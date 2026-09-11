@@ -415,3 +415,29 @@ def test_spanning_forest_tree_and_chords_cover_all_columns_exactly_once(n, extra
     tree_cols, chord_cols = net.spanning_forest()
     all_cols = torch.cat([tree_cols, chord_cols]).sort().values
     assert torch.equal(all_cols, torch.arange(net.b, dtype=torch.long))
+
+
+def test_to_changes_dtype_and_clears_the_cache():
+    net = triangle()
+    before = net.incidence()
+    assert before.dtype == torch.float32
+    result = net.to(dtype=torch.float64)
+    assert result is net
+    after = net.incidence()
+    assert after.dtype == torch.float64
+    assert after is not before
+
+
+@settings(max_examples=20, deadline=None)
+@given(
+    n=st.integers(min_value=2, max_value=8),
+    extra=st.integers(min_value=0, max_value=10),
+    seed=st.integers(min_value=0, max_value=10_000),
+)
+def test_to_float64_changes_tensor_dtypes_on_random_connected_multigraphs(n, extra, seed):
+    net = _random_connected_multigraph(n, extra, seed, dtype=torch.float32)
+    assert net.incidence().dtype == torch.float32
+    net.to(dtype=torch.float64)
+    assert net.incidence().dtype == torch.float64
+    assert net.source_selector().dtype == torch.float64
+    assert net.cycle_basis().dtype == torch.float64

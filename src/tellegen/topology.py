@@ -337,6 +337,15 @@ class Network:
         positive = (q >= 0).unsqueeze(-1)
         return torch.where(positive, T, S)
 
+    def to(self, device=None, dtype=None) -> Network:
+        """Move cached and future tensors to `device`/`dtype`, in place; clears the cache."""
+        if device is not None:
+            self.device = torch.device(device)
+        if dtype is not None:
+            self.dtype = dtype
+        self._cache.clear()
+        return self
+
     def power_residual(self, p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
         """Tellegen's residual sum(p * q); zero for consistent potentials and flows."""
         return (p * q).sum()
