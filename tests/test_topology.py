@@ -250,3 +250,23 @@ def test_node_index_returns_position_and_raises_for_unknown_node():
     assert net.node_index("c") == 2
     with pytest.raises(KeyError):
         net.node_index("z")
+
+
+def test_interior_and_boundary_index_partition_all_nodes():
+    net = triangle()  # nodes a, b, c
+    interior = net.interior_index(["b"])
+    boundary = net.boundary_index(["b"])
+    assert interior.tolist() == [0, 2]  # a, c in node order
+    assert boundary.tolist() == [1]
+
+
+def test_boundary_index_preserves_the_given_order():
+    net = triangle()
+    boundary = net.boundary_index(["c", "a"])
+    assert boundary.tolist() == [2, 0]  # order of the argument, not node order
+
+
+def test_boundary_index_raises_for_unknown_node():
+    net = triangle()
+    with pytest.raises(KeyError):
+        net.boundary_index(["z"])

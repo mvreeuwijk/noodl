@@ -25,7 +25,7 @@ and Moser, 1964), rebuilt on ``networkx.MultiDiGraph`` and ``torch``.
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Iterable
+from collections.abc import Hashable, Iterable, Sequence
 
 import networkx as nx
 import torch
@@ -108,6 +108,24 @@ class Network:
         if node not in index:
             raise KeyError(f"unknown node {node!r}")
         return index[node]
+
+    def interior_index(self, boundary: Sequence[Node]) -> torch.Tensor:
+        """Positions, in node order, of all nodes not listed in `boundary`."""
+        index = self._node_index()
+        missing = [n for n in boundary if n not in index]
+        if missing:
+            raise KeyError(f"unknown boundary nodes {missing}")
+        boundary_set = set(boundary)
+        idx = [index[n] for n in self.graph.nodes if n not in boundary_set]
+        return torch.tensor(idx, dtype=torch.long, device=self.device)
+
+    def boundary_index(self, boundary: Sequence[Node]) -> torch.Tensor:
+        """Positions of `boundary` nodes, in the order given."""
+        index = self._node_index()
+        missing = [n for n in boundary if n not in index]
+        if missing:
+            raise KeyError(f"unknown boundary nodes {missing}")
+        return torch.tensor([index[n] for n in boundary], dtype=torch.long, device=self.device)
 
     def node_attr(self, name: str, default: float | None = None) -> torch.Tensor:
         """Node attribute values in node order, as a (n,) tensor.
