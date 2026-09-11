@@ -1,0 +1,200 @@
+"""Typed network topology with the operators of algebraic graph theory.
+
+A :class:`Network` is a directed multigraph whose edges carry a ``kind``
+(``"airpath"``, ``"conduction"``, ``"hydronic"``, ``"storage"``, ...). It exposes,
+as PyTorch tensors:
+
+* the incidence matrix ``incidence()`` (n x b): +1 at the source node of each
+  edge, -1 at the target, so that ``incidence() @ q`` is the net outflow at
+  every node and ``incidence() @ q == 0`` is conservation (Kirchhoff's current
+  law);
+* the gradient ``gradient() = -incidence().T`` (b x n), so that
+  ``gradient() @ phi`` is the target-minus-source difference of a nodal
+  potential on every edge (Kirchhoff's voltage law holds by construction);
+* a basis of the cycle space ``cycle_basis()`` (l x b) with
+  ``incidence() @ cycle_basis().T == 0``; any flow ``q = cycle_basis().T @ m``
+  is divergence free for any amplitudes ``m``;
+* the upwind selection operator ``upwind(q)`` (b x n) that picks, for each
+  edge, the value of a nodal scalar at its upstream node;
+* Tellegen's residual ``power_residual(p, q) = sum(p * q)``, which vanishes
+  identically for ``p`` in the cut space and ``q`` in the cycle space.
+
+The conventions follow John Craske's 2019 ``Tellegen`` package (after Brayton
+and Moser, 1964), rebuilt on ``networkx.MultiDiGraph`` and ``torch``.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Hashable, Iterable
+
+import networkx as nx
+import torch
+
+Node = Hashable
+EdgeKey = tuple[Hashable, Hashable, int]
+
+
+class Network:
+    """Directed multigraph with typed edges and tensor-valued topology operators."""
+
+    def __init__(self, dtype: torch.dtype = torch.float32) -> None:
+        self.graph = nx.MultiDiGraph()
+        self.dtype = dtype
+        # Branch order is insertion order (networkx iterates edges by adjacency).
+        self._edges: list[EdgeKey] = []
+
+    # ------------------------------------------------------------------ building
+    def add_node(self, name: Node, **attrs) -> None:
+        self.graph.add_node(name, **attrs)
+
+    def add_edge(self, source: Node, target: Node, *, kind: str, **attrs) -> EdgeKey:
+        """Add a directed edge of the given kind and return its (source, target, key)."""
+        for node in (source, target):
+            if node not in self.graph:
+                raise KeyError(f"unknown node {node!r}; add nodes before edges")
+        key = self.graph.add_edge(source, target, kind=kind, **attrs)
+        edge = (source, target, key)
+        self._edges.append(edge)
+        return edge
+
+    def with_ambient(self, name: Node = "ambient", *, kind: str = "storage") -> Network:
+        """Return a copy with one extra node joined to every existing node (the cospan)."""
+        other = Network(dtype=self.dtype)
+        other.graph = self.graph.copy()
+        other._edges = list(self._edges)
+        other.add_node(name)
+        for node in self.nodes:
+            other.add_edge(node, name, kind=kind)
+        return other
+
+    # ------------------------------------------------------------------ counting
+    @property
+    def nodes(self) -> list[Node]:
+        return list(self.graph.nodes)
+
+    @property
+    def edges(self) -> list[EdgeKey]:
+        """Edges as (source, target, key), in insertion order; this is the branch order."""
+        return list(self._edges)
+
+    @property
+    def n(self) -> int:
+        return self.graph.number_of_nodes()
+
+    @property
+    def b(self) -> int:
+        return self.graph.number_of_edges()
+
+    @property
+    def n_components(self) -> int:
+        return nx.number_connected_components(self.graph.to_undirected(as_view=True))
+
+    @property
+    def n_cycles(self) -> int:
+        """Dimension of the cycle space: b - n + number of components."""
+        return self.b - self.n + self.n_components
+
+    # ------------------------------------------------------------------ indexing
+    def _node_index(self) -> dict[Node, int]:
+        return {node: i for i, node in enumerate(self.graph.nodes)}
+
+    def edge_index(self, kind: str | None = None) -> torch.Tensor:
+        """Column indices (into the full edge list) of the edges of one kind, or all."""
+        kinds = self.edge_kinds()
+        idx = [i for i, k in enumerate(kinds) if kind is None or k == kind]
+        return torch.tensor(idx, dtype=torch.long)
+
+    def edge_kinds(self) -> list[str]:
+        return [self.graph.edges[u, v, k].get("kind") for (u, v, k) in self._edges]
+
+    # ------------------------------------------------------------------ operators
+    def incidence(self, kind: str | None = None) -> torch.Tensor:
+        """Incidence matrix (n x b_kind): +1 at source, -1 at target of each edge."""
+        index = self._node_index()
+        cols = self.edge_index(kind)
+        d = torch.zeros(self.n, len(cols), dtype=self.dtype)
+        edges = self.edges
+        for j, col in enumerate(cols.tolist()):
+            source, target, _ = edges[col]
+            d[index[source], j] += 1
+            d[index[target], j] -= 1
+        return d
+
+    def gradient(self, kind: str | None = None) -> torch.Tensor:
+        """Gradient (b_kind x n): target minus source of a nodal potential."""
+        return -self.incidence(kind).T
+
+    def cycle_basis(self, kind: str | None = None) -> torch.Tensor:
+        """Integer basis of the cycle space (l x b_kind) from a spanning forest.
+
+        Each non-tree edge e = (u, v) gives one basis vector: unit flow along e
+        from u to v, returning from v to u along the unique tree path, with
+        +1 on tree edges traversed in their own direction and -1 otherwise.
+        """
+        cols = self.edge_index(kind).tolist()
+        edges = [self.edges[c] for c in cols]
+        b = len(edges)
+
+        # Undirected forest over the selected edges (parallel edges collapse;
+        # the first edge seen between two nodes becomes the tree edge).
+        forest = nx.Graph()
+        forest.add_nodes_from(self.graph.nodes)
+        tree_edges: dict[frozenset, tuple[int, Node, Node]] = {}
+        non_tree: list[int] = []
+        uf = _UnionFind(self.graph.nodes)
+        for j, (u, v, _) in enumerate(edges):
+            if u != v and uf.union(u, v):
+                forest.add_edge(u, v)
+                tree_edges[frozenset((u, v))] = (j, u, v)
+            else:
+                non_tree.append(j)
+
+        rows = torch.zeros(len(non_tree), b, dtype=self.dtype)
+        for r, j in enumerate(non_tree):
+            u, v, _ = edges[j]
+            rows[r, j] = 1
+            if u == v:
+                continue  # self loop closes on its own
+            path = nx.shortest_path(forest, v, u)
+            for a, c in zip(path[:-1], path[1:], strict=True):
+                jt, s, _ = tree_edges[frozenset((a, c))]
+                rows[r, jt] += 1 if s == a else -1
+        return rows
+
+    def upwind(self, q: torch.Tensor) -> torch.Tensor:
+        """Selection matrix (b x n): row e picks the node upstream of edge e for flow q[e].
+
+        For q[e] >= 0 the upstream node is the source, for q[e] < 0 the target.
+        """
+        index = self._node_index()
+        s = torch.zeros(self.b, self.n, dtype=self.dtype)
+        for e, (source, target, _) in enumerate(self.edges):
+            node = source if q[e] >= 0 else target
+            s[e, index[node]] = 1
+        return s
+
+    def power_residual(self, p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+        """Tellegen's residual sum(p * q); zero for consistent potentials and flows."""
+        return (p * q).sum()
+
+    # ------------------------------------------------------------------ misc
+    def __repr__(self) -> str:
+        return f"Network(n={self.n}, b={self.b}, kinds={sorted(set(self.edge_kinds()))})"
+
+
+class _UnionFind:
+    def __init__(self, items: Iterable[Node]) -> None:
+        self.parent = {item: item for item in items}
+
+    def find(self, x: Node) -> Node:
+        while self.parent[x] != x:
+            self.parent[x] = self.parent[self.parent[x]]
+            x = self.parent[x]
+        return x
+
+    def union(self, a: Node, b: Node) -> bool:
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return False
+        self.parent[rb] = ra
+        return True

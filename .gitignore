@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+.env
+.env.*
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Data: never commit measurements
+data/
+*.parquet
+*.feather
+*.h5
+*.hdf5
+*.csv
+!tests/data/*.csv
+
+# Notebooks: strip outputs before committing
+*.ipynb_checkpoints/
