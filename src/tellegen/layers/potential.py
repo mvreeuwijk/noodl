@@ -12,7 +12,7 @@ import torch
 
 from tellegen.drives import Drive
 from tellegen.elements.base import Element
-from tellegen.solvers.linear import floating_nodes, solve
+from tellegen.solvers.linear import solve
 from tellegen.solvers.newton import newton
 from tellegen.topology import Network
 
@@ -62,6 +62,14 @@ class PotentialFlowLayer:
         self.cols = torch.cat(cols_list)
         self.A = net.incidence()[:, self.cols]
 
+        kind_set = set(self.kinds)
+        for drv in self._drives:
+            if drv.kind not in kind_set:
+                raise ValueError(
+                    f"drive kind {drv.kind!r} is not one of this layer's element kinds "
+                    f"{sorted(kind_set)} (layer {name!r})"
+                )
+
         node_index = {node: i for i, node in enumerate(net.nodes)}
         for b in boundary:
             if b not in node_index:
@@ -78,9 +86,20 @@ class PotentialFlowLayer:
         parts = []
         for kind, (start, end) in self._kind_slices.items():
             block = d[..., start:end]
+            width = end - start
             for drv in self._drives:
                 if drv.kind == kind:
-                    block = block + drv(phi, drivers)
+                    value = drv(phi, drivers)
+                    # A width mismatch here is silent corruption, not a crash: torch.cat below
+                    # would happily accept a wrong-width block, shifting every later kind's
+                    # slice out from under `_elem_slices` so a DIFFERENT element ends up being
+                    # fed this kind's drive value with no exception anywhere in the call chain.
+                    if value.ndim > 0 and value.shape[-1] != width:
+                        raise ValueError(
+                            f"drive kind {drv.kind!r} returned width {value.shape[-1]} but "
+                            f"the layer's {drv.kind!r} block has {width} edges"
+                        )
+                    block = block + value
             parts.append((start, block))
         parts.sort(key=lambda p: p[0])
         return torch.cat([p[1] for p in parts], dim=-1)
@@ -168,6 +187,58 @@ class PotentialFlowLayer:
             k_parts.append(k_e + zero)
         return torch.cat(c_parts, dim=-1), torch.cat(k_parts, dim=-1)
 
+    def _floating_group_nodes(self, k: torch.Tensor) -> list:
+        """Interior node names in any connected GROUP with no path to a boundary node.
+
+        Two nodes are "connected" here only through an edge whose linear slope k is
+        nonzero somewhere in the batch: an edge whose element contributes no slope at all
+        (e.g. FixedFlow, whose dflow is identically 0) cannot carry a potential difference
+        to a boundary node and so cannot rescue a floating group. This subsumes the
+        isolated-single-node case (a node with zero diagonal in J0 is exactly a singleton
+        component here, since J0's diagonal at node i is the sum of k over i's own incident
+        edges) as well as a floating GROUP of two or more mutually-connected nodes that,
+        as a whole, has no path to any boundary node -- which a per-node diagonal check
+        alone cannot see, because each member's own diagonal is nonzero from its internal
+        edges.
+
+        Deliberately kind-restricted (`net.component_labels(kind)`/whole-graph
+        `net.n_components`) is NOT used here: `component_labels(kind)` alone cannot know
+        which edges have zero slope, so it is combined with a per-kind nonzero-slope test
+        (a kind ties nodes together only if at least one of its own edges has nonzero
+        slope) and unioned across every qualifying kind with a small union-find.
+        """
+        n = self.net.n
+        parent = list(range(n))
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: int, b: int) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        k_flat = k.reshape(-1, k.shape[-1])
+        nonzero_anywhere = (k_flat != 0).any(dim=0)
+        for kind, (start, end) in self._kind_slices.items():
+            if not bool(nonzero_anywhere[start:end].any()):
+                continue
+            labels = self.net.component_labels(kind)
+            by_label: dict[int, list[int]] = {}
+            for idx, label in enumerate(labels.tolist()):
+                by_label.setdefault(label, []).append(idx)
+            for group in by_label.values():
+                for other in group[1:]:
+                    union(group[0], other)
+
+        boundary_roots = {find(i) for i in self.bound.tolist()}
+        return [
+            self.net.nodes[i] for i in self.interior.tolist() if find(i) not in boundary_roots
+        ]
+
     def linear_init(self, phi_boundary, drivers, sources):
         drivers = drivers or {}
         batch_shape = phi_boundary.shape[:-1]
@@ -184,9 +255,8 @@ class PotentialFlowLayer:
             "ie,...e->...i", A_I, c + k * dp0
         )
         J0 = torch.einsum("ie,...e,je->...ij", A_I, k, A_I)
-        diag = torch.diagonal(J0, dim1=-2, dim2=-1)
-        if bool((diag == 0).any()):
-            bad = floating_nodes(J0, self._interior_names)
+        bad = self._floating_group_nodes(k)
+        if bad:
             raise RuntimeError(
                 f"floating nodes with no path to a boundary potential: {bad}"
             )

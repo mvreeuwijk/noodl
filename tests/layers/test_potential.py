@@ -4,6 +4,7 @@ import pytest
 import torch
 from scipy.optimize import brentq
 
+from tellegen.drives import ConstantDrive
 from tellegen.elements import Conductance, FixedFlow, PowerLaw
 from tellegen.layers.potential import PotentialFlowLayer
 from tellegen.solvers.newton import newton
@@ -257,3 +258,75 @@ def test_power_residual_is_zero_at_solution_with_interior_sources():
 
     pr_no_sources = layer.power_residual(phi, q, {})
     assert abs(pr_no_sources.item()) > 1e-3
+
+
+def test_floating_group_with_no_path_to_boundary_raises_runtime_error():
+    # CODE REVIEW FINDING 1: a floating GROUP (two or more mutually-connected nodes with no
+    # path, as a group, to any boundary node) was previously undetected, because each
+    # member's own J0 diagonal is nonzero from its internal (within-group) edges -- only an
+    # isolated SINGLE floating node was caught. Reproduction from the review: ambient-z0 and
+    # f1-f2 are each tied together by a Conductance edge (nonzero slope), and z0-f1 is a
+    # FixedFlow ("duct") edge, whose slope is identically zero and so cannot rescue the
+    # {f1, f2} group's connection to the boundary node "ambient".
+    net = Network(dtype=torch.float64)
+    for name in ("ambient", "z0", "f1", "f2"):
+        net.add_node(name)
+    net.add_edge("ambient", "z0", kind="conduction")
+    net.add_edge("f1", "f2", kind="conduction")
+    net.add_edge("z0", "f1", kind="duct")
+    layer = PotentialFlowLayer(
+        net,
+        "grp",
+        [
+            Conductance(torch.tensor([1.0, 1.0], dtype=torch.float64), kind="conduction"),
+            FixedFlow(torch.tensor([0.1], dtype=torch.float64), kind="duct"),
+        ],
+        boundary=["ambient"],
+    )
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    with pytest.raises(RuntimeError, match=r"f1.*f2|f2.*f1"):
+        layer.linear_init(phi_b, {}, None)
+
+
+def test_drive_kind_not_in_layer_raises_value_error_naming_it():
+    # CODE REVIEW FINDING 2 (part 1): a drive whose kind matches none of the layer's own
+    # element kinds was previously silently dropped (dp() only ever loops over kinds that
+    # ARE in the layer, so a "hydronic" drive on an airpath-only layer never gets applied
+    # and no error is raised anywhere).
+    net = Network(dtype=torch.float64)
+    net.add_node("a")
+    net.add_node("b")
+    net.add_edge("a", "b", kind="airpath")
+    element = PowerLaw(torch.tensor([1.0], dtype=torch.float64), 0.5, kind="airpath")
+    with pytest.raises(ValueError, match="hydronic"):
+        PotentialFlowLayer(
+            net, "bad", [element], drives=[ConstantDrive("hydronic", "x")], boundary=["a"]
+        )
+
+
+def test_wrong_width_drive_raises_value_error_naming_widths():
+    # CODE REVIEW FINDING 2 (part 2): a drive tensor whose trailing width does not match its
+    # kind's own edge count previously corrupted `dp` silently: torch.cat in dp() would
+    # accept the wrongly-widened block, shifting every later kind's slice out from under the
+    # (still correctly-sized) `_elem_slices`, so a DIFFERENT element ends up being fed part
+    # of the wrong kind's drive value with no exception anywhere in the call chain.
+    net = Network(dtype=torch.float64)
+    net.add_node("a")
+    net.add_node("b")
+    net.add_node("c")
+    net.add_edge("a", "b", kind="conduction")
+    net.add_edge("b", "c", kind="airpath")
+    layer = PotentialFlowLayer(
+        net,
+        "widths",
+        [
+            Conductance(torch.tensor([1.0], dtype=torch.float64), kind="conduction"),
+            PowerLaw(torch.tensor([1.0], dtype=torch.float64), 0.5, kind="airpath"),
+        ],
+        drives=[ConstantDrive("airpath", "wind")],
+        boundary=["a"],
+    )
+    phi = torch.tensor([0.0, 1.0, 2.0], dtype=torch.float64)
+    wind_bad = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)  # width 3, expected 1
+    with pytest.raises(ValueError, match="airpath"):
+        layer.dp(phi, {"wind": wind_bad})
