@@ -81,6 +81,19 @@ def test_param_leaves_non_learnable_tensor_without_grad():
     assert not _Linear(2.0, learnable=False).k.requires_grad
 
 
+def test_param_learnable_true_yields_a_registered_parameter_even_for_a_grad_tracking_input():
+    """Regression: the pass-through exception for an already-requires_grad input tensor must
+    be gated on learnable=False. With learnable=True the result must always be a real,
+    module-registered nn.Parameter -- so .parameters(), state_dict(), and
+    torch.func.functional_call name-based substitution all see it -- even if that means
+    detaching from whatever graph the incoming tensor carried."""
+    c = torch.tensor(1.3, requires_grad=True)
+    el = _Linear(c, learnable=True)
+    assert isinstance(el.k, torch.nn.Parameter)
+    assert list(el.parameters()) != []
+    assert "k" in el.state_dict()
+
+
 def test_forward_delegates_to_the_subclass_flow_override_not_the_base_class():
     """Guards against a naive `forward = flow` class-body assignment.
 

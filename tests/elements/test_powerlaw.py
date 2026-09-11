@@ -208,3 +208,31 @@ def test_gradcheck_flow_wrt_learnable_C():
         return PowerLaw(C=c, n=n, regularised=1e-3).flow(dp)
 
     assert torch.autograd.gradcheck(f, (C,), eps=1e-6, atol=1e-6)
+
+
+def test_blend_dflow_backward_is_finite_at_dp_zero_alongside_nonzero_values():
+    """Regression: dflow's own "outside" branch (n * C * |dp|**(n-1)) is evaluated by
+    torch.where even where it is not selected, i.e. at dp == 0. Differentiating dflow's
+    output again needs d/ddp[|dp|**(n-1)], which is inf at dp == 0 for n < 2; without a
+    dp_safe-style substitution there, torch.where's backward multiplies that inf by the zero
+    mask and produces nan instead of the correct zero -- the same trap flow() was hardened
+    against, one derivative level down."""
+    el = PowerLaw(
+        C=torch.tensor(1.3, dtype=torch.float64),
+        n=torch.tensor(0.6, dtype=torch.float64),
+        dp_transition=1e-3,
+    )
+    dp = torch.tensor([-2.0, -1e-3, 0.0, 1e-3, 2.0], dtype=torch.float64, requires_grad=True)
+    (grad,) = torch.autograd.grad(el.dflow(dp).sum(), dp)
+    assert torch.isfinite(grad).all()
+
+
+def test_dflow_backward_wrt_learnable_C_is_finite_at_dp_zero():
+    """Regression: differentiating dflow with respect to a learnable C, evaluated exactly at
+    dp = 0, must not hit the same inf * 0 = nan trap as above."""
+    n = torch.tensor(0.6, dtype=torch.float64)
+    C = torch.tensor(1.3, dtype=torch.float64, requires_grad=True)
+    el = PowerLaw(C=C, n=n, dp_transition=1e-3, learnable=True)
+    dp = torch.tensor([0.0], dtype=torch.float64)
+    (grad,) = torch.autograd.grad(el.dflow(dp).sum(), el.C)
+    assert torch.isfinite(grad).all()

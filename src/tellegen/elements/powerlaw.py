@@ -75,12 +75,22 @@ class PowerLaw(Element):
     def dflow(self, dp: Tensor, drivers=None) -> Tensor:
         C, n = self.C, self.n
         if self.regularised is not None:
+            # dp**2 + eps**2 >= eps**2 > 0 everywhere (eps is a fixed positive float), so
+            # this branch never raises a non-positive base to a non-integer power: smooth
+            # and safe at dp == 0 with no dp_safe substitution needed.
             eps = self.regularised
             return C * (dp**2 + eps**2) ** ((n - 3) / 2) * (dp**2 + eps**2 + (n - 1) * dp**2)
         dpt = self.dp_transition
         k = C * dpt ** (n - 1)
         mask = dp.abs() < dpt
-        outside = n * C * dp.abs() ** (n - 1)
+        # Same dp_safe trap as flow(): torch.where evaluates the "outside" branch even where
+        # it is not selected (dp == 0 is always inside mask), and its own backward needs
+        # d/ddp[dp.abs()**(n-1)] = (n-1)*dp.abs()**(n-2)*sign(dp), which is inf at dp == 0 for
+        # n < 2. Substituting the constant dpt there keeps that derivative finite (in fact
+        # exactly 0, since dp_safe is disconnected from dp under the mask) instead of
+        # producing inf * 0 = nan when a caller differentiates dflow's output again.
+        dp_safe = torch.where(mask, torch.full_like(dp, dpt), dp.abs())
+        outside = n * C * dp_safe ** (n - 1)
         return torch.where(mask, k * torch.ones_like(dp), outside)
 
     def linear_init(self, drivers=None) -> tuple[Tensor, Tensor]:

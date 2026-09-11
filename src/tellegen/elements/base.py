@@ -80,16 +80,23 @@ class Element(torch.nn.Module):
     def _param(value, learnable: bool) -> torch.nn.Parameter | Tensor:
         """Wrap ``value`` as a leaf ``nn.Parameter`` with ``requires_grad=learnable``.
 
-        Exception: if ``value`` is already a tensor with ``requires_grad=True``, it is
-        returned unchanged rather than wrapped. ``nn.Parameter`` always constructs a fresh,
-        detached leaf (even when ``requires_grad=True`` is requested), so wrapping here would
-        silently sever any existing autograd connection -- e.g. when a caller reconstructs an
-        element inside a closure that ``torch.autograd.gradcheck``/an outer optimizer
-        differentiates with respect to (a pattern distinct from this element's own
-        ``learnable=True``, which is for a value with no prior graph of its own).
+        Exception: if ``learnable`` is False and ``value`` is already a tensor with
+        ``requires_grad=True``, it is returned unchanged rather than wrapped.
+        ``nn.Parameter`` always constructs a fresh, detached leaf (even when
+        ``requires_grad=True`` is requested), so wrapping here would silently sever any
+        existing autograd connection -- e.g. when a caller reconstructs an element inside a
+        closure that ``torch.autograd.gradcheck``/an outer optimizer differentiates with
+        respect to.
+
+        This exception is gated on ``not learnable``: ``learnable=True`` always yields a
+        real, module-registered ``nn.Parameter`` (so ``.parameters()``, ``state_dict()``,
+        and ``torch.func.functional_call`` name-based substitution all see it), even if that
+        means detaching from whatever graph the incoming tensor happened to carry -- a
+        learnable element's whole point is to be *this* module's own optimizable leaf, not a
+        transparent view onto an external computation.
         """
         if isinstance(value, torch.Tensor):
-            if value.requires_grad:
+            if value.requires_grad and not learnable:
                 return value
             tensor = value.clone()
         else:
