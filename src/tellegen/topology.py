@@ -64,6 +64,7 @@ class Network:
     def with_ambient(self, name: Node = "ambient", *, kind: str = "storage") -> Network:
         """Return a copy with one extra node joined to every existing node (the cospan)."""
         other = Network(dtype=self.dtype)
+        other.device = self.device
         other.graph = self.graph.copy()
         other._edges = list(self._edges)
         other.add_node(name)
@@ -185,11 +186,18 @@ class Network:
         return torch.tensor(values, dtype=self.dtype, device=self.device)
 
     def edge_index(self, kind: str | None = None) -> torch.Tensor:
-        """Column indices (into the full edge list) of the edges of one kind, or all."""
+        """Column indices (into the full edge list) of the edges of one kind, or all.
+
+        Raises `KeyError` naming the unknown kind (and the kinds that do exist) if
+        `kind` is given but no edge carries it. `kind=None` always means "all
+        edges" and never raises, even on an empty network.
+        """
         key = ("edge_index", kind)
         if key in self._cache:
             return self._cache[key]
         kinds = self.edge_kinds()
+        if kind is not None and kind not in kinds:
+            raise KeyError(f"unknown edge kind {kind!r}; network has kinds {sorted(set(kinds))}")
         idx = [i for i, k in enumerate(kinds) if kind is None or k == kind]
         result = torch.tensor(idx, dtype=torch.long, device=self.device)
         self._cache[key] = result

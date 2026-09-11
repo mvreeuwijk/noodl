@@ -441,3 +441,56 @@ def test_to_float64_changes_tensor_dtypes_on_random_connected_multigraphs(n, ext
     assert net.incidence().dtype == torch.float64
     assert net.source_selector().dtype == torch.float64
     assert net.cycle_basis().dtype == torch.float64
+
+
+def test_edge_index_raises_keyerror_for_unknown_kind():
+    net = triangle()
+    with pytest.raises(KeyError, match="airpaths"):
+        net.edge_index("airpaths")
+
+
+def test_edge_index_kind_none_returns_all_edges_when_all_edges_share_one_kind():
+    net = triangle()
+    assert net.edge_index(None).tolist() == [0, 1, 2]
+
+
+def test_edge_index_kind_none_on_empty_network_returns_empty_tensor():
+    net = Network()
+    net.add_node("a")
+    assert net.edge_index(None).tolist() == []
+
+
+def test_incidence_raises_keyerror_for_unknown_kind():
+    net = triangle()
+    with pytest.raises(KeyError, match="airpaths"):
+        net.incidence("airpaths")
+
+
+def test_source_selector_raises_keyerror_for_unknown_kind():
+    net = triangle()
+    with pytest.raises(KeyError, match="airpaths"):
+        net.source_selector("airpaths")
+
+
+def test_edge_attr_raises_keyerror_for_unknown_kind():
+    net = Network()
+    net.add_node("a")
+    net.add_node("b")
+    net.add_edge("a", "b", kind="airpath", area=0.02)
+    with pytest.raises(KeyError, match="airpaths"):
+        net.edge_attr("area", kind="airpaths")
+
+
+def test_upwind_raises_keyerror_for_unknown_kind():
+    net = triangle()
+    q = torch.tensor([1.0, -1.0, 0.0])
+    with pytest.raises(KeyError, match="airpaths"):
+        net.upwind(q, kind="airpaths")
+
+
+def test_with_ambient_preserves_dtype_and_device():
+    net = triangle()
+    net.to(device=torch.device("meta"), dtype=torch.float64)
+    amb = net.with_ambient()
+    assert amb.dtype == torch.float64
+    assert amb.device == torch.device("meta")
