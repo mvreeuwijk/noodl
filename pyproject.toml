@@ -17,13 +17,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.5", "hypothesis>=6"]
+dev = ["pytest>=8", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--cov=tellegen --cov-report=term-missing --cov-fail-under=90"
+
+[tool.coverage.run]
+source = ["tellegen"]
 
 [tool.ruff]
 line-length = 100
