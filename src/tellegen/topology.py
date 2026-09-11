@@ -291,17 +291,24 @@ class Network:
         self._cache[key] = t
         return t
 
-    def upwind(self, q: torch.Tensor) -> torch.Tensor:
-        """Selection matrix (b x n): row e picks the node upstream of edge e for flow q[e].
+    def upwind(self, q: torch.Tensor, kind: str | None = None) -> torch.Tensor:
+        """Sign-aware selector: where(q >= 0, source_selector, target_selector).
 
-        For q[e] >= 0 the upstream node is the source, for q[e] < 0 the target.
+        `q` has shape (..., b_kind); the result has shape (..., b_kind, n). With
+        `kind=None` and `q` of shape (b,) this reproduces the original edge-by-edge
+        selection over the whole graph unchanged.
         """
-        index = self._node_index()
-        s = torch.zeros(self.b, self.n, dtype=self.dtype)
-        for e, (source, target, _) in enumerate(self.edges):
-            node = source if q[e] >= 0 else target
-            s[e, index[node]] = 1
-        return s
+        S = self.source_selector(kind)
+        T = self.target_selector(kind)
+        positive = (q >= 0).unsqueeze(-1)
+        return torch.where(positive, S, T)
+
+    def downwind(self, q: torch.Tensor, kind: str | None = None) -> torch.Tensor:
+        """Sign-aware selector: where(q >= 0, target_selector, source_selector)."""
+        S = self.source_selector(kind)
+        T = self.target_selector(kind)
+        positive = (q >= 0).unsqueeze(-1)
+        return torch.where(positive, T, S)
 
     def power_residual(self, p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
         """Tellegen's residual sum(p * q); zero for consistent potentials and flows."""

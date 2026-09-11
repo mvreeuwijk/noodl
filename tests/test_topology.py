@@ -313,3 +313,61 @@ def test_source_selector_minus_target_selector_recovers_incidence():
     S = net.source_selector()
     T = net.target_selector()
     assert torch.equal((S - T).T, net.incidence())
+
+
+def _random_connected_multigraph(n: int, extra: int, seed: int, dtype=torch.float64) -> Network:
+    """Random connected multigraph: a random spanning tree plus `extra` random edges."""
+    rng = torch.Generator().manual_seed(seed)
+    net = Network(dtype=dtype)
+    for i in range(n):
+        net.add_node(i)
+    for i in range(1, n):
+        j = int(torch.randint(0, i, (1,), generator=rng))
+        net.add_edge(i, j, kind="x")
+    for _ in range(extra):
+        u = int(torch.randint(0, n, (1,), generator=rng))
+        v = int(torch.randint(0, n, (1,), generator=rng))
+        if u != v:
+            net.add_edge(u, v, kind="x")
+    return net
+
+
+def test_upwind_unbatched_matches_original_edge_by_edge_selection():
+    net = triangle()
+    phi = torch.tensor([10.0, 20.0, 30.0])
+    q = torch.tensor([1.0, -1.0, 0.0])
+    up = net.upwind(q) @ phi
+    assert up[0] == 10.0
+    assert up[1] == 30.0
+    assert up[2] == 30.0  # zero flow defaults to the source
+
+
+def test_downwind_is_the_complement_of_upwind():
+    net = triangle()
+    q = torch.tensor([1.0, -1.0, 0.3])
+    up = net.upwind(q)
+    down = net.downwind(q)
+    assert torch.equal(up + down, net.source_selector() + net.target_selector())
+    assert torch.all((up + down).sum(dim=-1) == 2)  # each edge marks source and target
+
+
+@settings(max_examples=30, deadline=None)
+@given(
+    n=st.integers(min_value=2, max_value=8),
+    extra=st.integers(min_value=0, max_value=10),
+    seed=st.integers(min_value=0, max_value=10_000),
+    batch=st.integers(min_value=1, max_value=4),
+)
+def test_upwind_rows_are_one_hot_at_the_upstream_node_for_random_signed_batched_q(
+    n, extra, seed, batch
+):
+    net = _random_connected_multigraph(n, extra, seed)
+    torch.manual_seed(seed)
+    q = torch.rand(batch, net.b, dtype=torch.float64) - 0.5
+    up = net.upwind(q)
+    assert up.shape == (batch, net.b, net.n)
+    assert torch.all(up.sum(dim=-1) == 1)  # one-hot per edge
+    S = net.source_selector()
+    T = net.target_selector()
+    expected = torch.where((q >= 0).unsqueeze(-1), S, T)
+    assert torch.equal(up, expected)
