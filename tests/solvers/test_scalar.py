@@ -10,6 +10,14 @@ def _cube_minus_c(x, c):
     return x**3 - c
 
 
+def _sign_step(x, c):
+    # Zero derivative everywhere except (undefined) at the root itself: forces every
+    # iteration into the bisection fallback (dfx == 0 always), so convergence needs exactly
+    # ceil(log2(bracket_width / tol)) iterations -- a controlled way to make max_iter too
+    # small deterministically, without relying on any particular Newton trajectory.
+    return torch.sign(x - c)
+
+
 def test_finds_cube_root_of_a_scalar():
     c = torch.tensor(8.0, dtype=torch.float64)
     lo = torch.tensor(0.0, dtype=torch.float64)
@@ -51,6 +59,28 @@ def test_gradcheck_root_wrt_c():
         return solve_monotone(_cube_minus_c, lo, hi, c_)
 
     assert torch.autograd.gradcheck(f, (c,), eps=1e-6, atol=1e-6)
+
+
+def test_raises_on_non_convergence_when_max_iter_is_too_small_for_the_bracket():
+    # Pure bisection (see _sign_step) on a 2e15-wide bracket needs ~91 iterations to reach
+    # tol=1e-12; max_iter=5 leaves it far short, and this must raise rather than silently
+    # return the under-converged midpoint.
+    c = torch.tensor(0.0, dtype=torch.float64)
+    lo = torch.tensor(-1e15, dtype=torch.float64)
+    hi = torch.tensor(1e15, dtype=torch.float64)
+    with pytest.raises(RuntimeError):
+        solve_monotone(_sign_step, lo, hi, c, max_iter=5)
+
+
+def test_well_conditioned_root_still_converges_silently_within_default_max_iter():
+    # Same bracket and step function as the non-convergence test above, but with enough
+    # iterations budgeted (default max_iter=100 comfortably covers the ~91 bisections
+    # needed): must NOT raise, and must find the root to within tol.
+    c = torch.tensor(0.0, dtype=torch.float64)
+    lo = torch.tensor(-1e15, dtype=torch.float64)
+    hi = torch.tensor(1e15, dtype=torch.float64)
+    x = solve_monotone(_sign_step, lo, hi, c)
+    torch.testing.assert_close(x, torch.tensor(0.0, dtype=torch.float64), atol=1e-9, rtol=1e-9)
 
 
 def test_gradient_matches_the_implicit_function_rule():

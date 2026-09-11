@@ -87,3 +87,30 @@ def test_gradcheck_flow_wrt_learnable_coeffs():
         return FanCurve(coeffs=coeffs_, q_max=q_max).flow(dp)
 
     assert torch.autograd.gradcheck(f, (coeffs,), eps=1e-6, atol=1e-6)
+
+
+def test_dflow_gradients_are_finite_at_a_zero_slope_stalled_boundary():
+    # P(q) = 200 + 6q - q^2, P'(q) = 6 - 2q, P'(q_max=3) = 0: the curve flattens exactly at
+    # its top-of-curve (max-flow) point, a legitimate way to define that boundary. dp = 500
+    # gives -dp = -500 < P(q_max) = 200 + 18 - 9 = 209, so this is deep in the stalled region.
+    coeffs = torch.tensor([200.0, 6.0, -1.0, 0.0], dtype=torch.float64, requires_grad=True)
+    q_max = torch.tensor(3.0, dtype=torch.float64, requires_grad=True)
+    fan = FanCurve(coeffs=coeffs, q_max=q_max, learnable=True)
+
+    fan.dflow(torch.tensor([500.0], dtype=torch.float64)).sum().backward()
+
+    assert torch.isfinite(fan.coeffs.grad).all()
+    assert torch.isfinite(fan.q_max.grad).all()
+
+
+def test_dflow_gradients_are_finite_at_a_zero_slope_shut_boundary():
+    # P(q) = 100 - q^2, P'(q) = -2q, P'(0) = 0: the curve flattens exactly at its shutoff
+    # point (q = 0), the other legitimate zero-slope boundary. dp = -200 gives -dp = 200 >
+    # P(0) = 100, so this is deep in the shut region.
+    coeffs = torch.tensor([100.0, 0.0, -1.0, 0.0], dtype=torch.float64, requires_grad=True)
+    q_max = torch.tensor(5.0, dtype=torch.float64)
+    fan = FanCurve(coeffs=coeffs, q_max=q_max, learnable=True)
+
+    fan.dflow(torch.tensor([-200.0], dtype=torch.float64)).sum().backward()
+
+    assert torch.isfinite(fan.coeffs.grad).all()
