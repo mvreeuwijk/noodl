@@ -114,3 +114,27 @@ class PotentialFlowLayer:
         phi[..., self.interior] = phi_interior.expand(batch_shape + (len(self.interior),))
         phi[..., self.bound] = phi_boundary.expand(batch_shape + (len(self.bound),))
         return phi
+
+    # ------------------------------------------------------------------ Newton residual
+    def _source_interior(self, sources: torch.Tensor | None, ref: torch.Tensor) -> torch.Tensor:
+        if sources is None:
+            return torch.zeros(
+                ref.shape[:-1] + (len(self.interior),), dtype=ref.dtype, device=ref.device
+            )
+        return sources[..., self.interior]
+
+    def residual(self, phi_interior, phi_boundary, drivers, sources):
+        drivers = drivers or {}
+        phi = self.assemble(phi_interior, phi_boundary)
+        q = self.flows(phi, drivers)
+        A_I = self.A[self.interior]
+        lhs = torch.einsum("ie,...e->...i", A_I, q)
+        s_I = self._source_interior(sources, phi_interior)
+        return lhs - s_I
+
+    def jacobian(self, phi_interior, phi_boundary, drivers):
+        drivers = drivers or {}
+        phi = self.assemble(phi_interior, phi_boundary)
+        dq = self.dflows(phi, drivers)
+        A_I = self.A[self.interior]
+        return torch.einsum("ie,...e,je->...ij", A_I, dq, A_I)
