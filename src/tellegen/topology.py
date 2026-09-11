@@ -102,6 +102,54 @@ class Network:
     def _node_index(self) -> dict[Node, int]:
         return {node: i for i, node in enumerate(self.graph.nodes)}
 
+    def node_index(self, node: Node) -> int:
+        """Position of `node` in node order."""
+        index = self._node_index()
+        if node not in index:
+            raise KeyError(f"unknown node {node!r}")
+        return index[node]
+
+    def node_attr(self, name: str, default: float | None = None) -> torch.Tensor:
+        """Node attribute values in node order, as a (n,) tensor.
+
+        Raises `KeyError` naming the offending nodes if any node lacks the
+        attribute and no `default` is given.
+        """
+        values = []
+        missing = []
+        for node in self.graph.nodes:
+            data = self.graph.nodes[node]
+            if name in data:
+                values.append(float(data[name]))
+            elif default is not None:
+                values.append(float(default))
+            else:
+                missing.append(node)
+        if missing:
+            raise KeyError(f"node attribute {name!r} missing for nodes {missing}")
+        return torch.tensor(values, dtype=self.dtype, device=self.device)
+
+    def edge_attr(
+        self, name: str, kind: str | None = None, default: float | None = None
+    ) -> torch.Tensor:
+        """Edge attribute values of one kind, in branch order, as a (b_kind,) tensor."""
+        cols = self.edge_index(kind)
+        edges = self.edges
+        values = []
+        missing = []
+        for col in cols.tolist():
+            u, v, k = edges[col]
+            data = self.graph.edges[u, v, k]
+            if name in data:
+                values.append(float(data[name]))
+            elif default is not None:
+                values.append(float(default))
+            else:
+                missing.append((u, v, k))
+        if missing:
+            raise KeyError(f"edge attribute {name!r} missing for edges {missing}")
+        return torch.tensor(values, dtype=self.dtype, device=self.device)
+
     def edge_index(self, kind: str | None = None) -> torch.Tensor:
         """Column indices (into the full edge list) of the edges of one kind, or all."""
         key = ("edge_index", kind)

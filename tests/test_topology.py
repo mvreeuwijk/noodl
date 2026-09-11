@@ -203,3 +203,50 @@ def test_add_edge_clears_the_incidence_cache():
     after = net.incidence()
     assert after is not before
     assert after.shape == (4, 4)
+
+
+def test_node_attr_returns_values_in_node_order():
+    net = Network()
+    net.add_node("a", elevation=1.0)
+    net.add_node("b", elevation=2.5)
+    net.add_node("c", elevation=-3.0)
+    net.add_edge("a", "b", kind="airpath")
+    net.add_edge("b", "c", kind="airpath")
+    z = net.node_attr("elevation")
+    assert z.shape == (3,)
+    assert torch.allclose(z, torch.tensor([1.0, 2.5, -3.0]))
+
+
+def test_node_attr_raises_keyerror_for_missing_attribute():
+    net = Network()
+    net.add_node("a", elevation=1.0)
+    net.add_node("b")
+    with pytest.raises(KeyError, match="b"):
+        net.node_attr("elevation")
+
+
+def test_node_attr_default_fills_missing_values():
+    net = Network()
+    net.add_node("a", elevation=1.0)
+    net.add_node("b")
+    z = net.node_attr("elevation", default=0.0)
+    assert torch.allclose(z, torch.tensor([1.0, 0.0]))
+
+
+def test_edge_attr_returns_values_in_branch_order_for_one_kind():
+    net = Network()
+    net.add_node("a")
+    net.add_node("b")
+    net.add_edge("a", "b", kind="airpath", area=0.02)
+    net.add_edge("b", "a", kind="conduction", ua=5.0)
+    net.add_edge("a", "b", kind="airpath", area=0.05)
+    areas = net.edge_attr("area", kind="airpath")
+    assert torch.allclose(areas, torch.tensor([0.02, 0.05]))
+
+
+def test_node_index_returns_position_and_raises_for_unknown_node():
+    net = triangle()
+    assert net.node_index("a") == 0
+    assert net.node_index("c") == 2
+    with pytest.raises(KeyError):
+        net.node_index("z")
