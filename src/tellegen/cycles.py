@@ -55,8 +55,8 @@ def particular_flow(
     """
     A = net.incidence(kind)
     tree_cols, chord_cols = net.spanning_forest(kind)
-    labels = net.component_labels()
-    n_components = net.n_components
+    labels = net.component_labels(kind)
+    n_components = net.n_components_of(kind)
 
     bad = []
     for c in range(n_components):
@@ -107,8 +107,8 @@ def project_measured(
     A = net.incidence(kind)
     n, b = A.shape
     dtype = target.dtype
-    labels = net.component_labels()
-    n_components = net.n_components
+    labels = net.component_labels(kind)
+    n_components = net.n_components_of(kind)
 
     keep_rows: list[int] = []
     for c in range(n_components):

@@ -126,3 +126,82 @@ def test_project_measured_raises_on_infeasible_measurements(two_zone):
     target = torch.tensor([0.5, 0.9, 0.0], dtype=torch.float64)
     with pytest.raises(RuntimeError, match="infeasible"):
         project_measured(two_zone, target, mask)
+
+
+def _two_disjoint_airpath_pairs_bridged_by_hydronic() -> Network:
+    """4 nodes, two disconnected airpath edges (a-b, c-d) bridged by one hydronic edge.
+
+    Whole-graph component count is 1 (connected via the bridge); the airpath-only
+    subgraph has 2 components. This is the topology that exposed the kind-unaware
+    component labelling bug.
+    """
+    net = Network(dtype=torch.float64)
+    for name in ("a", "b", "c", "d"):
+        net.add_node(name)
+    net.add_edge("a", "b", kind="airpath")
+    net.add_edge("c", "d", kind="airpath")
+    net.add_edge("b", "c", kind="hydronic")
+    return net
+
+
+def test_component_labels_kind_restricted_differs_from_whole_graph_on_bridged_network():
+    net = _two_disjoint_airpath_pairs_bridged_by_hydronic()
+    assert len(set(net.component_labels().tolist())) == 1
+    labels_air = net.component_labels(kind="airpath")
+    assert len(set(labels_air.tolist())) == 2
+    assert labels_air[0] == labels_air[1]
+    assert labels_air[2] == labels_air[3]
+    assert labels_air[0] != labels_air[2]
+
+
+def test_particular_flow_is_kind_aware_on_a_bridged_multi_kind_network():
+    """Each airpath pair must solve as its own component, independent of the bridge."""
+    net = _two_disjoint_airpath_pairs_bridged_by_hydronic()
+    sources = torch.tensor([2.0, -2.0, 3.0, -3.0], dtype=torch.float64)
+    q = particular_flow(net, sources, kind="airpath")  # must not raise
+    assert torch.allclose(q, torch.tensor([2.0, 3.0], dtype=torch.float64), atol=1e-12)
+    A_air = net.incidence(kind="airpath")
+    assert torch.allclose(A_air @ q, sources, atol=1e-12)
+
+
+def _two_rings_bridged_by_hydronic() -> Network:
+    """Two independent airpath rings (each like `triangle`) joined by one hydronic edge.
+
+    Whole-graph component count is 1; the airpath-only subgraph has 2 ring
+    components, each with 1 cycle, so each ring's flows are only pinned down by
+    measuring one edge in that ring (same mechanism as the `two_zone` fixture).
+    """
+    net = Network(dtype=torch.float64)
+    for name in ("a1", "b1", "c1", "a2", "b2", "c2"):
+        net.add_node(name)
+    net.add_edge("a1", "b1", kind="airpath")
+    net.add_edge("b1", "c1", kind="airpath")
+    net.add_edge("c1", "a1", kind="airpath")
+    net.add_edge("a2", "b2", kind="airpath")
+    net.add_edge("b2", "c2", kind="airpath")
+    net.add_edge("c2", "a2", kind="airpath")
+    net.add_edge("c1", "a2", kind="hydronic")
+    return net
+
+
+def test_project_measured_is_kind_aware_and_does_not_raise_false_infeasible():
+    net = _two_rings_bridged_by_hydronic()
+    assert net.n_components == 1  # bridged into one whole-graph component
+    assert net.n_components_of("airpath") == 2  # but two independent airpath rings
+    mask = torch.tensor([True, False, False, True, False, False])
+    # only indices 0 and 3 are real measurements; the rest are unused filler values
+    target = torch.tensor([0.5, 3.0, -7.0, 0.9, 3.0, -7.0], dtype=torch.float64)
+    q = project_measured(net, target, mask, kind="airpath")  # must not raise "infeasible"
+    expected = torch.tensor([0.5, 0.5, 0.5, 0.9, 0.9, 0.9], dtype=torch.float64)
+    assert torch.allclose(q, expected, atol=1e-8)
+    A_air = net.incidence(kind="airpath")
+    assert torch.allclose(A_air @ q, torch.zeros(6, dtype=torch.float64), atol=1e-8)
+
+
+def test_project_measured_still_raises_on_genuinely_infeasible_multi_kind_measurements():
+    net = _two_rings_bridged_by_hydronic()
+    # two contradictory measurements within the SAME ring: still infeasible after the fix
+    mask = torch.tensor([True, True, False, False, False, False])
+    target = torch.tensor([0.5, 0.9, 0.0, 0.0, 0.0, 0.0], dtype=torch.float64)
+    with pytest.raises(RuntimeError, match="infeasible"):
+        project_measured(net, target, mask, kind="airpath")

@@ -295,6 +295,40 @@ def test_component_labels_different_labels_across_components():
     assert set(labels.tolist()) == {0, 1}
 
 
+def test_component_labels_kind_restricted_can_have_more_components_than_whole_graph():
+    """a-b and c-d are disconnected in the airpath subgraph but bridged by hydronic."""
+    net = Network(dtype=torch.float64)
+    for name in ("a", "b", "c", "d"):
+        net.add_node(name)
+    net.add_edge("a", "b", kind="airpath")
+    net.add_edge("c", "d", kind="airpath")
+    net.add_edge("b", "c", kind="hydronic")
+    labels_air = net.component_labels(kind="airpath")
+    labels_all = net.component_labels()
+    assert labels_all[0] == labels_all[1] == labels_all[2] == labels_all[3]
+    assert labels_air[0] == labels_air[1]
+    assert labels_air[2] == labels_air[3]
+    assert labels_air[0] != labels_air[2]
+
+
+def test_n_components_of_is_kind_aware_and_leaves_n_components_property_unchanged():
+    net = Network(dtype=torch.float64)
+    for name in ("a", "b", "c", "d"):
+        net.add_node(name)
+    net.add_edge("a", "b", kind="airpath")
+    net.add_edge("c", "d", kind="airpath")
+    net.add_edge("b", "c", kind="hydronic")
+    assert net.n_components_of("airpath") == 2
+    assert net.n_components_of() == 1
+    assert net.n_components == 1
+
+
+def test_component_labels_raises_keyerror_for_unknown_kind():
+    net = triangle()
+    with pytest.raises(KeyError, match="airpaths"):
+        net.component_labels("airpaths")
+
+
 def test_source_and_target_selector_are_onehot_and_kind_filtered():
     net = Network()
     net.add_node("room")

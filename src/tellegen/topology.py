@@ -148,12 +148,24 @@ class Network:
             raise KeyError(f"node attribute {name!r} missing for nodes {missing}")
         return torch.tensor(values, dtype=self.dtype, device=self.device)
 
-    def component_labels(self) -> torch.Tensor:
-        """Connected-component label (0..components-1) of every node, in node order."""
-        key = ("component_labels", None)
+    def component_labels(self, kind: str | None = None) -> torch.Tensor:
+        """Connected-component label (0..components-1) of every node, in node order.
+
+        With `kind` given, connectivity is restricted to edges of that kind: a node
+        touched by no edge of `kind` gets its own singleton component. Raises
+        `KeyError` (via `edge_index`) naming the unknown kind if `kind` matches no
+        edge.
+        """
+        key = ("component_labels", kind)
         if key in self._cache:
             return self._cache[key]
-        undirected = self.graph.to_undirected(as_view=True)
+        cols = self.edge_index(kind)
+        edges = self.edges
+        undirected = nx.Graph()
+        undirected.add_nodes_from(self.graph.nodes)
+        for col in cols.tolist():
+            u, v, _ = edges[col]
+            undirected.add_edge(u, v)
         label_of: dict[Node, int] = {}
         for label, component in enumerate(nx.connected_components(undirected)):
             for node in component:
@@ -163,6 +175,16 @@ class Network:
         )
         self._cache[key] = result
         return result
+
+    def n_components_of(self, kind: str | None = None) -> int:
+        """Number of connected components among edges of one kind (or the whole graph).
+
+        Does not affect `n_components`, which always describes the whole graph.
+        """
+        labels = self.component_labels(kind)
+        if labels.numel() == 0:
+            return 0
+        return int(labels.max().item()) + 1
 
     def edge_attr(
         self, name: str, kind: str | None = None, default: float | None = None
