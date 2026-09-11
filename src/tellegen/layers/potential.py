@@ -190,4 +190,75 @@ class PotentialFlowLayer:
             raise RuntimeError(
                 f"floating nodes with no path to a boundary potential: {bad}"
             )
+        # J0 picks up a batch dimension only if some element's linear_init(drivers) actually
+        # depends on drivers (e.g. a driver-conditioned slope); with purely constant slopes
+        # (every test element here) J0 stays unbatched (n_I, n_I) even when `rhs` is batched
+        # via phi_boundary/sources. torch.linalg.solve does not broadcast an unbatched A
+        # against a batched b the way one might expect: with A.ndim == b.ndim it instead
+        # treats b as a single (n_I, k) right-hand-side matrix, so a (2, 2) A against a
+        # (50, 2) b raises (misreported as a singular system) rather than solving 50
+        # independent 2x2 systems. Broadcasting both to their common batch shape first
+        # makes A.ndim == b.ndim + 1 in the batched case, which torch.linalg.solve does
+        # broadcast correctly as one system per batch element.
+        solve_batch = torch.broadcast_shapes(J0.shape[:-2], rhs.shape[:-1])
+        J0 = J0.expand(solve_batch + J0.shape[-2:])
+        rhs = rhs.expand(solve_batch + rhs.shape[-1:])
         return solve(J0, rhs)
+
+    # ------------------------------------------------------------------ solve
+    def solve(
+        self,
+        phi_boundary,
+        drivers=None,
+        sources=None,
+        phi0=None,
+        *,
+        differentiable=True,
+        **newton_kwargs,
+    ):
+        drivers = drivers or {}
+        if phi0 is None:
+            phi0 = self.linear_init(phi_boundary, drivers, sources)
+        if differentiable:
+            raise NotImplementedError(
+                "differentiable=True is implemented in Task 8 (solvers/implicit.py)"
+            )
+
+        def residual_fn(x):
+            return self.residual(x, phi_boundary, drivers, sources)
+
+        def jacobian_fn(x):
+            return self.jacobian(x, phi_boundary, drivers)
+
+        result = newton(residual_fn, jacobian_fn, phi0, **newton_kwargs)
+        phi = self.assemble(result.x, phi_boundary)
+        q = self.flows(phi, drivers)
+        return phi, q
+
+    def power_residual(self, phi, q, drivers, sources=None):
+        """Tellegen's power identity, zero at a converged solution.
+
+        (dp*q).sum() - (drive*q).sum() - (phi_bound * (A_bound @ q)).sum()
+        - (phi_interior * sources_interior).sum()
+
+        Derivation: dp = A^T phi + drive, so dp^T q = phi^T (A q) + drive^T q. Splitting
+        phi^T (A q) into interior and boundary parts and using A_I q = sources_I at a
+        converged solution (`residual` is exactly this equation) gives
+        dp^T q - drive^T q - phi_bound.(A_bound q) - phi_interior.sources_I == 0.
+        `sources=None` (the default) means zero interior sources, matching `residual` and
+        `linear_init`.
+        """
+        drivers = drivers or {}
+        d = self.dp(phi, drivers)
+        drive_only = d - torch.einsum("ie,...i->...e", self.A, phi)
+        A_bound = self.A[self.bound]
+        boundary_flow = torch.einsum("be,...e->...b", A_bound, q)
+        phi_b = phi[..., self.bound]
+        phi_i = phi[..., self.interior]
+        s_I = self._source_interior(sources, phi_i)
+        return (
+            (d * q).sum(-1)
+            - (drive_only * q).sum(-1)
+            - (phi_b * boundary_flow).sum(-1)
+            - (phi_i * s_I).sum(-1)
+        )
