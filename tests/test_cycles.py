@@ -7,6 +7,7 @@ from tellegen.cycles import (
     assert_forward_oriented,
     branch_flows,
     particular_flow,
+    project_measured,
 )
 from tellegen.topology import Network
 
@@ -80,3 +81,48 @@ def test_particular_flow_satisfies_conservation_on_random_trees(n, seed):
     q = particular_flow(net, sources)
     assert q.shape == (net.b,)
     assert torch.allclose(net.incidence() @ q, sources, atol=1e-10)
+
+
+def test_project_measured_matches_measured_branches_exactly_and_conserves_flow(two_zone):
+    mask = torch.tensor([True, False, False])
+    target = torch.tensor([0.5, 3.0, -7.0], dtype=torch.float64)  # only index 0 is real
+    q = project_measured(two_zone, target, mask)
+    assert torch.allclose(q[0], torch.tensor(0.5, dtype=torch.float64), atol=1e-8)
+    assert torch.allclose(two_zone.incidence() @ q, torch.zeros(3, dtype=torch.float64), atol=1e-8)
+    assert torch.allclose(q, torch.full((3,), 0.5, dtype=torch.float64), atol=1e-8)
+
+
+def test_project_measured_equals_plain_projection_when_mask_is_all_false(two_zone):
+    mask = torch.zeros(3, dtype=torch.bool)
+    target = torch.tensor([0.5, 0.2, 0.4], dtype=torch.float64)
+    q = project_measured(two_zone, target, mask)
+
+    A_reduced = two_zone.incidence()[1:]  # drop the "ambient" row (one component)
+    rhs = A_reduced @ target
+    mu = torch.linalg.solve(A_reduced @ A_reduced.T, rhs)
+    expected = target - A_reduced.T @ mu
+
+    assert torch.allclose(two_zone.incidence() @ q, torch.zeros(3, dtype=torch.float64), atol=1e-8)
+    assert torch.allclose(q, expected, atol=1e-8)
+
+
+def test_project_measured_batched_equals_looped(two_zone):
+    mask = torch.tensor([True, False, False])
+    target = torch.stack(
+        [
+            torch.tensor([0.5, 0.1, 0.2], dtype=torch.float64),
+            torch.tensor([0.5, -0.3, 0.4], dtype=torch.float64),
+            torch.tensor([0.5, 0.9, -0.9], dtype=torch.float64),
+        ]
+    )
+    batched = project_measured(two_zone, target, mask)
+    looped = torch.stack([project_measured(two_zone, target[i], mask) for i in range(3)])
+    assert batched.shape == (3, 3)
+    assert torch.allclose(batched, looped, atol=1e-10)
+
+
+def test_project_measured_raises_on_infeasible_measurements(two_zone):
+    mask = torch.tensor([True, True, False])
+    target = torch.tensor([0.5, 0.9, 0.0], dtype=torch.float64)
+    with pytest.raises(RuntimeError, match="infeasible"):
+        project_measured(two_zone, target, mask)

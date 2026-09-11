@@ -84,3 +84,72 @@ def particular_flow(
         q_tree_c = torch.linalg.solve(A_c, rhs_c.unsqueeze(-1)).squeeze(-1)
         q[..., tree_cols_c] = q_tree_c
     return q
+
+
+def project_measured(
+    net: Network,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    kind: str | None = None,
+    sources: torch.Tensor | None = None,
+    *,
+    atol: float = 1e-8,
+) -> torch.Tensor:
+    """Constrained least-squares flow: minimise ``||q - target||^2`` subject to
+    ``A @ q == sources`` and ``q[mask] == target[mask]``.
+
+    Solved as the KKT system ``[[I, C^T], [C, 0]] @ [q; mu] == [target; rhs]`` with
+    ``C = [A_reduced; E_mask]``: ``A_reduced`` drops one row per connected component
+    (the rows of ``A`` sum to zero within a component, so one is redundant) and
+    ``E_mask`` selects the measured columns. Raises ``RuntimeError`` if the
+    measurements and conservation cannot be satisfied simultaneously within ``atol``.
+    """
+    A = net.incidence(kind)
+    n, b = A.shape
+    dtype = target.dtype
+    labels = net.component_labels()
+    n_components = net.n_components
+
+    keep_rows: list[int] = []
+    for c in range(n_components):
+        node_idx = torch.nonzero(labels == c, as_tuple=False).flatten()
+        keep_rows.extend(node_idx[1:].tolist())
+    keep_rows_t = torch.tensor(sorted(keep_rows), dtype=torch.long)
+    A_reduced = A[keep_rows_t].to(dtype)
+
+    if sources is None:
+        sources = torch.zeros(n, dtype=dtype)
+    measured_idx = torch.nonzero(mask, as_tuple=False).flatten()
+    m = measured_idx.numel()
+    E = torch.zeros(m, b, dtype=dtype)
+    E[torch.arange(m), measured_idx] = 1.0
+
+    C = torch.cat([A_reduced, E], dim=0)  # (k, b)
+    k = C.shape[0]
+
+    batch_shape = torch.broadcast_shapes(target.shape[:-1], sources.shape[:-1])
+    target_b = target.expand(*batch_shape, b)
+    sources_reduced = sources[..., keep_rows_t].expand(*batch_shape, len(keep_rows_t))
+    measured_b = target_b[..., measured_idx]
+    lower = torch.cat([sources_reduced, measured_b], dim=-1)  # (..., k)
+    rhs = torch.cat([target_b, lower], dim=-1)  # (..., b + k)
+
+    top = torch.cat([torch.eye(b, dtype=dtype), C.T], dim=1)
+    bottom = torch.cat([C, torch.zeros(k, k, dtype=dtype)], dim=1)
+    K = torch.cat([top, bottom], dim=0)  # (b + k, b + k)
+
+    try:
+        solution = torch.linalg.solve(K, rhs.unsqueeze(-1)).squeeze(-1)
+    except torch.linalg.LinAlgError as exc:
+        raise RuntimeError(
+            "measured-flow constraints are infeasible: the KKT system is singular"
+        ) from exc
+
+    q = solution[..., :b]
+    residual = torch.einsum("kb,...b->...k", C, q) - lower
+    if torch.any(residual.abs() > atol):
+        raise RuntimeError(
+            f"measured-flow constraints are infeasible beyond atol={atol}: "
+            f"max constraint residual {residual.abs().max().item():.3e}"
+        )
+    return q
