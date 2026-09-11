@@ -293,3 +293,23 @@ def test_component_labels_different_labels_across_components():
     assert labels[3] == labels[4] == labels[5]
     assert labels[0] != labels[3]
     assert set(labels.tolist()) == {0, 1}
+
+
+def test_source_and_target_selector_are_onehot_and_kind_filtered():
+    net = Network()
+    net.add_node("room")
+    net.add_node("outside")
+    net.add_edge("outside", "room", kind="airpath")
+    net.add_edge("room", "outside", kind="conduction")
+    S = net.source_selector("airpath")
+    T = net.target_selector("airpath")
+    assert S.shape == (1, 2) and T.shape == (1, 2)
+    assert S.tolist() == [[0.0, 1.0]]  # source is "outside" (index 1)
+    assert T.tolist() == [[1.0, 0.0]]  # target is "room" (index 0)
+
+
+def test_source_selector_minus_target_selector_recovers_incidence():
+    net = triangle()
+    S = net.source_selector()
+    T = net.target_selector()
+    assert torch.equal((S - T).T, net.incidence())

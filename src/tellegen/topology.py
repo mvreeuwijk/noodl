@@ -261,6 +261,36 @@ class Network:
                 rows[r, jt] += 1 if s == a else -1
         return rows
 
+    def source_selector(self, kind: str | None = None) -> torch.Tensor:
+        """One-hot selector (b_kind x n): row e is 1 at the source node of edge e."""
+        key = ("source_selector", kind)
+        if key in self._cache:
+            return self._cache[key]
+        cols = self.edge_index(kind)
+        index = self._node_index()
+        edges = self.edges
+        s = torch.zeros(len(cols), self.n, dtype=self.dtype, device=self.device)
+        for j, col in enumerate(cols.tolist()):
+            source, _target, _ = edges[col]
+            s[j, index[source]] = 1
+        self._cache[key] = s
+        return s
+
+    def target_selector(self, kind: str | None = None) -> torch.Tensor:
+        """One-hot selector (b_kind x n): row e is 1 at the target node of edge e."""
+        key = ("target_selector", kind)
+        if key in self._cache:
+            return self._cache[key]
+        cols = self.edge_index(kind)
+        index = self._node_index()
+        edges = self.edges
+        t = torch.zeros(len(cols), self.n, dtype=self.dtype, device=self.device)
+        for j, col in enumerate(cols.tolist()):
+            _source, target, _ = edges[col]
+            t[j, index[target]] = 1
+        self._cache[key] = t
+        return t
+
     def upwind(self, q: torch.Tensor) -> torch.Tensor:
         """Selection matrix (b x n): row e picks the node upstream of edge e for flow q[e].
 
