@@ -371,3 +371,47 @@ def test_upwind_rows_are_one_hot_at_the_upstream_node_for_random_signed_batched_
     T = net.target_selector()
     expected = torch.where((q >= 0).unsqueeze(-1), S, T)
     assert torch.equal(up, expected)
+
+
+def test_spanning_forest_partitions_columns_into_tree_and_chords():
+    net = triangle()
+    tree_cols, chord_cols = net.spanning_forest()
+    assert tree_cols.tolist() == [0, 1]  # a->b, b->c form the tree
+    assert chord_cols.tolist() == [2]  # c->a closes the loop
+
+
+def test_cycle_basis_matches_spanning_forest_tree_edges():
+    net = triangle()
+    tree_cols, chord_cols = net.spanning_forest()
+    J = net.cycle_basis()
+    assert J.shape == (chord_cols.numel(), net.b)
+    for r, j in enumerate(chord_cols.tolist()):
+        assert J[r, j] == 1  # each chord row has a unit entry on its own column
+    assert torch.all(net.incidence() @ J.T == 0)
+
+
+@settings(max_examples=30, deadline=None)
+@given(
+    n=st.integers(min_value=2, max_value=8),
+    extra=st.integers(min_value=0, max_value=10),
+    seed=st.integers(min_value=0, max_value=10_000),
+)
+def test_incidence_tree_columns_has_rank_n_minus_components(n, extra, seed):
+    net = _random_connected_multigraph(n, extra, seed)
+    tree_cols, chord_cols = net.spanning_forest()
+    A = net.incidence()
+    assert tree_cols.numel() + chord_cols.numel() == net.b
+    assert torch.linalg.matrix_rank(A[:, tree_cols]) == net.n - net.n_components
+
+
+@settings(max_examples=30, deadline=None)
+@given(
+    n=st.integers(min_value=2, max_value=8),
+    extra=st.integers(min_value=0, max_value=10),
+    seed=st.integers(min_value=0, max_value=10_000),
+)
+def test_spanning_forest_tree_and_chords_cover_all_columns_exactly_once(n, extra, seed):
+    net = _random_connected_multigraph(n, extra, seed)
+    tree_cols, chord_cols = net.spanning_forest()
+    all_cols = torch.cat([tree_cols, chord_cols]).sort().values
+    assert torch.equal(all_cols, torch.arange(net.b, dtype=torch.long))

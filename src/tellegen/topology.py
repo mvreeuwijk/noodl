@@ -224,33 +224,59 @@ class Network:
         self._cache[key] = result
         return result
 
-    def cycle_basis(self, kind: str | None = None) -> torch.Tensor:
-        """Integer basis of the cycle space (l x b_kind) from a spanning forest.
+    def spanning_forest(self, kind: str | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """Spanning forest of the edges of one kind: (tree_cols, chord_cols).
 
-        Each non-tree edge e = (u, v) gives one basis vector: unit flow along e
-        from u to v, returning from v to u along the unique tree path, with
-        +1 on tree edges traversed in their own direction and -1 otherwise.
+        Both are `LongTensor`s indexing columns of `incidence(kind)`. One tree per
+        connected component, built by union-find over insertion order; `cycle_basis`
+        uses this same forest so a chord's fundamental cycle closes on it.
         """
+        key = ("spanning_forest", kind)
+        if key in self._cache:
+            return self._cache[key]
+        cols = self.edge_index(kind).tolist()
+        edges = [self.edges[c] for c in cols]
+        uf = _UnionFind(self.graph.nodes)
+        tree: list[int] = []
+        chord: list[int] = []
+        for j, (u, v, _) in enumerate(edges):
+            if u != v and uf.union(u, v):
+                tree.append(j)
+            else:
+                chord.append(j)
+        result = (
+            torch.tensor(tree, dtype=torch.long, device=self.device),
+            torch.tensor(chord, dtype=torch.long, device=self.device),
+        )
+        self._cache[key] = result
+        return result
+
+    def cycle_basis(self, kind: str | None = None) -> torch.Tensor:
+        """Integer basis of the cycle space (l x b_kind) from the spanning forest.
+
+        Each chord e = (u, v) gives one basis vector: unit flow along e from u to
+        v, returning from v to u along the unique tree path, with +1 on tree
+        edges traversed in their own direction and -1 otherwise.
+        """
+        key = ("cycle_basis", kind)
+        if key in self._cache:
+            return self._cache[key]
         cols = self.edge_index(kind).tolist()
         edges = [self.edges[c] for c in cols]
         b = len(edges)
+        tree_cols, chord_cols = self.spanning_forest(kind)
 
-        # Undirected forest over the selected edges (parallel edges collapse;
-        # the first edge seen between two nodes becomes the tree edge).
         forest = nx.Graph()
         forest.add_nodes_from(self.graph.nodes)
         tree_edges: dict[frozenset, tuple[int, Node, Node]] = {}
-        non_tree: list[int] = []
-        uf = _UnionFind(self.graph.nodes)
-        for j, (u, v, _) in enumerate(edges):
-            if u != v and uf.union(u, v):
-                forest.add_edge(u, v)
-                tree_edges[frozenset((u, v))] = (j, u, v)
-            else:
-                non_tree.append(j)
+        for j in tree_cols.tolist():
+            u, v, _ = edges[j]
+            forest.add_edge(u, v)
+            tree_edges[frozenset((u, v))] = (j, u, v)
 
-        rows = torch.zeros(len(non_tree), b, dtype=self.dtype)
-        for r, j in enumerate(non_tree):
+        chord_list = chord_cols.tolist()
+        rows = torch.zeros(len(chord_list), b, dtype=self.dtype, device=self.device)
+        for r, j in enumerate(chord_list):
             u, v, _ = edges[j]
             rows[r, j] = 1
             if u == v:
@@ -259,6 +285,7 @@ class Network:
             for a, c in zip(path[:-1], path[1:], strict=True):
                 jt, s, _ = tree_edges[frozenset((a, c))]
                 rows[r, jt] += 1 if s == a else -1
+        self._cache[key] = rows
         return rows
 
     def source_selector(self, kind: str | None = None) -> torch.Tensor:
