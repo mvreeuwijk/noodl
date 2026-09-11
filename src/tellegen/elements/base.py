@@ -77,9 +77,20 @@ class Element(torch.nn.Module):
         return self.flow(zero, drivers), self.dflow(zero, drivers)
 
     @staticmethod
-    def _param(value, learnable: bool) -> torch.nn.Parameter:
-        """Wrap ``value`` as a leaf ``nn.Parameter`` with ``requires_grad=learnable``."""
+    def _param(value, learnable: bool) -> torch.nn.Parameter | Tensor:
+        """Wrap ``value`` as a leaf ``nn.Parameter`` with ``requires_grad=learnable``.
+
+        Exception: if ``value`` is already a tensor with ``requires_grad=True``, it is
+        returned unchanged rather than wrapped. ``nn.Parameter`` always constructs a fresh,
+        detached leaf (even when ``requires_grad=True`` is requested), so wrapping here would
+        silently sever any existing autograd connection -- e.g. when a caller reconstructs an
+        element inside a closure that ``torch.autograd.gradcheck``/an outer optimizer
+        differentiates with respect to (a pattern distinct from this element's own
+        ``learnable=True``, which is for a value with no prior graph of its own).
+        """
         if isinstance(value, torch.Tensor):
+            if value.requires_grad:
+                return value
             tensor = value.clone()
         else:
             tensor = torch.as_tensor(value, dtype=torch.get_default_dtype())
