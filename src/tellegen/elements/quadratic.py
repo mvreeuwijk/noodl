@@ -10,37 +10,34 @@ Tensor = torch.Tensor
 
 
 class Quadratic(Element):
-    """q = sign(dp) * (sqrt(a^2 + 4 b |dp|) - a) / (2 b), the inverse of dp = a q + b |q| q."""
+    """q = sign(dp) * 2|dp| / (sqrt(a^2 + 4 b |dp|) + a) / b.
+
+    Inverts the quadratic-drag law dp = a q + b |q| q.
+
+    Precondition: a > 0 and b > 0. With a <= 0, the discriminant a^2 + 4 b |dp|
+    can vanish (when b |dp| = -a^2 / 4), and sqrt diverges in gradients. With
+    a = 0 and learnable=True, an optimiser can drive the batch toward dp=0 where
+    the gradient poisons the shared a parameter across the whole batch (a.grad = nan).
+    """
 
     def __init__(self, a, b, *, kind: str = "airpath", learnable: bool = False) -> None:
         super().__init__(kind)
-        # Store a and b with consistent precision (convert to tensors first)
-        a_tensor = torch.as_tensor(a)
-        b_tensor = torch.as_tensor(b)
-        self.a = self._param(a_tensor, learnable)
-        self.b = self._param(b_tensor, learnable)
+        self.a = self._param(a, learnable)
+        self.b = self._param(b, learnable)
 
     def flow(self, dp: Tensor, drivers=None) -> Tensor:
         a, b = self.a, self.b
-        # Promote to float64 for computation to avoid precision loss
-        a_hp = a.to(torch.float64)
-        b_hp = b.to(torch.float64)
-        dp_hp = dp.to(torch.float64)
-        disc = a_hp**2 + 4 * b_hp * dp_hp.abs()
-        result_hp = (
-            torch.sign(dp_hp) * (torch.sqrt(disc) - a_hp) / (2 * b_hp)
-        )
-        return result_hp.to(dp.dtype)
+        # Avoid catastrophic cancellation: use algebraically equivalent form
+        # q = sign(dp) * 2|dp| / (sqrt(a^2 + 4 b |dp|) + a)
+        # This is identical to sign(dp) * (sqrt(a^2 + 4 b |dp|) - a) / (2 b)
+        # (conjugate multiplication), but avoids subtraction of near-equal terms.
+        disc = a**2 + 4 * b * dp.abs()
+        return torch.sign(dp) * 2 * dp.abs() / (torch.sqrt(disc) + a)
 
     def dflow(self, dp: Tensor, drivers=None) -> Tensor:
         a, b = self.a, self.b
-        # Promote to float64 for computation to avoid precision loss
-        a_hp = a.to(torch.float64)
-        b_hp = b.to(torch.float64)
-        dp_hp = dp.to(torch.float64)
-        disc = a_hp**2 + 4 * b_hp * dp_hp.abs()
-        result_hp = 1.0 / torch.sqrt(disc)
-        return result_hp.to(dp.dtype)
+        disc = a**2 + 4 * b * dp.abs()
+        return 1.0 / torch.sqrt(disc)
 
     def linear_init(self, drivers=None) -> tuple[Tensor, Tensor]:
         return torch.zeros_like(self.a), 1.0 / self.a

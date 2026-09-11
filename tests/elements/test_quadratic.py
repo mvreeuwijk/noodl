@@ -59,6 +59,19 @@ def test_learnable_quadratic_exposes_parameters():
     assert all(p.requires_grad for p in params)
 
 
+def test_learnable_quadratic_with_integer_inputs():
+    # Integer inputs should be converted to float for learnable parameters
+    el = Quadratic(a=2, b=1, learnable=True)
+    params = list(el.parameters())
+    assert len(params) == 2
+    assert all(p.requires_grad for p in params)
+    assert all(p.dtype in [torch.float32, torch.float64] for p in params)
+    # Should be in state_dict
+    state = el.state_dict()
+    assert "a" in state
+    assert "b" in state
+
+
 def test_gradcheck_flow_wrt_dp_and_learnable_params_away_from_zero():
     a = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
     b = torch.tensor(0.5, dtype=torch.float64, requires_grad=True)
