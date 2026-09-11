@@ -10,14 +10,16 @@ Tensor = torch.Tensor
 
 
 class Quadratic(Element):
-    """q = sign(dp) * 2|dp| / (sqrt(a^2 + 4 b |dp|) + a) / b.
+    """q = sign(dp) * 2|dp| / (sqrt(a^2 + 4 b |dp|) + a).
 
     Inverts the quadratic-drag law dp = a q + b |q| q.
 
-    Precondition: a > 0 and b > 0. With a <= 0, the discriminant a^2 + 4 b |dp|
-    can vanish (when b |dp| = -a^2 / 4), and sqrt diverges in gradients. With
-    a = 0 and learnable=True, an optimiser can drive the batch toward dp=0 where
-    the gradient poisons the shared a parameter across the whole batch (a.grad = nan).
+    Precondition: a > 0 and b > 0. Violations produce nan in both forward and backward:
+    with a = 0 and dp = 0, the conjugate form evaluates to 0 / 0 = nan in the forward pass.
+    With a <= 0, the discriminant a^2 + 4 b |dp| can vanish (when b |dp| = -a^2 / 4), and
+    sqrt diverges in gradients. With a = 0 and learnable=True, an optimiser can drive the
+    batch toward dp=0 where the forward nan and gradient poisoning propagate to the shared
+    a parameter across the whole batch (a.grad = nan).
     """
 
     def __init__(self, a, b, *, kind: str = "airpath", learnable: bool = False) -> None:
