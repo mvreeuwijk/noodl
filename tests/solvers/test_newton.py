@@ -111,3 +111,25 @@ def test_newton_matches_direct_solve_on_random_spd_systems(seed, n, batch):
     result = newton(residual, jacobian, x0, atol=1e-10, rtol=1e-10)
     expected = torch.linalg.solve(A, b)
     torch.testing.assert_close(result.x, expected, atol=1e-8, rtol=1e-8)
+
+
+def test_converged_instance_with_singular_jacobian_does_not_crash_siblings():
+    # Instance 0 starts exactly at its root (c=0, x0=0): converged on iteration 0, but its
+    # Jacobian (3 * x**2) is exactly singular there. Instance 1 (c=1000) still needs several
+    # iterations. A batched linalg.solve raises for the whole call if *any* matrix in the
+    # batch is singular, so instance 0's frozen-but-singular Jacobian must not be fed to the
+    # solve unguarded, or instance 1 could never converge.
+    c = torch.tensor([[0.0], [1000.0]])
+    x0 = torch.tensor([[0.0], [1.0]])
+
+    def residual(x):
+        return x**3 - c
+
+    def jacobian(x):
+        return (3 * x**2).unsqueeze(-1)
+
+    result = newton(residual, jacobian, x0, max_iter=50)
+
+    assert bool(torch.all(result.converged))
+    torch.testing.assert_close(result.x[0], torch.tensor([0.0]), atol=1e-9, rtol=0.0)
+    torch.testing.assert_close(result.x[1], c[1] ** (1.0 / 3.0), atol=1e-6, rtol=1e-6)

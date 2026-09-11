@@ -46,7 +46,17 @@ def newton(
 
     while not bool(torch.all(converged)) and iterations < max_iter:
         J = jacobian(x)
-        dx = torch.linalg.solve(J, r)
+        # Guard the INPUT to linalg.solve, not just its output: J is still evaluated for
+        # every instance every iteration (a batched solve can't skip individual instances),
+        # so a frozen instance whose Jacobian is genuinely singular at its own converged
+        # point (e.g. a branch element sitting exactly on a zero-slope point) would otherwise
+        # raise for the *entire* batched call even though its result is about to be masked
+        # to zero below. Substituting the identity for converged instances keeps the solve
+        # well-posed without changing any result: those rows are discarded by the
+        # torch.where on `step` regardless of what value they resolve to.
+        eye = torch.eye(J.shape[-1], dtype=J.dtype, device=J.device)
+        J_safe = torch.where(converged[..., None, None], eye, J)
+        dx = torch.linalg.solve(J_safe, r)
         step = torch.where(
             converged.unsqueeze(-1), torch.zeros_like(dx), omega_i.unsqueeze(-1) * dx
         )
