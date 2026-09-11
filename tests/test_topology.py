@@ -183,3 +183,23 @@ def test_cycle_basis_is_divergence_free_on_random_connected_multigraphs(n, extra
 def test_network_exposes_underlying_networkx_graph():
     net = triangle()
     assert isinstance(net.graph, nx.MultiDiGraph)
+
+
+def test_incidence_and_edge_index_return_the_same_cached_tensor_object():
+    net = triangle()
+    first = net.incidence()
+    second = net.incidence()
+    assert first is second
+    cols_first = net.edge_index("airpath")
+    cols_second = net.edge_index("airpath")
+    assert cols_first is cols_second
+
+
+def test_add_edge_clears_the_incidence_cache():
+    net = triangle()
+    before = net.incidence()
+    net.add_node("d")
+    net.add_edge("a", "d", kind="airpath")
+    after = net.incidence()
+    assert after is not before
+    assert after.shape == (4, 4)

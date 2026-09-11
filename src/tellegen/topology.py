@@ -40,12 +40,15 @@ class Network:
     def __init__(self, dtype: torch.dtype = torch.float32) -> None:
         self.graph = nx.MultiDiGraph()
         self.dtype = dtype
+        self.device = torch.device("cpu")
         # Branch order is insertion order (networkx iterates edges by adjacency).
         self._edges: list[EdgeKey] = []
+        self._cache: dict[tuple, torch.Tensor] = {}
 
     # ------------------------------------------------------------------ building
     def add_node(self, name: Node, **attrs) -> None:
         self.graph.add_node(name, **attrs)
+        self._cache.clear()
 
     def add_edge(self, source: Node, target: Node, *, kind: str, **attrs) -> EdgeKey:
         """Add a directed edge of the given kind and return its (source, target, key)."""
@@ -55,6 +58,7 @@ class Network:
         key = self.graph.add_edge(source, target, kind=kind, **attrs)
         edge = (source, target, key)
         self._edges.append(edge)
+        self._cache.clear()
         return edge
 
     def with_ambient(self, name: Node = "ambient", *, kind: str = "storage") -> Network:
@@ -100,9 +104,14 @@ class Network:
 
     def edge_index(self, kind: str | None = None) -> torch.Tensor:
         """Column indices (into the full edge list) of the edges of one kind, or all."""
+        key = ("edge_index", kind)
+        if key in self._cache:
+            return self._cache[key]
         kinds = self.edge_kinds()
         idx = [i for i, k in enumerate(kinds) if kind is None or k == kind]
-        return torch.tensor(idx, dtype=torch.long)
+        result = torch.tensor(idx, dtype=torch.long, device=self.device)
+        self._cache[key] = result
+        return result
 
     def edge_kinds(self) -> list[str]:
         return [self.graph.edges[u, v, k].get("kind") for (u, v, k) in self._edges]
@@ -110,19 +119,28 @@ class Network:
     # ------------------------------------------------------------------ operators
     def incidence(self, kind: str | None = None) -> torch.Tensor:
         """Incidence matrix (n x b_kind): +1 at source, -1 at target of each edge."""
+        key = ("incidence", kind)
+        if key in self._cache:
+            return self._cache[key]
         index = self._node_index()
         cols = self.edge_index(kind)
-        d = torch.zeros(self.n, len(cols), dtype=self.dtype)
+        d = torch.zeros(self.n, len(cols), dtype=self.dtype, device=self.device)
         edges = self.edges
         for j, col in enumerate(cols.tolist()):
             source, target, _ = edges[col]
             d[index[source], j] += 1
             d[index[target], j] -= 1
+        self._cache[key] = d
         return d
 
     def gradient(self, kind: str | None = None) -> torch.Tensor:
         """Gradient (b_kind x n): target minus source of a nodal potential."""
-        return -self.incidence(kind).T
+        key = ("gradient", kind)
+        if key in self._cache:
+            return self._cache[key]
+        result = -self.incidence(kind).T
+        self._cache[key] = result
+        return result
 
     def cycle_basis(self, kind: str | None = None) -> torch.Tensor:
         """Integer basis of the cycle space (l x b_kind) from a spanning forest.
