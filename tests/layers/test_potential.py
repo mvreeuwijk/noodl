@@ -100,3 +100,41 @@ def test_residual_and_jacobian_on_single_conductance_edge():
     J = layer.jacobian(phi_i, phi_b, {})
     # dq/dphi_z = -g ; J = A_I diag(dq) A_I^T = (-1)*2*(-1) = 2
     torch.testing.assert_close(J, torch.tensor([[2.0]], dtype=torch.float64))
+
+
+def test_linear_init_solves_the_linear_system_exactly_for_conductance_network():
+    net = Network(dtype=torch.float64)
+    net.add_node("ambient")
+    net.add_node("z")
+    net.add_edge("ambient", "z", kind="conduction")
+    g = torch.tensor([2.0], dtype=torch.float64)
+    layer = PotentialFlowLayer(net, "cond", [Conductance(g, kind="conduction")], boundary=["ambient"])
+
+    phi_b = torch.tensor([0.0], dtype=torch.float64)
+    sources = torch.tensor([0.0, 1.0], dtype=torch.float64)
+    phi_i = layer.linear_init(phi_b, {}, sources)
+
+    r = layer.residual(phi_i, phi_b, {}, sources)
+    torch.testing.assert_close(r, torch.zeros(1, dtype=torch.float64), atol=1e-10, rtol=1e-10)
+
+
+def test_zone_connected_only_by_fixed_flow_edges_raises_runtime_error():
+    net = Network(dtype=torch.float64)
+    net.add_node("ambient")
+    net.add_node("z1")
+    net.add_node("z2")
+    net.add_edge("ambient", "z1", kind="duct")
+    net.add_edge("z1", "z2", kind="duct")
+    net.add_edge("z2", "ambient", kind="airpath")
+    layer = PotentialFlowLayer(
+        net,
+        "mixed",
+        [
+            FixedFlow(torch.tensor([0.1, 0.1], dtype=torch.float64), kind="duct"),
+            PowerLaw(torch.tensor([0.02], dtype=torch.float64), 0.65, kind="airpath"),
+        ],
+        boundary=["ambient"],
+    )
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    with pytest.raises(RuntimeError, match="z1"):
+        layer.linear_init(phi_b, {}, None)

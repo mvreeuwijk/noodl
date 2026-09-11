@@ -138,3 +138,56 @@ class PotentialFlowLayer:
         dq = self.dflows(phi, drivers)
         A_I = self.A[self.interior]
         return torch.einsum("ie,...e,je->...ij", A_I, dq, A_I)
+
+    def _linear_ck(self, drivers):
+        # Each element's own (c_e, k_e) covers only its own n_e = e - s edges; only the
+        # leading BATCH dims (everything but the trailing edge-count dim) are meant to be
+        # unified across elements before concatenating along the edge axis. Using
+        # torch.broadcast_tensors directly on the raw (c_e, k_e) list (as an earlier version
+        # of this method did) broadcasts the trailing edge dim too, so two elements with
+        # different edge counts silently expand to a shared (wrong) edge count instead of
+        # concatenating -- e.g. a 2-edge FixedFlow and a 1-edge PowerLaw would both become
+        # 2-edge before torch.cat, yielding a 4-wide result instead of the correct 3.
+        cs, ks, n_es = [], [], []
+        for el, (s, e) in zip(self._elements, self._elem_slices, strict=True):
+            c_e, k_e = el.linear_init(drivers)
+            cs.append(c_e)
+            ks.append(k_e)
+            n_es.append(e - s)
+        batch_shape = torch.broadcast_shapes(
+            *(c.shape[:-1] if c.ndim > 0 else () for c in cs),
+            *(k.shape[:-1] if k.ndim > 0 else () for k in ks),
+        )
+        dtype = cs[0].dtype
+        device = cs[0].device
+        c_parts = []
+        k_parts = []
+        for c_e, k_e, n_e in zip(cs, ks, n_es, strict=True):
+            zero = torch.zeros(batch_shape + (n_e,), dtype=dtype, device=device)
+            c_parts.append(c_e + zero)
+            k_parts.append(k_e + zero)
+        return torch.cat(c_parts, dim=-1), torch.cat(k_parts, dim=-1)
+
+    def linear_init(self, phi_boundary, drivers, sources):
+        drivers = drivers or {}
+        batch_shape = phi_boundary.shape[:-1]
+        phi_i0 = torch.zeros(
+            batch_shape + (len(self.interior),),
+            dtype=phi_boundary.dtype,
+            device=phi_boundary.device,
+        )
+        phi0 = self.assemble(phi_i0, phi_boundary)
+        dp0 = self.dp(phi0, drivers)
+        c, k = self._linear_ck(drivers)
+        A_I = self.A[self.interior]
+        rhs = self._source_interior(sources, phi0) - torch.einsum(
+            "ie,...e->...i", A_I, c + k * dp0
+        )
+        J0 = torch.einsum("ie,...e,je->...ij", A_I, k, A_I)
+        diag = torch.diagonal(J0, dim1=-2, dim2=-1)
+        if bool((diag == 0).any()):
+            bad = floating_nodes(J0, self._interior_names)
+            raise RuntimeError(
+                f"floating nodes with no path to a boundary potential: {bad}"
+            )
+        return solve(J0, rhs)
