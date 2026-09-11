@@ -147,6 +147,22 @@ class Network:
             raise KeyError(f"node attribute {name!r} missing for nodes {missing}")
         return torch.tensor(values, dtype=self.dtype, device=self.device)
 
+    def component_labels(self) -> torch.Tensor:
+        """Connected-component label (0..components-1) of every node, in node order."""
+        key = ("component_labels", None)
+        if key in self._cache:
+            return self._cache[key]
+        undirected = self.graph.to_undirected(as_view=True)
+        label_of: dict[Node, int] = {}
+        for label, component in enumerate(nx.connected_components(undirected)):
+            for node in component:
+                label_of[node] = label
+        result = torch.tensor(
+            [label_of[n] for n in self.graph.nodes], dtype=torch.long, device=self.device
+        )
+        self._cache[key] = result
+        return result
+
     def edge_attr(
         self, name: str, kind: str | None = None, default: float | None = None
     ) -> torch.Tensor:

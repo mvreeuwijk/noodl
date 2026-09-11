@@ -270,3 +270,26 @@ def test_boundary_index_raises_for_unknown_node():
     net = triangle()
     with pytest.raises(KeyError):
         net.boundary_index(["z"])
+
+
+def test_component_labels_same_label_within_a_component():
+    net = triangle()
+    labels = net.component_labels()
+    assert labels.shape == (3,)
+    assert labels[0] == labels[1] == labels[2]
+
+
+def test_component_labels_different_labels_across_components():
+    net = Network()
+    for name in "abcdef":
+        net.add_node(name)
+    net.add_edge("a", "b", kind="x")
+    net.add_edge("b", "c", kind="x")
+    net.add_edge("c", "a", kind="x")
+    net.add_edge("d", "e", kind="x")
+    net.add_edge("e", "f", kind="x")
+    labels = net.component_labels()
+    assert labels[0] == labels[1] == labels[2]
+    assert labels[3] == labels[4] == labels[5]
+    assert labels[0] != labels[3]
+    assert set(labels.tolist()) == {0, 1}
