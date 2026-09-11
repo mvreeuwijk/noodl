@@ -330,3 +330,28 @@ def test_wrong_width_drive_raises_value_error_naming_widths():
     wind_bad = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)  # width 3, expected 1
     with pytest.raises(ValueError, match="airpath"):
         layer.dp(phi, {"wind": wind_bad})
+
+
+def test_floating_group_with_mixed_slope_same_kind_edges_raises_runtime_error():
+    # CODE REVIEW FINDING 1 (re-review): the first fix gated connectivity at KIND
+    # granularity ("does this kind have any nonzero-slope edge anywhere"), which let a
+    # zero-slope edge of an otherwise nonzero-slope kind still connect a group -- exactly
+    # what the fix was meant to prevent. Reproduction: a single Conductance kind with a
+    # closed damper (g=0 on ambient->z1) and an open one (g=1 on z1->z2). {z1, z2} genuinely
+    # floats: there is no nonzero-slope path from either to "ambient", even though both
+    # edges share the "conduction" kind (which does have a nonzero-slope edge elsewhere).
+    net = Network(dtype=torch.float64)
+    net.add_node("ambient")
+    net.add_node("z1")
+    net.add_node("z2")
+    net.add_edge("ambient", "z1", kind="conduction")
+    net.add_edge("z1", "z2", kind="conduction")
+    layer = PotentialFlowLayer(
+        net,
+        "mix",
+        [Conductance(torch.tensor([0.0, 1.0], dtype=torch.float64), kind="conduction")],
+        boundary=["ambient"],
+    )
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    with pytest.raises(RuntimeError, match=r"z1.*z2|z2.*z1"):
+        layer.linear_init(phi_b, {}, None)

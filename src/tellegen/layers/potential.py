@@ -190,22 +190,29 @@ class PotentialFlowLayer:
     def _floating_group_nodes(self, k: torch.Tensor) -> list:
         """Interior node names in any connected GROUP with no path to a boundary node.
 
-        Two nodes are "connected" here only through an edge whose linear slope k is
+        Two nodes are "connected" here only through an EDGE whose own linear slope k is
         nonzero somewhere in the batch: an edge whose element contributes no slope at all
-        (e.g. FixedFlow, whose dflow is identically 0) cannot carry a potential difference
-        to a boundary node and so cannot rescue a floating group. This subsumes the
-        isolated-single-node case (a node with zero diagonal in J0 is exactly a singleton
-        component here, since J0's diagonal at node i is the sum of k over i's own incident
-        edges) as well as a floating GROUP of two or more mutually-connected nodes that,
-        as a whole, has no path to any boundary node -- which a per-node diagonal check
-        alone cannot see, because each member's own diagonal is nonzero from its internal
-        edges.
+        at that edge (e.g. any FixedFlow edge, whose dflow is identically 0, or a closed
+        damper of otherwise-slope-bearing kind sitting at g = 0) cannot carry a potential
+        difference to a boundary node and so cannot rescue a floating group. This subsumes
+        the isolated-single-node case (a node with zero diagonal in J0 is exactly a
+        singleton component here, since J0's diagonal at node i is the sum of k over i's
+        own incident edges) as well as a floating GROUP of two or more mutually-connected
+        nodes that, as a whole, has no path to any boundary node -- which a per-node
+        diagonal check alone cannot see, because each member's own diagonal is nonzero from
+        its internal edges.
 
-        Deliberately kind-restricted (`net.component_labels(kind)`/whole-graph
-        `net.n_components`) is NOT used here: `component_labels(kind)` alone cannot know
-        which edges have zero slope, so it is combined with a per-kind nonzero-slope test
-        (a kind ties nodes together only if at least one of its own edges has nonzero
-        slope) and unioned across every qualifying kind with a small union-find.
+        Filtering must happen at EDGE granularity, not kind granularity: a kind can mix a
+        zero-slope edge (a closed damper, g = 0) with a nonzero-slope edge of the very same
+        kind (an open one, g = 1), and gating on "does this kind have any nonzero edge
+        anywhere" would let the zero-slope edge itself connect a group it cannot actually
+        support. `net.component_labels(kind)`/`net.n_components_of(kind)` cannot express
+        this (they know edges by kind, not by slope), so this method does not use them: it
+        unions the source and target of each of the LAYER's OWN columns (`self.cols`, whose
+        order matches `k`'s) individually, filtered by that edge's own slope. Iterating the
+        layer's own columns is already kind-restricted by construction (Task 2's
+        whole-graph-vs-kind-restricted trap does not apply here, since no whole-graph
+        connectivity operator is used at all).
         """
         n = self.net.n
         parent = list(range(n))
@@ -223,16 +230,13 @@ class PotentialFlowLayer:
 
         k_flat = k.reshape(-1, k.shape[-1])
         nonzero_anywhere = (k_flat != 0).any(dim=0)
-        for kind, (start, end) in self._kind_slices.items():
-            if not bool(nonzero_anywhere[start:end].any()):
+        node_index = {node: i for i, node in enumerate(self.net.nodes)}
+        edges = self.net.edges
+        for col_pos, col in enumerate(self.cols.tolist()):
+            if not bool(nonzero_anywhere[col_pos]):
                 continue
-            labels = self.net.component_labels(kind)
-            by_label: dict[int, list[int]] = {}
-            for idx, label in enumerate(labels.tolist()):
-                by_label.setdefault(label, []).append(idx)
-            for group in by_label.values():
-                for other in group[1:]:
-                    union(group[0], other)
+            u, v, _ = edges[col]
+            union(node_index[u], node_index[v])
 
         boundary_roots = {find(i) for i in self.bound.tolist()}
         return [
