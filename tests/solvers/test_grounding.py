@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from tellegen.solvers.grounding import spd_certificate
+from tellegen.solvers.grounding import spd_certificate, spd_diagnosis
 
 
 def _chain():
@@ -157,3 +157,33 @@ def test_batching_matches_looped_single_instance_calls():
         ]
     )
     assert torch.equal(batched, looped)
+
+
+def test_spd_diagnosis_names_negative_slope_edges():
+    # g(boundary, node 0) -- a -- b ; edge 1 (a-b) negative in instance 1 only
+    src = torch.tensor([0, 1])
+    tgt = torch.tensor([1, 2])
+    interior_of_node = torch.tensor([-1, 0, 1])
+    boundary_mask = torch.tensor([True, False, False])
+    slopes = torch.tensor([[1.0, 1.0], [1.0, -0.5]], dtype=torch.float64)
+    out = spd_diagnosis(src, tgt, slopes, interior_of_node, boundary_mask)
+    assert out == [{"instance": 1, "reason": "negative_slope", "edges": [1], "nodes": [2]}]
+
+
+def test_spd_diagnosis_names_ungrounded_nodes():
+    src = torch.tensor([0, 1])
+    tgt = torch.tensor([1, 2])
+    interior_of_node = torch.tensor([-1, 0, 1])
+    boundary_mask = torch.tensor([True, False, False])
+    slopes = torch.tensor([[1.0, 1.0], [0.0, 1.0]], dtype=torch.float64)  # verified counterexample
+    out = spd_diagnosis(src, tgt, slopes, interior_of_node, boundary_mask)
+    assert out == [{"instance": 1, "reason": "ungrounded", "edges": [], "nodes": [1, 2]}]
+
+
+def test_spd_diagnosis_is_empty_when_every_instance_certifies():
+    src = torch.tensor([0, 1])
+    tgt = torch.tensor([1, 2])
+    interior_of_node = torch.tensor([-1, 0, 1])
+    boundary_mask = torch.tensor([True, False, False])
+    slopes = torch.ones(3, 2, dtype=torch.float64)
+    assert spd_diagnosis(src, tgt, slopes, interior_of_node, boundary_mask) == []

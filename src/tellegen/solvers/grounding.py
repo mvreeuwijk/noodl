@@ -23,24 +23,14 @@ import torch
 Tensor = torch.Tensor
 
 
-def spd_certificate(
+def _validate(
     src: Tensor,
     tgt: Tensor,
     slopes: Tensor,
     interior_of_node: Tensor,
     boundary_mask: Tensor,
-    *,
-    atol: float = 0.0,
-) -> Tensor:
-    """(...,) bool: every interior node reaches a boundary node via strictly positive slopes.
-
-    `src`, `tgt`: (b,) LongTensors, shared across the batch (as from `Network.endpoints`).
-    `slopes`: (..., b), the per-instance, per-edge slope actually used at this solve.
-    `interior_of_node`: (n,) LongTensor, the interior-row index of every node, or a negative
-    sentinel for a boundary node. `boundary_mask`: (n,) bool, True at every boundary node.
-    `atol`: a slope must strictly exceed this to count as active; `atol=0.0` is the
-    mathematical "strictly positive" condition.
-    """
+) -> None:
+    """Shared argument validation for `spd_certificate` and `spd_diagnosis`."""
     if src.ndim != 1 or tgt.ndim != 1:
         raise ValueError(
             f"src and tgt must be 1-D LongTensors, got shapes {tuple(src.shape)} and "
@@ -69,16 +59,35 @@ def spd_certificate(
             f"slopes has {slopes.shape[-1]} edges in its last dimension but src/tgt have {b}"
         )
 
+
+def _grounded(
+    src: Tensor,
+    tgt: Tensor,
+    slopes: Tensor,
+    interior_of_node: Tensor,
+    boundary_mask: Tensor,
+    *,
+    atol: float = 0.0,
+) -> Tensor:
+    """(..., n) bool: every node's grounded status, by label propagation over active edges.
+
+    Assumes `_validate` has already been called. A node is grounded if it is a boundary node,
+    or reachable from one through a chain of edges each with slope strictly greater than
+    `atol` (an active edge connects its endpoints undirected).
+    """
+    n = interior_of_node.shape[0]
+    b = src.shape[0]
     batch_shape = slopes.shape[:-1]
     device = slopes.device
     interior_mask = interior_of_node >= 0
 
     if not bool(interior_mask.any()):
-        # No interior nodes: nothing needs grounding, so the certificate holds vacuously.
-        return torch.ones(batch_shape, dtype=torch.bool, device=device)
+        # No interior nodes: nothing needs grounding; the caller's all(dim=-1) over an empty
+        # interior selection is vacuously True regardless of this mask's actual values.
+        return boundary_mask.to(device=device).expand(batch_shape + (n,))
     if not bool(boundary_mask.any()):
         # No boundary nodes at all: no interior node can reach one.
-        return torch.zeros(batch_shape, dtype=torch.bool, device=device)
+        return torch.zeros(batch_shape + (n,), dtype=torch.bool, device=device)
 
     grounded = boundary_mask.to(device=device).expand(batch_shape + (n,)).clone()
     active = slopes > atol
@@ -99,4 +108,70 @@ def spd_certificate(
             break
         grounded = updated
 
+    return grounded
+
+
+def spd_certificate(
+    src: Tensor,
+    tgt: Tensor,
+    slopes: Tensor,
+    interior_of_node: Tensor,
+    boundary_mask: Tensor,
+    *,
+    atol: float = 0.0,
+) -> Tensor:
+    """(...,) bool: every interior node reaches a boundary node via strictly positive slopes.
+
+    `src`, `tgt`: (b,) LongTensors, shared across the batch (as from `Network.endpoints`).
+    `slopes`: (..., b), the per-instance, per-edge slope actually used at this solve.
+    `interior_of_node`: (n,) LongTensor, the interior-row index of every node, or a negative
+    sentinel for a boundary node. `boundary_mask`: (n,) bool, True at every boundary node.
+    `atol`: a slope must strictly exceed this to count as active; `atol=0.0` is the
+    mathematical "strictly positive" condition.
+    """
+    _validate(src, tgt, slopes, interior_of_node, boundary_mask)
+    interior_mask = interior_of_node >= 0
+    grounded = _grounded(src, tgt, slopes, interior_of_node, boundary_mask, atol=atol)
     return grounded[..., interior_mask].all(dim=-1)
+
+
+def spd_diagnosis(
+    src: Tensor,
+    tgt: Tensor,
+    slopes: Tensor,
+    interior_of_node: Tensor,
+    boundary_mask: Tensor,
+    *,
+    atol: float = 0.0,
+) -> list[dict]:
+    """Per FAILING instance (flat batch index), in ascending instance order:
+        {"instance": int,
+         "reason": "negative_slope" | "ungrounded",
+         "edges": list[int],   # edge indices with slope < 0 in this instance (may be empty)
+         "nodes": list[int]}   # NODE indices (not interior rows) of ungrounded interior nodes
+    reason is "negative_slope" if any edge has slope < 0, else "ungrounded". Both lists are
+    always present. Called ONLY on the failure path; a Python loop over failing instances is
+    acceptable here and nowhere else in grounding.py.
+    """
+    _validate(src, tgt, slopes, interior_of_node, boundary_mask)
+    interior_mask = interior_of_node >= 0
+    node_indices = torch.arange(interior_of_node.shape[0])
+
+    grounded = _grounded(src, tgt, slopes, interior_of_node, boundary_mask, atol=atol)
+    certified = grounded[..., interior_mask].all(dim=-1)
+    failing = ~certified
+
+    b = src.shape[0]
+    flat_slopes = slopes.reshape(-1, b)
+    flat_grounded = grounded.reshape(-1, grounded.shape[-1])
+    flat_failing = failing.reshape(-1)
+
+    records = []
+    for idx in torch.nonzero(flat_failing, as_tuple=False).flatten().tolist():
+        inst_slopes = flat_slopes[idx]
+        edges = torch.nonzero(inst_slopes < 0, as_tuple=False).flatten().tolist()
+        reason = "negative_slope" if edges else "ungrounded"
+        inst_grounded = flat_grounded[idx]
+        nodes = node_indices[interior_mask & ~inst_grounded].tolist()
+        records.append({"instance": idx, "reason": reason, "edges": edges, "nodes": nodes})
+    return records
