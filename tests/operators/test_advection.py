@@ -161,3 +161,33 @@ def test_matvec_and_rmatvec_genuinely_differ_on_the_same_vector():
     )
     x = torch.tensor([12.0, -4.0], dtype=torch.float64)
     assert not torch.allclose(op.matvec(x), op.rmatvec(x), rtol=1e-6, atol=1e-8)
+
+
+def test_matvec_with_conduction_matches_dense():
+    net = Network(dtype=torch.float64)
+    net.add_node("Tb")
+    net.add_node("T1")
+    net.add_node("T2")
+    net.add_edge("T1", "Tb", kind="conduction")
+    net.add_edge("T2", "T1", kind="conduction")
+    layer = TransportLayer(
+        net, "heat", capacity=torch.tensor([1000.0, 500.0], dtype=torch.float64),
+        flow_kind="conduction", boundary=["Tb"], conduction_kind="conduction",
+        conductance=torch.tensor([5.0, 3.0], dtype=torch.float64),
+    )
+    q = torch.zeros(2, dtype=torch.float64)
+    M, _ = layer.operator(q)
+
+    csrc, ctgt = net.endpoints("conduction")
+    src, tgt = net.endpoints("conduction")  # flow_kind == conduction_kind here
+    interior_of_node = _interior_of_node(net, ["Tb"])
+    op = AdvectionOperator(
+        src, tgt, flow=layer.carrier.to(q.dtype) * q, transmission=layer.transmission,
+        capacity=layer.capacity, n_interior=layer.n_i, interior_of_node=interior_of_node,
+        conduction=(csrc, ctgt, torch.tensor([5.0, 3.0], dtype=torch.float64)),
+    )
+    x = torch.tensor([20.0, -6.0], dtype=torch.float64)
+    torch.testing.assert_close(op.matvec(x), M @ x, rtol=1e-9, atol=1e-12)
+
+    y = torch.tensor([3.0, 1.0], dtype=torch.float64)
+    torch.testing.assert_close(op.rmatvec(y), M.transpose(-1, -2) @ y, rtol=1e-9, atol=1e-12)
