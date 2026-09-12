@@ -5,6 +5,8 @@ test_transport.py` is untouched and re-verifies the dense/analytic behaviour on
 its own.
 """
 
+import math
+
 import pytest
 import torch
 from torch.autograd import gradcheck
@@ -534,3 +536,61 @@ def test_exact_scheme_preserves_positivity_sparse_path():
     for _ in range(20):
         c = layer.step(c, q, source, c_out, 300.0)
         assert torch.all(c >= 0.0)
+
+
+def test_error_control_triggers_substepping_on_a_stiff_case():
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1.0]), flow_kind="airpath", boundary=["ambient"],
+        removal=torch.tensor([500.0], dtype=torch.float64),  # dt * rate will be huge
+    )
+    q = torch.zeros(2, dtype=torch.float64)
+    x0 = torch.tensor([10.0], dtype=torch.float64)
+    xb = torch.tensor([0.0], dtype=torch.float64)
+    sources = torch.zeros(1, dtype=torch.float64)
+    dt = 50.0  # dt * rate = 25000: far past the Taylor series' single-step radius
+
+    op = layer._advection_operator(q)
+    M, N = layer.operator(q)
+    b0 = (N @ xb.unsqueeze(-1)).squeeze(-1) + sources / layer.capacity
+    sparse, substeps = _expm_action(op, x0, b0, dt)
+    assert substeps > 1
+
+    expected = x0 * math.exp(-500.0 * dt)
+    torch.testing.assert_close(sparse, expected, rtol=1e-6, atol=1e-9)
+
+
+def test_error_control_raises_naming_instances_when_max_substeps_exceeded():
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1.0]), flow_kind="airpath", boundary=["ambient"],
+        removal=torch.tensor([1e6], dtype=torch.float64),
+    )
+    q = torch.zeros(2, dtype=torch.float64)
+    x0 = torch.tensor([10.0], dtype=torch.float64)
+    xb = torch.tensor([0.0], dtype=torch.float64)
+    sources = torch.zeros(1, dtype=torch.float64)
+    op = layer._advection_operator(q)
+    M, N = layer.operator(q)
+    b0 = (N @ xb.unsqueeze(-1)).squeeze(-1) + sources / layer.capacity
+    with pytest.raises(RuntimeError, match="failed to converge"):
+        _expm_action(op, x0, b0, dt=1e9, max_substeps=3)
+
+
+def test_gradcheck_expm_action_wrt_x_flow_sources_boundary():
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath", boundary=["ambient"]
+    )
+    x0 = torch.tensor([150.0], dtype=torch.float64, requires_grad=True)
+    q = torch.tensor([0.4, 0.4], dtype=torch.float64, requires_grad=True)
+    sources = torch.tensor([1.0], dtype=torch.float64, requires_grad=True)
+    x_b = torch.tensor([420.0], dtype=torch.float64, requires_grad=True)
+
+    def f(x, q, sources, x_b):
+        op = layer._advection_operator(q)
+        b0 = op.boundary_forcing(x_b) + sources / layer.capacity
+        result, _ = _expm_action(op, x, b0, 300.0)
+        return result
+
+    assert gradcheck(f, (x0, q, sources, x_b), eps=1e-6, atol=1e-5)
