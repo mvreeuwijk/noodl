@@ -431,8 +431,12 @@ fall.
 
 **What would break the adjoint.** Nothing structural: `implicit_solve` only needs
 `jacobian(x, *params)` to return something `adjoint()` can solve against, and `adjoint()`
-is just `torch.linalg.solve(J.T, grad_x)` — swapping that call for matrix-free CG (same
-matvec as forward) is like-for-like. The one real risk: `linear.py`'s `floating_nodes`
+is just `torch.linalg.solve(J.T, grad_x)`. An earlier draft called swapping that call for
+matrix-free CG "like-for-like"; that was too simple, and the milestone 1b design corrects it.
+Three reasons: the Newton update, the linear initialisation and the backward solve all consume
+the same dense `J` and must migrate TOGETHER; the forward matvec may serve as the transpose
+only where the operator is symmetric, which transport is not; and CG requires positive
+definiteness, which symmetry alone does not establish. The one real risk: `linear.py`'s `floating_nodes`
 diagnostic inspects `J`'s dense rows to name disconnected nodes; with no formed `J` it
 must move to the edge-index level, where `_floating_group_nodes` in `potential.py`
 partially does this today — though as section 3(a) notes, that check is narrower than a
