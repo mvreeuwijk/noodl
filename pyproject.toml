@@ -17,13 +17,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.5", "hypothesis>=6"]
+dev = ["pytest>=8", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--cov=tellegen --cov-report=term-missing --cov-fail-under=90 -m \"not slow\""
+markers = [
+    "slow: marks tests as slow (excluded by default; run with -m slow to include them)",
+]
+
+[tool.coverage.run]
+source = ["tellegen"]
 
 [tool.ruff]
 line-length = 100
