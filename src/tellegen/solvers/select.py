@@ -1,10 +1,15 @@
 """method="auto" eligibility resolution (design section 3.1) and the raise/return failure
-boundary (design section 3.2), on top of solvers.iterative's pcg and gmres.
+boundary (design section 3.2), on top of solvers.iterative's pcg and gmres, plus the retained
+dense LU reference (`method="direct"`, amendment A3.1).
 
-solvers.iterative.pcg/gmres never raise; this is the one layer where a failed solve becomes
-an exception by default. `on_failure="return"` is the explicit, narrow, non-default escape
-hatch (never applies to a backward pass -- Task 12 always raises unconditionally there,
-bypassing this function's on_failure entirely).
+solvers.iterative.pcg/gmres never raise; this is the one layer where a failed NUMERICAL solve
+becomes an exception by default. `on_failure="return"` is the explicit, narrow, non-default
+escape hatch for that numerical-failure case only (never applies to a backward pass -- Task 12
+always raises unconditionally there, bypassing this function's on_failure entirely). It does
+NOT apply to an eligibility refusal: requesting `method="cg"` on an operator that cannot
+certify SPD, or letting `method="auto"` see a batch where some but not all instances certify,
+is a contract violation and raises regardless of `on_failure` -- there is no SolveResult to
+return in that case, only a modelling error to report.
 """
 
 from __future__ import annotations
@@ -73,6 +78,10 @@ def _direct(A: Tensor, b: Tensor) -> SolveResult:
     )
 
 
+_METHODS = ("auto", "cg", "gmres", "direct")
+_ON_FAILURE = ("raise", "return")
+
+
 def solve(
     op,
     b: Tensor,
@@ -80,15 +89,28 @@ def solve(
     method: str = "auto",
     on_failure: str = "raise",
     where: str = "solve",
-    **kw,
+    rtol: float = 1e-10,
+    atol: float = 0.0,
+    max_iter: int | None = None,
+    x0: Tensor | None = None,
+    preconditioner: str | None = "jacobi",
+    restart: int = 30,
 ) -> SolveResult:
-    if method not in ("auto", "cg", "gmres", "direct"):
+    """Resolve `method="auto"` per the eligibility table (see the module docstring), or honour
+    an explicit method, then apply the raise/return boundary on the NUMERICAL outcome.
+
+    Accepts the explicit union of backend keyword arguments -- `rtol`, `atol`, `max_iter`,
+    `x0` (both pcg and gmres), `preconditioner` (pcg only), `restart` (gmres only) -- and
+    forwards to the chosen backend only the ones it accepts, silently dropping the rest (no
+    `**kw`: a reviewer found `solve(op_nonsym, b, preconditioner="jacobi")` raising `TypeError`
+    from gmres before this signature was made explicit). `method="direct"` accepts and ignores
+    all of them.
+    """
+    if method not in _METHODS:
+        raise ValueError(f"{where}: unknown method {method!r}; expected one of {_METHODS}")
+    if on_failure not in _ON_FAILURE:
         raise ValueError(
-            f"{where}: unknown method {method!r}; expected 'auto', 'cg', 'gmres' or 'direct'"
-        )
-    if on_failure not in ("raise", "return"):
-        raise ValueError(
-            f"{where}: unknown on_failure {on_failure!r}; expected 'raise' or 'return'"
+            f"{where}: unknown on_failure {on_failure!r}; expected one of {_ON_FAILURE}"
         )
 
     if method == "cg":
@@ -105,9 +127,11 @@ def solve(
                 f"{_describe_uncertified(op, cert, where)}; refusing rather than returning a "
                 f"plausible wrong answer."
             )
-        result = pcg(op, b, **kw)
+        result = pcg(
+            op, b, rtol=rtol, atol=atol, max_iter=max_iter, preconditioner=preconditioner, x0=x0
+        )
     elif method == "gmres":
-        result = gmres(op, b, **kw)
+        result = gmres(op, b, rtol=rtol, atol=atol, max_iter=max_iter, restart=restart, x0=x0)
     elif method == "direct":
         A = op.assemble()
         if A is None:
@@ -122,13 +146,21 @@ def solve(
                 f"Certify all instances, or pass an explicit method."
             )
         if cert is not None and bool(torch.all(cert)):
-            result = pcg(op, b, **kw)
+            result = pcg(
+                op,
+                b,
+                rtol=rtol,
+                atol=atol,
+                max_iter=max_iter,
+                preconditioner=preconditioner,
+                x0=x0,
+            )
         else:
             # cert is None (cannot certify at all) or cert is uniformly False (no instance
             # is eligible for cg, so there is nothing to split off): both route to gmres,
             # which makes no symmetry or SPD assumption to violate. rmatvec, if this
             # operator declares one, is reserved for the adjoint and is never called here.
-            result = gmres(op, b, **kw)
+            result = gmres(op, b, rtol=rtol, atol=atol, max_iter=max_iter, restart=restart, x0=x0)
 
     if on_failure == "raise":
         return result.raise_on_failure(where)

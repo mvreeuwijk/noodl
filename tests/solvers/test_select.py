@@ -330,6 +330,75 @@ def test_direct_is_not_selected_by_auto(monkeypatch):
     assert gmres_calls["count"] == 0
 
 
+# -- A3.2: explicit kwarg forwarding and on_failure applying only to numerical failure --------
+
+
+def test_solve_forwards_preconditioner_to_pcg_only():
+    op = _FakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    result = solve(op, _B_SPD, method="cg", preconditioner=None)
+    x_ref = torch.linalg.solve(_A_SPD, _B_SPD)
+    torch.testing.assert_close(result.x, x_ref, atol=1e-8, rtol=1e-8)
+
+
+def test_solve_drops_preconditioner_kwarg_when_gmres_is_selected():
+    # A reviewer confirmed solve(op_nonsym, b, preconditioner="jacobi") used to raise TypeError
+    # from gmres, which does not accept that kwarg. solve must silently drop it instead.
+    op = _FakeOperator(_A_NS, symmetric=False, certificate=None)
+    result = solve(op, _B_NS, preconditioner="jacobi")
+    x_ref = torch.linalg.solve(_A_NS, _B_NS)
+    torch.testing.assert_close(result.x, x_ref, atol=1e-6, rtol=1e-6)
+
+
+def test_solve_drops_restart_kwarg_when_pcg_is_selected():
+    op = _FakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    result = solve(op, _B_SPD, method="cg", restart=5)
+    x_ref = torch.linalg.solve(_A_SPD, _B_SPD)
+    torch.testing.assert_close(result.x, x_ref, atol=1e-8, rtol=1e-8)
+
+
+def test_direct_accepts_and_ignores_every_kwarg():
+    op = _FakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(False))
+    result = solve(
+        op,
+        _B_SPD,
+        method="direct",
+        rtol=1e-3,
+        atol=1e-3,
+        max_iter=1,
+        x0=torch.zeros(2),
+        preconditioner="jacobi",
+        restart=1,
+    )
+    x_ref = torch.linalg.solve(_A_SPD, _B_SPD)
+    torch.testing.assert_close(result.x, x_ref, atol=1e-8, rtol=1e-8)
+
+
+def test_on_failure_return_does_not_suppress_an_eligibility_refusal():
+    # on_failure applies to NUMERICAL failure only; an eligibility refusal is a contract
+    # violation and raises regardless of on_failure.
+    op = _FakeOperator(_A_NS, symmetric=False, certificate=torch.tensor(False))
+    with pytest_raises_containing("cg"):
+        solve(op, _B_NS, method="cg", on_failure="return")
+
+
+def test_unknown_method_raises_valueerror():
+    op = _FakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    try:
+        solve(op, _B_SPD, method="bogus")
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "bogus" in str(exc)
+
+
+def test_unknown_on_failure_raises_valueerror():
+    op = _FakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    try:
+        solve(op, _B_SPD, on_failure="bogus")
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "bogus" in str(exc)
+
+
 class pytest_raises_containing:
     """Small local helper: assert a RuntimeError is raised whose message contains `text`
     (case-sensitive substring), without pulling in a separate `pytest.raises(match=...)`
