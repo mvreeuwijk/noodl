@@ -418,3 +418,87 @@ def test_expm_action_matches_dense_matrix_exp_small_dt():
     sparse, substeps = _expm_action(op, x0, b0, dt)
     assert substeps == 1  # this problem is not stiff at dt=30
     torch.testing.assert_close(sparse, dense, rtol=1e-9, atol=1e-12)
+
+
+def test_expm_action_matches_dense_zero_flow_singular_M():
+    net = flow_through_zone()
+    cap = torch.tensor([1000.0], dtype=torch.float64)
+    layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"])
+    q = torch.zeros(2, dtype=torch.float64)  # M is exactly the zero matrix here
+    x0 = torch.tensor([100.0], dtype=torch.float64)
+    xb = torch.tensor([420.0], dtype=torch.float64)
+    sources = torch.tensor([3.0], dtype=torch.float64)
+    dt = 500.0
+
+    M, N = layer.operator(q)
+    b0 = (N @ xb.unsqueeze(-1)).squeeze(-1) + sources / cap
+    dense = _van_loan_step_dense(M, x0, b0, dt)
+    op = layer._advection_operator(q)
+    sparse, _ = _expm_action(op, x0, b0, dt)
+    torch.testing.assert_close(sparse, dense, rtol=1e-9, atol=1e-12)
+    # zero flow, zero M: x should simply grow linearly in dt from the constant source term
+    torch.testing.assert_close(sparse, x0 + dt * b0, rtol=1e-9, atol=1e-12)
+
+
+def test_expm_action_matches_dense_large_dt():
+    net = flow_through_zone()
+    cap = torch.tensor([1000.0], dtype=torch.float64)
+    layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"])
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    x0 = torch.tensor([100.0], dtype=torch.float64)
+    xb = torch.tensor([420.0], dtype=torch.float64)
+    sources = torch.tensor([2.0], dtype=torch.float64)
+    dt = 1e6
+
+    M, N = layer.operator(q)
+    b0 = (N @ xb.unsqueeze(-1)).squeeze(-1) + sources / cap
+    dense = _van_loan_step_dense(M, x0, b0, dt)
+    op = layer._advection_operator(q)
+    sparse, substeps = _expm_action(op, x0, b0, dt)
+    assert substeps > 1
+    torch.testing.assert_close(sparse, dense, rtol=1e-9, atol=1e-12)
+
+
+def test_expm_action_matches_dense_three_species_kinetics():
+    net = flow_through_zone()
+    cap = torch.tensor([1000.0], dtype=torch.float64)
+    l1, l2 = 0.01, 0.02
+    kinetics = torch.zeros(3, 3, dtype=torch.float64)
+    kinetics[0, 0] = -l1
+    kinetics[1, 0] = l1
+    kinetics[1, 1] = -l2
+    kinetics[2, 1] = l2
+    layer = TransportLayer(
+        net, "chain", capacity=cap, flow_kind="airpath", boundary=["ambient"], n_species=3,
+        kinetics=kinetics,
+    )
+    q = torch.zeros(2, dtype=torch.float64)
+    x0 = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float64)
+    xb = torch.zeros(3, dtype=torch.float64)
+    sources = torch.zeros(3, dtype=torch.float64)
+    dt = 200.0
+
+    M, N = layer.operator(q)
+    b0 = (N @ xb.unsqueeze(-1)).squeeze(-1) + sources / layer._capacity_stacked(torch.float64)
+    dense = _van_loan_step_dense(M, x0, b0, dt)
+    op = layer._advection_operator(q)
+    sparse, _ = _expm_action(op, x0, b0, dt)
+    torch.testing.assert_close(sparse, dense, rtol=1e-9, atol=1e-12)
+
+
+def test_expm_action_flow_reversal_matches_dense():
+    net = flow_through_zone()
+    cap = torch.tensor([1000.0], dtype=torch.float64)
+    layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"])
+    x0 = torch.tensor([100.0], dtype=torch.float64)
+    xb = torch.tensor([420.0], dtype=torch.float64)
+    sources = torch.zeros(1, dtype=torch.float64)
+    dt = 300.0
+    for q in (torch.tensor([0.5, 0.5], dtype=torch.float64),
+              torch.tensor([-0.5, -0.5], dtype=torch.float64)):
+        M, N = layer.operator(q)
+        b0 = (N @ xb.unsqueeze(-1)).squeeze(-1) + sources / cap
+        dense = _van_loan_step_dense(M, x0, b0, dt)
+        op = layer._advection_operator(q)
+        sparse, _ = _expm_action(op, x0, b0, dt)
+        torch.testing.assert_close(sparse, dense, rtol=1e-9, atol=1e-12)
