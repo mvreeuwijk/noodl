@@ -290,3 +290,38 @@ def test_fan_curve_loop_single_instance():
         q[net.edge_index("airpath")[0]], torch.tensor(q_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6
     )
     assert 0.0 < q_ref < q_max
+
+
+def test_fan_curve_loop_batched():
+    torch.manual_seed(0)
+    m = 64
+    # Every parameter below carries an explicit trailing width-1 edge axis ((m, 1) rather
+    # than (m,)): both FanCurve (1 fan edge) and PowerLaw (1 airpath edge) here represent a
+    # SINGLE edge each, and the layer's per-element dp slice for a width-1 block keeps that
+    # trailing dim (shape (m, 1), not (m,)), per the shape convention documented on
+    # PowerLaw/FanCurve. The brief's original draft used bare (m,) tensors throughout, which
+    # broadcasts a (m,) parameter against a (m, 1) dp slice as (m, m) instead of (m, 1)
+    # (RuntimeError: size of tensor a (128) must match size of tensor b (2), from the (m, m)
+    # shape silently doubling the edge axis during linear_init's concatenation).
+    a0 = 100.0 + 100.0 * torch.rand(m, 1, dtype=DTYPE)
+    a1 = -150.0 - 50.0 * torch.rand(m, 1, dtype=DTYPE)
+    a2 = -100.0 - 50.0 * torch.rand(m, 1, dtype=DTYPE)
+    a3 = 20.0 + 30.0 * torch.rand(m, 1, dtype=DTYPE)
+    q_max = torch.full((m, 1), 1.0, dtype=DTYPE)
+    C = 0.02 + 0.06 * torch.rand(m, 1, dtype=DTYPE)
+    n = 0.4 + 0.3 * torch.rand(m, 1, dtype=DTYPE)
+
+    net, layer = _fan_curve_layer(a0, a1, a2, a3, q_max, C, n)
+    phi_boundary = torch.zeros(m, 1, dtype=DTYPE)
+    phi, q = layer.solve(phi_boundary, differentiable=False)
+
+    q_ref = torch.empty(m, dtype=DTYPE)
+    for i in range(m):
+        q_ref[i] = _fan_curve_reference_q(
+            a0[i].item(), a1[i].item(), a2[i].item(), a3[i].item(),
+            q_max[i].item(), C[i].item(), n[i].item(),
+        )
+    fan_col = net.edge_index("fan")[0]
+    leak_col = net.edge_index("airpath")[0]
+    torch.testing.assert_close(q[:, fan_col], q_ref, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(q[:, leak_col], q_ref, atol=1e-6, rtol=1e-6)
