@@ -31,6 +31,9 @@ def pcg(
     once either fires, that instance's x/r/p are never updated again, matching newton()'s own
     per-instance freezing convention exactly.
     """
+    if max_iter is not None and max_iter < 1:
+        raise ValueError(f"pcg: max_iter must be >= 1 when given, got {max_iter!r}")
+
     m = op.shape[-1]
     batch_shape = torch.broadcast_shapes(op.shape[:-2], b.shape[:-1])
     dtype, device = b.dtype, b.device
@@ -124,6 +127,11 @@ def gmres(
     per-instance state that is far simpler to index with one flat batch axis than with
     arbitrary leading dims, unlike pcg's per-element vector ops which need no such reshape.
     """
+    if restart < 1:
+        raise ValueError(f"gmres: restart must be >= 1, got {restart!r}")
+    if max_iter is not None and max_iter < 1:
+        raise ValueError(f"gmres: max_iter must be >= 1 when given, got {max_iter!r}")
+
     m = op.shape[-1]
     batch_shape = torch.broadcast_shapes(op.shape[:-2], b.shape[:-1])
     dtype, device = b.dtype, b.device

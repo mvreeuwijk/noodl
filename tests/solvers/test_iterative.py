@@ -261,3 +261,31 @@ def test_gmres_happy_breakdown_identity_system():
     assert bool(result.converged)
     assert int(result.status) == int(SolverStatus.CONVERGED)
     assert int(result.iterations) == 1
+
+
+def test_gmres_rejects_restart_below_one():
+    # gmres must reject restart < 1 with ValueError (not silently return status=MAX_ITER).
+    A = torch.tensor([[3.0, 1.0], [0.5, 2.0]])
+    b = torch.tensor([1.0, 2.0])
+    op = DenseOperator(A, symmetric=False)
+    with pytest.raises(ValueError, match="restart"):
+        gmres(op, b, restart=0)
+
+
+def test_gmres_rejects_max_iter_below_one():
+    # gmres must reject max_iter < 1 when explicitly given with ValueError.
+    A = torch.tensor([[3.0, 1.0], [0.5, 2.0]])
+    b = torch.tensor([1.0, 2.0])
+    op = DenseOperator(A, symmetric=False)
+    with pytest.raises(ValueError, match="max_iter"):
+        gmres(op, b, max_iter=0)
+
+
+def test_pcg_rejects_max_iter_below_one():
+    # pcg must reject max_iter < 1 when explicitly given with ValueError (for consistency
+    # with gmres).
+    A = torch.tensor([[4.0, 1.0], [1.0, 3.0]])
+    b = torch.tensor([1.0, 2.0])
+    op = DenseOperator(A, symmetric=True)
+    with pytest.raises(ValueError, match="max_iter"):
+        pcg(op, b, max_iter=0)
