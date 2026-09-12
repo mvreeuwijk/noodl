@@ -167,3 +167,39 @@ def test_parallel_combination_batched():
         q.sum(dim=-1), (C1 + C2) * torch.sign(Dp) * Dp.abs() ** n_flat, atol=1e-6, rtol=1e-6
     )
     torch.testing.assert_close(q[:, 0] / q[:, 1], C1 / C2, atol=1e-6, rtol=1e-6)
+
+
+def _fan_driven_layer(
+    C1: torch.Tensor, C2: torch.Tensor, n: torch.Tensor, q_fan: torch.Tensor
+) -> tuple[Network, PotentialFlowLayer]:
+    """Zone with two leakage paths to ambient plus a FixedFlow exhaust to ambient."""
+    net = Network(dtype=DTYPE)
+    net.add_node("zone")
+    net.add_node("ambient")
+    net.add_edge("zone", "ambient", kind="airpath")
+    net.add_edge("zone", "ambient", kind="airpath")
+    net.add_edge("zone", "ambient", kind="fan")
+    leak = PowerLaw(torch.stack([C1, C2], dim=-1), n, dp_transition=1e-6)
+    fan = FixedFlow(q_fan, kind="fan")
+    layer = PotentialFlowLayer(net, "fan_driven", [leak, fan], boundary=["ambient"])
+    return net, layer
+
+
+def test_fan_driven_zone_pressure_single_instance():
+    C1 = torch.tensor(0.020, dtype=DTYPE)
+    C2 = torch.tensor(0.010, dtype=DTYPE)
+    n = torch.tensor(0.65, dtype=DTYPE)
+    q_fan = torch.tensor(0.05, dtype=DTYPE)
+
+    net, layer = _fan_driven_layer(C1, C2, n, q_fan)
+    phi_boundary = torch.zeros(1, dtype=DTYPE)
+    phi, q = layer.solve(phi_boundary, differentiable=False)
+
+    p_ref = -((q_fan / (C1 + C2)) ** (1.0 / n))
+    torch.testing.assert_close(phi[net.node_index("zone")], p_ref, atol=1e-6, rtol=1e-6)
+
+    # atol=1e-9 matches newton()'s own default convergence tolerance (atol=1e-9, rtol=1e-9);
+    # the brief's original draft used atol=1e-10, tighter than the solver's guaranteed
+    # accuracy, and failed deterministically here (observed residual ~2.09e-10).
+    residual = layer.residual(phi[..., layer.interior], phi_boundary, {}, None)
+    torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-9, rtol=0.0)
