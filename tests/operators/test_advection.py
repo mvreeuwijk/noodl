@@ -268,3 +268,37 @@ def test_diagonal_matches_dense_M_diagonal():
     torch.testing.assert_close(
         op.diagonal(), torch.diagonal(M, dim1=-2, dim2=-1), rtol=1e-9, atol=1e-12
     )
+
+
+def test_assemble_matches_dense_transport_operator():
+    net = three_node_chain()
+    cap = torch.tensor([50.0, 80.0], dtype=torch.float64)
+    layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"])
+    q = torch.tensor([0.3, -0.2, 0.25], dtype=torch.float64)
+    M, _ = layer.operator(q)
+    src, tgt = net.endpoints("airpath")
+    op = AdvectionOperator(
+        src, tgt, flow=layer.carrier.to(q.dtype) * q, transmission=layer.transmission,
+        capacity=cap, n_interior=layer.n_i, interior_of_node=_interior_of_node(net, ["ambient"]),
+    )
+    torch.testing.assert_close(op.assemble(), M, rtol=1e-9, atol=1e-12)
+
+
+def test_symmetric_is_false_and_spd_certificate_is_none():
+    net = flow_through_zone()
+    cap = torch.tensor([1000.0], dtype=torch.float64)
+    layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"])
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    src, tgt = net.endpoints("airpath")
+    op = AdvectionOperator(
+        src, tgt, flow=layer.carrier.to(q.dtype) * q, transmission=layer.transmission,
+        capacity=cap, n_interior=layer.n_i, interior_of_node=_interior_of_node(net, ["ambient"]),
+    )
+    assert op.symmetric is False
+    assert op.spd_certificate() is None
+    # n_interior=1 (only "Z" is interior; "ambient" is the sole boundary node) and
+    # n_species=1 (default single-species transmission), so m = n_interior * n_species = 1;
+    # this is not b_flow (2 edges) -- shape is (m, m), matching M from
+    # TransportLayer.operator(q), not the edge count.
+    assert op.shape == (1, 1)
+    assert op.dtype == torch.float64

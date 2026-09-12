@@ -203,7 +203,41 @@ class AdvectionOperator:
         return diag_i.reshape(*diag_i.shape[:-2], K * n_i)
 
     def assemble(self) -> torch.Tensor:
-        raise NotImplementedError  # Step 6
+        K, n_i, n = self.n_species, self.n_interior, self._n
+        dtype = self.flow.dtype
+        flow = self.flow.to(dtype)
+        batch_shape = torch.broadcast_shapes(
+            flow.shape[:-1], self.transmission.shape[:-2], self.capacity.shape[:-1]
+        )
+        eye_n = torch.eye(n, dtype=dtype, device=flow.device)
+        up = torch.where(flow >= 0, self._src, self._tgt)
+        down = torch.where(flow >= 0, self._tgt, self._src)
+        Up = eye_n[up]      # (..., b, n) one-hot
+        Dn = eye_n[down]    # (..., b, n) one-hot
+        w = flow.abs()
+        Out = torch.einsum("...ei,...e,...ej->...ij", Up, w, Up)
+        weight = self.transmission.to(dtype) * w.unsqueeze(-2)     # (..., K, b)
+        In = torch.einsum("...ei,...ke,...ej->...kij", Dn, weight, Up)
+        L = torch.zeros(n, n, dtype=dtype, device=flow.device)
+        if self.conduction is not None:
+            csrc, ctgt, g = self.conduction
+            A_c = torch.zeros(n, csrc.shape[-1], dtype=dtype, device=flow.device)
+            A_c[csrc, torch.arange(csrc.shape[-1])] += 1
+            A_c[ctgt, torch.arange(ctgt.shape[-1])] -= 1
+            L = torch.einsum("nc,...c,mc->...nm", A_c, g.to(dtype), A_c)
+        G = In - Out.unsqueeze(-3) - L.unsqueeze(-3) if L.dim() > 2 else \
+            In - Out.unsqueeze(-3) - L.expand(n, n).unsqueeze(-3)
+        Gii = G.index_select(-2, self._interior_idx).index_select(-1, self._interior_idx)
+        cap = self.capacity.to(dtype).unsqueeze(-2).unsqueeze(-1)
+        Gii = Gii / cap
+        if self.removal is not None:
+            Gii = Gii - torch.diag_embed(self.removal.to(dtype).transpose(-1, -2))
+        eyeK = torch.eye(K, dtype=dtype, device=flow.device)
+        M_block = torch.einsum("kl,...kij->...kilj", eyeK, Gii)
+        if self.kinetics is not None:
+            eye_i = torch.eye(n_i, dtype=dtype, device=flow.device)
+            M_block = M_block + torch.einsum("ikl,ij->kilj", self.kinetics.to(dtype), eye_i)
+        return M_block.reshape(*batch_shape, K * n_i, K * n_i)
 
     def spd_certificate(self):
         return None
