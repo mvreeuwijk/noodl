@@ -280,3 +280,42 @@ def test_backward_memory_independent_of_solver_iterations():
     )
     assert bytes_tight == bytes_loose
     assert bytes_unrolled_tight > bytes_unrolled_loose
+
+
+def test_implicit_step_sparse_matches_dense_oracle():
+    net = flow_through_zone()
+    cap = torch.tensor([1000.0], dtype=torch.float64)
+    layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath",
+                            boundary=["ambient"], scheme="implicit")
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    c0 = torch.tensor([100.0], dtype=torch.float64)
+    source = torch.tensor([2.0], dtype=torch.float64)
+    c_out = torch.tensor([420.0], dtype=torch.float64)
+    dt = 200.0
+
+    x_sparse = layer.step(c0, q, source, c_out, dt)
+
+    M, N = layer.operator(q)
+    b0 = (N @ c_out.unsqueeze(-1)).squeeze(-1) + source / cap
+    m = M.shape[-1]
+    eye = torch.eye(m, dtype=torch.float64)
+    rhs = c0 + dt * b0
+    x_dense = torch.linalg.solve(eye - dt * M, rhs.unsqueeze(-1)).squeeze(-1)
+    torch.testing.assert_close(x_sparse, x_dense, rtol=1e-9, atol=1e-12)
+
+
+def test_gradcheck_implicit_step_wrt_x_q_sources_boundary():
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
+        boundary=["ambient"], scheme="implicit",
+    )
+    x = torch.tensor([150.0], dtype=torch.float64, requires_grad=True)
+    q = torch.tensor([0.4, 0.4], dtype=torch.float64, requires_grad=True)
+    sources = torch.tensor([1.0], dtype=torch.float64, requires_grad=True)
+    x_b = torch.tensor([420.0], dtype=torch.float64, requires_grad=True)
+
+    def f(x, q, sources, x_b):
+        return layer.step(x, q, sources, x_b, 300.0)
+
+    assert gradcheck(f, (x, q, sources, x_b), eps=1e-6, atol=1e-5)

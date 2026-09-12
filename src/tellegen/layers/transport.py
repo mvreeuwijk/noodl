@@ -137,6 +137,44 @@ def _linear_solve(build_system, where: str, *params, **solver_kwargs) -> torch.T
     return _LinearSolve.apply(build_system, where, solver_kwargs, *params)
 
 
+class _AffineSystemOperator:
+    """(I - alpha * M): built from an AdvectionOperator, satisfying the LinearOperator
+    duck type solvers.select.solve reads (matvec, rmatvec, diagonal, shape, dtype,
+    device, symmetric, assemble, spd_certificate). Used for both the implicit scheme
+    (alpha = dt) and the trapezoidal scheme (alpha = dt / 2), and passed to
+    _linear_solve exactly like a bare AdvectionOperator is for steady() -- the adjoint
+    derivation does not care what concrete operator "A" is, only that it exposes
+    matvec/rmatvec/diagonal/assemble/spd_certificate.
+    """
+
+    symmetric = False
+
+    def __init__(self, M: AdvectionOperator, alpha: float) -> None:
+        self.M = M
+        self.alpha = alpha
+        self.shape = M.shape
+        self.dtype = M.dtype
+        self.device = M.device
+
+    def matvec(self, x: torch.Tensor) -> torch.Tensor:
+        return x - self.alpha * self.M.matvec(x)
+
+    def rmatvec(self, y: torch.Tensor) -> torch.Tensor:
+        return y - self.alpha * self.M.rmatvec(y)
+
+    def diagonal(self) -> torch.Tensor:
+        return 1.0 - self.alpha * self.M.diagonal()
+
+    def assemble(self):
+        dense = self.M.assemble()
+        m = dense.shape[-1]
+        eye = torch.eye(m, dtype=dense.dtype, device=dense.device)
+        return eye - self.alpha * dense
+
+    def spd_certificate(self):
+        return None
+
+
 class TransportLayer:
     """dx/dt = M x + N x_b + sources / capacity on interior nodes."""
 
@@ -385,7 +423,8 @@ class TransportLayer:
         if self.scheme == "exact":
             result = _van_loan_step(M, x_s, b0, dt)
         elif self.scheme == "implicit":
-            result = _implicit_step(M, x_s, b0, dt, self.name)
+            result, reduced = self._implicit_step_sparse(x, q, sources, x_boundary, dt, "raise")
+            return self._from_stacked(result.to(out_dtype), self.n_i, reduced)
         elif self.scheme == "trapezoidal":
             result = _trapezoidal_step(M, x_s, b0, dt, self.name)
         else:
@@ -434,6 +473,42 @@ class TransportLayer:
         )
         return self._from_stacked(x_s, self.n_i, reduced)
 
+    def _implicit_step_sparse(
+        self, x: torch.Tensor, q: torch.Tensor, sources: torch.Tensor,
+        x_boundary: torch.Tensor, dt: float, on_failure: str,
+    ) -> torch.Tensor:
+        """Backward Euler `(I - dt M) x_{n+1} = x_n + dt b0` on the operator contract."""
+        dtype = torch.float64
+        x = x.to(dtype)
+        q = q.to(dtype)
+        sources = sources.to(dtype)
+        x_boundary = x_boundary.to(dtype)
+        _, reduced = self._to_stacked(x, self.n_i, "x")
+
+        def build_system(x_, q_, sources_, xb_):
+            op = self._advection_operator(q_)
+            xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
+            src_s, _ = self._to_stacked(sources_, self.n_i, "sources")
+            x_s, _ = self._to_stacked(x_, self.n_i, "x")
+            cap = self._capacity_stacked(dtype)
+            b0 = op.boundary_forcing(xb_s) + src_s / cap
+            rhs = x_s + dt * b0
+            system = _AffineSystemOperator(op, dt)
+            return system, rhs
+
+        if on_failure == "return":
+            system, rhs = build_system(x, q, sources, x_boundary)
+            result = _solve_operator(
+                system, rhs, method="auto", on_failure="return",
+                where=f"TransportLayer '{self.name}' implicit step",
+            )
+            return result, reduced
+        x_s = _linear_solve(
+            build_system, f"TransportLayer '{self.name}' implicit step",
+            x, q, sources, x_boundary,
+        )
+        return x_s, reduced
+
 
 def _van_loan_step(
     M: torch.Tensor, x: torch.Tensor, b0: torch.Tensor, dt: float
@@ -448,21 +523,6 @@ def _van_loan_step(
     Ed = E[..., :m, :m]
     Phi = E[..., :m, m:]
     return (Ed @ x.unsqueeze(-1)).squeeze(-1) + (Phi @ b0.unsqueeze(-1)).squeeze(-1)
-
-
-def _implicit_step(
-    M: torch.Tensor, x: torch.Tensor, b0: torch.Tensor, dt: float, name: str
-) -> torch.Tensor:
-    """Backward Euler: (I - dt M) x_{n+1} = x_n + dt b0."""
-    m = M.shape[-1]
-    eye = torch.eye(m, dtype=M.dtype).expand(*M.shape[:-2], m, m)
-    rhs = x + dt * b0
-    try:
-        return torch.linalg.solve(eye - dt * M, rhs.unsqueeze(-1)).squeeze(-1)
-    except torch.linalg.LinAlgError as err:
-        raise RuntimeError(
-            f"TransportLayer '{name}': implicit-scheme system is singular for dt={dt}: {err}"
-        ) from err
 
 
 def _trapezoidal_step(
