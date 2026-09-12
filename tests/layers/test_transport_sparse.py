@@ -10,7 +10,12 @@ import torch
 from torch.autograd import gradcheck
 
 from benchmarks.measure import saved_tensor_bytes
-from tellegen.layers.transport import TransportLayer, _linear_solve
+from tellegen.layers.transport import (
+    TransportLayer,
+    _expm_action,
+    _linear_solve,
+    _van_loan_step_dense,
+)
 from tellegen.operators.base import SolverStatus
 from tellegen.solvers.select import solve as _solve_operator
 from tellegen.topology import Network
@@ -393,3 +398,23 @@ def test_step_and_steady_reject_unknown_on_failure():
         layer.step(c0, q, source, c_out, 300.0, on_failure="bogus")
     with pytest.raises(ValueError, match="on_failure"):
         layer.steady(q, source, c_out, on_failure="bogus")
+
+
+def test_expm_action_matches_dense_matrix_exp_small_dt():
+    net = three_node_chain()
+    cap = torch.tensor([50.0, 80.0], dtype=torch.float64)
+    layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"])
+    q = torch.tensor([0.3, -0.2, 0.25], dtype=torch.float64)
+    x0 = torch.tensor([12.0, -4.0], dtype=torch.float64)
+    xb = torch.tensor([420.0], dtype=torch.float64)
+    sources = torch.zeros(2, dtype=torch.float64)
+    dt = 30.0
+
+    M, N = layer.operator(q)
+    b0 = (N @ xb.unsqueeze(-1)).squeeze(-1) + sources / cap
+    dense = _van_loan_step_dense(M, x0, b0, dt)
+
+    op = layer._advection_operator(q)
+    sparse, substeps = _expm_action(op, x0, b0, dt)
+    assert substeps == 1  # this problem is not stiff at dt=30
+    torch.testing.assert_close(sparse, dense, rtol=1e-9, atol=1e-12)

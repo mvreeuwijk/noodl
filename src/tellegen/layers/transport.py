@@ -576,10 +576,14 @@ class TransportLayer:
         return x_s, reduced
 
 
-def _van_loan_step(
+def _van_loan_step_dense(
     M: torch.Tensor, x: torch.Tensor, b0: torch.Tensor, dt: float
 ) -> torch.Tensor:
-    """Exact linear step via the augmented matrix exponential (Van Loan, 1978)."""
+    """Exact linear step via the augmented matrix exponential (Van Loan, 1978).
+
+    Retained as the O(m^2) dense ORACLE for tests and for the small-system path; the
+    operational path is `_expm_action`, which never forms this (2m, 2m) block.
+    """
     m = M.shape[-1]
     batch = M.shape[:-2]
     Z = torch.zeros(*batch, 2 * m, 2 * m, dtype=M.dtype)
@@ -589,5 +593,59 @@ def _van_loan_step(
     Ed = E[..., :m, :m]
     Phi = E[..., :m, m:]
     return (Ed @ x.unsqueeze(-1)).squeeze(-1) + (Phi @ b0.unsqueeze(-1)).squeeze(-1)
+
+
+def _expm_action(
+    M,
+    x: torch.Tensor,
+    b0: torch.Tensor,
+    dt: float,
+    *,
+    rtol: float = 1e-10,
+    atol: float = 1e-12,
+    max_terms: int = 60,
+    max_substeps: int = 20,
+    _depth: int = 0,
+) -> tuple[torch.Tensor, int]:
+    """expm(dt * [[M, b0], [0, 0]]) @ [x, 1], as a scaling-and-squaring-free Taylor
+    action in M -- see the module docstring / Task 10's plan for the derivation.
+    Never forms a (2m, 2m), or even an (m, m), dense object.
+    """
+    u = M.matvec(x) + b0
+    result = x.clone()
+    term = u
+    coef = dt
+    converged = torch.zeros(x.shape[:-1], dtype=torch.bool, device=x.device)
+    j = 1
+    while j <= max_terms:
+        increment = coef * term
+        result = torch.where(
+            converged.unsqueeze(-1), result, result + increment
+        )
+        tol = atol + rtol * result.abs().amax(dim=-1, keepdim=True).squeeze(-1)
+        finite = torch.isfinite(increment).all(dim=-1) & torch.isfinite(result).all(dim=-1)
+        newly_converged = finite & (increment.abs().amax(dim=-1) <= tol)  # amendment A6
+        converged = converged | newly_converged
+        if bool(torch.all(converged)):
+            return result, 1  # one leaf Taylor evaluation (amendment A6)
+        term = M.matvec(term)
+        j += 1
+        coef = coef * dt / (j)
+    if _depth >= max_substeps:
+        bad = torch.nonzero(~converged.reshape(-1), as_tuple=False).flatten()
+        raise RuntimeError(
+            f"TransportLayer exact step: batch indices {bad.tolist()} failed to converge "
+            f"the exponential action after {max_substeps} dt-halvings"
+        )
+    half = dt / 2
+    x_mid, substeps_a = _expm_action(
+        M, x, b0, half, rtol=rtol, atol=atol, max_terms=max_terms,
+        max_substeps=max_substeps, _depth=_depth + 1,
+    )
+    x_end, substeps_b = _expm_action(
+        M, x_mid, b0, half, rtol=rtol, atol=atol, max_terms=max_terms,
+        max_substeps=max_substeps, _depth=_depth + 1,
+    )
+    return x_end, substeps_a + substeps_b  # amendment A6
 
 
