@@ -417,3 +417,33 @@ def test_linear_init_reduces_newton_iterations_single_instance():
 
     assert result_linear.iterations <= result_zero.iterations
     torch.testing.assert_close(result_zero.x, result_linear.x, atol=1e-8, rtol=1e-8)
+
+
+def test_linear_init_reduces_newton_iterations_batched():
+    torch.manual_seed(0)
+    m = 64
+    C = 0.004 + 0.02 * torch.rand(m, 3, dtype=DTYPE)
+    n = 0.5 + 0.3 * torch.rand(m, 1, dtype=DTYPE)
+    Pw = 5.0 + 45.0 * torch.rand(m, dtype=DTYPE)
+
+    net, layer = _series_layer(C, n)
+    wind = torch.zeros(m, 3, dtype=DTYPE)
+    wind[:, 0] = Pw
+    drivers = {"wind": wind}
+    phi_boundary = torch.zeros(m, 2, dtype=DTYPE)
+    sources = None
+
+    def residual_fn(phi_i: torch.Tensor) -> torch.Tensor:
+        return layer.residual(phi_i, phi_boundary, drivers, sources)
+
+    def jacobian_fn(phi_i: torch.Tensor) -> torch.Tensor:
+        return layer.jacobian(phi_i, phi_boundary, drivers)
+
+    x0_zero = torch.zeros(m, 2, dtype=DTYPE)
+    x0_linear = layer.linear_init(phi_boundary, drivers, sources)
+
+    result_zero = newton(residual_fn, jacobian_fn, x0_zero)
+    result_linear = newton(residual_fn, jacobian_fn, x0_linear)
+
+    assert result_linear.iterations <= result_zero.iterations
+    torch.testing.assert_close(result_zero.x, result_linear.x, atol=1e-6, rtol=1e-6)
