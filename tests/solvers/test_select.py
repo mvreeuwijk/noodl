@@ -246,6 +246,90 @@ def test_spd_diagnosis_is_never_called_on_the_success_path(monkeypatch):
     assert calls["count"] == 0
 
 
+# -- A3.1: method="direct" -------------------------------------------------------------------
+
+
+def test_direct_matches_torch_linalg_solve_on_spd_batch():
+    A_batch = torch.stack([_A_SPD, _A_SPD])
+    b_batch = torch.stack([_B_SPD, _B_SPD])
+    op = _FakeOperator(A_batch, symmetric=True, certificate=torch.tensor(False))
+    result = solve(op, b_batch, method="direct")
+    x_ref = torch.linalg.solve(A_batch, b_batch)
+    torch.testing.assert_close(result.x, x_ref, atol=1e-8, rtol=1e-8)
+    assert bool(torch.all(result.converged))
+
+
+def test_direct_matches_torch_linalg_solve_on_nonsymmetric_system():
+    op = _FakeOperator(_A_NS, symmetric=False, certificate=None)
+    result = solve(op, _B_NS, method="direct")
+    x_ref = torch.linalg.solve(_A_NS, _B_NS)
+    torch.testing.assert_close(result.x, x_ref, atol=1e-8, rtol=1e-8)
+
+
+def test_explicit_gmres_is_honoured_unconditionally_even_on_a_certifying_operator():
+    # method="gmres" makes no SPD assumption to violate, so it never even asks the operator
+    # to certify -- unlike method="cg", it is honoured regardless of what spd_certificate says.
+    op = _FakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    result = solve(op, _B_SPD, method="gmres")
+    x_ref = torch.linalg.solve(_A_SPD, _B_SPD)
+    torch.testing.assert_close(result.x, x_ref, atol=1e-6, rtol=1e-6)
+
+
+def test_direct_reports_per_instance_singular_status_without_raising():
+    A_batch = torch.stack([torch.tensor([[1.0, 2.0], [2.0, 4.0]]), _A_SPD])
+    b_batch = torch.stack([torch.tensor([1.0, 3.0]), _B_SPD])
+    op = _FakeOperator(A_batch, symmetric=False, certificate=None)
+    result = solve(op, b_batch, method="direct", on_failure="return")
+    assert result.status[0] == int(SolverStatus.SINGULAR)
+    assert result.status[1] == int(SolverStatus.CONVERGED)
+    assert bool(result.converged[0]) is False
+    assert bool(result.converged[1]) is True
+
+
+def test_direct_on_failure_raise_names_the_singular_instance():
+    A_batch = torch.stack([torch.tensor([[1.0, 2.0], [2.0, 4.0]]), _A_SPD])
+    b_batch = torch.stack([torch.tensor([1.0, 3.0]), _B_SPD])
+    op = _FakeOperator(A_batch, symmetric=False, certificate=None)
+    with pytest_raises_containing("0"):
+        solve(op, b_batch, method="direct")
+
+
+def test_direct_ignores_certificate_and_never_calls_spd_diagnosis():
+    # certificate=False would refuse method="cg" and (for a mixed batch) method="auto", but
+    # "direct" needs no SPD-ness at all: it must solve successfully and never even ask.
+    calls = {"count": 0}
+    op = _FakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(False))
+    op.spd_diagnosis = lambda: calls.__setitem__("count", calls["count"] + 1) or []
+    result = solve(op, _B_SPD, method="direct")
+    x_ref = torch.linalg.solve(_A_SPD, _B_SPD)
+    torch.testing.assert_close(result.x, x_ref, atol=1e-8, rtol=1e-8)
+    assert calls["count"] == 0
+
+
+def test_direct_raises_valueerror_when_assemble_returns_none():
+    class _NoAssemble(_FakeOperator):
+        def assemble(self):
+            return None
+
+    op = _NoAssemble(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    try:
+        solve(op, _B_SPD, method="direct")
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "assemble" in str(exc)
+
+
+def test_direct_is_not_selected_by_auto(monkeypatch):
+    import tellegen.solvers.select as select_module
+
+    pcg_calls = _spy(monkeypatch, select_module, "pcg")
+    gmres_calls = _spy(monkeypatch, select_module, "gmres")
+    op = _FakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    solve(op, _B_SPD)  # method="auto"
+    assert pcg_calls["count"] == 1
+    assert gmres_calls["count"] == 0
+
+
 class pytest_raises_containing:
     """Small local helper: assert a RuntimeError is raised whose message contains `text`
     (case-sensitive substring), without pulling in a separate `pytest.raises(match=...)`

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import torch
 
-from tellegen.operators.base import SolveResult
+from tellegen.operators.base import SolveResult, SolverStatus
 from tellegen.solvers.iterative import gmres, pcg
 
 Tensor = torch.Tensor
@@ -38,6 +38,41 @@ def _describe_uncertified(op, cert: Tensor, where: str) -> str:
     return "; ".join(lines) if lines else f"instances {bad} do not certify SPD"
 
 
+def _direct(A: Tensor, b: Tensor) -> SolveResult:
+    """LU solve of the assembled operator with PER-INSTANCE singularity status.
+
+    torch.linalg.solve raises for the whole batch if any one instance is singular, which is
+    the very behaviour the milestone-1 Newton had to work around with an identity
+    substitution. lu_factor_ex reports singularity per instance through `info` instead.
+    """
+    batch = torch.broadcast_shapes(A.shape[:-2], b.shape[:-1])
+    m = A.shape[-1]
+    A_b = A.expand(*batch, m, m)
+    b_b = b.expand(*batch, m)
+    LU, pivots, info = torch.linalg.lu_factor_ex(A_b)
+    singular = info != 0  # (...,) per instance; info>0 = zero pivot
+    x = torch.linalg.lu_solve(LU, pivots, b_b.unsqueeze(-1)).squeeze(-1)
+    x = torch.where(singular.unsqueeze(-1), torch.zeros_like(x), x)
+    r = torch.einsum("...ij,...j->...i", A_b, x) - b_b
+    b_norm = torch.linalg.vector_norm(b_b, dim=-1)
+    residual = torch.linalg.vector_norm(r, dim=-1) / b_norm.clamp_min(torch.finfo(b.dtype).tiny)
+    residual = torch.where(b_norm > 0, residual, torch.zeros_like(residual))
+    finite = torch.isfinite(x).all(dim=-1)
+    converged = finite & ~singular
+    status = torch.where(
+        converged,
+        torch.full_like(info, int(SolverStatus.CONVERGED)),
+        torch.full_like(info, int(SolverStatus.SINGULAR)),
+    )
+    return SolveResult(
+        x=x,
+        converged=converged,
+        iterations=torch.ones_like(info),
+        residual=residual,
+        status=status.to(torch.int64),
+    )
+
+
 def solve(
     op,
     b: Tensor,
@@ -47,8 +82,10 @@ def solve(
     where: str = "solve",
     **kw,
 ) -> SolveResult:
-    if method not in ("auto", "cg", "gmres"):
-        raise ValueError(f"{where}: unknown method {method!r}; expected 'auto', 'cg' or 'gmres'")
+    if method not in ("auto", "cg", "gmres", "direct"):
+        raise ValueError(
+            f"{where}: unknown method {method!r}; expected 'auto', 'cg', 'gmres' or 'direct'"
+        )
     if on_failure not in ("raise", "return"):
         raise ValueError(
             f"{where}: unknown on_failure {on_failure!r}; expected 'raise' or 'return'"
@@ -71,6 +108,11 @@ def solve(
         result = pcg(op, b, **kw)
     elif method == "gmres":
         result = gmres(op, b, **kw)
+    elif method == "direct":
+        A = op.assemble()
+        if A is None:
+            raise ValueError(f"{where}: method='direct' requires op.assemble() to return a matrix")
+        result = _direct(A, b)
     else:  # method == "auto"
         cert = op.spd_certificate()
         if cert is not None and bool(torch.any(cert)) and not bool(torch.all(cert)):
