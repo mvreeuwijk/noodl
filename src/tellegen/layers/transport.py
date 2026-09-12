@@ -426,6 +426,11 @@ class TransportLayer:
         controls its own error via sub-stepping, and raises `RuntimeError` directly on
         failure, as it always has).
         """
+        if on_failure not in ("raise", "return"):
+            raise ValueError(
+                f"TransportLayer '{self.name}': unknown on_failure {on_failure!r}; "
+                f"expected 'raise' or 'return'"
+            )
         out_dtype = x.dtype
         dtype = torch.float64
         x_s, reduced = self._to_stacked(x, self.n_i, "x")
@@ -467,6 +472,11 @@ class TransportLayer:
         the way the default `Tensor` return is. Return type on that path is therefore
         `torch.Tensor | SolveResult` (amendment A8).
         """
+        if on_failure not in ("raise", "return"):
+            raise ValueError(
+                f"TransportLayer '{self.name}': unknown on_failure {on_failure!r}; "
+                f"expected 'raise' or 'return'"
+            )
         dtype = torch.float64
         q = q.to(dtype)
         sources = sources.to(dtype)

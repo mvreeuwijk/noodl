@@ -378,3 +378,18 @@ def test_implicit_step_on_failure_return_does_not_raise():
     x_b = torch.zeros(0, dtype=torch.float64)
     result, _ = layer._implicit_step_sparse(x, q, source, x_b, 1.0, "return")
     assert result.converged.all()  # backward Euler with dt=1 is well posed here; sanity check
+
+
+def test_step_and_steady_reject_unknown_on_failure():
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath", boundary=["ambient"]
+    )
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    c0 = torch.tensor([100.0], dtype=torch.float64)
+    source = torch.tensor([2.0], dtype=torch.float64)
+    c_out = torch.tensor([420.0], dtype=torch.float64)
+    with pytest.raises(ValueError, match="on_failure"):
+        layer.step(c0, q, source, c_out, 300.0, on_failure="bogus")
+    with pytest.raises(ValueError, match="on_failure"):
+        layer.steady(q, source, c_out, on_failure="bogus")
