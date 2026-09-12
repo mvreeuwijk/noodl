@@ -22,6 +22,7 @@ from typing import Literal
 
 import torch
 
+from tellegen.operators.advection import AdvectionOperator
 from tellegen.topology import Network, Node
 
 
@@ -136,6 +137,40 @@ class TransportLayer:
             self.L = torch.einsum("ne,...e,me->...nm", A_c, g, A_c)
         else:
             self.L = torch.zeros(net.n, net.n, dtype=net.dtype)
+
+        if not torch.all(self.carrier > 0):
+            raise ValueError(
+                f"TransportLayer '{name}': carrier must be strictly positive everywhere "
+                f"(AdvectionOperator folds carrier into flow as flow = carrier * q, which "
+                f"only preserves sign(q) and |carrier * q| == carrier * |q| when carrier > "
+                f"0); got minimum value {self.carrier.min().item()}"
+            )
+        self._interior_of_node = torch.full((net.n,), -1, dtype=torch.long)
+        self._interior_of_node[self.interior_idx] = torch.arange(self.n_i, dtype=torch.long)
+        if conduction_kind is not None:
+            csrc, ctgt = net.endpoints(conduction_kind)
+            self._conduction_edges = (csrc, ctgt, torch.as_tensor(conductance, dtype=net.dtype))
+        else:
+            self._conduction_edges = None
+
+    def _advection_operator(self, q: torch.Tensor) -> AdvectionOperator:
+        dtype = q.dtype
+        src, tgt = self.net.endpoints(self.flow_kind)
+        conduction = None
+        if self._conduction_edges is not None:
+            csrc, ctgt, g = self._conduction_edges
+            conduction = (csrc, ctgt, g.to(dtype))
+        return AdvectionOperator(
+            src, tgt,
+            flow=self.carrier.to(dtype) * q,
+            transmission=self.transmission.to(dtype),
+            capacity=self.capacity.to(dtype),
+            n_interior=self.n_i,
+            interior_of_node=self._interior_of_node,
+            kinetics=self.kinetics.to(dtype) if self.kinetics is not None else None,
+            removal=self.removal.to(dtype) if self.removal is not None else None,
+            conduction=conduction,
+        )
 
     # ------------------------------------------------------------ assembly
     def _capacity_stacked(self, dtype: torch.dtype) -> torch.Tensor:
