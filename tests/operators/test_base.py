@@ -5,7 +5,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from tellegen.operators.base import SolverStatus, SolveResult
+from tellegen.operators.base import LinearOperator, SolveResult, SolverStatus
+from tellegen.operators.dense import DenseOperator
 
 
 def test_solver_status_enum_values_match_the_authoritative_ordering():
@@ -43,9 +44,6 @@ def test_raise_on_failure_does_not_raise_when_every_instance_converged():
     result = _result(converged=[True, True], status=[0, 0], residual=[1e-12, 1e-13])
     returned = result.raise_on_failure("solve")
     assert returned is result
-
-
-from tellegen.operators.base import LinearOperator
 
 
 class _HandRolledOperator:
@@ -92,3 +90,100 @@ def test_solver_status_and_solve_result_and_linear_operator_are_reexported_from_
     assert PackageSolverStatus is SolverStatus
     assert PackageSolveResult is SolveResult
     assert PackageLinearOperator is LinearOperator
+
+
+def test_dense_operator_is_reexported_from_the_operators_package():
+    from tellegen.operators import DenseOperator as PackageDenseOperator
+
+    assert PackageDenseOperator is DenseOperator
+
+
+def test_dense_operator_rejects_a_non_square_tensor():
+    with pytest.raises(ValueError, match=r"square"):
+        DenseOperator(torch.randn(3, 4, dtype=torch.float64), symmetric=False)
+
+
+def test_dense_operator_matvec_matches_explicit_matmul():
+    torch.manual_seed(0)
+    A = torch.randn(4, 3, 3, dtype=torch.float64)
+    op = DenseOperator(A, symmetric=False)
+    x = torch.randn(4, 3, dtype=torch.float64)
+    expected = torch.einsum("...ij,...j->...i", A, x)
+    torch.testing.assert_close(op.matvec(x), expected)
+
+
+def test_dense_operator_rmatvec_equals_explicit_transpose_matvec():
+    torch.manual_seed(0)
+    A = torch.randn(4, 3, 3, dtype=torch.float64)
+    op = DenseOperator(A, symmetric=False)
+    x = torch.randn(4, 3, dtype=torch.float64)
+    expected = torch.einsum("...ji,...j->...i", A, x)  # A^T @ x, written out elementwise
+    torch.testing.assert_close(op.rmatvec(x), expected)
+
+
+def test_dense_operator_diagonal_matches_torch_diagonal():
+    torch.manual_seed(0)
+    A = torch.randn(4, 3, 3, dtype=torch.float64)
+    op = DenseOperator(A, symmetric=False)
+    torch.testing.assert_close(op.diagonal(), torch.diagonal(A, dim1=-2, dim2=-1))
+
+
+def test_dense_operator_assemble_returns_the_underlying_tensor():
+    A = torch.randn(3, 3, dtype=torch.float64)
+    op = DenseOperator(A, symmetric=False)
+    assert op.assemble() is A
+
+
+def test_dense_operator_spd_certificate_is_always_none():
+    A = torch.eye(3, dtype=torch.float64)
+    assert DenseOperator(A, symmetric=True).spd_certificate() is None
+    B = 2 * torch.eye(3, dtype=torch.float64)
+    assert DenseOperator(B, symmetric=False).spd_certificate() is None
+
+
+def test_dense_operator_matvec_and_rmatvec_broadcast_over_arbitrary_leading_batch_dims():
+    torch.manual_seed(0)
+    A = torch.randn(5, 7, 3, 3, dtype=torch.float64)
+    op = DenseOperator(A, symmetric=False)
+    x = torch.randn(5, 7, 3, dtype=torch.float64)
+    assert op.matvec(x).shape == (5, 7, 3)
+    assert op.rmatvec(x).shape == (5, 7, 3)
+    torch.testing.assert_close(op.matvec(x), torch.einsum("...ij,...j->...i", A, x))
+    torch.testing.assert_close(op.rmatvec(x), torch.einsum("...ji,...j->...i", A, x))
+
+
+def test_dense_operator_adjoint_identity_holds_for_matvec_and_rmatvec():
+    # (Ax).y == x.(A^T y) is an algebraic identity of transposition and holds for EVERY A,
+    # symmetric or not -- this checks rmatvec is genuinely the transpose action, not that A
+    # is symmetric (see this task's "spec ambiguity" note above the Steps).
+    torch.manual_seed(0)
+    A = torch.randn(4, 3, 3, dtype=torch.float64)
+    op = DenseOperator(A, symmetric=False)
+    x = torch.randn(4, 3, dtype=torch.float64)
+    y = torch.randn(4, 3, dtype=torch.float64)
+    lhs = (op.matvec(x) * y).sum(-1)
+    rhs = (x * op.rmatvec(y)).sum(-1)
+    torch.testing.assert_close(lhs, rhs)
+
+
+def test_matvec_equals_rmatvec_on_the_same_x_for_a_declared_symmetric_operator():
+    torch.manual_seed(0)
+    A = torch.randn(4, 3, 3, dtype=torch.float64)
+    A_sym = A + A.transpose(-1, -2)
+    op = DenseOperator(A_sym, symmetric=True)
+    x = torch.randn(4, 3, dtype=torch.float64)
+    torch.testing.assert_close(op.matvec(x), op.rmatvec(x))
+
+
+def test_matvec_does_not_equal_rmatvec_on_the_same_x_for_a_nonsymmetric_operator():
+    torch.manual_seed(0)
+    A = torch.randn(4, 3, 3, dtype=torch.float64)
+    op = DenseOperator(A, symmetric=False)
+    x = torch.randn(4, 3, dtype=torch.float64)
+    assert not torch.allclose(op.matvec(x), op.rmatvec(x))
+
+
+def test_dense_operator_symmetric_defaults_to_false():
+    A = torch.tensor([[4.0, 1.0], [1.0, 3.0]], dtype=torch.float64)  # symmetric matrix, but
+    op = DenseOperator(A)                                             # NOT declared: default wins
+    assert op.symmetric is False
