@@ -23,7 +23,118 @@ from typing import Literal
 import torch
 
 from tellegen.operators.advection import AdvectionOperator
+from tellegen.solvers.select import solve as _solve_operator
 from tellegen.topology import Network, Node
+
+
+class _TransposeView:
+    """A LinearOperator-shaped view exposing `op`'s TRANSPOSE: matvec and rmatvec swapped,
+    everything else passed through. Used only to solve the adjoint system `A^T lam =
+    grad_x` via the ordinary `solvers.select.solve` entry point -- the adjoint needs no
+    solver of its own, it reuses GMRES/PCG against the swapped action.
+    """
+
+    def __init__(self, op) -> None:
+        self._op = op
+        self.shape = op.shape
+        self.dtype = op.dtype
+        self.device = op.device
+        self.symmetric = op.symmetric
+
+    def matvec(self, x: torch.Tensor) -> torch.Tensor:
+        return self._op.rmatvec(x)
+
+    def rmatvec(self, x: torch.Tensor) -> torch.Tensor:
+        return self._op.matvec(x)
+
+    def diagonal(self) -> torch.Tensor:
+        return self._op.diagonal()  # diagonal entries are invariant under transpose
+
+    def assemble(self):
+        dense = self._op.assemble()
+        return None if dense is None else dense.transpose(-1, -2)
+
+    def spd_certificate(self):
+        return None
+
+
+class _LinearSolve(torch.autograd.Function):
+    """Differentiate a linear solve `A(params) x = rhs(params)` via the IMPLICIT ADJOINT,
+    never by unrolling the forward solver's iteration -- see this task's Design decisions
+    section for why this is required rather than optional.
+
+    Forward: run `solvers.select.solve` under `no_grad`. Backward: solve the ADJOINT system
+    `A(params)^T lam = grad_x` via `_TransposeView` (i.e. via `op.rmatvec`, never
+    `op.matvec` -- the entire reason `rmatvec` is part of this contract), then obtain
+    gradients wrt every parameter tensor by one more autograd pass through the residual
+    `A(params) x - rhs(params)` evaluated at the converged `x`, weighted by `-lam`. This is
+    `solvers/implicit.py`'s `_Implicit` structure, specialised to a LINEAR residual, so
+    there is no fixed-point iteration to differentiate through: `A` already IS the
+    residual's exact Jacobian everywhere, not just at convergence.
+
+    Every differentiable input is passed EXPLICITLY as a `*params` tensor to `apply`, never
+    captured by closure: `build_system` is a plain (non-tensor) Python callable, stored on
+    `ctx` for its STRUCTURE only, and it is called AGAIN inside `backward` on the SAVED
+    params (or fresh detached-and-`requires_grad_`-ed copies, for the residual pass) --
+    never on tensors implicitly captured from the enclosing scope, which `backward` cannot
+    see. This is `solvers/implicit.py`'s own module-docstring warning, almost verbatim,
+    because it is the identical trap.
+
+    The adjoint solve inside `backward` RAISES unconditionally on non-convergence --
+    independent of whatever `on_failure` the forward call was given -- because a wrong
+    gradient is worse than no gradient (design spec section 3.2).
+    """
+
+    @staticmethod
+    def forward(ctx, build_system, where, solver_kwargs, *params):
+        with torch.no_grad():
+            op, rhs = build_system(*params)
+            result = _solve_operator(
+                op, rhs, method="auto", on_failure="raise", where=where, **solver_kwargs
+            )
+        ctx.build_system = build_system
+        ctx.where = where
+        ctx.solver_kwargs = solver_kwargs
+        ctx.save_for_backward(result.x, *params)
+        return result.x
+
+    @staticmethod
+    def backward(ctx, grad_x):
+        if torch.is_grad_enabled():
+            # See solvers/implicit.py's module docstring: grad mode enabled here means the
+            # caller requested create_graph=True (second-order differentiation), which
+            # this adjoint does not support.
+            raise RuntimeError(
+                f"{ctx.where}: second-order differentiation (create_graph=True) is not "
+                f"supported by this implicit linear adjoint; detach the first-order "
+                f"gradient before using it in a further differentiable loss."
+            )
+        saved = ctx.saved_tensors
+        x, params = saved[0], list(saved[1:])
+        with torch.no_grad():
+            op, _ = ctx.build_system(*params)
+            lam = _solve_operator(
+                _TransposeView(op), grad_x, method="auto", on_failure="raise",
+                where=f"{ctx.where} backward (adjoint)", **ctx.solver_kwargs,
+            ).x
+        with torch.enable_grad():
+            p = [t.detach().requires_grad_(t.requires_grad) for t in params]
+            op_p, rhs_p = ctx.build_system(*p)
+            residual = op_p.matvec(x.detach()) - rhs_p
+            needs_grad = [t for t in p if t.requires_grad]
+            grads = (
+                torch.autograd.grad(residual, needs_grad, grad_outputs=-lam, allow_unused=True)
+                if needs_grad else []
+            )
+        grads_aligned = []
+        it = iter(grads)
+        for t in p:
+            grads_aligned.append(next(it) if t.requires_grad else None)
+        return (None, None, None, *grads_aligned)
+
+
+def _linear_solve(build_system, where: str, *params, **solver_kwargs) -> torch.Tensor:
+    return _LinearSolve.apply(build_system, where, solver_kwargs, *params)
 
 
 class TransportLayer:
@@ -285,18 +396,42 @@ class TransportLayer:
         return self._from_stacked(result.to(out_dtype), self.n_i, reduced)
 
     def steady(
-        self, q: torch.Tensor, sources: torch.Tensor, x_boundary: torch.Tensor
+        self, q: torch.Tensor, sources: torch.Tensor, x_boundary: torch.Tensor,
+        *, on_failure: str = "raise",
     ) -> torch.Tensor:
+        """Solve `0 = M x + N x_b + sources / capacity` for the steady-state `x`.
+
+        `on_failure="raise"` (the default) returns a plain `torch.Tensor`, matching every
+        existing call site's expectation. `on_failure="return"` bypasses the differentiable
+        `_linear_solve` path entirely and returns the raw, STACKED `SolveResult` from
+        `solvers.select.solve` directly (not reshaped by `_from_stacked`): a `SolveResult`
+        is not a plain `Tensor`, so it cannot be a single `torch.autograd.Function`'s output
+        the way the default `Tensor` return is. Return type on that path is therefore
+        `torch.Tensor | SolveResult` (amendment A8).
+        """
         dtype = torch.float64
-        M, N = self.operator(q.to(dtype))
-        b0, reduced = self._forcing(sources, x_boundary, N, dtype)
-        try:
-            x_s = torch.linalg.solve(M, -b0.unsqueeze(-1)).squeeze(-1)
-        except torch.linalg.LinAlgError as err:
-            raise RuntimeError(
-                f"TransportLayer '{self.name}': steady-state system is singular (no "
-                f"outflow anywhere on some interior node): {err}"
-            ) from err
+        q = q.to(dtype)
+        sources = sources.to(dtype)
+        x_boundary = x_boundary.to(dtype)
+        _, reduced = self._to_stacked(sources, self.n_i, "sources")
+
+        def build_system(q_, sources_, xb_):
+            op = self._advection_operator(q_)
+            xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
+            src_s, _ = self._to_stacked(sources_, self.n_i, "sources")
+            cap = self._capacity_stacked(dtype)
+            b0 = op.boundary_forcing(xb_s) + src_s / cap
+            return op, -b0
+
+        if on_failure == "return":
+            op, rhs = build_system(q, sources, x_boundary)
+            return _solve_operator(
+                op, rhs, method="auto", on_failure="return",
+                where=f"TransportLayer '{self.name}' steady",
+            )
+        x_s = _linear_solve(
+            build_system, f"TransportLayer '{self.name}' steady", q, sources, x_boundary
+        )
         return self._from_stacked(x_s, self.n_i, reduced)
 
 

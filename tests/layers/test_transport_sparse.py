@@ -5,10 +5,14 @@ test_transport.py` is untouched and re-verifies the dense/analytic behaviour on
 its own.
 """
 
+import pytest
 import torch
 from torch.autograd import gradcheck
 
-from tellegen.layers.transport import TransportLayer
+from benchmarks.measure import saved_tensor_bytes
+from tellegen.layers.transport import TransportLayer, _linear_solve
+from tellegen.operators.base import SolverStatus
+from tellegen.solvers.select import solve as _solve_operator
 from tellegen.topology import Network
 
 
@@ -52,3 +56,227 @@ def test_advection_operator_boundary_forcing_matches_dense_N():
     op = layer._advection_operator(q)
     x_b = torch.tensor([420.0], dtype=torch.float64)
     torch.testing.assert_close(op.boundary_forcing(x_b), N @ x_b, rtol=1e-9, atol=1e-12)
+
+
+def test_steady_sparse_matches_dense_oracle():
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath", boundary=["ambient"]
+    )
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    source = torch.tensor([2.0], dtype=torch.float64)
+    c_out = torch.tensor([420.0], dtype=torch.float64)
+    x_sparse = layer.steady(q, source, c_out)
+
+    M, N = layer.operator(q)
+    b0 = (N @ c_out.unsqueeze(-1)).squeeze(-1) + source / layer.capacity
+    x_dense = torch.linalg.solve(M, -b0.unsqueeze(-1)).squeeze(-1)
+    torch.testing.assert_close(x_sparse, x_dense, rtol=1e-9, atol=1e-12)
+
+
+def test_steady_singular_system_raises_naming_instance():
+    net = Network(dtype=torch.float64)
+    net.add_node("A")
+    net.add_node("B")
+    net.add_edge("A", "B", kind="airpath")
+    net.add_edge("B", "A", kind="airpath")
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([100.0, 100.0]), flow_kind="airpath", boundary=[]
+    )
+    q = torch.zeros(2, dtype=torch.float64)  # no flow, no boundary: M is exactly the zero matrix
+    # A nonzero source is required: with source == 0 too, the system 0 = 0 is trivially (if
+    # non-uniquely) satisfied by x = 0, which GMRES correctly reports as CONVERGED -- unlike
+    # torch.linalg.solve, an iterative solver has no obligation to detect that M itself is
+    # singular when the particular right-hand side it was asked to solve happens to be
+    # consistent with it. A nonzero source makes the system exactly singular AND
+    # inconsistent (no x solves M x = b when M = 0 and b != 0), which is what genuinely
+    # fails to converge.
+    source = torch.ones(2, dtype=torch.float64)
+    x_b = torch.zeros(0, dtype=torch.float64)
+    with pytest.raises(RuntimeError, match="co2"):
+        layer.steady(q, source, x_b)
+
+
+def test_steady_on_failure_return_gives_failing_status_instead_of_raising():
+    net = Network(dtype=torch.float64)
+    net.add_node("A")
+    net.add_node("B")
+    net.add_edge("A", "B", kind="airpath")
+    net.add_edge("B", "A", kind="airpath")
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([100.0, 100.0]), flow_kind="airpath", boundary=[]
+    )
+    q = torch.zeros(2, dtype=torch.float64)
+    source = torch.ones(2, dtype=torch.float64)  # see the fixture note above: must be nonzero
+    x_b = torch.zeros(0, dtype=torch.float64)
+    result = layer.steady(q, source, x_b, on_failure="return")
+    assert bool(torch.any(result.status != SolverStatus.CONVERGED))
+
+
+def test_gradcheck_steady_wrt_q_sources_boundary():
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath", boundary=["ambient"]
+    )
+    q = torch.tensor([0.4, 0.4], dtype=torch.float64, requires_grad=True)
+    sources = torch.tensor([1.0], dtype=torch.float64, requires_grad=True)
+    x_b = torch.tensor([420.0], dtype=torch.float64, requires_grad=True)
+
+    def f(q, sources, x_b):
+        return layer.steady(q, sources, x_b)
+
+    assert gradcheck(f, (q, sources, x_b), eps=1e-6, atol=1e-5)
+
+
+def test_steady_adjoint_gradient_matches_unrolled_reference_on_small_problem():
+    """Proves the implicit adjoint is RIGHT, not merely self-consistent with finite
+    differences of itself (all `gradcheck` alone would show): on a problem small enough
+    that unrolling GMRES's own iteration is affordable, compare the production
+    adjoint-based gradient (through `TransportLayer.steady`) against a gradient obtained
+    by calling `solvers.select.solve` DIRECTLY and differentiating straight through its
+    ordinary (non-`no_grad`) iteration -- bypassing `_LinearSolve` entirely. Agreement
+    here is the check that actually tells the adjoint derivation is correct.
+    """
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath", boundary=["ambient"]
+    )
+    q = torch.tensor([0.4, 0.4], dtype=torch.float64, requires_grad=True)
+    sources = torch.tensor([1.0], dtype=torch.float64, requires_grad=True)
+    x_b = torch.tensor([420.0], dtype=torch.float64, requires_grad=True)
+
+    x_adjoint = layer.steady(q, sources, x_b)
+    grad_adjoint = torch.autograd.grad(x_adjoint.sum(), (q, sources, x_b))
+
+    q2 = q.detach().clone().requires_grad_(True)
+    sources2 = sources.detach().clone().requires_grad_(True)
+    x_b2 = x_b.detach().clone().requires_grad_(True)
+    op = layer._advection_operator(q2)
+    xb_s, _ = layer._to_stacked(x_b2, layer.n_b, "x_boundary")
+    src_s, _ = layer._to_stacked(sources2, layer.n_i, "sources")
+    cap = layer._capacity_stacked(torch.float64)
+    b0 = op.boundary_forcing(xb_s) + src_s / cap
+    x_unrolled = _solve_operator(op, -b0, method="auto", where="unrolled reference").x
+    grad_unrolled = torch.autograd.grad(x_unrolled.sum(), (q2, sources2, x_b2))
+
+    for g_a, g_u in zip(grad_adjoint, grad_unrolled, strict=True):
+        torch.testing.assert_close(g_a, g_u, rtol=1e-6, atol=1e-8)
+
+
+def test_backward_memory_independent_of_solver_iterations():
+    """A loose and a tight GMRES tolerance on the SAME, deliberately ill-conditioned
+    problem (widely disparate capacities along a long chain) give substantially different
+    FORWARD iteration counts -- asserted and printed below, so a future regression that
+    accidentally makes the two tolerances equally cheap is visible.
+
+    Backward memory is measured with `saved_tensor_bytes` (amendment A4(a)), not
+    `tracemalloc`: `tracemalloc` sees zero bytes of PyTorch tensor allocations on this
+    `.venv` (measured; see `benchmarks/measure.py`'s module docstring), so a
+    `tracemalloc`-based assertion here would pass vacuously regardless of whether the
+    implicit adjoint actually decouples backward memory from forward iteration count.
+    `saved_tensor_bytes` instead counts exactly the tensors autograd will need for
+    `backward()`, deterministically.
+
+    The bytes `_linear_solve` (the implicit adjoint) saves for backward must be EQUAL at
+    the loose and tight tolerance -- the whole point of the adjoint over unrolling. That
+    assertion alone would still be vacuous if `saved_tensor_bytes` simply always returned
+    the same number regardless of what ran; the second half of this test rules that out by
+    showing the UNROLLED reference (autograd tracing straight through `solvers.select.solve`'s
+    own iteration, bypassing `_LinearSolve` entirely) saves MORE at the tight tolerance than
+    the loose one, on the exact same problem -- proving `saved_tensor_bytes` is sensitive to
+    iteration count in general, so the adjoint's flat count is a real property of the
+    adjoint, not an artifact of the measurement.
+
+    Fixture note: the brief's original 3-node fixture (`three_node_chain`, capacities
+    [50, 8000], `q0 = [0.05, -0.03, 0.02]`) reverses the middle edge, which makes node A a
+    pure sink with no outgoing advective edge at all -- the resulting 2x2 M is EXACTLY
+    singular (confirmed against the dense `operator()` oracle too, independent of
+    `AdvectionOperator`), and even with the sign fixed to a natural forward flow, a 2x2
+    system is far too small: GMRES's restart cycle length defaults to `min(restart, m) = m`
+    for `m = 2`, so ONE full-size cycle always covers the entire Krylov space regardless of
+    `rtol`, and `saved_tensor_bytes` (which reflects actual computation, not just the
+    reported `iterations` count) is IDENTICAL for both tolerances -- vacuous for exactly the
+    reason A4(a) rejects `tracemalloc`, just one level deeper. A genuinely restart-bound
+    problem needs `m` large enough, relative to GMRES's default `restart=30`, that a loose
+    tolerance converges within the first restart cycle while a tight one needs several more
+    -- a 40-node chain with capacities spanning 4 orders of magnitude does this.
+    """
+
+    def long_chain(n: int) -> Network:
+        net = Network(dtype=torch.float64)
+        net.add_node("ambient")
+        for i in range(n):
+            net.add_node(f"n{i}")
+        net.add_edge("ambient", "n0", kind="airpath")
+        for i in range(n - 1):
+            net.add_edge(f"n{i}", f"n{i + 1}", kind="airpath")
+        net.add_edge(f"n{n - 1}", "ambient", kind="airpath")
+        return net
+
+    n = 40
+    net = long_chain(n)
+    cap = torch.logspace(0, 4, n, dtype=torch.float64)  # 4 orders of magnitude: ill-conditioned
+    layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"])
+    q0 = 0.05 * torch.ones(n + 1, dtype=torch.float64)  # natural forward flow around the loop
+    sources0 = torch.ones(n, dtype=torch.float64)
+    x_b0 = torch.tensor([420.0], dtype=torch.float64)
+    max_iter = 400  # exceeds default restart=30 several times over, so tolerance genuinely
+    #                 controls how many restart cycles GMRES needs (not just whether the one
+    #                 cycle a small problem gets already covers the whole Krylov space).
+
+    def build_system(q_, sources_, xb_):
+        op = layer._advection_operator(q_)
+        xb_s, _ = layer._to_stacked(xb_, layer.n_b, "x_boundary")
+        src_s, _ = layer._to_stacked(sources_, layer.n_i, "sources")
+        cap_s = layer._capacity_stacked(torch.float64)
+        b0 = op.boundary_forcing(xb_s) + src_s / cap_s
+        return op, -b0
+
+    op0, rhs0 = build_system(q0, sources0, x_b0)
+    iters_loose = _solve_operator(
+        op0, rhs0, method="auto", rtol=1e-2, max_iter=max_iter, where="probe"
+    ).iterations
+    iters_tight = _solve_operator(
+        op0, rhs0, method="auto", rtol=1e-6, max_iter=max_iter, where="probe"
+    ).iterations
+    print(
+        f"GMRES iterations: loose(rtol=1e-2)={iters_loose.tolist()}, "
+        f"tight(rtol=1e-6)={iters_tight.tolist()}"
+    )
+    assert int(iters_tight.max()) > int(iters_loose.max())
+
+    def adjoint_saved_bytes(rtol):
+        q = q0.clone().requires_grad_(True)
+        sources = sources0.clone().requires_grad_(True)
+        x_b = x_b0.clone().requires_grad_(True)
+
+        def run():
+            return _linear_solve(
+                build_system, "probe", q, sources, x_b, rtol=rtol, max_iter=max_iter
+            )
+
+        return saved_tensor_bytes(run)[0]
+
+    def unrolled_saved_bytes(rtol):
+        q = q0.clone().requires_grad_(True)
+        sources = sources0.clone().requires_grad_(True)
+        x_b = x_b0.clone().requires_grad_(True)
+
+        def run():
+            op, rhs = build_system(q, sources, x_b)
+            return _solve_operator(
+                op, rhs, method="auto", rtol=rtol, max_iter=max_iter, where="unrolled probe"
+            ).x
+
+        return saved_tensor_bytes(run)[0]
+
+    bytes_loose = adjoint_saved_bytes(1e-2)
+    bytes_tight = adjoint_saved_bytes(1e-6)
+    bytes_unrolled_loose = unrolled_saved_bytes(1e-2)
+    bytes_unrolled_tight = unrolled_saved_bytes(1e-6)
+    print(
+        f"saved tensor bytes: adjoint loose={bytes_loose}, adjoint tight={bytes_tight}, "
+        f"unrolled loose={bytes_unrolled_loose}, unrolled tight={bytes_unrolled_tight}"
+    )
+    assert bytes_tight == bytes_loose
+    assert bytes_unrolled_tight > bytes_unrolled_loose

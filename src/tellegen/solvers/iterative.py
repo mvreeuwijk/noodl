@@ -184,11 +184,17 @@ def gmres(
         step_converged_at = torch.full((B,), cycle_len, dtype=torch.long, device=device)
 
         for k in range(cycle_len):
-            w = mv(V[:, k, :])
+            # V is read here and mutated again later (a new column, but the SAME tensor's
+            # storage) before backward runs; every operand read from it must be `.clone()`d
+            # first, or autograd's version counter (tracked per-storage, not per-slice) sees
+            # a mismatch at backward time. Same reasoning as the `h_j`/`h_j1`/`g_k` clones
+            # below and the `h_kk` clone above.
+            w = mv(V[:, k, :].clone())
             for j in range(k + 1):
-                h_jk = torch.einsum("bi,bi->b", w, V[:, j, :])
+                v_j = V[:, j, :].clone()
+                h_jk = torch.einsum("bi,bi->b", w, v_j)
                 H[:, j, k] = torch.where(active, h_jk, H[:, j, k])
-                w = w - h_jk.unsqueeze(-1) * V[:, j, :]
+                w = w - h_jk.unsqueeze(-1) * v_j
             h_next = torch.linalg.vector_norm(w, dim=-1)
             newly_exhausted = active & (h_next <= tiny)
             exhausted = exhausted | newly_exhausted
@@ -205,7 +211,7 @@ def gmres(
                     active, -sn[:, j] * h_j + cs[:, j] * h_j1, H[:, j + 1, k]
                 )
 
-            h_kk = H[:, k, k]
+            h_kk = H[:, k, k].clone()
             h_k1k = h_next
             denom = torch.sqrt(h_kk**2 + h_k1k**2)
             denom_safe = torch.where(denom > tiny, denom, torch.ones_like(denom))
