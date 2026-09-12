@@ -12,6 +12,8 @@ import torch
 
 from tellegen.drives import Drive
 from tellegen.elements.base import Element
+from tellegen.solvers.implicit import adjoint as _adjoint_solve
+from tellegen.solvers.implicit import implicit_solve
 from tellegen.solvers.linear import solve
 from tellegen.solvers.newton import newton
 from tellegen.topology import Network
@@ -293,21 +295,112 @@ class PotentialFlowLayer:
         drivers = drivers or {}
         if phi0 is None:
             phi0 = self.linear_init(phi_boundary, drivers, sources)
-        if differentiable:
-            raise NotImplementedError(
-                "differentiable=True is implemented in Task 8 (solvers/implicit.py)"
-            )
 
-        def residual_fn(x):
-            return self.residual(x, phi_boundary, drivers, sources)
+        if not differentiable:
 
-        def jacobian_fn(x):
-            return self.jacobian(x, phi_boundary, drivers)
+            def residual_fn(x):
+                return self.residual(x, phi_boundary, drivers, sources)
 
-        result = newton(residual_fn, jacobian_fn, phi0, **newton_kwargs)
-        phi = self.assemble(result.x, phi_boundary)
+            def jacobian_fn(x):
+                return self.jacobian(x, phi_boundary, drivers)
+
+            result = newton(residual_fn, jacobian_fn, phi0, **newton_kwargs)
+            phi = self.assemble(result.x, phi_boundary)
+            q = self.flows(phi, drivers)
+            return phi, q
+
+        param_dicts = [dict(el.named_parameters()) for el in self._elements]
+        param_names = [list(d.keys()) for d in param_dicts]
+        param_tensors = [
+            d[name] for d, names in zip(param_dicts, param_names, strict=True) for name in names
+        ]
+        driver_keys = sorted(drivers.keys())
+        driver_tensors = [drivers[k] for k in driver_keys]
+        sources_tensor = (
+            sources
+            if sources is not None
+            else torch.zeros(phi_boundary.shape[:-1] + (self.A.shape[0],), dtype=phi_boundary.dtype)
+        )
+        all_params = (*param_tensors, *driver_tensors, sources_tensor, phi_boundary)
+
+        def _rebuild(params):
+            offset = 0
+            rebuilt = []
+            for names in param_names:
+                d = {name: params[offset + j] for j, name in enumerate(names)}
+                rebuilt.append(d)
+                offset += len(names)
+            drv = dict(zip(driver_keys, params[offset : offset + len(driver_keys)], strict=True))
+            offset += len(driver_keys)
+            src = params[offset]
+            pb = params[offset + 1]
+            return rebuilt, drv, src, pb
+
+        def _dp_functional(phi, drv):
+            d = torch.einsum("ie,...i->...e", self.A, phi)
+            parts = []
+            for kind, (start, end) in self._kind_slices.items():
+                block = d[..., start:end]
+                for driven in self._drives:
+                    if driven.kind == kind:
+                        block = block + driven(phi, drv)
+                parts.append((start, block))
+            parts.sort(key=lambda p: p[0])
+            return torch.cat([p[1] for p in parts], dim=-1)
+
+        def _flows_functional(phi, drv, rebuilt):
+            dp_full = _dp_functional(phi, drv)
+            parts = []
+            for el, d, (s, e) in zip(self._elements, rebuilt, self._elem_slices, strict=True):
+                parts.append(torch.func.functional_call(el, d, (dp_full[..., s:e], drv)))
+            return torch.cat(parts, dim=-1)
+
+        def _dflows_functional(phi, drv, rebuilt):
+            dp_full = _dp_functional(phi, drv)
+            parts = []
+            for el, d, (s, e) in zip(self._elements, rebuilt, self._elem_slices, strict=True):
+                dp_slice = dp_full[..., s:e].detach().requires_grad_(True)
+                # The autograd.grad call must stay INSIDE the enable_grad block: this
+                # whole method runs under the outer no_grad of Newton's forward solve
+                # (Task 8's memory-saving guarantee), and torch.autograd.grad -- unlike
+                # ordinary tensor ops -- consults the *ambient* grad-mode flag at its own
+                # call site, not just whether `flow` itself carries a grad_fn. Calling it
+                # after the `with torch.enable_grad():` block has already exited raises
+                # "does not require grad and does not have a grad_fn" even though `flow`
+                # printed True with a valid grad_fn right before the call -- verified in
+                # isolation: `with no_grad(): x=...; with enable_grad(): y=x*x` still
+                # fails autograd.grad(y, x) once evaluated back under the outer no_grad.
+                with torch.enable_grad():
+                    flow = torch.func.functional_call(el, d, (dp_slice, drv))
+                    (grad,) = torch.autograd.grad(flow.sum(), dp_slice, create_graph=False)
+                parts.append(grad)
+            return torch.cat(parts, dim=-1)
+
+        def residual_fn(x, *params):
+            rebuilt, drv, src, pb = _rebuild(params)
+            phi = self.assemble(x, pb)
+            q = _flows_functional(phi, drv, rebuilt)
+            A_I = self.A[self.interior]
+            lhs = torch.einsum("ie,...e->...i", A_I, q)
+            s_I = src[..., self.interior]
+            return lhs - s_I
+
+        def jacobian_fn(x, *params):
+            rebuilt, drv, src, pb = _rebuild(params)
+            phi = self.assemble(x, pb)
+            dq = _dflows_functional(phi, drv, rebuilt)
+            A_I = self.A[self.interior]
+            return torch.einsum("ie,...e,je->...ij", A_I, dq, A_I)
+
+        x = implicit_solve(residual_fn, jacobian_fn, phi0, all_params, **newton_kwargs)
+        phi = self.assemble(x, phi_boundary)
         q = self.flows(phi, drivers)
         return phi, q
+
+    def adjoint(self, phi_interior, phi_boundary, drivers, grad_phi_interior):
+        drivers = drivers or {}
+        J = self.jacobian(phi_interior, phi_boundary, drivers)
+        return _adjoint_solve(J, grad_phi_interior)
 
     def power_residual(self, phi, q, drivers, sources=None):
         """Tellegen's power identity, zero at a converged solution.

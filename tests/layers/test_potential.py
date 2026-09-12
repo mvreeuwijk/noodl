@@ -355,3 +355,67 @@ def test_floating_group_with_mixed_slope_same_kind_edges_raises_runtime_error():
     phi_b = torch.zeros(1, dtype=torch.float64)
     with pytest.raises(RuntimeError, match=r"z1.*z2|z2.*z1"):
         layer.linear_init(phi_b, {}, None)
+
+
+def test_gradcheck_solve_wrt_powerlaw_conductance(two_zone_layer):
+    net, elements, drives, boundary = two_zone_layer
+    # Construct the element once with its own learnable Parameter and gradcheck against
+    # that exact tensor object: gradcheck perturbs it in place for the numerical Jacobian
+    # and autograd tracks it directly for the analytic one, so `f` need not re-read its
+    # argument explicitly -- `layer.solve` reads el.C via el.named_parameters() each call.
+    el = PowerLaw(elements[0].C.detach().clone().requires_grad_(True), elements[0].n, learnable=True)
+    layer = PotentialFlowLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
+
+    def f(C_):
+        phi, _ = layer.solve(phi_b, {"wind": wind}, None, differentiable=True, atol=1e-12, rtol=1e-12)
+        return phi[1:]
+
+    assert torch.autograd.gradcheck(f, (el.C,), eps=1e-6, atol=1e-5)
+
+
+def test_gradcheck_solve_wrt_wind_driver(two_zone_layer):
+    net, elements, drives, boundary = two_zone_layer
+    layer = PotentialFlowLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64, requires_grad=True)
+
+    def f(wind_):
+        phi, _ = layer.solve(
+            phi_b, {"wind": wind_}, None, differentiable=True, atol=1e-12, rtol=1e-12
+        )
+        return phi[1:]
+
+    assert torch.autograd.gradcheck(f, (wind,), eps=1e-6, atol=1e-5)
+
+
+def test_gradcheck_solve_wrt_sources(two_zone_layer):
+    net, elements, drives, boundary = two_zone_layer
+    layer = PotentialFlowLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
+    sources = torch.zeros(3, dtype=torch.float64, requires_grad=True)
+
+    def f(sources_):
+        phi, _ = layer.solve(
+            phi_b, {"wind": wind}, sources_, differentiable=True, atol=1e-12, rtol=1e-12
+        )
+        return phi[1:]
+
+    assert torch.autograd.gradcheck(f, (sources,), eps=1e-6, atol=1e-5)
+
+
+def test_gradcheck_solve_wrt_boundary_potential(two_zone_layer):
+    net, elements, drives, boundary = two_zone_layer
+    layer = PotentialFlowLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    phi_b = torch.zeros(1, dtype=torch.float64, requires_grad=True)
+    wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
+
+    def f(phi_b_):
+        phi, _ = layer.solve(
+            phi_b_, {"wind": wind}, None, differentiable=True, atol=1e-12, rtol=1e-12
+        )
+        return phi
+
+    assert torch.autograd.gradcheck(f, (phi_b,), eps=1e-6, atol=1e-5)
