@@ -502,3 +502,35 @@ def test_expm_action_flow_reversal_matches_dense():
         op = layer._advection_operator(q)
         sparse, _ = _expm_action(op, x0, b0, dt)
         torch.testing.assert_close(sparse, dense, rtol=1e-9, atol=1e-12)
+
+
+def test_exact_scheme_conserves_total_amount_sparse_path():
+    net = Network(dtype=torch.float64)
+    net.add_node("ambient")
+    net.add_node("A")
+    net.add_node("B")
+    net.add_edge("A", "B", kind="airpath")
+    net.add_edge("B", "A", kind="airpath")
+    cap = torch.tensor([100.0, 300.0], dtype=torch.float64)
+    layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"])
+    q = torch.tensor([0.05, 0.05], dtype=torch.float64)
+    c = torch.tensor([1000.0, 400.0], dtype=torch.float64)
+    total0 = (cap * c).sum()
+    for _ in range(10):
+        c = layer.step(c, q, torch.zeros(2, dtype=torch.float64), torch.tensor([420.0]), 900.0)
+    total = (cap * c).sum()
+    torch.testing.assert_close(total, total0, rtol=1e-9, atol=1e-9)
+
+
+def test_exact_scheme_preserves_positivity_sparse_path():
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath", boundary=["ambient"]
+    )
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    c = torch.tensor([0.0], dtype=torch.float64)
+    c_out = torch.tensor([420.0], dtype=torch.float64)
+    source = torch.zeros(1, dtype=torch.float64)
+    for _ in range(20):
+        c = layer.step(c, q, source, c_out, 300.0)
+        assert torch.all(c >= 0.0)
