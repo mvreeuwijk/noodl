@@ -285,10 +285,10 @@ def _implicit_step(
 ) -> torch.Tensor:
     """Backward Euler: (I - dt M) x_{n+1} = x_n + dt b0."""
     m = M.shape[-1]
-    I = torch.eye(m, dtype=M.dtype).expand(*M.shape[:-2], m, m)
+    eye = torch.eye(m, dtype=M.dtype).expand(*M.shape[:-2], m, m)
     rhs = x + dt * b0
     try:
-        return torch.linalg.solve(I - dt * M, rhs.unsqueeze(-1)).squeeze(-1)
+        return torch.linalg.solve(eye - dt * M, rhs.unsqueeze(-1)).squeeze(-1)
     except torch.linalg.LinAlgError as err:
         raise RuntimeError(
             f"TransportLayer '{name}': implicit-scheme system is singular for dt={dt}: {err}"
@@ -300,10 +300,10 @@ def _trapezoidal_step(
 ) -> torch.Tensor:
     """Crank-Nicolson: (I - dt/2 M) x_{n+1} = (I + dt/2 M) x_n + dt b0."""
     m = M.shape[-1]
-    I = torch.eye(m, dtype=M.dtype).expand(*M.shape[:-2], m, m)
-    rhs = ((I + 0.5 * dt * M) @ x.unsqueeze(-1)).squeeze(-1) + dt * b0
+    eye = torch.eye(m, dtype=M.dtype).expand(*M.shape[:-2], m, m)
+    rhs = ((eye + 0.5 * dt * M) @ x.unsqueeze(-1)).squeeze(-1) + dt * b0
     try:
-        return torch.linalg.solve(I - 0.5 * dt * M, rhs.unsqueeze(-1)).squeeze(-1)
+        return torch.linalg.solve(eye - 0.5 * dt * M, rhs.unsqueeze(-1)).squeeze(-1)
     except torch.linalg.LinAlgError as err:
         raise RuntimeError(
             f"TransportLayer '{name}': trapezoidal-scheme system is singular for dt={dt}: {err}"
