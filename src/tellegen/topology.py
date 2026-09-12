@@ -291,6 +291,36 @@ class Network:
         self._cache[key] = result
         return result
 
+    def endpoints(self, kind: str | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """(source_node_index, target_node_index), each (b_kind,), shared across the batch.
+
+        A DISTINCT accessor from `edge_index(kind)`, which returns the columns of `kind`
+        into the full edge list -- `endpoints` returns, for those same columns, the node
+        POSITION of every edge's source and target: exactly the row positions
+        `incidence(kind)` puts a +1 and a -1 at. `difference_ep` and `accumulate` are
+        gather/scatter forms of `difference(kind)` and `incidence(kind) @ w` built from this
+        pair, so `endpoints` and `incidence` always describe the same graph by construction
+        (both derive from `edge_index(kind)` and `self.edges` in node order). Cached under
+        `("endpoints", kind)`; cleared by `add_node`, `add_edge` and `to()` like every other
+        cached tensor. Raises `KeyError` (via `edge_index`) naming the unknown kind, exactly
+        as `incidence(kind)` and `difference(kind)` do.
+        """
+        key = ("endpoints", kind)
+        if key in self._cache:
+            return self._cache[key]
+        cols = self.edge_index(kind)
+        edges = self.edges
+        index = self._node_index()
+        src = torch.tensor(
+            [index[edges[c][0]] for c in cols.tolist()], dtype=torch.long, device=self.device
+        )
+        tgt = torch.tensor(
+            [index[edges[c][1]] for c in cols.tolist()], dtype=torch.long, device=self.device
+        )
+        result = (src, tgt)
+        self._cache[key] = result
+        return result
+
     def spanning_forest(self, kind: str | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         """Spanning forest of the edges of one kind: (tree_cols, chord_cols).
 
