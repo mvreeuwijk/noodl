@@ -41,6 +41,8 @@ class TransportLayer:
         transmission: torch.Tensor | None = None,
         kinetics: torch.Tensor | None = None,
         removal: torch.Tensor | None = None,
+        conduction_kind: str | None = None,
+        conductance: torch.Tensor | None = None,
         scheme: Literal["exact", "implicit", "trapezoidal"] = "exact",
     ) -> None:
         self.net = net
@@ -105,8 +107,18 @@ class TransportLayer:
                 )
         self.removal = removal
 
-        # Set by the conduction step in this task; left inert here.
-        self.L = torch.zeros(net.n, net.n, dtype=net.dtype)
+        self.conduction_kind = conduction_kind
+        if conduction_kind is not None:
+            if conductance is None:
+                raise ValueError(
+                    f"TransportLayer '{name}': conductance is required when "
+                    f"conduction_kind is given"
+                )
+            A_c = net.incidence(conduction_kind)
+            g = torch.as_tensor(conductance, dtype=net.dtype)
+            self.L = torch.einsum("ne,...e,me->...nm", A_c, g, A_c)
+        else:
+            self.L = torch.zeros(net.n, net.n, dtype=net.dtype)
 
     # ------------------------------------------------------------ assembly
     def _capacity_stacked(self, dtype: torch.dtype) -> torch.Tensor:

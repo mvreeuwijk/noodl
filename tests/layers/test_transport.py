@@ -233,3 +233,22 @@ def test_removal_rate_gives_exponential_decay():
     torch.testing.assert_close(
         x, torch.tensor([expected], dtype=torch.float64), rtol=1e-8, atol=1e-10
     )
+
+
+def test_conduction_only_reaches_laplacian_steady_state():
+    net = Network(dtype=torch.float64)
+    net.add_node("Tb")
+    net.add_node("T1")
+    net.add_edge("T1", "Tb", kind="conduction")
+    g1 = 5.0
+    layer = TransportLayer(
+        net, "heat", capacity=torch.tensor([1000.0]), flow_kind="conduction",
+        boundary=["Tb"], conduction_kind="conduction",
+        conductance=torch.tensor([g1], dtype=torch.float64),
+    )
+    q = torch.zeros(1, dtype=torch.float64)  # no advective flow: conduction only
+    Tb = torch.tensor([15.0], dtype=torch.float64)
+    S = torch.tensor([50.0], dtype=torch.float64)  # W, heat source at T1
+    T_ss = layer.steady(q, S, Tb)
+    expected = Tb + S / g1  # g1 (T1 - Tb) = S at steady state
+    torch.testing.assert_close(T_ss, expected, rtol=1e-8, atol=1e-8)
