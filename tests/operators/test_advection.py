@@ -191,3 +191,49 @@ def test_matvec_with_conduction_matches_dense():
 
     y = torch.tensor([3.0, 1.0], dtype=torch.float64)
     torch.testing.assert_close(op.rmatvec(y), M.transpose(-1, -2) @ y, rtol=1e-9, atol=1e-12)
+
+
+def test_matvec_with_kinetics_and_removal_matches_dense_three_species():
+    net = flow_through_zone()
+    cap = torch.tensor([1000.0], dtype=torch.float64)
+    l1, l2 = 0.01, 0.02
+    kinetics = torch.zeros(3, 3, dtype=torch.float64)
+    kinetics[0, 0] = -l1
+    kinetics[1, 0] = l1
+    kinetics[1, 1] = -l2
+    kinetics[2, 1] = l2
+    removal = torch.tensor([0.0, 0.0, 0.005], dtype=torch.float64)
+    layer = TransportLayer(
+        net, "chain", capacity=cap, flow_kind="airpath", boundary=["ambient"], n_species=3,
+        kinetics=kinetics, removal=removal,
+    )
+    q = torch.tensor([0.4, 0.4], dtype=torch.float64)
+    M, _ = layer.operator(q)
+
+    src, tgt = net.endpoints("airpath")
+    op = AdvectionOperator(
+        src, tgt, flow=layer.carrier.to(q.dtype) * q, transmission=layer.transmission,
+        capacity=cap, n_interior=layer.n_i, interior_of_node=_interior_of_node(net, ["ambient"]),
+        kinetics=layer.kinetics, removal=layer.removal,
+    )
+    x = torch.tensor([1.0, 0.3, 0.1], dtype=torch.float64)  # (n_i*K,), species-major
+    torch.testing.assert_close(op.matvec(x), M @ x, rtol=1e-9, atol=1e-12)
+
+    y = torch.tensor([0.2, -0.1, 0.05], dtype=torch.float64)
+    torch.testing.assert_close(op.rmatvec(y), M.transpose(-1, -2) @ y, rtol=1e-9, atol=1e-12)
+
+
+def test_boundary_forcing_matches_dense_N_block():
+    net = three_node_chain()
+    cap = torch.tensor([50.0, 80.0], dtype=torch.float64)
+    layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"])
+    q = torch.tensor([0.3, 0.2, 0.25], dtype=torch.float64)
+    _, N = layer.operator(q)
+
+    src, tgt = net.endpoints("airpath")
+    op = AdvectionOperator(
+        src, tgt, flow=layer.carrier.to(q.dtype) * q, transmission=layer.transmission,
+        capacity=cap, n_interior=layer.n_i, interior_of_node=_interior_of_node(net, ["ambient"]),
+    )
+    x_b = torch.tensor([420.0], dtype=torch.float64)
+    torch.testing.assert_close(op.boundary_forcing(x_b), (N @ x_b), rtol=1e-9, atol=1e-12)
