@@ -97,3 +97,67 @@ def test_matvec_batched_matches_looped():
         )
         ref.append(op_i.matvec(x[i]))
     torch.testing.assert_close(out, torch.stack(ref), rtol=1e-10, atol=1e-12)
+
+
+def test_rmatvec_is_the_true_transpose_of_matvec():
+    net = three_node_chain()
+    cap = torch.tensor([50.0, 80.0], dtype=torch.float64)
+    layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"])
+    src, tgt = net.endpoints("airpath")
+    interior_of_node = _interior_of_node(net, ["ambient"])
+    torch.manual_seed(0)
+    for q_sign in (1.0, -1.0):
+        q = q_sign * torch.tensor([0.3, 0.2, 0.25], dtype=torch.float64)
+        op = AdvectionOperator(
+            src, tgt, flow=layer.carrier.to(q.dtype) * q, transmission=layer.transmission,
+            capacity=cap, n_interior=layer.n_i, interior_of_node=interior_of_node,
+        )
+        x = torch.randn(2, dtype=torch.float64)
+        y = torch.randn(2, dtype=torch.float64)
+        lhs = (op.matvec(x) * y).sum()
+        rhs = (x * op.rmatvec(y)).sum()
+        torch.testing.assert_close(lhs, rhs, rtol=1e-9, atol=1e-12)
+
+
+def test_rmatvec_matches_dense_transpose():
+    net = three_node_chain()
+    cap = torch.tensor([50.0, 80.0], dtype=torch.float64)
+    layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"])
+    q = torch.tensor([0.3, -0.2, 0.25], dtype=torch.float64)
+    M, _ = layer.operator(q)
+    src, tgt = net.endpoints("airpath")
+    op = AdvectionOperator(
+        src, tgt, flow=layer.carrier.to(q.dtype) * q, transmission=layer.transmission,
+        capacity=cap, n_interior=layer.n_i, interior_of_node=_interior_of_node(net, ["ambient"]),
+    )
+    y = torch.tensor([5.0, -2.0], dtype=torch.float64)
+    torch.testing.assert_close(op.rmatvec(y), M.transpose(-1, -2) @ y, rtol=1e-9, atol=1e-12)
+
+
+def test_matvec_and_rmatvec_genuinely_differ_on_the_same_vector():
+    """Symmetry check (NOT the transpose-correctness check above): matvec(x) and
+    rmatvec(x) evaluated at the SAME x, for a problem with nonzero flow. This is a
+    DIFFERENT property from the transpose identity `matvec(x).y == x.rmatvec(y)`,
+    which holds for any correct rmatvec whether or not the operator is symmetric
+    (it holds for a random nonsymmetric matrix too). This test instead asserts the
+    operator FAILS `matvec(x) == rmatvec(x)`: since upwinding is direction-dependent
+    (matvec gathers at the upwind node and scatters to the downwind node; rmatvec
+    swaps that), the two must give genuinely different vectors whenever flow is
+    nonzero. A passing (i.e. equal) result here would mean the upwind/downwind swap
+    was not actually implemented -- a real bug that the transpose-identity test
+    alone cannot see, because a `rmatvec` that is silently just `matvec` again
+    would fail the transpose-identity test AND this one together in the general
+    case, but could coincidentally satisfy the identity on a single random (x, y)
+    pair for a small enough problem; asserting inequality directly closes that gap.
+    """
+    net = three_node_chain()
+    cap = torch.tensor([50.0, 80.0], dtype=torch.float64)
+    layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"])
+    q = torch.tensor([0.3, -0.2, 0.25], dtype=torch.float64)  # nonzero flow throughout
+    src, tgt = net.endpoints("airpath")
+    op = AdvectionOperator(
+        src, tgt, flow=layer.carrier.to(q.dtype) * q, transmission=layer.transmission,
+        capacity=cap, n_interior=layer.n_i, interior_of_node=_interior_of_node(net, ["ambient"]),
+    )
+    x = torch.tensor([12.0, -4.0], dtype=torch.float64)
+    assert not torch.allclose(op.matvec(x), op.rmatvec(x), rtol=1e-6, atol=1e-8)
