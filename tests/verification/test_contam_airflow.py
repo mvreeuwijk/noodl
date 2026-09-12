@@ -226,3 +226,67 @@ def test_fan_driven_zone_pressure_batched():
 
     residual = layer.residual(phi[..., layer.interior], phi_boundary, {}, None)
     torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-8, rtol=0.0)
+
+
+def _fan_curve_layer(
+    a0: torch.Tensor,
+    a1: torch.Tensor,
+    a2: torch.Tensor,
+    a3: torch.Tensor,
+    q_max: torch.Tensor,
+    C: torch.Tensor,
+    n: torch.Tensor,
+) -> tuple[Network, PotentialFlowLayer]:
+    """Loop ambient -> z (FanCurve supply) -> ambient (PowerLaw return)."""
+    net = Network(dtype=DTYPE)
+    net.add_node("ambient")
+    net.add_node("z")
+    net.add_edge("ambient", "z", kind="fan")
+    net.add_edge("z", "ambient", kind="airpath")
+    coeffs = torch.stack([a0, a1, a2, a3], dim=-1)
+    # FanCurve's own default kind is "airpath" (same as PowerLaw's); without an explicit
+    # kind="fan" here it collides with `leak`'s "airpath" kind and PotentialFlowLayer raises
+    # "duplicate element kind 'airpath'" (the brief's original draft omitted this argument).
+    fan = FanCurve(coeffs, q_max, kind="fan")
+    leak = PowerLaw(C, n, dp_transition=1e-6)
+    layer = PotentialFlowLayer(net, "fan_curve", [fan, leak], boundary=["ambient"])
+    return net, layer
+
+
+def _fan_curve_reference_q(
+    a0: float, a1: float, a2: float, a3: float, q_max: float, C: float, n: float
+) -> float:
+    """brentq root of P(q) = (q / C)^(1/n) for q in (0, q_max)."""
+
+    def f(q: float) -> float:
+        p = a0 + a1 * q + a2 * q**2 + a3 * q**3
+        return p - (q / C) ** (1.0 / n)
+
+    return brentq(f, 1e-9, q_max - 1e-9, xtol=1e-14, rtol=1e-14)
+
+
+def test_fan_curve_loop_single_instance():
+    a0, a1, a2, a3 = 150.0, -100.0, -80.0, 40.0
+    q_max = 1.0
+    C, n = 0.05, 0.5
+
+    net, layer = _fan_curve_layer(
+        torch.tensor(a0, dtype=DTYPE),
+        torch.tensor(a1, dtype=DTYPE),
+        torch.tensor(a2, dtype=DTYPE),
+        torch.tensor(a3, dtype=DTYPE),
+        torch.tensor(q_max, dtype=DTYPE),
+        torch.tensor(C, dtype=DTYPE),
+        torch.tensor(n, dtype=DTYPE),
+    )
+    phi_boundary = torch.zeros(1, dtype=DTYPE)
+    phi, q = layer.solve(phi_boundary, differentiable=False)
+
+    q_ref = _fan_curve_reference_q(a0, a1, a2, a3, q_max, C, n)
+    torch.testing.assert_close(
+        q[net.edge_index("fan")[0]], torch.tensor(q_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6
+    )
+    torch.testing.assert_close(
+        q[net.edge_index("airpath")[0]], torch.tensor(q_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6
+    )
+    assert 0.0 < q_ref < q_max
