@@ -2,6 +2,7 @@
 by Task 6, gmres (restarted, nonsymmetric-capable, per-instance status, never raises).
 """
 
+import pytest
 import torch
 
 from tellegen.operators.base import SolverStatus
@@ -9,7 +10,14 @@ from tellegen.operators.dense import DenseOperator
 from tellegen.operators.graph import GraphLaplacianOperator
 from tellegen.solvers.iterative import pcg
 
-torch.set_default_dtype(torch.float64)
+
+@pytest.fixture(autouse=True)
+def _set_float64_dtype():
+    """Set default dtype to float64 for this module's tests, then restore."""
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    yield
+    torch.set_default_dtype(old_dtype)
 
 
 def test_pcg_matches_solve_on_small_spd_system():
