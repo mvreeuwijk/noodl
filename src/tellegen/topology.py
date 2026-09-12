@@ -321,6 +321,17 @@ class Network:
         self._cache[key] = result
         return result
 
+    def difference_ep(self, phi: torch.Tensor, kind: str | None = None) -> torch.Tensor:
+        """Gather form of `difference(kind) @ phi`: `phi[..., src] - phi[..., tgt]`.
+
+        `phi` has shape `(..., n)`; the result has shape `(..., b_kind)`, broadcasting over
+        arbitrary leading batch dimensions exactly like `difference(kind) @ phi` does on a
+        batched `phi`. Never forms the `(b_kind, n)` `difference()` matrix: this is the
+        gather primitive the milestone's sparse operators are built from instead.
+        """
+        src, tgt = self.endpoints(kind)
+        return phi[..., src] - phi[..., tgt]
+
     def spanning_forest(self, kind: str | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         """Spanning forest of the edges of one kind: (tree_cols, chord_cols).
 
