@@ -13,6 +13,7 @@ from tellegen.elements.fan import FanCurve
 from tellegen.elements.fixed import FixedFlow
 from tellegen.elements.powerlaw import PowerLaw
 from tellegen.layers.potential import PotentialFlowLayer
+from tellegen.solvers.newton import newton
 from tellegen.topology import Network
 
 DTYPE = torch.float64
@@ -390,3 +391,29 @@ def test_stack_conservation_and_antisymmetry_batched():
     )
     torch.testing.assert_close(q_rev, -q, atol=1e-6, rtol=1e-6)
     torch.testing.assert_close(phi_rev, -phi, atol=1e-6, rtol=1e-6)
+
+
+def test_linear_init_reduces_newton_iterations_single_instance():
+    C = torch.tensor([0.010, 0.008, 0.012], dtype=DTYPE)
+    n = torch.tensor(0.65, dtype=DTYPE)
+    Pw = torch.tensor(30.0, dtype=DTYPE)
+
+    net, layer = _series_layer(C, n)
+    drivers = {"wind": torch.tensor([Pw, 0.0, 0.0], dtype=DTYPE)}
+    phi_boundary = torch.zeros(2, dtype=DTYPE)
+    sources = None
+
+    def residual_fn(phi_i: torch.Tensor) -> torch.Tensor:
+        return layer.residual(phi_i, phi_boundary, drivers, sources)
+
+    def jacobian_fn(phi_i: torch.Tensor) -> torch.Tensor:
+        return layer.jacobian(phi_i, phi_boundary, drivers)
+
+    x0_zero = torch.zeros(2, dtype=DTYPE)
+    x0_linear = layer.linear_init(phi_boundary, drivers, sources)
+
+    result_zero = newton(residual_fn, jacobian_fn, x0_zero)
+    result_linear = newton(residual_fn, jacobian_fn, x0_linear)
+
+    assert result_linear.iterations <= result_zero.iterations
+    torch.testing.assert_close(result_zero.x, result_linear.x, atol=1e-8, rtol=1e-8)
