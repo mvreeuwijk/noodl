@@ -213,3 +213,23 @@ def test_kinetics_matches_bateman_solution_for_decay_chain():
     torch.testing.assert_close(
         x[0], torch.tensor([A, B, C], dtype=torch.float64), rtol=1e-6, atol=1e-8
     )
+
+
+def test_removal_rate_gives_exponential_decay():
+    net = sealed_zone_with_flow_kind()
+    rate = 0.02
+    layer = TransportLayer(
+        net, "particle", capacity=torch.tensor([500.0]), flow_kind="airpath",
+        boundary=["ambient"], removal=torch.tensor([rate], dtype=torch.float64),
+    )
+    q = torch.zeros(2, dtype=torch.float64)
+    x = torch.tensor([100.0], dtype=torch.float64)
+    sources = torch.zeros(1, dtype=torch.float64)
+    x_b = torch.zeros(1, dtype=torch.float64)
+    dt = 10.0
+    for _ in range(30):
+        x = layer.step(x, q, sources, x_b, dt)
+    expected = 100.0 * math.exp(-rate * 30 * dt)
+    torch.testing.assert_close(
+        x, torch.tensor([expected], dtype=torch.float64), rtol=1e-8, atol=1e-10
+    )

@@ -40,6 +40,7 @@ class TransportLayer:
         carrier: torch.Tensor | float = 1.0,
         transmission: torch.Tensor | None = None,
         kinetics: torch.Tensor | None = None,
+        removal: torch.Tensor | None = None,
         scheme: Literal["exact", "implicit", "trapezoidal"] = "exact",
     ) -> None:
         self.net = net
@@ -93,8 +94,18 @@ class TransportLayer:
                 )
         self.kinetics = kinetics
 
-        # Set by later steps in this task (removal, conduction); left inert here.
-        self.removal: torch.Tensor | None = None
+        if removal is not None:
+            removal = torch.as_tensor(removal, dtype=net.dtype)
+            if removal.dim() == 1:
+                removal = removal.unsqueeze(0).expand(self.n_i, K)
+            elif removal.shape[-1] != K or removal.shape[-2] != self.n_i:
+                raise ValueError(
+                    f"TransportLayer '{name}': removal must have shape ({K},) or "
+                    f"({self.n_i}, {K}), got {tuple(removal.shape)}"
+                )
+        self.removal = removal
+
+        # Set by the conduction step in this task; left inert here.
         self.L = torch.zeros(net.n, net.n, dtype=net.dtype)
 
     # ------------------------------------------------------------ assembly
