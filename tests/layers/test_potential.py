@@ -363,13 +363,17 @@ def test_gradcheck_solve_wrt_powerlaw_conductance(two_zone_layer):
     # that exact tensor object: gradcheck perturbs it in place for the numerical Jacobian
     # and autograd tracks it directly for the analytic one, so `f` need not re-read its
     # argument explicitly -- `layer.solve` reads el.C via el.named_parameters() each call.
-    el = PowerLaw(elements[0].C.detach().clone().requires_grad_(True), elements[0].n, learnable=True)
+    el = PowerLaw(
+        elements[0].C.detach().clone().requires_grad_(True), elements[0].n, learnable=True
+    )
     layer = PotentialFlowLayer(net, "zones", [el], drives=drives, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
     def f(C_):
-        phi, _ = layer.solve(phi_b, {"wind": wind}, None, differentiable=True, atol=1e-12, rtol=1e-12)
+        phi, _ = layer.solve(
+            phi_b, {"wind": wind}, None, differentiable=True, atol=1e-12, rtol=1e-12
+        )
         return phi[1:]
 
     assert torch.autograd.gradcheck(f, (el.C,), eps=1e-6, atol=1e-5)
@@ -419,3 +423,81 @@ def test_gradcheck_solve_wrt_boundary_potential(two_zone_layer):
         return phi
 
     assert torch.autograd.gradcheck(f, (phi_b,), eps=1e-6, atol=1e-5)
+
+
+def test_adjoint_lambda_matches_autograd_gradient(two_zone_layer):
+    net, elements, drives, boundary = two_zone_layer
+    el = PowerLaw(
+        elements[0].C.detach().clone().requires_grad_(True), elements[0].n, learnable=True
+    )
+    layer = PotentialFlowLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
+
+    phi, q = layer.solve(phi_b, {"wind": wind}, None, differentiable=True)
+    loss = phi[1:].sum()
+    loss.backward()
+    autograd_grad = el.C.grad.clone()
+
+    phi_i = phi[layer.interior].detach()
+    grad_phi_i = torch.ones_like(phi_i)
+    lam = layer.adjoint(phi_i, phi_b, {"wind": wind}, grad_phi_i)
+
+    r = layer.residual(phi_i, phi_b, {"wind": wind}, None)
+    (dr_dC,) = torch.autograd.grad(r, el.C, grad_outputs=-lam)
+    torch.testing.assert_close(dr_dC, autograd_grad, atol=1e-6, rtol=1e-5)
+
+
+def test_finite_difference_matches_autograd_gradient_for_zone_pressure(two_zone_layer):
+    net, elements, drives, boundary = two_zone_layer
+    n = elements[0].n
+    C0 = elements[0].C.detach().clone()
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
+
+    def zone_pressure(C):
+        el = PowerLaw(C, n, learnable=False)
+        layer = PotentialFlowLayer(net, "zones", [el], drives=drives, boundary=boundary)
+        phi, _ = layer.solve(
+            phi_b, {"wind": wind}, None, differentiable=False, atol=1e-13, rtol=1e-13
+        )
+        return phi[1]  # z1 pressure
+
+    h = 1e-6
+    grads_fd = torch.zeros(3, dtype=torch.float64)
+    for i in range(3):
+        bump = torch.zeros(3, dtype=torch.float64)
+        bump[i] = h
+        grads_fd[i] = (zone_pressure(C0 + bump) - zone_pressure(C0 - bump)) / (2 * h)
+
+    el = PowerLaw(C0.clone().requires_grad_(True), n, learnable=True)
+    layer = PotentialFlowLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    phi, _ = layer.solve(phi_b, {"wind": wind}, None, differentiable=True)
+    phi[1].backward()
+    grads_ad = el.C.grad
+
+    torch.testing.assert_close(grads_ad, grads_fd, atol=1e-5, rtol=1e-5)
+
+
+def test_jacobian_is_symmetric(two_zone_layer):
+    net, elements, drives, boundary = two_zone_layer
+    layer = PotentialFlowLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
+
+    phi, _ = layer.solve(phi_b, {"wind": wind}, None, differentiable=False)
+    phi_i = phi[layer.interior]
+    J = layer.jacobian(phi_i, phi_b, {"wind": wind})
+    torch.testing.assert_close(J, J.transpose(-1, -2), atol=1e-10, rtol=1e-10)
+
+
+def test_differentiable_false_matches_differentiable_true(two_zone_layer):
+    net, elements, drives, boundary = two_zone_layer
+    layer = PotentialFlowLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
+
+    phi_nd, q_nd = layer.solve(phi_b, {"wind": wind}, None, differentiable=False)
+    phi_d, q_d = layer.solve(phi_b, {"wind": wind}, None, differentiable=True)
+    torch.testing.assert_close(phi_nd, phi_d, atol=1e-8, rtol=1e-6)
+    torch.testing.assert_close(q_nd, q_d, atol=1e-8, rtol=1e-6)
