@@ -459,3 +459,66 @@ def test_golden_helper_round_trip(tmp_path, monkeypatch):
     monkeypatch.setattr(golden, "_GOLDEN_DIR", tmp_path)
     golden.save_golden("scratch", {"value": 1.5, "list": [1, 2, 3]})
     assert golden.load_golden("scratch") == {"value": 1.5, "list": [1, 2, 3]}
+
+
+def test_golden_matches_stored_reference():
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from golden import load_golden
+
+    golden = load_golden("contam_airflow")
+
+    net, layer = _series_layer(
+        torch.tensor([0.010, 0.008, 0.012], dtype=DTYPE), torch.tensor(0.65, dtype=DTYPE)
+    )
+    drivers = {"wind": torch.tensor([12.0, 0.0, 0.0], dtype=DTYPE)}
+    phi, q = layer.solve(torch.zeros(2, dtype=DTYPE), drivers, differentiable=False)
+    torch.testing.assert_close(
+        phi, torch.tensor(golden["series"]["phi"], dtype=DTYPE), atol=1e-9, rtol=1e-9
+    )
+    torch.testing.assert_close(
+        q, torch.tensor(golden["series"]["q"], dtype=DTYPE), atol=1e-9, rtol=1e-9
+    )
+
+    net, layer = _parallel_layer(
+        torch.tensor(0.020, dtype=DTYPE),
+        torch.tensor(0.015, dtype=DTYPE),
+        torch.tensor(0.6, dtype=DTYPE),
+    )
+    phi, q = layer.solve(torch.tensor([8.0, 0.0], dtype=DTYPE), differentiable=False)
+    torch.testing.assert_close(
+        phi, torch.tensor(golden["parallel"]["phi"], dtype=DTYPE), atol=1e-9, rtol=1e-9
+    )
+    torch.testing.assert_close(
+        q, torch.tensor(golden["parallel"]["q"], dtype=DTYPE), atol=1e-9, rtol=1e-9
+    )
+
+    net, layer = _fan_driven_layer(
+        torch.tensor(0.020, dtype=DTYPE),
+        torch.tensor(0.010, dtype=DTYPE),
+        torch.tensor(0.65, dtype=DTYPE),
+        torch.tensor(0.05, dtype=DTYPE),
+    )
+    phi, q = layer.solve(torch.zeros(1, dtype=DTYPE), differentiable=False)
+    torch.testing.assert_close(
+        phi, torch.tensor(golden["fan_driven"]["phi"], dtype=DTYPE), atol=1e-9, rtol=1e-9
+    )
+    torch.testing.assert_close(
+        q, torch.tensor(golden["fan_driven"]["q"], dtype=DTYPE), atol=1e-9, rtol=1e-9
+    )
+
+    net, layer = _fan_curve_layer(
+        torch.tensor(150.0, dtype=DTYPE),
+        torch.tensor(-100.0, dtype=DTYPE),
+        torch.tensor(-80.0, dtype=DTYPE),
+        torch.tensor(40.0, dtype=DTYPE),
+        torch.tensor(1.0, dtype=DTYPE),
+        torch.tensor(0.05, dtype=DTYPE),
+        torch.tensor(0.5, dtype=DTYPE),
+    )
+    phi, q = layer.solve(torch.zeros(1, dtype=DTYPE), differentiable=False)
+    torch.testing.assert_close(
+        phi, torch.tensor(golden["fan_curve"]["phi"], dtype=DTYPE), atol=1e-9, rtol=1e-9
+    )
+    torch.testing.assert_close(
+        q, torch.tensor(golden["fan_curve"]["q"], dtype=DTYPE), atol=1e-9, rtol=1e-9
+    )
