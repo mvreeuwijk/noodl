@@ -449,7 +449,41 @@ class PotentialFlowLayer:
                 # must be inside the block.
                 with torch.enable_grad():
                     flow = torch.func.functional_call(el, d, (dp_slice, drv))
-                    (grad,) = torch.autograd.grad(flow.sum(), dp_slice, create_graph=False)
+                    # An element whose flow genuinely does not depend on dp (FixedFlow,
+                    # whose spec-documented dflow is identically 0) surfaces two distinct
+                    # autograd failure modes here, and they need two different guards:
+                    #
+                    # (a) FixedFlow(learnable=False) (the default construction): flow =
+                    # q0 + torch.zeros_like(dp_slice), and `zeros_like` does not carry
+                    # dp_slice's requires_grad forward, so with q0 itself not requiring
+                    # grad `flow` ends up with requires_grad=False and no grad_fn at all.
+                    # torch.autograd.grad requires its `outputs` argument to itself
+                    # require grad; `allow_unused` cannot rescue this because that flag
+                    # excuses an unused *input*, not an output that never entered the
+                    # autograd graph in the first place (confirmed empirically: the same
+                    # "does not require grad and does not have a grad_fn" error is raised
+                    # with or without allow_unused/materialize_grads). Since flow does not
+                    # depend on dp_slice at all in this case, the correct Jacobian
+                    # contribution is exactly zero, so we short-circuit to it directly.
+                    #
+                    # (b) FixedFlow(learnable=True): q0 is now a registered parameter, so
+                    # flow = q0 + zeros_like(dp_slice) DOES require grad (through q0), but
+                    # dp_slice is still never used to compute it, so plain
+                    # torch.autograd.grad(flow.sum(), dp_slice) raises "the differentiated
+                    # Tensor at index 0 appears to not have been used in the graph". Here
+                    # allow_unused=True (paired with materialize_grads=True, so the result
+                    # is an actual zero tensor of dp_slice's shape/dtype/device rather than
+                    # None) is exactly the right fix.
+                    if flow.requires_grad:
+                        (grad,) = torch.autograd.grad(
+                            flow.sum(),
+                            dp_slice,
+                            create_graph=False,
+                            allow_unused=True,
+                            materialize_grads=True,
+                        )
+                    else:
+                        grad = torch.zeros_like(dp_slice)
                 parts.append(grad)
             return torch.cat(parts, dim=-1)
 

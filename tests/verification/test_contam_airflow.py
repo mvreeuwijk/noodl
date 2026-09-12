@@ -9,6 +9,7 @@ import math
 import sys
 from pathlib import Path
 
+import pytest
 import torch
 from scipy.optimize import brentq, fsolve
 
@@ -611,3 +612,114 @@ def test_golden_matches_stored_reference():
     torch.testing.assert_close(
         q, torch.tensor(golden["fan_curve"]["q"], dtype=DTYPE), atol=1e-9, rtol=1e-9
     )
+
+
+# ---------------------------------------------------------------------------------------
+# Whole-branch review, MUST FIX 1: every case above that exercises FixedFlow ("fan_driven")
+# passes differentiable=False only, so the default (differentiable=True) path -- which
+# computes the branch Jacobian by autograd rather than analytically -- was never exercised
+# by this suite for an element whose flow does not depend on dp at all. That path crashed
+# unconditionally for FixedFlow (RuntimeError at potential.py's autograd.grad call, in both
+# the learnable=False and learnable=True constructions) until fixed. The tests below
+# parametrize the fan-driven case and two others over both paths, and add a direct
+# same-inputs comparison between the two paths so a future regression here is caught by
+# result disagreement, not just by one path failing to run.
+# ---------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("differentiable", [False, True])
+def test_fan_driven_zone_pressure_matches_reference_on_both_paths(differentiable):
+    C1 = torch.tensor(0.020, dtype=DTYPE)
+    C2 = torch.tensor(0.010, dtype=DTYPE)
+    n = torch.tensor(0.65, dtype=DTYPE)
+    q_fan = torch.tensor(0.05, dtype=DTYPE)
+
+    net, layer = _fan_driven_layer(C1, C2, n, q_fan)
+    phi_boundary = torch.zeros(1, dtype=DTYPE)
+    phi, q = layer.solve(phi_boundary, differentiable=differentiable)
+
+    p_ref = -((q_fan / (C1 + C2)) ** (1.0 / n))
+    torch.testing.assert_close(phi[net.node_index("zone")], p_ref, atol=1e-6, rtol=1e-6)
+
+    residual = layer.residual(phi[..., layer.interior], phi_boundary, {}, None)
+    torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-8, rtol=0.0)
+
+
+@pytest.mark.parametrize("differentiable", [False, True])
+def test_series_closed_form_matches_reference_on_both_paths(differentiable):
+    C = [0.010, 0.008, 0.012]
+    n = 0.65
+    Pw = 12.0
+    net, layer = _series_layer(torch.tensor(C, dtype=DTYPE), torch.tensor(n, dtype=DTYPE))
+    drivers = {"wind": torch.tensor([Pw, 0.0, 0.0], dtype=DTYPE)}
+    phi_boundary = torch.zeros(2, dtype=DTYPE)
+    phi, q = layer.solve(phi_boundary, drivers, differentiable=differentiable)
+
+    q_ref = _series_reference_q(C, n, Pw)
+    torch.testing.assert_close(q, torch.full((3,), q_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6)
+
+
+@pytest.mark.parametrize("differentiable", [False, True])
+def test_stack_conservation_matches_reference_on_both_paths(differentiable):
+    C = torch.tensor([0.020, 0.030, 0.025, 0.018], dtype=DTYPE)
+    n = torch.tensor(0.6, dtype=DTYPE)
+    drive_values = torch.tensor([2.0, 1.5, 1.5, 2.0], dtype=DTYPE)
+
+    net, layer = _stack_layer(C, n)
+    phi_boundary = torch.zeros(2, dtype=DTYPE)
+    phi, q = layer.solve(phi_boundary, {"stack": drive_values}, differentiable=differentiable)
+    residual = layer.residual(
+        phi[..., layer.interior], phi_boundary, {"stack": drive_values}, None
+    )
+    torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-9, rtol=0.0)
+
+    phi_z1_ref, phi_z2_ref, phi_z3_ref, q0_ref, q1_ref, q2_ref, q3_ref = _stack_reference(
+        C.tolist(), n.item(), drive_values.tolist()
+    )
+    torch.testing.assert_close(
+        phi[net.node_index("z1")], torch.tensor(phi_z1_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6
+    )
+    torch.testing.assert_close(
+        phi[net.node_index("z2")], torch.tensor(phi_z2_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6
+    )
+    torch.testing.assert_close(
+        phi[net.node_index("z3")], torch.tensor(phi_z3_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6
+    )
+    q_ref = torch.tensor([q0_ref, q1_ref, q2_ref, q3_ref], dtype=DTYPE)
+    torch.testing.assert_close(q, q_ref, atol=1e-6, rtol=1e-6)
+
+
+@pytest.mark.parametrize("learnable", [False, True])
+def test_fan_driven_zone_differentiable_and_nondifferentiable_paths_agree(learnable):
+    """Direct regression guard for the FixedFlow-on-the-default-path crash (MUST FIX 1):
+    solve the same fan-driven problem on both paths and require them to agree, rather than
+    only checking each path separately against the physical reference (which would not by
+    itself catch two paths that happen to agree with each other but not with either
+    reference, nor would it distinguish "differentiable=True crashes" from "differentiable=
+    True runs but is silently wrong"). Parametrized over FixedFlow's own learnable flag
+    because the two failure modes fixed in potential.py's _dflows_functional are distinct:
+    learnable=False leaves flow without a grad_fn at all (flow does not depend on dp_slice
+    and q0 is not a registered parameter), while learnable=True gives flow a grad_fn through
+    q0 but still never through dp_slice, which is the case allow_unused=True guards.
+    """
+    C1 = torch.tensor(0.020, dtype=DTYPE)
+    C2 = torch.tensor(0.010, dtype=DTYPE)
+    n = torch.tensor(0.65, dtype=DTYPE)
+    q_fan = torch.tensor(0.05, dtype=DTYPE)
+
+    net = Network(dtype=DTYPE)
+    net.add_node("zone")
+    net.add_node("ambient")
+    net.add_edge("zone", "ambient", kind="airpath")
+    net.add_edge("zone", "ambient", kind="airpath")
+    net.add_edge("zone", "ambient", kind="fan")
+    leak = PowerLaw(torch.stack([C1, C2], dim=-1), n, dp_transition=1e-6)
+    fan = FixedFlow(q_fan, kind="fan", learnable=learnable)
+    layer = PotentialFlowLayer(net, "fan_driven", [leak, fan], boundary=["ambient"])
+
+    phi_boundary = torch.zeros(1, dtype=DTYPE)
+    phi_d, q_d = layer.solve(phi_boundary, differentiable=True)
+    phi_nd, q_nd = layer.solve(phi_boundary, differentiable=False)
+
+    torch.testing.assert_close(phi_d, phi_nd, atol=1e-8, rtol=1e-8)
+    torch.testing.assert_close(q_d, q_nd, atol=1e-8, rtol=1e-8)
