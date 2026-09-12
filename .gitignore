@@ -30,3 +30,6 @@ data/
 
 # Notebooks: strip outputs before committing
 *.ipynb_checkpoints/
+
+# Benchmark scratch output
+benchmarks_stderr.log

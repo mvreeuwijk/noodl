@@ -1,0 +1,42 @@
+torch 2.14.0+cpu, threads=14
+====================================================================================================
+Part A: solve J x = r, J = A_I diag(g) A_I^T, g spans 6 decades (1e-3..1e3)
+(SKIPPED this run -- see benchmarks/sparse_scaling_results_partA.txt)
+====================================================================================================
+     n      B  b_edges |    dense_s  dense_mem_MB |     cg_s  cg_it    cgJ_s  cgJ_it |     sp_s  sp_it |    err_cg    err_sp
+
+====================================================================================================
+Part A2: iteration counts vs conductance spread (n=300, B=100), Jacobi on/off
+====================================================================================================
+ decades  it_plain  it_jacobi
+       0        56         35
+       1        83         45
+       2       179         76
+       4       910        233
+       6      3000        446
+       8      3000        805
+
+====================================================================================================
+Part B: torch.sparse.spsolve, direct attempt on a trivial 4x4 CSR system
+====================================================================================================
+FAILED: NotImplementedError: Could not run 'aten::_spsolve' with arguments from the 'SparseCsrCPU' backend. This could be because the operator doesn't exist for this backend, or w
+
+====================================================================================================
+Part B2: raw matvec cost, J @ x, gather/scatter vs. torch.sparse batched-COO bmm
+(fixed 30 calls each, no CG/convergence involved -- isolates per-call overhead)
+====================================================================================================
+     n      B |  gs_ms/call  sp_ms/call  sp/gs ratio
+    50      1 |      0.3102      0.0734          0.2
+    50    100 |      0.7813      3.6034          4.6
+    50   1000 |      2.2298     24.7522         11.1
+   100      1 |      0.1518      0.0191          0.1
+   100    100 |      0.7980      4.5382          5.7
+   100   1000 |      3.3560     28.4176          8.5
+   300      1 |      0.0311      0.1037          3.3
+   300    100 |      1.1343      6.9426          6.1
+   300   1000 |      5.8563     88.8434         15.2
+  1000      1 |      0.0541      0.3001          5.5
+  1000    100 |      2.9220     26.7071          9.1
+  1000   1000 |     26.8933    238.3561          8.9
+  3000      1 |      0.2065      0.9868          4.8
+  3000    100 |      6.1535     94.2899         15.3
