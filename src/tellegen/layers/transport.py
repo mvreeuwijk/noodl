@@ -413,23 +413,39 @@ class TransportLayer:
         sources: torch.Tensor,
         x_boundary: torch.Tensor,
         dt: float,
+        *,
+        on_failure: str = "raise",
     ) -> torch.Tensor:
+        """Advance one timestep under `self.scheme`.
+
+        `on_failure` (keyword-only, default `"raise"`) is threaded to the `"implicit"` and
+        `"trapezoidal"` schemes' underlying linear solve; on `"return"` those two schemes
+        return the raw, stacked `SolveResult` instead of a plain `Tensor` (return type
+        `torch.Tensor | SolveResult`, amendment A8). `"exact"` does not accept a failure
+        mode here: it has no linear solve at all (Task 10's augmented matrix exponential
+        controls its own error via sub-stepping, and raises `RuntimeError` directly on
+        failure, as it always has).
+        """
         out_dtype = x.dtype
         dtype = torch.float64
         x_s, reduced = self._to_stacked(x, self.n_i, "x")
         x_s = x_s.to(dtype)
-        M, N = self.operator(q.to(dtype))
-        b0, _ = self._forcing(sources, x_boundary, N, dtype)
         if self.scheme == "exact":
+            M, N = self.operator(q.to(dtype))
+            b0, _ = self._forcing(sources, x_boundary, N, dtype)
             result = _van_loan_step(M, x_s, b0, dt)
         elif self.scheme == "implicit":
-            result, reduced = self._implicit_step_sparse(x, q, sources, x_boundary, dt, "raise")
-            return self._from_stacked(result.to(out_dtype), self.n_i, reduced)
+            result, reduced = self._implicit_step_sparse(
+                x, q, sources, x_boundary, dt, on_failure
+            )
+            if on_failure == "return":
+                return result
         elif self.scheme == "trapezoidal":
             result, reduced = self._trapezoidal_step_sparse(
-                x, q, sources, x_boundary, dt, "raise"
+                x, q, sources, x_boundary, dt, on_failure
             )
-            return self._from_stacked(result.to(out_dtype), self.n_i, reduced)
+            if on_failure == "return":
+                return result
         else:
             raise ValueError(
                 f"TransportLayer '{self.name}': unknown scheme {self.scheme!r}; "
