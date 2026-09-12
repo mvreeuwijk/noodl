@@ -237,3 +237,34 @@ def test_boundary_forcing_matches_dense_N_block():
     )
     x_b = torch.tensor([420.0], dtype=torch.float64)
     torch.testing.assert_close(op.boundary_forcing(x_b), (N @ x_b), rtol=1e-9, atol=1e-12)
+
+
+def test_diagonal_matches_torch_diagonal_of_assemble():
+    net = three_node_chain()
+    cap = torch.tensor([50.0, 80.0], dtype=torch.float64)
+    layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"])
+    q = torch.tensor([0.3, -0.2, 0.25], dtype=torch.float64)
+    src, tgt = net.endpoints("airpath")
+    op = AdvectionOperator(
+        src, tgt, flow=layer.carrier.to(q.dtype) * q, transmission=layer.transmission,
+        capacity=cap, n_interior=layer.n_i, interior_of_node=_interior_of_node(net, ["ambient"]),
+    )
+    torch.testing.assert_close(
+        op.diagonal(), torch.diagonal(op.assemble(), dim1=-2, dim2=-1), rtol=1e-9, atol=1e-12
+    )
+
+
+def test_diagonal_matches_dense_M_diagonal():
+    net = three_node_chain()
+    cap = torch.tensor([50.0, 80.0], dtype=torch.float64)
+    layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"])
+    q = torch.tensor([0.3, -0.2, 0.25], dtype=torch.float64)
+    M, _ = layer.operator(q)
+    src, tgt = net.endpoints("airpath")
+    op = AdvectionOperator(
+        src, tgt, flow=layer.carrier.to(q.dtype) * q, transmission=layer.transmission,
+        capacity=cap, n_interior=layer.n_i, interior_of_node=_interior_of_node(net, ["ambient"]),
+    )
+    torch.testing.assert_close(
+        op.diagonal(), torch.diagonal(M, dim1=-2, dim2=-1), rtol=1e-9, atol=1e-12
+    )

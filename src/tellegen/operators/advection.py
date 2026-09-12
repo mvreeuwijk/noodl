@@ -157,7 +157,50 @@ class AdvectionOperator:
         return out_i.reshape(*out_i.shape[:-2], K * n_i)
 
     def diagonal(self) -> torch.Tensor:
-        raise NotImplementedError  # Step 5
+        K, n_i = self.n_species, self.n_interior
+        dtype = self.flow.dtype
+        flow = self.flow.to(dtype)
+        w = flow.abs()
+        batch_shape = torch.broadcast_shapes(w.shape[:-1], self.capacity.shape[:-1])
+        w_b = w.unsqueeze(-2).expand(*batch_shape, K, self._n_edges)
+
+        up = torch.where(flow >= 0, self._src, self._tgt)
+        up_b = _bcast_index(up, batch_shape, K) if up.dim() == 1 \
+            else up.unsqueeze(-2).expand(*batch_shape, K, up.shape[-1])
+        out_diag_full = torch.zeros(*batch_shape, K, self._n, dtype=dtype, device=w.device)
+        out_diag_full.scatter_add_(-1, up_b, w_b)
+
+        self_loop = (self._src == self._tgt)
+        weight = self.transmission.to(dtype) * w.unsqueeze(-2)
+        weight = weight.expand(*batch_shape, K, self._n_edges)
+        masked = torch.where(
+            self_loop.expand(*batch_shape, K, self._n_edges), weight, torch.zeros_like(weight)
+        )
+        src_b = _bcast_index(self._src, batch_shape, K)
+        in_diag_full = torch.zeros(*batch_shape, K, self._n, dtype=dtype, device=w.device)
+        in_diag_full.scatter_add_(-1, src_b, masked)
+
+        l_diag_full = torch.zeros(*batch_shape, K, self._n, dtype=dtype, device=w.device)
+        if self.conduction is not None:
+            csrc, ctgt, g = self.conduction
+            g_b = g.to(dtype)
+            g_b = g_b.unsqueeze(-2).expand(*batch_shape, K, csrc.shape[-1]) if g_b.dim() >= 1 \
+                else g_b
+            csrc_b = _bcast_index(csrc, batch_shape, K)
+            ctgt_b = _bcast_index(ctgt, batch_shape, K)
+            l_diag_full.scatter_add_(-1, csrc_b, g_b)
+            l_diag_full.scatter_add_(-1, ctgt_b, g_b)
+
+        raw_diag = in_diag_full - out_diag_full - l_diag_full
+        diag_i = raw_diag.index_select(-1, self._interior_idx)
+        cap = self.capacity.to(dtype).unsqueeze(-2)
+        diag_i = diag_i / cap
+        if self.removal is not None:
+            diag_i = diag_i - self.removal.to(dtype).transpose(-1, -2)
+        if self.kinetics is not None:
+            kdiag = torch.diagonal(self.kinetics.to(dtype), dim1=-2, dim2=-1)  # (n_i, K)
+            diag_i = diag_i + kdiag.transpose(-1, -2)
+        return diag_i.reshape(*diag_i.shape[:-2], K * n_i)
 
     def assemble(self) -> torch.Tensor:
         raise NotImplementedError  # Step 6
