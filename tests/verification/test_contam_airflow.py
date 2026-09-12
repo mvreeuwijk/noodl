@@ -75,3 +75,29 @@ def test_series_closed_form_single_instance():
     )
     residual_last = phi_z2_ref - (q_ref / C[2]) ** (1.0 / n)
     assert abs(residual_last) < 1e-6
+
+
+def test_series_closed_form_batched():
+    torch.manual_seed(0)
+    m = 64
+    C = 0.004 + 0.02 * torch.rand(m, 3, dtype=DTYPE)
+    n = 0.5 + 0.3 * torch.rand(m, 1, dtype=DTYPE)
+    Pw = 5.0 + 45.0 * torch.rand(m, dtype=DTYPE)
+
+    net, layer = _series_layer(C, n)
+    wind = torch.zeros(m, 3, dtype=DTYPE)
+    wind[:, 0] = Pw
+    drivers = {"wind": wind}
+    phi_boundary = torch.zeros(m, 2, dtype=DTYPE)
+    phi, q = layer.solve(phi_boundary, drivers, differentiable=False)
+
+    q_ref = torch.empty(m, dtype=DTYPE)
+    for i in range(m):
+        q_ref[i] = _series_reference_q(C[i].tolist(), n[i, 0].item(), Pw[i].item())
+
+    torch.testing.assert_close(q[:, 0], q_ref, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(q[:, 1], q_ref, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(q[:, 2], q_ref, atol=1e-6, rtol=1e-6)
+
+    c_series = (C ** (-1.0 / n)).sum(dim=-1) ** (-n.squeeze(-1))
+    torch.testing.assert_close(q_ref, c_series * Pw**n.squeeze(-1), atol=1e-6, rtol=1e-6)
