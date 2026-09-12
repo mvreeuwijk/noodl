@@ -430,10 +430,20 @@ class PotentialFlowLayer:
                 parts.append(torch.func.functional_call(el, d, (dp_full[..., s:e], drv)))
             return torch.cat(parts, dim=-1)
 
+        def _dp_dependence_error(el, i: int) -> RuntimeError:
+            return RuntimeError(
+                f"element {i} of kind {el.kind!r} (type {type(el).__name__}) produced a "
+                f"flow that does not depend on dp; if that is intended, set "
+                f"dp_independent = True on this element's class, otherwise its flow() is "
+                f"dropping the autograd graph (e.g. a stray dp.detach())."
+            )
+
         def _dflows_functional(phi, drv, rebuilt):
             dp_full = _dp_functional(phi, drv)
             parts = []
-            for el, d, (s, e) in zip(self._elements, rebuilt, self._elem_slices, strict=True):
+            for i, (el, d, (s, e)) in enumerate(
+                zip(self._elements, rebuilt, self._elem_slices, strict=True)
+            ):
                 dp_slice = dp_full[..., s:e].detach().requires_grad_(True)
                 # The REDUCTION `flow.sum()` must itself execute inside the enable_grad
                 # block, not just the `functional_call` that produces `flow`: this whole
@@ -454,41 +464,48 @@ class PotentialFlowLayer:
                 # must be inside the block.
                 with torch.enable_grad():
                     flow = torch.func.functional_call(el, d, (dp_slice, drv))
-                    # An element whose flow genuinely does not depend on dp (FixedFlow,
-                    # whose spec-documented dflow is identically 0) surfaces two distinct
-                    # autograd failure modes here, and they need two different guards:
-                    #
-                    # (a) FixedFlow(learnable=False) (the default construction): flow =
-                    # q0 + torch.zeros_like(dp_slice), and `zeros_like` does not carry
-                    # dp_slice's requires_grad forward, so with q0 itself not requiring
-                    # grad `flow` ends up with requires_grad=False and no grad_fn at all.
-                    # torch.autograd.grad requires its `outputs` argument to itself
-                    # require grad; `allow_unused` cannot rescue this because that flag
-                    # excuses an unused *input*, not an output that never entered the
-                    # autograd graph in the first place (confirmed empirically: the same
-                    # "does not require grad and does not have a grad_fn" error is raised
-                    # with or without allow_unused/materialize_grads). Since flow does not
-                    # depend on dp_slice at all in this case, the correct Jacobian
-                    # contribution is exactly zero, so we short-circuit to it directly.
-                    #
-                    # (b) FixedFlow(learnable=True): q0 is now a registered parameter, so
-                    # flow = q0 + zeros_like(dp_slice) DOES require grad (through q0), but
-                    # dp_slice is still never used to compute it, so plain
-                    # torch.autograd.grad(flow.sum(), dp_slice) raises "the differentiated
-                    # Tensor at index 0 appears to not have been used in the graph". Here
-                    # allow_unused=True (paired with materialize_grads=True, so the result
-                    # is an actual zero tensor of dp_slice's shape/dtype/device rather than
-                    # None) is exactly the right fix.
-                    if flow.requires_grad:
-                        (grad,) = torch.autograd.grad(
-                            flow.sum(),
-                            dp_slice,
-                            create_graph=False,
-                            allow_unused=True,
-                            materialize_grads=True,
-                        )
-                    else:
+                    # Whether a missing/zero Jacobian contribution here is legitimate is
+                    # decided ONLY by el.dp_independent -- a class-level DECLARATION (see
+                    # Element) -- never inferred from whatever autograd graph `flow` happens
+                    # to carry. A previous version of this code inferred it from
+                    # `flow.requires_grad` (with allow_unused=True as a catch-all), which
+                    # meant ANY element whose flow() accidentally lost the autograd graph
+                    # (e.g. a stray dp.detach() in a third-party subclass) silently got an
+                    # exact-zero Jacobian column instead of an error: the forward solve still
+                    # looked fine (Newton converges on the exact residual regardless), but
+                    # the adjoint gradient computed from that Jacobian was silently wrong.
+                    if el.dp_independent:
+                        # Cross-check the declaration against the element's own analytic
+                        # dflow(), which for a genuinely dp-independent law (FixedFlow's
+                        # spec) must be identically zero. This is called on `el` directly
+                        # (not through functional_call/`d`) rather than via a second
+                        # functional_call: torch.func.functional_call always invokes the
+                        # module's forward()/flow(), with no way to redirect it to dflow(),
+                        # and `d`'s tensors are the very same objects as el's own current
+                        # parameters (both trace back to el.named_parameters() at the start
+                        # of solve()), so reading el's own attributes here gives the same
+                        # values a substituted call would. This catches a wrongly-declared
+                        # dp_independent = True (or a dflow() inconsistent with it) instead
+                        # of silently trusting a possibly-wrong flag.
+                        analytic = el.dflow(dp_slice.detach(), drv)
+                        if not torch.equal(analytic, torch.zeros_like(analytic)):
+                            raise RuntimeError(
+                                f"element {i} of kind {el.kind!r} (type "
+                                f"{type(el).__name__}) declares dp_independent = True but "
+                                f"its own dflow() is not identically zero; either the flag "
+                                f"is wrong or dflow() is inconsistent with a dp-independent "
+                                f"flow law."
+                            )
                         grad = torch.zeros_like(dp_slice)
+                    elif not flow.requires_grad:
+                        raise _dp_dependence_error(el, i)
+                    else:
+                        try:
+                            (grad,) = torch.autograd.grad(
+                                flow.sum(), dp_slice, create_graph=False
+                            )
+                        except RuntimeError as exc:
+                            raise _dp_dependence_error(el, i) from exc
                 parts.append(grad)
             return torch.cat(parts, dim=-1)
 

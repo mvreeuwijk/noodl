@@ -94,6 +94,47 @@ def test_param_learnable_true_yields_a_registered_parameter_even_for_a_grad_trac
     assert "k" in el.state_dict()
 
 
+class _ConstantIgnoringDp(Element):
+    """Buggy element: flow does not depend on dp at all (no learnable state either), so
+    the returned tensor never requires grad."""
+
+    def __init__(self, q0):
+        super().__init__(kind="test")
+        self.q0 = q0
+
+    def flow(self, dp, drivers=None):
+        return self.q0 + 0.0 * dp.detach()
+
+
+def test_dflow_default_raises_a_clear_error_naming_the_element_when_flow_ignores_dp():
+    # Same hazard as `_dflows_functional`'s guard, one call earlier: `Element.linear_init`'s
+    # default reaches this default `dflow` (via `PotentialFlowLayer.linear_init`, called
+    # before every solve()), and a `flow()` that silently drops the autograd graph must
+    # raise a clear, element-naming error here too rather than a raw, unattributed one.
+    el = _ConstantIgnoringDp(torch.tensor(1.0))
+    with pytest.raises(RuntimeError, match="_ConstantIgnoringDp"):
+        el.dflow(torch.tensor([0.0, 1.0]))
+
+
+class _DetachedButLearnable(Element):
+    """Buggy element: flow requires grad (through its own learnable parameter `k`), but
+    never actually uses its dp input, so autograd.grad(flow.sum(), dp) raises "not used in
+    the graph" rather than "does not require grad"."""
+
+    def __init__(self, k):
+        super().__init__(kind="test")
+        self.k = self._param(k, learnable=True)
+
+    def flow(self, dp, drivers=None):
+        return self.k + 0.0 * dp.detach()
+
+
+def test_dflow_default_raises_a_clear_error_naming_the_element_when_dp_is_unused():
+    el = _DetachedButLearnable(torch.tensor(2.0))
+    with pytest.raises(RuntimeError, match="_DetachedButLearnable"):
+        el.dflow(torch.tensor([0.0, 1.0]))
+
+
 def test_forward_delegates_to_the_subclass_flow_override_not_the_base_class():
     """Guards against a naive `forward = flow` class-body assignment.
 

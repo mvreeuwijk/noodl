@@ -6,6 +6,7 @@ from scipy.optimize import brentq
 
 from tellegen.drives import ConstantDrive
 from tellegen.elements import Conductance, FixedFlow, PowerLaw
+from tellegen.elements.base import Element
 from tellegen.layers.potential import PotentialFlowLayer
 from tellegen.solvers.newton import newton
 from tellegen.topology import Network
@@ -555,3 +556,176 @@ def test_solve_raises_for_drive_owning_its_own_differentiable_tensor(two_zone_la
 
     with pytest.raises(ValueError, match="coeff"):
         layer.solve(phi_b, {"wind": wind}, None, differentiable=True)
+
+
+class _DetachedLeak(Element):
+    """Buggy element: mathematically a PowerLaw leak, but detaches dp inside flow(), which
+    silently drops the autograd graph -- the exact hazard
+    `test_solve_raises_when_an_element_flow_silently_drops_the_autograd_graph` guards
+    against. Unlike FixedFlow, this element does NOT declare `dp_independent = True`: its
+    flow genuinely depends on dp mathematically, it just fails to say so to autograd.
+
+    `linear_init` is overridden with the same closed-form tangent `PowerLaw.linear_init`
+    uses, bypassing `Element`'s own autograd-based default (which would call `dflow`, which
+    in turn would call the buggy `flow`, and raise there instead). This matches the
+    demonstrated defect precisely: the forward Newton solve converges without incident (the
+    residual is exact regardless of how the Jacobian is computed), and only the
+    differentiable path's own Jacobian evaluation (`_dflows_functional`, which
+    differentiates `flow` directly via autograd) ever exercises the detach bug.
+    """
+
+    def __init__(self, C, n, *, kind: str = "airpath") -> None:
+        super().__init__(kind)
+        self.C = self._param(C, learnable=False)
+        self.n = self._param(n, learnable=False)
+        self.dp_transition = 1e-3
+
+    def flow(self, dp, drivers=None):
+        dp_bug = dp.detach()  # BUG: silently drops the autograd graph
+        return self.C * torch.sign(dp_bug) * dp_bug.abs() ** self.n
+
+    def linear_init(self, drivers=None):
+        k = self.C * self.dp_transition ** (self.n - 1)
+        return torch.zeros_like(k), k
+
+
+def _mixed_leak_network(*, include_buggy: bool) -> tuple[Network, list]:
+    """ambient (boundary) -- z, joined by two correct PowerLaw leaks (and, if
+    `include_buggy`, a third, buggy leak of the same mathematical form)."""
+    net = Network(dtype=torch.float64)
+    net.add_node("ambient")
+    net.add_node("z")
+    net.add_edge("ambient", "z", kind="leakA")
+    net.add_edge("ambient", "z", kind="leakB")
+    elements = [
+        PowerLaw(torch.tensor([0.02], dtype=torch.float64), 0.65, kind="leakA"),
+        PowerLaw(torch.tensor([0.015], dtype=torch.float64), 0.6, kind="leakB"),
+    ]
+    if include_buggy:
+        net.add_edge("ambient", "z", kind="leakBuggy")
+        elements.append(
+            _DetachedLeak(torch.tensor([0.01], dtype=torch.float64), 0.7, kind="leakBuggy")
+        )
+    return net, elements
+
+
+def test_solve_raises_when_an_element_flow_silently_drops_the_autograd_graph():
+    # Demonstrated defect: with the old, unconditional `flow.requires_grad` short-circuit
+    # in `_dflows_functional`, a mixed layer of two correct PowerLaw leaks plus this buggy
+    # element solved fine (Newton converges on the exact residual regardless) but produced a
+    # silently wrong adjoint gradient (a demonstrated ~50% error on d(phi_zone)/d(source)).
+    # The differentiable solve must now raise instead, naming the offending element, because
+    # `_DetachedLeak` does not declare `dp_independent = True`.
+    net, elements = _mixed_leak_network(include_buggy=True)
+    layer = PotentialFlowLayer(net, "mixed", elements, boundary=["ambient"])
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    sources = torch.tensor([0.0, 1.0], dtype=torch.float64, requires_grad=True)
+
+    with pytest.raises(RuntimeError, match="leakBuggy"):
+        layer.solve(phi_b, {}, sources, differentiable=True)
+
+
+def test_solve_matches_finite_differences_for_the_all_correct_mixed_leak_layer():
+    # Companion to the test above: with the buggy element removed, the same mixed-kind
+    # layer's differentiable solve must still work, and its adjoint gradient of the zone
+    # pressure with respect to the interior source must match finite differences.
+    net, elements = _mixed_leak_network(include_buggy=False)
+    layer = PotentialFlowLayer(net, "mixed", elements, boundary=["ambient"])
+    phi_b = torch.zeros(1, dtype=torch.float64)
+
+    def zone_pressure(source_z: torch.Tensor) -> torch.Tensor:
+        sources = torch.stack([torch.zeros((), dtype=torch.float64), source_z])
+        phi, _ = layer.solve(phi_b, {}, sources, differentiable=False, atol=1e-13, rtol=1e-13)
+        return phi[1]
+
+    source_z0 = torch.tensor(1.0, dtype=torch.float64)
+    h = 1e-6
+    grad_fd = (zone_pressure(source_z0 + h) - zone_pressure(source_z0 - h)) / (2 * h)
+
+    sources = torch.tensor([0.0, 1.0], dtype=torch.float64, requires_grad=True)
+    phi, _ = layer.solve(phi_b, {}, sources, differentiable=True)
+    phi[1].backward()
+    grad_ad = sources.grad[1]
+
+    torch.testing.assert_close(grad_ad, grad_fd, atol=1e-6, rtol=1e-5)
+
+
+class _WronglyDeclaredDpIndependent(Element):
+    """A PowerLaw-like leak that WRONGLY declares dp_independent = True: its dflow() is not
+    identically zero, so the cross-check in `_dflows_functional` (which reads dflow() for any
+    element declaring dp_independent) must catch the mismatch and raise, rather than
+    trusting a wrong flag and silently zeroing this element's real Jacobian contribution."""
+
+    dp_independent = True
+
+    def __init__(self, C, n, *, kind: str = "airpath") -> None:
+        super().__init__(kind)
+        self.C = self._param(C, learnable=False)
+        self.n = self._param(n, learnable=False)
+        self.dp_transition = 1e-3
+
+    def flow(self, dp, drivers=None):
+        return self.C * torch.sign(dp) * dp.abs() ** self.n
+
+    def dflow(self, dp, drivers=None):
+        return self.n * self.C * dp.abs() ** (self.n - 1)
+
+    def linear_init(self, drivers=None):
+        k = self.C * self.dp_transition ** (self.n - 1)
+        return torch.zeros_like(k), k
+
+
+def test_solve_raises_when_dp_independent_is_wrongly_declared():
+    # Design choice evaluated in the report: dp_independent is cross-checked against the
+    # element's own analytic dflow() so a WRONG declaration (not just a missing one) is also
+    # caught, instead of being trusted silently.
+    net = Network(dtype=torch.float64)
+    net.add_node("ambient")
+    net.add_node("z")
+    net.add_edge("ambient", "z", kind="leak")
+    elements = [
+        _WronglyDeclaredDpIndependent(torch.tensor([0.02], dtype=torch.float64), 0.7, kind="leak")
+    ]
+    layer = PotentialFlowLayer(net, "wrong_flag", elements, boundary=["ambient"])
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    sources = torch.tensor([0.0, 1.0], dtype=torch.float64, requires_grad=True)
+
+    with pytest.raises(RuntimeError, match="leak"):
+        layer.solve(phi_b, {}, sources, differentiable=True)
+
+
+class _DetachedButLearnableLeak(Element):
+    """Buggy element whose flow requires grad (through its own learnable parameter C) but
+    never actually uses dp, so `_dflows_functional`'s autograd.grad call raises "not used in
+    the graph" rather than "does not require grad" -- the other of the two autograd failure
+    modes the guard must turn into a clear, element-naming error."""
+
+    def __init__(self, C, n, *, kind: str = "airpath") -> None:
+        super().__init__(kind)
+        self.C = self._param(C, learnable=True)
+        self.n = self._param(n, learnable=False)
+        self.dp_transition = 1e-3
+
+    def flow(self, dp, drivers=None):
+        dp_bug = dp.detach()  # BUG: silently drops the autograd graph
+        return self.C * torch.sign(dp_bug) * dp_bug.abs() ** self.n
+
+    def linear_init(self, drivers=None):
+        k = self.C * self.dp_transition ** (self.n - 1)
+        return torch.zeros_like(k), k
+
+
+def test_solve_raises_when_flow_requires_grad_via_a_parameter_but_ignores_dp():
+    net = Network(dtype=torch.float64)
+    net.add_node("ambient")
+    net.add_node("z")
+    net.add_edge("ambient", "z", kind="leak")
+    elements = [
+        _DetachedButLearnableLeak(torch.tensor([0.02], dtype=torch.float64), 0.7, kind="leak")
+    ]
+    layer = PotentialFlowLayer(net, "unused_dp", elements, boundary=["ambient"])
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    sources = torch.tensor([0.0, 1.0], dtype=torch.float64, requires_grad=True)
+
+    with pytest.raises(RuntimeError, match="leak"):
+        layer.solve(phi_b, {}, sources, differentiable=True)

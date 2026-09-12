@@ -32,9 +32,25 @@ class Element(torch.nn.Module):
     Subclasses implement :meth:`flow`. :meth:`dflow` and :meth:`linear_init` have working
     defaults built on :meth:`flow` and autograd; subclasses may override either with an
     analytic form for speed and exactness where autograd is ill-conditioned.
+
+    ``dp_independent`` (default ``False``) is a class-level DECLARATION, not something
+    inferred from whether ``flow`` happens to build an autograd graph back to ``dp``. Set it
+    ``True`` only when ``flow`` is mathematically independent of ``dp`` (so ``dflow`` is
+    identically zero everywhere) -- ``FixedFlow`` is the built-in example. The differentiable
+    solve path (``PotentialFlowLayer.solve(differentiable=True)``, in
+    ``tellegen.layers.potential._dflows_functional``) uses this flag, and only this flag, to
+    decide whether a missing gradient of ``flow`` with respect to ``dp`` is legitimate (this
+    element declares it does not depend on ``dp``) or a bug (some other element's ``flow``
+    silently dropped the autograd graph, e.g. via a stray ``dp.detach()``). Declaring instead
+    of inferring keeps that distinction loud: a third-party ``Element`` subclass that
+    accidentally detaches ``dp`` now raises a clear error instead of silently receiving a
+    zero Jacobian column (which leaves the forward solve looking fine -- Newton still
+    converges on the exact residual -- while the adjoint gradient computed from that Jacobian
+    is silently wrong).
     """
 
     kind: str
+    dp_independent: bool = False
 
     def __init__(self, kind: str) -> None:
         super().__init__()
@@ -60,13 +76,45 @@ class Element(torch.nn.Module):
         (captured before ``enable_grad`` is forced locally): no graph is built under
         ``torch.no_grad()`` (the batched Newton solve of Tasks 6/7); a graph is built under
         ordinary tracking, including inside ``gradcheck``, which differentiates this twice.
+
+        This default assumes ``flow`` actually depends on ``dp`` (true of every well-behaved
+        subclass); a genuinely ``dp_independent`` element (``FixedFlow``) overrides both
+        ``dflow`` and ``linear_init`` with its own analytic zero and never reaches this
+        method. If ``flow`` does not depend on ``dp`` here -- either because it produces an
+        output that does not require grad at all, or because ``dp`` is silently unused inside
+        it (e.g. a stray ``dp.detach()``) -- that is the same gradient hazard the
+        differentiable solve path guards against in
+        ``tellegen.layers.potential._dflows_functional``, reached here via
+        ``PotentialFlowLayer.linear_init`` instead. Raise a clear error naming the element
+        and its kind rather than letting a raw, unattributed autograd error escape.
         """
         grad_enabled = torch.is_grad_enabled()
         x = dp.detach().clone()
         x.requires_grad_(True)
         with torch.enable_grad():
             q = self.flow(x, drivers)
-            (grad,) = torch.autograd.grad(q.sum(), x, create_graph=grad_enabled)
+            if not q.requires_grad:
+                raise RuntimeError(
+                    f"{type(self).__name__} (kind {self.kind!r}) produced a flow that does "
+                    f"not depend on dp (flow.requires_grad is False), so the default "
+                    f"autograd-based dflow() cannot differentiate it. If this element's flow "
+                    f"is genuinely independent of dp, override dflow() (and linear_init()) "
+                    f"with the analytic zero, as FixedFlow does, and set "
+                    f"dp_independent = True. Otherwise flow() is dropping the autograd "
+                    f"graph (e.g. a stray dp.detach())."
+                )
+            try:
+                (grad,) = torch.autograd.grad(q.sum(), x, create_graph=grad_enabled)
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"{type(self).__name__} (kind {self.kind!r}) produced a flow that does "
+                    f"not use its dp input anywhere in the computation, so the default "
+                    f"autograd-based dflow() cannot differentiate it. If this element's flow "
+                    f"is genuinely independent of dp, override dflow() (and linear_init()) "
+                    f"with the analytic zero, as FixedFlow does, and set "
+                    f"dp_independent = True. Otherwise flow() is dropping the autograd "
+                    f"graph (e.g. a stray dp.detach())."
+                ) from exc
         return grad
 
     def linear_init(
