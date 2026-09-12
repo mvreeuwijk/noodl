@@ -43,3 +43,42 @@ def test_raise_on_failure_does_not_raise_when_every_instance_converged():
     result = _result(converged=[True, True], status=[0, 0], residual=[1e-12, 1e-13])
     returned = result.raise_on_failure("solve")
     assert returned is result
+
+
+from tellegen.operators.base import LinearOperator
+
+
+class _HandRolledOperator:
+    """Satisfies LinearOperator structurally, with no relation to DenseOperator."""
+
+    def __init__(self):
+        self.shape = (2, 2)
+        self.dtype = torch.float64
+        self.device = torch.device("cpu")
+        self.symmetric = False
+
+    def matvec(self, x):
+        return x
+
+    def rmatvec(self, x):
+        return x
+
+    def diagonal(self):
+        return torch.ones(2, dtype=torch.float64)
+
+    def assemble(self):
+        return None
+
+    def spd_certificate(self):
+        return None
+
+
+def test_a_hand_rolled_class_with_every_member_satisfies_the_protocol():
+    assert isinstance(_HandRolledOperator(), LinearOperator)
+
+
+def test_a_plain_object_missing_every_member_does_not_satisfy_the_protocol():
+    class NotAnOperator:
+        pass
+
+    assert not isinstance(NotAnOperator(), LinearOperator)

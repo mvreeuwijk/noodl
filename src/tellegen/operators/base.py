@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
+from typing import Protocol, runtime_checkable
 
 import torch
 
@@ -60,3 +61,30 @@ class SolveResult:
             f"{where}: batch indices {bad} failed to converge; "
             f"statuses {statuses}, residuals {residuals}"
         )
+
+
+@runtime_checkable
+class LinearOperator(Protocol):
+    """A batched linear operator, defined by its action rather than its storage.
+
+    `@runtime_checkable` is required (not merely decorative) so that
+    `isinstance(op, LinearOperator)` -- the protocol-conformance test in
+    `tests/operators/test_base.py` -- can be written at all; `Protocol` classes are not
+    usable with `isinstance` without it. As with every `runtime_checkable` protocol, the
+    check is structural (attribute and method NAMES only) and does not verify signatures.
+    """
+
+    shape: tuple[int, ...]
+    dtype: torch.dtype
+    device: torch.device
+    symmetric: bool
+
+    def matvec(self, x: Tensor) -> Tensor: ...
+
+    def rmatvec(self, x: Tensor) -> Tensor: ...
+
+    def diagonal(self) -> Tensor: ...
+
+    def assemble(self) -> Tensor | None: ...
+
+    def spd_certificate(self) -> Tensor | None: ...
