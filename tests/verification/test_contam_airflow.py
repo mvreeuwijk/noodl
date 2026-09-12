@@ -101,3 +101,40 @@ def test_series_closed_form_batched():
 
     c_series = (C ** (-1.0 / n)).sum(dim=-1) ** (-n.squeeze(-1))
     torch.testing.assert_close(q_ref, c_series * Pw**n.squeeze(-1), atol=1e-6, rtol=1e-6)
+
+
+def _parallel_layer(
+    C1: torch.Tensor, C2: torch.Tensor, n: torch.Tensor
+) -> tuple[Network, PotentialFlowLayer]:
+    """Two parallel airpath edges a -> c (a multigraph), same exponent n."""
+    net = Network(dtype=DTYPE)
+    net.add_node("a")
+    net.add_node("c")
+    net.add_edge("a", "c", kind="airpath")
+    net.add_edge("a", "c", kind="airpath")
+    C = torch.stack([C1, C2], dim=-1)
+    element = PowerLaw(C, n, dp_transition=1e-6)
+    layer = PotentialFlowLayer(net, "parallel", [element], boundary=["a", "c"])
+    return net, layer
+
+
+def test_parallel_combination_single_instance():
+    C1 = torch.tensor(0.020, dtype=DTYPE)
+    C2 = torch.tensor(0.015, dtype=DTYPE)
+    n = torch.tensor(0.6, dtype=DTYPE)
+    Dp = torch.tensor(8.0, dtype=DTYPE)
+
+    net, layer = _parallel_layer(C1, C2, n)
+    phi_boundary = torch.stack([Dp, torch.zeros((), dtype=DTYPE)])
+    phi, q = layer.solve(phi_boundary, differentiable=False)
+
+    q1_ref = C1 * torch.sign(Dp) * Dp.abs() ** n
+    q2_ref = C2 * torch.sign(Dp) * Dp.abs() ** n
+    torch.testing.assert_close(q[0], q1_ref, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(q[1], q2_ref, atol=1e-6, rtol=1e-6)
+
+    c_par = C1 + C2
+    torch.testing.assert_close(
+        q.sum(), c_par * torch.sign(Dp) * Dp.abs() ** n, atol=1e-6, rtol=1e-6
+    )
+    torch.testing.assert_close(q[0] / q[1], C1 / C2, atol=1e-6, rtol=1e-6)

@@ -36,6 +36,18 @@ def newton(
 ) -> NewtonResult:
     x = x0
     r = residual(x)
+    if r.shape[-1] == 0:
+        # Zero interior unknowns (every node is a boundary node): there is nothing to
+        # iterate on, and `r.abs().amax(dim=-1)` below would raise IndexError ("Expected
+        # reduction dim -1 to have non-zero size") rather than reporting a valid, trivially
+        # converged system. `x` (shape (..., 0)) is already the unique solution.
+        zero = torch.zeros(r.shape[:-1], dtype=r.dtype, device=r.device)
+        return NewtonResult(
+            x=x,
+            converged=torch.ones(r.shape[:-1], dtype=torch.bool, device=r.device),
+            iterations=0,
+            residual_norm=zero,
+        )
     norm0 = r.abs().amax(dim=-1)
     tol = atol + rtol * norm0
     norm = norm0
