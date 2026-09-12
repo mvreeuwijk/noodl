@@ -319,3 +319,25 @@ def test_gradcheck_implicit_step_wrt_x_q_sources_boundary():
         return layer.step(x, q, sources, x_b, 300.0)
 
     assert gradcheck(f, (x, q, sources, x_b), eps=1e-6, atol=1e-5)
+
+
+def test_trapezoidal_step_sparse_matches_dense_oracle():
+    net = flow_through_zone()
+    cap = torch.tensor([1000.0], dtype=torch.float64)
+    layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath",
+                            boundary=["ambient"], scheme="trapezoidal")
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    c0 = torch.tensor([100.0], dtype=torch.float64)
+    source = torch.tensor([2.0], dtype=torch.float64)
+    c_out = torch.tensor([420.0], dtype=torch.float64)
+    dt = 200.0
+
+    x_sparse = layer.step(c0, q, source, c_out, dt)
+
+    M, N = layer.operator(q)
+    b0 = (N @ c_out.unsqueeze(-1)).squeeze(-1) + source / cap
+    m = M.shape[-1]
+    eye = torch.eye(m, dtype=torch.float64)
+    rhs = ((eye + 0.5 * dt * M) @ c0.unsqueeze(-1)).squeeze(-1) + dt * b0
+    x_dense = torch.linalg.solve(eye - 0.5 * dt * M, rhs.unsqueeze(-1)).squeeze(-1)
+    torch.testing.assert_close(x_sparse, x_dense, rtol=1e-9, atol=1e-12)

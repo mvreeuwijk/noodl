@@ -426,7 +426,10 @@ class TransportLayer:
             result, reduced = self._implicit_step_sparse(x, q, sources, x_boundary, dt, "raise")
             return self._from_stacked(result.to(out_dtype), self.n_i, reduced)
         elif self.scheme == "trapezoidal":
-            result = _trapezoidal_step(M, x_s, b0, dt, self.name)
+            result, reduced = self._trapezoidal_step_sparse(
+                x, q, sources, x_boundary, dt, "raise"
+            )
+            return self._from_stacked(result.to(out_dtype), self.n_i, reduced)
         else:
             raise ValueError(
                 f"TransportLayer '{self.name}': unknown scheme {self.scheme!r}; "
@@ -509,6 +512,43 @@ class TransportLayer:
         )
         return x_s, reduced
 
+    def _trapezoidal_step_sparse(
+        self, x: torch.Tensor, q: torch.Tensor, sources: torch.Tensor,
+        x_boundary: torch.Tensor, dt: float, on_failure: str,
+    ) -> torch.Tensor:
+        """Crank-Nicolson `(I - dt/2 M) x_{n+1} = (I + dt/2 M) x_n + dt b0` on the operator
+        contract."""
+        dtype = torch.float64
+        x = x.to(dtype)
+        q = q.to(dtype)
+        sources = sources.to(dtype)
+        x_boundary = x_boundary.to(dtype)
+        _, reduced = self._to_stacked(x, self.n_i, "x")
+
+        def build_system(x_, q_, sources_, xb_):
+            op = self._advection_operator(q_)
+            xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
+            src_s, _ = self._to_stacked(sources_, self.n_i, "sources")
+            x_s, _ = self._to_stacked(x_, self.n_i, "x")
+            cap = self._capacity_stacked(dtype)
+            b0 = op.boundary_forcing(xb_s) + src_s / cap
+            rhs = x_s + 0.5 * dt * op.matvec(x_s) + dt * b0
+            system = _AffineSystemOperator(op, 0.5 * dt)
+            return system, rhs
+
+        if on_failure == "return":
+            system, rhs = build_system(x, q, sources, x_boundary)
+            result = _solve_operator(
+                system, rhs, method="auto", on_failure="return",
+                where=f"TransportLayer '{self.name}' trapezoidal step",
+            )
+            return result, reduced
+        x_s = _linear_solve(
+            build_system, f"TransportLayer '{self.name}' trapezoidal step",
+            x, q, sources, x_boundary,
+        )
+        return x_s, reduced
+
 
 def _van_loan_step(
     M: torch.Tensor, x: torch.Tensor, b0: torch.Tensor, dt: float
@@ -525,16 +565,3 @@ def _van_loan_step(
     return (Ed @ x.unsqueeze(-1)).squeeze(-1) + (Phi @ b0.unsqueeze(-1)).squeeze(-1)
 
 
-def _trapezoidal_step(
-    M: torch.Tensor, x: torch.Tensor, b0: torch.Tensor, dt: float, name: str
-) -> torch.Tensor:
-    """Crank-Nicolson: (I - dt/2 M) x_{n+1} = (I + dt/2 M) x_n + dt b0."""
-    m = M.shape[-1]
-    eye = torch.eye(m, dtype=M.dtype).expand(*M.shape[:-2], m, m)
-    rhs = ((eye + 0.5 * dt * M) @ x.unsqueeze(-1)).squeeze(-1) + dt * b0
-    try:
-        return torch.linalg.solve(eye - 0.5 * dt * M, rhs.unsqueeze(-1)).squeeze(-1)
-    except torch.linalg.LinAlgError as err:
-        raise RuntimeError(
-            f"TransportLayer '{name}': trapezoidal-scheme system is singular for dt={dt}: {err}"
-        ) from err
