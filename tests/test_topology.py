@@ -56,6 +56,37 @@ def test_gradient_of_nodal_potential_gives_source_minus_target_difference():
     assert torch.allclose(p, torch.tensor([-6.0, -3.0, 9.0]))
 
 
+def test_difference_is_transpose_of_incidence():
+    net = triangle()
+    assert torch.equal(net.difference(), net.incidence().T)
+
+
+def test_difference_is_the_negative_of_gradient():
+    """MUST FIX 3 (whole-branch review): `difference()` and `gradient()` are opposite sign
+    conventions on the same quantity -- `difference()` is source minus target (what
+    `PotentialFlowLayer.dp()` actually uses), `gradient()` is target minus source. They must
+    be exact negatives of each other on every network, not just on the hand-checked case
+    below.
+    """
+    net = triangle()
+    assert torch.equal(net.difference(), -net.gradient())
+
+
+def test_difference_of_nodal_potential_gives_source_minus_target_difference():
+    """Hand-checked graph: triangle a->b->c->a with phi = [10, 4, 1] (a, b, c).
+
+    For each directed edge (source, target), `difference() @ phi` must equal
+    `phi[source] - phi[target]`: edge a->b gives phi_a - phi_b = 6; edge b->c gives
+    phi_b - phi_c = 3; edge c->a gives phi_c - phi_a = -9. This is the exact negative of
+    `test_gradient_of_nodal_potential_gives_source_minus_target_difference` above (which,
+    despite its name, computes target minus source -- see `gradient()`'s docstring).
+    """
+    net = triangle()
+    phi = torch.tensor([10.0, 4.0, 1.0])
+    p = net.difference() @ phi
+    assert torch.allclose(p, torch.tensor([6.0, 3.0, -9.0]))
+
+
 def test_cycle_basis_spans_nullspace_of_incidence():
     net = triangle()
     J = net.cycle_basis()

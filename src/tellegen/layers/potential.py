@@ -63,6 +63,11 @@ class PotentialFlowLayer:
             offset += n_e
         self.cols = torch.cat(cols_list)
         self.A = net.incidence()[:, self.cols]
+        # net.difference() (== net.incidence().T, the "source minus target" convention this
+        # whole solve path uses -- see topology.py's module docstring) restricted to this
+        # layer's own edge columns; equal to self.A.T, computed via the named operator rather
+        # than repeating the einsum/transpose inline in dp().
+        self._diff = net.difference()[self.cols]
 
         kind_set = set(self.kinds)
         for drv in self._drives:
@@ -84,7 +89,7 @@ class PotentialFlowLayer:
     # ------------------------------------------------------------------ assembly
     def dp(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
         drivers = drivers or {}
-        d = torch.einsum("ie,...i->...e", self.A, phi)
+        d = torch.einsum("en,...n->...e", self._diff, phi)
         parts = []
         for kind, (start, end) in self._kind_slices.items():
             block = d[..., start:end]
@@ -407,7 +412,7 @@ class PotentialFlowLayer:
             return rebuilt, drv, src, pb
 
         def _dp_functional(phi, drv):
-            d = torch.einsum("ie,...i->...e", self.A, phi)
+            d = torch.einsum("en,...n->...e", self._diff, phi)
             parts = []
             for kind, (start, end) in self._kind_slices.items():
                 block = d[..., start:end]
@@ -528,7 +533,7 @@ class PotentialFlowLayer:
         """
         drivers = drivers or {}
         d = self.dp(phi, drivers)
-        drive_only = d - torch.einsum("ie,...i->...e", self.A, phi)
+        drive_only = d - torch.einsum("en,...n->...e", self._diff, phi)
         A_bound = self.A[self.bound]
         boundary_flow = torch.einsum("be,...e->...b", A_bound, q)
         phi_b = phi[..., self.bound]

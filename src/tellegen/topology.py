@@ -8,9 +8,20 @@ as PyTorch tensors:
   edge, -1 at the target, so that ``incidence() @ q`` is the net outflow at
   every node and ``incidence() @ q == 0`` is conservation (Kirchhoff's current
   law);
-* the gradient ``gradient() = -incidence().T`` (b x n), so that
-  ``gradient() @ phi`` is the target-minus-source difference of a nodal
-  potential on every edge (Kirchhoff's voltage law holds by construction);
+* the branch potential difference ``difference() = incidence().T`` (b x n), so
+  that ``difference() @ phi`` is the source-minus-target difference of a nodal
+  potential on every edge. This is the sign convention the rest of the
+  framework actually uses: ``PotentialFlowLayer.dp()`` calls this operator, a
+  positive ``difference()`` at an edge's source drives a positive flow ``q``
+  from source to target under every Element law in this package, and the
+  nodal Jacobian ``A_I diag(g') A_I^T`` is positive definite under exactly
+  this convention;
+* the gradient ``gradient() = -incidence().T`` (b x n) -- the *opposite* sign
+  convention (target minus source). It is kept only because existing tests
+  assert its shape and sign; nothing in this package's solve path reads it,
+  and a caller computing ``net.gradient() @ phi`` and treating the result as
+  "the potential difference driving flow" gets the wrong sign. Use
+  ``difference()`` instead;
 * a basis of the cycle space ``cycle_basis()`` (l x b) with
   ``incidence() @ cycle_basis().T == 0``; any flow ``q = cycle_basis().T @ m``
   is divergence free for any amplitudes ``m``;
@@ -246,11 +257,37 @@ class Network:
         return d
 
     def gradient(self, kind: str | None = None) -> torch.Tensor:
-        """Gradient (b_kind x n): target minus source of a nodal potential."""
+        """Gradient (b_kind x n): target minus source of a nodal potential.
+
+        This is the *opposite* sign convention from ``difference()``, which is what
+        ``PotentialFlowLayer.dp()`` and the rest of this package's solve path actually use.
+        ``gradient()`` is not called anywhere in this package outside its own definition; it
+        is kept only because existing tests assert its shape and sign. Computing
+        ``net.gradient() @ phi`` and treating the result as "the potential difference that
+        drives flow" gives the wrong sign -- use ``difference()`` for that.
+        """
         key = ("gradient", kind)
         if key in self._cache:
             return self._cache[key]
         result = -self.incidence(kind).T
+        self._cache[key] = result
+        return result
+
+    def difference(self, kind: str | None = None) -> torch.Tensor:
+        """Branch potential difference (b_kind x n): source minus target of a nodal potential.
+
+        ``difference() @ phi`` gives, for every edge, ``phi[source] - phi[target]``: this is
+        the sign convention the whole framework uses (the opposite of ``gradient()``, which
+        gives ``target - source`` and is not used by the solve path). A positive value here
+        at an edge's source drives a positive flow ``q`` from source to target under every
+        Element law in this package, and the nodal Jacobian ``A_I diag(g') A_I^T`` built from
+        this convention is positive definite. ``PotentialFlowLayer.dp()`` calls this operator
+        (restricted to its own layer's edge columns) rather than repeating the einsum inline.
+        """
+        key = ("difference", kind)
+        if key in self._cache:
+            return self._cache[key]
+        result = self.incidence(kind).T
         self._cache[key] = result
         return result
 
