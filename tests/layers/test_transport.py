@@ -369,6 +369,34 @@ def test_implicit_preserves_positivity_where_trapezoidal_goes_negative():
     assert torch.any(x_trap < 0.0)
 
 
+def test_heat_layer_reaches_algebraic_energy_balance():
+    net = Network(dtype=torch.float64)
+    net.add_node("ambient")
+    net.add_node("wall_ambient")
+    net.add_node("Z")
+    net.add_edge("ambient", "Z", kind="airpath")       # supply
+    net.add_edge("Z", "ambient", kind="airpath")        # exhaust
+    net.add_edge("Z", "wall_ambient", kind="conduction")
+
+    rho_cp = 1200.0  # J / (m3 K), rho * cp for air
+    Q = 0.5          # m3 / s
+    U = 8.0          # W / K, conduction to the wall boundary
+    V = 50.0         # m3
+
+    layer = TransportLayer(
+        net, "heat", capacity=torch.tensor([rho_cp * V]), flow_kind="airpath",
+        boundary=["ambient", "wall_ambient"], carrier=rho_cp,
+        conduction_kind="conduction", conductance=torch.tensor([U], dtype=torch.float64),
+    )
+    q = torch.tensor([Q, Q], dtype=torch.float64)
+    x_b = torch.tensor([20.0, 5.0], dtype=torch.float64)  # [T_ambient, T_wall]
+    T_ss = layer.steady(q, torch.zeros(1, dtype=torch.float64), x_b)
+    expected = (rho_cp * Q * 20.0 + U * 5.0) / (rho_cp * Q + U)
+    torch.testing.assert_close(
+        T_ss, torch.tensor([expected], dtype=torch.float64), rtol=1e-6, atol=1e-6
+    )
+
+
 def test_wrong_length_conductance_raises_value_error_naming_argument():
     net = Network(dtype=torch.float64)
     net.add_node("Tb")
