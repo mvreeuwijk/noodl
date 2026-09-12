@@ -238,8 +238,13 @@ class TransportLayer:
         b0, _ = self._forcing(sources, x_boundary, N, dtype)
         if self.scheme == "exact":
             result = _van_loan_step(M, x_s, b0, dt)
+        elif self.scheme == "implicit":
+            result = _implicit_step(M, x_s, b0, dt, self.name)
         else:
-            raise ValueError(f"TransportLayer '{self.name}': unknown scheme {self.scheme!r}")
+            raise ValueError(
+                f"TransportLayer '{self.name}': unknown scheme {self.scheme!r}; "
+                f"valid schemes are 'exact', 'implicit', 'trapezoidal'"
+            )
         return self._from_stacked(result.to(out_dtype), self.n_i, reduced)
 
     def steady(
@@ -271,3 +276,18 @@ def _van_loan_step(
     Ed = E[..., :m, :m]
     Phi = E[..., :m, m:]
     return (Ed @ x.unsqueeze(-1)).squeeze(-1) + (Phi @ b0.unsqueeze(-1)).squeeze(-1)
+
+
+def _implicit_step(
+    M: torch.Tensor, x: torch.Tensor, b0: torch.Tensor, dt: float, name: str
+) -> torch.Tensor:
+    """Backward Euler: (I - dt M) x_{n+1} = x_n + dt b0."""
+    m = M.shape[-1]
+    I = torch.eye(m, dtype=M.dtype).expand(*M.shape[:-2], m, m)
+    rhs = x + dt * b0
+    try:
+        return torch.linalg.solve(I - dt * M, rhs.unsqueeze(-1)).squeeze(-1)
+    except torch.linalg.LinAlgError as err:
+        raise RuntimeError(
+            f"TransportLayer '{name}': implicit-scheme system is singular for dt={dt}: {err}"
+        ) from err

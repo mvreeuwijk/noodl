@@ -272,6 +272,32 @@ def test_scalar_capacity_raises_value_error_naming_argument():
         )
 
 
+def test_implicit_scheme_is_first_order_in_dt():
+    net = flow_through_zone()
+    cap = torch.tensor([1000.0], dtype=torch.float64)
+    layer_exact = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath",
+                                  boundary=["ambient"], scheme="exact")
+    layer_imp = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath",
+                                boundary=["ambient"], scheme="implicit")
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    c0 = torch.tensor([100.0], dtype=torch.float64)
+    source = torch.tensor([2.0], dtype=torch.float64)
+    c_out = torch.tensor([420.0], dtype=torch.float64)
+
+    def error(dt: float, n: int) -> float:
+        c_e, c_i = c0.clone(), c0.clone()
+        for _ in range(n):
+            c_e = layer_exact.step(c_e, q, source, c_out, dt)
+            c_i = layer_imp.step(c_i, q, source, c_out, dt)
+        return (c_i - c_e).abs().item()
+
+    dt0, n0 = 200.0, 5
+    e1 = error(dt0, n0)
+    e2 = error(dt0 / 2, n0 * 2)
+    ratio = e1 / e2
+    assert 1.6 < ratio < 2.4  # first order: halving dt halves the error
+
+
 def test_wrong_length_conductance_raises_value_error_naming_argument():
     net = Network(dtype=torch.float64)
     net.add_node("Tb")
