@@ -202,13 +202,18 @@ def gmres(
             v_next = w / h_next_safe.unsqueeze(-1)
             V[:, k + 1, :] = torch.where(active.unsqueeze(-1), v_next, V[:, k + 1, :])
 
-            # apply every earlier cycle's Givens rotation to this new Hessenberg column
+            # apply every earlier cycle's Givens rotation to this new Hessenberg column.
+            # cs/sn are read here (for j < k, set in an earlier k-iteration) and mutated
+            # again below (cs[:, k], sn[:, k]) before backward runs -- the same
+            # read-then-mutate-same-storage hazard, so these reads need `.clone()` too.
             for j in range(k):
                 h_j = H[:, j, k].clone()
                 h_j1 = H[:, j + 1, k].clone()
-                H[:, j, k] = torch.where(active, cs[:, j] * h_j + sn[:, j] * h_j1, H[:, j, k])
+                cs_j = cs[:, j].clone()
+                sn_j = sn[:, j].clone()
+                H[:, j, k] = torch.where(active, cs_j * h_j + sn_j * h_j1, H[:, j, k])
                 H[:, j + 1, k] = torch.where(
-                    active, -sn[:, j] * h_j + cs[:, j] * h_j1, H[:, j + 1, k]
+                    active, -sn_j * h_j + cs_j * h_j1, H[:, j + 1, k]
                 )
 
             h_kk = H[:, k, k].clone()
@@ -232,11 +237,14 @@ def gmres(
             )
 
         # back-substitution: upper-triangular H[:, :cycle_len, :cycle_len] @ y = g[:, :cycle_len]
+        # y is written at the end of each k-iteration below and read (for larger j, already
+        # computed) by every subsequent iteration -- the identical read-then-mutate-same-
+        # storage hazard as V/H above, so every operand read from it needs `.clone()` too.
         y = torch.zeros(B, cycle_len, dtype=dtype, device=device)
         for k in range(cycle_len - 1, -1, -1):
             s = g[:, k].clone()
             for j in range(k + 1, cycle_len):
-                s = s - H[:, k, j] * y[:, j]
+                s = s - H[:, k, j].clone() * y[:, j].clone()
             diag = H[:, k, k]
             diag_safe = torch.where(diag.abs() > tiny, diag, torch.ones_like(diag))
             y[:, k] = torch.where(diag.abs() > tiny, s / diag_safe, torch.zeros_like(s))

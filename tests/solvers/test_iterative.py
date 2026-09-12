@@ -289,3 +289,30 @@ def test_pcg_rejects_max_iter_below_one():
     op = DenseOperator(A, symmetric=True)
     with pytest.raises(ValueError, match="max_iter"):
         pcg(op, b, max_iter=0)
+
+
+def test_gmres_is_differentiable_through_its_iteration_at_cycle_len_above_one():
+    """gmres's internal Arnoldi/Givens/back-substitution bookkeeping mutates a handful of
+    work tensors (V, H, cs, sn, g, y) in place across iterations; every plain (uncloned)
+    slice read from one of those tensors that is later used as an arithmetic operand becomes
+    a stale autograd version once anything else writes to the SAME tensor's storage, which
+    breaks backward() with 'modified by an inplace operation'. This was invisible as long as
+    gmres was only ever called under no_grad(), and also invisible on any n_i=1 fixture
+    (cycle_len == 1 skips the back-substitution cross-term loop and the Givens
+    apply-earlier-rotations loop entirely, both of which are where the bug lives). A 5x5
+    system with restart=3 (cycle_len=3 > 1) is the smallest case that exercises both loops.
+    """
+    torch.manual_seed(0)
+    A = torch.randn(5, 5)
+    b = torch.randn(5)
+    A_leaf = A.clone().requires_grad_(True)
+    op = DenseOperator(A_leaf)
+    result = gmres(op, b, restart=3, rtol=1e-13)
+    result.x.sum().backward()
+    assert torch.isfinite(A_leaf.grad).all()
+
+    def f(A_):
+        return gmres(DenseOperator(A_), b, restart=3, rtol=1e-13).x
+
+    A_gc = A.clone().requires_grad_(True)
+    assert torch.autograd.gradcheck(f, (A_gc,), eps=1e-6, atol=1e-5)
