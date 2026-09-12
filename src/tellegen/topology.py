@@ -332,6 +332,25 @@ class Network:
         src, tgt = self.endpoints(kind)
         return phi[..., src] - phi[..., tgt]
 
+    def accumulate(self, w: torch.Tensor, kind: str | None = None) -> torch.Tensor:
+        """Scatter-add form of `incidence(kind) @ w`: `+w` at `src`, `-w` at `tgt`.
+
+        `w` has shape `(..., b_kind)`; the result has shape `(..., n)`. Built with
+        `index_add` (out of place) on a FRESH zero tensor allocated inside this call, never
+        `index_add_` (in place) on an input or on anything aliased with one: an in-place
+        scatter into a tensor autograd needs unmodified for its own backward pass would
+        corrupt the gradient of any earlier operation sharing that storage, whereas an
+        out-of-place `index_add` on a tensor this call itself just created has no such alias
+        to protect, and is exactly as differentiable w.r.t. `w` as `incidence(kind) @ w` is.
+        Never forms the `(n, b_kind)` `incidence()` matrix.
+        """
+        src, tgt = self.endpoints(kind)
+        batch_shape = w.shape[:-1]
+        out = torch.zeros(batch_shape + (self.n,), dtype=w.dtype, device=w.device)
+        out = out.index_add(-1, src, w)
+        out = out.index_add(-1, tgt, -w)
+        return out
+
     def spanning_forest(self, kind: str | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         """Spanning forest of the edges of one kind: (tree_cols, chord_cols).
 
