@@ -5,11 +5,12 @@ once for a single parameter instance and once for a batch of 64 random instances
 (torch.manual_seed(0)), each batch element checked against its own per-instance reference.
 """
 
+import math
 import sys
 from pathlib import Path
 
 import torch
-from scipy.optimize import brentq
+from scipy.optimize import brentq, fsolve
 
 from tellegen.drives import ConstantDrive
 from tellegen.elements.fan import FanCurve
@@ -350,6 +351,50 @@ def _stack_layer(
     return net, layer
 
 
+def _stack_reference(
+    C: list[float], n: float, drive_values: list[float]
+) -> tuple[float, float, float, float, float, float, float]:
+    """Independent reference for the vertical stack: solve nodal conservation directly from the
+    PowerLaw element law q = C sign(dp) |dp|^n, using scipy.optimize.fsolve on residuals written
+    here from scratch -- no tellegen solver, layer, or Network code is called anywhere in this
+    function.
+
+    Unknowns: phi at the three interior nodes z1, z2, z3 (phi at out_low and out_high is fixed at
+    0, matching the tests' boundary condition). For each of the four edges e = (u, v) in the chain
+    out_low -> z1 -> z2 -> z3 -> out_high, the branch law gives
+        dp_e = phi_u - phi_v + drive_values[e],  q_e = C[e] * sign(dp_e) * |dp_e| ** n.
+    Conservation (net outflow = 0, no interior sources) at each interior node is "flow in = flow
+    out": q_(e-1) = q_e for the three consecutive edge pairs. This is a genuine 3-equation
+    nonlinear system in (phi_z1, phi_z2, phi_z3); fsolve (MINPACK hybrd, a different algorithm
+    from tellegen's own damped Newton in solvers/newton.py) finds the root independently.
+
+    Note (topology, not a weakness of this reference): this network is a single unbranched chain
+    with no interior sources, so conservation forces the SAME q through all four edges no matter
+    what the C/n values are or how the drives are distributed -- this is a structural fact, not
+    something this reference could be built to avoid. What *does* depend on each edge's own C[e]
+    and n individually is each interior node's own potential (phi_z1, phi_z2, phi_z3): a wrong
+    C[e] on any single edge changes that edge's own dp_e = sign(q) * (|q| / C[e]) ** (1/n) and so
+    shifts every downstream node's potential, even though q itself stays equal across edges. That
+    is why the caller checks per-node phi (not just per-edge q) against this reference.
+    """
+
+    def q_of(dp: float, Ci: float) -> float:
+        return Ci * math.copysign(abs(dp) ** n, dp) if dp != 0.0 else 0.0
+
+    def residual(phi_interior: list[float]) -> list[float]:
+        phi_z1, phi_z2, phi_z3 = phi_interior
+        nodes = [0.0, phi_z1, phi_z2, phi_z3, 0.0]  # out_low, z1, z2, z3, out_high
+        dps = [nodes[i] - nodes[i + 1] + drive_values[i] for i in range(4)]
+        qs = [q_of(dps[i], C[i]) for i in range(4)]
+        return [qs[1] - qs[0], qs[2] - qs[1], qs[3] - qs[2]]
+
+    phi_z1, phi_z2, phi_z3 = fsolve(residual, [0.0, 0.0, 0.0], xtol=1e-13)
+    nodes = [0.0, phi_z1, phi_z2, phi_z3, 0.0]
+    dps = [nodes[i] - nodes[i + 1] + drive_values[i] for i in range(4)]
+    qs = [q_of(dps[i], C[i]) for i in range(4)]
+    return phi_z1, phi_z2, phi_z3, qs[0], qs[1], qs[2], qs[3]
+
+
 def test_stack_conservation_and_antisymmetry_single_instance():
     C = torch.tensor([0.020, 0.030, 0.025, 0.018], dtype=DTYPE)
     n = torch.tensor(0.6, dtype=DTYPE)
@@ -371,6 +416,25 @@ def test_stack_conservation_and_antisymmetry_single_instance():
     )
     torch.testing.assert_close(q_rev, -q, atol=1e-8, rtol=1e-8)
     torch.testing.assert_close(phi_rev, -phi, atol=1e-8, rtol=1e-8)
+
+    # Independent reference (see _stack_reference's docstring): solved from the element law by
+    # scipy.optimize.fsolve, with no tellegen code involved. drive_values above (2.0, 1.5, 1.5,
+    # 2.0) sum to 7.0 (nonzero -- the drives do not cancel) and are not all equal, so each edge's
+    # own dp differs even though conservation forces the same q through all four.
+    phi_z1_ref, phi_z2_ref, phi_z3_ref, q0_ref, q1_ref, q2_ref, q3_ref = _stack_reference(
+        C.tolist(), n.item(), drive_values.tolist()
+    )
+    torch.testing.assert_close(
+        phi[net.node_index("z1")], torch.tensor(phi_z1_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6
+    )
+    torch.testing.assert_close(
+        phi[net.node_index("z2")], torch.tensor(phi_z2_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6
+    )
+    torch.testing.assert_close(
+        phi[net.node_index("z3")], torch.tensor(phi_z3_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6
+    )
+    q_ref = torch.tensor([q0_ref, q1_ref, q2_ref, q3_ref], dtype=DTYPE)
+    torch.testing.assert_close(q, q_ref, atol=1e-6, rtol=1e-6)
 
 
 def test_stack_conservation_and_antisymmetry_batched():
@@ -394,6 +458,31 @@ def test_stack_conservation_and_antisymmetry_batched():
     )
     torch.testing.assert_close(q_rev, -q, atol=1e-6, rtol=1e-6)
     torch.testing.assert_close(phi_rev, -phi, atol=1e-6, rtol=1e-6)
+
+    # Independent per-instance reference, matching the pattern of the series case: each of the
+    # 64 random instances is checked against its own scipy.optimize.fsolve solution of
+    # _stack_reference (element law only, no tellegen code).
+    phi_z1_ref = torch.empty(m, dtype=DTYPE)
+    phi_z2_ref = torch.empty(m, dtype=DTYPE)
+    phi_z3_ref = torch.empty(m, dtype=DTYPE)
+    q_ref = torch.empty(m, 4, dtype=DTYPE)
+    for i in range(m):
+        p1, p2, p3, q0, q1, q2, q3 = _stack_reference(
+            C[i].tolist(), n[i, 0].item(), drive_values[i].tolist()
+        )
+        phi_z1_ref[i], phi_z2_ref[i], phi_z3_ref[i] = p1, p2, p3
+        q_ref[i] = torch.tensor([q0, q1, q2, q3], dtype=DTYPE)
+
+    torch.testing.assert_close(
+        phi[:, net.node_index("z1")], phi_z1_ref, atol=1e-5, rtol=1e-5
+    )
+    torch.testing.assert_close(
+        phi[:, net.node_index("z2")], phi_z2_ref, atol=1e-5, rtol=1e-5
+    )
+    torch.testing.assert_close(
+        phi[:, net.node_index("z3")], phi_z3_ref, atol=1e-5, rtol=1e-5
+    )
+    torch.testing.assert_close(q, q_ref, atol=1e-5, rtol=1e-5)
 
 
 def test_linear_init_reduces_newton_iterations_single_instance():
