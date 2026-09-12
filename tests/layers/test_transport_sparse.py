@@ -594,3 +594,57 @@ def test_gradcheck_expm_action_wrt_x_flow_sources_boundary():
         return result
 
     assert gradcheck(f, (x0, q, sources, x_b), eps=1e-6, atol=1e-5)
+
+
+def test_expm_action_backward_memory_scales_with_substep_count():
+    """Measures (does not gate) how backward memory through _expm_action's own unrolled
+    iteration grows from a non-stiff case (1 substep) to a genuinely stiff one (several
+    substeps, forced exactly as in test_error_control_triggers_substepping_on_a_stiff_case
+    above). Unlike Task 9's linear-solve adjoint, no O(state) bound is asserted here --
+    see this task's Mathematics section for why none is expected. `tracemalloc` cannot be
+    used (amendment A4(a)): it sees zero bytes of PyTorch allocations on this `.venv`, so a
+    tracemalloc-based assertion would pass vacuously regardless of whether more sub-steps
+    genuinely cost more backward memory. `saved_tensor_bytes` instead counts exactly the
+    tensors autograd will need for backward(), deterministically. The printed numbers are
+    what a future composed-model-gate report (design spec section 6.1) would compare
+    against its timestep-history memory budget; if that gate is ever breached, section
+    6.2 already names checkpointing the sub-steps as the follow-up, not a change to this
+    test.
+    """
+    net = flow_through_zone()
+    layer_mild = TransportLayer(
+        net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath", boundary=["ambient"],
+    )
+    layer_stiff = TransportLayer(
+        net, "co2", capacity=torch.tensor([1.0]), flow_kind="airpath", boundary=["ambient"],
+        removal=torch.tensor([500.0], dtype=torch.float64),
+    )
+
+    def run_and_measure(layer, dt):
+        q = torch.zeros(2, dtype=torch.float64)
+        x0 = torch.tensor([10.0], dtype=torch.float64, requires_grad=True)
+        xb = torch.tensor([0.0], dtype=torch.float64, requires_grad=True)
+        sources = torch.zeros(1, dtype=torch.float64, requires_grad=True)
+        op = layer._advection_operator(q)
+        b0 = op.boundary_forcing(xb) + sources / layer.capacity
+
+        substeps_holder = {}
+
+        def run():
+            result, substeps = _expm_action(op, x0, b0, dt)
+            substeps_holder["substeps"] = substeps
+            return result
+
+        peak, result = saved_tensor_bytes(run)
+        result.sum().backward()
+        return substeps_holder["substeps"], peak
+
+    substeps_mild, peak_mild = run_and_measure(layer_mild, 30.0)
+    substeps_stiff, peak_stiff = run_and_measure(layer_stiff, 50.0)
+    print(
+        f"_expm_action backward memory (saved_tensor_bytes): "
+        f"mild(substeps={substeps_mild})={peak_mild}, "
+        f"stiff(substeps={substeps_stiff})={peak_stiff}"
+    )
+    assert substeps_stiff > substeps_mild  # confirms the two cases are genuinely different
+    assert peak_stiff > peak_mild  # more sub-steps genuinely save more for backward
