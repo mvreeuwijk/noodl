@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from tellegen.operators.base import SolverStatus
+from tellegen.operators.graph import GraphLaplacianOperator
 from tellegen.solvers.select import solve
 
 
@@ -55,6 +56,21 @@ _A_SPD = torch.tensor([[4.0, 1.0], [1.0, 3.0]], dtype=torch.float64)
 _B_SPD = torch.tensor([1.0, 2.0], dtype=torch.float64)
 _A_NS = torch.tensor([[3.0, 1.0], [0.5, 2.0]], dtype=torch.float64)
 _B_NS = torch.tensor([1.0, 2.0], dtype=torch.float64)
+
+
+def _chain_op(slopes: torch.Tensor) -> GraphLaplacianOperator:
+    """The chain fixture used throughout the milestone: 3 nodes, node 2 is the boundary
+    (grounded) node, nodes 0 and 1 are interior; edges (0,1) and (1,2). slopes = [[1,1],[0,1]]
+    certifies instance 0 (grounded through both edges) but not instance 1 (edge (0,1) has
+    zero slope, so {0, 1} has no path to the boundary through strictly positive slope).
+    """
+    src = torch.tensor([0, 1])
+    tgt = torch.tensor([1, 2])
+    interior_of_node = torch.tensor([0, 1, -1])
+    boundary_mask = torch.tensor([False, False, True])
+    return GraphLaplacianOperator(
+        src, tgt, slopes, 2, interior_of_node, boundary_mask=boundary_mask
+    )
 
 
 def _spy(monkeypatch, target, name):
@@ -205,6 +221,29 @@ def test_error_message_names_instances_status_and_residual():
         message = str(exc).lower()
         assert "0" in message  # the single (flat) failing batch index
         assert "residual" in message or "status" in message
+
+
+# -- A2: spd_diagnosis wired into select.solve's refusal messages --------------------------
+
+
+def test_mixed_certification_on_graph_laplacian_names_ungrounded_interior_nodes():
+    slopes = torch.tensor([[1.0, 1.0], [0.0, 1.0]])
+    op = _chain_op(slopes)
+    b = torch.zeros(2, 2)
+    with pytest_raises_containing("ungrounded interior nodes"):
+        solve(op, b)
+    with pytest_raises_containing("instance 1"):
+        solve(op, b)
+
+
+def test_spd_diagnosis_is_never_called_on_the_success_path(monkeypatch):
+    calls = _spy(monkeypatch, GraphLaplacianOperator, "spd_diagnosis")
+    slopes = torch.tensor([[1.0, 1.0], [1.0, 1.0]])  # both instances certify
+    op = _chain_op(slopes)
+    b = torch.ones(2, 2)
+    result = solve(op, b)
+    assert bool(torch.all(result.converged))
+    assert calls["count"] == 0
 
 
 class pytest_raises_containing:

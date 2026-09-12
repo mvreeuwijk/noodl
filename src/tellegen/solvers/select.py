@@ -17,6 +17,27 @@ from tellegen.solvers.iterative import gmres, pcg
 Tensor = torch.Tensor
 
 
+def _describe_uncertified(op, cert: Tensor, where: str) -> str:
+    """Message fragment naming which instances fail to certify SPD, and why.
+
+    Prefers `op.spd_diagnosis()` (present on GraphLaplacianOperator, absent elsewhere) to name
+    the actual negative-slope edges or ungrounded interior nodes per failing instance; falls
+    back to the generic "instances {bad} do not certify SPD" when the operator has no
+    `spd_diagnosis` (e.g. the test-only `_FakeOperator`, or any future non-diagnosing operator).
+    """
+    bad = torch.nonzero(~cert.reshape(-1), as_tuple=False).flatten().tolist()
+    diagnose = getattr(op, "spd_diagnosis", None)
+    if diagnose is None:
+        return f"instances {bad} do not certify SPD"
+    lines = []
+    for rec in diagnose():
+        if rec["reason"] == "negative_slope":
+            lines.append(f"instance {rec['instance']}: negative slope on edges {rec['edges']}")
+        else:
+            lines.append(f"instance {rec['instance']}: ungrounded interior nodes {rec['nodes']}")
+    return "; ".join(lines) if lines else f"instances {bad} do not certify SPD"
+
+
 def solve(
     op,
     b: Tensor,
@@ -42,10 +63,10 @@ def solve(
                 f"rather than returning a plausible wrong answer."
             )
         if not bool(torch.all(cert)):
-            bad = torch.nonzero(~cert.reshape(-1), as_tuple=False).flatten().tolist()
             raise RuntimeError(
-                f"{where}: method='cg' requested explicitly but instances {bad} do not "
-                f"certify SPD; refusing rather than returning a plausible wrong answer."
+                f"{where}: method='cg' requested explicitly but "
+                f"{_describe_uncertified(op, cert, where)}; refusing rather than returning a "
+                f"plausible wrong answer."
             )
         result = pcg(op, b, **kw)
     elif method == "gmres":
@@ -53,10 +74,9 @@ def solve(
     else:  # method == "auto"
         cert = op.spd_certificate()
         if cert is not None and bool(torch.any(cert)) and not bool(torch.all(cert)):
-            bad = torch.nonzero(~cert.reshape(-1), as_tuple=False).flatten().tolist()
             raise RuntimeError(
-                f"{where}: method='auto' refuses to split the batch; instances {bad} do "
-                f"not certify SPD (ungrounded, or a negative slope) while others do. "
+                f"{where}: method='auto' refuses to split the batch; "
+                f"{_describe_uncertified(op, cert, where)} while other instances certify. "
                 f"Certify all instances, or pass an explicit method."
             )
         if cert is not None and bool(torch.all(cert)):
