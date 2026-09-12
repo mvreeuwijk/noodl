@@ -240,6 +240,8 @@ class TransportLayer:
             result = _van_loan_step(M, x_s, b0, dt)
         elif self.scheme == "implicit":
             result = _implicit_step(M, x_s, b0, dt, self.name)
+        elif self.scheme == "trapezoidal":
+            result = _trapezoidal_step(M, x_s, b0, dt, self.name)
         else:
             raise ValueError(
                 f"TransportLayer '{self.name}': unknown scheme {self.scheme!r}; "
@@ -290,4 +292,19 @@ def _implicit_step(
     except torch.linalg.LinAlgError as err:
         raise RuntimeError(
             f"TransportLayer '{name}': implicit-scheme system is singular for dt={dt}: {err}"
+        ) from err
+
+
+def _trapezoidal_step(
+    M: torch.Tensor, x: torch.Tensor, b0: torch.Tensor, dt: float, name: str
+) -> torch.Tensor:
+    """Crank-Nicolson: (I - dt/2 M) x_{n+1} = (I + dt/2 M) x_n + dt b0."""
+    m = M.shape[-1]
+    I = torch.eye(m, dtype=M.dtype).expand(*M.shape[:-2], m, m)
+    rhs = ((I + 0.5 * dt * M) @ x.unsqueeze(-1)).squeeze(-1) + dt * b0
+    try:
+        return torch.linalg.solve(I - 0.5 * dt * M, rhs.unsqueeze(-1)).squeeze(-1)
+    except torch.linalg.LinAlgError as err:
+        raise RuntimeError(
+            f"TransportLayer '{name}': trapezoidal-scheme system is singular for dt={dt}: {err}"
         ) from err

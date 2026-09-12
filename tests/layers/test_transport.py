@@ -298,6 +298,77 @@ def test_implicit_scheme_is_first_order_in_dt():
     assert 1.6 < ratio < 2.4  # first order: halving dt halves the error
 
 
+def test_trapezoidal_scheme_is_second_order_in_dt():
+    net = flow_through_zone()
+    cap = torch.tensor([1000.0], dtype=torch.float64)
+    layer_exact = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath",
+                                  boundary=["ambient"], scheme="exact")
+    layer_trap = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath",
+                                 boundary=["ambient"], scheme="trapezoidal")
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    c0 = torch.tensor([100.0], dtype=torch.float64)
+    source = torch.tensor([2.0], dtype=torch.float64)
+    c_out = torch.tensor([420.0], dtype=torch.float64)
+
+    def error(dt: float, n: int) -> float:
+        c_e, c_t = c0.clone(), c0.clone()
+        for _ in range(n):
+            c_e = layer_exact.step(c_e, q, source, c_out, dt)
+            c_t = layer_trap.step(c_t, q, source, c_out, dt)
+        return (c_t - c_e).abs().item()
+
+    dt0, n0 = 200.0, 5
+    e1 = error(dt0, n0)
+    e2 = error(dt0 / 2, n0 * 2)
+    ratio = e1 / e2
+    assert 3.2 < ratio < 4.8  # second order: halving dt quarters the error
+
+
+def test_implicit_preserves_positivity_where_trapezoidal_goes_negative():
+    """A genuinely stiff single-mode decay drives trapezoidal negative while
+    backward Euler stays non-negative for any step size.
+
+    The brief's original parameterization (two sealed, equal-capacity zones
+    exchanging at a huge shared flow, zero removal, zero boundary coupling) can
+    NOT demonstrate this, for any choice of q/dt/capacity: with no boundary or
+    removal term, that generator M always has eigenvalues {0, lambda < 0} (the
+    "total capacity-weighted mass" functional is exactly conserved, as verified
+    by test_two_sealed_zones_conserve_total_amount), and the trapezoidal
+    (Crank-Nicolson) amplification factor a(z) = (2 + z) / (2 - z) satisfies
+    |a(z)| < 1 for every z = dt * lambda < 0. Starting from x0 = [10, 0], the
+    conserved and decaying eigenmodes both have amplitude 5, so the decaying
+    component is bounded strictly inside (-5, 5) and every component of x_trap
+    stays in the open interval (0, 10) no matter how large dt is made; this was
+    confirmed numerically for dt spanning 1 to 1e9 (trapezoidal output tends to
+    the boundary from above but never crosses it). A single sealed node with a
+    first-order removal rate is a genuine scalar decay problem instead (no
+    conservation law forces a compensating positive mode), so it reproduces the
+    textbook L-stability contrast: backward Euler's amplification factor
+    1 / (1 - z) stays in (0, 1] for any z <= 0, while trapezoidal's a(z) crosses
+    zero and goes negative once |z| = dt * rate exceeds 2 -- here dt * rate =
+    100, far past that threshold, not a knife-edge tuning.
+    """
+    net = sealed_zone_with_flow_kind()
+    cap = torch.tensor([1.0], dtype=torch.float64)
+    rate = 100.0
+    dt = 1.0  # dt * rate = 100 >> 2: deep in the regime where trapezoidal overshoots
+    q = torch.zeros(2, dtype=torch.float64)  # no advection: an isolated decay mode
+    x0 = torch.tensor([10.0], dtype=torch.float64)
+    src = torch.zeros(1, dtype=torch.float64)
+    xb = torch.tensor([0.0], dtype=torch.float64)
+
+    imp = TransportLayer(net, "x", capacity=cap, flow_kind="airpath", boundary=["ambient"],
+                          scheme="implicit", removal=torch.tensor([rate], dtype=torch.float64))
+    trap = TransportLayer(net, "x", capacity=cap, flow_kind="airpath", boundary=["ambient"],
+                           scheme="trapezoidal", removal=torch.tensor([rate], dtype=torch.float64))
+
+    x_imp = imp.step(x0, q, src, xb, dt)
+    x_trap = trap.step(x0, q, src, xb, dt)
+
+    assert torch.all(x_imp >= 0.0)
+    assert torch.any(x_trap < 0.0)
+
+
 def test_wrong_length_conductance_raises_value_error_naming_argument():
     net = Network(dtype=torch.float64)
     net.add_node("Tb")
