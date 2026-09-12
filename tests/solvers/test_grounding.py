@@ -55,3 +55,34 @@ def test_result_is_bool_with_the_batch_shape_of_slopes():
     result = spd_certificate(src, tgt, slopes, interior_of_node, boundary_mask)
     assert result.shape == (6,)
     assert result.dtype == torch.bool
+
+
+def test_no_interior_nodes_is_vacuously_true():
+    src = torch.tensor([0])
+    tgt = torch.tensor([1])
+    interior_of_node = torch.tensor([-1, -1])  # both nodes are boundary
+    boundary_mask = torch.tensor([True, True])
+    slopes = torch.tensor([1.0], dtype=torch.float64)
+    result = spd_certificate(src, tgt, slopes, interior_of_node, boundary_mask)
+    assert bool(result)
+
+
+def test_no_boundary_nodes_certifies_false():
+    src = torch.tensor([0])
+    tgt = torch.tensor([1])
+    interior_of_node = torch.tensor([0, 1])  # both nodes are interior
+    boundary_mask = torch.tensor([False, False])
+    slopes = torch.tensor([1.0], dtype=torch.float64)
+    result = spd_certificate(src, tgt, slopes, interior_of_node, boundary_mask)
+    assert not bool(result)
+
+
+def test_an_isolated_interior_component_certifies_false():
+    # g (boundary) -- a (interior); b -- c (interior pair, isolated: no path to g at all).
+    src = torch.tensor([0, 2])
+    tgt = torch.tensor([1, 3])
+    interior_of_node = torch.tensor([-1, 0, 1, 2])
+    boundary_mask = torch.tensor([True, False, False, False])
+    slopes = torch.tensor([1.0, 1.0], dtype=torch.float64)
+    result = spd_certificate(src, tgt, slopes, interior_of_node, boundary_mask)
+    assert not bool(result)

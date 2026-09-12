@@ -61,4 +61,14 @@ def spd_certificate(
         )
 
     batch_shape = slopes.shape[:-1]
-    return torch.zeros(batch_shape, dtype=torch.bool, device=slopes.device)
+    device = slopes.device
+    interior_mask = interior_of_node >= 0
+
+    if not bool(interior_mask.any()):
+        # No interior nodes: nothing needs grounding, so the certificate holds vacuously.
+        return torch.ones(batch_shape, dtype=torch.bool, device=device)
+    if not bool(boundary_mask.any()):
+        # No boundary nodes at all: no interior node can reach one.
+        return torch.zeros(batch_shape, dtype=torch.bool, device=device)
+
+    return torch.zeros(batch_shape, dtype=torch.bool, device=device)
