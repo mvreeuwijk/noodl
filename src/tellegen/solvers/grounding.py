@@ -5,6 +5,15 @@ See the milestone design, section 3.1: symmetry and non-negative slopes give pos
 SEMI-definiteness; this certificate is the third condition that upgrades semi-definite to
 definite. It is computed on the ACTUAL slopes at the solve, never on initialisation slopes,
 and is never bypassed when a caller supplies its own initial guess.
+
+Implementation: label propagation, vectorised over the batch (no Python loop over batch
+instances). A node is "grounded" once it is a boundary node or is connected, through some
+chain of edges each with slope strictly greater than `atol`, to a node that is already
+grounded. An active edge connects its two endpoints UNDIRECTED for this purpose (a
+resistor's conductance, unlike its flow, has no preferred direction). Each round is
+O(B * E) (one gather and two scatters over the edge list, batched); the worst case over all
+rounds is O(B * E * diameter), the same cost class the design document quotes, and the round
+count is bounded by the number of nodes regardless of graph shape.
 """
 
 from __future__ import annotations
@@ -71,4 +80,23 @@ def spd_certificate(
         # No boundary nodes at all: no interior node can reach one.
         return torch.zeros(batch_shape, dtype=torch.bool, device=device)
 
-    return torch.zeros(batch_shape, dtype=torch.bool, device=device)
+    grounded = boundary_mask.to(device=device).expand(batch_shape + (n,)).clone()
+    active = slopes > atol
+    src_idx = src.to(device=device).expand(batch_shape + (b,))
+    tgt_idx = tgt.to(device=device).expand(batch_shape + (b,))
+
+    # Grounded status propagates at most one edge further per round, so it is fully settled,
+    # for ANY graph and ANY batch instance, within `n` rounds (the longest possible simple
+    # path); a round that changes nothing means every later round would too, hence the early
+    # break. Vectorised over the batch throughout -- no Python loop over batch instances.
+    for _ in range(n):
+        src_grounded = torch.gather(grounded, -1, src_idx)
+        tgt_grounded = torch.gather(grounded, -1, tgt_idx)
+        propagate = active & (src_grounded | tgt_grounded)
+        updated = grounded.scatter_reduce(-1, tgt_idx, propagate, reduce="amax")
+        updated = updated.scatter_reduce(-1, src_idx, propagate, reduce="amax")
+        if torch.equal(updated, grounded):
+            break
+        grounded = updated
+
+    return grounded[..., interior_mask].all(dim=-1)

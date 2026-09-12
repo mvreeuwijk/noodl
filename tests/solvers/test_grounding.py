@@ -86,3 +86,74 @@ def test_an_isolated_interior_component_certifies_false():
     slopes = torch.tensor([1.0, 1.0], dtype=torch.float64)
     result = spd_certificate(src, tgt, slopes, interior_of_node, boundary_mask)
     assert not bool(result)
+
+
+def test_verified_counterexample_chain_certifies_true_then_false():
+    """The exact case the design cites: slopes [[1, 1], [0, 1]] on g->a->b certify
+    [True, False] -- unweighted connectivity alone (what `_floating_group_nodes` checked)
+    would see BOTH instances as one connected component and report neither as floating.
+    """
+    src, tgt, interior_of_node, boundary_mask = _chain()
+    slopes = torch.tensor([[1.0, 1.0], [0.0, 1.0]], dtype=torch.float64)
+    result = spd_certificate(src, tgt, slopes, interior_of_node, boundary_mask)
+    assert result.tolist() == [True, False]
+
+
+def test_verified_counterexample_matches_explicit_jacobian_eigenvalues():
+    """Cross-check against the actual mathematics, not just against the certificate's own
+    logic: A_I diag(slopes) A_I^T for this chain has minimum eigenvalue ~0.382 for the
+    grounded instance and exactly 0.0 for the ungrounded one.
+    """
+    A_I = torch.tensor([[-1.0, 1.0], [0.0, -1.0]], dtype=torch.float64)  # rows a, b
+    slopes = torch.tensor([[1.0, 1.0], [0.0, 1.0]], dtype=torch.float64)
+    expected_min_eig = [0.38196601125010515, 0.0]
+    for i in range(2):
+        J = A_I @ torch.diag(slopes[i]) @ A_I.T
+        min_eig = torch.linalg.eigvalsh(J).min().item()
+        assert abs(min_eig - expected_min_eig[i]) < 1e-9
+
+    src, tgt, interior_of_node, boundary_mask = _chain()
+    result = spd_certificate(src, tgt, slopes, interior_of_node, boundary_mask)
+    assert result.tolist() == [True, False]  # grounded iff minimum eigenvalue > 0
+
+
+def test_fully_grounded_network_certifies_all_true():
+    # 4-node star: node 0 boundary, nodes 1-3 interior, all directly grounded.
+    src = torch.tensor([0, 0, 0])
+    tgt = torch.tensor([1, 2, 3])
+    interior_of_node = torch.tensor([-1, 0, 1, 2])
+    boundary_mask = torch.tensor([True, False, False, False])
+    slopes = torch.ones(5, 3, dtype=torch.float64)
+    result = spd_certificate(src, tgt, slopes, interior_of_node, boundary_mask)
+    assert bool(result.all())
+
+
+def test_zero_slope_only_path_certifies_false():
+    # Same chain as _chain(), but the only path from b to the boundary has slope exactly 0.
+    src, tgt, interior_of_node, boundary_mask = _chain()
+    slopes = torch.tensor([1.0, 0.0], dtype=torch.float64)
+    result = spd_certificate(src, tgt, slopes, interior_of_node, boundary_mask)
+    assert not bool(result)
+
+
+def test_atol_excludes_a_tiny_but_nonzero_slope():
+    src, tgt, interior_of_node, boundary_mask = _chain()
+    slopes = torch.tensor([1.0, 1e-9], dtype=torch.float64)
+    assert bool(spd_certificate(src, tgt, slopes, interior_of_node, boundary_mask, atol=0.0))
+    assert not bool(
+        spd_certificate(src, tgt, slopes, interior_of_node, boundary_mask, atol=1e-6)
+    )
+
+
+def test_batching_matches_looped_single_instance_calls():
+    src, tgt, interior_of_node, boundary_mask = _chain()
+    torch.manual_seed(0)
+    slopes = torch.rand(9, 2, dtype=torch.float64)
+    batched = spd_certificate(src, tgt, slopes, interior_of_node, boundary_mask)
+    looped = torch.stack(
+        [
+            spd_certificate(src, tgt, slopes[i], interior_of_node, boundary_mask)
+            for i in range(9)
+        ]
+    )
+    assert torch.equal(batched, looped)
