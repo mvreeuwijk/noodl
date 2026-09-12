@@ -7,6 +7,7 @@ invisible.
 """
 
 import torch
+from torch.autograd import gradcheck
 
 from tellegen.operators.advection import AdvectionOperator
 from tellegen.layers.transport import TransportLayer
@@ -302,3 +303,45 @@ def test_symmetric_is_false_and_spd_certificate_is_none():
     # TransportLayer.operator(q), not the edge count.
     assert op.shape == (1, 1)
     assert op.dtype == torch.float64
+
+
+def test_gradcheck_matvec_wrt_flow_transmission_capacity_x():
+    net = three_node_chain()
+    src, tgt = net.endpoints("airpath")
+    interior_of_node = _interior_of_node(net, ["ambient"])
+    n_i = 2
+
+    flow0 = torch.tensor([0.3, -0.2, 0.25], dtype=torch.float64, requires_grad=True)
+    transmission0 = torch.tensor([[1.0, 0.6, 0.9]], dtype=torch.float64, requires_grad=True)
+    capacity0 = torch.tensor([50.0, 80.0], dtype=torch.float64, requires_grad=True)
+    x0 = torch.tensor([12.0, -4.0], dtype=torch.float64, requires_grad=True)
+
+    def f(flow, transmission, capacity, x):
+        op = AdvectionOperator(
+            src, tgt, flow=flow, transmission=transmission, capacity=capacity,
+            n_interior=n_i, interior_of_node=interior_of_node,
+        )
+        return op.matvec(x)
+
+    assert gradcheck(f, (flow0, transmission0, capacity0, x0), eps=1e-6, atol=1e-5)
+
+
+def test_gradcheck_rmatvec_wrt_flow_and_y():
+    net = three_node_chain()
+    src, tgt = net.endpoints("airpath")
+    interior_of_node = _interior_of_node(net, ["ambient"])
+    n_i = 2
+    transmission0 = torch.tensor([[1.0, 0.6, 0.9]], dtype=torch.float64)
+    capacity0 = torch.tensor([50.0, 80.0], dtype=torch.float64)
+
+    flow0 = torch.tensor([0.3, -0.2, 0.25], dtype=torch.float64, requires_grad=True)
+    y0 = torch.tensor([5.0, -2.0], dtype=torch.float64, requires_grad=True)
+
+    def f(flow, y):
+        op = AdvectionOperator(
+            src, tgt, flow=flow, transmission=transmission0, capacity=capacity0,
+            n_interior=n_i, interior_of_node=interior_of_node,
+        )
+        return op.rmatvec(y)
+
+    assert gradcheck(f, (flow0, y0), eps=1e-6, atol=1e-5)
