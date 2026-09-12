@@ -329,6 +329,16 @@ class Network:
         batched `phi`. Never forms the `(b_kind, n)` `difference()` matrix: this is the
         gather primitive the milestone's sparse operators are built from instead.
         """
+        if phi.dim() == 0:
+            raise ValueError(
+                f"Network.difference_ep: phi is a scalar (shape {tuple(phi.shape)}); "
+                f"expected shape (..., {self.n}) with {self.n} nodes (kind={kind!r})"
+            )
+        if phi.shape[-1] != self.n:
+            raise ValueError(
+                f"Network.difference_ep: phi has trailing size {phi.shape[-1]} but the network "
+                f"has {self.n} nodes (kind={kind!r}); got shape {tuple(phi.shape)}"
+            )
         src, tgt = self.endpoints(kind)
         return phi[..., src] - phi[..., tgt]
 
@@ -345,6 +355,17 @@ class Network:
         Never forms the `(n, b_kind)` `incidence()` matrix.
         """
         src, tgt = self.endpoints(kind)
+        b_kind = len(src)
+        if w.dim() == 0:
+            raise ValueError(
+                f"Network.accumulate: w is a scalar (shape {tuple(w.shape)}); "
+                f"expected shape (..., {b_kind}) with {b_kind} edges (kind={kind!r})"
+            )
+        if w.shape[-1] != b_kind:
+            raise ValueError(
+                f"Network.accumulate: w has trailing size {w.shape[-1]} but the network "
+                f"has {b_kind} edges (kind={kind!r}); got shape {tuple(w.shape)}"
+            )
         batch_shape = w.shape[:-1]
         out = torch.zeros(batch_shape + (self.n,), dtype=w.dtype, device=w.device)
         out = out.index_add(-1, src, w)

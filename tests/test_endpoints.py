@@ -197,3 +197,19 @@ def test_accumulate_of_difference_ep_matches_incidence_times_difference_on_rando
         "ne,...e->...n", net.incidence(), torch.einsum("en,...n->...e", net.difference(), phi)
     )
     torch.testing.assert_close(got, expected)
+
+
+def test_difference_ep_rejects_wrong_node_count_with_value_error(triangle):
+    import pytest
+
+    phi_wrong = torch.randn(5, 2, dtype=torch.float64)  # 2 nodes instead of 3
+    with pytest.raises(ValueError, match="2.*3"):  # match wrong vs expected count
+        triangle.difference_ep(phi_wrong)
+
+
+def test_accumulate_rejects_wrong_edge_count_with_value_error(triangle):
+    import pytest
+
+    w_wrong = torch.randn(5, 2, dtype=torch.float64)  # 2 edges instead of 3
+    with pytest.raises(ValueError, match="2.*3"):  # match wrong vs expected count
+        triangle.accumulate(w_wrong)
