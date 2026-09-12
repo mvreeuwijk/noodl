@@ -138,3 +138,32 @@ def test_parallel_combination_single_instance():
         q.sum(), c_par * torch.sign(Dp) * Dp.abs() ** n, atol=1e-6, rtol=1e-6
     )
     torch.testing.assert_close(q[0] / q[1], C1 / C2, atol=1e-6, rtol=1e-6)
+
+
+def test_parallel_combination_batched():
+    torch.manual_seed(0)
+    m = 64
+    C1 = 0.005 + 0.03 * torch.rand(m, dtype=DTYPE)
+    C2 = 0.005 + 0.03 * torch.rand(m, dtype=DTYPE)
+    # n carries a trailing size-1 edge axis (matching the (m, 1) convention used for the
+    # series/fan-driven/stack batched cases elsewhere in this file) so it broadcasts against
+    # C's (m, 2) edge axis inside PowerLaw; the brief's original draft used a bare (m,) n,
+    # which fails broadcasting against C's trailing edge dim of 2 (RuntimeError: size of
+    # tensor a (2) must match size of tensor b (64)). n_flat below undoes this for the
+    # per-edge closed-form reference, which needs n aligned with Dp's (m,) shape instead.
+    n = 0.5 + 0.3 * torch.rand(m, 1, dtype=DTYPE)
+    Dp = -20.0 + 40.0 * torch.rand(m, dtype=DTYPE)
+
+    net, layer = _parallel_layer(C1, C2, n)
+    phi_boundary = torch.stack([Dp, torch.zeros(m, dtype=DTYPE)], dim=-1)
+    phi, q = layer.solve(phi_boundary, differentiable=False)
+
+    n_flat = n.squeeze(-1)
+    q1_ref = C1 * torch.sign(Dp) * Dp.abs() ** n_flat
+    q2_ref = C2 * torch.sign(Dp) * Dp.abs() ** n_flat
+    torch.testing.assert_close(q[:, 0], q1_ref, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(q[:, 1], q2_ref, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(
+        q.sum(dim=-1), (C1 + C2) * torch.sign(Dp) * Dp.abs() ** n_flat, atol=1e-6, rtol=1e-6
+    )
+    torch.testing.assert_close(q[:, 0] / q[:, 1], C1 / C2, atol=1e-6, rtol=1e-6)
