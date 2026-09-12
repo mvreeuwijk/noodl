@@ -203,3 +203,26 @@ def test_fan_driven_zone_pressure_single_instance():
     # accuracy, and failed deterministically here (observed residual ~2.09e-10).
     residual = layer.residual(phi[..., layer.interior], phi_boundary, {}, None)
     torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-9, rtol=0.0)
+
+
+def test_fan_driven_zone_pressure_batched():
+    torch.manual_seed(0)
+    m = 64
+    C1 = 0.005 + 0.03 * torch.rand(m, dtype=DTYPE)
+    C2 = 0.005 + 0.03 * torch.rand(m, dtype=DTYPE)
+    n = 0.5 + 0.3 * torch.rand(m, 1, dtype=DTYPE)
+    q_fan = 0.01 + 0.09 * torch.rand(m, 1, dtype=DTYPE)
+
+    net, layer = _fan_driven_layer(C1, C2, n, q_fan)
+    phi_boundary = torch.zeros(m, 1, dtype=DTYPE)
+    phi, q = layer.solve(phi_boundary, differentiable=False)
+
+    n_flat = n.squeeze(-1)
+    q_fan_flat = q_fan.squeeze(-1)
+    p_ref = -((q_fan_flat / (C1 + C2)) ** (1.0 / n_flat))
+    torch.testing.assert_close(
+        phi[:, net.node_index("zone")], p_ref, atol=1e-6, rtol=1e-6
+    )
+
+    residual = layer.residual(phi[..., layer.interior], phi_boundary, {}, None)
+    torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-8, rtol=0.0)
