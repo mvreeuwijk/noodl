@@ -57,9 +57,10 @@ class TransportLayer:
         self.n_b = int(self.boundary_idx.shape[0])
 
         self.capacity = torch.as_tensor(capacity, dtype=net.dtype)
-        if self.capacity.shape[-1] != self.n_i:
+        if self.capacity.dim() == 0 or self.capacity.shape[-1] != self.n_i:
+            cap_len = self.capacity.shape[-1] if self.capacity.dim() >= 1 else 0
             raise ValueError(
-                f"TransportLayer '{name}': capacity has {self.capacity.shape[-1]} entries, "
+                f"TransportLayer '{name}': capacity has {cap_len} entries, "
                 f"expected {self.n_i} interior nodes"
             )
         self.carrier = torch.as_tensor(carrier, dtype=net.dtype)
@@ -99,6 +100,11 @@ class TransportLayer:
         if removal is not None:
             removal = torch.as_tensor(removal, dtype=net.dtype)
             if removal.dim() == 1:
+                if removal.shape[-1] != K:
+                    raise ValueError(
+                        f"TransportLayer '{name}': removal must have shape ({K},) or "
+                        f"({self.n_i}, {K}), got {tuple(removal.shape)}"
+                    )
                 removal = removal.unsqueeze(0).expand(self.n_i, K)
             elif removal.shape[-1] != K or removal.shape[-2] != self.n_i:
                 raise ValueError(
@@ -115,7 +121,18 @@ class TransportLayer:
                     f"conduction_kind is given"
                 )
             A_c = net.incidence(conduction_kind)
+            b_c = A_c.shape[-1]
             g = torch.as_tensor(conductance, dtype=net.dtype)
+            # Validate explicitly rather than let a mismatched length reach einsum: with a
+            # single conduction_kind edge (b_c == 1), einsum's size-1 broadcasting for the
+            # repeated "e" subscript would otherwise silently accept a wrongly-shaped g
+            # (e.g. length 2) and sum it into L instead of raising, giving a silently wrong
+            # conductance matrix rather than a ValueError naming the offender.
+            if g.dim() == 0 or g.shape[-1] != b_c:
+                raise ValueError(
+                    f"TransportLayer '{name}': conductance must have shape ({b_c},), "
+                    f"got {tuple(g.shape)}"
+                )
             self.L = torch.einsum("ne,...e,me->...nm", A_c, g, A_c)
         else:
             self.L = torch.zeros(net.n, net.n, dtype=net.dtype)

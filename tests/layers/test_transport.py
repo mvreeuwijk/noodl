@@ -252,3 +252,34 @@ def test_conduction_only_reaches_laplacian_steady_state():
     T_ss = layer.steady(q, S, Tb)
     expected = Tb + S / g1  # g1 (T1 - Tb) = S at steady state
     torch.testing.assert_close(T_ss, expected, rtol=1e-8, atol=1e-8)
+
+
+def test_wrong_length_removal_raises_value_error_naming_argument():
+    net = sealed_zone_with_flow_kind()
+    with pytest.raises(ValueError, match="removal"):
+        TransportLayer(
+            net, "particle", capacity=torch.tensor([500.0]), flow_kind="airpath",
+            boundary=["ambient"], removal=torch.tensor([0.1, 0.2], dtype=torch.float64),
+        )
+
+
+def test_scalar_capacity_raises_value_error_naming_argument():
+    net = flow_through_zone()
+    with pytest.raises(ValueError, match="capacity"):
+        TransportLayer(
+            net, "co2", capacity=torch.tensor(1000.0), flow_kind="airpath",
+            boundary=["ambient"],
+        )
+
+
+def test_wrong_length_conductance_raises_value_error_naming_argument():
+    net = Network(dtype=torch.float64)
+    net.add_node("Tb")
+    net.add_node("T1")
+    net.add_edge("T1", "Tb", kind="conduction")
+    with pytest.raises(ValueError, match="conductance"):
+        TransportLayer(
+            net, "heat", capacity=torch.tensor([1000.0]), flow_kind="conduction",
+            boundary=["Tb"], conduction_kind="conduction",
+            conductance=torch.tensor([1.0, 2.0], dtype=torch.float64),
+        )
