@@ -257,6 +257,10 @@ def test_direct_matches_torch_linalg_solve_on_spd_batch():
     x_ref = torch.linalg.solve(A_batch, b_batch)
     torch.testing.assert_close(result.x, x_ref, atol=1e-8, rtol=1e-8)
     assert bool(torch.all(result.converged))
+    # SolveResult's contract and both iterative backends use int64 throughout; _direct's
+    # `info` from lu_factor_ex is int32, so iterations/status must be cast, not inherited.
+    assert result.iterations.dtype == torch.int64
+    assert result.status.dtype == torch.int64
 
 
 def test_direct_matches_torch_linalg_solve_on_nonsymmetric_system():
@@ -266,11 +270,19 @@ def test_direct_matches_torch_linalg_solve_on_nonsymmetric_system():
     torch.testing.assert_close(result.x, x_ref, atol=1e-8, rtol=1e-8)
 
 
-def test_explicit_gmres_is_honoured_unconditionally_even_on_a_certifying_operator():
+def test_explicit_gmres_is_honoured_unconditionally_even_on_a_certifying_operator(monkeypatch):
     # method="gmres" makes no SPD assumption to violate, so it never even asks the operator
     # to certify -- unlike method="cg", it is honoured regardless of what spd_certificate says.
+    # An SPD operator gives the same numeric answer through either backend, so the assertion
+    # that matters is WHICH backend actually ran, not just the result value.
+    import tellegen.solvers.select as select_module
+
+    pcg_calls = _spy(monkeypatch, select_module, "pcg")
+    gmres_calls = _spy(monkeypatch, select_module, "gmres")
     op = _FakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
     result = solve(op, _B_SPD, method="gmres")
+    assert gmres_calls["count"] == 1
+    assert pcg_calls["count"] == 0
     x_ref = torch.linalg.solve(_A_SPD, _B_SPD)
     torch.testing.assert_close(result.x, x_ref, atol=1e-6, rtol=1e-6)
 
@@ -331,6 +343,21 @@ def test_direct_is_not_selected_by_auto(monkeypatch):
 
 
 # -- A3.2: explicit kwarg forwarding and on_failure applying only to numerical failure --------
+
+
+def test_x0_is_forwarded_to_pcg_and_gmres():
+    # x0 is common to both backends. Starting from the exact solution should converge in
+    # zero iterations for either -- if solve() dropped x0 instead of forwarding it, the
+    # solver would start from zero and take at least one iteration.
+    x_star_spd = torch.linalg.solve(_A_SPD, _B_SPD)
+    op_spd = _FakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    result_spd = solve(op_spd, _B_SPD, method="auto", x0=x_star_spd)  # routes to pcg
+    assert bool(torch.all(result_spd.iterations == 0))
+
+    x_star_ns = torch.linalg.solve(_A_NS, _B_NS)
+    op_ns = _FakeOperator(_A_NS, symmetric=False, certificate=None)
+    result_ns = solve(op_ns, _B_NS, method="auto", x0=x_star_ns)  # routes to gmres
+    assert bool(torch.all(result_ns.iterations == 0))
 
 
 def test_solve_forwards_preconditioner_to_pcg_only():

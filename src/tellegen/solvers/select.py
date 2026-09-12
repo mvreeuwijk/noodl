@@ -72,7 +72,7 @@ def _direct(A: Tensor, b: Tensor) -> SolveResult:
     return SolveResult(
         x=x,
         converged=converged,
-        iterations=torch.ones_like(info),
+        iterations=torch.ones(info.shape, dtype=torch.int64, device=info.device),
         residual=residual,
         status=status.to(torch.int64),
     )
