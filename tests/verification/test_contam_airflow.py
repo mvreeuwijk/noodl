@@ -5,6 +5,9 @@ once for a single parameter instance and once for a batch of 64 random instances
 (torch.manual_seed(0)), each batch element checked against its own per-instance reference.
 """
 
+import sys
+from pathlib import Path
+
 import torch
 from scipy.optimize import brentq
 
@@ -447,3 +450,12 @@ def test_linear_init_reduces_newton_iterations_batched():
 
     assert result_linear.iterations <= result_zero.iterations
     torch.testing.assert_close(result_zero.x, result_linear.x, atol=1e-6, rtol=1e-6)
+
+
+def test_golden_helper_round_trip(tmp_path, monkeypatch):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import golden
+
+    monkeypatch.setattr(golden, "_GOLDEN_DIR", tmp_path)
+    golden.save_golden("scratch", {"value": 1.5, "list": [1, 2, 3]})
+    assert golden.load_golden("scratch") == {"value": 1.5, "list": [1, 2, 3]}
