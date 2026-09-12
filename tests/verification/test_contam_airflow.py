@@ -325,3 +325,45 @@ def test_fan_curve_loop_batched():
     leak_col = net.edge_index("airpath")[0]
     torch.testing.assert_close(q[:, fan_col], q_ref, atol=1e-6, rtol=1e-6)
     torch.testing.assert_close(q[:, leak_col], q_ref, atol=1e-6, rtol=1e-6)
+
+
+def _stack_layer(
+    C: torch.Tensor, n: torch.Tensor
+) -> tuple[Network, PotentialFlowLayer]:
+    """Three zones in a vertical stack: out_low -> z1 -> z2 -> z3 -> out_high."""
+    net = Network(dtype=DTYPE)
+    for name in ("out_low", "z1", "z2", "z3", "out_high"):
+        net.add_node(name)
+    net.add_edge("out_low", "z1", kind="airpath")
+    net.add_edge("z1", "z2", kind="airpath")
+    net.add_edge("z2", "z3", kind="airpath")
+    net.add_edge("z3", "out_high", kind="airpath")
+    element = PowerLaw(C, n, dp_transition=1e-6)
+    drive = ConstantDrive(kind="airpath", key="stack")
+    layer = PotentialFlowLayer(
+        net, "stack", [element], [drive], boundary=["out_low", "out_high"]
+    )
+    return net, layer
+
+
+def test_stack_conservation_and_antisymmetry_single_instance():
+    C = torch.tensor([0.020, 0.030, 0.025, 0.018], dtype=DTYPE)
+    n = torch.tensor(0.6, dtype=DTYPE)
+    drive_values = torch.tensor([2.0, 1.5, 1.5, 2.0], dtype=DTYPE)  # rho g dz per edge
+
+    net, layer = _stack_layer(C, n)
+    phi_boundary = torch.zeros(2, dtype=DTYPE)
+
+    phi, q = layer.solve(phi_boundary, {"stack": drive_values}, differentiable=False)
+    residual = layer.residual(
+        phi[..., layer.interior], phi_boundary, {"stack": drive_values}, None
+    )
+    torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-9, rtol=0.0)
+    power = layer.power_residual(phi, q, {"stack": drive_values})
+    assert abs(power.item()) < 1e-7
+
+    phi_rev, q_rev = layer.solve(
+        phi_boundary, {"stack": -drive_values}, differentiable=False
+    )
+    torch.testing.assert_close(q_rev, -q, atol=1e-8, rtol=1e-8)
+    torch.testing.assert_close(phi_rev, -phi, atol=1e-8, rtol=1e-8)
