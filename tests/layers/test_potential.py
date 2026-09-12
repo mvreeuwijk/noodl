@@ -178,7 +178,14 @@ def test_two_zone_series_flow_matches_closed_form(two_zone_layer):
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
-    phi, q = layer.solve(phi_b, {"wind": wind}, None, differentiable=False)
+    # atol/rtol pinned explicitly: newton()'s default tolerance is now dtype-derived
+    # (sqrt(finfo(dtype).eps), about 1.5e-8 for this test's float64 tensors) rather than a
+    # flat 1e-9, so the q[0] == q[1] == q[2] series-conservation check below -- which needs
+    # branch flows equal to 1e-9 -- must ask newton() for that precision explicitly instead
+    # of silently relying on what used to be the unconditional default.
+    phi, q = layer.solve(
+        phi_b, {"wind": wind}, None, differentiable=False, atol=1e-11, rtol=1e-11
+    )
 
     q_ref = _closed_form_series_flow([0.01, 0.02, 0.01], 0.65, 10.0)
     torch.testing.assert_close(

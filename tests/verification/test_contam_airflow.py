@@ -24,9 +24,16 @@ from tellegen.topology import Network
 DTYPE = torch.float64
 
 
-def _series_layer(C: torch.Tensor, n: torch.Tensor) -> tuple[Network, PotentialFlowLayer]:
-    """ambient_w -> z1 -> z2 -> ambient_l, one PowerLaw per edge, wind drive on edge 0."""
-    net = Network(dtype=DTYPE)
+def _series_layer(
+    C: torch.Tensor, n: torch.Tensor, dtype: torch.dtype = DTYPE
+) -> tuple[Network, PotentialFlowLayer]:
+    """ambient_w -> z1 -> z2 -> ambient_l, one PowerLaw per edge, wind drive on edge 0.
+
+    `dtype` defaults to the module's DTYPE (float64, used by every other case in this file);
+    it is exposed so `test_series_closed_form_float32_end_to_end` below can build the exact
+    same network entirely in float32, the project's declared default dtype.
+    """
+    net = Network(dtype=dtype)
     for name in ("ambient_w", "z1", "z2", "ambient_l"):
         net.add_node(name)
     net.add_edge("ambient_w", "z1", kind="airpath")
@@ -221,7 +228,13 @@ def test_fan_driven_zone_pressure_batched():
 
     net, layer = _fan_driven_layer(C1, C2, n, q_fan)
     phi_boundary = torch.zeros(m, 1, dtype=DTYPE)
-    phi, q = layer.solve(phi_boundary, differentiable=False)
+    # atol/rtol pinned explicitly: newton()'s default is now dtype-derived (about 1.5e-8 for
+    # this test's float64 tensors, looser than the flat 1e-9 it used to be unconditionally),
+    # and the residual check below asks for 1e-8, which the new default cannot reliably clear
+    # for every one of the 64 random instances (observed: one instance's residual floored at
+    # ~1.1e-8, just over the 1e-8 bound). Ask newton() for the tighter tolerance explicitly
+    # instead of loosening this residual assertion.
+    phi, q = layer.solve(phi_boundary, differentiable=False, atol=1e-10, rtol=1e-10)
 
     n_flat = n.squeeze(-1)
     q_fan_flat = q_fan.squeeze(-1)
@@ -723,3 +736,43 @@ def test_fan_driven_zone_differentiable_and_nondifferentiable_paths_agree(learna
 
     torch.testing.assert_close(phi_d, phi_nd, atol=1e-8, rtol=1e-8)
     torch.testing.assert_close(q_d, q_nd, atol=1e-8, rtol=1e-8)
+
+
+# ---------------------------------------------------------------------------------------
+# Whole-branch review, MUST FIX 2: newton()'s old flat atol=rtol=1e-9 default was
+# unreachable in float32 (the project's declared default dtype -- see
+# tellegen/topology.py's Network(dtype: torch.dtype = torch.float32) and
+# benchmarks/newton_scaling.py) at every network size tried. Every fixture, both
+# benchmarks, the rest of this file, the performance test and the README quick start all
+# use float64, so nothing end-to-end ran in the declared default until this case was added.
+# This series case runs entirely in float32 (network, element parameters, drivers, boundary
+# conditions, and the Newton solve all float32) and checks against the same independent
+# brentq reference as test_series_closed_form_single_instance, at a tolerance appropriate to
+# float32's roughly 7 significant decimal digits rather than float64's roughly 15.
+# ---------------------------------------------------------------------------------------
+
+
+def test_series_closed_form_float32_end_to_end():
+    C = [0.010, 0.008, 0.012]
+    n = 0.65
+    Pw = 12.0
+    dtype = torch.float32
+    net, layer = _series_layer(
+        torch.tensor(C, dtype=dtype), torch.tensor(n, dtype=dtype), dtype=dtype
+    )
+    drivers = {"wind": torch.tensor([Pw, 0.0, 0.0], dtype=dtype)}
+    phi_boundary = torch.zeros(2, dtype=dtype)
+    phi, q = layer.solve(phi_boundary, drivers, differentiable=False)
+
+    assert q.dtype == torch.float32
+    q_ref = _series_reference_q(C, n, Pw)
+    torch.testing.assert_close(q, torch.full((3,), q_ref, dtype=dtype), atol=1e-4, rtol=1e-4)
+
+    phi_z1_ref = Pw - (q_ref / C[0]) ** (1.0 / n)
+    phi_z2_ref = phi_z1_ref - (q_ref / C[1]) ** (1.0 / n)
+    torch.testing.assert_close(
+        phi[net.node_index("z1")], torch.tensor(phi_z1_ref, dtype=dtype), atol=1e-4, rtol=1e-4
+    )
+    torch.testing.assert_close(
+        phi[net.node_index("z2")], torch.tensor(phi_z2_ref, dtype=dtype), atol=1e-4, rtol=1e-4
+    )

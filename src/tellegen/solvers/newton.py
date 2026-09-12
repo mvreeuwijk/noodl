@@ -9,6 +9,7 @@ drops below ``switch_ratio``, following CONTAM's under-relaxation scheme.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -28,14 +29,35 @@ def newton(
     jacobian: Callable[[torch.Tensor], torch.Tensor],
     x0: torch.Tensor,
     *,
-    atol: float = 1e-9,
-    rtol: float = 1e-9,
+    atol: float | None = None,
+    rtol: float | None = None,
     max_iter: int = 50,
     omega: float = 0.75,
     switch_ratio: float = 0.5,
 ) -> NewtonResult:
+    """Solve ``residual(x) = 0`` by damped, batched Newton iteration.
+
+    ``atol``/``rtol`` default to ``None``, meaning "derive from the working dtype": each
+    defaults independently to ``sqrt(torch.finfo(dtype).eps)``, where ``dtype`` is taken
+    from the actual residual tensor returned by ``residual(x0)`` (not assumed from ``x0``
+    or from any fixed convention), giving about 1.2e-4 for float32 and 1.5e-8 for float64.
+    This is the standard "half the significant digits" heuristic for a first-order
+    convergence test: tighter than that asks the dtype for precision it does not have and
+    the residual floors below the target before ``converged`` ever becomes true (observed,
+    pre-fix, for every network size in ``benchmarks/newton_scaling.py`` under float32, whose
+    Jacobian evaluation and linear solve both round to float32 ULP). Passing an explicit
+    ``atol`` and/or ``rtol`` always overrides this default for that argument; the two are
+    independent, so an explicit ``atol=1e-6`` with ``rtol`` left as ``None`` still gets the
+    dtype-derived default for ``rtol``.
+    """
     x = x0
     r = residual(x)
+    if atol is None or rtol is None:
+        default_tol = math.sqrt(torch.finfo(r.dtype).eps)
+        if atol is None:
+            atol = default_tol
+        if rtol is None:
+            rtol = default_tol
     if r.shape[-1] == 0:
         # Zero interior unknowns (every node is a boundary node): there is nothing to
         # iterate on, and `r.abs().amax(dim=-1)` below would raise IndexError ("Expected

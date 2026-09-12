@@ -128,7 +128,15 @@ def test_converged_instance_with_singular_jacobian_does_not_crash_siblings():
     def jacobian(x):
         return (3 * x**2).unsqueeze(-1)
 
-    result = newton(residual, jacobian, x0, max_iter=50)
+    # atol/rtol pinned explicitly: this test's assertions below check x[1] to 1e-6, which
+    # is tighter than newton()'s dtype-derived default for float32 (~1.2e-4, since c/x0 here
+    # are plain float32 tensors) now that the default is dtype-aware (see newton()'s
+    # docstring). Before that change the implicit default was a flat 1e-9 regardless of
+    # dtype, so this test's 1e-6 accuracy check silently rode on that; this test's actual
+    # subject is the singular-Jacobian masking behaviour described above, not the default
+    # tolerance itself, so the fix here is to state the tolerance this test needs explicitly
+    # rather than loosen the 1e-6 assertion to match the new, looser float32 default.
+    result = newton(residual, jacobian, x0, max_iter=50, atol=1e-9, rtol=1e-9)
 
     assert bool(torch.all(result.converged))
     torch.testing.assert_close(result.x[0], torch.tensor([0.0]), atol=1e-9, rtol=0.0)
