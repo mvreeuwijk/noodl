@@ -436,9 +436,12 @@ class TransportLayer:
         x_s, reduced = self._to_stacked(x, self.n_i, "x")
         x_s = x_s.to(dtype)
         if self.scheme == "exact":
-            M, N = self.operator(q.to(dtype))
-            b0, _ = self._forcing(sources, x_boundary, N, dtype)
-            result = _van_loan_step(M, x_s, b0, dt)
+            op = self._advection_operator(q.to(dtype))
+            xb_s, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
+            src_s, _ = self._to_stacked(sources.to(dtype), self.n_i, "sources")
+            cap = self._capacity_stacked(dtype)
+            b0 = op.boundary_forcing(xb_s) + src_s / cap
+            result, _substeps = _expm_action(op, x_s, b0, dt)
         elif self.scheme == "implicit":
             result, reduced = self._implicit_step_sparse(
                 x, q, sources, x_boundary, dt, on_failure
