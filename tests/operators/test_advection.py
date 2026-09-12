@@ -305,6 +305,76 @@ def test_symmetric_is_false_and_spd_certificate_is_none():
     assert op.dtype == torch.float64
 
 
+def test_diagonal_and_assemble_match_dense_with_kinetics_removal_and_conduction():
+    """Coverage fix (fix round 1): every prior test calling .diagonal()/.assemble() used the
+    plain three_node_chain() CO2 layer, so the kinetics/removal/conduction branches inside
+    those two methods (as opposed to matvec/rmatvec, which already exercised them) were never
+    hit. This test combines all three terms -- three-species kinetics + removal (as in
+    test_matvec_with_kinetics_and_removal_matches_dense_three_species) AND a conduction_kind
+    edge (as in test_matvec_with_conduction_matches_dense) -- on ONE layer, with a BATCHED,
+    mixed-sign flow q and a BATCHED conductance so assemble()'s `L.dim() > 2` branch (as well
+    as its plain conduction/removal/kinetics branches) is also exercised, not just the
+    unbatched path already covered by the conduction-only test above.
+    """
+    net = flow_through_zone()
+    net.add_edge("Z", "ambient", kind="conduction")
+    cap = torch.tensor([1000.0], dtype=torch.float64)
+    l1, l2 = 0.01, 0.02
+    kinetics = torch.zeros(3, 3, dtype=torch.float64)
+    kinetics[0, 0] = -l1
+    kinetics[1, 0] = l1
+    kinetics[1, 1] = -l2
+    kinetics[2, 1] = l2
+    removal = torch.tensor([0.0, 0.0, 0.005], dtype=torch.float64)
+    conductance = torch.tensor([[2.0], [3.0]], dtype=torch.float64)  # (2, b_c=1), batched
+    layer = TransportLayer(
+        net, "chain", capacity=cap, flow_kind="airpath", boundary=["ambient"], n_species=3,
+        kinetics=kinetics, removal=removal,
+        conduction_kind="conduction", conductance=conductance,
+    )
+    q = torch.tensor([[0.4, -0.3], [-0.2, 0.5]], dtype=torch.float64)  # (2, b_flow), mixed sign
+    M, _ = layer.operator(q)
+
+    src, tgt = net.endpoints("airpath")
+    csrc, ctgt = net.endpoints("conduction")
+    op = AdvectionOperator(
+        src, tgt, flow=layer.carrier.to(q.dtype) * q, transmission=layer.transmission,
+        capacity=cap, n_interior=layer.n_i, interior_of_node=_interior_of_node(net, ["ambient"]),
+        kinetics=layer.kinetics, removal=layer.removal,
+        conduction=(csrc, ctgt, conductance),
+    )
+    torch.testing.assert_close(op.assemble(), M, rtol=1e-9, atol=1e-12)
+    torch.testing.assert_close(
+        op.diagonal(), torch.diagonal(op.assemble(), dim1=-2, dim2=-1), rtol=1e-9, atol=1e-12
+    )
+
+
+def test_matvec_source_has_no_python_loop_over_edges():
+    """Construction-time loops are fine; a per-solve hot path (matvec is called every solver
+    iteration) must not loop over edges or nodes. Reads the actual source of matvec's method
+    body and asserts no `for` appears in it -- a static, cheap proxy for "vectorised", checked
+    here rather than merely asserted in prose because a future edit could silently reintroduce
+    a loop otherwise. Mirrors tests/operators/test_graph.py's identical check for
+    GraphLaplacianOperator.
+    """
+    import inspect
+
+    from tellegen.operators.advection import AdvectionOperator as A
+
+    source = inspect.getsource(A.matvec)
+    assert "for " not in source
+
+
+def test_rmatvec_source_has_no_python_loop_over_edges():
+    """Same check as test_matvec_source_has_no_python_loop_over_edges, but for rmatvec."""
+    import inspect
+
+    from tellegen.operators.advection import AdvectionOperator as A
+
+    source = inspect.getsource(A.rmatvec)
+    assert "for " not in source
+
+
 def test_gradcheck_matvec_wrt_flow_transmission_capacity_x():
     net = three_node_chain()
     src, tgt = net.endpoints("airpath")

@@ -1,8 +1,8 @@
 """AdvectionOperator: the nonsymmetric transport spatial operator, defined by its action.
 
-See docs/superpowers/plans/parts/m1b-tasks-08-10.md Task 8 for the full derivation,
-including why rmatvec swaps the upwind/downwind roles of the advective IN term and why
-the capacity division moves from output (matvec) to input (rmatvec).
+See docs/superpowers/plans/2026-09-12-milestone-1b-sparse.md, Task 8, for the full
+derivation, including why rmatvec swaps the upwind/downwind roles of the advective IN
+term and why the capacity division moves from output (matvec) to input (rmatvec).
 """
 
 from __future__ import annotations
