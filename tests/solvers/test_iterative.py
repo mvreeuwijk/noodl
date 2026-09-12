@@ -8,7 +8,7 @@ import torch
 from tellegen.operators.base import SolverStatus
 from tellegen.operators.dense import DenseOperator
 from tellegen.operators.graph import GraphLaplacianOperator
-from tellegen.solvers.iterative import pcg
+from tellegen.solvers.iterative import gmres, pcg
 
 
 @pytest.fixture(autouse=True)
@@ -148,3 +148,116 @@ def test_pcg_gradcheck_fixed_iteration_count():
         return pcg(op, bb, max_iter=2, preconditioner=None).x
 
     assert torch.autograd.gradcheck(f, (slopes, b), eps=1e-6, atol=1e-6)
+
+
+def test_gmres_matches_solve_on_nonsymmetric_system():
+    A = torch.tensor([[3.0, 1.0], [0.5, 2.0]])
+    b = torch.tensor([1.0, 2.0])
+    op = DenseOperator(A, symmetric=False)
+    result = gmres(op, b)
+    x_ref = torch.linalg.solve(A, b)
+    torch.testing.assert_close(result.x, x_ref, atol=1e-6, rtol=1e-6)
+    assert bool(result.converged)
+    assert int(result.status) == int(SolverStatus.CONVERGED)
+
+
+def test_gmres_matches_solve_on_spd_system():
+    # Correctness only, not efficiency: gmres makes no symmetry assumption, so it should
+    # still solve a symmetric system correctly (just less efficiently than pcg would).
+    A = torch.tensor([[4.0, 1.0], [1.0, 3.0]])
+    b = torch.tensor([1.0, 2.0])
+    op = DenseOperator(A, symmetric=True)
+    result = gmres(op, b)
+    x_ref = torch.linalg.solve(A, b)
+    torch.testing.assert_close(result.x, x_ref, atol=1e-6, rtol=1e-6)
+
+
+def test_gmres_restart_boundary_crossed_still_correct():
+    # n = 20, restart = 3: this problem provably needs many more than 3 Arnoldi directions
+    # (confirmed below via the returned iteration count), so convergence here can only come
+    # from correctly carrying state across multiple restart cycles.
+    torch.manual_seed(2)
+    n = 20
+    M = torch.randn(n, n) * 0.15
+    A = torch.eye(n) + M
+    b = torch.randn(n)
+    op = DenseOperator(A, symmetric=False)
+    result = gmres(op, b, restart=3, max_iter=200)
+    x_ref = torch.linalg.solve(A, b)
+    torch.testing.assert_close(result.x, x_ref, atol=1e-6, rtol=1e-6)
+    assert bool(result.converged)
+    assert int(result.iterations) > 3, "the restart boundary was not actually crossed"
+    assert int(result.iterations) == 63
+
+
+def test_gmres_per_instance_status_and_freezing():
+    # instance 0 has b = 0: x = 0 is exact at iteration 0, no Arnoldi work needed at all.
+    # instance 1 is the restart-crossing system from the test above (needs 63 iterations).
+    # Run once to convergence, once capped at max_iter=3 (instance 0 must already be done;
+    # instance 1 must not be), and instance 0's x must be bit-identical across both runs.
+    torch.manual_seed(2)
+    n = 20
+    M = torch.randn(n, n) * 0.15
+    A1 = torch.eye(n) + M
+    b1 = torch.randn(n)
+    A0 = torch.eye(n) * 2.0
+    b0 = torch.zeros(n)
+
+    A_batch = torch.stack([A0, A1])
+    b_batch = torch.stack([b0, b1])
+    op = DenseOperator(A_batch, symmetric=False)
+
+    result_full = gmres(op, b_batch, restart=3, max_iter=200)
+    assert result_full.iterations.tolist() == [0, 63]
+    assert bool(torch.all(result_full.converged))
+
+    result_3 = gmres(op, b_batch, restart=3, max_iter=3)
+    assert bool(result_3.converged[0])
+    assert not bool(result_3.converged[1])
+    assert torch.equal(result_full.x[0], result_3.x[0])  # frozen at iteration 0, bit-identical
+
+
+def test_gmres_batching_matches_looped():
+    torch.manual_seed(9)
+    B = 4
+    As = [torch.eye(5) + 0.2 * torch.randn(5, 5) for _ in range(B)]
+    bs = [torch.randn(5) for _ in range(B)]
+    A_batch = torch.stack(As)
+    b_batch = torch.stack(bs)
+    op_batch = DenseOperator(A_batch, symmetric=False)
+    result = gmres(op_batch, b_batch)
+    for i in range(B):
+        op_i = DenseOperator(As[i], symmetric=False)
+        result_i = gmres(op_i, bs[i])
+        torch.testing.assert_close(result.x[i], result_i.x, atol=1e-8, rtol=1e-8)
+
+
+def test_gmres_singular_system_yields_non_converged_status_without_raising():
+    # A is exactly rank 1 ([[1, 2], [2, 4]] = [1, 2] outer [1, 2]); b = [1, 3] has a
+    # component orthogonal to A's range, so no x solves this exactly. gmres must not raise,
+    # must not silently report a plausible wrong convergence, and must name this SINGULAR
+    # (an Arnoldi pivot genuinely vanishes -- the second Krylov direction cannot be built)
+    # rather than merely MAX_ITER, which would suggest "might converge given more budget".
+    A = torch.tensor([[1.0, 2.0], [2.0, 4.0]])
+    b = torch.tensor([1.0, 3.0])
+    op = DenseOperator(A, symmetric=False)
+    result = gmres(op, b, max_iter=20)  # does not raise
+    assert not bool(result.converged)
+    assert int(result.status) == int(SolverStatus.SINGULAR)
+    assert result.residual.item() > 1e-3
+
+
+def test_gmres_happy_breakdown_identity_system():
+    # Happy breakdown: A = I (3x3), b = [1, 2, 3]. The Krylov space contains the exact solution
+    # after just 1 iteration (the residual r = b - I*x0 = b - 0 = b is already in the span of
+    # the single Arnoldi direction v0 = b/||b||, so h[1,0] == 0 exactly). gmres must report
+    # this as CONVERGED with iterations == 1, NOT as SINGULAR (which is reserved for rank
+    # deficiency that prevents convergence).
+    A = torch.eye(3, dtype=torch.float64)
+    b = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+    op = DenseOperator(A, symmetric=False)
+    result = gmres(op, b)
+    torch.testing.assert_close(result.x, b, atol=1e-12, rtol=1e-12)
+    assert bool(result.converged)
+    assert int(result.status) == int(SolverStatus.CONVERGED)
+    assert int(result.iterations) == 1
