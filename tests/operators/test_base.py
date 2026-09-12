@@ -82,3 +82,13 @@ def test_a_plain_object_missing_every_member_does_not_satisfy_the_protocol():
         pass
 
     assert not isinstance(NotAnOperator(), LinearOperator)
+
+
+def test_solver_status_and_solve_result_and_linear_operator_are_reexported_from_the_package():
+    from tellegen.operators import LinearOperator as PackageLinearOperator
+    from tellegen.operators import SolveResult as PackageSolveResult
+    from tellegen.operators import SolverStatus as PackageSolverStatus
+
+    assert PackageSolverStatus is SolverStatus
+    assert PackageSolveResult is SolveResult
+    assert PackageLinearOperator is LinearOperator
