@@ -39,6 +39,7 @@ class TransportLayer:
         n_species: int = 1,
         carrier: torch.Tensor | float = 1.0,
         transmission: torch.Tensor | None = None,
+        kinetics: torch.Tensor | None = None,
         scheme: Literal["exact", "implicit", "trapezoidal"] = "exact",
     ) -> None:
         self.net = net
@@ -76,8 +77,23 @@ class TransportLayer:
             )
         self.transmission = transmission  # (..., K, b_flow)
 
-        # Set by Task 10's kinetics/removal/conduction steps; left inert here.
-        self.kinetics: torch.Tensor | None = None
+        if kinetics is not None:
+            kinetics = torch.as_tensor(kinetics, dtype=net.dtype)
+            if kinetics.shape[-2:] != (K, K):
+                raise ValueError(
+                    f"TransportLayer '{name}': kinetics must have trailing shape "
+                    f"({K}, {K}), got {tuple(kinetics.shape)}"
+                )
+            if kinetics.dim() == 2:
+                kinetics = kinetics.unsqueeze(0).expand(self.n_i, K, K)
+            elif kinetics.shape[-3] != self.n_i:
+                raise ValueError(
+                    f"TransportLayer '{name}': kinetics must have {self.n_i} node rows, "
+                    f"got {kinetics.shape[-3]}"
+                )
+        self.kinetics = kinetics
+
+        # Set by later steps in this task (removal, conduction); left inert here.
         self.removal: torch.Tensor | None = None
         self.L = torch.zeros(net.n, net.n, dtype=net.dtype)
 
@@ -104,6 +120,20 @@ class TransportLayer:
         Gii = G.index_select(-2, idx_i).index_select(-1, idx_i)   # (..., K, n_i, n_i)
         Gib = G.index_select(-2, idx_i).index_select(-1, idx_b)   # (..., K, n_i, n_b)
 
+        # Divide the transport (advection + conduction) block by interior capacity here,
+        # before removal/kinetics are added: those are caller-supplied per-second rate
+        # constants (e.g. a deposition rate, a reaction rate constant) that already act
+        # directly on the intensive state x, unlike the advective/conductive terms in Gii,
+        # Gib, which are extensive flow rates that must be divided by capacity to become a
+        # concentration/temperature rate. Dividing the *whole* stacked M (as a literal
+        # reading of the spec's "finally, every row is divided by capacity" would do) instead
+        # rescales removal/kinetics by 1/capacity too, which is wrong: e.g. the decay-chain
+        # kinetics test below expects rate constants l1, l2 unchanged by capacity=1000, and
+        # the removal test expects exp(-rate * t) with capacity=500 not entering at all.
+        cap = self.capacity.to(dtype).unsqueeze(-2).unsqueeze(-1)  # (..., 1, n_i, 1)
+        Gii = Gii / cap
+        Gib = Gib / cap
+
         if self.removal is not None:
             Gii = Gii - torch.diag_embed(self.removal.to(dtype).transpose(-1, -2))
 
@@ -118,10 +148,6 @@ class TransportLayer:
         batch = M_block.shape[:-4]
         M = M_block.reshape(*batch, K * n_i, K * n_i)
         N = N_block.reshape(*N_block.shape[:-4], K * n_i, K * n_b)
-
-        cap = self._capacity_stacked(dtype)
-        M = M / cap.unsqueeze(-1)
-        N = N / cap.unsqueeze(-1)
         return M, N
 
     # ------------------------------------------------------------ stacking

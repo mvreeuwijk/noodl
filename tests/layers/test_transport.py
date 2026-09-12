@@ -175,3 +175,41 @@ def test_gradcheck_step_wrt_x_q_sources_boundary():
         return layer.step(x, q, sources, x_b, 300.0)
 
     assert gradcheck(f, (x, q, sources, x_b), eps=1e-6, atol=1e-5)
+
+
+def sealed_zone_with_flow_kind() -> Network:
+    net = Network(dtype=torch.float64)
+    net.add_node("ambient")
+    net.add_node("Z")
+    net.add_edge("Z", "ambient", kind="airpath")
+    net.add_edge("ambient", "Z", kind="airpath")
+    return net
+
+
+def test_kinetics_matches_bateman_solution_for_decay_chain():
+    net = sealed_zone_with_flow_kind()
+    l1, l2 = 0.01, 0.02
+    kinetics = torch.zeros(3, 3, dtype=torch.float64)
+    kinetics[0, 0] = -l1  # A consumed
+    kinetics[1, 0] = l1   # B produced from A
+    kinetics[1, 1] = -l2  # B consumed
+    kinetics[2, 1] = l2   # C produced from B
+    layer = TransportLayer(
+        net, "chain", capacity=torch.tensor([1000.0]), flow_kind="airpath",
+        boundary=["ambient"], n_species=3, kinetics=kinetics,
+    )
+    q = torch.zeros(2, dtype=torch.float64)
+    x = torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float64)  # (n_i=1, K=3): A, B, C
+    sources = torch.zeros(1, 3, dtype=torch.float64)
+    x_b = torch.zeros(1, 3, dtype=torch.float64)
+    dt = 5.0
+    for _ in range(40):
+        x = layer.step(x, q, sources, x_b, dt)
+    t = 40 * dt
+    A0 = 1.0
+    A = A0 * math.exp(-l1 * t)
+    B = A0 * l1 / (l2 - l1) * (math.exp(-l1 * t) - math.exp(-l2 * t))
+    C = A0 - A - B
+    torch.testing.assert_close(
+        x[0], torch.tensor([A, B, C], dtype=torch.float64), rtol=1e-6, atol=1e-8
+    )
