@@ -9,8 +9,8 @@ invisible.
 import torch
 from torch.autograd import gradcheck
 
-from tellegen.operators.advection import AdvectionOperator
 from tellegen.layers.transport import TransportLayer
+from tellegen.operators.advection import AdvectionOperator
 from tellegen.topology import Network
 
 
