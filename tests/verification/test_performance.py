@@ -6,6 +6,7 @@ of this file is marked slow and skipped by default (see pyproject.toml addopts).
 
 import time
 
+import pytest
 import torch
 
 from tellegen.drives import ConstantDrive
@@ -74,3 +75,10 @@ def test_newton_scaling_smoke():
     elapsed, iterations = _time_solve(layer, drivers, phi_boundary)
     assert elapsed >= 0.0
     assert iterations >= 1
+
+
+@pytest.mark.slow
+def test_newton_solve_within_budget_for_100_nodes_batch_100():
+    layer, drivers, phi_boundary = _random_layer_and_drivers(n_nodes=100, batch=100, seed=0)
+    elapsed, _ = _time_solve(layer, drivers, phi_boundary)
+    assert elapsed < 2.0, f"solve took {elapsed:.3f}s, budget is 2.0s"

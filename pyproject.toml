@@ -24,7 +24,10 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=tellegen --cov-report=term-missing --cov-fail-under=90"
+addopts = "--cov=tellegen --cov-report=term-missing --cov-fail-under=90 -m \"not slow\""
+markers = [
+    "slow: marks tests as slow (excluded by default; run with -m slow to include them)",
+]
 
 [tool.coverage.run]
 source = ["tellegen"]
