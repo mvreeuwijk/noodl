@@ -281,6 +281,48 @@ class PotentialFlowLayer:
         rhs = rhs.expand(solve_batch + rhs.shape[-1:])
         return solve(J0, rhs)
 
+    def _check_no_unreachable_differentiable_tensors(self) -> None:
+        """Guard against a gradient that would be silently wrong or absent (review finding
+        2/3): the differentiable solve threads only two kinds of tensor into
+        `Function.apply` -- each Element's own registered `nn.Parameter`s (found via
+        `named_parameters()`, substituted in via `functional_call`) and whatever is reachable
+        through the `drivers`/`sources`/`phi_boundary` arguments to `solve()`. Any OTHER
+        tensor an Element or Drive happens to hold with `requires_grad=True` is captured only
+        by closure (the element/drive object itself, not its tensor payload) and is
+        invisible to `_Implicit.backward`: for an Element, this happens when it was
+        constructed with `learnable=False` on a tensor that already had `requires_grad=True`
+        (`Element._param`'s documented pass-through exception, which is correct and used
+        deliberately for `differentiable=False`); for a Drive, this happens whenever a Drive
+        implementation owns a learnable coefficient directly instead of reading it from the
+        `drivers` mapping passed to `solve()`. Raise now, before dispatching, rather than
+        return a gradient that is silently wrong (if some other path happens to also touch
+        the same value) or silently `None` (if it doesn't).
+        """
+        for el in self._elements:
+            for name, value in vars(el).items():
+                if isinstance(value, torch.Tensor) and value.requires_grad:
+                    raise ValueError(
+                        f"element {el!r} (kind {el.kind!r}) has a tensor attribute "
+                        f"{name!r} with requires_grad=True that is not a registered "
+                        f"nn.Parameter, so the differentiable solve cannot reach it through "
+                        f"Function.apply and its gradient would be silently wrong or "
+                        f"absent. Construct this element with learnable=True (so {name!r} "
+                        f"is registered and reachable via named_parameters()), or use "
+                        f"differentiable=False."
+                    )
+        for drv in self._drives:
+            for name, value in vars(drv).items():
+                if isinstance(value, torch.Tensor) and value.requires_grad:
+                    raise ValueError(
+                        f"drive {drv!r} (kind {drv.kind!r}) has a tensor attribute {name!r} "
+                        f"with requires_grad=True; a Drive is captured by closure inside the "
+                        f"differentiable solve, not threaded through Function.apply, so its "
+                        f"gradient would be silently absent. A Drive must read every "
+                        f"differentiable quantity from the `drivers` mapping passed to "
+                        f"solve() rather than owning it directly, or use "
+                        f"differentiable=False."
+                    )
+
     # ------------------------------------------------------------------ solve
     def solve(
         self,
@@ -292,6 +334,28 @@ class PotentialFlowLayer:
         differentiable=True,
         **newton_kwargs,
     ):
+        """Solve for interior potentials and branch flows.
+
+        With `differentiable=True` (the default), gradients flow back to `phi_boundary`,
+        `sources`, every value in `drivers`, and every Element's registered `nn.Parameter`s
+        (i.e. constructed with `learnable=True`) via the implicit-function adjoint
+        (`tellegen.solvers.implicit`). Only tensors reachable one of those ways are threaded
+        through `Function.apply`. Contract each Element and Drive must satisfy for
+        `differentiable=True` to be safe:
+
+        - An Element's own differentiable state must be a registered parameter
+          (`learnable=True`), never a bare tensor held with `requires_grad=True` outside
+          `named_parameters()` (the latter is a supported, correct construction for
+          `differentiable=False`, per `Element._param`, but is invisible to the
+          differentiable solve).
+        - A Drive must read every differentiable quantity from the `drivers` mapping passed
+          to `solve()` (see `tellegen.drives.Drive`), never hold one of its own as an
+          instance attribute.
+
+        Violating either raises `ValueError` naming the offending element/drive and
+        attribute before any solve is attempted, rather than silently returning a wrong or
+        absent gradient.
+        """
         drivers = drivers or {}
         if phi0 is None:
             phi0 = self.linear_init(phi_boundary, drivers, sources)
@@ -309,6 +373,8 @@ class PotentialFlowLayer:
             q = self.flows(phi, drivers)
             return phi, q
 
+        self._check_no_unreachable_differentiable_tensors()
+
         param_dicts = [dict(el.named_parameters()) for el in self._elements]
         param_names = [list(d.keys()) for d in param_dicts]
         param_tensors = [
@@ -319,7 +385,11 @@ class PotentialFlowLayer:
         sources_tensor = (
             sources
             if sources is not None
-            else torch.zeros(phi_boundary.shape[:-1] + (self.A.shape[0],), dtype=phi_boundary.dtype)
+            else torch.zeros(
+                phi_boundary.shape[:-1] + (self.A.shape[0],),
+                dtype=phi_boundary.dtype,
+                device=phi_boundary.device,
+            )
         )
         all_params = (*param_tensors, *driver_tensors, sources_tensor, phi_boundary)
 
@@ -360,16 +430,23 @@ class PotentialFlowLayer:
             parts = []
             for el, d, (s, e) in zip(self._elements, rebuilt, self._elem_slices, strict=True):
                 dp_slice = dp_full[..., s:e].detach().requires_grad_(True)
-                # The autograd.grad call must stay INSIDE the enable_grad block: this
-                # whole method runs under the outer no_grad of Newton's forward solve
-                # (Task 8's memory-saving guarantee), and torch.autograd.grad -- unlike
-                # ordinary tensor ops -- consults the *ambient* grad-mode flag at its own
-                # call site, not just whether `flow` itself carries a grad_fn. Calling it
-                # after the `with torch.enable_grad():` block has already exited raises
-                # "does not require grad and does not have a grad_fn" even though `flow`
-                # printed True with a valid grad_fn right before the call -- verified in
-                # isolation: `with no_grad(): x=...; with enable_grad(): y=x*x` still
-                # fails autograd.grad(y, x) once evaluated back under the outer no_grad.
+                # The REDUCTION `flow.sum()` must itself execute inside the enable_grad
+                # block, not just the `functional_call` that produces `flow`: this whole
+                # method runs under the outer no_grad of Newton's forward solve (Task 8's
+                # memory-saving guarantee), and `.sum()` is an ordinary tensor op like any
+                # other -- performed under the ambient grad mode at the point it actually
+                # runs, regardless of whether its input (`flow`) already carries a grad_fn
+                # from an earlier, enable_grad-wrapped computation. Writing
+                # `torch.autograd.grad(flow.sum(), dp_slice)` with the `with
+                # torch.enable_grad():` block closed before that line (as an earlier,
+                # incorrect version of this code did) evaluates `flow.sum()` under the outer
+                # no_grad, so the tensor actually handed to `autograd.grad` as `outputs` has
+                # no grad_fn of its own -- even though `flow` printed `requires_grad=True`
+                # right before the call. `torch.autograd.grad` itself does not consult the
+                # ambient grad mode at its own call site (confirmed: calling it under no_grad
+                # against an output already fully built under enable_grad, or with an explicit
+                # `grad_outputs=` and no further reduction, both work); the reduction is what
+                # must be inside the block.
                 with torch.enable_grad():
                     flow = torch.func.functional_call(el, d, (dp_slice, drv))
                     (grad,) = torch.autograd.grad(flow.sum(), dp_slice, create_graph=False)

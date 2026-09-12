@@ -501,3 +501,50 @@ def test_differentiable_false_matches_differentiable_true(two_zone_layer):
     phi_d, q_d = layer.solve(phi_b, {"wind": wind}, None, differentiable=True)
     torch.testing.assert_close(phi_nd, phi_d, atol=1e-8, rtol=1e-6)
     torch.testing.assert_close(q_nd, q_d, atol=1e-8, rtol=1e-6)
+
+
+def test_solve_raises_for_element_tensor_with_requires_grad_but_not_learnable(two_zone_layer):
+    # Review finding 2: `Element._param` deliberately supports holding a tensor with
+    # `requires_grad=True` unwrapped (learnable=False) so an external graph is preserved for
+    # `differentiable=False`; but such a tensor is absent from `named_parameters()`, so the
+    # differentiable solve (which threads only registered parameters through
+    # `Function.apply`) cannot reach it and would otherwise return a silently wrong or
+    # missing gradient. `solve(differentiable=True)` must refuse instead.
+    net, _elements, drives, boundary = two_zone_layer
+    C = torch.tensor([0.01, 0.02, 0.01], dtype=torch.float64, requires_grad=True)
+    el = PowerLaw(C, 0.65, learnable=False)
+    layer = PotentialFlowLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
+
+    with pytest.raises(ValueError, match="C"):
+        layer.solve(phi_b, {"wind": wind}, None, differentiable=True)
+
+    # differentiable=False is unaffected: the same construction is a supported, correct use.
+    phi, _ = layer.solve(phi_b, {"wind": wind}, None, differentiable=False)
+    assert torch.isfinite(phi).all()
+
+
+def test_solve_raises_for_drive_owning_its_own_differentiable_tensor(two_zone_layer):
+    # Review finding 3: a Drive is captured by closure inside the differentiable solve, not
+    # threaded through Function.apply, so a Drive that owns a learnable tensor directly
+    # (instead of reading it from the `drivers` mapping every call) would get a silently
+    # absent gradient. `solve(differentiable=True)` must refuse instead.
+    class LearnableDrive:
+        kind = "airpath"
+
+        def __init__(self, coeff):
+            self.coeff = coeff
+
+        def __call__(self, phi, drivers):
+            return self.coeff * drivers["wind"]
+
+    net, elements, _drives, boundary = two_zone_layer
+    coeff = torch.tensor(1.0, dtype=torch.float64, requires_grad=True)
+    drv = LearnableDrive(coeff)
+    layer = PotentialFlowLayer(net, "zones", elements, drives=[drv], boundary=boundary)
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
+
+    with pytest.raises(ValueError, match="coeff"):
+        layer.solve(phi_b, {"wind": wind}, None, differentiable=True)
