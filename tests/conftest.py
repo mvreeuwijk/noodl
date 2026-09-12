@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from benchmarks.composed_model import build_composed
 from tellegen.drives import ConstantDrive
 from tellegen.elements import PowerLaw
 from tellegen.topology import Network
@@ -56,3 +57,14 @@ def two_zone_layer():
     drives = [ConstantDrive("airpath", "wind")]
     boundary = ["ambient"]
     return net, elements, drives, boundary
+
+
+@pytest.fixture
+def composed_model():
+    """The reference composed model: 8 buildings, a 40-node street and a 30-node sewer
+    network, about 1030 nodes and 2200 edges, with one reference physics configuration
+    (`benchmarks.composed_model.build_composed`, defaults, ensemble=1). Used by the
+    migration tasks (9-14) that need a realistic joined topology, and by the composed-model
+    scaling gate (Task 14). Tests must not mutate the returned model's elements.
+    """
+    return build_composed()
