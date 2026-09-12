@@ -367,3 +367,26 @@ def test_stack_conservation_and_antisymmetry_single_instance():
     )
     torch.testing.assert_close(q_rev, -q, atol=1e-8, rtol=1e-8)
     torch.testing.assert_close(phi_rev, -phi, atol=1e-8, rtol=1e-8)
+
+
+def test_stack_conservation_and_antisymmetry_batched():
+    torch.manual_seed(0)
+    m = 64
+    C = 0.005 + 0.03 * torch.rand(m, 4, dtype=DTYPE)
+    n = 0.5 + 0.3 * torch.rand(m, 1, dtype=DTYPE)
+    drive_values = -3.0 + 6.0 * torch.rand(m, 4, dtype=DTYPE)
+
+    net, layer = _stack_layer(C, n)
+    phi_boundary = torch.zeros(m, 2, dtype=DTYPE)
+
+    phi, q = layer.solve(phi_boundary, {"stack": drive_values}, differentiable=False)
+    residual = layer.residual(
+        phi[..., layer.interior], phi_boundary, {"stack": drive_values}, None
+    )
+    torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-7, rtol=0.0)
+
+    phi_rev, q_rev = layer.solve(
+        phi_boundary, {"stack": -drive_values}, differentiable=False
+    )
+    torch.testing.assert_close(q_rev, -q, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(phi_rev, -phi, atol=1e-6, rtol=1e-6)
