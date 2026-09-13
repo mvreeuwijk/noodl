@@ -50,7 +50,7 @@ def adjoint(jacobian_at_solution: torch.Tensor, grad_x: torch.Tensor) -> torch.T
 
 class _Implicit(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x0, residual, jacobian, newton_kwargs, *params):
+    def forward(ctx, x0, residual, jacobian, newton_kwargs, diagnostics, *params):
         with torch.no_grad():
             result = newton(
                 lambda x: residual(x, *params),
@@ -58,6 +58,14 @@ class _Implicit(torch.autograd.Function):
                 x0,
                 **newton_kwargs,
             )
+        if diagnostics is not None:
+            # The forward Newton solve happens here and nowhere else, so its iteration
+            # counts are only observable from inside this Function. Writing them into a
+            # caller-supplied dict is the narrowest way to expose them without changing what
+            # `implicit_solve` RETURNS (a plain tensor, which is what autograd needs) or
+            # making every caller that does not care pay for a richer result type.
+            diagnostics["newton_iterations"] = result.iterations
+            diagnostics["linear_iterations"] = result.linear_iterations
         ctx.residual = residual
         ctx.jacobian = jacobian
         ctx.save_for_backward(result.x, *params)
@@ -104,7 +112,7 @@ class _Implicit(torch.autograd.Function):
         it = iter(grads)
         for t in p:
             grads_aligned.append(next(it) if t.requires_grad else None)
-        return (None, None, None, None, *grads_aligned)
+        return (None, None, None, None, None, *grads_aligned)
 
 
 def implicit_solve(
@@ -112,6 +120,13 @@ def implicit_solve(
     jacobian: Callable[..., torch.Tensor],
     x0: torch.Tensor,
     params: tuple[torch.Tensor, ...],
+    diagnostics: dict | None = None,
     **newton_kwargs,
 ) -> torch.Tensor:
-    return _Implicit.apply(x0, residual, jacobian, newton_kwargs, *params)
+    """Differentiable solve of ``residual(x, *params) = 0``; returns the converged ``x``.
+
+    ``diagnostics``, when a dict is given, is filled with the forward Newton solve's own
+    ``newton_iterations`` and ``linear_iterations`` (see ``_Implicit.forward``). Every other
+    keyword is forwarded to ``newton``.
+    """
+    return _Implicit.apply(x0, residual, jacobian, newton_kwargs, diagnostics, *params)

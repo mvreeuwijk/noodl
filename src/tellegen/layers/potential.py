@@ -26,6 +26,11 @@ from tellegen.topology import Network
 _LINEAR_RTOL = 1e-10
 _LINEAR_RTOL_ULPS = 32
 
+# Inner linear solvers a layer may be configured with; forwarded verbatim as
+# `solvers.select.solve`'s `method`. "direct" is the retained milestone-1 reference (the
+# operator's explicit A_I diag(g) A_I^T, LU-factorised); "auto" is the migrated default.
+_LINEAR_SOLVERS = ("auto", "cg", "gmres", "direct")
+
 
 def _linear_rtol(dtype: torch.dtype) -> float:
     """Relative residual to ask an inner linear solve for, floored by the working dtype.
@@ -53,7 +58,15 @@ class PotentialFlowLayer:
         elements: Sequence[Element],
         drives: Sequence[Drive] = (),
         boundary: Sequence = (),
+        linear_solver: str = "auto",
     ) -> None:
+        if linear_solver not in _LINEAR_SOLVERS:
+            raise ValueError(
+                f"unknown linear_solver {linear_solver!r} in layer {name!r}; expected one "
+                f"of {_LINEAR_SOLVERS}"
+            )
+        self.linear_solver = linear_solver
+
         seen_kinds: set[str] = set()
         for el in elements:
             if el.kind in seen_kinds:
@@ -329,7 +342,11 @@ class PotentialFlowLayer:
             boundary_mask=self._boundary_mask,
         )
         result = select_solve(
-            op, rhs, method="auto", where="linear_init", rtol=_linear_rtol(rhs.dtype)
+            op,
+            rhs,
+            method=self.linear_solver,
+            where="linear_init",
+            rtol=_linear_rtol(rhs.dtype),
         )
         return result.x
 
@@ -384,6 +401,7 @@ class PotentialFlowLayer:
         phi0=None,
         *,
         differentiable=True,
+        diagnostics: dict | None = None,
         **newton_kwargs,
     ):
         """Solve for interior potentials and branch flows.
@@ -407,8 +425,19 @@ class PotentialFlowLayer:
         Violating either raises `ValueError` naming the offending element/drive and
         attribute before any solve is attempted, rather than silently returning a wrong or
         absent gradient.
+
+        `diagnostics`, when a dict is passed, is filled with this solve's own
+        `{"newton_iterations", "linear_iterations", "method"}` -- the Newton step count, the
+        per-instance maximum inner-solver iteration count (`None` if no linear solve
+        happened), and the inner method actually used. Passing `None` (the default) changes
+        nothing; the dict is an out-parameter rather than an extra return value so that
+        `solve`'s `(phi, q)` contract, which every existing caller unpacks, is untouched.
+
+        The inner linear solver is this layer's `linear_solver` (set at construction), unless
+        the caller overrides it with an explicit `method=` among `newton_kwargs`.
         """
         drivers = drivers or {}
+        newton_kwargs.setdefault("method", self.linear_solver)
         if phi0 is None:
             phi0 = self.linear_init(phi_boundary, drivers, sources)
 
@@ -446,6 +475,10 @@ class PotentialFlowLayer:
                 )
 
             result = newton(residual_fn, operator_fn, phi0, **newton_kwargs)
+            if diagnostics is not None:
+                diagnostics["newton_iterations"] = result.iterations
+                diagnostics["linear_iterations"] = result.linear_iterations
+                diagnostics["method"] = newton_kwargs["method"]
             phi = self.assemble(result.x, phi_boundary)
             q = self.flows(phi, drivers)
             return phi, q
@@ -603,7 +636,16 @@ class PotentialFlowLayer:
                 boundary_mask=self._boundary_mask,
             )
 
-        x = implicit_solve(residual_fn, operator_fn, phi0, all_params, **newton_kwargs)
+        x = implicit_solve(
+            residual_fn,
+            operator_fn,
+            phi0,
+            all_params,
+            diagnostics=diagnostics,
+            **newton_kwargs,
+        )
+        if diagnostics is not None:
+            diagnostics["method"] = newton_kwargs["method"]
         phi = self.assemble(x, phi_boundary)
         q = self.flows(phi, drivers)
         return phi, q

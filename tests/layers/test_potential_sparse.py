@@ -6,6 +6,7 @@ GraphLaplacianOperator + solvers.select.solve rather than a dense einsum Jacobia
 import pytest
 import torch
 
+import tellegen.solvers.select as select_module
 from tellegen.drives import ConstantDrive
 from tellegen.elements import Conductance, FixedFlow, PowerLaw
 from tellegen.elements.fan import FanCurve
@@ -135,12 +136,12 @@ def test_grounding_at_a_supplied_phi0_is_checked_on_the_differentiable_path_too(
         layer.solve(phi_b, {}, sources, phi0=phi0_supplied, differentiable=True)
 
 
-def test_sparse_and_dense_newton_paths_agree_on_a_contam_style_series_network():
-    # Three-zone series network under a wind drive, matching the shape of the CONTAM
-    # verification cases: this exercises solve()'s full non-differentiable path (which now
-    # builds a GraphLaplacianOperator per Newton iteration) against layer.jacobian() (still
-    # dense, unchanged, used here only as the independent reference via a hand-rolled
-    # Newton loop) to confirm the two agree to solver-contract tolerance.
+def _series_layer(linear_solver: str = "auto") -> tuple[PotentialFlowLayer, dict, torch.Tensor]:
+    """Three-zone series network under a wind drive, matching the shape of the CONTAM
+    verification cases: ambient_w -> z1 -> z2 -> ambient_l, one PowerLaw per airpath edge.
+
+    Returns `(layer, drivers, phi_boundary)`.
+    """
     net = Network(dtype=torch.float64)
     for name in ("ambient_w", "z1", "z2", "ambient_l"):
         net.add_node(name)
@@ -150,15 +151,29 @@ def test_sparse_and_dense_newton_paths_agree_on_a_contam_style_series_network():
     element = PowerLaw(
         torch.tensor([0.010, 0.008, 0.012], dtype=torch.float64), 0.65, dp_transition=1e-6
     )
-    drive = ConstantDrive(kind="airpath", key="wind")
     layer = PotentialFlowLayer(
-        net, "series", [element], [drive], boundary=["ambient_w", "ambient_l"]
+        net,
+        "series",
+        [element],
+        [ConstantDrive(kind="airpath", key="wind")],
+        boundary=["ambient_w", "ambient_l"],
+        linear_solver=linear_solver,
     )
-    wind = torch.tensor([12.0, 0.0, 0.0], dtype=torch.float64)
+    drivers = {"wind": torch.tensor([12.0, 0.0, 0.0], dtype=torch.float64)}
     phi_b = torch.zeros(2, dtype=torch.float64)
+    return layer, drivers, phi_b
+
+
+def test_sparse_and_dense_newton_paths_agree_on_a_contam_style_series_network():
+    # Three-zone series network under a wind drive, matching the shape of the CONTAM
+    # verification cases: this exercises solve()'s full non-differentiable path (which now
+    # builds a GraphLaplacianOperator per Newton iteration) against layer.jacobian() (still
+    # dense, unchanged, used here only as the independent reference via a hand-rolled
+    # Newton loop) to confirm the two agree to solver-contract tolerance.
+    layer, drivers, phi_b = _series_layer()
 
     phi_sparse, q_sparse = layer.solve(
-        phi_b, {"wind": wind}, None, differentiable=False, atol=1e-13, rtol=1e-13
+        phi_b, drivers, None, differentiable=False, atol=1e-13, rtol=1e-13
     )
 
     # Independent dense reference: layer.jacobian() (unchanged, still a dense einsum) fed to
@@ -166,9 +181,9 @@ def test_sparse_and_dense_newton_paths_agree_on_a_contam_style_series_network():
     # own iteration exactly (same omega/switch_ratio schedule) but never touching the
     # operator contract at all.
     def residual_fn(x):
-        return layer.residual(x, phi_b, {"wind": wind}, None)
+        return layer.residual(x, phi_b, drivers, None)
 
-    x = layer.linear_init(phi_b, {"wind": wind}, None)
+    x = layer.linear_init(phi_b, drivers, None)
     omega_i = torch.tensor(0.75, dtype=torch.float64)
     r = residual_fn(x)
     norm0 = r.abs().amax(dim=-1)
@@ -176,7 +191,7 @@ def test_sparse_and_dense_newton_paths_agree_on_a_contam_style_series_network():
     for _ in range(50):
         if bool(norm0 < tol):
             break
-        J = layer.jacobian(x, phi_b, {"wind": wind})
+        J = layer.jacobian(x, phi_b, drivers)
         dx = torch.linalg.solve(J, r)
         prev_norm = norm0
         x = x - omega_i * dx
@@ -185,7 +200,7 @@ def test_sparse_and_dense_newton_paths_agree_on_a_contam_style_series_network():
         if bool(norm0 / prev_norm.clamp_min(1e-300) < 0.5):
             omega_i = torch.tensor(1.0, dtype=torch.float64)
     phi_dense = layer.assemble(x, phi_b)
-    q_dense = layer.flows(phi_dense, {"wind": wind})
+    q_dense = layer.flows(phi_dense, drivers)
 
     torch.testing.assert_close(phi_sparse, phi_dense, rtol=1e-9, atol=1e-12)
     torch.testing.assert_close(q_sparse, q_dense, rtol=1e-9, atol=1e-12)
@@ -199,25 +214,92 @@ def test_solve_never_assembles_the_dense_einsum_jacobian(monkeypatch, differenti
     # (n_interior, n_interior) einsum is no longer built at all. layer.jacobian() itself is
     # deliberately untouched -- it remains the dense oracle other tests call directly -- so
     # the assertion is that solve() does not call it.
-    net = Network(dtype=torch.float64)
-    for name in ("ambient_w", "z1", "z2", "ambient_l"):
-        net.add_node(name)
-    net.add_edge("ambient_w", "z1", kind="airpath")
-    net.add_edge("z1", "z2", kind="airpath")
-    net.add_edge("z2", "ambient_l", kind="airpath")
-    element = PowerLaw(
-        torch.tensor([0.010, 0.008, 0.012], dtype=torch.float64), 0.65, dp_transition=1e-6
-    )
-    layer = PotentialFlowLayer(
-        net, "series", [element], [ConstantDrive(kind="airpath", key="wind")],
-        boundary=["ambient_w", "ambient_l"],
-    )
-    wind = torch.tensor([12.0, 0.0, 0.0], dtype=torch.float64)
-    phi_b = torch.zeros(2, dtype=torch.float64)
+    layer, drivers, phi_b = _series_layer()
 
     def _no_dense_jacobian(self, *args, **kwargs):
         raise AssertionError("solve() must not assemble the dense einsum Jacobian")
 
     monkeypatch.setattr(PotentialFlowLayer, "jacobian", _no_dense_jacobian)
-    phi, q = layer.solve(phi_b, {"wind": wind}, None, differentiable=differentiable)
+    phi, q = layer.solve(phi_b, drivers, None, differentiable=differentiable)
     assert torch.isfinite(phi).all() and torch.isfinite(q).all()
+
+
+def test_direct_and_auto_linear_solvers_agree_on_a_contam_style_series_network():
+    # linear_solver="direct" is the RETAINED milestone-1 numerics: the operator's explicit
+    # A_I diag(g) A_I^T, LU-factorised. It must agree with the migrated (sparse, Krylov)
+    # default to solver-contract tolerance, or the retained reference is not a reference.
+    auto_layer, drivers, phi_b = _series_layer("auto")
+    direct_layer, _, _ = _series_layer("direct")
+
+    phi_auto, q_auto = auto_layer.solve(phi_b, drivers, None, differentiable=False)
+    phi_direct, q_direct = direct_layer.solve(phi_b, drivers, None, differentiable=False)
+
+    torch.testing.assert_close(phi_auto, phi_direct, rtol=1e-9, atol=1e-12)
+    torch.testing.assert_close(q_auto, q_direct, rtol=1e-9, atol=1e-12)
+
+
+def test_auto_goes_through_pcg_and_direct_goes_through_an_lu_factorisation(monkeypatch):
+    # The numeric agreement above is only meaningful if the two are genuinely different code
+    # paths; these spies are what establish that. `select.pcg` is the sparse path's own
+    # inner solver, `torch.linalg.lu_factor_ex` the direct path's.
+    pcg_calls, lu_calls = [], []
+    real_pcg, real_lu = select_module.pcg, torch.linalg.lu_factor_ex
+
+    def spy_pcg(*args, **kwargs):
+        pcg_calls.append(1)
+        return real_pcg(*args, **kwargs)
+
+    def spy_lu(*args, **kwargs):
+        lu_calls.append(1)
+        return real_lu(*args, **kwargs)
+
+    monkeypatch.setattr(select_module, "pcg", spy_pcg)
+    monkeypatch.setattr(torch.linalg, "lu_factor_ex", spy_lu)
+
+    auto_layer, drivers, phi_b = _series_layer("auto")
+    auto_layer.solve(phi_b, drivers, None, differentiable=False)
+    assert pcg_calls, "linear_solver 'auto' must go through pcg"
+    pcg_after_auto = len(pcg_calls)
+
+    direct_layer, _, _ = _series_layer("direct")
+    direct_layer.solve(phi_b, drivers, None, differentiable=False)
+    assert len(pcg_calls) == pcg_after_auto, "linear_solver 'direct' must not call pcg"
+    assert lu_calls, "linear_solver 'direct' must LU-factorise the assembled operator"
+
+
+def test_solve_fills_a_supplied_diagnostics_dict():
+    layer, drivers, phi_b = _series_layer()
+    diagnostics: dict = {}
+
+    layer.solve(phi_b, drivers, None, differentiable=False, diagnostics=diagnostics)
+
+    assert set(diagnostics) == {"newton_iterations", "linear_iterations", "method"}
+    assert diagnostics["method"] == "auto"
+    assert diagnostics["newton_iterations"] >= 1
+    assert isinstance(diagnostics["linear_iterations"], torch.Tensor)
+    assert bool(torch.all(diagnostics["linear_iterations"] >= 1))
+
+
+def test_diagnostics_are_filled_on_the_differentiable_path_too():
+    # Task 14 reads these alongside its timings, and its backward budget runs the
+    # differentiable path -- so diagnostics must not be a non-differentiable-only feature.
+    layer, drivers, phi_b = _series_layer()
+    diagnostics: dict = {}
+
+    layer.solve(phi_b, drivers, None, differentiable=True, diagnostics=diagnostics)
+
+    assert set(diagnostics) == {"newton_iterations", "linear_iterations", "method"}
+    assert diagnostics["newton_iterations"] >= 1
+    assert isinstance(diagnostics["linear_iterations"], torch.Tensor)
+
+
+def test_unknown_linear_solver_raises_value_error_naming_it():
+    net = _three_node_chain()
+    with pytest.raises(ValueError, match="banana"):
+        PotentialFlowLayer(
+            net,
+            "chain",
+            [Conductance(torch.ones(2, dtype=torch.float64), kind="conduction")],
+            boundary=["ambient"],
+            linear_solver="banana",
+        )
