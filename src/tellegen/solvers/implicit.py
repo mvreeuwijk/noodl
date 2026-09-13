@@ -113,7 +113,9 @@ class TransposeOperator:
 
         A symmetric operator is its own transpose, so an SPD certificate for it certifies
         this view verbatim -- which is what keeps `PotentialFlowLayer.adjoint`'s
-        GraphLaplacianOperator on the PCG path rather than dropping to GMRES. For a
+        GraphLaplacianOperator on the certified-SPD branch of the eligibility table
+        (sparse-direct, or PCG where no sparse form is available) rather than dropping it to
+        GMRES, so the backward pass costs what the forward pass costs. For a
         NONSYMMETRIC operator the transpose is a different matrix and the wrapped
         certificate says nothing about it, so None is returned: `select.solve` then routes
         to GMRES, which makes no symmetry or definiteness assumption to violate.
@@ -138,7 +140,9 @@ def adjoint(
     of the explicit transpose), so a legacy dense caller keeps the dense numerics it has
     always had rather than silently acquiring a Krylov solver's own error floor. An explicit
     ``method`` always wins, and a real operator's ``"auto"`` goes through the eligibility
-    table (PCG when the TransposeOperator certifies SPD, GMRES otherwise).
+    table in ``solvers.select``'s module docstring: sparse-direct when the TransposeOperator
+    certifies SPD and offers a transposed COO form (spec section 6.2 step 2), PCG when it
+    certifies but cannot, GMRES otherwise.
 
     Always raises on failure (``on_failure="raise"``, not exposed as a parameter): every
     caller of this function -- ``_Implicit.backward`` unconditionally, and

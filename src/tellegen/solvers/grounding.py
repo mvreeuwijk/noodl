@@ -134,9 +134,12 @@ def _certified(
     for `_grounded`'s propagation, so an instance grounded through other, positive edges
     passed condition 3 while its assembled operator was indefinite (verified: a grounded
     3-node chain with a parallel edge of slope -5 assembles to eigenvalues [-7.53, 0.53]).
-    `method="auto"` would then dispatch PCG to an indefinite system; CG's convergence test
-    uses the recursively updated residual, so such a system can report CONVERGED on a
-    drifted residual rather than the loud BREAKDOWN it happens to give in that example.
+    `method="auto"` would then dispatch a definiteness-assuming backend to an indefinite
+    system. On the PCG path (which "auto" still takes when no sparse form is available)
+    CG's convergence test uses the recursively updated residual, so such a system can report
+    CONVERGED on a drifted residual rather than the loud BREAKDOWN it happens to give in
+    that example; on the sparse-direct path the certificate is what keeps a matrix SuperLU
+    would factor into nonsense from being sent there without a word.
 
     Note the deliberate asymmetry between this test and `_grounded`'s: `g >= 0` here
     (non-negativity is what semi-definiteness needs, and a zero slope is a legitimately
