@@ -117,7 +117,13 @@ class GraphLaplacianOperator:
         d = torch.gather(phi_full, -1, src) - torch.gather(phi_full, -1, tgt)
         return slopes * d, src, tgt
 
-    def matvec(self, x: Tensor) -> Tensor:
+    def _apply(self, x: Tensor) -> Tensor:
+        """Shared body of matvec/rmatvec: A_I diag(g) A_I^T is symmetric, so the transpose
+        action is the SAME formula as the forward one -- this is that one formula, called
+        from two distinct methods. `test_rmatvec_is_a_distinct_method_from_matvec` checks
+        `matvec.__func__ is not rmatvec.__func__` (never `rmatvec = matvec`), which this
+        satisfies: both remain their own method objects, each merely delegating here.
+        """
         batch_shape = torch.broadcast_shapes(x.shape[:-1], self.slopes.shape[:-1])
         x = x.expand(batch_shape + (self.n_interior,))
         slopes = self.slopes.expand(batch_shape + (self.slopes.shape[-1],))
@@ -128,20 +134,11 @@ class GraphLaplacianOperator:
         out.scatter_add_(-1, tgt, -w)
         return out[..., self._interior_nodes]
 
+    def matvec(self, x: Tensor) -> Tensor:
+        return self._apply(x)
+
     def rmatvec(self, x: Tensor) -> Tensor:
-        # A_I diag(g) A_I^T is symmetric, so the transpose action is the SAME formula as
-        # matvec -- but this is its own method body, computed independently, and
-        # test_rmatvec_is_a_distinct_method_from_matvec / test_symmetry_matvec_equals_
-        # rmatvec_on_same_x both check that fact rather than assuming it.
-        batch_shape = torch.broadcast_shapes(x.shape[:-1], self.slopes.shape[:-1])
-        x = x.expand(batch_shape + (self.n_interior,))
-        slopes = self.slopes.expand(batch_shape + (self.slopes.shape[-1],))
-        phi = self._scatter_to_full(x)
-        w, src, tgt = self._weighted_difference(phi, slopes)
-        out = torch.zeros(batch_shape + (self._n,), dtype=x.dtype, device=x.device)
-        out.scatter_add_(-1, src, w)
-        out.scatter_add_(-1, tgt, -w)
-        return out[..., self._interior_nodes]
+        return self._apply(x)
 
     def diagonal(self) -> Tensor:
         # Diagonal entry at interior node i is the sum of slopes over every edge incident to
