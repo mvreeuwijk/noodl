@@ -12,11 +12,37 @@ import torch
 
 from tellegen.drives import Drive
 from tellegen.elements.base import Element
+from tellegen.operators.graph import GraphLaplacianOperator
+from tellegen.solvers.grounding import spd_certificate, spd_diagnosis
 from tellegen.solvers.implicit import adjoint as _adjoint_solve
 from tellegen.solvers.implicit import implicit_solve
-from tellegen.solvers.linear import solve
 from tellegen.solvers.newton import newton
+from tellegen.solvers.select import solve as select_solve
 from tellegen.topology import Network
+
+# The relative residual this layer asks its inner linear solves for, matching
+# `solvers.select.solve`'s own default, and the ULP multiple below which no dtype can
+# deliver it. See `_linear_rtol`.
+_LINEAR_RTOL = 1e-10
+_LINEAR_RTOL_ULPS = 32
+
+
+def _linear_rtol(dtype: torch.dtype) -> float:
+    """Relative residual to ask an inner linear solve for, floored by the working dtype.
+
+    A Krylov solver's achievable relative residual is bounded below by the rounding error it
+    accumulates, a small multiple of `finfo(dtype).eps`; asking for less does not make the
+    answer better, it just spends every remaining iteration and then reports MAX_ITER on a
+    solve that is in fact as converged as the dtype allows. In float64 the pinned 1e-10 is
+    comfortably above that floor and is used unchanged; in float32 (this project's declared
+    default dtype) eps is 1.2e-7, so 1e-10 is unreachable by several orders of magnitude --
+    measured: the float32 CONTAM series case in tests/verification floors at 3.2e-8 and was
+    reported as a linear_init failure until this floor was applied. This is the same
+    "the dtype cannot be asked for precision it does not have" argument `newton`'s own
+    dtype-derived atol/rtol default makes, applied to the linear solve instead of to the
+    Newton convergence test.
+    """
+    return max(_LINEAR_RTOL, _LINEAR_RTOL_ULPS * float(torch.finfo(dtype).eps))
 
 
 class PotentialFlowLayer:
@@ -217,61 +243,57 @@ class PotentialFlowLayer:
             k_parts.append(k_e + zero)
         return torch.cat(c_parts, dim=-1), torch.cat(k_parts, dim=-1)
 
-    def _floating_group_nodes(self, k: torch.Tensor) -> list:
-        """Interior node names in any connected GROUP with no path to a boundary node.
+    def _grounding_check(self, slopes: torch.Tensor, *, where: str) -> None:
+        """Raise unless every instance in `slopes` certifies SPD grounding.
 
-        Two nodes are "connected" here only through an EDGE whose own linear slope k is
-        nonzero somewhere in the batch: an edge whose element contributes no slope at all
-        at that edge (e.g. any FixedFlow edge, whose dflow is identically 0, or a closed
-        damper of otherwise-slope-bearing kind sitting at g = 0) cannot carry a potential
-        difference to a boundary node and so cannot rescue a floating group. This subsumes
-        the isolated-single-node case (a node with zero diagonal in J0 is exactly a
-        singleton component here, since J0's diagonal at node i is the sum of k over i's
-        own incident edges) as well as a floating GROUP of two or more mutually-connected
-        nodes that, as a whole, has no path to any boundary node -- which a per-node
-        diagonal check alone cannot see, because each member's own diagonal is nonzero from
-        its internal edges.
+        The certificate (Task 3's `solvers.grounding.spd_certificate`) is run on the slopes
+        GIVEN -- the caller decides whether those are `linear_init`'s tangent-at-zero slopes
+        or the actual `dflows` at a solve point -- and it is per instance. That is the whole
+        point: the pre-Task-11 check ORed "is this edge's slope nonzero" across the WHOLE
+        batch before testing connectivity, so an edge closed in one instance but open in
+        another counted as present for both, and a genuinely ungrounded instance sailed
+        through to a dense factorisation that could only report "singular", if it reported
+        anything at all.
 
-        Filtering must happen at EDGE granularity, not kind granularity: a kind can mix a
-        zero-slope edge (a closed damper, g = 0) with a nonzero-slope edge of the very same
-        kind (an open one, g = 1), and gating on "does this kind have any nonzero edge
-        anywhere" would let the zero-slope edge itself connect a group it cannot actually
-        support. `net.component_labels(kind)`/`net.n_components_of(kind)` cannot express
-        this (they know edges by kind, not by slope), so this method does not use them: it
-        unions the source and target of each of the LAYER's OWN columns (`self.cols`, whose
-        order matches `k`'s) individually, filtered by that edge's own slope. Iterating the
-        layer's own columns is already kind-restricted by construction (Task 2's
-        whole-graph-vs-kind-restricted trap does not apply here, since no whole-graph
-        connectivity operator is used at all).
+        The message is built from `solvers.grounding.spd_diagnosis` (amendment A2), which
+        names, per failing instance, either the negative-slope EDGES or the ungrounded
+        interior NODES. Node indices are rendered as node NAMES here, because this layer --
+        unlike the raw operator -- knows them, and because the error text every existing
+        (unbatched) test in test_potential.py asserts on is exactly those names. A batched
+        failure additionally leads with the failing BATCH INDICES, since node-level detail
+        alone is not attributable across unrelated per-instance failures.
         """
-        n = self.net.n
-        parent = list(range(n))
+        certified = spd_certificate(
+            self._src, self._tgt, slopes, self._interior_of_node, self._boundary_mask, atol=0.0
+        )
+        if bool(torch.all(certified)):
+            return
+        records = spd_diagnosis(
+            self._src, self._tgt, slopes, self._interior_of_node, self._boundary_mask, atol=0.0
+        )
+        if certified.ndim == 0:
+            # Unbatched: one instance, so a bare batch index would say nothing. Name the
+            # nodes (or edges) directly, as the pre-Task-11 message did.
+            raise RuntimeError(f"{where}: {self._describe_grounding(records[0])}")
+        bad_idx = torch.nonzero(~certified.reshape(-1), as_tuple=False).flatten().tolist()
+        details = "; ".join(
+            f"instance {rec['instance']}: {self._describe_grounding(rec)}" for rec in records
+        )
+        raise RuntimeError(
+            f"{where}: batch indices {bad_idx} do not certify a grounded, positive-slope "
+            f"system; {details}"
+        )
 
-        def find(x: int) -> int:
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
-
-        def union(a: int, b: int) -> None:
-            ra, rb = find(a), find(b)
-            if ra != rb:
-                parent[rb] = ra
-
-        k_flat = k.reshape(-1, k.shape[-1])
-        nonzero_anywhere = (k_flat != 0).any(dim=0)
-        node_index = {node: i for i, node in enumerate(self.net.nodes)}
-        edges = self.net.edges
-        for col_pos, col in enumerate(self.cols.tolist()):
-            if not bool(nonzero_anywhere[col_pos]):
-                continue
-            u, v, _ = edges[col]
-            union(node_index[u], node_index[v])
-
-        boundary_roots = {find(i) for i in self.bound.tolist()}
-        return [
-            self.net.nodes[i] for i in self.interior.tolist() if find(i) not in boundary_roots
-        ]
+    def _describe_grounding(self, record: dict) -> str:
+        """One failing instance's `spd_diagnosis` record, with node INDICES resolved to the
+        network's own node names (which the operator-level diagnosis cannot know)."""
+        if record["reason"] == "negative_slope":
+            return f"negative slope on edges {record['edges']}"
+        names = [self.net.nodes[i] for i in record["nodes"]]
+        return (
+            f"floating nodes with no path to a boundary potential: "
+            f"ungrounded interior nodes {names}"
+        )
 
     def linear_init(self, phi_boundary, drivers, sources):
         drivers = drivers or {}
@@ -288,26 +310,28 @@ class PotentialFlowLayer:
         rhs = self._source_interior(sources, phi0) - torch.einsum(
             "ie,...e->...i", A_I, c + k * dp0
         )
-        J0 = torch.einsum("ie,...e,je->...ij", A_I, k, A_I)
-        bad = self._floating_group_nodes(k)
-        if bad:
-            raise RuntimeError(
-                f"floating nodes with no path to a boundary potential: {bad}"
-            )
-        # J0 picks up a batch dimension only if some element's linear_init(drivers) actually
+        self._grounding_check(k, where="linear_init")
+        # k picks up a batch dimension only if some element's linear_init(drivers) actually
         # depends on drivers (e.g. a driver-conditioned slope); with purely constant slopes
-        # (every test element here) J0 stays unbatched (n_I, n_I) even when `rhs` is batched
-        # via phi_boundary/sources. torch.linalg.solve does not broadcast an unbatched A
-        # against a batched b the way one might expect: with A.ndim == b.ndim it instead
-        # treats b as a single (n_I, k) right-hand-side matrix, so a (2, 2) A against a
-        # (50, 2) b raises (misreported as a singular system) rather than solving 50
-        # independent 2x2 systems. Broadcasting both to their common batch shape first
-        # makes A.ndim == b.ndim + 1 in the batched case, which torch.linalg.solve does
-        # broadcast correctly as one system per batch element.
-        solve_batch = torch.broadcast_shapes(J0.shape[:-2], rhs.shape[:-1])
-        J0 = J0.expand(solve_batch + J0.shape[-2:])
+        # k stays unbatched (b,) even when `rhs` is batched via phi_boundary/sources.
+        # Broadcasting both to their common batch shape first keeps the operator's own batch
+        # shape and the right-hand side's in agreement, so the solve is one system per batch
+        # element rather than one system with several right-hand sides.
+        solve_batch = torch.broadcast_shapes(k.shape[:-1], rhs.shape[:-1])
+        k = k.expand(solve_batch + k.shape[-1:])
         rhs = rhs.expand(solve_batch + rhs.shape[-1:])
-        return solve(J0, rhs)
+        op = GraphLaplacianOperator(
+            self._src,
+            self._tgt,
+            k,
+            len(self.interior),
+            self._interior_of_node,
+            boundary_mask=self._boundary_mask,
+        )
+        result = select_solve(
+            op, rhs, method="auto", where="linear_init", rtol=_linear_rtol(rhs.dtype)
+        )
+        return result.x
 
     def _check_no_unreachable_differentiable_tensors(self) -> None:
         """Guard against a gradient that would be silently wrong or absent (review finding
