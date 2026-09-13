@@ -383,3 +383,69 @@ def test_adjoint_routes_through_the_layers_own_linear_solver(monkeypatch, two_zo
             assert not pcg_calls, "adjoint under linear_solver 'direct' must not call pcg"
 
     torch.testing.assert_close(lam["auto"], lam["direct"], rtol=1e-9, atol=1e-12)
+
+
+def test_hot_path_never_touches_the_dense_incidence(monkeypatch, two_zone_layer):
+    # Task 15's structural gate. `A` (n x b) and `_diff` (b x n) are the last dense objects
+    # the layer holds; the milestone's rule is that nothing on a per-Newton-step path may
+    # form or read one. Patching them on the CLASS with a raising property is what makes the
+    # guard non-vacuous: `property` is a data descriptor, so it intercepts the read even if
+    # an instance attribute (the pre-Task-15 `self.A = ...`) or a `cached_property` entry is
+    # already sitting in the instance __dict__ -- a plain instance-attribute delete would
+    # not. Every call below is on the hot path (`assemble` included, which used to read
+    # `self.A.shape[0]` for the node count); `jacobian()` is deliberately NOT called here,
+    # because it remains the dense oracle and is allowed to build A.
+    net, elements, drives, boundary = two_zone_layer
+    el = PowerLaw(
+        elements[0].C.detach().clone().requires_grad_(True), elements[0].n, learnable=True
+    )
+    layer = PotentialFlowLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    drivers = {"wind": torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)}
+    sources = torch.zeros(net.n, dtype=torch.float64)
+
+    def _dense_touched(self):
+        raise AssertionError("dense A touched")
+
+    monkeypatch.setattr(PotentialFlowLayer, "A", property(_dense_touched), raising=False)
+    monkeypatch.setattr(PotentialFlowLayer, "_diff", property(_dense_touched), raising=False)
+
+    phi_i0 = layer.linear_init(phi_b, drivers, sources)
+    phi0 = layer.assemble(phi_i0, phi_b)
+    layer.dp(phi0, drivers)
+    q0 = layer.flows(phi0, drivers)
+    layer.dflows(phi0, drivers)
+    layer.residual(phi_i0, phi_b, drivers, sources)
+    layer.power_residual(phi0, q0, drivers, sources)
+
+    phi_nd, q_nd = layer.solve(phi_b, drivers, sources, differentiable=False)
+    assert torch.isfinite(phi_nd).all() and torch.isfinite(q_nd).all()
+
+    phi_d, _ = layer.solve(phi_b, drivers, sources, differentiable=True)
+    phi_d.sum().backward()
+    assert el.C.grad is not None
+
+    grad_phi_i = torch.tensor([1.0, -2.0], dtype=torch.float64)
+    lam = layer.adjoint(phi_d[layer.interior].detach(), phi_b, drivers, grad_phi_i)
+    assert torch.isfinite(lam).all()
+
+
+def test_dense_incidence_is_computed_lazily(two_zone_layer):
+    # The companion to the guard above: A/_diff must still EXIST with their old values (the
+    # composed-model conservation tests read `model.layer.A` directly, and `jacobian()` is
+    # built from it), they must simply not be built until someone asks. "Not built" is
+    # asserted as "the layer holds no 2-D tensor at all after __init__", which is stronger
+    # and independent of the caching mechanism's attribute names.
+    net, elements, drives, boundary = two_zone_layer
+    layer = PotentialFlowLayer(net, "zones", elements, drives=drives, boundary=boundary)
+
+    dense = {
+        name: tuple(v.shape)
+        for name, v in vars(layer).items()
+        if isinstance(v, torch.Tensor) and v.dim() >= 2
+    }
+    assert dense == {}, f"layer holds dense tensors after construction: {dense}"
+
+    assert torch.equal(layer.A, net.incidence()[:, layer.cols])
+    assert torch.equal(layer._diff, net.difference()[layer.cols])
+    assert layer.A is layer.A, "A must be cached once computed, not rebuilt per access"

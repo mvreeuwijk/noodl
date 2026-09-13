@@ -718,3 +718,87 @@ def test_expm_action_mixed_stiffness_batch_matches_standalone_within_tolerance()
         torch.testing.assert_close(
             x_batch.grad[i], x_standalone[i].grad, rtol=1e-8, atol=1e-8
         )
+
+
+def _conduction_chain_layer() -> TransportLayer:
+    """ambient (boundary) -- A -- B with three airpath edges and ONE conduction edge A->B.
+
+    Used by the Task 15 structural tests: the conduction branch is the one that used to
+    build an (n, n) `self.L` in `__init__`, and the no-conduction branch is the one that
+    allocated an (n, n) block of ZEROS for nothing at all.
+    """
+    net = Network(dtype=torch.float64)
+    for name in ("ambient", "A", "B"):
+        net.add_node(name)
+    net.add_edge("ambient", "A", kind="airpath")
+    net.add_edge("A", "B", kind="airpath")
+    net.add_edge("B", "ambient", kind="airpath")
+    net.add_edge("A", "B", kind="conduction")
+    return TransportLayer(
+        net,
+        "heat",
+        capacity=torch.tensor([50.0, 80.0], dtype=torch.float64),
+        flow_kind="airpath",
+        boundary=["ambient"],
+        conduction_kind="conduction",
+        conductance=torch.tensor([2.5], dtype=torch.float64),
+    )
+
+
+def test_transport_layer_allocates_no_dense_L_at_construction():
+    # Task 15: `self.L` is (n, n) and grew 4x per node doubling in the composed-model
+    # memory gate, and in the NO-conduction case it was a block of zeros that operator()
+    # subtracted for nothing. Construction must hold no (n, n) tensor on either branch.
+    net = three_node_chain()
+    plain = TransportLayer(
+        net,
+        "co2",
+        capacity=torch.tensor([50.0, 80.0], dtype=torch.float64),
+        flow_kind="airpath",
+        boundary=["ambient"],
+    )
+    for layer in (plain, _conduction_chain_layer()):
+        n = layer.net.n
+        square = {
+            name: tuple(v.shape)
+            for name, v in vars(layer).items()
+            if isinstance(v, torch.Tensor) and v.dim() >= 2 and v.shape[-2:] == (n, n)
+        }
+        assert square == {}, f"TransportLayer holds an (n, n) tensor after __init__: {square}"
+
+
+def test_operator_oracle_still_includes_conduction():
+    # The dense oracle keeps its exact values. These are the (M, N) this fixture produced
+    # with the pre-Task-15 code (conduction folded in via the construction-time `self.L`),
+    # recorded before the change and hard-coded here, so a conduction term silently dropped
+    # when L stopped being an attribute would fail this test rather than pass a
+    # self-consistent comparison.
+    layer = _conduction_chain_layer()
+    q = torch.tensor([0.3, -0.2, 0.25], dtype=torch.float64)
+    M, N = layer.operator(q)
+
+    expected_M = torch.tensor(
+        [[-0.05, 0.054000000000000006], [0.03125, -0.036875000000000005]],
+        dtype=torch.float64,
+    )
+    expected_N = torch.tensor([[0.006], [0.0]], dtype=torch.float64)
+    torch.testing.assert_close(M, expected_M, rtol=1e-12, atol=1e-14)
+    torch.testing.assert_close(N, expected_N, rtol=1e-12, atol=1e-14)
+
+    # ... and the conduction term is genuinely IN there: the same network without the
+    # conduction edge gives a different M (2.5 W/K on both diagonal entries, scaled by
+    # capacity), so the assertions above are not merely pinning an advection-only oracle.
+    no_conduction = TransportLayer(
+        layer.net,
+        "heat",
+        capacity=torch.tensor([50.0, 80.0], dtype=torch.float64),
+        flow_kind="airpath",
+        boundary=["ambient"],
+    )
+    M_plain, _ = no_conduction.operator(q)
+    torch.testing.assert_close(
+        M - M_plain,
+        torch.tensor([[-2.5 / 50.0, 2.5 / 50.0], [2.5 / 80.0, -2.5 / 80.0]], dtype=torch.float64),
+        rtol=1e-12,
+        atol=1e-14,
+    )
