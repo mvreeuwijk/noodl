@@ -573,8 +573,11 @@ def test_error_control_raises_naming_instances_when_max_substeps_exceeded():
     op = layer._advection_operator(q)
     M, N = layer.operator(q)
     b0 = (N @ xb.unsqueeze(-1)).squeeze(-1) + sources / layer.capacity
-    with pytest.raises(RuntimeError, match="failed to converge"):
-        _expm_action(op, x0, b0, dt=1e9, max_substeps=3)
+    with pytest.raises(RuntimeError, match="TransportLayer 'co2' exact step.*failed to converge"):
+        _expm_action(
+            op, x0, b0, dt=1e9, max_substeps=3,
+            where=f"TransportLayer '{layer.name}' exact step",
+        )
 
 
 def test_gradcheck_expm_action_wrt_x_flow_sources_boundary():
@@ -648,3 +651,70 @@ def test_expm_action_backward_memory_scales_with_substep_count():
     )
     assert substeps_stiff > substeps_mild  # confirms the two cases are genuinely different
     assert peak_stiff > peak_mild  # more sub-steps genuinely save more for backward
+
+
+def test_expm_action_mixed_stiffness_batch_matches_standalone_within_tolerance():
+    """ONE `_expm_action` call on a batch of two instances -- instance 0 (removal rate
+    0.01) converges in a handful of Taylor terms, instance 1 (removal rate 500.0, the
+    same rate/dt as test_error_control_triggers_substepping_on_a_stiff_case above) needs
+    several dt-halvings. Because the WHOLE batch is halved together whenever ANY instance
+    has not converged (the batched shape never changes, matching newton.py's masking
+    idiom), the mild instance is recomputed at the halved dt too, by a DIFFERENT sequence
+    of Taylor evaluations than its own standalone (single-instance) call would use. This
+    test therefore asserts agreement with the standalone result and with the dense oracle
+    to rtol=1e-9/atol=1e-12 -- a TOLERANCE bound, not bit-for-bit identity, which the
+    algorithm does not guarantee by design.
+    """
+    net = flow_through_zone()
+    cap = torch.tensor([1.0], dtype=torch.float64)
+    rates = [0.01, 500.0]
+    layers = [
+        TransportLayer(
+            net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"],
+            removal=torch.tensor([r], dtype=torch.float64),
+        )
+        for r in rates
+    ]
+    q = torch.zeros(2, dtype=torch.float64)
+    dt = 50.0
+    xb = torch.tensor([0.0], dtype=torch.float64)
+    sources = torch.zeros(1, dtype=torch.float64)
+    x0_val = 10.0
+
+    # Build ONE batched operator: same net/topology, but a per-instance removal rate
+    # stacked along a new leading batch dimension -- everything else (flow, transmission,
+    # capacity) is shared, un-batched, and broadcasts against it.
+    op_batch = layers[1]._advection_operator(q)
+    op_batch.removal = torch.stack([layer.removal for layer in layers], dim=0)  # (2, 1, 1)
+
+    x_batch = torch.tensor([[x0_val], [x0_val]], dtype=torch.float64, requires_grad=True)
+    b0_batch = torch.zeros(2, 1, dtype=torch.float64)
+
+    sparse, substeps = _expm_action(op_batch, x_batch, b0_batch, dt)
+    assert substeps > 1
+
+    x_standalone = [
+        torch.tensor([x0_val], dtype=torch.float64, requires_grad=True) for _ in rates
+    ]
+    standalone_results = []
+    for layer, xi in zip(layers, x_standalone, strict=True):
+        op = layer._advection_operator(q)  # a FRESH operator per instance, never op_batch
+        M, N = layer.operator(q)
+        b0 = (N @ xb.unsqueeze(-1)).squeeze(-1) + sources / layer.capacity
+        dense = _van_loan_step_dense(M, xi.detach(), b0, dt)
+        result_i, _ = _expm_action(op, xi, b0, dt)
+        torch.testing.assert_close(result_i.detach(), dense, rtol=1e-9, atol=1e-12)
+        standalone_results.append(result_i)
+
+    for i in range(2):
+        torch.testing.assert_close(
+            sparse[i], standalone_results[i].detach(), rtol=1e-9, atol=1e-12
+        )
+
+    sparse.sum().backward()
+    assert torch.isfinite(x_batch.grad).all()
+    for i in range(2):
+        standalone_results[i].backward()
+        torch.testing.assert_close(
+            x_batch.grad[i], x_standalone[i].grad, rtol=1e-8, atol=1e-8
+        )

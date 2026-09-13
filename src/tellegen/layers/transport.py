@@ -441,7 +441,9 @@ class TransportLayer:
             src_s, _ = self._to_stacked(sources.to(dtype), self.n_i, "sources")
             cap = self._capacity_stacked(dtype)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
-            result, _substeps = _expm_action(op, x_s, b0, dt)
+            result, _substeps = _expm_action(
+                op, x_s, b0, dt, where=f"TransportLayer '{self.name}' exact step"
+            )
         elif self.scheme == "implicit":
             result, reduced = self._implicit_step_sparse(
                 x, q, sources, x_boundary, dt, on_failure
@@ -599,7 +601,7 @@ def _van_loan_step_dense(
 
 
 def _expm_action(
-    M,
+    M: AdvectionOperator,
     x: torch.Tensor,
     b0: torch.Tensor,
     dt: float,
@@ -608,6 +610,7 @@ def _expm_action(
     atol: float = 1e-12,
     max_terms: int = 60,
     max_substeps: int = 20,
+    where: str = "TransportLayer exact step",
     _depth: int = 0,
 ) -> tuple[torch.Tensor, int]:
     """expm(dt * [[M, b0], [0, 0]]) @ [x, 1], as a scaling-and-squaring-free Taylor
@@ -637,17 +640,17 @@ def _expm_action(
     if _depth >= max_substeps:
         bad = torch.nonzero(~converged.reshape(-1), as_tuple=False).flatten()
         raise RuntimeError(
-            f"TransportLayer exact step: batch indices {bad.tolist()} failed to converge "
+            f"{where}: batch indices {bad.tolist()} failed to converge "
             f"the exponential action after {max_substeps} dt-halvings"
         )
     half = dt / 2
     x_mid, substeps_a = _expm_action(
         M, x, b0, half, rtol=rtol, atol=atol, max_terms=max_terms,
-        max_substeps=max_substeps, _depth=_depth + 1,
+        max_substeps=max_substeps, where=where, _depth=_depth + 1,
     )
     x_end, substeps_b = _expm_action(
         M, x_mid, b0, half, rtol=rtol, atol=atol, max_terms=max_terms,
-        max_substeps=max_substeps, _depth=_depth + 1,
+        max_substeps=max_substeps, where=where, _depth=_depth + 1,
     )
     return x_end, substeps_a + substeps_b  # amendment A6
 
