@@ -18,7 +18,10 @@ from benchmarks.measure import isolated_peak_rss, time_call
 from benchmarks.report_composed_scaling import (
     BUDGET_TABLE,
     format_budget_row,
+    format_shape_gate,
     measure_budget_row,
+    measure_matvec_shape_gate,
+    measure_memory_shape_gate,
 )
 from tellegen.elements import PowerLaw
 from tellegen.layers.potential import PotentialFlowLayer
@@ -289,4 +292,41 @@ def test_composed_model_meets_its_section_6_1_budget(
         f"peak memory budget missed: {row['peak_memory_bytes'] / 1e6:.1f} MB > "
         f"{memory_budget / 1e6:.0f} MB "
         f"({row['peak_memory_bytes'] / memory_budget:.2f}x)"
+    )
+
+
+@pytest.mark.slow
+def test_doubling_nodes_at_fixed_edge_ratio_raises_peak_memory_by_at_most_2_5x():
+    """Shape gate 1: peak RSS must grow about linearly in problem size, not quadratically.
+
+    1030 nodes (`build_composed()`'s defaults) against 2060 (`building_nodes=240`,
+    `street_nodes=80`, `sewer_nodes=60`), at fixed ensemble 1 and one step. The builder
+    derives each submodel's extra-edge count from its node count, so doubling the node
+    counts holds the edge-to-node ratio fixed and the comparison is of shape alone. A dense
+    (n_interior x n_interior) Jacobian would give 4x here.
+    """
+    gate = measure_memory_shape_gate()
+    print("\n" + format_shape_gate(gate))
+    assert gate["ratio"] <= 2.5, (
+        f"peak memory grew {gate['ratio']:.2f}x when nodes doubled "
+        f"({gate['small_nodes']} -> {gate['large_nodes']} nodes; budget 2.5x)"
+    )
+
+
+@pytest.mark.slow
+def test_doubling_edges_at_fixed_nodes_raises_matvec_time_by_at_most_2_5x():
+    """Shape gate 2: `GraphLaplacianOperator.matvec` must be linear in edge count.
+
+    `build_composed` cannot vary edge count at fixed node count -- it derives every
+    submodel's extra-edge count from its node count -- so the doubled-edge operator is
+    built directly from the reference layer's own endpoint tensors plus an equal number of
+    freshly drawn random node pairs, exactly the "random tree plus extra random edges"
+    recipe the builder itself uses, at the SAME node count, interior map and boundary mask.
+    `matvec` is a gather/scatter over edges, so that is precisely the quantity under test.
+    """
+    gate = measure_matvec_shape_gate()
+    print("\n" + format_shape_gate(gate))
+    assert gate["ratio"] <= 2.5, (
+        f"matvec time grew {gate['ratio']:.2f}x when edges doubled "
+        f"({gate['small_edges']} -> {gate['large_edges']} edges; budget 2.5x)"
     )
