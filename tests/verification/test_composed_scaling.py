@@ -10,7 +10,12 @@ Memory here is measured with `benchmarks.measure.isolated_peak_rss`, never `trac
 
 from __future__ import annotations
 
+import torch
+
+from benchmarks.composed_model import build_composed
 from benchmarks.measure import isolated_peak_rss, time_call
+from tellegen.elements import PowerLaw
+from tellegen.layers.potential import PotentialFlowLayer
 
 
 def test_time_call_returns_a_nonnegative_elapsed_seconds_and_the_callables_result():
@@ -28,3 +33,213 @@ def test_isolated_peak_rss_sees_pytorch_allocations_a_200_mib_tensor_makes():
     )
     assert result == 200
     assert peak_bytes >= 150 * 2**20
+
+
+def test_composed_model_parity_with_dense_reference_at_ensemble_one_and_four():
+    """The migrated default path and the retained direct path must agree numerically.
+
+    Two genuinely different solvers (`tests/verification/test_composed_model.py`'s spy test is
+    what proves that); this asserts they land on the same answer, in both `phi` and `q`, at
+    ensemble 1 and again at ensemble 4 so a batching bug in either cannot hide behind a
+    single-instance comparison.
+    """
+    for ensemble in (1, 4):
+        model = build_composed(ensemble=ensemble)
+        phi_sparse, q_sparse = model.layer.solve(
+            model.phi_boundary, model.drivers, model.sources, differentiable=False
+        )
+        phi_dense, q_dense = model.dense_layer.solve(
+            model.phi_boundary, model.drivers, model.sources, differentiable=False
+        )
+        torch.testing.assert_close(phi_sparse, phi_dense, rtol=1e-9, atol=1e-12)
+        torch.testing.assert_close(q_sparse, q_dense, rtol=1e-9, atol=1e-12)
+
+
+def test_composed_model_interface_conservation_at_every_shared_node():
+    """Net flux minus source vanishes at every interior node a submodel join touches.
+
+    The imbalance is formed with `model.layer.A`, whose columns are in LAYER edge order --
+    the same order `q` comes back in. `net.incidence()` is in NETWORK edge order, and using
+    it here reports a spurious ~7e-3 imbalance from nothing but the column permutation.
+
+    Tolerance is relative to the largest flow on the edges INCIDENT to the node, since that
+    is the scale the cancellation happens at; the two boundary nodes (`street_0`, `sewer_0`)
+    are excluded because they absorb whatever flux the rest of the network leaves over.
+
+    Solved at `atol=rtol=1e-13` (as the parity gate is): the imbalance at a node IS the
+    Newton residual there, so a gate at 1e-12 RELATIVE to a ~1e-3 flow is a statement about
+    a converged solve, not about Newton's default stopping tolerance. At the default
+    tolerance the worst interior residual is 8e-11 absolute; at 1e-13 it is 2e-17, five
+    orders of magnitude inside this gate.
+    """
+    model = build_composed(ensemble=1)
+    phi, q = model.layer.solve(
+        model.phi_boundary, model.drivers, model.sources, atol=1e-13, rtol=1e-13
+    )
+    net_flux = torch.einsum("ne,...e->...n", model.layer.A, q)
+    interior_nodes = set(model.layer.interior.tolist())
+
+    checked = 0
+    worst = 0.0
+    for join in ("street", "sewer"):
+        for building, (local_node, shared_node) in model.interface_nodes[join].items():
+            for name in (local_node, shared_node):
+                node = model.net.node_index(name)
+                if node not in interior_nodes:
+                    continue
+                incident = torch.nonzero(model.layer.A[node], as_tuple=True)[0]
+                scale = float(q[..., incident].abs().amax())
+                residual = float((net_flux[..., node] - model.sources[..., node]).abs().amax())
+                assert residual <= 1e-12 * scale, (
+                    f"{join} interface of {building}: node {name!r} carries an imbalance of "
+                    f"{residual:.3e}, above 1e-12 * {scale:.3e}"
+                )
+                worst = max(worst, residual / scale)
+                checked += 1
+    print(f"\nworst relative interface imbalance: {worst:.3e} (gate <= 1e-12)")
+    # 8 buildings x 2 joins x 2 endpoints, less any endpoint that is a boundary node.
+    assert checked >= 30, f"only {checked} interface nodes were actually checked"
+
+
+def test_gradient_across_a_join_matches_central_finite_differences():
+    """A parameter in the STREET submodel (the conductance C of every street edge) must
+    receive a correct gradient from a loss inside BUILDING 0 (the potential at its manhole
+    node). Small configuration so the central-difference loop is cheap.
+
+    Amendment A3.5's gate, verbatim. MEASURED CAVEAT: at this configuration the exact
+    gradient is identically zero, and the test therefore asserts 0 == 0 (FD noise aside).
+    `build_composed` wires building `i`'s ambient node to `street_names[i % street_nodes]`
+    and its manhole to `sewer_names[i % sewer_nodes]`, so building 0 -- and only building 0
+    -- attaches directly to BOTH boundary nodes, `street_0` and `sewer_0`. Its submodel is
+    then enclosed between two fixed potentials and depends on nothing outside itself, so no
+    street conductance can move its manhole. Autograd returns exactly 0.0 and central
+    differences return one ULP of noise (3.5e-12). Kept because it is the amendment's
+    literal gate;
+    `test_gradient_across_a_join_is_nonzero_and_matches_central_finite_differences` below is
+    the same construction at building 1, where the gradient is genuinely non-zero and the
+    comparison has something to catch.
+    """
+    model = build_composed(
+        n_buildings=2, building_nodes=12, street_nodes=6, sewer_nodes=5, ensemble=1, seed=0
+    )
+    net = model.net
+    loss_node = net.node_index(model.interface_nodes["sewer"]["building_0"][0])  # manhole
+    street = next(el for el in model.elements if el.kind == "street")
+    C0 = street.C.detach().clone()
+
+    def layer_with_street_C(C, *, learnable):
+        elements = [
+            PowerLaw(C, 0.65, kind="street", learnable=learnable) if el.kind == "street" else el
+            for el in model.elements
+        ]
+        return PotentialFlowLayer(net, "grad_join", elements, boundary=model.boundary), elements
+
+    def loss_at(C):
+        layer, _ = layer_with_street_C(C, learnable=False)
+        phi, _ = layer.solve(
+            model.phi_boundary,
+            model.drivers,
+            model.sources,
+            differentiable=False,
+            atol=1e-13,
+            rtol=1e-13,
+        )
+        return float(phi[0, loss_node])
+
+    layer, elements = layer_with_street_C(C0.clone(), learnable=True)
+    el = next(e for e in elements if e.kind == "street")
+    phi, _ = layer.solve(
+        model.phi_boundary,
+        model.drivers,
+        model.sources,
+        differentiable=True,
+        atol=1e-13,
+        rtol=1e-13,
+    )
+    phi[0, loss_node].backward()
+    grad_ad = el.C.grad.detach().clone()
+
+    h = 1e-6
+    grad_fd = torch.zeros_like(C0)
+    for i in range(C0.numel()):
+        bump = torch.zeros_like(C0)
+        bump[i] = h
+        grad_fd[i] = (loss_at(C0 + bump) - loss_at(C0 - bump)) / (2 * h)
+
+    deviation = (grad_ad - grad_fd).abs()
+    print(
+        f"\ncross-join gradient: max abs deviation {float(deviation.max()):.3e}, "
+        f"max rel deviation {float((deviation / grad_fd.abs()).max()):.3e} "
+        f"(gate rtol=1e-6 atol=1e-8), |grad| up to {float(grad_fd.abs().max()):.3e}"
+    )
+    torch.testing.assert_close(grad_ad, grad_fd, rtol=1e-6, atol=1e-8)
+
+
+def test_gradient_across_a_join_is_nonzero_and_matches_central_finite_differences():
+    """The non-vacuous half of the cross-join gradient gate: building 1, not building 0.
+
+    Identical construction to the amendment's own test above, moved to building 1, whose
+    ambient node attaches to `street_1` and whose manhole attaches to `sewer_1` -- both
+    interior. The loss at building 1's manhole therefore genuinely depends on every street
+    conductance, through a path that leaves the building submodel, crosses the street join,
+    traverses the street network and comes back through the sewer join. The explicit
+    non-triviality assertion is what stops this gate degenerating into 0 == 0.
+    """
+    model = build_composed(
+        n_buildings=2, building_nodes=12, street_nodes=6, sewer_nodes=5, ensemble=1, seed=0
+    )
+    net = model.net
+    loss_node = net.node_index(model.interface_nodes["sewer"]["building_1"][0])  # manhole
+    street = next(el for el in model.elements if el.kind == "street")
+    C0 = street.C.detach().clone()
+
+    def layer_with_street_C(C, *, learnable):
+        elements = [
+            PowerLaw(C, 0.65, kind="street", learnable=learnable) if el.kind == "street" else el
+            for el in model.elements
+        ]
+        return PotentialFlowLayer(net, "grad_join", elements, boundary=model.boundary), elements
+
+    def loss_at(C):
+        layer, _ = layer_with_street_C(C, learnable=False)
+        phi, _ = layer.solve(
+            model.phi_boundary,
+            model.drivers,
+            model.sources,
+            differentiable=False,
+            atol=1e-13,
+            rtol=1e-13,
+        )
+        return float(phi[0, loss_node])
+
+    layer, elements = layer_with_street_C(C0.clone(), learnable=True)
+    el = next(e for e in elements if e.kind == "street")
+    phi, _ = layer.solve(
+        model.phi_boundary,
+        model.drivers,
+        model.sources,
+        differentiable=True,
+        atol=1e-13,
+        rtol=1e-13,
+    )
+    phi[0, loss_node].backward()
+    grad_ad = el.C.grad.detach().clone()
+
+    h = 1e-6
+    grad_fd = torch.zeros_like(C0)
+    for i in range(C0.numel()):
+        bump = torch.zeros_like(C0)
+        bump[i] = h
+        grad_fd[i] = (loss_at(C0 + bump) - loss_at(C0 - bump)) / (2 * h)
+
+    assert float(grad_fd.abs().max()) > 1e-9, (
+        "cross-join gradient gate is vacuous here too: the finite-difference gradient is "
+        f"{float(grad_fd.abs().max()):.3e}, indistinguishable from roundoff"
+    )
+    deviation = (grad_ad - grad_fd).abs()
+    print(
+        f"\ncross-join gradient (building 1): |grad| up to "
+        f"{float(grad_fd.abs().max()):.3e}, max abs deviation {float(deviation.max()):.3e} "
+        f"(gate rtol=1e-6 atol=1e-8)"
+    )
+    torch.testing.assert_close(grad_ad, grad_fd, rtol=1e-6, atol=1e-8)
