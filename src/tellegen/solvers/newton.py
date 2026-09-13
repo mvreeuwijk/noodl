@@ -51,10 +51,21 @@ from tellegen.solvers.select import solve as select_solve
 
 @dataclass
 class NewtonResult:
+    """Newton's own per-instance outcome, plus the inner solver's cost.
+
+    ``linear_iterations`` is per instance the MAXIMUM inner-solver iteration count over the
+    Newton steps actually taken -- the worst single linear solve an instance needed, which is
+    what a budget or a preconditioner decision is made against, and is monotone in the
+    problem's difficulty in a way a sum over a varying number of Newton steps is not. It is
+    ``None`` only when no linear solve happened at all (``x0`` already satisfied the
+    convergence test), never as a stand-in for an unknown count.
+    """
+
     x: torch.Tensor
     converged: torch.Tensor
     iterations: int
     residual_norm: torch.Tensor
+    linear_iterations: torch.Tensor | None = None
 
 
 def _as_operator(op: LinearOperator | torch.Tensor) -> LinearOperator:
@@ -82,6 +93,7 @@ def newton(
     max_iter: int = 50,
     omega: float = 0.75,
     switch_ratio: float = 0.5,
+    method: str = "auto",
     on_failure: str = "raise",
 ) -> NewtonResult:
     """Solve ``residual(x) = 0`` by damped, batched Newton iteration.
@@ -98,6 +110,12 @@ def newton(
     ``atol`` and/or ``rtol`` always overrides this default for that argument; the two are
     independent, so an explicit ``atol=1e-6`` with ``rtol`` left as ``None`` still gets the
     dtype-derived default for ``rtol``.
+
+    ``method`` is forwarded verbatim to ``solvers.select.solve`` for every inner linear
+    solve, so the caller chooses the inner solver (``"auto"``, ``"cg"``, ``"gmres"``,
+    ``"direct"``) without Newton needing to know anything about the operator's storage. The
+    one exception is the compatibility shim: with ``method="auto"`` a bare dense tensor
+    resolves to ``"direct"`` (see the module docstring). An explicit ``method`` always wins.
 
     ``on_failure="raise"`` (default) raises ``RuntimeError`` naming the batch indices that
     failed to converge after ``max_iter`` iterations, exactly as before. ``on_failure="return"``
@@ -134,17 +152,22 @@ def newton(
     converged = norm < tol
     omega_i = torch.full_like(norm0, omega)
     iterations = 0
+    linear_iterations: torch.Tensor | None = None
     tiny = torch.finfo(norm.dtype).tiny
 
     while not bool(torch.all(converged)) and iterations < max_iter:
         raw = operator(x)
         # A bare dense tensor (the pre-1b compatibility shim) keeps the dense LU numerics
         # it has always had; a genuine LinearOperator goes through the eligibility table.
-        step_method = "direct" if isinstance(raw, torch.Tensor) else "auto"
+        step_method = "direct" if method == "auto" and isinstance(raw, torch.Tensor) else method
         result = select_solve(
             _as_operator(raw), r, method=step_method, on_failure="return", where="newton"
         )
         dx = result.x
+        inner = result.iterations.to(torch.int64).expand(converged.shape)
+        linear_iterations = (
+            inner.clone() if linear_iterations is None else torch.maximum(linear_iterations, inner)
+        )
         step = torch.where(
             converged.unsqueeze(-1), torch.zeros_like(dx), omega_i.unsqueeze(-1) * dx
         )
@@ -160,7 +183,11 @@ def newton(
     if not bool(torch.all(converged)):
         if on_failure == "return":
             return NewtonResult(
-                x=x, converged=converged, iterations=iterations, residual_norm=norm
+                x=x,
+                converged=converged,
+                iterations=iterations,
+                residual_norm=norm,
+                linear_iterations=linear_iterations,
             )
         flat_converged = converged.reshape(-1)
         bad = torch.nonzero(~flat_converged, as_tuple=False).flatten()
@@ -169,4 +196,10 @@ def newton(
             f"newton: batch indices {bad.tolist()} failed to converge after "
             f"{iterations} iterations, residual norms {norms.tolist()}"
         )
-    return NewtonResult(x=x, converged=converged, iterations=iterations, residual_norm=norm)
+    return NewtonResult(
+        x=x,
+        converged=converged,
+        iterations=iterations,
+        residual_norm=norm,
+        linear_iterations=linear_iterations,
+    )
