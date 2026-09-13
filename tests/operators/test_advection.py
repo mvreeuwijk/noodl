@@ -6,6 +6,7 @@ formulas -- a bug shared between the operator and its own test would otherwise b
 invisible.
 """
 
+import pytest
 import torch
 from torch.autograd import gradcheck
 
@@ -448,3 +449,60 @@ def test_matvec_broadcasts_an_unbatched_state_against_a_batched_flow():
     yt = op.rmatvec(x)
     assert yt.shape == (5, 2)
     torch.testing.assert_close(yt, op.rmatvec(x.expand(5, 2)), rtol=1e-12, atol=1e-14)
+
+
+# ------------------------------------------------- I2: constructor shape validation
+# Global Constraint: "ValueError for bad shapes, naming the offender". Before this wave a
+# wrong edge count in `transmission` constructed silently and then raised an opaque
+# broadcast RuntimeError at the first matvec, and an `n_interior` inconsistent with
+# `interior_of_node` was not detected at all.
+
+
+def _valid_args():
+    net = three_node_chain()
+    src, tgt = net.endpoints("airpath")
+    return {
+        "src": src,
+        "tgt": tgt,
+        "flow": torch.tensor([0.3, -0.2, 0.25], dtype=torch.float64),
+        "transmission": torch.ones(1, 3, dtype=torch.float64),
+        "capacity": torch.tensor([50.0, 80.0], dtype=torch.float64),
+        "n_interior": 2,
+        "interior_of_node": _interior_of_node(net, ["ambient"]),
+    }
+
+
+def test_transmission_edge_count_mismatch_raises_value_error_naming_it():
+    args = _valid_args() | {"transmission": torch.ones(1, 2, dtype=torch.float64)}
+    with pytest.raises(ValueError, match=r"AdvectionOperator.*transmission"):
+        AdvectionOperator(**args)
+
+
+def test_capacity_length_mismatch_raises_value_error_naming_it():
+    args = _valid_args() | {"capacity": torch.ones(3, dtype=torch.float64)}
+    with pytest.raises(ValueError, match=r"AdvectionOperator.*capacity"):
+        AdvectionOperator(**args)
+
+
+def test_n_interior_inconsistent_with_interior_of_node_raises_value_error():
+    args = _valid_args() | {"n_interior": 3, "capacity": torch.ones(3, dtype=torch.float64)}
+    with pytest.raises(ValueError, match=r"AdvectionOperator.*n_interior"):
+        AdvectionOperator(**args)
+
+
+def test_src_and_tgt_shape_mismatch_raises_value_error_naming_them():
+    args = _valid_args() | {"tgt": torch.tensor([0, 1])}
+    with pytest.raises(ValueError, match=r"AdvectionOperator.*src.*tgt"):
+        AdvectionOperator(**args)
+
+
+def test_kinetics_trailing_shape_mismatch_raises_value_error_naming_it():
+    args = _valid_args() | {"kinetics": torch.zeros(3, 1, 1, dtype=torch.float64)}
+    with pytest.raises(ValueError, match=r"AdvectionOperator.*kinetics"):
+        AdvectionOperator(**args)
+
+
+def test_removal_trailing_shape_mismatch_raises_value_error_naming_it():
+    args = _valid_args() | {"removal": torch.zeros(3, 1, dtype=torch.float64)}
+    with pytest.raises(ValueError, match=r"AdvectionOperator.*removal"):
+        AdvectionOperator(**args)

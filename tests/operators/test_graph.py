@@ -217,3 +217,60 @@ def test_a_grounded_but_negative_slope_operator_is_genuinely_indefinite():
     eig = torch.linalg.eigvalsh(op.assemble())
     assert bool((eig < 0).any()), eig
     assert not bool(op.spd_certificate())
+
+
+# ------------------------------------------------- I2: constructor shape validation
+# Global Constraint: "ValueError for bad shapes, naming the offender". The final review
+# found the last of these four produced not an opaque torch error but a SILENT WRONG
+# ANSWER: `interior_nodes = torch.empty(n_interior)` leaves an uninitialised slot that is
+# then used as a gather index, so the operator constructed, reported shape (3, 3), and
+# `matvec` returned all zeros.
+
+
+def test_src_and_tgt_shape_mismatch_raises_value_error_naming_them():
+    with pytest.raises(ValueError, match=r"GraphLaplacianOperator.*src.*tgt"):
+        GraphLaplacianOperator(
+            torch.tensor([0, 1, 0]),
+            torch.tensor([1, 2]),
+            torch.tensor([1.0, 1.0]),
+            2,
+            torch.tensor([0, 1, -1]),
+            boundary_mask=torch.tensor([False, False, True]),
+        )
+
+
+def test_slopes_edge_count_mismatch_raises_value_error_naming_slopes():
+    with pytest.raises(ValueError, match=r"GraphLaplacianOperator.*slopes"):
+        GraphLaplacianOperator(
+            torch.tensor([0, 1]),
+            torch.tensor([1, 2]),
+            torch.tensor([1.0, 1.0, 1.0]),
+            2,
+            torch.tensor([0, 1, -1]),
+            boundary_mask=torch.tensor([False, False, True]),
+        )
+
+
+def test_interior_of_node_and_boundary_mask_length_mismatch_raises_value_error():
+    with pytest.raises(ValueError, match=r"GraphLaplacianOperator.*interior_of_node"):
+        GraphLaplacianOperator(
+            torch.tensor([0, 1]),
+            torch.tensor([1, 2]),
+            torch.tensor([1.0, 1.0]),
+            2,
+            torch.tensor([0, 1, -1, -1]),
+            boundary_mask=torch.tensor([False, False, True]),
+        )
+
+
+def test_n_interior_inconsistent_with_boundary_mask_raises_instead_of_zeroing():
+    # The silent-wrong-answer case: 3 interior rows claimed, 2 actually unmasked.
+    with pytest.raises(ValueError, match=r"GraphLaplacianOperator.*n_interior"):
+        GraphLaplacianOperator(
+            torch.tensor([0, 1]),
+            torch.tensor([1, 2]),
+            torch.tensor([1.0, 1.0]),
+            3,
+            torch.tensor([0, 1, -1]),
+            boundary_mask=torch.tensor([False, False, True]),
+        )

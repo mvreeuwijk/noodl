@@ -35,10 +35,56 @@ class AdvectionOperator:
         removal: torch.Tensor | None = None,
         conduction: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> None:
+        # Global Constraint: ValueError for bad shapes, naming the offender. Without these,
+        # a wrong edge count in `transmission` constructed silently and surfaced as an
+        # opaque broadcast RuntimeError at the first matvec, and an `n_interior`
+        # inconsistent with `interior_of_node` was never detected at all.
+        transmission = (
+            transmission if transmission.dim() >= 2 else transmission.unsqueeze(0)
+        )
+        if src.shape != tgt.shape:
+            raise ValueError(
+                f"AdvectionOperator: src and tgt must have the same shape, got "
+                f"src {tuple(src.shape)} and tgt {tuple(tgt.shape)}"
+            )
+        if transmission.shape[-1] != src.shape[-1]:
+            raise ValueError(
+                f"AdvectionOperator: transmission has {transmission.shape[-1]} edges in its "
+                f"last dimension (shape {tuple(transmission.shape)}) but src/tgt have "
+                f"{src.shape[-1]}"
+            )
+        n_interior_actual = int((interior_of_node >= 0).sum())
+        if n_interior != n_interior_actual:
+            raise ValueError(
+                f"AdvectionOperator: n_interior is {n_interior} but interior_of_node "
+                f"(shape {tuple(interior_of_node.shape)}) marks {n_interior_actual} nodes "
+                f"as interior"
+            )
+        if capacity.shape[-1] != n_interior:
+            raise ValueError(
+                f"AdvectionOperator: capacity has {capacity.shape[-1]} entries in its last "
+                f"dimension (shape {tuple(capacity.shape)}) but n_interior is {n_interior}"
+            )
+        n_species = transmission.shape[-2]
+        if kinetics is not None and tuple(kinetics.shape[-3:]) != (
+            n_interior,
+            n_species,
+            n_species,
+        ):
+            raise ValueError(
+                f"AdvectionOperator: kinetics must have trailing shape "
+                f"({n_interior}, {n_species}, {n_species}), got {tuple(kinetics.shape)}"
+            )
+        if removal is not None and tuple(removal.shape[-2:]) != (n_interior, n_species):
+            raise ValueError(
+                f"AdvectionOperator: removal must have trailing shape "
+                f"({n_interior}, {n_species}), got {tuple(removal.shape)}"
+            )
+
         self._src = src
         self._tgt = tgt
         self.flow = flow
-        self.transmission = transmission if transmission.dim() >= 2 else transmission.unsqueeze(0)
+        self.transmission = transmission
         self.capacity = capacity
         self.n_interior = n_interior
         self.kinetics = kinetics

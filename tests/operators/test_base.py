@@ -187,3 +187,13 @@ def test_dense_operator_symmetric_defaults_to_false():
     A = torch.tensor([[4.0, 1.0], [1.0, 3.0]], dtype=torch.float64)  # symmetric matrix, but
     op = DenseOperator(A)                                             # NOT declared: default wins
     assert op.symmetric is False
+
+
+def test_dense_operator_reports_shape_dtype_and_device():
+    """Ledger minor (Task 1): nothing asserted the three LinearOperator attributes
+    `solvers.select.solve` and every preconditioner read off an operator."""
+    A = torch.randn(4, 3, 3, dtype=torch.float64)
+    op = DenseOperator(A)
+    assert op.shape == (4, 3, 3)
+    assert op.dtype == torch.float64
+    assert op.device == A.device

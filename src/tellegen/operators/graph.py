@@ -41,6 +41,36 @@ class GraphLaplacianOperator:
         *,
         boundary_mask: Tensor,
     ) -> None:
+        # Global Constraint: ValueError for bad shapes, naming the offender. The last check
+        # is not cosmetic: `interior_nodes = torch.empty(n_interior)` below leaves an
+        # UNINITIALISED slot when `n_interior` overstates the mask, and that slot is then
+        # used as a gather index -- so before this check the operator constructed happily,
+        # reported its claimed shape, and `matvec` returned all zeros (a silent wrong
+        # answer, not the opaque torch error the deferral ruling assumed).
+        if src.shape != tgt.shape:
+            raise ValueError(
+                f"GraphLaplacianOperator: src and tgt must have the same shape, got "
+                f"src {tuple(src.shape)} and tgt {tuple(tgt.shape)}"
+            )
+        if slopes.shape[-1] != src.shape[-1]:
+            raise ValueError(
+                f"GraphLaplacianOperator: slopes has {slopes.shape[-1]} edges in its last "
+                f"dimension (shape {tuple(slopes.shape)}) but src/tgt have "
+                f"{src.shape[-1]} (shape {tuple(src.shape)})"
+            )
+        if interior_of_node.shape != boundary_mask.shape:
+            raise ValueError(
+                f"GraphLaplacianOperator: interior_of_node and boundary_mask must have the "
+                f"same shape, got interior_of_node {tuple(interior_of_node.shape)} and "
+                f"boundary_mask {tuple(boundary_mask.shape)}"
+            )
+        n_unmasked = int((~boundary_mask).sum())
+        if n_interior != n_unmasked:
+            raise ValueError(
+                f"GraphLaplacianOperator: n_interior is {n_interior} but boundary_mask "
+                f"(shape {tuple(boundary_mask.shape)}) leaves {n_unmasked} interior nodes"
+            )
+
         self.src = src
         self.tgt = tgt
         self.slopes = slopes
