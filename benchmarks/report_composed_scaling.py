@@ -60,18 +60,16 @@ BUDGET_TABLE = [
 
 # The inner linear solvers the budget table is measured under (spec section 6.2 step 2: the
 # default for `method="auto"` is chosen ON EVIDENCE, so the evidence has to exist). "auto" is
-# the shipped default; "sparse_direct" is the SciPy SuperLU reference path. The FIRST entry is
-# the one whose numbers the gate reads -- `measure_budget_row`'s own default -- so the
-# committed report keeps meaning what `tests/verification/test_composed_scaling.py` asserts.
+# the shipped default; "cg" is the PCG reference. The FIRST entry is the one whose numbers the
+# gate reads -- `measure_budget_row`'s own default -- so the committed report keeps meaning
+# what `tests/verification/test_composed_scaling.py` asserts.
 #
-# NOTE, since Task C decided the default: for a certified-SPD `PotentialFlowLayer` with SciPy
-# installed, "auto" now RESOLVES to sparse_direct (see `solvers.select`'s eligibility table),
-# so these two rows measure the same backend and differ only in whether it was chosen or
-# pinned. That makes the second row a check that the routing rule really lands where it says,
-# at the cost of doubling the report's wall clock. Swap the second entry to "cg" to recover
-# the PCG comparison the Task C measurement was made on -- the evidence itself is recorded in
-# `solvers.select`'s module docstring and in the Task C report, not only here.
-SOLVERS = ("auto", "sparse_direct")
+# These two must be DISTINCT backends, not the same one measured twice: since Task C decided
+# the default, "auto" now RESOLVES to sparse_direct for a certified-SPD operator with SciPy
+# installed (see `solvers.select`'s eligibility table), so pairing it with "sparse_direct"
+# would measure one backend under two names. "cg" (PCG) is what "auto" used to select and
+# what it falls back to, so this pairing is the before/after the routing change actually made.
+SOLVERS = ("auto", "cg")
 
 
 def measure_budget_row(
