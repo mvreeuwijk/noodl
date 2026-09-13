@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 import torch
 
+from benchmarks.measure import time_call
 from tellegen.elements import PowerLaw
 from tellegen.elements.base import Element
 from tellegen.layers.potential import PotentialFlowLayer
@@ -222,3 +223,140 @@ def workload_alloc(mb: int) -> int:
     if not float(block.sum()) > 0.0:  # touch every page so the OS commits them
         raise RuntimeError("workload_alloc: allocation was not touched")
     return int(mb)
+
+
+def _step_state(model: ComposedModel) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """`(x0, x_boundary, zero_sources)` for the transport half of a step, at 400 ppm."""
+    dtype = model.net.dtype
+    n_i = int(model.layer.interior.numel())
+    x0 = torch.full((model.ensemble, n_i), 400.0, dtype=dtype)
+    x_boundary = torch.full((model.ensemble, len(model.boundary)), 400.0, dtype=dtype)
+    zero_sources = torch.zeros(model.ensemble, n_i, dtype=dtype)
+    return x0, x_boundary, zero_sources
+
+
+def run_steps(
+    model: ComposedModel,
+    steps: int,
+    *,
+    differentiable: bool,
+    sources: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, dict]:
+    """Advance `steps` coupled steps; return `(phi, x, diagnostics_of_the_last_solve)`.
+
+    ONE STEP, as the milestone's section 6.1 budget table means it: one
+    `layer.solve(phi_boundary, drivers, sources)` followed by one `transport.step` on the
+    AIRPATH slice of the resulting `q` (implicit scheme, dt = 60 s), with `x` fed forward
+    from one step to the next so a multi-step row is a genuine trajectory rather than the
+    same step repeated.
+    """
+    lo, hi = model.layer._kind_slices["airpath"]
+    if sources is None:
+        sources = model.sources
+    x, x_boundary, zero_sources = _step_state(model)
+    diagnostics: dict = {}
+    phi = None
+    for _ in range(steps):
+        phi, q = model.layer.solve(
+            model.phi_boundary,
+            model.drivers,
+            sources,
+            differentiable=differentiable,
+            diagnostics=diagnostics,
+        )
+        x = model.transport.step(x, q[..., lo:hi], zero_sources, x_boundary, dt=60.0)
+    return phi, x, diagnostics
+
+
+def _iteration_counts(diagnostics: dict) -> dict:
+    """The JSON-serialisable half of a `solve` diagnostics dict.
+
+    `linear_iterations` is per instance; the MAX over the ensemble is what a conditioning
+    regression shows up in first, so that is what is reported.
+    """
+
+    def _as_max_int(value) -> int | None:
+        if value is None:
+            return None
+        return int(value.amax()) if hasattr(value, "amax") else int(value)
+
+    return {
+        "newton_iterations": _as_max_int(diagnostics.get("newton_iterations")),
+        "linear_iterations_max": _as_max_int(diagnostics.get("linear_iterations")),
+        "method": diagnostics.get("method"),
+    }
+
+
+def workload_forward(
+    n_buildings: int = 8,
+    building_nodes: int = 120,
+    street_nodes: int = 40,
+    sewer_nodes: int = 30,
+    ensemble: int = 1,
+    steps: int = 1,
+) -> dict:
+    """Build the composed model and run `steps` NON-differentiable steps; report the run.
+
+    The build and one warm-up step happen before the timed section, so the reported time is
+    the steady, already-warm cost the budget table is about (topology, cycle basis and
+    tree-elimination levels are all construction- or first-solve-time caches). Both still
+    happen inside the process whose peak RSS `isolated_peak_rss` measures, which is correct:
+    the memory budget is for the whole configuration, caches included.
+    """
+    model = build_composed(
+        n_buildings=n_buildings,
+        building_nodes=building_nodes,
+        street_nodes=street_nodes,
+        sewer_nodes=sewer_nodes,
+        ensemble=ensemble,
+    )
+    run_steps(model, 1, differentiable=False)
+    elapsed, (_phi, x, diagnostics) = time_call(
+        lambda: run_steps(model, steps, differentiable=False)
+    )
+    return {
+        "elapsed_s": elapsed,
+        "steps": steps,
+        "ensemble": ensemble,
+        "n_nodes": int(model.net.n),
+        "n_edges": int(model.net.b),
+        "x_final_mean": float(x.mean()),
+        **_iteration_counts(diagnostics),
+    }
+
+
+def workload_backward(
+    n_buildings: int = 8,
+    building_nodes: int = 120,
+    street_nodes: int = 40,
+    sewer_nodes: int = 30,
+    ensemble: int = 1,
+    steps: int = 1,
+) -> dict:
+    """Build the composed model, run `steps` DIFFERENTIABLE steps, and time `loss.backward()`.
+
+    `loss = phi[..., interior].sum() + x_final.sum()` differentiated with respect to
+    `sources` exercises both adjoints the milestone migrated: the potential layer's implicit
+    adjoint (through every solve) and the transport layer's `_LinearSolve` adjoint (through
+    every implicit step). Only the backward pass is timed; the forward that builds the graph
+    is not, because the forward budget already covers it.
+    """
+    model = build_composed(
+        n_buildings=n_buildings,
+        building_nodes=building_nodes,
+        street_nodes=street_nodes,
+        sewer_nodes=sewer_nodes,
+        ensemble=ensemble,
+    )
+    run_steps(model, 1, differentiable=False)  # warm the construction-time caches
+    sources = model.sources.detach().clone().requires_grad_(True)
+    phi, x, diagnostics = run_steps(model, steps, differentiable=True, sources=sources)
+    loss = phi[..., model.layer.interior].sum() + x.sum()
+    elapsed, _ = time_call(loss.backward)
+    return {
+        "elapsed_s": elapsed,
+        "steps": steps,
+        "ensemble": ensemble,
+        "grad_sources_absmax": float(sources.grad.abs().max()),
+        **_iteration_counts(diagnostics),
+    }

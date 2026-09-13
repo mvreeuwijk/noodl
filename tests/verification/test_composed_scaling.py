@@ -10,10 +10,16 @@ Memory here is measured with `benchmarks.measure.isolated_peak_rss`, never `trac
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from benchmarks.composed_model import build_composed
 from benchmarks.measure import isolated_peak_rss, time_call
+from benchmarks.report_composed_scaling import (
+    BUDGET_TABLE,
+    format_budget_row,
+    measure_budget_row,
+)
 from tellegen.elements import PowerLaw
 from tellegen.layers.potential import PotentialFlowLayer
 
@@ -243,3 +249,44 @@ def test_gradient_across_a_join_is_nonzero_and_matches_central_finite_difference
         f"(gate rtol=1e-6 atol=1e-8)"
     )
     torch.testing.assert_close(grad_ad, grad_fd, rtol=1e-6, atol=1e-8)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("ensemble", "steps", "forward_budget", "backward_budget", "memory_budget"), BUDGET_TABLE
+)
+def test_composed_model_meets_its_section_6_1_budget(
+    ensemble, steps, forward_budget, backward_budget, memory_budget
+):
+    """One row of the design's section 6.1 budget table, on the reference composed model.
+
+    A STEP is one `layer.solve` plus one implicit `transport.step` at dt=60 s on the airpath
+    slice of the resulting `q`, with `x` fed forward; the backward figure is the backward of
+    `phi.sum() + x_final.sum()` with respect to `sources`, so it exercises the potential
+    adjoint AND the transport `_LinearSolve` adjoint.
+
+    Every number is measured in a FRESH child process (`isolated_peak_rss`), which is what
+    makes the memory figure a real peak rather than a counter this process has already
+    polluted; the time comes back from the same run, so time and memory describe one
+    execution rather than two. Iteration counts are printed beside the times because a
+    conditioning regression is invisible in wall clock when threading masks it.
+
+    A missed budget is a FAILED gate. Do not loosen the budgets here; design section 6.2 is
+    the table of follow-ups a failure triggers.
+    """
+    row = measure_budget_row(ensemble, steps, forward_budget, backward_budget, memory_budget)
+    print("\n" + format_budget_row(row))
+
+    assert row["forward_seconds"] <= forward_budget, (
+        f"forward budget missed: {row['forward_seconds']:.3f}s > {forward_budget}s "
+        f"({row['forward_seconds'] / forward_budget:.2f}x)"
+    )
+    assert row["backward_seconds"] <= backward_budget, (
+        f"backward budget missed: {row['backward_seconds']:.3f}s > {backward_budget}s "
+        f"({row['backward_seconds'] / backward_budget:.2f}x)"
+    )
+    assert row["peak_memory_bytes"] <= memory_budget, (
+        f"peak memory budget missed: {row['peak_memory_bytes'] / 1e6:.1f} MB > "
+        f"{memory_budget / 1e6:.0f} MB "
+        f"({row['peak_memory_bytes'] / memory_budget:.2f}x)"
+    )
