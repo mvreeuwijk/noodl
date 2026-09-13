@@ -120,6 +120,7 @@ def implicit_solve(
     jacobian: Callable[..., torch.Tensor],
     x0: torch.Tensor,
     params: tuple[torch.Tensor, ...],
+    *,
     diagnostics: dict | None = None,
     **newton_kwargs,
 ) -> torch.Tensor:
@@ -127,6 +128,8 @@ def implicit_solve(
 
     ``diagnostics``, when a dict is given, is filled with the forward Newton solve's own
     ``newton_iterations`` and ``linear_iterations`` (see ``_Implicit.forward``). Every other
-    keyword is forwarded to ``newton``.
+    keyword is forwarded to ``newton``. It is keyword-ONLY deliberately: sitting positionally
+    in front of ``**newton_kwargs`` it would silently swallow a fifth positional argument
+    from any caller who thought they were passing something else.
     """
     return _Implicit.apply(x0, residual, jacobian, newton_kwargs, diagnostics, *params)
