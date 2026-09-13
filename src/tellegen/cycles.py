@@ -34,7 +34,9 @@ def branch_flows(net: Network, amplitudes: torch.Tensor, kind: str | None = None
     v_idx = torch.tensor([net.node_index(v) for (_u, v, _k) in chord_edges], dtype=torch.long)
 
     batch_shape = amplitudes.shape[:-1]
-    chord_source = torch.zeros(*batch_shape, net.n, dtype=amplitudes.dtype, device=amplitudes.device)
+    chord_source = torch.zeros(
+        *batch_shape, net.n, dtype=amplitudes.dtype, device=amplitudes.device
+    )
     chord_source.scatter_add_(-1, _expand_index(u_idx, batch_shape), -amplitudes)
     chord_source.scatter_add_(-1, _expand_index(v_idx, batch_shape), amplitudes)
 

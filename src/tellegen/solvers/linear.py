@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import torch
 
 
@@ -30,10 +28,3 @@ def solve(A: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
             except (RuntimeError, torch._C._LinAlgError):
                 bad.append(i)
         raise RuntimeError(f"singular system at batch indices {bad}") from exc
-
-
-def floating_nodes(J: torch.Tensor, names: Sequence) -> list:
-    flat = J.reshape(-1, J.shape[-2], J.shape[-1])
-    all_zero_row = (flat == 0).all(dim=-1).any(dim=0)
-    idx = torch.nonzero(all_zero_row, as_tuple=False).flatten().tolist()
-    return [names[i] for i in idx]
