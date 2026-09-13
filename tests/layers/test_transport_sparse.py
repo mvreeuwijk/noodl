@@ -802,3 +802,57 @@ def test_operator_oracle_still_includes_conduction():
         rtol=1e-12,
         atol=1e-14,
     )
+
+
+# ---------------------------------------------------------------- batch broadcasting
+# Final-review finding C1: an unbatched state against a BATCHED flow (one initial
+# condition against an ensemble of flow realisations -- the milestone's own calibration
+# use case) used to work at the pre-milestone dense `transport.py` and regressed to a raw
+# RuntimeError out of `AdvectionOperator._raw_action`, which expanded the state only to
+# its OWN batch shape rather than to the operator's.
+def _ensemble_flow() -> torch.Tensor:
+    base = torch.tensor([0.3, -0.2, 0.25], dtype=torch.float64)
+    scale = torch.linspace(0.5, 1.5, 5, dtype=torch.float64).unsqueeze(-1)
+    return base * scale
+
+
+@pytest.mark.parametrize("scheme", ["exact", "implicit", "trapezoidal"])
+def test_step_broadcasts_unbatched_state_against_batched_flow(scheme):
+    net = three_node_chain()
+    cap = torch.tensor([50.0, 80.0], dtype=torch.float64)
+    layer = TransportLayer(
+        net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"], scheme=scheme
+    )
+    q = _ensemble_flow()
+    x = torch.tensor([12.0, -4.0], dtype=torch.float64)
+    sources = torch.tensor([1.0, 2.0], dtype=torch.float64)
+    x_boundary = torch.tensor([420.0], dtype=torch.float64)
+
+    out = layer.step(x, q, sources, x_boundary, 60.0)
+    assert out.shape == (5, 2)
+
+    expanded = layer.step(
+        x.expand(5, 2), q, sources.expand(5, 2), x_boundary.expand(5, 1), 60.0
+    )
+    assert torch.allclose(out, expanded)
+
+
+def test_steady_broadcasts_unbatched_state_against_batched_flow():
+    net = three_node_chain()
+    cap = torch.tensor([50.0, 80.0], dtype=torch.float64)
+    layer = TransportLayer(
+        net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"]
+    )
+    # A mass-conserving circulation ambient -> A -> B -> ambient, so the steady system is
+    # nonsingular; the ensemble varies its magnitude.
+    q = torch.tensor([0.3, 0.3, 0.3], dtype=torch.float64) * torch.linspace(
+        0.5, 1.5, 5, dtype=torch.float64
+    ).unsqueeze(-1)
+    sources = torch.tensor([1.0, 2.0], dtype=torch.float64)
+    x_boundary = torch.tensor([420.0], dtype=torch.float64)
+
+    out = layer.steady(q, sources, x_boundary)
+    assert out.shape == (5, 2)
+
+    expanded = layer.steady(q, sources.expand(5, 2), x_boundary.expand(5, 1))
+    assert torch.allclose(out, expanded)

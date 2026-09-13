@@ -415,3 +415,36 @@ def test_gradcheck_rmatvec_wrt_flow_and_y():
         return op.rmatvec(y)
 
     assert gradcheck(f, (flow0, y0), eps=1e-6, atol=1e-5)
+
+
+def test_matvec_broadcasts_an_unbatched_state_against_a_batched_flow():
+    """Final-review finding C1: the operator's own batch must broadcast against the state.
+
+    `x` is one initial condition; `flow` is an ensemble of 5 realisations. The result must
+    be (5, m) and equal the explicitly-batched call entry for entry.
+    """
+    net = three_node_chain()
+    cap = torch.tensor([50.0, 80.0], dtype=torch.float64)
+    layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"])
+    src, tgt = net.endpoints("airpath")
+    base = torch.tensor([0.3, -0.2, 0.25], dtype=torch.float64)
+    flow = base * torch.linspace(0.5, 1.5, 5, dtype=torch.float64).unsqueeze(-1)  # (5, 3)
+    op = AdvectionOperator(
+        src, tgt, flow=layer.carrier.to(flow.dtype) * flow, transmission=layer.transmission,
+        capacity=cap, n_interior=layer.n_i, interior_of_node=_interior_of_node(net, ["ambient"]),
+    )
+    x = torch.tensor([12.0, -4.0], dtype=torch.float64)
+    y = op.matvec(x)
+    assert y.shape == (5, 2)
+    torch.testing.assert_close(y, op.matvec(x.expand(5, 2)), rtol=1e-12, atol=1e-14)
+
+    xb = torch.tensor([420.0], dtype=torch.float64)
+    yb = op.boundary_forcing(xb)
+    assert yb.shape == (5, 2)
+    torch.testing.assert_close(
+        yb, op.boundary_forcing(xb.expand(5, 1)), rtol=1e-12, atol=1e-14
+    )
+
+    yt = op.rmatvec(x)
+    assert yt.shape == (5, 2)
+    torch.testing.assert_close(yt, op.rmatvec(x.expand(5, 2)), rtol=1e-12, atol=1e-14)

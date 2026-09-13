@@ -68,7 +68,20 @@ class AdvectionOperator:
         down = torch.where(positive, self._tgt, self._src)    # (..., b)
         w = flow.abs()
 
-        batch_shape = v.shape[:-2]
+        # The state must broadcast against the OPERATOR's batch, not only against its own:
+        # one initial condition against an ensemble of flow realisations (an unbatched `v`
+        # with a batched `flow`) is a first-class shape here, per the framework's
+        # "arbitrary leading batch dimensions, torch.broadcast_tensors semantics" rule.
+        # Taking `v.shape[:-2]` alone made the index tensors (which carry `flow`'s batch)
+        # disagree with `v_b`, raising a raw RuntimeError out of `_bcast_index` (final
+        # review C1). When every batch shape already agrees, the broadcast and the expand
+        # below are both no-ops.
+        batch_shape = torch.broadcast_shapes(
+            v.shape[:-2],
+            flow.shape[:-1],
+            self.transmission.shape[:-2],
+            self.capacity.shape[:-1],
+        )
         K = v.shape[-2]
         gather_idx = down if transpose else up
         scatter_idx = up if transpose else down
