@@ -481,20 +481,40 @@ class PotentialFlowLayer:
         """
         drivers = drivers or {}
         newton_kwargs.setdefault("method", self.linear_solver)
-        if phi0 is None:
-            phi0 = self.linear_init(phi_boundary, drivers, sources)
 
-        # Grounding is certified on the ACTUAL slopes at the point the Newton iteration is
-        # about to start from, whatever its source. linear_init's own check sees only its
-        # tangent-at-zero slopes, and is not run at all when a caller supplies phi0 -- so a
-        # supplied phi0 used to bypass grounding entirely, and an element whose slope is
-        # dp-dependent (a fan past its shutoff point, whose dflow is exactly zero) could
-        # leave the operator singular with nothing to say about it but a Newton
-        # non-convergence. Placed BEFORE the differentiable branch so both paths run it
-        # unconditionally and identically.
-        phi0_full = self.assemble(phi0, phi_boundary)
-        dq0 = self.dflows(phi0_full, drivers)
-        self._grounding_check(dq0, where="solve")
+        # The initial guess is NOT a differentiable quantity, and neither is the grounding
+        # check below. Both are computed under no_grad (and a caller-supplied phi0 is
+        # detached) so nothing that produced them is traced into the autograd graph.
+        #
+        # This is a memory fix, not a numerical one: the converged point is where the
+        # implicit-function adjoint linearises, and that point is independent of the guess
+        # the iteration started from, so tracing the guess buys no gradient at all. What it
+        # costs is everything `linear_init` does -- a whole preconditioned-CG loop, its
+        # int64 gather indices and every iterate -- retained until backward(). Measured on
+        # the composed model at ensemble 100 (Task 14 review): 2567 MB of the 2571 MB saved
+        # per differentiable step came from here; with a detached guess the same step saves
+        # 74.7 MB. `linear_init` itself is untouched and stays differentiable for callers
+        # who want it directly.
+        with torch.no_grad():
+            if phi0 is None:
+                phi0 = self.linear_init(phi_boundary, drivers, sources)
+            else:
+                phi0 = phi0.detach()
+
+            # Grounding is certified on the ACTUAL slopes at the point the Newton iteration
+            # is about to start from, whatever its source. linear_init's own check sees only
+            # its tangent-at-zero slopes, and is not run at all when a caller supplies phi0
+            # -- so a supplied phi0 used to bypass grounding entirely, and an element whose
+            # slope is dp-dependent (a fan past its shutoff point, whose dflow is exactly
+            # zero) could leave the operator singular with nothing to say about it but a
+            # Newton non-convergence. Placed BEFORE the differentiable branch so both paths
+            # run it unconditionally and identically. It is a CHECK: it raises or it does
+            # not, and no tensor it computes reaches the result, so it runs under no_grad
+            # too (`dflows` here is each Element's own analytic `dflow`, not the autograd
+            # path the differentiable branch builds below).
+            phi0_full = self.assemble(phi0, phi_boundary)
+            dq0 = self.dflows(phi0_full, drivers)
+            self._grounding_check(dq0, where="solve")
 
         if not differentiable:
 

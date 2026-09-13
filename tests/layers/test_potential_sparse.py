@@ -7,6 +7,7 @@ import pytest
 import torch
 
 import tellegen.solvers.select as select_module
+from benchmarks.measure import saved_tensor_bytes
 from tellegen.drives import ConstantDrive
 from tellegen.elements import Conductance, FixedFlow, PowerLaw
 from tellegen.elements.fan import FanCurve
@@ -449,3 +450,47 @@ def test_dense_incidence_is_computed_lazily(two_zone_layer):
     assert torch.equal(layer.A, net.incidence()[:, layer.cols])
     assert torch.equal(layer._diff, net.difference()[layer.cols])
     assert layer.A is layer.A, "A must be cached once computed, not rebuilt per access"
+
+
+def test_differentiable_solve_does_not_trace_the_initial_guess(two_zone_layer):
+    # Task 15 Step 2b. The Task 14 reviewer's `saved_tensor_bytes` probe attributed 2567 MB
+    # of the 2571 MB saved per differentiable timestep at ensemble 100 to ONE thing: solve()
+    # computing its initial guess with grad enabled, which traces the whole inner Krylov
+    # loop (134 iterations, every iterate and every int64 gather index) into the autograd
+    # graph -- for a quantity the implicit-function adjoint makes irrelevant, since the
+    # gradient at the converged point does not depend on where the iteration started.
+    #
+    # The assertion is a RATIO against the same call given an already-detached phi0, not an
+    # absolute byte count: what must be true is that obtaining phi0 internally adds nothing
+    # material. On this fixture the pre-fix ratio is 1.99x (2397 vs 1206 bytes).
+    net, elements, drives, boundary = two_zone_layer
+    layer = PotentialFlowLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    drivers = {"wind": torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)}
+
+    def run(phi0):
+        sources = torch.zeros(net.n, dtype=torch.float64, requires_grad=True)
+        phi, _ = layer.solve(
+            phi_b, drivers, sources, phi0=phi0, differentiable=True, atol=1e-12, rtol=1e-12
+        )
+        return phi, sources
+
+    phi0 = layer.linear_init(
+        phi_b, drivers, torch.zeros(net.n, dtype=torch.float64)
+    ).detach()
+    bytes_supplied, (phi_supplied, src_supplied) = saved_tensor_bytes(lambda: run(phi0))
+    bytes_internal, (phi_internal, src_internal) = saved_tensor_bytes(lambda: run(None))
+
+    assert bytes_internal < 1.5 * bytes_supplied, (
+        f"solve() traced its own initial guess: {bytes_internal} bytes saved for backward "
+        f"vs {bytes_supplied} with a detached phi0 supplied"
+    )
+
+    # ... and the gradient is identical either way, which is the whole justification for
+    # not tracing it: the adjoint depends on the converged point, not on the starting guess.
+    phi_supplied.sum().backward()
+    phi_internal.sum().backward()
+    torch.testing.assert_close(
+        src_internal.grad, src_supplied.grad, rtol=1e-12, atol=1e-14
+    )
+    assert src_supplied.grad.abs().max() > 0, "a zero gradient would make this vacuous"
