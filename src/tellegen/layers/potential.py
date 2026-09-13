@@ -412,6 +412,18 @@ class PotentialFlowLayer:
         if phi0 is None:
             phi0 = self.linear_init(phi_boundary, drivers, sources)
 
+        # Grounding is certified on the ACTUAL slopes at the point the Newton iteration is
+        # about to start from, whatever its source. linear_init's own check sees only its
+        # tangent-at-zero slopes, and is not run at all when a caller supplies phi0 -- so a
+        # supplied phi0 used to bypass grounding entirely, and an element whose slope is
+        # dp-dependent (a fan past its shutoff point, whose dflow is exactly zero) could
+        # leave the operator singular with nothing to say about it but a Newton
+        # non-convergence. Placed BEFORE the differentiable branch so both paths run it
+        # unconditionally and identically.
+        phi0_full = self.assemble(phi0, phi_boundary)
+        dq0 = self.dflows(phi0_full, drivers)
+        self._grounding_check(dq0, where="solve")
+
         if not differentiable:
 
             def residual_fn(x):

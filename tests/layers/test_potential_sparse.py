@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from tellegen.elements import Conductance, FixedFlow
+from tellegen.elements.fan import FanCurve
 from tellegen.layers.potential import PotentialFlowLayer
 from tellegen.topology import Network
 
@@ -79,3 +80,55 @@ def test_unbatched_floating_group_error_still_names_nodes():
     phi_b = torch.zeros(1, dtype=torch.float64)
     with pytest.raises(RuntimeError, match=r"f1.*f2|f2.*f1"):
         layer.linear_init(phi_b, {}, None)
+
+
+def _shutoff_fan_layer() -> tuple[PotentialFlowLayer, torch.Tensor, torch.Tensor]:
+    """ambient (boundary) -- z, one FanCurve edge, plus a source that pulls 0.2 through it.
+
+    P(q) = 100 - 200 q on 0 <= q <= 1: shutoff pressure 100 at q = 0, -100 at q = q_max, so
+    the fan is on the smooth part of its curve at dp = 0 (slope -1/P'(q) = 0.005 > 0) and the
+    whole network is grounded there. Past its shutoff point (back-pressure -dp > 100, i.e.
+    phi_z > 100) FanCurve.dflow is EXACTLY zero -- a physical fan that is shut contributes no
+    slope at all -- so at such a point the only edge tying z to the boundary is inactive and
+    the operator is genuinely singular.
+    """
+    net = Network(dtype=torch.float64)
+    net.add_node("ambient")
+    net.add_node("z")
+    net.add_edge("ambient", "z", kind="fan")
+    element = FanCurve(
+        torch.tensor([100.0, -200.0, 0.0, 0.0], dtype=torch.float64),
+        torch.tensor(1.0, dtype=torch.float64),
+        kind="fan",
+    )
+    layer = PotentialFlowLayer(net, "fan", [element], boundary=["ambient"])
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    sources = torch.tensor([0.0, -0.2], dtype=torch.float64)
+    return layer, phi_b, sources
+
+
+def test_grounding_is_checked_on_actual_slopes_even_when_phi0_is_supplied():
+    # The pre-Task-11 code checked grounding only inside linear_init, on linear_init's own
+    # tangent-at-zero slopes, and skipped it entirely whenever a caller supplied phi0 (`if
+    # phi0 is None: phi0 = self.linear_init(...)` never runs, and with it neither does its
+    # check). FanCurve is what makes the two distinguishable: its slope is dp-dependent AND
+    # exactly zero past shutoff, so the SAME network is grounded at its linear_init point and
+    # ungrounded at a supplied phi0 beyond the fan's shutoff pressure.
+    layer, phi_b, sources = _shutoff_fan_layer()
+
+    # Non-vacuity: from its own linear_init the network is grounded and the solve succeeds.
+    phi, q = layer.solve(phi_b, {}, sources, differentiable=False)
+    torch.testing.assert_close(q, torch.tensor([0.2], dtype=torch.float64), atol=1e-9, rtol=0)
+
+    phi0_supplied = torch.tensor([200.0], dtype=torch.float64)  # past shutoff: dflow == 0
+    with pytest.raises(RuntimeError, match=r"solve: floating nodes"):
+        layer.solve(phi_b, {}, sources, phi0=phi0_supplied, differentiable=False)
+
+
+def test_grounding_at_a_supplied_phi0_is_checked_on_the_differentiable_path_too():
+    # Same check, same place: solve() runs it once, before the differentiable/
+    # non-differentiable branch, so neither path can be the one that skips it.
+    layer, phi_b, sources = _shutoff_fan_layer()
+    phi0_supplied = torch.tensor([200.0], dtype=torch.float64)
+    with pytest.raises(RuntimeError, match=r"solve: floating nodes"):
+        layer.solve(phi_b, {}, sources, phi0=phi0_supplied, differentiable=True)
