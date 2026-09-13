@@ -69,6 +69,17 @@ class PotentialFlowLayer:
         # than repeating the einsum/transpose inline in dp().
         self._diff = net.difference()[self.cols]
 
+        # This layer's own edge endpoints (restricted to self.cols, in the same order as
+        # self._diff / self.A's columns), and a node -> interior-position map, both needed to
+        # construct a GraphLaplacianOperator (and to run the per-instance SPD certificate)
+        # without a per-solve Python loop. net.endpoints() (kind=None) returns whole-graph
+        # (src, tgt) arrays in network edge order; indexing by self.cols restricts them to
+        # this layer's own edges, exactly as self.A = net.incidence()[:, self.cols] already
+        # does for the incidence matrix.
+        src_all, tgt_all = net.endpoints()
+        self._src = src_all[self.cols]
+        self._tgt = tgt_all[self.cols]
+
         kind_set = set(self.kinds)
         for drv in self._drives:
             if drv.kind not in kind_set:
@@ -85,6 +96,18 @@ class PotentialFlowLayer:
         self.interior = net.interior_index(boundary)
         self.bound = net.boundary_index(boundary)
         self._interior_names = [net.nodes[i] for i in self.interior.tolist()]
+
+        # interior_of_node: -1 at a boundary node's position, else its 0-based position
+        # within self.interior. boundary_mask: True at a boundary node's position. Both are
+        # (n,) and consumed by GraphLaplacianOperator's constructor and by
+        # solvers.grounding; computing them once here, at construction time, avoids
+        # rebuilding them on every solve() call.
+        self._interior_of_node = torch.full((net.n,), -1, dtype=torch.long)
+        self._interior_of_node[self.interior] = torch.arange(
+            len(self.interior), dtype=torch.long
+        )
+        self._boundary_mask = torch.zeros(net.n, dtype=torch.bool)
+        self._boundary_mask[self.bound] = True
 
     # ------------------------------------------------------------------ assembly
     def dp(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
