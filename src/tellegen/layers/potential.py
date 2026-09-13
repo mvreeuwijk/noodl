@@ -194,16 +194,18 @@ class PotentialFlowLayer:
         """`self._accumulate(w)` restricted to boundary rows -- the repeated `A_bound w` site."""
         return self._accumulate(w)[..., self.bound]
 
-    def _operator_at(self, dq: torch.Tensor) -> GraphLaplacianOperator:
-        """The matvec-free `A_I diag(dq) A_I^T` operator at slope `dq`, in this layer's own
-        endpoint/interior-index representation -- the construction repeated by `solve`'s
-        `operator_fn` (both the non-differentiable and differentiable branches) and by
-        `adjoint`.
+    def _operator_at(self, slopes: torch.Tensor) -> GraphLaplacianOperator:
+        """The matvec-free `A_I diag(slopes) A_I^T` operator at the given per-edge slope, in
+        this layer's own endpoint/interior-index representation -- the construction repeated
+        by `linear_init`, `solve`'s `operator_fn` (both the non-differentiable and
+        differentiable branches) and `adjoint`. `slopes` is `dflows`'s actual Jacobian
+        diagonal at the current iterate for all but `linear_init`, which instead passes its
+        own tangent-at-zero `k` -- the same operator shape, at a different slope.
         """
         return GraphLaplacianOperator(
             self._src,
             self._tgt,
-            dq,
+            slopes,
             len(self.interior),
             self._interior_of_node,
             boundary_mask=self._boundary_mask,
