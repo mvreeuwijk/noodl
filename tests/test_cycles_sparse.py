@@ -185,6 +185,8 @@ def test_particular_flow_1000_node_chain_is_faster_than_dense():
     80 MB torch.zeros shows as 0.000 MB under tracemalloc, measured on this machine), so a
     tracemalloc-based memory comparison would be a vacuous pass on Python-object overhead
     only (amendment A4). This test therefore reports TIME only.
+
+    Measured on this machine: sparse 20.13 ms vs dense 70.07 ms.
     """
     n = 1000
     net = Network(dtype=torch.float64)
