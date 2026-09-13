@@ -46,7 +46,7 @@ class ComposedModel:
     sources: torch.Tensor
     capacity: torch.Tensor
     layer: PotentialFlowLayer
-    dense_layer: PotentialFlowLayer
+    dense_layer: PotentialFlowLayer  # linear_solver="direct": the retained dense reference
     transport: TransportLayer
     ensemble: int
     seed: int
@@ -136,9 +136,11 @@ def build_composed(
 
     `boundary` is `["street_0", "sewer_0"]` -- one ground node each on the street and sewer
     networks. `layer` (name "composed") is the migrated, default-configured path; `dense_layer`
-    (name "composed_dense") is built from the same net/elements/boundary and is identical to
-    `layer` until a later task gives it a dense-only `linear_solver`. `transport` (name "co2")
-    is a single-species implicit-scheme `TransportLayer` on the "airpath" edges.
+    (name "composed_dense") is built from the same net/elements/boundary but with
+    `linear_solver="direct"`: the same operator assembled and LU-factorised, i.e. the
+    milestone-1 numerics, retained as a genuinely separate code path so the composed-model
+    parity gate compares two solvers rather than the sparse path with itself. `transport`
+    (name "co2") is a single-species implicit-scheme `TransportLayer` on the "airpath" edges.
     """
     net, interface_nodes = _build_topology(
         n_buildings, building_nodes, street_nodes, sewer_nodes, seed
@@ -168,7 +170,9 @@ def build_composed(
     drivers: dict = {}
 
     layer = PotentialFlowLayer(net, "composed", elements, boundary=boundary)
-    dense_layer = PotentialFlowLayer(net, "composed_dense", elements, boundary=boundary)
+    dense_layer = PotentialFlowLayer(
+        net, "composed_dense", elements, boundary=boundary, linear_solver="direct"
+    )
     transport = TransportLayer(
         net,
         "co2",

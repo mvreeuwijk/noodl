@@ -13,6 +13,7 @@ import time
 
 import torch
 
+import tellegen.solvers.select as select_module
 from benchmarks.composed_model import ComposedModel, build_composed
 
 
@@ -99,3 +100,38 @@ def test_composed_model_fixture_matches_a_direct_call(composed_model):
     assert model.net.n == ref.net.n
     assert model.net.b == ref.net.b
     assert model.interface_nodes == ref.interface_nodes
+
+
+def test_composed_layer_and_dense_layer_agree_and_take_different_paths(monkeypatch):
+    """The composed model's parity gate is only a gate if its two layers are two code paths.
+
+    `model.layer` is the migrated default (`linear_solver="auto"`, a Jacobi-PCG solve of the
+    matvec-free GraphLaplacianOperator); `model.dense_layer` is the retained milestone-1
+    reference (`linear_solver="direct"`, the same operator assembled and LU-factorised). The
+    spy on `select.pcg` is what proves the second does not quietly run the first's solver --
+    without it, a later parity assertion would be comparing the sparse path with itself.
+    """
+    model = build_composed()
+
+    pcg_calls = []
+    real_pcg = select_module.pcg
+
+    def spy_pcg(*args, **kwargs):
+        pcg_calls.append(1)
+        return real_pcg(*args, **kwargs)
+
+    monkeypatch.setattr(select_module, "pcg", spy_pcg)
+
+    phi_sparse, q_sparse = model.layer.solve(
+        model.phi_boundary, model.drivers, model.sources, differentiable=False
+    )
+    assert pcg_calls, "model.layer must solve through pcg"
+    pcg_after_sparse = len(pcg_calls)
+
+    phi_dense, q_dense = model.dense_layer.solve(
+        model.phi_boundary, model.drivers, model.sources, differentiable=False
+    )
+    assert len(pcg_calls) == pcg_after_sparse, "model.dense_layer must not call pcg"
+
+    torch.testing.assert_close(phi_sparse, phi_dense, rtol=1e-9, atol=1e-12)
+    torch.testing.assert_close(q_sparse, q_dense, rtol=1e-9, atol=1e-12)
