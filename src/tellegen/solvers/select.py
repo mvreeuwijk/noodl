@@ -11,6 +11,40 @@ NOT apply to an eligibility refusal: requesting `method="cg"` on an operator tha
 certify SPD, or letting `method="auto"` see a batch where some but not all instances certify,
 is a contract violation and raises regardless of `on_failure` -- there is no SolveResult to
 return in that case, only a modelling error to report.
+
+THE ELIGIBILITY TABLE for `method="auto"` (design section 3.1, amended by spec section 6.2
+step 2). Read top to bottom; the first matching row wins:
+
+  spd_certificate() mixed over the batch          -> RuntimeError (never split a batch)
+  certified SPD, and sparse-direct is applicable  -> sparse_direct  (SciPy SuperLU per instance)
+  certified SPD, otherwise                        -> pcg            (Jacobi-preconditioned CG)
+  certificate None, or uniformly False            -> gmres          (no symmetry assumption)
+
+"sparse-direct is applicable" is the conjunction `_auto_sparse_triplet` tests: the operator
+declares the optional `assemble_sparse` member AND returns a sparse form from it, SciPy is
+importable, and the solve is grad-safe (not `is_grad_enabled()` with a grad-requiring input).
+Every one of those is a FALL-BACK to pcg when it fails, never a refusal: `auto` is a promise
+to choose a backend that works.
+
+WHY sparse-direct is the certified-SPD default (spec section 2, "selected on evidence, per
+platform"; the platform here is CPU + SciPy). Measured in process on the reference composed
+model -- 1028 unknowns, ~5300 nonzeros, float64, 14 threads -- median of 3 warm runs via
+`benchmarks.profile_forward --compare-solvers`:
+
+  forward  ensemble 1     pcg 128.4 ms    sparse_direct   28.0 ms    4.59x faster
+  forward  ensemble 100   pcg 2399 ms     sparse_direct   2182 ms    1.10x (a tie: repeated,
+                                                                     interleaved, pcg ranged
+                                                                     2068-2434 ms against
+                                                                     2113-2182 ms)
+  forward  ensemble 1000  pcg 29489 ms    sparse_direct   19263 ms   1.53x faster
+  backward ensemble 1     pcg  44.9 ms    sparse_direct   13.8 ms    3.25x faster
+  backward ensemble 100   pcg 1741 ms     sparse_direct    476 ms    3.66x faster
+
+PCG needed 168-180 iterations per Newton step at this conditioning; the factorisation needs
+one. Sparse-direct never lost a measured point, so the rule carries NO ensemble threshold --
+there was no crossover to put one at. The per-instance Python loop is nevertheless its real
+cost (see `_sparse_direct`), which is why the ensemble-100 forward is only a tie and why a
+batched vendor backend stays admissible: it would replace the loop, not the algorithm.
 """
 
 from __future__ import annotations
@@ -79,7 +113,53 @@ def _direct(A: Tensor, b: Tensor) -> SolveResult:
     )
 
 
-def _sparse_direct(op, b: Tensor, where: str) -> SolveResult:
+def _sparse_triplet(op):
+    """`op.assemble_sparse()` if the operator declares the optional member, else None."""
+    assemble_sparse = getattr(op, "assemble_sparse", None)
+    return assemble_sparse() if assemble_sparse is not None else None
+
+
+def _auto_sparse_triplet(op, b: Tensor):
+    """The COO triplet `method="auto"` should factorise for a CERTIFIED-SPD operator, or
+    `None` to stay on PCG. Never raises: every "no" here is a fall-back, not a refusal.
+
+    This is where the section 6.2 step 2 default lives. `auto` is a promise to pick a
+    backend that works, so each of the four ways sparse-direct can be inapplicable makes it
+    return None and leaves `solve` on the Krylov path it had before:
+
+    1. the operator does not declare `assemble_sparse` (the member is OPTIONAL);
+    2. SciPy is not importable (it is a DEV dependency -- an explicit
+       `method="sparse_direct"` raises ImportError, but `auto` must not);
+    3. the operator declares the member but has no sparse form to give (returns None);
+    4. the solve is not grad-safe -- grad mode is on AND some input requires grad -- so a
+       non-differentiable backend would silently detach the answer. Both layer paths solve
+       under `no_grad`, so this is the non-differentiable-`solve`-with-learnable-elements
+       case and a handful of direct callers, not the implicit adjoint.
+
+    The SciPy import is repeated per solve rather than cached in a module global. After the
+    first one it is a `sys.modules` lookup costing microseconds against a solve costing
+    milliseconds, and a cached answer would be wrong for exactly the case the fall-back
+    exists for (a process that can or cannot import scipy is not a property this module gets
+    to memoise -- and it would make the behaviour untestable without process isolation).
+    """
+    if getattr(op, "assemble_sparse", None) is None:
+        return None
+    try:
+        import scipy.sparse.linalg  # noqa: F401
+    except ImportError:
+        return None
+    grad_on = torch.is_grad_enabled()
+    if grad_on and b.requires_grad:
+        return None
+    triplet = _sparse_triplet(op)
+    if triplet is None:
+        return None
+    if grad_on and triplet[2].requires_grad:
+        return None
+    return triplet
+
+
+def _sparse_direct(op, b: Tensor, where: str, triplet=None) -> SolveResult:
     """SciPy sparse LU (SuperLU) of `op.assemble_sparse()`, PER INSTANCE, with per-instance
     singularity status -- the spec's section 6.2 sparse-direct reference path.
 
@@ -119,14 +199,17 @@ def _sparse_direct(op, b: Tensor, where: str) -> SolveResult:
             f"use method='auto', 'cg', 'gmres' or 'direct'."
         ) from exc
 
-    assemble_sparse = getattr(op, "assemble_sparse", None)
-    triplet = assemble_sparse() if assemble_sparse is not None else None
     if triplet is None:
-        raise ValueError(
-            f"{where}: method='sparse_direct' requires op.assemble_sparse() to return a "
-            f"(row, col, values) COO triplet, but this operator "
-            f"{'returned None' if assemble_sparse is not None else 'has no assemble_sparse'}"
-        )
+        # Not pre-fetched by the "auto" branch, so this is an EXPLICIT method="sparse_direct":
+        # an operator with no sparse form is a caller error here, not a reason to fall back.
+        assemble_sparse = getattr(op, "assemble_sparse", None)
+        triplet = _sparse_triplet(op)
+        if triplet is None:
+            raise ValueError(
+                f"{where}: method='sparse_direct' requires op.assemble_sparse() to return a "
+                f"(row, col, values) COO triplet, but this operator "
+                f"{'returned None' if assemble_sparse is not None else 'has no assemble_sparse'}"
+            )
     row, col, values = triplet
     if torch.is_grad_enabled() and (b.requires_grad or values.requires_grad):
         raise RuntimeError(
@@ -139,8 +222,13 @@ def _sparse_direct(op, b: Tensor, where: str) -> SolveResult:
     m = int(b.shape[-1])
     nnz = int(row.shape[-1])
     batch = torch.broadcast_shapes(values.shape[:-1], b.shape[:-1])
-    values_flat = values.expand(*batch, nnz).reshape(-1, nnz)
-    b_flat = b.expand(*batch, m).reshape(-1, m)
+    # The flat instance count is computed, never inferred with a -1: a system with zero
+    # unknowns (every node of a network is a boundary node -- the CONTAM parallel-combination
+    # fixtures are exactly that) has m = 0 AND nnz = 0, and `reshape(-1, 0)` is ambiguous
+    # rather than empty.
+    n_flat = int(batch.numel())
+    values_flat = values.expand(*batch, nnz).reshape(n_flat, nnz)
+    b_flat = b.expand(*batch, m).reshape(n_flat, m)
 
     # SuperLU has single- and double-precision kernels only; anything narrower is factorised
     # in float64 and cast back, which is strictly better than refusing (and than silently
@@ -151,8 +239,11 @@ def _sparse_direct(op, b: Tensor, where: str) -> SolveResult:
     values_np = values_flat.detach().cpu().to(work_dtype).numpy()
     b_np = b_flat.detach().cpu().to(work_dtype).numpy()
     x_np = b_np.copy()
-    singular_flat = torch.zeros(b_flat.shape[0], dtype=torch.bool)
-    for i in range(b_flat.shape[0]):
+    singular_flat = torch.zeros(n_flat, dtype=torch.bool)
+    # `m == 0` is a system with no unknowns: already solved, and SuperLU has nothing to
+    # factorise. The empty `x_np` below IS the unique solution, and the residual machinery
+    # that follows reports it as converged with a zero residual, exactly as pcg did.
+    for i in range(n_flat if m > 0 else 0):
         A_i = scipy.sparse.csc_matrix((values_np[i], (row_np, col_np)), shape=(m, m))
         try:
             lu = scipy.sparse.linalg.splu(A_i)
@@ -266,15 +357,24 @@ def solve(
                 f"Certify all instances, or pass an explicit method."
             )
         if cert is not None and bool(torch.all(cert)):
-            result = pcg(
-                op,
-                b,
-                rtol=rtol,
-                atol=atol,
-                max_iter=max_iter,
-                preconditioner=preconditioner,
-                x0=x0,
-            )
+            # Spec section 6.2 step 2, decided on the Task C measurement (see this module's
+            # docstring): a certified-SPD operator that can hand over a sparse form is
+            # factorised rather than iterated. `_auto_sparse_triplet` returns None -- and
+            # never raises -- whenever that is not applicable, which is what keeps every
+            # other certified-SPD operator, and every SciPy-less installation, on PCG.
+            triplet = _auto_sparse_triplet(op, b)
+            if triplet is not None:
+                result = _sparse_direct(op, b, where, triplet)
+            else:
+                result = pcg(
+                    op,
+                    b,
+                    rtol=rtol,
+                    atol=atol,
+                    max_iter=max_iter,
+                    preconditioner=preconditioner,
+                    x0=x0,
+                )
         else:
             # cert is None (cannot certify at all) or cert is uniformly False (no instance
             # is eligible for cg, so there is nothing to split off): both route to gmres,

@@ -63,6 +63,14 @@ BUDGET_TABLE = [
 # the shipped default; "sparse_direct" is the SciPy SuperLU reference path. The FIRST entry is
 # the one whose numbers the gate reads -- `measure_budget_row`'s own default -- so the
 # committed report keeps meaning what `tests/verification/test_composed_scaling.py` asserts.
+#
+# NOTE, since Task C decided the default: for a certified-SPD `PotentialFlowLayer` with SciPy
+# installed, "auto" now RESOLVES to sparse_direct (see `solvers.select`'s eligibility table),
+# so these two rows measure the same backend and differ only in whether it was chosen or
+# pinned. That makes the second row a check that the routing rule really lands where it says,
+# at the cost of doubling the report's wall clock. Swap the second entry to "cg" to recover
+# the PCG comparison the Task C measurement was made on -- the evidence itself is recorded in
+# `solvers.select`'s module docstring and in the Task C report, not only here.
 SOLVERS = ("auto", "sparse_direct")
 
 

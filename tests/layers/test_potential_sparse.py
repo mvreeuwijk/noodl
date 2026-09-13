@@ -244,12 +244,24 @@ def test_direct_and_auto_linear_solvers_agree_on_a_contam_style_series_network()
     torch.testing.assert_close(q_auto, q_direct, rtol=1e-9, atol=1e-12)
 
 
-def test_auto_goes_through_pcg_and_direct_goes_through_an_lu_factorisation(monkeypatch):
+def test_auto_goes_through_sparse_lu_and_direct_goes_through_a_dense_lu(monkeypatch):
     # The numeric agreement above is only meaningful if the two are genuinely different code
-    # paths; these spies are what establish that. `select.pcg` is the sparse path's own
-    # inner solver, `torch.linalg.lu_factor_ex` the direct path's.
-    pcg_calls, lu_calls = [], []
+    # paths; these spies are what establish that. UPDATED for the spec section 6.2 step 2
+    # default: `auto` on a certified-SPD operator with a sparse form now factorises through
+    # `scipy.sparse.linalg.splu` (measured 1.1x-4.6x faster than PCG at every ensemble size;
+    # see `solvers.select`'s module docstring), where it used to run `select.pcg`. "direct"
+    # is unchanged and still dense-LU-factorises the ASSEMBLED operator, so the two remain
+    # the two distinct paths this parity gate needs -- one sparse kernel, one dense one --
+    # and `select.pcg` must now be called by NEITHER.
+    import scipy.sparse.linalg
+
+    splu_calls, lu_calls, pcg_calls = [], [], []
+    real_splu = scipy.sparse.linalg.splu
     real_pcg, real_lu = select_module.pcg, torch.linalg.lu_factor_ex
+
+    def spy_splu(*args, **kwargs):
+        splu_calls.append(1)
+        return real_splu(*args, **kwargs)
 
     def spy_pcg(*args, **kwargs):
         pcg_calls.append(1)
@@ -259,17 +271,21 @@ def test_auto_goes_through_pcg_and_direct_goes_through_an_lu_factorisation(monke
         lu_calls.append(1)
         return real_lu(*args, **kwargs)
 
+    monkeypatch.setattr(scipy.sparse.linalg, "splu", spy_splu)
     monkeypatch.setattr(select_module, "pcg", spy_pcg)
     monkeypatch.setattr(torch.linalg, "lu_factor_ex", spy_lu)
 
     auto_layer, drivers, phi_b = _series_layer("auto")
     auto_layer.solve(phi_b, drivers, None, differentiable=False)
-    assert pcg_calls, "linear_solver 'auto' must go through pcg"
-    pcg_after_auto = len(pcg_calls)
+    assert splu_calls, "linear_solver 'auto' must go through the sparse LU"
+    assert not pcg_calls, "linear_solver 'auto' no longer runs pcg on a certified operator"
+    assert not lu_calls, "linear_solver 'auto' must not dense-LU-factorise"
+    splu_after_auto = len(splu_calls)
 
     direct_layer, _, _ = _series_layer("direct")
     direct_layer.solve(phi_b, drivers, None, differentiable=False)
-    assert len(pcg_calls) == pcg_after_auto, "linear_solver 'direct' must not call pcg"
+    assert len(splu_calls) == splu_after_auto, "linear_solver 'direct' must not call splu"
+    assert not pcg_calls, "linear_solver 'direct' must not call pcg"
     assert lu_calls, "linear_solver 'direct' must LU-factorise the assembled operator"
 
 
@@ -355,8 +371,15 @@ def test_adjoint_routes_through_the_layers_own_linear_solver(monkeypatch, two_zo
     drivers = {"wind": torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)}
     grad_phi_i = torch.tensor([1.0, -2.0], dtype=torch.float64)
 
-    pcg_calls, lu_calls = [], []
+    import scipy.sparse.linalg
+
+    splu_calls, pcg_calls, lu_calls = [], [], []
+    real_splu = scipy.sparse.linalg.splu
     real_pcg, real_lu = select_module.pcg, torch.linalg.lu_factor_ex
+
+    def spy_splu(*args, **kwargs):
+        splu_calls.append(1)
+        return real_splu(*args, **kwargs)
 
     def spy_pcg(*args, **kwargs):
         pcg_calls.append(1)
@@ -366,6 +389,7 @@ def test_adjoint_routes_through_the_layers_own_linear_solver(monkeypatch, two_zo
         lu_calls.append(1)
         return real_lu(*args, **kwargs)
 
+    monkeypatch.setattr(scipy.sparse.linalg, "splu", spy_splu)
     monkeypatch.setattr(select_module, "pcg", spy_pcg)
     monkeypatch.setattr(torch.linalg, "lu_factor_ex", spy_lu)
 
@@ -385,15 +409,22 @@ def test_adjoint_routes_through_the_layers_own_linear_solver(monkeypatch, two_zo
         phi_i = phi[layer.interior]
         # Cleared AFTER the forward solve so the counters below describe the adjoint call
         # alone; the forward path's own solver choice is already covered elsewhere.
+        splu_calls.clear()
         pcg_calls.clear()
         lu_calls.clear()
         lam[linear_solver] = layer.adjoint(phi_i, phi_b, drivers, grad_phi_i)
         if linear_solver == "auto":
-            assert pcg_calls, "adjoint under linear_solver 'auto' must go through pcg"
-            assert not lu_calls, "adjoint under linear_solver 'auto' must not LU-factorise"
+            # Spec section 6.2 step 2: `auto` on the TransposeOperator of a certified-SPD
+            # GraphLaplacianOperator now takes the sparse LU -- the transposed COO triplet --
+            # rather than pcg. What A3.3 asserts is unchanged: the layer's own configured
+            # solver reaches the backward pass, and the two configurations stay two paths.
+            assert splu_calls, "adjoint under linear_solver 'auto' must go through splu"
+            assert not lu_calls, "adjoint under linear_solver 'auto' must not dense-LU"
+            assert not pcg_calls, "adjoint under linear_solver 'auto' no longer runs pcg"
         else:
             assert lu_calls, "adjoint under linear_solver 'direct' must LU-factorise"
             assert not pcg_calls, "adjoint under linear_solver 'direct' must not call pcg"
+            assert not splu_calls, "adjoint under linear_solver 'direct' must not call splu"
 
     torch.testing.assert_close(lam["auto"], lam["direct"], rtol=1e-9, atol=1e-12)
 

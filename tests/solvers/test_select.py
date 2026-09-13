@@ -683,3 +683,223 @@ def test_sparse_direct_ignores_the_certificate_entirely(monkeypatch):
     result = solve(op, b, method="sparse_direct", on_failure="return")
     assert calls["count"] == 0
     assert bool(result.converged[0])
+
+
+# -- section 6.2 step 2: what method="auto" selects, on the evidence measured in Task C -------
+#
+# Measured in process on the reference composed model (14-thread CPU, float64, 1028 unknowns),
+# median of 3 warm runs -- `benchmarks.profile_forward --compare-solvers`:
+#
+#   forward  ensemble 1     auto 128.4 ms   sparse_direct  28.0 ms   4.59x
+#   forward  ensemble 100   auto 2399 ms    sparse_direct  2182 ms   1.10x (a tie; see below)
+#   forward  ensemble 1000  auto 29489 ms   sparse_direct  19263 ms  1.53x
+#   backward ensemble 1     auto  44.9 ms   sparse_direct  13.8 ms   3.25x
+#   backward ensemble 100   auto 1741 ms    sparse_direct  476 ms    3.66x
+#
+# sparse_direct never loses, so the rule carries no ensemble threshold: `auto` takes it
+# whenever a certified-SPD operator offers a sparse form, SciPy is importable, and the solve
+# is grad-safe -- and falls back to PCG, never raising, in every other case.
+
+
+def _spy_splu(monkeypatch):
+    """Count `scipy.sparse.linalg.splu` calls while still delegating, like `_spy` above."""
+    import scipy.sparse.linalg
+
+    calls = {"count": 0}
+    real = scipy.sparse.linalg.splu
+
+    def wrapper(*args, **kwargs):
+        calls["count"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(scipy.sparse.linalg, "splu", wrapper)
+    return calls
+
+
+def test_auto_selects_sparse_direct_for_a_certified_spd_operator_with_a_sparse_form(monkeypatch):
+    import tellegen.solvers.select as select_module
+
+    pcg_calls = _spy(monkeypatch, select_module, "pcg")
+    gmres_calls = _spy(monkeypatch, select_module, "gmres")
+    splu_calls = _spy_splu(monkeypatch)
+    slopes = torch.tensor([[1.0, 1.0], [2.0, 3.0]])
+    op = _chain_op(slopes)
+    b = torch.tensor([[1.0, 2.0], [0.5, -1.0]])
+    result = solve(op, b)  # method="auto"
+    assert splu_calls["count"] == 2, "one factorisation per batch instance"
+    assert pcg_calls["count"] == 0
+    assert gmres_calls["count"] == 0
+    torch.testing.assert_close(
+        result.x, solve(op, b, method="direct").x, rtol=1e-9, atol=1e-12
+    )
+
+
+def test_auto_falls_back_to_pcg_when_the_operator_has_no_sparse_form_at_all(monkeypatch):
+    """`_FakeOperator` certifies SPD but declares no `assemble_sparse`: the optional member
+    is optional, so `auto` must keep selecting PCG rather than refuse.
+    """
+    import tellegen.solvers.select as select_module
+
+    pcg_calls = _spy(monkeypatch, select_module, "pcg")
+    splu_calls = _spy_splu(monkeypatch)
+    op = _FakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    solve(op, _B_SPD)
+    assert pcg_calls["count"] == 1
+    assert splu_calls["count"] == 0
+
+
+def test_auto_falls_back_to_pcg_when_assemble_sparse_returns_none(monkeypatch):
+    import tellegen.solvers.select as select_module
+
+    pcg_calls = _spy(monkeypatch, select_module, "pcg")
+    splu_calls = _spy_splu(monkeypatch)
+    op = _NoSparseFormOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    solve(op, _B_SPD)
+    assert pcg_calls["count"] == 1
+    assert splu_calls["count"] == 0
+
+
+def test_auto_falls_back_to_pcg_when_scipy_is_not_importable(monkeypatch):
+    """The sparse-direct default is conditional on SciPy, which is a DEV dependency: an
+    installation without it must keep solving through PCG, not raise the ImportError an
+    EXPLICIT method='sparse_direct' would.
+    """
+    import builtins
+
+    import tellegen.solvers.select as select_module
+
+    pcg_calls = _spy(monkeypatch, select_module, "pcg")
+    real_import = builtins.__import__
+
+    def no_scipy(name, *args, **kwargs):
+        if name.split(".")[0] == "scipy":
+            raise ImportError(f"No module named {name!r}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_scipy)
+    op = _chain_op(torch.tensor([[1.0, 1.0]]))
+    result = solve(op, torch.ones(1, 2))
+    assert pcg_calls["count"] == 1
+    assert bool(torch.all(result.converged))
+
+
+def test_auto_falls_back_to_pcg_rather_than_refusing_a_grad_requiring_solve(monkeypatch):
+    """An EXPLICIT method='sparse_direct' raises under grad mode; `auto` must never raise for
+    a reason the caller did not ask for, so it silently keeps the differentiable backend.
+    """
+    import tellegen.solvers.select as select_module
+
+    pcg_calls = _spy(monkeypatch, select_module, "pcg")
+    splu_calls = _spy_splu(monkeypatch)
+    slopes = torch.tensor([[1.0, 1.0]], requires_grad=True)
+    op = _chain_op(slopes)
+    result = solve(op, torch.ones(1, 2))
+    assert pcg_calls["count"] == 1
+    assert splu_calls["count"] == 0
+    assert result.x.requires_grad
+
+
+def test_auto_falls_back_to_pcg_when_only_the_right_hand_side_requires_grad(monkeypatch):
+    import tellegen.solvers.select as select_module
+
+    pcg_calls = _spy(monkeypatch, select_module, "pcg")
+    splu_calls = _spy_splu(monkeypatch)
+    op = _chain_op(torch.tensor([[1.0, 1.0]]))
+    result = solve(op, torch.ones(1, 2, requires_grad=True))
+    assert pcg_calls["count"] == 1
+    assert splu_calls["count"] == 0
+    assert result.x.requires_grad
+
+
+def test_auto_takes_sparse_direct_under_no_grad_even_when_the_slopes_require_grad(monkeypatch):
+    """The grad-safety test is about the AMBIENT mode, not about the tensors alone: inside
+    `no_grad` -- where both layer paths solve -- nothing is being traced, so the
+    non-differentiable backend is admissible and is taken.
+    """
+    splu_calls = _spy_splu(monkeypatch)
+    slopes = torch.tensor([[1.0, 1.0]], requires_grad=True)
+    op = _chain_op(slopes)
+    with torch.no_grad():
+        result = solve(op, torch.ones(1, 2))
+    assert splu_calls["count"] == 1
+    assert not result.x.requires_grad
+
+
+def test_auto_still_routes_a_nonsymmetric_uncertified_operator_to_gmres(monkeypatch):
+    """The eligibility table's other rows are untouched: a certificate of None still means
+    GMRES, whatever sparse form the operator may offer. This is the `TransportLayer` case --
+    `AdvectionOperator.spd_certificate()` is None -- and it must not move.
+    """
+    import tellegen.solvers.select as select_module
+
+    gmres_calls = _spy(monkeypatch, select_module, "gmres")
+    splu_calls = _spy_splu(monkeypatch)
+    op = _SparseFakeOperator(_A_NS, symmetric=False, certificate=None)
+    solve(op, _B_NS)
+    assert gmres_calls["count"] == 1
+    assert splu_calls["count"] == 0
+
+
+def test_auto_still_refuses_a_mixed_certification_batch_before_choosing_any_backend(monkeypatch):
+    """The mixed-certification refusal is unchanged and still happens FIRST: it is a
+    modelling error, and no backend -- sparse or otherwise -- may be reached.
+    """
+    splu_calls = _spy_splu(monkeypatch)
+    op = _chain_op(torch.tensor([[1.0, 1.0], [0.0, 1.0]]))
+    with pytest_raises_containing("refuses to split the batch"):
+        solve(op, torch.ones(2, 2))
+    assert splu_calls["count"] == 0
+
+
+def test_auto_and_explicit_cg_still_disagree_about_the_backend_they_run(monkeypatch):
+    """`method="cg"` remains an EXPLICIT request for the Krylov solver and is honoured
+    verbatim -- the new default applies to `"auto"` only.
+    """
+    import tellegen.solvers.select as select_module
+
+    pcg_calls = _spy(monkeypatch, select_module, "pcg")
+    splu_calls = _spy_splu(monkeypatch)
+    op = _chain_op(torch.tensor([[1.0, 1.0]]))
+    solve(op, torch.ones(1, 2), method="cg")
+    assert pcg_calls["count"] == 1
+    assert splu_calls["count"] == 0
+
+
+def test_auto_sparse_direct_reports_one_iteration_and_a_converged_status():
+    op = _chain_op(torch.tensor([[1.0, 1.0], [2.0, 3.0]]))
+    result = solve(op, torch.ones(2, 2))
+    assert result.iterations.tolist() == [1, 1]
+    assert result.status.tolist() == [int(SolverStatus.CONVERGED)] * 2
+
+
+def _no_interior_op() -> GraphLaplacianOperator:
+    """One edge between two BOUNDARY nodes: zero unknowns, and so zero COO entries too.
+
+    Not a contrived shape: `tests/verification/test_contam_airflow.py`'s parallel-combination
+    fixtures are exactly this network, and they reach `linear_init` with an empty right-hand
+    side before `newton` gets its own chance to short-circuit on it.
+    """
+    return GraphLaplacianOperator(
+        torch.tensor([0]),
+        torch.tensor([1]),
+        torch.tensor([1.0]),
+        0,
+        torch.tensor([-1, -1]),
+        boundary_mask=torch.tensor([True, True]),
+    )
+
+
+def test_sparse_direct_solves_a_system_with_no_unknowns_as_trivially_converged():
+    op = _no_interior_op()
+    row, col, values = op.assemble_sparse()
+    assert row.shape == (0,) and values.shape == (0,)
+    result = solve(op, torch.zeros(0), method="sparse_direct")
+    assert result.x.shape == (0,)
+    assert bool(result.converged)
+    assert float(result.residual) == 0.0
+
+
+def test_auto_solves_a_system_with_no_unknowns_as_trivially_converged():
+    result = solve(_no_interior_op(), torch.zeros(0))
+    assert result.x.shape == (0,)
+    assert bool(result.converged)
