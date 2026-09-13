@@ -105,6 +105,10 @@ class AdvectionOperator:
         # `_src`/`_tgt`, never from `flow`'s values -- so nothing cached here can capture an
         # autograd graph, which a cached expansion of a float tensor (`flow`, `transmission`)
         # would: `flow` is a solved `q` on the differentiable path and does require grad.
+        # Neither dict evicts, and neither needs to: an AdvectionOperator is rebuilt once
+        # per transport step from that step's own `flow`, so its key set is the one or two
+        # shapes that step uses and it is then discarded. The values are stride-0 views of
+        # (b,) index arrays, so the cache holds no memory beyond those arrays either way.
         self._upwind_cache: dict[torch.dtype, tuple[torch.Tensor, torch.Tensor]] = {}
         self._bcast_cache: dict[tuple, torch.Tensor] = {}
 

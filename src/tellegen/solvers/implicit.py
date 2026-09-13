@@ -184,6 +184,9 @@ class _Implicit(torch.autograd.Function):
             # non-converged forward raises out of `newton` above rather than reaching here.
             diagnostics["newton_iterations"] = result.iterations
             diagnostics["linear_iterations"] = result.linear_iterations
+            # The backend that actually ran, not the method requested: with "auto" the two
+            # differ on runtime predicates the caller cannot see (final review I5).
+            diagnostics["backend"] = result.backend
             diagnostics["converged"] = result.converged
             diagnostics["residual_norm"] = result.residual_norm
         ctx.residual = residual
@@ -261,8 +264,10 @@ def implicit_solve(
     the backward pass's adjoint system.
 
     ``diagnostics``, when a dict is given, is filled with the forward Newton solve's own
-    ``newton_iterations``, ``linear_iterations``, ``converged`` and ``residual_norm`` (see
-    ``_Implicit.forward``). Every other keyword is forwarded to ``newton``. It is
+    ``newton_iterations``, ``linear_iterations``, ``backend``, ``converged`` and
+    ``residual_norm`` (see ``_Implicit.forward``); ``backend`` is the inner solver that
+    actually ran, as opposed to the ``method`` requested. Every other keyword is forwarded
+    to ``newton``. It is
     keyword-ONLY deliberately: sitting positionally in front of ``**newton_kwargs`` it would
     silently swallow a fifth positional argument from any caller who thought they were
     passing something else.

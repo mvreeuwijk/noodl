@@ -126,6 +126,13 @@ class GraphLaplacianOperator:
         # `ExpandBackward` into the next forward pass, so a second backward would try to
         # traverse a freed graph. `expand` on a fresh tensor is one dispatch; that is the
         # cheap half anyway.
+        #
+        # UNBOUNDED BY TYPE, BOUNDED IN FACT, and the lifetime argument is the load-bearing
+        # one: a GraphLaplacianOperator is rebuilt at every Newton iterate (see
+        # `PotentialFlowLayer.solve`'s `operator_fn`), so one instance sees a handful of
+        # solves with one or two distinct (batch shape, device) keys and is then discarded.
+        # The entries are stride-0 views of two (edges,) arrays, so even a pathological key
+        # set would cost almost nothing; there is deliberately no eviction policy.
         self._index_cache: dict[tuple, tuple[torch.Size, Tensor, Tensor]] = {}
 
         # Lazily built COO index pattern for `assemble_sparse` (row, col and the gather

@@ -430,6 +430,26 @@ def test_exact_scheme_rejects_on_failure_return():
         )
 
 
+def test_exact_scheme_rejects_on_failure_return_before_doing_any_work():
+    """An ARGUMENT-VALIDITY error must precede the work, not follow it. The refusal used to
+    sit inside the `scheme == "exact"` branch, after `_to_stacked` had already validated and
+    reshaped `x`, so a caller who passed both a bad shape and the unusable `on_failure` was
+    told about the shape (final review M9). `on_failure` is wrong whatever the shapes are.
+    """
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath", boundary=["ambient"],
+        scheme="exact",
+    )
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    bad_shape_c = torch.zeros(7, dtype=torch.float64)  # n_i is 1, so this is invalid too
+    with pytest.raises(ValueError, match="on_failure='return'"):
+        layer.step(
+            bad_shape_c, q, torch.zeros(1, dtype=torch.float64), torch.tensor([420.0]), 300.0,
+            on_failure="return",
+        )
+
+
 def test_transpose_view_is_the_shared_transpose_operator():
     """`_TransposeView` is a thin alias for `solvers.implicit.TransposeOperator`, not a
     separately-maintained duplicate -- see the consolidation note in `layers/transport.py`.

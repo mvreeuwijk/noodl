@@ -97,6 +97,14 @@ class NewtonResult:
     problem's difficulty in a way a sum over a varying number of Newton steps is not. It is
     ``None`` only when no linear solve happened at all (``x0`` already satisfied the
     convergence test), never as a stand-in for an unknown count.
+
+    ``backend`` is the inner solver that actually RAN -- ``"sparse_direct"``, ``"pcg"``,
+    ``"gmres"`` or ``"direct"`` -- as opposed to the ``method`` that was requested. With
+    ``method="auto"`` the two differ, and which one a solve got depends on runtime predicates
+    (the batch size, whether SciPy is importable) that a caller cannot otherwise see. It is
+    the LAST inner solve's backend; every inner solve in one ``newton`` call sees the same
+    method and the same operator shape, so they do not disagree. Like
+    ``linear_iterations`` it is ``None`` exactly when no linear solve happened.
     """
 
     x: torch.Tensor
@@ -104,6 +112,7 @@ class NewtonResult:
     iterations: int
     residual_norm: torch.Tensor
     linear_iterations: torch.Tensor | None = None
+    backend: str | None = None
 
 
 def newton(
@@ -185,6 +194,9 @@ def newton(
     omega_i = torch.full_like(norm0, omega)
     iterations = 0
     linear_iterations: torch.Tensor | None = None
+    # One dict, refilled by every inner solve, so the resolved backend costs one string
+    # assignment per Newton step rather than a dict allocation. See `NewtonResult.backend`.
+    backend_out: dict = {}
     tiny = torch.finfo(norm.dtype).tiny
 
     while not bool(torch.all(converged)) and iterations < max_iter:
@@ -199,6 +211,7 @@ def newton(
             on_failure="return",
             where=where,
             rtol=inner_solve_rtol(r.dtype),
+            backend_out=backend_out,
         )
         dx = result.x
         inner = result.iterations.to(torch.int64).expand(converged.shape)
@@ -225,6 +238,7 @@ def newton(
                 iterations=iterations,
                 residual_norm=norm,
                 linear_iterations=linear_iterations,
+                backend=backend_out.get("backend"),
             )
         flat_converged = converged.reshape(-1)
         bad = torch.nonzero(~flat_converged, as_tuple=False).flatten()
@@ -239,4 +253,5 @@ def newton(
         iterations=iterations,
         residual_norm=norm,
         linear_iterations=linear_iterations,
+        backend=backend_out.get("backend"),
     )

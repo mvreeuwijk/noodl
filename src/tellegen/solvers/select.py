@@ -51,6 +51,8 @@ admissible: it would replace the loop, not the algorithm.
 
 from __future__ import annotations
 
+import warnings
+
 import torch
 
 from tellegen.operators.base import SolveResult, SolverStatus
@@ -81,6 +83,17 @@ Tensor = torch.Tensor
 # one problem size, and is the thing to re-measure when either changes.
 _SPARSE_DIRECT_MAX_BATCH = 32
 
+# Set once, the first time `auto` falls back to PCG for the ONE reason that is an environment
+# fault rather than a modelling fact: a certified-SPD operator offered a sparse form, the
+# batch was within the threshold, the solve was grad-safe, and SciPy -- the `tellegen[sparse]`
+# extra -- was the only thing missing. Warning on EVERY such solve would be unusable noise on
+# a machine that simply has not installed the extra, and PCG is a correct answer; warning
+# never at all leaves a user silently on the 4.6x-slower path with `diagnostics["backend"]`
+# as the only signal. Once per process is the compromise. It is module state rather than a
+# `warnings`-module filter because `warnings.warn`'s own "once" registry is keyed on the
+# message and can be reset out from under us by `catch_warnings`.
+_WARNED_SPARSE_DIRECT_NEEDS_SCIPY = False
+
 
 def _describe_uncertified(op, cert: Tensor, where: str) -> str:
     """Message fragment naming which instances fail to certify SPD, and why.
@@ -109,6 +122,17 @@ def _direct(A: Tensor, b: Tensor) -> SolveResult:
     torch.linalg.solve raises for the whole batch if any one instance is singular, which is
     the very behaviour the milestone-1 Newton had to work around with an identity
     substitution. lu_factor_ex reports singularity per instance through `info` instead.
+
+    `converged` HERE MAKES NO RESIDUAL CLAIM: it is `finite & ~singular`, so a factorisation
+    that returns a finite answer is reported CONVERGED whatever its residual, and `residual`
+    is informational rather than a gate (unlike `pcg`/`gmres`, where convergence IS a
+    residual test). LU is backward stable, so the residual is genuinely ~0 wherever the
+    factorisation succeeds; what the caller does not get is a forward-accuracy guarantee on
+    an ill-conditioned system. `_sparse_direct` shares this contract, and since section 6.2
+    step 2 made it the default for small certified batches it is the SHIPPED failure
+    signature: a badly-conditioned certified system that PCG would have reported as
+    MAX_ITER or BREAKDOWN now returns a finite, backward-stable, forward-inaccurate answer
+    marked CONVERGED, and Newton's own residual test will not catch it either.
     """
     batch = torch.broadcast_shapes(A.shape[:-2], b.shape[:-1])
     m = A.shape[-1]
@@ -152,19 +176,28 @@ def _auto_sparse_triplet(op, b: Tensor):
     backend that works, so each of the five ways sparse-direct can be inapplicable makes it
     return None and leaves `solve` on the Krylov path it had before:
 
-    1. the operator does not declare `assemble_sparse` (the member is OPTIONAL);
-    2. SciPy is not importable (it is a DEV dependency -- an explicit
-       `method="sparse_direct"` raises ImportError, but `auto` must not);
-    3. the operator declares the member but has no sparse form to give (returns None);
-    4. the solve is not grad-safe -- grad mode is on AND some input requires grad -- so a
-       non-differentiable backend would silently detach the answer. Both layer paths solve
-       under `no_grad`, so this is the non-differentiable-`solve`-with-learnable-elements
-       case and a handful of direct callers, not the implicit adjoint;
-    5. the flat batch exceeds `_SPARSE_DIRECT_MAX_BATCH` -- a PERFORMANCE fall-back rather
+    1. the flat batch exceeds `_SPARSE_DIRECT_MAX_BATCH` -- a PERFORMANCE fall-back rather
        than a capability one (sparse-direct would answer correctly, just slower), measured
        and justified at that constant. It is checked first because it is the cheapest of the
        five and, unlike the others, it is a property of this call rather than of the
-       environment.
+       environment;
+    2. the operator does not declare `assemble_sparse` (the member is OPTIONAL);
+    3. the solve is not grad-safe -- grad mode is on AND some input requires grad -- so a
+       non-differentiable backend would silently detach the answer. Both layer paths solve
+       under `no_grad`, so this is the non-differentiable-`solve`-with-learnable-elements
+       case and a handful of direct callers, not the implicit adjoint;
+    4. the operator declares the member but has no sparse form to give (returns None);
+    5. SciPy is not importable (it is an OPTIONAL extra, `tellegen[sparse]` -- an explicit
+       `method="sparse_direct"` raises ImportError, but `auto` must not).
+
+    ORDER MATTERS, and 5 is deliberately last even though it is the cheapest test after 1.
+    Reaching it means every OTHER condition held, which is exactly the predicate the
+    once-per-process warning needs: "this solve would have been factorised if the extra were
+    installed". Testing SciPy earlier would make that indistinguishable from the fall-backs
+    that are modelling facts, which must never warn -- telling someone to install SciPy for
+    an operator that has no sparse form to give would be wrong advice. The price is that a
+    SciPy-less installation assembles a COO triplet per solve and discards it; that is one
+    O(edges) vectorised expression against a PCG solve of ~170 matvecs, so well under 1%.
 
     The SciPy import is repeated per solve rather than cached in a module global. After the
     first one it is a `sys.modules` lookup costing microseconds against a solve costing
@@ -172,13 +205,11 @@ def _auto_sparse_triplet(op, b: Tensor):
     exists for (a process that can or cannot import scipy is not a property this module gets
     to memoise -- and it would make the behaviour untestable without process isolation).
     """
+    global _WARNED_SPARSE_DIRECT_NEEDS_SCIPY
+
     if b.shape[:-1].numel() > _SPARSE_DIRECT_MAX_BATCH:
         return None
     if getattr(op, "assemble_sparse", None) is None:
-        return None
-    try:
-        import scipy.sparse.linalg  # noqa: F401
-    except ImportError:
         return None
     grad_on = torch.is_grad_enabled()
     if grad_on and b.requires_grad:
@@ -187,6 +218,27 @@ def _auto_sparse_triplet(op, b: Tensor):
     if triplet is None:
         return None
     if grad_on and triplet[2].requires_grad:
+        return None
+    try:
+        import scipy.sparse.linalg  # noqa: F401
+    except ImportError:
+        if not _WARNED_SPARSE_DIRECT_NEEDS_SCIPY:
+            _WARNED_SPARSE_DIRECT_NEEDS_SCIPY = True
+            # `stacklevel=2` points at `solve`, the nearest frame that means anything: this
+            # sits under `solve` under `newton` under a layer, so no fixed depth reaches the
+            # user's own call site. The message is therefore self-contained, and
+            # `diagnostics["backend"]` is the per-solve, non-noisy answer.
+            warnings.warn(
+                "tellegen: method='auto' would have factorised this certified-SPD system "
+                "with SciPy's sparse LU, but scipy could not be imported, so it fell back "
+                "to preconditioned CG. The answer is correct; it is roughly 4.6x slower at "
+                "small ensembles. Install the extra to get the documented default: "
+                "pip install tellegen[sparse]. This warning is issued once per process; "
+                "PotentialFlowLayer.solve's diagnostics['backend'] reports the backend that "
+                "actually ran on every solve.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         return None
     return triplet
 
@@ -220,6 +272,10 @@ def _sparse_direct(op, b: Tensor, where: str, triplet=None) -> SolveResult:
     `.backward`), so a differentiable `PotentialFlowLayer.solve` configured with
     `linear_solver="sparse_direct"` is unaffected: its gradients come from the implicit
     adjoint, which never differentiates through the linear solver's own arithmetic.
+
+    `converged` makes no residual claim here either -- `finite & ~singular`, with `residual`
+    informational. See `_direct`, which states the contract and what it means now that this
+    backend is the default for small certified batches.
     """
     try:
         import scipy.sparse
@@ -330,6 +386,7 @@ def solve(
     x0: Tensor | None = None,
     preconditioner: str | None = "jacobi",
     restart: int = 30,
+    backend_out: dict | None = None,
 ) -> SolveResult:
     """Resolve `method="auto"` per the eligibility table (see the module docstring), or honour
     an explicit method, then apply the raise/return boundary on the NUMERICAL outcome.
@@ -346,6 +403,16 @@ def solve(
     symmetry assumption and never consults the certificate; it requires the optional
     `assemble_sparse` member (`ValueError` otherwise) and SciPy (`ImportError` otherwise);
     and it is not differentiable (see `_sparse_direct`).
+
+    `backend_out`, when a dict is passed, is filled with `{"backend": name}` naming the
+    backend that actually RAN -- one of "sparse_direct", "pcg", "gmres", "direct" -- as
+    distinct from the `method` that was requested. Since the `"auto"` default is conditional
+    on runtime predicates (SciPy's presence, the batch size, grad-safety) the two genuinely
+    differ, and nothing else exposes which way a given solve went: `linear_iterations` is an
+    indirect signal (1 vs ~170) and there is no other. It is an out-parameter rather than a
+    field on `SolveResult` so that the result type -- which every backend constructs and
+    every caller unpacks -- is unchanged. It is written only once a backend has been chosen,
+    so an ELIGIBILITY REFUSAL leaves it untouched: there is no backend behind a refusal.
     """
     if method not in _METHODS:
         raise ValueError(f"{where}: unknown method {method!r}; expected one of {_METHODS}")
@@ -368,17 +435,21 @@ def solve(
                 f"{_describe_uncertified(op, cert, where)}; refusing rather than returning a "
                 f"plausible wrong answer."
             )
+        backend = "pcg"
         result = pcg(
             op, b, rtol=rtol, atol=atol, max_iter=max_iter, preconditioner=preconditioner, x0=x0
         )
     elif method == "gmres":
+        backend = "gmres"
         result = gmres(op, b, rtol=rtol, atol=atol, max_iter=max_iter, restart=restart, x0=x0)
     elif method == "direct":
         A = op.assemble()
         if A is None:
             raise ValueError(f"{where}: method='direct' requires op.assemble() to return a matrix")
+        backend = "direct"
         result = _direct(A, b)
     elif method == "sparse_direct":
+        backend = "sparse_direct"
         result = _sparse_direct(op, b, where)
     else:  # method == "auto"
         cert = op.spd_certificate()
@@ -397,8 +468,10 @@ def solve(
             # SciPy-less installation, and every larger ensemble on PCG.
             triplet = _auto_sparse_triplet(op, b)
             if triplet is not None:
+                backend = "sparse_direct"
                 result = _sparse_direct(op, b, where, triplet)
             else:
+                backend = "pcg"
                 result = pcg(
                     op,
                     b,
@@ -413,7 +486,14 @@ def solve(
             # is eligible for cg, so there is nothing to split off): both route to gmres,
             # which makes no symmetry or SPD assumption to violate. rmatvec, if this
             # operator declares one, is reserved for the adjoint and is never called here.
+            backend = "gmres"
             result = gmres(op, b, rtol=rtol, atol=atol, max_iter=max_iter, restart=restart, x0=x0)
+
+    # After the branches, so every path that reaches here has actually chosen and run a
+    # backend; the raises above (unknown method, eligibility refusal, no assembled matrix)
+    # leave `backend_out` untouched.
+    if backend_out is not None:
+        backend_out["backend"] = backend
 
     if on_failure == "raise":
         return result.raise_on_failure(where)

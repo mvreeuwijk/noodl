@@ -784,6 +784,10 @@ def test_auto_falls_back_to_pcg_when_scipy_is_not_importable(monkeypatch):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", no_scipy)
+    # This test is about the ROUTING, not about the once-per-process warning that rides on
+    # the same branch (which has its own tests below). Pre-setting the flag makes it
+    # deterministic rather than dependent on which test in the session ran first.
+    monkeypatch.setattr(select_module, "_WARNED_SPARSE_DIRECT_NEEDS_SCIPY", True)
     op = _chain_op(torch.tensor([[1.0, 1.0]]))
     result = solve(op, torch.ones(1, 2))
     assert pcg_calls["count"] == 1
@@ -977,3 +981,170 @@ def test_the_batch_threshold_counts_every_leading_dimension(monkeypatch):
     solve(op, torch.ones(6, 6, 2))
     assert pcg_calls["count"] == 1
     assert splu_calls["count"] == 0
+
+
+# -- I5: reporting the RESOLVED backend, and the one fall-back that is an environment fault --
+
+
+def test_backend_out_reports_sparse_direct_for_a_small_certified_batch():
+    op = _chain_op(torch.ones(2, 2))
+    out: dict = {}
+    solve(op, torch.ones(2, 2), backend_out=out)
+    assert out == {"backend": "sparse_direct"}
+
+
+def test_backend_out_reports_pcg_above_the_batch_threshold():
+    from tellegen.solvers.select import _SPARSE_DIRECT_MAX_BATCH
+
+    n = _SPARSE_DIRECT_MAX_BATCH + 1
+    op = _chain_op(torch.ones(n, 2))
+    out: dict = {}
+    solve(op, torch.ones(n, 2), backend_out=out)
+    assert out == {"backend": "pcg"}
+
+
+def test_backend_out_reports_pcg_for_an_explicit_cg_request():
+    """`method` is the REQUEST and `backend` is what ran: `"cg"` resolves to the `pcg`
+    backend, and the two names are deliberately not forced to coincide.
+    """
+    op = _FakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    out: dict = {}
+    solve(op, _B_SPD, method="cg", backend_out=out)
+    assert out == {"backend": "pcg"}
+
+
+def test_backend_out_reports_gmres_direct_and_sparse_direct_for_explicit_requests():
+    out: dict = {}
+    solve(_FakeOperator(_A_NS, symmetric=False, certificate=None), _B_NS, backend_out=out)
+    assert out == {"backend": "gmres"}
+
+    out = {}
+    op = _FakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    solve(op, _B_SPD, method="direct", backend_out=out)
+    assert out == {"backend": "direct"}
+
+    out = {}
+    sparse_op = _SparseFakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    solve(sparse_op, _B_SPD, method="sparse_direct", backend_out=out)
+    assert out == {"backend": "sparse_direct"}
+
+
+def test_backend_out_is_optional_and_defaults_to_recording_nothing():
+    op = _chain_op(torch.ones(2, 2))
+    result = solve(op, torch.ones(2, 2))
+    assert bool(torch.all(result.converged))
+
+
+def test_backend_out_is_not_written_when_an_eligibility_refusal_happens_first():
+    """A refusal is a modelling error with no backend behind it, so `backend_out` must stay
+    empty rather than naming a backend that never ran.
+    """
+    op = _chain_op(torch.tensor([[1.0, 1.0], [0.0, 1.0]]))
+    out: dict = {}
+    with pytest_raises_containing("refuses to split the batch"):
+        solve(op, torch.ones(2, 2), backend_out=out)
+    assert out == {}
+
+
+def _no_scipy(monkeypatch):
+    """Make every `import scipy...` fail, the idiom the fall-back tests above already use."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_scipy(name, *args, **kwargs):
+        if name.split(".")[0] == "scipy":
+            raise ImportError(f"No module named {name!r}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_scipy)
+
+
+def _rearm_scipy_warning(monkeypatch):
+    """Reset the once-per-process flag. The warning is deliberately once per PROCESS, which
+    in a test session means whichever test ran first would otherwise consume it.
+    """
+    import tellegen.solvers.select as select_module
+
+    monkeypatch.setattr(select_module, "_WARNED_SPARSE_DIRECT_NEEDS_SCIPY", False)
+
+
+def test_auto_warns_once_when_scipy_is_the_only_thing_missing(monkeypatch):
+    """The one fall-back that is an ENVIRONMENT fault rather than a modelling fact: this
+    operator certifies SPD, offers a sparse form and is within the batch threshold, so the
+    only reason it is not being factorised is that the `tellegen[sparse]` extra is absent.
+    PCG is still a correct answer, so this is a warning and not an error -- and it fires
+    once per process, because a per-solve warning would be unusable noise.
+    """
+    _rearm_scipy_warning(monkeypatch)
+    _no_scipy(monkeypatch)
+    op = _chain_op(torch.tensor([[1.0, 1.0]]))
+    with pytest.warns(RuntimeWarning, match="scipy"):
+        result = solve(op, torch.ones(1, 2))
+    assert bool(torch.all(result.converged)), "the fall-back still solves the system"
+
+
+def test_the_scipy_warning_is_not_repeated_on_a_second_solve(monkeypatch):
+    import warnings as warnings_module
+
+    _rearm_scipy_warning(monkeypatch)
+    _no_scipy(monkeypatch)
+    op = _chain_op(torch.tensor([[1.0, 1.0]]))
+    with pytest.warns(RuntimeWarning):
+        solve(op, torch.ones(1, 2))
+    with warnings_module.catch_warnings():
+        warnings_module.simplefilter("error")
+        solve(op, torch.ones(1, 2))  # must not raise: no second warning
+
+
+def test_no_warning_when_the_operator_has_no_sparse_form_to_factorise(monkeypatch):
+    """Never warn on the fall-backs that are modelling facts. This operator would not be
+    factorised even with SciPy installed, so telling the user to install it would be wrong.
+    """
+    import warnings as warnings_module
+
+    _rearm_scipy_warning(monkeypatch)
+    _no_scipy(monkeypatch)
+    op = _FakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    with warnings_module.catch_warnings():
+        warnings_module.simplefilter("error")
+        solve(op, _B_SPD)
+
+
+def test_no_warning_when_the_batch_is_above_the_threshold(monkeypatch):
+    """Above the threshold PCG is the CHOSEN backend, not a fall-back, so SciPy's absence
+    costs nothing and there is nothing to report.
+    """
+    import warnings as warnings_module
+
+    from tellegen.solvers.select import _SPARSE_DIRECT_MAX_BATCH
+
+    _rearm_scipy_warning(monkeypatch)
+    _no_scipy(monkeypatch)
+    n = _SPARSE_DIRECT_MAX_BATCH + 1
+    op = _chain_op(torch.ones(n, 2))
+    with warnings_module.catch_warnings():
+        warnings_module.simplefilter("error")
+        solve(op, torch.ones(n, 2))
+
+
+def test_no_warning_when_scipy_is_present(monkeypatch):
+    import warnings as warnings_module
+
+    _rearm_scipy_warning(monkeypatch)
+    op = _chain_op(torch.tensor([[1.0, 1.0]]))
+    with warnings_module.catch_warnings():
+        warnings_module.simplefilter("error")
+        solve(op, torch.ones(1, 2))
+
+
+def test_no_warning_when_the_solve_is_not_grad_safe(monkeypatch):
+    """A grad-requiring solve under grad mode falls back for a reason SciPy cannot fix."""
+    import warnings as warnings_module
+
+    _rearm_scipy_warning(monkeypatch)
+    _no_scipy(monkeypatch)
+    op = _chain_op(torch.tensor([[1.0, 1.0]], requires_grad=True))
+    with warnings_module.catch_warnings():
+        warnings_module.simplefilter("error")
+        solve(op, torch.ones(1, 2))

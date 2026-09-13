@@ -299,6 +299,7 @@ def test_solve_fills_a_supplied_diagnostics_dict():
         "newton_iterations",
         "linear_iterations",
         "method",
+        "backend",
         "converged",
         "residual_norm",
     }
@@ -320,6 +321,7 @@ def test_diagnostics_are_filled_on_the_differentiable_path_too():
         "newton_iterations",
         "linear_iterations",
         "method",
+        "backend",
         "converged",
         "residual_norm",
     }
@@ -923,3 +925,54 @@ def test_non_differentiable_solve_returns_detached_tensors_whatever_the_caller_d
         phi, q = layer.solve(phi_b, drivers, sources, differentiable=False)
     assert not phi.requires_grad
     assert not q.requires_grad
+
+
+# -- I5: diagnostics report the RESOLVED backend, not only the requested method -------------
+
+
+def test_diagnostics_report_the_resolved_backend_at_a_small_ensemble():
+    """`diagnostics["method"]` is the REQUEST ("auto"); `diagnostics["backend"]` is what
+    actually ran. With the default conditional on four runtime predicates -- chief among them
+    "SciPy is importable", an optional extra -- a user on a plain install silently got the
+    4.6x-slower path with nothing in the diagnostics saying so (final review I5).
+    """
+    layer, drivers, phi_b = _series_layer()
+    diagnostics: dict = {}
+
+    layer.solve(phi_b, drivers, None, differentiable=False, diagnostics=diagnostics)
+
+    assert diagnostics["method"] == "auto"
+    assert diagnostics["backend"] == "sparse_direct"
+
+
+def test_diagnostics_report_pcg_above_the_sparse_direct_batch_threshold():
+    from tellegen.solvers.select import _SPARSE_DIRECT_MAX_BATCH
+
+    n = _SPARSE_DIRECT_MAX_BATCH + 1
+    layer, drivers, phi_b = _series_layer()
+    phi_b = phi_b.expand(n, 2)
+    diagnostics: dict = {}
+
+    layer.solve(phi_b, drivers, None, differentiable=False, diagnostics=diagnostics)
+
+    assert diagnostics["method"] == "auto", "the REQUEST is unchanged by the threshold"
+    assert diagnostics["backend"] == "pcg"
+
+
+def test_diagnostics_report_the_direct_backend_under_an_explicit_linear_solver():
+    layer, drivers, phi_b = _series_layer("direct")
+    diagnostics: dict = {}
+
+    layer.solve(phi_b, drivers, None, differentiable=False, diagnostics=diagnostics)
+
+    assert diagnostics["method"] == "direct"
+    assert diagnostics["backend"] == "direct"
+
+
+def test_the_resolved_backend_is_reported_on_the_differentiable_path_too():
+    layer, drivers, phi_b = _series_layer()
+    diagnostics: dict = {}
+
+    layer.solve(phi_b, drivers, None, differentiable=True, diagnostics=diagnostics)
+
+    assert diagnostics["backend"] == "sparse_direct"

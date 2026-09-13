@@ -450,19 +450,24 @@ class TransportLayer:
                 f"TransportLayer '{self.name}': unknown on_failure {on_failure!r}; "
                 f"expected 'raise' or 'return'"
             )
+        if on_failure == "return" and self.scheme == "exact":
+            # Both `on_failure` checks are ARGUMENT VALIDITY and both belong here, before any
+            # work. This one used to sit inside the `scheme == "exact"` branch below, after
+            # `_to_stacked` had already validated and reshaped `x`, so a caller who passed
+            # both a bad shape and this unusable combination was told about the shape (final
+            # review M9). `on_failure='return'` is wrong for this scheme whatever the shapes.
+            raise ValueError(
+                f"TransportLayer '{self.name}': on_failure='return' has no effect for "
+                f"scheme='exact' (there is no linear solve to return the status of; "
+                f"a sub-stepping failure raises RuntimeError directly). Use the default "
+                f"on_failure='raise', or a scheme with a linear solve ('implicit', "
+                f"'trapezoidal')."
+            )
         out_dtype = x.dtype
         dtype = torch.float64
         x_s, reduced = self._to_stacked(x, self.n_i, "x")
         x_s = x_s.to(dtype)
         if self.scheme == "exact":
-            if on_failure == "return":
-                raise ValueError(
-                    f"TransportLayer '{self.name}': on_failure='return' has no effect for "
-                    f"scheme='exact' (there is no linear solve to return the status of; "
-                    f"a sub-stepping failure raises RuntimeError directly). Use the default "
-                    f"on_failure='raise', or a scheme with a linear solve ('implicit', "
-                    f"'trapezoidal')."
-                )
             op = self._advection_operator(q.to(dtype))
             xb_s, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
             src_s, _ = self._to_stacked(sources.to(dtype), self.n_i, "sources")

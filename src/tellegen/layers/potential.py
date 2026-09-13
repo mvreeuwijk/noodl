@@ -513,13 +513,24 @@ class PotentialFlowLayer:
         absent gradient.
 
         `diagnostics`, when a dict is passed, is filled with this solve's own
-        `{"newton_iterations", "linear_iterations", "method", "converged", "residual_norm"}`
-        -- the Newton step count, the per-instance maximum inner-solver iteration count
-        (`None` if no linear solve happened), the inner method actually used, the
-        per-instance convergence flag and the per-instance final residual norm. Passing
-        `None` (the default) changes nothing; the dict is an out-parameter rather than an
-        extra return value so that `solve`'s `(phi, q)` contract, which every existing
-        caller unpacks, is untouched.
+        `{"newton_iterations", "linear_iterations", "method", "backend", "converged",
+        "residual_norm"}` -- the Newton step count, the per-instance maximum inner-solver
+        iteration count (`None` if no linear solve happened), the inner method REQUESTED,
+        the inner backend that actually RAN, the per-instance convergence flag and the
+        per-instance final residual norm. Passing `None` (the default) changes nothing; the
+        dict is an out-parameter rather than an extra return value so that `solve`'s
+        `(phi, q)` contract, which every existing caller unpacks, is untouched.
+
+        `"method"` and `"backend"` are deliberately separate. `"method"` is what this call
+        asked for -- usually `"auto"`, the layer's default. `"backend"` is one of
+        `"sparse_direct"`, `"pcg"`, `"gmres"`, `"direct"`: what `solvers.select.solve`
+        resolved that request to, which under `"auto"` depends on runtime predicates the
+        caller has no other way to observe (the ensemble size against
+        `select._SPARSE_DIRECT_MAX_BATCH`, and whether SciPy is importable at all -- it is
+        an optional extra, `pip install tellegen[sparse]`). Without it, an installation
+        missing that extra takes the ~4.6x-slower PCG path with nothing saying so; the
+        indirect signal is `"linear_iterations"` (1 for a factorisation, ~170 for PCG).
+        It is `None` only when no linear solve happened at all.
 
         `on_failure` (forwarded to `newton` among `newton_kwargs`) is `"raise"` by default:
         a batch that fails to converge within `max_iter` raises, naming the failing
@@ -663,6 +674,11 @@ class PotentialFlowLayer:
                     diagnostics["newton_iterations"] = result.iterations
                     diagnostics["linear_iterations"] = result.linear_iterations
                     diagnostics["method"] = newton_kwargs["method"]
+                    # `method` is what was REQUESTED, `backend` what RAN. Under "auto" the
+                    # two differ: the batch threshold and SciPy's presence decide which
+                    # side of `select`'s eligibility table this solve landed on, and
+                    # nothing else reports it (final review I5).
+                    diagnostics["backend"] = result.backend
                     # The per-instance STATUS, not only the cost. Without these two,
                     # `on_failure="return"` returned a non-converged phi with nothing
                     # anywhere reporting it (final review C2).
@@ -843,6 +859,16 @@ class PotentialFlowLayer:
         `matvec`, but nothing here assumes it. `method=self.linear_solver` carries the
         layer's configured inner solver onto the backward pass too (amendment A3.3), so
         `linear_solver="direct"` is the retained milestone-1 numerics on BOTH passes.
+
+        CALLED DIRECTLY UNDER GRAD MODE with grad-requiring `drivers` (or a grad-requiring
+        `phi_interior`/`phi_boundary`), `linear_solver="auto"` falls back to PCG here rather
+        than factorising: `solvers.select.solve` will not hand a grad-requiring solve to the
+        non-differentiable sparse-direct backend, and an explicit
+        `linear_solver="sparse_direct"` raises outright in that situation. Every in-repo
+        caller reaches this method under `no_grad` -- `solvers.implicit._Implicit.backward`
+        is the only one on the hot path -- so this is a direct-caller's concern, stated here
+        for the same reason `linear_init`'s equivalent is ("stays differentiable for callers
+        who want it directly"). Wrap the call in `torch.no_grad()` to get the factorisation.
         """
         drivers = drivers or {}
         phi = self.assemble(phi_interior, phi_boundary)
