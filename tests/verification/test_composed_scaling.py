@@ -330,3 +330,9 @@ def test_doubling_edges_at_fixed_nodes_raises_matvec_time_by_at_most_2_5x():
         f"matvec time grew {gate['ratio']:.2f}x when edges doubled "
         f"({gate['small_edges']} -> {gate['large_edges']} edges; budget 2.5x)"
     )
+
+
+def test_report_script_is_importable_and_has_a_main():
+    import benchmarks.report_composed_scaling as report_mod
+
+    assert hasattr(report_mod, "main")

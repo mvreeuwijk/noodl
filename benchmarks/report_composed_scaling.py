@@ -12,10 +12,20 @@ peak for any of them.
 Iteration counts travel beside the times because design section 6.1 requires it: on a machine
 with enough threads, a conditioning regression can leave wall-clock unchanged while the inner
 solver iteration count doubles.
+
+Run it explicitly (it takes minutes -- nothing runs it automatically):
+
+    .venv/Scripts/python -m benchmarks.report_composed_scaling
+
+(as a module, not as a path: it imports its siblings through the `benchmarks` package)
 """
 
 from __future__ import annotations
 
+import json
+import platform
+from datetime import UTC, datetime
+from pathlib import Path
 from statistics import median
 
 import torch
@@ -150,34 +160,47 @@ def measure_memory_shape_gate() -> dict:
     }
 
 
-def _doubled_edge_operator(layer, slopes: torch.Tensor, seed: int = 0):
-    """A `GraphLaplacianOperator` on the SAME nodes as `layer`, with twice as many edges.
+def _scaled_edge_operator(layer, slopes: torch.Tensor, multiplier: int, seed: int = 0):
+    """A `GraphLaplacianOperator` on the SAME nodes as `layer`, with `multiplier`x the edges.
 
     `build_composed` derives each submodel's extra-edge count from its node count, so it
-    cannot be asked for twice the edges at the same node count. The extra edges are drawn
-    here instead, by the same rule the builder's own `_random_tree_plus_extra` uses for its
-    extra edges -- a uniformly random ordered pair of distinct nodes -- and given slopes
-    resampled from the layer's own, so the doubled operator differs from the reference in
-    edge count and nothing else. `matvec` is a gather/scatter over edges against a fixed
-    node-space buffer, which is exactly what this gate is about.
+    cannot be asked for more edges at the same node count. The extra edges are drawn here
+    instead, by the same rule the builder's own `_random_tree_plus_extra` uses for its extra
+    edges -- a uniformly random ordered pair of distinct nodes -- and given slopes resampled
+    from the layer's own, so the scaled operator differs from the reference in edge count and
+    nothing else. `matvec` is a gather/scatter over edges against a fixed node-space buffer,
+    which is exactly what this gate is about.
     """
     n = layer._boundary_mask.shape[-1]
     b = int(layer._src.numel())
     rng = torch.Generator().manual_seed(seed)
-    src_extra = torch.randint(0, n, (b,), generator=rng)
-    tgt_extra = torch.randint(0, n, (b,), generator=rng)
-    # No self-loops, matching the builder's `if u != v` rejection, without changing the count.
-    self_loops = src_extra == tgt_extra
-    tgt_extra[self_loops] = (tgt_extra[self_loops] + 1) % n
-    perm = torch.randperm(b, generator=rng)
+    src, tgt, slope_blocks = [layer._src], [layer._tgt], [slopes]
+    for _ in range(multiplier - 1):
+        src_extra = torch.randint(0, n, (b,), generator=rng)
+        tgt_extra = torch.randint(0, n, (b,), generator=rng)
+        # No self-loops, matching the builder's `if u != v` rejection, without changing count.
+        self_loops = src_extra == tgt_extra
+        tgt_extra[self_loops] = (tgt_extra[self_loops] + 1) % n
+        src.append(src_extra)
+        tgt.append(tgt_extra)
+        slope_blocks.append(slopes[..., torch.randperm(b, generator=rng)])
     return GraphLaplacianOperator(
-        torch.cat([layer._src, src_extra]),
-        torch.cat([layer._tgt, tgt_extra]),
-        torch.cat([slopes, slopes[..., perm]], dim=-1),
+        torch.cat(src),
+        torch.cat(tgt),
+        torch.cat(slope_blocks, dim=-1),
         len(layer.interior),
         layer._interior_of_node,
         boundary_mask=layer._boundary_mask,
     )
+
+
+# Edge multipliers at which the same doubling is re-measured, purely as a diagnostic. At the
+# reference edge count a matvec is dominated by fixed per-call dispatch overhead rather than
+# by the edges themselves (measured: flat at ~0.10 ms/matvec from 2193 up to 17544 edges), so
+# the headline ratio would sit near 1.0 even for an implementation that was not linear in
+# edges at all. These two points are in the regime where edge work dominates, and their ratio
+# is what shows the operator is genuinely linear in edge count.
+EDGE_SENSITIVITY_MULTIPLIERS = (16, 32)
 
 
 def measure_matvec_shape_gate(repetitions: int = 200, medians_of: int = 5) -> dict:
@@ -186,20 +209,21 @@ def measure_matvec_shape_gate(repetitions: int = 200, medians_of: int = 5) -> di
     The median of `medians_of` batches of `repetitions` matvecs each, per operator, because
     a single batch on a loaded machine is noise; the median is taken over batches rather
     than over individual calls so per-call timer resolution never enters the figure.
+
+    `edge_sensitivity_ratio` repeats the same doubling at 16x and 32x the reference edge
+    count, where the measurement is actually edge-bound rather than dispatch-bound -- see
+    EDGE_SENSITIVITY_MULTIPLIERS. It is reported, not asserted; the gate is the ratio at the
+    reference size, as the design specifies.
     """
     model = build_composed()
     layer = model.layer
     phi, _q = layer.solve(model.phi_boundary, model.drivers, model.sources, differentiable=False)
     slopes = layer.dflows(phi, model.drivers)
-    operator = GraphLaplacianOperator(
-        layer._src,
-        layer._tgt,
-        slopes,
-        len(layer.interior),
-        layer._interior_of_node,
-        boundary_mask=layer._boundary_mask,
+    operator = _scaled_edge_operator(layer, slopes, 1)
+    doubled = _scaled_edge_operator(layer, slopes, 2)
+    big, bigger = (
+        _scaled_edge_operator(layer, slopes, m) for m in EDGE_SENSITIVITY_MULTIPLIERS
     )
-    doubled = _doubled_edge_operator(layer, slopes)
     x = torch.zeros(
         slopes.shape[:-1] + (len(layer.interior),), dtype=slopes.dtype, device=slopes.device
     )
@@ -208,10 +232,12 @@ def measure_matvec_shape_gate(repetitions: int = 200, medians_of: int = 5) -> di
         elapsed, _ = time_call(lambda: [op.matvec(x) for _ in range(repetitions)])
         return elapsed
 
-    batch(operator)  # warm up both before either is timed
-    batch(doubled)
+    for op in (operator, doubled, big, bigger):
+        batch(op)  # warm every operator up before any of them is timed
     t_small = median(batch(operator) for _ in range(medians_of))
     t_large = median(batch(doubled) for _ in range(medians_of))
+    t_big = median(batch(big) for _ in range(medians_of))
+    t_bigger = median(batch(bigger) for _ in range(medians_of))
     b_small = int(layer._src.numel())
     return {
         "name": "matvec time vs edges",
@@ -229,6 +255,9 @@ def measure_matvec_shape_gate(repetitions: int = 200, medians_of: int = 5) -> di
         "budget": 2.5,
         "within_budget": t_large / t_small <= 2.5,
         "units": f"seconds per {repetitions} matvecs",
+        "edge_sensitivity_multipliers": list(EDGE_SENSITIVITY_MULTIPLIERS),
+        "edge_sensitivity_seconds": [t_big, t_bigger],
+        "edge_sensitivity_ratio": t_bigger / t_big,
     }
 
 
@@ -241,4 +270,63 @@ def format_shape_gate(gate: dict) -> str:
         f"{gate['large_label']} -> {gate['large'] / scale:.3f}{unit}, "
         f"ratio {gate['ratio']:.2f} / budget {gate['budget']} "
         f"{'PASS' if gate['within_budget'] else 'FAIL'}"
+        + (
+            f" [edge sensitivity: same doubling at "
+            f"{gate['edge_sensitivity_multipliers'][0]}x -> "
+            f"{gate['edge_sensitivity_multipliers'][1]}x the reference edge count gives "
+            f"ratio {gate['edge_sensitivity_ratio']:.2f}]"
+            if "edge_sensitivity_ratio" in gate
+            else ""
+        )
     )
+
+
+def machine_info() -> dict:
+    """What the numbers in this report depend on besides the code itself."""
+    return {
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "torch_num_threads": torch.get_num_threads(),
+        "generated_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+
+
+def main() -> None:
+    """Measure everything and write `benchmarks/composed_scaling_report.json`.
+
+    Run explicitly after a change that could affect conditioning or scaling; nothing runs
+    this automatically, because the ensemble-1000 and 24-step rows take minutes.
+    """
+    budget_rows = []
+    for row_spec in BUDGET_TABLE:
+        row = measure_budget_row(*row_spec)
+        print(format_budget_row(row))
+        budget_rows.append(row)
+
+    shape_gates = [measure_memory_shape_gate(), measure_matvec_shape_gate()]
+    for gate in shape_gates:
+        print(format_shape_gate(gate))
+
+    report = {
+        "machine": machine_info(),
+        "reference_configuration": REFERENCE_KWARGS,
+        "budget_table": budget_rows,
+        "shape_gates": shape_gates,
+        "all_budgets_met": all(
+            row["forward_within_budget"]
+            and row["backward_within_budget"]
+            and row["peak_memory_within_budget"]
+            for row in budget_rows
+        )
+        and all(gate["within_budget"] for gate in shape_gates),
+    }
+    out = Path(__file__).parent / "composed_scaling_report.json"
+    with out.open("w", encoding="utf-8") as fh:
+        json.dump(report, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    print(f"wrote {out}")
+
+
+if __name__ == "__main__":
+    main()
