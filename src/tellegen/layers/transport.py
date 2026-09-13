@@ -270,22 +270,34 @@ class TransportLayer:
                     f"TransportLayer '{name}': conductance is required when "
                     f"conduction_kind is given"
                 )
-            A_c = net.incidence(conduction_kind)
-            b_c = A_c.shape[-1]
+            # The conduction edges' ENDPOINTS, never the (n, b_c) incidence matrix and never
+            # the (n, n) Laplacian it used to build here: since Task 15 this tuple is the
+            # layer's whole representation of its conduction topology. `_advection_operator`
+            # (Task 9) already consumed exactly this; `operator()`, the dense oracle, now
+            # forms its (n, n) `L` from it on demand (`_conduction_matrix`). The (n, n)
+            # matrix was 8.5 MB at the composed model's reference size, grew 4x per node
+            # doubling, and -- with no conduction configured, as in that model -- was a block
+            # of ZEROS that `operator()` subtracted for nothing.
+            csrc, ctgt = net.endpoints(conduction_kind)
+            b_c = len(csrc)
             g = torch.as_tensor(conductance, dtype=net.dtype)
-            # Validate explicitly rather than let a mismatched length reach einsum: with a
-            # single conduction_kind edge (b_c == 1), einsum's size-1 broadcasting for the
-            # repeated "e" subscript would otherwise silently accept a wrongly-shaped g
-            # (e.g. length 2) and sum it into L instead of raising, giving a silently wrong
-            # conductance matrix rather than a ValueError naming the offender.
+            # Validate explicitly rather than let a mismatched length reach the assembly:
+            # with a single conduction_kind edge (b_c == 1), the einsum that used to build L
+            # broadcast the repeated "e" subscript, so a wrongly-shaped g (e.g. length 2)
+            # was silently summed in instead of raising, giving a silently wrong conductance
+            # matrix rather than a ValueError naming the offender.
             if g.dim() == 0 or g.shape[-1] != b_c:
                 raise ValueError(
                     f"TransportLayer '{name}': conductance must have shape ({b_c},), "
                     f"got {tuple(g.shape)}"
                 )
-            self.L = torch.einsum("ne,...e,me->...nm", A_c, g, A_c)
+            self._conduction_edges: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = (
+                csrc,
+                ctgt,
+                g,
+            )
         else:
-            self.L = torch.zeros(net.n, net.n, dtype=net.dtype)
+            self._conduction_edges = None
 
         if not torch.all(self.carrier > 0):
             raise ValueError(
@@ -296,11 +308,35 @@ class TransportLayer:
             )
         self._interior_of_node = torch.full((net.n,), -1, dtype=torch.long)
         self._interior_of_node[self.interior_idx] = torch.arange(self.n_i, dtype=torch.long)
-        if conduction_kind is not None:
-            csrc, ctgt = net.endpoints(conduction_kind)
-            self._conduction_edges = (csrc, ctgt, torch.as_tensor(conductance, dtype=net.dtype))
-        else:
-            self._conduction_edges = None
+
+    def _conduction_matrix(self, dtype: torch.dtype) -> torch.Tensor | None:
+        """The (..., n, n) conduction Laplacian `A_c diag(g) A_c^T`, or None if no conduction.
+
+        Built HERE, on demand, from the endpoint tuple rather than held as `self.L`: only
+        `operator()` -- the dense oracle, which is (..., K, n, n) anyway -- wants a matrix,
+        and every other path goes through `AdvectionOperator`'s own sparse conduction term.
+        When there is no conduction this returns None rather than an (n, n) block of zeros,
+        so the oracle skips a subtraction instead of allocating n^2 doubles to subtract
+        nothing.
+
+        `index_add` on a flattened (n*n,) view gives the same four entries per edge the
+        einsum form did (+g at (s, s) and (t, t), -g at (s, t) and (t, s)), out of place and
+        broadcasting over any leading batch dims `g` carries.
+        """
+        if self._conduction_edges is None:
+            return None
+        csrc, ctgt, g = self._conduction_edges
+        g = g.to(dtype)
+        n = self.net.n
+        flat = torch.zeros(g.shape[:-1] + (n * n,), dtype=dtype, device=g.device)
+        for rows, cols, sign in (
+            (csrc, csrc, 1.0),
+            (ctgt, ctgt, 1.0),
+            (csrc, ctgt, -1.0),
+            (ctgt, csrc, -1.0),
+        ):
+            flat = flat.index_add(-1, rows * n + cols, sign * g)
+        return flat.reshape(g.shape[:-1] + (n, n))
 
     def _advection_operator(self, q: torch.Tensor) -> AdvectionOperator:
         dtype = q.dtype
@@ -337,8 +373,10 @@ class TransportLayer:
         Out = torch.einsum("...ei,...e,...ej->...ij", Up, w, Up)          # (..., n, n)
         weight = self.transmission.to(dtype) * w.unsqueeze(-2)           # (..., K, b_flow)
         In = torch.einsum("...ei,...ke,...ej->...kij", Dn, weight, Up)   # (..., K, n, n)
-        L = self.L.to(dtype)
-        G = In - Out.unsqueeze(-3) - L.unsqueeze(-3)                     # (..., K, n, n)
+        G = In - Out.unsqueeze(-3)                                       # (..., K, n, n)
+        L = self._conduction_matrix(dtype)
+        if L is not None:
+            G = G - L.unsqueeze(-3)
 
         idx_i, idx_b = self.interior_idx, self.boundary_idx
         Gii = G.index_select(-2, idx_i).index_select(-1, idx_i)   # (..., K, n_i, n_i)
