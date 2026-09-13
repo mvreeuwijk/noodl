@@ -308,3 +308,78 @@ def test_unknown_linear_solver_raises_value_error_naming_it():
             boundary=["ambient"],
             linear_solver="banana",
         )
+
+
+def test_sparse_adjoint_matches_dense_jacobian_transpose_solve(two_zone_layer):
+    net, elements, drives, boundary = two_zone_layer
+    el = PowerLaw(
+        elements[0].C.detach().clone().requires_grad_(True), elements[0].n, learnable=True
+    )
+    layer = PotentialFlowLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
+
+    phi, q = layer.solve(phi_b, {"wind": wind}, None, differentiable=False)
+    phi_i = phi[layer.interior]
+    grad_phi_i = torch.tensor([1.0, -2.0], dtype=torch.float64)
+
+    lam_sparse = layer.adjoint(phi_i, phi_b, {"wind": wind}, grad_phi_i)
+
+    J = layer.jacobian(phi_i, phi_b, {"wind": wind})
+    lam_dense = torch.linalg.solve(J.T, grad_phi_i)
+
+    torch.testing.assert_close(lam_sparse, lam_dense, rtol=1e-9, atol=1e-12)
+
+
+def test_adjoint_routes_through_the_layers_own_linear_solver(monkeypatch, two_zone_layer):
+    # Amendment A3.3 requires `linear_solver` to reach `adjoint` too, not only `linear_init`
+    # and `solve`: a layer configured with the retained milestone-1 dense numerics must keep
+    # them on the BACKWARD pass as well, or "direct" is only half a reference. The numbers
+    # must agree with the migrated default (first assertion) AND the two must genuinely be
+    # different code paths (the spies) -- either alone proves nothing.
+    net, elements, drives, boundary = two_zone_layer
+    phi_b = torch.zeros(1, dtype=torch.float64)
+    drivers = {"wind": torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)}
+    grad_phi_i = torch.tensor([1.0, -2.0], dtype=torch.float64)
+
+    pcg_calls, lu_calls = [], []
+    real_pcg, real_lu = select_module.pcg, torch.linalg.lu_factor_ex
+
+    def spy_pcg(*args, **kwargs):
+        pcg_calls.append(1)
+        return real_pcg(*args, **kwargs)
+
+    def spy_lu(*args, **kwargs):
+        lu_calls.append(1)
+        return real_lu(*args, **kwargs)
+
+    monkeypatch.setattr(select_module, "pcg", spy_pcg)
+    monkeypatch.setattr(torch.linalg, "lu_factor_ex", spy_lu)
+
+    lam = {}
+    for linear_solver in ("auto", "direct"):
+        layer = PotentialFlowLayer(
+            net,
+            "zones",
+            list(elements),
+            drives=drives,
+            boundary=boundary,
+            linear_solver=linear_solver,
+        )
+        phi, _ = layer.solve(
+            phi_b, drivers, None, differentiable=False, atol=1e-13, rtol=1e-13
+        )
+        phi_i = phi[layer.interior]
+        # Cleared AFTER the forward solve so the counters below describe the adjoint call
+        # alone; the forward path's own solver choice is already covered elsewhere.
+        pcg_calls.clear()
+        lu_calls.clear()
+        lam[linear_solver] = layer.adjoint(phi_i, phi_b, drivers, grad_phi_i)
+        if linear_solver == "auto":
+            assert pcg_calls, "adjoint under linear_solver 'auto' must go through pcg"
+            assert not lu_calls, "adjoint under linear_solver 'auto' must not LU-factorise"
+        else:
+            assert lu_calls, "adjoint under linear_solver 'direct' must LU-factorise"
+            assert not pcg_calls, "adjoint under linear_solver 'direct' must not call pcg"
+
+    torch.testing.assert_close(lam["auto"], lam["direct"], rtol=1e-9, atol=1e-12)

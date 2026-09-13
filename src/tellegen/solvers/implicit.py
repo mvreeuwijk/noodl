@@ -5,6 +5,14 @@ network, per Tellegen's theorem reciprocity between forward and adjoint), then o
 gradients with respect to every parameter tensor by one more autograd pass through the
 residual evaluated at the converged point, weighted by -lambda.
 
+That transposed solve is matvec-free: the Jacobian at x* is whatever LinearOperator the
+caller's `operator` callable returns there, and `TransposeOperator` exposes its `rmatvec`
+as the transposed action, so `solvers.select.solve` handles the adjoint system with no
+separate code path and nothing is ever materialised as an explicit matrix. `op.matvec` is
+never reused as the transpose: the two coincide only for a symmetric operator, and a
+caller's own wrong `rmatvec` must surface as a wrong gradient rather than be masked here.
+The adjoint solve always RAISES on failure, whatever `on_failure` the forward was given.
+
 Only first-order gradients are supported: `backward` never builds a graph connecting its
 returned gradients back to `grad_x` or to `params` (the internal `torch.autograd.grad` call
 uses the default `create_graph=False`), so a caller who tries to differentiate through

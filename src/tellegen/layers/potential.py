@@ -632,9 +632,35 @@ class PotentialFlowLayer:
         return phi, q
 
     def adjoint(self, phi_interior, phi_boundary, drivers, grad_phi_interior):
+        """Solve J(phi)^T lambda = grad_phi_interior at the given point.
+
+        The operator is the SAME GraphLaplacianOperator `solve`'s Newton iteration builds
+        (same endpoints, same `dflows` slopes), never the dense einsum `jacobian()` -- so
+        the adjoint costs one matvec-free transposed solve rather than an (n_I, n_I)
+        materialisation, and cannot drift from the forward path's own operator. The
+        transposed action comes from the operator's `rmatvec` via
+        `solvers.implicit.TransposeOperator`; for this symmetric Laplacian that equals its
+        `matvec`, but nothing here assumes it. `method=self.linear_solver` carries the
+        layer's configured inner solver onto the backward pass too (amendment A3.3), so
+        `linear_solver="direct"` is the retained milestone-1 numerics on BOTH passes.
+        """
         drivers = drivers or {}
-        J = self.jacobian(phi_interior, phi_boundary, drivers)
-        return _adjoint_solve(J, grad_phi_interior)
+        phi = self.assemble(phi_interior, phi_boundary)
+        dq = self.dflows(phi, drivers)
+        op = GraphLaplacianOperator(
+            self._src,
+            self._tgt,
+            dq,
+            len(self.interior),
+            self._interior_of_node,
+            boundary_mask=self._boundary_mask,
+        )
+        return _adjoint_solve(
+            op,
+            grad_phi_interior,
+            where=f"PotentialFlowLayer {self.name!r} adjoint",
+            method=self.linear_solver,
+        )
 
     def power_residual(self, phi, q, drivers, sources=None):
         """Tellegen's power identity, zero at a converged solution.
