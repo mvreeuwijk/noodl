@@ -748,7 +748,14 @@ def _conduction_chain_layer() -> TransportLayer:
 def test_transport_layer_allocates_no_dense_L_at_construction():
     # Task 15: `self.L` is (n, n) and grew 4x per node doubling in the composed-model
     # memory gate, and in the NO-conduction case it was a block of zeros that operator()
-    # subtracted for nothing. Construction must hold no (n, n) tensor on either branch.
+    # subtracted for nothing. Construction must hold no tensor whose shape scales with the
+    # full node count `n` -- strengthened (final review) from the original "exactly (n, n)"
+    # check to ANY 2-D+ tensor with `n` anywhere in its shape, since an (n, b) or (b, n)
+    # matrix reintroduces exactly the same O(n) scaling an (n, n) one does; it just isn't
+    # square. `transmission` is exempted BY NAME: its own shape is (K, b_flow), and in this
+    # fixture's network b_flow (three airpath edges) happens to equal n (three nodes) --  a
+    # coincidental collision with the quantity this test guards against, not evidence of a
+    # node-count-shaped tensor.
     net = three_node_chain()
     plain = TransportLayer(
         net,
@@ -759,12 +766,18 @@ def test_transport_layer_allocates_no_dense_L_at_construction():
     )
     for layer in (plain, _conduction_chain_layer()):
         n = layer.net.n
-        square = {
+        offending = {
             name: tuple(v.shape)
             for name, v in vars(layer).items()
-            if isinstance(v, torch.Tensor) and v.dim() >= 2 and v.shape[-2:] == (n, n)
+            if name != "transmission"
+            and isinstance(v, torch.Tensor)
+            and v.dim() >= 2
+            and n in v.shape
         }
-        assert square == {}, f"TransportLayer holds an (n, n) tensor after __init__: {square}"
+        assert offending == {}, (
+            f"TransportLayer holds a tensor with node count {n} in its shape after "
+            f"__init__: {offending}"
+        )
 
 
 def test_operator_oracle_still_includes_conduction():
@@ -816,6 +829,37 @@ def _ensemble_flow() -> torch.Tensor:
     return base * scale
 
 
+def test_matvec_rmatvec_boundary_forcing_broadcast_match_dense_oracle_per_instance():
+    """The C1 broadcast case (unbatched `x`/`x_b`, ensemble `flow` `(5, b)`), checked against
+    the dense `TransportLayer.operator(q)` oracle PER INSTANCE -- not merely self-consistent
+    with an explicitly-expanded call (that is `test_matvec_broadcasts_an_unbatched_state_
+    against_a_batched_flow` in `tests/operators/test_advection.py`), but numerically equal to
+    `M_i @ x`, `M_i.T @ x` and `N_i @ x_b` for each of the 5 flow realisations' own dense
+    `M_i`, `N_i`.
+    """
+    net = three_node_chain()
+    cap = torch.tensor([50.0, 80.0], dtype=torch.float64)
+    layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"])
+    q = _ensemble_flow()  # (5, 3)
+    op = layer._advection_operator(q)
+
+    x = torch.tensor([12.0, -4.0], dtype=torch.float64)
+    x_b = torch.tensor([420.0], dtype=torch.float64)
+
+    y = op.matvec(x)
+    yt = op.rmatvec(x)
+    yb = op.boundary_forcing(x_b)
+    assert y.shape == (5, 2)
+    assert yt.shape == (5, 2)
+    assert yb.shape == (5, 2)
+
+    for i in range(5):
+        M_i, N_i = layer.operator(q[i])
+        torch.testing.assert_close(y[i], M_i @ x, rtol=1e-9, atol=1e-12)
+        torch.testing.assert_close(yt[i], M_i.transpose(-1, -2) @ x, rtol=1e-9, atol=1e-12)
+        torch.testing.assert_close(yb[i], N_i @ x_b, rtol=1e-9, atol=1e-12)
+
+
 @pytest.mark.parametrize("scheme", ["exact", "implicit", "trapezoidal"])
 def test_step_broadcasts_unbatched_state_against_batched_flow(scheme):
     net = three_node_chain()
@@ -856,3 +900,105 @@ def test_steady_broadcasts_unbatched_state_against_batched_flow():
 
     expanded = layer.steady(q, sources.expand(5, 2), x_boundary.expand(5, 1))
     assert torch.allclose(out, expanded)
+
+
+# ------------------------------------ K=2, kinetics + removal + conduction, all at once
+def _k2_full_layer(scheme: str) -> TransportLayer:
+    """ambient (boundary) -- A -- B, three airpath edges plus one conduction edge A->B, TWO
+    species with both inter-species kinetics and a per-species removal rate -- every term
+    `operator()` assembles (advection, conduction, removal, kinetics) present at once, which
+    the final review flagged as never jointly exercised through a batched, mixed-sign flow.
+    """
+    net = Network(dtype=torch.float64)
+    for name in ("ambient", "A", "B"):
+        net.add_node(name)
+    net.add_edge("ambient", "A", kind="airpath")
+    net.add_edge("A", "B", kind="airpath")
+    net.add_edge("B", "ambient", kind="airpath")
+    net.add_edge("A", "B", kind="conduction")
+    kinetics = torch.tensor([[-0.01, 0.02], [0.01, -0.02]], dtype=torch.float64)
+    removal = torch.tensor([0.001, 0.002], dtype=torch.float64)
+    return TransportLayer(
+        net,
+        "gas",
+        capacity=torch.tensor([50.0, 80.0], dtype=torch.float64),
+        flow_kind="airpath",
+        boundary=["ambient"],
+        n_species=2,
+        kinetics=kinetics,
+        removal=removal,
+        conduction_kind="conduction",
+        conductance=torch.tensor([2.5], dtype=torch.float64),
+        scheme=scheme,
+    )
+
+
+def _batched_mixed_sign_flow() -> torch.Tensor:
+    """(4, 3): four instances, each with a mix of positive and negative branch flows."""
+    return torch.tensor(
+        [
+            [0.30, -0.20, 0.25],
+            [-0.15, 0.10, -0.05],
+            [0.05, -0.30, 0.20],
+            [-0.40, 0.35, -0.10],
+        ],
+        dtype=torch.float64,
+    )
+
+
+def _k2_state(batch: int, n_i: int) -> torch.Tensor:
+    torch.manual_seed(0)
+    return 50.0 + 10.0 * torch.rand(batch, n_i, 2, dtype=torch.float64)
+
+
+@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal"])
+def test_k2_kinetics_removal_conduction_batched_mixed_sign_step_matches_dense_oracle(scheme):
+    layer = _k2_full_layer(scheme)
+    q = _batched_mixed_sign_flow()
+    batch = q.shape[0]
+    x = _k2_state(batch, layer.n_i)
+    sources = 0.1 * _k2_state(batch, layer.n_i)
+    x_boundary = torch.tensor([[10.0, 5.0]], dtype=torch.float64).expand(batch, 1, 2)
+    dt = 30.0
+
+    x_sparse = layer.step(x, q, sources, x_boundary, dt)
+    assert x_sparse.shape == (batch, layer.n_i, 2)
+
+    cap = layer._capacity_stacked(torch.float64)
+    for i in range(batch):
+        M_i, N_i = layer.operator(q[i])
+        x0_i, _ = layer._to_stacked(x[i], layer.n_i, "x")
+        src_i, _ = layer._to_stacked(sources[i], layer.n_i, "sources")
+        xb_i, _ = layer._to_stacked(x_boundary[i], layer.n_b, "x_boundary")
+        b0_i = (N_i @ xb_i.unsqueeze(-1)).squeeze(-1) + src_i / cap
+        m = M_i.shape[-1]
+        eye = torch.eye(m, dtype=torch.float64)
+        if scheme == "implicit":
+            rhs = x0_i + dt * b0_i
+            x_dense_i = torch.linalg.solve(eye - dt * M_i, rhs.unsqueeze(-1)).squeeze(-1)
+        else:  # trapezoidal
+            rhs = ((eye + 0.5 * dt * M_i) @ x0_i.unsqueeze(-1)).squeeze(-1) + dt * b0_i
+            x_dense_i = torch.linalg.solve(eye - 0.5 * dt * M_i, rhs.unsqueeze(-1)).squeeze(-1)
+        x_dense_i_unstacked = layer._from_stacked(x_dense_i, layer.n_i, False)
+        torch.testing.assert_close(x_sparse[i], x_dense_i_unstacked, rtol=1e-8, atol=1e-10)
+
+
+def test_k2_kinetics_removal_conduction_batched_mixed_sign_steady_matches_dense_oracle():
+    layer = _k2_full_layer("implicit")  # scheme is irrelevant to steady()
+    q = _batched_mixed_sign_flow()
+    batch = q.shape[0]
+    sources = 0.1 * _k2_state(batch, layer.n_i)
+    x_boundary = torch.tensor([[10.0, 5.0]], dtype=torch.float64).expand(batch, 1, 2)
+
+    x_sparse = layer.steady(q, sources, x_boundary)
+    assert x_sparse.shape == (batch, layer.n_i, 2)
+
+    cap = layer._capacity_stacked(torch.float64)
+    for i in range(batch):
+        M_i, N_i = layer.operator(q[i])
+        src_i, _ = layer._to_stacked(sources[i], layer.n_i, "sources")
+        xb_i, _ = layer._to_stacked(x_boundary[i], layer.n_b, "x_boundary")
+        b0_i = (N_i @ xb_i.unsqueeze(-1)).squeeze(-1) + src_i / cap
+        x_dense_i = torch.linalg.solve(M_i, -b0_i.unsqueeze(-1)).squeeze(-1)
+        x_dense_i_unstacked = layer._from_stacked(x_dense_i, layer.n_i, False)
+        torch.testing.assert_close(x_sparse[i], x_dense_i_unstacked, rtol=1e-8, atol=1e-10)

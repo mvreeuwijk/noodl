@@ -152,6 +152,27 @@ def test_dense_operator_matvec_and_rmatvec_broadcast_over_arbitrary_leading_batc
     torch.testing.assert_close(op.rmatvec(x), torch.einsum("...ji,...j->...i", A, x))
 
 
+def test_dense_operator_matvec_broadcasts_unequal_but_broadcastable_leading_shapes():
+    """Stronger than the same-batch-shape broadcast above: `A`'s and `x`'s leading shapes are
+    UNEQUAL but mutually broadcastable ((5, 1) against (1, 7), giving (5, 7)), exactly the
+    "one operator ensemble against one state ensemble" shape the framework's own broadcast
+    rule (`torch.broadcast_tensors` semantics over arbitrary leading dims) is meant to cover,
+    not merely the case where both already agree.
+    """
+    torch.manual_seed(1)
+    A = torch.randn(5, 1, 3, 3, dtype=torch.float64)
+    op = DenseOperator(A, symmetric=False)
+    x = torch.randn(1, 7, 3, dtype=torch.float64)
+    y = op.matvec(x)
+    assert y.shape == (5, 7, 3)
+    torch.testing.assert_close(y, torch.einsum("...ij,...j->...i", A, x))
+    # And explicitly, index by index, against the two ensembles this collapses: instance a of
+    # the 5 operators applied to instance o of the 7 states.
+    for a in range(5):
+        for o in range(7):
+            torch.testing.assert_close(y[a, o], A[a, 0] @ x[0, o])
+
+
 def test_dense_operator_adjoint_identity_holds_for_matvec_and_rmatvec():
     # (Ax).y == x.(A^T y) is an algebraic identity of transposition and holds for EVERY A,
     # symmetric or not -- this checks rmatvec is genuinely the transpose action, not that A

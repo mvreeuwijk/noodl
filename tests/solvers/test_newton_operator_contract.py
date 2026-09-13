@@ -167,3 +167,55 @@ def test_the_float32_inner_solve_floor_costs_no_accuracy_against_float64():
 def test_inner_solve_rtol_leaves_float64_at_the_pinned_default():
     assert inner_solve_rtol(torch.float64) == 1e-10
     assert inner_solve_rtol(torch.float32) > 1e-10
+
+
+def test_linear_iterations_is_the_max_over_newton_steps_not_the_last(monkeypatch):
+    """`linear_iterations` must be the MAX inner-iteration count over every Newton step
+    actually taken, not merely the LAST one. Monkeypatches `newton.select_solve` with a stub
+    that returns iterations 1, 5, 2 on its first three successive calls (then keeps
+    returning 2), each call an EXACT linear solve `dx = r / g` for the genuinely linear
+    residual `g * x` below -- so Newton's own damping (`omega=0.4`, chosen with
+    `switch_ratio` set low enough that it never switches to a full step) is the only reason
+    more than one call happens at all, and the stub's own solve is otherwise trivial. If the
+    implementation used the LAST call's count instead of the max, this would observe 2
+    (the stub's steady-state return value) rather than 5.
+    """
+    import tellegen.solvers.newton as newton_mod
+    from tellegen.operators.base import SolveResult, SolverStatus
+
+    g = torch.tensor([1.0], dtype=torch.float64)
+
+    def residual(x):
+        return g * x
+
+    def operator(x):
+        return g.unsqueeze(-1)  # (1, 1) dense Jacobian; never read since select_solve is stubbed
+
+    call_iters = [1, 5, 2]
+    calls = {"n": 0}
+
+    def stub_select_solve(op, r, **kwargs):
+        it = call_iters[min(calls["n"], len(call_iters) - 1)]
+        calls["n"] += 1
+        batch_shape = r.shape[:-1]
+        dx = r / g  # the exact linear solve for this linear residual
+        return SolveResult(
+            x=dx,
+            converged=torch.zeros(batch_shape, dtype=torch.bool),
+            iterations=torch.full(batch_shape, it, dtype=torch.long),
+            residual=torch.zeros(batch_shape, dtype=r.dtype),
+            status=torch.full(
+                batch_shape, int(SolverStatus.MAX_ITER), dtype=torch.long
+            ),
+        )
+
+    monkeypatch.setattr(newton_mod, "select_solve", stub_select_solve)
+
+    x0 = torch.tensor([100.0], dtype=torch.float64)
+    result = newton_mod.newton(
+        residual, operator, x0, omega=0.4, switch_ratio=0.05, max_iter=200,
+    )
+
+    assert bool(torch.all(result.converged))
+    assert calls["n"] >= 3
+    assert int(result.linear_iterations) == 5
