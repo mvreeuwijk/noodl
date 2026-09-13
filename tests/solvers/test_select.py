@@ -443,3 +443,23 @@ class pytest_raises_containing:
         assert issubclass(exc_type, RuntimeError)
         assert self.text in str(exc), f"{self.text!r} not in {str(exc)!r}"
         return True
+
+
+def test_negative_slope_refusal_message_names_the_offending_edges():
+    """Finding I1: before the certificate tested section 3.1's condition 2, a
+    grounded-but-negative-slope instance certified True, so `select.solve`'s negative-slope
+    message branch was unreachable in practice and untested.
+    """
+    src = torch.tensor([0, 1, 0])
+    tgt = torch.tensor([1, 2, 1])  # a parallel 0--1 edge, so grounding survives
+    interior_of_node = torch.tensor([0, 1, -1])
+    boundary_mask = torch.tensor([False, False, True])
+    slopes = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, -5.0]])
+    op = GraphLaplacianOperator(
+        src, tgt, slopes, 2, interior_of_node, boundary_mask=boundary_mask
+    )
+    b = torch.ones(2, 2)
+    with pytest_raises_containing("negative slope on edges"):
+        solve(op, b)
+    with pytest_raises_containing("[2]"):
+        solve(op, b)

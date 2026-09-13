@@ -187,3 +187,39 @@ def test_spd_diagnosis_is_empty_when_every_instance_certifies():
     boundary_mask = torch.tensor([True, False, False])
     slopes = torch.ones(3, 2, dtype=torch.float64)
     assert spd_diagnosis(src, tgt, slopes, interior_of_node, boundary_mask) == []
+
+
+# ---------------------------------------------------- section 3.1 condition 2: g >= 0
+# Final-review finding I1: the certificate implemented condition 3 (grounding through
+# strictly positive slopes) only. A NEGATIVE slope merely makes an edge inactive for
+# propagation, so an instance grounded through other positive edges certified True while
+# its assembled operator was indefinite -- and `method="auto"` then dispatched PCG to it.
+# Element slopes are non-negative by construction, but a learnable conductance driven
+# negative by an optimiser (this milestone's stated calibration use case) reaches it.
+
+
+def _chain_with_parallel_edge():
+    """g (boundary, node 0) -- a -- b, plus a SECOND a--b edge (so a negative slope on it
+    still leaves every interior node grounded through the positive ones)."""
+    src = torch.tensor([0, 1, 1])
+    tgt = torch.tensor([1, 2, 2])
+    interior_of_node = torch.tensor([-1, 0, 1])
+    boundary_mask = torch.tensor([True, False, False])
+    return src, tgt, interior_of_node, boundary_mask
+
+
+def test_a_grounded_instance_with_a_negative_slope_does_not_certify():
+    src, tgt, interior_of_node, boundary_mask = _chain_with_parallel_edge()
+    slopes = torch.tensor([1.0, 1.0, -5.0], dtype=torch.float64)
+    assert not bool(spd_certificate(src, tgt, slopes, interior_of_node, boundary_mask))
+
+
+def test_negative_slope_instance_is_diagnosed_as_negative_slope_not_ungrounded():
+    src, tgt, interior_of_node, boundary_mask = _chain_with_parallel_edge()
+    slopes = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, -5.0]], dtype=torch.float64)
+    out = spd_diagnosis(src, tgt, slopes, interior_of_node, boundary_mask)
+    assert len(out) == 1
+    assert out[0]["instance"] == 1
+    assert out[0]["reason"] == "negative_slope"
+    assert out[0]["edges"] == [2]
+    assert out[0]["nodes"] == []  # every interior node IS grounded; the slope is the defect

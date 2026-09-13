@@ -192,3 +192,28 @@ def test_spd_diagnosis_on_ungrounded_chain_fixture():
     # So only node 0 is ungrounded.
     assert diagnosis[0]["nodes"] == [0]
     assert diagnosis[0]["edges"] == []
+
+
+def _chain_op_with_negative_parallel_edge() -> GraphLaplacianOperator:
+    """The chain fixture plus a parallel 0--1 edge whose slope is -5: every interior node
+    is still grounded through strictly positive slopes, so the pre-I1 certificate (which
+    tested grounding only) said True while the operator is in fact indefinite."""
+    src = torch.tensor([0, 1, 0])
+    tgt = torch.tensor([1, 2, 1])
+    interior_of_node = torch.tensor([0, 1, -1])
+    boundary_mask = torch.tensor([False, False, True])
+    slopes = torch.tensor([1.0, 1.0, -5.0])
+    return GraphLaplacianOperator(
+        src, tgt, slopes, 2, interior_of_node, boundary_mask=boundary_mask
+    )
+
+
+def test_a_grounded_but_negative_slope_operator_is_genuinely_indefinite():
+    """WHY the certificate must refuse a negative slope even when grounding holds: the
+    assembled operator has a negative eigenvalue, so it is not SPD and CG has no business
+    being dispatched to it.
+    """
+    op = _chain_op_with_negative_parallel_edge()
+    eig = torch.linalg.eigvalsh(op.assemble())
+    assert bool((eig < 0).any()), eig
+    assert not bool(op.spd_certificate())

@@ -296,9 +296,13 @@ class PotentialFlowLayer:
         return torch.cat(c_parts, dim=-1), torch.cat(k_parts, dim=-1)
 
     def _grounding_check(self, slopes: torch.Tensor, *, where: str) -> None:
-        """Raise unless every instance in `slopes` certifies SPD grounding.
+        """Raise unless every instance in `slopes` certifies SPD.
 
-        The certificate (Task 3's `solvers.grounding.spd_certificate`) is run on the slopes
+        The certificate (Task 3's `solvers.grounding.spd_certificate`) tests both of spec
+        section 3.1's testable conditions -- every branch slope non-negative, and every
+        interior node grounded through strictly positive slopes -- so the batched message
+        below ("do not certify a grounded, positive-slope system") states exactly what was
+        checked. It is run on the slopes
         GIVEN -- the caller decides whether those are `linear_init`'s tangent-at-zero slopes
         or the actual `dflows` at a solve point -- and it is per instance. That is the whole
         point: the pre-Task-11 check ORed "is this edge's slope nonzero" across the WHOLE

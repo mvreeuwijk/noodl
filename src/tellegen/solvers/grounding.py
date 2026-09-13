@@ -1,10 +1,14 @@
-"""Per-instance SPD certificate: every interior node reaches a boundary node through a path
-of strictly positive slopes, in that instance.
+"""Per-instance SPD certificate: every branch slope is non-negative, AND every interior node
+reaches a boundary node through a path of strictly positive slopes, in that instance.
 
-See the milestone design, section 3.1: symmetry and non-negative slopes give positive
-SEMI-definiteness; this certificate is the third condition that upgrades semi-definite to
-definite. It is computed on the ACTUAL slopes at the solve, never on initialisation slopes,
-and is never bypassed when a caller supplies its own initial guess.
+See the milestone design, section 3.1, which states the certificate as three conditions, all
+per instance: symmetry (structural here -- `A_I diag(g) A_I^T` is symmetric for any `g`),
+non-negative slopes (which with symmetry gives positive SEMI-definiteness), and grounding
+through strictly positive slopes (which upgrades semi-definite to definite). Both testable
+conditions are applied, by `_certified`, to `spd_certificate` and `spd_diagnosis` alike: see
+`_certified` for why grounding alone is not sufficient and not conservative. The certificate
+is computed on the ACTUAL slopes at the solve, never on initialisation slopes, and is never
+bypassed when a caller supplies its own initial guess.
 
 Implementation: label propagation, vectorised over the batch (no Python loop over batch
 instances). A node is "grounded" once it is a boundary node or is connected, through some
@@ -111,6 +115,39 @@ def _grounded(
     return grounded
 
 
+def _certified(
+    src: Tensor,
+    tgt: Tensor,
+    slopes: Tensor,
+    interior_of_node: Tensor,
+    boundary_mask: Tensor,
+    *,
+    atol: float = 0.0,
+) -> Tensor:
+    """(...,) bool: design section 3.1's conditions 2 AND 3, per instance.
+
+    Condition 1 (symmetry) is structural -- `A_I diag(g) A_I^T` is symmetric for any `g` --
+    so it needs no per-instance test. Condition 2 is `g >= 0` on EVERY branch, which with
+    symmetry gives positive SEMI-definiteness; condition 3 is grounding through strictly
+    positive slopes, which upgrades semi-definite to definite. Testing condition 3 alone is
+    not sufficient and is not conservative: a negative slope makes an edge merely INACTIVE
+    for `_grounded`'s propagation, so an instance grounded through other, positive edges
+    passed condition 3 while its assembled operator was indefinite (verified: a grounded
+    3-node chain with a parallel edge of slope -5 assembles to eigenvalues [-7.53, 0.53]).
+    `method="auto"` would then dispatch PCG to an indefinite system; CG's convergence test
+    uses the recursively updated residual, so such a system can report CONVERGED on a
+    drifted residual rather than the loud BREAKDOWN it happens to give in that example.
+
+    Note the deliberate asymmetry between this test and `_grounded`'s: `g >= 0` here
+    (non-negativity is what semi-definiteness needs, and a zero slope is a legitimately
+    open-circuit branch), `slopes > atol` there (only a STRICTLY positive slope actually
+    conducts a ground). Assumes `_validate` has already been called.
+    """
+    interior_mask = interior_of_node >= 0
+    grounded = _grounded(src, tgt, slopes, interior_of_node, boundary_mask, atol=atol)
+    return (slopes >= 0).all(dim=-1) & grounded[..., interior_mask].all(dim=-1)
+
+
 def spd_certificate(
     src: Tensor,
     tgt: Tensor,
@@ -120,7 +157,9 @@ def spd_certificate(
     *,
     atol: float = 0.0,
 ) -> Tensor:
-    """(...,) bool: every interior node reaches a boundary node via strictly positive slopes.
+    """(...,) bool: per instance, every branch slope is non-negative AND every interior node
+    reaches a boundary node via strictly positive slopes (design section 3.1, conditions 2
+    and 3; condition 1, symmetry, is structural).
 
     `src`, `tgt`: (b,) LongTensors, shared across the batch (as from `Network.endpoints`).
     `slopes`: (..., b), the per-instance, per-edge slope actually used at this solve.
@@ -130,9 +169,7 @@ def spd_certificate(
     mathematical "strictly positive" condition.
     """
     _validate(src, tgt, slopes, interior_of_node, boundary_mask)
-    interior_mask = interior_of_node >= 0
-    grounded = _grounded(src, tgt, slopes, interior_of_node, boundary_mask, atol=atol)
-    return grounded[..., interior_mask].all(dim=-1)
+    return _certified(src, tgt, slopes, interior_of_node, boundary_mask, atol=atol)
 
 
 def spd_diagnosis(
@@ -158,7 +195,12 @@ def spd_diagnosis(
     node_indices = torch.arange(interior_of_node.shape[0])
 
     grounded = _grounded(src, tgt, slopes, interior_of_node, boundary_mask, atol=atol)
-    certified = grounded[..., interior_mask].all(dim=-1)
+    # The SAME condition `spd_certificate` applies, so an instance the certificate refuses
+    # always has a record here (before I1 the two disagreed for a grounded instance with a
+    # negative slope: the certificate said True and the diagnosis, keyed on grounding alone,
+    # produced no record, which is why select.solve's negative-slope message branch was
+    # effectively unreachable).
+    certified = (slopes >= 0).all(dim=-1) & grounded[..., interior_mask].all(dim=-1)
     failing = ~certified
 
     b = src.shape[0]
