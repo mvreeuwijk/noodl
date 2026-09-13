@@ -429,10 +429,23 @@ class PotentialFlowLayer:
             def residual_fn(x):
                 return self.residual(x, phi_boundary, drivers, sources)
 
-            def jacobian_fn(x):
-                return self.jacobian(x, phi_boundary, drivers)
+            def operator_fn(x):
+                # A matvec-free A_I diag(dq) A_I^T at the current iterate, instead of the
+                # dense (n_interior, n_interior) einsum layer.jacobian() assembles. Rebuilt
+                # each iteration because dq is what changes; the endpoint/index tensors it
+                # closes over are cached on the layer at construction.
+                phi = self.assemble(x, phi_boundary)
+                dq = self.dflows(phi, drivers)
+                return GraphLaplacianOperator(
+                    self._src,
+                    self._tgt,
+                    dq,
+                    len(self.interior),
+                    self._interior_of_node,
+                    boundary_mask=self._boundary_mask,
+                )
 
-            result = newton(residual_fn, jacobian_fn, phi0, **newton_kwargs)
+            result = newton(residual_fn, operator_fn, phi0, **newton_kwargs)
             phi = self.assemble(result.x, phi_boundary)
             q = self.flows(phi, drivers)
             return phi, q
@@ -577,14 +590,20 @@ class PotentialFlowLayer:
             s_I = src[..., self.interior]
             return lhs - s_I
 
-        def jacobian_fn(x, *params):
+        def operator_fn(x, *params):
             rebuilt, drv, src, pb = _rebuild(params)
             phi = self.assemble(x, pb)
             dq = _dflows_functional(phi, drv, rebuilt)
-            A_I = self.A[self.interior]
-            return torch.einsum("ie,...e,je->...ij", A_I, dq, A_I)
+            return GraphLaplacianOperator(
+                self._src,
+                self._tgt,
+                dq,
+                len(self.interior),
+                self._interior_of_node,
+                boundary_mask=self._boundary_mask,
+            )
 
-        x = implicit_solve(residual_fn, jacobian_fn, phi0, all_params, **newton_kwargs)
+        x = implicit_solve(residual_fn, operator_fn, phi0, all_params, **newton_kwargs)
         phi = self.assemble(x, phi_boundary)
         q = self.flows(phi, drivers)
         return phi, q

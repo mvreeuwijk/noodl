@@ -6,7 +6,8 @@ GraphLaplacianOperator + solvers.select.solve rather than a dense einsum Jacobia
 import pytest
 import torch
 
-from tellegen.elements import Conductance, FixedFlow
+from tellegen.drives import ConstantDrive
+from tellegen.elements import Conductance, FixedFlow, PowerLaw
 from tellegen.elements.fan import FanCurve
 from tellegen.layers.potential import PotentialFlowLayer
 from tellegen.topology import Network
@@ -132,3 +133,91 @@ def test_grounding_at_a_supplied_phi0_is_checked_on_the_differentiable_path_too(
     phi0_supplied = torch.tensor([200.0], dtype=torch.float64)
     with pytest.raises(RuntimeError, match=r"solve: floating nodes"):
         layer.solve(phi_b, {}, sources, phi0=phi0_supplied, differentiable=True)
+
+
+def test_sparse_and_dense_newton_paths_agree_on_a_contam_style_series_network():
+    # Three-zone series network under a wind drive, matching the shape of the CONTAM
+    # verification cases: this exercises solve()'s full non-differentiable path (which now
+    # builds a GraphLaplacianOperator per Newton iteration) against layer.jacobian() (still
+    # dense, unchanged, used here only as the independent reference via a hand-rolled
+    # Newton loop) to confirm the two agree to solver-contract tolerance.
+    net = Network(dtype=torch.float64)
+    for name in ("ambient_w", "z1", "z2", "ambient_l"):
+        net.add_node(name)
+    net.add_edge("ambient_w", "z1", kind="airpath")
+    net.add_edge("z1", "z2", kind="airpath")
+    net.add_edge("z2", "ambient_l", kind="airpath")
+    element = PowerLaw(
+        torch.tensor([0.010, 0.008, 0.012], dtype=torch.float64), 0.65, dp_transition=1e-6
+    )
+    drive = ConstantDrive(kind="airpath", key="wind")
+    layer = PotentialFlowLayer(
+        net, "series", [element], [drive], boundary=["ambient_w", "ambient_l"]
+    )
+    wind = torch.tensor([12.0, 0.0, 0.0], dtype=torch.float64)
+    phi_b = torch.zeros(2, dtype=torch.float64)
+
+    phi_sparse, q_sparse = layer.solve(
+        phi_b, {"wind": wind}, None, differentiable=False, atol=1e-13, rtol=1e-13
+    )
+
+    # Independent dense reference: layer.jacobian() (unchanged, still a dense einsum) fed to
+    # torch.linalg.solve directly, in a hand-rolled damped Newton loop mirroring newton()'s
+    # own iteration exactly (same omega/switch_ratio schedule) but never touching the
+    # operator contract at all.
+    def residual_fn(x):
+        return layer.residual(x, phi_b, {"wind": wind}, None)
+
+    x = layer.linear_init(phi_b, {"wind": wind}, None)
+    omega_i = torch.tensor(0.75, dtype=torch.float64)
+    r = residual_fn(x)
+    norm0 = r.abs().amax(dim=-1)
+    tol = 1e-13 + 1e-13 * norm0
+    for _ in range(50):
+        if bool(norm0 < tol):
+            break
+        J = layer.jacobian(x, phi_b, {"wind": wind})
+        dx = torch.linalg.solve(J, r)
+        prev_norm = norm0
+        x = x - omega_i * dx
+        r = residual_fn(x)
+        norm0 = r.abs().amax(dim=-1)
+        if bool(norm0 / prev_norm.clamp_min(1e-300) < 0.5):
+            omega_i = torch.tensor(1.0, dtype=torch.float64)
+    phi_dense = layer.assemble(x, phi_b)
+    q_dense = layer.flows(phi_dense, {"wind": wind})
+
+    torch.testing.assert_close(phi_sparse, phi_dense, rtol=1e-9, atol=1e-12)
+    torch.testing.assert_close(q_sparse, q_dense, rtol=1e-9, atol=1e-12)
+
+
+@pytest.mark.parametrize("differentiable", [False, True])
+def test_solve_never_assembles_the_dense_einsum_jacobian(monkeypatch, differentiable):
+    # The structural half of the sparse-vs-dense pair above: the numbers were already right
+    # before Newton's per-iteration operator became a GraphLaplacianOperator (that refactor
+    # is a no-op for correctness), so what has to be asserted is that the dense
+    # (n_interior, n_interior) einsum is no longer built at all. layer.jacobian() itself is
+    # deliberately untouched -- it remains the dense oracle other tests call directly -- so
+    # the assertion is that solve() does not call it.
+    net = Network(dtype=torch.float64)
+    for name in ("ambient_w", "z1", "z2", "ambient_l"):
+        net.add_node(name)
+    net.add_edge("ambient_w", "z1", kind="airpath")
+    net.add_edge("z1", "z2", kind="airpath")
+    net.add_edge("z2", "ambient_l", kind="airpath")
+    element = PowerLaw(
+        torch.tensor([0.010, 0.008, 0.012], dtype=torch.float64), 0.65, dp_transition=1e-6
+    )
+    layer = PotentialFlowLayer(
+        net, "series", [element], [ConstantDrive(kind="airpath", key="wind")],
+        boundary=["ambient_w", "ambient_l"],
+    )
+    wind = torch.tensor([12.0, 0.0, 0.0], dtype=torch.float64)
+    phi_b = torch.zeros(2, dtype=torch.float64)
+
+    def _no_dense_jacobian(self, *args, **kwargs):
+        raise AssertionError("solve() must not assemble the dense einsum Jacobian")
+
+    monkeypatch.setattr(PotentialFlowLayer, "jacobian", _no_dense_jacobian)
+    phi, q = layer.solve(phi_b, {"wind": wind}, None, differentiable=differentiable)
+    assert torch.isfinite(phi).all() and torch.isfinite(q).all()

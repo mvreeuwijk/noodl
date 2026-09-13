@@ -81,6 +81,15 @@ class _Implicit(torch.autograd.Function):
         x, params = saved[0], list(saved[1:])
         with torch.no_grad():
             J = ctx.jacobian(x, *params)
+            if not isinstance(J, torch.Tensor):
+                # Task 11 turned this callable's contract into "returns a LinearOperator",
+                # and every pre-1b caller still returns a plain dense tensor. The FORWARD
+                # pass handles both through newton()'s own auto-wrap; the backward's adjoint
+                # solve is still the dense one below, so an operator is materialised here
+                # via its own assemble(). That is a deliberate stopgap, not the destination:
+                # Task 12 replaces this whole block with a matvec-free transposed solve
+                # through the operator contract, at which point assembling here goes away.
+                J = J.assemble()
             lam = adjoint(J, grad_x)
         with torch.enable_grad():
             p = [t.detach().requires_grad_(t.requires_grad) for t in params]
