@@ -12,15 +12,35 @@ from tellegen.topology import Network
 
 
 def branch_flows(net: Network, amplitudes: torch.Tensor, kind: str | None = None) -> torch.Tensor:
-    """Map cycle amplitudes ``(..., l)`` to branch flows ``(..., b_kind)``: ``q = m @ J``.
+    """Map cycle amplitudes ``(..., l)`` to branch flows ``(..., b_kind)``: applies the
+    cycle basis by its ACTION rather than forming the dense ``(l, b_kind)`` matrix.
 
-    ``incidence(kind) @ q == 0`` for every ``m`` because the rows of ``J`` span the
-    null space of the incidence matrix.
+    Each chord edge ``(u, v)`` carrying amplitude ``m`` is algebraically equivalent to
+    injecting ``+m`` at ``u`` and extracting ``m`` at ``v`` and letting the spanning tree
+    carry the return path (this is exactly what makes ``incidence(kind) @ q == 0`` for the
+    whole cycle: the tree's own contribution must exactly cancel the chord's). The tree part
+    is therefore `_tree_solve`'s own job, fed the negative of that per-chord injection summed
+    over every chord via a single scatter-add (`chord_source`); the chord edges' own flows
+    are just their amplitudes directly, since `cycle_basis`'s construction gives each chord
+    row a self-entry of exactly 1 at its own column.
     """
-    J = net.cycle_basis(kind).to(amplitudes.dtype)
-    if amplitudes.shape[-1] != J.shape[0]:
-        raise ValueError(f"expected {J.shape[0]} amplitudes, got {amplitudes.shape[-1]}")
-    return amplitudes @ J
+    tree_cols, chord_cols = net.spanning_forest(kind)
+    if amplitudes.shape[-1] != chord_cols.numel():
+        raise ValueError(f"expected {chord_cols.numel()} amplitudes, got {amplitudes.shape[-1]}")
+    cols = net.edge_index(kind).tolist()
+    edges = net.edges
+    chord_edges = [edges[cols[j]] for j in chord_cols.tolist()]
+    u_idx = torch.tensor([net.node_index(u) for (u, _v, _k) in chord_edges], dtype=torch.long)
+    v_idx = torch.tensor([net.node_index(v) for (_u, v, _k) in chord_edges], dtype=torch.long)
+
+    batch_shape = amplitudes.shape[:-1]
+    chord_source = torch.zeros(*batch_shape, net.n, dtype=amplitudes.dtype, device=amplitudes.device)
+    chord_source.scatter_add_(-1, _expand_index(u_idx, batch_shape), -amplitudes)
+    chord_source.scatter_add_(-1, _expand_index(v_idx, batch_shape), amplitudes)
+
+    q = _tree_solve(net, kind, chord_source)
+    q = q.scatter(-1, _expand_index(chord_cols, batch_shape), amplitudes)
+    return q
 
 
 def assert_forward_oriented(net: Network, kind: str | None = None) -> None:
