@@ -198,3 +198,27 @@ def build_composed(
         ensemble=ensemble,
         seed=seed,
     )
+
+
+# --- Workloads for `benchmarks.measure.isolated_peak_rss` -------------------------------
+#
+# Each is a NAMED module-level function taking only JSON-serialisable arguments and
+# returning a JSON-serialisable result, because `isolated_peak_rss` runs it in a fresh
+# child process (`python -c "... import benchmarks.composed_model ..."`) and reads its
+# result back off stdout. The child rebuilding the model from scratch is the point: the
+# measured peak is then the whole cost of the configuration -- topology, layer caches,
+# solve and transport step -- with no state inherited from the measuring process.
+
+
+def workload_alloc(mb: int) -> int:
+    """Allocate and touch an `mb`-MiB float64 tensor; return `mb`.
+
+    The calibration workload for `isolated_peak_rss` itself: its only allocation is a torch
+    tensor, which `tracemalloc` reports as zero bytes, so a measurement that sees it is
+    demonstrably seeing PyTorch's allocator rather than Python bookkeeping.
+    """
+    block = torch.empty(int(mb) * 2**20 // 8, dtype=torch.float64)
+    block.fill_(1.0)
+    if not float(block.sum()) > 0.0:  # touch every page so the OS commits them
+        raise RuntimeError("workload_alloc: allocation was not touched")
+    return int(mb)
