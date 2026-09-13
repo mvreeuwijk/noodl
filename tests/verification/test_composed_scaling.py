@@ -112,87 +112,24 @@ def test_composed_model_interface_conservation_at_every_shared_node():
 
 def test_gradient_across_a_join_matches_central_finite_differences():
     """A parameter in the STREET submodel (the conductance C of every street edge) must
-    receive a correct gradient from a loss inside BUILDING 0 (the potential at its manhole
+    receive a correct gradient from a loss inside a BUILDING (the potential at its manhole
     node). Small configuration so the central-difference loop is cheap.
 
-    Amendment A3.5's gate, verbatim. MEASURED CAVEAT: at this configuration the exact
-    gradient is identically zero, and the test therefore asserts 0 == 0 (FD noise aside).
-    `build_composed` wires building `i`'s ambient node to `street_names[i % street_nodes]`
-    and its manhole to `sewer_names[i % sewer_nodes]`, so building 0 -- and only building 0
-    -- attaches directly to BOTH boundary nodes, `street_0` and `sewer_0`. Its submodel is
-    then enclosed between two fixed potentials and depends on nothing outside itself, so no
-    street conductance can move its manhole. Autograd returns exactly 0.0 and central
-    differences return one ULP of noise (3.5e-12). Kept because it is the amendment's
-    literal gate;
-    `test_gradient_across_a_join_is_nonzero_and_matches_central_finite_differences` below is
-    the same construction at building 1, where the gradient is genuinely non-zero and the
-    comparison has something to catch.
-    """
-    model = build_composed(
-        n_buildings=2, building_nodes=12, street_nodes=6, sewer_nodes=5, ensemble=1, seed=0
-    )
-    net = model.net
-    loss_node = net.node_index(model.interface_nodes["sewer"]["building_0"][0])  # manhole
-    street = next(el for el in model.elements if el.kind == "street")
-    C0 = street.C.detach().clone()
+    Amendment A3.5's gate, at BUILDING 1 rather than the amendment's building 0. Building 0
+    was a bug in the amendment: `build_composed` wires building `i`'s ambient node to
+    `street_names[i % street_nodes]` and its manhole to `sewer_names[i % sewer_nodes]`, and
+    the boundary is `["street_0", "sewer_0"]` -- so building 0, alone among the buildings,
+    attaches directly to BOTH boundary nodes. Its submodel is enclosed between two fixed
+    potentials and depends on nothing outside itself, so no street conductance can move its
+    manhole: autograd returned exactly 0.0 for all ten street conductances and central
+    differences returned one ULP of noise (3.5e-12), and the gate asserted 0 == 0. It would
+    have passed with the cross-join adjoint entirely broken.
 
-    def layer_with_street_C(C, *, learnable):
-        elements = [
-            PowerLaw(C, 0.65, kind="street", learnable=learnable) if el.kind == "street" else el
-            for el in model.elements
-        ]
-        return PotentialFlowLayer(net, "grad_join", elements, boundary=model.boundary), elements
-
-    def loss_at(C):
-        layer, _ = layer_with_street_C(C, learnable=False)
-        phi, _ = layer.solve(
-            model.phi_boundary,
-            model.drivers,
-            model.sources,
-            differentiable=False,
-            atol=1e-13,
-            rtol=1e-13,
-        )
-        return float(phi[0, loss_node])
-
-    layer, elements = layer_with_street_C(C0.clone(), learnable=True)
-    el = next(e for e in elements if e.kind == "street")
-    phi, _ = layer.solve(
-        model.phi_boundary,
-        model.drivers,
-        model.sources,
-        differentiable=True,
-        atol=1e-13,
-        rtol=1e-13,
-    )
-    phi[0, loss_node].backward()
-    grad_ad = el.C.grad.detach().clone()
-
-    h = 1e-6
-    grad_fd = torch.zeros_like(C0)
-    for i in range(C0.numel()):
-        bump = torch.zeros_like(C0)
-        bump[i] = h
-        grad_fd[i] = (loss_at(C0 + bump) - loss_at(C0 - bump)) / (2 * h)
-
-    deviation = (grad_ad - grad_fd).abs()
-    print(
-        f"\ncross-join gradient: max abs deviation {float(deviation.max()):.3e}, "
-        f"max rel deviation {float((deviation / grad_fd.abs()).max()):.3e} "
-        f"(gate rtol=1e-6 atol=1e-8), |grad| up to {float(grad_fd.abs().max()):.3e}"
-    )
-    torch.testing.assert_close(grad_ad, grad_fd, rtol=1e-6, atol=1e-8)
-
-
-def test_gradient_across_a_join_is_nonzero_and_matches_central_finite_differences():
-    """The non-vacuous half of the cross-join gradient gate: building 1, not building 0.
-
-    Identical construction to the amendment's own test above, moved to building 1, whose
-    ambient node attaches to `street_1` and whose manhole attaches to `sewer_1` -- both
-    interior. The loss at building 1's manhole therefore genuinely depends on every street
-    conductance, through a path that leaves the building submodel, crosses the street join,
-    traverses the street network and comes back through the sewer join. The explicit
-    non-triviality assertion is what stops this gate degenerating into 0 == 0.
+    Building 1's ambient attaches to `street_1` and its manhole to `sewer_1`, both interior,
+    so the loss genuinely depends on every street conductance through a path that leaves the
+    building submodel, crosses the street join, traverses the street network and returns
+    through the sewer join. The explicit non-triviality assertion below is what stops this
+    gate degenerating the same way again.
     """
     model = build_composed(
         n_buildings=2, building_nodes=12, street_nodes=6, sewer_nodes=5, ensemble=1, seed=0
@@ -280,19 +217,29 @@ def test_composed_model_meets_its_section_6_1_budget(
     row = measure_budget_row(ensemble, steps, forward_budget, backward_budget, memory_budget)
     print("\n" + format_budget_row(row))
 
-    assert row["forward_seconds"] <= forward_budget, (
-        f"forward budget missed: {row['forward_seconds']:.3f}s > {forward_budget}s "
-        f"({row['forward_seconds'] / forward_budget:.2f}x)"
-    )
-    assert row["backward_seconds"] <= backward_budget, (
-        f"backward budget missed: {row['backward_seconds']:.3f}s > {backward_budget}s "
-        f"({row['backward_seconds'] / backward_budget:.2f}x)"
-    )
-    assert row["peak_memory_bytes"] <= memory_budget, (
-        f"peak memory budget missed: {row['peak_memory_bytes'] / 1e6:.1f} MB > "
-        f"{memory_budget / 1e6:.0f} MB "
-        f"({row['peak_memory_bytes'] / memory_budget:.2f}x)"
-    )
+    failures = []
+    if not row["forward_within_budget"]:
+        failures.append(
+            f"forward budget missed: {row['forward_seconds']:.3f}s > {forward_budget}s "
+            f"({row['forward_seconds'] / forward_budget:.2f}x)"
+        )
+    if not row["backward_within_budget"]:
+        failures.append(
+            f"backward budget missed: {row['backward_seconds']:.3f}s > {backward_budget}s "
+            f"({row['backward_seconds'] / backward_budget:.2f}x)"
+        )
+    if not row["peak_memory_within_budget"]:
+        failures.append(
+            f"peak memory budget missed: {row['peak_memory_bytes'] / 1e6:.1f} MB > "
+            f"{memory_budget / 1e6:.0f} MB "
+            f"({row['peak_memory_bytes'] / memory_budget:.2f}x)"
+        )
+    # One report per row covering all three budgets, not three short-circuiting asserts: a
+    # row that misses its forward budget would otherwise say nothing about whether its
+    # backward and memory budgets hold, and a gate that hides two thirds of its own result
+    # behind the first failure is not reporting the gate.
+    if failures:
+        pytest.fail("\n".join(failures))
 
 
 @pytest.mark.slow

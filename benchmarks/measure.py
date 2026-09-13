@@ -98,8 +98,9 @@ def _working_set():
     import resource
 
     raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    # ru_maxrss is kilobytes on Linux and bytes on macOS/BSD.
-    peak = int(raw) * 1024 if sys.platform.startswith("linux") else int(raw)
+    # ru_maxrss is bytes on macOS; kilobytes on Linux and FreeBSD.
+    kilobytes = sys.platform.startswith("linux") or sys.platform.startswith("freebsd")
+    peak = int(raw) * 1024 if kilobytes else int(raw)
     current = peak
     try:
         with open("/proc/self/statm") as fh:
@@ -164,6 +165,13 @@ def isolated_peak_rss(module: str, func: str, kwargs: dict) -> tuple[int, Any]:
     name, so there is nothing to pickle and nothing about the parent's state leaks into the
     measurement. That is the isolation: every call is its own process, so a measurement can
     never inherit another one's high-water mark.
+
+    The difference is clamped at 0. `peak` is a high-water mark over the whole process and
+    `before` is the instantaneous working set at entry, so on a platform or workload where
+    the interpreter's own import transient exceeded the resident set by the time the baseline
+    is taken -- or where the OS trimmed the working set before the call -- the difference can
+    come out negative. That means "this workload allocated nothing measurable", not a
+    negative footprint, and 0 is what it should report.
     """
     payload = json.dumps(kwargs)
     completed = subprocess.run(
@@ -185,4 +193,5 @@ def isolated_peak_rss(module: str, func: str, kwargs: dict) -> tuple[int, Any]:
             f"line\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
         )
     measurement = json.loads(lines[-1][len(_MARKER) :])
-    return int(measurement["peak"]) - int(measurement["before"]), measurement["result"]
+    above_baseline = int(measurement["peak"]) - int(measurement["before"])
+    return max(0, above_baseline), measurement["result"]

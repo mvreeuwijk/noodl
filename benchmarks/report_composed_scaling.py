@@ -59,32 +59,48 @@ def measure_budget_row(
     forward_budget: float,
     backward_budget: float,
     memory_budget: int,
+    samples: int = 3,
 ) -> dict:
     """Measure one budget-table row: forward time, backward time, peak RSS, iteration counts.
 
-    Two child processes, one per direction. `peak_memory_bytes` is the LARGER of the two
-    peaks: the row's memory budget is a budget for the configuration, and a backward pass
-    that needs more than the forward pass is still this row's peak.
+    `samples` child processes per direction. The reported TIME is the median over samples,
+    because a single sample is not a measurement at this size: the ensemble-1 forward figure
+    was seen to range over 0.315-1.621 s across runs on the development machine, a 5x spread,
+    which is wider than several of the budget margins being judged. The shape gates already
+    take a median for the same reason; this brings the budget rows into line with them.
+
+    The reported PEAK is the MAXIMUM over samples, not the median: a peak is a high-water
+    mark, and the question the memory budget asks is how much this configuration can need.
+
+    `peak_memory_bytes` is the larger of the forward and backward peaks. The row's memory
+    budget is a budget for the configuration, and a backward pass that needs more than the
+    forward pass is still this row's peak.
     """
     kwargs = {**REFERENCE_KWARGS, "ensemble": ensemble, "steps": steps}
-    peak_forward, forward = isolated_peak_rss(
-        "benchmarks.composed_model", "workload_forward", kwargs
-    )
-    peak_backward, backward = isolated_peak_rss(
-        "benchmarks.composed_model", "workload_backward", kwargs
-    )
+
+    def measure(workload: str) -> tuple[int, float, dict]:
+        peaks, results = [], []
+        for _ in range(samples):
+            peak, result = isolated_peak_rss("benchmarks.composed_model", workload, kwargs)
+            peaks.append(peak)
+            results.append(result)
+        return max(peaks), median(r["elapsed_s"] for r in results), results[0]
+
+    peak_forward, forward_seconds, forward = measure("workload_forward")
+    peak_backward, backward_seconds, backward = measure("workload_backward")
     peak = max(peak_forward, peak_backward)
     return {
         "ensemble": ensemble,
         "steps": steps,
+        "samples": samples,
         "n_nodes": forward["n_nodes"],
         "n_edges": forward["n_edges"],
-        "forward_seconds": forward["elapsed_s"],
+        "forward_seconds": forward_seconds,
         "forward_budget_seconds": forward_budget,
-        "forward_within_budget": forward["elapsed_s"] <= forward_budget,
-        "backward_seconds": backward["elapsed_s"],
+        "forward_within_budget": forward_seconds <= forward_budget,
+        "backward_seconds": backward_seconds,
         "backward_budget_seconds": backward_budget,
-        "backward_within_budget": backward["elapsed_s"] <= backward_budget,
+        "backward_within_budget": backward_seconds <= backward_budget,
         "peak_memory_bytes": peak,
         "peak_memory_forward_bytes": peak_forward,
         "peak_memory_backward_bytes": peak_backward,
@@ -117,7 +133,8 @@ def format_budget_row(row: dict) -> str:
         f"{verdict(row['peak_memory_within_budget'])}, "
         f"newton_iterations={row['newton_iterations']}, "
         f"linear_iterations_max={row['linear_iterations_max']}, "
-        f"method={row['method']}"
+        f"method={row['method']}, "
+        f"samples={row['samples']} (median time, max peak)"
     )
 
 
