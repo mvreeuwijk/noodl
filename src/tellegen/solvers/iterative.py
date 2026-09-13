@@ -12,6 +12,38 @@ from tellegen.operators.base import SolveResult, SolverStatus
 Tensor = torch.Tensor
 
 
+def _result(
+    x: Tensor,
+    converged: Tensor,
+    iterations: Tensor,
+    residual_norm: Tensor,
+    b_norm: Tensor,
+    *,
+    flag: Tensor,
+    flag_status: SolverStatus,
+) -> SolveResult:
+    """Shared per-instance status/residual construction for `pcg` and `gmres`: CONVERGED
+    where `converged`, else `flag_status` where the solver-specific failure `flag` (pcg's
+    `breakdown`, gmres's `exhausted`) fires, else MAX_ITER; residual is the relative norm
+    `residual_norm / b_norm`, falling back to the raw `residual_norm` when `b_norm` is zero.
+    """
+    device = x.device
+    batch_shape = converged.shape
+    status = torch.where(
+        converged,
+        torch.full(batch_shape, int(SolverStatus.CONVERGED), dtype=torch.long, device=device),
+        torch.where(
+            flag,
+            torch.full(batch_shape, int(flag_status), dtype=torch.long, device=device),
+            torch.full(batch_shape, int(SolverStatus.MAX_ITER), dtype=torch.long, device=device),
+        ),
+    )
+    residual = torch.where(b_norm > 0, residual_norm / b_norm, residual_norm)
+    return SolveResult(
+        x=x, converged=converged, iterations=iterations, residual=residual, status=status
+    )
+
+
 def pcg(
     op,
     b: Tensor,
@@ -93,18 +125,8 @@ def pcg(
         iterations = torch.where(active, iterations + 1, iterations)
         it += 1
 
-    status = torch.where(
-        converged,
-        torch.full(batch_shape, int(SolverStatus.CONVERGED), dtype=torch.long, device=device),
-        torch.where(
-            breakdown,
-            torch.full(batch_shape, int(SolverStatus.BREAKDOWN), dtype=torch.long, device=device),
-            torch.full(batch_shape, int(SolverStatus.MAX_ITER), dtype=torch.long, device=device),
-        ),
-    )
-    residual = torch.where(b_norm > 0, norm_r / b_norm, norm_r)
-    return SolveResult(
-        x=x, converged=converged, iterations=iterations, residual=residual, status=status
+    return _result(
+        x, converged, iterations, norm_r, b_norm, flag=breakdown, flag_status=SolverStatus.BREAKDOWN
     )
 
 
@@ -265,23 +287,15 @@ def gmres(
         )
         converged = converged | newly_converged
 
-    status = torch.where(
-        converged,
-        torch.full((B,), int(SolverStatus.CONVERGED), dtype=torch.long, device=device),
-        torch.where(
-            exhausted,
-            torch.full((B,), int(SolverStatus.SINGULAR), dtype=torch.long, device=device),
-            torch.full((B,), int(SolverStatus.MAX_ITER), dtype=torch.long, device=device),
-        ),
-    )
     iterations = torch.where(converged, iterations, total_matvecs)
-    residual = torch.where(b_norm > 0, beta / b_norm, beta)
 
     x_out = x_flat.reshape(batch_shape + (m,))
-    return SolveResult(
-        x=x_out,
-        converged=converged.reshape(batch_shape),
-        iterations=iterations.reshape(batch_shape),
-        residual=residual.reshape(batch_shape),
-        status=status.reshape(batch_shape),
+    return _result(
+        x_out,
+        converged.reshape(batch_shape),
+        iterations.reshape(batch_shape),
+        beta.reshape(batch_shape),
+        b_norm.reshape(batch_shape),
+        flag=exhausted.reshape(batch_shape),
+        flag_status=SolverStatus.SINGULAR,
     )
