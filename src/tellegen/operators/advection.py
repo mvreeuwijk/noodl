@@ -97,6 +97,17 @@ class AdvectionOperator:
         self._boundary_idx = torch.nonzero(interior_of_node < 0, as_tuple=True)[0]
         self._n_edges = src.shape[0]
 
+        # Per-shape caches for `_raw_action`, which runs once per transport matvec and
+        # otherwise rebuilds the same index views every time (milestone-1b follow-up,
+        # Task B). `_upwind_cache` holds the (up, down) endpoint arrays per dtype;
+        # `_bcast_cache` holds their `_bcast_index` expansions per (name, batch shape, K).
+        # Both hold only LONG index tensors -- derived from the SIGN of `flow` and from
+        # `_src`/`_tgt`, never from `flow`'s values -- so nothing cached here can capture an
+        # autograd graph, which a cached expansion of a float tensor (`flow`, `transmission`)
+        # would: `flow` is a solved `q` on the differentiable path and does require grad.
+        self._upwind_cache: dict[torch.dtype, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._bcast_cache: dict[tuple, torch.Tensor] = {}
+
         self.dtype = flow.dtype
         self.device = flow.device
         batch = torch.broadcast_shapes(
@@ -106,12 +117,49 @@ class AdvectionOperator:
         self.shape = (*batch, m, m)
 
     # ---------------------------------------------------------------- raw action
+    def _upwind(self, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+        """`(up, down)` endpoint arrays at the given dtype, cached per dtype.
+
+        The dtype is part of the key rather than ignored because the sign test is made on
+        `flow.to(dtype)`: a value that underflows to -0.0 in a narrower dtype tests
+        `>= 0` as TRUE where the wider value tested false, so the two dtypes genuinely can
+        disagree about which end of an edge is upwind.
+        """
+        cached = self._upwind_cache.get(dtype)
+        if cached is None:
+            positive = self.flow.to(dtype) >= 0
+            cached = (
+                torch.where(positive, self._src, self._tgt),      # (..., b) upwind
+                torch.where(positive, self._tgt, self._src),      # (..., b) downwind
+            )
+            self._upwind_cache[dtype] = cached
+        return cached
+
+    def _expanded(
+        self, name: tuple, idx: torch.Tensor, batch_shape: torch.Size, k: int
+    ) -> torch.Tensor:
+        """`idx` broadcast against a (*batch_shape, k, b) tensor, cached under `name`.
+
+        `_bcast_index` for a shared (b,) index array, and the equivalent unsqueeze/expand
+        for an already-batched one. The result is a stride-0 VIEW, so the cache costs
+        nothing beyond the (b,) array it views; `name` must identify the index array
+        (including any dtype it was derived at), since that is what the key cannot see.
+        """
+        key = (name, tuple(batch_shape), k)
+        cached = self._bcast_cache.get(key)
+        if cached is None:
+            cached = (
+                _bcast_index(idx, batch_shape, k)
+                if idx.dim() == 1
+                else idx.unsqueeze(-2).expand(*batch_shape, k, idx.shape[-1])
+            )
+            self._bcast_cache[key] = cached
+        return cached
+
     def _raw_action(self, v: torch.Tensor, *, transpose: bool) -> torch.Tensor:
         dtype = v.dtype
         flow = self.flow.to(dtype)
-        positive = flow >= 0
-        up = torch.where(positive, self._src, self._tgt)      # (..., b)
-        down = torch.where(positive, self._tgt, self._src)    # (..., b)
+        up, down = self._upwind(dtype)
         w = flow.abs()
 
         # The state must broadcast against the OPERATOR's batch, not only against its own:
@@ -129,12 +177,12 @@ class AdvectionOperator:
             self.capacity.shape[:-1],
         )
         K = v.shape[-2]
+        gather_name = ("down", dtype) if transpose else ("up", dtype)
+        scatter_name = ("up", dtype) if transpose else ("down", dtype)
         gather_idx = down if transpose else up
         scatter_idx = up if transpose else down
-        gather_idx_b = _bcast_index(gather_idx, batch_shape, K) if gather_idx.dim() == 1 \
-            else gather_idx.unsqueeze(-2).expand(*batch_shape, K, gather_idx.shape[-1])
-        scatter_idx_b = _bcast_index(scatter_idx, batch_shape, K) if scatter_idx.dim() == 1 \
-            else scatter_idx.unsqueeze(-2).expand(*batch_shape, K, scatter_idx.shape[-1])
+        gather_idx_b = self._expanded(gather_name, gather_idx, batch_shape, K)
+        scatter_idx_b = self._expanded(scatter_name, scatter_idx, batch_shape, K)
 
         v_b = v.expand(*batch_shape, K, self._n)
         x_g = torch.gather(v_b, -1, gather_idx_b)
@@ -143,8 +191,7 @@ class AdvectionOperator:
         in_action = torch.zeros(*batch_shape, K, self._n, dtype=dtype, device=v.device)
         in_action.scatter_add_(-1, scatter_idx_b, in_val)
 
-        up_b = _bcast_index(up, batch_shape, K) if up.dim() == 1 \
-            else up.unsqueeze(-2).expand(*batch_shape, K, up.shape[-1])
+        up_b = self._expanded(("up", dtype), up, batch_shape, K)
         w_b = w.unsqueeze(-2).expand(*batch_shape, K, self._n_edges)
         out_weight = torch.zeros(*batch_shape, K, self._n, dtype=dtype, device=v.device)
         out_weight.scatter_add_(-1, up_b, w_b)
@@ -157,8 +204,8 @@ class AdvectionOperator:
             diff = v_b.index_select(-1, csrc) - v_b.index_select(-1, ctgt)
             weighted = g.unsqueeze(-2).expand(*batch_shape, K, csrc.shape[-1]) * diff \
                 if g.dim() >= 1 and g.shape[-1] == csrc.shape[-1] else g * diff
-            csrc_b = _bcast_index(csrc, batch_shape, K)
-            ctgt_b = _bcast_index(ctgt, batch_shape, K)
+            csrc_b = self._expanded(("csrc",), csrc, batch_shape, K)
+            ctgt_b = self._expanded(("ctgt",), ctgt, batch_shape, K)
             l_action.scatter_add_(-1, csrc_b, weighted)
             l_action.scatter_add_(-1, ctgt_b, -weighted)
 

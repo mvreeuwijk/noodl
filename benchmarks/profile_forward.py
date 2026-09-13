@@ -33,6 +33,7 @@ import statistics
 import sys
 
 from benchmarks.composed_model import build_composed, workload_forward
+from benchmarks.measure import time_call
 
 # Profile entries counted as "dispatch overhead" inside `pcg`. cProfile records a C function
 # under its whole repr ("<built-in method torch.where>", "<method 'expand' of
@@ -99,6 +100,27 @@ def profile_ensemble(ensemble: int) -> None:
     )
 
 
+def time_solve(ensemble: int, repeats: int = 15) -> float:
+    """Median wall time of `repeats` warm `layer.solve` calls on ONE model, in seconds.
+
+    The low-variance companion to `time_ensemble`: it times exactly what the profile above
+    covers, in one process, on one already-built model, so run-to-run scatter is the
+    machine's rather than the model build's. On this (noisy, 14-thread) box the
+    `workload_forward` median of 5 moved by 1.6x between two runs of IDENTICAL code, which is
+    far more than the effect being measured -- this figure moves by a few percent instead.
+    """
+    model = build_composed(ensemble=ensemble)
+    for _ in range(3):
+        _solve_once(model)
+    samples = [time_call(lambda: _solve_once(model))[0] for _ in range(repeats)]
+    median = statistics.median(samples)
+    print(
+        f"ensemble {ensemble}: layer.solve median {median * 1e3:.1f} ms of {repeats} warm "
+        f"calls [min {min(samples) * 1e3:.1f} ms, max {max(samples) * 1e3:.1f} ms]"
+    )
+    return median
+
+
 def time_ensemble(ensemble: int, repeats: int = 5) -> float:
     """Median of `repeats` warm `workload_forward` runs (its own timed section), in seconds."""
     samples = [workload_forward(ensemble=ensemble)["elapsed_s"] for _ in range(repeats)]
@@ -111,12 +133,17 @@ def time_ensemble(ensemble: int, repeats: int = 5) -> float:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timing", action="store_true", help="median-of-5 timing, no profile")
+    parser.add_argument(
+        "--solve-timing", action="store_true", help="median layer.solve timing, no profile"
+    )
     parser.add_argument("--ensembles", type=int, nargs="+", default=[1, 100])
     parser.add_argument("--repeats", type=int, default=5)
     args = parser.parse_args(argv)
 
     for ensemble in args.ensembles:
-        if args.timing:
+        if args.solve_timing:
+            time_solve(ensemble)
+        elif args.timing:
             time_ensemble(ensemble, repeats=args.repeats)
         else:
             profile_ensemble(ensemble)

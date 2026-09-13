@@ -98,31 +98,59 @@ def pcg(
     breakdown = torch.zeros_like(converged)
     iterations = torch.zeros(batch_shape, dtype=torch.long, device=device)
 
+    # Hoisted out of the iteration (milestone-1b follow-up, Task B): at ensemble 1 this loop
+    # is DISPATCH bound -- ~40 tensor ops per iteration on 1028-element vectors, each costing
+    # more in Python/ATen dispatch than in arithmetic -- so every op removed from the body is
+    # a real saving, and none of the removals below changes a single bit of the result.
+    #
+    # `ones` replaces the two per-iteration `torch.ones_like` allocations. It is only ever
+    # SELECTED by `torch.where` (never scaled, never added), so one shared constant is
+    # bit-identical to a fresh one each time.
+    ones = torch.ones(batch_shape, dtype=dtype, device=device)
+    # `done` is the loop's own exit test AND the complement of `active`; computing it once
+    # per iteration replaces the `converged | breakdown` that used to be evaluated twice.
+    done = converged | breakdown
+
     it = 0
-    while not bool(torch.all(converged | breakdown)) and it < max_iter:
-        active = ~(converged | breakdown)
+    while not bool(done.all()) and it < max_iter:
+        active = ~done
         Ap = op.matvec(p)
         pAp = (p * Ap).sum(-1)
         new_breakdown = active & (pAp <= 0)
         breakdown = breakdown | new_breakdown
-        active = active & ~new_breakdown
+        # `new_breakdown` is a SUBSET of `active`, so `active ^ new_breakdown` is exactly
+        # the `active & ~new_breakdown` it replaces, in one boolean op instead of two.
+        active = active ^ new_breakdown
+        active_col = active.unsqueeze(-1)
 
-        pAp_safe = torch.where(pAp != 0, pAp, torch.ones_like(pAp))
-        alpha = rz_old / pAp_safe
-        x = torch.where(active.unsqueeze(-1), x + alpha.unsqueeze(-1) * p, x)
-        r = torch.where(active.unsqueeze(-1), r - alpha.unsqueeze(-1) * Ap, r)
+        pAp_safe = torch.where(pAp != 0, pAp, ones)
+        alpha = (rz_old / pAp_safe).unsqueeze(-1)
+        # These three updates keep `torch.where` and must: a MULTIPLICATIVE `active` mask is
+        # NOT bit-equivalent here. A frozen instance's `p`/`Ap` can hold inf (a `beta` that
+        # overflowed on the very iteration it froze on, say), and 0 * inf is nan -- masking
+        # the STEP would poison an `x`/`r`/`p` that, by the per-instance freezing contract,
+        # must never change again. The mask has to SELECT the old value, not scale the new
+        # one. Only `active_col` is hoisted (one `unsqueeze` instead of three).
+        x = torch.where(active_col, x + alpha * p, x)
+        r = torch.where(active_col, r - alpha * Ap, r)
 
         norm_r = torch.linalg.vector_norm(r, dim=-1)
         converged = converged | (active & (norm_r <= tol))
 
         z = m_inv * r
         rz_new = (r * z).sum(-1)
-        rz_old_safe = torch.where(rz_old != 0, rz_old, torch.ones_like(rz_old))
-        beta = rz_new / rz_old_safe
-        p = torch.where(active.unsqueeze(-1), z + beta.unsqueeze(-1) * p, p)
+        rz_old_safe = torch.where(rz_old != 0, rz_old, ones)
+        beta = (rz_new / rz_old_safe).unsqueeze(-1)
+        p = torch.where(active_col, z + beta * p, p)
+        # `rz_new` can be nan for a frozen instance too (an infinite Jacobi diagonal makes
+        # `z` infinite while `r` stays finite), so this one stays a `torch.where` as well.
         rz_old = torch.where(active, rz_new, rz_old)
 
-        iterations = torch.where(active, iterations + 1, iterations)
+        # The one counter that CAN drop its `torch.where`: `active` promotes to 0/1 and
+        # int64 addition is exact, so this is bit-identical to
+        # `torch.where(active, iterations + 1, iterations)` with no inf/nan hazard to carry.
+        iterations = iterations + active
+        done = converged | breakdown
         it += 1
 
     return _result(
