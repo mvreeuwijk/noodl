@@ -36,7 +36,7 @@ source = ["tellegen"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-extend-exclude = ["legacy"]
+extend-exclude = ["legacy", ".claude"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]

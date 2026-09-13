@@ -19,6 +19,9 @@ venv/
 .idea/
 *.swp
 
+# Claude Code local state (worktrees, settings) -- never part of the tracked tree
+.claude/
+
 # Data: never commit measurements
 data/
 *.parquet
