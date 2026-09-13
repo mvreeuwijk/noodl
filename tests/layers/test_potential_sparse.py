@@ -53,6 +53,7 @@ def test_batched_counterexample_raises_naming_instance_1_not_empty_list():
         layer.linear_init(phi_b, {}, None)
 
     message = str(excinfo.value)
+    assert "PotentialFlowLayer 'chain'" in message  # errors name the offending layer
     assert "linear_init" in message
     assert "ungrounded interior nodes" in message
     assert "z1" in message and "z2" in message
@@ -80,8 +81,10 @@ def test_unbatched_floating_group_error_still_names_nodes():
         boundary=["ambient"],
     )
     phi_b = torch.zeros(1, dtype=torch.float64)
-    with pytest.raises(RuntimeError, match=r"f1.*f2|f2.*f1"):
+    with pytest.raises(RuntimeError, match=r"f1.*f2|f2.*f1") as excinfo:
         layer.linear_init(phi_b, {}, None)
+
+    assert "PotentialFlowLayer 'grp'" in str(excinfo.value)
 
 
 def _shutoff_fan_layer() -> tuple[PotentialFlowLayer, torch.Tensor, torch.Tensor]:
@@ -123,8 +126,10 @@ def test_grounding_is_checked_on_actual_slopes_even_when_phi0_is_supplied():
     torch.testing.assert_close(q, torch.tensor([0.2], dtype=torch.float64), atol=1e-9, rtol=0)
 
     phi0_supplied = torch.tensor([200.0], dtype=torch.float64)  # past shutoff: dflow == 0
-    with pytest.raises(RuntimeError, match=r"solve: floating nodes"):
+    with pytest.raises(RuntimeError, match=r"solve: floating nodes") as excinfo:
         layer.solve(phi_b, {}, sources, phi0=phi0_supplied, differentiable=False)
+
+    assert "PotentialFlowLayer 'fan'" in str(excinfo.value)
 
 
 def test_grounding_at_a_supplied_phi0_is_checked_on_the_differentiable_path_too():

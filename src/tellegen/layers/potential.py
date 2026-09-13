@@ -250,7 +250,9 @@ class PotentialFlowLayer:
         unlike the raw operator -- knows them, and because the error text every existing
         (unbatched) test in test_potential.py asserts on is exactly those names. A batched
         failure additionally leads with the failing BATCH INDICES, since node-level detail
-        alone is not attributable across unrelated per-instance failures.
+        alone is not attributable across unrelated per-instance failures. Every message
+        names the offending LAYER first: a model composes several layers over one network,
+        and "solve: floating nodes ... ['z']" alone does not say which of them failed.
         """
         certified = spd_certificate(
             self._src, self._tgt, slopes, self._interior_of_node, self._boundary_mask, atol=0.0
@@ -263,14 +265,17 @@ class PotentialFlowLayer:
         if certified.ndim == 0:
             # Unbatched: one instance, so a bare batch index would say nothing. Name the
             # nodes (or edges) directly, as the pre-Task-11 message did.
-            raise RuntimeError(f"{where}: {self._describe_grounding(records[0])}")
+            raise RuntimeError(
+                f"PotentialFlowLayer {self.name!r}: {where}: "
+                f"{self._describe_grounding(records[0])}"
+            )
         bad_idx = torch.nonzero(~certified.reshape(-1), as_tuple=False).flatten().tolist()
         details = "; ".join(
             f"instance {rec['instance']}: {self._describe_grounding(rec)}" for rec in records
         )
         raise RuntimeError(
-            f"{where}: batch indices {bad_idx} do not certify a grounded, positive-slope "
-            f"system; {details}"
+            f"PotentialFlowLayer {self.name!r}: {where}: batch indices {bad_idx} do not "
+            f"certify a grounded, positive-slope system; {details}"
         )
 
     def _describe_grounding(self, record: dict) -> str:
