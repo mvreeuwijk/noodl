@@ -279,7 +279,13 @@ def test_solve_fills_a_supplied_diagnostics_dict():
 
     layer.solve(phi_b, drivers, None, differentiable=False, diagnostics=diagnostics)
 
-    assert set(diagnostics) == {"newton_iterations", "linear_iterations", "method"}
+    assert set(diagnostics) == {
+        "newton_iterations",
+        "linear_iterations",
+        "method",
+        "converged",
+        "residual_norm",
+    }
     assert diagnostics["method"] == "auto"
     assert diagnostics["newton_iterations"] >= 1
     assert isinstance(diagnostics["linear_iterations"], torch.Tensor)
@@ -294,7 +300,13 @@ def test_diagnostics_are_filled_on_the_differentiable_path_too():
 
     layer.solve(phi_b, drivers, None, differentiable=True, diagnostics=diagnostics)
 
-    assert set(diagnostics) == {"newton_iterations", "linear_iterations", "method"}
+    assert set(diagnostics) == {
+        "newton_iterations",
+        "linear_iterations",
+        "method",
+        "converged",
+        "residual_norm",
+    }
     assert diagnostics["newton_iterations"] >= 1
     assert isinstance(diagnostics["linear_iterations"], torch.Tensor)
 
@@ -494,3 +506,58 @@ def test_differentiable_solve_does_not_trace_the_initial_guess(two_zone_layer):
         src_internal.grad, src_supplied.grad, rtol=1e-12, atol=1e-14
     )
     assert src_supplied.grad.abs().max() > 0, "a zero gradient would make this vacuous"
+
+
+# --------------------------------------------------- C2: on_failure="return" carries status
+# Final-review finding C2: `solve` read only `NewtonResult.x` and discarded
+# `converged`/`residual_norm`, so `on_failure="return"` returned a non-converged solution
+# with nothing anywhere reporting it -- and on the differentiable path linearised the
+# adjoint at that non-converged point, producing a silently wrong gradient. Spec section
+# 3.2: the escape hatch "is never silent: the result carries the status", and a
+# non-converged forward has no defined adjoint.
+
+
+def test_solve_on_failure_return_reports_non_convergence_through_diagnostics():
+    layer, drivers, phi_b = _series_layer()
+    diagnostics: dict = {}
+
+    phi, q = layer.solve(
+        phi_b,
+        drivers,
+        None,
+        differentiable=False,
+        diagnostics=diagnostics,
+        max_iter=1,
+        on_failure="return",
+    )
+
+    assert torch.isfinite(phi).all()
+    assert "converged" in diagnostics, "on_failure='return' must not drop the status"
+    assert not bool(diagnostics["converged"].any()), "this solve genuinely did not converge"
+    assert diagnostics["converged"].dtype == torch.bool
+    assert "residual_norm" in diagnostics
+    assert bool((diagnostics["residual_norm"] > 0).all())
+
+
+def test_solve_refuses_on_failure_return_without_a_diagnostics_dict():
+    layer, drivers, phi_b = _series_layer()
+    with pytest.raises(ValueError, match="on_failure='return' requires diagnostics="):
+        layer.solve(
+            phi_b, drivers, None, differentiable=False, max_iter=1, on_failure="return"
+        )
+
+
+def test_differentiable_solve_refuses_on_failure_return_outright():
+    # A non-converged forward has no defined adjoint: implicit_solve rejects the escape
+    # hatch rather than returning a gradient linearised at the wrong point.
+    layer, drivers, phi_b = _series_layer()
+    with pytest.raises(ValueError, match="on_failure='return'"):
+        layer.solve(
+            phi_b,
+            drivers,
+            None,
+            differentiable=True,
+            diagnostics={},
+            max_iter=1,
+            on_failure="return",
+        )

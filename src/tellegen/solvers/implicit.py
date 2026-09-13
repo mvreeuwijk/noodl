@@ -167,9 +167,15 @@ class _Implicit(torch.autograd.Function):
             # counts are only observable from inside this Function. Writing them into a
             # caller-supplied dict is the narrowest way to expose them without changing what
             # `implicit_solve` RETURNS (a plain tensor, which is what autograd needs) or
-            # making every caller that does not care pay for a richer result type.
+            # making every caller that does not care pay for a richer result type. The
+            # convergence STATUS goes in alongside them (design section 3.2: a solve result
+            # always carries its status), even though this path can only ever report
+            # success -- `implicit_solve` refuses `on_failure="return"` outright, so a
+            # non-converged forward raises out of `newton` above rather than reaching here.
             diagnostics["newton_iterations"] = result.iterations
             diagnostics["linear_iterations"] = result.linear_iterations
+            diagnostics["converged"] = result.converged
+            diagnostics["residual_norm"] = result.residual_norm
         ctx.residual = residual
         ctx.operator = operator
         ctx.newton_kwargs = newton_kwargs
@@ -242,9 +248,28 @@ def implicit_solve(
     the backward pass's adjoint system.
 
     ``diagnostics``, when a dict is given, is filled with the forward Newton solve's own
-    ``newton_iterations`` and ``linear_iterations`` (see ``_Implicit.forward``). Every other
-    keyword is forwarded to ``newton``. It is keyword-ONLY deliberately: sitting positionally
-    in front of ``**newton_kwargs`` it would silently swallow a fifth positional argument
-    from any caller who thought they were passing something else.
+    ``newton_iterations``, ``linear_iterations``, ``converged`` and ``residual_norm`` (see
+    ``_Implicit.forward``). Every other keyword is forwarded to ``newton``. It is
+    keyword-ONLY deliberately: sitting positionally in front of ``**newton_kwargs`` it would
+    silently swallow a fifth positional argument from any caller who thought they were
+    passing something else.
+
+    ``on_failure="return"`` is REFUSED here (``ValueError``), unlike on ``newton``'s own
+    non-differentiable path. The implicit-function adjoint linearises at the point the
+    forward returned and assumes that point solves ``residual(x, *params) = 0``; at a
+    non-converged point that assumption is false, the adjoint solve nevertheless converges
+    happily, and the gradient handed back is silently wrong. Design section 3.2 legislates
+    exactly this: the backward pass raises unconditionally because "a wrong gradient is
+    worse than no gradient" -- so the escape hatch must not be reachable on the
+    differentiable path at all. Use ``differentiable=False`` (or ``newton`` directly) if a
+    non-converged instance is something the caller wants to inspect rather than abort on.
     """
+    if newton_kwargs.get("on_failure") == "return":
+        raise ValueError(
+            "implicit_solve: on_failure='return' is not supported on the differentiable "
+            "path -- a non-converged forward has no defined adjoint, so the gradient would "
+            "be silently wrong (design section 3.2: the backward pass raises "
+            "unconditionally). Use the non-differentiable solve if a non-converged instance "
+            "must be returned rather than raised on."
+        )
     return _Implicit.apply(x0, residual, operator, newton_kwargs, diagnostics, *params)

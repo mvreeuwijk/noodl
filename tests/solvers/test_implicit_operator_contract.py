@@ -108,15 +108,35 @@ def test_gradcheck_on_a_nonsymmetric_transport_shaped_problem_via_the_adjoint():
         assert torch.autograd.gradcheck(f_buggy, (A,), eps=1e-6, atol=1e-5)
 
 
-def test_backward_raises_even_though_forward_used_on_failure_return():
-    # A deliberately, unconditionally singular "Jacobian": the residual is well-posed
-    # (x - c = 0 has an exact solution), but the operator callable always returns an
-    # all-zero 1x1 operator regardless of x, so forward Newton cannot actually take a real
-    # step -- on_failure="return" lets the forward pass complete anyway (returning a
-    # non-converged x close to x0) instead of raising. The backward pass must then raise
-    # unconditionally when it tries to solve the (still all-zero, hence singular) adjoint
-    # system, regardless of what on_failure the forward used: on_failure never applies to
-    # the backward pass (design section 3.2).
+def test_implicit_solve_refuses_on_failure_return_on_the_differentiable_path():
+    # Final-review finding C2. This test previously asserted the WEAKER guarantee that the
+    # forward could complete non-converged under on_failure="return" as long as the backward
+    # raised. That is not enough: the backward raises only if the adjoint system itself is
+    # degenerate, and at a merely non-converged (but perfectly nonsingular) point the adjoint
+    # solve converges happily and hands back a gradient linearised at the wrong point, with
+    # nothing reporting it. The escape hatch is therefore refused at the front door on the
+    # differentiable path -- design section 3.2, "a wrong gradient is worse than no
+    # gradient". `newton` itself still honours on_failure="return"; only the differentiable
+    # wrapper refuses it.
+    c = torch.tensor([[2.0]], dtype=torch.float64, requires_grad=True)
+    x0 = torch.tensor([[5.0]], dtype=torch.float64)
+
+    def residual(x, c_):
+        return x - c_
+
+    def operator(x, c_):
+        return torch.eye(x.shape[-1], dtype=x.dtype).expand(*x.shape, x.shape[-1])
+
+    with pytest.raises(ValueError, match=r"on_failure='return'.*no defined adjoint"):
+        implicit_solve(residual, operator, x0, (c,), max_iter=2, on_failure="return")
+
+
+def test_backward_raises_unconditionally_on_a_singular_adjoint_system():
+    # on_failure never applies to the backward pass (design section 3.2). Here the FORWARD
+    # converges exactly (identity Jacobian on a linear residual), and the operator callable
+    # is degenerate only at the converged point -- which is precisely where the adjoint
+    # system is built. The backward must raise rather than return whatever the singular
+    # solve produced.
     #
     # The `match` is not decoration: the pre-Task-12 dense `torch.linalg.solve` ALSO raised
     # here (LinAlgError is a RuntimeError subclass), so a bare `pytest.raises(RuntimeError)`
@@ -130,12 +150,13 @@ def test_backward_raises_even_though_forward_used_on_failure_return():
         return x - c_
 
     def operator(x, c_):
-        return torch.zeros(*x.shape, x.shape[-1], dtype=x.dtype)
+        eye = torch.eye(x.shape[-1], dtype=x.dtype).expand(*x.shape, x.shape[-1])
+        at_solution = bool((x - c_).abs().max() < 1e-9)
+        return torch.zeros_like(eye) if at_solution else eye
 
-    x = implicit_solve(
-        residual, operator, x0, (c,), max_iter=2, on_failure="return", atol=1e-12, rtol=1e-12
-    )
-    assert torch.isfinite(x).all()  # forward completed without raising
+    x = implicit_solve(residual, operator, x0, (c,), atol=1e-12, rtol=1e-12)
+    assert torch.isfinite(x).all()
+    torch.testing.assert_close(x, c.detach())  # the forward genuinely converged
 
     with pytest.raises(RuntimeError, match=r"implicit_solve backward.*batch indices \[0\]"):
         torch.autograd.grad(x.sum(), c)

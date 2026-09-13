@@ -470,11 +470,28 @@ class PotentialFlowLayer:
         absent gradient.
 
         `diagnostics`, when a dict is passed, is filled with this solve's own
-        `{"newton_iterations", "linear_iterations", "method"}` -- the Newton step count, the
-        per-instance maximum inner-solver iteration count (`None` if no linear solve
-        happened), and the inner method actually used. Passing `None` (the default) changes
-        nothing; the dict is an out-parameter rather than an extra return value so that
-        `solve`'s `(phi, q)` contract, which every existing caller unpacks, is untouched.
+        `{"newton_iterations", "linear_iterations", "method", "converged", "residual_norm"}`
+        -- the Newton step count, the per-instance maximum inner-solver iteration count
+        (`None` if no linear solve happened), the inner method actually used, the
+        per-instance convergence flag and the per-instance final residual norm. Passing
+        `None` (the default) changes nothing; the dict is an out-parameter rather than an
+        extra return value so that `solve`'s `(phi, q)` contract, which every existing
+        caller unpacks, is untouched.
+
+        `on_failure` (forwarded to `newton` among `newton_kwargs`) is `"raise"` by default:
+        a batch that fails to converge within `max_iter` raises, naming the failing
+        instances. `"return"` is the explicit, narrow escape hatch of design section 3.2 --
+        a calibration loop that would rather inspect or down-weight a failed instance than
+        abort -- and it is accepted here under two conditions, because this method returns
+        `(phi, q)` tensors with no room for a status:
+
+        - `diagnostics=` must be supplied, so `converged`/`residual_norm` have somewhere to
+          go. Without it the status would be silently dropped and a non-converged `phi`
+          would be indistinguishable from a converged one; that is refused with a
+          `ValueError`.
+        - `differentiable=False` is required. On the differentiable path the escape hatch is
+          refused outright by `solvers.implicit.implicit_solve`: the adjoint linearises at
+          the returned point, and at a non-converged point the gradient is silently wrong.
 
         The inner linear solver is this layer's `linear_solver` (set at construction), unless
         the caller overrides it with an explicit `method=` among `newton_kwargs`.
@@ -487,6 +504,16 @@ class PotentialFlowLayer:
         """
         drivers = drivers or {}
         newton_kwargs.setdefault("method", self.linear_solver)
+        if newton_kwargs.get("on_failure") == "return" and diagnostics is None:
+            # `solve` returns (phi, q) tensors; without a diagnostics dict there is nowhere
+            # for `converged`/`residual_norm` to go, and a non-converged phi would be
+            # indistinguishable from a converged one. Design section 3.2: the escape hatch
+            # "is never silent: the result carries the status".
+            raise ValueError(
+                f"PotentialFlowLayer {self.name!r}: on_failure='return' requires "
+                f"diagnostics= so the status is not silently dropped; pass a dict and read "
+                f"its 'converged' and 'residual_norm' entries."
+            )
 
         # The initial guess is NOT a differentiable quantity, and neither is the grounding
         # check below. Both are computed under no_grad (and a caller-supplied phi0 is
@@ -548,6 +575,11 @@ class PotentialFlowLayer:
                 diagnostics["newton_iterations"] = result.iterations
                 diagnostics["linear_iterations"] = result.linear_iterations
                 diagnostics["method"] = newton_kwargs["method"]
+                # The per-instance STATUS, not only the cost. Without these two,
+                # `on_failure="return"` returned a non-converged phi with nothing anywhere
+                # reporting it (final review C2).
+                diagnostics["converged"] = result.converged
+                diagnostics["residual_norm"] = result.residual_norm
             phi = self.assemble(result.x, phi_boundary)
             q = self.flows(phi, drivers)
             return phi, q
