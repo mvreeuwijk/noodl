@@ -74,9 +74,11 @@ def _as_operator(op: LinearOperator | torch.Tensor) -> LinearOperator:
     Every pre-Milestone-1b caller passes a callable returning a dense ``(..., m, m)``
     tensor; wrapping here (rather than making each of them construct an operator) is the
     single compatibility shim that makes the operator contract invisible to them.
-    ``DenseOperator``'s ``symmetric=False`` default is load-bearing: an auto-wrapped
-    Jacobian makes no symmetry claim, so ``select.solve`` routes it to GMRES rather than
-    to CG, which would be wrong for a nonsymmetric Newton Jacobian.
+    ``DenseOperator``'s ``symmetric=False`` default is load-bearing: it lets this wrap
+    happen with no keyword at all, and it makes no symmetry claim on a Newton Jacobian that
+    is in general nonsymmetric -- so an explicit ``method="cg"`` is correctly refused, and
+    ``"auto"`` falls through to GMRES for anything this function does not route to the
+    direct path.
     """
     if isinstance(op, torch.Tensor):
         return DenseOperator(op)
