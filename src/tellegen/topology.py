@@ -291,6 +291,87 @@ class Network:
         self._cache[key] = result
         return result
 
+    def endpoints(self, kind: str | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """(source_node_index, target_node_index), each (b_kind,), shared across the batch.
+
+        A DISTINCT accessor from `edge_index(kind)`, which returns the columns of `kind`
+        into the full edge list -- `endpoints` returns, for those same columns, the node
+        POSITION of every edge's source and target: exactly the row positions
+        `incidence(kind)` puts a +1 and a -1 at. `difference_ep` and `accumulate` are
+        gather/scatter forms of `difference(kind)` and `incidence(kind) @ w` built from this
+        pair, so `endpoints` and `incidence` always describe the same graph by construction
+        (both derive from `edge_index(kind)` and `self.edges` in node order). Cached under
+        `("endpoints", kind)`; cleared by `add_node`, `add_edge` and `to()` like every other
+        cached tensor. Raises `KeyError` (via `edge_index`) naming the unknown kind, exactly
+        as `incidence(kind)` and `difference(kind)` do.
+        """
+        key = ("endpoints", kind)
+        if key in self._cache:
+            return self._cache[key]
+        cols = self.edge_index(kind)
+        edges = self.edges
+        index = self._node_index()
+        src = torch.tensor(
+            [index[edges[c][0]] for c in cols.tolist()], dtype=torch.long, device=self.device
+        )
+        tgt = torch.tensor(
+            [index[edges[c][1]] for c in cols.tolist()], dtype=torch.long, device=self.device
+        )
+        result = (src, tgt)
+        self._cache[key] = result
+        return result
+
+    def difference_ep(self, phi: torch.Tensor, kind: str | None = None) -> torch.Tensor:
+        """Gather form of `difference(kind) @ phi`: `phi[..., src] - phi[..., tgt]`.
+
+        `phi` has shape `(..., n)`; the result has shape `(..., b_kind)`, broadcasting over
+        arbitrary leading batch dimensions exactly like `difference(kind) @ phi` does on a
+        batched `phi`. Never forms the `(b_kind, n)` `difference()` matrix: this is the
+        gather primitive the milestone's sparse operators are built from instead.
+        """
+        if phi.dim() == 0:
+            raise ValueError(
+                f"Network.difference_ep: phi is a scalar (shape {tuple(phi.shape)}); "
+                f"expected shape (..., {self.n}) with {self.n} nodes (kind={kind!r})"
+            )
+        if phi.shape[-1] != self.n:
+            raise ValueError(
+                f"Network.difference_ep: phi has trailing size {phi.shape[-1]} but the network "
+                f"has {self.n} nodes (kind={kind!r}); got shape {tuple(phi.shape)}"
+            )
+        src, tgt = self.endpoints(kind)
+        return phi[..., src] - phi[..., tgt]
+
+    def accumulate(self, w: torch.Tensor, kind: str | None = None) -> torch.Tensor:
+        """Scatter-add form of `incidence(kind) @ w`: `+w` at `src`, `-w` at `tgt`.
+
+        `w` has shape `(..., b_kind)`; the result has shape `(..., n)`. Built with
+        `index_add` (out of place) on a FRESH zero tensor allocated inside this call, never
+        `index_add_` (in place) on an input or on anything aliased with one: an in-place
+        scatter into a tensor autograd needs unmodified for its own backward pass would
+        corrupt the gradient of any earlier operation sharing that storage, whereas an
+        out-of-place `index_add` on a tensor this call itself just created has no such alias
+        to protect, and is exactly as differentiable w.r.t. `w` as `incidence(kind) @ w` is.
+        Never forms the `(n, b_kind)` `incidence()` matrix.
+        """
+        src, tgt = self.endpoints(kind)
+        b_kind = len(src)
+        if w.dim() == 0:
+            raise ValueError(
+                f"Network.accumulate: w is a scalar (shape {tuple(w.shape)}); "
+                f"expected shape (..., {b_kind}) with {b_kind} edges (kind={kind!r})"
+            )
+        if w.shape[-1] != b_kind:
+            raise ValueError(
+                f"Network.accumulate: w has trailing size {w.shape[-1]} but the network "
+                f"has {b_kind} edges (kind={kind!r}); got shape {tuple(w.shape)}"
+            )
+        batch_shape = w.shape[:-1]
+        out = torch.zeros(batch_shape + (self.n,), dtype=w.dtype, device=w.device)
+        out = out.index_add(-1, src, w)
+        out = out.index_add(-1, tgt, -w)
+        return out
+
     def spanning_forest(self, kind: str | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         """Spanning forest of the edges of one kind: (tree_cols, chord_cols).
 

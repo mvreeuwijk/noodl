@@ -5,6 +5,14 @@ network, per Tellegen's theorem reciprocity between forward and adjoint), then o
 gradients with respect to every parameter tensor by one more autograd pass through the
 residual evaluated at the converged point, weighted by -lambda.
 
+That transposed solve is matvec-free: the Jacobian at x* is whatever LinearOperator the
+caller's `operator` callable returns there, and `TransposeOperator` exposes its `rmatvec`
+as the transposed action, so `solvers.select.solve` handles the adjoint system with no
+separate code path and nothing is ever materialised as an explicit matrix. `op.matvec` is
+never reused as the transpose: the two coincide only for a symmetric operator, and a
+caller's own wrong `rmatvec` must surface as a wrong gradient rather than be masked here.
+The adjoint solve always RAISES on failure, whatever `on_failure` the forward was given.
+
 Only first-order gradients are supported: `backward` never builds a graph connecting its
 returned gradients back to `grad_x` or to `params` (the internal `torch.autograd.grad` call
 uses the default `create_graph=False`), so a caller who tries to differentiate through
@@ -40,26 +48,137 @@ from collections.abc import Callable
 
 import torch
 
-from tellegen.solvers.newton import newton
+from tellegen.operators.base import LinearOperator
+from tellegen.operators.dense import DenseOperator
+from tellegen.solvers.newton import inner_solve_rtol, newton
+from tellegen.solvers.select import solve as select_solve
 
 
-def adjoint(jacobian_at_solution: torch.Tensor, grad_x: torch.Tensor) -> torch.Tensor:
-    J = jacobian_at_solution
-    return torch.linalg.solve(J.transpose(-1, -2), grad_x.unsqueeze(-1)).squeeze(-1)
+def _as_operator(op: LinearOperator | torch.Tensor) -> LinearOperator:
+    """Auto-wrap a plain dense Jacobian tensor as a ``DenseOperator``, exactly as
+    ``solvers.newton._as_operator`` does for the forward pass: every pre-Milestone-1b caller
+    of ``adjoint`` hands it an explicit ``(..., m, m)`` tensor, and wrapping here is what
+    keeps the operator contract invisible to them.
+    """
+    if isinstance(op, torch.Tensor):
+        return DenseOperator(op)
+    return op
+
+
+class TransposeOperator:
+    """Wraps a LinearOperator's TRANSPOSE action as its own LinearOperator: matvec here is
+    the wrapped operator's rmatvec, and rmatvec here is the wrapped operator's matvec. This
+    lets the ordinary solve() entry point solve the adjoint system op^T @ lambda = grad_x
+    without a separate code path, and without ever assuming op.matvec == op.rmatvec (true
+    only for a symmetric operator, and not assumed here even then -- the swap always
+    happens, so a bug in a caller's own claimed rmatvec is exposed rather than masked).
+
+    This is the general counterpart of ``layers.transport._TransposeView`` (Task 9), which
+    is the same adapter specialised to that layer's own advection operator; the two agree
+    method for method, except that this one can forward an SPD certificate (see
+    ``spd_certificate``) where the transport-local view, whose operator never certifies,
+    simply returns None.
+    """
+
+    def __init__(self, op: LinearOperator) -> None:
+        self._op = op
+        self.shape = op.shape
+        self.dtype = op.dtype
+        self.device = op.device
+        # The transpose of a symmetric operator is symmetric; of a nonsymmetric one, still
+        # nonsymmetric. Either way the wrapped operator's own declaration carries over.
+        self.symmetric = op.symmetric
+
+    def matvec(self, x: torch.Tensor) -> torch.Tensor:
+        return self._op.rmatvec(x)
+
+    def rmatvec(self, x: torch.Tensor) -> torch.Tensor:
+        return self._op.matvec(x)
+
+    def diagonal(self) -> torch.Tensor:
+        return self._op.diagonal()  # diagonal entries are invariant under transpose
+
+    def assemble(self) -> torch.Tensor | None:
+        a = self._op.assemble()
+        return None if a is None else a.transpose(-1, -2)
+
+    def spd_certificate(self) -> torch.Tensor | None:
+        """The wrapped operator's certificate, but only when it declares itself SYMMETRIC.
+
+        A symmetric operator is its own transpose, so an SPD certificate for it certifies
+        this view verbatim -- which is what keeps `PotentialFlowLayer.adjoint`'s
+        GraphLaplacianOperator on the PCG path rather than dropping to GMRES. For a
+        NONSYMMETRIC operator the transpose is a different matrix and the wrapped
+        certificate says nothing about it, so None is returned: `select.solve` then routes
+        to GMRES, which makes no symmetry or definiteness assumption to violate.
+        """
+        return self._op.spd_certificate() if self._op.symmetric else None
+
+
+def adjoint(
+    op: LinearOperator | torch.Tensor,
+    grad_x: torch.Tensor,
+    *,
+    where: str = "adjoint",
+    method: str = "auto",
+) -> torch.Tensor:
+    """Solve the adjoint system ``op^T @ lambda = grad_x`` via ``op.rmatvec`` (never
+    ``op.matvec``): the two coincide only when ``op`` is symmetric, which is not assumed
+    here. ``op`` may be a plain dense tensor (backward compatible with every pre-1b caller)
+    or a ``LinearOperator``; a tensor is auto-wrapped in ``DenseOperator``.
+
+    ``method`` is forwarded to ``solvers.select.solve``, with the same compatibility shim
+    ``newton`` applies: a BARE TENSOR under ``method="auto"`` resolves to ``"direct"`` (LU
+    of the explicit transpose), so a legacy dense caller keeps the dense numerics it has
+    always had rather than silently acquiring a Krylov solver's own error floor. An explicit
+    ``method`` always wins, and a real operator's ``"auto"`` goes through the eligibility
+    table (PCG when the TransposeOperator certifies SPD, GMRES otherwise).
+
+    Always raises on failure (``on_failure="raise"``, not exposed as a parameter): every
+    caller of this function -- ``_Implicit.backward`` unconditionally, and
+    ``PotentialFlowLayer.adjoint`` as a diagnostic entry point -- wants a wrong gradient to
+    be impossible rather than silently returned.
+    """
+    step_method = "direct" if method == "auto" and isinstance(op, torch.Tensor) else method
+    top = TransposeOperator(_as_operator(op))
+    result = select_solve(
+        top,
+        grad_x,
+        method=step_method,
+        on_failure="raise",
+        where=where,
+        rtol=inner_solve_rtol(grad_x.dtype),
+    )
+    return result.x
 
 
 class _Implicit(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x0, residual, jacobian, newton_kwargs, *params):
+    def forward(ctx, x0, residual, operator, newton_kwargs, diagnostics, *params):
         with torch.no_grad():
             result = newton(
                 lambda x: residual(x, *params),
-                lambda x: jacobian(x, *params),
+                lambda x: operator(x, *params),
                 x0,
                 **newton_kwargs,
             )
+        if diagnostics is not None:
+            # The forward Newton solve happens here and nowhere else, so its iteration
+            # counts are only observable from inside this Function. Writing them into a
+            # caller-supplied dict is the narrowest way to expose them without changing what
+            # `implicit_solve` RETURNS (a plain tensor, which is what autograd needs) or
+            # making every caller that does not care pay for a richer result type. The
+            # convergence STATUS goes in alongside them (design section 3.2: a solve result
+            # always carries its status), even though this path can only ever report
+            # success -- `implicit_solve` refuses `on_failure="return"` outright, so a
+            # non-converged forward raises out of `newton` above rather than reaching here.
+            diagnostics["newton_iterations"] = result.iterations
+            diagnostics["linear_iterations"] = result.linear_iterations
+            diagnostics["converged"] = result.converged
+            diagnostics["residual_norm"] = result.residual_norm
         ctx.residual = residual
-        ctx.jacobian = jacobian
+        ctx.operator = operator
+        ctx.newton_kwargs = newton_kwargs
         ctx.save_for_backward(result.x, *params)
         return result.x
 
@@ -80,8 +199,24 @@ class _Implicit(torch.autograd.Function):
         saved = ctx.saved_tensors
         x, params = saved[0], list(saved[1:])
         with torch.no_grad():
-            J = ctx.jacobian(x, *params)
-            lam = adjoint(J, grad_x)
+            op = ctx.operator(x, *params)
+            # on_failure is never forwarded: `adjoint` always raises (its own fixed
+            # default), whatever the FORWARD pass was told. A forward solve may legitimately
+            # be asked to return a non-converged instance instead of raising -- a
+            # calibration loop inspecting or down-weighting it -- but a backward pass has no
+            # such caller: a wrong gradient silently reaching an optimiser is strictly worse
+            # than an exception (design section 3.2). `method` IS forwarded, so a layer
+            # configured with linear_solver="direct" keeps the dense numerics it asked for
+            # on both passes rather than only on the forward one.
+            lam = adjoint(
+                op,
+                grad_x,
+                # The forward's own `where` (a layer name, when a layer supplied one) with
+                # " backward" appended, so an adjoint failure names the same solve the
+                # forward would have. Defaults to "implicit_solve backward" as before.
+                where=f"{ctx.newton_kwargs.get('where', 'implicit_solve')} backward",
+                method=ctx.newton_kwargs.get("method", "auto"),
+            )
         with torch.enable_grad():
             p = [t.detach().requires_grad_(t.requires_grad) for t in params]
             r = ctx.residual(x.detach(), *p)
@@ -95,14 +230,49 @@ class _Implicit(torch.autograd.Function):
         it = iter(grads)
         for t in p:
             grads_aligned.append(next(it) if t.requires_grad else None)
-        return (None, None, None, None, *grads_aligned)
+        return (None, None, None, None, None, *grads_aligned)
 
 
 def implicit_solve(
     residual: Callable[..., torch.Tensor],
-    jacobian: Callable[..., torch.Tensor],
+    operator: Callable[..., LinearOperator | torch.Tensor],
     x0: torch.Tensor,
     params: tuple[torch.Tensor, ...],
+    *,
+    diagnostics: dict | None = None,
     **newton_kwargs,
 ) -> torch.Tensor:
-    return _Implicit.apply(x0, residual, jacobian, newton_kwargs, *params)
+    """Differentiable solve of ``residual(x, *params) = 0``; returns the converged ``x``.
+
+    ``operator`` is called as ``operator(x, *params)`` at the current iterate and returns
+    either a ``LinearOperator`` (the Milestone-1b contract) or a plain dense ``(..., m, m)``
+    tensor (auto-wrapped, for every pre-1b caller); it is the same callable contract
+    ``newton`` takes, and the same object is re-evaluated at the converged point to build
+    the backward pass's adjoint system.
+
+    ``diagnostics``, when a dict is given, is filled with the forward Newton solve's own
+    ``newton_iterations``, ``linear_iterations``, ``converged`` and ``residual_norm`` (see
+    ``_Implicit.forward``). Every other keyword is forwarded to ``newton``. It is
+    keyword-ONLY deliberately: sitting positionally in front of ``**newton_kwargs`` it would
+    silently swallow a fifth positional argument from any caller who thought they were
+    passing something else.
+
+    ``on_failure="return"`` is REFUSED here (``ValueError``), unlike on ``newton``'s own
+    non-differentiable path. The implicit-function adjoint linearises at the point the
+    forward returned and assumes that point solves ``residual(x, *params) = 0``; at a
+    non-converged point that assumption is false, the adjoint solve nevertheless converges
+    happily, and the gradient handed back is silently wrong. Design section 3.2 legislates
+    exactly this: the backward pass raises unconditionally because "a wrong gradient is
+    worse than no gradient" -- so the escape hatch must not be reachable on the
+    differentiable path at all. Use ``differentiable=False`` (or ``newton`` directly) if a
+    non-converged instance is something the caller wants to inspect rather than abort on.
+    """
+    if newton_kwargs.get("on_failure") == "return":
+        raise ValueError(
+            "implicit_solve: on_failure='return' is not supported on the differentiable "
+            "path -- a non-converged forward has no defined adjoint, so the gradient would "
+            "be silently wrong (design section 3.2: the backward pass raises "
+            "unconditionally). Use the non-differentiable solve if a non-converged instance "
+            "must be returned rather than raised on."
+        )
+    return _Implicit.apply(x0, residual, operator, newton_kwargs, diagnostics, *params)

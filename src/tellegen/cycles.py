@@ -12,15 +12,33 @@ from tellegen.topology import Network
 
 
 def branch_flows(net: Network, amplitudes: torch.Tensor, kind: str | None = None) -> torch.Tensor:
-    """Map cycle amplitudes ``(..., l)`` to branch flows ``(..., b_kind)``: ``q = m @ J``.
+    """Map cycle amplitudes ``(..., l)`` to branch flows ``(..., b_kind)``: applies the
+    cycle basis by its ACTION rather than forming the dense ``(l, b_kind)`` matrix.
 
-    ``incidence(kind) @ q == 0`` for every ``m`` because the rows of ``J`` span the
-    null space of the incidence matrix.
+    Each chord edge ``(u, v)`` carrying amplitude ``m`` is algebraically equivalent to
+    injecting ``+m`` at ``u`` and extracting ``m`` at ``v`` and letting the spanning tree
+    carry the return path (this is exactly what makes ``incidence(kind) @ q == 0`` for the
+    whole cycle: the tree's own contribution must exactly cancel the chord's). The tree part
+    is therefore `_tree_solve`'s own job, fed the negative of that per-chord injection summed
+    over every chord via a single scatter-add (`chord_source`); the chord edges' own flows
+    are just their amplitudes directly, since `cycle_basis`'s construction gives each chord
+    row a self-entry of exactly 1 at its own column.
     """
-    J = net.cycle_basis(kind).to(amplitudes.dtype)
-    if amplitudes.shape[-1] != J.shape[0]:
-        raise ValueError(f"expected {J.shape[0]} amplitudes, got {amplitudes.shape[-1]}")
-    return amplitudes @ J
+    _tree_cols, chord_cols = net.spanning_forest(kind)
+    if amplitudes.shape[-1] != chord_cols.numel():
+        raise ValueError(f"expected {chord_cols.numel()} amplitudes, got {amplitudes.shape[-1]}")
+    u_idx, v_idx = _chord_endpoints(net, kind)
+
+    batch_shape = amplitudes.shape[:-1]
+    chord_source = torch.zeros(
+        *batch_shape, net.n, dtype=amplitudes.dtype, device=amplitudes.device
+    )
+    chord_source.scatter_add_(-1, _expand_index(u_idx, batch_shape), -amplitudes)
+    chord_source.scatter_add_(-1, _expand_index(v_idx, batch_shape), amplitudes)
+
+    q = _tree_solve(net, kind, chord_source)
+    q = q.scatter(-1, _expand_index(chord_cols, batch_shape), amplitudes)
+    return q
 
 
 def assert_forward_oriented(net: Network, kind: str | None = None) -> None:
@@ -39,6 +57,154 @@ def assert_forward_oriented(net: Network, kind: str | None = None) -> None:
         )
 
 
+def _expand_index(idx: torch.Tensor, batch_shape: torch.Size) -> torch.Tensor:
+    """Broadcast a 1-D index tensor to `(*batch_shape, len(idx))` for scatter_add_/indexing
+    against a `(*batch_shape, m)` tensor, without a Python loop over the batch."""
+    return idx.reshape((1,) * len(batch_shape) + idx.shape).expand(*batch_shape, *idx.shape)
+
+
+def _chord_endpoints(net: Network, kind: str | None) -> tuple[torch.Tensor, torch.Tensor]:
+    """Node-index endpoints ``(u_idx, v_idx)``, each ``(l,)``, of every chord edge of `kind`,
+    in chord order (matching ``net.spanning_forest(kind)[1]``). Both live on ``net.device``,
+    like every other index tensor this module builds (`_tree_elimination_levels`'s levels in
+    particular) -- `branch_flows` scatters `amplitudes` (on the caller's device) through these
+    indices, so a device mismatch here would raise on any non-CPU network. Cached on
+    `net._cache`, exactly like `_tree_elimination_levels`, so `branch_flows` never repeats this
+    Python-level comprehension over chord edges once per call.
+    """
+    key = ("chord_endpoints", kind)
+    if key in net._cache:
+        return net._cache[key]
+    _tree_cols, chord_cols = net.spanning_forest(kind)
+    cols = net.edge_index(kind).tolist()
+    edges = net.edges
+    chord_edges = [edges[cols[j]] for j in chord_cols.tolist()]
+    u_idx = torch.tensor(
+        [net.node_index(u) for (u, _v, _k) in chord_edges], dtype=torch.long, device=net.device
+    )
+    v_idx = torch.tensor(
+        [net.node_index(v) for (_u, v, _k) in chord_edges], dtype=torch.long, device=net.device
+    )
+    result = (u_idx, v_idx)
+    net._cache[key] = result
+    return result
+
+
+def _tree_elimination_levels(net: Network, kind: str | None):
+    """Levels of net's spanning forest (of edges of `kind`), deepest first, for O(depth)
+    elimination. Each level is `(child_nodes, edge_cols, signs, parent_nodes)`, all 1-D
+    LongTensors/the edge dtype's signs tensor, describing every node at that BFS depth
+    simultaneously: `signs[i]` is `+1` if `child_nodes[i]` is the SOURCE of
+    `edge_cols[i]` and `-1` if it is the TARGET (i.e. exactly `incidence(kind)[child, edge]`).
+    One root per component (the first node index touched in that component, matching
+    particular_flow's existing "drop one reference node" convention) never appears as a
+    child and so never receives a level entry. Cached on `net._cache`, exactly like
+    `spanning_forest`/`component_labels`; this is the one Python-level (per-node) loop in
+    this module, and it runs once per (net, kind), not once per solve.
+    """
+    key = ("tree_elimination_levels", kind)
+    if key in net._cache:
+        return net._cache[key]
+    tree_cols, _chord_cols = net.spanning_forest(kind)
+    cols = net.edge_index(kind).tolist()  # local (kind-filtered) index -> global edge index
+    edges = net.edges
+    labels = net.component_labels(kind)
+    n = net.n
+    adjacency: dict[int, list[tuple[int, int, float]]] = {i: [] for i in range(n)}
+    for col in tree_cols.tolist():
+        u, v, _ = edges[cols[col]]
+        ui, vi = net.node_index(u), net.node_index(v)
+        adjacency[ui].append((vi, col, -1.0))  # if we move u -> v, child=v is the TARGET
+        adjacency[vi].append((ui, col, 1.0))  # if we move v -> u, child=u is the SOURCE
+    n_components = net.n_components_of(kind)
+    depth = [-1] * n
+    parent_of = [-1] * n
+    parent_edge = [-1] * n
+    parent_sign = [0.0] * n
+    order: list[int] = []
+    for c in range(n_components):
+        node_idx = torch.nonzero(labels == c, as_tuple=False).flatten().tolist()
+        if not node_idx:
+            continue
+        root = node_idx[0]
+        depth[root] = 0
+        frontier = [root]
+        while frontier:
+            nxt = []
+            for node in frontier:
+                for neighbour, col, sign in adjacency[node]:
+                    if depth[neighbour] == -1:
+                        depth[neighbour] = depth[node] + 1
+                        parent_of[neighbour] = node
+                        parent_edge[neighbour] = col
+                        parent_sign[neighbour] = sign
+                        order.append(neighbour)
+                        nxt.append(neighbour)
+            frontier = nxt
+    max_depth = max((depth[node] for node in order), default=0)
+    levels = []
+    for d in range(max_depth, 0, -1):
+        nodes_at_d = [node for node in order if depth[node] == d]
+        if not nodes_at_d:
+            continue
+        levels.append(
+            (
+                torch.tensor(nodes_at_d, dtype=torch.long, device=net.device),
+                torch.tensor(
+                    [parent_edge[node] for node in nodes_at_d], dtype=torch.long, device=net.device
+                ),
+                torch.tensor(
+                    [parent_sign[node] for node in nodes_at_d], dtype=net.dtype, device=net.device
+                ),
+                torch.tensor(
+                    [parent_of[node] for node in nodes_at_d], dtype=torch.long, device=net.device
+                ),
+            )
+        )
+    net._cache[key] = levels
+    return levels
+
+
+def _tree_solve(net: Network, kind: str | None, rhs: torch.Tensor) -> torch.Tensor:
+    """Solve `A_tree @ q_tree = rhs` over `net`'s spanning forest of edges of `kind`, zero
+    on chord edges. `rhs` is `(..., n)` and must already sum to (near) zero within every
+    connected component (the caller's responsibility -- particular_flow checks this
+    explicitly against its own external sources; branch_flows's chord-source construction
+    guarantees it by build, since it only ever moves +m/-m between two nodes already in the
+    same tree component). Returns `(..., b_kind)`.
+
+    Algorithm: level-synchronous elimination, deepest level first (see this task's header
+    note). At each level, every child's excess demand is read off (gather), its parent tree
+    edge is solved for directly (`A[child, edge]` is +-1, so dividing is multiplying by the
+    same sign), and the child's ENTIRE excess is handed up to its parent (scatter-add) --
+    physically, "whatever this child's own subtree could not satisfy internally must now be
+    satisfied by the rest of the tree above it." A node with two or more children at the
+    same level scatters onto the same parent additively, which is exactly why scatter_add_
+    (not a plain index assignment) is used for the handoff.
+
+    The per-level write into `q` uses `Tensor.scatter` (out-of-place, autograd-safe), not
+    `q[..., idx] = value` with a batch-shaped `idx`: plain `__setitem__` with an index tensor
+    that carries its own leading batch dimensions does not pair each batch row with its own
+    row of `idx` -- it broadcasts the last write across every batch row instead (confirmed
+    empirically: `q[..., idx] = vals` with `idx`/`vals` shape `(2, k)` leaves both rows of
+    `q` equal to the *second* row of `vals`). `scatter` performs the intended per-row paired
+    write, and is safe here because every entry of `edge_cols` is already distinct within one
+    level (a node has exactly one parent edge).
+    """
+    levels = _tree_elimination_levels(net, kind)
+    batch_shape = rhs.shape[:-1]
+    b_kind = net.edge_index(kind).numel()
+    q = torch.zeros(*batch_shape, b_kind, dtype=rhs.dtype, device=rhs.device)
+    excess = rhs.clone()
+    for child_nodes, edge_cols, signs, parent_nodes in levels:
+        excess_child = excess[..., child_nodes]
+        q_level = signs * excess_child
+        q = q.scatter(-1, _expand_index(edge_cols, batch_shape), q_level)
+        excess = excess.clone()
+        excess.scatter_add_(-1, _expand_index(parent_nodes, batch_shape), excess_child)
+    return q
+
+
 def particular_flow(
     net: Network,
     sources: torch.Tensor,
@@ -53,8 +219,6 @@ def particular_flow(
     naming the offending components if any component's sources do not sum to zero
     within ``atol``.
     """
-    A = net.incidence(kind)
-    tree_cols, chord_cols = net.spanning_forest(kind)
     labels = net.component_labels(kind)
     n_components = net.n_components_of(kind)
 
@@ -69,21 +233,7 @@ def particular_flow(
             f"sources do not sum to zero within atol={atol} on components {bad}; "
             "particular_flow requires a zero net source per connected component"
         )
-
-    col_component = (net.source_selector(kind) @ labels.to(A.dtype)).round().long()
-    batch_shape = sources.shape[:-1]
-    q = torch.zeros(*batch_shape, A.shape[1], dtype=sources.dtype)
-    for c in range(n_components):
-        node_idx = torch.nonzero(labels == c, as_tuple=False).flatten()
-        if node_idx.numel() <= 1:
-            continue  # isolated node: no tree edges, nothing to solve
-        rest = node_idx[1:]  # drop one reference node per component
-        tree_cols_c = tree_cols[col_component[tree_cols] == c]
-        A_c = A[rest][:, tree_cols_c]
-        rhs_c = sources[..., rest]
-        q_tree_c = torch.linalg.solve(A_c, rhs_c.unsqueeze(-1)).squeeze(-1)
-        q[..., tree_cols_c] = q_tree_c
-    return q
+    return _tree_solve(net, kind, sources)
 
 
 def project_measured(

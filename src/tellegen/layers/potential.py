@@ -6,17 +6,25 @@ on typed edges (one Element per kind) and Drive terms (additive potential differ
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Mapping, Sequence
 
 import torch
 
 from tellegen.drives import Drive
 from tellegen.elements.base import Element
+from tellegen.operators.graph import GraphLaplacianOperator
+from tellegen.solvers.grounding import spd_certificate, spd_diagnosis
 from tellegen.solvers.implicit import adjoint as _adjoint_solve
 from tellegen.solvers.implicit import implicit_solve
-from tellegen.solvers.linear import solve
-from tellegen.solvers.newton import newton
+from tellegen.solvers.newton import inner_solve_rtol, newton
+from tellegen.solvers.select import solve as select_solve
 from tellegen.topology import Network
+
+# Inner linear solvers a layer may be configured with; forwarded verbatim as
+# `solvers.select.solve`'s `method`. "direct" is the retained milestone-1 reference (the
+# operator's explicit A_I diag(g) A_I^T, LU-factorised); "auto" is the migrated default.
+_LINEAR_SOLVERS = ("auto", "cg", "gmres", "direct")
 
 
 class PotentialFlowLayer:
@@ -27,7 +35,15 @@ class PotentialFlowLayer:
         elements: Sequence[Element],
         drives: Sequence[Drive] = (),
         boundary: Sequence = (),
+        linear_solver: str = "auto",
     ) -> None:
+        if linear_solver not in _LINEAR_SOLVERS:
+            raise ValueError(
+                f"unknown linear_solver {linear_solver!r} in layer {name!r}; expected one "
+                f"of {_LINEAR_SOLVERS}"
+            )
+        self.linear_solver = linear_solver
+
         seen_kinds: set[str] = set()
         for el in elements:
             if el.kind in seen_kinds:
@@ -62,12 +78,23 @@ class PotentialFlowLayer:
             self._elem_slices.append((offset, offset + n_e))
             offset += n_e
         self.cols = torch.cat(cols_list)
-        self.A = net.incidence()[:, self.cols]
-        # net.difference() (== net.incidence().T, the "source minus target" convention this
-        # whole solve path uses -- see topology.py's module docstring) restricted to this
-        # layer's own edge columns; equal to self.A.T, computed via the named operator rather
-        # than repeating the einsum/transpose inline in dp().
-        self._diff = net.difference()[self.cols]
+        # The node count, cached as a plain int: `assemble` (once per Newton iteration) and
+        # solve's zero-source default used to read it off self.A.shape[0], which is exactly
+        # the kind of incidental dense-matrix access that keeps an (n, b) tensor alive.
+        self._n_nodes = net.n
+
+        # This layer's own edge endpoints (restricted to self.cols, in the same order as
+        # the columns of the (lazy) self.A / rows of self._diff), and a node -> interior-
+        # position map, both needed to construct a GraphLaplacianOperator (and to run the
+        # per-instance SPD certificate) without a per-solve Python loop. net.endpoints()
+        # (kind=None) returns whole-graph (src, tgt) arrays in network edge order; indexing
+        # by self.cols restricts them to this layer's own edges, exactly as the lazy
+        # self.A == net.incidence()[:, self.cols] does for the incidence matrix. Since
+        # Task 15 these ARE the layer's representation of its own topology: every hot-path
+        # site gathers or scatter-adds with them instead of contracting against A/_diff.
+        src_all, tgt_all = net.endpoints()
+        self._src = src_all[self.cols]
+        self._tgt = tgt_all[self.cols]
 
         kind_set = set(self.kinds)
         for drv in self._drives:
@@ -86,10 +113,75 @@ class PotentialFlowLayer:
         self.bound = net.boundary_index(boundary)
         self._interior_names = [net.nodes[i] for i in self.interior.tolist()]
 
+        # interior_of_node: -1 at a boundary node's position, else its 0-based position
+        # within self.interior. boundary_mask: True at a boundary node's position. Both are
+        # (n,) and consumed by GraphLaplacianOperator's constructor and by
+        # solvers.grounding; computing them once here, at construction time, avoids
+        # rebuilding them on every solve() call.
+        self._interior_of_node = torch.full((net.n,), -1, dtype=torch.long)
+        self._interior_of_node[self.interior] = torch.arange(
+            len(self.interior), dtype=torch.long
+        )
+        self._boundary_mask = torch.zeros(net.n, dtype=torch.bool)
+        self._boundary_mask[self.bound] = True
+
+    # ------------------------------------------------------- dense oracles (lazy)
+    @functools.cached_property
+    def A(self) -> torch.Tensor:
+        """This layer's (n, b_layer) incidence matrix, built on FIRST ACCESS only.
+
+        Held as a `cached_property` rather than an `__init__` attribute since Task 15: at
+        the composed model's reference size this matrix is 18.1 MB per layer and grows 4x
+        per node doubling, which on its own broke the milestone's memory shape gate
+        (measured 3.16x against a 2.5x budget in Task 14). Nothing inside this class reads
+        it except `jacobian()`, the retained dense oracle -- every hot-path site gathers or
+        scatter-adds with `_src`/`_tgt` instead (`dp`, `residual`, `linear_init`,
+        `power_residual`). It stays public, with exactly its old value
+        (`net.incidence()[:, self.cols]`, i.e. columns in LAYER edge order, not network
+        order), because callers outside the layer legitimately want the matrix: the
+        composed-model conservation tests form `A @ q` with it.
+        """
+        return self.net.incidence()[:, self.cols]
+
+    @functools.cached_property
+    def _diff(self) -> torch.Tensor:
+        """`self.A.T`: the (b_layer, n) difference matrix, built on first access only.
+
+        `net.difference()` (== `net.incidence().T`, the "source minus target" convention
+        this whole solve path uses -- see topology.py's module docstring) restricted to this
+        layer's own edge columns. Kept for callers and for symmetry with `A`; `dp()` gathers
+        `phi[..., _src] - phi[..., _tgt]` instead of contracting against it.
+        """
+        return self.net.difference()[self.cols]
+
+    # ------------------------------------------------------- sparse topology primitives
+    def _difference(self, phi: torch.Tensor) -> torch.Tensor:
+        """`self._diff @ phi` without the matrix: `phi[..., src] - phi[..., tgt]`.
+
+        `Network.difference_ep` restricted to this layer's own columns. Exact, not merely
+        close: the matrix form sums n terms of which all but two are exactly 0.0, and adding
+        0.0 is exact in IEEE arithmetic, so the gather reproduces it bit for bit.
+        """
+        return phi[..., self._src] - phi[..., self._tgt]
+
+    def _accumulate(self, w: torch.Tensor) -> torch.Tensor:
+        """`self.A @ w` without the matrix: `+w` scattered at `src`, `-w` at `tgt`.
+
+        `Network.accumulate` restricted to this layer's own columns (the network-level
+        method works in network edge order and cannot express a layer's column subset).
+        `index_add` is out of place, on a zero tensor this call itself allocates, so it is
+        exactly as differentiable w.r.t. `w` as the matrix product is and cannot corrupt a
+        tensor some earlier op still needs for its own backward pass.
+        """
+        out = torch.zeros(
+            w.shape[:-1] + (self._n_nodes,), dtype=w.dtype, device=w.device
+        )
+        return out.index_add(-1, self._src, w).index_add(-1, self._tgt, -w)
+
     # ------------------------------------------------------------------ assembly
     def dp(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
         drivers = drivers or {}
-        d = torch.einsum("en,...n->...e", self._diff, phi)
+        d = self._difference(phi)
         parts = []
         for kind, (start, end) in self._kind_slices.items():
             block = d[..., start:end]
@@ -133,7 +225,7 @@ class PotentialFlowLayer:
         batch_shape = torch.broadcast_shapes(
             phi_interior.shape[:-1], phi_boundary.shape[:-1]
         )
-        n = self.A.shape[0]
+        n = self._n_nodes
         phi = torch.zeros(
             batch_shape + (n,), dtype=phi_interior.dtype, device=phi_interior.device
         )
@@ -153,12 +245,21 @@ class PotentialFlowLayer:
         drivers = drivers or {}
         phi = self.assemble(phi_interior, phi_boundary)
         q = self.flows(phi, drivers)
-        A_I = self.A[self.interior]
-        lhs = torch.einsum("ie,...e->...i", A_I, q)
+        # (A_I q), by scatter-add over this layer's edges then a select of the interior
+        # rows, rather than einsum against the (n_I, b) slice of the dense incidence: this
+        # is once per Newton residual evaluation, and at ensemble 100 the einsum form alone
+        # cost 14.2 ms of a 41.8 ms residual (Task 14's profile).
+        lhs = self._accumulate(q)[..., self.interior]
         s_I = self._source_interior(sources, phi_interior)
         return lhs - s_I
 
     def jacobian(self, phi_interior, phi_boundary, drivers):
+        """The dense (n_I, n_I) Jacobian A_I diag(dq) A_I^T -- the retained ORACLE.
+
+        This is the one method that reads `self.A` (and so materialises it, once, on first
+        access); no solve path calls it. Tests compare `GraphLaplacianOperator`'s matvec and
+        the adjoint against this, so its einsum form is deliberately unchanged.
+        """
         drivers = drivers or {}
         phi = self.assemble(phi_interior, phi_boundary)
         dq = self.dflows(phi, drivers)
@@ -194,61 +295,66 @@ class PotentialFlowLayer:
             k_parts.append(k_e + zero)
         return torch.cat(c_parts, dim=-1), torch.cat(k_parts, dim=-1)
 
-    def _floating_group_nodes(self, k: torch.Tensor) -> list:
-        """Interior node names in any connected GROUP with no path to a boundary node.
+    def _grounding_check(self, slopes: torch.Tensor, *, where: str) -> None:
+        """Raise unless every instance in `slopes` certifies SPD.
 
-        Two nodes are "connected" here only through an EDGE whose own linear slope k is
-        nonzero somewhere in the batch: an edge whose element contributes no slope at all
-        at that edge (e.g. any FixedFlow edge, whose dflow is identically 0, or a closed
-        damper of otherwise-slope-bearing kind sitting at g = 0) cannot carry a potential
-        difference to a boundary node and so cannot rescue a floating group. This subsumes
-        the isolated-single-node case (a node with zero diagonal in J0 is exactly a
-        singleton component here, since J0's diagonal at node i is the sum of k over i's
-        own incident edges) as well as a floating GROUP of two or more mutually-connected
-        nodes that, as a whole, has no path to any boundary node -- which a per-node
-        diagonal check alone cannot see, because each member's own diagonal is nonzero from
-        its internal edges.
+        The certificate (Task 3's `solvers.grounding.spd_certificate`) tests both of spec
+        section 3.1's testable conditions -- every branch slope non-negative, and every
+        interior node grounded through strictly positive slopes -- so the batched message
+        below ("do not certify a grounded, positive-slope system") states exactly what was
+        checked. It is run on the slopes
+        GIVEN -- the caller decides whether those are `linear_init`'s tangent-at-zero slopes
+        or the actual `dflows` at a solve point -- and it is per instance. That is the whole
+        point: the pre-Task-11 check ORed "is this edge's slope nonzero" across the WHOLE
+        batch before testing connectivity, so an edge closed in one instance but open in
+        another counted as present for both, and a genuinely ungrounded instance sailed
+        through to a dense factorisation that could only report "singular", if it reported
+        anything at all.
 
-        Filtering must happen at EDGE granularity, not kind granularity: a kind can mix a
-        zero-slope edge (a closed damper, g = 0) with a nonzero-slope edge of the very same
-        kind (an open one, g = 1), and gating on "does this kind have any nonzero edge
-        anywhere" would let the zero-slope edge itself connect a group it cannot actually
-        support. `net.component_labels(kind)`/`net.n_components_of(kind)` cannot express
-        this (they know edges by kind, not by slope), so this method does not use them: it
-        unions the source and target of each of the LAYER's OWN columns (`self.cols`, whose
-        order matches `k`'s) individually, filtered by that edge's own slope. Iterating the
-        layer's own columns is already kind-restricted by construction (Task 2's
-        whole-graph-vs-kind-restricted trap does not apply here, since no whole-graph
-        connectivity operator is used at all).
+        The message is built from `solvers.grounding.spd_diagnosis` (amendment A2), which
+        names, per failing instance, either the negative-slope EDGES or the ungrounded
+        interior NODES. Node indices are rendered as node NAMES here, because this layer --
+        unlike the raw operator -- knows them, and because the error text every existing
+        (unbatched) test in test_potential.py asserts on is exactly those names. A batched
+        failure additionally leads with the failing BATCH INDICES, since node-level detail
+        alone is not attributable across unrelated per-instance failures. Every message
+        names the offending LAYER first: a model composes several layers over one network,
+        and "solve: floating nodes ... ['z']" alone does not say which of them failed.
         """
-        n = self.net.n
-        parent = list(range(n))
+        certified = spd_certificate(
+            self._src, self._tgt, slopes, self._interior_of_node, self._boundary_mask, atol=0.0
+        )
+        if bool(torch.all(certified)):
+            return
+        records = spd_diagnosis(
+            self._src, self._tgt, slopes, self._interior_of_node, self._boundary_mask, atol=0.0
+        )
+        if certified.ndim == 0:
+            # Unbatched: one instance, so a bare batch index would say nothing. Name the
+            # nodes (or edges) directly, as the pre-Task-11 message did.
+            raise RuntimeError(
+                f"PotentialFlowLayer {self.name!r}: {where}: "
+                f"{self._describe_grounding(records[0])}"
+            )
+        bad_idx = torch.nonzero(~certified.reshape(-1), as_tuple=False).flatten().tolist()
+        details = "; ".join(
+            f"instance {rec['instance']}: {self._describe_grounding(rec)}" for rec in records
+        )
+        raise RuntimeError(
+            f"PotentialFlowLayer {self.name!r}: {where}: batch indices {bad_idx} do not "
+            f"certify a grounded, positive-slope system; {details}"
+        )
 
-        def find(x: int) -> int:
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
-
-        def union(a: int, b: int) -> None:
-            ra, rb = find(a), find(b)
-            if ra != rb:
-                parent[rb] = ra
-
-        k_flat = k.reshape(-1, k.shape[-1])
-        nonzero_anywhere = (k_flat != 0).any(dim=0)
-        node_index = {node: i for i, node in enumerate(self.net.nodes)}
-        edges = self.net.edges
-        for col_pos, col in enumerate(self.cols.tolist()):
-            if not bool(nonzero_anywhere[col_pos]):
-                continue
-            u, v, _ = edges[col]
-            union(node_index[u], node_index[v])
-
-        boundary_roots = {find(i) for i in self.bound.tolist()}
-        return [
-            self.net.nodes[i] for i in self.interior.tolist() if find(i) not in boundary_roots
-        ]
+    def _describe_grounding(self, record: dict) -> str:
+        """One failing instance's `spd_diagnosis` record, with node INDICES resolved to the
+        network's own node names (which the operator-level diagnosis cannot know)."""
+        if record["reason"] == "negative_slope":
+            return f"negative slope on edges {record['edges']}"
+        names = [self.net.nodes[i] for i in record["nodes"]]
+        return (
+            f"floating nodes with no path to a boundary potential: "
+            f"ungrounded interior nodes {names}"
+        )
 
     def linear_init(self, phi_boundary, drivers, sources):
         drivers = drivers or {}
@@ -261,30 +367,35 @@ class PotentialFlowLayer:
         phi0 = self.assemble(phi_i0, phi_boundary)
         dp0 = self.dp(phi0, drivers)
         c, k = self._linear_ck(drivers)
-        A_I = self.A[self.interior]
-        rhs = self._source_interior(sources, phi0) - torch.einsum(
-            "ie,...e->...i", A_I, c + k * dp0
-        )
-        J0 = torch.einsum("ie,...e,je->...ij", A_I, k, A_I)
-        bad = self._floating_group_nodes(k)
-        if bad:
-            raise RuntimeError(
-                f"floating nodes with no path to a boundary potential: {bad}"
-            )
-        # J0 picks up a batch dimension only if some element's linear_init(drivers) actually
+        rhs = self._source_interior(sources, phi0) - self._accumulate(c + k * dp0)[
+            ..., self.interior
+        ]
+        self._grounding_check(k, where="linear_init")
+        # k picks up a batch dimension only if some element's linear_init(drivers) actually
         # depends on drivers (e.g. a driver-conditioned slope); with purely constant slopes
-        # (every test element here) J0 stays unbatched (n_I, n_I) even when `rhs` is batched
-        # via phi_boundary/sources. torch.linalg.solve does not broadcast an unbatched A
-        # against a batched b the way one might expect: with A.ndim == b.ndim it instead
-        # treats b as a single (n_I, k) right-hand-side matrix, so a (2, 2) A against a
-        # (50, 2) b raises (misreported as a singular system) rather than solving 50
-        # independent 2x2 systems. Broadcasting both to their common batch shape first
-        # makes A.ndim == b.ndim + 1 in the batched case, which torch.linalg.solve does
-        # broadcast correctly as one system per batch element.
-        solve_batch = torch.broadcast_shapes(J0.shape[:-2], rhs.shape[:-1])
-        J0 = J0.expand(solve_batch + J0.shape[-2:])
+        # k stays unbatched (b,) even when `rhs` is batched via phi_boundary/sources.
+        # Broadcasting both to their common batch shape first keeps the operator's own batch
+        # shape and the right-hand side's in agreement, so the solve is one system per batch
+        # element rather than one system with several right-hand sides.
+        solve_batch = torch.broadcast_shapes(k.shape[:-1], rhs.shape[:-1])
+        k = k.expand(solve_batch + k.shape[-1:])
         rhs = rhs.expand(solve_batch + rhs.shape[-1:])
-        return solve(J0, rhs)
+        op = GraphLaplacianOperator(
+            self._src,
+            self._tgt,
+            k,
+            len(self.interior),
+            self._interior_of_node,
+            boundary_mask=self._boundary_mask,
+        )
+        result = select_solve(
+            op,
+            rhs,
+            method=self.linear_solver,
+            where=f"PotentialFlowLayer {self.name!r} linear_init",
+            rtol=inner_solve_rtol(rhs.dtype),
+        )
+        return result.x
 
     def _check_no_unreachable_differentiable_tensors(self) -> None:
         """Guard against a gradient that would be silently wrong or absent (review finding
@@ -337,6 +448,7 @@ class PotentialFlowLayer:
         phi0=None,
         *,
         differentiable=True,
+        diagnostics: dict | None = None,
         **newton_kwargs,
     ):
         """Solve for interior potentials and branch flows.
@@ -360,20 +472,124 @@ class PotentialFlowLayer:
         Violating either raises `ValueError` naming the offending element/drive and
         attribute before any solve is attempted, rather than silently returning a wrong or
         absent gradient.
+
+        `diagnostics`, when a dict is passed, is filled with this solve's own
+        `{"newton_iterations", "linear_iterations", "method", "converged", "residual_norm"}`
+        -- the Newton step count, the per-instance maximum inner-solver iteration count
+        (`None` if no linear solve happened), the inner method actually used, the
+        per-instance convergence flag and the per-instance final residual norm. Passing
+        `None` (the default) changes nothing; the dict is an out-parameter rather than an
+        extra return value so that `solve`'s `(phi, q)` contract, which every existing
+        caller unpacks, is untouched.
+
+        `on_failure` (forwarded to `newton` among `newton_kwargs`) is `"raise"` by default:
+        a batch that fails to converge within `max_iter` raises, naming the failing
+        instances. `"return"` is the explicit, narrow escape hatch of design section 3.2 --
+        a calibration loop that would rather inspect or down-weight a failed instance than
+        abort -- and it is accepted here under two conditions, because this method returns
+        `(phi, q)` tensors with no room for a status:
+
+        - `diagnostics=` must be supplied, so `converged`/`residual_norm` have somewhere to
+          go. Without it the status would be silently dropped and a non-converged `phi`
+          would be indistinguishable from a converged one; that is refused with a
+          `ValueError`.
+        - `differentiable=False` is required. On the differentiable path the escape hatch is
+          refused outright by `solvers.implicit.implicit_solve`: the adjoint linearises at
+          the returned point, and at a non-converged point the gradient is silently wrong.
+
+        The inner linear solver is this layer's `linear_solver` (set at construction), unless
+        the caller overrides it with an explicit `method=` among `newton_kwargs`.
+
+        `phi0` is a starting guess and nothing else: it is DETACHED on entry (and the guess
+        this method computes for itself when `phi0 is None` is computed under `no_grad`),
+        because the implicit adjoint linearises at the converged point and never returns a
+        gradient w.r.t. the starting guess -- `solvers.implicit._Implicit.backward` returns
+        `None` for it. See the comment at the top of the body for what tracing it cost.
         """
         drivers = drivers or {}
-        if phi0 is None:
-            phi0 = self.linear_init(phi_boundary, drivers, sources)
+        newton_kwargs.setdefault("method", self.linear_solver)
+        # Name this layer on every error the Newton solve or its INNER linear solves raise.
+        # Grounding is certified at phi0, but slopes change between Newton iterates, so an
+        # instance can lose it mid-iteration; without this the refusal read "newton:
+        # method='auto' refuses to split the batch ..." with no way to tell which layer of a
+        # composed model over one network produced it.
+        newton_kwargs.setdefault("where", f"PotentialFlowLayer {self.name!r} solve")
+        if newton_kwargs.get("on_failure") == "return" and diagnostics is None:
+            # `solve` returns (phi, q) tensors; without a diagnostics dict there is nowhere
+            # for `converged`/`residual_norm` to go, and a non-converged phi would be
+            # indistinguishable from a converged one. Design section 3.2: the escape hatch
+            # "is never silent: the result carries the status".
+            raise ValueError(
+                f"PotentialFlowLayer {self.name!r}: on_failure='return' requires "
+                f"diagnostics= so the status is not silently dropped; pass a dict and read "
+                f"its 'converged' and 'residual_norm' entries."
+            )
+
+        # The initial guess is NOT a differentiable quantity, and neither is the grounding
+        # check below. Both are computed under no_grad (and a caller-supplied phi0 is
+        # detached) so nothing that produced them is traced into the autograd graph.
+        #
+        # This is a memory fix, not a numerical one: the converged point is where the
+        # implicit-function adjoint linearises, and that point is independent of the guess
+        # the iteration started from, so tracing the guess buys no gradient at all. What it
+        # costs is everything `linear_init` does -- a whole preconditioned-CG loop, its
+        # int64 gather indices and every iterate -- retained until backward(). Measured on
+        # the composed model at ensemble 100 (Task 14 review): 2567 MB of the 2571 MB saved
+        # per differentiable step came from here; with a detached guess the same step saves
+        # 74.7 MB. `linear_init` itself is untouched and stays differentiable for callers
+        # who want it directly.
+        with torch.no_grad():
+            if phi0 is None:
+                phi0 = self.linear_init(phi_boundary, drivers, sources)
+            else:
+                phi0 = phi0.detach()
+
+            # Grounding is certified on the ACTUAL slopes at the point the Newton iteration
+            # is about to start from, whatever its source. linear_init's own check sees only
+            # its tangent-at-zero slopes, and is not run at all when a caller supplies phi0
+            # -- so a supplied phi0 used to bypass grounding entirely, and an element whose
+            # slope is dp-dependent (a fan past its shutoff point, whose dflow is exactly
+            # zero) could leave the operator singular with nothing to say about it but a
+            # Newton non-convergence. Placed BEFORE the differentiable branch so both paths
+            # run it unconditionally and identically. It is a CHECK: it raises or it does
+            # not, and no tensor it computes reaches the result, so it runs under no_grad
+            # too (`dflows` here is each Element's own analytic `dflow`, not the autograd
+            # path the differentiable branch builds below).
+            phi0_full = self.assemble(phi0, phi_boundary)
+            dq0 = self.dflows(phi0_full, drivers)
+            self._grounding_check(dq0, where="solve")
 
         if not differentiable:
 
             def residual_fn(x):
                 return self.residual(x, phi_boundary, drivers, sources)
 
-            def jacobian_fn(x):
-                return self.jacobian(x, phi_boundary, drivers)
+            def operator_fn(x):
+                # A matvec-free A_I diag(dq) A_I^T at the current iterate, instead of the
+                # dense (n_interior, n_interior) einsum layer.jacobian() assembles. Rebuilt
+                # each iteration because dq is what changes; the endpoint/index tensors it
+                # closes over are cached on the layer at construction.
+                phi = self.assemble(x, phi_boundary)
+                dq = self.dflows(phi, drivers)
+                return GraphLaplacianOperator(
+                    self._src,
+                    self._tgt,
+                    dq,
+                    len(self.interior),
+                    self._interior_of_node,
+                    boundary_mask=self._boundary_mask,
+                )
 
-            result = newton(residual_fn, jacobian_fn, phi0, **newton_kwargs)
+            result = newton(residual_fn, operator_fn, phi0, **newton_kwargs)
+            if diagnostics is not None:
+                diagnostics["newton_iterations"] = result.iterations
+                diagnostics["linear_iterations"] = result.linear_iterations
+                diagnostics["method"] = newton_kwargs["method"]
+                # The per-instance STATUS, not only the cost. Without these two,
+                # `on_failure="return"` returned a non-converged phi with nothing anywhere
+                # reporting it (final review C2).
+                diagnostics["converged"] = result.converged
+                diagnostics["residual_norm"] = result.residual_norm
             phi = self.assemble(result.x, phi_boundary)
             q = self.flows(phi, drivers)
             return phi, q
@@ -391,7 +607,7 @@ class PotentialFlowLayer:
             sources
             if sources is not None
             else torch.zeros(
-                phi_boundary.shape[:-1] + (self.A.shape[0],),
+                phi_boundary.shape[:-1] + (self._n_nodes,),
                 dtype=phi_boundary.dtype,
                 device=phi_boundary.device,
             )
@@ -412,7 +628,7 @@ class PotentialFlowLayer:
             return rebuilt, drv, src, pb
 
         def _dp_functional(phi, drv):
-            d = torch.einsum("en,...n->...e", self._diff, phi)
+            d = self._difference(phi)
             parts = []
             for kind, (start, end) in self._kind_slices.items():
                 block = d[..., start:end]
@@ -513,27 +729,67 @@ class PotentialFlowLayer:
             rebuilt, drv, src, pb = _rebuild(params)
             phi = self.assemble(x, pb)
             q = _flows_functional(phi, drv, rebuilt)
-            A_I = self.A[self.interior]
-            lhs = torch.einsum("ie,...e->...i", A_I, q)
+            lhs = self._accumulate(q)[..., self.interior]
             s_I = src[..., self.interior]
             return lhs - s_I
 
-        def jacobian_fn(x, *params):
+        def operator_fn(x, *params):
             rebuilt, drv, src, pb = _rebuild(params)
             phi = self.assemble(x, pb)
             dq = _dflows_functional(phi, drv, rebuilt)
-            A_I = self.A[self.interior]
-            return torch.einsum("ie,...e,je->...ij", A_I, dq, A_I)
+            return GraphLaplacianOperator(
+                self._src,
+                self._tgt,
+                dq,
+                len(self.interior),
+                self._interior_of_node,
+                boundary_mask=self._boundary_mask,
+            )
 
-        x = implicit_solve(residual_fn, jacobian_fn, phi0, all_params, **newton_kwargs)
+        x = implicit_solve(
+            residual_fn,
+            operator_fn,
+            phi0,
+            all_params,
+            diagnostics=diagnostics,
+            **newton_kwargs,
+        )
+        if diagnostics is not None:
+            diagnostics["method"] = newton_kwargs["method"]
         phi = self.assemble(x, phi_boundary)
         q = self.flows(phi, drivers)
         return phi, q
 
     def adjoint(self, phi_interior, phi_boundary, drivers, grad_phi_interior):
+        """Solve J(phi)^T lambda = grad_phi_interior at the given point.
+
+        The operator is the SAME GraphLaplacianOperator `solve`'s Newton iteration builds
+        (same endpoints, same `dflows` slopes), never the dense einsum `jacobian()` -- so
+        the adjoint costs one matvec-free transposed solve rather than an (n_I, n_I)
+        materialisation, and cannot drift from the forward path's own operator. The
+        transposed action comes from the operator's `rmatvec` via
+        `solvers.implicit.TransposeOperator`; for this symmetric Laplacian that equals its
+        `matvec`, but nothing here assumes it. `method=self.linear_solver` carries the
+        layer's configured inner solver onto the backward pass too (amendment A3.3), so
+        `linear_solver="direct"` is the retained milestone-1 numerics on BOTH passes.
+        """
         drivers = drivers or {}
-        J = self.jacobian(phi_interior, phi_boundary, drivers)
-        return _adjoint_solve(J, grad_phi_interior)
+        phi = self.assemble(phi_interior, phi_boundary)
+        dq = self.dflows(phi, drivers)
+        op = GraphLaplacianOperator(
+            self._src,
+            self._tgt,
+            dq,
+            len(self.interior),
+            self._interior_of_node,
+            boundary_mask=self._boundary_mask,
+        )
+        return _adjoint_solve(
+            op,
+            grad_phi_interior,
+            where=f"PotentialFlowLayer {self.name!r} adjoint",
+            method=self.linear_solver,
+        )
 
     def power_residual(self, phi, q, drivers, sources=None):
         """Tellegen's power identity, zero at a converged solution.
@@ -550,9 +806,8 @@ class PotentialFlowLayer:
         """
         drivers = drivers or {}
         d = self.dp(phi, drivers)
-        drive_only = d - torch.einsum("en,...n->...e", self._diff, phi)
-        A_bound = self.A[self.bound]
-        boundary_flow = torch.einsum("be,...e->...b", A_bound, q)
+        drive_only = d - self._difference(phi)
+        boundary_flow = self._accumulate(q)[..., self.bound]
         phi_b = phi[..., self.bound]
         phi_i = phi[..., self.interior]
         s_I = self._source_interior(sources, phi_i)

@@ -22,7 +22,157 @@ from typing import Literal
 
 import torch
 
+from tellegen.operators.advection import AdvectionOperator
+from tellegen.solvers.select import solve as _solve_operator
 from tellegen.topology import Network, Node
+
+
+class _TransposeView:
+    """A LinearOperator-shaped view exposing `op`'s TRANSPOSE: matvec and rmatvec swapped,
+    everything else passed through. Used only to solve the adjoint system `A^T lam =
+    grad_x` via the ordinary `solvers.select.solve` entry point -- the adjoint needs no
+    solver of its own, it reuses GMRES/PCG against the swapped action.
+    """
+
+    def __init__(self, op) -> None:
+        self._op = op
+        self.shape = op.shape
+        self.dtype = op.dtype
+        self.device = op.device
+        self.symmetric = op.symmetric
+
+    def matvec(self, x: torch.Tensor) -> torch.Tensor:
+        return self._op.rmatvec(x)
+
+    def rmatvec(self, x: torch.Tensor) -> torch.Tensor:
+        return self._op.matvec(x)
+
+    def diagonal(self) -> torch.Tensor:
+        return self._op.diagonal()  # diagonal entries are invariant under transpose
+
+    def assemble(self):
+        dense = self._op.assemble()
+        return None if dense is None else dense.transpose(-1, -2)
+
+    def spd_certificate(self):
+        return None
+
+
+class _LinearSolve(torch.autograd.Function):
+    """Differentiate a linear solve `A(params) x = rhs(params)` via the IMPLICIT ADJOINT,
+    never by unrolling the forward solver's iteration -- see this task's Design decisions
+    section for why this is required rather than optional.
+
+    Forward: run `solvers.select.solve` under `no_grad`. Backward: solve the ADJOINT system
+    `A(params)^T lam = grad_x` via `_TransposeView` (i.e. via `op.rmatvec`, never
+    `op.matvec` -- the entire reason `rmatvec` is part of this contract), then obtain
+    gradients wrt every parameter tensor by one more autograd pass through the residual
+    `A(params) x - rhs(params)` evaluated at the converged `x`, weighted by `-lam`. This is
+    `solvers/implicit.py`'s `_Implicit` structure, specialised to a LINEAR residual, so
+    there is no fixed-point iteration to differentiate through: `A` already IS the
+    residual's exact Jacobian everywhere, not just at convergence.
+
+    Every differentiable input is passed EXPLICITLY as a `*params` tensor to `apply`, never
+    captured by closure: `build_system` is a plain (non-tensor) Python callable, stored on
+    `ctx` for its STRUCTURE only, and it is called AGAIN inside `backward` on the SAVED
+    params (or fresh detached-and-`requires_grad_`-ed copies, for the residual pass) --
+    never on tensors implicitly captured from the enclosing scope, which `backward` cannot
+    see. This is `solvers/implicit.py`'s own module-docstring warning, almost verbatim,
+    because it is the identical trap.
+
+    The adjoint solve inside `backward` RAISES unconditionally on non-convergence --
+    independent of whatever `on_failure` the forward call was given -- because a wrong
+    gradient is worse than no gradient (design spec section 3.2).
+    """
+
+    @staticmethod
+    def forward(ctx, build_system, where, solver_kwargs, *params):
+        with torch.no_grad():
+            op, rhs = build_system(*params)
+            result = _solve_operator(
+                op, rhs, method="auto", on_failure="raise", where=where, **solver_kwargs
+            )
+        ctx.build_system = build_system
+        ctx.where = where
+        ctx.solver_kwargs = solver_kwargs
+        ctx.save_for_backward(result.x, *params)
+        return result.x
+
+    @staticmethod
+    def backward(ctx, grad_x):
+        if torch.is_grad_enabled():
+            # See solvers/implicit.py's module docstring: grad mode enabled here means the
+            # caller requested create_graph=True (second-order differentiation), which
+            # this adjoint does not support.
+            raise RuntimeError(
+                f"{ctx.where}: second-order differentiation (create_graph=True) is not "
+                f"supported by this implicit linear adjoint; detach the first-order "
+                f"gradient before using it in a further differentiable loss."
+            )
+        saved = ctx.saved_tensors
+        x, params = saved[0], list(saved[1:])
+        with torch.no_grad():
+            op, _ = ctx.build_system(*params)
+            lam = _solve_operator(
+                _TransposeView(op), grad_x, method="auto", on_failure="raise",
+                where=f"{ctx.where} backward (adjoint)", **ctx.solver_kwargs,
+            ).x
+        with torch.enable_grad():
+            p = [t.detach().requires_grad_(t.requires_grad) for t in params]
+            op_p, rhs_p = ctx.build_system(*p)
+            residual = op_p.matvec(x.detach()) - rhs_p
+            needs_grad = [t for t in p if t.requires_grad]
+            grads = (
+                torch.autograd.grad(residual, needs_grad, grad_outputs=-lam, allow_unused=True)
+                if needs_grad else []
+            )
+        grads_aligned = []
+        it = iter(grads)
+        for t in p:
+            grads_aligned.append(next(it) if t.requires_grad else None)
+        return (None, None, None, *grads_aligned)
+
+
+def _linear_solve(build_system, where: str, *params, **solver_kwargs) -> torch.Tensor:
+    return _LinearSolve.apply(build_system, where, solver_kwargs, *params)
+
+
+class _AffineSystemOperator:
+    """(I - alpha * M): built from an AdvectionOperator, satisfying the LinearOperator
+    duck type solvers.select.solve reads (matvec, rmatvec, diagonal, shape, dtype,
+    device, symmetric, assemble, spd_certificate). Used for both the implicit scheme
+    (alpha = dt) and the trapezoidal scheme (alpha = dt / 2), and passed to
+    _linear_solve exactly like a bare AdvectionOperator is for steady() -- the adjoint
+    derivation does not care what concrete operator "A" is, only that it exposes
+    matvec/rmatvec/diagonal/assemble/spd_certificate.
+    """
+
+    symmetric = False
+
+    def __init__(self, M: AdvectionOperator, alpha: float) -> None:
+        self.M = M
+        self.alpha = alpha
+        self.shape = M.shape
+        self.dtype = M.dtype
+        self.device = M.device
+
+    def matvec(self, x: torch.Tensor) -> torch.Tensor:
+        return x - self.alpha * self.M.matvec(x)
+
+    def rmatvec(self, y: torch.Tensor) -> torch.Tensor:
+        return y - self.alpha * self.M.rmatvec(y)
+
+    def diagonal(self) -> torch.Tensor:
+        return 1.0 - self.alpha * self.M.diagonal()
+
+    def assemble(self):
+        dense = self.M.assemble()
+        m = dense.shape[-1]
+        eye = torch.eye(m, dtype=dense.dtype, device=dense.device)
+        return eye - self.alpha * dense
+
+    def spd_certificate(self):
+        return None
 
 
 class TransportLayer:
@@ -120,22 +270,92 @@ class TransportLayer:
                     f"TransportLayer '{name}': conductance is required when "
                     f"conduction_kind is given"
                 )
-            A_c = net.incidence(conduction_kind)
-            b_c = A_c.shape[-1]
+            # The conduction edges' ENDPOINTS, never the (n, b_c) incidence matrix and never
+            # the (n, n) Laplacian it used to build here: since Task 15 this tuple is the
+            # layer's whole representation of its conduction topology. `_advection_operator`
+            # (Task 9) already consumed exactly this; `operator()`, the dense oracle, now
+            # forms its (n, n) `L` from it on demand (`_conduction_matrix`). The (n, n)
+            # matrix was 8.5 MB at the composed model's reference size, grew 4x per node
+            # doubling, and -- with no conduction configured, as in that model -- was a block
+            # of ZEROS that `operator()` subtracted for nothing.
+            csrc, ctgt = net.endpoints(conduction_kind)
+            b_c = len(csrc)
             g = torch.as_tensor(conductance, dtype=net.dtype)
-            # Validate explicitly rather than let a mismatched length reach einsum: with a
-            # single conduction_kind edge (b_c == 1), einsum's size-1 broadcasting for the
-            # repeated "e" subscript would otherwise silently accept a wrongly-shaped g
-            # (e.g. length 2) and sum it into L instead of raising, giving a silently wrong
-            # conductance matrix rather than a ValueError naming the offender.
+            # Validate explicitly rather than let a mismatched length reach the assembly:
+            # with a single conduction_kind edge (b_c == 1), the einsum that used to build L
+            # broadcast the repeated "e" subscript, so a wrongly-shaped g (e.g. length 2)
+            # was silently summed in instead of raising, giving a silently wrong conductance
+            # matrix rather than a ValueError naming the offender.
             if g.dim() == 0 or g.shape[-1] != b_c:
                 raise ValueError(
                     f"TransportLayer '{name}': conductance must have shape ({b_c},), "
                     f"got {tuple(g.shape)}"
                 )
-            self.L = torch.einsum("ne,...e,me->...nm", A_c, g, A_c)
+            self._conduction_edges: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = (
+                csrc,
+                ctgt,
+                g,
+            )
         else:
-            self.L = torch.zeros(net.n, net.n, dtype=net.dtype)
+            self._conduction_edges = None
+
+        if not torch.all(self.carrier > 0):
+            raise ValueError(
+                f"TransportLayer '{name}': carrier must be strictly positive everywhere "
+                f"(AdvectionOperator folds carrier into flow as flow = carrier * q, which "
+                f"only preserves sign(q) and |carrier * q| == carrier * |q| when carrier > "
+                f"0); got minimum value {self.carrier.min().item()}"
+            )
+        self._interior_of_node = torch.full((net.n,), -1, dtype=torch.long)
+        self._interior_of_node[self.interior_idx] = torch.arange(self.n_i, dtype=torch.long)
+
+    def _conduction_matrix(self, dtype: torch.dtype) -> torch.Tensor | None:
+        """The (..., n, n) conduction Laplacian `A_c diag(g) A_c^T`, or None if no conduction.
+
+        Built HERE, on demand, from the endpoint tuple rather than held as `self.L`: only
+        `operator()` -- the dense oracle, which is (..., K, n, n) anyway -- wants a matrix,
+        and every other path goes through `AdvectionOperator`'s own sparse conduction term.
+        When there is no conduction this returns None rather than an (n, n) block of zeros,
+        so the oracle skips a subtraction instead of allocating n^2 doubles to subtract
+        nothing.
+
+        `index_add` on a flattened (n*n,) view gives the same four entries per edge the
+        einsum form did (+g at (s, s) and (t, t), -g at (s, t) and (t, s)), out of place and
+        broadcasting over any leading batch dims `g` carries.
+        """
+        if self._conduction_edges is None:
+            return None
+        csrc, ctgt, g = self._conduction_edges
+        g = g.to(dtype)
+        n = self.net.n
+        flat = torch.zeros(g.shape[:-1] + (n * n,), dtype=dtype, device=g.device)
+        for rows, cols, sign in (
+            (csrc, csrc, 1.0),
+            (ctgt, ctgt, 1.0),
+            (csrc, ctgt, -1.0),
+            (ctgt, csrc, -1.0),
+        ):
+            flat = flat.index_add(-1, rows * n + cols, sign * g)
+        return flat.reshape(g.shape[:-1] + (n, n))
+
+    def _advection_operator(self, q: torch.Tensor) -> AdvectionOperator:
+        dtype = q.dtype
+        src, tgt = self.net.endpoints(self.flow_kind)
+        conduction = None
+        if self._conduction_edges is not None:
+            csrc, ctgt, g = self._conduction_edges
+            conduction = (csrc, ctgt, g.to(dtype))
+        return AdvectionOperator(
+            src, tgt,
+            flow=self.carrier.to(dtype) * q,
+            transmission=self.transmission.to(dtype),
+            capacity=self.capacity.to(dtype),
+            n_interior=self.n_i,
+            interior_of_node=self._interior_of_node,
+            kinetics=self.kinetics.to(dtype) if self.kinetics is not None else None,
+            removal=self.removal.to(dtype) if self.removal is not None else None,
+            conduction=conduction,
+        )
 
     # ------------------------------------------------------------ assembly
     def _capacity_stacked(self, dtype: torch.dtype) -> torch.Tensor:
@@ -153,8 +373,10 @@ class TransportLayer:
         Out = torch.einsum("...ei,...e,...ej->...ij", Up, w, Up)          # (..., n, n)
         weight = self.transmission.to(dtype) * w.unsqueeze(-2)           # (..., K, b_flow)
         In = torch.einsum("...ei,...ke,...ej->...kij", Dn, weight, Up)   # (..., K, n, n)
-        L = self.L.to(dtype)
-        G = In - Out.unsqueeze(-3) - L.unsqueeze(-3)                     # (..., K, n, n)
+        G = In - Out.unsqueeze(-3)                                       # (..., K, n, n)
+        L = self._conduction_matrix(dtype)
+        if L is not None:
+            G = G - L.unsqueeze(-3)
 
         idx_i, idx_b = self.interior_idx, self.boundary_idx
         Gii = G.index_select(-2, idx_i).index_select(-1, idx_i)   # (..., K, n_i, n_i)
@@ -229,19 +451,49 @@ class TransportLayer:
         sources: torch.Tensor,
         x_boundary: torch.Tensor,
         dt: float,
+        *,
+        on_failure: str = "raise",
     ) -> torch.Tensor:
+        """Advance one timestep under `self.scheme`.
+
+        `on_failure` (keyword-only, default `"raise"`) is threaded to the `"implicit"` and
+        `"trapezoidal"` schemes' underlying linear solve; on `"return"` those two schemes
+        return the raw, stacked `SolveResult` instead of a plain `Tensor` (return type
+        `torch.Tensor | SolveResult`, amendment A8). `"exact"` does not accept a failure
+        mode here: it has no linear solve at all (Task 10's augmented matrix exponential
+        controls its own error via sub-stepping, and raises `RuntimeError` directly on
+        failure, as it always has).
+        """
+        if on_failure not in ("raise", "return"):
+            raise ValueError(
+                f"TransportLayer '{self.name}': unknown on_failure {on_failure!r}; "
+                f"expected 'raise' or 'return'"
+            )
         out_dtype = x.dtype
         dtype = torch.float64
         x_s, reduced = self._to_stacked(x, self.n_i, "x")
         x_s = x_s.to(dtype)
-        M, N = self.operator(q.to(dtype))
-        b0, _ = self._forcing(sources, x_boundary, N, dtype)
         if self.scheme == "exact":
-            result = _van_loan_step(M, x_s, b0, dt)
+            op = self._advection_operator(q.to(dtype))
+            xb_s, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
+            src_s, _ = self._to_stacked(sources.to(dtype), self.n_i, "sources")
+            cap = self._capacity_stacked(dtype)
+            b0 = op.boundary_forcing(xb_s) + src_s / cap
+            result, _substeps = _expm_action(
+                op, x_s, b0, dt, where=f"TransportLayer '{self.name}' exact step"
+            )
         elif self.scheme == "implicit":
-            result = _implicit_step(M, x_s, b0, dt, self.name)
+            result, reduced = self._implicit_step_sparse(
+                x, q, sources, x_boundary, dt, on_failure
+            )
+            if on_failure == "return":
+                return result
         elif self.scheme == "trapezoidal":
-            result = _trapezoidal_step(M, x_s, b0, dt, self.name)
+            result, reduced = self._trapezoidal_step_sparse(
+                x, q, sources, x_boundary, dt, on_failure
+            )
+            if on_failure == "return":
+                return result
         else:
             raise ValueError(
                 f"TransportLayer '{self.name}': unknown scheme {self.scheme!r}; "
@@ -250,25 +502,131 @@ class TransportLayer:
         return self._from_stacked(result.to(out_dtype), self.n_i, reduced)
 
     def steady(
-        self, q: torch.Tensor, sources: torch.Tensor, x_boundary: torch.Tensor
+        self, q: torch.Tensor, sources: torch.Tensor, x_boundary: torch.Tensor,
+        *, on_failure: str = "raise",
     ) -> torch.Tensor:
+        """Solve `0 = M x + N x_b + sources / capacity` for the steady-state `x`.
+
+        `on_failure="raise"` (the default) returns a plain `torch.Tensor`, matching every
+        existing call site's expectation. `on_failure="return"` bypasses the differentiable
+        `_linear_solve` path entirely and returns the raw, STACKED `SolveResult` from
+        `solvers.select.solve` directly (not reshaped by `_from_stacked`): a `SolveResult`
+        is not a plain `Tensor`, so it cannot be a single `torch.autograd.Function`'s output
+        the way the default `Tensor` return is. Return type on that path is therefore
+        `torch.Tensor | SolveResult` (amendment A8).
+        """
+        if on_failure not in ("raise", "return"):
+            raise ValueError(
+                f"TransportLayer '{self.name}': unknown on_failure {on_failure!r}; "
+                f"expected 'raise' or 'return'"
+            )
         dtype = torch.float64
-        M, N = self.operator(q.to(dtype))
-        b0, reduced = self._forcing(sources, x_boundary, N, dtype)
-        try:
-            x_s = torch.linalg.solve(M, -b0.unsqueeze(-1)).squeeze(-1)
-        except torch.linalg.LinAlgError as err:
-            raise RuntimeError(
-                f"TransportLayer '{self.name}': steady-state system is singular (no "
-                f"outflow anywhere on some interior node): {err}"
-            ) from err
+        q = q.to(dtype)
+        sources = sources.to(dtype)
+        x_boundary = x_boundary.to(dtype)
+        _, reduced = self._to_stacked(sources, self.n_i, "sources")
+
+        def build_system(q_, sources_, xb_):
+            op = self._advection_operator(q_)
+            xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
+            src_s, _ = self._to_stacked(sources_, self.n_i, "sources")
+            cap = self._capacity_stacked(dtype)
+            b0 = op.boundary_forcing(xb_s) + src_s / cap
+            return op, -b0
+
+        if on_failure == "return":
+            op, rhs = build_system(q, sources, x_boundary)
+            return _solve_operator(
+                op, rhs, method="auto", on_failure="return",
+                where=f"TransportLayer '{self.name}' steady",
+            )
+        x_s = _linear_solve(
+            build_system, f"TransportLayer '{self.name}' steady", q, sources, x_boundary
+        )
         return self._from_stacked(x_s, self.n_i, reduced)
 
+    def _implicit_step_sparse(
+        self, x: torch.Tensor, q: torch.Tensor, sources: torch.Tensor,
+        x_boundary: torch.Tensor, dt: float, on_failure: str,
+    ) -> torch.Tensor:
+        """Backward Euler `(I - dt M) x_{n+1} = x_n + dt b0` on the operator contract."""
+        dtype = torch.float64
+        x = x.to(dtype)
+        q = q.to(dtype)
+        sources = sources.to(dtype)
+        x_boundary = x_boundary.to(dtype)
+        _, reduced = self._to_stacked(x, self.n_i, "x")
 
-def _van_loan_step(
+        def build_system(x_, q_, sources_, xb_):
+            op = self._advection_operator(q_)
+            xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
+            src_s, _ = self._to_stacked(sources_, self.n_i, "sources")
+            x_s, _ = self._to_stacked(x_, self.n_i, "x")
+            cap = self._capacity_stacked(dtype)
+            b0 = op.boundary_forcing(xb_s) + src_s / cap
+            rhs = x_s + dt * b0
+            system = _AffineSystemOperator(op, dt)
+            return system, rhs
+
+        if on_failure == "return":
+            system, rhs = build_system(x, q, sources, x_boundary)
+            result = _solve_operator(
+                system, rhs, method="auto", on_failure="return",
+                where=f"TransportLayer '{self.name}' implicit step",
+            )
+            return result, reduced
+        x_s = _linear_solve(
+            build_system, f"TransportLayer '{self.name}' implicit step",
+            x, q, sources, x_boundary,
+        )
+        return x_s, reduced
+
+    def _trapezoidal_step_sparse(
+        self, x: torch.Tensor, q: torch.Tensor, sources: torch.Tensor,
+        x_boundary: torch.Tensor, dt: float, on_failure: str,
+    ) -> torch.Tensor:
+        """Crank-Nicolson `(I - dt/2 M) x_{n+1} = (I + dt/2 M) x_n + dt b0` on the operator
+        contract."""
+        dtype = torch.float64
+        x = x.to(dtype)
+        q = q.to(dtype)
+        sources = sources.to(dtype)
+        x_boundary = x_boundary.to(dtype)
+        _, reduced = self._to_stacked(x, self.n_i, "x")
+
+        def build_system(x_, q_, sources_, xb_):
+            op = self._advection_operator(q_)
+            xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
+            src_s, _ = self._to_stacked(sources_, self.n_i, "sources")
+            x_s, _ = self._to_stacked(x_, self.n_i, "x")
+            cap = self._capacity_stacked(dtype)
+            b0 = op.boundary_forcing(xb_s) + src_s / cap
+            rhs = x_s + 0.5 * dt * op.matvec(x_s) + dt * b0
+            system = _AffineSystemOperator(op, 0.5 * dt)
+            return system, rhs
+
+        if on_failure == "return":
+            system, rhs = build_system(x, q, sources, x_boundary)
+            result = _solve_operator(
+                system, rhs, method="auto", on_failure="return",
+                where=f"TransportLayer '{self.name}' trapezoidal step",
+            )
+            return result, reduced
+        x_s = _linear_solve(
+            build_system, f"TransportLayer '{self.name}' trapezoidal step",
+            x, q, sources, x_boundary,
+        )
+        return x_s, reduced
+
+
+def _van_loan_step_dense(
     M: torch.Tensor, x: torch.Tensor, b0: torch.Tensor, dt: float
 ) -> torch.Tensor:
-    """Exact linear step via the augmented matrix exponential (Van Loan, 1978)."""
+    """Exact linear step via the augmented matrix exponential (Van Loan, 1978).
+
+    Retained as the O(m^2) dense ORACLE for tests and for the small-system path; the
+    operational path is `_expm_action`, which never forms this (2m, 2m) block.
+    """
     m = M.shape[-1]
     batch = M.shape[:-2]
     Z = torch.zeros(*batch, 2 * m, 2 * m, dtype=M.dtype)
@@ -280,31 +638,58 @@ def _van_loan_step(
     return (Ed @ x.unsqueeze(-1)).squeeze(-1) + (Phi @ b0.unsqueeze(-1)).squeeze(-1)
 
 
-def _implicit_step(
-    M: torch.Tensor, x: torch.Tensor, b0: torch.Tensor, dt: float, name: str
-) -> torch.Tensor:
-    """Backward Euler: (I - dt M) x_{n+1} = x_n + dt b0."""
-    m = M.shape[-1]
-    eye = torch.eye(m, dtype=M.dtype).expand(*M.shape[:-2], m, m)
-    rhs = x + dt * b0
-    try:
-        return torch.linalg.solve(eye - dt * M, rhs.unsqueeze(-1)).squeeze(-1)
-    except torch.linalg.LinAlgError as err:
+def _expm_action(
+    M: AdvectionOperator,
+    x: torch.Tensor,
+    b0: torch.Tensor,
+    dt: float,
+    *,
+    rtol: float = 1e-10,
+    atol: float = 1e-12,
+    max_terms: int = 60,
+    max_substeps: int = 20,
+    where: str = "TransportLayer exact step",
+    _depth: int = 0,
+) -> tuple[torch.Tensor, int]:
+    """expm(dt * [[M, b0], [0, 0]]) @ [x, 1], as a scaling-and-squaring-free Taylor
+    action in M -- see the module docstring / Task 10's plan for the derivation.
+    Never forms a (2m, 2m), or even an (m, m), dense object.
+    """
+    u = M.matvec(x) + b0
+    result = x.clone()
+    term = u
+    coef = dt
+    converged = torch.zeros(x.shape[:-1], dtype=torch.bool, device=x.device)
+    j = 1
+    while j <= max_terms:
+        increment = coef * term
+        result = torch.where(
+            converged.unsqueeze(-1), result, result + increment
+        )
+        tol = atol + rtol * result.abs().amax(dim=-1, keepdim=True).squeeze(-1)
+        finite = torch.isfinite(increment).all(dim=-1) & torch.isfinite(result).all(dim=-1)
+        newly_converged = finite & (increment.abs().amax(dim=-1) <= tol)  # amendment A6
+        converged = converged | newly_converged
+        if bool(torch.all(converged)):
+            return result, 1  # one leaf Taylor evaluation (amendment A6)
+        term = M.matvec(term)
+        j += 1
+        coef = coef * dt / (j)
+    if _depth >= max_substeps:
+        bad = torch.nonzero(~converged.reshape(-1), as_tuple=False).flatten()
         raise RuntimeError(
-            f"TransportLayer '{name}': implicit-scheme system is singular for dt={dt}: {err}"
-        ) from err
+            f"{where}: batch indices {bad.tolist()} failed to converge "
+            f"the exponential action after {max_substeps} dt-halvings"
+        )
+    half = dt / 2
+    x_mid, substeps_a = _expm_action(
+        M, x, b0, half, rtol=rtol, atol=atol, max_terms=max_terms,
+        max_substeps=max_substeps, where=where, _depth=_depth + 1,
+    )
+    x_end, substeps_b = _expm_action(
+        M, x_mid, b0, half, rtol=rtol, atol=atol, max_terms=max_terms,
+        max_substeps=max_substeps, where=where, _depth=_depth + 1,
+    )
+    return x_end, substeps_a + substeps_b  # amendment A6
 
 
-def _trapezoidal_step(
-    M: torch.Tensor, x: torch.Tensor, b0: torch.Tensor, dt: float, name: str
-) -> torch.Tensor:
-    """Crank-Nicolson: (I - dt/2 M) x_{n+1} = (I + dt/2 M) x_n + dt b0."""
-    m = M.shape[-1]
-    eye = torch.eye(m, dtype=M.dtype).expand(*M.shape[:-2], m, m)
-    rhs = ((eye + 0.5 * dt * M) @ x.unsqueeze(-1)).squeeze(-1) + dt * b0
-    try:
-        return torch.linalg.solve(eye - 0.5 * dt * M, rhs.unsqueeze(-1)).squeeze(-1)
-    except torch.linalg.LinAlgError as err:
-        raise RuntimeError(
-            f"TransportLayer '{name}': trapezoidal-scheme system is singular for dt={dt}: {err}"
-        ) from err
