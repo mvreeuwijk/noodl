@@ -89,7 +89,11 @@ def _spy(monkeypatch, target, name):
     return calls
 
 
-def test_all_instances_certify_selects_pcg(monkeypatch):
+def test_all_instances_certify_and_no_sparse_form_selects_pcg(monkeypatch):
+    """PCG rather than sparse-direct because `_FakeOperator` declares no `assemble_sparse`,
+    not because certification alone still means PCG -- since spec section 6.2 step 2 it does
+    not. The name says the reason, so this test cannot be read as pinning the old rule.
+    """
     import tellegen.solvers.select as select_module
 
     pcg_calls = _spy(monkeypatch, select_module, "pcg")

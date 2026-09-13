@@ -174,10 +174,16 @@ def test_build_composed_forwards_linear_solver_to_the_migrated_layer_only():
     assert build_composed().layer.linear_solver == "auto"
 
 
-def test_budget_row_kwargs_carry_the_solver_into_the_child_process():
-    """`measure_budget_row`'s `solver` must arrive as the workload's own `linear_solver`
-    keyword, since `isolated_peak_rss` rebuilds the model in a fresh process from those
-    kwargs alone -- a solver that did not travel would silently measure the default twice.
+def test_the_report_compares_two_distinct_backends_through_a_solver_keyword():
+    """The report's two solver rows must be two DIFFERENT backends, and each workload must
+    have a `linear_solver` keyword for `measure_budget_row`'s `solver` to travel through --
+    `isolated_peak_rss` rebuilds the model in a fresh process from those kwargs alone, so a
+    workload with nowhere to put the solver would silently measure the default twice.
+
+    Named for what it asserts: it checks the two ENDS of that path (distinct backends in
+    `SOLVERS`, a `linear_solver` parameter on each workload), not that `measure_budget_row`
+    actually forwards `solver` into the child's kwargs, which would need the child process
+    itself and is covered by the report's own output carrying two different sets of numbers.
     """
     import inspect
 

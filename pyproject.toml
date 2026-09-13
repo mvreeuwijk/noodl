@@ -17,7 +17,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy"]
+# `sparse` is a RUNTIME extra, not a developer convenience. `method="auto"` prefers the
+# SciPy SuperLU backend for a certified-SPD operator with a sparse form at a flat batch of
+# at most 32 (spec section 6.2 step 2), so on a plain `pip install tellegen` the documented
+# default silently never fires and every such solve falls back to PCG -- correct, and 4.6x
+# slower at ensemble 1. It stays OPTIONAL rather than becoming a hard dependency because the
+# evidence for the default is one platform at one problem size (spec section 2: "selected on
+# evidence, per platform"), and PCG remains a complete answer without it.
+sparse = ["scipy>=1.11"]
+# `dev` restates `sparse`'s requirement rather than referencing the extra recursively: the
+# test suite exercises the sparse-direct backend directly, and a plain pin is one fewer
+# resolver feature for `pip install -e ".[dev]"` to depend on. Keep the two in step.
+dev = ["pytest>=8", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy>=1.11"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

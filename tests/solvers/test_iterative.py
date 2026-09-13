@@ -355,6 +355,17 @@ def test_pcg_results_are_pinned():
     compared with `rtol=0, atol=0`. A failure here means a change altered the numerics; the
     fix is to drop that change, never to re-record the numbers.
 
+    WHAT THE LITERALS ARE A PIN OF. They are a SINGLE-PLATFORM CPU float64 recording:
+    Windows, torch 2.14.0+cpu, 14 threads. Bit-exactness across platforms is not something
+    this test can promise -- a different BLAS, a different thread count over a reduction, or
+    a different vectorisation width may legitimately land in another ulp. The reductions here
+    are tiny (5 unknowns, 3 instances), the scatter-add is deterministic and everything is
+    CPU float64, so the risk is low; it is not zero. If another platform (CI's ubuntu-latest,
+    say) disagrees, that is a finding to INVESTIGATE -- print the differing entries and
+    establish whether the gap is a last-ulp reduction-order difference or a real change --
+    and never a reason to re-record the numbers against that platform, which would destroy
+    the only instrument that can see an arithmetic change at all.
+
     Two runs are pinned. The first (default `max_iter = m = 5`) pins the CONVERGED result,
     where CG's exact-termination property means all three instances finish on the same
     iteration. The second (`max_iter=3`) pins a MID-ITERATION state, which is what actually
