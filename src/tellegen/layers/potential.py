@@ -151,6 +151,14 @@ class PotentialFlowLayer:
         this whole solve path uses -- see topology.py's module docstring) restricted to this
         layer's own edge columns. Kept for callers and for symmetry with `A`; `dp()` gathers
         `phi[..., _src] - phi[..., _tgt]` instead of contracting against it.
+
+        Like `A`, cached on first access and never invalidated: both assume `net` is not
+        mutated after this layer is constructed. Nothing in this codebase does that -- a
+        `Network` is built, then layers are constructed over it, then it is solved -- but a
+        caller who mutated `net` afterwards (adding a node or edge) would get a layer whose
+        `A`/`_diff` (if already accessed) or `_src`/`_tgt`/`cols` (fixed at `__init__`) no
+        longer agree with the network's current topology, with no check anywhere that
+        catches it.
         """
         return self.net.difference()[self.cols]
 
@@ -511,14 +519,27 @@ class PotentialFlowLayer:
           refused outright by `solvers.implicit.implicit_solve`: the adjoint linearises at
           the returned point, and at a non-converged point the gradient is silently wrong.
 
-        The inner linear solver is this layer's `linear_solver` (set at construction), unless
-        the caller overrides it with an explicit `method=` among `newton_kwargs`.
+        The inner linear solver for NEWTON's own iteration is this layer's `linear_solver`
+        (set at construction), unless the caller overrides it with an explicit `method=`
+        among `newton_kwargs`. That override does NOT reach the initial guess: when `phi0`
+        is `None` (the default) it is computed by `linear_init`, which always solves with
+        `self.linear_solver` regardless of any `method=` passed to this call -- pass an
+        explicit `phi0` instead if the override must apply there too.
 
         `phi0` is a starting guess and nothing else: it is DETACHED on entry (and the guess
         this method computes for itself when `phi0 is None` is computed under `no_grad`),
         because the implicit adjoint linearises at the converged point and never returns a
         gradient w.r.t. the starting guess -- `solvers.implicit._Implicit.backward` returns
         `None` for it. See the comment at the top of the body for what tracing it cost.
+
+        With `differentiable=False`, the returned `(phi, q)` are NOT necessarily detached:
+        this branch runs Newton's residual/operator closures under ordinary autograd (no
+        `no_grad`, no `Function.apply`), so if any Element was constructed with
+        `learnable=True` its `nn.Parameter`s are read directly inside those closures and the
+        result carries a graph back to them (and to `phi_boundary`/`drivers`/`sources`) via
+        plain unrolled autograd through the converged Newton iterate -- gradients that are
+        real, just not the implicit-function ones `differentiable=True` computes. A caller
+        that wants tensors with no graph at all must `.detach()` the result itself.
         """
         drivers = drivers or {}
         newton_kwargs.setdefault("method", self.linear_solver)

@@ -10,8 +10,15 @@ drops below ``switch_ratio``, following CONTAM's under-relaxation scheme.
 contract of Milestone 1b) or a plain dense ``(..., m, m)`` tensor for backward
 compatibility with every pre-1b caller; a returned tensor is auto-wrapped in
 ``DenseOperator``. The inner linear solve goes through ``solvers.select.solve``
-with ``on_failure="return"`` (Newton is a low-level primitive: it never raises
-mid-iteration on its own account, only via the final convergence check below).
+with ``on_failure="return"``, so a NUMERICAL failure (non-convergence,
+breakdown, singularity) never raises mid-iteration -- only the final
+convergence check below can, and only when ``on_failure="raise"``. This does
+NOT cover an ELIGIBILITY refusal (amendment A3.2): ``solvers.select.solve``
+raises ``RuntimeError`` regardless of ``on_failure`` when an explicit
+``method="cg"`` cannot certify SPD, or when ``method="auto"`` would have to
+split a batch between certified and uncertified instances -- both are
+modelling errors, not numerical outcomes, so they propagate out of an inner
+iteration exactly as they would from a single, unbatched call.
 This is what replaces the old identity-substitution trick for a converged-but-
 singular instance: a dense ``torch.linalg.solve`` raises for the WHOLE batched
 call if any one instance's matrix is singular, which is why the old code had to

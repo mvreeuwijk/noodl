@@ -32,6 +32,12 @@ class SolverStatus(IntEnum):
     MAX_ITER = 1
     BREAKDOWN = 2
     SINGULAR = 3
+    # RESERVED: no `solvers.*` entry point currently produces this status. An eligibility
+    # refusal (an explicit method="cg" that cannot certify SPD, or method="auto" seeing a
+    # mixed-certification batch) raises RuntimeError instead of returning a SolveResult at
+    # all, so there is no per-instance status to set -- see solvers/select.py's module
+    # docstring. Kept for a future per-instance (rather than whole-call) certification
+    # failure, should one be added.
     NOT_CERTIFIED = 4
 
 

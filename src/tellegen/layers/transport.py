@@ -437,10 +437,13 @@ class TransportLayer:
         `on_failure` (keyword-only, default `"raise"`) is threaded to the `"implicit"` and
         `"trapezoidal"` schemes' underlying linear solve; on `"return"` those two schemes
         return the raw, stacked `SolveResult` instead of a plain `Tensor` (return type
-        `torch.Tensor | SolveResult`, amendment A8). `"exact"` does not accept a failure
-        mode here: it has no linear solve at all (Task 10's augmented matrix exponential
-        controls its own error via sub-stepping, and raises `RuntimeError` directly on
-        failure, as it always has).
+        `torch.Tensor | SolveResult`, amendment A8). `"exact"` has no linear solve at all
+        (Task 10's augmented matrix exponential controls its own error via sub-stepping, and
+        raises `RuntimeError` directly on failure, as it always has), so it does not accept
+        `on_failure="return"`: there is no `SolveResult` for it to produce, and silently
+        falling back to `"raise"` behaviour would make the argument look like it had an
+        effect it does not have. `on_failure="return"` with `scheme="exact"` therefore
+        raises `ValueError` naming the layer.
         """
         if on_failure not in ("raise", "return"):
             raise ValueError(
@@ -452,6 +455,14 @@ class TransportLayer:
         x_s, reduced = self._to_stacked(x, self.n_i, "x")
         x_s = x_s.to(dtype)
         if self.scheme == "exact":
+            if on_failure == "return":
+                raise ValueError(
+                    f"TransportLayer '{self.name}': on_failure='return' has no effect for "
+                    f"scheme='exact' (there is no linear solve to return the status of; "
+                    f"a sub-stepping failure raises RuntimeError directly). Use the default "
+                    f"on_failure='raise', or a scheme with a linear solve ('implicit', "
+                    f"'trapezoidal')."
+                )
             op = self._advection_operator(q.to(dtype))
             xb_s, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
             src_s, _ = self._to_stacked(sources.to(dtype), self.n_i, "sources")

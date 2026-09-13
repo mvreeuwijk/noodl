@@ -411,6 +411,25 @@ def test_wrong_length_conductance_raises_value_error_naming_argument():
         )
 
 
+def test_exact_scheme_rejects_on_failure_return():
+    """scheme='exact' has no linear solve to report a SolveResult for; on_failure='return'
+    is validated but does nothing there, so it must raise ValueError rather than silently
+    behave like 'raise'.
+    """
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath", boundary=["ambient"],
+        scheme="exact",
+    )
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    c = torch.tensor([100.0], dtype=torch.float64)
+    with pytest.raises(ValueError, match="on_failure='return'"):
+        layer.step(
+            c, q, torch.zeros(1, dtype=torch.float64), torch.tensor([420.0]), 300.0,
+            on_failure="return",
+        )
+
+
 def test_transpose_view_is_the_shared_transpose_operator():
     """`_TransposeView` is a thin alias for `solvers.implicit.TransposeOperator`, not a
     separately-maintained duplicate -- see the consolidation note in `layers/transport.py`.
