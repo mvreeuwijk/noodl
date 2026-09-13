@@ -178,6 +178,29 @@ class PotentialFlowLayer:
         )
         return out.index_add(-1, self._src, w).index_add(-1, self._tgt, -w)
 
+    def _accumulate_interior(self, w: torch.Tensor) -> torch.Tensor:
+        """`self._accumulate(w)` restricted to interior rows -- the repeated `A_I w` site."""
+        return self._accumulate(w)[..., self.interior]
+
+    def _accumulate_bound(self, w: torch.Tensor) -> torch.Tensor:
+        """`self._accumulate(w)` restricted to boundary rows -- the repeated `A_bound w` site."""
+        return self._accumulate(w)[..., self.bound]
+
+    def _operator_at(self, dq: torch.Tensor) -> GraphLaplacianOperator:
+        """The matvec-free `A_I diag(dq) A_I^T` operator at slope `dq`, in this layer's own
+        endpoint/interior-index representation -- the construction repeated by `solve`'s
+        `operator_fn` (both the non-differentiable and differentiable branches) and by
+        `adjoint`.
+        """
+        return GraphLaplacianOperator(
+            self._src,
+            self._tgt,
+            dq,
+            len(self.interior),
+            self._interior_of_node,
+            boundary_mask=self._boundary_mask,
+        )
+
     # ------------------------------------------------------------------ assembly
     def dp(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
         drivers = drivers or {}
@@ -249,7 +272,7 @@ class PotentialFlowLayer:
         # rows, rather than einsum against the (n_I, b) slice of the dense incidence: this
         # is once per Newton residual evaluation, and at ensemble 100 the einsum form alone
         # cost 14.2 ms of a 41.8 ms residual (Task 14's profile).
-        lhs = self._accumulate(q)[..., self.interior]
+        lhs = self._accumulate_interior(q)
         s_I = self._source_interior(sources, phi_interior)
         return lhs - s_I
 
@@ -367,9 +390,7 @@ class PotentialFlowLayer:
         phi0 = self.assemble(phi_i0, phi_boundary)
         dp0 = self.dp(phi0, drivers)
         c, k = self._linear_ck(drivers)
-        rhs = self._source_interior(sources, phi0) - self._accumulate(c + k * dp0)[
-            ..., self.interior
-        ]
+        rhs = self._source_interior(sources, phi0) - self._accumulate_interior(c + k * dp0)
         self._grounding_check(k, where="linear_init")
         # k picks up a batch dimension only if some element's linear_init(drivers) actually
         # depends on drivers (e.g. a driver-conditioned slope); with purely constant slopes
@@ -380,14 +401,7 @@ class PotentialFlowLayer:
         solve_batch = torch.broadcast_shapes(k.shape[:-1], rhs.shape[:-1])
         k = k.expand(solve_batch + k.shape[-1:])
         rhs = rhs.expand(solve_batch + rhs.shape[-1:])
-        op = GraphLaplacianOperator(
-            self._src,
-            self._tgt,
-            k,
-            len(self.interior),
-            self._interior_of_node,
-            boundary_mask=self._boundary_mask,
-        )
+        op = self._operator_at(k)
         result = select_solve(
             op,
             rhs,
@@ -571,14 +585,7 @@ class PotentialFlowLayer:
                 # closes over are cached on the layer at construction.
                 phi = self.assemble(x, phi_boundary)
                 dq = self.dflows(phi, drivers)
-                return GraphLaplacianOperator(
-                    self._src,
-                    self._tgt,
-                    dq,
-                    len(self.interior),
-                    self._interior_of_node,
-                    boundary_mask=self._boundary_mask,
-                )
+                return self._operator_at(dq)
 
             result = newton(residual_fn, operator_fn, phi0, **newton_kwargs)
             if diagnostics is not None:
@@ -729,7 +736,7 @@ class PotentialFlowLayer:
             rebuilt, drv, src, pb = _rebuild(params)
             phi = self.assemble(x, pb)
             q = _flows_functional(phi, drv, rebuilt)
-            lhs = self._accumulate(q)[..., self.interior]
+            lhs = self._accumulate_interior(q)
             s_I = src[..., self.interior]
             return lhs - s_I
 
@@ -737,14 +744,7 @@ class PotentialFlowLayer:
             rebuilt, drv, src, pb = _rebuild(params)
             phi = self.assemble(x, pb)
             dq = _dflows_functional(phi, drv, rebuilt)
-            return GraphLaplacianOperator(
-                self._src,
-                self._tgt,
-                dq,
-                len(self.interior),
-                self._interior_of_node,
-                boundary_mask=self._boundary_mask,
-            )
+            return self._operator_at(dq)
 
         x = implicit_solve(
             residual_fn,
@@ -776,14 +776,7 @@ class PotentialFlowLayer:
         drivers = drivers or {}
         phi = self.assemble(phi_interior, phi_boundary)
         dq = self.dflows(phi, drivers)
-        op = GraphLaplacianOperator(
-            self._src,
-            self._tgt,
-            dq,
-            len(self.interior),
-            self._interior_of_node,
-            boundary_mask=self._boundary_mask,
-        )
+        op = self._operator_at(dq)
         return _adjoint_solve(
             op,
             grad_phi_interior,
@@ -807,7 +800,7 @@ class PotentialFlowLayer:
         drivers = drivers or {}
         d = self.dp(phi, drivers)
         drive_only = d - self._difference(phi)
-        boundary_flow = self._accumulate(q)[..., self.bound]
+        boundary_flow = self._accumulate_bound(q)
         phi_b = phi[..., self.bound]
         phi_i = phi[..., self.interior]
         s_I = self._source_interior(sources, phi_i)
