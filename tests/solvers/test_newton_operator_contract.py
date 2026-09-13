@@ -72,7 +72,10 @@ def test_method_direct_agrees_with_auto_and_reports_linear_iterations():
     # `method` is forwarded to select.solve, so the caller chooses the inner solver without
     # newton() knowing anything about the operator's storage. `linear_iterations` is the
     # per-instance MAX inner iteration count over the Newton steps actually taken: exactly 1
-    # for a direct (LU) solve, at least 1 for any Krylov one.
+    # for any direct solve (dense LU here, and SuperLU on the "auto" path since spec section
+    # 6.2 step 2 -- this fixture is a certified-SPD operator with a sparse form at a flat
+    # batch of 1), and at least 1 for a Krylov one. The `>= 1` below is deliberately the
+    # weaker claim, because it must hold whichever backend "auto" resolves to.
     residual, operator = _grounded_chain()
     x0 = torch.tensor([5.0], dtype=torch.float64)
 
@@ -132,31 +135,63 @@ def _leaky_chain(dtype: torch.dtype, m: int = 128):
     return residual, operator, torch.zeros(m, dtype=dtype), m
 
 
-def test_inner_solve_rtol_is_floored_by_the_working_dtype():
+def _spy_pcg(monkeypatch):
+    """Count `select.pcg` calls while still delegating, so a test that means to observe the
+    Krylov solver's behaviour fails loudly if the routing ever stops sending it there.
+    """
+    import tellegen.solvers.select as select_module
+
+    calls = {"count": 0}
+    real = select_module.pcg
+
+    def wrapper(*args, **kwargs):
+        calls["count"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(select_module, "pcg", wrapper)
+    return calls
+
+
+def test_inner_solve_rtol_is_floored_by_the_working_dtype(monkeypatch):
     # `select.solve`'s pinned rtol=1e-10 is unreachable at float32 (eps 1.2e-7). Without the
     # floor, every inner PCG on this fixture ran to its max_iter ceiling (measured: exactly
     # m=128 iterations), its MAX_ITER status was swallowed by newton's own
     # on_failure="return", and `linear_iterations` reported the ceiling rather than the work
     # actually done -- which is the number the composed-model report publishes.
+    #
+    # `method="cg"`, not "auto": this fixture is a certified-SPD GraphLaplacianOperator with
+    # a sparse form at a flat batch of 1, so since spec section 6.2 step 2 "auto" factorises
+    # it through SuperLU and reports `linear_iterations == 1` no matter what the floor does.
+    # The assertion below then held vacuously and the float32 PCG floor was exercised end to
+    # end by nothing at all (final review I2). The spy is what keeps it from silently
+    # happening again: this test is about the Krylov path, so it asserts it ran.
     residual, operator, x0, m = _leaky_chain(torch.float32)
+    pcg_calls = _spy_pcg(monkeypatch)
 
-    result = newton(residual, operator, x0, method="auto")
+    result = newton(residual, operator, x0, method="cg")
 
+    assert pcg_calls["count"] >= 1, "this test observes PCG's floor, so PCG must have run"
     assert bool(torch.all(result.converged))
     assert int(result.linear_iterations) < m, (
         f"inner solve ran to its max_iter ceiling ({m}) instead of converging"
     )
 
 
-def test_the_float32_inner_solve_floor_costs_no_accuracy_against_float64():
+def test_the_float32_inner_solve_floor_costs_no_accuracy_against_float64(monkeypatch):
     # The complement of the assertion above: the floor buys an honest iteration count
     # without giving up accuracy float32 could have delivered. float64 is unaffected by the
     # floor at all (max(1e-10, 32*2.2e-16) is still 1e-10).
+    #
+    # `method="cg"` for the same reason as above -- the floor is a property of the Krylov
+    # path, so comparing two direct factorisations would say nothing about it.
     r32, op32, x32, _ = _leaky_chain(torch.float32)
     r64, op64, x64, _ = _leaky_chain(torch.float64)
+    pcg_calls = _spy_pcg(monkeypatch)
 
-    result32 = newton(r32, op32, x32, method="auto")
-    result64 = newton(r64, op64, x64, method="auto")
+    result32 = newton(r32, op32, x32, method="cg")
+    result64 = newton(r64, op64, x64, method="cg")
+
+    assert pcg_calls["count"] >= 2
 
     assert bool(torch.all(result32.converged)) and bool(torch.all(result64.converged))
     torch.testing.assert_close(
