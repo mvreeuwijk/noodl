@@ -6,7 +6,8 @@ import pytest
 import torch
 from torch.autograd import gradcheck
 
-from tellegen.layers.transport import TransportLayer
+from tellegen.layers.transport import TransportLayer, _TransposeView
+from tellegen.solvers.implicit import TransposeOperator
 from tellegen.topology import Network
 
 
@@ -408,3 +409,10 @@ def test_wrong_length_conductance_raises_value_error_naming_argument():
             boundary=["Tb"], conduction_kind="conduction",
             conductance=torch.tensor([1.0, 2.0], dtype=torch.float64),
         )
+
+
+def test_transpose_view_is_the_shared_transpose_operator():
+    """`_TransposeView` is a thin alias for `solvers.implicit.TransposeOperator`, not a
+    separately-maintained duplicate -- see the consolidation note in `layers/transport.py`.
+    """
+    assert _TransposeView is TransposeOperator

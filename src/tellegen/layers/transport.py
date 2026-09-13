@@ -23,39 +23,17 @@ from typing import Literal
 import torch
 
 from tellegen.operators.advection import AdvectionOperator
+from tellegen.solvers.implicit import TransposeOperator as _TransposeView
 from tellegen.solvers.select import solve as _solve_operator
 from tellegen.topology import Network, Node
 
-
-class _TransposeView:
-    """A LinearOperator-shaped view exposing `op`'s TRANSPOSE: matvec and rmatvec swapped,
-    everything else passed through. Used only to solve the adjoint system `A^T lam =
-    grad_x` via the ordinary `solvers.select.solve` entry point -- the adjoint needs no
-    solver of its own, it reuses GMRES/PCG against the swapped action.
-    """
-
-    def __init__(self, op) -> None:
-        self._op = op
-        self.shape = op.shape
-        self.dtype = op.dtype
-        self.device = op.device
-        self.symmetric = op.symmetric
-
-    def matvec(self, x: torch.Tensor) -> torch.Tensor:
-        return self._op.rmatvec(x)
-
-    def rmatvec(self, x: torch.Tensor) -> torch.Tensor:
-        return self._op.matvec(x)
-
-    def diagonal(self) -> torch.Tensor:
-        return self._op.diagonal()  # diagonal entries are invariant under transpose
-
-    def assemble(self):
-        dense = self._op.assemble()
-        return None if dense is None else dense.transpose(-1, -2)
-
-    def spd_certificate(self):
-        return None
+# `_TransposeView` used to be its own LinearOperator-shaped adjoint-view class, duplicating
+# `solvers.implicit.TransposeOperator` method for method except for `spd_certificate` (this
+# module's version always returned None; `TransposeOperator`'s forwards the wrapped
+# operator's certificate iff it declares itself symmetric). Both this layer's operators
+# (`AdvectionOperator`, `_AffineSystemOperator` below) declare `symmetric = False`, so
+# `TransposeOperator.spd_certificate()` returns None for them exactly as the old local class
+# did -- this alias changes nothing observable here, it only removes the duplicate.
 
 
 class _LinearSolve(torch.autograd.Function):
