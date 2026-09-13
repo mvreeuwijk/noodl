@@ -332,7 +332,6 @@ def main() -> None:
             if dense_bytes < DENSE_MEM_BUDGET_BYTES:
                 try:
                     gc.collect()
-                    mem0 = peak_rss_mb() or 0.0
                     x_dense, dense_s = timed(dense_solve, edge_index, n, g, rhs, repeats=1)
                     dense_mem = (peak_rss_mb() or 0.0)
                 except (RuntimeError, MemoryError) as e:
@@ -342,7 +341,8 @@ def main() -> None:
             else:
                 print(
                     f"    [dense SKIPPED at n={n} B={B}: J would be "
-                    f"{dense_bytes / 1e9:.1f} GB, over the {DENSE_MEM_BUDGET_BYTES/1e9:.0f} GB budget]"
+                    f"{dense_bytes / 1e9:.1f} GB, over the "
+                    f"{DENSE_MEM_BUDGET_BYTES / 1e9:.0f} GB budget]"
                 )
 
             # ---- matrix-free CG, no preconditioner ----
@@ -433,7 +433,9 @@ def main() -> None:
         _, it_plain = cg_solve(mv, rhs, max_iter=3000)
         diag = jacobi_diag(edge_index, g, n)
         inv_diag = 1.0 / diag.clamp_min(torch.finfo(DTYPE).tiny)
-        _, it_jac = cg_solve(mv, rhs, precond=lambda r: r * inv_diag, max_iter=3000)
+        _, it_jac = cg_solve(
+            mv, rhs, precond=lambda r, inv_diag=inv_diag: r * inv_diag, max_iter=3000
+        )
         print(f"{decades:>8.0f} {it_plain:>9} {it_jac:>10}")
 
     print()
@@ -489,7 +491,7 @@ def main() -> None:
             q = torch.randn(B, b_edges, dtype=DTYPE)
             phi = torch.randn(B, n, dtype=DTYPE)
 
-            _, dense_Aq_s = timed(lambda q=q: q @ A.T, repeats=5)
+            _, dense_Aq_s = timed(lambda q=q, A=A: q @ A.T, repeats=5)
 
             def scatter_Aq(q=q, src=src, dst=dst, n=n):
                 out = q.new_zeros(q.shape[0], n)
@@ -499,7 +501,7 @@ def main() -> None:
 
             _, scat_Aq_s = timed(scatter_Aq, repeats=5)
 
-            _, dense_ATphi_s = timed(lambda phi=phi: phi @ A, repeats=5)
+            _, dense_ATphi_s = timed(lambda phi=phi, A=A: phi @ A, repeats=5)
 
             def gather_ATphi(phi=phi, src=src, dst=dst):
                 return phi[..., src] - phi[..., dst]

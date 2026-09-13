@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import time
 
+import sparse_scaling as original
 import torch
 from torch.utils.benchmark import Timer
 
-import sparse_scaling as original
 from tellegen.elements.conductance import Conductance
 from tellegen.layers.potential import PotentialFlowLayer
 from tellegen.topology import Network
@@ -61,7 +61,8 @@ def checks():
         A, AT = shared_incidence(ei, 6, layout)
         g = original.random_conductances(2, ei.shape[1], 2, 10).requires_grad_()
         x = torch.randn(2, 5, dtype=torch.float64, requires_grad=True)
-        fn = lambda g, x: shared_mv(A, AT, g, x)
+        def fn(g, x, A=A, AT=AT):
+            return shared_mv(A, AT, g, x)
         torch.testing.assert_close(fn(g, x), original.matvec_gather_scatter(ei, g, 6, x))
         print("shared", layout, "different g per batch: gradcheck",
               torch.autograd.gradcheck(fn, (g, x)), flush=True)
@@ -74,9 +75,11 @@ def checks():
         coo, coot = shared_incidence(ei, n, "coo")
         csr, csrt = shared_incidence(ei, n, "csr")
         funcs = {
-            "gather_scatter": lambda: original.matvec_gather_scatter(ei, g, n, x),
-            "shared_coo": lambda: shared_mv(coo, coot, g, x),
-            "shared_csr": lambda: shared_mv(csr, csrt, g, x),
+            "gather_scatter": lambda ei=ei, g=g, n=n, x=x: original.matvec_gather_scatter(
+                ei, g, n, x
+            ),
+            "shared_coo": lambda coo=coo, coot=coot, g=g, x=x: shared_mv(coo, coot, g, x),
+            "shared_csr": lambda csr=csr, csrt=csrt, g=g, x=x: shared_mv(csr, csrt, g, x),
         }
         reference = funcs["gather_scatter"]()
         for fn in funcs.values():
@@ -92,12 +95,18 @@ def checks():
     n, B = 300, 100
     ei = original.build_graph(n, 999)
     rhs = torch.randn(B, n - 1, dtype=torch.float64)
-    print("spread: decades, method, iterations, true max relative residual, failed batches", flush=True)
+    print(
+        "spread: decades, method, iterations, true max relative residual, failed batches",
+        flush=True,
+    )
     for decades in (0, 2, 6, 8):
         g = original.random_conductances(B, ei.shape[1], decades, 7)
-        mv = lambda x: original.matvec_gather_scatter(ei, g, n, x)
+
+        def mv(x, g=g):
+            return original.matvec_gather_scatter(ei, g, n, x)
+
         inv_diag = original.jacobi_diag(ei, g, n).reciprocal()
-        for name, pre in (("CG", None), ("PCG", lambda r: r * inv_diag)):
+        for name, pre in (("CG", None), ("PCG", lambda r, inv_diag=inv_diag: r * inv_diag)):
             t0 = time.perf_counter()
             sol, it = original.cg_solve(mv, rhs, precond=pre, max_iter=3000)
             rel = (rhs - mv(sol)).abs().amax(-1) / rhs.abs().amax(-1)
@@ -108,7 +117,9 @@ def checks():
     ei = torch.tensor([[0, 0], [1, 2]])
     g = torch.tensor([[1.0, 1e-8]], dtype=torch.float64)
     rhs = torch.ones(1, 2, dtype=torch.float64)
-    mv = lambda x: original.matvec_gather_scatter(ei, g, 3, x)
+    def mv(x):
+        return original.matvec_gather_scatter(ei, g, 3, x)
+
     sol, it = original.cg_solve(mv, rhs, precond=lambda r: r / g)
     print("8-decade grounded star PCG", it, "residual", (rhs - mv(sol)).abs().max().item())
 
@@ -153,7 +164,9 @@ def checks():
         spla.spsolve(A_sp @ sp.diags(g[i].numpy()) @ A_sp.T, rhs[i].numpy())
         for i in range(B)
     ]))
-    rel = (rhs - original.matvec_gather_scatter(ei, g, n, out_sp)).abs().amax(-1) / rhs.abs().amax(-1)
+    rel = (rhs - original.matvec_gather_scatter(ei, g, n, out_sp)).abs().amax(
+        -1
+    ) / rhs.abs().amax(-1)
     print("SciPy", scipy.__version__, "sparse direct n=300 B=1000", "seconds",
           round(time.perf_counter() - t0, 3), "max relative residual", rel.max().item(),
           "sequential CPU loop; no custom backward in this check", flush=True)
