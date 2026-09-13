@@ -11,7 +11,7 @@ from benchmarks.measure import saved_tensor_bytes
 from tellegen.drives import ConstantDrive
 from tellegen.elements import Conductance, FixedFlow, PowerLaw
 from tellegen.elements.fan import FanCurve
-from tellegen.layers.potential import PotentialFlowLayer
+from tellegen.layers.potential import _LINEAR_SOLVERS, PotentialFlowLayer
 from tellegen.topology import Network
 
 
@@ -596,3 +596,195 @@ def test_an_inner_solve_refusal_inside_newton_names_the_layer():
     assert "PotentialFlowLayer 'fan'" in message, message
     assert "cg" in message, message
     assert "instance 1" in message, message
+
+
+# -- section 6.2 step 2: linear_solver="sparse_direct" end to end -----------------------------
+
+
+def test_sparse_direct_linear_solver_matches_direct_on_the_two_zone_layer(two_zone_layer):
+    """Parity of the whole layer solve, not merely of one inner linear solve: `linear_init`,
+    every Newton inner solve and the returned flows all run through SciPy SuperLU instead of
+    the dense LU, and must agree with the retained milestone-1 numerics to 1e-9.
+    """
+    net, elements, drives, boundary = two_zone_layer
+    drivers = {"wind": torch.tensor([5.0, 0.0, 0.0], dtype=torch.float64)}
+    phi_b = torch.zeros(1, 1, dtype=torch.float64)
+    sources = torch.zeros(1, net.n, dtype=torch.float64)
+    sources[..., net.node_index("z1")] = 0.01
+
+    results = {}
+    for linear_solver in ("direct", "sparse_direct"):
+        layer = PotentialFlowLayer(
+            net, "two_zone", elements, drives, boundary=boundary, linear_solver=linear_solver
+        )
+        results[linear_solver] = layer.solve(phi_b, drivers, sources, differentiable=False)
+
+    phi_direct, q_direct = results["direct"]
+    phi_sparse, q_sparse = results["sparse_direct"]
+    torch.testing.assert_close(phi_sparse, phi_direct, rtol=1e-9, atol=1e-12)
+    torch.testing.assert_close(q_sparse, q_direct, rtol=1e-9, atol=1e-12)
+
+
+def test_sparse_direct_adjoint_matches_direct_on_the_two_zone_layer(two_zone_layer):
+    net, elements, drives, boundary = two_zone_layer
+    drivers = {"wind": torch.tensor([5.0, 0.0, 0.0], dtype=torch.float64)}
+    phi_b = torch.zeros(1, 1, dtype=torch.float64)
+    sources = torch.zeros(1, net.n, dtype=torch.float64)
+    sources[..., net.node_index("z1")] = 0.01
+
+    lam = {}
+    for linear_solver in ("direct", "sparse_direct"):
+        layer = PotentialFlowLayer(
+            net, "two_zone", elements, drives, boundary=boundary, linear_solver=linear_solver
+        )
+        phi, _q = layer.solve(phi_b, drivers, sources, differentiable=False)
+        phi_i = phi[..., layer.interior]
+        grad_phi_i = torch.ones_like(phi_i)
+        lam[linear_solver] = layer.adjoint(phi_i, phi_b, drivers, grad_phi_i)
+    torch.testing.assert_close(
+        lam["sparse_direct"], lam["direct"], rtol=1e-9, atol=1e-12
+    )
+
+
+def test_sparse_direct_linear_solver_matches_direct_on_the_composed_model():
+    """The same parity at a size where the sparse form actually matters: 2 buildings x 12
+    nodes plus the street and sewer networks, i.e. a few hundred unknowns rather than two.
+    """
+    from benchmarks.composed_model import build_composed
+
+    model = build_composed(
+        n_buildings=2, building_nodes=12, street_nodes=8, sewer_nodes=6, ensemble=2
+    )
+    net = model.net
+    sparse_layer = PotentialFlowLayer(
+        net,
+        "composed_sparse_direct",
+        model.elements,
+        boundary=model.boundary,
+        linear_solver="sparse_direct",
+    )
+    phi_direct, q_direct = model.dense_layer.solve(
+        model.phi_boundary, model.drivers, model.sources, differentiable=False
+    )
+    phi_sparse, q_sparse = sparse_layer.solve(
+        model.phi_boundary, model.drivers, model.sources, differentiable=False
+    )
+    torch.testing.assert_close(phi_sparse, phi_direct, rtol=1e-9, atol=1e-12)
+    torch.testing.assert_close(q_sparse, q_direct, rtol=1e-9, atol=1e-12)
+
+
+def test_sparse_direct_adjoint_matches_direct_on_the_composed_model():
+    from benchmarks.composed_model import build_composed
+
+    model = build_composed(
+        n_buildings=2, building_nodes=12, street_nodes=8, sewer_nodes=6, ensemble=2
+    )
+    net = model.net
+    sparse_layer = PotentialFlowLayer(
+        net,
+        "composed_sparse_direct",
+        model.elements,
+        boundary=model.boundary,
+        linear_solver="sparse_direct",
+    )
+    phi, _q = model.dense_layer.solve(
+        model.phi_boundary, model.drivers, model.sources, differentiable=False
+    )
+    phi_i = phi[..., model.dense_layer.interior]
+    grad_phi_i = torch.ones_like(phi_i)
+    lam_direct = model.dense_layer.adjoint(
+        phi_i, model.phi_boundary, model.drivers, grad_phi_i
+    )
+    lam_sparse = sparse_layer.adjoint(phi_i, model.phi_boundary, model.drivers, grad_phi_i)
+    torch.testing.assert_close(lam_sparse, lam_direct, rtol=1e-9, atol=1e-12)
+
+
+def test_sparse_direct_layer_actually_factorises_through_scipy_splu(monkeypatch, two_zone_layer):
+    """The parity tests above are only a gate if the two configurations are two code paths:
+    this spies on `scipy.sparse.linalg.splu` itself (and on `torch.linalg.lu_factor_ex`, the
+    dense path's own kernel) to prove which one ran. `linear_init`, the Newton inner solves
+    and the adjoint must ALL go through SuperLU under `linear_solver="sparse_direct"`.
+    """
+    import scipy.sparse.linalg
+
+    net, elements, drives, boundary = two_zone_layer
+    drivers = {"wind": torch.tensor([5.0, 0.0, 0.0], dtype=torch.float64)}
+    phi_b = torch.zeros(1, 1, dtype=torch.float64)
+    sources = torch.zeros(1, net.n, dtype=torch.float64)
+    sources[..., net.node_index("z1")] = 0.01
+
+    splu_calls, lu_calls, pcg_calls = [], [], []
+    real_splu = scipy.sparse.linalg.splu
+    real_lu = torch.linalg.lu_factor_ex
+    real_pcg = select_module.pcg
+
+    def spy_splu(*args, **kwargs):
+        splu_calls.append(1)
+        return real_splu(*args, **kwargs)
+
+    def spy_lu(*args, **kwargs):
+        lu_calls.append(1)
+        return real_lu(*args, **kwargs)
+
+    def spy_pcg(*args, **kwargs):
+        pcg_calls.append(1)
+        return real_pcg(*args, **kwargs)
+
+    monkeypatch.setattr(scipy.sparse.linalg, "splu", spy_splu)
+    monkeypatch.setattr(torch.linalg, "lu_factor_ex", spy_lu)
+    monkeypatch.setattr(select_module, "pcg", spy_pcg)
+
+    layer = PotentialFlowLayer(
+        net, "two_zone", elements, drives, boundary=boundary, linear_solver="sparse_direct"
+    )
+    phi, _q = layer.solve(phi_b, drivers, sources, differentiable=False)
+    assert splu_calls, "linear_solver 'sparse_direct' must factorise through scipy splu"
+    assert not lu_calls, "linear_solver 'sparse_direct' must not dense-LU-factorise"
+    assert not pcg_calls, "linear_solver 'sparse_direct' must not call pcg"
+
+    splu_after_solve = len(splu_calls)
+    phi_i = phi[..., layer.interior]
+    layer.adjoint(phi_i, phi_b, drivers, torch.ones_like(phi_i))
+    assert len(splu_calls) > splu_after_solve, "the adjoint must factorise through splu too"
+    assert not lu_calls and not pcg_calls
+
+
+def test_sparse_direct_is_an_accepted_linear_solver_value():
+    assert "sparse_direct" in _LINEAR_SOLVERS
+
+
+def test_unknown_linear_solver_error_message_lists_sparse_direct():
+    net = _three_node_chain()
+    element = Conductance(torch.tensor([1.0, 1.0], dtype=torch.float64), kind="conduction")
+    with pytest.raises(ValueError) as excinfo:
+        PotentialFlowLayer(
+            net, "chain", [element], boundary=["ambient"], linear_solver="banana"
+        )
+    assert "sparse_direct" in str(excinfo.value)
+
+
+def test_sparse_direct_layer_is_differentiable_through_the_implicit_adjoint(two_zone_layer):
+    """The backend itself is not differentiable, but the LAYER is: both the forward Newton
+    and the adjoint solve run under `no_grad` inside `_Implicit`, and the gradient comes from
+    one autograd pass through the residual at the converged point. So a differentiable
+    `solve` under `linear_solver="sparse_direct"` must produce the SAME gradient as under
+    `linear_solver="direct"`, not a refusal and not a detached zero.
+    """
+    net, elements, drives, boundary = two_zone_layer
+    drivers = {"wind": torch.tensor([5.0, 0.0, 0.0], dtype=torch.float64)}
+    phi_b = torch.zeros(1, 1, dtype=torch.float64)
+
+    grads = {}
+    for linear_solver in ("direct", "sparse_direct"):
+        sources = torch.zeros(1, net.n, dtype=torch.float64)
+        sources[..., net.node_index("z1")] = 0.01
+        sources = sources.detach().requires_grad_(True)
+        layer = PotentialFlowLayer(
+            net, "two_zone", elements, drives, boundary=boundary, linear_solver=linear_solver
+        )
+        phi, _q = layer.solve(phi_b, drivers, sources, differentiable=True)
+        phi[..., layer.interior].sum().backward()
+        grads[linear_solver] = sources.grad.clone()
+    torch.testing.assert_close(
+        grads["sparse_direct"], grads["direct"], rtol=1e-9, atol=1e-12
+    )

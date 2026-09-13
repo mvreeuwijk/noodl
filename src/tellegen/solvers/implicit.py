@@ -90,6 +90,24 @@ class TransposeOperator:
         a = self._op.assemble()
         return None if a is None else a.transpose(-1, -2)
 
+    def assemble_sparse(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        """The wrapped operator's COO form with ROW and COL swapped -- its transpose.
+
+        The optional `operators.base.SparseAssembling` member, which is what lets
+        `method="sparse_direct"` solve the ADJOINT system: transposing a COO triplet is
+        exactly exchanging the two index arrays, with the values untouched and no
+        re-assembly or coalescing of any kind. `None` propagates unchanged (the transpose
+        of "no sparse form" is still no sparse form), as does the absence of the optional
+        member on the wrapped operator -- so `select.solve` reports its own ValueError
+        rather than this view raising an AttributeError first.
+        """
+        assemble_sparse = getattr(self._op, "assemble_sparse", None)
+        triplet = assemble_sparse() if assemble_sparse is not None else None
+        if triplet is None:
+            return None
+        row, col, values = triplet
+        return col, row, values
+
     def spd_certificate(self) -> torch.Tensor | None:
         """The wrapped operator's certificate, but only when it declares itself SYMMETRIC.
 

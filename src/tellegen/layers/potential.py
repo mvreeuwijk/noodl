@@ -23,8 +23,11 @@ from tellegen.topology import Network
 
 # Inner linear solvers a layer may be configured with; forwarded verbatim as
 # `solvers.select.solve`'s `method`. "direct" is the retained milestone-1 reference (the
-# operator's explicit A_I diag(g) A_I^T, LU-factorised); "auto" is the migrated default.
-_LINEAR_SOLVERS = ("auto", "cg", "gmres", "direct")
+# operator's explicit A_I diag(g) A_I^T, LU-factorised); "auto" is the migrated default;
+# "sparse_direct" is the spec's section 6.2 SciPy SuperLU reference, which factorises the
+# operator's O(E) COO form per instance instead. All four reach BOTH passes: `linear_init`
+# and every Newton inner solve on the forward, and the implicit adjoint on the backward.
+_LINEAR_SOLVERS = ("auto", "cg", "gmres", "direct", "sparse_direct")
 
 
 class PotentialFlowLayer:
