@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from tellegen.operators.base import LinearOperator, SolveResult, SolverStatus
+from tellegen.operators.base import LinearOperator, SolveResult, SolverStatus, as_operator
 from tellegen.operators.dense import DenseOperator
 
 
@@ -187,6 +187,46 @@ def test_dense_operator_symmetric_defaults_to_false():
     A = torch.tensor([[4.0, 1.0], [1.0, 3.0]], dtype=torch.float64)  # symmetric matrix, but
     op = DenseOperator(A)                                             # NOT declared: default wins
     assert op.symmetric is False
+
+
+def test_as_operator_wraps_a_bare_tensor_in_dense_operator():
+    A = torch.randn(3, 3, dtype=torch.float64)
+    op = as_operator(A)
+    assert isinstance(op, DenseOperator)
+    assert op.assemble() is A
+    assert op.symmetric is False
+
+
+def test_as_operator_passes_a_linear_operator_through_unchanged():
+    class _Op:
+        shape = (2, 2)
+        dtype = torch.float64
+        device = torch.device("cpu")
+        symmetric = False
+
+        def matvec(self, x):
+            return x
+
+        def rmatvec(self, x):
+            return x
+
+        def diagonal(self):
+            return torch.ones(2, dtype=torch.float64)
+
+        def assemble(self):
+            return None
+
+        def spd_certificate(self):
+            return None
+
+    op = _Op()
+    assert as_operator(op) is op
+
+
+def test_as_operator_is_reexported_from_the_operators_package():
+    from tellegen.operators import as_operator as package_as_operator
+
+    assert package_as_operator is as_operator
 
 
 def test_dense_operator_reports_shape_dtype_and_device():

@@ -48,21 +48,9 @@ from collections.abc import Callable
 
 import torch
 
-from tellegen.operators.base import LinearOperator
-from tellegen.operators.dense import DenseOperator
+from tellegen.operators.base import LinearOperator, as_operator
 from tellegen.solvers.newton import inner_solve_rtol, newton
 from tellegen.solvers.select import solve as select_solve
-
-
-def _as_operator(op: LinearOperator | torch.Tensor) -> LinearOperator:
-    """Auto-wrap a plain dense Jacobian tensor as a ``DenseOperator``, exactly as
-    ``solvers.newton._as_operator`` does for the forward pass: every pre-Milestone-1b caller
-    of ``adjoint`` hands it an explicit ``(..., m, m)`` tensor, and wrapping here is what
-    keeps the operator contract invisible to them.
-    """
-    if isinstance(op, torch.Tensor):
-        return DenseOperator(op)
-    return op
 
 
 class TransposeOperator:
@@ -140,7 +128,7 @@ def adjoint(
     be impossible rather than silently returned.
     """
     step_method = "direct" if method == "auto" and isinstance(op, torch.Tensor) else method
-    top = TransposeOperator(_as_operator(op))
+    top = TransposeOperator(as_operator(op))
     result = select_solve(
         top,
         grad_x,

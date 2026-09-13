@@ -44,8 +44,7 @@ from dataclasses import dataclass
 
 import torch
 
-from tellegen.operators.base import LinearOperator
-from tellegen.operators.dense import DenseOperator
+from tellegen.operators.base import LinearOperator, as_operator
 from tellegen.solvers.select import solve as select_solve
 
 # The relative residual an inner linear solve is asked for, matching `solvers.select.solve`'s
@@ -98,23 +97,6 @@ class NewtonResult:
     iterations: int
     residual_norm: torch.Tensor
     linear_iterations: torch.Tensor | None = None
-
-
-def _as_operator(op: LinearOperator | torch.Tensor) -> LinearOperator:
-    """Auto-wrap a plain dense Jacobian tensor as a ``DenseOperator``.
-
-    Every pre-Milestone-1b caller passes a callable returning a dense ``(..., m, m)``
-    tensor; wrapping here (rather than making each of them construct an operator) is the
-    single compatibility shim that makes the operator contract invisible to them.
-    ``DenseOperator``'s ``symmetric=False`` default is load-bearing: it lets this wrap
-    happen with no keyword at all, and it makes no symmetry claim on a Newton Jacobian that
-    is in general nonsymmetric -- so an explicit ``method="cg"`` is correctly refused, and
-    ``"auto"`` falls through to GMRES for anything this function does not route to the
-    direct path.
-    """
-    if isinstance(op, torch.Tensor):
-        return DenseOperator(op)
-    return op
 
 
 def newton(
@@ -204,7 +186,7 @@ def newton(
         # it has always had; a genuine LinearOperator goes through the eligibility table.
         step_method = "direct" if method == "auto" and isinstance(raw, torch.Tensor) else method
         result = select_solve(
-            _as_operator(raw),
+            as_operator(raw),
             r,
             method=step_method,
             on_failure="return",

@@ -20,6 +20,8 @@ from typing import Protocol, runtime_checkable
 
 import torch
 
+from tellegen.operators.dense import DenseOperator
+
 Tensor = torch.Tensor
 
 
@@ -61,6 +63,27 @@ class SolveResult:
             f"{where}: batch indices {bad} failed to converge; "
             f"statuses {statuses}, residuals {residuals}"
         )
+
+
+def as_operator(op: LinearOperator | Tensor) -> LinearOperator:
+    """Auto-wrap a plain dense tensor as a ``DenseOperator``; pass a ``LinearOperator`` through.
+
+    The single compatibility shim that makes every pre-Milestone-1b caller -- each of which
+    passes a callable returning a dense ``(..., m, m)`` tensor rather than a ``LinearOperator``
+    -- invisible to `newton.newton` and `implicit.adjoint`, the two entry points that call it.
+    ``DenseOperator``'s ``symmetric=False`` default is load-bearing: it lets this wrap happen
+    with no keyword at all, and it makes no symmetry claim on a tensor that is in general
+    nonsymmetric (a Newton Jacobian, an affine system's matrix) -- so an explicit
+    ``method="cg"`` is correctly refused downstream, and ``"auto"`` falls through to GMRES for
+    anything not separately routed to the direct path.
+
+    The "a bare dense tensor resolves to ``method='direct'`` under ``method='auto'``" rule
+    lives in each CALLER (`newton.newton`, `implicit.adjoint`), not here: this function only
+    wraps, it never chooses a solver.
+    """
+    if isinstance(op, torch.Tensor):
+        return DenseOperator(op)
+    return op
 
 
 @runtime_checkable
