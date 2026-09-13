@@ -478,6 +478,12 @@ class PotentialFlowLayer:
 
         The inner linear solver is this layer's `linear_solver` (set at construction), unless
         the caller overrides it with an explicit `method=` among `newton_kwargs`.
+
+        `phi0` is a starting guess and nothing else: it is DETACHED on entry (and the guess
+        this method computes for itself when `phi0 is None` is computed under `no_grad`),
+        because the implicit adjoint linearises at the converged point and never returns a
+        gradient w.r.t. the starting guess -- `solvers.implicit._Implicit.backward` returns
+        `None` for it. See the comment at the top of the body for what tracing it cost.
         """
         drivers = drivers or {}
         newton_kwargs.setdefault("method", self.linear_solver)
