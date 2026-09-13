@@ -696,9 +696,12 @@ def test_sparse_direct_ignores_the_certificate_entirely(monkeypatch):
 #   backward ensemble 1     auto  44.9 ms   sparse_direct  13.8 ms   3.25x
 #   backward ensemble 100   auto 1741 ms    sparse_direct  476 ms    3.66x
 #
-# sparse_direct never loses, so the rule carries no ensemble threshold: `auto` takes it
-# whenever a certified-SPD operator offers a sparse form, SciPy is importable, and the solve
-# is grad-safe -- and falls back to PCG, never raising, in every other case.
+# Those points are all at ensemble sizes where sparse_direct wins, but its per-instance Python
+# loop is linear in the ensemble while PCG's batched arithmetic is sub-linear, so they cross:
+# see `select._SPARSE_DIRECT_MAX_BATCH` for the crossover sweep. `auto` therefore takes
+# sparse-direct whenever a certified-SPD operator offers a sparse form, SciPy is importable,
+# the solve is grad-safe AND the flat batch is at most that threshold -- and falls back to
+# PCG, never raising, in every other case.
 
 
 def _spy_splu(monkeypatch):
@@ -903,3 +906,70 @@ def test_auto_solves_a_system_with_no_unknowns_as_trivially_converged():
     result = solve(_no_interior_op(), torch.zeros(0))
     assert result.x.shape == (0,)
     assert bool(result.converged)
+
+
+# -- the ensemble threshold on `auto`'s sparse-direct branch ---------------------------------
+
+
+def test_auto_takes_sparse_direct_at_the_batch_threshold(monkeypatch):
+    """At exactly `_SPARSE_DIRECT_MAX_BATCH` instances the factorisation is still the faster
+    backend (see the constant's own evidence table), so `auto` must still take it.
+    """
+    import tellegen.solvers.select as select_module
+    from tellegen.solvers.select import _SPARSE_DIRECT_MAX_BATCH
+
+    n = _SPARSE_DIRECT_MAX_BATCH
+    pcg_calls = _spy(monkeypatch, select_module, "pcg")
+    splu_calls = _spy_splu(monkeypatch)
+    op = _chain_op(torch.ones(n, 2))
+    result = solve(op, torch.ones(n, 2))
+    assert splu_calls["count"] == n, "one factorisation per batch instance, at the threshold"
+    assert pcg_calls["count"] == 0
+    torch.testing.assert_close(
+        result.x, solve(op, torch.ones(n, 2), method="direct").x, rtol=1e-9, atol=1e-12
+    )
+
+
+def test_auto_falls_back_to_pcg_one_instance_above_the_batch_threshold(monkeypatch):
+    """One instance past the threshold the per-instance Python loop has lost to PCG's
+    batched arithmetic, so `auto` routes to PCG -- a fall-back like every other "no" on this
+    path, not a refusal.
+    """
+    import tellegen.solvers.select as select_module
+    from tellegen.solvers.select import _SPARSE_DIRECT_MAX_BATCH
+
+    n = _SPARSE_DIRECT_MAX_BATCH + 1
+    pcg_calls = _spy(monkeypatch, select_module, "pcg")
+    splu_calls = _spy_splu(monkeypatch)
+    op = _chain_op(torch.ones(n, 2))
+    result = solve(op, torch.ones(n, 2))
+    assert pcg_calls["count"] == 1
+    assert splu_calls["count"] == 0
+    torch.testing.assert_close(
+        result.x, solve(op, torch.ones(n, 2), method="direct").x, rtol=1e-8, atol=1e-10
+    )
+
+
+def test_auto_takes_sparse_direct_for_an_unbatched_solve(monkeypatch):
+    """A flat batch of one -- an unbatched right-hand side -- is where sparse-direct wins by
+    the widest measured margin, and `b.shape[:-1]` is empty there rather than `(1,)`.
+    """
+    splu_calls = _spy_splu(monkeypatch)
+    op = _chain_op(torch.ones(2))
+    result = solve(op, torch.ones(2))
+    assert splu_calls["count"] == 1
+    assert result.x.shape == (2,)
+
+
+def test_the_batch_threshold_counts_every_leading_dimension(monkeypatch):
+    """The threshold is on the FLAT batch size, so a (6, 6) batch is 36 instances and is
+    above a threshold of 32 even though neither leading dimension is.
+    """
+    import tellegen.solvers.select as select_module
+
+    pcg_calls = _spy(monkeypatch, select_module, "pcg")
+    splu_calls = _spy_splu(monkeypatch)
+    op = _chain_op(torch.ones(6, 6, 2))
+    solve(op, torch.ones(6, 6, 2))
+    assert pcg_calls["count"] == 1
+    assert splu_calls["count"] == 0

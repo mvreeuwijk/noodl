@@ -22,9 +22,11 @@ step 2). Read top to bottom; the first matching row wins:
 
 "sparse-direct is applicable" is the conjunction `_auto_sparse_triplet` tests: the operator
 declares the optional `assemble_sparse` member AND returns a sparse form from it, SciPy is
-importable, and the solve is grad-safe (not `is_grad_enabled()` with a grad-requiring input).
-Every one of those is a FALL-BACK to pcg when it fails, never a refusal: `auto` is a promise
-to choose a backend that works.
+importable, the solve is grad-safe (not `is_grad_enabled()` with a grad-requiring input), AND
+the flat batch size is at most `_SPARSE_DIRECT_MAX_BATCH` (see that constant: above it the
+per-instance Python loop has lost to PCG's batched arithmetic). Every one of those is a
+FALL-BACK to pcg when it fails, never a refusal: `auto` is a promise to choose a backend that
+works.
 
 WHY sparse-direct is the certified-SPD default (spec section 2, "selected on evidence, per
 platform"; the platform here is CPU + SciPy). Measured in process on the reference composed
@@ -41,10 +43,10 @@ model -- 1028 unknowns, ~5300 nonzeros, float64, 14 threads -- median of 3 warm 
   backward ensemble 100   pcg 1741 ms     sparse_direct    476 ms    3.66x faster
 
 PCG needed 168-180 iterations per Newton step at this conditioning; the factorisation needs
-one. Sparse-direct never lost a measured point, so the rule carries NO ensemble threshold --
-there was no crossover to put one at. The per-instance Python loop is nevertheless its real
-cost (see `_sparse_direct`), which is why the ensemble-100 forward is only a tie and why a
-batched vendor backend stays admissible: it would replace the loop, not the algorithm.
+one. The per-instance Python loop is its real cost (see `_sparse_direct`), which is why the
+ensemble-100 forward is only a tie, why the rule DOES carry an ensemble threshold
+(`_SPARSE_DIRECT_MAX_BATCH`, measured below) and why a batched vendor backend stays
+admissible: it would replace the loop, not the algorithm.
 """
 
 from __future__ import annotations
@@ -55,6 +57,29 @@ from tellegen.operators.base import SolveResult, SolverStatus
 from tellegen.solvers.iterative import gmres, pcg
 
 Tensor = torch.Tensor
+
+# The largest FLAT batch (product of the leading dims of `b`) for which `method="auto"` still
+# routes a certified-SPD, sparse-capable operator to sparse-direct. Above it, `auto` uses PCG.
+#
+# WHY THERE IS A THRESHOLD AT ALL. `_sparse_direct` factorises instance by instance in a
+# PYTHON LOOP (SuperLU has no batched entry point), so its cost is linear in the ensemble
+# size at ~21 ms/instance on the reference model; PCG's cost is sub-linear, because its
+# arithmetic is batched torch. The two therefore cross. Measured in process on the reference
+# composed model -- 1028 unknowns, float64, 14 threads, median of 3, forward solve -- as the
+# ratio sparse_direct/cg (below 1.0 sparse-direct wins):
+#
+#   batch      1      2      4      8     16     32     64
+#   ratio   0.24   0.14   0.26   0.30   0.54   0.68   1.00
+#
+# and in the child-process acceptance gate (`benchmarks/composed_scaling_report.json`, whole
+# forward pass) cg is already AHEAD of an unthresholded auto at ensemble 100 (1.593 s vs
+# 1.686 s), 100x24 (39.4 s vs 48.5 s) and 1000 (12.9 s vs 15.2 s), while auto wins 2.2x at
+# ensemble 1 (0.097 s vs 0.210 s). 32 is the last measured point at which the factorisation
+# is still clearly ahead (0.68) and 64 is the tie; the whole 32-64 band is within 1.0-1.5x,
+# so the cost of choosing 32 rather than 64 is small either way. Like the rest of this rule
+# (spec section 2, "selected on evidence, per platform") it is a CPU + SciPy measurement at
+# one problem size, and is the thing to re-measure when either changes.
+_SPARSE_DIRECT_MAX_BATCH = 32
 
 
 def _describe_uncertified(op, cert: Tensor, where: str) -> str:
@@ -124,7 +149,7 @@ def _auto_sparse_triplet(op, b: Tensor):
     `None` to stay on PCG. Never raises: every "no" here is a fall-back, not a refusal.
 
     This is where the section 6.2 step 2 default lives. `auto` is a promise to pick a
-    backend that works, so each of the four ways sparse-direct can be inapplicable makes it
+    backend that works, so each of the five ways sparse-direct can be inapplicable makes it
     return None and leaves `solve` on the Krylov path it had before:
 
     1. the operator does not declare `assemble_sparse` (the member is OPTIONAL);
@@ -134,7 +159,12 @@ def _auto_sparse_triplet(op, b: Tensor):
     4. the solve is not grad-safe -- grad mode is on AND some input requires grad -- so a
        non-differentiable backend would silently detach the answer. Both layer paths solve
        under `no_grad`, so this is the non-differentiable-`solve`-with-learnable-elements
-       case and a handful of direct callers, not the implicit adjoint.
+       case and a handful of direct callers, not the implicit adjoint;
+    5. the flat batch exceeds `_SPARSE_DIRECT_MAX_BATCH` -- a PERFORMANCE fall-back rather
+       than a capability one (sparse-direct would answer correctly, just slower), measured
+       and justified at that constant. It is checked first because it is the cheapest of the
+       five and, unlike the others, it is a property of this call rather than of the
+       environment.
 
     The SciPy import is repeated per solve rather than cached in a module global. After the
     first one it is a `sys.modules` lookup costing microseconds against a solve costing
@@ -142,6 +172,8 @@ def _auto_sparse_triplet(op, b: Tensor):
     exists for (a process that can or cannot import scipy is not a property this module gets
     to memoise -- and it would make the behaviour untestable without process isolation).
     """
+    if b.shape[:-1].numel() > _SPARSE_DIRECT_MAX_BATCH:
+        return None
     if getattr(op, "assemble_sparse", None) is None:
         return None
     try:
@@ -359,9 +391,10 @@ def solve(
         if cert is not None and bool(torch.all(cert)):
             # Spec section 6.2 step 2, decided on the Task C measurement (see this module's
             # docstring): a certified-SPD operator that can hand over a sparse form is
-            # factorised rather than iterated. `_auto_sparse_triplet` returns None -- and
-            # never raises -- whenever that is not applicable, which is what keeps every
-            # other certified-SPD operator, and every SciPy-less installation, on PCG.
+            # factorised rather than iterated, up to `_SPARSE_DIRECT_MAX_BATCH` instances.
+            # `_auto_sparse_triplet` returns None -- and never raises -- whenever that is not
+            # applicable, which is what keeps every other certified-SPD operator, every
+            # SciPy-less installation, and every larger ensemble on PCG.
             triplet = _auto_sparse_triplet(op, b)
             if triplet is not None:
                 result = _sparse_direct(op, b, where, triplet)

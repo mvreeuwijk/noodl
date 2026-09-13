@@ -27,6 +27,14 @@ from tellegen.topology import Network
 # "sparse_direct" is the spec's section 6.2 SciPy SuperLU reference, which factorises the
 # operator's O(E) COO form per instance instead. All four reach BOTH passes: `linear_init`
 # and every Newton inner solve on the forward, and the implicit adjoint on the backward.
+#
+# What "auto" resolves to on THIS layer's operator (a certified-SPD GraphLaplacianOperator
+# that declares `assemble_sparse`) is sparse-direct up to an ensemble of
+# `select._SPARSE_DIRECT_MAX_BATCH` = 32 instances and Jacobi-preconditioned CG above it,
+# because SuperLU is driven by a per-instance Python loop whose cost is linear in the
+# ensemble while PCG's is sub-linear; the measured crossover sweep is at that constant. An
+# explicit `linear_solver=` is honoured verbatim at every ensemble size. `diagnostics`
+# reports which backend actually ran (see `solve`).
 _LINEAR_SOLVERS = ("auto", "cg", "gmres", "direct", "sparse_direct")
 
 
