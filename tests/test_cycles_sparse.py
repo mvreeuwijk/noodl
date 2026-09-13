@@ -13,7 +13,7 @@ import torch
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from tellegen.cycles import branch_flows, particular_flow
+from tellegen.cycles import _chord_endpoints, branch_flows, particular_flow
 from tellegen.topology import Network
 
 
@@ -150,6 +150,19 @@ def test_gradcheck_branch_flows(triangle):
         return branch_flows(triangle, m_)
 
     assert torch.autograd.gradcheck(f, (m,), eps=1e-6, atol=1e-5)
+
+
+def test_chord_endpoints_live_on_the_network_device(triangle):
+    # Regression: branch_flows scatters `amplitudes` (on the caller's device) through
+    # u_idx/v_idx, so these index tensors must live on net.device like every other index
+    # tensor this module builds (_tree_elimination_levels's levels in particular) -- a
+    # mismatch here raises on any non-CPU network. triangle's one chord is c -> a (edge
+    # index 2: a->b and b->c are tree edges, c->a closes the loop).
+    u_idx, v_idx = _chord_endpoints(triangle, None)
+    assert u_idx.device == triangle.device
+    assert v_idx.device == triangle.device
+    assert u_idx.tolist() == [triangle.node_index("c")]
+    assert v_idx.tolist() == [triangle.node_index("a")]
 
 
 def test_branch_flows_never_materialises_the_dense_cycle_basis_matrix():

@@ -24,14 +24,10 @@ def branch_flows(net: Network, amplitudes: torch.Tensor, kind: str | None = None
     are just their amplitudes directly, since `cycle_basis`'s construction gives each chord
     row a self-entry of exactly 1 at its own column.
     """
-    tree_cols, chord_cols = net.spanning_forest(kind)
+    _tree_cols, chord_cols = net.spanning_forest(kind)
     if amplitudes.shape[-1] != chord_cols.numel():
         raise ValueError(f"expected {chord_cols.numel()} amplitudes, got {amplitudes.shape[-1]}")
-    cols = net.edge_index(kind).tolist()
-    edges = net.edges
-    chord_edges = [edges[cols[j]] for j in chord_cols.tolist()]
-    u_idx = torch.tensor([net.node_index(u) for (u, _v, _k) in chord_edges], dtype=torch.long)
-    v_idx = torch.tensor([net.node_index(v) for (_u, v, _k) in chord_edges], dtype=torch.long)
+    u_idx, v_idx = _chord_endpoints(net, kind)
 
     batch_shape = amplitudes.shape[:-1]
     chord_source = torch.zeros(
@@ -65,6 +61,33 @@ def _expand_index(idx: torch.Tensor, batch_shape: torch.Size) -> torch.Tensor:
     """Broadcast a 1-D index tensor to `(*batch_shape, len(idx))` for scatter_add_/indexing
     against a `(*batch_shape, m)` tensor, without a Python loop over the batch."""
     return idx.reshape((1,) * len(batch_shape) + idx.shape).expand(*batch_shape, *idx.shape)
+
+
+def _chord_endpoints(net: Network, kind: str | None) -> tuple[torch.Tensor, torch.Tensor]:
+    """Node-index endpoints ``(u_idx, v_idx)``, each ``(l,)``, of every chord edge of `kind`,
+    in chord order (matching ``net.spanning_forest(kind)[1]``). Both live on ``net.device``,
+    like every other index tensor this module builds (`_tree_elimination_levels`'s levels in
+    particular) -- `branch_flows` scatters `amplitudes` (on the caller's device) through these
+    indices, so a device mismatch here would raise on any non-CPU network. Cached on
+    `net._cache`, exactly like `_tree_elimination_levels`, so `branch_flows` never repeats this
+    Python-level comprehension over chord edges once per call.
+    """
+    key = ("chord_endpoints", kind)
+    if key in net._cache:
+        return net._cache[key]
+    _tree_cols, chord_cols = net.spanning_forest(kind)
+    cols = net.edge_index(kind).tolist()
+    edges = net.edges
+    chord_edges = [edges[cols[j]] for j in chord_cols.tolist()]
+    u_idx = torch.tensor(
+        [net.node_index(u) for (u, _v, _k) in chord_edges], dtype=torch.long, device=net.device
+    )
+    v_idx = torch.tensor(
+        [net.node_index(v) for (_u, v, _k) in chord_edges], dtype=torch.long, device=net.device
+    )
+    result = (u_idx, v_idx)
+    net._cache[key] = result
+    return result
 
 
 def _tree_elimination_levels(net: Network, kind: str | None):
