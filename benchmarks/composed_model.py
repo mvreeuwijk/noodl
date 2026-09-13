@@ -126,6 +126,7 @@ def build_composed(
     sewer_nodes: int = 30,
     ensemble: int = 1,
     seed: int = 0,
+    linear_solver: str = "auto",
 ) -> ComposedModel:
     """Build the reference composed model: topology plus one reference physics configuration.
 
@@ -142,6 +143,13 @@ def build_composed(
     milestone-1 numerics, retained as a genuinely separate code path so the composed-model
     parity gate compares two solvers rather than the sparse path with itself. `transport`
     (name "co2") is a single-species implicit-scheme `TransportLayer` on the "airpath" edges.
+
+    `linear_solver` configures `layer` ONLY, and defaults to the layer's own default, so
+    every existing caller gets exactly the model it got before. It exists for the spec's
+    section 6.2 solver comparison, which measures the SAME model under `"auto"` and under
+    `"sparse_direct"` and needs the two to differ in nothing else. `dense_layer` is always
+    `"direct"`: it is the parity reference, and a reference that moved with the thing it
+    references would not be one.
     """
     net, interface_nodes = _build_topology(
         n_buildings, building_nodes, street_nodes, sewer_nodes, seed
@@ -170,7 +178,9 @@ def build_composed(
 
     drivers: dict = {}
 
-    layer = PotentialFlowLayer(net, "composed", elements, boundary=boundary)
+    layer = PotentialFlowLayer(
+        net, "composed", elements, boundary=boundary, linear_solver=linear_solver
+    )
     dense_layer = PotentialFlowLayer(
         net, "composed_dense", elements, boundary=boundary, linear_solver="direct"
     )
@@ -294,6 +304,7 @@ def workload_forward(
     sewer_nodes: int = 30,
     ensemble: int = 1,
     steps: int = 1,
+    linear_solver: str = "auto",
 ) -> dict:
     """Build the composed model and run `steps` NON-differentiable steps; report the run.
 
@@ -309,6 +320,7 @@ def workload_forward(
         street_nodes=street_nodes,
         sewer_nodes=sewer_nodes,
         ensemble=ensemble,
+        linear_solver=linear_solver,
     )
     run_steps(model, 1, differentiable=False)
     elapsed, (_phi, x, diagnostics) = time_call(
@@ -318,6 +330,7 @@ def workload_forward(
         "elapsed_s": elapsed,
         "steps": steps,
         "ensemble": ensemble,
+        "linear_solver": linear_solver,
         "n_nodes": int(model.net.n),
         "n_edges": int(model.net.b),
         "x_final_mean": float(x.mean()),
@@ -332,6 +345,7 @@ def workload_backward(
     sewer_nodes: int = 30,
     ensemble: int = 1,
     steps: int = 1,
+    linear_solver: str = "auto",
 ) -> dict:
     """Build the composed model, run `steps` DIFFERENTIABLE steps, and time `loss.backward()`.
 
@@ -347,6 +361,7 @@ def workload_backward(
         street_nodes=street_nodes,
         sewer_nodes=sewer_nodes,
         ensemble=ensemble,
+        linear_solver=linear_solver,
     )
     run_steps(model, 1, differentiable=False)  # warm the construction-time caches
     sources = model.sources.detach().clone().requires_grad_(True)
@@ -357,6 +372,7 @@ def workload_backward(
         "elapsed_s": elapsed,
         "steps": steps,
         "ensemble": ensemble,
+        "linear_solver": linear_solver,
         "grad_sources_absmax": float(sources.grad.abs().max()),
         **_iteration_counts(diagnostics),
     }

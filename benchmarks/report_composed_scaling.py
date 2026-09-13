@@ -13,6 +13,11 @@ Iteration counts travel beside the times because design section 6.1 requires it:
 with enough threads, a conditioning regression can leave wall-clock unchanged while the inner
 solver iteration count doubles.
 
+Every budget row is measured under EVERY entry of `SOLVERS` (spec section 6.2 step 2: the
+`method="auto"` default is selected on evidence, so the evidence lives in the report), and
+each row carries a `solver` field saying which. The row keys are otherwise unchanged, so a
+consumer that ignores `solver` reads the same schema it always did.
+
 Run it explicitly (it takes minutes -- nothing runs it automatically):
 
     .venv/Scripts/python -m benchmarks.report_composed_scaling
@@ -53,6 +58,14 @@ BUDGET_TABLE = [
 ]
 
 
+# The inner linear solvers the budget table is measured under (spec section 6.2 step 2: the
+# default for `method="auto"` is chosen ON EVIDENCE, so the evidence has to exist). "auto" is
+# the shipped default; "sparse_direct" is the SciPy SuperLU reference path. The FIRST entry is
+# the one whose numbers the gate reads -- `measure_budget_row`'s own default -- so the
+# committed report keeps meaning what `tests/verification/test_composed_scaling.py` asserts.
+SOLVERS = ("auto", "sparse_direct")
+
+
 def measure_budget_row(
     ensemble: int,
     steps: int,
@@ -60,6 +73,7 @@ def measure_budget_row(
     backward_budget: float,
     memory_budget: int,
     samples: int = 3,
+    solver: str = "auto",
 ) -> dict:
     """Measure one budget-table row: forward time, backward time, peak RSS, iteration counts.
 
@@ -75,8 +89,19 @@ def measure_budget_row(
     `peak_memory_bytes` is the larger of the forward and backward peaks. The row's memory
     budget is a budget for the configuration, and a backward pass that needs more than the
     forward pass is still this row's peak.
+
+    `solver` is the layer's inner linear solver (`PotentialFlowLayer(linear_solver=...)`),
+    carried into the child process and recorded in the row. It defaults to `"auto"`, the
+    shipped default, so the gate keeps measuring what ships; the report additionally measures
+    every entry of `SOLVERS`, which is the section 6.2 evidence the `"auto"` default is
+    chosen on. The BUDGETS do not vary with it -- they are the design's, not the backend's.
     """
-    kwargs = {**REFERENCE_KWARGS, "ensemble": ensemble, "steps": steps}
+    kwargs = {
+        **REFERENCE_KWARGS,
+        "ensemble": ensemble,
+        "steps": steps,
+        "linear_solver": solver,
+    }
 
     def measure(workload: str) -> tuple[int, float, dict]:
         peaks, results = [], []
@@ -93,6 +118,7 @@ def measure_budget_row(
         "ensemble": ensemble,
         "steps": steps,
         "samples": samples,
+        "solver": solver,
         "n_nodes": forward["n_nodes"],
         "n_edges": forward["n_edges"],
         "forward_seconds": forward_seconds,
@@ -121,7 +147,8 @@ def format_budget_row(row: dict) -> str:
         return "PASS" if ok else "FAIL"
 
     return (
-        f"budget[ensemble={row['ensemble']}, steps={row['steps']}]: "
+        f"budget[ensemble={row['ensemble']}, steps={row['steps']}, "
+        f"solver={row.get('solver', 'auto')}]: "
         f"forward {row['forward_seconds']:.3f}s / {row['forward_budget_seconds']}s "
         f"{verdict(row['forward_within_budget'])}, "
         f"backward {row['backward_seconds']:.3f}s / {row['backward_budget_seconds']}s "
@@ -316,10 +343,11 @@ def main() -> None:
     this automatically, because the ensemble-1000 and 24-step rows take minutes.
     """
     budget_rows = []
-    for row_spec in BUDGET_TABLE:
-        row = measure_budget_row(*row_spec)
-        print(format_budget_row(row))
-        budget_rows.append(row)
+    for solver in SOLVERS:
+        for row_spec in BUDGET_TABLE:
+            row = measure_budget_row(*row_spec, solver=solver)
+            print(format_budget_row(row))
+            budget_rows.append(row)
 
     shape_gates = [measure_memory_shape_gate(), measure_matvec_shape_gate()]
     for gate in shape_gates:
@@ -330,11 +358,17 @@ def main() -> None:
         "reference_configuration": REFERENCE_KWARGS,
         "budget_table": budget_rows,
         "shape_gates": shape_gates,
+        "solvers": list(SOLVERS),
+        # The verdict is the DEFAULT solver's, not the best of the two: `all_budgets_met`
+        # answers "does what ships meet its budgets", and a row measured under an
+        # alternative backend that nothing selects cannot change that answer. The
+        # alternative's rows are in `budget_table` beside it, tagged by `solver`.
         "all_budgets_met": all(
             row["forward_within_budget"]
             and row["backward_within_budget"]
             and row["peak_memory_within_budget"]
             for row in budget_rows
+            if row["solver"] == SOLVERS[0]
         )
         and all(gate["within_budget"] for gate in shape_gates),
     }

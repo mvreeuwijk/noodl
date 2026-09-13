@@ -11,6 +11,7 @@ Run it as a SCRIPT, never as a test:
     .venv/Scripts/python -m benchmarks.profile_forward             # profile, ensembles 1 + 100
     .venv/Scripts/python -m benchmarks.profile_forward --timing    # median-of-5 workload timing
     .venv/Scripts/python -m benchmarks.profile_forward --ensembles 1
+    .venv/Scripts/python -m benchmarks.profile_forward --compare-solvers
 
 `--timing` is the before/after number the follow-up is judged on: the median over 5 warm runs
 of `workload_forward`'s own already-warm timed section (its model build and one warm-up step
@@ -130,15 +131,141 @@ def time_ensemble(ensemble: int, repeats: int = 5) -> float:
     return median
 
 
+# --- section 6.2 step 2: the in-process auto-vs-sparse_direct comparison ---------------------
+#
+# The budget report (`benchmarks.report_composed_scaling`) measures the same two solvers from
+# a fresh child process per sample, which is right for a MEMORY peak and for an end-to-end
+# wall clock but costs ~45 minutes and buries a 2x solver difference under the process start
+# and the model build. This comparison is the same question asked in ONE process, on ONE
+# already-warm model per configuration, so what it reports is the solve itself. It is what the
+# `method="auto"` default was chosen on (spec section 2: "selected on evidence, per platform").
+
+COMPARE_SOLVERS = ("auto", "sparse_direct")
+COMPARE_FORWARD_ENSEMBLES = (1, 100, 1000)
+COMPARE_BACKWARD_ENSEMBLES = (1, 100)
+
+
+def _forward_with_diagnostics(model) -> dict:
+    """One non-differentiable `layer.solve`, returning its diagnostics dict."""
+    diagnostics: dict = {}
+    model.layer.solve(
+        model.phi_boundary,
+        model.drivers,
+        model.sources,
+        differentiable=False,
+        diagnostics=diagnostics,
+    )
+    return diagnostics
+
+
+def compare_forward(ensemble: int, solver: str, repeats: int = 3) -> dict:
+    """Median warm `layer.solve` time under one `linear_solver`, plus its iteration counts."""
+    model = build_composed(ensemble=ensemble, linear_solver=solver)
+    diagnostics = _forward_with_diagnostics(model)  # also warms every construction cache
+    _forward_with_diagnostics(model)
+    samples = [time_call(lambda: _forward_with_diagnostics(model))[0] for _ in range(repeats)]
+    linear = diagnostics.get("linear_iterations")
+    return {
+        "ensemble": ensemble,
+        "solver": solver,
+        "seconds": statistics.median(samples),
+        "newton_iterations": int(diagnostics["newton_iterations"]),
+        "linear_iterations_max": None if linear is None else int(linear.amax()),
+    }
+
+
+def _timed_backward(model) -> float:
+    """Build a fresh differentiable forward (UNTIMED) and time `loss.backward()` alone.
+
+    The graph has to be rebuilt for every sample: `backward` frees it, and a second
+    `backward` on the same graph would raise rather than re-measure. Only the backward pass
+    is timed, matching `benchmarks.composed_model.workload_backward`.
+    """
+    sources = model.sources.detach().clone().requires_grad_(True)
+    phi, _q = model.layer.solve(
+        model.phi_boundary, model.drivers, sources, differentiable=True
+    )
+    loss = phi[..., model.layer.interior].sum()
+    elapsed, _ = time_call(loss.backward)
+    return elapsed
+
+
+def compare_backward(ensemble: int, solver: str, repeats: int = 3) -> dict:
+    """Median warm `loss.backward()` time through the implicit adjoint, under one solver."""
+    model = build_composed(ensemble=ensemble, linear_solver=solver)
+    _forward_with_diagnostics(model)  # warm the construction-time caches
+    _timed_backward(model)
+    samples = [_timed_backward(model) for _ in range(repeats)]
+    return {"ensemble": ensemble, "solver": solver, "seconds": statistics.median(samples)}
+
+
+def compare_solvers(repeats: int = 3, *, forward: bool = True, backward: bool = True) -> list:
+    """The comparison table, printed row by row as it is measured.
+
+    `forward`/`backward` select halves of it, because the whole table is several minutes of
+    wall clock (the ensemble-1000 forward alone is tens of seconds per sample under either
+    solver) and the two halves are independent measurements.
+    """
+    rows = []
+    for ensemble in COMPARE_FORWARD_ENSEMBLES if forward else ():
+        for solver in COMPARE_SOLVERS:
+            row = {"direction": "forward", **compare_forward(ensemble, solver, repeats)}
+            print(
+                f"forward  ensemble={row['ensemble']:>4} solver={row['solver']:<13} "
+                f"{row['seconds'] * 1e3:9.1f} ms  newton={row['newton_iterations']} "
+                f"linear_iterations_max={row['linear_iterations_max']}"
+            )
+            rows.append(row)
+    for ensemble in COMPARE_BACKWARD_ENSEMBLES if backward else ():
+        for solver in COMPARE_SOLVERS:
+            row = {"direction": "backward", **compare_backward(ensemble, solver, repeats)}
+            print(
+                f"backward ensemble={row['ensemble']:>4} solver={row['solver']:<13} "
+                f"{row['seconds'] * 1e3:9.1f} ms"
+            )
+            rows.append(row)
+    for direction, ensemble in sorted({(r["direction"], r["ensemble"]) for r in rows}):
+        by_solver = {
+            r["solver"]: r["seconds"]
+            for r in rows
+            if r["direction"] == direction and r["ensemble"] == ensemble
+        }
+        speedup = by_solver["auto"] / by_solver["sparse_direct"]
+        print(
+            f"{direction:<8} ensemble={ensemble:>4}: sparse_direct is {speedup:.2f}x "
+            f"{'faster' if speedup > 1 else 'SLOWER'} than auto"
+        )
+    return rows
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timing", action="store_true", help="median-of-5 timing, no profile")
     parser.add_argument(
         "--solve-timing", action="store_true", help="median layer.solve timing, no profile"
     )
+    parser.add_argument(
+        "--compare-solvers",
+        action="store_true",
+        help="auto vs sparse_direct, forward and backward, in process (section 6.2 step 2)",
+    )
+    parser.add_argument(
+        "--forward-only", action="store_true", help="--compare-solvers: forward rows only"
+    )
+    parser.add_argument(
+        "--backward-only", action="store_true", help="--compare-solvers: backward rows only"
+    )
     parser.add_argument("--ensembles", type=int, nargs="+", default=[1, 100])
     parser.add_argument("--repeats", type=int, default=5)
     args = parser.parse_args(argv)
+
+    if args.compare_solvers:
+        compare_solvers(
+            args.repeats,
+            forward=not args.backward_only,
+            backward=not args.forward_only,
+        )
+        return 0
 
     for ensemble in args.ensembles:
         if args.solve_timing:

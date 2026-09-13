@@ -135,3 +135,29 @@ def test_composed_layer_and_dense_layer_agree_and_take_different_paths(monkeypat
 
     torch.testing.assert_close(phi_sparse, phi_dense, rtol=1e-9, atol=1e-12)
     torch.testing.assert_close(q_sparse, q_dense, rtol=1e-9, atol=1e-12)
+
+
+def test_build_composed_forwards_linear_solver_to_the_migrated_layer_only():
+    """The section 6.2 solver comparison measures the SAME model under two inner solvers, so
+    `linear_solver` has to reach `layer` and nothing else: `dense_layer` is the parity
+    reference and stays on the dense LU whatever `layer` is configured with.
+    """
+    model = build_composed(linear_solver="sparse_direct")
+    assert model.layer.linear_solver == "sparse_direct"
+    assert model.dense_layer.linear_solver == "direct"
+    assert build_composed().layer.linear_solver == "auto"
+
+
+def test_budget_row_kwargs_carry_the_solver_into_the_child_process():
+    """`measure_budget_row`'s `solver` must arrive as the workload's own `linear_solver`
+    keyword, since `isolated_peak_rss` rebuilds the model in a fresh process from those
+    kwargs alone -- a solver that did not travel would silently measure the default twice.
+    """
+    import inspect
+
+    from benchmarks.composed_model import workload_backward, workload_forward
+    from benchmarks.report_composed_scaling import SOLVERS
+
+    assert "auto" in SOLVERS and "sparse_direct" in SOLVERS
+    for workload in (workload_forward, workload_backward):
+        assert "linear_solver" in inspect.signature(workload).parameters
