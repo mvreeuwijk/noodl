@@ -6,6 +6,7 @@ on typed edges (one Element per kind) and Drive terms (additive potential differ
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Mapping, Sequence
 
 import torch
@@ -77,20 +78,20 @@ class PotentialFlowLayer:
             self._elem_slices.append((offset, offset + n_e))
             offset += n_e
         self.cols = torch.cat(cols_list)
-        self.A = net.incidence()[:, self.cols]
-        # net.difference() (== net.incidence().T, the "source minus target" convention this
-        # whole solve path uses -- see topology.py's module docstring) restricted to this
-        # layer's own edge columns; equal to self.A.T, computed via the named operator rather
-        # than repeating the einsum/transpose inline in dp().
-        self._diff = net.difference()[self.cols]
+        # The node count, cached as a plain int: `assemble` (once per Newton iteration) and
+        # solve's zero-source default used to read it off self.A.shape[0], which is exactly
+        # the kind of incidental dense-matrix access that keeps an (n, b) tensor alive.
+        self._n_nodes = net.n
 
         # This layer's own edge endpoints (restricted to self.cols, in the same order as
-        # self._diff / self.A's columns), and a node -> interior-position map, both needed to
-        # construct a GraphLaplacianOperator (and to run the per-instance SPD certificate)
-        # without a per-solve Python loop. net.endpoints() (kind=None) returns whole-graph
-        # (src, tgt) arrays in network edge order; indexing by self.cols restricts them to
-        # this layer's own edges, exactly as self.A = net.incidence()[:, self.cols] already
-        # does for the incidence matrix.
+        # the columns of the (lazy) self.A / rows of self._diff), and a node -> interior-
+        # position map, both needed to construct a GraphLaplacianOperator (and to run the
+        # per-instance SPD certificate) without a per-solve Python loop. net.endpoints()
+        # (kind=None) returns whole-graph (src, tgt) arrays in network edge order; indexing
+        # by self.cols restricts them to this layer's own edges, exactly as the lazy
+        # self.A == net.incidence()[:, self.cols] does for the incidence matrix. Since
+        # Task 15 these ARE the layer's representation of its own topology: every hot-path
+        # site gathers or scatter-adds with them instead of contracting against A/_diff.
         src_all, tgt_all = net.endpoints()
         self._src = src_all[self.cols]
         self._tgt = tgt_all[self.cols]
@@ -124,10 +125,63 @@ class PotentialFlowLayer:
         self._boundary_mask = torch.zeros(net.n, dtype=torch.bool)
         self._boundary_mask[self.bound] = True
 
+    # ------------------------------------------------------- dense oracles (lazy)
+    @functools.cached_property
+    def A(self) -> torch.Tensor:
+        """This layer's (n, b_layer) incidence matrix, built on FIRST ACCESS only.
+
+        Held as a `cached_property` rather than an `__init__` attribute since Task 15: at
+        the composed model's reference size this matrix is 18.1 MB per layer and grows 4x
+        per node doubling, which on its own broke the milestone's memory shape gate
+        (measured 3.16x against a 2.5x budget in Task 14). Nothing inside this class reads
+        it except `jacobian()`, the retained dense oracle -- every hot-path site gathers or
+        scatter-adds with `_src`/`_tgt` instead (`dp`, `residual`, `linear_init`,
+        `power_residual`). It stays public, with exactly its old value
+        (`net.incidence()[:, self.cols]`, i.e. columns in LAYER edge order, not network
+        order), because callers outside the layer legitimately want the matrix: the
+        composed-model conservation tests form `A @ q` with it.
+        """
+        return self.net.incidence()[:, self.cols]
+
+    @functools.cached_property
+    def _diff(self) -> torch.Tensor:
+        """`self.A.T`: the (b_layer, n) difference matrix, built on first access only.
+
+        `net.difference()` (== `net.incidence().T`, the "source minus target" convention
+        this whole solve path uses -- see topology.py's module docstring) restricted to this
+        layer's own edge columns. Kept for callers and for symmetry with `A`; `dp()` gathers
+        `phi[..., _src] - phi[..., _tgt]` instead of contracting against it.
+        """
+        return self.net.difference()[self.cols]
+
+    # ------------------------------------------------------- sparse topology primitives
+    def _difference(self, phi: torch.Tensor) -> torch.Tensor:
+        """`self._diff @ phi` without the matrix: `phi[..., src] - phi[..., tgt]`.
+
+        `Network.difference_ep` restricted to this layer's own columns. Exact, not merely
+        close: the matrix form sums n terms of which all but two are exactly 0.0, and adding
+        0.0 is exact in IEEE arithmetic, so the gather reproduces it bit for bit.
+        """
+        return phi[..., self._src] - phi[..., self._tgt]
+
+    def _accumulate(self, w: torch.Tensor) -> torch.Tensor:
+        """`self.A @ w` without the matrix: `+w` scattered at `src`, `-w` at `tgt`.
+
+        `Network.accumulate` restricted to this layer's own columns (the network-level
+        method works in network edge order and cannot express a layer's column subset).
+        `index_add` is out of place, on a zero tensor this call itself allocates, so it is
+        exactly as differentiable w.r.t. `w` as the matrix product is and cannot corrupt a
+        tensor some earlier op still needs for its own backward pass.
+        """
+        out = torch.zeros(
+            w.shape[:-1] + (self._n_nodes,), dtype=w.dtype, device=w.device
+        )
+        return out.index_add(-1, self._src, w).index_add(-1, self._tgt, -w)
+
     # ------------------------------------------------------------------ assembly
     def dp(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
         drivers = drivers or {}
-        d = torch.einsum("en,...n->...e", self._diff, phi)
+        d = self._difference(phi)
         parts = []
         for kind, (start, end) in self._kind_slices.items():
             block = d[..., start:end]
@@ -171,7 +225,7 @@ class PotentialFlowLayer:
         batch_shape = torch.broadcast_shapes(
             phi_interior.shape[:-1], phi_boundary.shape[:-1]
         )
-        n = self.A.shape[0]
+        n = self._n_nodes
         phi = torch.zeros(
             batch_shape + (n,), dtype=phi_interior.dtype, device=phi_interior.device
         )
@@ -191,12 +245,21 @@ class PotentialFlowLayer:
         drivers = drivers or {}
         phi = self.assemble(phi_interior, phi_boundary)
         q = self.flows(phi, drivers)
-        A_I = self.A[self.interior]
-        lhs = torch.einsum("ie,...e->...i", A_I, q)
+        # (A_I q), by scatter-add over this layer's edges then a select of the interior
+        # rows, rather than einsum against the (n_I, b) slice of the dense incidence: this
+        # is once per Newton residual evaluation, and at ensemble 100 the einsum form alone
+        # cost 14.2 ms of a 41.8 ms residual (Task 14's profile).
+        lhs = self._accumulate(q)[..., self.interior]
         s_I = self._source_interior(sources, phi_interior)
         return lhs - s_I
 
     def jacobian(self, phi_interior, phi_boundary, drivers):
+        """The dense (n_I, n_I) Jacobian A_I diag(dq) A_I^T -- the retained ORACLE.
+
+        This is the one method that reads `self.A` (and so materialises it, once, on first
+        access); no solve path calls it. Tests compare `GraphLaplacianOperator`'s matvec and
+        the adjoint against this, so its einsum form is deliberately unchanged.
+        """
         drivers = drivers or {}
         phi = self.assemble(phi_interior, phi_boundary)
         dq = self.dflows(phi, drivers)
@@ -300,10 +363,9 @@ class PotentialFlowLayer:
         phi0 = self.assemble(phi_i0, phi_boundary)
         dp0 = self.dp(phi0, drivers)
         c, k = self._linear_ck(drivers)
-        A_I = self.A[self.interior]
-        rhs = self._source_interior(sources, phi0) - torch.einsum(
-            "ie,...e->...i", A_I, c + k * dp0
-        )
+        rhs = self._source_interior(sources, phi0) - self._accumulate(c + k * dp0)[
+            ..., self.interior
+        ]
         self._grounding_check(k, where="linear_init")
         # k picks up a batch dimension only if some element's linear_init(drivers) actually
         # depends on drivers (e.g. a driver-conditioned slope); with purely constant slopes
@@ -477,7 +539,7 @@ class PotentialFlowLayer:
             sources
             if sources is not None
             else torch.zeros(
-                phi_boundary.shape[:-1] + (self.A.shape[0],),
+                phi_boundary.shape[:-1] + (self._n_nodes,),
                 dtype=phi_boundary.dtype,
                 device=phi_boundary.device,
             )
@@ -498,7 +560,7 @@ class PotentialFlowLayer:
             return rebuilt, drv, src, pb
 
         def _dp_functional(phi, drv):
-            d = torch.einsum("en,...n->...e", self._diff, phi)
+            d = self._difference(phi)
             parts = []
             for kind, (start, end) in self._kind_slices.items():
                 block = d[..., start:end]
@@ -599,8 +661,7 @@ class PotentialFlowLayer:
             rebuilt, drv, src, pb = _rebuild(params)
             phi = self.assemble(x, pb)
             q = _flows_functional(phi, drv, rebuilt)
-            A_I = self.A[self.interior]
-            lhs = torch.einsum("ie,...e->...i", A_I, q)
+            lhs = self._accumulate(q)[..., self.interior]
             s_I = src[..., self.interior]
             return lhs - s_I
 
@@ -677,9 +738,8 @@ class PotentialFlowLayer:
         """
         drivers = drivers or {}
         d = self.dp(phi, drivers)
-        drive_only = d - torch.einsum("en,...n->...e", self._diff, phi)
-        A_bound = self.A[self.bound]
-        boundary_flow = torch.einsum("be,...e->...b", A_bound, q)
+        drive_only = d - self._difference(phi)
+        boundary_flow = self._accumulate(q)[..., self.bound]
         phi_b = phi[..., self.bound]
         phi_i = phi[..., self.interior]
         s_I = self._source_interior(sources, phi_i)
