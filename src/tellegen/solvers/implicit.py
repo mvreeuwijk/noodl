@@ -146,11 +146,11 @@ def adjoint(
 
 class _Implicit(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x0, residual, jacobian, newton_kwargs, diagnostics, *params):
+    def forward(ctx, x0, residual, operator, newton_kwargs, diagnostics, *params):
         with torch.no_grad():
             result = newton(
                 lambda x: residual(x, *params),
-                lambda x: jacobian(x, *params),
+                lambda x: operator(x, *params),
                 x0,
                 **newton_kwargs,
             )
@@ -163,7 +163,8 @@ class _Implicit(torch.autograd.Function):
             diagnostics["newton_iterations"] = result.iterations
             diagnostics["linear_iterations"] = result.linear_iterations
         ctx.residual = residual
-        ctx.jacobian = jacobian
+        ctx.operator = operator
+        ctx.newton_kwargs = newton_kwargs
         ctx.save_for_backward(result.x, *params)
         return result.x
 
@@ -184,8 +185,21 @@ class _Implicit(torch.autograd.Function):
         saved = ctx.saved_tensors
         x, params = saved[0], list(saved[1:])
         with torch.no_grad():
-            op = ctx.jacobian(x, *params)
-            lam = adjoint(op, grad_x)
+            op = ctx.operator(x, *params)
+            # on_failure is never forwarded: `adjoint` always raises (its own fixed
+            # default), whatever the FORWARD pass was told. A forward solve may legitimately
+            # be asked to return a non-converged instance instead of raising -- a
+            # calibration loop inspecting or down-weighting it -- but a backward pass has no
+            # such caller: a wrong gradient silently reaching an optimiser is strictly worse
+            # than an exception (design section 3.2). `method` IS forwarded, so a layer
+            # configured with linear_solver="direct" keeps the dense numerics it asked for
+            # on both passes rather than only on the forward one.
+            lam = adjoint(
+                op,
+                grad_x,
+                where="implicit_solve backward",
+                method=ctx.newton_kwargs.get("method", "auto"),
+            )
         with torch.enable_grad():
             p = [t.detach().requires_grad_(t.requires_grad) for t in params]
             r = ctx.residual(x.detach(), *p)
@@ -204,7 +218,7 @@ class _Implicit(torch.autograd.Function):
 
 def implicit_solve(
     residual: Callable[..., torch.Tensor],
-    jacobian: Callable[..., torch.Tensor],
+    operator: Callable[..., LinearOperator | torch.Tensor],
     x0: torch.Tensor,
     params: tuple[torch.Tensor, ...],
     *,
@@ -213,10 +227,16 @@ def implicit_solve(
 ) -> torch.Tensor:
     """Differentiable solve of ``residual(x, *params) = 0``; returns the converged ``x``.
 
+    ``operator`` is called as ``operator(x, *params)`` at the current iterate and returns
+    either a ``LinearOperator`` (the Milestone-1b contract) or a plain dense ``(..., m, m)``
+    tensor (auto-wrapped, for every pre-1b caller); it is the same callable contract
+    ``newton`` takes, and the same object is re-evaluated at the converged point to build
+    the backward pass's adjoint system.
+
     ``diagnostics``, when a dict is given, is filled with the forward Newton solve's own
     ``newton_iterations`` and ``linear_iterations`` (see ``_Implicit.forward``). Every other
     keyword is forwarded to ``newton``. It is keyword-ONLY deliberately: sitting positionally
     in front of ``**newton_kwargs`` it would silently swallow a fifth positional argument
     from any caller who thought they were passing something else.
     """
-    return _Implicit.apply(x0, residual, jacobian, newton_kwargs, diagnostics, *params)
+    return _Implicit.apply(x0, residual, operator, newton_kwargs, diagnostics, *params)

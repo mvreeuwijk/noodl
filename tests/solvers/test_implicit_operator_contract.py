@@ -106,3 +106,36 @@ def test_gradcheck_on_a_nonsymmetric_transport_shaped_problem_via_the_adjoint():
     # `raise_exception=False`-style return value.
     with pytest.raises((AssertionError, GradcheckError)):
         assert torch.autograd.gradcheck(f_buggy, (A,), eps=1e-6, atol=1e-5)
+
+
+def test_backward_raises_even_though_forward_used_on_failure_return():
+    # A deliberately, unconditionally singular "Jacobian": the residual is well-posed
+    # (x - c = 0 has an exact solution), but the operator callable always returns an
+    # all-zero 1x1 operator regardless of x, so forward Newton cannot actually take a real
+    # step -- on_failure="return" lets the forward pass complete anyway (returning a
+    # non-converged x close to x0) instead of raising. The backward pass must then raise
+    # unconditionally when it tries to solve the (still all-zero, hence singular) adjoint
+    # system, regardless of what on_failure the forward used: on_failure never applies to
+    # the backward pass (design section 3.2).
+    #
+    # The `match` is not decoration: the pre-Task-12 dense `torch.linalg.solve` ALSO raised
+    # here (LinAlgError is a RuntimeError subclass), so a bare `pytest.raises(RuntimeError)`
+    # cannot tell the two implementations apart. What is new is that the failure is reported
+    # through the operator contract's own raise/return boundary, naming the `where` it came
+    # from and the failing batch instance -- this project's binding error convention.
+    c = torch.tensor([[2.0]], dtype=torch.float64, requires_grad=True)
+    x0 = torch.tensor([[5.0]], dtype=torch.float64)
+
+    def residual(x, c_):
+        return x - c_
+
+    def operator(x, c_):
+        return torch.zeros(*x.shape, x.shape[-1], dtype=x.dtype)
+
+    x = implicit_solve(
+        residual, operator, x0, (c,), max_iter=2, on_failure="return", atol=1e-12, rtol=1e-12
+    )
+    assert torch.isfinite(x).all()  # forward completed without raising
+
+    with pytest.raises(RuntimeError, match=r"implicit_solve backward.*batch indices \[0\]"):
+        torch.autograd.grad(x.sum(), c)
