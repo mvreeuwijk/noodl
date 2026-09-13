@@ -7,7 +7,7 @@ solvers.select.solve rather than torch.linalg.solve directly.
 import torch
 
 from tellegen.operators.graph import GraphLaplacianOperator
-from tellegen.solvers.newton import newton
+from tellegen.solvers.newton import inner_solve_rtol, newton
 
 
 def test_newton_accepts_a_linear_operator_returning_callable_directly():
@@ -100,3 +100,70 @@ def test_linear_iterations_is_none_when_no_linear_solve_was_needed():
 
     assert result.iterations == 0
     assert result.linear_iterations is None
+
+
+def _leaky_chain(dtype: torch.dtype, m: int = 128):
+    """`m` interior zones on a chain, each also leaking to one shared boundary node.
+
+    Leak slopes 1.0, chain slopes 50.0: stiff enough that Jacobi-PCG needs a real number of
+    iterations, so the count below is a measurement rather than a constant. Returns
+    `(residual, operator, x0, m)` for a LINEAR residual `A x - b`, so Newton's own iteration
+    is trivial and what is being observed is the inner solve.
+    """
+    leaks = [(0, i) for i in range(1, m + 1)]
+    links = [(i, i + 1) for i in range(1, m)]
+    src = torch.tensor([u for u, _ in leaks + links], dtype=torch.long)
+    tgt = torch.tensor([v for _, v in leaks + links], dtype=torch.long)
+    slopes = torch.tensor([1.0] * len(leaks) + [50.0] * len(links), dtype=dtype)
+    interior_of_node = torch.tensor([-1] + list(range(m)), dtype=torch.long)
+    boundary_mask = torch.tensor([True] + [False] * m)
+
+    op = GraphLaplacianOperator(
+        src, tgt, slopes, m, interior_of_node, boundary_mask=boundary_mask
+    )
+    b = torch.linspace(1.0, 2.0, m, dtype=dtype)
+
+    def residual(x):
+        return op.matvec(x) - b
+
+    def operator(x):
+        return op
+
+    return residual, operator, torch.zeros(m, dtype=dtype), m
+
+
+def test_inner_solve_rtol_is_floored_by_the_working_dtype():
+    # `select.solve`'s pinned rtol=1e-10 is unreachable at float32 (eps 1.2e-7). Without the
+    # floor, every inner PCG on this fixture ran to its max_iter ceiling (measured: exactly
+    # m=128 iterations), its MAX_ITER status was swallowed by newton's own
+    # on_failure="return", and `linear_iterations` reported the ceiling rather than the work
+    # actually done -- which is the number the composed-model report publishes.
+    residual, operator, x0, m = _leaky_chain(torch.float32)
+
+    result = newton(residual, operator, x0, method="auto")
+
+    assert bool(torch.all(result.converged))
+    assert int(result.linear_iterations) < m, (
+        f"inner solve ran to its max_iter ceiling ({m}) instead of converging"
+    )
+
+
+def test_the_float32_inner_solve_floor_costs_no_accuracy_against_float64():
+    # The complement of the assertion above: the floor buys an honest iteration count
+    # without giving up accuracy float32 could have delivered. float64 is unaffected by the
+    # floor at all (max(1e-10, 32*2.2e-16) is still 1e-10).
+    r32, op32, x32, _ = _leaky_chain(torch.float32)
+    r64, op64, x64, _ = _leaky_chain(torch.float64)
+
+    result32 = newton(r32, op32, x32, method="auto")
+    result64 = newton(r64, op64, x64, method="auto")
+
+    assert bool(torch.all(result32.converged)) and bool(torch.all(result64.converged))
+    torch.testing.assert_close(
+        result32.x.to(torch.float64), result64.x, atol=1e-6, rtol=1e-6
+    )
+
+
+def test_inner_solve_rtol_leaves_float64_at_the_pinned_default():
+    assert inner_solve_rtol(torch.float64) == 1e-10
+    assert inner_solve_rtol(torch.float32) > 1e-10

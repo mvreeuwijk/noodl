@@ -16,38 +16,14 @@ from tellegen.operators.graph import GraphLaplacianOperator
 from tellegen.solvers.grounding import spd_certificate, spd_diagnosis
 from tellegen.solvers.implicit import adjoint as _adjoint_solve
 from tellegen.solvers.implicit import implicit_solve
-from tellegen.solvers.newton import newton
+from tellegen.solvers.newton import inner_solve_rtol, newton
 from tellegen.solvers.select import solve as select_solve
 from tellegen.topology import Network
-
-# The relative residual this layer asks its inner linear solves for, matching
-# `solvers.select.solve`'s own default, and the ULP multiple below which no dtype can
-# deliver it. See `_linear_rtol`.
-_LINEAR_RTOL = 1e-10
-_LINEAR_RTOL_ULPS = 32
 
 # Inner linear solvers a layer may be configured with; forwarded verbatim as
 # `solvers.select.solve`'s `method`. "direct" is the retained milestone-1 reference (the
 # operator's explicit A_I diag(g) A_I^T, LU-factorised); "auto" is the migrated default.
 _LINEAR_SOLVERS = ("auto", "cg", "gmres", "direct")
-
-
-def _linear_rtol(dtype: torch.dtype) -> float:
-    """Relative residual to ask an inner linear solve for, floored by the working dtype.
-
-    A Krylov solver's achievable relative residual is bounded below by the rounding error it
-    accumulates, a small multiple of `finfo(dtype).eps`; asking for less does not make the
-    answer better, it just spends every remaining iteration and then reports MAX_ITER on a
-    solve that is in fact as converged as the dtype allows. In float64 the pinned 1e-10 is
-    comfortably above that floor and is used unchanged; in float32 (this project's declared
-    default dtype) eps is 1.2e-7, so 1e-10 is unreachable by several orders of magnitude --
-    measured: the float32 CONTAM series case in tests/verification floors at 3.2e-8 and was
-    reported as a linear_init failure until this floor was applied. This is the same
-    "the dtype cannot be asked for precision it does not have" argument `newton`'s own
-    dtype-derived atol/rtol default makes, applied to the linear solve instead of to the
-    Newton convergence test.
-    """
-    return max(_LINEAR_RTOL, _LINEAR_RTOL_ULPS * float(torch.finfo(dtype).eps))
 
 
 class PotentialFlowLayer:
@@ -346,7 +322,7 @@ class PotentialFlowLayer:
             rhs,
             method=self.linear_solver,
             where="linear_init",
-            rtol=_linear_rtol(rhs.dtype),
+            rtol=inner_solve_rtol(rhs.dtype),
         )
         return result.x
 
