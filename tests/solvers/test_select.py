@@ -463,3 +463,223 @@ def test_negative_slope_refusal_message_names_the_offending_edges():
         solve(op, b)
     with pytest_raises_containing("[2]"):
         solve(op, b)
+
+
+# -- section 6.2 step 2: method="sparse_direct" ----------------------------------------------
+
+
+class _SparseFakeOperator(_FakeOperator):
+    """`_FakeOperator` plus the optional `assemble_sparse` member, built from its own dense
+    `A` by listing every structurally nonzero entry. Test-only: a real sparse operator
+    derives its COO pattern from its topology (see `GraphLaplacianOperator`), but what
+    `select.solve`'s sparse-direct branch needs to be exercised on is the CONTRACT --
+    shared int64 indices, batch-leading values -- not any particular operator's derivation.
+    """
+
+    def assemble_sparse(self):
+        if self.A.dim() > 2:
+            pattern = (self.A != 0).any(dim=tuple(range(self.A.dim() - 2)))
+        else:
+            pattern = self.A != 0
+        row, col = torch.nonzero(pattern, as_tuple=True)
+        values = self.A[..., row, col]
+        return row.to(torch.int64), col.to(torch.int64), values
+
+
+class _NoSparseFormOperator(_FakeOperator):
+    def assemble_sparse(self):
+        return None
+
+
+def test_sparse_direct_matches_torch_linalg_solve_on_an_spd_system():
+    op = _SparseFakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    result = solve(op, _B_SPD, method="sparse_direct")
+    torch.testing.assert_close(
+        result.x, torch.linalg.solve(_A_SPD, _B_SPD), rtol=1e-12, atol=1e-14
+    )
+    assert bool(torch.all(result.converged))
+    assert int(result.iterations) == 1
+    assert float(result.residual) < 1e-12
+    assert int(result.status) == int(SolverStatus.CONVERGED)
+
+
+def test_sparse_direct_matches_torch_linalg_solve_on_a_nonsymmetric_system():
+    op = _SparseFakeOperator(_A_NS, symmetric=False, certificate=None)
+    result = solve(op, _B_NS, method="sparse_direct")
+    torch.testing.assert_close(
+        result.x, torch.linalg.solve(_A_NS, _B_NS), rtol=1e-12, atol=1e-14
+    )
+
+
+def test_sparse_direct_solves_a_batch_instance_by_instance():
+    A = torch.stack([_A_SPD, 2.0 * _A_SPD, _A_NS])
+    b = torch.stack([_B_SPD, _B_SPD, _B_NS])
+    op = _SparseFakeOperator(A, symmetric=False, certificate=None)
+    result = solve(op, b, method="sparse_direct")
+    torch.testing.assert_close(result.x, torch.linalg.solve(A, b), rtol=1e-12, atol=1e-14)
+    assert result.iterations.shape == (3,)
+    assert result.status.shape == (3,)
+
+
+def test_sparse_direct_broadcasts_an_unbatched_operator_against_a_batched_rhs():
+    b = torch.stack([_B_SPD, 3.0 * _B_SPD])
+    op = _SparseFakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    result = solve(op, b, method="sparse_direct")
+    torch.testing.assert_close(
+        result.x, torch.linalg.solve(_A_SPD.expand(2, 2, 2), b), rtol=1e-12, atol=1e-14
+    )
+
+
+def test_sparse_direct_reports_per_instance_singular_status_without_raising():
+    """The per-instance failure contract (design section 3.2) on the sparse path: one
+    singular instance is reported as SINGULAR with x = 0, and its siblings are still solved.
+    """
+    A = torch.stack([_A_SPD, torch.zeros(2, 2)])
+    b = torch.stack([_B_SPD, _B_SPD])
+    op = _SparseFakeOperator(A, symmetric=False, certificate=None)
+    result = solve(op, b, method="sparse_direct", on_failure="return")
+    assert bool(result.converged[0]) and not bool(result.converged[1])
+    assert int(result.status[1]) == int(SolverStatus.SINGULAR)
+    torch.testing.assert_close(result.x[1], torch.zeros(2, dtype=torch.float64))
+    torch.testing.assert_close(
+        result.x[0], torch.linalg.solve(_A_SPD, _B_SPD), rtol=1e-12, atol=1e-14
+    )
+
+
+def test_sparse_direct_on_failure_raise_names_the_singular_instance():
+    A = torch.stack([_A_SPD, torch.zeros(2, 2)])
+    b = torch.stack([_B_SPD, _B_SPD])
+    op = _SparseFakeOperator(A, symmetric=False, certificate=None)
+    with pytest_raises_containing("SINGULAR"):
+        solve(op, b, method="sparse_direct", where="sparse")
+
+
+def test_sparse_direct_refuses_when_assemble_sparse_returns_none():
+    op = _NoSparseFormOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    try:
+        solve(op, _B_SPD, method="sparse_direct")
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "assemble_sparse" in str(exc)
+
+
+def test_sparse_direct_refuses_an_operator_without_the_optional_member_at_all():
+    op = _FakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    try:
+        solve(op, _B_SPD, method="sparse_direct")
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "assemble_sparse" in str(exc)
+
+
+def test_sparse_direct_refuses_to_run_under_grad_mode_with_a_grad_requiring_input():
+    """The backend goes out to SciPy and back, so nothing it computes is connected to the
+    autograd graph. Both layer paths solve under `no_grad` (`_LinearSolve` and `_Implicit`),
+    so this never fires there -- it fires for a caller who would otherwise receive a
+    silently detached answer.
+    """
+    b = _B_SPD.clone().requires_grad_(True)
+    op = _SparseFakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    with pytest_raises_containing("sparse_direct"):
+        solve(op, b, method="sparse_direct")
+
+
+def test_sparse_direct_refuses_when_the_operators_own_values_require_grad():
+    A = _A_SPD.clone().requires_grad_(True)
+    op = _SparseFakeOperator(A, symmetric=True, certificate=torch.tensor(True))
+    with pytest_raises_containing("sparse_direct"):
+        solve(op, _B_SPD, method="sparse_direct")
+
+
+def test_sparse_direct_runs_happily_under_no_grad_on_grad_requiring_inputs():
+    A = _A_SPD.clone().requires_grad_(True)
+    op = _SparseFakeOperator(A, symmetric=True, certificate=torch.tensor(True))
+    with torch.no_grad():
+        result = solve(op, _B_SPD, method="sparse_direct")
+    torch.testing.assert_close(
+        result.x, torch.linalg.solve(_A_SPD, _B_SPD), rtol=1e-12, atol=1e-14
+    )
+    assert not result.x.requires_grad
+
+
+def test_sparse_direct_raises_importerror_naming_scipy_when_it_is_missing(monkeypatch):
+    """SciPy is a DEV dependency, so the backend imports it lazily inside the function and
+    must say so by name when it is absent, rather than failing with a bare ModuleNotFound
+    from somewhere inside the solver.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_scipy(name, *args, **kwargs):
+        if name.split(".")[0] == "scipy":
+            raise ImportError(f"No module named {name!r}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_scipy)
+    op = _SparseFakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    try:
+        solve(op, _B_SPD, method="sparse_direct")
+        raise AssertionError("expected ImportError")
+    except ImportError as exc:
+        assert "scipy" in str(exc).lower()
+
+
+def test_sparse_direct_result_tensors_carry_the_inputs_dtype_and_device():
+    A = _A_SPD.to(torch.float32)
+    b = _B_SPD.to(torch.float32)
+    op = _SparseFakeOperator(A, symmetric=True, certificate=torch.tensor(True))
+    result = solve(op, b, method="sparse_direct")
+    assert result.x.dtype is torch.float32
+    assert result.x.device == b.device
+    assert result.residual.dtype is torch.float32
+    torch.testing.assert_close(result.x, torch.linalg.solve(A, b), rtol=1e-5, atol=1e-6)
+
+
+def test_sparse_direct_reports_zero_residual_for_a_zero_right_hand_side():
+    """`_direct`'s own convention, preserved: a zero rhs has no relative residual to report,
+    so the reported residual is 0 rather than 0/0.
+    """
+    op = _SparseFakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    result = solve(op, torch.zeros(2, dtype=torch.float64), method="sparse_direct")
+    assert float(result.residual) == 0.0
+
+
+def test_sparse_direct_matches_direct_on_the_graph_laplacian_chain_fixture():
+    slopes = torch.tensor([[1.0, 1.0], [2.0, 3.0]])
+    op = _chain_op(slopes)
+    b = torch.tensor([[1.0, 2.0], [0.5, -1.0]])
+    sparse = solve(op, b, method="sparse_direct")
+    direct = solve(op, b, method="direct")
+    torch.testing.assert_close(sparse.x, direct.x, rtol=1e-9, atol=1e-12)
+
+
+def test_sparse_direct_accepts_and_ignores_every_iterative_kwarg():
+    op = _SparseFakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(False))
+    result = solve(
+        op,
+        _B_SPD,
+        method="sparse_direct",
+        rtol=1e-3,
+        atol=1e-3,
+        max_iter=1,
+        x0=torch.zeros(2),
+        preconditioner="jacobi",
+        restart=1,
+    )
+    torch.testing.assert_close(
+        result.x, torch.linalg.solve(_A_SPD, _B_SPD), rtol=1e-12, atol=1e-14
+    )
+
+
+def test_sparse_direct_ignores_the_certificate_entirely(monkeypatch):
+    """An explicit `sparse_direct` makes no SPD assumption, so it neither consults nor
+    diagnoses the certificate -- the same contract `method="direct"` has.
+    """
+    calls = _spy(monkeypatch, GraphLaplacianOperator, "spd_diagnosis")
+    slopes = torch.tensor([[1.0, 1.0], [0.0, 1.0]])  # instance 1 does not certify
+    op = _chain_op(slopes)
+    b = torch.ones(2, 2)
+    result = solve(op, b, method="sparse_direct", on_failure="return")
+    assert calls["count"] == 0
+    assert bool(result.converged[0])
