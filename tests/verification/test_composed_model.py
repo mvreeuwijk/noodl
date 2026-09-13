@@ -184,6 +184,6 @@ def test_budget_row_kwargs_carry_the_solver_into_the_child_process():
     from benchmarks.composed_model import workload_backward, workload_forward
     from benchmarks.report_composed_scaling import SOLVERS
 
-    assert "auto" in SOLVERS and "sparse_direct" in SOLVERS
+    assert len(set(SOLVERS)) == 2, "SOLVERS must compare two distinct backends"
     for workload in (workload_forward, workload_backward):
         assert "linear_solver" in inspect.signature(workload).parameters

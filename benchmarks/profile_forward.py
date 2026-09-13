@@ -140,7 +140,10 @@ def time_ensemble(ensemble: int, repeats: int = 5) -> float:
 # already-warm model per configuration, so what it reports is the solve itself. It is what the
 # `method="auto"` default was chosen on (spec section 2: "selected on evidence, per platform").
 
-COMPARE_SOLVERS = ("auto", "sparse_direct")
+# "auto" now resolves to sparse_direct for a certified-SPD operator (Task C), so comparing it
+# against "sparse_direct" would measure one backend against itself; "cg" is the PCG backend
+# the evidence table in `solvers.select`'s docstring actually compares sparse_direct against.
+COMPARE_SOLVERS = ("cg", "sparse_direct")
 COMPARE_FORWARD_ENSEMBLES = (1, 100, 1000)
 COMPARE_BACKWARD_ENSEMBLES = (1, 100)
 
