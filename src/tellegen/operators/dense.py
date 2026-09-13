@@ -44,5 +44,16 @@ class DenseOperator:
     def assemble(self) -> Tensor | None:
         return self.A
 
+    def assemble_sparse(self) -> tuple[Tensor, Tensor, Tensor] | None:
+        """`None`: a dense operator has no sparse form worth offering.
+
+        The optional `operators.base.SparseAssembling` member. Returning `None` here is not
+        a gap: `A` is stored densely and is in general fully populated, so a COO triplet of
+        it would be an n^2-entry object built to feed a solver whose whole advantage is not
+        having one -- and `method="direct"` already factorises `A` in place. A caller that
+        wants the sparse path supplies an operator that genuinely is sparse.
+        """
+        return None
+
     def spd_certificate(self) -> Tensor | None:
         return None

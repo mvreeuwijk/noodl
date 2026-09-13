@@ -128,6 +128,12 @@ class GraphLaplacianOperator:
         # cheap half anyway.
         self._index_cache: dict[tuple, tuple[torch.Size, Tensor, Tensor]] = {}
 
+        # Lazily built COO index pattern for `assemble_sparse` (row, col and the gather
+        # index into the four-block stencil). Built on first use rather than here: most
+        # operators this class builds are never assembled sparsely at all, and the pattern
+        # costs a cat and a nonzero over 4 * edges entries.
+        self._coo_indices: tuple[Tensor, Tensor, Tensor] | None = None
+
         self.shape = slopes.shape[:-1] + (n_interior, n_interior)
         self.dtype = slopes.dtype
         self.device = slopes.device
@@ -221,6 +227,45 @@ class GraphLaplacianOperator:
         A_full.index_put_((self.tgt, idx), -ones, accumulate=True)
         A_I = A_full[self._interior_nodes]
         return torch.einsum("ie,...e,je->...ij", A_I, self.slopes, A_I)
+
+    def assemble_sparse(self) -> tuple[Tensor, Tensor, Tensor]:
+        """COO `(row, col, values)` for A_I diag(g) A_I^T, in O(edges) and with no n x n form.
+
+        The optional `operators.base.SparseAssembling` member. One edge between interior
+        nodes i, j with slope g contributes the four-entry stencil (i,i)+=g, (j,j)+=g,
+        (i,j)-=g, (j,i)-=g -- which is literally the outer product of that edge's incidence
+        column with itself, weighted by g, i.e. the e-th term of A_I diag(g) A_I^T. An edge
+        between an interior node i and a BOUNDARY node contributes only (i,i)+=g, because
+        the boundary row and column are not part of this operator's domain at all.
+
+        Both cases fall out of ONE vectorised expression, with no branch on which endpoints
+        are interior, by reusing `_src_compact`/`_tgt_compact` -- the endpoints in this
+        operator's own compact interior indexing, with every boundary node folded into the
+        single pad slot at index `n_interior` (see the module docstring). The four blocks
+        are emitted for every edge and then filtered by `row < n_interior & col < n_interior`,
+        which drops exactly the pad entries: for an interior-boundary edge that leaves the
+        (i,i) diagonal entry and nothing else, and for a boundary-boundary edge it leaves
+        nothing. The filter reads only INDICES, never slopes, so `row`/`col` are shared
+        across the batch as the contract requires, and they are cached: a Newton step builds
+        a fresh operator at new slopes but on the same topology, and only the values move.
+
+        DUPLICATES are emitted deliberately and left uncoalesced (a multigraph's parallel
+        edges land on the same (i,j) pair, as do the four blocks' own diagonals): the COO
+        consumer sums them, and coalescing here would cost a sort for nothing.
+        """
+        n_i = self.n_interior
+        cached = self._coo_indices
+        if cached is None:
+            sc, tc = self._src_compact, self._tgt_compact
+            row = torch.cat([sc, tc, sc, tc]).to(torch.int64)
+            col = torch.cat([sc, tc, tc, sc]).to(torch.int64)
+            keep = torch.nonzero((row < n_i) & (col < n_i), as_tuple=False).flatten()
+            cached = (row[keep], col[keep], keep)
+            self._coo_indices = cached
+        row, col, keep = cached
+        g = self.slopes
+        values = torch.cat([g, g, -g, -g], dim=-1).index_select(-1, keep)
+        return row, col, values
 
     def spd_certificate(self) -> Tensor:
         return _spd_certificate(

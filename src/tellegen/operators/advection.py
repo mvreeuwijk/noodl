@@ -345,5 +345,27 @@ class AdvectionOperator:
             M_block = M_block + torch.einsum("ikl,ij->kilj", self.kinetics.to(dtype), eye_i)
         return M_block.reshape(*batch_shape, K * n_i, K * n_i)
 
+    def assemble_sparse(self):
+        """`None`: this operator declares no COO sparse form (spec section 6.2, Task C).
+
+        The optional `operators.base.SparseAssembling` member, answered honestly rather
+        than approximately. A sparse form IS derivable here -- the In/Out/L blocks over the
+        node space, restricted to the interior, divided by capacity, plus the removal
+        diagonal and the kinetics species blocks -- but it is not free: the upwind/downwind
+        roles of every edge come from the SIGN of `flow`, which varies per batch instance,
+        so a shared index pattern would have to carry BOTH orientations of every edge with
+        the inactive one masked to zero, roughly doubling nnz and adding a second structure
+        to keep in step with `matvec`.
+
+        It was left out of Task C's scope because the sparse-direct evaluation this member
+        exists for is about the POTENTIAL block: `AdvectionOperator` is nonsymmetric and its
+        `spd_certificate()` is `None`, so `method="auto"` routes it to GMRES and would
+        continue to do so whatever this returned. `method="sparse_direct"` on a transport
+        operator therefore raises a `ValueError` naming `assemble_sparse`, which is the
+        correct answer for a backend it has no sparse form for, rather than a silent
+        fallback.
+        """
+        return None
+
     def spd_certificate(self):
         return None

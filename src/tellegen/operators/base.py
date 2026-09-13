@@ -101,6 +101,15 @@ class LinearOperator(Protocol):
     `tests/operators/test_base.py` -- can be written at all; `Protocol` classes are not
     usable with `isinstance` without it. As with every `runtime_checkable` protocol, the
     check is structural (attribute and method NAMES only) and does not verify signatures.
+
+    OPTIONAL EXTENSION -- `assemble_sparse()`: an operator MAY additionally offer a COO
+    sparse form, declared by the separate `SparseAssembling` protocol below and discovered
+    by callers with `getattr(op, "assemble_sparse", None)`. It is deliberately NOT a member
+    of this protocol: `LinearOperator` is `runtime_checkable`, so every name listed here
+    becomes REQUIRED by `isinstance` -- and an optional member that makes a conforming
+    operator stop conforming is not optional. `DenseOperator` and `AdvectionOperator`
+    declare it and return `None`; `GraphLaplacianOperator` and
+    `solvers.implicit.TransposeOperator` return a real sparse form.
     """
 
     shape: tuple[int, ...]
@@ -117,3 +126,26 @@ class LinearOperator(Protocol):
     def assemble(self) -> Tensor | None: ...
 
     def spd_certificate(self) -> Tensor | None: ...
+
+
+@runtime_checkable
+class SparseAssembling(Protocol):
+    """The OPTIONAL sparse-assembly extension to `LinearOperator` (spec section 6.2).
+
+    `assemble_sparse()` returns `(row, col, values)` in COO form, or `None` when this
+    operator has no sparse form to offer (the honest answer for a dense operator, and for
+    any operator whose sparse structure has not been derived):
+
+    * `row`, `col` -- int64, one-dimensional, of equal length `nnz`, SHARED across the whole
+      batch. Sharing is what makes the form usable at all: the index pattern of a batched
+      operator is fixed by its topology, so only the VALUES vary per instance, and a
+      per-instance index array would multiply the memory by the ensemble size for nothing.
+    * `values` -- `(..., nnz)`, batch-leading, with the operator's own batch shape.
+
+    DUPLICATE `(row, col)` pairs are permitted and are SUMMED by the consumer -- the
+    contract every COO consumer in use here (`scipy.sparse.coo_matrix`, and `csc_matrix`
+    built from the same triplet) already implements. That is what allows an O(E) assembly
+    that emits a fixed stencil per edge with no coalescing pass of its own.
+    """
+
+    def assemble_sparse(self) -> tuple[Tensor, Tensor, Tensor] | None: ...
