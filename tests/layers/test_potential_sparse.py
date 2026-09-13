@@ -819,3 +819,107 @@ def test_sparse_direct_layer_is_differentiable_through_the_implicit_adjoint(two_
     torch.testing.assert_close(
         grads["sparse_direct"], grads["direct"], rtol=1e-9, atol=1e-12
     )
+
+
+def test_auto_backend_is_independent_of_the_callers_grad_context(monkeypatch):
+    """`solve(differentiable=False)` must factorise through the SAME backend whatever grad
+    mode and grad-requiring inputs the caller happens to have.
+
+    The hazard this pins (controller finding, Task C fix round 1): Newton's inner solves used
+    to run under the caller's AMBIENT grad mode, so `select.solve`'s `"auto"` saw a
+    grad-requiring system and correctly declined the non-differentiable sparse-direct backend
+    -- meaning the identical call took SuperLU from a plain call site and PCG (4.6x slower)
+    from inside `torch.enable_grad()` with `sources.requires_grad_(True)`. Now the whole
+    branch runs under `no_grad`, so the backend is a property of the layer, not of the caller.
+
+    The `differentiable=True` case is here too: its forward already solves under `no_grad`
+    inside `_Implicit`, so it must also never reach pcg -- its gradient comes from the
+    adjoint, which is not the inner solver's business.
+    """
+    import scipy.sparse.linalg
+
+    from benchmarks.composed_model import build_composed
+
+    model = build_composed(n_buildings=2, building_nodes=12, street_nodes=6, sewer_nodes=5)
+    layer = model.layer
+
+    splu_calls, pcg_calls = [], []
+    real_splu = scipy.sparse.linalg.splu
+    real_pcg = select_module.pcg
+
+    def spy_splu(*args, **kwargs):
+        splu_calls.append(1)
+        return real_splu(*args, **kwargs)
+
+    def spy_pcg(*args, **kwargs):
+        pcg_calls.append(1)
+        return real_pcg(*args, **kwargs)
+
+    monkeypatch.setattr(scipy.sparse.linalg, "splu", spy_splu)
+    monkeypatch.setattr(select_module, "pcg", spy_pcg)
+
+    def _run(context: str):
+        splu_calls.clear()
+        pcg_calls.clear()
+        sources = model.sources.detach().clone()
+        if context in ("enable_grad", "differentiable"):
+            sources = sources.requires_grad_(True)
+        if context == "no_grad":
+            with torch.no_grad():
+                phi, _q = layer.solve(
+                    model.phi_boundary, model.drivers, sources, differentiable=False
+                )
+        elif context == "enable_grad":
+            with torch.enable_grad():
+                phi, _q = layer.solve(
+                    model.phi_boundary, model.drivers, sources, differentiable=False
+                )
+        elif context == "plain":
+            phi, _q = layer.solve(
+                model.phi_boundary, model.drivers, sources, differentiable=False
+            )
+        else:
+            phi, _q = layer.solve(
+                model.phi_boundary, model.drivers, sources, differentiable=True
+            )
+        return phi, len(splu_calls), len(pcg_calls)
+
+    results = {ctx: _run(ctx) for ctx in ("no_grad", "enable_grad", "plain", "differentiable")}
+
+    for context, (_phi, n_splu, n_pcg) in results.items():
+        assert n_pcg == 0, f"context {context!r} fell back to pcg ({n_pcg} calls)"
+        assert n_splu > 0, f"context {context!r} never reached the sparse LU"
+
+    non_differentiable = [results[c][1] for c in ("no_grad", "enable_grad", "plain")]
+    assert len(set(non_differentiable)) == 1, (
+        f"differentiable=False factorised a different number of times per grad context: "
+        f"{dict(zip(('no_grad', 'enable_grad', 'plain'), non_differentiable, strict=True))}"
+    )
+
+    reference = results["no_grad"][0]
+    for context, (phi, _n_splu, _n_pcg) in results.items():
+        torch.testing.assert_close(
+            phi.detach(), reference, rtol=1e-12, atol=1e-12, msg=f"context {context!r}"
+        )
+
+
+def test_non_differentiable_solve_returns_detached_tensors_whatever_the_caller_does(
+    two_zone_layer,
+):
+    """The consequence of running the whole branch under `no_grad`, pinned: nothing this path
+    returns carries a graph, even from inside `enable_grad` with grad-requiring inputs and a
+    learnable Element. A caller who wants gradients uses `differentiable=True`.
+    """
+    net, elements, drives, boundary = two_zone_layer
+    el = PowerLaw(
+        elements[0].C.detach().clone().requires_grad_(True), elements[0].n, learnable=True
+    )
+    layer = PotentialFlowLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    phi_b = torch.zeros(1, dtype=torch.float64, requires_grad=True)
+    drivers = {"wind": torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)}
+    sources = torch.zeros(net.n, dtype=torch.float64).requires_grad_(True)
+
+    with torch.enable_grad():
+        phi, q = layer.solve(phi_b, drivers, sources, differentiable=False)
+    assert not phi.requires_grad
+    assert not q.requires_grad

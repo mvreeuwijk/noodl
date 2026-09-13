@@ -434,8 +434,11 @@ class PotentialFlowLayer:
         by closure (the element/drive object itself, not its tensor payload) and is
         invisible to `_Implicit.backward`: for an Element, this happens when it was
         constructed with `learnable=False` on a tensor that already had `requires_grad=True`
-        (`Element._param`'s documented pass-through exception, which is correct and used
-        deliberately for `differentiable=False`); for a Drive, this happens whenever a Drive
+        (`Element._param`'s documented pass-through exception, which is still a correct
+        construction -- its graph is reachable through this layer's own component calls
+        (`flows`, `dflows`, `residual`, `jacobian`, `linear_init`), though NOT through
+        `solve(differentiable=False)`, which since the Task C fix returns detached tensors);
+        for a Drive, this happens whenever a Drive
         implementation owns a learnable coefficient directly instead of reading it from the
         `drivers` mapping passed to `solve()`. Raise now, before dispatching, rather than
         return a gradient that is silently wrong (if some other path happens to also touch
@@ -489,9 +492,10 @@ class PotentialFlowLayer:
 
         - An Element's own differentiable state must be a registered parameter
           (`learnable=True`), never a bare tensor held with `requires_grad=True` outside
-          `named_parameters()` (the latter is a supported, correct construction for
-          `differentiable=False`, per `Element._param`, but is invisible to the
-          differentiable solve).
+          `named_parameters()` (the latter is still a supported construction, per
+          `Element._param`, and its graph is reachable through this layer's component calls
+          -- but it is invisible to the differentiable solve, and `differentiable=False` now
+          returns detached tensors, so neither `solve` path carries a gradient to it).
         - A Drive must read every differentiable quantity from the `drivers` mapping passed
           to `solve()` (see `tellegen.drives.Drive`), never hold one of its own as an
           instance attribute.
@@ -537,14 +541,23 @@ class PotentialFlowLayer:
         gradient w.r.t. the starting guess -- `solvers.implicit._Implicit.backward` returns
         `None` for it. See the comment at the top of the body for what tracing it cost.
 
-        With `differentiable=False`, the returned `(phi, q)` are NOT necessarily detached:
-        this branch runs Newton's residual/operator closures under ordinary autograd (no
-        `no_grad`, no `Function.apply`), so if any Element was constructed with
-        `learnable=True` its `nn.Parameter`s are read directly inside those closures and the
-        result carries a graph back to them (and to `phi_boundary`/`drivers`/`sources`) via
-        plain unrolled autograd through the converged Newton iterate -- gradients that are
-        real, just not the implicit-function ones `differentiable=True` computes. A caller
-        that wants tensors with no graph at all must `.detach()` the result itself.
+        With `differentiable=False`, the returned `(phi, q)` are ALWAYS DETACHED: the whole
+        branch -- the initial guess, the grounding check, the Newton iteration, every inner
+        linear solve and the final assemble/flows -- runs under `torch.no_grad()`, whatever
+        grad mode the caller is in.
+
+        This branch used to run Newton's closures under ORDINARY autograd, so with a
+        `learnable=True` Element (or a grad-requiring `phi_boundary`/`drivers`/`sources`) the
+        result carried an UNROLLED graph through the converged iterate. Those gradients were
+        real but were never the implicit-function ones `differentiable=True` computes, and
+        nothing asked for them. Worse, they made the INNER SOLVER'S CHOICE depend on the
+        caller's ambient grad mode: `solvers.select.solve`'s `"auto"` will not hand a
+        grad-requiring solve to the non-differentiable sparse-direct backend, so the same
+        call factorised through SuperLU from a plain call site and fell back to PCG -- 4.6x
+        slower -- from inside `torch.enable_grad()` with a grad-requiring `sources`. A
+        backend must not be a function of who is calling. A caller who wants gradients calls
+        `differentiable=True`, which is unchanged (`solvers.implicit._Implicit.forward`
+        already solved under `no_grad` and takes its gradients from the adjoint).
         """
         drivers = drivers or {}
         newton_kwargs.setdefault("method", self.linear_solver)
@@ -600,31 +613,55 @@ class PotentialFlowLayer:
             self._grounding_check(dq0, where="solve")
 
         if not differentiable:
+            # The WHOLE non-differentiable solve runs under no_grad -- the Newton iteration,
+            # every inner linear solve inside it, and the final assemble/flows. Two reasons,
+            # the second of which is the one that made this mandatory rather than tidy:
+            #
+            # 1. There is no legitimate graph to build here. This branch does not use the
+            #    implicit adjoint, so any graph it leaves behind is an UNROLLED trace through
+            #    the converged Newton iterate -- real gradients, but not the ones
+            #    `differentiable=True` computes, retained for a caller who asked for the
+            #    non-differentiable path. Task 11 recorded that leak as a pre-existing wart;
+            #    this closes it.
+            # 2. It made the inner solver's choice depend on the CALLER's ambient grad mode.
+            #    `solvers.select.solve`'s "auto" refuses the non-differentiable sparse-direct
+            #    backend when grad mode is on and an input requires grad (correctly: it would
+            #    silently detach). With the iteration running under whatever mode the caller
+            #    happened to be in, the same `solve(differentiable=False)` factorised through
+            #    SuperLU from a plain call and fell back to PCG -- 4.6x slower, and a
+            #    different code path -- from inside `torch.enable_grad()` with a
+            #    grad-requiring `sources`. A solver choice must not be a function of the
+            #    caller's context. The guard in `select.solve` stays as the last line of
+            #    defence; this removes the condition that was tripping it.
+            #
+            # `diagnostics` is filled exactly as before (no_grad does not touch it), and the
+            # returned `(phi, q)` are now unconditionally detached -- see the docstring.
+            with torch.no_grad():
 
-            def residual_fn(x):
-                return self.residual(x, phi_boundary, drivers, sources)
+                def residual_fn(x):
+                    return self.residual(x, phi_boundary, drivers, sources)
 
-            def operator_fn(x):
-                # A matvec-free A_I diag(dq) A_I^T at the current iterate, instead of the
-                # dense (n_interior, n_interior) einsum layer.jacobian() assembles. Rebuilt
-                # each iteration because dq is what changes; the endpoint/index tensors it
-                # closes over are cached on the layer at construction.
-                phi = self.assemble(x, phi_boundary)
-                dq = self.dflows(phi, drivers)
-                return self._operator_at(dq)
+                def operator_fn(x):
+                    # A matvec-free A_I diag(dq) A_I^T at the current iterate, instead of the
+                    # dense (n_interior, n_interior) einsum layer.jacobian() assembles.
+                    # Rebuilt each iteration because dq is what changes; the endpoint/index
+                    # tensors it closes over are cached on the layer at construction.
+                    phi = self.assemble(x, phi_boundary)
+                    dq = self.dflows(phi, drivers)
+                    return self._operator_at(dq)
 
-            result = newton(residual_fn, operator_fn, phi0, **newton_kwargs)
-            if diagnostics is not None:
-                diagnostics["newton_iterations"] = result.iterations
-                diagnostics["linear_iterations"] = result.linear_iterations
-                diagnostics["method"] = newton_kwargs["method"]
-                # The per-instance STATUS, not only the cost. Without these two,
-                # `on_failure="return"` returned a non-converged phi with nothing anywhere
-                # reporting it (final review C2).
-                diagnostics["converged"] = result.converged
-                diagnostics["residual_norm"] = result.residual_norm
-            phi = self.assemble(result.x, phi_boundary)
-            q = self.flows(phi, drivers)
+                result = newton(residual_fn, operator_fn, phi0, **newton_kwargs)
+                if diagnostics is not None:
+                    diagnostics["newton_iterations"] = result.iterations
+                    diagnostics["linear_iterations"] = result.linear_iterations
+                    diagnostics["method"] = newton_kwargs["method"]
+                    # The per-instance STATUS, not only the cost. Without these two,
+                    # `on_failure="return"` returned a non-converged phi with nothing
+                    # anywhere reporting it (final review C2).
+                    diagnostics["converged"] = result.converged
+                    diagnostics["residual_norm"] = result.residual_norm
+                phi = self.assemble(result.x, phi_boundary)
+                q = self.flows(phi, drivers)
             return phi, q
 
         self._check_no_unreachable_differentiable_tensors()
