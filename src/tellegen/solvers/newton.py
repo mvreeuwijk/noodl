@@ -129,6 +129,7 @@ def newton(
     switch_ratio: float = 0.5,
     method: str = "auto",
     on_failure: str = "raise",
+    where: str = "newton",
 ) -> NewtonResult:
     """Solve ``residual(x) = 0`` by damped, batched Newton iteration.
 
@@ -150,6 +151,14 @@ def newton(
     ``"direct"``) without Newton needing to know anything about the operator's storage. The
     one exception is the compatibility shim: with ``method="auto"`` a bare dense tensor
     resolves to ``"direct"`` (see the module docstring). An explicit ``method`` always wins.
+
+    ``where`` is the caller's own name for this solve, used to prefix BOTH Newton's own
+    final-convergence error and every inner ``solvers.select.solve`` refusal or failure it
+    triggers. It defaults to ``"newton"``, which is all a standalone call can say; a layer
+    passes something like ``"PotentialFlowLayer 'air' solve"``, because slopes change
+    between Newton iterates and an instance can lose grounding mid-iteration (a fan reaching
+    shutoff, a damper closing) -- and in a composed model over one network, "newton:
+    method='auto' refuses to split the batch" does not say WHICH layer failed.
 
     ``on_failure="raise"`` (default) raises ``RuntimeError`` naming the batch indices that
     failed to converge after ``max_iter`` iterations, exactly as before. ``on_failure="return"``
@@ -199,7 +208,7 @@ def newton(
             r,
             method=step_method,
             on_failure="return",
-            where="newton",
+            where=where,
             rtol=inner_solve_rtol(r.dtype),
         )
         dx = result.x
@@ -232,7 +241,7 @@ def newton(
         bad = torch.nonzero(~flat_converged, as_tuple=False).flatten()
         norms = norm.reshape(-1)[bad]
         raise RuntimeError(
-            f"newton: batch indices {bad.tolist()} failed to converge after "
+            f"{where}: batch indices {bad.tolist()} failed to converge after "
             f"{iterations} iterations, residual norms {norms.tolist()}"
         )
     return NewtonResult(

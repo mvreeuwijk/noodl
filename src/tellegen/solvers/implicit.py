@@ -211,7 +211,10 @@ class _Implicit(torch.autograd.Function):
             lam = adjoint(
                 op,
                 grad_x,
-                where="implicit_solve backward",
+                # The forward's own `where` (a layer name, when a layer supplied one) with
+                # " backward" appended, so an adjoint failure names the same solve the
+                # forward would have. Defaults to "implicit_solve backward" as before.
+                where=f"{ctx.newton_kwargs.get('where', 'implicit_solve')} backward",
                 method=ctx.newton_kwargs.get("method", "auto"),
             )
         with torch.enable_grad():

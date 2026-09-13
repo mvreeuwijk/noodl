@@ -561,3 +561,38 @@ def test_differentiable_solve_refuses_on_failure_return_outright():
             max_iter=1,
             on_failure="return",
         )
+
+
+def test_an_inner_solve_refusal_inside_newton_names_the_layer():
+    """Finding I3. Grounding is certified at `phi0`, but slopes change between Newton
+    iterates, so an instance can lose it mid-iteration -- here instance 1's fan is driven
+    past the top of its curve, where `dflow` is exactly zero and the only edge tying `z` to
+    the boundary goes inactive. The refusal then comes from `solvers.select.solve` INSIDE
+    `newton`, not from the layer's own pre-solve check, and used to read "newton: ..." with
+    no way to tell which layer of a composed model produced it.
+    """
+    net = Network(dtype=torch.float64)
+    net.add_node("ambient")
+    net.add_node("z")
+    net.add_edge("ambient", "z", kind="fan")
+    element = FanCurve(
+        torch.tensor([100.0, -200.0, 0.0, 0.0], dtype=torch.float64),
+        torch.tensor(1.0, dtype=torch.float64),
+        kind="fan",
+    )
+    layer = PotentialFlowLayer(
+        net, "fan", [element], boundary=["ambient"], linear_solver="cg"
+    )
+    phi_b = torch.zeros(2, 1, dtype=torch.float64)
+    # Instance 0 asks for a flow the curve can deliver; instance 1 asks for more than
+    # q_max, so Newton drives it past the top of the curve.
+    sources = torch.tensor([[0.0, -0.2], [0.0, -1.5]], dtype=torch.float64)
+    phi0 = torch.tensor([[-50.0], [-50.0]], dtype=torch.float64)  # grounded for both
+
+    with pytest.raises(RuntimeError) as excinfo:
+        layer.solve(phi_b, {}, sources, phi0=phi0, differentiable=False)
+
+    message = str(excinfo.value)
+    assert "PotentialFlowLayer 'fan'" in message, message
+    assert "cg" in message, message
+    assert "instance 1" in message, message

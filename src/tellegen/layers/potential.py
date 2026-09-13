@@ -392,7 +392,7 @@ class PotentialFlowLayer:
             op,
             rhs,
             method=self.linear_solver,
-            where="linear_init",
+            where=f"PotentialFlowLayer {self.name!r} linear_init",
             rtol=inner_solve_rtol(rhs.dtype),
         )
         return result.x
@@ -508,6 +508,12 @@ class PotentialFlowLayer:
         """
         drivers = drivers or {}
         newton_kwargs.setdefault("method", self.linear_solver)
+        # Name this layer on every error the Newton solve or its INNER linear solves raise.
+        # Grounding is certified at phi0, but slopes change between Newton iterates, so an
+        # instance can lose it mid-iteration; without this the refusal read "newton:
+        # method='auto' refuses to split the batch ..." with no way to tell which layer of a
+        # composed model over one network produced it.
+        newton_kwargs.setdefault("where", f"PotentialFlowLayer {self.name!r} solve")
         if newton_kwargs.get("on_failure") == "return" and diagnostics is None:
             # `solve` returns (phi, q) tensors; without a diagnostics dict there is nowhere
             # for `converged`/`residual_norm` to go, and a non-converged phi would be
