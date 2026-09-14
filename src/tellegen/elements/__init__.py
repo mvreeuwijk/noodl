@@ -2,6 +2,7 @@
 
 from tellegen.elements.base import Element
 from tellegen.elements.conductance import Conductance
+from tellegen.elements.damper import Damper
 from tellegen.elements.duct import Duct
 from tellegen.elements.fan import FanCurve
 from tellegen.elements.fixed import FixedFlow
@@ -10,6 +11,7 @@ from tellegen.elements.quadratic import Quadratic
 
 __all__ = [
     "Conductance",
+    "Damper",
     "Duct",
     "Element",
     "FanCurve",
