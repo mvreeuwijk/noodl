@@ -58,7 +58,8 @@ def active_interior(
     motivating case: it carries conduction edges and no airpath edges, so it belongs to the
     thermal layer's interior but not to a species layer's. The same holds a scale up: in the
     composed reference model the street and sewer nodes carry no `airpath` edge at all, so
-    the `co2` layer over that network has 70 fewer unknowns than it has non-boundary nodes.
+    the `co2` layer over that network has 960 unknowns, 68 fewer than its 1028 non-boundary
+    nodes.
 
     This is the ONE place the rule is decided. `TransportLayer` sizes its interior with it,
     `physics.species.SpeciesTransport` sizes its `interior`/`volumes` with it, and a caller

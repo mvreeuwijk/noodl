@@ -474,3 +474,52 @@ def test_transpose_view_is_the_shared_transpose_operator():
     separately-maintained duplicate -- see the consolidation note in `layers/transport.py`.
     """
     assert _TransposeView is TransposeOperator
+
+
+def test_boundary_values_pair_with_the_caller_s_boundary_order_not_node_order():
+    """`x_boundary[j]` belongs to `boundary[j]`, whatever node order that list is in.
+
+    This PINS the caller-order convention on the operator path. `AdvectionOperator` used to
+    derive its boundary positions as "every node that is not interior", which is ASCENDING
+    node order, while the dense oracle `operator()` has always taken its `N` columns from
+    `self.boundary_idx` -- `Network.boundary_index`, "in the order given". The two therefore
+    disagreed for any layer whose `boundary` list is not in ascending node order, and nothing
+    pinned either of them (the composed model's two boundary values are equal, so it cannot
+    tell the difference). The layer now hands the operator its own `boundary_idx`, so both
+    paths pair entry `j` with node `boundary[j]`; the two boundary values here are far apart
+    so that swapping them would be unmissable.
+    """
+    net = Network(dtype=torch.float64)
+    for name in ("z1", "outlet", "z2", "inlet"):   # boundary nodes at positions 3 and 1
+        net.add_node(name)
+    net.add_edge("inlet", "z1", kind="airpath")
+    net.add_edge("z1", "z2", kind="airpath")
+    net.add_edge("z2", "outlet", kind="airpath")
+    boundary = ["inlet", "outlet"]                 # NOT ascending: node indices (3, 1)
+    assert net.boundary_index(boundary).tolist() == [3, 1]
+
+    cap = torch.tensor([600.0, 900.0], dtype=torch.float64)
+    layer = TransportLayer(
+        net, "co2", capacity=cap, flow_kind="airpath", boundary=boundary, scheme="implicit",
+    )
+    q = torch.tensor([0.4, 0.4, 0.4], dtype=torch.float64)
+    x_b = torch.tensor([800.0, 20.0], dtype=torch.float64)   # [inlet, outlet]
+    sources = torch.zeros(net.n, dtype=torch.float64)
+    sources[net.node_index("z2")] = 5.0
+    s_i = sources.index_select(0, layer.interior_idx)
+
+    M, N = layer.operator(q)
+    b0 = N @ x_b + s_i / cap
+
+    steady_ref = torch.linalg.solve(M, -b0)
+    torch.testing.assert_close(
+        layer.steady(q, sources, x_b), steady_ref, rtol=1e-9, atol=1e-12
+    )
+
+    x0 = torch.tensor([400.0, 450.0], dtype=torch.float64)
+    dt = 120.0
+    eye = torch.eye(M.shape[-1], dtype=torch.float64)
+    step_ref = torch.linalg.solve(eye - dt * M, x0 + dt * b0)
+    torch.testing.assert_close(
+        layer.step(x0, q, sources, x_b, dt=dt), step_ref, rtol=1e-9, atol=1e-12
+    )

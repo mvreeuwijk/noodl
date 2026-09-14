@@ -149,8 +149,10 @@ class PotentialFlowLayer:
         self._interior_names = [net.nodes[i] for i in self.interior.tolist()]
         self._inactive_names = [net.nodes[i] for i in self.inactive.tolist()]
 
-        # interior_of_node: -1 at a boundary node's position, else its 0-based position
-        # within self.interior. boundary_mask: True at a boundary node's position. Both are
+        # interior_of_node: -1 at a boundary node's position AND at an inactive one's (an
+        # inactive node is an unknown of neither kind, see the split above), else that node's
+        # 0-based position within self.interior. boundary_mask: True at a boundary node's
+        # position only -- an inactive node is not a prescribed value. Both are
         # (n,) and consumed by GraphLaplacianOperator's constructor and by
         # solvers.grounding; computing them once here, at construction time, avoids
         # rebuilding them on every solve() call.
