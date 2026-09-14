@@ -287,7 +287,11 @@ def test_wind_from_network_names_an_unknown_ambient_and_a_missing_driver():
     net = _wind_net()
     with pytest.raises(KeyError, match="outside"):
         Wind.from_network(net, "airpath", ambient="outside")
-    wind = Wind.from_network(net, "airpath", ambient="ambient")
+    # _wind_net()'s envelope edges reference profile 1 (Ruling R22: validation is strict,
+    # so this construction must be given that profile to succeed) -- the point of this
+    # test is the ambient and driver errors, not profile configuration.
+    prof = WindProfile([0.0, 180.0], [0.6, -0.4])
+    wind = Wind.from_network(net, "airpath", ambient="ambient", profiles=[prof])
     with pytest.raises(KeyError, match="V_met"):
         wind({"rho_amb": torch.tensor(1.2, dtype=F64), "theta_w": torch.tensor(0.0, dtype=F64)})
 

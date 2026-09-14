@@ -257,10 +257,14 @@ class Wind:
         contiguously from 1; a project numbering them, say, 2 and 5 needs the mapping form to
         resolve correctly. Numbers are remapped to dense positions once, here, so the hot path
         (`__call__`) stays a plain index lookup. `profile=` is shorthand: one profile for
-        every envelope edge that carries no `profile` attribute at all. `profile = 0` (the
-        default when the attribute is absent and no shorthand is given) means "no profile,
-        use the constant `Cp` attribute". An edge whose `profile` attribute names a number
-        absent from `profiles` raises `KeyError` naming the edge and the number.
+        every envelope edge that carries no `profile` attribute at all. `profile = 0` is the
+        only value that means "no profile, use the constant `Cp` attribute" -- it is a
+        configured, non-silent choice, not a fallback. Every OTHER value an edge's `profile`
+        attribute names must resolve in `profiles`, including when `profiles` is empty
+        entirely: raises `KeyError` naming the edge and the number (Ruling R22). A caller
+        who sets `profile=k` on edges and forgets to pass `profiles` must get a loud error,
+        not a silently vanishing wind pressure from the constant `Cp` attribute defaulting
+        to zero.
         """
         amb = net.node_index(ambient)  # KeyError names the node
         src, tgt = net.endpoints(kind)
@@ -287,13 +291,6 @@ class Wind:
         edges = net.edges
         profile_index = []
         for col, value in zip(cols, raw.tolist(), strict=True):
-            if not numbers:
-                # No profiles (or shorthand) were given at all: profile-based Cp is not
-                # configured for this Wind, so a stray `profile` attribute (e.g. written by
-                # a general-purpose reader for a caller doing constant-Cp analysis) is not
-                # validated against anything and every edge falls back to constant Cp.
-                profile_index.append(0)
-                continue
             number = round(value)
             if number == 0:
                 profile_index.append(0)
