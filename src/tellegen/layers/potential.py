@@ -23,8 +23,19 @@ from tellegen.topology import Network
 
 # Inner linear solvers a layer may be configured with; forwarded verbatim as
 # `solvers.select.solve`'s `method`. "direct" is the retained milestone-1 reference (the
-# operator's explicit A_I diag(g) A_I^T, LU-factorised); "auto" is the migrated default.
-_LINEAR_SOLVERS = ("auto", "cg", "gmres", "direct")
+# operator's explicit A_I diag(g) A_I^T, LU-factorised); "auto" is the migrated default;
+# "sparse_direct" is the spec's section 6.2 SciPy SuperLU reference, which factorises the
+# operator's O(E) COO form per instance instead. All four reach BOTH passes: `linear_init`
+# and every Newton inner solve on the forward, and the implicit adjoint on the backward.
+#
+# What "auto" resolves to on THIS layer's operator (a certified-SPD GraphLaplacianOperator
+# that declares `assemble_sparse`) is sparse-direct up to an ensemble of
+# `select._SPARSE_DIRECT_MAX_BATCH` = 32 instances and Jacobi-preconditioned CG above it,
+# because SuperLU is driven by a per-instance Python loop whose cost is linear in the
+# ensemble while PCG's is sub-linear; the measured crossover sweep is at that constant. An
+# explicit `linear_solver=` is honoured verbatim at every ensemble size. `diagnostics`
+# reports which backend actually ran (see `solve`).
+_LINEAR_SOLVERS = ("auto", "cg", "gmres", "direct", "sparse_direct")
 
 
 class PotentialFlowLayer:
@@ -151,6 +162,14 @@ class PotentialFlowLayer:
         this whole solve path uses -- see topology.py's module docstring) restricted to this
         layer's own edge columns. Kept for callers and for symmetry with `A`; `dp()` gathers
         `phi[..., _src] - phi[..., _tgt]` instead of contracting against it.
+
+        Like `A`, cached on first access and never invalidated: both assume `net` is not
+        mutated after this layer is constructed. Nothing in this codebase does that -- a
+        `Network` is built, then layers are constructed over it, then it is solved -- but a
+        caller who mutated `net` afterwards (adding a node or edge) would get a layer whose
+        `A`/`_diff` (if already accessed) or `_src`/`_tgt`/`cols` (fixed at `__init__`) no
+        longer agree with the network's current topology, with no check anywhere that
+        catches it.
         """
         return self.net.difference()[self.cols]
 
@@ -177,6 +196,31 @@ class PotentialFlowLayer:
             w.shape[:-1] + (self._n_nodes,), dtype=w.dtype, device=w.device
         )
         return out.index_add(-1, self._src, w).index_add(-1, self._tgt, -w)
+
+    def _accumulate_interior(self, w: torch.Tensor) -> torch.Tensor:
+        """`self._accumulate(w)` restricted to interior rows -- the repeated `A_I w` site."""
+        return self._accumulate(w)[..., self.interior]
+
+    def _accumulate_bound(self, w: torch.Tensor) -> torch.Tensor:
+        """`self._accumulate(w)` restricted to boundary rows -- the repeated `A_bound w` site."""
+        return self._accumulate(w)[..., self.bound]
+
+    def _operator_at(self, slopes: torch.Tensor) -> GraphLaplacianOperator:
+        """The matvec-free `A_I diag(slopes) A_I^T` operator at the given per-edge slope, in
+        this layer's own endpoint/interior-index representation -- the construction repeated
+        by `linear_init`, `solve`'s `operator_fn` (both the non-differentiable and
+        differentiable branches) and `adjoint`. `slopes` is `dflows`'s actual Jacobian
+        diagonal at the current iterate for all but `linear_init`, which instead passes its
+        own tangent-at-zero `k` -- the same operator shape, at a different slope.
+        """
+        return GraphLaplacianOperator(
+            self._src,
+            self._tgt,
+            slopes,
+            len(self.interior),
+            self._interior_of_node,
+            boundary_mask=self._boundary_mask,
+        )
 
     # ------------------------------------------------------------------ assembly
     def dp(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
@@ -249,7 +293,7 @@ class PotentialFlowLayer:
         # rows, rather than einsum against the (n_I, b) slice of the dense incidence: this
         # is once per Newton residual evaluation, and at ensemble 100 the einsum form alone
         # cost 14.2 ms of a 41.8 ms residual (Task 14's profile).
-        lhs = self._accumulate(q)[..., self.interior]
+        lhs = self._accumulate_interior(q)
         s_I = self._source_interior(sources, phi_interior)
         return lhs - s_I
 
@@ -367,9 +411,7 @@ class PotentialFlowLayer:
         phi0 = self.assemble(phi_i0, phi_boundary)
         dp0 = self.dp(phi0, drivers)
         c, k = self._linear_ck(drivers)
-        rhs = self._source_interior(sources, phi0) - self._accumulate(c + k * dp0)[
-            ..., self.interior
-        ]
+        rhs = self._source_interior(sources, phi0) - self._accumulate_interior(c + k * dp0)
         self._grounding_check(k, where="linear_init")
         # k picks up a batch dimension only if some element's linear_init(drivers) actually
         # depends on drivers (e.g. a driver-conditioned slope); with purely constant slopes
@@ -380,14 +422,7 @@ class PotentialFlowLayer:
         solve_batch = torch.broadcast_shapes(k.shape[:-1], rhs.shape[:-1])
         k = k.expand(solve_batch + k.shape[-1:])
         rhs = rhs.expand(solve_batch + rhs.shape[-1:])
-        op = GraphLaplacianOperator(
-            self._src,
-            self._tgt,
-            k,
-            len(self.interior),
-            self._interior_of_node,
-            boundary_mask=self._boundary_mask,
-        )
+        op = self._operator_at(k)
         result = select_solve(
             op,
             rhs,
@@ -407,8 +442,11 @@ class PotentialFlowLayer:
         by closure (the element/drive object itself, not its tensor payload) and is
         invisible to `_Implicit.backward`: for an Element, this happens when it was
         constructed with `learnable=False` on a tensor that already had `requires_grad=True`
-        (`Element._param`'s documented pass-through exception, which is correct and used
-        deliberately for `differentiable=False`); for a Drive, this happens whenever a Drive
+        (`Element._param`'s documented pass-through exception, which is still a correct
+        construction -- its graph is reachable through this layer's own component calls
+        (`flows`, `dflows`, `residual`, `jacobian`, `linear_init`), though NOT through
+        `solve(differentiable=False)`, which since the Task C fix returns detached tensors);
+        for a Drive, this happens whenever a Drive
         implementation owns a learnable coefficient directly instead of reading it from the
         `drivers` mapping passed to `solve()`. Raise now, before dispatching, rather than
         return a gradient that is silently wrong (if some other path happens to also touch
@@ -462,9 +500,10 @@ class PotentialFlowLayer:
 
         - An Element's own differentiable state must be a registered parameter
           (`learnable=True`), never a bare tensor held with `requires_grad=True` outside
-          `named_parameters()` (the latter is a supported, correct construction for
-          `differentiable=False`, per `Element._param`, but is invisible to the
-          differentiable solve).
+          `named_parameters()` (the latter is still a supported construction, per
+          `Element._param`, and its graph is reachable through this layer's component calls
+          -- but it is invisible to the differentiable solve, and `differentiable=False` now
+          returns detached tensors, so neither `solve` path carries a gradient to it).
         - A Drive must read every differentiable quantity from the `drivers` mapping passed
           to `solve()` (see `tellegen.drives.Drive`), never hold one of its own as an
           instance attribute.
@@ -474,13 +513,24 @@ class PotentialFlowLayer:
         absent gradient.
 
         `diagnostics`, when a dict is passed, is filled with this solve's own
-        `{"newton_iterations", "linear_iterations", "method", "converged", "residual_norm"}`
-        -- the Newton step count, the per-instance maximum inner-solver iteration count
-        (`None` if no linear solve happened), the inner method actually used, the
-        per-instance convergence flag and the per-instance final residual norm. Passing
-        `None` (the default) changes nothing; the dict is an out-parameter rather than an
-        extra return value so that `solve`'s `(phi, q)` contract, which every existing
-        caller unpacks, is untouched.
+        `{"newton_iterations", "linear_iterations", "method", "backend", "converged",
+        "residual_norm"}` -- the Newton step count, the per-instance maximum inner-solver
+        iteration count (`None` if no linear solve happened), the inner method REQUESTED,
+        the inner backend that actually RAN, the per-instance convergence flag and the
+        per-instance final residual norm. Passing `None` (the default) changes nothing; the
+        dict is an out-parameter rather than an extra return value so that `solve`'s
+        `(phi, q)` contract, which every existing caller unpacks, is untouched.
+
+        `"method"` and `"backend"` are deliberately separate. `"method"` is what this call
+        asked for -- usually `"auto"`, the layer's default. `"backend"` is one of
+        `"sparse_direct"`, `"pcg"`, `"gmres"`, `"direct"`: what `solvers.select.solve`
+        resolved that request to, which under `"auto"` depends on runtime predicates the
+        caller has no other way to observe (the ensemble size against
+        `select._SPARSE_DIRECT_MAX_BATCH`, and whether SciPy is importable at all -- it is
+        an optional extra, `pip install tellegen[sparse]`). Without it, an installation
+        missing that extra takes the ~4.6x-slower PCG path with nothing saying so; the
+        indirect signal is `"linear_iterations"` (1 for a factorisation, ~170 for PCG).
+        It is `None` only when no linear solve happened at all.
 
         `on_failure` (forwarded to `newton` among `newton_kwargs`) is `"raise"` by default:
         a batch that fails to converge within `max_iter` raises, naming the failing
@@ -497,14 +547,36 @@ class PotentialFlowLayer:
           refused outright by `solvers.implicit.implicit_solve`: the adjoint linearises at
           the returned point, and at a non-converged point the gradient is silently wrong.
 
-        The inner linear solver is this layer's `linear_solver` (set at construction), unless
-        the caller overrides it with an explicit `method=` among `newton_kwargs`.
+        The inner linear solver for NEWTON's own iteration is this layer's `linear_solver`
+        (set at construction), unless the caller overrides it with an explicit `method=`
+        among `newton_kwargs`. That override does NOT reach the initial guess: when `phi0`
+        is `None` (the default) it is computed by `linear_init`, which always solves with
+        `self.linear_solver` regardless of any `method=` passed to this call -- pass an
+        explicit `phi0` instead if the override must apply there too.
 
         `phi0` is a starting guess and nothing else: it is DETACHED on entry (and the guess
         this method computes for itself when `phi0 is None` is computed under `no_grad`),
         because the implicit adjoint linearises at the converged point and never returns a
         gradient w.r.t. the starting guess -- `solvers.implicit._Implicit.backward` returns
         `None` for it. See the comment at the top of the body for what tracing it cost.
+
+        With `differentiable=False`, the returned `(phi, q)` are ALWAYS DETACHED: the whole
+        branch -- the initial guess, the grounding check, the Newton iteration, every inner
+        linear solve and the final assemble/flows -- runs under `torch.no_grad()`, whatever
+        grad mode the caller is in.
+
+        This branch used to run Newton's closures under ORDINARY autograd, so with a
+        `learnable=True` Element (or a grad-requiring `phi_boundary`/`drivers`/`sources`) the
+        result carried an UNROLLED graph through the converged iterate. Those gradients were
+        real but were never the implicit-function ones `differentiable=True` computes, and
+        nothing asked for them. Worse, they made the INNER SOLVER'S CHOICE depend on the
+        caller's ambient grad mode: `solvers.select.solve`'s `"auto"` will not hand a
+        grad-requiring solve to the non-differentiable sparse-direct backend, so the same
+        call factorised through SuperLU from a plain call site and fell back to PCG -- 4.6x
+        slower -- from inside `torch.enable_grad()` with a grad-requiring `sources`. A
+        backend must not be a function of who is calling. A caller who wants gradients calls
+        `differentiable=True`, which is unchanged (`solvers.implicit._Implicit.forward`
+        already solved under `no_grad` and takes its gradients from the adjoint).
         """
         drivers = drivers or {}
         newton_kwargs.setdefault("method", self.linear_solver)
@@ -560,38 +632,60 @@ class PotentialFlowLayer:
             self._grounding_check(dq0, where="solve")
 
         if not differentiable:
+            # The WHOLE non-differentiable solve runs under no_grad -- the Newton iteration,
+            # every inner linear solve inside it, and the final assemble/flows. Two reasons,
+            # the second of which is the one that made this mandatory rather than tidy:
+            #
+            # 1. There is no legitimate graph to build here. This branch does not use the
+            #    implicit adjoint, so any graph it leaves behind is an UNROLLED trace through
+            #    the converged Newton iterate -- real gradients, but not the ones
+            #    `differentiable=True` computes, retained for a caller who asked for the
+            #    non-differentiable path. Task 11 recorded that leak as a pre-existing wart;
+            #    this closes it.
+            # 2. It made the inner solver's choice depend on the CALLER's ambient grad mode.
+            #    `solvers.select.solve`'s "auto" refuses the non-differentiable sparse-direct
+            #    backend when grad mode is on and an input requires grad (correctly: it would
+            #    silently detach). With the iteration running under whatever mode the caller
+            #    happened to be in, the same `solve(differentiable=False)` factorised through
+            #    SuperLU from a plain call and fell back to PCG -- 4.6x slower, and a
+            #    different code path -- from inside `torch.enable_grad()` with a
+            #    grad-requiring `sources`. A solver choice must not be a function of the
+            #    caller's context. The guard in `select.solve` stays as the last line of
+            #    defence; this removes the condition that was tripping it.
+            #
+            # `diagnostics` is filled exactly as before (no_grad does not touch it), and the
+            # returned `(phi, q)` are now unconditionally detached -- see the docstring.
+            with torch.no_grad():
 
-            def residual_fn(x):
-                return self.residual(x, phi_boundary, drivers, sources)
+                def residual_fn(x):
+                    return self.residual(x, phi_boundary, drivers, sources)
 
-            def operator_fn(x):
-                # A matvec-free A_I diag(dq) A_I^T at the current iterate, instead of the
-                # dense (n_interior, n_interior) einsum layer.jacobian() assembles. Rebuilt
-                # each iteration because dq is what changes; the endpoint/index tensors it
-                # closes over are cached on the layer at construction.
-                phi = self.assemble(x, phi_boundary)
-                dq = self.dflows(phi, drivers)
-                return GraphLaplacianOperator(
-                    self._src,
-                    self._tgt,
-                    dq,
-                    len(self.interior),
-                    self._interior_of_node,
-                    boundary_mask=self._boundary_mask,
-                )
+                def operator_fn(x):
+                    # A matvec-free A_I diag(dq) A_I^T at the current iterate, instead of the
+                    # dense (n_interior, n_interior) einsum layer.jacobian() assembles.
+                    # Rebuilt each iteration because dq is what changes; the endpoint/index
+                    # tensors it closes over are cached on the layer at construction.
+                    phi = self.assemble(x, phi_boundary)
+                    dq = self.dflows(phi, drivers)
+                    return self._operator_at(dq)
 
-            result = newton(residual_fn, operator_fn, phi0, **newton_kwargs)
-            if diagnostics is not None:
-                diagnostics["newton_iterations"] = result.iterations
-                diagnostics["linear_iterations"] = result.linear_iterations
-                diagnostics["method"] = newton_kwargs["method"]
-                # The per-instance STATUS, not only the cost. Without these two,
-                # `on_failure="return"` returned a non-converged phi with nothing anywhere
-                # reporting it (final review C2).
-                diagnostics["converged"] = result.converged
-                diagnostics["residual_norm"] = result.residual_norm
-            phi = self.assemble(result.x, phi_boundary)
-            q = self.flows(phi, drivers)
+                result = newton(residual_fn, operator_fn, phi0, **newton_kwargs)
+                if diagnostics is not None:
+                    diagnostics["newton_iterations"] = result.iterations
+                    diagnostics["linear_iterations"] = result.linear_iterations
+                    diagnostics["method"] = newton_kwargs["method"]
+                    # `method` is what was REQUESTED, `backend` what RAN. Under "auto" the
+                    # two differ: the batch threshold and SciPy's presence decide which
+                    # side of `select`'s eligibility table this solve landed on, and
+                    # nothing else reports it (final review I5).
+                    diagnostics["backend"] = result.backend
+                    # The per-instance STATUS, not only the cost. Without these two,
+                    # `on_failure="return"` returned a non-converged phi with nothing
+                    # anywhere reporting it (final review C2).
+                    diagnostics["converged"] = result.converged
+                    diagnostics["residual_norm"] = result.residual_norm
+                phi = self.assemble(result.x, phi_boundary)
+                q = self.flows(phi, drivers)
             return phi, q
 
         self._check_no_unreachable_differentiable_tensors()
@@ -729,7 +823,7 @@ class PotentialFlowLayer:
             rebuilt, drv, src, pb = _rebuild(params)
             phi = self.assemble(x, pb)
             q = _flows_functional(phi, drv, rebuilt)
-            lhs = self._accumulate(q)[..., self.interior]
+            lhs = self._accumulate_interior(q)
             s_I = src[..., self.interior]
             return lhs - s_I
 
@@ -737,14 +831,7 @@ class PotentialFlowLayer:
             rebuilt, drv, src, pb = _rebuild(params)
             phi = self.assemble(x, pb)
             dq = _dflows_functional(phi, drv, rebuilt)
-            return GraphLaplacianOperator(
-                self._src,
-                self._tgt,
-                dq,
-                len(self.interior),
-                self._interior_of_node,
-                boundary_mask=self._boundary_mask,
-            )
+            return self._operator_at(dq)
 
         x = implicit_solve(
             residual_fn,
@@ -772,18 +859,21 @@ class PotentialFlowLayer:
         `matvec`, but nothing here assumes it. `method=self.linear_solver` carries the
         layer's configured inner solver onto the backward pass too (amendment A3.3), so
         `linear_solver="direct"` is the retained milestone-1 numerics on BOTH passes.
+
+        CALLED DIRECTLY UNDER GRAD MODE with grad-requiring `drivers` (or a grad-requiring
+        `phi_interior`/`phi_boundary`), `linear_solver="auto"` falls back to PCG here rather
+        than factorising: `solvers.select.solve` will not hand a grad-requiring solve to the
+        non-differentiable sparse-direct backend, and an explicit
+        `linear_solver="sparse_direct"` raises outright in that situation. Every in-repo
+        caller reaches this method under `no_grad` -- `solvers.implicit._Implicit.backward`
+        is the only one on the hot path -- so this is a direct-caller's concern, stated here
+        for the same reason `linear_init`'s equivalent is ("stays differentiable for callers
+        who want it directly"). Wrap the call in `torch.no_grad()` to get the factorisation.
         """
         drivers = drivers or {}
         phi = self.assemble(phi_interior, phi_boundary)
         dq = self.dflows(phi, drivers)
-        op = GraphLaplacianOperator(
-            self._src,
-            self._tgt,
-            dq,
-            len(self.interior),
-            self._interior_of_node,
-            boundary_mask=self._boundary_mask,
-        )
+        op = self._operator_at(dq)
         return _adjoint_solve(
             op,
             grad_phi_interior,
@@ -807,7 +897,7 @@ class PotentialFlowLayer:
         drivers = drivers or {}
         d = self.dp(phi, drivers)
         drive_only = d - self._difference(phi)
-        boundary_flow = self._accumulate(q)[..., self.bound]
+        boundary_flow = self._accumulate_bound(q)
         phi_b = phi[..., self.bound]
         phi_i = phi[..., self.interior]
         s_I = self._source_interior(sources, phi_i)

@@ -23,39 +23,17 @@ from typing import Literal
 import torch
 
 from tellegen.operators.advection import AdvectionOperator
+from tellegen.solvers.implicit import TransposeOperator as _TransposeView
 from tellegen.solvers.select import solve as _solve_operator
 from tellegen.topology import Network, Node
 
-
-class _TransposeView:
-    """A LinearOperator-shaped view exposing `op`'s TRANSPOSE: matvec and rmatvec swapped,
-    everything else passed through. Used only to solve the adjoint system `A^T lam =
-    grad_x` via the ordinary `solvers.select.solve` entry point -- the adjoint needs no
-    solver of its own, it reuses GMRES/PCG against the swapped action.
-    """
-
-    def __init__(self, op) -> None:
-        self._op = op
-        self.shape = op.shape
-        self.dtype = op.dtype
-        self.device = op.device
-        self.symmetric = op.symmetric
-
-    def matvec(self, x: torch.Tensor) -> torch.Tensor:
-        return self._op.rmatvec(x)
-
-    def rmatvec(self, x: torch.Tensor) -> torch.Tensor:
-        return self._op.matvec(x)
-
-    def diagonal(self) -> torch.Tensor:
-        return self._op.diagonal()  # diagonal entries are invariant under transpose
-
-    def assemble(self):
-        dense = self._op.assemble()
-        return None if dense is None else dense.transpose(-1, -2)
-
-    def spd_certificate(self):
-        return None
+# `_TransposeView` used to be its own LinearOperator-shaped adjoint-view class, duplicating
+# `solvers.implicit.TransposeOperator` method for method except for `spd_certificate` (this
+# module's version always returned None; `TransposeOperator`'s forwards the wrapped
+# operator's certificate iff it declares itself symmetric). Both this layer's operators
+# (`AdvectionOperator`, `_AffineSystemOperator` below) declare `symmetric = False`, so
+# `TransposeOperator.spd_certificate()` returns None for them exactly as the old local class
+# did -- this alias changes nothing observable here, it only removes the duplicate.
 
 
 class _LinearSolve(torch.autograd.Function):
@@ -459,15 +437,31 @@ class TransportLayer:
         `on_failure` (keyword-only, default `"raise"`) is threaded to the `"implicit"` and
         `"trapezoidal"` schemes' underlying linear solve; on `"return"` those two schemes
         return the raw, stacked `SolveResult` instead of a plain `Tensor` (return type
-        `torch.Tensor | SolveResult`, amendment A8). `"exact"` does not accept a failure
-        mode here: it has no linear solve at all (Task 10's augmented matrix exponential
-        controls its own error via sub-stepping, and raises `RuntimeError` directly on
-        failure, as it always has).
+        `torch.Tensor | SolveResult`, amendment A8). `"exact"` has no linear solve at all
+        (Task 10's augmented matrix exponential controls its own error via sub-stepping, and
+        raises `RuntimeError` directly on failure, as it always has), so it does not accept
+        `on_failure="return"`: there is no `SolveResult` for it to produce, and silently
+        falling back to `"raise"` behaviour would make the argument look like it had an
+        effect it does not have. `on_failure="return"` with `scheme="exact"` therefore
+        raises `ValueError` naming the layer.
         """
         if on_failure not in ("raise", "return"):
             raise ValueError(
                 f"TransportLayer '{self.name}': unknown on_failure {on_failure!r}; "
                 f"expected 'raise' or 'return'"
+            )
+        if on_failure == "return" and self.scheme == "exact":
+            # Both `on_failure` checks are ARGUMENT VALIDITY and both belong here, before any
+            # work. This one used to sit inside the `scheme == "exact"` branch below, after
+            # `_to_stacked` had already validated and reshaped `x`, so a caller who passed
+            # both a bad shape and this unusable combination was told about the shape (final
+            # review M9). `on_failure='return'` is wrong for this scheme whatever the shapes.
+            raise ValueError(
+                f"TransportLayer '{self.name}': on_failure='return' has no effect for "
+                f"scheme='exact' (there is no linear solve to return the status of; "
+                f"a sub-stepping failure raises RuntimeError directly). Use the default "
+                f"on_failure='raise', or a scheme with a linear solve ('implicit', "
+                f"'trapezoidal')."
             )
         out_dtype = x.dtype
         dtype = torch.float64

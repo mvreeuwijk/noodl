@@ -20,6 +20,8 @@ from typing import Protocol, runtime_checkable
 
 import torch
 
+from tellegen.operators.dense import DenseOperator
+
 Tensor = torch.Tensor
 
 
@@ -30,6 +32,12 @@ class SolverStatus(IntEnum):
     MAX_ITER = 1
     BREAKDOWN = 2
     SINGULAR = 3
+    # RESERVED: no `solvers.*` entry point currently produces this status. An eligibility
+    # refusal (an explicit method="cg" that cannot certify SPD, or method="auto" seeing a
+    # mixed-certification batch) raises RuntimeError instead of returning a SolveResult at
+    # all, so there is no per-instance status to set -- see solvers/select.py's module
+    # docstring. Kept for a future per-instance (rather than whole-call) certification
+    # failure, should one be added.
     NOT_CERTIFIED = 4
 
 
@@ -63,6 +71,27 @@ class SolveResult:
         )
 
 
+def as_operator(op: LinearOperator | Tensor) -> LinearOperator:
+    """Auto-wrap a plain dense tensor as a ``DenseOperator``; pass a ``LinearOperator`` through.
+
+    The single compatibility shim that makes every pre-Milestone-1b caller -- each of which
+    passes a callable returning a dense ``(..., m, m)`` tensor rather than a ``LinearOperator``
+    -- invisible to `newton.newton` and `implicit.adjoint`, the two entry points that call it.
+    ``DenseOperator``'s ``symmetric=False`` default is load-bearing: it lets this wrap happen
+    with no keyword at all, and it makes no symmetry claim on a tensor that is in general
+    nonsymmetric (a Newton Jacobian, an affine system's matrix) -- so an explicit
+    ``method="cg"`` is correctly refused downstream, and ``"auto"`` falls through to GMRES for
+    anything not separately routed to the direct path.
+
+    The "a bare dense tensor resolves to ``method='direct'`` under ``method='auto'``" rule
+    lives in each CALLER (`newton.newton`, `implicit.adjoint`), not here: this function only
+    wraps, it never chooses a solver.
+    """
+    if isinstance(op, torch.Tensor):
+        return DenseOperator(op)
+    return op
+
+
 @runtime_checkable
 class LinearOperator(Protocol):
     """A batched linear operator, defined by its action rather than its storage.
@@ -72,6 +101,15 @@ class LinearOperator(Protocol):
     `tests/operators/test_base.py` -- can be written at all; `Protocol` classes are not
     usable with `isinstance` without it. As with every `runtime_checkable` protocol, the
     check is structural (attribute and method NAMES only) and does not verify signatures.
+
+    OPTIONAL EXTENSION -- `assemble_sparse()`: an operator MAY additionally offer a COO
+    sparse form, declared by the separate `SparseAssembling` protocol below and discovered
+    by callers with `getattr(op, "assemble_sparse", None)`. It is deliberately NOT a member
+    of this protocol: `LinearOperator` is `runtime_checkable`, so every name listed here
+    becomes REQUIRED by `isinstance` -- and an optional member that makes a conforming
+    operator stop conforming is not optional. `DenseOperator` and `AdvectionOperator`
+    declare it and return `None`; `GraphLaplacianOperator` and
+    `solvers.implicit.TransposeOperator` return a real sparse form.
     """
 
     shape: tuple[int, ...]
@@ -88,3 +126,26 @@ class LinearOperator(Protocol):
     def assemble(self) -> Tensor | None: ...
 
     def spd_certificate(self) -> Tensor | None: ...
+
+
+@runtime_checkable
+class SparseAssembling(Protocol):
+    """The OPTIONAL sparse-assembly extension to `LinearOperator` (spec section 6.2).
+
+    `assemble_sparse()` returns `(row, col, values)` in COO form, or `None` when this
+    operator has no sparse form to offer (the honest answer for a dense operator, and for
+    any operator whose sparse structure has not been derived):
+
+    * `row`, `col` -- int64, one-dimensional, of equal length `nnz`, SHARED across the whole
+      batch. Sharing is what makes the form usable at all: the index pattern of a batched
+      operator is fixed by its topology, so only the VALUES vary per instance, and a
+      per-instance index array would multiply the memory by the ensemble size for nothing.
+    * `values` -- `(..., nnz)`, batch-leading, with the operator's own batch shape.
+
+    DUPLICATE `(row, col)` pairs are permitted and are SUMMED by the consumer -- the
+    contract every COO consumer in use here (`scipy.sparse.coo_matrix`, and `csc_matrix`
+    built from the same triplet) already implements. That is what allows an O(E) assembly
+    that emits a fixed stencil per edge with no coalescing pass of its own.
+    """
+
+    def assemble_sparse(self) -> tuple[Tensor, Tensor, Tensor] | None: ...

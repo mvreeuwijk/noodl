@@ -160,3 +160,84 @@ def test_backward_raises_unconditionally_on_a_singular_adjoint_system():
 
     with pytest.raises(RuntimeError, match=r"implicit_solve backward.*batch indices \[0\]"):
         torch.autograd.grad(x.sum(), c)
+
+
+# -- section 6.2 step 2: the transposed sparse form the adjoint solve needs -------------------
+
+
+def _asymmetric_sparse_operator():
+    """A deliberately ASYMMETRIC operator carrying the optional `assemble_sparse` member, so
+    that a swap of row and col is observable rather than a no-op.
+    """
+    A = torch.tensor([[4.0, 1.0], [0.0, 3.0]], dtype=torch.float64)
+
+    class _SparseDense(DenseOperator):
+        def assemble_sparse(self):
+            row, col = torch.nonzero(A != 0, as_tuple=True)
+            return row.to(torch.int64), col.to(torch.int64), A[row, col]
+
+    return A, _SparseDense(A)
+
+
+def test_transpose_operator_assemble_sparse_swaps_row_and_col():
+    A, op = _asymmetric_sparse_operator()
+    row, col, values = op.assemble_sparse()
+    trow, tcol, tvalues = TransposeOperator(op).assemble_sparse()
+    torch.testing.assert_close(trow, col)
+    torch.testing.assert_close(tcol, row)
+    torch.testing.assert_close(tvalues, values)
+
+
+def test_transpose_operator_assemble_sparse_is_the_transpose_of_assemble():
+    A, op = _asymmetric_sparse_operator()
+    trow, tcol, tvalues = TransposeOperator(op).assemble_sparse()
+    dense = torch.zeros(2, 2, dtype=torch.float64)
+    dense[trow, tcol] = tvalues
+    torch.testing.assert_close(dense, A.T, atol=1e-12, rtol=1e-12)
+    torch.testing.assert_close(
+        dense, TransposeOperator(op).assemble(), atol=1e-12, rtol=1e-12
+    )
+
+
+def test_transpose_operator_assemble_sparse_is_none_when_the_wrapped_form_is_none():
+    """`DenseOperator.assemble_sparse()` is None, and the transpose of "no sparse form" is
+    still no sparse form -- not a crash on unpacking None.
+    """
+    op = DenseOperator(torch.eye(2, dtype=torch.float64))
+    assert TransposeOperator(op).assemble_sparse() is None
+
+
+def test_transpose_operator_has_no_assemble_sparse_gap_for_an_operator_without_the_member():
+    """A wrapped operator that never declares the optional member at all: the view must say
+    None rather than raise, so `select.solve`'s own ValueError is what a caller sees.
+    """
+
+    class _NoMember:
+        shape = (2, 2)
+        dtype = torch.float64
+        device = torch.device("cpu")
+        symmetric = False
+
+        def matvec(self, x):
+            return x
+
+        def rmatvec(self, x):
+            return x
+
+        def diagonal(self):
+            return torch.ones(2, dtype=torch.float64)
+
+        def assemble(self):
+            return None
+
+        def spd_certificate(self):
+            return None
+
+    assert TransposeOperator(_NoMember()).assemble_sparse() is None
+
+
+def test_adjoint_through_sparse_direct_matches_an_explicit_transpose_solve():
+    A, op = _asymmetric_sparse_operator()
+    grad_x = torch.tensor([1.0, 2.0], dtype=torch.float64)
+    lam = adjoint(op, grad_x, method="sparse_direct")
+    torch.testing.assert_close(lam, torch.linalg.solve(A.T, grad_x), atol=1e-12, rtol=1e-12)

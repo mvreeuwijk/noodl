@@ -21,6 +21,7 @@ venv/
 
 # Claude Code local state (worktrees, settings) -- never part of the tracked tree
 .claude/
+.worktrees/
 
 # Data: never commit measurements
 data/

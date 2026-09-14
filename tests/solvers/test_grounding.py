@@ -42,6 +42,46 @@ def test_interior_of_node_and_boundary_mask_length_mismatch_raises_valueerror():
         )
 
 
+def test_src_tgt_equal_ndim_but_different_length_raises_valueerror():
+    """Distinct from `test_src_tgt_shape_mismatch_raises_valueerror` above, which mismatches
+    NDIM (2-D src vs 1-D tgt): both 1-D here, but different edge counts, exercising
+    `_validate`'s separate `src.shape != tgt.shape` check.
+    """
+    _, _, interior_of_node, boundary_mask = _chain()
+    slopes = torch.tensor([1.0, 1.0], dtype=torch.float64)
+    with pytest.raises(ValueError, match="src and tgt"):
+        spd_certificate(
+            torch.tensor([0, 1, 2]), torch.tensor([1, 2]), slopes, interior_of_node,
+            boundary_mask,
+        )
+
+
+def test_non_1d_interior_of_node_raises_valueerror():
+    # Shaped (3, 1), not (1, 3): shape[0] == 3 still agrees with boundary_mask's own length,
+    # so a coincidental fall-through to the LENGTH-mismatch check below (which also mentions
+    # "interior_of_node" in its message) cannot mask a missing ndim check here -- confirmed
+    # by temporarily deleting the ndim check and re-running this test, which then failed to
+    # raise at all instead of raising the wrong message.
+    src, tgt, _, boundary_mask = _chain()
+    slopes = torch.tensor([1.0, 1.0], dtype=torch.float64)
+    with pytest.raises(ValueError, match="interior_of_node must be 1-D"):
+        spd_certificate(
+            src, tgt, slopes, torch.tensor([[-1], [0], [1]]), boundary_mask,
+        )
+
+
+def test_non_1d_boundary_mask_raises_valueerror():
+    # Shaped (3, 1), matching interior_of_node's own length, for the same reason as above:
+    # a fall-through to the length-mismatch check (also naming "boundary_mask") must not be
+    # able to pass this test in place of the intended ndim check.
+    src, tgt, interior_of_node, _ = _chain()
+    slopes = torch.tensor([1.0, 1.0], dtype=torch.float64)
+    with pytest.raises(ValueError, match="boundary_mask must be 1-D"):
+        spd_certificate(
+            src, tgt, slopes, interior_of_node, torch.tensor([[True], [False], [False]]),
+        )
+
+
 def test_slopes_edge_count_mismatch_raises_valueerror():
     src, tgt, interior_of_node, boundary_mask = _chain()
     slopes = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float64)  # 3 edges, but src/tgt have 2

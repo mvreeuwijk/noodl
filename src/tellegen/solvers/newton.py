@@ -10,8 +10,15 @@ drops below ``switch_ratio``, following CONTAM's under-relaxation scheme.
 contract of Milestone 1b) or a plain dense ``(..., m, m)`` tensor for backward
 compatibility with every pre-1b caller; a returned tensor is auto-wrapped in
 ``DenseOperator``. The inner linear solve goes through ``solvers.select.solve``
-with ``on_failure="return"`` (Newton is a low-level primitive: it never raises
-mid-iteration on its own account, only via the final convergence check below).
+with ``on_failure="return"``, so a NUMERICAL failure (non-convergence,
+breakdown, singularity) never raises mid-iteration -- only the final
+convergence check below can, and only when ``on_failure="raise"``. This does
+NOT cover an ELIGIBILITY refusal (amendment A3.2): ``solvers.select.solve``
+raises ``RuntimeError`` regardless of ``on_failure`` when an explicit
+``method="cg"`` cannot certify SPD, or when ``method="auto"`` would have to
+split a batch between certified and uncertified instances -- both are
+modelling errors, not numerical outcomes, so they propagate out of an inner
+iteration exactly as they would from a single, unbatched call.
 This is what replaces the old identity-substitution trick for a converged-but-
 singular instance: a dense ``torch.linalg.solve`` raises for the WHOLE batched
 call if any one instance's matrix is singular, which is why the old code had to
@@ -44,8 +51,7 @@ from dataclasses import dataclass
 
 import torch
 
-from tellegen.operators.base import LinearOperator
-from tellegen.operators.dense import DenseOperator
+from tellegen.operators.base import LinearOperator, as_operator
 from tellegen.solvers.select import solve as select_solve
 
 # The relative residual an inner linear solve is asked for, matching `solvers.select.solve`'s
@@ -91,6 +97,14 @@ class NewtonResult:
     problem's difficulty in a way a sum over a varying number of Newton steps is not. It is
     ``None`` only when no linear solve happened at all (``x0`` already satisfied the
     convergence test), never as a stand-in for an unknown count.
+
+    ``backend`` is the inner solver that actually RAN -- ``"sparse_direct"``, ``"pcg"``,
+    ``"gmres"`` or ``"direct"`` -- as opposed to the ``method`` that was requested. With
+    ``method="auto"`` the two differ, and which one a solve got depends on runtime predicates
+    (the batch size, whether SciPy is importable) that a caller cannot otherwise see. It is
+    the LAST inner solve's backend; every inner solve in one ``newton`` call sees the same
+    method and the same operator shape, so they do not disagree. Like
+    ``linear_iterations`` it is ``None`` exactly when no linear solve happened.
     """
 
     x: torch.Tensor
@@ -98,23 +112,7 @@ class NewtonResult:
     iterations: int
     residual_norm: torch.Tensor
     linear_iterations: torch.Tensor | None = None
-
-
-def _as_operator(op: LinearOperator | torch.Tensor) -> LinearOperator:
-    """Auto-wrap a plain dense Jacobian tensor as a ``DenseOperator``.
-
-    Every pre-Milestone-1b caller passes a callable returning a dense ``(..., m, m)``
-    tensor; wrapping here (rather than making each of them construct an operator) is the
-    single compatibility shim that makes the operator contract invisible to them.
-    ``DenseOperator``'s ``symmetric=False`` default is load-bearing: it lets this wrap
-    happen with no keyword at all, and it makes no symmetry claim on a Newton Jacobian that
-    is in general nonsymmetric -- so an explicit ``method="cg"`` is correctly refused, and
-    ``"auto"`` falls through to GMRES for anything this function does not route to the
-    direct path.
-    """
-    if isinstance(op, torch.Tensor):
-        return DenseOperator(op)
-    return op
+    backend: str | None = None
 
 
 def newton(
@@ -196,6 +194,9 @@ def newton(
     omega_i = torch.full_like(norm0, omega)
     iterations = 0
     linear_iterations: torch.Tensor | None = None
+    # One dict, refilled by every inner solve, so the resolved backend costs one string
+    # assignment per Newton step rather than a dict allocation. See `NewtonResult.backend`.
+    backend_out: dict = {}
     tiny = torch.finfo(norm.dtype).tiny
 
     while not bool(torch.all(converged)) and iterations < max_iter:
@@ -204,12 +205,13 @@ def newton(
         # it has always had; a genuine LinearOperator goes through the eligibility table.
         step_method = "direct" if method == "auto" and isinstance(raw, torch.Tensor) else method
         result = select_solve(
-            _as_operator(raw),
+            as_operator(raw),
             r,
             method=step_method,
             on_failure="return",
             where=where,
             rtol=inner_solve_rtol(r.dtype),
+            backend_out=backend_out,
         )
         dx = result.x
         inner = result.iterations.to(torch.int64).expand(converged.shape)
@@ -236,6 +238,7 @@ def newton(
                 iterations=iterations,
                 residual_norm=norm,
                 linear_iterations=linear_iterations,
+                backend=backend_out.get("backend"),
             )
         flat_converged = converged.reshape(-1)
         bad = torch.nonzero(~flat_converged, as_tuple=False).flatten()
@@ -250,4 +253,5 @@ def newton(
         iterations=iterations,
         residual_norm=norm,
         linear_iterations=linear_iterations,
+        backend=backend_out.get("backend"),
     )

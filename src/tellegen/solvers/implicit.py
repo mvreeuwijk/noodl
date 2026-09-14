@@ -48,21 +48,9 @@ from collections.abc import Callable
 
 import torch
 
-from tellegen.operators.base import LinearOperator
-from tellegen.operators.dense import DenseOperator
+from tellegen.operators.base import LinearOperator, as_operator
 from tellegen.solvers.newton import inner_solve_rtol, newton
 from tellegen.solvers.select import solve as select_solve
-
-
-def _as_operator(op: LinearOperator | torch.Tensor) -> LinearOperator:
-    """Auto-wrap a plain dense Jacobian tensor as a ``DenseOperator``, exactly as
-    ``solvers.newton._as_operator`` does for the forward pass: every pre-Milestone-1b caller
-    of ``adjoint`` hands it an explicit ``(..., m, m)`` tensor, and wrapping here is what
-    keeps the operator contract invisible to them.
-    """
-    if isinstance(op, torch.Tensor):
-        return DenseOperator(op)
-    return op
 
 
 class TransposeOperator:
@@ -102,12 +90,32 @@ class TransposeOperator:
         a = self._op.assemble()
         return None if a is None else a.transpose(-1, -2)
 
+    def assemble_sparse(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        """The wrapped operator's COO form with ROW and COL swapped -- its transpose.
+
+        The optional `operators.base.SparseAssembling` member, which is what lets
+        `method="sparse_direct"` solve the ADJOINT system: transposing a COO triplet is
+        exactly exchanging the two index arrays, with the values untouched and no
+        re-assembly or coalescing of any kind. `None` propagates unchanged (the transpose
+        of "no sparse form" is still no sparse form), as does the absence of the optional
+        member on the wrapped operator -- so `select.solve` reports its own ValueError
+        rather than this view raising an AttributeError first.
+        """
+        assemble_sparse = getattr(self._op, "assemble_sparse", None)
+        triplet = assemble_sparse() if assemble_sparse is not None else None
+        if triplet is None:
+            return None
+        row, col, values = triplet
+        return col, row, values
+
     def spd_certificate(self) -> torch.Tensor | None:
         """The wrapped operator's certificate, but only when it declares itself SYMMETRIC.
 
         A symmetric operator is its own transpose, so an SPD certificate for it certifies
         this view verbatim -- which is what keeps `PotentialFlowLayer.adjoint`'s
-        GraphLaplacianOperator on the PCG path rather than dropping to GMRES. For a
+        GraphLaplacianOperator on the certified-SPD branch of the eligibility table
+        (sparse-direct, or PCG where no sparse form is available) rather than dropping it to
+        GMRES, so the backward pass costs what the forward pass costs. For a
         NONSYMMETRIC operator the transpose is a different matrix and the wrapped
         certificate says nothing about it, so None is returned: `select.solve` then routes
         to GMRES, which makes no symmetry or definiteness assumption to violate.
@@ -132,7 +140,9 @@ def adjoint(
     of the explicit transpose), so a legacy dense caller keeps the dense numerics it has
     always had rather than silently acquiring a Krylov solver's own error floor. An explicit
     ``method`` always wins, and a real operator's ``"auto"`` goes through the eligibility
-    table (PCG when the TransposeOperator certifies SPD, GMRES otherwise).
+    table in ``solvers.select``'s module docstring: sparse-direct when the TransposeOperator
+    certifies SPD and offers a transposed COO form (spec section 6.2 step 2), PCG when it
+    certifies but cannot, GMRES otherwise.
 
     Always raises on failure (``on_failure="raise"``, not exposed as a parameter): every
     caller of this function -- ``_Implicit.backward`` unconditionally, and
@@ -140,7 +150,7 @@ def adjoint(
     be impossible rather than silently returned.
     """
     step_method = "direct" if method == "auto" and isinstance(op, torch.Tensor) else method
-    top = TransposeOperator(_as_operator(op))
+    top = TransposeOperator(as_operator(op))
     result = select_solve(
         top,
         grad_x,
@@ -174,6 +184,9 @@ class _Implicit(torch.autograd.Function):
             # non-converged forward raises out of `newton` above rather than reaching here.
             diagnostics["newton_iterations"] = result.iterations
             diagnostics["linear_iterations"] = result.linear_iterations
+            # The backend that actually ran, not the method requested: with "auto" the two
+            # differ on runtime predicates the caller cannot see (final review I5).
+            diagnostics["backend"] = result.backend
             diagnostics["converged"] = result.converged
             diagnostics["residual_norm"] = result.residual_norm
         ctx.residual = residual
@@ -251,8 +264,10 @@ def implicit_solve(
     the backward pass's adjoint system.
 
     ``diagnostics``, when a dict is given, is filled with the forward Newton solve's own
-    ``newton_iterations``, ``linear_iterations``, ``converged`` and ``residual_norm`` (see
-    ``_Implicit.forward``). Every other keyword is forwarded to ``newton``. It is
+    ``newton_iterations``, ``linear_iterations``, ``backend``, ``converged`` and
+    ``residual_norm`` (see ``_Implicit.forward``); ``backend`` is the inner solver that
+    actually ran, as opposed to the ``method`` requested. Every other keyword is forwarded
+    to ``newton``. It is
     keyword-ONLY deliberately: sitting positionally in front of ``**newton_kwargs`` it would
     silently swallow a fifth positional argument from any caller who thought they were
     passing something else.

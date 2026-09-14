@@ -177,6 +177,21 @@ def test_rmatvec_source_has_no_python_loop_over_edges():
     assert "for " not in source
 
 
+def test_apply_source_has_no_python_loop_over_edges():
+    """`matvec`/`rmatvec` are now one-line delegators to `_apply` (the consolidation this
+    review flagged): checking only their own source, as the two tests above do, would never
+    catch a loop introduced INSIDE `_apply` itself, where all the actual arithmetic now
+    lives. Checked for both `for` and `while` loops.
+    """
+    import inspect
+
+    from tellegen.operators.graph import GraphLaplacianOperator as G
+
+    source = inspect.getsource(G._apply)
+    assert "for " not in source
+    assert "while " not in source
+
+
 def test_spd_diagnosis_on_ungrounded_chain_fixture():
     """A2 amendment: add one test on the chain fixture asserting `op.spd_diagnosis()`
     returns exactly one record for instance 1 with `reason == "ungrounded"`.

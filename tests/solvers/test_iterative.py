@@ -316,3 +316,162 @@ def test_gmres_is_differentiable_through_its_iteration_at_cycle_len_above_one():
 
     A_gc = A.clone().requires_grad_(True)
     assert torch.autograd.gradcheck(f, (A_gc,), eps=1e-6, atol=1e-5)
+
+
+def _pinned_pcg_system() -> tuple[GraphLaplacianOperator, torch.Tensor]:
+    """The fixed 3-instance SPD system the pin below runs on.
+
+    A 6-node chain (edges 0-1-2-3-4-5) grounded at node 0, so `A_I diag(g) A_I^T` is a
+    5x5 tridiagonal SPD matrix per instance, with per-instance slopes and right-hand
+    sides drawn from ONE seeded generator in a fixed order (slopes, then b) so the system
+    is reproducible to the last bit on any run.
+    """
+    src = torch.tensor([0, 1, 2, 3, 4])
+    tgt = torch.tensor([1, 2, 3, 4, 5])
+    boundary_mask = torch.zeros(6, dtype=torch.bool)
+    boundary_mask[0] = True
+    interior_of_node = torch.tensor([-1, 0, 1, 2, 3, 4])
+    gen = torch.Generator().manual_seed(20260913)
+    slopes = 0.5 + torch.rand(3, 5, generator=gen, dtype=torch.float64)
+    b = torch.randn(3, 5, generator=gen, dtype=torch.float64)
+    op = GraphLaplacianOperator(
+        src, tgt, slopes, 5, interior_of_node, boundary_mask=boundary_mask
+    )
+    return op, b
+
+
+# Tolerance for the two `residual` comparisons in `test_pcg_results_are_pinned`, and ONLY
+# them: `residual` is a `vector_norm`, i.e. a cross-lane reduction whose summation order is
+# the BLAS's, not ours. Measured platform disagreement is 1.2 ulp (see that test's
+# docstring); 4 ulps leaves headroom for another BLAS without admitting anything a real
+# arithmetic change could hide in -- such a change moves the bit-exact `x` pin first.
+_NORM_ULP_RTOL = 4 * torch.finfo(torch.float64).eps
+
+
+def test_pcg_results_are_pinned():
+    """BIT-IDENTICAL pin of `pcg`'s output on a fixed system (milestone-1b follow-up, Task B).
+
+    Task B rewrites `pcg`'s iteration (hoisting allocations, collapsing `torch.where` calls)
+    and `GraphLaplacianOperator._apply` (cached indices, one fused `index_add`) for speed
+    ALONE: the arithmetic must be untouched, and "untouched" here means the last bit, not
+    `assert_close`. Reordering a floating-point accumulation (two scatter-adds into one,
+    say) or replacing a `torch.where` with a multiplicative mask changes results in the last
+    ulp or, where an inactive instance's step holds inf/nan, catastrophically -- and an
+    `rtol`-based comparison would wave both through.
+
+    So these values are HARD-CODED from the pre-change implementation (commit dfd4664). A
+    failure here means a change altered the numerics; the fix is to drop that change, never
+    to re-record the numbers.
+
+    WHAT THE LITERALS ARE A PIN OF. They are a SINGLE-PLATFORM CPU float64 recording:
+    Windows, torch 2.14.0+cpu, 14 threads. `x` is compared BIT-EXACTLY (`rtol=0, atol=0`),
+    and that is the instrument: 30 iterate values produced by elementwise arithmetic and
+    deterministic scatter-adds, in which a reordered accumulation or a `torch.where` replaced
+    by a multiplicative mask cannot hide. `residual` is compared to `_NORM_ULP_RTOL` instead,
+    for a reason established by measurement rather than assumed -- see below.
+
+    WHY `residual` IS NOT BIT-EXACT. Run on CI (ubuntu-latest, GitHub Actions, run
+    34791144790) both `x` tensors matched BIT-FOR-BIT, and exactly one of the three converged
+    `residual` entries differed, by 2.6e-16 relative -- 1.2 ulp. That is the expected
+    signature of a cross-lane REDUCTION: `x` comes out of elementwise ops and a scatter-add
+    whose order is fixed by the index array, so it is portable, while `residual` is a
+    `torch.linalg.vector_norm`, whose summation order is the BLAS's business and legitimately
+    differs with vectorisation width and thread count. Pinning it to the last bit pinned
+    someone else's reduction order, not tellegen's arithmetic -- and for the CONVERGED
+    result it pinned the last bit of a ~1e-15 quantity that is pure rounding noise.
+    A few-ulp tolerance still catches everything the pin exists for: the mid-iteration
+    residual is O(1), and any arithmetic change big enough to move a norm by more than a few
+    ulps moves `x` off its bit-exact pin first.
+
+    If another platform disagrees on `x`, or on `residual` by more than a few ulps, that is a
+    finding to INVESTIGATE -- print the differing entries and establish whether it is a
+    reduction-order difference or a real change -- and never a reason to re-record the
+    numbers against that platform, which would destroy the only instrument that can see an
+    arithmetic change at all.
+
+    Two runs are pinned. The first (default `max_iter = m = 5`) pins the CONVERGED result,
+    where CG's exact-termination property means all three instances finish on the same
+    iteration. The second (`max_iter=3`) pins a MID-ITERATION state, which is what actually
+    catches an arithmetic change inside the loop: at iteration 3 the iterate is nowhere near
+    the solution, so nothing about the converged answer can mask a per-iteration difference.
+    """
+    op, b = _pinned_pcg_system()
+
+    x_pinned = torch.tensor(
+        [
+            [
+                -2.4221274757646585,
+                -3.3616209595087376,
+                -6.6874636775904355,
+                -9.029323965256463,
+                -9.55860251348158,
+            ],
+            [
+                3.1108814899435027,
+                6.165292110420957,
+                8.902460988513422,
+                12.808285046210193,
+                14.478491652720464,
+            ],
+            [
+                -3.3262554783401908,
+                -4.274940678450948,
+                -4.95443455225562,
+                -5.23763788904974,
+                -6.491224356278421,
+            ],
+        ],
+        dtype=torch.float64,
+    )
+    residual_pinned = torch.tensor(
+        [1.6899695376013564e-15, 7.476049596500161e-16, 7.527059658122819e-16],
+        dtype=torch.float64,
+    )
+
+    result = pcg(op, b, rtol=1e-10)
+    torch.testing.assert_close(result.x, x_pinned, rtol=0, atol=0)
+    torch.testing.assert_close(
+        result.residual, residual_pinned, rtol=_NORM_ULP_RTOL, atol=0
+    )
+    assert result.iterations.tolist() == [5, 5, 5]
+    assert result.converged.tolist() == [True, True, True]
+    assert result.status.tolist() == [int(SolverStatus.CONVERGED)] * 3
+
+    x_mid_pinned = torch.tensor(
+        [
+            [
+                0.019865200684191966,
+                -0.01756284653290152,
+                -2.9603748835416517,
+                -5.108620580339356,
+                -6.278209064432335,
+            ],
+            [
+                -0.764399659033867,
+                0.4737857339591227,
+                3.2823934474299588,
+                7.187697429052225,
+                7.03022864696632,
+            ],
+            [
+                -3.21169012300437,
+                -3.6642680147256703,
+                -3.6406502574356834,
+                -2.879911546974747,
+                -3.2096289500350332,
+            ],
+        ],
+        dtype=torch.float64,
+    )
+    residual_mid_pinned = torch.tensor(
+        [0.9619314042531656, 0.9663629091357048, 0.4525248035016952], dtype=torch.float64
+    )
+
+    result_mid = pcg(op, b, rtol=1e-10, max_iter=3)
+    torch.testing.assert_close(result_mid.x, x_mid_pinned, rtol=0, atol=0)
+    torch.testing.assert_close(
+        result_mid.residual, residual_mid_pinned, rtol=_NORM_ULP_RTOL, atol=0
+    )
+    assert result_mid.iterations.tolist() == [3, 3, 3]
+    assert result_mid.converged.tolist() == [False, False, False]
+    assert result_mid.status.tolist() == [int(SolverStatus.MAX_ITER)] * 3
