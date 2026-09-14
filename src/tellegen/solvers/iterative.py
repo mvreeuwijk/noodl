@@ -171,6 +171,14 @@ def gmres(
     """Restarted GMRES for nonsymmetric operators: Arnoldi (modified Gram-Schmidt) with
     incremental Givens rotations, per-instance status, never raises.
 
+    An instance whose Arnoldi breaks down -- `h_next` at rounding level RELATIVE to
+    `||A v_k||`, which is the invariant-Krylov-space ("lucky breakdown") case a repeated
+    spectrum produces by construction -- ends its cycle there, at the k+1 system that holds
+    the exact solution, instead of extending the basis with noise. Breakdown is per
+    instance, like convergence: siblings keep iterating. `exhausted` (reported as SINGULAR)
+    therefore means "the Krylov space was exhausted AND the answer it held still did not
+    converge", i.e. genuine rank deficiency, not a lucky breakdown.
+
     Implementation flattens every leading batch dimension into one axis `B` for the duration
     of the Arnoldi/Givens bookkeeping (reshaped back to the caller's batch shape at the end):
     the Hessenberg system, Givens coefficients and Krylov basis are naturally rectangular
@@ -214,6 +222,25 @@ def gmres(
     total_matvecs = torch.zeros(B, dtype=torch.long, device=device)
     iterations = torch.zeros(B, dtype=torch.long, device=device)
     tiny = torch.finfo(dtype).tiny
+    # Arnoldi breakdown is a RELATIVE condition, never an absolute one. `h_next` is what
+    # modified Gram-Schmidt leaves of `A v_k` after projecting out the existing basis, so
+    # the only meaningful scale to test it against is `||A v_k||` itself. Once that ratio
+    # reaches rounding level the remainder is arithmetic noise, not a new Krylov direction,
+    # and dividing by it fills `V` with a vector orthogonal to nothing -- which corrupts
+    # the Hessenberg matrix, leaves a degenerate (but not `tiny`) diagonal in its rotated
+    # form, and lets back-substitution amplify it without bound. A `finfo.tiny` test
+    # (2.2e-308 in float64) never fires on that: on the multi-species transport systems
+    # that motivated this, the ratio lands at ~2e-16, i.e. about `eps` and 292 orders of
+    # magnitude above `tiny`.
+    #
+    # `eps ** 0.75` (1.8e-12 in float64) sits ~3 orders above every breakdown ratio
+    # measured (2e-16 .. 1e-14) and ~2 orders below the smallest LEGITIMATE ratio measured
+    # over 1000 random dense systems of size 4..64, ill-conditioned ones included
+    # (2.6e-10). Erring loose is the safe direction: the cycle's `x` is accepted or
+    # rejected on the residual `b - A x` RECOMPUTED explicitly below, never on the Givens
+    # estimate, so a premature truncation costs at most one extra restart cycle and can
+    # never report a wrong answer as CONVERGED.
+    break_rtol = torch.finfo(dtype).eps ** 0.75
 
     while (not bool(torch.all(converged))) and int(total_matvecs.max().item()) < max_iter:
         active = ~converged
@@ -233,24 +260,48 @@ def gmres(
 
         step_converged_at = torch.full((B,), cycle_len, dtype=torch.long, device=device)
 
+        # Per-instance, per-cycle breakdown. An instance that breaks down at step k has an
+        # INVARIANT Krylov space: its (k+1)-dimensional least-squares problem already holds
+        # the best available solution (the EXACT one, in exact arithmetic), so the cycle
+        # must stop there FOR THAT INSTANCE rather than extend the basis with noise -- its
+        # siblings, which have not broken down, still need the remaining steps, which is
+        # why this is a mask and not a `break`. Freezing the instance leaves its H columns,
+        # its Givens pair and its `g` entries at zero beyond k, and that is exactly what
+        # collapses the back-substitution below onto the leading (k+1)x(k+1) system: `y` is
+        # exactly zero wherever the rotated diagonal is zero, and those zero entries drop
+        # out of every earlier row's cross terms.
+        broken = torch.zeros(B, dtype=torch.bool, device=device)
+
         for k in range(cycle_len):
+            live = active & ~broken
+            live_col = live.unsqueeze(-1)
             # V is read here and mutated again later (a new column, but the SAME tensor's
             # storage) before backward runs; every operand read from it must be `.clone()`d
             # first, or autograd's version counter (tracked per-storage, not per-slice) sees
             # a mismatch at backward time. Same reasoning as the `h_j`/`h_j1`/`g_k` clones
             # below and the `h_kk` clone above.
             w = mv(V[:, k, :].clone())
+            w_norm = torch.linalg.vector_norm(w, dim=-1)
             for j in range(k + 1):
                 v_j = V[:, j, :].clone()
                 h_jk = torch.einsum("bi,bi->b", w, v_j)
-                H[:, j, k] = torch.where(active, h_jk, H[:, j, k])
+                H[:, j, k] = torch.where(live, h_jk, H[:, j, k])
                 w = w - h_jk.unsqueeze(-1) * v_j
             h_next = torch.linalg.vector_norm(w, dim=-1)
-            newly_exhausted = active & (h_next <= tiny)
+            newly_exhausted = live & (h_next <= break_rtol * w_norm)
             exhausted = exhausted | newly_exhausted
+            broken = broken | newly_exhausted
+            # A detected breakdown is treated as the exact one it numerically is: forcing
+            # `h_next` to zero makes the Givens rotation below zero `g[k+1]` outright, so
+            # the k+1 system's residual estimate is exactly zero and the cycle's answer is
+            # that system's solution. `h_next_safe` then falls back to 1, leaving
+            # `V[:, k+1, :]` holding the unnormalised noise remainder -- harmless, because
+            # `H[k+1, k+1]` stays zero for a frozen instance and back-substitution
+            # therefore multiplies that column by an exactly-zero `y`.
+            h_next = torch.where(newly_exhausted, torch.zeros_like(h_next), h_next)
             h_next_safe = torch.where(h_next > tiny, h_next, torch.ones_like(h_next))
             v_next = w / h_next_safe.unsqueeze(-1)
-            V[:, k + 1, :] = torch.where(active.unsqueeze(-1), v_next, V[:, k + 1, :])
+            V[:, k + 1, :] = torch.where(live_col, v_next, V[:, k + 1, :])
 
             # apply every earlier cycle's Givens rotation to this new Hessenberg column.
             # cs/sn are read here (for j < k, set in an earlier k-iteration) and mutated
@@ -261,9 +312,9 @@ def gmres(
                 h_j1 = H[:, j + 1, k].clone()
                 cs_j = cs[:, j].clone()
                 sn_j = sn[:, j].clone()
-                H[:, j, k] = torch.where(active, cs_j * h_j + sn_j * h_j1, H[:, j, k])
+                H[:, j, k] = torch.where(live, cs_j * h_j + sn_j * h_j1, H[:, j, k])
                 H[:, j + 1, k] = torch.where(
-                    active, -sn_j * h_j + cs_j * h_j1, H[:, j + 1, k]
+                    live, -sn_j * h_j + cs_j * h_j1, H[:, j + 1, k]
                 )
 
             h_kk = H[:, k, k].clone()
@@ -272,16 +323,16 @@ def gmres(
             denom_safe = torch.where(denom > tiny, denom, torch.ones_like(denom))
             cs_k = torch.where(denom > tiny, h_kk / denom_safe, torch.ones_like(denom))
             sn_k = torch.where(denom > tiny, h_k1k / denom_safe, torch.zeros_like(denom))
-            cs[:, k] = torch.where(active, cs_k, cs[:, k])
-            sn[:, k] = torch.where(active, sn_k, sn[:, k])
-            H[:, k, k] = torch.where(active, cs_k * h_kk + sn_k * h_k1k, H[:, k, k])
+            cs[:, k] = torch.where(live, cs_k, cs[:, k])
+            sn[:, k] = torch.where(live, sn_k, sn[:, k])
+            H[:, k, k] = torch.where(live, cs_k * h_kk + sn_k * h_k1k, H[:, k, k])
 
             g_k = g[:, k].clone()
-            g[:, k] = torch.where(active, cs_k * g_k, g[:, k])
-            g[:, k + 1] = torch.where(active, -sn_k * g_k, g[:, k + 1])
+            g[:, k] = torch.where(live, cs_k * g_k, g[:, k])
+            g[:, k + 1] = torch.where(live, -sn_k * g_k, g[:, k + 1])
 
             residual_est = g[:, k + 1].abs()
-            just_met = active & (residual_est <= tol) & (step_converged_at == cycle_len)
+            just_met = live & (residual_est <= tol) & (step_converged_at == cycle_len)
             step_converged_at = torch.where(
                 just_met, torch.full_like(step_converged_at, k + 1), step_converged_at
             )
