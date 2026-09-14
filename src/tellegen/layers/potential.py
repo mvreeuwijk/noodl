@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 
 import torch
 
-from tellegen.drives import Drive
+from tellegen.drives import Drive, check_drive_signature
 from tellegen.elements.base import Element
 from tellegen.operators.graph import GraphLaplacianOperator
 from tellegen.solvers.grounding import spd_certificate, spd_diagnosis
@@ -109,6 +109,7 @@ class PotentialFlowLayer:
 
         kind_set = set(self.kinds)
         for drv in self._drives:
+            check_drive_signature(drv, where=f"PotentialFlowLayer {name!r}")
             if drv.kind not in kind_set:
                 raise ValueError(
                     f"drive kind {drv.kind!r} is not one of this layer's element kinds "
@@ -232,7 +233,7 @@ class PotentialFlowLayer:
             width = end - start
             for drv in self._drives:
                 if drv.kind == kind:
-                    value = drv(phi, drivers)
+                    value = drv(drivers)
                     # A width mismatch here is silent corruption, not a crash: torch.cat below
                     # would happily accept a wrong-width block, shifting every later kind's
                     # slice out from under `_elem_slices` so a DIFFERENT element ends up being
@@ -728,7 +729,7 @@ class PotentialFlowLayer:
                 block = d[..., start:end]
                 for driven in self._drives:
                     if driven.kind == kind:
-                        block = block + driven(phi, drv)
+                        block = block + driven(drv)
                 parts.append((start, block))
             parts.sort(key=lambda p: p[0])
             return torch.cat([p[1] for p in parts], dim=-1)

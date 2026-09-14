@@ -544,7 +544,7 @@ def test_solve_raises_for_drive_owning_its_own_differentiable_tensor(two_zone_la
         def __init__(self, coeff):
             self.coeff = coeff
 
-        def __call__(self, phi, drivers):
+        def __call__(self, drivers):
             return self.coeff * drivers["wind"]
 
     net, elements, _drives, boundary = two_zone_layer
