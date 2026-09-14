@@ -12,7 +12,7 @@ Jacobian (TN 1887r1 section 3.18, eq. 8-9).
 from __future__ import annotations
 
 import inspect
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Protocol, runtime_checkable
 
 import torch
@@ -135,3 +135,207 @@ class Stack:
         head_src = rho[..., self.src] * (z_ref[self.src] - z_path)
         head_tgt = rho[..., self.tgt] * (z_ref[self.tgt] - z_path)
         return self.g * (head_src - head_tgt)
+
+
+class WindProfile:
+    """CONTAM wind pressure profile: Cp versus relative wind angle, periodic piecewise-linear.
+
+    `angles_deg` starts at 0, is strictly increasing and stays below 360; a trailing 360 row
+    (as CONTAM writes) is accepted if its Cp equals the first. Differentiable in theta away
+    from the knots, which is what a calibration of wind direction needs.
+    """
+
+    def __init__(self, angles_deg, cp) -> None:
+        ang = torch.as_tensor([float(a) for a in angles_deg], dtype=torch.float64)
+        val = torch.as_tensor([float(c) for c in cp], dtype=torch.float64)
+        if ang.numel() != val.numel() or ang.numel() < 1:
+            raise ValueError("WindProfile: angles and cp must have the same nonzero length")
+        if ang.numel() >= 2 and ang[-1].item() == 360.0:
+            if abs(val[-1].item() - val[0].item()) > 1e-12:
+                raise ValueError(
+                    "WindProfile: the closing 360 row must repeat the Cp at 0 "
+                    f"({val[0].item()} != {val[-1].item()})"
+                )
+            ang, val = ang[:-1], val[:-1]
+        if ang[0].item() != 0.0:
+            raise ValueError("WindProfile: angles must start at 0 degrees")
+        if ang.numel() > 1 and not bool((ang[1:] > ang[:-1]).all()):
+            raise ValueError("WindProfile: angles must be strictly increasing")
+        if bool((ang >= 360.0).any()):
+            raise ValueError("WindProfile: angles must be below 360 (the table is periodic)")
+        self.angles = torch.cat([ang, ang.new_tensor([360.0])])
+        self.cp = torch.cat([val, val[:1]])
+
+    def __call__(self, theta_deg: torch.Tensor) -> torch.Tensor:
+        t = torch.remainder(torch.as_tensor(theta_deg), 360.0)
+        ang = self.angles.to(t.dtype)
+        cp = self.cp.to(t.dtype)
+        idx = (torch.searchsorted(ang, t.detach().contiguous(), right=True) - 1).clamp(
+            0, ang.numel() - 2
+        )
+        a0, a1 = ang[idx], ang[idx + 1]
+        c0, c1 = cp[idx], cp[idx + 1]
+        return c0 + (c1 - c0) * (t - a0) / (a1 - a0)
+
+
+class Wind:
+    """Wind pressure on envelope paths (CONTAM TN 1887r1 section 3.15):
+
+        value_e = sign_e * envelope_e * 0.5 * rho_amb * V_met^2 * Ch_e * Cp_e(theta_w - az_e)
+
+    sign_e is +1 when the edge's source is the ambient node and -1 when its target is, so the
+    wind pressure always acts from the ambient side. Cp comes from a `WindProfile` (per-edge
+    1-based `profile` index into `profiles`) or, for edges with no profile, the constant edge
+    attribute `Cp`. Drivers `rho_amb`, `V_met`, `theta_w` are one value per batch instance.
+    """
+
+    def __init__(
+        self,
+        kind: str,
+        *,
+        sign,
+        envelope,
+        azimuth,
+        ch,
+        cp_const,
+        profile_index,
+        profiles=(),
+        rho_key: str = "rho_amb",
+        speed_key: str = "V_met",
+        direction_key: str = "theta_w",
+    ) -> None:
+        self.kind = kind
+        self.sign = torch.as_tensor(sign)
+        self.envelope = torch.as_tensor(envelope)
+        self.azimuth = torch.as_tensor(azimuth)
+        self.ch = torch.as_tensor(ch)
+        self.cp_const = torch.as_tensor(cp_const)
+        self.profile_index = torch.as_tensor(profile_index).to(torch.long)
+        self.profiles = list(profiles)
+        b = self.sign.shape
+        named = (
+            ("envelope", self.envelope), ("azimuth", self.azimuth), ("ch", self.ch),
+            ("cp_const", self.cp_const), ("profile_index", self.profile_index),
+        )
+        for name, t in named:
+            if t.shape != b:
+                raise ValueError(
+                    f"Wind (kind {kind!r}): {name} has shape {tuple(t.shape)}, expected "
+                    f"{tuple(b)}"
+                )
+        if self.profile_index.numel() and int(self.profile_index.max()) > len(self.profiles):
+            raise ValueError(
+                f"Wind (kind {kind!r}): an edge references profile "
+                f"{int(self.profile_index.max())} but only {len(self.profiles)} were given"
+            )
+        self.rho_key, self.speed_key, self.direction_key = rho_key, speed_key, direction_key
+
+    @classmethod
+    def from_network(
+        cls,
+        net,
+        kind: str,
+        *,
+        ambient,
+        profiles: Sequence[WindProfile] | Mapping[int, WindProfile] = (),
+        profile: WindProfile | None = None,
+        azimuth: str = "azimuth",
+        cp: str = "Cp",
+        ch: str = "Ch",
+        ch_default: float = 1.0,
+        profile_attr: str = "profile",
+        rho_key: str = "rho_amb",
+        speed_key: str = "V_met",
+        direction_key: str = "theta_w",
+    ) -> Wind:
+        """Build from edge attributes.
+
+        `profiles` is either a plain sequence -- numbered 1..N by position -- or a
+        `Mapping[int, WindProfile]` keyed by CONTAM's own profile NUMBER (Ruling R3). The
+        CONTAM reader (Task 12) stores the file's profile number verbatim in each edge's
+        `profile` attribute, and the two forms agree only when a project numbers its profiles
+        contiguously from 1; a project numbering them, say, 2 and 5 needs the mapping form to
+        resolve correctly. Numbers are remapped to dense positions once, here, so the hot path
+        (`__call__`) stays a plain index lookup. `profile=` is shorthand: one profile for
+        every envelope edge that carries no `profile` attribute at all. `profile = 0` (the
+        default when the attribute is absent and no shorthand is given) means "no profile,
+        use the constant `Cp` attribute". An edge whose `profile` attribute names a number
+        absent from `profiles` raises `KeyError` naming the edge and the number.
+        """
+        amb = net.node_index(ambient)  # KeyError names the node
+        src, tgt = net.endpoints(kind)
+        is_src, is_tgt = src == amb, tgt == amb
+        one = torch.ones(src.shape, dtype=net.dtype)
+        envelope = (is_src | is_tgt).to(net.dtype)
+        sign = torch.where(is_src, one, -one)
+
+        numbers: dict[int, WindProfile] = (
+            dict(profiles)
+            if isinstance(profiles, Mapping)
+            else {i + 1: p for i, p in enumerate(profiles)}
+        )
+        default_number = 0
+        if profile is not None:
+            default_number = max(numbers, default=0) + 1
+            numbers[default_number] = profile
+
+        raw = net.edge_attr(profile_attr, kind, default=float(default_number))
+        position = {number: i + 1 for i, number in enumerate(sorted(numbers))}
+        profiles_list = [numbers[number] for number in sorted(numbers)]
+
+        cols = net.edge_index(kind).tolist()
+        edges = net.edges
+        profile_index = []
+        for col, value in zip(cols, raw.tolist(), strict=True):
+            if not numbers:
+                # No profiles (or shorthand) were given at all: profile-based Cp is not
+                # configured for this Wind, so a stray `profile` attribute (e.g. written by
+                # a general-purpose reader for a caller doing constant-Cp analysis) is not
+                # validated against anything and every edge falls back to constant Cp.
+                profile_index.append(0)
+                continue
+            number = round(value)
+            if number == 0:
+                profile_index.append(0)
+            elif number in position:
+                profile_index.append(position[number])
+            else:
+                raise KeyError(
+                    f"Wind.from_network (kind {kind!r}): edge {edges[col]} references "
+                    f"profile number {number}, which is not in profiles"
+                )
+
+        return cls(
+            kind,
+            sign=sign,
+            envelope=envelope,
+            azimuth=net.edge_attr(azimuth, kind, default=0.0),
+            ch=net.edge_attr(ch, kind, default=ch_default),
+            cp_const=net.edge_attr(cp, kind, default=0.0),
+            profile_index=torch.tensor(profile_index, dtype=torch.long),
+            profiles=profiles_list,
+            rho_key=rho_key,
+            speed_key=speed_key,
+            direction_key=direction_key,
+        )
+
+    def _driver(self, drivers, key):
+        try:
+            return torch.as_tensor(drivers[key])
+        except KeyError as exc:
+            raise KeyError(f"Wind drive (kind {self.kind!r}): driver {key!r} not found") from exc
+
+    def __call__(self, drivers: Mapping[str, torch.Tensor]) -> torch.Tensor:
+        rho = self._driver(drivers, self.rho_key)[..., None]
+        V = self._driver(drivers, self.speed_key)[..., None]
+        dtype = V.dtype
+        Cp = self.cp_const.to(dtype)
+        if self.profiles:
+            theta = self._driver(drivers, self.direction_key)[..., None]
+            rel = theta - self.azimuth.to(dtype)
+            for i, prof in enumerate(self.profiles, start=1):
+                Cp = torch.where(self.profile_index == i, prof(rel), Cp)
+        return (
+            self.sign.to(dtype) * self.envelope.to(dtype) * 0.5 * rho * V**2
+            * self.ch.to(dtype) * Cp
+        )

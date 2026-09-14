@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import inspect
 
+import numpy as np
 import pytest
 import torch
 
-from tellegen.drives import ConstantDrive, Drive, Stack, check_drive_signature
+from tellegen.drives import ConstantDrive, Drive, Stack, Wind, WindProfile, check_drive_signature
 from tellegen.elements import PowerLaw
 from tellegen.layers.potential import PotentialFlowLayer
 from tellegen.topology import Network
@@ -191,3 +192,138 @@ def test_stack_reports_a_missing_density_driver_by_key():
     net = _two_opening_net()
     with pytest.raises(KeyError, match="rho"):
         Stack.from_network(net, "airpath")({})
+
+
+def test_wind_profile_interpolates_periodically_like_numpy():
+    ang = [0.0, 90.0, 180.0, 270.0]
+    cp = [0.6, -0.3, -0.4, -0.3]
+    prof = WindProfile(ang, cp)
+    theta = torch.tensor([-30.0, 0.0, 45.0, 135.0, 359.0, 400.0], dtype=F64)
+    expected = np.interp(np.mod(theta.numpy(), 360.0), ang + [360.0], cp + [cp[0]])
+    torch.testing.assert_close(prof(theta), torch.tensor(expected, dtype=F64))
+
+
+def test_wind_profile_accepts_a_contam_style_closing_360_row_and_refuses_bad_tables():
+    prof = WindProfile([0.0, 180.0, 360.0], [0.6, -0.4, 0.6])
+    assert prof(torch.tensor([360.0], dtype=F64)).item() == pytest.approx(0.6)
+    with pytest.raises(ValueError, match="WindProfile.*360"):
+        WindProfile([0.0, 180.0, 360.0], [0.6, -0.4, 0.1])
+    with pytest.raises(ValueError, match="WindProfile.*start at 0"):
+        WindProfile([10.0, 180.0], [0.6, -0.4])
+    with pytest.raises(ValueError, match="WindProfile.*increasing"):
+        WindProfile([0.0, 180.0, 90.0], [0.6, -0.4, 0.1])
+
+
+def _wind_net():
+    """ambient -> z1 (envelope, azimuth 0, Ch 0.5), z1 -> z2 (interior), z2 -> ambient
+    (envelope, azimuth 180, Ch 0.5); node order ambient, z1, z2."""
+    net = Network(dtype=F64)
+    for name in ("ambient", "z1", "z2"):
+        net.add_node(name, z_ref=0.0)
+    net.add_edge("ambient", "z1", kind="airpath", azimuth=0.0, Ch=0.5, profile=1)
+    net.add_edge("z1", "z2", kind="airpath")
+    net.add_edge("z2", "ambient", kind="airpath", azimuth=180.0, Ch=0.5, profile=1)
+    return net
+
+
+def test_wind_pressure_formula_sign_and_envelope_mask():
+    net = _wind_net()
+    prof = WindProfile([0.0, 90.0, 180.0, 270.0], [0.6, -0.3, -0.4, -0.3])
+    wind = Wind.from_network(net, "airpath", ambient="ambient", profiles=[prof])
+    drivers = {
+        "rho_amb": torch.tensor(1.2, dtype=F64),
+        "V_met": torch.tensor(4.0, dtype=F64),
+        "theta_w": torch.tensor(0.0, dtype=F64),
+    }
+    v = wind(drivers)
+    q = 0.5 * 1.2 * 16.0 * 0.5
+    # edge 0: ambient is src -> +; theta_rel = 0 -> Cp 0.6.  edge 2: ambient is tgt -> -;
+    # theta_rel = -180 -> Cp -0.4, so value = -(q * -0.4) = +0.4 q.  interior edge: 0.
+    torch.testing.assert_close(v, torch.tensor([0.6 * q, 0.0, 0.4 * q], dtype=F64))
+
+
+def test_wind_constant_cp_edges_and_batched_speed():
+    net = Network(dtype=F64)
+    net.add_node("ambient")
+    net.add_node("z")
+    net.add_edge("ambient", "z", kind="airpath", Cp=0.7, Ch=1.0)
+    net.add_edge("z", "ambient", kind="airpath", Cp=-0.2, Ch=1.0)
+    wind = Wind.from_network(net, "airpath", ambient="ambient")
+    V = torch.tensor([0.0, 2.0, 4.0], dtype=F64)
+    v = wind({
+        "rho_amb": torch.full((3,), 1.2, dtype=F64),
+        "V_met": V,
+        "theta_w": torch.zeros(3, dtype=F64),
+    })
+    assert v.shape == (3, 2)
+    torch.testing.assert_close(v[:, 0], 0.5 * 1.2 * V**2 * 0.7)
+    torch.testing.assert_close(v[:, 1], 0.5 * 1.2 * V**2 * 0.2)   # tgt is ambient: -(-0.2)
+
+
+def test_wind_drives_a_through_flow_and_is_differentiable_wrt_speed_and_direction():
+    net = _wind_net()
+    prof = WindProfile([0.0, 90.0, 180.0, 270.0], [0.6, -0.3, -0.4, -0.3])
+    layer = PotentialFlowLayer(
+        net, "air", [PowerLaw(torch.tensor([0.01, 0.05, 0.01], dtype=F64), 0.5)],
+        drives=[Wind.from_network(net, "airpath", ambient="ambient", profiles=[prof])],
+        boundary=["ambient"],
+    )
+    pb = torch.zeros(1, dtype=F64)
+    rho = torch.tensor(1.2, dtype=F64)
+    phi, q = layer.solve(
+        pb, {"rho_amb": rho, "V_met": torch.tensor(4.0, dtype=F64),
+             "theta_w": torch.tensor(20.0, dtype=F64)}, differentiable=False,
+    )
+    assert q[0] > 0 and q[1] > 0 and q[2] > 0        # windward in, leeward out
+    V = torch.tensor(4.0, dtype=F64, requires_grad=True)
+    th = torch.tensor(20.0, dtype=F64, requires_grad=True)
+    assert torch.autograd.gradcheck(
+        lambda v, t: layer.solve(pb, {"rho_amb": rho, "V_met": v, "theta_w": t})[1],
+        (V, th), eps=1e-6, atol=1e-6,
+    )
+
+
+def test_wind_from_network_names_an_unknown_ambient_and_a_missing_driver():
+    net = _wind_net()
+    with pytest.raises(KeyError, match="outside"):
+        Wind.from_network(net, "airpath", ambient="outside")
+    wind = Wind.from_network(net, "airpath", ambient="ambient")
+    with pytest.raises(KeyError, match="V_met"):
+        wind({"rho_amb": torch.tensor(1.2, dtype=F64), "theta_w": torch.tensor(0.0, dtype=F64)})
+
+
+def test_wind_from_network_accepts_a_profile_number_mapping_with_gaps():
+    """Ruling R3: `profiles` may be a Mapping[int, WindProfile] keyed by CONTAM's own,
+    possibly non-contiguous, profile number -- here 5 and 2, not 1 and 2."""
+    net = Network(dtype=F64)
+    for name in ("ambient", "z1", "z2"):
+        net.add_node(name, z_ref=0.0)
+    net.add_edge("ambient", "z1", kind="airpath", azimuth=0.0, Ch=0.5, profile=5)
+    net.add_edge("z1", "z2", kind="airpath")
+    net.add_edge("z2", "ambient", kind="airpath", azimuth=180.0, Ch=0.5, profile=2)
+    prof_a = WindProfile([0.0, 180.0], [0.6, -0.4])
+    prof_b = WindProfile([0.0, 180.0], [0.9, -0.9])
+    wind = Wind.from_network(
+        net, "airpath", ambient="ambient", profiles={5: prof_a, 2: prof_b}
+    )
+    drivers = {
+        "rho_amb": torch.tensor(1.2, dtype=F64),
+        "V_met": torch.tensor(4.0, dtype=F64),
+        "theta_w": torch.tensor(0.0, dtype=F64),
+    }
+    v = wind(drivers)
+    q = 0.5 * 1.2 * 16.0 * 0.5
+    # edge 0 (profile 5 -> prof_a): theta_rel = 0 -> Cp 0.6, ambient is src -> +.
+    # edge 2 (profile 2 -> prof_b): theta_rel = -180 -> Cp -0.9, ambient is tgt ->
+    # -(q * -0.9) = +0.9 q.
+    torch.testing.assert_close(v, torch.tensor([0.6 * q, 0.0, 0.9 * q], dtype=F64))
+
+
+def test_wind_from_network_names_the_edge_and_number_for_an_absent_profile():
+    """Ruling R3: a profile number an edge references but that is absent from a `profiles`
+    Mapping is a KeyError naming the edge and the number, not a silent mismatch."""
+    net = _wind_net()
+    prof = WindProfile([0.0, 180.0], [0.6, -0.4])
+    with pytest.raises(KeyError, match="profile number 1") as excinfo:
+        Wind.from_network(net, "airpath", ambient="ambient", profiles={2: prof})
+    assert "ambient" in str(excinfo.value) and "z1" in str(excinfo.value)
