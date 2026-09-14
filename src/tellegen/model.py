@@ -92,12 +92,28 @@ class Model:
                     f"Model: layer {name!r} is built on a different Network than the model"
                 )
         self.closures = list(closures)
+        # Both callability checks are made HERE, not at the first `step`: a non-callable
+        # closure or a reaction without `apply` would otherwise surface a bare
+        # "'X' object is not callable" from inside `_pass`, naming neither the model nor
+        # which of the closures it was.
+        for i, closure in enumerate(self.closures):
+            if not isinstance(closure, Closure):
+                raise TypeError(
+                    f"Model: closure {i} is a {type(closure).__name__}, which is not "
+                    f"callable; a closure is called as closure(state, drivers) and returns "
+                    f"driver updates"
+                )
         self.reactions = list(reactions)
-        for lname, _ in self.reactions:
+        for lname, reaction in self.reactions:
             if lname not in self.transport:
                 raise KeyError(
                     f"Model: reaction targets {lname!r}, not a transport layer of this "
                     f"model ({sorted(self.transport)})"
+                )
+            if not callable(getattr(reaction, "apply", None)):
+                raise TypeError(
+                    f"Model: reaction for layer {lname!r} is a {type(reaction).__name__}, "
+                    f"not a Reaction; it must provide apply(x, dt, drivers)"
                 )
         self.coupling = coupling
         self.iterate_tol = dict(iterate_tol or {})
@@ -109,11 +125,20 @@ class Model:
                     f"Model: substeps names {name!r}, not a transport layer of this model "
                     f"({sorted(self.transport)})"
                 )
-            if int(k) < 1:
+            try:
+                k_int = int(k)
+            except (TypeError, ValueError) as exc:
+                # Without this, a substeps value that is not a number at all fails as a bare
+                # "invalid literal for int()" naming neither the model nor the layer.
+                raise TypeError(
+                    f"Model: substeps[{name!r}] must be an integer, got {k!r} "
+                    f"({type(k).__name__})"
+                ) from exc
+            if k_int < 1:
                 raise ValueError(
                     f"Model: substeps[{name!r}] must be >= 1, got {k!r}"
                 )
-            self.substeps[name] = int(k)
+            self.substeps[name] = k_int
         self.flow_layer_of: dict[str, str] = {}
         for tname, tl in self.transport.items():
             owners = [
@@ -152,6 +177,15 @@ class Model:
         return drv
 
     def _zero_sources(self, layer: TransportLayer, like: Tensor, n_like: int) -> Tensor:
+        """Full-node zeros in `like`'s LAYOUT (reduced `(n,)` or stacked `(n, K)`).
+
+        `like` decides the layout, so it must be a tensor whose own layout is the one the
+        caller wants back: the state `x` where there is one (`step`, `residuals`, and
+        `steady` whenever the state carries `"<layer>.x"`). `TransportLayer.steady` reads its
+        `reduced` flag off the SOURCES rather than off `x`, so a `(n_b, K)`-shaped
+        `x_boundary` used as `like` would flip the returned state to `(..., n_i, K)` for a
+        single-species layer; only fall back to it when there is no `x` at all.
+        """
         _, reduced = layer._to_stacked(like, n_like, "state")
         batch = like.shape[:-1] if reduced else like.shape[:-2]
         tail = (self.net.n,) if reduced else (self.net.n, layer.n_species)
@@ -184,7 +218,14 @@ class Model:
             sources = drv.get(f"{name}.sources")
             if dt is None:
                 if sources is None:
-                    sources = self._zero_sources(layer, xb, layer.n_b)
+                    # The state's own `x` is the layout authority when it is there; `x_b`
+                    # is the fallback for a steady solve started without one.
+                    like = state.get(f"{name}.x")
+                    sources = (
+                        self._zero_sources(layer, xb, layer.n_b)
+                        if like is None
+                        else self._zero_sources(layer, like, layer.n_i)
+                    )
                 x = layer.steady(q_kind, sources, xb)
             else:
                 x = state.get(f"{name}.x")
@@ -212,6 +253,14 @@ class Model:
         return self._advance(state, drivers, float(dt), diagnostics, solve_kwargs)
 
     def steady(self, state, drivers, *, diagnostics: dict | None = None, **solve_kwargs):
+        """The quasi-steady state of every layer at `drivers` (transport layers solved to
+        `rate == 0` rather than advanced).
+
+        REACTIONS ARE NOT APPLIED. They are an operator splitting applied AFTER a transport
+        step, so they belong to `step` alone: a model carrying a reaction has a `steady` that
+        is the fixed point of transport only, not of transport-plus-reaction (spec section 7;
+        `residuals` reports the same balance). Deliberate, and pinned by a test.
+        """
         return self._advance(state, drivers, None, diagnostics, solve_kwargs)
 
     def _advance(self, state, drivers, dt, diagnostics, solve_kwargs) -> State:
@@ -225,7 +274,13 @@ class Model:
 
     def residuals(self, state, drivers) -> dict[str, Tensor]:
         """Nodal balances at `state`: interior residual per potential layer, dx/dt per
-        transport layer (spec 14). Zero (to solver tolerance) at a steady state."""
+        transport layer (spec 14). Zero (to solver tolerance) at a steady state.
+
+        The transport balance is TRANSPORT ONLY: reactions are an operator splitting applied
+        by `step` after the transport step, so they are outside the balance reported here,
+        exactly as they are outside `steady`. A model with a reaction is therefore at zero
+        residual at `steady`'s fixed point, not at the reaction's.
+        """
         drv = self._apply_closures(state, drivers)
         out: dict[str, Tensor] = {}
         for name, layer in self.potential.items():
