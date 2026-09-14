@@ -488,12 +488,71 @@ def test_iterate_non_convergence_names_only_the_failing_batch_instances():
     assert diag["max_change"]["species"][0].item() <= 1e-12 < diag["max_change"]["species"][1]
 
 
-def test_iterate_with_a_single_pass_is_never_declared_converged():
-    """`iterate_max=1` is one ping-pong pass with no second pass to compare it against, so
-    the coupling reports failure rather than claim a fixed point it never tested for."""
-    _, model, state, drivers, _, _ = _build(
-        closures=[_Feedback(2e3)], coupling="iterate", iterate_tol={"species": 1e-3},
-        iterate_max=1,
+def test_iterate_refuses_a_pass_budget_below_two_at_construction():
+    """One pass has no predecessor to compare against, so it can never be reported as
+    converged: a budget below two is a configuration that would always raise, and zero would
+    return the input state untouched first. Both are refused when the model is built."""
+    for bad in (1, 0, -3):
+        with pytest.raises(ValueError, match=rf"iterate_max >= 2, got {bad!r}"):
+            _build(coupling="iterate", iterate_tol={"species": 1e-9}, iterate_max=bad)
+    # `pingpong` never iterates, so the same value is none of its business
+    _build(iterate_max=1)
+
+
+def test_iterate_steps_every_transport_layer_but_tests_only_the_named_ones():
+    """Spec 7's motivating case: a species layer in kg/kg beside a thermal layer in kelvin.
+
+    No single absolute tolerance can straddle the two, so `iterate_tol` names the species
+    layer alone. The thermal layer is still stepped on EVERY pass -- it just gets no vote on
+    convergence, and no entry in `max_change`. Ruling R21 for the tight Newton tolerances:
+    the assertions below are three orders inside the coupling tolerance, so the solve is
+    asked for the accuracy they need.
+    """
+    tight = {"atol": 1e-14, "rtol": 1e-14}
+    net = _net()
+    air = PotentialFlowLayer(
+        net, "air", [PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65)],
+        drives=[ConstantDrive("airpath", "wind")], boundary=["ambient"],
     )
-    with pytest.raises(RuntimeError, match=r"within 1 passes for instances all"):
-        model.steady(state, drivers)
+    species = TransportLayer(
+        net, "species", capacity=torch.tensor([50.0, 80.0], dtype=F64), flow_kind="airpath",
+        boundary=["ambient"], scheme="implicit", quantity="mass_fraction", unit="kg/kg",
+    )
+    heat = TransportLayer(
+        net, "heat", capacity=torch.tensor([5.0e4, 8.0e4], dtype=F64), flow_kind="airpath",
+        boundary=["ambient"], scheme="implicit", quantity="temperature", unit="K",
+    )
+    model = Model(
+        net, {"air": air, "species": species, "heat": heat}, closures=[_Feedback(2e3)],
+        coupling="iterate", iterate_tol={"species": 1e-12}, iterate_max=60,
+    )
+    drivers = {
+        "air.phi_boundary": torch.zeros(1, dtype=F64),
+        "wind": torch.tensor([5.0, 0.0, 0.0], dtype=F64),
+        "species.x_boundary": torch.tensor([1e-3], dtype=F64),
+        "species.sources": torch.tensor([0.0, 2e-6, 0.0], dtype=F64),
+        "heat.x_boundary": torch.tensor([293.0], dtype=F64),
+        "heat.sources": torch.tensor([0.0, 0.1, 0.0], dtype=F64),
+    }
+    state = {"species.x": torch.zeros(2, dtype=F64),
+             "heat.x": torch.full((2,), 293.0, dtype=F64)}
+    diag: dict = {}
+    ss = model.steady(state, drivers, diagnostics=diag, **tight)
+    assert diag["passes"] > 1 and bool(diag["converged"].all())
+    # the untested layer is reported on by neither `max_change` nor the convergence verdict
+    assert set(diag["max_change"]) == {"species"}
+    assert set(diag["layers"]) == {"air", "species", "heat"}   # but it IS part of the pass
+
+    # Stepped, not skipped: the thermal state is more than a kelvin away from what the FIRST
+    # pass alone gives, because the flows kept moving under it while the species converged.
+    first, _, _ = model._pass(state, drivers, None, tight)
+    assert (ss["heat.x"] - first["heat.x"]).abs().max().item() > 0.5
+    assert 293.0 < ss["heat.x"].min().item() < 300.0
+
+    # And the reason it may not share the species layer's tolerance: at the fixed point one
+    # further pass still moves it by ~1e-8 K, which is 1e4 times the 1e-12 the species layer
+    # has converged to. Had it been named in `iterate_tol`, this model would never converge.
+    again, _, _ = model._pass(ss, drivers, None, tight)
+    moved_x = (again["species.x"] - ss["species.x"]).abs().max().item()
+    moved_t = (again["heat.x"] - ss["heat.x"]).abs().max().item()
+    assert moved_x < 1e-12 < moved_t and moved_t > 1e3 * moved_x

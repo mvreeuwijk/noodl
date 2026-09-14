@@ -150,6 +150,18 @@ class Model:
                     f"Model: iterate_tol names {unknown}, not transport layers of this model "
                     f"({sorted(self.transport)})"
                 )
+            # Refused HERE rather than left to fail at the first `step`: one pass has no
+            # second pass to compare against, so it can never report convergence -- a budget
+            # below two is a configuration that always raises, and a `iterate_max=0` would
+            # return the input state untouched before doing so. Enforcing it also keeps the
+            # diagnostics one shape: `converged` and `max_change` are always the ones a real
+            # comparison produced, never a degenerate 0-dim placeholder and an empty dict.
+            if self.iterate_max < 2:
+                raise ValueError(
+                    f"Model: coupling='iterate' requires iterate_max >= 2, got "
+                    f"{iterate_max!r}; a single pass has no predecessor to compare against, "
+                    f"so it can never be reported as converged"
+                )
         self.substeps = {name: 1 for name in self.transport}
         for name, k in (substeps or {}).items():
             if name not in self.transport:
@@ -332,7 +344,10 @@ class Model:
         fed: State = dict(state)
         prev: State | None = None
         change: dict[str, Tensor] = {}
-        converged: Tensor | None = None
+        # A placeholder the second pass always replaces: `iterate_max >= 2` and a non-empty
+        # `iterate_tol` are both refused at construction, so the loop below cannot end
+        # without a real per-instance verdict of the right shape, dtype and device.
+        converged: Tensor = torch.zeros((), dtype=torch.bool)
         passes = 0
         diag: dict = {}
         new: State = dict(state)
@@ -353,7 +368,7 @@ class Model:
                         this = change[name] <= tol
                         ok = this if ok is None else (ok & this)
                     converged = ok
-                if converged is not None and bool(converged.all()):
+                if bool(converged.all()):
                     break
             fed = dict(new)
             if prev is not None:
@@ -361,8 +376,6 @@ class Model:
                     key = f"{name}.x"
                     fed[key] = 0.5 * (prev[key] + new[key])
             prev = new
-        if converged is None:  # iterate_max == 1: nothing to compare, so not converged
-            converged = torch.zeros((), dtype=torch.bool)
         if not bool(converged.all()):
             failing = (
                 (~converged).nonzero().flatten().tolist() if converged.dim() else "all"
