@@ -23,6 +23,11 @@ class SpeciesTransport:
     Boundary nodes hold prescribed concentrations. Flows must be non-negative, so the
     upwind operator is fixed by the edge directions (use a forward-oriented graph).
     Units are the caller's: with c in ppm, V in m3 and q in m3/s, sources are ppm m3/s.
+
+    This wrapper's own `sources` stays INTERIOR-only (its callers use it that way),
+    unlike `TransportLayer.step`'s `sources`, which milestone 2 changed to FULL node
+    order (spec 4.2): this class's `step` pads `sources` to FULL node order internally
+    before delegating to `TransportLayer.step`.
     """
 
     def __init__(
@@ -64,5 +69,7 @@ class SpeciesTransport:
         out_dtype = c.dtype
         dtype = torch.float64
         c, q, sources, c_boundary = (v.to(dtype) for v in (c, q, sources, c_boundary))
-        result = self._layer.step(c, q, sources, c_boundary, dt)
+        full = torch.zeros(*sources.shape[:-1], self.net.n, dtype=dtype)
+        full[..., self._layer.interior_idx] = sources
+        result = self._layer.step(c, q, full, c_boundary, dt)
         return result.to(out_dtype)

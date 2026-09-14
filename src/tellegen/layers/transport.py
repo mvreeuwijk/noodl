@@ -13,6 +13,14 @@ are stacked species-major: for ``K`` species the stacked row/column index is
 ``k * n_i + i`` for interior node ``i`` (see the module docstring of
 ``TransportLayer.operator`` for why the stacked shape is used even when species
 do not interact).
+
+``sources`` is given in FULL node order (spec 4.2: trailing shape ``(n, K)``, or ``(n,)``
+for ``n_species == 1``), covering every node of the network, not just this layer's
+interior ones -- the same full-node order every other layer's inputs use, so a caller
+(``Model``) can hand every layer the same per-node source tensor without slicing it per
+layer. Boundary rows must be zero (refused by name, not silently dropped); ``step``,
+``steady`` and ``rate`` all pull out the interior rows internally via
+``_sources_interior``.
 """
 
 from __future__ import annotations
@@ -411,10 +419,62 @@ class TransportLayer:
         x = x.reshape(*x.shape[:-1], K, n_nodes)
         return x.transpose(-1, -2)
 
+    def _sources_interior(self, sources: torch.Tensor) -> torch.Tensor:
+        """Full-node `sources` -> interior rows (spec 4.2). Boundary rows must be zero.
+
+        Accepts trailing shape `(n, K)` or, for `n_species == 1`, `(n,)`, in NODE order. A
+        nonzero entry on a boundary node is refused by name rather than dropped: a source on
+        a node whose value is prescribed is a modelling error, not a value to ignore.
+        """
+        n, K = self.net.n, self.n_species
+        if sources.dim() >= 2 and sources.shape[-2] == n and sources.shape[-1] == K:
+            node_dim = sources.dim() - 2
+        elif K == 1 and sources.shape[-1] == n:
+            node_dim = sources.dim() - 1
+        else:
+            raise ValueError(
+                f"TransportLayer '{self.name}': sources must be in FULL node order with "
+                f"trailing shape ({n}, {K}) or, for n_species=1, ({n},); got "
+                f"{tuple(sources.shape)}. Boundary rows must be zero."
+            )
+        self._refuse_nonzero_rows(sources, node_dim, self.boundary_idx, self.boundary, "boundary")
+        return sources.index_select(node_dim, self.interior_idx)
+
+    def _refuse_nonzero_rows(self, sources, node_dim, idx, names, role) -> None:
+        if idx.numel() == 0:
+            return
+        rows = sources.index_select(node_dim, idx)
+        nonzero = rows != 0
+        if node_dim == sources.dim() - 2:
+            nonzero = nonzero.any(-1)
+        nonzero = nonzero.reshape(-1, nonzero.shape[-1]).any(0)
+        if bool(nonzero.any()):
+            bad = [names[i] for i in nonzero.nonzero().flatten().tolist()]
+            raise ValueError(
+                f"TransportLayer '{self.name}': sources must be zero on {role} nodes; "
+                f"nonzero at {bad}"
+            )
+
+    def rate(self, x, q, sources, x_boundary) -> torch.Tensor:
+        """dx/dt = M x + N x_b + sources / capacity at (x, q); x's layout and dtype.
+
+        The balance `Model.residuals` reports for a transport layer, and the oracle the
+        energy-balance tests check against. Zero at the fixed point of `steady`.
+        """
+        dtype = torch.float64
+        x_s, reduced = self._to_stacked(x.to(dtype), self.n_i, "x")
+        op = self._advection_operator(q.to(dtype))
+        xb_s, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
+        src_s, _ = self._to_stacked(
+            self._sources_interior(sources).to(dtype), self.n_i, "sources"
+        )
+        r = op.matvec(x_s) + op.boundary_forcing(xb_s) + src_s / self._capacity_stacked(dtype)
+        return self._from_stacked(r.to(x.dtype), self.n_i, reduced)
+
     def _forcing(
         self, sources: torch.Tensor, x_boundary: torch.Tensor, N: torch.Tensor, dtype: torch.dtype
     ) -> tuple[torch.Tensor, bool]:
-        src_s, reduced = self._to_stacked(sources, self.n_i, "sources")
+        src_s, reduced = self._to_stacked(self._sources_interior(sources), self.n_i, "sources")
         xb_s, _ = self._to_stacked(x_boundary, self.n_b, "x_boundary")
         src_s, xb_s = src_s.to(dtype), xb_s.to(dtype)
         cap = self._capacity_stacked(dtype)
@@ -434,7 +494,9 @@ class TransportLayer:
     ) -> torch.Tensor:
         """Advance one timestep under `self.scheme`.
 
-        `on_failure` (keyword-only, default `"raise"`) is threaded to the `"implicit"` and
+        `sources` is in FULL node order (spec 4.2), not just this layer's interior nodes;
+        see the module docstring and `_sources_interior`. `on_failure` (keyword-only,
+        default `"raise"`) is threaded to the `"implicit"` and
         `"trapezoidal"` schemes' underlying linear solve; on `"return"` those two schemes
         return the raw, stacked `SolveResult` instead of a plain `Tensor` (return type
         `torch.Tensor | SolveResult`, amendment A8). `"exact"` has no linear solve at all
@@ -470,7 +532,9 @@ class TransportLayer:
         if self.scheme == "exact":
             op = self._advection_operator(q.to(dtype))
             xb_s, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
-            src_s, _ = self._to_stacked(sources.to(dtype), self.n_i, "sources")
+            src_s, _ = self._to_stacked(
+                self._sources_interior(sources.to(dtype)), self.n_i, "sources"
+            )
             cap = self._capacity_stacked(dtype)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
             result, _substeps = _expm_action(
@@ -501,7 +565,9 @@ class TransportLayer:
     ) -> torch.Tensor:
         """Solve `0 = M x + N x_b + sources / capacity` for the steady-state `x`.
 
-        `on_failure="raise"` (the default) returns a plain `torch.Tensor`, matching every
+        `sources` is in FULL node order (spec 4.2), not just this layer's interior nodes;
+        see the module docstring and `_sources_interior`. `on_failure="raise"` (the
+        default) returns a plain `torch.Tensor`, matching every
         existing call site's expectation. `on_failure="return"` bypasses the differentiable
         `_linear_solve` path entirely and returns the raw, STACKED `SolveResult` from
         `solvers.select.solve` directly (not reshaped by `_from_stacked`): a `SolveResult`
@@ -518,12 +584,12 @@ class TransportLayer:
         q = q.to(dtype)
         sources = sources.to(dtype)
         x_boundary = x_boundary.to(dtype)
-        _, reduced = self._to_stacked(sources, self.n_i, "sources")
+        _, reduced = self._to_stacked(self._sources_interior(sources), self.n_i, "sources")
 
         def build_system(q_, sources_, xb_):
             op = self._advection_operator(q_)
             xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
-            src_s, _ = self._to_stacked(sources_, self.n_i, "sources")
+            src_s, _ = self._to_stacked(self._sources_interior(sources_), self.n_i, "sources")
             cap = self._capacity_stacked(dtype)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
             return op, -b0
@@ -554,7 +620,7 @@ class TransportLayer:
         def build_system(x_, q_, sources_, xb_):
             op = self._advection_operator(q_)
             xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
-            src_s, _ = self._to_stacked(sources_, self.n_i, "sources")
+            src_s, _ = self._to_stacked(self._sources_interior(sources_), self.n_i, "sources")
             x_s, _ = self._to_stacked(x_, self.n_i, "x")
             cap = self._capacity_stacked(dtype)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
@@ -591,7 +657,7 @@ class TransportLayer:
         def build_system(x_, q_, sources_, xb_):
             op = self._advection_operator(q_)
             xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
-            src_s, _ = self._to_stacked(sources_, self.n_i, "sources")
+            src_s, _ = self._to_stacked(self._sources_interior(sources_), self.n_i, "sources")
             x_s, _ = self._to_stacked(x_, self.n_i, "x")
             cap = self._capacity_stacked(dtype)
             b0 = op.boundary_forcing(xb_s) + src_s / cap

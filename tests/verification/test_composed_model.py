@@ -17,6 +17,14 @@ import tellegen.solvers.select as select_module
 from benchmarks.composed_model import ComposedModel, build_composed
 
 
+def _full(layer, s_interior, node_dim=-1):
+    """Interior-order sources -> FULL node order with zeros on boundary nodes (spec 4.2)."""
+    shape = list(s_interior.shape)
+    shape[node_dim] = layer.net.n
+    full = torch.zeros(shape, dtype=s_interior.dtype)
+    return full.index_copy(node_dim % full.dim(), layer.interior_idx, s_interior)
+
+
 def test_build_composed_produces_expected_node_and_edge_counts():
     model = build_composed()
     # Node count is exact and seed-independent: 8 * 120 + 40 + 30.
@@ -85,7 +93,7 @@ def test_build_composed_transport_steps_on_the_dense_path():
     x1 = model.transport.step(
         x0,
         q[..., lo:hi],
-        torch.zeros_like(x0),
+        _full(model.transport, torch.zeros_like(x0)),
         torch.full((1, 2), 400.0, dtype=torch.float64),
         dt=60.0,
     )

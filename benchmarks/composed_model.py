@@ -236,12 +236,16 @@ def workload_alloc(mb: int) -> int:
 
 
 def _step_state(model: ComposedModel) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """`(x0, x_boundary, zero_sources)` for the transport half of a step, at 400 ppm."""
+    """`(x0, x_boundary, zero_sources)` for the transport half of a step, at 400 ppm.
+
+    `zero_sources` is in FULL node order (spec 4.2), matching `TransportLayer.step`'s
+    milestone-2 `sources` contract, not just the transport layer's interior nodes.
+    """
     dtype = model.net.dtype
     n_i = int(model.layer.interior.numel())
     x0 = torch.full((model.ensemble, n_i), 400.0, dtype=dtype)
     x_boundary = torch.full((model.ensemble, len(model.boundary)), 400.0, dtype=dtype)
-    zero_sources = torch.zeros(model.ensemble, n_i, dtype=dtype)
+    zero_sources = torch.zeros(model.ensemble, model.net.n, dtype=dtype)
     return x0, x_boundary, zero_sources
 
 

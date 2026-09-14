@@ -35,7 +35,7 @@ def test_operator_splitting_matches_removal_matrix_route_to_first_order():
     rate = 0.01
     cap = torch.tensor([1000.0], dtype=torch.float64)
     q = torch.tensor([0.2, 0.2], dtype=torch.float64)
-    src = torch.zeros(1, dtype=torch.float64)
+    src = torch.zeros(net.n, dtype=torch.float64)  # FULL node order (spec 4.2); all zero
     x_b = torch.tensor([420.0], dtype=torch.float64)
     dt = 5.0  # small step so the splitting error stays within first-order tolerance
 
