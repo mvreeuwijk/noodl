@@ -19,7 +19,7 @@ from benchmarks.measure import time_call
 from tellegen.elements import PowerLaw
 from tellegen.elements.base import Element
 from tellegen.layers.potential import PotentialFlowLayer
-from tellegen.layers.transport import TransportLayer
+from tellegen.layers.transport import TransportLayer, active_interior
 from tellegen.topology import Network
 
 # PowerLaw conductance scale per edge kind, and the insertion order the elements list and the
@@ -45,6 +45,10 @@ class ComposedModel:
     phi_boundary: torch.Tensor
     drivers: dict
     sources: torch.Tensor
+    # Capacity of the `co2` transport layer, one entry per node of its ACTIVE interior (the
+    # non-boundary nodes an "airpath" edge touches), NOT per non-boundary node: the street
+    # and sewer nodes carry no airpath edge, so they are inactive for that layer and have no
+    # row in it at all. See `tellegen.layers.transport.active_interior`.
     capacity: torch.Tensor
     layer: PotentialFlowLayer
     dense_layer: PotentialFlowLayer  # linear_solver="direct": the retained dense reference
@@ -134,7 +138,9 @@ def build_composed(
     built (so the graph itself is exactly `_build_topology`'s, unaffected by how many random
     draws the physics below makes), in this order: one `PowerLaw(C, 0.65, kind=kind)` per edge
     kind, in `_ELEMENT_SCALES` order, with `C = scale * (0.5 + U(b_kind))`; then `sources`; then
-    `capacity`. `C` is shared across the ensemble; only `sources` varies per instance.
+    `capacity` (drawn over every interior node, then restricted to the transport layer's
+    active interior -- see the `ComposedModel.capacity` field). `C` is shared across the
+    ensemble; only `sources` varies per instance.
 
     `boundary` is `["street_0", "sewer_0"]` -- one ground node each on the street and sewer
     networks. `layer` (name "composed") is the migrated, default-configured path; `dense_layer`
@@ -174,7 +180,13 @@ def build_composed(
 
     n_interior = net.n - len(boundary)
     u_capacity = torch.rand(n_interior, generator=rng, dtype=dtype)
-    capacity = 50.0 + 100.0 * u_capacity
+    # Drawn over EVERY interior node, then restricted to the co2 layer's active interior (the
+    # nodes an "airpath" edge touches; the street and sewer nodes are inactive for it). The
+    # draw stays whole-interior on purpose: the RNG stream, and so every active node's
+    # capacity value, is then bit-identical to what it was before the layer stopped carrying
+    # a row for the untouched nodes.
+    active_idx, _inactive_idx = active_interior(net, ("airpath",), boundary)
+    capacity = (50.0 + 100.0 * u_capacity)[torch.isin(net.interior_index(boundary), active_idx)]
 
     drivers: dict = {}
 
@@ -242,7 +254,9 @@ def _step_state(model: ComposedModel) -> tuple[torch.Tensor, torch.Tensor, torch
     milestone-2 `sources` contract, not just the transport layer's interior nodes.
     """
     dtype = model.net.dtype
-    n_i = int(model.layer.interior.numel())
+    # The TRANSPORT layer's own interior, which is smaller than the potential layer's: the
+    # co2 layer has no row for a node no airpath edge touches.
+    n_i = model.transport.n_i
     x0 = torch.full((model.ensemble, n_i), 400.0, dtype=dtype)
     x_boundary = torch.full((model.ensemble, len(model.boundary)), 400.0, dtype=dtype)
     zero_sources = torch.zeros(model.ensemble, model.net.n, dtype=dtype)

@@ -88,7 +88,11 @@ def test_build_composed_transport_steps_on_the_dense_path():
         model.phi_boundary, model.drivers, model.sources, differentiable=False
     )
     lo, hi = model.layer._kind_slices["airpath"]
-    n_i = model.layer.interior.numel()
+    # The TRANSPORT layer's interior, not the potential layer's: the co2 layer advects on
+    # "airpath" edges only, and the street and sewer nodes carry none, so they are inactive
+    # for it and it has no row for them (spec 14, 4.5).
+    n_i = model.transport.n_i
+    assert n_i < model.layer.interior.numel()
     x0 = torch.full((1, n_i), 400.0, dtype=torch.float64)
     x1 = model.transport.step(
         x0,

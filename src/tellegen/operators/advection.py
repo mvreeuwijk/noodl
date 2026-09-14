@@ -34,6 +34,7 @@ class AdvectionOperator:
         kinetics: torch.Tensor | None = None,
         removal: torch.Tensor | None = None,
         conduction: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+        boundary_idx: torch.Tensor | None = None,
     ) -> None:
         # Global Constraint: ValueError for bad shapes, naming the offender. Without these,
         # a wrong edge count in `transmission` constructed silently and surfaced as an
@@ -94,7 +95,18 @@ class AdvectionOperator:
 
         self._n = interior_of_node.shape[0]
         self._interior_idx = torch.nonzero(interior_of_node >= 0, as_tuple=True)[0]
-        self._boundary_idx = torch.nonzero(interior_of_node < 0, as_tuple=True)[0]
+        # Which nodes `boundary_forcing`'s `x_boundary` covers, and in WHICH ORDER. It
+        # defaults to "every node that is not interior, in node order", which is what a
+        # two-way interior/boundary split means. A caller whose node set has a third class --
+        # `TransportLayer`'s INACTIVE nodes, which no edge of the layer's kinds touches, so
+        # they are neither unknowns nor prescribed values (spec 14, 4.5) -- passes its own
+        # boundary index instead, so that `x_boundary` stays one entry per PRESCRIBED node
+        # and is embedded at the node each entry actually names.
+        self._boundary_idx = (
+            torch.nonzero(interior_of_node < 0, as_tuple=True)[0]
+            if boundary_idx is None
+            else boundary_idx
+        )
         self._n_edges = src.shape[0]
 
         # Per-shape caches for `_raw_action`, which runs once per transport matvec and

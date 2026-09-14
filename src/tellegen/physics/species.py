@@ -13,7 +13,7 @@ from collections.abc import Hashable
 
 import torch
 
-from tellegen.layers.transport import TransportLayer
+from tellegen.layers.transport import TransportLayer, active_interior
 from tellegen.topology import Network
 
 
@@ -23,6 +23,11 @@ class SpeciesTransport:
     Boundary nodes hold prescribed concentrations. Flows must be non-negative, so the
     upwind operator is fixed by the edge directions (use a forward-oriented graph).
     Units are the caller's: with c in ppm, V in m3 and q in m3/s, sources are ppm m3/s.
+
+    `interior` (and so `volumes`, and the `sources`/`c` vectors below) covers the nodes an
+    edge of `kind` touches, not every non-boundary node: see `layers.transport.active_interior`.
+    On a network of one edge kind, which is how callers use this class, the two are the
+    same set.
 
     This wrapper's own `sources` stays INTERIOR-only (its callers use it that way),
     unlike `TransportLayer.step`'s `sources`, which milestone 2 changed to FULL node
@@ -40,7 +45,15 @@ class SpeciesTransport:
         self.net = net
         self.kind = kind
         self.boundary = list(boundary)
-        self.interior = [n for n in net.nodes if n not in self.boundary]
+        # The interior is the non-boundary nodes an edge of `kind` TOUCHES, in node order --
+        # not every non-boundary node (spec 14, 4.5). On a network that also carries edges of
+        # other kinds (a wall-conduction node, a street node in the composed model) the two
+        # differ, and it is the active one that `TransportLayer` below sizes its rows by: the
+        # old "all non-boundary nodes" spelling handed it a `capacity` vector one entry per
+        # untouched node too long and was refused by its capacity check. A volume is required
+        # for the active nodes only, since those are the only ones this layer has a state for.
+        interior_idx, _inactive_idx = active_interior(net, (kind,), self.boundary)
+        self.interior = [net.nodes[i] for i in interior_idx.tolist()]
         missing = [n for n in self.interior if n not in volumes]
         if missing:
             raise KeyError(f"no volume for interior nodes {missing}")

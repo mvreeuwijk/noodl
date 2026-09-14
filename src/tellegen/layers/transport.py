@@ -1,7 +1,10 @@
 """Multi-species transport on nodal scalars advected by signed branch flows.
 
 For interior capacity ``V`` (volume, or heat capacity), signed branch flow ``q``
-on edges of ``flow_kind``, a carrier factor and a transmission fraction per edge:
+on the edges of ``flow_kind`` (one edge kind, or several: ``q`` then carries the
+kinds' flows concatenated in ``flow_kinds`` order, which is what
+``PotentialFlowLayer.flows_of_kind(q, layer.flow_kinds)`` returns), a carrier
+factor and a transmission fraction per edge:
 
     V dx/dt = (In(q) - Out(q)) x + N x_b + sources
 
@@ -42,6 +45,40 @@ from tellegen.topology import Network, Node
 # (`AdvectionOperator`, `_AffineSystemOperator` below) declare `symmetric = False`, so
 # `TransposeOperator.spd_certificate()` returns None for them exactly as the old local class
 # did -- this alias changes nothing observable here, it only removes the duplicate.
+
+
+def active_interior(
+    net: Network, kinds: Sequence[str], boundary: Sequence[Node]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split the non-boundary nodes of `net` into the ones `kinds` touch and the ones it does
+    not: `(interior_idx, inactive_idx)`, both in NODE order, both excluding `boundary`.
+
+    Spec 14, 4.5: a node that no edge of a layer's kinds touches is INACTIVE for that layer
+    -- not an unknown, and not a singular row. A wall-mass node in a building network is the
+    motivating case: it carries conduction edges and no airpath edges, so it belongs to the
+    thermal layer's interior but not to a species layer's. The same holds a scale up: in the
+    composed reference model the street and sewer nodes carry no `airpath` edge at all, so
+    the `co2` layer over that network has 70 fewer unknowns than it has non-boundary nodes.
+
+    This is the ONE place the rule is decided. `TransportLayer` sizes its interior with it,
+    `physics.species.SpeciesTransport` sizes its `interior`/`volumes` with it, and a caller
+    building a layer's capacity vector (`benchmarks.composed_model`, and the building
+    application's thermal builder) must size that vector with it too rather than re-deriving
+    "every node that is not a boundary node" -- which is what the layer's capacity check
+    compares against, and what it names in its error when the two disagree.
+
+    Raises `KeyError` (via `Network.endpoints`) naming any kind that carries no edge at all,
+    and via `Network.interior_index` any unknown boundary node. Construction-time only: the
+    Python loop is over KINDS (a handful), never over nodes or edges.
+    """
+    touched = torch.zeros(net.n, dtype=torch.bool, device=net.device)
+    for kind in kinds:
+        src, tgt = net.endpoints(kind)
+        touched[src] = True
+        touched[tgt] = True
+    all_interior = net.interior_index(boundary)
+    active = touched[all_interior]
+    return all_interior[active], all_interior[~active]
 
 
 class _LinearSolve(torch.autograd.Function):
@@ -162,7 +199,16 @@ class _AffineSystemOperator:
 
 
 class TransportLayer:
-    """dx/dt = M x + N x_b + sources / capacity on interior nodes."""
+    """dx/dt = M x + N x_b + sources / capacity on this layer's ACTIVE interior nodes.
+
+    The interior is the non-boundary nodes an edge of ``flow_kind`` (or of
+    ``conduction_kind``) touches; the rest are ``inactive_idx`` and have no row here at all
+    (spec 14, 4.5, and ``active_interior``). ``capacity`` is indexed by that active interior,
+    NOT by every non-boundary node -- a caller sizing it must use ``active_interior`` too.
+
+    ``quantity``/``unit`` are metadata a ``Model`` reports ("temperature"/"K",
+    "concentration"/"ppm"); nothing in the numerics reads them.
+    """
 
     def __init__(
         self,
@@ -170,7 +216,7 @@ class TransportLayer:
         name: str,
         *,
         capacity: torch.Tensor,
-        flow_kind: str,
+        flow_kind: str | Sequence[str],
         boundary: Sequence[Node],
         n_species: int = 1,
         carrier: torch.Tensor | float = 1.0,
@@ -180,28 +226,60 @@ class TransportLayer:
         conduction_kind: str | None = None,
         conductance: torch.Tensor | None = None,
         scheme: Literal["exact", "implicit", "trapezoidal"] = "exact",
+        quantity: str = "scalar",
+        unit: str = "",
     ) -> None:
         self.net = net
         self.name = name
         self.flow_kind = flow_kind
+        # One or several advecting edge kinds. `flow_kinds` is the tuple form every internal
+        # site uses; `flow_kind` keeps the caller's own spelling. `q` is then the kinds'
+        # flows CONCATENATED in this order (`_flow_slices` holds the block boundaries), which
+        # is exactly what `PotentialFlowLayer.flows_of_kind(q, layer.flow_kinds)` produces:
+        # a thermal layer advected by both "airpath" and "door" edges needs no new operator,
+        # only both kinds' endpoints in one array.
+        self.flow_kinds = (flow_kind,) if isinstance(flow_kind, str) else tuple(flow_kind)
+        # Metadata only (spec 4.4): what this layer's state IS and what it is measured in.
+        self.quantity, self.unit = quantity, unit
         self.boundary = list(boundary)
         self.n_species = n_species
         self.scheme = scheme
-        self.interior_idx = net.interior_index(self.boundary)
+        # Spec 14, 4.5: nodes no edge of this layer's kinds touches are INACTIVE -- excluded
+        # from the interior rather than left as an all-zero (singular) row. Conduction counts
+        # as a touch: a wall-mass node with conduction edges and no airpath edge IS an
+        # unknown of a thermal layer, and is not one of a species layer over the same
+        # network. See `active_interior`, which is also what a caller must size `capacity`
+        # with.
+        kinds = self.flow_kinds if conduction_kind is None else (*self.flow_kinds, conduction_kind)
+        self.interior_idx, self.inactive_idx = active_interior(net, kinds, self.boundary)
         self.boundary_idx = net.boundary_index(self.boundary)
         self.n_i = int(self.interior_idx.shape[0])
         self.n_b = int(self.boundary_idx.shape[0])
+        self._inactive_names = [net.nodes[i] for i in self.inactive_idx.tolist()]
 
         self.capacity = torch.as_tensor(capacity, dtype=net.dtype)
         if self.capacity.dim() == 0 or self.capacity.shape[-1] != self.n_i:
             cap_len = self.capacity.shape[-1] if self.capacity.dim() >= 1 else 0
             raise ValueError(
                 f"TransportLayer '{name}': capacity has {cap_len} entries, "
-                f"expected {self.n_i} interior nodes"
+                f"expected {self.n_i} active interior nodes"
             )
         self.carrier = torch.as_tensor(carrier, dtype=net.dtype)
 
-        b_flow = int(net.edge_index(flow_kind).shape[0])
+        b_flow = 0
+        self._flow_slices: list[tuple[int, int]] = []
+        for kind in self.flow_kinds:
+            n_kind = int(net.edge_index(kind).numel())
+            self._flow_slices.append((b_flow, b_flow + n_kind))
+            b_flow += n_kind
+        # The flow edges' endpoints, concatenated once here in `flow_kinds` order so that
+        # every `_advection_operator` call is a plain attribute read (and so that a
+        # multi-kind layer is one AdvectionOperator over all its flow edges, not several).
+        src_parts, tgt_parts = zip(
+            *(net.endpoints(kind) for kind in self.flow_kinds), strict=True
+        )
+        self._flow_src = torch.cat(src_parts)
+        self._flow_tgt = torch.cat(tgt_parts)
         K = n_species
         if transmission is None:
             transmission = torch.ones(b_flow, dtype=net.dtype)
@@ -326,7 +404,7 @@ class TransportLayer:
 
     def _advection_operator(self, q: torch.Tensor) -> AdvectionOperator:
         dtype = q.dtype
-        src, tgt = self.net.endpoints(self.flow_kind)
+        src, tgt = self._flow_src, self._flow_tgt
         conduction = None
         if self._conduction_edges is not None:
             csrc, ctgt, g = self._conduction_edges
@@ -341,6 +419,11 @@ class TransportLayer:
             kinetics=self.kinetics.to(dtype) if self.kinetics is not None else None,
             removal=self.removal.to(dtype) if self.removal is not None else None,
             conduction=conduction,
+            # This layer's PRESCRIBED nodes, in the caller's own `boundary` order. Passed
+            # explicitly because "not interior" is no longer the same set: an inactive node
+            # is not interior and is not a boundary value either, and the operator would
+            # otherwise expect an `x_boundary` entry for it.
+            boundary_idx=self.boundary_idx,
         )
 
     # ------------------------------------------------------------ assembly
@@ -350,11 +433,25 @@ class TransportLayer:
         c = c.unsqueeze(-2).expand(*c.shape[:-1], K, n_i)
         return c.reshape(*c.shape[:-2], K * n_i)
 
+    def _selectors(self, selector, q: torch.Tensor) -> torch.Tensor:
+        """`net.upwind`/`net.downwind` over every flow kind, concatenated along the EDGE
+        dimension in `flow_kinds` order -- the order `q`'s blocks are in (`_flow_slices`).
+        """
+        if len(self.flow_kinds) == 1:
+            return selector(q, self.flow_kinds[0])
+        return torch.cat(
+            [
+                selector(q[..., lo:hi], kind)
+                for kind, (lo, hi) in zip(self.flow_kinds, self._flow_slices, strict=True)
+            ],
+            dim=-2,
+        )
+
     def operator(self, q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         net, K, n_i, n_b = self.net, self.n_species, self.n_i, self.n_b
         dtype = q.dtype
-        Up = net.upwind(q, self.flow_kind).to(dtype)    # (..., b_flow, n)
-        Dn = net.downwind(q, self.flow_kind).to(dtype)  # (..., b_flow, n)
+        Up = self._selectors(net.upwind, q).to(dtype)    # (..., b_flow, n)
+        Dn = self._selectors(net.downwind, q).to(dtype)  # (..., b_flow, n)
         w = self.carrier.to(dtype) * q.abs()            # (..., b_flow)
         Out = torch.einsum("...ei,...e,...ej->...ij", Up, w, Up)          # (..., n, n)
         weight = self.transmission.to(dtype) * w.unsqueeze(-2)           # (..., K, b_flow)
@@ -424,7 +521,10 @@ class TransportLayer:
 
         Accepts trailing shape `(n, K)` or, for `n_species == 1`, `(n,)`, in NODE order. A
         nonzero entry on a boundary node is refused by name rather than dropped: a source on
-        a node whose value is prescribed is a modelling error, not a value to ignore.
+        a node whose value is prescribed is a modelling error, not a value to ignore. The
+        same holds for an INACTIVE node (spec 14, 4.5): it has no row in this layer at all,
+        so a source there could not be balanced by anything -- a CO2 source placed on a
+        wall-mass node is a wiring mistake, and is named rather than silently discarded.
         """
         n, K = self.net.n, self.n_species
         if sources.dim() >= 2 and sources.shape[-2] == n and sources.shape[-1] == K:
@@ -438,6 +538,9 @@ class TransportLayer:
                 f"{tuple(sources.shape)}. Boundary rows must be zero."
             )
         self._refuse_nonzero_rows(sources, node_dim, self.boundary_idx, self.boundary, "boundary")
+        self._refuse_nonzero_rows(
+            sources, node_dim, self.inactive_idx, self._inactive_names, "inactive"
+        )
         return sources.index_select(node_dim, self.interior_idx)
 
     def _refuse_nonzero_rows(self, sources, node_dim, idx, names, role) -> None:
