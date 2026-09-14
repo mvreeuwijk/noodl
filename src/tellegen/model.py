@@ -58,7 +58,25 @@ class Ports:
 
 
 class Model:
-    """Layers on one `Network`, stepped together. See the module docstring for the keys."""
+    """Layers on one `Network`, stepped together. See the module docstring for the keys.
+
+    Two couplings (Hensen 1995), chosen with `coupling`:
+
+    `"pingpong"` (the default) takes exactly ONE pass per step -- closures, potential solves,
+    transport steps, reactions -- with the state at the START of the step. It is cheap and
+    it is what a weakly coupled model wants; its splitting error is first order in `dt`.
+
+    `"iterate"` (the "onion") repeats that pass within the one step until the transport
+    states named in `iterate_tol` stop changing, at most `iterate_max` times. Successive
+    substitution with 0.5 relaxation: the state the closures see on pass k >= 2 is the mean
+    of the last two passes' transport states, while each pass re-advances the transport
+    layers from the state at the start of the step. `iterate_tol` is REQUIRED in this mode
+    and is an ABSOLUTE tolerance per layer, on that layer's own units; a transport layer left
+    out of it is stepped every pass but not tested, which is what a species layer whose mass
+    fractions are ~1e-3 wants when a thermal layer in kelvin sets the pace. Convergence is
+    decided per batch instance, and a batch that does not converge within `iterate_max`
+    raises, naming the instances (`on_failure="return"` with `diagnostics` returns instead).
+    """
 
     def __init__(
         self,
@@ -71,8 +89,10 @@ class Model:
         iterate_max: int = 20,
         substeps: Mapping[str, int] | None = None,
     ) -> None:
-        if coupling not in ("pingpong",):
-            raise ValueError(f"Model: coupling must be 'pingpong', got {coupling!r}")
+        if coupling not in ("pingpong", "iterate"):
+            raise ValueError(
+                f"Model: coupling must be 'pingpong' or 'iterate', got {coupling!r}"
+            )
         self.net = net
         self.layers = dict(layers)
         self.potential: dict[str, PotentialFlowLayer] = {}
@@ -118,6 +138,18 @@ class Model:
         self.coupling = coupling
         self.iterate_tol = dict(iterate_tol or {})
         self.iterate_max = int(iterate_max)
+        if coupling == "iterate":
+            if not self.iterate_tol:
+                raise ValueError(
+                    "Model: coupling='iterate' requires iterate_tol={transport layer name: "
+                    "absolute tolerance on that layer's state}"
+                )
+            unknown = sorted(set(self.iterate_tol) - set(self.transport))
+            if unknown:
+                raise KeyError(
+                    f"Model: iterate_tol names {unknown}, not transport layers of this model "
+                    f"({sorted(self.transport)})"
+                )
         self.substeps = {name: 1 for name in self.transport}
         for name, k in (substeps or {}).items():
             if name not in self.transport:
@@ -198,8 +230,18 @@ class Model:
         )
 
     # -------------------------------------------------------------------- pass
-    def _pass(self, state, drivers, dt, solve_kwargs) -> tuple[State, dict, Drivers]:
-        """One closures -> potential -> transport -> reactions pass; `dt=None` means steady."""
+    def _pass(
+        self, state, drivers, dt, solve_kwargs, *, step_from: State | None = None
+    ) -> tuple[State, dict, Drivers]:
+        """One closures -> potential -> transport -> reactions pass; `dt=None` means steady.
+
+        `state` is what the closures read and what the potential solves warm-start from.
+        `step_from` is the state a transport STEP starts at, which is a different thing
+        inside an iterated coupling: pass k there re-advances the SAME time step from the
+        state at the start of it, with only the closures' view of the new state updated.
+        It defaults to `state`, which is what a single ping-pong pass wants.
+        """
+        base: State = state if step_from is None else step_from
         drv = self._apply_closures(state, drivers)
         new: State = dict(state)
         diag: dict = {}
@@ -220,7 +262,7 @@ class Model:
                 if sources is None:
                     # The state's own `x` is the layout authority when it is there; `x_b`
                     # is the fallback for a steady solve started without one.
-                    like = state.get(f"{name}.x")
+                    like = base.get(f"{name}.x")
                     sources = (
                         self._zero_sources(layer, xb, layer.n_b)
                         if like is None
@@ -228,7 +270,7 @@ class Model:
                     )
                 x = layer.steady(q_kind, sources, xb)
             else:
-                x = state.get(f"{name}.x")
+                x = base.get(f"{name}.x")
                 if x is None:
                     raise KeyError(
                         f"Model: state {name + '.x'!r} is required to step transport layer "
@@ -265,11 +307,78 @@ class Model:
 
     def _advance(self, state, drivers, dt, diagnostics, solve_kwargs) -> State:
         # The coupling seam: ping-pong is exactly ONE pass, taken with the state at the start
-        # of the step. Task 9's `coupling="iterate"` repeats `_pass` here until the named
-        # transport states stop changing, and reports the pass count it took.
-        new, diag, _ = self._pass(state, drivers, dt, solve_kwargs)
+        # of the step; `coupling="iterate"` repeats `_pass` until the named transport states
+        # stop changing, and reports the pass count it took.
+        if self.coupling == "pingpong":
+            new, diag, _ = self._pass(state, drivers, dt, solve_kwargs)
+            if diagnostics is not None:
+                diagnostics.update({"passes": 1, "layers": diag})
+            return new
+        return self._iterate(state, drivers, dt, diagnostics, solve_kwargs)
+
+    def _iterate(self, state, drivers, dt, diagnostics, solve_kwargs) -> State:
+        """Hensen's onion: repeat the pass until the named transport states stop changing.
+
+        The state fed to the closures on pass k >= 2 is the mean of the last two passes'
+        transport states (Hensen 1995, successive substitution with 0.5 relaxation); the
+        returned state is the LAST pass's own output. Convergence is judged per instance on
+        detached copies; the passes themselves stay on the autograd graph (unrolled).
+
+        The fixed point is therefore differentiated by unrolling, which carries the whole
+        chain of passes on the graph. An implicit-function treatment of the fixed point (one
+        adjoint solve at the converged state, memory independent of the pass count) is a
+        follow-up, not this milestone.
+        """
+        fed: State = dict(state)
+        prev: State | None = None
+        change: dict[str, Tensor] = {}
+        converged: Tensor | None = None
+        passes = 0
+        diag: dict = {}
+        new: State = dict(state)
+        # A `while` rather than `for passes in range(...)`: the pass count is wanted AFTER
+        # the loop (it goes into the diagnostics and into the failure message), which a loop
+        # control variable unused inside the body is not (ruff B007).
+        while passes < self.iterate_max:
+            passes += 1
+            new, diag, _ = self._pass(fed, drivers, dt, solve_kwargs, step_from=state)
+            if prev is not None:
+                with torch.no_grad():
+                    ok: Tensor | None = None
+                    for name, tol in self.iterate_tol.items():
+                        layer = self.transport[name]
+                        d = (new[f"{name}.x"] - prev[f"{name}.x"]).abs()
+                        d_s, _ = layer._to_stacked(d, layer.n_i, "x")
+                        change[name] = d_s.amax(-1)
+                        this = change[name] <= tol
+                        ok = this if ok is None else (ok & this)
+                    converged = ok
+                if converged is not None and bool(converged.all()):
+                    break
+            fed = dict(new)
+            if prev is not None:
+                for name in self.transport:
+                    key = f"{name}.x"
+                    fed[key] = 0.5 * (prev[key] + new[key])
+            prev = new
+        if converged is None:  # iterate_max == 1: nothing to compare, so not converged
+            converged = torch.zeros((), dtype=torch.bool)
+        if not bool(converged.all()):
+            failing = (
+                (~converged).nonzero().flatten().tolist() if converged.dim() else "all"
+            )
+            worst = {name: float(c.max()) for name, c in change.items()}
+            message = (
+                f"Model: coupling='iterate' did not converge within {self.iterate_max} "
+                f"passes for instances {failing}; largest change per layer {worst}, "
+                f"tolerances {self.iterate_tol}"
+            )
+            if not (solve_kwargs.get("on_failure") == "return" and diagnostics is not None):
+                raise RuntimeError(message)
         if diagnostics is not None:
-            diagnostics.update({"passes": 1, "layers": diag})
+            diagnostics.update(
+                {"passes": passes, "converged": converged, "max_change": change, "layers": diag}
+            )
         return new
 
     def residuals(self, state, drivers) -> dict[str, Tensor]:

@@ -360,3 +360,140 @@ def test_batched_drivers_run_as_a_batch_matching_the_single_instances():
         single = model.step(state, dict(drivers, wind=winds[i]), 600.0)
         torch.testing.assert_close(batched["species.x"][i], single["species.x"],
                                    rtol=1e-10, atol=1e-18)
+
+
+class _Feedback:
+    """Wind that grows with z1's concentration: a genuine flow <- transport feedback.
+
+    The gain is ADDED to the wind driver rather than to a hard-coded 5.0, so that a batched
+    `wind` survives the closure: with the fixtures' (5, 0, 0) this is exactly
+    (5 + gain * x1, 0, 0), and with a batch of winds it is that per instance.
+    """
+
+    def __init__(self, gain: float) -> None:
+        self.gain = gain
+
+    def __call__(self, state, drivers):
+        x1 = state["species.x"][..., 0]
+        zero = torch.zeros_like(x1)
+        bump = torch.stack([self.gain * x1, zero, zero], dim=-1)
+        return {"wind": drivers["wind"] + bump}
+
+
+def test_iterate_requires_tolerances_naming_the_layers():
+    with pytest.raises(ValueError, match="iterate_tol"):
+        _build(coupling="iterate")
+    with pytest.raises(KeyError, match="'nope'"):
+        _build(coupling="iterate", iterate_tol={"nope": 1e-9})
+
+
+def test_iterate_reaches_a_fixed_point_of_the_coupled_pass():
+    _, model, state, drivers, _, _ = _build(
+        closures=[_Feedback(2e3)], coupling="iterate", iterate_tol={"species": 1e-12},
+        iterate_max=60,
+    )
+    diag: dict = {}
+    ss = model.steady(state, drivers, diagnostics=diag)
+    assert diag["passes"] > 1 and bool(diag["converged"].all())
+    # one more pass from the fixed point changes nothing beyond the tolerance
+    again, _, _ = model._pass(ss, drivers, None, {})
+    assert (again["species.x"] - ss["species.x"]).abs().max().item() < 1e-11
+    assert (again["air.q"] - ss["air.q"]).abs().max().item() < 1e-9
+
+
+def test_iterate_equals_pingpong_when_there_is_no_feedback():
+    """The second pass warm-starts Newton from the first pass's phi, so the two passes can
+    differ at solver tolerance; the tolerance here is above that and the step count is 2."""
+    _, it, state, drivers, _, _ = _build(coupling="iterate", iterate_tol={"species": 1e-11})
+    _, pp, _, _, _, _ = _build()
+    diag: dict = {}
+    a = it.step(state, drivers, 600.0, diagnostics=diag)
+    b = pp.step(state, drivers, 600.0)
+    torch.testing.assert_close(a["species.x"], b["species.x"], rtol=1e-9, atol=1e-15)
+    assert diag["passes"] == 2          # the second pass only confirms
+
+
+def test_iterate_reports_non_convergence_per_instance_or_raises():
+    _, model, state, drivers, _, _ = _build(
+        closures=[_Feedback(2e3)], coupling="iterate", iterate_tol={"species": 1e-15},
+        iterate_max=2,
+    )
+    with pytest.raises(RuntimeError, match=r"iterate.*2 passes"):
+        model.steady(state, drivers)
+    diag: dict = {}
+    out = model.steady(state, drivers, diagnostics=diag, differentiable=False,
+                       on_failure="return")
+    assert "species.x" in out
+    assert diag["passes"] == 2 and not bool(diag["converged"].all())
+    assert diag["max_change"]["species"].item() > 1e-15
+
+
+def test_iterate_is_differentiable_by_unrolling():
+    _, model, state, drivers, el, _ = _build(
+        learnable=True, closures=[_Feedback(2e3)], coupling="iterate",
+        iterate_tol={"species": 1e-13}, iterate_max=80,
+    )
+
+    def loss():
+        return model.steady(state, drivers)["species.x"].sum()
+
+    loss().backward()
+    grad = el.C.grad[0].item()
+    h = 1e-6
+    with torch.no_grad():
+        el.C[0] += h
+        up = loss().item()
+        el.C[0] -= 2 * h
+        down = loss().item()
+        el.C[0] += h
+    assert grad == pytest.approx((up - down) / (2 * h), rel=1e-4)
+
+
+def test_iterate_batched_convergence_is_per_instance():
+    _, model, state, drivers, _, _ = _build(
+        closures=[_Feedback(2e3)], coupling="iterate", iterate_tol={"species": 1e-12},
+        iterate_max=60,
+    )
+    winds = torch.tensor([[5.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=F64)
+    diag: dict = {}
+    # Ruling R21: at the default Newton tolerance the weaker-wind instance stagnates at the
+    # solver's own noise floor (~2e-11, measured) and never reaches the 1e-12 asked of the
+    # coupling; the SOLVE is asked for the accuracy the assertion needs instead.
+    model.steady(state, dict(drivers, wind=winds), diagnostics=diag, atol=1e-14, rtol=1e-14)
+    assert diag["converged"].shape == (2,) and bool(diag["converged"].all())
+    assert diag["max_change"]["species"].shape == (2,)
+
+
+def test_iterate_non_convergence_names_only_the_failing_batch_instances():
+    """The dictated non-convergence test is unbatched, so it reports "all"; this one pins the
+    per-instance naming the milestone asks for.
+
+    Tight Newton tolerances (ruling R21) so that what instance 1 runs out of is the PASS
+    budget and not the solver's noise floor: at pass 11 the strong-wind instance is at a
+    change of ~6e-15 and the weak-wind one still at ~2e-11 (measured).
+    """
+    tight = {"atol": 1e-14, "rtol": 1e-14}
+    _, model, state, drivers, _, _ = _build(
+        closures=[_Feedback(2e3)], coupling="iterate", iterate_tol={"species": 1e-12},
+        iterate_max=11,
+    )
+    winds = torch.tensor([[5.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=F64)
+    drv = dict(drivers, wind=winds)
+    with pytest.raises(RuntimeError, match=r"instances \[1\]"):
+        model.steady(state, drv, **tight)
+    diag: dict = {}
+    model.steady(state, drv, diagnostics=diag, differentiable=False, on_failure="return",
+                 **tight)
+    assert diag["converged"].tolist() == [True, False]
+    assert diag["max_change"]["species"][0].item() <= 1e-12 < diag["max_change"]["species"][1]
+
+
+def test_iterate_with_a_single_pass_is_never_declared_converged():
+    """`iterate_max=1` is one ping-pong pass with no second pass to compare it against, so
+    the coupling reports failure rather than claim a fixed point it never tested for."""
+    _, model, state, drivers, _, _ = _build(
+        closures=[_Feedback(2e3)], coupling="iterate", iterate_tol={"species": 1e-3},
+        iterate_max=1,
+    )
+    with pytest.raises(RuntimeError, match=r"within 1 passes for instances all"):
+        model.steady(state, drivers)
