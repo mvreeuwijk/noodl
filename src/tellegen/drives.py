@@ -71,3 +71,67 @@ class ConstantDrive:
             return drivers[self.key]
         except KeyError as exc:
             raise KeyError(f"driver {self.key!r} not found") from exc
+
+
+class Stack:
+    """Hydrostatic stack term (CONTAM TN 1887r1 eq. 17 with eq. 64-65 at the path elevation).
+
+    For edge e from node i to node j at elevation z_path, with node reference heights z_ref
+    and densities rho (a full-node driver, `drivers[rho_key]`, shape (..., n)):
+
+        value_e = g * ( rho_i (z_ref_i - z_path_e) - rho_j (z_ref_j - z_path_e) )
+
+    so that dp_e = phi_i - phi_j + value_e is the pressure difference AT the opening.
+    Geometry is read once at construction and is not differentiable; rho is.
+    """
+
+    def __init__(
+        self, kind: str, *, src, tgt, z_path, z_ref, rho_key: str = "rho", g: float = 9.80665
+    ) -> None:
+        self.kind = kind
+        self.src = torch.as_tensor(src, dtype=torch.long)
+        self.tgt = torch.as_tensor(tgt, dtype=torch.long)
+        self.z_path = torch.as_tensor(z_path)
+        self.z_ref = torch.as_tensor(z_ref)
+        if self.z_path.shape != self.src.shape:
+            raise ValueError(
+                f"Stack (kind {kind!r}): z_path has shape {tuple(self.z_path.shape)}, "
+                f"expected {tuple(self.src.shape)} (one value per edge of the kind)"
+            )
+        self.rho_key = rho_key
+        self.g = float(g)
+
+    @classmethod
+    def from_network(
+        cls,
+        net,
+        kind: str,
+        *,
+        z_path: str = "z_path",
+        z_ref: str = "z_ref",
+        rho_key: str = "rho",
+        g: float = 9.80665,
+    ) -> Stack:
+        src, tgt = net.endpoints(kind)
+        return cls(
+            kind,
+            src=src,
+            tgt=tgt,
+            z_path=net.edge_attr(z_path, kind),
+            z_ref=net.node_attr(z_ref, default=0.0),
+            rho_key=rho_key,
+            g=g,
+        )
+
+    def __call__(self, drivers: Mapping[str, torch.Tensor]) -> torch.Tensor:
+        try:
+            rho = drivers[self.rho_key]
+        except KeyError as exc:
+            raise KeyError(
+                f"Stack drive (kind {self.kind!r}): driver {self.rho_key!r} not found"
+            ) from exc
+        z_path = self.z_path.to(rho.dtype)
+        z_ref = self.z_ref.to(rho.dtype)
+        head_src = rho[..., self.src] * (z_ref[self.src] - z_path)
+        head_tgt = rho[..., self.tgt] * (z_ref[self.tgt] - z_path)
+        return self.g * (head_src - head_tgt)
