@@ -340,6 +340,14 @@ def _pinned_pcg_system() -> tuple[GraphLaplacianOperator, torch.Tensor]:
     return op, b
 
 
+# Tolerance for the two `residual` comparisons in `test_pcg_results_are_pinned`, and ONLY
+# them: `residual` is a `vector_norm`, i.e. a cross-lane reduction whose summation order is
+# the BLAS's, not ours. Measured platform disagreement is 1.2 ulp (see that test's
+# docstring); 4 ulps leaves headroom for another BLAS without admitting anything a real
+# arithmetic change could hide in -- such a change moves the bit-exact `x` pin first.
+_NORM_ULP_RTOL = 4 * torch.finfo(torch.float64).eps
+
+
 def test_pcg_results_are_pinned():
     """BIT-IDENTICAL pin of `pcg`'s output on a fixed system (milestone-1b follow-up, Task B).
 
@@ -351,20 +359,35 @@ def test_pcg_results_are_pinned():
     ulp or, where an inactive instance's step holds inf/nan, catastrophically -- and an
     `rtol`-based comparison would wave both through.
 
-    So these values are HARD-CODED from the pre-change implementation (commit dfd4664) and
-    compared with `rtol=0, atol=0`. A failure here means a change altered the numerics; the
-    fix is to drop that change, never to re-record the numbers.
+    So these values are HARD-CODED from the pre-change implementation (commit dfd4664). A
+    failure here means a change altered the numerics; the fix is to drop that change, never
+    to re-record the numbers.
 
     WHAT THE LITERALS ARE A PIN OF. They are a SINGLE-PLATFORM CPU float64 recording:
-    Windows, torch 2.14.0+cpu, 14 threads. Bit-exactness across platforms is not something
-    this test can promise -- a different BLAS, a different thread count over a reduction, or
-    a different vectorisation width may legitimately land in another ulp. The reductions here
-    are tiny (5 unknowns, 3 instances), the scatter-add is deterministic and everything is
-    CPU float64, so the risk is low; it is not zero. If another platform (CI's ubuntu-latest,
-    say) disagrees, that is a finding to INVESTIGATE -- print the differing entries and
-    establish whether the gap is a last-ulp reduction-order difference or a real change --
-    and never a reason to re-record the numbers against that platform, which would destroy
-    the only instrument that can see an arithmetic change at all.
+    Windows, torch 2.14.0+cpu, 14 threads. `x` is compared BIT-EXACTLY (`rtol=0, atol=0`),
+    and that is the instrument: 30 iterate values produced by elementwise arithmetic and
+    deterministic scatter-adds, in which a reordered accumulation or a `torch.where` replaced
+    by a multiplicative mask cannot hide. `residual` is compared to `_NORM_ULP_RTOL` instead,
+    for a reason established by measurement rather than assumed -- see below.
+
+    WHY `residual` IS NOT BIT-EXACT. Run on CI (ubuntu-latest, GitHub Actions, run
+    34791144790) both `x` tensors matched BIT-FOR-BIT, and exactly one of the three converged
+    `residual` entries differed, by 2.6e-16 relative -- 1.2 ulp. That is the expected
+    signature of a cross-lane REDUCTION: `x` comes out of elementwise ops and a scatter-add
+    whose order is fixed by the index array, so it is portable, while `residual` is a
+    `torch.linalg.vector_norm`, whose summation order is the BLAS's business and legitimately
+    differs with vectorisation width and thread count. Pinning it to the last bit pinned
+    someone else's reduction order, not tellegen's arithmetic -- and for the CONVERGED
+    result it pinned the last bit of a ~1e-15 quantity that is pure rounding noise.
+    A few-ulp tolerance still catches everything the pin exists for: the mid-iteration
+    residual is O(1), and any arithmetic change big enough to move a norm by more than a few
+    ulps moves `x` off its bit-exact pin first.
+
+    If another platform disagrees on `x`, or on `residual` by more than a few ulps, that is a
+    finding to INVESTIGATE -- print the differing entries and establish whether it is a
+    reduction-order difference or a real change -- and never a reason to re-record the
+    numbers against that platform, which would destroy the only instrument that can see an
+    arithmetic change at all.
 
     Two runs are pinned. The first (default `max_iter = m = 5`) pins the CONVERGED result,
     where CG's exact-termination property means all three instances finish on the same
@@ -407,7 +430,9 @@ def test_pcg_results_are_pinned():
 
     result = pcg(op, b, rtol=1e-10)
     torch.testing.assert_close(result.x, x_pinned, rtol=0, atol=0)
-    torch.testing.assert_close(result.residual, residual_pinned, rtol=0, atol=0)
+    torch.testing.assert_close(
+        result.residual, residual_pinned, rtol=_NORM_ULP_RTOL, atol=0
+    )
     assert result.iterations.tolist() == [5, 5, 5]
     assert result.converged.tolist() == [True, True, True]
     assert result.status.tolist() == [int(SolverStatus.CONVERGED)] * 3
@@ -444,7 +469,9 @@ def test_pcg_results_are_pinned():
 
     result_mid = pcg(op, b, rtol=1e-10, max_iter=3)
     torch.testing.assert_close(result_mid.x, x_mid_pinned, rtol=0, atol=0)
-    torch.testing.assert_close(result_mid.residual, residual_mid_pinned, rtol=0, atol=0)
+    torch.testing.assert_close(
+        result_mid.residual, residual_mid_pinned, rtol=_NORM_ULP_RTOL, atol=0
+    )
     assert result_mid.iterations.tolist() == [3, 3, 3]
     assert result_mid.converged.tolist() == [False, False, False]
     assert result_mid.status.tolist() == [int(SolverStatus.MAX_ITER)] * 3
