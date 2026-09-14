@@ -139,9 +139,7 @@ re-measured at that sample count; the committed figures are medians of `samples:
 
 - `auto`, ensemble 1, **forward**. The same configuration and code has measured 0.097 s
   (1.94x), 0.104 s (2.08x) and -- under the acceptance gate itself
-  (`test_composed_scaling.py -m slow`, see
-  [`gate-run.log`](.superpowers/sdd/2026-09-13-milestone-1b-followups/gate-run.log)) --
-  0.164 s (3.29x). The row straddles the 2x boundary depending on which run is read, so
+  (`pytest tests/verification/test_composed_scaling.py -m slow`) -- 0.164 s (3.29x). The row straddles the 2x boundary depending on which run is read, so
   whether the rule even fires on it is itself unsettled. Spread 0.097-0.164 s, 1.94x-3.29x,
   against a 0.050 s budget.
 - `cg`, ensemble 1, **backward**. 0.120 s (1.20x, FAIL) here against ~0.100 s (~1.00x, PASS)
@@ -154,9 +152,8 @@ acceptance gate (`test_composed_scaling.py -m slow`) and the report script call 
 measurement functions in `benchmarks/report_composed_scaling.py`, so they should agree. On the
 tree they were both run against (`f3d2ba4`, before the batch threshold existed, so `auto` was
 sparse-direct on all four rows) the gate's forward figures were 1.2-1.7x worse on every row:
-3.29x / 5.16x / 4.96x / 5.13x in
-[`gate-run.log`](.superpowers/sdd/2026-09-13-milestone-1b-followups/gate-run.log) against the
-report's 1.94x / 3.37x / 4.04x / 3.03x for the identical configurations. A systematic gap of
+3.29x / 5.16x / 4.96x / 5.13x from the gate against the report's
+1.94x / 3.37x / 4.04x / 3.03x for the identical configurations. A systematic gap of
 that size between two instruments matters more than either number, because it is the gap that
 decides the verdict on the two rows above. The gate has not been re-run since the threshold
 landed, so the table here is the report script's alone. Both are carried into the next
