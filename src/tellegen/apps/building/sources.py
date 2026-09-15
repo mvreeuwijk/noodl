@@ -34,14 +34,36 @@ class ConstantSource(_NodeSource):
 
 
 class CutoffSource(_NodeSource):
-    """S = G (1 - x / x_cut)  (eq. 17)."""
+    """S = max(G (1 - x / x_cut), 0)  (eq. 17), clamped at the cutoff concentration.
+
+    CONTAM's cutoff-concentration source models generation that shuts OFF once the zone
+    concentration reaches ``x_cut``; it does not model a sink. The bare eq. 17 formula
+    turns negative for ``x > x_cut``, which would silently remove mass never generated --
+    wrong physics for anything that runs a cutoff source past its threshold -- so the rate
+    is clamped at zero above the cutoff.
+
+    The clamp uses this project's guarded ``torch.where`` idiom (see
+    ``elements/powerlaw.py``'s kink): the branch that is *not* selected still gets
+    evaluated by ``torch.where``, so it is fed a substituted, safe input (the cutoff value
+    itself) rather than the true above-cutoff concentration. That keeps the discarded
+    branch's contribution to the backward pass exactly zero everywhere, so no stray
+    gradient (let alone a ``nan``) crosses from the clamped region, and the gradient
+    below the cutoff -- ``-G / x_cut`` -- is exactly unchanged from the unclamped formula.
+    """
 
     def __init__(self, node: int, G: float, x_cut: float) -> None:
         super().__init__(node)
         self.G, self.x_cut = float(G), float(x_cut)
 
     def __call__(self, t: float, x: torch.Tensor) -> torch.Tensor:
-        return self._vector(x, self.G * (1.0 - x[..., self.node] / self.x_cut))
+        xn = x[..., self.node]
+        below = xn <= self.x_cut
+        # xn is only trusted where the formula is actually selected; above the cutoff it
+        # is replaced by the constant x_cut, so torch.where's unselected branch there
+        # carries no gradient dependence on xn at all (see class docstring).
+        x_safe = torch.where(below, xn, torch.full_like(xn, self.x_cut))
+        rate = self.G * (1.0 - x_safe / self.x_cut)
+        return self._vector(x, torch.where(below, rate, torch.zeros_like(xn)))
 
 
 class DecayingSource(_NodeSource):

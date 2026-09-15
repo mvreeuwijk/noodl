@@ -54,3 +54,16 @@ def test_rejects_a_file_that_is_not_a_contam_weather_file(tmp_path):
     f.write_text("EPW,SomeCity\n")
     with pytest.raises(ValueError, match="WeatherFile ContamW"):
         read_wth(f)
+
+
+def test_wind_direction_interpolates_on_the_shorter_arc_across_the_0_360_wrap():
+    # A step from 350 deg to 10 deg sweeps forward through 0 (a 20 deg arc), not
+    # backwards through 180 (a 340 deg arc): the midpoint must be 0, not 180.
+    w = Weather(
+        t=torch.tensor([0.0, 100.0], dtype=torch.float64),
+        Ta=torch.tensor([280.0, 280.0], dtype=torch.float64),
+        Pb=torch.tensor([101000.0, 101000.0], dtype=torch.float64),
+        Ws=torch.tensor([1.0, 1.0], dtype=torch.float64),
+        Wd=torch.tensor([350.0, 10.0], dtype=torch.float64),
+    )
+    assert w.at(50.0)["Wd"] == pytest.approx(0.0, abs=1e-9)

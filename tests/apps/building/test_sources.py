@@ -39,6 +39,33 @@ def test_cutoff_source_vanishes_at_the_cutoff_concentration():
     assert s(0.0, x)[2].item() == pytest.approx(5e-6)
 
 
+def test_cutoff_source_clamps_at_zero_above_the_cutoff_instead_of_reversing_sign():
+    # Controller ruling R31: CONTAM's cutoff source shuts generation off past x_cut; the
+    # bare eq. 17 formula would go negative (a sink) there, which is not the model.
+    s = CutoffSource(node=2, G=1e-5, x_cut=1e-3)
+    x = torch.tensor([0.0, 0.0, 2e-3], dtype=F64)  # 2x the cutoff
+    assert s(0.0, x)[2].item() == 0.0
+
+
+def test_cutoff_source_below_cutoff_still_matches_the_unclamped_formula():
+    s = CutoffSource(node=2, G=1e-5, x_cut=1e-3)
+    x = torch.tensor([0.0, 0.0, 9e-4], dtype=F64)  # just below x_cut
+    expected = 1e-5 * (1.0 - 9e-4 / 1e-3)
+    assert s(0.0, x)[2].item() == pytest.approx(expected)
+
+
+def test_cutoff_source_gradient_is_unchanged_below_cutoff_and_zero_above():
+    s = CutoffSource(node=0, G=1e-5, x_cut=1e-3)
+
+    x_below = torch.tensor([9e-4], dtype=F64, requires_grad=True)
+    s(0.0, x_below)[0].backward()
+    assert x_below.grad.item() == pytest.approx(-1e-5 / 1e-3)
+
+    x_above = torch.tensor([2e-3], dtype=F64, requires_grad=True)
+    s(0.0, x_above)[0].backward()
+    assert x_above.grad.item() == 0.0
+
+
 def test_decaying_source_follows_the_exponential_from_its_start():
     s = DecayingSource(node=0, G0=1e-5, tau=600.0, t0=100.0)
     x = torch.zeros(2, dtype=F64)
