@@ -130,20 +130,44 @@ def test_assisting_wind_matches_the_cubic_root():
     assert _volumetric_inflow(model, ss) == pytest.approx(root, rel=1e-6)
 
 
+def _opposing_wind_case(coupling: str = "iterate"):
+    """Li and Delsante's beta = 0, alpha = 0.9, gamma = 1 three-root example, built HERE for
+    both tests below so the two can never drift into describing different cases.
+
+    Returns the model, its initial state, its drivers, and the `alpha` and `E` the reference
+    cubics and the unstable root's temperature are computed from.
+    """
+    h, alpha = 1.0, 0.9
+    A = math.sqrt(2.0) / CD                          # Cd A* = 1
+    E = alpha**3 / h * RHO_0 * CP_AIR * T_O / G      # B h = alpha^3
+    cp_low, cp_high = -0.3, 0.5                      # top windward: opposes the upflow
+    V = math.sqrt(1.5 / (0.5 * 0.8))                 # |dP_w| = 1.5 -> gamma = 1
+    _, model, state, drivers = _single_zone(
+        A=A, h=h, E=E, cp_low=cp_low, cp_high=cp_high, coupling=coupling
+    )
+    drivers["V_met"] = torch.tensor(V, dtype=F64)
+    return model, state, drivers, alpha, E
+
+
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "Hensen's onion (successive substitution with 0.5 relaxation, which is what "
-        "coupling='iterate' is) CONVERGES here, but both instances land on the SAME stable "
-        "root -- the wind-driven downward q = 1.3993 m^3/s -- whatever the start. The "
-        "measured reason is that the quasi-steady map T -> q(T) -> T = T_o + E/(rho c_p |q|) "
-        "has slope dT_next/dT = -8.4 at the upward root (T - T_o = 46.294 K: q(46.0) = "
-        "0.43167, q(46.3) = 0.45510, giving T_next = 48.761, 46.250), so that root is a "
-        "REPELLING fixed point of the coupling iteration even though it is a dynamically "
-        "STABLE steady state of the physics -- started exactly on it (T - T_o = 46.2943 K) "
-        "the iteration still walks away to 15.0422 K in 52 passes. No tolerance reaches it; "
-        "this is the spec's section 13 monolithic-Newton trigger. The physics itself is "
-        "sound and the model resolves all three roots correctly under TIME STEPPING -- see "
+        "coupling='iterate' CONVERGES here, but both instances land on the SAME stable root "
+        "-- the wind-driven downward q = 1.3993 m^3/s -- whatever the start, so the upward "
+        "root Li and Delsante also call stable is unreachable. Measured cause: the "
+        "quasi-steady map T -> q(T) -> T = T_o + E/(rho c_p |q|) has slope g' = -7.756 at "
+        "the upward root (T - T_o = 46.2943 K, central difference at 1e-3 K), so "
+        "under-relaxed substitution x <- x + omega (g(x) - x) amplifies by "
+        "|1 - omega (1 - g')| = |1 - 8.756 omega|, which is 3.38 at the 0.5 relaxation "
+        "HARD-CODED in Model._iterate: started exactly on the root, the iteration still "
+        "walks away to 15.0422 K in 52 passes. The blocker is that FIXED 0.5, not "
+        "successive substitution as a method -- any omega < 0.228 contracts, and iterating "
+        "these same measured relations at omega = 0.15 from 46.0 K gives 46.414, 46.261, "
+        "46.305, 46.291, 46.295, converging on the root. So: no TOLERANCE reaches it (which "
+        "is what this xfail is about, and why nothing here was loosened), but adaptive or "
+        "user-settable under-relaxation is a candidate remedy alongside the spec's section "
+        "13 monolithic Newton, and the evidence does not choose between them. The physics "
+        "is sound -- the model resolves all three roots under TIME STEPPING, see "
         "test_opposing_wind_multiplicity_resolves_per_instance_under_time_stepping, which "
         "is the per-instance multiplicity check this case is here to make."
     ),
@@ -156,14 +180,7 @@ def test_opposing_wind_three_root_case_converges_per_instance_to_a_stable_root()
     monolithic-Newton trigger: record it in the ledger and mark this test
     xfail(strict=True) with that reason -- do not loosen the tolerances.
     """
-    h = 1.0
-    A = math.sqrt(2.0) / CD                          # Cd A* = 1
-    alpha = 0.9
-    E = alpha**3 / h * RHO_0 * CP_AIR * T_O / G      # B h = alpha^3
-    cp_low, cp_high = -0.3, 0.5                      # top windward: opposes the upflow
-    V = math.sqrt(1.5 / (0.5 * 0.8))                 # |dP_w| = 1.5 -> gamma = 1
-    _, model, state, drivers = _single_zone(A=A, h=h, E=E, cp_low=cp_low, cp_high=cp_high)
-    drivers["V_met"] = torch.tensor(V, dtype=F64)
+    model, state, drivers, alpha, _ = _opposing_wind_case()
     starts = dict(state, **{"thermal.x": torch.tensor([[T_O], [T_O + 40.0]], dtype=F64)})
     diag: dict = {}
     ss = model.steady(starts, drivers, diagnostics=diag, **TIGHT)
@@ -176,15 +193,6 @@ def test_opposing_wind_three_root_case_converges_per_instance_to_a_stable_root()
     assert q[1].item() == pytest.approx(up[0], rel=1e-4)                 # hot start: up
     assert q[0].item() < 0                                               # cold start: down
     assert -q[0].item() == pytest.approx(down[1], rel=1e-4)              # the stable one
-
-
-def _opposing_wind_case():
-    """Li and Delsante's beta = 0, alpha = 0.9, gamma = 1 three-root example."""
-    h, alpha = 1.0, 0.9
-    A = math.sqrt(2.0) / CD                          # Cd A* = 1
-    E = alpha**3 / h * RHO_0 * CP_AIR * T_O / G      # B h = alpha^3
-    V = math.sqrt(1.5 / (0.5 * 0.8))                 # |dP_w| = 1.5 -> gamma = 1
-    return h, alpha, A, E, V
 
 
 def test_opposing_wind_multiplicity_resolves_per_instance_under_time_stepping():
@@ -203,11 +211,7 @@ def test_opposing_wind_multiplicity_resolves_per_instance_under_time_stepping():
     branch, and none on the unstable middle one -- which a start sitting a half kelvin from
     it is the sharp test of.
     """
-    h, alpha, A, E, V = _opposing_wind_case()
-    _, model, _, drivers = _single_zone(
-        A=A, h=h, E=E, cp_low=-0.3, cp_high=0.5, coupling="pingpong"
-    )
-    drivers["V_met"] = torch.tensor(V, dtype=F64)
+    model, _, drivers, alpha, E = _opposing_wind_case("pingpong")
     up = _positive_real_roots([1.0, 0.0, 3.0, -2.0 * alpha**3])          # one root ~0.45
     down = _positive_real_roots([1.0, 0.0, -3.0, 2.0 * alpha**3])        # ~0.54, ~1.40
     dT_unstable = E / (RHO_0 * CP_AIR * down[0])                         # 39.133 K
