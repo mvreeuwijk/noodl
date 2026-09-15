@@ -291,12 +291,13 @@ def test_steady_without_a_sources_driver_keeps_the_states_own_layout():
 
 def test_a_two_species_layer_steps_to_a_steady_state_in_the_stacked_layout():
     # The (n_i, K) half of the "<l>.x" layout promise, including the zero-sources default,
-    # whose stacked branch no single-species test reaches. The steady state is reached by
-    # STEPPING, not by `Model.steady`: `TransportLayer.steady` is unreliable for K > 1
-    # independently of `Model` (measured: its linear solve fails with MAX_ITER/SINGULAR for
-    # 14 of 60 flow magnitudes in 0.005..0.035 kg/s at K=2 and 0 of 60 at K=1, for a system
-    # whose condition number is ~1.0) -- a pre-existing defect of the transport layer,
-    # reported with the numbers in this task's report rather than worked around here.
+    # whose stacked branch no single-species test reaches. Both routes to the steady state
+    # are checked and must agree: STEPPING (what the test's name promises) and
+    # `Model.steady`. The comment that used to stand here said the second route had to be
+    # avoided because `TransportLayer.steady` was unreliable for K > 1 -- true when it was
+    # written, and fixed in Task 8b: a K-species operator is block diagonal with K
+    # identical blocks, so its Krylov space is invariant after n_i steps, and `gmres` was
+    # mishandling that near-breakdown. See `tests/solvers/test_gmres_breakdown.py`.
     model, state, drivers, gas = _build_multi()
     zero = torch.zeros(3, 2, dtype=F64)
     new = model.step(state, drivers, 600.0)
@@ -318,6 +319,13 @@ def test_a_two_species_layer_steps_to_a_steady_state_in_the_stacked_layout():
     )
     res = model.residuals(x, drivers)["gas"]
     assert res.shape == (2, 2) and res.abs().max().item() < 1e-12
+
+    # The same fixed point straight from `Model.steady` (i.e. through the linear solve that
+    # used to fail at K > 1), in the same stacked layout.
+    ss = model.steady(state, drivers)
+    assert ss["gas.x"].shape == (2, 2)
+    torch.testing.assert_close(ss["gas.x"], x["gas.x"], rtol=1e-6, atol=1e-9)
+    assert model.residuals(ss, drivers)["gas"].abs().max().item() < 1e-12
 
 
 def test_closures_and_reactions_are_checked_for_callability_at_construction():

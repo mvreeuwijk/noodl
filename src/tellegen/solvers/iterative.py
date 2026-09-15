@@ -176,8 +176,10 @@ def gmres(
     spectrum produces by construction -- ends its cycle there, at the k+1 system that holds
     the exact solution, instead of extending the basis with noise. Breakdown is per
     instance, like convergence: siblings keep iterating. `exhausted` (reported as SINGULAR)
-    therefore means "the Krylov space was exhausted AND the answer it held still did not
-    converge", i.e. genuine rank deficiency, not a lucky breakdown.
+    is reserved for a breakdown that TRUNCATED a cycle and still did not converge, i.e.
+    genuine rank deficiency -- not a lucky breakdown, and not a basis that merely ran out
+    of room at the last step of its cycle, which is what an ill-conditioned but nonsingular
+    system does routinely.
 
     Implementation flattens every leading batch dimension into one axis `B` for the duration
     of the Arnoldi/Givens bookkeeping (reshaped back to the caller's batch shape at the end):
@@ -288,9 +290,20 @@ def gmres(
                 H[:, j, k] = torch.where(live, h_jk, H[:, j, k])
                 w = w - h_jk.unsqueeze(-1) * v_j
             h_next = torch.linalg.vector_norm(w, dim=-1)
-            newly_exhausted = live & (h_next <= break_rtol * w_norm)
+            newly_broken = live & (h_next <= break_rtol * w_norm)
+            broken = broken | newly_broken
+            # `exhausted` (reported as SINGULAR) is a DIAGNOSIS, and it is only earned by a
+            # breakdown that actually TRUNCATES the cycle. At the final step of a cycle the
+            # test above is a numerical no-op -- the basis has simply completed, there is
+            # no step left to take, and nothing is discarded -- and an ill-conditioned but
+            # perfectly nonsingular system reaches exactly that state routinely: measured,
+            # every one of 120 systems at cond 1e8 and m = 4, 8, 16 ends its last Arnoldi
+            # step under the relative threshold. Flagging those SINGULAR would point a user
+            # at rank deficiency when the truth is conditioning. `broken` above is NOT
+            # gated the same way: the truncation bookkeeping is a no-op at the last step
+            # anyway, and keeping it ungated leaves the freezing rule uniform.
+            newly_exhausted = newly_broken & (k + 1 < cycle_len)
             exhausted = exhausted | newly_exhausted
-            broken = broken | newly_exhausted
             # A detected breakdown is treated as the exact one it numerically is: forcing
             # `h_next` to zero makes the Givens rotation below zero `g[k+1]` outright, so
             # the k+1 system's residual estimate is exactly zero and the cycle's answer is
@@ -298,7 +311,7 @@ def gmres(
             # `V[:, k+1, :]` holding the unnormalised noise remainder -- harmless, because
             # `H[k+1, k+1]` stays zero for a frozen instance and back-substitution
             # therefore multiplies that column by an exactly-zero `y`.
-            h_next = torch.where(newly_exhausted, torch.zeros_like(h_next), h_next)
+            h_next = torch.where(newly_broken, torch.zeros_like(h_next), h_next)
             h_next_safe = torch.where(h_next > tiny, h_next, torch.ones_like(h_next))
             v_next = w / h_next_safe.unsqueeze(-1)
             V[:, k + 1, :] = torch.where(live_col, v_next, V[:, k + 1, :])

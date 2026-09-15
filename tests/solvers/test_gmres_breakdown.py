@@ -156,3 +156,74 @@ def test_steady_gradients_survive_the_breakdown_at_two_species():
         lambda q_, xb_: layer.steady(q_, sources, xb_), (q, xb),
         eps=1e-7, atol=1e-6, rtol=1e-3,
     )
+
+
+def _seeded_system(m: int, seed: int, decades: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """A reproducible nonsymmetric `m x m` system; `decades > 0` spreads the singular values
+    over that many decades (condition number `10 ** decades`), `decades == 0` gives a
+    well-conditioned diagonally dominant one."""
+    gen = torch.Generator().manual_seed(seed)
+    A = torch.randn(m, m, dtype=torch.float64, generator=gen)
+    if decades:
+        U, _, Vh = torch.linalg.svd(A)
+        S = torch.logspace(0, -decades, m, dtype=torch.float64)
+        A = U @ torch.diag(S) @ Vh
+    else:
+        A = A + m * torch.eye(m, dtype=torch.float64)
+    return A, torch.randn(m, dtype=torch.float64, generator=gen)
+
+
+@pytest.mark.parametrize(
+    ("m", "seed", "decades", "atol_x"),
+    [(4, 11, 0, 1e-12), (7, 12, 0, 1e-12), (12, 13, 0, 1e-12),
+     (6, 14, 3, 1e-9), (10, 15, 5, 1e-7), (6, 15, 6, 1e-5)],
+)
+def test_no_legitimate_arnoldi_step_is_misdiagnosed_as_breakdown(m, seed, decades, atol_x):
+    """The FALSE-POSITIVE side of the relative breakdown threshold.
+
+    `eps ** 0.75` (1.8e-12 in float64) is the riskiest constant in this fix: too loose and
+    an ordinary Arnoldi step gets truncated as a breakdown. That is not silently wrong --
+    the cycle's x is judged on the residual recomputed with the real operator -- but with
+    the default `max_iter = m` there is no budget for a second cycle, so a false positive
+    shows up here as non-convergence. Two of these are deliberately ill conditioned (1e3
+    and 1e5), where the smallest legitimate `h_next / ||A v_k||` measured over random dense
+    systems of size 4..64 bottoms out around 2.6e-10, i.e. two orders above the threshold.
+    The last case, `(6, 15, 6)`, is the tightest-margin system found by scanning 4500
+    seeded systems for the smallest non-final `h_next / ||A v_k||`: 4.37e-08, still four
+    orders above `eps ** 0.75`, and it still converges.
+
+    `atol_x` tracks the forward-error floor `cond * eps`, which is a property of the system,
+    not of the solver: the residual assertion below is the solver's own promise.
+    """
+    A, b = _seeded_system(m, seed, decades)
+    result = gmres(DenseOperator(A, symmetric=False), b)  # max_iter defaults to m
+
+    assert bool(result.converged)
+    assert int(result.status) == int(SolverStatus.CONVERGED)
+    assert int(result.iterations) <= m
+    assert float(result.residual) <= 1e-10
+    torch.testing.assert_close(result.x, torch.linalg.solve(A, b), rtol=1e-6, atol=atol_x)
+
+
+@pytest.mark.parametrize("m", [4, 8, 16])
+def test_ill_conditioned_but_nonsingular_systems_are_not_reported_singular(m):
+    """SINGULAR must mean rank deficiency, not conditioning.
+
+    At `cond = 1e8` and the default `rtol = 1e-10`, these systems do not converge -- their
+    relative residuals stall around 1e-8, and 50x the budget does not help. That is a
+    conditioning limit and the honest report is MAX_ITER. They are NOT rank deficient, and
+    SINGULAR would send a reader looking for a defect in their network.
+
+    The trap this pins: the Arnoldi breakdown test fires at the FINAL step of a cycle for
+    every one of these, where it is a numerical no-op (the basis has simply completed and
+    nothing is truncated). Accumulating `exhausted` there turned all 120 of the systems
+    this sweep covers into SINGULAR; only a breakdown that actually truncates a cycle
+    earns the flag.
+    """
+    for seed in range(1000 * m, 1000 * m + 40):
+        A, b = _seeded_system(m, seed, 8)
+        result = gmres(DenseOperator(A, symmetric=False), b)
+        assert int(result.status) != int(SolverStatus.SINGULAR), (
+            f"m = {m}, seed = {seed}: cond 1e8 but NOT rank deficient, reported SINGULAR "
+            f"with relative residual {float(result.residual):.3e}"
+        )
