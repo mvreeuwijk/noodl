@@ -166,8 +166,44 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
                 coupling: str = "pingpong", iterate_tol=None, iterate_max: int = 20,
                 thermal_scheme: str = "exact", species_scheme: str = "implicit",
                 flow_kinds=None) -> Model:
-    """Layers "air" (+ "thermal", + "species"), the density closure, one Model."""
-    kinds = tuple(flow_kinds) if flow_kinds else tuple(el.kind for el in air_elements)
+    """Layers "air" (+ "thermal", + "species"), the density closure, one Model.
+
+    TWO COUPLING TRAPS, both inherited from `Model` (see `tellegen.model.Model`, the class
+    docstring's "Two couplings"), because this builder chooses the coupling but never calls
+    `step`/`steady` itself -- solve tolerances are per-call `**solve_kwargs` on those methods,
+    so neither trap is fixable here:
+
+    1. `coupling` DEFAULTS TO `"pingpong"`, which is exactly ONE pass. A
+       `build_model(...).steady(...)` at the defaults therefore solves the airflow at the
+       state the closures saw -- the INITIAL temperatures -- and never re-converges it
+       against the temperatures it produced, reporting a zero thermal residual for that one
+       pass. On the linear-density single zone that returns T_z = 366.0327 K, exactly
+       `T_o + S / (c_p F(293.15 K))`, and not the coupled answer. This is correct ping-pong
+       (Hensen 1995) and it is silent; pass `coupling="iterate"` with `iterate_tol` whenever
+       the airflow depends on the temperatures it carries.
+    2. `iterate_tol` is an ABSOLUTE tolerance in the layer's own units (K for "thermal"), and
+       it cannot be met below the potential solve's residual floor propagated through
+       `dT/dF`. Newton's default residual tolerance is dtype-derived (`sqrt(eps)`, 1.49e-8 for
+       float64); at `dT/dF ~ 3.6e3 K.s/kg` that is ~5e-5 K of noise, so an `iterate_tol` of
+       1e-9 K stalls and `steady` raises, naming the layer, the change and the tolerance. A
+       tight `iterate_tol` requires a matching `atol`/`rtol` on the `steady`/`step` call.
+
+    `flow_kinds` NARROWS which edge kinds advect heat and species; it defaults to every air
+    element's kind, which is what a building network wants. Naming a subset is deliberate
+    (a duct kind that carries mass but whose heat is modelled elsewhere), so it is allowed --
+    but every kind named must be one the air layer actually provides, or the narrowing is a
+    typo that silently drops advection. Unknown kinds raise `KeyError` naming them. The same
+    value governs BOTH the thermal and the species layer.
+    """
+    element_kinds = tuple(el.kind for el in air_elements)
+    kinds = tuple(flow_kinds) if flow_kinds else element_kinds
+    unknown = [k for k in kinds if k not in element_kinds]
+    if unknown:
+        raise KeyError(
+            f"build_model: flow_kinds names {unknown}, which no air element provides "
+            f"(the air elements' kinds are {list(element_kinds)}); a kind the air layer does "
+            f"not solve carries no flow, so heat and species would silently not advect on it"
+        )
     air = PotentialFlowLayer(net, "air", list(air_elements), drives=list(drives),
                              boundary=[ambient], quantity="pressure", unit="Pa")
     layers: dict = {"air": air}
@@ -193,13 +229,29 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
 
 
 def initial_state(model: Model) -> State:
-    """"thermal.x" from the node attribute T0 (interior order), "species.x" zeros."""
+    """`"<layer>.x"` for every transport layer: temperatures from the node attribute `T0`
+    (interior order), mass fractions zero.
+
+    Keyed by each layer's OWN name, and dispatched on its `quantity` tag rather than on the
+    names `"thermal"`/`"species"`: a layer renamed through `thermal_layer(name=...)` must
+    still get its state, and must never be answered with a silently EMPTY state that only
+    surfaces later as `Model`'s "state '<name>.x' is required" from inside a step. A
+    transport layer whose `quantity` this application does not know is refused by name for
+    the same reason.
+    """
     state: State = {}
-    th = model.layers.get("thermal")
-    if isinstance(th, TransportLayer):
-        state["thermal.x"] = model.net.node_attr("T0", default=T_REF)[th.interior_idx]
-    sp = model.layers.get("species")
-    if isinstance(sp, TransportLayer):
-        shape = (sp.n_i,) if sp.n_species == 1 else (sp.n_i, sp.n_species)
-        state["species.x"] = torch.zeros(shape, dtype=model.net.dtype)
+    for name, layer in model.transport.items():
+        if layer.quantity == "temperature":
+            state[f"{name}.x"] = model.net.node_attr("T0", default=T_REF)[layer.interior_idx]
+        elif layer.quantity == "mass_fraction":
+            shape = (layer.n_i,) if layer.n_species == 1 else (layer.n_i, layer.n_species)
+            state[f"{name}.x"] = torch.zeros(shape, dtype=model.net.dtype)
+        else:
+            raise ValueError(
+                f"initial_state: transport layer {name!r} has quantity "
+                f"{layer.quantity!r}, which the building application has no initial value "
+                f"for (it knows 'temperature' and 'mass_fraction'); build it with "
+                f"thermal_layer/species_layer, or set that layer's own state key "
+                f"{name + '.x'!r} yourself"
+            )
     return state

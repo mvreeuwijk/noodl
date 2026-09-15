@@ -23,6 +23,8 @@ from tellegen.apps.building.thermal import (
     thermal_layer,
 )
 from tellegen.drives import Stack
+from tellegen.layers.transport import TransportLayer
+from tellegen.model import Model
 from tellegen.topology import Network
 
 F64 = torch.float64
@@ -136,10 +138,12 @@ def test_density_closures_write_rho_and_rho_amb_in_node_order():
 
 def test_gradients_flow_through_the_application_built_model():
     """Loss on the zone temperature after one ping-pong step; gradients to the heat source
-    driver and to the leakage coefficient, against central differences."""
-    net, model, state, drivers, el = _single_zone(coupling="pingpong")
+    driver, to the boundary temperature driver and to the leakage coefficient, against
+    central differences."""
+    net, _, _, drivers, _ = _single_zone()
     el_learn = orifice_elements_from_edges(net, "airpath", learnable=True)
     model = build_model(net, air_elements=[el_learn], drives=[Stack.from_network(net, "airpath")])
+    state = initial_state(model)
     src = drivers["thermal.sources"].clone().requires_grad_(True)
     drv = dict(drivers, **{"thermal.sources": src})
 
@@ -169,6 +173,17 @@ def test_gradients_flow_through_the_application_built_model():
         downC = loss(drivers).item()
         el_learn.C[0] += hC
     assert gC == pytest.approx((upC - downC) / (2 * hC), rel=1e-4)
+    # ... and to the BOUNDARY VALUE driver, through the density closure and the transport
+    # layer's boundary block (this backward accumulates into el_learn.C.grad again, so it
+    # comes after gC has been read).
+    Tb = drivers["thermal.x_boundary"].clone().requires_grad_(True)
+    loss(dict(drivers, **{"thermal.x_boundary": Tb})).backward()
+    hT = 1e-5
+    upT = loss(dict(drivers, **{"thermal.x_boundary": drivers["thermal.x_boundary"] + hT}))
+    downT = loss(dict(drivers, **{"thermal.x_boundary": drivers["thermal.x_boundary"] - hT}))
+    assert Tb.grad[0].item() == pytest.approx(
+        (upT.item() - downT.item()) / (2 * hT), rel=1e-6
+    )
 
 
 def test_thermal_layer_refuses_a_node_with_no_heat_capacity():
@@ -178,6 +193,28 @@ def test_thermal_layer_refuses_a_node_with_no_heat_capacity():
     net.add_edge("ambient", "z", kind="airpath", z_path=0.0, Cd=0.6, area=0.01)
     with pytest.raises(ValueError, match=r"thermal.*'z'.*capacity"):
         thermal_layer(net)
+
+
+def test_build_model_refuses_a_flow_kind_no_air_element_provides():
+    """Narrowing `flow_kinds` to a kind the air layer does not solve would silently stop heat
+    (and species) advecting on it; it is named, not dropped."""
+    net, _, _, _, el = _single_zone()
+    with pytest.raises(KeyError, match=r"flow_kinds.*'duct'.*airpath"):
+        build_model(net, air_elements=[el], drives=[Stack.from_network(net, "airpath")],
+                    flow_kinds=("airpath", "duct"))
+
+
+def test_initial_state_keys_transport_layers_by_their_own_name():
+    """A renamed thermal layer still gets its state; an unknown quantity is refused by name
+    rather than answered with a silently empty state."""
+    net, model, _, _, _ = _single_zone()
+    heat = thermal_layer(net, name="heat")
+    st = initial_state(Model(net, {"air": model.layers["air"], "heat": heat}))
+    assert list(st) == ["heat.x"] and st["heat.x"].tolist() == [293.15]
+    odd = TransportLayer(net, "odd", capacity=torch.ones(1, dtype=F64), flow_kind="airpath",
+                         boundary=["ambient"])
+    with pytest.raises(ValueError, match=r"initial_state.*'odd'.*quantity"):
+        initial_state(Model(net, {"air": model.layers["air"], "odd": odd}))
 
 
 def test_species_layer_uses_zone_air_mass_as_capacity():
