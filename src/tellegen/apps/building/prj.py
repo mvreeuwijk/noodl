@@ -66,13 +66,23 @@ MU_0 = 1.81625e-5
 #     plr_orfc      `lam turb expt area dia coef Re u_A u_D`
 #     plr_leak3     `lam turb expt coef pres area1 area2 area3 u u u u`
 #     fan_cmf       `Flow u_F`
-#     dor_door      `lam turb expt dTmin ht wd cd u_H u_W`
-#     dor_pl2       `lam turb expt dH    ht wd cd u_H u_W`
+#     dor_door      10 fields: `lam turb expt dTmin ht wd cd u u u`. VERIFIED against
+#                   `reg_solverContTrace-mz-MH-trans-3day.prj` lines 704-706, the one NIST
+#                   sample that carries a doorway:
+#                       18 27 dor_door IntDoor-open
+#                       open interior door
+#                        0.148966 2.54558 0.5 0.01 2 0.9 1 0 0 0
+#                   Reading that as ht = 2, wd = 0.9, cd = 1 reproduces the record's OWN
+#                   turbulent coefficient through CONTAM's identity turb = cd A sqrt(2):
+#                   1 * (2 * 0.9) * sqrt(2) = 2.545584, against the file's 2.54558 -- six
+#                   significant figures, so fields 4, 5 and 6 are pinned by NIST's numbers.
+#     dor_pl2       `lam turb expt dH    ht wd cd u u`
 #                   -- the two doorway types differ ONLY in field 3 (a minimum temperature
 #                   difference versus the half-separation of the two openings); `ht wd cd`
 #                   sit at 4, 5, 6 in both, which is why the code below has ONE assignment
-#                   for them (Ruling R9). No NIST sample carries a doorway, so this pair is
-#                   documented from TN 1887r1 Appendix A rather than verified against a file.
+#                   for them (Ruling R9). The `dor_pl2` half is documented from TN 1887r1
+#                   Appendix A and from the milestone plan's own dictated record: no NIST
+#                   sample carries a dor_pl2, so only `dor_door` is file-verified.
 #     plr_bdq/bdf   `lam Cp xp Cn xn ...`
 #   zone            19 fields: `# f s# c# k# l# relHt Vol T0 P0 name clr uH uT uP uV axs
 #                   cdvf cfd`. `clr` is not in ContamW's own header comment but IS written.
@@ -270,12 +280,57 @@ def _read_run_control(lines: _Lines) -> tuple[dict[str, float], float]:
     return ambient, g
 
 
+def _read_contaminants(lines: _Lines, count: int) -> None:
+    """Consume the `N ! contaminants:` section: N species INDICES, then no terminator.
+
+    The indices are whitespace-separated and CONTAM writes them all on ONE line (`   1 2 3`),
+    so this counts TOKENS, not lines. A per-line loop happens to work for a single-species
+    project and then eats the `N ! species:` header of every other one -- verified on
+    `reg_solverContTrace-mz-MH-trans-3day.prj` (2 contaminants, `   1 2`) and
+    `test_OneFloorWpcAddMf.prj` (3, `   1 2 3`). The section has no -999 of its own: the
+    species section follows it directly.
+    """
+    seen = 0
+    while seen < count:
+        seen += len(lines.record())
+    if seen != count:
+        raise ValueError(
+            f"prj: the 'contaminants' section promises {count} species indices but its "
+            f"lines carry {seen}"
+        )
+
+
 def _read_species(lines: _Lines, count: int, species: list[str]) -> None:
     for _ in range(count):
         tok = lines.record()
         species.append(tok[-1])                     # name is the last field of the line
         lines.raw()                                 # the species' description line
     lines.expect_end("species")
+
+
+def _read_initial_concentrations(
+    lines: _Lines, count: int, x0_rows: dict[int, list[float]]
+) -> None:
+    """One row per zone, `Z# x1 .. xK`; the section's count is VALUES, not rows.
+
+    Every other section's header count is a record count, but this one's is zones times
+    species: `test_OneFloorWpcAddMf.prj:171` heads TWO zone rows with `6` (2 zones, 3
+    species). So read rows to the terminator and use the count as the integrity check it
+    is. A single-species project hides the difference, which is why this was invisible on
+    the shipped fixtures.
+    """
+    values = 0
+    while True:
+        tok = lines.record()
+        if tok == ["-999"]:
+            break
+        x0_rows[int(tok[0])] = [float(v) for v in tok[1:]]
+        values += len(tok) - 1
+    if values != count:
+        raise ValueError(
+            f"prj: the 'initial zone concentrations' section promises {count} values "
+            f"(zones x species) but its rows carry {values}"
+        )
 
 
 def _read_levels(lines: _Lines, count: int, levels: dict[int, float]) -> None:
@@ -468,10 +523,7 @@ def read_prj(path) -> Project:
             continue
         count, name = _section_header(lines)
         if name == "contaminants":
-            # `N ! contaminants:` is followed by N index lines and then DIRECTLY by the
-            # species section -- it has no -999 of its own (verified on the NIST sample).
-            for _ in range(count):
-                lines.record()
+            _read_contaminants(lines, count)
         elif name == "species":
             _read_species(lines, count, species)
         elif name == "levels plus icon data":
@@ -485,10 +537,7 @@ def read_prj(path) -> Project:
         elif name == "zones":
             _read_zones(lines, count, zones)
         elif name == "initial zone concentrations":
-            for _ in range(count):
-                tok = lines.record()
-                x0_rows[int(tok[0])] = [float(v) for v in tok[1:]]
-            lines.expect_end("initial zone concentrations")
+            _read_initial_concentrations(lines, count, x0_rows)
         elif name == "flow paths":
             _read_paths(lines, count, paths, levels)
         elif name == "source/sinks":
@@ -566,8 +615,9 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         first = el.data[0]
         if d in _DOOR:
             # `ht wd cd` sit at fields 4, 5, 6 for BOTH doorway types; only field 3 differs
-            # (dor_door's dTmin versus dor_pl2's half-separation dH). See the layout block
-            # at the top of this module (Ruling R9).
+            # (dor_door's dTmin versus dor_pl2's half-separation dH). Verified for dor_door
+            # against NIST's own record and its turb = cd A sqrt(2) identity; see the layout
+            # block at the top of this module (Ruling R9).
             ht, wd, cd = first[4], first[5], first[6]
             dh = (2.0 * ht / 9.0) if d == "dor_door" else first[3]
             area = wd * ht / 2.0

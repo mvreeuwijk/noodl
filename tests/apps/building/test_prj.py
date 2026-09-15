@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 import torch
 
-from tellegen.apps.building.prj import Project, project_to_model, read_prj
+from tellegen.apps.building.prj import (
+    _PATH_FIELDS,
+    Project,
+    project_to_model,
+    read_prj,
+)
 from tellegen.elements import Damper, FixedFlow, PowerLaw
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "contam"
@@ -106,15 +111,58 @@ def test_reads_the_hand_written_doorway_damper_fan_project():
     assert len(fans) <= 1
 
 
+def test_a_doorway_reads_ht_wd_and_cd_from_fields_4_5_and_6():
+    """Ruling R9, verified against NIST's own numbers.
+
+    `doorway_damper_fan.prj` element 5 is `reg_solverContTrace-mz-MH-trans-3day.prj`'s
+    `dor_door` record copied verbatim: ` 0.148966 2.54558 0.5 0.01 2 0.9 1 0 0 0`, i.e.
+    `lam turb expt dTmin ht wd cd`. Three independent assertions pin all three fields --
+    the sum of C alone cannot, because CONTAM's identity turb = cd A sqrt(2) is symmetric
+    under swapping `wd` and `cd`.
+    """
+    p = read_prj(MIXED)
+    (door,) = [el for el in p.elements if el.kind == "door_5"]
+    ht, wd, cd, turb, rho = 2.0, 0.9, 1.0, 2.54558, 1.2041
+
+    # field 4 (ht): dor_door derives its half-separation as 2 ht / 9, nothing else.
+    z = p.net.edge_attr("z_path", "door_5")
+    assert (z[1] - z[0]).item() == pytest.approx(2 * (2 * ht / 9))
+    # field 6 (cd) on its own, and field 5 (wd) through the half-opening area wd ht / 2:
+    # swapping the two would give Cd 0.9 and area 1.0 instead.
+    assert p.net.edge_attr("Cd", "door_5").tolist() == pytest.approx([cd, cd])
+    assert p.net.edge_attr("area", "door_5").tolist() == pytest.approx([wd * ht / 2] * 2)
+    # And the whole conversion against the record's OWN turbulent coefficient: the two
+    # openings together must be turb sqrt(rho) (the file rounds turb to six figures).
+    assert door.C.sum().item() == pytest.approx(turb * math.sqrt(rho), rel=1e-5)
+
+
+def test_reads_a_multi_species_project():
+    """A `N ! contaminants:` section lists its N indices on ONE line, not one per line.
+
+    With a per-line loop the reader ate the `3 ! species:` header and then its comment
+    line, and five NIST demo projects were unreadable with an error blaming the wrong
+    record. `doorway_damper_fan.prj` carries three species so both failure modes are
+    pinned (>= 2 eats the header, >= 3 eats the comment too).
+    """
+    p = read_prj(MIXED)
+    assert p.species == ["sarin", "CO", "tracer"]
+    assert p.x0.shape == (1, 3)
+    torch.testing.assert_close(p.x0, torch.tensor([[0.0, 1e-4, 0.0]], dtype=F64))
+    # And `initial zone concentrations` heads its ONE zone row with 3 -- that section's
+    # count is zones x species, not rows (NIST heads two rows with 6 in the three-species
+    # `test_OneFloorWpcAddMf.prj`). A reader taking it as a row count reads past the row.
+
+
 def test_the_round_trip_keeps_levels_zone_numbers_and_sources():
     """Ruling R5: Task 13 resolves a source's zone through `zone_nr_to_name`, not by position."""
     p = read_prj(MIXED)
     assert p.zones == ["singleZone"]
     assert p.zone_nr_to_name == {1: "singleZone"}
     assert p.net.node_attr("z_ref", default=0.0).tolist() == [0.0, 0.0]   # level 1 refHt 0
-    # relHt 0, 3, 1, 2, 2.5 on a level whose refHt is 0 -> z_path = refHt + relHt.
+    # relHt 0, 3, 1, 2, 2.5, 1.5 on a level whose refHt is 0 -> z_path = refHt + relHt,
+    # the two doorways splitting theirs by +/- dH and +/- 2 ht / 9.
     assert sorted(p.net.edge_attr("z_path").tolist()) == pytest.approx(
-        [0.0, 0.5556, 1.4444, 2.0, 2.5, 3.0]
+        [0.0, 0.5556, 1.5 - 4 / 9, 1.4444, 1.5 + 4 / 9, 2.0, 2.5, 3.0]
     )
     (src,) = p.sources
     assert (src.nr, src.zone_nr, src.element_nr) == (1, 1, 1)
@@ -128,34 +176,35 @@ def test_the_round_trip_keeps_levels_zone_numbers_and_sources():
 def test_path_flows_index_q_in_the_layers_kind_block_layout():
     """Ruling R2: `q` is laid out in element-KIND blocks, not in path order.
 
-    `doorway_damper_fan.prj` has four kinds. Network edge order is path order --
-    pl_2, pl_2, door_3, door_3, bd_4, fan_1 -- but `PotentialFlowLayer` concatenates
-    per element, in `project.elements` order, so the two layouts differ.
+    `doorway_damper_fan.prj` has five kinds. Network edge order is path order --
+    pl_2, pl_2, door_3, door_3, bd_4, fan_1, door_5, door_5 -- but `PotentialFlowLayer`
+    concatenates per element, in `project.elements` order, so the two layouts differ.
     """
     p = read_prj(MIXED)
     offsets, offset = {}, 0
     for el in p.elements:
         offsets[el.kind] = offset
         offset += p.net.edge_index(el.kind).numel()
-    assert offset == p.net.b == 6
+    assert offset == p.net.b == 8
     expected = {
         1: [offsets["pl_2"] + 0],
         2: [offsets["pl_2"] + 1],
         3: [offsets["door_3"] + 0, offsets["door_3"] + 1],
         4: [offsets["bd_4"] + 0],
         5: [offsets["fan_1"] + 0],
+        6: [offsets["door_5"] + 0, offsets["door_5"] + 1],
     }
     assert {path.nr: path.edge_columns for path in p.paths} == expected
-    # A naive running counter in PATH order would give [0], [1], [2, 3], [4], [5].
-    assert [path.edge_columns for path in p.paths] != [[0], [1], [2, 3], [4], [5]]
+    # A naive running counter in PATH order would give the network's own edge order.
+    naive = [[0], [1], [2, 3], [4], [5], [6, 7]]
+    assert [path.edge_columns for path in p.paths] != naive
 
     q = torch.arange(p.net.b, dtype=F64)
     flows = p.path_flows(q)
-    assert flows.tolist() == [float(sum(expected[nr])) if nr == 3 else float(expected[nr][0])
-                              for nr in (1, 2, 3, 4, 5)]
+    assert flows.tolist() == [float(sum(expected[nr])) for nr in (1, 2, 3, 4, 5, 6)]
     # And batched, so Task 14 can compare a whole time series at once.
     batched = p.path_flows(q.expand(7, p.net.b))
-    assert batched.shape == (7, 5)
+    assert batched.shape == (7, 6)
     torch.testing.assert_close(batched[0], flows)
 
 
@@ -274,3 +323,55 @@ def test_a_truncated_file_raises_rather_than_returning_half_a_project(tmp_path):
     out.write_text(text.split("   2    0   1   2   3")[0])
     with pytest.raises(ValueError, match=r"ended in the middle of a record"):
         read_prj(out)
+
+
+def _set_path_field(text: str, path_nr: int, index: int, value: str) -> tuple[str, str]:
+    """(old line, rewritten line) with field `index` of path `path_nr` set to `value`.
+
+    Rewriting a field in place keeps the record at its 30 fields, so the length check
+    cannot stand in for the flag check the test is actually making.
+    """
+    for line in text.splitlines():
+        tok = line.split()
+        if len(tok) == _PATH_FIELDS and tok[0] == str(path_nr):
+            new = list(tok)
+            new[index] = value
+            return line, " ".join(new)
+    raise AssertionError(f"no {_PATH_FIELDS}-field path record numbered {path_nr}")
+
+
+def test_the_path_record_carries_cdvf_and_cfd_at_fields_28_and_29(tmp_path):
+    """A path line has 30 fields: an unnamed `clr` sits between `dir` and `u[4]`.
+
+    ContamW's own header comment omits it, which is where the brief's 27/28 came from.
+    Every shipped fixture reads 0 at 27, 28 AND 29, so without this test a regression to
+    27/28 leaves the whole file green -- while refusing most NIST projects, whose field 27
+    (`u[4]`'s last unit code) takes values 0, 1, 3 and 4.
+    """
+    text = THREE.read_text()
+    old, new = _set_path_field(text, 2, 28, "1")
+    with pytest.raises(ValueError, match=r"path 2.*values file \(cdvf 1\)"):
+        read_prj(_variant(text, old, new, tmp_path))
+    old, new = _set_path_field(text, 2, 29, "1")
+    with pytest.raises(ValueError, match=r"path 2.*CFD \(cfd 1\)"):
+        read_prj(_variant(text, old, new, tmp_path))
+    # Field 27 is a display-unit code, NOT cdvf: a nonzero there must load.
+    old, new = _set_path_field(text, 2, 27, "4")
+    assert [path.nr for path in read_prj(_variant(text, old, new, tmp_path)).paths] == [
+        1, 2, 3, 4
+    ]
+
+
+def test_a_zone_reading_a_continuous_values_file_is_refused(tmp_path):
+    """`cdvf` at zone field 17, between `axs` (16) and `cfd` (18), both already pinned."""
+    text = THREE.read_text()
+    zone1 = "   1  3   0   0   0   1   0.000   300 293.15 0 one -1 0 2 0 0 0 0 0"
+    with pytest.raises(ValueError, match=r"zone 1.*continuous values file"):
+        read_prj(
+            _variant(
+                text,
+                zone1,
+                "   1  3   0   0   0   1   0.000   300 293.15 0 one -1 0 2 0 0 0 1 0",
+                tmp_path,
+            )
+        )
