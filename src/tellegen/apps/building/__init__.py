@@ -6,6 +6,14 @@ units (milestone 2 spec 6.4). Nothing under `src/tellegen/` outside `apps/` impo
 here.
 """
 
+# `contamx` drives NIST's ContamX through the OPTIONAL `contamxpy` package. Importing it
+# here is safe: the module imports `contamxpy` lazily, inside the call, so a tellegen
+# installed without the `contam` extra still imports this package cleanly and only a call
+# to `run_steady`/`run_transient` raises the ImportError that names the missing package.
+from tellegen.apps.building.contamx import (
+    run_steady,
+    run_transient,
+)
 from tellegen.apps.building.elements import (
     add_large_opening,
     mass_orifice,
@@ -58,6 +66,8 @@ __all__ = [
     "project_to_model",
     "read_prj",
     "read_wth",
+    "run_steady",
+    "run_transient",
     "species_layer",
     "sources_from_project",
     "thermal_layer",

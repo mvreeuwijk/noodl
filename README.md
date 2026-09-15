@@ -194,6 +194,13 @@ certificate for **every** `linear_solver` -- `"direct"` and `"sparse_direct"` in
 because an ungrounded instance is a singular system whichever backend is asked to solve it,
 and the layer would rather name the floating nodes than hand back a plausible wrong answer.
 
+## Installation
+
+`pip install -e .[dev]`, or on Windows x86-64 `pip install -e .[dev,contam]`, which adds
+NIST's `contamxpy` (it bundles the ContamX 3.4.1.7 engine) and so enables the ContamX parity
+tests in `tests/verification/test_contam_parity.py`; `-m external` is not needed, they run
+when the package imports and skip themselves otherwise, including on every non-Windows CI.
+
 ## Quick start
 
 ```python

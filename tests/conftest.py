@@ -68,3 +68,11 @@ def composed_model():
     scaling gate (Task 14). Tests must not mutate the returned model's elements.
     """
     return build_composed()
+
+
+@pytest.fixture
+def contamx():
+    """NIST's contamxpy (bundles ContamX 3.4.1.7; Windows x86-64). Skips when absent."""
+    return pytest.importorskip(
+        "contamxpy", reason="contamxpy not installed: pip install .[contam] (Windows only)"
+    )
