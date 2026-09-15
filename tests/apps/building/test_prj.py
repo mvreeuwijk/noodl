@@ -19,6 +19,11 @@ from tellegen.elements import Damper, FixedFlow, PowerLaw
 DATA = Path(__file__).resolve().parents[2] / "data" / "contam"
 THREE = DATA / "valThreeZonesWthCtm-UseApi.prj"
 MIXED = DATA / "doorway_damper_fan.prj"
+# NIST's own one-zone stack demo. Ruling R30 replaced it with the unfiltered
+# `test_OneZoneWthCtmStack-UseApi.prj` for the ContamX parity comparison because it attaches
+# a constant-efficiency filter to path 1; it stays in the fixture set as the project that
+# pins the refusal.
+SS_STACK = DATA / "test_OneZoneSsStack-UseApi.prj"
 F64 = torch.float64
 
 
@@ -235,6 +240,18 @@ def test_a_path_naming_an_absent_wind_profile_raises_naming_edge_and_number(tmp_
     path1 = "   1    1  -1   1   3   0   3   0"
     with pytest.raises(KeyError, match=r"profile number 7"):
         read_prj(_variant(text, path1, "   1    1  -1   1   3   0   7   0", tmp_path))
+
+
+def test_the_filtered_one_zone_stack_project_is_refused_naming_the_filter():
+    """Ruling R30, on NIST's own file rather than on a hand-edited variant.
+
+    A filter is invisible to the airflow solve but not to the species layer, so loading this
+    project would silently drop a 10% sarin sink on path 1 and return contaminant results
+    that are wrong with nothing saying so. This is also the only test that references this
+    fixture at all; without it the file sat in `tests/data/contam/` unused.
+    """
+    with pytest.raises(ValueError, match=r"path 1.*filter 1"):
+        read_prj(SS_STACK)
 
 
 def test_unsupported_records_raise_naming_the_offender(tmp_path):

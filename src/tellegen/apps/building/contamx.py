@@ -47,7 +47,14 @@ def _isolated(prj_path):
         yield Path(tmp) / src.name
 
 
-def _open(prj_path, ambient: dict):
+def _open(prj_path, ambient: dict, *, reported_as=None):
+    """Set up a ContamX simulation on `prj_path`.
+
+    `reported_as` is the path the CALLER named. `prj_path` is always the scratch COPY
+    `_isolated` made (in a temporary directory that is deleted before the caller ever sees
+    the exception), so naming it in the refusal message points at a path that no longer
+    exists and that the caller never asked for. Report the original.
+    """
     cxLib = _cxlib()
 
     def init(cx):
@@ -62,7 +69,10 @@ def _open(prj_path, ambient: dict):
     cx.setVerbosity(0)
     if cx.setupSimulation(1):
         cx.endSimulation()
-        raise RuntimeError(f"contamx: ContamX refused {prj_path} (setupSimulation != 0)")
+        raise RuntimeError(
+            f"contamx: ContamX refused "
+            f"{prj_path if reported_as is None else reported_as} (setupSimulation != 0)"
+        )
     return cx
 
 
@@ -117,7 +127,7 @@ def _result(cx, flows, mf, dt=None) -> dict:
 def run_steady(prj_path, *, ambient: dict) -> dict:
     """Path net flows [kg/s] and zone mass fractions after the initial steady-state solve."""
     with _isolated(prj_path) as prj:
-        cx = _open(prj, ambient)
+        cx = _open(prj, ambient, reported_as=prj_path)
         try:
             flows, mf = _snapshot(cx)
             return _result(cx, flows, mf)
@@ -129,7 +139,7 @@ def run_transient(prj_path, *, steps: int, ambient: dict) -> dict:
     """`steps` steps of the project's own time step; results stacked with the initial state
     first: flow (steps+1, n_paths), mf (steps+1, n_zones, K)."""
     with _isolated(prj_path) as prj:
-        cx = _open(prj, ambient)
+        cx = _open(prj, ambient, reported_as=prj_path)
         try:
             dt = float(cx.getSimTimeStep())
             f0, m0 = _snapshot(cx)

@@ -8,6 +8,7 @@ from tellegen.elements.fan import FanCurve
 from tellegen.elements.fixed import FixedFlow
 from tellegen.elements.powerlaw import Orifice, PowerLaw
 from tellegen.elements.quadratic import Quadratic
+from tellegen.elements.upstream import UpstreamDensityPowerLaw
 
 __all__ = [
     "Conductance",
@@ -19,4 +20,5 @@ __all__ = [
     "Orifice",
     "PowerLaw",
     "Quadratic",
+    "UpstreamDensityPowerLaw",
 ]

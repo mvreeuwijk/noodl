@@ -20,6 +20,15 @@ crossing is dp_t = (C_mass mu / (lam rho))^(1/(1-n)). One element KIND per CONTA
 (`pl_<nr>`, `qf_<nr>`, `door_<nr>`, `bd_<nr>`, `fan_<nr>`), so every element keeps its own
 transition and the transport layers advect over all of them.
 
+The `rho` in those coefficients is the density of the air ENTERING the path, not a fixed
+reference: ContamX re-evaluates it per path and per flow direction. Every power-law kind is
+therefore built as an `UpstreamDensityPowerLaw`, whose `C` is the coefficient at RHO_0 (as
+above) and which multiplies it by `(rho_upstream / RHO_0)**m` at solve time, m being 0, 1/2
+or 1 for the three CONTAM families. Freezing it at RHO_0 instead costs about 0.086% per
+kelvin of zone-to-ambient temperature difference -- 1.7% in mass flow on a 20 K stack. The
+quadratic, damper and fan families keep their reference-density coefficients (they are not
+part of this milestone's parity evidence); `dp_t` above likewise stays at RHO_0.
+
 Dtype (Ruling R7): `torch.get_default_dtype()` is float32 in this repository, and a CONTAM
 parity comparison is a float64 exercise. The `Network`, every element parameter and every
 tensor `Project` carries are built with an EXPLICIT float64 dtype -- never by letting a
@@ -36,7 +45,13 @@ import torch
 
 from tellegen.apps.building.thermal import R_AIR, RHO_0, species_layer
 from tellegen.drives import Stack, Wind, WindProfile
-from tellegen.elements import Damper, FanCurve, FixedFlow, PowerLaw, Quadratic
+from tellegen.elements import (
+    Damper,
+    FanCurve,
+    FixedFlow,
+    Quadratic,
+    UpstreamDensityPowerLaw,
+)
 from tellegen.layers.potential import PotentialFlowLayer
 from tellegen.model import Model
 from tellegen.topology import Network
@@ -599,7 +614,14 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     built: list = []
     per_kind_C: dict[str, list[float]] = {}
     per_kind_n: dict[str, list[float]] = {}
+    # Density exponent m of the upstream-density correction, per edge: 0 for the mass-flow
+    # family, 1/2 for the sqrt(rho) family (orifice/leak/crack and both doorway openings),
+    # 1 for the volumetric one. See `UpstreamDensityPowerLaw`.
+    per_kind_m: dict[str, list[float]] = {}
     per_kind_dpt: dict[str, list[float]] = {}
+    # The NETWORK edge column of every per-edge coefficient appended above, in append order,
+    # so the ordering `endpoints(kind)` assumes can be ASSERTED rather than trusted below.
+    per_kind_cols: dict[str, list[int]] = {}
     per_kind_quad: dict[str, list[tuple[float, float]]] = {}
     path_edges: list[list[int]] = []          # per path, its NETWORK edge columns
     column = 0
@@ -628,6 +650,8 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
                     p.mult * cd * area * math.sqrt(2.0 * RHO_0)
                 )
                 per_kind_n.setdefault(kind, []).append(0.5)
+                per_kind_m.setdefault(kind, []).append(0.5)
+                per_kind_cols.setdefault(kind, []).append(column)
                 cols.append(column)
                 column += 1
             path_edges.append(cols)
@@ -639,13 +663,15 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         if d in _POWERLAW:
             lam, turb, expt = first[0], first[1], first[2]
             if d in _POWERLAW_SQRT_RHO:
-                C = turb * math.sqrt(RHO_0)
+                C, m = turb * math.sqrt(RHO_0), 0.5
             elif d in _POWERLAW_VOLUME:
-                C = RHO_0 * turb
+                C, m = RHO_0 * turb, 1.0
             else:
-                C = turb
+                C, m = turb, 0.0
             per_kind_C.setdefault(kind, []).append(p.mult * C)
             per_kind_n.setdefault(kind, []).append(expt)
+            per_kind_m.setdefault(kind, []).append(m)
+            per_kind_cols.setdefault(kind, []).append(column - 1)
             dpt = (
                 (C * MU_0 / (lam * RHO_0)) ** (1.0 / (1.0 - expt))
                 if (lam > 0 and expt < 1)
@@ -686,15 +712,40 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
                 )
             )
 
-    # Power-law kinds: one PowerLaw per kind with per-edge C, n and the kind's (shared)
-    # transition. The transition is the element's own, so it is the same for every edge
-    # of the kind; edges only differ by `mult`.
+    # Power-law kinds: one `UpstreamDensityPowerLaw` per kind with per-edge C, n, m and the
+    # kind's (shared) transition. The transition is the element's own, so it is the same for
+    # every edge of the kind; edges only differ by `mult`.
+    #
+    # C is still the coefficient at the REFERENCE density RHO_0; the element multiplies it
+    # by (rho_upstream / RHO_0)**m at solve time, which is what ContamX does (TN 1887r1
+    # section 3.2) and what the isothermal-only reference value gets wrong by about 0.086%
+    # per kelvin of zone-to-ambient temperature difference. `dp_transition` deliberately
+    # stays at reference conditions -- see the element's docstring.
     for kind, Cs in per_kind_C.items():
         ns = per_kind_n[kind]
+        ms = per_kind_m[kind]
         dpt = per_kind_dpt.get(kind, [1e-3])[0]
+        # `endpoints(kind)` returns (src, tgt) in `edge_index(kind)` order, which is also the
+        # order `PotentialFlowLayer` slices this element's dp block in. The per-edge C/n/m
+        # lists above were appended in PATH order, and a doorway contributes TWO edges per
+        # path -- so the two orders agree only because every edge of a kind is added to the
+        # network at the moment its coefficient is appended. Assert it: a silent mismatch
+        # would pair each edge with another edge's endpoints and give the correction the
+        # wrong upstream node, with no exception anywhere.
+        cols_in_append_order = per_kind_cols[kind]
+        cols_in_network_order = net.edge_index(kind).tolist()
+        if cols_in_append_order != cols_in_network_order:
+            raise RuntimeError(
+                f"prj: element kind {kind!r} built its per-edge coefficients in edge order "
+                f"{cols_in_append_order} but the network orders that kind's edges "
+                f"{cols_in_network_order}; the upstream-density endpoints would be "
+                f"misaligned"
+            )
+        src, tgt = net.endpoints(kind)
         built.append(
-            PowerLaw(
+            UpstreamDensityPowerLaw(
                 torch.tensor(Cs, dtype=F64), torch.tensor(ns, dtype=F64),
+                src=src, tgt=tgt, m=torch.tensor(ms, dtype=F64), rho_ref=RHO_0,
                 dp_transition=dpt, kind=kind,
             )
         )
