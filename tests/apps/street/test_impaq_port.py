@@ -142,3 +142,36 @@ def test_network_from_street_network_keeps_the_street_order_and_geometry():
     np.testing.assert_allclose(converted.roads.height_m, reference.roads.height_m)
     np.testing.assert_allclose(converted.roads.roughness_m, reference.roads.roughness_m)
     np.testing.assert_allclose(converted.roads.emission_rate, emission)
+
+
+def test_flow_route_mis_permutes_its_answer_at_a_three_way_junction():
+    """A third defect, beyond the prototype's documented issues A and B.
+
+    `flow_route` sorts the incident streets by angle and then un-sorts with `order`
+    instead of `argsort(order)`. Every permutation of one or two elements is its own
+    inverse, so nothing shows at a dead end or a two-way junction; a three-way junction
+    whose sort is a proper 3-cycle has its rows scrambled, and the matrix stops conserving
+    each street's own flux. The port reproduces it -- it is the oracle, not the model.
+    """
+    # Angles chosen so that argsort is the 3-cycle (0 -> 2 -> 1 -> 0).
+    fluxes = np.array([5.0, -2.0, -3.0])
+    angles = np.array([2.0, 5.0, 0.5])
+    assert np.argsort(angles).tolist() == [2, 0, 1]
+    routing = flow_route(fluxes, angles)
+    rows = routing[:3, :].sum(axis=1)
+    sent = np.clip(fluxes, 0.0, None)
+    # Street 0 carries all 5 m3/s into the node and should be the only row with a total.
+    assert float(np.max(np.abs(rows - sent))) > 1.0
+    # An involution (two streets, or a self-inverse three-way sort) hides it completely.
+    two = flow_route(np.array([5.0, -5.0]), np.array([3.0, 0.0]))
+    assert abs(float(two[0, :].sum()) - 5.0) < 1e-12
+
+
+def test_fix_b_alone_is_refused_when_intersections_outnumber_roads():
+    from tellegen.apps.street.impaq import build_transport_system
+
+    network, layer = _case()
+    network.intersections.x = np.concatenate([network.intersections.x, [1.0, 2.0, 3.0]])
+    network.intersections.y = np.concatenate([network.intersections.y, [1.0, 2.0, 3.0]])
+    with pytest.raises(ValueError, match=r"fix_b without fix_a is only defined"):
+        build_transport_system(network, layer, fix_a=False, fix_b=True)
