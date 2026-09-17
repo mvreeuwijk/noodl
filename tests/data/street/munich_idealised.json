@@ -1,0 +1,198 @@
+{
+  "source": [
+    "Kim, Lugon, Maison, Sarica, Roustan, Valari, Zhang, Andre, Sartelet (2022), MUNICH",
+    "v2.0, Geosci. Model Dev. 15, 7371-7396, Fig. 1 and its caption, p. 7374"
+  ],
+  "transcription": [
+    "The concentrations are printed as TEXT inside the figure's raster at two decimal",
+    "places, so this table is exact to the paper's own precision and carries no",
+    "digitisation error. A blank cell means no number was printed beside that street; the",
+    "caption's threshold is 0.005 ug/m3 (see `.superpowers/munich-formulas.md` section",
+    "5.4)."
+  ],
+  "unpublished": [
+    "The paper gives no street length, width or building height, no emission rate, no",
+    "friction velocity, no boundary-layer height, no Monin-Obukhov length and no",
+    "background concentration; the Zenodo package (10.5281/zenodo.6167477) is the",
+    "577-street Paris case, and no 12-street input file exists anywhere in the MUNICH git",
+    "history. ABSOLUTE concentrations therefore cannot be reproduced -- only ratios and",
+    "patterns."
+  ],
+  "blank_threshold_ug_m3": 0.005,
+  "emitting_street": "11",
+  "streets": [
+    {
+      "id": "1",
+      "u": "N1",
+      "v": "A"
+    },
+    {
+      "id": "2",
+      "u": "N2",
+      "v": "B"
+    },
+    {
+      "id": "3",
+      "u": "E3",
+      "v": "A"
+    },
+    {
+      "id": "4",
+      "u": "A",
+      "v": "B"
+    },
+    {
+      "id": "5",
+      "u": "B",
+      "v": "E5"
+    },
+    {
+      "id": "6",
+      "u": "C",
+      "v": "A"
+    },
+    {
+      "id": "7",
+      "u": "D",
+      "v": "B"
+    },
+    {
+      "id": "8",
+      "u": "E8",
+      "v": "C"
+    },
+    {
+      "id": "9",
+      "u": "C",
+      "v": "D"
+    },
+    {
+      "id": "10",
+      "u": "D",
+      "v": "E10"
+    },
+    {
+      "id": "11",
+      "u": "E11",
+      "v": "C"
+    },
+    {
+      "id": "12",
+      "u": "D",
+      "v": "E12"
+    }
+  ],
+  "scenarios": [
+    {
+      "panel": "a",
+      "wind_from_deg": 210,
+      "speed_mps": 5.0,
+      "theta_w_rad": 1.0471975511965976
+    },
+    {
+      "panel": "b",
+      "wind_from_deg": 240,
+      "speed_mps": 5.0,
+      "theta_w_rad": 0.5235987755982988
+    },
+    {
+      "panel": "c",
+      "wind_from_deg": 270,
+      "speed_mps": 5.0,
+      "theta_w_rad": 0.0
+    },
+    {
+      "panel": "d",
+      "wind_from_deg": 210,
+      "speed_mps": 10.0,
+      "theta_w_rad": 1.0471975511965976
+    },
+    {
+      "panel": "e",
+      "wind_from_deg": 240,
+      "speed_mps": 10.0,
+      "theta_w_rad": 0.5235987755982988
+    },
+    {
+      "panel": "f",
+      "wind_from_deg": 270,
+      "speed_mps": 10.0,
+      "theta_w_rad": 0.0
+    }
+  ],
+  "wind_convention": [
+    "The paper's directions are meteorological -- the direction the wind comes FROM,",
+    "degrees clockwise from north. theta_w_rad is the same wind in this application's",
+    "convention: the direction it blows TOWARDS, radians counter-clockwise from east,",
+    "i.e. radians((-90 - wind_from_deg) mod 360)."
+  ],
+  "concentrations_ug_m3": {
+    "a": {
+      "1": 0.05,
+      "4": 0.08,
+      "6": 2.33,
+      "7": 0.22,
+      "9": 4.77,
+      "11": 101.31
+    },
+    "b": {
+      "7": 0.22,
+      "9": 4.63,
+      "10": 0.16,
+      "11": 104.8
+    },
+    "c": {
+      "9": 0.28,
+      "10": 0.02,
+      "11": 109.16
+    },
+    "d": {
+      "1": 0.03,
+      "4": 0.04,
+      "6": 1.16,
+      "7": 0.11,
+      "9": 2.39,
+      "11": 50.66
+    },
+    "e": {
+      "7": 0.11,
+      "9": 2.32,
+      "10": 0.08,
+      "11": 52.4
+    },
+    "f": {
+      "9": 0.07,
+      "11": 54.73
+    }
+  },
+  "fitted_geometry": {
+    "comment": [
+      "The best uniform geometry over a 150-point grid of H in {5, 8, 12, 20, 30} m, W/H in",
+      "{0.25, 0.5, 1, 2, 4} and L/H in {2, 5, 10, 20, 40, 80}, scored on the five printed",
+      "ratios of panel (a). It is NOT the paper's geometry, which is unpublished; it is the",
+      "assumption this comparison is made under, and it is stated here so the residual",
+      "below can be read."
+    ],
+    "L_m": 2400.0,
+    "W_m": 7.5,
+    "H_m": 30.0,
+    "u_star_from": "Macdonald (1998) log law at z_ref = 30 m on the network means",
+    "h_abl_m": 500.0
+  },
+  "options": {
+    "canyon_wind": "exponential",
+    "exchange": "schulte",
+    "routing": "sirane",
+    "direction_averaging": "munich",
+    "kappa": 0.41,
+    "canyon_wind_min": 0.1,
+    "u_d_min": 0.001,
+    "roof_wind_form": "macdonald",
+    "z_ref": 30.0,
+    "comment": [
+      "K22 Table 2's reference option set, except that the roof wind is MACDONALD rather",
+      "than SIRANE -- K22 pp. 7380 and 7382 recommend Macdonald on the strength of Maison",
+      "et al. (2022), and it is the option this comparison was measured with."
+    ]
+  }
+}

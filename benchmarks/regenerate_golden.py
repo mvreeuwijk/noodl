@@ -146,6 +146,16 @@ def _impaq_test_network_case() -> dict:
     }
 
 
+def _munich_idealised_case() -> dict:
+    """The model's own 12x6 answer on the published idealised case, so that a change in
+    the routing, the direction averaging or the canyon wind shows up as a diff."""
+    from tests.verification.test_munich import _fixture, _run
+
+    out, _names = _run(_fixture())
+    return {panel: {street: float(value) for street, value in row.items()}
+            for panel, row in out.items()}
+
+
 def main() -> None:
     data = {
         "series": _series_case(),
@@ -159,6 +169,8 @@ def main() -> None:
     print("wrote tests/golden/natural_ventilation.json")
     save_golden("impaq_test_network", _impaq_test_network_case())
     print("wrote tests/golden/impaq_test_network.json")
+    save_golden("munich_idealised", _munich_idealised_case())
+    print("wrote tests/golden/munich_idealised.json")
 
 
 if __name__ == "__main__":
