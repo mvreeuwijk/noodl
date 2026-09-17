@@ -21,6 +21,15 @@ from tellegen.apps.street.canyon import (
     roof_wind,
     soulhac_shape,
 )
+from tellegen.apps.street.routing import (
+    StreetFlows,
+    StreetGeometry,
+    direction_offsets,
+    n_theta_munich,
+    node_closure,
+    routing_matrix,
+    sigma_theta_munich,
+)
 
 __all__ = [
     "GAMMA_E",
@@ -31,10 +40,17 @@ __all__ = [
     "Z0_B_DEFAULT",
     "Z0_S_DEFAULT",
     "BoundaryLayer",
+    "StreetFlows",
+    "StreetGeometry",
     "boundary_layer",
     "canyon_velocity",
+    "direction_offsets",
     "exchange_velocity",
     "macdonald_profile",
+    "n_theta_munich",
+    "node_closure",
     "roof_wind",
+    "routing_matrix",
+    "sigma_theta_munich",
     "soulhac_shape",
 ]
