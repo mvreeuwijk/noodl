@@ -370,7 +370,9 @@ def main() -> None:
     # species one, through `Model.step`, under the shipped default solver and against that
     # row's own section 6.1 budgets. It is a gate row like any other, so it counts towards
     # `all_budgets_met` below; `tests/verification/test_composed_scaling.py` asserts on the
-    # same measurement.
+    # same measurement. The report therefore holds TWO `(100, 24, "auto")` rows, identical in
+    # every key but `"thermal"`, which is what tells them apart -- and, read side by side,
+    # what the added layer costs on one machine in one run.
     thermal_row = measure_budget_row(
         *next(r for r in BUDGET_TABLE if r[0] == 100 and r[1] == 24), thermal=True
     )

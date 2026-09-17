@@ -426,6 +426,9 @@ def workload_forward(
     tree-elimination levels are all construction- or first-solve-time caches). Both still
     happen inside the process whose peak RSS `isolated_peak_rss` measures, which is correct:
     the memory budget is for the whole configuration, caches included.
+
+    `x_final_mean` is a checksum, not a physical quantity: on a `thermal=True` row it is the
+    mean of the concatenated co2 and thermal states, i.e. a mixed ppm/kelvin number.
     """
     model = build_composed(
         n_buildings=n_buildings,

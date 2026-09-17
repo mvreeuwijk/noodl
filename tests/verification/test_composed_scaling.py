@@ -282,8 +282,10 @@ def test_composed_model_with_thermal_layer_24_steps_within_budget():
 
     It is judged against the SAME section 6.1 budgets as the 100x24 row (12 s forward, 25 s
     backward, that row's memory budget), which is what makes the comparison mean anything:
-    the configuration differs from that row in the added layer alone. A miss is a FAILED
-    gate, recorded in the README and the ledger; the budgets are never edited here.
+    the configuration differs from that row in the added layer and the `Model.step` dispatch
+    around it (the closure loop, the driver lookups, `flows_of_kind` and the per-pass dict
+    copies), and in nothing else. A miss is a FAILED gate, recorded in the README and the
+    ledger; the budgets are never edited here.
     """
     ensemble, steps, forward_budget, backward_budget, memory_budget = next(
         r for r in BUDGET_TABLE if r[0] == 100 and r[1] == 24

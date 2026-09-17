@@ -242,10 +242,10 @@ makes the result checkable against an engine other than itself.
 - The building application `apps/building`: `Zone`, `WallMass`, `thermal_layer`,
   `species_layer`, `IdealGasDensity`, `LinearDensity`, `build_model`, `add_large_opening`,
   `mass_orifice`.
-- Readers: the CONTAM `.prj` reader (a documented subset; it REFUSES on a record referencing
-  an unsupported section; multi-species; 30-field path records) with `project_to_model`, the
-  `.wth` weather reader, and the four CONTAM source types (`CutoffSource` clamped at zero
-  above the cutoff).
+- Readers: the CONTAM `.prj` reader (a documented subset -- multi-species, 30-field path
+  records -- which REFUSES on a record referencing an unsupported section) with
+  `project_to_model`, the `.wth` weather reader, and the four CONTAM source types
+  (`CutoffSource` clamped at zero above the cutoff).
 - The ContamX driver over `contamxpy` (marked `external`, installed by the `contam` extra).
 - `UpstreamDensityPowerLaw`, the upstream-density correction on CONTAM power-law elements
   that the spec required.
@@ -280,15 +280,51 @@ case was off by 1.7e-2.
 (`slow`): the reference composed model at ensemble 100 for 24 steps, with air, species AND
 heat stepped together through `Model.step`, judged against the SAME section 6.1 budgets as
 the 100x24 row above -- 12 s forward, 25 s backward, 2000 MB -- because it differs from that
-row in the added layer alone. Solver `auto`, `samples: 3`, medians of three child processes
-as every other row is.
+row in the added layer and the `Model.step` dispatch around it. Solver `auto`, `samples: 3`,
+medians of three child processes as every other row is. **It misses both time budgets.**
 
-| Configuration | Forward | Backward | Peak memory |
+| Measured | Forward | Backward | Peak memory |
 |---|---|---|---|
-| ensemble 100, 24 steps, air + species + heat | `<<GATE NUMBERS: filled by controller run>>` | `<<GATE NUMBERS: filled by controller run>>` | `<<GATE NUMBERS: filled by controller run>>` |
+| the gate, run in isolation | 91.189 s vs 12 s (7.60x) FAIL | 38.258 s vs 25 s (1.53x) FAIL | 510.9 MB vs 2000 MB (0.26x) PASS (fwd 118.4, bwd 510.9) |
+| the same row inside the report script, back to back with every other row | 170.872 s (14.24x) FAIL | 75.533 s (3.02x) FAIL | 508.5 MB (0.25x) PASS |
 
-The milestone-1b forward-time misses are carried into this milestone unchanged, and no budget
-was edited for this row or any other. One measurement note belongs with it: the composed
+`newton_iterations` 4, `linear_iterations_max` 180, `method` `auto`, per
+[`benchmarks/composed_scaling_report.json`](benchmarks/composed_scaling_report.json), which
+now carries two `(100, 24, "auto")` rows distinguished only by `"thermal"`.
+
+**Today's absolute times are not comparable to the 1b table above, and the machine is why.**
+Every PRE-EXISTING row in the new report is 1.8x-4.4x slower than the committed 1b report --
+(100, 24, `auto`) forward 40.7 s then against 71.869 s now, (1000, 1, `auto`) 13.3 s then
+against 58.340 s now -- which on its own would be indistinguishable from a regression on this
+branch. A discriminating experiment separates them: rows (1, 1, `auto`) and (100, 1, `auto`)
+were measured at this branch's HEAD and at the merge base `e982efe` in the same venv,
+interleaved HEAD/BASE/HEAD, giving forward 0.457 / 0.439 / 0.392 s and 6.735 / 6.211 /
+6.608 s. HEAD and base are within noise of each other, so **the branch has not regressed**:
+the machine is 2-4x slower today than when the 1b table was recorded, and noisy within the
+morning -- (100, 1, `auto`) measured 2.900 s inside the report run and 6.7 s an hour later.
+So the figures above cannot be read against the 1b table, and reading them against the
+budgets says as much about the machine as about the code.
+
+**The meaningful figure is the WITHIN-RUN ratio.** The report run measured the thermal row
+and the plain 100x24 `auto` row back to back on the same machine, and there the thermal
+configuration costs **2.38x forward** (170.872 s / 71.869 s) and **3.06x backward**
+(75.533 s / 24.714 s), for 508.5 MB of peak against 424.9 MB. That is the cost of the second
+transport layer and its `Model.step` dispatch, and it is the number to carry forward.
+
+**The two instruments disagree more widely than they did in 1b.** The isolated gate run
+measured this row 1.9x FASTER than the report script did (91.189 s against 170.872 s) --
+opposite in sign to milestone 1b, where the gate was 1.2-1.7x SLOWER than the report on
+every row. Both call the same measurement functions. The discrepancy is carried into the next
+milestone as a measurement defect to understand, as 1b already carried it.
+
+**Spec section 13's trigger has fired.** Its condition -- the 24-step composed gate missing
+by more than 2x with the thermal layer -- is met on the forward budget under both instruments
+(7.60x and 14.24x), so the milestone-1b spec's section 6.2 routes apply. That is RECORDED
+here as a follow-up; nothing was fixed, re-measured to a friendlier verdict, or re-budgeted
+for it. The milestone-1b forward-time misses are likewise carried into this milestone
+unchanged, and no budget was edited for this row or any other.
+
+One measurement note belongs with the row: the composed
 model's transport layer now has 960 active rows rather than 1028, because the street and sewer
 nodes carry no airpath edge and per-layer inactive nodes removed them, so the transport half of
 a step now measures about 6.6% less work than the milestone-1b table's rows did.
@@ -302,8 +338,10 @@ a step now measures about 6.6% less work than the milestone-1b table's rows did.
    remedy ALONGSIDE the spec's monolithic Newton. Ping-pong TIME STEPPING resolves all three
    roots, and a test asserts that it does.
 2. The remaining 4.4e-5 stack residual against ContamX is the `Stack` drive's constant
-   node-density hydrostatic column against ContamX's variable-density integration: it is
-   linear in opening height and independent of the temperature difference.
+   node-density hydrostatic column against ContamX's variable-density integration. By
+   construction of that column the discrepancy is linear in opening height and independent of
+   the temperature difference -- that is what the constant-density form implies, not a fitted
+   or measured scaling.
 3. `dp_transition`, quadratic, damper and `fan_cvf` elements still use the REFERENCE density.
 4. Newton at `atol=rtol=1e-14` hard-fails on a three-zone stack after 50 iterations (residual
    1.22e-13), so coupling tolerances that tight are reachable on one- and two-zone cases only.

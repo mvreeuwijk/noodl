@@ -358,7 +358,7 @@ in its capacity, its carrier, its `quantity`/`unit` tags, and in having conducti
 **Conduction is the Laplacian term.** Edges of the layer's `conduction_kind`, carrying a
 conductance `UA`, contribute `-UA` to the diagonal and `+UA` off-diagonal -- the weighted
 graph Laplacian of that edge set, symmetric and negative semi-definite -- which is added to
-the advective `M`. Advection alone is a (negative) Metzler matrix and so positivity- (here,
+the advective `M`. Advection alone is a Metzler matrix and so positivity- (here,
 maximum-principle-) preserving under the schemes of section 6; adding a Laplacian keeps that
 structure, since it too has non-negative off-diagonals. A wall-mass node carries conduction
 edges and NO airpath edge: it is an unknown of the thermal layer and not of a species layer
@@ -366,10 +366,12 @@ over the same network, which is why a layer's active interior is per layer rathe
 global.
 
 **Why a drive is a function of the drivers alone.** The airflow solve is a nodal problem
-`A f(A^T phi + d) = s` whose Jacobian is `A diag(f') A^T`: symmetric, and positive definite
-once grounded, precisely because the branch head `d` (the stack and wind terms) does not
-depend on `phi`. Making `d` a function of the thermal STATE would not break that -- `phi` is
-still the only unknown of the solve -- but making it a function of `phi` or of `f` would, and
+`A f(A^T phi + d) = s` whose Jacobian is `A diag(f') A^T`. It is the branch head `d` (the
+stack and wind terms) NOT depending on `phi` that buys this form, and with it the symmetry;
+positive definiteness then follows from the element slopes `f' > 0` and from the network
+being grounded (a boundary node, so `A^T` has trivial null space), which are separate
+requirements the layer checks separately. Making `d` a function of the thermal STATE would
+not disturb any of that -- `phi` is still the only unknown of the solve -- but making it a function of `phi` or of `f` would, and
 a drive that closed over the flow it produces (say, an upstream density evaluated from the
 flow direction) is exactly such a term. The framework therefore defines a `Drive` as a
 function of the DRIVERS only: the node densities entering a stack head are computed from the
