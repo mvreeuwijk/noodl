@@ -324,6 +324,23 @@ def test_a_density_driver_too_short_for_the_endpoints_raises_value_error():
         el.flow(torch.tensor([1.0], dtype=F64), {"rho": torch.tensor([1.2], dtype=F64)})
 
 
+def test_a_non_positive_density_raises_value_error_naming_the_node_instead_of_nan():
+    """Without this check `rho = [-1.0, 1.2]` silently produces `flow() == nan`: a negative
+    density raised to `m = 1/2` is a complex number, and torch collapses that to `nan` with
+    no exception anywhere. The offending node's own index must be named."""
+    el = _element(0.5)
+    bad = {"rho": torch.tensor([-1.0, 1.2], dtype=F64)}
+    with pytest.raises(ValueError, match=r"not strictly positive at node index/indices \[0\]"):
+        el.flow(torch.tensor([1.0], dtype=F64), bad)
+
+
+def test_a_zero_density_at_the_target_node_also_raises_naming_it():
+    el = _element(0.5)
+    bad = {"rho": torch.tensor([1.2, 0.0], dtype=F64)}
+    with pytest.raises(ValueError, match=r"not strictly positive at node index/indices \[1\]"):
+        el.flow(torch.tensor([1.0], dtype=F64), bad)
+
+
 # ------------------------------------------------------------------ in a layer
 def test_a_buoyant_two_orifice_stack_beats_the_uncorrected_law_in_both_directions():
     """ambient (boundary) -> zone through two openings at different heights, the classic

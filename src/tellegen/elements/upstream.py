@@ -150,7 +150,30 @@ class UpstreamDensityPowerLaw(PowerLaw):
                 f"{self.rho_key!r} has {n_nodes} node values but this element's endpoints "
                 f"reach node index {needed - 1}"
             )
+        self._check_positive(rho)
         return rho
+
+    def _check_positive(self, rho: Tensor) -> None:
+        """Raise on a non-positive density rather than let it reach `flow` as a silent `nan`.
+
+        `(rho / rho_ref) ** m` is a real power of a physical density; a non-positive value
+        (a caller's bug upstream, not a property of a converged solve) turns `m = 1/2` into
+        `nan` with no exception anywhere. This is a CHECK, not a clamp -- it only inspects the
+        driver values this element actually gathers (its own `src`/`tgt` node positions) and
+        raises before the arithmetic runs; it does not touch the gradient path.
+        """
+        nodes = torch.cat([self.src, self.tgt]) if self.src.numel() else self.src
+        if nodes.numel() == 0:
+            return
+        gathered = rho[..., nodes]
+        bad = gathered <= 0
+        if bool(bad.any()):
+            bad_here = bad.reshape(-1, nodes.numel()).any(dim=0)
+            offenders = sorted(set(nodes[bad_here].tolist()))
+            raise ValueError(
+                f"UpstreamDensityPowerLaw (kind {self.kind!r}): driver {self.rho_key!r} is "
+                f"not strictly positive at node index/indices {offenders}"
+            )
 
     def _ratio(self, rho: Tensor, nodes: Tensor) -> Tensor:
         return (rho[..., nodes] / self.rho_ref) ** self.m.to(rho.dtype)
@@ -195,9 +218,15 @@ class UpstreamDensityPowerLaw(PowerLaw):
         `dp = 0` is exactly where the coefficient switches, so neither one-sided slope is
         more right than the other; the mean is direction-neutral and keeps the initial
         operator symmetric positive definite. This only seeds Newton's first iterate.
+
+        The base class's own offset `c` is scaled by the same `mean` factor rather than
+        discarded: `PowerLaw.linear_init` happens to return `c = 0` today, so the offset
+        this element seeds Newton with is zero either way, but that is a fact about
+        `PowerLaw`'s implementation, not a contract of the base class's return type. Scaling
+        `c` here keeps this element correct even if a future `PowerLaw` (or a different base
+        class) ever returned a nonzero offset.
         """
         c, k = super().linear_init(drivers)
         rho = self._rho(drivers)
         mean = 0.5 * (self._ratio(rho, self.src) + self._ratio(rho, self.tgt))
-        k = mean * k
-        return torch.zeros_like(k), k
+        return mean * c, mean * k

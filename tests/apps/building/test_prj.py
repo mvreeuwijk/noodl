@@ -14,7 +14,7 @@ from tellegen.apps.building.prj import (
     project_to_model,
     read_prj,
 )
-from tellegen.elements import Damper, FixedFlow, PowerLaw
+from tellegen.elements import Damper, FixedFlow, UpstreamDensityPowerLaw
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "contam"
 THREE = DATA / "valThreeZonesWthCtm-UseApi.prj"
@@ -65,12 +65,43 @@ def test_network_edges_follow_the_paths_with_ambient_as_minus_one():
 def test_element_coefficients_follow_contam_conventions():
     p = read_prj(THREE)
     (el,) = p.elements
-    assert isinstance(el, PowerLaw) and el.kind == "pl_3"
+    # `plr_orfc` is the sqrt(rho) CONTAM family: the reader must build the UPSTREAM-density
+    # correction, not a plain `PowerLaw` (which `UpstreamDensityPowerLaw` satisfies too, so
+    # `isinstance(el, PowerLaw)` alone would not catch a revert to the uncorrected element).
+    assert isinstance(el, UpstreamDensityPowerLaw) and el.kind == "pl_3"
     turb_mass = 0.141421 * math.sqrt(1.2041)          # orifice: turb * sqrt(rho) (spec 14)
     torch.testing.assert_close(el.C, torch.full((4,), turb_mass, dtype=F64))
     torch.testing.assert_close(el.n, torch.full((4,), 0.5, dtype=F64))
+    torch.testing.assert_close(el.m, torch.full((4,), 0.5, dtype=F64))
+    src, tgt = p.net.endpoints("pl_3")
+    torch.testing.assert_close(el.src, src)
+    torch.testing.assert_close(el.tgt, tgt)
     lam, mu, rho = 0.00237882, 1.81625e-5, 1.2041
     assert el.dp_transition == pytest.approx((turb_mass * mu / (lam * rho)) ** (1 / 0.5))
+
+
+def test_a_mass_flow_family_kind_gets_exponent_zero(tmp_path):
+    """`plr_fcn` (and `plr_test1/2`, `plr_conn`, `plr_stair`, `plr_shaft`) is CONTAM's
+    mass-flow family: C is already a mass-flow coefficient, so the upstream-density
+    correction must apply exponent m = 0 -- i.e. no correction at all -- rather than the
+    sqrt(rho) family's 1/2."""
+    text = THREE.read_text()
+    variant = _variant(text, "3 23 plr_orfc orfcPt01", "3 23 plr_fcn orfcPt01", tmp_path)
+    p = read_prj(variant)
+    (el,) = p.elements
+    assert isinstance(el, UpstreamDensityPowerLaw)
+    torch.testing.assert_close(el.m, torch.full((4,), 0.0, dtype=F64))
+
+
+def test_a_volumetric_family_kind_gets_exponent_one(tmp_path):
+    """`plr_qcn` is CONTAM's volumetric family (a volumetric rating turned into mass flow via
+    C = mult * rho * turb), so the upstream-density correction must apply exponent m = 1."""
+    text = THREE.read_text()
+    variant = _variant(text, "3 23 plr_orfc orfcPt01", "3 23 plr_qcn orfcPt01", tmp_path)
+    p = read_prj(variant)
+    (el,) = p.elements
+    assert isinstance(el, UpstreamDensityPowerLaw)
+    torch.testing.assert_close(el.m, torch.full((4,), 1.0, dtype=F64))
 
 
 def test_the_reader_builds_a_float64_application():
@@ -105,8 +136,22 @@ def test_project_to_model_solves_the_wind_driven_case_and_conserves_species():
 def test_reads_the_hand_written_doorway_damper_fan_project():
     p = read_prj(MIXED)
     kinds = {el.kind: el for el in p.elements}
-    assert isinstance(kinds["door_3"], PowerLaw)
+    # Two DIFFERENT power-law kinds from this one file: a single-edge orifice (`pl_2`, from
+    # `plr_orfc`) and a two-edge doorway (`door_3`, from `dor_pl2`). `isinstance(el, PowerLaw)`
+    # alone would not catch a revert to the uncorrected element, since
+    # `UpstreamDensityPowerLaw` is itself a `PowerLaw`.
+    assert isinstance(kinds["pl_2"], UpstreamDensityPowerLaw)
+    torch.testing.assert_close(kinds["pl_2"].m, torch.full((2,), 0.5, dtype=F64))
+    src2, tgt2 = p.net.endpoints("pl_2")
+    torch.testing.assert_close(kinds["pl_2"].src, src2)
+    torch.testing.assert_close(kinds["pl_2"].tgt, tgt2)
+
+    assert isinstance(kinds["door_3"], UpstreamDensityPowerLaw)
     assert p.net.edge_index("door_3").numel() == 2      # two-opening doorway -> two edges
+    torch.testing.assert_close(kinds["door_3"].m, torch.full((2,), 0.5, dtype=F64))
+    src3, tgt3 = p.net.endpoints("door_3")
+    torch.testing.assert_close(kinds["door_3"].src, src3)
+    torch.testing.assert_close(kinds["door_3"].tgt, tgt3)
     z = p.net.edge_attr("z_path", "door_3")
     assert (z[1] - z[0]).item() == pytest.approx(2 * 0.4444)
     assert isinstance(kinds["bd_4"], Damper)
