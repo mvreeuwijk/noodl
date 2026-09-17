@@ -29,6 +29,11 @@ sparse = ["scipy>=1.11"]
 # test suite exercises the sparse-direct backend directly, and a plain pin is one fewer
 # resolver feature for `pip install -e ".[dev]"` to depend on. Keep the two in step.
 dev = ["pytest>=8", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy>=1.11"]
+# ContamX parity (spec section 9): NIST's `contamxpy` ships a Windows x86-64 wheel that
+# BUNDLES the ContamX 3.4.1.7 engine, so no CONTAM installation is needed -- but there is
+# no wheel for any other platform, hence the marker. Tests that need it carry `external`
+# and skip themselves when the import fails, so CI on Linux is unaffected.
+contam = ["contamxpy>=0.0.9; sys_platform == 'win32'"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -39,6 +44,7 @@ pythonpath = ["."]
 addopts = "--cov=tellegen --cov-report=term-missing --cov-fail-under=90 -m \"not slow\""
 markers = [
     "slow: marks tests as slow (excluded by default; run with -m slow to include them)",
+    "external: needs an external engine or package (contamxpy); skipped when unavailable",
 ]
 
 [tool.coverage.run]

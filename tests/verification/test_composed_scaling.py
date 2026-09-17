@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from benchmarks.composed_model import build_composed
+from benchmarks.composed_model import build_composed, run_steps
 from benchmarks.measure import isolated_peak_rss, time_call
 from benchmarks.report_composed_scaling import (
     BUDGET_TABLE,
@@ -238,6 +238,83 @@ def test_composed_model_meets_its_section_6_1_budget(
     # row that misses its forward budget would otherwise say nothing about whether its
     # backward and memory budgets hold, and a gate that hides two thirds of its own result
     # behind the first failure is not reporting the gate.
+    if failures:
+        pytest.fail("\n".join(failures))
+
+
+def test_thermal_composed_configuration_steps_and_differentiates_on_a_small_model():
+    """The milestone-2 gate row's configuration, at a size that runs in CI in a second.
+
+    The gate itself is `slow` and takes tens of minutes, so nothing else here would notice a
+    typo in `build_composed(thermal=True)` or in `run_steps(..., thermal=True)` until that
+    run failed. This exercises both: the thermal layer is sized on the ACTIVE interior (the
+    same rows the co2 layer has -- street and sewer nodes carry no airpath edge), a step
+    advances both transport states, and a loss over the concatenated state reaches `sources`
+    through both of them.
+    """
+    model = build_composed(
+        n_buildings=2, building_nodes=12, street_nodes=6, sewer_nodes=5, ensemble=2,
+        thermal=True,
+    )
+    assert model.model is not None and model.thermal is not None
+    assert model.thermal.n_i == model.transport.n_i < model.net.n - len(model.boundary)
+    assert model.thermal.capacity.shape == (model.thermal.n_i,)
+
+    phi, x, diagnostics = run_steps(model, 2, differentiable=False, thermal=True)
+    assert phi.shape == (2, model.net.n)
+    assert x.shape == (2, model.transport.n_i + model.thermal.n_i)
+    assert diagnostics["newton_iterations"] > 0     # not warm-started into a no-op solve
+
+    sources = model.sources.detach().clone().requires_grad_(True)
+    phi, x, _ = run_steps(model, 2, differentiable=True, sources=sources, thermal=True)
+    (phi[..., model.layer.interior].sum() + x.sum()).backward()
+    assert float(sources.grad.abs().max()) > 0.0
+
+
+@pytest.mark.slow
+def test_composed_model_with_thermal_layer_24_steps_within_budget():
+    """The milestone-2 row: ensemble 100, 24 steps, air + species + HEAT through `Model.step`.
+
+    `build_composed(thermal=True)` adds a second `TransportLayer` (carrier c_p, capacity in
+    J/K, implicit) over the same airpath flows and runs air, species and heat together
+    through `Model.step`; the backward figure differentiates a loss over BOTH transport
+    states, so both transport adjoints are exercised, not just the species one.
+
+    It is judged against the SAME section 6.1 budgets as the 100x24 row (12 s forward, 25 s
+    backward, that row's memory budget), which is what makes the comparison mean anything:
+    the configuration differs from that row in the added layer and the `Model.step` dispatch
+    around it (the closure loop, the driver lookups, `flows_of_kind` and the per-pass dict
+    copies), and in nothing else. A miss is a FAILED gate, recorded in the README and the
+    ledger; the budgets are never edited here.
+    """
+    ensemble, steps, forward_budget, backward_budget, memory_budget = next(
+        r for r in BUDGET_TABLE if r[0] == 100 and r[1] == 24
+    )
+    row = measure_budget_row(
+        ensemble, steps, forward_budget, backward_budget, memory_budget, thermal=True
+    )
+    print("\n" + format_budget_row(row))
+
+    # One report covering all three budgets, as the parametrised row above does and for the
+    # same reason: a gate that hides two thirds of its own result behind the first failure is
+    # not reporting the gate.
+    failures = []
+    if not row["forward_within_budget"]:
+        failures.append(
+            f"forward budget missed: {row['forward_seconds']:.3f}s > {forward_budget}s "
+            f"({row['forward_seconds'] / forward_budget:.2f}x)"
+        )
+    if not row["backward_within_budget"]:
+        failures.append(
+            f"backward budget missed: {row['backward_seconds']:.3f}s > {backward_budget}s "
+            f"({row['backward_seconds'] / backward_budget:.2f}x)"
+        )
+    if not row["peak_memory_within_budget"]:
+        failures.append(
+            f"peak memory budget missed: {row['peak_memory_bytes'] / 1e6:.1f} MB > "
+            f"{memory_budget / 1e6:.0f} MB "
+            f"({row['peak_memory_bytes'] / memory_budget:.2f}x)"
+        )
     if failures:
         pytest.fail("\n".join(failures))
 

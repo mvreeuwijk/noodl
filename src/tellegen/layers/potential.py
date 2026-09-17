@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 
 import torch
 
-from tellegen.drives import Drive
+from tellegen.drives import Drive, check_drive_signature
 from tellegen.elements.base import Element
 from tellegen.operators.graph import GraphLaplacianOperator
 from tellegen.solvers.grounding import spd_certificate, spd_diagnosis
@@ -47,6 +47,9 @@ class PotentialFlowLayer:
         drives: Sequence[Drive] = (),
         boundary: Sequence = (),
         linear_solver: str = "auto",
+        *,
+        quantity: str = "potential",
+        unit: str = "",
     ) -> None:
         if linear_solver not in _LINEAR_SOLVERS:
             raise ValueError(
@@ -54,6 +57,12 @@ class PotentialFlowLayer:
                 f"of {_LINEAR_SOLVERS}"
             )
         self.linear_solver = linear_solver
+        # Metadata only: what this layer's potential IS and what it is measured in (spec 4.4).
+        # Nothing in the numerics reads them; `Model` reports them, and a caller composing
+        # several layers over one network uses them to tell a pressure layer from a
+        # temperature one without matching on layer names.
+        self.quantity = quantity
+        self.unit = unit
 
         seen_kinds: set[str] = set()
         for el in elements:
@@ -109,6 +118,7 @@ class PotentialFlowLayer:
 
         kind_set = set(self.kinds)
         for drv in self._drives:
+            check_drive_signature(drv, where=f"PotentialFlowLayer {name!r}")
             if drv.kind not in kind_set:
                 raise ValueError(
                     f"drive kind {drv.kind!r} is not one of this layer's element kinds "
@@ -120,12 +130,29 @@ class PotentialFlowLayer:
             if b not in node_index:
                 raise KeyError(f"unknown boundary node {b!r} in layer {name!r}")
 
-        self.interior = net.interior_index(boundary)
+        touched = torch.zeros(net.n, dtype=torch.bool)
+        touched[self._src] = True
+        touched[self._tgt] = True
+        all_interior = net.interior_index(boundary)
+        # Spec 14, 4.5: a node no edge of this layer's kinds touches is INACTIVE for this
+        # layer -- not an unknown, and not a singular row. A wall-mass node in a building
+        # network is the motivating case: it has conduction edges and no airpath edges.
+        # `touched` is built from this layer's OWN edge endpoints (`self._src`/`self._tgt`,
+        # already restricted to `self.cols`), which is exactly "an edge of one of
+        # `self.kinds`" -- the same rule `layers.transport.active_interior` applies for a
+        # transport layer. An inactive node is not an unknown, so it is not reported as
+        # ungrounded either: `solvers.grounding` gates on `_interior_of_node >= 0`, which
+        # stays -1 there.
+        self.interior = all_interior[touched[all_interior]]
+        self.inactive = all_interior[~touched[all_interior]]
         self.bound = net.boundary_index(boundary)
         self._interior_names = [net.nodes[i] for i in self.interior.tolist()]
+        self._inactive_names = [net.nodes[i] for i in self.inactive.tolist()]
 
-        # interior_of_node: -1 at a boundary node's position, else its 0-based position
-        # within self.interior. boundary_mask: True at a boundary node's position. Both are
+        # interior_of_node: -1 at a boundary node's position AND at an inactive one's (an
+        # inactive node is an unknown of neither kind, see the split above), else that node's
+        # 0-based position within self.interior. boundary_mask: True at a boundary node's
+        # position only -- an inactive node is not a prescribed value. Both are
         # (n,) and consumed by GraphLaplacianOperator's constructor and by
         # solvers.grounding; computing them once here, at construction time, avoids
         # rebuilding them on every solve() call.
@@ -232,7 +259,7 @@ class PotentialFlowLayer:
             width = end - start
             for drv in self._drives:
                 if drv.kind == kind:
-                    value = drv(phi, drivers)
+                    value = drv(drivers)
                     # A width mismatch here is silent corruption, not a crash: torch.cat below
                     # would happily accept a wrong-width block, shifting every later kind's
                     # slice out from under `_elem_slices` so a DIFFERENT element ends up being
@@ -255,6 +282,29 @@ class PotentialFlowLayer:
             for el, (s, e) in zip(self._elements, self._elem_slices, strict=True)
         ]
         return torch.cat(parts, dim=-1)
+
+    def kind_slice(self, kind: str) -> slice:
+        """Columns of `q` (as returned by `solve`) that belong to `kind`."""
+        try:
+            start, end = self._kind_slices[kind]
+        except KeyError as exc:
+            raise KeyError(
+                f"PotentialFlowLayer {self.name!r} has no element of kind {kind!r}; its kinds "
+                f"are {self.kinds}"
+            ) from exc
+        return slice(start, end)
+
+    def flows_of_kind(self, q: torch.Tensor, kinds) -> torch.Tensor:
+        """`q` restricted to `kinds` (a name or a sequence), concatenated in the given order.
+
+        This is what a `TransportLayer` with `flow_kinds == kinds` expects as its `q`: the
+        transport layer reads its flow edges kind by kind, in ITS OWN `flow_kinds` order,
+        which need not be this layer's element order. `Model` couples the two layers with
+        exactly this call.
+        """
+        if isinstance(kinds, str):
+            kinds = (kinds,)
+        return torch.cat([q[..., self.kind_slice(k)] for k in kinds], dim=-1)
 
     def dflows(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
         drivers = drivers or {}
@@ -279,10 +329,29 @@ class PotentialFlowLayer:
 
     # ------------------------------------------------------------------ Newton residual
     def _source_interior(self, sources: torch.Tensor | None, ref: torch.Tensor) -> torch.Tensor:
+        """Full-node `sources` -> this layer's interior rows; refuse a source on an INACTIVE
+        node by name.
+
+        An inactive node has no unknown in this layer, so a source there cannot be balanced
+        by anything: it is a modelling error (a source put on the wall-mass node of an
+        airflow layer), not a value to drop silently. Costs nothing on the usual layer, whose
+        kinds touch every node: `self.inactive` is then empty and the check short-circuits.
+        """
         if sources is None:
             return torch.zeros(
                 ref.shape[:-1] + (len(self.interior),), dtype=ref.dtype, device=ref.device
             )
+        if self.inactive.numel():
+            nonzero = sources[..., self.inactive] != 0
+            if bool(nonzero.any()):
+                flat = nonzero.reshape(-1, nonzero.shape[-1]).any(0)
+                names = [
+                    self._inactive_names[i] for i in flat.nonzero().flatten().tolist()
+                ]
+                raise ValueError(
+                    f"PotentialFlowLayer {self.name!r}: sources must be zero on inactive "
+                    f"nodes (no edge of kinds {self.kinds} touches them); nonzero at {names}"
+                )
         return sources[..., self.interior]
 
     def residual(self, phi_interior, phi_boundary, drivers, sources):
@@ -728,7 +797,7 @@ class PotentialFlowLayer:
                 block = d[..., start:end]
                 for driven in self._drives:
                     if driven.kind == kind:
-                        block = block + driven(phi, drv)
+                        block = block + driven(drv)
                 parts.append((start, block))
             parts.sort(key=lambda p: p[0])
             return torch.cat([p[1] for p in parts], dim=-1)

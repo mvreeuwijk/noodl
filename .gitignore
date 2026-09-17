@@ -25,6 +25,11 @@ venv/
 
 # Data: never commit measurements
 data/
+# ... except the test fixtures. `data/` matches ANY directory named `data`, tests/ included,
+# and git never descends into an excluded directory -- so `tests/data/` must be re-included
+# HERE, before the per-extension rules below, or the `!tests/data/*.csv` exception (and every
+# .prj/.wth/.ctm fixture under tests/data/contam/) is silently dead.
+!tests/data/
 *.parquet
 *.feather
 *.h5

@@ -1,0 +1,8 @@
+WeatherFile ContamW 2.0
+WTH file for valThreeZonesWthCtm.prj
+1/1	1/1
+!Date	DofW	Dtype	DST	Tgrnd
+1/1	1	4	0	273.15
+!Date	Time	Ta	Pb	Ws	Wd	Hr	Ith	Idn	Ts	Rn	Sn
+1/1	00:00:00	293.15	101325	5.230	270	0	0	0	0	0	0
+1/1	24:00:00	293.15	101325	5.230	270	0	0	0	0	0	0

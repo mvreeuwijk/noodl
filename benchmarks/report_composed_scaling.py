@@ -80,6 +80,7 @@ def measure_budget_row(
     memory_budget: int,
     samples: int = 3,
     solver: str = "auto",
+    thermal: bool = False,
 ) -> dict:
     """Measure one budget-table row: forward time, backward time, peak RSS, iteration counts.
 
@@ -101,12 +102,20 @@ def measure_budget_row(
     shipped default, so the gate keeps measuring what ships; the report additionally measures
     every entry of `SOLVERS`, which is the section 6.2 evidence the `"auto"` default is
     chosen on. The BUDGETS do not vary with it -- they are the design's, not the backend's.
+
+    `thermal` measures the MILESTONE-2 configuration instead: the same air and species
+    layers plus a second (heat) transport layer, stepped together through `Model.step`
+    (`build_composed(thermal=True)`). The budgets do not vary with it either -- the row is
+    judged against the section 6.1 budgets of the row it shares its shape with, which is the
+    whole point of measuring it -- and the row records `"thermal": true` so a reader can tell
+    the two configurations apart.
     """
     kwargs = {
         **REFERENCE_KWARGS,
         "ensemble": ensemble,
         "steps": steps,
         "linear_solver": solver,
+        "thermal": thermal,
     }
 
     def measure(workload: str) -> tuple[int, float, dict]:
@@ -125,6 +134,7 @@ def measure_budget_row(
         "steps": steps,
         "samples": samples,
         "solver": solver,
+        "thermal": bool(thermal),
         "n_nodes": forward["n_nodes"],
         "n_edges": forward["n_edges"],
         "forward_seconds": forward_seconds,
@@ -154,7 +164,8 @@ def format_budget_row(row: dict) -> str:
 
     return (
         f"budget[ensemble={row['ensemble']}, steps={row['steps']}, "
-        f"solver={row.get('solver', 'auto')}]: "
+        f"solver={row.get('solver', 'auto')}"
+        f"{', thermal' if row.get('thermal') else ''}]: "
         f"forward {row['forward_seconds']:.3f}s / {row['forward_budget_seconds']}s "
         f"{verdict(row['forward_within_budget'])}, "
         f"backward {row['backward_seconds']:.3f}s / {row['backward_budget_seconds']}s "
@@ -354,6 +365,19 @@ def main() -> None:
             row = measure_budget_row(*row_spec, solver=solver)
             print(format_budget_row(row))
             budget_rows.append(row)
+
+    # The milestone-2 gate row: the ensemble-100, 24-step SHAPE with a heat layer beside the
+    # species one, through `Model.step`, under the shipped default solver and against that
+    # row's own section 6.1 budgets. It is a gate row like any other, so it counts towards
+    # `all_budgets_met` below; `tests/verification/test_composed_scaling.py` asserts on the
+    # same measurement. The report therefore holds TWO `(100, 24, "auto")` rows, identical in
+    # every key but `"thermal"`, which is what tells them apart -- and, read side by side,
+    # what the added layer costs on one machine in one run.
+    thermal_row = measure_budget_row(
+        *next(r for r in BUDGET_TABLE if r[0] == 100 and r[1] == 24), thermal=True
+    )
+    print(format_budget_row(thermal_row))
+    budget_rows.append(thermal_row)
 
     shape_gates = [measure_memory_shape_gate(), measure_matvec_shape_gate()]
     for gate in shape_gates:

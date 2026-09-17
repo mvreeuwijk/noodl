@@ -1,1 +1,6 @@
 * text=auto eol=lf
+
+# NIST's CONTAM sample files are redistributed UNCHANGED (see tests/data/contam/NOTICE.md)
+# and ContamX reads them byte for byte, so keep git's end-of-line normalisation away from
+# them: a checkout on any platform must be the file NIST shipped.
+tests/data/contam/* -text

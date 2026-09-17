@@ -11,6 +11,14 @@ from tellegen.solvers.implicit import TransposeOperator
 from tellegen.topology import Network
 
 
+def _full(layer, s_interior, node_dim=-1):
+    """Interior-order sources -> FULL node order with zeros on boundary nodes (spec 4.2)."""
+    shape = list(s_interior.shape)
+    shape[node_dim] = layer.net.n
+    full = torch.zeros(shape, dtype=s_interior.dtype)
+    return full.index_copy(node_dim % full.dim(), layer.interior_idx, s_interior)
+
+
 def flow_through_zone() -> Network:
     """ambient <-> Z, exhaust (tree) then supply (loop), both forward-oriented."""
     net = Network(dtype=torch.float64)
@@ -43,8 +51,9 @@ def test_single_zone_flow_through_matches_analytic_exponential():
     source = torch.tensor([1.0], dtype=torch.float64)
     dt = 300.0
     c = c0.clone()
+    full_source = _full(layer, source)
     for _ in range(20):
-        c = layer.step(c, q, source, c_out, dt)
+        c = layer.step(c, q, full_source, c_out, dt)
     t = 20 * dt
     tau = V / Q
     c_ss = c_out + source / Q
@@ -59,8 +68,9 @@ def test_two_sealed_zones_conserve_total_amount():
     q = torch.tensor([0.05, 0.05], dtype=torch.float64)
     c = torch.tensor([1000.0, 400.0], dtype=torch.float64)
     total0 = (cap * c).sum()
+    full_source = _full(layer, torch.zeros(2, dtype=torch.float64))
     for _ in range(10):
-        c = layer.step(c, q, torch.zeros(2, dtype=torch.float64), torch.tensor([420.0]), 900.0)
+        c = layer.step(c, q, full_source, torch.tensor([420.0]), 900.0)
     total = (cap * c).sum()
     torch.testing.assert_close(total, total0, rtol=1e-9, atol=1e-9)
 
@@ -73,7 +83,7 @@ def test_reversed_flow_transports_in_reverse_direction():
     q_fwd = torch.tensor([0.5, 0.5], dtype=torch.float64)
     c0 = torch.tensor([100.0], dtype=torch.float64)
     c_out = torch.tensor([420.0], dtype=torch.float64)
-    forward = layer.step(c0, q_fwd, torch.zeros(1, dtype=torch.float64), c_out, 300.0)
+    forward = layer.step(c0, q_fwd, _full(layer, torch.zeros(1, dtype=torch.float64)), c_out, 300.0)
 
     reversed_net = Network(dtype=torch.float64)
     reversed_net.add_node("ambient")
@@ -85,7 +95,9 @@ def test_reversed_flow_transports_in_reverse_direction():
         boundary=["ambient"],
     )
     q_rev = torch.tensor([-0.5, -0.5], dtype=torch.float64)
-    backward = rev_layer.step(c0, q_rev, torch.zeros(1, dtype=torch.float64), c_out, 300.0)
+    backward = rev_layer.step(
+        c0, q_rev, _full(rev_layer, torch.zeros(1, dtype=torch.float64)), c_out, 300.0
+    )
     torch.testing.assert_close(forward, backward, rtol=1e-10, atol=1e-10)
 
 
@@ -101,8 +113,8 @@ def test_transmission_half_halves_steady_state():
     q = torch.tensor([Q, Q], dtype=torch.float64)
     c_out = torch.tensor([420.0], dtype=torch.float64)
     zero_source = torch.zeros(1, dtype=torch.float64)
-    x_full = full.steady(q, zero_source, c_out)
-    x_filtered = filtered.steady(q, zero_source, c_out)
+    x_full = full.steady(q, _full(full, zero_source), c_out)
+    x_filtered = filtered.steady(q, _full(filtered, zero_source), c_out)
     torch.testing.assert_close(x_filtered, 0.5 * x_full, rtol=1e-6, atol=1e-6)
 
 
@@ -114,7 +126,7 @@ def test_boundary_inflow_enters_interior():
     q = torch.tensor([0.5, 0.5], dtype=torch.float64)
     c = torch.tensor([100.0], dtype=torch.float64)
     c_out_high = torch.tensor([800.0], dtype=torch.float64)
-    out = layer.step(c, q, torch.zeros(1, dtype=torch.float64), c_out_high, 300.0)
+    out = layer.step(c, q, _full(layer, torch.zeros(1, dtype=torch.float64)), c_out_high, 300.0)
     assert out.item() > c.item()
 
 
@@ -127,8 +139,9 @@ def test_steady_equals_long_time_step():
     source = torch.tensor([2.0], dtype=torch.float64)
     c_out = torch.tensor([420.0], dtype=torch.float64)
     c0 = torch.tensor([100.0], dtype=torch.float64)
-    x_steady = layer.steady(q, source, c_out)
-    x_long = layer.step(c0, q, source, c_out, 1e6)
+    full_source = _full(layer, source)
+    x_steady = layer.steady(q, full_source, c_out)
+    x_long = layer.step(c0, q, full_source, c_out, 1e6)
     torch.testing.assert_close(x_long, x_steady, rtol=1e-6, atol=1e-6)
 
 
@@ -142,9 +155,10 @@ def test_batched_step_equals_looped():
     c = 100 + 300 * torch.rand(n, 1, dtype=torch.float64)
     source = torch.rand(n, 1, dtype=torch.float64)
     c_out = 400 + 40 * torch.rand(n, 1, dtype=torch.float64)
-    out = layer.step(c, q, source, c_out, 300.0)
+    full_source = _full(layer, source)
+    out = layer.step(c, q, full_source, c_out, 300.0)
     ref = torch.stack(
-        [layer.step(c[i], q[i], source[i], c_out[i], 300.0) for i in range(n)]
+        [layer.step(c[i], q[i], full_source[i], c_out[i], 300.0) for i in range(n)]
     )
     torch.testing.assert_close(out, ref, rtol=1e-8, atol=1e-8)
 
@@ -173,7 +187,7 @@ def test_gradcheck_step_wrt_x_q_sources_boundary():
     x_b = torch.tensor([420.0], dtype=torch.float64, requires_grad=True)
 
     def f(x, q, sources, x_b):
-        return layer.step(x, q, sources, x_b, 300.0)
+        return layer.step(x, q, _full(layer, sources), x_b, 300.0)
 
     assert gradcheck(f, (x, q, sources, x_b), eps=1e-6, atol=1e-5)
 
@@ -203,9 +217,10 @@ def test_kinetics_matches_bateman_solution_for_decay_chain():
     x = torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float64)  # (n_i=1, K=3): A, B, C
     sources = torch.zeros(1, 3, dtype=torch.float64)
     x_b = torch.zeros(1, 3, dtype=torch.float64)
+    full_sources = _full(layer, sources, node_dim=-2)
     dt = 5.0
     for _ in range(40):
-        x = layer.step(x, q, sources, x_b, dt)
+        x = layer.step(x, q, full_sources, x_b, dt)
     t = 40 * dt
     A0 = 1.0
     A = A0 * math.exp(-l1 * t)
@@ -227,9 +242,10 @@ def test_removal_rate_gives_exponential_decay():
     x = torch.tensor([100.0], dtype=torch.float64)
     sources = torch.zeros(1, dtype=torch.float64)
     x_b = torch.zeros(1, dtype=torch.float64)
+    full_sources = _full(layer, sources)
     dt = 10.0
     for _ in range(30):
-        x = layer.step(x, q, sources, x_b, dt)
+        x = layer.step(x, q, full_sources, x_b, dt)
     expected = 100.0 * math.exp(-rate * 30 * dt)
     torch.testing.assert_close(
         x, torch.tensor([expected], dtype=torch.float64), rtol=1e-8, atol=1e-10
@@ -250,7 +266,7 @@ def test_conduction_only_reaches_laplacian_steady_state():
     q = torch.zeros(1, dtype=torch.float64)  # no advective flow: conduction only
     Tb = torch.tensor([15.0], dtype=torch.float64)
     S = torch.tensor([50.0], dtype=torch.float64)  # W, heat source at T1
-    T_ss = layer.steady(q, S, Tb)
+    T_ss = layer.steady(q, _full(layer, S), Tb)
     expected = Tb + S / g1  # g1 (T1 - Tb) = S at steady state
     torch.testing.assert_close(T_ss, expected, rtol=1e-8, atol=1e-8)
 
@@ -284,12 +300,13 @@ def test_implicit_scheme_is_first_order_in_dt():
     c0 = torch.tensor([100.0], dtype=torch.float64)
     source = torch.tensor([2.0], dtype=torch.float64)
     c_out = torch.tensor([420.0], dtype=torch.float64)
+    full_source = _full(layer_exact, source)
 
     def error(dt: float, n: int) -> float:
         c_e, c_i = c0.clone(), c0.clone()
         for _ in range(n):
-            c_e = layer_exact.step(c_e, q, source, c_out, dt)
-            c_i = layer_imp.step(c_i, q, source, c_out, dt)
+            c_e = layer_exact.step(c_e, q, full_source, c_out, dt)
+            c_i = layer_imp.step(c_i, q, full_source, c_out, dt)
         return (c_i - c_e).abs().item()
 
     dt0, n0 = 200.0, 5
@@ -310,12 +327,13 @@ def test_trapezoidal_scheme_is_second_order_in_dt():
     c0 = torch.tensor([100.0], dtype=torch.float64)
     source = torch.tensor([2.0], dtype=torch.float64)
     c_out = torch.tensor([420.0], dtype=torch.float64)
+    full_source = _full(layer_exact, source)
 
     def error(dt: float, n: int) -> float:
         c_e, c_t = c0.clone(), c0.clone()
         for _ in range(n):
-            c_e = layer_exact.step(c_e, q, source, c_out, dt)
-            c_t = layer_trap.step(c_t, q, source, c_out, dt)
+            c_e = layer_exact.step(c_e, q, full_source, c_out, dt)
+            c_t = layer_trap.step(c_t, q, full_source, c_out, dt)
         return (c_t - c_e).abs().item()
 
     dt0, n0 = 200.0, 5
@@ -363,8 +381,9 @@ def test_implicit_preserves_positivity_where_trapezoidal_goes_negative():
     trap = TransportLayer(net, "x", capacity=cap, flow_kind="airpath", boundary=["ambient"],
                            scheme="trapezoidal", removal=torch.tensor([rate], dtype=torch.float64))
 
-    x_imp = imp.step(x0, q, src, xb, dt)
-    x_trap = trap.step(x0, q, src, xb, dt)
+    full_src = _full(imp, src)
+    x_imp = imp.step(x0, q, full_src, xb, dt)
+    x_trap = trap.step(x0, q, full_src, xb, dt)
 
     assert torch.all(x_imp >= 0.0)
     assert torch.any(x_trap < 0.0)
@@ -391,7 +410,7 @@ def test_heat_layer_reaches_algebraic_energy_balance():
     )
     q = torch.tensor([Q, Q], dtype=torch.float64)
     x_b = torch.tensor([20.0, 5.0], dtype=torch.float64)  # [T_ambient, T_wall]
-    T_ss = layer.steady(q, torch.zeros(1, dtype=torch.float64), x_b)
+    T_ss = layer.steady(q, _full(layer, torch.zeros(1, dtype=torch.float64)), x_b)
     expected = (rho_cp * Q * 20.0 + U * 5.0) / (rho_cp * Q + U)
     torch.testing.assert_close(
         T_ss, torch.tensor([expected], dtype=torch.float64), rtol=1e-6, atol=1e-6
@@ -425,8 +444,8 @@ def test_exact_scheme_rejects_on_failure_return():
     c = torch.tensor([100.0], dtype=torch.float64)
     with pytest.raises(ValueError, match="on_failure='return'"):
         layer.step(
-            c, q, torch.zeros(1, dtype=torch.float64), torch.tensor([420.0]), 300.0,
-            on_failure="return",
+            c, q, _full(layer, torch.zeros(1, dtype=torch.float64)), torch.tensor([420.0]),
+            300.0, on_failure="return",
         )
 
 
@@ -445,8 +464,8 @@ def test_exact_scheme_rejects_on_failure_return_before_doing_any_work():
     bad_shape_c = torch.zeros(7, dtype=torch.float64)  # n_i is 1, so this is invalid too
     with pytest.raises(ValueError, match="on_failure='return'"):
         layer.step(
-            bad_shape_c, q, torch.zeros(1, dtype=torch.float64), torch.tensor([420.0]), 300.0,
-            on_failure="return",
+            bad_shape_c, q, _full(layer, torch.zeros(1, dtype=torch.float64)),
+            torch.tensor([420.0]), 300.0, on_failure="return",
         )
 
 
@@ -455,3 +474,52 @@ def test_transpose_view_is_the_shared_transpose_operator():
     separately-maintained duplicate -- see the consolidation note in `layers/transport.py`.
     """
     assert _TransposeView is TransposeOperator
+
+
+def test_boundary_values_pair_with_the_caller_s_boundary_order_not_node_order():
+    """`x_boundary[j]` belongs to `boundary[j]`, whatever node order that list is in.
+
+    This PINS the caller-order convention on the operator path. `AdvectionOperator` used to
+    derive its boundary positions as "every node that is not interior", which is ASCENDING
+    node order, while the dense oracle `operator()` has always taken its `N` columns from
+    `self.boundary_idx` -- `Network.boundary_index`, "in the order given". The two therefore
+    disagreed for any layer whose `boundary` list is not in ascending node order, and nothing
+    pinned either of them (the composed model's two boundary values are equal, so it cannot
+    tell the difference). The layer now hands the operator its own `boundary_idx`, so both
+    paths pair entry `j` with node `boundary[j]`; the two boundary values here are far apart
+    so that swapping them would be unmissable.
+    """
+    net = Network(dtype=torch.float64)
+    for name in ("z1", "outlet", "z2", "inlet"):   # boundary nodes at positions 3 and 1
+        net.add_node(name)
+    net.add_edge("inlet", "z1", kind="airpath")
+    net.add_edge("z1", "z2", kind="airpath")
+    net.add_edge("z2", "outlet", kind="airpath")
+    boundary = ["inlet", "outlet"]                 # NOT ascending: node indices (3, 1)
+    assert net.boundary_index(boundary).tolist() == [3, 1]
+
+    cap = torch.tensor([600.0, 900.0], dtype=torch.float64)
+    layer = TransportLayer(
+        net, "co2", capacity=cap, flow_kind="airpath", boundary=boundary, scheme="implicit",
+    )
+    q = torch.tensor([0.4, 0.4, 0.4], dtype=torch.float64)
+    x_b = torch.tensor([800.0, 20.0], dtype=torch.float64)   # [inlet, outlet]
+    sources = torch.zeros(net.n, dtype=torch.float64)
+    sources[net.node_index("z2")] = 5.0
+    s_i = sources.index_select(0, layer.interior_idx)
+
+    M, N = layer.operator(q)
+    b0 = N @ x_b + s_i / cap
+
+    steady_ref = torch.linalg.solve(M, -b0)
+    torch.testing.assert_close(
+        layer.steady(q, sources, x_b), steady_ref, rtol=1e-9, atol=1e-12
+    )
+
+    x0 = torch.tensor([400.0, 450.0], dtype=torch.float64)
+    dt = 120.0
+    eye = torch.eye(M.shape[-1], dtype=torch.float64)
+    step_ref = torch.linalg.solve(eye - dt * M, x0 + dt * b0)
+    torch.testing.assert_close(
+        layer.step(x0, q, sources, x_b, dt=dt), step_ref, rtol=1e-9, atol=1e-12
+    )

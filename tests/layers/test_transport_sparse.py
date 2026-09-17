@@ -23,6 +23,14 @@ from tellegen.solvers.select import solve as _solve_operator
 from tellegen.topology import Network
 
 
+def _full(layer, s_interior, node_dim=-1):
+    """Interior-order sources -> FULL node order with zeros on boundary nodes (spec 4.2)."""
+    shape = list(s_interior.shape)
+    shape[node_dim] = layer.net.n
+    full = torch.zeros(shape, dtype=s_interior.dtype)
+    return full.index_copy(node_dim % full.dim(), layer.interior_idx, s_interior)
+
+
 def flow_through_zone() -> Network:
     net = Network(dtype=torch.float64)
     net.add_node("ambient")
@@ -73,7 +81,7 @@ def test_steady_sparse_matches_dense_oracle():
     q = torch.tensor([0.5, 0.5], dtype=torch.float64)
     source = torch.tensor([2.0], dtype=torch.float64)
     c_out = torch.tensor([420.0], dtype=torch.float64)
-    x_sparse = layer.steady(q, source, c_out)
+    x_sparse = layer.steady(q, _full(layer, source), c_out)
 
     M, N = layer.operator(q)
     b0 = (N @ c_out.unsqueeze(-1)).squeeze(-1) + source / layer.capacity
@@ -101,7 +109,7 @@ def test_steady_singular_system_raises_naming_instance():
     source = torch.ones(2, dtype=torch.float64)
     x_b = torch.zeros(0, dtype=torch.float64)
     with pytest.raises(RuntimeError, match="co2"):
-        layer.steady(q, source, x_b)
+        layer.steady(q, _full(layer, source), x_b)
 
 
 def test_steady_on_failure_return_gives_failing_status_instead_of_raising():
@@ -116,7 +124,7 @@ def test_steady_on_failure_return_gives_failing_status_instead_of_raising():
     q = torch.zeros(2, dtype=torch.float64)
     source = torch.ones(2, dtype=torch.float64)  # see the fixture note above: must be nonzero
     x_b = torch.zeros(0, dtype=torch.float64)
-    result = layer.steady(q, source, x_b, on_failure="return")
+    result = layer.steady(q, _full(layer, source), x_b, on_failure="return")
     assert bool(torch.any(result.status != SolverStatus.CONVERGED))
 
 
@@ -130,7 +138,7 @@ def test_gradcheck_steady_wrt_q_sources_boundary():
     x_b = torch.tensor([420.0], dtype=torch.float64, requires_grad=True)
 
     def f(q, sources, x_b):
-        return layer.steady(q, sources, x_b)
+        return layer.steady(q, _full(layer, sources), x_b)
 
     assert gradcheck(f, (q, sources, x_b), eps=1e-6, atol=1e-5)
 
@@ -152,7 +160,7 @@ def test_steady_adjoint_gradient_matches_unrolled_reference_on_small_problem():
     sources = torch.tensor([1.0], dtype=torch.float64, requires_grad=True)
     x_b = torch.tensor([420.0], dtype=torch.float64, requires_grad=True)
 
-    x_adjoint = layer.steady(q, sources, x_b)
+    x_adjoint = layer.steady(q, _full(layer, sources), x_b)
     grad_adjoint = torch.autograd.grad(x_adjoint.sum(), (q, sources, x_b))
 
     q2 = q.detach().clone().requires_grad_(True)
@@ -300,7 +308,7 @@ def test_implicit_step_sparse_matches_dense_oracle():
     c_out = torch.tensor([420.0], dtype=torch.float64)
     dt = 200.0
 
-    x_sparse = layer.step(c0, q, source, c_out, dt)
+    x_sparse = layer.step(c0, q, _full(layer, source), c_out, dt)
 
     M, N = layer.operator(q)
     b0 = (N @ c_out.unsqueeze(-1)).squeeze(-1) + source / cap
@@ -323,7 +331,7 @@ def test_gradcheck_implicit_step_wrt_x_q_sources_boundary():
     x_b = torch.tensor([420.0], dtype=torch.float64, requires_grad=True)
 
     def f(x, q, sources, x_b):
-        return layer.step(x, q, sources, x_b, 300.0)
+        return layer.step(x, q, _full(layer, sources), x_b, 300.0)
 
     assert gradcheck(f, (x, q, sources, x_b), eps=1e-6, atol=1e-5)
 
@@ -339,7 +347,7 @@ def test_trapezoidal_step_sparse_matches_dense_oracle():
     c_out = torch.tensor([420.0], dtype=torch.float64)
     dt = 200.0
 
-    x_sparse = layer.step(c0, q, source, c_out, dt)
+    x_sparse = layer.step(c0, q, _full(layer, source), c_out, dt)
 
     M, N = layer.operator(q)
     b0 = (N @ c_out.unsqueeze(-1)).squeeze(-1) + source / cap
@@ -363,8 +371,9 @@ def test_two_sealed_zones_conserve_total_amount_sparse_path():
     q = torch.tensor([0.05, 0.05], dtype=torch.float64)
     c = torch.tensor([1000.0, 400.0], dtype=torch.float64)
     total0 = (cap * c).sum()
+    full_source = _full(layer, torch.zeros(2, dtype=torch.float64))
     for _ in range(10):
-        c = layer.step(c, q, torch.zeros(2, dtype=torch.float64), torch.tensor([420.0]), 900.0)
+        c = layer.step(c, q, full_source, torch.tensor([420.0]), 900.0)
     total = (cap * c).sum()
     torch.testing.assert_close(total, total0, rtol=1e-8, atol=1e-8)
 
@@ -396,10 +405,11 @@ def test_step_and_steady_reject_unknown_on_failure():
     c0 = torch.tensor([100.0], dtype=torch.float64)
     source = torch.tensor([2.0], dtype=torch.float64)
     c_out = torch.tensor([420.0], dtype=torch.float64)
+    full_source = _full(layer, source)
     with pytest.raises(ValueError, match="on_failure"):
-        layer.step(c0, q, source, c_out, 300.0, on_failure="bogus")
+        layer.step(c0, q, full_source, c_out, 300.0, on_failure="bogus")
     with pytest.raises(ValueError, match="on_failure"):
-        layer.steady(q, source, c_out, on_failure="bogus")
+        layer.steady(q, full_source, c_out, on_failure="bogus")
 
 
 def test_expm_action_matches_dense_matrix_exp_small_dt():
@@ -518,8 +528,9 @@ def test_exact_scheme_conserves_total_amount_sparse_path():
     q = torch.tensor([0.05, 0.05], dtype=torch.float64)
     c = torch.tensor([1000.0, 400.0], dtype=torch.float64)
     total0 = (cap * c).sum()
+    full_source = _full(layer, torch.zeros(2, dtype=torch.float64))
     for _ in range(10):
-        c = layer.step(c, q, torch.zeros(2, dtype=torch.float64), torch.tensor([420.0]), 900.0)
+        c = layer.step(c, q, full_source, torch.tensor([420.0]), 900.0)
     total = (cap * c).sum()
     torch.testing.assert_close(total, total0, rtol=1e-9, atol=1e-9)
 
@@ -533,8 +544,9 @@ def test_exact_scheme_preserves_positivity_sparse_path():
     c = torch.tensor([0.0], dtype=torch.float64)
     c_out = torch.tensor([420.0], dtype=torch.float64)
     source = torch.zeros(1, dtype=torch.float64)
+    full_source = _full(layer, source)
     for _ in range(20):
-        c = layer.step(c, q, source, c_out, 300.0)
+        c = layer.step(c, q, full_source, c_out, 300.0)
         assert torch.all(c >= 0.0)
 
 
@@ -871,12 +883,13 @@ def test_step_broadcasts_unbatched_state_against_batched_flow(scheme):
     x = torch.tensor([12.0, -4.0], dtype=torch.float64)
     sources = torch.tensor([1.0, 2.0], dtype=torch.float64)
     x_boundary = torch.tensor([420.0], dtype=torch.float64)
+    full_sources = _full(layer, sources)
 
-    out = layer.step(x, q, sources, x_boundary, 60.0)
+    out = layer.step(x, q, full_sources, x_boundary, 60.0)
     assert out.shape == (5, 2)
 
     expanded = layer.step(
-        x.expand(5, 2), q, sources.expand(5, 2), x_boundary.expand(5, 1), 60.0
+        x.expand(5, 2), q, full_sources.expand(5, 3), x_boundary.expand(5, 1), 60.0
     )
     assert torch.allclose(out, expanded)
 
@@ -894,11 +907,12 @@ def test_steady_broadcasts_unbatched_state_against_batched_flow():
     ).unsqueeze(-1)
     sources = torch.tensor([1.0, 2.0], dtype=torch.float64)
     x_boundary = torch.tensor([420.0], dtype=torch.float64)
+    full_sources = _full(layer, sources)
 
-    out = layer.steady(q, sources, x_boundary)
+    out = layer.steady(q, full_sources, x_boundary)
     assert out.shape == (5, 2)
 
-    expanded = layer.steady(q, sources.expand(5, 2), x_boundary.expand(5, 1))
+    expanded = layer.steady(q, full_sources.expand(5, 3), x_boundary.expand(5, 1))
     assert torch.allclose(out, expanded)
 
 
@@ -961,7 +975,7 @@ def test_k2_kinetics_removal_conduction_batched_mixed_sign_step_matches_dense_or
     x_boundary = torch.tensor([[10.0, 5.0]], dtype=torch.float64).expand(batch, 1, 2)
     dt = 30.0
 
-    x_sparse = layer.step(x, q, sources, x_boundary, dt)
+    x_sparse = layer.step(x, q, _full(layer, sources, node_dim=-2), x_boundary, dt)
     assert x_sparse.shape == (batch, layer.n_i, 2)
 
     cap = layer._capacity_stacked(torch.float64)
@@ -990,7 +1004,7 @@ def test_k2_kinetics_removal_conduction_batched_mixed_sign_steady_matches_dense_
     sources = 0.1 * _k2_state(batch, layer.n_i)
     x_boundary = torch.tensor([[10.0, 5.0]], dtype=torch.float64).expand(batch, 1, 2)
 
-    x_sparse = layer.steady(q, sources, x_boundary)
+    x_sparse = layer.steady(q, _full(layer, sources, node_dim=-2), x_boundary)
     assert x_sparse.shape == (batch, layer.n_i, 2)
 
     cap = layer._capacity_stacked(torch.float64)

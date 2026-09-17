@@ -70,11 +70,22 @@ class GraphLaplacianOperator:
                 f"same shape, got interior_of_node {tuple(interior_of_node.shape)} and "
                 f"boundary_mask {tuple(boundary_mask.shape)}"
             )
-        n_unmasked = int((~boundary_mask).sum())
-        if n_interior != n_unmasked:
+        # An interior node is one that is NOT prescribed (`boundary_mask`) AND carries a
+        # compact index (`interior_of_node >= 0`). The second half is what a layer's INACTIVE
+        # nodes fail (spec 14, 4.5): a node no edge of this layer's kinds touches is neither
+        # an unknown of this operator nor a prescribed boundary value, so `boundary_mask`
+        # alone would over-count the interior by exactly those nodes. Requiring BOTH also
+        # leaves the older, looser calling convention intact, in which `interior_of_node`
+        # holds an arbitrary value at a masked (boundary) node and only the mask says so.
+        # An inactive node carries no edge here by construction, so nothing below gathers or
+        # scatters at its (pad) slot.
+        interior_mask = (~boundary_mask) & (interior_of_node >= 0)
+        n_marked = int(interior_mask.sum())
+        if n_interior != n_marked:
             raise ValueError(
-                f"GraphLaplacianOperator: n_interior is {n_interior} but boundary_mask "
-                f"(shape {tuple(boundary_mask.shape)}) leaves {n_unmasked} interior nodes"
+                f"GraphLaplacianOperator: n_interior is {n_interior} but boundary_mask and "
+                f"interior_of_node (shape {tuple(interior_of_node.shape)}) mark {n_marked} "
+                f"nodes as interior"
             )
 
         self.src = src
@@ -88,19 +99,20 @@ class GraphLaplacianOperator:
         # Invert interior_of_node (node -> compact index) to interior_nodes (compact index ->
         # node), so the dense `assemble` oracle can pick this operator's own interior rows
         # out of the shared n-node space. This is a construction-time, O(n) vectorised
-        # computation (no Python loop over edges or nodes): boundary nodes are excluded by
-        # boundary_mask before the fancy-index scatter below, so their (unused) compact
-        # indices never collide with a real interior one.
+        # computation (no Python loop over edges or nodes): boundary and inactive nodes are excluded
+        # by `interior_mask` before the fancy-index scatter below, so their (unused) compact
+        # index -1 never collides with -- or overwrites -- a real interior one.
         node_ids = torch.arange(n, device=boundary_mask.device)
-        interior_positions = node_ids[~boundary_mask]
-        compact = interior_of_node[~boundary_mask]
+        interior_positions = node_ids[interior_mask]
+        compact = interior_of_node[interior_mask]
         interior_nodes = torch.empty(n_interior, dtype=torch.long, device=boundary_mask.device)
         interior_nodes[compact] = interior_positions
         self._interior_nodes = interior_nodes
         self._n = n
 
         # The same endpoints expressed in the operator's OWN compact interior indexing, with
-        # EVERY boundary node mapped to one shared PAD slot at index `n_interior`. `_apply`
+        # EVERY non-interior node (boundary or inactive) mapped to one shared PAD slot at
+        # index `n_interior`. `_apply`
         # then works on an `n_interior + 1`-wide vector instead of the full n-node space:
         # what it gathers at a boundary endpoint is the pad's zero (exactly what "boundary
         # nodes are held at potential 0" means here), and what it scatters back at a
@@ -110,7 +122,7 @@ class GraphLaplacianOperator:
         # and it removes the two full-width fancy-index operations the old form needed (the
         # scatter of x INTO the node space, and the select of the interior rows back OUT).
         compact_of_node = torch.where(
-            boundary_mask, torch.full_like(interior_of_node, n_interior), interior_of_node
+            interior_mask, interior_of_node, torch.full_like(interior_of_node, n_interior)
         )
         self._src_compact = compact_of_node[src]
         self._tgt_compact = compact_of_node[tgt]

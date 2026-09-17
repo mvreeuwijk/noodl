@@ -2,6 +2,12 @@
 
 from .potential import PotentialFlowLayer
 from .reaction import FirstOrderDecay, Reaction
-from .transport import TransportLayer
+from .transport import TransportLayer, active_interior
 
-__all__ = ["FirstOrderDecay", "PotentialFlowLayer", "Reaction", "TransportLayer"]
+__all__ = [
+    "FirstOrderDecay",
+    "PotentialFlowLayer",
+    "Reaction",
+    "TransportLayer",
+    "active_interior",
+]

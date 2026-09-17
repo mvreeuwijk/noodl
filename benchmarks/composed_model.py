@@ -19,7 +19,8 @@ from benchmarks.measure import time_call
 from tellegen.elements import PowerLaw
 from tellegen.elements.base import Element
 from tellegen.layers.potential import PotentialFlowLayer
-from tellegen.layers.transport import TransportLayer
+from tellegen.layers.transport import TransportLayer, active_interior
+from tellegen.model import Model
 from tellegen.topology import Network
 
 # PowerLaw conductance scale per edge kind, and the insertion order the elements list and the
@@ -45,12 +46,21 @@ class ComposedModel:
     phi_boundary: torch.Tensor
     drivers: dict
     sources: torch.Tensor
+    # Capacity of the `co2` transport layer, one entry per node of its ACTIVE interior (the
+    # non-boundary nodes an "airpath" edge touches), NOT per non-boundary node: the street
+    # and sewer nodes carry no airpath edge, so they are inactive for that layer and have no
+    # row in it at all. See `tellegen.layers.transport.active_interior`.
     capacity: torch.Tensor
     layer: PotentialFlowLayer
     dense_layer: PotentialFlowLayer  # linear_solver="direct": the retained dense reference
     transport: TransportLayer
     ensemble: int
     seed: int
+    # Both are None unless `build_composed(thermal=True)`: the milestone-2 configuration,
+    # which adds a SECOND transport layer (heat) over the same airpath flows and runs the
+    # whole thing through `Model.step` rather than through hand-written layer calls.
+    thermal: TransportLayer | None = None
+    model: Model | None = None
 
 
 def _build_topology(
@@ -127,6 +137,7 @@ def build_composed(
     ensemble: int = 1,
     seed: int = 0,
     linear_solver: str = "auto",
+    thermal: bool = False,
 ) -> ComposedModel:
     """Build the reference composed model: topology plus one reference physics configuration.
 
@@ -134,7 +145,9 @@ def build_composed(
     built (so the graph itself is exactly `_build_topology`'s, unaffected by how many random
     draws the physics below makes), in this order: one `PowerLaw(C, 0.65, kind=kind)` per edge
     kind, in `_ELEMENT_SCALES` order, with `C = scale * (0.5 + U(b_kind))`; then `sources`; then
-    `capacity`. `C` is shared across the ensemble; only `sources` varies per instance.
+    `capacity` (drawn over every interior node, then restricted to the transport layer's
+    active interior -- see the `ComposedModel.capacity` field). `C` is shared across the
+    ensemble; only `sources` varies per instance.
 
     `boundary` is `["street_0", "sewer_0"]` -- one ground node each on the street and sewer
     networks. `layer` (name "composed") is the migrated, default-configured path; `dense_layer`
@@ -143,6 +156,16 @@ def build_composed(
     milestone-1 numerics, retained as a genuinely separate code path so the composed-model
     parity gate compares two solvers rather than the sparse path with itself. `transport`
     (name "co2") is a single-species implicit-scheme `TransportLayer` on the "airpath" edges.
+
+    `thermal` adds the milestone-2 configuration: a SECOND `TransportLayer` ("thermal",
+    carrier `c_p = 1005`, capacity 1e5 J/K per active node, implicit, quantity "temperature"
+    in K) over the same "airpath" flows, and a `Model(net, {"composed": layer, "co2":
+    transport, "thermal": thermal})` that steps all three together. There are NO closures:
+    the point of the configuration is the cost of a second transport layer through
+    `Model.step`, not thermal feedback, for which this synthetic topology carries no
+    elevations. Everything else -- topology, RNG stream, elements, sources, the co2 layer --
+    is bit-identical to `thermal=False`, so the two differ in the added layer and the
+    `Model.step` dispatch around it.
 
     `linear_solver` configures `layer` ONLY, and defaults to the layer's own default, so
     every existing caller gets exactly the model it got before. It exists for the spec's
@@ -174,7 +197,13 @@ def build_composed(
 
     n_interior = net.n - len(boundary)
     u_capacity = torch.rand(n_interior, generator=rng, dtype=dtype)
-    capacity = 50.0 + 100.0 * u_capacity
+    # Drawn over EVERY interior node, then restricted to the co2 layer's active interior (the
+    # nodes an "airpath" edge touches; the street and sewer nodes are inactive for it). The
+    # draw stays whole-interior on purpose: the RNG stream, and so every active node's
+    # capacity value, is then bit-identical to what it was before the layer stopped carrying
+    # a row for the untouched nodes.
+    active_idx, _inactive_idx = active_interior(net, ("airpath",), boundary)
+    capacity = (50.0 + 100.0 * u_capacity)[torch.isin(net.interior_index(boundary), active_idx)]
 
     drivers: dict = {}
 
@@ -194,6 +223,25 @@ def build_composed(
         scheme="implicit",
     )
 
+    thermal_layer: TransportLayer | None = None
+    model: Model | None = None
+    if thermal:
+        # Sized on the ACTIVE interior, exactly as `capacity` above is: the thermal layer
+        # advects on "airpath" too, so it has no row for a street or sewer node either, and
+        # `1e5 * ones(n_interior)` would be 68 entries too long and be refused.
+        thermal_layer = TransportLayer(
+            net,
+            "thermal",
+            capacity=1e5 * torch.ones(active_idx.numel(), dtype=dtype),
+            flow_kind="airpath",
+            boundary=boundary,
+            carrier=1005.0,
+            scheme="implicit",
+            quantity="temperature",
+            unit="K",
+        )
+        model = Model(net, {"composed": layer, "co2": transport, "thermal": thermal_layer})
+
     return ComposedModel(
         net=net,
         interface_nodes=interface_nodes,
@@ -208,6 +256,8 @@ def build_composed(
         transport=transport,
         ensemble=ensemble,
         seed=seed,
+        thermal=thermal_layer,
+        model=model,
     )
 
 
@@ -236,13 +286,69 @@ def workload_alloc(mb: int) -> int:
 
 
 def _step_state(model: ComposedModel) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """`(x0, x_boundary, zero_sources)` for the transport half of a step, at 400 ppm."""
+    """`(x0, x_boundary, zero_sources)` for the transport half of a step, at 400 ppm.
+
+    `zero_sources` is in FULL node order (spec 4.2), matching `TransportLayer.step`'s
+    milestone-2 `sources` contract, not just the transport layer's interior nodes.
+    """
     dtype = model.net.dtype
-    n_i = int(model.layer.interior.numel())
+    # The TRANSPORT layer's own interior, which is smaller than the potential layer's: the
+    # co2 layer has no row for a node no airpath edge touches.
+    n_i = model.transport.n_i
     x0 = torch.full((model.ensemble, n_i), 400.0, dtype=dtype)
     x_boundary = torch.full((model.ensemble, len(model.boundary)), 400.0, dtype=dtype)
-    zero_sources = torch.zeros(model.ensemble, n_i, dtype=dtype)
+    zero_sources = torch.zeros(model.ensemble, model.net.n, dtype=dtype)
     return x0, x_boundary, zero_sources
+
+
+def _model_steps(
+    model: ComposedModel, steps: int, *, differentiable: bool, sources: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, dict]:
+    """`run_steps`'s `thermal=True` branch: the same steps taken through `Model.step`.
+
+    Air, species and heat in one step, with the model's own ping-pong coupling (one pass per
+    step) rather than hand-written layer calls. The returned `x` is the co2 and thermal
+    states CONCATENATED on the last axis, so a `loss` formed from it reaches BOTH transport
+    adjoints: a loss over the co2 state alone would leave the thermal layer's implicit solves
+    off the backward graph entirely and the backward figure would measure the wrong
+    configuration. It also makes `x_final_mean` a mixed ppm/kelvin checksum, which is all it
+    has ever been used as.
+    """
+    assert model.model is not None and model.thermal is not None  # build_composed(thermal=True)
+    x_co2, x_boundary, zero_sources = _step_state(model)
+    dtype = model.net.dtype
+    state = {
+        "co2.x": x_co2,
+        "thermal.x": torch.full(
+            (model.ensemble, model.thermal.n_i), 293.15, dtype=dtype
+        ),
+    }
+    drivers = {
+        "composed.phi_boundary": model.phi_boundary,
+        "composed.sources": sources,
+        "co2.x_boundary": x_boundary,
+        "co2.sources": zero_sources,
+        "thermal.x_boundary": torch.full(
+            (model.ensemble, len(model.boundary)), 293.15, dtype=dtype
+        ),
+        "thermal.sources": torch.zeros(model.ensemble, model.net.n, dtype=dtype),
+    }
+    diagnostics: dict = {}
+    new: dict = {}
+    for _ in range(steps):
+        new = model.model.step(
+            state, drivers, 60.0, diagnostics=diagnostics, differentiable=differentiable
+        )
+        # Only the TRANSPORT states are fed forward, which is the state this row is specified
+        # with. Feeding "composed.phi" forward too would warm-start the next step's Newton,
+        # and with drivers this configuration holds constant (no closures) every solve after
+        # the first then converges in ZERO Newton iterations -- the air half of the step would
+        # cost nothing, and the row would be measured against the 100x24 budgets while doing a
+        # fraction of that row's potential work. The trajectory is still genuine: `x` is fed
+        # forward exactly as the non-thermal path feeds it.
+        state = {"co2.x": new["co2.x"], "thermal.x": new["thermal.x"]}
+    x = torch.cat((state["co2.x"], state["thermal.x"]), dim=-1)
+    return new["composed.phi"], x, diagnostics.get("layers", {}).get("composed", {})
 
 
 def run_steps(
@@ -251,6 +357,7 @@ def run_steps(
     *,
     differentiable: bool,
     sources: torch.Tensor | None = None,
+    thermal: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, dict]:
     """Advance `steps` coupled steps; return `(phi, x, diagnostics_of_the_last_solve)`.
 
@@ -259,10 +366,16 @@ def run_steps(
     AIRPATH slice of the resulting `q` (implicit scheme, dt = 60 s), with `x` fed forward
     from one step to the next so a multi-step row is a genuine trajectory rather than the
     same step repeated.
+
+    `thermal=True` takes the same steps through `model.model.step` with a second (heat)
+    transport layer alongside the species one -- the milestone-2 gate row. It requires a
+    model built by `build_composed(thermal=True)`; see `_model_steps`.
     """
-    lo, hi = model.layer._kind_slices["airpath"]
     if sources is None:
         sources = model.sources
+    if thermal:
+        return _model_steps(model, steps, differentiable=differentiable, sources=sources)
+    lo, hi = model.layer._kind_slices["airpath"]
     x, x_boundary, zero_sources = _step_state(model)
     diagnostics: dict = {}
     phi = None
@@ -305,6 +418,7 @@ def workload_forward(
     ensemble: int = 1,
     steps: int = 1,
     linear_solver: str = "auto",
+    thermal: bool = False,
 ) -> dict:
     """Build the composed model and run `steps` NON-differentiable steps; report the run.
 
@@ -313,6 +427,9 @@ def workload_forward(
     tree-elimination levels are all construction- or first-solve-time caches). Both still
     happen inside the process whose peak RSS `isolated_peak_rss` measures, which is correct:
     the memory budget is for the whole configuration, caches included.
+
+    `x_final_mean` is a checksum, not a physical quantity: on a `thermal=True` row it is the
+    mean of the concatenated co2 and thermal states, i.e. a mixed ppm/kelvin number.
     """
     model = build_composed(
         n_buildings=n_buildings,
@@ -321,16 +438,18 @@ def workload_forward(
         sewer_nodes=sewer_nodes,
         ensemble=ensemble,
         linear_solver=linear_solver,
+        thermal=thermal,
     )
-    run_steps(model, 1, differentiable=False)
+    run_steps(model, 1, differentiable=False, thermal=thermal)
     elapsed, (_phi, x, diagnostics) = time_call(
-        lambda: run_steps(model, steps, differentiable=False)
+        lambda: run_steps(model, steps, differentiable=False, thermal=thermal)
     )
     return {
         "elapsed_s": elapsed,
         "steps": steps,
         "ensemble": ensemble,
         "linear_solver": linear_solver,
+        "thermal": bool(thermal),
         "n_nodes": int(model.net.n),
         "n_edges": int(model.net.b),
         "x_final_mean": float(x.mean()),
@@ -346,6 +465,7 @@ def workload_backward(
     ensemble: int = 1,
     steps: int = 1,
     linear_solver: str = "auto",
+    thermal: bool = False,
 ) -> dict:
     """Build the composed model, run `steps` DIFFERENTIABLE steps, and time `loss.backward()`.
 
@@ -362,10 +482,14 @@ def workload_backward(
         sewer_nodes=sewer_nodes,
         ensemble=ensemble,
         linear_solver=linear_solver,
+        thermal=thermal,
     )
-    run_steps(model, 1, differentiable=False)  # warm the construction-time caches
+    # warm the construction-time caches
+    run_steps(model, 1, differentiable=False, thermal=thermal)
     sources = model.sources.detach().clone().requires_grad_(True)
-    phi, x, diagnostics = run_steps(model, steps, differentiable=True, sources=sources)
+    phi, x, diagnostics = run_steps(
+        model, steps, differentiable=True, sources=sources, thermal=thermal
+    )
     loss = phi[..., model.layer.interior].sum() + x.sum()
     elapsed, _ = time_call(loss.backward)
     return {
@@ -373,6 +497,7 @@ def workload_backward(
         "steps": steps,
         "ensemble": ensemble,
         "linear_solver": linear_solver,
+        "thermal": bool(thermal),
         "grad_sources_absmax": float(sources.grad.abs().max()),
         **_iteration_counts(diagnostics),
     }

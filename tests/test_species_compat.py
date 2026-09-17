@@ -40,6 +40,11 @@ def test_wrapper_matches_a_directly_built_transport_layer_on_random_flows():
     c_boundary = torch.tensor([420.0])
     dt = 300.0
 
+    # `direct.step`'s `sources` is FULL node order (spec 4.2); the wrapper's `sources` stays
+    # interior-only and pads internally the same way, so this pads by hand for the direct call.
+    full_sources = torch.zeros(net.n, dtype=torch.float64)
+    full_sources[direct.interior_idx] = sources.double()
+
     out_wrapper = st.step(c, q, sources, c_boundary, dt)
-    out_direct = direct.step(c.double(), q.double(), sources.double(), c_boundary.double(), dt)
+    out_direct = direct.step(c.double(), q.double(), full_sources, c_boundary.double(), dt)
     torch.testing.assert_close(out_wrapper.double(), out_direct, rtol=1e-8, atol=1e-8)
