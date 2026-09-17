@@ -64,9 +64,14 @@ class Photostationary(Reaction):
     root at the MINUS sign; it is evaluated as ``2 k P Q / (S + sqrt(S^2 - 4 k^2 P Q))``
     with ``S = k (P+Q) + J``, the same root written without the catastrophic cancellation
     the direct form suffers whenever ``J >> k (P+Q)`` -- the ordinary daytime case. The
-    discriminant equals ``(k (P-Q))^2 + 2 J k (P+Q) + J^2``, a sum of non-negative terms,
-    so it is never clamped: a negative value there would be a bug worth raising on, not a
-    value worth hiding.
+    discriminant is evaluated directly in that sum-of-squares form,
+    ``(k (P-Q))^2 + 2 J k (P+Q) + J^2``, and not via the algebraically equal expansion
+    ``S^2 - 4 k^2 P Q``: the expansion cancels catastrophically whenever ``P ~= Q`` and
+    ``J`` is small (the ordinary night-time near-titration state, NOx ~= Ox), producing a
+    spuriously negative value and a NaN square root. Every term of the sum-of-squares form
+    is a square or a product of non-negatives, so it is never negative in floating point,
+    not only in exact arithmetic, and is therefore never clamped: a negative value there
+    would be a bug worth raising on, not a value worth hiding.
     """
 
     def __init__(
@@ -122,7 +127,13 @@ class Photostationary(Reaction):
         p = c_no + c_no2                      # NOx, mol/m3
         q = c_no2 + c_o3                      # Ox,  mol/m3
         s = k * (p + q) + j
-        disc = s * s - 4.0 * k * k * p * q    # = (k(p-q))^2 + 2 j k (p+q) + j^2 >= 0
+        # Sum-of-squares form: every term is a square or a product of non-negatives, so
+        # this is >= 0 in floating point, not only in exact arithmetic. The algebraically
+        # equal expanded form s*s - 4*k*k*p*q cancels catastrophically whenever p ~= q
+        # and j is small (the ordinary night-time near-titration state, NOx ~= Ox),
+        # producing a spuriously negative disc, a NaN sqrt, and a silently unchanged
+        # output.
+        disc = (k * (p - q)) ** 2 + 2.0 * j * k * (p + q) + j * j
         denominator = s + torch.sqrt(disc)
         # denominator == 0 only when j == 0 AND p + q == 0: an empty cell with no
         # photolysis, whose answer is 0. The guard keeps that 0/0 off the autograd graph.

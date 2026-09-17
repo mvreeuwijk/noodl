@@ -155,3 +155,44 @@ def test_photostationary_names_a_missing_driver_and_a_bad_column():
     with pytest.raises(ValueError, match=r"Photostationary: column 7"):
         Photostationary(0, 1, 7).apply(_state(1e-8, 1e-8, 1e-8), None,
                                        {"J_NO2": torch.ones(1, dtype=DT)})
+
+
+# Ruling M3-R10: the reviewer's near-titration case, NOx ~= Ox to ~1 part in 1e12 with J
+# small/zero, catastrophically cancels the naive expanded discriminant `s*s - 4 k^2 p q`
+# to a genuinely negative float, giving `sqrt` -> NaN and (through the `denominator > 0`
+# guard) a silently unchanged output instead of the physical near-titration state.
+_C_NO_TITRATION = 0.00973714548689837
+_C_O3_TITRATION = 0.009737145486879147
+
+
+def test_photostationary_handles_the_near_titration_kink_without_nan():
+    p, q = _C_NO_TITRATION, _C_O3_TITRATION  # p > q, so the limiting reagent is O3
+    z_star = min(p, q)
+    x = _state(p * MOLAR_MASS["no"], 0.0, q * MOLAR_MASS["o3"])
+    for j_value in (0.0, 1.0e-17):  # exactly at, and a hair off, the degenerate point
+        y = Photostationary(0, 1, 2).apply(
+            x, None, {"J_NO2": torch.tensor([j_value], dtype=DT)}
+        )
+        assert not bool(torch.isnan(y).any())
+        c0, c1 = _molar(x), _molar(y)
+        torch.testing.assert_close(c1[:, 0] + c1[:, 1], c0[:, 0] + c0[:, 1],
+                                   rtol=1e-12, atol=0)
+        torch.testing.assert_close(c1[:, 1] + c1[:, 2], c0[:, 1] + c0[:, 2],
+                                   rtol=1e-12, atol=0)
+        # NO2 sits at the min(P, Q) limit; NO holds the excess of the majority species
+        # (P - Q) and O3, the limiting reagent, is driven to ~0 -- all three checked
+        # against the analytic titration limit, scaled by the concentration itself since
+        # (P - Q) and the O3 target are both individually near machine epsilon.
+        assert abs(float(c1[:, 1]) / z_star - 1.0) < 1e-9
+        assert abs(float(c1[:, 0]) - (p - q)) / z_star < 1e-9
+        assert abs(float(c1[:, 2])) / z_star < 1e-9
+
+
+def test_photostationary_gradients_are_finite_at_the_near_titration_kink():
+    p, q = _C_NO_TITRATION, _C_O3_TITRATION
+    x = _state(p * MOLAR_MASS["no"], 0.0, q * MOLAR_MASS["o3"]).requires_grad_(True)
+    j = torch.zeros(1, dtype=DT, requires_grad=True)
+    y = Photostationary(0, 1, 2).apply(x, None, {"J_NO2": j})
+    gx, gj = torch.autograd.grad(y.sum(), (x, j))
+    assert torch.isfinite(gx).all()
+    assert torch.isfinite(gj).all()
