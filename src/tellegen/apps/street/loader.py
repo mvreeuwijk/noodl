@@ -87,7 +87,7 @@ def _feature_key(properties: dict) -> tuple:
 def _netcdf(path: Path):
     from scipy.io import netcdf_file
 
-    return netcdf_file(str(path), "r", mmap=False)
+    return netcdf_file(str(path), "r", mmap=False)  # closed by its own `with` block
 
 
 def _column(handle, name: str, where: str) -> torch.Tensor:
@@ -164,10 +164,12 @@ def read_aqdt(
         elif properties.get("is_canyon") is not True:
             continue
         chosen.append(index)
+    rule = (f"aq_solver_type == {select!r}" if labelled
+            else "is_canyon is True (no feature carries aq_solver_type)")
     if not chosen:
         raise ValueError(
             f"read_aqdt: no feature of {stage1 / 'repaired_edges_canyon.geojson'} has "
-            f"aq_solver_type == {select!r}"
+            f"{rule}"
         )
     streets: list[Street] = []
     osmid: list[int] = []
@@ -185,21 +187,21 @@ def read_aqdt(
             name=str(index), u=u, v=v, length=length,
             width=float(_first(properties, ("W_m", "street_width_m"), 0.0)),
             height=float(_first(properties, ("H_m", "building_height_mean_m"), 0.0)),
-            z0_b=float(properties.get("roughness_m") or z0_b),
+            z0_b=float(_first(properties, ("roughness_m",), z0_b)),
         ))
         value = properties.get("osmid")
         osmid.append(int(value) if isinstance(value, int) else -1)
     net = StreetNetwork(streets=streets, x=x, y=y)
 
     forcing_path = stage2 / f"forcing_{year}.nc"
-    handle = _netcdf(forcing_path)
     where = str(forcing_path)
-    time_hours = _column(handle, "time_hours", where)
-    u_ref = _column(handle, "wind_speed_mps", where)
-    theta_w = _column(handle, "wind_angle_rad", where)
-    h_abl = _column(handle, "abl_height_m", where)
-    background = _column(handle, "background_concentration", where)
-    file_height = _column(handle, "reference_height_m", where)
+    with _netcdf(forcing_path) as handle:
+        time_hours = _column(handle, "time_hours", where)
+        u_ref = _column(handle, "wind_speed_mps", where)
+        theta_w = _column(handle, "wind_angle_rad", where)
+        h_abl = _column(handle, "abl_height_m", where)
+        background = _column(handle, "background_concentration", where)
+        file_height = _column(handle, "reference_height_m", where)
     reference_height = float(file_height.reshape(-1)[0])
     if float(file_height.min()) != reference_height:
         raise ValueError(
@@ -231,12 +233,14 @@ def read_aqdt(
     )
 
     parameters_path = stage2 / f"input_parameters_{year}.nc"
-    handle = _netcdf(parameters_path)
     where = str(parameters_path)
-    edge_index = handle.variables["edge_index"].data.astype("int64").tolist()
-    rows = _column(handle, "edge_emission_rate_nox_normalized_time", where)
+    with _netcdf(parameters_path) as handle:
+        edge_index = handle.variables["edge_index"].data.astype("int64").tolist()
+        rows = _column(handle, "edge_emission_rate_nox_normalized_time", where)
+        if emissions == "kg_per_year":
+            per_year = _column(handle, "edge_emission_rate_nox_kg_per_year", where)
+            normalized = _column(handle, "edge_emission_rate_nox_normalized", where)
     if emissions == "kg_per_year":
-        per_year = _column(handle, "edge_emission_rate_nox_kg_per_year", where)
         if not bool(torch.isfinite(per_year).all()):
             bad = int((~torch.isfinite(per_year)).sum())
             raise ValueError(
@@ -245,7 +249,6 @@ def read_aqdt(
                 f"leiden_small snapshot of 17 September 2026); emissions='kg_per_year' "
                 f"cannot be scaled from it -- use emissions='normalized'"
             )
-        normalized = _column(handle, "edge_emission_rate_nox_normalized", where)
         safe = torch.where(normalized > 0, normalized, torch.ones_like(normalized))
         scale = torch.where(normalized > 0, per_year / (safe * 365.25 * 86400.0),
                             torch.zeros_like(normalized))
@@ -279,7 +282,7 @@ def read_aqdt(
             "kg/s, from edge_emission_rate_nox_kg_per_year spread over the year"
         ),
         "alignment": f"emission rows matched to features by {align!r}",
-        "selection": f"aq_solver_type == {select!r}: {len(chosen)} of {len(features)}",
+        "selection": f"{rule}: {len(chosen)} of {len(features)}",
     }
     return AqdtData(net=net, forcing=forcing, emission=emission,
                     feature_index=list(chosen), osmid=osmid, notes=notes)
@@ -292,13 +295,23 @@ def _emission_rows(stage2: Path, features, edge_index, align: str, where: str
     That file's feature order IS the parameters NetCDF's row order (checked on
     `leiden_small`: `edge_emission_rate_nox_normalized[i]` equals feature `i`'s
     `emission_rate_nox_normalized` exactly, at every one of its 904 rows), and it carries
-    the `(osmid, u, v)` key that identifies a feature independently of any position.
+    the `(osmid, u, v)` key that identifies a feature independently of any position. A key
+    that occurs more than once in that file is a contradiction -- it is never resolved by
+    last-write-wins, because that would make an unselected feature silently donate its
+    emission series to a selected one with the same key.
     """
     key_path = stage2 / "edge_emissions_normalized.geojson"
     by_key: dict[tuple, int] = {}
     if key_path.exists():
         for row, feature in enumerate(_load_json(key_path)["features"]):
-            by_key[_feature_key(feature["properties"])] = row
+            key = _feature_key(feature["properties"])
+            if key in by_key:
+                raise ValueError(
+                    f"read_aqdt: emission key (osmid, u, v) = {key} occurs at features "
+                    f"{by_key[key]} and {row} of {key_path}; alignment by emission key "
+                    f"is ambiguous"
+                )
+            by_key[key] = row
     if align == "emission_key":
         if not by_key:
             raise FileNotFoundError(
@@ -313,16 +326,18 @@ def _emission_rows(stage2: Path, features, edge_index, align: str, where: str
         return out
     positional = {int(feature): row for row, feature in enumerate(edge_index)}
     if by_key:
-        wrong = 0
+        wrong: list[int] = []
         for index, feature in enumerate(features):
             row = by_key.get(_feature_key(feature["properties"]))
             if row is not None and positional.get(index) != row:
-                wrong += 1
+                wrong.append(index)
         if wrong:
+            shown = wrong[:5]
             raise ValueError(
-                f"read_aqdt: align='edge_index' puts {wrong} emission rows on a feature "
-                f"whose (osmid, u, v) does not match, so the geometry file and {where} "
-                f"describe different edge orders -- the products are out of step. Use "
-                f"align='emission_key', which matches by that key instead"
+                f"read_aqdt: align='edge_index' puts {len(wrong)} emission rows on a "
+                f"feature whose (osmid, u, v) does not match (the first features: "
+                f"{shown}), so the geometry file and {where} describe different edge "
+                f"orders -- the products are out of step. Use align='emission_key', "
+                f"which matches by that key instead"
             )
     return positional

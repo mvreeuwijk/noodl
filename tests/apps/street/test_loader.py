@@ -6,6 +6,7 @@ five products, with the same property and variable names, into `tmp_path`.
 
 from __future__ import annotations
 
+import json
 import math
 
 import pytest
@@ -188,3 +189,49 @@ def test_the_loaded_network_builds_a_model_that_solves_and_conserves(tmp_path):
     assert out["street.x"].shape == (n_time, len(data.net.streets))
     assert bool(torch.isfinite(out["street.x"]).all())
     assert bool((out["street.x"] > 0).all())
+
+
+def test_a_colliding_emission_key_is_never_resolved_silently(tmp_path):
+    """Feature 0 (selected, `network_transport`) and feature 2 (unselected,
+    `gaussian_fallback`) are made to share one `(osmid, u, v)` key. Last-write-wins would
+    make feature 0 silently receive feature 2's emission row; this must raise instead,
+    naming both feature indices."""
+    stage1, stage2 = build(tmp_path)
+    key_path = stage2 / "edge_emissions_normalized.geojson"
+    collection = json.loads(key_path.read_text(encoding="utf-8"))
+    donor = collection["features"][0]["properties"]
+    victim = collection["features"][2]["properties"]
+    victim["osmid"] = donor["osmid"]
+    victim["u"] = donor["u"]
+    victim["v"] = donor["v"]
+    key_path.write_text(json.dumps(collection), encoding="utf-8")
+    with pytest.raises(ValueError, match=r"emission key .* occurs at features 0 and 2"):
+        read_aqdt(stage1, stage2, year=2024, wind_height_m=30.0, trust_file_height=True)
+
+
+def test_the_selection_note_names_is_canyon_when_unlabelled(tmp_path):
+    """When no feature carries `aq_solver_type` at all, selection falls back to `is_canyon
+    is True`, and the note must say so rather than repeating the `aq_solver_type` wording
+    that was never actually applied."""
+    stage1, stage2 = build(tmp_path)
+    edges_path = stage1 / "repaired_edges_canyon.geojson"
+    collection = json.loads(edges_path.read_text(encoding="utf-8"))
+    for feature in collection["features"]:
+        feature["properties"].pop("aq_solver_type", None)
+    edges_path.write_text(json.dumps(collection), encoding="utf-8")
+    data = read_aqdt(stage1, stage2, year=2024, wind_height_m=30.0, trust_file_height=True)
+    assert "is_canyon" in data.notes["selection"]
+    assert "aq_solver_type ==" not in data.notes["selection"]
+
+
+def test_a_present_zero_roughness_is_not_treated_as_absent(tmp_path):
+    """`roughness_m: 0.0` is a present, invalid value, not a missing one; it must reach
+    `StreetNetwork`'s positivity check (naming the street) rather than being silently
+    replaced by the loader's default."""
+    stage1, stage2 = build(tmp_path)
+    edges_path = stage1 / "repaired_edges_canyon.geojson"
+    collection = json.loads(edges_path.read_text(encoding="utf-8"))
+    collection["features"][0]["properties"]["roughness_m"] = 0.0
+    edges_path.write_text(json.dumps(collection), encoding="utf-8")
+    with pytest.raises(ValueError, match=r"street '0' has z0_b 0\.0"):
+        read_aqdt(stage1, stage2, year=2024, wind_height_m=30.0, trust_file_height=True)
