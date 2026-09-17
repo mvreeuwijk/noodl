@@ -20,6 +20,21 @@ crossing is dp_t = (C_mass mu / (lam rho))^(1/(1-n)). One element KIND per CONTA
 (`pl_<nr>`, `qf_<nr>`, `door_<nr>`, `bd_<nr>`, `fan_<nr>`), so every element keeps its own
 transition and the transport layers advect over all of them.
 
+ONE DOCUMENTED EXCEPTION to that crossing rule: the DOORWAY kinds (`dor_door`, `dor_pl2`) do
+NOT derive `dp_transition` from their record's `lam`. Each doorway becomes two half-area
+openings built directly from `ht`/`wd`/`cd`, and that branch never reaches the derivation
+above, so both openings take `PowerLaw`'s generic 1e-3 Pa default. What the formula WOULD
+give, for the two records this repository carries (`tests/data/contam/doorway_damper_fan.prj`,
+at mult = 1, n = 0.5): 2.7e-4 Pa for the `dor_pl2` record and 2.0e-8 Pa for the `dor_door`
+one -- both BELOW the default, so on both the regularised laminar blend is entered earlier
+(at a larger |dp|) than ContamX would enter it. The error this can cause is bounded twice
+over: it is confined to |dp| < 1e-3 Pa, where the two laws differ by a fraction of the flow
+that a 1e-3 Pa pressure difference drives at all; and NO doorway flow is compared against ContamX
+anywhere (the three-zone and one-zone stack parity projects carry no doorway at all, and the
+one parity test that loads `doorway_damper_fan.prj` compares path 5, its fan, alone). Deriving
+it
+properly would move test numbers and is a recorded FOLLOW-UP, not a change made here.
+
 The `rho` in those coefficients is the density of the air ENTERING the path, not a fixed
 reference: ContamX re-evaluates it per path and per flow direction. Every power-law kind is
 therefore built as an `UpstreamDensityPowerLaw`, whose `C` is the coefficient at RHO_0 (as

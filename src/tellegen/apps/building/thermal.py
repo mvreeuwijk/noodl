@@ -27,12 +27,32 @@ T_REF = 293.15
 
 @dataclass
 class WallMass:
-    """A lumped wall node: capacity [J/K], conductances to the zone and to ambient [W/K]."""
+    """A lumped wall node: capacity [J/K], conductances to the zone and to ambient [W/K].
+
+    Both conductances must be strictly positive, and are checked here rather than left to the
+    layer. A NEGATIVE `ua` makes the conduction term `A_c diag(g) A_c^T` indefinite instead of
+    positive semi-definite, so the heat layer's operator is anti-diffusive: heat flows UP the
+    temperature gradient and a wall node can overshoot both of its neighbours, breaking the
+    maximum principle `docs/theory.md` section 7 claims for the layer -- and every solve still
+    reports success, because nothing downstream ever looks at the sign. A ZERO conductance is
+    refused with it: it is a wall that conducts nothing, leaving the wall node with no
+    conduction path to the rest of the network.
+    """
 
     name: str
     capacity: float
     ua_zone: float
     ua_ambient: float
+
+    def __post_init__(self) -> None:
+        for attr in ("ua_zone", "ua_ambient"):
+            value = float(getattr(self, attr))
+            if not value > 0:
+                raise ValueError(
+                    f"WallMass {self.name!r}: {attr} must be strictly positive, got {value!r} "
+                    f"(a non-positive conductance makes the heat layer's conduction operator "
+                    f"anti-diffusive)"
+                )
 
 
 @dataclass
@@ -46,7 +66,9 @@ class Zone:
 
 def add_zone(net: Network, zone: Zone, *, ambient="ambient") -> None:
     """Add the zone's air node (attributes volume, T0, z_ref, heat_capacity=0) and, if it has
-    a wall, the wall node (heat_capacity) with 'wall' edges zone -> wall -> ambient (ua)."""
+    a wall, the wall node (heat_capacity) with 'wall' edges zone -> wall -> ambient (ua).
+
+    The wall's conductances are validated by `WallMass` itself, at construction."""
     if ambient not in net.nodes:
         net.add_node(ambient, z_ref=0.0)
     net.add_node(zone.name, volume=zone.volume, T0=zone.T0, z_ref=zone.z_ref, heat_capacity=0.0)

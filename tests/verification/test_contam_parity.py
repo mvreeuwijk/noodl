@@ -45,7 +45,12 @@ FAN_CMF_PATH = 5
 # transient against a different problem.
 THREE_AMBIENT_MF = 0.0023254
 F64 = torch.float64
-pytestmark = pytest.mark.external
+# NOT a module-level `pytestmark`: the two tests below monkeypatch their way to the behaviour
+# they pin and need no engine at all, so marking them `external` would misreport what this
+# file requires (and would hide them from a `-m "not external"` run that could perfectly well
+# execute them). `external` is carried by the engine-dependent tests themselves -- exactly
+# those taking the `contamx` fixture. Nothing about the default selection changes: `addopts`
+# deselects `slow` only, so `external` has never gated what runs.
 
 
 def test_contamx_module_names_the_missing_package(monkeypatch):
@@ -95,6 +100,7 @@ def _stack_case(contamx_run_steady, Ta=STACK_AMBIENT_T):
     return p, ref, p.path_flows(ss["air.q"])
 
 
+@pytest.mark.external
 def test_stack_project_flow_directions_match_contamx(contamx):
     from tellegen.apps.building.contamx import run_steady
 
@@ -109,6 +115,7 @@ def test_stack_project_flow_directions_match_contamx(contamx):
     assert torch.equal(torch.sign(ours), torch.sign(ref["flow"]))
 
 
+@pytest.mark.external
 @pytest.mark.parametrize("Ta", STACK_AMBIENT_SWEEP)
 def test_stack_project_flow_magnitudes_match_contamx(contamx, Ta):
     """The non-isothermal parity case, live at the milestone's own 1e-3 (Task 14b).
@@ -129,6 +136,7 @@ def test_stack_project_flow_magnitudes_match_contamx(contamx, Ta):
     torch.testing.assert_close(ours, ref["flow"], rtol=1e-3, atol=1e-6)
 
 
+@pytest.mark.external
 def test_the_stack_residual_is_flat_across_the_sweep_not_proportional_to_dT(contamx):
     """Guards the DIAGNOSIS, not just the tolerance: before the correction the relative
     error was proportional to |T_zone - T_ambient| (1.72e-2 at 20 K, 8.61e-3 at 10 K, 0 at
@@ -148,6 +156,7 @@ def test_the_stack_residual_is_flat_across_the_sweep_not_proportional_to_dT(cont
     assert max(rel) / min(rel) < 1.5
 
 
+@pytest.mark.external
 def test_a_constant_mass_flow_fan_delivers_its_rating_in_the_from_to_direction(contamx):
     """The from->to sign convention `contamx._snapshot` documents, asserted rather than
     merely written down (hardening carried from the Task 14 review).
@@ -172,6 +181,7 @@ def test_a_constant_mass_flow_fan_delivers_its_rating_in_the_from_to_direction(c
     assert ours[j].item() == pytest.approx(FAN_CMF_RATING, rel=1e-5)
 
 
+@pytest.mark.external
 def test_three_zone_steady_flows_match_contamx(contamx):
     from tellegen.apps.building.contamx import run_steady
 
@@ -183,6 +193,7 @@ def test_three_zone_steady_flows_match_contamx(contamx):
     torch.testing.assert_close(p.path_flows(ss["air.q"]), ref["flow"], rtol=1e-3, atol=1e-6)
 
 
+@pytest.mark.external
 def test_three_zone_transient_concentrations_match_contamx(contamx):
     from tellegen.apps.building.contamx import run_transient
 
@@ -198,4 +209,7 @@ def test_three_zone_transient_concentrations_match_contamx(contamx):
         state = model.step(state, drivers, ref["dt"])
         trace.append(state["species.x"].clone())
     ours = torch.stack(trace)                                   # (steps+1, 3, 1)
-    torch.testing.assert_close(ours, ref["mf"], rtol=2e-3, atol=1e-7)
+    # Spec section 9's tolerance for zone mass fractions is 1e-3 relative; the measured
+    # pointwise maximum relative error over the whole (25, 3, 1) trace is 6.5e-6, so the
+    # tolerance is the spec's, not a looser one chosen to fit.
+    torch.testing.assert_close(ours, ref["mf"], rtol=1e-3, atol=1e-7)

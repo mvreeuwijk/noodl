@@ -186,6 +186,64 @@ def test_gradients_flow_through_the_application_built_model():
     )
 
 
+def test_wall_mass_refuses_a_non_positive_conductance_naming_it():
+    """A negative `ua` makes the conduction operator anti-diffusive -- it breaks the maximum
+    principle docs/theory.md section 7 claims for the layer -- and nothing downstream looks at
+    the sign, so every solve would report success. It is refused where the wall is built."""
+    with pytest.raises(ValueError, match=r"WallMass 'z_wall'.*ua_zone.*strictly positive.*-1"):
+        WallMass("z_wall", capacity=2e6, ua_zone=-1.0, ua_ambient=20.0)
+    with pytest.raises(ValueError, match=r"WallMass 'z_wall'.*ua_ambient.*strictly positive"):
+        WallMass("z_wall", capacity=2e6, ua_zone=100.0, ua_ambient=0.0)
+
+
+def test_gradient_to_a_wall_conductance_matches_central_differences():
+    """Spec section 9's gradcheck with respect to a WALL CONDUCTANCE.
+
+    `thermal_layer` builds the layer's conductance from the network attribute `ua`
+    (`net.edge_attr("ua", "wall")`), which is a plain tensor of floats, so the application
+    offers no LEARNABLE route to it today: the conductance is reached here through the
+    layer's own conduction state, `TransportLayer._conduction_edges`, whose third entry is
+    the per-edge conductance vector `g`. Making `WallMass`/`thermal_layer` accept a tensor
+    (or `learnable=True`) conductance is a MILESTONE 3 item and is deliberately NOT added
+    here; this test pins that the derivative itself is correct and unbroken, so that the
+    milestone-3 API has something to be wired onto.
+
+    Two `wall` edges (zone->wall, wall->ambient) on a `build_model`-built model, one
+    ping-pong step, loss = sum of the interior temperatures; central differences on both
+    conductances agree to ~1e-8 relative.
+    """
+    def _wall_model():
+        net, model, state, drivers, _ = _single_zone(wall=True, coupling="pingpong")
+        return net, model, state, drivers
+
+    net, model, state, drivers = _wall_model()
+    th = model.layers["thermal"]
+    csrc, ctgt, g0 = th._conduction_edges
+    assert g0.tolist() == [100.0, 20.0]                       # ua_zone, ua_ambient
+    g = g0.clone().requires_grad_(True)
+    th._conduction_edges = (csrc, ctgt, g)
+    # R21 as elsewhere in this file: the finite differences below must not be compared
+    # against a solve stopped at Newton's dtype-derived default residual.
+    model.step(state, drivers, 600.0, atol=1e-14, rtol=1e-14)["thermal.x"].sum().backward()
+
+    def loss_at(values: list[float]) -> float:
+        net_, model_, state_, drivers_ = _wall_model()
+        th_ = model_.layers["thermal"]
+        csrc_, ctgt_, _ = th_._conduction_edges
+        th_._conduction_edges = (csrc_, ctgt_, torch.tensor(values, dtype=F64))
+        step = model_.step(state_, drivers_, 600.0, atol=1e-14, rtol=1e-14)
+        return step["thermal.x"].sum().item()
+
+    h = 1e-3
+    for i in range(2):
+        up, down = [100.0, 20.0], [100.0, 20.0]
+        up[i] += h
+        down[i] -= h
+        fd = (loss_at(up) - loss_at(down)) / (2 * h)
+        assert fd != 0.0
+        assert g.grad[i].item() == pytest.approx(fd, rel=1e-6)
+
+
 def test_thermal_layer_refuses_a_node_with_no_heat_capacity():
     net = Network(dtype=F64)
     net.add_node("ambient", z_ref=0.0)

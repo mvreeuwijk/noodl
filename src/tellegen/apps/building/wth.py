@@ -78,11 +78,31 @@ class Weather:
         out["Wd"] = float(np.rad2deg(np.interp(t, tt, wd)) % 360.0)
         return out
 
-    def drivers_at(self, t: float) -> dict[str, torch.Tensor]:
+    def drivers_at(self, t: float, *, thermal: str = "thermal") -> dict[str, torch.Tensor]:
+        """The weather at `t` under the CONVENTION KEYS a `build_model`-built model reads.
+
+        This is a seam, so the keys are the consumers' own, not this reader's column names:
+
+        * the ambient TEMPERATURE is the thermal layer's prescribed boundary value, so it is
+          emitted as `"<thermal>.x_boundary"` -- one entry for the single boundary node
+          `thermal_layer` prescribes, hence shape `(1,)`, the shape that layer's `step`
+          expects -- and never as a free-standing `"T_amb"`, which nothing in the system
+          reads. `thermal` renames it for a layer built through `thermal_layer(name=...)`.
+        * the barometric pressure is `"P_ref"`, the key `IdealGasDensity` looks for (CONTAM
+          TN 1887r1 section 3.18). It is NOT namespaced: it is a property of the ambient
+          state that any closure may read, not of one layer.
+        * `"V_met"`/`"theta_w"` are the `Wind` drive's own default `speed_key`/
+          `direction_key` and are unchanged.
+
+        A model with more than one prescribed temperature node (`thermal_layer(
+        fixed_temperature=...)`) needs more than the ambient value, so it must build the
+        boundary vector itself; this returns the one-boundary-node case.
+        """
         a = self.at(t)
         f = lambda v: torch.tensor(v, dtype=torch.float64)  # noqa: E731
         return {
-            "T_amb": f(a["Ta"]), "P_amb": f(a["Pb"]),
+            f"{thermal}.x_boundary": torch.tensor([a["Ta"]], dtype=torch.float64),
+            "P_ref": f(a["Pb"]),
             "V_met": f(a["Ws"]), "theta_w": f(a["Wd"]),
         }
 

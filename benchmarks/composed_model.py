@@ -164,7 +164,8 @@ def build_composed(
     the point of the configuration is the cost of a second transport layer through
     `Model.step`, not thermal feedback, for which this synthetic topology carries no
     elevations. Everything else -- topology, RNG stream, elements, sources, the co2 layer --
-    is bit-identical to `thermal=False`, so the two differ in the added layer alone.
+    is bit-identical to `thermal=False`, so the two differ in the added layer and the
+    `Model.step` dispatch around it.
 
     `linear_solver` configures `layer` ONLY, and defaults to the layer's own default, so
     every existing caller gets exactly the model it got before. It exists for the spec's

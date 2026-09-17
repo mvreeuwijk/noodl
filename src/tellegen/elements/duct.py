@@ -42,7 +42,35 @@ _C = 2.0 * math.log10(math.e)
 
 
 class Duct(Element):
-    """Colebrook duct: F(dp) with friction from the Colebrook equation, laminar below Re_t."""
+    """Colebrook duct: F(dp) with friction from the Colebrook equation, laminar below Re_t.
+
+    KNOWN DISCONTINUITY at |dp| = dp_t, of size ~1e-6 to ~1e-4 RELATIVE at the default
+    `n_iter=4`. `flow()` is not continuous there, and this is a property of the flow law
+    itself, not a test tolerance:
+
+    `_transition()` and `_turbulent()` are DIFFERENT RECURRENCES for the same Colebrook fixed
+    point. `_transition()` iterates g at the FIXED `Re = Re_t` -- it knows the Reynolds number
+    at the transition point by definition -- and inverts the result for dp_t, so its F_t is
+    exactly `mu Re_t A / D`. `_turbulent()` cannot know Re in advance and re-evaluates it from
+    the current F on every pass. Both converge to the same g as `n_iter -> inf`, but at a
+    FINITE `n_iter` they stop at different iterates, so `_turbulent(dp_t) != F_t` and the
+    laminar branch (which meets F_t exactly) and the turbulent branch disagree at the switch.
+
+    Measured relative step `|_turbulent(dp_t) - F_t| / F_t` for the L=10, D=0.3, eps=1.5e-4,
+    sum_C=2 duct of `tests/elements/test_duct.py`: 1.5e-2 at `n_iter=1`, 3.2e-4 at 2, 2.2e-5
+    at 3, 1.6e-6 at 4 (the default), 8.2e-9 at 6, 4.3e-11 at 8 -- i.e. it inherits the fixed
+    point's own convergence and is bounded by raising `n_iter`. Other geometries at the
+    default sit in the same band (2.3e-4 for a short smooth L=5, D=0.1, eps=1e-4 duct).
+    `tests/elements/test_duct.py::test_the_transition_step_is_bounded_and_shrinks_with_n_iter`
+    pins both the size and the mechanism.
+
+    Unifying the two recurrences is a FOLLOW-UP, not a change made here: defining F_t as
+    `_turbulent(dp_t)` would make the branches agree by construction but would give up
+    `Re = Re_t` exactly at the transition, which is the physical definition of the transition
+    point and is separately pinned; the alternative -- correcting dp_t to the root of
+    `_turbulent(dp) = F_t` -- is new numerics on the flow path. Neither is urgent: `Duct` is
+    used by no verification case, and the `.prj` reader refuses duct networks outright.
+    """
 
     def __init__(
         self,

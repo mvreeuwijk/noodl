@@ -68,8 +68,10 @@ class Model:
 
     `"iterate"` (the "onion") repeats that pass within the one step until the transport
     states named in `iterate_tol` stop changing, at most `iterate_max` times. Successive
-    substitution with 0.5 relaxation: the state the closures see on pass k >= 2 is the mean
-    of the last two passes' transport states, while each pass re-advances the transport
+    substitution with 0.5 relaxation, which takes a pass to start: pass 1 sees the state at
+    the start of the step, pass 2 sees pass 1's transport states UNRELAXED (there is no
+    earlier pass to average them with), and pass 3 is the first to see a mean -- from there
+    on, pass k sees the mean of passes k-2 and k-1. Every pass re-advances the transport
     layers from the state at the start of the step. `iterate_tol` is REQUIRED in this mode
     and is an ABSOLUTE tolerance per layer, on that layer's own units; a transport layer left
     out of it is stepped every pass but not tested, which is what a species layer whose mass
@@ -331,9 +333,11 @@ class Model:
     def _iterate(self, state, drivers, dt, diagnostics, solve_kwargs) -> State:
         """Hensen's onion: repeat the pass until the named transport states stop changing.
 
-        The state fed to the closures on pass k >= 2 is the mean of the last two passes'
-        transport states (Hensen 1995, successive substitution with 0.5 relaxation); the
-        returned state is the LAST pass's own output. Convergence is judged per instance on
+        The relaxation takes a pass to start: `prev` is None after pass 1, so pass 2 is fed
+        pass 1's transport states UNRELAXED, and pass 3 is the first fed a mean. From there
+        the state fed to the closures on pass k is the mean of passes k-2 and k-1 (Hensen
+        1995, successive substitution with 0.5 relaxation). The returned state is the LAST
+        pass's own output, never a relaxed one. Convergence is judged per instance on
         detached copies; the passes themselves stay on the autograd graph (unrolled).
 
         The fixed point is therefore differentiated by unrolling, which carries the whole

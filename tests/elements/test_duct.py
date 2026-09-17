@@ -92,6 +92,33 @@ def test_laminar_regime_is_linear_and_meets_the_turbulent_curve_at_Re_t():
     assert just_above.item() == pytest.approx(F_t.item(), rel=1e-5)
 
 
+def test_the_transition_step_is_bounded_and_shrinks_with_n_iter():
+    """`flow()` is DISCONTINUOUS at |dp| = dp_t, and this bounds the jump.
+
+    `_transition()` iterates the Colebrook fixed point at the fixed `Re = Re_t`, while
+    `_turbulent()` re-evaluates Re from the current F; at a finite `n_iter` the two stop at
+    different iterates, so the laminar branch (which meets F_t exactly) and the turbulent
+    branch do not meet. The step is the fixed point's own truncation error, so it must shrink
+    with `n_iter` -- which is what makes it a truncation artefact rather than a modelling
+    disagreement. See the `Duct` class docstring.
+    """
+    step = {}
+    for n_iter in (1, 2, 4, 8):
+        el = Duct(**PARAMS, n_iter=n_iter)
+        F_t, dp_t = el._transition()
+        step[n_iter] = abs(el._turbulent(dp_t).item() - F_t.item()) / F_t.item()
+    assert step[4] < 1e-5                                    # the default: measured 1.6e-6
+    assert step[8] < 1e-9                                    # measured 4.3e-11
+    assert step[1] > step[2] > step[4] > step[8]
+    # The jump is REAL: evaluated either side of dp_t, `flow` differs by that much and no
+    # less, so the bound above is on the flow law and not on an artefact of _turbulent.
+    el = Duct(**PARAMS)
+    F_t, dp_t = el._transition()
+    below = el.flow(dp_t * (1 - 1e-12)).item()
+    above = el.flow(dp_t * (1 + 1e-12)).item()
+    assert abs(above - below) / F_t.item() == pytest.approx(step[4], rel=1e-6)
+
+
 def test_gradcheck_flow_wrt_dp_at_zero_inside_and_outside_the_transition():
     el = Duct(**PARAMS)
     _, dp_t = el._transition()

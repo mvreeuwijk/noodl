@@ -7,7 +7,17 @@ from pathlib import Path
 import pytest
 import torch
 
+from tellegen.apps.building.elements import orifice_elements_from_edges
+from tellegen.apps.building.thermal import (
+    R_AIR,
+    Zone,
+    add_zone,
+    build_model,
+    initial_state,
+)
 from tellegen.apps.building.wth import Weather, read_wth
+from tellegen.drives import Stack
+from tellegen.topology import Network
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "contam"
 
@@ -45,8 +55,45 @@ def test_interpolates_linearly_between_rows_and_across_days(tmp_path):
     assert at["Ws"] == pytest.approx(3.0)
     assert w.at(36 * 3600.0)["Ta"] == pytest.approx(284.0)
     d = w.drivers_at(6 * 3600.0)
-    assert set(d) == {"T_amb", "P_amb", "V_met", "theta_w"}
+    assert set(d) == {"thermal.x_boundary", "P_ref", "V_met", "theta_w"}
     assert d["V_met"].dtype == torch.float64 and d["V_met"].dim() == 0
+
+
+def test_drivers_at_emits_the_keys_a_build_model_model_actually_consumes(tmp_path):
+    """The seam test: not that `drivers_at` returns four keys, but that they are the keys a
+    `build_model`-built model reads. Updating such a model's drivers with them must move the
+    ambient temperature the density closure sees -- which `"T_amb"`/`"P_amb"` never did."""
+    f = tmp_path / "s.wth"
+    f.write_text(SYNTHETIC)
+    w = read_wth(f)
+
+    net = Network(dtype=torch.float64)
+    net.add_node("ambient", z_ref=0.0)
+    add_zone(net, Zone("z", volume=50.0, T0=293.15))
+    net.add_edge("ambient", "z", kind="airpath", z_path=0.0, Cd=0.6, area=0.01)
+    el = orifice_elements_from_edges(net, "airpath")
+    model = build_model(net, air_elements=[el], drives=[Stack.from_network(net, "airpath")])
+    state = initial_state(model)
+    drivers = {
+        "air.phi_boundary": torch.zeros(1, dtype=torch.float64),
+        "thermal.x_boundary": torch.tensor([300.0], dtype=torch.float64),
+    }
+    (closure,) = model.closures
+    amb = net.node_index("ambient")
+    before = closure(state, drivers)["rho"][amb].item()
+
+    d = w.drivers_at(6 * 3600.0)
+    assert set(d) == {"thermal.x_boundary", "P_ref", "V_met", "theta_w"}
+    assert d["thermal.x_boundary"].shape == (model.layers["thermal"].n_b,)
+    assert d["thermal.x_boundary"].dtype == torch.float64
+    assert d["P_ref"].dtype == torch.float64 and d["P_ref"].dim() == 0
+    drivers.update(d)
+    after = closure(state, drivers)["rho"][amb].item()
+
+    assert d["thermal.x_boundary"].item() == pytest.approx(285.0)      # interpolated Ta
+    assert d["P_ref"].item() == pytest.approx(101100.0)                # interpolated Pb
+    assert after == pytest.approx(101100.0 / (R_AIR * 285.0))
+    assert after != before
 
 
 def test_rejects_a_file_that_is_not_a_contam_weather_file(tmp_path):

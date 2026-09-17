@@ -268,12 +268,17 @@ The second was the upstream-density correction above.
 | Hensen's ping-pong versus iterate table | qualitative | holds |
 | Gradients through `Model.step`, `Model.steady` and `build_model`-built models to element parameters, drivers, sources and boundary values | finite differences | hold |
 | ContamX three-zone steady flows | 1e-3 relative | 9.1e-8 |
-| ContamX 24-step transient concentrations | 2e-3 | 3.4e-6 |
+| ContamX 24-step transient concentrations | 1e-3 relative (atol 1e-7) | 6.5e-6 |
 | ContamX single-zone stack flows at 273.15/283.15/303.15/313.15 K ambient | 1e-3 | 4.4e-5 |
 
 The ContamX figures are against ContamX 3.4.1.7 through `contamxpy` 0.0.9, Windows x86-64
 only. The stack row is 4.4e-5 **after** the upstream-density correction; before it, the same
-case was off by 1.7e-2.
+case was off by 1.7e-2. The transient row's 6.5e-6 is the POINTWISE MAXIMUM RELATIVE ERROR
+`max |ours - ref| / |ref|` over the whole (25, 3, 1) trace of zone mass fractions -- all 25
+steps and all three zones -- taken over the entries where `ref` is nonzero, the first row
+being identically zero on both sides. (An earlier version of this table gave 3.4e-6 there,
+which is not that metric and is not reproducible as one; 6.5e-6 is the re-measured pointwise
+figure. That row's tolerance was also 2e-3, against the spec's 1e-3, and is now 1e-3.)
 
 **The section 6.1 budget table with a heat layer.** One new gate row,
 `tests/verification/test_composed_scaling.py::test_composed_model_with_thermal_layer_24_steps_within_budget`
@@ -299,9 +304,11 @@ against 58.340 s now -- which on its own would be indistinguishable from a regre
 branch. A discriminating experiment separates them: rows (1, 1, `auto`) and (100, 1, `auto`)
 were measured at this branch's HEAD and at the merge base `e982efe` in the same venv,
 interleaved HEAD/BASE/HEAD, giving forward 0.457 / 0.439 / 0.392 s and 6.735 / 6.211 /
-6.608 s. HEAD and base are within noise of each other, so **the branch has not regressed**:
-the machine is 2-4x slower today than when the 1b table was recorded, and noisy within the
-morning -- (100, 1, `auto`) measured 2.900 s inside the report run and 6.7 s an hour later.
+6.608 s. HEAD and base are within noise of each other, so **the branch has not regressed**
+at the shapes that experiment measured -- and it measured (1, 1) and (100, 1) only, so it
+establishes no regression THERE and does not directly measure the 24-step thermal shape,
+which has no counterpart at the base to be compared against: the machine is 2-4x slower
+today than when the 1b table was recorded, and noisy within the morning -- (100, 1, `auto`) measured 2.900 s inside the report run and 6.7 s an hour later.
 So the figures above cannot be read against the 1b table, and reading them against the
 budgets says as much about the machine as about the code.
 

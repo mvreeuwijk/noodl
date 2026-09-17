@@ -296,6 +296,28 @@ def test_wind_from_network_names_an_unknown_ambient_and_a_missing_driver():
         wind({"rho_amb": torch.tensor(1.2, dtype=F64), "theta_w": torch.tensor(0.0, dtype=F64)})
 
 
+def test_wind_refuses_a_negative_profile_index_naming_the_edges():
+    """The valid range is 0 (constant Cp) to len(profiles). A NEGATIVE index matches no
+    `profile_index == i` in `__call__` (i runs from 1), so it would silently fall back to
+    `cp_const` rather than being refused; the upper bound was already checked, this is the
+    lower one."""
+    prof = WindProfile([0.0, 180.0], [0.6, -0.4])
+    kw = dict(
+        sign=torch.tensor([1.0, -1.0], dtype=F64),
+        envelope=torch.tensor([1.0, 1.0], dtype=F64),
+        azimuth=torch.tensor([0.0, 180.0], dtype=F64),
+        ch=torch.tensor([0.5, 0.5], dtype=F64),
+        cp_const=torch.tensor([0.0, 0.0], dtype=F64),
+        profiles=[prof],
+    )
+    with pytest.raises(ValueError, match=r"edges \[1\] reference profile -1.*0 \(the constant"):
+        Wind("airpath", profile_index=torch.tensor([1, -1]), **kw)
+    # The upper bound still refuses on its own terms, and the valid range is accepted.
+    with pytest.raises(ValueError, match="profile 2 but only 1 were given"):
+        Wind("airpath", profile_index=torch.tensor([0, 2]), **kw)
+    assert Wind("airpath", profile_index=torch.tensor([0, 1]), **kw).profiles == [prof]
+
+
 def test_wind_from_network_accepts_a_profile_number_mapping_with_gaps():
     """Ruling R3: `profiles` may be a Mapping[int, WindProfile] keyed by CONTAM's own,
     possibly non-contiguous, profile number -- here 5 and 2, not 1 and 2."""

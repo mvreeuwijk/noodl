@@ -228,6 +228,16 @@ class Wind:
                 f"Wind (kind {kind!r}): an edge references profile "
                 f"{int(self.profile_index.max())} but only {len(self.profiles)} were given"
             )
+        # The valid range is 0 (the constant Cp, no profile) to len(self.profiles); a NEGATIVE
+        # index matches no `profile_index == i` in `__call__`, where `i` runs from 1, so it
+        # would silently fall through to `cp_const` instead of being refused.
+        if self.profile_index.numel() and int(self.profile_index.min()) < 0:
+            bad = int(self.profile_index.min())
+            where = (self.profile_index == bad).nonzero().flatten().tolist()
+            raise ValueError(
+                f"Wind (kind {kind!r}): edges {where} reference profile {bad}; a profile "
+                f"index must be 0 (the constant Cp) or 1..{len(self.profiles)}"
+            )
         self.rho_key, self.speed_key, self.direction_key = rho_key, speed_key, direction_key
 
     @classmethod
