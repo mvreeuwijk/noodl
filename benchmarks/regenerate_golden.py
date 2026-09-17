@@ -1,7 +1,11 @@
-"""Regenerate tests/golden/contam_airflow.json from the current solver implementation.
+"""Regenerate the stored golden results from the current implementation.
+
+Writes `tests/golden/contam_airflow.json` (the closed-form airflow cases) and
+`tests/golden/natural_ventilation.json` (the coupled airflow-heat demo trajectory).
 
 This is an explicit action, not run automatically: run it only after an intentional change
-to element laws or solver defaults that is expected to change the reference numbers.
+to element laws, coupling or solver defaults that is expected to change the reference
+numbers.
 
     .venv/Scripts/python benchmarks/regenerate_golden.py
 """
@@ -13,10 +17,15 @@ from pathlib import Path
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests"))
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+# `tests` for `golden`, and the repository root so `benchmarks.natural_ventilation` imports
+# whether this file is run as a path (sys.path[0] is `benchmarks/`) or as `-m`.
+sys.path.insert(0, str(_REPO_ROOT / "tests"))
+sys.path.insert(0, str(_REPO_ROOT))
 
 from golden import save_golden  # noqa: E402
 
+from benchmarks.natural_ventilation import run as run_natural_ventilation  # noqa: E402
 from tellegen.drives import ConstantDrive  # noqa: E402
 from tellegen.elements.fan import FanCurve  # noqa: E402
 from tellegen.elements.fixed import FixedFlow  # noqa: E402
@@ -98,6 +107,18 @@ def _fan_curve_case() -> dict:
     return {"phi": phi.tolist(), "q": q.tolist()}
 
 
+def _natural_ventilation_case() -> dict:
+    """Two simulated hours (12 steps of 600 s) of the coupled airflow-heat demo, `iterate`.
+
+    `benchmarks.natural_ventilation.run` is deterministic -- no RNG anywhere in it -- so this
+    is a genuine bit-for-bit regression reference for the whole milestone-2 stack at once:
+    `build_model`, the stack drive, the density closure, the large opening, and the iterated
+    coupling of the air and thermal layers, step by step.
+    """
+    result = run_natural_ventilation("iterate", 600.0, hours=2.0)
+    return {key: result[key] for key in ("T_A", "T_B", "door_kg_s")}
+
+
 def main() -> None:
     data = {
         "series": _series_case(),
@@ -107,6 +128,8 @@ def main() -> None:
     }
     save_golden("contam_airflow", data)
     print("wrote tests/golden/contam_airflow.json")
+    save_golden("natural_ventilation", _natural_ventilation_case())
+    print("wrote tests/golden/natural_ventilation.json")
 
 
 if __name__ == "__main__":

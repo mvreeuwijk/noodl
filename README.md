@@ -20,8 +20,14 @@ src/tellegen/
   cycles.py      branch_flows, assert_forward_oriented, particular_flow, project_measured
   elements/      Element base class and built-in branch laws: powerlaw.py (PowerLaw, Orifice),
                  quadratic.py (Quadratic), fixed.py (FixedFlow), conductance.py (Conductance),
-                 fan.py (FanCurve)
-  drives.py      Drive protocol, ConstantDrive
+                 fan.py (FanCurve), duct.py (Duct: Colebrook friction, unrolled), damper.py
+                 (Damper), upstream.py (UpstreamDensityPowerLaw, the upstream-density
+                 correction on CONTAM power-law elements)
+  drives.py      Drive protocol (a function of the DRIVERS alone), ConstantDrive, Stack,
+                 Wind, WindProfile (profiles identified by CONTAM's profile number)
+  model.py       Model: several physics layers on one network, stepped together;
+                 coupling="pingpong" (one pass) or "iterate" (Hensen's onion, 0.5
+                 relaxation, per-instance convergence)
   operators/     the matvec-free linear-operator contract: base.py (LinearOperator protocol,
                  SolveResult, SolverStatus), dense.py (DenseOperator, the retained dense
                  oracle), graph.py (GraphLaplacianOperator), advection.py (AdvectionOperator)
@@ -32,12 +38,19 @@ src/tellegen/
                  implicit.py (implicit_solve, adjoint)
   layers/        potential.py (PotentialFlowLayer), transport.py (TransportLayer),
                  reaction.py (Reaction, FirstOrderDecay)
+  apps/building/ the building application: thermal.py (Zone, WallMass, thermal_layer,
+                 species_layer, IdealGasDensity, LinearDensity, build_model), elements.py
+                 (mass_orifice, add_large_opening), prj.py (the CONTAM .prj reader, a
+                 documented subset, and project_to_model), wth.py (the .wth weather reader),
+                 sources.py (the four CONTAM source types), contamx.py (the ContamX driver
+                 over contamxpy)
   physics/       flows.py, species.py: thin wrappers so downstream code runs unchanged
 legacy/          the original 2019 package, for reference
 docs/superpowers/  design spec and implementation plans
 tests/
   conftest.py, test_topology.py, test_endpoints.py, test_cycles.py, test_cycles_sparse.py,
-  test_drives.py, test_flows.py, test_import.py, test_species.py, test_species_compat.py
+  test_drives.py, test_flows.py, test_import.py, test_model.py, test_species.py,
+  test_species_compat.py
   elements/      test_base.py, test_powerlaw.py, test_quadratic.py, test_fixed.py,
                  test_conductance.py, test_fan.py
   operators/     test_base.py, test_graph.py, test_advection.py, test_assemble_sparse.py
@@ -46,15 +59,24 @@ tests/
                  test_implicit.py, test_implicit_operator_contract.py
   layers/        test_potential.py, test_potential_sparse.py, test_transport.py,
                  test_transport_sparse.py, test_reaction.py
+  apps/building/ test_thermal.py, test_elements.py, test_prj.py, test_wth.py,
+                 test_sources.py; tests/data/contam holds the sample projects
   verification/  CONTAM-style closed-form airflow cases, batched against scipy roots;
                  test_composed_model.py (parity, interface conservation, cross-join
-                 gradients); CPU performance budgets and test_composed_scaling.py, the
-                 milestone-1b acceptance gate (both marked slow, skipped by default)
-  golden/        stored reference results (contam_airflow.json) and load_golden/save_golden
+                 gradients); test_natural_ventilation.py (Li and Delsante closed forms, a
+                 two-zone scipy oracle, Hensen's ping-pong/onion table, the golden);
+                 test_contam_parity.py (ContamX through contamxpy, skipped when absent);
+                 CPU performance budgets and test_composed_scaling.py, the milestone-1b
+                 and milestone-2 acceptance gates (both marked slow, skipped by default)
+  golden/        stored reference results (contam_airflow.json, natural_ventilation.json)
+                 and load_golden/save_golden
 benchmarks/
   newton_scaling.py           batched Newton solve timing vs network size and batch size
   composed_model.py           the composed reference model: 8 buildings joined through a
-                              street and a sewer network
+                              street and a sewer network, optionally (thermal=True) with a
+                              heat layer beside the species one, stepped through Model
+  natural_ventilation.py      the coupled airflow-heat demo: two rooms, a doorway, a daily
+                              ambient sinusoid, under both coupling modes
   measure.py                  isolated peak-RSS (one child process per figure) and
                               saved-tensor-bytes measurement
   profile_forward.py          per-stage forward/backward profile of the composed model, and
@@ -63,7 +85,8 @@ benchmarks/
   sparse_scaling.py           gather/scatter vs shared-CSR matvec timing across thread counts
   sparse_review_checks.py     standalone numerical checks used during the sparse-path review
   report_composed_scaling.py  writes benchmarks/composed_scaling_report.json
-  regenerate_golden.py        rewrites tests/golden/contam_airflow.json (explicit action)
+  regenerate_golden.py        rewrites tests/golden/contam_airflow.json and
+                              tests/golden/natural_ventilation.json (explicit action)
 ```
 
 Licence: MIT (the original code with the agreement of its author).
@@ -193,6 +216,108 @@ it. At `PotentialFlowLayer`, the grounding check in front of every solve require
 certificate for **every** `linear_solver` -- `"direct"` and `"sparse_direct"` included --
 because an ungrounded instance is a singular system whichever backend is asked to solve it,
 and the layer would rather name the floating nodes than hand back a plausible wrong answer.
+
+## Milestone 2 status
+
+Milestone 2 put HEAT on the same footing as species and airflow -- a transport layer over the
+same typed graph -- and added the building application and the CONTAM interoperability that
+makes the result checkable against an engine other than itself.
+
+**What it adds.**
+
+- A `Drive` is a function of the DRIVERS only, never of the state, which is what keeps the
+  assembled Jacobian exactly symmetric; `sources` is in FULL-node order everywhere.
+- Per-layer inactive nodes: a node no edge of a layer's kinds touches has no row in that
+  layer at all, exported as `tellegen.layers.transport.active_interior`. A caller sizing a
+  `capacity` must use it.
+- `kind_slice`/`flows_of_kind` on the potential layer, `quantity`/`unit` tags on a transport
+  layer, and multi-kind transport (one layer advected by several edge kinds).
+- Elements: `Duct` (Colebrook friction, unrolled iteration) and `Damper`.
+- Drives: `Stack` and `Wind`, with `WindProfile`; profiles are identified by CONTAM's profile
+  NUMBER.
+- `Model`: several layers on one network stepped together, with Hensen's two couplings --
+  `"pingpong"` (one pass) and `"iterate"` (successive substitution at 0.5 relaxation,
+  per-instance convergence, diagnostics `passes`/`converged`/`max_change`/`layers`;
+  `iterate_max < 2` is refused).
+- The building application `apps/building`: `Zone`, `WallMass`, `thermal_layer`,
+  `species_layer`, `IdealGasDensity`, `LinearDensity`, `build_model`, `add_large_opening`,
+  `mass_orifice`.
+- Readers: the CONTAM `.prj` reader (a documented subset; it REFUSES on a record referencing
+  an unsupported section; multi-species; 30-field path records) with `project_to_model`, the
+  `.wth` weather reader, and the four CONTAM source types (`CutoffSource` clamped at zero
+  above the cutoff).
+- The ContamX driver over `contamxpy` (marked `external`, installed by the `contam` extra).
+- `UpstreamDensityPowerLaw`, the upstream-density correction on CONTAM power-law elements
+  that the spec required.
+
+**Two remediation tasks were inserted mid-milestone.** `solvers.iterative.gmres` mishandled
+Arnoldi near-breakdown -- it tested against `finfo.tiny` where real near-breakdown is about
+1e-16 RELATIVE -- which made multi-species transport steady solves fail for about one flow
+magnitude in seven; it now tests a relative threshold and freezes the instance at breakdown.
+The second was the upstream-density correction above.
+
+**What passes, and at what tolerance.**
+
+| Case | Tolerance | Measured |
+|---|---|---|
+| Brown-Solvason doorway | 1e-12 relative | 1.04e-15 |
+| Ventilated zone, `T = T_o + S/(c_p q + UA)` | closed form | holds |
+| Wall RC time constant `m c/(UA)` | 1e-10 | holds |
+| Li and Delsante buoyancy, envelope-loss, assisting-wind closed forms | 1e-6 | worst 1.8e-10 |
+| Two-zone doorway against an independent scipy oracle | 1e-5 K | holds |
+| Hensen's ping-pong versus iterate table | qualitative | holds |
+| Gradients through `Model.step`, `Model.steady` and `build_model`-built models to element parameters, drivers, sources and boundary values | finite differences | hold |
+| ContamX three-zone steady flows | 1e-3 relative | 9.1e-8 |
+| ContamX 24-step transient concentrations | 2e-3 | 3.4e-6 |
+| ContamX single-zone stack flows at 273.15/283.15/303.15/313.15 K ambient | 1e-3 | 4.4e-5 |
+
+The ContamX figures are against ContamX 3.4.1.7 through `contamxpy` 0.0.9, Windows x86-64
+only. The stack row is 4.4e-5 **after** the upstream-density correction; before it, the same
+case was off by 1.7e-2.
+
+**The section 6.1 budget table with a heat layer.** One new gate row,
+`tests/verification/test_composed_scaling.py::test_composed_model_with_thermal_layer_24_steps_within_budget`
+(`slow`): the reference composed model at ensemble 100 for 24 steps, with air, species AND
+heat stepped together through `Model.step`, judged against the SAME section 6.1 budgets as
+the 100x24 row above -- 12 s forward, 25 s backward, 2000 MB -- because it differs from that
+row in the added layer alone. Solver `auto`, `samples: 3`, medians of three child processes
+as every other row is.
+
+| Configuration | Forward | Backward | Peak memory |
+|---|---|---|---|
+| ensemble 100, 24 steps, air + species + heat | `<<GATE NUMBERS: filled by controller run>>` | `<<GATE NUMBERS: filled by controller run>>` | `<<GATE NUMBERS: filled by controller run>>` |
+
+The milestone-1b forward-time misses are carried into this milestone unchanged, and no budget
+was edited for this row or any other. One measurement note belongs with it: the composed
+model's transport layer now has 960 active rows rather than 1028, because the street and sewer
+nodes carry no airpath edge and per-layer inactive nodes removed them, so the transport half of
+a step now measures about 6.6% less work than the milestone-1b table's rows did.
+
+**What is open, recorded rather than resolved.**
+
+1. The opposing-wind three-root case is `xfail(strict=True)`: `coupling="iterate"` converges
+   to the wrong (down) root, because the up root is a REPELLING fixed point of the successive
+   substitution map at the hard-coded 0.5 relaxation (measured slope -7.756). Any relaxation
+   below 0.228 would contract, so adaptive or user-settable under-relaxation is a candidate
+   remedy ALONGSIDE the spec's monolithic Newton. Ping-pong TIME STEPPING resolves all three
+   roots, and a test asserts that it does.
+2. The remaining 4.4e-5 stack residual against ContamX is the `Stack` drive's constant
+   node-density hydrostatic column against ContamX's variable-density integration: it is
+   linear in opening height and independent of the temperature difference.
+3. `dp_transition`, quadratic, damper and `fan_cvf` elements still use the REFERENCE density.
+4. Newton at `atol=rtol=1e-14` hard-fails on a three-zone stack after 50 iterations (residual
+   1.22e-13), so coupling tolerances that tight are reachable on one- and two-zone cases only.
+5. The `.prj` reader refuses duct networks, AHS, filters, schedules, kinetics, constant wind
+   pressure, and `fan_fan` with `mult != 1`. NIST's `test_OneZoneSsStack-UseApi.prj` carries a
+   filter and is therefore refused, so the stack parity case uses
+   `test_OneZoneWthCtmStack-UseApi.prj`.
+6. `build_model` defaults to `coupling="pingpong"`, which is ONE pass, so a default `steady()`
+   returns the airflow solved at the INITIAL temperatures. Documented on `build_model`.
+7. The spec's proposed `ReferenceCorrection` closure mechanism cannot work -- a closure runs
+   before the solve and cannot see flow direction -- so the correction lives inside the
+   element, and spec sections 5 and 6.2 need amending.
+8. The monolithic coupled Newton and an implicit-function adjoint of the coupling fixed point
+   (rather than the unrolled one `iterate` uses today) are both section-13 follow-ups.
 
 ## Installation
 

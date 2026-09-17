@@ -338,3 +338,33 @@ def test_hensen_table_fine_steps_agree_and_coarse_pingpong_errs_more_than_coarse
     err_pp = abs(coarse_pp["max_flow"] - fine_on["max_flow"])
     err_on = abs(coarse_on["max_flow"] - fine_on["max_flow"])
     assert err_pp > err_on
+
+
+def test_golden_matches_stored_reference():
+    """The `benchmarks/natural_ventilation.py` demo against its committed trajectory.
+
+    Two simulated hours at 600 s under `coupling="iterate"`, compared term by term. The demo
+    has no RNG, so it regenerates bit-exactly and the tolerance here (1e-8 relative) is far
+    tighter than any physical claim: this is a change detector for the whole milestone-2
+    stack at once -- `build_model`, `Stack`, the density closure, the large opening and the
+    iterated coupling -- not a verification, which is what every other test in this file is.
+    Regenerate with `.venv/Scripts/python benchmarks/regenerate_golden.py` only when a change
+    to those numbers is intended.
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from golden import load_golden
+
+    from benchmarks.natural_ventilation import run
+
+    ref = load_golden("natural_ventilation")
+    now = run("iterate", 600.0, hours=2.0)
+    for key in ("T_A", "T_B", "door_kg_s"):
+        torch.testing.assert_close(
+            torch.tensor(now[key], dtype=F64),
+            torch.tensor(ref[key], dtype=F64),
+            rtol=1e-8,
+            atol=1e-10,
+        )
