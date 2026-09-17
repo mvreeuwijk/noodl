@@ -414,6 +414,93 @@ with Brown and Solvason's doorway exchange, an `m c / (UA)` wall RC time constan
 two-zone doorway against an independent `scipy` root find; ContamX itself is the reference
 for the transient and for the stack. All live in `tests/verification/`.
 
+## 8. Street canyons as a transport layer
+
+*(Written from the implementation, milestone 3: this section describes what `apps/street`
+does and why, and its verification cases are in the repository.)*
+
+**The street balance IS the framework's transport equation, again.** For a canyon street
+`i` of length `L_i`, width `W_i` and height `H_i`, holding a well-mixed pollutant mass
+concentration `x_i` (kg/m3),
+
+```
+L_i W_i H_i dx_i/dt = sum_r Q_r x_up(r) - u_d,i (L_i W_i) x_i + u_d,i (L_i W_i) x_b + S_i
+```
+
+is exactly `dx/dt = M x + N x_b + sources / capacity` (section 6 above), with `capacity =
+L W H`, `carrier = 1` (the transported quantity IS the concentration, not a scaled energy
+or momentum density as in section 7's heat layer), the routed inter-street terms `Q_r
+x_up(r)` playing the advective role, and the roof exchange `u_d (L W)(x_b - x_i)` playing
+the same role a conduction edge plays for heat. So the street network is not a third
+physics either: it is a third `TransportLayer`, over a graph whose edges are `route`
+(street-to-street, through an eliminated junction), `vent` (a street's own flux leaving or
+entering at a junction end, before routing) and `exchange` (roof exchange with the
+atmosphere boundary node), with `carrier = 1`.
+
+**Why the intersections are ELIMINATED rather than modelled.** A junction with its own
+storage would need a potential (a pressure-like quantity) to drive flow between the streets
+meeting there, but the only physical constraint at a street intersection is that the
+*flows* balance -- there is no independent state for a junction to hold, and the
+prescribed-flow edges (`route`, `vent`) that would carry that balance are FIXED-FLOW, not
+potential-driven, edges. A potential layer built entirely from fixed-flow edges has no
+element relating a node's potential to anything, so its would-be conductance matrix is
+identically zero -- singular by construction (framework spec section 9). Eliminating the
+junction sidesteps that non-problem entirely: what a junction actually does is redistribute
+the fixed street-end fluxes among each other and the atmosphere, and that redistribution is
+computed once per solve, outside any potential layer, as a routed flux (`routing_matrix`,
+the non-crossing fill below) plus a roof closure (`node_closure`, MUNICH's roof-exchange
+correction, which lands asymmetrically on the side needed to keep every one of a junction's
+in/out totals matched, per `StreetNetworkTransport.cxx:2980-3014`). The result is written
+straight onto the `route`/`vent`/`exchange` edges of the `TransportLayer` as this step's
+flow, exactly like a `Drive`, before that layer's own solve runs at all.
+
+**Why every `route`, `vent` and `exchange` flow is non-negative, with direction living in
+the topology.** Each of these three edge kinds is added to the graph in BOTH directions
+(`direction="in"`/`"out"`, or the ordered pair of distinct street ends at a junction), so a
+physical flow that reverses under a wind-direction change does not need its own sign: it is
+a different, non-negative amount on the OTHER edge of the pair, exactly as
+`assert_forward_oriented` already requires of every fixed-flow edge in the framework. This
+reproduces, for free, MUNICH's one-way dead ends (spec section 4.5b): a street whose one
+open end is unambiguously downwind gets zero flux on the edge that would carry flow the
+other way, not a negative one, because that edge's non-negative closure output is zero
+there -- no special-cased dead-end branch is needed anywhere in `StreetFlows`.
+
+**The two canyon-wind closures and the two exchange closures.** `canyon_velocity` (Soulhac,
+Perkins and Salizzoni 2008; Soulhac et al. 2011, the SIRANE/IMPAQ form) and the exponential
+in-canyon profile (Kim et al. 2018, 2022; the MUNICH form) both turn a reference wind into
+an along-street canyon velocity, differing in their treatment of the boundary-layer profile
+above the canyon and in their von Karman constant (`KAPPA_IMPAQ = 0.4` against
+`KAPPA_MUNICH = 0.41`). `exchange_velocity` similarly has a SIRANE branch (`u_d =
+sigma_w/(sqrt(2) pi)`, S11 Eq. (5), K18 Eq. (3), K22 Eq. (B10), `StreetNetworkTransport.cxx
+:3273` -- see the issue-C retraction in the README) and a Schulte mixing-length branch
+(`SCHULTE_BETA = 2/(sqrt(2) pi)`, fixed by matching the SIRANE form at `a_r = 1`, K18 p.
+613). Both pairs are selectable independently (`canyon_wind=`, `exchange=`) because the two
+source codebases do not always pair them the same way, and the parity tests exercise both
+pairings.
+
+**The non-crossing routing as the north-west-corner rule.** MUNICH's `ComputeAlpha` walks a
+junction's inflows counter-clockwise and its outflows clockwise, greedily filling each
+inflow/outflow cell with `min(remaining_in, remaining_out)` -- which is exactly the
+transportation-problem north-west-corner rule applied to the two ORDERED marginals, and so
+has the closed form `F[p, r] = max(0, min(A_p, B_r) - max(A_{p-1}, B_{r-1}))` on their
+cumulative sums `A`, `B` (`routing_matrix`, spec section 4.4). Writing it this way rather
+than as MUNICH's literal loop makes the fill BATCHED (every junction, every wind direction,
+every forcing step in one call) and DIFFERENTIABLE (piecewise linear in the marginals, so
+`torch.autograd` sees a gradient through the fluxes), while the one genuinely
+combinatorial part -- WHICH order the inflows and outflows are visited in -- is confined to
+`order_slots`'s argsort and run under `no_grad`: the ordering is a discrete choice (it can
+only change at a measure-zero set of exactly-tied angles), so no gradient through it is
+either needed or well-defined, and keeping it out of the traced graph is what lets the
+fluxes it feeds stay differentiable.
+
+**Verification.** `tests/verification/test_munich.py` pins the thirteen exact formula pairs
+against MUNICH's own source (each at the precision its source publishes) and the idealised
+12-street case against Kim et al. (2022) Fig. 1; `tests/verification/test_street_parity.py`
+checks the ported IMPAQ oracle against both a four-node hand network and the real
+`leiden_small` domain. Conservation, junction elimination against hand algebra, and
+gradients through the whole model against central differences are in
+`tests/apps/street/test_conservation.py`.
+
 ## Summary of flags/uncertainties
 
 - Pseudo-bond-graph `(T, Φ)` vs true bond-graph `(T, dS/dt)`: only the latter is

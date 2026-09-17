@@ -28,12 +28,19 @@ sparse = ["scipy>=1.11"]
 # `dev` restates `sparse`'s requirement rather than referencing the extra recursively: the
 # test suite exercises the sparse-direct backend directly, and a plain pin is one fewer
 # resolver feature for `pip install -e ".[dev]"` to depend on. Keep the two in step.
-dev = ["pytest>=8", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy>=1.11"]
+# netCDF4 reads the ONE NETCDF4 file this project touches, AQ_DT's saved
+# network_concentration_<year>.nc; every product tellegen writes is classic CDF, which
+# scipy reads. Test-only, and the tests that need it use pytest.importorskip.
+dev = ["pytest>=8", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy>=1.11", "netCDF4>=1.7"]
 # ContamX parity (spec section 9): NIST's `contamxpy` ships a Windows x86-64 wheel that
 # BUNDLES the ContamX 3.4.1.7 engine, so no CONTAM installation is needed -- but there is
 # no wheel for any other platform, hence the marker. Tests that need it carry `external`
 # and skip themselves when the import fails, so CI on Linux is unaffected.
 contam = ["contamxpy>=0.0.9; sys_platform == 'win32'"]
+# `street` is a RUNTIME extra: `apps/street/loader.py` reads the AQ_DT NetCDF products
+# through `scipy.io.netcdf_file`, and `apps/street/impaq.py` -- the comparison oracle --
+# needs `scipy.optimize` and `scipy.special`. Neither is on any path the core solves take.
+street = ["scipy>=1.11"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

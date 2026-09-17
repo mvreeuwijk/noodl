@@ -33,6 +33,11 @@ from tellegen.apps.street.network import (
     street_geometry,
     street_index,
 )
+from tellegen.apps.street.report import (
+    from_ug_m3,
+    to_ug_m3,
+    write_network_concentration,
+)
 from tellegen.apps.street.routing import (
     StreetFlows,
     StreetGeometry,
@@ -65,6 +70,7 @@ __all__ = [
     "direction_offsets",
     "exchange_velocity",
     "from_test_network",
+    "from_ug_m3",
     "initial_state",
     "macdonald_profile",
     "munich_idealised",
@@ -79,4 +85,6 @@ __all__ = [
     "street_geometry",
     "street_index",
     "street_steady",
+    "to_ug_m3",
+    "write_network_concentration",
 ]

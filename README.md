@@ -44,6 +44,17 @@ src/tellegen/
                  documented subset, and project_to_model), wth.py (the .wth weather reader),
                  sources.py (the four CONTAM source types), contamx.py (the ContamX driver
                  over contamxpy)
+  apps/street/   the street application: canyon.py (BoundaryLayer, canyon_velocity,
+                 exchange_velocity, the soulhac/macdonald closures), routing.py
+                 (StreetGeometry, StreetFlows, routing_matrix, node_closure,
+                 direction_offsets -- the north-west-corner routing), network.py
+                 (StreetNetwork, build_street_model, street_geometry, street_index,
+                 munich_idealised), chemistry.py (photostationary_for_streets,
+                 street_steady), loader.py (read_aqdt, the AQ_DT GeoJSON/NetCDF reader),
+                 impaq.py (the IMPAQ prototype ported as a numpy/scipy comparison oracle,
+                 kept as per-edge Python loops by design -- it is the oracle, not the
+                 model path), report.py (to_ug_m3, from_ug_m3,
+                 write_network_concentration)
   physics/       flows.py, species.py: thin wrappers so downstream code runs unchanged
 legacy/          the original 2019 package, for reference
 docs/superpowers/  design spec and implementation plans
@@ -61,13 +72,18 @@ tests/
                  test_transport_sparse.py, test_reaction.py
   apps/building/ test_thermal.py, test_elements.py, test_prj.py, test_wth.py,
                  test_sources.py; tests/data/contam holds the sample projects
+  apps/street/   test_canyon.py, test_routing.py, test_network.py, test_chemistry.py,
+                 test_loader.py, test_impaq_port.py, test_conservation.py, test_report.py;
+                 tests/data/street holds the AQ_DT and MUNICH fixtures
   verification/  CONTAM-style closed-form airflow cases, batched against scipy roots;
                  test_composed_model.py (parity, interface conservation, cross-join
                  gradients); test_natural_ventilation.py (Li and Delsante closed forms, a
                  two-zone scipy oracle, Hensen's ping-pong/onion table, the golden);
                  test_contam_parity.py (ContamX through contamxpy, skipped when absent);
                  CPU performance budgets and test_composed_scaling.py, the milestone-1b
-                 and milestone-2 acceptance gates (both marked slow, skipped by default)
+                 and milestone-2 acceptance gates (both marked slow, skipped by default);
+                 test_munich.py (13 MUNICH formula pairs and the idealised 12-street case);
+                 test_street_parity.py (the IMPAQ port, four-node and leiden_small parity)
   golden/        stored reference results (contam_airflow.json, natural_ventilation.json)
                  and load_golden/save_golden
 benchmarks/
@@ -85,6 +101,8 @@ benchmarks/
   sparse_scaling.py           gather/scatter vs shared-CSR matvec timing across thread counts
   sparse_review_checks.py     standalone numerical checks used during the sparse-path review
   report_composed_scaling.py  writes benchmarks/composed_scaling_report.json
+  street_leiden.py            load/build/solve timing for the street model on the real
+                              AQ_DT `leiden_small` and `leiden` domains
   regenerate_golden.py        rewrites tests/golden/contam_airflow.json and
                               tests/golden/natural_ventilation.json (explicit action)
 ```
@@ -363,6 +381,111 @@ a step now measures about 6.6% less work than the milestone-1b table's rows did.
    element, and spec sections 5 and 6.2 need amending.
 8. The monolithic coupled Newton and an implicit-function adjoint of the coupling fixed point
    (rather than the unrolled one `iterate` uses today) are both section-13 follow-ups.
+
+## Milestone 3 status
+
+Milestone 3 built a street-network dispersion application ON TOP of the core package
+(spec section 1), to check the framework against a domain neither `apps/building` nor the
+core's own tests exercise: driver-prescribed transport, junction elimination, and a
+non-negative directed routing whose combinatorics have to stay differentiable.
+
+**What it adds.**
+
+- Driver-prescribed transport flows in `Model` (a `TransportLayer` whose flows are written
+  by a closure from the drivers, not solved for) and `Photostationary`, the Leighton
+  NO/NO2/O3 reaction.
+- `apps/street/`: `canyon.py` (the boundary layer, canyon wind and exchange-velocity
+  closures), `routing.py` (the north-west-corner non-crossing router and the roof
+  closure), `network.py` (`StreetNetwork`, `build_street_model`), `chemistry.py`
+  (`photostationary_for_streets`, `street_steady`), `loader.py` (the AQ_DT reader),
+  `impaq.py` (the IMPAQ prototype ported as a comparison oracle) and `report.py` (units
+  and the NetCDF product).
+- The AQ_DT reader (`read_aqdt`), the IMPAQ port, and the MUNICH checks
+  (`tests/verification/test_munich.py`, `test_street_parity.py`).
+
+**What passes, and at what tolerance.**
+
+| Case | Tolerance | Measured |
+|---|---|---|
+| Mass conservation (steady-state nodal balance, atmosphere balance) | 1e-12 | 3.0e-16 |
+| Junction elimination against a hand-written dense linear system | 1e-12 | 2.1e-16 |
+| `exchange` edge pair against `TransportLayer`'s conduction term | 1e-12 | 1.2e-16 |
+| Gradients through the whole model against central differences | 1e-6 | 4e-10 to 1.3e-8 |
+| IMPAQ parity 1, four-node network, `fix_a=True` on both sides | 1e-9 | 4.2e-16 |
+| The thirteen MUNICH formula pairs | the precision each source publishes | hold |
+| MUNICH linearity in wind speed (210/240 degrees, all streets) | < 1e-9 | exactly 2 |
+| MUNICH 270-degree canyon-wind-floor fingerprints (street 11, street 9) | against the paper's 1.99451 / 4.00 | 4.5e-4, 3.2e-3 |
+| M3-R8 Photostationary chemistry on the synthetic 12-street network | NOx/Ox conservation < 1e-12, PSS < 1e-10 | 9.65e-20, 7.38e-17, 6.80e-16 |
+| `leiden_small` parity, tellegen against the ported IMPAQ oracle, median street at three sampled steps | asserted per-street `1e-9` (median only, since a routing defect below leaves a worst-case tail) | 3.6e-16, 3.2e-11, 1.9e-11 |
+
+The full suite passes **925 passed, 10 skipped, 9 deselected, 1 xfailed** (coverage
+96.35 %), measured with this task's files (Task 10's IMPAQ `leiden_small` parity tests
+landed at commit `00e951f` during this task's run; this task's own files remain
+uncommitted at measurement time).
+
+**THE ISSUE-C RETRACTION.** The prototype's `u_d = sigma_w/(sqrt(2) pi)` is CORRECT, and is
+what SIRANE, MUNICH and all three papers use; `sigma_w/sqrt(2 pi)` appears in no source.
+Both the framework spec's earlier text and IMPAQ's own prototype docstring called this an
+error ("issue C") and proposed a `fix_c`; that reading came from plain-text PDF extraction
+flattening the radical over the whole fraction rather than just the 2, and it is retracted
+here against BOTH of those sources. It was checked at glyph level in Soulhac et al. 2011
+Eq. (5) (p. 7386), Kim et al. 2018 Eq. (3) (p. 613) and Kim et al. 2022 Eq. (B10) (p. 7387),
+and against MUNICH's own source, `StreetNetworkTransport.cxx:3273`, and the
+`beta = 0.45` Schulte mixing length MUNICH derives from it. There is no `fix_c` in this
+codebase.
+
+**What else was found and is NOT a tellegen defect.** IMPAQ's `flow_route` mis-permutes its
+routing matrix at three-way junctions whose angular sort is a proper cycle -- 12, 8 and 12
+of 162 `leiden_small` roads at three sampled forcing steps (worst factor 13.95, 6.78, 5.92)
+-- so its matrix does not conserve each street's own flux there; this is a property of the
+prototype, not of the ported oracle or of the model. It is exactly why the `leiden_small`
+parity row above is asserted on the MEDIAN street (which agrees at machine/solver
+precision) rather than on every street: 15, 21 and 12 of the 162 streets at those same
+three steps disagree by more than `1e-9`, with a worst case up to a factor of 4.5, tracking
+the same mis-permuted junctions. IMPAQ's `fix_b` is only meaningful together with `fix_a`
+(it corrects a term `fix_a` introduces). The saved `network_concentration_2024.nc` shipped
+with AQ_DT describes a geometry that was rewritten after it was produced (160 edges against
+162 `network_transport` features, 94 of the 160 rows naming an osmid that does not match
+the feature its own `edge_feature_index` points at), so the saved-product comparison is
+skipped with that measurement recorded rather than compared against stale rows.
+
+**The measured runs (17 September 2026, on this machine).** Spec section 11 budgets nothing
+for this milestone: both runs are RECORDED, and neither of the two conditional follow-up
+triggers fired.
+
+| run | measured | trigger |
+|---|---|---|
+| `leiden_small`, 162 streets, 230 junctions, the whole of 2024 (2928 forcing steps, chunks of 96) | load 0.381 s, build 0.019 s, solve 27.832 s (0.00951 s/step) | a street row in the composed scaling gate if it exceeds 10 minutes -- it does not |
+| `leiden`, 2943 streets, 3829 junctions, one step | load 1.824 s, build 0.803 s, solve 1.524 s | the same row if one step exceeds 60 s -- it does not |
+
+Both runs completed with no refusals: the loader's `emission_key` alignment matched all
+selected features, and `pblh_floor=True` kept every `sigma_w` positive on both domains.
+
+**Data facts recorded by the loader (Task 9), because they decide what any of the above
+numbers mean.** The AQ_DT products are out of step: 905 canyon features against 904
+emission rows, and the `edge_index` alignment misplaces 515 of those 904 rows, so the
+loader aligns by the `(osmid, u, v)` emission key instead and refuses `edge_index` on a
+mismatch. `edge_emission_rate_nox_kg_per_year` is entirely NaN and is refused by name.
+The wind is ERA5 10 m labelled 30 m in the file; the loader defaults to 10 m and refuses
+the file's own label unless `trust_file_height=True`. The background field is a CAMS
+mixing ratio (kg/kg) converted to kg/m3 with `RHO_AIR = 1.2041`. `leiden_small` has 162
+`network_transport` streets and 230 junctions.
+
+**What is open.**
+
+- The MUNICH idealised case's absolute concentrations are not reproduced -- Kim et al.
+  2022's own inputs are unpublished, so only a fitted uniform geometry is available (a
+  wind-speed/lidar or WSL follow-up would supply the real one).
+- The relative pattern across the twelve streets sits at a worst residual of 50.7 % (7 of
+  19 sampled ratios inside 15 %) against the spec's 5 % target, recorded under that same
+  stated uniform-geometry assumption rather than absorbed into a widened tolerance.
+- `leiden` (2943 streets) is loaded and stepped but not run for a full year; only
+  `leiden_small` has a year-long recorded run.
+- Chemistry is exercised analytically and on the synthetic 12-street network only; the
+  Leiden AQ_DT data is NOx-only, so no real-data chemistry run exists in this milestone.
+- `apps/street/impaq.py`, the comparison oracle, keeps the prototype's per-edge Python
+  loops by design -- it exists to be compared against, not to be a model path, and nothing
+  else in `apps/street/` calls it.
 
 ## Installation
 
