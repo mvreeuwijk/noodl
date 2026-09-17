@@ -148,7 +148,9 @@ def test_a_missing_required_driver_is_named():
         model.step(state, drivers, 60.0)
 
 
-def test_a_transport_layer_whose_kinds_no_potential_layer_provides_is_refused():
+def test_a_transport_layer_whose_kinds_no_potential_layer_provides_reads_a_driver():
+    """The rule this replaces refused the model outright. A transport layer advecting on a
+    kind the potential layer does not provide is now driver-prescribed (spec section 5)."""
     net = _net()
     net.add_edge("z1", "z2", kind="duct")
     air = PotentialFlowLayer(
@@ -157,8 +159,15 @@ def test_a_transport_layer_whose_kinds_no_potential_layer_provides_is_refused():
     )
     heat = TransportLayer(net, "heat", capacity=torch.ones(2, dtype=F64),
                           flow_kind=("airpath", "duct"), boundary=["ambient"])
-    with pytest.raises(ValueError, match=r"'heat'.*duct.*0 potential layers"):
-        Model(net, {"air": air, "heat": heat})
+    model = Model(net, {"air": air, "heat": heat})
+    assert model.flow_layer_of["heat"] is None
+    assert model.flow_driver_of["heat"] == "heat.q"
+    with pytest.raises(KeyError, match=r"heat\.q"):
+        model.steady(
+            {},
+            {"air.phi_boundary": torch.zeros(1, dtype=F64),
+             "heat.x_boundary": torch.zeros(1, dtype=F64)},
+        )
 
 
 def test_layer_dict_is_validated():
@@ -564,3 +573,119 @@ def test_iterate_steps_every_transport_layer_but_tests_only_the_named_ones():
     moved_x = (again["species.x"] - ss["species.x"]).abs().max().item()
     moved_t = (again["heat.x"] - ss["heat.x"]).abs().max().item()
     assert moved_x < 1e-12 < moved_t and moved_t > 1e3 * moved_x
+
+
+def _prescribed_flow_network():
+    """Two interior nodes and one boundary node, joined by 'link' edges only.
+
+    No potential layer can own 'link' (no element is built for it), so the flows must
+    come from the driver "conc.q". Edge order is the insertion order: a->b, b->amb.
+    """
+    net = Network(dtype=torch.float64)
+    for name in ("a", "b", "amb"):
+        net.add_node(name)
+    net.add_edge("a", "b", kind="link")
+    net.add_edge("b", "amb", kind="link")
+    layer = TransportLayer(
+        net, "conc", capacity=torch.tensor([10.0, 20.0], dtype=torch.float64),
+        flow_kind="link", boundary=["amb"], scheme="implicit",
+        quantity="concentration", unit="kg/m3",
+    )
+    return net, layer
+
+
+def test_model_reads_transport_flows_from_a_driver_when_no_potential_layer_owns_them():
+    net, layer = _prescribed_flow_network()
+    model = Model(net, {"conc": layer})
+    assert model.flow_layer_of["conc"] is None
+    assert model.flow_driver_of["conc"] == "conc.q"
+    sources = torch.zeros(3, dtype=torch.float64)
+    sources[net.node_index("a")] = 1.0
+    drivers = {
+        "conc.x_boundary": torch.zeros(1, dtype=torch.float64),
+        "conc.sources": sources,
+        "conc.q": torch.tensor([2.0, 2.0], dtype=torch.float64),
+    }
+    state = model.steady({}, drivers)
+    # Steady: 1 kg/s in at a, carried a->b->amb by a 2 m3/s flow, so x_a = x_b = 0.5.
+    torch.testing.assert_close(
+        state["conc.x"], torch.tensor([0.5, 0.5], dtype=torch.float64), rtol=1e-12, atol=1e-15
+    )
+
+
+def test_model_raises_naming_the_missing_flow_driver():
+    net, layer = _prescribed_flow_network()
+    model = Model(net, {"conc": layer})
+    drivers = {
+        "conc.x_boundary": torch.zeros(1, dtype=torch.float64),
+        "conc.sources": torch.zeros(3, dtype=torch.float64),
+    }
+    with pytest.raises(KeyError, match=r"conc\.q"):
+        model.steady({}, drivers)
+
+
+def test_model_raises_when_the_flow_driver_has_the_wrong_length():
+    net, layer = _prescribed_flow_network()
+    model = Model(net, {"conc": layer})
+    drivers = {
+        "conc.x_boundary": torch.zeros(1, dtype=torch.float64),
+        "conc.sources": torch.zeros(3, dtype=torch.float64),
+        "conc.q": torch.tensor([2.0], dtype=torch.float64),
+    }
+    with pytest.raises(ValueError, match=r"conc\.q.*2 flow edges.*got 1"):
+        model.steady({}, drivers)
+
+
+def test_ports_reports_the_flow_driver_key_for_a_prescribed_flow_layer():
+    net, layer = _prescribed_flow_network()
+    model = Model(net, {"conc": layer})
+    ports = model.ports({"conc.x": torch.zeros(2, dtype=torch.float64)})
+    assert ports.flow_keys == {"conc": "conc.q"}
+    assert ports.prescribed_keys["conc"] == "conc.x_boundary"
+
+
+def test_a_closure_may_write_the_flow_driver_of_a_prescribed_flow_layer():
+    net, layer = _prescribed_flow_network()
+
+    class Flows:
+        def __call__(self, state, drivers):
+            return {"conc.q": torch.tensor([2.0, 2.0], dtype=torch.float64)}
+
+    model = Model(net, {"conc": layer}, closures=[Flows()])
+    sources = torch.zeros(3, dtype=torch.float64)
+    sources[net.node_index("a")] = 1.0
+    state = model.steady({}, {
+        "conc.x_boundary": torch.zeros(1, dtype=torch.float64),
+        "conc.sources": sources,
+    })
+    torch.testing.assert_close(
+        state["conc.x"], torch.tensor([0.5, 0.5], dtype=torch.float64), rtol=1e-12, atol=1e-15
+    )
+
+
+def test_a_closure_still_may_not_write_a_state_key():
+    net, layer = _prescribed_flow_network()
+
+    class WritesX:
+        def __call__(self, state, drivers):
+            return {"conc.x": torch.zeros(2, dtype=torch.float64)}
+
+    bad = Model(net, {"conc": layer}, closures=[WritesX()])
+    with pytest.raises(ValueError, match=r"conc\.x.*state key"):
+        bad.steady({}, {"conc.x_boundary": torch.zeros(1, dtype=torch.float64),
+                        "conc.sources": torch.zeros(3, dtype=torch.float64),
+                        "conc.q": torch.ones(2, dtype=torch.float64)})
+
+
+def test_model_raises_when_a_layer_has_both_a_potential_owner_and_a_flow_driver():
+    """Uses `_build()`, this module's own fixture for a Model with one potential layer
+    ("air") and one transport layer ("species") the potential layer owns."""
+    net, model, state, drivers, _, layer = _build()
+    drivers = dict(drivers)
+    name = next(iter(model.transport))
+    owner = model.flow_layer_of[name]
+    assert owner is not None
+    b = int(sum(len(model.net.edge_index(k)) for k in layer.flow_kinds))
+    drivers[f"{name}.q"] = torch.zeros(b, dtype=torch.float64)
+    with pytest.raises(ValueError, match=rf"{name}.*{owner}.*{name}\.q"):
+        model.steady(state, drivers)

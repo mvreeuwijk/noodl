@@ -10,7 +10,10 @@ changing.
 Keys. State: "<layer>.phi" (full-node order), "<layer>.q" (the layer's kind order),
 "<layer>.x" (interior order, (n_i,) or (n_i, K)). Drivers: "<layer>.phi_boundary",
 "<layer>.x_boundary", optional "<layer>.sources" (FULL-node order, zeros on boundary and
-inactive nodes). Closures return driver updates; they may not write state keys.
+inactive nodes). Closures return driver updates; they may not write state keys. A transport
+layer whose kinds no potential layer provides reads its branch flows from the driver
+"<layer>.q", in the layer's own flow_kinds order; a layer with both a potential owner and
+that driver raises.
 
 `**solve_kwargs` of `step`/`steady` reach the POTENTIAL solves only (`differentiable`,
 `on_failure`, `method`, Newton kwargs). Transport steps always raise on failure.
@@ -23,7 +26,7 @@ as Newton's mask is). Failure follows the layers: raise by default, naming the o
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 import torch
@@ -55,6 +58,12 @@ class Ports:
     boundary_nodes: dict[str, list]
     prescribed_keys: dict[str, str]
     boundary_flows: dict[str, Tensor]
+    # Transport layer -> the driver key its branch flows are read from. Present for EVERY
+    # transport layer, whether or not a potential layer owns its kinds: a coupled model that
+    # wants to drive a layer's flows needs the key, and a model that wants to know whether
+    # it MAY do so reads `Model.flow_layer_of[name] is None`. Defaulted so that any existing
+    # construction of `Ports` keeps working.
+    flow_keys: dict[str, str] = field(default_factory=dict)
 
 
 class Model:
@@ -185,19 +194,28 @@ class Model:
                     f"Model: substeps[{name!r}] must be >= 1, got {k!r}"
                 )
             self.substeps[name] = k_int
-        self.flow_layer_of: dict[str, str] = {}
+        self.flow_layer_of: dict[str, str | None] = {}
+        self.flow_driver_of: dict[str, str] = {}
         for tname, tl in self.transport.items():
             owners = [
                 pn for pn, pl in self.potential.items()
                 if all(k in pl.kinds for k in tl.flow_kinds)
             ]
-            if len(owners) != 1:
+            # Spec section 5, "Model: driver-prescribed flows". Two potential layers both
+            # providing a transport layer's kinds is still ambiguous and still refused here.
+            # ZERO owners is no longer an error: the flows are then read from the driver
+            # "<layer>.q", which a closure writes -- the street application's whole
+            # architecture (prescribed canyon fluxes, routed at intersections) depends on
+            # it. The driver's PRESENCE cannot be checked here, because drivers arrive per
+            # call; `_kind_flows` does that, and refuses a layer that has both sources.
+            if len(owners) > 1:
                 raise ValueError(
                     f"Model: transport layer {tname!r} advects on kinds {tl.flow_kinds}, "
                     f"which {len(owners)} potential layers of this model provide "
-                    f"({owners}); exactly one must"
+                    f"({owners}); at most one may"
                 )
-            self.flow_layer_of[tname] = owners[0]
+            self.flow_layer_of[tname] = owners[0] if owners else None
+            self.flow_driver_of[tname] = f"{tname}.q"
 
     # ----------------------------------------------------------------- helpers
     @staticmethod
@@ -215,10 +233,25 @@ class Model:
             for key, value in closure(state, drv).items():
                 head, _, tail = key.rpartition(".")
                 if head in self.layers and tail in _STATE_SUFFIXES:
-                    raise ValueError(
-                        f"Model: closure {closure!r} returned {key!r}, which is a state key; "
-                        f"closures write drivers only"
+                    # ONE exception to "closures write drivers only": "<layer>.q" for a
+                    # transport layer no potential layer owns is a DRIVER, not a state --
+                    # it is the key `_kind_flows` reads that layer's branch flows from, and
+                    # writing it is exactly what a flow closure is for. Every other
+                    # "<layer>.phi/q/x" stays refused, including "<layer>.q" for a layer a
+                    # potential layer DOES own, where it would silently contradict the
+                    # solve.
+                    prescribed = (
+                        tail == "q"
+                        and head in self.transport
+                        and self.flow_layer_of.get(head) is None
                     )
+                    if not prescribed:
+                        raise ValueError(
+                            f"Model: closure {closure!r} returned {key!r}, which is a "
+                            f"state key; closures write drivers only (the one exception "
+                            f"is '<layer>.q' for a transport layer whose flows no "
+                            f"potential layer provides)"
+                        )
                 drv[key] = value
         return drv
 
@@ -237,11 +270,36 @@ class Model:
         tail = (self.net.n,) if reduced else (self.net.n, layer.n_species)
         return torch.zeros(batch + tail, dtype=like.dtype, device=like.device)
 
-    def _kind_flows(self, name: str, state: Mapping[str, Tensor]) -> Tensor:
+    def _kind_flows(self, name: str, state: Mapping[str, Tensor],
+                    drivers: Mapping[str, Tensor]) -> Tensor:
+        """This transport layer's branch flows, in its own `flow_kinds` order.
+
+        From the owning potential layer's solved `q` when there is one, otherwise from the
+        driver `"<layer>.q"`. A layer with BOTH is a contradiction -- two different answers
+        for the same flows -- and is refused by name rather than resolved by a precedence
+        rule nobody would remember.
+        """
+        layer = self.transport[name]
         owner = self.flow_layer_of[name]
-        return self.potential[owner].flows_of_kind(
-            state[f"{owner}.q"], self.transport[name].flow_kinds
-        )
+        key = self.flow_driver_of[name]
+        if owner is not None:
+            if key in drivers:
+                raise ValueError(
+                    f"Model: transport layer {name!r} takes its flows from potential layer "
+                    f"{owner!r}, and the driver {key!r} was also given; a layer may have "
+                    f"one source of flows, not two -- drop {key!r} or remove {owner!r}"
+                )
+            return self.potential[owner].flows_of_kind(state[f"{owner}.q"], layer.flow_kinds)
+        q = self._require(drivers, key)
+        b = int(layer._flow_src.shape[0])
+        if q.dim() == 0 or q.shape[-1] != b:
+            got = q.shape[-1] if q.dim() >= 1 else 0
+            raise ValueError(
+                f"Model: driver {key!r} must have trailing shape ({b},) -- transport layer "
+                f"{name!r} advects on {b} flow edges of kinds {layer.flow_kinds}, in that "
+                f"order -- got {got} (shape {tuple(q.shape)})"
+            )
+        return q
 
     # -------------------------------------------------------------------- pass
     def _pass(
@@ -269,7 +327,7 @@ class Model:
             new[f"{name}.phi"], new[f"{name}.q"] = phi, q
             diag[name] = d
         for name, layer in self.transport.items():
-            q_kind = self._kind_flows(name, new)
+            q_kind = self._kind_flows(name, new, drv)
             xb = self._require(drv, f"{name}.x_boundary")
             sources = drv.get(f"{name}.sources")
             if dt is None:
@@ -421,7 +479,7 @@ class Model:
             sources = drv.get(f"{name}.sources")
             if sources is None:
                 sources = self._zero_sources(layer, x, layer.n_i)
-            out[name] = layer.rate(x, self._kind_flows(name, state), sources, xb)
+            out[name] = layer.rate(x, self._kind_flows(name, state, drv), sources, xb)
         return out
 
     def ports(self, state) -> Ports:
@@ -435,7 +493,10 @@ class Model:
             keys[name] = f"{name}.phi_boundary"
             # _accumulate(q) is A q: net OUTflow at every node; negate for the inflow.
             flows[name] = -layer._accumulate(state[f"{name}.q"])[..., layer.bound]
+        flow_keys: dict[str, str] = {}
         for name, layer in self.transport.items():
             nodes[name] = list(layer.boundary)
             keys[name] = f"{name}.x_boundary"
-        return Ports(boundary_nodes=nodes, prescribed_keys=keys, boundary_flows=flows)
+            flow_keys[name] = self.flow_driver_of[name]
+        return Ports(boundary_nodes=nodes, prescribed_keys=keys, boundary_flows=flows,
+                     flow_keys=flow_keys)
