@@ -613,6 +613,16 @@ framing paragraph above.
   the two transport GMRES solves ~31 %, the air Newton solve ~12 %).
 - FR-20: the outfall node is a dead end in the air graph (physically inert edge; a design
   tidy-up, not a correctness defect).
+- FR-26: `LateralLoads` overwrites a caller-supplied `water_quality.sources` driver while
+  `H2STransfer` adds to it, so an industrial discharge given as a source driver is silently
+  dropped when `quality=True`; add to it or refuse the key by name (found by the wave
+  re-review, not yet fixed).
+- FR-27: `TankLevels.event_step` indexes its level/rate vectors positionally on the first
+  dimension, so a batched `(B, n_tanks)` rollout would index the batch; no batched caller
+  exists yet.
+- FR-31: on a Darcy-Weisbach file with both `SPECIFIC GRAVITY` and `VISCOSITY` non-default,
+  the effective kinematic viscosity is divided by the specific gravity once too often
+  (EPANET's `VISCOSITY` is already relative kinematic); no fixture sets both.
 - FR-25: `tank_inflow` (`apps/water/network.py`) still reads `PotentialFlowLayer`'s private
   `_accumulate` directly; `element_for` (FR-13) covers looking up an element by kind, not
   this per-node flow accumulation, so a second public accessor is a recorded follow-up.
