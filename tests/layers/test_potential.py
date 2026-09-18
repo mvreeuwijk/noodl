@@ -8,6 +8,7 @@ from tellegen.drives import ConstantDrive
 from tellegen.elements import Conductance, FixedFlow, PowerLaw
 from tellegen.elements.base import Element
 from tellegen.layers.potential import PotentialFlowLayer
+from tellegen.nodesources import NodeSource
 from tellegen.solvers.newton import newton
 from tellegen.topology import Network
 
@@ -729,3 +730,142 @@ def test_solve_raises_when_flow_requires_grad_via_a_parameter_but_ignores_dp():
 
     with pytest.raises(RuntimeError, match="leak"):
         layer.solve(phi_b, {}, sources, differentiable=True)
+
+
+class _Emitter(NodeSource):
+    """q_out = C sign(phi) |phi|^n, the orifice-type emitter EPANET also offers."""
+
+    def __init__(self, nodes, coeff, exponent=0.5):
+        super().__init__(nodes)
+        self.coeff = torch.nn.Parameter(torch.as_tensor(coeff, dtype=torch.float64))
+        self.exponent = float(exponent)
+
+    def flow(self, phi_nodes, drivers=None):
+        safe = torch.clamp(phi_nodes.abs(), min=1e-12)
+        return self.coeff * torch.sign(phi_nodes) * safe**self.exponent
+
+
+def _pipe_law():
+    # C and n are explicit float64 tensors: a bare Python float here is silently cast to
+    # torch.get_default_dtype() (float32 in this repo, see elements/duct.py) by
+    # Element._param, and the ~1e-8 relative precision loss that costs would blow the
+    # rel=1e-9 tolerances the node-source tests below check against an independently
+    # computed root.
+    return PowerLaw(
+        torch.tensor(0.05, dtype=torch.float64), torch.tensor(0.54, dtype=torch.float64),
+        kind="pipe",
+    )
+
+
+def _emitter_layer(coeff=0.02):
+    net = Network(dtype=torch.float64)
+    net.add_node("J")
+    net.add_node("R")
+    net.add_edge("R", "J", kind="pipe")
+    source = _Emitter(torch.tensor([0]), torch.tensor([coeff], dtype=torch.float64))
+    layer = PotentialFlowLayer(
+        net, "water", [_pipe_law()], boundary=["R"],
+        node_sources=[source], linear_solver="direct",
+    )
+    return net, layer, source
+
+
+def test_node_source_solves_against_a_hand_written_root():
+    """0.05 (10 - x)^0.54 == 0.02 x^0.5 at the junction."""
+    scipy_optimize = pytest.importorskip("scipy.optimize")
+    _, layer, _ = _emitter_layer()
+    pb = torch.tensor([10.0], dtype=torch.float64)
+    phi, q = layer.solve(pb, {}, None, differentiable=False, atol=1e-13, rtol=1e-13)
+    root = scipy_optimize.brentq(
+        lambda x: 0.05 * (10.0 - x) ** 0.54 - 0.02 * x**0.5, 1e-9, 10.0 - 1e-9
+    )
+    assert float(phi[0]) == pytest.approx(root, abs=1e-7)
+    # the branch flow equals the withdrawal at the converged point
+    assert float(q[0]) == pytest.approx(0.02 * root**0.5, rel=1e-9)
+
+
+def test_node_source_enters_the_residual_and_the_jacobian_diagonal():
+    _, layer, _ = _emitter_layer()
+    pb = torch.tensor([10.0], dtype=torch.float64)
+    phi, _ = layer.solve(pb, {}, None, differentiable=False, atol=1e-13, rtol=1e-13)
+    residual = layer.residual(phi[..., layer.interior], pb, {}, None)
+    assert float(residual.detach().abs().max()) < 1e-10
+    without = PotentialFlowLayer(
+        layer.net, "bare", [_pipe_law()], boundary=["R"],
+        linear_solver="direct",
+    )
+    dense = layer.jacobian(phi[..., layer.interior], pb, {})
+    bare = without.jacobian(phi[..., without.interior], pb, {})
+    added = float(dense[0, 0] - bare[0, 0])
+    assert added == pytest.approx(0.5 * 0.02 * float(phi[0]) ** -0.5, rel=1e-9)
+
+
+def test_node_source_adjoint_passes_gradcheck():
+    _, layer, _ = _emitter_layer()
+
+    def fn(pb):
+        phi, _ = layer.solve(pb, {}, None, differentiable=True)
+        return phi[..., layer.interior]
+
+    pb = torch.tensor([10.0], dtype=torch.float64, requires_grad=True)
+    assert torch.autograd.gradcheck(fn, (pb,), eps=1e-6, atol=1e-8, rtol=1e-5)
+
+
+def test_node_source_parameter_gradient_matches_central_differences():
+    _, layer, source = _emitter_layer()
+    source.coeff.requires_grad_(True)
+    pb = torch.tensor([10.0], dtype=torch.float64)
+    phi, _ = layer.solve(pb, {}, None, differentiable=True)
+    phi[..., layer.interior].sum().backward()
+    analytic = float(source.coeff.grad[0])
+    eps = 1e-7
+    with torch.no_grad():
+        source.coeff += eps
+    up, _ = layer.solve(pb, {}, None, differentiable=False, atol=1e-14, rtol=1e-14)
+    with torch.no_grad():
+        source.coeff -= 2 * eps
+    down, _ = layer.solve(pb, {}, None, differentiable=False, atol=1e-14, rtol=1e-14)
+    with torch.no_grad():
+        source.coeff += eps
+    fd = float((up[0] - down[0]) / (2 * eps))
+    assert analytic == pytest.approx(fd, rel=1e-6)
+
+
+def test_node_source_on_a_boundary_node_is_refused():
+    net = Network(dtype=torch.float64)
+    net.add_node("J")
+    net.add_node("R")
+    net.add_edge("R", "J", kind="pipe")
+    with pytest.raises(ValueError, match=r"acts at \['R'\]"):
+        PotentialFlowLayer(
+            net, "water", [_pipe_law()], boundary=["R"],
+            node_sources=[_Emitter(torch.tensor([1]),
+                                   torch.tensor([0.02], dtype=torch.float64))],
+        )
+
+
+def test_a_phi_independent_node_source_is_refused():
+    class _Constant(NodeSource):
+        def flow(self, phi_nodes, drivers=None):
+            return torch.full_like(phi_nodes, 0.01)
+
+    source = _Constant(torch.tensor([0]))
+    with pytest.raises(RuntimeError, match="does not depend on phi_nodes"):
+        source.dflow(torch.tensor([5.0], dtype=torch.float64))
+
+
+def test_node_sources_default_to_empty_and_change_nothing():
+    net = Network(dtype=torch.float64)
+    net.add_node("J")
+    net.add_node("R")
+    net.add_edge("R", "J", kind="pipe")
+    layer = PotentialFlowLayer(
+        net, "water", [_pipe_law()], boundary=["R"],
+        linear_solver="direct",
+    )
+    phi, _ = layer.solve(
+        torch.tensor([10.0], dtype=torch.float64),
+        {}, torch.tensor([-0.01, 0.0], dtype=torch.float64), differentiable=False,
+        atol=1e-13, rtol=1e-13,
+    )
+    assert float(phi[0]) == pytest.approx(10.0 - (0.01 / 0.05) ** (1.0 / 0.54), rel=1e-9)
