@@ -21,6 +21,16 @@ also fixes the LENGTH units of every other field: `CFS GPM MGD IMGD AFD` are US 
 elevations, lengths, heads and tank levels, inches for diameters) and `LPS LPM MLD CMH CMD`
 are SI (metres, millimetres) -- Manual p.136, "LPS/LPM/MLD/CMH/CMD => SI/metric for
 everything else".
+
+`[OPTIONS]` KEYS THAT CHANGE THE PHYSICS -- `DEMAND MODEL`, `MINIMUM PRESSURE`,
+`REQUIRED PRESSURE`, `PRESSURE EXPONENT`, `SPECIFIC GRAVITY`, `VISCOSITY` -- are carried
+onto `WaterNetwork.options` (a `WaterOptions`, EPANET's own defaults) rather than dropped;
+`build_water_model` defaults its own `pda`/`p_min`/`p_req`/`exponent` arguments from them.
+Any OTHER `[OPTIONS]` line (`TRIALS`, `ACCURACY`, `UNBALANCED`, the in-section `QUALITY`
+mode, ...) is recorded verbatim in `notes["unrecognised_options"]` instead of being
+silently ignored, since most of them are solver/report cosmetics this reader does not need
+but a few (an unimplemented `QUALITY CHEMICAL`, say) would silently change the network if
+dropped without a trace.
 """
 
 from __future__ import annotations
@@ -36,6 +46,7 @@ from tellegen.apps.water.network import (
     Tank,
     Valve,
     WaterNetwork,
+    WaterOptions,
     WaterPipe,
 )
 
@@ -58,6 +69,10 @@ FLOW_UNITS = {
 _US_UNITS = frozenset({"CFS", "GPM", "MGD", "IMGD", "AFD"})
 FOOT = 0.3048
 INCH = 0.0254
+#: psi -> m of head, for a US-units file's `MINIMUM PRESSURE`/`REQUIRED PRESSURE` (`wntr`'s
+#: own `HydParam.Pressure` conversion, `0.3048 / 0.4333`, confirmed to 1e-15 against
+#: `wntr.epanet.util.to_si`). SI files state these two already in metres.
+PSI_TO_M = FOOT / 0.4333
 
 _IGNORED = frozenset(
     {
@@ -124,6 +139,13 @@ def read_epanet_inp(path) -> WaterNetwork:
     headloss = "H-W"
     demand_pattern = None
     demand_multiplier = 1.0
+    demand_model = "DDA"
+    minimum_pressure = 0.0
+    required_pressure = 0.1
+    pressure_exponent = 0.5
+    specific_gravity = 1.0
+    viscosity = 1.0
+    unrecognised: list[str] = []
     for line in sections.get("OPTIONS", []):
         key = line.fields[0].upper()
         second = line.fields[1].upper() if len(line.fields) > 1 else ""
@@ -147,11 +169,33 @@ def read_epanet_inp(path) -> WaterNetwork:
             demand_pattern = line.fields[1] if len(line.fields) > 1 else None
         elif key == "DEMAND" and second == "MULTIPLIER":
             demand_multiplier = as_float(line, 2, "the demand multiplier", path)
+        elif key == "DEMAND" and second == "MODEL":
+            require_fields(line, 3, "DEMAND MODEL", path)
+            demand_model = line.fields[2].upper()
+            if demand_model not in ("DDA", "PDA"):
+                raise ValueError(
+                    f"{path}: line {line.number}: DEMAND MODEL {demand_model!r}; only "
+                    f"DDA and PDA are modelled"
+                )
+        elif key == "MINIMUM" and second == "PRESSURE":
+            minimum_pressure = as_float(line, 2, "MINIMUM PRESSURE", path)
+        elif key == "REQUIRED" and second == "PRESSURE":
+            required_pressure = as_float(line, 2, "REQUIRED PRESSURE", path)
+        elif key == "PRESSURE" and second == "EXPONENT":
+            pressure_exponent = as_float(line, 2, "PRESSURE EXPONENT", path)
+        elif key == "SPECIFIC" and second == "GRAVITY":
+            specific_gravity = as_float(line, 2, "SPECIFIC GRAVITY", path)
+        elif key == "VISCOSITY":
+            require_fields(line, 2, "VISCOSITY", path)
+            viscosity = as_float(line, 1, "VISCOSITY", path)
+        else:
+            unrecognised.append(line.raw.strip())
 
     flow = FLOW_UNITS[flow_unit]
     us = flow_unit in _US_UNITS
     length_scale = FOOT if us else 1.0
     diameter_scale = INCH if us else 1e-3
+    pressure_scale = PSI_TO_M if us else 1.0
 
     patterns: dict[str, tuple[float, ...]] = {}
     for line in sections.get("PATTERNS", []):
@@ -385,7 +429,19 @@ def read_epanet_inp(path) -> WaterNetwork:
         report_timestep=report_step,
         duration=duration,
         headloss=headloss,
-        notes={"flow_units": flow_unit},
+        options=WaterOptions(
+            demand_model=demand_model,
+            minimum_pressure=minimum_pressure * pressure_scale,
+            required_pressure=required_pressure * pressure_scale,
+            pressure_exponent=pressure_exponent,
+            specific_gravity=specific_gravity,
+            viscosity=viscosity,
+        ),
+        notes=(
+            {"flow_units": flow_unit, "unrecognised_options": "; ".join(unrecognised)}
+            if unrecognised
+            else {"flow_units": flow_unit}
+        ),
     )
     network.validate()
     return network

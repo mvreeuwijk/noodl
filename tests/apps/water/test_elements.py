@@ -175,6 +175,30 @@ def test_minor_loss_valve_inverts_its_quadratic():
     assert torch.isfinite(dp.grad).all()
 
 
+# ------------------------------------------------------------------------------ N12
+def test_minor_loss_laminar_blend_is_full_float64_precision():
+    """N12: the laminar-blend constant used to build with `torch.as_tensor(dpt)`, which
+    casts a bare Python float with `torch.get_default_dtype()` (float32) BEFORE the
+    division -- type promotion then upgrades the RESULT back to float64, so the bug is
+    invisible to a `.dtype` check and only shows up as an ~1.4e-8 relative precision loss
+    (measured) against the value computed with `dpt` at full float64 precision throughout,
+    which is what a pipe carrying exactly zero flow (the transition's whole reason to
+    exist) needs from its tangent slope.
+    """
+    el = MinorLoss(torch.tensor([10.0], dtype=F64), torch.tensor([0.2], dtype=F64))
+    dpt = el.dp_transition
+    m = float(el.coefficient())
+    expected_slope = (dpt / m) ** 0.5 / dpt
+
+    zero, slope = el.linear_init()
+    assert zero.dtype == F64
+    assert slope.dtype == F64
+    assert float(slope) == pytest.approx(expected_slope, rel=1e-13)
+
+    dp0 = torch.zeros(1, dtype=F64)
+    assert float(el.dflow(dp0)) == pytest.approx(expected_slope, rel=1e-13)
+
+
 # --------------------------------------------------------------- M4-R14: PDA's exact kink
 def test_pressure_driven_demand_is_exactly_zero_at_and_below_p_min():
     """Ruling M4-R14: the Wagner curve is EXACTLY 0 at and below `P_min`, the fractional

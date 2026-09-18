@@ -53,6 +53,29 @@ _VALVES_REFUSED = ("PRV", "PSV", "PBV", "GPV")
 
 
 @dataclass(frozen=True)
+class WaterOptions:
+    """`[OPTIONS]` keys that change the physics, with EPANET 2.2's own defaults.
+
+    `demand_model` is `"DDA"` or `"PDA"`; `minimum_pressure`/`required_pressure` are in
+    METRES of head (this reader converts a US file's native psi at the same boundary as
+    every other length, research note section 9's `PSI_TO_M`); `pressure_exponent` is
+    dimensionless; `specific_gravity`/`viscosity` are relative to water at 20 C. The
+    `required_pressure` default 0.1 is EPANET's own lower limit on the value ("0.1 in psi
+    or m", `wntr`'s inp writer), not the manual OPTIONS table's literal 0.0, which only
+    describes the no-op DDA case; `wntr`'s `HydraulicOptions.required_pressure = 0.07` is
+    that SAME 0.1 converted from psi assuming US units, which does not apply here since
+    this reader is always SI.
+    """
+
+    demand_model: str = "DDA"
+    minimum_pressure: float = 0.0
+    required_pressure: float = 0.1
+    pressure_exponent: float = 0.5
+    specific_gravity: float = 1.0
+    viscosity: float = 1.0
+
+
+@dataclass(frozen=True)
 class Junction:
     name: str
     elevation: float
@@ -129,6 +152,7 @@ class WaterNetwork:
     report_timestep: float = 3600.0
     duration: float = 0.0
     headloss: str = "H-W"
+    options: WaterOptions = field(default_factory=WaterOptions)
     notes: dict[str, str] = field(default_factory=dict)
 
     def nodes(self) -> list[str]:
@@ -244,6 +268,11 @@ class WaterNetwork:
                 f"WaterNetwork: headloss {self.headloss!r}; only H-W and D-W are modelled "
                 f"(Chezy-Manning's SI constant is UNVERIFIED, spec section 11)"
             )
+        if self.options.demand_model not in ("DDA", "PDA"):
+            raise ValueError(
+                f"WaterNetwork: DEMAND MODEL {self.options.demand_model!r}; only DDA and "
+                f"PDA are modelled"
+            )
         tank_names = {t.name for t in self.tanks}
         pump_names = {p.name for p in self.pumps}
         for control in self.controls:
@@ -296,10 +325,10 @@ def build_water_model(
     net: WaterNetwork,
     *,
     headloss: str | None = None,
-    pda: bool = False,
-    p_min: float = 0.0,
-    p_req: float = 0.0,
-    exponent: float = 0.5,
+    pda: bool | None = None,
+    p_min: float | None = None,
+    p_req: float | None = None,
+    exponent: float | None = None,
     quality: float | None = None,
     coupling: str = "pingpong",
     dt: float | None = None,
@@ -309,6 +338,19 @@ def build_water_model(
     ONE `PotentialFlowLayer("water", ...)` on a network whose edge kinds partition by device
     type, plus the tank/controls closure when the network has tanks, plus an optional
     quality layer.
+
+    `pda`, `p_min`, `p_req` and `exponent` each DEFAULT from `net.options` (the file's own
+    `[OPTIONS] DEMAND MODEL`/`MINIMUM PRESSURE`/`REQUIRED PRESSURE`/`PRESSURE EXPONENT`,
+    or `WaterOptions`'s EPANET defaults when the network was built by hand) when the caller
+    passes nothing; passing any of them explicitly still overrides the file.
+
+    `net.options.specific_gravity`/`viscosity` (relative to water at 20 C) reach the
+    Darcy-Weisbach path, which is the only element here parameterised by fluid density and
+    viscosity at all (`Duct`'s Reynolds-number friction factor; `scale`, below, uses the
+    SAME density so a D-W network's head/pressure conversion stays self-consistent).
+    Hazen-Williams has no such parameters -- EPANET's own H-W formula is calibrated for
+    water and does not take them either -- so a NON-DEFAULT `SPECIFIC GRAVITY` or
+    `VISCOSITY` on an H-W network is refused by name rather than silently ignored.
 
     `quality` is a bulk decay coefficient in 1/day (EPANET's own `[REACTIONS] Global Bulk`
     units, Manual Table 8.4 p.78), or `None`. TWO facts the plan writer MEASURED go with it
@@ -331,6 +373,24 @@ def build_water_model(
         raise ValueError(
             f"build_water_model: headloss must be 'H-W' or 'D-W', got {headloss!r}"
         )
+    options = net.options
+    if pda is None:
+        pda = options.demand_model == "PDA"
+    if p_min is None:
+        p_min = options.minimum_pressure
+    if p_req is None:
+        p_req = options.required_pressure
+    if exponent is None:
+        exponent = options.pressure_exponent
+    if headloss == "H-W" and (options.specific_gravity != 1.0 or options.viscosity != 1.0):
+        raise ValueError(
+            f"build_water_model: [OPTIONS] SPECIFIC GRAVITY {options.specific_gravity!r} "
+            f"/ VISCOSITY {options.viscosity!r} are not the defaults, but Hazen-Williams "
+            f"does not take fluid density or viscosity (EPANET's own H-W formula is "
+            f"calibrated for water); use headloss='D-W' or leave both at 1.0"
+        )
+    rho = RHO_W * options.specific_gravity
+    mu = MU_W * options.viscosity
     graph = Network(dtype=F64)
     node_names = net.nodes()
     for junction in net.junctions:
@@ -351,7 +411,7 @@ def build_water_model(
         graph.add_edge(valve.u, valve.v, kind="fcv", name=valve.name)
 
     notes: dict[str, str] = dict(net.notes)
-    scale = RHO_W * G if headloss == "D-W" else 1.0
+    scale = rho * G if headloss == "D-W" else 1.0
     elements: list = []
     if net.pipes:
         if headloss == "H-W":
@@ -366,17 +426,18 @@ def build_water_model(
             )
         else:
             notes["headloss"] = (
-                "Darcy-Weisbach uses the existing Duct element (Colebrook, unrolled fixed "
-                "point) at rho = 998.2 kg/m3 and mu = 1.002e-3 Pa s; EPANET uses "
-                "Swamee-Jain above Re = 4000, Hagen-Poiseuille below 2000 and Dunlop's "
-                "cubic between, and spec row D4 RECORDS the resulting residual"
+                f"Darcy-Weisbach uses the existing Duct element (Colebrook, unrolled "
+                f"fixed point) at rho = {rho} kg/m3 and mu = {mu} Pa s (998.2 / 1.002e-3 "
+                f"scaled by [OPTIONS] SPECIFIC GRAVITY / VISCOSITY); EPANET uses "
+                f"Swamee-Jain above Re = 4000, Hagen-Poiseuille below 2000 and Dunlop's "
+                f"cubic between, and spec row D4 RECORDS the resulting residual"
             )
             elements.append(
                 Duct(
                     torch.tensor([p.length for p in net.pipes], dtype=F64),
                     torch.tensor([p.diameter for p in net.pipes], dtype=F64),
                     torch.tensor([p.roughness for p in net.pipes], dtype=F64),
-                    rho=RHO_W, mu=MU_W, n_iter=12, kind="pipe",
+                    rho=rho, mu=mu, n_iter=12, kind="pipe",
                 )
             )
     if net.pumps:
@@ -619,12 +680,16 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
 
 
 def _refuse_pump_overflow(model: Model, state: State) -> None:
-    """Ruling M4-R13: refuse, by name, a converged pump flow beyond its own `q_max`."""
+    """Ruling M4-R13: refuse, by name, a converged pump flow beyond its own `q_max`.
+
+    FR-13: reads the layer through its public `element_for` (kind -> `(element, slice)`)
+    rather than the private `_elements`/`_kind_slices` this used to reach into.
+    """
     layer = model.potential.get("water")
-    if layer is None or "pump" not in layer._kind_slices:
+    if layer is None or "pump" not in layer.kinds:
         return
-    lo, hi = layer._kind_slices["pump"]
-    pump = next(el for el in layer._elements if el.kind == "pump")
+    pump, sl = layer.element_for("pump")
+    lo, hi = sl.start, sl.stop
     q = state["water.q"][..., lo:hi].detach()
     q_max = pump.q_max().detach()
     over = q.abs() > q_max

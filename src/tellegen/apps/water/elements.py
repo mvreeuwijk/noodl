@@ -297,7 +297,11 @@ class MinorLoss(Element):
         mask = dp.abs() < dpt
         dp_safe = torch.where(mask, torch.full_like(dp, dpt), dp.abs())
         sharp = torch.sign(dp) * torch.sqrt(dp_safe / m)
-        slope = torch.sqrt(torch.as_tensor(dpt) / m) / dpt
+        # `torch.as_tensor(dpt)` on a bare Python float casts with
+        # `torch.get_default_dtype()` (float32 in this repo, `elements/duct.py`'s
+        # documented gotcha), which would silently downcast a float64 element; `dtype=
+        # dp.dtype` keeps it in the caller's own precision, as `Headspace` does.
+        slope = torch.sqrt(torch.as_tensor(dpt, dtype=dp.dtype) / m) / dpt
         return torch.where(mask, slope * dp, sharp)
 
     def dflow(self, dp: Tensor, drivers=None) -> Tensor:
@@ -306,12 +310,12 @@ class MinorLoss(Element):
         mask = dp.abs() < dpt
         dp_safe = torch.where(mask, torch.full_like(dp, dpt), dp.abs())
         sharp = 0.5 / torch.sqrt(m * dp_safe)
-        slope = torch.sqrt(torch.as_tensor(dpt) / m) / dpt
+        slope = torch.sqrt(torch.as_tensor(dpt, dtype=dp.dtype) / m) / dpt
         return torch.where(mask, slope * torch.ones_like(dp), sharp)
 
     def linear_init(self, drivers=None) -> tuple[Tensor, Tensor]:
         m = self.coefficient()
         dpt = self.dp_transition
-        slope = torch.sqrt(torch.as_tensor(dpt) / m) / dpt
+        slope = torch.sqrt(torch.as_tensor(dpt, dtype=m.dtype) / m) / dpt
         zero = torch.zeros_like(slope)
         return zero, slope + zero

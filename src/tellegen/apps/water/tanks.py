@@ -147,19 +147,26 @@ class TankLevels:
         """Explicit Euler on the level, from the net inflow (m3/s) at each tank node."""
         return level + inflow * dt / self.area
 
-    def event_step(self, level: float, rate: float, dt: float) -> float:
+    def event_step(self, level: Tensor, rate: Tensor, dt: float) -> float:
         """EPANET's shortened hydraulic step: the time to the next control crossing.
 
         Manual section 13.1 item 17, p.113: the next step is the minimum of the nominal
         step and the time until a tank level "reaches a point that triggers a change in
         status for some link", computed on the assumption that the level changes LINEARLY
-        at the current solution's rate. `rate` is dy/dt in m/s.
+        at the current solution's rate.
+
+        `level` and `rate` (dy/dt, m/s) are given for EVERY tank, not just the one the
+        caller happens to be tracking: each control tests its OWN tank (`control.node`)
+        against that tank's own level and rate (N13). A single scalar pair, tested against
+        every control regardless of which tank it names, is wrong the moment a second
+        controlled tank exists -- it silently uses the wrong tank's level.
         """
         step = dt
-        if rate == 0.0:
-            return step
         for control in self.controls:
-            crossing = (control.level - level) / rate
+            r = float(rate[self.tank_of[control.node]])
+            if r == 0.0:
+                continue
+            crossing = (control.level - float(level[self.tank_of[control.node]])) / r
             if 1e-9 < crossing < step:
                 step = crossing + 1e-9
         return step

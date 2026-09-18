@@ -1,6 +1,7 @@
 """WaterNetwork validation, the builder, the tank closure and the report helpers."""
 
 import csv
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from tellegen.apps.water.network import (
     Tank,
     Valve,
     WaterNetwork,
+    WaterOptions,
     WaterPipe,
     build_water_model,
     initial_state,
@@ -261,6 +263,49 @@ def test_a_junction_touching_no_pipe_is_refused_for_quality():
 def test_an_unmodelled_headloss_argument_is_refused():
     with pytest.raises(ValueError, match="must be 'H-W' or 'D-W'"):
         build_water_model(twoloop(), headloss="C-M")
+
+
+# --------------------------------------------------------------------- [OPTIONS] (N5)
+def test_pda_defaults_from_the_networks_own_options():
+    """`build_water_model(net)` with NO `pda=`/`p_min=`/... reads them from `net.options`,
+    exactly as a `DEMAND MODEL PDA` `.inp` would set them (row D5)."""
+    net = dataclasses.replace(
+        twoloop(),
+        options=WaterOptions(
+            demand_model="PDA", minimum_pressure=0.0, required_pressure=60.0,
+            pressure_exponent=0.5,
+        ),
+    )
+    model, _, drivers = build_water_model(net)
+    assert float(drivers["water.sources"].abs().max()) == 0.0
+    sources = model.potential["water"]._node_sources
+    assert len(sources) == 1
+    assert sources[0].p_min == 0.0
+    assert sources[0].p_req == 60.0
+    assert "demand_model" in model.notes
+
+
+def test_a_non_default_viscosity_on_hazen_williams_is_refused():
+    net = dataclasses.replace(twoloop(), options=WaterOptions(viscosity=1.5))
+    with pytest.raises(ValueError, match="VISCOSITY"):
+        build_water_model(net)
+
+
+def test_a_non_default_specific_gravity_on_hazen_williams_is_refused():
+    net = dataclasses.replace(twoloop(), options=WaterOptions(specific_gravity=1.1))
+    with pytest.raises(ValueError, match="SPECIFIC GRAVITY"):
+        build_water_model(net)
+
+
+def test_a_non_default_viscosity_and_gravity_reach_the_darcy_weisbach_duct():
+    net = dataclasses.replace(
+        twoloop(), options=WaterOptions(specific_gravity=1.1, viscosity=1.5)
+    )
+    model, _, _ = build_water_model(net, headloss="D-W")
+    duct = model.potential["water"]._elements[0]
+    assert duct.rho == pytest.approx(998.2 * 1.1, rel=1e-15)
+    assert duct.mu == pytest.approx(1.002e-3 * 1.5, rel=1e-15)
+    assert model.head_scale == pytest.approx(998.2 * 1.1 * 9.80665, rel=1e-15)
 
 
 def test_initial_state_refuses_an_unknown_quantity():

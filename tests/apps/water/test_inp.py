@@ -269,3 +269,62 @@ def test_darcy_weisbach_roughness_is_converted_from_millifeet(tmp_path):
     net = read_epanet_inp(path)
     pipe = next(p for p in net.pipes if p.name == "10")
     assert pipe.roughness == pytest.approx(0.85 * FOOT * 1e-3, rel=1e-15)
+
+
+# --------------------------------------------------------------------- [OPTIONS] (N5)
+def test_a_default_file_reads_dda_with_epanets_own_defaults():
+    """Neither committed fixture writes `DEMAND MODEL`, `MINIMUM PRESSURE`, `REQUIRED
+    PRESSURE` or `PRESSURE EXPONENT`, so all four fall back to `WaterOptions`'s defaults."""
+    net = read_epanet_inp(DATA / "twoloop_si.inp")
+    assert net.options.demand_model == "DDA"
+    assert net.options.minimum_pressure == 0.0
+    assert net.options.required_pressure == 0.1
+    assert net.options.pressure_exponent == 0.5
+    assert net.options.specific_gravity == 1.0
+    assert net.options.viscosity == 1.0
+
+
+def test_a_pda_file_reads_the_demand_model_and_the_three_pressures(tmp_path):
+    path = _edit(
+        tmp_path, "twoloop_si.inp",
+        (" Pattern            \t1", " Pattern            \t1\n"
+         " DEMAND MODEL       \tPDA\n MINIMUM PRESSURE   \t0\n"
+         " REQUIRED PRESSURE  \t60\n PRESSURE EXPONENT  \t0.5"),
+    )
+    net = read_epanet_inp(path)
+    assert net.options.demand_model == "PDA"
+    assert net.options.minimum_pressure == 0.0
+    assert net.options.required_pressure == 60.0
+    assert net.options.pressure_exponent == 0.5
+    from tellegen.apps.water.network import build_water_model
+
+    model, _, _ = build_water_model(net)
+    assert len(model.potential["water"]._node_sources) == 1
+
+
+def test_an_unknown_demand_model_is_refused(tmp_path):
+    path = _edit(tmp_path, "twoloop_si.inp",
+                 (" Pattern            \t1", " Pattern            \t1\n"
+                  " DEMAND MODEL       \tPDD"))
+    with pytest.raises(ValueError, match="DEMAND MODEL 'PDD'"):
+        read_epanet_inp(path)
+
+
+def test_an_unrecognised_option_is_recorded_not_dropped():
+    """`Trials`, `Accuracy`, `CHECKFREQ`, ... are solver/report cosmetics this reader does
+    not model, but N5 requires they be RECORDED rather than silently dropped."""
+    net = read_epanet_inp(DATA / "twoloop_si.inp")
+    assert "unrecognised_options" in net.notes
+    assert "Trials" in net.notes["unrecognised_options"]
+    assert "Quality" in net.notes["unrecognised_options"]
+
+
+def test_required_pressure_in_a_us_units_file_is_converted_from_psi(tmp_path):
+    path = _edit(
+        tmp_path, "Net1.inp",
+        (" Pattern            \t1", " Pattern            \t1\n"
+         " DEMAND MODEL       \tPDA\n MINIMUM PRESSURE   \t0\n"
+         " REQUIRED PRESSURE  \t20\n PRESSURE EXPONENT  \t0.5"),
+    )
+    net = read_epanet_inp(path)
+    assert net.options.required_pressure == pytest.approx(20 * FOOT / 0.4333, rel=1e-15)

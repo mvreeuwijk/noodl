@@ -1,9 +1,17 @@
-"""Milestone 4 demonstration: Net1's 24 h extended period, batched over demand multipliers.
+"""Milestone 4 demonstration: Net1's 24 h extended period, over 8 demand multipliers.
 
 Runs EPANET's own Example Network 1 for a full day with its two tank-level pump controls,
 using the EVENT-SHORTENED hydraulic step (EPANET 2.2 Manual section 13.1 item 17, p.113),
-batched over 8 demand multipliers. Prints the wall time, the tank-level trajectory of
-instance 0 and the number of hydraulic sub-steps the event shortening cost.
+run SEQUENTIALLY over 8 demand multipliers -- one model per multiplier, not a batched leading
+dimension (N15). `TankLevels.event_step` shortens the step to each multiplier's OWN next
+control crossing, so the eight instances take a different number of sub-steps and land on
+different report times mid-run; a genuinely batched rollout would need a per-instance step
+(the sub-stepping loop below only ever advances one scalar `moment` at a time) or a
+global-minimum step shared by all eight, which oversamples the seven instances that did not
+need shortening on that particular sub-step -- undesirable and, either way, not "straightforward"
+enough to fold into a fix-wave item, so this docstring records reality instead of the plan's
+original "batched" wording. Prints the wall time, the tank-level trajectory of instance 0 and
+the number of hydraulic sub-steps the event shortening cost.
 
 Run: `.venv/Scripts/python benchmarks/water_eps.py`
 """
@@ -19,7 +27,7 @@ from tellegen.apps.water.inp import read_epanet_inp
 from tellegen.apps.water.network import build_water_model, tank_inflow, water_steady
 
 F64 = torch.float64
-DATA = Path(__file__).resolve().parent.parent / "tests" / "data" / "water"
+DATA = Path(__file__).resolve().parents[1] / "tests" / "data" / "water"
 MULTIPLIERS = (0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4)
 
 
@@ -45,9 +53,9 @@ def _run(net, multiplier: float) -> tuple[list[float], int]:
             step_drivers["water.sources"] = base * _pattern_factor(net, moment)
             solved = water_steady(model, state, step_drivers)
             inflow = tank_inflow(model, solved)
-            rate = float(inflow[0]) / float(closure.area[0])
+            rate = inflow / closure.area
             step = closure.event_step(
-                float(state["water.tank_level"][0]), rate, report_end - moment
+                state["water.tank_level"], rate, report_end - moment
             )
             state = dict(solved)
             state["water.tank_level"] = closure.advance(
@@ -71,8 +79,8 @@ def main() -> None:
     elapsed = time.perf_counter() - started
     print(
         f"water_eps: Net1, {int(net.duration / 3600)} h, "
-        f"{len(MULTIPLIERS)} demand multipliers, {total_sub_steps} hydraulic sub-steps "
-        f"in {elapsed:.2f} s"
+        f"{len(MULTIPLIERS)} sequential demand multipliers, {total_sub_steps} hydraulic "
+        f"sub-steps in {elapsed:.2f} s"
     )
     print("tank 2 level (m) at each report step, demand multiplier 1.0:")
     baseline = trajectories[MULTIPLIERS.index(1.0)]

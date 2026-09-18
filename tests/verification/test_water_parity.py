@@ -206,9 +206,8 @@ def _extended_period(net, model, state, drivers):
             step_drivers["water.sources"] = base * _pattern_factor(net, time)
             solved = water_steady(model, state, step_drivers)
             inflow = tank_inflow(model, solved)
-            rate = float(inflow[0]) / float(closure.area[0])
-            dt = closure.event_step(float(state["water.tank_level"][0]), rate,
-                                    report_end - time)
+            rate = inflow / closure.area
+            dt = closure.event_step(state["water.tank_level"], rate, report_end - time)
             state = dict(solved)
             state["water.tank_level"] = closure.advance(
                 state["water.tank_level"], inflow, dt
@@ -260,12 +259,18 @@ def test_d3_event_step_returns_the_nominal_step_when_nothing_is_crossed(tmp_path
     net = read_epanet_inp(path)
     model, _, _ = build_water_model(net)
     closure = model.tank_closure
-    assert closure.event_step(36.576, 0.0, 3600.0) == 3600.0
+    assert closure.event_step(
+        torch.tensor([36.576], dtype=F64), torch.tensor([0.0], dtype=F64), 3600.0
+    ) == 3600.0
     # rising towards the 42.672 m upper trigger at 1e-3 m/s crosses it in 6096 s, which is
     # longer than the 3600 s step, so the step is not shortened
-    assert closure.event_step(36.576, 1e-3, 3600.0) == 3600.0
+    assert closure.event_step(
+        torch.tensor([36.576], dtype=F64), torch.tensor([1e-3], dtype=F64), 3600.0
+    ) == 3600.0
     # from 42.0 m the same rate crosses in 672 s, so the step IS shortened to it
-    assert closure.event_step(42.0, 1e-3, 3600.0) == pytest.approx(672.0, abs=1e-6)
+    assert closure.event_step(
+        torch.tensor([42.0], dtype=F64), torch.tensor([1e-3], dtype=F64), 3600.0
+    ) == pytest.approx(672.0, abs=1e-6)
 
 
 def test_d3_a_tank_outside_its_limits_is_refused(tmp_path):
@@ -337,12 +342,18 @@ def test_d5_pressure_driven_demand(tmp_path):
     row validates the core extension of spec 13.4 -- EPANET itself formulates PDA as "a
     virtual pipe from the junction to a fictitious reservoir" (Manual section 13.1, p.110),
     i.e. as exactly this potential-dependent nodal source.
+
+    `build_water_model` is called with NO `pda=`/`p_min=`/`p_req=`/`exponent=` (N5): the
+    file's own `[OPTIONS]` edit below is what turns PDA on, exactly as `read_epanet_inp`
+    -> `net.options` -> the builder's own defaults are meant to be exercised together,
+    rather than the test re-supplying by hand what the file already says.
     """
     path, results = _epanet(tmp_path, "twoloop_si.inp", edits=[_PDA_EDIT])
     net = read_epanet_inp(path)
-    model, state, drivers = build_water_model(
-        net, pda=True, p_min=0.0, p_req=60.0, exponent=0.5
-    )
+    assert net.options.demand_model == "PDA"
+    assert (net.options.minimum_pressure, net.options.required_pressure,
+            net.options.pressure_exponent) == (0.0, 60.0, 0.5)
+    model, state, drivers = build_water_model(net)
     final = water_steady(model, state, drivers)
     heads = results.node["head"].loc[0]
     demands = results.node["demand"].loc[0]
@@ -361,9 +372,7 @@ def test_d5_pda_delivers_less_than_the_required_demand(tmp_path):
     """The whole point of PDA: below the required pressure the demand is curtailed."""
     path, _ = _epanet(tmp_path, "twoloop_si.inp", edits=[_PDA_EDIT])
     net = read_epanet_inp(path)
-    model, state, drivers = build_water_model(
-        net, pda=True, p_min=0.0, p_req=60.0, exponent=0.5
-    )
+    model, state, drivers = build_water_model(net)
     final = water_steady(model, state, drivers)
     source = model.potential["water"]._node_sources[0]
     delivered = source.flow(final["water.phi"][..., source.nodes]).detach()
@@ -402,11 +411,18 @@ def test_d6_head_loss_sums_to_zero_around_every_loop(tmp_path):
 
 # --------------------------------------------------------------------------- D7
 def test_d7_gradients_against_central_differences(tmp_path):
-    """Row D7, `max|analytic - fd| <= 1e-6 * max|fd|` (spec amendment A14).
+    """Row D7, `max|analytic - fd| <= 1e-6 * max|fd|` (spec amendment A14), for BOTH the
+    nodal demand `water.sources` and the Hazen-Williams roughness (N6: the row's own
+    docstring and the README promise "roughness, demands, pump h0, tank area", but only
+    `water.sources` used to be differenced here and `solve_sum`'s `roughness` branch was
+    dead code -- it is exercised for real below). The pump `h0` and tank AREA channels are
+    checked separately, on Net1 (`test_d7_gradient_reaches_the_pump_head_gain_h0` and
+    `test_d7_...tank_area...` below), since `twoloop_si.inp` has neither a pump nor a tank.
 
-    MEASURED: 7.1e-11 against an allowance of 6.3e-8. Stated as a SCALED criterion rather
-    than an entrywise relative one because pipe P7's own gradient is 1.24e-5, 2e-4 of the
-    largest, where the central difference is the noisy party (5.721e-6 relative there).
+    MEASURED: sources 3.212e-6 against an allowance of 4.444e-4; roughness 2.505e-10
+    against an allowance of 6.259e-8. Both are SCALED criteria rather than entrywise
+    relative ones because the smallest-flow pipe's own gradient is a tiny fraction of the
+    largest, where the central difference is the noisy party.
     """
     path, _ = _epanet(tmp_path, "twoloop_si.inp")
     net = read_epanet_inp(path)
@@ -432,7 +448,9 @@ def test_d7_gradients_against_central_differences(tmp_path):
         return model, final
 
     model, _, drivers = build_water_model(net)
+    element = model.potential["water"]._elements[0]
     sources = drivers["water.sources"].clone().requires_grad_(True)
+    element.roughness.requires_grad_(True)
     final = water_steady(model, {"water.phi": torch.zeros(model.net.n, dtype=F64),
                                  "water.q": torch.zeros(
                                      len(model.potential["water"].cols), dtype=F64)},
@@ -441,6 +459,7 @@ def test_d7_gradients_against_central_differences(tmp_path):
     layer = model.potential["water"]
     final["water.phi"][..., layer.interior].sum().backward()
     analytic_sources = sources.grad.clone()
+    analytic_roughness = element.roughness.grad.clone()
 
     eps = 1e-8
     fd_sources = []
@@ -465,6 +484,109 @@ def test_d7_gradients_against_central_differences(tmp_path):
     )
     assert worst <= 1e-6 * scale, (worst, 1e-6 * scale)
 
+    eps_r = 1e-4
+    base_roughness = [p.roughness for p in net.pipes]
+    fd_roughness = []
+    for i in range(len(net.pipes)):
+        up_r = list(base_roughness)
+        up_r[i] += eps_r
+        down_r = list(base_roughness)
+        down_r[i] -= eps_r
+        m_up, s_up = solve_sum(roughness=up_r)
+        m_down, s_down = solve_sum(roughness=down_r)
+        fd_roughness.append(
+            (
+                float(s_up["water.phi"][..., m_up.potential["water"].interior].sum())
+                - float(s_down["water.phi"][..., m_down.potential["water"].interior].sum())
+            )
+            / (2 * eps_r)
+        )
+    scale_r = max(abs(v) for v in fd_roughness)
+    worst_r = max(
+        abs(float(a) - b)
+        for a, b in zip(analytic_roughness.tolist(), fd_roughness, strict=True)
+    )
+    assert worst_r <= 1e-6 * scale_r, (worst_r, 1e-6 * scale_r)
+
+
+def test_d7_gradient_reaches_the_pump_head_gain_h0(tmp_path):
+    """Row D7's pump `h0` channel, on Net1 (`twoloop_si.inp` has no pump).
+
+    MEASURED: 1.007e-6 relative (analytic 0.430638, central difference 0.430638).
+    """
+    path, _ = _epanet(tmp_path, "Net1.inp", duration=0)
+    net = read_epanet_inp(path)
+
+    def solve_with_h0(delta: float):
+        model, state, drivers = build_water_model(net)
+        pump = next(el for el in model.potential["water"]._elements if el.kind == "pump")
+        with torch.no_grad():
+            pump.h0.add_(delta)
+        final = water_steady(model, state, drivers)
+        return model, final
+
+    model, state, drivers = build_water_model(net)
+    pump = next(el for el in model.potential["water"]._elements if el.kind == "pump")
+    pump.h0.requires_grad_(True)
+    final = water_steady(model, state, drivers, differentiable=True)
+    layer = model.potential["water"]
+    final["water.phi"][..., layer.interior].sum().backward()
+    analytic = float(pump.h0.grad.detach())
+
+    eps = 1e-4
+    m_up, up = solve_with_h0(eps)
+    m_down, down = solve_with_h0(-eps)
+    fd = (
+        float(up["water.phi"][..., m_up.potential["water"].interior].sum())
+        - float(down["water.phi"][..., m_down.potential["water"].interior].sum())
+    ) / (2 * eps)
+    assert abs(analytic - fd) <= 1e-5 * abs(fd), (analytic, fd)
+
+
+def test_d7_tank_area_is_not_reached_by_a_single_steady_solve(tmp_path):
+    """Tank AREA never enters `TankLevels.__call__` (only `bottom + level` does), so a
+    single `water_steady` call's output is STRUCTURALLY independent of it -- not a small
+    gradient, but no path in the graph at all. This is the "structurally not
+    differentiable" half of N6: D7's blanket claim that roughness, demands, pump h0 AND
+    tank area all reach the steady solve overstated the last one. The next test shows
+    where the framework DOES differentiate w.r.t. area: `TankLevels.advance()`.
+    """
+    path, _ = _epanet(tmp_path, "Net1.inp", duration=0)
+    net = read_epanet_inp(path)
+    model, state, drivers = build_water_model(net)
+    closure = model.tank_closure
+    closure.area.requires_grad_(True)
+    final = water_steady(model, state, drivers, differentiable=True)
+    assert not final["water.phi"].requires_grad
+
+
+def test_d7_gradient_reaches_the_tank_area_through_advance(tmp_path):
+    """Row D7's tank-area channel is `TankLevels.advance`'s explicit-Euler update (the
+    previous test), not the steady solve. MEASURED: 2.753e-9 relative (analytic
+    -5.0256097e-3, central difference -5.0256097e-3).
+    """
+    path, _ = _epanet(tmp_path, "Net1.inp", duration=0)
+    net = read_epanet_inp(path)
+    model, state, drivers = build_water_model(net)
+    closure = model.tank_closure
+    final = water_steady(model, state, drivers)
+    inflow = tank_inflow(model, final).detach()
+
+    closure.area.requires_grad_(True)
+    closure.advance(state["water.tank_level"], inflow, 3600.0).sum().backward()
+    analytic = float(closure.area.grad.detach().sum())
+
+    eps = 1e-4
+    base_area = closure.area.detach().clone()
+    with torch.no_grad():
+        closure.area.copy_(base_area + eps)
+        up = float(closure.advance(state["water.tank_level"], inflow, 3600.0).sum())
+        closure.area.copy_(base_area - eps)
+        down = float(closure.advance(state["water.tank_level"], inflow, 3600.0).sum())
+        closure.area.copy_(base_area)
+    fd = (up - down) / (2 * eps)
+    assert abs(analytic - fd) <= 1e-5 * abs(fd), (analytic, fd)
+
 
 def test_d7_gradient_reaches_a_learnable_roughness(tmp_path):
     path, _ = _epanet(tmp_path, "twoloop_si.inp")
@@ -482,7 +604,10 @@ def test_d7_gradient_reaches_a_learnable_roughness(tmp_path):
 
 # --------------------------------------------------------------------------- D8
 def test_d8_trace_quality_on_the_two_loop(tmp_path):
-    """Row D8, 1e-3 on the steady trace fraction. MEASURED: 2.501e-12 percentage points.
+    """Row D8, 1e-3 on the steady trace fraction. MEASURED: 6.438e-12 percentage points
+    (FR-16: refreshed from a stale 2.501e-12; both are noise many orders below the 1e-3
+    tolerance, floating on the oracle's own float32 output and this solve's Newton
+    tolerance rather than on any physics this row could regress).
 
     A SMOKE row, as spec 13.3 states: the fixture has a single source, so mass balance
     alone forces 100 % everywhere once transients clear. A genuinely discriminating
