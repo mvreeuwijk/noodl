@@ -153,25 +153,61 @@ def test_step_shares_scarce_receiver_headroom_by_preference():
     assert torch.allclose(f[:2], torch.tensor([10.0, 10.0], dtype=F64), atol=1e-6)
 
 
+def _star_net() -> Network:
+    """X -> D, Y -> D, Z -> D: three independent sources sharing one sink D."""
+    net = Network()
+    for name in ("X", "Y", "Z", "D"):
+        net.add_node(name)
+    net.add_edge("X", "D", kind="link")
+    net.add_edge("Y", "D", kind="link")
+    net.add_edge("Z", "D", kind="link")
+    return net
+
+
 def test_step_conserves_with_n_passes_1_vs_5():
-    """A single pass under-shares (leaves headroom unused); 5 passes converges closer."""
-    net = _diamond_net()
-    s_max = torch.tensor([100.0, 100.0, 100.0, 3.0], dtype=F64)
-    c_arc = torch.full((4,), 100.0, dtype=F64)
-    preference = torch.full((4,), 1.0, dtype=F64)
-    drivers = {"cap.requests": torch.tensor([10.0, 10.0, 10.0, 10.0], dtype=F64)}
+    """A single pass under-shares when one edge's request is below its fair share;
+    later passes recover the difference by redistributing the freed preference weight
+    among the still-competing edges.
+
+    The diamond fixture (used elsewhere in this file) does NOT exercise this: with
+    c_arc=100 >> D's headroom of 3.0 and both D-competing edges requesting far more
+    than their fair share, pass 1 already saturates the exact max-min-fair split and
+    n_passes=1/2/5 are bit-identical there -- n_passes only matters when some
+    competitor's request falls short of what a naive fair share would hand it, freeing
+    headroom that only a LATER pass redistributes to the others. This fixture (three
+    edges into one sink, one deliberately under-demanding) is the minimal case that
+    needs more than one pass, and was hand-verified pass-by-pass in the task report.
+    """
+    net = _star_net()
+    s_max = torch.tensor([100.0, 100.0, 100.0, 3.0], dtype=F64)  # D's headroom is 3.0
+    c_arc = torch.full((3,), 100.0, dtype=F64)
+    preference = torch.full((3,), 1.0, dtype=F64)  # equal preference -> 1.0 fair share each
+    # X requests only 0.5 (below its 1.0 fair share); Y and Z each request far more
+    # than theirs, so they are the ones left holding X's unused headroom.
+    drivers = {"cap.requests": torch.tensor([0.5, 10.0, 10.0], dtype=F64)}
     layer_1 = CapacitatedTransferLayer(
         net, "cap", "link", s_max=s_max, c_arc=c_arc, preference=preference, n_passes=1
+    )
+    layer_2 = CapacitatedTransferLayer(
+        net, "cap", "link", s_max=s_max, c_arc=c_arc, preference=preference, n_passes=2
     )
     layer_5 = CapacitatedTransferLayer(
         net, "cap", "link", s_max=s_max, c_arc=c_arc, preference=preference, n_passes=5
     )
     _, f1 = layer_1.step(torch.zeros(net.n, dtype=F64), drivers, dt=1.0)
+    _, f2 = layer_2.step(torch.zeros(net.n, dtype=F64), drivers, dt=1.0)
     _, f5 = layer_5.step(torch.zeros(net.n, dtype=F64), drivers, dt=1.0)
-    total_1 = f1[2] + f1[3]
-    total_5 = f5[2] + f5[3]
-    assert total_5 >= total_1 - 1e-9
-    assert torch.allclose(total_5, torch.tensor(3.0, dtype=F64), atol=1e-6)
+    # Pass 1: naive 3-way fair share is 1.0 each; X takes only what it asked for (0.5),
+    # but that unused 0.5 is NOT yet redistributed -- Y and Z stay capped at 1.0, so
+    # 0.5 of D's 3.0 headroom is left unused (sum = 2.5, provably under-shared).
+    assert torch.allclose(f1, torch.tensor([0.5, 1.0, 1.0], dtype=F64), atol=1e-6)
+    assert torch.allclose(f1.sum(), torch.tensor(2.5, dtype=F64), atol=1e-6)
+    # Pass 2 (and every pass after): X's freed 0.5 preference share is redistributed
+    # 50:50 between Y and Z, the only two edges still actively competing, each rising
+    # from 1.0 to 1.25 -- D's headroom is now fully used (sum = 3.0, exactly).
+    assert torch.allclose(f2, torch.tensor([0.5, 1.25, 1.25], dtype=F64), atol=1e-6)
+    assert torch.allclose(f2.sum(), torch.tensor(3.0, dtype=F64), atol=1e-6)
+    assert torch.allclose(f5, f2, atol=1e-6)  # already converged by pass 2, stable after
 
 
 def test_model_steps_capacitated_layer_end_to_end():
