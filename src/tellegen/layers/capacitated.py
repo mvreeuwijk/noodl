@@ -80,6 +80,66 @@ class CapacitatedTransferLayer:
         self.c_arc = c_arc
         self.preference = torch.ones_like(c_arc) if preference is None else preference
 
+    def _clip(self, a, b):
+        """`min(a, b)` in hard mode (byte-identical to Tasks 1-2's bare
+        `torch.minimum`); in smooth mode, the softmin counterpart at temperature
+        `self.tau`: `-tau * logsumexp([-a/tau, -b/tau])`, which is smooth everywhere
+        and -> `min(a, b)` as `tau -> 0`. Used at every UPPER-bound kink site: arc
+        capacity, receiver headroom, request-vs-availability, and the final storage
+        clamp against `s_max`.
+        """
+        if self.mode == "smooth":
+            return -self.tau * torch.logsumexp(
+                torch.stack([-a / self.tau, -b / self.tau]), dim=0
+            )
+        return torch.minimum(a, b)
+
+    def _nonneg(self, x):
+        """`max(x, 0)` in hard mode (byte-identical to Tasks 1-2's bare
+        `torch.clamp(x, min=0.0)`); in smooth mode, the softplus counterpart at
+        temperature `self.tau`: `tau * softplus(x / tau)`, smooth everywhere and ->
+        `max(x, 0)` as `tau -> 0`. Used at every LOWER-bound-at-zero kink site: free
+        headroom, avail, and the realised share.
+        """
+        if self.mode == "smooth":
+            return self.tau * torch.nn.functional.softplus(x / self.tau)
+        return torch.clamp(x, min=0.0)
+
+    def _select(self, hard_cond, soft_margin, a, b):
+        """Selects `a` where oversubscribed, else `b` -- the pass loop's
+        `over_subscribed_e` branch (proportional share vs. plain tentative flow).
+
+        In hard mode this is `torch.where(hard_cond, a, b)`, with `hard_cond` the
+        EXACT SAME boolean tensor Task 2 computed (`demand_at_tgt > free_headroom +
+        1e-12`), so hard mode is byte-identical to the committed Task 2 arithmetic.
+
+        In smooth mode, `hard_cond`/`soft_margin` is a boolean `torch.where` selecting
+        between two WHOLE FORMULAS, not a `min`/`max`/`clamp` of two scalars, so it has
+        no single obvious softmin/softplus counterpart. DESIGN DECISION (for Task 4's
+        `mode="projection"`, which faces this identical boolean site): we smooth the
+        SELECTION itself, via a sigmoid-weighted blend of the two whole branches at
+        temperature `self.tau` -- `w = sigmoid(margin / tau)`, `w * a + (1 - w) * b`
+        (`margin = demand_at_tgt - free_headroom`, positive exactly when
+        oversubscribed) -- rather than leaving the branch hard and smoothing only the
+        arithmetic inside each branch. Rationale: a hard boolean select is
+        differentiable almost everywhere, but AT and near the crossing point (a node
+        moving from "headroom covers every tentative demand" to "oversubscribed") the
+        gradient through the discrete branch choice is exactly zero, even though that
+        crossing is itself a smooth function of the differentiable inputs (r, s_max,
+        c_arc, ...). That is precisely the point `mode="smooth"` exists to fix -- a
+        live gradient across a capacity boundary -- so leaving this one boolean hard
+        would defeat the mode's purpose at the one site most likely to sit exactly on
+        a boundary. Task 4 may reasonably choose the opposite for `"projection"` (leave
+        its analogous select hard, smoothing only the QP/projection arithmetic) if that
+        mode's purpose is judged to be about the constraint SURFACE rather than the
+        ROUTING decision; either is defensible, but should be a deliberate, documented
+        choice, as this one is.
+        """
+        if self.mode == "smooth":
+            w = torch.sigmoid(soft_margin / self.tau)
+            return w * a + (1 - w) * b
+        return torch.where(hard_cond, a, b)
+
     def step(self, s, drivers, dt, *, diagnostics=None):
         """One explicit step. `s` is the previous per-node storage, `dt` in seconds.
 
@@ -127,26 +187,35 @@ class CapacitatedTransferLayer:
             # Headroom already used up by flow committed in EARLIER rounds -- recomputed
             # fresh from the current `f` every round, never accumulated separately.
             committed_in = torch.zeros_like(headroom).index_add(-1, self._tgt, f)
-            free_headroom = torch.clamp(headroom - committed_in, min=0.0)
+            free_headroom = self._nonneg(headroom - committed_in)
             free_headroom_e = free_headroom.index_select(-1, self._tgt)
-            avail = torch.clamp(torch.minimum(self.c_arc - f, free_headroom_e), min=0.0)
-            tentative = torch.minimum(remaining, avail)
+            avail = self._nonneg(self._clip(self.c_arc - f, free_headroom_e))
+            tentative = self._clip(remaining, avail)
+            # `active` gates which edges compete for `pref_sum` below; this is a hard
+            # boolean threshold in EVERY mode, including smooth. Scope decision: the
+            # brief's enumerated kink sites are the `minimum`/`clamp(min=0.0)` pair and
+            # the `over_subscribed_e` `where` -- this narrower gate is left hard in all
+            # modes. It only ever zeroes a preference weight already attached to an
+            # edge whose `tentative` (now smooth) is ~0, so it contributes at most a
+            # locally-zero (never NaN/Inf) gradient contribution, not a discontinuity
+            # in `f` itself.
             active = (tentative > 0).to(self.preference.dtype)
             demand_at_tgt = torch.zeros_like(headroom).index_add(-1, self._tgt, tentative)
             pref_sum_at_tgt = torch.zeros_like(headroom).index_add(
                 -1, self._tgt, self.preference * active
             )
-            over_subscribed_e = (demand_at_tgt > free_headroom + 1e-12).index_select(
-                -1, self._tgt
-            )
+            # `hard_cond` reproduces Task 2's exact boolean (kept unused in smooth mode,
+            # computed unconditionally so hard mode's arithmetic is untouched).
+            hard_cond = (demand_at_tgt > free_headroom + 1e-12).index_select(-1, self._tgt)
+            soft_margin = (demand_at_tgt - free_headroom).index_select(-1, self._tgt)
             pref_sum_e = pref_sum_at_tgt.index_select(-1, self._tgt)
             proportional_share = (
                 free_headroom_e * self.preference / torch.clamp(pref_sum_e, min=1e-30)
             )
-            share = torch.where(
-                over_subscribed_e, torch.minimum(proportional_share, tentative), tentative
+            share = self._select(
+                hard_cond, soft_margin, self._clip(proportional_share, tentative), tentative
             )
-            share = torch.clamp(share, min=0.0)
+            share = self._nonneg(share)
             f = f + share
             remaining = remaining - share
         ds = -self.net.accumulate(f, self.kind)
@@ -159,7 +228,7 @@ class CapacitatedTransferLayer:
         # (spec 4.2b), so a source node may be drawn below zero -- that is a modelling
         # choice upstream of this layer (e.g. a closure sizing requests off available
         # storage), not something this layer silently papers over by floors here.
-        s_new = torch.clamp(s_unclamped, max=self.s_max)
+        s_new = self._clip(s_unclamped, self.s_max)
         if diagnostics is not None:
-            diagnostics["overflow"] = torch.clamp(s_unclamped - self.s_max, min=0.0) / dt
+            diagnostics["overflow"] = self._nonneg(s_unclamped - self.s_max) / dt
         return s_new, f

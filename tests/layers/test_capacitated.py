@@ -210,6 +210,91 @@ def test_step_conserves_with_n_passes_1_vs_5():
     assert torch.allclose(f5, f2, atol=1e-6)  # already converged by pass 2, stable after
 
 
+def test_smooth_mode_converges_to_hard_clip_as_tau_shrinks():
+    """Single-out-edge chain: never touches the sharing `_select` site, only the
+    `_clip`/`_nonneg` sites (avail's minimum, the tentative minimum, the final storage
+    clamp) -- so this pins those three sites' convergence to hard-clip as tau shrinks.
+
+    Once the arc's `c_arc` is exhausted (this fixture's request, 5.0, exceeds its
+    capacity, 1.5), `c_arc - f` hovers at ~0 every pass thereafter, and `_nonneg`'s
+    softplus has a built-in `tau * ln(2)` offset AT exactly zero (`softplus(0) =
+    ln(2)`, not 0) -- so each of the fixed `n_passes=5` rounds re-adds that offset as
+    a small phantom `avail`, compounding to a total error of `O(n_passes * tau)`
+    rather than `O(tau)`. This is an inherent property of re-applying a smoothed
+    clip `n_passes` times over an already-saturated arc, not a bug in `_clip`/
+    `_nonneg` individually (each converges to its hard counterpart at a fixed point,
+    just not instantaneously within one pass) -- confirmed by tracing the loop
+    pass-by-pass at tau=0.01: avail/share stays a small tau-scaled residual every
+    round instead of collapsing to exactly 0 after the first. Hence the tightest tau
+    below is 1e-4, not 1e-2 as a naive single-clip reading of the brief would use.
+    """
+    net = _chain_net()
+    s_max = torch.full((net.n,), 100.0, dtype=F64)
+    c_arc = torch.full((2,), 1.5, dtype=F64)
+    drivers = {"cap.requests": torch.tensor([5.0, 5.0], dtype=F64)}
+    hard = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="hard")
+    _, f_hard = hard.step(torch.zeros(net.n, dtype=F64), drivers, dt=1.0)
+    errors = []
+    for tau in (1.0, 0.1, 1e-4):
+        smooth = CapacitatedTransferLayer(
+            net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="smooth", tau=tau
+        )
+        _, f_smooth = smooth.step(torch.zeros(net.n, dtype=F64), drivers, dt=1.0)
+        errors.append((f_smooth - f_hard).abs().max().item())
+    assert errors[0] > errors[1] > errors[2]
+    assert errors[2] < 1e-3
+
+
+def test_smooth_mode_is_differentiable_through_requests():
+    net = _chain_net()
+    s_max = torch.full((net.n,), 100.0, dtype=F64)
+    c_arc = torch.full((2,), 1.5, dtype=F64)
+    layer = CapacitatedTransferLayer(
+        net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="smooth", tau=0.1
+    )
+    r = torch.tensor([5.0, 5.0], dtype=F64, requires_grad=True)
+    _, f = layer.step(torch.zeros(net.n, dtype=F64), {"cap.requests": r}, dt=1.0)
+    f.sum().backward()
+    assert r.grad is not None
+    assert torch.isfinite(r.grad).all()
+
+
+def test_smooth_mode_shares_scarce_receiver_headroom_by_preference():
+    """Smooth-mode variant of `test_step_shares_scarce_receiver_headroom_by_preference`,
+    covering the `_select` sharing site (the `over_subscribed_e` `torch.where`), which
+    the chain fixtures above never exercise. A small `tau` should reproduce the hard
+    2:1 split closely; the tolerance is scaled to `tau` rather than pinned to the hard
+    mode's exact bound, since the softmin/sigmoid blend never converges bit-exactly.
+    """
+    net = _diamond_net()
+    s_max = torch.tensor([100.0, 100.0, 100.0, 3.0], dtype=F64)
+    c_arc = torch.full((4,), 100.0, dtype=F64)
+    preference = torch.tensor([1.0, 1.0, 2.0, 1.0], dtype=F64)
+    tau = 0.01
+    layer = CapacitatedTransferLayer(
+        net,
+        "cap",
+        "link",
+        s_max=s_max,
+        c_arc=c_arc,
+        preference=preference,
+        mode="smooth",
+        tau=tau,
+        n_passes=5,
+    )
+    s0 = torch.zeros(net.n, dtype=F64)
+    drivers = {"cap.requests": torch.tensor([10.0, 10.0, 10.0, 10.0], dtype=F64)}
+    _, f = layer.step(s0, drivers, dt=1.0)
+    assert torch.allclose(f[2:], torch.tensor([2.0, 1.0], dtype=F64), atol=50 * tau)
+    assert torch.allclose(f[:2], torch.tensor([10.0, 10.0], dtype=F64), atol=50 * tau)
+    # Fully differentiable through the sharing site too.
+    r = drivers["cap.requests"].clone().requires_grad_(True)
+    _, f_grad = layer.step(s0, {"cap.requests": r}, dt=1.0)
+    f_grad.sum().backward()
+    assert r.grad is not None
+    assert torch.isfinite(r.grad).all()
+
+
 def test_model_steps_capacitated_layer_end_to_end():
     net = _chain_net()
     s_max = torch.full((net.n,), 100.0, dtype=F64)
