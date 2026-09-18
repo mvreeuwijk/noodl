@@ -98,7 +98,11 @@ node) — the sparse SPD system familiar from resistive-network and finite-volum
 diffusion solves, amenable to Cholesky or CG. Nonlinear `g` (turbulent orifices,
 power-law cracks, quadratic pipe friction) is solved by Newton's method with Jacobian
 `A G'(A^T φ) A^T` — the same congruence structure at every iteration, i.e. a **Schur
-complement** of the branch Jacobian onto the nodal potentials. Nodal analysis handles
+complement** of the branch Jacobian onto the nodal potentials (`solvers/newton.py`'s own
+implementation is a damped, batched iteration whose relaxation factor `omega` per instance
+switches to a full step once the residual has shrunk enough, and falls back to the damped
+step for any instance whose residual did NOT shrink under a full step — a dead-end
+square-root-law edge otherwise cycles `dp -> -dp` forever, milestone 4's M4-R22). Nodal analysis handles
 flow sources trivially (add to `s`) but a branch whose *natural* law fixes a flow or
 potential directly (an ideal pump, a fixed-flow fan, a prescribed pressure boundary)
 cannot be written as `f = g(e)`; this is handled by **Modified Nodal Analysis (MNA)**,
@@ -532,6 +536,95 @@ checks the ported IMPAQ oracle against both a four-node hand network and the rea
 `leiden_small` domain. Conservation, junction elimination against hand algebra, and
 gradients through the whole model against central differences are in
 `tests/apps/street/test_conservation.py`.
+
+## 9. Sewers and water distribution
+
+*(Written from the implementation, milestone 4: this section describes what `apps/sewer`
+and `apps/water` do and why, and their verification cases are in the repository.)*
+
+**Why the sewer's water side is CONTINUITY-first and the water-distribution side is a
+potential layer, on the same framework.** A gravity sewer runs free-surface: on the
+dendritic tree of section 1's own analysis, normal flow at every pipe is set by continuity
+alone -- the net inflow upstream of it (`cycles.particular_flow`, closed form on a tree,
+no Newton solve at all) -- and depth follows from Manning's law given that flow, not the
+other way round; a head difference does not drive the water, so a Newton potential layer
+built on head is the wrong shape for it (spec section 1). A pressurised water-distribution
+network is the opposite case, and it is exactly the framework's own: every pipe runs full,
+and head loss is a monotone function of the head difference at each pipe, pump and valve,
+so `tellegen.apps.water` is an ordinary `PotentialFlowLayer` (§1, §3 above) with
+Hazen-Williams or Darcy-Weisbach pipes, `PumpCurve` and minor-loss elements, solved by the
+same batched, damped Newton iteration as every other potential layer in this codebase.
+Section 3's own table already says why: SWMM solves the sewer's full 1-D Saint-Venant
+equations (dynamic wave routing) with surcharging and reverse flow, "a genuinely dynamic
+(not quasi-steady) network" -- exactly why surcharge, backwater and dynamic-wave routing
+are OUT of scope here, and SWMM's KINWAVE (kinematic wave) routing, which shares the
+continuity-first assumption, is the parity target for rows W1-W4 rather than SWMM's own
+dynamic-wave engine.
+
+**The manhole-level storage idealisation, and what it is not.** With `storage=True`
+(spec 3.2), each manhole gets a surface area and a level advanced by implicit Euler,
+`A_s dH/dt = sum(inflow) - Q_out(H)`, where `Q_out` is read off the SAME Manning law as the
+quasi-steady case at depth `H`. This is a lumped storage-node approximation -- "the
+manhole's level equals its own outgoing pipe's entrance depth" -- not a hydraulic profile
+along the pipe and not SWMM's dynamic wave, which carries one head per junction and a
+backwater-coupled momentum equation between them; under constant inflow the storage sweep's
+fixed point is the quasi-steady solution of section 3.1 (measured 5.7e-15 relative on flows,
+4.4e-15 on depths, row W7), which is the only property this idealisation is required to
+have. The sweep advances every manhole LEVEL-SYNCHRONOUSLY, leaves to the outfall, in the
+same order the tree's own closed-form flow solve uses: it precomputes, once, the leaf-to-
+root level order and, per level, flat gather/scatter index tensors, so the per-call sweep is
+one batched `solve_monotone` call plus one `index_add` per tree LEVEL rather than a Python
+loop over manholes -- the loop count is the tree depth, not the manhole count, satisfying
+the "no Python loop on a per-step path" constraint (spec section 8). The pipe carrying each
+manhole's outflow is found by which pipe drains INTO that manhole's own outfall, never
+assumed to be the last pipe read from the file, because the reader's pipe order is whatever
+order the `.inp` lists conduits in, not necessarily the order the tree drains in (M4-R19);
+and the headspace `Stack` buoyancy drive's `z_path` on a `headspace` edge is the pipe's
+CROWN elevation -- the mean of its two end inverts plus its own diameter -- not the mean
+invert alone, which is only the pipe's invert at its midpoint (M4-R19).
+
+**The headspace momentum balance, and the `Drive`-cannot-see-`phi` rule.** Air in the
+headspace above the flow is driven by three terms per pipe (spec 3.3): Darcy-Weisbach wall
+friction on the air itself, buoyancy from the density difference between a warm manhole
+shaft and ambient (the SAME `Stack` drive the building application's stack effect uses, one
+full-node air-density driver, `rho_air_nodes`), and drag from the moving water surface
+dragging the air along above it. That last term is written as a `Drive` -- `D = (f_i/2)
+rho_air U_s |U_s| T L / A_air` in the ABSOLUTE water-surface velocity `U_s`, not the
+physically more complete relative form `(U_s - V_air)` -- because a `Drive` is a function of
+the drivers alone and is never allowed to read the layer's own solved potential `phi`
+(§1, `drives.py`): letting the drag depend on the air's own flow would put a term into the
+Newton residual that the Jacobian `A diag(g') A^T` does not account for, silently breaking
+the solver's own convergence theory. The absolute form is therefore not a simplification of
+convenience but the one shape the framework's `Drive` protocol admits; the relative form is
+recorded as a follow-up requiring an element-side formulation (a batched monotone root on
+`R|Q|Q - (f_i/2) rho (U_s - Q/A)^2 T L/A_air = dp`) rather than a drive.
+
+**The two-film coupling, and its lagged pass.** Total sulfide in the water and H2S in the
+headspace air are two separate `TransportLayer` species, coupled by one closure,
+`H2STransfer`, computing a flux `J = K_L a V_wet (f C_S - C_G/H)` per manhole from the free-
+sulfide fraction `f`, Henry's constant `H(T)` and a two-film transfer coefficient `K_L a`,
+and writing `+J` onto the air side and `-J` onto the water side (equal in moles of S by
+construction, checked node by node, row C2). Both correlations read per-PIPE quantities --
+hydraulic radius, slope, wetted velocity, mean depth -- at each manhole's own SINGLE
+outgoing pipe (a tree guarantees exactly one), gathered once at construction into a
+per-manhole index (`out_pipe`) rather than looked up per call (M4-R4); the same gather
+underlies the Pomeroy-Parkhurst sulfide-generation reaction. The closure reads the PREVIOUS
+pass's concentrations -- the framework's ordinary lagged coupling (§5, §7 above) -- so
+`coupling="pingpong"` carries a one-pass lag on the cross-phase source terms exactly as the
+building application's heat/species coupling does, and `coupling="iterate"` removes it by
+Hensen's-onion successive substitution when the two quality layers' own `iterate_tol` is set.
+
+**Verification.** `tests/verification/test_sewer_parity.py` checks water flows, depths,
+velocities and a first-order-decay tracer against pyswmm/SWMM 5.2.4 under KINWAVE routing
+(rows W1-W4); `tests/verification/test_sewer_ventilation.py` checks the air side against
+Pescod and Price's laboratory ratios and Tyneside field range (rows A1-A3) and the H2S
+two-film transfer's Henry-equilibrium fixed point (row H3); `tests/verification/
+test_water_parity.py` checks the water-distribution application's heads, flows, pump gain,
+tank trajectory, pressure-driven demand, loop consistency, gradients and a trace-quality row
+against EPANET 2.2 through wntr (rows D1-D8, G2). `f_i` and `f_air` are CALIBRATED to a
+single source (Pescod and Price Test 8), not literature-pinned, so rows A1 and A2 are
+consistency checks against the calibration source rather than independent validation (spec
+section 10) -- the same caveat the README states for the same reason.
 
 ## Summary of flags/uncertainties
 

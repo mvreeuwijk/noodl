@@ -486,6 +486,137 @@ mixing ratio (kg/kg) converted to kg/m3 with `RHO_AIR = 1.2041`. `leiden_small` 
   loops by design -- it exists to be compared against, not to be a model path, and nothing
   else in `apps/street/` calls it.
 
+## Milestone 4 status
+
+Milestone 4 built two applications ON TOP of the core package (spec section 1): a gravity
+sewer, `tellegen.apps.sewer` (water hydraulics on a dendritic tree, a headspace air network
+driven by drag and buoyancy, water quality and H2S coupled by two-film transfer), and,
+folded in during the spec review, a pressurised water-distribution network,
+`tellegen.apps.water`, with EPANET 2.2 (via `wntr`) as its oracle. The two interfacial
+coefficients that calibrate the sewer's air side, `f_i` (drag) and `f_air` (wall friction),
+are CALIBRATED to a single laboratory source (Pescod and Price's Test 8, as tabulated by
+Edwini-Bonsu and Steffler 2004), not literature-pinned, so rows A1 and A2 below are
+consistency checks against that calibration source, not independent validation.
+
+**What it adds.**
+
+- `apps/sewer/`: `geometry.py` (exact circular geometry and the batched Manning normal-
+  depth inversion), `hydraulics.py` (`SewerHydraulics`, the closure-first tree flow, depth,
+  and the optional level-synchronous implicit-Euler storage sweep), `air.py` (`Headspace`,
+  `Drag`, air density), `quality.py` (Henry's law, the two-film flux, Pomeroy-Parkhurst
+  sulfide generation and BOD decay), `network.py` (`SewerNetwork`, `build_sewer_model`,
+  `sewer_steady`), `inp.py` (the SWMM `.inp` reader, a documented subset) and `report.py`.
+- `apps/water/`: `network.py` (`Junction`/`Reservoir`/`Tank`/`WaterPipe`/`Pump`/`Valve`,
+  `WaterNetwork`, `build_water_model`, `water_steady`), `elements.py` (`HazenWilliams`,
+  `PumpCurve`, `MinorLoss`), `tanks.py` (`TankLevels`, the tank-level and simple-control
+  closure), `demand.py` (`PressureDrivenDemand`), `inp.py` (the EPANET `.inp` reader) and
+  `report.py`. The two applications share `apps/inpfile.py`, a section-keyed tokenizer, and
+  nothing else.
+- Two small core extensions: `NodeSource` (`src/tellegen/nodesources.py`), a
+  potential-dependent nodal withdrawal added to `PotentialFlowLayer` (`node_sources=`) --
+  used by `PressureDrivenDemand` and re-exported from the package root -- and the
+  closure-carried state keys/per-step transport capacity driver the sewer app's
+  continuity-first hydraulics needs (spec section 4.6).
+- A core fix (M4-R22, `fix(solvers)`): the batched Newton solver now falls back to its
+  damped step for any instance whose residual did not shrink under a full step, rather
+  than locking its relaxation factor at 1 -- a dead-end square-root-law headspace edge
+  otherwise cycled `dp -> -dp` for the full iteration budget.
+
+**What passes, and at what tolerance.**
+
+| Row | Check | Tolerance | Measured |
+|---|---|---|---|
+| W1 | pipe flows vs pyswmm KINWAVE | 1e-9 relative | 1.370e-14 |
+| W2 | normal depths vs pyswmm KINWAVE | 1e-3 relative | 5.464e-4 (SWMM's own 51-point circular lookup table, not solver noise) |
+| W3 | velocities vs pyswmm's binary FLOW_VELOCITY | 1e-3 relative | 6.257e-4 |
+| W4 | tracer concentration vs pyswmm KINWAVE / tank-in-series closed form | 3e-5 relative (amendment A4) | 7.811e-6 |
+| W5 | Manning inversion round trip, h/D in [0.01, 0.938] | 1e-12 relative | 7.5e-14 worst |
+| W6 | surcharge refusal, naming the pipe | exact | holds |
+| W7 | storage dynamics reach the quasi-steady fixed point, 200 steps of 60 s | 1e-9 relative | 5.7e-15 (flows), 4.4e-15 (depths) |
+| C1 | air nodal residual / power identity / water continuity | 1e-11 / 1e-10 (M4-R20b) / exact | 1.352e-12 / 1.855e-11 / < 1e-15 |
+| C2 | cross-phase sulfide conservation, moles of S | 1e-12 | equal to rtol 1e-12 |
+| C3 | gradients vs Richardson-extrapolated central differences | 1e-6 (M4-R20a) | 3.17e-8 / 3.16e-9 / 1.16e-8 relative |
+| A1 | air/water velocity ratio vs Pescod and Price Table 1 (three points) | inside 20-40 % | 24.139 % / 24.995 % / 25.149 %; closed form to 1.12e-8 relative |
+| A2 | Tyneside field range, bracketed (amendment A5) | inside 105-315 m3/h | open-both-ends 1253.78 m3/h, vented (8 cm2) 0.24 m3/h; band reproduced at leak areas 0.355/1.097 m2 |
+| A3 | leak-and-fan flow balance / nodal residual / power residual (amendment A6) | 1e-12 / 1e-11 / 1e-11 | 1.234e-14 / 6.3e-15 / 8.06e-13 |
+| H1 | Henry's constant vs Sander 2023 | 0.36 +/- 0.01 at 293.15 K | 0.363854 (293.15 K), 0.403418 (298.15 K) |
+| H2 | two-film flux, analytic closed form | exact | 0.0 |
+| H3 | Henry-equilibrium fixed point (transfer-dominated) | 1e-10 | < 1e-10 |
+| S1 | Pomeroy-Parkhurst rate, closed form | exact | 0.0 |
+| G1 | sewer golden regression | 1e-10 | 0.0 |
+| D1 | `twoloop_si.inp` heads and flows vs EPANET 2.2 (wntr) | 1e-6 relative | 4.361e-7 (heads), 8.090e-8 (flows); nodal continuity 2.093e-14 against 1e-13 |
+| D2 | Net1 single period: heads, flows, pump head gain vs EPANET | 1e-6 relative | 7.059e-8 (heads), 2.868e-6 (flows, worst pipe 113, against 1e-5), 1.189e-7 (pump gain) |
+| D3 | Net1 24 h tank level with tank-level pump controls | 2e-4 m absolute | 8.181e-5 m worst of 25 reported steps (26 hydraulic sub-steps) |
+| D4 | Darcy-Weisbach pipe vs EPANET D-W (friction-factor formulae differ) | recorded band | 3.822e-2 (heads, band 3.8e-3..3.8e-1), 4.446e-1 (flows, band 4.4e-2..4.4) |
+| D5 | pressure-driven demand vs EPANET `DEMAND MODEL PDA` | 1e-5 | 3.521e-7 (heads), 2.184e-7 (delivered demands) |
+| D6 | loop consistency, head loss around every cycle-basis loop | 1e-12 | 0.0 |
+| D7 | gradients vs central differences (roughness, demands, pump h0, tank area) | 1e-6 x scale | 2.801e-6 absolute, scale 4.444e-4 |
+| D8 | TRACE water quality on `twoloop_trace.inp` (single-source smoke row) | 1e-3 | 4.873e-11 |
+| G2 | water golden regression | 1e-10 | 0.0 |
+
+The full suite passes **1176 passed, 10 skipped, 9 deselected, 1 xfailed** (coverage
+96.09 %), ruff clean.
+
+**The measured runs (18 September 2026, on this machine).**
+
+| run | measured | budget |
+|---|---|---|
+| `benchmarks/sewer_diurnal.py`: 24 h at 60 s, 8 instances, storage on | 1440 steps x 8 instances in 248.04 s | 60 s -- **FAIL**, recorded as FR-19 rather than loosened |
+| `benchmarks/water_eps.py`: Net1, 24 h extended period, 8 demand multipliers | 210 hydraulic sub-steps in 9.95 s | recorded, no budget set (spec section 7 sets one for the sewer benchmark only) |
+
+**Data facts.** SWMM's KINWAVE (kinematic wave) routing, not its dynamic-wave engine, is
+the parity target for the sewer rows -- the theory section explains why. EPANET 2.2 is
+reached through `wntr`'s `EpanetSimulator`, whose result arrays are float32 (a measured
+~4e-7 heads / ~8e-8 flows floor that the D1/D2 tolerances above are set around), and `wntr`
+itself drags in a measured ~351 MB of mandatory dependencies (scipy, pandas, numpy,
+matplotlib and friends); both `pyswmm` and `wntr` are dev-extra, test-only, and neither
+sewer nor water applications need anything beyond torch and the existing `sparse` extra to
+run.
+
+**Coefficient register (unverified defaults; spec section 11).** `f_air` (air wall
+friction, default 0.02, reported range 0.015-0.045, Edwini-Bonsu and Steffler 2006,
+paywalled); `C_d`/`A_leak` (manhole leak orifice, 0.6 / 8 cm2, generic/scenario values);
+the two-film `K_L a` form's constants 0.86 and 0.20 (form corroborated, Yongsiri et al.
+2004, paywalled); the Pomeroy-Parkhurst `M'` and `m` (vendor defaults, unverified against
+the 1977 paper); `k_BOD` (generic bulk-water value, Metcalf and Eddy); `k_gas`, the
+gas-phase H2S sink (no verified value, default 0); `pKa`'s temperature dependence
+(approximated as constant). `f_i` is calibrated, not unverified in this sense -- see the
+framing paragraph above.
+
+**What is open.**
+
+- FR-21 (important): the inflow-concentration drivers `bod_in` and `sulfide_in` (spec 4.2)
+  are accepted by the model but read by no code, so lateral BOD/sulfide loads do not yet
+  enter the water-quality layer; the sulfide chain itself is verified at unit level (rows
+  H1-H3, S1, C2), not end to end from an inflow load.
+- FR-22: row W4 checks the tank-in-series closed form against SWMM without running the
+  model's own quality layer (it builds with `quality=False`).
+- FR-19: `benchmarks/sewer_diurnal.py` takes 248.04 s against its 60 s budget -- recorded,
+  not loosened.
+- FR-18: the benchmark's 8 instances are identical copies, not the varied `f_i`/leak-area
+  ensemble the plan originally described.
+- FR-20: the outfall node is a dead end in the air graph (physically inert edge; a design
+  tidy-up, not a correctness defect).
+- The diffusive-wave sewer formulation (a surface-elevation potential layer with
+  depth-dependent conveyance, Newton-solved) and the MIXED regime (some pipes free-surface,
+  others surcharged, with transitions) are parked, not implemented -- the natural
+  generalisation if a dynamic, looped or backwater sewer case is ever needed.
+- Headspace heat and moisture layers are not modelled; headspace temperature is a driver.
+  The UWO (Western Ontario) dataset is not used. Surcharge, backwater, dynamic-wave
+  hydraulics, pumps, weirs, orifices and force mains in the sewer are out of scope; the
+  relative-velocity drag form is a recorded follow-up requiring an element-side
+  formulation (the theory section explains the `Drive`-cannot-see-`phi` constraint that
+  rules it out here).
+- In the water application: PRV, PSV, PBV and GPV valves, time-based controls and
+  `[RULES]`, variable-speed pumps, volume curves, emitters, leakage models, energy and cost
+  reports, and Chezy-Manning (SI constant unverified) are refused by name, not implemented.
+  D8's trace row is a single-source smoke test; a genuinely discriminating two-source trace
+  (EPANET's Net3-style "percent of Lake water") is a recorded follow-up.
+- The paywalled coefficient sources in the register above (Edwini-Bonsu and Steffler 2006;
+  Yongsiri et al. 2004; Pomeroy and Parkhurst 1977) have not been obtained; if supplied, the
+  plan pins the corresponding defaults and upgrades their status without any code change,
+  since every entry is already a parameter.
+
 ## Installation
 
 `pip install -e .[dev]`, or on Windows x86-64 `pip install -e .[dev,contam]`, which adds
