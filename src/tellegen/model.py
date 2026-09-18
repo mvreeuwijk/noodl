@@ -37,6 +37,7 @@ from typing import Protocol, runtime_checkable
 
 import torch
 
+from tellegen.layers.capacitated import CapacitatedTransferLayer
 from tellegen.layers.potential import PotentialFlowLayer
 from tellegen.layers.reaction import Reaction
 from tellegen.layers.transport import TransportLayer
@@ -45,7 +46,7 @@ from tellegen.topology import Network
 Tensor = torch.Tensor
 State = dict[str, Tensor]
 Drivers = dict[str, Tensor]
-_STATE_SUFFIXES = ("phi", "q", "x")
+_STATE_SUFFIXES = ("phi", "q", "x", "s")
 
 
 @runtime_checkable
@@ -114,15 +115,18 @@ class Model:
         self.layers = dict(layers)
         self.potential: dict[str, PotentialFlowLayer] = {}
         self.transport: dict[str, TransportLayer] = {}
+        self.capacitated: dict[str, CapacitatedTransferLayer] = {}
         for name, layer in self.layers.items():
             if isinstance(layer, PotentialFlowLayer):
                 self.potential[name] = layer
             elif isinstance(layer, TransportLayer):
                 self.transport[name] = layer
+            elif isinstance(layer, CapacitatedTransferLayer):
+                self.capacitated[name] = layer
             else:
                 raise TypeError(
                     f"Model: layer {name!r} is a {type(layer).__name__}, not a "
-                    f"PotentialFlowLayer or TransportLayer"
+                    f"PotentialFlowLayer, TransportLayer or CapacitatedTransferLayer"
                 )
             if layer.net is not net:
                 raise ValueError(
@@ -138,6 +142,9 @@ class Model:
             owners = [
                 pn for pn, pl in self.potential.items()
                 if all(k in pl.kinds for k in tl.flow_kinds)
+            ] + [
+                cn for cn, cl in self.capacitated.items()
+                if all(k in cl.kinds for k in tl.flow_kinds)
             ]
             # Spec section 5, "Model: driver-prescribed flows". Two potential layers both
             # providing a transport layer's kinds is still ambiguous and still refused here.
@@ -401,6 +408,22 @@ class Model:
             phi, q = layer.solve(pb, drv, sources, phi0=phi0, diagnostics=d, **solve_kwargs)
             new[f"{name}.phi"], new[f"{name}.q"] = phi, q
             diag[name] = d
+        if self.capacitated and dt is None:
+            raise ValueError(
+                "Model: a steady (dt=None) pass has no defined meaning for a "
+                "CapacitatedTransferLayer, which is inherently discrete-time"
+            )
+        for name, layer in self.capacitated.items():
+            s_prev = state.get(f"{name}.s")
+            if s_prev is None:
+                raise KeyError(
+                    f"Model: state {name + '.s'!r} is required to step capacitated "
+                    f"layer {name!r}"
+                )
+            cd: dict = {}
+            s_new, f = layer.step(s_prev, drv, dt, diagnostics=cd)
+            new[f"{name}.s"], new[f"{name}.q"] = s_new, f
+            diag[name] = cd
         for name, layer in self.transport.items():
             q_kind = self._kind_flows(name, new, drv)
             xb = self._require(drv, f"{name}.x_boundary")
