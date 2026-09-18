@@ -23,6 +23,7 @@ from tellegen.apps.street.routing import (
     routing_matrix,
     sigma_theta_munich,
 )
+from tellegen.layers.transport import TransportLayer
 from tellegen.topology import Network
 
 DT = torch.float64
@@ -278,3 +279,25 @@ def test_street_flows_resolves_kappa_by_formulation():
     assert make(exchange="schulte").kappa == KAPPA_MUNICH
     assert make(roof_wind_form="macdonald").kappa == KAPPA_MUNICH
     assert make(canyon_wind="exponential", kappa=0.38).kappa == 0.38
+
+
+def _street_layer(net, kinds) -> TransportLayer:
+    """The transport layer `build_street_model` builds, with `flow_kinds` as given."""
+    return TransportLayer(
+        net, "street", capacity=torch.tensor([40000.0, 40000.0], dtype=DT),
+        flow_kind=kinds, boundary=["atmosphere"], scheme="implicit",
+        quantity="concentration", unit="kg/m3",
+    )
+
+
+def test_street_flows_refuses_a_layer_whose_flow_kinds_are_in_another_order():
+    """FR-3: the closure writes `q` as one concatenated block in the order
+    `("route", "vent", "exchange")`, so a layer built with the same kinds in any other
+    order would read the route flows as vent flows with no error anywhere. `layer=None`
+    stays legal -- the fixtures above drive `_flows` without a Model at all."""
+    net, geometry = _flows_fixture()
+    good = StreetFlows(net, _street_layer(net, ("route", "vent", "exchange")), geometry)
+    assert good.layer.flow_kinds == ("route", "vent", "exchange")
+    swapped = _street_layer(net, ("vent", "route", "exchange"))
+    with pytest.raises(ValueError, match=r"StreetFlows.*'street'.*vent.*route.*exchange"):
+        StreetFlows(net, swapped, geometry)

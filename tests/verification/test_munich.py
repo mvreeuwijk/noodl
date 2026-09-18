@@ -391,9 +391,11 @@ def test_the_relative_pattern_is_compared_and_its_residual_recorded(capsys):
     with capsys.disabled():
         print(f"  worst residual {worst:.1%}; {inside_15} of {len(rows)} ratios "
               f"inside 15 %")
-    # Measured: worst 50.7 %, seven of nineteen inside 15 %. The bounds are wide enough
-    # to be a regression guard and tight enough that a real change trips them.
-    assert worst < 1.0
+    # Measured 0.507 on 18 September 2026 (seven of nineteen ratios inside 15 %); a
+    # regression past 0.6 is a real change in the relative pattern, not noise. The bounds
+    # are wide enough to be a regression guard and tight enough that a real change trips
+    # them.
+    assert worst < 0.6
     assert inside_15 >= 6
 
 

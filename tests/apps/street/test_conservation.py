@@ -88,6 +88,12 @@ def test_the_steady_state_has_a_zero_nodal_balance_at_every_street():
 
 
 def test_everything_emitted_leaves_through_the_atmosphere():
+    """Steady state: every kilogram emitted crosses the atmosphere boundary.
+
+    These three are conservation IDENTITIES of the advection operator, not
+    misattribution checks: a flow written on the WRONG edge still balances, so the
+    oracle for that is `test_junction_elimination_equals_the_hand_written_dense_system`.
+    """
     model, state, _ = build_street_model(from_test_network(), pblh_floor=False)
     drivers = _drivers(model)
     solved = model.steady(state, drivers)
@@ -98,6 +104,12 @@ def test_everything_emitted_leaves_through_the_atmosphere():
 
 
 def test_the_balance_closes_with_a_zero_background_too():
+    """The same balance with no incoming background, which removes the compensating inflow.
+
+    These three are conservation IDENTITIES of the advection operator, not
+    misattribution checks: a flow written on the WRONG edge still balances, so the
+    oracle for that is `test_junction_elimination_equals_the_hand_written_dense_system`.
+    """
     model, state, _ = build_street_model(from_test_network(), pblh_floor=False)
     drivers = _drivers(model, background=0.0)
     solved = model.steady(state, drivers)
@@ -307,6 +319,12 @@ def test_gradients_match_central_differences_through_the_whole_model():
 
 
 def test_a_two_street_dead_end_pair_conserves_mass_in_both_wind_directions():
+    """A three-street T with two dead ends, balanced at four wind directions.
+
+    These three are conservation IDENTITIES of the advection operator, not
+    misattribution checks: a flow written on the WRONG edge still balances, so the
+    oracle for that is `test_junction_elimination_equals_the_hand_written_dense_system`.
+    """
     sn = StreetNetwork(
         streets=[Street("r1", "a", "b", 100.0, 20.0, 20.0),
                  Street("r2", "b", "c", 120.0, 20.0, 20.0),

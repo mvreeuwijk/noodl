@@ -233,7 +233,8 @@ def test_the_oracle_s_routing_matrix_does_not_conserve_and_tellegen_s_flows_do(c
 @needs_aqdt
 def test_tellegen_matches_the_fixed_oracle_on_the_typical_leiden_small_street(capsys):
     """The parity that IS attainable: the median street agrees to machine precision, and
-    the streets that do not are the ones a mis-permuted junction feeds. The counts are
+    the count of streets that do not is consistent with the mis-permuted junctions
+    diagnosed above (the set cross-reference is a recorded follow-up). The counts are
     printed and asserted against the range measured while this plan was written."""
     data = _leiden_small()
     _model, _drivers, solved = _tellegen_leiden(data)

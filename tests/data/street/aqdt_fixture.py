@@ -145,7 +145,8 @@ def _write_json(path: Path, features: list[dict]) -> None:
 
 
 def build(root, *, year: int = 2024, aligned: bool = True,
-          kg_per_year: bool = True) -> tuple[Path, Path]:
+          kg_per_year: bool = True, reference_height_m=None,
+          osmid_override: dict[int, object] | None = None) -> tuple[Path, Path]:
     """Write the five products under `root` and return `(stage1_dir, stage2_dir)`.
 
     `aligned=True` writes the emission products in the geometry file's own order, which is
@@ -155,6 +156,14 @@ def build(root, *, year: int = 2024, aligned: bool = True,
 
     `kg_per_year=False` writes `edge_emission_rate_nox_kg_per_year` as NaN, which is what
     the real `leiden_small` file contains at every one of its 904 rows.
+
+    `reference_height_m` overrides the forcing's `reference_height_m` series; a sequence of
+    `len(TIME_HOURS)` values writes a NON-constant label, which the loader must refuse. The
+    default writes the real products' constant 30.0 m.
+
+    `osmid_override` maps a feature index to the `osmid` value written for it in BOTH the
+    geometry file and the emission key file, so that the emission key still matches. It is
+    how a test writes an osmid the real products never carry (a string, say).
     """
     from scipy.io import netcdf_file
 
@@ -165,13 +174,22 @@ def build(root, *, year: int = 2024, aligned: bool = True,
     stage2.mkdir(parents=True, exist_ok=True)
     _write_json(stage1 / "repaired_nodes.geojson",
                 [_node_feature(i, *lonlat) for i, lonlat in NODES.items()])
+    overrides = dict(osmid_override or {})
+
+    def _patch(index: int, feature: dict) -> dict:
+        if index in overrides:
+            feature["properties"]["osmid"] = overrides[index]
+        return feature
+
     _write_json(stage1 / "repaired_edges_canyon.geojson",
-                [_edge_feature(*edge) for edge in EDGES])
+                [_patch(i, _edge_feature(*edge)) for i, edge in enumerate(EDGES)])
     order = list(range(len(EDGES))) if aligned else list(SHUFFLE)
     _write_json(stage2 / "edge_emissions_normalized.geojson",
-                [_emission_feature(i) for i in order])
+                [_patch(i, _emission_feature(i)) for i in order])
 
     n_time, n_edge = len(TIME_HOURS), len(EDGES)
+    heights = ([REFERENCE_HEIGHT_M] * n_time if reference_height_m is None
+               else list(reference_height_m))
     with netcdf_file(str(stage2 / f"forcing_{year}.nc"), "w") as handle:
         handle.history = "hand-written tellegen fixture"
         handle.model_time_step_hours = "3"
@@ -182,7 +200,7 @@ def build(root, *, year: int = 2024, aligned: bool = True,
             ("wind_speed_mps", WIND_SPEED_MPS, None),
             ("wind_angle_rad", WIND_ANGLE_RAD, None),
             ("abl_height_m", ABL_HEIGHT_M, None),
-            ("reference_height_m", [REFERENCE_HEIGHT_M] * n_time, None),
+            ("reference_height_m", heights, None),
         ):
             variable = handle.createVariable(name, "d", ("time",))
             variable[:] = np.asarray(values, dtype="float64")

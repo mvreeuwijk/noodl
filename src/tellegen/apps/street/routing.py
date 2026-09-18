@@ -37,6 +37,10 @@ Ben Salem et al. 2015, "maximum fluctuation of +/-20 deg (2 sigma_theta)")."""
 
 MAX_N_THETA = 10
 
+_FLOW_KINDS = ("route", "vent", "exchange")
+"""The edge kinds `StreetFlows` writes its concatenated `q` in, and the order
+`build_street_model` must build the transport layer with. Checked at construction."""
+
 
 def sigma_theta_munich(sigma_v: Tensor, u_ref: Tensor) -> Tensor:
     """`sigma_theta = min(sigma_v / U, 10 deg)` (SRC `:3567`; Blackadar 1997, Soulhac 2009).
@@ -301,6 +305,18 @@ class StreetFlows:
                 f"StreetFlows: direction_averaging must be 'none', 'munich' or 'gauss', "
                 f"got {direction_averaging!r}"
             )
+        # `q` is written as one concatenated block, so the layer's own `flow_kinds` order
+        # IS the slot layout this closure assumes; a layer built with the kinds in any
+        # other order would take the route flows for vent flows with no error anywhere.
+        # `layer=None` stays legal: the routing tests drive `_flows` without a Model.
+        if layer is not None:
+            kinds = tuple(layer.flow_kinds)
+            if kinds != _FLOW_KINDS:
+                raise ValueError(
+                    f"StreetFlows: transport layer {getattr(layer, 'name', layer)!r} has "
+                    f"flow_kinds {kinds}, and this closure writes its 'q' in the order "
+                    f"{_FLOW_KINDS}; the two must agree exactly"
+                )
         self.net = net
         self.layer = layer
         self.geometry = geometry

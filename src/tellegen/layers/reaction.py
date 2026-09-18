@@ -134,7 +134,18 @@ class Photostationary(Reaction):
         # producing a spuriously negative disc, a NaN sqrt, and a silently unchanged
         # output.
         disc = (k * (p - q)) ** 2 + 2.0 * j * k * (p + q) + j * j
-        denominator = s + torch.sqrt(disc)
+        # disc == 0 exactly when p == q bitwise AND j == 0 -- the exactly titrated cell
+        # with no photolysis. sqrt has infinite slope there, so the raw sqrt puts NaN into
+        # the gradient w.r.t. every input (measured: [nan, nan, nan] at the point,
+        # [1, 1, 1/3] one ulp away). The guard substitutes a safe 1.0 under the sqrt on the
+        # degenerate branch and returns a hard 0 there, which is the forward value already.
+        positive = disc > 0
+        root = torch.where(
+            positive,
+            torch.sqrt(torch.where(positive, disc, torch.ones_like(disc))),
+            torch.zeros_like(disc),
+        )
+        denominator = s + root
         # denominator == 0 only when j == 0 AND p + q == 0: an empty cell with no
         # photolysis, whose answer is 0. The guard keeps that 0/0 off the autograd graph.
         safe = denominator > 0

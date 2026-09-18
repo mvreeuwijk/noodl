@@ -235,3 +235,21 @@ def test_a_present_zero_roughness_is_not_treated_as_absent(tmp_path):
     edges_path.write_text(json.dumps(collection), encoding="utf-8")
     with pytest.raises(ValueError, match=r"street '0' has z0_b 0\.0"):
         read_aqdt(stage1, stage2, year=2024, wind_height_m=30.0, trust_file_height=True)
+
+
+def test_a_rising_reference_height_series_is_refused_by_name(tmp_path):
+    """The series `[10, 10, 10, 30]` has its MINIMUM first, so a check that compares the
+    first element with the minimum passes it and the loader silently keeps 10 m for a
+    series that ends at 30 m. `max != min` is the check that catches it."""
+    stage1, stage2 = build(tmp_path, reference_height_m=[10.0, 10.0, 10.0, 30.0])
+    with pytest.raises(ValueError, match=r"reference_height_m is not constant.*10\.0.*30\.0"):
+        read_aqdt(stage1, stage2, year=2024, wind_height_m=10.0, trust_file_height=True)
+
+
+def test_a_non_integer_osmid_is_refused_naming_the_feature(tmp_path):
+    """Both Leiden domains carry integer osmids at every feature, so a string is an
+    unrecognised product, not a value to stand in for with -1: writing -1 would put an
+    osmid nothing can be traced back to into the report and the parity diagnostics."""
+    stage1, stage2 = build(tmp_path, osmid_override={1: "900002"})
+    with pytest.raises(ValueError, match=r"feature 1 of .*has osmid '900002'"):
+        read_aqdt(stage1, stage2, year=2024, wind_height_m=30.0, trust_file_height=True)

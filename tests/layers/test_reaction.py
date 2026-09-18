@@ -196,3 +196,24 @@ def test_photostationary_gradients_are_finite_at_the_near_titration_kink():
     gx, gj = torch.autograd.grad(y.sum(), (x, j))
     assert torch.isfinite(gx).all()
     assert torch.isfinite(gj).all()
+
+
+def test_photostationary_gradients_are_finite_at_the_exactly_degenerate_point():
+    """`P == Q` BITWISE with `J == 0` makes the discriminant exactly 0.0, where `sqrt` has
+    infinite slope: the unguarded form returns NaN for every gradient AT the point while
+    reading perfectly one ulp away, which is the worst kind of hole to leave in a graph.
+
+    The masses are chosen so the molar values coincide exactly -- `x_NO = c M_NO` and
+    `x_O3 = c M_O3` with the same `c`, so `c_NO == c_O3` bit for bit after the layer's own
+    division. The forward answer there is the titration limit `min(P, Q) = c`.
+    """
+    c = 1.0e-8
+    x = _state(c * MOLAR_MASS["no"], 0.0, c * MOLAR_MASS["o3"])
+    assert float(x[0, 0]) / MOLAR_MASS["no"] == float(x[0, 2]) / MOLAR_MASS["o3"]
+    x = x.requires_grad_(True)
+    j = torch.zeros(1, dtype=DT, requires_grad=True)
+    y = Photostationary(0, 1, 2).apply(x, None, {"J_NO2": j})
+    assert abs(float(y[0, 1].detach()) / (c * MOLAR_MASS["no2"]) - 1.0) < 1e-12
+    gx, gj = torch.autograd.grad(y.sum(), (x, j))
+    assert torch.isfinite(gx).all()
+    assert torch.isfinite(gj).all()

@@ -439,6 +439,9 @@ def solve_steady_state(
     rhs[-1] = boundary_layer.background_concentration
     try:
         solution = np.linalg.solve(matrix, rhs)
+    # Kept verbatim from the prototype (it is the oracle); if this ever fires a parity
+    # number silently becomes a least-squares answer -- see the diagnosis tests in
+    # tests/verification/test_street_parity.py.
     except np.linalg.LinAlgError:
         solution, *_ = np.linalg.lstsq(matrix, rhs, rcond=None)
     n_roads = len(network.roads.s)

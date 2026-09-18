@@ -11,7 +11,10 @@ disagreement is named in the docstring -- see `.superpowers/munich-formulas.md` 
 no `grad_fn` at all), so all four are wrapped below in `torch.autograd.Function`s carrying
 the standard derivative identities. Nothing outside those wrappers may call the raw
 kernels: a gradient through one is lost silently, and `solve_monotone` -- which takes
-`torch.autograd.grad` of its residual inside its own forward -- fails outright.
+`torch.autograd.grad` of its residual inside its own forward -- fails outright. That
+applies to the wrappers' own `backward` methods too: each calls the WRAPPED `bessel_*`
+below, so the derivative expression is itself differentiable and the second derivative is
+real rather than a silent zero.
 """
 
 from __future__ import annotations
@@ -68,7 +71,7 @@ class _BesselJ0(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad):
         (x,) = ctx.saved_tensors
-        return -grad * torch.special.bessel_j1(x)
+        return -grad * bessel_j1(x)
 
 
 class _BesselY0(torch.autograd.Function):
@@ -80,7 +83,7 @@ class _BesselY0(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad):
         (x,) = ctx.saved_tensors
-        return -grad * torch.special.bessel_y1(x)
+        return -grad * bessel_y1(x)
 
 
 class _BesselJ1(torch.autograd.Function):
@@ -92,7 +95,7 @@ class _BesselJ1(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad):
         (x,) = ctx.saved_tensors
-        return grad * (torch.special.bessel_j0(x) - torch.special.bessel_j1(x) / x)
+        return grad * (bessel_j0(x) - bessel_j1(x) / x)
 
 
 class _BesselY1(torch.autograd.Function):
@@ -104,7 +107,7 @@ class _BesselY1(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad):
         (x,) = ctx.saved_tensors
-        return grad * (torch.special.bessel_y0(x) - torch.special.bessel_y1(x) / x)
+        return grad * (bessel_y0(x) - bessel_y1(x) / x)
 
 
 def bessel_j0(x: Tensor) -> Tensor:
@@ -168,6 +171,24 @@ def soulhac_shape(ratio: Tensor) -> Tensor:
     lo = torch.full_like(ratio, C_BRACKET_LO)
     hi = torch.full_like(ratio, C_BRACKET_HI)
     return solve_monotone(soulhac_residual, lo, hi, ratio, tol=1e-14, max_iter=200)
+
+
+def _guarded_sqrt(argument: Tensor) -> Tensor:
+    """`sqrt(argument)`, with the exactly-zero point kept off the autograd graph.
+
+    Every term of MUNICH's unstable `sigma_w`/`sigma_v` argument is proportional to `u*`,
+    so the argument is EXACTLY zero at a calm step (`u_star == 0`), where `sqrt` has
+    infinite slope and hands back a NaN gradient. The safe input goes under the square root
+    on BOTH branches; the degenerate branch returns a hard zero, which is the forward value
+    there. The argument itself is formed by the caller, unchanged, so no forward value
+    moves by so much as an ulp.
+    """
+    positive = argument > 0
+    return torch.where(
+        positive,
+        torch.sqrt(torch.where(positive, argument, torch.ones_like(argument))),
+        torch.zeros_like(argument),
+    )
 
 
 def _bessel_roof_factor(c: Tensor) -> Tensor:
@@ -234,7 +255,7 @@ class BoundaryLayer:
         sigma_wc = (
             math.sqrt(0.4) * w_star * 2.1 * ratio ** (1.0 / 3.0) * (1.0 - 0.8 * ratio)
         )
-        unstable = torch.sqrt(sigma_wc * sigma_wc + neutral * neutral)
+        unstable = _guarded_sqrt(sigma_wc * sigma_wc + neutral * neutral)
         return torch.where(is_unstable, unstable, torch.where(lmo < pblh, stable, neutral))
 
     def sigma_v(self, *, lmo: Tensor | None = None, stability: str = "impaq") -> Tensor:
@@ -268,7 +289,7 @@ class BoundaryLayer:
         is_unstable = lmo < 0
         safe_lmo = torch.where(is_unstable, lmo.abs(), torch.ones_like(lmo))
         w_star = u_star * (pblh / (self.kappa * safe_lmo)) ** (1.0 / 3.0)
-        unstable = torch.sqrt(0.3 * w_star * w_star + neutral * neutral)
+        unstable = _guarded_sqrt(0.3 * w_star * w_star + neutral * neutral)
         per_level = torch.where(
             is_unstable, unstable, torch.where(lmo < pblh, stable, neutral)
         )
@@ -439,6 +460,10 @@ def canyon_velocity(
             [ 2 sqrt2/c (1 - beta)(1 - c^2/3 + c^4/45)
               + beta (2 alpha - 3)/alpha + (W/di - 2)(alpha - 1)/alpha ]
 
+    The Soulhac form REFUSES `z0_b >= di`, which `soulhac_shape`'s own `z0_b/di < 1.6`
+    bound lets through: `alpha` is zero at ratio 1 and negative above it, and the answer
+    comes back NaN rather than wrong-looking.
+
     `form="exponential"` (needs `u_h`) is K22 Eq. (B14), p. 7388 -- SINGLE regime, `2/a_r`
     prefactor, integrated from the street roughness `z0_s`:
 
@@ -467,6 +492,20 @@ def canyon_velocity(
         u_star = torch.as_tensor(u_star, dtype=torch.float64)
         z0_b = torch.as_tensor(z0_b, dtype=torch.float64)
         di = torch.minimum(W / 2.0, H)
+        # `soulhac_shape` refuses z0_b/di >= 1.6, which is NOT enough here: `alpha` is
+        # ln(di/z0_b), exactly 0 at ratio 1 and negative on (1, 1.6), so the shape function
+        # divides by zero or by a negative there and the answer comes back NaN with no
+        # error anywhere. Refused by name rather than clamped.
+        wide, rough, half = torch.broadcast_tensors(W, z0_b, di)
+        if bool((rough >= half).any()):
+            bad = torch.nonzero((rough >= half).reshape(-1)).flatten().tolist()
+            raise ValueError(
+                f"canyon_velocity: form='soulhac' needs the in-canyon roughness z0_b "
+                f"strictly below di = min(W/2, H), because alpha = ln(di/z0_b) divides "
+                f"the shape function; at flat index/indices {bad} the widths are "
+                f"{[float(v) for v in wide.reshape(-1)[bad]]} m and the roughnesses are "
+                f"{[float(v) for v in rough.reshape(-1)[bad]]} m"
+            )
         c = soulhac_shape(z0_b / di)
         alpha = torch.log(di / z0_b)
         beta = torch.exp(c / math.sqrt(2.0) * (1.0 - H / di))

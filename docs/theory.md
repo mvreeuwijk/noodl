@@ -433,9 +433,13 @@ or momentum density as in section 7's heat layer), the routed inter-street terms
 x_up(r)` playing the advective role, and the roof exchange `u_d (L W)(x_b - x_i)` playing
 the same role a conduction edge plays for heat. So the street network is not a third
 physics either: it is a third `TransportLayer`, over a graph whose edges are `route`
-(street-to-street, through an eliminated junction), `vent` (a street's own flux leaving or
-entering at a junction end, before routing) and `exchange` (roof exchange with the
-atmosphere boundary node), with `carrier = 1`.
+(street-to-street, through an eliminated junction), `vent` (ONLY the junction's closure
+share -- the `to_atmosphere`/`from_atmosphere` imbalance `node_closure` computes for that
+junction end; a street's own flux rides the `route` edges) and `exchange` (roof exchange
+with the atmosphere boundary node), with `carrier = 1`. The `exchange` pair is written as
+two ADVECTIVE edges rather than as the framework's conduction kind because a conductance is
+fixed at construction, whereas `u_d` varies with the forcing at every step; the two agree
+to 1.2e-16, pinned by `test_the_exchange_edge_pair_is_exactly_the_conduction_term`.
 
 **Why the intersections are ELIMINATED rather than modelled.** A junction with its own
 storage would need a potential (a pressure-like quantity) to drive flow between the streets
@@ -477,6 +481,34 @@ sigma_w/(sqrt(2) pi)`, S11 Eq. (5), K18 Eq. (3), K22 Eq. (B10), `StreetNetworkTr
 613). Both pairs are selectable independently (`canyon_wind=`, `exchange=`) because the two
 source codebases do not always pair them the same way, and the parity tests exercise both
 pairings.
+
+**The Soulhac form, written out.** With `di = min(W/2, H)` and the in-canyon roughness
+`z0_b`, the shape parameter `c` is the root of
+
+```
+0.5 (z0_b/di) c = exp((pi/2) Y1(c)/J1(c) - gamma_E)
+```
+
+(`soulhac_residual`, solved by `solve_monotone` on `[1e-4, 3]` rather than by MUNICH's
+0.01-wide brute-force grid), and the roof-level wind that the in-canyon integral is written
+on is
+
+```
+u_h = u* sqrt(pi/(sqrt(2) kappa^2 c) [Y0(c) - J0(c) Y1(c)/J1(c)])
+```
+
+The four Bessel functions are the reason `apps/street/canyon.py` wraps
+`torch.special.bessel_j0/j1/y0/y1` in `torch.autograd.Function`s: the torch kernels carry
+no `grad_fn` at all, and `solve_monotone` differentiates its own residual.
+
+**MUNICH's direction averaging.** The wind direction is not a single number: MUNICH spreads
+it with `sigma_theta = min(sigma_v/U, 10 degrees)` and takes `n_theta = floor(degrees)`
+samples, clamped to `[1, 10]`, uniformly on `+/- 2 sigma_theta` with UNNORMALISED weights
+(`StreetNetworkTransport.cxx:3567`, `:3568`, `:3562-3616`; `sigma_theta_munich`,
+`n_theta_munich`, `direction_offsets`). The canyon velocities are computed ONCE from the
+MEAN direction and are NOT recomputed per sample -- only the in/out classification and the
+angular ordering at each junction change from sample to sample -- which is what makes the
+averaged flux matrix comparable with MUNICH's at all.
 
 **The non-crossing routing as the north-west-corner rule.** MUNICH's `ComputeAlpha` walks a
 junction's inflows counter-clockwise and its outflows clockwise, greedily filling each

@@ -13,8 +13,9 @@ TWO INPUT AMBIGUITIES, both handled explicitly rather than inherited (spec secti
 * **Wind height.** `reference_height_m` reads 30.0 in the file, but the wind is ERA5's 10 m
   `u10`/`v10` with no extrapolation. The height is therefore an explicit ARGUMENT,
   defaulting to the physical truth of 10.0 m, and a file that disagrees raises unless
-  `trust_file_height=True` says to believe it (which the IMPAQ comparison does, because the
-  prototype uses 30 m).
+  `trust_file_height=True` accepts the disagreement with the file's `reference_height_m`
+  label and proceeds with `wind_height_m` (the label itself is recorded in `notes`; the
+  IMPAQ comparison proceeds with 30 m, because the prototype uses 30 m).
 """
 
 from __future__ import annotations
@@ -128,6 +129,11 @@ def read_aqdt(
     than their own. The verification is what turns that into an error instead of a
     plausible-looking wrong answer.
 
+    `wind_height_m` is the height the forcing wind is taken to be valid at, and
+    `trust_file_height=True` accepts a disagreement with the file's `reference_height_m`
+    label and proceeds with `wind_height_m` anyway; the label itself is always recorded in
+    `notes["wind_height"]`, whichever height the load used.
+
     `times` selects forcing steps (a slice or a sequence of indices); the default reads all
     of them, which is 2928 for a 2024 domain.
     """
@@ -190,7 +196,14 @@ def read_aqdt(
             z0_b=float(_first(properties, ("roughness_m",), z0_b)),
         ))
         value = properties.get("osmid")
-        osmid.append(int(value) if isinstance(value, int) else -1)
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(
+                f"read_aqdt: feature {index} of "
+                f"{stage1 / 'repaired_edges_canyon.geojson'} has osmid {value!r}, which "
+                f"is not an integer; both Leiden domains carry integer osmids everywhere, "
+                f"so this is an unrecognised product rather than a value to stand in for"
+            )
+        osmid.append(int(value))
     net = StreetNetwork(streets=streets, x=x, y=y)
 
     forcing_path = stage2 / f"forcing_{year}.nc"
@@ -203,7 +216,7 @@ def read_aqdt(
         background = _column(handle, "background_concentration", where)
         file_height = _column(handle, "reference_height_m", where)
     reference_height = float(file_height.reshape(-1)[0])
-    if float(file_height.min()) != reference_height:
+    if float(file_height.max()) != float(file_height.min()):
         raise ValueError(
             f"read_aqdt: reference_height_m is not constant in {where} (it runs from "
             f"{float(file_height.min())} to {float(file_height.max())} m); this loader "
@@ -214,9 +227,10 @@ def read_aqdt(
             f"read_aqdt: {where} labels its wind as valid at {reference_height} m, and "
             f"wind_height_m is {wind_height_m} m. On the AQ_DT products the label is "
             f"metadata and the wind is ERA5's 10 m u10/v10 with no extrapolation, so the "
-            f"label is wrong; pass wind_height_m={reference_height} with "
-            f"trust_file_height=True to use the file's own height (which is what the "
-            f"IMPAQ comparison does), or wind_height_m=10.0 to use the physical one"
+            f"label is wrong; pass trust_file_height=True to proceed with the height "
+            f"you gave; the file's label is recorded in `notes`. The IMPAQ comparison "
+            f"proceeds with wind_height_m={reference_height} that way, because the "
+            f"prototype uses the file's height"
         )
     if times is not None:
         selector = (torch.arange(len(time_hours))[times] if isinstance(times, slice)

@@ -411,17 +411,15 @@ non-negative directed routing whose combinatorics have to stay differentiable.
 | Junction elimination against a hand-written dense linear system | 1e-12 | 2.1e-16 |
 | `exchange` edge pair against `TransportLayer`'s conduction term | 1e-12 | 1.2e-16 |
 | Gradients through the whole model against central differences | 1e-6 | 4e-10 to 1.3e-8 |
-| IMPAQ parity 1, four-node network, `fix_a=True` on both sides | 1e-9 | 4.2e-16 |
+| IMPAQ parity 1, four-node network, tellegen against the port at `fix_a=True`, `fix_b=True` | 1e-9 | 4.2e-16 |
 | The thirteen MUNICH formula pairs | the precision each source publishes | hold |
 | MUNICH linearity in wind speed (210/240 degrees, all streets) | < 1e-9 | exactly 2 |
 | MUNICH 270-degree canyon-wind-floor fingerprints (street 11, street 9) | against the paper's 1.99451 / 4.00 | 4.5e-4, 3.2e-3 |
 | M3-R8 Photostationary chemistry on the synthetic 12-street network | NOx/Ox conservation < 1e-12, PSS < 1e-10 | 9.65e-20, 7.38e-17, 6.80e-16 |
 | `leiden_small` parity, tellegen against the ported IMPAQ oracle, median street at three sampled steps | asserted per-street `1e-9` (median only, since a routing defect below leaves a worst-case tail) | 3.6e-16, 3.2e-11, 1.9e-11 |
 
-The full suite passes **925 passed, 10 skipped, 9 deselected, 1 xfailed** (coverage
-96.35 %), measured with this task's files (Task 10's IMPAQ `leiden_small` parity tests
-landed at commit `00e951f` during this task's run; this task's own files remain
-uncommitted at measurement time).
+The full suite passes **934 passed, 10 skipped, 9 deselected, 1 xfailed** (coverage
+96.65 %).
 
 **THE ISSUE-C RETRACTION.** The prototype's `u_d = sigma_w/(sqrt(2) pi)` is CORRECT, and is
 what SIRANE, MUNICH and all three papers use; `sigma_w/sqrt(2 pi)` appears in no source.
@@ -467,7 +465,8 @@ emission rows, and the `edge_index` alignment misplaces 515 of those 904 rows, s
 loader aligns by the `(osmid, u, v)` emission key instead and refuses `edge_index` on a
 mismatch. `edge_emission_rate_nox_kg_per_year` is entirely NaN and is refused by name.
 The wind is ERA5 10 m labelled 30 m in the file; the loader defaults to 10 m and refuses
-the file's own label unless `trust_file_height=True`. The background field is a CAMS
+a file whose label disagrees unless `trust_file_height=True` accepts the disagreement (the
+label is recorded in `notes`). The background field is a CAMS
 mixing ratio (kg/kg) converted to kg/m3 with `RHO_AIR = 1.2041`. `leiden_small` has 162
 `network_transport` streets and 230 junctions.
 
@@ -493,6 +492,10 @@ mixing ratio (kg/kg) converted to kg/m3 with `RHO_AIR = 1.2041`. `leiden_small` 
 NIST's `contamxpy` (it bundles the ContamX 3.4.1.7 engine) and so enables the ContamX parity
 tests in `tests/verification/test_contam_parity.py`; `-m external` is not needed, they run
 when the package imports and skip themselves otherwise, including on every non-Windows CI.
+`pip install -e .[street]` adds SciPy for the street application, which is what gives
+`read_aqdt` and `write_network_concentration` their NetCDF reader and `apps/street/impaq.py`
+its `scipy.optimize`/`scipy.special`; `.[sparse]` adds the same SciPy for the sparse-direct
+linear solver.
 
 ## Quick start
 

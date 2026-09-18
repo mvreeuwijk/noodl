@@ -297,3 +297,78 @@ def test_unknown_form_names_the_offender():
         canyon_velocity(*args, torch.tensor([0.0], dtype=DT), form="soulhac")
     with pytest.raises(ValueError, match=r"canyon_velocity.*form='exponential'.*u_h"):
         canyon_velocity(*args, torch.tensor([0.0], dtype=DT), form="exponential")
+
+
+def test_the_bessel_second_derivative_is_real_rather_than_a_silent_zero():
+    """The four wrappers' `backward`s call the WRAPPED `bessel_*`, so the first derivative
+    is itself differentiable. Against the identity `J0'' = -J1' = -(J0 - J1/x)` at x = 1.5,
+    with scipy as the reference for J0 and J1 themselves."""
+    from scipy.special import jv
+
+    x = torch.tensor([1.5], dtype=DT, requires_grad=True)
+    (first,) = torch.autograd.grad(bessel_j0(x).sum(), x, create_graph=True)
+    (second,) = torch.autograd.grad(first.sum(), x)
+    want = -(jv(0, 1.5) - jv(1, 1.5) / 1.5)
+    assert abs(float(second) - want) < 1e-8
+    assert abs(float(first.detach()) + jv(1, 1.5)) < 1e-8
+
+
+def test_the_munich_sigmas_are_finite_and_differentiable_at_a_calm_step():
+    """`u_star == 0` (a calm forcing step) makes the unstable branch's `sigma_wc^2 +
+    neutral^2` EXACTLY zero, where `sqrt` has infinite slope and hands back a NaN gradient
+    through both `sigma_w` and `sigma_v`. The guarded form returns 0 with a finite slope."""
+    u_star = torch.zeros(1, dtype=DT, requires_grad=True)
+    bl = BoundaryLayer(u_star=u_star, h_abl=torch.tensor([500.0], dtype=DT),
+                       z_ref=torch.tensor([30.0], dtype=DT),
+                       d=torch.tensor([4.6], dtype=DT), z0=torch.tensor([0.69], dtype=DT),
+                       kappa=KAPPA_MUNICH)
+    lmo = torch.tensor([-50.0], dtype=DT)
+    for value in (bl.sigma_w(torch.tensor([6.9], dtype=DT), lmo=lmo, stability="munich"),
+                  bl.sigma_v(lmo=lmo, stability="munich")):
+        assert torch.isfinite(value).all() and float(value.detach()) == 0.0
+        (grad,) = torch.autograd.grad(value.sum(), u_star, retain_graph=True)
+        assert torch.isfinite(grad).all()
+
+
+def test_sigma_v_impaq_form_and_the_three_munich_branches():
+    """Mirrors the `sigma_w` three-branch test. `ComputeSigmaV` averages over ten levels
+    `z/PBLH = j/9`, j = 0..9, with `neutral_j = 2 u* (1 - 0.8 z_j)`,
+    `stable_j = 2 u* (1 - 0.5 z_j)^0.75` and
+    `unstable_j = sqrt(0.3 w*^2 + neutral_j^2)`, `w* = u* (PBLH/(kappa |L|))^(1/3)`.
+    At u* = 0.3, PBLH = 500, kappa = 0.41: mean(z_j) = 0.5 so the neutral mean is
+    0.6 (1 - 0.4) = 0.36 exactly; at L = +100 (< PBLH, so stable) the mean is 0.481463889;
+    at L = -50, w* = 0.87001479 and the mean is 0.609998279."""
+    bl = BoundaryLayer(u_star=torch.tensor([0.3], dtype=DT),
+                       h_abl=torch.tensor([500.0], dtype=DT),
+                       z_ref=torch.tensor([30.0], dtype=DT),
+                       d=torch.tensor([4.6], dtype=DT), z0=torch.tensor([0.69], dtype=DT),
+                       kappa=KAPPA_MUNICH)
+    neutral = bl.sigma_v(lmo=torch.tensor([1e6], dtype=DT), stability="munich")
+    torch.testing.assert_close(neutral, torch.tensor([0.36], dtype=DT),
+                               rtol=1e-13, atol=0)
+    torch.testing.assert_close(neutral, bl.sigma_v(), rtol=1e-14, atol=0)
+    stable = bl.sigma_v(lmo=torch.tensor([100.0], dtype=DT), stability="munich")
+    torch.testing.assert_close(stable, torch.tensor([0.4814638890964201], dtype=DT),
+                               rtol=1e-13, atol=0)
+    unstable = bl.sigma_v(lmo=torch.tensor([-50.0], dtype=DT), stability="munich")
+    torch.testing.assert_close(unstable, torch.tensor([0.6099982787520067], dtype=DT),
+                               rtol=1e-12, atol=0)
+    with pytest.raises(ValueError, match=r"sigma_v.*'impaq' or 'munich'.*'stable'"):
+        bl.sigma_v(stability="stable")
+    with pytest.raises(ValueError, match=r"sigma_v.*stability='munich'.*lmo"):
+        bl.sigma_v(stability="munich")
+
+
+def test_soulhac_canyon_velocity_refuses_a_roughness_at_or_above_the_half_width():
+    """`soulhac_shape` only refuses `z0_b/di >= 1.6`, but `alpha = ln(di/z0_b)` is zero at
+    ratio 1 and negative on (1, 1.6), so `canyon_velocity` returned a silent NaN there.
+    W = 0.3 m with z0_b = 0.15 m is exactly ratio 1; W = 0.32 m is just below it."""
+    u_star = torch.tensor([0.4], dtype=DT)
+    phi = torch.tensor([0.0], dtype=DT)
+    height = torch.tensor([10.0], dtype=DT)
+    with pytest.raises(ValueError, match=r"canyon_velocity.*z0_b.*min\(W/2, H\).*0\.15"):
+        canyon_velocity(torch.tensor([0.3], dtype=DT), height, phi, u_star=u_star,
+                        z0_b=0.15)
+    just_below = canyon_velocity(torch.tensor([0.32], dtype=DT), height, phi,
+                                 u_star=u_star, z0_b=0.15)
+    assert torch.isfinite(just_below).all()

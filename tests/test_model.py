@@ -689,3 +689,20 @@ def test_model_raises_when_a_layer_has_both_a_potential_owner_and_a_flow_driver(
     drivers[f"{name}.q"] = torch.zeros(b, dtype=torch.float64)
     with pytest.raises(ValueError, match=rf"{name}.*{owner}.*{name}\.q"):
         model.steady(state, drivers)
+
+
+class _WritesSpeciesQ:
+    def __call__(self, state, drivers):
+        return {"species.q": torch.zeros(3, dtype=F64)}
+
+
+def test_a_closure_may_not_write_the_flow_driver_of_a_layer_a_potential_layer_owns():
+    """The `_apply_closures` carve-out has three conjuncts, and the third -- that NO
+    potential layer owns the transport layer's kinds -- is what keeps a closure from
+    quietly overwriting flows the solve produced. "air" owns "species" here, so
+    `"species.q"` is refused as a state key rather than accepted as a driver, and the
+    layer goes on seeing the solved flows."""
+    _net_, model, state, drivers, _el, _layer = _build(closures=[_WritesSpeciesQ()])
+    assert model.flow_layer_of["species"] == "air"
+    with pytest.raises(ValueError, match=r"species\.q.*state key"):
+        model.steady(state, drivers)
