@@ -119,6 +119,43 @@ def _natural_ventilation_case() -> dict:
     return {key: result[key] for key in ("T_A", "T_B", "door_kg_s")}
 
 
+def _impaq_test_network_case() -> dict:
+    """The IMPAQ prototype's own answer on `build_test_network`, so the port's fidelity
+    keeps being checked where the AQ_DT repository is not installed."""
+    import math
+
+    from tellegen.apps.street.impaq import (
+        build_test_network,
+        canyon_velocity,
+        compute_boundary_layer,
+        solve_steady_state,
+    )
+
+    network = build_test_network()
+    layer = compute_boundary_layer(network, 1e-4, 2.0, 0.25 * math.pi)
+    network.roads.canyon_velocity_mps = canyon_velocity(
+        network.roads, layer.friction_velocity_mps, layer.wind_angle_rad
+    )
+    return {
+        "friction_velocity_mps": float(layer.friction_velocity_mps),
+        "canyon_velocity_mps": [float(v) for v in network.roads.canyon_velocity_mps],
+        "prototype": [float(v) for v in solve_steady_state(network, layer)],
+        "fix_ab": [
+            float(v) for v in solve_steady_state(network, layer, fix_a=True, fix_b=True)
+        ],
+    }
+
+
+def _munich_idealised_case() -> dict:
+    """The model's own 12x6 answer on the published idealised case, so that a change in
+    the routing, the direction averaging or the canyon wind shows up as a diff."""
+    from tests.verification.test_munich import _fixture, _run
+
+    out, _names = _run(_fixture())
+    return {panel: {street: float(value) for street, value in row.items()}
+            for panel, row in out.items()}
+
+
 def main() -> None:
     data = {
         "series": _series_case(),
@@ -130,6 +167,10 @@ def main() -> None:
     print("wrote tests/golden/contam_airflow.json")
     save_golden("natural_ventilation", _natural_ventilation_case())
     print("wrote tests/golden/natural_ventilation.json")
+    save_golden("impaq_test_network", _impaq_test_network_case())
+    print("wrote tests/golden/impaq_test_network.json")
+    save_golden("munich_idealised", _munich_idealised_case())
+    print("wrote tests/golden/munich_idealised.json")
 
 
 if __name__ == "__main__":
