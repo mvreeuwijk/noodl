@@ -15,11 +15,21 @@ solved ``q``), the air layer sees THIS pass's water state, not the previous one'
 run before every potential solve inside one `Model._pass`. That is the whole reason the
 water side is continuity-first rather than a Newton potential layer.
 
-Loops. The construction builds the pipe index, each manhole's outgoing pipe and the
-leaf-to-root LEVEL order once, and caches them. Per call there is no Python loop over pipes
-or manholes; the storage sweep loops over tree LEVELS only, whose count is the tree DEPTH
-(3 on the committed fixture), and that is what the spec's "no Python loop on a per-step
-path" permits.
+Loops. The construction builds the pipe index, each manhole's outgoing pipe, the
+leaf-to-root LEVEL order, and, per level, the FLAT index tensors the storage sweep gathers
+and scatters with (the level's own manhole positions, and a `(source, target-slot)` pair
+tensor for every upstream contribution into that level) -- once, exactly as
+`cycles._tree_solve` precomputes its own per-level index tensors. Per call there is NO
+Python loop over pipes or manholes anywhere, including inside the storage sweep: the sweep
+loops over tree LEVELS only (one gather plus one `index_add` per level), whose count is the
+tree DEPTH (3 on the committed fixture), and that is what the spec's "no Python loop on a
+per-step path" permits.
+
+The storage sweep's implicit-Euler residual is evaluated at `h = 0` exactly for a dry leaf
+manhole (zero lateral inflow, zero initial state), and `solve_monotone`'s backward
+differentiates that residual with respect to the pipe diameter, roughness and slope. This is
+safe only because `geometry.hydraulic_radius`'s `** (2/3)` carries Task 5's M4-R15 guard at
+`h = 0`; this module relies on that guard and does not re-implement it.
 """
 
 from __future__ import annotations
@@ -125,6 +135,7 @@ class SewerHydraulics:
                 "no ground elevation given, so the manhole shafts contribute no headspace "
                 "volume; the air quality capacity is the conduit headspace alone"
             )
+        self.node_names = list(net.nodes)
         # Leaf-to-root LEVEL order, one Python loop HERE, none per call.
         self.levels = _levels(pipes, manholes)
         self.upstream: dict[int, list[int]] = {}
@@ -132,6 +143,26 @@ class SewerHydraulics:
         for p in pipes:
             if p.v in position:
                 self.upstream.setdefault(position[p.v], []).append(position[p.u])
+        # Per level, the FLAT index tensors the storage sweep gathers/scatters with, built
+        # ONCE here: `level_idx` is that level's own manhole positions; `level_src`/
+        # `level_tgt` is a `(source manhole position, target slot WITHIN this level)` pair
+        # for every upstream contribution into this level, so the per-call sweep collapses
+        # each level's upstream-inflow assembly to one `index_select` gather plus one
+        # `index_add` scatter -- no Python loop over manholes at call time (mirrors
+        # `cycles._tree_solve`'s own per-level index tensors).
+        self.level_idx: list[Tensor] = []
+        self.level_src: list[Tensor] = []
+        self.level_tgt: list[Tensor] = []
+        for level in self.levels:
+            self.level_idx.append(torch.tensor(level, dtype=torch.long))
+            src: list[int] = []
+            tgt: list[int] = []
+            for slot, j in enumerate(level):
+                for u in self.upstream.get(j, ()):
+                    src.append(u)
+                    tgt.append(slot)
+            self.level_src.append(torch.tensor(src, dtype=torch.long))
+            self.level_tgt.append(torch.tensor(tgt, dtype=torch.long))
 
     # ------------------------------------------------------------------ call
     def __call__(self, state: Mapping, drivers: Mapping) -> dict[str, Tensor]:
@@ -142,9 +173,14 @@ class SewerHydraulics:
                 f"order with trailing shape ({self.net.n},), got "
                 f"{tuple(inflow.shape)}"
             )
-        if bool(torch.any(~torch.isfinite(inflow))):
+        bad_finite = ~torch.isfinite(inflow)
+        if bool(torch.any(bad_finite)):
+            flat = bad_finite.reshape(-1, bad_finite.shape[-1])
+            batch_idx, node_idx = torch.nonzero(flat, as_tuple=True)
+            names = [self.node_names[i] for i in node_idx.tolist()]
             raise ValueError(
-                f"SewerHydraulics {self.name!r}: driver 'inflow' must be finite"
+                f"SewerHydraulics {self.name!r}: driver 'inflow' must be finite; "
+                f"non-finite at node(s) {names} instance(s) {batch_idx.tolist()}"
             )
         lateral = inflow.index_select(-1, self.manhole_idx)
         if bool(torch.any(lateral < 0)):
@@ -230,6 +266,9 @@ class SewerHydraulics:
         sources = torch.zeros_like(inflow)
         sources = sources.index_add(-1, self.manhole_idx, lateral)
         total = lateral.sum(-1, keepdim=True)
+        # Subtracting the WHOLE network's lateral total at the outfall positions is correct
+        # only because `SewerNetwork` admits exactly one outfall per connected component --
+        # a load-bearing assumption of this closure, not re-checked here.
         outfalls = _outfall_positions(self.net, self.manhole_idx, self.ambient_idx)
         sources = sources.index_add(-1, outfalls, -total)
         return particular_flow(self.net, sources, kind="pipe")
@@ -244,9 +283,17 @@ class SewerHydraulics:
         with `solve_monotone` on `[0, 0.938 D]`, batched over the manholes of one LEVEL and
         over the ensemble. The bracket is justified exactly as `normal_depth`'s: the
         left-hand side is strictly increasing in `H_new` (both terms are), so a sign change
-        is bracketed whenever the right-hand side is between the values at the two ends.
-        Under constant inflow the fixed point IS the quasi-steady solution of section 3.1
-        (row W7; measured 5.7e-15 relative after 200 steps of 60 s).
+        is bracketed whenever the right-hand side is between the values at the two ends --
+        which is why the required discharge is checked against the outgoing pipe's Manning
+        capacity and REFUSED BY NAME before `solve_monotone` runs: an unbracketed root there
+        would otherwise raise an unnamed batch-index error. Under constant inflow the fixed
+        point IS the quasi-steady solution of section 3.1 (row W7; measured 5.7e-15 relative
+        after 200 steps of 60 s).
+
+        Per level, this uses ONLY the flat `level_idx`/`level_src`/`level_tgt` index tensors
+        `__init__` precomputed: one gather (`index_select`) plus one scatter (`index_add`)
+        assembles the upstream inflow, so the only per-call Python loop anywhere in this
+        method is over LEVELS (the tree depth) -- never over pipes or manholes.
         """
         try:
             old = state["sewer.H"]
@@ -261,22 +308,49 @@ class SewerHydraulics:
         s_out = self.slope.index_select(-1, self.out_pipe)
         levels = old
         q_out = torch.zeros_like(old)
-        for level in self.levels:
-            idx = torch.tensor(level, dtype=torch.long)
+        for idx, src, tgt in zip(
+            self.level_idx, self.level_src, self.level_tgt, strict=True
+        ):
+            # ONE gather plus one scatter assembles this level's upstream inflow; no Python
+            # loop over this level's manholes (the review's M4-R17 fix -- see the module
+            # docstring and construction's `level_src`/`level_tgt`).
             upstream_sum = torch.zeros_like(lateral.index_select(-1, idx))
-            for k, j in enumerate(level):
-                for u in self.upstream.get(j, ()):
-                    upstream_sum = upstream_sum.index_add(
-                        -1,
-                        torch.tensor([k], dtype=torch.long),
-                        q_out.index_select(-1, torch.tensor([u], dtype=torch.long)),
-                    )
+            if src.numel():
+                upstream_sum = upstream_sum.index_add(-1, tgt, q_out.index_select(-1, src))
             target = lateral.index_select(-1, idx) + upstream_sum
             area_s = self.surface_area.index_select(-1, idx)
             h_old = levels.index_select(-1, idx)
             d_j = d_out.index_select(-1, idx)
             n_j = n_out.index_select(-1, idx)
             s_j = s_out.index_select(-1, idx)
+
+            # Refuse a surcharge BY NAME before `solve_monotone` ever sees it: an
+            # unbracketed root there raises an unnamed batch-index `RuntimeError`, which is
+            # the wrong failure mode for a required discharge this closure can identify and
+            # name itself (spec's house style: name the offender).
+            cap = geom.capacity_flow(d_j, n_j, s_j)
+            over = target > cap
+            if bool(torch.any(over)):
+                flat_target = target.reshape(-1, target.shape[-1])
+                flat_cap = cap.reshape(-1, cap.shape[-1])
+                flat_over = over.reshape(-1, over.shape[-1])
+                batch_idx, local_idx = torch.nonzero(flat_over, as_tuple=True)
+                idx_list = idx.tolist()
+                manholes = [self.manhole_names[idx_list[i]] for i in local_idx.tolist()]
+                instances = batch_idx.tolist()
+                worst = [
+                    float(flat_target[b, i])
+                    for b, i in zip(instances, local_idx.tolist(), strict=True)
+                ]
+                cap_vals = [
+                    float(flat_cap[b, i])
+                    for b, i in zip(instances, local_idx.tolist(), strict=True)
+                ]
+                raise ValueError(
+                    f"sewer.storage: surcharge at manhole(s) {manholes} instance(s) "
+                    f"{instances}: required discharge {worst} m3/s exceeds the outgoing "
+                    f"pipe's Manning capacity {cap_vals} m3/s"
+                )
 
             def residual(h, target_t, area_t, old_t, d_t, n_t, s_t):
                 return (
@@ -306,6 +380,8 @@ class SewerHydraulics:
         `_DensityClosure` pattern)."""
         t_head = _require(drivers, "T_head", self.name)
         t_amb = _require(drivers, "T_amb", self.name)
+        _validate_temperature(t_head, "T_head", self.name)
+        _validate_temperature(t_amb, "T_amb", self.name)
         batch = torch.broadcast_shapes(
             t_head.shape[:-1] if t_head.dim() else (),
             t_amb.shape[:-1] if t_amb.dim() else (),
@@ -328,6 +404,19 @@ def _require(drivers: Mapping, key: str, name: str) -> Tensor:
         raise KeyError(
             f"SewerHydraulics {name!r}: driver {key!r} is required and was not given"
         ) from exc
+
+
+def _validate_temperature(t: Tensor, key: str, name: str) -> None:
+    """`T_head`/`T_amb` are absolute (KELVIN) temperatures: non-finite or non-positive is a
+    driver error, named by the driver key and the offending instance(s)/node(s) rather than
+    left to surface later as a silently wrong `air_density`."""
+    bad = ~torch.isfinite(t) | (t <= 0)
+    if bool(torch.any(bad)):
+        idx = bad.reshape(-1).nonzero().flatten().tolist()
+        raise ValueError(
+            f"SewerHydraulics {name!r}: driver {key!r} must be finite and positive "
+            f"(Kelvin); bad at instance(s)/node(s) {idx}"
+        )
 
 
 def _outfall_positions(net, manhole_idx: Tensor, ambient_idx) -> Tensor:

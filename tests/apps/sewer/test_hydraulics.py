@@ -183,3 +183,87 @@ def test_gradients_flow_through_the_whole_closure():
     assert torch.isfinite(inflow.grad).all()
     assert float(inflow.grad[0]) > 0.0
     assert float(inflow.grad[5]) == 0.0
+
+
+# ------------------------------------------------------------------ M4-R17 fix round
+
+
+def test_storage_sweep_is_vectorised_and_bit_identical_to_the_pinned_values():
+    """M4-R17 CRITICAL fix: the storage sweep's per-level upstream-inflow assembly is now
+    one gather (`index_select`) plus one scatter (`index_add`) per level, using the flat
+    `level_idx`/`level_src`/`level_tgt` index tensors `__init__` precomputes -- no per-call
+    Python loop over manholes. The pinned values below were computed ONCE (before this fix)
+    from the previous, per-call nested-loop implementation on this fixture, 3 steps of
+    dt=60 s from a dry start; the vectorised sweep must reproduce them bit-for-bit."""
+    net = _network()
+    closure = SewerHydraulics(net, PIPES, MANHOLES, storage=True, dt=60.0)
+    state = {"sewer.H": torch.zeros(5, dtype=F64)}
+    out = None
+    for _ in range(3):
+        out = closure(state, _drivers())
+        state = {"sewer.H": out["sewer.H"]}
+    assert out["sewer.q"].tolist() == [
+        0.049996631074511494, 0.07999480508352401, 0.029996753614541634,
+        0.1299788909045441, 0.15994840443943728,
+    ]
+    assert out["sewer.H"].tolist() == [
+        0.15300087431334175, 0.20809111295985105, 0.11471647324658035,
+        0.2629005273481634, 0.30262765439830236,
+    ]
+
+
+def test_non_finite_inflow_is_refused_naming_the_node():
+    closure = SewerHydraulics(_network(), PIPES, MANHOLES)
+    with pytest.raises(ValueError, match=r"non-finite.*\['J1'\].*instance\(s\) \[0\]"):
+        closure({}, _drivers(inflows=(float("nan"), 0.08, 0.03, 0.0, 0.0)))
+
+
+def test_storage_surcharge_is_refused_naming_the_manhole():
+    """IMPORTANT 2: a level's required discharge is checked against the outgoing pipe's
+    Manning capacity and refused BY NAME before `solve_monotone` ever sees an unbracketed
+    root."""
+    closure = SewerHydraulics(_network(), PIPES, MANHOLES, storage=True, dt=60.0)
+    state = {"sewer.H": torch.zeros(5, dtype=F64)}
+    with pytest.raises(ValueError, match=r"surcharge at manhole\(s\) \['J1'\]"):
+        closure(state, _drivers(inflows=(50.0, 0.08, 0.03, 0.0, 0.0)))
+
+
+def test_non_positive_t_head_is_refused_naming_the_driver():
+    closure = SewerHydraulics(_network(), PIPES, MANHOLES)
+    drivers = _drivers()
+    drivers["T_head"] = torch.tensor(-1.0, dtype=F64)
+    with pytest.raises(ValueError, match="'T_head'"):
+        closure({}, drivers)
+
+
+def test_non_finite_t_amb_is_refused_naming_the_driver():
+    closure = SewerHydraulics(_network(), PIPES, MANHOLES)
+    drivers = _drivers()
+    drivers["T_amb"] = torch.tensor(float("nan"), dtype=F64)
+    with pytest.raises(ValueError, match="'T_amb'"):
+        closure({}, drivers)
+
+
+def test_storage_gradients_are_finite_through_a_dry_branch():
+    """IMPORTANT 4: the storage sweep's implicit-Euler residual is evaluated at h = 0
+    exactly for a dry leaf manhole (zero inflow on J5, zero initial `sewer.H`), and
+    `solve_monotone`'s backward differentiates that residual with respect to the pipe
+    diameter, roughness and slope -- safe only because `geometry.hydraulic_radius`'s
+    `** (2/3)` carries Task 5's M4-R15 guard at h = 0 (geometry.py is not modified here)."""
+    net = _network()
+    for target in ("sewer.H", "sewer.q"):
+        closure = SewerHydraulics(net, PIPES, MANHOLES, storage=True, dt=60.0)
+        closure.diameter = closure.diameter.clone().requires_grad_(True)
+        closure.roughness = closure.roughness.clone().requires_grad_(True)
+        closure.slope = closure.slope.clone().requires_grad_(True)
+        inflow = torch.tensor([0.05, 0.08, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=F64,
+                              requires_grad=True)
+        state = {"sewer.H": torch.zeros(5, dtype=F64)}
+        out = closure(state, {"inflow": inflow, "T_head": torch.tensor(293.15, dtype=F64),
+                              "T_amb": torch.tensor(283.15, dtype=F64)})
+        grads = torch.autograd.grad(
+            out[target].sum(),
+            [inflow, closure.diameter, closure.roughness, closure.slope],
+        )
+        for g in grads:
+            assert torch.isfinite(g).all()
