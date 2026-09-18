@@ -13,7 +13,8 @@ Keys. State: "<layer>.phi" (full-node order), "<layer>.q" (the layer's kind orde
 inactive nodes). Closures return driver updates; they may not write state keys. A transport
 layer whose kinds no potential layer provides reads its branch flows from the driver
 "<layer>.q", in the layer's own flow_kinds order; a layer with both a potential owner and
-that driver raises.
+that driver raises. A closure may also declare `state_keys`, keys it carries across steps
+itself (spec 4.6a); those are copied from its return into the returned state.
 
 `**solve_kwargs` of `step`/`steady` reach the POTENTIAL solves only (`differentiable`,
 `on_failure`, `method`, Newton kwargs). Transport steps always raise on failure.
@@ -134,6 +135,31 @@ class Model:
                     f"callable; a closure is called as closure(state, drivers) and returns "
                     f"driver updates"
                 )
+        # CLOSURE-CARRIED STATE (spec 4.6a). A closure may declare
+        # `state_keys: tuple[str, ...]`: keys it both READS from the state and WRITES back
+        # every call, which `_pass` copies from its return into the returned state. They are
+        # neither drivers (they persist across steps) nor layer state (no layer owns them);
+        # a sewer manhole level under `storage=True`, or a tank level and the controlled
+        # links' status in the water application, are the motivating cases. Two closures
+        # claiming one key is refused HERE, naming both, rather than resolved by whichever
+        # ran last.
+        self.closure_state_keys: dict[str, Closure] = {}
+        for closure in self.closures:
+            for key in getattr(closure, "state_keys", ()):
+                head, _, tail = str(key).rpartition(".")
+                if head in self.layers and tail in _STATE_SUFFIXES:
+                    raise ValueError(
+                        f"Model: closure {closure!r} declares state_keys entry {key!r}, "
+                        f"which is layer {head!r}'s own state key; a closure may carry its "
+                        f"OWN state, never a layer's"
+                    )
+                if key in self.closure_state_keys:
+                    raise ValueError(
+                        f"Model: closures {self.closure_state_keys[key]!r} and "
+                        f"{closure!r} both declare the state key {key!r}; exactly one "
+                        f"closure may own a state key"
+                    )
+                self.closure_state_keys[key] = closure
         self.reactions = list(reactions)
         for lname, reaction in self.reactions:
             if lname not in self.transport:
@@ -358,6 +384,18 @@ class Model:
                         x = reaction.apply(x, dt, drv)
             new[f"{name}.x"] = x
             diag[name] = {"substeps": self.substeps[name]}
+        # Closure-carried state (spec 4.6a): a declared key is copied OUT of the closure's
+        # return into the state, so the next step's closures read it back. A closure that
+        # declares a key and does not write it every call would freeze that state silently,
+        # so the omission is refused by name instead.
+        for key, closure in self.closure_state_keys.items():
+            if key not in drv:
+                raise KeyError(
+                    f"Model: closure {closure!r} declares the state key {key!r} but did "
+                    f"not return it; a closure must write every key it declares on every "
+                    f"call"
+                )
+            new[key] = drv[key]
         return new, diag, drv
 
     # ------------------------------------------------------------------ public

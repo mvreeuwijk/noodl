@@ -706,3 +706,82 @@ def test_a_closure_may_not_write_the_flow_driver_of_a_layer_a_potential_layer_ow
     assert model.flow_layer_of["species"] == "air"
     with pytest.raises(ValueError, match=r"species\.q.*state key"):
         model.steady(state, drivers)
+
+
+class _CounterClosure:
+    """A closure that carries its own integer state across steps."""
+
+    state_keys = ("demo.count",)
+
+    def __call__(self, state, drivers):
+        return {"demo.count": state["demo.count"] + 1.0}
+
+
+class _SilentClosure:
+    state_keys = ("demo.count",)
+
+    def __call__(self, state, drivers):
+        return {}
+
+
+def _counter_model(closures):
+    net = Network(dtype=torch.float64)
+    net.add_node("A")
+    net.add_node("B")
+    net.add_edge("A", "B", kind="pipe")
+    layer = TransportLayer(
+        net, "c", capacity=torch.tensor([2.0], dtype=torch.float64), flow_kind="pipe",
+        boundary=[net.nodes[1]], scheme="implicit",
+    )
+    return net, layer, Model(net, {"c": layer}, closures=closures)
+
+
+def test_closure_state_is_carried_across_steps():
+    _, _, model = _counter_model([_CounterClosure()])
+    state = {
+        "c.x": torch.zeros(1, dtype=torch.float64),
+        "demo.count": torch.zeros((), dtype=torch.float64),
+    }
+    drivers = {
+        "c.q": torch.tensor([1.0], dtype=torch.float64),
+        "c.x_boundary": torch.zeros(1, dtype=torch.float64),
+    }
+    for _ in range(3):
+        state = model.step(state, drivers, 1.0)
+    assert float(state["demo.count"]) == 3.0
+
+
+def test_closure_state_key_is_registered_on_the_model():
+    closure = _CounterClosure()
+    _, _, model = _counter_model([closure])
+    assert model.closure_state_keys == {"demo.count": closure}
+
+
+def test_two_closures_claiming_one_state_key_are_refused():
+    with pytest.raises(ValueError, match="both declare the state key 'demo.count'"):
+        _counter_model([_CounterClosure(), _CounterClosure()])
+
+
+def test_a_closure_may_not_claim_a_layer_state_key():
+    class _Bad:
+        state_keys = ("c.x",)
+
+        def __call__(self, state, drivers):
+            return {}
+
+    with pytest.raises(ValueError, match="which is layer 'c''s own state key"):
+        _counter_model([_Bad()])
+
+
+def test_a_declared_state_key_that_is_not_written_is_refused():
+    _, _, model = _counter_model([_SilentClosure()])
+    state = {
+        "c.x": torch.zeros(1, dtype=torch.float64),
+        "demo.count": torch.zeros((), dtype=torch.float64),
+    }
+    drivers = {
+        "c.q": torch.tensor([1.0], dtype=torch.float64),
+        "c.x_boundary": torch.zeros(1, dtype=torch.float64),
+    }
+    with pytest.raises(KeyError, match="did not return it"):
+        model.step(state, drivers, 1.0)
