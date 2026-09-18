@@ -111,6 +111,69 @@ def test_model_rejects_capacitated_layer_without_dt():
         model._pass(state, drivers, None, {})
 
 
+def _diamond_net() -> Network:
+    """A -> B -> D, A -> C -> D: two paths sharing the sink D."""
+    net = Network()
+    for name in ("A", "B", "C", "D"):
+        net.add_node(name)
+    net.add_edge("A", "B", kind="link")
+    net.add_edge("A", "C", kind="link")
+    net.add_edge("B", "D", kind="link")
+    net.add_edge("C", "D", kind="link")
+    return net
+
+
+def test_step_shares_scarce_receiver_headroom_by_preference():
+    net = _diamond_net()
+    s_max = torch.tensor([100.0, 100.0, 100.0, 3.0], dtype=F64)  # D's headroom is 3.0
+    c_arc = torch.full((4,), 100.0, dtype=F64)
+    # preference order matches edge insertion: A->B, A->C, B->D, C->D
+    preference = torch.tensor([1.0, 1.0, 2.0, 1.0], dtype=F64)  # B->D favoured 2:1
+    layer = CapacitatedTransferLayer(
+        net, "cap", "link", s_max=s_max, c_arc=c_arc, preference=preference,
+        n_passes=5,
+    )
+    s0 = torch.zeros(net.n, dtype=F64)
+    drivers = {"cap.requests": torch.tensor([10.0, 10.0, 10.0, 10.0], dtype=F64)}
+    _, f = layer.step(s0, drivers, dt=1.0)
+    # D's headroom (3.0) is shared 2:1 between B->D and C->D -> 2.0 and 1.0. This is the
+    # only genuine competition in this graph: B and C each have exactly ONE in-edge, so
+    # there is nothing for A->B or A->C to share with.
+    assert torch.allclose(f[2:], torch.tensor([2.0, 1.0], dtype=F64), atol=1e-6)
+    # A->B and A->C are NOT capped to match B->D/C->D. B and C each have ample headroom
+    # (s_max=100) and only one in-edge apiece, so their receiver-side sharing never
+    # triggers -- each simply passes its full 10.0 request through, exactly like Task
+    # 1's single-edge hard-clip. B and C then accumulate the surplus (10 - 2 = 8, and
+    # 10 - 1 = 9 respectively) as storage this step; nothing in the spec (design spec
+    # section 3: sharing applies only "where more than one out-edge draws on one node's
+    # supply", i.e. at the CONVERGING node) or in WSIMOD's own per-arc push/pull
+    # semantics (amendment A1: a node's accept decision is its own push_check against
+    # its OWN storage headroom, never against its future ability to forward the flow
+    # onward) caps an upstream edge to match a downstream bottleneck two hops away.
+    assert torch.allclose(f[:2], torch.tensor([10.0, 10.0], dtype=F64), atol=1e-6)
+
+
+def test_step_conserves_with_n_passes_1_vs_5():
+    """A single pass under-shares (leaves headroom unused); 5 passes converges closer."""
+    net = _diamond_net()
+    s_max = torch.tensor([100.0, 100.0, 100.0, 3.0], dtype=F64)
+    c_arc = torch.full((4,), 100.0, dtype=F64)
+    preference = torch.full((4,), 1.0, dtype=F64)
+    drivers = {"cap.requests": torch.tensor([10.0, 10.0, 10.0, 10.0], dtype=F64)}
+    layer_1 = CapacitatedTransferLayer(
+        net, "cap", "link", s_max=s_max, c_arc=c_arc, preference=preference, n_passes=1
+    )
+    layer_5 = CapacitatedTransferLayer(
+        net, "cap", "link", s_max=s_max, c_arc=c_arc, preference=preference, n_passes=5
+    )
+    _, f1 = layer_1.step(torch.zeros(net.n, dtype=F64), drivers, dt=1.0)
+    _, f5 = layer_5.step(torch.zeros(net.n, dtype=F64), drivers, dt=1.0)
+    total_1 = f1[2] + f1[3]
+    total_5 = f5[2] + f5[3]
+    assert total_5 >= total_1 - 1e-9
+    assert torch.allclose(total_5, torch.tensor(3.0, dtype=F64), atol=1e-6)
+
+
 def test_model_steps_capacitated_layer_end_to_end():
     net = _chain_net()
     s_max = torch.full((net.n,), 100.0, dtype=F64)

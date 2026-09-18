@@ -86,6 +86,33 @@ class CapacitatedTransferLayer:
         Reads `f"{self.name}.requests"` from `drivers` (per edge, m3/s). Returns
         `(s_new, f)`: `s_new` the new per-node storage, `f` the realised per-edge flow
         (m3/s). `diagnostics`, when given, is filled with `"overflow"` (m3/s, per node).
+
+        Proportional sharing (design spec section 3): sharing only ever happens at a
+        node that is the TARGET of more than one of this layer's edges -- "where more
+        than one out-edge draws on one node's [headroom] supply". A node with a single
+        in-edge is never touched by this loop, however many out-edges or requests are
+        downstream of it: this layer never caps an edge to match a bottleneck further
+        along the graph (that would need reasoning about paths, not incidence), exactly
+        mirroring WSIMOD's own per-arc semantics (design spec amendment A1): a node's
+        accept decision is its own `push_check`/`pull_check` against its OWN storage
+        headroom, never against its future ability to forward the flow onward.
+
+        Each of the fixed `n_passes` rounds: computes `tentative` flow per edge (request
+        still unmet, capped by remaining arc capacity and the TARGET's headroom still
+        free after every edge's flow committed in EARLIER rounds); finds nodes whose
+        summed tentative demand this round exceeds their free headroom; and on those
+        nodes only, replaces `tentative` with a preference-weighted share of that free
+        headroom (preference renormalised over the edges still actively competing --
+        `tentative > 0` -- so an edge that has already gotten everything it asked for
+        does not soak up a share it no longer wants). `remaining` only shrinks and `f`
+        only grows round over round, so more passes can only move a share closer to the
+        true max-min-fair split, never past it: an edge whose request is small enough to
+        be satisfied outright in one round frees its unused preference weight for the
+        REMAINING competitors in the next round -- this is what `n_passes` is for
+        (WSIMOD's own bounded `while`-with-early-exit, `constants.MAXITER = 5`, replaced
+        here with a fixed count for batched differentiability, each round strictly
+        non-expansive so a fixed cap is a safe over-approximation, never an
+        approximation of a different algorithm).
         """
         key = f"{self.name}.requests"
         r = drivers.get(key)
@@ -93,8 +120,35 @@ class CapacitatedTransferLayer:
             raise KeyError(
                 f"CapacitatedTransferLayer {self.name!r}: driver {key!r} is required"
             )
-        headroom = (self.s_max - s).index_select(-1, self._tgt)
-        f = torch.clamp(torch.minimum(torch.minimum(r, self.c_arc), headroom), min=0.0)
+        headroom = self.s_max - s
+        remaining = r.clone()
+        f = torch.zeros_like(r)
+        for _ in range(self.n_passes):
+            # Headroom already used up by flow committed in EARLIER rounds -- recomputed
+            # fresh from the current `f` every round, never accumulated separately.
+            committed_in = torch.zeros_like(headroom).index_add(-1, self._tgt, f)
+            free_headroom = torch.clamp(headroom - committed_in, min=0.0)
+            free_headroom_e = free_headroom.index_select(-1, self._tgt)
+            avail = torch.clamp(torch.minimum(self.c_arc - f, free_headroom_e), min=0.0)
+            tentative = torch.minimum(remaining, avail)
+            active = (tentative > 0).to(self.preference.dtype)
+            demand_at_tgt = torch.zeros_like(headroom).index_add(-1, self._tgt, tentative)
+            pref_sum_at_tgt = torch.zeros_like(headroom).index_add(
+                -1, self._tgt, self.preference * active
+            )
+            over_subscribed_e = (demand_at_tgt > free_headroom + 1e-12).index_select(
+                -1, self._tgt
+            )
+            pref_sum_e = pref_sum_at_tgt.index_select(-1, self._tgt)
+            proportional_share = (
+                free_headroom_e * self.preference / torch.clamp(pref_sum_e, min=1e-30)
+            )
+            share = torch.where(
+                over_subscribed_e, torch.minimum(proportional_share, tentative), tentative
+            )
+            share = torch.clamp(share, min=0.0)
+            f = f + share
+            remaining = remaining - share
         ds = -self.net.accumulate(f, self.kind)
         s_unclamped = s + dt * ds
         # Only the UPPER bound (s_max) is enforced here: `f` is already clipped against
