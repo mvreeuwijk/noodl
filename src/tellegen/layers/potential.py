@@ -418,6 +418,17 @@ class PotentialFlowLayer:
             ) from exc
         return slice(start, end)
 
+    def element_for(self, kind: str) -> tuple[Element, slice]:
+        """This layer's own `Element` instance for `kind`, and the slice of `q`'s (and
+        `dp`'s) columns it occupies (FR-13): the PUBLIC accessor a caller outside this layer
+        uses instead of reaching into its private `_elements`/`_elem_slices`. Raises
+        `KeyError` naming the kind and this layer's known kinds when absent, exactly as
+        `kind_slice` does (each element kind is unique within a layer, so the two agree by
+        construction).
+        """
+        sl = self.kind_slice(kind)
+        return self._elements[self.kinds.index(kind)], sl
+
     def flows_of_kind(self, q: torch.Tensor, kinds) -> torch.Tensor:
         """`q` restricted to `kinds` (a name or a sequence), concatenated in the given order.
 
@@ -537,7 +548,27 @@ class PotentialFlowLayer:
             k_parts.append(k_e + zero)
         return torch.cat(c_parts, dim=-1), torch.cat(k_parts, dim=-1)
 
-    def _grounding_check(self, slopes: torch.Tensor, *, where: str) -> None:
+    def _extra_grounded(self, node_slopes: torch.Tensor | None) -> torch.Tensor | None:
+        """Full-node-order bool from `node_slopes` (per COMPACT interior row, as
+        `_node_source_slopes` returns): True at an interior node whose own node-source slope
+        is strictly positive there (FR-1). Such a node is grounded independent of any edge
+        path -- `_DiagonalShifted`'s positive diagonal shift there is exactly the SPD
+        contribution a boundary connection would otherwise have to supply -- so
+        `_grounding_check` must treat it exactly like a boundary node when deciding whether
+        the rest of the graph reaches ground. `None` when this layer has no node sources,
+        which leaves `_grounding_check` unchanged for every existing layer.
+        """
+        if node_slopes is None:
+            return None
+        positive = node_slopes > 0
+        out = torch.zeros(
+            positive.shape[:-1] + (self._n_nodes,), dtype=torch.bool, device=positive.device
+        )
+        return out.index_copy(-1, self.interior, positive)
+
+    def _grounding_check(
+        self, slopes: torch.Tensor, *, where: str, node_slopes: torch.Tensor | None = None
+    ) -> None:
         """Raise unless every instance in `slopes` certifies SPD.
 
         The certificate (Task 3's `solvers.grounding.spd_certificate`) tests both of spec
@@ -562,14 +593,23 @@ class PotentialFlowLayer:
         alone is not attributable across unrelated per-instance failures. Every message
         names the offending LAYER first: a model composes several layers over one network,
         and "solve: floating nodes ... ['z']" alone does not say which of them failed.
+
+        `node_slopes` (FR-1, spec 13.4), when this layer has node sources, is `diag(w')`
+        per compact interior row -- the same tensor `_node_source_slopes` returns. A node
+        with a strictly positive entry there is grounded independent of any edge path (see
+        `_extra_grounded`), so passing it here is what keeps a node grounded ONLY through a
+        node source from being reported ungrounded.
         """
+        extra_grounded = self._extra_grounded(node_slopes)
         certified = spd_certificate(
-            self._src, self._tgt, slopes, self._interior_of_node, self._boundary_mask, atol=0.0
+            self._src, self._tgt, slopes, self._interior_of_node, self._boundary_mask,
+            atol=0.0, extra_grounded=extra_grounded,
         )
         if bool(torch.all(certified)):
             return
         records = spd_diagnosis(
-            self._src, self._tgt, slopes, self._interior_of_node, self._boundary_mask, atol=0.0
+            self._src, self._tgt, slopes, self._interior_of_node, self._boundary_mask,
+            atol=0.0, extra_grounded=extra_grounded,
         )
         if certified.ndim == 0:
             # Unbatched: one instance, so a bare batch index would say nothing. Name the
@@ -618,7 +658,7 @@ class PotentialFlowLayer:
             w0 = self._node_source_withdrawal(phi0, drivers)
             node_slopes = self._node_source_slopes(phi0, drivers)
             rhs = rhs - w0
-        self._grounding_check(k, where="linear_init")
+        self._grounding_check(k, where="linear_init", node_slopes=node_slopes)
         # k picks up a batch dimension only if some element's linear_init(drivers) actually
         # depends on drivers (e.g. a driver-conditioned slope); with purely constant slopes
         # k stays unbatched (b,) even when `rhs` is batched via phi_boundary/sources.
@@ -661,8 +701,22 @@ class PotentialFlowLayer:
         for el in (*self._elements, *self._node_sources):
             for name, value in vars(el).items():
                 if isinstance(value, torch.Tensor) and value.requires_grad:
+                    if isinstance(el, NodeSource):
+                        # FR-8: a NodeSource has no `learnable=` constructor kwarg (unlike
+                        # Element) -- its fix is to register the tensor as an nn.Parameter
+                        # directly, so it must be named and fixed as a node source, not
+                        # rendered (and told to construct itself) as if it were an Element.
+                        raise ValueError(
+                            f"node source {el!r} has a tensor attribute {name!r} with "
+                            f"requires_grad=True that is not a registered nn.Parameter, so "
+                            f"the differentiable solve cannot reach it through "
+                            f"Function.apply and its gradient would be silently wrong or "
+                            f"absent. Register {name!r} as an nn.Parameter "
+                            f"(self.{name} = torch.nn.Parameter(...)) in __init__ so it is "
+                            f"reachable via named_parameters(), or use differentiable=False."
+                        )
                     raise ValueError(
-                        f"element {el!r} (kind {getattr(el, 'kind', 'node source')!r}) has a "
+                        f"element {el!r} (kind {el.kind!r}) has a "
                         f"tensor attribute {name!r} with requires_grad=True that is not a "
                         f"registered nn.Parameter, so the differentiable solve cannot reach "
                         f"it through Function.apply and its gradient would be silently wrong "
@@ -835,7 +889,8 @@ class PotentialFlowLayer:
             # path the differentiable branch builds below).
             phi0_full = self.assemble(phi0, phi_boundary)
             dq0 = self.dflows(phi0_full, drivers)
-            self._grounding_check(dq0, where="solve")
+            node_slopes0 = self._node_source_slopes(phi0_full, drivers)
+            self._grounding_check(dq0, where="solve", node_slopes=node_slopes0)
 
         if not differentiable:
             # The WHOLE non-differentiable solve runs under no_grad -- the Newton iteration,

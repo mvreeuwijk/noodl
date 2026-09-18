@@ -785,3 +785,86 @@ def test_a_declared_state_key_that_is_not_written_is_refused():
     }
     with pytest.raises(KeyError, match="did not return it"):
         model.step(state, drivers, 1.0)
+
+
+def test_n14_a_same_named_driver_does_not_satisfy_a_silent_closures_state_key():
+    """N14: `key not in drv` used to be satisfied by a caller-supplied DRIVER of the same
+    name, sitting in `drv` from its initial `dict(drivers)` copy -- even though no closure
+    ever wrote it -- freezing the closure's carried state at the caller's value with no
+    error. The check must be on what the closure itself returned."""
+    _, _, model = _counter_model([_SilentClosure()])
+    state = {
+        "c.x": torch.zeros(1, dtype=torch.float64),
+        "demo.count": torch.zeros((), dtype=torch.float64),
+    }
+    drivers = {
+        "c.q": torch.tensor([1.0], dtype=torch.float64),
+        "c.x_boundary": torch.zeros(1, dtype=torch.float64),
+        "demo.count": torch.tensor(99.0, dtype=torch.float64),  # a DRIVER, same name
+    }
+    with pytest.raises(KeyError, match=r"_SilentClosure.*demo\.count.*did not return it"):
+        model.step(state, drivers, 1.0)
+
+
+def test_fr2_a_closure_may_declare_the_flow_driver_of_an_ownerless_layer_as_state():
+    """FR-2: the construction-time state_keys/layer-state collision check must mirror
+    `_apply_closures`' own ownerless-"<layer>.q" carve-out -- "<layer>.q" for a transport
+    layer no potential layer owns is a DRIVER (what a flow closure writes), not that
+    layer's state, so a closure may legitimately declare it as state it carries across
+    steps (a flow closure that also remembers its own last-written flow)."""
+
+    class _RememberedFlow:
+        state_keys = ("c.q",)
+
+        def __call__(self, state, drivers):
+            return {"c.q": state["c.q"]}
+
+    net = Network(dtype=torch.float64)
+    net.add_node("A")
+    net.add_node("B")
+    net.add_edge("A", "B", kind="pipe")
+    layer = TransportLayer(
+        net, "c", capacity=torch.tensor([2.0], dtype=torch.float64), flow_kind="pipe",
+        boundary=[net.nodes[1]], scheme="implicit",
+    )
+    # Construction must NOT raise "which is layer 'c''s own state key" (pre-FR-2 behaviour).
+    model = Model(net, {"c": layer}, closures=[_RememberedFlow()])
+    assert model.flow_layer_of["c"] is None
+    state = {
+        "c.x": torch.zeros(1, dtype=torch.float64),
+        "c.q": torch.tensor([1.0], dtype=torch.float64),
+    }
+    drivers = {"c.x_boundary": torch.zeros(1, dtype=torch.float64)}
+    new = model.step(state, drivers, 1.0)
+    torch.testing.assert_close(new["c.q"], state["c.q"])
+
+
+class _IntegratingCounter:
+    """A closure that carries a scalar it advances by a FIXED amount every call, mimicking
+    a stateful closure that integrates over time (a sewer manhole storage sweep, a tank
+    level): N1's counter-closure."""
+
+    state_keys = ("demo.n",)
+
+    def __init__(self, increment: float) -> None:
+        self.increment = increment
+
+    def __call__(self, state, drivers):
+        return {"demo.n": state["demo.n"] + self.increment}
+
+
+def test_n1_closure_carried_state_advances_once_per_step_not_once_per_pass():
+    """N1: under coupling='iterate', a closure-carried state key must be evaluated from the
+    STEP-START state on EVERY pass, so one model.step(dt) advances it by exactly the
+    closure's own per-call increment -- never by (number of passes) * increment, which is
+    what `_iterate` fed pass k-1's own output back into pass k used to produce."""
+    dt = 600.0
+    _, model, state, drivers, _, _ = _build(
+        closures=[_Feedback(2e3), _IntegratingCounter(dt)],
+        coupling="iterate", iterate_tol={"species": 1e-12}, iterate_max=60,
+    )
+    start = dict(state, **{"demo.n": torch.zeros((), dtype=F64)})
+    diag: dict = {}
+    new = model.step(start, drivers, dt, diagnostics=diag)
+    assert diag["passes"] >= 2   # the bug requires more than one pass to be visible at all
+    assert float(new["demo.n"]) == pytest.approx(dt, rel=0.0, abs=1e-9)

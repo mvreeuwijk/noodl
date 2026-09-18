@@ -496,7 +496,10 @@ class TransportLayer:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         net, K, n_i, n_b = self.net, self.n_species, self.n_i, self.n_b
         dtype = q.dtype
-        capacity_t = self.capacity if capacity is None else capacity
+        # FR-7: `cap_t` names the resolved per-step capacity everywhere else in this file
+        # (`rate`, `step`, `steady`, `_implicit_step_sparse`, `_trapezoidal_step_sparse`);
+        # this used to be the one place calling it `capacity_t` instead.
+        cap_t = self.capacity if capacity is None else capacity
         Up = self._selectors(net.upwind, q).to(dtype)    # (..., b_flow, n)
         Dn = self._selectors(net.downwind, q).to(dtype)  # (..., b_flow, n)
         w = self.carrier.to(dtype) * q.abs()            # (..., b_flow)
@@ -522,7 +525,7 @@ class TransportLayer:
         # rescales removal/kinetics by 1/capacity too, which is wrong: e.g. the decay-chain
         # kinetics test below expects rate constants l1, l2 unchanged by capacity=1000, and
         # the removal test expects exp(-rate * t) with capacity=500 not entering at all.
-        cap = capacity_t.to(dtype).unsqueeze(-2).unsqueeze(-1)  # (..., 1, n_i, 1)
+        cap = cap_t.to(dtype).unsqueeze(-2).unsqueeze(-1)  # (..., 1, n_i, 1)
         Gii = Gii / cap
         Gib = Gib / cap
 
@@ -614,9 +617,9 @@ class TransportLayer:
         this call only; see `_capacity_arg`.
         """
         dtype = torch.float64
-        cap_t = self._capacity_arg(capacity)
+        cap = self._capacity_arg(capacity)
         x_s, reduced = self._to_stacked(x.to(dtype), self.n_i, "x")
-        op = self._advection_operator(q.to(dtype), cap_t)
+        op = self._advection_operator(q.to(dtype), cap)
         xb_s, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
         src_s, _ = self._to_stacked(
             self._sources_interior(sources).to(dtype), self.n_i, "sources"
@@ -624,19 +627,9 @@ class TransportLayer:
         r = (
             op.matvec(x_s)
             + op.boundary_forcing(xb_s)
-            + src_s / self._capacity_stacked(dtype, cap_t)
+            + src_s / self._capacity_stacked(dtype, cap)
         )
         return self._from_stacked(r.to(x.dtype), self.n_i, reduced)
-
-    def _forcing(
-        self, sources: torch.Tensor, x_boundary: torch.Tensor, N: torch.Tensor, dtype: torch.dtype
-    ) -> tuple[torch.Tensor, bool]:
-        src_s, reduced = self._to_stacked(self._sources_interior(sources), self.n_i, "sources")
-        xb_s, _ = self._to_stacked(x_boundary, self.n_b, "x_boundary")
-        src_s, xb_s = src_s.to(dtype), xb_s.to(dtype)
-        cap = self._capacity_stacked(dtype)
-        b0 = (N @ xb_s.unsqueeze(-1)).squeeze(-1) + src_s / cap
-        return b0, reduced
 
     # ------------------------------------------------------------ stepping
     def step(

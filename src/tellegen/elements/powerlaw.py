@@ -110,13 +110,26 @@ def Orifice(
     kind: str = "airpath",
     learnable: bool = False,
 ) -> PowerLaw:
-    """PowerLaw(C = Cd * A * sqrt(2 / rho), n = 0.5): the sharp-edged orifice equation."""
-    Cd_t = torch.as_tensor(Cd, dtype=torch.get_default_dtype())
-    A_t = torch.as_tensor(A, dtype=torch.get_default_dtype())
+    """PowerLaw(C = Cd * A * sqrt(2 / rho), n = 0.5): the sharp-edged orifice equation.
+
+    N2: `Cd`/`A` given as a `torch.Tensor` keep THEIR OWN dtype -- a caller building a
+    float64 network is not silently downcast to `torch.get_default_dtype()` (float32 in
+    this project). A bare Python float still takes `torch.get_default_dtype()`, unchanged
+    from before. `n` is built at the resulting `C`'s own dtype so it is never the odd one
+    out (mirrors `apps.building.elements.mass_orifice`, which is explicit-float64 rather
+    than default-dtype and so never had this bug).
+    """
+    Cd_t = Cd if isinstance(Cd, torch.Tensor) else torch.as_tensor(
+        Cd, dtype=torch.get_default_dtype()
+    )
+    A_t = A if isinstance(A, torch.Tensor) else torch.as_tensor(
+        A, dtype=torch.get_default_dtype()
+    )
     C = Cd_t * A_t * math.sqrt(2.0 / rho)
+    n = torch.as_tensor(0.5, dtype=C.dtype)
     return PowerLaw(
         C=C,
-        n=0.5,
+        n=n,
         dp_transition=dp_transition,
         regularised=regularised,
         kind=kind,

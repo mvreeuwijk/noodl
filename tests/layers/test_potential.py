@@ -854,6 +854,165 @@ def test_a_phi_independent_node_source_is_refused():
         source.dflow(torch.tensor([5.0], dtype=torch.float64))
 
 
+class _LinearGround(NodeSource):
+    """w = g * phi: a linear virtual-ground withdrawal, dflow = g everywhere (well-defined
+    at phi = 0, unlike `_Emitter`'s sqrt law) -- built for the FR-1 grounding tests below."""
+
+    def __init__(self, nodes, g):
+        super().__init__(nodes)
+        self.g = float(g)
+
+    def flow(self, phi_nodes, drivers=None):
+        return self.g * phi_nodes
+
+
+def test_grounding_counts_a_node_source_at_a_fixed_flow_only_node():
+    """FR-1: a node reachable from every boundary only through FixedFlow edges (dflow == 0
+    everywhere, spec's own "structurally singular subnetwork" example) is ungrounded by
+    edges alone; a NodeSource with a positive slope at that node must still let it solve,
+    because the node source's own diagonal shift IS the SPD contribution a boundary
+    connection would otherwise have to supply."""
+    net = Network(dtype=torch.float64)
+    net.add_node("J")
+    net.add_node("R")
+    net.add_edge("J", "R", kind="vent")
+    q0 = torch.tensor([0.01], dtype=torch.float64)
+    elements = [FixedFlow(q0, kind="vent")]
+    source = _LinearGround(torch.tensor([0]), 0.02)
+    layer = PotentialFlowLayer(
+        net, "test", elements, boundary=["R"], node_sources=[source],
+        linear_solver="direct",
+    )
+    pb = torch.tensor([10.0], dtype=torch.float64)
+    phi, q = layer.solve(pb, {}, None, differentiable=False, atol=1e-13, rtol=1e-13)
+    assert torch.isfinite(phi).all() and torch.isfinite(q).all()
+    # The residual is exactly linear here (FixedFlow contributes a phi-independent q0, the
+    # node source w = g*phi): A_I q0 + g*phi_J = 0.
+    expected = float(-q0[0] / 0.02)
+    assert float(phi[..., layer.interior]) == pytest.approx(expected, rel=1e-9)
+
+    # Without the fix (edge-only grounding), this same layer is refused: the FixedFlow edge
+    # contributes a zero slope, so the pre-FR-1 check saw an ungrounded interior node.
+    without_source = PotentialFlowLayer(
+        net, "bare", elements, boundary=["R"], linear_solver="direct",
+    )
+    with pytest.raises(RuntimeError, match="floating nodes"):
+        without_source.solve(pb, {}, None, differentiable=False)
+
+
+def test_two_node_sources_on_one_node_sum_their_withdrawals():
+    """FR-9: EPANET semantics -- several node sources at one junction sum, exactly as if a
+    single node source carried their combined coefficient."""
+    net = Network(dtype=torch.float64)
+    net.add_node("J")
+    net.add_node("R")
+    net.add_edge("R", "J", kind="pipe")
+    a = _Emitter(torch.tensor([0]), torch.tensor([0.02], dtype=torch.float64))
+    b = _Emitter(torch.tensor([0]), torch.tensor([0.01], dtype=torch.float64))
+    two = PotentialFlowLayer(
+        net, "water", [_pipe_law()], boundary=["R"], node_sources=[a, b],
+        linear_solver="direct",
+    )
+    combined = _Emitter(torch.tensor([0]), torch.tensor([0.03], dtype=torch.float64))
+    one = PotentialFlowLayer(
+        net, "water", [_pipe_law()], boundary=["R"], node_sources=[combined],
+        linear_solver="direct",
+    )
+    pb = torch.tensor([10.0], dtype=torch.float64)
+    phi_two, q_two = two.solve(pb, {}, None, differentiable=False, atol=1e-13, rtol=1e-13)
+    phi_one, q_one = one.solve(pb, {}, None, differentiable=False, atol=1e-13, rtol=1e-13)
+    torch.testing.assert_close(phi_two, phi_one, rtol=1e-9, atol=1e-12)
+    torch.testing.assert_close(q_two, q_one, rtol=1e-9, atol=1e-12)
+
+
+def test_node_source_with_a_batched_parameter_solves_each_instance_independently():
+    """FR-9: a NodeSource whose own parameter carries a leading batch dim solves each
+    instance to the same answer an unbatched, single-instance solve would give it."""
+    net = Network(dtype=torch.float64)
+    net.add_node("J")
+    net.add_node("R")
+    net.add_edge("R", "J", kind="pipe")
+    coeffs = torch.tensor([[0.01], [0.02], [0.04]], dtype=torch.float64)  # (3 instances, 1 node)
+    source = _Emitter(torch.tensor([0]), coeffs)
+    layer = PotentialFlowLayer(
+        net, "water", [_pipe_law()], boundary=["R"], node_sources=[source],
+        linear_solver="direct",
+    )
+    pb = torch.tensor([10.0], dtype=torch.float64)
+    phi, q = layer.solve(pb, {}, None, differentiable=False, atol=1e-13, rtol=1e-13)
+    assert phi.shape[:-1] == (3,) and q.shape[:-1] == (3,)
+    for i in range(3):
+        single_source = _Emitter(torch.tensor([0]), coeffs[i])
+        single_layer = PotentialFlowLayer(
+            net, "water", [_pipe_law()], boundary=["R"], node_sources=[single_source],
+            linear_solver="direct",
+        )
+        phi_i, q_i = single_layer.solve(
+            pb, {}, None, differentiable=False, atol=1e-13, rtol=1e-13
+        )
+        torch.testing.assert_close(phi[i], phi_i, rtol=1e-9, atol=1e-12)
+        torch.testing.assert_close(q[i], q_i, rtol=1e-9, atol=1e-12)
+
+
+def test_node_source_with_an_unregistered_grad_tensor_is_named_as_a_node_source():
+    """FR-8: the unreachable-tensor guard must call a NodeSource a "node source" (not an
+    "element") and must not tell the caller to pass learnable=True -- a NodeSource has no
+    such constructor kwarg; the fix is to register the tensor as an nn.Parameter."""
+
+    class _LeakyGradSource(NodeSource):
+        def __init__(self, nodes, coeff):
+            super().__init__(nodes)
+            self.coeff = torch.nn.Parameter(torch.as_tensor(coeff, dtype=torch.float64))
+            # A stray tensor with requires_grad=True that is NOT a registered nn.Parameter:
+            # invisible to named_parameters(), so the differentiable solve cannot reach it.
+            self.stray = torch.tensor(1.0, dtype=torch.float64, requires_grad=True)
+
+        def flow(self, phi_nodes, drivers=None):
+            return self.coeff * self.stray * phi_nodes
+
+    net = Network(dtype=torch.float64)
+    net.add_node("J")
+    net.add_node("R")
+    net.add_edge("R", "J", kind="pipe")
+    source = _LeakyGradSource(torch.tensor([0]), 0.02)
+    layer = PotentialFlowLayer(
+        net, "water", [_pipe_law()], boundary=["R"], node_sources=[source],
+        linear_solver="direct",
+    )
+    pb = torch.tensor([10.0], dtype=torch.float64)
+    with pytest.raises(ValueError, match=r"node source .*'stray'") as excinfo:
+        layer.solve(pb, {}, None, differentiable=True)
+    message = str(excinfo.value)
+    assert "learnable=True" not in message
+    assert not message.startswith("element ")
+
+
+def test_element_for_returns_the_element_and_its_q_slice():
+    """FR-13: the public accessor a caller outside this layer uses instead of reaching into
+    `_elements`/`_elem_slices` directly."""
+    net = Network(dtype=torch.float64)
+    net.add_node("a")
+    net.add_node("b")
+    net.add_node("c")
+    net.add_edge("a", "b", kind="pipe")
+    net.add_edge("b", "c", kind="valve")
+    pipe = _pipe_law()
+    valve = PowerLaw(torch.tensor(0.03, dtype=torch.float64),
+                      torch.tensor(0.6, dtype=torch.float64), kind="valve")
+    layer = PotentialFlowLayer(net, "net", [pipe, valve], boundary=["a"])
+
+    el, sl = layer.element_for("valve")
+    assert el is valve
+    assert sl == layer.kind_slice("valve")
+
+    el0, sl0 = layer.element_for("pipe")
+    assert el0 is pipe
+    assert sl0 == slice(0, 1)
+
+    with pytest.raises(KeyError, match=r"nope.*pipe.*valve"):
+        layer.element_for("nope")
+
+
 def test_node_sources_default_to_empty_and_change_nothing():
     net = Network(dtype=torch.float64)
     net.add_node("J")
