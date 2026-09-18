@@ -13,6 +13,7 @@ from tellegen.apps.sewer.network import (
     sewer_steady,
     tree_steady,
 )
+from tellegen.drives import Stack
 
 F64 = torch.float64
 
@@ -184,3 +185,87 @@ def test_read_inp_sulfide_source_uses_each_manholes_own_outgoing_pipe():
     )
     expected_sulfide = torch.clamp(sulfide + dt * d_sulfide, min=0.0)
     assert torch.allclose(out[..., 1], expected_sulfide)
+
+
+def test_the_outfall_pipe_is_found_by_where_it_drains_not_by_position():
+    """M4-R19 Important 1: the brief's dictated `outfall_manhole = net.pipes[-1].u`
+    assumed the LAST pipe drains to the outfall. Moving C5 (J4 -> Outfall) to the FRONT of
+    `net.pipes` used to attach the outfall-flagged `headspace` edge (and the geometry it
+    borrows) to J3 -- the upstream end of whatever pipe happened to be last, C3 (J3 -> J4)
+    -- instead of J4. Fixed by finding the pipe whose `v` is an outfall, wherever it sits;
+    both orderings must now attach the outfall edge to J4 and produce identical air-side
+    steady results, compared by node NAME (node order is the same for both builds -- only
+    `net.pipes`' order differs -- so this also incidentally checks position-for-position,
+    but the comparison is done by name as asked)."""
+    canonical = tree_steady()
+    reordered = SewerNetwork(
+        manholes=canonical.manholes,
+        pipes=(canonical.pipes[-1], *canonical.pipes[:-1]),
+        outfalls=canonical.outfalls,
+    )
+    reordered.validate()
+    assert [p.name for p in reordered.pipes] == ["C5", "C1", "C2", "C4", "C3"]
+
+    model_a, state_a, drivers_a = build_sewer_model(canonical)
+    model_b, state_b, drivers_b = build_sewer_model(reordered)
+    assert model_a.net.nodes == model_b.net.nodes
+
+    def outfall_edge_names(model):
+        src, tgt = model.net.endpoints("headspace")
+        flagged = model.net.edge_attr("outfall", kind="headspace", default=0.0)
+        (idx,) = flagged.nonzero().flatten().tolist()
+        return model.net.nodes[int(src[idx])], model.net.nodes[int(tgt[idx])]
+
+    assert outfall_edge_names(model_a) == ("J4", "ambient")
+    assert outfall_edge_names(model_b) == ("J4", "ambient")
+
+    new_a = model_a.step(state_a, drivers_a, 60.0)
+    new_b = model_b.step(state_b, drivers_b, 60.0)
+    phi_a = dict(zip(model_a.net.nodes, new_a["air.phi"].tolist(), strict=True))
+    phi_b = dict(zip(model_b.net.nodes, new_b["air.phi"].tolist(), strict=True))
+    assert set(phi_a) == set(phi_b)
+    for name in phi_a:
+        assert phi_a[name] == pytest.approx(phi_b[name], abs=1e-10), name
+
+
+def test_the_headspace_stack_drive_uses_the_pipe_crown_not_the_mean_invert():
+    """M4-R19 Important 2: `_stack_for`'s `headspace` branch must use the pipe CROWN
+    elevation (mean invert plus diameter), not the bare mean invert, as `z_path`. Built
+    with `T_head != T_amb` (the builder's own defaults, 293.15 K vs 283.15 K) so the drive
+    carries a non-trivial value, and checked against the drive's own formula
+    (`drives.Stack`'s docstring) evaluated by hand with the crown `z_path`."""
+    net = SewerNetwork(
+        manholes=(Manhole("J1", 12.0),),
+        pipes=(Pipe("A", "J1", "Out", 100.0, 0.3, 0.013, 0.01),),
+        outfalls=(Outfall("Out", 9.0),),
+    )
+    model, state, drivers = build_sewer_model(net, quality=False)
+    assert float(drivers["T_head"]) != float(drivers["T_amb"])
+    resolved = model._apply_closures(state, drivers)
+
+    stack = next(
+        d for d in model.potential["air"]._drives
+        if isinstance(d, Stack) and d.kind == "headspace"
+    )
+    value = stack(resolved)
+
+    graph = model.net
+    invert = torch.tensor(
+        [graph.graph.nodes[n].get("invert", 0.0) or 0.0 for n in graph.nodes], dtype=F64
+    )
+    ground = torch.tensor(
+        [
+            graph.graph.nodes[n].get("ground") or graph.graph.nodes[n].get("invert", 0.0)
+            or 0.0
+            for n in graph.nodes
+        ],
+        dtype=F64,
+    )
+    src, tgt = graph.endpoints("headspace")
+    diameter = net.pipes[0].diameter
+    z_path = 0.5 * (invert[src] + invert[tgt]) + diameter
+    rho = resolved["rho_air_nodes"]
+    expected = 9.80665 * (
+        rho[..., src] * (ground[src] - z_path) - rho[..., tgt] * (ground[tgt] - z_path)
+    )
+    assert torch.allclose(value, expected)

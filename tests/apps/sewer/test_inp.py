@@ -37,6 +37,25 @@ def test_the_pollutant_variant_carries_the_tracer():
     assert inflows == {"J1": {"Tracer": pytest.approx(0.1, rel=1e-14)}}
 
 
+def test_conduit_offsets_shift_the_effective_invert_under_link_offsets_depth(tmp_path):
+    """M4-R19 minor: under `LINK_OFFSETS DEPTH` (the fixture's own default), a conduit's
+    InOffset/OutOffset add to the NODE invert at each end before the slope is computed --
+    untested by the committed fixtures, which all carry zero offsets. Gives C1 an
+    OutOffset of 0.5 m at J3 (invert 10.0), so its effective downstream elevation is 10.5,
+    not 10.0."""
+    original = (DATA / "tree_steady.inp").read_text()
+    old_line = next(line for line in original.splitlines() if line.startswith("C1 "))
+    fields = old_line.split()
+    fields[6] = "0.5"  # OutOffset (name, node1, node2, length, n, InOffset, OutOffset, ...)
+    text = original.replace(old_line, " ".join(fields))
+    path = tmp_path / "offset.inp"
+    path.write_text(text)
+    net, _, _ = read_inp(path)
+    pipe = next(p for p in net.pipes if p.name == "C1")
+    fall = 12.0 - (10.0 + 0.5)
+    assert pipe.slope == pytest.approx(fall / (200.0**2 - fall**2) ** 0.5, rel=1e-12)
+
+
 def test_conduits_are_normalised_upstream_to_downstream():
     """C1 is written J1 -> J3 with inverts 12.0 and 10.0, so it already runs downhill; the
     reader still recomputes the slope from the inverts and the 3-D chord length."""

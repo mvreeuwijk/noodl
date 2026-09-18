@@ -122,8 +122,6 @@ def read_inp(path) -> tuple[SewerNetwork, dict[str, dict[str, float]], dict[str,
             raise ValueError(
                 f"{path}: line {line.number}: conduit {name!r} has no [XSECTIONS] entry"
             )
-        if z1 == z2 or (z1 < z2 and z2 - z1 >= 0):
-            pass
         upstream, downstream, high, low = (
             (node1, node2, z1, z2) if z1 > z2 else (node2, node1, z2, z1)
         )

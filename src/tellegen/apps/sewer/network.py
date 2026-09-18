@@ -221,6 +221,7 @@ def build_sewer_model(
     # `tree_steady.inp` gives `out_pipe = [0, 1, 3, 2, 4]` (M4-R4 amendment).
     out_pipe = torch.tensor([outgoing[name] for name in manhole_names], dtype=torch.long)
     length = torch.tensor([p.length for p in net.pipes], dtype=F64)
+    diameter = torch.tensor([p.diameter for p in net.pipes], dtype=F64)
     slope_per_manhole = torch.tensor(
         [net.pipes[outgoing[name]].slope for name in manhole_names], dtype=F64
     )
@@ -252,8 +253,29 @@ def build_sewer_model(
 
     if air:
         # Kind order: `headspace` (one per pipe, then the outfall edge), `leak`, `fan`.
-        outfall_manhole = net.pipes[-1].u
-        pipe_positions = list(range(n_pipes)) + [n_pipes - 1]
+        # The outfall pipe is the one that DRAINS TO an outfall (`p.v in outfall_names`),
+        # found by where it drains rather than assumed to be `net.pipes[-1]` (M4-R19
+        # Important 1: a network whose outfall conduit is listed first silently attached
+        # the outfall-flagged headspace edge, and its geometry, to the wrong manhole).
+        # `SewerNetwork.validate()` guarantees every manhole has exactly one outgoing pipe
+        # and every outfall has none, but does not itself forbid two different manholes
+        # both draining directly into the same outfall; this builder wires exactly ONE
+        # outfall-to-ambient headspace edge, so that case is refused here by name instead
+        # of silently wiring only one of the two.
+        outfall_names = {o.name for o in net.outfalls}
+        outfall_pipe_candidates = [
+            i for i, p in enumerate(net.pipes) if p.v in outfall_names
+        ]
+        if len(outfall_pipe_candidates) != 1:
+            raise ValueError(
+                f"build_sewer_model: expected exactly one pipe draining to an outfall, "
+                f"found {len(outfall_pipe_candidates)} "
+                f"({[net.pipes[i].name for i in outfall_pipe_candidates]}); outfalls are "
+                f"{sorted(outfall_names)}"
+            )
+        outfall_pipe = outfall_pipe_candidates[0]
+        outfall_manhole = net.pipes[outfall_pipe].u
+        pipe_positions = list(range(n_pipes)) + [outfall_pipe]
         for pipe in net.pipes:
             graph.add_edge(pipe.u, pipe.v, kind="headspace", name=f"{pipe.name}.air")
         graph.add_edge(outfall_manhole, "ambient", kind="headspace", outfall=True)
@@ -261,7 +283,7 @@ def build_sewer_model(
             graph.add_edge(manhole.name, "ambient", kind="leak", name=f"{manhole.name}.leak")
         for name in fans:
             graph.add_edge(name, "ambient", kind="fan", name=f"{name}.fan")
-        air_lengths = torch.cat([length, length[-1:]])
+        air_lengths = torch.cat([length, length[outfall_pipe : outfall_pipe + 1]])
         positions = torch.tensor(pipe_positions, dtype=torch.long)
         elements = [
             Headspace(air_lengths, positions, f_air=f_air, kind="headspace"),
@@ -278,7 +300,10 @@ def build_sewer_model(
                 air_lengths, positions, f_i=f_i, c_s=c_s,
                 zero_positions=(n_pipes,), kind="headspace",
             ),
-            _stack_for("headspace", graph, net),
+            _stack_for(
+                "headspace", graph, net,
+                crown=torch.cat([diameter, diameter[outfall_pipe : outfall_pipe + 1]]),
+            ),
             _stack_for("leak", graph, net),
         ]
         layers["air"] = PotentialFlowLayer(
@@ -381,15 +406,26 @@ def build_sewer_model(
     return model, state, drivers
 
 
-def _stack_for(kind: str, graph: Network, net: SewerNetwork) -> Stack:
+def _stack_for(
+    kind: str, graph: Network, net: SewerNetwork, *, crown: Tensor | None = None
+) -> Stack:
     """The existing buoyancy drive on one air kind (spec 3.3).
 
-    On `headspace` edges `z_path` is the pipe crown elevation and `z_ref` the node's ground
-    level, so a warm headspace column in a manhole shaft is lighter than the outside column
-    of the same height -- the building application's stack effect, unchanged. On `leak`
-    edges `z_path` is the cover's own level and `z_ref` the same at both ends, so the leak
-    path itself carries no stack term.
+    On `headspace` edges `z_path` is the pipe CROWN elevation: the mean of the two end
+    inverts plus the pipe's own diameter (M4-R19 Important 2 -- the mean invert alone is
+    the pipe's INVERT at its midpoint, not its crown; `crown` is the per-headspace-edge
+    diameter, in the same order as `graph.endpoints("headspace")`, i.e. `net.pipes` order
+    then the outfall pipe's diameter again for the extra outfall-to-ambient edge, exactly
+    like `air_lengths` at the call site). `z_ref` is the node's ground level, so a warm
+    headspace column in a manhole shaft is lighter than the outside column of the same
+    height -- the building application's stack effect, unchanged. On `leak` edges `z_path`
+    is the cover's own level and `z_ref` the same at both ends, so the leak path itself
+    carries no stack term; `crown` is unused (and must be `None`) for that kind.
     """
+    if kind != "headspace" and crown is not None:
+        raise ValueError(
+            f"_stack_for: crown is only meaningful for kind='headspace', got kind={kind!r}"
+        )
     src, tgt = graph.endpoints(kind)
     invert = torch.tensor(
         [graph.graph.nodes[n].get("invert", 0.0) or 0.0 for n in graph.nodes], dtype=F64
@@ -402,7 +438,12 @@ def _stack_for(kind: str, graph: Network, net: SewerNetwork) -> Stack:
         ],
         dtype=F64,
     )
-    z_path = 0.5 * (invert[src] + invert[tgt]) if kind == "headspace" else ground[src]
+    if kind == "headspace":
+        if crown is None:
+            raise ValueError("_stack_for: kind='headspace' requires the crown diameters")
+        z_path = 0.5 * (invert[src] + invert[tgt]) + crown
+    else:
+        z_path = ground[src]
     return Stack(kind, src=src, tgt=tgt, z_path=z_path, z_ref=ground,
                  rho_key="rho_air_nodes", g=9.80665)
 
