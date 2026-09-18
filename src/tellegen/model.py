@@ -356,6 +356,11 @@ class Model:
             q_kind = self._kind_flows(name, new, drv)
             xb = self._require(drv, f"{name}.x_boundary")
             sources = drv.get(f"{name}.sources")
+            # Spec 4.6b: a per-step capacity, written by a closure that owns the geometry
+            # (a sewer conduit's wetted volume, a headspace volume). Absent, the layer's
+            # construction-time capacity stands, so nothing changes for a fixed-storage
+            # layer. Shape and positivity are checked by the layer, naming the nodes.
+            cap = drv.get(f"{name}.capacity")
             if dt is None:
                 if sources is None:
                     # The state's own `x` is the layout authority when it is there; `x_b`
@@ -366,7 +371,7 @@ class Model:
                         if like is None
                         else self._zero_sources(layer, like, layer.n_i)
                     )
-                x = layer.steady(q_kind, sources, xb)
+                x = layer.steady(q_kind, sources, xb, capacity=cap)
             else:
                 x = base.get(f"{name}.x")
                 if x is None:
@@ -378,7 +383,7 @@ class Model:
                     sources = self._zero_sources(layer, x, layer.n_i)
                 k = self.substeps[name]
                 for _ in range(k):
-                    x = layer.step(x, q_kind, sources, xb, dt / k)
+                    x = layer.step(x, q_kind, sources, xb, dt / k, capacity=cap)
                 for lname, reaction in self.reactions:
                     if lname == name:
                         x = reaction.apply(x, dt, drv)
@@ -517,7 +522,10 @@ class Model:
             sources = drv.get(f"{name}.sources")
             if sources is None:
                 sources = self._zero_sources(layer, x, layer.n_i)
-            out[name] = layer.rate(x, self._kind_flows(name, state, drv), sources, xb)
+            out[name] = layer.rate(
+                x, self._kind_flows(name, state, drv), sources, xb,
+                capacity=drv.get(f"{name}.capacity"),
+            )
         return out
 
     def ports(self, state) -> Ports:

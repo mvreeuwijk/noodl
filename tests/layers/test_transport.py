@@ -7,6 +7,7 @@ import torch
 from torch.autograd import gradcheck
 
 from tellegen.layers.transport import TransportLayer, _TransposeView
+from tellegen.model import Model
 from tellegen.solvers.implicit import TransposeOperator
 from tellegen.topology import Network
 
@@ -523,3 +524,113 @@ def test_boundary_values_pair_with_the_caller_s_boundary_order_not_node_order():
     torch.testing.assert_close(
         layer.step(x0, q, sources, x_b, dt=dt), step_ref, rtol=1e-9, atol=1e-12
     )
+
+
+def _two_node_layer(capacity):
+    net = Network(dtype=torch.float64)
+    for name in ("A", "B", "C"):
+        net.add_node(name)
+    net.add_edge("A", "B", kind="pipe")
+    net.add_edge("B", "C", kind="pipe")
+    layer = TransportLayer(
+        net, "c", capacity=torch.tensor(capacity, dtype=torch.float64),
+        flow_kind="pipe", boundary=[net.nodes[2]], scheme="implicit",
+    )
+    return net, layer
+
+
+def test_per_step_capacity_changes_the_step():
+    _, layer = _two_node_layer([10.0, 10.0])
+    q = torch.tensor([1.0, 1.0], dtype=torch.float64)
+    x0 = torch.tensor([5.0, 3.0], dtype=torch.float64)
+    sources = torch.zeros(3, dtype=torch.float64)
+    xb = torch.zeros(1, dtype=torch.float64)
+    base = layer.step(x0, q, sources, xb, 1.0)
+    halved = layer.step(
+        x0, q, sources, xb, 1.0, capacity=torch.tensor([5.0, 5.0], dtype=torch.float64)
+    )
+    assert not torch.allclose(base, halved)
+    # The construction-time capacity is untouched by the call.
+    assert torch.equal(layer.capacity, torch.tensor([10.0, 10.0], dtype=torch.float64))
+
+
+def test_per_step_capacity_conserves_mass():
+    """sum(V dx/dt) is the net flow leaving through the boundary, for ANY positive V."""
+    _, layer = _two_node_layer([10.0, 10.0])
+    q = torch.tensor([1.0, 1.0], dtype=torch.float64)
+    x0 = torch.tensor([5.0, 3.0], dtype=torch.float64)
+    volume = torch.tensor([4.0, 6.0], dtype=torch.float64)
+    rate = layer.rate(
+        x0, q, torch.zeros(3, dtype=torch.float64),
+        torch.zeros(1, dtype=torch.float64), capacity=volume,
+    )
+    # Node A loses 1 * 5; node B gains 1 * 5 and loses 1 * 3; the boundary takes 1 * 3.
+    assert float((volume * rate).sum()) == pytest.approx(-3.0, abs=1e-12)
+
+
+def test_per_step_capacity_is_refused_on_a_wrong_shape():
+    _, layer = _two_node_layer([10.0, 10.0])
+    with pytest.raises(ValueError, match="capacity has 1 entries"):
+        layer.step(
+            torch.tensor([5.0, 3.0], dtype=torch.float64),
+            torch.tensor([1.0, 1.0], dtype=torch.float64),
+            torch.zeros(3, dtype=torch.float64),
+            torch.zeros(1, dtype=torch.float64), 1.0,
+            capacity=torch.tensor([1.0], dtype=torch.float64),
+        )
+
+
+def test_per_step_capacity_must_be_strictly_positive():
+    _, layer = _two_node_layer([10.0, 10.0])
+    with pytest.raises(ValueError, match=r"strictly positive.*\['B'\]"):
+        layer.step(
+            torch.tensor([5.0, 3.0], dtype=torch.float64),
+            torch.tensor([1.0, 1.0], dtype=torch.float64),
+            torch.zeros(3, dtype=torch.float64),
+            torch.zeros(1, dtype=torch.float64), 1.0,
+            capacity=torch.tensor([1.0, 0.0], dtype=torch.float64),
+        )
+
+
+def test_capacity_driver_reaches_the_layer_through_the_model():
+    net, layer = _two_node_layer([10.0, 10.0])
+    model = Model(net, {"c": layer})
+    q = torch.tensor([1.0, 1.0], dtype=torch.float64)
+    x0 = torch.tensor([5.0, 3.0], dtype=torch.float64)
+    drivers = {
+        "c.q": q, "c.x_boundary": torch.zeros(1, dtype=torch.float64),
+        "c.capacity": torch.tensor([5.0, 5.0], dtype=torch.float64),
+    }
+    through_model = model.step({"c.x": x0}, drivers, 1.0)["c.x"]
+    direct = layer.step(
+        x0, q, torch.zeros(3, dtype=torch.float64),
+        torch.zeros(1, dtype=torch.float64), 1.0,
+        capacity=torch.tensor([5.0, 5.0], dtype=torch.float64),
+    )
+    assert torch.allclose(through_model, direct, atol=0.0, rtol=0.0)
+
+
+def test_per_step_capacity_carries_a_gradient():
+    """Amendment A9: `capacity` reaches `_LinearSolve` as an explicit `*params` entry, not
+    a closure capture, so it must receive a gradient.
+
+    `steady()` is not usable for this check: at a fixed point, `V dx/dt = 0` holds for
+    every strictly positive `V` (the transport-only, no-kinetics case here), so its output
+    is analytically independent of capacity -- confirmed by finite differences, not just
+    this implementation's adjoint (d(steady())/d(capacity) is exactly 0, verified both by
+    perturbing capacity by two decades and by a forward-difference probe). `step()`
+    (backward Euler) is where a per-step capacity is meant to bite: `x_s + dt * b0` mixes
+    an UNSCALED `x_s` with a capacity-scaled `b0`, so it has no such cancellation.
+    """
+    _, layer = _two_node_layer([10.0, 10.0])
+    volume = torch.tensor([4.0, 6.0], dtype=torch.float64, requires_grad=True)
+    x0 = torch.tensor([5.0, 3.0], dtype=torch.float64)
+    out = layer.step(
+        x0, torch.tensor([1.0, 1.0], dtype=torch.float64),
+        torch.tensor([0.0, 2.0, 0.0], dtype=torch.float64),
+        torch.zeros(1, dtype=torch.float64), 1.0, capacity=volume,
+    )
+    out.sum().backward()
+    assert volume.grad is not None
+    assert torch.isfinite(volume.grad).all()
+    assert float(volume.grad.abs().max()) > 0.0
