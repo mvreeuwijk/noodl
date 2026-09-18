@@ -4,7 +4,9 @@ Every instance in the leading batch dimensions is solved independently: once an
 instance's residual is below tolerance its state is frozen (the update is masked
 to zero) while other instances keep iterating, and the relaxation factor omega
 switches from its initial (damped) value to 1 once an instance's residual ratio
-drops below ``switch_ratio``, following CONTAM's under-relaxation scheme.
+drops below ``switch_ratio``, following CONTAM's under-relaxation scheme, and falls
+back to the damped value for any instance whose residual failed to shrink under the
+full step (the undamped step on a square-root law cycles ``dp -> -dp`` forever).
 
 ``operator`` returns, at the current iterate, either a ``LinearOperator`` (the
 contract of Milestone 1b) or a plain dense ``(..., m, m)`` tensor for backward
@@ -227,6 +229,12 @@ def newton(
         norm = r.abs().amax(dim=-1)
         ratio = norm / prev_norm.clamp_min(tiny)
         omega_i = torch.where(ratio < switch_ratio, torch.ones_like(omega_i), omega_i)
+        # A step that did not shrink an instance's residual means that instance is
+        # overshooting or cycling -- an undamped step on a ``sign(dp) sqrt(|dp|)`` equation
+        # maps ``dp`` to ``-dp`` exactly (a dead-end sqrt-law edge), so without this fallback
+        # the iterate sat at constant residual until ``max_iter``. Return that instance to
+        # the relaxed step; the switch above re-arms once its residual shrinks again.
+        omega_i = torch.where(ratio >= 1.0, torch.full_like(omega_i, omega), omega_i)
         converged = norm < tol
         iterations += 1
 

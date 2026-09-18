@@ -72,28 +72,42 @@ def _grounded(
     boundary_mask: Tensor,
     *,
     atol: float = 0.0,
+    extra_grounded: Tensor | None = None,
 ) -> Tensor:
     """(..., n) bool: every node's grounded status, by label propagation over active edges.
 
     Assumes `_validate` has already been called. A node is grounded if it is a boundary node,
-    or reachable from one through a chain of edges each with slope strictly greater than
-    `atol` (an active edge connects its endpoints undirected).
+    if `extra_grounded` marks it grounded directly (FR-1: a potential-dependent NODAL source,
+    spec 13.4, is itself a virtual connection to ground -- its positive diagonal shift makes
+    the operator SPD at that node independent of any edge path), or if it is reachable from a
+    grounded node through a chain of edges each with slope strictly greater than `atol` (an
+    active edge connects its endpoints undirected). `extra_grounded`, when given, is
+    `(..., n)` bool and may be batched independently of `boundary_mask` (a node source's
+    slope is a function of the solve point and so can differ per instance, unlike a
+    boundary node's fixed set).
     """
     n = interior_of_node.shape[0]
     b = src.shape[0]
-    batch_shape = slopes.shape[:-1]
+    batch_shape = torch.broadcast_shapes(
+        slopes.shape[:-1], () if extra_grounded is None else extra_grounded.shape[:-1]
+    )
     device = slopes.device
     interior_mask = interior_of_node >= 0
+
+    seed = boundary_mask.to(device=device).expand(batch_shape + (n,))
+    if extra_grounded is not None:
+        seed = seed | extra_grounded.to(device=device, dtype=torch.bool).expand(batch_shape + (n,))
 
     if not bool(interior_mask.any()):
         # No interior nodes: nothing needs grounding; the caller's all(dim=-1) over an empty
         # interior selection is vacuously True regardless of this mask's actual values.
-        return boundary_mask.to(device=device).expand(batch_shape + (n,))
-    if not bool(boundary_mask.any()):
-        # No boundary nodes at all: no interior node can reach one.
+        return seed
+    if not bool(seed.any()):
+        # No boundary node AND no node-source-grounded node at all: no interior node can
+        # reach ground.
         return torch.zeros(batch_shape + (n,), dtype=torch.bool, device=device)
 
-    grounded = boundary_mask.to(device=device).expand(batch_shape + (n,)).clone()
+    grounded = seed.clone()
     active = slopes > atol
     src_idx = src.to(device=device).expand(batch_shape + (b,))
     tgt_idx = tgt.to(device=device).expand(batch_shape + (b,))
@@ -123,6 +137,7 @@ def _certified(
     boundary_mask: Tensor,
     *,
     atol: float = 0.0,
+    extra_grounded: Tensor | None = None,
 ) -> Tensor:
     """(...,) bool: design section 3.1's conditions 2 AND 3, per instance.
 
@@ -147,7 +162,10 @@ def _certified(
     conducts a ground). Assumes `_validate` has already been called.
     """
     interior_mask = interior_of_node >= 0
-    grounded = _grounded(src, tgt, slopes, interior_of_node, boundary_mask, atol=atol)
+    grounded = _grounded(
+        src, tgt, slopes, interior_of_node, boundary_mask, atol=atol,
+        extra_grounded=extra_grounded,
+    )
     return (slopes >= 0).all(dim=-1) & grounded[..., interior_mask].all(dim=-1)
 
 
@@ -159,20 +177,28 @@ def spd_certificate(
     boundary_mask: Tensor,
     *,
     atol: float = 0.0,
+    extra_grounded: Tensor | None = None,
 ) -> Tensor:
     """(...,) bool: per instance, every branch slope is non-negative AND every interior node
-    reaches a boundary node via strictly positive slopes (design section 3.1, conditions 2
-    and 3; condition 1, symmetry, is structural).
+    reaches ground -- either a boundary node via strictly positive slopes, or a node
+    `extra_grounded` marks directly grounded (design section 3.1, conditions 2 and 3;
+    condition 1, symmetry, is structural).
 
     `src`, `tgt`: (b,) LongTensors, shared across the batch (as from `Network.endpoints`).
     `slopes`: (..., b), the per-instance, per-edge slope actually used at this solve.
     `interior_of_node`: (n,) LongTensor, the interior-row index of every node, or a negative
     sentinel for a boundary node. `boundary_mask`: (n,) bool, True at every boundary node.
     `atol`: a slope must strictly exceed this to count as active; `atol=0.0` is the
-    mathematical "strictly positive" condition.
+    mathematical "strictly positive" condition. `extra_grounded` (FR-1): `(..., n)` bool,
+    additional per-instance nodes considered grounded independent of any edge path -- a
+    potential-dependent nodal source's positive diagonal shift (spec 13.4) is exactly such a
+    connection. `None` (the default) changes nothing for a layer with no node sources.
     """
     _validate(src, tgt, slopes, interior_of_node, boundary_mask)
-    return _certified(src, tgt, slopes, interior_of_node, boundary_mask, atol=atol)
+    return _certified(
+        src, tgt, slopes, interior_of_node, boundary_mask, atol=atol,
+        extra_grounded=extra_grounded,
+    )
 
 
 def spd_diagnosis(
@@ -183,6 +209,7 @@ def spd_diagnosis(
     boundary_mask: Tensor,
     *,
     atol: float = 0.0,
+    extra_grounded: Tensor | None = None,
 ) -> list[dict]:
     """Per FAILING instance (flat batch index), in ascending instance order:
         {"instance": int,
@@ -191,13 +218,16 @@ def spd_diagnosis(
          "nodes": list[int]}   # NODE indices (not interior rows) of ungrounded interior nodes
     reason is "negative_slope" if any edge has slope < 0, else "ungrounded". Both lists are
     always present. Called ONLY on the failure path; a Python loop over failing instances is
-    acceptable here and nowhere else in grounding.py.
+    acceptable here and nowhere else in grounding.py. `extra_grounded`: see `spd_certificate`.
     """
     _validate(src, tgt, slopes, interior_of_node, boundary_mask)
     interior_mask = interior_of_node >= 0
     node_indices = torch.arange(interior_of_node.shape[0])
 
-    grounded = _grounded(src, tgt, slopes, interior_of_node, boundary_mask, atol=atol)
+    grounded = _grounded(
+        src, tgt, slopes, interior_of_node, boundary_mask, atol=atol,
+        extra_grounded=extra_grounded,
+    )
     # The SAME condition `spd_certificate` applies, so an instance the certificate refuses
     # always has a record here (before I1 the two disagreed for a grounded instance with a
     # negative slope: the certificate said True and the diagnosis, keyed on grounding alone,
@@ -207,7 +237,12 @@ def spd_diagnosis(
     failing = ~certified
 
     b = src.shape[0]
-    flat_slopes = slopes.reshape(-1, b)
+    # `grounded`'s own batch shape is the authority (it may be broader than `slopes`'s when
+    # `extra_grounded` carries a leading batch `slopes` does not, e.g. a per-instance node
+    # source slope over an otherwise unbatched edge set): expand `slopes` to match before
+    # flattening, rather than assume the two already agree.
+    batch_shape = failing.shape
+    flat_slopes = slopes.expand(batch_shape + (b,)).reshape(-1, b)
     flat_grounded = grounded.reshape(-1, grounded.shape[-1])
     flat_failing = failing.reshape(-1)
 

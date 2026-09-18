@@ -1,5 +1,9 @@
 """Multi-species transport on nodal scalars advected by signed branch flows.
 
+The interior capacity ``V`` is fixed at construction, and ``step``/``steady``/``rate``
+accept an optional per-call ``capacity=`` that replaces it (spec 4.6b); ``Model`` supplies
+it from the driver ``"<layer>.capacity"`` when a closure writes one.
+
 For interior capacity ``V`` (volume, or heat capacity), signed branch flow ``q``
 on the edges of ``flow_kind`` (one edge kind, or several: ``q`` then carries the
 kinds' flows concatenated in ``flow_kinds`` order, which is what
@@ -403,18 +407,55 @@ class TransportLayer:
             flat = flat.index_add(-1, rows * n + cols, sign * g)
         return flat.reshape(g.shape[:-1] + (n, n))
 
-    def _advection_operator(self, q: torch.Tensor) -> AdvectionOperator:
+    def _capacity_arg(self, capacity: torch.Tensor | None) -> torch.Tensor:
+        """Validate an optional PER-STEP capacity (spec 4.6b), else `self.capacity`.
+
+        The construction-time capacity is the default and nothing changes for a layer whose
+        storage is fixed. A layer whose capacity is a function of the state -- a sewer
+        conduit's wetted volume, a headspace volume above a moving water surface -- is
+        handed a fresh tensor per step, computed by the closure that owns the hydraulics and
+        passed in by `Model._pass` from the driver `"<layer>.capacity"`. It must be strictly
+        POSITIVE on every active interior node: a node with zero capacity cannot hold a
+        concentration at all (its `dx/dt = .../V` is infinite), which is a modelling error
+        to name, not a division to let through.
+        """
+        if capacity is None:
+            return self.capacity
+        cap = torch.as_tensor(capacity)
+        if cap.dim() == 0 or cap.shape[-1] != self.n_i:
+            got = cap.shape[-1] if cap.dim() >= 1 else 0
+            raise ValueError(
+                f"TransportLayer '{self.name}': capacity has {got} entries "
+                f"(shape {tuple(cap.shape)}), expected {self.n_i} active interior nodes"
+            )
+        nonpositive = cap <= 0
+        if bool(nonpositive.any()):
+            flat = nonpositive.reshape(-1, nonpositive.shape[-1]).any(0)
+            names = [
+                self.net.nodes[int(self.interior_idx[i])]
+                for i in flat.nonzero().flatten().tolist()
+            ]
+            raise ValueError(
+                f"TransportLayer '{self.name}': capacity must be strictly positive on "
+                f"every active interior node; non-positive at {names}"
+            )
+        return cap
+
+    def _advection_operator(
+        self, q: torch.Tensor, capacity: torch.Tensor | None = None
+    ) -> AdvectionOperator:
         dtype = q.dtype
         src, tgt = self._flow_src, self._flow_tgt
         conduction = None
         if self._conduction_edges is not None:
             csrc, ctgt, g = self._conduction_edges
             conduction = (csrc, ctgt, g.to(dtype))
+        cap = self.capacity if capacity is None else capacity
         return AdvectionOperator(
             src, tgt,
             flow=self.carrier.to(dtype) * q,
             transmission=self.transmission.to(dtype),
-            capacity=self.capacity.to(dtype),
+            capacity=cap.to(dtype),
             n_interior=self.n_i,
             interior_of_node=self._interior_of_node,
             kinetics=self.kinetics.to(dtype) if self.kinetics is not None else None,
@@ -428,9 +469,11 @@ class TransportLayer:
         )
 
     # ------------------------------------------------------------ assembly
-    def _capacity_stacked(self, dtype: torch.dtype) -> torch.Tensor:
+    def _capacity_stacked(
+        self, dtype: torch.dtype, capacity: torch.Tensor | None = None
+    ) -> torch.Tensor:
         K, n_i = self.n_species, self.n_i
-        c = self.capacity.to(dtype)
+        c = (self.capacity if capacity is None else capacity).to(dtype)
         c = c.unsqueeze(-2).expand(*c.shape[:-1], K, n_i)
         return c.reshape(*c.shape[:-2], K * n_i)
 
@@ -448,9 +491,15 @@ class TransportLayer:
             dim=-2,
         )
 
-    def operator(self, q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def operator(
+        self, q: torch.Tensor, capacity: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         net, K, n_i, n_b = self.net, self.n_species, self.n_i, self.n_b
         dtype = q.dtype
+        # FR-7: `cap_t` names the resolved per-step capacity everywhere else in this file
+        # (`rate`, `step`, `steady`, `_implicit_step_sparse`, `_trapezoidal_step_sparse`);
+        # this used to be the one place calling it `capacity_t` instead.
+        cap_t = self.capacity if capacity is None else capacity
         Up = self._selectors(net.upwind, q).to(dtype)    # (..., b_flow, n)
         Dn = self._selectors(net.downwind, q).to(dtype)  # (..., b_flow, n)
         w = self.carrier.to(dtype) * q.abs()            # (..., b_flow)
@@ -476,7 +525,7 @@ class TransportLayer:
         # rescales removal/kinetics by 1/capacity too, which is wrong: e.g. the decay-chain
         # kinetics test below expects rate constants l1, l2 unchanged by capacity=1000, and
         # the removal test expects exp(-rate * t) with capacity=500 not entering at all.
-        cap = self.capacity.to(dtype).unsqueeze(-2).unsqueeze(-1)  # (..., 1, n_i, 1)
+        cap = cap_t.to(dtype).unsqueeze(-2).unsqueeze(-1)  # (..., 1, n_i, 1)
         Gii = Gii / cap
         Gib = Gib / cap
 
@@ -559,31 +608,28 @@ class TransportLayer:
                 f"nonzero at {bad}"
             )
 
-    def rate(self, x, q, sources, x_boundary) -> torch.Tensor:
+    def rate(self, x, q, sources, x_boundary, *, capacity=None) -> torch.Tensor:
         """dx/dt = M x + N x_b + sources / capacity at (x, q); x's layout and dtype.
 
         The balance `Model.residuals` reports for a transport layer, and the oracle the
         energy-balance tests check against. Zero at the fixed point of `steady`.
+        `capacity` (keyword-only, spec 4.6b) overrides the construction-time capacity for
+        this call only; see `_capacity_arg`.
         """
         dtype = torch.float64
+        cap = self._capacity_arg(capacity)
         x_s, reduced = self._to_stacked(x.to(dtype), self.n_i, "x")
-        op = self._advection_operator(q.to(dtype))
+        op = self._advection_operator(q.to(dtype), cap)
         xb_s, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
         src_s, _ = self._to_stacked(
             self._sources_interior(sources).to(dtype), self.n_i, "sources"
         )
-        r = op.matvec(x_s) + op.boundary_forcing(xb_s) + src_s / self._capacity_stacked(dtype)
+        r = (
+            op.matvec(x_s)
+            + op.boundary_forcing(xb_s)
+            + src_s / self._capacity_stacked(dtype, cap)
+        )
         return self._from_stacked(r.to(x.dtype), self.n_i, reduced)
-
-    def _forcing(
-        self, sources: torch.Tensor, x_boundary: torch.Tensor, N: torch.Tensor, dtype: torch.dtype
-    ) -> tuple[torch.Tensor, bool]:
-        src_s, reduced = self._to_stacked(self._sources_interior(sources), self.n_i, "sources")
-        xb_s, _ = self._to_stacked(x_boundary, self.n_b, "x_boundary")
-        src_s, xb_s = src_s.to(dtype), xb_s.to(dtype)
-        cap = self._capacity_stacked(dtype)
-        b0 = (N @ xb_s.unsqueeze(-1)).squeeze(-1) + src_s / cap
-        return b0, reduced
 
     # ------------------------------------------------------------ stepping
     def step(
@@ -595,6 +641,7 @@ class TransportLayer:
         dt: float,
         *,
         on_failure: str = "raise",
+        capacity: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Advance one timestep under `self.scheme`.
 
@@ -609,7 +656,8 @@ class TransportLayer:
         `on_failure="return"`: there is no `SolveResult` for it to produce, and silently
         falling back to `"raise"` behaviour would make the argument look like it had an
         effect it does not have. `on_failure="return"` with `scheme="exact"` therefore
-        raises `ValueError` naming the layer.
+        raises `ValueError` naming the layer. `capacity` (keyword-only, spec 4.6b) overrides
+        the construction-time capacity for this call only.
         """
         if on_failure not in ("raise", "return"):
             raise ValueError(
@@ -631,28 +679,29 @@ class TransportLayer:
             )
         out_dtype = x.dtype
         dtype = torch.float64
+        cap_t = self._capacity_arg(capacity)
         x_s, reduced = self._to_stacked(x, self.n_i, "x")
         x_s = x_s.to(dtype)
         if self.scheme == "exact":
-            op = self._advection_operator(q.to(dtype))
+            op = self._advection_operator(q.to(dtype), cap_t)
             xb_s, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
             src_s, _ = self._to_stacked(
                 self._sources_interior(sources.to(dtype)), self.n_i, "sources"
             )
-            cap = self._capacity_stacked(dtype)
+            cap = self._capacity_stacked(dtype, cap_t)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
             result, _substeps = _expm_action(
                 op, x_s, b0, dt, where=f"TransportLayer '{self.name}' exact step"
             )
         elif self.scheme == "implicit":
             result, reduced = self._implicit_step_sparse(
-                x, q, sources, x_boundary, dt, on_failure
+                x, q, sources, x_boundary, dt, on_failure, cap_t
             )
             if on_failure == "return":
                 return result
         elif self.scheme == "trapezoidal":
             result, reduced = self._trapezoidal_step_sparse(
-                x, q, sources, x_boundary, dt, on_failure
+                x, q, sources, x_boundary, dt, on_failure, cap_t
             )
             if on_failure == "return":
                 return result
@@ -665,7 +714,7 @@ class TransportLayer:
 
     def steady(
         self, q: torch.Tensor, sources: torch.Tensor, x_boundary: torch.Tensor,
-        *, on_failure: str = "raise",
+        *, on_failure: str = "raise", capacity: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Solve `0 = M x + N x_b + sources / capacity` for the steady-state `x`.
 
@@ -677,7 +726,8 @@ class TransportLayer:
         `solvers.select.solve` directly (not reshaped by `_from_stacked`): a `SolveResult`
         is not a plain `Tensor`, so it cannot be a single `torch.autograd.Function`'s output
         the way the default `Tensor` return is. Return type on that path is therefore
-        `torch.Tensor | SolveResult` (amendment A8).
+        `torch.Tensor | SolveResult` (amendment A8). `capacity` (keyword-only, spec 4.6b)
+        overrides the construction-time capacity for this call only.
         """
         if on_failure not in ("raise", "return"):
             raise ValueError(
@@ -685,33 +735,36 @@ class TransportLayer:
                 f"expected 'raise' or 'return'"
             )
         dtype = torch.float64
+        cap_t = self._capacity_arg(capacity).to(dtype)
         q = q.to(dtype)
         sources = sources.to(dtype)
         x_boundary = x_boundary.to(dtype)
         _, reduced = self._to_stacked(self._sources_interior(sources), self.n_i, "sources")
 
-        def build_system(q_, sources_, xb_):
-            op = self._advection_operator(q_)
+        def build_system(q_, sources_, xb_, cap_):
+            op = self._advection_operator(q_, cap_)
             xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
             src_s, _ = self._to_stacked(self._sources_interior(sources_), self.n_i, "sources")
-            cap = self._capacity_stacked(dtype)
+            cap = self._capacity_stacked(dtype, cap_)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
             return op, -b0
 
         if on_failure == "return":
-            op, rhs = build_system(q, sources, x_boundary)
+            op, rhs = build_system(q, sources, x_boundary, cap_t)
             return _solve_operator(
                 op, rhs, method="auto", on_failure="return",
                 where=f"TransportLayer '{self.name}' steady",
             )
         x_s = _linear_solve(
-            build_system, f"TransportLayer '{self.name}' steady", q, sources, x_boundary
+            build_system, f"TransportLayer '{self.name}' steady",
+            q, sources, x_boundary, cap_t,
         )
         return self._from_stacked(x_s, self.n_i, reduced)
 
     def _implicit_step_sparse(
         self, x: torch.Tensor, q: torch.Tensor, sources: torch.Tensor,
         x_boundary: torch.Tensor, dt: float, on_failure: str,
+        capacity: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Backward Euler `(I - dt M) x_{n+1} = x_n + dt b0` on the operator contract."""
         dtype = torch.float64
@@ -719,21 +772,22 @@ class TransportLayer:
         q = q.to(dtype)
         sources = sources.to(dtype)
         x_boundary = x_boundary.to(dtype)
+        cap_t = self._capacity_arg(capacity).to(dtype)
         _, reduced = self._to_stacked(x, self.n_i, "x")
 
-        def build_system(x_, q_, sources_, xb_):
-            op = self._advection_operator(q_)
+        def build_system(x_, q_, sources_, xb_, cap_):
+            op = self._advection_operator(q_, cap_)
             xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
             src_s, _ = self._to_stacked(self._sources_interior(sources_), self.n_i, "sources")
             x_s, _ = self._to_stacked(x_, self.n_i, "x")
-            cap = self._capacity_stacked(dtype)
+            cap = self._capacity_stacked(dtype, cap_)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
             rhs = x_s + dt * b0
             system = _AffineSystemOperator(op, dt)
             return system, rhs
 
         if on_failure == "return":
-            system, rhs = build_system(x, q, sources, x_boundary)
+            system, rhs = build_system(x, q, sources, x_boundary, cap_t)
             result = _solve_operator(
                 system, rhs, method="auto", on_failure="return",
                 where=f"TransportLayer '{self.name}' implicit step",
@@ -741,13 +795,14 @@ class TransportLayer:
             return result, reduced
         x_s = _linear_solve(
             build_system, f"TransportLayer '{self.name}' implicit step",
-            x, q, sources, x_boundary,
+            x, q, sources, x_boundary, cap_t,
         )
         return x_s, reduced
 
     def _trapezoidal_step_sparse(
         self, x: torch.Tensor, q: torch.Tensor, sources: torch.Tensor,
         x_boundary: torch.Tensor, dt: float, on_failure: str,
+        capacity: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Crank-Nicolson `(I - dt/2 M) x_{n+1} = (I + dt/2 M) x_n + dt b0` on the operator
         contract."""
@@ -756,21 +811,22 @@ class TransportLayer:
         q = q.to(dtype)
         sources = sources.to(dtype)
         x_boundary = x_boundary.to(dtype)
+        cap_t = self._capacity_arg(capacity).to(dtype)
         _, reduced = self._to_stacked(x, self.n_i, "x")
 
-        def build_system(x_, q_, sources_, xb_):
-            op = self._advection_operator(q_)
+        def build_system(x_, q_, sources_, xb_, cap_):
+            op = self._advection_operator(q_, cap_)
             xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
             src_s, _ = self._to_stacked(self._sources_interior(sources_), self.n_i, "sources")
             x_s, _ = self._to_stacked(x_, self.n_i, "x")
-            cap = self._capacity_stacked(dtype)
+            cap = self._capacity_stacked(dtype, cap_)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
             rhs = x_s + 0.5 * dt * op.matvec(x_s) + dt * b0
             system = _AffineSystemOperator(op, 0.5 * dt)
             return system, rhs
 
         if on_failure == "return":
-            system, rhs = build_system(x, q, sources, x_boundary)
+            system, rhs = build_system(x, q, sources, x_boundary, cap_t)
             result = _solve_operator(
                 system, rhs, method="auto", on_failure="return",
                 where=f"TransportLayer '{self.name}' trapezoidal step",
@@ -778,7 +834,7 @@ class TransportLayer:
             return result, reduced
         x_s = _linear_solve(
             build_system, f"TransportLayer '{self.name}' trapezoidal step",
-            x, q, sources, x_boundary,
+            x, q, sources, x_boundary, cap_t,
         )
         return x_s, reduced
 

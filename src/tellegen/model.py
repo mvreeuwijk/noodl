@@ -10,10 +10,16 @@ changing.
 Keys. State: "<layer>.phi" (full-node order), "<layer>.q" (the layer's kind order),
 "<layer>.x" (interior order, (n_i,) or (n_i, K)). Drivers: "<layer>.phi_boundary",
 "<layer>.x_boundary", optional "<layer>.sources" (FULL-node order, zeros on boundary and
-inactive nodes). Closures return driver updates; they may not write state keys. A transport
-layer whose kinds no potential layer provides reads its branch flows from the driver
-"<layer>.q", in the layer's own flow_kinds order; a layer with both a potential owner and
-that driver raises.
+inactive nodes), optional "<layer>.capacity" (a transport layer's per-step capacity
+override, spec 4.6b; absent, the layer's construction-time capacity stands). Closures
+return driver updates; they may not write state keys. A transport layer whose kinds no
+potential layer provides reads its branch flows from the driver "<layer>.q", in the layer's
+own flow_kinds order; a layer with both a potential owner and that driver raises. A closure
+may also declare `state_keys`, keys it carries across steps itself (spec 4.6a); those are
+copied from its return into the returned state, evaluated from the step-start state in
+every pass of a coupling that takes more than one (N1) -- never fed forward from an earlier
+pass's own output, which would integrate a stateful closure once per pass instead of once
+per step.
 
 `**solve_kwargs` of `step`/`steady` reach the POTENTIAL solves only (`differentiable`,
 `on_failure`, `method`, Newton kwargs). Transport steps always raise on failure.
@@ -122,6 +128,32 @@ class Model:
                 raise ValueError(
                     f"Model: layer {name!r} is built on a different Network than the model"
                 )
+        # Moved here (was computed at the very end of __init__) so that FR-2's
+        # closure_state_keys check below can consult `self.flow_layer_of` -- both only need
+        # `self.potential`/`self.transport`, already built above, and nothing between here
+        # and the old position read them first.
+        self.flow_layer_of: dict[str, str | None] = {}
+        self.flow_driver_of: dict[str, str] = {}
+        for tname, tl in self.transport.items():
+            owners = [
+                pn for pn, pl in self.potential.items()
+                if all(k in pl.kinds for k in tl.flow_kinds)
+            ]
+            # Spec section 5, "Model: driver-prescribed flows". Two potential layers both
+            # providing a transport layer's kinds is still ambiguous and still refused here.
+            # ZERO owners is no longer an error: the flows are then read from the driver
+            # "<layer>.q", which a closure writes -- the street application's whole
+            # architecture (prescribed canyon fluxes, routed at intersections) depends on
+            # it. The driver's PRESENCE cannot be checked here, because drivers arrive per
+            # call; `_kind_flows` does that, and refuses a layer that has both sources.
+            if len(owners) > 1:
+                raise ValueError(
+                    f"Model: transport layer {tname!r} advects on kinds {tl.flow_kinds}, "
+                    f"which {len(owners)} potential layers of this model provide "
+                    f"({owners}); at most one may"
+                )
+            self.flow_layer_of[tname] = owners[0] if owners else None
+            self.flow_driver_of[tname] = f"{tname}.q"
         self.closures = list(closures)
         # Both callability checks are made HERE, not at the first `step`: a non-callable
         # closure or a reaction without `apply` would otherwise surface a bare
@@ -134,6 +166,44 @@ class Model:
                     f"callable; a closure is called as closure(state, drivers) and returns "
                     f"driver updates"
                 )
+        # CLOSURE-CARRIED STATE (spec 4.6a). A closure may declare
+        # `state_keys: tuple[str, ...]`: keys it both READS from the state and WRITES back
+        # every call, which `_pass` copies from its return into the returned state. They are
+        # neither drivers (they persist across steps) nor layer state (no layer owns them);
+        # a sewer manhole level under `storage=True`, or a tank level and the controlled
+        # links' status in the water application, are the motivating cases. Two closures
+        # claiming one key is refused HERE, naming both, rather than resolved by whichever
+        # ran last.
+        self.closure_state_keys: dict[str, Closure] = {}
+        for closure in self.closures:
+            for key in getattr(closure, "state_keys", ()):
+                head, _, tail = str(key).rpartition(".")
+                if head in self.layers and tail in _STATE_SUFFIXES:
+                    # FR-2: mirror `_apply_closures`' own ownerless-"<layer>.q" carve-out --
+                    # for a transport layer no potential layer owns, "<layer>.q" is the
+                    # DRIVER a flow closure writes, not that layer's state, so a closure may
+                    # declare it as state_keys (a flow closure that also remembers its own
+                    # last-written flow across steps is exactly this shape). Every other
+                    # "<layer>.phi/q/x" stays refused, including "<layer>.q" for a layer a
+                    # potential layer DOES own.
+                    prescribed = (
+                        tail == "q"
+                        and head in self.transport
+                        and self.flow_layer_of.get(head) is None
+                    )
+                    if not prescribed:
+                        raise ValueError(
+                            f"Model: closure {closure!r} declares state_keys entry {key!r}, "
+                            f"which is layer {head!r}'s own state key; a closure may carry "
+                            f"its OWN state, never a layer's"
+                        )
+                if key in self.closure_state_keys:
+                    raise ValueError(
+                        f"Model: closures {self.closure_state_keys[key]!r} and "
+                        f"{closure!r} both declare the state key {key!r}; exactly one "
+                        f"closure may own a state key"
+                    )
+                self.closure_state_keys[key] = closure
         self.reactions = list(reactions)
         for lname, reaction in self.reactions:
             if lname not in self.transport:
@@ -194,28 +264,6 @@ class Model:
                     f"Model: substeps[{name!r}] must be >= 1, got {k!r}"
                 )
             self.substeps[name] = k_int
-        self.flow_layer_of: dict[str, str | None] = {}
-        self.flow_driver_of: dict[str, str] = {}
-        for tname, tl in self.transport.items():
-            owners = [
-                pn for pn, pl in self.potential.items()
-                if all(k in pl.kinds for k in tl.flow_kinds)
-            ]
-            # Spec section 5, "Model: driver-prescribed flows". Two potential layers both
-            # providing a transport layer's kinds is still ambiguous and still refused here.
-            # ZERO owners is no longer an error: the flows are then read from the driver
-            # "<layer>.q", which a closure writes -- the street application's whole
-            # architecture (prescribed canyon fluxes, routed at intersections) depends on
-            # it. The driver's PRESENCE cannot be checked here, because drivers arrive per
-            # call; `_kind_flows` does that, and refuses a layer that has both sources.
-            if len(owners) > 1:
-                raise ValueError(
-                    f"Model: transport layer {tname!r} advects on kinds {tl.flow_kinds}, "
-                    f"which {len(owners)} potential layers of this model provide "
-                    f"({owners}); at most one may"
-                )
-            self.flow_layer_of[tname] = owners[0] if owners else None
-            self.flow_driver_of[tname] = f"{tname}.q"
 
     # ----------------------------------------------------------------- helpers
     @staticmethod
@@ -226,8 +274,21 @@ class Model:
             raise KeyError(f"Model: driver {key!r} is required and was not given") from exc
 
     def _apply_closures(
-        self, state: Mapping[str, Tensor], drivers: Mapping[str, Tensor]
+        self,
+        state: Mapping[str, Tensor],
+        drivers: Mapping[str, Tensor],
+        written: set[str] | None = None,
     ) -> Drivers:
+        """Run every closure, in order, over `drivers`; return the resulting drivers.
+
+        `written` (keyword-out-parameter, like `solve`'s `diagnostics`; `None` by default so
+        every existing caller -- including several apps' tests that call this directly -- is
+        unaffected) is filled with whichever `closure_state_keys` some closure's OWN return
+        actually wrote THIS call: N14's fix. A same-named entry already sitting in `drivers`
+        (the caller's own, unrelated to any closure) must not be mistaken for a closure
+        having written its declared state key -- `key in drv` alone cannot tell the two
+        apart, since `drv` starts as a copy of `drivers`.
+        """
         drv: Drivers = dict(drivers)
         for closure in self.closures:
             for key, value in closure(state, drv).items():
@@ -253,6 +314,8 @@ class Model:
                             f"potential layer provides)"
                         )
                 drv[key] = value
+                if written is not None and key in self.closure_state_keys:
+                    written.add(key)
         return drv
 
     def _zero_sources(self, layer: TransportLayer, like: Tensor, n_like: int) -> Tensor:
@@ -314,7 +377,19 @@ class Model:
         It defaults to `state`, which is what a single ping-pong pass wants.
         """
         base: State = state if step_from is None else step_from
-        drv = self._apply_closures(state, drivers)
+        # N1: closure-carried state (spec 4.6a) must be evaluated from the STEP-START state
+        # on every pass, never from the previous pass's own output -- a closure that
+        # integrates (adds dt each call) would otherwise integrate once per PASS instead of
+        # once per STEP, because `_iterate` feeds pass k-1's output into pass k. Every other
+        # key a closure reads still sees `state` (pass k-1's relaxed transport `.x`, which is
+        # exactly what the relaxed coupling wants); only the keys this model's closures
+        # themselves carry are pinned to `base`.
+        closure_state: State = dict(state)
+        for key in self.closure_state_keys:
+            if key in base:
+                closure_state[key] = base[key]
+        written: set[str] = set()
+        drv = self._apply_closures(closure_state, drivers, written)
         new: State = dict(state)
         diag: dict = {}
         for name, layer in self.potential.items():
@@ -330,6 +405,11 @@ class Model:
             q_kind = self._kind_flows(name, new, drv)
             xb = self._require(drv, f"{name}.x_boundary")
             sources = drv.get(f"{name}.sources")
+            # Spec 4.6b: a per-step capacity, written by a closure that owns the geometry
+            # (a sewer conduit's wetted volume, a headspace volume). Absent, the layer's
+            # construction-time capacity stands, so nothing changes for a fixed-storage
+            # layer. Shape and positivity are checked by the layer, naming the nodes.
+            cap = drv.get(f"{name}.capacity")
             if dt is None:
                 if sources is None:
                     # The state's own `x` is the layout authority when it is there; `x_b`
@@ -340,7 +420,7 @@ class Model:
                         if like is None
                         else self._zero_sources(layer, like, layer.n_i)
                     )
-                x = layer.steady(q_kind, sources, xb)
+                x = layer.steady(q_kind, sources, xb, capacity=cap)
             else:
                 x = base.get(f"{name}.x")
                 if x is None:
@@ -352,12 +432,27 @@ class Model:
                     sources = self._zero_sources(layer, x, layer.n_i)
                 k = self.substeps[name]
                 for _ in range(k):
-                    x = layer.step(x, q_kind, sources, xb, dt / k)
+                    x = layer.step(x, q_kind, sources, xb, dt / k, capacity=cap)
                 for lname, reaction in self.reactions:
                     if lname == name:
                         x = reaction.apply(x, dt, drv)
             new[f"{name}.x"] = x
             diag[name] = {"substeps": self.substeps[name]}
+        # Closure-carried state (spec 4.6a): a declared key is copied OUT of the closure's
+        # return into the state, so the next step's closures read it back. A closure that
+        # declares a key and does not write it every call would freeze that state silently,
+        # so the omission is refused by name instead. N14: the check is on `written` (which
+        # closure ACTUALLY returned it this call), not on `key in drv` -- a same-named
+        # DRIVER the caller passed in would otherwise already be sitting in `drv` and defeat
+        # this check, freezing the closure's state at the caller's value with no error.
+        for key, closure in self.closure_state_keys.items():
+            if key not in written:
+                raise KeyError(
+                    f"Model: closure {closure!r} declares the state key {key!r} but did "
+                    f"not return it; a closure must write every key it declares on every "
+                    f"call"
+                )
+            new[key] = drv[key]
         return new, diag, drv
 
     # ------------------------------------------------------------------ public
@@ -393,10 +488,15 @@ class Model:
 
         The relaxation takes a pass to start: `prev` is None after pass 1, so pass 2 is fed
         pass 1's transport states UNRELAXED, and pass 3 is the first fed a mean. From there
-        the state fed to the closures on pass k is the mean of passes k-2 and k-1 (Hensen
-        1995, successive substitution with 0.5 relaxation). The returned state is the LAST
-        pass's own output, never a relaxed one. Convergence is judged per instance on
-        detached copies; the passes themselves stay on the autograd graph (unrolled).
+        the "<layer>.x" state fed to the closures on pass k is the mean of passes k-2 and
+        k-1 (Hensen 1995, successive substitution with 0.5 relaxation). CLOSURE-CARRIED
+        state (spec 4.6a, `closure_state_keys`) is the one exception to that relaxation: it
+        is evaluated from the STEP-START state on every pass, never fed forward from the
+        previous pass's own output (N1) -- a closure that integrates (a sewer manhole's
+        storage sweep, a tank level) would otherwise advance once per PASS instead of once
+        per STEP. The returned state is the LAST pass's own output, never a relaxed one.
+        Convergence is judged per instance on detached copies; the passes themselves stay on
+        the autograd graph (unrolled).
 
         The fixed point is therefore differentiated by unrolling, which carries the whole
         chain of passes on the graph. An implicit-function treatment of the fixed point (one
@@ -479,7 +579,10 @@ class Model:
             sources = drv.get(f"{name}.sources")
             if sources is None:
                 sources = self._zero_sources(layer, x, layer.n_i)
-            out[name] = layer.rate(x, self._kind_flows(name, state, drv), sources, xb)
+            out[name] = layer.rate(
+                x, self._kind_flows(name, state, drv), sources, xb,
+                capacity=drv.get(f"{name}.capacity"),
+            )
         return out
 
     def ports(self, state) -> Ports:

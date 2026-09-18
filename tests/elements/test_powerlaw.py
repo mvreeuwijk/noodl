@@ -199,6 +199,26 @@ def test_orifice_forwards_kind_learnable_and_transition_kwargs():
     assert el.regularised == 1e-5
 
 
+def test_orifice_keeps_a_float64_tensor_arguments_own_dtype():
+    """N2 (core half): Cd/A given as tensors must not be silently downcast to
+    torch.get_default_dtype() (float32 in this project); a bare Python float still takes
+    it, unchanged."""
+    Cd64 = torch.tensor(0.6, dtype=torch.float64)
+    A64 = torch.tensor(0.02, dtype=torch.float64)
+    el64 = Orifice(Cd64, A64, rho=1.2)
+    assert el64.C.dtype == torch.float64
+    assert el64.n.dtype == torch.float64
+    expected_C = 0.6 * 0.02 * math.sqrt(2.0 / 1.2)
+    torch.testing.assert_close(el64.C, torch.tensor(expected_C, dtype=torch.float64))
+
+    el_float = Orifice(0.6, 0.02, rho=1.2)
+    assert el_float.C.dtype == torch.get_default_dtype()
+    assert el_float.n.dtype == torch.get_default_dtype()
+    torch.testing.assert_close(
+        el_float.C, torch.tensor(expected_C, dtype=torch.get_default_dtype())
+    )
+
+
 def test_gradcheck_flow_wrt_learnable_C():
     n = torch.tensor(0.6, dtype=torch.float64)
     C = torch.tensor(1.3, dtype=torch.float64, requires_grad=True)

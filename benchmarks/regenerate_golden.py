@@ -156,6 +156,28 @@ def _munich_idealised_case() -> dict:
             for panel, row in out.items()}
 
 
+def _sewer_tree_case() -> dict:
+    """Steady water, air and quality on the committed sewer fixture (row G1)."""
+    from tellegen.apps.sewer.network import build_sewer_model, sewer_steady, tree_steady
+
+    model, state, drivers = build_sewer_model(tree_steady())
+    final = sewer_steady(model, state, drivers)
+    return {key: value.flatten().tolist() for key, value in sorted(final.items())}
+
+
+def _water_twoloop_case() -> dict:
+    """Row G2: steady heads and flows on the committed two-loop water fixture.
+
+    Built from `twoloop()` rather than from the `.inp`, so regenerating the golden does not
+    depend on the reader; `test_water_parity.py` pins that the two agree.
+    """
+    from tellegen.apps.water.network import build_water_model, twoloop, water_steady
+
+    model, state, drivers = build_water_model(twoloop())
+    final = water_steady(model, state, drivers)
+    return {key: value.flatten().tolist() for key, value in sorted(final.items())}
+
+
 def main() -> None:
     data = {
         "series": _series_case(),
@@ -171,6 +193,10 @@ def main() -> None:
     print("wrote tests/golden/impaq_test_network.json")
     save_golden("munich_idealised", _munich_idealised_case())
     print("wrote tests/golden/munich_idealised.json")
+    save_golden("water_twoloop", _water_twoloop_case())
+    print("wrote tests/golden/water_twoloop.json")
+    save_golden("sewer_tree", _sewer_tree_case())
+    print("wrote tests/golden/sewer_tree.json")
 
 
 if __name__ == "__main__":

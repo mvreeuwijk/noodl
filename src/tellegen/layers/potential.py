@@ -13,6 +13,7 @@ import torch
 
 from tellegen.drives import Drive, check_drive_signature
 from tellegen.elements.base import Element
+from tellegen.nodesources import NodeSource
 from tellegen.operators.graph import GraphLaplacianOperator
 from tellegen.solvers.grounding import spd_certificate, spd_diagnosis
 from tellegen.solvers.implicit import adjoint as _adjoint_solve
@@ -38,6 +39,59 @@ from tellegen.topology import Network
 _LINEAR_SOLVERS = ("auto", "cg", "gmres", "direct", "sparse_direct")
 
 
+class _DiagonalShifted:
+    """`A_I diag(g) A_I^T + diag(d)`: the Jacobian of a layer carrying potential-dependent
+    NODAL sources (spec 13.4), satisfying the LinearOperator duck type
+    `solvers.select.solve` reads.
+
+    The shift is symmetric by construction, so the whole operator stays symmetric and the
+    adjoint's `rmatvec` is still the forward action. The SPD certificate is delegated to the
+    Laplacian and kept ONLY when every shift entry is non-negative: a non-negative diagonal
+    added to an SPD matrix is SPD, while a negative one could destroy definiteness, so the
+    certificate is dropped there rather than asserted (`solvers.select.solve` then routes to
+    GMRES, which needs none).
+    """
+
+    symmetric = True
+
+    def __init__(self, base: GraphLaplacianOperator, diag: torch.Tensor) -> None:
+        self.base = base
+        self.diag_shift = diag
+        self.shape = torch.broadcast_shapes(base.shape[:-2], diag.shape[:-1]) + base.shape[-2:]
+        self.dtype = base.dtype
+        self.device = base.device
+
+    def matvec(self, x: torch.Tensor) -> torch.Tensor:
+        return self.base.matvec(x) + self.diag_shift * x
+
+    def rmatvec(self, x: torch.Tensor) -> torch.Tensor:
+        return self.base.rmatvec(x) + self.diag_shift * x
+
+    def diagonal(self) -> torch.Tensor:
+        return self.base.diagonal() + self.diag_shift
+
+    def assemble(self) -> torch.Tensor:
+        return self.base.assemble() + torch.diag_embed(
+            self.diag_shift.expand(self.shape[:-1])
+        )
+
+    def assemble_sparse(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        row, col, values = self.base.assemble_sparse()
+        n_i = self.base.n_interior
+        idx = torch.arange(n_i, dtype=torch.int64, device=row.device)
+        shift = self.diag_shift.expand(values.shape[:-1] + (n_i,))
+        return (
+            torch.cat([row, idx]),
+            torch.cat([col, idx]),
+            torch.cat([values, shift], dim=-1),
+        )
+
+    def spd_certificate(self):
+        if bool((self.diag_shift < 0).any()):
+            return None
+        return self.base.spd_certificate()
+
+
 class PotentialFlowLayer:
     def __init__(
         self,
@@ -48,6 +102,7 @@ class PotentialFlowLayer:
         boundary: Sequence = (),
         linear_solver: str = "auto",
         *,
+        node_sources: Sequence[NodeSource] = (),
         quantity: str = "potential",
         unit: str = "",
     ) -> None:
@@ -163,6 +218,35 @@ class PotentialFlowLayer:
         self._boundary_mask = torch.zeros(net.n, dtype=torch.bool)
         self._boundary_mask[self.bound] = True
 
+        # POTENTIAL-DEPENDENT NODAL SOURCES (spec 13.4). Empty by default, so every
+        # existing layer is unchanged. Each source's nodes must be INTERIOR unknowns of
+        # this layer: a withdrawal at a prescribed node is absorbed by the boundary and
+        # changes nothing, and one at an inactive node has no row to enter -- both are
+        # wiring mistakes, named here rather than silently dropped. `_source_positions`
+        # holds each source's nodes in this layer's COMPACT interior indexing, which is
+        # what the residual's scatter-add and the Jacobian's diagonal both need.
+        self._node_sources = list(node_sources)
+        self._source_positions: list[torch.Tensor] = []
+        for ns in self._node_sources:
+            if not isinstance(ns, NodeSource):
+                raise TypeError(
+                    f"PotentialFlowLayer {name!r}: node_sources entry "
+                    f"{type(ns).__name__} is not a NodeSource"
+                )
+            pos = self._interior_of_node[ns.nodes]
+            if bool((pos < 0).any()):
+                bad = [
+                    net.nodes[int(i)]
+                    for i, p in zip(ns.nodes.tolist(), pos.tolist(), strict=True)
+                    if p < 0
+                ]
+                raise ValueError(
+                    f"PotentialFlowLayer {name!r}: node source {ns!r} acts at {bad}, "
+                    f"which are not interior unknowns of this layer (a boundary node's "
+                    f"potential is prescribed and an inactive node has no row)"
+                )
+            self._source_positions.append(pos)
+
     # ------------------------------------------------------- dense oracles (lazy)
     @functools.cached_property
     def A(self) -> torch.Tensor:
@@ -232,15 +316,52 @@ class PotentialFlowLayer:
         """`self._accumulate(w)` restricted to boundary rows -- the repeated `A_bound w` site."""
         return self._accumulate(w)[..., self.bound]
 
-    def _operator_at(self, slopes: torch.Tensor) -> GraphLaplacianOperator:
+    def _node_source_withdrawal(
+        self, phi: torch.Tensor, drivers: Mapping
+    ) -> torch.Tensor | None:
+        """Total potential-dependent withdrawal per INTERIOR row, or `None` when this layer
+        has no node sources (spec 13.4). `phi` is full-node."""
+        if not self._node_sources:
+            return None
+        out = None
+        for ns, pos in zip(self._node_sources, self._source_positions, strict=True):
+            w = ns.flow(phi[..., ns.nodes], drivers)
+            zeros = torch.zeros(
+                w.shape[:-1] + (len(self.interior),), dtype=w.dtype, device=w.device
+            )
+            term = zeros.index_add(-1, pos, w)
+            out = term if out is None else out + term
+        return out
+
+    def _node_source_slopes(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor | None:
+        """`diag(w')` per INTERIOR row, or `None` when this layer has no node sources."""
+        if not self._node_sources:
+            return None
+        out = None
+        for ns, pos in zip(self._node_sources, self._source_positions, strict=True):
+            d = ns.dflow(phi[..., ns.nodes], drivers)
+            zeros = torch.zeros(
+                d.shape[:-1] + (len(self.interior),), dtype=d.dtype, device=d.device
+            )
+            term = zeros.index_add(-1, pos, d)
+            out = term if out is None else out + term
+        return out
+
+    def _operator_at(
+        self, slopes: torch.Tensor, node_slopes: torch.Tensor | None = None
+    ) -> GraphLaplacianOperator | _DiagonalShifted:
         """The matvec-free `A_I diag(slopes) A_I^T` operator at the given per-edge slope, in
         this layer's own endpoint/interior-index representation -- the construction repeated
         by `linear_init`, `solve`'s `operator_fn` (both the non-differentiable and
         differentiable branches) and `adjoint`. `slopes` is `dflows`'s actual Jacobian
         diagonal at the current iterate for all but `linear_init`, which instead passes its
         own tangent-at-zero `k` -- the same operator shape, at a different slope.
+
+        `node_slopes` (spec 13.4) is the `diag(w')` a potential-dependent nodal source adds to
+        that Jacobian; `None` (the usual case) returns the bare Laplacian, so nothing about an
+        existing layer's operator changes.
         """
-        return GraphLaplacianOperator(
+        op = GraphLaplacianOperator(
             self._src,
             self._tgt,
             slopes,
@@ -248,6 +369,9 @@ class PotentialFlowLayer:
             self._interior_of_node,
             boundary_mask=self._boundary_mask,
         )
+        if node_slopes is None:
+            return op
+        return _DiagonalShifted(op, node_slopes)
 
     # ------------------------------------------------------------------ assembly
     def dp(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
@@ -293,6 +417,17 @@ class PotentialFlowLayer:
                 f"are {self.kinds}"
             ) from exc
         return slice(start, end)
+
+    def element_for(self, kind: str) -> tuple[Element, slice]:
+        """This layer's own `Element` instance for `kind`, and the slice of `q`'s (and
+        `dp`'s) columns it occupies (FR-13): the PUBLIC accessor a caller outside this layer
+        uses instead of reaching into its private `_elements`/`_elem_slices`. Raises
+        `KeyError` naming the kind and this layer's known kinds when absent, exactly as
+        `kind_slice` does (each element kind is unique within a layer, so the two agree by
+        construction).
+        """
+        sl = self.kind_slice(kind)
+        return self._elements[self.kinds.index(kind)], sl
 
     def flows_of_kind(self, q: torch.Tensor, kinds) -> torch.Tensor:
         """`q` restricted to `kinds` (a name or a sequence), concatenated in the given order.
@@ -364,7 +499,8 @@ class PotentialFlowLayer:
         # cost 14.2 ms of a 41.8 ms residual (Task 14's profile).
         lhs = self._accumulate_interior(q)
         s_I = self._source_interior(sources, phi_interior)
-        return lhs - s_I
+        w = self._node_source_withdrawal(phi, drivers)
+        return lhs - s_I if w is None else lhs - s_I + w
 
     def jacobian(self, phi_interior, phi_boundary, drivers):
         """The dense (n_I, n_I) Jacobian A_I diag(dq) A_I^T -- the retained ORACLE.
@@ -377,7 +513,11 @@ class PotentialFlowLayer:
         phi = self.assemble(phi_interior, phi_boundary)
         dq = self.dflows(phi, drivers)
         A_I = self.A[self.interior]
-        return torch.einsum("ie,...e,je->...ij", A_I, dq, A_I)
+        dense = torch.einsum("ie,...e,je->...ij", A_I, dq, A_I)
+        node_slopes = self._node_source_slopes(phi, drivers)
+        if node_slopes is None:
+            return dense
+        return dense + torch.diag_embed(node_slopes.expand(dense.shape[:-1]))
 
     def _linear_ck(self, drivers):
         # Each element's own (c_e, k_e) covers only its own n_e = e - s edges; only the
@@ -408,7 +548,27 @@ class PotentialFlowLayer:
             k_parts.append(k_e + zero)
         return torch.cat(c_parts, dim=-1), torch.cat(k_parts, dim=-1)
 
-    def _grounding_check(self, slopes: torch.Tensor, *, where: str) -> None:
+    def _extra_grounded(self, node_slopes: torch.Tensor | None) -> torch.Tensor | None:
+        """Full-node-order bool from `node_slopes` (per COMPACT interior row, as
+        `_node_source_slopes` returns): True at an interior node whose own node-source slope
+        is strictly positive there (FR-1). Such a node is grounded independent of any edge
+        path -- `_DiagonalShifted`'s positive diagonal shift there is exactly the SPD
+        contribution a boundary connection would otherwise have to supply -- so
+        `_grounding_check` must treat it exactly like a boundary node when deciding whether
+        the rest of the graph reaches ground. `None` when this layer has no node sources,
+        which leaves `_grounding_check` unchanged for every existing layer.
+        """
+        if node_slopes is None:
+            return None
+        positive = node_slopes > 0
+        out = torch.zeros(
+            positive.shape[:-1] + (self._n_nodes,), dtype=torch.bool, device=positive.device
+        )
+        return out.index_copy(-1, self.interior, positive)
+
+    def _grounding_check(
+        self, slopes: torch.Tensor, *, where: str, node_slopes: torch.Tensor | None = None
+    ) -> None:
         """Raise unless every instance in `slopes` certifies SPD.
 
         The certificate (Task 3's `solvers.grounding.spd_certificate`) tests both of spec
@@ -433,14 +593,23 @@ class PotentialFlowLayer:
         alone is not attributable across unrelated per-instance failures. Every message
         names the offending LAYER first: a model composes several layers over one network,
         and "solve: floating nodes ... ['z']" alone does not say which of them failed.
+
+        `node_slopes` (FR-1, spec 13.4), when this layer has node sources, is `diag(w')`
+        per compact interior row -- the same tensor `_node_source_slopes` returns. A node
+        with a strictly positive entry there is grounded independent of any edge path (see
+        `_extra_grounded`), so passing it here is what keeps a node grounded ONLY through a
+        node source from being reported ungrounded.
         """
+        extra_grounded = self._extra_grounded(node_slopes)
         certified = spd_certificate(
-            self._src, self._tgt, slopes, self._interior_of_node, self._boundary_mask, atol=0.0
+            self._src, self._tgt, slopes, self._interior_of_node, self._boundary_mask,
+            atol=0.0, extra_grounded=extra_grounded,
         )
         if bool(torch.all(certified)):
             return
         records = spd_diagnosis(
-            self._src, self._tgt, slopes, self._interior_of_node, self._boundary_mask, atol=0.0
+            self._src, self._tgt, slopes, self._interior_of_node, self._boundary_mask,
+            atol=0.0, extra_grounded=extra_grounded,
         )
         if certified.ndim == 0:
             # Unbatched: one instance, so a bare batch index would say nothing. Name the
@@ -481,7 +650,15 @@ class PotentialFlowLayer:
         dp0 = self.dp(phi0, drivers)
         c, k = self._linear_ck(drivers)
         rhs = self._source_interior(sources, phi0) - self._accumulate_interior(c + k * dp0)
-        self._grounding_check(k, where="linear_init")
+        # A node source contributes its tangent at phi = 0 to the same linearisation:
+        # w(phi) ~ w(0) + w'(0) phi, so w(0) moves to the right-hand side and w'(0) joins
+        # the operator's diagonal (spec 13.4).
+        node_slopes = None
+        if self._node_sources:
+            w0 = self._node_source_withdrawal(phi0, drivers)
+            node_slopes = self._node_source_slopes(phi0, drivers)
+            rhs = rhs - w0
+        self._grounding_check(k, where="linear_init", node_slopes=node_slopes)
         # k picks up a batch dimension only if some element's linear_init(drivers) actually
         # depends on drivers (e.g. a driver-conditioned slope); with purely constant slopes
         # k stays unbatched (b,) even when `rhs` is batched via phi_boundary/sources.
@@ -491,7 +668,7 @@ class PotentialFlowLayer:
         solve_batch = torch.broadcast_shapes(k.shape[:-1], rhs.shape[:-1])
         k = k.expand(solve_batch + k.shape[-1:])
         rhs = rhs.expand(solve_batch + rhs.shape[-1:])
-        op = self._operator_at(k)
+        op = self._operator_at(k, node_slopes)
         result = select_solve(
             op,
             rhs,
@@ -521,15 +698,29 @@ class PotentialFlowLayer:
         return a gradient that is silently wrong (if some other path happens to also touch
         the same value) or silently `None` (if it doesn't).
         """
-        for el in self._elements:
+        for el in (*self._elements, *self._node_sources):
             for name, value in vars(el).items():
                 if isinstance(value, torch.Tensor) and value.requires_grad:
+                    if isinstance(el, NodeSource):
+                        # FR-8: a NodeSource has no `learnable=` constructor kwarg (unlike
+                        # Element) -- its fix is to register the tensor as an nn.Parameter
+                        # directly, so it must be named and fixed as a node source, not
+                        # rendered (and told to construct itself) as if it were an Element.
+                        raise ValueError(
+                            f"node source {el!r} has a tensor attribute {name!r} with "
+                            f"requires_grad=True that is not a registered nn.Parameter, so "
+                            f"the differentiable solve cannot reach it through "
+                            f"Function.apply and its gradient would be silently wrong or "
+                            f"absent. Register {name!r} as an nn.Parameter "
+                            f"(self.{name} = torch.nn.Parameter(...)) in __init__ so it is "
+                            f"reachable via named_parameters(), or use differentiable=False."
+                        )
                     raise ValueError(
-                        f"element {el!r} (kind {el.kind!r}) has a tensor attribute "
-                        f"{name!r} with requires_grad=True that is not a registered "
-                        f"nn.Parameter, so the differentiable solve cannot reach it through "
-                        f"Function.apply and its gradient would be silently wrong or "
-                        f"absent. Construct this element with learnable=True (so {name!r} "
+                        f"element {el!r} (kind {el.kind!r}) has a "
+                        f"tensor attribute {name!r} with requires_grad=True that is not a "
+                        f"registered nn.Parameter, so the differentiable solve cannot reach "
+                        f"it through Function.apply and its gradient would be silently wrong "
+                        f"or absent. Construct this element with learnable=True (so {name!r} "
                         f"is registered and reachable via named_parameters()), or use "
                         f"differentiable=False."
                     )
@@ -698,7 +889,8 @@ class PotentialFlowLayer:
             # path the differentiable branch builds below).
             phi0_full = self.assemble(phi0, phi_boundary)
             dq0 = self.dflows(phi0_full, drivers)
-            self._grounding_check(dq0, where="solve")
+            node_slopes0 = self._node_source_slopes(phi0_full, drivers)
+            self._grounding_check(dq0, where="solve", node_slopes=node_slopes0)
 
         if not differentiable:
             # The WHOLE non-differentiable solve runs under no_grad -- the Newton iteration,
@@ -736,7 +928,7 @@ class PotentialFlowLayer:
                     # tensors it closes over are cached on the layer at construction.
                     phi = self.assemble(x, phi_boundary)
                     dq = self.dflows(phi, drivers)
-                    return self._operator_at(dq)
+                    return self._operator_at(dq, self._node_source_slopes(phi, drivers))
 
                 result = newton(residual_fn, operator_fn, phi0, **newton_kwargs)
                 if diagnostics is not None:
@@ -759,7 +951,12 @@ class PotentialFlowLayer:
 
         self._check_no_unreachable_differentiable_tensors()
 
-        param_dicts = [dict(el.named_parameters()) for el in self._elements]
+        # Node sources are threaded through 'Function.apply' exactly as elements are: their
+        # own nn.Parameters are substituted back in with functional_call, so a learnable
+        # demand exponent or required pressure gets a correct implicit-function gradient.
+        owners = [*self._elements, *self._node_sources]
+        n_el = len(self._elements)
+        param_dicts = [dict(owner.named_parameters()) for owner in owners]
         param_names = [list(d.keys()) for d in param_dicts]
         param_tensors = [
             d[name] for d, names in zip(param_dicts, param_names, strict=True) for name in names
@@ -805,9 +1002,46 @@ class PotentialFlowLayer:
         def _flows_functional(phi, drv, rebuilt):
             dp_full = _dp_functional(phi, drv)
             parts = []
-            for el, d, (s, e) in zip(self._elements, rebuilt, self._elem_slices, strict=True):
+            for el, d, (s, e) in zip(
+                self._elements, rebuilt[:n_el], self._elem_slices, strict=True
+            ):
                 parts.append(torch.func.functional_call(el, d, (dp_full[..., s:e], drv)))
             return torch.cat(parts, dim=-1)
+
+        def _node_withdrawal_functional(phi, drv, rebuilt):
+            if not self._node_sources:
+                return None
+            out = None
+            for ns, d, pos in zip(
+                self._node_sources, rebuilt[n_el:], self._source_positions, strict=True
+            ):
+                w = torch.func.functional_call(ns, d, (phi[..., ns.nodes], drv))
+                zeros = torch.zeros(
+                    w.shape[:-1] + (len(self.interior),), dtype=w.dtype, device=w.device
+                )
+                term = zeros.index_add(-1, pos, w)
+                out = term if out is None else out + term
+            return out
+
+        def _node_slopes_functional(phi, drv, rebuilt):
+            if not self._node_sources:
+                return None
+            out = None
+            for ns, d, pos in zip(
+                self._node_sources, rebuilt[n_el:], self._source_positions, strict=True
+            ):
+                leaf = phi[..., ns.nodes].detach().requires_grad_(True)
+                with torch.enable_grad():
+                    w = torch.func.functional_call(ns, d, (leaf, drv))
+                    (grad,) = torch.autograd.grad(w.sum(), leaf)
+                zeros = torch.zeros(
+                    grad.shape[:-1] + (len(self.interior),),
+                    dtype=grad.dtype,
+                    device=grad.device,
+                )
+                term = zeros.index_add(-1, pos, grad)
+                out = term if out is None else out + term
+            return out
 
         def _dp_dependence_error(el, i: int) -> RuntimeError:
             return RuntimeError(
@@ -821,7 +1055,7 @@ class PotentialFlowLayer:
             dp_full = _dp_functional(phi, drv)
             parts = []
             for i, (el, d, (s, e)) in enumerate(
-                zip(self._elements, rebuilt, self._elem_slices, strict=True)
+                zip(self._elements, rebuilt[:n_el], self._elem_slices, strict=True)
             ):
                 dp_slice = dp_full[..., s:e].detach().requires_grad_(True)
                 # The REDUCTION `flow.sum()` must itself execute inside the enable_grad
@@ -894,13 +1128,14 @@ class PotentialFlowLayer:
             q = _flows_functional(phi, drv, rebuilt)
             lhs = self._accumulate_interior(q)
             s_I = src[..., self.interior]
-            return lhs - s_I
+            w = _node_withdrawal_functional(phi, drv, rebuilt)
+            return lhs - s_I if w is None else lhs - s_I + w
 
         def operator_fn(x, *params):
             rebuilt, drv, src, pb = _rebuild(params)
             phi = self.assemble(x, pb)
             dq = _dflows_functional(phi, drv, rebuilt)
-            return self._operator_at(dq)
+            return self._operator_at(dq, _node_slopes_functional(phi, drv, rebuilt))
 
         x = implicit_solve(
             residual_fn,
@@ -942,7 +1177,7 @@ class PotentialFlowLayer:
         drivers = drivers or {}
         phi = self.assemble(phi_interior, phi_boundary)
         dq = self.dflows(phi, drivers)
-        op = self._operator_at(dq)
+        op = self._operator_at(dq, self._node_source_slopes(phi, drivers))
         return _adjoint_solve(
             op,
             grad_phi_interior,

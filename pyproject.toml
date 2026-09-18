@@ -31,7 +31,18 @@ sparse = ["scipy>=1.11"]
 # netCDF4 reads the ONE NETCDF4 file this project touches, AQ_DT's saved
 # network_concentration_<year>.nc; every product tellegen writes is classic CDF, which
 # scipy reads. Test-only, and the tests that need it use pytest.importorskip.
-dev = ["pytest>=8", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy>=1.11", "netCDF4>=1.7"]
+# pyswmm parity (rows W1-W4): BSD-2-Clause, wrapping SWMM 5, whose engine is public domain
+# (US-government work) / CC0. Test-only (`importorskip`); the sewer application itself needs
+# nothing beyond torch and the existing `sparse` extra.
+# wntr parity (rows D1-D8, G2): Revised BSD, wrapping EPANET 2.2, whose engine is MIT-licensed
+# -- but wntr drags in a MEASURED 351 MB mandatory dependency stack (scipy 114.5 MB, pandas
+# 62.9 MB, numpy 53.7 MB, matplotlib + fontTools + Pillow 64.9 MB, networkx 15.5 MB; wntr's
+# own code and its four DLLs are 10.8 MB). Test-only (`importorskip`); NOT a runtime extra,
+# for the same reason.
+dev = [
+    "pytest>=8", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy>=1.11", "netCDF4>=1.7",
+    "pyswmm>=2.1", "wntr>=1.5",
+]
 # ContamX parity (spec section 9): NIST's `contamxpy` ships a Windows x86-64 wheel that
 # BUNDLES the ContamX 3.4.1.7 engine, so no CONTAM installation is needed -- but there is
 # no wheel for any other platform, hence the marker. Tests that need it carry `external`
