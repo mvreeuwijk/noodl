@@ -581,7 +581,21 @@ assumed to be the last pipe read from the file, because the reader's pipe order 
 order the `.inp` lists conduits in, not necessarily the order the tree drains in (M4-R19);
 and the headspace `Stack` buoyancy drive's `z_path` on a `headspace` edge is the pipe's
 CROWN elevation -- the mean of its two end inverts plus its own diameter -- not the mean
-invert alone, which is only the pipe's invert at its midpoint (M4-R19).
+invert alone, which is only the pipe's invert at its midpoint (M4-R19). A forest of more
+than one tree (spec 3.1) is supported on both the water and air sides: each component gets
+its own outfall and, on the air side, its own outfall-to-ambient headspace edge, so `air.q`
+and `sewer.q` conserve mass within each component independently rather than at one shared
+sink (N4).
+
+**The `air.phi` datum.** Every `leak` edge's `Stack` carries a manhole term that cancels
+against the manhole's own ground level (`z_ref - z_path = 0` there) but an AMBIENT term that
+does not, because `ambient` has no `ground` attribute of its own and so falls back to a
+`0.0` datum rather than to the manhole's; the same `0.0` is used identically at the outfall's
+open-air edge and at `ambient`'s own fixed boundary condition (`air.phi_boundary = 0`), so
+every air pressure in the solve is shifted by the same constant -- `air.phi` is
+DATUM-REFERENCED to this convention, not to a physical zero, and every drive, refusal and
+verification row reads only DIFFERENCES between manholes, which the convention leaves
+unaffected (N9).
 
 **The headspace momentum balance, and the `Drive`-cannot-see-`phi` rule.** Air in the
 headspace above the flow is driven by three terms per pipe (spec 3.3): Darcy-Weisbach wall
@@ -604,7 +618,12 @@ headspace air are two separate `TransportLayer` species, coupled by one closure,
 `H2STransfer`, computing a flux `J = K_L a V_wet (f C_S - C_G/H)` per manhole from the free-
 sulfide fraction `f`, Henry's constant `H(T)` and a two-film transfer coefficient `K_L a`,
 and writing `+J` onto the air side and `-J` onto the water side (equal in moles of S by
-construction, checked node by node, row C2). Both correlations read per-PIPE quantities --
+construction, checked node by node, row C2). Spec 4.2's own lateral inflow-concentration
+drivers, `bod_in`/`sulfide_in`, enter the water-quality layer's source term the same way
+every other nodal load does -- `inflow x concentration` (m3/s times kg/m3, kg/s per species)
+-- written by a separate closure, `LateralLoads`, registered before `H2STransfer` so its
+load and the two-film transfer's own source term add rather than one overwriting the other.
+Both correlations read per-PIPE quantities --
 hydraulic radius, slope, wetted velocity, mean depth -- at each manhole's own SINGLE
 outgoing pipe (a tree guarantees exactly one), gathered once at construction into a
 per-manhole index (`out_pipe`) rather than looked up per call (M4-R4); the same gather

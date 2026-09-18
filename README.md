@@ -55,6 +55,20 @@ src/tellegen/
                  kept as per-edge Python loops by design -- it is the oracle, not the
                  model path), report.py (to_ug_m3, from_ug_m3,
                  write_network_concentration)
+  apps/sewer/    the gravity-sewer application: geometry.py (exact circular geometry, the
+                 batched Manning normal-depth inversion), hydraulics.py (SewerHydraulics --
+                 closure-first tree flow, depth, the optional implicit-Euler storage
+                 sweep), air.py (Headspace, Drag, air_density), quality.py (Henry's law,
+                 the two-film flux, Pomeroy-Parkhurst sulfide generation, BOD decay,
+                 LateralLoads), network.py (SewerNetwork, build_sewer_model, sewer_steady),
+                 inp.py (a documented SWMM .inp subset) and report.py
+  apps/water/    the pressurised water-distribution application: network.py (Junction/
+                 Reservoir/Tank/WaterPipe/Pump/Valve, WaterNetwork, build_water_model,
+                 water_steady), elements.py (HazenWilliams, PumpCurve, MinorLoss),
+                 tanks.py (TankLevels), demand.py (PressureDrivenDemand), inp.py (a
+                 documented EPANET 2.2 .inp subset) and report.py
+  apps/inpfile.py  the section-keyed `.inp` tokenizer shared by apps/sewer/inp.py and
+                 apps/water/inp.py, and nothing else
   physics/       flows.py, species.py: thin wrappers so downstream code runs unchanged
 legacy/          the original 2019 package, for reference
 docs/superpowers/  design spec and implementation plans
@@ -504,8 +518,11 @@ consistency checks against that calibration source, not independent validation.
   depth inversion), `hydraulics.py` (`SewerHydraulics`, the closure-first tree flow, depth,
   and the optional level-synchronous implicit-Euler storage sweep), `air.py` (`Headspace`,
   `Drag`, air density), `quality.py` (Henry's law, the two-film flux, Pomeroy-Parkhurst
-  sulfide generation and BOD decay), `network.py` (`SewerNetwork`, `build_sewer_model`,
-  `sewer_steady`), `inp.py` (the SWMM `.inp` reader, a documented subset) and `report.py`.
+  sulfide generation, BOD decay and, since the fix wave, `LateralLoads` -- the spec 4.2
+  inflow-concentration drivers `bod_in`/`sulfide_in`, wired as a source term the
+  water-quality layer actually reads, FR-21), `network.py` (`SewerNetwork`,
+  `build_sewer_model`, `sewer_steady`), `inp.py` (the SWMM `.inp` reader, a documented
+  subset) and `report.py`.
 - `apps/water/`: `network.py` (`Junction`/`Reservoir`/`Tank`/`WaterPipe`/`Pump`/`Valve`,
   `WaterNetwork`, `build_water_model`, `water_steady`), `elements.py` (`HazenWilliams`,
   `PumpCurve`, `MinorLoss`), `tanks.py` (`TankLevels`, the tank-level and simple-control
@@ -521,6 +538,10 @@ consistency checks against that calibration source, not independent validation.
   damped step for any instance whose residual did not shrink under a full step, rather
   than locking its relaxation factor at 1 -- a dead-end square-root-law headspace edge
   otherwise cycled `dp -> -dp` for the full iteration budget.
+- A second core fix (N1): closure-carried state (the sewer's storage sweep, the water
+  application's `TankLevels`) is now evaluated from the STEP-START state in every pass
+  under `coupling="iterate"`, not fed forward from the previous pass's own output -- one
+  `model.step(dt)` used to advance such state by `passes x dt` rather than by `dt`.
 
 **What passes, and at what tolerance.**
 
@@ -533,36 +554,38 @@ consistency checks against that calibration source, not independent validation.
 | W5 | Manning inversion round trip, h/D in [0.01, 0.938] | 1e-12 relative | 7.5e-14 worst |
 | W6 | surcharge refusal, naming the pipe | exact | holds |
 | W7 | storage dynamics reach the quasi-steady fixed point, 200 steps of 60 s | 1e-9 relative | 5.7e-15 (flows), 4.4e-15 (depths) |
-| C1 | air nodal residual / power identity / water continuity | 1e-11 / 1e-10 (M4-R20b) / exact | 1.352e-12 / 1.855e-11 / < 1e-15 |
+| C1 | air nodal residual / power identity / water continuity | 1e-11 / 1e-10 (M4-R20b) / exact | 4.518e-13 / 6.141e-12 / < 1e-15, with the manhole leak built float64 (N2) -- the earlier 1.352e-12 / 1.855e-11 (still inside tolerance) was mostly an arithmetic floor from the leak's default-dtype `Orifice` cast, not a stopping criterion |
 | C2 | cross-phase sulfide conservation, moles of S | 1e-12 | equal to rtol 1e-12 |
-| C3 | gradients vs Richardson-extrapolated central differences | 1e-6 (M4-R20a) | 3.17e-8 / 3.16e-9 / 1.16e-8 relative |
+| C3 | gradients vs Richardson-extrapolated central differences (inflows, `T_head`, leak area) | 1e-6 (M4-R20a) | inflows 3.17e-8 / 3.16e-9 / 1.16e-8, `T_head` 3.57e-8, leak area 9.67e-9, all relative; `f_i` is a `Drag` `Drive` attribute and structurally NOT differentiable (refused by name); `f_air` finite and correctly signed (a learnable-friction test, not a Richardson row) |
 | A1 | air/water velocity ratio vs Pescod and Price Table 1 (three points) | inside 20-40 % | 24.139 % / 24.995 % / 25.149 %; closed form to 1.12e-8 relative |
 | A2 | Tyneside field range, bracketed (amendment A5) | inside 105-315 m3/h | open-both-ends 1253.78 m3/h, vented (8 cm2) 0.24 m3/h; band reproduced at leak areas 0.355/1.097 m2 |
 | A3 | leak-and-fan flow balance / nodal residual / power residual (amendment A6) | 1e-12 / 1e-11 / 1e-11 | 1.234e-14 / 6.3e-15 / 8.06e-13 |
 | H1 | Henry's constant vs Sander 2023 | 0.36 +/- 0.01 at 293.15 K | 0.363854 (293.15 K), 0.403418 (298.15 K) |
 | H2 | two-film flux, analytic closed form | exact | 0.0 |
-| H3 | Henry-equilibrium fixed point (transfer-dominated) | 1e-10 | < 1e-10 |
+| H3 | Henry-equilibrium fixed point, a genuine `Model.step` run (600 steps, dt = 60 s) on one CLOSED manhole | 1e-10 | 1.4e-16 relative gap; the assembled tree cannot reach equilibrium since its leaks and outfall vent H2S to a zero-concentration boundary |
 | S1 | Pomeroy-Parkhurst rate, closed form | exact | 0.0 |
+| FR-21 | lateral BOD load wiring, one step: `bod_in = 0.3` kg/m3 at a single headwater manhole, against the transport layer's own backward-Euler closed form | exact | 0.0 relative (bit-exact); every other manhole's source stays exactly zero |
+| FR-22 | `sewer_diurnal.py`'s tracer, run through the model's own quality layer (`LateralLoads` + `SulfideGeneration`) rather than hand-resolved, Richardson over dt = 10 s / 20 s vs SWMM | 3e-5 relative | 8.05e-6 (single-dt operator-split error 3.47e-3 at dt = 60 s, 5.79e-5 at dt = 1 s) |
 | G1 | sewer golden regression | 1e-10 | 0.0 |
 | D1 | `twoloop_si.inp` heads and flows vs EPANET 2.2 (wntr) | 1e-6 relative | 4.361e-7 (heads), 8.090e-8 (flows); nodal continuity 2.093e-14 against 1e-13 |
 | D2 | Net1 single period: heads, flows, pump head gain vs EPANET | 1e-6 relative | 7.059e-8 (heads), 2.868e-6 (flows, worst pipe 113, against 1e-5), 1.189e-7 (pump gain) |
 | D3 | Net1 24 h tank level with tank-level pump controls | 2e-4 m absolute | 8.181e-5 m worst of 25 reported steps (26 hydraulic sub-steps) |
 | D4 | Darcy-Weisbach pipe vs EPANET D-W (friction-factor formulae differ) | recorded band | 3.822e-2 (heads, band 3.8e-3..3.8e-1), 4.446e-1 (flows, band 4.4e-2..4.4) |
-| D5 | pressure-driven demand vs EPANET `DEMAND MODEL PDA` | 1e-5 | 3.521e-7 (heads), 2.184e-7 (delivered demands) |
+| D5 | pressure-driven demand vs EPANET `DEMAND MODEL PDA`, now read from the file's own `[OPTIONS]` (N5) rather than re-supplied by hand | 1e-5 | 3.521e-7 (heads), 2.184e-7 (delivered demands) |
 | D6 | loop consistency, head loss around every cycle-basis loop | 1e-12 | 0.0 |
-| D7 | gradients vs central differences (roughness, demands, pump h0, tank area) | 1e-6 x scale | 2.801e-6 absolute, scale 4.444e-4 |
-| D8 | TRACE water quality on `twoloop_trace.inp` (single-source smoke row) | 1e-3 | 4.873e-11 |
+| D7 | gradients vs central differences (nodal demands, Hazen-Williams roughness, pump `h0`, tank area through `TankLevels.advance`; a single steady solve does not itself reach tank area, N6) | 1e-6 x scale | sources 3.212e-6 (allowance 4.444e-4); roughness 2.505e-10 (allowance 6.259e-8); pump `h0` 1.007e-6 relative; tank area 2.753e-9 relative |
+| D8 | TRACE water quality on `twoloop_trace.inp` (single-source smoke row) | 1e-3 | 6.438e-12 percentage points |
 | G2 | water golden regression | 1e-10 | 0.0 |
 
-The full suite passes **1176 passed, 10 skipped, 9 deselected, 1 xfailed** (coverage
-96.09 %), ruff clean.
+The full suite passes **1225 passed, 10 skipped, 9 deselected, 1 xfailed** (coverage
+96.41 %), ruff clean.
 
 **The measured runs (18 September 2026, on this machine).**
 
 | run | measured | budget |
 |---|---|---|
-| `benchmarks/sewer_diurnal.py`: 24 h at 60 s, 8 instances, storage on | 1440 steps x 8 instances in 248.04 s | 60 s -- **FAIL**, recorded as FR-19 rather than loosened |
-| `benchmarks/water_eps.py`: Net1, 24 h extended period, 8 demand multipliers | 210 hydraulic sub-steps in 9.95 s | recorded, no budget set (spec section 7 sets one for the sewer benchmark only) |
+| `benchmarks/sewer_diurnal.py`: 24 h at 60 s, 8 instances (`f_i` and leak area varied 0.5x-1.5x across the batch, FR-18), storage on | 1440 steps x 8 instances in 235.28 s; peak headspace H2S per manhole, instance 0: 9.336 / 7.702 / 12.108 / 11.680 / 13.509 ppm | 60 s -- **FAIL**, recorded as FR-19 rather than loosened |
+| `benchmarks/water_eps.py`: Net1, 24 h extended period, 8 SEQUENTIAL demand multipliers (N15: one model per multiplier, not a batched leading dimension) | 210 hydraulic sub-steps in 11.85 s | recorded, no budget set (spec section 7 sets one for the sewer benchmark only) |
 
 **Data facts.** SWMM's KINWAVE (kinematic wave) routing, not its dynamic-wave engine, is
 the parity target for the sewer rows -- the theory section explains why. EPANET 2.2 is
@@ -585,18 +608,19 @@ framing paragraph above.
 
 **What is open.**
 
-- FR-21 (important): the inflow-concentration drivers `bod_in` and `sulfide_in` (spec 4.2)
-  are accepted by the model but read by no code, so lateral BOD/sulfide loads do not yet
-  enter the water-quality layer; the sulfide chain itself is verified at unit level (rows
-  H1-H3, S1, C2), not end to end from an inflow load.
-- FR-22: row W4 checks the tank-in-series closed form against SWMM without running the
-  model's own quality layer (it builds with `quality=False`).
-- FR-19: `benchmarks/sewer_diurnal.py` takes 248.04 s against its 60 s budget -- recorded,
-  not loosened.
-- FR-18: the benchmark's 8 instances are identical copies, not the varied `f_i`/leak-area
-  ensemble the plan originally described.
+- FR-19: `benchmarks/sewer_diurnal.py` takes 235.28 s against its 60 s budget -- recorded,
+  not loosened (profiled: the storage sweep's own Newton root-finds are ~56 % of one step,
+  the two transport GMRES solves ~31 %, the air Newton solve ~12 %).
 - FR-20: the outfall node is a dead end in the air graph (physically inert edge; a design
   tidy-up, not a correctness defect).
+- FR-25: `tank_inflow` (`apps/water/network.py`) still reads `PotentialFlowLayer`'s private
+  `_accumulate` directly; `element_for` (FR-13) covers looking up an element by kind, not
+  this per-node flow accumulation, so a second public accessor is a recorded follow-up.
+- N15: `benchmarks/water_eps.py` runs its 8 demand multipliers SEQUENTIALLY, one model per
+  multiplier, not as a batched leading dimension -- `TankLevels.event_step` shortens each
+  instance's step to its own next control crossing, so a genuinely batched rollout would
+  need a per-instance step or an oversampling global-minimum step; recorded as a design
+  limitation rather than fixed.
 - The diffusive-wave sewer formulation (a surface-elevation potential layer with
   depth-dependent conveyance, Newton-solved) and the MIXED regime (some pipes free-surface,
   others surcharged, with transitions) are parked, not implemented -- the natural
