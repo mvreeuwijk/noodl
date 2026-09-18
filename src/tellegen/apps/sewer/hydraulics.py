@@ -101,6 +101,7 @@ class SewerHydraulics:
         self.ambient_idx = (
             node_index["ambient"] if "ambient" in node_index else None
         )
+        self._node_idx = torch.arange(net.n, dtype=torch.long)
         # Each manhole's OUTGOING pipe: a tree guarantees exactly one, and `SewerNetwork`
         # has already refused anything else by name. The map is a position into the per-pipe
         # order, so every per-manhole quantity is a single gather.
@@ -114,6 +115,31 @@ class SewerHydraulics:
         self.out_pipe = torch.tensor(
             [outgoing[m.name] for m in manholes], dtype=torch.long
         )
+        # N4: multi-outfall forests. `_tree_flow` must subtract each COMPONENT's own
+        # lateral total at its OWN outfall, not the whole network's total at every outfall
+        # (which silently gave the wrong per-component balance, and an unnamed
+        # `index_add_` shape error, for a forest of more than one component). Each
+        # manhole's own outfall is found ONCE here by walking `outgoing` forward until a
+        # name that is not a manhole -- a tree guarantees this terminates, and
+        # `SewerNetwork.validate()` has already refused a cycle -- then mapped to that
+        # outfall's SLOT within `self.outfall_node_idx` (the node positions
+        # `_outfall_positions` returns, in the same order every call of `_tree_flow` would
+        # otherwise recompute).
+        self.outfall_node_idx = _outfall_positions(net, self.manhole_idx, self.ambient_idx)
+        outfall_slot_by_node = {
+            int(idx): slot for slot, idx in enumerate(self.outfall_node_idx.tolist())
+        }
+        manhole_name_set = set(self.manhole_names)
+        limit = len(manholes) + 1
+        slots = []
+        for m in manholes:
+            node = m.name
+            steps = 0
+            while node in manhole_name_set and steps <= limit:
+                node = pipes[outgoing[node]].v
+                steps += 1
+            slots.append(outfall_slot_by_node[node_index[node]])
+        self.manhole_outfall_slot = torch.tensor(slots, dtype=torch.long)
         self.surface_area = (
             torch.as_tensor(surface_area, dtype=F64)
             if surface_area is not None
@@ -194,15 +220,23 @@ class SewerHydraulics:
         if self.storage:
             q, levels = self._storage_sweep(state, lateral)
             out["sewer.H"] = levels
+            # FR-19 (profiled hot spot: ~40% of one diurnal step's wall time): the storage
+            # sweep already solved for each manhole's own level via `solve_monotone` (spec
+            # 3.2's "manhole level equals the outgoing pipe's entrance depth"), so calling
+            # `geom.normal_depth` on `q` here would run a SECOND, redundant Newton solve to
+            # recover a depth `_storage_sweep` already has -- `levels` remapped from
+            # manhole order into pipe order (through `out_pipe`, exactly as `_storage_sweep`
+            # itself remaps `q_out`) is that same value, bit-for-bit, with no root-find.
+            h = torch.zeros_like(q).index_copy(-1, self.out_pipe, levels)
         else:
             q = self._tree_flow(inflow, lateral)
-        h = geom.normal_depth(
-            q,
-            self.diameter,
-            self.roughness,
-            self.slope,
-            names=self.pipe_names,
-        )
+            h = geom.normal_depth(
+                q,
+                self.diameter,
+                self.roughness,
+                self.slope,
+                names=self.pipe_names,
+            )
         area = geom.flow_area(h, self.diameter)
         radius = geom.hydraulic_radius(h, self.diameter)
         width = geom.top_width(h, self.diameter)
@@ -260,17 +294,23 @@ class SewerHydraulics:
     def _tree_flow(self, inflow: Tensor, lateral: Tensor) -> Tensor:
         """Every pipe's discharge from continuity alone (framework spec section 3).
 
-        `particular_flow` requires the per-component source sum to be zero, so the outfall
-        node absorbs the total: it is the tree's single sink, by construction.
+        `particular_flow` requires the per-component source sum to be zero, so each
+        outfall node absorbs its OWN component's total (N4): a forest (spec 3.1) has one
+        outfall per component, and `self.manhole_outfall_slot` (built once at construction)
+        says which of `self.outfall_node_idx`'s positions is each manhole's own -- so a
+        two-component forest subtracts component A's total at outfall A and component B's
+        at outfall B, rather than the WHOLE network's total at every outfall (which balanced
+        only a single-outfall tree and otherwise raised an unnamed `index_add_` error from
+        the shape mismatch, or silently misbalanced every component but one).
         """
         sources = torch.zeros_like(inflow)
         sources = sources.index_add(-1, self.manhole_idx, lateral)
-        total = lateral.sum(-1, keepdim=True)
-        # Subtracting the WHOLE network's lateral total at the outfall positions is correct
-        # only because `SewerNetwork` admits exactly one outfall per connected component --
-        # a load-bearing assumption of this closure, not re-checked here.
-        outfalls = _outfall_positions(self.net, self.manhole_idx, self.ambient_idx)
-        sources = sources.index_add(-1, outfalls, -total)
+        n_outfalls = self.outfall_node_idx.numel()
+        comp_totals = torch.zeros(
+            lateral.shape[:-1] + (n_outfalls,), dtype=lateral.dtype
+        )
+        comp_totals = comp_totals.index_add(-1, self.manhole_outfall_slot, lateral)
+        sources = sources.index_add(-1, self.outfall_node_idx, -comp_totals)
         return particular_flow(self.net, sources, kind="pipe")
 
     def _storage_sweep(self, state: Mapping, lateral: Tensor) -> tuple[Tensor, Tensor]:
@@ -383,24 +423,74 @@ class SewerHydraulics:
     def _densities(self, drivers: Mapping) -> Tensor:
         """Full-node ideal-gas air density from `T_head` at the manholes and `T_amb` at
         `ambient` -- the driver the existing `Stack` drive reads (the building app's
-        `_DensityClosure` pattern)."""
+        `_DensityClosure` pattern).
+
+        Both drivers are resolved through `resolve_nodal_driver` (N3): a 0-d scalar, a
+        full-node vector, or a `(..., 1)` trailing singleton all step; a batched leading
+        dimension is preserved throughout.
+        """
         t_head = _require(drivers, "T_head", self.name)
         t_amb = _require(drivers, "T_amb", self.name)
         _validate_temperature(t_head, "T_head", self.name)
         _validate_temperature(t_amb, "T_amb", self.name)
-        batch = torch.broadcast_shapes(
-            t_head.shape[:-1] if t_head.dim() else (),
-            t_amb.shape[:-1] if t_amb.dim() else (),
-        )
         # The AMBIENT density fills the whole vector first, so an outfall node (which carries
         # no headspace edge and is inactive for the air layer) still holds a physical value
         # rather than a zero that would silently give a `Stack` drive an infinite buoyancy
         # if the topology ever changed.
-        rho = air_density(t_amb) * torch.ones(batch + (self.net.n,), dtype=F64)
-        head = air_density(t_head) * torch.ones(
-            batch + (len(self.manhole_names),), dtype=F64
+        rho = air_density(
+            resolve_nodal_driver(
+                t_amb, self._node_idx, self.net.n, key="T_amb", name=self.name
+            )
         )
+        head = air_density(
+            resolve_nodal_driver(
+                t_head, self.manhole_idx, self.net.n, key="T_head", name=self.name
+            )
+        )
+        batch = torch.broadcast_shapes(rho.shape[:-1], head.shape[:-1])
+        rho = rho.expand(batch + (self.net.n,)).clone()
+        head = head.expand(batch + (len(self.manhole_names),))
         return rho.index_copy(-1, self.manhole_idx, head)
+
+
+def resolve_nodal_driver(
+    value: Tensor, idx: Tensor, n_nodes: int, *, key: str, name: str
+) -> Tensor:
+    """Resolve a "full-node K; scalars broadcast" driver (spec 4.2: `T_water`, `T_head`,
+    `T_amb`, `pH`) to values AT the node positions `idx`, batched leading dims preserved.
+
+    Three accepted layouts, by the driver's OWN trailing dimension:
+
+    * 0-d (a bare scalar): broadcast to every position in `idx`.
+    * trailing dimension exactly `n_nodes` (full-node order): gathered through
+      `index_select(-1, idx)`.
+    * trailing dimension exactly `1`: broadcast over `idx` (a per-instance scalar with a
+      batch leading dimension, `(..., 1)`).
+
+    Anything else is refused BY NAME: neither a bare per-manhole vector nor any other
+    trailing size is accepted here, because this helper cannot tell a per-manhole vector
+    from a driver error without a topology it is never given -- `H2STransfer`/
+    `SulfideGeneration`'s own `out_pipe=None` convention is the place a caller hands in an
+    already-per-manhole vector directly, bypassing this helper entirely.
+
+    `idx=torch.arange(n_nodes)` resolves a driver to the WHOLE node vector unchanged (used
+    for `T_amb`, which underlies every node's density before the manhole values overwrite
+    it): a full-node input is returned as itself, a scalar or singleton is broadcast to
+    every node, exactly the same three rules.
+    """
+    n = idx.numel()
+    if value.dim() == 0:
+        return value.expand(value.shape + (n,))
+    trailing = value.shape[-1]
+    if trailing == n_nodes:
+        return value.index_select(-1, idx)
+    if trailing == 1:
+        return value.expand(value.shape[:-1] + (n,))
+    raise ValueError(
+        f"{name}: driver {key!r} has trailing shape {trailing}; accepted layouts are a "
+        f"0-d scalar, full-node (trailing {n_nodes}), or a trailing singleton broadcast "
+        f"over {n} node(s) -- got {tuple(value.shape)}"
+    )
 
 
 def _require(drivers: Mapping, key: str, name: str) -> Tensor:

@@ -8,6 +8,7 @@ returns the triple, and one `initial_state` dispatching on each layer's `quantit
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import torch
@@ -20,10 +21,10 @@ from tellegen.apps.sewer.air import (
     Headspace,
 )
 from tellegen.apps.sewer.hydraulics import SewerHydraulics
-from tellegen.apps.sewer.quality import H2STransfer, SulfideGeneration
+from tellegen.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
 from tellegen.drives import Stack
 from tellegen.elements.fixed import FixedFlow
-from tellegen.elements.powerlaw import Orifice
+from tellegen.elements.powerlaw import PowerLaw
 from tellegen.layers.potential import PotentialFlowLayer
 from tellegen.layers.transport import TransportLayer, active_interior
 from tellegen.model import Model
@@ -252,57 +253,82 @@ def build_sewer_model(
     state: State = {}
 
     if air:
-        # Kind order: `headspace` (one per pipe, then the outfall edge), `leak`, `fan`.
-        # The outfall pipe is the one that DRAINS TO an outfall (`p.v in outfall_names`),
-        # found by where it drains rather than assumed to be `net.pipes[-1]` (M4-R19
-        # Important 1: a network whose outfall conduit is listed first silently attached
-        # the outfall-flagged headspace edge, and its geometry, to the wrong manhole).
-        # `SewerNetwork.validate()` guarantees every manhole has exactly one outgoing pipe
-        # and every outfall has none, but does not itself forbid two different manholes
-        # both draining directly into the same outfall; this builder wires exactly ONE
-        # outfall-to-ambient headspace edge, so that case is refused here by name instead
-        # of silently wiring only one of the two.
+        # Kind order: `headspace` (one per pipe, then one outfall edge PER outfall pipe),
+        # `leak`, `fan`. Each outfall pipe is the one that DRAINS TO an outfall
+        # (`p.v in outfall_names`), found by where it drains rather than assumed to be
+        # `net.pipes[-1]` (M4-R19 Important 1: a network whose outfall conduit is listed
+        # first silently attached the outfall-flagged headspace edge, and its geometry, to
+        # the wrong manhole). `SewerNetwork.validate()` guarantees every manhole has exactly
+        # one outgoing pipe and every outfall has none, but does not itself forbid two
+        # different manholes both draining directly into the same outfall; this builder
+        # wires exactly ONE outfall-to-ambient headspace edge per OUTFALL NODE, so that case
+        # is refused here by name instead of silently wiring only one of the two. A forest
+        # (spec 3.1 puts it in scope; N4) has one outfall pipe per component -- each gets its
+        # own appended headspace edge, borrowing its own pipe's own length and diameter.
         outfall_names = {o.name for o in net.outfalls}
         outfall_pipe_candidates = [
             i for i, p in enumerate(net.pipes) if p.v in outfall_names
         ]
-        if len(outfall_pipe_candidates) != 1:
+        if not outfall_pipe_candidates:
             raise ValueError(
-                f"build_sewer_model: expected exactly one pipe draining to an outfall, "
-                f"found {len(outfall_pipe_candidates)} "
-                f"({[net.pipes[i].name for i in outfall_pipe_candidates]}); outfalls are "
+                f"build_sewer_model: no pipe drains to an outfall; outfalls are "
                 f"{sorted(outfall_names)}"
             )
-        outfall_pipe = outfall_pipe_candidates[0]
-        outfall_manhole = net.pipes[outfall_pipe].u
-        pipe_positions = list(range(n_pipes)) + [outfall_pipe]
+        drained = [net.pipes[i].v for i in outfall_pipe_candidates]
+        if len(drained) != len(set(drained)):
+            dupes = sorted({v for v in drained if drained.count(v) > 1})
+            raise ValueError(
+                f"build_sewer_model: outfall(s) {dupes} each have more than one pipe "
+                f"draining into them; a dendritic sewer (or forest) gives each outfall "
+                f"exactly one"
+            )
+        pipe_positions = list(range(n_pipes)) + outfall_pipe_candidates
+        outfall_pipe_idx = torch.tensor(outfall_pipe_candidates, dtype=torch.long)
+        n_outfall_edges = len(outfall_pipe_candidates)
         for pipe in net.pipes:
             graph.add_edge(pipe.u, pipe.v, kind="headspace", name=f"{pipe.name}.air")
-        graph.add_edge(outfall_manhole, "ambient", kind="headspace", outfall=True)
+        for outfall_pipe in outfall_pipe_candidates:
+            graph.add_edge(
+                net.pipes[outfall_pipe].u, "ambient", kind="headspace", outfall=True
+            )
         for manhole in net.manholes:
             graph.add_edge(manhole.name, "ambient", kind="leak", name=f"{manhole.name}.leak")
         for name in fans:
             graph.add_edge(name, "ambient", kind="fan", name=f"{name}.fan")
-        air_lengths = torch.cat([length, length[outfall_pipe : outfall_pipe + 1]])
+        air_lengths = torch.cat([length, length.index_select(-1, outfall_pipe_idx)])
         positions = torch.tensor(pipe_positions, dtype=torch.long)
+        # Leak law: `PowerLaw(C = Cd A sqrt(2/rho), n = 0.5, kind="leak")` built DIRECTLY,
+        # never through `Orifice` (N2): `Orifice` casts with `torch.get_default_dtype()`
+        # (float32 in this repository) regardless of its inputs' own dtype, which silently
+        # downcast the leak's `C` and floored C1's residual on the float32 arithmetic of
+        # the leak branch alone (measured 1.352e-12 / 1.855e-11 in float32; 4.518e-13 /
+        # 6.141e-12 in float64, ruling N2). `leak_cd`/`leak_area` are ordinary floats by
+        # default but may also be tensors carrying a leading batch (instance) dimension
+        # (FR-18: `sewer_diurnal` varies them per instance without any core or element
+        # change, since `PowerLaw._param`'s pass-through rule and ordinary broadcasting
+        # do the rest).
+        leak_c = (
+            torch.as_tensor(leak_cd, dtype=F64)
+            * torch.as_tensor(leak_area, dtype=F64)
+            * math.sqrt(2.0 / RHO_AIR_REF)
+            * torch.ones(len(net.manholes), dtype=F64)
+        )
+        leak_n = torch.full((len(net.manholes),), 0.5, dtype=F64)
         elements = [
             Headspace(air_lengths, positions, f_air=f_air, kind="headspace"),
-            Orifice(
-                torch.full((len(net.manholes),), leak_cd, dtype=F64),
-                torch.full((len(net.manholes),), leak_area, dtype=F64),
-                rho=RHO_AIR_REF, kind="leak", dp_transition=1e-8,
-            ),
+            PowerLaw(C=leak_c, n=leak_n, kind="leak", dp_transition=1e-8),
         ]
         if fans:
             elements.append(FixedFlow(torch.zeros(len(fans), dtype=F64), kind="fan"))
         drives = [
             Drag(
                 air_lengths, positions, f_i=f_i, c_s=c_s,
-                zero_positions=(n_pipes,), kind="headspace",
+                zero_positions=tuple(range(n_pipes, n_pipes + n_outfall_edges)),
+                kind="headspace",
             ),
             _stack_for(
                 "headspace", graph, net,
-                crown=torch.cat([diameter, diameter[outfall_pipe : outfall_pipe + 1]]),
+                crown=torch.cat([diameter, diameter.index_select(-1, outfall_pipe_idx)]),
             ),
             _stack_for("leak", graph, net),
         ]
@@ -332,6 +358,18 @@ def build_sewer_model(
             )
         drivers["water_quality.x_boundary"] = torch.zeros(
             len(net.outfalls), len(species), dtype=F64
+        )
+        # FR-21: the lateral inflow-concentration loads (`bod_in`/`sulfide_in`, spec 4.2)
+        # were created as zero drivers and read by nothing; `LateralLoads` is registered
+        # whenever quality is built at all (with or without `air`), and BEFORE `H2STransfer`
+        # below (which adds its own transfer term on top rather than overwriting).
+        species_drivers = {"bod": "bod_in", "sulfide": "sulfide_in"}
+        columns = {
+            i: species_drivers[name] for i, name in enumerate(species)
+            if name in species_drivers
+        }
+        closures.append(
+            LateralLoads(graph.n, columns=columns, n_species=len(species))
         )
         if air:
             # `active_interior` calls `Network.endpoints` on every kind named, which raises
@@ -369,7 +407,11 @@ def build_sewer_model(
             closures.append(H2STransfer(graph.n, manhole_idx, out_pipe=out_pipe))
 
     reactions = (
-        [("water_quality", SulfideGeneration(out_pipe=out_pipe))] if quality else []
+        [(
+            "water_quality",
+            SulfideGeneration(out_pipe=out_pipe, manhole_idx=manhole_idx, n_nodes=graph.n),
+        )]
+        if quality else []
     )
     model = Model(
         graph, layers, closures=closures, reactions=reactions, coupling=coupling,
@@ -379,7 +421,11 @@ def build_sewer_model(
             else None
         ),
     )
-    model.notes = dict(hydraulics.notes)
+    # N10: the SAME dict object as the closure's own `notes`, not a one-time copy, so a
+    # note the closure adds later (e.g. `capacity_floor`, spec 4.7, added only once a step
+    # actually hits a dry pipe) is visible on `model.notes` too, rather than frozen at the
+    # dict copy this builder made at construction time.
+    model.notes = hydraulics.notes
 
     inflow = torch.zeros(graph.n, dtype=F64)
     inflow[manhole_idx] = torch.tensor([m.inflow for m in net.manholes], dtype=F64)
@@ -398,12 +444,23 @@ def build_sewer_model(
         }
     )
     state.update(initial_state(model))
-    if storage:
-        state["sewer.H"] = torch.zeros(len(net.manholes), dtype=F64)
     model.out_pipe = out_pipe
     model.manhole_idx = manhole_idx
     model.pipe_names = [p.name for p in net.pipes]
     return model, state, drivers
+
+
+def _ground_of(node_attrs) -> float:
+    """A node's ground level: its own `ground`, else its `invert`, else `0.0` (`ambient`'s
+    case, carrying neither). N8: `is None` throughout, not an `or`-chain -- `or` treats an
+    explicitly given `0.0` ground (or invert) as falsy and falls through to the next
+    fallback, silently dropping a real ground-level-zero manhole to whatever its invert (or
+    the hard-coded `0.0`) happens to be instead."""
+    ground = node_attrs.get("ground")
+    if ground is not None:
+        return float(ground)
+    invert = node_attrs.get("invert")
+    return 0.0 if invert is None else float(invert)
 
 
 def _stack_for(
@@ -418,9 +475,22 @@ def _stack_for(
     then the outfall pipe's diameter again for the extra outfall-to-ambient edge, exactly
     like `air_lengths` at the call site). `z_ref` is the node's ground level, so a warm
     headspace column in a manhole shaft is lighter than the outside column of the same
-    height -- the building application's stack effect, unchanged. On `leak` edges `z_path`
-    is the cover's own level and `z_ref` the same at both ends, so the leak path itself
-    carries no stack term; `crown` is unused (and must be `None`) for that kind.
+    height -- the building application's stack effect, unchanged.
+
+    DATUM CONVENTION (N9; corrects the earlier claim that a leak carries no stack term at
+    all). `ground` falls back to the node's own `invert` when no `ground` was given, and to
+    `0.0` when neither was given -- which is exactly `ambient`'s case, since `ambient` is
+    added as a bare node with no `invert` or `ground` attribute at all. On a `leak` edge
+    `z_path` is the manhole's own ground level (`ground[src]`), so the MANHOLE term of the
+    Stack law cancels (`z_ref[src] - z_path = 0`), but the AMBIENT term does not: `z_ref` at
+    `ambient` is `0.0`, not the manhole's ground level, so every leak in fact carries a
+    `g * rho_ambient * ground[manhole]` term, not zero. This is self-consistent rather than
+    a bug: `ambient`'s `0.0` datum is used identically at every leak and at the outfall's
+    open-air `headspace` edge, and `ambient` is itself a fixed boundary node
+    (`air.phi_boundary = 0`), so the datum choice only ever shifts every air pressure by the
+    same constant -- `air.phi` is DATUM-REFERENCED to this convention, not to a physical
+    zero, and differences between manholes (what every drive and refusal actually reads)
+    are unaffected. `crown` is unused (and must be `None`) for `kind='leak'`.
     """
     if kind != "headspace" and crown is not None:
         raise ValueError(
@@ -428,14 +498,14 @@ def _stack_for(
         )
     src, tgt = graph.endpoints(kind)
     invert = torch.tensor(
-        [graph.graph.nodes[n].get("invert", 0.0) or 0.0 for n in graph.nodes], dtype=F64
-    )
-    ground = torch.tensor(
         [
-            graph.graph.nodes[n].get("ground") or graph.graph.nodes[n].get("invert", 0.0)
-            or 0.0
+            0.0 if (v := graph.graph.nodes[n].get("invert")) is None else v
             for n in graph.nodes
         ],
+        dtype=F64,
+    )
+    ground = torch.tensor(
+        [_ground_of(graph.graph.nodes[n]) for n in graph.nodes],
         dtype=F64,
     )
     if kind == "headspace":
@@ -449,8 +519,18 @@ def _stack_for(
 
 
 def initial_state(model: Model) -> State:
-    """All-zero state, dispatching on each layer's `quantity` (the app convention)."""
+    """All-zero state, dispatching on each layer's `quantity` (the app convention).
+
+    N11: also builds every closure-carried state key (spec 4.6a) this application knows --
+    `"sewer.H"`, the `SewerHydraulics` closure's manhole levels, when it is running with
+    `storage=True` -- so that `step(initial_state(model))` works exactly as
+    `SewerHydraulics`'s own `KeyError` message (raised when `"sewer.H"` is missing) already
+    promises, rather than requiring the caller to know to add it separately.
+    """
     state: State = {}
+    for closure in model.closures:
+        if "sewer.H" in getattr(closure, "state_keys", ()):
+            state["sewer.H"] = torch.zeros(len(closure.manhole_names), dtype=F64)
     for name, layer in model.potential.items():
         if layer.quantity != "pressure":
             raise ValueError(

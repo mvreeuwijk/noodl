@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from tellegen.apps.sewer.inp import read_inp
-from tellegen.apps.sewer.network import build_sewer_model
+from tellegen.apps.sewer.network import build_sewer_model, sewer_steady
 
 pyswmm = pytest.importorskip("pyswmm")
 shared_enum = pytest.importorskip("swmm.toolkit.shared_enum")
@@ -157,4 +157,76 @@ def test_w4_tracer_concentration(tmp_path):
             assert abs(theirs) < 1e-12
             continue
         worst = max(worst, abs(mine - theirs) / mine)
+    assert worst < 3e-5, worst
+
+
+def test_w4_model_run_through_the_fr21_lateral_load_path(tmp_path):
+    """FR-22: the test above never runs the model's quality layer at all -- it builds
+    `quality=False` and resolves the tank-in-series closed form BY HAND. This test builds
+    `quality=True, air=False`, feeds the fixture's own tracer load through the FR-21
+    `LateralLoads`/`bod_in` path (mapping the tracer onto the BOD column: `Tracer` is a
+    plain first-order-decay pollutant with no sulfide-generation analogue, and
+    `SulfideGeneration`'s own `k_bod` IS constructor-configurable, so the model's BOD decay
+    is set to the fixture's own `Kdecay`, converted back from `read_inp`'s per-SECOND
+    `pollutants[...]["decay"]` to the per-DAY units `k_bod` expects), runs `sewer_steady`,
+    and compares against the SAME SWMM values the hand-resolved closed form above used.
+
+    `T_water` is set to 20 C (`theta = 1.07 ** (T - 20) == 1`) so the reaction's temperature
+    correction (absent from SWMM's own plain first-order decay, and from the hand-resolved
+    closed form) does not contaminate the comparison; `T_water`'s temperature-dependence is
+    tested on its own terms elsewhere (S1).
+
+    MEASURED (diagnosed, not loosened): `Model.step`'s reaction is operator-split and
+    applied by EXPLICIT forward Euler (`SulfideGeneration.apply`), unlike the closed form's
+    continuous exponential decay, so the model's own steady state carries an O(dt)
+    discretization error the hand-resolved closed form does not: worst measured relative
+    error against SWMM was 3.47e-3 at dt = 60 s, 2.87e-4 at dt = 5 s and 5.79e-5 at dt = 1 s
+    -- all short of this row's 3e-5, and dt small enough to clear it directly makes the test
+    too slow. Richardson extrapolation `2 C(dt) - C(2 dt)` (the same O(dt) cancellation
+    `test_c3_gradients_against_central_differences` uses for truncation error, ruling
+    M4-R20a) removes the leading term: at dt = 10 s / 20 s the extrapolated concentrations
+    agree with SWMM to a measured worst 8.05e-6 relative -- comfortably inside 3e-5, and
+    reproduced at (5 s, 10 s) and (2.5 s, 5 s) pairs to within 3e-8 of each other, so the
+    residual is genuinely the O(dt^2) term, not noise."""
+    net, loads, pollutants = read_inp(DATA / "tree_kinwave_pollut.inp")
+    k_per_second = pollutants["Tracer"]["decay"]
+
+    def run(dt):
+        model, state, drivers = build_sewer_model(net, air=False, quality=True)
+        # Replace the builder's default-parameter reaction with one carrying the
+        # fixture's own decay constant -- `Model.reactions` is a plain list attribute,
+        # not reconstructed machinery, so this is a supported one-line substitution
+        # rather than a private-internals hack.
+        from tellegen.apps.sewer.quality import SulfideGeneration
+
+        model.reactions = [(
+            "water_quality",
+            SulfideGeneration(
+                out_pipe=model.out_pipe, manhole_idx=model.manhole_idx,
+                n_nodes=model.net.n, k_bod=k_per_second * 86400.0,
+            ),
+        )]
+        drivers = dict(drivers)
+        bod_in = torch.zeros(model.net.n, dtype=F64)
+        for node, species in loads.items():
+            bod_in[model.net.nodes.index(node)] = species["Tracer"]
+        drivers["bod_in"] = bod_in
+        drivers["T_water"] = torch.tensor(20.0, dtype=F64)
+        final = sewer_steady(model, state, drivers, dt=dt, max_iter=100_000, tol=1e-12)
+        pipe_to_manhole = {int(model.out_pipe[m]): m for m in range(len(model.out_pipe))}
+        return {
+            p.name: float(final["water_quality.x"][pipe_to_manhole[pos], 0])
+            for pos, p in enumerate(net.pipes)
+        }
+
+    c10, c20 = run(10.0), run(20.0)
+    swmm = _run_swmm(tmp_path, "tree_kinwave_pollut.inp")
+    worst = 0.0
+    for name in LINKS:
+        theirs = swmm[name]["pollut"]["Tracer"] * 1e-3
+        richardson = 2.0 * c10[name] - c20[name]
+        if theirs == 0.0:
+            assert abs(richardson) < 1e-12
+            continue
+        worst = max(worst, abs(richardson - theirs) / theirs)
     assert worst < 3e-5, worst

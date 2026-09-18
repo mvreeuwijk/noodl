@@ -155,6 +155,21 @@ def test_negative_discharge_is_refused():
         )
 
 
+def test_non_finite_discharge_is_refused():
+    """FR-14: `normal_depth`'s non-finite guard (checked BEFORE the negative-discharge and
+    surcharge checks) was the one uncovered line in this module."""
+    with pytest.raises(ValueError, match="discharge must be finite"):
+        g.normal_depth(
+            torch.tensor([float("nan")], dtype=F64), torch.tensor([0.30], dtype=F64),
+            torch.tensor([0.013], dtype=F64), torch.tensor([0.01], dtype=F64),
+        )
+    with pytest.raises(ValueError, match="discharge must be finite"):
+        g.normal_depth(
+            torch.tensor([float("inf")], dtype=F64), torch.tensor([0.30], dtype=F64),
+            torch.tensor([0.013], dtype=F64), torch.tensor([0.01], dtype=F64),
+        )
+
+
 def test_air_geometry_complements_the_water():
     d = torch.tensor([0.30], dtype=F64)
     h = 0.6 * d

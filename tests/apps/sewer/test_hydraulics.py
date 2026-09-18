@@ -288,3 +288,77 @@ def test_storage_gradients_are_finite_through_a_dry_branch():
         )
         for g in grads:
             assert torch.isfinite(g).all()
+
+
+# ------------------------------------------------------------------------------- N3
+
+
+def test_t_head_full_node_batched_and_scalar_all_step_and_agree():
+    """N3: `T_head` is spec 4.2 "full-node K; scalars broadcast", not scalar-or-nothing.
+    A 0-d scalar, a `(n_nodes,)` full-node vector, a `(B, 1)` batched broadcast and a
+    `(B, n_nodes)` batched full-node array must all step, and (being the same physical
+    temperature everywhere) must all agree with the plain scalar case."""
+    closure = SewerHydraulics(_network(), PIPES, MANHOLES)
+    base = _drivers()
+    scalar_rho = closure({}, base)["rho_air_nodes"]
+
+    full = dict(base)
+    full["T_head"] = torch.full((7,), 293.15, dtype=F64)
+    assert closure({}, full)["rho_air_nodes"].tolist() == pytest.approx(
+        scalar_rho.tolist(), rel=1e-14
+    )
+
+    b1 = dict(base)
+    b1["T_head"] = torch.tensor([[293.15], [293.15]], dtype=F64)
+    out_b1 = closure({}, b1)["rho_air_nodes"]
+    assert out_b1.shape == (2, 7)
+    for row in out_b1:
+        assert row.tolist() == pytest.approx(scalar_rho.tolist(), rel=1e-14)
+
+    bn = dict(base)
+    bn["T_head"] = torch.full((2, 7), 293.15, dtype=F64)
+    out_bn = closure({}, bn)["rho_air_nodes"]
+    assert out_bn.shape == (2, 7)
+    for row in out_bn:
+        assert row.tolist() == pytest.approx(scalar_rho.tolist(), rel=1e-14)
+
+
+def test_t_head_with_a_layout_matching_neither_scalar_nor_full_node_is_refused_by_name():
+    """N3: a `(B,)` layout with `B != n_nodes` is neither a scalar, a full-node vector nor
+    a trailing singleton, so it is refused by name rather than silently misinterpreted."""
+    closure = SewerHydraulics(_network(), PIPES, MANHOLES)
+    drivers = _drivers()
+    drivers["T_head"] = torch.tensor([1.0, 2.0, 3.0], dtype=F64)
+    with pytest.raises(ValueError, match=r"'T_head'.*trailing shape 3"):
+        closure({}, drivers)
+
+
+# ------------------------------------------------------------------------------- N4
+
+
+def _forest():
+    """Two independent one-pipe trees, each with its own outfall."""
+    net = Network(dtype=F64)
+    for name in ("A", "B", "OutA", "OutB"):
+        net.add_node(name)
+    net.add_edge("A", "OutA", kind="pipe", name="PA")
+    net.add_edge("B", "OutB", kind="pipe", name="PB")
+    return net
+
+
+def test_a_two_component_forest_steps_and_each_component_keeps_its_own_inflow():
+    """N4: `_tree_flow` used to subtract the WHOLE network's lateral total at every
+    outfall, which is wrong for more than one component (and raised an unnamed
+    `index_add_` error once the outfall count and manhole count disagreed with the old
+    single-`total` broadcast). Each one-pipe component's own pipe must carry exactly its
+    own inflow, independent of the other component's."""
+    net = _forest()
+    manholes = [_M("A", 10.0, 0.05), _M("B", 8.0, 0.03)]
+    pipes = [_P("PA", "A", "OutA", 100.0, 0.30, 0.013, 0.01),
+             _P("PB", "B", "OutB", 100.0, 0.30, 0.013, 0.01)]
+    closure = SewerHydraulics(net, pipes, manholes)
+    inflow = torch.zeros(4, dtype=F64)
+    inflow[0], inflow[1] = 0.05, 0.03
+    out = closure({}, {"inflow": inflow, "T_head": torch.tensor(293.15, dtype=F64),
+                       "T_amb": torch.tensor(283.15, dtype=F64)})
+    assert out["sewer.q"].tolist() == pytest.approx([0.05, 0.03], abs=1e-15)

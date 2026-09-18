@@ -90,6 +90,18 @@ def test_headspace_refuses_a_missing_driver():
         el.flow(torch.tensor([0.5], dtype=F64), {})
 
 
+def test_headspace_resistance_names_only_the_missing_key():
+    """FR-11: only the ACTUALLY missing key is named, not always both -- a caller who gave
+    `sewer.D_h` but forgot `sewer.A_air` must not be told `sewer.D_h` is missing too."""
+    el = Headspace(torch.tensor([15.0], dtype=F64), torch.tensor([0]))
+    with pytest.raises(KeyError, match=r"\['sewer\.A_air'\]") as excinfo:
+        el.resistance({"sewer.D_h": torch.tensor([0.1], dtype=F64)})
+    assert "sewer.D_h" not in str(excinfo.value)
+    with pytest.raises(KeyError, match=r"\['sewer\.D_h'\]") as excinfo:
+        el.resistance({"sewer.A_air": torch.tensor([0.1], dtype=F64)})
+    assert "sewer.A_air" not in str(excinfo.value)
+
+
 def test_drag_returns_the_positive_shear_term():
     drv = _drivers(0.30, 0.6, 0.8)
     drive = Drag(torch.tensor([15.0], dtype=F64), torch.tensor([0]))

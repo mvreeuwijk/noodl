@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import torch
 
+from tellegen.apps.sewer.hydraulics import resolve_nodal_driver
 from tellegen.layers.reaction import Reaction
 
 Tensor = torch.Tensor
@@ -143,6 +144,63 @@ def _gather(value: Tensor, out_pipe: Tensor | None) -> Tensor:
     return value.index_select(-1, out_pipe)
 
 
+class LateralLoads:
+    """Lateral inflow-concentration loads (spec 3.4/4.2), as a `Model` closure.
+
+    `bod_in`/`sulfide_in` (kg/m3, full-node, spec 4.2) times `inflow` (m3/s, full-node)
+    gives the load `s_j C_in,j` in kg/s per species (spec 3.4's water_quality source term),
+    written to `"<water_layer>.sources"` in FULL node order. FR-21: before this closure
+    existed, `bod_in`/`sulfide_in` were created by the builder and read by nothing, so no
+    lateral load ever reached the water-quality layer.
+
+    Registered BEFORE `H2STransfer` in `build_sewer_model`'s closure list: `H2STransfer`
+    reads `drivers.get("<water_layer>.sources")` and ADDS its own transfer term to it
+    (rather than overwriting), so this closure's load survives regardless of whether
+    `H2STransfer` also runs (it is registered whenever `quality=True`, with or without
+    `air=True`).
+
+    `columns` maps a species column index to the driver key carrying that species' own
+    inflow concentration; a species column with no entry gets a zero load. The default the
+    builder uses, for `species=("bod", "sulfide")`, is `{0: "bod_in", 1: "sulfide_in"}`.
+    """
+
+    def __init__(
+        self,
+        n_nodes: int,
+        *,
+        columns: dict[int, str],
+        n_species: int,
+        water_layer: str = "water_quality",
+    ) -> None:
+        self.n_nodes = int(n_nodes)
+        self.columns = dict(columns)
+        self.n_species = int(n_species)
+        self.water_layer = water_layer
+
+    def __call__(self, state, drivers) -> dict[str, Tensor]:
+        inflow = _need(drivers, "inflow")
+        if inflow.shape[-1] != self.n_nodes:
+            raise ValueError(
+                f"LateralLoads: driver 'inflow' must be full-node, trailing shape "
+                f"({self.n_nodes},), got {tuple(inflow.shape)}"
+            )
+        parts = []
+        for col in range(self.n_species):
+            key = self.columns.get(col)
+            if key is None:
+                parts.append(torch.zeros_like(inflow))
+                continue
+            c_in = _need(drivers, key)
+            if c_in.shape[-1] != self.n_nodes:
+                raise ValueError(
+                    f"LateralLoads: driver {key!r} must be full-node, trailing shape "
+                    f"({self.n_nodes},), got {tuple(c_in.shape)}"
+                )
+            parts.append(inflow * c_in)
+        sources = parts[0] if self.n_species == 1 else torch.stack(parts, dim=-1)
+        return {f"{self.water_layer}.sources": sources}
+
+
 class SulfideGeneration(Reaction):
     """Operator-split Pomeroy-Parkhurst sulfide generation and bulk BOD decay.
 
@@ -167,6 +225,8 @@ class SulfideGeneration(Reaction):
         m_loss: float = M_LOSS,
         k_bod: float = K_BOD,
         out_pipe: Tensor | None = None,
+        manhole_idx: Tensor | None = None,
+        n_nodes: int | None = None,
     ) -> None:
         self.bod = int(bod)
         self.sulfide = int(sulfide)
@@ -176,16 +236,35 @@ class SulfideGeneration(Reaction):
         self.out_pipe = (
             None if out_pipe is None else torch.as_tensor(out_pipe, dtype=torch.long)
         )
+        # FR-12/N3: when given (the `build_sewer_model` builder passes both), `T_water` is
+        # resolved through the shared `resolve_nodal_driver` helper (0-d / full-node /
+        # trailing-singleton, spec 4.2); when either is omitted (the dictated unit tests'
+        # own convention) `T_water` is used exactly as given, already per-manhole or scalar.
+        self.manhole_idx = (
+            None if manhole_idx is None else torch.as_tensor(manhole_idx, dtype=torch.long)
+        )
+        self.n_nodes = None if n_nodes is None else int(n_nodes)
 
     def apply(self, x: Tensor, dt: float | None, drivers=None) -> Tensor:
         if dt is None:
             return x
         drivers = drivers or {}
+        n_species = x.shape[-1]
+        if not (0 <= self.bod < n_species) or not (0 <= self.sulfide < n_species):
+            raise ValueError(
+                f"SulfideGeneration: species index bod={self.bod} sulfide={self.sulfide} "
+                f"out of range for a water_quality state with {n_species} species"
+            )
         radius = _gather(_need(drivers, "sewer.R_h"), self.out_pipe)
         slope = _need(drivers, "sewer.q_slope")
         velocity = _gather(_need(drivers, "sewer.v"), self.out_pipe)
         depth = _gather(_need(drivers, "sewer.d_m"), self.out_pipe)
         t_water = _need(drivers, "T_water")
+        if self.manhole_idx is not None and self.n_nodes is not None:
+            t_water = resolve_nodal_driver(
+                t_water, self.manhole_idx, self.n_nodes,
+                key="T_water", name="apps.sewer.SulfideGeneration",
+            )
         bod = x[..., self.bod]
         sulfide = x[..., self.sulfide]
         d_sulfide = sulfide_rate(
@@ -205,6 +284,12 @@ class H2STransfer:
     Reads the PREVIOUS pass's concentrations (the framework's lagged cross-layer coupling)
     and writes the two layers' `sources` drivers. Both are in FULL node order and both are
     exactly opposite in MOLES of sulfur, which row C2 asserts node by node.
+
+    ADDS to an existing `"<water_layer>.sources"`/`"<air_layer>.sources"` driver rather than
+    overwriting it (FR-21): registered AFTER `LateralLoads` in `build_sewer_model`'s closure
+    list, so `drivers` here already carries `LateralLoads`'s inflow-concentration term (spec
+    3.4's `s_j C_in,j`) when quality is built with lateral loads, and this closure's own
+    transfer term is added on top rather than silently discarding it.
 
     The per-pipe hydraulic drivers ``"sewer.v"``, ``"sewer.d_m"`` and ``"sewer.V_wet"`` are
     gathered from PIPE order into MANHOLE order
@@ -252,21 +337,31 @@ class H2STransfer:
                 f"{self.air_layer + '.x'!r} are both required; build them with "
                 f"initial_state(model)"
             )
+        n_species = water.shape[-1]
+        if not (0 <= self.sulfide < n_species):
+            raise ValueError(
+                f"H2STransfer: species index sulfide={self.sulfide} out of range for a "
+                f"water_quality state with {n_species} species"
+            )
         volume = _gather(_need(drivers, "sewer.V_wet"), self.out_pipe)
         slope = _need(drivers, "sewer.q_slope")
         velocity = _gather(_need(drivers, "sewer.v"), self.out_pipe)
         depth = _gather(_need(drivers, "sewer.d_m"), self.out_pipe)
-        t_head = _need(drivers, "T_head")
-        ph = _need(drivers, "pH")
+        t_head = resolve_nodal_driver(
+            _need(drivers, "T_head"), self.manhole_idx, self.n_nodes,
+            key="T_head", name="H2STransfer",
+        )
+        ph = resolve_nodal_driver(
+            _need(drivers, "pH"), self.manhole_idx, self.n_nodes,
+            key="pH", name="H2STransfer",
+        )
         kla = kla_h2s(slope, velocity, depth)
-        free = free_fraction(ph if ph.dim() == 0 else ph.index_select(-1, self.manhole_idx))
-        henry = henry_h2s(t_head if t_head.dim() == 0 else
-                          t_head.index_select(-1, self.manhole_idx))
+        free = free_fraction(ph)
+        henry = henry_h2s(t_head)
         flux = two_film_flux(
             water[..., self.sulfide], gas, volume, kla, free, henry
         )
         batch = flux.shape[:-1]
-        n_species = water.shape[-1]
         water_sources = torch.zeros(batch + (self.n_nodes, n_species), dtype=F64)
         water_sources = water_sources.index_add(
             -2,
@@ -279,6 +374,12 @@ class H2STransfer:
         air_sources = air_sources.index_add(
             -1, self.manhole_idx, flux * (M_H2S / M_S)
         )
+        existing_water = drivers.get(f"{self.water_layer}.sources")
+        if existing_water is not None:
+            water_sources = water_sources + torch.as_tensor(existing_water, dtype=F64)
+        existing_air = drivers.get(f"{self.air_layer}.sources")
+        if existing_air is not None:
+            air_sources = air_sources + torch.as_tensor(existing_air, dtype=F64)
         return {
             f"{self.water_layer}.sources": water_sources,
             f"{self.air_layer}.sources": air_sources,

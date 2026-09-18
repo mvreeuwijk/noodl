@@ -97,11 +97,19 @@ class Headspace(Element):
         )
 
     def resistance(self, drivers: Mapping | None) -> Tensor:
-        if drivers is None or self.area_key not in drivers or self.dh_key not in drivers:
+        # FR-11: name only the key(s) that are actually missing, not always both -- a
+        # caller who supplied `area_key` but forgot `dh_key` (or the reverse) otherwise
+        # gets an error naming a driver it DID give, which reads as if the code were wrong
+        # about its own requirement.
+        missing = [
+            key for key in (self.area_key, self.dh_key)
+            if drivers is None or key not in drivers
+        ]
+        if missing:
             raise KeyError(
-                f"Headspace (kind {self.kind!r}): drivers {self.area_key!r} and "
-                f"{self.dh_key!r} are required and were not given; they are written by the "
-                f"SewerHydraulics closure in the same pass"
+                f"Headspace (kind {self.kind!r}): driver(s) {missing} are required and "
+                f"were not given; they are written by the SewerHydraulics closure in the "
+                f"same pass"
             )
         a_air = drivers[self.area_key].index_select(-1, self.pipe_positions)
         d_h = drivers[self.dh_key].index_select(-1, self.pipe_positions)

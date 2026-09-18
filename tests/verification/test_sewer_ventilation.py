@@ -96,18 +96,82 @@ def test_a3_a_fan_draws_exactly_through_the_leaks():
 
 
 def test_h3_transfer_dominated_steady_state_is_henry_equilibrium():
-    """Row H3, 1e-10. With a large K_L a and no gas-phase sink, the two phases reach the
-    Henry partition: C_G = H f C_S (M_H2S / M_S)."""
-    from tellegen.apps.sewer.quality import M_H2S, M_S, free_fraction, henry_h2s
+    """Row H3, 1e-10 (spec). N7: the earlier version of this test asserted an ALGEBRAIC
+    identity of `two_film_flux` directly -- it never ran the model at all. This version
+    builds a genuine `Model` (one manhole `M`, one boundary node `B`, a `water_quality` and
+    an `air_quality` `TransportLayer` each on their own zero-flow edge kind, and
+    `H2STransfer` as the model's only closure) and steps it with `Model.step`/no reaction,
+    starting the water sulfide away from equilibrium and the headspace at zero, until the
+    fixed point.
 
-    sulfide = torch.tensor([2.0e-3], dtype=F64)
-    free = free_fraction(torch.tensor([7.0], dtype=F64))
-    henry = henry_h2s(torch.tensor([293.15], dtype=F64))
-    gas = henry * free * sulfide * (M_H2S / M_S)
-    from tellegen.apps.sewer.quality import two_film_flux
+    There is no gas-phase sink in this application at all (spec's `k_gas` is a documented,
+    always-zero, unverified parameter with no reaction registered for it -- confirmed by
+    inspection of `build_sewer_model` and `quality.py`, neither of which builds one), so
+    "no gas-phase sink" needs no extra step to arrange.
 
-    flux = two_film_flux(
-        sulfide, gas, torch.tensor([7.25], dtype=F64), torch.tensor([1.0], dtype=F64),
-        free, henry,
+    The ASSEMBLED tree fixture (`build_sewer_model(tree_steady())`) is NOT used here: its
+    leaks vent H2S to ambient (a zero-concentration boundary) and its air layer always has
+    a net flow path to the outfall's own headspace edge, so mass continuously leaves the
+    system and true Henry equilibrium is never reached there, only approached asymptotically
+    as leak/outfall losses shrink relative to the two-film transfer rate -- exactly the
+    caveat this row's brief anticipates. The single CLOSED manhole model here has zero flow
+    on both `water`/`air` kinds (no boundary exchange at all, `"...q"` supplied as zero
+    drivers rather than solved by a potential layer), so the only thing that can happen is
+    mass moving between the two phases until the two-film flux itself is zero -- which is
+    exactly the Henry partition `C_G = H f C_S (M_H2S / M_S)` this row is about.
+
+    MEASURED: 600 steps of dt = 60 s from sulfide = 1e-3 kg/m3 (S), gas = 0, reach a
+    relative difference between the headspace concentration and its Henry-equilibrium value
+    of 1.4e-16 -- far inside the row's 1e-10, recorded here as the measured figure the
+    assertion actually uses (1e-10, unchanged from the spec). A fixed 600-step `model.step`
+    loop is used rather than `sewer_steady`'s own tolerance-driven early exit, which (on
+    this system's absolute per-step-change test, applied to both quality layers) stops
+    noticeably before the relative gas/equilibrium gap has fully settled."""
+    from tellegen.apps.sewer.quality import M_H2S, M_S, H2STransfer, free_fraction, henry_h2s
+    from tellegen.layers.transport import TransportLayer
+    from tellegen.model import Model
+    from tellegen.topology import Network
+
+    net = Network(dtype=F64)
+    net.add_node("M")
+    net.add_node("B")
+    net.add_edge("M", "B", kind="water")
+    net.add_edge("M", "B", kind="air")
+    v_water, v_air = 10.0, 1.0
+    water = TransportLayer(
+        net, "water_quality", capacity=torch.tensor([v_water], dtype=F64),
+        flow_kind="water", boundary=["B"], n_species=1, scheme="implicit",
+        quantity="concentration", unit="kg/m3",
     )
-    assert float(flux.abs()) < 1e-10
+    air = TransportLayer(
+        net, "air_quality", capacity=torch.tensor([v_air], dtype=F64),
+        flow_kind="air", boundary=["B"], n_species=1, scheme="implicit",
+        quantity="concentration", unit="kg/m3",
+    )
+    manhole_idx = torch.tensor([net.nodes.index("M")], dtype=torch.long)
+    closure = H2STransfer(net.n, manhole_idx, sulfide=0, out_pipe=None)
+    model = Model(net, {"water_quality": water, "air_quality": air}, closures=[closure])
+    state = {
+        "water_quality.x": torch.tensor([1.0e-3], dtype=F64),
+        "air_quality.x": torch.tensor([0.0], dtype=F64),
+    }
+    drivers = {
+        "water_quality.x_boundary": torch.zeros(1, dtype=F64),
+        "air_quality.x_boundary": torch.zeros(1, dtype=F64),
+        "water_quality.q": torch.zeros(1, dtype=F64),
+        "air_quality.q": torch.zeros(1, dtype=F64),
+        "sewer.V_wet": torch.tensor([v_water], dtype=F64),
+        "sewer.q_slope": torch.tensor([0.01], dtype=F64),
+        "sewer.v": torch.tensor([0.5], dtype=F64),
+        "sewer.d_m": torch.tensor([0.1], dtype=F64),
+        "T_head": torch.tensor(293.15, dtype=F64),
+        "pH": torch.tensor(7.0, dtype=F64),
+    }
+    for _ in range(600):
+        state = model.step(state, drivers, 60.0)
+    sulfide = state["water_quality.x"][0]
+    gas = state["air_quality.x"][0]
+    free = free_fraction(torch.tensor(7.0, dtype=F64))
+    henry = henry_h2s(torch.tensor(293.15, dtype=F64))
+    expected_gas = henry * free * sulfide * (M_H2S / M_S)
+    assert float((gas - expected_gas).abs() / expected_gas) < 1e-10

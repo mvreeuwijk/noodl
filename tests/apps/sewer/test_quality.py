@@ -255,3 +255,97 @@ def test_out_pipe_gathers_per_pipe_drivers_into_manhole_order():
     assert float(out_h2s["water_quality.sources"][3, 1]) == pytest.approx(
         float(-expected_flux_m3), rel=1e-12
     )
+
+
+# --------------------------------------------------------------------------------- FR-21
+
+
+def test_lateral_loads_writes_only_the_named_columns_at_the_named_nodes():
+    """FR-21 unit test: `LateralLoads` writes `inflow * c_in` (kg/s) at exactly the nodes
+    `inflow` names, in exactly the species columns `columns` names, and zero everywhere
+    (and every other species) else -- the full-node, full-species `"...sources"` tensor
+    `H2STransfer` (registered after it) is required to ADD to rather than overwrite."""
+    closure = q.LateralLoads(5, columns={0: "bod_in", 1: "sulfide_in"}, n_species=2)
+    inflow = torch.tensor([0.05, 0.0, 0.03, 0.0, 0.0], dtype=F64)
+    bod_in = torch.tensor([0.3, 0.0, 0.0, 0.0, 0.0], dtype=F64)
+    sulfide_in = torch.tensor([0.0, 0.0, 0.1, 0.0, 0.0], dtype=F64)
+    out = closure({}, {"inflow": inflow, "bod_in": bod_in, "sulfide_in": sulfide_in})
+    sources = out["water_quality.sources"]
+    assert sources.shape == (5, 2)
+    expected = torch.zeros(5, 2, dtype=F64)
+    expected[0, 0] = 0.05 * 0.3
+    expected[2, 1] = 0.03 * 0.1
+    assert torch.equal(sources, expected)
+
+
+def test_lateral_loads_refuses_a_wrong_shaped_driver_by_name():
+    closure = q.LateralLoads(5, columns={0: "bod_in"}, n_species=1)
+    with pytest.raises(ValueError, match="'inflow'"):
+        closure({}, {"inflow": torch.zeros(3, dtype=F64), "bod_in": torch.zeros(5, dtype=F64)})
+    with pytest.raises(ValueError, match="'bod_in'"):
+        closure({}, {"inflow": torch.zeros(5, dtype=F64), "bod_in": torch.zeros(3, dtype=F64)})
+
+
+def test_h2stransfer_adds_to_an_existing_sources_driver_rather_than_overwriting():
+    """FR-21: `H2STransfer` must ADD its own transfer term to a `"...sources"` driver a
+    prior closure (`LateralLoads`) already wrote, not silently discard it."""
+    closure = q.H2STransfer(5, torch.tensor([0, 1, 2, 3, 4]))
+    x = torch.zeros(5, 2, dtype=F64)
+    x[:, 1] = 1.0e-3
+    state = {"water_quality.x": x, "air_quality.x": torch.zeros(5, dtype=F64)}
+    per_pipe = torch.full((5,), 0.1, dtype=F64)
+    drivers = {
+        "sewer.V_wet": per_pipe, "sewer.q_slope": per_pipe, "sewer.v": per_pipe,
+        "sewer.d_m": per_pipe, "T_water": torch.tensor(18.0, dtype=F64),
+        "T_head": torch.tensor(293.15, dtype=F64), "pH": torch.tensor(7.0, dtype=F64),
+    }
+    existing = torch.zeros(5, 2, dtype=F64)
+    existing[0, 0] = 0.015  # a pre-existing lateral BOD load at node 0
+    drivers_with_existing = dict(drivers)
+    drivers_with_existing["water_quality.sources"] = existing
+    drivers_with_existing["air_quality.sources"] = torch.full((5,), 2.0e-7, dtype=F64)
+
+    out_plain = closure(state, drivers)
+    out_with_existing = closure(state, drivers_with_existing)
+    assert torch.allclose(
+        out_with_existing["water_quality.sources"], out_plain["water_quality.sources"] + existing
+    )
+    assert torch.allclose(
+        out_with_existing["air_quality.sources"],
+        out_plain["air_quality.sources"] + torch.full((5,), 2.0e-7, dtype=F64),
+    )
+
+
+def test_h2stransfer_refuses_an_out_of_range_sulfide_index():
+    """FR-12: an out-of-range species index names the driver/column rather than a bare
+    IndexError from `water[..., self.sulfide]`."""
+    closure = q.H2STransfer(5, torch.tensor([0, 1, 2, 3, 4]), sulfide=5)
+    x = torch.zeros(5, 2, dtype=F64)
+    state = {"water_quality.x": x, "air_quality.x": torch.zeros(5, dtype=F64)}
+    with pytest.raises(ValueError, match="sulfide=5"):
+        closure(state, {})
+
+
+def test_sulfidegeneration_refuses_an_out_of_range_species_index():
+    """FR-12: same, for `SulfideGeneration`'s `bod`/`sulfide` indices."""
+    reaction = q.SulfideGeneration(sulfide=5)
+    x = torch.zeros(1, 2, dtype=F64)
+    with pytest.raises(ValueError, match="sulfide=5"):
+        reaction.apply(x, 60.0, {"sewer.R_h": torch.tensor([0.1], dtype=F64)})
+
+
+def test_h2stransfer_refuses_a_wrong_length_ph_naming_the_driver():
+    """FR-12/N3: a wrong-length `pH` (neither scalar, full-node nor a trailing singleton)
+    is refused naming the driver, through the shared `resolve_nodal_driver` helper."""
+    closure = q.H2STransfer(5, torch.tensor([0, 1, 2, 3, 4]))
+    x = torch.zeros(5, 2, dtype=F64)
+    state = {"water_quality.x": x, "air_quality.x": torch.zeros(5, dtype=F64)}
+    per_pipe = torch.full((5,), 0.1, dtype=F64)
+    drivers = {
+        "sewer.V_wet": per_pipe, "sewer.q_slope": per_pipe, "sewer.v": per_pipe,
+        "sewer.d_m": per_pipe, "T_water": torch.tensor(18.0, dtype=F64),
+        "T_head": torch.tensor(293.15, dtype=F64),
+        "pH": torch.tensor([1.0, 2.0, 3.0], dtype=F64),
+    }
+    with pytest.raises(ValueError, match=r"'pH'.*trailing shape 3"):
+        closure(state, drivers)
