@@ -61,8 +61,10 @@ def _theta(h: Tensor, diameter: Tensor) -> Tensor:
     endpoint tolerances the tests demand (measured: fails both the full-pipe and
     zero-depth cases). Clamping to the true domain ``[-1, 1]`` instead is exact at the
     endpoints AND finite-gradient there for a different reason: ``torch.clamp``'s own
-    backward is ``0`` for an input at (or past) its bound, so the ``arccos`` singularity is
-    never reached by the gradient in the first place -- it is gated shut one step upstream.
+    backward is exactly ``0`` for an input at (or past) its bound -- not merely "small" --
+    so it hard-zeroes even an ``inf``/``nan`` seed arriving from further downstream, not
+    only a well-behaved one. The ``arccos`` derivative singularity is never reached by the
+    gradient at all: it is gated shut one step upstream, unconditionally.
     """
     u = 1.0 - 2.0 * h / diameter
     return 2.0 * torch.arccos(torch.clamp(u, -1.0, 1.0))
@@ -111,10 +113,23 @@ def hydraulic_mean_depth(h: Tensor, diameter: Tensor) -> Tensor:
 
 
 def manning_flow(h: Tensor, diameter: Tensor, roughness: Tensor, slope: Tensor) -> Tensor:
-    """Manning discharge ``Q = (1/n) A R^(2/3) sqrt(S0)`` (m^3/s), SI constant 1.0."""
+    """Manning discharge ``Q = (1/n) A R^(2/3) sqrt(S0)`` (m^3/s), SI constant 1.0.
+
+    ``R^(2/3)`` has an infinite local derivative at ``R = 0`` (a dry pipe, ``h = 0``). Left
+    unguarded, that ``inf`` flows back into ``hydraulic_radius``'s own ``diameter * ratio /
+    4`` and multiplies the ``0`` from ``ratio`` there into ``nan`` for ``d(Q)/d(diameter)``
+    -- ``diameter`` reaches ``hydraulic_radius`` through a plain multiplicative factor, not
+    through ``_theta``'s clamp gate, so it is not protected the way ``h``, ``n`` and ``s``
+    are. ``R`` is floored on both branches of the ``where`` (the module's usual pattern):
+    the value is unchanged (``0`` at a dry pipe) and the local derivative of the substituted
+    branch is finite, so no ``inf`` is ever produced for any gradient to multiply by ``0``.
+    """
     area = flow_area(h, diameter)
     radius = hydraulic_radius(h, diameter)
-    return area * radius ** (2.0 / 3.0) * torch.sqrt(slope) / roughness
+    positive = radius > 0
+    safe_radius = torch.where(positive, radius, torch.ones_like(radius))
+    factor = torch.where(positive, safe_radius ** (2.0 / 3.0), torch.zeros_like(radius))
+    return area * factor * torch.sqrt(slope) / roughness
 
 
 def capacity_flow(diameter: Tensor, roughness: Tensor, slope: Tensor) -> Tensor:

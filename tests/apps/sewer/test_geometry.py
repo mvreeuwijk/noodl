@@ -56,6 +56,22 @@ def test_manning_uses_the_si_constant_one():
     assert float(q) == pytest.approx(expected, rel=1e-14)
 
 
+def test_manning_flow_is_zero_and_finite_gradient_at_a_dry_pipe():
+    """M4-R15: R^(2/3) has an infinite local derivative at R = 0 (h = 0), and diameter
+    reaches hydraulic_radius through a plain multiplicative factor that bypasses _theta's
+    clamp gate, so d(Q)/d(diameter) was NaN at exactly h = 0 before the R-floor guard."""
+    h = torch.zeros(1, dtype=F64, requires_grad=True)
+    d = torch.tensor([0.30], dtype=F64, requires_grad=True)
+    n = torch.tensor([0.013], dtype=F64, requires_grad=True)
+    s = torch.tensor([0.01], dtype=F64, requires_grad=True)
+    q = g.manning_flow(h, d, n, s)
+    assert float(q.detach()) == pytest.approx(0.0, abs=1e-9)
+    grads = torch.autograd.grad(q.sum(), (h, d, n, s))
+    for grad in grads:
+        assert torch.isfinite(grad).all()
+        assert float(grad) == 0.0
+
+
 def test_discharge_increases_strictly_on_the_ascending_branch():
     n = 2000
     d = torch.full((n,), 0.30, dtype=F64)
