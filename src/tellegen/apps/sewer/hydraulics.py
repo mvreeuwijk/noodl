@@ -331,8 +331,14 @@ class SewerHydraulics:
             cap = geom.capacity_flow(d_j, n_j, s_j)
             over = target > cap
             if bool(torch.any(over)):
+                # `cap` carries no batch dimension (built from the pipe-only tensors); it
+                # must be broadcast up to `target`'s full (possibly batched) shape BEFORE
+                # the flat reshape below, or indexing a later batch instance out of the
+                # unexpanded `(1, k)` `flat_cap` raises an unnamed `IndexError` instead of
+                # the named refusal this check exists to give.
+                cap_b = cap.expand_as(target)
                 flat_target = target.reshape(-1, target.shape[-1])
-                flat_cap = cap.reshape(-1, cap.shape[-1])
+                flat_cap = cap_b.reshape(-1, target.shape[-1])
                 flat_over = over.reshape(-1, over.shape[-1])
                 batch_idx, local_idx = torch.nonzero(flat_over, as_tuple=True)
                 idx_list = idx.tolist()
@@ -408,14 +414,14 @@ def _require(drivers: Mapping, key: str, name: str) -> Tensor:
 
 def _validate_temperature(t: Tensor, key: str, name: str) -> None:
     """`T_head`/`T_amb` are absolute (KELVIN) temperatures: non-finite or non-positive is a
-    driver error, named by the driver key and the offending instance(s)/node(s) rather than
-    left to surface later as a silently wrong `air_density`."""
+    driver error, named by the driver key and the offending instance(s) rather than left to
+    surface later as a silently wrong `air_density`."""
     bad = ~torch.isfinite(t) | (t <= 0)
     if bool(torch.any(bad)):
         idx = bad.reshape(-1).nonzero().flatten().tolist()
         raise ValueError(
             f"SewerHydraulics {name!r}: driver {key!r} must be finite and positive "
-            f"(Kelvin); bad at instance(s)/node(s) {idx}"
+            f"(Kelvin); bad at instance(s) {idx}"
         )
 
 

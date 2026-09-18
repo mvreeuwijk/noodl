@@ -228,6 +228,27 @@ def test_storage_surcharge_is_refused_naming_the_manhole():
         closure(state, _drivers(inflows=(50.0, 0.08, 0.03, 0.0, 0.0)))
 
 
+def test_storage_surcharge_batched_names_only_the_surcharging_instance():
+    """Fix round 2: `capacity_flow` carries no batch dimension; the surcharge check must
+    broadcast it up to `target`'s batch shape before indexing, or a later batch instance's
+    lookup raises an unnamed `IndexError` instead of the named refusal. Instance 0 here is
+    ordinary and must not be blamed; only instance 1 surcharges at J1."""
+    closure = SewerHydraulics(_network(), PIPES, MANHOLES, storage=True, dt=60.0)
+    state = {"sewer.H": torch.zeros(2, 5, dtype=F64)}
+    inflow = torch.zeros(2, 7, dtype=F64)
+    inflow[0, 0], inflow[0, 1], inflow[0, 2] = 0.05, 0.08, 0.03
+    inflow[1, 0], inflow[1, 1], inflow[1, 2] = 50.0, 0.08, 0.03
+    drivers = {
+        "inflow": inflow,
+        "T_head": torch.tensor(293.15, dtype=F64),
+        "T_amb": torch.tensor(283.15, dtype=F64),
+    }
+    with pytest.raises(
+        ValueError, match=r"surcharge at manhole\(s\) \['J1'\] instance\(s\) \[1\]"
+    ):
+        closure(state, drivers)
+
+
 def test_non_positive_t_head_is_refused_naming_the_driver():
     closure = SewerHydraulics(_network(), PIPES, MANHOLES)
     drivers = _drivers()
