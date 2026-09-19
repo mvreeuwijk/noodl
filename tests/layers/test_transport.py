@@ -568,6 +568,33 @@ def test_per_step_capacity_conserves_mass():
     assert float((volume * rate).sum()) == pytest.approx(-3.0, abs=1e-12)
 
 
+def test_per_step_capacity_conserves_mass_across_the_step():
+    """The milestone 4 spec (4.6b) promised: a two-node layer whose capacity is halved per
+    step conserves mass. Node A and B both halve from 10 to 5 while a unit flow carries A's
+    concentration to B and B's to the boundary. Amount form, implicit:
+    V_new x_new - V_old x_old = dt * (inflow - outflow at x_new)."""
+    _, layer = _two_node_layer([10.0, 10.0])
+    q = torch.tensor([1.0, 1.0], dtype=torch.float64)
+    x0 = torch.tensor([5.0, 3.0], dtype=torch.float64)
+    v_old = torch.tensor([10.0, 10.0], dtype=torch.float64)
+    v_new = torch.tensor([5.0, 5.0], dtype=torch.float64)
+    layer.scheme = "implicit"
+    x1 = layer.step(x0, q, torch.zeros(3, dtype=torch.float64),
+                    torch.zeros(1, dtype=torch.float64), 1.0,
+                    capacity=v_new, capacity_prev=v_old)
+    # A: 5 xA - 50 = -1 * xA           -> xA = 50/6
+    # B: 5 xB - 30 = 1 * xA - 1 * xB   -> xB = (30 + 50/6)/6
+    xa = 50.0 / 6.0
+    xb = (30.0 + xa) / 6.0
+    torch.testing.assert_close(
+        x1, torch.tensor([xa, xb], dtype=torch.float64), rtol=1e-12, atol=1e-12
+    )
+    mass_out = 1.0 * xb
+    assert float((v_new * x1).sum()) + mass_out == pytest.approx(
+        float((v_old * x0).sum()), rel=1e-12
+    )
+
+
 def test_per_step_capacity_is_refused_on_a_wrong_shape():
     _, layer = _two_node_layer([10.0, 10.0])
     with pytest.raises(ValueError, match="capacity has 1 entries"):
@@ -593,19 +620,22 @@ def test_per_step_capacity_must_be_strictly_positive():
 
 
 def test_capacity_driver_reaches_the_layer_through_the_model():
+    """A fixed capacity supplied as a driver: the step-start state must carry the SAME
+    capacity under "c.capacity" too (R5's contract -- a supplied capacity driver requires
+    the storage at the state's own time), so this is a no-change-in-storage step and
+    matches a bare `layer.step` call with `capacity_prev` defaulting to `capacity`."""
     net, layer = _two_node_layer([10.0, 10.0])
     model = Model(net, {"c": layer})
     q = torch.tensor([1.0, 1.0], dtype=torch.float64)
     x0 = torch.tensor([5.0, 3.0], dtype=torch.float64)
+    cap = torch.tensor([5.0, 5.0], dtype=torch.float64)
     drivers = {
-        "c.q": q, "c.x_boundary": torch.zeros(1, dtype=torch.float64),
-        "c.capacity": torch.tensor([5.0, 5.0], dtype=torch.float64),
+        "c.q": q, "c.x_boundary": torch.zeros(1, dtype=torch.float64), "c.capacity": cap,
     }
-    through_model = model.step({"c.x": x0}, drivers, 1.0)["c.x"]
+    through_model = model.step({"c.x": x0, "c.capacity": cap}, drivers, 1.0)["c.x"]
     direct = layer.step(
         x0, q, torch.zeros(3, dtype=torch.float64),
-        torch.zeros(1, dtype=torch.float64), 1.0,
-        capacity=torch.tensor([5.0, 5.0], dtype=torch.float64),
+        torch.zeros(1, dtype=torch.float64), 1.0, capacity=cap,
     )
     assert torch.allclose(through_model, direct, atol=0.0, rtol=0.0)
 

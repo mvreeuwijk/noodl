@@ -141,10 +141,10 @@ def test_sewer_steady_reaches_a_fixed_point():
 
 
 def test_initial_state_refuses_an_unknown_quantity():
-    model, _, _ = build_sewer_model(tree_steady())
+    model, _, drivers = build_sewer_model(tree_steady())
     model.transport["water_quality"].quantity = "nonsense"
     with pytest.raises(ValueError, match="nonsense"):
-        initial_state(model)
+        initial_state(model, drivers)
 
 
 def test_read_inp_sulfide_source_uses_each_manholes_own_outgoing_pipe():
@@ -424,7 +424,7 @@ def test_initial_state_builds_sewer_h_and_a_storage_step_runs():
     """N11: `initial_state(model)` must build `"sewer.H"` itself when `storage=True`, as
     `SewerHydraulics`'s own `KeyError` message already promises."""
     model, _, drivers = build_sewer_model(tree_steady(), storage=True, dt_storage=60.0)
-    state = initial_state(model)
+    state = initial_state(model, drivers)
     assert "sewer.H" in state
     new = model.step(state, drivers, 60.0)
     assert torch.isfinite(new["sewer.H"]).all()

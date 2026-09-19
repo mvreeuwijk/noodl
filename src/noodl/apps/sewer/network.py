@@ -443,7 +443,7 @@ def build_sewer_model(
             "sewer.q_slope": slope_per_manhole,
         }
     )
-    state.update(initial_state(model))
+    state.update(initial_state(model, drivers))
     model.out_pipe = out_pipe
     model.manhole_idx = manhole_idx
     model.pipe_names = [p.name for p in net.pipes]
@@ -518,14 +518,27 @@ def _stack_for(
                  rho_key="rho_air_nodes", g=9.80665)
 
 
-def initial_state(model: Model) -> State:
+def initial_state(model: Model, drivers: Drivers | None = None) -> State:
     """All-zero state, dispatching on each layer's `quantity` (the app convention).
 
     N11: also builds every closure-carried state key (spec 4.6a) this application knows --
     `"sewer.H"`, the `SewerHydraulics` closure's manhole levels, when it is running with
-    `storage=True` -- so that `step(initial_state(model))` works exactly as
+    `storage=True` -- so that `step(initial_state(model, drivers))` works exactly as
     `SewerHydraulics`'s own `KeyError` message (raised when `"sewer.H"` is missing) already
     promises, rather than requiring the caller to know to add it separately.
+
+    R5: `SewerHydraulics` writes `"<quality layer>.capacity"` every call (the wetted/headspace
+    volume, spec 4.6b), and `Model` now requires the step-start state to carry that key
+    whenever the driver is supplied (the storage at the state's own time, R5's amount form).
+    When `drivers` is given, `model.initial_capacities(state, drivers)` supplies it -- Task
+    10's QUERY call (`Model._apply_closures` with no `ctx`), so `SewerHydraulics` evaluates
+    its geometry at this all-zero, dry state (`sewer.H = 0` from the block above) WITHOUT
+    advancing it; the wetted volumes come out at the documented floor `CAPACITY_FLOOR`
+    (`hydraulics.py`), so the first real step conserves the (negligible) initial amount.
+    `drivers` is required for that -- there is no drivers-free way to evaluate a closure --
+    so its absence is refused by name whenever it would actually be needed (a transport layer
+    exists and some closure is a `SewerHydraulics`), rather than only once the missing key is
+    discovered deep inside `Model.step`.
     """
     state: State = {}
     for closure in model.closures:
@@ -547,6 +560,13 @@ def initial_state(model: Model) -> State:
             )
         shape = (layer.n_i,) if layer.n_species == 1 else (layer.n_i, layer.n_species)
         state[f"{name}.x"] = torch.zeros(shape, dtype=F64)
+    if drivers is not None:
+        state.update(model.initial_capacities(state, drivers))
+    elif model.transport and any(isinstance(c, SewerHydraulics) for c in model.closures):
+        raise ValueError(
+            "apps.sewer.initial_state: drivers are required to evaluate the initial "
+            "storage; call initial_state(model, drivers)"
+        )
     return state
 
 

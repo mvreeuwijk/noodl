@@ -557,9 +557,27 @@ class Model:
                     )
                 if sources is None:
                     sources = self._zero_sources(layer, x, layer.n_i)
+                cap_prev = None
+                if cap is not None:
+                    cap_prev = base.get(f"{name}.capacity")
+                    if cap_prev is None:
+                        raise KeyError(
+                            f"Model: a closure writes the driver {name + '.capacity'!r}, so "
+                            f"the step-start state must carry {name + '.capacity'!r} (the "
+                            f"storage at the state's own time); build it with "
+                            f"Model.initial_capacities(state, drivers)"
+                        )
                 k = self.substeps[name]
-                for _ in range(k):
-                    x = layer.step(x, q_kind, sources, xb, dt / k, capacity=cap)
+                for j in range(1, k + 1):
+                    if cap is None:
+                        cap_j = cap_prev_j = None
+                    else:
+                        cap_prev_j = cap_prev + (j - 1) / k * (cap - cap_prev)
+                        cap_j = cap_prev + j / k * (cap - cap_prev)
+                    x = layer.step(x, q_kind, sources, xb, dt / k, capacity=cap_j,
+                                   capacity_prev=cap_prev_j)
+                if cap is not None:
+                    new[f"{name}.capacity"] = cap
                 for lname, reaction in self.reactions:
                     if lname == name:
                         x = reaction.apply(x, dt, drv)
@@ -583,6 +601,16 @@ class Model:
         return new, diag, drv
 
     # ------------------------------------------------------------------ public
+    def initial_capacities(self, state: State, drivers: Drivers) -> dict[str, Tensor]:
+        """`{"<layer>.capacity": tensor}` for every transport layer whose closures write that
+        driver, evaluated as a QUERY at `state` (no integration): the storage at the state's
+        own time, which is what the step-start state must carry before the first step."""
+        drv = self._apply_closures(state, drivers)
+        return {
+            f"{name}.capacity": drv[f"{name}.capacity"]
+            for name in self.transport if f"{name}.capacity" in drv
+        }
+
     def step(
         self, state, drivers, dt: float, *, t: float | None = None,
         diagnostics: dict | None = None, **solve_kwargs,

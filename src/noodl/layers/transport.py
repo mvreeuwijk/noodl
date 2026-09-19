@@ -675,6 +675,7 @@ class TransportLayer:
         *,
         on_failure: str = "raise",
         capacity: torch.Tensor | None = None,
+        capacity_prev: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Advance one timestep under `self.scheme`.
 
@@ -691,6 +692,17 @@ class TransportLayer:
         effect it does not have. `on_failure="return"` with `scheme="exact"` therefore
         raises `ValueError` naming the layer. `capacity` (keyword-only, spec 4.6b) overrides
         the construction-time capacity for this call only.
+
+        `capacity_prev` (keyword-only, R5) is the storage at the START of the step, when it
+        differs from `capacity` (the storage at the end of it): the AMOUNT form
+        `V_new x_new - V_old x_old = dt F(x_new)` (implicit) / `= dt/2 (F(x_new) + F(x_old))`
+        (trapezoidal), so that a step across a changing capacity conserves the stored amount
+        `V x` rather than treating the old concentration as the initial condition of a step
+        that also silently rescales it. Defaults to `capacity` (fixed storage over the
+        step), so a layer with no `capacity` driver takes exactly the old code path.
+        `scheme="exact"` has no changing-volume form (the exponential step assumes a fixed
+        storage over the whole step) and raises `ValueError` naming the layer when
+        `capacity_prev` differs from `capacity`.
         """
         if on_failure not in ("raise", "return"):
             raise ValueError(
@@ -713,6 +725,13 @@ class TransportLayer:
         out_dtype = x.dtype
         dtype = torch.float64
         cap_t = self._capacity_arg(capacity)
+        cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev)
+        if self.scheme == "exact" and not torch.equal(cap_prev_t, cap_t):
+            raise ValueError(
+                f"TransportLayer '{self.name}': scheme='exact' has no changing-capacity "
+                f"form (the exponential step assumes a fixed storage over the step); use "
+                f"scheme='implicit' or 'trapezoidal' for a layer whose capacity changes"
+            )
         x_s, reduced = self._to_stacked(x, self.n_i, "x")
         x_s = x_s.to(dtype)
         if self.scheme == "exact":
@@ -745,13 +764,13 @@ class TransportLayer:
             ).x
         elif self.scheme == "implicit":
             result, reduced = self._implicit_step_sparse(
-                x, q, sources, x_boundary, dt, on_failure, cap_t
+                x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t
             )
             if on_failure == "return":
                 return result
         elif self.scheme == "trapezoidal":
             result, reduced = self._trapezoidal_step_sparse(
-                x, q, sources, x_boundary, dt, on_failure, cap_t
+                x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t
             )
             if on_failure == "return":
                 return result
@@ -816,32 +835,45 @@ class TransportLayer:
         self, x: torch.Tensor, q: torch.Tensor, sources: torch.Tensor,
         x_boundary: torch.Tensor, dt: float, on_failure: str,
         capacity: torch.Tensor | None = None,
+        capacity_prev: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Backward Euler `(I - dt M) x_{n+1} = x_n + dt b0` on the operator contract."""
+        """Backward Euler on the AMOUNT `V x`: `V_new x_{n+1} - V_old x_n = dt F(x_{n+1})`,
+        with `F(x) = G x + N_raw x_b + s` the capacity-FREE amount rate (`G`, `N_raw` the
+        un-divided-by-capacity advection/conduction blocks). Dividing through by `V_new`:
+
+            x_{n+1} - (V_old / V_new) x_n = dt (M_new x_{n+1} + N_new x_b + s / V_new)
+
+        i.e. `(I - dt M_new) x_{n+1} = (V_old / V_new) x_n + dt b0`, `b0` and `M_new` at the
+        NEW capacity exactly as the fixed-capacity form already computed them (`operator()`
+        divides by capacity once, up front). Only the `x_n` term is rescaled by the ratio,
+        because `F(x_n) / V_new = M_new x_n + N_new x_b + s / V_new` already IS `b0` plus the
+        capacity-divided `M_new x_n` -- there is no separate old-capacity operator to build.
+        `capacity_prev` defaults to `capacity` (fixed storage), which recovers the classic
+        `x_{n+1} - x_n = dt b0` step bit for bit (ratio == 1)."""
         dtype = torch.float64
         x = x.to(dtype)
         q = q.to(dtype)
         sources = sources.to(dtype)
         x_boundary = x_boundary.to(dtype)
         cap_t = self._capacity_arg(capacity).to(dtype)
+        cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev).to(dtype)
         _, reduced = self._to_stacked(x, self.n_i, "x")
         names, coef = self._coefficients()
 
         def build_system(x_, q_, sources_, xb_, cap_, cap_prev_, *coef_):
-            # cap_prev_ is unused until Task 11; kept in the signature to match the shared
-            # interface every scheme's build_system now exposes.
             op = self._advection_operator(q_, cap_, dict(zip(names, coef_, strict=True)))
             xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
             src_s, _ = self._to_stacked(self._sources_interior(sources_), self.n_i, "sources")
             x_s, _ = self._to_stacked(x_, self.n_i, "x")
             cap = self._capacity_stacked(dtype, cap_)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
-            rhs = x_s + dt * b0
+            ratio = self._capacity_stacked(dtype, cap_prev_) / cap        # V_old / V_new
+            rhs = ratio * x_s + dt * b0
             system = _AffineSystemOperator(op, dt)
             return system, rhs
 
         if on_failure == "return":
-            system, rhs = build_system(x, q, sources, x_boundary, cap_t, cap_t, *coef)
+            system, rhs = build_system(x, q, sources, x_boundary, cap_t, cap_prev_t, *coef)
             result = _solve_operator(
                 system, rhs, method="auto", on_failure="return",
                 where=f"TransportLayer '{self.name}' implicit step",
@@ -849,7 +881,7 @@ class TransportLayer:
             return result, reduced
         x_s = _linear_solve(
             build_system, f"TransportLayer '{self.name}' implicit step",
-            x, q, sources, x_boundary, cap_t, cap_t, *coef,
+            x, q, sources, x_boundary, cap_t, cap_prev_t, *coef,
         )
         return x_s, reduced
 
@@ -857,33 +889,42 @@ class TransportLayer:
         self, x: torch.Tensor, q: torch.Tensor, sources: torch.Tensor,
         x_boundary: torch.Tensor, dt: float, on_failure: str,
         capacity: torch.Tensor | None = None,
+        capacity_prev: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Crank-Nicolson `(I - dt/2 M) x_{n+1} = (I + dt/2 M) x_n + dt b0` on the operator
-        contract."""
+        """Crank-Nicolson on the AMOUNT `V x`: `V_new x_{n+1} - V_old x_n =
+        dt/2 (F(x_{n+1}) + F(x_n))`, with `F(x) = G x + N_raw x_b + s` the capacity-FREE
+        amount rate. Dividing through by `V_new` and using `F(x_n) / V_new = M_new x_n +
+        N_new x_b + s / V_new = op.matvec(x_n) + b0` (the operator's own capacity-divided
+        blocks at the NEW capacity -- there is no separate old-capacity operator to build):
+
+            (I - dt/2 M_new) x_{n+1} = (V_old / V_new) x_n + dt/2 op.matvec(x_n) + dt b0
+
+        `capacity_prev` defaults to `capacity` (fixed storage), which recovers the classic
+        `(I - dt/2 M) x_{n+1} = (I + dt/2 M) x_n + dt b0` step bit for bit (ratio == 1)."""
         dtype = torch.float64
         x = x.to(dtype)
         q = q.to(dtype)
         sources = sources.to(dtype)
         x_boundary = x_boundary.to(dtype)
         cap_t = self._capacity_arg(capacity).to(dtype)
+        cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev).to(dtype)
         _, reduced = self._to_stacked(x, self.n_i, "x")
         names, coef = self._coefficients()
 
         def build_system(x_, q_, sources_, xb_, cap_, cap_prev_, *coef_):
-            # cap_prev_ is unused until Task 11; kept in the signature to match the shared
-            # interface every scheme's build_system now exposes.
             op = self._advection_operator(q_, cap_, dict(zip(names, coef_, strict=True)))
             xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
             src_s, _ = self._to_stacked(self._sources_interior(sources_), self.n_i, "sources")
             x_s, _ = self._to_stacked(x_, self.n_i, "x")
             cap = self._capacity_stacked(dtype, cap_)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
-            rhs = x_s + 0.5 * dt * op.matvec(x_s) + dt * b0
+            ratio = self._capacity_stacked(dtype, cap_prev_) / cap
+            rhs = ratio * x_s + 0.5 * dt * op.matvec(x_s) + dt * b0
             system = _AffineSystemOperator(op, 0.5 * dt)
             return system, rhs
 
         if on_failure == "return":
-            system, rhs = build_system(x, q, sources, x_boundary, cap_t, cap_t, *coef)
+            system, rhs = build_system(x, q, sources, x_boundary, cap_t, cap_prev_t, *coef)
             result = _solve_operator(
                 system, rhs, method="auto", on_failure="return",
                 where=f"TransportLayer '{self.name}' trapezoidal step",
@@ -891,7 +932,7 @@ class TransportLayer:
             return result, reduced
         x_s = _linear_solve(
             build_system, f"TransportLayer '{self.name}' trapezoidal step",
-            x, q, sources, x_boundary, cap_t, cap_t, *coef,
+            x, q, sources, x_boundary, cap_t, cap_prev_t, *coef,
         )
         return x_s, reduced
 
