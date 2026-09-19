@@ -211,25 +211,6 @@ class _Implicit(torch.autograd.Function):
             )
         saved = ctx.saved_tensors
         x, params = saved[0], list(saved[1:])
-        with torch.no_grad():
-            op = ctx.operator(x, *params)
-            # on_failure is never forwarded: `adjoint` always raises (its own fixed
-            # default), whatever the FORWARD pass was told. A forward solve may legitimately
-            # be asked to return a non-converged instance instead of raising -- a
-            # calibration loop inspecting or down-weighting it -- but a backward pass has no
-            # such caller: a wrong gradient silently reaching an optimiser is strictly worse
-            # than an exception (design section 3.2). `method` IS forwarded, so a layer
-            # configured with linear_solver="direct" keeps the dense numerics it asked for
-            # on both passes rather than only on the forward one.
-            lam = adjoint(
-                op,
-                grad_x,
-                # The forward's own `where` (a layer name, when a layer supplied one) with
-                # " backward" appended, so an adjoint failure names the same solve the
-                # forward would have. Defaults to "implicit_solve backward" as before.
-                where=f"{ctx.newton_kwargs.get('where', 'implicit_solve')} backward",
-                method=ctx.newton_kwargs.get("method", "auto"),
-            )
         with torch.enable_grad():
             p = [t.detach().requires_grad_(t.requires_grad) for t in params]
             r = ctx.residual(x.detach(), *p)
@@ -253,11 +234,35 @@ class _Implicit(torch.autograd.Function):
             # already makes one level down, for the PARTIALLY-connected case (an individual
             # unused input among several used ones) -- this is its natural extension to the
             # wholly-unconnected case, not a new risk this fix introduces.
-            grads = (
-                torch.autograd.grad(r, needs_grad, grad_outputs=-lam, allow_unused=True)
-                if needs_grad and r.requires_grad
-                else [None] * len(needs_grad)
+            #
+            # The residual is therefore rebuilt BEFORE the adjoint solve, so that this
+            # all-`None` case can return without solving anything: `lambda` is only ever used
+            # as `grad_outputs` for the `torch.autograd.grad` call below, so a solve on this
+            # path would be pure waste -- and not a cheap one, since this is exactly the path
+            # a coupled model takes on every backward pass through its potential layer.
+            if not needs_grad or not r.requires_grad:
+                return (None, None, None, None, None, *[None] * len(p))
+        with torch.no_grad():
+            op = ctx.operator(x, *params)
+            # on_failure is never forwarded: `adjoint` always raises (its own fixed
+            # default), whatever the FORWARD pass was told. A forward solve may legitimately
+            # be asked to return a non-converged instance instead of raising -- a
+            # calibration loop inspecting or down-weighting it -- but a backward pass has no
+            # such caller: a wrong gradient silently reaching an optimiser is strictly worse
+            # than an exception (design section 3.2). `method` IS forwarded, so a layer
+            # configured with linear_solver="direct" keeps the dense numerics it asked for
+            # on both passes rather than only on the forward one.
+            lam = adjoint(
+                op,
+                grad_x,
+                # The forward's own `where` (a layer name, when a layer supplied one) with
+                # " backward" appended, so an adjoint failure names the same solve the
+                # forward would have. Defaults to "implicit_solve backward" as before.
+                where=f"{ctx.newton_kwargs.get('where', 'implicit_solve')} backward",
+                method=ctx.newton_kwargs.get("method", "auto"),
             )
+        with torch.enable_grad():
+            grads = torch.autograd.grad(r, needs_grad, grad_outputs=-lam, allow_unused=True)
         grads_aligned = []
         it = iter(grads)
         for t in p:

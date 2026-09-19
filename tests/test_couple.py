@@ -424,6 +424,126 @@ def test_unregistered_conversion_is_refused_at_union_construction():
                "building": (building_model, building_state, building_drivers)}, shared=[bad])
 
 
+def test_an_unconverted_link_between_unequal_units_is_refused_at_construction():
+    """`convert=None` across kg/m3 -> kg/kg is silently wrong by a factor of `rho_amb`, and
+    both models keep running happily -- so it must be refused at construction."""
+    from tellegen.couple import ValueLink, union
+
+    street_model, street_state, street_drivers = _tiny_street_model()
+    building_model, building_state, building_drivers = _tiny_building_model()
+    bad = ValueLink(
+        from_model="street", from_key="street.x", from_index=0,
+        to_model="building", to_key="species.x_boundary", to_index=0,  # convert=None
+    )
+    with pytest.raises(ValueError) as excinfo:
+        union({"street": (street_model, street_state, street_drivers),
+               "building": (building_model, building_state, building_drivers)}, shared=[bad])
+    message = str(excinfo.value)
+    assert "street:street.x[0]->building:species.x_boundary" in message  # WHICH link
+    assert "'kg/m3'" in message and "'kg/kg'" in message                 # and both units
+    assert "concentration" in message and "mass_fraction" in message     # and both quantities
+
+
+def test_a_conversion_whose_units_do_not_match_the_layers_is_refused_at_construction():
+    from tellegen.couple import STREET_RAD_TO_CONTAM_DEG, ValueLink, union
+
+    street_model, street_state, street_drivers = _tiny_street_model()
+    building_model, building_state, building_drivers = _tiny_building_model()
+    bad = ValueLink(  # an ANGLE conversion on a species link: rad -> deg, not kg/m3 -> kg/kg
+        from_model="street", from_key="street.x", from_index=0,
+        to_model="building", to_key="species.x_boundary", to_index=0,
+        convert=STREET_RAD_TO_CONTAM_DEG,
+    )
+    with pytest.raises(ValueError) as excinfo:
+        union({"street": (street_model, street_state, street_drivers),
+               "building": (building_model, building_state, building_drivers)}, shared=[bad])
+    message = str(excinfo.value)
+    assert "street:street.x[0]->building:species.x_boundary" in message
+    assert "'rad'" in message and "'deg'" in message      # the conversion's own units
+    assert "'kg/m3'" in message and "'kg/kg'" in message  # against the layers'
+
+
+def _multi_kind_building_model():
+    """`_tiny_building_model` with TWO advecting edge kinds on its species layer."""
+    from tellegen.layers.transport import TransportLayer
+    from tellegen.model import Model
+
+    net = Network(dtype=F64)
+    net.add_node("ambient")
+    net.add_node("z0")
+    net.add_edge("z0", "ambient", kind="a")
+    net.add_edge("z0", "ambient", kind="b")
+    layer = TransportLayer(
+        net, "species", capacity=torch.tensor([5.0], dtype=F64), flow_kind=("a", "b"),
+        boundary=["ambient"], quantity="mass_fraction", unit="kg/kg",
+    )
+
+    def closure(state, drivers):
+        return {"species.q": torch.tensor([-0.5, -0.5], dtype=F64)}
+
+    model = Model(net, {"species": layer}, closures=[closure])
+    state = {"species.x": torch.tensor([0.1], dtype=F64)}
+    drivers = {"species.x_boundary": torch.zeros(1, dtype=F64),
+               "rho_amb": torch.tensor(1.2, dtype=F64)}
+    return model, state, drivers
+
+
+def _two_species_building_model():
+    """`_tiny_building_model` with TWO species on its species layer."""
+    from tellegen.layers.transport import TransportLayer
+    from tellegen.model import Model
+
+    net = Network(dtype=F64)
+    net.add_node("ambient")
+    net.add_node("z0")
+    net.add_edge("z0", "ambient", kind="airpath")
+    layer = TransportLayer(
+        net, "species", capacity=torch.tensor([5.0], dtype=F64), flow_kind="airpath",
+        boundary=["ambient"], n_species=2, quantity="mass_fraction", unit="kg/kg",
+    )
+
+    def closure(state, drivers):
+        return {"species.q": torch.tensor([-0.5], dtype=F64)}
+
+    model = Model(net, {"species": layer}, closures=[closure])
+    state = {"species.x": torch.zeros(1, 2, dtype=F64)}
+    drivers = {"species.x_boundary": torch.zeros(1, 2, dtype=F64),
+               "rho_amb": torch.tensor(1.2, dtype=F64)}
+    return model, state, drivers
+
+
+def test_a_two_way_link_into_a_multi_flow_kind_layer_is_refused_at_construction():
+    """`transport_boundary_inflow` is single-flow-kind; it used to discover that at STEP
+    time, after a whole first pass had run."""
+    from tellegen.couple import union
+
+    street_model, street_state, street_drivers = _tiny_street_model()
+    building_model, building_state, building_drivers = _multi_kind_building_model()
+    with pytest.raises(ValueError, match="single flow kind") as excinfo:
+        union({"street": (street_model, street_state, street_drivers),
+               "building": (building_model, building_state, building_drivers)},
+              shared=[_two_way_link()])
+    message = str(excinfo.value)
+    assert "street:street.x[0]->building:species.x_boundary" in message
+    assert "'a'" in message and "'b'" in message  # the kinds it actually has
+
+
+def test_a_two_way_link_on_a_multi_species_layer_is_refused_at_construction():
+    """A stacked `(n_i, 1)` and a reduced `(n_i, K)` with `K == n_i` are the same shape, so
+    the glue's layout rule cannot read a multi-species state unambiguously."""
+    from tellegen.couple import union
+
+    street_model, street_state, street_drivers = _tiny_street_model()
+    building_model, building_state, building_drivers = _two_species_building_model()
+    with pytest.raises(ValueError, match="n_species == 1") as excinfo:
+        union({"street": (street_model, street_state, street_drivers),
+               "building": (building_model, building_state, building_drivers)},
+              shared=[_two_way_link()])
+    message = str(excinfo.value)
+    assert "street:street.x[0]->building:species.x_boundary" in message
+    assert "building:species has n_species=2" in message  # WHICH layer is out of scope
+
+
 def test_reduced_accepts_reduced_and_stacked_single_species_layouts():
     from tellegen.couple import _reduced
 
@@ -529,11 +649,14 @@ def test_substeps_calls_the_fast_model_k_times_with_the_glue_held_constant():
 
     street_model, street_state, street_drivers = _tiny_street_model()
     building_model, building_state, building_drivers = _tiny_building_model()
-    calls: list[tuple[float, float]] = []
+    calls: list[tuple[float, torch.Tensor]] = []
     real_step = building_model.step
 
     def spy(state, drivers, dt, **kw):
-        calls.append((float(dt), float(drivers["species.x_boundary"].flatten()[0])))
+        # The boundary VALUE is kept as a tensor and compared exactly below: rounding it to
+        # a float first (`round(v, 15)`) makes the constancy check vacuous at the ~1e-8
+        # magnitudes a real mass fraction has, where every candidate value rounds together.
+        calls.append((float(dt), drivers["species.x_boundary"].detach().clone()))
         return real_step(state, drivers, dt, **kw)
 
     building_model.step = spy  # a per-instance spy; the class is untouched
@@ -551,9 +674,10 @@ def test_substeps_calls_the_fast_model_k_times_with_the_glue_held_constant():
     assert len(calls) == 6 * passes
     for p in range(passes):
         chunk = calls[6 * p:6 * (p + 1)]
-        # 60 s in six 10 s sub-steps, boundary held constant across them:
+        # 60 s in six 10 s sub-steps, boundary held EXACTLY constant across them:
         assert all(dt == pytest.approx(10.0) for dt, _ in chunk)
-        assert len({round(v, 15) for _, v in chunk}) == 1
+        first = chunk[0][1]
+        assert all(torch.equal(v, first) for _, v in chunk)
 
 
 def test_gradient_flows_across_the_join_and_matches_central_differences():

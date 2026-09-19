@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import torch
 
@@ -24,16 +25,38 @@ MASS_FRACTION_TO_CONCENTRATION = "mass_fraction_to_concentration"
 STREET_RAD_TO_CONTAM_DEG = "street_rad_to_contam_deg"
 CONTAM_DEG_TO_STREET_RAD = "contam_deg_to_street_rad"
 
-_CONVERSIONS: dict[str, Callable[[Tensor, Mapping[str, Tensor]], Tensor]] = {
-    CONCENTRATION_TO_MASS_FRACTION: lambda value, drivers: value / drivers["rho_amb"],
-    MASS_FRACTION_TO_CONCENTRATION: lambda value, drivers: value * drivers["rho_amb"],
+
+class Conversion(NamedTuple):
+    """One registered conversion and the UNITS it maps between, `(from_unit, to_unit, fn)`.
+
+    The units are not decoration: `CoupledModel.__init__` checks a `ValueLink`'s forward
+    `convert` against the two transport layers' own `unit` metadata, so a link that names the
+    wrong conversion (or none at all between mismatched units) is refused at construction
+    rather than silently off by a density. `fn(value, drivers)` is the conversion itself,
+    with `drivers` the TO model's own driver mapping.
+    """
+
+    from_unit: str
+    to_unit: str
+    fn: Callable[[Tensor, Mapping[str, Tensor]], Tensor]
+
+
+_CONVERSIONS: dict[str, Conversion] = {
+    CONCENTRATION_TO_MASS_FRACTION: Conversion(
+        "kg/m3", "kg/kg", lambda value, drivers: value / drivers["rho_amb"]),
+    MASS_FRACTION_TO_CONCENTRATION: Conversion(
+        "kg/kg", "kg/m3", lambda value, drivers: value * drivers["rho_amb"]),
     # CONTAM's Wd: degrees clockwise from north, the direction the wind blows FROM. The
     # street app's theta_w: radians counter-clockwise from east, the direction it blows
-    # TOWARD (design spec A3). West wind: Wd=270 <-> theta=0.
-    STREET_RAD_TO_CONTAM_DEG: lambda value, drivers: torch.remainder(
-        270.0 - torch.rad2deg(value), 360.0),
-    CONTAM_DEG_TO_STREET_RAD: lambda value, drivers: torch.remainder(
-        torch.deg2rad(270.0 - value), 2.0 * math.pi),
+    # TOWARD (design spec A3). West wind: Wd=270 <-> theta=0. These two are used by
+    # `DriverAlias` targets, and a DRIVER carries no unit metadata to check against -- their
+    # "rad"/"deg" are recorded here for the reader, not enforced anywhere.
+    STREET_RAD_TO_CONTAM_DEG: Conversion(
+        "rad", "deg",
+        lambda value, drivers: torch.remainder(270.0 - torch.rad2deg(value), 360.0)),
+    CONTAM_DEG_TO_STREET_RAD: Conversion(
+        "deg", "rad",
+        lambda value, drivers: torch.remainder(torch.deg2rad(270.0 - value), 2.0 * math.pi)),
 }
 
 
@@ -91,13 +114,13 @@ def apply_conversion(name: str | None, value: Tensor, drivers: Mapping[str, Tens
     if name is None:
         return value
     try:
-        convert = _CONVERSIONS[name]
+        conversion = _CONVERSIONS[name]
     except KeyError as exc:
         raise KeyError(
             f"couple: unknown unit conversion {name!r}; registered conversions are "
             f"{sorted(_CONVERSIONS)}"
         ) from exc
-    return convert(value, drivers)
+    return conversion.fn(value, drivers)
 
 
 def transport_boundary_inflow(
@@ -155,6 +178,19 @@ class ValueLink:
     consistent with the two-way glue beside it. One-way links are NOT part of the
     convergence criterion: only two-way forward values are measured, because only they close
     a loop that can fail to converge.
+
+    `sources_key` is VALIDATED on every link (it must name a "<layer>.sources" driver) but is
+    USED only on a two-way one: only a two-way link feeds a flux back, so on a one-way link
+    the key names a driver nothing ever writes. It is still checked, so that a link whose
+    `two_way=True` is later turned on does not fail for the first time mid-run.
+
+    UNITS. The forward `convert` is checked against the two transport layers' own `unit`
+    metadata at construction: `convert=None` requires equal units, and a named conversion
+    must map the from-layer's unit to the to-layer's. `convert_back` is NOT unit-checked: it
+    acts on a FLUX, not on the state value, and a flux's units are the from-layer's own
+    source units (kg/s of pollutant on both sides of this milestone's join, which is exactly
+    why the demo leaves it `None` -- design spec A2); the layers' `unit` strings, which
+    describe the STATE, say nothing about it.
     """
 
     from_model: str
@@ -194,7 +230,19 @@ class DriverAlias:
 
 class CoupledModel:
     """Returned by `union`. `.step` takes and returns `{model_tag: State}` /
-    `{model_tag: Drivers}` -- each model keeps its own dicts; nothing is merged."""
+    `{model_tag: Drivers}` -- each model keeps its own dicts; nothing is merged.
+
+    `iterate_max=50` is set from this milestone's own measurements, not guessed: the headline
+    demo needs 22-28 passes to reach `rtol=1e-10`, and about 21 passes per coupled hour at the
+    default `rtol=1e-8` (the benchmark's 116-128 passes over 6 hours). The former default of
+    20 was below the milestone's own headline case, so every call site had to override it --
+    which hid, rather than fixed, the fact that the default could not run the demo.
+
+    `iterate_atol=0.0` is a pure relative criterion: a shared value that is legitimately ZERO
+    (no emission at the coupled node, say) can never satisfy `|d| <= rtol * |f|` unless `d` is
+    exactly zero, so such a coupling needs a positive `iterate_atol` -- a floor in the shared
+    value's own units -- to be judged converged at all.
+    """
 
     def __init__(
         self,
@@ -206,7 +254,7 @@ class CoupledModel:
         relaxation: float = 0.5,
         iterate_rtol: float = 1e-8,
         iterate_atol: float = 0.0,
-        iterate_max: int = 20,
+        iterate_max: int = 50,
     ) -> None:
         self.models = dict(models)
         self.links = list(links)
@@ -244,8 +292,11 @@ class CoupledModel:
                     f"transport layer's source term, '<layer>.sources'; the feedback flux is "
                     f"ADDED into it on {link.from_model!r}'s FULL node axis"
                 )
-            self._layer(link.from_model, link.from_layer)
-            self._layer(link.to_model, link.to_layer)
+            from_layer = self._layer(link.from_model, link.from_layer)
+            to_layer = self._layer(link.to_model, link.to_layer)
+            self._check_units(link, from_layer, to_layer)
+            if link.two_way:
+                self._check_two_way_scope(link, from_layer, to_layer)
         for alias in self.aliases:
             for _model, _key, name in alias.targets:
                 if name is not None and name not in _CONVERSIONS:
@@ -269,6 +320,70 @@ class CoupledModel:
                 f"CoupledModel: model {tag!r} has no transport layer {name!r} (has "
                 f"{sorted(self.models[tag].transport) if tag in self.models else 'no such model'})"
             ) from exc
+
+    def _check_units(self, link: ValueLink, from_layer, to_layer) -> None:
+        """The forward `convert` must carry the FROM layer's unit to the TO layer's.
+
+        Without this, a `convert=None` link between the street's `kg/m3` and CONTAM's `kg/kg`
+        is accepted and is silently wrong by a factor of `rho_amb` -- a plausible mistake that
+        no test of either application can catch, because both models keep running happily.
+        `convert_back` is deliberately NOT checked here: it acts on a flux, whose units are
+        the from-layer's own source units rather than either layer's state unit (spec A2, and
+        `ValueLink`'s docstring).
+        """
+        what = (
+            f"{link.from_model}:{link.from_layer} is {from_layer.quantity} in "
+            f"{from_layer.unit!r}, {link.to_model}:{link.to_layer} is {to_layer.quantity} in "
+            f"{to_layer.unit!r}"
+        )
+        if link.convert is None:
+            if from_layer.unit != to_layer.unit:
+                raise ValueError(
+                    f"CoupledModel: link {self._link_key(link)} has convert=None but {what}; "
+                    f"an unconverted link requires equal units -- name a conversion mapping "
+                    f"{from_layer.unit!r} to {to_layer.unit!r} (registered conversions are "
+                    f"{sorted(_CONVERSIONS)})"
+                )
+            return
+        conversion = _CONVERSIONS[link.convert]   # registration already checked above
+        if (from_layer.unit, to_layer.unit) != (conversion.from_unit, conversion.to_unit):
+            raise ValueError(
+                f"CoupledModel: link {self._link_key(link)} names conversion "
+                f"{link.convert!r}, which maps {conversion.from_unit!r} to "
+                f"{conversion.to_unit!r}, but {what}"
+            )
+
+    def _check_two_way_scope(self, link: ValueLink, from_layer, to_layer) -> None:
+        """Milestone 5's two-way scope: one flow kind on the TO layer, one species on both.
+
+        `transport_boundary_inflow`, which builds the feedback flux, is single-flow-kind
+        (it raises `NotImplementedError` at STEP time otherwise, after a whole first pass has
+        run) and single-species -- a multi-species `(n_i, K)` state is not merely unsupported
+        but AMBIGUOUS to the glue's layout rule: a stacked `(n_i, 1)` and a reduced `(n_i, K)`
+        with `K == n_i` are the same shape, so `_reduced` would silently read the wrong axis.
+        Both are therefore refused here, before any stepping, rather than discovered later.
+        """
+        if len(to_layer.flow_kinds) > 1:
+            raise ValueError(
+                f"CoupledModel: two-way link {self._link_key(link)} needs a single flow kind "
+                f"on its TO layer {link.to_model}:{link.to_layer}, which has "
+                f"{list(to_layer.flow_kinds)}; the feedback flux "
+                f"(`transport_boundary_inflow`) is single-flow-kind in milestone 5"
+            )
+        multi = [
+            f"{tag}:{layer_name} has n_species={layer.n_species}"
+            for tag, layer_name, layer in (
+                (link.from_model, link.from_layer, from_layer),
+                (link.to_model, link.to_layer, to_layer),
+            )
+            if layer.n_species != 1
+        ]
+        if multi:
+            raise ValueError(
+                f"CoupledModel: two-way link {self._link_key(link)} needs n_species == 1 on "
+                f"both layers ({', '.join(multi)}); the glue's reduced/stacked layout rule is "
+                f"ambiguous for a multi-species state and the feedback flux is single-species"
+            )
 
     # ------------------------------------------------------------------- glue
     def _apply_aliases(self, drivers: dict[str, Drivers]) -> None:
@@ -463,11 +578,20 @@ def union(
     relaxation: float = 0.5,
     iterate_rtol: float = 1e-8,
     iterate_atol: float = 0.0,
-    iterate_max: int = 20,
+    iterate_max: int = 50,
 ) -> tuple[CoupledModel, dict[str, State], dict[str, Drivers]]:
     """Couple `models` by exchanging the driver/state values `shared` names, WITHOUT merging
     any model's `Network`, layers, or closures (design spec section 3). Never modifies the
-    `Model`/`State`/`Drivers` objects passed in -- returns fresh dict copies."""
+    `Model`/`State`/`Drivers` objects passed in -- returns fresh dict copies.
+
+    `iterate_max=50` comes from this milestone's own measurements: the headline demo takes
+    22-28 passes to `rtol=1e-10` and about 21 passes per coupled hour at the default
+    `rtol=1e-8` (the benchmark's 116-128 passes over 6 hours), so the former default of 20 sat
+    below the milestone's own headline case and every call site had to override it.
+    `iterate_atol=0.0` makes the criterion purely relative, so a shared value that is
+    legitimately ZERO needs a positive `iterate_atol` to be judged converged at all. See
+    `CoupledModel`.
+    """
     model_map = {tag: m for tag, (m, _s, _d) in models.items()}
     state_map = {tag: dict(s) for tag, (_m, s, _d) in models.items()}
     drivers_map = {tag: dict(d) for tag, (_m, _s, d) in models.items()}

@@ -13,6 +13,7 @@ receives the street's wind through the `DriverAlias`es.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import os
 from pathlib import Path
@@ -102,7 +103,7 @@ def _aliases() -> list[DriverAlias]:
 def _coupled(street_triple, building_triple, street_model, *, two_way=True, **kwargs):
     link = _link(street_model, SHARED)
     if not two_way:
-        link = ValueLink(**{**link.__dict__, "two_way": False})
+        link = dataclasses.replace(link, two_way=False)
     return union({"street": street_triple, "building": building_triple},
                  shared=[link, *_aliases()], **kwargs)
 
@@ -215,7 +216,7 @@ def test_real_leiden_small_building_back_coupling_magnitude(record_property):
     state = model.steady(state, drivers)
     busiest = data.net.streets[int(torch.argmax(data.emission[0]))].name
     _project, (building_model, building_state, building_drivers) = _building()
-    link = ValueLink(**{**_link(model, busiest).__dict__})
+    link = _link(model, busiest)
     city, s, d = union(
         {
             "street": (model, state, drivers),
@@ -227,6 +228,11 @@ def test_real_leiden_small_building_back_coupling_magnitude(record_property):
     diag: dict = {}
     coupled = city.step(s, d, dt=3600.0, diagnostics=diag)
     seg = street_index(model)[busiest]
+    # The baseline here is the street's own STEADY state, not a one-way coupled step as in
+    # the synthetic test above. That is valid because the street alone, stepped the same
+    # 3600 s from this steady state, drifts by only 2.1e-11 relative (measured in the final
+    # whole-branch review) -- three orders of magnitude below the ~7e-5 back-coupling change
+    # recorded below, so the steady state IS the uncoupled hour to the precision that matters.
     c_two, c_one = coupled["street"]["street.x"][seg].item(), state["street.x"][seg].item()
     record_property("segment", busiest)
     record_property("street_conc_steady_kg_m3", c_one)

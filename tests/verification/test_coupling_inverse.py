@@ -12,6 +12,11 @@ from __future__ import annotations
 import pytest
 import torch
 
+# All three inverse examples reuse the demo's own PRIVATE fixtures (`_street`, `_building`,
+# `_coupled`, `_small_street_network`) rather than rebuilding the pairing: they are the same
+# street canyon and the same CONTAM project, so every number recorded here moves with
+# `test_coupling_demo.py` -- change a fixture there and these examples' measurements change
+# with it, by design.
 from tests.verification.test_coupling_demo import (
     F64,
     SHARED,
@@ -100,6 +105,14 @@ def test_attribute_indoor_concentration_to_street_emissions_with_one_backward_pa
     e = base.clone().requires_grad_(True)
     attribution, = torch.autograd.grad(indoor_given(e), e)  # ONE backward pass
 
+    # `h = 1e-8` is 10 % of the 1e-7 kg/s emission -- an enormous step for a finite
+    # difference, and valid ONLY because the indoor concentration is exactly LINEAR in
+    # `street.sources`: neither the street's own flows `street.q` (closure-prescribed from
+    # the canyon wind) nor the building's `air.q` (driven by wind and buoyancy) depends on
+    # the emissions at all, so the whole map from sources to indoor mass fraction is linear
+    # and a central difference is exact up to rounding. That is also why the agreement below
+    # is ~5e-7 rather than the ~h^2 truncation error a nonlinear map would show: what is left
+    # is floating-point cancellation between two nearly-equal 3-step solves, not truncation.
     h = 1e-8
     fd = torch.zeros_like(base)
     for i in range(len(names)):

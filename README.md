@@ -801,12 +801,18 @@ names.
   `from_model`/`from_key`/`from_index`, `to_model`/`to_key`/`to_index`, `convert`, `two_way`,
   `convert_back`, `sources_key`), `DriverAlias` (one driver value aliased across models, each
   target through its own registered conversion), `CoupledModel` (`.step(state, drivers, dt,
-  diagnostics=)`; no `.steady` -- see "What is open"), `union(models, shared=, *, coupling=,
-  relaxation=, iterate_rtol=, iterate_atol=, iterate_max=, substeps=)`, `transport_boundary_
-  inflow` (the net mass inflow at a transport layer's boundary node, built from
-  `net.accumulate`/`net.upwind` alone, since `Model.ports()` reports boundary flows only for
-  potential layers), and the unit/angle conversion registry (`concentration_to_mass_fraction`,
-  its inverse, and the two street-radians/CONTAM-degrees wind-direction conversions).
+  diagnostics=)`; no `.steady` -- see "What is open"), `union(models, shared=, *,
+  relaxation=0.5, iterate_rtol=1e-8, iterate_atol=0.0, iterate_max=50, substeps=)`,
+  `transport_boundary_inflow` (the net mass inflow at a transport layer's boundary node, built
+  from `net.accumulate`/`net.upwind` alone, since `Model.ports()` reports boundary flows only
+  for potential layers), and the unit/angle conversion registry
+  (`concentration_to_mass_fraction`, its inverse, and the two street-radians/CONTAM-degrees
+  wind-direction conversions), each entry carrying the units it maps between so that a
+  `ValueLink` whose `convert` does not carry the FROM layer's `unit` to the TO layer's -- or a
+  `convert=None` link between unequal units -- is refused at construction. `iterate_max`
+  defaults to 50 because the demo itself needs 22-28 passes to `rtol=1e-10` and ~21 passes per
+  coupled hour at the default `rtol=1e-8`; `iterate_atol=0.0` makes the criterion purely
+  relative, so a legitimately-zero shared value needs a positive `iterate_atol` to converge.
 - `Model.current_flows(name, state, drivers)`: a transport layer's branch flows for a given
   state/drivers without stepping the model -- closures run first, then the layer's own owner
   is consulted; when the owner is a potential layer and the state carries no `"<owner>.q"`
@@ -883,39 +889,60 @@ open"). Covered by two unit tests in `tests/solvers/test_implicit.py`:
 |---|---|
 | `benchmarks/coupling_street_building.py`: the headline union, 6 coupled hours (60 building sub-steps per street hour), batch sizes 1/10/100 | batch_size=1: 41.221 s, 116 outer passes; batch_size=10: 38.541 s, 128 outer passes; batch_size=100: 134.772 s, 128 outer passes -- 10 -> 100 is 3.5x the time for 10x the batch (sub-linear); no budget is set (spec section 6) |
 
+The full suite passes **1306 passed, 10 skipped, 10 deselected, 1 xfailed** (coverage
+96.09 %), ruff clean.
+
 **What is open, and out of scope.**
 
 - `CoupledModel.steady` is not built, though design spec section 3 point 6 names it in the
   public surface (R2-11).
-- Adaptive or user-settable relaxation: convergence at the hard-coded `relaxation=0.5` takes
-  22-28 passes to `rtol=1e-10` on the demo fixtures -- README milestone 2's open item 1
-  already names under-relaxation as a candidate remedy for the same successive-substitution
-  risk (a repelling fixed point at the hard-coded value), and this milestone's own numbers
-  are consistent with that being slow rather than wrong here.
+- Adaptive relaxation: `relaxation` IS a `union`/`CoupledModel` parameter (default 0.5), but
+  it is never adapted during the iteration -- at 0.5 the demo takes 22-28 passes to
+  `rtol=1e-10`. README milestone 2's open item 1 already names under-relaxation as a candidate
+  remedy for the same successive-substitution risk (a repelling fixed point at a given value),
+  and this milestone's own numbers are consistent with 0.5 being slow rather than wrong here.
 - The `params_may_be_unused` precondition on `implicit_solve` (R2-14, above): the
   `_Implicit.backward` short-circuit cannot distinguish a legitimately-unused driver key from
   an accidental upstream `.detach()`.
 - Single-species scope: `transport_boundary_inflow` assumes a single-species transport layer
   (milestone 5's global constraint); a multi-species boundary inflow is unbuilt.
+- Two-way scope, refused at construction (R2-20): a two-way link requires a SINGLE flow kind
+  on its TO layer and `n_species == 1` on BOTH layers. The first is the feedback flux's own
+  limit (`transport_boundary_inflow`; a typical `.prj` has several edge kinds, so this is a
+  real pairing to refuse); the second is a layout ambiguity, since a stacked `(n_i, 1)` and a
+  reduced `(n_i, K)` with `K == n_i` are the same shape.
+- The coupling fixed point is differentiated by UNROLLING: every pass stays on the autograd
+  graph, so memory grows with the pass count. An implicit-function treatment (one adjoint
+  solve at the converged state, as `implicit_solve` does for Newton) is a follow-up -- it is
+  also the main cost of the 4-minute calibration example, which unrolls the whole iteration on
+  every one of its optimiser steps.
 - Held-constant sub-stepping: the fast model's glue-derived boundary value is held constant
   across the slow model's inner steps rather than interpolated -- a follow-up if that policy
   proves too coarse for a real pairing (design spec section 3 point 4, section 9).
 - `Model.current_flows`'s first-pass branch re-solves the owning potential layer from scratch
   when a step's state carries no `"<owner>.q"` yet, rather than reusing the solve the pass
   itself is about to perform -- a reuse of the pass's own solve is a recorded follow-up.
+- Caching the owner's solve across sub-steps (R2-21): with `substeps={"building": 60}` the
+  building's `air` potential layer is Newton-solved 60 times per pass at IDENTICAL drivers
+  (~1500 identical solves per coupled hour, at 25 passes). Caching the owning potential
+  solve across sub-steps while its drivers are unchanged is the highest-leverage optimisation
+  available here; it is not implemented.
+- The street's canyon AIRFLOW field is unaffected by the building's ventilation (R2-21): the
+  street's flows are closure-prescribed from the wind, so only the POLLUTANT balance is
+  coupled -- the building removes and returns mass at the shared node, it does not change how
+  the canyon ventilates.
 - Ambient temperature is not coupled in this milestone's demo (A4): the building's
   temperature enters only through `rho`/`rho_amb`, computed once from the `.prj`'s `Ta`; the
   AQ_DT forcing carries no temperature field.
-- `_feed_back` assumes the FROM model's sources are reduced full-node; a stacked
-  CONTAM-side FROM model is out of scope.
+- Species identity is not coupled either: the demo joins the street's `nox` to the CONTAM
+  fixture's only species, `sarin`. `union` relates two layers by UNIT, not by species
+  identity, and both are passive tracers here -- a real pairing of named species is a
+  modelling decision the glue does not make.
 - The wider sewer+street+building three-way union is deferred (decision 1) -- the same
   orchestration mechanism is expected to extend to it, but it is not built or tested here.
 - `CoSim`/ports and the WSIMOD `Node` wrapper stay out of scope (decision 2).
 - The leakage-calibration test (inverse example 1) is marked `slow` (~4.3 minutes; R2-12),
   deselected by default like the milestone-1b and milestone-2 acceptance gates.
-
-The full suite passes **1302 passed, 10 skipped, 10 deselected, 1 xfailed** (coverage
-96.47 %), ruff clean.
 
 ## Installation
 
