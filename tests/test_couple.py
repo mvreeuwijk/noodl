@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import math
+import re
+
 import pytest
 import torch
 
@@ -160,63 +163,151 @@ def test_one_way_union_sets_building_boundary_from_street_segment():
     assert torch.allclose(new_state["building"]["species.x"], expected["species.x"])
 
 
-def test_two_way_union_converges_and_feeds_back_into_street_sources():
-    from tellegen.couple import ValueLink, union
+def _two_way_link():  # -> ValueLink (imported in-body, like every other test here)
+    from tellegen.couple import ValueLink
+
+    return ValueLink(
+        from_model="street", from_key="street.x", from_index=0,
+        to_model="building", to_key="species.x_boundary", to_index=0,
+        convert="concentration_to_mass_fraction", two_way=True,
+    )
+
+
+def _city(**kwargs):
+    from tellegen.couple import union
 
     street_model, street_state, street_drivers = _tiny_street_model()
     building_model, building_state, building_drivers = _tiny_building_model()
-    link = ValueLink(
-        from_model="street", from_key="street.x", from_index=0,
-        to_model="building", to_key="species.x_boundary", to_index=0,
-        convert="concentration_to_mass_fraction", convert_back="mass_fraction_to_concentration",
-        two_way=True, sources_key="street.sources", flow_layer="species",
-        flow_kinds=("airpath",), interior_key="species.x",
-        interior_idx_of=lambda m: m.transport["species"].interior_idx,
-        boundary_idx_of=lambda m: m.transport["species"].boundary_idx,
-    )
-    city, state, drivers = union(
+    return union(
         {"street": (street_model, street_state, street_drivers),
          "building": (building_model, building_state, building_drivers)},
-        # iterate_max=200, not the plan's original 50: verified empirically (see task-3
-        # report) that this fixture's 0.5-relaxed fixed point has an asymptotic convergence
-        # factor of ~0.847/pass, so reaching iterate_tol=1e-10 needs >=137 passes -- 50 was
-        # never checked against the actual convergence rate and always raised. 200 leaves
-        # comfortable margin without masking a genuine non-convergence (the separate test
-        # below still pins that failure mode with an impossible tol=0.0, iterate_max=2).
-        shared=[link], iterate_tol=1e-10, iterate_max=200,
+        shared=[_two_way_link()], **kwargs,
+    ), (street_model, building_model)
+
+
+def test_two_way_step_is_a_fixed_point_of_one_step_from_the_start_state():
+    """The converged output, fed back as glue values, must reproduce itself from ONE step
+    of each model from the START state -- design spec A1. A time-compounding iteration
+    (stepping from the previous pass's output) fails this: its output is not one dt away."""
+    from tellegen.couple import transport_boundary_inflow
+
+    (city, state, drivers), (street_model, building_model) = _city(
+        iterate_rtol=1e-12, iterate_max=100)
+    diag: dict = {}
+    new = city.step(state, drivers, dt=1.0, diagnostics=diag)
+    assert diag["converged"] and 2 <= diag["passes"] <= 100
+
+    # Glue values from the OUTPUT, by hand:
+    forward = new["street"]["street.x"][0] / drivers["building"]["rho_amb"]
+    building_drivers = dict(drivers["building"])
+    building_drivers["species.x_boundary"] = torch.tensor([forward.item()], dtype=F64)
+    species = building_model.transport["species"]
+    q = building_model.current_flows("species", new["building"], building_drivers)
+    inflow = transport_boundary_inflow(
+        building_model.net, q, species.flow_kinds, new["building"]["species.x"],
+        building_drivers["species.x_boundary"], species.interior_idx, species.boundary_idx, 0,
     )
-    new_state = city.step(state, drivers, dt=1.0)
-    # street's own segment 0 sources must have received a NONZERO contribution from the
-    # building's boundary inflow -- the two-way property the design spec requires. Pinned
-    # against the actual converged fixed point (independently verified, see task-3 report's
-    # parameter sweep): street's segment 0 drains to ~0 (it both vents out AND now feeds the
-    # building, rather than merely venting) and the building's species.x settles at ~1.9943,
-    # NOT the ~2.71/~0.35 a single, unconverged, feedback-free pass would give (verified by
-    # hand -- with the two-way feedback removed, street.x[0] stays at 2.71 and building
-    # species.x stays at 0.35 instead) -- so this assertion genuinely distinguishes a working
-    # two-way iteration from a no-op or a wrong fixed point, not just "it ran and returned".
-    assert new_state["street"]["street.x"][0].item() == pytest.approx(0.0, abs=1e-3)
-    assert new_state["building"]["species.x"][0].item() == pytest.approx(1.9943, abs=1e-3)
+    street_drivers = dict(drivers["street"])
+    sources = street_drivers["street.sources"].clone()
+    street = street_model.transport["street"]
+    sources[int(street.interior_idx[0])] += inflow
+    street_drivers["street.sources"] = sources
+
+    # ONE step of each model from the START state with those glue values:
+    expect_building = building_model.step(state["building"], building_drivers, dt=1.0)
+    expect_street = street_model.step(state["street"], street_drivers, dt=1.0)
+    assert torch.allclose(
+        new["building"]["species.x"], expect_building["species.x"], rtol=1e-9, atol=1e-14)
+    assert torch.allclose(
+        new["street"]["street.x"], expect_street["street.x"], rtol=1e-9, atol=1e-14)
 
 
-def test_two_way_union_raises_naming_instances_when_it_does_not_converge():
+def test_two_way_step_differs_from_a_one_way_pass_and_is_sensitive_to_the_glue():
     from tellegen.couple import ValueLink, union
 
+    (city, state, drivers), _ = _city(iterate_max=100)
+    two_way = city.step(state, drivers, dt=1.0)
     street_model, street_state, street_drivers = _tiny_street_model()
     building_model, building_state, building_drivers = _tiny_building_model()
-    link = ValueLink(
+    one_way_link = ValueLink(
         from_model="street", from_key="street.x", from_index=0,
         to_model="building", to_key="species.x_boundary", to_index=0,
-        convert="concentration_to_mass_fraction", convert_back="mass_fraction_to_concentration",
-        two_way=True, sources_key="street.sources", flow_layer="species",
-        flow_kinds=("airpath",), interior_key="species.x",
-        interior_idx_of=lambda m: m.transport["species"].interior_idx,
-        boundary_idx_of=lambda m: m.transport["species"].boundary_idx,
+        convert="concentration_to_mass_fraction",
     )
-    city, state, drivers = union(
+    loose, s1, d1 = union(
         {"street": (street_model, street_state, street_drivers),
          "building": (building_model, building_state, building_drivers)},
-        shared=[link], iterate_tol=0.0, iterate_max=2,  # impossible tolerance
+        shared=[one_way_link],
     )
-    with pytest.raises(RuntimeError, match="did not converge"):
+    one_way = loose.step(s1, d1, dt=1.0)
+    # The street must have felt the building (a sink: infiltration draws segment air):
+    assert not torch.allclose(two_way["street"]["street.x"], one_way["street"]["street.x"])
+    # and the building must have seen the END-of-step street value, not the start value:
+    assert not torch.allclose(two_way["building"]["species.x"], one_way["building"]["species.x"])
+
+
+def test_two_way_union_raises_with_the_real_largest_change_when_it_does_not_converge():
+    (city, state, drivers), _ = _city(iterate_rtol=0.0, iterate_atol=0.0, iterate_max=2)
+    with pytest.raises(RuntimeError, match="did not converge") as excinfo:
         city.step(state, drivers, dt=1.0)
+    largest = float(re.search(r"largest change[^0-9]*([0-9.eE+-]+)", str(excinfo.value)).group(1))
+    assert largest > 0.0  # never the stale 0.0 the aliased post-loop computation produced
+
+
+def test_two_way_link_with_iterate_max_below_two_is_refused_at_construction():
+    with pytest.raises(ValueError, match="iterate_max"):
+        _city(iterate_max=1)
+
+
+def test_unregistered_conversion_is_refused_at_union_construction():
+    from tellegen.couple import ValueLink, union
+
+    street_model, street_state, street_drivers = _tiny_street_model()
+    building_model, building_state, building_drivers = _tiny_building_model()
+    bad = ValueLink(
+        from_model="street", from_key="street.x", from_index=0,
+        to_model="building", to_key="species.x_boundary", to_index=0, convert="furlongs",
+    )
+    with pytest.raises(KeyError, match="furlongs"):
+        union({"street": (street_model, street_state, street_drivers),
+               "building": (building_model, building_state, building_drivers)}, shared=[bad])
+
+
+def test_reduced_accepts_reduced_and_stacked_single_species_layouts():
+    from tellegen.couple import _reduced
+
+    reduced = torch.tensor([1.0, 2.0, 3.0], dtype=F64)
+    stacked = reduced.reshape(3, 1)
+    assert torch.equal(_reduced(reduced, 3), reduced)
+    assert torch.equal(_reduced(stacked, 3), reduced)
+    batched_stacked = torch.arange(6, dtype=F64).reshape(2, 3, 1)
+    assert _reduced(batched_stacked, 3).shape == (2, 3)
+    with pytest.raises(ValueError, match="3 entries"):
+        _reduced(torch.zeros(4, dtype=F64), 3)
+
+
+def test_write_at_restores_the_stacked_layout():
+    from tellegen.couple import _write_at
+
+    target = torch.zeros(1, 1, dtype=F64)  # CONTAM's x_boundary layout, n_b = 1, K = 1
+    out = _write_at(target, 1, 0, torch.tensor(2.5, dtype=F64))
+    assert out.shape == (1, 1) and out.item() == pytest.approx(2.5)
+    assert target.item() == 0.0  # the input was cloned, not written in place
+    batched = torch.zeros(4, 2, 1, dtype=F64)
+    out = _write_at(batched, 2, 1, torch.arange(4, dtype=F64))
+    assert out.shape == (4, 2, 1)
+    assert torch.equal(out[:, 1, 0], torch.arange(4, dtype=F64))
+    assert torch.all(out[:, 0, 0] == 0)
+
+
+@pytest.mark.parametrize("wd, theta", [(270.0, 0.0), (0.0, 1.5 * math.pi),
+                                       (90.0, math.pi), (180.0, 0.5 * math.pi)])
+def test_wind_direction_conversions_on_the_cardinal_points(wd, theta):
+    from tellegen.couple import CONTAM_DEG_TO_STREET_RAD, STREET_RAD_TO_CONTAM_DEG
+
+    wd_t = torch.tensor(wd, dtype=F64)
+    theta_t = torch.tensor(theta, dtype=F64)
+    assert apply_conversion(CONTAM_DEG_TO_STREET_RAD, wd_t, {}).item() == pytest.approx(
+        theta, abs=1e-12)
+    assert apply_conversion(STREET_RAD_TO_CONTAM_DEG, theta_t, {}).item() == pytest.approx(
+        wd, abs=1e-9)
