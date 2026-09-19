@@ -676,10 +676,17 @@ pyswmm and EPANET.
   edges -- delivering none of the mode's actual purpose (gradients flowing through which
   arc absorbs a constraint). The fix routes the sharing site through a real coupled QP whose
   KKT stationarity reduces to one scalar monotone equation per node, shared by every
-  competing edge; the genuine cross-gradient this produces, `d(f_BD)/d(r_CD) = -0.5` on the
-  diamond test fixture, was hand-derived and confirmed correct for both symmetric and
-  asymmetric preference weights, and is checked directly by
-  `test_projection_mode_sharing_has_nonzero_cross_gradient`.
+  competing edge; the genuine cross-gradient this produces, `d(f_BD)/d(r_CD) = -0.5` on this
+  specific SYMMETRIC-preference diamond fixture, was hand-derived and is checked directly
+  (sign and magnitude) by `test_projection_mode_sharing_has_nonzero_cross_gradient`. The
+  general sharing mechanism -- the KKT derivation `d(f_i)/d(r_j) = -(1/preference_i) /
+  sum_k(1/preference_k)`, of which -0.5 is the symmetric-weight special case -- was
+  separately hand-verified against DIFFERENT, asymmetric-preference fixtures during Task 4's
+  review (`pref=[1,3]` and `pref=[1,2,5]`, confirmed to 4 decimal places; see the ledger at
+  `.superpowers/sdd/2026-09-18-milestone-4b-wsimod/progress.md`, lines ~241-244). That
+  confirms the mechanism generalises correctly, not that -0.5 itself does -- for asymmetric
+  weights the value is generically different (e.g. `pref=[1,3]` gives -0.25, not -0.5), and
+  no committed test asserts the literal -0.5 value under asymmetric weights.
 - `tests/verification/_wsimod_oracle.py`: a request-capture harness that monkeypatches
   `wsimod.arc.Arc.send_push_request`/`send_pull_request` to record every per-arc
   `requested`/`realised` pair WSIMOD itself computes while running its own
