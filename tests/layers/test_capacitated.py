@@ -342,6 +342,81 @@ def test_gradcheck_smooth_and_projection_on_diamond():
         assert torch.autograd.gradcheck(f_of_r, (r0,), eps=1e-6, atol=1e-4)
 
 
+def test_projection_mode_sharing_has_nonzero_cross_gradient():
+    """Fix-loop round 1 (Critical finding): the ORIGINAL `mode="projection"` reused
+    hard-clip's own preference-proportional-share formula at the sharing site, which is a
+    function of preference weights and total headroom alone -- never of any individual
+    edge's own request -- so it had a provably ZERO cross-gradient between competing edges,
+    delivering NONE of the spec's stated purpose ("gradients flow through which arc absorbs
+    a constraint", framework spec 4.2b). Confirmed empirically (not just by inspection) via
+    `torch.autograd.functional.jacobian`: `d(f_BD)/d(r_CD)` was byte-identical to
+    `mode="hard"`'s own (zero) cross-term at this exact fixture, across 200 random trials
+    too. `_share_via_qp`'s real coupled QP (via `solve_monotone`) fixes this: `d(f_BD)/d(r_CD)`
+    must now be genuinely nonzero, and its SIGN must be negative -- raising a competing
+    edge's request can only ever grow ITS OWN share and shrink everyone else's, since the
+    shared pool (`free_headroom`) does not grow.
+    """
+    net = _diamond_net()
+    s_max = torch.tensor([100.0, 100.0, 100.0, 3.0], dtype=F64)
+    c_arc = torch.full((4,), 100.0, dtype=F64)
+    preference = torch.full((4,), 1.0, dtype=F64)
+    layer = CapacitatedTransferLayer(
+        net, "cap", "link", s_max=s_max, c_arc=c_arc, preference=preference, mode="projection"
+    )
+
+    def f_of_r(r):
+        _, f = layer.step(torch.zeros(net.n, dtype=F64), {"cap.requests": r}, dt=1.0)
+        return f
+
+    r0 = torch.tensor([2.0, 2.0, 2.0, 2.0], dtype=F64)
+    jac = torch.autograd.functional.jacobian(f_of_r, r0)
+    # f_BD is edge index 2, r_CD is edge index 3 -- competing for D's headroom, D is
+    # oversubscribed at this fixture's numbers (demand 4.0 > headroom 3.0).
+    cross = jac[2, 3].item()
+    assert cross < -1e-6, f"expected a genuinely negative cross-gradient, got {cross}"
+    # Own-request sensitivity should be positive (more of my own request -> more of my own
+    # share, up to the shared constraint).
+    assert jac[2, 2].item() > 1e-6
+
+
+def test_projection_mode_sharing_is_nan_free_under_random_fixtures():
+    """Fix-loop round 1: `_share_via_qp`'s `solve_monotone`-based root-find has a genuine
+    division (`weight = -grad_output / f_x` inside `solve_monotone`'s own backward) that
+    blows up to NaN whenever every competing edge at a node is simultaneously boundary-
+    pinned at the converged root -- observed directly during this fix, in two distinct
+    forms: a single, arc-capacity-saturated edge at a non-competing node (caught by
+    `test_projection_mode_is_differentiable_through_requests`'s chain fixture), and a
+    genuinely multi-edge node whose competing edges are ALL already fully satisfied by an
+    earlier `n_passes` round (`remaining == 0` for all of them) -- the second form was
+    missed by every hand-written fixture above and only surfaced via randomised search: a
+    first fix-attempt gated on in-degree alone still produced NaN gradients in 101/200
+    random trials. This test pins that regression with a smaller, deterministic (seeded)
+    sweep so a future change reintroducing either degenerate case fails CI directly, without
+    needing a fresh randomised search to rediscover it.
+    """
+    net = _diamond_net()
+    c_arc = torch.full((4,), 100.0, dtype=F64)
+    generator = torch.Generator().manual_seed(0)
+    for _ in range(50):
+        s_max = torch.tensor(
+            [100.0, 100.0, 100.0, torch.rand(1, generator=generator).item() * 5 + 0.5],
+            dtype=F64,
+        )
+        preference = torch.rand(4, generator=generator, dtype=F64) * 2 + 0.5
+        layer = CapacitatedTransferLayer(
+            net, "cap", "link", s_max=s_max, c_arc=c_arc, preference=preference,
+            mode="projection",
+        )
+
+        def f_of_r(r, layer=layer):
+            _, f = layer.step(torch.zeros(net.n, dtype=F64), {"cap.requests": r}, dt=1.0)
+            return f
+
+        r0 = torch.rand(4, generator=generator, dtype=F64) * 5 + 0.1
+        jac = torch.autograd.functional.jacobian(f_of_r, r0)
+        assert torch.isfinite(jac).all(), f"NaN/Inf Jacobian at s_max={s_max}, r0={r0}"
+
+
 def test_model_steps_capacitated_layer_end_to_end():
     net = _chain_net()
     s_max = torch.full((net.n,), 100.0, dtype=F64)

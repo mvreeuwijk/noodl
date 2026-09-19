@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import torch
 
+from tellegen.solvers.scalar import solve_monotone
 from tellegen.topology import Network
 
 F64 = torch.float64
@@ -21,6 +22,16 @@ _MODES = ("hard", "smooth", "projection")
 # step (unit step size) reaches its exact optimum in a single iteration (see
 # `_clip_projection`'s docstring), so 3 is generous headroom, not a tuned tolerance.
 _PROJECTION_ITERS = 3
+# Fix-loop round 1 (Critical finding, third degeneracy -- see `_share_via_qp`'s docstring):
+# a node's `free_headroom` can shrink to ~1e-12 from accumulated floating-point cancellation
+# in a LATER `n_passes` round once its headroom is already fully consumed, comparable to the
+# `1e-12` epsilon `step` itself uses for the oversubscription test -- occasionally
+# misclassifying pure numerical noise as genuine oversubscription and routing a near-zero-
+# scale problem through `solve_monotone`'s real Newton solve, where it was observed (a
+# 1-in-2000 randomised trial) to produce a NaN gradient. This floor is many orders of
+# magnitude above float64's accumulated noise over the loop's own few arithmetic passes, and
+# many orders below any physically meaningful headroom value in this class's own fixtures.
+_OVERSUBSCRIBED_FLOOR = 1e-9
 
 
 class CapacitatedTransferLayer:
@@ -141,60 +152,77 @@ class CapacitatedTransferLayer:
         ROUTING decision; either is defensible, but should be a deliberate, documented
         choice, as this one is.
 
-        TASK 4's CHOICE for `"projection"`: the opposite of `"smooth"` -- `hard_cond`
-        stays the exact SAME hard boolean as hard-clip mode (this method's default
-        `torch.where` branch already applies, unmodified, since it only special-cases
-        `"smooth"` above). The QP/projection machinery (`_clip_projection`) is applied
-        instead to the ARITHMETIC inside the branches (the tentative-flow and
-        proportional-share bounds computed in `step`), not to the branch choice itself.
-        Rationale: `"projection"`'s stated purpose (design spec section 3) is a QP posed
-        against the constraint SURFACE -- `0 <= f <= c_arc` and the headroom bound -- not
-        a re-litigation of which edge WINS a competition for scarce headroom, which is
-        exactly what `hard_cond` decides. Reusing hard-clip's own boolean there keeps
-        `"projection"` byte-identical to hard-clip's ROUTING outcome (the only sense in
-        which "solve for the flows exactly, then differentiate" is meaningful -- an
-        approximate routing decision would need `"smooth"`'s own machinery, already
-        available via `mode="smooth"`) while still exercising genuinely new machinery
-        (`_clip_projection`'s own iterative box-projection solve, verified against
-        `_clip`'s closed form in `test_clip_projection_matches_box_clamp`) at the actual
-        QP site the spec names.
+        TASK 4's ORIGINAL CHOICE for `"projection"` (fix-loop round 1 superseded the
+        SHARING-SITE part of this, see below, but the underlying philosophy still stands):
+        the opposite of `"smooth"` -- leave the oversubscription BRANCH decision hard,
+        smooth/solve only the arithmetic inside it. `"projection"`'s stated purpose (design
+        spec section 3) is a QP posed against the constraint SURFACE -- `0 <= f <= c_arc`
+        and the headroom bound -- not a re-litigation of WHETHER a node is oversubscribed
+        at all, which is a genuinely separate question from what the flows should be once
+        it is.
+
+        FIX-LOOP ROUND 1 (Critical finding, reviewer-verified via 200 random trials + the
+        diamond fixture's full Jacobian): the ORIGINAL implementation routed `"projection"`'s
+        sharing-site arithmetic through `_select`/`_clip_projection` using the SAME
+        preference-proportional-share VALUE formula as hard-clip mode -- which, being a
+        function of preference weights and total headroom alone, has a provably zero
+        cross-gradient between competing edges regardless of which mode computes it. That
+        delivered NONE of the spec's actual purpose ("gradients flow through which arc
+        absorbs a constraint"), so `"projection"`'s sharing site no longer calls `_select`
+        or `_clip_projection` at all -- `step` calls `_share_via_qp` directly instead, which
+        solves the REAL coupled QP (see its own docstring) and reproduces this same hard
+        oversubscription-branch philosophy internally via a target-substitution trick
+        (also documented there), without going through this method's `torch.where`.
+        `_select` itself is unchanged and still governs `"hard"` and `"smooth"` exactly as
+        before.
         """
         if self.mode == "smooth":
             w = torch.sigmoid(soft_margin / self.tau)
             return w * a + (1 - w) * b
         return torch.where(hard_cond, a, b)
 
-    # Path taken for mode="projection": the UNROLLED box-projection fallback, not
-    # `implicit_solve` reuse -- decided after reading `implicit.py`/`newton.py` in full (not
-    # a blind skip). `implicit_solve` wants a smooth `residual(x, *params) = 0` and an
-    # `operator` returning a Jacobian/LinearOperator at the current Newton iterate; this QP's
-    # KKT stationarity condition has a genuine complementarity term (`f` pinned at 0, at its
-    # upper bound, or strictly interior, with a DIFFERENT active Jacobian structure in each
-    # regime), so presenting it as a Newton root-find would require smoothing the
+    # Path taken for mode="projection" overall: the UNROLLED box-projection fallback (this
+    # method) plus, at the sharing site specifically, `tellegen.solvers.scalar.solve_monotone`
+    # (see `_share_via_qp` below) -- NOT `tellegen.solvers.implicit.implicit_solve` anywhere,
+    # decided after reading `implicit.py`/`newton.py` in full (not a blind skip).
+    # `implicit_solve` wants a smooth `residual(x, *params) = 0` and an `operator` returning a
+    # Jacobian/LinearOperator at the current Newton iterate; this QP's KKT stationarity
+    # condition has a genuine complementarity term (`f` pinned at 0, at its upper bound, or
+    # strictly interior, with a DIFFERENT active Jacobian structure in each regime), so
+    # presenting the FULL multi-edge QP as a Newton root-find would require smoothing the
     # complementarity condition first (e.g. Fischer-Burmeister) to get a residual Newton can
     # differentiate through -- at which point the "new" machinery is just a harder-to-verify
     # reimplementation of what `mode="smooth"` already does with `_clip`/`_nonneg`/`_select`,
-    # for no accuracy benefit and the exact risk design section 10 flags. The box-constrained
-    # least-squares QP this method actually solves (`min sum (f - r)**2 s.t. 0 <= f <=
-    # min(c_arc, headroom)`) is SEPARABLE per edge, so its exact closed-form solution is
-    # simply `clamp(r, 0, bound)` -- the loop below is a genuine (if trivially-converging)
-    # projected-gradient solve of that QP, not a disguised call to `_clip`: unit step size on
-    # a separable quadratic reaches the optimum after exactly one projection, so every
-    # iteration after the first is a fixed-point check, not additional correction.
+    # for no accuracy benefit and the exact risk design section 10 flags. `solve_monotone`
+    # sidesteps this: at the sharing site, the QP's KKT system reduces to ONE scalar,
+    # monotone equation per node (`_share_via_qp`'s docstring derives this), which is exactly
+    # `solve_monotone`'s own contract (a batched, monotone, implicit-function-differentiable
+    # scalar root) -- an existing, already-tested primitive, not new solver machinery.
     def _clip_projection(
         self, r: torch.Tensor, headroom_per_edge: torch.Tensor, c_arc: torch.Tensor | None = None
     ) -> torch.Tensor:
         """Box-constrained least-squares projection: minimises `sum((f - r)**2)` subject to
-        `0 <= f <= bound`, where `bound = headroom_per_edge` alone (`c_arc=None`, used at the
-        edge-sharing site where the bound is already a headroom-coupled quantity such as
-        `proportional_share`) or `bound = min(c_arc, headroom_per_edge)` (used at the
-        arc-capacity-and-headroom site, mirroring `avail`'s own `_clip`/`_nonneg` pair).
+        `0 <= f <= bound`, where `bound = headroom_per_edge` alone (`c_arc=None`) or `bound =
+        min(c_arc, headroom_per_edge)`.
+
+        Used ONLY at "QP site 1" in `step` -- each edge's own arc-capacity-and-headroom bound
+        (`avail`), which has NO cross-edge coupling (a single edge's own capacity bound is not
+        a shared-constraint problem), so the exact closed-form solution `clamp(r, 0, bound)`
+        is correct and sufficient on its own; the loop below is a genuine (if
+        trivially-converging, since a separable box QP's unit-step projected-gradient step
+        reaches the optimum after exactly one projection) iterative solve of that QP, not a
+        disguised call to `_clip`. It is NOT used at the sharing site ("QP site 2") any more
+        -- that site has REAL cross-edge coupling and needs `_share_via_qp` instead (fix-loop
+        round 1: an earlier version of this method WAS (mis)used there too, computing a value
+        mathematically identical to `_clip`'s hard-clip formula and delivering none of the
+        spec's cross-gradient requirement -- see `_share_via_qp`'s docstring and `_select`'s
+        for the full history).
 
         Solved by projected gradient descent at unit step size (`f <- clamp(f - (f - r), 0,
         bound)`) for a small FIXED `_PROJECTION_ITERS` count, independent of `self.n_passes`
         (which counts OUTER sharing rounds, a different loop solving a different problem --
         see `step`'s own docstring). Ordinary autograd differentiates straight through the
-        unrolled loop; no `implicit_solve` reuse (see the comment above this method for why).
+        unrolled loop.
         """
         bound = headroom_per_edge if c_arc is None else torch.minimum(c_arc, headroom_per_edge)
         zero = torch.zeros_like(r)
@@ -203,6 +231,189 @@ class CapacitatedTransferLayer:
             grad = f - r
             f = torch.clamp(f - grad, zero, bound)
         return f
+
+    def _share_via_qp(self, remaining, avail_e, free_headroom, node_oversubscribed):
+        """Fix-loop round 1 (Critical finding, reviewer-verified by 200 random trials + the
+        diamond fixture's full Jacobian): the REAL coupled per-node QP the design spec asks
+        for at the sharing site -- minimise `sum_i preference_i * (f_i - remaining_i)**2`
+        subject to `0 <= f_i <= avail_i` for every edge `i` targeting an oversubscribed node,
+        AND `sum_i f_i <= free_headroom` for that node JOINTLY (not per edge).
+
+        This replaces the earlier (Task 4 first pass) reuse of `_clip_projection` at this
+        site, which computed `min(proportional_share, tentative)` -- mathematically IDENTICAL
+        to hard-clip's own formula, and therefore, like it, having a PROVABLY zero
+        cross-gradient `d(share_i)/d(r_j) == 0` for a competing edge `j`: the
+        preference-proportional split `free_headroom * preference_i / pref_sum` depends only
+        on preference weights and total headroom, never on any individual edge's own request,
+        so no formula built on top of it can carry a live gradient between competitors. That
+        delivered NONE of the spec's stated purpose (framework spec 4.2b: "gradients flow
+        through which arc absorbs a constraint") -- confirmed empirically, not just by
+        reading code: `torch.autograd.functional.jacobian` gave byte-identical zero
+        cross-terms and byte-identical full Jacobians to `mode="hard"`, across 200 random
+        trials and the diamond fixture.
+
+        This QP's solution does NOT have that flaw. Its Lagrangian (`lambda >= 0` by
+        complementary slackness on the joint inequality) is `sum_i preference_i * (f_i -
+        remaining_i)**2 + lambda * (sum_i f_i - free_headroom)`; stationarity per edge, with
+        the box bound applied, reduces to `f_i = clamp(remaining_i - lambda / preference_i, 0,
+        avail_i)` for ONE scalar `lambda`, SHARED by every edge competing at that node. Since
+        `lambda` depends on every competing edge's `remaining_j` jointly (see below),
+        `d(f_i)/d(r_j)` for `i != j` is genuinely nonzero, flowing entirely through `lambda`
+        -- this is the real cross-gradient the spec wants. The fix-loop's covering test,
+        `test_projection_mode_sharing_has_nonzero_cross_gradient`, pins its sign: increasing a
+        competitor's request should make ITS share bigger and, since the shared pool of
+        `free_headroom` does not grow, every OTHER competitor's share smaller.
+
+        `lambda`'s value is the unique root of `g(lambda, ...) = sum_i f_i(lambda) -
+        free_headroom`, monotone NON-INCREASING in `lambda` (every term shrinks as `lambda`
+        grows) -- exactly `tellegen.solvers.scalar.solve_monotone`'s own contract (a batched,
+        monotone, implicit-function-differentiable scalar root), the same primitive the sewer
+        app already uses for Manning-depth inversion. `params` threaded through
+        `solve_monotone` are `remaining`, `avail_e`, `self.preference` and `target` (below) --
+        every tensor `g` depends on besides `lambda` itself, per `solve_monotone`'s own module
+        docstring (a closure-captured tensor never reaches its backward pass).
+
+        Bracket: `lo=0` always brackets the root from below -- `g(0, target=free_headroom) =
+        demand_at_tgt - free_headroom >= 0` exactly when the node IS oversubscribed, by that
+        condition's own definition. `hi` is a single GLOBAL scalar (not a tight per-node
+        bound -- `solve_monotone` only needs a VALID bracket, not a tight one, and a global
+        scalar avoids a per-node scatter-max op): `max(preference * clamp(remaining, min=0))
+        + 1` over EVERY edge in the whole call. At that `lambda`, `remaining_i -
+        lambda/preference_i <= 0` for every edge everywhere (not just this node's), so `g(hi)
+        <= -free_headroom <= 0` for every node -- loose but always safe. `hi` is built with
+        `.item()` (a plain Python float), deliberately detached: `solve_monotone` never
+        returns a gradient for `lo`/`hi` (only for `*params`), so building it from a
+        `requires_grad` tensor would be silently discarded anyway, and `.item()` makes that
+        explicit rather than relying on the library's own (correct, but non-obvious) behaviour.
+
+        NON-OVERSUBSCRIBED nodes (or nodes with no incoming edges at all) still need a VALID
+        bracket -- `solve_monotone` raises if `g(lo)` and `g(hi)` share a sign, which they
+        would here without adjustment (`g(0) = demand_at_tgt - free_headroom <= 0` when NOT
+        oversubscribed, same sign as `g(hi) <= 0`). Rather than a dynamic per-node boolean
+        mask (which would break the fixed, static-shape vectorisation every other site in this
+        class relies on, and reintroduce a variable-size batch per call), the TARGET fed to
+        `g` is substituted for these nodes instead: `target = free_headroom` where
+        oversubscribed, else `demand_at_tgt` -- `g(0) = demand_at_tgt - target = 0` EXACTLY
+        there, satisfying `solve_monotone`'s own `f_lo == 0` exemption from the sign check
+        unconditionally. This makes `lambda = 0` an exact root for every non-oversubscribed
+        node, so the solve trivially converges to the same `tentative` these nodes would get
+        anyway -- the SAME hard, not-smoothed oversubscription-branch decision `_select`'s own
+        docstring discusses for the ROUTING question (see there for why `"projection"` leaves
+        it hard rather than blending it the way `"smooth"` does), just implemented here via a
+        target substitution instead of `_select`'s `torch.where`, since `solve_monotone`'s own
+        bracket-validity contract needs BOTH branches to share one call rather than a plain
+        two-value choice.
+
+        A SECOND, more GENERAL degeneracy (caught empirically by 200 randomised trials, not
+        by any of the four originally-written tests -- see
+        `test_projection_mode_sharing_has_nonzero_cross_gradient`'s "also check every OTHER
+        random trial stays NaN-free" assertion, added specifically because the four narrow
+        fixtures above missed it): whenever a node is NOT oversubscribed, `lambda* = 0` is the
+        FORCED root (by the target-substitution trick above), and the residual's LOCAL
+        derivative there is `sum_i (-1/preference_i) * [interior_i]`, where `interior_i` is 1
+        only for an edge STRICTLY between its bounds (`0 < remaining_i < avail_i`) and 0 for
+        an edge sitting AT either bound (`remaining_i <= 0`, already fully satisfied by an
+        EARLIER pass in `step`'s own outer loop -- extremely common in pass 2 onward, once a
+        node's demand was already met in pass 1 -- or `remaining_i >= avail_i`, arc-capacity-
+        saturated). If EVERY edge into that node is at a bound simultaneously (both the
+        single-edge case above, AND a genuinely multi-edge, `in_degree >= 2` node where every
+        competitor happens to be boundary-pinned -- observed directly: with `c_arc` large
+        enough not to bind, `avail_i` is IDENTICAL across every edge sharing one node, so once
+        one edge's demand is satisfied and its `remaining` drops to exactly 0 in a later pass,
+        EVERY other still-active edge sharing that SAME node can independently also land at a
+        bound), the derivative is exactly 0 and `solve_monotone`'s backward divides by it --
+        the SAME `0/0 -> NaN` mechanism as the narrower case below, just triggered by
+        `remaining_i == 0` (a LOWER-bound pin from an already-satisfied earlier pass) instead
+        of `remaining_i >= avail_i` (an UPPER-bound pin), and by a genuinely competing node in
+        a LATER pass rather than only a non-competing node in the first one.
+
+        Because being NOT oversubscribed is *exactly* the condition under which this
+        degeneracy can arise (an oversubscribed node's root is `lambda* > 0`, found only by
+        actually leaving at least one edge's saturated regime, so at least one edge IS locally
+        responsive at the converged point in every case this class has needed to handle), the
+        fix below gates on OVERSUBSCRIPTION, not in-degree: a narrower `in_degree <= 1` gate
+        (Task 4 fix-loop round 1's first attempt) caught the single-edge chain-fixture case
+        but missed this later-pass, genuinely-competing-but-currently-satisfied case entirely
+        -- confirmed the narrower gate was insufficient by running exactly the 200-trial check
+        this docstring describes against it (101/200 trials still produced NaN gradients).
+
+        Fix: for every edge whose TARGET node is NOT oversubscribed (`node_oversubscribed`
+        broadcast to edges), the values fed into `solve_monotone`'s OWN internal residual are
+        replaced with fixed, safely-INTERIOR constants (`remaining=1.0`, `avail=2.0` -- `1.0`
+        strictly between `0` and `2.0`, guaranteeing a genuine nonzero local derivative
+        `-1/preference_i` there), and `target` is replaced correspondingly (`in_degree`, the
+        COUNT of such edges into that node, since each dummy-substituted edge contributes
+        exactly `min(1.0, 2.0) = 1.0` at `lambda=0`) -- so `lambda* = 0` is STILL the exact
+        root there (unchanged in VALUE, since a non-oversubscribed node's real root was always
+        0 anyway), but now via a non-degenerate residual. This is safe precisely because it
+        only touches `solve_monotone`'s INTERNAL root-finding inputs: the FINAL returned share
+        below is computed from the REAL `remaining`/`avail_e` (never the dummy constants), so
+        a non-oversubscribed edge's realised share is unaffected, and the dummy constants are
+        fresh, non-`requires_grad` leaves with no connection to `r` at all, so
+        `d(lambda)/d(r) = 0` there regardless of `solve_monotone`'s own backward output --
+        exactly what "share = tentative regardless of any other edge" means for a node with no
+        ACTIVE competition pressure this pass, whatever its in-degree.
+
+        A THIRD degeneracy (found by the SAME 200-trial randomised sweep, 1 trial in 2000 on
+        a wider re-run): once a node's headroom is fully consumed in an early pass,
+        `free_headroom` and `avail_e` do not always settle to EXACTLY 0 in later passes --
+        floating-point cancellation across the subtraction chain (`headroom - committed_in`,
+        `c_arc - f`, ...) can leave a residual of order `1e-12`, comparable to the SAME
+        `1e-12` epsilon `step` uses for `node_oversubscribed` -- so a purely numerical-noise
+        residual was occasionally misclassified as genuine oversubscription (observed: `demand
+        ~2.6e-12 > free_headroom(~1.3e-12) + 1e-12`), routing an essentially-zero-scale
+        problem through the REAL (non-dummy) branch, where `solve_monotone`'s Newton step
+        divides by a derivative that is ITSELF subject to the same cancellation -- a second,
+        distinct route to the same `0/0 -> NaN` failure, this time from floating-point noise
+        rather than a structural boundary-pinning coincidence. Fix: `node_oversubscribed` is
+        additionally required to clear `_OVERSUBSCRIBED_FLOOR` (`1e-9`, far above accumulated
+        float64 noise over this loop's few arithmetic passes, far below any physically
+        meaningful headroom value in this class's fixtures) before a node is trusted as
+        GENUINELY oversubscribed here; a node whose margin is noise-scale is treated as
+        not-oversubscribed instead (dummy-substituted, as above) -- correct up to floating-
+        point noise itself, since there was never a meaningful amount of headroom left to
+        contest either way.
+
+        An analogous flat-residual risk remains, in principle, for a node that IS GENUINELY
+        (not just noise-level) oversubscribed but whose target value happens to land exactly
+        on a PLATEAU of the (piecewise-linear) residual -- every competing edge simultaneously
+        boundary-pinned across a whole RANGE of `lambda`, not just at a single point -- which
+        would require an exact coincidence between `free_headroom` and a specific combination
+        of `avail_i` values. This was not observed in either randomised sweep (2200 trials
+        total) or any fixture in this test suite; it is flagged here rather than silently
+        assumed away.
+        """
+        in_degree = torch.zeros_like(free_headroom).index_add(
+            -1, self._tgt, torch.ones_like(remaining)
+        )
+        node_oversubscribed = node_oversubscribed & (free_headroom > _OVERSUBSCRIBED_FLOOR)
+        edge_oversubscribed = node_oversubscribed.index_select(-1, self._tgt)
+        # Dummy pair is strictly interior (1.0 lies between 0 and 2.0) so the residual's
+        # local derivative at lambda=0 is guaranteed nonzero for these edges -- see the
+        # docstring's degeneracy paragraphs above.
+        remaining_safe = torch.where(edge_oversubscribed, remaining, torch.ones_like(remaining))
+        avail_safe = torch.where(edge_oversubscribed, avail_e, torch.full_like(avail_e, 2.0))
+        # `in_degree` edges dummy-substituted (uniformly, since oversubscription is a NODE-
+        # level property shared by every edge into it), each contributing min(1.0, 2.0) = 1.0.
+        target = torch.where(node_oversubscribed, free_headroom, in_degree)
+        lo = torch.zeros_like(free_headroom)
+        hi_value = (self.preference * torch.clamp(remaining, min=0.0)).max().item() + 1.0
+        hi = torch.full_like(free_headroom, hi_value)
+
+        def _residual(lam, remaining_e, avail_e, preference_e, target):
+            lam_e = lam.index_select(-1, self._tgt)
+            f_e = torch.clamp(
+                remaining_e - lam_e / preference_e, torch.zeros_like(remaining_e), avail_e
+            )
+            return torch.zeros_like(target).index_add(-1, self._tgt, f_e) - target
+
+        lam = solve_monotone(
+            _residual, lo, hi, remaining_safe, avail_safe, self.preference, target
+        )
+        lam_e = lam.index_select(-1, self._tgt)
+        return torch.clamp(
+            remaining - lam_e / self.preference, torch.zeros_like(remaining), avail_e
+        )
 
     def step(self, s, drivers, dt, *, diagnostics=None):
         """One explicit step. `s` is the previous per-node storage, `dt` in seconds.
@@ -254,53 +465,62 @@ class CapacitatedTransferLayer:
             free_headroom = self._nonneg(headroom - committed_in)
             free_headroom_e = free_headroom.index_select(-1, self._tgt)
             if self.mode == "projection":
-                # QP site 1: `tentative`'s bound is `min(c_arc - f, free_headroom_e)`,
-                # exactly `avail`'s own definition -- `_clip_projection` solves that box
-                # projection directly rather than computing `avail` as a separate step.
-                tentative = self._clip_projection(remaining, free_headroom_e, self.c_arc - f)
+                # QP site 1 (no cross-edge coupling, see `_clip_projection`'s docstring):
+                # `avail_e` is exposed as its OWN step, not folded into a single 3-arg call,
+                # so QP site 2 below can reuse it as each edge's own upper bound in the real
+                # coupled QP. This also fixes fix-loop round 1's Minor finding: routing
+                # `self.c_arc - f` through `_clip_projection`'s own `clamp(..., 0, bound)`
+                # floors it at 0, guarding against a slightly-negative `c_arc - f` (floating-
+                # point overshoot) feeding a negative bound into the box projection -- the
+                # earlier 3-arg fused call computed `bound = min(c_arc - f, free_headroom_e)`
+                # BEFORE flooring, so a negative `c_arc - f` could have produced a negative
+                # bound directly.
+                avail_e = self._clip_projection(self.c_arc - f, free_headroom_e)
+                tentative = self._clip_projection(remaining, avail_e)
+                # QP site 2 (fix-loop round 1, Critical finding -- see `_share_via_qp`'s
+                # docstring for the full derivation and why the ORIGINAL implementation here,
+                # `_clip_projection(tentative, proportional_share)`, delivered a provably
+                # zero cross-gradient and none of the spec's actual purpose): every edge
+                # targeting the SAME oversubscribed node now shares one scalar Lagrange
+                # multiplier solved via `solve_monotone`, so `d(share_i)/d(r_j)` for a
+                # competing edge `j != i` is genuinely nonzero.
+                demand_at_tgt = torch.zeros_like(headroom).index_add(-1, self._tgt, tentative)
+                node_oversubscribed = demand_at_tgt > free_headroom + 1e-12
+                share = self._share_via_qp(remaining, avail_e, free_headroom, node_oversubscribed)
             else:
                 avail = self._nonneg(self._clip(self.c_arc - f, free_headroom_e))
                 tentative = self._clip(remaining, avail)
-            # `active` gates which edges compete for `pref_sum` below; this is a hard
-            # boolean threshold in EVERY mode, including smooth. Scope decision: the
-            # brief's enumerated kink sites are the `minimum`/`clamp(min=0.0)` pair and
-            # the `over_subscribed_e` `where` -- this narrower gate is left hard in all
-            # modes. Because `active` flips discretely the instant a competing edge's
-            # (now smooth) `tentative` crosses zero, it discretely changes
-            # `pref_sum_at_tgt` and therefore `proportional_share` in THAT pass, which
-            # DOES introduce a real discontinuity in the OTHER competing edges' realised
-            # `f` right at that crossing -- not merely a locally-zero gradient blip.
-            # Measured (diamond fixture, mode="smooth"): the jump is bounded, scales
-            # linearly with `tau` (same O(tau) order as the mode's other accepted
-            # approximation error), and is largely -- but not completely -- cancelled by
-            # the `n_passes` loop's self-correction over later rounds. Verified NaN/Inf
-            # safe even where `proportional_share` blows up as `pref_sum_e` hits its
-            # `1e-30` floor: the `_select` sigmoid weight on that branch is ~0 there, so
-            # the extreme value never propagates into `f`.
-            active = (tentative > 0).to(self.preference.dtype)
-            demand_at_tgt = torch.zeros_like(headroom).index_add(-1, self._tgt, tentative)
-            pref_sum_at_tgt = torch.zeros_like(headroom).index_add(
-                -1, self._tgt, self.preference * active
-            )
-            # `hard_cond` reproduces Task 2's exact boolean (kept unused in smooth mode,
-            # computed unconditionally so hard mode's arithmetic is untouched).
-            hard_cond = (demand_at_tgt > free_headroom + 1e-12).index_select(-1, self._tgt)
-            soft_margin = (demand_at_tgt - free_headroom).index_select(-1, self._tgt)
-            pref_sum_e = pref_sum_at_tgt.index_select(-1, self._tgt)
-            proportional_share = (
-                free_headroom_e * self.preference / torch.clamp(pref_sum_e, min=1e-30)
-            )
-            # QP site 2: the oversubscribed branch's value is `min(proportional_share,
-            # tentative)` in every mode (`_select`'s docstring records why `"projection"`
-            # leaves the BRANCH CHOICE itself hard, unlike `"smooth"`) -- `_clip_projection`
-            # solves that box projection with `c_arc=None` (the sole bound is already the
-            # headroom-coupled `proportional_share`, not a raw arc/headroom pair).
-            bounded_share = (
-                self._clip_projection(tentative, proportional_share)
-                if self.mode == "projection"
-                else self._clip(proportional_share, tentative)
-            )
-            share = self._select(hard_cond, soft_margin, bounded_share, tentative)
+                # `active` gates which edges compete for `pref_sum` below; this is a hard
+                # boolean threshold in EVERY mode, including smooth. Scope decision: the
+                # brief's enumerated kink sites are the `minimum`/`clamp(min=0.0)` pair and
+                # the `over_subscribed_e` `where` -- this narrower gate is left hard in all
+                # modes. Because `active` flips discretely the instant a competing edge's
+                # (now smooth) `tentative` crosses zero, it discretely changes
+                # `pref_sum_at_tgt` and therefore `proportional_share` in THAT pass, which
+                # DOES introduce a real discontinuity in the OTHER competing edges' realised
+                # `f` right at that crossing -- not merely a locally-zero gradient blip.
+                # Measured (diamond fixture, mode="smooth"): the jump is bounded, scales
+                # linearly with `tau` (same O(tau) order as the mode's other accepted
+                # approximation error), and is largely -- but not completely -- cancelled by
+                # the `n_passes` loop's self-correction over later rounds. Verified NaN/Inf
+                # safe even where `proportional_share` blows up as `pref_sum_e` hits its
+                # `1e-30` floor: the `_select` sigmoid weight on that branch is ~0 there, so
+                # the extreme value never propagates into `f`.
+                active = (tentative > 0).to(self.preference.dtype)
+                demand_at_tgt = torch.zeros_like(headroom).index_add(-1, self._tgt, tentative)
+                pref_sum_at_tgt = torch.zeros_like(headroom).index_add(
+                    -1, self._tgt, self.preference * active
+                )
+                # `hard_cond` reproduces Task 2's exact boolean (kept unused in smooth mode,
+                # computed unconditionally so hard mode's arithmetic is untouched).
+                hard_cond = (demand_at_tgt > free_headroom + 1e-12).index_select(-1, self._tgt)
+                soft_margin = (demand_at_tgt - free_headroom).index_select(-1, self._tgt)
+                pref_sum_e = pref_sum_at_tgt.index_select(-1, self._tgt)
+                proportional_share = (
+                    free_headroom_e * self.preference / torch.clamp(pref_sum_e, min=1e-30)
+                )
+                bounded_share = self._clip(proportional_share, tentative)
+                share = self._select(hard_cond, soft_margin, bounded_share, tentative)
             share = self._nonneg(share)
             f = f + share
             remaining = remaining - share
