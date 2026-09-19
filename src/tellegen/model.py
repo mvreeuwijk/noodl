@@ -662,10 +662,30 @@ class Model:
         owner's solved `q`: read from `state["<owner>.q"]` when an earlier pass or step left
         one there, otherwise SOLVED here for these drivers, exactly as `_pass` would (the
         first pass of a step starts from a state that carries no `q` yet -- design spec A6).
+
+        Two things to know about that branch. A `"<owner>.q"` already in `state` is used
+        AS-IS, even when these `drivers` would solve to a different one: that is a previous
+        outer step's output threaded back in, and for a coupling orchestrator it is the
+        pass-1 initial guess, corrected from pass 2 onward once a step of this model has run
+        at the current drivers. And the solve here takes the layer's DEFAULTS: `step`'s
+        `**solve_kwargs` (tolerances, backend, `on_failure`) are not forwarded, because this
+        method has no such argument -- a caller needing a specific solver setting should step
+        the model and read `"<owner>.q"` out of the result.
         """
         drv = self._apply_closures(state, drivers)
         owner = self.flow_layer_of[name]
         if owner in self.potential and f"{owner}.q" not in state:
+            key = self.flow_driver_of[name]
+            if key in drv:
+                # The same refusal `_kind_flows` makes on the read path, made here too: the
+                # solve branch would otherwise silently prefer the potential layer and never
+                # notice the contradicting driver, so whether a two-sourced layer is caught
+                # would depend on whether the state happened to carry a `q` yet.
+                raise ValueError(
+                    f"Model: transport layer {name!r} takes its flows from potential layer "
+                    f"{owner!r}, and the driver {key!r} was also given; a layer may have "
+                    f"one source of flows, not two -- drop {key!r} or remove {owner!r}"
+                )
             layer = self.potential[owner]
             phi_prev = state.get(f"{owner}.phi")
             phi0 = None if phi_prev is None else phi_prev[..., layer.interior]

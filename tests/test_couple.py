@@ -246,12 +246,127 @@ def test_two_way_step_differs_from_a_one_way_pass_and_is_sensitive_to_the_glue()
     assert not torch.allclose(two_way["building"]["species.x"], one_way["building"]["species.x"])
 
 
-def test_two_way_union_raises_with_the_real_largest_change_when_it_does_not_converge():
+def test_two_way_union_raises_naming_the_link_the_instances_and_the_real_largest_change():
     (city, state, drivers), _ = _city(iterate_rtol=0.0, iterate_atol=0.0, iterate_max=2)
     with pytest.raises(RuntimeError, match="did not converge") as excinfo:
         city.step(state, drivers, dt=1.0)
-    largest = float(re.search(r"largest change[^0-9]*([0-9.eE+-]+)", str(excinfo.value)).group(1))
+    message = str(excinfo.value)
+    key = "street:street.x[0]->building:species.x_boundary"
+    assert key in message  # which LINK failed, not just "the shared value(s)"
+    assert "for instances all" in message  # unbatched run: every instance failed
+    largest = float(re.search(rf"{re.escape(key)}'?: ?([0-9.eE+-]+)", message).group(1))
     assert largest > 0.0  # never the stale 0.0 the aliased post-loop computation produced
+
+
+def test_two_way_convergence_and_non_convergence_are_judged_per_batch_instance():
+    """A batch of street forcings: `converged` is a mask over the batch, `max_change` is per
+    link and per instance, and the failure message names ONLY the instances that failed --
+    as `Model._iterate` does (`model.py:595-604`)."""
+    from tellegen.couple import union
+
+    def batched_city(**kwargs):
+        street_model, street_state, street_drivers = _tiny_street_model()
+        building_model, building_state, building_drivers = _tiny_building_model()
+        # Two instances, differing tenfold at the coupled segment, so instance 1's residual
+        # is ~10x instance 0's at every pass and one absolute tolerance separates them:
+        street_state["street.x"] = torch.tensor([[3.0, 4.0], [30.0, 4.0]], dtype=F64)
+        return union(
+            {"street": (street_model, street_state, street_drivers),
+             "building": (building_model, building_state, building_drivers)},
+            shared=[_two_way_link()], **kwargs,
+        )
+
+    city, state, drivers = batched_city(iterate_rtol=1e-12, iterate_max=100)
+    diag: dict = {}
+    new = city.step(state, drivers, dt=1.0, diagnostics=diag)
+    key = "street:street.x[0]->building:species.x_boundary"
+    assert diag["converged"].shape == (2,) and bool(diag["converged"].all())
+    assert diag["max_change"][key].shape == (2,)
+    assert new["building"]["species.x"].shape == (2, 1)
+    # Instance 0 is the unbatched fixture, and must reproduce its unbatched answer:
+    (solo, s0, d0), _ = _city(iterate_rtol=1e-12, iterate_max=100)
+    one = solo.step(s0, d0, dt=1.0)
+    assert torch.allclose(
+        new["building"]["species.x"][0], one["building"]["species.x"], rtol=1e-9, atol=1e-14)
+    assert torch.allclose(
+        new["street"]["street.x"][0], one["street"]["street.x"], rtol=1e-9, atol=1e-14)
+
+    # A tolerance instance 0 meets within 6 passes and instance 1 does not:
+    city, state, drivers = batched_city(iterate_rtol=0.0, iterate_atol=0.05, iterate_max=6)
+    with pytest.raises(RuntimeError, match=r"for instances \[1\]"):
+        city.step(state, drivers, dt=1.0)
+
+
+def test_two_way_feedback_adds_to_the_callers_own_sources_and_never_overwrites_them():
+    """The caller's own source terms at the coupled node must survive: the feedback flux is
+    ADDED to them. Every other fixture supplies zeros, where add and overwrite agree."""
+    from tellegen.couple import transport_boundary_inflow, union
+
+    street_model, street_state, street_drivers = _tiny_street_model()
+    building_model, building_state, building_drivers = _tiny_building_model()
+    # atm, seg0, seg1 in full node order: seg0 (the coupled node) already emits 0.7, seg1 0.2.
+    own_sources = torch.tensor([0.0, 0.7, 0.2], dtype=F64)
+    street_drivers["street.sources"] = own_sources
+    city, state, drivers = union(
+        {"street": (street_model, street_state, street_drivers),
+         "building": (building_model, building_state, building_drivers)},
+        shared=[_two_way_link()], iterate_rtol=1e-12, iterate_max=100,
+    )
+    new = city.step(state, drivers, dt=1.0)
+
+    # Reassemble the converged step by hand, as the fixed-point test does:
+    forward = new["street"]["street.x"][0] / drivers["building"]["rho_amb"]
+    hand_building = dict(drivers["building"])
+    hand_building["species.x_boundary"] = torch.tensor([forward.item()], dtype=F64)
+    species = building_model.transport["species"]
+    q = building_model.current_flows("species", new["building"], hand_building)
+    inflow = transport_boundary_inflow(
+        building_model.net, q, species.flow_kinds, new["building"]["species.x"],
+        hand_building["species.x_boundary"], species.interior_idx, species.boundary_idx, 0,
+    )
+    assert inflow.item() != pytest.approx(0.0)  # there IS a flux to add
+    street = street_model.transport["street"]
+    node = int(street.interior_idx[0])
+    expected_sources = own_sources.clone()
+    expected_sources[node] = expected_sources[node] + inflow
+    assert expected_sources[node].item() == pytest.approx(0.7 + inflow.item())  # ADDED to 0.7
+    assert expected_sources[2].item() == 0.2  # the caller's other entries are untouched
+    hand_street = dict(drivers["street"])
+    hand_street["street.sources"] = expected_sources
+    expect_street = street_model.step(state["street"], hand_street, dt=1.0)
+    assert torch.allclose(
+        new["street"]["street.x"], expect_street["street.x"], rtol=1e-9, atol=1e-14)
+    # and the caller's own tensor was never written into:
+    assert torch.equal(own_sources, torch.tensor([0.0, 0.7, 0.2], dtype=F64))
+
+
+def test_a_to_key_that_is_not_a_boundary_driver_is_refused_at_construction():
+    from tellegen.couple import ValueLink, union
+
+    street_model, street_state, street_drivers = _tiny_street_model()
+    building_model, building_state, building_drivers = _tiny_building_model()
+    bad = ValueLink(
+        from_model="street", from_key="street.x", from_index=0,
+        to_model="building", to_key="species.sources", to_index=0,
+    )
+    with pytest.raises(ValueError, match="x_boundary"):
+        union({"street": (street_model, street_state, street_drivers),
+               "building": (building_model, building_state, building_drivers)}, shared=[bad])
+
+
+def test_a_sources_key_that_is_not_a_source_term_is_refused_at_construction():
+    from tellegen.couple import ValueLink, union
+
+    street_model, street_state, street_drivers = _tiny_street_model()
+    building_model, building_state, building_drivers = _tiny_building_model()
+    bad = ValueLink(
+        from_model="street", from_key="street.x", from_index=0,
+        to_model="building", to_key="species.x_boundary", to_index=0,
+        two_way=True, sources_key="street.capacity",
+    )
+    with pytest.raises(ValueError, match="sources"):
+        union({"street": (street_model, street_state, street_drivers),
+               "building": (building_model, building_state, building_drivers)}, shared=[bad])
 
 
 def test_two_way_link_with_iterate_max_below_two_is_refused_at_construction():
@@ -334,6 +449,22 @@ def test_write_at_restores_the_stacked_layout():
     assert out.shape == (4, 2, 1)
     assert torch.equal(out[:, 1, 0], torch.arange(4, dtype=F64))
     assert torch.all(out[:, 0, 0] == 0)
+
+
+def test_write_at_add_accumulates_and_reduces_a_stacked_sources_tensor():
+    """`add=True` is the two-way feedback's write into "<layer>.sources". A STACKED
+    single-species sources tensor must be reduced first: indexing it directly would address
+    the species axis, silently writing the flux at the wrong place."""
+    from tellegen.couple import _write_at
+
+    stacked = torch.tensor([[0.0], [0.7], [0.2]], dtype=F64)  # (n, 1), full node order
+    out = _write_at(stacked, 3, 1, torch.tensor(0.5, dtype=F64), add=True)
+    assert out.shape == (3, 1)
+    assert out[:, 0].tolist() == pytest.approx([0.0, 1.2, 0.2])  # ADDED to 0.7, not 0.5
+    reduced = torch.tensor([0.0, 0.7, 0.2], dtype=F64)
+    out = _write_at(reduced, 3, 1, torch.tensor(0.5, dtype=F64), add=True)
+    assert out.tolist() == pytest.approx([0.0, 1.2, 0.2])
+    assert torch.equal(stacked, torch.tensor([[0.0], [0.7], [0.2]], dtype=F64))  # not in place
 
 
 def test_write_at_broadcasts_a_batched_value_into_an_unbatched_target():

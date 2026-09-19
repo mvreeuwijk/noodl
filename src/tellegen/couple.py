@@ -43,7 +43,7 @@ def _reduced(x: Tensor, n_last: int) -> Tensor:
     `x0` and `x_boundary` are stacked, the street app's are reduced -- design spec A5); the
     glue works in the reduced form. A batched reduced `(1, 1)` and a stacked `(1, 1)` hold
     the same single number, so the ambiguity when `n_last == 1` is harmless."""
-    if x.dim() >= 2 and x.shape[-1] == 1 and x.shape[-2] == n_last:
+    if _is_stacked(x, n_last):
         return x.squeeze(-1)
     if x.shape[-1] != n_last:
         raise ValueError(
@@ -53,19 +53,32 @@ def _reduced(x: Tensor, n_last: int) -> Tensor:
     return x
 
 
-def _write_at(target: Tensor, n_last: int, position: int, value: Tensor) -> Tensor:
-    """`target` with `value` written at `position` on its node axis, in the caller's own
-    LAYOUT (reduced `(..., n_last)` or stacked `(..., n_last, 1)`) -- but not necessarily its
-    own SHAPE: a batched `value` written into an unbatched `target` broadcasts the target up
-    to the value's batch, exactly as `CoupledModel._feed_back` broadcasts a source term. That
-    is the ensemble case: the street model runs a batch of `B` forcings while the CONTAM
-    reader's `x_boundary` stays `(1, 1)`. Never writes into `target` itself."""
+def _write_at(
+    target: Tensor, n_last: int, position: int, value: Tensor, *, add: bool = False,
+) -> Tensor:
+    """`target` with `value` written (`add=True`: ADDED) at `position` on its node axis, in
+    the caller's own LAYOUT (reduced `(..., n_last)` or stacked `(..., n_last, 1)`) -- but not
+    necessarily its own SHAPE: a batched `value` written into an unbatched `target`
+    broadcasts the target up to the value's batch. That is the ensemble case: the street
+    model runs a batch of `B` forcings while the CONTAM reader's `x_boundary` stays `(1, 1)`.
+    Never writes into `target` itself.
+
+    `add=True` is what a two-way link's feedback term needs: the caller's own entry at
+    `position` (another source of pollutant at that node) must survive, with the coupling's
+    contribution added to it, never overwritten.
+    """
     reduced = _reduced(target, n_last)
     batch = torch.broadcast_shapes(reduced.shape[:-1], value.shape)
     reduced = reduced.expand(*batch, n_last).clone()
-    reduced[..., position] = value
-    stacked = target.dim() >= 2 and target.shape[-1] == 1 and target.shape[-2] == n_last
+    reduced[..., position] = reduced[..., position] + value if add else value
+    stacked = _is_stacked(target, n_last)
     return reduced.reshape(*batch, n_last, 1) if stacked else reduced.reshape(*batch, n_last)
+
+
+def _is_stacked(x: Tensor, n_last: int) -> bool:
+    """True when a single-species tensor is in STACKED layout `(..., n_last, 1)` rather than
+    reduced `(..., n_last)` -- the one rule `_reduced` and `_write_at` both decide by."""
+    return x.dim() >= 2 and x.shape[-1] == 1 and x.shape[-2] == n_last
 
 
 def apply_conversion(name: str | None, value: Tensor, drivers: Mapping[str, Tensor]) -> Tensor:
@@ -133,6 +146,15 @@ class ValueLink:
     ("<layer>.x_boundary") and `to_index` a position on its BOUNDARY axis. Two-way: the
     to-layer's net boundary INFLOW at `to_index` is added into `sources_key` (default
     "<from layer>.sources", FULL node order) at the from-layer's interior node.
+
+    WHICH state a ONE-WAY link reads depends on the company it keeps, deliberately. In a
+    union with no two-way link there is one pass, and the forward value is read from the
+    STEP-START state -- the explicit-coupling ping-pong the design spec asks for. In a union
+    that also has a two-way link, the iteration's passes read every link (one-way included)
+    from the previous pass's OUTPUT, so a one-way link there carries an END-of-step value,
+    consistent with the two-way glue beside it. One-way links are NOT part of the
+    convergence criterion: only two-way forward values are measured, because only they close
+    a loop that can fail to converge.
     """
 
     from_model: str
@@ -158,8 +180,13 @@ class ValueLink:
 @dataclass(frozen=True)
 class DriverAlias:
     """One driver value shared across models (design spec section 3 point 3, A3): `source`
-    is authoritative; every target is overwritten from it each pass, through its own
-    registered conversion (or none)."""
+    is authoritative; every target is overwritten from it through that target's own
+    registered conversion (or none).
+
+    Applied ONCE per `step`, before any pass -- not per pass. An alias relates two DRIVERS,
+    and drivers do not change between passes; only the glue values derived from the models'
+    own states do. Applying it per pass would be the same write repeated.
+    """
 
     source: tuple[str, str]
     targets: tuple[tuple[str, str, str | None], ...]
@@ -201,6 +228,22 @@ class CoupledModel:
                         f"{link.to_model}:{link.to_key} names conversion {name!r}; registered "
                         f"conversions are {sorted(_CONVERSIONS)}"
                     )
+            # The suffixes are not decoration: `to_key` is written with `_write_at` on the
+            # to-layer's BOUNDARY axis and `sources_key` with an ADD on the from-model's FULL
+            # node axis. A key naming any other driver would be written with the wrong length
+            # and the wrong semantics -- refuse it here rather than at the first shape clash.
+            if not link.to_key.endswith(".x_boundary"):
+                raise ValueError(
+                    f"CoupledModel: link to_key {link.to_key!r} must name a transport layer's "
+                    f"boundary driver, '<layer>.x_boundary'; it is written on "
+                    f"{link.to_model!r}'s boundary axis at index {link.to_index}"
+                )
+            if link.sources_key is not None and not link.sources_key.endswith(".sources"):
+                raise ValueError(
+                    f"CoupledModel: link sources_key {link.sources_key!r} must name a "
+                    f"transport layer's source term, '<layer>.sources'; the feedback flux is "
+                    f"ADDED into it on {link.from_model!r}'s FULL node axis"
+                )
             self._layer(link.from_model, link.from_layer)
             self._layer(link.to_model, link.to_layer)
         for alias in self.aliases:
@@ -259,7 +302,12 @@ class CoupledModel:
         drivers: dict[str, Drivers],
     ) -> None:
         """Add the to-layer's net boundary inflow at `to_index` into the from-layer's sources
-        (FULL node order, ADDED to whatever the caller supplied -- never overwritten)."""
+        (FULL node order, ADDED to whatever the caller supplied -- never overwritten).
+
+        The sources tensor goes through `_write_at` like every other glue write, so a STACKED
+        single-species `(n, 1)` sources tensor is reduced before the node index is applied and
+        restored afterwards; indexing it directly would silently address the species axis.
+        """
         to_model = self.models[link.to_model]
         to_layer = self._layer(link.to_model, link.to_layer)
         q = to_model.current_flows(link.to_layer, latest[link.to_model], drivers[link.to_model])
@@ -276,11 +324,8 @@ class CoupledModel:
         existing = drivers[link.from_model].get(key)
         if existing is None:
             existing = torch.zeros(from_net.n, dtype=inflow.dtype, device=inflow.device)
-        batch = torch.broadcast_shapes(existing.shape[:-1], inflow.shape)
-        updated = existing.expand(*batch, existing.shape[-1]).clone()
         node = int(from_layer.interior_idx[link.from_index])  # interior_idx is FULL node order
-        updated[..., node] = updated[..., node] + inflow
-        drivers[link.from_model][key] = updated
+        drivers[link.from_model][key] = _write_at(existing, from_net.n, node, inflow, add=True)
 
     # ------------------------------------------------------------------- step
     def step(
@@ -298,7 +343,15 @@ class CoupledModel:
                 )
             new = self._step_all(start, pass_drivers, dt)
             if diagnostics is not None:
-                diagnostics.update({"passes": 1, "converged": True, "max_change": 0.0})
+                # One pass, nothing iterated: `converged` is true for every instance by
+                # construction, and `max_change` is EMPTY rather than 0.0 -- no change was
+                # measured, and reporting a number nothing measured would be a claim. Same
+                # types as the iterated path (a 0-d bool tensor, a per-link dict).
+                diagnostics.update({
+                    "passes": 1,
+                    "converged": torch.ones((), dtype=torch.bool),
+                    "max_change": {},
+                })
             return new
         return self._iterate(start, drivers, dt, diagnostics)
 
@@ -317,15 +370,43 @@ class CoupledModel:
             new[tag] = s
         return new
 
+    @staticmethod
+    def _link_key(link: ValueLink) -> str:
+        """The name a link answers to in diagnostics and in the non-convergence message."""
+        return (
+            f"{link.from_model}:{link.from_key}[{link.from_index}]->"
+            f"{link.to_model}:{link.to_key}"
+        )
+
     def _iterate(self, start, drivers, dt, diagnostics) -> dict[str, State]:
         """Successive substitution on every two-way link's FORWARD value, damped by
         `relaxation` (0.5 mirrors `Model._iterate`, `model.py:540-611`). EVERY pass steps
         every model from `start` (the N1 rule, design spec A1); only the glue values -- read
         from `latest`, the previous pass's OUTPUT (the start state on pass 1) -- carry over.
-        Converged when `|f_k - f_{k-1}| <= atol + rtol |f_k|` for every link (A7)."""
+
+        Convergence is judged on the UNRELAXED residual of the fixed-point map,
+        `|f(latest_k-1) - f_k-1|` (A7: `<= atol + rtol |f|`), not on the relaxed increment
+        actually applied: the relaxed step is `relaxation` times the residual, so measuring
+        it would make the effective tolerance scale with `relaxation` and let a heavily
+        damped run "converge" while still far from the fixed point. It is judged PER
+        INSTANCE, on detached copies inside `torch.no_grad()`; the passes themselves stay on
+        the autograd graph.
+
+        The returned state is the last pass's own output, whose glue values came from pass
+        k-1 -- so it is a fixed point of "one step of each model from `start`" only to within
+        the tolerance, which is exactly what the criterion certifies. The fixed point is
+        therefore differentiated by UNROLLING: every pass stays on the graph and memory grows
+        with the pass count. An implicit-function treatment (one adjoint solve at the
+        converged state) is a follow-up, as it is for `Model._iterate`.
+        """
         latest: Mapping[str, State] = start
         prev: dict[int, Tensor] | None = None
-        passes, worst, converged = 0, float("inf"), False
+        change: dict[str, Tensor] = {}
+        # A placeholder the second pass always replaces: a two-way link is refused at
+        # construction unless `iterate_max >= 2`, so the loop cannot end without a real
+        # per-instance verdict of the right shape, dtype and device.
+        converged: Tensor = torch.zeros((), dtype=torch.bool)
+        passes = 0
         new: dict[str, State] = dict(start)
         while passes < self.iterate_max:
             passes += 1
@@ -335,35 +416,42 @@ class CoupledModel:
                     link, self._forward_value(link, latest, pass_drivers), pass_drivers
                 )
             now: dict[int, Tensor] = {}
+            raw: dict[int, Tensor] = {}
             for i, link in enumerate(self._two_way):
-                value = self._forward_value(link, latest, pass_drivers)
-                if prev is not None:
-                    value = prev[i] + self.relaxation * (value - prev[i])
+                raw[i] = self._forward_value(link, latest, pass_drivers)
+                value = raw[i] if prev is None else prev[i] + self.relaxation * (raw[i] - prev[i])
                 now[i] = value
                 boundary = self._write_forward(link, value, pass_drivers)
                 self._feed_back(link, latest, boundary, pass_drivers)
             new = self._step_all(start, pass_drivers, dt)
             if prev is not None:
-                worst, ok = 0.0, True
-                for i, f in now.items():
-                    delta = (f - prev[i]).abs()
-                    worst = max(worst, float(delta.max()))
-                    ok = ok and bool(
-                        (delta <= self.iterate_atol + self.iterate_rtol * f.abs()).all()
-                    )
-                if ok:
-                    converged = True
+                with torch.no_grad():
+                    ok: Tensor | None = None
+                    for i, link in enumerate(self._two_way):
+                        # A forward value is ONE number per instance (one node, one species),
+                        # so its own shape IS the batch shape and nothing is reduced away;
+                        # `.amax(-1)` here would collapse the instance axis itself.
+                        d = (raw[i] - prev[i]).abs()
+                        change[self._link_key(link)] = d
+                        this = d <= self.iterate_atol + self.iterate_rtol * raw[i].abs()
+                        ok = this if ok is None else (ok & this)
+                    converged = ok
+                if bool(converged.all()):
                     break
             prev = now
             latest = new
-        if not converged:
+        if not bool(converged.all()):
+            failing = (~converged).nonzero().flatten().tolist() if converged.dim() else "all"
+            worst = {name: float(c.max()) for name, c in change.items()}
             raise RuntimeError(
                 f"CoupledModel: two-way coupling did not converge within {self.iterate_max} "
-                f"passes; largest change in the shared value(s) was {worst}, tolerance "
+                f"passes for instances {failing}; largest change per link {worst}, tolerance "
                 f"atol={self.iterate_atol} rtol={self.iterate_rtol}"
             )
         if diagnostics is not None:
-            diagnostics.update({"passes": passes, "converged": True, "max_change": worst})
+            diagnostics.update(
+                {"passes": passes, "converged": converged, "max_change": change}
+            )
         return new
 
 
