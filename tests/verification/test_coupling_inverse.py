@@ -159,7 +159,17 @@ def test_latent_infiltration_from_one_measured_path_and_the_cycle_ensemble(recor
     # (b) With NO measurement, the admissible conserved flows are the cycle space: an
     #     ensemble over its amplitude is the spread of every latent path -- equal on every
     #     edge of this single loop -- and collapses to zero once one path is measured.
-    amplitudes = solved[measured] + 0.1 * solved[measured].abs() * torch.randn(
+    _tree, chord_cols = net.spanning_forest(kind)
+    assert chord_cols.numel() == 1
+    chord = int(chord_cols[0])
+    record_property("chord_edge", list(net.edges[chord]))
+    # `branch_flows` places the amplitude directly on the chord edge, with a +1
+    # self-entry, so the physical loop's amplitude IS the chord's own signed flow.
+    # Seeding from a tree edge (e.g. the measured one) would instead fix the loop's
+    # rotational sense by that edge's orientation, which need not agree with the
+    # chord's -- here it doesn't, since the loop traverses the chord edge backwards
+    # relative to its incidence direction.
+    amplitudes = solved[chord] + 0.1 * solved[chord].abs() * torch.randn(
         200, 1, dtype=F64, generator=torch.Generator().manual_seed(0)
     )
     ensemble = branch_flows(net, amplitudes, kind)             # (200, b)
@@ -167,13 +177,4 @@ def test_latent_infiltration_from_one_measured_path_and_the_cycle_ensemble(recor
     record_property("unmeasured_spread_kg_s", spread.tolist())
     assert torch.all(spread > 0)
     assert torch.allclose(spread, spread[0].expand_as(spread), rtol=1e-10)
-    # The ensemble is centred on the truth in MAGNITUDE, not necessarily in sign: the
-    # chord edge that `net.spanning_forest(kind)` picks for this network's one cycle is
-    # ("ambient", "three") (edge 3, the last edge union-find closes the loop on), not the
-    # measured ("ambient", "one") edge (edge 0). That chord runs opposite to the loop's own
-    # direction (the loop is ambient->one->two->three->ambient, so it traverses the
-    # ambient->three edge backwards), so seeding the amplitude from the measured edge's
-    # flow drives `branch_flows`'s loop in the opposite rotational sense -- the mean comes
-    # out as -solved elementwise, not +solved. Comparing magnitudes is therefore the
-    # correct check here, per this convention, rather than silently flipping the sign.
-    assert torch.allclose(ensemble.mean(dim=0).abs(), solved.abs(), rtol=0.05)
+    assert torch.allclose(ensemble.mean(dim=0), solved, rtol=0.05)  # centred on the truth
