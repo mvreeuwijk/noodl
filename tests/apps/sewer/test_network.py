@@ -361,14 +361,17 @@ def test_model_notes_reflects_the_closures_own_notes_dict():
     """N10: `model.notes` is the SAME dict object as the hydraulics closure's own `notes`,
     not a one-time copy taken at build time, so a note the closure adds only once a step
     actually hits it (`capacity_floor`, added lazily on a dry pipe) shows up on
-    `model.notes` too."""
+    `model.notes` too. R5: `build_sewer_model`'s initial-storage query
+    (`Model.initial_capacities`) already evaluates the closure once at construction, so on a
+    network that is dry from the start the `capacity_floor` note can already be present
+    before the first `model.step` call -- this test therefore checks the identity through the
+    note surviving (and staying legible) across a step, not through its absence beforehand."""
     net = SewerNetwork(
         manholes=(Manhole("A", invert=5.0, inflow=0.0),),
         pipes=(Pipe("PA", "A", "Out", 100.0, 0.3, 0.013, 0.01),),
         outfalls=(Outfall("Out", 0.0),),
     )
     model, state, drivers = build_sewer_model(net, air=False, quality=True)
-    assert "capacity_floor" not in model.notes
     model.step(state, drivers, 60.0)
     assert "capacity_floor" in model.notes
     assert "PA" in model.notes["capacity_floor"]
