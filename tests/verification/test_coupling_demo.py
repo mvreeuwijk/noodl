@@ -235,3 +235,41 @@ def test_real_leiden_small_building_back_coupling_magnitude(record_property):
     record_property("passes", diag["passes"])
     assert diag["converged"]
     assert c_two <= c_one
+
+
+def test_sequential_file_exchange_disagrees_with_the_coupled_result(record_property):
+    """Today's practice: run the street for the hour, hand the resulting concentration to
+    the building, no feedback (framework spec section 7 item 5). Against the two-way coupled
+    step on the same fixture and forcing, report the indoor discrepancy."""
+    net = _small_street_network()
+    street_model, street_state, street_drivers = _street(net)
+    _project, (building_model, building_state, building_drivers) = _building()
+    seg = street_index(street_model)[SHARED]
+
+    street_triple = (street_model, street_state, street_drivers)
+    building_triple = (building_model, building_state, building_drivers)
+    city, state, drivers = _coupled(
+        street_triple, building_triple,
+        street_model, substeps={"building": 60}, iterate_rtol=1e-10, iterate_max=100,
+    )
+    coupled = city.step(state, drivers, dt=3600.0)
+
+    # Sequential exchange: street first, frozen, then the building on that value, sixty
+    # 60 s steps with the SAME wind the aliases would have supplied.
+    street_after = street_model.step(dict(street_state), dict(street_drivers), dt=3600.0)
+    frozen = street_after["street.x"][seg] / building_drivers["rho_amb"]
+    loose_drivers = dict(building_drivers)
+    loose_drivers["species.x_boundary"] = frozen.reshape(1, 1)
+    loose_drivers["V_met"] = street_drivers["U_ref"]
+    wind_from_deg = 270.0 - torch.rad2deg(street_drivers["theta_w"])
+    loose_drivers["theta_w"] = torch.remainder(wind_from_deg, 360.0)
+    indoor = dict(building_state)
+    for _ in range(60):
+        indoor = building_model.step(indoor, loose_drivers, dt=60.0)
+
+    a, b = coupled["building"]["species.x"].flatten(), indoor["species.x"].flatten()
+    discrepancy = ((a - b).abs() / b.abs().clamp_min(1e-300)).max().item()
+    record_property("indoor_mass_fraction_coupled", a.tolist())
+    record_property("indoor_mass_fraction_sequential", b.tolist())
+    record_property("loose_coupling_relative_discrepancy", discrepancy)
+    assert discrepancy > 1e-4
