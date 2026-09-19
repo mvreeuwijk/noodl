@@ -655,14 +655,25 @@ class Model:
         return out
 
     def current_flows(self, name: str, state: State, drivers: Drivers) -> Tensor:
-        """Transport layer `name`'s branch flows for THIS `state`/`drivers`, running
-        closures first so a driver-prescribed layer's flow is available -- exactly what
-        `step`/`steady` compute internally just before advancing `name`, exposed here for a
-        caller (a coupling orchestrator) that needs a layer's flows WITHOUT itself stepping
-        the model. Potential-owned flows need no closure run (they live in `state`
-        already) but running closures is harmless for them either way.
+        """Transport layer `name`'s branch flows for THIS `state`/`drivers` -- what `step`
+        would use just before advancing `name`, exposed for a caller (a coupling
+        orchestrator) that needs them WITHOUT stepping the model. Closures run first, so a
+        driver-prescribed layer's flow is available. A potential-owned layer's flows are the
+        owner's solved `q`: read from `state["<owner>.q"]` when an earlier pass or step left
+        one there, otherwise SOLVED here for these drivers, exactly as `_pass` would (the
+        first pass of a step starts from a state that carries no `q` yet -- design spec A6).
         """
         drv = self._apply_closures(state, drivers)
+        owner = self.flow_layer_of[name]
+        if owner in self.potential and f"{owner}.q" not in state:
+            layer = self.potential[owner]
+            phi_prev = state.get(f"{owner}.phi")
+            phi0 = None if phi_prev is None else phi_prev[..., layer.interior]
+            _phi, q = layer.solve(
+                self._require(drv, f"{owner}.phi_boundary"), drv,
+                drv.get(f"{owner}.sources"), phi0=phi0,
+            )
+            return layer.flows_of_kind(q, self.transport[name].flow_kinds)
         return self._kind_flows(name, state, drv)
 
     def ports(self, state) -> Ports:
