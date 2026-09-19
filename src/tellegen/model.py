@@ -654,6 +654,17 @@ class Model:
             )
         return out
 
+    def current_flows(self, name: str, state: State, drivers: Drivers) -> Tensor:
+        """Transport layer `name`'s branch flows for THIS `state`/`drivers`, running
+        closures first so a driver-prescribed layer's flow is available -- exactly what
+        `step`/`steady` compute internally just before advancing `name`, exposed here for a
+        caller (a coupling orchestrator) that needs a layer's flows WITHOUT itself stepping
+        the model. Potential-owned flows need no closure run (they live in `state`
+        already) but running closures is harmless for them either way.
+        """
+        drv = self._apply_closures(state, drivers)
+        return self._kind_flows(name, state, drv)
+
     def ports(self, state) -> Ports:
         """Boundary nodes, the driver keys that prescribe them, and (potential layers) the net
         flow INTO each boundary node at `state`.
