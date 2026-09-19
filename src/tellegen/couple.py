@@ -185,6 +185,84 @@ class CoupledModel:
             return self._step_all(state, drivers, dt)
         return self._iterate(state, drivers, dt)
 
+    def _iterate(
+        self, state: dict[str, State], drivers: dict[str, Drivers], dt: float,
+    ) -> dict[str, State]:
+        """Hensen-style successive substitution (mirrors `Model._iterate`, `model.py:540-611`,
+        generalised across two `Model`s rather than one) on every two-way `ValueLink`'s
+        FORWARD value, 0.5-relaxed from pass 3 onward."""
+        _apply_aliases(self.aliases, drivers)
+        two_way = [link for link in self.links if link.two_way]
+        one_way = [link for link in self.links if not link.two_way]
+        prev_forward: dict[int, Tensor] | None = None
+        new_state: dict[str, State] = dict(state)
+        passes = 0
+        worst_change = float("inf")
+        while passes < self.iterate_max:
+            passes += 1
+            pass_drivers = {tag: dict(d) for tag, d in drivers.items()}
+            _apply_links_forward(one_way, state, pass_drivers)
+            forward_now: dict[int, Tensor] = {}
+            for i, link in enumerate(two_way):
+                value = state[link.from_model][link.from_key][..., link.from_index]
+                value = apply_conversion(link.convert, value, pass_drivers[link.to_model])
+                if prev_forward is not None and passes > 2:
+                    value = 0.5 * (prev_forward[i] + value)
+                forward_now[i] = value
+                target = pass_drivers[link.to_model][link.to_key].clone()
+                target[..., link.to_index] = value
+                pass_drivers[link.to_model][link.to_key] = target
+
+                model = self.models[link.to_model]
+                # `current_flows` runs the model's own closures against THIS pass's
+                # state/drivers and resolves the flow through whichever ownership this layer
+                # actually has (closure-written or potential-owned) -- there is no plain dict
+                # key that already holds this value before the model steps.
+                q = model.current_flows(
+                    link.flow_layer, state[link.to_model], pass_drivers[link.to_model]
+                )
+                x_interior = state[link.to_model][link.interior_key]
+                x_boundary = target
+                inflow = transport_boundary_inflow(
+                    model.net, q, link.flow_kinds, x_interior, x_boundary,
+                    link.interior_idx_of(model), link.boundary_idx_of(model),
+                    node_position=link.to_index,
+                )
+                inflow = apply_conversion(link.convert_back, inflow, pass_drivers[link.to_model])
+                from_net = self.models[link.from_model].net
+                # `interior_idx` is already in FULL node-order positions (design spec section
+                # 3 -- every layer's own `interior_idx`/`interior` is built this way,
+                # `topology.py`'s `interior_index`), so this is the target node's full-node
+                # position directly; no name round-trip needed.
+                from_layer = self.models[link.from_model].transport[link.sources_key.split(".")[0]]
+                node_idx = int(from_layer.interior_idx[link.from_index])
+                existing = pass_drivers[link.from_model].get(
+                    link.sources_key, torch.zeros(from_net.n, dtype=inflow.dtype)
+                ).clone()
+                existing[..., node_idx] = existing[..., node_idx] + inflow
+                pass_drivers[link.from_model][link.sources_key] = existing
+
+            new_state = self._step_all(state, pass_drivers, dt)
+            if prev_forward is not None:
+                changes = [
+                    (forward_now[i] - prev_forward[i]).abs().max().item() for i in forward_now
+                ]
+                # Captured HERE, at the moment it is actually measured -- not re-derived
+                # after the loop, where `prev_forward`/`forward_now` would already both be
+                # the LAST pass's dict (reusing them post-loop always reported 0.0, since
+                # `prev_forward = forward_now` below aliases the same object on the final
+                # iteration).
+                worst_change = max(changes, default=worst_change)
+                if worst_change <= self.iterate_tol:
+                    return new_state
+            prev_forward = forward_now
+            state = new_state
+        raise RuntimeError(
+            f"CoupledModel: two-way coupling did not converge within {self.iterate_max} "
+            f"passes; largest change in the shared value(s) was {worst_change}, tolerance "
+            f"{self.iterate_tol}"
+        )
+
     def _step_all(
         self, state: dict[str, State], drivers: dict[str, Drivers], dt: float,
     ) -> dict[str, State]:
