@@ -64,21 +64,12 @@ def test_exact_step_tangent_matches_the_matrix_exponential_at_equilibrium(x0):
     assert ds[1].item() == pytest.approx(1.0 - math.exp(-1.0), rel=1e-8, abs=1e-10)
 
 
-R4 = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "R4: the custom autograd function reads this coefficient from self, "
-        "so it gets no gradient"
-    ),
-)
-
-
 @pytest.mark.parametrize(
     "scheme, expected",
     [
         pytest.param("exact", -math.exp(-1.5), id="exact-control"),
-        pytest.param("implicit", -1.0 / 2.5**2, marks=R4, id="implicit"),
-        pytest.param("trapezoidal", -1.0 / 1.75**2, marks=R4, id="trapezoidal"),
+        pytest.param("implicit", -1.0 / 2.5**2, id="implicit"),
+        pytest.param("trapezoidal", -1.0 / 1.75**2, id="trapezoidal"),
     ],
 )
 def test_step_gradient_with_respect_to_removal(scheme, expected):
@@ -96,7 +87,6 @@ def test_step_gradient_with_respect_to_removal(scheme, expected):
     assert dr.item() == pytest.approx(expected, rel=1e-8)
 
 
-@R4
 def test_steady_gradient_with_respect_to_removal():
     """0 = -(q + r) x + s with q = 1, s = 1: x = 1/(1 + r) = 2/3 at r = 0.5,
     dx/dr = -1/(1 + r)^2 = -4/9."""
@@ -109,7 +99,6 @@ def test_steady_gradient_with_respect_to_removal():
     assert dr.item() == pytest.approx(-4 / 9, rel=1e-8)
 
 
-@R4
 def test_implicit_gradient_survives_an_outer_transform_of_the_coefficient():
     """removal = exp(theta): d x1/d theta = d x1/d r * r, with d x1/d r = -1/2.5^2 at r = 0.5."""
     theta = _t([math.log(0.5)], requires_grad=True)
@@ -120,7 +109,6 @@ def test_implicit_gradient_survives_an_outer_transform_of_the_coefficient():
     assert dtheta.item() == pytest.approx(-0.16 * 0.5, rel=1e-8)
 
 
-@R4
 def test_implicit_gradient_with_respect_to_carrier():
     """carrier c scales the flow: dx/dt = -c q x; implicit x1 = 1/(1 + c) -> dx1/dc = -1/(1+c)^2."""
     carrier = torch.tensor(1.0, dtype=F64, requires_grad=True)
@@ -132,7 +120,6 @@ def test_implicit_gradient_with_respect_to_carrier():
     assert dc.item() == pytest.approx(-0.25, rel=1e-8)
 
 
-@R4
 def test_implicit_gradient_with_respect_to_transmission():
     """Circulating compartment, x_boundary = 1: dx/dt = t_in q x_b - q x.
 

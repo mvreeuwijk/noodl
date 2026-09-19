@@ -32,7 +32,7 @@ layer. Boundary rows must be zero (refused by name, not silently dropped); ``ste
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Literal
 
 import torch
@@ -214,6 +214,25 @@ class TransportLayer:
     ``quantity``/``unit`` are metadata a ``Model`` reports ("temperature"/"K",
     "concentration"/"ppm"); nothing in the numerics reads them.
     """
+
+    #: The differentiable operator coefficients a layer owns, in the fixed order the
+    #: custom autograd boundary flattens them. Absent optional ones are skipped by name.
+    _COEFFICIENT_NAMES = ("carrier", "transmission", "kinetics", "removal", "conductance")
+
+    def _coefficients(self) -> tuple[tuple[str, ...], list[torch.Tensor]]:
+        """`(names, tensors)`: every coefficient tensor that must cross `_LinearSolve`'s
+        boundary explicitly. `_LinearSolve.backward` only sees what `apply` was given, so a
+        coefficient read from `self` inside `build_system` silently gets no gradient
+        (finding R4). Topology and index tensors are not coefficients and stay on `self`."""
+        values = {
+            "carrier": self.carrier,
+            "transmission": self.transmission,
+            "kinetics": self.kinetics,
+            "removal": self.removal,
+            "conductance": None if self._conduction_edges is None else self._conduction_edges[2],
+        }
+        names = tuple(n for n in self._COEFFICIENT_NAMES if values[n] is not None)
+        return names, [values[n] for n in names]
 
     def __init__(
         self,
@@ -442,24 +461,35 @@ class TransportLayer:
         return cap
 
     def _advection_operator(
-        self, q: torch.Tensor, capacity: torch.Tensor | None = None
+        self,
+        q: torch.Tensor,
+        capacity: torch.Tensor | None = None,
+        coefficients: Mapping[str, torch.Tensor] | None = None,
     ) -> AdvectionOperator:
+        """The operator at flows `q`, capacity `capacity` (default the layer's) and the given
+        coefficient tensors (default the layer's own). Inside a `build_system` the
+        coefficients MUST be the explicit ones handed in, never `self`'s (R4)."""
+        if coefficients is None:
+            names, values = self._coefficients()
+            coefficients = dict(zip(names, values, strict=True))
         dtype = q.dtype
         src, tgt = self._flow_src, self._flow_tgt
         conduction = None
         if self._conduction_edges is not None:
-            csrc, ctgt, g = self._conduction_edges
-            conduction = (csrc, ctgt, g.to(dtype))
+            csrc, ctgt, _ = self._conduction_edges
+            conduction = (csrc, ctgt, coefficients["conductance"].to(dtype))
         cap = self.capacity if capacity is None else capacity
+        kinetics = coefficients.get("kinetics")
+        removal = coefficients.get("removal")
         return AdvectionOperator(
             src, tgt,
-            flow=self.carrier.to(dtype) * q,
-            transmission=self.transmission.to(dtype),
+            flow=coefficients["carrier"].to(dtype) * q,
+            transmission=coefficients["transmission"].to(dtype),
             capacity=cap.to(dtype),
             n_interior=self.n_i,
             interior_of_node=self._interior_of_node,
-            kinetics=self.kinetics.to(dtype) if self.kinetics is not None else None,
-            removal=self.removal.to(dtype) if self.removal is not None else None,
+            kinetics=None if kinetics is None else kinetics.to(dtype),
+            removal=None if removal is None else removal.to(dtype),
             conduction=conduction,
             # This layer's PRESCRIBED nodes, in the caller's own `boundary` order. Passed
             # explicitly because "not interior" is no longer the same set: an inactive node
@@ -740,9 +770,10 @@ class TransportLayer:
         sources = sources.to(dtype)
         x_boundary = x_boundary.to(dtype)
         _, reduced = self._to_stacked(self._sources_interior(sources), self.n_i, "sources")
+        names, coef = self._coefficients()
 
-        def build_system(q_, sources_, xb_, cap_):
-            op = self._advection_operator(q_, cap_)
+        def build_system(q_, sources_, xb_, cap_, *coef_):
+            op = self._advection_operator(q_, cap_, dict(zip(names, coef_, strict=True)))
             xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
             src_s, _ = self._to_stacked(self._sources_interior(sources_), self.n_i, "sources")
             cap = self._capacity_stacked(dtype, cap_)
@@ -750,14 +781,14 @@ class TransportLayer:
             return op, -b0
 
         if on_failure == "return":
-            op, rhs = build_system(q, sources, x_boundary, cap_t)
+            op, rhs = build_system(q, sources, x_boundary, cap_t, *coef)
             return _solve_operator(
                 op, rhs, method="auto", on_failure="return",
                 where=f"TransportLayer '{self.name}' steady",
             )
         x_s = _linear_solve(
             build_system, f"TransportLayer '{self.name}' steady",
-            q, sources, x_boundary, cap_t,
+            q, sources, x_boundary, cap_t, *coef,
         )
         return self._from_stacked(x_s, self.n_i, reduced)
 
@@ -774,9 +805,12 @@ class TransportLayer:
         x_boundary = x_boundary.to(dtype)
         cap_t = self._capacity_arg(capacity).to(dtype)
         _, reduced = self._to_stacked(x, self.n_i, "x")
+        names, coef = self._coefficients()
 
-        def build_system(x_, q_, sources_, xb_, cap_):
-            op = self._advection_operator(q_, cap_)
+        def build_system(x_, q_, sources_, xb_, cap_, cap_prev_, *coef_):
+            # cap_prev_ is unused until Task 11; kept in the signature to match the shared
+            # interface every scheme's build_system now exposes.
+            op = self._advection_operator(q_, cap_, dict(zip(names, coef_, strict=True)))
             xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
             src_s, _ = self._to_stacked(self._sources_interior(sources_), self.n_i, "sources")
             x_s, _ = self._to_stacked(x_, self.n_i, "x")
@@ -787,7 +821,7 @@ class TransportLayer:
             return system, rhs
 
         if on_failure == "return":
-            system, rhs = build_system(x, q, sources, x_boundary, cap_t)
+            system, rhs = build_system(x, q, sources, x_boundary, cap_t, cap_t, *coef)
             result = _solve_operator(
                 system, rhs, method="auto", on_failure="return",
                 where=f"TransportLayer '{self.name}' implicit step",
@@ -795,7 +829,7 @@ class TransportLayer:
             return result, reduced
         x_s = _linear_solve(
             build_system, f"TransportLayer '{self.name}' implicit step",
-            x, q, sources, x_boundary, cap_t,
+            x, q, sources, x_boundary, cap_t, cap_t, *coef,
         )
         return x_s, reduced
 
@@ -813,9 +847,12 @@ class TransportLayer:
         x_boundary = x_boundary.to(dtype)
         cap_t = self._capacity_arg(capacity).to(dtype)
         _, reduced = self._to_stacked(x, self.n_i, "x")
+        names, coef = self._coefficients()
 
-        def build_system(x_, q_, sources_, xb_, cap_):
-            op = self._advection_operator(q_, cap_)
+        def build_system(x_, q_, sources_, xb_, cap_, cap_prev_, *coef_):
+            # cap_prev_ is unused until Task 11; kept in the signature to match the shared
+            # interface every scheme's build_system now exposes.
+            op = self._advection_operator(q_, cap_, dict(zip(names, coef_, strict=True)))
             xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
             src_s, _ = self._to_stacked(self._sources_interior(sources_), self.n_i, "sources")
             x_s, _ = self._to_stacked(x_, self.n_i, "x")
@@ -826,7 +863,7 @@ class TransportLayer:
             return system, rhs
 
         if on_failure == "return":
-            system, rhs = build_system(x, q, sources, x_boundary, cap_t)
+            system, rhs = build_system(x, q, sources, x_boundary, cap_t, cap_t, *coef)
             result = _solve_operator(
                 system, rhs, method="auto", on_failure="return",
                 where=f"TransportLayer '{self.name}' trapezoidal step",
@@ -834,7 +871,7 @@ class TransportLayer:
             return result, reduced
         x_s = _linear_solve(
             build_system, f"TransportLayer '{self.name}' trapezoidal step",
-            x, q, sources, x_boundary, cap_t,
+            x, q, sources, x_boundary, cap_t, cap_t, *coef,
         )
         return x_s, reduced
 
