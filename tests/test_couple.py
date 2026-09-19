@@ -187,8 +187,16 @@ def test_two_way_union_converges_and_feeds_back_into_street_sources():
     )
     new_state = city.step(state, drivers, dt=1.0)
     # street's own segment 0 sources must have received a NONZERO contribution from the
-    # building's boundary inflow -- the two-way property the design spec requires.
-    assert "street" in new_state and "building" in new_state
+    # building's boundary inflow -- the two-way property the design spec requires. Pinned
+    # against the actual converged fixed point (independently verified, see task-3 report's
+    # parameter sweep): street's segment 0 drains to ~0 (it both vents out AND now feeds the
+    # building, rather than merely venting) and the building's species.x settles at ~1.9943,
+    # NOT the ~2.71/~0.35 a single, unconverged, feedback-free pass would give (verified by
+    # hand -- with the two-way feedback removed, street.x[0] stays at 2.71 and building
+    # species.x stays at 0.35 instead) -- so this assertion genuinely distinguishes a working
+    # two-way iteration from a no-op or a wrong fixed point, not just "it ran and returned".
+    assert new_state["street"]["street.x"][0].item() == pytest.approx(0.0, abs=1e-3)
+    assert new_state["building"]["species.x"][0].item() == pytest.approx(1.9943, abs=1e-3)
 
 
 def test_two_way_union_raises_naming_instances_when_it_does_not_converge():
