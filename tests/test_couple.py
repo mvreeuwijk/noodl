@@ -117,7 +117,14 @@ def _tiny_building_model():
     )
 
     def closure(state, drivers):
-        return {"species.q": torch.tensor([0.5], dtype=F64)}  # z0 vents OUT at 0.5
+        # NEGATIVE: edge is z0(source)->ambient(target), and Network.upwind picks the
+        # TARGET as upwind when q < 0 -- so this is infiltration FROM ambient INTO z0.
+        # This sign is required, not cosmetic: with q > 0 (z0 exhausting outward), "ambient"
+        # is never the upwind node for this edge, so `species.x_boundary`'s value never
+        # enters the state update at all (`AdvectionOperator.boundary_forcing` evaluates to
+        # zero regardless of x_boundary) and a test asserting on the resulting `species.x`
+        # cannot distinguish a working coupling from a no-op one (found in Task 2's review).
+        return {"species.q": torch.tensor([-0.5], dtype=F64)}  # ambient infiltrates INTO z0
 
     model = Model(net, {"species": layer}, closures=[closure])
     state = {"species.x": torch.tensor([0.1], dtype=F64)}
