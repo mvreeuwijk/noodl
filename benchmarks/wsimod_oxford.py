@@ -3,7 +3,7 @@
 
 NOT a fair batched-vs-unbatched speedup claim: WSIMOD itself runs exactly one instance of
 this topology in ~4 s (its own recursive push/pull message-chaining, single-threaded). This
-script instead reports tellegen's own wall-clock for `B` BATCHED instances of the SAME
+script instead reports noodl's own wall-clock for `B` BATCHED instances of the SAME
 21-arc, 18-node topology and the SAME 1,456-timestep length, run through
 `CapacitatedTransferLayer` in hard-clip mode -- a sanity number in the same spirit as
 milestone 4's `benchmarks/sewer_diurnal.py` and `benchmarks/water_eps.py` rows, stated as
@@ -37,8 +37,8 @@ from pathlib import Path
 
 import torch
 
-from tellegen.layers.capacitated import CapacitatedTransferLayer
-from tellegen.topology import Network
+from noodl.layers.capacitated import CapacitatedTransferLayer
+from noodl.topology import Network
 
 F64 = torch.float64
 N_STEPS = 1456

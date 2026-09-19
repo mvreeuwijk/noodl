@@ -1,8 +1,8 @@
 import pytest
 import torch
 
-from tellegen.physics import assert_forward_oriented, branch_flows
-from tellegen.topology import Network
+from noodl.physics import assert_forward_oriented, branch_flows
+from noodl.topology import Network
 
 
 def two_loop_floor() -> Network:

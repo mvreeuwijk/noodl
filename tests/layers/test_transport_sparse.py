@@ -12,15 +12,15 @@ import torch
 from torch.autograd import gradcheck
 
 from benchmarks.measure import saved_tensor_bytes
-from tellegen.layers.transport import (
+from noodl.layers.transport import (
     TransportLayer,
     _expm_action,
     _linear_solve,
     _van_loan_step_dense,
 )
-from tellegen.operators.base import SolverStatus
-from tellegen.solvers.select import solve as _solve_operator
-from tellegen.topology import Network
+from noodl.operators.base import SolverStatus
+from noodl.solvers.select import solve as _solve_operator
+from noodl.topology import Network
 
 
 def _full(layer, s_interior, node_dim=-1):

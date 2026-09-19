@@ -23,10 +23,10 @@ import numpy as np
 import pytest
 import torch
 
-from tellegen.apps.building.elements import add_large_opening, orifice_elements_from_edges
-from tellegen.apps.building.thermal import CP_AIR, RHO_0, Zone, add_zone, build_model, initial_state
-from tellegen.drives import Stack, Wind
-from tellegen.topology import Network
+from noodl.apps.building.elements import add_large_opening, orifice_elements_from_edges
+from noodl.apps.building.thermal import CP_AIR, RHO_0, Zone, add_zone, build_model, initial_state
+from noodl.drives import Stack, Wind
+from noodl.topology import Network
 
 F64 = torch.float64
 G = 9.80665

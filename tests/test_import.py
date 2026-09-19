@@ -1,5 +1,5 @@
-import tellegen
+import noodl
 
 
 def test_version():
-    assert tellegen.__version__
+    assert noodl.__version__

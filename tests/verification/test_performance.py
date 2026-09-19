@@ -9,11 +9,11 @@ import time
 import pytest
 import torch
 
-from tellegen.drives import ConstantDrive
-from tellegen.elements.powerlaw import PowerLaw
-from tellegen.layers.potential import PotentialFlowLayer
-from tellegen.solvers.newton import newton
-from tellegen.topology import Network
+from noodl.drives import ConstantDrive
+from noodl.elements.powerlaw import PowerLaw
+from noodl.layers.potential import PotentialFlowLayer
+from noodl.solvers.newton import newton
+from noodl.topology import Network
 
 DTYPE = torch.float64
 

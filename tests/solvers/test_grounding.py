@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from tellegen.solvers.grounding import spd_certificate, spd_diagnosis
+from noodl.solvers.grounding import spd_certificate, spd_diagnosis
 
 
 def _chain():

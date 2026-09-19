@@ -13,13 +13,13 @@ import pytest
 import torch
 from scipy.optimize import brentq, fsolve
 
-from tellegen.drives import ConstantDrive
-from tellegen.elements.fan import FanCurve
-from tellegen.elements.fixed import FixedFlow
-from tellegen.elements.powerlaw import PowerLaw
-from tellegen.layers.potential import PotentialFlowLayer
-from tellegen.solvers.newton import newton
-from tellegen.topology import Network
+from noodl.drives import ConstantDrive
+from noodl.elements.fan import FanCurve
+from noodl.elements.fixed import FixedFlow
+from noodl.elements.powerlaw import PowerLaw
+from noodl.layers.potential import PotentialFlowLayer
+from noodl.solvers.newton import newton
+from noodl.topology import Network
 
 DTYPE = torch.float64
 
@@ -370,7 +370,7 @@ def _stack_reference(
 ) -> tuple[float, float, float, float, float, float, float]:
     """Independent reference for the vertical stack: solve nodal conservation directly from the
     PowerLaw element law q = C sign(dp) |dp|^n, using scipy.optimize.fsolve on residuals written
-    here from scratch -- no tellegen solver, layer, or Network code is called anywhere in this
+    here from scratch -- no noodl solver, layer, or Network code is called anywhere in this
     function.
 
     Unknowns: phi at the three interior nodes z1, z2, z3 (phi at out_low and out_high is fixed at
@@ -380,7 +380,7 @@ def _stack_reference(
     Conservation (net outflow = 0, no interior sources) at each interior node is "flow in = flow
     out": q_(e-1) = q_e for the three consecutive edge pairs. This is a genuine 3-equation
     nonlinear system in (phi_z1, phi_z2, phi_z3); fsolve (MINPACK hybrd, a different algorithm
-    from tellegen's own damped Newton in solvers/newton.py) finds the root independently.
+    from noodl's own damped Newton in solvers/newton.py) finds the root independently.
 
     Note (topology, not a weakness of this reference): this network is a single unbranched chain
     with no interior sources, so conservation forces the SAME q through all four edges no matter
@@ -432,7 +432,7 @@ def test_stack_conservation_and_antisymmetry_single_instance():
     torch.testing.assert_close(phi_rev, -phi, atol=1e-8, rtol=1e-8)
 
     # Independent reference (see _stack_reference's docstring): solved from the element law by
-    # scipy.optimize.fsolve, with no tellegen code involved. drive_values above (2.0, 1.5, 1.5,
+    # scipy.optimize.fsolve, with no noodl code involved. drive_values above (2.0, 1.5, 1.5,
     # 2.0) sum to 7.0 (nonzero -- the drives do not cancel) and are not all equal, so each edge's
     # own dp differs even though conservation forces the same q through all four.
     phi_z1_ref, phi_z2_ref, phi_z3_ref, q0_ref, q1_ref, q2_ref, q3_ref = _stack_reference(
@@ -475,7 +475,7 @@ def test_stack_conservation_and_antisymmetry_batched():
 
     # Independent per-instance reference, matching the pattern of the series case: each of the
     # 64 random instances is checked against its own scipy.optimize.fsolve solution of
-    # _stack_reference (element law only, no tellegen code).
+    # _stack_reference (element law only, no noodl code).
     phi_z1_ref = torch.empty(m, dtype=DTYPE)
     phi_z2_ref = torch.empty(m, dtype=DTYPE)
     phi_z3_ref = torch.empty(m, dtype=DTYPE)
@@ -741,7 +741,7 @@ def test_fan_driven_zone_differentiable_and_nondifferentiable_paths_agree(learna
 # ---------------------------------------------------------------------------------------
 # Whole-branch review, MUST FIX 2: newton()'s old flat atol=rtol=1e-9 default was
 # unreachable in float32 (the project's declared default dtype -- see
-# tellegen/topology.py's Network(dtype: torch.dtype = torch.float32) and
+# noodl/topology.py's Network(dtype: torch.dtype = torch.float32) and
 # benchmarks/newton_scaling.py) at every network size tried. Every fixture, both
 # benchmarks, the rest of this file, the performance test and the README quick start all
 # use float64, so nothing end-to-end ran in the declared default until this case was added.

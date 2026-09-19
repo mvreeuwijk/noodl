@@ -5,10 +5,10 @@ by Task 6, gmres (restarted, nonsymmetric-capable, per-instance status, never ra
 import pytest
 import torch
 
-from tellegen.operators.base import SolverStatus
-from tellegen.operators.dense import DenseOperator
-from tellegen.operators.graph import GraphLaplacianOperator
-from tellegen.solvers.iterative import gmres, pcg
+from noodl.operators.base import SolverStatus
+from noodl.operators.dense import DenseOperator
+from noodl.operators.graph import GraphLaplacianOperator
+from noodl.solvers.iterative import gmres, pcg
 
 
 @pytest.fixture(autouse=True)
@@ -377,7 +377,7 @@ def test_pcg_results_are_pinned():
     whose order is fixed by the index array, so it is portable, while `residual` is a
     `torch.linalg.vector_norm`, whose summation order is the BLAS's business and legitimately
     differs with vectorisation width and thread count. Pinning it to the last bit pinned
-    someone else's reduction order, not tellegen's arithmetic -- and for the CONVERGED
+    someone else's reduction order, not noodl's arithmetic -- and for the CONVERGED
     result it pinned the last bit of a ~1e-15 quantity that is pure rounding noise.
     A few-ulp tolerance still catches everything the pin exists for: the mid-iteration
     residual is O(1), and any arithmetic change big enough to move a norm by more than a few

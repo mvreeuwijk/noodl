@@ -12,11 +12,11 @@ relative residuals around 0.6 on a system whose condition number is 2.44.
 import pytest
 import torch
 
-from tellegen.layers.transport import TransportLayer
-from tellegen.operators.base import SolverStatus
-from tellegen.operators.dense import DenseOperator
-from tellegen.solvers.iterative import gmres
-from tellegen.topology import Network
+from noodl.layers.transport import TransportLayer
+from noodl.operators.base import SolverStatus
+from noodl.operators.dense import DenseOperator
+from noodl.solvers.iterative import gmres
+from noodl.topology import Network
 
 
 def _three_node_network() -> Network:

@@ -74,7 +74,7 @@ about the others.
 a single continuous path through two nodes and a junction — flow through a network, drawn in
 one stroke.
 
-The package was previously called `tellegen`, after Tellegen's theorem: for any potentials in
+The package was previously called `noodl`, after Tellegen's theorem: for any potentials in
 the cut space and any flows in the cycle space of a graph, the branch power sum is zero. That
 result is still the backbone of the topology layer, and [the theory page](theory.md) opens with
 it.

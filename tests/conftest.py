@@ -6,9 +6,9 @@ import pytest
 import torch
 
 from benchmarks.composed_model import build_composed
-from tellegen.drives import ConstantDrive
-from tellegen.elements import PowerLaw
-from tellegen.topology import Network
+from noodl.drives import ConstantDrive
+from noodl.elements import PowerLaw
+from noodl.topology import Network
 
 
 @pytest.fixture

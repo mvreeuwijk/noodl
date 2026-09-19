@@ -4,8 +4,8 @@ import math
 
 import torch
 
-from tellegen.elements.base import Element
-from tellegen.elements.powerlaw import Orifice, PowerLaw
+from noodl.elements.base import Element
+from noodl.elements.powerlaw import Orifice, PowerLaw
 
 
 def test_blend_matches_sharp_power_law_away_from_transition():

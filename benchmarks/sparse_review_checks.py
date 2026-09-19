@@ -12,9 +12,9 @@ import sparse_scaling as original
 import torch
 from torch.utils.benchmark import Timer
 
-from tellegen.elements.conductance import Conductance
-from tellegen.layers.potential import PotentialFlowLayer
-from tellegen.topology import Network
+from noodl.elements.conductance import Conductance
+from noodl.layers.potential import PotentialFlowLayer
+from noodl.topology import Network
 
 
 def shared_incidence(edge_index, n, layout):

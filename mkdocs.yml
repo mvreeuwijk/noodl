@@ -70,6 +70,7 @@ nav:
 # repository but are not part of the published documentation.
 exclude_docs: |
   superpowers/
+  development-history.md
   sparse_operators_report.md
   sparse_operators_review.md
 

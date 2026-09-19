@@ -2,9 +2,9 @@
 
 import torch
 
-from tellegen.layers.transport import TransportLayer
-from tellegen.physics import SpeciesTransport
-from tellegen.topology import Network
+from noodl.layers.transport import TransportLayer
+from noodl.physics import SpeciesTransport
+from noodl.topology import Network
 
 
 def two_zone_net() -> Network:

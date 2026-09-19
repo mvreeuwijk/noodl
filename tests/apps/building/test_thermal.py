@@ -7,8 +7,8 @@ import math
 import pytest
 import torch
 
-from tellegen.apps.building.elements import orifice_elements_from_edges
-from tellegen.apps.building.thermal import (
+from noodl.apps.building.elements import orifice_elements_from_edges
+from noodl.apps.building.thermal import (
     CP_AIR,
     P_REF,
     R_AIR,
@@ -22,10 +22,10 @@ from tellegen.apps.building.thermal import (
     initial_state,
     thermal_layer,
 )
-from tellegen.drives import Stack
-from tellegen.layers.transport import TransportLayer
-from tellegen.model import Model
-from tellegen.topology import Network
+from noodl.drives import Stack
+from noodl.layers.transport import TransportLayer
+from noodl.model import Model
+from noodl.topology import Network
 
 F64 = torch.float64
 T_OUT = 283.15

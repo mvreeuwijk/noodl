@@ -8,8 +8,8 @@ import pytest
 import torch
 from torch.autograd.gradcheck import GradcheckError
 
-from tellegen.operators.dense import DenseOperator
-from tellegen.solvers.implicit import TransposeOperator, adjoint, implicit_solve
+from noodl.operators.dense import DenseOperator
+from noodl.solvers.implicit import TransposeOperator, adjoint, implicit_solve
 
 
 def test_transpose_operator_matvec_is_wrapped_ops_rmatvec():

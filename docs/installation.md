@@ -13,7 +13,7 @@ pip install noodl
 
 ```bash
 git clone https://github.com/mvreeuwijk/noodl.git
-cd tellegen
+cd noodl
 pip install -e .
 ```
 

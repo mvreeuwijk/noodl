@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 import torch
 
-from tellegen.apps.sewer.inp import read_inp
-from tellegen.apps.sewer.network import build_sewer_model, sewer_steady
+from noodl.apps.sewer.inp import read_inp
+from noodl.apps.sewer.network import build_sewer_model, sewer_steady
 
 pyswmm = pytest.importorskip("pyswmm")
 shared_enum = pytest.importorskip("swmm.toolkit.shared_enum")
@@ -51,7 +51,7 @@ def _run_swmm(tmp_path, name):
 
 
 @pytest.fixture(scope="module")
-def tellegen_steady():
+def noodl_steady():
     net, _, _ = read_inp(DATA / "tree_kinwave.inp")
     model, state, drivers = build_sewer_model(net, air=False, quality=False)
     resolved = model._apply_closures(state, drivers)
@@ -67,9 +67,9 @@ def test_the_engine_is_the_one_the_measurements_used(tmp_path):
     assert result["error"] == 0.0
 
 
-def test_w1_pipe_flows(tmp_path, tellegen_steady):
+def test_w1_pipe_flows(tmp_path, noodl_steady):
     """Row W1, 1e-9 relative. Measured worst 1.370e-14."""
-    net, resolved = tellegen_steady
+    net, resolved = noodl_steady
     swmm = _run_swmm(tmp_path, "tree_kinwave.inp")
     order = [p.name for p in net.pipes]
     worst = 0.0
@@ -79,10 +79,10 @@ def test_w1_pipe_flows(tmp_path, tellegen_steady):
     assert worst < 1e-9, worst
 
 
-def test_w2_normal_depths(tmp_path, tellegen_steady):
+def test_w2_normal_depths(tmp_path, noodl_steady):
     """Row W2, 1e-3 relative. Measured worst 5.464e-4 (conduit C3), which is SWMM's own
     51-point circular lookup table (Ref. Man. Vol. II section 5.1.3), not solver noise."""
-    net, resolved = tellegen_steady
+    net, resolved = noodl_steady
     swmm = _run_swmm(tmp_path, "tree_kinwave.inp")
     worst = 0.0
     for i, name in enumerate(p.name for p in net.pipes):
@@ -92,14 +92,14 @@ def test_w2_normal_depths(tmp_path, tellegen_steady):
     assert worst > 1e-5, "the lookup-table difference has disappeared: check the geometry"
 
 
-def test_w3_velocities(tmp_path, tellegen_steady):
+def test_w3_velocities(tmp_path, noodl_steady):
     """Row W3, 1e-3 relative, against the BINARY output's FLOW_VELOCITY.
 
     Spec amendment A2: under KINWAVE, `Link.ups_xsection_area` is exactly 0.0 (SWMM fills
     it only under DYNWAVE), so the spec's `flow / ups_xsection_area` is 0/0. Measured worst
     6.257e-4.
     """
-    net, resolved = tellegen_steady
+    net, resolved = noodl_steady
     swmm = _run_swmm(tmp_path, "tree_kinwave.inp")
     worst = 0.0
     for i, name in enumerate(p.name for p in net.pipes):
@@ -108,10 +108,10 @@ def test_w3_velocities(tmp_path, tellegen_steady):
     assert worst < 1e-3, worst
 
 
-def test_conduit_volumes(tmp_path, tellegen_steady):
+def test_conduit_volumes(tmp_path, noodl_steady):
     """Not a numbered row, but the capacity every quality layer is built on. Measured worst
     6.438e-4 relative, the same lookup-table difference as W2."""
-    net, resolved = tellegen_steady
+    net, resolved = noodl_steady
     swmm = _run_swmm(tmp_path, "tree_kinwave.inp")
     worst = 0.0
     for i, name in enumerate(p.name for p in net.pipes):
@@ -128,7 +128,7 @@ def test_w4_tracer_concentration(tmp_path):
     `tau = V / q`. SWMM's own conduit model is the same completely-mixed reactor (Ref. Man.
     Vol. III Eq. 5-4), which is why the row is this tight.
     """
-    from tellegen.layers.reaction import FirstOrderDecay
+    from noodl.layers.reaction import FirstOrderDecay
 
     net, loads, pollutants = read_inp(DATA / "tree_kinwave_pollut.inp")
     model, state, drivers = build_sewer_model(net, air=False, quality=False)
@@ -197,7 +197,7 @@ def test_w4_model_run_through_the_fr21_lateral_load_path(tmp_path):
         # fixture's own decay constant -- `Model.reactions` is a plain list attribute,
         # not reconstructed machinery, so this is a supported one-line substitution
         # rather than a private-internals hack.
-        from tellegen.apps.sewer.quality import SulfideGeneration
+        from noodl.apps.sewer.quality import SulfideGeneration
 
         model.reactions = [(
             "water_quality",

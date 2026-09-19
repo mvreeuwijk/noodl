@@ -1,9 +1,9 @@
-# Sparse-by-default operators for `tellegen`: research and benchmark report
+# Sparse-by-default operators for `noodl`: research and benchmark report
 
 > Status (12 Sep 2026): drafted by an AI agent (Claude) from web sources, direct
 > introspection of this repo's `.venv` (torch 2.14.0+cpu), and a benchmark script at
 > `benchmarks/sparse_scaling.py`. Answers the open question in
-> `docs/superpowers/specs/2026-09-11-tellegen-framework-design.md` section 4.0: "the
+> `docs/superpowers/specs/2026-09-11-noodl-framework-design.md` section 4.0: "the
 > choice between a formed sparse Jacobian and a matrix-free operator is being settled by
 > measurement." Sections 4-5 are measured on this machine (CPU only, no CUDA); GPU claims
 > elsewhere are from cited literature, marked as such.
@@ -58,7 +58,7 @@ almost everything else does not.
 
 Batching is where the gap between the documented model and this repo's needs is widest.
 The docs describe batched sparse compressed tensors as requiring "the same number of
-specified elements per batch entry" — tellegen's shared-topology case satisfies this
+specified elements per batch entry" — noodl's shared-topology case satisfies this
 trivially. Verified directly in this `.venv`, that is not the binding constraint:
 
 - A batched CSR tensor built the documented way (`crow_indices`/`col_indices` given an
@@ -91,7 +91,7 @@ trivially. Verified directly in this `.venv`, that is not the binding constraint
   does run, it is non-differentiable by construction — no registered backward.
 
 Net: a `torch.sparse`-first design built on **batched, per-instance sparse tensors**
-gives tellegen a beta API, no batched CSR matvec that runs, no batched or
+gives noodl a beta API, no batched CSR matvec that runs, no batched or
 differentiable direct solve, and a `spsolve` broken in the exact environment this
 project ships — using natural calling conventions, not edge cases. This does **not**
 rule out `torch.sparse` altogether: sections 4-5 and 7(b) show a *shared, non-batched*
@@ -114,7 +114,7 @@ layout: Sparse" inside `gradcheck`
 ([discuss.pytorch.org/t/141309](https://discuss.pytorch.org/t/differentiable-sparse-linear-solver-with-cupy-backend-unsupported-tensor-layout-sparse-in-gradcheck/141309)).
 Differentiating through such a solve means hand-writing a `torch.autograd.Function` that
 calls the external solver forward and does its own adjoint solve backward — precisely
-tellegen's own `implicit_solve` pattern (`src/tellegen/solvers/implicit.py`), with the
+noodl's own `implicit_solve` pattern (`src/noodl/solvers/implicit.py`), with the
 linear algebra swapped out.
 
 A brand-new project, torch-sla ([arXiv:2601.13994](https://arxiv.org/html/2601.13994v2)),
@@ -126,7 +126,7 @@ here); naive backprop through k CG iterations costs `O(k)` graph
 memory (~80 GB for a 1M-DOF problem at 1000 iterations); "batched solves over shared
 sparsity patterns are unsupported" natively. Its fix is the one this project already
 committed to: implicit-function adjoint (one extra solve, `O(1)` graph nodes) —
-corroborating tellegen's own section-4.0 note almost verbatim, from an unrelated project
+corroborating noodl's own section-4.0 note almost verbatim, from an unrelated project
 three months old.
 
 **Conclusion:** no differentiable, batched, sparse *direct* solve exists in stock
@@ -150,7 +150,7 @@ per-instance condition: it additionally requires every interior component to rea
 prescribed potential through STRICTLY POSITIVE slopes IN THAT INSTANCE — unweighted
 connectivity is not sufficient, since a zero slope on a bridging edge (e.g. a fully
 closed damper) can leave a component effectively floating even though the graph itself
-is connected. Tellegen's existing diagnostic, `PotentialFlowLayer._floating_group_nodes`,
+is connected. noodl's existing diagnostic, `PotentialFlowLayer._floating_group_nodes`,
 is narrower than "detects and rejects the floating case" as originally stated here: it
 checks `(k_flat != 0).any(dim=0)`, the union of active edges **across the whole batch**,
 using linear-initialisation slopes, and is bypassed entirely when the caller supplies
@@ -186,7 +186,7 @@ and applying it as a fixed preconditioner inside an otherwise-differentiable CG 
 defensible, common pattern (exactly how "deep learning of preconditioners for CG" for
 urban water networks frames it, [arXiv:1906.06925](https://arxiv.org/pdf/1906.06925)),
 but real engineering, not a drop-in. Jacobi is measured below to already be enough for
-tellegen's near-term sizes; AMG earns its complexity past that, mainly for extreme
+noodl's near-term sizes; AMG earns its complexity past that, mainly for extreme
 conductance ratios, not size alone.
 
 ## 4-5. Benchmark results
@@ -320,21 +320,21 @@ autograd — the identical `NotImplementedError` from section 1 every time.
 `index_add`) and `A^T @ phi` (dense matmul vs. gather): within 2x either way at
 `n=100-300` (small-matrix overhead dominates); 20-60x faster for gather/scatter by
 `n=3000`; 70-370x by `n=10000`, at both `B=1` and `B=1000` — matching theory (`O(n*b)` vs
-`O(b)`) and landing close to tellegen's target scale, not a large-`n` curiosity.
+`O(b)`) and landing close to noodl's target scale, not a large-`n` curiosity.
 
 ## 6. What other differentiable-physics projects do
 
-The dominant pattern, from several independent directions, is exactly tellegen's own:
+The dominant pattern, from several independent directions, is exactly noodl's own:
 **shared edge-index arrays, batched dense values, gather/scatter as the only sparse
 primitive, implicit-function differentiation for anything solved iteratively.**
 
 - **PyTorch Geometric**: "PyG makes heavy usage of gather and scatter operations to map
   node and edge information into edge and node parallel space"
   ([Creating Message Passing Networks](https://pytorch-geometric.readthedocs.io/en/latest/notes/create_gnn.html)).
-  A GNN layer and tellegen's `A_I q`/`A^T phi` are the same primitive on the same data
+  A GNN layer and noodl's `A_I q`/`A^T phi` are the same primitive on the same data
   structure; PyG found scatter/gather competitive with optimised SpMM up to average node
   degree ~128 ([arXiv:1903.02428](https://arxiv.org/pdf/1903.02428)) — well above
-  tellegen's ~4 (a 300-node, 600-branch building).
+  noodl's ~4 (a 300-node, 600-branch building).
 - **JAX**'s `jax.experimental.sparse` (BCOO) is explicitly batchable, jittable,
   differentiable ([docs](https://docs.jax.dev/en/latest/jax.experimental.sparse.html)) —
   ahead of `torch.sparse` on paper — but serious sparse *solves* still route through
@@ -344,7 +344,7 @@ primitive, implicit-function differentiation for anything solved iteratively.**
   map, using LSQR for sparse problems to avoid forming a dense KKT Jacobian
   ([Differentiable Convex Optimization Layers](https://web.stanford.edu/~boyd/papers/pdf/diff_cvxpy.pdf))
   — IFT plus a matrix-free solve, not a direct factorisation.
-- **Differentiable power flow**, tellegen's closest analogue, converged on the same
+- **Differentiable power flow**, noodl's closest analogue, converged on the same
   shape: SABLE is "an implicit power flow layer," batching Jacobians via a block-diagonal
   sparse template shared across PyTorch/CuPy/cuDSS, citing up to 206x training throughput
   over dense batching ([arXiv:2606.07099](https://arxiv.org/abs/2606.07099));
@@ -352,7 +352,7 @@ primitive, implicit-function differentiation for anything solved iteratively.**
   ([arXiv:2603.28203](https://arxiv.org/abs/2603.28203)). No differentiable-EPANET
   project of comparable maturity was found; closest is learned CG preconditioners for
   urban water networks ([arXiv:1906.06925](https://arxiv.org/pdf/1906.06925)), which
-  assumes tellegen's own matrix-free-CG structure.
+  assumes noodl's own matrix-free-CG structure.
 
 Most projects surveyed that both batch and differentiate over shared topology land on
 gather/scatter (or a hand-rolled matrix-free operator) plus IFT — but not all: SABLE
@@ -404,7 +404,7 @@ alternatives behind the same operator interface, not excluded options.
 transport projection is attributed to the earlier design-spec review, not to this
 sparse benchmark: this benchmark did not run the transport operator at all, so those
 figures are cited here, not reproduced. `TransportLayer.operator()`
-(`src/tellegen/layers/transport.py`) builds `Out`, `In`, `L` as dense `(..., n, n)` (or
+(`src/noodl/layers/transport.py`) builds `Out`, `In`, `L` as dense `(..., n, n)` (or
 `(..., K, n, n)`) tensors via `einsum` over one-hot selectors — this should become
 gather/scatter like the potential-flow Jacobian, with `_van_loan_step`'s matrix
 exponential restricted to sparsity-permitting cases or replaced by a Krylov-subspace

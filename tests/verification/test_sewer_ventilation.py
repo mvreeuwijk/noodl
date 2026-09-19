@@ -3,12 +3,12 @@
 import pytest
 import torch
 
-from tellegen.apps.sewer import geometry as g
-from tellegen.apps.sewer.air import RHO_AIR_REF, Drag, Headspace
-from tellegen.elements.fixed import FixedFlow
-from tellegen.elements.powerlaw import Orifice
-from tellegen.layers.potential import PotentialFlowLayer
-from tellegen.topology import Network
+from noodl.apps.sewer import geometry as g
+from noodl.apps.sewer.air import RHO_AIR_REF, Drag, Headspace
+from noodl.elements.fixed import FixedFlow
+from noodl.elements.powerlaw import Orifice
+from noodl.layers.potential import PotentialFlowLayer
+from noodl.topology import Network
 
 F64 = torch.float64
 
@@ -127,10 +127,10 @@ def test_h3_transfer_dominated_steady_state_is_henry_equilibrium():
     loop is used rather than `sewer_steady`'s own tolerance-driven early exit, which (on
     this system's absolute per-step-change test, applied to both quality layers) stops
     noticeably before the relative gas/equilibrium gap has fully settled."""
-    from tellegen.apps.sewer.quality import M_H2S, M_S, H2STransfer, free_fraction, henry_h2s
-    from tellegen.layers.transport import TransportLayer
-    from tellegen.model import Model
-    from tellegen.topology import Network
+    from noodl.apps.sewer.quality import M_H2S, M_S, H2STransfer, free_fraction, henry_h2s
+    from noodl.layers.transport import TransportLayer
+    from noodl.model import Model
+    from noodl.topology import Network
 
     net = Network(dtype=F64)
     net.add_node("M")

@@ -10,9 +10,9 @@ import pytest
 import torch
 from torch.autograd import gradcheck
 
-from tellegen.layers.transport import TransportLayer
-from tellegen.operators.advection import AdvectionOperator
-from tellegen.topology import Network
+from noodl.layers.transport import TransportLayer
+from noodl.operators.advection import AdvectionOperator
+from noodl.topology import Network
 
 
 def _interior_of_node(net: Network, boundary: list) -> torch.Tensor:
@@ -360,7 +360,7 @@ def test_matvec_source_has_no_python_loop_over_edges():
     """
     import inspect
 
-    from tellegen.operators.advection import AdvectionOperator as A
+    from noodl.operators.advection import AdvectionOperator as A
 
     source = inspect.getsource(A.matvec)
     assert "for " not in source
@@ -370,7 +370,7 @@ def test_rmatvec_source_has_no_python_loop_over_edges():
     """Same check as test_matvec_source_has_no_python_loop_over_edges, but for rmatvec."""
     import inspect
 
-    from tellegen.operators.advection import AdvectionOperator as A
+    from noodl.operators.advection import AdvectionOperator as A
 
     source = inspect.getsource(A.rmatvec)
     assert "for " not in source

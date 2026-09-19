@@ -3,17 +3,17 @@ import torch
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from tellegen.cycles import (
+from noodl.cycles import (
     assert_forward_oriented,
     branch_flows,
     particular_flow,
     project_measured,
 )
-from tellegen.topology import Network
+from noodl.topology import Network
 
 
 def test_branch_flows_is_importable_from_cycles_and_matches_physics_wrapper():
-    from tellegen.physics import branch_flows as physics_branch_flows
+    from noodl.physics import branch_flows as physics_branch_flows
 
     net = Network(dtype=torch.float64)
     net.add_node("a")

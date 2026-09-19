@@ -5,8 +5,8 @@ from dataclasses import dataclass
 import pytest
 import torch
 
-from tellegen.apps.sewer.hydraulics import CAPACITY_FLOOR, SewerHydraulics
-from tellegen.topology import Network
+from noodl.apps.sewer.hydraulics import CAPACITY_FLOOR, SewerHydraulics
+from noodl.topology import Network
 
 F64 = torch.float64
 

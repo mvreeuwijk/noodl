@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from tellegen.layers.transport import TransportLayer
-from tellegen.topology import Network
+from noodl.layers.transport import TransportLayer
+from noodl.topology import Network
 
 F64 = torch.float64
 

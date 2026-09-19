@@ -7,7 +7,7 @@ import math
 import pytest
 import torch
 
-from tellegen.apps.street.network import (
+from noodl.apps.street.network import (
     Street,
     StreetNetwork,
     build_street_model,

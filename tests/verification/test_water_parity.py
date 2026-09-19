@@ -1,4 +1,4 @@
-"""EPANET 2.2 parity for `tellegen.apps.water` (spec rows D1-D8 and the golden case G2).
+"""EPANET 2.2 parity for `noodl.apps.water` (spec rows D1-D8 and the golden case G2).
 
 The oracle is the REAL EPANET 2.2 engine: `wntr` 1.5.0 bundles `epanet22.dll` and
 `wntr.sim.EpanetSimulator` drives it. `EpanetSimulator` reads EPANET's binary output, whose
@@ -21,8 +21,8 @@ from pathlib import Path
 import pytest
 import torch
 
-from tellegen.apps.water.inp import read_epanet_inp
-from tellegen.apps.water.network import (
+from noodl.apps.water.inp import read_epanet_inp
+from noodl.apps.water.network import (
     build_water_model,
     tank_inflow,
     twoloop,

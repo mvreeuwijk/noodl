@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from tellegen.solvers.implicit import adjoint, implicit_solve
+from noodl.solvers.implicit import adjoint, implicit_solve
 
 
 def test_gradcheck_implicit_solve_on_cube_root_wrt_parameter():

@@ -6,8 +6,8 @@ solvers.select.solve rather than torch.linalg.solve directly.
 
 import torch
 
-from tellegen.operators.graph import GraphLaplacianOperator
-from tellegen.solvers.newton import inner_solve_rtol, newton
+from noodl.operators.graph import GraphLaplacianOperator
+from noodl.solvers.newton import inner_solve_rtol, newton
 
 
 def test_newton_accepts_a_linear_operator_returning_callable_directly():
@@ -139,7 +139,7 @@ def _spy_pcg(monkeypatch):
     """Count `select.pcg` calls while still delegating, so a test that means to observe the
     Krylov solver's behaviour fails loudly if the routing ever stops sending it there.
     """
-    import tellegen.solvers.select as select_module
+    import noodl.solvers.select as select_module
 
     calls = {"count": 0}
     real = select_module.pcg
@@ -215,8 +215,8 @@ def test_linear_iterations_is_the_max_over_newton_steps_not_the_last(monkeypatch
     implementation used the LAST call's count instead of the max, this would observe 2
     (the stub's steady-state return value) rather than 5.
     """
-    import tellegen.solvers.newton as newton_mod
-    from tellegen.operators.base import SolveResult, SolverStatus
+    import noodl.solvers.newton as newton_mod
+    from noodl.operators.base import SolveResult, SolverStatus
 
     g = torch.tensor([1.0], dtype=torch.float64)
 

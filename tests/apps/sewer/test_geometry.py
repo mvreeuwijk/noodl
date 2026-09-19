@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from tellegen.apps.sewer import geometry as g
+from noodl.apps.sewer import geometry as g
 
 F64 = torch.float64
 

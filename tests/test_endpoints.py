@@ -9,7 +9,7 @@ import torch
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from tellegen.topology import Network
+from noodl.topology import Network
 
 
 def _random_connected_multigraph(n, extra, seed, dtype=torch.float64):

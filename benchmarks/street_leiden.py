@@ -7,7 +7,7 @@ scaling gate) is triggered.
     .venv/Scripts/python -m benchmarks.street_leiden --domain leiden_small
     .venv/Scripts/python -m benchmarks.street_leiden --domain leiden --steps 1
 
-The data directory comes from `TELLEGEN_AQDT_DATA`, defaulting to the location on the
+The data directory comes from `NOODL_AQDT_DATA`, defaulting to the location on the
 machine this milestone was written on. Nothing is written into it.
 """
 
@@ -21,12 +21,12 @@ from pathlib import Path
 
 import torch
 
-from tellegen.apps.street.loader import read_aqdt
-from tellegen.apps.street.network import build_street_model
-from tellegen.apps.street.report import to_ug_m3, write_network_concentration
+from noodl.apps.street.loader import read_aqdt
+from noodl.apps.street.network import build_street_model
+from noodl.apps.street.report import to_ug_m3, write_network_concentration
 
 DEFAULT_DATA = Path(os.environ.get(
-    "TELLEGEN_AQDT_DATA", r"<workspace>\tmp\2026_AQ_DT\data"
+    "NOODL_AQDT_DATA", r"<workspace>\tmp\2026_AQ_DT\data"
 ))
 DTYPE = torch.float64
 

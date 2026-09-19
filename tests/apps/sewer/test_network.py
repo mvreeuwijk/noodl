@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from tellegen.apps.sewer.network import (
+from noodl.apps.sewer.network import (
     Manhole,
     Outfall,
     Pipe,
@@ -13,7 +13,7 @@ from tellegen.apps.sewer.network import (
     sewer_steady,
     tree_steady,
 )
-from tellegen.drives import Stack
+from noodl.drives import Stack
 
 F64 = torch.float64
 
@@ -156,8 +156,8 @@ def test_read_inp_sulfide_source_uses_each_manholes_own_outgoing_pipe():
     `build_sewer_model`."""
     from pathlib import Path
 
-    from tellegen.apps.sewer.inp import read_inp
-    from tellegen.apps.sewer.quality import sulfide_rate
+    from noodl.apps.sewer.inp import read_inp
+    from noodl.apps.sewer.quality import sulfide_rate
 
     data = Path(__file__).resolve().parents[2] / "data" / "sewer"
     net, _, _ = read_inp(data / "tree_steady.inp")

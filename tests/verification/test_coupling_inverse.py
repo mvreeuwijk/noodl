@@ -153,7 +153,7 @@ def test_latent_infiltration_from_one_measured_path_and_the_cycle_ensemble(recor
     cycle), one measured path plus conservation alone pins every other flow, and with
     no measurement at all the admissible conserved flows are exactly the cycle-space
     ensemble."""
-    from tellegen.cycles import branch_flows, project_measured
+    from noodl.cycles import branch_flows, project_measured
 
     _city_, state, drivers, _street_model, building_model = _city()
     net, kind = building_model.net, "pl_3"

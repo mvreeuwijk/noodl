@@ -8,13 +8,13 @@ from pathlib import Path
 import pytest
 import torch
 
-from tellegen.apps.building.prj import (
+from noodl.apps.building.prj import (
     _PATH_FIELDS,
     Project,
     project_to_model,
     read_prj,
 )
-from tellegen.elements import Damper, FixedFlow, UpstreamDensityPowerLaw
+from noodl.elements import Damper, FixedFlow, UpstreamDensityPowerLaw
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "contam"
 THREE = DATA / "valThreeZonesWthCtm-UseApi.prj"

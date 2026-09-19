@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from tellegen.apps.sewer.network import build_sewer_model, sewer_steady, tree_steady
+from noodl.apps.sewer.network import build_sewer_model, sewer_steady, tree_steady
 
 F64 = torch.float64
 
@@ -57,7 +57,7 @@ def test_c2_cross_phase_sulfide_is_conserved_node_by_node():
     `LateralLoads`'s (zero, here) contribution ADDED IN before this closure runs, so a
     nonzero lateral BOD load elsewhere in the vector cannot leak into this comparison
     either: it lands in the BOD column, never the sulfide one this test reads."""
-    from tellegen.apps.sewer.quality import M_H2S, M_S
+    from noodl.apps.sewer.quality import M_H2S, M_S
 
     model, state, drivers = build_sewer_model(tree_steady())
     state = dict(state)
@@ -186,7 +186,7 @@ def test_c3_gradient_reaches_a_learnable_leak_area():
     relative error 9.67e-9, comfortably inside the row's 1e-6."""
     import math
 
-    from tellegen.apps.sewer.air import RHO_AIR_REF
+    from noodl.apps.sewer.air import RHO_AIR_REF
 
     base = 8e-4
     leak_cd = 0.6

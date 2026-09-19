@@ -26,12 +26,12 @@ sys.path.insert(0, str(_REPO_ROOT))
 from golden import save_golden  # noqa: E402
 
 from benchmarks.natural_ventilation import run as run_natural_ventilation  # noqa: E402
-from tellegen.drives import ConstantDrive  # noqa: E402
-from tellegen.elements.fan import FanCurve  # noqa: E402
-from tellegen.elements.fixed import FixedFlow  # noqa: E402
-from tellegen.elements.powerlaw import PowerLaw  # noqa: E402
-from tellegen.layers.potential import PotentialFlowLayer  # noqa: E402
-from tellegen.topology import Network  # noqa: E402
+from noodl.drives import ConstantDrive  # noqa: E402
+from noodl.elements.fan import FanCurve  # noqa: E402
+from noodl.elements.fixed import FixedFlow  # noqa: E402
+from noodl.elements.powerlaw import PowerLaw  # noqa: E402
+from noodl.layers.potential import PotentialFlowLayer  # noqa: E402
+from noodl.topology import Network  # noqa: E402
 
 DTYPE = torch.float64
 
@@ -124,7 +124,7 @@ def _impaq_test_network_case() -> dict:
     keeps being checked where the AQ_DT repository is not installed."""
     import math
 
-    from tellegen.apps.street.impaq import (
+    from noodl.apps.street.impaq import (
         build_test_network,
         canyon_velocity,
         compute_boundary_layer,
@@ -158,7 +158,7 @@ def _munich_idealised_case() -> dict:
 
 def _sewer_tree_case() -> dict:
     """Steady water, air and quality on the committed sewer fixture (row G1)."""
-    from tellegen.apps.sewer.network import build_sewer_model, sewer_steady, tree_steady
+    from noodl.apps.sewer.network import build_sewer_model, sewer_steady, tree_steady
 
     model, state, drivers = build_sewer_model(tree_steady())
     final = sewer_steady(model, state, drivers)
@@ -171,7 +171,7 @@ def _water_twoloop_case() -> dict:
     Built from `twoloop()` rather than from the `.inp`, so regenerating the golden does not
     depend on the reader; `test_water_parity.py` pins that the two agree.
     """
-    from tellegen.apps.water.network import build_water_model, twoloop, water_steady
+    from noodl.apps.water.network import build_water_model, twoloop, water_steady
 
     model, state, drivers = build_water_model(twoloop())
     final = water_steady(model, state, drivers)

@@ -18,9 +18,9 @@ from pathlib import Path
 
 import torch
 
-from tellegen.apps.building.prj import project_to_model, read_prj
-from tellegen.apps.street.network import Street, StreetNetwork, build_street_model, street_index
-from tellegen.couple import (
+from noodl.apps.building.prj import project_to_model, read_prj
+from noodl.apps.street.network import Street, StreetNetwork, build_street_model, street_index
+from noodl.couple import (
     CONCENTRATION_TO_MASS_FRACTION,
     STREET_RAD_TO_CONTAM_DEG,
     DriverAlias,

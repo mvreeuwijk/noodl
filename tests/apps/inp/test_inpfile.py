@@ -2,7 +2,7 @@
 
 import pytest
 
-from tellegen.apps.inpfile import InpLine, as_float, read_sections, require_fields
+from noodl.apps.inpfile import InpLine, as_float, read_sections, require_fields
 
 SAMPLE = """\
 [TITLE]

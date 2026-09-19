@@ -8,8 +8,8 @@ from dataclasses import dataclass
 import pytest
 import torch
 
-from tellegen.apps.building.prj import PrjSource
-from tellegen.apps.building.sources import (
+from noodl.apps.building.prj import PrjSource
+from noodl.apps.building.sources import (
     BurstSource,
     ConstantSource,
     CutoffSource,
@@ -17,7 +17,7 @@ from tellegen.apps.building.sources import (
     assemble_sources,
     sources_from_project,
 )
-from tellegen.topology import Network
+from noodl.topology import Network
 
 F64 = torch.float64
 

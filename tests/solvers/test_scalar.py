@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from tellegen.solvers.scalar import solve_monotone
+from noodl.solvers.scalar import solve_monotone
 
 
 def _cube_minus_c(x, c):

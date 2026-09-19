@@ -5,7 +5,7 @@ import torch
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from tellegen.solvers.newton import NewtonResult, newton
+from noodl.solvers.newton import NewtonResult, newton
 
 
 def _linear_system(A, b):

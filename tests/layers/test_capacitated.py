@@ -3,10 +3,10 @@
 import pytest
 import torch
 
-from tellegen.layers.capacitated import CapacitatedTransferLayer
-from tellegen.layers.transport import TransportLayer
-from tellegen.model import Model
-from tellegen.topology import Network
+from noodl.layers.capacitated import CapacitatedTransferLayer
+from noodl.layers.transport import TransportLayer
+from noodl.model import Model
+from noodl.topology import Network
 
 F64 = torch.float64
 

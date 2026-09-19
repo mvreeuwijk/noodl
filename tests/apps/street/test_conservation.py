@@ -10,20 +10,20 @@ import math
 
 import torch
 
-from tellegen.apps.street.canyon import (
+from noodl.apps.street.canyon import (
     KAPPA_IMPAQ,
     boundary_layer,
     canyon_velocity,
     exchange_velocity,
 )
-from tellegen.apps.street.network import (
+from noodl.apps.street.network import (
     Street,
     StreetNetwork,
     build_street_model,
     from_test_network,
 )
-from tellegen.layers.transport import TransportLayer
-from tellegen.topology import Network
+from noodl.layers.transport import TransportLayer
+from noodl.topology import Network
 
 DT = torch.float64
 U_REF, THETA_W, H_ABL, BACKGROUND = 2.0, 0.25 * math.pi, 1200.0, 1.0e-4

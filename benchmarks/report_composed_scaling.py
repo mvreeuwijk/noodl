@@ -37,7 +37,7 @@ import torch
 
 from benchmarks.composed_model import build_composed
 from benchmarks.measure import isolated_peak_rss, time_call
-from tellegen.operators.graph import GraphLaplacianOperator
+from noodl.operators.graph import GraphLaplacianOperator
 
 # The reference composed model of design section 6: 8 buildings x 120 nodes, a 40-node street
 # and a 30-node sewer network -- 1030 nodes, about 2200 edges.

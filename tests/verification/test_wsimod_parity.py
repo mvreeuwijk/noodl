@@ -67,8 +67,8 @@ import pandas as pd
 import pytest
 import torch
 
-from tellegen.layers.capacitated import CapacitatedTransferLayer
-from tellegen.topology import Network
+from noodl.layers.capacitated import CapacitatedTransferLayer
+from noodl.topology import Network
 
 pytest.importorskip("wsimod")  # only the regeneration script needs it installed to
 # RUN; these tests read the already-committed fixtures and need it only so that a

@@ -1,8 +1,8 @@
 """Benchmark: dense solve vs. matrix-free CG vs. torch.sparse for a batched
-network Laplacian J = A_I diag(g) A_I^T, representative of a tellegen nodal
+network Laplacian J = A_I diag(g) A_I^T, representative of a noodl nodal
 Jacobian.
 
-Written to answer one question empirically: given tellegen's move to sparse-
+Written to answer one question empirically: given noodl's move to sparse-
 by-default operators, what is actually fast, what actually fits in memory, and
 what actually works with autograd in THIS installed torch version -- not what
 the docs claim in the abstract.
@@ -10,7 +10,7 @@ the docs claim in the abstract.
 Three solve paths are compared, all on CPU (this repo's .venv has no CUDA):
 
 1. dense    -- assemble J densely, batched (B, n_i, n_i), solve with
-               torch.linalg.solve. This is tellegen's current path.
+               torch.linalg.solve. This is noodl's current path.
 2. cg       -- matrix-free CG. J is never assembled; the matvec is
                gather (index_select) + elementwise scale + scatter
                (index_add), operating on a *shared* edge-index array
@@ -47,8 +47,8 @@ except Exception:  # not all stdout wrappers support this; harmless if it fails
 
 print(f"torch {torch.__version__}, threads={torch.get_num_threads()}", flush=True)
 
-DTYPE = torch.float64  # matches tellegen's own choice for its solve paths (see
-# TransportLayer.step/steady in src/tellegen/layers/transport.py, and the benchmark
+DTYPE = torch.float64  # matches noodl's own choice for its solve paths (see
+# TransportLayer.step/steady in src/noodl/layers/transport.py, and the benchmark
 # in benchmarks/newton_scaling.py): float32 was tried first here and found to make
 # the accuracy comparison meaningless -- at the conductance spread this benchmark
 # uses (up to 6 decades), cond(J) reaches ~1e6, and cond*eps_fp32 (~1.2e-7) is

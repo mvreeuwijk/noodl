@@ -23,8 +23,8 @@ from pathlib import Path
 
 import torch
 
-from tellegen.apps.water.inp import read_epanet_inp
-from tellegen.apps.water.network import build_water_model, tank_inflow, water_steady
+from noodl.apps.water.inp import read_epanet_inp
+from noodl.apps.water.network import build_water_model, tank_inflow, water_steady
 
 F64 = torch.float64
 DATA = Path(__file__).resolve().parents[1] / "tests" / "data" / "water"

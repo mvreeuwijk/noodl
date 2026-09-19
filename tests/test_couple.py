@@ -6,12 +6,12 @@ import re
 import pytest
 import torch
 
-from tellegen.couple import (
+from noodl.couple import (
     CONCENTRATION_TO_MASS_FRACTION,
     MASS_FRACTION_TO_CONCENTRATION,
     apply_conversion,
 )
-from tellegen.topology import Network
+from noodl.topology import Network
 
 F64 = torch.float64
 
@@ -43,7 +43,7 @@ def test_apply_conversion_unknown_name_raises_naming_it():
 
 def _line_network() -> object:
     """boundary --edge0--> mid --edge1--> boundary2, kind='link'. `mid` is interior."""
-    from tellegen.topology import Network
+    from noodl.topology import Network
 
     net = Network(dtype=F64)
     net.add_node("boundary")
@@ -55,7 +55,7 @@ def _line_network() -> object:
 
 
 def test_transport_boundary_inflow_hand_computed():
-    from tellegen.couple import transport_boundary_inflow
+    from noodl.couple import transport_boundary_inflow
 
     net = _line_network()
     interior_idx = net.interior_index(["boundary", "boundary2"])  # just "mid"
@@ -81,8 +81,8 @@ def test_transport_boundary_inflow_hand_computed():
 
 def _tiny_street_model():
     """Two segments 'seg0'->'atm', 'seg1'->'atm', kind='vent'. Concentration state only."""
-    from tellegen.layers.transport import TransportLayer
-    from tellegen.model import Model
+    from noodl.layers.transport import TransportLayer
+    from noodl.model import Model
 
     net = Network(dtype=F64)
     net.add_node("atm")
@@ -107,8 +107,8 @@ def _tiny_street_model():
 
 def _tiny_building_model():
     """One zone 'z0' with an airpath to 'ambient'. Species state only."""
-    from tellegen.layers.transport import TransportLayer
-    from tellegen.model import Model
+    from noodl.layers.transport import TransportLayer
+    from noodl.model import Model
 
     net = Network(dtype=F64)
     net.add_node("ambient")
@@ -139,7 +139,7 @@ def _tiny_building_model():
 
 
 def test_one_way_union_sets_building_boundary_from_street_segment():
-    from tellegen.couple import ValueLink, union
+    from noodl.couple import ValueLink, union
 
     street_model, street_state, street_drivers = _tiny_street_model()
     building_model, building_state, building_drivers = _tiny_building_model()
@@ -164,7 +164,7 @@ def test_one_way_union_sets_building_boundary_from_street_segment():
 
 
 def _two_way_link():  # -> ValueLink (imported in-body, like every other test here)
-    from tellegen.couple import ValueLink
+    from noodl.couple import ValueLink
 
     return ValueLink(
         from_model="street", from_key="street.x", from_index=0,
@@ -174,7 +174,7 @@ def _two_way_link():  # -> ValueLink (imported in-body, like every other test he
 
 
 def _city(**kwargs):
-    from tellegen.couple import union
+    from noodl.couple import union
 
     street_model, street_state, street_drivers = _tiny_street_model()
     building_model, building_state, building_drivers = _tiny_building_model()
@@ -189,7 +189,7 @@ def test_two_way_step_is_a_fixed_point_of_one_step_from_the_start_state():
     """The converged output, fed back as glue values, must reproduce itself from ONE step
     of each model from the START state -- design spec A1. A time-compounding iteration
     (stepping from the previous pass's output) fails this: its output is not one dt away."""
-    from tellegen.couple import transport_boundary_inflow
+    from noodl.couple import transport_boundary_inflow
 
     (city, state, drivers), (street_model, building_model) = _city(
         iterate_rtol=1e-12, iterate_max=100)
@@ -223,7 +223,7 @@ def test_two_way_step_is_a_fixed_point_of_one_step_from_the_start_state():
 
 
 def test_two_way_step_differs_from_a_one_way_pass_and_is_sensitive_to_the_glue():
-    from tellegen.couple import ValueLink, union
+    from noodl.couple import ValueLink, union
 
     (city, state, drivers), _ = _city(iterate_max=100)
     two_way = city.step(state, drivers, dt=1.0)
@@ -262,7 +262,7 @@ def test_two_way_convergence_and_non_convergence_are_judged_per_batch_instance()
     """A batch of street forcings: `converged` is a mask over the batch, `max_change` is per
     link and per instance, and the failure message names ONLY the instances that failed --
     as `Model._iterate` does (`model.py:595-604`)."""
-    from tellegen.couple import union
+    from noodl.couple import union
 
     def batched_city(**kwargs):
         street_model, street_state, street_drivers = _tiny_street_model()
@@ -300,7 +300,7 @@ def test_two_way_convergence_and_non_convergence_are_judged_per_batch_instance()
 def test_two_way_feedback_adds_to_the_callers_own_sources_and_never_overwrites_them():
     """The caller's own source terms at the coupled node must survive: the feedback flux is
     ADDED to them. Every other fixture supplies zeros, where add and overwrite agree."""
-    from tellegen.couple import transport_boundary_inflow, union
+    from noodl.couple import transport_boundary_inflow, union
 
     street_model, street_state, street_drivers = _tiny_street_model()
     building_model, building_state, building_drivers = _tiny_building_model()
@@ -341,7 +341,7 @@ def test_two_way_feedback_adds_to_the_callers_own_sources_and_never_overwrites_t
 
 
 def test_a_to_key_that_is_not_a_boundary_driver_is_refused_at_construction():
-    from tellegen.couple import ValueLink, union
+    from noodl.couple import ValueLink, union
 
     street_model, street_state, street_drivers = _tiny_street_model()
     building_model, building_state, building_drivers = _tiny_building_model()
@@ -355,7 +355,7 @@ def test_a_to_key_that_is_not_a_boundary_driver_is_refused_at_construction():
 
 
 def test_a_sources_key_that_is_not_a_source_term_is_refused_at_construction():
-    from tellegen.couple import ValueLink, union
+    from noodl.couple import ValueLink, union
 
     street_model, street_state, street_drivers = _tiny_street_model()
     building_model, building_state, building_drivers = _tiny_building_model()
@@ -378,7 +378,7 @@ def test_driver_alias_writes_every_target_through_its_own_conversion():
     """The source is authoritative and each target is written from it through that target's
     registered conversion (design spec A3): the street's theta_w, radians counter-clockwise
     from east, reaches the building as CONTAM's Wd, degrees clockwise from north."""
-    from tellegen.couple import STREET_RAD_TO_CONTAM_DEG, DriverAlias, ValueLink, union
+    from noodl.couple import STREET_RAD_TO_CONTAM_DEG, DriverAlias, ValueLink, union
 
     street_model, street_state, street_drivers = _tiny_street_model()
     building_model, building_state, building_drivers = _tiny_building_model()
@@ -411,7 +411,7 @@ def test_driver_alias_writes_every_target_through_its_own_conversion():
 
 
 def test_unregistered_conversion_is_refused_at_union_construction():
-    from tellegen.couple import ValueLink, union
+    from noodl.couple import ValueLink, union
 
     street_model, street_state, street_drivers = _tiny_street_model()
     building_model, building_state, building_drivers = _tiny_building_model()
@@ -427,7 +427,7 @@ def test_unregistered_conversion_is_refused_at_union_construction():
 def test_an_unconverted_link_between_unequal_units_is_refused_at_construction():
     """`convert=None` across kg/m3 -> kg/kg is silently wrong by a factor of `rho_amb`, and
     both models keep running happily -- so it must be refused at construction."""
-    from tellegen.couple import ValueLink, union
+    from noodl.couple import ValueLink, union
 
     street_model, street_state, street_drivers = _tiny_street_model()
     building_model, building_state, building_drivers = _tiny_building_model()
@@ -445,7 +445,7 @@ def test_an_unconverted_link_between_unequal_units_is_refused_at_construction():
 
 
 def test_a_conversion_whose_units_do_not_match_the_layers_is_refused_at_construction():
-    from tellegen.couple import STREET_RAD_TO_CONTAM_DEG, ValueLink, union
+    from noodl.couple import STREET_RAD_TO_CONTAM_DEG, ValueLink, union
 
     street_model, street_state, street_drivers = _tiny_street_model()
     building_model, building_state, building_drivers = _tiny_building_model()
@@ -465,8 +465,8 @@ def test_a_conversion_whose_units_do_not_match_the_layers_is_refused_at_construc
 
 def _multi_kind_building_model():
     """`_tiny_building_model` with TWO advecting edge kinds on its species layer."""
-    from tellegen.layers.transport import TransportLayer
-    from tellegen.model import Model
+    from noodl.layers.transport import TransportLayer
+    from noodl.model import Model
 
     net = Network(dtype=F64)
     net.add_node("ambient")
@@ -490,8 +490,8 @@ def _multi_kind_building_model():
 
 def _two_species_building_model():
     """`_tiny_building_model` with TWO species on its species layer."""
-    from tellegen.layers.transport import TransportLayer
-    from tellegen.model import Model
+    from noodl.layers.transport import TransportLayer
+    from noodl.model import Model
 
     net = Network(dtype=F64)
     net.add_node("ambient")
@@ -515,7 +515,7 @@ def _two_species_building_model():
 def test_a_two_way_link_into_a_multi_flow_kind_layer_is_refused_at_construction():
     """`transport_boundary_inflow` is single-flow-kind; it used to discover that at STEP
     time, after a whole first pass had run."""
-    from tellegen.couple import union
+    from noodl.couple import union
 
     street_model, street_state, street_drivers = _tiny_street_model()
     building_model, building_state, building_drivers = _multi_kind_building_model()
@@ -531,7 +531,7 @@ def test_a_two_way_link_into_a_multi_flow_kind_layer_is_refused_at_construction(
 def test_a_two_way_link_on_a_multi_species_layer_is_refused_at_construction():
     """A stacked `(n_i, 1)` and a reduced `(n_i, K)` with `K == n_i` are the same shape, so
     the glue's layout rule cannot read a multi-species state unambiguously."""
-    from tellegen.couple import union
+    from noodl.couple import union
 
     street_model, street_state, street_drivers = _tiny_street_model()
     building_model, building_state, building_drivers = _two_species_building_model()
@@ -545,7 +545,7 @@ def test_a_two_way_link_on_a_multi_species_layer_is_refused_at_construction():
 
 
 def test_reduced_accepts_reduced_and_stacked_single_species_layouts():
-    from tellegen.couple import _reduced
+    from noodl.couple import _reduced
 
     reduced = torch.tensor([1.0, 2.0, 3.0], dtype=F64)
     stacked = reduced.reshape(3, 1)
@@ -558,7 +558,7 @@ def test_reduced_accepts_reduced_and_stacked_single_species_layouts():
 
 
 def test_write_at_restores_the_stacked_layout():
-    from tellegen.couple import _write_at
+    from noodl.couple import _write_at
 
     target = torch.zeros(1, 1, dtype=F64)  # CONTAM's x_boundary layout, n_b = 1, K = 1
     out = _write_at(target, 1, 0, torch.tensor(2.5, dtype=F64))
@@ -575,7 +575,7 @@ def test_write_at_add_accumulates_and_reduces_a_stacked_sources_tensor():
     """`add=True` is the two-way feedback's write into "<layer>.sources". A STACKED
     single-species sources tensor must be reduced first: indexing it directly would address
     the species axis, silently writing the flux at the wrong place."""
-    from tellegen.couple import _write_at
+    from noodl.couple import _write_at
 
     stacked = torch.tensor([[0.0], [0.7], [0.2]], dtype=F64)  # (n, 1), full node order
     out = _write_at(stacked, 3, 1, torch.tensor(0.5, dtype=F64), add=True)
@@ -591,7 +591,7 @@ def test_write_at_broadcasts_a_batched_value_into_an_unbatched_target():
     """The ensemble case: the street model runs a batch of B forcings while the CONTAM
     reader's `species.x_boundary` stays `(1, 1)`. The target must broadcast up to the
     value's batch, keeping its own LAYOUT (stacked stays stacked)."""
-    from tellegen.couple import _write_at
+    from noodl.couple import _write_at
 
     value = torch.arange(4, dtype=F64)
     out = _write_at(torch.zeros(1, 1, dtype=F64), 1, 0, value)  # stacked, n_b = 1
@@ -608,7 +608,7 @@ def test_write_at_broadcasts_a_batched_value_into_an_unbatched_target():
 @pytest.mark.parametrize("wd, theta", [(270.0, 0.0), (0.0, 1.5 * math.pi),
                                        (90.0, math.pi), (180.0, 0.5 * math.pi)])
 def test_wind_direction_conversions_on_the_cardinal_points(wd, theta):
-    from tellegen.couple import CONTAM_DEG_TO_STREET_RAD, STREET_RAD_TO_CONTAM_DEG
+    from noodl.couple import CONTAM_DEG_TO_STREET_RAD, STREET_RAD_TO_CONTAM_DEG
 
     wd_t = torch.tensor(wd, dtype=F64)
     theta_t = torch.tensor(theta, dtype=F64)
@@ -626,7 +626,7 @@ def test_original_models_still_run_standalone_unchanged_after_union():
     street_snapshot = {k: v.clone() for k, v in street_drivers.items()}
     building_snapshot = {k: v.clone() for k, v in building_drivers.items()}
 
-    from tellegen.couple import union
+    from noodl.couple import union
     city, state, drivers = union(
         {"street": (street_model, street_state, street_drivers),
          "building": (building_model, building_state, building_drivers)},
@@ -645,7 +645,7 @@ def test_original_models_still_run_standalone_unchanged_after_union():
 
 
 def test_substeps_calls_the_fast_model_k_times_with_the_glue_held_constant():
-    from tellegen.couple import union
+    from noodl.couple import union
 
     street_model, street_state, street_drivers = _tiny_street_model()
     building_model, building_state, building_drivers = _tiny_building_model()
@@ -683,7 +683,7 @@ def test_substeps_calls_the_fast_model_k_times_with_the_glue_held_constant():
 def test_gradient_flows_across_the_join_and_matches_central_differences():
     """d(building species.x) / d(street segment-0 initial concentration), through the
     coupled two-way step -- design spec section 7, 'gradients flow across the join'."""
-    from tellegen.couple import union
+    from noodl.couple import union
 
     def indoor(x0: torch.Tensor) -> torch.Tensor:
         street_model, street_state, street_drivers = _tiny_street_model()

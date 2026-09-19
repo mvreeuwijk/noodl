@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from tellegen.apps.sewer import quality as q
+from noodl.apps.sewer import quality as q
 
 F64 = torch.float64
 
@@ -128,7 +128,7 @@ def test_ppm_conversion_uses_the_ideal_gas_law():
 
 
 def test_sulfide_generation_reaction_advances_both_species():
-    from tellegen.apps.sewer.quality import SulfideGeneration
+    from noodl.apps.sewer.quality import SulfideGeneration
 
     reaction = SulfideGeneration()
     x = torch.tensor([[0.3, 2.0e-3]], dtype=F64)
@@ -150,7 +150,7 @@ def test_sulfide_generation_reaction_advances_both_species():
 
 
 def test_sulfide_generation_refuses_a_missing_driver():
-    from tellegen.apps.sewer.quality import SulfideGeneration
+    from noodl.apps.sewer.quality import SulfideGeneration
 
     with pytest.raises(KeyError, match="'sewer.R_h'"):
         SulfideGeneration().apply(torch.zeros(1, 2, dtype=F64), 60.0, {})
@@ -158,7 +158,7 @@ def test_sulfide_generation_refuses_a_missing_driver():
 
 def test_c2_transfer_sources_are_exactly_opposite_in_moles_of_sulfur():
     """Row C2's algebraic core, node by node."""
-    from tellegen.apps.sewer.quality import H2STransfer
+    from noodl.apps.sewer.quality import H2STransfer
 
     closure = H2STransfer(4, torch.tensor([0, 1, 2]))
     state = {
@@ -185,7 +185,7 @@ def test_c2_transfer_sources_are_exactly_opposite_in_moles_of_sulfur():
 def test_out_pipe_gathers_per_pipe_drivers_into_manhole_order():
     """M4-R4 amendment: a non-identity out_pipe permutes the per-pipe drivers before use,
     while sewer.q_slope (already per manhole) is used as given."""
-    from tellegen.apps.sewer.quality import H2STransfer, SulfideGeneration
+    from noodl.apps.sewer.quality import H2STransfer, SulfideGeneration
 
     out_pipe = torch.tensor([0, 1, 3, 2, 4])
     per_pipe_v = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0], dtype=F64)

@@ -7,17 +7,17 @@ from pathlib import Path
 import pytest
 import torch
 
-from tellegen.apps.building.elements import orifice_elements_from_edges
-from tellegen.apps.building.thermal import (
+from noodl.apps.building.elements import orifice_elements_from_edges
+from noodl.apps.building.thermal import (
     R_AIR,
     Zone,
     add_zone,
     build_model,
     initial_state,
 )
-from tellegen.apps.building.wth import Weather, read_wth
-from tellegen.drives import Stack
-from tellegen.topology import Network
+from noodl.apps.building.wth import Weather, read_wth
+from noodl.drives import Stack
+from noodl.topology import Network
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "contam"
 

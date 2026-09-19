@@ -5,13 +5,13 @@ from __future__ import annotations
 import pytest
 import torch
 
-from tellegen.drives import ConstantDrive
-from tellegen.elements import PowerLaw
-from tellegen.layers.potential import PotentialFlowLayer
-from tellegen.layers.reaction import FirstOrderDecay
-from tellegen.layers.transport import TransportLayer
-from tellegen.model import Model, Ports
-from tellegen.topology import Network
+from noodl.drives import ConstantDrive
+from noodl.elements import PowerLaw
+from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.reaction import FirstOrderDecay
+from noodl.layers.transport import TransportLayer
+from noodl.model import Model, Ports
+from noodl.topology import Network
 
 F64 = torch.float64
 
@@ -899,7 +899,7 @@ def test_current_flows_returns_potential_owned_flow():
     net.add_node("b")
     net.add_node("i")
     net.add_edge("i", "b", kind="link")
-    from tellegen.elements.conductance import Conductance
+    from noodl.elements.conductance import Conductance
 
     air = PotentialFlowLayer(net, "air", [Conductance(kind="link", g=1.0)], boundary=["b"])
     species = TransportLayer(
@@ -919,7 +919,7 @@ def test_current_flows_solves_a_potential_owner_when_the_state_has_no_q_yet():
     """The first pass of a step: the start state carries no "<owner>.q" (project_to_model's
     initial state has only "species.x"), so current_flows must SOLVE the owner for these
     drivers, and agree with what a step would have solved."""
-    from tellegen.elements.conductance import Conductance
+    from noodl.elements.conductance import Conductance
 
     net = Network(dtype=torch.float64)
     net.add_node("b")
@@ -946,7 +946,7 @@ def test_current_flows_solves_a_potential_owner_when_the_state_has_no_q_yet():
 def test_current_flows_refuses_a_flow_driver_beside_a_potential_owner_on_the_solve_path():
     """The two-sources-of-flows refusal must not depend on whether the state happens to carry
     a solved q yet: `_kind_flows` makes it on the read path, and the solve path makes it too."""
-    from tellegen.elements.conductance import Conductance
+    from noodl.elements.conductance import Conductance
 
     net = Network(dtype=torch.float64)
     net.add_node("b")

@@ -2,8 +2,8 @@
 
 import torch
 
-from tellegen.elements.base import Element
-from tellegen.elements.fan import FanCurve
+from noodl.elements.base import Element
+from noodl.elements.fan import FanCurve
 
 
 def _p(coeffs, q):

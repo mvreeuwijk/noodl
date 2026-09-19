@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tellegen"
+name = "noodl"
 version = "0.0.1"
 description = "Network topology and conservative physics on graphs for building simulation (PyTorch)"
 readme = "README.md"
@@ -19,7 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 # `sparse` is a RUNTIME extra, not a developer convenience. `method="auto"` prefers the
 # SciPy SuperLU backend for a certified-SPD operator with a sparse form at a flat batch of
-# at most 32 (spec section 6.2 step 2), so on a plain `pip install tellegen` the documented
+# at most 32 (spec section 6.2 step 2), so on a plain `pip install noodl` the documented
 # default silently never fires and every such solve falls back to PCG -- correct, and 4.6x
 # slower at ensemble 1. It stays OPTIONAL rather than becoming a hard dependency because the
 # evidence for the default is one platform at one problem size (spec section 2: "selected on
@@ -29,7 +29,7 @@ sparse = ["scipy>=1.11"]
 # test suite exercises the sparse-direct backend directly, and a plain pin is one fewer
 # resolver feature for `pip install -e ".[dev]"` to depend on. Keep the two in step.
 # netCDF4 reads the ONE NETCDF4 file this project touches, AQ_DT's saved
-# network_concentration_<year>.nc; every product tellegen writes is classic CDF, which
+# network_concentration_<year>.nc; every product noodl writes is classic CDF, which
 # scipy reads. Test-only, and the tests that need it use pytest.importorskip.
 # pyswmm parity (rows W1-W4): BSD-2-Clause, wrapping SWMM 5, whose engine is public domain
 # (US-government work) / CC0. Test-only (`importorskip`); the sewer application itself needs
@@ -43,7 +43,7 @@ sparse = ["scipy>=1.11"]
 # the `>=` pins above, because the committed fixtures under tests/data/wsimod/ freeze one
 # specific wsimod run (design spec section 10, "Fixture staleness") -- a newer release could
 # silently change quickstart_demo/oxford_demo's forcing or node parameters, which an `>=` pin
-# would not catch. Test-only (`importorskip`); never a runtime dependency of tellegen itself.
+# would not catch. Test-only (`importorskip`); never a runtime dependency of noodl itself.
 dev = [
     "pytest>=8", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy>=1.11", "netCDF4>=1.7",
     "pyswmm>=2.1", "wntr>=1.5", "wsimod==0.8.1",
@@ -64,14 +64,14 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "--cov=tellegen --cov-report=term-missing --cov-fail-under=90 -m \"not slow\""
+addopts = "--cov=noodl --cov-report=term-missing --cov-fail-under=90 -m \"not slow\""
 markers = [
     "slow: marks tests as slow (excluded by default; run with -m slow to include them)",
     "external: needs an external engine or package (contamxpy); skipped when unavailable",
 ]
 
 [tool.coverage.run]
-source = ["tellegen"]
+source = ["noodl"]
 
 [tool.ruff]
 line-length = 100

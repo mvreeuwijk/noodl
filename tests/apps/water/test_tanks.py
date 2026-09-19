@@ -2,8 +2,8 @@
 
 import torch
 
-from tellegen.apps.water.network import Tank
-from tellegen.apps.water.tanks import Control, TankLevels
+from noodl.apps.water.network import Tank
+from noodl.apps.water.tanks import Control, TankLevels
 
 F64 = torch.float64
 

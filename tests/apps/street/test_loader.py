@@ -12,8 +12,8 @@ import math
 import pytest
 import torch
 
-from tellegen.apps.street.loader import RHO_AIR, read_aqdt
-from tellegen.apps.street.network import build_street_model
+from noodl.apps.street.loader import RHO_AIR, read_aqdt
+from noodl.apps.street.network import build_street_model
 from tests.data.street.aqdt_fixture import (
     BACKGROUND_CONCENTRATION,
     EMISSION_NORMALIZED,

@@ -7,14 +7,14 @@ import math
 import pytest
 import torch
 
-from tellegen.apps.building.elements import (
+from noodl.apps.building.elements import (
     add_large_opening,
     mass_orifice,
     orifice_elements_from_edges,
 )
-from tellegen.drives import Stack
-from tellegen.layers.potential import PotentialFlowLayer
-from tellegen.topology import Network
+from noodl.drives import Stack
+from noodl.layers.potential import PotentialFlowLayer
+from noodl.topology import Network
 
 F64 = torch.float64
 G = 9.80665

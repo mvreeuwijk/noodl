@@ -6,10 +6,10 @@ import pytest
 import torch
 from torch.autograd import gradcheck
 
-from tellegen.layers.transport import TransportLayer, _TransposeView
-from tellegen.model import Model
-from tellegen.solvers.implicit import TransposeOperator
-from tellegen.topology import Network
+from noodl.layers.transport import TransportLayer, _TransposeView
+from noodl.model import Model
+from noodl.solvers.implicit import TransposeOperator
+from noodl.topology import Network
 
 
 def _full(layer, s_interior, node_dim=-1):

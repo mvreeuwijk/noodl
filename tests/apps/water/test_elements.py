@@ -3,8 +3,8 @@
 import pytest
 import torch
 
-from tellegen.apps.water.demand import PressureDrivenDemand
-from tellegen.apps.water.elements import (
+from noodl.apps.water.demand import PressureDrivenDemand
+from noodl.apps.water.elements import (
     HW_SI,
     HazenWilliams,
     MinorLoss,

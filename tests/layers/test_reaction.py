@@ -5,15 +5,15 @@ import math
 import pytest
 import torch
 
-from tellegen.layers.reaction import (
+from noodl.layers.reaction import (
     K_NO_O3,
     K_NO_O3_298,
     MOLAR_MASS,
     FirstOrderDecay,
     Photostationary,
 )
-from tellegen.layers.transport import TransportLayer
-from tellegen.topology import Network
+from noodl.layers.transport import TransportLayer
+from noodl.topology import Network
 
 
 def sealed_zone() -> Network:

@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from tellegen.elements.base import Element
+from noodl.elements.base import Element
 
 
 class _Linear(Element):

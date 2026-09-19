@@ -12,8 +12,8 @@ minimum eigenvalues (0.381966..., 0.0) are re-derived by hand below and checked 
 import pytest
 import torch
 
-from tellegen.operators.dense import DenseOperator
-from tellegen.operators.graph import GraphLaplacianOperator
+from noodl.operators.dense import DenseOperator
+from noodl.operators.graph import GraphLaplacianOperator
 
 
 @pytest.fixture(autouse=True)
@@ -158,7 +158,7 @@ def test_matvec_source_has_no_python_loop_over_edges():
     """
     import inspect
 
-    from tellegen.operators.graph import GraphLaplacianOperator as G
+    from noodl.operators.graph import GraphLaplacianOperator as G
 
     source = inspect.getsource(G.matvec)
     assert "for " not in source
@@ -171,7 +171,7 @@ def test_rmatvec_source_has_no_python_loop_over_edges():
     """
     import inspect
 
-    from tellegen.operators.graph import GraphLaplacianOperator as G
+    from noodl.operators.graph import GraphLaplacianOperator as G
 
     source = inspect.getsource(G.rmatvec)
     assert "for " not in source
@@ -185,7 +185,7 @@ def test_apply_source_has_no_python_loop_over_edges():
     """
     import inspect
 
-    from tellegen.operators.graph import GraphLaplacianOperator as G
+    from noodl.operators.graph import GraphLaplacianOperator as G
 
     source = inspect.getsource(G._apply)
     assert "for " not in source

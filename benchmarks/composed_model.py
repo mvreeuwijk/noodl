@@ -16,12 +16,12 @@ from dataclasses import dataclass
 import torch
 
 from benchmarks.measure import time_call
-from tellegen.elements import PowerLaw
-from tellegen.elements.base import Element
-from tellegen.layers.potential import PotentialFlowLayer
-from tellegen.layers.transport import TransportLayer, active_interior
-from tellegen.model import Model
-from tellegen.topology import Network
+from noodl.elements import PowerLaw
+from noodl.elements.base import Element
+from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.transport import TransportLayer, active_interior
+from noodl.model import Model
+from noodl.topology import Network
 
 # PowerLaw conductance scale per edge kind, and the insertion order the elements list and the
 # shared RNG draws follow (topology first, then these in this order, then sources, then
@@ -49,7 +49,7 @@ class ComposedModel:
     # Capacity of the `co2` transport layer, one entry per node of its ACTIVE interior (the
     # non-boundary nodes an "airpath" edge touches), NOT per non-boundary node: the street
     # and sewer nodes carry no airpath edge, so they are inactive for that layer and have no
-    # row in it at all. See `tellegen.layers.transport.active_interior`.
+    # row in it at all. See `noodl.layers.transport.active_interior`.
     capacity: torch.Tensor
     layer: PotentialFlowLayer
     dense_layer: PotentialFlowLayer  # linear_solver="direct": the retained dense reference

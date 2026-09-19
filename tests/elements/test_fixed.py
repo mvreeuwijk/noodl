@@ -2,7 +2,7 @@
 
 import torch
 
-from tellegen.elements.fixed import FixedFlow
+from noodl.elements.fixed import FixedFlow
 
 
 def test_flow_ignores_dp_and_broadcasts_q0_to_dps_shape():

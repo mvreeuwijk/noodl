@@ -13,8 +13,8 @@ import torch
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from tellegen.cycles import _chord_endpoints, branch_flows, particular_flow
-from tellegen.topology import Network
+from noodl.cycles import _chord_endpoints, branch_flows, particular_flow
+from noodl.topology import Network
 
 
 def _dense_particular_flow_reference(net, sources, kind=None):
@@ -113,7 +113,7 @@ def test_gradcheck_particular_flow():
 
 
 def test_tree_elimination_helpers_are_importable():
-    from tellegen.cycles import _tree_elimination_levels, _tree_solve  # noqa: F401
+    from noodl.cycles import _tree_elimination_levels, _tree_solve  # noqa: F401
 
 
 def _dense_branch_flows_reference(net, amplitudes, kind=None):

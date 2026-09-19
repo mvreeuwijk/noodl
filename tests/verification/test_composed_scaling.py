@@ -23,8 +23,8 @@ from benchmarks.report_composed_scaling import (
     measure_matvec_shape_gate,
     measure_memory_shape_gate,
 )
-from tellegen.elements import PowerLaw
-from tellegen.layers.potential import PotentialFlowLayer
+from noodl.elements import PowerLaw
+from noodl.layers.potential import PotentialFlowLayer
 
 
 def test_time_call_returns_a_nonnegative_elapsed_seconds_and_the_callables_result():

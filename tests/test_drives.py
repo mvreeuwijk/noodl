@@ -8,10 +8,10 @@ import numpy as np
 import pytest
 import torch
 
-from tellegen.drives import ConstantDrive, Drive, Stack, Wind, WindProfile, check_drive_signature
-from tellegen.elements import PowerLaw
-from tellegen.layers.potential import PotentialFlowLayer
-from tellegen.topology import Network
+from noodl.drives import ConstantDrive, Drive, Stack, Wind, WindProfile, check_drive_signature
+from noodl.elements import PowerLaw
+from noodl.layers.potential import PotentialFlowLayer
+from noodl.topology import Network
 
 
 def test_constant_drive_returns_the_named_driver():

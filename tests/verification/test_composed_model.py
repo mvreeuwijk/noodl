@@ -13,7 +13,7 @@ import time
 
 import torch
 
-import tellegen.solvers.select as select_module
+import noodl.solvers.select as select_module
 from benchmarks.composed_model import ComposedModel, build_composed
 
 

@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 import torch
 
-from tellegen.apps.water.inp import read_epanet_inp
-from tellegen.apps.water.network import (
+from noodl.apps.water.inp import read_epanet_inp
+from noodl.apps.water.network import (
     Control,
     Junction,
     Pump,
@@ -23,7 +23,7 @@ from tellegen.apps.water.network import (
     twoloop,
     water_steady,
 )
-from tellegen.apps.water.report import link_table, pressure_head, to_kilopascal
+from noodl.apps.water.report import link_table, pressure_head, to_kilopascal
 
 F64 = torch.float64
 

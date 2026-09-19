@@ -4,13 +4,13 @@ import pytest
 import torch
 from scipy.optimize import brentq
 
-from tellegen.drives import ConstantDrive
-from tellegen.elements import Conductance, FixedFlow, PowerLaw
-from tellegen.elements.base import Element
-from tellegen.layers.potential import PotentialFlowLayer
-from tellegen.nodesources import NodeSource
-from tellegen.solvers.newton import newton
-from tellegen.topology import Network
+from noodl.drives import ConstantDrive
+from noodl.elements import Conductance, FixedFlow, PowerLaw
+from noodl.elements.base import Element
+from noodl.layers.potential import PotentialFlowLayer
+from noodl.nodesources import NodeSource
+from noodl.solvers.newton import newton
+from noodl.topology import Network
 
 
 def _closed_form_series_flow(C, n, drive):

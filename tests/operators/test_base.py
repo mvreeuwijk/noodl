@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from tellegen.operators.base import LinearOperator, SolveResult, SolverStatus, as_operator
-from tellegen.operators.dense import DenseOperator
+from noodl.operators.base import LinearOperator, SolveResult, SolverStatus, as_operator
+from noodl.operators.dense import DenseOperator
 
 
 def test_solver_status_enum_values_match_the_authoritative_ordering():
@@ -83,9 +83,9 @@ def test_a_plain_object_missing_every_member_does_not_satisfy_the_protocol():
 
 
 def test_solver_status_and_solve_result_and_linear_operator_are_reexported_from_the_package():
-    from tellegen.operators import LinearOperator as PackageLinearOperator
-    from tellegen.operators import SolveResult as PackageSolveResult
-    from tellegen.operators import SolverStatus as PackageSolverStatus
+    from noodl.operators import LinearOperator as PackageLinearOperator
+    from noodl.operators import SolveResult as PackageSolveResult
+    from noodl.operators import SolverStatus as PackageSolverStatus
 
     assert PackageSolverStatus is SolverStatus
     assert PackageSolveResult is SolveResult
@@ -93,7 +93,7 @@ def test_solver_status_and_solve_result_and_linear_operator_are_reexported_from_
 
 
 def test_dense_operator_is_reexported_from_the_operators_package():
-    from tellegen.operators import DenseOperator as PackageDenseOperator
+    from noodl.operators import DenseOperator as PackageDenseOperator
 
     assert PackageDenseOperator is DenseOperator
 
@@ -245,7 +245,7 @@ def test_as_operator_passes_a_linear_operator_through_unchanged():
 
 
 def test_as_operator_is_reexported_from_the_operators_package():
-    from tellegen.operators import as_operator as package_as_operator
+    from noodl.operators import as_operator as package_as_operator
 
     assert package_as_operator is as_operator
 

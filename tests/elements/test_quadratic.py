@@ -2,8 +2,8 @@
 
 import torch
 
-from tellegen.elements.base import Element
-from tellegen.elements.quadratic import Quadratic
+from noodl.elements.base import Element
+from noodl.elements.quadratic import Quadratic
 
 
 def test_flow_inverts_the_quadratic_drag_law():

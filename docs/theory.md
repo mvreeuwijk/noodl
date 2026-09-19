@@ -1,4 +1,4 @@
-# Theoretical background for `tellegen`
+# Theoretical background for `noodl`
 
 > Status (11 Sep 2026): research survey drafted by an AI agent from web sources; claims are
 > to be verified against the cited sources. The design spec
@@ -19,7 +19,7 @@ building this in PyTorch. Uncertain or unverified claims are flagged explicitly.
 Represent the network as a directed graph with `n` nodes and `b` branches. The
 **incidence matrix** `A` (`n × b`) has `A[i,e] = +1` if branch `e` leaves node `i`, `-1`
 if it enters, `0` otherwise (this is exactly `Network.incidence()` in
-`src/tellegen/topology.py`). For a connected graph `A` has rank `n − 1`; one row is
+`src/noodl/topology.py`). For a connected graph `A` has rank `n − 1`; one row is
 redundant because every column sums to zero (each branch leaves one node and enters
 another).
 
@@ -60,7 +60,7 @@ e^T f = φ^T (A f) = 0.
 
 The proof is one line, but the content is large: `f` need only be any element of the
 cycle space (no constitutive law required), and `e` need only be a gradient.
-Consequences used throughout `tellegen`:
+Consequences used throughout `noodl`:
 
 - **Power balance / energy conservation**: if `e, f` are the *same* system's effort and
   flow, `Σ e_k f_k = 0` is the statement that stored power equals dissipated/supplied
@@ -119,7 +119,7 @@ f = B^T λ + f_p ,     A f_p = s
 which satisfies KCL *by construction*, for any `λ` (this is exactly
 `physics/flows.py: branch_flows`, which builds `f = λ @ B` so mass conservation is exact
 to floating-point precision independent of solver convergence — a deliberate design
-choice in `tellegen`). What remains is KVL on the branch effort law `e = h(f)`:
+choice in `noodl`). What remains is KVL on the branch effort law `e = h(f)`:
 
 ```
 B h(B^T λ + f_p) = 0.
@@ -153,7 +153,7 @@ conjugate **effort/flow** pairs whose product is power:
 
 (For the true bond graph pair `T·(dS/dt)` has units of power; the pseudo-bond-graph
 `T·Φ` pairing is a convenient engineering approximation, not literally power — this
-distinction matters if `tellegen`'s thermal module is ever audited for exact energy
+distinction matters if `noodl`'s thermal module is ever audited for exact energy
 balance, and should be flagged as a modelling choice, not swept under Tellegen's
 theorem.) Van der Schaft & Maschke, ["Port-Hamiltonian Systems on
 Graphs"](https://pure.rug.nl/ws/files/2340945/2013SIAMJContOptimvdSchaft.pdf) (SIAM J.
@@ -163,7 +163,7 @@ edge flows/efforts to vertex flows/efforts, `f_v = -A f_e`, `e_e = A^T e_v`, so 
 storage, dissipation and ports can be attached at either edges or vertices while power
 balance (`dH/dt` = power in through ports − dissipation) holds identically — the
 continuous-time, energy-storing generalisation of Tellegen's theorem, and the natural
-home for `tellegen`'s "storage at nodes, typed edges" design.
+home for `noodl`'s "storage at nodes, typed edges" design.
 
 **The subtlety for heat and species.** A resistive bond-graph element has `f = g(e)`: the
 flow is driven by the effort *difference alone* (Fourier conduction, `q = k(T_i − T_j)`).
@@ -198,7 +198,7 @@ on a graph, `V dc/dt = -(A K A^T) c - M(f) c + s`.
 | NIST **CONTAM**/AIRNET (Walton 1989) | Nodal (zone pressures) | Newton on power-law/quadratic orifice flows | Contaminant transport: a second nodal solve on well-mixed zones, using AIRNET's converged flows |
 | **COMIS** | Nodal, same family | Newton | Similar; largely superseded, merged into EnergyPlus AFN |
 | **EnergyPlus AirflowNetwork** | Nodal (zones = nodes) | Newton on Bernoulli/power-law components ([Engineering Reference](https://bigladdersoftware.com/epx/docs/9-4/engineering-reference/airflownetwork-model.html)) | Airflow solved first each timestep; resulting flows feed the zone heat balance (sequential/operator-split) |
-| **Modelica Buildings** (Wetter et al.) | Acausal DAE; **stream connectors** carry `p, m_flow, h_outflow, Xi_outflow, C_outflow` together ([spec](https://specification.modelica.org/master/stream-connectors.html)) | Tool-dependent Newton after index reduction | Heat and species ride along with mass flow *by connector design* — closest existing analogue to `tellegen`'s intent |
+| **Modelica Buildings** (Wetter et al.) | Acausal DAE; **stream connectors** carry `p, m_flow, h_outflow, Xi_outflow, C_outflow` together ([spec](https://specification.modelica.org/master/stream-connectors.html)) | Tool-dependent Newton after index reduction | Heat and species ride along with mass flow *by connector design* — closest existing analogue to `noodl`'s intent |
 | **pandapipes**/**pandapower** | Nodal Newton (Y-bus-like for power; pressure/temperature nodes for pipes) | Newton, linearised pipe friction each step | Sequential heat-network extension in pandapipes |
 | **EPANET** (Rossman) | Nodal heads via the **Global Gradient Algorithm** (Todini & Pilati 1988) | One sparse linear solve for heads + a scalar flow-update per link, each Newton iteration ([EPANET 2.2 docs](https://epanet22.readthedocs.io/en/latest/12_analysis_algorithms.html)) | Water-quality solved as a second, decoupled transport step on converged flows |
 | **WNTR** | Python wrapper around EPANET's engine | as EPANET | Adds resilience/failure scenario analysis |
@@ -207,8 +207,8 @@ on a graph, `V dc/dt = -(A K A^T) c - M(f) c + s`.
 None of these is differentiable in the autograd sense (uncertain: no published
 "differentiable EPANET/CONTAM" was found; the closest is differentiable AC/DC
 [power-flow optimisation](https://arxiv.org/pdf/2603.28203)). Two patterns matter for
-`tellegen`: every mature tool is **nodal** in the pressure/head variable (cheap, robust
-SPD systems), whereas `tellegen` deliberately chose the **loop** formulation for air
+`noodl`: every mature tool is **nodal** in the pressure/head variable (cheap, robust
+SPD systems), whereas `noodl` deliberately chose the **loop** formulation for air
 networks to get exact conservation by construction (§1) — an intentional trade-off; and
 Modelica's stream connectors are the strongest existing precedent for carrying enthalpy
 and species *with* the flow, matching the advection-matrix construction in §2.
@@ -245,7 +245,7 @@ Implicit Differentiation"](https://arxiv.org/pdf/2105.15183), NeurIPS 2021) and
 Optimistix/Diffrax; Theseus (Meta) and OptNet (Amos & Kolter 2017) are differentiable
 nonlinear/QP solver layers in the same family; Deep Equilibrium Models (Bai et al. 2019)
 popularised implicit differentiation for fixed-point layers generally. **Caveat**:
-PyTorch's native sparse-tensor autograd coverage is limited, so a practical `tellegen`
+PyTorch's native sparse-tensor autograd coverage is limited, so a practical `noodl`
 sparse solver likely needs a custom `autograd.Function` wrapping a sparse solve with an
 *analytic* adjoint via the rule above rather than autograd tracing the factorisation;
 recent work (`torch-sla`, [arXiv:2601.13994](https://arxiv.org/html/2601.13994v2))
@@ -291,7 +291,7 @@ PyTorch network solver to FMI, so treat it as a hypothesis to validate.
 On topology and metadata standards for auto-generating the graph: **Brick schema**
 (Balaji et al., BuildSys 2016) and the W3C **Building Topology Ontology (BOT)** are
 complementary — BOT for spatial containment/adjacency (sites, storeys, spaces, elements),
-Brick for equipment/point semantics — and both can plausibly seed a `tellegen.Network`'s
+Brick for equipment/point semantics — and both can plausibly seed a `noodl.Network`'s
 nodes and edge `kind`s from a BAS point list or **IFC/BIM** model (`IfcSpace` adjacency
 for airflow-path topology, `IfcDistributionElement` for duct/pipe branches). **Project
 Haystack** is a competing/overlapping industry tagging convention for the same purpose.
@@ -341,7 +341,7 @@ quasi-steady-state assumption already built into CONTAM, COMIS and EnergyPlus AF
 ## 7. Heat as a transport layer, and coupling modes
 
 *(Written from the implementation, milestone 2, not from the survey: this section describes
-what `tellegen` does and why, and its verification cases are in the repository.)*
+what `noodl` does and why, and its verification cases are in the repository.)*
 
 **The heat balance IS the transport equation.** For a well-mixed zone `i` of volume `V_i`
 at temperature `T_i`, with air mass flows `F_e` on the paths incident to it, an envelope
@@ -395,7 +395,7 @@ on. Its error is the lag between the two -- a first-order-in-`dt` splitting erro
 usually harmless when the coupling is weak. **Onion** repeats the pass within the step until
 the exchanged temperatures stop moving, so the flows and the temperatures at the end of the
 step are mutually consistent and the splitting error is removed; each pass re-advances the
-same step from the state at its start. `tellegen` implements both (`Model(coupling=...)`),
+same step from the state at its start. `noodl` implements both (`Model(coupling=...)`),
 the onion as successive substitution under 0.5 relaxation with a per-instance convergence
 test. The difference between them is therefore ONLY the within-step lag: it vanishes as
 `dt -> 0`, which is why a fine-step ping-pong run and a fine-step onion run agree while a
@@ -551,7 +551,7 @@ other way round; a head difference does not drive the water, so a Newton potenti
 built on head is the wrong shape for it (spec section 1). A pressurised water-distribution
 network is the opposite case, and it is exactly the framework's own: every pipe runs full,
 and head loss is a monotone function of the head difference at each pipe, pump and valve,
-so `tellegen.apps.water` is an ordinary `PotentialFlowLayer` (§1, §3 above) with
+so `noodl.apps.water` is an ordinary `PotentialFlowLayer` (§1, §3 above) with
 Hazen-Williams or Darcy-Weisbach pipes, `PumpCurve` and minor-loss elements, solved by the
 same batched, damped Newton iteration as every other potential layer in this codebase.
 Section 3's own table already says why: SWMM solves the sewer's full 1-D Saint-Venant
@@ -662,7 +662,7 @@ capacity and the downstream node's remaining storage headroom -- with no potenti
 anywhere in the calculation. The framework spec names this explicitly as the fourth way an
 edge's flow can be determined (alongside a potential-flow Newton solve, a driver-prescribed
 flow, and a closure-computed flow), and `CapacitatedTransferLayer`
-(`src/tellegen/layers/capacitated.py`) is its implementation: a `Model` layer type that owns
+(`src/noodl/layers/capacitated.py`) is its implementation: a `Model` layer type that owns
 one or more edge kinds exactly like `PotentialFlowLayer` does, but whose per-step output is
 an explicit clip-and-allocate computation rather than a solve.
 
@@ -710,11 +710,11 @@ lambda/preference_i, 0, avail_i)` for one scalar `lambda` SHARED by every edge c
 that node -- so `d(f_i)/d(r_j)` for a competing edge `j != i` is genuinely nonzero, flowing
 entirely through `lambda`. `lambda`'s root is monotone in `lambda` by construction (every
 edge's contribution shrinks as `lambda` grows), which is exactly
-`tellegen.solvers.scalar.solve_monotone`'s own contract (a batched, monotone,
+`noodl.solvers.scalar.solve_monotone`'s own contract (a batched, monotone,
 implicit-function-differentiable scalar root) -- the same primitive the sewer application
 uses for Manning-depth inversion (section 9 above) -- rather than new solver machinery or a
 Fischer-Burmeister-smoothed complementarity condition fed through
-`tellegen.solvers.implicit.implicit_solve`, which was investigated and rejected as strictly
+`noodl.solvers.implicit.implicit_solve`, which was investigated and rejected as strictly
 harder to verify for no accuracy benefit. The resulting cross-gradient,
 `d(f_BD)/d(r_CD) = -0.5` on this specific SYMMETRIC-preference four-node diamond test
 fixture, was hand-derived and is checked directly (sign and magnitude) by

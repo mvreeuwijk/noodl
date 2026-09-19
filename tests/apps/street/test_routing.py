@@ -10,8 +10,8 @@ import math
 import pytest
 import torch
 
-from tellegen.apps.street.canyon import KAPPA_IMPAQ, KAPPA_MUNICH
-from tellegen.apps.street.routing import (
+from noodl.apps.street.canyon import KAPPA_IMPAQ, KAPPA_MUNICH
+from noodl.apps.street.routing import (
     MAX_N_THETA,
     MAX_SIGMA_THETA,
     StreetFlows,
@@ -23,8 +23,8 @@ from tellegen.apps.street.routing import (
     routing_matrix,
     sigma_theta_munich,
 )
-from tellegen.layers.transport import TransportLayer
-from tellegen.topology import Network
+from noodl.layers.transport import TransportLayer
+from noodl.topology import Network
 
 DT = torch.float64
 

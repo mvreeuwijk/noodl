@@ -21,9 +21,9 @@ from pathlib import Path
 import pytest
 import torch
 
-from tellegen.apps.building.prj import project_to_model, read_prj
-from tellegen.apps.street.network import Street, StreetNetwork, build_street_model, street_index
-from tellegen.couple import (
+from noodl.apps.building.prj import project_to_model, read_prj
+from noodl.apps.street.network import Street, StreetNetwork, build_street_model, street_index
+from noodl.couple import (
     CONCENTRATION_TO_MASS_FRACTION,
     STREET_RAD_TO_CONTAM_DEG,
     DriverAlias,
@@ -179,12 +179,12 @@ def test_the_wind_reaches_the_building_through_the_aliases():
 # ----------------------------------------------------------------- the real data
 
 AQDT_DATA = Path(os.environ.get(
-    "TELLEGEN_AQDT_DATA", r"<workspace>\tmp\2026_AQ_DT\data"
+    "NOODL_AQDT_DATA", r"<workspace>\tmp\2026_AQ_DT\data"
 ))
 DOMAIN, YEAR, STEP = "leiden_small", 2024, 1000
 needs_aqdt = pytest.mark.skipif(
     not (AQDT_DATA / "stage1_geometry" / DOMAIN / "repaired_edges_canyon.geojson").exists(),
-    reason=f"the AQ_DT products are not at {AQDT_DATA}; set TELLEGEN_AQDT_DATA",
+    reason=f"the AQ_DT products are not at {AQDT_DATA}; set NOODL_AQDT_DATA",
 )
 
 
@@ -195,7 +195,7 @@ def test_real_leiden_small_building_back_coupling_magnitude(record_property):
     segment, the three-zone CONTAM building on it. The magnitude is RECORDED (design spec
     section 4: negligible is an acceptable, reportable result); the assertion is only that
     the coupled step converged and the sink sign is right."""
-    from tellegen.apps.street.loader import read_aqdt
+    from noodl.apps.street.loader import read_aqdt
 
     data = read_aqdt(
         AQDT_DATA / "stage1_geometry" / DOMAIN, AQDT_DATA / "stage2_inputs" / DOMAIN,

@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from tellegen.apps.water.inp import FLOW_UNITS, read_epanet_inp
-from tellegen.apps.water.network import twoloop
+from noodl.apps.water.inp import FLOW_UNITS, read_epanet_inp
+from noodl.apps.water.network import twoloop
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "water"
 FOOT = 0.3048
@@ -296,7 +296,7 @@ def test_a_pda_file_reads_the_demand_model_and_the_three_pressures(tmp_path):
     assert net.options.minimum_pressure == 0.0
     assert net.options.required_pressure == 60.0
     assert net.options.pressure_exponent == 0.5
-    from tellegen.apps.water.network import build_water_model
+    from noodl.apps.water.network import build_water_model
 
     model, _, _ = build_water_model(net)
     assert len(model.potential["water"]._node_sources) == 1

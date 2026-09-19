@@ -6,13 +6,13 @@ GraphLaplacianOperator + solvers.select.solve rather than a dense einsum Jacobia
 import pytest
 import torch
 
-import tellegen.solvers.select as select_module
+import noodl.solvers.select as select_module
 from benchmarks.measure import saved_tensor_bytes
-from tellegen.drives import ConstantDrive
-from tellegen.elements import Conductance, FixedFlow, PowerLaw
-from tellegen.elements.fan import FanCurve
-from tellegen.layers.potential import _LINEAR_SOLVERS, PotentialFlowLayer
-from tellegen.topology import Network
+from noodl.drives import ConstantDrive
+from noodl.elements import Conductance, FixedFlow, PowerLaw
+from noodl.elements.fan import FanCurve
+from noodl.layers.potential import _LINEAR_SOLVERS, PotentialFlowLayer
+from noodl.topology import Network
 
 
 def _three_node_chain() -> Network:
@@ -946,7 +946,7 @@ def test_diagnostics_report_the_resolved_backend_at_a_small_ensemble():
 
 
 def test_diagnostics_report_pcg_above_the_sparse_direct_batch_threshold():
-    from tellegen.solvers.select import _SPARSE_DIRECT_MAX_BATCH
+    from noodl.solvers.select import _SPARSE_DIRECT_MAX_BATCH
 
     n = _SPARSE_DIRECT_MAX_BATCH + 1
     layer, drivers, phi_b = _series_layer()

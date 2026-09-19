@@ -17,7 +17,7 @@ import math
 import pytest
 import torch
 
-from tellegen.elements import Duct
+from noodl.elements import Duct
 
 F64 = torch.float64
 PARAMS = dict(

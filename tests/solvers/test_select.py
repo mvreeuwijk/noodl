@@ -10,9 +10,9 @@ its certificate correctly (Tasks 3 and 4 already cover that).
 import pytest
 import torch
 
-from tellegen.operators.base import SolverStatus
-from tellegen.operators.graph import GraphLaplacianOperator
-from tellegen.solvers.select import solve
+from noodl.operators.base import SolverStatus
+from noodl.operators.graph import GraphLaplacianOperator
+from noodl.solvers.select import solve
 
 
 @pytest.fixture(autouse=True)
@@ -74,7 +74,7 @@ def _chain_op(slopes: torch.Tensor) -> GraphLaplacianOperator:
 
 
 def _spy(monkeypatch, target, name):
-    """Wrap tellegen.solvers.select.<name> to count calls while still delegating to the
+    """Wrap noodl.solvers.select.<name> to count calls while still delegating to the
     real implementation, so the eligibility mechanism is verified by WHICH solver actually
     ran (not merely by inspecting internal state) without losing correctness checking.
     """
@@ -94,7 +94,7 @@ def test_all_instances_certify_and_no_sparse_form_selects_pcg(monkeypatch):
     not because certification alone still means PCG -- since spec section 6.2 step 2 it does
     not. The name says the reason, so this test cannot be read as pinning the old rule.
     """
-    import tellegen.solvers.select as select_module
+    import noodl.solvers.select as select_module
 
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
     gmres_calls = _spy(monkeypatch, select_module, "gmres")
@@ -107,7 +107,7 @@ def test_all_instances_certify_and_no_sparse_form_selects_pcg(monkeypatch):
 
 
 def test_symmetric_but_cannot_certify_selects_gmres(monkeypatch):
-    import tellegen.solvers.select as select_module
+    import noodl.solvers.select as select_module
 
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
     gmres_calls = _spy(monkeypatch, select_module, "gmres")
@@ -120,7 +120,7 @@ def test_symmetric_but_cannot_certify_selects_gmres(monkeypatch):
 
 
 def test_nonsymmetric_selects_gmres_and_never_uses_rmatvec_for_the_forward_solve(monkeypatch):
-    import tellegen.solvers.select as select_module
+    import noodl.solvers.select as select_module
 
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
     gmres_calls = _spy(monkeypatch, select_module, "gmres")
@@ -135,7 +135,7 @@ def test_nonsymmetric_selects_gmres_and_never_uses_rmatvec_for_the_forward_solve
 def test_none_certify_selects_gmres_not_a_raise(monkeypatch):
     # Uniformly ineligible (certificate all False, not a mix) is not "some but not all": there
     # is no subset to split off, so this routes to gmres exactly like certificate=None does.
-    import tellegen.solvers.select as select_module
+    import noodl.solvers.select as select_module
 
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
     gmres_calls = _spy(monkeypatch, select_module, "gmres")
@@ -157,7 +157,7 @@ def test_mixed_certification_does_not_split_the_batch(monkeypatch):
     # Confirm the refusal happens BEFORE either solver runs -- neither pcg nor gmres is
     # ever called on a mixed-certification batch, since silently splitting it is exactly
     # what design section 3.1 says would hide a modelling error.
-    import tellegen.solvers.select as select_module
+    import noodl.solvers.select as select_module
 
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
     gmres_calls = _spy(monkeypatch, select_module, "gmres")
@@ -279,7 +279,7 @@ def test_explicit_gmres_is_honoured_unconditionally_even_on_a_certifying_operato
     # to certify -- unlike method="cg", it is honoured regardless of what spd_certificate says.
     # An SPD operator gives the same numeric answer through either backend, so the assertion
     # that matters is WHICH backend actually ran, not just the result value.
-    import tellegen.solvers.select as select_module
+    import noodl.solvers.select as select_module
 
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
     gmres_calls = _spy(monkeypatch, select_module, "gmres")
@@ -336,7 +336,7 @@ def test_direct_raises_valueerror_when_assemble_returns_none():
 
 
 def test_direct_is_not_selected_by_auto(monkeypatch):
-    import tellegen.solvers.select as select_module
+    import noodl.solvers.select as select_module
 
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
     gmres_calls = _spy(monkeypatch, select_module, "gmres")
@@ -724,7 +724,7 @@ def _spy_splu(monkeypatch):
 
 
 def test_auto_selects_sparse_direct_for_a_certified_spd_operator_with_a_sparse_form(monkeypatch):
-    import tellegen.solvers.select as select_module
+    import noodl.solvers.select as select_module
 
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
     gmres_calls = _spy(monkeypatch, select_module, "gmres")
@@ -745,7 +745,7 @@ def test_auto_falls_back_to_pcg_when_the_operator_has_no_sparse_form_at_all(monk
     """`_FakeOperator` certifies SPD but declares no `assemble_sparse`: the optional member
     is optional, so `auto` must keep selecting PCG rather than refuse.
     """
-    import tellegen.solvers.select as select_module
+    import noodl.solvers.select as select_module
 
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
     splu_calls = _spy_splu(monkeypatch)
@@ -756,7 +756,7 @@ def test_auto_falls_back_to_pcg_when_the_operator_has_no_sparse_form_at_all(monk
 
 
 def test_auto_falls_back_to_pcg_when_assemble_sparse_returns_none(monkeypatch):
-    import tellegen.solvers.select as select_module
+    import noodl.solvers.select as select_module
 
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
     splu_calls = _spy_splu(monkeypatch)
@@ -773,7 +773,7 @@ def test_auto_falls_back_to_pcg_when_scipy_is_not_importable(monkeypatch):
     """
     import builtins
 
-    import tellegen.solvers.select as select_module
+    import noodl.solvers.select as select_module
 
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
     real_import = builtins.__import__
@@ -798,7 +798,7 @@ def test_auto_falls_back_to_pcg_rather_than_refusing_a_grad_requiring_solve(monk
     """An EXPLICIT method='sparse_direct' raises under grad mode; `auto` must never raise for
     a reason the caller did not ask for, so it silently keeps the differentiable backend.
     """
-    import tellegen.solvers.select as select_module
+    import noodl.solvers.select as select_module
 
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
     splu_calls = _spy_splu(monkeypatch)
@@ -811,7 +811,7 @@ def test_auto_falls_back_to_pcg_rather_than_refusing_a_grad_requiring_solve(monk
 
 
 def test_auto_falls_back_to_pcg_when_only_the_right_hand_side_requires_grad(monkeypatch):
-    import tellegen.solvers.select as select_module
+    import noodl.solvers.select as select_module
 
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
     splu_calls = _spy_splu(monkeypatch)
@@ -841,7 +841,7 @@ def test_auto_still_routes_a_nonsymmetric_uncertified_operator_to_gmres(monkeypa
     GMRES, whatever sparse form the operator may offer. This is the `TransportLayer` case --
     `AdvectionOperator.spd_certificate()` is None -- and it must not move.
     """
-    import tellegen.solvers.select as select_module
+    import noodl.solvers.select as select_module
 
     gmres_calls = _spy(monkeypatch, select_module, "gmres")
     splu_calls = _spy_splu(monkeypatch)
@@ -866,7 +866,7 @@ def test_auto_and_explicit_cg_still_disagree_about_the_backend_they_run(monkeypa
     """`method="cg"` remains an EXPLICIT request for the Krylov solver and is honoured
     verbatim -- the new default applies to `"auto"` only.
     """
-    import tellegen.solvers.select as select_module
+    import noodl.solvers.select as select_module
 
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
     splu_calls = _spy_splu(monkeypatch)
@@ -923,8 +923,8 @@ def test_auto_takes_sparse_direct_at_the_batch_threshold(monkeypatch):
     """At exactly `_SPARSE_DIRECT_MAX_BATCH` instances the factorisation is still the faster
     backend (see the constant's own evidence table), so `auto` must still take it.
     """
-    import tellegen.solvers.select as select_module
-    from tellegen.solvers.select import _SPARSE_DIRECT_MAX_BATCH
+    import noodl.solvers.select as select_module
+    from noodl.solvers.select import _SPARSE_DIRECT_MAX_BATCH
 
     n = _SPARSE_DIRECT_MAX_BATCH
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
@@ -943,8 +943,8 @@ def test_auto_falls_back_to_pcg_one_instance_above_the_batch_threshold(monkeypat
     batched arithmetic, so `auto` routes to PCG -- a fall-back like every other "no" on this
     path, not a refusal.
     """
-    import tellegen.solvers.select as select_module
-    from tellegen.solvers.select import _SPARSE_DIRECT_MAX_BATCH
+    import noodl.solvers.select as select_module
+    from noodl.solvers.select import _SPARSE_DIRECT_MAX_BATCH
 
     n = _SPARSE_DIRECT_MAX_BATCH + 1
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
@@ -973,7 +973,7 @@ def test_the_batch_threshold_counts_every_leading_dimension(monkeypatch):
     """The threshold is on the FLAT batch size, so a (6, 6) batch is 36 instances and is
     above a threshold of 32 even though neither leading dimension is.
     """
-    import tellegen.solvers.select as select_module
+    import noodl.solvers.select as select_module
 
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
     splu_calls = _spy_splu(monkeypatch)
@@ -994,7 +994,7 @@ def test_backend_out_reports_sparse_direct_for_a_small_certified_batch():
 
 
 def test_backend_out_reports_pcg_above_the_batch_threshold():
-    from tellegen.solvers.select import _SPARSE_DIRECT_MAX_BATCH
+    from noodl.solvers.select import _SPARSE_DIRECT_MAX_BATCH
 
     n = _SPARSE_DIRECT_MAX_BATCH + 1
     op = _chain_op(torch.ones(n, 2))
@@ -1064,7 +1064,7 @@ def _rearm_scipy_warning(monkeypatch):
     """Reset the once-per-process flag. The warning is deliberately once per PROCESS, which
     in a test session means whichever test ran first would otherwise consume it.
     """
-    import tellegen.solvers.select as select_module
+    import noodl.solvers.select as select_module
 
     monkeypatch.setattr(select_module, "_WARNED_SPARSE_DIRECT_NEEDS_SCIPY", False)
 
@@ -1072,7 +1072,7 @@ def _rearm_scipy_warning(monkeypatch):
 def test_auto_warns_once_when_scipy_is_the_only_thing_missing(monkeypatch):
     """The one fall-back that is an ENVIRONMENT fault rather than a modelling fact: this
     operator certifies SPD, offers a sparse form and is within the batch threshold, so the
-    only reason it is not being factorised is that the `tellegen[sparse]` extra is absent.
+    only reason it is not being factorised is that the `noodl[sparse]` extra is absent.
     PCG is still a correct answer, so this is a warning and not an error -- and it fires
     once per process, because a per-solve warning would be unusable noise.
     """
@@ -1117,7 +1117,7 @@ def test_no_warning_when_the_batch_is_above_the_threshold(monkeypatch):
     """
     import warnings as warnings_module
 
-    from tellegen.solvers.select import _SPARSE_DIRECT_MAX_BATCH
+    from noodl.solvers.select import _SPARSE_DIRECT_MAX_BATCH
 
     _rearm_scipy_warning(monkeypatch)
     _no_scipy(monkeypatch)

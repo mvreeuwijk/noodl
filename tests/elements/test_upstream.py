@@ -10,9 +10,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from tellegen.elements import PowerLaw, UpstreamDensityPowerLaw
-from tellegen.layers.potential import PotentialFlowLayer
-from tellegen.topology import Network
+from noodl.elements import PowerLaw, UpstreamDensityPowerLaw
+from noodl.layers.potential import PotentialFlowLayer
+from noodl.topology import Network
 
 F64 = torch.float64
 RHO_REF = 1.2041
@@ -106,7 +106,7 @@ def test_dflow_is_the_exact_elementwise_derivative_on_both_sides():
 
 
 def test_dflow_matches_the_autograd_default_including_at_zero_and_the_transition():
-    from tellegen.elements.base import Element
+    from noodl.elements.base import Element
 
     el = _element(0.5)
     dp = torch.tensor([-2.0, -1e-3, -5e-4, 0.0, 5e-4, 1e-3, 2.0], dtype=F64)
@@ -356,7 +356,7 @@ def test_a_buoyant_two_orifice_stack_beats_the_uncorrected_law_in_both_direction
     src, tgt = net.endpoints("airpath")
     C = torch.full((2,), 0.141421 * RHO_REF**0.5, dtype=F64)
     n = torch.full((2,), 0.5, dtype=F64)
-    from tellegen.drives import Stack
+    from noodl.drives import Stack
 
     drive = Stack.from_network(net, "airpath")
     plain = PotentialFlowLayer(net, "air", [PowerLaw(C, n)], drives=[drive],
@@ -398,7 +398,7 @@ def test_a_gradient_reaches_the_density_driver_through_a_differentiable_solve():
     net.add_edge("ambient", "zone", kind="airpath", z_path=0.0)
     net.add_edge("ambient", "zone", kind="airpath", z_path=1.5)
     src, tgt = net.endpoints("airpath")
-    from tellegen.drives import Stack
+    from noodl.drives import Stack
 
     layer = PotentialFlowLayer(
         net,

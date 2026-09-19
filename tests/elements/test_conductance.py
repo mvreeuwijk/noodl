@@ -2,7 +2,7 @@
 
 import torch
 
-from tellegen.elements.conductance import Conductance
+from noodl.elements.conductance import Conductance
 
 
 def test_flow_is_linear_and_defaults_to_conduction_kind():

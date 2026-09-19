@@ -191,7 +191,7 @@ def build(root, *, year: int = 2024, aligned: bool = True,
     heights = ([REFERENCE_HEIGHT_M] * n_time if reference_height_m is None
                else list(reference_height_m))
     with netcdf_file(str(stage2 / f"forcing_{year}.nc"), "w") as handle:
-        handle.history = "hand-written tellegen fixture"
+        handle.history = "hand-written noodl fixture"
         handle.model_time_step_hours = "3"
         handle.createDimension("time", n_time)
         for name, values, units in (
@@ -210,7 +210,7 @@ def build(root, *, year: int = 2024, aligned: bool = True,
     normalized = np.asarray([EMISSION_NORMALIZED[i] for i in order], dtype="float64")
     modulation = np.asarray(EMISSION_TIME_MODULATION, dtype="float64")
     with netcdf_file(str(stage2 / f"input_parameters_{year}.nc"), "w") as handle:
-        handle.history = "hand-written tellegen fixture"
+        handle.history = "hand-written noodl fixture"
         handle.emissions_policy = "Unit-source emissions only."
         handle.createDimension("time", n_time)
         handle.createDimension("edge", n_edge)

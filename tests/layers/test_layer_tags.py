@@ -6,10 +6,10 @@ from __future__ import annotations
 import pytest
 import torch
 
-from tellegen.elements import PowerLaw
-from tellegen.layers.potential import PotentialFlowLayer
-from tellegen.layers.transport import TransportLayer, active_interior
-from tellegen.topology import Network
+from noodl.elements import PowerLaw
+from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.transport import TransportLayer, active_interior
+from noodl.topology import Network
 
 F64 = torch.float64
 

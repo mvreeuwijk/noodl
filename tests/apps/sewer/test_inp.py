@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from tellegen.apps.sewer.inp import read_inp
+from noodl.apps.sewer.inp import read_inp
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "sewer"
 

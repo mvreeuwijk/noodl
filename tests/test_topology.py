@@ -6,7 +6,7 @@ import torch
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from tellegen.topology import Network
+from noodl.topology import Network
 
 
 def triangle() -> Network:
@@ -95,7 +95,7 @@ def test_cycle_basis_spans_nullspace_of_incidence():
     assert torch.linalg.matrix_rank(J) == 1
 
 
-def test_tellegen_power_residual_is_zero_for_consistent_potentials_and_flows():
+def test_noodl_power_residual_is_zero_for_consistent_potentials_and_flows():
     net = triangle()
     phi = torch.tensor([3.0, -1.0, 7.0])
     p = net.gradient() @ phi

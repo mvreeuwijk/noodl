@@ -19,10 +19,10 @@ import pytest
 import scipy.sparse
 import torch
 
-from tellegen.operators.advection import AdvectionOperator
-from tellegen.operators.base import SparseAssembling
-from tellegen.operators.dense import DenseOperator
-from tellegen.operators.graph import GraphLaplacianOperator
+from noodl.operators.advection import AdvectionOperator
+from noodl.operators.base import SparseAssembling
+from noodl.operators.dense import DenseOperator
+from noodl.operators.graph import GraphLaplacianOperator
 
 
 @pytest.fixture(autouse=True)

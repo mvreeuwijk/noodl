@@ -40,9 +40,9 @@ import time
 
 import torch
 
-from tellegen.apps.sewer.air import F_I_DEFAULT
-from tellegen.apps.sewer.network import build_sewer_model, tree_steady
-from tellegen.apps.sewer.report import to_ppm
+from noodl.apps.sewer.air import F_I_DEFAULT
+from noodl.apps.sewer.network import build_sewer_model, tree_steady
+from noodl.apps.sewer.report import to_ppm
 
 F64 = torch.float64
 

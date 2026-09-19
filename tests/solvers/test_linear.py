@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from tellegen.solvers.linear import solve
+from noodl.solvers.linear import solve
 
 
 def test_solve_matches_torch_linalg_solve_on_a_regular_system():

@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from tellegen.apps.street.canyon import (
+from noodl.apps.street.canyon import (
     KAPPA_MUNICH,
     SCHULTE_BETA,
     SIRANE_EXCHANGE,
@@ -31,16 +31,16 @@ from tellegen.apps.street.canyon import (
     roof_wind,
     soulhac_shape,
 )
-from tellegen.apps.street.chemistry import photostationary_for_streets, street_steady
-from tellegen.apps.street.network import build_street_model, munich_idealised, street_index
-from tellegen.apps.street.routing import (
+from noodl.apps.street.chemistry import photostationary_for_streets, street_steady
+from noodl.apps.street.network import build_street_model, munich_idealised, street_index
+from noodl.apps.street.routing import (
     direction_offsets,
     n_theta_munich,
     node_closure,
     routing_matrix,
     sigma_theta_munich,
 )
-from tellegen.layers.reaction import K_NO_O3, K_NO_O3_298, MOLAR_MASS
+from noodl.layers.reaction import K_NO_O3, K_NO_O3_298, MOLAR_MASS
 
 DT = torch.float64
 FIXTURE = Path(__file__).resolve().parents[1] / "data" / "street" / "munich_idealised.json"

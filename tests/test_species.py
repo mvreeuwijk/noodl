@@ -3,8 +3,8 @@ import math
 import pytest
 import torch
 
-from tellegen.physics import SpeciesTransport, branch_flows
-from tellegen.topology import Network
+from noodl.physics import SpeciesTransport, branch_flows
+from noodl.topology import Network
 
 
 def one_zone():

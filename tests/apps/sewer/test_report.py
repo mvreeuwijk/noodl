@@ -5,8 +5,8 @@ import csv
 import pytest
 import torch
 
-from tellegen.apps.sewer.network import build_sewer_model, sewer_steady, tree_steady
-from tellegen.apps.sewer.report import pipe_table, to_mg_per_litre, to_ppm
+from noodl.apps.sewer.network import build_sewer_model, sewer_steady, tree_steady
+from noodl.apps.sewer.report import pipe_table, to_mg_per_litre, to_ppm
 
 F64 = torch.float64
 

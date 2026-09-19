@@ -3,8 +3,8 @@
 import pytest
 import torch
 
-from tellegen.apps.sewer import geometry as g
-from tellegen.apps.sewer.air import (
+from noodl.apps.sewer import geometry as g
+from noodl.apps.sewer.air import (
     F_AIR_DEFAULT,
     F_I_DEFAULT,
     RHO_AIR_REF,
@@ -12,8 +12,8 @@ from tellegen.apps.sewer.air import (
     Headspace,
     air_density,
 )
-from tellegen.layers.potential import PotentialFlowLayer
-from tellegen.topology import Network
+from noodl.layers.potential import PotentialFlowLayer
+from noodl.topology import Network
 
 F64 = torch.float64
 
