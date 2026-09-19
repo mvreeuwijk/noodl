@@ -1,0 +1,62 @@
+{
+  "nodes": [
+    {
+      "name": "my_sewer",
+      "type": "Sewer"
+    },
+    {
+      "name": "my_land",
+      "type": "Land"
+    },
+    {
+      "name": "my_groundwater",
+      "type": "Groundwater"
+    },
+    {
+      "name": "my_river",
+      "type": "Node"
+    },
+    {
+      "name": "my_outlet",
+      "type": "Waste"
+    }
+  ],
+  "arcs": [
+    {
+      "name": "urban_drainage",
+      "source": "my_land",
+      "target": "my_sewer",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "percolation",
+      "source": "my_land",
+      "target": "my_groundwater",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "runoff",
+      "source": "my_land",
+      "target": "my_river",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "storm_outflow",
+      "source": "my_sewer",
+      "target": "my_river",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "baseflow",
+      "source": "my_groundwater",
+      "target": "my_river",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "catchment_outflow",
+      "source": "my_river",
+      "target": "my_outlet",
+      "capacity": 1000000000000000.0
+    }
+  ]
+}
