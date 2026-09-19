@@ -112,6 +112,12 @@ The three schemes: `"exact"` uses an augmented matrix exponential and controls i
 sub-stepping; `"implicit"` is implicit Euler; `"trapezoidal"` is the second-order variant. Use
 `"exact"` for heat, `"implicit"` for species — the application defaults reflect this.
 
+The exact scheme bases its sub-stepping on the operator's one-norm `||dt M||_1`, computed from
+the state-independent matrix before any arithmetic on the state; if the predicted work exceeds
+the budget, the step is refused, raising an error that names the layer and advises the implicit
+or trapezoidal schemes. All coefficients the layer owns—carrier, transmission, kinetics, removal,
+and conductance—are differentiable under every scheme.
+
 ## `Reaction`
 
 Applied to a transport layer's state after its step, operator-split:
