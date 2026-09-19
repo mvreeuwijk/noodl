@@ -8,6 +8,7 @@ from tellegen.couple import (
     MASS_FRACTION_TO_CONCENTRATION,
     apply_conversion,
 )
+from tellegen.topology import Network
 
 F64 = torch.float64
 
@@ -73,3 +74,80 @@ def test_transport_boundary_inflow_hand_computed():
         net, q, ["link"], x_interior, x_boundary, interior_idx, boundary_idx, node_position=1,
     )
     assert inflow2.item() == pytest.approx(15.0)
+
+
+def _tiny_street_model():
+    """Two segments 'seg0'->'atm', 'seg1'->'atm', kind='vent'. Concentration state only."""
+    from tellegen.layers.transport import TransportLayer
+    from tellegen.model import Model
+
+    net = Network(dtype=F64)
+    net.add_node("atm")
+    net.add_node("seg0")
+    net.add_node("seg1")
+    net.add_edge("seg0", "atm", kind="vent")
+    net.add_edge("seg1", "atm", kind="vent")
+    layer = TransportLayer(
+        net, "street", capacity=torch.tensor([10.0, 10.0], dtype=F64), flow_kind="vent",
+        boundary=["atm"], quantity="concentration", unit="kg/m3",
+    )
+
+    def closure(state, drivers):
+        return {"street.q": torch.tensor([1.0, 1.0], dtype=F64)}  # both segments vent OUT at 1.0
+
+    model = Model(net, {"street": layer}, closures=[closure])
+    state = {"street.x": torch.tensor([3.0, 4.0], dtype=F64)}
+    drivers = {"street.x_boundary": torch.zeros(1, dtype=F64),
+               "street.sources": torch.zeros(3, dtype=F64)}
+    return model, state, drivers
+
+
+def _tiny_building_model():
+    """One zone 'z0' with an airpath to 'ambient'. Species state only."""
+    from tellegen.layers.transport import TransportLayer
+    from tellegen.model import Model
+
+    net = Network(dtype=F64)
+    net.add_node("ambient")
+    net.add_node("z0")
+    net.add_edge("z0", "ambient", kind="airpath")
+    layer = TransportLayer(
+        net, "species", capacity=torch.tensor([5.0], dtype=F64), flow_kind="airpath",
+        boundary=["ambient"], quantity="mass_fraction", unit="kg/kg",
+    )
+
+    def closure(state, drivers):
+        return {"species.q": torch.tensor([0.5], dtype=F64)}  # z0 vents OUT at 0.5
+
+    model = Model(net, {"species": layer}, closures=[closure])
+    state = {"species.x": torch.tensor([0.1], dtype=F64)}
+    drivers = {
+        "species.x_boundary": torch.zeros(1, dtype=F64),
+        "rho_amb": torch.tensor(1.2, dtype=F64),
+    }
+    return model, state, drivers
+
+
+def test_one_way_union_sets_building_boundary_from_street_segment():
+    from tellegen.couple import ValueLink, union
+
+    street_model, street_state, street_drivers = _tiny_street_model()
+    building_model, building_state, building_drivers = _tiny_building_model()
+    link = ValueLink(
+        from_model="street", from_key="street.x", from_index=0,
+        to_model="building", to_key="species.x_boundary", to_index=0,
+        convert="concentration_to_mass_fraction",
+    )
+    city, state, drivers = union(
+        {"street": (street_model, street_state, street_drivers),
+         "building": (building_model, building_state, building_drivers)},
+        shared=[link],
+    )
+    new_state = city.step(state, drivers, dt=1.0)
+    # street.x[0] = 3.0 kg/m3 -> mass fraction 3.0 / 1.2 = 2.5 kg/kg must have been used as
+    # building's species.x_boundary for this step -- checked indirectly via the building's
+    # own resulting state matching a standalone run given that exact boundary value.
+    expected_building_model, _, expected_building_drivers = _tiny_building_model()
+    expected_building_drivers["species.x_boundary"] = torch.tensor([2.5], dtype=F64)
+    expected = expected_building_model.step(building_state, expected_building_drivers, dt=1.0)
+    assert torch.allclose(new_state["building"]["species.x"], expected["species.x"])
