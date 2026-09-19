@@ -35,6 +35,7 @@ as Newton's mask is). Failure follows the layers: raise by default, naming the o
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
@@ -55,11 +56,27 @@ _STATE_SUFFIXES = ("phi", "q", "x", "s")
 
 @runtime_checkable
 class Closure(Protocol):
-    """state, drivers -> driver updates (a mapping of NEW driver values, merged in order)."""
+    """state, drivers -> driver updates (a mapping of NEW driver values, merged in order).
+
+    A closure that INTEGRATES some state over the step (R6) declares a class or instance
+    attribute `integrates = True` and is instead called as `closure(state, drivers, ctx)`,
+    receiving the `StepContext` it must advance by; see `StepContext` and
+    `Model._apply_closures`.
+    """
 
     def __call__(
         self, state: Mapping[str, Tensor], drivers: Mapping[str, Tensor]
     ) -> Mapping[str, Tensor]: ...
+
+
+@dataclass(frozen=True)
+class StepContext:
+    """What a state transition needs from the model: the interval it must integrate over
+    (`None` under `steady()`, which an integrating closure refuses) and, when the caller
+    tracks it, the time at the start of the step."""
+
+    dt: float | None
+    t: float | None = None
 
 
 @dataclass(frozen=True)
@@ -180,6 +197,38 @@ class Model:
                     f"callable; a closure is called as closure(state, drivers) and returns "
                     f"driver updates"
                 )
+        # R6: a closure that INTEGRATES some state over the step (rather than merely
+        # carrying it, unchanged, across steps) declares `integrates = True` and is called
+        # with a third argument, the `StepContext` it must advance by -- see
+        # `_apply_closures`. A closure declaring `state_keys` without declaring `integrates`
+        # is refused HERE, by name, rather than left to silently integrate with whatever
+        # interval its own constructor happened to be given (R6's own bug).
+        self._integrating: set[int] = set()
+        for closure in self.closures:
+            declared = getattr(closure, "integrates", None)
+            carries = tuple(getattr(closure, "state_keys", ()))
+            if carries and declared is None:
+                raise ValueError(
+                    f"Model: closure {closure!r} declares state_keys {carries} but not "
+                    f"`integrates`; set `integrates = True` if it advances that state over "
+                    f"the step (it then receives a StepContext), or `integrates = False` if "
+                    f"something else advances it"
+                )
+            if declared:
+                params = inspect.signature(closure).parameters
+                positional = [
+                    p for p in params.values()
+                    if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+                ]
+                if len(positional) < 3 and not any(
+                    p.kind is p.VAR_POSITIONAL for p in params.values()
+                ):
+                    raise ValueError(
+                        f"Model: closure {closure!r} declares integrates=True but its call "
+                        f"signature takes {len(positional)} positional arguments; an "
+                        f"integrating closure is called as closure(state, drivers, ctx)"
+                    )
+                self._integrating.add(id(closure))
         # CLOSURE-CARRIED STATE (spec 4.6a). A closure may declare
         # `state_keys: tuple[str, ...]`: keys it both READS from the state and WRITES back
         # every call, which `_pass` copies from its return into the returned state. They are
@@ -292,6 +341,7 @@ class Model:
         state: Mapping[str, Tensor],
         drivers: Mapping[str, Tensor],
         written: set[str] | None = None,
+        ctx: StepContext | None = None,
     ) -> Drivers:
         """Run every closure, in order, over `drivers`; return the resulting drivers.
 
@@ -302,10 +352,27 @@ class Model:
         (the caller's own, unrelated to any closure) must not be mistaken for a closure
         having written its declared state key -- `key in drv` alone cannot tell the two
         apart, since `drv` starts as a copy of `drivers`.
+
+        `ctx` (R6) is threaded to an INTEGRATING closure only (`closure.integrates = True`):
+        `StepContext(dt)` from `_pass` inside `step`, `StepContext(dt=None)` inside `steady`
+        (refused here by name -- an integrating closure has no interval to integrate over),
+        and `None` from a query (`residuals`, `current_flows`, `ports`, the sewer report),
+        where an integrating closure evaluates its algebraic outputs at the given state
+        without advancing. A non-integrating closure never sees `ctx` at all, so its call
+        signature and behaviour are exactly as before R6.
         """
         drv: Drivers = dict(drivers)
         for closure in self.closures:
-            for key, value in closure(state, drv).items():
+            if id(closure) in self._integrating:
+                if ctx is not None and ctx.dt is None:
+                    raise ValueError(
+                        f"Model: closure {closure!r} declares integrates=True and cannot be "
+                        f"evaluated by steady(), which has no interval to integrate over"
+                    )
+                result = closure(state, drv, ctx)
+            else:
+                result = closure(state, drv)
+            for key, value in result.items():
                 head, _, tail = key.rpartition(".")
                 if head in self.layers and tail in _STATE_SUFFIXES:
                     # ONE exception to "closures write drivers only": "<layer>.q" for a
@@ -397,11 +464,16 @@ class Model:
 
     # -------------------------------------------------------------------- pass
     def _pass(
-        self, state, drivers, dt, solve_kwargs, *, step_from: State | None = None
+        self, state, drivers, dt, solve_kwargs, *, step_from: State | None = None,
+        t: float | None = None,
     ) -> tuple[State, dict, Drivers]:
         """One closures -> potential -> capacitated -> transport -> reactions pass;
         `dt=None` means steady (and is refused outright by a model owning a capacitated
         layer, which is inherently discrete-time).
+
+        `t` is the caller's own start-of-step time, if it tracks one; both `dt` and `t` are
+        carried to every closure as a `StepContext` (R6), so an INTEGRATING closure reads the
+        model's own clock rather than an interval fixed at its own construction.
 
         `state` is what the closures read and what the potential solves warm-start from.
         `step_from` is the state a transport STEP starts at, which is a different thing
@@ -422,7 +494,8 @@ class Model:
             if key in base:
                 closure_state[key] = base[key]
         written: set[str] = set()
-        drv = self._apply_closures(closure_state, drivers, written)
+        ctx = StepContext(dt=dt, t=t)
+        drv = self._apply_closures(closure_state, drivers, written, ctx)
         new: State = dict(state)
         diag: dict = {}
         for name, layer in self.potential.items():
@@ -510,10 +583,13 @@ class Model:
         return new, diag, drv
 
     # ------------------------------------------------------------------ public
-    def step(self, state, drivers, dt: float, *, diagnostics: dict | None = None, **solve_kwargs):
+    def step(
+        self, state, drivers, dt: float, *, t: float | None = None,
+        diagnostics: dict | None = None, **solve_kwargs,
+    ):
         if not dt > 0:
             raise ValueError(f"Model: dt must be positive, got {dt!r}")
-        return self._advance(state, drivers, float(dt), diagnostics, solve_kwargs)
+        return self._advance(state, drivers, float(dt), diagnostics, solve_kwargs, t=t)
 
     def steady(self, state, drivers, *, diagnostics: dict | None = None, **solve_kwargs):
         """The quasi-steady state of every layer at `drivers` (transport layers solved to
@@ -523,21 +599,26 @@ class Model:
         step, so they belong to `step` alone: a model carrying a reaction has a `steady` that
         is the fixed point of transport only, not of transport-plus-reaction (spec section 7;
         `residuals` reports the same balance). Deliberate, and pinned by a test.
+
+        `dt=None` here means the `StepContext` an INTEGRATING closure (R6) receives carries
+        `dt=None` too, and `_apply_closures` refuses that by the closure's own name: a
+        closure that integrates some state over an interval has no interval to integrate over
+        at a quasi-steady state.
         """
         return self._advance(state, drivers, None, diagnostics, solve_kwargs)
 
-    def _advance(self, state, drivers, dt, diagnostics, solve_kwargs) -> State:
+    def _advance(self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None) -> State:
         # The coupling seam: ping-pong is exactly ONE pass, taken with the state at the start
         # of the step; `coupling="iterate"` repeats `_pass` until the named transport states
         # stop changing, and reports the pass count it took.
         if self.coupling == "pingpong":
-            new, diag, _ = self._pass(state, drivers, dt, solve_kwargs)
+            new, diag, _ = self._pass(state, drivers, dt, solve_kwargs, t=t)
             if diagnostics is not None:
                 diagnostics.update({"passes": 1, "layers": diag})
             return new
-        return self._iterate(state, drivers, dt, diagnostics, solve_kwargs)
+        return self._iterate(state, drivers, dt, diagnostics, solve_kwargs, t=t)
 
-    def _iterate(self, state, drivers, dt, diagnostics, solve_kwargs) -> State:
+    def _iterate(self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None) -> State:
         """Hensen's onion: repeat the pass until the named transport states stop changing.
 
         The relaxation takes a pass to start: `prev` is None after pass 1, so pass 2 is fed
@@ -572,7 +653,7 @@ class Model:
         # control variable unused inside the body is not (ruff B007).
         while passes < self.iterate_max:
             passes += 1
-            new, diag, _ = self._pass(fed, drivers, dt, solve_kwargs, step_from=state)
+            new, diag, _ = self._pass(fed, drivers, dt, solve_kwargs, step_from=state, t=t)
             if prev is not None:
                 with torch.no_grad():
                     ok: Tensor | None = None

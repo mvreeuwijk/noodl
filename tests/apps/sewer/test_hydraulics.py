@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from noodl.apps.sewer.hydraulics import CAPACITY_FLOOR, SewerHydraulics
+from noodl.model import StepContext
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -144,22 +145,34 @@ def test_a_wrong_shaped_inflow_is_refused():
                      "T_amb": torch.tensor(283.15, dtype=F64)})
 
 
-def test_storage_requires_a_positive_dt():
-    with pytest.raises(ValueError, match="requires a positive dt"):
-        SewerHydraulics(_network(), PIPES, MANHOLES, storage=True)
+def test_storage_without_a_declared_dt_is_now_allowed():
+    """R6: `storage=True` no longer requires a constructor `dt` -- the closure follows the
+    model's own step interval (a `StepContext`) instead of one fixed at construction. `dt`
+    stays an OPTIONAL declaration: when given, a step of a different interval is refused by
+    name (`test_a_constructor_dt_that_disagrees_with_the_step_is_refused_by_name`,
+    `tests/apps/sewer/test_storage_clock.py`); when omitted, as here, any interval steps."""
+    closure = SewerHydraulics(_network(), PIPES, MANHOLES, storage=True)
+    assert closure.dt is None
+    assert closure.integrates is True
 
 
 def test_w7_storage_reaches_the_quasi_steady_fixed_point():
     """Row W7. Measured by the plan writer: 5.7e-15 relative on the flows and 4.4e-15 on
-    the depths after 200 steps of 60 s from a dry start."""
+    the depths after 200 steps of 60 s from a dry start.
+
+    R6: a direct closure call (bypassing `Model`) now passes its own `StepContext` to make
+    the closure ADVANCE -- without a `ctx`, `storage=True` evaluates the given state's
+    levels as a query instead (see `test_storage_without_its_state_is_refused` below, which
+    is unaffected because it never gets that far)."""
     net = _network()
     steady = SewerHydraulics(net, PIPES, MANHOLES)({}, _drivers())
     closure = SewerHydraulics(net, PIPES, MANHOLES, storage=True, dt=60.0)
     assert closure.state_keys == ("sewer.H",)
+    ctx = StepContext(dt=60.0)
     state = {"sewer.H": torch.zeros(5, dtype=F64)}
     out = None
     for _ in range(200):
-        out = closure(state, _drivers())
+        out = closure(state, _drivers(), ctx)
         state = {"sewer.H": out["sewer.H"]}
     q_rel = ((out["sewer.q"] - steady["sewer.q"]).abs() / steady["sewer.q"]).max()
     h_rel = ((out["sewer.h"] - steady["sewer.h"]).abs() / steady["sewer.h"]).max()
@@ -197,10 +210,11 @@ def test_storage_sweep_is_vectorised_and_bit_identical_to_the_pinned_values():
     dt=60 s from a dry start; the vectorised sweep must reproduce them bit-for-bit."""
     net = _network()
     closure = SewerHydraulics(net, PIPES, MANHOLES, storage=True, dt=60.0)
+    ctx = StepContext(dt=60.0)
     state = {"sewer.H": torch.zeros(5, dtype=F64)}
     out = None
     for _ in range(3):
-        out = closure(state, _drivers())
+        out = closure(state, _drivers(), ctx)
         state = {"sewer.H": out["sewer.H"]}
     assert out["sewer.q"].tolist() == [
         0.049996631074511494, 0.07999480508352401, 0.029996753614541634,
@@ -225,7 +239,7 @@ def test_storage_surcharge_is_refused_naming_the_manhole():
     closure = SewerHydraulics(_network(), PIPES, MANHOLES, storage=True, dt=60.0)
     state = {"sewer.H": torch.zeros(5, dtype=F64)}
     with pytest.raises(ValueError, match=r"surcharge at manhole\(s\) \['J1'\]"):
-        closure(state, _drivers(inflows=(50.0, 0.08, 0.03, 0.0, 0.0)))
+        closure(state, _drivers(inflows=(50.0, 0.08, 0.03, 0.0, 0.0)), StepContext(dt=60.0))
 
 
 def test_storage_surcharge_batched_names_only_the_surcharging_instance():
@@ -246,7 +260,7 @@ def test_storage_surcharge_batched_names_only_the_surcharging_instance():
     with pytest.raises(
         ValueError, match=r"surcharge at manhole\(s\) \['J1'\] instance\(s\) \[1\]"
     ):
-        closure(state, drivers)
+        closure(state, drivers, StepContext(dt=60.0))
 
 
 def test_non_positive_t_head_is_refused_naming_the_driver():
@@ -281,7 +295,7 @@ def test_storage_gradients_are_finite_through_a_dry_branch():
                               requires_grad=True)
         state = {"sewer.H": torch.zeros(5, dtype=F64)}
         out = closure(state, {"inflow": inflow, "T_head": torch.tensor(293.15, dtype=F64),
-                              "T_amb": torch.tensor(283.15, dtype=F64)})
+                              "T_amb": torch.tensor(283.15, dtype=F64)}, StepContext(dt=60.0))
         grads = torch.autograd.grad(
             out[target].sum(),
             [inflow, closure.diameter, closure.roughness, closure.slope],

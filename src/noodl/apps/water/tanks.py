@@ -54,6 +54,11 @@ class TankLevels:
     """Tank levels, simple controls and the boundary heads they prescribe."""
 
     state_keys = ("water.tank_level", "water.link_status")
+    # R6: `__call__` only ever PASSES the level through unchanged (see the module
+    # docstring); `advance()` is what actually integrates it, called explicitly by the
+    # extended-period driver (Task 12), so this closure does not integrate and takes no
+    # `StepContext`.
+    integrates = False
 
     def __init__(
         self,

@@ -712,6 +712,9 @@ class _CounterClosure:
     """A closure that carries its own integer state across steps."""
 
     state_keys = ("demo.count",)
+    # R6: advances by a FIXED 1.0 every call, regardless of the step's own interval, so it
+    # does not integrate (does not need a StepContext).
+    integrates = False
 
     def __call__(self, state, drivers):
         return {"demo.count": state["demo.count"] + 1.0}
@@ -719,6 +722,7 @@ class _CounterClosure:
 
 class _SilentClosure:
     state_keys = ("demo.count",)
+    integrates = False  # R6: never writes its state key at all; no interval involved either.
 
     def __call__(self, state, drivers):
         return {}
@@ -765,6 +769,7 @@ def test_two_closures_claiming_one_state_key_are_refused():
 def test_a_closure_may_not_claim_a_layer_state_key():
     class _Bad:
         state_keys = ("c.x",)
+        integrates = False  # R6: declared so the state_keys/layer-collision check is reached.
 
         def __call__(self, state, drivers):
             return {}
@@ -815,6 +820,7 @@ def test_fr2_a_closure_may_declare_the_flow_driver_of_an_ownerless_layer_as_stat
 
     class _RememberedFlow:
         state_keys = ("c.q",)
+        integrates = False  # R6: passes its own last-written flow through unchanged.
 
         def __call__(self, state, drivers):
             return {"c.q": state["c.q"]}
@@ -842,9 +848,17 @@ def test_fr2_a_closure_may_declare_the_flow_driver_of_an_ownerless_layer_as_stat
 class _IntegratingCounter:
     """A closure that carries a scalar it advances by a FIXED amount every call, mimicking
     a stateful closure that integrates over time (a sewer manhole storage sweep, a tank
-    level): N1's counter-closure."""
+    level): N1's counter-closure.
+
+    R6: `integrates = False` here even though the docstring says "integrates" -- the
+    increment is a constant fixed at CONSTRUCTION (the test passes it the step's own `dt`
+    so the numbers line up), never read off a `StepContext`, so this closure does not
+    consult the model's own clock and takes no `ctx`. N1 (pass-vs-step, exercised here) and
+    R6 (whose clock a closure reads) are independent concerns.
+    """
 
     state_keys = ("demo.n",)
+    integrates = False
 
     def __init__(self, increment: float) -> None:
         self.increment = increment
