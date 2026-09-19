@@ -723,7 +723,13 @@ tests). The gap is narrower and specific to what the WSIMOD comparison itself ha
 WSIMOD's own numbers have never been used to cross-check the layer's behaviour AT the exact
 point a capacity binds, because neither reference demo happens to push any arc that far --
 the same kind of distinction the milestone 4 section above draws between a coefficient
-CALIBRATED to one source and one INDEPENDENTLY VALIDATED. A separate, unrelated exclusion in
+CALIBRATED to one source and one INDEPENDENTLY VALIDATED. The same applies, for a separate
+reason, to the clip's OTHER bound: both fixtures set `s_max = inf` at every node (the harness
+captures per-arc capacity only; WSIMOD's node science, not its arcs, decides what a node
+accepts), so the receiver-headroom clip is the identity everywhere and the proportional-
+sharing branch never runs against WSIMOD's numbers either -- neither half of
+`min(r, c_arc, h_receiver)` is cross-checked against WSIMOD at a binding point, and both are
+covered instead by the synthetic fixtures with finite bounds. A separate, unrelated exclusion in
 the same W2 fixture: `oxford_demo`'s `sewer_to_wwtw` arc is excluded from the strict W2
 comparison (20 of 21 arcs compared) because it shows 185/1456 mismatched timesteps
 root-caused to WSIMOD's own `WWTW` node applying an internal

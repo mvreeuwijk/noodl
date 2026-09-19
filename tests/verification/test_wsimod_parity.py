@@ -14,6 +14,21 @@ clip. This is not a weaker fixture by choice -- `oxford_demo` (Task 7, row W2) w
 to be where a genuinely bounded arc gets exercised; the finding below is that it isn't,
 either.
 
+**Multiple events per (arc, timestep), and why every replay loop below ACCUMULATES.**
+The committed fixtures hold one row per (arc, DIRECTION, timestep), so an arc that sees
+both a push and a pull event within one WSIMOD timestep contributes TWO rows to the same
+`(arc, t)`. Quickstart has none (7464 rows, 7464 distinct `(arc, t)` pairs); oxford has
+5824 such pairs across four arcs -- `abstraction_to_farmoor`, `evenlode_to_thames`,
+`thames_to_thames` and `thames_to_farmoor` (33880 rows, 28056 distinct pairs). Every
+replay loop below therefore sums a group's rows into `r`/`wsimod_realised` (`+=`) rather
+than assigning; an earlier version assigned, which silently kept only the LAST row of
+each group ("push", sorted after "pull" in the fixture) and so replayed
+`abstraction_to_farmoor` -- the ONE genuinely finite-capacity arc in either demo -- as
+its always-zero push request instead of its real pull requests. The aggregate parity
+numbers are unchanged by the fix (`max_abs_error` 1.8626e-9, 0 mismatched timesteps,
+measured both ways), because the arc's capacity still never binds, but the numbers now
+being compared are the real ones.
+
 **oxford_demo finding (Task 7): no arc's OWN capacity ever actually binds either.**
 Of oxford_demo's 21 arcs, 20 are captured at `UNBOUNDED_CAPACITY` (1e15) exactly like
 every quickstart arc. Exactly one, `abstraction_to_farmoor`, has a genuinely finite
@@ -92,10 +107,17 @@ def test_quickstart_hard_clip_matches_wsimod_realised_flows():
     for _t, group in events.groupby("t"):
         r = torch.zeros(len(arc_names), dtype=F64)
         wsimod_realised = torch.zeros(len(arc_names), dtype=F64)
+        # ACCUMULATE (`+=`), never assign. A `(arc, t)` group can hold MORE THAN
+        # ONE row: the fixtures are one row per (arc, DIRECTION, timestep), so an arc
+        # that sees both a push and a pull event within one WSIMOD timestep has two
+        # rows here. Summing their volumes is the correct per-timestep aggregate for
+        # a replay through a single `.step`; assigning silently kept only whichever
+        # row came last in the file ("push", sorted after "pull"). See the module
+        # docstring's multiple-events-per-timestep paragraph.
         for _, row in group.iterrows():
             i = arc_index[row["arc"]]
-            r[i] = row["requested"]
-            wsimod_realised[i] = row["realised"]
+            r[i] += row["requested"]
+            wsimod_realised[i] += row["realised"]
         s, f = layer.step(s, {"cap.requests": r}, dt=1.0)
         max_abs_error = max(max_abs_error, (f - wsimod_realised).abs().max().item())
     # Observed max_abs_error over all 1456 quickstart timesteps: 1.1102e-16 (a single
@@ -121,8 +143,15 @@ def test_quickstart_smooth_mode_converges_to_hard_clip():
     max_abs_error = 0.0
     for _t, group in events.groupby("t"):
         r = torch.zeros(len(arc_names), dtype=F64)
+        # ACCUMULATE (`+=`), never assign. A `(arc, t)` group can hold MORE THAN
+        # ONE row: the fixtures are one row per (arc, DIRECTION, timestep), so an arc
+        # that sees both a push and a pull event within one WSIMOD timestep has two
+        # rows here. Summing their volumes is the correct per-timestep aggregate for
+        # a replay through a single `.step`; assigning silently kept only whichever
+        # row came last in the file ("push", sorted after "pull"). See the module
+        # docstring's multiple-events-per-timestep paragraph.
         for _, row in group.iterrows():
-            r[arc_index[row["arc"]]] = row["requested"]
+            r[arc_index[row["arc"]]] += row["requested"]
         s_hard, f_hard = hard.step(s_hard, {"cap.requests": r}, dt=1.0)
         s_smooth, f_smooth = smooth.step(s_smooth, {"cap.requests": r}, dt=1.0)
         max_abs_error = max(max_abs_error, (f_smooth - f_hard).abs().max().item())
@@ -159,8 +188,15 @@ def test_quickstart_projection_mode_converges_to_hard_clip():
     max_abs_error = 0.0
     for _t, group in events.groupby("t"):
         r = torch.zeros(len(arc_names), dtype=F64)
+        # ACCUMULATE (`+=`), never assign. A `(arc, t)` group can hold MORE THAN
+        # ONE row: the fixtures are one row per (arc, DIRECTION, timestep), so an arc
+        # that sees both a push and a pull event within one WSIMOD timestep has two
+        # rows here. Summing their volumes is the correct per-timestep aggregate for
+        # a replay through a single `.step`; assigning silently kept only whichever
+        # row came last in the file ("push", sorted after "pull"). See the module
+        # docstring's multiple-events-per-timestep paragraph.
         for _, row in group.iterrows():
-            r[arc_index[row["arc"]]] = row["requested"]
+            r[arc_index[row["arc"]]] += row["requested"]
         s_hard, f_hard = hard.step(s_hard, {"cap.requests": r}, dt=1.0)
         s_proj, f_proj = projection.step(s_proj, {"cap.requests": r}, dt=1.0)
         max_abs_error = max(max_abs_error, (f_proj - f_hard).abs().max().item())
@@ -198,10 +234,17 @@ def test_oxford_hard_clip_matches_wsimod_realised_flows():
     for _t, group in events.groupby("t"):
         r = torch.zeros(len(arc_names), dtype=F64)
         wsimod_realised = torch.zeros(len(arc_names), dtype=F64)
+        # ACCUMULATE (`+=`), never assign. A `(arc, t)` group can hold MORE THAN
+        # ONE row: the fixtures are one row per (arc, DIRECTION, timestep), so an arc
+        # that sees both a push and a pull event within one WSIMOD timestep has two
+        # rows here. Summing their volumes is the correct per-timestep aggregate for
+        # a replay through a single `.step`; assigning silently kept only whichever
+        # row came last in the file ("push", sorted after "pull"). See the module
+        # docstring's multiple-events-per-timestep paragraph.
         for _, row in group.iterrows():
             i = arc_index[row["arc"]]
-            r[i] = row["requested"]
-            wsimod_realised[i] = row["realised"]
+            r[i] += row["requested"]
+            wsimod_realised[i] += row["realised"]
         s, f = layer.step(s, {"cap.requests": r}, dt=1.0)
         diff = (f - wsimod_realised).abs()
         step_error = diff[~excluded].max().item()

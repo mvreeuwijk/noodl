@@ -10,11 +10,23 @@ shipped in the `wsimod` PyPI wheel) rather than committing it -- only the COMPUT
 fixture outputs (topology, captured events, WSIMOD's own realised flows) belong in this
 repository.
 
-Milestone 4b Task 5 skeleton: this script downloads the one forcing file both demos
-share and leaves the quickstart_demo and oxford_demo build/capture/fixture-write steps
-as explicit stubs -- building either full demo model is out of Task 5's scope (Task 6
-fills in quickstart, Task 7 fills in oxford). Both stubs currently raise
-`NotImplementedError` rather than silently doing nothing.
+What it does, in order: downloads the one forcing file both demos share into a temp
+directory; builds `quickstart_demo`'s model inline (design spec amendment A3) and
+`oxford_demo`'s via WSIMOD's own packaged `create_oxford_model`; runs each under the
+capture harness (`tests/verification/_wsimod_oracle.py`); and writes four fixtures --
+`{quickstart,oxford}_topology.json` and `{quickstart,oxford}_events.csv` -- under
+`tests/data/wsimod/`. Both demos are fully implemented here (they were stubs raising
+`NotImplementedError` while milestone 4b's Task 5 only built the harness; Tasks 6 and 7
+filled them in).
+
+Each `_events.csv` holds one row per (arc, DIRECTION, timestep), aggregated from the
+harness's raw per-event rows. Push and pull are deliberately NOT merged into one row:
+whether to sum them is the replay's decision, and `tests/verification/
+test_wsimod_parity.py` does sum them (it must -- four oxford arcs see both a push and a
+pull in the same timestep). Each build prints its raw-event and aggregated-row counts
+and warns when they differ, i.e. when some arc saw two events of the SAME direction in
+one timestep; neither demo currently does (quickstart 7464/7464, oxford 33880/33880),
+which is what makes the aggregation here a pure relabelling rather than a summation.
 """
 
 from __future__ import annotations
@@ -166,10 +178,14 @@ def _build_and_capture_oxford(data_folder: str) -> None:
     oxford_aggregated = oxford_raw.groupby(
         ["arc", "direction", "t"], as_index=False
     )[["requested", "realised"]].sum()
-    print(
-        f"oxford: {len(oxford_raw)} raw events aggregated into "
-        f"{len(oxford_aggregated)} rows"
-    )
+    n_events = len(oxford_raw)
+    n_rows = len(oxford_aggregated)
+    print(f"oxford: {n_events} raw events aggregated into {n_rows} rows")
+    if n_events != n_rows:
+        print(
+            "oxford: at least one arc saw more than one event in a single "
+            "timestep -- inspect before trusting the aggregation (harness docstring)"
+        )
     oxford_aggregated.to_csv(FIXTURE_DIR / "oxford_events.csv", index=False)
 
 

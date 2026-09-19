@@ -16,12 +16,21 @@ are visible together, at exactly the per-edge granularity `CapacitatedTransferLa
 incidence structure needs. `Arc.get_excess` clips against an ACCUMULATING per-timestep
 `flow_in`, reset only by `end_timestep`, so if an arc sees MORE THAN ONE push/pull event
 within one WSIMOD timestep, each event is captured here as a SEPARATE row -- this
-function does not sum them. Replaying one row per WSIMOD timestep through
-`CapacitatedTransferLayer` is exact only when every arc sees AT MOST ONE push/pull event
-per timestep; this has been verified empirically for `quickstart_demo` and
-`oxford_demo` (Tasks 6/7), not proven in general. A future model that violates it would
-need its rows summed per (arc, t) before replay -- a documented follow-up, not something
-this harness does silently.
+function does not sum them, deliberately: aggregation is the caller's decision, made
+where the replay semantics are known, not silently here.
+
+**Arcs DO see more than one event per timestep, in a demo this repo actually ships.**
+`oxford_demo` has four such arcs (`abstraction_to_farmoor`, `evenlode_to_thames`,
+`thames_to_thames`, `thames_to_farmoor`), each with both a push and a pull event in the
+same timestep -- 5824 of its 28056 distinct `(arc, timestep)` pairs carry two rows.
+`quickstart_demo` happens to have none (7464 events, 7464 pairs), but that is a property
+of that one demo, not a general guarantee, and earlier versions of this docstring claimed
+it held for both. Anything replaying these events through one
+`CapacitatedTransferLayer.step` per timestep must therefore ACCUMULATE a `(arc, t)`
+group's rows rather than assign them one at a time -- `tests/verification/
+test_wsimod_parity.py` (Tasks 6/7) does exactly that, and the fixture-writing script
+`scripts/regenerate_wsimod_fixtures.py` aggregates only over (arc, DIRECTION, timestep),
+leaving push and pull as separate rows for the replay to sum.
 
 Timestep index: `wsimod.orchestration.model.Model` has no `.t` or other current-
 timestep attribute of its own (confirmed by inspecting a constructed `Model` directly,
@@ -49,8 +58,9 @@ def capture_events(model):
     Each dict: `{"arc": str, "direction": "push" | "pull", "t": int, "requested":
     float, "realised": float}`. `requested`/`realised` are WSIMOD's raw per-timestep
     volumes (WSIMOD's native unit, not m^3/s -- callers convert at the boundary, design
-    spec section 2). See the module docstring for what `t` means and the
-    one-event-per-(arc, timestep) caveat this repo currently relies on.
+    spec section 2). See the module docstring for what `t` means and for why a caller
+    must aggregate per `(arc, timestep)` itself -- an arc CAN see several events in one
+    timestep, and this function never sums them.
 
     `model.arcs` is a plain `dict[str, Arc]` on `wsimod.orchestration.model.Model`
     (confirmed directly, not guarded with `hasattr`: a permanent fallback on a fact this
