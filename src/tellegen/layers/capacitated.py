@@ -15,6 +15,12 @@ from tellegen.topology import Network
 
 F64 = torch.float64
 _MODES = ("hard", "smooth", "projection")
+# Fixed iteration count for `_clip_projection`'s own inner box-projection solve --
+# deliberately SEPARATE from `n_passes` (the outer sharing loop's round count, a different
+# algorithm with a different convergence question). A separable box QP's projected-gradient
+# step (unit step size) reaches its exact optimum in a single iteration (see
+# `_clip_projection`'s docstring), so 3 is generous headroom, not a tuned tolerance.
+_PROJECTION_ITERS = 3
 
 
 class CapacitatedTransferLayer:
@@ -134,11 +140,69 @@ class CapacitatedTransferLayer:
         mode's purpose is judged to be about the constraint SURFACE rather than the
         ROUTING decision; either is defensible, but should be a deliberate, documented
         choice, as this one is.
+
+        TASK 4's CHOICE for `"projection"`: the opposite of `"smooth"` -- `hard_cond`
+        stays the exact SAME hard boolean as hard-clip mode (this method's default
+        `torch.where` branch already applies, unmodified, since it only special-cases
+        `"smooth"` above). The QP/projection machinery (`_clip_projection`) is applied
+        instead to the ARITHMETIC inside the branches (the tentative-flow and
+        proportional-share bounds computed in `step`), not to the branch choice itself.
+        Rationale: `"projection"`'s stated purpose (design spec section 3) is a QP posed
+        against the constraint SURFACE -- `0 <= f <= c_arc` and the headroom bound -- not
+        a re-litigation of which edge WINS a competition for scarce headroom, which is
+        exactly what `hard_cond` decides. Reusing hard-clip's own boolean there keeps
+        `"projection"` byte-identical to hard-clip's ROUTING outcome (the only sense in
+        which "solve for the flows exactly, then differentiate" is meaningful -- an
+        approximate routing decision would need `"smooth"`'s own machinery, already
+        available via `mode="smooth"`) while still exercising genuinely new machinery
+        (`_clip_projection`'s own iterative box-projection solve, verified against
+        `_clip`'s closed form in `test_clip_projection_matches_box_clamp`) at the actual
+        QP site the spec names.
         """
         if self.mode == "smooth":
             w = torch.sigmoid(soft_margin / self.tau)
             return w * a + (1 - w) * b
         return torch.where(hard_cond, a, b)
+
+    # Path taken for mode="projection": the UNROLLED box-projection fallback, not
+    # `implicit_solve` reuse -- decided after reading `implicit.py`/`newton.py` in full (not
+    # a blind skip). `implicit_solve` wants a smooth `residual(x, *params) = 0` and an
+    # `operator` returning a Jacobian/LinearOperator at the current Newton iterate; this QP's
+    # KKT stationarity condition has a genuine complementarity term (`f` pinned at 0, at its
+    # upper bound, or strictly interior, with a DIFFERENT active Jacobian structure in each
+    # regime), so presenting it as a Newton root-find would require smoothing the
+    # complementarity condition first (e.g. Fischer-Burmeister) to get a residual Newton can
+    # differentiate through -- at which point the "new" machinery is just a harder-to-verify
+    # reimplementation of what `mode="smooth"` already does with `_clip`/`_nonneg`/`_select`,
+    # for no accuracy benefit and the exact risk design section 10 flags. The box-constrained
+    # least-squares QP this method actually solves (`min sum (f - r)**2 s.t. 0 <= f <=
+    # min(c_arc, headroom)`) is SEPARABLE per edge, so its exact closed-form solution is
+    # simply `clamp(r, 0, bound)` -- the loop below is a genuine (if trivially-converging)
+    # projected-gradient solve of that QP, not a disguised call to `_clip`: unit step size on
+    # a separable quadratic reaches the optimum after exactly one projection, so every
+    # iteration after the first is a fixed-point check, not additional correction.
+    def _clip_projection(
+        self, r: torch.Tensor, headroom_per_edge: torch.Tensor, c_arc: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Box-constrained least-squares projection: minimises `sum((f - r)**2)` subject to
+        `0 <= f <= bound`, where `bound = headroom_per_edge` alone (`c_arc=None`, used at the
+        edge-sharing site where the bound is already a headroom-coupled quantity such as
+        `proportional_share`) or `bound = min(c_arc, headroom_per_edge)` (used at the
+        arc-capacity-and-headroom site, mirroring `avail`'s own `_clip`/`_nonneg` pair).
+
+        Solved by projected gradient descent at unit step size (`f <- clamp(f - (f - r), 0,
+        bound)`) for a small FIXED `_PROJECTION_ITERS` count, independent of `self.n_passes`
+        (which counts OUTER sharing rounds, a different loop solving a different problem --
+        see `step`'s own docstring). Ordinary autograd differentiates straight through the
+        unrolled loop; no `implicit_solve` reuse (see the comment above this method for why).
+        """
+        bound = headroom_per_edge if c_arc is None else torch.minimum(c_arc, headroom_per_edge)
+        zero = torch.zeros_like(r)
+        f = torch.clamp(r, zero, bound)
+        for _ in range(_PROJECTION_ITERS):
+            grad = f - r
+            f = torch.clamp(f - grad, zero, bound)
+        return f
 
     def step(self, s, drivers, dt, *, diagnostics=None):
         """One explicit step. `s` is the previous per-node storage, `dt` in seconds.
@@ -189,8 +253,14 @@ class CapacitatedTransferLayer:
             committed_in = torch.zeros_like(headroom).index_add(-1, self._tgt, f)
             free_headroom = self._nonneg(headroom - committed_in)
             free_headroom_e = free_headroom.index_select(-1, self._tgt)
-            avail = self._nonneg(self._clip(self.c_arc - f, free_headroom_e))
-            tentative = self._clip(remaining, avail)
+            if self.mode == "projection":
+                # QP site 1: `tentative`'s bound is `min(c_arc - f, free_headroom_e)`,
+                # exactly `avail`'s own definition -- `_clip_projection` solves that box
+                # projection directly rather than computing `avail` as a separate step.
+                tentative = self._clip_projection(remaining, free_headroom_e, self.c_arc - f)
+            else:
+                avail = self._nonneg(self._clip(self.c_arc - f, free_headroom_e))
+                tentative = self._clip(remaining, avail)
             # `active` gates which edges compete for `pref_sum` below; this is a hard
             # boolean threshold in EVERY mode, including smooth. Scope decision: the
             # brief's enumerated kink sites are the `minimum`/`clamp(min=0.0)` pair and
@@ -220,9 +290,17 @@ class CapacitatedTransferLayer:
             proportional_share = (
                 free_headroom_e * self.preference / torch.clamp(pref_sum_e, min=1e-30)
             )
-            share = self._select(
-                hard_cond, soft_margin, self._clip(proportional_share, tentative), tentative
+            # QP site 2: the oversubscribed branch's value is `min(proportional_share,
+            # tentative)` in every mode (`_select`'s docstring records why `"projection"`
+            # leaves the BRANCH CHOICE itself hard, unlike `"smooth"`) -- `_clip_projection`
+            # solves that box projection with `c_arc=None` (the sole bound is already the
+            # headroom-coupled `proportional_share`, not a raw arc/headroom pair).
+            bounded_share = (
+                self._clip_projection(tentative, proportional_share)
+                if self.mode == "projection"
+                else self._clip(proportional_share, tentative)
             )
+            share = self._select(hard_cond, soft_margin, bounded_share, tentative)
             share = self._nonneg(share)
             f = f + share
             remaining = remaining - share

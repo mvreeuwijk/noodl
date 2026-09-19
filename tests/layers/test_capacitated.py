@@ -295,6 +295,53 @@ def test_smooth_mode_shares_scarce_receiver_headroom_by_preference():
     assert torch.isfinite(r.grad).all()
 
 
+def test_projection_mode_converges_to_hard_clip_as_it_gets_tighter():
+    net = _chain_net()
+    s_max = torch.full((net.n,), 100.0, dtype=F64)
+    c_arc = torch.full((2,), 1.5, dtype=F64)
+    drivers = {"cap.requests": torch.tensor([5.0, 5.0], dtype=F64)}
+    hard = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="hard")
+    _, f_hard = hard.step(torch.zeros(net.n, dtype=F64), drivers, dt=1.0)
+    projection = CapacitatedTransferLayer(
+        net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="projection"
+    )
+    _, f_proj = projection.step(torch.zeros(net.n, dtype=F64), drivers, dt=1.0)
+    assert torch.allclose(f_proj, f_hard, atol=1e-4)
+
+
+def test_projection_mode_is_differentiable_through_requests():
+    net = _chain_net()
+    s_max = torch.full((net.n,), 100.0, dtype=F64)
+    c_arc = torch.full((2,), 1.5, dtype=F64)
+    layer = CapacitatedTransferLayer(
+        net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="projection"
+    )
+    r = torch.tensor([5.0, 5.0], dtype=F64, requires_grad=True)
+    _, f = layer.step(torch.zeros(net.n, dtype=F64), {"cap.requests": r}, dt=1.0)
+    f.sum().backward()
+    assert r.grad is not None
+    assert torch.isfinite(r.grad).all()
+
+
+def test_gradcheck_smooth_and_projection_on_diamond():
+    net = _diamond_net()
+    s_max = torch.tensor([100.0, 100.0, 100.0, 3.0], dtype=F64)
+    c_arc = torch.full((4,), 100.0, dtype=F64)
+    preference = torch.full((4,), 1.0, dtype=F64)
+    for mode, kwargs in (("smooth", {"tau": 0.1}), ("projection", {})):
+        layer = CapacitatedTransferLayer(
+            net, "cap", "link", s_max=s_max, c_arc=c_arc, preference=preference,
+            mode=mode, **kwargs,
+        )
+
+        def f_of_r(r, layer=layer):
+            _, f = layer.step(torch.zeros(net.n, dtype=F64), {"cap.requests": r}, dt=1.0)
+            return f
+
+        r0 = torch.tensor([2.0, 2.0, 2.0, 2.0], dtype=F64, requires_grad=True)
+        assert torch.autograd.gradcheck(f_of_r, (r0,), eps=1e-6, atol=1e-4)
+
+
 def test_model_steps_capacitated_layer_end_to_end():
     net = _chain_net()
     s_max = torch.full((net.n,), 100.0, dtype=F64)
@@ -308,3 +355,22 @@ def test_model_steps_capacitated_layer_end_to_end():
     assert torch.allclose(
         new_state["cap.s"], torch.tensor([-2.0, 0.0, 2.0], dtype=F64)
     )
+
+
+def test_clip_projection_matches_box_clamp():
+    """White-box: `_clip_projection` is the new QP machinery Task 4 introduces -- pin that
+    it actually exists and computes the box-constrained least-squares projection (which has
+    the closed form `clamp(r, 0, min(c_arc, headroom))`), not merely an alias for `_clip`.
+    """
+    net = _chain_net()
+    s_max = torch.full((net.n,), 100.0, dtype=F64)
+    c_arc = torch.full((2,), 1.5, dtype=F64)
+    layer = CapacitatedTransferLayer(
+        net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="projection"
+    )
+    r = torch.tensor([0.5, 2.0, -1.0], dtype=F64)
+    headroom = torch.tensor([1.0, 1.0, 1.0], dtype=F64)
+    c_arc3 = torch.tensor([10.0, 10.0, 10.0], dtype=F64)
+    out = layer._clip_projection(r, headroom, c_arc3)
+    expected = torch.clamp(r, torch.zeros_like(r), torch.minimum(c_arc3, headroom))
+    assert torch.allclose(out, expected, atol=1e-9)
