@@ -651,6 +651,110 @@ framing paragraph above.
   plan pins the corresponding defaults and upgrades their status without any code change,
   since every entry is already a parameter.
 
+## Milestone 4b status
+
+Milestone 4b added `CapacitatedTransferLayer` (`src/tellegen/layers/capacitated.py`), the
+fourth layer type in `src/tellegen/layers/` alongside `PotentialFlowLayer`, `TransportLayer`
+and `Reaction` -- the framework spec's fourth way of determining edge flows (alongside
+potential-flow Newton solves, driver-prescribed flows and closure-computed flows):
+clipping per-edge requests against arc capacity and receiver storage headroom rather than
+solving for a potential, with proportional sharing when more than one edge competes for one
+node's headroom. It is validated against **WSIMOD 0.8.1's own output** -- WSIMOD
+(Dobson, Liu and Mijic; JOSS 2023, GMD 2024) is a published Python water-systems model whose
+own `Arc`/`Node` push/pull semantics this layer's hard-clip mode reproduces -- not against
+an independent measurement, exactly the same oracle relationship milestone 4 has with
+pyswmm and EPANET.
+
+**What it adds.**
+
+- `CapacitatedTransferLayer`: hard-clip, `"smooth"` (softmin/softplus at temperature `tau`)
+  and `"projection"` (a per-node QP solved via `tellegen.solvers.scalar.solve_monotone`)
+  modes, selected at construction. A real bug was found and fixed in `"projection"`
+  mode's sharing site: the first implementation reused the same preference-proportional
+  share VALUE formula hard-clip mode uses, which is a function of preference weights and
+  total headroom alone and therefore has a provably zero cross-gradient between competing
+  edges -- delivering none of the mode's actual purpose (gradients flowing through which
+  arc absorbs a constraint). The fix routes the sharing site through a real coupled QP whose
+  KKT stationarity reduces to one scalar monotone equation per node, shared by every
+  competing edge; the genuine cross-gradient this produces, `d(f_BD)/d(r_CD) = -0.5` on the
+  diamond test fixture, was hand-derived and confirmed correct for both symmetric and
+  asymmetric preference weights, and is checked directly by
+  `test_projection_mode_sharing_has_nonzero_cross_gradient`.
+- `tests/verification/_wsimod_oracle.py`: a request-capture harness that monkeypatches
+  `wsimod.arc.Arc.send_push_request`/`send_pull_request` to record every per-arc
+  `requested`/`realised` pair WSIMOD itself computes while running its own
+  `quickstart_demo` and `oxford_demo`, and the committed fixtures those runs produced
+  (`tests/data/wsimod/{quickstart,oxford}_{topology.json,events.csv}`) -- WSIMOD need not
+  be installed at all to run the parity tests themselves, only to regenerate the fixtures.
+- `benchmarks/wsimod_oxford.py`: batched throughput on the `oxford_demo` topology (below).
+
+**What passes, and at what tolerance.**
+
+| Row | Check | Tolerance | Measured |
+|---|---|---|---|
+| W1 | Hard-clip mode vs WSIMOD's own realised flows, `quickstart_demo`, all 1,456 timesteps | 1e-9 absolute | 1.11e-16 |
+| W2 | Hard-clip mode vs WSIMOD's own realised flows, `oxford_demo`, full 1,456-timestep run, 20 of 21 arcs (see limitation below) | 1e-6 absolute | 1.86e-9 |
+| W3 | `"smooth"` mode (`tau=1e-3`) vs W1's own hard-clip tellegen output, `quickstart_demo` | 3e-3 absolute | 1.79e-3 |
+| W4 | `"projection"` mode vs W1's own hard-clip tellegen output, `quickstart_demo` | 1e-9 absolute | 9.10e-13 |
+| W5 | Conservation (`sum(f) + overflow` in equals out plus `ds`), exact by construction, both demos, all three modes | exact | holds (no oracle needed) |
+| W6 | `torch.autograd.gradcheck` through `"smooth"` and `"projection"` on the diamond fixture | analytic finite-difference | holds (`test_gradcheck_smooth_and_projection_on_diamond`) |
+| W7 | Fixed `n_passes=5` sharing loop vs a hand-converged reference on a synthetic multi-out-arc node | exact once converged | holds (`test_step_conserves_with_n_passes_1_vs_5`) |
+
+**A significant limitation of what W1/W2 actually demonstrate (amendment A7, design spec
+section 9) -- read this before citing W1/W2 as validating the capacity clip itself.**
+Neither `quickstart_demo` nor `oxford_demo` ever exercises a genuine arc-capacity clip: of
+`quickstart_demo`'s 6 arcs and `oxford_demo`'s 21 arcs, all but one sit at WSIMOD's own
+`UNBOUNDED_CAPACITY` (1e15) for their entire run, and the one finite-capacity arc
+(`abstraction_to_farmoor`, capacity 50000.0) never sees its request exceed ~30934 across
+oxford's full 1,456-day run. W1 and W2 -- the two rows this milestone's WSIMOD-oracle
+strategy rests on -- therefore validate `CapacitatedTransferLayer`'s clip arithmetic only on
+the identity path (`min(x, c_arc) == x`), never on the branch where `c_arc` actually binds.
+**This is NOT a gap in the layer's own correctness**: the clip-against-`c_arc` mechanism is
+directly, rigorously unit-tested on synthetic fixtures with a deliberately tight capacity
+(e.g. `test_step_hard_clip_above_arc_capacity_is_capped` and the proportional-sharing
+tests). The gap is narrower and specific to what the WSIMOD comparison itself has shown:
+WSIMOD's own numbers have never been used to cross-check the layer's behaviour AT the exact
+point a capacity binds, because neither reference demo happens to push any arc that far --
+the same kind of distinction the milestone 4 section above draws between a coefficient
+CALIBRATED to one source and one INDEPENDENTLY VALIDATED. A separate, unrelated exclusion in
+the same W2 fixture: `oxford_demo`'s `sewer_to_wwtw` arc is excluded from the strict W2
+comparison (20 of 21 arcs compared) because it shows 185/1456 mismatched timesteps
+root-caused to WSIMOD's own `WWTW` node applying an internal
+`treatment_throughput_capacity`/stormwater-tank constraint -- a NODE-level throughput cap
+this milestone's harness does not extract and `CapacitatedTransferLayer` does not model
+(`s_max` here is a storage-headroom bound, not a per-step throughput-rate cap), not that
+arc's own capacity (still 1e15, unbounded, throughout).
+
+**The measured runs (19 September 2026, on this machine).**
+
+| run | measured |
+|---|---|
+| `benchmarks/wsimod_oxford.py`: `oxford_demo` topology (21 arcs, 18 nodes), hard-clip mode, 1,456 steps, random per-instance requests scaled to each arc's own capacity | batch_size=1: 1.004 s; batch_size=10: 1.338 s; batch_size=100: 1.439 s (WSIMOD's own single-instance run: ~4 s -- NOT a fair batched-vs-unbatched comparison, spec section 7; no budget is set for this row) |
+
+The full suite passes **1250 passed, 10 skipped, 9 deselected, 1 xfailed** (coverage
+96.39 %), ruff clean.
+
+**Out of scope.**
+
+- The WSIMOD `Node` wrapper (embedding a tellegen `Model` as a live WSIMOD `Node` via
+  `push_set`/`pull_set`/`push_check`/`pull_check`, so a tellegen model could sit inside a
+  running WSIMOD orchestration) -- named in the framework spec's roadmap for 4b, deferred
+  per Maarten's own scope decision (design spec section 1).
+- The other nine WSIMOD pollutants (do, org-phosphorus, phosphate, ammonia, solids, cod,
+  ph, nitrate, nitrite, org-nitrogen) -- the layer is species-count-agnostic, so this is
+  purely a matter of widening a future `TransportLayer`'s species list and the fixture
+  capture, not a `CapacitatedTransferLayer` change.
+- Species/quality transport (volume, temperature, BOD) is not wired up despite an earlier
+  scope note to the contrary (amendment A5): the WSIMOD oracle harness captures per-arc
+  volume only, not WSIMOD's `temperature`/`bod` VQIP fields, and no task attaches a
+  `TransportLayer` riding on a capacitated layer's `"<name>.q"`.
+- Time-varying arc capacities and storage bounds: construction-time buffers only, since
+  WSIMOD's own capacities are static within a run.
+- Recorded follow-up closing the A7 gap above: a small synthetic 2-3 node fixture with a
+  deliberately tight `c_arc`, captured the same way (WSIMOD's own push/pull on that
+  fixture, not just tellegen's own unit tests) -- not built in 4b to avoid unilaterally
+  expanding an already-approved 8-task plan.
+
 ## Installation
 
 `pip install -e .[dev]`, or on Windows x86-64 `pip install -e .[dev,contam]`, which adds

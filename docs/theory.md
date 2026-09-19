@@ -645,6 +645,95 @@ single source (Pescod and Price Test 8), not literature-pinned, so rows A1 and A
 consistency checks against the calibration source rather than independent validation (spec
 section 10) -- the same caveat the README states for the same reason.
 
+## 10. A fourth flow-determination mode: clip-and-allocate capacitated transfer
+
+*(Written from the implementation, milestone 4b: this section documents
+`CapacitatedTransferLayer`'s physics and why it needed a genuinely new differentiability
+mechanism at one site; the full derivation is in the design spec,
+`docs/superpowers/specs/2026-09-18-milestone-4b-wsimod-design.md`, section 3.)*
+
+**Why this is a fourth way of determining flows, not a variant of the potential layer.**
+Sections 1 and 9 above both describe networks where flow at an edge is either the closed-
+form output of a Newton potential solve or of continuity alone on a tree. WSIMOD's own
+`Arc`/`Node` model (Dobson, Liu and Mijic, JOSS 2023; GMD 2024) is neither: an edge is asked
+to carry a REQUESTED flow (typically emitted by some upstream process closure, not a
+pressure difference) and simply clips it against two independent bounds -- its own arc
+capacity and the downstream node's remaining storage headroom -- with no potential variable
+anywhere in the calculation. The framework spec names this explicitly as the fourth way an
+edge's flow can be determined (alongside a potential-flow Newton solve, a driver-prescribed
+flow, and a closure-computed flow), and `CapacitatedTransferLayer`
+(`src/tellegen/layers/capacitated.py`) is its implementation: a `Model` layer type that owns
+one or more edge kinds exactly like `PotentialFlowLayer` does, but whose per-step output is
+an explicit clip-and-allocate computation rather than a solve.
+
+**The clip/allocation math, condensed (design spec section 3).** Given the previous
+per-node storage `s`, a per-edge capacity `c_arc` and a per-edge REQUEST driver `r`:
+receiver headroom is `h = s_max - s` at each edge's downstream node (a boundary node has
+`s_max = inf` and never constrains); the realised flow in hard-clip mode is
+`f = min(r, c_arc, h)`, vectorised over every edge via the incidence matrix in one pass, no
+Python loop over nodes or edges. Where more than one edge converges on a node whose combined
+tentative demand exceeds its free headroom, each edge's share is instead a preference-
+weighted fraction of that headroom, resolved by a small FIXED number of vectorised passes
+(`n_passes`, default 5, matching WSIMOD's own `constants.MAXITER`) rather than WSIMOD's own
+per-node bounded `while`-with-early-exit -- each pass is strictly non-expansive, so a fixed
+count no worse than WSIMOD's own cap is a safe over-approximation of the same fixed point,
+not an approximation of a different algorithm. This sharing is deliberately
+RECEIVER-LOCAL: it triggers only at the node actually oversubscribed and never propagates a
+downstream bottleneck back to an earlier edge in the same step, mirroring WSIMOD's own
+per-arc semantics (a node's accept decision is against its own headroom, never its future
+ability to forward flow onward) and matching what storage itself is for in a discrete-time
+capacitated network. The storage update is `s' = min(s + A_in f - A_out f, s_max)` with
+`overflow = relu(...)` reported as a diagnostic, never fed back -- and deliberately has NO
+floor at zero: `f` is already clipped against the RECEIVER's headroom, never the sender's
+own available storage, so a caller requesting more than is actually available upstream is
+a modelling responsibility upstream of this layer (a closure sizing requests correctly),
+exactly as a `PotentialFlowLayer`'s boundary sources are trusted as given rather than
+second-guessed.
+
+**Two differentiability modes, and why the sharing site needed a real solve, not just a
+softened `min`.** `"smooth"` replaces every `min`/`clamp`/`relu` above with its
+softmin/softplus counterpart at a construction-time temperature `tau` -- ordinary autograd
+through the vectorised passes, no new solver machinery, exactly the same style as the
+building application's smoothed switches elsewhere in this codebase. `"projection"` poses
+the allocation at an oversubscribed node as a genuine per-node QP -- minimise
+`sum_i preference_i (f_i - remaining_i)^2` subject to `0 <= f_i <= avail_i` per edge and
+`sum_i f_i <= free_headroom` jointly -- because the FIRST implementation of this mode
+reused hard-clip's own preference-proportional share formula, which depends only on
+preference weights and total headroom, never on any individual edge's own request; being
+provably independent of a competitor's request, it could not carry a gradient between
+competing edges no matter how it was wrapped, defeating the framework spec's stated purpose
+for this mode ("gradients flow through which arc absorbs a constraint"). The real QP's
+Lagrangian stationarity, with the box bound applied, reduces to `f_i = clamp(remaining_i -
+lambda/preference_i, 0, avail_i)` for one scalar `lambda` SHARED by every edge competing at
+that node -- so `d(f_i)/d(r_j)` for a competing edge `j != i` is genuinely nonzero, flowing
+entirely through `lambda`. `lambda`'s root is monotone in `lambda` by construction (every
+edge's contribution shrinks as `lambda` grows), which is exactly
+`tellegen.solvers.scalar.solve_monotone`'s own contract (a batched, monotone,
+implicit-function-differentiable scalar root) -- the same primitive the sewer application
+uses for Manning-depth inversion (section 9 above) -- rather than new solver machinery or a
+Fischer-Burmeister-smoothed complementarity condition fed through
+`tellegen.solvers.implicit.implicit_solve`, which was investigated and rejected as strictly
+harder to verify for no accuracy benefit. The resulting cross-gradient,
+`d(f_BD)/d(r_CD) = -0.5` on a four-node diamond test fixture, was hand-derived and confirmed
+correct for both symmetric and asymmetric preference weights -- the one genuinely new
+numerical result this milestone needed to produce, as opposed to reproducing an existing
+mechanism (the plain clip) at a new site.
+
+**Verification, and what it does and does not show.** `tests/verification/
+test_wsimod_parity.py` replays WSIMOD's own captured per-arc requests from its packaged
+`quickstart_demo` and `oxford_demo` scripts through `CapacitatedTransferLayer` and compares
+against WSIMOD's own realised flows -- WSIMOD's output is the oracle here, the same
+relationship pyswmm and EPANET have with the sewer and water applications above, and it is
+NOT an independent measurement. This comparison has a real, specific limitation: of
+`quickstart_demo`'s 6 arcs and `oxford_demo`'s 21 arcs, all but one sit at WSIMOD's own
+unbounded capacity for the whole run, and the one finite-capacity arc never sees its request
+approach its own capacity either -- so neither demo's numbers ever exercise the branch where
+`c_arc` actually binds, only the identity path `min(x, c_arc) == x`. The clip-against-
+`c_arc` mechanism itself is separately and rigorously covered by synthetic unit fixtures
+with a deliberately tight capacity; what remains unvalidated is specifically WSIMOD's own
+numbers at a binding point, not the mechanism (README, "Milestone 4b status", amendment A7,
+has the full account and the recorded follow-up that would close this gap).
+
 ## Summary of flags/uncertainties
 
 - Pseudo-bond-graph `(T, Φ)` vs true bond-graph `(T, dS/dt)`: only the latter is
