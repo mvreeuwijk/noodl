@@ -259,6 +259,42 @@ def test_two_way_link_with_iterate_max_below_two_is_refused_at_construction():
         _city(iterate_max=1)
 
 
+def test_driver_alias_writes_every_target_through_its_own_conversion():
+    """The source is authoritative and each target is written from it through that target's
+    registered conversion (design spec A3): the street's theta_w, radians counter-clockwise
+    from east, reaches the building as CONTAM's Wd, degrees clockwise from north."""
+    from tellegen.couple import STREET_RAD_TO_CONTAM_DEG, DriverAlias, ValueLink, union
+
+    street_model, street_state, street_drivers = _tiny_street_model()
+    building_model, building_state, building_drivers = _tiny_building_model()
+    street_drivers["theta_w"] = torch.tensor(0.5 * math.pi, dtype=F64)  # blowing north
+    building_drivers["theta_w"] = torch.tensor(-1.0, dtype=F64)  # stale; must be overwritten
+    seen: dict = {}
+    original_step = building_model.step
+
+    def spy(state, drivers, dt, **kwargs):
+        seen.update(drivers)
+        return original_step(state, drivers, dt, **kwargs)
+
+    building_model.step = spy
+    city, state, drivers = union(
+        {"street": (street_model, street_state, street_drivers),
+         "building": (building_model, building_state, building_drivers)},
+        shared=[
+            ValueLink(from_model="street", from_key="street.x", from_index=0,
+                      to_model="building", to_key="species.x_boundary", to_index=0,
+                      convert="concentration_to_mass_fraction"),
+            DriverAlias(source=("street", "theta_w"),
+                        targets=(("building", "theta_w", STREET_RAD_TO_CONTAM_DEG),)),
+        ],
+    )
+    city.step(state, drivers, dt=1.0)
+    assert seen["theta_w"].item() == pytest.approx(180.0)  # (270 - 90) mod 360
+    # The source is untouched, and the caller's own driver dicts are never modified:
+    assert drivers["street"]["theta_w"].item() == pytest.approx(0.5 * math.pi)
+    assert building_drivers["theta_w"].item() == -1.0
+
+
 def test_unregistered_conversion_is_refused_at_union_construction():
     from tellegen.couple import ValueLink, union
 
@@ -298,6 +334,24 @@ def test_write_at_restores_the_stacked_layout():
     assert out.shape == (4, 2, 1)
     assert torch.equal(out[:, 1, 0], torch.arange(4, dtype=F64))
     assert torch.all(out[:, 0, 0] == 0)
+
+
+def test_write_at_broadcasts_a_batched_value_into_an_unbatched_target():
+    """The ensemble case: the street model runs a batch of B forcings while the CONTAM
+    reader's `species.x_boundary` stays `(1, 1)`. The target must broadcast up to the
+    value's batch, keeping its own LAYOUT (stacked stays stacked)."""
+    from tellegen.couple import _write_at
+
+    value = torch.arange(4, dtype=F64)
+    out = _write_at(torch.zeros(1, 1, dtype=F64), 1, 0, value)  # stacked, n_b = 1
+    assert out.shape == (4, 1, 1)
+    assert torch.equal(out[:, 0, 0], value)
+    reduced_target = torch.tensor([7.0, 8.0], dtype=F64)  # reduced, n_b = 2
+    out = _write_at(reduced_target, 2, 1, torch.arange(3, dtype=F64))
+    assert out.shape == (3, 2)
+    assert torch.equal(out[:, 1], torch.arange(3, dtype=F64))
+    assert torch.all(out[:, 0] == 7.0)  # the untouched entry is broadcast, not zeroed
+    assert torch.equal(reduced_target, torch.tensor([7.0, 8.0], dtype=F64))  # not in place
 
 
 @pytest.mark.parametrize("wd, theta", [(270.0, 0.0), (0.0, 1.5 * math.pi),

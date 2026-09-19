@@ -55,10 +55,17 @@ def _reduced(x: Tensor, n_last: int) -> Tensor:
 
 def _write_at(target: Tensor, n_last: int, position: int, value: Tensor) -> Tensor:
     """`target` with `value` written at `position` on its node axis, in the caller's own
-    layout (reduced or stacked). Never writes into `target` itself."""
-    reduced = _reduced(target, n_last).clone()
+    LAYOUT (reduced `(..., n_last)` or stacked `(..., n_last, 1)`) -- but not necessarily its
+    own SHAPE: a batched `value` written into an unbatched `target` broadcasts the target up
+    to the value's batch, exactly as `CoupledModel._feed_back` broadcasts a source term. That
+    is the ensemble case: the street model runs a batch of `B` forcings while the CONTAM
+    reader's `x_boundary` stays `(1, 1)`. Never writes into `target` itself."""
+    reduced = _reduced(target, n_last)
+    batch = torch.broadcast_shapes(reduced.shape[:-1], value.shape)
+    reduced = reduced.expand(*batch, n_last).clone()
     reduced[..., position] = value
-    return reduced.reshape(target.shape)
+    stacked = target.dim() >= 2 and target.shape[-1] == 1 and target.shape[-2] == n_last
+    return reduced.reshape(*batch, n_last, 1) if stacked else reduced.reshape(*batch, n_last)
 
 
 def apply_conversion(name: str | None, value: Tensor, drivers: Mapping[str, Tensor]) -> Tensor:
