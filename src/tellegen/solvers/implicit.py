@@ -234,10 +234,20 @@ class _Implicit(torch.autograd.Function):
             p = [t.detach().requires_grad_(t.requires_grad) for t in params]
             r = ctx.residual(x.detach(), *p)
             needs_grad = [t for t in p if t.requires_grad]
+            # `r.requires_grad` can be False even when `needs_grad` is non-empty: a caller
+            # (e.g. `PotentialFlowLayer.solve`) may thread every entry of a shared `drivers`
+            # mapping into `params` positionally, including keys this particular layer's
+            # residual never reads (a coupled model's OTHER layer's own driver, sitting in
+            # the same dict). When the only requires_grad=True entries are among those unused
+            # ones, `r` ends up with no grad_fn at all, and `torch.autograd.grad` refuses to
+            # start from an output that itself does not require grad -- `allow_unused=True`
+            # only excuses individual UNUSED INPUTS, not an output with no graph whatsoever.
+            # The correct gradient in that case is exactly zero (None) for every parameter:
+            # `r` provably does not depend on any of them, so there is nothing to solve.
             grads = (
                 torch.autograd.grad(r, needs_grad, grad_outputs=-lam, allow_unused=True)
-                if needs_grad
-                else []
+                if needs_grad and r.requires_grad
+                else [None] * len(needs_grad)
             )
         grads_aligned = []
         it = iter(grads)
