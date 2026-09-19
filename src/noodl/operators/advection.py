@@ -324,6 +324,74 @@ class AdvectionOperator:
             diag_i = diag_i + kdiag.transpose(-1, -2)
         return diag_i.reshape(*diag_i.shape[:-2], K * n_i)
 
+    def abs_column_sums(self) -> torch.Tensor:
+        """sum_i |M_ij| for every column j (stacked index k * n_interior + i), so that
+        `.amax(-1)` is the exact 1-norm of the interior operator. O(edges), no dense form.
+
+        The DIAGONAL entry of column (node u, species k) is `self.diagonal()`'s own entry:
+        `diagonal()` already combines, SIGNED, everything that lands there -- the Out term,
+        a self-loop edge's In term, conduction's own-node term, `removal`, and kinetics'
+        own-species term `K_{u,k,k}` -- so taking `.abs()` of that one combined number is
+        exact even when, e.g., a signed kinetics self-term partially cancels the (always
+        non-positive) Out/removal diagonal; summing each piece's `.abs()` separately would
+        overcount that cancellation and fail to reproduce the dense assembly bit for bit.
+
+        The OFF-diagonal entries never share a matrix position with each other or with the
+        diagonal, so their magnitudes add directly: the IN term t_{k,e} |w_e| / cap[d] of
+        every non-self-loop edge whose downwind node d is interior (a boundary d is not a
+        row of M and contributes nothing); a conduction edge (u, v, g)'s cross term, g /
+        cap[v] in u's column and g / cap[u] in v's; and the kinetics column's off-species
+        terms sum_{l != k} |K_{u,l,k}|.
+        """
+        K, n_i, n = self.n_species, self.n_interior, self._n
+        dtype = self.flow.dtype
+        flow = self.flow.to(dtype)
+        w = flow.abs()
+        batch_shape = torch.broadcast_shapes(
+            w.shape[:-1], self.transmission.shape[:-2], self.capacity.shape[:-1]
+        )
+        up = torch.where(flow >= 0, self._src, self._tgt).expand(*batch_shape, self._n_edges)
+        down = torch.where(flow >= 0, self._tgt, self._src).expand(*batch_shape, self._n_edges)
+        w = w.expand(*batch_shape, self._n_edges)
+        inv_cap = torch.zeros(*batch_shape, n, dtype=dtype, device=w.device)
+        inv_cap[..., self._interior_idx] = 1.0 / self.capacity.to(dtype).expand(*batch_shape, n_i)
+
+        # Off-diagonal In term: exclude self-loop edges (up == down), whose contribution is
+        # already inside the signed diagonal above -- adding its magnitude again here would
+        # both double-count it and defeat any cancellation already resolved there.
+        not_self_loop = (self._src != self._tgt).expand(*batch_shape, self._n_edges)
+        weight = self.transmission.to(dtype).expand(*batch_shape, K, self._n_edges)
+        weight = weight * w.unsqueeze(-2)
+        in_val = weight * torch.gather(inv_cap, -1, down).unsqueeze(-2)          # (..., K, b)
+        in_val = torch.where(not_self_loop.unsqueeze(-2), in_val, torch.zeros_like(in_val))
+        up_k = up.unsqueeze(-2).expand(*batch_shape, K, self._n_edges)
+        in_col = torch.zeros(*batch_shape, K, n, dtype=dtype, device=w.device)
+        in_col = in_col.scatter_add(-1, up_k, in_val)
+
+        cond_col = torch.zeros(*batch_shape, n, dtype=dtype, device=w.device)
+        if self.conduction is not None:
+            csrc, ctgt, g = self.conduction
+            g = g.to(dtype).expand(*batch_shape, csrc.shape[-1])
+            csrc_b = csrc.expand(*batch_shape, -1)
+            ctgt_b = ctgt.expand(*batch_shape, -1)
+            cond_col = cond_col.scatter_add(-1, csrc_b, g * torch.gather(inv_cap, -1, ctgt_b))
+            cond_col = cond_col.scatter_add(-1, ctgt_b, g * torch.gather(inv_cap, -1, csrc_b))
+
+        off = cond_col.unsqueeze(-2) + in_col                                    # (..., K, n)
+        off = off.index_select(-1, self._interior_idx)                            # (..., K, n_i)
+        if self.kinetics is not None:
+            kin_abs = self.kinetics.to(dtype).abs()
+            kin_self = torch.diagonal(kin_abs, dim1=-2, dim2=-1)                  # (..., n_i, K)
+            kin_off = kin_abs.sum(-2) - kin_self                                  # sum rows l != k
+            off = off + kin_off.transpose(-1, -2)
+        off = off.reshape(*off.shape[:-2], K * n_i)
+        return off + self.diagonal().abs()
+
+    def norm1_bound(self) -> torch.Tensor:
+        """||M||_1 per batch instance: a norm, so it bounds the Taylor truncation error for
+        non-normal and nilpotent operators alike (a power iteration would not)."""
+        return self.abs_column_sums().amax(-1)
+
     def assemble(self) -> torch.Tensor:
         K, n_i, n = self.n_species, self.n_interior, self._n
         dtype = self.flow.dtype

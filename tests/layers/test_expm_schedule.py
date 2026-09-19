@@ -1,0 +1,155 @@
+"""The exponential action's Taylor work is chosen from a norm bound, independent of the
+state, so autograd through the polynomial is the polynomial's own derivative (R3)."""
+
+from __future__ import annotations
+
+import math
+
+import pytest
+import torch
+
+from noodl.layers.transport import (
+    ExpmResult,
+    TransportLayer,
+    _expm_action,
+    _taylor_remainder,
+    _taylor_schedule,
+    _theta_max,
+)
+from noodl.topology import Network
+
+F64 = torch.float64
+
+
+def _t(values, **kwargs):
+    return torch.tensor(values, dtype=F64, **kwargs)
+
+
+def test_remainder_is_the_tail_of_the_exponential_series():
+    theta, m = 1.5, 6
+    tail = math.exp(theta) - sum(theta**k / math.factorial(k) for k in range(m + 1))
+    assert _taylor_remainder(theta, m) == pytest.approx(tail, rel=1e-10)
+    assert _taylor_remainder(0.0, 3) == 0.0
+
+
+def test_theta_max_agrees_with_al_mohy_higham_to_the_leading_digit():
+    """Table 3.1 of Al-Mohy & Higham (2011) gives theta_55 = 9.87 at unit-roundoff tolerance;
+    a forward bound at 2^-53 must land in the same range (the two bounds differ in constants,
+    not in kind)."""
+    assert 8.0 < _theta_max(2.0**-53, 55) < 14.0
+
+
+@pytest.mark.parametrize("norm", [0.0, 1e-3, 1.0, 12.0, 250.0, 25_000.0])
+def test_schedule_meets_the_tolerance_and_never_wastes_a_substep(norm):
+    s, m = _taylor_schedule(norm, 1e-12)
+    assert s >= 1 and 1 <= m <= 55
+    assert _taylor_remainder(norm / s, m) <= 1e-12
+    if s > 1:
+        # one fewer substep would need more than m_max terms
+        assert _taylor_remainder(norm / (s - 1), 55) > 1e-12 or s * m <= (s - 1) * 55
+
+
+def _chain(n_nodes=4, *, removal=None, capacity=None):
+    net = Network(dtype=F64)
+    net.add_node("ambient")
+    names = [f"z{i}" for i in range(n_nodes)]
+    for nm in names:
+        net.add_node(nm)
+    net.add_edge("ambient", names[0], kind="flow")
+    for a, b in zip(names, names[1:]):  # noqa: B905 -- intentional pairwise (unequal-length) zip
+        net.add_edge(a, b, kind="flow")
+    net.add_edge(names[-1], "ambient", kind="flow")
+    cap = torch.ones(n_nodes, dtype=F64) if capacity is None else capacity
+    return TransportLayer(net, "c", capacity=cap, flow_kind="flow", boundary=["ambient"],
+                          removal=removal)
+
+
+def _dense_reference(op, x, b0, dt):
+    """[x_next, integral of x over (0, dt)] from a 3-block Van Loan exponential, differentiable
+    through torch.linalg.matrix_exp."""
+    M = op.assemble()
+    m = M.shape[-1]
+    eye = torch.eye(m, dtype=F64)
+    Z = torch.zeros(*M.shape[:-2], 3 * m, 3 * m, dtype=F64)
+    Z[..., :m, :m] = M * dt
+    Z[..., :m, m:2 * m] = eye * dt
+    Z[..., m:2 * m, 2 * m:] = eye * dt
+    E = torch.linalg.matrix_exp(Z)
+    Ed, Phi, Psi = E[..., :m, :m], E[..., :m, m:2 * m], E[..., :m, 2 * m:]
+    x_next = (Ed @ x.unsqueeze(-1)).squeeze(-1) + (Phi @ b0.unsqueeze(-1)).squeeze(-1)
+    # integral of x(tau) = e^{tau M} x + int_0^tau e^{s M} b0 ds  over tau in (0, dt):
+    integral = (Phi @ x.unsqueeze(-1)).squeeze(-1) + (Psi @ b0.unsqueeze(-1)).squeeze(-1)
+    return x_next, integral
+
+
+def test_action_and_integral_match_the_dense_reference_and_so_do_their_gradients():
+    layer = _chain()
+    q = _t([0.3, 0.3, -0.2, 0.3, 0.3], requires_grad=True)
+    cap = _t([1.0, 2.0, 0.5, 1.5], requires_grad=True)
+    op = layer._advection_operator(q, cap)
+    x = _t([1.0, 0.0, 2.0, 0.5], requires_grad=True)
+    b0 = _t([0.1, 0.0, 0.0, -0.05], requires_grad=True)
+    out = _expm_action(op, x, b0, 7.0, integrate=True)
+    assert isinstance(out, ExpmResult)
+    x_ref, i_ref = _dense_reference(op, x, b0, 7.0)
+    torch.testing.assert_close(out.x, x_ref, rtol=1e-10, atol=1e-12)
+    torch.testing.assert_close(out.integral, i_ref, rtol=1e-10, atol=1e-12)
+    w = _t([0.3, -1.2, 0.7, 2.0])
+    # `op.flow` (carrier * q) is one shared non-leaf node under both `out` and `x_ref`/
+    # `i_ref`; the first `grad()` call needs `retain_graph=True` or the second one hits
+    # PyTorch's "backward through the graph a second time" on that shared node -- true of
+    # any implementation, not specific to `_expm_action`.
+    got = torch.autograd.grad(
+        (out.x * w).sum() + out.integral.sum(), (x, b0, q, cap), retain_graph=True
+    )
+    ref = torch.autograd.grad((x_ref * w).sum() + i_ref.sum(), (x, b0, q, cap))
+    for g, r in zip(got, ref, strict=True):
+        torch.testing.assert_close(g, r, rtol=1e-8, atol=1e-10)
+
+
+def test_a_nonzero_nilpotent_operator_is_advanced_exactly_with_its_derivative():
+    """Species 0 -> species 1 at rate k, no loss, no flow: M is nilpotent (M^2 = 0), its
+    spectral radius is 0 but ||M||_1 = k. exp(dt M) = I + dt M exactly."""
+    net = Network(dtype=F64)
+    net.add_node("ambient")
+    net.add_node("zone")
+    net.add_edge("zone", "ambient", kind="flow")
+    k = torch.tensor(0.8, dtype=F64, requires_grad=True)
+    kinetics = torch.stack([torch.stack([0 * k, 0 * k]), torch.stack([k, 0 * k])])
+    layer = TransportLayer(net, "c", capacity=_t([1.0]), flow_kind="flow", boundary=["ambient"],
+                           n_species=2, kinetics=kinetics)
+    x0 = _t([[1.0, 0.0]])
+    y = layer.step(x0, _t([0.0]), torch.zeros(2, 2, dtype=F64), torch.zeros(1, 2, dtype=F64), 3.0)
+    torch.testing.assert_close(y, _t([[1.0, 2.4]]), rtol=1e-12, atol=1e-12)
+    (dk,) = torch.autograd.grad(y[..., 1].sum(), (k,))
+    assert dk.item() == pytest.approx(3.0, rel=1e-10)
+
+
+def test_a_mixed_stiffness_batch_shares_one_schedule_and_matches_the_reference():
+    layer = _chain()
+    q = torch.ones(2, 5, dtype=F64) * 0.5
+    cap = torch.stack([torch.ones(4, dtype=F64), torch.full((4,), 1e-3, dtype=F64)])
+    op = layer._advection_operator(q, cap)
+    x = torch.rand(2, 4, generator=torch.Generator().manual_seed(1), dtype=F64)
+    b0 = torch.zeros(2, 4, dtype=F64)
+    out = _expm_action(op, x, b0, 2.0)
+    x_ref, _ = _dense_reference(op, x, b0, 2.0)
+    torch.testing.assert_close(out.x, x_ref, rtol=1e-9, atol=1e-12)
+    assert out.substeps >= 1 and out.matvecs == out.substeps * out.terms
+
+
+def test_pure_decay_with_no_forcing_costs_one_term_after_the_diagonal_shift():
+    """dx/dt = -500 x, x(0) = 10, dt = 50: the review's instrumented case took 184,459
+    matvecs. With b0 == 0 the mean-diagonal shift makes M - mu I vanish."""
+    layer = _chain(1, removal=_t([[500.0]]))
+    op = layer._advection_operator(_t([0.0, 0.0]))
+    out = _expm_action(op, _t([10.0]), _t([0.0]), 50.0)
+    assert out.x.item() == pytest.approx(10.0 * math.exp(-25_000.0), abs=1e-300)
+    assert out.matvecs <= 2
+
+
+def test_the_work_budget_is_refused_by_name():
+    layer = _chain(1, removal=_t([[500.0]]))
+    op = layer._advection_operator(_t([0.0, 0.0]))
+    with pytest.raises(RuntimeError, match=r"matvecs.*scheme='implicit'"):
+        _expm_action(op, _t([10.0]), _t([1.0]), 50.0, max_matvecs=1000, where="budget test")

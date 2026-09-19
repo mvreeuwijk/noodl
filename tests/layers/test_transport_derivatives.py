@@ -35,17 +35,11 @@ def _layer(scheme="exact", *, circulation=False, **kwargs):
     )
 
 
-R3 = pytest.mark.xfail(
-    strict=True,
-    reason="R3: the Taylor loop stops on a zero forward increment, truncating the tangent",
-)
-
-
 @pytest.mark.parametrize(
     "x0",
     [
-        pytest.param(0.0, marks=R3, id="exact-zero"),
-        pytest.param(1e-12, marks=R3, id="near-zero"),
+        pytest.param(0.0, id="exact-zero"),
+        pytest.param(1e-12, id="near-zero"),
         pytest.param(1.0, id="control"),
     ],
 )

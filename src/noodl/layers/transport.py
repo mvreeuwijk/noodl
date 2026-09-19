@@ -32,8 +32,11 @@ layer. Boundary rows must be zero (refused by name, not silently dropped); ``ste
 
 from __future__ import annotations
 
+import bisect
+import functools
+import math
 from collections.abc import Mapping, Sequence
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import torch
 
@@ -720,9 +723,9 @@ class TransportLayer:
             )
             cap = self._capacity_stacked(dtype, cap_t)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
-            result, _substeps = _expm_action(
+            result = _expm_action(
                 op, x_s, b0, dt, where=f"TransportLayer '{self.name}' exact step"
-            )
+            ).x
         elif self.scheme == "implicit":
             result, reduced = self._implicit_step_sparse(
                 x, q, sources, x_boundary, dt, on_failure, cap_t
@@ -895,58 +898,154 @@ def _van_loan_step_dense(
     return (Ed @ x.unsqueeze(-1)).squeeze(-1) + (Phi @ b0.unsqueeze(-1)).squeeze(-1)
 
 
+_TAYLOR_M_MAX = 55
+
+
+class ExpmResult(NamedTuple):
+    x: torch.Tensor
+    integral: torch.Tensor | None   # int_0^dt x(tau) dtau, when requested
+    substeps: int
+    terms: int
+    matvecs: int
+
+
+def _taylor_remainder(theta: float, m: int) -> float:
+    """sum_{k > m} theta^k / k!: the operator-norm error of the degree-m Taylor polynomial of
+    exp(A) for any ||A|| <= theta. A forward bound, valid for every matrix of that norm."""
+    if theta <= 0.0:
+        return 0.0
+    term = math.exp((m + 1) * math.log(theta) - math.lgamma(m + 2))
+    total, k = 0.0, m + 1
+    while term > 1e-300 and k < m + 2000:
+        total += term
+        k += 1
+        term *= theta / k
+    return total
+
+
+@functools.cache
+def _theta_table(tol: float, m_max: int) -> tuple[float, ...]:
+    """theta_m for m = 1..m_max: the largest ||A|| that m Taylor terms bring within tol
+    (one bisection per m, computed once per tol and cached). Monotone increasing in m."""
+    table = []
+    for m in range(1, m_max + 1):
+        lo, hi = 0.0, 4.0 * m_max
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            if _taylor_remainder(mid, m) <= tol:
+                lo = mid
+            else:
+                hi = mid
+        table.append(lo)
+    return tuple(table)
+
+
+def _theta_max(tol: float, m_max: int) -> float:
+    return _theta_table(tol, m_max)[-1]
+
+
+def _taylor_schedule(norm: float, tol: float, m_max: int = _TAYLOR_M_MAX) -> tuple[int, int]:
+    """(substeps s, terms m), s * m minimal over a window of s, with theta = norm / s <= theta_m.
+
+    Independent of the state and the forcing by construction: the term count is fixed before
+    a single matvec runs, so autograd through the recurrence is the exact derivative of the
+    same polynomial that produced the value (R3). The window `s_min .. s_min + 15` is enough:
+    m falls by at most a few terms per extra substep while s grows by one, so the product's
+    minimum sits at or just above the smallest admissible s.
+    """
+    if not math.isfinite(norm) or norm < 0.0:
+        raise ValueError(
+            f"_taylor_schedule: operator norm bound must be finite and >= 0, got {norm!r}"
+        )
+    if norm == 0.0:
+        return 1, 1
+    table = _theta_table(tol, m_max)
+    s_min = max(1, math.ceil(norm / table[-1]))
+    best: tuple[int, int] | None = None
+    for s in range(s_min, s_min + 16):
+        theta = norm / s
+        m = bisect.bisect_left(table, theta) + 1          # smallest m with theta_m >= theta
+        if best is None or s * m < best[0] * best[1]:
+            best = (s, m)
+    assert best is not None
+    return best
+
+
 def _expm_action(
     M: AdvectionOperator,
     x: torch.Tensor,
     b0: torch.Tensor,
     dt: float,
     *,
-    rtol: float = 1e-10,
-    atol: float = 1e-12,
-    max_terms: int = 60,
-    max_substeps: int = 20,
+    tol: float = 1e-12,
+    max_matvecs: int = 200_000,
+    integrate: bool = False,
     where: str = "TransportLayer exact step",
-    _depth: int = 0,
-) -> tuple[torch.Tensor, int]:
-    """expm(dt * [[M, b0], [0, 0]]) @ [x, 1], as a scaling-and-squaring-free Taylor
-    action in M -- see the module docstring / Task 10's plan for the derivation.
-    Never forms a (2m, 2m), or even an (m, m), dense object.
+) -> ExpmResult:
+    """expm(dt [[M, b0], [0, 0]]) [x; 1] by a scaled Taylor action whose work (s substeps of m
+    terms) is fixed from ||dt M||_1 before any arithmetic on x or b0.
+
+    The recurrence per substep of length h: u = M x + b0, x_next = x + sum_{j>=1} h^j/j!
+    M^{j-1} u; and, when `integrate`, int_0^h x(tau) dtau = h x + sum_{j>=1} h^{j+1}/(j+1)!
+    M^{j-1} u (the same terms, shifted coefficients). One (s, m) serves the whole batch: the
+    bound is taken as the batch maximum, which is conservative for every instance.
+
+    Shift: when b0 is identically zero and no integral is requested, M is replaced by
+    M - mu I with mu the mean diagonal per instance and the result multiplied by e^{h mu};
+    this is exact and removes the common decay rate from the norm (a pure decay costs one
+    term). It is not applied with forcing, where the augmented system's norm would gain |mu|
+    back, nor with the integral, whose shifted form has no such simple recurrence. The
+    convolution integral_0^h e^{mu(h-s)} e^{sA} ds b0 (A = M - mu I) does not factor into a
+    single e^{h mu} the way the x0 term does -- its exponent varies with s -- so the shift is
+    correct only when b0 can NEVER be nonzero, not merely when its current value happens to
+    be 0: `b0.requires_grad` is checked, not just `b0`'s value, because a zero-valued but
+    grad-tracked b0 (a `sources` leaf that is 0 at this call but not structurally so) would
+    otherwise get an incorrect (shifted) derivative even though the forward value is exact.
+
+    Raises `RuntimeError` naming `where`, the norm and the predicted s * m when that exceeds
+    `max_matvecs`: the exact scheme is O(||dt M||) matvecs by nature; a stiff problem belongs
+    to scheme='implicit'.
     """
-    u = M.matvec(x) + b0
-    result = x.clone()
-    term = u
-    coef = dt
-    converged = torch.zeros(x.shape[:-1], dtype=torch.bool, device=x.device)
-    j = 1
-    while j <= max_terms:
-        increment = coef * term
-        result = torch.where(
-            converged.unsqueeze(-1), result, result + increment
-        )
-        tol = atol + rtol * result.abs().amax(dim=-1, keepdim=True).squeeze(-1)
-        finite = torch.isfinite(increment).all(dim=-1) & torch.isfinite(result).all(dim=-1)
-        newly_converged = finite & (increment.abs().amax(dim=-1) <= tol)  # amendment A6
-        converged = converged | newly_converged
-        if bool(torch.all(converged)):
-            return result, 1  # one leaf Taylor evaluation (amendment A6)
-        term = M.matvec(term)
-        j += 1
-        coef = coef * dt / (j)
-    if _depth >= max_substeps:
-        bad = torch.nonzero(~converged.reshape(-1), as_tuple=False).flatten()
+    dtype = x.dtype
+    shift = (not integrate) and (not b0.requires_grad) and (not bool(torch.any(b0 != 0)))
+    with torch.no_grad():
+        colsum = M.abs_column_sums().to(dtype)
+        if shift:
+            diag = M.diagonal().to(dtype)
+            mu_ng = diag.mean(-1, keepdim=True)
+            colsum = colsum - diag.abs() + (diag - mu_ng).abs()
+        norm = float((colsum.amax(-1) * dt).max())
+    s, m = _taylor_schedule(norm, tol)
+    if s * m > max_matvecs:
         raise RuntimeError(
-            f"{where}: batch indices {bad.tolist()} failed to converge "
-            f"the exponential action after {max_substeps} dt-halvings"
+            f"{where}: the exponential action needs about {s * m} matvecs (||dt M||_1 = "
+            f"{norm:.3e}: {s} substeps of {m} Taylor terms) against a budget of "
+            f"{max_matvecs}; this is a stiff step -- use scheme='implicit' or "
+            f"'trapezoidal', or raise max_matvecs deliberately"
         )
-    half = dt / 2
-    x_mid, substeps_a = _expm_action(
-        M, x, b0, half, rtol=rtol, atol=atol, max_terms=max_terms,
-        max_substeps=max_substeps, where=where, _depth=_depth + 1,
-    )
-    x_end, substeps_b = _expm_action(
-        M, x_mid, b0, half, rtol=rtol, atol=atol, max_terms=max_terms,
-        max_substeps=max_substeps, where=where, _depth=_depth + 1,
-    )
-    return x_end, substeps_a + substeps_b  # amendment A6
+    h = dt / s
+    mu = M.diagonal().to(dtype).mean(-1, keepdim=True) if shift else None
+    scale = torch.exp(h * mu) if shift else None
+
+    def apply(v: torch.Tensor) -> torch.Tensor:
+        y = M.matvec(v)
+        return y - mu * v if shift else y
+
+    integral = torch.zeros_like(x) if integrate else None
+    for _ in range(s):
+        term = apply(x) + b0
+        result = x + h * term
+        piece = h * x + (0.5 * h * h) * term if integrate else None
+        coef = h
+        for j in range(2, m + 1):
+            term = apply(term)
+            coef = coef * h / j
+            result = result + coef * term
+            if integrate:
+                piece = piece + (coef * h / (j + 1)) * term
+        x = result * scale if shift else result
+        if integrate:
+            integral = integral + piece
+    return ExpmResult(x, integral, s, m, s * m)
 
 
