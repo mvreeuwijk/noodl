@@ -15,6 +15,7 @@ from noodl.layers.transport import (
     _taylor_remainder,
     _taylor_schedule,
     _theta_max,
+    _theta_table,
 )
 from noodl.topology import Network
 
@@ -47,6 +48,20 @@ def test_schedule_meets_the_tolerance_and_never_wastes_a_substep(norm):
     if s > 1:
         # one fewer substep would need more than m_max terms
         assert _taylor_remainder(norm / (s - 1), 55) > 1e-12 or s * m <= (s - 1) * 55
+
+
+def test_schedule_clamps_m_at_the_table_boundary():
+    """norm = the smallest float above table[-1] * 17 makes s_min land exactly on s = 17 (via
+    `math.ceil(norm / table[-1])`) while the SEPARATE division `norm / 17` rounds to a hair
+    above the largest tabulated theta_{m_max} -- bisect_left then returns len(table) ==
+    m_max, which must clamp to m_max rather than overflow to m_max + 1. Confirmed to
+    reproduce end to end through `_taylor_schedule` before the clamp was added (result
+    (17, 56)); this pins it at (17, <= 55)."""
+    tol, m_max = 1e-12, 55
+    table = _theta_table(tol, m_max)
+    norm = math.nextafter(table[-1] * 17, math.inf)
+    s, m = _taylor_schedule(norm, tol, m_max)
+    assert m <= m_max
 
 
 def _chain(n_nodes=4, *, removal=None, capacity=None):
@@ -146,6 +161,32 @@ def test_pure_decay_with_no_forcing_costs_one_term_after_the_diagonal_shift():
     out = _expm_action(op, _t([10.0]), _t([0.0]), 50.0)
     assert out.x.item() == pytest.approx(10.0 * math.exp(-25_000.0), abs=1e-300)
     assert out.matvecs <= 2
+
+
+def test_shifted_branch_gradient_matches_the_dense_reference():
+    """The b0 == 0 shift changes the recurrence itself (M -> M - mu I, rescaled by e^{h mu}),
+    so it needs its own gradient check against the dense reference: the only other gradient
+    test uses integrate=True (shift disabled by construction), the nilpotent test reaches the
+    shift with mu == 0 (a no-op shift numerically), and the mixed-stiffness batch test checks
+    only the forward value. Here mu is strongly nonzero (removal=500) and q/capacity require
+    grad; b0 is detached and all-zero, which the default (shift=None) inference recognises as
+    structurally eligible."""
+    layer = _chain(4, removal=torch.full((4, 1), 500.0, dtype=F64))
+    q = _t([0.3, 0.3, -0.2, 0.3, 0.3], requires_grad=True)
+    cap = _t([1.0, 2.0, 0.5, 1.5], requires_grad=True)
+    op = layer._advection_operator(q, cap)
+    x = _t([1.0, 0.0, 2.0, 0.5])
+    b0 = torch.zeros(4, dtype=F64).detach()
+    out = _expm_action(op, x, b0, 2.0)
+    x_ref, _ = _dense_reference(op, x, b0, 2.0)
+    torch.testing.assert_close(out.x, x_ref, rtol=1e-9, atol=1e-12)
+    w = _t([0.3, -1.2, 0.7, 2.0])
+    # `op.flow` (carrier * q) is again shared between `out` and `x_ref`; see the identical
+    # note on test_action_and_integral_match_the_dense_reference_and_so_do_their_gradients.
+    dq, dcap = torch.autograd.grad((out.x * w).sum(), (q, cap), retain_graph=True)
+    dq_ref, dcap_ref = torch.autograd.grad((x_ref * w).sum(), (q, cap))
+    torch.testing.assert_close(dq, dq_ref, rtol=1e-8, atol=1e-10)
+    torch.testing.assert_close(dcap, dcap_ref, rtol=1e-8, atol=1e-10)
 
 
 def test_the_work_budget_is_refused_by_name():

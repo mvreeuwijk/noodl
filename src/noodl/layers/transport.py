@@ -723,8 +723,25 @@ class TransportLayer:
             )
             cap = self._capacity_stacked(dtype, cap_t)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
+            # Structural verdict for `_expm_action`'s diagonal shift, computed from
+            # `x_boundary`/`sources` THEMSELVES rather than from `b0` (T8-4): `b0.requires_grad`
+            # would be True whenever `q` or `capacity` requires grad, even with `x_boundary`
+            # and `sources` constant zero, since `b0 = boundary_forcing(x_boundary) +
+            # sources / capacity` differentiates through the operator's flow/capacity
+            # regardless. With `x_boundary` and `sources` identically zero and not themselves
+            # grad-tracked, `b0` is identically zero as a function of `q` and `capacity`, so
+            # the shift (and its tangent) stays exact whether or not `q`/`capacity` require
+            # grad -- this is what lets a sealed pure-decay zone cost one Taylor term under
+            # training instead of `_expm_action`'s conservative (value-only) default.
+            homogeneous = (
+                (not x_boundary.requires_grad)
+                and (not sources.requires_grad)
+                and bool((x_boundary == 0).all())
+                and bool((sources == 0).all())
+            )
             result = _expm_action(
-                op, x_s, b0, dt, where=f"TransportLayer '{self.name}' exact step"
+                op, x_s, b0, dt, where=f"TransportLayer '{self.name}' exact step",
+                shift=homogeneous,
             ).x
         elif self.scheme == "implicit":
             result, reduced = self._implicit_step_sparse(
@@ -964,7 +981,11 @@ def _taylor_schedule(norm: float, tol: float, m_max: int = _TAYLOR_M_MAX) -> tup
     best: tuple[int, int] | None = None
     for s in range(s_min, s_min + 16):
         theta = norm / s
-        m = bisect.bisect_left(table, theta) + 1          # smallest m with theta_m >= theta
+        # `bisect_left` returns `len(table)` (== m_max) when theta lands a hair above
+        # table[-1] -- e.g. norm == table[-1] * s_min exactly, where float rounding in the
+        # ceil/divide above can leave theta infinitesimally over the largest tabulated
+        # theta_{m_max}. Clamping to m_max keeps m a valid Taylor degree instead of m_max + 1.
+        m = min(bisect.bisect_left(table, theta) + 1, m_max)  # smallest m with theta_m >= theta
         if best is None or s * m < best[0] * best[1]:
             best = (s, m)
     assert best is not None
@@ -980,6 +1001,7 @@ def _expm_action(
     tol: float = 1e-12,
     max_matvecs: int = 200_000,
     integrate: bool = False,
+    shift: bool | None = None,
     where: str = "TransportLayer exact step",
 ) -> ExpmResult:
     """expm(dt [[M, b0], [0, 0]]) [x; 1] by a scaled Taylor action whose work (s substeps of m
@@ -990,24 +1012,42 @@ def _expm_action(
     M^{j-1} u (the same terms, shifted coefficients). One (s, m) serves the whole batch: the
     bound is taken as the batch maximum, which is conservative for every instance.
 
-    Shift: when b0 is identically zero and no integral is requested, M is replaced by
-    M - mu I with mu the mean diagonal per instance and the result multiplied by e^{h mu};
-    this is exact and removes the common decay rate from the norm (a pure decay costs one
-    term). It is not applied with forcing, where the augmented system's norm would gain |mu|
-    back, nor with the integral, whose shifted form has no such simple recurrence. The
-    convolution integral_0^h e^{mu(h-s)} e^{sA} ds b0 (A = M - mu I) does not factor into a
-    single e^{h mu} the way the x0 term does -- its exponent varies with s -- so the shift is
-    correct only when b0 can NEVER be nonzero, not merely when its current value happens to
-    be 0: `b0.requires_grad` is checked, not just `b0`'s value, because a zero-valued but
-    grad-tracked b0 (a `sources` leaf that is 0 at this call but not structurally so) would
-    otherwise get an incorrect (shifted) derivative even though the forward value is exact.
+    Shift: when applied, M is replaced by M - mu I with mu the mean diagonal per instance and
+    the result multiplied by e^{h mu}; this is exact and removes the common decay rate from
+    the norm (a pure decay costs one term instead of thousands). It is valid ONLY when b0 is
+    identically (structurally) zero: the convolution integral_0^h e^{mu(h-s)} e^{sA} ds b0
+    (A = M - mu I) does not factor into a single e^{h mu} the way the x0 term does -- its
+    exponent varies with s -- so shifting when b0 can ever be nonzero produces a wrong
+    derivative even where the forward value looks exact. It is also never valid together with
+    `integrate`, whose shifted form has no such simple recurrence (`shift=True` with
+    `integrate=True` raises `ValueError`).
+
+    `shift` (keyword-only, default `None`) picks who decides:
+    - `None` (the default): inferred conservatively from `b0` itself -- off whenever
+      `integrate` is set, whenever `b0.requires_grad` (b0 MIGHT become nonzero under
+      autograd, even if its current value is 0), or whenever `b0`'s current value is
+      nonzero. This default is always safe but can be needlessly conservative: a `b0`
+      built as `boundary_forcing(xb) + sources / capacity` has `requires_grad=True`
+      whenever `q` or `capacity` requires grad, even with `xb` and `sources` constant
+      zero, because `boundary_forcing` and the capacity division differentiate through
+      the OPERATOR's coefficients, not through `xb`/`sources` (T8-4) -- so the inferred
+      default alone would silently pay full Taylor cost for what is structurally still an
+      exact-shift-eligible pure decay whenever training makes `q`/`capacity` require grad.
+    - `True` / `False`: the caller's own verdict, used as-is (still forced through the
+      `integrate` check above). Pass `True` only when the caller can prove `b0` has no way
+      of becoming nonzero -- e.g. `TransportLayer.step` computes this from `x_boundary` and
+      `sources` directly (constant, all-zero, and not themselves grad-tracked), which is
+      unaffected by whether `q`/`capacity` require grad.
 
     Raises `RuntimeError` naming `where`, the norm and the predicted s * m when that exceeds
     `max_matvecs`: the exact scheme is O(||dt M||) matvecs by nature; a stiff problem belongs
     to scheme='implicit'.
     """
+    if shift and integrate:
+        raise ValueError("_expm_action: shift=True is incompatible with integrate=True")
     dtype = x.dtype
-    shift = (not integrate) and (not b0.requires_grad) and (not bool(torch.any(b0 != 0)))
+    if shift is None:
+        shift = (not integrate) and (not b0.requires_grad) and (not bool(torch.any(b0 != 0)))
     with torch.no_grad():
         colsum = M.abs_column_sums().to(dtype)
         if shift:

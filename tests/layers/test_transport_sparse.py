@@ -13,6 +13,7 @@ import torch
 from torch.autograd import gradcheck
 
 from benchmarks.measure import saved_tensor_bytes
+from noodl.layers import transport as transport_module
 from noodl.layers.transport import (
     TransportLayer,
     _expm_action,
@@ -580,7 +581,7 @@ def test_error_control_triggers_substepping_on_a_stiff_case():
     torch.testing.assert_close(out.x, expected, rtol=1e-6, atol=1e-9)
 
 
-def test_error_control_raises_naming_instances_when_max_substeps_exceeded():
+def test_error_control_refuses_a_step_that_exceeds_the_matvec_budget():
     net = flow_through_zone()
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([1.0]), flow_kind="airpath", boundary=["ambient"],
@@ -600,6 +601,69 @@ def test_error_control_raises_naming_instances_when_max_substeps_exceeded():
             op, x0, b0, dt=1e9, max_matvecs=100,
             where=f"TransportLayer '{layer.name}' exact step",
         )
+
+
+def test_step_passes_the_structural_shift_verdict_computed_from_xb_and_sources(monkeypatch):
+    """T8-4: `b0 = boundary_forcing(x_boundary) + sources / capacity` has `requires_grad=True`
+    whenever `q` requires grad, even with `x_boundary` and `sources` constant zero, which
+    would silently disable `_expm_action`'s own (value/requires_grad-based) default shift
+    inference under training -- a ~139k-matvec budget cliff for what is structurally still an
+    exact, one-term pure decay. `step()`'s exact branch must instead pass a `shift` verdict
+    computed from `x_boundary`/`sources` themselves, unaffected by whether `q` requires grad.
+    Observed by monkeypatching `_expm_action` with a spy that records the `shift` kwarg it
+    received and forwards the call unchanged.
+    """
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1.0]), flow_kind="airpath", boundary=["ambient"],
+        removal=torch.tensor([500.0], dtype=torch.float64),
+    )
+    q = torch.zeros(2, dtype=torch.float64, requires_grad=True)
+    x0 = torch.tensor([10.0], dtype=torch.float64)
+    xb = torch.tensor([0.0], dtype=torch.float64)          # constant zero, not grad-tracked
+    sources = torch.zeros(1, dtype=torch.float64)          # constant zero, not grad-tracked
+    full_source = _full(layer, sources)
+
+    recorded = {}
+    real_expm_action = transport_module._expm_action
+
+    def spy(*args, **kwargs):
+        recorded["shift"] = kwargs.get("shift")
+        return real_expm_action(*args, **kwargs)
+
+    monkeypatch.setattr(transport_module, "_expm_action", spy)
+    y = layer.step(x0, q, full_source, xb, 50.0)
+
+    assert recorded["shift"] is True
+    assert y.item() == pytest.approx(10.0 * math.exp(-25_000.0), abs=1e-300)
+
+
+def test_step_records_shift_false_when_sources_require_grad(monkeypatch):
+    """Negative case: `sources` requiring grad (even though it is 0 at this call) must record
+    `shift=False`. The existing R3 oracle (test_transport_derivatives.py) already covers the
+    resulting gradient's correctness; this only pins the recorded flag."""
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1.0]), flow_kind="airpath", boundary=["ambient"],
+        removal=torch.tensor([500.0], dtype=torch.float64),
+    )
+    q = torch.zeros(2, dtype=torch.float64)
+    x0 = torch.tensor([10.0], dtype=torch.float64)
+    xb = torch.tensor([0.0], dtype=torch.float64)
+    sources = torch.zeros(1, dtype=torch.float64, requires_grad=True)
+    full_source = _full(layer, sources)
+
+    recorded = {}
+    real_expm_action = transport_module._expm_action
+
+    def spy(*args, **kwargs):
+        recorded["shift"] = kwargs.get("shift")
+        return real_expm_action(*args, **kwargs)
+
+    monkeypatch.setattr(transport_module, "_expm_action", spy)
+    layer.step(x0, q, full_source, xb, 50.0)
+
+    assert recorded["shift"] is False
 
 
 def test_gradcheck_expm_action_wrt_x_flow_sources_boundary():
@@ -623,8 +687,13 @@ def test_gradcheck_expm_action_wrt_x_flow_sources_boundary():
 def test_expm_action_backward_memory_scales_with_substep_count():
     """Measures (does not gate) how backward memory through _expm_action's own unrolled
     iteration grows from a non-stiff case (1 substep) to a genuinely stiff one (several
-    substeps, forced exactly as in test_error_control_triggers_substepping_on_a_stiff_case
-    above). Unlike Task 9's linear-solve adjoint, no O(state) bound is asserted here --
+    substeps). Both `run_and_measure` calls below build `b0` from `xb`/`sources` with
+    `requires_grad=True`, so even though their VALUES are 0, `_expm_action`'s default
+    (`shift=None`) inference disables the diagonal shift on `b0.requires_grad` alone (T8-4)
+    -- unlike test_error_control_triggers_substepping_on_a_stiff_case (which now needs an
+    explicit nonzero `sources=50` to stay stiff, since IT calls through a b0 with
+    `requires_grad=False`), the stiffness here comes from the grad-tracked zeros, not from
+    forcing. Unlike Task 9's linear-solve adjoint, no O(state) bound is asserted here --
     see this task's Mathematics section for why none is expected. `tracemalloc` cannot be
     used (amendment A4(a)): it sees zero bytes of PyTorch allocations on this `.venv`, so a
     tracemalloc-based assertion would pass vacuously regardless of whether more sub-steps
@@ -722,7 +791,9 @@ def test_expm_action_mixed_stiffness_batch_matches_standalone_within_tolerance()
         f"wall time={elapsed:.4f}s, out.matvecs={out.matvecs} (substeps={out.substeps}, "
         f"terms={out.terms})"
     )
-    assert elapsed < 60.0
+    # No wall-clock assertion here (finding: a flaky bound that guarded only this ~16 s
+    # action call, not the ~57 s the whole test actually takes with the standalone
+    # comparisons and backward passes below) -- the print above is the ledger record.
     assert out.substeps > 1
     sparse = out.x
 
