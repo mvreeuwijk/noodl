@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 336" width="820" height="336" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
+  <title id="t">Linear backend selection</title>
+  <desc id="d">The auto eligibility table resolving to sparse_direct, pcg or gmres.</desc>
+  <rect width="820" height="336" rx="10" fill="#F7F9FA"/>
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#17A398"/></marker>
+    <marker id="arn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#1E3A52"/></marker>
+    <marker id="arm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#7C8A99"/></marker>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#C2703D"/></marker>
+  </defs>
+  <text x="40" y="34" font-size="15" fill="#1E3A52" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">method="auto" — first matching row wins</text>
+  <rect x="40" y="60" width="380" height="44" rx="8" fill="#FFFFFF" stroke="#DCE3E8" stroke-width="1.5"/>
+  <text x="58" y="87" font-size="12.5" fill="#1E3A52" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">spd_certificate() mixed over the batch</text>
+  <line x1="424" y1="82" x2="466" y2="82" stroke="#C2703D" stroke-width="2" stroke-linecap="round" marker-end="url(#arw)"/>
+  <rect x="474" y="60" width="150" height="44" rx="8" fill="#FFFFFF" stroke="#C2703D" stroke-width="2"/>
+  <text x="549" y="87" font-size="12.5" fill="#C2703D" text-anchor="middle" font-weight="600" font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace">RuntimeError</text>
+  <text x="640" y="87" font-size="11.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">never split a batch</text>
+  <rect x="40" y="118" width="380" height="44" rx="8" fill="#FFFFFF" stroke="#DCE3E8" stroke-width="1.5"/>
+  <text x="58" y="145" font-size="12.5" fill="#1E3A52" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">certified SPD, sparse-direct applicable</text>
+  <line x1="424" y1="140" x2="466" y2="140" stroke="#17A398" stroke-width="2" stroke-linecap="round" marker-end="url(#ar)"/>
+  <rect x="474" y="118" width="150" height="44" rx="8" fill="#FFFFFF" stroke="#17A398" stroke-width="2"/>
+  <text x="549" y="145" font-size="12.5" fill="#17A398" text-anchor="middle" font-weight="600" font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace">sparse_direct</text>
+  <text x="640" y="145" font-size="11.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">SciPy SuperLU, batch &lt;= 32</text>
+  <rect x="40" y="176" width="380" height="44" rx="8" fill="#FFFFFF" stroke="#DCE3E8" stroke-width="1.5"/>
+  <text x="58" y="203" font-size="12.5" fill="#1E3A52" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">certified SPD, otherwise</text>
+  <line x1="424" y1="198" x2="466" y2="198" stroke="#17A398" stroke-width="2" stroke-linecap="round" marker-end="url(#ar)"/>
+  <rect x="474" y="176" width="150" height="44" rx="8" fill="#FFFFFF" stroke="#17A398" stroke-width="2"/>
+  <text x="549" y="203" font-size="12.5" fill="#17A398" text-anchor="middle" font-weight="600" font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace">pcg</text>
+  <text x="640" y="203" font-size="11.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Jacobi-preconditioned CG</text>
+  <rect x="40" y="234" width="380" height="44" rx="8" fill="#FFFFFF" stroke="#DCE3E8" stroke-width="1.5"/>
+  <text x="58" y="261" font-size="12.5" fill="#1E3A52" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">certificate None, or uniformly False</text>
+  <line x1="424" y1="256" x2="466" y2="256" stroke="#1E3A52" stroke-width="2" stroke-linecap="round" marker-end="url(#arn)"/>
+  <rect x="474" y="234" width="150" height="44" rx="8" fill="#FFFFFF" stroke="#1E3A52" stroke-width="2"/>
+  <text x="549" y="261" font-size="12.5" fill="#1E3A52" text-anchor="middle" font-weight="600" font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace">gmres</text>
+  <text x="640" y="261" font-size="11.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">assumes no symmetry</text>
+  <text x="40" y="316" font-size="11.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Every sparse-direct precondition falls back to pcg when it fails — auto is a promise to choose a backend that works.</text>
+</svg>

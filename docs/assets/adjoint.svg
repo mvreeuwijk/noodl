@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 264" width="820" height="264" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
+  <title id="t">Adjoint versus unrolled differentiation</title>
+  <desc id="d">The implicit-function theorem gives one linear solve on the backward pass.</desc>
+  <rect width="820" height="264" rx="10" fill="#F7F9FA"/>
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#17A398"/></marker>
+    <marker id="arn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#1E3A52"/></marker>
+    <marker id="arm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#7C8A99"/></marker>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#C2703D"/></marker>
+  </defs>
+  <text x="40" y="34" font-size="14" fill="#7C8A99" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Unrolled tape</text>
+  <text x="440" y="34" font-size="14" fill="#17A398" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Implicit adjoint — what noodl does</text>
+  <line x1="410" y1="20" x2="410" y2="250" stroke="#DCE3E8" stroke-width="1.5" stroke-linecap="round"/>
+  <rect x="56" y="62" width="150" height="26" rx="5" fill="#FFFFFF" stroke="#7C8A99" stroke-width="1.3"/>
+  <text x="131" y="79" font-size="10.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Newton iterate 1</text>
+  <line x1="226" y1="75" x2="300" y2="75" stroke="#7C8A99" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="4 4" marker-end="url(#arm)"/>
+  <rect x="56" y="96" width="150" height="26" rx="5" fill="#FFFFFF" stroke="#7C8A99" stroke-width="1.3"/>
+  <text x="131" y="113" font-size="10.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Newton iterate 2</text>
+  <line x1="226" y1="109" x2="300" y2="109" stroke="#7C8A99" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="4 4" marker-end="url(#arm)"/>
+  <rect x="56" y="130" width="150" height="26" rx="5" fill="#FFFFFF" stroke="#7C8A99" stroke-width="1.3"/>
+  <text x="131" y="147" font-size="10.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Newton iterate 3</text>
+  <line x1="226" y1="143" x2="300" y2="143" stroke="#7C8A99" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="4 4" marker-end="url(#arm)"/>
+  <rect x="56" y="164" width="150" height="26" rx="5" fill="#FFFFFF" stroke="#7C8A99" stroke-width="1.3"/>
+  <text x="131" y="181" font-size="10.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Newton iterate 4</text>
+  <line x1="226" y1="177" x2="300" y2="177" stroke="#7C8A99" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="4 4" marker-end="url(#arm)"/>
+  <rect x="56" y="198" width="150" height="26" rx="5" fill="#FFFFFF" stroke="#7C8A99" stroke-width="1.3"/>
+  <text x="131" y="215" font-size="10.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Newton iterate 5</text>
+  <line x1="226" y1="211" x2="300" y2="211" stroke="#7C8A99" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="4 4" marker-end="url(#arm)"/>
+  <text x="310" y="130" font-size="11" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">every step</text>
+  <text x="310" y="148" font-size="11" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">stored and</text>
+  <text x="310" y="166" font-size="11" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">replayed</text>
+  <text x="56" y="246" font-size="11.5" fill="#C2703D" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">memory grows with the iteration count, plus noise from early iterates</text>
+  <rect x="440" y="62" width="180" height="26" rx="5" fill="#FFFFFF" stroke="#DCE3E8" stroke-width="1.3"/>
+  <text x="530" y="79" font-size="10.5" fill="#7C8A99" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Newton iterate 1</text>
+  <circle cx="530" cy="96" r="1.8" fill="#7C8A99"/>
+  <circle cx="530" cy="104" r="1.8" fill="#7C8A99"/>
+  <circle cx="530" cy="112" r="1.8" fill="#7C8A99"/>
+  <rect x="440" y="118" width="180" height="26" rx="5" fill="#FFFFFF" stroke="#DCE3E8" stroke-width="1.3"/>
+  <text x="530" y="135" font-size="10.5" fill="#7C8A99" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Newton iterate k</text>
+  <rect x="440" y="160" width="180" height="40" rx="6" fill="#D8F0ED" stroke="#17A398" stroke-width="2"/>
+  <text x="530" y="185" font-size="11.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace">converged   r(x, theta) = 0</text>
+  <path d="M 636 180 L 700 180" fill="none" stroke="#17A398" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ar)"/>
+  <rect x="700" y="150" width="84" height="60" rx="6" fill="#FFFFFF" stroke="#17A398" stroke-width="2"/>
+  <text x="742" y="174" font-size="12" fill="#17A398" text-anchor="middle" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">ONE</text>
+  <text x="742" y="192" font-size="10.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">linear solve</text>
+  <text x="440" y="246" font-size="11.5" fill="#17A398" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">cost independent of the forward iteration count</text>
+</svg>

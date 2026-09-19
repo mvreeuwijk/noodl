@@ -46,3 +46,6 @@ data/
 
 # Benchmark scratch output
 benchmarks_stderr.log
+
+# MkDocs build output (`mkdocs build` writes here; the site is published from CI).
+/site/

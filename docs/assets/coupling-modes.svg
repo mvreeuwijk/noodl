@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 268" width="820" height="268" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
+  <title id="t">The two coupling schemes</title>
+  <desc id="d">Ping-pong takes one pass; iterate repeats the pass to a tolerance.</desc>
+  <rect width="820" height="268" rx="10" fill="#F7F9FA"/>
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#17A398"/></marker>
+    <marker id="arn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#1E3A52"/></marker>
+    <marker id="arm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#7C8A99"/></marker>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#C2703D"/></marker>
+  </defs>
+  <text x="40" y="34" font-size="14" fill="#17A398" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">pingpong — one pass per step</text>
+  <text x="430" y="34" font-size="14" fill="#1E3A52" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">iterate — repeat until converged</text>
+  <line x1="400" y1="20" x2="400" y2="250" stroke="#DCE3E8" stroke-width="1.5" stroke-linecap="round"/>
+  <rect x="52" y="70" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#17A398" stroke-width="1.5"/>
+  <text x="81" y="89" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">closures</text>
+  <line x1="110" y1="85" x2="116" y2="85" stroke="#17A398" stroke-width="1.5" stroke-linecap="round" marker-end="url(#ar)"/>
+  <rect x="118" y="70" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#17A398" stroke-width="1.5"/>
+  <text x="147" y="89" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">potential</text>
+  <line x1="176" y1="85" x2="182" y2="85" stroke="#17A398" stroke-width="1.5" stroke-linecap="round" marker-end="url(#ar)"/>
+  <rect x="184" y="70" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#17A398" stroke-width="1.5"/>
+  <text x="213" y="89" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">capacitated</text>
+  <line x1="242" y1="85" x2="248" y2="85" stroke="#17A398" stroke-width="1.5" stroke-linecap="round" marker-end="url(#ar)"/>
+  <rect x="250" y="70" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#17A398" stroke-width="1.5"/>
+  <text x="279" y="89" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">transport</text>
+  <line x1="308" y1="85" x2="314" y2="85" stroke="#17A398" stroke-width="1.5" stroke-linecap="round" marker-end="url(#ar)"/>
+  <rect x="316" y="70" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#17A398" stroke-width="1.5"/>
+  <text x="345" y="89" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">reactions</text>
+  <text x="52" y="128" font-size="11.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">state at the START of the step</text>
+  <text x="52" y="148" font-size="11.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">splitting error: first order in dt</text>
+  <rect x="52" y="168" width="324" height="58" rx="8" fill="#D8F0ED" stroke="#17A398" stroke-width="1.5"/>
+  <text x="68" y="190" font-size="11.5" fill="#1E3A52" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Cheap, and correct for a weakly coupled model.</text>
+  <text x="68" y="210" font-size="11.5" fill="#1E3A52" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">The default — and a trap if coupling is two-way.</text>
+  <rect x="442" y="60" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#1E3A52" stroke-width="1.5"/>
+  <text x="471" y="79" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">closures</text>
+  <line x1="500" y1="75" x2="506" y2="75" stroke="#1E3A52" stroke-width="1.5" stroke-linecap="round" marker-end="url(#arn)"/>
+  <rect x="508" y="60" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#1E3A52" stroke-width="1.5"/>
+  <text x="537" y="79" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">potential</text>
+  <line x1="566" y1="75" x2="572" y2="75" stroke="#1E3A52" stroke-width="1.5" stroke-linecap="round" marker-end="url(#arn)"/>
+  <rect x="574" y="60" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#1E3A52" stroke-width="1.5"/>
+  <text x="603" y="79" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">capacitated</text>
+  <line x1="632" y1="75" x2="638" y2="75" stroke="#1E3A52" stroke-width="1.5" stroke-linecap="round" marker-end="url(#arn)"/>
+  <rect x="640" y="60" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#1E3A52" stroke-width="1.5"/>
+  <text x="669" y="79" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">transport</text>
+  <line x1="698" y1="75" x2="704" y2="75" stroke="#1E3A52" stroke-width="1.5" stroke-linecap="round" marker-end="url(#arn)"/>
+  <rect x="706" y="60" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#1E3A52" stroke-width="1.5"/>
+  <text x="735" y="79" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">reactions</text>
+  <text x="430" y="79" font-size="11" fill="#7C8A99" text-anchor="end" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">1</text>
+  <rect x="442" y="104" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#1E3A52" stroke-width="1.5"/>
+  <text x="471" y="123" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">closures</text>
+  <line x1="500" y1="119" x2="506" y2="119" stroke="#1E3A52" stroke-width="1.5" stroke-linecap="round" marker-end="url(#arn)"/>
+  <rect x="508" y="104" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#1E3A52" stroke-width="1.5"/>
+  <text x="537" y="123" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">potential</text>
+  <line x1="566" y1="119" x2="572" y2="119" stroke="#1E3A52" stroke-width="1.5" stroke-linecap="round" marker-end="url(#arn)"/>
+  <rect x="574" y="104" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#1E3A52" stroke-width="1.5"/>
+  <text x="603" y="123" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">capacitated</text>
+  <line x1="632" y1="119" x2="638" y2="119" stroke="#1E3A52" stroke-width="1.5" stroke-linecap="round" marker-end="url(#arn)"/>
+  <rect x="640" y="104" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#1E3A52" stroke-width="1.5"/>
+  <text x="669" y="123" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">transport</text>
+  <line x1="698" y1="119" x2="704" y2="119" stroke="#1E3A52" stroke-width="1.5" stroke-linecap="round" marker-end="url(#arn)"/>
+  <rect x="706" y="104" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#1E3A52" stroke-width="1.5"/>
+  <text x="735" y="123" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">reactions</text>
+  <text x="430" y="123" font-size="11" fill="#7C8A99" text-anchor="end" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">2</text>
+  <rect x="442" y="148" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#1E3A52" stroke-width="1.5"/>
+  <text x="471" y="167" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">closures</text>
+  <line x1="500" y1="163" x2="506" y2="163" stroke="#1E3A52" stroke-width="1.5" stroke-linecap="round" marker-end="url(#arn)"/>
+  <rect x="508" y="148" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#1E3A52" stroke-width="1.5"/>
+  <text x="537" y="167" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">potential</text>
+  <line x1="566" y1="163" x2="572" y2="163" stroke="#1E3A52" stroke-width="1.5" stroke-linecap="round" marker-end="url(#arn)"/>
+  <rect x="574" y="148" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#1E3A52" stroke-width="1.5"/>
+  <text x="603" y="167" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">capacitated</text>
+  <line x1="632" y1="163" x2="638" y2="163" stroke="#1E3A52" stroke-width="1.5" stroke-linecap="round" marker-end="url(#arn)"/>
+  <rect x="640" y="148" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#1E3A52" stroke-width="1.5"/>
+  <text x="669" y="167" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">transport</text>
+  <line x1="698" y1="163" x2="704" y2="163" stroke="#1E3A52" stroke-width="1.5" stroke-linecap="round" marker-end="url(#arn)"/>
+  <rect x="706" y="148" width="58" height="30" rx="6" fill="#FFFFFF" stroke="#1E3A52" stroke-width="1.5"/>
+  <text x="735" y="167" font-size="9.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">reactions</text>
+  <text x="430" y="167" font-size="11" fill="#7C8A99" text-anchor="end" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">3</text>
+  <text x="442" y="204" font-size="11.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">0.5 relaxation, one-pass delayed;</text>
+  <text x="442" y="222" font-size="11.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">every pass re-advances from the step start</text>
+  <rect x="442" y="168" width="330" height="0" rx="8" fill="none" stroke="none" stroke-width="1.5"/>
+  <text x="442" y="242" font-size="11.5" fill="#1E3A52" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">converged when iterate_tol is met, per instance</text>
+</svg>

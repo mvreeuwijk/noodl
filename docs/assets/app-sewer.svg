@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 312" width="820" height="312" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
+  <title id="t">The sewer application</title>
+  <desc id="d">A pipe cross-section with water and headspace, and a dendritic network.</desc>
+  <rect width="820" height="312" rx="10" fill="#F7F9FA"/>
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#17A398"/></marker>
+    <marker id="arn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#1E3A52"/></marker>
+    <marker id="arm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#7C8A99"/></marker>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#C2703D"/></marker>
+  </defs>
+  <text x="40" y="34" font-size="15" fill="#1E3A52" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">One pipe, two flow networks</text>
+  <circle cx="160" cy="160" r="84" fill="#FFFFFF" stroke="#1E3A52" stroke-width="2.5"/>
+  <path d="M 83 194 A 84 84 0 0 0 237 194 Z" fill="#D8F0ED" stroke="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 83 194 A 84 84 0 0 0 237 194" fill="none" stroke="#17A398" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="83" y1="194" x2="237" y2="194" stroke="#17A398" stroke-width="3" stroke-linecap="round"/>
+  <text x="160" y="222" font-size="12" fill="#17A398" text-anchor="middle" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">water</text>
+  <text x="160" y="240" font-size="10.5" fill="#7C8A99" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Manning</text>
+  <text x="160" y="126" font-size="12" fill="#1E3A52" text-anchor="middle" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">headspace air</text>
+  <text x="160" y="144" font-size="10.5" fill="#7C8A99" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Newton potential solve</text>
+  <path d="M 108 182 L 212 182" fill="none" stroke="#17A398" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ar)"/>
+  <path d="M 108 166 L 212 166" fill="none" stroke="#1E3A52" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arn)"/>
+  <text x="256" y="198" font-size="12" fill="#17A398" text-anchor="start" font-weight="400" font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace">h</text>
+  <line x1="248" y1="194" x2="248" y2="244" stroke="#7C8A99" stroke-width="1.2" stroke-linecap="round"/>
+  <text x="340" y="74" font-size="13" fill="#1E3A52" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">a dendritic network</text>
+  <path d="M 380 110 L 480 140" fill="none" stroke="#17A398" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ar)"/>
+  <path d="M 380 170 L 480 140" fill="none" stroke="#17A398" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ar)"/>
+  <path d="M 480 140 L 480 210" fill="none" stroke="#17A398" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ar)"/>
+  <path d="M 380 230 L 480 210" fill="none" stroke="#17A398" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ar)"/>
+  <path d="M 480 210 L 600 176" fill="none" stroke="#17A398" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ar)"/>
+  <circle cx="380" cy="110" r="11" fill="#17A398" stroke="#FFFFFF" stroke-width="2.5"/>
+  <circle cx="380" cy="170" r="11" fill="#17A398" stroke="#FFFFFF" stroke-width="2.5"/>
+  <circle cx="480" cy="140" r="11" fill="#17A398" stroke="#FFFFFF" stroke-width="2.5"/>
+  <circle cx="480" cy="210" r="11" fill="#17A398" stroke="#FFFFFF" stroke-width="2.5"/>
+  <circle cx="380" cy="230" r="11" fill="#17A398" stroke="#FFFFFF" stroke-width="2.5"/>
+  <circle cx="600" cy="176" r="11" fill="#1E3A52" stroke="#FFFFFF" stroke-width="2.5"/>
+  <text x="612" y="180" font-size="11" fill="#1E3A52" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">outfall</text>
+  <rect x="340" y="266" width="430" height="32" rx="6" fill="#D8F0ED" stroke="#17A398" stroke-width="1.5"/>
+  <text x="555" y="287" font-size="11.5" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">a tree has an empty cycle space — continuity alone fixes every flow</text>
+  <text x="340" y="253" font-size="11.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">H2S generated in the water off-gasses into the air above</text>
+</svg>

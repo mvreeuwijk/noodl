@@ -1,0 +1,117 @@
+site_name: noodl
+site_description: >-
+  Network-Oriented Open Differentiable Library — a generic framework for solving
+  physics problems on networks, built on PyTorch.
+site_url: https://mvreeuwijk.github.io/noodl/
+repo_url: https://github.com/mvreeuwijk/noodl
+repo_name: mvreeuwijk/noodl
+edit_uri: edit/main/docs/
+copyright: MIT licensed.
+
+theme:
+  name: material
+  logo: assets/noodl-symbol.png
+  favicon: assets/noodl-symbol.png
+  font:
+    text: Inter
+    code: JetBrains Mono
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - content.code.copy
+    - content.action.edit
+    - toc.follow
+    - search.suggest
+
+# The nav lives here rather than in a toctree inside the pages, so that every
+# .md file under docs/ stays plain Markdown and renders correctly when read
+# directly on GitHub.
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Quick start: quickstart.md
+  - Concepts:
+      - concepts/index.md
+      - Networks: concepts/networks.md
+      - Elements and drives: concepts/elements.md
+      - Layers and models: concepts/layers.md
+      - Solvers: concepts/solvers.md
+      - Differentiability: concepts/differentiability.md
+  - Applications:
+      - applications/index.md
+      - Buildings: applications/building.md
+      - Street canyons: applications/street.md
+      - Sewers: applications/sewer.md
+      - Water distribution: applications/water.md
+      - Capacitated transfer: applications/capacitated.md
+      - Coupling: applications/coupling.md
+  - API reference: api.md
+  - Theory: theory.md
+
+# Internal design specs, implementation plans and review reports are kept in the
+# repository but are not part of the published documentation.
+exclude_docs: |
+  superpowers/
+  sparse_operators_report.md
+  sparse_operators_review.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_root_heading: true
+            show_source: true
+            show_signature_annotations: true
+            separate_signature: true
+            signature_crossrefs: true
+            docstring_style: google
+            members_order: source
+            filters: ["!^_"]
+            heading_level: 3
+
+markdown_extensions:
+  - abbr
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.details
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/mvreeuwijk/noodl

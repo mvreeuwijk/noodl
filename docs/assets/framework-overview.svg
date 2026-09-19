@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 382" width="820" height="382" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
+  <title id="t">The noodl model stack</title>
+  <desc id="d">Network, then elements drives and closures, then layers, then Model.</desc>
+  <rect width="820" height="382" rx="10" fill="#F7F9FA"/>
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#17A398"/></marker>
+    <marker id="arn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#1E3A52"/></marker>
+    <marker id="arm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#7C8A99"/></marker>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#C2703D"/></marker>
+  </defs>
+  <rect x="60" y="60" width="700" height="58" rx="8" fill="#FFFFFF" stroke="#17A398" stroke-width="2"/>
+  <text x="88" y="86" font-size="16" fill="#17A398" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Network</text>
+  <text x="88" y="105" font-size="12.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">a typed multigraph — nodes store, edges carry</text>
+  <rect x="60" y="140" width="700" height="58" rx="8" fill="#FFFFFF" stroke="#1E3A52" stroke-width="2"/>
+  <text x="88" y="166" font-size="16" fill="#1E3A52" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Elements · Drives · Closures</text>
+  <text x="88" y="185" font-size="12.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">your physics: branch laws, driving terms, state functions</text>
+  <rect x="60" y="220" width="700" height="58" rx="8" fill="#FFFFFF" stroke="#17A398" stroke-width="2"/>
+  <text x="88" y="246" font-size="16" fill="#17A398" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Layers</text>
+  <text x="88" y="265" font-size="12.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">potential flow · transport · reaction · capacitated transfer</text>
+  <rect x="60" y="300" width="700" height="58" rx="8" fill="#FFFFFF" stroke="#1E3A52" stroke-width="2"/>
+  <text x="88" y="326" font-size="16" fill="#1E3A52" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Model</text>
+  <text x="88" y="345" font-size="12.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">several layers on one network, stepped together</text>
+  <line x1="410" y1="118" x2="410" y2="140" stroke="#7C8A99" stroke-width="2" stroke-linecap="round" marker-end="url(#arm)"/>
+  <line x1="410" y1="198" x2="410" y2="220" stroke="#7C8A99" stroke-width="2" stroke-linecap="round" marker-end="url(#arm)"/>
+  <line x1="410" y1="278" x2="410" y2="300" stroke="#7C8A99" stroke-width="2" stroke-linecap="round" marker-end="url(#arm)"/>
+  <text x="790" y="92" font-size="11.5" fill="#7C8A99" text-anchor="end" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">framework</text>
+  <text x="790" y="172" font-size="11.5" fill="#17A398" text-anchor="end" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">yours</text>
+  <text x="790" y="252" font-size="11.5" fill="#7C8A99" text-anchor="end" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">framework</text>
+  <text x="790" y="332" font-size="11.5" fill="#7C8A99" text-anchor="end" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">framework</text>
+</svg>

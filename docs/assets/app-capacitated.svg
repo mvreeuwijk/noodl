@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 312" width="820" height="312" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
+  <title id="t">Capacitated transfer</title>
+  <desc id="d">A request clipped by arc capacity and receiver headroom, then shared.</desc>
+  <rect width="820" height="312" rx="10" fill="#F7F9FA"/>
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#17A398"/></marker>
+    <marker id="arn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#1E3A52"/></marker>
+    <marker id="arm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#7C8A99"/></marker>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#C2703D"/></marker>
+  </defs>
+  <text x="40" y="34" font-size="15" fill="#1E3A52" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">A request, clipped twice — then shared</text>
+  <text x="60" y="78" font-size="12" fill="#1E3A52" text-anchor="start" font-weight="400" font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace">request r</text>
+  <rect x="60" y="90" width="190" height="30" rx="5" fill="#D8F0ED" stroke="#17A398" stroke-width="1.5"/>
+  <text x="155" y="110" font-size="12" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace">10.0</text>
+  <text x="60" y="150" font-size="12" fill="#1E3A52" text-anchor="start" font-weight="400" font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace">arc capacity c_arc</text>
+  <rect x="60" y="162" width="114" height="30" rx="5" fill="#FFFFFF" stroke="#C2703D" stroke-width="2"/>
+  <text x="117" y="182" font-size="12" fill="#C2703D" text-anchor="middle" font-weight="400" font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace">6.0</text>
+  <line x1="174" y1="162" x2="174" y2="192" stroke="#C2703D" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 3"/>
+  <text x="60" y="222" font-size="12" fill="#1E3A52" text-anchor="start" font-weight="400" font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace">receiver headroom h</text>
+  <rect x="60" y="234" width="76" height="30" rx="5" fill="#FFFFFF" stroke="#C2703D" stroke-width="2"/>
+  <text x="98" y="254" font-size="12" fill="#C2703D" text-anchor="middle" font-weight="400" font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace">4.0</text>
+  <path d="M 268 178 L 316 178" fill="none" stroke="#1E3A52" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arn)"/>
+  <rect x="330" y="150" width="150" height="56" rx="8" fill="#FFFFFF" stroke="#17A398" stroke-width="2.5"/>
+  <text x="405" y="174" font-size="12" fill="#1E3A52" text-anchor="middle" font-weight="400" font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace">f = min(r, c, h)</text>
+  <text x="405" y="194" font-size="13" fill="#17A398" text-anchor="middle" font-weight="600" font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace">= 4.0</text>
+  <text x="540" y="78" font-size="13" fill="#1E3A52" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">when several edges compete</text>
+  <circle cx="570" cy="120" r="10" fill="#17A398" stroke="#FFFFFF" stroke-width="2.5"/>
+  <path d="M 582 120 L 706 172" fill="none" stroke="#17A398" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ar)"/>
+  <circle cx="570" cy="172" r="10" fill="#17A398" stroke="#FFFFFF" stroke-width="2.5"/>
+  <path d="M 582 172 L 706 172" fill="none" stroke="#17A398" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ar)"/>
+  <circle cx="570" cy="224" r="10" fill="#17A398" stroke="#FFFFFF" stroke-width="2.5"/>
+  <path d="M 582 224 L 706 172" fill="none" stroke="#17A398" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ar)"/>
+  <circle cx="720" cy="172" r="15" fill="#1E3A52" stroke="#FFFFFF" stroke-width="2.5"/>
+  <text x="750" y="176" font-size="11" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">one node's</text>
+  <text x="750" y="191" font-size="11" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">headroom</text>
+  <text x="540" y="262" font-size="11.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">shared by preference, over n_passes rounds</text>
+  <text x="40" y="292" font-size="11.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">mode="hard" is exact and has zero gradient at the clip · "smooth" softens it · "projection" gives real cross-gradients</text>
+</svg>
