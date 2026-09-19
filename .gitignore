@@ -35,7 +35,11 @@ data/
 *.h5
 *.hdf5
 *.csv
+# `*.csv` above is a flat pattern -- it does not recurse, so `!tests/data/*.csv` alone
+# only re-includes CSVs directly under `tests/data/`, not nested fixture subdirectories
+# like `tests/data/wsimod/`. `**/*.csv` covers both.
 !tests/data/*.csv
+!tests/data/**/*.csv
 
 # Notebooks: strip outputs before committing
 *.ipynb_checkpoints/
