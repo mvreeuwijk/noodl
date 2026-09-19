@@ -195,10 +195,18 @@ class CapacitatedTransferLayer:
             # boolean threshold in EVERY mode, including smooth. Scope decision: the
             # brief's enumerated kink sites are the `minimum`/`clamp(min=0.0)` pair and
             # the `over_subscribed_e` `where` -- this narrower gate is left hard in all
-            # modes. It only ever zeroes a preference weight already attached to an
-            # edge whose `tentative` (now smooth) is ~0, so it contributes at most a
-            # locally-zero (never NaN/Inf) gradient contribution, not a discontinuity
-            # in `f` itself.
+            # modes. Because `active` flips discretely the instant a competing edge's
+            # (now smooth) `tentative` crosses zero, it discretely changes
+            # `pref_sum_at_tgt` and therefore `proportional_share` in THAT pass, which
+            # DOES introduce a real discontinuity in the OTHER competing edges' realised
+            # `f` right at that crossing -- not merely a locally-zero gradient blip.
+            # Measured (diamond fixture, mode="smooth"): the jump is bounded, scales
+            # linearly with `tau` (same O(tau) order as the mode's other accepted
+            # approximation error), and is largely -- but not completely -- cancelled by
+            # the `n_passes` loop's self-correction over later rounds. Verified NaN/Inf
+            # safe even where `proportional_share` blows up as `pref_sum_e` hits its
+            # `1e-30` floor: the `_select` sigmoid weight on that branch is ~0 there, so
+            # the extreme value never propagates into `f`.
             active = (tentative > 0).to(self.preference.dtype)
             demand_at_tgt = torch.zeros_like(headroom).index_add(-1, self._tgt, tentative)
             pref_sum_at_tgt = torch.zeros_like(headroom).index_add(
