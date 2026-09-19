@@ -211,6 +211,37 @@ class _Implicit(torch.autograd.Function):
             )
         saved = ctx.saved_tensors
         x, params = saved[0], list(saved[1:])
+        with torch.enable_grad():
+            p = [t.detach().requires_grad_(t.requires_grad) for t in params]
+            r = ctx.residual(x.detach(), *p)
+            needs_grad = [t for t in p if t.requires_grad]
+            # `r.requires_grad` can be False even when `needs_grad` is non-empty: a caller
+            # (e.g. `PotentialFlowLayer.solve`) may thread every entry of a shared `drivers`
+            # mapping into `params` positionally, including keys this particular layer's
+            # residual never reads (a coupled model's OTHER layer's own driver, sitting in
+            # the same dict). When the only requires_grad=True entries are among those unused
+            # ones, `r` ends up with no grad_fn at all, and `torch.autograd.grad` refuses to
+            # start from an output that itself does not require grad -- `allow_unused=True`
+            # only excuses individual UNUSED INPUTS, not an output with no graph whatsoever.
+            # The correct gradient in that case is exactly zero (None) for every parameter:
+            # `r` provably does not depend on any of them, so there is nothing to solve.
+            #
+            # This is exact for a legitimately-unused param (a driver key some OTHER layer
+            # reads), but it is indistinguishable, by construction, from a param whose graph
+            # was accidentally severed upstream (e.g. a stray `.detach()` in a caller's own
+            # residual): both present as "r does not require grad", and both silently
+            # receive a zero gradient here. That is the same trade-off `allow_unused=True`
+            # already makes one level down, for the PARTIALLY-connected case (an individual
+            # unused input among several used ones) -- this is its natural extension to the
+            # wholly-unconnected case, not a new risk this fix introduces.
+            #
+            # The residual is therefore rebuilt BEFORE the adjoint solve, so that this
+            # all-`None` case can return without solving anything: `lambda` is only ever used
+            # as `grad_outputs` for the `torch.autograd.grad` call below, so a solve on this
+            # path would be pure waste -- and not a cheap one, since this is exactly the path
+            # a coupled model takes on every backward pass through its potential layer.
+            if not needs_grad or not r.requires_grad:
+                return (None, None, None, None, None, *[None] * len(p))
         with torch.no_grad():
             op = ctx.operator(x, *params)
             # on_failure is never forwarded: `adjoint` always raises (its own fixed
@@ -231,14 +262,7 @@ class _Implicit(torch.autograd.Function):
                 method=ctx.newton_kwargs.get("method", "auto"),
             )
         with torch.enable_grad():
-            p = [t.detach().requires_grad_(t.requires_grad) for t in params]
-            r = ctx.residual(x.detach(), *p)
-            needs_grad = [t for t in p if t.requires_grad]
-            grads = (
-                torch.autograd.grad(r, needs_grad, grad_outputs=-lam, allow_unused=True)
-                if needs_grad
-                else []
-            )
+            grads = torch.autograd.grad(r, needs_grad, grad_outputs=-lam, allow_unused=True)
         grads_aligned = []
         it = iter(grads)
         for t in p:

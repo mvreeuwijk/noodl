@@ -868,3 +868,101 @@ def test_n1_closure_carried_state_advances_once_per_step_not_once_per_pass():
     new = model.step(start, drivers, dt, diagnostics=diag)
     assert diag["passes"] >= 2   # the bug requires more than one pass to be visible at all
     assert float(new["demo.n"]) == pytest.approx(dt, rel=0.0, abs=1e-9)
+
+
+def test_current_flows_returns_closure_written_driver_prescribed_flow():
+    """A transport layer with no owning potential layer: its flow is written by a closure,
+    only visible after closures run -- `current_flows` must run them and return it."""
+    net = Network(dtype=torch.float64)
+    net.add_node("b")
+    net.add_node("i")
+    net.add_edge("i", "b", kind="link")
+    layer = TransportLayer(
+        net, "x", capacity=torch.tensor([1.0], dtype=torch.float64), flow_kind="link",
+        boundary=["b"],
+    )
+
+    def closure(state, drivers):
+        return {"x.q": torch.tensor([2.5], dtype=torch.float64)}
+
+    model = Model(net, {"x": layer}, closures=[closure])
+    state = {"x.x": torch.tensor([0.0], dtype=torch.float64)}
+    drivers = {"x.x_boundary": torch.zeros(1, dtype=torch.float64)}
+    flows = model.current_flows("x", state, drivers)
+    assert torch.equal(flows, torch.tensor([2.5], dtype=torch.float64))
+
+
+def test_current_flows_returns_potential_owned_flow():
+    """A transport layer whose flow kind is owned by a potential layer: `current_flows`
+    must read it from the SOLVED state, not require a driver."""
+    net = Network(dtype=torch.float64)
+    net.add_node("b")
+    net.add_node("i")
+    net.add_edge("i", "b", kind="link")
+    from tellegen.elements.conductance import Conductance
+
+    air = PotentialFlowLayer(net, "air", [Conductance(kind="link", g=1.0)], boundary=["b"])
+    species = TransportLayer(
+        net, "x", capacity=torch.tensor([1.0], dtype=torch.float64), flow_kind="link",
+        boundary=["b"],
+    )
+    model = Model(net, {"air": air, "x": species})
+    solved_q = torch.tensor([0.7], dtype=torch.float64)
+    state = {"x.x": torch.tensor([0.0], dtype=torch.float64), "air.q": solved_q}
+    drivers = {"air.phi_boundary": torch.zeros(1, dtype=torch.float64),
+               "x.x_boundary": torch.zeros(1, dtype=torch.float64)}
+    flows = model.current_flows("x", state, drivers)
+    assert torch.equal(flows, air.flows_of_kind(solved_q, species.flow_kinds))
+
+
+def test_current_flows_solves_a_potential_owner_when_the_state_has_no_q_yet():
+    """The first pass of a step: the start state carries no "<owner>.q" (project_to_model's
+    initial state has only "species.x"), so current_flows must SOLVE the owner for these
+    drivers, and agree with what a step would have solved."""
+    from tellegen.elements.conductance import Conductance
+
+    net = Network(dtype=torch.float64)
+    net.add_node("b")
+    net.add_node("i")
+    net.add_edge("i", "b", kind="link")
+    air = PotentialFlowLayer(net, "air", [Conductance(kind="link", g=1.0)], boundary=["b"])
+    species = TransportLayer(
+        net, "x", capacity=torch.tensor([1.0], dtype=torch.float64), flow_kind="link",
+        boundary=["b"],
+    )
+    model = Model(net, {"air": air, "x": species})
+    state = {"x.x": torch.tensor([0.0], dtype=torch.float64)}
+    drivers = {
+        "air.phi_boundary": torch.zeros(1, dtype=torch.float64),
+        "air.sources": torch.tensor([0.0, 0.3], dtype=torch.float64),  # 0.3 injected at "i"
+        "x.x_boundary": torch.zeros(1, dtype=torch.float64),
+    }
+    flows = model.current_flows("x", state, drivers)
+    stepped = model.step(state, drivers, 1.0)
+    assert torch.allclose(flows, air.flows_of_kind(stepped["air.q"], species.flow_kinds))
+    assert flows.item() == pytest.approx(0.3)  # the injected 0.3 must leave through the edge
+
+
+def test_current_flows_refuses_a_flow_driver_beside_a_potential_owner_on_the_solve_path():
+    """The two-sources-of-flows refusal must not depend on whether the state happens to carry
+    a solved q yet: `_kind_flows` makes it on the read path, and the solve path makes it too."""
+    from tellegen.elements.conductance import Conductance
+
+    net = Network(dtype=torch.float64)
+    net.add_node("b")
+    net.add_node("i")
+    net.add_edge("i", "b", kind="link")
+    air = PotentialFlowLayer(net, "air", [Conductance(kind="link", g=1.0)], boundary=["b"])
+    species = TransportLayer(
+        net, "x", capacity=torch.tensor([1.0], dtype=torch.float64), flow_kind="link",
+        boundary=["b"],
+    )
+    model = Model(net, {"air": air, "x": species})
+    state = {"x.x": torch.tensor([0.0], dtype=torch.float64)}  # no "air.q" -> solve path
+    drivers = {
+        "air.phi_boundary": torch.zeros(1, dtype=torch.float64),
+        "x.x_boundary": torch.zeros(1, dtype=torch.float64),
+        "x.q": torch.tensor([0.9], dtype=torch.float64),  # contradicts the potential layer
+    }
+    with pytest.raises(ValueError, match="one source of flows, not two"):
+        model.current_flows("x", state, drivers)
