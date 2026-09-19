@@ -146,11 +146,31 @@ def _build_and_capture_quickstart(data_folder: str) -> None:
 
 
 def _build_and_capture_oxford(data_folder: str) -> None:
-    """TODO (Task 7): call `wsimod.demo.create_oxford.create_oxford_model(data_folder)`
-    (18 nodes, 21 arcs, design spec amendment A3), run it under `capture_events`
-    (`tests/verification/_wsimod_oracle.py`), and write `oxford_topology.{csv,json}`,
-    `oxford_requests.csv` and `oxford_reference.csv` under `FIXTURE_DIR`."""
-    raise NotImplementedError("Task 7 fills this in")
+    """Builds `oxford_demo`'s model via the packaged
+    `wsimod.demo.create_oxford.create_oxford_model` (design spec amendment A3: 18 nodes,
+    21 arcs), runs it under `capture_events` (`tests/verification/_wsimod_oracle.py`),
+    and writes `oxford_topology.json` and `oxford_events.csv` under `FIXTURE_DIR`."""
+    import pandas as pd
+    from wsimod.demo.create_oxford import create_oxford_model
+
+    from tests.verification._wsimod_oracle import capture_events, extract_topology
+
+    oxford_model = create_oxford_model(data_folder)
+    oxford_topology = extract_topology(oxford_model)
+    with capture_events(oxford_model) as oxford_events_raw:
+        oxford_model.run(verbose=False)
+
+    FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
+    (FIXTURE_DIR / "oxford_topology.json").write_text(json.dumps(oxford_topology, indent=2))
+    oxford_raw = pd.DataFrame(oxford_events_raw)
+    oxford_aggregated = oxford_raw.groupby(
+        ["arc", "direction", "t"], as_index=False
+    )[["requested", "realised"]].sum()
+    print(
+        f"oxford: {len(oxford_raw)} raw events aggregated into "
+        f"{len(oxford_aggregated)} rows"
+    )
+    oxford_aggregated.to_csv(FIXTURE_DIR / "oxford_events.csv", index=False)
 
 
 if __name__ == "__main__":

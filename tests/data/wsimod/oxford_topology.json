@@ -1,0 +1,204 @@
+{
+  "nodes": [
+    {
+      "name": "thames_above_abingdon",
+      "type": "Waste"
+    },
+    {
+      "name": "evenlode",
+      "type": "Catchment"
+    },
+    {
+      "name": "thames",
+      "type": "Catchment"
+    },
+    {
+      "name": "ray",
+      "type": "Catchment"
+    },
+    {
+      "name": "cherwell",
+      "type": "Catchment"
+    },
+    {
+      "name": "oxford",
+      "type": "Demand"
+    },
+    {
+      "name": "oxford_distribution",
+      "type": "Node"
+    },
+    {
+      "name": "farmoor",
+      "type": "Reservoir"
+    },
+    {
+      "name": "oxford_fwtw",
+      "type": "FWTW"
+    },
+    {
+      "name": "oxford_wwtw",
+      "type": "WWTW"
+    },
+    {
+      "name": "combined_sewer",
+      "type": "Sewer"
+    },
+    {
+      "name": "oxford_land",
+      "type": "Land"
+    },
+    {
+      "name": "gw",
+      "type": "Groundwater"
+    },
+    {
+      "name": "farmoor_abstraction",
+      "type": "Node"
+    },
+    {
+      "name": "evenlode_thames",
+      "type": "Node"
+    },
+    {
+      "name": "cherwell_ray",
+      "type": "Node"
+    },
+    {
+      "name": "cherwell_thames",
+      "type": "Node"
+    },
+    {
+      "name": "thames_mixer",
+      "type": "Node"
+    }
+  ],
+  "arcs": [
+    {
+      "name": "evenlode_to_thames",
+      "source": "evenlode",
+      "target": "evenlode_thames",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "thames_to_thames",
+      "source": "thames",
+      "target": "evenlode_thames",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "ray_to_cherwell",
+      "source": "ray",
+      "target": "cherwell_ray",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "cherwell_to_cherwell",
+      "source": "cherwell",
+      "target": "cherwell_ray",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "thames_to_farmoor",
+      "source": "evenlode_thames",
+      "target": "farmoor_abstraction",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "farmoor_to_mixer",
+      "source": "farmoor_abstraction",
+      "target": "thames_mixer",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "cherwell_to_mixer",
+      "source": "cherwell_ray",
+      "target": "thames_mixer",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "wwtw_to_mixer",
+      "source": "oxford_wwtw",
+      "target": "thames_mixer",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "sewer_overflow",
+      "source": "combined_sewer",
+      "target": "thames_mixer",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "mixer_to_waste",
+      "source": "thames_mixer",
+      "target": "thames_above_abingdon",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "abstraction_to_farmoor",
+      "source": "farmoor_abstraction",
+      "target": "farmoor",
+      "capacity": 50000.0
+    },
+    {
+      "name": "distribution_to_demand",
+      "source": "oxford_distribution",
+      "target": "oxford",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "demand_to_sewer",
+      "source": "oxford",
+      "target": "combined_sewer",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "land_to_sewer",
+      "source": "oxford_land",
+      "target": "combined_sewer",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "sewer_to_wwtw",
+      "source": "combined_sewer",
+      "target": "oxford_wwtw",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "fwtw_to_sewer",
+      "source": "oxford_fwtw",
+      "target": "combined_sewer",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "fwtw_to_distribution",
+      "source": "oxford_fwtw",
+      "target": "oxford_distribution",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "reservoir_to_fwtw",
+      "source": "farmoor",
+      "target": "oxford_fwtw",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "land_to_gw",
+      "source": "oxford_land",
+      "target": "gw",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "garden_to_gw",
+      "source": "oxford",
+      "target": "gw",
+      "capacity": 1000000000000000.0
+    },
+    {
+      "name": "gw_to_mixer",
+      "source": "gw",
+      "target": "thames_mixer",
+      "capacity": 1000000000000000.0
+    }
+  ]
+}

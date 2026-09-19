@@ -10,9 +10,39 @@ regenerating these fixtures) and every captured `requested` equals its `realised
 WSIMOD's own node science never lets this particular demo's push requests exceed a
 downstream node's headroom, so W1 here exercises the identity path of the clip
 arithmetic (`min(request, huge_capacity) == request`) rather than an actively-binding
-clip. This is not a weaker fixture by choice -- `oxford_demo` (Task 7, row W2) is where a
-genuinely bounded arc gets exercised; this module only claims what `quickstart_demo`
-actually contains.
+clip. This is not a weaker fixture by choice -- `oxford_demo` (Task 7, row W2) was hoped
+to be where a genuinely bounded arc gets exercised; the finding below is that it isn't,
+either.
+
+**oxford_demo finding (Task 7): no arc's OWN capacity ever actually binds either.**
+Of oxford_demo's 21 arcs, 20 are captured at `UNBOUNDED_CAPACITY` (1e15) exactly like
+every quickstart arc. Exactly one, `abstraction_to_farmoor`, has a genuinely finite
+capacity (50000.0, WSIMOD's own volume units) -- but across the full 1456-timestep
+2009-2013 run, that arc's captured `requested` volume never exceeds ~30934.2, well under
+its 50000 capacity, so it is NEVER clipped either (confirmed directly against the
+committed `oxford_events.csv`, not assumed: `requested > capacity` is true for zero rows,
+for every arc, in the whole fixture). So W1 AND W2 both only ever exercise the
+capacitated layer's identity path (`min(request, capacity) == request`) for every arc
+whose CAPACITY this milestone's harness can see -- neither reference demo shipped by
+WSIMOD itself provides a load-bearing test of the hard-clip branch actually clipping
+something on an arc's own `c_arc` capacity. This is a real gap in what W1/W2 validate,
+not a minor footnote; a synthetic small-graph test with a deliberately tight `c_arc`
+would be needed to exercise that branch, and is recorded as a follow-up rather than
+retrofitted into this milestone's WSIMOD-oracle-only verification rows.
+
+Oxford's `sewer_to_wwtw` arc DOES show `requested > realised` in 185 of its 1456
+timesteps (max observed gap ~3.924e6) -- but this is NOT that arc's own capacity acting
+(still 1e15, unbounded, confirmed the same way). It is WSIMOD's `WWTW` node applying its
+own internal `treatment_throughput_capacity` / stormwater-tank overflow logic
+(`wsimod/nodes/wtw.py`), a NODE-level throughput constraint this milestone's harness does
+not extract (`extract_topology`, `tests/verification/_wsimod_oracle.py`, reads only
+`arc.capacity`) and that `CapacitatedTransferLayer` does not model in this test (`s_max`
+here is a storage-headroom bound, set to infinity for every node, not a per-step
+throughput-rate cap). `test_oxford_hard_clip_matches_wsimod_realised_flows` below
+excludes this one arc from its strict comparison and documents exactly why at the
+exclusion site, per design spec section 9's recorded-follow-up pattern -- it is not a
+bug in the replay or the harness, and every one of oxford's other 20 arcs across all
+1456 timesteps replays to float64 noise (~1.86e-9), same as quickstart.
 """
 
 import json
@@ -140,3 +170,60 @@ def test_quickstart_projection_mode_converges_to_hard_clip():
     # fixture, Task 7, is where an arc's capacity actually binds). 1e-9 is ~1000x
     # above the observed noise floor.
     assert max_abs_error < 1e-9
+
+
+# Excluded from the strict comparison below: WSIMOD's own `WWTW` node applies an
+# internal `treatment_throughput_capacity` / stormwater-tank constraint on top of
+# whatever it pulls in over `sewer_to_wwtw` (a NODE-level throughput cap, not that arc's
+# OWN `.capacity`, which is 1e15/unbounded -- see the module docstring's oxford_demo
+# finding). `extract_topology` only captures per-arc capacity, and this test's `s_max`
+# models storage headroom, not a per-step throughput rate, so this one node-level
+# constraint is out of scope for what W2 can replay -- recorded as a follow-up, not
+# papered over with a loosened global tolerance.
+OXFORD_NODE_CAPACITY_ARCS = {"sewer_to_wwtw"}
+
+
+def test_oxford_hard_clip_matches_wsimod_realised_flows():
+    topology, events = _load("oxford")
+    net, _, arc_names = _build_network(topology)
+    c_arc = torch.tensor([a["capacity"] for a in topology["arcs"]], dtype=F64)
+    s_max = torch.full((net.n,), float("inf"), dtype=F64)
+    layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    s = torch.zeros(net.n, dtype=F64)
+    arc_index = {name: i for i, name in enumerate(arc_names)}
+    excluded = torch.tensor([name in OXFORD_NODE_CAPACITY_ARCS for name in arc_names])
+    max_abs_error = 0.0
+    max_abs_error_excluded_arcs = 0.0
+    n_mismatched_timesteps = 0
+    for _t, group in events.groupby("t"):
+        r = torch.zeros(len(arc_names), dtype=F64)
+        wsimod_realised = torch.zeros(len(arc_names), dtype=F64)
+        for _, row in group.iterrows():
+            i = arc_index[row["arc"]]
+            r[i] = row["requested"]
+            wsimod_realised[i] = row["realised"]
+        s, f = layer.step(s, {"cap.requests": r}, dt=1.0)
+        diff = (f - wsimod_realised).abs()
+        step_error = diff[~excluded].max().item()
+        max_abs_error = max(max_abs_error, step_error)
+        max_abs_error_excluded_arcs = max(
+            max_abs_error_excluded_arcs, diff[excluded].max().item()
+        )
+        if step_error > 1e-6:
+            n_mismatched_timesteps += 1
+    print(
+        f"oxford: max_abs_error={max_abs_error} over the "
+        f"{len(arc_names) - len(OXFORD_NODE_CAPACITY_ARCS)} non-excluded arcs, "
+        f"mismatched timesteps={n_mismatched_timesteps}; excluded arcs "
+        f"{sorted(OXFORD_NODE_CAPACITY_ARCS)} max diff="
+        f"{max_abs_error_excluded_arcs} (WWTW node-internal throughput cap, see "
+        "module docstring)"
+    )
+    # Observed max_abs_error over the 20 non-excluded arcs, across all 1456 oxford
+    # timesteps: 1.8626e-9 -- float64 noise at oxford's magnitude (flows reach ~1e6,
+    # where relative machine epsilon alone is ~2e-10). 1e-6 is ~500x above that observed
+    # floor while still well below a value that would hide a real regression. This
+    # confirms every arc oxford_demo captures with a well-formed `.capacity` (whether
+    # 1e15 or the one genuinely finite value, see module docstring) replays exactly.
+    assert max_abs_error < 1e-6
+    assert n_mismatched_timesteps == 0
