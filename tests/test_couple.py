@@ -496,3 +496,88 @@ def test_wind_direction_conversions_on_the_cardinal_points(wd, theta):
         theta, abs=1e-12)
     assert apply_conversion(STREET_RAD_TO_CONTAM_DEG, theta_t, {}).item() == pytest.approx(
         wd, abs=1e-9)
+
+
+def test_original_models_still_run_standalone_unchanged_after_union():
+    street_model, street_state, street_drivers = _tiny_street_model()
+    building_model, building_state, building_drivers = _tiny_building_model()
+    baseline_street = street_model.step(dict(street_state), dict(street_drivers), dt=1.0)
+    baseline_building = building_model.step(dict(building_state), dict(building_drivers), dt=1.0)
+    street_snapshot = {k: v.clone() for k, v in street_drivers.items()}
+    building_snapshot = {k: v.clone() for k, v in building_drivers.items()}
+
+    from tellegen.couple import union
+    city, state, drivers = union(
+        {"street": (street_model, street_state, street_drivers),
+         "building": (building_model, building_state, building_drivers)},
+        shared=[_two_way_link()], iterate_max=100,
+    )
+    city.step(state, drivers, dt=1.0)
+
+    after_street = street_model.step(dict(street_state), dict(street_drivers), dt=1.0)
+    after_building = building_model.step(dict(building_state), dict(building_drivers), dt=1.0)
+    assert torch.equal(baseline_street["street.x"], after_street["street.x"])
+    assert torch.equal(baseline_building["species.x"], after_building["species.x"])
+    for k, v in street_snapshot.items():
+        assert torch.equal(street_drivers[k], v), k   # the caller's driver tensors untouched
+    for k, v in building_snapshot.items():
+        assert torch.equal(building_drivers[k], v), k
+
+
+def test_substeps_calls_the_fast_model_k_times_with_the_glue_held_constant():
+    from tellegen.couple import union
+
+    street_model, street_state, street_drivers = _tiny_street_model()
+    building_model, building_state, building_drivers = _tiny_building_model()
+    calls: list[tuple[float, float]] = []
+    real_step = building_model.step
+
+    def spy(state, drivers, dt, **kw):
+        calls.append((float(dt), float(drivers["species.x_boundary"].flatten()[0])))
+        return real_step(state, drivers, dt, **kw)
+
+    building_model.step = spy  # a per-instance spy; the class is untouched
+    try:
+        city, state, drivers = union(
+            {"street": (street_model, street_state, street_drivers),
+             "building": (building_model, building_state, building_drivers)},
+            shared=[_two_way_link()], substeps={"building": 6}, iterate_max=100,
+        )
+        diag: dict = {}
+        city.step(state, drivers, dt=60.0, diagnostics=diag)
+    finally:
+        building_model.step = real_step
+    passes = diag["passes"]
+    assert len(calls) == 6 * passes
+    for p in range(passes):
+        chunk = calls[6 * p:6 * (p + 1)]
+        # 60 s in six 10 s sub-steps, boundary held constant across them:
+        assert all(dt == pytest.approx(10.0) for dt, _ in chunk)
+        assert len({round(v, 15) for _, v in chunk}) == 1
+
+
+def test_gradient_flows_across_the_join_and_matches_central_differences():
+    """d(building species.x) / d(street segment-0 initial concentration), through the
+    coupled two-way step -- design spec section 7, 'gradients flow across the join'."""
+    from tellegen.couple import union
+
+    def indoor(x0: torch.Tensor) -> torch.Tensor:
+        street_model, street_state, street_drivers = _tiny_street_model()
+        building_model, building_state, building_drivers = _tiny_building_model()
+        street_state = dict(street_state)
+        street_state["street.x"] = torch.stack([x0, street_state["street.x"][1]])
+        city, state, drivers = union(
+            {"street": (street_model, street_state, street_drivers),
+             "building": (building_model, building_state, building_drivers)},
+            shared=[_two_way_link()], iterate_rtol=1e-12, iterate_max=200,
+        )
+        return city.step(state, drivers, dt=1.0)["building"]["species.x"].sum()
+
+    x0 = torch.tensor(3.0, dtype=F64, requires_grad=True)
+    grad, = torch.autograd.grad(indoor(x0), x0)
+    h = 1e-5
+    fd = (
+        indoor(torch.tensor(3.0 + h, dtype=F64)) - indoor(torch.tensor(3.0 - h, dtype=F64))
+    ) / (2 * h)
+    assert grad.item() == pytest.approx(fd.item(), rel=1e-5)
+    assert abs(grad.item()) > 0.0
