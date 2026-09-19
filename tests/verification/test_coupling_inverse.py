@@ -109,13 +109,25 @@ def test_attribute_indoor_concentration_to_street_emissions_with_one_backward_pa
         "attribution_kgkg_per_kgs", dict(zip(names, attribution.tolist(), strict=True))
     )
     record_property("fd_kgkg_per_kgs", dict(zip(names, fd.tolist(), strict=True)))
-    # atol=1e-10 (not 0.0): "r3" has NO advective path into the shared street under this
-    # wind (n3 -> n1 flows away from n1, never into it), so its true sensitivity is a
-    # structural zero -- FD lands on it exactly (0.0), while the adjoint returns ~2e-20,
-    # pure floating-point noise. That is 6+ orders of magnitude below the smallest REAL
-    # signal here (r1, ~2.9e-4), so atol=1e-10 forgives only the noise floor and leaves the
-    # rtol=1e-4 check exactly as strict on every street with an actual gradient.
-    assert torch.allclose(attribution, fd, rtol=1e-4, atol=1e-10)
+    idx_r1, idx_r2, idx_r3 = names.index("r1"), names.index("r2"), names.index("r3")
+    # r3 (n3 (30, 0) -> n1 (30, 30): due NORTH) runs PERPENDICULAR to the theta_w=0
+    # (due-east) wind, so its along-canyon velocity is ~0 (measured u_canyon ~= 8.79e-18
+    # m/s, vs ~1.3625e-1 m/s for r1 and r2, which both run east-west, parallel to the
+    # wind) -- it exchanges essentially no advective flux with junction n1 in EITHER
+    # direction, and its emission leaves almost entirely through roof exchange instead.
+    # Its own route flows are themselves ~5e-17 (not exactly zero), so this is a
+    # genuinely negligible signal, not a purely structural (exactly-zero) one: the FD
+    # estimate happens to land on exact 0.0 while the adjoint returns ~2e-20, both
+    # consistent with "below any resolvable threshold" rather than disagreeing. The
+    # load-bearing rtol=1e-4 check stays exactly as strict as the brief specifies
+    # (atol=0.0) on r1/r2, the two streets with a real, resolvable signal; r3 gets its
+    # own explicit, separate structural/negligible-zero check instead of being folded
+    # into a global atol that would silently loosen the r1/r2 comparison too.
+    assert torch.allclose(
+        attribution[[idx_r1, idx_r2]], fd[[idx_r1, idx_r2]], rtol=1e-4, atol=0.0
+    )
+    assert attribution[idx_r3].abs() < 1e-12
+    assert fd[idx_r3].abs() < 1e-12
     assert torch.all(attribution >= 0)
     assert attribution.argmax().item() == names.index(SHARED)  # the shared street dominates
 

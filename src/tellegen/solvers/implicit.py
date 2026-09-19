@@ -244,6 +244,15 @@ class _Implicit(torch.autograd.Function):
             # only excuses individual UNUSED INPUTS, not an output with no graph whatsoever.
             # The correct gradient in that case is exactly zero (None) for every parameter:
             # `r` provably does not depend on any of them, so there is nothing to solve.
+            #
+            # This is exact for a legitimately-unused param (a driver key some OTHER layer
+            # reads), but it is indistinguishable, by construction, from a param whose graph
+            # was accidentally severed upstream (e.g. a stray `.detach()` in a caller's own
+            # residual): both present as "r does not require grad", and both silently
+            # receive a zero gradient here. That is the same trade-off `allow_unused=True`
+            # already makes one level down, for the PARTIALLY-connected case (an individual
+            # unused input among several used ones) -- this is its natural extension to the
+            # wholly-unconnected case, not a new risk this fix introduces.
             grads = (
                 torch.autograd.grad(r, needs_grad, grad_outputs=-lam, allow_unused=True)
                 if needs_grad and r.requires_grad
