@@ -890,7 +890,7 @@ open"). Covered by two unit tests in `tests/solvers/test_implicit.py`:
 | `benchmarks/coupling_street_building.py`: the headline union, 6 coupled hours (60 building sub-steps per street hour), batch sizes 1/10/100 | batch_size=1: 41.221 s, 116 outer passes; batch_size=10: 38.541 s, 128 outer passes; batch_size=100: 134.772 s, 128 outer passes -- 10 -> 100 is 3.5x the time for 10x the batch (sub-linear); no budget is set (spec section 6) |
 
 The full suite passes **1306 passed, 10 skipped, 10 deselected, 1 xfailed** (coverage
-96.09 %), ruff clean.
+96.47 %), ruff clean.
 
 **What is open, and out of scope.**
 
