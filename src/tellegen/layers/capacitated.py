@@ -6,6 +6,12 @@ identifies (alongside potential-flow Newton solves, driver-prescribed flows and
 closure-computed flows). Conservation is exact by construction: every clipped unit of
 flow is either realised on the edge or left unmet at the source; overflow at a full node
 is a separate, reported quantity, never silently dropped.
+
+The docstrings below record the mathematics and the failure modes each guard exists for,
+which is what a later reader needs; the DESIGN HISTORY behind them (which alternatives
+were tried, in what order, and who found what) is in the design spec's amendments,
+`docs/superpowers/specs/2026-09-18-milestone-4b-wsimod-design.md`, and the ledger
+`.superpowers/sdd/2026-09-18-milestone-4b-wsimod/progress.md`.
 """
 from __future__ import annotations
 
@@ -22,7 +28,7 @@ _MODES = ("hard", "smooth", "projection")
 # step (unit step size) reaches its exact optimum in a single iteration (see
 # `_clip_projection`'s docstring), so 3 is generous headroom, not a tuned tolerance.
 _PROJECTION_ITERS = 3
-# Fix-loop round 1 (Critical finding, third degeneracy -- see `_share_via_qp`'s docstring):
+# Guards `_share_via_qp`'s third degeneracy (see its docstring):
 # a node's `free_headroom` can shrink to ~1e-12 from accumulated floating-point cancellation
 # in a LATER `n_passes` round once its headroom is already fully consumed, comparable to the
 # `1e-12` epsilon `step` itself uses for the oversubscription test -- occasionally
@@ -57,6 +63,16 @@ class CapacitatedTransferLayer:
             raise ValueError(
                 f"CapacitatedTransferLayer {name!r}: mode='smooth' requires tau"
             )
+        # `tau` is a temperature: every smooth-mode helper divides by it unconditionally.
+        # `tau == 0` gives a division by zero (inf/NaN); `tau < 0` is worse -- it silently
+        # flips `_clip`'s softmin into a softMAX and `_select`'s sigmoid blend the wrong way
+        # round, a WRONG ANSWER rather than a crash. Checked for any mode, not only
+        # "smooth": a tau passed alongside "hard"/"projection" is ignored, and a nonsense
+        # value there is a configuration error worth naming rather than quietly accepting.
+        if tau is not None and not tau > 0:
+            raise ValueError(
+                f"CapacitatedTransferLayer {name!r}: tau must be > 0, got {tau!r}"
+            )
         if n_passes < 1:
             raise ValueError(
                 f"CapacitatedTransferLayer {name!r}: n_passes must be >= 1, got {n_passes}"
@@ -79,11 +95,31 @@ class CapacitatedTransferLayer:
                 f"CapacitatedTransferLayer {name!r}: s_max has trailing size "
                 f"{s_max.shape[-1]}, expected {net.n} (every node in the network)"
             )
-        if preference is not None and preference.shape[-1] != n_edges:
-            raise ValueError(
-                f"CapacitatedTransferLayer {name!r}: preference has trailing size "
-                f"{preference.shape[-1]}, expected {n_edges} (edge kind {kind!r})"
-            )
+        if preference is not None:
+            if preference.shape[-1] != n_edges:
+                raise ValueError(
+                    f"CapacitatedTransferLayer {name!r}: preference has trailing size "
+                    f"{preference.shape[-1]}, expected {n_edges} (edge kind {kind!r})"
+                )
+            # `mode="projection"` uses `preference` as a LIVE DIVISOR (`lambda /
+            # preference_i`, `_share_via_qp`'s KKT stationarity), where a zero weight gives
+            # a clean forward value and a silent NaN GRADIENT in that edge's Jacobian
+            # column -- the one failure this class cannot report from its own output.
+            # (Hard and smooth modes only ever SUM preferences, and their `pref_sum` is
+            # floored at 1e-30, so they degrade gracefully; the refusal is uniform anyway,
+            # since a non-positive preference weight has no meaning in any mode.) `None`
+            # means "all ones" and never reaches here.
+            if not bool((preference > 0).all()):
+                # `.nonzero().tolist()` (index TUPLES, not a flattened run of ints) so a
+                # batched `preference` names the offending (instance, edge) pairs, not a
+                # meaningless interleaved list. `> 0` is negated rather than `<= 0` tested
+                # so a NaN weight is caught too.
+                bad = (~(preference > 0)).nonzero().tolist()
+                raise ValueError(
+                    f"CapacitatedTransferLayer {name!r}: preference must be > 0 everywhere; "
+                    f"entries {bad} are not (mode='projection' divides by it, and a "
+                    f"non-positive weight there is a silent NaN gradient)"
+                )
         self.net = net
         self.name = name
         self.kinds = [kind]
@@ -98,10 +134,10 @@ class CapacitatedTransferLayer:
         self.preference = torch.ones_like(c_arc) if preference is None else preference
 
     def _clip(self, a, b):
-        """`min(a, b)` in hard mode (byte-identical to Tasks 1-2's bare
-        `torch.minimum`); in smooth mode, the softmin counterpart at temperature
-        `self.tau`: `-tau * logsumexp([-a/tau, -b/tau])`, which is smooth everywhere
-        and -> `min(a, b)` as `tau -> 0`. Used at every UPPER-bound kink site: arc
+        """`min(a, b)` in hard mode (a bare `torch.minimum`, so hard mode is untouched by
+        the existence of the other modes); in smooth mode, the softmin counterpart at
+        temperature `self.tau`: `-tau * logsumexp([-a/tau, -b/tau])`, which is smooth
+        everywhere and -> `min(a, b)` as `tau -> 0`. Used at every UPPER-bound kink site: arc
         capacity, receiver headroom, request-vs-availability, and the final storage
         clamp against `s_max`.
         """
@@ -112,8 +148,8 @@ class CapacitatedTransferLayer:
         return torch.minimum(a, b)
 
     def _nonneg(self, x):
-        """`max(x, 0)` in hard mode (byte-identical to Tasks 1-2's bare
-        `torch.clamp(x, min=0.0)`); in smooth mode, the softplus counterpart at
+        """`max(x, 0)` in hard mode (a bare `torch.clamp(x, min=0.0)`, so hard mode is
+        untouched by the other modes); in smooth mode, the softplus counterpart at
         temperature `self.tau`: `tau * softplus(x / tau)`, smooth everywhere and ->
         `max(x, 0)` as `tau -> 0`. Used at every LOWER-bound-at-zero kink site: free
         headroom, avail, and the realised share.
@@ -126,15 +162,15 @@ class CapacitatedTransferLayer:
         """Selects `a` where oversubscribed, else `b` -- the pass loop's
         `over_subscribed_e` branch (proportional share vs. plain tentative flow).
 
-        In hard mode this is `torch.where(hard_cond, a, b)`, with `hard_cond` the
-        EXACT SAME boolean tensor Task 2 computed (`demand_at_tgt > free_headroom +
-        1e-12`), so hard mode is byte-identical to the committed Task 2 arithmetic.
+        In hard mode this is `torch.where(hard_cond, a, b)`, with `hard_cond` the plain
+        boolean `demand_at_tgt > free_headroom + 1e-12` -- hard mode's arithmetic is
+        untouched by the existence of the other two modes, byte for byte.
 
         In smooth mode, `hard_cond`/`soft_margin` is a boolean `torch.where` selecting
         between two WHOLE FORMULAS, not a `min`/`max`/`clamp` of two scalars, so it has
-        no single obvious softmin/softplus counterpart. DESIGN DECISION (for Task 4's
-        `mode="projection"`, which faces this identical boolean site): we smooth the
-        SELECTION itself, via a sigmoid-weighted blend of the two whole branches at
+        no single obvious softmin/softplus counterpart. DESIGN DECISION (`mode="projection"`
+        faces this identical boolean site and resolves it the other way, see below): we
+        smooth the SELECTION itself, via a sigmoid-weighted blend of the two whole branches at
         temperature `self.tau` -- `w = sigmoid(margin / tau)`, `w * a + (1 - w) * b`
         (`margin = demand_at_tgt - free_headroom`, positive exactly when
         oversubscribed) -- rather than leaving the branch hard and smoothing only the
@@ -146,35 +182,20 @@ class CapacitatedTransferLayer:
         c_arc, ...). That is precisely the point `mode="smooth"` exists to fix -- a
         live gradient across a capacity boundary -- so leaving this one boolean hard
         would defeat the mode's purpose at the one site most likely to sit exactly on
-        a boundary. Task 4 may reasonably choose the opposite for `"projection"` (leave
-        its analogous select hard, smoothing only the QP/projection arithmetic) if that
-        mode's purpose is judged to be about the constraint SURFACE rather than the
-        ROUTING decision; either is defensible, but should be a deliberate, documented
-        choice, as this one is.
+        a boundary.
 
-        TASK 4's ORIGINAL CHOICE for `"projection"` (fix-loop round 1 superseded the
-        SHARING-SITE part of this, see below, but the underlying philosophy still stands):
-        the opposite of `"smooth"` -- leave the oversubscription BRANCH decision hard,
-        smooth/solve only the arithmetic inside it. `"projection"`'s stated purpose (design
-        spec section 3) is a QP posed against the constraint SURFACE -- `0 <= f <= c_arc`
-        and the headroom bound -- not a re-litigation of WHETHER a node is oversubscribed
-        at all, which is a genuinely separate question from what the flows should be once
-        it is.
+        `"projection"` makes the OPPOSITE choice at the same question, deliberately: leave
+        the oversubscription BRANCH decision hard, smooth/solve only the arithmetic inside
+        it. Its stated purpose (design spec section 3) is a QP posed against the constraint
+        SURFACE -- `0 <= f <= c_arc` and the headroom bound -- not a re-litigation of
+        WHETHER a node is oversubscribed at all, which is a genuinely separate question
+        from what the flows should be once it is. Either choice is defensible; both are
+        deliberate and documented rather than incidental.
 
-        FIX-LOOP ROUND 1 (Critical finding, reviewer-verified via 200 random trials + the
-        diamond fixture's full Jacobian): the ORIGINAL implementation routed `"projection"`'s
-        sharing-site arithmetic through `_select`/`_clip_projection` using the SAME
-        preference-proportional-share VALUE formula as hard-clip mode -- which, being a
-        function of preference weights and total headroom alone, has a provably zero
-        cross-gradient between competing edges regardless of which mode computes it. That
-        delivered NONE of the spec's actual purpose ("gradients flow through which arc
-        absorbs a constraint"), so `"projection"`'s sharing site no longer calls `_select`
-        or `_clip_projection` at all -- `step` calls `_share_via_qp` directly instead, which
-        solves the REAL coupled QP (see its own docstring) and reproduces this same hard
-        oversubscription-branch philosophy internally via a target-substitution trick
-        (also documented there), without going through this method's `torch.where`.
-        `_select` itself is unchanged and still governs `"hard"` and `"smooth"` exactly as
-        before.
+        `"projection"` does not reach this method at all: `step` calls `_share_via_qp`
+        directly, which solves the real coupled QP and reproduces that same hard branch
+        decision internally via a target-substitution trick (both documented there) rather
+        than through this `torch.where`. `_select` governs `"hard"` and `"smooth"` only.
         """
         if self.mode == "smooth":
             w = torch.sigmoid(soft_margin / self.tau)
@@ -211,12 +232,11 @@ class CapacitatedTransferLayer:
         is correct and sufficient on its own; the loop below is a genuine (if
         trivially-converging, since a separable box QP's unit-step projected-gradient step
         reaches the optimum after exactly one projection) iterative solve of that QP, not a
-        disguised call to `_clip`. It is NOT used at the sharing site ("QP site 2") any more
-        -- that site has REAL cross-edge coupling and needs `_share_via_qp` instead (fix-loop
-        round 1: an earlier version of this method WAS (mis)used there too, computing a value
-        mathematically identical to `_clip`'s hard-clip formula and delivering none of the
-        spec's cross-gradient requirement -- see `_share_via_qp`'s docstring and `_select`'s
-        for the full history).
+        disguised call to `_clip`. It is deliberately NOT used at the sharing site ("QP site
+        2"): that site has REAL cross-edge coupling, which a SEPARABLE box projection cannot
+        represent -- applied there it computes a value mathematically identical to `_clip`'s
+        hard-clip formula, carrying no cross-gradient at all. `_share_via_qp` handles that
+        site instead; see its docstring.
 
         Solved by projected gradient descent at unit step size (`f <- clamp(f - (f - r), 0,
         bound)`) for a small FIXED `_PROJECTION_ITERS` count, independent of `self.n_passes`
@@ -233,24 +253,22 @@ class CapacitatedTransferLayer:
         return f
 
     def _share_via_qp(self, remaining, avail_e, free_headroom, node_oversubscribed):
-        """Fix-loop round 1 (Critical finding, reviewer-verified by 200 random trials + the
-        diamond fixture's full Jacobian): the REAL coupled per-node QP the design spec asks
-        for at the sharing site -- minimise `sum_i preference_i * (f_i - remaining_i)**2`
-        subject to `0 <= f_i <= avail_i` for every edge `i` targeting an oversubscribed node,
-        AND `sum_i f_i <= free_headroom` for that node JOINTLY (not per edge).
+        """The REAL coupled per-node QP the design spec asks for at the sharing site --
+        minimise `sum_i preference_i * (f_i - remaining_i)**2` subject to
+        `0 <= f_i <= avail_i` for every edge `i` targeting an oversubscribed node, AND
+        `sum_i f_i <= free_headroom` for that node JOINTLY (not per edge).
 
-        This replaces the earlier (Task 4 first pass) reuse of `_clip_projection` at this
-        site, which computed `min(proportional_share, tentative)` -- mathematically IDENTICAL
-        to hard-clip's own formula, and therefore, like it, having a PROVABLY zero
-        cross-gradient `d(share_i)/d(r_j) == 0` for a competing edge `j`: the
-        preference-proportional split `free_headroom * preference_i / pref_sum` depends only
-        on preference weights and total headroom, never on any individual edge's own request,
-        so no formula built on top of it can carry a live gradient between competitors. That
-        delivered NONE of the spec's stated purpose (framework spec 4.2b: "gradients flow
-        through which arc absorbs a constraint") -- confirmed empirically, not just by
-        reading code: `torch.autograd.functional.jacobian` gave byte-identical zero
-        cross-terms and byte-identical full Jacobians to `mode="hard"`, across 200 random
-        trials and the diamond fixture.
+        WHY A SEPARABLE CLIP CANNOT DO THIS JOB, stated here because the obvious
+        simplification is to reuse `_clip_projection` or `_clip` at this site and it silently
+        produces the wrong DERIVATIVE while looking right in forward value: any formula built
+        on the preference-proportional split `free_headroom * preference_i / pref_sum`
+        depends only on preference weights and total headroom, never on any individual edge's
+        own request, so `d(share_i)/d(r_j) == 0` for a competing edge `j` -- provably, not
+        approximately. That delivers NONE of the spec's stated purpose (framework spec 4.2b:
+        "gradients flow through which arc absorbs a constraint"), and it is invisible to a
+        forward-value test: `torch.autograd.functional.jacobian` on such an implementation
+        gives byte-identical zero cross-terms and byte-identical full Jacobians to
+        `mode="hard"`, across 200 random trials and the diamond fixture.
 
         This QP's solution does NOT have that flaw. Its Lagrangian (`lambda >= 0` by
         complementary slackness on the joint inequality) is `sum_i preference_i * (f_i -
@@ -259,7 +277,7 @@ class CapacitatedTransferLayer:
         avail_i)` for ONE scalar `lambda`, SHARED by every edge competing at that node. Since
         `lambda` depends on every competing edge's `remaining_j` jointly (see below),
         `d(f_i)/d(r_j)` for `i != j` is genuinely nonzero, flowing entirely through `lambda`
-        -- this is the real cross-gradient the spec wants. The fix-loop's covering test,
+        -- this is the real cross-gradient the spec wants. The covering test,
         `test_projection_mode_sharing_has_nonzero_cross_gradient`, pins its sign: increasing a
         competitor's request should make ITS share bigger and, since the shared pool of
         `free_headroom` does not grow, every OTHER competitor's share smaller.
@@ -304,14 +322,14 @@ class CapacitatedTransferLayer:
         bracket-validity contract needs BOTH branches to share one call rather than a plain
         two-value choice.
 
-        A SECOND, more GENERAL degeneracy (caught empirically by 200 randomised trials, not
-        by any of the four originally-written tests -- see
-        `test_projection_mode_sharing_has_nonzero_cross_gradient`'s "also check every OTHER
-        random trial stays NaN-free" assertion, added specifically because the four narrow
-        fixtures above missed it): whenever a node is NOT oversubscribed, `lambda* = 0` is the
-        FORCED root (by the target-substitution trick above), and the residual's LOCAL
-        derivative there is `sum_i (-1/preference_i) * [interior_i]`, where `interior_i` is 1
-        only for an edge STRICTLY between its bounds (`0 < remaining_i < avail_i`) and 0 for
+        A SECOND, more GENERAL degeneracy (found only by a 200-trial randomised sweep -- no
+        hand-written fixture in this suite reaches it, which is why
+        `test_projection_mode_sharing_is_nan_free_under_random_fixtures` exists as a seeded
+        sweep rather than another named case): whenever a node is NOT oversubscribed,
+        `lambda* = 0` is the FORCED root (by the target-substitution trick above), and the
+        residual's LOCAL derivative there is `sum_i (-1/preference_i) * [interior_i]`, where
+        `interior_i` is 1 only for an edge STRICTLY between its bounds
+        (`0 < remaining_i < avail_i`) and 0 for
         an edge sitting AT either bound (`remaining_i <= 0`, already fully satisfied by an
         EARLIER pass in `step`'s own outer loop -- extremely common in pass 2 onward, once a
         node's demand was already met in pass 1 -- or `remaining_i >= avail_i`, arc-capacity-
@@ -331,11 +349,11 @@ class CapacitatedTransferLayer:
         degeneracy can arise (an oversubscribed node's root is `lambda* > 0`, found only by
         actually leaving at least one edge's saturated regime, so at least one edge IS locally
         responsive at the converged point in every case this class has needed to handle), the
-        fix below gates on OVERSUBSCRIPTION, not in-degree: a narrower `in_degree <= 1` gate
-        (Task 4 fix-loop round 1's first attempt) caught the single-edge chain-fixture case
-        but missed this later-pass, genuinely-competing-but-currently-satisfied case entirely
-        -- confirmed the narrower gate was insufficient by running exactly the 200-trial check
-        this docstring describes against it (101/200 trials still produced NaN gradients).
+        fix below gates on OVERSUBSCRIPTION, not in-degree. A narrower `in_degree <= 1` gate
+        is NOT sufficient and should not be substituted back in: it catches the single-edge
+        chain-fixture case but misses this later-pass,
+        genuinely-competing-but-currently-satisfied case entirely -- measured directly, that
+        gate still produced NaN gradients in 101 of the same 200 trials.
 
         Fix: for every edge whose TARGET node is NOT oversubscribed (`node_oversubscribed`
         broadcast to edges), the values fed into `solve_monotone`'s OWN internal residual are
@@ -455,7 +473,25 @@ class CapacitatedTransferLayer:
             raise KeyError(
                 f"CapacitatedTransferLayer {self.name!r}: driver {key!r} is required"
             )
-        headroom = self.s_max - s
+        # Same shape-refusal pattern (and message shape) as `Model._kind_flows` uses for
+        # the "<layer>.q" flow driver: a wrong-shaped `r` otherwise reaches `torch.minimum`
+        # and surfaces as an unnamed broadcast `RuntimeError` naming neither this layer nor
+        # the edge count it expected.
+        n_edges = self.c_arc.shape[-1]
+        if r.dim() == 0 or r.shape[-1] != n_edges:
+            got = r.shape[-1] if r.dim() >= 1 else 0
+            raise ValueError(
+                f"CapacitatedTransferLayer {self.name!r}: driver {key!r} must have trailing "
+                f"shape ({n_edges},) -- this layer owns {n_edges} edges of kind "
+                f"{self.kind!r}, in that order -- got {got} (shape {tuple(r.shape)})"
+            )
+        # A RATE (m3/s), not a volume: `f` and every quantity derived from `headroom`
+        # below (`committed_in`, `free_headroom`, `avail`, the whole sharing/QP machinery)
+        # is a rate, and the storage update itself multiplies by `dt`. Dividing here is
+        # what makes the receiver-headroom clip actually bound the storage INCREASE --
+        # `dt * sum_in(f) <= dt * (s_max - s)/dt == s_max - s` -- at any `dt`, not only
+        # at `dt == 1`, where the two conventions happen to coincide.
+        headroom = (self.s_max - s) / dt
         remaining = r.clone()
         f = torch.zeros_like(r)
         for _ in range(self.n_passes):
@@ -468,22 +504,19 @@ class CapacitatedTransferLayer:
                 # QP site 1 (no cross-edge coupling, see `_clip_projection`'s docstring):
                 # `avail_e` is exposed as its OWN step, not folded into a single 3-arg call,
                 # so QP site 2 below can reuse it as each edge's own upper bound in the real
-                # coupled QP. This also fixes fix-loop round 1's Minor finding: routing
-                # `self.c_arc - f` through `_clip_projection`'s own `clamp(..., 0, bound)`
-                # floors it at 0, guarding against a slightly-negative `c_arc - f` (floating-
-                # point overshoot) feeding a negative bound into the box projection -- the
-                # earlier 3-arg fused call computed `bound = min(c_arc - f, free_headroom_e)`
-                # BEFORE flooring, so a negative `c_arc - f` could have produced a negative
-                # bound directly.
+                # coupled QP. Splitting it this way also FLOORS `c_arc - f` at 0 (via
+                # `_clip_projection`'s own `clamp(..., 0, bound)`) before it can become a
+                # bound: a fused `bound = min(c_arc - f, free_headroom_e)` would take the min
+                # BEFORE flooring, so a slightly-negative `c_arc - f` from floating-point
+                # overshoot could feed a NEGATIVE bound into the box projection.
                 avail_e = self._clip_projection(self.c_arc - f, free_headroom_e)
                 tentative = self._clip_projection(remaining, avail_e)
-                # QP site 2 (fix-loop round 1, Critical finding -- see `_share_via_qp`'s
-                # docstring for the full derivation and why the ORIGINAL implementation here,
-                # `_clip_projection(tentative, proportional_share)`, delivered a provably
-                # zero cross-gradient and none of the spec's actual purpose): every edge
-                # targeting the SAME oversubscribed node now shares one scalar Lagrange
-                # multiplier solved via `solve_monotone`, so `d(share_i)/d(r_j)` for a
-                # competing edge `j != i` is genuinely nonzero.
+                # QP site 2: every edge targeting the SAME oversubscribed node shares one
+                # scalar Lagrange multiplier solved via `solve_monotone`, so `d(share_i)/
+                # d(r_j)` for a competing edge `j != i` is genuinely nonzero. Do NOT
+                # "simplify" this back to a separable clip such as
+                # `_clip_projection(tentative, proportional_share)` -- `_share_via_qp`'s
+                # docstring derives why any such form has a provably zero cross-gradient.
                 demand_at_tgt = torch.zeros_like(headroom).index_add(-1, self._tgt, tentative)
                 node_oversubscribed = demand_at_tgt > free_headroom + 1e-12
                 share = self._share_via_qp(remaining, avail_e, free_headroom, node_oversubscribed)
@@ -511,8 +544,8 @@ class CapacitatedTransferLayer:
                 pref_sum_at_tgt = torch.zeros_like(headroom).index_add(
                     -1, self._tgt, self.preference * active
                 )
-                # `hard_cond` reproduces Task 2's exact boolean (kept unused in smooth mode,
-                # computed unconditionally so hard mode's arithmetic is untouched).
+                # `hard_cond` is hard mode's own oversubscription boolean (unused in smooth
+                # mode, computed unconditionally so hard mode's arithmetic is untouched).
                 hard_cond = (demand_at_tgt > free_headroom + 1e-12).index_select(-1, self._tgt)
                 soft_margin = (demand_at_tgt - free_headroom).index_select(-1, self._tgt)
                 pref_sum_e = pref_sum_at_tgt.index_select(-1, self._tgt)
@@ -526,10 +559,18 @@ class CapacitatedTransferLayer:
             remaining = remaining - share
         ds = -self.net.accumulate(f, self.kind)
         s_unclamped = s + dt * ds
-        # Only the UPPER bound (s_max) is enforced here: `f` is already clipped against
-        # each receiving edge's headroom, so no node can be pushed above its s_max by this
-        # step (the clamp below is then a no-op, kept as a defensive backstop against
-        # floating-point overshoot). There is deliberately no lower bound of zero: a
+        # Only the UPPER bound (s_max) is enforced here. `f` is already clipped against
+        # each receiving node's headroom-as-a-RATE (`(s_max - s)/dt`, see `headroom`
+        # above), and each pass's `free_headroom` subtracts what earlier passes already
+        # committed, so `dt * sum_in(f) <= s_max - s` exactly in hard mode and the clamp
+        # below is a genuine no-op there. It is NOT unconditionally a no-op, which is why
+        # it stays and why `overflow` is reported rather than assumed zero: `mode="smooth"`
+        # deliberately relaxes every one of those clips (softplus at zero carries a
+        # `tau*ln(2)` bias, so `free_headroom` can exceed the true headroom by O(tau)), a
+        # node whose free headroom is below `_OVERSUBSCRIBED_FLOOR` is treated as
+        # not-oversubscribed in `mode="projection"` and can be overfilled by up to that
+        # floor, and a state handed in already above its own `s_max` (nothing here forbids
+        # it) overflows by exactly that excess. There is deliberately no lower bound of zero: a
         # request is not checked against the SENDER's available storage in hard-clip mode
         # (spec 4.2b), so a source node may be drawn below zero -- that is a modelling
         # choice upstream of this layer (e.g. a closure sizing requests off available

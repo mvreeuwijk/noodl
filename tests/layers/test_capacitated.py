@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from tellegen.layers.capacitated import CapacitatedTransferLayer
+from tellegen.layers.transport import TransportLayer
 from tellegen.model import Model
 from tellegen.topology import Network
 
@@ -45,6 +46,81 @@ def test_construction_rejects_unknown_mode():
         CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="bogus")
 
 
+def test_construction_rejects_smooth_mode_without_tau():
+    net = _chain_net()
+    s_max = torch.full((net.n,), 10.0, dtype=F64)
+    c_arc = torch.full((2,), 1.0, dtype=F64)
+    with pytest.raises(ValueError, match="requires tau"):
+        CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="smooth")
+
+
+@pytest.mark.parametrize("tau", [0.0, -1e-3])
+def test_construction_rejects_non_positive_tau(tau):
+    """`tau == 0` divides by zero in every smooth-mode helper; `tau < 0` is worse -- it
+    turns `_clip`'s softmin into a softmax and reverses `_select`'s sigmoid blend, a
+    silently WRONG answer rather than a crash."""
+    net = _chain_net()
+    s_max = torch.full((net.n,), 10.0, dtype=F64)
+    c_arc = torch.full((2,), 1.0, dtype=F64)
+    with pytest.raises(ValueError, match="tau must be > 0"):
+        CapacitatedTransferLayer(
+            net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="smooth", tau=tau
+        )
+
+
+def test_construction_rejects_n_passes_below_one():
+    net = _chain_net()
+    s_max = torch.full((net.n,), 10.0, dtype=F64)
+    c_arc = torch.full((2,), 1.0, dtype=F64)
+    with pytest.raises(ValueError, match="n_passes"):
+        CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc, n_passes=0)
+
+
+def test_construction_rejects_edge_kind_absent_from_network():
+    net = _chain_net()
+    s_max = torch.full((net.n,), 10.0, dtype=F64)
+    c_arc = torch.full((2,), 1.0, dtype=F64)
+    with pytest.raises(ValueError, match="no edges"):
+        CapacitatedTransferLayer(net, "cap", "pipe", s_max=s_max, c_arc=c_arc)
+
+
+def test_construction_rejects_wrong_preference_shape():
+    net = _chain_net()
+    s_max = torch.full((net.n,), 10.0, dtype=F64)
+    c_arc = torch.full((2,), 1.0, dtype=F64)
+    bad_preference = torch.full((3,), 1.0, dtype=F64)  # 3 edges, network has 2
+    with pytest.raises(ValueError, match="preference has trailing size"):
+        CapacitatedTransferLayer(
+            net, "cap", "link", s_max=s_max, c_arc=c_arc, preference=bad_preference
+        )
+
+
+def test_construction_rejects_non_positive_preference():
+    """`mode="projection"` divides by `preference` (`lambda / preference_i`), so a zero
+    weight gives a clean forward value and a silent NaN gradient -- the one failure the
+    layer cannot report from its own output. Refused at construction instead."""
+    net = _chain_net()
+    s_max = torch.full((net.n,), 10.0, dtype=F64)
+    c_arc = torch.full((2,), 1.0, dtype=F64)
+    with pytest.raises(ValueError, match="preference must be > 0"):
+        CapacitatedTransferLayer(
+            net, "cap", "link", s_max=s_max, c_arc=c_arc,
+            preference=torch.tensor([0.0, 1.0], dtype=F64),
+        )
+
+
+def test_step_rejects_wrong_shaped_requests_driver_by_name():
+    """Mirrors `Model._kind_flows`' own shape refusal: a wrong-shaped `requests` must
+    raise a named `ValueError`, not an unnamed torch broadcast `RuntimeError`."""
+    net = _chain_net()
+    s_max = torch.full((net.n,), 10.0, dtype=F64)
+    c_arc = torch.full((2,), 1.0, dtype=F64)
+    layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    s0 = torch.zeros(net.n, dtype=F64)
+    with pytest.raises(ValueError, match=r"cap.requests.*trailing shape \(2,\)"):
+        layer.step(s0, {"cap.requests": torch.ones(3, dtype=F64)}, dt=1.0)
+
+
 def test_step_hard_clip_below_capacity_passes_request_through():
     net = _chain_net()
     s_max = torch.full((net.n,), 100.0, dtype=F64)
@@ -81,6 +157,68 @@ def test_step_hard_clip_above_receiver_headroom_is_capped():
     assert torch.allclose(f, torch.tensor([2.0, 0.0], dtype=F64))
 
 
+@pytest.mark.parametrize(("dt", "s_max_c"), [(2.0, 10.0), (86400.0, 86400.0)])
+def test_step_receiver_headroom_clip_is_a_rate_at_dt_other_than_one(dt, s_max_c):
+    """Final-review C1 regression: the receiver-headroom clip must bound the actual
+    STORAGE increase at ANY `dt`, not only at `dt == 1.0`.
+
+    `headroom` is `(s_max - s) / dt` -- a RATE, in the same m3/s units as `f`,
+    `committed_in`, `avail` and everything else it is compared against -- while the
+    storage update multiplies by `dt`. Before the fix it was the raw VOLUME `s_max - s`,
+    which coincides with the rate only at `dt == 1.0` (every other test and benchmark in
+    this milestone). At the two `dt` values below the pre-fix arithmetic gave
+    `f = s_max_c` instead of `s_max_c / dt`, overshot `s_max` by a factor of `dt`, and
+    reported the excess as `overflow` -- volume conserved, but the clip no longer
+    bounding what it exists to bound. Spec section 2 names `dt = 86400` (one WSIMOD day
+    in seconds) as the intended use, so this was not a hypothetical `dt`.
+
+    Both `(dt, s_max_c)` pairs are chosen so `s_max_c / dt` is exact in binary floating
+    point and the fill lands on `s_max` to the last bit, letting the assertions be exact
+    rather than tolerance-guarded.
+    """
+    net = _chain_net()
+    s_max = torch.tensor([1e9, 1e9, s_max_c], dtype=F64)
+    c_arc = torch.full((2,), 1e9, dtype=F64)
+    layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    s0 = torch.zeros(net.n, dtype=F64)
+    # B->C asks for far more than C can take; A->B asks for nothing, so C's fill comes
+    # from exactly one edge and is hand-computable.
+    drivers = {"cap.requests": torch.tensor([0.0, 1e9], dtype=F64)}
+    diag: dict = {}
+    s1, f = layer.step(s0, drivers, dt=dt, diagnostics=diag)
+    assert f[1].item() == s_max_c / dt
+    # C is filled EXACTLY to s_max: fully, and not past it.
+    assert s1[2].item() == s_max_c
+    assert torch.equal(diag["overflow"], torch.zeros(net.n, dtype=F64))
+
+
+def test_step_reports_overflow_when_storage_starts_above_s_max():
+    """Row W5's `overflow` diagnostic, asserted directly against a hand-computed value.
+
+    With C1 fixed, the receiver-headroom clip genuinely bounds every INFLOW, so a node
+    can only end a step above its own `s_max` if it began one there -- nothing in this
+    layer (or in `Model`) forbids a caller handing in such a state, and this is what
+    `overflow` exists to report rather than silently absorb into the final clamp.
+
+    C starts at 5.0 with `s_max = 3.0`: its headroom is `(3 - 5)/2 = -1`, floored to 0 by
+    `_nonneg`, so B->C carries nothing; C has no out-edge either, so its unclamped
+    storage stays 5.0, is clamped back to 3.0, and the 2.0 m3 difference is reported as
+    `2.0 / dt = 1.0` m3/s of overflow.
+    """
+    net = _chain_net()
+    s_max = torch.tensor([100.0, 100.0, 3.0], dtype=F64)
+    c_arc = torch.full((2,), 10.0, dtype=F64)
+    layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    s0 = torch.tensor([0.0, 0.0, 5.0], dtype=F64)
+    drivers = {"cap.requests": torch.tensor([2.0, 2.0], dtype=F64)}
+    diag: dict = {}
+    s1, f = layer.step(s0, drivers, dt=2.0, diagnostics=diag)
+    assert torch.allclose(f, torch.tensor([2.0, 0.0], dtype=F64))
+    assert torch.allclose(diag["overflow"], torch.tensor([0.0, 0.0, 1.0], dtype=F64))
+    # A loses 2 m3/s for 2 s; B gains 2 and forwards none; C is clamped to its s_max.
+    assert torch.allclose(s1, torch.tensor([-4.0, 4.0, 3.0], dtype=F64))
+
+
 def test_step_missing_request_driver_raises_keyerror():
     net = _chain_net()
     s_max = torch.full((net.n,), 10.0, dtype=F64)
@@ -97,6 +235,52 @@ def test_model_registers_capacitated_layer():
     layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
     model = Model(net, {"cap": layer})
     assert model.capacitated == {"cap": layer}
+
+
+def test_model_refuses_capacitated_layer_as_a_transport_flow_owner_by_name():
+    """`Model.__init__`'s ownership scan lets a capacitated layer own a transport layer's
+    flow kinds (it writes `"<name>.q"` in the same key convention), but reading those flows
+    would need `CapacitatedTransferLayer.flows_of_kind` -- the species/quality-transport
+    follow-up (design spec amendment A5), deliberately not built in 4b. `_kind_flows` used
+    to fall through to `self.potential[owner]` and raise a bare `KeyError` naming nothing;
+    it must refuse by name instead.
+    """
+    net = _chain_net()
+    s_max = torch.full((net.n,), 100.0, dtype=F64)
+    c_arc = torch.full((2,), 10.0, dtype=F64)
+    cap = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    # B and C are the active interior of the "link" edges once A is the boundary.
+    spec = TransportLayer(
+        net, "spec", capacity=torch.tensor([50.0, 50.0], dtype=F64), flow_kind="link",
+        boundary=["A"], scheme="implicit",
+    )
+    model = Model(net, {"cap": cap, "spec": spec})
+    assert model.flow_layer_of["spec"] == "cap"  # the ownership scan really does pick it
+    state = {
+        "cap.s": torch.zeros(net.n, dtype=F64),
+        "spec.x": torch.zeros(2, dtype=F64),
+    }
+    drivers = {
+        "cap.requests": torch.tensor([2.0, 2.0], dtype=F64),
+        "spec.x_boundary": torch.tensor([1e-3], dtype=F64),
+    }
+    with pytest.raises(NotImplementedError, match="capacitated layer 'cap'"):
+        model.step(state, drivers, dt=1.0)
+
+
+def test_model_refuses_residuals_for_a_model_owning_a_capacitated_layer():
+    """`residuals()` reports the balance whose zero `steady()` converges to, and `_pass`
+    already refuses a steady pass for a capacitated layer by name. Silently returning `{}`
+    (or the other layers' balances alone) would present a balance over part of the model as
+    the model's."""
+    net = _chain_net()
+    s_max = torch.full((net.n,), 100.0, dtype=F64)
+    c_arc = torch.full((2,), 10.0, dtype=F64)
+    model = Model(net, {"cap": CapacitatedTransferLayer(
+        net, "cap", "link", s_max=s_max, c_arc=c_arc
+    )})
+    with pytest.raises(ValueError, match="residuals"):
+        model.residuals({"cap.s": torch.zeros(net.n, dtype=F64)}, {})
 
 
 def test_model_rejects_capacitated_layer_without_dt():

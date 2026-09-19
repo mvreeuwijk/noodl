@@ -18,6 +18,14 @@ per-instance requests are enough and let every batch instance differ (unlike rep
 fixture's requests identically B times, which would not exercise the batch dimension's own
 broadcasting any differently to B=1).
 
+Limitation of what this number covers: `s_max` is `inf` at every node (matching the parity
+tests, where WSIMOD's own nodes impose no storage headroom the harness can see), so no node
+is ever oversubscribed, the proportional-sharing branch and -- in the other two modes -- the
+`solve_monotone` QP never run, and every one of the `n_passes` rounds after the first is a
+no-op. This therefore measures the layer's CHEAPEST path only, not its typical cost under
+real headroom contention; a benchmark of the sharing/QP machinery would need finite `s_max`
+values and is not what this row claims.
+
 Run: `.venv/Scripts/python benchmarks/wsimod_oxford.py`
 """
 

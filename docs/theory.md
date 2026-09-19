@@ -668,8 +668,10 @@ an explicit clip-and-allocate computation rather than a solve.
 
 **The clip/allocation math, condensed (design spec section 3).** Given the previous
 per-node storage `s`, a per-edge capacity `c_arc` and a per-edge REQUEST driver `r`:
-receiver headroom is `h = s_max - s` at each edge's downstream node (a boundary node has
-`s_max = inf` and never constrains); the realised flow in hard-clip mode is
+receiver headroom is `h = (s_max - s) / dt` at each edge's downstream node (a boundary node
+has `s_max = inf` and never constrains) -- a RATE, in the same units as `r` and `f`, which is
+what makes the clip bound the actual storage INCREASE `dt * h = s_max - s` at any `dt` and
+not only at `dt = 1`; the realised flow in hard-clip mode is
 `f = min(r, c_arc, h)`, vectorised over every edge via the incidence matrix in one pass, no
 Python loop over nodes or edges. Where more than one edge converges on a node whose combined
 tentative demand exceeds its free headroom, each edge's share is instead a preference-
@@ -737,9 +739,12 @@ NOT an independent measurement. This comparison has a real, specific limitation:
 `quickstart_demo`'s 6 arcs and `oxford_demo`'s 21 arcs, all but one sit at WSIMOD's own
 unbounded capacity for the whole run, and the one finite-capacity arc never sees its request
 approach its own capacity either -- so neither demo's numbers ever exercise the branch where
-`c_arc` actually binds, only the identity path `min(x, c_arc) == x`. The clip-against-
-`c_arc` mechanism itself is separately and rigorously covered by synthetic unit fixtures
-with a deliberately tight capacity; what remains unvalidated is specifically WSIMOD's own
+`c_arc` actually binds, only the identity path `min(x, c_arc) == x`. The same holds, for a
+different reason, of the clip's other bound: both fixtures set `s_max = inf` at every node
+(the harness captures per-arc capacity only), so the receiver-headroom clip is the identity
+everywhere too and the proportional-sharing branch never runs against WSIMOD's numbers. Both
+mechanisms are separately and rigorously covered by synthetic unit fixtures
+with deliberately tight bounds; what remains unvalidated is specifically WSIMOD's own
 numbers at a binding point, not the mechanism (README, "Milestone 4b status", amendment A7,
 has the full account and the recorded follow-up that would close this gap).
 
