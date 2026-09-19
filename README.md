@@ -27,7 +27,12 @@ src/tellegen/
                  Wind, WindProfile (profiles identified by CONTAM's profile number)
   model.py       Model: several physics layers on one network, stepped together;
                  coupling="pingpong" (one pass) or "iterate" (Hensen's onion, 0.5
-                 relaxation, per-instance convergence)
+                 relaxation, per-instance convergence); current_flows(name, state,
+                 drivers), a transport layer's flows without stepping the model
+  couple.py      orchestration-level coupling between two independently-built Models:
+                 ValueLink, DriverAlias, CoupledModel (.step, diagnostics=), union, the
+                 unit/angle conversion registry -- never merges networks, layers or
+                 closures (milestone 5)
   operators/     the matvec-free linear-operator contract: base.py (LinearOperator protocol,
                  SolveResult, SolverStatus), dense.py (DenseOperator, the retained dense
                  oracle), graph.py (GraphLaplacianOperator), advection.py (AdvectionOperator)
@@ -75,7 +80,8 @@ docs/superpowers/  design spec and implementation plans
 tests/
   conftest.py, test_topology.py, test_endpoints.py, test_cycles.py, test_cycles_sparse.py,
   test_drives.py, test_flows.py, test_import.py, test_model.py, test_species.py,
-  test_species_compat.py
+  test_species_compat.py, test_couple.py (the union mechanism: conversions, one- and
+  two-way links, aliases, substeps, gradients across the join)
   elements/      test_base.py, test_powerlaw.py, test_quadratic.py, test_fixed.py,
                  test_conductance.py, test_fan.py
   operators/     test_base.py, test_graph.py, test_advection.py, test_assemble_sparse.py
@@ -97,7 +103,13 @@ tests/
                  CPU performance budgets and test_composed_scaling.py, the milestone-1b
                  and milestone-2 acceptance gates (both marked slow, skipped by default);
                  test_munich.py (13 MUNICH formula pairs and the idealised 12-street case);
-                 test_street_parity.py (the IMPAQ port, four-node and leiden_small parity)
+                 test_street_parity.py (the IMPAQ port, four-node and leiden_small parity);
+                 test_coupling_demo.py (the headline street+building union: one-way vs
+                 two-way back-coupling on a synthetic 2x3 m canyon and the real
+                 leiden_small/CONTAM pairing, plus the loose sequential file-exchange
+                 comparison); test_coupling_inverse.py (the three inverse examples:
+                 calibration through the join, source attribution by one adjoint pass,
+                 latent infiltration via the cycle space; the calibration test is `slow`)
   golden/        stored reference results (contam_airflow.json, natural_ventilation.json)
                  and load_golden/save_golden
 benchmarks/
@@ -117,6 +129,8 @@ benchmarks/
   report_composed_scaling.py  writes benchmarks/composed_scaling_report.json
   street_leiden.py            load/build/solve timing for the street model on the real
                               AQ_DT `leiden_small` and `leiden` domains
+  coupling_street_building.py batched throughput of `city.step` across batch sizes, on the
+                              headline street+building coupled demo (milestone 5)
   regenerate_golden.py        rewrites tests/golden/contam_airflow.json and
                               tests/golden/natural_ventilation.json (explicit action)
 ```
@@ -767,6 +781,141 @@ The full suite passes **1250 passed, 10 skipped, 9 deselected, 1 xfailed** (cove
   deliberately tight `c_arc`, captured the same way (WSIMOD's own push/pull on that
   fixture, not just tellegen's own unit tests) -- not built in 4b to avoid unilaterally
   expanding an already-approved 8-task plan.
+
+## Milestone 5 status
+
+Milestone 5 covers the first three items of framework spec section 8's milestone list entry
+"graph-union demonstration, inverse examples, benchmarks" (the remaining item of that entry
+is editorial rather than engineering work and is not part of this repository). It couples a real street segment (the `leiden_small` AQ_DT
+domain milestone 3 already reads) to a real CONTAM building (a milestone 2 `.prj` fixture)
+without editing either application, differentiates through the coupled solve for three
+inverse examples, and measures -- rather than assumes -- both the building's own back-effect
+on the street and the error a loosely-coupled file-exchange workflow would make in its place.
+Union scope is deliberately narrow (design spec section 1): the street-ambient/building-
+boundary pair only, not the wider sewer+street+building union framework spec section 8 also
+names.
+
+**What it adds.**
+
+- `src/tellegen/couple.py` (new module): `ValueLink` (one shared-node value relationship --
+  `from_model`/`from_key`/`from_index`, `to_model`/`to_key`/`to_index`, `convert`, `two_way`,
+  `convert_back`, `sources_key`), `DriverAlias` (one driver value aliased across models, each
+  target through its own registered conversion), `CoupledModel` (`.step(state, drivers, dt,
+  diagnostics=)`; no `.steady` -- see "What is open"), `union(models, shared=, *, coupling=,
+  relaxation=, iterate_rtol=, iterate_atol=, iterate_max=, substeps=)`, `transport_boundary_
+  inflow` (the net mass inflow at a transport layer's boundary node, built from
+  `net.accumulate`/`net.upwind` alone, since `Model.ports()` reports boundary flows only for
+  potential layers), and the unit/angle conversion registry (`concentration_to_mass_fraction`,
+  its inverse, and the two street-radians/CONTAM-degrees wind-direction conversions).
+- `Model.current_flows(name, state, drivers)`: a transport layer's branch flows for a given
+  state/drivers without stepping the model -- closures run first, then the layer's own owner
+  is consulted; when the owner is a potential layer and the state carries no `"<owner>.q"`
+  yet (a step's first pass), the owning layer is solved fresh for these drivers, warm-started
+  from `"<owner>.phi"` when available. Needed because a transport layer's flow is never a
+  plain driver-dict entry before `Model.step` runs: it is either closure-written (visible
+  only inside `Model._pass`) or potential-owned (sitting in the OUTPUT state, not the input).
+
+**Why orchestration, not graph merging (design spec section 3).** `union` never copies,
+rebuilds or mutates either model's `Network`, layers or closures; it exchanges named
+driver/state VALUES between two ordinary `Model.step` calls each outer step, converged to a
+fixed point when a link is two-way -- the standard Dirichlet-Neumann style flux/value
+exchange used to couple independently-solved subdomains, applied here across two
+`tellegen.Model`s rather than two mesh partitions of one solver. Two corrections came from
+reading the apps rather than the framework spec's illustrative pseudocode: the street
+application has **no potential layer at all** -- `build_street_model` builds exactly one
+`TransportLayer` whose flows on every kind are closure-written by `StreetFlows`, so there is
+no Newton-solved state for a merged graph to expose; and closures are net-bound and
+application-specific (`StreetFlows` is constructed bound to the specific graph object
+`build_street_model` built, with its own canyon-wind arguments), so a literal graph merge
+would need to rebuild closures from inside `couple.py`, which would require importing
+`tellegen.apps.*` and breaks "neither model is modified" as badly as editing the app itself.
+PyTorch's autograd tracks the computation graph, not Python object structure, so two ordinary
+`.step` calls sharing tensors between them are exactly as differentiable in one `.backward()`
+as a merged model would be -- there is no `CoSim`/ports-style differentiability boundary here.
+Two convention facts sit at the join: the forward value needs a unit conversion (street
+`kg/m3` to the building's CONTAM-convention `kg/kg` mass fraction, via the building's own
+`rho_amb` driver) while the backward value needs none (both sides are already a flux, kg/s of
+pollutant, once the inflow is computed in the transport layer's own units -- design spec A2);
+and the two models' wind-direction drivers use different conventions entirely -- the street's
+radians counter-clockwise from east, the direction the wind blows TOWARD, against CONTAM's
+`Wd`, degrees clockwise from north, the direction the wind blows FROM -- so `DriverAlias`
+carries a registered conversion per target rather than aliasing the raw number (design spec
+A3). Ambient temperature is not among the aliased drivers in this milestone's demo (A4).
+
+**A core fix, found while building the second inverse example.** `PotentialFlowLayer.solve`
+threads every key of a shared `drivers` mapping into `implicit_solve`'s adjoint params,
+including keys a given layer's own residual never reads -- for a coupled model, that is
+routinely another layer's driver (here, the building's `air` layer receiving
+`species.x_boundary`, which requires grad because it is two-way coupled to the street's
+emissions, but which only the `species` layer consumes). When the only grad-requiring params
+are such functionally-unused ones, the layer's residual has no autograd graph at all, and
+`torch.autograd.grad` refuses to start from an output that does not itself require grad --
+`allow_unused=True` excuses individual unused INPUTS, not an output with no graph whatsoever.
+`_Implicit.backward` (`src/tellegen/solvers/implicit.py`) now short-circuits to all-`None`
+gradients whenever the residual itself does not require grad, which is exact when the
+graph-less residual is provably independent of every param (as here), but is, by
+construction, indistinguishable from a param whose graph was accidentally severed upstream
+(a stray `.detach()`) -- the same trade-off `allow_unused=True` already makes one level down
+for the partially-connected case. A `params_may_be_unused` precondition on `implicit_solve`
+naming which params a residual is allowed to ignore is a recorded follow-up (see "What is
+open"). Covered by two unit tests in `tests/solvers/test_implicit.py`:
+`test_implicit_solve_ignores_a_grad_requiring_but_functionally_unused_parameter` and
+`test_implicit_solve_mixed_used_and_unused_parameters`.
+
+**What passes, and at what tolerance.**
+
+| Case | Tolerance | Measured |
+|---|---|---|
+| Two-way step is a fixed point of one step from the start state | rtol 1e-9, atol 1e-14 | holds |
+| Gradient across the join vs. central differences | rel 1e-5 | holds |
+| `substeps={"building": k}` calls the fast model exactly `k` times per one slow step, glue-derived boundary held constant across them | exact | holds (`k=6`, calls = `k x passes`) |
+| Synthetic back-coupling, 2x3 m canyon, segment `r2`, one-way (`4.16974e-08`) vs. two-way (`4.14518e-08` kg/m3) | measured, not budgeted | 0.589 % relative change, 28 passes to converge |
+| Real `leiden_small` back-coupling, segment `783` (busiest street, forcing step 1000), steady (`2.07911e-07`) vs. coupled (`2.07896e-07` kg/m3) | measured, not budgeted | 7.19e-3 % relative change (7.2e-5), 22 passes to converge -- correctly signed (building is a sink) but negligible for one real building, as anticipated |
+| Loose sequential file-exchange vs. the two-way coupled result, building indoor mass fraction | measured, not budgeted | 0.589 % discrepancy -- equal to the street-side back-coupling change, as expected for a boundary response linear in the shared value |
+| Inverse example 1: leakage coefficient calibration through the join, gradient running through the coupled solve and back through the street model | relative error < 0.05 | 1.29e-4; final loss 3.4574e-08 |
+| Inverse example 2: source attribution by one adjoint pass vs. central differences | rel 1e-4 | r1 3.6e-7, r2 5.3e-7; r3 structurally zero (both attribution and FD below 1e-12) |
+| Inverse example 3: latent infiltration, one measured path recovers all four branch flows (`project_measured`) | rtol 1e-10, atol 1e-14 | exact recovery |
+| Inverse example 3: 200-sample cycle-amplitude ensemble, seeded from the chord edge's own solved flow, mean vs. the hand-solved flows | rtol 0.05 | holds, correctly signed |
+
+**The measured runs (19 September 2026, on this machine).**
+
+| run | measured |
+|---|---|
+| `benchmarks/coupling_street_building.py`: the headline union, 6 coupled hours (60 building sub-steps per street hour), batch sizes 1/10/100 | batch_size=1: 41.221 s, 116 outer passes; batch_size=10: 38.541 s, 128 outer passes; batch_size=100: 134.772 s, 128 outer passes -- 10 -> 100 is 3.5x the time for 10x the batch (sub-linear); no budget is set (spec section 6) |
+
+**What is open, and out of scope.**
+
+- `CoupledModel.steady` is not built, though design spec section 3 point 6 names it in the
+  public surface (R2-11).
+- Adaptive or user-settable relaxation: convergence at the hard-coded `relaxation=0.5` takes
+  22-28 passes to `rtol=1e-10` on the demo fixtures -- README milestone 2's open item 1
+  already names under-relaxation as a candidate remedy for the same successive-substitution
+  risk (a repelling fixed point at the hard-coded value), and this milestone's own numbers
+  are consistent with that being slow rather than wrong here.
+- The `params_may_be_unused` precondition on `implicit_solve` (R2-14, above): the
+  `_Implicit.backward` short-circuit cannot distinguish a legitimately-unused driver key from
+  an accidental upstream `.detach()`.
+- Single-species scope: `transport_boundary_inflow` assumes a single-species transport layer
+  (milestone 5's global constraint); a multi-species boundary inflow is unbuilt.
+- Held-constant sub-stepping: the fast model's glue-derived boundary value is held constant
+  across the slow model's inner steps rather than interpolated -- a follow-up if that policy
+  proves too coarse for a real pairing (design spec section 3 point 4, section 9).
+- `Model.current_flows`'s first-pass branch re-solves the owning potential layer from scratch
+  when a step's state carries no `"<owner>.q"` yet, rather than reusing the solve the pass
+  itself is about to perform -- a reuse of the pass's own solve is a recorded follow-up.
+- Ambient temperature is not coupled in this milestone's demo (A4): the building's
+  temperature enters only through `rho`/`rho_amb`, computed once from the `.prj`'s `Ta`; the
+  AQ_DT forcing carries no temperature field.
+- `_feed_back` assumes the FROM model's sources are reduced full-node; a stacked
+  CONTAM-side FROM model is out of scope.
+- The wider sewer+street+building three-way union is deferred (decision 1) -- the same
+  orchestration mechanism is expected to extend to it, but it is not built or tested here.
+- `CoSim`/ports and the WSIMOD `Node` wrapper stay out of scope (decision 2).
+- The leakage-calibration test (inverse example 1) is marked `slow` (~4.3 minutes; R2-12),
+  deselected by default like the milestone-1b and milestone-2 acceptance gates.
+
+The full suite passes **1302 passed, 10 skipped, 10 deselected, 1 xfailed** (coverage
+96.47 %), ruff clean.
 
 ## Installation
 
