@@ -100,7 +100,9 @@ step interval via the `StepContext` the closure receives.
 `initial_state(model, drivers=None)` builds the all-zero state, dispatching on each layer's
 quantity. When `drivers` is given, it also evaluates the initial storage (by querying
 `model.initial_capacities`), which a step with a changing capacity requires to be in the step-start
-state. Drivers are required whenever the model has a storage sweep and a transport layer.
+state. Drivers are required for initial_state whenever the model has a quality layer, because the
+hydraulics closure writes those layers' capacity from the flows and the initial storage must be
+evaluated from the drivers; this holds with or without `storage=True`.
 
 `sewer_steady(model, state, drivers, *, reaction=None, dt=60.0, max_iter=500, tol=1e-12)` steps
 repeatedly until every transport layer stops changing. You need it rather than `Model.steady`
