@@ -36,7 +36,7 @@ as Newton's mask is). Failure follows the layers: raise by default, naming the o
 from __future__ import annotations
 
 import inspect
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -465,7 +465,7 @@ class Model:
     # -------------------------------------------------------------------- pass
     def _pass(
         self, state, drivers, dt, solve_kwargs, *, step_from: State | None = None,
-        t: float | None = None, boundary_transfers: bool = False,
+        t: float | None = None, boundary_transfers: bool | Collection[str] = False,
     ) -> tuple[State, dict, Drivers]:
         """One closures -> potential -> capacitated -> transport -> reactions pass;
         `dt=None` means steady (and is refused outright by a model owning a capacitated
@@ -480,6 +480,14 @@ class Model:
         inside an iterated coupling: pass k there re-advances the SAME time step from the
         state at the start of it, with only the closures' view of the new state updated.
         It defaults to `state`, which is what a single ping-pong pass wants.
+
+        `boundary_transfers`: `True` runs `step_with_transfer` on every transport layer; a
+        collection of layer names runs it on ONLY those (every other transport layer takes
+        the plain, cheaper `step`); `False` (or an empty collection) runs it on none. Only
+        a layer actually asked for gets `diag[name]["boundary_transfer"]` -- a caller that
+        names one linked layer out of several must not pay `step_with_transfer`'s extra cost
+        (no diagonal shift on the `exact` scheme's Taylor accumulator, milestone 5 R2 review
+        finding) on layers whose transfer nothing reads.
         """
         base: State = state if step_from is None else step_from
         # N1: closure-carried state (spec 4.6a) must be evaluated from the STEP-START state
@@ -528,7 +536,13 @@ class Model:
             s_new, f = layer.step(s_prev, drv, dt, diagnostics=cd)
             new[f"{name}.s"], new[f"{name}.q"] = s_new, f
             diag[name] = cd
+        transfer_layers: set[str] = (
+            set(self.transport) if boundary_transfers is True
+            else set(boundary_transfers) if boundary_transfers
+            else set()
+        )
         for name, layer in self.transport.items():
+            want_transfer = name in transfer_layers
             q_kind = self._kind_flows(name, new, drv)
             xb = self._require(drv, f"{name}.x_boundary")
             sources = drv.get(f"{name}.sources")
@@ -575,7 +589,7 @@ class Model:
                     else:
                         cap_prev_j = cap_prev + (j - 1) / k * (cap - cap_prev)
                         cap_j = cap_prev + j / k * (cap - cap_prev)
-                    if boundary_transfers:
+                    if want_transfer:
                         stepped = layer.step_with_transfer(
                             x, q_kind, sources, xb, dt / k,
                             capacity=cap_j, capacity_prev=cap_prev_j,
@@ -595,7 +609,7 @@ class Model:
                         x = reaction.apply(x, dt, drv)
             new[f"{name}.x"] = x
             diag[name] = {"substeps": self.substeps[name]}
-            if boundary_transfers:
+            if want_transfer:
                 diag[name]["boundary_transfer"] = transfer_total
         # Closure-carried state (spec 4.6a): a declared key is copied OUT of the closure's
         # return into the state, so the next step's closures read it back. A closure that
@@ -627,20 +641,38 @@ class Model:
 
     def step(
         self, state, drivers, dt: float, *, t: float | None = None,
-        diagnostics: dict | None = None, boundary_transfers: bool = False, **solve_kwargs,
+        diagnostics: dict | None = None,
+        boundary_transfers: bool | Collection[str] = False, **solve_kwargs,
     ):
         """Advance one step (spec's ping-pong or iterated coupling, per `self.coupling`).
 
-        `boundary_transfers` (keyword-only, default False) reports, for every transport
-        layer, the time-integrated amount that crossed its boundary during the step, summed
-        over that layer's substeps, at `diagnostics["layers"][name]["boundary_transfer"]`;
+        `boundary_transfers` (keyword-only, default False) reports the time-integrated
+        amount that crossed a transport layer's boundary during the step, summed over that
+        layer's substeps, at `diagnostics["layers"][name]["boundary_transfer"]`: `True` for
+        EVERY transport layer, or a collection of layer names for only those (every other
+        transport layer takes the plain, cheaper `step` and gets no `"boundary_transfer"`
+        entry); `False` (the default) or an empty collection for none. A name in the
+        collection that is not one of this model's transport layers is refused, naming it.
         `diagnostics` is created internally when the caller passes none, so the state
         returned is unchanged either way -- only a caller who wants the transfers passes a
         dict. Sign and unit convention: see `TransportLayer.step_with_transfer`. REACTIONS
         ARE APPLIED AFTER TRANSPORT and are not part of the reported transfer.
+
+        Naming only the layer(s) actually linked to a coupling matters for cost: `True`
+        forces `step_with_transfer` (no diagonal shift on the `exact` scheme's Taylor
+        accumulator) on every transport layer of the model, including ones nothing reads a
+        transfer from -- a coupled recipient with an unlinked `exact`-scheme thermal layer
+        paid that cost on every one of its substeps for no benefit (task 18b).
         """
         if not dt > 0:
             raise ValueError(f"Model: dt must be positive, got {dt!r}")
+        if boundary_transfers is not True and boundary_transfers is not False:
+            bad = sorted(set(boundary_transfers) - set(self.transport))
+            if bad:
+                raise ValueError(
+                    f"Model: boundary_transfers names {bad}, not transport layer(s) of this "
+                    f"model (has {sorted(self.transport)})"
+                )
         return self._advance(
             state, drivers, float(dt), diagnostics, solve_kwargs, t=t,
             boundary_transfers=boundary_transfers,
@@ -664,7 +696,7 @@ class Model:
 
     def _advance(
         self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None,
-        boundary_transfers: bool = False,
+        boundary_transfers: bool | Collection[str] = False,
     ) -> State:
         # The coupling seam: ping-pong is exactly ONE pass, taken with the state at the start
         # of the step; `coupling="iterate"` repeats `_pass` until the named transport states
@@ -683,7 +715,7 @@ class Model:
 
     def _iterate(
         self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None,
-        boundary_transfers: bool = False,
+        boundary_transfers: bool | Collection[str] = False,
     ) -> State:
         """Hensen's onion: repeat the pass until the named transport states stop changing.
 

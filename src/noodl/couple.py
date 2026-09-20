@@ -9,7 +9,7 @@ when a link is two-way. This module must never import `noodl.apps.*`.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -238,11 +238,12 @@ class CoupledModel:
     """Returned by `union`. `.step` takes and returns `{model_tag: State}` /
     `{model_tag: Drivers}` -- each model keeps its own dicts; nothing is merged.
 
-    `iterate_max=50` is set from this milestone's own measurements, not guessed: the headline
-    demo needs 22-28 passes to reach `rtol=1e-10`, and about 21 passes per coupled hour at the
-    default `rtol=1e-8` (the benchmark's 116-128 passes over 6 hours). The former default of
-    20 was below the milestone's own headline case, so every call site had to override it --
-    which hid, rather than fixed, the fact that the default could not run the demo.
+    `iterate_max=50` is a floor, not a measurement pinned here: the recipient-first schedule
+    changed the per-pass cost and the pass counts a coupling needs to reach a given
+    tolerance, so see `docs/applications/coupling.md` for current numbers rather than this
+    docstring. The former default of 20 was below the milestone's own headline case, so
+    every call site had to override it -- which hid, rather than fixed, the fact that the
+    default could not run the demo.
 
     `iterate_atol=0.0` is a pure relative criterion: a shared value that is legitimately ZERO
     (no emission at the coupled node, say) can never satisfy `|d| <= rtol * |f|` unless `d` is
@@ -474,7 +475,7 @@ class CoupledModel:
             new = {}
             for tag in self.models:
                 new[tag], _ = self._step_model(tag, start[tag], pass_drivers[tag], dt,
-                                                 want_transfers=False)
+                                                 want_transfers=set())
             if diagnostics is not None:
                 # One pass, nothing iterated: `converged` is true for every instance by
                 # construction, and `max_change` is EMPTY rather than 0.0 -- no change was
@@ -490,14 +491,18 @@ class CoupledModel:
         return self._iterate(start, drivers, dt, diagnostics)
 
     def _step_model(
-        self, tag: str, start: State, drivers: Drivers, dt: float, *, want_transfers: bool,
+        self, tag: str, start: State, drivers: Drivers, dt: float,
+        *, want_transfers: Collection[str],
     ) -> tuple[State, dict[str, Tensor]]:
         """Step model `tag` ONCE over `dt` -- in `k` sub-steps of `dt/k` when named in
         `substeps`, its glue-derived drivers held constant across them (design spec section 3
-        point 4). With `want_transfers`, also return, per transport layer, the boundary
-        transfer `Model.step` integrated over that layer's own sub-steps, summed over these
-        `k` outer sub-steps too -- the total amount that crossed each boundary node during
-        THIS model's whole `dt`, in the layer's own boundary layout."""
+        point 4). `want_transfers` names the transport layer(s) to report the boundary
+        transfer for (empty: none, a plain step); `Model.step` runs `step_with_transfer` on
+        ONLY those layers, not every transport layer of the model -- a recipient with an
+        unlinked layer must not pay `step_with_transfer`'s extra cost on a layer nothing
+        reads a transfer from (task 18b). The returned dict sums each named layer's
+        transfer over these `k` outer sub-steps too -- the total amount that crossed each
+        boundary node during THIS model's whole `dt`, in the layer's own boundary layout."""
         k = self.substeps.get(tag, 1)
         s = start
         totals: dict[str, Tensor] = {}
@@ -578,8 +583,9 @@ class CoupledModel:
                 self._write_forward(link, value, pass_drivers)
             new = {}
             for tag in self._recipients:                      # recipients first
+                layers = {link.to_layer for link in self._two_way if link.to_model == tag}
                 new[tag], totals = self._step_model(
-                    tag, start[tag], pass_drivers[tag], dt, want_transfers=True
+                    tag, start[tag], pass_drivers[tag], dt, want_transfers=layers
                 )
                 for link in self._two_way:
                     if link.to_model == tag:
@@ -588,7 +594,7 @@ class CoupledModel:
                         )
             for tag in self._others:                          # donors and uncoupled models
                 new[tag], _ = self._step_model(
-                    tag, start[tag], pass_drivers[tag], dt, want_transfers=False
+                    tag, start[tag], pass_drivers[tag], dt, want_transfers=set()
                 )
             with torch.no_grad():
                 ok: Tensor | None = None

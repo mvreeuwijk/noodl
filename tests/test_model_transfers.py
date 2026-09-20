@@ -54,3 +54,62 @@ def test_without_the_flag_no_transfer_is_reported_and_the_state_is_identical():
     b = model.step(state, drivers, 1.2, diagnostics=d2, boundary_transfers=True)
     assert "boundary_transfer" not in d1["layers"]["c"]
     torch.testing.assert_close(a["c.x"], b["c.x"], rtol=1e-12, atol=1e-14)
+
+
+def _two_layer_model():
+    """`thermal` (scheme='exact') and `species` (scheme='implicit') on the same net, each
+    with its own flow kind -- so a caller who names only one in `boundary_transfers` can be
+    checked against the other (task 18b: `step_with_transfer`'s extra cost, no diagonal
+    shift on the `exact` scheme's Taylor accumulator, must not be paid on a layer nothing
+    reads a transfer from)."""
+    net = Network(dtype=F64)
+    for n in ("amb", "z"):
+        net.add_node(n)
+    net.add_edge("amb", "z", kind="heat")
+    net.add_edge("z", "amb", kind="heat")
+    net.add_edge("amb", "z", kind="conc")
+    net.add_edge("z", "amb", kind="conc")
+    thermal = TransportLayer(net, "thermal", capacity=_t([2.0]), flow_kind="heat",
+                              boundary=["amb"], scheme="exact")
+    species = TransportLayer(net, "species", capacity=_t([3.0]), flow_kind="conc",
+                              boundary=["amb"], scheme="implicit")
+
+    def closure(state, drivers):
+        return {"thermal.q": _t([0.5, 0.5]), "species.q": _t([0.7, 0.7])}
+
+    return Model(net, {"thermal": thermal, "species": species}, closures=[closure])
+
+
+def _two_layer_fixture():
+    model = _two_layer_model()
+    state = {"thermal.x": _t([1.0]), "species.x": _t([2.0])}
+    drivers = {
+        "thermal.x_boundary": _t([4.0]), "species.x_boundary": _t([5.0]),
+        "thermal.sources": _t([0.0, 0.0]), "species.sources": _t([0.0, 0.0]),
+    }
+    return model, state, drivers
+
+
+def test_boundary_transfers_as_a_collection_runs_step_with_transfer_only_on_named_layers(
+    monkeypatch,
+):
+    model, state, drivers = _two_layer_fixture()
+    calls: list[str] = []
+    original = TransportLayer.step_with_transfer
+
+    def recording(self, *args, **kwargs):
+        calls.append(self.name)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(TransportLayer, "step_with_transfer", recording)
+    diag: dict = {}
+    model.step(state, drivers, 1.0, diagnostics=diag, boundary_transfers={"species"})
+    assert "boundary_transfer" in diag["layers"]["species"]
+    assert "boundary_transfer" not in diag["layers"]["thermal"]
+    assert calls == ["species"]  # thermal took the plain, cheaper `step`
+
+
+def test_boundary_transfers_naming_an_unknown_layer_is_refused_by_name():
+    model, state, drivers = _two_layer_fixture()
+    with pytest.raises(ValueError, match="bogus"):
+        model.step(state, drivers, 1.0, boundary_transfers={"bogus"})

@@ -264,3 +264,57 @@ def test_partitioned_error_against_a_monolithic_reference_shrinks_with_the_step(
         (partitioned(dt, int(1.0 / dt)) - fine).abs().max().item() for dt in (0.5, 0.25, 0.125)
     ]
     assert errors[1] < errors[0] and errors[2] < errors[1]
+
+
+def test_a_recipient_with_an_extra_unlinked_layer_runs_step_with_transfer_only_on_the_linked_one(  # noqa: E501
+    monkeypatch,
+):
+    """Task 18b: a recipient's OWN unlinked layer (an `exact`-scheme thermal layer in the
+    real building/street coupling) must not pay `step_with_transfer`'s extra cost -- the
+    coupler must ask only for the linked layer's transfer, never every transport layer of
+    the recipient."""
+    a = compartment("a", scheme="implicit")
+
+    net = Network(dtype=F64)
+    net.add_node("ambient")
+    net.add_node("zone")
+    net.add_edge("zone", "ambient", kind="flow")
+    net.add_edge("ambient", "zone", kind="flow")
+    net.add_node("amb2")
+    net.add_node("z2")
+    net.add_edge("z2", "amb2", kind="heat")
+    net.add_edge("amb2", "z2", kind="heat")
+    linked = TransportLayer(net, "b", capacity=_t([1.0]), flow_kind="flow",
+                             boundary=["ambient"], scheme="implicit",
+                             quantity="concentration", unit="kg/m3")
+    extra = TransportLayer(net, "extra", capacity=_t([1.0]), flow_kind="heat",
+                            boundary=["amb2"], scheme="exact")
+
+    def closure(state, drivers):
+        return {"b.q": _t([1.0, 1.0]), "extra.q": _t([0.5, 0.5])}
+
+    b_model = Model(net, {"b": linked, "extra": extra}, closures=[closure])
+    b_state = {"b.x": _t([0.0]), "extra.x": _t([1.0])}
+    # Sources are FULL node order over the whole (shared) net: ambient, zone, amb2, z2.
+    zeros4 = torch.zeros(4, dtype=F64)
+    b_drivers = {
+        "b.x_boundary": _t([0.0]), "b.sources": zeros4,
+        "extra.x_boundary": _t([2.0]), "extra.sources": zeros4,
+    }
+
+    calls: list[str] = []
+    original = TransportLayer.step_with_transfer
+
+    def recording(self, *args, **kwargs):
+        calls.append(self.name)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(TransportLayer, "step_with_transfer", recording)
+
+    model, state, drivers = union(
+        {"A": a, "B": (b_model, b_state, b_drivers)},
+        [ValueLink("A", "a.x", 0, "B", "b.x_boundary", two_way=True)],
+        iterate_rtol=1e-10, iterate_atol=1e-14, iterate_max=50,
+    )
+    model.step(state, drivers, 1.0)
+    assert calls and set(calls) == {"b"}  # never "extra"

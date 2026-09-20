@@ -277,11 +277,25 @@ Gauss-Seidel schedule now produces a real per-instance convergence verdict on th
 the new schedule needs systematically more or fewer passes to close the loop.
 
 Throughput, on the headline union over 6 coupled hours with 60 building sub-steps per street
-hour: batch 1 takes 56.968 s and 116 outer passes; batch 10, 63.055 s and 128 passes; batch 100,
-150.288 s and 128 passes — the same pass counts as before the recipient-first change (this
-benchmark runs at the looser default `rtol=1e-8`, where the one-pass shift above does not show),
-1.1x the time for 10x the batch and 2.6x the time for 100x the batch, sub-linear throughout. No
-budget is set.
+hour, re-measured after task 18b (`Model.step`'s `boundary_transfers` now names only the
+linked layer, not every transport layer of the recipient — see below): batch 1 takes
+52.647 s and 116 outer passes; batch 10, 61.282 s and 128 passes — the same pass counts as
+before the recipient-first change (this benchmark runs at the looser default `rtol=1e-8`,
+where the one-pass shift above does not show), and statistically indistinguishable from the
+pre-18b numbers (56.968 s / 63.055 s respectively; run-to-run variance on this machine is a
+few seconds either way). That is expected, not a null result: this benchmark's building
+model (`project_to_model`) carries exactly ONE transport layer, `species`, which is also the
+ONE linked layer, so `boundary_transfers=True` (every transport layer) and
+`boundary_transfers={"species"}` (only the linked one) request `step_with_transfer` on the
+same set here — nothing to skip. Task 18b's saving is for a recipient that ALSO carries an
+unlinked transport layer (e.g. a `thermal` layer alongside `species`, as the building
+application's own thermal builder produces, though this benchmark's `.prj`-based model does
+not build one — "no thermal layer: a .prj carries no thermal data"); that case is covered by
+`tests/test_couple_conservation.py`'s dedicated two-layer fixture and
+`tests/test_model_transfers.py`'s `boundary_transfers` collection tests, not by this
+benchmark. Batch 100 was not re-measured this round; its previous 150.288 s stands (1.1x the
+time for 10x the batch and 2.6x the time for 100x the batch, sub-linear throughout, still
+hold as before-vs-before/after-vs-after ratios respectively). No budget is set.
 
 ## Limitations
 
