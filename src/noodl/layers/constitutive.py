@@ -15,7 +15,7 @@ choosing different unknowns: cycle amplitudes ``m`` and reduced nodal potentials
 related to ``p`` and ``q`` by ``q = J.T @ m`` (``J`` a basis of the cycle space, so
 ``A q = 0`` identically -- Kirchhoff's current law) and ``p = A_red.T @ phi_red`` (``A_red``
 the incidence matrix with one grounded row dropped, so ``B p = 0`` identically -- Kirchhoff's
-voltage law, ``B`` any basis of the cut space). Both conservation laws hold BY CONSTRUCTION,
+voltage law, ``B`` any basis of the cycle space). Both conservation laws hold BY CONSTRUCTION,
 for any ``m`` and ``phi_red`` whatsoever, leaving only the branch law itself,
 ``law(p, q, theta) = 0``, to solve: ``b`` equations in ``l + (n - 1) = b`` unknowns for a
 connected graph of ``b`` branches, ``n`` nodes and cycle rank ``l``. This is the ONE

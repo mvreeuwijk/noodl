@@ -886,7 +886,6 @@ src/noodl/
   apps/inpfile.py  the section-keyed `.inp` tokenizer shared by apps/sewer/inp.py and
                  apps/water/inp.py, and nothing else
   physics/       flows.py, species.py: thin wrappers so downstream code runs unchanged
-legacy/          the original 2019 package, for reference
 docs/superpowers/  design spec and implementation plans
 tests/
   conftest.py, test_topology.py, test_endpoints.py, test_cycles.py, test_cycles_sparse.py,

@@ -75,7 +75,7 @@ Consequences used throughout `noodl`:
   in §4.
 - **Cross-checks between different times/systems**: because `f` and `e` need not come
   from the same evaluation, Tellegen's theorem underlies mixed potential/Brayton–Moser
-  formulations (the origin of the 2019 `legacy/Tellegen` package) and time-domain
+  formulations (the origin of the 2019 `Tellegen` package) and time-domain
   reciprocity identities.
 
 ### Two dual formulations
