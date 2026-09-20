@@ -121,7 +121,9 @@ and conductance—are differentiable under every scheme.
 **Changing storage.** A transport layer's capacity may change over a step: a sewer pipe's wetted
 volume, or a headspace volume as the water level changes. The step conserves the stored amount
 `V x` in amount form: `V_new x_new - V_old x_old = dt F(x_new)` (implicit) or `= dt/2 (F(x_new) + F(x_old))`
-(trapezoidal). The argument `capacity_prev` (the storage at the step's start, when it differs from
+(trapezoidal). In the trapezoidal form the old-time rate `F(x_old)` is evaluated with the OLD
+capacity, which matters for removal and kinetics (they act on the amount `V x`), not for advection
+or conduction (capacity-free amount rates). The argument `capacity_prev` (the storage at the step's start, when it differs from
 the `capacity` argument at the step's end) implements this; a fixed-storage layer omits both and
 recovers the classical form. The driver `"<layer>.capacity"` holds the storage at the step's end.
 When a closure writes that driver, the step-start state must carry the key `"<layer>.capacity"`,

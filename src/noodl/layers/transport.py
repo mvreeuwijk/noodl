@@ -996,12 +996,17 @@ class TransportLayer:
         dt/2 (F(x_{n+1}) + F(x_n))`, with `F(x) = G x + N_raw x_b + s` the capacity-FREE
         amount rate. Dividing through by `V_new` and using `F(x_n) / V_new = M_new x_n +
         N_new x_b + s / V_new = op.matvec(x_n) + b0` (the operator's own capacity-divided
-        blocks at the NEW capacity -- there is no separate old-capacity operator to build):
+        blocks at the NEW capacity) for x_{n+1}'s coefficient, but `F(x_n) / V_new =
+        (V_old / V_new) * (F(x_n) / V_old) = (V_old / V_new) * op_old.matvec(x_n)` for the
+        OLD-time term: advection and conduction are capacity-free amount rates, so op_old
+        agrees with op there, but removal and kinetics act on the amount `V x` and so must
+        carry V_old at the old time, not V_new (P1-3):
 
-            (I - dt/2 M_new) x_{n+1} = (V_old / V_new) x_n + dt/2 op.matvec(x_n) + dt b0
+            (I - dt/2 M_new) x_{n+1} = (V_old / V_new) (x_n + dt/2 op_old.matvec(x_n)) + dt b0
 
-        `capacity_prev` defaults to `capacity` (fixed storage), which recovers the classic
-        `(I - dt/2 M) x_{n+1} = (I + dt/2 M) x_n + dt b0` step bit for bit (ratio == 1)."""
+        `capacity_prev` defaults to `capacity` (fixed storage), in which case op_old is op
+        itself and this recovers the classic `(I - dt/2 M) x_{n+1} = (I + dt/2 M) x_n + dt b0`
+        step bit for bit (ratio == 1)."""
         dtype = torch.float64
         x = x.to(dtype)
         q = q.to(dtype)
@@ -1019,8 +1024,19 @@ class TransportLayer:
             x_s, _ = self._to_stacked(x_, self.n_i, "x")
             cap = self._capacity_stacked(dtype, cap_)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
+            # The old-time term is F(x_n) / V_new with F the AMOUNT rate. Advection and
+            # conduction are capacity-free amount rates, but removal and kinetics act on the
+            # amount V x, so at t_n they carry V_old, not V_new (P1-3). Since
+            # op_old.matvec(x) == F_old(x) / V_old, the whole old-time term is
+            # (V_old / V_new) * op_old.matvec(x_n): one operator at the OLD capacity, and
+            # the ratio in front of both x_n and its rate. With a fixed capacity op_old is
+            # op itself and the result is bit-identical to the classic Crank-Nicolson step.
             ratio = self._capacity_stacked(dtype, cap_prev_) / cap
-            rhs = ratio * x_s + 0.5 * dt * op.matvec(x_s) + dt * b0
+            op_old = (
+                op if cap_prev_ is cap_
+                else self._advection_operator(q_, cap_prev_, dict(zip(names, coef_, strict=True)))
+            )
+            rhs = ratio * (x_s + 0.5 * dt * op_old.matvec(x_s)) + dt * b0
             system = _AffineSystemOperator(op, 0.5 * dt)
             return system, rhs
 

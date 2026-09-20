@@ -147,8 +147,7 @@ def test_a_written_capacity_driver_requires_the_capacity_in_the_start_state():
 @pytest.mark.parametrize(
     "scheme, expected",
     [
-        pytest.param("trapezoidal", 1.0 / 6.0, marks=pytest.mark.xfail(
-            strict=True, reason="P1-3: the old-time removal term is scaled by V_new")),
+        ("trapezoidal", 1.0 / 6.0),
         ("implicit", 1.0 / 4.0),  # control: the implicit amount form is correct
     ],
 )
@@ -159,3 +158,44 @@ def test_changing_capacity_with_removal_uses_each_capacity_for_its_own_time(sche
     2 x_new - 1 = -2 x_new, i.e. 1/4."""
     x = _step(scheme, q=-1.0, v_old=1.0, v_new=2.0, removal=1.0)
     assert x == pytest.approx(expected, rel=1e-10)
+
+
+def test_two_species_kinetics_across_a_changing_capacity_match_the_amount_equation():
+    """No flow (q = 0), one tank, V 1 -> 2, two species with kinetics K and removal r.
+    Amount rate F(x) = V (K - diag r) x. Trapezoidal amount form, solved by hand:
+        (V_new I - dt/2 V_new A) x_new = (V_old I + dt/2 V_old A) x_old,  A = K - diag r."""
+    K = torch.tensor([[[-0.4, 0.0], [0.4, -0.1]]], dtype=F64)         # (n_i, K, K)
+    r = torch.tensor([[0.2, 0.3]], dtype=F64)                          # (n_i, K)
+    net = Network(dtype=F64)
+    net.add_node("ambient")
+    net.add_node("zone")
+    net.add_edge("zone", "ambient", kind="flow")
+    layer = TransportLayer(net, "c", capacity=_t([1.0]), flow_kind="flow", boundary=["ambient"],
+                           n_species=2, kinetics=K, removal=r, scheme="trapezoidal")
+    x0 = _t([[1.0, 0.5]])
+    dt, v_old, v_new = 0.8, 1.0, 2.0
+    got = layer.step(x0, _t([0.0]), torch.zeros(2, 2, dtype=F64), torch.zeros(1, 2, dtype=F64),
+                     dt, capacity=_t([v_new]), capacity_prev=_t([v_old]))
+    A = K[0] - torch.diag(r[0])
+    eye = torch.eye(2, dtype=F64)
+    lhs = v_new * (eye - 0.5 * dt * A)
+    rhs = v_old * (eye + 0.5 * dt * A) @ x0[0]
+    want = torch.linalg.solve(lhs, rhs)
+    torch.testing.assert_close(got[0], want, rtol=1e-12, atol=1e-14)
+
+
+def test_trapezoidal_gradients_through_both_capacities_with_removal():
+    net = Network(dtype=F64)
+    net.add_node("ambient")
+    net.add_node("zone")
+    net.add_edge("zone", "ambient", kind="flow")
+    layer = TransportLayer(net, "c", capacity=_t([1.0]), flow_kind="flow", boundary=["ambient"],
+                           removal=_t([[0.7]]), scheme="trapezoidal")
+
+    def f(v_old, v_new):
+        return layer.step(_t([1.0]), _t([-1.0]), torch.zeros(2, dtype=F64), _t([0.0]), 1.0,
+                          capacity=v_new, capacity_prev=v_old)
+
+    v_old = _t([1.0]).requires_grad_(True)
+    v_new = _t([2.0]).requires_grad_(True)
+    assert torch.autograd.gradcheck(f, (v_old, v_new), eps=1e-6, atol=1e-8)
