@@ -126,11 +126,19 @@ class AdvectionOperator:
 
         self.dtype = flow.dtype
         self.device = flow.device
-        batch = torch.broadcast_shapes(
-            flow.shape[:-1], self.transmission.shape[:-2], capacity.shape[:-1]
-        )
+        shapes = [flow.shape[:-1], self.transmission.shape[:-2], capacity.shape[:-1]]
+        if conduction is not None and conduction[2].dim() >= 1:
+            shapes.append(conduction[2].shape[:-1])
+        if removal is not None:
+            shapes.append(removal.shape[:-2])
+        if kinetics is not None:
+            shapes.append(kinetics.shape[:-3])
+        # EVERY coefficient family contributes to the operator's batch (P2-5): an ensemble
+        # batched in conductance, removal or kinetics alone is a first-class shape, exactly
+        # like one batched in flow or capacity alone.
+        self.batch_shape = torch.broadcast_shapes(*shapes)
         m = n_interior * self.n_species
-        self.shape = (*batch, m, m)
+        self.shape = (*self.batch_shape, m, m)
 
     # ---------------------------------------------------------------- raw action
     def _upwind(self, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
@@ -186,12 +194,7 @@ class AdvectionOperator:
         # disagree with `v_b`, raising a raw RuntimeError out of `_bcast_index` (final
         # review C1). When every batch shape already agrees, the broadcast and the expand
         # below are both no-ops.
-        batch_shape = torch.broadcast_shapes(
-            v.shape[:-2],
-            flow.shape[:-1],
-            self.transmission.shape[:-2],
-            self.capacity.shape[:-1],
-        )
+        batch_shape = torch.broadcast_shapes(v.shape[:-2], self.batch_shape)
         K = v.shape[-2]
         gather_name = ("down", dtype) if transpose else ("up", dtype)
         scatter_name = ("up", dtype) if transpose else ("down", dtype)
@@ -246,7 +249,7 @@ class AdvectionOperator:
         if self.removal is not None:  # amendment A5
             y_i = y_i - self.removal.to(dtype).transpose(-1, -2) * x_kn
         if self.kinetics is not None:  # amendment A5
-            y_i = y_i + torch.einsum("ikl,...li->...ki", self.kinetics.to(dtype), x_kn)
+            y_i = y_i + torch.einsum("...ikl,...li->...ki", self.kinetics.to(dtype), x_kn)
         return y_i.reshape(*y_i.shape[:-2], K * n_i)
 
     def boundary_forcing(self, x_boundary: torch.Tensor) -> torch.Tensor:
@@ -313,7 +316,7 @@ class AdvectionOperator:
             out_i = out_i - self.removal.to(dtype).transpose(-1, -2) * y_kn
         if self.kinetics is not None:  # amendment A5: transpose of the kinetics block
             out_i = out_i + torch.einsum(
-                "ikl,...li->...ki", self.kinetics.to(dtype).transpose(-1, -2), y_kn
+                "...ikl,...li->...ki", self.kinetics.to(dtype).transpose(-1, -2), y_kn
             )
         return out_i.reshape(*out_i.shape[:-2], K * n_i)
 
@@ -322,7 +325,7 @@ class AdvectionOperator:
         dtype = self.flow.dtype
         flow = self.flow.to(dtype)
         w = flow.abs()
-        batch_shape = torch.broadcast_shapes(w.shape[:-1], self.capacity.shape[:-1])
+        batch_shape = self.batch_shape
         w_b = w.unsqueeze(-2).expand(*batch_shape, K, self._n_edges)
 
         up = torch.where(flow >= 0, self._src, self._tgt)
@@ -386,9 +389,7 @@ class AdvectionOperator:
         dtype = self.flow.dtype
         flow = self.flow.to(dtype)
         w = flow.abs()
-        batch_shape = torch.broadcast_shapes(
-            w.shape[:-1], self.transmission.shape[:-2], self.capacity.shape[:-1]
-        )
+        batch_shape = self.batch_shape
         up = torch.where(flow >= 0, self._src, self._tgt).expand(*batch_shape, self._n_edges)
         down = torch.where(flow >= 0, self._tgt, self._src).expand(*batch_shape, self._n_edges)
         w = w.expand(*batch_shape, self._n_edges)
@@ -435,9 +436,7 @@ class AdvectionOperator:
         K, n_i, n = self.n_species, self.n_interior, self._n
         dtype = self.flow.dtype
         flow = self.flow.to(dtype)
-        batch_shape = torch.broadcast_shapes(
-            flow.shape[:-1], self.transmission.shape[:-2], self.capacity.shape[:-1]
-        )
+        batch_shape = self.batch_shape
         eye_n = torch.eye(n, dtype=dtype, device=flow.device)
         up = torch.where(flow >= 0, self._src, self._tgt)
         down = torch.where(flow >= 0, self._tgt, self._src)
@@ -465,8 +464,12 @@ class AdvectionOperator:
         M_block = torch.einsum("kl,...kij->...kilj", eyeK, Gii)
         if self.kinetics is not None:
             eye_i = torch.eye(n_i, dtype=dtype, device=flow.device)
-            M_block = M_block + torch.einsum("ikl,ij->kilj", self.kinetics.to(dtype), eye_i)
-        return M_block.reshape(*batch_shape, K * n_i, K * n_i)
+            M_block = M_block + torch.einsum(
+                "...ikl,ij->...kilj", self.kinetics.to(dtype), eye_i
+            )
+        return M_block.expand(*batch_shape, K, n_i, K, n_i).reshape(
+            *batch_shape, K * n_i, K * n_i
+        )
 
     def assemble_sparse(self):
         """`None`: this operator declares no COO sparse form (spec section 6.2, Task C).

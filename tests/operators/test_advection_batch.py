@@ -52,32 +52,9 @@ def _step(layer, q):
     return layer.step(x0, q, sources, xb, 0.7)
 
 
-# Run against 852c65d before marking (see the module docstring's cross-reference): per
-# (family, scheme), NOT per family as first assumed -- `removal` fails only under
-# "implicit" (exact and trapezoidal already pass) and `transmission` fails only under
-# "exact" (implicit and trapezoidal already pass), alongside `conductance` and `kinetics`
-# which fail under all three schemes. Mark exactly these eight (family, scheme) pairs.
-_FAILING = {
-    ("conductance", "exact"), ("conductance", "implicit"), ("conductance", "trapezoidal"),
-    ("removal", "implicit"),
-    ("kinetics", "exact"), ("kinetics", "implicit"), ("kinetics", "trapezoidal"),
-    ("transmission", "exact"),
-}
-
-
-def _case(family, scheme):
-    if (family, scheme) in _FAILING:
-        return pytest.param(family, scheme, id=f"{family}-{scheme}", marks=pytest.mark.xfail(
-            strict=True,
-            reason=f"P2-5: {family} is missing from the operator batch shape under "
-            f"scheme={scheme!r}",
-        ))
-    return pytest.param(family, scheme, id=f"{family}-{scheme}")
-
-
 @pytest.mark.parametrize(
     "family, scheme",
-    [_case(family, scheme) for family in FAMILIES
+    [(family, scheme) for family in FAMILIES
      for scheme in ("exact", "implicit", "trapezoidal")],
 )
 def test_an_ensemble_batched_in_one_family_matches_the_per_instance_layers(family, scheme):
