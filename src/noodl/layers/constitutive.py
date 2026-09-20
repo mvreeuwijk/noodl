@@ -103,9 +103,15 @@ class ConstitutiveLayer:
         self.l = self.J.shape[0]
         self.b = self.J.shape[1]
         self.n_red = self.A_red.shape[0]
-        # A connected graph always satisfies this (l = b - n + 1), so it is an invariant, not
-        # a user-facing check -- asserted rather than raised.
-        assert self.l + self.n_red == self.b
+        # A connected graph always satisfies this (l = b - n + 1); an `assert` alone would
+        # both disappear under `python -O` and give no diagnostic, so this is raised
+        # explicitly -- it can fire for a node carrying no edge of `kind`.
+        if self.l + self.n_red != self.b:
+            raise ValueError(
+                f"ConstitutiveLayer {name!r}: cycle rank l={self.l} and reduced-node count "
+                f"n_red={self.n_red} do not add up to branch count b={self.b}; this signals "
+                f"a node carrying no edge of kind {kind!r}"
+            )
 
         self._law_checked = False
 

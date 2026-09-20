@@ -550,6 +550,11 @@ class Model:
             else set(boundary_transfers) if boundary_transfers
             else set()
         )
+        if dt is None and transfer_layers:
+            raise ValueError(
+                "Model: boundary_transfers has no meaning for a steady solve, which "
+                "integrates nothing"
+            )
         for name, layer in self.transport.items():
             want_transfer = name in transfer_layers
             q_kind = self._kind_flows(name, new, drv)
@@ -560,6 +565,7 @@ class Model:
             # construction-time capacity stands, so nothing changes for a fixed-storage
             # layer. Shape and positivity are checked by the layer, naming the nodes.
             cap = drv.get(f"{name}.capacity")
+            transfer_total = None
             if dt is None:
                 if sources is None:
                     # The state's own `x` is the layout authority when it is there; `x_b`
@@ -591,7 +597,6 @@ class Model:
                             f"Model.initial_capacities(state, drivers)"
                         )
                 k = self.substeps[name]
-                transfer_total = None
                 for j in range(1, k + 1):
                     if cap is None:
                         cap_j = cap_prev_j = None

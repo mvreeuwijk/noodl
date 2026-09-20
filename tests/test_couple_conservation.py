@@ -105,21 +105,29 @@ def test_a_two_way_step_never_assembles_a_dense_topology_operator(monkeypatch):
 @pytest.mark.parametrize("scheme, substeps", [("exact", 1), ("implicit", 1), ("implicit", 4),
                                               ("trapezoidal", 1), ("trapezoidal", 3)])
 def test_conservation_holds_before_convergence(scheme, substeps):
-    """Conservation is by construction: cap the iteration at two passes with a loose
-    tolerance that cannot be met and check the balance of what IS returned."""
+    """Conservation is by construction: cap the iteration at two passes and check the
+    balance of what IS returned, on a pass-2 state that is still far from the fixed point
+    (measured ``max_change`` is 0.11-0.13 for every parametrisation below, none of them
+    anywhere near settled). ``iterate_rtol=0.5`` is loose enough that this residual still
+    counts as "converged" by the per-pass criterion (so the run returns normally instead of
+    raising), but the state itself is a genuinely early, unconverged pass -- the exact
+    opposite of the tight-tolerance runs in the tests above. If a future change to the
+    coupling makes some parametrisation settle below rtol 0.5 in two passes, the
+    ``max_change`` assertion below will fail loudly rather than silently start testing a
+    converged run instead."""
     a = compartment("a", scheme=scheme)
     b = compartment("b", scheme=scheme, circulation=True, initial=0.0)
     model, state, drivers = union(
         {"A": a, "B": b}, [ValueLink("A", "a.x", 0, "B", "b.x_boundary", two_way=True)],
-        substeps={"B": substeps}, iterate_rtol=1e-14, iterate_atol=0.0, iterate_max=2,
+        substeps={"B": substeps}, iterate_rtol=0.5, iterate_atol=0.0, iterate_max=2,
     )
     diagnostics: dict = {}
-    try:
-        result = model.step(state, drivers, 1.0, diagnostics=diagnostics)
-    except RuntimeError as exc:          # non-convergence is reported, not hidden
-        assert "did not converge" in str(exc)
-        return
-    assert result["A"]["a.x"].item() + result["B"]["b.x"].item() == pytest.approx(1.0, abs=1e-10)
+    result = model.step(state, drivers, 1.0, diagnostics=diagnostics)
+    assert diagnostics["passes"] == 2
+    assert max(c.max().item() for c in diagnostics["max_change"].values()) > 1e-3
+    a_val = result["A"]["a.x"].item()
+    b_val = result["B"]["b.x"].item()
+    assert a_val + b_val == pytest.approx(1.0, abs=1e-10)
 
 
 def test_unequal_capacities_nonzero_states_and_reversed_flow_conserve():

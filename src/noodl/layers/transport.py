@@ -725,7 +725,7 @@ class TransportLayer:
 
         Returns `TransportStep(x, boundary_transfer)`. `boundary_transfer` has this layer's
         boundary layout: `(..., n_b)` for one species, or `(..., n_b, K)` stacked, matching
-        how `x_boundary` was given.
+        how `x` was given.
 
         Sign and unit convention: `boundary_transfer[b]` is the amount (state unit times
         capacity unit -- e.g. concentration times volume) that entered boundary node `b`
@@ -738,9 +738,13 @@ class TransportLayer:
         state over the whole step), `trapezoidal` uses `dt/2 (x_old + x_new)` (its own
         quadrature), and `exact` uses the Taylor accumulator `int_0^dt x(tau) dtau` from
         `_expm_action(..., integrate=True)`; in every case the boundary's own prescribed
-        value contributes `dt * x_b` (constant over the step). This is why `out.x` from this
-        method is bit-identical to `layer.step(...)`: the state update itself is untouched,
-        only an extra functional of the same trajectory is reported alongside it.
+        value contributes `dt * x_b` (constant over the step). `out.x` from this method
+        agrees with `layer.step(...)` only up to the exponential action's own tolerance
+        (about 1e-12), not bitwise: in the homogeneous exact case `step` takes a diagonal
+        shift that `step_with_transfer` cannot take when the accumulator is requested. The
+        state update itself is untouched -- only the exact scheme's diagonal shift is
+        unavailable here, and an extra functional of the same trajectory is reported
+        alongside it.
 
         `on_failure="return"` is refused (`ValueError` naming the layer): no `SolveResult`
         carries a boundary transfer, so there is nothing sensible to return the raw solver
