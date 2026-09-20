@@ -17,6 +17,25 @@ check) and hands autograd the cotangent g on the outputs AND the cotangent v on 
 which the ordinary backward pass through the retained single-pass graph turns into exactly
 those two terms. Memory is one pass, independent of the pass count.
 
+The `pass_fn` contract, in full, because two of its rules are traps:
+
+* `pass_fn(z)` returns `(outputs, z_next)`. `outputs` is EVERY tensor the caller will hand on
+  that depends on `z`, flattened in a fixed order; `z_next` is the next iterate as read from
+  those outputs, the same length and the same SHAPES as `z`. An entry of `z_next` may be an
+  entry of `outputs` itself (the identity read), a slice or reshape of one, or any other
+  function of them.
+* **Every entry of `z_next` must be RECOMPUTED by the pass.** Handing back the leaf `z[j]`
+  unchanged -- the obvious way to express "this interface entry is prescribed, the pass never
+  updates it" -- puts a unit row in `G_z`, which makes `I - G_z` singular and the adjoint
+  solve fail with the non-convergence error below. A prescribed entry is not an unknown of
+  the interface equations at all: `z_j = z_j` determines nothing. Keep it OUT of `z_star`, or
+  hand it back detached from `z` (the original graph-free tensor), which leaves a zero row
+  where the identity would have been and is exactly right.
+* The returned outputs are VIEWS of the pass's own tensors (an identity `autograd.Function`).
+  A caller reassembling state dicts from them must not write into them in place: that would
+  mutate the pass's graph under autograd and trip its version counter at backward time, or
+  silently alias a tensor the caller still owns. Copy first if a buffer must be written.
+
 The derivation in full, for the record. Let z*(theta) solve z = G(z, theta) and write the
 pass's whole output as new = S(z*(theta), theta), with z_next = G(z, theta) whatever part of
 the pass produced it. Then
@@ -127,14 +146,26 @@ class _AdjointOperator:
 
 class _FixedPointAdjoint(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, n_z, rtol, atol, max_iter, where, *tensors):
-        ctx.n_z, ctx.rtol, ctx.atol, ctx.max_iter, ctx.where = n_z, rtol, atol, max_iter, where
+    def forward(ctx, n_z, rtol, atol, max_iter, restart, where, *tensors):
+        ctx.n_z, ctx.rtol, ctx.atol = n_z, rtol, atol
+        ctx.max_iter, ctx.restart, ctx.where = max_iter, restart, where
         ctx.z = tensors[:n_z]
         ctx.z_next = tensors[n_z : 2 * n_z]
         ctx.outputs = tensors[2 * n_z :]
         # Identity on the outputs: a view of each, so autograd routes their cotangents
         # through `backward` below and then on into the pass's own graph.
-        return tuple(o.view_as(o) for o in ctx.outputs)
+        wrapped = tuple(o.view_as(o) for o in ctx.outputs)
+        # A pass may hand on a tensor nothing differentiable reached. Without this, the
+        # Function's own output would come back `requires_grad=True` with a `grad_fn`,
+        # because ANY input requiring grad makes EVERY output of a Function require it --
+        # and this repo branches on `requires_grad`: `solvers/select.py` drops the SuperLU
+        # fast path for an input that requires grad and turns an explicit
+        # `method="sparse_direct"` into a RuntimeError. A boundary constant carried through a
+        # Model pass would silently cost the fast path, or crash, for no real dependence.
+        dead = [w for w, o in zip(wrapped, ctx.outputs, strict=True) if not o.requires_grad]
+        if dead:
+            ctx.mark_non_differentiable(*dead)
+        return wrapped
 
     @staticmethod
     def backward(ctx, *g_out):
@@ -165,20 +196,23 @@ class _FixedPointAdjoint(torch.autograd.Function):
             rtol=ctx.rtol,
             atol=ctx.atol,
             max_iter=ctx.max_iter,
-            restart=min(m, 100),
+            restart=min(m, 100) if ctx.restart is None else ctx.restart,
         )
         if not bool(result.converged.all()):
             raise RuntimeError(
                 f"{ctx.where}: the fixed-point adjoint solve did not converge (residual "
                 f"{float(result.residual.max()):.3e} after {int(result.iterations.max())} "
-                f"GMRES iterations, rtol={ctx.rtol}, atol={ctx.atol}); the interface "
-                f"Jacobian is not a contraction at this point, or max_iter is too small"
+                f"GMRES iterations, rtol={ctx.rtol}, atol={ctx.atol}); I - G_z is singular or "
+                f"badly conditioned at this point -- an interface entry the pass hands back "
+                f"unchanged puts a unit row in G_z and does exactly that -- or max_iter is "
+                f"too small. Note that a contraction is NOT required: implicit "
+                f"differentiation needs only a nonsingular I - G_z"
             )
         # g on the `outputs` inputs and v on the `z_next` inputs: autograd's own backward
         # pass then accumulates g^T S_theta + v^T G_theta through the one retained graph.
         # See the module docstring for why v is NOT projected onto the outputs here.
         v = _unflatten(result.x, z)
-        return (None, None, None, None, None, *([None] * ctx.n_z), *v, *g)
+        return (None, None, None, None, None, None, *([None] * ctx.n_z), *v, *g)
 
 
 def differentiate_fixed_point(
@@ -188,12 +222,30 @@ def differentiate_fixed_point(
     rtol: float = 1e-10,
     atol: float = 0.0,
     max_iter: int | None = None,
+    restart: int | None = None,
     where: str = "fixed point",
 ) -> list[Tensor]:
     """One differentiable pass at the converged interface `z_star`, with the implicit adjoint
-    attached to its outputs. `pass_fn(z)` returns `(outputs, z_next)`; see the module
-    docstring. Under `no_grad`, or when nothing in the pass requires grad, the plain outputs
-    come back. Raises by name from `backward` when the adjoint GMRES does not converge."""
+    attached to its outputs. `pass_fn(z)` returns `(outputs, z_next)`; the module docstring
+    has the contract in full, including the two rules that bite: every entry of `z_next` must
+    be RECOMPUTED (handing the leaf `z[j]` straight back for a prescribed entry makes
+    `I - G_z` singular), and the returned outputs are VIEWS that must not be written into in
+    place.
+
+    `rtol`, `atol`, `max_iter` and `restart` go to `solvers.iterative.gmres` for the adjoint
+    solve; `restart` defaults to `min(m, 100)` on the flattened interface of size `m`. Each
+    GMRES matvec is one full VJP through the pass graph, so a large interface may want a
+    smaller `restart` (less basis memory, more matvecs) or a larger `max_iter`.
+
+    Under `no_grad`, when nothing in the pass requires grad, or when the interface is empty,
+    the plain outputs come back. Raises `ValueError` here for a `z_next` that does not match
+    `z` in length or shape and for an out-of-range `max_iter`/`restart`; raises `RuntimeError`
+    by name from `backward` when the adjoint GMRES does not converge.
+    """
+    if max_iter is not None and max_iter < 1:
+        raise ValueError(f"{where}: max_iter must be >= 1 when given, got {max_iter!r}")
+    if restart is not None and restart < 1:
+        raise ValueError(f"{where}: restart must be >= 1 when given, got {restart!r}")
     z = [t.detach().requires_grad_(torch.is_grad_enabled()) for t in z_star]
     outputs, z_next = pass_fn(z)
     outputs, z_next = list(outputs), list(z_next)
@@ -202,7 +254,23 @@ def differentiate_fixed_point(
             f"{where}: pass_fn returned {len(z_next)} next-iterate tensors for "
             f"{len(z)} interface tensors"
         )
+    for i, (t, n) in enumerate(zip(z, z_next, strict=True)):
+        if n.shape != t.shape:
+            # Checked here, where `where` and the entry index are in hand: a same-numel
+            # mismatch would otherwise surface from inside `backward` as a bare autograd
+            # shape error with nothing to locate it by.
+            raise ValueError(
+                f"{where}: pass_fn returned next-iterate tensor {i} of shape "
+                f"{tuple(n.shape)} for an interface tensor of shape {tuple(t.shape)}"
+            )
+    # An empty interface has no implicit term at all -- d new/d theta is just S_theta, which
+    # the pass graph already carries. Short-circuit, or `backward` would die in `torch.cat`
+    # on an empty list with no `where` to locate it by.
+    if not z:
+        return list(outputs)
     if not torch.is_grad_enabled() or not any(o.requires_grad for o in outputs):
         return [o.detach() if o.requires_grad else o for o in outputs]
-    wrapped = _FixedPointAdjoint.apply(len(z), rtol, atol, max_iter, where, *z, *z_next, *outputs)
+    wrapped = _FixedPointAdjoint.apply(
+        len(z), rtol, atol, max_iter, restart, where, *z, *z_next, *outputs
+    )
     return list(wrapped)
