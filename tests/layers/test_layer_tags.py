@@ -162,7 +162,8 @@ def test_transport_layer_treats_nodes_untouched_by_its_kinds_as_inactive():
 
 def test_active_interior_splits_the_non_boundary_nodes_by_the_kinds_that_touch_them():
     """`active_interior` is the one place the inactive rule is decided: `TransportLayer`,
-    `SpeciesTransport` and the composed benchmark all size their per-node vectors with it.
+    the composed benchmark and downstream callers (a downstream species model) all
+    size their per-node vectors with it.
     """
     net = _wall_net()
     i_air, inactive_air = active_interior(net, ("airpath",), ["ambient"])

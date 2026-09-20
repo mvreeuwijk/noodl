@@ -117,7 +117,7 @@ f = B^T λ + f_p ,     A f_p = s
 ```
 
 which satisfies KCL *by construction*, for any `λ` (this is exactly
-`physics/flows.py: branch_flows`, which builds `f = λ @ B` so mass conservation is exact
+`cycles.py: branch_flows`, which builds `f = λ @ B` so mass conservation is exact
 to floating-point precision independent of solver convergence — a deliberate design
 choice in `noodl`). What remains is KVL on the branch effort law `e = h(f)`:
 
@@ -180,7 +180,7 @@ M(f) = A diag(f) U(f)     (n × n)
 ```
 
 so the node balance for a scalar `c` (temperature, concentration) with nodal storage
-`V dc/dt = -M(f) c + s` reproduces exactly `physics/species.py`. Because `f ≥ 0` on a
+`V dc/dt = -M(f) c + s` reproduces exactly `layers/transport.py`. Because `f ≥ 0` on a
 forward-oriented graph, `-M(f)` is a (singular) **M-matrix** — off-diagonal entries
 non-negative, columns summing to `≤ 0` — precisely the generator structure of a
 continuous-time Markov chain / compartmental system, which guarantees the flow
@@ -315,7 +315,7 @@ avoids inverting `A_c` by exponentiating the block matrix
 Z = [[A_c Δt, b Δt], [0, 0]],   e^Z = [[e^{A_c Δt}, Φ], [0, I]]
 ```
 
-with `Φ` the exact integrated forcing term — exactly what `physics/species.py`
+with `Φ` the exact integrated forcing term — exactly what `layers/transport.py`
 implements for its two-block augmented system. Because this step is *exact* for the
 linear operator, it inherits whatever positivity/conservation structure `A_c` has: since
 `A_c` is (negative) Metzler/M-matrix (§2), `e^{A_c Δt}` is entrywise non-negative for

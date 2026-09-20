@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from noodl.physics import assert_forward_oriented, branch_flows
+from noodl.cycles import assert_forward_oriented, branch_flows
 from noodl.topology import Network
 
 

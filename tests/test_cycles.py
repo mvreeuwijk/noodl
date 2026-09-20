@@ -12,16 +12,14 @@ from noodl.cycles import (
 from noodl.topology import Network
 
 
-def test_branch_flows_is_importable_from_cycles_and_matches_physics_wrapper():
-    from noodl.physics import branch_flows as physics_branch_flows
-
+def test_branch_flows_maps_one_amplitude_onto_both_edges_of_a_two_cycle():
     net = Network(dtype=torch.float64)
     net.add_node("a")
     net.add_node("b")
     net.add_edge("a", "b", kind="airpath")
     net.add_edge("b", "a", kind="airpath")
     m = torch.tensor([0.3], dtype=torch.float64)
-    assert torch.equal(branch_flows(net, m), physics_branch_flows(net, m))
+    torch.testing.assert_close(branch_flows(net, m), torch.full((2,), 0.3, dtype=torch.float64))
 
 
 def test_assert_forward_oriented_is_importable_from_cycles():

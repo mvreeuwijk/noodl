@@ -131,6 +131,22 @@ def test_boundary_inflow_enters_interior():
     assert out.item() > c.item()
 
 
+def test_zero_flow_is_pure_source_accumulation():
+    """With no flow there is nothing to advect, so the step is `c += s dt / V` exactly.
+    (Kept from the retired `tests/test_species.py`, which reached this through the
+    `physics.species` wrapper.)"""
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([500.0]), flow_kind="airpath", boundary=["ambient"]
+    )
+    q = torch.zeros(2, dtype=torch.float64)
+    c = torch.tensor([600.0], dtype=torch.float64)
+    source = torch.tensor([50.0], dtype=torch.float64)
+    out = layer.step(c, q, _full(layer, source), torch.tensor([420.0], dtype=torch.float64), 900.0)
+    expected = torch.tensor([600.0 + 50.0 * 900.0 / 500.0], dtype=torch.float64)
+    torch.testing.assert_close(out, expected)
+
+
 def test_steady_equals_long_time_step():
     net = flow_through_zone()
     layer = TransportLayer(

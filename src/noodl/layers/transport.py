@@ -66,9 +66,9 @@ def active_interior(
     nodes.
 
     This is the ONE place the rule is decided. `TransportLayer` sizes its interior with it,
-    `physics.species.SpeciesTransport` sizes its `interior`/`volumes` with it, and a caller
-    building a layer's capacity vector (`benchmarks.composed_model`, and the building
-    application's thermal builder) must size that vector with it too rather than re-deriving
+    and a caller building a layer's capacity vector (`benchmarks.composed_model`, the
+    building application's thermal builder, a downstream species model) must size
+    that vector with it too rather than re-deriving
     "every node that is not a boundary node" -- which is what the layer's capacity check
     compares against, and what it names in its error when the two disagree.
 

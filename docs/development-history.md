@@ -1103,6 +1103,26 @@ exceeds `max_matvecs` (200,000 by default), with the message advising `scheme='i
 `'trapezoidal'`, or raising `max_matvecs` deliberately -- a stiff exact step is refused rather
 than silently left to run to a possibly much larger matvec count.
 
+## Retiring the `physics/` compatibility layer (20 Sep 2026)
+
+Milestone 1 generalised the species balance into `layers/transport.py::TransportLayer` but
+kept `physics/species.py` (`SpeciesTransport`) and `physics/flows.py` (`branch_flows`,
+`assert_forward_oriented`) as thin wrappers, so that downstream code written against the
+milestone-0 interface kept running unchanged across the rewrite. That debt is now paid:
+callers build a `TransportLayer` directly and import the cycle helpers from `cycles.py`, and
+the `physics/` package has been removed along with `tests/test_species.py` and `tests/test_species_compat.py`.
+
+The two mismatches the wrapper absorbed moved to the caller, which is where they belong: a
+caller that assembles its sources per interior node must expand them to the full node order
+`TransportLayer.step` takes (spec 4.2), and a caller with float32 ensemble states must cast
+them, since the exponential step is taken in float64. The wrapper's own guards -- a missing
+volume, a negative branch flow on a forward-oriented graph -- moved with them; neither is a
+rule of the general layer, which takes signed flows.
+
+Nothing else in noodl imported `physics`. `tests/layers/test_transport.py` already covered
+every physics case the deleted tests did, bar zero-flow source accumulation, which was
+ported into it; `tests/test_flows.py` now imports from `cycles` directly.
+
 ## Appendix: the source tree
 
 A module-by-module map of the repository, as it stood at the end of milestone 5.
@@ -1170,12 +1190,11 @@ src/noodl/
                  documented EPANET 2.2 .inp subset) and report.py
   apps/inpfile.py  the section-keyed `.inp` tokenizer shared by apps/sewer/inp.py and
                  apps/water/inp.py, and nothing else
-  physics/       flows.py, species.py: thin wrappers so downstream code runs unchanged
 docs/superpowers/  design spec and implementation plans
 tests/
   conftest.py, test_topology.py, test_endpoints.py, test_cycles.py, test_cycles_sparse.py,
-  test_drives.py, test_flows.py, test_import.py, test_model.py, test_species.py,
-  test_species_compat.py, test_couple.py (the union mechanism: conversions, one- and
+  test_drives.py, test_flows.py, test_import.py, test_model.py,
+  test_couple.py (the union mechanism: conversions, one- and
   two-way links, aliases, substeps, gradients across the join)
   elements/      test_base.py, test_powerlaw.py, test_quadratic.py, test_fixed.py,
                  test_conductance.py, test_fan.py

@@ -1,7 +1,8 @@
 """Cycle-space utilities: conserved flows from cycle amplitudes and from tree solutions.
 
-``branch_flows`` and ``assert_forward_oriented`` moved here verbatim from
-``physics/flows.py``, which now re-exports them for compatibility.
+``branch_flows`` and ``assert_forward_oriented`` moved here verbatim from the
+``physics/flows.py`` of milestone 1, which was retired once its downstream callers
+imported them from here directly.
 """
 
 from __future__ import annotations
