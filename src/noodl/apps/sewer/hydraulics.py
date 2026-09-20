@@ -34,7 +34,9 @@ safe only because `geometry.hydraulic_radius`'s `** (2/3)` carries Task 5's M4-R
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -42,6 +44,9 @@ from noodl.apps.sewer import geometry as geom
 from noodl.apps.sewer.air import air_density
 from noodl.cycles import particular_flow
 from noodl.solvers.scalar import solve_monotone
+
+if TYPE_CHECKING:
+    from noodl.model import StepContext
 
 Tensor = torch.Tensor
 F64 = torch.float64
@@ -56,8 +61,15 @@ class SewerHydraulics:
     """The water side of a sewer, as a `Model` closure.
 
     `state_keys` is `("sewer.H",)` when `storage=True` (the manhole levels, carried by this
-    closure across steps under spec 4.6a) and empty otherwise.
+    closure across steps under spec 4.6a) and empty otherwise. `integrates` (R6) is exactly
+    `storage`: under `storage=True` this closure integrates the manhole levels over the
+    model's own step interval (a `StepContext`, not a fixed interval read off its own
+    constructor); under `storage=False` it is a plain algebraic closure.
     """
+
+    @property
+    def integrates(self) -> bool:
+        return self.storage
 
     def __init__(
         self,
@@ -80,10 +92,13 @@ class SewerHydraulics:
         self.air_quality_layer = air_quality_layer
         self.notes: dict[str, str] = {}
         self.state_keys: tuple[str, ...] = ("sewer.H",) if self.storage else ()
-        if self.storage and not (dt is not None and dt > 0):
+        # `dt`, when given, is the interval this closure was built for, and a step of any
+        # OTHER interval is then refused by name in `__call__`; when omitted (the default,
+        # and now allowed under `storage=True` too -- R6), the step's own interval is used,
+        # via the `StepContext` `Model._apply_closures` passes to an integrating closure.
+        if dt is not None and not dt > 0:
             raise ValueError(
-                f"SewerHydraulics {name!r}: storage=True requires a positive dt (s), got "
-                f"{dt!r}"
+                f"SewerHydraulics {name!r}: dt, when given, must be positive, got {dt!r}"
             )
         self.dt = float(dt) if dt is not None else None
 
@@ -191,7 +206,9 @@ class SewerHydraulics:
             self.level_tgt.append(torch.tensor(tgt, dtype=torch.long))
 
     # ------------------------------------------------------------------ call
-    def __call__(self, state: Mapping, drivers: Mapping) -> dict[str, Tensor]:
+    def __call__(
+        self, state: Mapping, drivers: Mapping, ctx: StepContext | None = None
+    ) -> dict[str, Tensor]:
         inflow = _require(drivers, "inflow", self.name)
         if inflow.shape[-1] != self.net.n:
             raise ValueError(
@@ -218,7 +235,21 @@ class SewerHydraulics:
             )
         out: dict[str, Tensor] = {}
         if self.storage:
-            q, levels = self._storage_sweep(state, lateral)
+            if ctx is None:
+                # A query (`residuals`, `current_flows`, `ports`, the sewer report): evaluate
+                # the algebraic outputs at the given state's levels, without advancing them.
+                q, levels = self._at_levels(state)
+            else:
+                # Ruling P-1: `Model._apply_closures` refuses `ctx.dt is None` (steady()) by
+                # name, generically, before an integrating closure is ever called -- so
+                # `ctx.dt` is always a real interval here, never `None`.
+                if self.dt is not None and not math.isclose(self.dt, ctx.dt, rel_tol=1e-12):
+                    raise ValueError(
+                        f"SewerHydraulics {self.name!r} was built for dt={self.dt} s and "
+                        f"was asked to step {ctx.dt} s; build it without dt to follow the "
+                        f"model's step"
+                    )
+                q, levels = self._storage_sweep(state, lateral, ctx.dt)
             out["sewer.H"] = levels
             # FR-19 (profiled hot spot: ~40% of one diurnal step's wall time): the storage
             # sweep already solved for each manhole's own level via `solve_monotone` (spec
@@ -313,8 +344,12 @@ class SewerHydraulics:
         sources = sources.index_add(-1, self.outfall_node_idx, -comp_totals)
         return particular_flow(self.net, sources, kind="pipe")
 
-    def _storage_sweep(self, state: Mapping, lateral: Tensor) -> tuple[Tensor, Tensor]:
-        """Implicit Euler on each manhole's level, level-synchronous from leaves to outfall.
+    def _storage_sweep(
+        self, state: Mapping, lateral: Tensor, dt: float
+    ) -> tuple[Tensor, Tensor]:
+        """Implicit Euler on each manhole's level, level-synchronous from leaves to outfall,
+        over the interval `dt` (R6: the model's own step interval, not a fixed one read off
+        this closure's own constructor).
 
         Each manhole solves the scalar monotone equation
 
@@ -335,14 +370,7 @@ class SewerHydraulics:
         assembles the upstream inflow, so the only per-call Python loop anywhere in this
         method is over LEVELS (the tree depth) -- never over pipes or manholes.
         """
-        try:
-            old = state["sewer.H"]
-        except KeyError as exc:
-            raise KeyError(
-                f"SewerHydraulics {self.name!r}: state 'sewer.H' (the manhole levels) is "
-                f"required when storage=True; build it with initial_state(model)"
-            ) from exc
-        dt = self.dt
+        old = self._levels_from_state(state)
         d_out = self.diameter.index_select(-1, self.out_pipe)
         n_out = self.roughness.index_select(-1, self.out_pipe)
         s_out = self.slope.index_select(-1, self.out_pipe)
@@ -415,10 +443,42 @@ class SewerHydraulics:
             q_out = q_out.index_copy(
                 -1, idx, geom.manning_flow(h_new, d_j, n_j, s_j)
             )
-        # A manhole's outgoing pipe carries that manhole's own outflow, by construction.
+        return self._scatter_out(q_out), levels
+
+    def _at_levels(self, state: Mapping) -> tuple[Tensor, Tensor]:
+        """Query (R6): this closure's algebraic outputs at the given state's manhole
+        levels, without advancing them -- used by `residuals`, `current_flows`, `ports` and
+        the sewer report, none of which own an interval to integrate over.
+
+        Each manhole's outgoing-pipe discharge is `Q_out(H)` alone (no `solve_monotone`,
+        no upstream assembly): FR-19's insight applies here too -- the outgoing pipe's
+        entrance depth already IS the manhole level, so its discharge is a single
+        `geom.manning_flow` evaluation, exactly the closed form `_storage_sweep` solves
+        for at each level.
+        """
+        levels = self._levels_from_state(state)
+        d_out = self.diameter.index_select(-1, self.out_pipe)
+        n_out = self.roughness.index_select(-1, self.out_pipe)
+        s_out = self.slope.index_select(-1, self.out_pipe)
+        q_out = geom.manning_flow(levels, d_out, n_out, s_out)
+        return self._scatter_out(q_out), levels
+
+    def _levels_from_state(self, state: Mapping) -> Tensor:
+        """`state["sewer.H"]`, or a named `KeyError` -- shared by `_storage_sweep` and the
+        query path `_at_levels`."""
+        try:
+            return state["sewer.H"]
+        except KeyError as exc:
+            raise KeyError(
+                f"SewerHydraulics {self.name!r}: state 'sewer.H' (the manhole levels) is "
+                f"required when storage=True; build it with initial_state(model)"
+            ) from exc
+
+    def _scatter_out(self, q_out: Tensor) -> Tensor:
+        """Each manhole's own outflow (`q_out`, manhole order) scattered into its outgoing
+        pipe's position (pipe order), by construction; every other pipe position is zero."""
         q = torch.zeros_like(self.length).expand(q_out.shape[:-1] + self.length.shape)
-        q = q.clone().index_copy(-1, self.out_pipe, q_out)
-        return q, levels
+        return q.clone().index_copy(-1, self.out_pipe, q_out)
 
     def _densities(self, drivers: Mapping) -> Tensor:
         """Full-node ideal-gas air density from `T_head` at the manholes and `T_amb` at

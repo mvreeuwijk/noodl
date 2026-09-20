@@ -6,12 +6,14 @@ its own.
 """
 
 import math
+import time
 
 import pytest
 import torch
 from torch.autograd import gradcheck
 
 from benchmarks.measure import saved_tensor_bytes
+from noodl.layers import transport as transport_module
 from noodl.layers.transport import (
     TransportLayer,
     _expm_action,
@@ -427,9 +429,9 @@ def test_expm_action_matches_dense_matrix_exp_small_dt():
     dense = _van_loan_step_dense(M, x0, b0, dt)
 
     op = layer._advection_operator(q)
-    sparse, substeps = _expm_action(op, x0, b0, dt)
-    assert substeps == 1  # this problem is not stiff at dt=30
-    torch.testing.assert_close(sparse, dense, rtol=1e-9, atol=1e-12)
+    out = _expm_action(op, x0, b0, dt)
+    assert out.substeps == 1  # this problem is not stiff at dt=30
+    torch.testing.assert_close(out.x, dense, rtol=1e-9, atol=1e-12)
 
 
 def test_expm_action_matches_dense_zero_flow_singular_M():
@@ -446,10 +448,10 @@ def test_expm_action_matches_dense_zero_flow_singular_M():
     b0 = (N @ xb.unsqueeze(-1)).squeeze(-1) + sources / cap
     dense = _van_loan_step_dense(M, x0, b0, dt)
     op = layer._advection_operator(q)
-    sparse, _ = _expm_action(op, x0, b0, dt)
-    torch.testing.assert_close(sparse, dense, rtol=1e-9, atol=1e-12)
+    out = _expm_action(op, x0, b0, dt)
+    torch.testing.assert_close(out.x, dense, rtol=1e-9, atol=1e-12)
     # zero flow, zero M: x should simply grow linearly in dt from the constant source term
-    torch.testing.assert_close(sparse, x0 + dt * b0, rtol=1e-9, atol=1e-12)
+    torch.testing.assert_close(out.x, x0 + dt * b0, rtol=1e-9, atol=1e-12)
 
 
 def test_expm_action_matches_dense_large_dt():
@@ -466,9 +468,9 @@ def test_expm_action_matches_dense_large_dt():
     b0 = (N @ xb.unsqueeze(-1)).squeeze(-1) + sources / cap
     dense = _van_loan_step_dense(M, x0, b0, dt)
     op = layer._advection_operator(q)
-    sparse, substeps = _expm_action(op, x0, b0, dt)
-    assert substeps > 1
-    torch.testing.assert_close(sparse, dense, rtol=1e-9, atol=1e-12)
+    out = _expm_action(op, x0, b0, dt)
+    assert out.substeps > 1
+    torch.testing.assert_close(out.x, dense, rtol=1e-9, atol=1e-12)
 
 
 def test_expm_action_matches_dense_three_species_kinetics():
@@ -494,8 +496,8 @@ def test_expm_action_matches_dense_three_species_kinetics():
     b0 = (N @ xb.unsqueeze(-1)).squeeze(-1) + sources / layer._capacity_stacked(torch.float64)
     dense = _van_loan_step_dense(M, x0, b0, dt)
     op = layer._advection_operator(q)
-    sparse, _ = _expm_action(op, x0, b0, dt)
-    torch.testing.assert_close(sparse, dense, rtol=1e-9, atol=1e-12)
+    out = _expm_action(op, x0, b0, dt)
+    torch.testing.assert_close(out.x, dense, rtol=1e-9, atol=1e-12)
 
 
 def test_expm_action_flow_reversal_matches_dense():
@@ -512,8 +514,8 @@ def test_expm_action_flow_reversal_matches_dense():
         b0 = (N @ xb.unsqueeze(-1)).squeeze(-1) + sources / cap
         dense = _van_loan_step_dense(M, x0, b0, dt)
         op = layer._advection_operator(q)
-        sparse, _ = _expm_action(op, x0, b0, dt)
-        torch.testing.assert_close(sparse, dense, rtol=1e-9, atol=1e-12)
+        out = _expm_action(op, x0, b0, dt)
+        torch.testing.assert_close(out.x, dense, rtol=1e-9, atol=1e-12)
 
 
 def test_exact_scheme_conserves_total_amount_sparse_path():
@@ -559,20 +561,27 @@ def test_error_control_triggers_substepping_on_a_stiff_case():
     q = torch.zeros(2, dtype=torch.float64)
     x0 = torch.tensor([10.0], dtype=torch.float64)
     xb = torch.tensor([0.0], dtype=torch.float64)
-    sources = torch.zeros(1, dtype=torch.float64)
+    # A nonzero source keeps b0 != 0, so `_expm_action`'s mean-diagonal shift -- which makes
+    # a genuinely zero-forcing pure decay collapse to one term by design (see
+    # test_pure_decay_with_no_forcing_costs_one_term_after_the_diagonal_shift in
+    # test_expm_schedule.py) -- does not apply, and this stays a genuinely stiff, multi-
+    # substep case (R3 follow-up: the shift is correct and intentional, not a bug to work
+    # around; this test's own intent -- exercising real substepping -- needs forcing now).
+    sources = torch.tensor([50.0], dtype=torch.float64)
     dt = 50.0  # dt * rate = 25000: far past the Taylor series' single-step radius
 
     op = layer._advection_operator(q)
     M, N = layer.operator(q)
     b0 = (N @ xb.unsqueeze(-1)).squeeze(-1) + sources / layer.capacity
-    sparse, substeps = _expm_action(op, x0, b0, dt)
-    assert substeps > 1
+    out = _expm_action(op, x0, b0, dt)
+    assert out.substeps > 1
 
-    expected = x0 * math.exp(-500.0 * dt)
-    torch.testing.assert_close(sparse, expected, rtol=1e-6, atol=1e-9)
+    # dx/dt = -500 x + 50: steady state 50/500 = 0.1, and exp(-500*50) underflows to 0.
+    expected = x0 * math.exp(-500.0 * dt) + (50.0 / 500.0) * (1.0 - math.exp(-500.0 * dt))
+    torch.testing.assert_close(out.x, expected, rtol=1e-6, atol=1e-9)
 
 
-def test_error_control_raises_naming_instances_when_max_substeps_exceeded():
+def test_error_control_refuses_a_step_that_exceeds_the_matvec_budget():
     net = flow_through_zone()
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([1.0]), flow_kind="airpath", boundary=["ambient"],
@@ -581,15 +590,80 @@ def test_error_control_raises_naming_instances_when_max_substeps_exceeded():
     q = torch.zeros(2, dtype=torch.float64)
     x0 = torch.tensor([10.0], dtype=torch.float64)
     xb = torch.tensor([0.0], dtype=torch.float64)
-    sources = torch.zeros(1, dtype=torch.float64)
+    # Nonzero source disables the b0 == 0 diagonal shift (see the test above), so this stays
+    # far too stiff for the tiny budget below.
+    sources = torch.tensor([1.0], dtype=torch.float64)
     op = layer._advection_operator(q)
     M, N = layer.operator(q)
     b0 = (N @ xb.unsqueeze(-1)).squeeze(-1) + sources / layer.capacity
-    with pytest.raises(RuntimeError, match="TransportLayer 'co2' exact step.*failed to converge"):
+    with pytest.raises(RuntimeError, match="matvecs"):
         _expm_action(
-            op, x0, b0, dt=1e9, max_substeps=3,
+            op, x0, b0, dt=1e9, max_matvecs=100,
             where=f"TransportLayer '{layer.name}' exact step",
         )
+
+
+def test_step_passes_the_structural_shift_verdict_computed_from_xb_and_sources(monkeypatch):
+    """T8-4: `b0 = boundary_forcing(x_boundary) + sources / capacity` has `requires_grad=True`
+    whenever `q` requires grad, even with `x_boundary` and `sources` constant zero, which
+    would silently disable `_expm_action`'s own (value/requires_grad-based) default shift
+    inference under training -- a ~139k-matvec budget cliff for what is structurally still an
+    exact, one-term pure decay. `step()`'s exact branch must instead pass a `shift` verdict
+    computed from `x_boundary`/`sources` themselves, unaffected by whether `q` requires grad.
+    Observed by monkeypatching `_expm_action` with a spy that records the `shift` kwarg it
+    received and forwards the call unchanged.
+    """
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1.0]), flow_kind="airpath", boundary=["ambient"],
+        removal=torch.tensor([500.0], dtype=torch.float64),
+    )
+    q = torch.zeros(2, dtype=torch.float64, requires_grad=True)
+    x0 = torch.tensor([10.0], dtype=torch.float64)
+    xb = torch.tensor([0.0], dtype=torch.float64)          # constant zero, not grad-tracked
+    sources = torch.zeros(1, dtype=torch.float64)          # constant zero, not grad-tracked
+    full_source = _full(layer, sources)
+
+    recorded = {}
+    real_expm_action = transport_module._expm_action
+
+    def spy(*args, **kwargs):
+        recorded["shift"] = kwargs.get("shift")
+        return real_expm_action(*args, **kwargs)
+
+    monkeypatch.setattr(transport_module, "_expm_action", spy)
+    y = layer.step(x0, q, full_source, xb, 50.0)
+
+    assert recorded["shift"] is True
+    assert y.item() == pytest.approx(10.0 * math.exp(-25_000.0), abs=1e-300)
+
+
+def test_step_records_shift_false_when_sources_require_grad(monkeypatch):
+    """Negative case: `sources` requiring grad (even though it is 0 at this call) must record
+    `shift=False`. The existing R3 oracle (test_transport_derivatives.py) already covers the
+    resulting gradient's correctness; this only pins the recorded flag."""
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1.0]), flow_kind="airpath", boundary=["ambient"],
+        removal=torch.tensor([500.0], dtype=torch.float64),
+    )
+    q = torch.zeros(2, dtype=torch.float64)
+    x0 = torch.tensor([10.0], dtype=torch.float64)
+    xb = torch.tensor([0.0], dtype=torch.float64)
+    sources = torch.zeros(1, dtype=torch.float64, requires_grad=True)
+    full_source = _full(layer, sources)
+
+    recorded = {}
+    real_expm_action = transport_module._expm_action
+
+    def spy(*args, **kwargs):
+        recorded["shift"] = kwargs.get("shift")
+        return real_expm_action(*args, **kwargs)
+
+    monkeypatch.setattr(transport_module, "_expm_action", spy)
+    layer.step(x0, q, full_source, xb, 50.0)
+
+    assert recorded["shift"] is False
 
 
 def test_gradcheck_expm_action_wrt_x_flow_sources_boundary():
@@ -605,8 +679,7 @@ def test_gradcheck_expm_action_wrt_x_flow_sources_boundary():
     def f(x, q, sources, x_b):
         op = layer._advection_operator(q)
         b0 = op.boundary_forcing(x_b) + sources / layer.capacity
-        result, _ = _expm_action(op, x, b0, 300.0)
-        return result
+        return _expm_action(op, x, b0, 300.0).x
 
     assert gradcheck(f, (x0, q, sources, x_b), eps=1e-6, atol=1e-5)
 
@@ -614,8 +687,13 @@ def test_gradcheck_expm_action_wrt_x_flow_sources_boundary():
 def test_expm_action_backward_memory_scales_with_substep_count():
     """Measures (does not gate) how backward memory through _expm_action's own unrolled
     iteration grows from a non-stiff case (1 substep) to a genuinely stiff one (several
-    substeps, forced exactly as in test_error_control_triggers_substepping_on_a_stiff_case
-    above). Unlike Task 9's linear-solve adjoint, no O(state) bound is asserted here --
+    substeps). Both `run_and_measure` calls below build `b0` from `xb`/`sources` with
+    `requires_grad=True`, so even though their VALUES are 0, `_expm_action`'s default
+    (`shift=None`) inference disables the diagonal shift on `b0.requires_grad` alone (T8-4)
+    -- unlike test_error_control_triggers_substepping_on_a_stiff_case (which now needs an
+    explicit nonzero `sources=50` to stay stiff, since IT calls through a b0 with
+    `requires_grad=False`), the stiffness here comes from the grad-tracked zeros, not from
+    forcing. Unlike Task 9's linear-solve adjoint, no O(state) bound is asserted here --
     see this task's Mathematics section for why none is expected. `tracemalloc` cannot be
     used (amendment A4(a)): it sees zero bytes of PyTorch allocations on this `.venv`, so a
     tracemalloc-based assertion would pass vacuously regardless of whether more sub-steps
@@ -646,9 +724,9 @@ def test_expm_action_backward_memory_scales_with_substep_count():
         substeps_holder = {}
 
         def run():
-            result, substeps = _expm_action(op, x0, b0, dt)
-            substeps_holder["substeps"] = substeps
-            return result
+            out = _expm_action(op, x0, b0, dt)
+            substeps_holder["substeps"] = out.substeps
+            return out.x
 
         peak, result = saved_tensor_bytes(run)
         result.sum().backward()
@@ -690,7 +768,10 @@ def test_expm_action_mixed_stiffness_batch_matches_standalone_within_tolerance()
     q = torch.zeros(2, dtype=torch.float64)
     dt = 50.0
     xb = torch.tensor([0.0], dtype=torch.float64)
-    sources = torch.zeros(1, dtype=torch.float64)
+    # Nonzero source disables the b0 == 0 diagonal shift for both instances (see
+    # test_error_control_triggers_substepping_on_a_stiff_case above), keeping the removal=500
+    # instance genuinely stiff enough to force substepping under the new norm-based schedule.
+    sources = torch.tensor([1.0], dtype=torch.float64)
     x0_val = 10.0
 
     # Build ONE batched operator: same net/topology, but a per-instance removal rate
@@ -700,10 +781,21 @@ def test_expm_action_mixed_stiffness_batch_matches_standalone_within_tolerance()
     op_batch.removal = torch.stack([layer.removal for layer in layers], dim=0)  # (2, 1, 1)
 
     x_batch = torch.tensor([[x0_val], [x0_val]], dtype=torch.float64, requires_grad=True)
-    b0_batch = torch.zeros(2, 1, dtype=torch.float64)
+    b0_batch = (sources / cap).expand(2, 1).clone()
 
-    sparse, substeps = _expm_action(op_batch, x_batch, b0_batch, dt)
-    assert substeps > 1
+    start = time.perf_counter()
+    out = _expm_action(op_batch, x_batch, b0_batch, dt)
+    elapsed = time.perf_counter() - start
+    print(
+        f"test_expm_action_mixed_stiffness_batch_matches_standalone_within_tolerance: "
+        f"wall time={elapsed:.4f}s, out.matvecs={out.matvecs} (substeps={out.substeps}, "
+        f"terms={out.terms})"
+    )
+    # No wall-clock assertion here (finding: a flaky bound that guarded only this ~16 s
+    # action call, not the ~57 s the whole test actually takes with the standalone
+    # comparisons and backward passes below) -- the print above is the ledger record.
+    assert out.substeps > 1
+    sparse = out.x
 
     x_standalone = [
         torch.tensor([x0_val], dtype=torch.float64, requires_grad=True) for _ in rates
@@ -714,7 +806,7 @@ def test_expm_action_mixed_stiffness_batch_matches_standalone_within_tolerance()
         M, N = layer.operator(q)
         b0 = (N @ xb.unsqueeze(-1)).squeeze(-1) + sources / layer.capacity
         dense = _van_loan_step_dense(M, xi.detach(), b0, dt)
-        result_i, _ = _expm_action(op, xi, b0, dt)
+        result_i = _expm_action(op, xi, b0, dt).x
         torch.testing.assert_close(result_i.detach(), dense, rtol=1e-9, atol=1e-12)
         standalone_results.append(result_i)
 

@@ -112,6 +112,23 @@ The three schemes: `"exact"` uses an augmented matrix exponential and controls i
 sub-stepping; `"implicit"` is implicit Euler; `"trapezoidal"` is the second-order variant. Use
 `"exact"` for heat, `"implicit"` for species — the application defaults reflect this.
 
+The exact scheme bases its sub-stepping on the operator's one-norm `||dt M||_1`, computed from
+the state-independent matrix before any arithmetic on the state; if the predicted work exceeds
+the budget, the step is refused, raising an error that names the layer and advises the implicit
+or trapezoidal schemes. All coefficients the layer owns—carrier, transmission, kinetics, removal,
+and conductance—are differentiable under every scheme.
+
+**Changing storage.** A transport layer's capacity may change over a step: a sewer pipe's wetted
+volume, or a headspace volume as the water level changes. The step conserves the stored amount
+`V x` in amount form: `V_new x_new - V_old x_old = dt F(x_new)` (implicit) or `= dt/2 (F(x_new) + F(x_old))`
+(trapezoidal). The argument `capacity_prev` (the storage at the step's start, when it differs from
+the `capacity` argument at the step's end) implements this; a fixed-storage layer omits both and
+recovers the classical form. The driver `"<layer>.capacity"` holds the storage at the step's end.
+When a closure writes that driver, the step-start state must carry the key `"<layer>.capacity"`,
+the storage at the state's own time, which `Model.initial_capacities(state, drivers)` builds by
+querying the closures. The `"exact"` scheme has no changing-capacity form and raises by name if
+`capacity_prev` differs from `capacity`.
+
 ## `Reaction`
 
 Applied to a transport layer's state after its step, operator-split:
@@ -219,6 +236,18 @@ Closures may **not** write layer state keys. A closure may carry *its own* state
 declaring `state_keys`, which `Model` copies from its return into the returned state — a sewer
 manhole level, or a water tank level and its controlled links' status. Two closures claiming one
 key is refused at construction, naming both, rather than resolved by whichever ran last.
+
+### Closures and the clock
+
+A closure that only computes coefficients or forcing terms keeps the two-argument form `closure(state, drivers)`.
+A closure that integrates some state over the step (such as a storage sweep that advances manhole levels)
+declares `integrates = True` and receives a third argument, `ctx = StepContext(dt, t)`, where `dt` is
+the integration interval and `t` the step's start time if tracked. Inside `step(...)` the context carries the
+interval; inside `steady(...)` it refuses the closure by name because there is no interval to integrate over.
+Queries (`residuals`, `current_flows`, and the sewer report) call closures with `ctx = None`, where an
+integrating closure evaluates its outputs at the given state without advancing it. A closure declaring `state_keys`
+must also declare `integrates` (True or False) so the model knows whether its carried state changes step to step;
+omitting it is refused by name.
 
 ### The two couplings, and the trap in the default
 

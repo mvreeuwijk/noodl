@@ -32,8 +32,11 @@ layer. Boundary rows must be zero (refused by name, not silently dropped); ``ste
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Literal
+import bisect
+import functools
+import math
+from collections.abc import Mapping, Sequence
+from typing import Literal, NamedTuple
 
 import torch
 
@@ -214,6 +217,25 @@ class TransportLayer:
     ``quantity``/``unit`` are metadata a ``Model`` reports ("temperature"/"K",
     "concentration"/"ppm"); nothing in the numerics reads them.
     """
+
+    #: The differentiable operator coefficients a layer owns, in the fixed order the
+    #: custom autograd boundary flattens them. Absent optional ones are skipped by name.
+    _COEFFICIENT_NAMES = ("carrier", "transmission", "kinetics", "removal", "conductance")
+
+    def _coefficients(self) -> tuple[tuple[str, ...], list[torch.Tensor]]:
+        """`(names, tensors)`: every coefficient tensor that must cross `_LinearSolve`'s
+        boundary explicitly. `_LinearSolve.backward` only sees what `apply` was given, so a
+        coefficient read from `self` inside `build_system` silently gets no gradient
+        (finding R4). Topology and index tensors are not coefficients and stay on `self`."""
+        values = {
+            "carrier": self.carrier,
+            "transmission": self.transmission,
+            "kinetics": self.kinetics,
+            "removal": self.removal,
+            "conductance": None if self._conduction_edges is None else self._conduction_edges[2],
+        }
+        names = tuple(n for n in self._COEFFICIENT_NAMES if values[n] is not None)
+        return names, [values[n] for n in names]
 
     def __init__(
         self,
@@ -442,24 +464,35 @@ class TransportLayer:
         return cap
 
     def _advection_operator(
-        self, q: torch.Tensor, capacity: torch.Tensor | None = None
+        self,
+        q: torch.Tensor,
+        capacity: torch.Tensor | None = None,
+        coefficients: Mapping[str, torch.Tensor] | None = None,
     ) -> AdvectionOperator:
+        """The operator at flows `q`, capacity `capacity` (default the layer's) and the given
+        coefficient tensors (default the layer's own). Inside a `build_system` the
+        coefficients MUST be the explicit ones handed in, never `self`'s (R4)."""
+        if coefficients is None:
+            names, values = self._coefficients()
+            coefficients = dict(zip(names, values, strict=True))
         dtype = q.dtype
         src, tgt = self._flow_src, self._flow_tgt
         conduction = None
         if self._conduction_edges is not None:
-            csrc, ctgt, g = self._conduction_edges
-            conduction = (csrc, ctgt, g.to(dtype))
+            csrc, ctgt, _ = self._conduction_edges
+            conduction = (csrc, ctgt, coefficients["conductance"].to(dtype))
         cap = self.capacity if capacity is None else capacity
+        kinetics = coefficients.get("kinetics")
+        removal = coefficients.get("removal")
         return AdvectionOperator(
             src, tgt,
-            flow=self.carrier.to(dtype) * q,
-            transmission=self.transmission.to(dtype),
+            flow=coefficients["carrier"].to(dtype) * q,
+            transmission=coefficients["transmission"].to(dtype),
             capacity=cap.to(dtype),
             n_interior=self.n_i,
             interior_of_node=self._interior_of_node,
-            kinetics=self.kinetics.to(dtype) if self.kinetics is not None else None,
-            removal=self.removal.to(dtype) if self.removal is not None else None,
+            kinetics=None if kinetics is None else kinetics.to(dtype),
+            removal=None if removal is None else removal.to(dtype),
             conduction=conduction,
             # This layer's PRESCRIBED nodes, in the caller's own `boundary` order. Passed
             # explicitly because "not interior" is no longer the same set: an inactive node
@@ -642,6 +675,7 @@ class TransportLayer:
         *,
         on_failure: str = "raise",
         capacity: torch.Tensor | None = None,
+        capacity_prev: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Advance one timestep under `self.scheme`.
 
@@ -658,6 +692,17 @@ class TransportLayer:
         effect it does not have. `on_failure="return"` with `scheme="exact"` therefore
         raises `ValueError` naming the layer. `capacity` (keyword-only, spec 4.6b) overrides
         the construction-time capacity for this call only.
+
+        `capacity_prev` (keyword-only, R5) is the storage at the START of the step, when it
+        differs from `capacity` (the storage at the end of it): the AMOUNT form
+        `V_new x_new - V_old x_old = dt F(x_new)` (implicit) / `= dt/2 (F(x_new) + F(x_old))`
+        (trapezoidal), so that a step across a changing capacity conserves the stored amount
+        `V x` rather than treating the old concentration as the initial condition of a step
+        that also silently rescales it. Defaults to `capacity` (fixed storage over the
+        step), so a layer with no `capacity` driver takes exactly the old code path.
+        `scheme="exact"` has no changing-volume form (the exponential step assumes a fixed
+        storage over the whole step) and raises `ValueError` naming the layer when
+        `capacity_prev` differs from `capacity`.
         """
         if on_failure not in ("raise", "return"):
             raise ValueError(
@@ -680,6 +725,13 @@ class TransportLayer:
         out_dtype = x.dtype
         dtype = torch.float64
         cap_t = self._capacity_arg(capacity)
+        cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev)
+        if self.scheme == "exact" and not torch.equal(cap_prev_t, cap_t):
+            raise ValueError(
+                f"TransportLayer '{self.name}': scheme='exact' has no changing-capacity "
+                f"form (the exponential step assumes a fixed storage over the step); use "
+                f"scheme='implicit' or 'trapezoidal' for a layer whose capacity changes"
+            )
         x_s, reduced = self._to_stacked(x, self.n_i, "x")
         x_s = x_s.to(dtype)
         if self.scheme == "exact":
@@ -690,18 +742,35 @@ class TransportLayer:
             )
             cap = self._capacity_stacked(dtype, cap_t)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
-            result, _substeps = _expm_action(
-                op, x_s, b0, dt, where=f"TransportLayer '{self.name}' exact step"
+            # Structural verdict for `_expm_action`'s diagonal shift, computed from
+            # `x_boundary`/`sources` THEMSELVES rather than from `b0` (T8-4): `b0.requires_grad`
+            # would be True whenever `q` or `capacity` requires grad, even with `x_boundary`
+            # and `sources` constant zero, since `b0 = boundary_forcing(x_boundary) +
+            # sources / capacity` differentiates through the operator's flow/capacity
+            # regardless. With `x_boundary` and `sources` identically zero and not themselves
+            # grad-tracked, `b0` is identically zero as a function of `q` and `capacity`, so
+            # the shift (and its tangent) stays exact whether or not `q`/`capacity` require
+            # grad -- this is what lets a sealed pure-decay zone cost one Taylor term under
+            # training instead of `_expm_action`'s conservative (value-only) default.
+            homogeneous = (
+                (not x_boundary.requires_grad)
+                and (not sources.requires_grad)
+                and bool((x_boundary == 0).all())
+                and bool((sources == 0).all())
             )
+            result = _expm_action(
+                op, x_s, b0, dt, where=f"TransportLayer '{self.name}' exact step",
+                shift=homogeneous,
+            ).x
         elif self.scheme == "implicit":
             result, reduced = self._implicit_step_sparse(
-                x, q, sources, x_boundary, dt, on_failure, cap_t
+                x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t
             )
             if on_failure == "return":
                 return result
         elif self.scheme == "trapezoidal":
             result, reduced = self._trapezoidal_step_sparse(
-                x, q, sources, x_boundary, dt, on_failure, cap_t
+                x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t
             )
             if on_failure == "return":
                 return result
@@ -740,9 +809,10 @@ class TransportLayer:
         sources = sources.to(dtype)
         x_boundary = x_boundary.to(dtype)
         _, reduced = self._to_stacked(self._sources_interior(sources), self.n_i, "sources")
+        names, coef = self._coefficients()
 
-        def build_system(q_, sources_, xb_, cap_):
-            op = self._advection_operator(q_, cap_)
+        def build_system(q_, sources_, xb_, cap_, *coef_):
+            op = self._advection_operator(q_, cap_, dict(zip(names, coef_, strict=True)))
             xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
             src_s, _ = self._to_stacked(self._sources_interior(sources_), self.n_i, "sources")
             cap = self._capacity_stacked(dtype, cap_)
@@ -750,14 +820,14 @@ class TransportLayer:
             return op, -b0
 
         if on_failure == "return":
-            op, rhs = build_system(q, sources, x_boundary, cap_t)
+            op, rhs = build_system(q, sources, x_boundary, cap_t, *coef)
             return _solve_operator(
                 op, rhs, method="auto", on_failure="return",
                 where=f"TransportLayer '{self.name}' steady",
             )
         x_s = _linear_solve(
             build_system, f"TransportLayer '{self.name}' steady",
-            q, sources, x_boundary, cap_t,
+            q, sources, x_boundary, cap_t, *coef,
         )
         return self._from_stacked(x_s, self.n_i, reduced)
 
@@ -765,29 +835,45 @@ class TransportLayer:
         self, x: torch.Tensor, q: torch.Tensor, sources: torch.Tensor,
         x_boundary: torch.Tensor, dt: float, on_failure: str,
         capacity: torch.Tensor | None = None,
+        capacity_prev: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Backward Euler `(I - dt M) x_{n+1} = x_n + dt b0` on the operator contract."""
+        """Backward Euler on the AMOUNT `V x`: `V_new x_{n+1} - V_old x_n = dt F(x_{n+1})`,
+        with `F(x) = G x + N_raw x_b + s` the capacity-FREE amount rate (`G`, `N_raw` the
+        un-divided-by-capacity advection/conduction blocks). Dividing through by `V_new`:
+
+            x_{n+1} - (V_old / V_new) x_n = dt (M_new x_{n+1} + N_new x_b + s / V_new)
+
+        i.e. `(I - dt M_new) x_{n+1} = (V_old / V_new) x_n + dt b0`, `b0` and `M_new` at the
+        NEW capacity exactly as the fixed-capacity form already computed them (`operator()`
+        divides by capacity once, up front). Only the `x_n` term is rescaled by the ratio,
+        because `F(x_n) / V_new = M_new x_n + N_new x_b + s / V_new` already IS `b0` plus the
+        capacity-divided `M_new x_n` -- there is no separate old-capacity operator to build.
+        `capacity_prev` defaults to `capacity` (fixed storage), which recovers the classic
+        `x_{n+1} - x_n = dt b0` step bit for bit (ratio == 1)."""
         dtype = torch.float64
         x = x.to(dtype)
         q = q.to(dtype)
         sources = sources.to(dtype)
         x_boundary = x_boundary.to(dtype)
         cap_t = self._capacity_arg(capacity).to(dtype)
+        cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev).to(dtype)
         _, reduced = self._to_stacked(x, self.n_i, "x")
+        names, coef = self._coefficients()
 
-        def build_system(x_, q_, sources_, xb_, cap_):
-            op = self._advection_operator(q_, cap_)
+        def build_system(x_, q_, sources_, xb_, cap_, cap_prev_, *coef_):
+            op = self._advection_operator(q_, cap_, dict(zip(names, coef_, strict=True)))
             xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
             src_s, _ = self._to_stacked(self._sources_interior(sources_), self.n_i, "sources")
             x_s, _ = self._to_stacked(x_, self.n_i, "x")
             cap = self._capacity_stacked(dtype, cap_)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
-            rhs = x_s + dt * b0
+            ratio = self._capacity_stacked(dtype, cap_prev_) / cap        # V_old / V_new
+            rhs = ratio * x_s + dt * b0
             system = _AffineSystemOperator(op, dt)
             return system, rhs
 
         if on_failure == "return":
-            system, rhs = build_system(x, q, sources, x_boundary, cap_t)
+            system, rhs = build_system(x, q, sources, x_boundary, cap_t, cap_prev_t, *coef)
             result = _solve_operator(
                 system, rhs, method="auto", on_failure="return",
                 where=f"TransportLayer '{self.name}' implicit step",
@@ -795,7 +881,7 @@ class TransportLayer:
             return result, reduced
         x_s = _linear_solve(
             build_system, f"TransportLayer '{self.name}' implicit step",
-            x, q, sources, x_boundary, cap_t,
+            x, q, sources, x_boundary, cap_t, cap_prev_t, *coef,
         )
         return x_s, reduced
 
@@ -803,30 +889,42 @@ class TransportLayer:
         self, x: torch.Tensor, q: torch.Tensor, sources: torch.Tensor,
         x_boundary: torch.Tensor, dt: float, on_failure: str,
         capacity: torch.Tensor | None = None,
+        capacity_prev: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Crank-Nicolson `(I - dt/2 M) x_{n+1} = (I + dt/2 M) x_n + dt b0` on the operator
-        contract."""
+        """Crank-Nicolson on the AMOUNT `V x`: `V_new x_{n+1} - V_old x_n =
+        dt/2 (F(x_{n+1}) + F(x_n))`, with `F(x) = G x + N_raw x_b + s` the capacity-FREE
+        amount rate. Dividing through by `V_new` and using `F(x_n) / V_new = M_new x_n +
+        N_new x_b + s / V_new = op.matvec(x_n) + b0` (the operator's own capacity-divided
+        blocks at the NEW capacity -- there is no separate old-capacity operator to build):
+
+            (I - dt/2 M_new) x_{n+1} = (V_old / V_new) x_n + dt/2 op.matvec(x_n) + dt b0
+
+        `capacity_prev` defaults to `capacity` (fixed storage), which recovers the classic
+        `(I - dt/2 M) x_{n+1} = (I + dt/2 M) x_n + dt b0` step bit for bit (ratio == 1)."""
         dtype = torch.float64
         x = x.to(dtype)
         q = q.to(dtype)
         sources = sources.to(dtype)
         x_boundary = x_boundary.to(dtype)
         cap_t = self._capacity_arg(capacity).to(dtype)
+        cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev).to(dtype)
         _, reduced = self._to_stacked(x, self.n_i, "x")
+        names, coef = self._coefficients()
 
-        def build_system(x_, q_, sources_, xb_, cap_):
-            op = self._advection_operator(q_, cap_)
+        def build_system(x_, q_, sources_, xb_, cap_, cap_prev_, *coef_):
+            op = self._advection_operator(q_, cap_, dict(zip(names, coef_, strict=True)))
             xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
             src_s, _ = self._to_stacked(self._sources_interior(sources_), self.n_i, "sources")
             x_s, _ = self._to_stacked(x_, self.n_i, "x")
             cap = self._capacity_stacked(dtype, cap_)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
-            rhs = x_s + 0.5 * dt * op.matvec(x_s) + dt * b0
+            ratio = self._capacity_stacked(dtype, cap_prev_) / cap
+            rhs = ratio * x_s + 0.5 * dt * op.matvec(x_s) + dt * b0
             system = _AffineSystemOperator(op, 0.5 * dt)
             return system, rhs
 
         if on_failure == "return":
-            system, rhs = build_system(x, q, sources, x_boundary, cap_t)
+            system, rhs = build_system(x, q, sources, x_boundary, cap_t, cap_prev_t, *coef)
             result = _solve_operator(
                 system, rhs, method="auto", on_failure="return",
                 where=f"TransportLayer '{self.name}' trapezoidal step",
@@ -834,7 +932,7 @@ class TransportLayer:
             return result, reduced
         x_s = _linear_solve(
             build_system, f"TransportLayer '{self.name}' trapezoidal step",
-            x, q, sources, x_boundary, cap_t,
+            x, q, sources, x_boundary, cap_t, cap_prev_t, *coef,
         )
         return x_s, reduced
 
@@ -858,58 +956,177 @@ def _van_loan_step_dense(
     return (Ed @ x.unsqueeze(-1)).squeeze(-1) + (Phi @ b0.unsqueeze(-1)).squeeze(-1)
 
 
+_TAYLOR_M_MAX = 55
+
+
+class ExpmResult(NamedTuple):
+    x: torch.Tensor
+    integral: torch.Tensor | None   # int_0^dt x(tau) dtau, when requested
+    substeps: int
+    terms: int
+    matvecs: int
+
+
+def _taylor_remainder(theta: float, m: int) -> float:
+    """sum_{k > m} theta^k / k!: the operator-norm error of the degree-m Taylor polynomial of
+    exp(A) for any ||A|| <= theta. A forward bound, valid for every matrix of that norm."""
+    if theta <= 0.0:
+        return 0.0
+    term = math.exp((m + 1) * math.log(theta) - math.lgamma(m + 2))
+    total, k = 0.0, m + 1
+    while term > 1e-300 and k < m + 2000:
+        total += term
+        k += 1
+        term *= theta / k
+    return total
+
+
+@functools.cache
+def _theta_table(tol: float, m_max: int) -> tuple[float, ...]:
+    """theta_m for m = 1..m_max: the largest ||A|| that m Taylor terms bring within tol
+    (one bisection per m, computed once per tol and cached). Monotone increasing in m."""
+    table = []
+    for m in range(1, m_max + 1):
+        lo, hi = 0.0, 4.0 * m_max
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            if _taylor_remainder(mid, m) <= tol:
+                lo = mid
+            else:
+                hi = mid
+        table.append(lo)
+    return tuple(table)
+
+
+def _theta_max(tol: float, m_max: int) -> float:
+    return _theta_table(tol, m_max)[-1]
+
+
+def _taylor_schedule(norm: float, tol: float, m_max: int = _TAYLOR_M_MAX) -> tuple[int, int]:
+    """(substeps s, terms m), s * m minimal over a window of s, with theta = norm / s <= theta_m.
+
+    Independent of the state and the forcing by construction: the term count is fixed before
+    a single matvec runs, so autograd through the recurrence is the exact derivative of the
+    same polynomial that produced the value (R3). The window `s_min .. s_min + 15` is enough:
+    m falls by at most a few terms per extra substep while s grows by one, so the product's
+    minimum sits at or just above the smallest admissible s.
+    """
+    if not math.isfinite(norm) or norm < 0.0:
+        raise ValueError(
+            f"_taylor_schedule: operator norm bound must be finite and >= 0, got {norm!r}"
+        )
+    if norm == 0.0:
+        return 1, 1
+    table = _theta_table(tol, m_max)
+    s_min = max(1, math.ceil(norm / table[-1]))
+    best: tuple[int, int] | None = None
+    for s in range(s_min, s_min + 16):
+        theta = norm / s
+        # `bisect_left` returns `len(table)` (== m_max) when theta lands a hair above
+        # table[-1] -- e.g. norm == table[-1] * s_min exactly, where float rounding in the
+        # ceil/divide above can leave theta infinitesimally over the largest tabulated
+        # theta_{m_max}. Clamping to m_max keeps m a valid Taylor degree instead of m_max + 1.
+        m = min(bisect.bisect_left(table, theta) + 1, m_max)  # smallest m with theta_m >= theta
+        if best is None or s * m < best[0] * best[1]:
+            best = (s, m)
+    assert best is not None
+    return best
+
+
 def _expm_action(
     M: AdvectionOperator,
     x: torch.Tensor,
     b0: torch.Tensor,
     dt: float,
     *,
-    rtol: float = 1e-10,
-    atol: float = 1e-12,
-    max_terms: int = 60,
-    max_substeps: int = 20,
+    tol: float = 1e-12,
+    max_matvecs: int = 200_000,
+    integrate: bool = False,
+    shift: bool | None = None,
     where: str = "TransportLayer exact step",
-    _depth: int = 0,
-) -> tuple[torch.Tensor, int]:
-    """expm(dt * [[M, b0], [0, 0]]) @ [x, 1], as a scaling-and-squaring-free Taylor
-    action in M -- see the module docstring / Task 10's plan for the derivation.
-    Never forms a (2m, 2m), or even an (m, m), dense object.
+) -> ExpmResult:
+    """expm(dt [[M, b0], [0, 0]]) [x; 1] by a scaled Taylor action whose work (s substeps of m
+    terms) is fixed from ||dt M||_1 before any arithmetic on x or b0.
+
+    The recurrence per substep of length h: u = M x + b0, x_next = x + sum_{j>=1} h^j/j!
+    M^{j-1} u; and, when `integrate`, int_0^h x(tau) dtau = h x + sum_{j>=1} h^{j+1}/(j+1)!
+    M^{j-1} u (the same terms, shifted coefficients). One (s, m) serves the whole batch: the
+    bound is taken as the batch maximum, which is conservative for every instance.
+
+    Shift: when applied, M is replaced by M - mu I with mu the mean diagonal per instance and
+    the result multiplied by e^{h mu}; this is exact and removes the common decay rate from
+    the norm (a pure decay costs one term instead of thousands). It is valid ONLY when b0 is
+    identically (structurally) zero: the convolution integral_0^h e^{mu(h-s)} e^{sA} ds b0
+    (A = M - mu I) does not factor into a single e^{h mu} the way the x0 term does -- its
+    exponent varies with s -- so shifting when b0 can ever be nonzero produces a wrong
+    derivative even where the forward value looks exact. It is also never valid together with
+    `integrate`, whose shifted form has no such simple recurrence (`shift=True` with
+    `integrate=True` raises `ValueError`).
+
+    `shift` (keyword-only, default `None`) picks who decides:
+    - `None` (the default): inferred conservatively from `b0` itself -- off whenever
+      `integrate` is set, whenever `b0.requires_grad` (b0 MIGHT become nonzero under
+      autograd, even if its current value is 0), or whenever `b0`'s current value is
+      nonzero. This default is always safe but can be needlessly conservative: a `b0`
+      built as `boundary_forcing(xb) + sources / capacity` has `requires_grad=True`
+      whenever `q` or `capacity` requires grad, even with `xb` and `sources` constant
+      zero, because `boundary_forcing` and the capacity division differentiate through
+      the OPERATOR's coefficients, not through `xb`/`sources` (T8-4) -- so the inferred
+      default alone would silently pay full Taylor cost for what is structurally still an
+      exact-shift-eligible pure decay whenever training makes `q`/`capacity` require grad.
+    - `True` / `False`: the caller's own verdict, used as-is (still forced through the
+      `integrate` check above). Pass `True` only when the caller can prove `b0` has no way
+      of becoming nonzero -- e.g. `TransportLayer.step` computes this from `x_boundary` and
+      `sources` directly (constant, all-zero, and not themselves grad-tracked), which is
+      unaffected by whether `q`/`capacity` require grad.
+
+    Raises `RuntimeError` naming `where`, the norm and the predicted s * m when that exceeds
+    `max_matvecs`: the exact scheme is O(||dt M||) matvecs by nature; a stiff problem belongs
+    to scheme='implicit'.
     """
-    u = M.matvec(x) + b0
-    result = x.clone()
-    term = u
-    coef = dt
-    converged = torch.zeros(x.shape[:-1], dtype=torch.bool, device=x.device)
-    j = 1
-    while j <= max_terms:
-        increment = coef * term
-        result = torch.where(
-            converged.unsqueeze(-1), result, result + increment
-        )
-        tol = atol + rtol * result.abs().amax(dim=-1, keepdim=True).squeeze(-1)
-        finite = torch.isfinite(increment).all(dim=-1) & torch.isfinite(result).all(dim=-1)
-        newly_converged = finite & (increment.abs().amax(dim=-1) <= tol)  # amendment A6
-        converged = converged | newly_converged
-        if bool(torch.all(converged)):
-            return result, 1  # one leaf Taylor evaluation (amendment A6)
-        term = M.matvec(term)
-        j += 1
-        coef = coef * dt / (j)
-    if _depth >= max_substeps:
-        bad = torch.nonzero(~converged.reshape(-1), as_tuple=False).flatten()
+    if shift and integrate:
+        raise ValueError("_expm_action: shift=True is incompatible with integrate=True")
+    dtype = x.dtype
+    if shift is None:
+        shift = (not integrate) and (not b0.requires_grad) and (not bool(torch.any(b0 != 0)))
+    with torch.no_grad():
+        colsum = M.abs_column_sums().to(dtype)
+        if shift:
+            diag = M.diagonal().to(dtype)
+            mu_ng = diag.mean(-1, keepdim=True)
+            colsum = colsum - diag.abs() + (diag - mu_ng).abs()
+        norm = float((colsum.amax(-1) * dt).max())
+    s, m = _taylor_schedule(norm, tol)
+    if s * m > max_matvecs:
         raise RuntimeError(
-            f"{where}: batch indices {bad.tolist()} failed to converge "
-            f"the exponential action after {max_substeps} dt-halvings"
+            f"{where}: the exponential action needs about {s * m} matvecs (||dt M||_1 = "
+            f"{norm:.3e}: {s} substeps of {m} Taylor terms) against a budget of "
+            f"{max_matvecs}; this is a stiff step -- use scheme='implicit' or "
+            f"'trapezoidal', or raise max_matvecs deliberately"
         )
-    half = dt / 2
-    x_mid, substeps_a = _expm_action(
-        M, x, b0, half, rtol=rtol, atol=atol, max_terms=max_terms,
-        max_substeps=max_substeps, where=where, _depth=_depth + 1,
-    )
-    x_end, substeps_b = _expm_action(
-        M, x_mid, b0, half, rtol=rtol, atol=atol, max_terms=max_terms,
-        max_substeps=max_substeps, where=where, _depth=_depth + 1,
-    )
-    return x_end, substeps_a + substeps_b  # amendment A6
+    h = dt / s
+    mu = M.diagonal().to(dtype).mean(-1, keepdim=True) if shift else None
+    scale = torch.exp(h * mu) if shift else None
+
+    def apply(v: torch.Tensor) -> torch.Tensor:
+        y = M.matvec(v)
+        return y - mu * v if shift else y
+
+    integral = torch.zeros_like(x) if integrate else None
+    for _ in range(s):
+        term = apply(x) + b0
+        result = x + h * term
+        piece = h * x + (0.5 * h * h) * term if integrate else None
+        coef = h
+        for j in range(2, m + 1):
+            term = apply(term)
+            coef = coef * h / j
+            result = result + coef * term
+            if integrate:
+                piece = piece + (coef * h / (j + 1)) * term
+        x = result * scale if shift else result
+        if integrate:
+            integral = integral + piece
+    return ExpmResult(x, integral, s, m, s * m)
 
 
