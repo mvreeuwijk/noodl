@@ -1048,7 +1048,10 @@ functions -- `_apply_closures`, `_write_at`, `_forward_value`, `apply_conversion
 magnitude below the gate. It stays a recorded option, to revisit only if a future extension
 contract genuinely needs the prepared structure (fixed endpoint indices, explicit
 flow-provider bindings, an execution order) independent of any wall-time argument -- the
-profile gives no wall-time case for it today.
+profile gives no wall-time case for it today. (Those per-function self-times come from the
+profile's full pstats listing, not from the committed `benchmarks/profile_coupled_2026-09.txt`
+-- that file keeps only the cumulative-time top 25 of 8824 profiled functions, below which
+these orchestration functions fall; the full numbers are recorded in Task 28's report.)
 
 **Where the time goes, and what that points at.** 93.7% of the profiled run (76.05 s of
 81.17 s) is inside two numerical-solve subtrees, sibling calls from `model.py:_pass`: the
@@ -1076,9 +1079,14 @@ benchmark -- not commitments made here:
   can take a direct route instead of GMRES (the doubled-nnz cost of carrying both edge
   orientations, noted in `assemble_sparse`'s docstring, would need to be measured against
   the 45.1 s this profile shows GMRES costing);
-- a better-than-diagonal preconditioner for GMRES on the advection system, since the current
-  default (`preconditioner="jacobi"` in `select.solve`) is the same starting point A2 already
-  flags as insufficient for large ill-conditioned networks;
+- a preconditioner for GMRES on the advection system: `select.solve`'s `preconditioner`
+  argument is pcg-only (forwarded only to `pcg`, never to `gmres`), and `iterative.gmres`
+  itself takes no preconditioner parameter at all, so both of `select.solve`'s `gmres` call
+  sites -- the explicit `method="gmres"` branch and the `auto` fallback -- run GMRES on the
+  advection system fully unpreconditioned today. Adding one is the candidate; a Jacobi
+  diagonal is the natural first step, but A2 already flags a diagonal as a starting point,
+  not the complete strategy for a large ill-conditioned network, so a better one is the real
+  target;
 - for the potential layer's Newton solve, preconditioner quality under high conductance
   contrast (the review's own item), which this profile's 30.9 s Newton share is consistent
   with but does not by itself isolate from the reference model's ordinary conditioning.
