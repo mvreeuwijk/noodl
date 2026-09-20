@@ -1016,6 +1016,84 @@ mean-diagonal shift (commit `e451872`, PR-1) changed the work three cases take:
   chain, removal-free capacities 1.0 and 1e-3): 4,180 matvecs after the fix (76 substeps x 55
   terms), measured directly on this branch for this re-baseline.
 
+## Decision record: what the re-baseline says (20 Sep 2026)
+
+**What PR-5 measured.** PR-5 re-ran `benchmarks/report_composed_scaling.py` on the current
+code (above) and added a controlled A/B against `main` (`8fdea28`, part 1 of the hardening)
+and pre-hardening (`f1d8177`), plus a cProfile of one coupled street/building run, to separate
+code-attributable change from the machine load both sessions ran under. The A/B, interleaved
+three ways per measurement so ambient load cancels out of the ratio rather than the absolute
+time, found no code-attributable slowdown: `coupling_street_building.py 1`, wall seconds,
+median of 3 interleaved rounds -- head 65.79 s (107 outer passes) vs main 66.03 s (116 passes)
+vs pre-hardening 65.60 s (116 passes), ratios head/main 0.996 and main/pre 1.007, both inside
+the ~1.2x noise band the machine's ambient load requires. The composed ensemble-1 forward
+step (implicit-scheme transport only, no `exact`-scheme closures) gave the same verdict:
+0.733 s / 0.711 s / 0.686 s median, ratios 1.031 / 1.036, again inside noise. The 1.5-3x
+deltas the 20 September re-baseline table shows against the 17 September numbers are
+therefore machine load (another session's ~3 GB resident Python process, active at launch and
+throughout both runs), not a regression introduced by this branch. Head does converge the
+coupled iteration in fewer outer passes than main and pre-hardening (107 vs 116, repeatable
+every round) -- a real, deterministic effect of part 1 of the hardening already on `main`
+before this branch -- but it happens to cost slightly more per pass, so it produces no
+wall-time gain. **All latency budgets in the re-baseline table remain unmet, on both solvers,
+on every row; all four peak-memory budgets and both shape gates pass**, unchanged from 17
+September.
+
+**A1 verdict.** The prepared-execution refactor (A1) is **not justified now.** The review's
+own gate was orchestration exceeding "about a fifth" of the coupled step; the profile of one
+coupled batch-1 run (81.2 s cumulative inside `couple.py:step`) puts the named orchestration
+functions -- `_apply_closures`, `_write_at`, `_forward_value`, `apply_conversion`, plus
+`_step_model`'s and `model.py`'s `step`/`_advance`/`_pass` self-times, and `couple.py`'s
+`_iterate` -- at roughly 0.70 s combined self-time, **under 1% of the run**, two orders of
+magnitude below the gate. It stays a recorded option, to revisit only if a future extension
+contract genuinely needs the prepared structure (fixed endpoint indices, explicit
+flow-provider bindings, an execution order) independent of any wall-time argument -- the
+profile gives no wall-time case for it today.
+
+**Where the time goes, and what that points at.** 93.7% of the profiled run (76.05 s of
+81.17 s) is inside two numerical-solve subtrees, sibling calls from `model.py:_pass`: the
+implicit-scheme transport step (`layers/transport.py:_step` through `_linear_solve` and
+`solvers/select.py:solve` into `solvers/iterative.py:gmres`), 45.1 s cumulative with 13.25 s
+of that inside GMRES's own iterative-solve loop; and the building-airflow Newton solve
+(`layers/potential.py:solve` through `implicit_solve`/`newton`), 30.9 s cumulative. The
+transport solve is routed to GMRES rather than a direct method because `AdvectionOperator`
+(`src/noodl/operators/advection.py`) answers both eligibility questions the way that forces
+it there: `spd_certificate()` returns `None` unconditionally, and `assemble_sparse()` also
+returns `None` (a sparse COO form is derivable but was left unimplemented in Task C's scope,
+per that method's own docstring, precisely because it would not change the routing -- see
+below). `solvers/select.py`'s `method="auto"` eligibility table (module docstring, confirmed
+by reading `solve`) picks the backend in this order: a certificate mixed across a batch
+raises; a uniformly-certified-SPD operator with a usable sparse form goes to `sparse_direct`;
+a certified-SPD operator without one goes to `pcg`; and a certificate of `None`, or uniformly
+`False`, goes to `gmres` -- the last row is `AdvectionOperator`'s row, decided by
+`spd_certificate()` alone, so giving it an `assemble_sparse()` would not move it off GMRES
+without also revisiting nonsymmetric eligibility in `select.py`. This is where the review's
+solver/preconditioner list and the profile agree, and it names three concrete candidates to
+benchmark -- not commitments made here:
+
+- a COO/CSR assembly for `AdvectionOperator`, paired with a nonsymmetric sparse-direct
+  (or sparse-LU) eligibility path in `select.py`, so small-ensemble implicit transport steps
+  can take a direct route instead of GMRES (the doubled-nnz cost of carrying both edge
+  orientations, noted in `assemble_sparse`'s docstring, would need to be measured against
+  the 45.1 s this profile shows GMRES costing);
+- a better-than-diagonal preconditioner for GMRES on the advection system, since the current
+  default (`preconditioner="jacobi"` in `select.solve`) is the same starting point A2 already
+  flags as insufficient for large ill-conditioned networks;
+- for the potential layer's Newton solve, preconditioner quality under high conductance
+  contrast (the review's own item), which this profile's 30.9 s Newton share is consistent
+  with but does not by itself isolate from the reference model's ordinary conditioning.
+
+**Exponential-action work counts.** The mean-diagonal-shift fix changed matvec counts as
+recorded above: the pure-decay case collapses from 184,459 matvecs to 1 (the shift makes
+`M - mu*I` vanish for a case that is structurally an exact-shift-eligible pure decay); the
+committed forced mixed-stiffness batch test needs 104,280 matvecs after the fix, with no
+instrumented pre-fix count to compare against; the smaller mixed-stiffness case needs 4,180.
+Separately, and by design, `_expm_action` (`src/noodl/layers/transport.py`) now enforces a
+work budget rather than relying only on the recursion-depth limit the review flagged: it
+raises `RuntimeError` naming the predicted substep x Taylor-term matvec count when that count
+exceeds `max_matvecs` (200,000 by default), with the message advising `scheme='implicit'` or
+`'trapezoidal'`, or raising `max_matvecs` deliberately -- a stiff exact step is refused rather
+than silently left to run to a possibly much larger matvec count.
 
 ## Appendix: the source tree
 
