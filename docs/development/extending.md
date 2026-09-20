@@ -13,7 +13,8 @@ Every branch law is a `torch.nn.Module` subclass of `noodl.elements.base.Element
 [Elements and drives](../concepts/elements.md#the-element-contract) for the full contract;
 in short, an element owns one edge `kind` and provides `flow`, `dflow` and `linear_init`.
 
-Here is a new one, `Sigmoid`, with a single learnable coefficient (a "steepness"):
+Here is a new one, `Sigmoid`, with a single learnable coefficient (a "steepness") — verbatim
+from `tests/test_extension_recipe.py`:
 
 ```python
 from noodl.elements.base import Element
@@ -21,20 +22,28 @@ import torch
 
 
 class Sigmoid(Element):
-    """q = tanh(k * dp): a smooth, bounded, odd branch law with a learnable steepness `k`."""
+    """q = tanh(k * dp): a smooth, bounded, odd branch law with a learnable steepness `k`.
+
+    Follows `Conductance`'s contract exactly: `__init__` wraps its one coefficient with
+    `Element._param` (so `learnable=True` registers it as a real `nn.Parameter`, reachable
+    by `torch.func.functional_call` the same way every built-in element is), and `flow`,
+    `dflow` and `linear_init` are all overridden with closed forms rather than left to the
+    base class's autograd default -- exact and cheap, exactly the reason `Conductance` does
+    the same.
+    """
 
     def __init__(self, k, *, kind: str = "airpath", learnable: bool = False) -> None:
         super().__init__(kind)
         self.k = self._param(k, learnable)
 
-    def flow(self, dp, drivers=None):
+    def flow(self, dp: torch.Tensor, drivers=None) -> torch.Tensor:
         return torch.tanh(self.k * dp)
 
-    def dflow(self, dp, drivers=None):
+    def dflow(self, dp: torch.Tensor, drivers=None) -> torch.Tensor:
         q = torch.tanh(self.k * dp)
         return self.k * (1.0 - q * q)
 
-    def linear_init(self, drivers=None):
+    def linear_init(self, drivers=None) -> tuple[torch.Tensor, torch.Tensor]:
         return torch.zeros_like(self.k), self.k
 ```
 
@@ -61,7 +70,7 @@ A "new application" is nothing but a builder function returning `(model, state, 
 existing layers and elements, plus (if the application steps forward in time) an
 `initial_state` function and any closures it needs. Here is the smallest one that exercises
 `Sigmoid`: an ambient boundary and two zones, joined by three `airpath` edges, one
-`PotentialFlowLayer`, one `Model`.
+`PotentialFlowLayer`, one `Model`. Verbatim from `tests/test_extension_recipe.py`:
 
 ```python
 from noodl.layers.potential import PotentialFlowLayer
@@ -73,6 +82,13 @@ F64 = torch.float64
 
 
 def build_two_zone(*, learnable: bool = True):
+    """(model, state, drivers) for the smallest network the new law can be checked on.
+
+    ambient (boundary) -> z1 -> z2 -> ambient, three `airpath` edges, one `Sigmoid` element
+    covering all three (steepness `k`, shape (3,)). One `PotentialFlowLayer`, one `Model`.
+    No `TransportLayer`, no closures: nothing here needs one, and the guide's point is the
+    smallest network that exercises the new law, not a full application.
+    """
     net = Network(dtype=F64)
     net.add_node("ambient")
     net.add_node("z1")
@@ -120,13 +136,16 @@ real application adds more of the same kind of thing, in a fixed place:
 ## Checking it
 
 The test itself does two things with `build_two_zone`, both cheap sanity checks a new law and
-a new network should always pass before anything more elaborate is built on them:
+a new network should always pass before anything more elaborate is built on them. Verbatim
+from `tests/test_extension_recipe.py`:
 
 ```python
 def test_interior_flow_balance_and_gradcheck_through_the_new_law():
     model, state, drivers = build_two_zone()
 
     new_state = model.steady(state, drivers)
+    assert new_state["air.phi"].shape == (3,)
+
     residual = model.residuals(new_state, drivers)["air"]
     torch.testing.assert_close(
         residual, torch.zeros_like(residual), atol=1e-10, rtol=0.0

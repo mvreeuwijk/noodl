@@ -36,6 +36,22 @@ def _conduction_net():
     return net
 
 
+def _circulating_net():
+    """One zone with an outflow edge (index 0, zone->ambient) AND a circulating inflow edge
+    (index 1, ambient->zone), both kind="flow" -- the shape `test_transmission_gradient`
+    needs a nonzero `x_boundary` to make the inflow edge's transmission actually enter the
+    interior balance, exactly as
+    tests/layers/test_transport_derivatives.py::test_implicit_gradient_with_respect_to_transmission
+    does for the closed-form implicit case alone.
+    """
+    net = Network(dtype=F64)
+    net.add_node("ambient")
+    net.add_node("zone")
+    net.add_edge("zone", "ambient", kind="flow")
+    net.add_edge("ambient", "zone", kind="flow")
+    return net
+
+
 @pytest.mark.parametrize("scheme", ["implicit", "trapezoidal", "exact"])
 def test_kinetics_gradient(scheme):
     """Species 0 turns into species 1 at rate k inside a zone with unit outflow."""
@@ -98,6 +114,97 @@ def test_conductance_gradient_steady():
 
     g = torch.tensor(0.7, dtype=F64, requires_grad=True)
     assert gradcheck(f, (g,), eps=1e-6, atol=1e-7, rtol=1e-6)
+
+
+@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal", "exact"])
+def test_carrier_gradient(scheme):
+    """A single compartment with unit outflow: dx/dt = -c q x scales the flow by carrier c."""
+    net = _two_species_net()
+
+    def f(c):
+        layer = TransportLayer(
+            net, "c", capacity=_t([1.0]), flow_kind="flow", boundary=["ambient"],
+            carrier=c, scheme=scheme,
+        )
+        return layer.step(_t([1.0]), _t([1.0]), _t([0.0, 0.0]), _t([0.0]), 1.0)
+
+    c = torch.tensor(1.0, dtype=F64, requires_grad=True)
+    assert gradcheck(f, (c,), eps=1e-6, atol=1e-7, rtol=1e-6)
+
+
+def test_carrier_gradient_steady():
+    net = _two_species_net()
+
+    def f(c):
+        layer = TransportLayer(
+            net, "c", capacity=_t([1.0]), flow_kind="flow", boundary=["ambient"],
+            carrier=c, scheme="implicit",
+        )
+        return layer.steady(_t([1.0]), _t([0.0, 1.0]), _t([0.0]))
+
+    c = torch.tensor(1.0, dtype=F64, requires_grad=True)
+    assert gradcheck(f, (c,), eps=1e-6, atol=1e-7, rtol=1e-6)
+
+
+@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal", "exact"])
+def test_removal_gradient(scheme):
+    """A single compartment with unit outflow and a removal term: dx/dt = -(q + r) x."""
+    net = _two_species_net()
+
+    def f(r):
+        layer = TransportLayer(
+            net, "c", capacity=_t([1.0]), flow_kind="flow", boundary=["ambient"],
+            removal=r, scheme=scheme,
+        )
+        return layer.step(_t([1.0]), _t([1.0]), _t([0.0, 0.0]), _t([0.0]), 1.0)
+
+    r = torch.tensor([0.5], dtype=F64, requires_grad=True)
+    assert gradcheck(f, (r,), eps=1e-6, atol=1e-7, rtol=1e-6)
+
+
+def test_removal_gradient_steady():
+    net = _two_species_net()
+
+    def f(r):
+        layer = TransportLayer(
+            net, "c", capacity=_t([1.0]), flow_kind="flow", boundary=["ambient"],
+            removal=r, scheme="implicit",
+        )
+        return layer.steady(_t([1.0]), _t([0.0, 1.0]), _t([0.0]))
+
+    r = torch.tensor([0.5], dtype=F64, requires_grad=True)
+    assert gradcheck(f, (r,), eps=1e-6, atol=1e-7, rtol=1e-6)
+
+
+@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal", "exact"])
+def test_transmission_gradient(scheme):
+    """Circulating compartment, x_boundary = 1: the inflow edge's transmission scales how
+    much of the boundary value re-enters, so it must reach the gradient too."""
+    net = _circulating_net()
+
+    def f(t_):
+        layer = TransportLayer(
+            net, "c", capacity=_t([1.0]), flow_kind="flow", boundary=["ambient"],
+            transmission=t_, scheme=scheme,
+        )
+        return layer.step(_t([1.0]), _t([1.0, 1.0]), _t([0.0, 0.0]), _t([1.0]), 1.0)
+
+    transmission = _t([1.0, 1.0], requires_grad=True)
+    assert gradcheck(f, (transmission,), eps=1e-6, atol=1e-7, rtol=1e-6)
+
+
+def test_transmission_gradient_steady():
+    net = _circulating_net()
+
+    def f(t_):
+        layer = TransportLayer(
+            net, "c", capacity=_t([1.0]), flow_kind="flow", boundary=["ambient"],
+            transmission=t_, scheme="implicit",
+        )
+        return layer.steady(_t([1.0, 1.0]), _t([0.0, 0.0]), _t([1.0]))
+
+    transmission = _t([1.0, 1.0], requires_grad=True)
+    assert gradcheck(f, (transmission,), eps=1e-6, atol=1e-7, rtol=1e-6)
 
 
 @pytest.mark.parametrize("scheme", ["implicit", "trapezoidal"])

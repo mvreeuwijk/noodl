@@ -79,8 +79,9 @@ that would fail if the claim stopped holding.
 
 - **First-order derivatives only.** The implicit adjoint never builds a graph connecting its
   own returned gradients back to its inputs, so a second `torch.autograd.grad(..., create_graph=True)`
-  through an already-differentiated implicit solve is refused by name, at construction time,
-  rather than silently returning an incomplete result with a missing second-order term
+  through an already-differentiated implicit solve is refused by name, inside `backward()` at
+  the moment that second differentiation is attempted, rather than silently returning an
+  incomplete result with a missing second-order term
   (pinned by tests/solvers/test_implicit.py::test_second_order_differentiation_raises_instead_of_silently_dropping_a_term).
 - **At regular solutions.** The guarantee above is for a converged solve at which the residual's
   Jacobian is invertible; every implicit-adjoint gradient this page cites is checked at such a
@@ -106,10 +107,14 @@ that would fail if the claim stopped holding.
   (pinned by tests/layers/test_transport_derivatives.py::test_exact_step_tangent_matches_the_matrix_exponential_at_equilibrium).
 - **Every transport coefficient is differentiable under every scheme.** Carrier, transmission,
   kinetics, removal and conductance all reach the backward pass under `implicit`, `trapezoidal`
-  and `exact` alike, checked by `gradcheck` against each coefficient family
-  (pinned by tests/layers/test_transport_coefficients.py::test_kinetics_gradient and
-  tests/layers/test_transport_coefficients.py::test_conductance_gradient, both parametrised
-  over scheme).
+  and `exact` alike, checked by `gradcheck` against each coefficient family, both in a single
+  step and at steady state
+  (pinned by tests/layers/test_transport_coefficients.py::test_carrier_gradient,
+  tests/layers/test_transport_coefficients.py::test_transmission_gradient,
+  tests/layers/test_transport_coefficients.py::test_kinetics_gradient,
+  tests/layers/test_transport_coefficients.py::test_removal_gradient and
+  tests/layers/test_transport_coefficients.py::test_conductance_gradient, all parametrised
+  over scheme, plus each one's `_steady` counterpart).
 - **Coupled fixed points are differentiated by unrolling.** Both `Model`'s own `coupling="iterate"`
   and `couple.CoupledModel`'s two-way join repeat a pass to convergence and keep every pass on
   the autograd graph, so memory grows with the pass count; the convergence decision itself is
