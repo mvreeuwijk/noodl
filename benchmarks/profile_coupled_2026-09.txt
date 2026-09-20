@@ -1,0 +1,45 @@
+# cProfile of the coupled street-building step (Task 28)
+# Command: PYTHONPATH=src python -m cProfile -o .superpowers/sdd/2026-09-20-framework-hardening-part-2/coupled.prof benchmarks/coupling_street_building.py 1
+# Commit: c07db07c11957698f7721273a104326b4f1277d8 (worktree-framework-hardening-2, worktree framework-hardening-2)
+# Date: 2026-09-20
+# Machine: Windows 11, 14 cores / 20 logical processors, 65176 MB RAM; a second python.exe
+#   (~3.0 GB RSS at time of this run, tasklist-observed) from another session ran throughout,
+#   per controller ruling T18-2/F2-1 -- see task-28-report.md for the interleaved A/B timing
+#   that isolates code-attributable slowdown from this ambient load.
+# Sorted by cumulative time, top 25 of 8824 profiled functions.
+
+Sun Sep 20 16:07:11 2026    <repo>/coupled.prof
+
+         16762376 function calls (16687562 primitive calls) in 84.452 seconds
+
+   Ordered by: cumulative time
+   List reduced from 8824 to 25 due to restriction <25>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.000    0.000   81.178   81.178 <repo>/benchmarks/coupling_street_building.py:91(run)
+        6    0.000    0.000   81.169   13.528 <repo>\src\noodl\couple.py:462(step)
+        6    0.011    0.002   81.169   13.528 <repo>\src\noodl\couple.py:529(_iterate)
+      214    0.118    0.001   80.059    0.374 <repo>\src\noodl\couple.py:493(_step_model)
+     6527    0.043    0.000   79.938    0.012 <repo>\src\noodl\model.py:656(step)
+     6527    0.044    0.000   79.883    0.012 <repo>\src\noodl\model.py:721(_advance)
+     6527    0.462    0.000   79.832    0.012 <repo>\src\noodl\model.py:466(_pass)
+42372/13482    0.631    0.000   52.996    0.004 {built-in method apply}
+     6527    0.256    0.000   45.105    0.007 <repo>\src\noodl\layers\transport.py:766(_step)
+     6420    0.067    0.000   44.539    0.007 <repo>\src\noodl\layers\transport.py:711(step_with_transfer)
+     6527    0.073    0.000   40.579    0.006 <repo>\src\noodl\layers\transport.py:935(_implicit_step_sparse)
+     6527    0.018    0.000   39.878    0.006 <repo>\src\noodl\layers\transport.py:164(_linear_solve)
+     6527    0.130    0.000   39.652    0.006 <repo>\src\noodl\layers\transport.py:116(forward)
+     6555    0.154    0.000   35.337    0.005 <repo>\src\noodl\solvers\select.py:376(solve)
+     6527   13.250    0.002   34.395    0.005 <repo>\src\noodl\solvers\iterative.py:161(gmres)
+     6420    0.339    0.000   30.948    0.005 <repo>\src\noodl\layers\potential.py:725(solve)
+     6420    0.026    0.000   10.643    0.002 <repo>\src\noodl\solvers\implicit.py:266(implicit_solve)
+    19288    1.932    0.000   10.498    0.001 <repo>\src\noodl\drives.py:335(__call__)
+     6420    0.109    0.000   10.387    0.002 <repo>\src\noodl\solvers\implicit.py:159(forward)
+    32395    0.126    0.000   10.300    0.000 <repo>\src\noodl\solvers\iterative.py:213(mv)
+     6420    0.294    0.000   10.168    0.002 <repo>\src\noodl\solvers\newton.py:113(newton)
+    32395    0.569    0.000    9.767    0.000 <repo>\src\noodl\layers\transport.py:187(matvec)
+    45342    2.406    0.000    9.727    0.000 <repo>\src\noodl\operators\advection.py:175(_raw_action)
+     6420    0.030    0.000    9.579    0.001 <repo>\src\noodl\solvers\implicit.py:163(<lambda>)
+     6420    0.156    0.000    9.549    0.001 <repo>\src\noodl\layers\potential.py:1098(residual_fn)
+
+
