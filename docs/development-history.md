@@ -1009,8 +1009,10 @@ mean-diagonal shift (commit `e451872`, PR-1) changed the work three cases take:
 - The forced mixed-stiffness batch in `tests/layers/test_transport_sparse.py`
   (`test_expm_action_mixed_stiffness_batch_matches_standalone_within_tolerance`, removal
   rates 0.01 and 500.0 batched together so the whole batch halves its step whenever either
-  instance hasn't converged): 104,280 matvecs after the fix (1896 substeps x 55 terms). There
-  is no instrumented pre-fix count for this specific case.
+  instance hasn't converged): 107,030 matvecs (1946 substeps x 55 terms) (re-measured after
+  the P1-1 schedule; the forced case pays for the derivative bound -- 104,280 matvecs (1896
+  substeps x 55 terms) before P1-1). There is no instrumented pre-fix count from the original
+  review.
 - The smaller mixed-stiffness case in `tests/layers/test_expm_schedule.py`
   (`test_a_mixed_stiffness_batch_shares_one_schedule_and_matches_the_reference`, a 4-node
   chain, removal-free capacities 1.0 and 1e-3): 4,180 matvecs after the fix (76 substeps x 55
@@ -1094,8 +1096,10 @@ benchmark -- not commitments made here:
 **Exponential-action work counts.** The mean-diagonal-shift fix changed matvec counts as
 recorded above: the pure-decay case collapses from 184,459 matvecs to 1 (the shift makes
 `M - mu*I` vanish for a case that is structurally an exact-shift-eligible pure decay); the
-committed forced mixed-stiffness batch test needs 104,280 matvecs after the fix, with no
-instrumented pre-fix count to compare against; the smaller mixed-stiffness case needs 4,180.
+committed forced mixed-stiffness batch test needs 107,030 matvecs (re-measured after the
+P1-1 schedule; the forced case pays for the derivative bound -- 104,280 before P1-1), with
+no instrumented pre-fix count to compare against; the smaller (zero-forcing, shift-eligible)
+mixed-stiffness case is unaffected by P1-1 and still needs 4,180.
 Separately, and by design, `_expm_action` (`src/noodl/layers/transport.py`) now enforces a
 work budget rather than relying only on the recursion-depth limit the review flagged: it
 raises `RuntimeError` naming the predicted substep x Taylor-term matvec count when that count

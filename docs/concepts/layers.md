@@ -115,8 +115,10 @@ sub-stepping; `"implicit"` is implicit Euler; `"trapezoidal"` is the second-orde
 The exact scheme bases its sub-stepping on the operator's one-norm `||dt M||_1`, computed from
 the state-independent matrix before any arithmetic on the state; if the predicted work exceeds
 the budget, the step is refused, raising an error that names the layer and advises the implicit
-or trapezoidal schemes. All coefficients the layer owns—carrier, transmission, kinetics, removal,
-and conductance—are differentiable under every scheme.
+or trapezoidal schemes. A stiff operator (large `||dt M||_1`, e.g. fast removal with a nonzero
+forcing) costs the exact scheme thousands of matvecs per step by nature; `scheme="implicit"` is
+the documented choice there, not a larger budget. All coefficients the layer owns—carrier,
+transmission, kinetics, removal, and conductance—are differentiable under every scheme.
 
 **Changing storage.** A transport layer's capacity may change over a step: a sewer pipe's wetted
 volume, or a headspace volume as the water level changes. The step conserves the stored amount

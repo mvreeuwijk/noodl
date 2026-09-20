@@ -102,9 +102,13 @@ that would fail if the claim stopped holding.
   schemes are all differentiable, and the exact scheme's tangent at equilibrium matches the
   analytic matrix-exponential derivative even from $x_0 = 0$ or $x_0 \to 0$, because the
   Taylor schedule (substep count $s$, term count $m$) is computed from $\lVert dt\, M\rVert_1$
-  under `no_grad` before any arithmetic on $x$ or the forcing term runs — the term count never
-  depends on the state being differentiated
-  (pinned by tests/layers/test_transport_derivatives.py::test_exact_step_tangent_matches_the_matrix_exponential_at_equilibrium).
+  under `no_grad` before any arithmetic on $x$ or the forcing term runs, and bounds the
+  truncation of both the state polynomial and the forcing polynomial together with their
+  derivatives with respect to the operator, so coefficient sensitivities are accurate at and
+  near a zero operator too
+  (pinned by tests/layers/test_transport_derivatives.py::test_exact_step_tangent_matches_the_matrix_exponential_at_equilibrium
+  and
+  tests/layers/test_expm_schedule.py::test_forced_step_value_and_coefficient_derivative_match_the_closed_form_near_a_zero_operator).
 - **Every transport coefficient is differentiable under every scheme.** Carrier, transmission,
   kinetics, removal and conductance all reach the backward pass under `implicit`, `trapezoidal`
   and `exact` alike, checked by `gradcheck` against each coefficient family, both in a single

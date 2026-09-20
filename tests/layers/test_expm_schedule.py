@@ -12,6 +12,7 @@ from noodl.layers.transport import (
     ExpmResult,
     TransportLayer,
     _expm_action,
+    _forced_remainder,
     _taylor_remainder,
     _taylor_schedule,
     _theta_max,
@@ -31,23 +32,33 @@ def test_remainder_is_the_tail_of_the_exponential_series():
     tail = math.exp(theta) - sum(theta**k / math.factorial(k) for k in range(m + 1))
     assert _taylor_remainder(theta, m) == pytest.approx(tail, rel=1e-10)
     assert _taylor_remainder(0.0, 3) == 0.0
+    assert _forced_remainder(0.0, 1) == 0.5 and _forced_remainder(0.0, 2) == 0.0
+    r_x = sum(theta**k / math.factorial(k) for k in range(m + 1, 60))
+    r_phi = sum(theta ** (k - 1) / math.factorial(k) for k in range(m + 1, 60))
+    d_x = sum(k * theta ** (k - 1) / math.factorial(k) for k in range(m + 1, 60))
+    d_phi = sum((k - 1) * theta ** (k - 2) / math.factorial(k) for k in range(m + 1, 60))
+    assert _forced_remainder(theta, m) == pytest.approx(max(r_x, r_phi, d_x, d_phi), rel=1e-10)
 
 
 def test_theta_max_agrees_with_al_mohy_higham_to_the_leading_digit():
     """Table 3.1 of Al-Mohy & Higham (2011) gives theta_55 = 9.87 at unit-roundoff tolerance;
     a forward bound at 2^-53 must land in the same range (the two bounds differ in constants,
-    not in kind)."""
-    assert 8.0 < _theta_max(2.0**-53, 55) < 14.0
+    not in kind). Homogeneous (unforced) table -- the affine step's own table is smaller."""
+    assert 8.0 < _theta_max(2.0**-53, 55, forcing=False) < 14.0
 
 
 @pytest.mark.parametrize("norm", [0.0, 1e-3, 1.0, 12.0, 250.0, 25_000.0])
-def test_schedule_meets_the_tolerance_and_never_wastes_a_substep(norm):
-    s, m = _taylor_schedule(norm, 1e-12)
+@pytest.mark.parametrize("forcing", [False, True])
+def test_schedule_meets_the_tolerance_and_never_wastes_a_substep(norm, forcing):
+    s, m = _taylor_schedule(norm, 1e-12, forcing=forcing)
     assert s >= 1 and 1 <= m <= 55
-    assert _taylor_remainder(norm / s, m) <= 1e-12
+    if forcing:
+        assert m >= 2
+    bound = _forced_remainder if forcing else _taylor_remainder
+    assert bound(norm / s, m) <= 1e-12
     if s > 1:
         # one fewer substep would need more than m_max terms
-        assert _taylor_remainder(norm / (s - 1), 55) > 1e-12 or s * m <= (s - 1) * 55
+        assert bound(norm / (s - 1), 55) > 1e-12 or s * m <= (s - 1) * 55
 
 
 def test_schedule_clamps_m_at_the_table_boundary():
@@ -58,9 +69,9 @@ def test_schedule_clamps_m_at_the_table_boundary():
     reproduce end to end through `_taylor_schedule` before the clamp was added (result
     (17, 56)); this pins it at (17, <= 55)."""
     tol, m_max = 1e-12, 55
-    table = _theta_table(tol, m_max)
+    table = _theta_table(tol, m_max, forcing=False)
     norm = math.nextafter(table[-1] * 17, math.inf)
-    s, m = _taylor_schedule(norm, tol, m_max)
+    s, m = _taylor_schedule(norm, tol, m_max, forcing=False)
     assert m <= m_max
 
 
@@ -216,35 +227,43 @@ def _one_node_forced(r_val: float, *, requires_grad: bool = True):
 
 def _closed_form_forced(r: float) -> tuple[float, float]:
     """x(1) = (1 - e^{-r}) / r and dx/dr = (e^{-r}(1 + r) - 1) / r^2, with their r -> 0
-    limits 1 and -1/2."""
-    if r == 0.0:
-        return 1.0, -0.5
-    return (1.0 - math.exp(-r)) / r, (math.exp(-r) * (1.0 + r) - 1.0) / r**2
+    limits 1 and -1/2. Both are entire functions of r, evaluated here by their own (equally
+    exact) Taylor series -- x(1) = sum_k (-1)^k r^k / (k+1)! and dx/dr = sum_k (-1)^(k+1)
+    (k+1) r^k / (k+2)! -- rather than the closed forms above: the naive closed forms
+    subtract two nearly-equal O(1) floats to recover an O(r) (value) or O(r^2)
+    (derivative) result and lose essentially all precision at r = 1e-6 (verified against
+    mpmath at 50 digits: the naive derivative formula is off by 4.5e-5 there, while this
+    series matches to 1e-16)."""
+    n_terms = 40
+    value = sum((-1) ** k * r**k / math.factorial(k + 1) for k in range(n_terms))
+    derivative = sum(
+        (-1) ** (k + 1) * (k + 1) * r**k / math.factorial(k + 2) for k in range(n_terms)
+    )
+    return value, derivative
 
 
-@pytest.mark.parametrize(
-    "r",
-    [
-        pytest.param(0.0, marks=pytest.mark.xfail(
-            strict=True, reason="P1-1: one Taylor term at zero norm drops the forcing "
-            "term's coefficient derivative")),
-        pytest.param(1e-6, marks=pytest.mark.xfail(
-            strict=True, reason="P1-1: the forcing term's own remainder is one power of "
-            "theta short of the scheduled bound")),
-        # Run against 852c65d before marking (see the module docstring's cross-reference):
-        # the brief expected 1e-3 to already pass as a control, but it reproduces the same
-        # P1-1 remainder shortfall as 1e-6 (obtained -0.4996666666666667 vs the closed form
-        # -0.4996667917200881, a ~2.5e-7 relative error against the rel=1e-8 tolerance) --
-        # marked, not loosened.
-        pytest.param(1e-3, marks=pytest.mark.xfail(
-            strict=True, reason="P1-1: the forcing term's own remainder is one power of "
-            "theta short of the scheduled bound")),
-        1e-1, 1.0,
-    ],
-)
+@pytest.mark.parametrize("r", [0.0, 1e-6, 1e-3, 1e-1, 1.0])
 def test_forced_step_value_and_coefficient_derivative_match_the_closed_form_near_a_zero_operator(r):
     x, r_t = _one_node_forced(r)
     value, derivative = _closed_form_forced(r)
     assert x.item() == pytest.approx(value, rel=1e-10, abs=1e-12)
     (dr,) = torch.autograd.grad(x.sum(), (r_t,))
     assert dr.item() == pytest.approx(derivative, rel=1e-8, abs=1e-9)
+
+
+@pytest.mark.parametrize("dt", [1e-9, 1e-6, 1e-3, 1e-1, 1.0, 7.0])
+def test_forced_action_and_its_coefficient_gradients_match_the_dense_reference_at_every_norm(dt):
+    layer = _chain()
+    q = _t([0.3, 0.3, -0.2, 0.3, 0.3], requires_grad=True)
+    cap = _t([1.0, 2.0, 0.5, 1.5], requires_grad=True)
+    op = layer._advection_operator(q, cap)
+    x = _t([1.0, 0.0, 2.0, 0.5])
+    b0 = _t([0.1, 0.0, 0.0, -0.05], requires_grad=True)
+    out = _expm_action(op, x, b0, dt, shift=False)
+    x_ref, _ = _dense_reference(op, x, b0, dt)
+    torch.testing.assert_close(out.x, x_ref, rtol=1e-10, atol=1e-14)
+    w = _t([0.3, -1.2, 0.7, 2.0])
+    got = torch.autograd.grad((out.x * w).sum(), (q, cap, b0), retain_graph=True)
+    ref = torch.autograd.grad((x_ref * w).sum(), (q, cap, b0))
+    for g, r in zip(got, ref, strict=True):
+        torch.testing.assert_close(g, r, rtol=1e-8, atol=1e-12)
