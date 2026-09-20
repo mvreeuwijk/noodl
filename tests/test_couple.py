@@ -770,6 +770,9 @@ def _compartment(name, *, scheme="exact", circulation=False, initial=1.0, source
 
     model = Model(net, {name: layer}, closures=[closure])
     state = {f"{name}.x": torch.tensor([initial], dtype=F64)}
+    # Deliberately omits the original helper's Tensor-source branch (`torch.stack([...])` to
+    # keep `source` on the autograd graph when it is itself a Tensor): no caller here passes
+    # a Tensor `source`. A grad-tracked source would need that `torch.stack` branch back.
     drivers = {f"{name}.x_boundary": torch.tensor([0.0], dtype=F64),
                f"{name}.sources": torch.tensor([0.0, source], dtype=F64)}
     return model, state, drivers
@@ -785,7 +788,6 @@ def _pair_with_links(links, *, extra_donor=False):
     return union(models, links, iterate_rtol=1e-12, iterate_atol=1e-14, iterate_max=200)
 
 
-@pytest.mark.xfail(strict=True, reason="P2-4: a second writer of one boundary entry is accepted")
 @pytest.mark.parametrize(
     "links, extra_donor",
     [
@@ -805,6 +807,33 @@ def _pair_with_links(links, *, extra_donor=False):
 def test_a_second_writer_of_a_boundary_entry_is_refused_by_name(links, extra_donor):
     with pytest.raises(ValueError, match=r"B:b\.x_boundary\[0\].*exactly one writer"):
         _pair_with_links(links, extra_donor=extra_donor)
+
+
+def test_two_links_into_different_entries_of_one_boundary_key_are_accepted():
+    """Ownership is per ENTRY: two donors feeding two different boundary indices of the same
+    recipient layer is the ordinary multi-boundary case (part 2's
+    test_two_recipients_of_one_donor_conserve_and_report_each_transfer is its mirror)."""
+    from noodl.layers.transport import TransportLayer
+    from noodl.model import Model
+
+    net = Network(dtype=F64)
+    for n in ("amb1", "amb2", "zone"):
+        net.add_node(n)
+    net.add_edge("amb1", "zone", kind="flow")
+    net.add_edge("zone", "amb2", kind="flow")
+    layer = TransportLayer(net, "b", capacity=torch.tensor([1.0], dtype=F64), flow_kind="flow",
+                           boundary=["amb1", "amb2"], scheme="implicit",
+                           quantity="concentration", unit="kg/m3")
+    q = torch.tensor([1.0, 1.0], dtype=F64)
+    b_model = Model(net, {"b": layer}, closures=[lambda s, d: {"b.q": q}])
+    b = (b_model, {"b.x": torch.tensor([0.0], dtype=F64)},
+         {"b.x_boundary": torch.zeros(2, dtype=F64), "b.sources": torch.zeros(3, dtype=F64)})
+    union(
+        {"A": _compartment("a", scheme="implicit"), "C": _compartment("c", scheme="implicit"),
+         "B": b},
+        [ValueLink("A", "a.x", 0, "B", "b.x_boundary", 0, two_way=True),
+         ValueLink("C", "c.x", 0, "B", "b.x_boundary", 1, two_way=True)],
+    )
 
 
 def test_gradient_flows_across_the_join_and_matches_central_differences():

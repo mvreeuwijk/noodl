@@ -197,6 +197,11 @@ class ValueLink:
     source units (kg/s of pollutant on both sides of this milestone's join, which is exactly
     why the demo leaves it `None` -- design spec A2); the layers' `unit` strings, which
     describe the STATE, say nothing about it.
+
+    OWNERSHIP. Each boundary entry `(to_model, to_key, to_index)` has exactly one writing
+    link. The recipient-first schedule is conservative because every integrated transfer has
+    one donor to go to; two donors of one entry would each receive the whole transfer. Shared
+    ownership needs an allocation rule and is refused rather than guessed.
     """
 
     from_model: str
@@ -311,6 +316,20 @@ class CoupledModel:
                         f"CoupledModel: alias of {alias.source} names conversion {name!r}; "
                         f"registered conversions are {sorted(_CONVERSIONS)}"
                     )
+        owners: dict[tuple[str, str, int], ValueLink] = {}
+        for link in self.links:
+            target = (link.to_model, link.to_key, link.to_index)
+            first = owners.get(target)
+            if first is not None:
+                raise ValueError(
+                    f"CoupledModel: boundary entry {link.to_model}:{link.to_key}"
+                    f"[{link.to_index}] is written by two links, {self._link_key(first)} and "
+                    f"{self._link_key(link)}; every boundary entry has exactly one writer. A "
+                    f"second two-way link would forward the recipient's ONE transfer to two "
+                    f"donors (counting it twice, P2-4) and a second one-way link would "
+                    f"silently overwrite the first in list order"
+                )
+            owners[target] = link
         self._two_way = [link for link in self.links if link.two_way]
         self._one_way = [link for link in self.links if not link.two_way]
         recipients = {link.to_model for link in self._two_way}
