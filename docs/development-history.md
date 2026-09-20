@@ -952,6 +952,71 @@ The full suite passes **1306 passed, 10 skipped, 10 deselected, 1 xfailed** (cov
   deselected by default like the milestone-1b and milestone-2 acceptance gates.
 
 
+## Performance re-baseline after framework hardening (20 Sep 2026)
+
+The framework-hardening branches changed the transport layer's exponential action, the
+closure contract and the coupler after the milestone-1b section 6.1 numbers above were
+recorded (17 September). `benchmarks/report_composed_scaling.py` was re-run unmodified on
+this code, same settings (`samples: 3`, `torch_num_threads: 14`, both `auto` and `cg`, the
+reference composed model: 1030 nodes, 2193 edges). The old report is kept as
+[`benchmarks/composed_scaling_report_2026-09-17.json`](benchmarks/composed_scaling_report_2026-09-17.json);
+the new one is [`benchmarks/composed_scaling_report.json`](benchmarks/composed_scaling_report.json)
+(generated 2026-09-20T14:17 UTC). `all_budgets_met` is `false` in both.
+
+**Machine state.** The machine was not idle: another session's Python process was active at
+launch and stayed active through the run (a ~2.4 GB resident process, unrelated to this
+benchmark, present before it started and never exited). Both reports otherwise share the same
+thread count (`torch_num_threads: 14`). Because of this, absolute times are **not** a clean
+before/after of the code change -- the largest single row, `cg`/ensemble 100/24 steps
+forward, moved from 149.9 s to 221.3 s, a 48% increase that is at least partly contention, not
+regression. The comparison that isolates the code change from machine noise is the controlled
+A/B that Task 28 runs; this re-baseline's job is only to re-measure on the current code and
+record the new absolute numbers under the noisy conditions they were actually taken under.
+
+**Result: every latency budget in the table remains unmet, on both solvers, on every row.**
+Two rows that passed their backward budget on 17 September (`auto`, ensemble 100, both step
+counts) now fail it as well -- the table has strictly more failures than before, not fewer,
+though under a machine state this run cannot separate from noise. All four peak-memory
+budgets still pass, on both solvers, and **both shape gates still pass** (peak RSS vs nodes
+1.06x, matvec time vs edges 0.32x, budget 2.5x each).
+
+| Ensemble | Steps | Solver | Thermal | Forward: old -> new | Budget | Backward: old -> new | Budget | Peak memory: old -> new | Budget |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 1 | `auto` | no | 0.205 s -> 0.512 s (10.24x) | 0.05 s FAIL (was 4.09x FAIL) | 0.157 s -> 0.452 s (4.52x) | 0.1 s FAIL (was 1.57x FAIL) | 66.3 MB -> 67.5 MB (0.67x) | 100 MB PASS |
+| 100 | 1 | `auto` | no | 2.900 s -> 8.899 s (17.80x) | 0.5 s FAIL (was 5.80x FAIL) | 0.912 s -> 3.194 s (3.19x) | 1.0 s **FAIL (was PASS, 0.91x)** | 128.7 MB -> 127.7 MB (0.13x) | 1000 MB PASS |
+| 100 | 24 | `auto` | no | 71.869 s -> 212.044 s (17.67x) | 12 s FAIL (was 5.99x FAIL) | 24.714 s -> 119.951 s (4.80x) | 25 s **FAIL (was PASS, 0.99x)** | 424.9 MB -> 420.1 MB (0.21x) | 2000 MB PASS |
+| 1000 | 1 | `auto` | no | 58.340 s -> 50.679 s (10.14x) | 5 s FAIL (was 11.67x FAIL) | 12.375 s -> 14.688 s (1.47x) | 10 s FAIL (was 1.24x FAIL) | 719.5 MB -> 726.0 MB (0.09x) | 8000 MB PASS |
+| 1 | 1 | `cg` | no | 0.482 s -> 1.099 s (21.98x) | 0.05 s FAIL (was 9.64x FAIL) | 0.283 s -> 0.435 s (4.35x) | 0.1 s FAIL (was 2.83x FAIL) | 46.1 MB -> 45.1 MB (0.45x) | 100 MB PASS |
+| 100 | 1 | `cg` | no | 6.747 s -> 8.322 s (16.64x) | 0.5 s FAIL (was 13.49x FAIL) | 2.370 s -> 2.998 s (3.00x) | 1.0 s FAIL (was 2.37x FAIL) | 127.6 MB -> 128.0 MB (0.13x) | 1000 MB PASS |
+| 100 | 24 | `cg` | no | 149.870 s -> 221.318 s (18.44x) | 12 s FAIL (was 12.49x FAIL) | 50.835 s -> 79.755 s (3.19x) | 25 s FAIL (was 2.03x FAIL) | 422.4 MB -> 419.0 MB (0.21x) | 2000 MB PASS |
+| 1000 | 1 | `cg` | no | 53.673 s -> 48.894 s (9.78x) | 5 s FAIL (was 10.73x FAIL) | 14.262 s -> 13.511 s (1.35x) | 10 s FAIL (was 1.43x FAIL) | 726.2 MB -> 725.7 MB (0.09x) | 8000 MB PASS |
+| 100 | 24 | `auto` | **yes** | 170.872 s -> 248.178 s (20.68x) | 12 s FAIL (was 14.24x FAIL) | 75.533 s -> 68.121 s (2.72x) | 25 s FAIL (was 3.02x FAIL) | 508.5 MB -> 497.6 MB (0.25x) | 2000 MB PASS |
+
+The four `auto`, non-thermal forward rows -- the shipped default, the numbers a reader of
+this table cares about first -- went 0.205 s -> 0.512 s (ensemble 1), 2.900 s -> 8.899 s
+(ensemble 100, 1 step), 71.869 s -> 212.044 s (ensemble 100, 24 steps) and 58.340 s -> 50.679 s
+(ensemble 1000, 1 step, the one row that got faster). **Unmet budgets, stated plainly: every
+forward budget and every backward budget in the table, on both solvers, on every row and
+including the thermal row.** Only the four peak-memory budgets and the two shape gates are
+met, unchanged from 17 September.
+
+**Exponential-action work counts (R3).** The norm-scheduled exponential action with the
+mean-diagonal shift (commit `e451872`, PR-1) changed the work three cases take:
+
+- Pure decay, `dx/dt = -500x`, `x(0) = 10`, `dt = 50`: 184,459 matvecs before the fix (the
+  review's instrumented count) -> 1 matvec after (the mean-diagonal shift makes `M - mu*I`
+  vanish for this case).
+- The forced mixed-stiffness batch in `tests/layers/test_transport_sparse.py`
+  (`test_expm_action_mixed_stiffness_batch_matches_standalone_within_tolerance`, removal
+  rates 0.01 and 500.0 batched together so the whole batch halves its step whenever either
+  instance hasn't converged): 104,280 matvecs after the fix (1896 substeps x 55 terms). There
+  is no instrumented pre-fix count for this specific case.
+- The smaller mixed-stiffness case in `tests/layers/test_expm_schedule.py`
+  (`test_a_mixed_stiffness_batch_shares_one_schedule_and_matches_the_reference`, a 4-node
+  chain, removal-free capacities 1.0 and 1e-3): 4,180 matvecs after the fix (76 substeps x 55
+  terms), measured directly on this branch for this re-baseline.
+
+
 ## Appendix: the source tree
 
 A module-by-module map of the repository, as it stood at the end of milestone 5.
