@@ -106,6 +106,140 @@ The committed report sweeps ensemble size and simulation length, now under two s
 section 6's species count and joined-submodel sweeps, and its composed robustness cases, are
 not measured. Nodes and edges are covered by the two shape gates.
 
+### Docstring narratives moved from source
+
+The paragraphs below were review-history narrative embedded in source docstrings and
+comments; they were moved here (Task 26) to keep the contract beside the code concise, and
+are reproduced verbatim.
+
+From `src/noodl/layers/potential.py::PotentialFlowLayer._grounding_check`:
+
+> The certificate (Task 3's `solvers.grounding.spd_certificate`) tests both of spec
+> section 3.1's testable conditions -- every branch slope non-negative, and every
+> interior node grounded through strictly positive slopes -- so the batched message
+> below ("do not certify a grounded, positive-slope system") states exactly what was
+> checked. It is run on the slopes
+> GIVEN -- the caller decides whether those are `linear_init`'s tangent-at-zero slopes
+> or the actual `dflows` at a solve point -- and it is per instance. That is the whole
+> point: the pre-Task-11 check ORed "is this edge's slope nonzero" across the WHOLE
+> batch before testing connectivity, so an edge closed in one instance but open in
+> another counted as present for both, and a genuinely ungrounded instance sailed
+> through to a dense factorisation that could only report "singular", if it reported
+> anything at all.
+>
+> The message is built from `solvers.grounding.spd_diagnosis` (amendment A2), which
+> names, per failing instance, either the negative-slope EDGES or the ungrounded
+> interior NODES. Node indices are rendered as node NAMES here, because this layer --
+> unlike the raw operator -- knows them, and because the error text every existing
+> (unbatched) test in test_potential.py asserts on is exactly those names. A batched
+> failure additionally leads with the failing BATCH INDICES, since node-level detail
+> alone is not attributable across unrelated per-instance failures. Every message
+> names the offending LAYER first: a model composes several layers over one network,
+> and "solve: floating nodes ... ['z']" alone does not say which of them failed.
+
+From `src/noodl/layers/potential.py::PotentialFlowLayer.solve`:
+
+> This branch used to run Newton's closures under ORDINARY autograd, so with a
+> `learnable=True` Element (or a grad-requiring `phi_boundary`/`drivers`/`sources`) the
+> result carried an UNROLLED graph through the converged iterate. Those gradients were
+> real but were never the implicit-function ones `differentiable=True` computes, and
+> nothing asked for them. Worse, they made the INNER SOLVER'S CHOICE depend on the
+> caller's ambient grad mode: `solvers.select.solve`'s `"auto"` will not hand a
+> grad-requiring solve to the non-differentiable sparse-direct backend, so the same
+> call factorised through SuperLU from a plain call site and fell back to PCG -- 4.6x
+> slower -- from inside `torch.enable_grad()` with a grad-requiring `sources`. A
+> backend must not be a function of who is calling. A caller who wants gradients calls
+> `differentiable=True`, which is unchanged (`solvers.implicit._Implicit.forward`
+> already solved under `no_grad` and takes its gradients from the adjoint).
+
+From `src/noodl/layers/potential.py::PotentialFlowLayer.solve` (body comment, the
+detached-`phi0` `no_grad` block):
+
+> What it costs is everything `linear_init` does -- a whole preconditioned-CG loop, its
+> int64 gather indices and every iterate -- retained until backward(). Measured on
+> the composed model at ensemble 100 (Task 14 review): 2567 MB of the 2571 MB saved
+> per differentiable step came from here; with a detached guess the same step saves
+> 74.7 MB.
+
+From `src/noodl/layers/transport.py` (module-level comment on the `_TransposeView` alias):
+
+> `_TransposeView` used to be its own LinearOperator-shaped adjoint-view class, duplicating
+> `solvers.implicit.TransposeOperator` method for method except for `spd_certificate` (this
+> module's version always returned None; `TransposeOperator`'s forwards the wrapped
+> operator's certificate iff it declares itself symmetric). Both this layer's operators
+> (`AdvectionOperator`, `_AffineSystemOperator` below) declare `symmetric = False`, so
+> `TransposeOperator.spd_certificate()` returns None for them exactly as the old local class
+> did -- this alias changes nothing observable here, it only removes the duplicate.
+
+From `src/noodl/layers/transport.py::TransportLayer.__init__` (conduction-edges comment):
+
+> The conduction edges' ENDPOINTS, never the (n, b_c) incidence matrix and never
+> the (n, n) Laplacian it used to build here: since Task 15 this tuple is the
+> layer's whole representation of its conduction topology. `_advection_operator`
+> (Task 9) already consumed exactly this; `operator()`, the dense oracle, now
+> forms its (n, n) `L` from it on demand (`_conduction_matrix`). The (n, n)
+> matrix was 8.5 MB at the composed model's reference size, grew 4x per node
+> doubling, and -- with no conduction configured, as in that model -- was a block
+> of ZEROS that `operator()` subtracted for nothing.
+
+From `src/noodl/layers/transport.py::TransportLayer._step` (`on_failure` validation comment):
+
+> This one used to sit inside the `scheme == "exact"` branch below, after
+> `_to_stacked` had already validated and reshaped `x`, so a caller who passed
+> both a bad shape and this unusable combination was told about the shape (final
+> review M9).
+
+From `src/noodl/operators/graph.py::GraphLaplacianOperator._apply`:
+
+> The body is deliberately flat (the scatter into the full node space and the weighted
+> endpoint difference were their own helpers until the milestone-1b follow-up): this
+> runs once per PCG iteration, thousands of times per solve, and at ensemble 1 the two
+> extra Python frames alone were measurable against the ~50 us the whole call takes.
+>
+> The two `scatter_add_` calls are NOT fused into one `index_add` over
+> `cat([src, tgt])` with `cat([w, -w])`. That fusion IS bit-identical (measured: same
+> `x` to the last bit, since each output node still accumulates its incident edges in
+> the same order), but it is SLOWER -- interleaved medians at the composed reference
+> size: 34.7 vs 36.6 us at ensemble 1, 474.8 vs 529.8 us at ensemble 100 -- because
+> building `cat([w, -w])` costs a negate and a copy of a (batch, 2 * edges) tensor,
+> which is more than the one `scatter_add_` dispatch it saves. The accumulator zeros
+> tensor is already shared by both scatters, so there was never a second one to save.
+
+From `src/noodl/solvers/implicit.py` (module docstring):
+
+> `@torch.autograd.function.once_differentiable` was tried first, as it is the standard idiom
+> for this, but was found NOT to catch this case here and was dropped again: its guard fires
+> only when the incoming `grad_x` itself already `requires_grad`, which is false for the
+> ordinary implicit unit-seed `torch.autograd.grad(x.sum(), theta, create_graph=True)` produces
+> -- confirmed empirically (with and without the decorator, a mixed loss
+> `(dx/dtheta**2).sum() + (theta**2).sum()` silently returns only the second term's gradient,
+> identically, in both cases). It also cannot be layered underneath a manual check of its own,
+> since its wrapper forces `torch.no_grad()` before calling the wrapped body, hiding the very
+> signal (`torch.is_grad_enabled()`) that would otherwise reveal a `create_graph=True` request.
+
+From `src/noodl/solvers/newton.py` (module docstring):
+
+> This is what replaces the old identity-substitution trick for a converged-but-
+> singular instance: a dense ``torch.linalg.solve`` raises for the WHOLE batched
+> call if any one instance's matrix is singular, which is why the old code had to
+> substitute an identity for converged rows before the call ever happened. An
+> operator-based solve (PCG/GMRES, or a per-instance-safe direct path) is batched
+> elementwise over the leading dimensions with no cross-instance coupling in its
+> own arithmetic, so one instance being exactly singular cannot make the call
+> fail for its siblings; that instance's own step is simply garbage (possibly
+> NaN), and it is discarded by the ``torch.where`` on ``step`` below exactly as
+> it always was, without needing to keep the solve well-posed first.
+
+From `src/noodl/solvers/newton.py::inner_solve_rtol`:
+
+> measured: the float32 CONTAM series case in ``tests/verification`` floors at 3.2e-8 and
+> was reported as a ``linear_init`` failure until this floor was applied, and the 128-zone
+> leaky chain in ``tests/solvers/test_newton_operator_contract.py`` ran every inner PCG to
+> its full ``max_iter = 128`` ceiling. That second symptom is the quieter one: Newton
+> passes ``on_failure="return"``, so the ``MAX_ITER`` status is swallowed and only
+> ``NewtonResult.linear_iterations`` -- the number the composed-model report publishes --
+> carries the damage, as the ceiling rather than the work actually done.
+
 ## New public API in milestone 1b
 
 Every one of these is optional and defaults to the pre-milestone behaviour.

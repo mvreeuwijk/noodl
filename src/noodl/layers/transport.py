@@ -45,13 +45,10 @@ from noodl.solvers.implicit import TransposeOperator as _TransposeView
 from noodl.solvers.select import solve as _solve_operator
 from noodl.topology import Network, Node
 
-# `_TransposeView` used to be its own LinearOperator-shaped adjoint-view class, duplicating
-# `solvers.implicit.TransposeOperator` method for method except for `spd_certificate` (this
-# module's version always returned None; `TransposeOperator`'s forwards the wrapped
-# operator's certificate iff it declares itself symmetric). Both this layer's operators
+# `_TransposeView` is `solvers.implicit.TransposeOperator`. Both this layer's operators
 # (`AdvectionOperator`, `_AffineSystemOperator` below) declare `symmetric = False`, so
-# `TransposeOperator.spd_certificate()` returns None for them exactly as the old local class
-# did -- this alias changes nothing observable here, it only removes the duplicate.
+# `TransposeOperator.spd_certificate()` returns None for them.
+# History: see docs/development-history.md (Milestone 1b).
 
 
 def active_interior(
@@ -362,13 +359,10 @@ class TransportLayer:
                     f"conduction_kind is given"
                 )
             # The conduction edges' ENDPOINTS, never the (n, b_c) incidence matrix and never
-            # the (n, n) Laplacian it used to build here: since Task 15 this tuple is the
-            # layer's whole representation of its conduction topology. `_advection_operator`
-            # (Task 9) already consumed exactly this; `operator()`, the dense oracle, now
-            # forms its (n, n) `L` from it on demand (`_conduction_matrix`). The (n, n)
-            # matrix was 8.5 MB at the composed model's reference size, grew 4x per node
-            # doubling, and -- with no conduction configured, as in that model -- was a block
-            # of ZEROS that `operator()` subtracted for nothing.
+            # the (n, n) Laplacian, are this layer's whole representation of its conduction
+            # topology; `operator()`, the dense oracle, forms its (n, n) `L` from it on
+            # demand (`_conduction_matrix`).
+            # History: see docs/development-history.md (Milestone 1b).
             csrc, ctgt = net.endpoints(conduction_kind)
             b_c = len(csrc)
             g = torch.as_tensor(conductance, dtype=net.dtype)
@@ -792,10 +786,8 @@ class TransportLayer:
             )
         if on_failure == "return" and self.scheme == "exact":
             # Both `on_failure` checks are ARGUMENT VALIDITY and both belong here, before any
-            # work. This one used to sit inside the `scheme == "exact"` branch below, after
-            # `_to_stacked` had already validated and reshaped `x`, so a caller who passed
-            # both a bad shape and this unusable combination was told about the shape (final
-            # review M9). `on_failure='return'` is wrong for this scheme whatever the shapes.
+            # work. `on_failure='return'` is wrong for this scheme whatever the shapes.
+            # History: see docs/development-history.md (Milestone 1b).
             raise ValueError(
                 f"TransportLayer '{self.name}': on_failure='return' has no effect for "
                 f"scheme='exact' (there is no linear solve to return the status of; "

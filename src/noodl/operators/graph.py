@@ -188,19 +188,18 @@ class GraphLaplacianOperator:
         `matvec.__func__ is not rmatvec.__func__` (never `rmatvec = matvec`), which this
         satisfies: both remain their own method objects, each merely delegating here.
 
-        The body is deliberately flat (the scatter into the full node space and the weighted
-        endpoint difference were their own helpers until the milestone-1b follow-up): this
-        runs once per PCG iteration, thousands of times per solve, and at ensemble 1 the two
-        extra Python frames alone were measurable against the ~50 us the whole call takes.
+        The body is deliberately flat: this runs once per PCG iteration, thousands of times
+        per solve, so a Python frame removed from it is a real saving.
 
         The two `scatter_add_` calls are NOT fused into one `index_add` over
-        `cat([src, tgt])` with `cat([w, -w])`. That fusion IS bit-identical (measured: same
-        `x` to the last bit, since each output node still accumulates its incident edges in
-        the same order), but it is SLOWER -- interleaved medians at the composed reference
-        size: 34.7 vs 36.6 us at ensemble 1, 474.8 vs 529.8 us at ensemble 100 -- because
-        building `cat([w, -w])` costs a negate and a copy of a (batch, 2 * edges) tensor,
-        which is more than the one `scatter_add_` dispatch it saves. The accumulator zeros
-        tensor is already shared by both scatters, so there was never a second one to save.
+        `cat([src, tgt])` with `cat([w, -w])`. That fusion is bit-identical (same `x` to the
+        last bit, since each output node still accumulates its incident edges in the same
+        order), but it is slower here: building `cat([w, -w])` costs a negate and a copy of a
+        (batch, 2 * edges) tensor, which is more than the one `scatter_add_` dispatch it
+        saves. The accumulator zeros tensor is already shared by both scatters, so there was
+        never a second one to save.
+
+        History: see docs/development-history.md (Milestone 1b).
         """
         n_i = self.n_interior
         batch_shape, src, tgt = self._endpoints_for(x.shape[:-1], x.device)

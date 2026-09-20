@@ -21,16 +21,14 @@ raises ``RuntimeError`` regardless of ``on_failure`` when an explicit
 split a batch between certified and uncertified instances -- both are
 modelling errors, not numerical outcomes, so they propagate out of an inner
 iteration exactly as they would from a single, unbatched call.
-This is what replaces the old identity-substitution trick for a converged-but-
-singular instance: a dense ``torch.linalg.solve`` raises for the WHOLE batched
-call if any one instance's matrix is singular, which is why the old code had to
-substitute an identity for converged rows before the call ever happened. An
-operator-based solve (PCG/GMRES, or a per-instance-safe direct path) is batched
+An operator-based solve (PCG/GMRES, or a per-instance-safe direct path) is batched
 elementwise over the leading dimensions with no cross-instance coupling in its
 own arithmetic, so one instance being exactly singular cannot make the call
 fail for its siblings; that instance's own step is simply garbage (possibly
-NaN), and it is discarded by the ``torch.where`` on ``step`` below exactly as
-it always was, without needing to keep the solve well-posed first.
+NaN), and it is discarded by the ``torch.where`` on ``step`` below.
+
+History: see docs/development-history.md (Milestone 1b) for the identity-substitution
+trick this replaced.
 
 An auto-wrapped dense tensor resolves to ``method="direct"`` (LU of the explicit
 matrix, per instance) rather than to the iterative default, because that is the
@@ -71,20 +69,15 @@ def inner_solve_rtol(dtype: torch.dtype) -> float:
     answer better, it just spends every remaining iteration and then reports ``MAX_ITER`` on
     a solve that is in fact as converged as the dtype allows. In float64 the pinned 1e-10 is
     comfortably above that floor and is used unchanged; in float32 (this project's declared
-    default dtype) eps is 1.2e-7, so 1e-10 is unreachable by several orders of magnitude --
-    measured: the float32 CONTAM series case in ``tests/verification`` floors at 3.2e-8 and
-    was reported as a ``linear_init`` failure until this floor was applied, and the 128-zone
-    leaky chain in ``tests/solvers/test_newton_operator_contract.py`` ran every inner PCG to
-    its full ``max_iter = 128`` ceiling. That second symptom is the quieter one: Newton
-    passes ``on_failure="return"``, so the ``MAX_ITER`` status is swallowed and only
-    ``NewtonResult.linear_iterations`` -- the number the composed-model report publishes --
-    carries the damage, as the ceiling rather than the work actually done.
+    default dtype) eps is 1.2e-7, so 1e-10 is unreachable by several orders of magnitude.
 
     This is the same "the dtype cannot be asked for precision it does not have" argument
     ``newton``'s own dtype-derived ``atol``/``rtol`` default makes, applied to the linear
     solve instead of to the Newton convergence test. It lives here, next to that default,
     rather than in any one caller: ``PotentialFlowLayer.linear_init`` needs the identical
     floor for the identical reason.
+
+    History: see docs/development-history.md (Milestone 1b).
     """
     return max(_INNER_RTOL, _INNER_RTOL_ULPS * float(torch.finfo(dtype).eps))
 
