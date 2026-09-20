@@ -22,13 +22,14 @@ def _t(values):
     return torch.tensor(values, dtype=F64)
 
 
-def _step(scheme, *, q, v_old, v_new, x0=1.0, dt=1.0, carry_capacity=True):
+def _step(scheme, *, q, v_old, v_new, x0=1.0, dt=1.0, carry_capacity=True, removal=None):
     net = Network(dtype=F64)
     net.add_node("ambient")
     net.add_node("zone")
     net.add_edge("zone", "ambient", kind="flow")
     layer = TransportLayer(
         net, "c", capacity=_t([1.0]), flow_kind="flow", boundary=["ambient"], scheme=scheme,
+        removal=None if removal is None else _t([[removal]]),
     )
     model = Model(net, {"c": layer}, closures=[lambda state, drivers: {"c.q": _t([q])}])
     state = {"c.x": _t([x0])}
@@ -141,3 +142,20 @@ def test_a_written_capacity_driver_requires_the_capacity_in_the_start_state():
     caps = model.initial_capacities({"c.x": _t([1.0])}, {"c.x_boundary": _t([0.0])})
     assert set(caps) == {"c.capacity"}
     assert torch.equal(caps["c.capacity"], _t([2.0]))
+
+
+@pytest.mark.parametrize(
+    "scheme, expected",
+    [
+        pytest.param("trapezoidal", 1.0 / 6.0, marks=pytest.mark.xfail(
+            strict=True, reason="P1-3: the old-time removal term is scaled by V_new")),
+        ("implicit", 1.0 / 4.0),  # control: the implicit amount form is correct
+    ],
+)
+def test_changing_capacity_with_removal_uses_each_capacity_for_its_own_time(scheme, expected):
+    """V 1 -> 2, x0 = 1, clean inflow (q = -1, x_b = 0), removal r = 1, dt = 1. Removal acts
+    on the AMOUNT V x, so the trapezoidal amount equation is
+    2 x_new - 1 = -(1 * 1 + 2 * x_new) / 2, i.e. x_new = 1/6; the implicit one is
+    2 x_new - 1 = -2 x_new, i.e. 1/4."""
+    x = _step(scheme, q=-1.0, v_old=1.0, v_new=2.0, removal=1.0)
+    assert x == pytest.approx(expected, rel=1e-10)

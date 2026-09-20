@@ -980,3 +980,35 @@ def test_current_flows_refuses_a_flow_driver_beside_a_potential_owner_on_the_sol
     }
     with pytest.raises(ValueError, match="one source of flows, not two"):
         model.current_flows("x", state, drivers)
+
+
+@pytest.mark.xfail(strict=True, reason="P1-2: the onion stops at its two-pass floor near a "
+                   "fixed point and returns the two-pass derivative")
+def test_iterate_gradient_from_a_near_fixed_point_start_matches_central_differences():
+    """Start the step at the model's own steady state: the primal needs only the structural
+    two passes, and the derivative it returns must still be the fixed point's."""
+    _, model, state, drivers, el, _ = _build(
+        learnable=True, closures=[_Feedback(2e3)], coupling="iterate",
+        iterate_tol={"species": 1e-13}, iterate_max=80,
+    )
+    with torch.no_grad():
+        ss = model.steady(state, drivers, differentiable=False)
+    start = {k: v.detach().clone() for k, v in ss.items()}
+
+    def loss():
+        return model.step(start, drivers, 600.0)["species.x"].sum()
+
+    diag: dict = {}
+    model.step(start, drivers, 600.0, diagnostics=diag)
+    assert diag["passes"] == 2
+    el.C.grad = None
+    loss().backward()
+    grad = el.C.grad[0].item()
+    h = 1e-6
+    with torch.no_grad():
+        el.C[0] += h
+        up = loss().item()
+        el.C[0] -= 2 * h
+        down = loss().item()
+        el.C[0] += h
+    assert grad == pytest.approx((up - down) / (2 * h), rel=1e-5)

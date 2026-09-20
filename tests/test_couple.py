@@ -9,7 +9,9 @@ import torch
 from noodl.couple import (
     CONCENTRATION_TO_MASS_FRACTION,
     MASS_FRACTION_TO_CONCENTRATION,
+    ValueLink,
     apply_conversion,
+    union,
 )
 from noodl.topology import Network
 
@@ -743,6 +745,66 @@ def test_substeps_calls_the_fast_model_k_times_with_the_glue_held_constant():
         assert all(dt == pytest.approx(10.0) for dt, _ in chunk)
         first = chunk[0][1]
         assert all(torch.equal(v, first) for _, v in chunk)
+
+
+def _compartment(name, *, scheme="exact", circulation=False, initial=1.0, source=0.0):
+    """Copied from `tests/test_couple_conservation.py`'s `compartment` helper: a single
+    unit-capacity transport layer, optionally with a circulating boundary exchange."""
+    from noodl.layers.transport import TransportLayer
+    from noodl.model import Model
+
+    net = Network(dtype=F64)
+    net.add_node("ambient")
+    net.add_node("zone")
+    net.add_edge("zone", "ambient", kind="flow")
+    if circulation:
+        net.add_edge("ambient", "zone", kind="flow")
+    layer = TransportLayer(
+        net, name, capacity=torch.tensor([1.0], dtype=F64), flow_kind="flow",
+        boundary=["ambient"], scheme=scheme, quantity="concentration", unit="kg/m3",
+    )
+    q = torch.tensor([1.0, 1.0] if circulation else [0.0], dtype=F64)
+
+    def closure(state, drivers):
+        return {f"{name}.q": q}
+
+    model = Model(net, {name: layer}, closures=[closure])
+    state = {f"{name}.x": torch.tensor([initial], dtype=F64)}
+    drivers = {f"{name}.x_boundary": torch.tensor([0.0], dtype=F64),
+               f"{name}.sources": torch.tensor([0.0, source], dtype=F64)}
+    return model, state, drivers
+
+
+def _pair_with_links(links, *, extra_donor=False):
+    models = {
+        "A": _compartment("a", scheme="implicit", initial=1.0),
+        "B": _compartment("b", scheme="implicit", circulation=True, initial=0.0),
+    }
+    if extra_donor:
+        models["C"] = _compartment("c", scheme="implicit", initial=1.0)
+    return union(models, links, iterate_rtol=1e-12, iterate_atol=1e-14, iterate_max=200)
+
+
+@pytest.mark.xfail(strict=True, reason="P2-4: a second writer of one boundary entry is accepted")
+@pytest.mark.parametrize(
+    "links, extra_donor",
+    [
+        pytest.param(
+            [ValueLink("A", "a.x", 0, "B", "b.x_boundary", two_way=True)] * 2, False,
+            id="same-two-way-link-twice"),
+        pytest.param(
+            [ValueLink("A", "a.x", 0, "B", "b.x_boundary", 0, two_way=True),
+             ValueLink("C", "c.x", 0, "B", "b.x_boundary", 0, two_way=True)], True,
+            id="two-donors-one-boundary-entry"),
+        pytest.param(
+            [ValueLink("A", "a.x", 0, "B", "b.x_boundary", 0),
+             ValueLink("C", "c.x", 0, "B", "b.x_boundary", 0)], True,
+            id="two-one-way-writers"),
+    ],
+)
+def test_a_second_writer_of_a_boundary_entry_is_refused_by_name(links, extra_donor):
+    with pytest.raises(ValueError, match=r"B:b\.x_boundary\[0\].*exactly one writer"):
+        _pair_with_links(links, extra_donor=extra_donor)
 
 
 def test_gradient_flows_across_the_join_and_matches_central_differences():

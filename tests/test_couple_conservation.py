@@ -41,7 +41,9 @@ def compartment(name, *, scheme="exact", circulation=False, initial=1.0, source=
 
     model = Model(net, {name: layer}, closures=[closure])
     state = {f"{name}.x": _t([initial])}
-    drivers = {f"{name}.x_boundary": _t([0.0]), f"{name}.sources": _t([0.0, source])}
+    sources = (torch.stack([torch.zeros((), dtype=F64), source])
+               if isinstance(source, torch.Tensor) else _t([0.0, source]))
+    drivers = {f"{name}.x_boundary": _t([0.0]), f"{name}.sources": sources}
     return model, state, drivers
 
 
@@ -326,3 +328,46 @@ def test_a_recipient_with_an_extra_unlinked_layer_runs_step_with_transfer_only_o
     )
     model.step(state, drivers, 1.0)
     assert calls and set(calls) == {"b"}  # never "extra"
+
+
+def _coupled_with_source(s, *, iterate_rtol=1e-12):
+    a = compartment("a", scheme="implicit")
+    b = compartment("b", scheme="implicit", circulation=True, initial=1.0, source=s)
+    model, state, drivers = union(
+        {"A": a, "B": b},
+        [ValueLink("A", "a.x", 0, "B", "b.x_boundary", two_way=True)],
+        iterate_rtol=iterate_rtol, iterate_atol=1e-14, iterate_max=200,
+    )
+    diagnostics: dict = {}
+    out = model.step(state, drivers, 1.0, diagnostics=diagnostics)
+    return out["A"]["a.x"].sum(), out["B"]["b.x"].sum(), diagnostics
+
+
+@pytest.mark.xfail(strict=True, reason="P1-2: the unrolled derivative of a one-pass converged "
+                   "iteration is the derivative of one pass, not of the fixed point")
+def test_gradient_at_a_converged_start_is_the_coupled_derivative():
+    """Both compartments start at 1 and B's source s is 0: the start IS the fixed point, so
+    the primal converges in one pass at (1, 1). The coupled backward-Euler solution is
+    a = 1 + s/3, b = 1 + 2s/3, so the derivatives are 1/3 and 2/3, whatever the pass count."""
+    s = torch.tensor(0.0, dtype=F64, requires_grad=True)
+    a, b, diagnostics = _coupled_with_source(s)
+    assert diagnostics["passes"] == 1
+    (da,) = torch.autograd.grad(a, (s,), retain_graph=True)
+    (db,) = torch.autograd.grad(b, (s,))
+    assert da.item() == pytest.approx(1.0 / 3.0, rel=1e-8)
+    assert db.item() == pytest.approx(2.0 / 3.0, rel=1e-8)
+
+
+@pytest.mark.xfail(strict=True, reason="P1-2: the unrolled gradient error tracks the primal "
+                   "tolerance instead of the adjoint's own")
+def test_gradient_does_not_depend_on_the_primal_tolerance():
+    """s = 0.3 from the same start: a loose primal tolerance stops after a few passes. The
+    returned VALUE may then be off by the primal tolerance, but the derivative of the fixed
+    point is still 1/3 and 2/3 and must be returned to the adjoint's accuracy."""
+    s = torch.tensor(0.3, dtype=F64, requires_grad=True)
+    a, b, diagnostics = _coupled_with_source(s, iterate_rtol=1e-3)
+    assert diagnostics["passes"] < 10
+    (da,) = torch.autograd.grad(a, (s,), retain_graph=True)
+    (db,) = torch.autograd.grad(b, (s,))
+    assert da.item() == pytest.approx(1.0 / 3.0, rel=1e-8)
+    assert db.item() == pytest.approx(2.0 / 3.0, rel=1e-8)

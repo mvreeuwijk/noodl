@@ -194,3 +194,57 @@ def test_the_work_budget_is_refused_by_name():
     op = layer._advection_operator(_t([0.0, 0.0]))
     with pytest.raises(RuntimeError, match=r"matvecs.*scheme='implicit'"):
         _expm_action(op, _t([10.0]), _t([1.0]), 50.0, max_matvecs=1000, where="budget test")
+
+
+def _one_node_forced(r_val: float, *, requires_grad: bool = True):
+    """dx/dt = -r x + 1 on one interior node, x(0) = 0, dt = 1: the review's P1-1 case.
+    Nodes: ambient (0), zone (1); the single flow edge carries q = 0 so nothing advects; the
+    unit forcing is `sources` on the FULL node axis; removal r is the differentiated
+    coefficient."""
+    net = Network(dtype=F64)
+    net.add_node("ambient")
+    net.add_node("zone")
+    net.add_edge("zone", "ambient", kind="flow")
+    r = torch.tensor([r_val], dtype=F64, requires_grad=requires_grad)
+    layer = TransportLayer(
+        net, "c", capacity=_t([1.0]), flow_kind="flow", boundary=["ambient"], removal=r,
+        scheme="exact",
+    )
+    x = layer.step(_t([0.0]), _t([0.0]), _t([0.0, 1.0]), _t([0.0]), 1.0)
+    return x, r
+
+
+def _closed_form_forced(r: float) -> tuple[float, float]:
+    """x(1) = (1 - e^{-r}) / r and dx/dr = (e^{-r}(1 + r) - 1) / r^2, with their r -> 0
+    limits 1 and -1/2."""
+    if r == 0.0:
+        return 1.0, -0.5
+    return (1.0 - math.exp(-r)) / r, (math.exp(-r) * (1.0 + r) - 1.0) / r**2
+
+
+@pytest.mark.parametrize(
+    "r",
+    [
+        pytest.param(0.0, marks=pytest.mark.xfail(
+            strict=True, reason="P1-1: one Taylor term at zero norm drops the forcing "
+            "term's coefficient derivative")),
+        pytest.param(1e-6, marks=pytest.mark.xfail(
+            strict=True, reason="P1-1: the forcing term's own remainder is one power of "
+            "theta short of the scheduled bound")),
+        # Run against 852c65d before marking (see the module docstring's cross-reference):
+        # the brief expected 1e-3 to already pass as a control, but it reproduces the same
+        # P1-1 remainder shortfall as 1e-6 (obtained -0.4996666666666667 vs the closed form
+        # -0.4996667917200881, a ~2.5e-7 relative error against the rel=1e-8 tolerance) --
+        # marked, not loosened.
+        pytest.param(1e-3, marks=pytest.mark.xfail(
+            strict=True, reason="P1-1: the forcing term's own remainder is one power of "
+            "theta short of the scheduled bound")),
+        1e-1, 1.0,
+    ],
+)
+def test_forced_step_value_and_coefficient_derivative_match_the_closed_form_near_a_zero_operator(r):
+    x, r_t = _one_node_forced(r)
+    value, derivative = _closed_form_forced(r)
+    assert x.item() == pytest.approx(value, rel=1e-10, abs=1e-12)
+    (dr,) = torch.autograd.grad(x.sum(), (r_t,))
+    assert dr.item() == pytest.approx(derivative, rel=1e-8, abs=1e-9)
