@@ -13,6 +13,7 @@ from noodl.layers.transport import (
     TransportLayer,
     _expm_action,
     _forced_remainder,
+    _shifted_remainder,
     _taylor_remainder,
     _taylor_schedule,
     _theta_max,
@@ -38,6 +39,19 @@ def test_remainder_is_the_tail_of_the_exponential_series():
     d_x = sum(k * theta ** (k - 1) / math.factorial(k) for k in range(m + 1, 60))
     d_phi = sum((k - 1) * theta ** (k - 2) / math.factorial(k) for k in range(m + 1, 60))
     assert _forced_remainder(theta, m) == pytest.approx(max(r_x, r_phi, d_x, d_phi), rel=1e-10)
+    # P1-1b: the shifted (homogeneous) path's own derivative tail D_x = sum_{k>m} k
+    # theta^(k-1)/k! equals the VALUE tail one Taylor degree down, `_taylor_remainder(theta,
+    # m - 1)`, exactly (re-index k' = k - 1). `_shifted_remainder` is `max(R_x, D_x)`, which
+    # is `_taylor_remainder(theta, m - 1)` because the tail is monotone decreasing in degree.
+    d_x_hand = sum(k * theta ** (k - 1) / math.factorial(k) for k in range(m + 1, 60))
+    assert d_x_hand == pytest.approx(_taylor_remainder(theta, m - 1), rel=1e-10)
+    assert _shifted_remainder(theta, m) == pytest.approx(
+        max(_taylor_remainder(theta, m), d_x_hand), rel=1e-10
+    )
+    assert _shifted_remainder(theta, m) == pytest.approx(_taylor_remainder(theta, m - 1), rel=1e-10)
+    # A zero-norm shifted operator must stay admissible at one term: every term of D_x
+    # carries a positive power of theta, so it (and hence the max) vanishes at theta = 0.
+    assert _shifted_remainder(0.0, 1) == 0.0
 
 
 def test_theta_max_agrees_with_al_mohy_higham_to_the_leading_digit():
@@ -54,24 +68,28 @@ def test_schedule_meets_the_tolerance_and_never_wastes_a_substep(norm, forcing):
     assert s >= 1 and 1 <= m <= 55
     if forcing:
         assert m >= 2
-    bound = _forced_remainder if forcing else _taylor_remainder
+    bound = _forced_remainder if forcing else _shifted_remainder
     assert bound(norm / s, m) <= 1e-12
     if s > 1:
         # one fewer substep would need more than m_max terms
         assert bound(norm / (s - 1), 55) > 1e-12 or s * m <= (s - 1) * 55
 
 
-def test_schedule_clamps_m_at_the_table_boundary():
+@pytest.mark.parametrize("forcing", [False, True])
+def test_schedule_clamps_m_at_the_table_boundary(forcing):
     """norm = the smallest float above table[-1] * 17 makes s_min land exactly on s = 17 (via
     `math.ceil(norm / table[-1])`) while the SEPARATE division `norm / 17` rounds to a hair
     above the largest tabulated theta_{m_max} -- bisect_left then returns len(table) ==
     m_max, which must clamp to m_max rather than overflow to m_max + 1. Confirmed to
     reproduce end to end through `_taylor_schedule` before the clamp was added (result
-    (17, 56)); this pins it at (17, <= 55)."""
+    (17, 56)) on the homogeneous table (`theta_55 = 13.1924`); the forced table's own
+    `theta_55 = 12.8508` is a different boundary value, so it needs the same clamp checked
+    against its own table rather than assuming the homogeneous case covers it. Both pin it
+    at (17, <= 55)."""
     tol, m_max = 1e-12, 55
-    table = _theta_table(tol, m_max, forcing=False)
+    table = _theta_table(tol, m_max, forcing=forcing)
     norm = math.nextafter(table[-1] * 17, math.inf)
-    s, m = _taylor_schedule(norm, tol, m_max, forcing=False)
+    s, m = _taylor_schedule(norm, tol, m_max, forcing=forcing)
     assert m <= m_max
 
 
@@ -229,11 +247,26 @@ def _closed_form_forced(r: float) -> tuple[float, float]:
     """x(1) = (1 - e^{-r}) / r and dx/dr = (e^{-r}(1 + r) - 1) / r^2, with their r -> 0
     limits 1 and -1/2. Both are entire functions of r, evaluated here by their own (equally
     exact) Taylor series -- x(1) = sum_k (-1)^k r^k / (k+1)! and dx/dr = sum_k (-1)^(k+1)
-    (k+1) r^k / (k+2)! -- rather than the closed forms above: the naive closed forms
-    subtract two nearly-equal O(1) floats to recover an O(r) (value) or O(r^2)
+    (k+1) r^k / (k+2)! -- rather than the closed forms above for SMALL r: the naive closed
+    forms subtract two nearly-equal O(1) floats to recover an O(r) (value) or O(r^2)
     (derivative) result and lose essentially all precision at r = 1e-6 (verified against
     mpmath at 50 digits: the naive derivative formula is off by 4.5e-5 there, while this
-    series matches to 1e-16)."""
+    series matches to 1e-16).
+
+    The series form flips that trade-off for LARGE r: its alternating terms r^k / (k+1)!
+    grow before they shrink, and by r = 20 cancellation among them has eaten 4.4e+3 relative
+    of the 40-term truncation (nothing in this module tests above r = 1.0 today, so this was
+    an untested trap for whoever extends the parametrization). The naive closed form has the
+    opposite profile: `1 - e^{-r}` and `e^{-r}(1+r) - 1` both compute exactly (no
+    cancellation once `e^{-r}` is small), so it is accurate to 1e-16 for every r above the
+    small-r regime where IT loses precision. `r = 1.0` is comfortably inside the series'
+    accurate range and short of where the naive form is needed, so the crossover point
+    itself is untested by the parametrization; it is picked here as a round number known to
+    lie strictly between the two forms' respective loss regions (series good through
+    r ~ O(1), naive good from r ~ O(1) up)."""
+    if r > 1.0:
+        e = math.exp(-r)
+        return (1.0 - e) / r, (e * (1.0 + r) - 1.0) / (r * r)
     n_terms = 40
     value = sum((-1) ** k * r**k / math.factorial(k + 1) for k in range(n_terms))
     derivative = sum(
@@ -267,3 +300,40 @@ def test_forced_action_and_its_coefficient_gradients_match_the_dense_reference_a
     ref = torch.autograd.grad((x_ref * w).sum(), (q, cap, b0))
     for g, r in zip(got, ref, strict=True):
         torch.testing.assert_close(g, r, rtol=1e-8, atol=1e-12)
+
+
+@pytest.mark.parametrize("spread", [1e-6, 1e-4, 1e-2, 1.0])
+def test_shifted_action_gradients_match_the_dense_reference_near_a_zero_operator(spread):
+    """P1-1b's reviewed case, mirroring the forced test above on the SHIFTED path: four nodes
+    with `removal = [100, 100, 100, 100 + spread]`, `q = 0` (pure decay, no advective
+    coupling), a detached all-zero `b0` (so `shift=None` infers `shift=True`), `dt = 1`,
+    against `torch.linalg.matrix_exp` directly (there is no forcing to fold into a 3-block
+    Van Loan reference; `b0 == 0` means `x_next = expm(dt * M) @ x0` exactly). The shift
+    subtracts the mean removal rate from the diagonal, so the POST-shift norm scales with
+    `spread`, not with the removal rate itself (~100) -- this is what makes the schedule pick
+    as few as one or two Taylor terms for `spread = 1e-6` and only grows to ~14 terms by
+    `spread = 1.0`, reproducing the review's table of (s, m) pairs up to the one extra term
+    this fix adds. Before P1-1b, the schedule
+    bounded only the state polynomial's VALUE tail (`_taylor_remainder`) on this path, leaving
+    its A-derivative tail (`D_x`) unbounded, so `dx/d(removal)` degrades badly at the smallest
+    spreads even though the VALUE stays accurate to ~1e-13 throughout."""
+    removal = torch.tensor(
+        [[100.0], [100.0], [100.0], [100.0 + spread]], dtype=F64, requires_grad=True
+    )
+    layer = _chain(4, removal=removal)
+    q = torch.zeros(5, dtype=F64)
+    op = layer._advection_operator(q, layer.capacity)
+    x = _t([1.0, 0.5, -0.3, 2.0])
+    b0 = torch.zeros(4, dtype=F64).detach()
+    out = _expm_action(op, x, b0, 1.0)
+    M = op.assemble()
+    x_ref = (torch.linalg.matrix_exp(M) @ x.unsqueeze(-1)).squeeze(-1)
+    # `removal ~ 100` with `dt = 1` makes both `x_ref` and its gradient tiny (~e^-100 ~
+    # 3.7e-44), so `atol` must be near-zero rather than a default-sized absolute floor --
+    # otherwise it swamps any relative error the schedule's derivative bound is supposed to
+    # control, and the test would pass unconditionally regardless of (s, m).
+    torch.testing.assert_close(out.x, x_ref, rtol=1e-9, atol=0.0)
+    w = _t([0.3, -1.2, 0.7, 2.0])
+    (dg,) = torch.autograd.grad((out.x * w).sum(), (removal,), retain_graph=True)
+    (dg_ref,) = torch.autograd.grad((x_ref * w).sum(), (removal,))
+    torch.testing.assert_close(dg, dg_ref, rtol=1e-8, atol=0.0)

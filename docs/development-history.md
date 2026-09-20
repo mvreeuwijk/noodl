@@ -1015,8 +1015,10 @@ mean-diagonal shift (commit `e451872`, PR-1) changed the work three cases take:
   review.
 - The smaller mixed-stiffness case in `tests/layers/test_expm_schedule.py`
   (`test_a_mixed_stiffness_batch_shares_one_schedule_and_matches_the_reference`, a 4-node
-  chain, removal-free capacities 1.0 and 1e-3): 4,180 matvecs after the fix (76 substeps x 55
-  terms), measured directly on this branch for this re-baseline.
+  chain, removal-free capacities 1.0 and 1e-3): 4,290 matvecs (78 substeps x 55 terms)
+  (re-measured after P1-1b, which also bounds the state polynomial's own coefficient
+  derivative on this shift-eligible path -- 4,180 matvecs, 76 substeps x 55 terms, before
+  P1-1b), measured directly on this branch for this re-baseline.
 
 ## Decision record: what the re-baseline says (20 Sep 2026)
 
@@ -1099,7 +1101,8 @@ recorded above: the pure-decay case collapses from 184,459 matvecs to 1 (the shi
 committed forced mixed-stiffness batch test needs 107,030 matvecs (re-measured after the
 P1-1 schedule; the forced case pays for the derivative bound -- 104,280 before P1-1), with
 no instrumented pre-fix count to compare against; the smaller (zero-forcing, shift-eligible)
-mixed-stiffness case is unaffected by P1-1 and still needs 4,180.
+mixed-stiffness case is unaffected by P1-1 but IS affected by P1-1b (the shifted path's own
+derivative bound), needing 4,290 matvecs (was 4,180 before P1-1b).
 Separately, and by design, `_expm_action` (`src/noodl/layers/transport.py`) now enforces a
 work budget rather than relying only on the recursion-depth limit the review flagged: it
 raises `RuntimeError` naming the predicted substep x Taylor-term matvec count when that count
