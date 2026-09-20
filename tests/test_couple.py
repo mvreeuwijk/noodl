@@ -230,7 +230,16 @@ def _city(**kwargs):
 def test_two_way_step_is_a_fixed_point_of_one_step_from_the_start_state():
     """The converged output, fed back as glue values, must reproduce itself from ONE step
     of each model from the START state -- design spec A1. A time-compounding iteration
-    (stepping from the previous pass's output) fails this: its output is not one dt away."""
+    (stepping from the previous pass's output) fails this: its output is not one dt away.
+
+    Task 17 (R1, R2): the coupler now steps the RECIPIENT (building) first and feeds the
+    DONOR (street) the recipient's own integrated boundary transfer as a source rate, rather
+    than an endpoint flux recomputed from a stale state; at convergence, the returned donor
+    forward value equals the boundary value the recipient was stepped with (the convergence
+    criterion itself), so this hand reconstruction -- using the OUTPUT state's endpoint flux
+    as the constant source rate -- still reproduces the same one-step-from-start fixed point
+    to within the assertion's tolerance.
+    """
     from noodl.couple import transport_boundary_inflow
 
     (city, state, drivers), (street_model, building_model) = _city(
@@ -262,6 +271,13 @@ def test_two_way_step_is_a_fixed_point_of_one_step_from_the_start_state():
         new["building"]["species.x"], expect_building["species.x"], rtol=1e-9, atol=1e-14)
     assert torch.allclose(
         new["street"]["street.x"], expect_street["street.x"], rtol=1e-9, atol=1e-14)
+
+    # The recipient's own integrated transfer, reported in diagnostics, is exactly the
+    # source RATE the donor (street) was stepped with, times dt (R1: an integrated amount,
+    # not an endpoint flux held fixed) -- `inflow` above IS that rate, by construction of
+    # the hand reconstruction, so at this converged fixed point they must agree.
+    key = "street:street.x[0]->building:species.x_boundary"
+    assert diag["transfers"][key].item() == pytest.approx(inflow.item() * 1.0, rel=1e-9)
 
 
 def test_two_way_step_differs_from_a_one_way_pass_and_is_sensitive_to_the_glue():
@@ -303,7 +319,13 @@ def test_two_way_union_raises_naming_the_link_the_instances_and_the_real_largest
 def test_two_way_convergence_and_non_convergence_are_judged_per_batch_instance():
     """A batch of street forcings: `converged` is a mask over the batch, `max_change` is per
     link and per instance, and the failure message names ONLY the instances that failed --
-    as `Model._iterate` does (`model.py:595-604`)."""
+    as `Model._iterate` does (`model.py:595-604`).
+
+    Task 17 (R1, R2): the coupler now judges convergence on the donor's RETURNED forward
+    value against the value the recipient was stepped with THIS pass, from the first pass
+    on -- re-measured below for this fixture (unchanged by the scheme change here: instance
+    0 still converges by pass 4, instance 1 needs 7 total).
+    """
     from noodl.couple import union
 
     def batched_city(**kwargs):
@@ -333,7 +355,8 @@ def test_two_way_convergence_and_non_convergence_are_judged_per_batch_instance()
     assert torch.allclose(
         new["street"]["street.x"][0], one["street"]["street.x"], rtol=1e-9, atol=1e-14)
 
-    # A tolerance instance 0 meets within 6 passes and instance 1 does not:
+    # A tolerance instance 0 meets within 6 passes and instance 1 does not (re-measured for
+    # the recipient-first schedule: instance 0 is done by pass 4, instance 1 needs 7 total):
     city, state, drivers = batched_city(iterate_rtol=0.0, iterate_atol=0.05, iterate_max=6)
     with pytest.raises(RuntimeError, match=r"for instances \[1\]"):
         city.step(state, drivers, dt=1.0)
@@ -341,8 +364,13 @@ def test_two_way_convergence_and_non_convergence_are_judged_per_batch_instance()
 
 def test_two_way_feedback_adds_to_the_callers_own_sources_and_never_overwrites_them():
     """The caller's own source terms at the coupled node must survive: the feedback flux is
-    ADDED to them. Every other fixture supplies zeros, where add and overwrite agree."""
-    from noodl.couple import transport_boundary_inflow, union
+    ADDED to them. Every other fixture supplies zeros, where add and overwrite agree.
+
+    Task 17 (R1, R2): the added quantity is now `transfer / dt`, the recipient's own
+    integrated boundary transfer (reported in `diagnostics["transfers"]`) divided by dt, not
+    `transport_boundary_inflow` recomputed from the previous pass's state.
+    """
+    from noodl.couple import union
 
     street_model, street_state, street_drivers = _tiny_street_model()
     building_model, building_state, building_drivers = _tiny_building_model()
@@ -354,28 +382,23 @@ def test_two_way_feedback_adds_to_the_callers_own_sources_and_never_overwrites_t
          "building": (building_model, building_state, building_drivers)},
         shared=[_two_way_link()], iterate_rtol=1e-12, iterate_max=100,
     )
-    new = city.step(state, drivers, dt=1.0)
+    diag: dict = {}
+    dt = 1.0
+    new = city.step(state, drivers, dt=dt, diagnostics=diag)
 
-    # Reassemble the converged step by hand, as the fixed-point test does:
-    forward = new["street"]["street.x"][0] / drivers["building"]["rho_amb"]
-    hand_building = dict(drivers["building"])
-    hand_building["species.x_boundary"] = torch.tensor([forward.item()], dtype=F64)
-    species = building_model.transport["species"]
-    q = building_model.current_flows("species", new["building"], hand_building)
-    inflow = transport_boundary_inflow(
-        building_model.net, q, species.flow_kinds, new["building"]["species.x"],
-        hand_building["species.x_boundary"], species.interior_idx, species.boundary_idx, 0,
-    )
-    assert inflow.item() != pytest.approx(0.0)  # there IS a flux to add
+    key = "street:street.x[0]->building:species.x_boundary"
+    transfer = diag["transfers"][key]
+    assert transfer.item() != pytest.approx(0.0)  # there IS a flux to add
+    rate = transfer / dt
     street = street_model.transport["street"]
     node = int(street.interior_idx[0])
     expected_sources = own_sources.clone()
-    expected_sources[node] = expected_sources[node] + inflow
-    assert expected_sources[node].item() == pytest.approx(0.7 + inflow.item())  # ADDED to 0.7
+    expected_sources[node] = expected_sources[node] + rate
+    assert expected_sources[node].item() == pytest.approx(0.7 + rate.item())  # ADDED to 0.7
     assert expected_sources[2].item() == 0.2  # the caller's other entries are untouched
     hand_street = dict(drivers["street"])
     hand_street["street.sources"] = expected_sources
-    expect_street = street_model.step(state["street"], hand_street, dt=1.0)
+    expect_street = street_model.step(state["street"], hand_street, dt=dt)
     assert torch.allclose(
         new["street"]["street.x"], expect_street["street.x"], rtol=1e-9, atol=1e-14)
     # and the caller's own tensor was never written into:
