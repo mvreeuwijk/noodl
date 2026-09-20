@@ -465,7 +465,7 @@ class Model:
     # -------------------------------------------------------------------- pass
     def _pass(
         self, state, drivers, dt, solve_kwargs, *, step_from: State | None = None,
-        t: float | None = None,
+        t: float | None = None, boundary_transfers: bool = False,
     ) -> tuple[State, dict, Drivers]:
         """One closures -> potential -> capacitated -> transport -> reactions pass;
         `dt=None` means steady (and is refused outright by a model owning a capacitated
@@ -568,14 +568,26 @@ class Model:
                             f"Model.initial_capacities(state, drivers)"
                         )
                 k = self.substeps[name]
+                transfer_total = None
                 for j in range(1, k + 1):
                     if cap is None:
                         cap_j = cap_prev_j = None
                     else:
                         cap_prev_j = cap_prev + (j - 1) / k * (cap - cap_prev)
                         cap_j = cap_prev + j / k * (cap - cap_prev)
-                    x = layer.step(x, q_kind, sources, xb, dt / k, capacity=cap_j,
-                                   capacity_prev=cap_prev_j)
+                    if boundary_transfers:
+                        stepped = layer.step_with_transfer(
+                            x, q_kind, sources, xb, dt / k,
+                            capacity=cap_j, capacity_prev=cap_prev_j,
+                        )
+                        x = stepped.x
+                        transfer_total = (
+                            stepped.boundary_transfer if transfer_total is None
+                            else transfer_total + stepped.boundary_transfer
+                        )
+                    else:
+                        x = layer.step(x, q_kind, sources, xb, dt / k, capacity=cap_j,
+                                       capacity_prev=cap_prev_j)
                 if cap is not None:
                     new[f"{name}.capacity"] = cap
                 for lname, reaction in self.reactions:
@@ -583,6 +595,8 @@ class Model:
                         x = reaction.apply(x, dt, drv)
             new[f"{name}.x"] = x
             diag[name] = {"substeps": self.substeps[name]}
+            if boundary_transfers:
+                diag[name]["boundary_transfer"] = transfer_total
         # Closure-carried state (spec 4.6a): a declared key is copied OUT of the closure's
         # return into the state, so the next step's closures read it back. A closure that
         # declares a key and does not write it every call would freeze that state silently,
@@ -613,11 +627,24 @@ class Model:
 
     def step(
         self, state, drivers, dt: float, *, t: float | None = None,
-        diagnostics: dict | None = None, **solve_kwargs,
+        diagnostics: dict | None = None, boundary_transfers: bool = False, **solve_kwargs,
     ):
+        """Advance one step (spec's ping-pong or iterated coupling, per `self.coupling`).
+
+        `boundary_transfers` (keyword-only, default False) reports, for every transport
+        layer, the time-integrated amount that crossed its boundary during the step, summed
+        over that layer's substeps, at `diagnostics["layers"][name]["boundary_transfer"]`;
+        `diagnostics` is created internally when the caller passes none, so the state
+        returned is unchanged either way -- only a caller who wants the transfers passes a
+        dict. Sign and unit convention: see `TransportLayer.step_with_transfer`. REACTIONS
+        ARE APPLIED AFTER TRANSPORT and are not part of the reported transfer.
+        """
         if not dt > 0:
             raise ValueError(f"Model: dt must be positive, got {dt!r}")
-        return self._advance(state, drivers, float(dt), diagnostics, solve_kwargs, t=t)
+        return self._advance(
+            state, drivers, float(dt), diagnostics, solve_kwargs, t=t,
+            boundary_transfers=boundary_transfers,
+        )
 
     def steady(self, state, drivers, *, diagnostics: dict | None = None, **solve_kwargs):
         """The quasi-steady state of every layer at `drivers` (transport layers solved to
@@ -635,18 +662,29 @@ class Model:
         """
         return self._advance(state, drivers, None, diagnostics, solve_kwargs)
 
-    def _advance(self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None) -> State:
+    def _advance(
+        self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None,
+        boundary_transfers: bool = False,
+    ) -> State:
         # The coupling seam: ping-pong is exactly ONE pass, taken with the state at the start
         # of the step; `coupling="iterate"` repeats `_pass` until the named transport states
         # stop changing, and reports the pass count it took.
         if self.coupling == "pingpong":
-            new, diag, _ = self._pass(state, drivers, dt, solve_kwargs, t=t)
+            new, diag, _ = self._pass(
+                state, drivers, dt, solve_kwargs, t=t, boundary_transfers=boundary_transfers,
+            )
             if diagnostics is not None:
                 diagnostics.update({"passes": 1, "layers": diag})
             return new
-        return self._iterate(state, drivers, dt, diagnostics, solve_kwargs, t=t)
+        return self._iterate(
+            state, drivers, dt, diagnostics, solve_kwargs, t=t,
+            boundary_transfers=boundary_transfers,
+        )
 
-    def _iterate(self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None) -> State:
+    def _iterate(
+        self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None,
+        boundary_transfers: bool = False,
+    ) -> State:
         """Hensen's onion: repeat the pass until the named transport states stop changing.
 
         The relaxation takes a pass to start: `prev` is None after pass 1, so pass 2 is fed
@@ -681,7 +719,10 @@ class Model:
         # control variable unused inside the body is not (ruff B007).
         while passes < self.iterate_max:
             passes += 1
-            new, diag, _ = self._pass(fed, drivers, dt, solve_kwargs, step_from=state, t=t)
+            new, diag, _ = self._pass(
+                fed, drivers, dt, solve_kwargs, step_from=state, t=t,
+                boundary_transfers=boundary_transfers,
+            )
             if prev is not None:
                 with torch.no_grad():
                     ok: Tensor | None = None
