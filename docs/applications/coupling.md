@@ -293,9 +293,10 @@ application's own thermal builder produces, though this benchmark's `.prj`-based
 not build one — "no thermal layer: a .prj carries no thermal data"); that case is covered by
 `tests/test_couple_conservation.py`'s dedicated two-layer fixture and
 `tests/test_model_transfers.py`'s `boundary_transfers` collection tests, not by this
-benchmark. Batch 100 was not re-measured this round; its previous 150.288 s stands (1.1x the
-time for 10x the batch and 2.6x the time for 100x the batch, sub-linear throughout, still
-hold as before-vs-before/after-vs-after ratios respectively). No budget is set.
+benchmark. Batch 100 was not re-measured this round; its previous 150.288 s stands. The
+measured after-18b numbers -- 52.647 s at batch 1, 61.282 s at batch 10 -- keep the same
+sub-linear pattern as before (well under 10x the time for 10x the batch); no new ratio
+against the un-re-measured batch 100 is computed here. No budget is set.
 
 ## Limitations
 

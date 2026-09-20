@@ -536,6 +536,15 @@ class Model:
             s_new, f = layer.step(s_prev, drv, dt, diagnostics=cd)
             new[f"{name}.s"], new[f"{name}.q"] = s_new, f
             diag[name] = cd
+        if isinstance(boundary_transfers, str):
+            # Defensive: `step()` already refuses a bare string before reaching here, but
+            # `_pass` is not otherwise unreachable except through it -- see that check for
+            # why a bare `str` (itself a `Collection[str]`) must never reach the ternary
+            # below, which would silently iterate its characters instead.
+            raise TypeError(
+                f"Model.step: boundary_transfers must be a bool or a collection of layer "
+                f"names, not a bare string; pass {boundary_transfers!r} in a set"
+            )
         transfer_layers: set[str] = (
             set(self.transport) if boundary_transfers is True
             else set(boundary_transfers) if boundary_transfers
@@ -666,6 +675,16 @@ class Model:
         """
         if not dt > 0:
             raise ValueError(f"Model: dt must be positive, got {dt!r}")
+        if isinstance(boundary_transfers, str):
+            # A bare `str` IS a `Collection[str]` -- `set("species")` iterates its
+            # CHARACTERS, not the one name meant, either raising a confusing "layer 's' does
+            # not exist" or, on a single-letter layer name (this repo's own tests use "a",
+            # "b", "c"), silently selecting the wrong layer. Refuse it outright rather than
+            # let either happen.
+            raise TypeError(
+                f"Model.step: boundary_transfers must be a bool or a collection of layer "
+                f"names, not a bare string; pass {boundary_transfers!r} in a set"
+            )
         if boundary_transfers is not True and boundary_transfers is not False:
             bad = sorted(set(boundary_transfers) - set(self.transport))
             if bad:

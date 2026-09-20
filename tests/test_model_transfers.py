@@ -56,6 +56,18 @@ def test_without_the_flag_no_transfer_is_reported_and_the_state_is_identical():
     torch.testing.assert_close(a["c.x"], b["c.x"], rtol=1e-12, atol=1e-14)
 
 
+def test_a_bare_string_boundary_transfers_is_refused_rather_than_iterated_as_characters():
+    """`set("species")` iterates CHARACTERS, not the one name meant: on this fixture's own
+    single-letter layer name "c", a bare string would otherwise be silently accepted and
+    happen to select the right layer by coincidence -- exactly the trap task 18b's fix-round
+    review caught. Refused outright instead, naming the string."""
+    model = _model("exact", 1)
+    state = {"c.x": _t([1.0])}
+    drivers = {"c.x_boundary": _t([0.0]), "c.sources": _t([0.0, 0.0])}
+    with pytest.raises(TypeError, match="bare string"):
+        model.step(state, drivers, 1.2, boundary_transfers="c")
+
+
 def _two_layer_model():
     """`thermal` (scheme='exact') and `species` (scheme='implicit') on the same net, each
     with its own flow kind -- so a caller who names only one in `boundary_transfers` can be
