@@ -375,19 +375,19 @@ class CoupledModel:
     def _check_two_way_scope(self, link: ValueLink, from_layer, to_layer) -> None:
         """Milestone 5's two-way scope: one flow kind on the TO layer, one species on both.
 
-        `transport_boundary_inflow`, which builds the feedback flux, is single-flow-kind
-        (it raises `NotImplementedError` at STEP time otherwise, after a whole first pass has
-        run) and single-species -- a multi-species `(n_i, K)` state is not merely unsupported
-        but AMBIGUOUS to the glue's layout rule: a stacked `(n_i, 1)` and a reduced `(n_i, K)`
-        with `K == n_i` are the same shape, so `_reduced` would silently read the wrong axis.
+        The recipient's own transfer is read off `Model.step`'s `boundary_transfer` at ONE
+        boundary node of a single-flow-kind layer (`_apply_transfer`), so a TO layer with more
+        than one flow kind has no single transfer to read there. And `_reduced`'s single-species
+        layout rule is AMBIGUOUS for a multi-species state: a stacked `(n_i, 1)` and a reduced
+        `(n_i, K)` with `K == n_i` are the same shape, so it would silently read the wrong axis.
         Both are therefore refused here, before any stepping, rather than discovered later.
         """
         if len(to_layer.flow_kinds) > 1:
             raise ValueError(
                 f"CoupledModel: two-way link {self._link_key(link)} needs a single flow kind "
                 f"on its TO layer {link.to_model}:{link.to_layer}, which has "
-                f"{list(to_layer.flow_kinds)}; the feedback flux "
-                f"(`transport_boundary_inflow`) is single-flow-kind in milestone 5"
+                f"{list(to_layer.flow_kinds)}; the recipient's own transfer is read at one "
+                f"boundary node of a single-flow-kind layer"
             )
         multi = [
             f"{tag}:{layer_name} has n_species={layer.n_species}"
@@ -400,8 +400,8 @@ class CoupledModel:
         if multi:
             raise ValueError(
                 f"CoupledModel: two-way link {self._link_key(link)} needs n_species == 1 on "
-                f"both layers ({', '.join(multi)}); the glue's reduced/stacked layout rule is "
-                f"ambiguous for a multi-species state and the feedback flux is single-species"
+                f"both layers ({', '.join(multi)}); `_reduced`'s single-species layout rule is "
+                f"ambiguous for a multi-species state"
             )
 
     # ------------------------------------------------------------------- glue
@@ -484,6 +484,7 @@ class CoupledModel:
                     "passes": 1,
                     "converged": torch.ones((), dtype=torch.bool),
                     "max_change": {},
+                    "transfers": {},
                 })
             return new
         return self._iterate(start, drivers, dt, diagnostics)
@@ -537,8 +538,14 @@ class CoupledModel:
         EVERY pass including the first: the donor's RETURNED forward value (computed from
         `new`, this pass's own donor output) against `now`, the relaxed forward value the
         recipient was actually stepped with in this same pass (R2) -- the returned state is
-        what is certified, not the previous pass's forward value. The passes themselves stay
-        on the autograd graph.
+        what is certified, not the previous pass's forward value. This is the fixed-point
+        map's own UNRELAXED residual, `g(v_k) - v_k`: the returned forward value `g(v_k)`
+        against the relaxed iterate `v_k` the recipient was just stepped with, not the
+        relaxed increment `relaxation * (raw - prev)` that produced `v_k` in the first
+        place. Judging the relaxed increment instead would make the effective tolerance
+        scale with `relaxation`, letting a heavily damped run falsely report convergence
+        while `g(v_k)` still disagrees with `v_k` by a large, unrelaxed amount. The passes
+        themselves stay on the autograd graph.
 
         The returned state is the last pass's own output. The fixed point is differentiated
         by UNROLLING: every pass stays on the graph and memory grows with the pass count. An
@@ -549,9 +556,10 @@ class CoupledModel:
         prev: dict[int, Tensor] | None = None
         change: dict[str, Tensor] = {}
         transfers: dict[str, Tensor] = {}
-        # A placeholder the second pass always replaces: `iterate_max >= 2` is refused at
-        # construction, so the loop cannot end without a real per-instance verdict of the
-        # right shape, dtype and device.
+        # A placeholder the FIRST pass always replaces: convergence is now judged on every
+        # pass including the first (see the docstring above), so the loop's own body always
+        # computes a real per-instance verdict before this initial value could ever be read.
+        # It exists only to give `converged` a well-typed shape/dtype/device up front.
         converged: Tensor = torch.zeros((), dtype=torch.bool)
         passes = 0
         new: dict[str, State] = dict(start)
