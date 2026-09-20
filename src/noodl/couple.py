@@ -139,8 +139,8 @@ def transport_boundary_inflow(
 
     `TransportLayer` never exposes this: its own `rate()` has no row for boundary nodes at
     all (design spec section 3, `Model.ports()` reports boundary flows only for potential
-    layers). Built here from `net.accumulate`/`net.upwind` alone -- `net.accumulate(w, kind)`
-    is the scatter-add form of `incidence(kind) @ w` (net OUTFLOW: +at source, -at target).
+    layers). Built here with `net.endpoints` + gather + `net.accumulate` to avoid assembling
+    a dense topology selector.
     """
     kind = flow_kinds[0] if len(flow_kinds) == 1 else None
     if kind is None:
@@ -152,10 +152,10 @@ def transport_boundary_inflow(
     full = torch.zeros(*batch_shape, net.n, dtype=x_interior.dtype, device=x_interior.device)
     full[..., interior_idx] = x_interior.expand(*batch_shape, interior_idx.numel())
     full[..., boundary_idx] = x_boundary.expand(*batch_shape, boundary_idx.numel())
-    upwind_selector = net.upwind(q, kind)          # (..., b_kind, n)
-    upstream_value = torch.einsum("...bn,...n->...b", upwind_selector, full)
-    mass_flux = q * upstream_value                  # (..., b_kind)
-    net_outflow = net.accumulate(mass_flux, kind)    # (..., n)
+    src, tgt = net.endpoints(kind)
+    upstream = torch.where(q >= 0, src, tgt)                       # (..., b_kind)
+    mass_flux = q * torch.gather(full, -1, upstream.expand(*batch_shape, upstream.shape[-1]))
+    net_outflow = net.accumulate(mass_flux, kind)
     node_idx = int(boundary_idx[node_position])
     return -net_outflow[..., node_idx]
 

@@ -1,4 +1,4 @@
-"""Independent oracles for the coupling findings R1, R2 and R7 of the 19 September review.
+"""Independent oracles for the coupling findings R1 and R2 of the 19 September review.
 
 Two unit-capacity compartments. A: one edge zone->ambient that carries no flow, so A changes
 only through the sources the coupler adds. B: zone->ambient and ambient->zone, both carrying
@@ -97,13 +97,6 @@ def test_two_way_iteration_returns_the_coupled_backward_euler_solution():
     assert b == pytest.approx(5 / 3, abs=1e-9)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "R7: transport_boundary_inflow allocates the dense "
-        "(batch, edges, nodes) upwind selector"
-    ),
-)
 def test_a_two_way_step_never_assembles_a_dense_topology_operator(monkeypatch):
     """The compartments carry no potential layer, so nothing on this path has a legitimate
     reason to form an (edges, nodes) matrix."""

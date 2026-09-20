@@ -79,6 +79,48 @@ def test_transport_boundary_inflow_hand_computed():
     assert inflow2.item() == pytest.approx(15.0)
 
 
+def _dense_boundary_inflow(
+    net, q, kind, x_interior, x_boundary, interior_idx, boundary_idx, node_position
+):
+    """The milestone 5 dense form, kept here as the oracle for the sparse helper."""
+    batch_shape = torch.broadcast_shapes(
+        x_interior.shape[:-1], x_boundary.shape[:-1], q.shape[:-1]
+    )
+    full = torch.zeros(*batch_shape, net.n, dtype=F64)
+    full[..., interior_idx] = x_interior.expand(*batch_shape, interior_idx.numel())
+    full[..., boundary_idx] = x_boundary.expand(*batch_shape, boundary_idx.numel())
+    selector = net.upwind(q, kind)
+    mass_flux = q * torch.einsum("...bn,...n->...b", selector, full)
+    return -net.accumulate(mass_flux, kind)[..., int(boundary_idx[node_position])]
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_transport_boundary_inflow_matches_the_dense_form_on_signed_batched_multi_boundary_cases(  # noqa: E501
+    seed,
+):
+    from noodl.couple import transport_boundary_inflow
+
+    g = torch.Generator().manual_seed(seed)
+    net = Network(dtype=F64)
+    for n in ("b0", "b1", "i0", "i1", "i2"):
+        net.add_node(n)
+    edges = [
+        ("b0", "i0"), ("i0", "i1"), ("i1", "b1"),
+        ("i2", "i0"), ("b1", "i2"), ("i1", "i2"),
+    ]
+    for u, v in edges:
+        net.add_edge(u, v, kind="flow")
+    interior_idx = net.interior_index(["b0", "b1"])
+    boundary_idx = net.boundary_index(["b0", "b1"])
+    q = torch.randn(3, 6, generator=g, dtype=F64)
+    xi = torch.rand(3, 3, generator=g, dtype=F64)
+    xb = torch.rand(3, 2, generator=g, dtype=F64)
+    for pos in (0, 1):
+        got = transport_boundary_inflow(net, q, ["flow"], xi, xb, interior_idx, boundary_idx, pos)
+        want = _dense_boundary_inflow(net, q, "flow", xi, xb, interior_idx, boundary_idx, pos)
+        torch.testing.assert_close(got, want, rtol=1e-12, atol=1e-12)
+
+
 def _tiny_street_model():
     """Two segments 'seg0'->'atm', 'seg1'->'atm', kind='vent'. Concentration state only."""
     from noodl.layers.transport import TransportLayer
