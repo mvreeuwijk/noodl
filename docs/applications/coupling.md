@@ -94,7 +94,8 @@ union(
     relaxation=0.5,
     iterate_rtol=1e-8,
     iterate_atol=0.0,
-    iterate_max=20,
+    iterate_max=50,
+    adjoint_rtol=1e-10,    # tolerance of the implicit adjoint solve, not of the primal
 ) -> (CoupledModel, {tag: State}, {tag: Drivers})
 ```
 
@@ -222,9 +223,40 @@ Failure to converge in `iterate_max` passes raises naming the link — for examp
 `"street:street.x[0]->building:species.x_boundary"` — the failing instances, and the largest
 change.
 
-With `diagnostics`, you get `{"passes", "converged", "max_change", "transfers"}` —
+With `diagnostics`, you get `{"passes", "converged", "max_change", "transfers", "adjoint"}` —
 `transfers` is the recipient's own integrated transfer per two-way link, from the pass that
-produced the returned state, keyed the same way as `max_change`.
+produced the returned state, keyed the same way as `max_change`; `passes` counts **primal**
+passes; `adjoint` is `"implicit"` when the returned state carries the fixed point's adjoint and
+`None` when nothing differentiable reached it. Every value in the dict is detached: diagnostics
+are a report, and a transfer still attached to the pass graph would offer a silent route around
+the adjoint.
+
+### Differentiating the fixed point
+
+The passes of the iteration carry **no autograd graph**. Once the interface has converged, the
+certified pass is run **once more** on the graph at the same interface values — so the state it
+returns is the certified one — and `solvers.fixed_point.differentiate_fixed_point` attaches the
+implicit adjoint of the interface equations to it. Writing $y = S(z^*, \theta)$ for that pass's
+whole output and $G$ for the map that reads the next iterate out of it, the returned gradient is
+
+$$
+\frac{\partial y}{\partial \theta} = S_\theta + S_z (I - G_z)^{-1} G_\theta,
+$$
+
+obtained from one small GMRES solve (`adjoint_rtol`) whose matvec is a VJP through that single
+pass. Three consequences:
+
+- the gradient is the **fixed point's**, not the truncated iteration's — it does not depend on
+  how many passes the primal took, nor on `iterate_rtol`;
+- backward **memory is one pass**, not all of them;
+- a forward-only run pays nothing: pass 1 runs on the graph only to learn whether anything
+  differentiable reaches the state at all (a structural question that inspecting the states and
+  drivers cannot answer, because a parameter may be captured inside a model's own closure), and
+  when nothing does, the extra pass is skipped entirely and the pass count is unchanged.
+
+The **interface** is every link's forward value, one-way links included, because that is what a
+pass reads from the previous pass's output. Only the two-way entries are measured for
+convergence — only they close a loop that can fail to converge.
 
 ## The canonical pairing: street ↔ building
 
@@ -262,7 +294,7 @@ the street side. Both demos assert that sign.
 | Real `leiden_small`, segment 783, steady 2.079110e-07 vs coupled 2.078961e-07 kg/m³ | measured | **7.191e-5** (0.007191 %) change, 21 passes |
 | Loose sequential file exchange vs the two-way result | measured | 0.5897 % discrepancy — equal to the street-side change, as expected for a boundary response linear in the shared value |
 | Inverse 1: leakage calibration through the join | rel err < 0.05 | **1.288e-4**, final loss 3.4574e-08 |
-| Inverse 2: source attribution by one adjoint pass vs central differences | rel 1e-4 | 7.2e-9, 1.1e-8; third source structurally zero |
+| Inverse 2: source attribution by one adjoint pass vs central differences | rel 1e-4 | 1.3e-8, 2.0e-9; third source structurally zero |
 | Inverse 3: one measured path recovers all four branch flows | rtol 1e-10 | exact |
 
 The real-data row is worth reading carefully. A 0.007191 % change is **negligible** — and that is
@@ -315,8 +347,11 @@ against the un-re-measured batch 100 is computed here. No budget is set.
   recipient and a donor is refused at construction, by name, in the error message — the
   conservative schedule is defined only when every two-way link can be given a strict
   recipient-before-donor order, which a cycle cannot.
-- **Differentiated by unrolling** the outer passes, so memory grows with pass count. An
-  implicit-function treatment of the fixed point is a recorded follow-up.
+- **The one-way interface entries are not part of the convergence test.** A one-way link's
+  forward value is read from the previous pass's output like every other interface entry, but
+  only the two-way entries are measured, so a one-way entry is converged only as far as the
+  state it reads has settled — exactly as true of the returned state itself, which is read from
+  that same pass.
 - **Ambient temperature is not coupled** in the demo — it reaches the building only through
   `rho_amb`, computed once from the `.prj`'s own `Ta`, and the AQ_DT forcing carries no
   temperature field.

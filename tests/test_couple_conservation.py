@@ -343,8 +343,6 @@ def _coupled_with_source(s, *, iterate_rtol=1e-12):
     return out["A"]["a.x"].sum(), out["B"]["b.x"].sum(), diagnostics
 
 
-@pytest.mark.xfail(strict=True, reason="P1-2: the unrolled derivative of a one-pass converged "
-                   "iteration is the derivative of one pass, not of the fixed point")
 def test_gradient_at_a_converged_start_is_the_coupled_derivative():
     """Both compartments start at 1 and B's source s is 0: the start IS the fixed point, so
     the primal converges in one pass at (1, 1). The coupled backward-Euler solution is
@@ -358,8 +356,6 @@ def test_gradient_at_a_converged_start_is_the_coupled_derivative():
     assert db.item() == pytest.approx(2.0 / 3.0, rel=1e-8)
 
 
-@pytest.mark.xfail(strict=True, reason="P1-2: the unrolled gradient error tracks the primal "
-                   "tolerance instead of the adjoint's own")
 def test_gradient_does_not_depend_on_the_primal_tolerance():
     """s = 0.3 from the same start: a loose primal tolerance stops after a few passes. The
     returned VALUE may then be off by the primal tolerance, but the derivative of the fixed
@@ -371,3 +367,101 @@ def test_gradient_does_not_depend_on_the_primal_tolerance():
     (db,) = torch.autograd.grad(b, (s,))
     assert da.item() == pytest.approx(1.0 / 3.0, rel=1e-8)
     assert db.item() == pytest.approx(2.0 / 3.0, rel=1e-8)
+
+
+def test_diagnostics_report_the_adjoint_and_the_primal_pass_count():
+    """`passes` counts PRIMAL passes on both paths, so the differentiable run's count must
+    equal the forward-only run's: the extra pass that carries the adjoint is not one of them,
+    and a run with nothing to differentiate does not pay for it at all (`adjoint is None`)."""
+    s = torch.tensor(0.3, dtype=F64, requires_grad=True)
+    _a, _b, diagnostics = _coupled_with_source(s)
+    assert diagnostics["adjoint"] == "implicit" and diagnostics["passes"] >= 2
+    with torch.no_grad():
+        _a, _b, plain = _coupled_with_source(torch.tensor(0.3, dtype=F64))
+    assert plain["adjoint"] is None and plain["passes"] == diagnostics["passes"]
+    # Grad enabled but nothing requiring it: still no adjoint pass, still the same count.
+    _a, _b, forward_only = _coupled_with_source(torch.tensor(0.3, dtype=F64))
+    assert forward_only["adjoint"] is None and forward_only["passes"] == diagnostics["passes"]
+
+
+def test_the_differentiated_pass_conserves_exactly_like_the_primal_one():
+    """R1 on the pass that is actually RETURNED when a gradient is wanted. The returned state
+    now comes from the extra differentiable pass rather than from the last primal one, so the
+    conservation property has to hold there too -- it does, by construction, because both run
+    the same `_one_pass` and the donor receives the recipient's own integrated transfer.
+
+    Both compartments start at 1 and B carries an external source s over dt = 1, so the exact
+    budget is 2 + s with nothing else entering or leaving.
+    """
+    for value in (0.0, 0.3):
+        s = torch.tensor(value, dtype=F64, requires_grad=True)
+        a, b, diagnostics = _coupled_with_source(s)
+        assert diagnostics["adjoint"] == "implicit"
+        assert a.item() + b.item() == pytest.approx(2.0 + value, abs=1e-10)
+        with torch.no_grad():
+            plain_a, plain_b, _ = _coupled_with_source(torch.tensor(value, dtype=F64))
+        # ... and it is the SAME pass: the certified primal state, reproduced.
+        assert a.item() == pytest.approx(plain_a.item(), rel=1e-12, abs=1e-15)
+        assert b.item() == pytest.approx(plain_b.item(), rel=1e-12, abs=1e-15)
+
+
+def test_a_one_way_link_riding_on_the_iteration_carries_its_own_gradient():
+    """The fixed-point INTERFACE is every link's forward value, one-way links included, and
+    this is the case that decides it. A --two-way--> B (B the recipient) and B --one-way--> C:
+    the parameter is B's own source, and C sees it only through the one-way value read out of
+    B's state. Hold that entry outside the interface -- the obvious reading of "only two-way
+    links close a loop" -- and dC/ds collapses to 0, because C's boundary would then be frozen
+    at B's start value. Central differences say otherwise.
+    """
+    def run(s):
+        a = compartment("a", scheme="implicit")
+        b = compartment("b", scheme="implicit", circulation=True, initial=1.0, source=s)
+        c = compartment("c", scheme="implicit", circulation=True, initial=0.0)
+        model, state, drivers = union(
+            {"A": a, "B": b, "C": c},
+            [ValueLink("A", "a.x", 0, "B", "b.x_boundary", two_way=True),
+             ValueLink("B", "b.x", 0, "C", "c.x_boundary")],
+            iterate_rtol=1e-12, iterate_atol=1e-14, iterate_max=200,
+        )
+        out = model.step(state, drivers, 1.0)
+        return tuple(out[tag][f"{tag.lower()}.x"].sum() for tag in ("A", "B", "C"))
+
+    s = torch.tensor(0.3, dtype=F64, requires_grad=True)
+    values = run(s)
+    grads = [torch.autograd.grad(v, (s,), retain_graph=True)[0].item() for v in values]
+    h = 1e-6
+    hi, lo = run(torch.tensor(0.3 + h, dtype=F64)), run(torch.tensor(0.3 - h, dtype=F64))
+    for name, g, up, down in zip("ABC", grads, hi, lo, strict=True):
+        fd = ((up - down) / (2 * h)).item()
+        assert g == pytest.approx(fd, rel=1e-6), name
+    assert grads[2] == pytest.approx(1.0 / 3.0, rel=1e-8)   # not zero, and not B's 2/3
+
+
+def test_the_adjoint_solves_a_batched_interface_per_instance():
+    """The interface is flattened across the batch before the adjoint GMRES solve, so a batch
+    of instances with DIFFERENT couplings has to come back with each instance's own
+    derivative. Weighted so a single scalar gradient cannot hide a per-instance error."""
+    n = 4
+    weights = torch.arange(1.0, n + 1.0, dtype=F64)
+
+    def run(s):
+        a = compartment("a", scheme="implicit")
+        b_model, b_state, b_drivers = compartment(
+            "b", scheme="implicit", circulation=True, initial=1.0)
+        q = torch.stack([_t([1.0 + i, 1.0 + i]) for i in range(n)])
+        b_model.closures[0] = lambda _s, _d: {"b.q": q}
+        b_drivers = dict(b_drivers)
+        b_drivers["b.sources"] = torch.stack([torch.zeros(n, dtype=F64), s * weights], dim=-1)
+        model, state, drivers = union(
+            {"A": a, "B": (b_model, b_state, b_drivers)},
+            [ValueLink("A", "a.x", 0, "B", "b.x_boundary", two_way=True)],
+            iterate_rtol=1e-12, iterate_atol=1e-14, iterate_max=200,
+        )
+        out = model.step(state, drivers, 1.0)
+        return (out["A"]["a.x"].reshape(n) * weights).sum() + out["B"]["b.x"].sum()
+
+    s = torch.tensor(0.3, dtype=F64, requires_grad=True)
+    (grad,) = torch.autograd.grad(run(s), (s,))
+    h = 1e-6
+    fd = (run(torch.tensor(0.3 + h, dtype=F64)) - run(torch.tensor(0.3 - h, dtype=F64))) / (2 * h)
+    assert grad.item() == pytest.approx(fd.item(), rel=1e-6)
