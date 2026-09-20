@@ -76,7 +76,7 @@ source = ["noodl"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-extend-exclude = ["legacy", ".claude"]
+extend-exclude = [".claude"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]

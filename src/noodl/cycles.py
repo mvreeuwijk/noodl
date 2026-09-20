@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import itertools
+
 import torch
 
 from noodl.topology import Network
@@ -303,3 +305,28 @@ def project_measured(
             f"max constraint residual {residual.abs().max().item():.3e}"
         )
     return q
+
+
+def flow_direction_count(net: Network, kind: str | None = None) -> int:
+    """Winder's (1966) count of the flow-direction patterns a network admits: the number of
+    regions into which the b coordinate hyperplanes divide the l-dimensional cycle space.
+    Exponential in the number of edges (every column subset of the cycle basis is
+    inspected); a diagnostic for small graphs, ported from the 2019 Tellegen package.
+
+    An edge that no fundamental cycle traverses (an all-zero column of the cycle basis,
+    such as a bridge/pendant edge in a forest) carries no cycle flow and so imposes no
+    hyperplane on the cycle space; such columns are dropped before the enumeration, since
+    Winder's inclusion-exclusion assumes every column defines a proper hyperplane and an
+    all-zero column would poison the alternating sum."""
+    J = net.cycle_basis(kind).to(torch.float64)
+    keep = (J != 0).any(0)
+    J = J[:, keep]
+    n_cycles, n_edges = J.shape
+    if n_cycles == 0:
+        return 1
+    count = 1
+    for k in range(1, n_edges + 1):
+        for cols in itertools.combinations(range(n_edges), k):
+            r = int(torch.linalg.matrix_rank(J[:, list(cols)]))
+            count += 1 if (r - k) % 2 == 0 else -1
+    return count

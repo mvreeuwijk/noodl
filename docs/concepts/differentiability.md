@@ -71,6 +71,75 @@ invisible to the differentiable solve. Since `differentiable=False` returns deta
 one as an instance attribute. See [Elements and drives](elements.md#the-rule-a-drive-must-obey)
 for why this is structural rather than stylistic.
 
+## What is guaranteed
+
+The sections above describe how noodl differentiates and what it takes to keep that safe.
+This section states the contract itself, as a list of bounded claims, each pinned to the test
+that would fail if the claim stopped holding.
+
+- **First-order derivatives only.** The implicit adjoint never builds a graph connecting its
+  own returned gradients back to its inputs, so a second `torch.autograd.grad(..., create_graph=True)`
+  through an already-differentiated implicit solve is refused by name, inside `backward()` at
+  the moment that second differentiation is attempted, rather than silently returning an
+  incomplete result with a missing second-order term
+  (pinned by tests/solvers/test_implicit.py::test_second_order_differentiation_raises_instead_of_silently_dropping_a_term).
+- **At regular solutions.** The guarantee above is for a converged solve at which the residual's
+  Jacobian is invertible; every implicit-adjoint gradient this page cites is checked at such a
+  point, both for a linear system and for a Newton solve of a nonlinear one
+  (pinned by tests/solvers/test_implicit.py::test_gradcheck_implicit_solve_batched_wrt_linear_system_matrix_entries
+  and tests/solvers/test_implicit.py::test_gradcheck_implicit_solve_on_cube_root_wrt_parameter).
+- **Implicit adjoint for linear and Newton solves.** For a residual $R(z, \theta) = 0$ solved
+  at $z^*$, the backward pass solves the *transposed* system for the adjoint variable,
+  $R_z^T \lambda = L_z$, and then assembles the parameter gradient from one more pass through
+  the residual, $dL/d\theta = L_\theta - R_\theta^T \lambda$ — never by unrolling the forward
+  iteration. `adjoint()` solving the transposed system is checked directly
+  (pinned by tests/solvers/test_implicit.py::test_adjoint_solves_the_transposed_system), and the
+  same construction is what `_LinearSolve` in `noodl.layers.transport` specialises to a linear
+  residual (its own class docstring calls out `solvers/implicit.py`'s warning "almost verbatim,
+  because it is the identical trap").
+- **A discrete-step derivative for every integrator, including the exponential action with a
+  state-independent term count.** `implicit`, `trapezoidal` and `exact` (matrix-exponential)
+  schemes are all differentiable, and the exact scheme's tangent at equilibrium matches the
+  analytic matrix-exponential derivative even from $x_0 = 0$ or $x_0 \to 0$, because the
+  Taylor schedule (substep count $s$, term count $m$) is computed from $\lVert dt\, M\rVert_1$
+  under `no_grad` before any arithmetic on $x$ or the forcing term runs — the term count never
+  depends on the state being differentiated
+  (pinned by tests/layers/test_transport_derivatives.py::test_exact_step_tangent_matches_the_matrix_exponential_at_equilibrium).
+- **Every transport coefficient is differentiable under every scheme.** Carrier, transmission,
+  kinetics, removal and conductance all reach the backward pass under `implicit`, `trapezoidal`
+  and `exact` alike, checked by `gradcheck` against each coefficient family, both in a single
+  step and at steady state
+  (pinned by tests/layers/test_transport_coefficients.py::test_carrier_gradient,
+  tests/layers/test_transport_coefficients.py::test_transmission_gradient,
+  tests/layers/test_transport_coefficients.py::test_kinetics_gradient,
+  tests/layers/test_transport_coefficients.py::test_removal_gradient and
+  tests/layers/test_transport_coefficients.py::test_conductance_gradient, all parametrised
+  over scheme, plus each one's `_steady` counterpart).
+- **Coupled fixed points are differentiated by unrolling.** Both `Model`'s own `coupling="iterate"`
+  and `couple.CoupledModel`'s two-way join repeat a pass to convergence and keep every pass on
+  the autograd graph, so memory grows with the pass count; the convergence decision itself is
+  made on detached copies and never enters the graph. An implicit interface adjoint (one solve
+  at the converged interface state, independent of pass count) is a recorded follow-up, not
+  yet implemented. The cross-interface gradient this unrolling produces is checked against
+  central differences for every transport scheme
+  (pinned by tests/test_couple_conservation.py::test_cross_interface_gradient_matches_central_differences_for_each_scheme).
+- **Nonsmooth element laws have declared piecewise semantics, named per element.** `Damper`
+  evaluates both signed power-law branches everywhere and selects with `torch.where`, so its
+  `dflow` is finite at the kink (`dp = 0`) and matches finite differences away from it
+  (pinned by tests/elements/test_damper.py::test_dflow_matches_finite_differences_on_both_sides
+  and tests/elements/test_damper.py::test_gradcheck_flow_wrt_dp_away_from_the_kinks_and_finite_at_zero).
+  `Duct` declares a laminar/turbulent transition at `Re_t` with its own bounded, shrinking
+  transition step, checked at and either side of that boundary
+  (pinned by tests/elements/test_duct.py::test_gradcheck_flow_wrt_dp_at_zero_inside_and_outside_the_transition).
+  `UpstreamDensityPowerLaw` declares its own transition and is finite through it too — see
+  `tests/elements/test_upstream.py` for that element's own kink tests. No element in noodl
+  claims to be globally smooth where its law is not; where it is not, the transition is
+  declared and tested, not left to autograd to discover.
+
+No claim above is new: each restates something the module docstrings of
+`noodl.solvers.implicit`, `noodl.layers.transport` and `noodl.couple` already document, gathered
+here as one checklist with the test that pins it.
+
 ## What this is for
 
 ### Parameter estimation

@@ -82,8 +82,8 @@ it.
 ## Credits and licence
 
 noodl grew out of John Craske's 2019 `Tellegen` package, which formulated nonlinear networks
-after Brayton and Moser using autograd; that original is kept unchanged under `legacy/` for
-reference. This project ports the topology layer to PyTorch and rebuilds the physics as nodal
-state-space modules with storage at nodes, typed edges, and batching over instances.
+after Brayton and Moser using autograd. This project ports the topology
+layer to PyTorch and rebuilds the physics as nodal state-space modules with storage at nodes,
+typed edges, and batching over instances.
 
 Authors: John Craske and Maarten van Reeuwijk. MIT licensed.

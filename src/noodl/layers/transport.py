@@ -45,13 +45,10 @@ from noodl.solvers.implicit import TransposeOperator as _TransposeView
 from noodl.solvers.select import solve as _solve_operator
 from noodl.topology import Network, Node
 
-# `_TransposeView` used to be its own LinearOperator-shaped adjoint-view class, duplicating
-# `solvers.implicit.TransposeOperator` method for method except for `spd_certificate` (this
-# module's version always returned None; `TransposeOperator`'s forwards the wrapped
-# operator's certificate iff it declares itself symmetric). Both this layer's operators
+# `_TransposeView` is `solvers.implicit.TransposeOperator`. Both this layer's operators
 # (`AdvectionOperator`, `_AffineSystemOperator` below) declare `symmetric = False`, so
-# `TransposeOperator.spd_certificate()` returns None for them exactly as the old local class
-# did -- this alias changes nothing observable here, it only removes the duplicate.
+# `TransposeOperator.spd_certificate()` returns None for them.
+# History: see docs/development-history.md (Milestone 1b).
 
 
 def active_interior(
@@ -362,13 +359,10 @@ class TransportLayer:
                     f"conduction_kind is given"
                 )
             # The conduction edges' ENDPOINTS, never the (n, b_c) incidence matrix and never
-            # the (n, n) Laplacian it used to build here: since Task 15 this tuple is the
-            # layer's whole representation of its conduction topology. `_advection_operator`
-            # (Task 9) already consumed exactly this; `operator()`, the dense oracle, now
-            # forms its (n, n) `L` from it on demand (`_conduction_matrix`). The (n, n)
-            # matrix was 8.5 MB at the composed model's reference size, grew 4x per node
-            # doubling, and -- with no conduction configured, as in that model -- was a block
-            # of ZEROS that `operator()` subtracted for nothing.
+            # the (n, n) Laplacian, are this layer's whole representation of its conduction
+            # topology; `operator()`, the dense oracle, forms its (n, n) `L` from it on
+            # demand (`_conduction_matrix`).
+            # History: see docs/development-history.md (Milestone 1b).
             csrc, ctgt = net.endpoints(conduction_kind)
             b_c = len(csrc)
             g = torch.as_tensor(conductance, dtype=net.dtype)
@@ -703,6 +697,91 @@ class TransportLayer:
         `scheme="exact"` has no changing-volume form (the exponential step assumes a fixed
         storage over the whole step) and raises `ValueError` naming the layer when
         `capacity_prev` differs from `capacity`.
+
+        Delegates to `_step` with `want_transfer=False`, which never requests the exact
+        scheme's integral accumulator -- the diagonal shift that makes a sealed pure-decay
+        zone cost one Taylor term stays available on this path (see `_expm_action`).
+        """
+        return self._step(
+            x, q, sources, x_boundary, dt,
+            on_failure=on_failure, capacity=capacity, capacity_prev=capacity_prev,
+            want_transfer=False,
+        )[0]
+
+    def step_with_transfer(
+        self,
+        x: torch.Tensor,
+        q: torch.Tensor,
+        sources: torch.Tensor,
+        x_boundary: torch.Tensor,
+        dt: float,
+        *,
+        on_failure: str = "raise",
+        capacity: torch.Tensor | None = None,
+        capacity_prev: torch.Tensor | None = None,
+    ) -> TransportStep:
+        """Advance one timestep under `self.scheme`, like `step`, and also report the
+        time-integrated amount that crossed each boundary node during the step.
+
+        Returns `TransportStep(x, boundary_transfer)`. `boundary_transfer` has this layer's
+        boundary layout: `(..., n_b)` for one species, or `(..., n_b, K)` stacked, matching
+        how `x` was given.
+
+        Sign and unit convention: `boundary_transfer[b]` is the amount (state unit times
+        capacity unit -- e.g. concentration times volume) that entered boundary node `b`
+        from this layer's interior during the step, positive when the interior lost it. It
+        includes carrier, transmission and conduction exactly as the interior amount balance
+        does: with transmission below one, the transfer reports what ARRIVES at the boundary
+        while the interior lost more, the difference being a transit loss (not double-counted
+        anywhere else). Each scheme integrates the state consistently with how it advanced
+        `x` itself: `implicit` uses `dt * x_new` (backward Euler holds the rate at the new
+        state over the whole step), `trapezoidal` uses `dt/2 (x_old + x_new)` (its own
+        quadrature), and `exact` uses the Taylor accumulator `int_0^dt x(tau) dtau` from
+        `_expm_action(..., integrate=True)`; in every case the boundary's own prescribed
+        value contributes `dt * x_b` (constant over the step). `out.x` from this method
+        agrees with `layer.step(...)` only up to the exponential action's own tolerance
+        (about 1e-12), not bitwise: in the homogeneous exact case `step` takes a diagonal
+        shift that `step_with_transfer` cannot take when the accumulator is requested. The
+        state update itself is untouched -- only the exact scheme's diagonal shift is
+        unavailable here, and an extra functional of the same trajectory is reported
+        alongside it.
+
+        `on_failure="return"` is refused (`ValueError` naming the layer): no `SolveResult`
+        carries a boundary transfer, so there is nothing sensible to return the raw solver
+        status alongside. `capacity`/`capacity_prev` behave exactly as in `step`.
+        """
+        if on_failure == "return":
+            raise ValueError(
+                f"TransportLayer '{self.name}': on_failure='return' has no effect for "
+                f"step_with_transfer (no SolveResult carries a boundary transfer); use "
+                f"the default on_failure='raise'."
+            )
+        result, transfer = self._step(
+            x, q, sources, x_boundary, dt,
+            on_failure=on_failure, capacity=capacity, capacity_prev=capacity_prev,
+            want_transfer=True,
+        )
+        return TransportStep(result, transfer)
+
+    def _step(
+        self,
+        x: torch.Tensor,
+        q: torch.Tensor,
+        sources: torch.Tensor,
+        x_boundary: torch.Tensor,
+        dt: float,
+        *,
+        on_failure: str = "raise",
+        capacity: torch.Tensor | None = None,
+        capacity_prev: torch.Tensor | None = None,
+        want_transfer: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Shared body of `step` and `step_with_transfer`; see both for the public contract.
+
+        Returns `(x_new, boundary_transfer)`, `boundary_transfer` `None` unless
+        `want_transfer` (and always `None` on the `on_failure="return"` early-return path,
+        which only `step` can reach -- `step_with_transfer` refuses that combination before
+        calling here).
         """
         if on_failure not in ("raise", "return"):
             raise ValueError(
@@ -711,10 +790,8 @@ class TransportLayer:
             )
         if on_failure == "return" and self.scheme == "exact":
             # Both `on_failure` checks are ARGUMENT VALIDITY and both belong here, before any
-            # work. This one used to sit inside the `scheme == "exact"` branch below, after
-            # `_to_stacked` had already validated and reshaped `x`, so a caller who passed
-            # both a bad shape and this unusable combination was told about the shape (final
-            # review M9). `on_failure='return'` is wrong for this scheme whatever the shapes.
+            # work. `on_failure='return'` is wrong for this scheme whatever the shapes.
+            # History: see docs/development-history.md (Milestone 1b).
             raise ValueError(
                 f"TransportLayer '{self.name}': on_failure='return' has no effect for "
                 f"scheme='exact' (there is no linear solve to return the status of; "
@@ -758,28 +835,52 @@ class TransportLayer:
                 and bool((x_boundary == 0).all())
                 and bool((sources == 0).all())
             )
-            result = _expm_action(
+            expm = _expm_action(
                 op, x_s, b0, dt, where=f"TransportLayer '{self.name}' exact step",
-                shift=homogeneous,
-            ).x
+                # `step` never requests the integral, so the shift stays whatever
+                # `homogeneous` says; `step_with_transfer` needs the accumulator, which
+                # `_expm_action` never combines with a shift (its own rule already turns
+                # `shift` off whenever `integrate=True` -- passed explicitly here so that
+                # stays true by construction, not by relying on the inferred default).
+                shift=False if want_transfer else homogeneous,
+                integrate=want_transfer,
+            )
+            result = expm.x
         elif self.scheme == "implicit":
             result, reduced = self._implicit_step_sparse(
                 x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t
             )
             if on_failure == "return":
-                return result
+                return result, None
         elif self.scheme == "trapezoidal":
             result, reduced = self._trapezoidal_step_sparse(
                 x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t
             )
             if on_failure == "return":
-                return result
+                return result, None
         else:
             raise ValueError(
                 f"TransportLayer '{self.name}': unknown scheme {self.scheme!r}; "
                 f"valid schemes are 'exact', 'implicit', 'trapezoidal'"
             )
-        return self._from_stacked(result.to(out_dtype), self.n_i, reduced)
+
+        transfer_s = None
+        if want_transfer:
+            xb_s_full, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
+            op_t = op if self.scheme == "exact" else self._advection_operator(q.to(dtype), cap_t)
+            if self.scheme == "implicit":
+                x_int = dt * result
+            elif self.scheme == "trapezoidal":
+                x_int = 0.5 * dt * (x_s + result)
+            else:                       # exact: the accumulator, computed with integrate=True
+                x_int = expm.integral
+            transfer_s = op_t.boundary_net_inflow(x_int, dt * xb_s_full)
+
+        return (
+            self._from_stacked(result.to(out_dtype), self.n_i, reduced),
+            None if transfer_s is None
+            else self._from_stacked(transfer_s.to(out_dtype), self.n_b, reduced),
+        )
 
     def steady(
         self, q: torch.Tensor, sources: torch.Tensor, x_boundary: torch.Tensor,
@@ -957,6 +1058,15 @@ def _van_loan_step_dense(
 
 
 _TAYLOR_M_MAX = 55
+
+
+class TransportStep(NamedTuple):
+    """`TransportLayer.step_with_transfer`'s return: the new state and the time-integrated
+    amount that crossed each boundary node during the step. See that method's docstring for
+    the sign/unit convention and the per-scheme integration formula."""
+
+    x: torch.Tensor
+    boundary_transfer: torch.Tensor
 
 
 class ExpmResult(NamedTuple):

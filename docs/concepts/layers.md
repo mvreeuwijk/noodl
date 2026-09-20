@@ -129,6 +129,32 @@ the storage at the state's own time, which `Model.initial_capacities(state, driv
 querying the closures. The `"exact"` scheme has no changing-capacity form and raises by name if
 `capacity_prev` differs from `capacity`.
 
+## `ConstitutiveLayer`
+
+The loop formulation, for the one case `PotentialFlowLayer` cannot express: a branch law
+that is flow-controlled, mixes potential- and flow-controlled edges, or is a dynamic element
+(inductor, capacitor) stepped implicitly. Instead of solving for nodal potentials directly,
+it solves for cycle amplitudes and reduced nodal potentials so both Kirchhoff laws hold by
+construction, leaving only `law(p, q, theta) = 0` to solve — `b` equations in `b` unknowns
+for a connected network of `b` branches. It is a dense solve, for small networks by nature
+(the Jacobian is a plain `torch.func.jacrev` tensor, no sparse path); use `PotentialFlowLayer`
+for nodal balances over a network of any size.
+
+```python
+from noodl.layers.constitutive import ConstitutiveLayer
+
+def spring_mass_damper(p, q, theta):
+    L, R, C, q0_prev, p2_prev, dt = theta
+    return torch.stack([
+        q[0] - q0_prev - dt / L * p[0],   # inductor, implicit
+        p[1] - R * q[1],                   # resistor
+        p[2] - p2_prev - dt * q[2],        # capacitor, implicit
+    ])
+
+layer = ConstitutiveLayer(net, "smd", kind="pipe", law=spring_mass_damper)
+p, q = layer.solve(theta, z0=z0)   # z0: the previous step's own z, for a dynamic law
+```
+
 ## `Reaction`
 
 Applied to a transport layer's state after its step, operator-split:

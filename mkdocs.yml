@@ -63,6 +63,8 @@ nav:
       - Water distribution: applications/water.md
       - Capacitated transfer: applications/capacitated.md
       - Coupling: applications/coupling.md
+  - Development:
+      - Extending noodl: development/extending.md
   - API reference: api.md
   - Theory: theory.md
 

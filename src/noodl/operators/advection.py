@@ -261,6 +261,45 @@ class AdvectionOperator:
         y_i = y_i / cap
         return y_i.reshape(*y_i.shape[:-2], K * n_i)
 
+    def boundary_net_inflow(
+        self, x_interior: torch.Tensor, x_boundary: torch.Tensor
+    ) -> torch.Tensor:
+        """Net rate at which AMOUNT enters each boundary node from this layer: the boundary
+        rows of the capacity-free generator applied to the full state (interior values at
+        interior nodes, prescribed values at boundary nodes). Positive means the interior is
+        losing amount to that boundary node. Carrier, transmission and conduction enter
+        exactly as they do in `matvec`; there is no capacity division, since a boundary node
+        holds no storage of this layer. Stacked layouts on both sides: `(..., K*n_i)` in,
+        `(..., K*n_b)` out."""
+        K, n_i = self.n_species, self.n_interior
+        n_b = self._boundary_idx.shape[0]
+        dtype = x_interior.dtype
+
+        # Reshape and embed interior values
+        xi_kn = x_interior.reshape(*x_interior.shape[:-1], K, n_i)
+        v_interior = self._embed(xi_kn, self._interior_idx, dtype)
+
+        # Reshape and embed boundary values
+        xb_kn = x_boundary.to(dtype).reshape(*x_boundary.shape[:-1], K, n_b)
+        v_boundary = self._embed(xb_kn, self._boundary_idx, dtype)
+
+        # If the two embedded tensors have different batch shapes due to broadcasting,
+        # broadcast both to a common batch shape first
+        batch_shape = torch.broadcast_shapes(v_interior.shape[:-2], v_boundary.shape[:-2])
+        if v_interior.shape[:-2] != batch_shape:
+            v_interior = v_interior.expand(*batch_shape, K, self._n)
+        if v_boundary.shape[:-2] != batch_shape:
+            v_boundary = v_boundary.expand(*batch_shape, K, self._n)
+
+        # Combine full state
+        v = v_interior + v_boundary
+
+        # Apply raw action and select boundary rows
+        raw = self._raw_action(v, transpose=False)
+        y_b = raw.index_select(-1, self._boundary_idx)
+
+        return y_b.reshape(*y_b.shape[:-2], K * n_b)
+
     def rmatvec(self, y: torch.Tensor) -> torch.Tensor:
         K, n_i = self.n_species, self.n_interior
         dtype = y.dtype

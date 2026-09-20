@@ -106,6 +106,140 @@ The committed report sweeps ensemble size and simulation length, now under two s
 section 6's species count and joined-submodel sweeps, and its composed robustness cases, are
 not measured. Nodes and edges are covered by the two shape gates.
 
+### Docstring narratives moved from source
+
+The paragraphs below were review-history narrative embedded in source docstrings and
+comments; they were moved here (Task 26) to keep the contract beside the code concise, and
+are reproduced verbatim.
+
+From `src/noodl/layers/potential.py::PotentialFlowLayer._grounding_check`:
+
+> The certificate (Task 3's `solvers.grounding.spd_certificate`) tests both of spec
+> section 3.1's testable conditions -- every branch slope non-negative, and every
+> interior node grounded through strictly positive slopes -- so the batched message
+> below ("do not certify a grounded, positive-slope system") states exactly what was
+> checked. It is run on the slopes
+> GIVEN -- the caller decides whether those are `linear_init`'s tangent-at-zero slopes
+> or the actual `dflows` at a solve point -- and it is per instance. That is the whole
+> point: the pre-Task-11 check ORed "is this edge's slope nonzero" across the WHOLE
+> batch before testing connectivity, so an edge closed in one instance but open in
+> another counted as present for both, and a genuinely ungrounded instance sailed
+> through to a dense factorisation that could only report "singular", if it reported
+> anything at all.
+>
+> The message is built from `solvers.grounding.spd_diagnosis` (amendment A2), which
+> names, per failing instance, either the negative-slope EDGES or the ungrounded
+> interior NODES. Node indices are rendered as node NAMES here, because this layer --
+> unlike the raw operator -- knows them, and because the error text every existing
+> (unbatched) test in test_potential.py asserts on is exactly those names. A batched
+> failure additionally leads with the failing BATCH INDICES, since node-level detail
+> alone is not attributable across unrelated per-instance failures. Every message
+> names the offending LAYER first: a model composes several layers over one network,
+> and "solve: floating nodes ... ['z']" alone does not say which of them failed.
+
+From `src/noodl/layers/potential.py::PotentialFlowLayer.solve`:
+
+> This branch used to run Newton's closures under ORDINARY autograd, so with a
+> `learnable=True` Element (or a grad-requiring `phi_boundary`/`drivers`/`sources`) the
+> result carried an UNROLLED graph through the converged iterate. Those gradients were
+> real but were never the implicit-function ones `differentiable=True` computes, and
+> nothing asked for them. Worse, they made the INNER SOLVER'S CHOICE depend on the
+> caller's ambient grad mode: `solvers.select.solve`'s `"auto"` will not hand a
+> grad-requiring solve to the non-differentiable sparse-direct backend, so the same
+> call factorised through SuperLU from a plain call site and fell back to PCG -- 4.6x
+> slower -- from inside `torch.enable_grad()` with a grad-requiring `sources`. A
+> backend must not be a function of who is calling. A caller who wants gradients calls
+> `differentiable=True`, which is unchanged (`solvers.implicit._Implicit.forward`
+> already solved under `no_grad` and takes its gradients from the adjoint).
+
+From `src/noodl/layers/potential.py::PotentialFlowLayer.solve` (body comment, the
+detached-`phi0` `no_grad` block):
+
+> What it costs is everything `linear_init` does -- a whole preconditioned-CG loop, its
+> int64 gather indices and every iterate -- retained until backward(). Measured on
+> the composed model at ensemble 100 (Task 14 review): 2567 MB of the 2571 MB saved
+> per differentiable step came from here; with a detached guess the same step saves
+> 74.7 MB.
+
+From `src/noodl/layers/transport.py` (module-level comment on the `_TransposeView` alias):
+
+> `_TransposeView` used to be its own LinearOperator-shaped adjoint-view class, duplicating
+> `solvers.implicit.TransposeOperator` method for method except for `spd_certificate` (this
+> module's version always returned None; `TransposeOperator`'s forwards the wrapped
+> operator's certificate iff it declares itself symmetric). Both this layer's operators
+> (`AdvectionOperator`, `_AffineSystemOperator` below) declare `symmetric = False`, so
+> `TransposeOperator.spd_certificate()` returns None for them exactly as the old local class
+> did -- this alias changes nothing observable here, it only removes the duplicate.
+
+From `src/noodl/layers/transport.py::TransportLayer.__init__` (conduction-edges comment):
+
+> The conduction edges' ENDPOINTS, never the (n, b_c) incidence matrix and never
+> the (n, n) Laplacian it used to build here: since Task 15 this tuple is the
+> layer's whole representation of its conduction topology. `_advection_operator`
+> (Task 9) already consumed exactly this; `operator()`, the dense oracle, now
+> forms its (n, n) `L` from it on demand (`_conduction_matrix`). The (n, n)
+> matrix was 8.5 MB at the composed model's reference size, grew 4x per node
+> doubling, and -- with no conduction configured, as in that model -- was a block
+> of ZEROS that `operator()` subtracted for nothing.
+
+From `src/noodl/layers/transport.py::TransportLayer._step` (`on_failure` validation comment):
+
+> This one used to sit inside the `scheme == "exact"` branch below, after
+> `_to_stacked` had already validated and reshaped `x`, so a caller who passed
+> both a bad shape and this unusable combination was told about the shape (final
+> review M9).
+
+From `src/noodl/operators/graph.py::GraphLaplacianOperator._apply`:
+
+> The body is deliberately flat (the scatter into the full node space and the weighted
+> endpoint difference were their own helpers until the milestone-1b follow-up): this
+> runs once per PCG iteration, thousands of times per solve, and at ensemble 1 the two
+> extra Python frames alone were measurable against the ~50 us the whole call takes.
+>
+> The two `scatter_add_` calls are NOT fused into one `index_add` over
+> `cat([src, tgt])` with `cat([w, -w])`. That fusion IS bit-identical (measured: same
+> `x` to the last bit, since each output node still accumulates its incident edges in
+> the same order), but it is SLOWER -- interleaved medians at the composed reference
+> size: 34.7 vs 36.6 us at ensemble 1, 474.8 vs 529.8 us at ensemble 100 -- because
+> building `cat([w, -w])` costs a negate and a copy of a (batch, 2 * edges) tensor,
+> which is more than the one `scatter_add_` dispatch it saves. The accumulator zeros
+> tensor is already shared by both scatters, so there was never a second one to save.
+
+From `src/noodl/solvers/implicit.py` (module docstring):
+
+> `@torch.autograd.function.once_differentiable` was tried first, as it is the standard idiom
+> for this, but was found NOT to catch this case here and was dropped again: its guard fires
+> only when the incoming `grad_x` itself already `requires_grad`, which is false for the
+> ordinary implicit unit-seed `torch.autograd.grad(x.sum(), theta, create_graph=True)` produces
+> -- confirmed empirically (with and without the decorator, a mixed loss
+> `(dx/dtheta**2).sum() + (theta**2).sum()` silently returns only the second term's gradient,
+> identically, in both cases). It also cannot be layered underneath a manual check of its own,
+> since its wrapper forces `torch.no_grad()` before calling the wrapped body, hiding the very
+> signal (`torch.is_grad_enabled()`) that would otherwise reveal a `create_graph=True` request.
+
+From `src/noodl/solvers/newton.py` (module docstring):
+
+> This is what replaces the old identity-substitution trick for a converged-but-
+> singular instance: a dense ``torch.linalg.solve`` raises for the WHOLE batched
+> call if any one instance's matrix is singular, which is why the old code had to
+> substitute an identity for converged rows before the call ever happened. An
+> operator-based solve (PCG/GMRES, or a per-instance-safe direct path) is batched
+> elementwise over the leading dimensions with no cross-instance coupling in its
+> own arithmetic, so one instance being exactly singular cannot make the call
+> fail for its siblings; that instance's own step is simply garbage (possibly
+> NaN), and it is discarded by the ``torch.where`` on ``step`` below exactly as
+> it always was, without needing to keep the solve well-posed first.
+
+From `src/noodl/solvers/newton.py::inner_solve_rtol`:
+
+> measured: the float32 CONTAM series case in ``tests/verification`` floors at 3.2e-8 and
+> was reported as a ``linear_init`` failure until this floor was applied, and the 128-zone
+> leaky chain in ``tests/solvers/test_newton_operator_contract.py`` ran every inner PCG to
+> its full ``max_iter = 128`` ceiling. That second symptom is the quieter one: Newton
+> passes ``on_failure="return"``, so the ``MAX_ITER`` status is swallowed and only
+> ``NewtonResult.linear_iterations`` -- the number the composed-model report publishes --
+> carries the damage, as the ceiling rather than the work actually done.
+
 ## New public API in milestone 1b
 
 Every one of these is optional and defaults to the pre-milestone behaviour.
@@ -818,6 +952,157 @@ The full suite passes **1306 passed, 10 skipped, 10 deselected, 1 xfailed** (cov
   deselected by default like the milestone-1b and milestone-2 acceptance gates.
 
 
+## Performance re-baseline after framework hardening (20 Sep 2026)
+
+The framework-hardening branches changed the transport layer's exponential action, the
+closure contract and the coupler after the milestone-1b section 6.1 numbers above were
+recorded (17 September). `benchmarks/report_composed_scaling.py` was re-run unmodified on
+this code, same settings (`samples: 3`, `torch_num_threads: 14`, both `auto` and `cg`, the
+reference composed model: 1030 nodes, 2193 edges). The old report is kept as
+[`benchmarks/composed_scaling_report_2026-09-17.json`](benchmarks/composed_scaling_report_2026-09-17.json);
+the new one is [`benchmarks/composed_scaling_report.json`](benchmarks/composed_scaling_report.json)
+(generated 2026-09-20T14:17 UTC). `all_budgets_met` is `false` in both.
+
+**Machine state.** The machine was not idle: another session's Python process was active at
+launch and stayed active through the run (a ~2.4 GB resident process, unrelated to this
+benchmark, present before it started and never exited). Both reports otherwise share the same
+thread count (`torch_num_threads: 14`). Because of this, absolute times are **not** a clean
+before/after of the code change -- the largest single row, `cg`/ensemble 100/24 steps
+forward, moved from 149.9 s to 221.3 s, a 48% increase that is at least partly contention, not
+regression. The comparison that isolates the code change from machine noise is the controlled
+A/B that Task 28 runs; this re-baseline's job is only to re-measure on the current code and
+record the new absolute numbers under the noisy conditions they were actually taken under.
+
+**Result: every latency budget in the table remains unmet, on both solvers, on every row.**
+Two rows that passed their backward budget on 17 September (`auto`, ensemble 100, both step
+counts) now fail it as well -- the table has strictly more failures than before, not fewer,
+though under a machine state this run cannot separate from noise. All four peak-memory
+budgets still pass, on both solvers, and **both shape gates still pass** (peak RSS vs nodes
+1.06x, matvec time vs edges 0.32x, budget 2.5x each).
+
+| Ensemble | Steps | Solver | Thermal | Forward: old -> new | Budget | Backward: old -> new | Budget | Peak memory: old -> new | Budget |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 1 | `auto` | no | 0.205 s -> 0.512 s (10.24x) | 0.05 s FAIL (was 4.09x FAIL) | 0.157 s -> 0.452 s (4.52x) | 0.1 s FAIL (was 1.57x FAIL) | 66.3 MB -> 67.5 MB (0.67x) | 100 MB PASS |
+| 100 | 1 | `auto` | no | 2.900 s -> 8.899 s (17.80x) | 0.5 s FAIL (was 5.80x FAIL) | 0.912 s -> 3.194 s (3.19x) | 1.0 s **FAIL (was PASS, 0.91x)** | 128.7 MB -> 127.7 MB (0.13x) | 1000 MB PASS |
+| 100 | 24 | `auto` | no | 71.869 s -> 212.044 s (17.67x) | 12 s FAIL (was 5.99x FAIL) | 24.714 s -> 119.951 s (4.80x) | 25 s **FAIL (was PASS, 0.99x)** | 424.9 MB -> 420.1 MB (0.21x) | 2000 MB PASS |
+| 1000 | 1 | `auto` | no | 58.340 s -> 50.679 s (10.14x) | 5 s FAIL (was 11.67x FAIL) | 12.375 s -> 14.688 s (1.47x) | 10 s FAIL (was 1.24x FAIL) | 719.5 MB -> 726.0 MB (0.09x) | 8000 MB PASS |
+| 1 | 1 | `cg` | no | 0.482 s -> 1.099 s (21.98x) | 0.05 s FAIL (was 9.64x FAIL) | 0.283 s -> 0.435 s (4.35x) | 0.1 s FAIL (was 2.83x FAIL) | 46.1 MB -> 45.1 MB (0.45x) | 100 MB PASS |
+| 100 | 1 | `cg` | no | 6.747 s -> 8.322 s (16.64x) | 0.5 s FAIL (was 13.49x FAIL) | 2.370 s -> 2.998 s (3.00x) | 1.0 s FAIL (was 2.37x FAIL) | 127.6 MB -> 128.0 MB (0.13x) | 1000 MB PASS |
+| 100 | 24 | `cg` | no | 149.870 s -> 221.318 s (18.44x) | 12 s FAIL (was 12.49x FAIL) | 50.835 s -> 79.755 s (3.19x) | 25 s FAIL (was 2.03x FAIL) | 422.4 MB -> 419.0 MB (0.21x) | 2000 MB PASS |
+| 1000 | 1 | `cg` | no | 53.673 s -> 48.894 s (9.78x) | 5 s FAIL (was 10.73x FAIL) | 14.262 s -> 13.511 s (1.35x) | 10 s FAIL (was 1.43x FAIL) | 726.2 MB -> 725.7 MB (0.09x) | 8000 MB PASS |
+| 100 | 24 | `auto` | **yes** | 170.872 s -> 248.178 s (20.68x) | 12 s FAIL (was 14.24x FAIL) | 75.533 s -> 68.121 s (2.72x) | 25 s FAIL (was 3.02x FAIL) | 508.5 MB -> 497.6 MB (0.25x) | 2000 MB PASS |
+
+The four `auto`, non-thermal forward rows -- the shipped default, the numbers a reader of
+this table cares about first -- went 0.205 s -> 0.512 s (ensemble 1), 2.900 s -> 8.899 s
+(ensemble 100, 1 step), 71.869 s -> 212.044 s (ensemble 100, 24 steps) and 58.340 s -> 50.679 s
+(ensemble 1000, 1 step, the one row that got faster). **Unmet budgets, stated plainly: every
+forward budget and every backward budget in the table, on both solvers, on every row and
+including the thermal row.** Only the four peak-memory budgets and the two shape gates are
+met, unchanged from 17 September.
+
+**Exponential-action work counts (R3).** The norm-scheduled exponential action with the
+mean-diagonal shift (commit `e451872`, PR-1) changed the work three cases take:
+
+- Pure decay, `dx/dt = -500x`, `x(0) = 10`, `dt = 50`: 184,459 matvecs before the fix (the
+  review's instrumented count) -> 1 matvec after (the mean-diagonal shift makes `M - mu*I`
+  vanish for this case).
+- The forced mixed-stiffness batch in `tests/layers/test_transport_sparse.py`
+  (`test_expm_action_mixed_stiffness_batch_matches_standalone_within_tolerance`, removal
+  rates 0.01 and 500.0 batched together so the whole batch halves its step whenever either
+  instance hasn't converged): 104,280 matvecs after the fix (1896 substeps x 55 terms). There
+  is no instrumented pre-fix count for this specific case.
+- The smaller mixed-stiffness case in `tests/layers/test_expm_schedule.py`
+  (`test_a_mixed_stiffness_batch_shares_one_schedule_and_matches_the_reference`, a 4-node
+  chain, removal-free capacities 1.0 and 1e-3): 4,180 matvecs after the fix (76 substeps x 55
+  terms), measured directly on this branch for this re-baseline.
+
+## Decision record: what the re-baseline says (20 Sep 2026)
+
+**What PR-5 measured.** PR-5 re-ran `benchmarks/report_composed_scaling.py` on the current
+code (above) and added a controlled A/B against `main` (`8fdea28`, part 1 of the hardening)
+and pre-hardening (`f1d8177`), plus a cProfile of one coupled street/building run, to separate
+code-attributable change from the machine load both sessions ran under. The A/B, interleaved
+three ways per measurement so ambient load cancels out of the ratio rather than the absolute
+time, found no code-attributable slowdown: `coupling_street_building.py 1`, wall seconds,
+median of 3 interleaved rounds -- head 65.79 s (107 outer passes) vs main 66.03 s (116 passes)
+vs pre-hardening 65.60 s (116 passes), ratios head/main 0.996 and main/pre 1.007, both inside
+the ~1.2x noise band the machine's ambient load requires. The composed ensemble-1 forward
+step (implicit-scheme transport only, no `exact`-scheme closures) gave the same verdict:
+0.733 s / 0.711 s / 0.686 s median, ratios 1.031 / 1.036, again inside noise. The 1.5-3x
+deltas the 20 September re-baseline table shows against the 17 September numbers are
+therefore machine load (another session's ~3 GB resident Python process, active at launch and
+throughout both runs), not a regression introduced by this branch. Head does converge the
+coupled iteration in fewer outer passes than main and pre-hardening (107 vs 116, repeatable
+every round) -- a real, deterministic effect of part 1 of the hardening already on `main`
+before this branch -- but it happens to cost slightly more per pass, so it produces no
+wall-time gain. **All latency budgets in the re-baseline table remain unmet, on both solvers,
+on every row; all four peak-memory budgets and both shape gates pass**, unchanged from 17
+September.
+
+**A1 verdict.** The prepared-execution refactor (A1) is **not justified now.** The review's
+own gate was orchestration exceeding "about a fifth" of the coupled step; the profile of one
+coupled batch-1 run (81.2 s cumulative inside `couple.py:step`) puts the named orchestration
+functions -- `_apply_closures`, `_write_at`, `_forward_value`, `apply_conversion`, plus
+`_step_model`'s and `model.py`'s `step`/`_advance`/`_pass` self-times, and `couple.py`'s
+`_iterate` -- at roughly 0.70 s combined self-time, **under 1% of the run**, two orders of
+magnitude below the gate. It stays a recorded option, to revisit only if a future extension
+contract genuinely needs the prepared structure (fixed endpoint indices, explicit
+flow-provider bindings, an execution order) independent of any wall-time argument -- the
+profile gives no wall-time case for it today. (Those per-function self-times come from the
+profile's full pstats listing, not from the committed `benchmarks/profile_coupled_2026-09.txt`
+-- that file keeps only the cumulative-time top 25 of 8824 profiled functions, below which
+these orchestration functions fall; the full numbers are recorded in Task 28's report.)
+
+**Where the time goes, and what that points at.** 93.7% of the profiled run (76.05 s of
+81.17 s) is inside two numerical-solve subtrees, sibling calls from `model.py:_pass`: the
+implicit-scheme transport step (`layers/transport.py:_step` through `_linear_solve` and
+`solvers/select.py:solve` into `solvers/iterative.py:gmres`), 45.1 s cumulative with 13.25 s
+of that inside GMRES's own iterative-solve loop; and the building-airflow Newton solve
+(`layers/potential.py:solve` through `implicit_solve`/`newton`), 30.9 s cumulative. The
+transport solve is routed to GMRES rather than a direct method because `AdvectionOperator`
+(`src/noodl/operators/advection.py`) answers both eligibility questions the way that forces
+it there: `spd_certificate()` returns `None` unconditionally, and `assemble_sparse()` also
+returns `None` (a sparse COO form is derivable but was left unimplemented in Task C's scope,
+per that method's own docstring, precisely because it would not change the routing -- see
+below). `solvers/select.py`'s `method="auto"` eligibility table (module docstring, confirmed
+by reading `solve`) picks the backend in this order: a certificate mixed across a batch
+raises; a uniformly-certified-SPD operator with a usable sparse form goes to `sparse_direct`;
+a certified-SPD operator without one goes to `pcg`; and a certificate of `None`, or uniformly
+`False`, goes to `gmres` -- the last row is `AdvectionOperator`'s row, decided by
+`spd_certificate()` alone, so giving it an `assemble_sparse()` would not move it off GMRES
+without also revisiting nonsymmetric eligibility in `select.py`. This is where the review's
+solver/preconditioner list and the profile agree, and it names three concrete candidates to
+benchmark -- not commitments made here:
+
+- a COO/CSR assembly for `AdvectionOperator`, paired with a nonsymmetric sparse-direct
+  (or sparse-LU) eligibility path in `select.py`, so small-ensemble implicit transport steps
+  can take a direct route instead of GMRES (the doubled-nnz cost of carrying both edge
+  orientations, noted in `assemble_sparse`'s docstring, would need to be measured against
+  the 45.1 s this profile shows GMRES costing);
+- a preconditioner for GMRES on the advection system: `select.solve`'s `preconditioner`
+  argument is pcg-only (forwarded only to `pcg`, never to `gmres`), and `iterative.gmres`
+  itself takes no preconditioner parameter at all, so both of `select.solve`'s `gmres` call
+  sites -- the explicit `method="gmres"` branch and the `auto` fallback -- run GMRES on the
+  advection system fully unpreconditioned today. Adding one is the candidate; a Jacobi
+  diagonal is the natural first step, but A2 already flags a diagonal as a starting point,
+  not the complete strategy for a large ill-conditioned network, so a better one is the real
+  target;
+- for the potential layer's Newton solve, preconditioner quality under high conductance
+  contrast (the review's own item), which this profile's 30.9 s Newton share is consistent
+  with but does not by itself isolate from the reference model's ordinary conditioning.
+
+**Exponential-action work counts.** The mean-diagonal-shift fix changed matvec counts as
+recorded above: the pure-decay case collapses from 184,459 matvecs to 1 (the shift makes
+`M - mu*I` vanish for a case that is structurally an exact-shift-eligible pure decay); the
+committed forced mixed-stiffness batch test needs 104,280 matvecs after the fix, with no
+instrumented pre-fix count to compare against; the smaller mixed-stiffness case needs 4,180.
+Separately, and by design, `_expm_action` (`src/noodl/layers/transport.py`) now enforces a
+work budget rather than relying only on the recursion-depth limit the review flagged: it
+raises `RuntimeError` naming the predicted substep x Taylor-term matvec count when that count
+exceeds `max_matvecs` (200,000 by default), with the message advising `scheme='implicit'` or
+`'trapezoidal'`, or raising `max_matvecs` deliberately -- a stiff exact step is refused rather
+than silently left to run to a possibly much larger matvec count.
+
 ## Appendix: the source tree
 
 A module-by-module map of the repository, as it stood at the end of milestone 5.
@@ -886,7 +1171,6 @@ src/noodl/
   apps/inpfile.py  the section-keyed `.inp` tokenizer shared by apps/sewer/inp.py and
                  apps/water/inp.py, and nothing else
   physics/       flows.py, species.py: thin wrappers so downstream code runs unchanged
-legacy/          the original 2019 package, for reference
 docs/superpowers/  design spec and implementation plans
 tests/
   conftest.py, test_topology.py, test_endpoints.py, test_cycles.py, test_cycles_sparse.py,

@@ -36,7 +36,7 @@ as Newton's mask is). Failure follows the layers: raise by default, naming the o
 from __future__ import annotations
 
 import inspect
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -465,7 +465,7 @@ class Model:
     # -------------------------------------------------------------------- pass
     def _pass(
         self, state, drivers, dt, solve_kwargs, *, step_from: State | None = None,
-        t: float | None = None,
+        t: float | None = None, boundary_transfers: bool | Collection[str] = False,
     ) -> tuple[State, dict, Drivers]:
         """One closures -> potential -> capacitated -> transport -> reactions pass;
         `dt=None` means steady (and is refused outright by a model owning a capacitated
@@ -480,6 +480,14 @@ class Model:
         inside an iterated coupling: pass k there re-advances the SAME time step from the
         state at the start of it, with only the closures' view of the new state updated.
         It defaults to `state`, which is what a single ping-pong pass wants.
+
+        `boundary_transfers`: `True` runs `step_with_transfer` on every transport layer; a
+        collection of layer names runs it on ONLY those (every other transport layer takes
+        the plain, cheaper `step`); `False` (or an empty collection) runs it on none. Only
+        a layer actually asked for gets `diag[name]["boundary_transfer"]` -- a caller that
+        names one linked layer out of several must not pay `step_with_transfer`'s extra cost
+        (no diagonal shift on the `exact` scheme's Taylor accumulator, milestone 5 R2 review
+        finding) on layers whose transfer nothing reads.
         """
         base: State = state if step_from is None else step_from
         # N1: closure-carried state (spec 4.6a) must be evaluated from the STEP-START state
@@ -528,7 +536,27 @@ class Model:
             s_new, f = layer.step(s_prev, drv, dt, diagnostics=cd)
             new[f"{name}.s"], new[f"{name}.q"] = s_new, f
             diag[name] = cd
+        if isinstance(boundary_transfers, str):
+            # Defensive: `step()` already refuses a bare string before reaching here, but
+            # `_pass` is not otherwise unreachable except through it -- see that check for
+            # why a bare `str` (itself a `Collection[str]`) must never reach the ternary
+            # below, which would silently iterate its characters instead.
+            raise TypeError(
+                f"Model.step: boundary_transfers must be a bool or a collection of layer "
+                f"names, not a bare string; pass {boundary_transfers!r} in a set"
+            )
+        transfer_layers: set[str] = (
+            set(self.transport) if boundary_transfers is True
+            else set(boundary_transfers) if boundary_transfers
+            else set()
+        )
+        if dt is None and transfer_layers:
+            raise ValueError(
+                "Model: boundary_transfers has no meaning for a steady solve, which "
+                "integrates nothing"
+            )
         for name, layer in self.transport.items():
+            want_transfer = name in transfer_layers
             q_kind = self._kind_flows(name, new, drv)
             xb = self._require(drv, f"{name}.x_boundary")
             sources = drv.get(f"{name}.sources")
@@ -537,6 +565,7 @@ class Model:
             # construction-time capacity stands, so nothing changes for a fixed-storage
             # layer. Shape and positivity are checked by the layer, naming the nodes.
             cap = drv.get(f"{name}.capacity")
+            transfer_total = None
             if dt is None:
                 if sources is None:
                     # The state's own `x` is the layout authority when it is there; `x_b`
@@ -574,8 +603,19 @@ class Model:
                     else:
                         cap_prev_j = cap_prev + (j - 1) / k * (cap - cap_prev)
                         cap_j = cap_prev + j / k * (cap - cap_prev)
-                    x = layer.step(x, q_kind, sources, xb, dt / k, capacity=cap_j,
-                                   capacity_prev=cap_prev_j)
+                    if want_transfer:
+                        stepped = layer.step_with_transfer(
+                            x, q_kind, sources, xb, dt / k,
+                            capacity=cap_j, capacity_prev=cap_prev_j,
+                        )
+                        x = stepped.x
+                        transfer_total = (
+                            stepped.boundary_transfer if transfer_total is None
+                            else transfer_total + stepped.boundary_transfer
+                        )
+                    else:
+                        x = layer.step(x, q_kind, sources, xb, dt / k, capacity=cap_j,
+                                       capacity_prev=cap_prev_j)
                 if cap is not None:
                     new[f"{name}.capacity"] = cap
                 for lname, reaction in self.reactions:
@@ -583,6 +623,8 @@ class Model:
                         x = reaction.apply(x, dt, drv)
             new[f"{name}.x"] = x
             diag[name] = {"substeps": self.substeps[name]}
+            if want_transfer:
+                diag[name]["boundary_transfer"] = transfer_total
         # Closure-carried state (spec 4.6a): a declared key is copied OUT of the closure's
         # return into the state, so the next step's closures read it back. A closure that
         # declares a key and does not write it every call would freeze that state silently,
@@ -613,11 +655,52 @@ class Model:
 
     def step(
         self, state, drivers, dt: float, *, t: float | None = None,
-        diagnostics: dict | None = None, **solve_kwargs,
+        diagnostics: dict | None = None,
+        boundary_transfers: bool | Collection[str] = False, **solve_kwargs,
     ):
+        """Advance one step (spec's ping-pong or iterated coupling, per `self.coupling`).
+
+        `boundary_transfers` (keyword-only, default False) reports the time-integrated
+        amount that crossed a transport layer's boundary during the step, summed over that
+        layer's substeps, at `diagnostics["layers"][name]["boundary_transfer"]`: `True` for
+        EVERY transport layer, or a collection of layer names for only those (every other
+        transport layer takes the plain, cheaper `step` and gets no `"boundary_transfer"`
+        entry); `False` (the default) or an empty collection for none. A name in the
+        collection that is not one of this model's transport layers is refused, naming it.
+        `diagnostics` is created internally when the caller passes none, so the state
+        returned is unchanged either way -- only a caller who wants the transfers passes a
+        dict. Sign and unit convention: see `TransportLayer.step_with_transfer`. REACTIONS
+        ARE APPLIED AFTER TRANSPORT and are not part of the reported transfer.
+
+        Naming only the layer(s) actually linked to a coupling matters for cost: `True`
+        forces `step_with_transfer` (no diagonal shift on the `exact` scheme's Taylor
+        accumulator) on every transport layer of the model, including ones nothing reads a
+        transfer from -- a coupled recipient with an unlinked `exact`-scheme thermal layer
+        paid that cost on every one of its substeps for no benefit (task 18b).
+        """
         if not dt > 0:
             raise ValueError(f"Model: dt must be positive, got {dt!r}")
-        return self._advance(state, drivers, float(dt), diagnostics, solve_kwargs, t=t)
+        if isinstance(boundary_transfers, str):
+            # A bare `str` IS a `Collection[str]` -- `set("species")` iterates its
+            # CHARACTERS, not the one name meant, either raising a confusing "layer 's' does
+            # not exist" or, on a single-letter layer name (this repo's own tests use "a",
+            # "b", "c"), silently selecting the wrong layer. Refuse it outright rather than
+            # let either happen.
+            raise TypeError(
+                f"Model.step: boundary_transfers must be a bool or a collection of layer "
+                f"names, not a bare string; pass {boundary_transfers!r} in a set"
+            )
+        if boundary_transfers is not True and boundary_transfers is not False:
+            bad = sorted(set(boundary_transfers) - set(self.transport))
+            if bad:
+                raise ValueError(
+                    f"Model: boundary_transfers names {bad}, not transport layer(s) of this "
+                    f"model (has {sorted(self.transport)})"
+                )
+        return self._advance(
+            state, drivers, float(dt), diagnostics, solve_kwargs, t=t,
+            boundary_transfers=boundary_transfers,
+        )
 
     def steady(self, state, drivers, *, diagnostics: dict | None = None, **solve_kwargs):
         """The quasi-steady state of every layer at `drivers` (transport layers solved to
@@ -635,18 +718,29 @@ class Model:
         """
         return self._advance(state, drivers, None, diagnostics, solve_kwargs)
 
-    def _advance(self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None) -> State:
+    def _advance(
+        self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None,
+        boundary_transfers: bool | Collection[str] = False,
+    ) -> State:
         # The coupling seam: ping-pong is exactly ONE pass, taken with the state at the start
         # of the step; `coupling="iterate"` repeats `_pass` until the named transport states
         # stop changing, and reports the pass count it took.
         if self.coupling == "pingpong":
-            new, diag, _ = self._pass(state, drivers, dt, solve_kwargs, t=t)
+            new, diag, _ = self._pass(
+                state, drivers, dt, solve_kwargs, t=t, boundary_transfers=boundary_transfers,
+            )
             if diagnostics is not None:
                 diagnostics.update({"passes": 1, "layers": diag})
             return new
-        return self._iterate(state, drivers, dt, diagnostics, solve_kwargs, t=t)
+        return self._iterate(
+            state, drivers, dt, diagnostics, solve_kwargs, t=t,
+            boundary_transfers=boundary_transfers,
+        )
 
-    def _iterate(self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None) -> State:
+    def _iterate(
+        self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None,
+        boundary_transfers: bool | Collection[str] = False,
+    ) -> State:
         """Hensen's onion: repeat the pass until the named transport states stop changing.
 
         The relaxation takes a pass to start: `prev` is None after pass 1, so pass 2 is fed
@@ -681,7 +775,10 @@ class Model:
         # control variable unused inside the body is not (ruff B007).
         while passes < self.iterate_max:
             passes += 1
-            new, diag, _ = self._pass(fed, drivers, dt, solve_kwargs, step_from=state, t=t)
+            new, diag, _ = self._pass(
+                fed, drivers, dt, solve_kwargs, step_from=state, t=t,
+                boundary_transfers=boundary_transfers,
+            )
             if prev is not None:
                 with torch.no_grad():
                     ok: Tensor | None = None

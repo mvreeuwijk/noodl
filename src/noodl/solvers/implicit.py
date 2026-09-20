@@ -22,15 +22,8 @@ must be told this loudly rather than silently receiving an incomplete result in 
 second-order term is simply missing (contributing zero) while any other, first-order term in
 the same loss still produces a gradient.
 
-`@torch.autograd.function.once_differentiable` was tried first, as it is the standard idiom
-for this, but was found NOT to catch this case here and was dropped again: its guard fires
-only when the incoming `grad_x` itself already `requires_grad`, which is false for the
-ordinary implicit unit-seed `torch.autograd.grad(x.sum(), theta, create_graph=True)` produces
--- confirmed empirically (with and without the decorator, a mixed loss
-`(dx/dtheta**2).sum() + (theta**2).sum()` silently returns only the second term's gradient,
-identically, in both cases). It also cannot be layered underneath a manual check of its own,
-since its wrapper forces `torch.no_grad()` before calling the wrapped body, hiding the very
-signal (`torch.is_grad_enabled()`) that would otherwise reveal a `create_graph=True` request.
+History: see docs/development-history.md (Milestone 1b) for why
+`@torch.autograd.function.once_differentiable` does not catch this case.
 
 Instead, `backward` checks `torch.is_grad_enabled()` at its own entry, before any of its own
 `no_grad`/`enable_grad` blocks: PyTorch's engine calls `Function.backward` with grad mode

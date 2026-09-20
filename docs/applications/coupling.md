@@ -151,8 +151,10 @@ unchanged for `None` and raising with the sorted list of registered names for an
 unregistered conversion is never silently treated as identity.
 
 `transport_boundary_inflow(...)` returns the net mass inflow at a boundary node of a transport
-layer. `Model.ports()` cannot supply this: it reports `boundary_flows` for *potential* layers
-only.
+layer, computed from a single state snapshot. `Model.ports()` cannot supply this: it reports
+`boundary_flows` for *potential* layers only. The coupler itself no longer calls this to build
+the two-way feedback (see "The fixed point" below) — it is kept as a public helper and used in
+tests as an independent hand-reconstruction oracle.
 
 ## Unit conversions
 
@@ -173,46 +175,75 @@ street application's $\theta_w$ is radians counter-clockwise from east, giving t
 blows **toward**. A west wind is $W_d = 270°$ and $\theta = 0$; a north wind is $W_d = 0°$ and
 $\theta = 3\pi/2$. Both are pinned on the cardinal points by test.
 
-Note that the **backward** link in the canonical pairing needs `convert_back=None`: once
-`transport_boundary_inflow` has computed it, the feedback is a mass flux in kg/s on both sides.
+Note that the **backward** link in the canonical pairing needs `convert_back=None`: the feedback
+is the recipient's own integrated boundary transfer (an amount, divided by `dt` into a rate), a
+mass flux in kg/s on both sides already.
 
 ## The fixed point
 
-When any link is two-way, `step` routes through the iteration:
+When any link is two-way, `step` routes through the iteration, on a **recipient-first**
+Gauss-Seidel schedule (closing review findings R1, R2 and R7): the model that a two-way link
+writes its forward value *into* — the **recipient** — is stepped before its **donor**, and the
+donor receives exactly the amount the recipient's own step integrated across the shared
+boundary, never a flux recomputed from a state that has not been stepped yet.
 
-1. Apply the one-way links from the latest state.
-2. For each two-way link, compute the raw forward value, relax it against the previous pass's
-   value, write it onto the target's boundary, then compute and add the feedback flux.
-3. Step **every** model once **from the step-start state** — never from the previous pass's
-   output.
-4. Test convergence.
+1. Apply the one-way links from the latest state (the previous pass's output, or the step-start
+   state on the first pass).
+2. For each two-way link, compute the raw forward value from the latest state, relax it against
+   the previous pass's value, and write it onto the **recipient**'s boundary driver.
+3. Step every **recipient** once, **from the step-start state** — never from the previous pass's
+   output — recording the boundary transfer `Model.step` integrated over the recipient's own
+   whole outer step (its sub-steps included).
+4. For each two-way link, divide that integrated transfer by `dt` and **add** it, as a source
+   rate, into the **donor**'s sources, for the donor's own whole outer step.
+5. Step every other model (donors and any uncoupled models) once, from the step-start state.
+6. Test convergence.
 
-That third point is the rule that keeps the scheme correct: passes never compound into
-`passes × dt`.
+Step 3's "from the step-start state" is what keeps the scheme correct: passes never compound
+into `passes × dt`. Because the donor is always given exactly what the recipient's own scheme
+integrated this same pass, **conservation holds on every returned pass, not only at
+convergence** — no separate residual is needed to enforce it (independently checked in
+`tests/test_couple_conservation.py`, closed exchanges to floating-point precision regardless of
+scheme or sub-step ratio).
 
 **Convergence is judged on the *unrelaxed* residual** of the fixed-point map,
-$\lvert \text{raw}_k - \text{raw}_{k-1} \rvert \le \text{atol} + \text{rtol}\,\lvert \text{raw}_k \rvert$,
-per link and per batch instance, inside `no_grad`. Judging the *relaxed* increment instead would
-make the effective tolerance scale with the relaxation factor, letting a heavily damped run
-falsely report convergence.
+$\lvert g(v_k) - v_k \rvert \le \text{atol} + \text{rtol}\,\lvert g(v_k) \rvert$ — the
+**returned** forward value $g(v_k)$, recomputed from this pass's own output state, against
+$v_k$, the *relaxed* value the recipient was actually stepped with in this same pass — per link
+and per batch instance, inside `no_grad`, on **every** pass including the first. Judging the
+relaxed increment that produced $v_k$ instead would make the effective tolerance scale with the
+relaxation factor, letting a heavily damped run falsely report convergence while $g(v_k)$ still
+disagrees with $v_k$ by a large, unrelaxed amount.
+
+A model that is both a recipient and a donor of two-way links is refused at construction: the
+recipient-first schedule has no defined order for a cycle of two-way links.
 
 Failure to converge in `iterate_max` passes raises naming the link — for example
 `"street:street.x[0]->building:species.x_boundary"` — the failing instances, and the largest
 change.
 
-With `diagnostics`, you get `{"passes", "converged", "max_change"}`.
+With `diagnostics`, you get `{"passes", "converged", "max_change", "transfers"}` —
+`transfers` is the recipient's own integrated transfer per two-way link, from the pass that
+produced the returned state, keyed the same way as `max_change`.
 
 ## The canonical pairing: street ↔ building
 
 - **Forward, converted:** the street's segment concentration `street.x[i]` becomes the building's
   `species.x_boundary`, divided by the building's own `rho_amb`.
-- **Backward, two-way, unconverted:** the building's net species boundary inflow at its ambient
-  node is added into `street.sources` at the shared segment.
+- **Backward, two-way, unconverted:** the building is the **recipient**, so it is stepped first,
+  from that boundary value; its own species boundary transfer, integrated over its whole outer
+  step, divided by `dt`, is added into `street.sources` at the shared segment — already a mass
+  flux in kg/s on both sides, so no conversion is needed.
 - **Aliased weather drivers:** the street's `U_ref` → the building's `V_met` with no conversion
   (the street is built at $z_{\text{ref}} = 10$ m, matching CONTAM's met-station convention), and
   `theta_w` → `theta_w` through the wind-direction conversion.
 - **Multi-rate:** `substeps={"building": 60}` — the street steps once per hour, the building
-  sixty times at 60 s, with the glue-derived boundary held constant across the inner steps.
+  sixty times at 60 s, with the glue-derived boundary held constant across the inner steps. That
+  is an accuracy simplification, not a conservation one, and it is now **conservative**
+  regardless: whatever the building actually integrates across those sixty sub-steps — with the
+  boundary held constant or interpolated — is exactly the amount reported back and added to the
+  street's sources, so holding it constant cannot leak or fabricate mass, only make the
+  building's own response to a changing boundary less accurate within the hour.
 
 Physically, infiltration draws segment air into the building and the building acts as a sink on
 the street side. Both demos assert that sign.
@@ -221,38 +252,69 @@ the street side. Both demos assert that sign.
 
 | Check | Tolerance | Measured |
 |---|---|---|
-| A two-way step is a fixed point of one step from the start state | rtol 1e-9, atol 1e-14 | holds |
+| The returned state's forward value agrees with the value the recipient was stepped with, to rtol | rtol 1e-9, atol 1e-14 | holds |
 | Gradient across the join vs central differences | rel 1e-5 | holds |
 | `substeps={"building": k}` calls the fast model exactly `k` times per slow step | exact | holds |
-| Synthetic back-coupling, 2×3 m canyon: one-way 4.16974e-08 vs two-way 4.14518e-08 kg/m³ | measured | **0.589 %** change, 28 passes |
-| Real `leiden_small`, segment 783, steady 2.07911e-07 vs coupled 2.07896e-07 kg/m³ | measured | **7.2e-5** (0.0072 %) change, 22 passes |
-| Loose sequential file exchange vs the two-way result | measured | 0.589 % discrepancy — equal to the street-side change, as expected for a boundary response linear in the shared value |
-| Inverse 1: leakage calibration through the join | rel err < 0.05 | **1.29e-4**, final loss 3.4574e-08 |
-| Inverse 2: source attribution by one adjoint pass vs central differences | rel 1e-4 | 3.6e-7, 5.3e-7; third source structurally zero |
+| Closed two-way exchange conserves the total amount — exact/implicit/trapezoidal schemes, 1 and 4 recipient sub-steps | abs 1e-10 | holds |
+| 2×2 analytic fixed point (one implicit step each, unit source into the recipient) solves to $(4/3, 5/3)$ | abs 1e-9 | holds |
+| Structural guard: a two-way step assembles no dense topology operator (`upwind`/`incidence`/selectors) | n/a | holds |
+| Synthetic back-coupling, 2×3 m canyon: one-way 4.169740e-08 vs two-way 4.145151e-08 kg/m³ | measured | **0.5897 %** change, 27 passes |
+| Real `leiden_small`, segment 783, steady 2.079110e-07 vs coupled 2.078961e-07 kg/m³ | measured | **7.191e-5** (0.007191 %) change, 21 passes |
+| Loose sequential file exchange vs the two-way result | measured | 0.5897 % discrepancy — equal to the street-side change, as expected for a boundary response linear in the shared value |
+| Inverse 1: leakage calibration through the join | rel err < 0.05 | **1.288e-4**, final loss 3.4574e-08 |
+| Inverse 2: source attribution by one adjoint pass vs central differences | rel 1e-4 | 7.2e-9, 1.1e-8; third source structurally zero |
 | Inverse 3: one measured path recovers all four branch flows | rtol 1e-10 | exact |
 
-The real-data row is worth reading carefully. A 0.0072 % change is **negligible** — and that is
+The real-data row is worth reading carefully. A 0.007191 % change is **negligible** — and that is
 the honest result, not a disappointing one. One building's infiltration should not measurably
 change a whole street's concentration, and the number is correctly signed. The synthetic case,
-deliberately sized so the building matters, shows 0.589 %.
+deliberately sized so the building matters, shows 0.5897 %.
+
+Pass counts moved by one relative to the previous (Jacobi-style successive-substitution) coupler
+— 28 → 27 on the synthetic fixture, 22 → 21 on the real one — because the recipient-first
+Gauss-Seidel schedule now produces a real per-instance convergence verdict on the **first** pass
+(the old scheme's first pass wrote a placeholder that no pass could satisfy), rather than because
+the new schedule needs systematically more or fewer passes to close the loop.
 
 Throughput, on the headline union over 6 coupled hours with 60 building sub-steps per street
-hour: batch 1 takes 41.221 s and 116 outer passes; batch 10, 38.541 s and 128 passes; batch 100,
-134.772 s and 128 passes — 3.5x the time for 10x the batch, sub-linear. No budget is set.
+hour, re-measured after task 18b (`Model.step`'s `boundary_transfers` now names only the
+linked layer, not every transport layer of the recipient — see below): batch 1 takes
+52.647 s and 116 outer passes; batch 10, 61.282 s and 128 passes — the same pass counts as
+before the recipient-first change (this benchmark runs at the looser default `rtol=1e-8`,
+where the one-pass shift above does not show), and statistically indistinguishable from the
+pre-18b numbers (56.968 s / 63.055 s respectively; run-to-run variance on this machine is a
+few seconds either way). That is expected, not a null result: this benchmark's building
+model (`project_to_model`) carries exactly ONE transport layer, `species`, which is also the
+ONE linked layer, so `boundary_transfers=True` (every transport layer) and
+`boundary_transfers={"species"}` (only the linked one) request `step_with_transfer` on the
+same set here — nothing to skip. Task 18b's saving is for a recipient that ALSO carries an
+unlinked transport layer (e.g. a `thermal` layer alongside `species`, as the building
+application's own thermal builder produces, though this benchmark's `.prj`-based model does
+not build one — "no thermal layer: a .prj carries no thermal data"); that case is covered by
+`tests/test_couple_conservation.py`'s dedicated two-layer fixture and
+`tests/test_model_transfers.py`'s `boundary_transfers` collection tests, not by this
+benchmark. Batch 100 was not re-measured this round; its previous 150.288 s stands. The
+measured after-18b numbers -- 52.647 s at batch 1, 61.282 s at batch 10 -- keep the same
+sub-linear pattern as before (well under 10x the time for 10x the batch); no new ratio
+against the un-re-measured batch 100 is computed here. No budget is set.
 
 ## Limitations
 
 - **`CoupledModel.steady` is not built**, though the design names it in the intended public
   surface.
 - **Relaxation is fixed at 0.5** in practice — it is a constructor parameter, but no adaptive
-  scheme exists. Convergence takes 22–28 passes to rtol $10^{-10}$ on the demo fixtures. This is
-  flagged as a known risk: successive substitution at fixed 0.5 relaxation can converge to the
-  wrong root of a repelling fixed point, the same issue the
+  scheme exists. Convergence takes 21–27 passes to rtol $10^{-10}$ on the demo fixtures. This is
+  flagged as a known risk: recipient-first Gauss-Seidel substitution at fixed 0.5 relaxation can
+  still converge to the wrong root of a repelling fixed point, the same issue the
   [building application's](building.md#limitations) three-root case runs into.
-- **Single species only.** `transport_boundary_inflow` assumes a single-species transport layer
-  and raises `NotImplementedError` for more than one flow kind.
-- **The sub-stepping policy holds the glue value constant** across the fast model's inner steps
-  rather than interpolating. A follow-up if it proves too coarse.
+- **Single species, single flow kind only.** A two-way link is refused at construction
+  (`ValueError`) unless both layers have `n_species == 1` and the recipient's layer has exactly
+  one flow kind: `_reduced`'s single-species layout rule is ambiguous for a multi-species state,
+  and the recipient's own transfer is read at one boundary node of a single-flow-kind layer.
+- **The recipient-first schedule assumes no cycles of two-way links.** A model that is both a
+  recipient and a donor is refused at construction, by name, in the error message — the
+  conservative schedule is defined only when every two-way link can be given a strict
+  recipient-before-donor order, which a cycle cannot.
 - **Differentiated by unrolling** the outer passes, so memory grows with pass count. An
   implicit-function treatment of the fixed point is a recorded follow-up.
 - **Ambient temperature is not coupled** in the demo — it reaches the building only through

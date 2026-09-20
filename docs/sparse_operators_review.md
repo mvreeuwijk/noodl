@@ -237,8 +237,13 @@ For implementation, I recommend this order:
    shape. Same-physics graph union can preserve an SPD potential block;
    general multiphysics feedback need not. External black-box models retain
    their port/co-simulation contracts and do not acquire gradients automatically.
-   At union time, remap formerly prescribed interface nodes into shared balances
-   where appropriate and recheck grounding. For long differentiable simulations,
+   [As delivered in milestone 5, `noodl.couple.union` does not merge graphs or
+   remap interface nodes at all: it orchestrates two independently-built `Model`s,
+   exchanging named driver/state values between their `step` calls each outer step
+   and rechecking grounding within each model unchanged. The graph-merging design
+   sketched in this paragraph was not the one built; see
+   docs/development-history.md, Milestone 5 status, "Why orchestration, not graph
+   merging".] For long differentiable simulations,
    budget timestep-history memory separately: the existing implicit-function
    backward removes Newton-iteration history, not the history of all timesteps.
    Checkpointing or a separate time-adjoint strategy may be needed.

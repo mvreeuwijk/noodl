@@ -571,34 +571,18 @@ class PotentialFlowLayer:
     ) -> None:
         """Raise unless every instance in `slopes` certifies SPD.
 
-        The certificate (Task 3's `solvers.grounding.spd_certificate`) tests both of spec
-        section 3.1's testable conditions -- every branch slope non-negative, and every
-        interior node grounded through strictly positive slopes -- so the batched message
-        below ("do not certify a grounded, positive-slope system") states exactly what was
-        checked. It is run on the slopes
-        GIVEN -- the caller decides whether those are `linear_init`'s tangent-at-zero slopes
-        or the actual `dflows` at a solve point -- and it is per instance. That is the whole
-        point: the pre-Task-11 check ORed "is this edge's slope nonzero" across the WHOLE
-        batch before testing connectivity, so an edge closed in one instance but open in
-        another counted as present for both, and a genuinely ungrounded instance sailed
-        through to a dense factorisation that could only report "singular", if it reported
-        anything at all.
+        It is run on the slopes GIVEN -- the caller decides whether those are
+        `linear_init`'s tangent-at-zero slopes or the actual `dflows` at a solve point -- and
+        it is per instance, so an edge closed in one instance but open in another cannot be
+        conflated with it.
 
-        The message is built from `solvers.grounding.spd_diagnosis` (amendment A2), which
-        names, per failing instance, either the negative-slope EDGES or the ungrounded
-        interior NODES. Node indices are rendered as node NAMES here, because this layer --
-        unlike the raw operator -- knows them, and because the error text every existing
-        (unbatched) test in test_potential.py asserts on is exactly those names. A batched
-        failure additionally leads with the failing BATCH INDICES, since node-level detail
-        alone is not attributable across unrelated per-instance failures. Every message
-        names the offending LAYER first: a model composes several layers over one network,
-        and "solve: floating nodes ... ['z']" alone does not say which of them failed.
-
-        `node_slopes` (FR-1, spec 13.4), when this layer has node sources, is `diag(w')`
+        `node_slopes` (spec 13.4), when this layer has node sources, is `diag(w')`
         per compact interior row -- the same tensor `_node_source_slopes` returns. A node
         with a strictly positive entry there is grounded independent of any edge path (see
         `_extra_grounded`), so passing it here is what keeps a node grounded ONLY through a
         node source from being reported ungrounded.
+
+        History: see docs/development-history.md (Milestone 1b).
         """
         extra_grounded = self._extra_grounded(node_slopes)
         certified = spd_certificate(
@@ -823,20 +807,12 @@ class PotentialFlowLayer:
         With `differentiable=False`, the returned `(phi, q)` are ALWAYS DETACHED: the whole
         branch -- the initial guess, the grounding check, the Newton iteration, every inner
         linear solve and the final assemble/flows -- runs under `torch.no_grad()`, whatever
-        grad mode the caller is in.
+        grad mode the caller is in. A backend choice must not be a function of who is
+        calling: a caller who wants gradients calls `differentiable=True`, which is unchanged
+        (`solvers.implicit._Implicit.forward` already solved under `no_grad` and takes its
+        gradients from the adjoint).
 
-        This branch used to run Newton's closures under ORDINARY autograd, so with a
-        `learnable=True` Element (or a grad-requiring `phi_boundary`/`drivers`/`sources`) the
-        result carried an UNROLLED graph through the converged iterate. Those gradients were
-        real but were never the implicit-function ones `differentiable=True` computes, and
-        nothing asked for them. Worse, they made the INNER SOLVER'S CHOICE depend on the
-        caller's ambient grad mode: `solvers.select.solve`'s `"auto"` will not hand a
-        grad-requiring solve to the non-differentiable sparse-direct backend, so the same
-        call factorised through SuperLU from a plain call site and fell back to PCG -- 4.6x
-        slower -- from inside `torch.enable_grad()` with a grad-requiring `sources`. A
-        backend must not be a function of who is calling. A caller who wants gradients calls
-        `differentiable=True`, which is unchanged (`solvers.implicit._Implicit.forward`
-        already solved under `no_grad` and takes its gradients from the adjoint).
+        History: see docs/development-history.md (Milestone 1b).
         """
         drivers = drivers or {}
         newton_kwargs.setdefault("method", self.linear_solver)
@@ -863,13 +839,10 @@ class PotentialFlowLayer:
         #
         # This is a memory fix, not a numerical one: the converged point is where the
         # implicit-function adjoint linearises, and that point is independent of the guess
-        # the iteration started from, so tracing the guess buys no gradient at all. What it
-        # costs is everything `linear_init` does -- a whole preconditioned-CG loop, its
-        # int64 gather indices and every iterate -- retained until backward(). Measured on
-        # the composed model at ensemble 100 (Task 14 review): 2567 MB of the 2571 MB saved
-        # per differentiable step came from here; with a detached guess the same step saves
-        # 74.7 MB. `linear_init` itself is untouched and stays differentiable for callers
-        # who want it directly.
+        # the iteration started from, so tracing the guess buys no gradient at all.
+        # `linear_init` itself is untouched and stays differentiable for callers who want it
+        # directly.
+        # History: see docs/development-history.md (Milestone 1b).
         with torch.no_grad():
             if phi0 is None:
                 phi0 = self.linear_init(phi_boundary, drivers, sources)

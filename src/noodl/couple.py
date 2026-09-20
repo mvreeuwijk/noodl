@@ -9,7 +9,7 @@ when a link is two-way. This module must never import `noodl.apps.*`.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -139,8 +139,8 @@ def transport_boundary_inflow(
 
     `TransportLayer` never exposes this: its own `rate()` has no row for boundary nodes at
     all (design spec section 3, `Model.ports()` reports boundary flows only for potential
-    layers). Built here from `net.accumulate`/`net.upwind` alone -- `net.accumulate(w, kind)`
-    is the scatter-add form of `incidence(kind) @ w` (net OUTFLOW: +at source, -at target).
+    layers). Built here with `net.endpoints` + gather + `net.accumulate` to avoid assembling
+    a dense topology selector.
     """
     kind = flow_kinds[0] if len(flow_kinds) == 1 else None
     if kind is None:
@@ -152,10 +152,10 @@ def transport_boundary_inflow(
     full = torch.zeros(*batch_shape, net.n, dtype=x_interior.dtype, device=x_interior.device)
     full[..., interior_idx] = x_interior.expand(*batch_shape, interior_idx.numel())
     full[..., boundary_idx] = x_boundary.expand(*batch_shape, boundary_idx.numel())
-    upwind_selector = net.upwind(q, kind)          # (..., b_kind, n)
-    upstream_value = torch.einsum("...bn,...n->...b", upwind_selector, full)
-    mass_flux = q * upstream_value                  # (..., b_kind)
-    net_outflow = net.accumulate(mass_flux, kind)    # (..., n)
+    src, tgt = net.endpoints(kind)
+    upstream = torch.where(q >= 0, src, tgt)                       # (..., b_kind)
+    mass_flux = q * torch.gather(full, -1, upstream.expand(*batch_shape, upstream.shape[-1]))
+    net_outflow = net.accumulate(mass_flux, kind)
     node_idx = int(boundary_idx[node_position])
     return -net_outflow[..., node_idx]
 
@@ -167,8 +167,14 @@ class ValueLink:
     `from_key` is a transport layer's state key ("<layer>.x") and `from_index` a position on
     that layer's ACTIVE INTERIOR axis; `to_key` is a transport layer's boundary driver
     ("<layer>.x_boundary") and `to_index` a position on its BOUNDARY axis. Two-way: the
-    to-layer's net boundary INFLOW at `to_index` is added into `sources_key` (default
-    "<from layer>.sources", FULL node order) at the from-layer's interior node.
+    to-model (the RECIPIENT) is stepped first, from the step-start state, over the whole
+    outer step; the amount that its own step integrated across `to_index` (`Model.step`'s
+    `boundary_transfer`, summed over the recipient's sub-steps) is then divided by `dt` and
+    ADDED, as a source RATE, into `sources_key` (default "<from layer>.sources", FULL node
+    order) at the from-model's (the DONOR's) interior node, for the donor's own whole outer
+    step. Conservation holds on every returned pass by construction: the donor receives
+    exactly what the recipient's own scheme integrated, never an endpoint flux frozen from a
+    stale state.
 
     WHICH state a ONE-WAY link reads depends on the company it keeps, deliberately. In a
     union with no two-way link there is one pass, and the forward value is read from the
@@ -232,11 +238,12 @@ class CoupledModel:
     """Returned by `union`. `.step` takes and returns `{model_tag: State}` /
     `{model_tag: Drivers}` -- each model keeps its own dicts; nothing is merged.
 
-    `iterate_max=50` is set from this milestone's own measurements, not guessed: the headline
-    demo needs 22-28 passes to reach `rtol=1e-10`, and about 21 passes per coupled hour at the
-    default `rtol=1e-8` (the benchmark's 116-128 passes over 6 hours). The former default of
-    20 was below the milestone's own headline case, so every call site had to override it --
-    which hid, rather than fixed, the fact that the default could not run the demo.
+    `iterate_max=50` is a floor, not a measurement pinned here: the recipient-first schedule
+    changed the per-pass cost and the pass counts a coupling needs to reach a given
+    tolerance, so see `docs/applications/coupling.md` for current numbers rather than this
+    docstring. The former default of 20 was below the milestone's own headline case, so
+    every call site had to override it -- which hid, rather than fixed, the fact that the
+    default could not run the demo.
 
     `iterate_atol=0.0` is a pure relative criterion: a shared value that is legitimately ZERO
     (no emission at the coupled node, say) can never satisfy `|d| <= rtol * |f|` unless `d` is
@@ -306,10 +313,23 @@ class CoupledModel:
                     )
         self._two_way = [link for link in self.links if link.two_way]
         self._one_way = [link for link in self.links if not link.two_way]
+        recipients = {link.to_model for link in self._two_way}
+        donors = {link.from_model for link in self._two_way}
+        both = sorted(recipients & donors)
+        if both:
+            raise ValueError(
+                f"CoupledModel: model(s) {both} are both a recipient and a donor of two-way "
+                f"links; the conservative recipient-first schedule is defined only when no "
+                f"model plays both roles (a cycle of two-way links has no such order yet)"
+            )
+        self._recipients = [tag for tag in self.models if tag in recipients]
+        self._others = [tag for tag in self.models if tag not in recipients]
         if self._two_way and self.iterate_max < 2:
             raise ValueError(
                 f"CoupledModel: a two-way link needs iterate_max >= 2, got {iterate_max!r}; "
-                f"one pass has no predecessor to judge convergence against"
+                f"one pass rarely closes a conservative exchange to a useful tolerance, so "
+                f"this floor stays as a sanity check even though the per-pass criterion below "
+                f"is well-defined from the very first pass"
             )
 
     def _layer(self, tag: str, name: str):
@@ -356,19 +376,19 @@ class CoupledModel:
     def _check_two_way_scope(self, link: ValueLink, from_layer, to_layer) -> None:
         """Milestone 5's two-way scope: one flow kind on the TO layer, one species on both.
 
-        `transport_boundary_inflow`, which builds the feedback flux, is single-flow-kind
-        (it raises `NotImplementedError` at STEP time otherwise, after a whole first pass has
-        run) and single-species -- a multi-species `(n_i, K)` state is not merely unsupported
-        but AMBIGUOUS to the glue's layout rule: a stacked `(n_i, 1)` and a reduced `(n_i, K)`
-        with `K == n_i` are the same shape, so `_reduced` would silently read the wrong axis.
+        The recipient's own transfer is read off `Model.step`'s `boundary_transfer` at ONE
+        boundary node of a single-flow-kind layer (`_apply_transfer`), so a TO layer with more
+        than one flow kind has no single transfer to read there. And `_reduced`'s single-species
+        layout rule is AMBIGUOUS for a multi-species state: a stacked `(n_i, 1)` and a reduced
+        `(n_i, K)` with `K == n_i` are the same shape, so it would silently read the wrong axis.
         Both are therefore refused here, before any stepping, rather than discovered later.
         """
         if len(to_layer.flow_kinds) > 1:
             raise ValueError(
                 f"CoupledModel: two-way link {self._link_key(link)} needs a single flow kind "
                 f"on its TO layer {link.to_model}:{link.to_layer}, which has "
-                f"{list(to_layer.flow_kinds)}; the feedback flux "
-                f"(`transport_boundary_inflow`) is single-flow-kind in milestone 5"
+                f"{list(to_layer.flow_kinds)}; the recipient's own transfer is read at one "
+                f"boundary node of a single-flow-kind layer"
             )
         multi = [
             f"{tag}:{layer_name} has n_species={layer.n_species}"
@@ -381,8 +401,8 @@ class CoupledModel:
         if multi:
             raise ValueError(
                 f"CoupledModel: two-way link {self._link_key(link)} needs n_species == 1 on "
-                f"both layers ({', '.join(multi)}); the glue's reduced/stacked layout rule is "
-                f"ambiguous for a multi-species state and the feedback flux is single-species"
+                f"both layers ({', '.join(multi)}); `_reduced`'s single-species layout rule is "
+                f"ambiguous for a multi-species state"
             )
 
     # ------------------------------------------------------------------- glue
@@ -412,35 +432,31 @@ class CoupledModel:
         drivers[link.to_model][link.to_key] = boundary
         return boundary
 
-    def _feed_back(
-        self, link: ValueLink, latest: Mapping[str, State], boundary: Tensor,
-        drivers: dict[str, Drivers],
-    ) -> None:
-        """Add the to-layer's net boundary inflow at `to_index` into the from-layer's sources
-        (FULL node order, ADDED to whatever the caller supplied -- never overwritten).
+    def _apply_transfer(
+        self, link: ValueLink, transfer: Tensor, dt: float, drivers: dict[str, Drivers],
+    ) -> Tensor:
+        """Add the recipient's integrated transfer at the linked boundary node, as a source
+        RATE over the donor's outer step, into the donor's sources (ADDED, never overwritten).
 
-        The sources tensor goes through `_write_at` like every other glue write, so a STACKED
-        single-species `(n, 1)` sources tensor is reduced before the node index is applied and
-        restored afterwards; indexing it directly would silently address the species axis.
+        `transfer` is `boundary_transfer` in the TO layer's own boundary layout, exactly as
+        `Model.step(..., boundary_transfers=True)` reported it for the recipient's own step
+        over the whole outer `dt` -- not a flux recomputed from a stale state, so conservation
+        holds on every returned pass by construction (R1). The sources tensor goes through
+        `_write_at` like every other glue write, so a STACKED single-species `(n, 1)` sources
+        tensor is reduced before the node index is applied and restored afterwards.
         """
-        to_model = self.models[link.to_model]
         to_layer = self._layer(link.to_model, link.to_layer)
-        q = to_model.current_flows(link.to_layer, latest[link.to_model], drivers[link.to_model])
-        inflow = transport_boundary_inflow(
-            to_model.net, q, to_layer.flow_kinds,
-            _reduced(latest[link.to_model][f"{link.to_layer}.x"], to_layer.n_i),
-            _reduced(boundary, to_layer.n_b),
-            to_layer.interior_idx, to_layer.boundary_idx, node_position=link.to_index,
-        )
-        inflow = apply_conversion(link.convert_back, inflow, drivers[link.to_model])
+        amount = _reduced(transfer, to_layer.n_b)[..., link.to_index]
+        rate = apply_conversion(link.convert_back, amount / dt, drivers[link.to_model])
         from_layer = self._layer(link.from_model, link.from_layer)
         from_net = self.models[link.from_model].net
         key = link.sources_key or f"{link.from_layer}.sources"
         existing = drivers[link.from_model].get(key)
         if existing is None:
-            existing = torch.zeros(from_net.n, dtype=inflow.dtype, device=inflow.device)
+            existing = torch.zeros(from_net.n, dtype=rate.dtype, device=rate.device)
         node = int(from_layer.interior_idx[link.from_index])  # interior_idx is FULL node order
-        drivers[link.from_model][key] = _write_at(existing, from_net.n, node, inflow, add=True)
+        drivers[link.from_model][key] = _write_at(existing, from_net.n, node, rate, add=True)
+        return amount
 
     # ------------------------------------------------------------------- step
     def step(
@@ -456,7 +472,10 @@ class CoupledModel:
                 self._write_forward(
                     link, self._forward_value(link, start, pass_drivers), pass_drivers
                 )
-            new = self._step_all(start, pass_drivers, dt)
+            new = {}
+            for tag in self.models:
+                new[tag], _ = self._step_model(tag, start[tag], pass_drivers[tag], dt,
+                                                 want_transfers=set())
             if diagnostics is not None:
                 # One pass, nothing iterated: `converged` is true for every instance by
                 # construction, and `max_change` is EMPTY rather than 0.0 -- no change was
@@ -466,24 +485,38 @@ class CoupledModel:
                     "passes": 1,
                     "converged": torch.ones((), dtype=torch.bool),
                     "max_change": {},
+                    "transfers": {},
                 })
             return new
         return self._iterate(start, drivers, dt, diagnostics)
 
-    def _step_all(
-        self, start: Mapping[str, State], drivers: Mapping[str, Drivers], dt: float,
-    ) -> dict[str, State]:
-        """Every model stepped ONCE from `start` over `dt` -- in `k` sub-steps of `dt/k` for a
-        model named in `substeps`, its glue-derived drivers held constant across them
-        (design spec section 3 point 4)."""
-        new: dict[str, State] = {}
-        for tag, model in self.models.items():
-            k = self.substeps.get(tag, 1)
-            s = start[tag]
-            for _ in range(k):
-                s = model.step(s, drivers[tag], dt / k)
-            new[tag] = s
-        return new
+    def _step_model(
+        self, tag: str, start: State, drivers: Drivers, dt: float,
+        *, want_transfers: Collection[str],
+    ) -> tuple[State, dict[str, Tensor]]:
+        """Step model `tag` ONCE over `dt` -- in `k` sub-steps of `dt/k` when named in
+        `substeps`, its glue-derived drivers held constant across them (design spec section 3
+        point 4). `want_transfers` names the transport layer(s) to report the boundary
+        transfer for (empty: none, a plain step); `Model.step` runs `step_with_transfer` on
+        ONLY those layers, not every transport layer of the model -- a recipient with an
+        unlinked layer must not pay `step_with_transfer`'s extra cost on a layer nothing
+        reads a transfer from (task 18b). The returned dict sums each named layer's
+        transfer over these `k` outer sub-steps too -- the total amount that crossed each
+        boundary node during THIS model's whole `dt`, in the layer's own boundary layout."""
+        k = self.substeps.get(tag, 1)
+        s = start
+        totals: dict[str, Tensor] = {}
+        for _ in range(k):
+            d: dict = {}
+            s = self.models[tag].step(
+                s, drivers, dt / k, diagnostics=d, boundary_transfers=want_transfers
+            )
+            if want_transfers:
+                for name, layer_diag in d["layers"].items():
+                    if "boundary_transfer" in layer_diag:
+                        transfer = layer_diag["boundary_transfer"]
+                        totals[name] = transfer if name not in totals else totals[name] + transfer
+        return s, totals
 
     @staticmethod
     def _link_key(link: ValueLink) -> str:
@@ -495,31 +528,43 @@ class CoupledModel:
 
     def _iterate(self, start, drivers, dt, diagnostics) -> dict[str, State]:
         """Successive substitution on every two-way link's FORWARD value, damped by
-        `relaxation` (0.5 mirrors `Model._iterate`, `model.py:540-611`). EVERY pass steps
-        every model from `start` (the N1 rule, design spec A1); only the glue values -- read
-        from `latest`, the previous pass's OUTPUT (the start state on pass 1) -- carry over.
+        `relaxation` (0.5 mirrors `Model._iterate`, `model.py:540-611`), on a RECIPIENT-FIRST
+        schedule: each pass steps every recipient (`self._recipients`) from `start` first,
+        with the pass's relaxed forward values written into its boundary drivers, then applies
+        each two-way link's donor transfer -- the recipient's own integrated boundary
+        transfer this pass, as a source RATE over the donor's whole `dt` (`_apply_transfer`,
+        R1) -- into the DONOR's pass drivers, and only then steps every other model
+        (`self._others`, donors and uncoupled models) from `start`. The donor therefore
+        always receives exactly what the recipient's own scheme integrated THIS pass, so
+        conservation holds on every returned pass by construction; no separate residual is
+        needed to enforce it.
 
-        Convergence is judged on the UNRELAXED residual of the fixed-point map,
-        `|f(latest_k-1) - f_k-1|` (A7: `<= atol + rtol |f|`), not on the relaxed increment
-        actually applied: the relaxed step is `relaxation` times the residual, so measuring
-        it would make the effective tolerance scale with `relaxation` and let a heavily
-        damped run "converge" while still far from the fixed point. It is judged PER
-        INSTANCE, on detached copies inside `torch.no_grad()`; the passes themselves stay on
-        the autograd graph.
+        Convergence is judged PER INSTANCE, on detached copies inside `torch.no_grad()`, on
+        EVERY pass including the first: the donor's RETURNED forward value (computed from
+        `new`, this pass's own donor output) against `now`, the relaxed forward value the
+        recipient was actually stepped with in this same pass (R2) -- the returned state is
+        what is certified, not the previous pass's forward value. This is the fixed-point
+        map's own UNRELAXED residual, `g(v_k) - v_k`: the returned forward value `g(v_k)`
+        against the relaxed iterate `v_k` the recipient was just stepped with, not the
+        relaxed increment `relaxation * (raw - prev)` that produced `v_k` in the first
+        place. Judging the relaxed increment instead would make the effective tolerance
+        scale with `relaxation`, letting a heavily damped run falsely report convergence
+        while `g(v_k)` still disagrees with `v_k` by a large, unrelaxed amount. The passes
+        themselves stay on the autograd graph.
 
-        The returned state is the last pass's own output, whose glue values came from pass
-        k-1 -- so it is a fixed point of "one step of each model from `start`" only to within
-        the tolerance, which is exactly what the criterion certifies. The fixed point is
-        therefore differentiated by UNROLLING: every pass stays on the graph and memory grows
-        with the pass count. An implicit-function treatment (one adjoint solve at the
-        converged state) is a follow-up, as it is for `Model._iterate`.
+        The returned state is the last pass's own output. The fixed point is differentiated
+        by UNROLLING: every pass stays on the graph and memory grows with the pass count. An
+        implicit-function treatment (one adjoint solve at the converged state) is a follow-up,
+        as it is for `Model._iterate`.
         """
         latest: Mapping[str, State] = start
         prev: dict[int, Tensor] | None = None
         change: dict[str, Tensor] = {}
-        # A placeholder the second pass always replaces: a two-way link is refused at
-        # construction unless `iterate_max >= 2`, so the loop cannot end without a real
-        # per-instance verdict of the right shape, dtype and device.
+        transfers: dict[str, Tensor] = {}
+        # A placeholder the FIRST pass always replaces: convergence is now judged on every
+        # pass including the first (see the docstring above), so the loop's own body always
+        # computes a real per-instance verdict before this initial value could ever be read.
+        # It exists only to give `converged` a well-typed shape/dtype/device up front.
         converged: Tensor = torch.zeros((), dtype=torch.bool)
         passes = 0
         new: dict[str, State] = dict(start)
@@ -531,28 +576,39 @@ class CoupledModel:
                     link, self._forward_value(link, latest, pass_drivers), pass_drivers
                 )
             now: dict[int, Tensor] = {}
-            raw: dict[int, Tensor] = {}
             for i, link in enumerate(self._two_way):
-                raw[i] = self._forward_value(link, latest, pass_drivers)
-                value = raw[i] if prev is None else prev[i] + self.relaxation * (raw[i] - prev[i])
+                raw = self._forward_value(link, latest, pass_drivers)
+                value = raw if prev is None else prev[i] + self.relaxation * (raw - prev[i])
                 now[i] = value
-                boundary = self._write_forward(link, value, pass_drivers)
-                self._feed_back(link, latest, boundary, pass_drivers)
-            new = self._step_all(start, pass_drivers, dt)
-            if prev is not None:
-                with torch.no_grad():
-                    ok: Tensor | None = None
-                    for i, link in enumerate(self._two_way):
-                        # A forward value is ONE number per instance (one node, one species),
-                        # so its own shape IS the batch shape and nothing is reduced away;
-                        # `.amax(-1)` here would collapse the instance axis itself.
-                        d = (raw[i] - prev[i]).abs()
-                        change[self._link_key(link)] = d
-                        this = d <= self.iterate_atol + self.iterate_rtol * raw[i].abs()
-                        ok = this if ok is None else (ok & this)
-                    converged = ok
-                if bool(converged.all()):
-                    break
+                self._write_forward(link, value, pass_drivers)
+            new = {}
+            for tag in self._recipients:                      # recipients first
+                layers = {link.to_layer for link in self._two_way if link.to_model == tag}
+                new[tag], totals = self._step_model(
+                    tag, start[tag], pass_drivers[tag], dt, want_transfers=layers
+                )
+                for link in self._two_way:
+                    if link.to_model == tag:
+                        transfers[self._link_key(link)] = self._apply_transfer(
+                            link, totals[link.to_layer], dt, pass_drivers
+                        )
+            for tag in self._others:                          # donors and uncoupled models
+                new[tag], _ = self._step_model(
+                    tag, start[tag], pass_drivers[tag], dt, want_transfers=set()
+                )
+            with torch.no_grad():
+                ok: Tensor | None = None
+                for i, link in enumerate(self._two_way):
+                    # A forward value is ONE number per instance (one node, one species), so
+                    # its own shape IS the batch shape and nothing is reduced away.
+                    returned = self._forward_value(link, new, pass_drivers)
+                    d = (returned - now[i]).abs()
+                    change[self._link_key(link)] = d
+                    this = d <= self.iterate_atol + self.iterate_rtol * returned.abs()
+                    ok = this if ok is None else (ok & this)
+                converged = ok
+            if bool(converged.all()):
+                break
             prev = now
             latest = new
         if not bool(converged.all()):
@@ -565,7 +621,8 @@ class CoupledModel:
             )
         if diagnostics is not None:
             diagnostics.update(
-                {"passes": passes, "converged": converged, "max_change": change}
+                {"passes": passes, "converged": converged, "max_change": change,
+                 "transfers": transfers}
             )
         return new
 
@@ -584,12 +641,11 @@ def union(
     any model's `Network`, layers, or closures (design spec section 3). Never modifies the
     `Model`/`State`/`Drivers` objects passed in -- returns fresh dict copies.
 
-    `iterate_max=50` comes from this milestone's own measurements: the headline demo takes
-    22-28 passes to `rtol=1e-10` and about 21 passes per coupled hour at the default
-    `rtol=1e-8` (the benchmark's 116-128 passes over 6 hours), so the former default of 20 sat
-    below the milestone's own headline case and every call site had to override it.
-    `iterate_atol=0.0` makes the criterion purely relative, so a shared value that is
-    legitimately ZERO needs a positive `iterate_atol` to be judged converged at all. See
+    `iterate_max=50` is a floor, not a measurement pinned here: the recipient-first schedule
+    changed the per-pass cost and the pass counts a coupling needs to reach a given
+    tolerance, so see `docs/applications/coupling.md` for current numbers rather than this
+    docstring. `iterate_atol=0.0` makes the criterion purely relative, so a shared value that
+    is legitimately ZERO needs a positive `iterate_atol` to be judged converged at all. See
     `CoupledModel`.
     """
     model_map = {tag: m for tag, (m, _s, _d) in models.items()}
