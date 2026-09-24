@@ -97,7 +97,7 @@ net = Network(dtype=torch.float64).with_ambient("ambient")
 
 ## Tellegen's theorem
 
-The name the package carried before noodl comes from the identity this structure guarantees. For
+This structure guarantees an identity worth naming directly. For
 any nodal potentials $p$ and any flows $q$ satisfying nodal conservation,
 
 $$

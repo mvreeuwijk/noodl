@@ -182,8 +182,8 @@ p, q = layer.solve(theta, z0=z0)   # z0: the previous step's own z, for a dynami
 
 **A standalone block.** `ConstitutiveLayer` is not one of the three layer kinds `Model` steps
 (`PotentialFlowLayer`, `TransportLayer`, `CapacitatedTransferLayer`); `Model` refuses it by name
-at construction. It is used directly through `solve()`, as the legacy port's tests do, and a
-dynamic law carries its own previous state in `theta`. Making it steppable inside `Model` would
+at construction. It is used directly through `solve()`, as the worked-example parity tests do,
+and a dynamic law carries its own previous state in `theta`. Making it steppable inside `Model` would
 need a declared state key and a step contract; nothing needs that yet, so the boundary is
 explicit rather than adapted.
 

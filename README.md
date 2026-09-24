@@ -108,17 +108,10 @@ implementation plans behind them are under `docs/superpowers/`.
 a single continuous path through two nodes and a junction — flow through a network, drawn in
 one stroke.
 
-The package was previously called `tellegen`, after Tellegen's theorem: for any potentials in
-the cut space and any flows in the cycle space of a graph, the branch power sum is zero. That
-result is still the backbone of the topology layer, and
-[the theory page](https://mvreeuwijk.github.io/noodl/theory/) opens with it.
-
 ## Credits and licence
 
-noodl grew out of John Craske's 2019 `Tellegen` package, which formulated nonlinear networks
-after Brayton and Moser using autograd. This project ports the
-topology layer to PyTorch and rebuilds the physics as nodal
-state-space modules with storage at nodes, typed edges, and batching over instances.
+The topology layer is built on PyTorch, and the physics is implemented as nodal state-space
+modules with storage at nodes, typed edges, and batching over instances.
 
 Authors: John Craske and Maarten van Reeuwijk. MIT licensed, with the agreement of the original
 author.
