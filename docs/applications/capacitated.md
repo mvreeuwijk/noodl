@@ -215,7 +215,7 @@ committed fixtures mean the parity tests run **without WSIMOD installed**.
 | W2 | Same, `oxford_demo`, 20 of 21 arcs | 1e-6 abs | **1.86e-9** |
 | W3 | `"smooth"` at $\tau=10^{-3}$ vs W1's own hard-clip output | 3e-3 abs | **1.79e-3** |
 | W4 | `"projection"` vs W1's own hard-clip output | 1e-9 abs | **9.10e-13** |
-| W5 | Conservation, both demos, all three modes | exact | holds, no oracle needed |
+| W5 | Conservation, both demos, all three modes | exact | holds, no reference needed |
 | W6 | `gradcheck` through smooth and projection on the diamond | analytic | holds |
 | W7 | `n_passes=5` vs a hand-converged reference | exact | holds |
 

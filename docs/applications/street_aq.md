@@ -11,8 +11,8 @@ aloft and the canyon geometry, so a closure computes every flow and writes it, a
 layer advects on what it wrote.
 
 ```python
-from noodl.apps.street import (
-    build_street_model, street_steady, street_index, initial_state,
+from noodl.apps.street_aq import (
+    build_model, street_steady, street_index, initial_state,
     StreetNetwork, Street, from_test_network, munich_idealised,
     read_aqdt, write_network_concentration, to_ug_m3,
     photostationary_for_streets,
@@ -26,12 +26,12 @@ from noodl.apps.street import (
 ```python
 import math
 import torch
-from noodl.apps.street import build_street_model, from_test_network
+from noodl.apps.street_aq import build_model, from_test_network
 
 DT = torch.float64
 
 net = from_test_network()                     # a 4-junction, 3-street toy network
-model, state, _ = build_street_model(net, pblh_floor=False)
+model, state, _ = build_model(net, pblh_floor=False)
 
 street_net = model.net
 sources = torch.zeros(street_net.n, dtype=DT)
@@ -50,10 +50,10 @@ solved = model.steady(state, drivers)
 print(solved["street.x"])                     # kg/m3 per street, interior order
 ```
 
-*(From `tests/apps/street/test_conservation.py`, which then checks that every kilogram emitted
+*(From `tests/apps/street_aq/test_conservation.py`, which then checks that every kilogram emitted
 crosses the atmosphere boundary exactly, rtol $10^{-12}$.)*
 
-**The drivers returned by `build_street_model` are templates only.** They carry zero-shaped
+**The drivers returned by `build_model` are templates only.** They carry zero-shaped
 `x_boundary` and `sources`; you must supply `U_ref`, `theta_w` and `h_abl` yourself (and `lmo`
 if you chose `stability="munich"`).
 
@@ -70,10 +70,10 @@ if you chose `stability="munich"`).
 Construction validates: unique street names, `u != v`, coordinates for every named junction, and
 strictly positive `length`, `width`, `height` and `z0_b`.
 
-## `build_street_model`
+## `build_model`
 
 ```python
-model, state, drivers = build_street_model(
+model, state, drivers = build_model(
     net,
     canyon_wind="soulhac",        # 'soulhac' | 'exponential'
     exchange="sirane",            # 'sirane'  | 'schulte'
@@ -116,14 +116,14 @@ IMPAQ's 0.40. An explicit value always wins.
 For strict IMPAQ parity:
 
 ```python
-build_street_model(net, canyon_wind="soulhac", exchange="sirane",
+build_model(net, canyon_wind="soulhac", exchange="sirane",
                    direction_averaging="none", kappa=0.4, canyon_wind_min=0.0,
                    u_d_min=0.0, stability="impaq", z_ref=30.0, pblh_floor=False)
 ```
 
 ### The canyon physics
 
-`noodl.apps.street.canyon` exposes the pieces directly:
+`noodl.apps.street_aq.canyon` exposes the pieces directly:
 
 | Function | Returns |
 |---|---|
@@ -141,10 +141,10 @@ build_street_model(net, canyon_wind="soulhac", exchange="sirane",
 `street_steady`, which iterates the two by successive substitution:
 
 ```python
-from noodl.apps.street import photostationary_for_streets, street_steady
+from noodl.apps.street_aq import photostationary_for_streets, street_steady
 
 reaction = photostationary_for_streets(("no", "no2", "o3"))
-model, state, drivers = build_street_model(net, species=("no", "no2", "o3"), chemistry=reaction)
+model, state, drivers = build_model(net, species=("no", "no2", "o3"), chemistry=reaction)
 solved = street_steady(model, state, drivers, reaction=reaction, tol=1e-18, max_iter=200)
 ```
 
@@ -162,7 +162,7 @@ data = read_aqdt(stage1_dir, stage2_dir, year=2024, select="network_transport",
 
 Reads junction and edge GeoJSON, plus forcing and emission NetCDF, into an `AqdtData` carrying a
 `StreetNetwork`, a `Forcing` record and an emission array. Needs the
-[`street` extra](../installation.md#optional-extras).
+[`street_aq` extra](../installation.md#optional-extras).
 
 Its ambiguities are handled by **explicit failure rather than silent defaults**, and this is
 worth knowing before you point it at your own data:
@@ -201,26 +201,26 @@ one. The same applies to `soulhac_shape`: MUNICH quantises the root to a 0.01 gr
 solves it continuously (0.6198293…), and the resulting 4e-4 relative difference in $u_M$ is
 documented rather than matched.
 
-### IMPAQ oracle
+### IMPAQ port check
 
-`impaq.py` is a byte-faithful numpy/scipy port of the AQ_DT prototype, kept so parity tests need
+`impaq.py` is a byte-faithful numpy/scipy port of the AQ_DT prototype, kept so the port check needs
 no external checkout. It reproduces the prototype to rtol $10^{-12}$.
 
 On IMPAQ's four-node network, after fixing the prototype's two documented bugs, noodl and the
-oracle agree to **machine precision** (< 1e-9 relative). With those bugs left unfixed the two
+port agree to **machine precision** (< 1e-9 relative). With those bugs left unfixed the two
 disagree by **30–45%** — which is reported, not hidden. On the real `leiden_small` domain (162
-streets, 230 junctions) canyon velocities match exactly and concentrations match the fixed oracle
+streets, 230 junctions) canyon velocities match exactly and concentrations match the fixed port
 with median relative difference below $10^{-9}$.
 
-Parity testing also turned up a **third, undocumented defect** in IMPAQ's `flow_route`: it sorts
+The port check also turned up a **third, undocumented defect** in IMPAQ's `flow_route`: it sorts
 by angle with `argsort` but un-sorts with `order` rather than `argsort(order)`, mis-permuting
-routing at three-way junctions and breaking the oracle's own conservation — measured at 12 roads
-at one step, worst factor 13.95. The port reproduces it faithfully, because it is the oracle, not
+routing at three-way junctions and breaking the port's own conservation — measured at 12 roads
+at one step, worst factor 13.95. The port reproduces it faithfully, because it is the port, not
 the model.
 
 ## Limitations and caveats
 
-- **`impaq.py` is an oracle, not a model path.** It is numpy and scipy, it is not
+- **`impaq.py` is the IMPAQ port, not a model path.** It is numpy and scipy, it is not
   differentiable, and nothing else in the application imports it.
 - **The MUNICH 12-street idealised case cannot be reproduced absolutely.** Its published figure
   depends on a geometry that was never published. Scale-invariant properties *are* checked and do
@@ -243,8 +243,8 @@ the model.
 ## Install
 
 ```bash
-pip install "noodl[street]"
+pip install "noodl[street_aq]"
 ```
 
 Needed for `read_aqdt`, `write_network_concentration` and `impaq.py`. The modelling API —
-`build_street_model`, `street_steady`, the closures — needs only the base dependencies.
+`build_model`, `street_steady`, the closures — needs only the base dependencies.

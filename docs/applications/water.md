@@ -12,7 +12,7 @@ upstream inflow rather than by head difference.
 ```python
 from noodl.apps.water import (
     Junction, Reservoir, Tank, WaterPipe, Pump, Valve, WaterNetwork, WaterOptions,
-    build_water_model, water_steady, initial_state, twoloop,
+    build_model, water_steady, initial_state, twoloop,
     read_epanet_inp, pressure_head, to_kilopascal, link_table, tank_inflow,
 )
 ```
@@ -22,10 +22,10 @@ from noodl.apps.water import (
 ## A worked example
 
 ```python
-from noodl.apps.water import read_epanet_inp, build_water_model, water_steady
+from noodl.apps.water import read_epanet_inp, build_model, water_steady
 
 net = read_epanet_inp("twoloop_si.inp")
-model, state, drivers = build_water_model(net)
+model, state, drivers = build_model(net)
 final = water_steady(model, state, drivers)
 
 # final["water.phi"] is head (m) at every node
@@ -35,9 +35,9 @@ final = water_steady(model, state, drivers)
 Or without a file, using the built-in fixture:
 
 ```python
-from noodl.apps.water import build_water_model, water_steady, twoloop
+from noodl.apps.water import build_model, water_steady, twoloop
 
-model, state, drivers = build_water_model(twoloop())
+model, state, drivers = build_model(twoloop())
 final = water_steady(model, state, drivers)
 ```
 
@@ -62,10 +62,10 @@ two independent loops. Its reference heads from EPANET 2.2 are 49.267731, 48.877
 `nodes()` returns junctions, then reservoirs, then tanks; `links()` returns pipes, pumps, TCVs,
 FCVs in that order; `validate()` refuses anything out of scope by name.
 
-## `build_water_model`
+## `build_model`
 
 ```python
-model, state, drivers = build_water_model(
+model, state, drivers = build_model(
     net,
     headloss=None,      # 'H-W' (default) or 'D-W'; None takes the network's own
     pda=None,           # pressure-driven demand; None takes net.options
@@ -154,7 +154,7 @@ Implemented with a guarded kink so both `where` branches stay finite and differe
 
 **Ignored** because nothing in the hydraulics references them: `[TITLE]`, `[REPORT]`,
 `[COORDINATES]`, `[VERTICES]`, `[LABELS]`, `[BACKDROP]`, `[TAGS]`, `[ENERGY]`, `[END]`, and the
-quality sections (a quality run is configured through `build_water_model(quality=...)` instead).
+quality sections (a quality run is configured through `build_model(quality=...)` instead).
 
 **Refused by name:** `[RULES]`; `[EMITTERS]`; `[STATUS]` with content; time-based controls (only
 `LINK <id> OPEN|CLOSED IF NODE <tank> BELOW|ABOVE <level>` is read); PRV, PSV, PBV and GPV valves;
@@ -171,8 +171,8 @@ and everything is converted to SI on read. Unrecognised `[OPTIONS]` lines are re
 ## Validation
 
 Against the real EPANET 2.2 engine through `wntr` 1.5.0, which bundles `epanet22.dll`. Note the
-oracle's own floor: `EpanetSimulator` reads EPANET's binary output, whose on-disk reals are
-**float32**, so roughly 1e-7 relative is EPANET's own precision, not noodl's.
+reference implementation's own floor: `EpanetSimulator` reads EPANET's binary output, whose
+on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precision, not noodl's.
 
 | Row | Check | Tolerance | Measured |
 |---|---|---|---|
@@ -222,9 +222,9 @@ independent loop is a property of the cycle-space formulation, and it holds exac
 
 ## Install
 
-Nothing beyond the base dependencies, plus optionally `sparse`. `wntr` — the EPANET oracle — is
-test-only and deliberately **not** a runtime extra, because it pulls in a measured 351 MB of
-mandatory dependencies.
+Nothing beyond the base dependencies, plus optionally `sparse`. `wntr` — the EPANET reference
+implementation — is test-only and deliberately **not** a runtime extra, because it pulls in a
+measured 351 MB of mandatory dependencies.
 
 ```bash
 pip install "noodl[dev]"     # only if you want to run the EPANET parity tests

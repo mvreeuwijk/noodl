@@ -57,8 +57,8 @@ nav:
       - Differentiability: concepts/differentiability.md
   - Applications:
       - applications/index.md
-      - Buildings: applications/building.md
-      - Street canyons: applications/street.md
+      - Building physics: applications/building_physics.md
+      - Street air quality: applications/street_aq.md
       - Sewers: applications/sewer.md
       - Water distribution: applications/water.md
       - Capacitated transfer: applications/capacitated.md

@@ -1489,3 +1489,30 @@ benchmarks/
   regenerate_golden.py        rewrites tests/golden/contam_airflow.json and
                               tests/golden/natural_ventilation.json (explicit action)
 ```
+
+## 24 September 2026 -- application names and reference terminology
+
+Earlier records in this file, and every document under `docs/superpowers/`, use the names that
+were current when they were written: `noodl.apps.building`, `noodl.apps.street`,
+`build_street_model`, `build_sewer_model`, `build_water_model`, `read_inp`, and the word
+"oracle".
+
+**Renames.** `noodl.apps.building` is now `noodl.apps.building_physics` and `noodl.apps.street`
+is now `noodl.apps.street_aq`, so each package name says what it models. `sewer` and `water` are
+unchanged. Every application exposes `build_model`; the qualified import already says which one.
+The SWMM reader is `read_swmm_inp`, matching `read_epanet_inp`. The install extra `street` is
+now `street_aq`. State keys such as `"street.x"` and `"sewer.H"` are unchanged, because they
+name physical layers and appear in saved fixtures.
+
+**No compatibility shims.** noodl is a prototype. The old import paths fail with
+`ModuleNotFoundError` rather than warning; downstream code is updated by its owner.
+
+**Terminology.** "Test oracle" is standard software-testing vocabulary, but the readers of these
+pages are modellers. The pages now speak of reference implementations, parity tests and
+validation, defined on the [applications page](applications/index.md). Dense code paths kept
+for checking sparse ones are "dense references", and agreement with the IMPAQ port is a port
+check.
+
+**Deferred.** A `noodl.apps.wsimod` package with a WSIMOD configuration reader and a parity case
+where capacities bind is its own milestone. Moving the MUNICH reader from a separate analysis
+pipeline into `noodl.apps.street_aq` is also deferred.

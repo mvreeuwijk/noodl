@@ -26,9 +26,9 @@ pip install noodl
 ```
 
 Python 3.11 or newer; PyTorch, NetworkX and NumPy are the only hard dependencies. The optional
-extras are genuinely optional — `[sparse]` (sparse-direct linear solver), `[street]` (the street
-application's NetCDF I/O and comparison oracle), `[contam]` (ContamX parity, Windows x86-64 only)
-and `[dev]` (everything the test suite needs). For a checkout:
+extras are genuinely optional — `[sparse]` (sparse-direct linear solver), `[street_aq]` (the
+street air quality application's NetCDF I/O and IMPAQ port), `[contam]` (ContamX parity, Windows
+x86-64 only) and `[dev]` (everything the test suite needs). For a checkout:
 
 ```
 git clone https://github.com/mvreeuwijk/noodl.git
@@ -68,12 +68,12 @@ print("flows (m3/s):  ", dict(zip(("room->ambient",), q.tolist())))
 ## Applications
 
 noodl ships six worked applications. Each is a thin layer of domain physics over the shared
-core, and each is validated against the standard tool in its field.
+core, and each is checked against the standard reference implementation in its field.
 
 | Application | Physical system | Reference model |
 |---|---|---|
-| Buildings | Multi-zone airflow, heat and contaminant transport | CONTAM / ContamX |
-| Street canyons | Urban air quality, canyon exchange and routing | MUNICH, SIRANE, IMPAQ |
+| Building physics | Multi-zone airflow, heat and contaminant transport | CONTAM / ContamX |
+| Street air quality | Urban air quality, canyon exchange and routing | MUNICH, SIRANE, IMPAQ |
 | Sewers | Gravity sewer hydraulics, headspace air, sulfide | SWMM |
 | Water distribution | Pressurised mains, pumps, tanks, demand | EPANET 2.2 |
 | Capacitated transfer | Rule-based water-systems allocation | WSIMOD |
@@ -83,7 +83,7 @@ core, and each is validated against the standard tool in its field.
 
 ```
 src/noodl/        the package: topology, elements, drives, layers, solvers, operators,
-                  Model and couple, and apps/ (building, street, sewer, water)
+                  Model and couple, and apps/ (building_physics, street_aq, sewer, water)
 tests/            the suite, including verification/ — the parity cases against CONTAM,
                   MUNICH, SWMM, EPANET and WSIMOD, and the performance gates
 benchmarks/       timing and scaling scripts, and the composed reference model
@@ -96,8 +96,8 @@ A module-by-module map is in the
 
 ## Status
 
-The framework core and all six applications are built and validated; the suite is 1306 tests
-at 96 % coverage. The per-milestone engineering record — what each milestone added, the
+The framework core and all six applications are built and checked against reference
+implementations; the suite is 1306 tests at 96 % coverage. The per-milestone engineering record — what each milestone added, the
 decisions behind it, the measured errors and what it left open — is in
 [docs/development-history.md](docs/development-history.md). The design specs and
 implementation plans behind them are under `docs/superpowers/`.

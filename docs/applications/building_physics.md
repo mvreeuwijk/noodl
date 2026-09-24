@@ -13,7 +13,7 @@ are genuinely two-way coupled.
 application works in `float64` regardless of the network's default dtype.
 
 ```python
-from noodl.apps.building import (
+from noodl.apps.building_physics import (
     Zone, WallMass, add_zone, build_model, initial_state,
     add_large_opening, orifice_elements_from_edges, read_prj, project_to_model, read_wth,
 )
@@ -27,8 +27,8 @@ from noodl.apps.building import (
 
 ```python
 import torch
-from noodl.apps.building import Zone, add_zone, add_large_opening, orifice_elements_from_edges
-from noodl.apps.building import build_model, initial_state
+from noodl.apps.building_physics import Zone, add_zone, add_large_opening, orifice_elements_from_edges
+from noodl.apps.building_physics import build_model, initial_state
 from noodl.drives import Stack
 from noodl.topology import Network
 
@@ -73,7 +73,7 @@ print(state["air.q"][0])    # doorway low-opening flow, kg/s
 **From a CONTAM project file:**
 
 ```python
-from noodl.apps.building import read_prj, project_to_model
+from noodl.apps.building_physics import read_prj, project_to_model
 
 project = read_prj("valThreeZonesWthCtm-UseApi.prj")
 model, state, drivers = project_to_model(project)
@@ -128,7 +128,7 @@ no flow, so heat and species would silently not advect on it.
 
 ### Contaminant sources
 
-CONTAM's four source types, all in `noodl.apps.building.sources`:
+CONTAM's four source types, all in `noodl.apps.building_physics.sources`:
 
 | Source | Model |
 |---|---|
@@ -196,7 +196,7 @@ case; a model with several prescribed temperatures must build its own boundary v
 ### Against ContamX
 
 The reference is NIST's ContamX 3.4.1.7, driven through `contamxpy` (the `contam` extra, Windows
-x86-64 only — the wheel bundles the engine). `noodl.apps.building.contamx` provides `run_steady`
+x86-64 only — the wheel bundles the engine). `noodl.apps.building_physics.contamx` provides `run_steady`
 and `run_transient`, which run the engine on a scratch copy of the project and never mutate your
 fixture directory.
 
@@ -224,7 +224,7 @@ since `contamxpy`'s own documentation does not pin the sign of `getPathFlow`.
 Separately from ContamX parity, `tests/verification/test_natural_ventilation.py` checks the
 coupled airflow-heat physics against the closed-form solutions of Li and Delsante (2001) for a
 single ventilated zone — buoyancy-only, envelope-loss, assisting-wind and opposing-wind cubics —
-plus an independent `scipy.optimize.fsolve` oracle for a two-zone doorway case and a golden
+plus an independent `scipy.optimize.fsolve` reference for a two-zone doorway case and a golden
 regression at rtol 1e-8.
 
 ## Limitations

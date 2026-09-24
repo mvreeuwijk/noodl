@@ -20,8 +20,8 @@ reaches the air where it attacks the crown of the pipe.
 ```python
 from noodl.apps.sewer import (
     SewerNetwork, Manhole, Pipe, Outfall, tree_steady,
-    build_sewer_model, sewer_steady, initial_state,
-    read_inp, pipe_table, to_ppm, to_mg_per_litre,
+    build_model, sewer_steady, initial_state,
+    read_swmm_inp, pipe_table, to_ppm, to_mg_per_litre,
 )
 ```
 
@@ -30,9 +30,9 @@ from noodl.apps.sewer import (
 ## A worked example
 
 ```python
-from noodl.apps.sewer import build_sewer_model, sewer_steady, pipe_table, tree_steady
+from noodl.apps.sewer import build_model, sewer_steady, pipe_table, tree_steady
 
-model, state, drivers = build_sewer_model(tree_steady())
+model, state, drivers = build_model(tree_steady())
 final = sewer_steady(model, state, drivers)
 rows = pipe_table(model, final, drivers, path="pipes.csv")
 
@@ -45,10 +45,10 @@ fixture; its steady discharges are 0.05, 0.08, 0.03, 0.13 and 0.16 m³/s.
 From a SWMM file instead:
 
 ```python
-from noodl.apps.sewer import read_inp, build_sewer_model
+from noodl.apps.sewer import read_swmm_inp, build_model
 
-net, inflows, pollutants = read_inp("tree_steady.inp")
-model, state, drivers = build_sewer_model(net)
+net, inflows, pollutants = read_swmm_inp("tree_steady.inp")
+model, state, drivers = build_model(net)
 ```
 
 For a single step rather than a steady state:
@@ -75,10 +75,10 @@ reaches an outfall — which also catches cycles.
 That one-outgoing-pipe rule is the dendritic constraint, and it is what makes the closed-form
 flow solve valid.
 
-## `build_sewer_model`
+## `build_model`
 
 ```python
-model, state, drivers = build_sewer_model(
+model, state, drivers = build_model(
     net,
     storage=False,          # implicit-Euler manhole storage sweep
     air=True,               # the headspace layer
