@@ -15,15 +15,15 @@ import numpy as np
 import pytest
 import torch
 
-from noodl.apps.street.impaq import (
+from noodl.apps.street_aq.impaq import (
     canyon_velocity,
     compute_boundary_layer,
     compute_intersection_routing,
     network_from_street_network,
     solve_steady_state,
 )
-from noodl.apps.street.loader import read_aqdt
-from noodl.apps.street.network import build_street_model, from_test_network
+from noodl.apps.street_aq.loader import read_aqdt
+from noodl.apps.street_aq.network import build_street_model, from_test_network
 
 DT = torch.float64
 U_REF, THETA_W, H_ABL, BACKGROUND = 2.0, 0.25 * math.pi, 1200.0, 1.0e-4
@@ -116,7 +116,7 @@ def test_the_exchange_coefficient_is_the_retracted_issue_c_form_on_both_sides():
     """`u_d = sigma_w/(sqrt(2) pi)`, not `sigma_w/sqrt(2 pi)`. The two differ by
     `sqrt(pi) = 1.7725`, so a model using the other one cannot agree with this oracle at
     any tolerance -- which makes the parity above evidence for the retraction."""
-    from noodl.apps.street.canyon import SIRANE_EXCHANGE
+    from noodl.apps.street_aq.canyon import SIRANE_EXCHANGE
 
     assert abs(SIRANE_EXCHANGE - 1.0 / (math.sqrt(2.0) * math.pi)) < 1e-16
     wrong = 1.0 / math.sqrt(2.0 * math.pi)

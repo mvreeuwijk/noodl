@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from noodl.apps.street.canyon import (
+from noodl.apps.street_aq.canyon import (
     KAPPA_MUNICH,
     SCHULTE_BETA,
     SIRANE_EXCHANGE,
@@ -31,9 +31,9 @@ from noodl.apps.street.canyon import (
     roof_wind,
     soulhac_shape,
 )
-from noodl.apps.street.chemistry import photostationary_for_streets, street_steady
-from noodl.apps.street.network import build_street_model, munich_idealised, street_index
-from noodl.apps.street.routing import (
+from noodl.apps.street_aq.chemistry import photostationary_for_streets, street_steady
+from noodl.apps.street_aq.network import build_street_model, munich_idealised, street_index
+from noodl.apps.street_aq.routing import (
     direction_offsets,
     n_theta_munich,
     node_closure,

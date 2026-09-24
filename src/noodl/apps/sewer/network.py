@@ -1,6 +1,6 @@
 """`SewerNetwork`, its validation, and the (Model, State, Drivers) builder.
 
-Follows `apps/street/network.py`'s builder shape: dataclasses describing the physical
+Follows `apps/street_aq/network.py`'s builder shape: dataclasses describing the physical
 network, one `validate()` that refuses every topology this milestone does not model BY NAME,
 one `build_sewer_model` that assembles the `Network`, the layers and the closures and
 returns the triple, and one `initial_state` dispatching on each layer's `quantity`.
@@ -347,7 +347,7 @@ def build_sewer_model(
         )
         # `out_pipe` above indexes the per-pipe driver vectors by POSITION in `manhole_names`,
         # so the map is correct only if `TransportLayer`'s own active-interior order agrees
-        # with `manhole_names` exactly (the same self-check `apps/street/network.py`
+        # with `manhole_names` exactly (the same self-check `apps/street_aq/network.py`
         # performs) -- checked ONCE, here, rather than trusted (M4-R4/M4-R9 amendment).
         ordered = [graph.nodes[i] for i in layers["water_quality"].interior_idx.tolist()]
         if ordered != manhole_names:

@@ -7,15 +7,15 @@ from pathlib import Path
 import pytest
 import torch
 
-from noodl.apps.building.elements import orifice_elements_from_edges
-from noodl.apps.building.thermal import (
+from noodl.apps.building_physics.elements import orifice_elements_from_edges
+from noodl.apps.building_physics.thermal import (
     R_AIR,
     Zone,
     add_zone,
     build_model,
     initial_state,
 )
-from noodl.apps.building.wth import Weather, read_wth
+from noodl.apps.building_physics.wth import Weather, read_wth
 from noodl.drives import Stack
 from noodl.topology import Network
 

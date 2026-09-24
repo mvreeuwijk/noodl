@@ -21,9 +21,9 @@ from pathlib import Path
 
 import torch
 
-from noodl.apps.street.loader import read_aqdt
-from noodl.apps.street.network import build_street_model
-from noodl.apps.street.report import to_ug_m3, write_network_concentration
+from noodl.apps.street_aq.loader import read_aqdt
+from noodl.apps.street_aq.network import build_street_model
+from noodl.apps.street_aq.report import to_ug_m3, write_network_concentration
 
 DEFAULT_DATA = Path(os.environ.get(
     "NOODL_AQDT_DATA", r"<workspace>\tmp\2026_AQ_DT\data"

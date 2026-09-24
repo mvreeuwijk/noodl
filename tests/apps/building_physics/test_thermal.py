@@ -7,8 +7,8 @@ import math
 import pytest
 import torch
 
-from noodl.apps.building.elements import orifice_elements_from_edges
-from noodl.apps.building.thermal import (
+from noodl.apps.building_physics.elements import orifice_elements_from_edges
+from noodl.apps.building_physics.thermal import (
     CP_AIR,
     P_REF,
     R_AIR,

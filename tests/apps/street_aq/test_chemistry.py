@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from noodl.apps.street.chemistry import photostationary_for_streets, street_steady
-from noodl.apps.street.network import Street, StreetNetwork, build_street_model
+from noodl.apps.street_aq.chemistry import photostationary_for_streets, street_steady
+from noodl.apps.street_aq.network import Street, StreetNetwork, build_street_model
 from noodl.layers.reaction import K_NO_O3, MOLAR_MASS
 
 DT = torch.float64
@@ -112,7 +112,7 @@ def test_street_steady_reports_a_fixed_point_it_cannot_reach():
 
 
 def test_j_no2_reproduces_munich_s_tabulation_and_interpolates_between_it():
-    from noodl.apps.street.chemistry import (
+    from noodl.apps.street_aq.chemistry import (
         J_NO2_CLEAR_SKY,
         J_NO2_ZENITH_DEG,
         j_no2,

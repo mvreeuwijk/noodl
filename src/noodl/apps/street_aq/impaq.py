@@ -4,7 +4,7 @@
 the parity tests need no import from the AQ_DT repository, and so that its two remaining
 documented issues can be switched on and off one at a time and their effect reported
 separately (framework spec section 9). Nothing here is used by the model: this module is
-numpy and scipy, it is not differentiable, and nothing else in `apps/street/` imports it.
+numpy and scipy, it is not differentiable, and nothing else in `apps/street_aq/` imports it.
 
 THE THIRD ISSUE IS RETRACTED. The prototype's docstring calls its ventilation coefficient
 `sigma_w(H) W L / (sqrt(2) pi)` an error against `sigma_w(H) W L / sqrt(2 pi)` ("issue C").

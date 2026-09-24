@@ -8,8 +8,8 @@ from dataclasses import dataclass
 import pytest
 import torch
 
-from noodl.apps.building.prj import PrjSource
-from noodl.apps.building.sources import (
+from noodl.apps.building_physics.prj import PrjSource
+from noodl.apps.building_physics.sources import (
     BurstSource,
     ConstantSource,
     CutoffSource,

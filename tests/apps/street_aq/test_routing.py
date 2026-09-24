@@ -10,8 +10,8 @@ import math
 import pytest
 import torch
 
-from noodl.apps.street.canyon import KAPPA_IMPAQ, KAPPA_MUNICH
-from noodl.apps.street.routing import (
+from noodl.apps.street_aq.canyon import KAPPA_IMPAQ, KAPPA_MUNICH
+from noodl.apps.street_aq.routing import (
     MAX_N_THETA,
     MAX_SIGMA_THETA,
     StreetFlows,

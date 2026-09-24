@@ -5,7 +5,7 @@ Design spec `docs/superpowers/specs/2026-09-19-milestone-5-coupling-design.md`, 
 
 The street's `StreetFlows` closure REQUIRES the drivers `U_ref` (m/s at `z_ref`), `theta_w`
 (radians CCW from east, wind TOWARD) and `h_abl` (m), which `build_street_model`'s returned
-driver template does NOT include (`apps/street/routing.py:414-416`,
+driver template does NOT include (`apps/street_aq/routing.py:414-416`,
 `tests/verification/test_street_parity.py:53-59`); the fixtures below supply them. The
 building is built at the .prj's own ambient (`Ws=5.23`, `Wd=270`, west wind) and then
 receives the street's wind through the `DriverAlias`es.
@@ -21,8 +21,8 @@ from pathlib import Path
 import pytest
 import torch
 
-from noodl.apps.building.prj import project_to_model, read_prj
-from noodl.apps.street.network import Street, StreetNetwork, build_street_model, street_index
+from noodl.apps.building_physics.prj import project_to_model, read_prj
+from noodl.apps.street_aq.network import Street, StreetNetwork, build_street_model, street_index
 from noodl.couple import (
     CONCENTRATION_TO_MASS_FRACTION,
     STREET_RAD_TO_CONTAM_DEG,
@@ -195,7 +195,7 @@ def test_real_leiden_small_building_back_coupling_magnitude(record_property):
     segment, the three-zone CONTAM building on it. The magnitude is RECORDED (design spec
     section 4: negligible is an acceptable, reportable result); the assertion is only that
     the coupled step converged and the sink sign is right."""
-    from noodl.apps.street.loader import read_aqdt
+    from noodl.apps.street_aq.loader import read_aqdt
 
     data = read_aqdt(
         AQDT_DATA / "stage1_geometry" / DOMAIN, AQDT_DATA / "stage2_inputs" / DOMAIN,

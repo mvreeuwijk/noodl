@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from noodl.apps.street.impaq import (
+from noodl.apps.street_aq.impaq import (
     build_test_network,
     canyon_velocity,
     compute_boundary_layer,
@@ -24,7 +24,7 @@ from noodl.apps.street.impaq import (
     network_from_street_network,
     solve_steady_state,
 )
-from noodl.apps.street.network import from_test_network
+from noodl.apps.street_aq.network import from_test_network
 from tests.golden import load_golden
 
 AQDT_ROOT = Path(os.environ.get("NOODL_AQDT_ROOT",
@@ -106,7 +106,7 @@ def test_each_fix_changes_the_answer_by_the_amount_recorded_in_the_plan():
 
 
 def test_the_unfixed_state_is_oversized_and_the_fixed_one_is_not():
-    from noodl.apps.street.impaq import build_transport_system
+    from noodl.apps.street_aq.impaq import build_transport_system
 
     network, layer = _case()
     # Four intersections and three roads, so the prototype allocates five states where
@@ -168,7 +168,7 @@ def test_flow_route_mis_permutes_its_answer_at_a_three_way_junction():
 
 
 def test_fix_b_alone_is_refused_when_intersections_outnumber_roads():
-    from noodl.apps.street.impaq import build_transport_system
+    from noodl.apps.street_aq.impaq import build_transport_system
 
     network, layer = _case()
     network.intersections.x = np.concatenate([network.intersections.x, [1.0, 2.0, 3.0]])

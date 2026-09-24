@@ -23,8 +23,15 @@ import numpy as np
 import pytest
 import torch
 
-from noodl.apps.building.elements import add_large_opening, orifice_elements_from_edges
-from noodl.apps.building.thermal import CP_AIR, RHO_0, Zone, add_zone, build_model, initial_state
+from noodl.apps.building_physics.elements import add_large_opening, orifice_elements_from_edges
+from noodl.apps.building_physics.thermal import (
+    CP_AIR,
+    RHO_0,
+    Zone,
+    add_zone,
+    build_model,
+    initial_state,
+)
 from noodl.drives import Stack, Wind
 from noodl.topology import Network
 

@@ -15,8 +15,8 @@ from dataclasses import dataclass, field
 
 import torch
 
-from noodl.apps.street.canyon import Z0_B_DEFAULT, Z0_S_DEFAULT
-from noodl.apps.street.routing import StreetFlows, StreetGeometry
+from noodl.apps.street_aq.canyon import Z0_B_DEFAULT, Z0_S_DEFAULT
+from noodl.apps.street_aq.routing import StreetFlows, StreetGeometry
 from noodl.layers.reaction import Reaction
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Drivers, Model, State

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from noodl.apps.street.canyon import (
+from noodl.apps.street_aq.canyon import (
     KAPPA_IMPAQ,
     KAPPA_MUNICH,
     Z0_S_DEFAULT,

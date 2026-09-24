@@ -124,7 +124,7 @@ def _impaq_test_network_case() -> dict:
     keeps being checked where the AQ_DT repository is not installed."""
     import math
 
-    from noodl.apps.street.impaq import (
+    from noodl.apps.street_aq.impaq import (
         build_test_network,
         canyon_velocity,
         compute_boundary_layer,

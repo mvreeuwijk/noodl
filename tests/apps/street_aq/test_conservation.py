@@ -10,13 +10,13 @@ import math
 
 import torch
 
-from noodl.apps.street.canyon import (
+from noodl.apps.street_aq.canyon import (
     KAPPA_IMPAQ,
     boundary_layer,
     canyon_velocity,
     exchange_velocity,
 )
-from noodl.apps.street.network import (
+from noodl.apps.street_aq.network import (
     Street,
     StreetNetwork,
     build_street_model,

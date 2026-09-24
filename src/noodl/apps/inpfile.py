@@ -6,7 +6,7 @@ and no more: it knows no section names, no column layouts and no units. `apps/se
 and `apps/water/inp.py` each own their own.
 
 Every `InpLine` carries the file's OWN 1-based line number, so a reader's refusal can name
-the line the way `apps/building/prj.py` names a CONTAM record. Section names are upper-cased
+the line the way `apps/building_physics/prj.py` names a CONTAM record. Section names are upper-cased
 and a repeated section is MERGED (EPANET's own example files split `[REACTIONS]` in two).
 """
 

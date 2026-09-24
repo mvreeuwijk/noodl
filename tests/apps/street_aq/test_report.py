@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from noodl.apps.street.report import (
+from noodl.apps.street_aq.report import (
     from_ug_m3,
     to_ug_m3,
     write_network_concentration,

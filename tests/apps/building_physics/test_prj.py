@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from noodl.apps.building.prj import (
+from noodl.apps.building_physics.prj import (
     _PATH_FIELDS,
     Project,
     project_to_model,
