@@ -1,0 +1,45 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "test.BadDoorWiring",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.23.0",
+  "experiment": {"StartTime": 0, "StopTime": 3600, "Interval": 1, "Tolerance": 1e-6},
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "extraPropertiesNames": ["CO2"],
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "volWes",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "T_start": 298.15, "V": 62.5, "nPorts": 2, "m_flow_nominal": 0.001,
+        "energyDynamics": "FixedInitial"
+      }
+    },
+    {
+      "name": "volEas",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "T_start": 293.15, "V": 62.5, "nPorts": 2, "m_flow_nominal": 0.001,
+        "energyDynamics": "FixedInitial"
+      }
+    },
+    {
+      "name": "dooOpeClo",
+      "class": "Buildings.Airflow.Multizone.DoorOpen",
+      "parameters": {"wOpe": 1, "hOpe": 2.2, "CD": 0.78, "m": 0.5, "dp_turbulent": 0.01}
+    }
+  ],
+  "connections": [
+    ["volWes.ports[1]", "dooOpeClo.port_a1"],
+    ["volWes.ports[2]", "dooOpeClo.port_b1"],
+    ["volEas.ports[1]", "dooOpeClo.port_a2"],
+    ["volEas.ports[2]", "dooOpeClo.port_b2"]
+  ],
+  "signals": []
+}

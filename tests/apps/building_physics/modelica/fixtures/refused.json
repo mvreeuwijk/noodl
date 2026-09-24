@@ -1,0 +1,29 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "test.Refused",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.23.0",
+  "experiment": {"StartTime": 0, "StopTime": 500, "Interval": 1, "Tolerance": 1e-6},
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "extraPropertiesNames": [],
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "bouOut",
+      "class": "Buildings.Fluid.Sources.Outside_CpLowRise",
+      "parameters": {"lat": 0.7, "til": 1.5707963267948966, "azi": 0.0}
+    },
+    {
+      "name": "ctrl",
+      "class": "Modelica.Blocks.Continuous.LimPID",
+      "parameters": {"controllerType": "P", "k": 5}
+    }
+  ],
+  "connections": [],
+  "signals": []
+}

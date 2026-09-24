@@ -1,0 +1,37 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "test.TwoZonesOrifice",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.23.0",
+  "experiment": {"StartTime": 0, "StopTime": 500, "Interval": 1, "Tolerance": 1e-6},
+  "medium": {
+    "class": "Buildings.Media.Specialized.Air.PerfectGas",
+    "extraPropertiesNames": [],
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "bouA",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {"p": 101330.0, "T": 294.15, "nPorts": 1}
+    },
+    {
+      "name": "bouB",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {"p": 101325.0, "T": 293.15, "nPorts": 1}
+    },
+    {
+      "name": "ori",
+      "class": "Buildings.Airflow.Multizone.Orifice",
+      "parameters": {"A": 0.01, "CD": 0.6, "m": 0.5, "dp_turbulent": 0.1}
+    }
+  ],
+  "connections": [
+    ["bouA.ports[1]", "ori.port_a"],
+    ["ori.port_b", "bouB.ports[1]"]
+  ],
+  "signals": []
+}

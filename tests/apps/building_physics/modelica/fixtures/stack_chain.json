@@ -1,0 +1,55 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "test.StackChain",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.23.0",
+  "experiment": {"StartTime": 0, "StopTime": 3600, "Interval": 1, "Tolerance": 1e-6},
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "extraPropertiesNames": ["CO2"],
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "volWes",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "T_start": 298.15, "V": 62.5, "nPorts": 3, "m_flow_nominal": 0.001,
+        "energyDynamics": "FixedInitial"
+      }
+    },
+    {
+      "name": "colWesBot",
+      "class": "Buildings.Airflow.Multizone.MediumColumn",
+      "parameters": {"h": 1.5, "densitySelection": "fromBottom"}
+    },
+    {
+      "name": "oriWesTop",
+      "class": "Buildings.Airflow.Multizone.Orifice",
+      "parameters": {"A": 0.01, "m": 0.5}
+    },
+    {
+      "name": "colWesTop",
+      "class": "Buildings.Airflow.Multizone.MediumColumn",
+      "parameters": {"h": 1.5, "densitySelection": "fromTop"}
+    },
+    {
+      "name": "volTop",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "T_start": 293.15, "V": 125.0, "nPorts": 2, "m_flow_nominal": 0.001,
+        "energyDynamics": "FixedInitial"
+      }
+    }
+  ],
+  "connections": [
+    ["volWes.ports[3]", "colWesBot.port_b"],
+    ["colWesBot.port_a", "oriWesTop.port_b"],
+    ["oriWesTop.port_a", "colWesTop.port_b"],
+    ["colWesTop.port_a", "volTop.ports[1]"]
+  ],
+  "signals": []
+}

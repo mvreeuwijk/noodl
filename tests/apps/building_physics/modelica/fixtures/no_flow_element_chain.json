@@ -1,0 +1,43 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "test.NoFlowElementChain",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.23.0",
+  "experiment": {"StartTime": 0, "StopTime": 500, "Interval": 1, "Tolerance": 1e-6},
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "extraPropertiesNames": [],
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "volA",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "T_start": 293.15, "V": 62.5, "nPorts": 1, "m_flow_nominal": 0.001,
+        "energyDynamics": "FixedInitial"
+      }
+    },
+    {
+      "name": "volB",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "T_start": 293.15, "V": 62.5, "nPorts": 1, "m_flow_nominal": 0.001,
+        "energyDynamics": "FixedInitial"
+      }
+    },
+    {
+      "name": "colOnly",
+      "class": "Buildings.Airflow.Multizone.MediumColumn",
+      "parameters": {"h": 3.0, "densitySelection": "fromTop"}
+    }
+  ],
+  "connections": [
+    ["volA.ports[1]", "colOnly.port_a"],
+    ["colOnly.port_b", "volB.ports[1]"]
+  ],
+  "signals": []
+}
