@@ -776,6 +776,10 @@ class CoupledModel:
             # links themselves. A run with a value shared across instances (a one-way link
             # fed from an unbatched driver, say) fails that check per entry and
             # `differentiate_fixed_point` falls back to the flattened solve on its own.
+            # `batch_shape` also asserts (see that function's docstring) that instances do not
+            # couple through `pass_fn` -- true here because `_one_pass` steps every model and
+            # applies every transfer per instance, never mixing one instance's state into
+            # another's.
             adjoint_report: dict = {}
             flat = differentiate_fixed_point(
                 values, pass_fn, rtol=self.adjoint_rtol,

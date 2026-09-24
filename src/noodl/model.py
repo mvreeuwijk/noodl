@@ -1044,7 +1044,11 @@ class Model:
             # `iterate_tol` layer, never reduced further), so it names the leading dims a
             # genuinely batched state key carries; a key some instances share unbatched
             # fails that check and `differentiate_fixed_point` falls back to the flattened
-            # solve on its own.
+            # solve on its own. `batch_shape` also asserts (see that function's docstring)
+            # that instances do not couple through `pass_fn` -- true here because `_pass`
+            # advances every state key and layer per instance and `converged` is itself
+            # judged per instance, so nothing in the pass ever mixes one instance's state
+            # into another's.
             adjoint_report: dict = {}
             flat = differentiate_fixed_point(
                 [certified_fed[k] for k in keys], pass_fn, rtol=self.adjoint_rtol,

@@ -36,6 +36,11 @@ The `pass_fn` contract, in full, because two of its rules are traps:
   mutate the pass's graph under autograd and trip its version counter at backward time, or
   silently alias a tensor the caller still owns. Copy first if a buffer must be written.
 
+`batch_shape` (Task 9) lets the adjoint solve one independent GMRES system per batch instance
+instead of one system flattened over the whole interface, which is only correct when instances
+do NOT couple through the pass -- see `differentiate_fixed_point`'s own docstring for the
+precondition this places on the CALLER, not something this utility can verify from shapes alone.
+
 The derivation in full, for the record. Let z*(theta) solve z = G(z, theta) and write the
 pass's whole output as new = S(z*(theta), theta), with z_next = G(z, theta) whatever part of
 the pass produced it. Then
@@ -143,14 +148,16 @@ def _vjp(
 class _AdjointOperator:
     """(I - J^T), either on the fully flattened interface or split into one block per batch
     instance. J^T w is one VJP of the read z_next = G(z); when `batch_shape` is given, that
-    VJP is taken ONCE for the WHOLE batch and reshaped per instance -- correct because the
-    pass graph has no cross-instance edges (every interface tensor carries `batch_shape` as
-    its leading dims, by the caller's construction), so autograd's batched VJP is already
-    exactly the per-instance one, and gluing every instance's block into a single flattened
-    system (as the `batch_shape=None` path still does) computes the identical numbers, just
-    without letting `gmres` exploit the block-diagonal structure. `batch_shape=()` (a
-    "batch" of one, scalar-shaped instance) takes the same code path as `batch_shape=None`
-    and is bit-identical to it: `n_batch=0` either way.
+    VJP is taken ONCE for the WHOLE batch and reshaped per instance -- correct ONLY because the
+    pass graph is ASSUMED to have no cross-instance edges (every interface tensor carries
+    `batch_shape` as its leading dims is a necessary but not sufficient check for that; see
+    `differentiate_fixed_point`'s docstring for the precondition this places on the caller),
+    so autograd's batched VJP is then already exactly the per-instance one, and gluing every
+    instance's block into a single flattened system (as the `batch_shape=None` path still
+    does) computes the identical numbers, just without letting `gmres` exploit the
+    block-diagonal structure. `batch_shape=()` (a "batch" of one, scalar-shaped instance)
+    takes the same code path as `batch_shape=None` and is bit-identical to it: `n_batch=0`
+    either way.
     """
 
     def __init__(
@@ -239,7 +246,14 @@ class _FixedPointAdjoint(torch.autograd.Function):
             restart=min(op.shape[-1], 100) if ctx.restart is None else ctx.restart,
         )
         if not bool(result.converged.all()):
-            if batch_shape is None:
+            # `not batch_shape`, not `batch_shape is None`: `batch_shape=()` (every unbatched
+            # caller's `tuple(converged.shape)`) takes the SAME flattened code path as `None`
+            # everywhere else in this class (`n_batch = 0` either way, see above), and the
+            # message must match -- a bare `is None` check here fired the per-instance
+            # branch for `()` too, and since a 0-d `converged` has no `.nonzero()` indices to
+            # report, that branch's own fallback produced a spurious "for instances all" on
+            # the single most common (unbatched) case.
+            if not batch_shape:
                 locus = ""
             else:
                 # Per-instance convergence, named like the callers' own non-convergence
@@ -307,6 +321,17 @@ def differentiate_fixed_point(
     solve of today, unconditionally correct either way. `report`, when given, is updated with
     `{"batched": bool}`: False whenever the adjoint does not attach at all (nothing ran, so
     there is nothing to report) or the flattened solve ran; True when the batched one did.
+
+    **`batch_shape` is a precondition on the CALLER, not something this function can verify.**
+    Passing it asserts that instances do NOT couple through `pass_fn` -- that instance i's
+    `outputs`/`z_next` depend only on `z`'s instance-i slice, never on another instance's. The
+    shape check above (every entry carries `batch_shape` as leading dims) is necessary but not
+    sufficient: a pass that mixes instances (a mean reduced across the batch axis, a term that
+    reads one instance's slice while computing another's, ...) can still hand back tensors
+    shaped exactly like a block-diagonal interface, and the batched adjoint would then solve
+    the WRONG system and return a silently wrong gradient -- nothing about the shapes says
+    otherwise. Pass `batch_shape=None` for a pass that does not honour this, or that you are
+    not sure honours it.
 
     Under `no_grad`, when nothing in the pass requires grad, or when the interface is empty,
     the plain outputs come back. Raises `ValueError` here for a `z_next` that does not match

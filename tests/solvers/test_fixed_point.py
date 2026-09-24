@@ -277,6 +277,40 @@ def test_non_convergence_of_the_adjoint_is_refused_by_name():
         torch.autograd.grad(y.sum(), (theta,))
 
 
+def test_the_non_convergence_message_is_identical_for_no_batch_shape_and_an_empty_one():
+    """`batch_shape=()` is what every UNBATCHED `Model`/`CoupledModel` call now passes
+    (`tuple(converged.shape)` on a 0-d `converged`), and it takes the identical flattened
+    code path as `batch_shape=None` (`n_batch=0` either way -- see `_AdjointOperator`), so the
+    non-convergence message must be the exact same TEXT, not just match the same regex. Fix
+    round: a bare `batch_shape is None` check fired the per-instance-naming branch for `()`
+    too, and a 0-d `converged` has no `.nonzero()` indices, so that branch's own fallback
+    produced a spurious "for instances all" on the single most common (unbatched) case --
+    reproduced here on the same fixture as the test above.
+    """
+    J = torch.tensor([[0.3, 0.2, 0.0], [0.1, 0.4, 0.1], [0.0, 0.2, 0.5]], dtype=F64)
+
+    def message(batch_shape):
+        theta = torch.tensor([0.3, -0.2, 0.1], dtype=F64, requires_grad=True)
+        with torch.no_grad():
+            z_star = [torch.linalg.solve(torch.eye(3, dtype=F64) - J, theta)]
+
+        def pass_fn(z):
+            y = J @ z[0] + theta
+            return [y], [y]
+
+        (y,) = differentiate_fixed_point(
+            z_star, pass_fn, max_iter=1, rtol=1e-15, where="tiny map", batch_shape=batch_shape,
+        )
+        with pytest.raises(RuntimeError) as excinfo:
+            torch.autograd.grad(y.sum(), (theta,))
+        return str(excinfo.value)
+
+    msg_none = message(None)
+    msg_empty = message(())
+    assert msg_none == msg_empty
+    assert "for instances" not in msg_none
+
+
 def test_second_order_differentiation_is_refused_by_name():
     theta = torch.tensor(0.7, dtype=F64, requires_grad=True)
 
