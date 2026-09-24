@@ -137,7 +137,11 @@ class Model:
     out of it is stepped every pass but not tested, which is what a species layer whose mass
     fractions are ~1e-3 wants when a thermal layer in kelvin sets the pace. Convergence is
     decided per batch instance, and a batch that does not converge within `iterate_max`
-    raises, naming the instances (`on_failure="return"` with `diagnostics` returns instead).
+    raises, naming the instances (`on_failure="return"` with `diagnostics` returns instead --
+    but only when nothing differentiable reached the state on this call, e.g. under
+    `torch.no_grad()` or with `differentiable=False`; a non-converged iteration has no fixed
+    point to differentiate, so `on_failure="return"` still raises, naming that reason, when a
+    gradient was wanted (A2)).
 
     The onion's fixed point is differentiated IMPLICITLY, not by unrolling the passes: the
     primal passes carry no graph, and after convergence the certified pass runs once more on
@@ -931,6 +935,13 @@ class Model:
                 f"passes for instances {failing}; largest change per layer {worst}, "
                 f"tolerances {self.iterate_tol}"
             )
+            if needs_adjoint:
+                raise RuntimeError(
+                    message + "; a gradient was requested and a non-converged iteration has "
+                    "no fixed point to differentiate, so on_failure='return' cannot return a "
+                    "state here (it returns the primal state only when nothing requires a "
+                    "gradient, e.g. under torch.no_grad() or with differentiable=False)"
+                )
             if not (solve_kwargs.get("on_failure") == "return" and diagnostics is not None):
                 raise RuntimeError(message)
         # A key `_pass` does not write is carried through it verbatim, pass after pass, so

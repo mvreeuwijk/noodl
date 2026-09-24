@@ -1211,3 +1211,37 @@ def test_iterate_gradient_is_per_instance_on_a_batched_model():
     for i in range(2):
         assert grads[i] == pytest.approx(cd[i], rel=1e-5), i
     assert grads[0] != pytest.approx(grads[1], rel=1e-3)
+
+
+def test_a_non_converged_iteration_refuses_to_return_when_a_gradient_is_wanted():
+    """on_failure="return" keeps its meaning for forward-only and differentiable=False runs
+    (`test_iterate_reports_non_convergence_per_instance_or_raises`, unlearnable so
+    `needs_adjoint` stays False there), but a non-converged iteration has no fixed point to
+    differentiate, and returning the primal state there would hand the caller a graph-free
+    tensor that differentiates to nothing, silently.
+
+    Adapted from the brief's literal fixture: `model.steady(..., on_failure="return")` with a
+    `learnable=True` element cannot reach `_iterate`'s own non-convergence branch with
+    `needs_adjoint` True, because `solve_kwargs` (including `on_failure`) is forwarded to
+    every potential-layer solve too (module docstring), and `PotentialFlowLayer.solve`'s
+    differentiable path (the default) refuses `on_failure="return"` UNCONDITIONALLY
+    (`solvers.implicit.implicit_solve`, not only on the potential solve's own
+    non-convergence) -- verified by running: it raises `ValueError` from `implicit_solve`
+    before `_iterate` is ever reached. `differentiable=False` keeps the potential solve on
+    its non-differentiable path instead (which does accept `on_failure="return"` given
+    `diagnostics`), and the gradient reaches "species.x" directly through a `requires_grad`
+    `species.sources` driver, which the transport step differentiates in plain autograd,
+    independently of the potential solve."""
+    _, model, state, drivers, _el, _ = _build(
+        closures=[_Feedback(2e3)], coupling="iterate",
+        iterate_tol={"species": 1e-15}, iterate_max=2,
+    )
+    drv = dict(drivers)
+    drv["species.sources"] = drivers["species.sources"].clone().requires_grad_(True)
+    diag: dict = {}
+    with pytest.raises(RuntimeError, match=r"did not converge.*no fixed point to differentiate"):
+        model.steady(state, drv, diagnostics=diag, differentiable=False, on_failure="return")
+    with torch.no_grad():
+        out = model.steady(state, drv, diagnostics=diag, differentiable=False,
+                            on_failure="return")
+    assert "species.x" in out and not bool(diag["converged"].all())
