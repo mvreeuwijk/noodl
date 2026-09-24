@@ -7,7 +7,7 @@ the tolerances and measured errors written down rather than asserted.
 | Application | Physical system | Reference model | Entry point |
 |---|---|---|---|
 | [Building physics](building_physics.md) | Multi-zone airflow, heat, contaminants | CONTAM / ContamX 3.4.1.7 | `build_model`, `read_prj` |
-| [Street air quality](street_aq.md) | Urban air quality, canyon exchange, routing | MUNICH, SIRANE, IMPAQ | `build_model`, `read_aqdt` |
+| [Street air quality](street_aq.md) | Urban air quality, canyon exchange, routing | MUNICH, SIRANE (IMPAQ port check) | `build_model`, `read_aqdt` |
 | [Sewers](sewer.md) | Gravity hydraulics, headspace air, sulfide | SWMM 5.2.4 | `build_model`, `read_swmm_inp` |
 | [Water distribution](water.md) | Pressurised mains, pumps, tanks, demand | EPANET 2.2 | `build_model`, `read_epanet_inp` |
 | [Capacitated transfer](capacitated.md) | Rule-based water-systems allocation | WSIMOD 0.8.1 | `CapacitatedTransferLayer` |
@@ -24,8 +24,8 @@ all four:
 
 - The **building physics** and **water** applications solve for a potential — pressure in
   pascals, hydraulic head in metres. Newton on a nodal conservation residual.
-- The **street air quality** application has no potential at all. The along-canyon velocity is a closed-form
-  function of the wind aloft, so a closure computes every flow directly.
+- The **street air quality** application has no potential at all. The along-canyon velocity is
+  a closed-form function of the wind aloft, so a closure computes every flow directly.
 - The **sewer** application's water side exploits the fact that a tree has an empty cycle space:
   continuity alone fixes every discharge, in closed form, with no solve. Its *headspace air*
   side, on the same graph, is a full Newton potential solve.
@@ -49,7 +49,9 @@ Three words are used with fixed meanings throughout these pages.
   capacitated transfer.
 - A **parity test** runs noodl and a reference implementation on the same input and compares the
   outputs at a stated tolerance. Parity shows that noodl solves the same model as the reference;
-  it is a code-to-code comparison, not evidence that the model describes reality.
+  it is a code-to-code comparison, not evidence that the model describes reality. Where the
+  reference has not been run, as for MUNICH on this release, the check is instead against the
+  formulas and published results the reference documents, and the application page says so.
 - **Validation** means comparison against measurements. No application claims it yet.
 
 IMPAQ is the prototype the street application grew from, written by the same author, so

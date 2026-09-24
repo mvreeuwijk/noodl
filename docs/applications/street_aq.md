@@ -1,4 +1,4 @@
-# Street canyons
+# Street air quality
 
 Urban air quality on a street network — the SIRANE/MUNICH class of problem. Road segments
 flanked by buildings are "canyons"; pollutant builds up in each from traffic emissions, is
@@ -117,8 +117,8 @@ For strict IMPAQ parity:
 
 ```python
 build_model(net, canyon_wind="soulhac", exchange="sirane",
-                   direction_averaging="none", kappa=0.4, canyon_wind_min=0.0,
-                   u_d_min=0.0, stability="impaq", z_ref=30.0, pblh_floor=False)
+            direction_averaging="none", kappa=0.4, canyon_wind_min=0.0,
+            u_d_min=0.0, stability="impaq", z_ref=30.0, pblh_floor=False)
 ```
 
 ### The canyon physics
@@ -180,7 +180,7 @@ worth knowing before you point it at your own data:
 layout, with two recorded differences: classic CDF rather than NETCDF4 (so `scipy` can read it),
 and float64 rather than float32.
 
-## Validation
+## Verification
 
 ### MUNICH formulas
 
@@ -215,8 +215,8 @@ with median relative difference below $10^{-9}$.
 The port check also turned up a **third, undocumented defect** in IMPAQ's `flow_route`: it sorts
 by angle with `argsort` but un-sorts with `order` rather than `argsort(order)`, mis-permuting
 routing at three-way junctions and breaking the port's own conservation — measured at 12 roads
-at one step, worst factor 13.95. The port reproduces it faithfully, because it is the port, not
-the model.
+at one step, worst factor 13.95. The port reproduces it faithfully because its purpose is to
+reproduce IMPAQ, defects included; noodl's own model does not have the defect.
 
 ## Limitations and caveats
 
@@ -236,7 +236,7 @@ the model.
 - **A retracted claim.** Earlier documentation held that the SIRANE exchange coefficient should
   be $\sigma_w/\sqrt{2\pi}$ rather than $\sigma_w/(\sqrt{2}\,\pi)$. That was retracted after
   checking the source PDFs at glyph level; the code uses the latter and a test pins it.
-- **The saved real AQ_DT product used for validation was found stale** against its own geometry
+- **The saved real AQ_DT product used for the parity check was found stale** against its own geometry
   file — 160 edges vs 162 features, 94 of 160 rows with mismatched `edge_osmid`. That test skips
   itself with the diagnosis recorded rather than reporting a false pass or fail.
 

@@ -1,4 +1,4 @@
-# Buildings
+# Building physics
 
 Multi-zone airflow, heat balance and contaminant transport — the CONTAM class of problem, in a
 differentiable and batched form.
@@ -191,7 +191,7 @@ shortest arc. `drivers_at(t)` returns the driver keys a `build_model`-built mode
 `"<thermal>.x_boundary"`, `"P_ref"`, `"V_met"`, `"theta_w"`. It handles the single-boundary-node
 case; a model with several prescribed temperatures must build its own boundary vector.
 
-## Validation
+## Verification
 
 ### Against ContamX
 

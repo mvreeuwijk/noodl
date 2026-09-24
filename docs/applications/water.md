@@ -168,7 +168,7 @@ internally for one is not stated in the manual, so implementing it would be a gu
 and everything is converted to SI on read. Unrecognised `[OPTIONS]` lines are recorded verbatim in
 `notes["unrecognised_options"]` rather than dropped.
 
-## Validation
+## Verification
 
 Against the real EPANET 2.2 engine through `wntr` 1.5.0, which bundles `epanet22.dll`. Note the
 reference implementation's own floor: `EpanetSimulator` reads EPANET's binary output, whose

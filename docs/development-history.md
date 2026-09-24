@@ -1364,6 +1364,35 @@ relabelling would need to preserve that deliberately), and no genuine data dupli
 fix. Flagged here rather than silently resolved either way, since the ledger's wording assumed
 regenerating would remove it and this regeneration does not.
 
+## Application names and reference terminology (24 Sep 2026)
+
+Earlier records in this file, and every document under `docs/superpowers/`, use the pre-rename
+package paths and builder names -- the building and street application packages without their
+current suffixes, each builder named after its own application rather than sharing one name, and
+the SWMM reader under its old, shorter name -- together with the retired word "oracle".
+
+**Renames.** `noodl.apps.building_physics` (formerly the same path without the `_physics`
+suffix) and `noodl.apps.street_aq` (formerly the same path without the `_aq` suffix) now say
+what each package models. `sewer` and `water` are unchanged. Every application exposes
+`build_model`; the three builders that used to spell out their own application's name in the
+function name now share that one name, and the qualified import already says which one. The
+SWMM reader is `read_swmm_inp`, matching `read_epanet_inp`. The install extra `street` is now
+`street_aq`. State keys such as `"street.x"` and `"sewer.H"` are unchanged, because they name
+physical layers and appear in saved fixtures.
+
+**No compatibility shims.** noodl is a prototype. The old import paths fail with
+`ModuleNotFoundError` rather than warning; downstream code is updated by its owner.
+
+**Terminology.** The retired term is standard software-testing vocabulary, but the readers of
+these pages are modellers. The pages now speak of reference implementations, parity tests and
+validation, defined on the [applications page](applications/index.md). Dense code paths kept
+for checking sparse ones are "dense references", and agreement with the IMPAQ port is a port
+check.
+
+**Deferred.** A `noodl.apps.wsimod` package with a WSIMOD configuration reader and a parity case
+where capacities bind is its own milestone. Moving the MUNICH reader from a separate analysis
+pipeline into `noodl.apps.street_aq` is also deferred.
+
 ## Appendix: the source tree
 
 A module-by-module map of the repository, as it stood at the end of milestone 5.
@@ -1392,7 +1421,7 @@ src/noodl/
                  closures (milestone 5)
   operators/     the matvec-free linear-operator contract: base.py (LinearOperator protocol,
                  SolveResult, SolverStatus), dense.py (DenseOperator, the retained dense
-                 oracle), graph.py (GraphLaplacianOperator), advection.py (AdvectionOperator)
+                 reference), graph.py (GraphLaplacianOperator), advection.py (AdvectionOperator)
   solvers/       scalar.py (solve_monotone), linear.py (solve, the dense reference),
                  grounding.py (spd_certificate, spd_diagnosis), iterative.py (pcg, gmres;
                  never raise), select.py (solve: the method="auto" eligibility table and the
@@ -1400,32 +1429,32 @@ src/noodl/
                  implicit.py (implicit_solve, adjoint)
   layers/        potential.py (PotentialFlowLayer), transport.py (TransportLayer),
                  reaction.py (Reaction, FirstOrderDecay)
-  apps/building/ the building application: thermal.py (Zone, WallMass, thermal_layer,
+  apps/building_physics/ the building application: thermal.py (Zone, WallMass, thermal_layer,
                  species_layer, IdealGasDensity, LinearDensity, build_model), elements.py
                  (mass_orifice, add_large_opening), prj.py (the CONTAM .prj reader, a
                  documented subset, and project_to_model), wth.py (the .wth weather reader),
                  sources.py (the four CONTAM source types), contamx.py (the ContamX driver
                  over contamxpy)
-  apps/street/   the street application: canyon.py (BoundaryLayer, canyon_velocity,
+  apps/street_aq/ the street application: canyon.py (BoundaryLayer, canyon_velocity,
                  exchange_velocity, the soulhac/macdonald closures), routing.py
                  (StreetGeometry, StreetFlows, routing_matrix, node_closure,
                  direction_offsets -- the north-west-corner routing), network.py
-                 (StreetNetwork, build_street_model, street_geometry, street_index,
+                 (StreetNetwork, build_model, street_geometry, street_index,
                  munich_idealised), chemistry.py (photostationary_for_streets,
                  street_steady), loader.py (read_aqdt, the AQ_DT GeoJSON/NetCDF reader),
-                 impaq.py (the IMPAQ prototype ported as a numpy/scipy comparison oracle,
-                 kept as per-edge Python loops by design -- it is the oracle, not the
-                 model path), report.py (to_ug_m3, from_ug_m3,
+                 impaq.py (the IMPAQ prototype ported as a numpy/scipy reference
+                 implementation, kept as per-edge Python loops by design -- it is the
+                 port, not the model path), report.py (to_ug_m3, from_ug_m3,
                  write_network_concentration)
   apps/sewer/    the gravity-sewer application: geometry.py (exact circular geometry, the
                  batched Manning normal-depth inversion), hydraulics.py (SewerHydraulics --
                  closure-first tree flow, depth, the optional implicit-Euler storage
                  sweep), air.py (Headspace, Drag, air_density), quality.py (Henry's law,
                  the two-film flux, Pomeroy-Parkhurst sulfide generation, BOD decay,
-                 LateralLoads), network.py (SewerNetwork, build_sewer_model, sewer_steady),
-                 inp.py (a documented SWMM .inp subset) and report.py
+                 LateralLoads), network.py (SewerNetwork, build_model, sewer_steady),
+                 inp.py (a documented SWMM .inp subset, read_swmm_inp) and report.py
   apps/water/    the pressurised water-distribution application: network.py (Junction/
-                 Reservoir/Tank/WaterPipe/Pump/Valve, WaterNetwork, build_water_model,
+                 Reservoir/Tank/WaterPipe/Pump/Valve, WaterNetwork, build_model,
                  water_steady), elements.py (HazenWilliams, PumpCurve, MinorLoss),
                  tanks.py (TankLevels), demand.py (PressureDrivenDemand), inp.py (a
                  documented EPANET 2.2 .inp subset) and report.py
@@ -1445,15 +1474,15 @@ tests/
                  test_implicit.py, test_implicit_operator_contract.py
   layers/        test_potential.py, test_potential_sparse.py, test_transport.py,
                  test_transport_sparse.py, test_reaction.py
-  apps/building/ test_thermal.py, test_elements.py, test_prj.py, test_wth.py,
+  apps/building_physics/ test_thermal.py, test_elements.py, test_prj.py, test_wth.py,
                  test_sources.py; tests/data/contam holds the sample projects
-  apps/street/   test_canyon.py, test_routing.py, test_network.py, test_chemistry.py,
+  apps/street_aq/ test_canyon.py, test_routing.py, test_network.py, test_chemistry.py,
                  test_loader.py, test_impaq_port.py, test_conservation.py, test_report.py;
                  tests/data/street holds the AQ_DT and MUNICH fixtures
   verification/  CONTAM-style closed-form airflow cases, batched against scipy roots;
                  test_composed_model.py (parity, interface conservation, cross-join
                  gradients); test_natural_ventilation.py (Li and Delsante closed forms, a
-                 two-zone scipy oracle, Hensen's ping-pong/onion table, the golden);
+                 two-zone scipy reference, Hensen's ping-pong/onion table, the golden);
                  test_contam_parity.py (ContamX through contamxpy, skipped when absent);
                  CPU performance budgets and test_composed_scaling.py, the milestone-1b
                  and milestone-2 acceptance gates (both marked slow, skipped by default);
@@ -1490,29 +1519,3 @@ benchmarks/
                               tests/golden/natural_ventilation.json (explicit action)
 ```
 
-## 24 September 2026 -- application names and reference terminology
-
-Earlier records in this file, and every document under `docs/superpowers/`, use the names that
-were current when they were written: `noodl.apps.building`, `noodl.apps.street`,
-`build_street_model`, `build_sewer_model`, `build_water_model`, `read_inp`, and the word
-"oracle".
-
-**Renames.** `noodl.apps.building` is now `noodl.apps.building_physics` and `noodl.apps.street`
-is now `noodl.apps.street_aq`, so each package name says what it models. `sewer` and `water` are
-unchanged. Every application exposes `build_model`; the qualified import already says which one.
-The SWMM reader is `read_swmm_inp`, matching `read_epanet_inp`. The install extra `street` is
-now `street_aq`. State keys such as `"street.x"` and `"sewer.H"` are unchanged, because they
-name physical layers and appear in saved fixtures.
-
-**No compatibility shims.** noodl is a prototype. The old import paths fail with
-`ModuleNotFoundError` rather than warning; downstream code is updated by its owner.
-
-**Terminology.** "Test oracle" is standard software-testing vocabulary, but the readers of these
-pages are modellers. The pages now speak of reference implementations, parity tests and
-validation, defined on the [applications page](applications/index.md). Dense code paths kept
-for checking sparse ones are "dense references", and agreement with the IMPAQ port is a port
-check.
-
-**Deferred.** A `noodl.apps.wsimod` package with a WSIMOD configuration reader and a parity case
-where capacities bind is its own milestone. Moving the MUNICH reader from a separate analysis
-pipeline into `noodl.apps.street_aq` is also deferred.

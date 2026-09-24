@@ -115,7 +115,7 @@ real application adds more of the same kind of thing, in a fixed place:
 - **`src/noodl/apps/<name>/network.py`** — the module a real application lives in. It defines
   the domain objects (see `Street`/`StreetNetwork` in
   `src/noodl/apps/street_aq/network.py` for a worked example: frozen dataclasses that validate
-  their own inputs), a **builder** (`build_<name>_model` there, `build_two_zone` here) that
+  their own inputs), a **builder** (`build_model` there, `build_two_zone` here) that
   turns them into `(Model, State, Drivers)` by constructing a `Network`, one `Element` per
   edge kind, one layer per physical quantity, any closures, and the `Model` itself, and an
   **`initial_state(model)`** function that returns a state dict of the right shape for every

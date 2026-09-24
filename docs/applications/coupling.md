@@ -290,7 +290,7 @@ way** — that is a property of the pass itself, not of which solver ran inside 
 Physically, infiltration draws segment air into the building and the building acts as a sink on
 the street side. Both demos assert that sign.
 
-## Validation
+## Verification
 
 | Check | Tolerance | Measured |
 |---|---|---|

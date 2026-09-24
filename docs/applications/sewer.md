@@ -217,7 +217,7 @@ refused, because time variation belongs in the drivers.
 **Slope** follows SWMM's own definition $S_0 = dy/dx$ with $dx = \sqrt{L^2 - dy^2}$ — the 3-D
 chord, not the naive $dy/L$. Zero or adverse fall is refused, as is a fall $\ge$ length.
 
-## Validation
+## Verification
 
 Against SWMM 5.2.4 through `pyswmm`, on the committed `tree_kinwave.inp` fixture. The engine
 identity itself is pinned: `engine_version == "5.2.4"` and `flow_routing_error == 0.0`.
@@ -241,7 +241,7 @@ from transport; SWMM's is a continuous exponential decay. The $O(\Delta t)$ diff
 directly. Richardson extrapolation $2C(\Delta t) - C(2\Delta t)$ removes the leading term and
 reaches 8.05e-6, with the three $\Delta t$ pairs agreeing to 3e-8.
 
-Non-SWMM validation, for the physics SWMM does not model:
+Non-SWMM checks, for the physics SWMM does not model:
 
 | Check | Result |
 |---|---|

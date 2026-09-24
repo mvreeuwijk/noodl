@@ -73,7 +73,7 @@ core, and each is checked against the standard reference implementation in its f
 | Application | Physical system | Reference model |
 |---|---|---|
 | Building physics | Multi-zone airflow, heat and contaminant transport | CONTAM / ContamX |
-| Street air quality | Urban air quality, canyon exchange and routing | MUNICH, SIRANE, IMPAQ |
+| Street air quality | Urban air quality, canyon exchange and routing | MUNICH, SIRANE (IMPAQ port check) |
 | Sewers | Gravity sewer hydraulics, headspace air, sulfide | SWMM |
 | Water distribution | Pressurised mains, pumps, tanks, demand | EPANET 2.2 |
 | Capacitated transfer | Rule-based water-systems allocation | WSIMOD |
@@ -97,10 +97,10 @@ A module-by-module map is in the
 ## Status
 
 The framework core and all six applications are built and checked against reference
-implementations; the suite is 1306 tests at 96 % coverage. The per-milestone engineering record — what each milestone added, the
-decisions behind it, the measured errors and what it left open — is in
-[docs/development-history.md](docs/development-history.md). The design specs and
-implementation plans behind them are under `docs/superpowers/`.
+implementations; the suite is 1677 tests at 96.7 % coverage. The per-milestone engineering
+record — what each milestone added, the decisions behind it, the measured errors and what it
+left open — is in [docs/development-history.md](docs/development-history.md). The design specs
+and implementation plans behind them are under `docs/superpowers/`.
 
 ## The name
 
