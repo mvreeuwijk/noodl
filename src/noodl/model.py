@@ -23,7 +23,9 @@ may also declare `state_keys`, keys it carries across steps itself (spec 4.6a); 
 copied from its return into the returned state, evaluated from the step-start state in
 every pass of a coupling that takes more than one (N1) -- never fed forward from an earlier
 pass's own output, which would integrate a stateful closure once per pass instead of once
-per step.
+per step. A `coupling="iterate"` step started without such a key already in the step-start
+state warns by name (`RuntimeWarning`, A3): N1's pinning has nothing to pin on that step, so
+the closure integrates once per pass instead of once per step until the key is seeded.
 
 `**solve_kwargs` of `step`/`steady` reach the POTENTIAL solves only (`differentiable`,
 `on_failure`, `method`, Newton kwargs). Transport steps always raise on failure.
@@ -38,6 +40,7 @@ Newton's mask is). Failure follows the layers: raise by default, naming the offe
 from __future__ import annotations
 
 import inspect
+import warnings
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
@@ -870,6 +873,18 @@ class Model:
         would scale `(I - G_z)^-1` by 1/relaxation and return a gradient wrong by that
         factor.
         """
+        missing = [k for k in self.closure_state_keys if k not in state]
+        if missing:
+            warnings.warn(
+                f"Model: coupling='iterate' started a step without the closure-carried state "
+                f"{missing} in the step-start state. On this step the key is not pinned to the "
+                f"step start (rule N1 pins only keys the state carries), so its closure "
+                f"integrates once per pass instead of once per step and the adjoint omits its "
+                f"compounding path. Seed it before the first step (the application's "
+                f"initial_state helper, or Model.initial_capacities for capacities).",
+                RuntimeWarning,
+                stacklevel=3,
+            )
         fed: State = dict(state)
         # The fed state of the pass being run RIGHT NOW. Equal to `fed` on the converged
         # exit, which breaks before `fed` is rebuilt, but named separately so that a later

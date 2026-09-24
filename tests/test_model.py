@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 import torch
 
@@ -906,6 +908,25 @@ class _ParametrizedIntegratingCounter:
         return {"demo.n": n + self.increment}
 
 
+def _iterate_model_with_counter(param=None):
+    """Shared builder for the I8-1 tests (a closure-carried key missing vs. seeded from the
+    step-start state) and A3's warning tests, all on the same `_Feedback` +
+    `_ParametrizedIntegratingCounter` iterate model. `state` is SEEDED ("demo.n" zero): A3's
+    own control test wants that, and its warning test derives the unseeded state by dropping
+    the key from it, exactly as the I8-1 control test already built its own `start`. `param`
+    defaults to a fixed, non-differentiable 0.5 for A3's tests, which never differentiate;
+    the I8-1 tests each pass their own differentiable leaf so `torch.autograd.grad` can read
+    it back afterward."""
+    if param is None:
+        param = torch.tensor(0.5, dtype=F64)
+    _, model, state, drivers, _, _ = _build(
+        closures=[_Feedback(2e3), _ParametrizedIntegratingCounter(param)],
+        coupling="iterate", iterate_tol={"species": 1e-12}, iterate_max=60,
+    )
+    state = dict(state, **{"demo.n": torch.zeros((), dtype=F64)})
+    return model, state, drivers
+
+
 def test_i8_1_a_closure_state_key_missing_from_the_step_start_state_gets_a_truncated_gradient():
     """I8-1 (Task 8 review): `_iterate`'s interface excludes every `closure_state_keys` entry
     UNCONDITIONALLY (`keys = [... if k not in self.closure_state_keys ...]`), whether or not
@@ -930,12 +951,11 @@ def test_i8_1_a_closure_state_key_missing_from_the_step_start_state_gets_a_trunc
     (silently wrong-by-omission, never wrong-signed or blown up) and NOT a runtime refusal --
     the first step is allowed to lack the key by design (`_pass`'s `if key in base:` guard)."""
     param = torch.tensor(0.5, dtype=F64, requires_grad=True)
-    _, model, state, drivers, _, _ = _build(
-        closures=[_Feedback(2e3), _ParametrizedIntegratingCounter(param)],
-        coupling="iterate", iterate_tol={"species": 1e-12}, iterate_max=60,
-    )
+    model, state, drivers = _iterate_model_with_counter(param)
+    unseeded = {k: v for k, v in state.items() if k != "demo.n"}
     diag: dict = {}
-    new = model.step(state, drivers, 600.0, diagnostics=diag)   # "demo.n" NOT seeded
+    with pytest.warns(RuntimeWarning, match=r"closure-carried state.*'demo\.n'.*once per pass"):
+        new = model.step(unseeded, drivers, 600.0, diagnostics=diag)   # "demo.n" NOT seeded
     assert diag["passes"] >= 2      # the compounding needs more than one pass to be visible
     assert diag["adjoint"] == "implicit"
     (grad,) = torch.autograd.grad(new["demo.n"], (param,))
@@ -951,7 +971,12 @@ def test_i8_1_a_closure_state_key_missing_from_the_step_start_state_gets_a_trunc
             return m.step(s, d, 600.0)["demo.n"].item()
 
     h = 1e-6
-    cd = (_unseeded_value(0.5 + h) - _unseeded_value(0.5 - h)) / (2 * h)
+    warn_match = r"closure-carried state.*'demo\.n'.*once per pass"
+    with pytest.warns(RuntimeWarning, match=warn_match):
+        up = _unseeded_value(0.5 + h)
+    with pytest.warns(RuntimeWarning, match=warn_match):
+        down = _unseeded_value(0.5 - h)
+    cd = (up - down) / (2 * h)
     assert cd == pytest.approx(float(diag["passes"]), rel=1e-6)   # true sensitivity ~ pass count
     assert grad.item() < 0.2 * cd   # the adjoint drops nearly all of that true sensitivity
 
@@ -962,11 +987,7 @@ def test_i8_1_control_the_same_gradient_matches_central_differences_once_seeded(
     adjoint returns is the fixed point's own, matching central differences the way every other
     `coupling="iterate"` gradient test in this module does."""
     param = torch.tensor(0.5, dtype=F64, requires_grad=True)
-    _, model, state, drivers, _, _ = _build(
-        closures=[_Feedback(2e3), _ParametrizedIntegratingCounter(param)],
-        coupling="iterate", iterate_tol={"species": 1e-12}, iterate_max=60,
-    )
-    start = dict(state, **{"demo.n": torch.zeros((), dtype=F64)})
+    model, start, drivers = _iterate_model_with_counter(param)
     diag: dict = {}
     new = model.step(start, drivers, 600.0, diagnostics=diag)
     assert diag["adjoint"] == "implicit"
@@ -985,6 +1006,24 @@ def test_i8_1_control_the_same_gradient_matches_central_differences_once_seeded(
     h = 1e-6
     cd = (_seeded_value(0.5 + h) - _seeded_value(0.5 - h)) / (2 * h)
     assert grad.item() == pytest.approx(cd, rel=1e-6)
+
+
+def test_iterate_warns_when_a_closure_carried_key_is_missing_from_the_step_start_state():
+    """A3: on such a step the key is not pinned to the step start (N1's `if key in base`), so
+    its closure integrates once per PASS and the adjoint omits the compounding path. The
+    misconfiguration is named where it happens; it is not refused, because the first step is
+    allowed to lack the key by design."""
+    model, state, drivers = _iterate_model_with_counter()   # the I8-1 tests' builder
+    unseeded = {k: v for k, v in state.items() if k != "demo.n"}
+    with pytest.warns(RuntimeWarning, match=r"closure-carried state.*'demo\.n'.*once per pass"):
+        model.step(unseeded, drivers, 600.0)
+
+
+def test_iterate_does_not_warn_when_the_key_is_seeded():
+    model, state, drivers = _iterate_model_with_counter()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        model.step(state, drivers, 600.0)
 
 
 def test_current_flows_returns_closure_written_driver_prescribed_flow():
