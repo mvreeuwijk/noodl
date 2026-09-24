@@ -540,6 +540,13 @@ class Model:
         (no diagonal shift on the `exact` scheme's Taylor accumulator, milestone 5 R2 review
         finding) on layers whose transfer nothing reads.
 
+        `diag[name]["linear"]` (Task 5, B2), when this transport layer's `scheme` runs a
+        linear solve (`"implicit"`, `"trapezoidal"`; not `"exact"`), is the LAST substep's
+        `{"backend", "iterations", "residual"}` from `TransportLayer.step`'s own
+        `diagnostics=` out-parameter -- see `TransportLayer._resolve_solver` and
+        `layers.transport._LinearSolve` for what each entry means and how `linear_solver`
+        resolves to it. Absent for `scheme="exact"`, which has no linear solve to report.
+
         `produced` (a keyword out-parameter, like `_apply_closures`'s `written` and `solve`'s
         `diagnostics`; `None` by default, so every other caller is unaffected) is REPLACED
         with the state keys this pass actually RECOMPUTED, in write order. The returned state
@@ -630,6 +637,13 @@ class Model:
             # layer. Shape and positivity are checked by the layer, naming the nodes.
             cap = drv.get(f"{name}.capacity")
             transfer_total = None
+            # Task 5 (B2): a fresh dict per layer, threaded into `steady`/`step`/
+            # `step_with_transfer` as an out-parameter and read back below into
+            # `diag[name]["linear"]`. Only the LAST substep's entry survives (each substep
+            # overwrites it), matching how `diag[name]["substeps"]` already reports a count
+            # rather than a per-substep history. A scheme with no linear solve (`"exact"`)
+            # leaves this dict empty, so no `"linear"` key is added.
+            layer_diag: dict = {}
             if dt is None:
                 if sources is None:
                     # The state's own `x` is the layout authority when it is there; `x_b`
@@ -640,7 +654,7 @@ class Model:
                         if like is None
                         else self._zero_sources(layer, like, layer.n_i)
                     )
-                x = layer.steady(q_kind, sources, xb, capacity=cap)
+                x = layer.steady(q_kind, sources, xb, capacity=cap, diagnostics=layer_diag)
             else:
                 x = base.get(f"{name}.x")
                 if x is None:
@@ -671,6 +685,7 @@ class Model:
                         stepped = layer.step_with_transfer(
                             x, q_kind, sources, xb, dt / k,
                             capacity=cap_j, capacity_prev=cap_prev_j,
+                            diagnostics=layer_diag,
                         )
                         x = stepped.x
                         transfer_total = (
@@ -679,7 +694,7 @@ class Model:
                         )
                     else:
                         x = layer.step(x, q_kind, sources, xb, dt / k, capacity=cap_j,
-                                       capacity_prev=cap_prev_j)
+                                       capacity_prev=cap_prev_j, diagnostics=layer_diag)
                 if cap is not None:
                     new[f"{name}.capacity"] = cap
                     made.append(f"{name}.capacity")
@@ -689,6 +704,8 @@ class Model:
             new[f"{name}.x"] = x
             made.append(f"{name}.x")
             diag[name] = {"substeps": self.substeps[name]}
+            if "linear" in layer_diag:
+                diag[name]["linear"] = layer_diag["linear"]
             if want_transfer:
                 diag[name]["boundary_transfer"] = transfer_total
         # Closure-carried state (spec 4.6a): a declared key is copied OUT of the closure's

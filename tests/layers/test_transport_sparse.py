@@ -16,6 +16,7 @@ from benchmarks.measure import saved_tensor_bytes
 from noodl.layers import transport as transport_module
 from noodl.layers.transport import (
     TransportLayer,
+    _AffineSystemOperator,
     _expm_action,
     _linear_solve,
     _van_loan_step_dense,
@@ -1108,3 +1109,175 @@ def test_k2_kinetics_removal_conduction_batched_mixed_sign_steady_matches_dense_
         x_dense_i = torch.linalg.solve(M_i, -b0_i.unsqueeze(-1)).squeeze(-1)
         x_dense_i_unstacked = layer._from_stacked(x_dense_i, layer.n_i, False)
         torch.testing.assert_close(x_sparse[i], x_dense_i_unstacked, rtol=1e-8, atol=1e-10)
+
+
+# ------------------------------------------------------------- Task 5: linear_solver option
+def test_unknown_linear_solver_refused_by_name_at_construction():
+    net = flow_through_zone()
+    with pytest.raises(ValueError, match="bogus"):
+        TransportLayer(
+            net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
+            boundary=["ambient"], linear_solver="bogus",
+        )
+
+
+@pytest.mark.parametrize("name", ["gmres_jacobi", "gmres_ilu"])
+def test_gmres_preconditioner_names_raise_not_implemented_naming_task_6(name):
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
+        boundary=["ambient"], scheme="implicit", linear_solver=name,
+    )
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    c0 = torch.tensor([100.0], dtype=torch.float64)
+    source = torch.tensor([2.0], dtype=torch.float64)
+    c_out = torch.tensor([420.0], dtype=torch.float64)
+    with pytest.raises(NotImplementedError, match="Task 6"):
+        layer.step(c0, q, _full(layer, source), c_out, 200.0)
+
+
+def test_auto_resolves_to_gmres_bit_identical_to_the_old_hardcoded_solve():
+    """Regression proof that `linear_solver="auto"` (the default, unchanged by this task)
+    is BIT-IDENTICAL to what `_LinearSolve.forward` hard-coded before this task: builds the
+    exact same affine system `TransportLayer.step` does and solves it directly with
+    `solvers.select.solve(method="auto", ...)` and no other kwargs -- the literal call the
+    old code made -- then compares against `step()`'s own result under `linear_solver="auto"`.
+    """
+    net = flow_through_zone()
+    cap = torch.tensor([1000.0], dtype=torch.float64)
+    layer = TransportLayer(
+        net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"], scheme="implicit"
+    )
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    c0 = torch.tensor([100.0], dtype=torch.float64)
+    source = torch.tensor([2.0], dtype=torch.float64)
+    c_out = torch.tensor([420.0], dtype=torch.float64)
+    dt = 200.0
+
+    x_new = layer.step(c0, q, _full(layer, source), c_out, dt)
+
+    op = layer._advection_operator(q.to(torch.float64))
+    xb_s, _ = layer._to_stacked(c_out.to(torch.float64), layer.n_b, "x_boundary")
+    src_s, _ = layer._to_stacked(source.to(torch.float64), layer.n_i, "sources")
+    cap_s = layer._capacity_stacked(torch.float64)
+    b0 = op.boundary_forcing(xb_s) + src_s / cap_s
+    x0_s, _ = layer._to_stacked(c0.to(torch.float64), layer.n_i, "x")
+    rhs = x0_s + dt * b0
+    system = _AffineSystemOperator(op, dt)
+    x_old = _solve_operator(system, rhs, method="auto", where="regression probe").x
+
+    assert torch.equal(x_new, x_old)
+
+
+def test_implicit_step_sparse_direct_matches_gmres_to_high_precision():
+    net = flow_through_zone()
+    cap = torch.tensor([1000.0], dtype=torch.float64)
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    c0 = torch.tensor([100.0], dtype=torch.float64)
+    source = torch.tensor([2.0], dtype=torch.float64)
+    c_out = torch.tensor([420.0], dtype=torch.float64)
+    dt = 200.0
+    layer_gmres = TransportLayer(
+        net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"],
+        scheme="implicit", linear_solver="gmres",
+    )
+    layer_sd = TransportLayer(
+        net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"],
+        scheme="implicit", linear_solver="sparse_direct",
+    )
+    x_gmres = layer_gmres.step(c0, q, _full(layer_gmres, source), c_out, dt)
+    x_sd = layer_sd.step(c0, q, _full(layer_sd, source), c_out, dt)
+    torch.testing.assert_close(x_sd, x_gmres, rtol=1e-10, atol=1e-10)
+
+
+def test_trapezoidal_step_sparse_direct_matches_gmres_to_high_precision():
+    net = flow_through_zone()
+    cap = torch.tensor([1000.0], dtype=torch.float64)
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    c0 = torch.tensor([100.0], dtype=torch.float64)
+    source = torch.tensor([2.0], dtype=torch.float64)
+    c_out = torch.tensor([420.0], dtype=torch.float64)
+    dt = 200.0
+    layer_gmres = TransportLayer(
+        net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"],
+        scheme="trapezoidal", linear_solver="gmres",
+    )
+    layer_sd = TransportLayer(
+        net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"],
+        scheme="trapezoidal", linear_solver="sparse_direct",
+    )
+    x_gmres = layer_gmres.step(c0, q, _full(layer_gmres, source), c_out, dt)
+    x_sd = layer_sd.step(c0, q, _full(layer_sd, source), c_out, dt)
+    torch.testing.assert_close(x_sd, x_gmres, rtol=1e-10, atol=1e-10)
+
+
+def test_steady_sparse_direct_matches_gmres_to_high_precision():
+    net = flow_through_zone()
+    cap = torch.tensor([1000.0])
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    source = torch.tensor([2.0], dtype=torch.float64)
+    c_out = torch.tensor([420.0], dtype=torch.float64)
+    layer_gmres = TransportLayer(
+        net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"],
+        linear_solver="gmres",
+    )
+    layer_sd = TransportLayer(
+        net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"],
+        linear_solver="sparse_direct",
+    )
+    x_gmres = layer_gmres.steady(q, _full(layer_gmres, source), c_out)
+    x_sd = layer_sd.steady(q, _full(layer_sd, source), c_out)
+    torch.testing.assert_close(x_sd, x_gmres, rtol=1e-10, atol=1e-10)
+
+
+def test_gradcheck_implicit_step_sparse_direct_adjoint_through_superlu():
+    """The backward's transposed solve must go through SuperLU too when the forward did --
+    proof, not merely a claim, that `_LinearSolve.backward` uses the SAME resolved kwargs as
+    `forward` (design point in the brief)."""
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
+        boundary=["ambient"], scheme="implicit", linear_solver="sparse_direct",
+    )
+    x = torch.tensor([150.0], dtype=torch.float64, requires_grad=True)
+    q = torch.tensor([0.4, 0.4], dtype=torch.float64, requires_grad=True)
+    sources = torch.tensor([1.0], dtype=torch.float64, requires_grad=True)
+    x_b = torch.tensor([420.0], dtype=torch.float64, requires_grad=True)
+
+    def f(x, q, sources, x_b):
+        return layer.step(x, q, _full(layer, sources), x_b, 300.0)
+
+    assert gradcheck(f, (x, q, sources, x_b), eps=1e-6, atol=1e-5)
+
+
+def test_diagnostics_linear_reports_sparse_direct_backend_and_one_iteration():
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
+        boundary=["ambient"], scheme="implicit", linear_solver="sparse_direct",
+    )
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    c0 = torch.tensor([100.0], dtype=torch.float64)
+    source = torch.tensor([2.0], dtype=torch.float64)
+    c_out = torch.tensor([420.0], dtype=torch.float64)
+    diag: dict = {}
+    layer.step(c0, q, _full(layer, source), c_out, 200.0, diagnostics=diag)
+    assert diag["linear"]["backend"] == "sparse_direct"
+    assert diag["linear"]["iterations"] == 1
+    assert diag["linear"]["residual"] < 1e-10
+
+
+def test_diagnostics_linear_reports_gmres_backend_and_at_least_one_iteration():
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
+        boundary=["ambient"], scheme="implicit",  # default linear_solver="auto" -> gmres
+    )
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    c0 = torch.tensor([100.0], dtype=torch.float64)
+    source = torch.tensor([2.0], dtype=torch.float64)
+    c_out = torch.tensor([420.0], dtype=torch.float64)
+    diag: dict = {}
+    layer.step(c0, q, _full(layer, source), c_out, 200.0, diagnostics=diag)
+    assert diag["linear"]["backend"] == "gmres"
+    assert diag["linear"]["iterations"] >= 1

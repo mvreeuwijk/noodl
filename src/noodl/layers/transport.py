@@ -86,6 +86,18 @@ def active_interior(
     return all_interior[active], all_interior[~active]
 
 
+# Inner linear solvers a TransportLayer may be configured with; resolved PER SOLVE (never
+# fixed for the layer's whole lifetime the way `PotentialFlowLayer._LINEAR_SOLVERS` is used)
+# by `TransportLayer._resolve_solver` into the kwargs `solvers.select.solve` actually reads.
+# "auto" and "gmres" both resolve to `method="gmres"` with no preconditioner in THIS task --
+# today's hard-coded behaviour, unchanged (the default moves in Task 8, on measurements;
+# ledger ruling B-1: `select.solve`'s own auto policy is not touched by this plan).
+# "gmres_jacobi"/"gmres_ilu" are Task 6's names for a real GMRES preconditioner and raise
+# NotImplementedError naming it until that task lands. "sparse_direct" (SuperLU, Task 4's
+# COO forms) and "direct" (the dense LU reference) pass straight through.
+_TRANSPORT_SOLVERS = ("auto", "gmres", "gmres_jacobi", "gmres_ilu", "sparse_direct", "direct")
+
+
 class _LinearSolve(torch.autograd.Function):
     """Differentiate a linear solve `A(params) x = rhs(params)` via the IMPLICIT ADJOINT,
     never by unrolling the forward solver's iteration -- see this task's Design decisions
@@ -111,15 +123,43 @@ class _LinearSolve(torch.autograd.Function):
     The adjoint solve inside `backward` RAISES unconditionally on non-convergence --
     independent of whatever `on_failure` the forward call was given -- because a wrong
     gradient is worse than no gradient (design spec section 3.2).
+
+    `solver_kwargs` (Task 5, B2) is the dict `TransportLayer._resolve_solver` produced for
+    THIS solve -- `{"method": ..., "preconditioner": ..., "restart": ...}`, plus whatever
+    else a direct caller of `_linear_solve` passes through (e.g. `rtol`/`max_iter` in
+    `tests/layers/test_transport_sparse.py`'s own probes). Both `forward` and `backward`
+    read it the same way (a local copy, `"method"` popped with an `"auto"` default so a
+    caller that never resolves one at all -- the pre-Task-5 call sites, and every direct
+    `_linear_solve` call in the test suite -- keeps exactly the old hard-coded behaviour),
+    so a `sparse_direct` forward gets a SuperLU adjoint too: the backward's transposed solve
+    through `_TransposeView` runs the SAME resolved method.
+
+    `diagnostics` (Task 5, B2), when a dict is passed, is filled by `forward` ONLY (never by
+    `backward`, which has no result to report to a layer's public API) with `"linear"`:
+    `{"backend", "iterations", "residual"}` from the forward solve's own `SolveResult` and
+    `solve()`'s `backend_out` -- `iterations`/`residual` reduced with `.max()` over whatever
+    batch shape this solve carries, since a per-instance breakdown has nowhere to go through
+    a single dict entry. Threading a mutable dict OUT of a `torch.autograd.Function.forward`
+    is fine: it is a plain (non-tensor) argument to `apply`, filled in place, never returned.
     """
 
     @staticmethod
-    def forward(ctx, build_system, where, solver_kwargs, *params):
+    def forward(ctx, build_system, where, solver_kwargs, diagnostics, *params):
         with torch.no_grad():
             op, rhs = build_system(*params)
+            kwargs = dict(solver_kwargs)
+            method = kwargs.pop("method", "auto")
+            backend_out: dict = {}
             result = _solve_operator(
-                op, rhs, method="auto", on_failure="raise", where=where, **solver_kwargs
+                op, rhs, method=method, on_failure="raise", where=where,
+                backend_out=backend_out, **kwargs,
             )
+        if diagnostics is not None:
+            diagnostics["linear"] = {
+                "backend": backend_out.get("backend"),
+                "iterations": int(result.iterations.max()),
+                "residual": float(result.residual.max()),
+            }
         ctx.build_system = build_system
         ctx.where = where
         ctx.solver_kwargs = solver_kwargs
@@ -141,9 +181,11 @@ class _LinearSolve(torch.autograd.Function):
         x, params = saved[0], list(saved[1:])
         with torch.no_grad():
             op, _ = ctx.build_system(*params)
+            kwargs = dict(ctx.solver_kwargs)
+            method = kwargs.pop("method", "auto")
             lam = _solve_operator(
-                _TransposeView(op), grad_x, method="auto", on_failure="raise",
-                where=f"{ctx.where} backward (adjoint)", **ctx.solver_kwargs,
+                _TransposeView(op), grad_x, method=method, on_failure="raise",
+                where=f"{ctx.where} backward (adjoint)", **kwargs,
             ).x
         with torch.enable_grad():
             p = [t.detach().requires_grad_(t.requires_grad) for t in params]
@@ -158,11 +200,13 @@ class _LinearSolve(torch.autograd.Function):
         it = iter(grads)
         for t in p:
             grads_aligned.append(next(it) if t.requires_grad else None)
-        return (None, None, None, *grads_aligned)
+        return (None, None, None, None, *grads_aligned)
 
 
-def _linear_solve(build_system, where: str, *params, **solver_kwargs) -> torch.Tensor:
-    return _LinearSolve.apply(build_system, where, solver_kwargs, *params)
+def _linear_solve(
+    build_system, where: str, *params, diagnostics: dict | None = None, **solver_kwargs
+) -> torch.Tensor:
+    return _LinearSolve.apply(build_system, where, solver_kwargs, diagnostics, *params)
 
 
 class _AffineSystemOperator:
@@ -236,6 +280,13 @@ class TransportLayer:
 
     ``quantity``/``unit`` are metadata a ``Model`` reports ("temperature"/"K",
     "concentration"/"ppm"); nothing in the numerics reads them.
+
+    ``linear_solver`` (Task 5, B2) names one of ``_TRANSPORT_SOLVERS``, refused by name at
+    construction otherwise, and is resolved PER SOLVE by ``_resolve_solver`` into the kwargs
+    every linear solve of this layer runs with (``steady``'s and the two implicit schemes'
+    forward, backward adjoint and ``on_failure="return"`` paths alike). ``"auto"`` (the
+    default) resolves to today's hard-coded ``method="gmres"``, no preconditioner, unchanged
+    by this task (ledger ruling B-1); see ``_resolve_solver`` for the rest.
     """
 
     #: The differentiable operator coefficients a layer owns, in the fixed order the
@@ -273,9 +324,16 @@ class TransportLayer:
         conduction_kind: str | None = None,
         conductance: torch.Tensor | None = None,
         scheme: Literal["exact", "implicit", "trapezoidal"] = "exact",
+        linear_solver: str = "auto",
         quantity: str = "scalar",
         unit: str = "",
     ) -> None:
+        if linear_solver not in _TRANSPORT_SOLVERS:
+            raise ValueError(
+                f"TransportLayer '{name}': unknown linear_solver {linear_solver!r}; "
+                f"expected one of {_TRANSPORT_SOLVERS}"
+            )
+        self.linear_solver = linear_solver
         self.net = net
         self.name = name
         self.flow_kind = flow_kind
@@ -416,6 +474,38 @@ class TransportLayer:
             )
         self._interior_of_node = torch.full((net.n,), -1, dtype=torch.long)
         self._interior_of_node[self.interior_idx] = torch.arange(self.n_i, dtype=torch.long)
+
+    def _resolve_solver(self, batch_size: int) -> dict:
+        """The kwargs `solvers.select.solve` should see for THIS layer's `linear_solver`
+        (`method`, `preconditioner`, `restart`) -- resolved PER SOLVE (the brief's B2), used
+        by every linear solve this layer runs: `steady`, `_implicit_step_sparse` and
+        `_trapezoidal_step_sparse`'s differentiable path AND their `on_failure="return"`
+        early-return path, and (via the resolved kwargs `_LinearSolve` saves on its `ctx`)
+        the backward adjoint too.
+
+        `batch_size` is `rhs.shape[:-1].numel()`, the flat instance count this solve is
+        about to run at. `"auto"` IGNORES it in this task and resolves to `method="gmres"`
+        with no preconditioner -- exactly today's hard-coded behaviour (the default moves in
+        Task 8, on measurements; ledger ruling B-1: `solvers.select.solve`'s own `"auto"`
+        policy is not touched by this plan). `"gmres"` resolves the same way, explicitly.
+        The signature carries `batch_size` now because Task 8's default will need it.
+
+        `"gmres_jacobi"`/`"gmres_ilu"` are Task 6's names for a real GMRES preconditioner;
+        until that task lands they raise `NotImplementedError` naming it, rather than
+        silently resolving to plain GMRES under a name that promises preconditioning.
+        `"sparse_direct"` and `"direct"` pass straight through: `preconditioner`/`restart`
+        are irrelevant to both and `solvers.select.solve` ignores them for those two
+        methods.
+        """
+        if self.linear_solver in ("gmres_jacobi", "gmres_ilu"):
+            raise NotImplementedError(
+                f"TransportLayer '{self.name}': linear_solver={self.linear_solver!r} has "
+                f"no real preconditioner yet -- Task 6 gives GMRES one. Use 'auto', "
+                f"'gmres', 'sparse_direct' or 'direct' until then."
+            )
+        if self.linear_solver in ("auto", "gmres"):
+            return {"method": "gmres", "preconditioner": None, "restart": 30}
+        return {"method": self.linear_solver, "preconditioner": None, "restart": 30}
 
     def _conduction_matrix(self, dtype: torch.dtype) -> torch.Tensor | None:
         """The (..., n, n) conduction Laplacian `A_c diag(g) A_c^T`, or None if no conduction.
@@ -693,6 +783,7 @@ class TransportLayer:
         on_failure: str = "raise",
         capacity: torch.Tensor | None = None,
         capacity_prev: torch.Tensor | None = None,
+        diagnostics: dict | None = None,
     ) -> torch.Tensor:
         """Advance one timestep under `self.scheme`.
 
@@ -724,11 +815,16 @@ class TransportLayer:
         Delegates to `_step` with `want_transfer=False`, which never requests the exact
         scheme's integral accumulator -- the diagonal shift that makes a sealed pure-decay
         zone cost one Taylor term stays available on this path (see `_expm_action`).
+
+        `diagnostics` (keyword-only, Task 5 B2), when a dict is passed, is filled with this
+        step's `"linear"` entry (`{"backend", "iterations", "residual"}`) for `"implicit"`
+        and `"trapezoidal"` -- see `_LinearSolve`'s docstring for exactly what it holds and
+        when. `scheme="exact"` has no linear solve, so it leaves `diagnostics` untouched.
         """
         return self._step(
             x, q, sources, x_boundary, dt,
             on_failure=on_failure, capacity=capacity, capacity_prev=capacity_prev,
-            want_transfer=False,
+            want_transfer=False, diagnostics=diagnostics,
         )[0]
 
     def step_with_transfer(
@@ -742,6 +838,7 @@ class TransportLayer:
         on_failure: str = "raise",
         capacity: torch.Tensor | None = None,
         capacity_prev: torch.Tensor | None = None,
+        diagnostics: dict | None = None,
     ) -> TransportStep:
         """Advance one timestep under `self.scheme`, like `step`, and also report the
         time-integrated amount that crossed each boundary node during the step.
@@ -772,6 +869,7 @@ class TransportLayer:
         `on_failure="return"` is refused (`ValueError` naming the layer): no `SolveResult`
         carries a boundary transfer, so there is nothing sensible to return the raw solver
         status alongside. `capacity`/`capacity_prev` behave exactly as in `step`.
+        `diagnostics` (keyword-only, Task 5 B2) behaves exactly as in `step`.
         """
         if on_failure == "return":
             raise ValueError(
@@ -782,7 +880,7 @@ class TransportLayer:
         result, transfer = self._step(
             x, q, sources, x_boundary, dt,
             on_failure=on_failure, capacity=capacity, capacity_prev=capacity_prev,
-            want_transfer=True,
+            want_transfer=True, diagnostics=diagnostics,
         )
         return TransportStep(result, transfer)
 
@@ -798,6 +896,7 @@ class TransportLayer:
         capacity: torch.Tensor | None = None,
         capacity_prev: torch.Tensor | None = None,
         want_transfer: bool = False,
+        diagnostics: dict | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Shared body of `step` and `step_with_transfer`; see both for the public contract.
 
@@ -871,13 +970,15 @@ class TransportLayer:
             result = expm.x
         elif self.scheme == "implicit":
             result, reduced = self._implicit_step_sparse(
-                x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t
+                x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t,
+                diagnostics=diagnostics,
             )
             if on_failure == "return":
                 return result, None
         elif self.scheme == "trapezoidal":
             result, reduced = self._trapezoidal_step_sparse(
-                x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t
+                x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t,
+                diagnostics=diagnostics,
             )
             if on_failure == "return":
                 return result, None
@@ -908,6 +1009,7 @@ class TransportLayer:
     def steady(
         self, q: torch.Tensor, sources: torch.Tensor, x_boundary: torch.Tensor,
         *, on_failure: str = "raise", capacity: torch.Tensor | None = None,
+        diagnostics: dict | None = None,
     ) -> torch.Tensor:
         """Solve `0 = M x + N x_b + sources / capacity` for the steady-state `x`.
 
@@ -920,7 +1022,11 @@ class TransportLayer:
         is not a plain `Tensor`, so it cannot be a single `torch.autograd.Function`'s output
         the way the default `Tensor` return is. Return type on that path is therefore
         `torch.Tensor | SolveResult` (amendment A8). `capacity` (keyword-only, spec 4.6b)
-        overrides the construction-time capacity for this call only.
+        overrides the construction-time capacity for this call only. `diagnostics`
+        (keyword-only, Task 5 B2), when a dict is passed, is filled with this solve's
+        `"linear"` entry on the `on_failure="raise"` path only -- see `_LinearSolve`'s
+        docstring; the `on_failure="return"` path already gives the caller the full
+        `SolveResult` directly and leaves `diagnostics` untouched.
         """
         if on_failure not in ("raise", "return"):
             raise ValueError(
@@ -945,13 +1051,19 @@ class TransportLayer:
 
         if on_failure == "return":
             op, rhs = build_system(q, sources, x_boundary, cap_t, *coef)
+            solver_kwargs = self._resolve_solver(rhs.shape[:-1].numel())
+            method = solver_kwargs.pop("method")
             return _solve_operator(
-                op, rhs, method="auto", on_failure="return",
-                where=f"TransportLayer '{self.name}' steady",
+                op, rhs, method=method, on_failure="return",
+                where=f"TransportLayer '{self.name}' steady", **solver_kwargs,
             )
+        with torch.no_grad():
+            _, rhs_probe = build_system(q, sources, x_boundary, cap_t, *coef)
+        solver_kwargs = self._resolve_solver(rhs_probe.shape[:-1].numel())
         x_s = _linear_solve(
             build_system, f"TransportLayer '{self.name}' steady",
             q, sources, x_boundary, cap_t, *coef,
+            diagnostics=diagnostics, **solver_kwargs,
         )
         return self._from_stacked(x_s, self.n_i, reduced)
 
@@ -960,6 +1072,7 @@ class TransportLayer:
         x_boundary: torch.Tensor, dt: float, on_failure: str,
         capacity: torch.Tensor | None = None,
         capacity_prev: torch.Tensor | None = None,
+        diagnostics: dict | None = None,
     ) -> torch.Tensor:
         """Backward Euler on the AMOUNT `V x`: `V_new x_{n+1} - V_old x_n = dt F(x_{n+1})`,
         with `F(x) = G x + N_raw x_b + s` the capacity-FREE amount rate (`G`, `N_raw` the
@@ -998,14 +1111,20 @@ class TransportLayer:
 
         if on_failure == "return":
             system, rhs = build_system(x, q, sources, x_boundary, cap_t, cap_prev_t, *coef)
+            solver_kwargs = self._resolve_solver(rhs.shape[:-1].numel())
+            method = solver_kwargs.pop("method")
             result = _solve_operator(
-                system, rhs, method="auto", on_failure="return",
-                where=f"TransportLayer '{self.name}' implicit step",
+                system, rhs, method=method, on_failure="return",
+                where=f"TransportLayer '{self.name}' implicit step", **solver_kwargs,
             )
             return result, reduced
+        with torch.no_grad():
+            _, rhs_probe = build_system(x, q, sources, x_boundary, cap_t, cap_prev_t, *coef)
+        solver_kwargs = self._resolve_solver(rhs_probe.shape[:-1].numel())
         x_s = _linear_solve(
             build_system, f"TransportLayer '{self.name}' implicit step",
             x, q, sources, x_boundary, cap_t, cap_prev_t, *coef,
+            diagnostics=diagnostics, **solver_kwargs,
         )
         return x_s, reduced
 
@@ -1014,6 +1133,7 @@ class TransportLayer:
         x_boundary: torch.Tensor, dt: float, on_failure: str,
         capacity: torch.Tensor | None = None,
         capacity_prev: torch.Tensor | None = None,
+        diagnostics: dict | None = None,
     ) -> torch.Tensor:
         """Crank-Nicolson on the AMOUNT `V x`: `V_new x_{n+1} - V_old x_n =
         dt/2 (F(x_{n+1}) + F(x_n))`, with `F(x) = G x + N_raw x_b + s` the capacity-FREE
@@ -1066,14 +1186,20 @@ class TransportLayer:
 
         if on_failure == "return":
             system, rhs = build_system(x, q, sources, x_boundary, cap_t, cap_prev_t, *coef)
+            solver_kwargs = self._resolve_solver(rhs.shape[:-1].numel())
+            method = solver_kwargs.pop("method")
             result = _solve_operator(
-                system, rhs, method="auto", on_failure="return",
-                where=f"TransportLayer '{self.name}' trapezoidal step",
+                system, rhs, method=method, on_failure="return",
+                where=f"TransportLayer '{self.name}' trapezoidal step", **solver_kwargs,
             )
             return result, reduced
+        with torch.no_grad():
+            _, rhs_probe = build_system(x, q, sources, x_boundary, cap_t, cap_prev_t, *coef)
+        solver_kwargs = self._resolve_solver(rhs_probe.shape[:-1].numel())
         x_s = _linear_solve(
             build_system, f"TransportLayer '{self.name}' trapezoidal step",
             x, q, sources, x_boundary, cap_t, cap_prev_t, *coef,
+            diagnostics=diagnostics, **solver_kwargs,
         )
         return x_s, reduced
 

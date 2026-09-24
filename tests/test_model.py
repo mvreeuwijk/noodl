@@ -229,6 +229,7 @@ def test_diagnostics_carry_the_layers_status_and_the_pass_count():
     assert diag["passes"] == 1
     assert bool(diag["layers"]["air"]["converged"].all())
     assert diag["layers"]["species"]["substeps"] == 1
+    assert diag["layers"]["species"]["linear"]["backend"] == "gmres"
 
 
 def test_ports_round_trip_and_air_boundary_flow_balances_the_interior():
