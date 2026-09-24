@@ -124,15 +124,22 @@ class _LinearSolve(torch.autograd.Function):
     independent of whatever `on_failure` the forward call was given -- because a wrong
     gradient is worse than no gradient (design spec section 3.2).
 
-    `solver_kwargs` (Task 5, B2) is the dict `TransportLayer._resolve_solver` produced for
-    THIS solve -- `{"method": ..., "preconditioner": ..., "restart": ...}`, plus whatever
-    else a direct caller of `_linear_solve` passes through (e.g. `rtol`/`max_iter` in
-    `tests/layers/test_transport_sparse.py`'s own probes). Both `forward` and `backward`
-    read it the same way (a local copy, `"method"` popped with an `"auto"` default so a
-    caller that never resolves one at all -- the pre-Task-5 call sites, and every direct
-    `_linear_solve` call in the test suite -- keeps exactly the old hard-coded behaviour),
-    so a `sparse_direct` forward gets a SuperLU adjoint too: the backward's transposed solve
-    through `_TransposeView` runs the SAME resolved method.
+    `resolve_solver` (Task 5, B2; fix round 1) is `None`, or a callable `batch_size -> dict`
+    -- `TransportLayer._resolve_solver` bound to its layer -- called by `forward` ONCE, on
+    the REAL `rhs` `build_system(*params)` already produced (never on a separate probe
+    build: `build_system` runs the operator's own `boundary_forcing`, an embed/gather/
+    `scatter_add_` over every edge, at the same cost order as a matvec, so a second call
+    purely to learn a shape would double this layer's dominant per-solve cost -- exactly the
+    finding this fix closes). The resolved dict (still carrying `"method"`) is merged with
+    `solver_kwargs` (whatever a direct caller of `_linear_solve` passes through verbatim,
+    e.g. `rtol`/`max_iter` in `tests/layers/test_transport_sparse.py`'s own probes, which
+    pass no `resolve_solver` at all) and stored UNMODIFIED on `ctx.solver_kwargs`, so
+    `backward` -- which builds its own `op` again from the saved params exactly as it always
+    has, but never re-resolves -- reads the SAME method a local copy, `.pop("method",
+    "auto")`, with the same `"auto"` default a caller that resolves nothing at all keeps
+    (the pre-Task-5 call sites, and every direct `_linear_solve` call in the test suite,
+    unaffected). This is what makes a `sparse_direct` forward get a SuperLU adjoint too: the
+    backward's transposed solve through `_TransposeView` runs the SAME resolved method.
 
     `diagnostics` (Task 5, B2), when a dict is passed, is filled by `forward` ONLY (never by
     `backward`, which has no result to report to a layer's public API) with `"linear"`:
@@ -144,10 +151,12 @@ class _LinearSolve(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, build_system, where, solver_kwargs, diagnostics, *params):
+    def forward(ctx, build_system, where, resolve_solver, solver_kwargs, diagnostics, *params):
         with torch.no_grad():
             op, rhs = build_system(*params)
-            kwargs = dict(solver_kwargs)
+            resolved = {} if resolve_solver is None else resolve_solver(rhs.shape[:-1].numel())
+            full_kwargs = {**resolved, **solver_kwargs}
+            kwargs = dict(full_kwargs)
             method = kwargs.pop("method", "auto")
             backend_out: dict = {}
             result = _solve_operator(
@@ -162,7 +171,7 @@ class _LinearSolve(torch.autograd.Function):
             }
         ctx.build_system = build_system
         ctx.where = where
-        ctx.solver_kwargs = solver_kwargs
+        ctx.solver_kwargs = full_kwargs
         ctx.save_for_backward(result.x, *params)
         return result.x
 
@@ -200,13 +209,16 @@ class _LinearSolve(torch.autograd.Function):
         it = iter(grads)
         for t in p:
             grads_aligned.append(next(it) if t.requires_grad else None)
-        return (None, None, None, None, *grads_aligned)
+        return (None, None, None, None, None, *grads_aligned)
 
 
 def _linear_solve(
-    build_system, where: str, *params, diagnostics: dict | None = None, **solver_kwargs
+    build_system, where: str, *params,
+    resolve_solver=None, diagnostics: dict | None = None, **solver_kwargs,
 ) -> torch.Tensor:
-    return _LinearSolve.apply(build_system, where, solver_kwargs, diagnostics, *params)
+    return _LinearSolve.apply(
+        build_system, where, resolve_solver, solver_kwargs, diagnostics, *params
+    )
 
 
 class _AffineSystemOperator:
@@ -1057,13 +1069,10 @@ class TransportLayer:
                 op, rhs, method=method, on_failure="return",
                 where=f"TransportLayer '{self.name}' steady", **solver_kwargs,
             )
-        with torch.no_grad():
-            _, rhs_probe = build_system(q, sources, x_boundary, cap_t, *coef)
-        solver_kwargs = self._resolve_solver(rhs_probe.shape[:-1].numel())
         x_s = _linear_solve(
             build_system, f"TransportLayer '{self.name}' steady",
             q, sources, x_boundary, cap_t, *coef,
-            diagnostics=diagnostics, **solver_kwargs,
+            resolve_solver=self._resolve_solver, diagnostics=diagnostics,
         )
         return self._from_stacked(x_s, self.n_i, reduced)
 
@@ -1118,13 +1127,10 @@ class TransportLayer:
                 where=f"TransportLayer '{self.name}' implicit step", **solver_kwargs,
             )
             return result, reduced
-        with torch.no_grad():
-            _, rhs_probe = build_system(x, q, sources, x_boundary, cap_t, cap_prev_t, *coef)
-        solver_kwargs = self._resolve_solver(rhs_probe.shape[:-1].numel())
         x_s = _linear_solve(
             build_system, f"TransportLayer '{self.name}' implicit step",
             x, q, sources, x_boundary, cap_t, cap_prev_t, *coef,
-            diagnostics=diagnostics, **solver_kwargs,
+            resolve_solver=self._resolve_solver, diagnostics=diagnostics,
         )
         return x_s, reduced
 
@@ -1193,13 +1199,10 @@ class TransportLayer:
                 where=f"TransportLayer '{self.name}' trapezoidal step", **solver_kwargs,
             )
             return result, reduced
-        with torch.no_grad():
-            _, rhs_probe = build_system(x, q, sources, x_boundary, cap_t, cap_prev_t, *coef)
-        solver_kwargs = self._resolve_solver(rhs_probe.shape[:-1].numel())
         x_s = _linear_solve(
             build_system, f"TransportLayer '{self.name}' trapezoidal step",
             x, q, sources, x_boundary, cap_t, cap_prev_t, *coef,
-            diagnostics=diagnostics, **solver_kwargs,
+            resolve_solver=self._resolve_solver, diagnostics=diagnostics,
         )
         return x_s, reduced
 

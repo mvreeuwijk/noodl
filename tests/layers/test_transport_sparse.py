@@ -1281,3 +1281,49 @@ def test_diagnostics_linear_reports_gmres_backend_and_at_least_one_iteration():
     layer.step(c0, q, _full(layer, source), c_out, 200.0, diagnostics=diag)
     assert diag["linear"]["backend"] == "gmres"
     assert diag["linear"]["iterations"] >= 1
+
+
+def test_differentiable_step_builds_the_system_exactly_once_per_pass(monkeypatch):
+    """Fix round 1 regression guard: resolving `linear_solver` used to require a separate
+    probe `build_system` call (purely to learn `rhs.shape[:-1].numel()`) before invoking
+    `_linear_solve`, which doubled the cost of `_advection_operator`'s own
+    `boundary_forcing` (an embed/gather/`scatter_add_` over every edge, the same cost order
+    as a matvec) on the differentiable path this whole plan exists to speed up. Counts
+    `TransportLayer._advection_operator` invocations directly: `build_system` calls it
+    exactly once per invocation (for a fixed, non-changing capacity), so this is a direct
+    proxy for `build_system`'s own call count.
+
+    FORWARD must call it exactly ONCE (never a probe-and-solve pair). BACKWARD calls it
+    TWICE, not once -- `_LinearSolve.backward` (unrelated to this fix, pre-existing since
+    before Task 5: confirmed against commit cf354dc, this worktree's base) rebuilds the
+    system twice by design: once for the adjoint solve's operator (`op`, under `no_grad`)
+    and once more for the residual pass that produces the parameter gradients (`op_p`,
+    under `enable_grad`), per `solvers/implicit.py`'s `_Implicit` structure this class
+    mirrors. So a correct forward+backward pass totals THREE calls (1 + 2), exactly the
+    pre-Task-5 baseline -- not two, and the earlier (buggy) probe-based implementation of
+    this task made it FOUR (2 + 2) by adding a redundant probe call in forward alone.
+    """
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
+        boundary=["ambient"], scheme="implicit",
+    )
+    x = torch.tensor([150.0], dtype=torch.float64, requires_grad=True)
+    q = torch.tensor([0.4, 0.4], dtype=torch.float64, requires_grad=True)
+    sources = torch.tensor([1.0], dtype=torch.float64, requires_grad=True)
+    x_b = torch.tensor([420.0], dtype=torch.float64, requires_grad=True)
+
+    calls = {"n": 0}
+    real_advection_operator = TransportLayer._advection_operator
+
+    def counting(self, *args, **kwargs):
+        calls["n"] += 1
+        return real_advection_operator(self, *args, **kwargs)
+
+    monkeypatch.setattr(TransportLayer, "_advection_operator", counting)
+
+    y = layer.step(x, q, _full(layer, sources), x_b, 300.0)
+    assert calls["n"] == 1  # forward: exactly one build, no probe
+
+    y.sum().backward()
+    assert calls["n"] == 3  # + backward's own two (adjoint op, residual-pass op_p)
