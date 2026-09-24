@@ -372,6 +372,15 @@ def _sparse_direct(op, b: Tensor, where: str, triplet=None) -> SolveResult:
 _METHODS = ("auto", "cg", "gmres", "direct", "sparse_direct")
 _ON_FAILURE = ("raise", "return")
 
+# `preconditioner`'s DEFAULT differs by backend: pcg's is `"jacobi"` (unchanged since
+# before Task 6), gmres's is `None` (today's behaviour, unchanged by Task 6 either). One
+# shared literal default could not represent both, so the public default is this private
+# sentinel instead -- meaning "the caller did not mention `preconditioner` at all", resolved
+# per backend just below. An explicitly passed value (including the literal string
+# `"jacobi"` passed to a gmres-routed call) is always honoured verbatim; only the UNSET case
+# is backend-dependent.
+_PRECONDITIONER_UNSET = object()
+
 
 def solve(
     op,
@@ -384,7 +393,7 @@ def solve(
     atol: float = 0.0,
     max_iter: int | None = None,
     x0: Tensor | None = None,
-    preconditioner: str | None = "jacobi",
+    preconditioner: str | None = _PRECONDITIONER_UNSET,
     restart: int = 30,
     backend_out: dict | None = None,
 ) -> SolveResult:
@@ -392,11 +401,22 @@ def solve(
     an explicit method, then apply the raise/return boundary on the NUMERICAL outcome.
 
     Accepts the explicit union of backend keyword arguments -- `rtol`, `atol`, `max_iter`,
-    `x0` (both pcg and gmres), `preconditioner` (pcg only), `restart` (gmres only) -- and
-    forwards to the chosen backend only the ones it accepts, silently dropping the rest (no
-    `**kw`: a reviewer found `solve(op_nonsym, b, preconditioner="jacobi")` raising `TypeError`
-    from gmres before this signature was made explicit). `method="direct"` and
-    `method="sparse_direct"` accept and ignore all of them.
+    `x0` (both pcg and gmres), `preconditioner` (pcg AND, since Task 6, gmres), `restart`
+    (gmres only) -- and forwards to the chosen backend only the ones it accepts, silently
+    dropping the rest (no `**kw`: a reviewer found `solve(op_nonsym, b,
+    preconditioner="jacobi")` raising `TypeError` from gmres before this signature was made
+    explicit). `method="direct"` and `method="sparse_direct"` accept and ignore all of them.
+
+    `preconditioner` left UNSPECIFIED resolves to `"jacobi"` for pcg (unchanged) and to
+    `None` for gmres (today's behaviour, unchanged: `method="auto"`/`"gmres"` still run
+    plain gmres by default). An EXPLICIT `preconditioner` -- including the literal string
+    `"jacobi"` -- is honoured for whichever backend actually runs, gmres included: this is
+    what makes `TransportLayer`'s `"gmres_jacobi"`/`"gmres_ilu"` possible at all (Task 6).
+    `preconditioner="ilu"` on a gmres-routed solve requires `op.assemble_sparse()` and SciPy,
+    exactly like `method="sparse_direct"` does, and raises `ValueError` by name for either
+    missing piece -- it was asked for explicitly, so this is a refusal, never a fall-back
+    (that check lives in `gmres`'s own `"ilu"` preconditioner builder, which this function
+    does not duplicate).
 
     `method="sparse_direct"` is the spec's section 6.2 sparse-direct reference: SciPy SuperLU
     of `op.assemble_sparse()`, per instance. It is a DIRECT method, so it makes no SPD or
@@ -421,6 +441,13 @@ def solve(
             f"{where}: unknown on_failure {on_failure!r}; expected one of {_ON_FAILURE}"
         )
 
+    # Resolve the shared `preconditioner` kwarg to each backend's OWN default when the
+    # caller left it unspecified -- see `_PRECONDITIONER_UNSET`'s own comment. An explicit
+    # value (any value other than the sentinel, `None` included) is passed through verbatim
+    # to whichever backend runs.
+    pcg_preconditioner = "jacobi" if preconditioner is _PRECONDITIONER_UNSET else preconditioner
+    gmres_preconditioner = None if preconditioner is _PRECONDITIONER_UNSET else preconditioner
+
     if method == "cg":
         cert = op.spd_certificate()
         if cert is None:
@@ -437,11 +464,26 @@ def solve(
             )
         backend = "pcg"
         result = pcg(
-            op, b, rtol=rtol, atol=atol, max_iter=max_iter, preconditioner=preconditioner, x0=x0
+            op,
+            b,
+            rtol=rtol,
+            atol=atol,
+            max_iter=max_iter,
+            preconditioner=pcg_preconditioner,
+            x0=x0,
         )
     elif method == "gmres":
         backend = "gmres"
-        result = gmres(op, b, rtol=rtol, atol=atol, max_iter=max_iter, restart=restart, x0=x0)
+        result = gmres(
+            op,
+            b,
+            rtol=rtol,
+            atol=atol,
+            max_iter=max_iter,
+            restart=restart,
+            x0=x0,
+            preconditioner=gmres_preconditioner,
+        )
     elif method == "direct":
         A = op.assemble()
         if A is None:
@@ -478,7 +520,7 @@ def solve(
                     rtol=rtol,
                     atol=atol,
                     max_iter=max_iter,
-                    preconditioner=preconditioner,
+                    preconditioner=pcg_preconditioner,
                     x0=x0,
                 )
         else:
@@ -487,7 +529,16 @@ def solve(
             # which makes no symmetry or SPD assumption to violate. rmatvec, if this
             # operator declares one, is reserved for the adjoint and is never called here.
             backend = "gmres"
-            result = gmres(op, b, rtol=rtol, atol=atol, max_iter=max_iter, restart=restart, x0=x0)
+            result = gmres(
+                op,
+                b,
+                rtol=rtol,
+                atol=atol,
+                max_iter=max_iter,
+                restart=restart,
+                x0=x0,
+                preconditioner=gmres_preconditioner,
+            )
 
     # After the branches, so every path that reaches here has actually chosen and run a
     # backend; the raises above (unknown method, eligibility refusal, no assembled matrix)

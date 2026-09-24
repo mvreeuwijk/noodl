@@ -1010,7 +1010,7 @@ def test_steady_broadcasts_unbatched_state_against_batched_flow():
 
 
 # ------------------------------------ K=2, kinetics + removal + conduction, all at once
-def _k2_full_layer(scheme: str) -> TransportLayer:
+def _k2_full_layer(scheme: str, linear_solver: str = "auto") -> TransportLayer:
     """ambient (boundary) -- A -- B, three airpath edges plus one conduction edge A->B, TWO
     species with both inter-species kinetics and a per-species removal rate -- every term
     `operator()` assembles (advection, conduction, removal, kinetics) present at once, which
@@ -1037,6 +1037,7 @@ def _k2_full_layer(scheme: str) -> TransportLayer:
         conduction_kind="conduction",
         conductance=torch.tensor([2.5], dtype=torch.float64),
         scheme=scheme,
+        linear_solver=linear_solver,
     )
 
 
@@ -1122,7 +1123,68 @@ def test_unknown_linear_solver_refused_by_name_at_construction():
 
 
 @pytest.mark.parametrize("name", ["gmres_jacobi", "gmres_ilu"])
-def test_gmres_preconditioner_names_raise_not_implemented_naming_task_6(name):
+def test_gmres_preconditioner_names_match_the_dense_oracle(name):
+    """Task 6: `gmres_jacobi`/`gmres_ilu` are real preconditioners now, not a stub that
+    raises. Same problem, dense oracle solved by hand -- the same comparison
+    `test_k2_kinetics_removal_conduction_batched_mixed_sign_step_matches_dense_oracle`
+    already makes for the default solver, repeated here for both new preconditioner names.
+    """
+    layer = _k2_full_layer("implicit", linear_solver=name)
+    q = _batched_mixed_sign_flow()
+    batch = q.shape[0]
+    x = _k2_state(batch, layer.n_i)
+    sources = 0.1 * _k2_state(batch, layer.n_i)
+    x_boundary = torch.tensor([[10.0, 5.0]], dtype=torch.float64).expand(batch, 1, 2)
+    dt = 30.0
+
+    x_sparse = layer.step(x, q, _full(layer, sources, node_dim=-2), x_boundary, dt)
+    assert x_sparse.shape == (batch, layer.n_i, 2)
+
+    cap = layer._capacity_stacked(torch.float64)
+    for i in range(batch):
+        M_i, N_i = layer.operator(q[i])
+        x0_i, _ = layer._to_stacked(x[i], layer.n_i, "x")
+        src_i, _ = layer._to_stacked(sources[i], layer.n_i, "sources")
+        xb_i, _ = layer._to_stacked(x_boundary[i], layer.n_b, "x_boundary")
+        b0_i = (N_i @ xb_i.unsqueeze(-1)).squeeze(-1) + src_i / cap
+        m = M_i.shape[-1]
+        eye = torch.eye(m, dtype=torch.float64)
+        rhs = x0_i + dt * b0_i
+        x_dense_i = torch.linalg.solve(eye - dt * M_i, rhs.unsqueeze(-1)).squeeze(-1)
+        x_dense_i_unstacked = layer._from_stacked(x_dense_i, layer.n_i, False)
+        torch.testing.assert_close(x_sparse[i], x_dense_i_unstacked, rtol=1e-8, atol=1e-10)
+
+
+@pytest.mark.parametrize("name", ["gmres_jacobi", "gmres_ilu"])
+def test_gradcheck_gmres_preconditioner_names_through_implicit_step(name):
+    """Both names must be differentiable end to end through `layer.step`: gradients come
+    from `_LinearSolve`'s implicit adjoint (forward AND backward run under `no_grad`, per
+    Task 5), so this proves the adjoint's own resolved kwargs (`method='gmres'`,
+    `preconditioner=name.removeprefix('gmres_')`) produce a correct gradient -- not merely
+    that the forward value is right.
+    """
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
+        boundary=["ambient"], scheme="implicit", linear_solver=name,
+    )
+    x = torch.tensor([150.0], dtype=torch.float64, requires_grad=True)
+    q = torch.tensor([0.4, 0.4], dtype=torch.float64, requires_grad=True)
+    sources = torch.tensor([1.0], dtype=torch.float64, requires_grad=True)
+    x_b = torch.tensor([420.0], dtype=torch.float64, requires_grad=True)
+
+    def f(x, q, sources, x_b):
+        return layer.step(x, q, _full(layer, sources), x_b, 300.0)
+
+    assert gradcheck(f, (x, q, sources, x_b), eps=1e-6, atol=1e-5)
+
+
+@pytest.mark.parametrize("name", ["gmres_jacobi", "gmres_ilu"])
+def test_diagnostics_linear_reports_the_resolved_preconditioner_backend(name):
+    """Both names resolve to backend='gmres' (preconditioning is an internal detail of how
+    gmres converges, not a distinct backend name) with a real, positive residual/iteration
+    count -- unlike sparse_direct's trivial iterations==1.
+    """
     net = flow_through_zone()
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
@@ -1132,8 +1194,11 @@ def test_gmres_preconditioner_names_raise_not_implemented_naming_task_6(name):
     c0 = torch.tensor([100.0], dtype=torch.float64)
     source = torch.tensor([2.0], dtype=torch.float64)
     c_out = torch.tensor([420.0], dtype=torch.float64)
-    with pytest.raises(NotImplementedError, match="Task 6"):
-        layer.step(c0, q, _full(layer, source), c_out, 200.0)
+    diag: dict = {}
+    layer.step(c0, q, _full(layer, source), c_out, 200.0, diagnostics=diag)
+    assert diag["linear"]["backend"] == "gmres"
+    assert diag["linear"]["iterations"] >= 1
+    assert diag["linear"]["residual"] < 1e-8
 
 
 def test_auto_resolves_to_gmres_bit_identical_to_the_old_hardcoded_solve():

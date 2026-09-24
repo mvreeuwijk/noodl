@@ -502,19 +502,20 @@ class TransportLayer:
         policy is not touched by this plan). `"gmres"` resolves the same way, explicitly.
         The signature carries `batch_size` now because Task 8's default will need it.
 
-        `"gmres_jacobi"`/`"gmres_ilu"` are Task 6's names for a real GMRES preconditioner;
-        until that task lands they raise `NotImplementedError` naming it, rather than
-        silently resolving to plain GMRES under a name that promises preconditioning.
-        `"sparse_direct"` and `"direct"` pass straight through: `preconditioner`/`restart`
-        are irrelevant to both and `solvers.select.solve` ignores them for those two
-        methods.
+        `"gmres_jacobi"`/`"gmres_ilu"` (Task 6) resolve to `method="gmres"` with a real
+        preconditioner -- `"jacobi"` (`1 / diag(A)`) or `"ilu"` (SciPy's incomplete LU of
+        `op.assemble_sparse()`, per instance) -- rather than plain GMRES under a name that
+        promises preconditioning. `preconditioner` is otherwise the only thing that changes:
+        the backend is still `"gmres"` (preconditioning is an internal detail of how gmres
+        converges, not a distinct backend `diagnostics["linear"]["backend"]` would name
+        differently). `"sparse_direct"` and `"direct"` pass straight through:
+        `preconditioner`/`restart` are irrelevant to both and `solvers.select.solve` ignores
+        them for those two methods.
         """
-        if self.linear_solver in ("gmres_jacobi", "gmres_ilu"):
-            raise NotImplementedError(
-                f"TransportLayer '{self.name}': linear_solver={self.linear_solver!r} has "
-                f"no real preconditioner yet -- Task 6 gives GMRES one. Use 'auto', "
-                f"'gmres', 'sparse_direct' or 'direct' until then."
-            )
+        if self.linear_solver == "gmres_jacobi":
+            return {"method": "gmres", "preconditioner": "jacobi", "restart": 30}
+        if self.linear_solver == "gmres_ilu":
+            return {"method": "gmres", "preconditioner": "ilu", "restart": 30}
         if self.linear_solver in ("auto", "gmres"):
             return {"method": "gmres", "preconditioner": None, "restart": 30}
         return {"method": self.linear_solver, "preconditioner": None, "restart": 30}
