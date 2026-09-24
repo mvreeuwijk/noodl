@@ -23,7 +23,7 @@ from noodl.apps.street_aq.impaq import (
     solve_steady_state,
 )
 from noodl.apps.street_aq.loader import read_aqdt
-from noodl.apps.street_aq.network import build_street_model, from_test_network
+from noodl.apps.street_aq.network import build_model, from_test_network
 
 DT = torch.float64
 U_REF, THETA_W, H_ABL, BACKGROUND = 2.0, 0.25 * math.pi, 1200.0, 1.0e-4
@@ -41,7 +41,7 @@ def _oracle(street_net):
 
 
 def _noodl(street_net, **options):
-    model, state, _ = build_street_model(
+    model, state, _ = build_model(
         street_net, canyon_wind="soulhac", exchange="sirane",
         direction_averaging="none", kappa=0.4, canyon_wind_min=0.0, u_d_min=0.0,
         stability="impaq", z_ref=30.0, pblh_floor=False, **options,
@@ -63,7 +63,7 @@ def _noodl(street_net, **options):
 def test_the_canyon_velocities_agree_with_the_oracle_s_scipy_ones():
     street_net = from_test_network()
     network, _layer = _oracle(street_net)
-    model, state, _ = build_street_model(street_net, kappa=0.4, pblh_floor=False)
+    model, state, _ = build_model(street_net, kappa=0.4, pblh_floor=False)
     resolved = model._apply_closures(state, {
         "U_ref": torch.tensor(U_REF, dtype=DT),
         "theta_w": torch.tensor(THETA_W, dtype=DT),
@@ -147,7 +147,7 @@ def _leiden_small():
 
 def _noodl_leiden(data, **options):
     """The noodl model in IMPAQ's own formulation, batched over the sampled steps."""
-    model, _state, _ = build_street_model(
+    model, _state, _ = build_model(
         data.net, canyon_wind="soulhac", exchange="sirane", routing="sirane",
         direction_averaging="none", kappa=0.4, canyon_wind_min=0.0, u_d_min=0.0,
         stability="impaq", z_ref=30.0, pblh_floor=False, **options,

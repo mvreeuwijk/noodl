@@ -8,7 +8,7 @@ from noodl.apps.sewer.network import (
     Outfall,
     Pipe,
     SewerNetwork,
-    build_sewer_model,
+    build_model,
     initial_state,
     sewer_steady,
     tree_steady,
@@ -85,7 +85,7 @@ def test_a_duplicate_name_is_refused():
 
 
 def test_builder_returns_a_model_a_state_and_drivers():
-    model, state, drivers = build_sewer_model(tree_steady())
+    model, state, drivers = build_model(tree_steady())
     assert set(model.potential) == {"air"}
     assert set(model.transport) == {"water_quality", "air_quality"}
     assert model.net.nodes == ["J1", "J2", "J5", "J3", "J4", "Outfall", "ambient"]
@@ -98,7 +98,7 @@ def test_builder_returns_a_model_a_state_and_drivers():
 
 
 def test_the_air_layer_carries_every_kind():
-    model, _, _ = build_sewer_model(tree_steady(), fans=("J3",))
+    model, _, _ = build_model(tree_steady(), fans=("J3",))
     assert set(model.potential["air"].kinds) == {"headspace", "leak", "fan"}
     # one headspace edge per pipe, plus the outfall edge
     assert model.net.edge_index("headspace").numel() == 6
@@ -107,7 +107,7 @@ def test_the_air_layer_carries_every_kind():
 
 
 def test_air_false_builds_the_water_only_model():
-    model, state, drivers = build_sewer_model(tree_steady(), air=False)
+    model, state, drivers = build_model(tree_steady(), air=False)
     assert model.potential == {}
     assert set(model.transport) == {"water_quality"}
     assert "ambient" not in model.net.nodes
@@ -115,25 +115,25 @@ def test_air_false_builds_the_water_only_model():
 
 
 def test_quality_false_drops_both_quality_layers():
-    model, _, _ = build_sewer_model(tree_steady(), quality=False)
+    model, _, _ = build_model(tree_steady(), quality=False)
     assert model.transport == {}
 
 
 def test_storage_true_registers_the_closure_state_key():
-    model, state, _ = build_sewer_model(tree_steady(), storage=True, dt_storage=60.0)
+    model, state, _ = build_model(tree_steady(), storage=True, dt_storage=60.0)
     assert "sewer.H" in model.closure_state_keys
     assert state["sewer.H"].shape == (5,)
 
 
 def test_a_single_step_runs_and_conserves_the_air_balance():
-    model, state, drivers = build_sewer_model(tree_steady())
+    model, state, drivers = build_model(tree_steady())
     new = model.step(state, drivers, 60.0)
     residuals = model.residuals(new, drivers)
     assert float(residuals["air"].abs().max()) < 1e-10
 
 
 def test_sewer_steady_reaches_a_fixed_point():
-    model, state, drivers = build_sewer_model(tree_steady())
+    model, state, drivers = build_model(tree_steady())
     final = sewer_steady(model, state, drivers)
     residuals = model.residuals(final, drivers)
     for name, value in residuals.items():
@@ -141,7 +141,7 @@ def test_sewer_steady_reaches_a_fixed_point():
 
 
 def test_initial_state_refuses_an_unknown_quantity():
-    model, _, drivers = build_sewer_model(tree_steady())
+    model, _, drivers = build_model(tree_steady())
     model.transport["water_quality"].quantity = "nonsense"
     with pytest.raises(ValueError, match="nonsense"):
         initial_state(model, drivers)
@@ -149,22 +149,22 @@ def test_initial_state_refuses_an_unknown_quantity():
 
 def test_read_inp_sulfide_source_uses_each_manholes_own_outgoing_pipe():
     """M4-R4/M4-R9 amendment: `tree_steady.inp`'s `[CONDUITS]` order (C1..C5) does not match
-    its `[JUNCTIONS]` order (J1, J2, J5, J3, J4), so `read_inp` gives the non-identity
+    its `[JUNCTIONS]` order (J1, J2, J5, J3, J4), so `read_swmm_inp` gives the non-identity
     `out_pipe = [0, 1, 3, 2, 4]`. The model's sulfide source at each manhole must equal
     `sulfide_rate` evaluated on THAT manhole's own outgoing pipe's hydraulics, not on the
-    pipe at the same position -- exercised end to end through `read_inp` and
-    `build_sewer_model`."""
+    pipe at the same position -- exercised end to end through `read_swmm_inp` and
+    `build_model`."""
     from pathlib import Path
 
-    from noodl.apps.sewer.inp import read_inp
+    from noodl.apps.sewer.inp import read_swmm_inp
     from noodl.apps.sewer.quality import sulfide_rate
 
     data = Path(__file__).resolve().parents[2] / "data" / "sewer"
-    net, _, _ = read_inp(data / "tree_steady.inp")
+    net, _, _ = read_swmm_inp(data / "tree_steady.inp")
     assert [p.name for p in net.pipes] == ["C1", "C2", "C3", "C4", "C5"]
     assert [m.name for m in net.manholes] == ["J1", "J2", "J5", "J3", "J4"]
 
-    model, state, drivers = build_sewer_model(net, air=False, quality=True)
+    model, state, drivers = build_model(net, air=False, quality=True)
     assert model.out_pipe.tolist() == [0, 1, 3, 2, 4]
 
     reaction = dict(model.reactions)["water_quality"]
@@ -206,8 +206,8 @@ def test_the_outfall_pipe_is_found_by_where_it_drains_not_by_position():
     reordered.validate()
     assert [p.name for p in reordered.pipes] == ["C5", "C1", "C2", "C4", "C3"]
 
-    model_a, state_a, drivers_a = build_sewer_model(canonical)
-    model_b, state_b, drivers_b = build_sewer_model(reordered)
+    model_a, state_a, drivers_a = build_model(canonical)
+    model_b, state_b, drivers_b = build_model(reordered)
     assert model_a.net.nodes == model_b.net.nodes
 
     def outfall_edge_names(model):
@@ -239,7 +239,7 @@ def test_the_headspace_stack_drive_uses_the_pipe_crown_not_the_mean_invert():
         pipes=(Pipe("A", "J1", "Out", 100.0, 0.3, 0.013, 0.01),),
         outfalls=(Outfall("Out", 9.0),),
     )
-    model, state, drivers = build_sewer_model(net, quality=False)
+    model, state, drivers = build_model(net, quality=False)
     assert float(drivers["T_head"]) != float(drivers["T_amb"])
     resolved = model._apply_closures(state, drivers)
 
@@ -278,7 +278,7 @@ def test_the_leak_element_is_built_float64_not_the_default_dtype():
     """N2: the leak's `PowerLaw` is built DIRECTLY (never through `Orifice`, which casts
     with `torch.get_default_dtype()` -- float32 in this repository -- regardless of its
     inputs' own dtype); both `C` and `n` must be float64."""
-    model, _, _ = build_sewer_model(tree_steady())
+    model, _, _ = build_model(tree_steady())
     leak = next(el for el in model.potential["air"]._elements if el.kind == "leak")
     assert leak.C.dtype == torch.float64
     assert leak.n.dtype == torch.float64
@@ -298,18 +298,18 @@ def _two_component_forest():
 
 def test_a_two_component_forest_builds_and_steps_with_air_false():
     net = _two_component_forest()
-    model, state, drivers = build_sewer_model(net, air=False, quality=False)
+    model, state, drivers = build_model(net, air=False, quality=False)
     resolved = model._apply_closures(state, drivers)
     assert resolved["sewer.q"].tolist() == pytest.approx([0.05, 0.03], abs=1e-15)
 
 
 def test_a_two_component_forest_builds_and_steps_with_air_true():
-    """N4: `build_sewer_model(air=True)` used to refuse any network whose pipe subgraph
+    """N4: `build_model(air=True)` used to refuse any network whose pipe subgraph
     was not a single tree with exactly one outfall pipe. A forest gets one outfall-to-
     ambient headspace edge PER outfall pipe instead, each borrowing its own pipe's length
     and diameter, with the drive zeroed on both appended edges."""
     net = _two_component_forest()
-    model, state, drivers = build_sewer_model(net, air=True, quality=True)
+    model, state, drivers = build_model(net, air=True, quality=True)
     assert model.net.edge_index("headspace").numel() == 4  # 2 pipes + 2 outfall edges
     new = model.step(state, drivers, 60.0)
     residuals = model.residuals(new, drivers)
@@ -326,7 +326,7 @@ def test_two_manholes_draining_into_one_outfall_is_still_refused_by_name():
         outfalls=(Outfall("Out", 5.0),),
     )
     with pytest.raises(ValueError, match=r"more than one pipe.*draining"):
-        build_sewer_model(net, air=True)
+        build_model(net, air=True)
 
 
 # ------------------------------------------------------------------------------------ N8
@@ -343,7 +343,7 @@ def test_a_ground_level_of_exactly_zero_is_not_dropped():
         pipes=(Pipe("PA", "A", "Out", 100.0, 0.30, 0.013, 0.01),),
         outfalls=(Outfall("Out", -10.0),),
     )
-    model, state, drivers = build_sewer_model(net, quality=False)
+    model, state, drivers = build_model(net, quality=False)
     leak_stack = next(
         d for d in model.potential["air"]._drives
         if isinstance(d, Stack) and d.kind == "leak"
@@ -361,7 +361,7 @@ def test_model_notes_reflects_the_closures_own_notes_dict():
     """N10: `model.notes` is the SAME dict object as the hydraulics closure's own `notes`,
     not a one-time copy taken at build time, so a note the closure adds only once a step
     actually hits it (`capacity_floor`, added lazily on a dry pipe) shows up on
-    `model.notes` too. R5: `build_sewer_model`'s initial-storage query
+    `model.notes` too. R5: `build_model`'s initial-storage query
     (`Model.initial_capacities`) already evaluates the closure once at construction, so on a
     network that is dry from the start the `capacity_floor` note can already be present
     before the first `model.step` call -- this test therefore checks the identity through the
@@ -371,7 +371,7 @@ def test_model_notes_reflects_the_closures_own_notes_dict():
         pipes=(Pipe("PA", "A", "Out", 100.0, 0.3, 0.013, 0.01),),
         outfalls=(Outfall("Out", 0.0),),
     )
-    model, state, drivers = build_sewer_model(net, air=False, quality=True)
+    model, state, drivers = build_model(net, air=False, quality=True)
     model.step(state, drivers, 60.0)
     assert "capacity_floor" in model.notes
     assert "PA" in model.notes["capacity_floor"]
@@ -381,7 +381,7 @@ def test_fr21_one_step_with_a_lateral_bod_load_raises_only_j1():
     """FR-21 (a): `bod_in = 0.3` at J1 only. `LateralLoads`'s own contract puts the
     resulting source at EXACTLY J1's row and EXACTLY the BOD column (verified directly at
     the closure level in `test_quality.py`); this test verifies the FULL WIRING through
-    `build_sewer_model` and one `model.step`.
+    `build_model` and one `model.step`.
 
     J1 is a HEADWATER manhole (no upstream inflow, only its own lateral source), so its own
     concentration after one implicit step of the water_quality transport layer is the
@@ -393,7 +393,7 @@ def test_fr21_one_step_with_a_lateral_bod_load_raises_only_j1():
     transport-layer-only step (bypassing `SulfideGeneration`'s reaction, verified separately
     at S1) matches the closed form above to rel 0.0 (bit-exact -- it is that layer's OWN
     scheme, not an approximation of it)."""
-    model, state, drivers = build_sewer_model(tree_steady())
+    model, state, drivers = build_model(tree_steady())
     n = model.net.n
     j1_node = int(model.manhole_idx[0])
     drivers = dict(drivers)
@@ -426,7 +426,7 @@ def test_fr21_one_step_with_a_lateral_bod_load_raises_only_j1():
 def test_initial_state_builds_sewer_h_and_a_storage_step_runs():
     """N11: `initial_state(model)` must build `"sewer.H"` itself when `storage=True`, as
     `SewerHydraulics`'s own `KeyError` message already promises."""
-    model, _, drivers = build_sewer_model(tree_steady(), storage=True, dt_storage=60.0)
+    model, _, drivers = build_model(tree_steady(), storage=True, dt_storage=60.0)
     state = initial_state(model, drivers)
     assert "sewer.H" in state
     new = model.step(state, drivers, 60.0)

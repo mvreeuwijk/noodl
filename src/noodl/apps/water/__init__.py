@@ -20,7 +20,7 @@ from noodl.apps.water.network import (
     WaterNetwork,
     WaterOptions,
     WaterPipe,
-    build_water_model,
+    build_model,
     initial_state,
     tank_inflow,
     twoloop,
@@ -33,7 +33,7 @@ __all__ = [
     "DW_SI", "FLOW_UNITS", "G", "HW_SI", "Control", "HazenWilliams", "Junction",
     "MinorLoss", "PressureDrivenDemand", "Pump", "PumpCurve", "Reservoir", "Tank",
     "TankLevels", "Valve", "WaterNetwork", "WaterOptions", "WaterPipe",
-    "build_water_model", "initial_state", "link_table", "pressure_head",
+    "build_model", "initial_state", "link_table", "pressure_head",
     "read_epanet_inp", "tank_inflow", "three_point_curve", "to_kilopascal", "twoloop",
     "water_steady",
 ]

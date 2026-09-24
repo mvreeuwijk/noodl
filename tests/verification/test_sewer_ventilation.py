@@ -106,10 +106,10 @@ def test_h3_transfer_dominated_steady_state_is_henry_equilibrium():
 
     There is no gas-phase sink in this application at all (spec's `k_gas` is a documented,
     always-zero, unverified parameter with no reaction registered for it -- confirmed by
-    inspection of `build_sewer_model` and `quality.py`, neither of which builds one), so
+    inspection of `build_model` and `quality.py`, neither of which builds one), so
     "no gas-phase sink" needs no extra step to arrange.
 
-    The ASSEMBLED tree fixture (`build_sewer_model(tree_steady())`) is NOT used here: its
+    The ASSEMBLED tree fixture (`build_model(tree_steady())`) is NOT used here: its
     leaks vent H2S to ambient (a zero-concentration boundary) and its air layer always has
     a net flow path to the outfall's own headspace edge, so mass continuously leaves the
     system and true Henry equilibrium is never reached there, only approached asymptotically

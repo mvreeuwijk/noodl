@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 import torch
 
-from noodl.apps.sewer.inp import read_inp
-from noodl.apps.sewer.network import build_sewer_model, sewer_steady
+from noodl.apps.sewer.inp import read_swmm_inp
+from noodl.apps.sewer.network import build_model, sewer_steady
 
 pyswmm = pytest.importorskip("pyswmm")
 shared_enum = pytest.importorskip("swmm.toolkit.shared_enum")
@@ -52,8 +52,8 @@ def _run_swmm(tmp_path, name):
 
 @pytest.fixture(scope="module")
 def noodl_steady():
-    net, _, _ = read_inp(DATA / "tree_kinwave.inp")
-    model, state, drivers = build_sewer_model(net, air=False, quality=False)
+    net, _, _ = read_swmm_inp(DATA / "tree_kinwave.inp")
+    model, state, drivers = build_model(net, air=False, quality=False)
     resolved = model._apply_closures(state, drivers)
     return net, resolved
 
@@ -130,8 +130,8 @@ def test_w4_tracer_concentration(tmp_path):
     """
     from noodl.layers.reaction import FirstOrderDecay
 
-    net, loads, pollutants = read_inp(DATA / "tree_kinwave_pollut.inp")
-    model, state, drivers = build_sewer_model(net, air=False, quality=False)
+    net, loads, pollutants = read_swmm_inp(DATA / "tree_kinwave_pollut.inp")
+    model, state, drivers = build_model(net, air=False, quality=False)
     resolved = model._apply_closures(state, drivers)
     k = pollutants["Tracer"]["decay"]
     volume = resolved["sewer.V_wet"]
@@ -167,7 +167,7 @@ def test_w4_model_run_through_the_fr21_lateral_load_path(tmp_path):
     `LateralLoads`/`bod_in` path (mapping the tracer onto the BOD column: `Tracer` is a
     plain first-order-decay pollutant with no sulfide-generation analogue, and
     `SulfideGeneration`'s own `k_bod` IS constructor-configurable, so the model's BOD decay
-    is set to the fixture's own `Kdecay`, converted back from `read_inp`'s per-SECOND
+    is set to the fixture's own `Kdecay`, converted back from `read_swmm_inp`'s per-SECOND
     `pollutants[...]["decay"]` to the per-DAY units `k_bod` expects), runs `sewer_steady`,
     and compares against the SAME SWMM values the hand-resolved closed form above used.
 
@@ -188,11 +188,11 @@ def test_w4_model_run_through_the_fr21_lateral_load_path(tmp_path):
     agree with SWMM to a measured worst 8.05e-6 relative -- comfortably inside 3e-5, and
     reproduced at (5 s, 10 s) and (2.5 s, 5 s) pairs to within 3e-8 of each other, so the
     residual is genuinely the O(dt^2) term, not noise."""
-    net, loads, pollutants = read_inp(DATA / "tree_kinwave_pollut.inp")
+    net, loads, pollutants = read_swmm_inp(DATA / "tree_kinwave_pollut.inp")
     k_per_second = pollutants["Tracer"]["decay"]
 
     def run(dt):
-        model, state, drivers = build_sewer_model(net, air=False, quality=True)
+        model, state, drivers = build_model(net, air=False, quality=True)
         # Replace the builder's default-parameter reaction with one carrying the
         # fixture's own decay constant -- `Model.reactions` is a plain list attribute,
         # not reconstructed machinery, so this is a supported one-line substitution

@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from noodl.apps.street_aq.chemistry import photostationary_for_streets, street_steady
-from noodl.apps.street_aq.network import Street, StreetNetwork, build_street_model
+from noodl.apps.street_aq.network import Street, StreetNetwork, build_model
 from noodl.layers.reaction import K_NO_O3, MOLAR_MASS
 
 DT = torch.float64
@@ -54,7 +54,7 @@ def test_model_steady_does_not_apply_the_reaction():
     docstring says so). `street_steady` is what the street application uses instead."""
     sn = _network()
     reaction = photostationary_for_streets(("no", "no2", "o3"))
-    model, state, _ = build_street_model(sn, species=("no", "no2", "o3"),
+    model, state, _ = build_model(sn, species=("no", "no2", "o3"),
                                          chemistry=reaction, pblh_floor=False)
     drivers = _drivers(model)
     transport_only = model.steady(state, drivers)
@@ -65,7 +65,7 @@ def test_model_steady_does_not_apply_the_reaction():
 def test_street_steady_reaches_the_photostationary_state_on_every_street():
     sn = _network()
     reaction = photostationary_for_streets(("no", "no2", "o3"))
-    model, state, _ = build_street_model(sn, species=("no", "no2", "o3"),
+    model, state, _ = build_model(sn, species=("no", "no2", "o3"),
                                          chemistry=reaction, pblh_floor=False)
     drivers = _drivers(model)
     out = street_steady(model, state, drivers, reaction=reaction, tol=1e-18, max_iter=200)
@@ -81,7 +81,7 @@ def test_street_steady_reaches_the_photostationary_state_on_every_street():
 
 def test_street_steady_without_a_reaction_is_exactly_model_steady():
     sn = _network()
-    model, state, _ = build_street_model(sn, species=("nox",), pblh_floor=False)
+    model, state, _ = build_model(sn, species=("nox",), pblh_floor=False)
     net = model.net
     sources = torch.zeros(net.n, dtype=DT)
     sources[net.node_index("s1")] = 1.0e-3
@@ -101,7 +101,7 @@ def test_street_steady_without_a_reaction_is_exactly_model_steady():
 def test_street_steady_reports_a_fixed_point_it_cannot_reach():
     sn = _network()
     reaction = photostationary_for_streets(("no", "no2", "o3"))
-    model, state, _ = build_street_model(sn, species=("no", "no2", "o3"),
+    model, state, _ = build_model(sn, species=("no", "no2", "o3"),
                                          chemistry=reaction, pblh_floor=False)
     # One pass cannot converge: the change from the all-zero initial state to the first
     # solve is the whole solution. (Two passes DO converge on this case -- the second

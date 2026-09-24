@@ -26,7 +26,7 @@ from noodl.apps.street_aq.loader import RHO_AIR, AqdtData, Forcing, read_aqdt
 from noodl.apps.street_aq.network import (
     Street,
     StreetNetwork,
-    build_street_model,
+    build_model,
     from_test_network,
     initial_state,
     munich_idealised,
@@ -65,7 +65,7 @@ __all__ = [
     "StreetGeometry",
     "StreetNetwork",
     "boundary_layer",
-    "build_street_model",
+    "build_model",
     "canyon_velocity",
     "direction_offsets",
     "exchange_velocity",

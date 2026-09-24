@@ -32,7 +32,7 @@ from noodl.apps.street_aq.canyon import (
     soulhac_shape,
 )
 from noodl.apps.street_aq.chemistry import photostationary_for_streets, street_steady
-from noodl.apps.street_aq.network import build_street_model, munich_idealised, street_index
+from noodl.apps.street_aq.network import build_model, munich_idealised, street_index
 from noodl.apps.street_aq.routing import (
     direction_offsets,
     n_theta_munich,
@@ -246,7 +246,7 @@ def _run(fixture):
     options.pop("comment")
     net, names = munich_idealised(L=geometry["L_m"], W=geometry["W_m"],
                                   H=geometry["H_m"])
-    model, state, _ = build_street_model(net, stability="impaq", pblh_floor=True,
+    model, state, _ = build_model(net, stability="impaq", pblh_floor=True,
                                          **options)
     graph = model.net
     sources = torch.zeros(graph.n, dtype=DT)
@@ -416,7 +416,7 @@ def test_photostationary_chemistry_on_the_twelve_street_network():
     net, names = munich_idealised(L=geometry["L_m"], W=geometry["W_m"],
                                   H=geometry["H_m"])
     reaction = photostationary_for_streets(("no", "no2", "o3"))
-    model, state, _ = build_street_model(
+    model, state, _ = build_model(
         net, species=("no", "no2", "o3"), chemistry=reaction, stability="impaq",
         pblh_floor=True, **options,
     )

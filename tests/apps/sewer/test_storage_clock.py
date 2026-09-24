@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from noodl.apps.sewer import geometry as geom
-from noodl.apps.sewer.network import build_sewer_model, tree_steady
+from noodl.apps.sewer.network import build_model, tree_steady
 
 F64 = torch.float64
 
@@ -21,7 +21,7 @@ H_AFTER_60_S = torch.tensor(
 
 
 def _model():
-    return build_sewer_model(
+    return build_model(
         tree_steady(), air=False, quality=False, storage=True, dt_storage=60.0,
     )
 
@@ -39,7 +39,7 @@ def test_a_1_s_step_fills_the_manholes_less_than_a_60_s_step():
     `dt_storage` (R6): with one declared, a 1 s step is now the declared-mismatch case that
     refuses by name -- see
     `test_a_constructor_dt_that_disagrees_with_the_step_is_refused_by_name`."""
-    model, state, drivers = build_sewer_model(
+    model, state, drivers = build_model(
         tree_steady(), air=False, quality=False, storage=True,
     )
     h_1 = model.step(state, drivers, 1.0)["sewer.H"]
@@ -55,7 +55,7 @@ def test_a_constructor_dt_that_disagrees_with_the_step_is_refused_by_name():
 
 
 def test_without_a_declared_dt_the_step_interval_is_used():
-    model, state, drivers = build_sewer_model(
+    model, state, drivers = build_model(
         tree_steady(), air=False, quality=False, storage=True,
     )
     torch.testing.assert_close(
@@ -76,7 +76,7 @@ def test_each_leaf_manholes_60_s_level_satisfies_its_own_implicit_euler_residual
     J4 (positions 0, 1, 2, 3, 4); the three LEAVES J1, J2, J5 each drain through their own
     0.30 m diameter, n=0.013, slope=0.010 outgoing pipe (C1, C2, C4) straight to inflow-only
     lateral demand -- no upstream contribution, unlike J3 and J4."""
-    model, state, drivers = build_sewer_model(
+    model, state, drivers = build_model(
         tree_steady(), air=False, quality=False, storage=True,
     )
     h = model.step(state, drivers, 60.0)["sewer.H"]

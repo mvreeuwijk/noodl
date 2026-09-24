@@ -158,9 +158,10 @@ def _munich_idealised_case() -> dict:
 
 def _sewer_tree_case() -> dict:
     """Steady water, air and quality on the committed sewer fixture (row G1)."""
-    from noodl.apps.sewer.network import build_sewer_model, sewer_steady, tree_steady
+    from noodl.apps.sewer import network as sewer_network
+    from noodl.apps.sewer.network import sewer_steady
 
-    model, state, drivers = build_sewer_model(tree_steady())
+    model, state, drivers = sewer_network.build_model(sewer_network.tree_steady())
     final = sewer_steady(model, state, drivers)
     return {key: value.flatten().tolist() for key, value in sorted(final.items())}
 
@@ -171,9 +172,10 @@ def _water_twoloop_case() -> dict:
     Built from `twoloop()` rather than from the `.inp`, so regenerating the golden does not
     depend on the reader; `test_water_parity.py` pins that the two agree.
     """
-    from noodl.apps.water.network import build_water_model, twoloop, water_steady
+    from noodl.apps.water import network as water_network
+    from noodl.apps.water.network import water_steady
 
-    model, state, drivers = build_water_model(twoloop())
+    model, state, drivers = water_network.build_model(water_network.twoloop())
     final = water_steady(model, state, drivers)
     return {key: value.flatten().tolist() for key, value in sorted(final.items())}
 

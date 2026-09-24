@@ -8,7 +8,7 @@ IGNORED because nothing in the hydraulics references them: `[TITLE]`, `[REPORT]`
 Windows version of EPANET, the only [REPORT] option recognized is STATUS", Manual p.142),
 `[COORDINATES]`, `[VERTICES]`, `[LABELS]`, `[BACKDROP]`, `[TAGS]`, `[ENERGY]`, `[END]`, and
 the water-quality sections `[QUALITY] [SOURCES] [REACTIONS] [MIXING]` (this reader returns
-hydraulics; a quality run is configured through `build_water_model(quality=...)`).
+hydraulics; a quality run is configured through `build_model(quality=...)`).
 
 REFUSED BY NAME, because skipping them would silently change the network: `[RULES]`,
 `[EMITTERS]` and `[STATUS]` with content, a time-based `[CONTROLS]` line, a PRV/PSV/PBV/GPV
@@ -25,7 +25,7 @@ everything else".
 `[OPTIONS]` KEYS THAT CHANGE THE PHYSICS -- `DEMAND MODEL`, `MINIMUM PRESSURE`,
 `REQUIRED PRESSURE`, `PRESSURE EXPONENT`, `SPECIFIC GRAVITY`, `VISCOSITY` -- are carried
 onto `WaterNetwork.options` (a `WaterOptions`, EPANET's own defaults) rather than dropped;
-`build_water_model` defaults its own `pda`/`p_min`/`p_req`/`exponent` arguments from them.
+`build_model` defaults its own `pda`/`p_min`/`p_req`/`exponent` arguments from them.
 Any OTHER `[OPTIONS]` line (`TRIALS`, `ACCURACY`, `UNBALANCED`, the in-section `QUALITY`
 mode, ...) is recorded verbatim in `notes["unrecognised_options"]` instead of being
 silently ignored, since most of them are solver/report cosmetics this reader does not need

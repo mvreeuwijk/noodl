@@ -4,7 +4,7 @@ Design spec `docs/superpowers/specs/2026-09-19-milestone-5-coupling-design.md`, 
 4 and 10; amendments A2 (units), A3 (wind conventions), A5 (layouts).
 
 The street's `StreetFlows` closure REQUIRES the drivers `U_ref` (m/s at `z_ref`), `theta_w`
-(radians CCW from east, wind TOWARD) and `h_abl` (m), which `build_street_model`'s returned
+(radians CCW from east, wind TOWARD) and `h_abl` (m), which `street_aq.build_model`'s returned
 driver template does NOT include (`apps/street_aq/routing.py:414-416`,
 `tests/verification/test_street_parity.py:53-59`); the fixtures below supply them. The
 building is built at the .prj's own ambient (`Ws=5.23`, `Wd=270`, west wind) and then
@@ -22,7 +22,8 @@ import pytest
 import torch
 
 from noodl.apps.building_physics.prj import project_to_model, read_prj
-from noodl.apps.street_aq.network import Street, StreetNetwork, build_street_model, street_index
+from noodl.apps.street_aq import network as street_network
+from noodl.apps.street_aq.network import Street, StreetNetwork, street_index
 from noodl.couple import (
     CONCENTRATION_TO_MASS_FRACTION,
     STREET_RAD_TO_CONTAM_DEG,
@@ -58,7 +59,7 @@ def _street(net: StreetNetwork, *, u_ref=U_REF, theta_w=THETA_W, h_abl=H_ABL,
             background=BACKGROUND, emission=EMISSION):
     """`(model, state, drivers)` with EVERY driver `StreetFlows` needs. `z_ref=10.0`: the
     street's reference wind is the 10 m wind the building's `V_met` also names (spec A3)."""
-    model, state, drivers = build_street_model(net, species=("nox",), z_ref=10.0)
+    model, state, drivers = street_network.build_model(net, species=("nox",), z_ref=10.0)
     graph = model.net
     sources = torch.zeros(graph.n, dtype=F64)
     for street in net.streets:
@@ -201,7 +202,7 @@ def test_real_leiden_small_building_back_coupling_magnitude(record_property):
         AQDT_DATA / "stage1_geometry" / DOMAIN, AQDT_DATA / "stage2_inputs" / DOMAIN,
         year=YEAR, wind_height_m=30.0, trust_file_height=True, times=[STEP],
     )
-    model, state, drivers = build_street_model(data.net, species=("nox",), z_ref=30.0)
+    model, state, drivers = street_network.build_model(data.net, species=("nox",), z_ref=30.0)
     graph = model.net
     sources = torch.zeros(graph.n, dtype=F64)
     for column, street in enumerate(data.net.streets):

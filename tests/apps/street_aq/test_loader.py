@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from noodl.apps.street_aq.loader import RHO_AIR, read_aqdt
-from noodl.apps.street_aq.network import build_street_model
+from noodl.apps.street_aq.network import build_model
 from tests.data.street.aqdt_fixture import (
     BACKGROUND_CONCENTRATION,
     EMISSION_NORMALIZED,
@@ -158,7 +158,7 @@ def test_the_wind_angle_is_the_direction_the_wind_blows_towards(tmp_path):
     `wind_angle_rad = 0`, so the due-east street 0 must carry a POSITIVE canyon velocity
     (its `u` end upwind) and the due-north street 1 must carry essentially none."""
     data = _read(tmp_path)
-    model, state, _ = build_street_model(data.net, pblh_floor=True, z_ref=30.0)
+    model, state, _ = build_model(data.net, pblh_floor=True, z_ref=30.0)
     resolved = model._apply_closures(state, {
         "U_ref": data.forcing.u_ref[0],
         "theta_w": data.forcing.theta_w[0],
@@ -172,7 +172,7 @@ def test_the_wind_angle_is_the_direction_the_wind_blows_towards(tmp_path):
 
 def test_the_loaded_network_builds_a_model_that_solves_and_conserves(tmp_path):
     data = _read(tmp_path)
-    model, _state, _ = build_street_model(data.net, routing="sirane", pblh_floor=True,
+    model, _state, _ = build_model(data.net, routing="sirane", pblh_floor=True,
                                           z_ref=30.0)
     net = model.net
     n_time = data.emission.shape[0]

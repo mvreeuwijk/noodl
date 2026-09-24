@@ -218,7 +218,7 @@ def test_routing_matrix_names_an_unknown_model():
 
 def _flows_fixture() -> tuple[Network, StreetGeometry]:
     """Two streets end to end (`s1`: a->b, `s2`: b->c): one real junction of degree two
-    (`b`) and two dead ends (`a`, `c`). Built by hand, replicating `build_street_model`'s
+    (`b`) and two dead ends (`a`, `c`). Built by hand, replicating `build_model`'s
     own edge-construction pattern (plan Task 5) -- `route`/`vent`/`exchange` edges carrying
     exactly the attributes `StreetFlows._read_edges` reads -- since `network.py` (Task 5)
     does not exist yet. Used only to construct `StreetFlows`, never called: this is the
@@ -282,7 +282,7 @@ def test_street_flows_resolves_kappa_by_formulation():
 
 
 def _street_layer(net, kinds) -> TransportLayer:
-    """The transport layer `build_street_model` builds, with `flow_kinds` as given."""
+    """The transport layer `build_model` builds, with `flow_kinds` as given."""
     return TransportLayer(
         net, "street", capacity=torch.tensor([40000.0, 40000.0], dtype=DT),
         flow_kind=kinds, boundary=["atmosphere"], scheme="implicit",

@@ -296,9 +296,9 @@ def test_a_pda_file_reads_the_demand_model_and_the_three_pressures(tmp_path):
     assert net.options.minimum_pressure == 0.0
     assert net.options.required_pressure == 60.0
     assert net.options.pressure_exponent == 0.5
-    from noodl.apps.water.network import build_water_model
+    from noodl.apps.water.network import build_model
 
-    model, _, _ = build_water_model(net)
+    model, _, _ = build_model(net)
     assert len(model.potential["water"]._node_sources) == 1
 
 

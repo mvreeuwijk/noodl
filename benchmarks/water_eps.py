@@ -24,7 +24,7 @@ from pathlib import Path
 import torch
 
 from noodl.apps.water.inp import read_epanet_inp
-from noodl.apps.water.network import build_water_model, tank_inflow, water_steady
+from noodl.apps.water.network import build_model, tank_inflow, water_steady
 
 F64 = torch.float64
 DATA = Path(__file__).resolve().parents[1] / "tests" / "data" / "water"
@@ -40,7 +40,7 @@ def _pattern_factor(net, seconds: float) -> float:
 
 def _run(net, multiplier: float) -> tuple[list[float], int]:
     """One instance's 24 h trajectory and its sub-step count."""
-    model, state, drivers = build_water_model(net)
+    model, state, drivers = build_model(net)
     closure = model.tank_closure
     base = drivers["water.sources"].clone() * multiplier
     levels = [float(state["water.tank_level"][0])]

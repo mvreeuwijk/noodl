@@ -5,7 +5,7 @@ import csv
 import pytest
 import torch
 
-from noodl.apps.sewer.network import build_sewer_model, sewer_steady, tree_steady
+from noodl.apps.sewer.network import build_model, sewer_steady, tree_steady
 from noodl.apps.sewer.report import pipe_table, to_mg_per_litre, to_ppm
 
 F64 = torch.float64
@@ -22,7 +22,7 @@ def test_ppm_matches_the_measured_equilibrium():
 
 
 def test_pipe_table_writes_every_pipe(tmp_path):
-    model, state, drivers = build_sewer_model(tree_steady())
+    model, state, drivers = build_model(tree_steady())
     final = sewer_steady(model, state, drivers)
     path = tmp_path / "pipes.csv"
     rows = pipe_table(model, final, drivers, path=path)

@@ -18,7 +18,7 @@ from noodl.apps.water.network import (
     WaterNetwork,
     WaterOptions,
     WaterPipe,
-    build_water_model,
+    build_model,
     initial_state,
     twoloop,
     water_steady,
@@ -164,7 +164,7 @@ def test_a_control_on_a_non_pump_is_refused():
 
 # ---------------------------------------------------------------------- builder
 def test_the_builder_returns_a_model_a_state_and_drivers():
-    model, state, drivers = build_water_model(twoloop())
+    model, state, drivers = build_model(twoloop())
     assert set(model.potential) == {"water"}
     assert model.transport == {}
     assert model.node_names == ["J1", "J2", "J3", "J4", "J5", "J6", "R1"]
@@ -177,7 +177,7 @@ def test_the_builder_returns_a_model_a_state_and_drivers():
 
 
 def test_the_demand_enters_as_a_negative_nodal_source():
-    model, _, drivers = build_water_model(twoloop())
+    model, _, drivers = build_model(twoloop())
     assert drivers["water.sources"].tolist() == pytest.approx(
         [-0.005, -0.008, -0.006, -0.010, -0.007, -0.009, 0.0], rel=1e-15
     )
@@ -185,7 +185,7 @@ def test_the_demand_enters_as_a_negative_nodal_source():
 
 def test_the_two_loop_solves_to_the_measured_heads():
     """The same numbers spec row D1 asserts against EPANET, pinned here without wntr."""
-    model, state, drivers = build_water_model(twoloop())
+    model, state, drivers = build_model(twoloop())
     final = water_steady(model, state, drivers)
     assert final["water.phi"].tolist() == pytest.approx(
         [49.267724991, 48.877301673, 48.430865920, 48.213849910, 48.117097853,
@@ -195,7 +195,7 @@ def test_the_two_loop_solves_to_the_measured_heads():
 
 
 def test_the_solved_residual_is_at_the_newton_tolerance():
-    model, state, drivers = build_water_model(twoloop())
+    model, state, drivers = build_model(twoloop())
     final = water_steady(model, state, drivers)
     layer = model.potential["water"]
     residual = layer.residual(
@@ -206,7 +206,7 @@ def test_the_solved_residual_is_at_the_newton_tolerance():
 
 
 def test_darcy_weisbach_switches_the_layer_to_pressure():
-    model, state, drivers = build_water_model(twoloop(), headloss="D-W")
+    model, state, drivers = build_model(twoloop(), headloss="D-W")
     assert model.potential["water"].quantity == "pressure"
     assert model.head_scale == pytest.approx(998.2 * 9.80665, rel=1e-15)
     assert float(drivers["water.phi_boundary"][0]) == pytest.approx(
@@ -216,7 +216,7 @@ def test_darcy_weisbach_switches_the_layer_to_pressure():
 
 
 def test_pda_replaces_the_nodal_sources_with_a_node_source():
-    model, _, drivers = build_water_model(
+    model, _, drivers = build_model(
         twoloop(), pda=True, p_min=0.0, p_req=60.0
     )
     assert float(drivers["water.sources"].abs().max()) == 0.0
@@ -227,7 +227,7 @@ def test_pda_replaces_the_nodal_sources_with_a_node_source():
 
 
 def test_a_quality_layer_carries_the_demand_as_a_removal_rate():
-    model, _, _ = build_water_model(twoloop(), quality=0.5)
+    model, _, _ = build_model(twoloop(), quality=0.5)
     layer = model.transport["quality"]
     demand = torch.tensor([j.demand for j in twoloop().junctions], dtype=F64)
     expected = demand / layer.capacity + 0.5 / 86400.0
@@ -239,7 +239,7 @@ def test_a_quality_layer_carries_the_demand_as_a_removal_rate():
 
 
 def test_a_junction_capacity_is_half_of_every_incident_pipe():
-    model, _, _ = build_water_model(twoloop(), quality=0.0)
+    model, _, _ = build_model(twoloop(), quality=0.0)
     net = twoloop()
     volume = {p.name: torch.pi * p.diameter**2 / 4.0 * p.length for p in net.pipes}
     expected = 0.5 * (volume["P1"] + volume["P2"] + volume["P4"])
@@ -257,17 +257,17 @@ def test_a_junction_touching_no_pipe_is_refused_for_quality():
         valves=(Valve("V1", "J1", "J2", 0.2, "TCV", 5.0),),
     )
     with pytest.raises(ValueError, match="touch no pipe"):
-        build_water_model(net, quality=0.0)
+        build_model(net, quality=0.0)
 
 
 def test_an_unmodelled_headloss_argument_is_refused():
     with pytest.raises(ValueError, match="must be 'H-W' or 'D-W'"):
-        build_water_model(twoloop(), headloss="C-M")
+        build_model(twoloop(), headloss="C-M")
 
 
 # --------------------------------------------------------------------- [OPTIONS] (N5)
 def test_pda_defaults_from_the_networks_own_options():
-    """`build_water_model(net)` with NO `pda=`/`p_min=`/... reads them from `net.options`,
+    """`build_model(net)` with NO `pda=`/`p_min=`/... reads them from `net.options`,
     exactly as a `DEMAND MODEL PDA` `.inp` would set them (row D5)."""
     net = dataclasses.replace(
         twoloop(),
@@ -276,7 +276,7 @@ def test_pda_defaults_from_the_networks_own_options():
             pressure_exponent=0.5,
         ),
     )
-    model, _, drivers = build_water_model(net)
+    model, _, drivers = build_model(net)
     assert float(drivers["water.sources"].abs().max()) == 0.0
     sources = model.potential["water"]._node_sources
     assert len(sources) == 1
@@ -288,20 +288,20 @@ def test_pda_defaults_from_the_networks_own_options():
 def test_a_non_default_viscosity_on_hazen_williams_is_refused():
     net = dataclasses.replace(twoloop(), options=WaterOptions(viscosity=1.5))
     with pytest.raises(ValueError, match="VISCOSITY"):
-        build_water_model(net)
+        build_model(net)
 
 
 def test_a_non_default_specific_gravity_on_hazen_williams_is_refused():
     net = dataclasses.replace(twoloop(), options=WaterOptions(specific_gravity=1.1))
     with pytest.raises(ValueError, match="SPECIFIC GRAVITY"):
-        build_water_model(net)
+        build_model(net)
 
 
 def test_a_non_default_viscosity_and_gravity_reach_the_darcy_weisbach_duct():
     net = dataclasses.replace(
         twoloop(), options=WaterOptions(specific_gravity=1.1, viscosity=1.5)
     )
-    model, _, _ = build_water_model(net, headloss="D-W")
+    model, _, _ = build_model(net, headloss="D-W")
     duct = model.potential["water"]._elements[0]
     assert duct.rho == pytest.approx(998.2 * 1.1, rel=1e-15)
     assert duct.mu == pytest.approx(1.002e-3 * 1.5, rel=1e-15)
@@ -309,14 +309,14 @@ def test_a_non_default_viscosity_and_gravity_reach_the_darcy_weisbach_duct():
 
 
 def test_initial_state_refuses_an_unknown_quantity():
-    model, _, _ = build_water_model(twoloop())
+    model, _, _ = build_model(twoloop())
     model.potential["water"].quantity = "nonsense"
     with pytest.raises(ValueError, match="nonsense"):
         initial_state(model)
 
 
 def test_initial_state_matches_the_builders_own_state():
-    model, state, _ = build_water_model(twoloop())
+    model, state, _ = build_model(twoloop())
     fresh = initial_state(model)
     assert set(fresh) == set(state)
     for key in fresh:
@@ -325,7 +325,7 @@ def test_initial_state_matches_the_builders_own_state():
 
 # ------------------------------------------------------------------- report
 def test_pressure_head_and_kilopascal():
-    model, state, drivers = build_water_model(twoloop())
+    model, state, drivers = build_model(twoloop())
     final = water_steady(model, state, drivers)
     head = pressure_head(model, final)
     # every junction sits at elevation 0, so the pressure head IS the solved head
@@ -336,7 +336,7 @@ def test_pressure_head_and_kilopascal():
 
 
 def test_link_table_writes_every_link(tmp_path):
-    model, state, drivers = build_water_model(twoloop())
+    model, state, drivers = build_model(twoloop())
     final = water_steady(model, state, drivers)
     path = tmp_path / "links.csv"
     rows = link_table(model, final, path=path)
@@ -354,7 +354,7 @@ def test_link_table_writes_every_link(tmp_path):
 def test_tank_inflow_is_the_net_inflow_at_the_tank():
     """A tank-free network has no tank rows, so this is exercised on Net1 in D3; here the
     identity itself is checked on the reservoir, which is the same accumulation."""
-    model, state, drivers = build_water_model(twoloop())
+    model, state, drivers = build_model(twoloop())
     final = water_steady(model, state, drivers)
     layer = model.potential["water"]
     inflow = -layer._accumulate(final["water.q"])[..., layer.bound]
@@ -380,7 +380,7 @@ def test_water_steady_refuses_a_converged_pump_flow_beyond_q_max():
         pumps=(Pump("PU1", "R1", "J1", "C1"),),
         curves={"C1": ((1.0, 30.0),)},
     )
-    model, state, drivers = build_water_model(net)
+    model, state, drivers = build_model(net)
     with pytest.raises(RuntimeError, match=r"pump 'PU1'.*instance 0") as excinfo:
         water_steady(model, state, drivers)
     assert "q_max" in str(excinfo.value)
@@ -391,6 +391,6 @@ def test_net1_pump_stays_below_q_max_and_is_not_refused():
     (spec row D2), so `water_steady` must NOT raise on it."""
     data = Path(__file__).resolve().parents[2] / "data" / "water"
     net = read_epanet_inp(data / "Net1.inp")
-    model, state, drivers = build_water_model(net)
+    model, state, drivers = build_model(net)
     final = water_steady(model, state, drivers)
     assert torch.isfinite(final["water.phi"]).all()

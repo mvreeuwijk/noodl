@@ -33,7 +33,7 @@ _READ = {"OPTIONS", "JUNCTIONS", "OUTFALLS", "CONDUITS", "XSECTIONS", "INFLOWS",
          "POLLUTANTS"}
 
 
-def read_inp(path) -> tuple[SewerNetwork, dict[str, dict[str, float]], dict[str, dict]]:
+def read_swmm_inp(path) -> tuple[SewerNetwork, dict[str, dict[str, float]], dict[str, dict]]:
     """`(network, {node: {pollutant: kg/m3}}, {pollutant: {...}})` for `path`."""
     path = Path(path)
     sections = read_sections(path)
