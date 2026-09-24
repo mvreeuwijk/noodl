@@ -1247,6 +1247,7 @@ def test_iterate_gradient_is_per_instance_on_a_batched_model():
     x = model.step(state, drv, 600.0, diagnostics=diag, **tight)["species.x"]
     assert x.shape == (2, 2)
     assert diag["adjoint"] == "implicit"
+    assert diag["adjoint_batched"] is True
     assert diag["converged"].shape == (2,) and bool(diag["converged"].all())
     grads = []
     for i in range(2):

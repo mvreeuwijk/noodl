@@ -385,3 +385,178 @@ def test_restart_is_passed_through_to_the_adjoint_gmres():
 
     with pytest.raises(RuntimeError, match=r"restart test.*adjoint.*did not converge"):
         run(restart=1, max_iter=4)
+
+
+# --------------------------------------------------------------------- batch_shape (Task 9)
+
+def _batched_scalar_contraction():
+    """Four INDEPENDENT scalar contractions z_i = rho_i z_i + theta_i, distinct rho and
+    theta per instance: z_i* = theta_i / (1 - rho_i), dz_i*/dtheta_i = 1/(1 - rho_i). The
+    interface Jacobian this induces is DIAGONAL with four distinct entries -- exactly the
+    case that discriminates the batched solve (one 1x1 system per instance, exact in a
+    single GMRES step) from the flattened one (one 4x4 diagonal system, whose Krylov basis
+    generically needs a step per distinct eigenvalue to represent a generic right-hand side
+    exactly).
+    """
+    rho = torch.tensor([0.1, 0.3, 0.6, 0.85], dtype=F64)
+    theta = torch.tensor([0.2, -0.3, 0.5, 0.05], dtype=F64, requires_grad=True)
+    with torch.no_grad():
+        z_star = [theta.detach() / (1.0 - rho)]
+
+    def pass_fn(z):
+        y = rho * z[0] + theta
+        return [y], [y]
+
+    want_grad = 1.0 / (1.0 - rho)          # d y_i / d theta_i, elementwise
+    return rho, theta, z_star, pass_fn, want_grad
+
+
+def test_the_batched_adjoint_matches_the_flattened_one_and_the_closed_form():
+    """`batch_shape=(4,)` and `batch_shape=None` on the identical problem must agree with
+    each other and with the closed form, to solver accuracy -- the batched split changes
+    HOW GMRES searches, not the linear system being solved."""
+    _, theta, z_star, pass_fn, want_grad = _batched_scalar_contraction()
+    w = torch.tensor([0.5, -1.0, 2.0, 0.25], dtype=F64)
+
+    report: dict = {}
+    (y_batched,) = differentiate_fixed_point(
+        z_star, pass_fn, where="batched test", batch_shape=(4,), report=report,
+    )
+    assert report["batched"] is True
+    (g_batched,) = torch.autograd.grad((w * y_batched).sum(), (theta,))
+
+    theta2 = theta.detach().clone().requires_grad_(True)
+    rho2, _, z_star2, _, _ = _batched_scalar_contraction()
+
+    def pass_fn_flat(z):
+        y = rho2 * z[0] + theta2
+        return [y], [y]
+
+    report_flat: dict = {}
+    (y_flat,) = differentiate_fixed_point(
+        z_star2, pass_fn_flat, where="flat test", batch_shape=None, report=report_flat,
+    )
+    assert report_flat["batched"] is False
+    (g_flat,) = torch.autograd.grad((w * y_flat).sum(), (theta2,))
+
+    want = w * want_grad
+    torch.testing.assert_close(g_batched, want, rtol=1e-10, atol=1e-12)
+    torch.testing.assert_close(g_flat, want, rtol=1e-10, atol=1e-12)
+
+
+def test_the_batched_adjoint_solves_one_small_system_per_instance_not_one_big_one():
+    """The discriminating measurement: `gmres`'s own per-instance `iterations`, captured by
+    wrapping `noodl.solvers.fixed_point.gmres` (the name `_AdjointOperator`'s caller looks up
+    at call time, so patching the module attribute reaches it). `m_inst = 1` here, so the
+    batched solve should need at most `m_inst + 1 = 2` GMRES iterations per instance; the
+    flattened 4x4 diagonal system, with four distinct eigenvalues and a generic right-hand
+    side, needs strictly more.
+    """
+    import noodl.solvers.fixed_point as fp
+
+    rho, theta, z_star, pass_fn, _ = _batched_scalar_contraction()
+    w = torch.tensor([0.5, -1.0, 2.0, 0.25], dtype=F64)
+    m_inst = 1
+
+    captured: list = []
+    real_gmres = fp.gmres
+
+    def capturing_gmres(*args, **kwargs):
+        result = real_gmres(*args, **kwargs)
+        captured.append(result)
+        return result
+
+    try:
+        fp.gmres = capturing_gmres
+        (y_batched,) = differentiate_fixed_point(
+            z_star, pass_fn, where="batched iters test", batch_shape=(4,),
+        )
+        torch.autograd.grad((w * y_batched).sum(), (theta,))
+        assert len(captured) == 1
+        batched_iters = int(captured[-1].iterations.max())
+
+        captured.clear()
+        theta2 = theta.detach().clone().requires_grad_(True)
+
+        def pass_fn_flat(z):
+            y = rho * z[0] + theta2
+            return [y], [y]
+
+        (y_flat,) = differentiate_fixed_point(
+            z_star, pass_fn_flat, where="flat iters test", batch_shape=None,
+        )
+        torch.autograd.grad((w * y_flat).sum(), (theta2,))
+        assert len(captured) == 1
+        flat_iters = int(captured[-1].iterations.max())
+    finally:
+        fp.gmres = real_gmres
+
+    assert batched_iters <= m_inst + 1
+    assert flat_iters > batched_iters
+
+
+def test_a_mixed_interface_without_matching_leading_dims_falls_back_to_the_flattened_solve():
+    """A value SHARED across instances -- no leading batch dims at all -- genuinely couples
+    them, so the block-diagonal structure the batched solve relies on does not hold for it.
+    `differentiate_fixed_point` must detect this BY SHAPE and fall back to solving the whole
+    mixed interface as one flattened system, `report["batched"]` False, with both entries'
+    gradients still correct.
+    """
+    rho, theta, z_star, _, want_grad = _batched_scalar_contraction()
+    phi = torch.tensor(0.6, dtype=F64, requires_grad=True)
+    with torch.no_grad():
+        phi_star = phi.detach() / (1.0 - 0.25)
+
+    def pass_fn(z):
+        y = rho * z[0] + theta                 # shape (4,): carries the batch leading dim
+        s = 0.25 * z[1] + phi                   # shape (): shared across instances
+        return [y, s], [y, s]
+
+    report: dict = {}
+    y, s = differentiate_fixed_point(
+        [*z_star, phi_star], pass_fn, where="mixed test", batch_shape=(4,), report=report,
+    )
+    assert report["batched"] is False
+
+    w = torch.tensor([0.5, -1.0, 2.0, 0.25], dtype=F64)
+    (g_theta,) = torch.autograd.grad((w * y).sum(), (theta,), retain_graph=True)
+    (g_phi,) = torch.autograd.grad(s, (phi,))
+    torch.testing.assert_close(g_theta, w * want_grad, rtol=1e-10, atol=1e-12)
+    assert g_phi.item() == pytest.approx(1.0 / (1.0 - 0.25), rel=1e-10)
+
+
+def test_a_per_instance_non_convergence_of_the_batched_adjoint_names_the_instance():
+    """Two instances: instance 0's interface Jacobian is exactly zero (`J = 0`, so
+    `I - G_z = I`, solved exactly in one GMRES step regardless of `max_iter`), instance 1's
+    is the coupled 3x3 map from `test_non_convergence_of_the_adjoint_is_refused_by_name`,
+    already known to need more than one iteration at `rtol=1e-15`. `max_iter=1` therefore
+    converges instance 0 and strands instance 1, and the error must name instance 1, not
+    "all".
+    """
+    J_hard = torch.tensor(
+        [[0.3, 0.2, 0.0], [0.1, 0.4, 0.1], [0.0, 0.2, 0.5]], dtype=F64
+    )
+    J = torch.stack([torch.zeros(3, 3, dtype=F64), J_hard])          # (2, 3, 3)
+    theta = torch.tensor(
+        [[0.3, -0.2, 0.1], [0.3, -0.2, 0.1]], dtype=F64, requires_grad=True
+    )
+    with torch.no_grad():
+        eye = torch.eye(3, dtype=F64)
+        z_star = [torch.stack([
+            theta.detach()[0],
+            torch.linalg.solve(eye - J_hard, theta.detach()[1]),
+        ])]
+
+    def pass_fn(z):
+        y = torch.einsum("bij,bj->bi", J, z[0]) + theta
+        return [y], [y]
+
+    (y,) = differentiate_fixed_point(
+        z_star, pass_fn, max_iter=1, rtol=1e-15,
+        where="batched non-convergence test", batch_shape=(2,),
+    )
+    with pytest.raises(
+        RuntimeError,
+        match=r"batched non-convergence test.*adjoint.*did not converge for instances \[1\]",
+    ):
+        torch.autograd.grad(y.sum(), (theta,))

@@ -157,7 +157,11 @@ class Model:
     interface is linear. Backward memory is one pass rather than all of them (P1-2).
     `diagnostics["adjoint"]` says whether that pass ran: `"implicit"` when it did, `None`
     when nothing differentiable reached the state (or the iteration did not converge) and no
-    extra pass was needed.
+    extra pass was needed. `diagnostics["adjoint_batched"]` says whether that solve ran as one
+    independent GMRES system per batch instance (every state key the pass recomputes carrying
+    the batch as its leading dims) or, when some key does not (a value shared across
+    instances), as today's single system flattened over the whole interface; `False` when
+    `"adjoint"` is `None` too.
     """
 
     def __init__(
@@ -985,6 +989,7 @@ class Model:
         written_here = set(produced)
         carried = {k: v for k, v in state.items() if k not in written_here}
         adjoint: str | None = None
+        adjoint_batched = False
         if needs_adjoint and bool(converged.all()):
             # `k in certified_fed` only guards the impossible: every produced key is in the
             # previous pass's output and so in the fed state of any pass after the first,
@@ -1035,20 +1040,28 @@ class Model:
                     )
                 return [out[k] for k in out_keys], z_next
 
+            # `converged`'s shape IS the batch shape (it is judged per instance over every
+            # `iterate_tol` layer, never reduced further), so it names the leading dims a
+            # genuinely batched state key carries; a key some instances share unbatched
+            # fails that check and `differentiate_fixed_point` falls back to the flattened
+            # solve on its own.
+            adjoint_report: dict = {}
             flat = differentiate_fixed_point(
                 [certified_fed[k] for k in keys], pass_fn, rtol=self.adjoint_rtol,
                 where="Model coupling='iterate'",
+                batch_shape=tuple(converged.shape), report=adjoint_report,
             )
             new = dict(zip(out_keys, flat, strict=True))
             # The differentiated pass's own diagnostics, DETACHED: see `_detached`.
             diag = _detached(adjoint_diag)
             adjoint = "implicit"
+            adjoint_batched = bool(adjoint_report["batched"])
         else:
             new = {**new, **carried}
         if diagnostics is not None:
             diagnostics.update(
                 {"passes": passes, "converged": converged, "max_change": change,
-                 "layers": diag, "adjoint": adjoint}
+                 "layers": diag, "adjoint": adjoint, "adjoint_batched": adjoint_batched}
             )
         return new
 
