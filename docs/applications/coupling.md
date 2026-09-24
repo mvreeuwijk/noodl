@@ -234,10 +234,10 @@ the adjoint.
 ### Differentiating the fixed point
 
 The passes of the iteration carry **no autograd graph**. Once the interface has converged, the
-certified pass is run **once more** on the graph at the same interface values — so the state it
-returns is the certified one — and `solvers.fixed_point.differentiate_fixed_point` attaches the
-implicit adjoint of the interface equations to it. Writing $y = S(z^*, \theta)$ for that pass's
-whole output and $G$ for the map that reads the next iterate out of it, the returned gradient is
+certified pass is run **once more** on the graph at the same interface values — reproducing it to
+solver accuracy — and `solvers.fixed_point.differentiate_fixed_point` attaches the implicit
+adjoint of the interface equations to it. Writing $y = S(z^*, \theta)$ for that pass's whole
+output and $G$ for the map that reads the next iterate out of it, the returned gradient is
 
 $$
 \frac{\partial y}{\partial \theta} = S_\theta + S_z (I - G_z)^{-1} G_\theta,
@@ -246,8 +246,12 @@ $$
 obtained from one small GMRES solve (`adjoint_rtol`) whose matvec is a VJP through that single
 pass. Three consequences:
 
-- the gradient is the **fixed point's**, not the truncated iteration's — it does not depend on
-  how many passes the primal took, nor on `iterate_rtol`;
+- the gradient is the **converged interface's**, not the truncated iteration's. Its error is of
+  the order of the primal residual, rather than the unrolled $O(\rho^{\text{passes}})$ counted
+  from the *start* state — an error tied to nothing the caller controls, and worst exactly where
+  the primal is cheapest. Where the interface equations are **linear** in the interface the
+  adjoint is exact whatever the residual, which is why the P1-2 fixtures return $1/3$ and $2/3$
+  to one ulp at `iterate_rtol` $10^{-12}$ and $10^{-3}$ alike;
 - backward **memory is one pass**, not all of them;
 - a forward-only run pays nothing: pass 1 runs on the graph only to learn whether anything
   differentiable reaches the state at all (a structural question that inspecting the states and
@@ -257,6 +261,12 @@ pass. Three consequences:
 The **interface** is every link's forward value, one-way links included, because that is what a
 pass reads from the previous pass's output. Only the two-way entries are measured for
 convergence — only they close a loop that can fail to converge.
+
+"Reproducing it to solver accuracy" is deliberate wording: the extra pass is the same function of
+the same arguments, but `solvers/select.py` drops the SuperLU fast path for an input that requires
+grad, so it can take a different linear-solver route than the primal passes did. It came out
+bitwise identical on every fixture measured, and **conservation does not depend on it either
+way** — that is a property of the pass itself, not of which solver ran inside it.
 
 ## The canonical pairing: street ↔ building
 

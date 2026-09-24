@@ -260,10 +260,12 @@ class CoupledModel:
     primal passes carry no graph, and after convergence the certified pass runs once more on
     the graph with `solvers.fixed_point.differentiate_fixed_point` attaching the adjoint of
     the interface equations (`adjoint_rtol`, the GMRES tolerance of that one small solve).
-    The returned gradient is therefore the fixed point's own, independent of how many passes
-    the primal took and of `iterate_rtol`, and backward memory is one pass rather than all of
-    them (P1-2). `diagnostics["adjoint"]` says whether that pass ran: `"implicit"` when it
-    did, `None` when nothing differentiable reached the state and no extra pass was needed.
+    The returned gradient is therefore the CONVERGED INTERFACE's, with an error of the order
+    of the primal residual (exact where the interface equations are linear in the interface)
+    rather than the unrolled truncation error O(rho^passes) counted from the start state, and
+    backward memory is one pass rather than all of them (P1-2). `diagnostics["adjoint"]` says
+    whether that pass ran: `"implicit"` when it did, `None` when nothing differentiable
+    reached the state and no extra pass was needed.
     """
 
     def __init__(
@@ -637,8 +639,14 @@ class CoupledModel:
         Differentiation: the primal passes carry no graph. After convergence the certified
         pass runs once more on the graph at the SAME interface values and
         `solvers.fixed_point.differentiate_fixed_point` attaches the implicit adjoint of the
-        interface equations, so the returned gradient is the fixed point's, independent of
-        the pass count and of `iterate_rtol` (P1-2); memory is one pass. Pass 1 runs on the
+        interface equations (P1-2); memory is one pass. What that buys, stated no higher than
+        it is: the gradient is the CONVERGED INTERFACE's, so its error is of the order of the
+        primal residual at `values` -- not the unrolled truncation error O(rho^passes)
+        counted from the START state, which is tied to nothing the caller controls and is
+        worst exactly where the primal is cheapest. Where the interface equations are LINEAR
+        in the interface the adjoint is exact whatever the residual, which is why the P1-2
+        fixtures return 1/3 and 2/3 to one ulp both at `iterate_rtol=1e-12` and at 1e-3.
+        Pass 1 runs on the
         graph only to learn whether anything differentiable reaches the state -- a structural
         question no inspection of `start` and `drivers` can answer, since a differentiable
         parameter may be captured inside a model's own closure and never appear in either --
@@ -681,15 +689,26 @@ class CoupledModel:
                 if prev is not None:
                     for i in two_way_pos:
                         values[i] = prev[i] + self.relaxation * (raw[i] - prev[i])
-                new, pass_transfers, pass_drivers = self._one_pass(start, drivers, dt, values)
+                new, transfers, pass_drivers = self._one_pass(start, drivers, dt, values)
+                last_transfers = {k: v.detach() for k, v in transfers.items()}
                 if passes == 1:
                     needs_adjoint = any(
                         t.requires_grad for s in new.values() for t in s.values()
                     )
+                    # Drop pass 1's graph here, and drop ALL of it: `values`, `new`, the pass
+                    # drivers (whose boundary writes and donor source terms were built from
+                    # the grad-carrying values and transfers) and the transfers themselves
+                    # each anchor it, and each stays bound until the next pass overwrites it
+                    # -- or until this method returns, if the loop breaks on this pass.
+                    # Nothing downstream wants it: the convergence check below runs under
+                    # `no_grad` and reads the pass drivers only for the conversions, and the
+                    # derivative comes from the one pass after the loop.
                     values = [v.detach() for v in values]
                     new = {tag: {k: t.detach() for k, t in s.items()}
                            for tag, s in new.items()}
-                last_transfers = {k: v.detach() for k, v in pass_transfers.items()}
+                    pass_drivers = {tag: {k: t.detach() for k, t in d.items()}
+                                    for tag, d in pass_drivers.items()}
+                    del transfers
             with torch.no_grad():
                 ok: Tensor | None = None
                 for i in two_way_pos:
@@ -716,8 +735,18 @@ class CoupledModel:
             )
         # `values` are the relaxed forward values the CERTIFIED pass -- the one whose output
         # was just judged converged -- was stepped with, so running `_one_pass` on them once
-        # more reproduces that same pass and the state it returns IS the certified one.
-        tags = list(self.models)
+        # more reproduces that pass TO SOLVER ACCURACY. Not bitwise by construction:
+        # `solvers/select.py` drops the SuperLU fast path for an input that requires grad, so
+        # this pass can take a different linear-solver route than primal passes 2..n did
+        # (measured bitwise identical on every fixture in the suite, but that is a
+        # measurement, not a guarantee). Conservation does not rest on it either way, being a
+        # property of `_one_pass` itself rather than of which solver ran inside it.
+        # `list(new)`, NOT `list(self.models)`: `_one_pass` builds its dict
+        # recipients-first, and the no-adjoint branch below returns `new` itself, so taking
+        # declaration order here would make the returned mapping's key order flip the moment
+        # autograd is switched on. Reading the order off `new` also makes `keys` and the
+        # `out` of every pass agree by construction.
+        tags = list(new)
         keys = {tag: list(new[tag]) for tag in tags}
         if needs_adjoint:
             final_transfers: dict[str, Tensor] = {}
@@ -758,6 +787,7 @@ class CoupledModel:
                  "transfers": reported, "adjoint": adjoint}
             )
         return result
+
 
 def union(
     models: Mapping[str, tuple[Model, State, Drivers]],
