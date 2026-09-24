@@ -102,6 +102,78 @@ def test_refused_classes_are_named_together() -> None:
     assert "feedback controllers are not supported" in message
 
 
+def _head(path, rho: float, g: float) -> float:
+    """`(phi_src - phi_tgt) + sum(sign * h * rho * g)`'s column term (module docstring)."""
+    return sum(sign * col.parameters["h"] * rho * g for col, sign in path.columns)
+
+
+def test_stack_chain_head_matches_hand_derived_hydrostatic_balance() -> None:
+    """Physics check (fix round 1, review item 1), not mere self-consistency.
+
+    `MediumColumn.mo`'s own relation is `port_a.p - port_b.p = -h*rho*g_n` (the bottom port,
+    `port_b`, sits at the HIGHER pressure). Chasing that through the west stack's wiring by
+    hand (also written out in `graph.py`'s module docstring) gives, at zero flow through the
+    orifice (`dp_element = 0`),
+
+        p(volWes) - p(volTop) = 2 * h * rho * g
+
+    with `h = 1.5` for both `colWesTop` and `colWesBot`. This test computes the SAME quantity
+    from the graph's signs (`FlowPath.columns`) and checks it against that independently
+    hand-derived number, not merely that the code agrees with itself.
+    """
+    g = _graph("stack_chain.json")
+    path = g.paths[0]
+    assert path.src == "volTop"
+    assert path.tgt == "volWes"
+
+    rho, g_n = 1.2, 9.81
+    head = _head(path, rho, g_n)
+    # dp_element = (phi_src - phi_tgt) + head = 0  =>  phi_tgt - phi_src = head.
+    implied_p_volWes_minus_p_volTop = head
+    assert implied_p_volWes_minus_p_volTop == pytest.approx(2 * 1.5 * rho * g_n)
+
+
+def test_reverse_column_gets_sign_minus_one_and_matches_hand_derivation() -> None:
+    """A column wired the OTHER way along its path (its own `port_a` facing the `tgt` end,
+    `port_b` facing the flow element) gets sign -1.
+
+    Hand derivation (`reverse_column.json`: `volA -- oriX -- colRev -- volB`, `colRev.port_a`
+    wired to `volB`, `colRev.port_b` wired to `oriX.port_b`): `MediumColumn.mo` gives
+    `p(colRev.port_a) - p(colRev.port_b) = -h*rho*g_n`, i.e. `p(volB) - p(oriX.port_b) =
+    -h*rho*g_n`, so `p(oriX.port_b) = p(volB) + h*rho*g_n`; `oriX.port_a` is wired straight to
+    `volA` with no column, so `p(oriX.port_a) = p(volA)`. Hence
+
+        dp_oriX = p(volA) - p(volB) - h*rho*g_n = (phi_src - phi_tgt) + (-1)*h*rho*g_n
+
+    matching the module docstring's formula with sign -1, and at zero flow
+    `p(volA) - p(volB) = h*rho*g_n`.
+    """
+    g = _graph("reverse_column.json")
+    path = g.paths[0]
+    assert path.src == "volA"
+    assert path.tgt == "volB"
+    assert [(c.name, sign) for c, sign in path.columns] == [("colRev", -1)]
+
+    rho, g_n = 1.2, 9.81
+    head = _head(path, rho, g_n)
+    assert head == pytest.approx(-1 * 2.0 * rho * g_n)
+    # dp_element = 0  =>  phi_src - phi_tgt = -head = h*rho*g_n.
+    implied_p_volA_minus_p_volB = -head
+    assert implied_p_volA_minus_p_volB == pytest.approx(2.0 * rho * g_n)
+
+
+def test_refusals_are_gathered_across_every_phase_into_one_error() -> None:
+    """A doc combining an unsupported class (found in the earliest phase) and a bad door
+    wiring (found in a much later phase) must name BOTH in the one raised error -- refusals
+    are gathered across every phase, not just the first one that finds something."""
+    with pytest.raises(ModelicaImportError) as excinfo:
+        _graph("refused_and_bad_door.json")
+    message = str(excinfo.value)
+    assert "bouOut" in message
+    assert "wind pressure is not supported" in message
+    assert "dooOpeClo" in message
+
+
 def test_thermal_pin_and_source_are_resolved() -> None:
     g = _graph("thermal_and_source.json")
 
