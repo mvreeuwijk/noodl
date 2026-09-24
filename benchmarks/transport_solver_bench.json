@@ -1,0 +1,291 @@
+{
+  "machine": {
+    "torch_version": "2.14.0+cpu",
+    "num_threads": 14,
+    "platform": "Windows-11-10.0.26100-SP0",
+    "python_version": "3.12.10",
+    "timestamp": "2026-09-24T12:22:02+0100",
+    "noodl_file": "<repo>\\src\\noodl\\__init__.py"
+  },
+  "quick": false,
+  "composed": [
+    {
+      "ensemble": 1,
+      "solver": "gmres",
+      "direction": "forward",
+      "backend": "gmres",
+      "iterations": 4,
+      "median_s": 0.22966820001602173,
+      "min_s": 0.18212849996052682,
+      "max_s": 0.26992029999382794,
+      "n": 5
+    },
+    {
+      "ensemble": 1,
+      "solver": "gmres",
+      "direction": "backward",
+      "backend": "gmres",
+      "iterations": 4,
+      "median_s": 0.2775697999750264,
+      "min_s": 0.18759139999747276,
+      "max_s": 0.3911116999806836,
+      "n": 5
+    },
+    {
+      "ensemble": 1,
+      "solver": "gmres_jacobi",
+      "direction": "forward",
+      "backend": "gmres",
+      "iterations": 3,
+      "median_s": 0.2722353999852203,
+      "min_s": 0.2103110000025481,
+      "max_s": 0.2899088999838568,
+      "n": 5
+    },
+    {
+      "ensemble": 1,
+      "solver": "gmres_jacobi",
+      "direction": "backward",
+      "backend": "gmres",
+      "iterations": 3,
+      "median_s": 0.3160158999962732,
+      "min_s": 0.15160529996501282,
+      "max_s": 0.40827150002587587,
+      "n": 5
+    },
+    {
+      "ensemble": 1,
+      "solver": "gmres_ilu",
+      "direction": "forward",
+      "backend": "gmres",
+      "iterations": 3,
+      "median_s": 0.2883085999637842,
+      "min_s": 0.22424409998347983,
+      "max_s": 0.4047503999900073,
+      "n": 5
+    },
+    {
+      "ensemble": 1,
+      "solver": "gmres_ilu",
+      "direction": "backward",
+      "backend": "gmres",
+      "iterations": 3,
+      "median_s": 0.28502889996161684,
+      "min_s": 0.2355027999728918,
+      "max_s": 0.43440109997754917,
+      "n": 5
+    },
+    {
+      "ensemble": 1,
+      "solver": "sparse_direct",
+      "direction": "forward",
+      "backend": "sparse_direct",
+      "iterations": 1,
+      "median_s": 0.01234620000468567,
+      "min_s": 0.009481400018557906,
+      "max_s": 0.014835899986792356,
+      "n": 5
+    },
+    {
+      "ensemble": 1,
+      "solver": "sparse_direct",
+      "direction": "backward",
+      "backend": "sparse_direct",
+      "iterations": 1,
+      "median_s": 0.014109899988397956,
+      "min_s": 0.010534600005485117,
+      "max_s": 0.025645499990787357,
+      "n": 5
+    },
+    {
+      "ensemble": 32,
+      "solver": "gmres",
+      "direction": "forward",
+      "backend": "gmres",
+      "iterations": 4,
+      "median_s": 0.5556567999883555,
+      "min_s": 0.3283460999955423,
+      "max_s": 0.6948641000199132,
+      "n": 5
+    },
+    {
+      "ensemble": 32,
+      "solver": "gmres",
+      "direction": "backward",
+      "backend": "gmres",
+      "iterations": 4,
+      "median_s": 0.46021980000659823,
+      "min_s": 0.41458560002502054,
+      "max_s": 0.7166313999914564,
+      "n": 5
+    },
+    {
+      "ensemble": 32,
+      "solver": "gmres_jacobi",
+      "direction": "forward",
+      "backend": "gmres",
+      "iterations": 3,
+      "median_s": 0.3649722999543883,
+      "min_s": 0.3559952999930829,
+      "max_s": 0.6471927999518812,
+      "n": 5
+    },
+    {
+      "ensemble": 32,
+      "solver": "gmres_jacobi",
+      "direction": "backward",
+      "backend": "gmres",
+      "iterations": 3,
+      "median_s": 0.5403708000085317,
+      "min_s": 0.36887360003311187,
+      "max_s": 0.7412226999877021,
+      "n": 5
+    },
+    {
+      "ensemble": 32,
+      "solver": "gmres_ilu",
+      "direction": "forward",
+      "backend": "gmres",
+      "iterations": 3,
+      "median_s": 0.7120685999980196,
+      "min_s": 0.6805373000097461,
+      "max_s": 1.0565823999932036,
+      "n": 5
+    },
+    {
+      "ensemble": 32,
+      "solver": "gmres_ilu",
+      "direction": "backward",
+      "backend": "gmres",
+      "iterations": 3,
+      "median_s": 0.9371581000159495,
+      "min_s": 0.714729500003159,
+      "max_s": 1.072692699963227,
+      "n": 5
+    },
+    {
+      "ensemble": 32,
+      "solver": "sparse_direct",
+      "direction": "forward",
+      "backend": "sparse_direct",
+      "iterations": 1,
+      "median_s": 0.2518028999911621,
+      "min_s": 0.18542969995178282,
+      "max_s": 0.28226100001484156,
+      "n": 5
+    },
+    {
+      "ensemble": 32,
+      "solver": "sparse_direct",
+      "direction": "backward",
+      "backend": "sparse_direct",
+      "iterations": 1,
+      "median_s": 0.25438180001219735,
+      "min_s": 0.20765510003548115,
+      "max_s": 0.33409370004665107,
+      "n": 5
+    },
+    {
+      "ensemble": 100,
+      "solver": "gmres",
+      "direction": "forward",
+      "backend": "gmres",
+      "iterations": 4,
+      "median_s": 0.804555100039579,
+      "min_s": 0.6402995000244118,
+      "max_s": 1.3911913000047207,
+      "n": 5
+    },
+    {
+      "ensemble": 100,
+      "solver": "gmres",
+      "direction": "backward",
+      "backend": "gmres",
+      "iterations": 4,
+      "median_s": 1.0933293000562117,
+      "min_s": 0.7343449000036344,
+      "max_s": 1.227454099978786,
+      "n": 5
+    },
+    {
+      "ensemble": 100,
+      "solver": "gmres_jacobi",
+      "direction": "forward",
+      "backend": "gmres",
+      "iterations": 3,
+      "median_s": 0.8980298999813385,
+      "min_s": 0.7647943000192754,
+      "max_s": 1.0254922999884002,
+      "n": 5
+    },
+    {
+      "ensemble": 100,
+      "solver": "gmres_jacobi",
+      "direction": "backward",
+      "backend": "gmres",
+      "iterations": 3,
+      "median_s": 0.7888542999862693,
+      "min_s": 0.6830676000099629,
+      "max_s": 1.1525869999895804,
+      "n": 5
+    },
+    {
+      "ensemble": 100,
+      "solver": "gmres_ilu",
+      "direction": "forward",
+      "backend": "gmres",
+      "iterations": 3,
+      "median_s": 2.0478726999717765,
+      "min_s": 1.672022900020238,
+      "max_s": 5.537955600011628,
+      "n": 5
+    },
+    {
+      "ensemble": 100,
+      "solver": "gmres_ilu",
+      "direction": "backward",
+      "backend": "gmres",
+      "iterations": 3,
+      "median_s": 1.8390008000424132,
+      "min_s": 1.3554626000113785,
+      "max_s": 2.2346301000216044,
+      "n": 5
+    },
+    {
+      "ensemble": 100,
+      "solver": "sparse_direct",
+      "not_applicable": true,
+      "reason": "sparse_direct excluded at ensemble=100: its batch cap is 32 (SuperLU factorises one instance at a time in a Python loop; not attempted, not an error)"
+    }
+  ],
+  "coupling": [
+    {
+      "solver": "gmres",
+      "median_s": 16.262948999996297,
+      "min_s": 15.72309739998309,
+      "max_s": 31.01858659996651,
+      "n": 3
+    },
+    {
+      "solver": "gmres_jacobi",
+      "median_s": 15.06152230000589,
+      "min_s": 12.585459300025832,
+      "max_s": 28.80573750002077,
+      "n": 3
+    },
+    {
+      "solver": "gmres_ilu",
+      "median_s": 19.108089599991217,
+      "min_s": 17.10197530000005,
+      "max_s": 22.673940099950414,
+      "n": 3
+    },
+    {
+      "solver": "sparse_direct",
+      "median_s": 15.6040084999986,
+      "min_s": 12.580757000017911,
+      "max_s": 17.292048599978443,
+      "n": 3
+    }
+  ]
+}
