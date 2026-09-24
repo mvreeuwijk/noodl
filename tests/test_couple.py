@@ -84,7 +84,7 @@ def test_transport_boundary_inflow_hand_computed():
 def _dense_boundary_inflow(
     net, q, kind, x_interior, x_boundary, interior_idx, boundary_idx, node_position
 ):
-    """The milestone 5 dense form, kept here as the oracle for the sparse helper."""
+    """The milestone 5 dense form, kept here as the reference for the sparse helper."""
     batch_shape = torch.broadcast_shapes(
         x_interior.shape[:-1], x_boundary.shape[:-1], q.shape[:-1]
     )

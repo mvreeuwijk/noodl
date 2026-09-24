@@ -147,7 +147,7 @@ def test_initial_state_refuses_an_unknown_quantity():
         initial_state(model, drivers)
 
 
-def test_read_inp_sulfide_source_uses_each_manholes_own_outgoing_pipe():
+def test_read_swmm_inp_sulfide_source_uses_each_manholes_own_outgoing_pipe():
     """M4-R4/M4-R9 amendment: `tree_steady.inp`'s `[CONDUITS]` order (C1..C5) does not match
     its `[JUNCTIONS]` order (J1, J2, J5, J3, J4), so `read_swmm_inp` gives the non-identity
     `out_pipe = [0, 1, 3, 2, 4]`. The model's sulfide source at each manhole must equal

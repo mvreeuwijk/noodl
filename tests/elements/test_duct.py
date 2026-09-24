@@ -2,7 +2,7 @@
 
 PARAMS' geometry values are constructed as float64 tensors (rather than the plain Python
 floats a reader might expect) because ``Element._param`` casts a non-tensor value with
-``torch.get_default_dtype()``, which is float32 in this repo. The scipy oracle below is
+``torch.get_default_dtype()``, which is float32 in this repo. The scipy reference below is
 evaluated in float64, and several assertions compare against it at ``rel=1e-8``/``1e-9`` --
 tolerances a float32 ``Duct`` could not meet (relative error from float32 alone is about
 1e-7). Passing float64 tensors makes ``Duct``'s own parameters float64 (via

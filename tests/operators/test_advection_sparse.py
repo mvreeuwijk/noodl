@@ -1,7 +1,7 @@
 """Parity tests for `AdvectionOperator.assemble_sparse`, `_AffineSystemOperator.assemble_sparse`
 and `TransposeOperator.assemble_sparse` (Task 4, B1): the sparse COO form must scatter, via
 `index_put_(accumulate=True)`, to exactly the same dense matrix as the operator's own
-`assemble()`, to 1e-14 -- the dense code is the oracle throughout.
+`assemble()`, to 1e-14 -- the dense code is the reference throughout.
 """
 
 from __future__ import annotations

@@ -151,7 +151,7 @@ def test_flow_route_mis_permutes_its_answer_at_a_three_way_junction():
     instead of `argsort(order)`. Every permutation of one or two elements is its own
     inverse, so nothing shows at a dead end or a two-way junction; a three-way junction
     whose sort is a proper 3-cycle has its rows scrambled, and the matrix stops conserving
-    each street's own flux. The port reproduces it -- it is the oracle, not the model.
+    each street's own flux. The port reproduces it -- it is a defect of the port, not the model.
     """
     # Angles chosen so that argsort is the 3-cycle (0 -> 2 -> 1 -> 0).
     fluxes = np.array([5.0, -2.0, -3.0])

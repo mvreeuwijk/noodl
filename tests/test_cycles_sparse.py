@@ -19,7 +19,7 @@ from noodl.topology import Network
 
 def _dense_particular_flow_reference(net, sources, kind=None):
     """The exact pre-Task-13 algorithm: a dense per-component tree solve. Kept here, not in
-    production code, purely as this test file's independent oracle."""
+    production code, purely as this test file's independent reference."""
     A = net.incidence(kind)
     tree_cols, chord_cols = net.spanning_forest(kind)
     labels = net.component_labels(kind)

@@ -6,7 +6,7 @@ arrays SHARED across the batch, `values` is batch-leading `(..., nnz)`. Duplicat
 that), which is what lets `GraphLaplacianOperator` emit four entries per edge with no
 coalescing pass.
 
-The oracle throughout is the operator's own dense `assemble()`: an operator's sparse form
+The reference throughout is the operator's own dense `assemble()`: an operator's sparse form
 must be the same matrix, to 1e-12, instance for instance.
 """
 
@@ -163,7 +163,7 @@ def test_advection_operator_assemble_sparse_matches_its_dense_assembly():
     `method="sparse_direct"` and ILU to consume. See `tests/operators/test_advection_sparse.py`
     for the full parity suite (batches, conduction, kinetics, removal, self-loops, an
     inactive node, a zero-flow edge); this is the one-instance smoke test in this module's
-    own oracle style.
+    own reference style.
     """
     src = torch.tensor([0, 1])
     tgt = torch.tensor([1, 2])

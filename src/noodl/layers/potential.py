@@ -247,7 +247,7 @@ class PotentialFlowLayer:
                 )
             self._source_positions.append(pos)
 
-    # ------------------------------------------------------- dense oracles (lazy)
+    # ------------------------------------------------------- dense references (lazy)
     @functools.cached_property
     def A(self) -> torch.Tensor:
         """This layer's (n, b_layer) incidence matrix, built on FIRST ACCESS only.
@@ -256,7 +256,7 @@ class PotentialFlowLayer:
         the composed model's reference size this matrix is 18.1 MB per layer and grows 4x
         per node doubling, which on its own broke the milestone's memory shape gate
         (measured 3.16x against a 2.5x budget in Task 14). Nothing inside this class reads
-        it except `jacobian()`, the retained dense oracle -- every hot-path site gathers or
+        it except `jacobian()`, the retained dense reference -- every hot-path site gathers or
         scatter-adds with `_src`/`_tgt` instead (`dp`, `residual`, `linear_init`,
         `power_residual`). It stays public, with exactly its old value
         (`net.incidence()[:, self.cols]`, i.e. columns in LAYER edge order, not network
@@ -503,7 +503,7 @@ class PotentialFlowLayer:
         return lhs - s_I if w is None else lhs - s_I + w
 
     def jacobian(self, phi_interior, phi_boundary, drivers):
-        """The dense (n_I, n_I) Jacobian A_I diag(dq) A_I^T -- the retained ORACLE.
+        """The dense (n_I, n_I) Jacobian A_I diag(dq) A_I^T -- the retained dense reference.
 
         This is the one method that reads `self.A` (and so materialises it, once, on first
         access); no solve path calls it. Tests compare `GraphLaplacianOperator`'s matvec and

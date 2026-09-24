@@ -1,7 +1,7 @@
 """Conservation, junction elimination and gradients — spec section 7, rows 4 to 7 and 11.
 
-These are the physics gate: they use no oracle at all, only the model's own balance and
-algebra done by hand in the test.
+These are the physics gate: they use no reference implementation at all, only the model's own
+balance and algebra done by hand in the test.
 """
 
 from __future__ import annotations
@@ -92,7 +92,7 @@ def test_everything_emitted_leaves_through_the_atmosphere():
 
     These three are conservation IDENTITIES of the advection operator, not
     misattribution checks: a flow written on the WRONG edge still balances, so the
-    oracle for that is `test_junction_elimination_equals_the_hand_written_dense_system`.
+    reference for that is `test_junction_elimination_equals_the_hand_written_dense_system`.
     """
     model, state, _ = build_model(from_test_network(), pblh_floor=False)
     drivers = _drivers(model)
@@ -108,7 +108,7 @@ def test_the_balance_closes_with_a_zero_background_too():
 
     These three are conservation IDENTITIES of the advection operator, not
     misattribution checks: a flow written on the WRONG edge still balances, so the
-    oracle for that is `test_junction_elimination_equals_the_hand_written_dense_system`.
+    reference for that is `test_junction_elimination_equals_the_hand_written_dense_system`.
     """
     model, state, _ = build_model(from_test_network(), pblh_floor=False)
     drivers = _drivers(model, background=0.0)
@@ -323,7 +323,7 @@ def test_a_two_street_dead_end_pair_conserves_mass_in_both_wind_directions():
 
     These three are conservation IDENTITIES of the advection operator, not
     misattribution checks: a flow written on the WRONG edge still balances, so the
-    oracle for that is `test_junction_elimination_equals_the_hand_written_dense_system`.
+    reference for that is `test_junction_elimination_equals_the_hand_written_dense_system`.
     """
     sn = StreetNetwork(
         streets=[Street("r1", "a", "b", 100.0, 20.0, 20.0),

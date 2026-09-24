@@ -1,4 +1,4 @@
-"""MUNICH as the independent oracle — spec section 7, rows 10 and 11.
+"""MUNICH as the independent reference — spec section 7, rows 10 and 11.
 
 Part one: the thirteen exact input/output pairs of `.superpowers/munich-formulas.md`
 section 8, each with its equation, page and `file:line`. Part two: the published 12-street

@@ -1,4 +1,4 @@
-"""A faithful numpy/scipy port of the IMPAQ prototype, as the comparison ORACLE.
+"""A faithful numpy/scipy port of the IMPAQ prototype, used for the port check.
 
 `aqdt/impaq.py` (483 lines, byte-identical in both AQ_DT copies) is reproduced here so that
 the parity tests need no import from the AQ_DT repository, and so that its two remaining
@@ -325,7 +325,7 @@ def build_transport_system(
     as well as an environment COLUMN, and both are ordinary advective edges: the column is
     what a road sends to the atmosphere at an intersection, the row is what the atmosphere
     sends back into a road. Taking only the column leaves a hole in the mass balance worth
-    4.7 % on `build_test_network`; taking both puts this oracle within 4.2e-16 of the
+    4.7 % on `build_test_network`; taking both puts this port within 4.2e-16 of the
     noodl model.
 
     `fix_b=False` reproduces the prototype's `n_state = max(n_intersections, n_roads) + 1`,
@@ -439,7 +439,7 @@ def solve_steady_state(
     rhs[-1] = boundary_layer.background_concentration
     try:
         solution = np.linalg.solve(matrix, rhs)
-    # Kept verbatim from the prototype (it is the oracle); if this ever fires a parity
+    # Kept verbatim from the prototype (it is the port); if this ever fires a parity
     # number silently becomes a least-squares answer -- see the diagnosis tests in
     # tests/verification/test_street_parity.py.
     except np.linalg.LinAlgError:

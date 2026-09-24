@@ -1,8 +1,8 @@
-"""Parity tests against the captured 2019 Tellegen tutorial oracles.
+"""Parity tests against the captured 2019 Tellegen tutorial golden references.
 
 ``tests/golden/legacy/tutorial.json`` holds the legacy tutorial's numeric results, generated
 by a separate (pre-``noodl``) implementation. Each test here reproduces one of the tutorial's
-examples with today's public layer API and checks the result against the captured oracle,
+examples with today's public layer API and checks the result against the captured reference,
 not against a value re-derived from today's code -- that is what makes this a PARITY test
 rather than an ordinary regression test.
 """

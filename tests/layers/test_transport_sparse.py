@@ -1,5 +1,5 @@
 """Parity tests between TransportLayer's new operator-based paths and its retained
-dense oracle (`operator()`, unchanged since milestone 1). Every test here compares
+dense reference (`operator()`, unchanged since milestone 1). Every test here compares
 the SPARSE result against the DENSE one on the same problem; `tests/layers/
 test_transport.py` is untouched and re-verifies the dense/analytic behaviour on
 its own.
@@ -76,7 +76,7 @@ def test_advection_operator_boundary_forcing_matches_dense_N():
     torch.testing.assert_close(op.boundary_forcing(x_b), N @ x_b, rtol=1e-9, atol=1e-12)
 
 
-def test_steady_sparse_matches_dense_oracle():
+def test_steady_sparse_matches_dense_reference():
     net = flow_through_zone()
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath", boundary=["ambient"]
@@ -208,7 +208,7 @@ def test_backward_memory_independent_of_solver_iterations():
     Fixture note: the brief's original 3-node fixture (`three_node_chain`, capacities
     [50, 8000], `q0 = [0.05, -0.03, 0.02]`) reverses the middle edge, which makes node A a
     pure sink with no outgoing advective edge at all -- the resulting 2x2 M is EXACTLY
-    singular (confirmed against the dense `operator()` oracle too, independent of
+    singular (confirmed against the dense `operator()` reference too, independent of
     `AdvectionOperator`), and even with the sign fixed to a natural forward flow, a 2x2
     system is far too small: GMRES's restart cycle length defaults to `min(restart, m) = m`
     for `m = 2`, so ONE full-size cycle always covers the entire Krylov space regardless of
@@ -300,7 +300,7 @@ def test_backward_memory_independent_of_solver_iterations():
     assert bytes_unrolled_tight > bytes_unrolled_loose
 
 
-def test_implicit_step_sparse_matches_dense_oracle():
+def test_implicit_step_sparse_matches_dense_reference():
     net = flow_through_zone()
     cap = torch.tensor([1000.0], dtype=torch.float64)
     layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath",
@@ -339,7 +339,7 @@ def test_gradcheck_implicit_step_wrt_x_q_sources_boundary():
     assert gradcheck(f, (x, q, sources, x_b), eps=1e-6, atol=1e-5)
 
 
-def test_trapezoidal_step_sparse_matches_dense_oracle():
+def test_trapezoidal_step_sparse_matches_dense_reference():
     net = flow_through_zone()
     cap = torch.tensor([1000.0], dtype=torch.float64)
     layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath",
@@ -641,7 +641,7 @@ def test_step_passes_the_structural_shift_verdict_computed_from_xb_and_sources(m
 
 def test_step_records_shift_false_when_sources_require_grad(monkeypatch):
     """Negative case: `sources` requiring grad (even though it is 0 at this call) must record
-    `shift=False`. The existing R3 oracle (test_transport_derivatives.py) already covers the
+    `shift=False`. The existing R3 reference (test_transport_derivatives.py) already covers the
     resulting gradient's correctness; this only pins the recorded flag."""
     net = flow_through_zone()
     layer = TransportLayer(
@@ -752,7 +752,7 @@ def test_expm_action_mixed_stiffness_batch_matches_standalone_within_tolerance()
     has not converged (the batched shape never changes, matching newton.py's masking
     idiom), the mild instance is recomputed at the halved dt too, by a DIFFERENT sequence
     of Taylor evaluations than its own standalone (single-instance) call would use. This
-    test therefore asserts agreement with the standalone result and with the dense oracle
+    test therefore asserts agreement with the standalone result and with the dense reference
     to rtol=1e-9/atol=1e-12 -- a TOLERANCE bound, not bit-for-bit identity, which the
     algorithm does not guarantee by design.
     """
@@ -885,8 +885,8 @@ def test_transport_layer_allocates_no_dense_L_at_construction():
         )
 
 
-def test_operator_oracle_still_includes_conduction():
-    # The dense oracle keeps its exact values. These are the (M, N) this fixture produced
+def test_operator_reference_still_includes_conduction():
+    # The dense reference keeps its exact values. These are the (M, N) this fixture produced
     # with the pre-Task-15 code (conduction folded in via the construction-time `self.L`),
     # recorded before the change and hard-coded here, so a conduction term silently dropped
     # when L stopped being an attribute would fail this test rather than pass a
@@ -905,7 +905,7 @@ def test_operator_oracle_still_includes_conduction():
 
     # ... and the conduction term is genuinely IN there: the same network without the
     # conduction edge gives a different M (2.5 W/K on both diagonal entries, scaled by
-    # capacity), so the assertions above are not merely pinning an advection-only oracle.
+    # capacity), so the assertions above are not merely pinning an advection-only reference.
     no_conduction = TransportLayer(
         layer.net,
         "heat",
@@ -934,9 +934,9 @@ def _ensemble_flow() -> torch.Tensor:
     return base * scale
 
 
-def test_matvec_rmatvec_boundary_forcing_broadcast_match_dense_oracle_per_instance():
+def test_matvec_rmatvec_boundary_forcing_broadcast_match_dense_reference_per_instance():
     """The C1 broadcast case (unbatched `x`/`x_b`, ensemble `flow` `(5, b)`), checked against
-    the dense `TransportLayer.operator(q)` oracle PER INSTANCE -- not merely self-consistent
+    the dense `TransportLayer.operator(q)` reference PER INSTANCE -- not merely self-consistent
     with an explicitly-expanded call (that is `test_matvec_broadcasts_an_unbatched_state_
     against_a_batched_flow` in `tests/operators/test_advection.py`), but numerically equal to
     `M_i @ x`, `M_i.T @ x` and `N_i @ x_b` for each of the 5 flow realisations' own dense
@@ -1060,7 +1060,7 @@ def _k2_state(batch: int, n_i: int) -> torch.Tensor:
 
 
 @pytest.mark.parametrize("scheme", ["implicit", "trapezoidal"])
-def test_k2_kinetics_removal_conduction_batched_mixed_sign_step_matches_dense_oracle(scheme):
+def test_k2_kinetics_removal_conduction_batched_mixed_sign_step_matches_dense_reference(scheme):
     layer = _k2_full_layer(scheme)
     q = _batched_mixed_sign_flow()
     batch = q.shape[0]
@@ -1091,7 +1091,7 @@ def test_k2_kinetics_removal_conduction_batched_mixed_sign_step_matches_dense_or
         torch.testing.assert_close(x_sparse[i], x_dense_i_unstacked, rtol=1e-8, atol=1e-10)
 
 
-def test_k2_kinetics_removal_conduction_batched_mixed_sign_steady_matches_dense_oracle():
+def test_k2_kinetics_removal_conduction_batched_mixed_sign_steady_matches_dense_reference():
     layer = _k2_full_layer("implicit")  # scheme is irrelevant to steady()
     q = _batched_mixed_sign_flow()
     batch = q.shape[0]
@@ -1123,10 +1123,10 @@ def test_unknown_linear_solver_refused_by_name_at_construction():
 
 
 @pytest.mark.parametrize("name", ["gmres_jacobi", "gmres_ilu"])
-def test_gmres_preconditioner_names_match_the_dense_oracle(name):
+def test_gmres_preconditioner_names_match_the_dense_reference(name):
     """Task 6: `gmres_jacobi`/`gmres_ilu` are real preconditioners now, not a stub that
-    raises. Same problem, dense oracle solved by hand -- the same comparison
-    `test_k2_kinetics_removal_conduction_batched_mixed_sign_step_matches_dense_oracle`
+    raises. Same problem, dense reference solved by hand -- the same comparison
+    `test_k2_kinetics_removal_conduction_batched_mixed_sign_step_matches_dense_reference`
     already makes for the default solver, repeated here for both new preconditioner names.
     """
     layer = _k2_full_layer("implicit", linear_solver=name)

@@ -263,7 +263,7 @@ def _two_zone_doorway():
     return net, model, initial_state(model), drivers, E_A
 
 
-def test_two_zone_doorway_matches_an_independent_root_finding_oracle():
+def test_two_zone_doorway_matches_an_independent_root_finding_reference():
     from scipy.optimize import fsolve
 
     net, model, state, drivers, E_A = _two_zone_doorway()

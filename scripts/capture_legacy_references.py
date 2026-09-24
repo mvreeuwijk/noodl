@@ -1,8 +1,8 @@
-"""Capture John Craske's 2019 Tellegen tutorial results as golden oracles.
+"""Capture John Craske's 2019 Tellegen tutorial results as golden references.
 
 Run ONCE, in a throwaway environment with numpy<2, scipy, networkx<3 and autograd, from the
 repository root, before legacy/ is deleted:
-    <legacy-venv>/python scripts/capture_legacy_oracles.py
+    <legacy-venv>/python scripts/capture_legacy_references.py
 Writes tests/golden/legacy/tutorial.json. The values are the ORIGINAL package's output; the
 noodl parity tests compare against them.
 """

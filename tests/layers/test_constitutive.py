@@ -1,7 +1,7 @@
 """Tests for ConstitutiveLayer: the loop formulation for general branch laws.
 
 ``tests/golden/legacy/tutorial.json`` (``GOLD``) holds the 2019 ``Circuit`` tutorial's
-captured numeric oracles for the same triangle (edges (0,1), (1,2), (2,0), kind "pipe") used
+captured numeric references for the same triangle (edges (0,1), (1,2), (2,0), kind "pipe") used
 throughout this file.
 """
 

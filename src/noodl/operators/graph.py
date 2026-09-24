@@ -97,7 +97,7 @@ class GraphLaplacianOperator:
 
         n = boundary_mask.shape[-1]
         # Invert interior_of_node (node -> compact index) to interior_nodes (compact index ->
-        # node), so the dense `assemble` oracle can pick this operator's own interior rows
+        # node), so the dense `assemble` reference can pick this operator's own interior rows
         # out of the shared n-node space. This is a construction-time, O(n) vectorised
         # computation (no Python loop over edges or nodes): boundary and inactive nodes are excluded
         # by `interior_mask` before the fancy-index scatter below, so their (unused) compact
@@ -233,7 +233,7 @@ class GraphLaplacianOperator:
         return diag[..., :n_i]
 
     def assemble(self) -> Tensor:
-        """Dense (..., n_interior, n_interior), the oracle path for small problems only."""
+        """Dense (..., n_interior, n_interior), the reference path for small problems only."""
         b = self.src.shape[-1]
         A_full = torch.zeros(self._n, b, dtype=self.dtype, device=self.device)
         ones = torch.ones(b, dtype=self.dtype, device=self.device)

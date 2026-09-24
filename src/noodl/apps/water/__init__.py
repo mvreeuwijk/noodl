@@ -1,4 +1,5 @@
-"""A differentiable, pressurised water distribution network with EPANET 2.2 as the oracle."""
+"""A differentiable, pressurised water distribution network with EPANET 2.2 as the reference
+implementation."""
 
 from noodl.apps.water.demand import PressureDrivenDemand
 from noodl.apps.water.elements import (

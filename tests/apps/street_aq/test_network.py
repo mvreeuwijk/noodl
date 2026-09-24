@@ -83,7 +83,7 @@ def test_munich_idealised_topology():
     assert abs(azimuth["9"] - 0.0) < 1e-12
 
 
-def test_build_street_model_wires_the_layer_and_the_three_edge_kinds():
+def test_build_model_wires_the_layer_and_the_three_edge_kinds():
     sn = _line_network()
     model, state, drivers = build_model(sn, pblh_floor=False)
     net = model.net
@@ -124,7 +124,7 @@ def test_a_dead_end_is_a_one_way_exchange_with_the_background_not_a_wall():
     torch.testing.assert_close(c_up[0], c_down[0], rtol=1e-12, atol=0)
 
 
-def test_build_street_model_batches_over_forcing_steps_and_keeps_float64():
+def test_build_model_batches_over_forcing_steps_and_keeps_float64():
     sn = from_test_network()
     model, state, _ = build_model(sn, kappa=0.4, pblh_floor=False)
     net = model.net
@@ -146,7 +146,7 @@ def test_build_street_model_batches_over_forcing_steps_and_keeps_float64():
     assert bool((out["street.x"][1] < out["street.x"][0]).all())
 
 
-def test_build_street_model_accepts_every_documented_option_combination():
+def test_build_model_accepts_every_documented_option_combination():
     sn = from_test_network()
     for canyon_wind, exchange, routing, averaging in (
         ("soulhac", "sirane", "mixing", "none"),
@@ -162,7 +162,7 @@ def test_build_street_model_accepts_every_documented_option_combination():
         assert torch.isfinite(out["street.x"]).all()
 
 
-def test_build_street_model_names_every_bad_input():
+def test_build_model_names_every_bad_input():
     good = _line_network()
     with pytest.raises(ValueError, match=r"StreetNetwork.*duplicate street name.*'s1'"):
         StreetNetwork(streets=[good.streets[0], good.streets[0]], x=good.x, y=good.y)

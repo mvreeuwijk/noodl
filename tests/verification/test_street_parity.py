@@ -1,6 +1,6 @@
 """IMPAQ parity — spec section 7, rows 8 and 9.
 
-Part one, here: the four-node network, where the noodl model and the ported oracle can
+Part one, here: the four-node network, where the noodl model and the IMPAQ port can
 be compared to machine precision. Part two, Task 10: `leiden_small` on the real data.
 """
 
@@ -30,7 +30,7 @@ U_REF, THETA_W, H_ABL, BACKGROUND = 2.0, 0.25 * math.pi, 1200.0, 1.0e-4
 EMISSION = np.array([1.0, 1.0, 1.0])
 
 
-def _oracle(street_net):
+def _impaq_port(street_net):
     network = network_from_street_network(street_net, EMISSION)
     layer = compute_boundary_layer(network, BACKGROUND, U_REF, THETA_W,
                                    reference_height_m=30.0, abl_height_m=H_ABL)
@@ -60,9 +60,9 @@ def _noodl(street_net, **options):
     return model.steady(state, drivers)["street.x"].detach().numpy()
 
 
-def test_the_canyon_velocities_agree_with_the_oracle_s_scipy_ones():
+def test_the_canyon_velocities_agree_with_the_impaq_port_s_scipy_ones():
     street_net = from_test_network()
-    network, _layer = _oracle(street_net)
+    network, _layer = _impaq_port(street_net)
     model, state, _ = build_model(street_net, kappa=0.4, pblh_floor=False)
     resolved = model._apply_closures(state, {
         "U_ref": torch.tensor(U_REF, dtype=DT),
@@ -76,13 +76,13 @@ def test_the_canyon_velocities_agree_with_the_oracle_s_scipy_ones():
 
 
 @pytest.mark.parametrize("routing", ["mixing", "sirane"])
-def test_noodl_matches_the_fixed_impaq_oracle_on_the_four_node_network(routing):
+def test_noodl_matches_the_fixed_impaq_port_on_the_four_node_network(routing):
     """Both routing models give the same answer here: no junction of this network has two
     inflows AND two outflows, so there is nothing for a routing model to decide. The test
     is about the ELIMINATION and the closure, not about routing -- Task 11's 2-in/2-out
     node is what distinguishes the routing models."""
     street_net = from_test_network()
-    network, layer = _oracle(street_net)
+    network, layer = _impaq_port(street_net)
     ours = _noodl(street_net, routing=routing)
     theirs = solve_steady_state(network, layer, fix_a=True, fix_b=True)[:len(ours)]
     np.testing.assert_allclose(ours, theirs, rtol=1e-9, atol=0)
@@ -90,7 +90,7 @@ def test_noodl_matches_the_fixed_impaq_oracle_on_the_four_node_network(routing):
 
 def test_the_effect_of_each_impaq_fix_is_reported_not_absorbed(capsys):
     street_net = from_test_network()
-    network, layer = _oracle(street_net)
+    network, layer = _impaq_port(street_net)
     ours = _noodl(street_net, routing="mixing")
     rows = []
     for fix_a, fix_b in ((False, False), (True, False), (True, True)):
@@ -114,7 +114,7 @@ def test_the_effect_of_each_impaq_fix_is_reported_not_absorbed(capsys):
 
 def test_the_exchange_coefficient_is_the_retracted_issue_c_form_on_both_sides():
     """`u_d = sigma_w/(sqrt(2) pi)`, not `sigma_w/sqrt(2 pi)`. The two differ by
-    `sqrt(pi) = 1.7725`, so a model using the other one cannot agree with this oracle at
+    `sqrt(pi) = 1.7725`, so a model using the other one cannot agree with this port at
     any tolerance -- which makes the parity above evidence for the retraction."""
     from noodl.apps.street_aq.canyon import SIRANE_EXCHANGE
 
@@ -166,7 +166,7 @@ def _noodl_leiden(data, **options):
     return model, drivers, model.steady({}, drivers)
 
 
-def _oracle_leiden(data, step: int):
+def _impaq_port_leiden(data, step: int):
     network = network_from_street_network(data.net, data.emission[step].numpy())
     layer = compute_boundary_layer(
         network, 0.0, float(data.forcing.u_ref[step]), float(data.forcing.theta_w[step]),
@@ -187,20 +187,20 @@ def test_the_loaded_leiden_small_domain_is_the_one_the_plan_measured():
 
 
 @needs_aqdt
-def test_the_canyon_velocities_agree_with_the_oracle_on_every_leiden_small_street():
+def test_the_canyon_velocities_agree_with_the_impaq_port_on_every_leiden_small_street():
     """Everything upstream of the junction algebra is identical to the prototype's."""
     data = _leiden_small()
     model, drivers, _solved = _noodl_leiden(data)
     resolved = model._apply_closures({}, drivers)
     ours = resolved["street.u_canyon"].detach().numpy()
     for step in range(len(STEPS)):
-        network, _layer = _oracle_leiden(data, step)
+        network, _layer = _impaq_port_leiden(data, step)
         np.testing.assert_allclose(ours[step], network.roads.canyon_velocity_mps,
                                    rtol=1e-9, atol=1e-12)
 
 
 @needs_aqdt
-def test_the_oracle_s_routing_matrix_does_not_conserve_and_noodl_s_flows_do(capsys):
+def test_the_impaq_port_s_routing_matrix_does_not_conserve_and_noodl_s_flows_do(capsys):
     """The diagnosis. IMPAQ's `flow_route` mis-permutes at three-way junctions, so its
     routing matrix's row sums are not the streets' own fluxes; the noodl model's
     prescribed flows close the mass balance exactly. This is why the comparison below
@@ -212,7 +212,7 @@ def test_the_oracle_s_routing_matrix_does_not_conserve_and_noodl_s_flows_do(caps
     assert bool((q >= 0).all())
     report = []
     for step in range(len(STEPS)):
-        network, _layer = _oracle_leiden(data, step)
+        network, _layer = _impaq_port_leiden(data, step)
         _topology, routing = compute_intersection_routing(network)
         n_roads = len(network.roads.s)
         flux = np.abs(network.roads.canyon_velocity_mps * network.roads.width_m
@@ -231,7 +231,7 @@ def test_the_oracle_s_routing_matrix_does_not_conserve_and_noodl_s_flows_do(caps
 
 
 @needs_aqdt
-def test_noodl_matches_the_fixed_oracle_on_the_typical_leiden_small_street(capsys):
+def test_noodl_matches_the_fixed_impaq_port_on_the_typical_leiden_small_street(capsys):
     """The parity that IS attainable: the median street agrees to machine precision, and
     the count of streets that do not is consistent with the mis-permuted junctions
     diagnosed above (the set cross-reference is a recorded follow-up). The counts are
@@ -241,7 +241,7 @@ def test_noodl_matches_the_fixed_oracle_on_the_typical_leiden_small_street(capsy
     ours = solved["street.x"].detach().numpy()
     rows = []
     for step in range(len(STEPS)):
-        network, layer = _oracle_leiden(data, step)
+        network, layer = _impaq_port_leiden(data, step)
         theirs = solve_steady_state(network, layer, fix_a=True,
                                     fix_b=True)[:ours.shape[1]]
         relative = np.abs(ours[step] - theirs) / np.maximum(np.abs(theirs), 1e-300)
@@ -264,7 +264,7 @@ def test_issue_a_is_much_larger_than_the_routing_defect_on_leiden_small(capsys):
     ours = solved["street.x"].detach().numpy()
     fixed, unfixed = [], []
     for step in range(len(STEPS)):
-        network, layer = _oracle_leiden(data, step)
+        network, layer = _impaq_port_leiden(data, step)
         for fix_a, sink in ((True, fixed), (False, unfixed)):
             theirs = solve_steady_state(network, layer, fix_a=fix_a,
                                         fix_b=fix_a)[:ours.shape[1]]
