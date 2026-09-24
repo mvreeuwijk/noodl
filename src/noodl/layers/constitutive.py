@@ -10,7 +10,7 @@ implicitly, coupling ``p`` and ``q`` through a previous-step state rather than t
 alone. None of that fits a nodal solve, because a nodal solve's unknown is ``phi`` and its
 residual is written in terms of ``q(dp)`` specifically.
 
-The 2019 ``Circuit`` (``legacy/Tellegen/circuit.py``) handled all of this uniformly by
+This layer's loop formulation handles all of this uniformly by
 choosing different unknowns: cycle amplitudes ``m`` and reduced nodal potentials ``phi_red``,
 related to ``p`` and ``q`` by ``q = J.T @ m`` (``J`` a basis of the cycle space, so
 ``A q = 0`` identically -- Kirchhoff's current law) and ``p = A_red.T @ phi_red`` (``A_red``
@@ -19,8 +19,8 @@ voltage law, ``B`` any basis of the cycle space). Both conservation laws hold BY
 for any ``m`` and ``phi_red`` whatsoever, leaving only the branch law itself,
 ``law(p, q, theta) = 0``, to solve: ``b`` equations in ``l + (n - 1) = b`` unknowns for a
 connected graph of ``b`` branches, ``n`` nodes and cycle rank ``l``. This is the ONE
-capability of the legacy ``Circuit`` that a purely nodal solver structurally cannot express,
-and this layer exists to carry it forward, unchanged in spirit, on noodl's own primitives.
+capability a purely nodal solver structurally cannot express, and this layer exists to
+provide it, on noodl's own primitives.
 
 This is a DENSE solve, deliberately: the residual's Jacobian is built by
 ``torch.func.jacrev`` as a plain ``(b, b)`` tensor at every Newton iterate, with no sparse or
@@ -150,7 +150,7 @@ class ConstitutiveLayer:
         ``_DEFAULT_AMPLITUDE``). Pass the previous step's own converged ``z`` -- available
         from ``diagnostics`` is not needed for this; the caller already has ``p``, ``q`` --
         as `z0` on the next call for a dynamic branch law stepped implicitly over many steps,
-        exactly as the legacy ``Circuit`` reused its stored state between calls.
+        the same way any stateful branch law reuses its own stored state between calls.
 
         `diagnostics`, when a dict is given, receives the forward Newton solve's own
         `newton_iterations`, `linear_iterations`, `backend`, `converged` and `residual_norm`

@@ -312,7 +312,7 @@ def flow_direction_count(net: Network, kind: str | None = None) -> int:
     """Winder's (1966) count of the flow-direction patterns a network admits: the number of
     regions into which the b coordinate hyperplanes divide the l-dimensional cycle space.
     Exponential in the number of edges (every column subset of the cycle basis is
-    inspected); a diagnostic for small graphs, ported from the 2019 Tellegen package.
+    inspected); a diagnostic for small graphs only.
 
     An edge that no fundamental cycle traverses (an all-zero column of the cycle basis,
     such as a bridge/pendant edge in a forest) carries no cycle flow and so imposes no
