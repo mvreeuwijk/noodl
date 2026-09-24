@@ -36,6 +36,11 @@ The `pass_fn` contract, in full, because two of its rules are traps:
   mutate the pass's graph under autograd and trip its version counter at backward time, or
   silently alias a tensor the caller still owns. Copy first if a buffer must be written.
 
+`batch_shape` (Task 9) lets the adjoint solve one independent GMRES system per batch instance
+instead of one system flattened over the whole interface, which is only correct when instances
+do NOT couple through the pass -- see `differentiate_fixed_point`'s own docstring for the
+precondition this places on the CALLER, not something this utility can verify from shapes alone.
+
 The derivation in full, for the record. Let z*(theta) solve z = G(z, theta) and write the
 pass's whole output as new = S(z*(theta), theta), with z_next = G(z, theta) whatever part of
 the pass produced it. Then
@@ -72,7 +77,7 @@ part of the same backward pass.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, MutableMapping, Sequence
 
 import torch
 from torch import Tensor
@@ -82,15 +87,25 @@ from noodl.solvers.iterative import gmres
 __all__ = ["differentiate_fixed_point"]
 
 
-def _flatten(tensors: Sequence[Tensor]) -> Tensor:
-    return torch.cat([t.reshape(-1) for t in tensors])
+def _flatten(tensors: Sequence[Tensor], n_batch: int = 0) -> Tensor:
+    """Concatenate every tensor's trailing dims into one axis, keeping the leading `n_batch`
+    dims (assumed identical across `tensors` -- the batch shape) untouched. `n_batch=0`, the
+    default and the only case before batched adjoints existed, flattens each tensor to a 1-D
+    vector and concatenates those exactly as it always did.
+    """
+    return torch.cat([t.reshape(*t.shape[:n_batch], -1) for t in tensors], dim=-1)
 
 
-def _unflatten(flat: Tensor, like: Sequence[Tensor]) -> list[Tensor]:
+def _unflatten(flat: Tensor, like: Sequence[Tensor], n_batch: int = 0) -> list[Tensor]:
+    """Inverse of `_flatten`: split `flat`'s last axis back into `like`'s per-tensor sizes
+    (each tensor's element count beyond its first `n_batch` dims) and reshape each piece to
+    that tensor's own shape."""
     out, offset = [], 0
     for t in like:
-        n = t.numel()
-        out.append(flat[offset : offset + n].reshape(t.shape))
+        n = 1
+        for d in t.shape[n_batch:]:
+            n *= d
+        out.append(flat[..., offset : offset + n].reshape(t.shape))
         offset += n
     return out
 
@@ -131,24 +146,52 @@ def _vjp(
 
 
 class _AdjointOperator:
-    """(I - J^T) on the flattened interface; J^T w is one VJP of the read z_next = G(z)."""
+    """(I - J^T), either on the fully flattened interface or split into one block per batch
+    instance. J^T w is one VJP of the read z_next = G(z); when `batch_shape` is given, that
+    VJP is taken ONCE for the WHOLE batch and reshaped per instance -- correct ONLY because the
+    pass graph is ASSUMED to have no cross-instance edges (every interface tensor carries
+    `batch_shape` as its leading dims is a necessary but not sufficient check for that; see
+    `differentiate_fixed_point`'s docstring for the precondition this places on the caller),
+    so autograd's batched VJP is then already exactly the per-instance one, and gluing every
+    instance's block into a single flattened system (as the `batch_shape=None` path still
+    does) computes the identical numbers, just without letting `gmres` exploit the
+    block-diagonal structure. `batch_shape=()` (a "batch" of one, scalar-shaped instance)
+    takes the same code path as `batch_shape=None` and is bit-identical to it: `n_batch=0`
+    either way.
+    """
 
-    def __init__(self, z: Sequence[Tensor], z_next: Sequence[Tensor]) -> None:
+    def __init__(
+        self,
+        z: Sequence[Tensor],
+        z_next: Sequence[Tensor],
+        batch_shape: tuple[int, ...] | None = None,
+    ) -> None:
         self.z, self.z_next = list(z), list(z_next)
-        m = sum(t.numel() for t in self.z)
-        self.shape = (m, m)
+        self.n_batch = 0 if batch_shape is None else len(batch_shape)
+        if batch_shape is None:
+            m = sum(t.numel() for t in self.z)
+            self.shape = (m, m)
+        else:
+            m_inst = 0
+            for t in self.z:
+                n = 1
+                for d in t.shape[self.n_batch :]:
+                    n *= d
+                m_inst += n
+            self.shape = (*batch_shape, m_inst, m_inst)
         self.dtype, self.device = self.z[0].dtype, self.z[0].device
 
     def matvec(self, v: Tensor) -> Tensor:
-        w = _unflatten(v, self.z)
-        return v - _flatten(_vjp(self.z_next, w, self.z))
+        w = _unflatten(v, self.z, self.n_batch)
+        return v - _flatten(_vjp(self.z_next, w, self.z), self.n_batch)
 
 
 class _FixedPointAdjoint(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, n_z, rtol, atol, max_iter, restart, where, *tensors):
+    def forward(ctx, n_z, rtol, atol, max_iter, restart, where, batch_shape, *tensors):
         ctx.n_z, ctx.rtol, ctx.atol = n_z, rtol, atol
         ctx.max_iter, ctx.restart, ctx.where = max_iter, restart, where
+        ctx.batch_shape = batch_shape
         ctx.z = tensors[:n_z]
         ctx.z_next = tensors[n_z : 2 * n_z]
         ctx.outputs = tensors[2 * n_z :]
@@ -187,32 +230,55 @@ class _FixedPointAdjoint(torch.autograd.Function):
         # default `materialize_grads`; `_or_zeros` keeps the `None` of the opposite setting
         # from reaching the VJPs below either way.
         g = _or_zeros(g_out, outputs)
-        rhs = _flatten(_vjp(outputs, g, z))
-        m = rhs.numel()
-        op = _AdjointOperator(z, z_next)
+        batch_shape = ctx.batch_shape
+        n_batch = 0 if batch_shape is None else len(batch_shape)
+        rhs = _flatten(_vjp(outputs, g, z), n_batch)
+        op = _AdjointOperator(z, z_next, batch_shape)
+        # `op.shape[-1]` is `m_inst` on the batched path and the flattened `m` on the
+        # `batch_shape=None` one (see `_AdjointOperator`): the same expression gives each
+        # path its own right default without branching here.
         result = gmres(
             op,
             rhs,
             rtol=ctx.rtol,
             atol=ctx.atol,
             max_iter=ctx.max_iter,
-            restart=min(m, 100) if ctx.restart is None else ctx.restart,
+            restart=min(op.shape[-1], 100) if ctx.restart is None else ctx.restart,
         )
         if not bool(result.converged.all()):
+            # `not batch_shape`, not `batch_shape is None`: `batch_shape=()` (every unbatched
+            # caller's `tuple(converged.shape)`) takes the SAME flattened code path as `None`
+            # everywhere else in this class (`n_batch = 0` either way, see above), and the
+            # message must match -- a bare `is None` check here fired the per-instance
+            # branch for `()` too, and since a 0-d `converged` has no `.nonzero()` indices to
+            # report, that branch's own fallback produced a spurious "for instances all" on
+            # the single most common (unbatched) case.
+            if not batch_shape:
+                locus = ""
+            else:
+                # Per-instance convergence, named like the callers' own non-convergence
+                # errors (`CoupledModel._iterate`, `Model._iterate`) name their failing
+                # instances: `couple.py`/`model.py`, `(~converged).nonzero()...`.
+                failing = (
+                    (~result.converged).nonzero().flatten().tolist()
+                    if result.converged.dim()
+                    else "all"
+                )
+                locus = f" for instances {failing}"
             raise RuntimeError(
-                f"{ctx.where}: the fixed-point adjoint solve did not converge (residual "
-                f"{float(result.residual.max()):.3e} after {int(result.iterations.max())} "
-                f"GMRES iterations, rtol={ctx.rtol}, atol={ctx.atol}); I - G_z is singular or "
-                f"badly conditioned at this point -- an interface entry the pass hands back "
-                f"unchanged puts a unit row in G_z and does exactly that -- or max_iter is "
-                f"too small. Note that a contraction is NOT required: implicit "
-                f"differentiation needs only a nonsingular I - G_z"
+                f"{ctx.where}: the fixed-point adjoint solve did not converge{locus} "
+                f"(residual {float(result.residual.max()):.3e} after "
+                f"{int(result.iterations.max())} GMRES iterations, rtol={ctx.rtol}, "
+                f"atol={ctx.atol}); I - G_z is singular or badly conditioned at this point -- "
+                f"an interface entry the pass hands back unchanged puts a unit row in G_z and "
+                f"does exactly that -- or max_iter is too small. Note that a contraction is "
+                f"NOT required: implicit differentiation needs only a nonsingular I - G_z"
             )
         # g on the `outputs` inputs and v on the `z_next` inputs: autograd's own backward
         # pass then accumulates g^T S_theta + v^T G_theta through the one retained graph.
         # See the module docstring for why v is NOT projected onto the outputs here.
-        v = _unflatten(result.x, z)
-        return (None, None, None, None, None, None, *([None] * ctx.n_z), *v, *g)
+        v = _unflatten(result.x, z, n_batch)
+        return (None, None, None, None, None, None, None, *([None] * ctx.n_z), *v, *g)
 
 
 def differentiate_fixed_point(
@@ -224,6 +290,8 @@ def differentiate_fixed_point(
     max_iter: int | None = None,
     restart: int | None = None,
     where: str = "fixed point",
+    batch_shape: tuple[int, ...] | None = None,
+    report: MutableMapping[str, object] | None = None,
 ) -> list[Tensor]:
     """One differentiable pass at the converged interface `z_star`, with the implicit adjoint
     attached to its outputs. `pass_fn(z)` returns `(outputs, z_next)`; the module docstring
@@ -237,11 +305,42 @@ def differentiate_fixed_point(
     GMRES matvec is one full VJP through the pass graph, so a large interface may want a
     smaller `restart` (less basis memory, more matvecs) or a larger `max_iter`.
 
+    `batch_shape`, when given, is tried as every interface tensor's leading dims. A batch of
+    instances never couples across the interface (each instance's next iterate depends only
+    on its own slice), so the true interface Jacobian is block-diagonal, and the flattened
+    single system of today's default is that block-diagonal matrix glued into one -- solvable,
+    but at up to `prod(batch_shape)` times the GMRES work, since one shared Krylov basis has
+    to represent every instance's (possibly quite different) spectrum at once. When EVERY
+    entry of `z_star` carries `batch_shape` as its leading dims (checked by shape, entry by
+    entry), the adjoint instead solves `prod(batch_shape)` independent systems of size
+    `m_inst` (the per-instance element count): the same numbers, `gmres`'s own per-instance
+    convergence applies, and `restart`/`max_iter` default from `m_inst` rather than the
+    flattened `m`. `batch_shape=None`, or any entry whose leading dims do not match it (a
+    value SHARED across instances -- a driver-derived constant, say -- genuinely couples
+    them, so the block-diagonal structure does not hold for it), falls back to the flattened
+    solve of today, unconditionally correct either way. `report`, when given, is updated with
+    `{"batched": bool}`: False whenever the adjoint does not attach at all (nothing ran, so
+    there is nothing to report) or the flattened solve ran; True when the batched one did.
+
+    **`batch_shape` is a precondition on the CALLER, not something this function can verify.**
+    Passing it asserts that instances do NOT couple through `pass_fn` -- that instance i's
+    `outputs`/`z_next` depend only on `z`'s instance-i slice, never on another instance's. The
+    shape check above (every entry carries `batch_shape` as leading dims) is necessary but not
+    sufficient: a pass that mixes instances (a mean reduced across the batch axis, a term that
+    reads one instance's slice while computing another's, ...) can still hand back tensors
+    shaped exactly like a block-diagonal interface, and the batched adjoint would then solve
+    the WRONG system and return a silently wrong gradient -- nothing about the shapes says
+    otherwise. Pass `batch_shape=None` for a pass that does not honour this, or that you are
+    not sure honours it.
+
     Under `no_grad`, when nothing in the pass requires grad, or when the interface is empty,
     the plain outputs come back. Raises `ValueError` here for a `z_next` that does not match
     `z` in length or shape and for an out-of-range `max_iter`/`restart`; raises `RuntimeError`
-    by name from `backward` when the adjoint GMRES does not converge.
+    by name from `backward` when the adjoint GMRES does not converge (per instance, on the
+    batched path).
     """
+    if report is not None:
+        report["batched"] = False
     if max_iter is not None and max_iter < 1:
         raise ValueError(f"{where}: max_iter must be >= 1 when given, got {max_iter!r}")
     if restart is not None and restart < 1:
@@ -273,7 +372,16 @@ def differentiate_fixed_point(
         # enabled, so no `o` here ever has `requires_grad=True` -- the `.detach()` arm of the
         # old `[o.detach() if o.requires_grad else o for o in outputs]` was dead.
         return list(outputs)
+    effective_batch_shape: tuple[int, ...] | None = None
+    if batch_shape is not None:
+        bs = tuple(batch_shape)
+        n_batch = len(bs)
+        if all(tuple(t.shape[:n_batch]) == bs for t in z):
+            effective_batch_shape = bs
+    if report is not None:
+        report["batched"] = effective_batch_shape is not None
     wrapped = _FixedPointAdjoint.apply(
-        len(z), rtol, atol, max_iter, restart, where, *z, *z_next, *outputs
+        len(z), rtol, atol, max_iter, restart, where, effective_batch_shape,
+        *z, *z_next, *outputs,
     )
     return list(wrapped)

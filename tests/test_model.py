@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 import torch
 
@@ -227,6 +229,9 @@ def test_diagnostics_carry_the_layers_status_and_the_pass_count():
     assert diag["passes"] == 1
     assert bool(diag["layers"]["air"]["converged"].all())
     assert diag["layers"]["species"]["substeps"] == 1
+    # Task 8: default linear_solver="auto" now resolves to sparse_direct at this small
+    # (single-instance) batch size, per the interleaved benchmark's decision (ledger B-14).
+    assert diag["layers"]["species"]["linear"]["backend"] == "sparse_direct"
 
 
 def test_ports_round_trip_and_air_boundary_flow_balances_the_interior():
@@ -906,6 +911,25 @@ class _ParametrizedIntegratingCounter:
         return {"demo.n": n + self.increment}
 
 
+def _iterate_model_with_counter(param=None):
+    """Shared builder for the I8-1 tests (a closure-carried key missing vs. seeded from the
+    step-start state) and A3's warning tests, all on the same `_Feedback` +
+    `_ParametrizedIntegratingCounter` iterate model. `state` is SEEDED ("demo.n" zero): A3's
+    own control test wants that, and its warning test derives the unseeded state by dropping
+    the key from it, exactly as the I8-1 control test already built its own `start`. `param`
+    defaults to a fixed, non-differentiable 0.5 for A3's tests, which never differentiate;
+    the I8-1 tests each pass their own differentiable leaf so `torch.autograd.grad` can read
+    it back afterward."""
+    if param is None:
+        param = torch.tensor(0.5, dtype=F64)
+    _, model, state, drivers, _, _ = _build(
+        closures=[_Feedback(2e3), _ParametrizedIntegratingCounter(param)],
+        coupling="iterate", iterate_tol={"species": 1e-12}, iterate_max=60,
+    )
+    state = dict(state, **{"demo.n": torch.zeros((), dtype=F64)})
+    return model, state, drivers
+
+
 def test_i8_1_a_closure_state_key_missing_from_the_step_start_state_gets_a_truncated_gradient():
     """I8-1 (Task 8 review): `_iterate`'s interface excludes every `closure_state_keys` entry
     UNCONDITIONALLY (`keys = [... if k not in self.closure_state_keys ...]`), whether or not
@@ -930,12 +954,11 @@ def test_i8_1_a_closure_state_key_missing_from_the_step_start_state_gets_a_trunc
     (silently wrong-by-omission, never wrong-signed or blown up) and NOT a runtime refusal --
     the first step is allowed to lack the key by design (`_pass`'s `if key in base:` guard)."""
     param = torch.tensor(0.5, dtype=F64, requires_grad=True)
-    _, model, state, drivers, _, _ = _build(
-        closures=[_Feedback(2e3), _ParametrizedIntegratingCounter(param)],
-        coupling="iterate", iterate_tol={"species": 1e-12}, iterate_max=60,
-    )
+    model, state, drivers = _iterate_model_with_counter(param)
+    unseeded = {k: v for k, v in state.items() if k != "demo.n"}
     diag: dict = {}
-    new = model.step(state, drivers, 600.0, diagnostics=diag)   # "demo.n" NOT seeded
+    with pytest.warns(RuntimeWarning, match=r"closure-carried state.*'demo\.n'.*once per pass"):
+        new = model.step(unseeded, drivers, 600.0, diagnostics=diag)   # "demo.n" NOT seeded
     assert diag["passes"] >= 2      # the compounding needs more than one pass to be visible
     assert diag["adjoint"] == "implicit"
     (grad,) = torch.autograd.grad(new["demo.n"], (param,))
@@ -951,7 +974,12 @@ def test_i8_1_a_closure_state_key_missing_from_the_step_start_state_gets_a_trunc
             return m.step(s, d, 600.0)["demo.n"].item()
 
     h = 1e-6
-    cd = (_unseeded_value(0.5 + h) - _unseeded_value(0.5 - h)) / (2 * h)
+    warn_match = r"closure-carried state.*'demo\.n'.*once per pass"
+    with pytest.warns(RuntimeWarning, match=warn_match):
+        up = _unseeded_value(0.5 + h)
+    with pytest.warns(RuntimeWarning, match=warn_match):
+        down = _unseeded_value(0.5 - h)
+    cd = (up - down) / (2 * h)
     assert cd == pytest.approx(float(diag["passes"]), rel=1e-6)   # true sensitivity ~ pass count
     assert grad.item() < 0.2 * cd   # the adjoint drops nearly all of that true sensitivity
 
@@ -962,11 +990,7 @@ def test_i8_1_control_the_same_gradient_matches_central_differences_once_seeded(
     adjoint returns is the fixed point's own, matching central differences the way every other
     `coupling="iterate"` gradient test in this module does."""
     param = torch.tensor(0.5, dtype=F64, requires_grad=True)
-    _, model, state, drivers, _, _ = _build(
-        closures=[_Feedback(2e3), _ParametrizedIntegratingCounter(param)],
-        coupling="iterate", iterate_tol={"species": 1e-12}, iterate_max=60,
-    )
-    start = dict(state, **{"demo.n": torch.zeros((), dtype=F64)})
+    model, start, drivers = _iterate_model_with_counter(param)
     diag: dict = {}
     new = model.step(start, drivers, 600.0, diagnostics=diag)
     assert diag["adjoint"] == "implicit"
@@ -985,6 +1009,37 @@ def test_i8_1_control_the_same_gradient_matches_central_differences_once_seeded(
     h = 1e-6
     cd = (_seeded_value(0.5 + h) - _seeded_value(0.5 - h)) / (2 * h)
     assert grad.item() == pytest.approx(cd, rel=1e-6)
+
+
+def test_iterate_warns_when_a_closure_carried_key_is_missing_from_the_step_start_state():
+    """A3: on such a step the key is not pinned to the step start (N1's `if key in base`), so
+    its closure integrates once per PASS and the adjoint omits the compounding path. The
+    misconfiguration is named where it happens; it is not refused, because the first step is
+    allowed to lack the key by design.
+
+    `stacklevel` is pinned here too, not just the message text: the warning must be attributed
+    to the CALLER of `step`/`steady` (this test module), not to a line inside `model.py` itself
+    -- `warnings.warn`'s default filter dedupes on (message, category, module, lineno), so a
+    warning permanently attributed to one internal line would let a second, later, genuinely
+    different caller's identical warning go silently missing (A3 fix round). Both `step` and
+    `steady` reach `_iterate` through the same `_advance`, so one `stacklevel` serves both --
+    checked on both calls below."""
+    model, state, drivers = _iterate_model_with_counter()   # the I8-1 tests' builder
+    unseeded = {k: v for k, v in state.items() if k != "demo.n"}
+    match = r"closure-carried state.*'demo\.n'.*once per pass"
+    with pytest.warns(RuntimeWarning, match=match) as record:
+        model.step(unseeded, drivers, 600.0)
+    assert record[0].filename.endswith("test_model.py")
+    with pytest.warns(RuntimeWarning, match=match) as record:
+        model.steady(unseeded, drivers)
+    assert record[0].filename.endswith("test_model.py")
+
+
+def test_iterate_does_not_warn_when_the_key_is_seeded():
+    model, state, drivers = _iterate_model_with_counter()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        model.step(state, drivers, 600.0)
 
 
 def test_current_flows_returns_closure_written_driver_prescribed_flow():
@@ -1170,3 +1225,79 @@ def test_iterate_pays_for_the_adjoint_pass_only_when_a_gradient_is_wanted():
     assert out["species.x"].requires_grad
     out["species.x"].sum().backward()
     assert el.C.grad is not None
+
+
+def test_iterate_gradient_is_per_instance_on_a_batched_model():
+    """I8-2 (part 3 follow-up): two wind speeds through coupling="iterate" with a learnable
+    element. Each instance's sensitivity must match its OWN central difference, so the adjoint
+    solve keeps instances apart; the instances must also differ, or a batch-mixing error could
+    hide. Sources at 5e-4 as in the near-fixed-point test, so the feedback gain is strong.
+    Solver tolerances tightened for the central-difference reference (ruling R21)."""
+    _, model, state, drivers, el, _ = _build(
+        learnable=True, closures=[_Feedback(2e3)], coupling="iterate",
+        iterate_tol={"species": 1e-13}, iterate_max=80,
+    )
+    drv = dict(drivers)
+    drv["wind"] = torch.tensor([[5.0, 0.0, 0.0], [2.0, 0.0, 0.0]], dtype=F64)
+    drv["species.sources"] = torch.tensor([0.0, 5e-4, 0.0], dtype=F64)
+    tight = {"atol": 1e-14, "rtol": 1e-14}
+
+    def run():
+        return model.step(state, drv, 600.0, **tight)["species.x"]      # (2, n_i)
+
+    diag: dict = {}
+    x = model.step(state, drv, 600.0, diagnostics=diag, **tight)["species.x"]
+    assert x.shape == (2, 2)
+    assert diag["adjoint"] == "implicit"
+    assert diag["adjoint_batched"] is True
+    assert diag["converged"].shape == (2,) and bool(diag["converged"].all())
+    grads = []
+    for i in range(2):
+        el.C.grad = None
+        x[i].sum().backward(retain_graph=True)
+        grads.append(el.C.grad[0].item())
+    h = 1e-6
+    with torch.no_grad():
+        el.C[0] += h
+        up = run().sum(-1)
+        el.C[0] -= 2 * h
+        down = run().sum(-1)
+        el.C[0] += h
+    cd = ((up - down) / (2 * h)).tolist()
+    for i in range(2):
+        assert grads[i] == pytest.approx(cd[i], rel=1e-5), i
+    assert grads[0] != pytest.approx(grads[1], rel=1e-3)
+
+
+def test_a_non_converged_iteration_refuses_to_return_when_a_gradient_is_wanted():
+    """on_failure="return" keeps its meaning for forward-only and differentiable=False runs
+    (`test_iterate_reports_non_convergence_per_instance_or_raises`, unlearnable so
+    `needs_adjoint` stays False there), but a non-converged iteration has no fixed point to
+    differentiate, and returning the primal state there would hand the caller a graph-free
+    tensor that differentiates to nothing, silently.
+
+    Adapted from the brief's literal fixture: `model.steady(..., on_failure="return")` with a
+    `learnable=True` element cannot reach `_iterate`'s own non-convergence branch with
+    `needs_adjoint` True, because `solve_kwargs` (including `on_failure`) is forwarded to
+    every potential-layer solve too (module docstring), and `PotentialFlowLayer.solve`'s
+    differentiable path (the default) refuses `on_failure="return"` UNCONDITIONALLY
+    (`solvers.implicit.implicit_solve`, not only on the potential solve's own
+    non-convergence) -- verified by running: it raises `ValueError` from `implicit_solve`
+    before `_iterate` is ever reached. `differentiable=False` keeps the potential solve on
+    its non-differentiable path instead (which does accept `on_failure="return"` given
+    `diagnostics`), and the gradient reaches "species.x" directly through a `requires_grad`
+    `species.sources` driver, which the transport step differentiates in plain autograd,
+    independently of the potential solve."""
+    _, model, state, drivers, _el, _ = _build(
+        closures=[_Feedback(2e3)], coupling="iterate",
+        iterate_tol={"species": 1e-15}, iterate_max=2,
+    )
+    drv = dict(drivers)
+    drv["species.sources"] = drivers["species.sources"].clone().requires_grad_(True)
+    diag: dict = {}
+    with pytest.raises(RuntimeError, match=r"did not converge.*no fixed point to differentiate"):
+        model.steady(state, drv, diagnostics=diag, differentiable=False, on_failure="return")
+    with torch.no_grad():
+        out = model.steady(state, drv, diagnostics=diag, differentiable=False,
+                            on_failure="return")
+    assert "species.x" in out and not bool(diag["converged"].all())

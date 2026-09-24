@@ -35,6 +35,7 @@ from __future__ import annotations
 import bisect
 import functools
 import math
+import warnings
 from collections.abc import Mapping, Sequence
 from typing import Literal, NamedTuple
 
@@ -42,6 +43,7 @@ import torch
 
 from noodl.operators.advection import AdvectionOperator
 from noodl.solvers.implicit import TransposeOperator as _TransposeView
+from noodl.solvers.select import _SPARSE_DIRECT_MAX_BATCH
 from noodl.solvers.select import solve as _solve_operator
 from noodl.topology import Network, Node
 
@@ -86,6 +88,49 @@ def active_interior(
     return all_interior[active], all_interior[~active]
 
 
+# Inner linear solvers a TransportLayer may be configured with; resolved PER SOLVE (never
+# fixed for the layer's whole lifetime the way `PotentialFlowLayer._LINEAR_SOLVERS` is used)
+# by `TransportLayer._resolve_solver` into the kwargs `solvers.select.solve` actually reads.
+# "gmres" resolves to `method="gmres"` with no preconditioner (unchanged since before Task 8).
+# "gmres_jacobi"/"gmres_ilu" (Task 6) resolve to `method="gmres"` with a real preconditioner.
+# "sparse_direct" (SuperLU, Task 4's COO forms) and "direct" (the dense LU reference) pass
+# straight through. `select.solve`'s OWN "auto" policy (the certified-SPD potential path) is
+# not touched by this plan (ledger ruling B-1) -- this is a SEPARATE "auto", scoped to this
+# layer, chosen on Task 7's interleaved benchmark (Task 8, ledger ruling B-14): "auto" resolves
+# to `sparse_direct` at or under `_SPARSE_DIRECT_MAX_BATCH` instances (Task 7's e=1 and e=32
+# rows: sparse_direct wins both by a wide, spread-clear margin) and to plain `gmres` above it
+# (e=100: sparse_direct is not applicable at all, and the gmres family's own internal ordering
+# is not clean enough to prefer a preconditioner over plain gmres); `gmres_jacobi`/`gmres_ilu`
+# are never chosen by `auto` (gmres_ilu's per-instance ILU factorisation cost dominates at
+# every ensemble Task 7 measured, and jacobi vs plain gmres is ambiguous within the measured
+# spread). See `_resolve_solver` for the two hazards this default must handle: SciPy absent,
+# and a grad-requiring `on_failure="return"` solve (which runs outside `_LinearSolve`'s
+# `no_grad`, unlike the differentiable forward/backward path).
+_TRANSPORT_SOLVERS = ("auto", "gmres", "gmres_jacobi", "gmres_ilu", "sparse_direct", "direct")
+
+# Set once, mirroring `solvers.select._WARNED_SPARSE_DIRECT_NEEDS_SCIPY`: the one fall-back
+# from this layer's "auto" to gmres that is an ENVIRONMENT fault (SciPy, the `noodl[sparse]`
+# extra, is absent) rather than a modelling or grad-safety fact, so it is the only one that
+# warns, and only once per process -- a per-solve warning at this default's small-batch,
+# every-step call frequency would be unusable noise. Module state rather than a `warnings`
+# filter for the same reason `select.py` gives: `warnings.warn`'s own "once" registry is keyed
+# on the message and can be reset out from under us by `catch_warnings`.
+_WARNED_AUTO_NEEDS_SCIPY = False
+
+
+def _scipy_sparse_linalg_importable() -> bool:
+    """Whether `scipy.sparse.linalg` can be imported right now -- the same lazy, per-call
+    check `solvers.select._auto_sparse_triplet` makes (a cached answer would be wrong for the
+    one case this exists to detect: a process that can or cannot import scipy is not a
+    property this module gets to memoise, and doing so would make the fall-back untestable
+    without process isolation)."""
+    try:
+        import scipy.sparse.linalg  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 class _LinearSolve(torch.autograd.Function):
     """Differentiate a linear solve `A(params) x = rhs(params)` via the IMPLICIT ADJOINT,
     never by unrolling the forward solver's iteration -- see this task's Design decisions
@@ -111,18 +156,61 @@ class _LinearSolve(torch.autograd.Function):
     The adjoint solve inside `backward` RAISES unconditionally on non-convergence --
     independent of whatever `on_failure` the forward call was given -- because a wrong
     gradient is worse than no gradient (design spec section 3.2).
+
+    `resolve_solver` (Task 5, B2; fix round 1) is `None`, or a callable `batch_size -> dict`
+    -- `TransportLayer._resolve_solver` bound to its layer -- called by `forward` ONCE, on
+    the REAL `rhs` `build_system(*params)` already produced (never on a separate probe
+    build: `build_system` runs the operator's own `boundary_forcing`, an embed/gather/
+    `scatter_add_` over every edge, at the same cost order as a matvec, so a second call
+    purely to learn a shape would double this layer's dominant per-solve cost -- exactly the
+    finding this fix closes). The resolved dict (still carrying `"method"`) is merged with
+    `solver_kwargs` (whatever a direct caller of `_linear_solve` passes through verbatim,
+    e.g. `rtol`/`max_iter` in `tests/layers/test_transport_sparse.py`'s own probes, which
+    pass no `resolve_solver` at all) and stored UNMODIFIED on `ctx.solver_kwargs`, so
+    `backward` -- which builds its own `op` again from the saved params exactly as it always
+    has, but never re-resolves -- reads the SAME method a local copy, `.pop("method",
+    "auto")`, with the same `"auto"` default a caller that resolves nothing at all keeps
+    (the pre-Task-5 call sites, and every direct `_linear_solve` call in the test suite,
+    unaffected). This is what makes a `sparse_direct` forward get a SuperLU adjoint too: the
+    backward's transposed solve through `_TransposeView` runs the SAME resolved method.
+
+    `diagnostics` (Task 5, B2), when a dict is passed, is filled by `forward` ONLY (never by
+    `backward`, which has no result to report to a layer's public API) with `"linear"`:
+    `{"backend", "iterations", "residual"}` from the forward solve's own `SolveResult` and
+    `solve()`'s `backend_out` -- `iterations`/`residual` reduced with `.max()` over whatever
+    batch shape this solve carries, since a per-instance breakdown has nowhere to go through
+    a single dict entry. `iterations` is exact only when the resolved method is unpreconditioned;
+    under a preconditioner it is `gmres`'s own cycle-granular count, an upper bound on the
+    iteration at which the true residual actually met tolerance -- see `gmres`'s docstring for
+    why. Threading a mutable dict OUT of a `torch.autograd.Function.forward` is fine: it is a
+    plain (non-tensor) argument to `apply`, filled in place, never returned.
     """
 
     @staticmethod
-    def forward(ctx, build_system, where, solver_kwargs, *params):
+    def forward(ctx, build_system, where, resolve_solver, solver_kwargs, diagnostics, *params):
         with torch.no_grad():
             op, rhs = build_system(*params)
-            result = _solve_operator(
-                op, rhs, method="auto", on_failure="raise", where=where, **solver_kwargs
+            resolved = (
+                {} if resolve_solver is None
+                else resolve_solver(rhs.shape[:-1].numel(), op=op, rhs=rhs)
             )
+            full_kwargs = {**resolved, **solver_kwargs}
+            kwargs = dict(full_kwargs)
+            method = kwargs.pop("method", "auto")
+            backend_out: dict = {}
+            result = _solve_operator(
+                op, rhs, method=method, on_failure="raise", where=where,
+                backend_out=backend_out, **kwargs,
+            )
+        if diagnostics is not None:
+            diagnostics["linear"] = {
+                "backend": backend_out.get("backend"),
+                "iterations": int(result.iterations.max()),
+                "residual": float(result.residual.max()),
+            }
         ctx.build_system = build_system
         ctx.where = where
-        ctx.solver_kwargs = solver_kwargs
+        ctx.solver_kwargs = full_kwargs
         ctx.save_for_backward(result.x, *params)
         return result.x
 
@@ -141,9 +229,11 @@ class _LinearSolve(torch.autograd.Function):
         x, params = saved[0], list(saved[1:])
         with torch.no_grad():
             op, _ = ctx.build_system(*params)
+            kwargs = dict(ctx.solver_kwargs)
+            method = kwargs.pop("method", "auto")
             lam = _solve_operator(
-                _TransposeView(op), grad_x, method="auto", on_failure="raise",
-                where=f"{ctx.where} backward (adjoint)", **ctx.solver_kwargs,
+                _TransposeView(op), grad_x, method=method, on_failure="raise",
+                where=f"{ctx.where} backward (adjoint)", **kwargs,
             ).x
         with torch.enable_grad():
             p = [t.detach().requires_grad_(t.requires_grad) for t in params]
@@ -158,11 +248,16 @@ class _LinearSolve(torch.autograd.Function):
         it = iter(grads)
         for t in p:
             grads_aligned.append(next(it) if t.requires_grad else None)
-        return (None, None, None, *grads_aligned)
+        return (None, None, None, None, None, *grads_aligned)
 
 
-def _linear_solve(build_system, where: str, *params, **solver_kwargs) -> torch.Tensor:
-    return _LinearSolve.apply(build_system, where, solver_kwargs, *params)
+def _linear_solve(
+    build_system, where: str, *params,
+    resolve_solver=None, diagnostics: dict | None = None, **solver_kwargs,
+) -> torch.Tensor:
+    return _LinearSolve.apply(
+        build_system, where, resolve_solver, solver_kwargs, diagnostics, *params
+    )
 
 
 class _AffineSystemOperator:
@@ -183,6 +278,11 @@ class _AffineSystemOperator:
         self.shape = M.shape
         self.dtype = M.dtype
         self.device = M.device
+        # Cache for `assemble_sparse`'s identity-block row/col index (D-B1): this object is
+        # built fresh per solve and `m`/`device` never change over its life, so this is a
+        # tidy-up (one `torch.arange` fewer when `assemble_sparse` runs more than once for the
+        # same instance, e.g. forward then backward), not a speedup that matters on its own.
+        self._eye_idx: torch.Tensor | None = None
 
     def matvec(self, x: torch.Tensor) -> torch.Tensor:
         return x - self.alpha * self.M.matvec(x)
@@ -199,6 +299,31 @@ class _AffineSystemOperator:
         eye = torch.eye(m, dtype=dense.dtype, device=dense.device)
         return eye - self.alpha * dense
 
+    def assemble_sparse(self):
+        """COO `(row, col, values)` for `I - alpha * M`: `M`'s own sparse form (Task 4) with
+        an identity diagonal added, `None` propagating unchanged if `M` has none to give.
+
+        DUPLICATES are how the identity and `M`'s diagonal entries combine: `M`'s own COO
+        form already carries duplicate (row, col) pairs at a diagonal position (e.g. an Out
+        term and a self-loop In term at the same interior node), all summed by the COO
+        consumer; appending one more `1.0` per diagonal position is the same mechanism, not
+        a special case.
+        """
+        triplet = self.M.assemble_sparse()
+        if triplet is None:
+            return None
+        row, col, values = triplet
+        m = self.shape[-1]
+        if self._eye_idx is None or self._eye_idx.device != row.device:
+            self._eye_idx = torch.arange(m, dtype=torch.int64, device=row.device)
+        eye_idx = self._eye_idx
+        ones = torch.ones(*values.shape[:-1], m, dtype=values.dtype, device=values.device)
+        return (
+            torch.cat([eye_idx, row]),
+            torch.cat([eye_idx, col]),
+            torch.cat([ones, -self.alpha * values], dim=-1),
+        )
+
     def spd_certificate(self):
         return None
 
@@ -213,6 +338,16 @@ class TransportLayer:
 
     ``quantity``/``unit`` are metadata a ``Model`` reports ("temperature"/"K",
     "concentration"/"ppm"); nothing in the numerics reads them.
+
+    ``linear_solver`` (Task 5, B2) names one of ``_TRANSPORT_SOLVERS``, refused by name at
+    construction otherwise, and is resolved PER SOLVE by ``_resolve_solver`` into the kwargs
+    every linear solve of this layer runs with (``steady``'s and the two implicit schemes'
+    forward, backward adjoint and ``on_failure="return"`` paths alike). ``"auto"`` (the
+    default, Task 8, ledger ruling B-14, chosen on the interleaved benchmark) resolves to
+    ``method="sparse_direct"`` at or under ``_SPARSE_DIRECT_MAX_BATCH`` instances and to plain
+    ``method="gmres"`` above it, falling back to ``gmres`` (never raising) when SciPy is
+    absent or when a grad-requiring ``on_failure="return"`` solve would otherwise refuse; see
+    ``_resolve_solver`` for the full rule and both hazards.
     """
 
     #: The differentiable operator coefficients a layer owns, in the fixed order the
@@ -250,9 +385,16 @@ class TransportLayer:
         conduction_kind: str | None = None,
         conductance: torch.Tensor | None = None,
         scheme: Literal["exact", "implicit", "trapezoidal"] = "exact",
+        linear_solver: str = "auto",
         quantity: str = "scalar",
         unit: str = "",
     ) -> None:
+        if linear_solver not in _TRANSPORT_SOLVERS:
+            raise ValueError(
+                f"TransportLayer '{name}': unknown linear_solver {linear_solver!r}; "
+                f"expected one of {_TRANSPORT_SOLVERS}"
+            )
+        self.linear_solver = linear_solver
         self.net = net
         self.name = name
         self.flow_kind = flow_kind
@@ -393,6 +535,135 @@ class TransportLayer:
             )
         self._interior_of_node = torch.full((net.n,), -1, dtype=torch.long)
         self._interior_of_node[self.interior_idx] = torch.arange(self.n_i, dtype=torch.long)
+
+    def _resolve_solver(
+        self, batch_size: int, *, op=None, rhs: torch.Tensor | None = None,
+    ) -> dict:
+        """The kwargs `solvers.select.solve` should see for THIS layer's `linear_solver`
+        (`method`, `preconditioner`, `restart`) -- resolved PER SOLVE (the brief's B2), used
+        by every linear solve this layer runs: `steady`, `_implicit_step_sparse` and
+        `_trapezoidal_step_sparse`'s differentiable path AND their `on_failure="return"`
+        early-return path, and (via the resolved kwargs `_LinearSolve` saves on its `ctx`)
+        the backward adjoint too.
+
+        `batch_size` is `rhs.shape[:-1].numel()`, the flat instance count this solve is
+        about to run at. `op`/`rhs`, when given (the `on_failure="return"` call sites always
+        give them; `_LinearSolve.forward` gives them too, though it never needs them -- see
+        below), are the just-built operator and right-hand side, used ONLY to decide whether
+        `"auto"` may pick `sparse_direct` under grad (hazard 2 below); no solve reads them.
+
+        `"auto"` (Task 8, ledger ruling B-14, decided on the interleaved benchmark in
+        `benchmarks/transport_solver_bench.json` -- see `docs/development-history.md`'s
+        decision record for the full table): resolves to `method="sparse_direct"` when
+        `batch_size <= _SPARSE_DIRECT_MAX_BATCH` (the SAME constant `solvers.select` uses for
+        its own, separate "auto" -- imported, never re-hard-coded) and to plain `gmres`
+        above it. `gmres_jacobi`/`gmres_ilu` are never chosen by `auto`: the benchmark found
+        `gmres_ilu` the clear loser at every ensemble measured (its per-instance ILU
+        factorisation cost dominates, see the COST note below) and the gmres-vs-gmres_jacobi
+        ordering ambiguous within the measured spread, so there is no evidence to prefer
+        either preconditioner over plain gmres as the fallback. `"gmres"` (explicit) resolves
+        to plain gmres unconditionally, regardless of `batch_size` -- unaffected by any of
+        this, exactly as before Task 8.
+
+        TWO HAZARDS `"auto"` must handle before it can hand back `sparse_direct`, both
+        fall-backs to plain `gmres` (never a raise: `auto` is a promise to choose a backend
+        that works, the same contract `solvers.select`'s own `auto` makes):
+
+        1. **SciPy absent.** `sparse_direct` needs SciPy (`noodl[sparse]`, an optional
+           extra). When it is not importable, `auto` falls back to `gmres` and warns ONCE
+           per process (`_WARNED_AUTO_NEEDS_SCIPY`, mirroring `solvers.select`'s own
+           `_WARNED_SPARSE_DIRECT_NEEDS_SCIPY` pattern and for the same reason: a per-solve
+           warning at this default's every-step call frequency would be unusable noise).
+        2. **A grad-requiring `on_failure="return"` solve.** `_LinearSolve.forward`/
+           `.backward` always resolve `"auto"` INSIDE `torch.no_grad()` (`forward`'s own
+           `with torch.no_grad(): ... resolve_solver(...)`; `backward` never re-resolves at
+           all, it reuses whatever `forward` picked), so `torch.is_grad_enabled()` is always
+           False there and this hazard cannot fire on the differentiable path -- `op`/`rhs`
+           passed from that path are accepted but never actually inspected because of this.
+           The THREE `on_failure="return"` early-return paths (`steady`,
+           `_implicit_step_sparse`, `_trapezoidal_step_sparse`), by contrast, call
+           `_resolve_solver` OUTSIDE any `no_grad`: an explicit `method="sparse_direct"`
+           reaching `solvers.select.solve` there would raise `RuntimeError` (see
+           `select._sparse_direct`) whenever grad mode is enabled and the rhs or the
+           operator's own sparse values require grad -- an eligibility refusal, not a
+           numerical failure, so `on_failure="return"` would NOT catch it. `auto` must not
+           raise for a reason the caller did not ask for (the same principle
+           `solvers.select`'s own `_auto_sparse_triplet` states), so when
+           `torch.is_grad_enabled()` and either `rhs.requires_grad` or the operator's
+           assembled sparse `values` tensor requires grad, `auto` falls back to `gmres`
+           silently (this is a routing fact about THIS solve, not an environment fault, so
+           it never warns).
+
+        `"gmres_jacobi"`/`"gmres_ilu"` (Task 6) resolve to `method="gmres"` with a real
+        preconditioner -- `"jacobi"` (`1 / diag(A)`) or `"ilu"` (SciPy's incomplete LU of
+        `op.assemble_sparse()`, per instance) -- rather than plain GMRES under a name that
+        promises preconditioning. `preconditioner` is otherwise the only thing that changes:
+        the backend is still `"gmres"` (preconditioning is an internal detail of how gmres
+        converges, not a distinct backend `diagnostics["linear"]["backend"]` would name
+        differently). `"sparse_direct"` and `"direct"` pass straight through:
+        `preconditioner`/`restart` are irrelevant to both and `solvers.select.solve` ignores
+        them for those two methods.
+
+        `"gmres_ilu"` COST (Task 6 fix round 1): `"ilu"` factorises a fresh SciPy `spilu` PER
+        INSTANCE on every `gmres()` call (see `iterative._gmres_ilu_preconditioner`), and a
+        differentiable transport step calls `gmres` from BOTH `_LinearSolve.forward` and
+        `.backward` -- so one transport step under `"gmres_ilu"` pays that per-instance
+        factorisation TWICE, on every step, not once and reused across steps. `"sparse_direct"`
+        instead pays one full LU per solve (also per instance, also not reused) and then an
+        exact solve with no outer iteration; `"gmres_ilu"` pays a cheaper, incomplete
+        factorisation on both passes and then still iterates GMRES to convergence. This cost
+        shape, not iteration counts alone, is why Task 7's benchmark found it the clear loser
+        at every ensemble measured and why `auto` never chooses it.
+        """
+        if self.linear_solver == "gmres_jacobi":
+            return {"method": "gmres", "preconditioner": "jacobi", "restart": 30}
+        if self.linear_solver == "gmres_ilu":
+            return {"method": "gmres", "preconditioner": "ilu", "restart": 30}
+        if self.linear_solver == "gmres":
+            return {"method": "gmres", "preconditioner": None, "restart": 30}
+        if self.linear_solver == "auto":
+            if batch_size <= _SPARSE_DIRECT_MAX_BATCH and self._auto_sparse_direct_ok(op, rhs):
+                return {"method": "sparse_direct", "preconditioner": None, "restart": 30}
+            return {"method": "gmres", "preconditioner": None, "restart": 30}
+        return {"method": self.linear_solver, "preconditioner": None, "restart": 30}
+
+    def _auto_sparse_direct_ok(self, op, rhs: torch.Tensor | None) -> bool:
+        """Whether `"auto"` may resolve to `sparse_direct` right now -- the two hazards in
+        `_resolve_solver`'s docstring, hazard 2 first (cheaper: no import, and usually a
+        no-op because `op`/`rhs` are `None` or grad is disabled), hazard 1 second. Within
+        hazard 2 itself, `rhs.requires_grad` is tested before `assemble_sparse()` is ever
+        called: it is a plain attribute read, whereas `assemble_sparse()` is a real sparse
+        assembly, so a grad-enabled `on_failure="return"` solve whose rhs already requires
+        grad returns False without paying for it.
+        """
+        global _WARNED_AUTO_NEEDS_SCIPY
+        if op is not None and rhs is not None and torch.is_grad_enabled():
+            if rhs.requires_grad:
+                return False
+            values_require_grad = False
+            assemble_sparse = getattr(op, "assemble_sparse", None)
+            if assemble_sparse is not None:
+                triplet = assemble_sparse()
+                values_require_grad = triplet is not None and bool(triplet[2].requires_grad)
+            if values_require_grad:
+                return False
+        if not _scipy_sparse_linalg_importable():
+            if not _WARNED_AUTO_NEEDS_SCIPY:
+                _WARNED_AUTO_NEEDS_SCIPY = True
+                warnings.warn(
+                    f"noodl: TransportLayer '{self.name}' linear_solver='auto' would have "
+                    f"factorised this solve with SciPy's sparse LU (batch size at or under "
+                    f"{_SPARSE_DIRECT_MAX_BATCH}), but scipy could not be imported, so it "
+                    f"fell back to plain gmres. The answer is correct; it is slower at small "
+                    f"batches (see the benchmark in docs/development-history.md). Install "
+                    f"the extra to get the documented default: pip install noodl[sparse]. "
+                    f"This warning is issued once per process; diagnostics['linear']"
+                    f"['backend'] reports the backend that actually ran on every solve.",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
+            return False
+        return True
 
     def _conduction_matrix(self, dtype: torch.dtype) -> torch.Tensor | None:
         """The (..., n, n) conduction Laplacian `A_c diag(g) A_c^T`, or None if no conduction.
@@ -670,6 +941,7 @@ class TransportLayer:
         on_failure: str = "raise",
         capacity: torch.Tensor | None = None,
         capacity_prev: torch.Tensor | None = None,
+        diagnostics: dict | None = None,
     ) -> torch.Tensor:
         """Advance one timestep under `self.scheme`.
 
@@ -701,11 +973,16 @@ class TransportLayer:
         Delegates to `_step` with `want_transfer=False`, which never requests the exact
         scheme's integral accumulator -- the diagonal shift that makes a sealed pure-decay
         zone cost one Taylor term stays available on this path (see `_expm_action`).
+
+        `diagnostics` (keyword-only, Task 5 B2), when a dict is passed, is filled with this
+        step's `"linear"` entry (`{"backend", "iterations", "residual"}`) for `"implicit"`
+        and `"trapezoidal"` -- see `_LinearSolve`'s docstring for exactly what it holds and
+        when. `scheme="exact"` has no linear solve, so it leaves `diagnostics` untouched.
         """
         return self._step(
             x, q, sources, x_boundary, dt,
             on_failure=on_failure, capacity=capacity, capacity_prev=capacity_prev,
-            want_transfer=False,
+            want_transfer=False, diagnostics=diagnostics,
         )[0]
 
     def step_with_transfer(
@@ -719,6 +996,7 @@ class TransportLayer:
         on_failure: str = "raise",
         capacity: torch.Tensor | None = None,
         capacity_prev: torch.Tensor | None = None,
+        diagnostics: dict | None = None,
     ) -> TransportStep:
         """Advance one timestep under `self.scheme`, like `step`, and also report the
         time-integrated amount that crossed each boundary node during the step.
@@ -749,6 +1027,7 @@ class TransportLayer:
         `on_failure="return"` is refused (`ValueError` naming the layer): no `SolveResult`
         carries a boundary transfer, so there is nothing sensible to return the raw solver
         status alongside. `capacity`/`capacity_prev` behave exactly as in `step`.
+        `diagnostics` (keyword-only, Task 5 B2) behaves exactly as in `step`.
         """
         if on_failure == "return":
             raise ValueError(
@@ -759,7 +1038,7 @@ class TransportLayer:
         result, transfer = self._step(
             x, q, sources, x_boundary, dt,
             on_failure=on_failure, capacity=capacity, capacity_prev=capacity_prev,
-            want_transfer=True,
+            want_transfer=True, diagnostics=diagnostics,
         )
         return TransportStep(result, transfer)
 
@@ -775,6 +1054,7 @@ class TransportLayer:
         capacity: torch.Tensor | None = None,
         capacity_prev: torch.Tensor | None = None,
         want_transfer: bool = False,
+        diagnostics: dict | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Shared body of `step` and `step_with_transfer`; see both for the public contract.
 
@@ -848,13 +1128,15 @@ class TransportLayer:
             result = expm.x
         elif self.scheme == "implicit":
             result, reduced = self._implicit_step_sparse(
-                x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t
+                x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t,
+                diagnostics=diagnostics,
             )
             if on_failure == "return":
                 return result, None
         elif self.scheme == "trapezoidal":
             result, reduced = self._trapezoidal_step_sparse(
-                x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t
+                x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t,
+                diagnostics=diagnostics,
             )
             if on_failure == "return":
                 return result, None
@@ -885,6 +1167,7 @@ class TransportLayer:
     def steady(
         self, q: torch.Tensor, sources: torch.Tensor, x_boundary: torch.Tensor,
         *, on_failure: str = "raise", capacity: torch.Tensor | None = None,
+        diagnostics: dict | None = None,
     ) -> torch.Tensor:
         """Solve `0 = M x + N x_b + sources / capacity` for the steady-state `x`.
 
@@ -897,7 +1180,11 @@ class TransportLayer:
         is not a plain `Tensor`, so it cannot be a single `torch.autograd.Function`'s output
         the way the default `Tensor` return is. Return type on that path is therefore
         `torch.Tensor | SolveResult` (amendment A8). `capacity` (keyword-only, spec 4.6b)
-        overrides the construction-time capacity for this call only.
+        overrides the construction-time capacity for this call only. `diagnostics`
+        (keyword-only, Task 5 B2), when a dict is passed, is filled with this solve's
+        `"linear"` entry on the `on_failure="raise"` path only -- see `_LinearSolve`'s
+        docstring; the `on_failure="return"` path already gives the caller the full
+        `SolveResult` directly and leaves `diagnostics` untouched.
         """
         if on_failure not in ("raise", "return"):
             raise ValueError(
@@ -922,13 +1209,16 @@ class TransportLayer:
 
         if on_failure == "return":
             op, rhs = build_system(q, sources, x_boundary, cap_t, *coef)
+            solver_kwargs = self._resolve_solver(rhs.shape[:-1].numel(), op=op, rhs=rhs)
+            method = solver_kwargs.pop("method")
             return _solve_operator(
-                op, rhs, method="auto", on_failure="return",
-                where=f"TransportLayer '{self.name}' steady",
+                op, rhs, method=method, on_failure="return",
+                where=f"TransportLayer '{self.name}' steady", **solver_kwargs,
             )
         x_s = _linear_solve(
             build_system, f"TransportLayer '{self.name}' steady",
             q, sources, x_boundary, cap_t, *coef,
+            resolve_solver=self._resolve_solver, diagnostics=diagnostics,
         )
         return self._from_stacked(x_s, self.n_i, reduced)
 
@@ -937,6 +1227,7 @@ class TransportLayer:
         x_boundary: torch.Tensor, dt: float, on_failure: str,
         capacity: torch.Tensor | None = None,
         capacity_prev: torch.Tensor | None = None,
+        diagnostics: dict | None = None,
     ) -> torch.Tensor:
         """Backward Euler on the AMOUNT `V x`: `V_new x_{n+1} - V_old x_n = dt F(x_{n+1})`,
         with `F(x) = G x + N_raw x_b + s` the capacity-FREE amount rate (`G`, `N_raw` the
@@ -975,14 +1266,17 @@ class TransportLayer:
 
         if on_failure == "return":
             system, rhs = build_system(x, q, sources, x_boundary, cap_t, cap_prev_t, *coef)
+            solver_kwargs = self._resolve_solver(rhs.shape[:-1].numel(), op=system, rhs=rhs)
+            method = solver_kwargs.pop("method")
             result = _solve_operator(
-                system, rhs, method="auto", on_failure="return",
-                where=f"TransportLayer '{self.name}' implicit step",
+                system, rhs, method=method, on_failure="return",
+                where=f"TransportLayer '{self.name}' implicit step", **solver_kwargs,
             )
             return result, reduced
         x_s = _linear_solve(
             build_system, f"TransportLayer '{self.name}' implicit step",
             x, q, sources, x_boundary, cap_t, cap_prev_t, *coef,
+            resolve_solver=self._resolve_solver, diagnostics=diagnostics,
         )
         return x_s, reduced
 
@@ -991,6 +1285,7 @@ class TransportLayer:
         x_boundary: torch.Tensor, dt: float, on_failure: str,
         capacity: torch.Tensor | None = None,
         capacity_prev: torch.Tensor | None = None,
+        diagnostics: dict | None = None,
     ) -> torch.Tensor:
         """Crank-Nicolson on the AMOUNT `V x`: `V_new x_{n+1} - V_old x_n =
         dt/2 (F(x_{n+1}) + F(x_n))`, with `F(x) = G x + N_raw x_b + s` the capacity-FREE
@@ -1043,14 +1338,17 @@ class TransportLayer:
 
         if on_failure == "return":
             system, rhs = build_system(x, q, sources, x_boundary, cap_t, cap_prev_t, *coef)
+            solver_kwargs = self._resolve_solver(rhs.shape[:-1].numel(), op=system, rhs=rhs)
+            method = solver_kwargs.pop("method")
             result = _solve_operator(
-                system, rhs, method="auto", on_failure="return",
-                where=f"TransportLayer '{self.name}' trapezoidal step",
+                system, rhs, method=method, on_failure="return",
+                where=f"TransportLayer '{self.name}' trapezoidal step", **solver_kwargs,
             )
             return result, reduced
         x_s = _linear_solve(
             build_system, f"TransportLayer '{self.name}' trapezoidal step",
             x, q, sources, x_boundary, cap_t, cap_prev_t, *coef,
+            resolve_solver=self._resolve_solver, diagnostics=diagnostics,
         )
         return x_s, reduced
 

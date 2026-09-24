@@ -233,10 +233,19 @@ def compare_solvers(repeats: int = 3, *, forward: bool = True, backward: bool = 
             for r in rows
             if r["direction"] == direction and r["ensemble"] == ensemble
         }
-        speedup = by_solver["auto"] / by_solver["sparse_direct"]
+        # `by_solver["auto"]` would KeyError: COMPARE_SOLVERS is ("cg", "sparse_direct"), not
+        # ("auto", "sparse_direct") -- "auto" now resolves TO sparse_direct for a certified-SPD
+        # operator (see COMPARE_SOLVERS's comment above), so comparing against the literal name
+        # "auto" would either miss every row or compare sparse_direct against itself. Divide by
+        # the first solver actually measured for this (direction, ensemble) instead, whichever
+        # name that is, so the ratio is always well defined for the solvers this function ran.
+        baseline_solver = next(
+            r["solver"] for r in rows if r["direction"] == direction and r["ensemble"] == ensemble
+        )
+        speedup = by_solver[baseline_solver] / by_solver["sparse_direct"]
         print(
             f"{direction:<8} ensemble={ensemble:>4}: sparse_direct is {speedup:.2f}x "
-            f"{'faster' if speedup > 1 else 'SLOWER'} than auto"
+            f"{'faster' if speedup > 1 else 'SLOWER'} than {baseline_solver}"
         )
     return rows
 

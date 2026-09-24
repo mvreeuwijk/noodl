@@ -23,7 +23,9 @@ may also declare `state_keys`, keys it carries across steps itself (spec 4.6a); 
 copied from its return into the returned state, evaluated from the step-start state in
 every pass of a coupling that takes more than one (N1) -- never fed forward from an earlier
 pass's own output, which would integrate a stateful closure once per pass instead of once
-per step.
+per step. A `coupling="iterate"` step started without such a key already in the step-start
+state warns by name (`RuntimeWarning`, A3): N1's pinning has nothing to pin on that step, so
+the closure integrates once per pass instead of once per step until the key is seeded.
 
 `**solve_kwargs` of `step`/`steady` reach the POTENTIAL solves only (`differentiable`,
 `on_failure`, `method`, Newton kwargs). Transport steps always raise on failure.
@@ -38,6 +40,7 @@ Newton's mask is). Failure follows the layers: raise by default, naming the offe
 from __future__ import annotations
 
 import inspect
+import warnings
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
@@ -137,7 +140,11 @@ class Model:
     out of it is stepped every pass but not tested, which is what a species layer whose mass
     fractions are ~1e-3 wants when a thermal layer in kelvin sets the pace. Convergence is
     decided per batch instance, and a batch that does not converge within `iterate_max`
-    raises, naming the instances (`on_failure="return"` with `diagnostics` returns instead).
+    raises, naming the instances (`on_failure="return"` with `diagnostics` returns instead --
+    but only when nothing differentiable reached the state on this call, e.g. under
+    `torch.no_grad()` or with `differentiable=False`; a non-converged iteration has no fixed
+    point to differentiate, so `on_failure="return"` still raises, naming that reason, when a
+    gradient was wanted (A2)).
 
     The onion's fixed point is differentiated IMPLICITLY, not by unrolling the passes: the
     primal passes carry no graph, and after convergence the certified pass runs once more on
@@ -150,7 +157,11 @@ class Model:
     interface is linear. Backward memory is one pass rather than all of them (P1-2).
     `diagnostics["adjoint"]` says whether that pass ran: `"implicit"` when it did, `None`
     when nothing differentiable reached the state (or the iteration did not converge) and no
-    extra pass was needed.
+    extra pass was needed. `diagnostics["adjoint_batched"]` says whether that solve ran as one
+    independent GMRES system per batch instance (every state key the pass recomputes carrying
+    the batch as its leading dims) or, when some key does not (a value shared across
+    instances), as today's single system flattened over the whole interface; `False` when
+    `"adjoint"` is `None` too.
     """
 
     def __init__(
@@ -533,6 +544,13 @@ class Model:
         (no diagonal shift on the `exact` scheme's Taylor accumulator, milestone 5 R2 review
         finding) on layers whose transfer nothing reads.
 
+        `diag[name]["linear"]` (Task 5, B2), when this transport layer's `scheme` runs a
+        linear solve (`"implicit"`, `"trapezoidal"`; not `"exact"`), is the LAST substep's
+        `{"backend", "iterations", "residual"}` from `TransportLayer.step`'s own
+        `diagnostics=` out-parameter -- see `TransportLayer._resolve_solver` and
+        `layers.transport._LinearSolve` for what each entry means and how `linear_solver`
+        resolves to it. Absent for `scheme="exact"`, which has no linear solve to report.
+
         `produced` (a keyword out-parameter, like `_apply_closures`'s `written` and `solve`'s
         `diagnostics`; `None` by default, so every other caller is unaffected) is REPLACED
         with the state keys this pass actually RECOMPUTED, in write order. The returned state
@@ -623,6 +641,13 @@ class Model:
             # layer. Shape and positivity are checked by the layer, naming the nodes.
             cap = drv.get(f"{name}.capacity")
             transfer_total = None
+            # Task 5 (B2): a fresh dict per layer, threaded into `steady`/`step`/
+            # `step_with_transfer` as an out-parameter and read back below into
+            # `diag[name]["linear"]`. Only the LAST substep's entry survives (each substep
+            # overwrites it), matching how `diag[name]["substeps"]` already reports a count
+            # rather than a per-substep history. A scheme with no linear solve (`"exact"`)
+            # leaves this dict empty, so no `"linear"` key is added.
+            layer_diag: dict = {}
             if dt is None:
                 if sources is None:
                     # The state's own `x` is the layout authority when it is there; `x_b`
@@ -633,7 +658,7 @@ class Model:
                         if like is None
                         else self._zero_sources(layer, like, layer.n_i)
                     )
-                x = layer.steady(q_kind, sources, xb, capacity=cap)
+                x = layer.steady(q_kind, sources, xb, capacity=cap, diagnostics=layer_diag)
             else:
                 x = base.get(f"{name}.x")
                 if x is None:
@@ -664,6 +689,7 @@ class Model:
                         stepped = layer.step_with_transfer(
                             x, q_kind, sources, xb, dt / k,
                             capacity=cap_j, capacity_prev=cap_prev_j,
+                            diagnostics=layer_diag,
                         )
                         x = stepped.x
                         transfer_total = (
@@ -672,7 +698,7 @@ class Model:
                         )
                     else:
                         x = layer.step(x, q_kind, sources, xb, dt / k, capacity=cap_j,
-                                       capacity_prev=cap_prev_j)
+                                       capacity_prev=cap_prev_j, diagnostics=layer_diag)
                 if cap is not None:
                     new[f"{name}.capacity"] = cap
                     made.append(f"{name}.capacity")
@@ -682,6 +708,8 @@ class Model:
             new[f"{name}.x"] = x
             made.append(f"{name}.x")
             diag[name] = {"substeps": self.substeps[name]}
+            if "linear" in layer_diag:
+                diag[name]["linear"] = layer_diag["linear"]
             if want_transfer:
                 diag[name]["boundary_transfer"] = transfer_total
         # Closure-carried state (spec 4.6a): a declared key is copied OUT of the closure's
@@ -866,6 +894,18 @@ class Model:
         would scale `(I - G_z)^-1` by 1/relaxation and return a gradient wrong by that
         factor.
         """
+        missing = [k for k in self.closure_state_keys if k not in state]
+        if missing:
+            warnings.warn(
+                f"Model: coupling='iterate' started a step without the closure-carried state "
+                f"{missing} in the step-start state. On this step the key is not pinned to the "
+                f"step start (rule N1 pins only keys the state carries), so its closure "
+                f"integrates once per pass instead of once per step and the adjoint omits its "
+                f"compounding path. Seed it before the first step (the application's "
+                f"initial_state helper, or Model.initial_capacities for capacities).",
+                RuntimeWarning,
+                stacklevel=4,
+            )
         fed: State = dict(state)
         # The fed state of the pass being run RIGHT NOW. Equal to `fed` on the converged
         # exit, which breaks before `fed` is rebuilt, but named separately so that a later
@@ -931,6 +971,13 @@ class Model:
                 f"passes for instances {failing}; largest change per layer {worst}, "
                 f"tolerances {self.iterate_tol}"
             )
+            if needs_adjoint:
+                raise RuntimeError(
+                    message + "; a gradient was requested and a non-converged iteration has "
+                    "no fixed point to differentiate, so on_failure='return' cannot return a "
+                    "state here (it returns the primal state only when nothing requires a "
+                    "gradient, e.g. under torch.no_grad() or with differentiable=False)"
+                )
             if not (solve_kwargs.get("on_failure") == "return" and diagnostics is not None):
                 raise RuntimeError(message)
         # A key `_pass` does not write is carried through it verbatim, pass after pass, so
@@ -942,6 +989,7 @@ class Model:
         written_here = set(produced)
         carried = {k: v for k, v in state.items() if k not in written_here}
         adjoint: str | None = None
+        adjoint_batched = False
         if needs_adjoint and bool(converged.all()):
             # `k in certified_fed` only guards the impossible: every produced key is in the
             # previous pass's output and so in the fed state of any pass after the first,
@@ -992,20 +1040,32 @@ class Model:
                     )
                 return [out[k] for k in out_keys], z_next
 
+            # `converged`'s shape IS the batch shape (it is judged per instance over every
+            # `iterate_tol` layer, never reduced further), so it names the leading dims a
+            # genuinely batched state key carries; a key some instances share unbatched
+            # fails that check and `differentiate_fixed_point` falls back to the flattened
+            # solve on its own. `batch_shape` also asserts (see that function's docstring)
+            # that instances do not couple through `pass_fn` -- true here because `_pass`
+            # advances every state key and layer per instance and `converged` is itself
+            # judged per instance, so nothing in the pass ever mixes one instance's state
+            # into another's.
+            adjoint_report: dict = {}
             flat = differentiate_fixed_point(
                 [certified_fed[k] for k in keys], pass_fn, rtol=self.adjoint_rtol,
                 where="Model coupling='iterate'",
+                batch_shape=tuple(converged.shape), report=adjoint_report,
             )
             new = dict(zip(out_keys, flat, strict=True))
             # The differentiated pass's own diagnostics, DETACHED: see `_detached`.
             diag = _detached(adjoint_diag)
             adjoint = "implicit"
+            adjoint_batched = bool(adjoint_report["batched"])
         else:
             new = {**new, **carried}
         if diagnostics is not None:
             diagnostics.update(
                 {"passes": passes, "converged": converged, "max_change": change,
-                 "layers": diag, "adjoint": adjoint}
+                 "layers": diag, "adjoint": adjoint, "adjoint_batched": adjoint_batched}
             )
         return new
 

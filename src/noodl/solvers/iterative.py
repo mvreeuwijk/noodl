@@ -5,6 +5,8 @@ instance -- the raise/return boundary lives in solvers/select.py (Task 7), one l
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import torch
 
 from noodl.operators.base import SolveResult, SolverStatus
@@ -158,6 +160,106 @@ def pcg(
     )
 
 
+def _gmres_jacobi_preconditioner(op, batch_shape: torch.Size, m: int) -> Callable[[Tensor], Tensor]:
+    """gmres's `"jacobi"` preconditioner: `M^-1 = 1 / diag(A)`, broadcast over the batch and
+    flattened to gmres's own `(B, m)` working shape -- built once per call, applied every
+    Arnoldi step as an elementwise product (no dependence on `k`).
+    """
+    diag = op.diagonal().expand(*batch_shape, m)
+    m_inv_flat = (1.0 / diag).reshape(-1, m)
+
+    def apply(v_flat: Tensor) -> Tensor:
+        return m_inv_flat * v_flat
+
+    return apply
+
+
+def _gmres_ilu_preconditioner(
+    op, batch_shape: torch.Size, B: int, m: int, dtype: torch.dtype, device: torch.device
+) -> Callable[[Tensor], Tensor]:
+    """gmres's `"ilu"` preconditioner: SciPy's incomplete LU with `drop_tol=0, fill_factor=1`
+    (ILU(0) in effect: nothing is dropped, so the factorisation keeps every fill entry),
+    factorised PER INSTANCE from `op.assemble_sparse()`'s COO triplet -- the same per-instance
+    Python loop and batch-flattening `solvers.select._sparse_direct` uses, reused here rather
+    than reinvented.
+
+    COST (fix round 1, undocumented before): this function is called ONCE PER `gmres()` CALL,
+    and it factorises `spilu` PER INSTANCE in a Python loop, same as `_sparse_direct` -- there
+    is no batched SuperLU entry point, so the cost is linear in the ensemble size, same shape
+    as `_sparse_direct`'s documented limitation. Unlike `_sparse_direct`, this is NOT a one-off
+    per solve: `_LinearSolve.forward` and `.backward` (`noodl.operators.solve`) each call
+    `gmres` independently, so a single differentiable transport step under `preconditioner=
+    "ilu"` factorises TWICE per step -- once for the forward solve, once for the adjoint --
+    on every step, not once and reused. Compare with `sparse_direct`: one full LU per solve,
+    then an exact (to rounding) solve with no outer iteration; `"ilu"` instead pays a
+    (cheaper, incomplete) factorisation on both passes and then still iterates GMRES to
+    convergence, so the trade is fewer, better-conditioned Arnoldi steps against strictly
+    more total factorisations than `sparse_direct` needs. See `TransportLayer._resolve_solver`
+    for how this reaches a transport step, and `gmres`'s own docstring for the same note next
+    to `"ilu"`.
+
+    Both refusals below are `ValueError`, not `ImportError`/`AttributeError`: `"ilu"` is an
+    EXPLICIT request (never a fall-back, unlike `select.solve`'s `"auto"`), so a missing
+    capability is refused by name rather than silently substituted.
+    """
+    assemble_sparse = getattr(op, "assemble_sparse", None)
+    triplet = assemble_sparse() if assemble_sparse is not None else None
+    if triplet is None:
+        raise ValueError(
+            f"gmres: preconditioner='ilu' requires op.assemble_sparse() to return a "
+            f"(row, col, values) COO triplet, but this operator "
+            f"{'returned None' if assemble_sparse is not None else 'has no assemble_sparse'}"
+        )
+    try:
+        import scipy.sparse
+        import scipy.sparse.linalg
+    except ImportError as exc:
+        raise ValueError(
+            f"gmres: preconditioner='ilu' requires scipy (scipy.sparse and "
+            f"scipy.sparse.linalg), which could not be imported: {exc}. Install scipy, or "
+            f"use preconditioner=None, 'jacobi' or a callable."
+        ) from exc
+
+    row, col, values = triplet
+    nnz = int(row.shape[-1])
+    values_flat = values.expand(*batch_shape, nnz).reshape(B, nnz)
+    row_np = row.detach().cpu().numpy()
+    col_np = col.detach().cpu().numpy()
+    # SuperLU has single- and double-precision kernels only; factorise in float64 and cast
+    # back, mirroring `_sparse_direct`'s handling of the same constraint.
+    values_np = values_flat.detach().cpu().to(torch.float64).numpy()
+
+    lus = []
+    for i in range(B if m > 0 else 0):
+        A_i = scipy.sparse.csc_matrix((values_np[i], (row_np, col_np)), shape=(m, m))
+        lus.append(scipy.sparse.linalg.spilu(A_i, drop_tol=0, fill_factor=1))
+
+    def apply(v_flat: Tensor) -> Tensor:
+        v_np = v_flat.detach().cpu().to(torch.float64).numpy()
+        out_np = v_np.copy()
+        for i in range(B if m > 0 else 0):
+            out_np[i] = lus[i].solve(v_np[i])
+        return torch.from_numpy(out_np).to(device=device, dtype=dtype)
+
+    return apply
+
+
+def _gmres_callable_preconditioner(
+    fn: Callable[[Tensor], Tensor], batch_shape: torch.Size, m: int, B: int
+) -> Callable[[Tensor], Tensor]:
+    """Wraps a caller-supplied preconditioner (applied "as given", per the brief) so it can
+    sit next to `mv` in gmres's flattened-batch working shape: reshape flat -> the caller's
+    natural `batch_shape + (m,)`, call it, reshape back.
+    """
+
+    def apply(v_flat: Tensor) -> Tensor:
+        v = v_flat.reshape(*batch_shape, m)
+        out = fn(v)
+        return out.reshape(B, m)
+
+    return apply
+
+
 def gmres(
     op,
     b: Tensor,
@@ -167,6 +269,7 @@ def gmres(
     max_iter: int | None = None,
     restart: int = 30,
     x0: Tensor | None = None,
+    preconditioner: str | Callable[[Tensor], Tensor] | None = None,
 ) -> SolveResult:
     """Restarted GMRES for nonsymmetric operators: Arnoldi (modified Gram-Schmidt) with
     incremental Givens rotations, per-instance status, never raises.
@@ -186,6 +289,42 @@ def gmres(
     the Hessenberg system, Givens coefficients and Krylov basis are naturally rectangular
     per-instance state that is far simpler to index with one flat batch axis than with
     arbitrary leading dims, unlike pcg's per-element vector ops which need no such reshape.
+
+    `preconditioner` (Task 6) is a LEFT preconditioner: Arnoldi runs on `M^-1 A` with
+    `M^-1 b`, so the per-cycle Givens residual estimate (`g[:, k+1]`) is in the
+    PRECONDITIONED scale. The quantity that gates convergence -- `beta`/`r`, compared
+    against `tol` -- is always the TRUE, unpreconditioned residual `b - A x`, recomputed via
+    the ordinary (unpreconditioned) `mv` at every cycle end and at exit, exactly as it
+    already was before this parameter existed; `preconditioner=None` takes that original
+    code path completely unchanged (`r`/`beta` are aliased, not recomputed, so this is
+    bit-identical to gmres before Task 6). `"jacobi"` is `1 / diag(A)`; `"ilu"` is SciPy's
+    incomplete LU of `op.assemble_sparse()`, per instance (see `_gmres_ilu_preconditioner`,
+    including its FACTORISATION COST -- read that before choosing `"ilu"`); a callable is
+    applied as given, on vectors of the operator's own `batch_shape + (m,)`. Breakdown
+    detection is unaffected in meaning: it operates on whatever Arnoldi sees, which is now
+    `M^-1 A v_k`.
+
+    `iterations` (fix round 1): unpreconditioned, this is the exact within-cycle step at
+    which the Givens estimate first met `tol` -- unchanged, and bit-identical, from before
+    Task 6, because that estimate already IS the true-scale residual there. PRECONDITIONED,
+    the Givens estimate is in `M^-1`-weighted units while `tol` is built from `||b||`, so
+    the two scales generally disagree and the in-cycle estimate cannot be trusted to report
+    the true convergence step -- measured on this module's own stiff fixture
+    (`tests/solvers/test_iterative.py::_stiff_diag_spread_system`, Jacobi, `restart=15`),
+    the estimate crossed `tol` at step 13 while the TRUE residual, recomputed at cycle end,
+    first did at step 14. `iterations` is therefore CYCLE-GRANULAR under a preconditioner:
+    the matvec count through the end of whichever cycle's TRUE recompute first satisfied
+    `tol` (`total_matvecs + cycle_len` for that cycle), never the in-cycle estimate. This
+    can overshoot the true step (by up to `restart - 1`) but is guaranteed to never
+    undershoot it, unlike the in-cycle estimate.
+
+    `"jacobi"` divides by `op.diagonal()` unguarded: a zero diagonal entry produces `inf`
+    then `nan` in that entry of `M^-1 r`, which fails safe through the true-residual gate
+    (an instance whose Arnoldi state has gone non-finite will not satisfy `beta <= tol` and
+    so is reported MAX_ITER, never a wrong CONVERGED) but silently -- there is no explicit
+    check or message, matching pcg's own pre-existing Jacobi. A caller with a zero (or
+    near-zero) diagonal entry should treat `"jacobi"` as unusable for that operator and use
+    `None`, `"ilu"` or a callable instead.
     """
     if restart < 1:
         raise ValueError(f"gmres: restart must be >= 1, got {restart!r}")
@@ -213,6 +352,22 @@ def gmres(
     def mv(v_flat: Tensor) -> Tensor:
         v = v_flat.reshape(batch_shape + (m,))
         return op.matvec(v).reshape(B, m)
+
+    # Built once per call, applied every Arnoldi step. `precond_apply is None` is the
+    # untouched pre-Task-6 path: `mv_pre` becomes `mv` itself (no wrapper, no extra call),
+    # which is what makes `preconditioner=None` bit-identical to gmres before this parameter
+    # existed -- see the docstring.
+    if preconditioner is None:
+        precond_apply = None
+    elif callable(preconditioner):
+        precond_apply = _gmres_callable_preconditioner(preconditioner, batch_shape, m, B)
+    elif preconditioner == "jacobi":
+        precond_apply = _gmres_jacobi_preconditioner(op, batch_shape, m)
+    elif preconditioner == "ilu":
+        precond_apply = _gmres_ilu_preconditioner(op, batch_shape, B, m, dtype, device)
+    else:
+        raise ValueError(f"gmres: unknown preconditioner {preconditioner!r}")
+    mv_pre = mv if precond_apply is None else (lambda v: precond_apply(mv(v)))
 
     b_norm = torch.linalg.vector_norm(b_flat, dim=-1)
     tol = torch.clamp(rtol * b_norm, min=atol)
@@ -256,9 +411,19 @@ def gmres(
         sn = torch.zeros(B, cycle_len, dtype=dtype, device=device)
         g = torch.zeros(B, cycle_len + 1, dtype=dtype, device=device)
 
-        beta_safe = torch.where(beta > 0, beta, torch.ones_like(beta))
-        V[:, 0, :] = torch.where(active.unsqueeze(-1), r / beta_safe.unsqueeze(-1), V[:, 0, :])
-        g[:, 0] = torch.where(active, beta, g[:, 0])
+        # `r0`/`beta0` are what Arnoldi actually starts from: the TRUE residual `r`/`beta`
+        # when unpreconditioned (aliased, not recomputed -- this is the bit-identical path),
+        # or the PRECONDITIONED residual `M^-1 r` otherwise. `r`/`beta` themselves are never
+        # touched here: they still hold the true residual from the last cycle end (or the
+        # initial one), which is what the outer `converged`/`active` test above is based on.
+        if precond_apply is None:
+            r0, beta0 = r, beta
+        else:
+            r0 = precond_apply(r)
+            beta0 = torch.linalg.vector_norm(r0, dim=-1)
+        beta0_safe = torch.where(beta0 > 0, beta0, torch.ones_like(beta0))
+        V[:, 0, :] = torch.where(active.unsqueeze(-1), r0 / beta0_safe.unsqueeze(-1), V[:, 0, :])
+        g[:, 0] = torch.where(active, beta0, g[:, 0])
 
         step_converged_at = torch.full((B,), cycle_len, dtype=torch.long, device=device)
 
@@ -282,7 +447,11 @@ def gmres(
             # first, or autograd's version counter (tracked per-storage, not per-slice) sees
             # a mismatch at backward time. Same reasoning as the `h_j`/`h_j1`/`g_k` clones
             # below and the `h_kk` clone above.
-            w = mv(V[:, k, :].clone())
+            # `mv_pre` is `M^-1 A` (or plain `A` when unpreconditioned) -- Arnoldi's own
+            # matvec, distinct from the plain `mv` used below to recompute the TRUE
+            # residual at cycle end. Breakdown detection (`w_norm`, `h_next` below) operates
+            # on whatever this is, per the docstring.
+            w = mv_pre(V[:, k, :].clone())
             w_norm = torch.linalg.vector_norm(w, dim=-1)
             for j in range(k + 1):
                 v_j = V[:, j, :].clone()
@@ -371,9 +540,23 @@ def gmres(
         beta = torch.linalg.vector_norm(r, dim=-1)
         newly_converged = active & (beta <= tol)
 
-        iterations = torch.where(
-            active, total_matvecs + step_converged_at.clamp(max=cycle_len), iterations
+        # `step_converged_at` is measured in PRECONDITIONED units (the Givens estimate is
+        # ||M^-1(b - A x_k)||, compared above against `tol`, which is built from the
+        # TRUE-scale ||b||): unpreconditioned, that estimate already IS the true-scale
+        # residual, so the within-cycle count is exact and this is the untouched, bit-
+        # identical pre-Task-6 expression. Preconditioned, the two scales generally
+        # disagree -- reproduced on the shipped stiff fixture, where the estimate crosses
+        # `tol` one step before the TRUE residual (recomputed as `beta` just above) actually
+        # does -- so the within-cycle count cannot be trusted there; this reports the
+        # CYCLE-GRANULAR count instead (every matvec actually spent in the cycle that
+        # produced the `x` whose true residual just met `tol`), which can only be >= the
+        # true step and is therefore never a false "converged early".
+        cycle_count = (
+            step_converged_at.clamp(max=cycle_len)
+            if precond_apply is None
+            else torch.full_like(step_converged_at, cycle_len)
         )
+        iterations = torch.where(active, total_matvecs + cycle_count, iterations)
         total_matvecs = total_matvecs + torch.where(
             active, torch.full_like(total_matvecs, cycle_len), torch.zeros_like(total_matvecs)
         )

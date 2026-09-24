@@ -133,6 +133,27 @@ the storage at the state's own time, which `Model.initial_capacities(state, driv
 querying the closures. The `"exact"` scheme has no changing-capacity form and raises by name if
 `capacity_prev` differs from `capacity`.
 
+**Linear solver.** The `"implicit"` and `"trapezoidal"` schemes each need one linear solve per
+step (`"exact"` has none). `linear_solver` names it: `"auto"` (the default), `"gmres"`,
+`"gmres_jacobi"`, `"gmres_ilu"`, `"sparse_direct"` or `"direct"`, resolved fresh on every solve
+(unlike `PotentialFlowLayer.linear_solver`, which is fixed for the layer's lifetime). `"auto"`
+picks `"sparse_direct"` (SciPy's sparse LU, one exact factor-and-solve, no outer iteration) at or
+under a batch cap of 32 instances, and plain `"gmres"` above it — chosen on an interleaved
+forward/backward benchmark across the whole family (`gmres`, `gmres_jacobi`, `gmres_ilu`,
+`sparse_direct`), not on iteration counts alone; see the dated decision record in
+`docs/development-history.md` for the full table. `"auto"` never picks
+`gmres_jacobi`/`gmres_ilu`: the benchmark found `gmres_ilu`'s per-instance ILU factorisation cost
+(paid twice per differentiable step — once in the forward solve, once in the backward adjoint,
+since preconditioning is not reused across the two) the clear loser at every batch size measured,
+and the gmres-vs-`gmres_jacobi` ordering too close to the run-to-run spread to trust as a
+tie-break. Two fall-backs, both silent (never a raise, since `"auto"` is a promise to choose a
+backend that works): SciPy absent (`"auto"` would have factorised, but the optional `noodl[sparse]`
+extra is not installed) falls back to `gmres` and warns once per process; a grad-requiring solve
+on the `on_failure="return"` early-return path (which runs outside the differentiable path's own
+`no_grad`, unlike `step`'s ordinary forward/backward) falls back to `gmres` silently, since an
+explicit `sparse_direct` there would otherwise raise for a reason the caller did not ask for.
+`diagnostics["linear"]["backend"]` reports which backend actually ran on every solve.
+
 ## `ConstitutiveLayer`
 
 The loop formulation, for the one case `PotentialFlowLayer` cannot express: a branch law

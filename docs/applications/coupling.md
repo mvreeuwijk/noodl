@@ -377,8 +377,13 @@ is set.
   itself — is not available.
 - **`Model.current_flows`'s first-pass branch re-solves** the owning potential layer from scratch
   rather than reusing the pass's own upcoming solve. A recorded inefficiency.
-- **The adjoint GMRES solves the interface flattened across the batch.** The interface Jacobian
-  is block-diagonal across batch instances, but the solve does not exploit that yet, so with `B`
-  batched instances it can need up to `B` times the matvecs a single instance would — the results
-  are still correct, only the adjoint solve's cost is worse than it needs to be. A per-instance
-  solve is a planned follow-up (`solvers.fixed_point`'s module docstring records the same point).
+- **The adjoint GMRES solves one independent system per batch instance when every interface
+  tensor carries the batch shape as its leading dims.** That is a documented precondition on
+  the caller (`_iterate` passes it because its instances do not couple through the pass), checked
+  only by shape, not proven from it; `union`'s own `_iterate` passes it too. When some interface
+  entry does not carry the batch shape (a value shared across instances, which genuinely
+  couples them), the solve falls back to the interface flattened across the whole batch, whose
+  cost can need up to `B` times the matvecs a single instance would for `B` batched instances.
+  `diagnostics["adjoint_batched"]` says which of the two ran; on the per-instance path the
+  adjoint's cost no longer scales with batch size (`solvers.fixed_point`'s module docstring has
+  the full contract).

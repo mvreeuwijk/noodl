@@ -438,13 +438,15 @@ def test_a_one_way_link_riding_on_the_iteration_carries_its_own_gradient():
 
 
 def test_the_adjoint_solves_a_batched_interface_per_instance():
-    """The interface is flattened across the batch before the adjoint GMRES solve, so a batch
-    of instances with DIFFERENT couplings has to come back with each instance's own
-    derivative. Weighted so a single scalar gradient cannot hide a per-instance error."""
+    """The link's forward value carries the batch as its leading dim, so (Task 9) the adjoint
+    solves one small system PER INSTANCE rather than flattening the whole batch into one --
+    `diagnostics["adjoint_batched"]` says so. A batch of instances with DIFFERENT couplings
+    still has to come back with each instance's own derivative either way. Weighted so a
+    single scalar gradient cannot hide a per-instance error."""
     n = 4
     weights = torch.arange(1.0, n + 1.0, dtype=F64)
 
-    def run(s):
+    def run(s, diagnostics=None):
         a = compartment("a", scheme="implicit")
         b_model, b_state, b_drivers = compartment(
             "b", scheme="implicit", circulation=True, initial=1.0)
@@ -457,11 +459,14 @@ def test_the_adjoint_solves_a_batched_interface_per_instance():
             [ValueLink("A", "a.x", 0, "B", "b.x_boundary", two_way=True)],
             iterate_rtol=1e-12, iterate_atol=1e-14, iterate_max=200,
         )
-        out = model.step(state, drivers, 1.0)
+        out = model.step(state, drivers, 1.0, diagnostics=diagnostics)
         return (out["A"]["a.x"].reshape(n) * weights).sum() + out["B"]["b.x"].sum()
 
     s = torch.tensor(0.3, dtype=F64, requires_grad=True)
-    (grad,) = torch.autograd.grad(run(s), (s,))
+    diagnostics: dict = {}
+    (grad,) = torch.autograd.grad(run(s, diagnostics), (s,))
+    assert diagnostics["adjoint"] == "implicit"
+    assert diagnostics["adjoint_batched"] is True
     h = 1e-6
     fd = (run(torch.tensor(0.3 + h, dtype=F64)) - run(torch.tensor(0.3 - h, dtype=F64))) / (2 * h)
     assert grad.item() == pytest.approx(fd.item(), rel=1e-6)

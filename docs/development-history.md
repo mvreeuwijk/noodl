@@ -1201,6 +1201,168 @@ all of them on branch `worktree-framework-hardening-3`. One line each, fix and m
   for GMRES on the advection system, and preconditioner quality for the potential layer's Newton
   solve under high conductance contrast. None of the three is implemented here.
 
+## Transport layer default linear solver, chosen on evidence (24 Sep 2026)
+
+The three items part 3 left open (above) are now implemented: a sparse COO form for
+`AdvectionOperator` (Task 4), a `linear_solver` option on `TransportLayer` resolved per solve
+with backend diagnostics (Task 5), left-preconditioned GMRES with Jacobi and ILU(0) (Task 6),
+an interleaved forward/adjoint benchmark of all four solvers (Task 7), and — this section — the
+transport layer's own `"auto"` default, chosen on that benchmark, plus the regenerated
+composed-model budget table.
+
+**The rule, written before the measurement.** From the plan's Task 8 brief: `"auto"` resolves
+to the solver with the lowest forward-plus-backward median at `e = 1` AND at `e = 32` if the
+same solver wins both; if the winners differ, `sparse_direct` up to the batch cap and the best
+gmres variant above it; if no variant beats plain `gmres` by more than the measured spread,
+`"auto"` stays `gmres` and the record says so. `PotentialFlowLayer`/`solvers.select.solve`'s own
+`"auto"` (the certified-SPD path) is a separate default and is untouched by this plan (ledger
+ruling B-1); this section is scoped to `TransportLayer._resolve_solver` alone.
+
+**Task 7's measurements** (`benchmarks/transport_solver_bench.json`, full protocol in that
+task's report): median [min, max] ms, composed-model transport step, forward and backward.
+
+| ensemble | solver | direction | median [min, max] ms |
+|---|---|---|---|
+| 1 | gmres | forward | 229.7 [182.1, 269.9] |
+| 1 | gmres | backward | 277.6 [187.6, 391.1] |
+| 1 | gmres_jacobi | forward | 272.2 [210.3, 289.9] |
+| 1 | gmres_jacobi | backward | 316.0 [151.6, 408.3] |
+| 1 | gmres_ilu | forward | 288.3 [224.2, 404.8] |
+| 1 | gmres_ilu | backward | 285.0 [235.5, 434.4] |
+| 1 | sparse_direct | forward | 12.3 [9.5, 14.8] |
+| 1 | sparse_direct | backward | 14.1 [10.5, 25.6] |
+| 32 | gmres | forward | 555.7 [328.3, 694.9] |
+| 32 | gmres | backward | 460.2 [414.6, 716.6] |
+| 32 | gmres_jacobi | forward | 365.0 [356.0, 647.2] |
+| 32 | gmres_jacobi | backward | 540.4 [368.9, 741.2] |
+| 32 | gmres_ilu | forward | 712.1 [680.5, 1056.6] |
+| 32 | gmres_ilu | backward | 937.2 [714.7, 1072.7] |
+| 32 | sparse_direct | forward | 251.8 [185.4, 282.3] |
+| 32 | sparse_direct | backward | 254.4 [207.7, 334.1] |
+| 100 | gmres | forward | 804.6 [640.3, 1391.2] |
+| 100 | gmres | backward | 1093.3 [734.3, 1227.5] |
+| 100 | gmres_jacobi | forward | 898.0 [764.8, 1025.5] |
+| 100 | gmres_jacobi | backward | 788.9 [683.1, 1152.6] |
+| 100 | gmres_ilu | forward | 2047.9 [1672.0, 5538.0] |
+| 100 | gmres_ilu | backward | 1839.0 [1355.5, 2234.6] |
+| 100 | sparse_direct | -- | n/a (batch cap 32) |
+
+At `e = 1`: `sparse_direct` (12.3 / 14.1 ms) beats plain `gmres` (229.7 / 277.6 ms) by 18.7x,
+with no overlap between `sparse_direct`'s [min, max] and any gmres variant's. At `e = 32`:
+`sparse_direct` (251.8 / 254.4 ms) again beats every gmres variant (365.0-937.2 ms), same
+solver winning both directions both ensembles — the rule's first clause applies cleanly, no
+tie-break needed. At `e = 100` (`sparse_direct` not applicable at all, above the 32-instance
+batch cap): plain `gmres` (804.6 / 1093.3 ms) and `gmres_jacobi` (898.0 / 788.9 ms) swap
+ranking between forward and backward and sit inside each other's [min, max] spread —
+"no variant beats plain gmres by more than the measured spread" — so the rule's third clause
+applies here: `gmres` stays the fallback above the cap. `gmres_ilu` is the clear loser at every
+ensemble measured in both directions (2047.9 / 1839.0 ms at e=100, worse everywhere else too),
+despite converging in the fewest matvecs of the three gmres variants — its per-instance SciPy
+ILU factorisation, paid on BOTH the forward solve and the backward adjoint solve (they call
+`gmres` independently, so the factorisation is not shared or reused across the pair), dominates
+the iteration saving. `sparse_direct` pays one full LU factorisation per solve instead (also
+per instance, also not reused step to step) and then an exact solve with no outer iteration at
+all — a cheaper trade at every size this benchmark could measure it at.
+
+**On iteration counts.** Task 7's benchmark JSON records `iterations` for `gmres_jacobi`/
+`gmres_ilu` from a run that started before commit `9699db5` finished landing, so those two
+solvers' iteration counts in that file are STALE (they reflect the pre-`9699db5` in-cycle
+estimate, not the current cycle-granular one) and are not quoted here as characterising
+current code. Plain `gmres` and `sparse_direct` iteration counts are unaffected. Since
+`9699db5`, `iterations` under ANY preconditioner (`"jacobi"` or `"ilu"`) is a CYCLE-GRANULAR
+UPPER BOUND — the count at which the true residual first met tolerance, rounded up to the end
+of whichever restart cycle it fell in — never an exact step count; see that commit and Task 6's
+report for why (the in-cycle Givens estimate is in preconditioned units and can disagree with
+the true, unpreconditioned-scale tolerance test that actually gates convergence). None of this
+changes the decision: the choice above rests on the wall-clock medians only, exactly as the
+rule requires, never on iteration counts.
+
+**The choice.** `TransportLayer._resolve_solver`'s `"auto"` now resolves to `sparse_direct` at
+or under `_SPARSE_DIRECT_MAX_BATCH` (32) instances, and to plain `gmres` above it.
+`gmres_jacobi`/`gmres_ilu` are never chosen by `auto` — nothing in Task 7's data recommends
+either preconditioner over plain `gmres` as the large-batch fallback. This default is scoped to
+`TransportLayer` alone; `PotentialFlowLayer`/`solvers.select.solve`'s own `"auto"` (the
+certified-SPD path) is untouched (ledger ruling B-1).
+
+**The two hazards** `"auto"` must handle before it can hand back `sparse_direct` (both
+fall-backs to `gmres`, never a raise — `auto` is a promise to choose a backend that works):
+
+1. **SciPy absent.** `sparse_direct` needs SciPy (`noodl[sparse]`, an optional extra). When
+   `import scipy.sparse.linalg` fails, `"auto"` falls back to `gmres` and warns once per
+   process (mirroring `solvers.select`'s own `_WARNED_SPARSE_DIRECT_NEEDS_SCIPY` pattern).
+2. **A grad-requiring `on_failure="return"` solve.** `_LinearSolve.forward`/`.backward` always
+   resolve `"auto"` inside `torch.no_grad()`, so this hazard cannot fire on the ordinary
+   differentiable `step`/`steady` path. The `on_failure="return"` early-return paths
+   (`steady`, `_implicit_step_sparse`, `_trapezoidal_step_sparse`), by contrast, resolve
+   OUTSIDE any `no_grad`: an explicit `method="sparse_direct"` reaching
+   `solvers.select.solve` there raises `RuntimeError` whenever grad mode is enabled and the
+   rhs or the operator's own sparse values require grad (`select._sparse_direct`'s
+   eligibility refusal, which `on_failure="return"` does not catch, since it is not a
+   numerical failure). `"auto"` falls back to `gmres` silently in that case instead.
+
+**The composed budget table, before (20 Sep 2026 baseline) and after, median of 3 forward /
+backward seconds, honest verdict per row** (`benchmarks/composed_scaling_report_2026-09-20.json`
+kept as the previous file, per the same convention the 20 September re-baseline used; new file
+generated 2026-09-24T13:15 UTC, same machine, `torch_num_threads: 14`, not measured idle — see
+the ambient-load caveat in the 20 September re-baseline section above, which applies here too):
+
+| Ensemble | Steps | Solver | Thermal | Forward: old -> new | Verdict | Backward: old -> new | Verdict | Peak memory: old -> new | Verdict |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 1 | `auto` | no | 0.512 s -> 0.085 s | 0.05 s **FAIL** (6.0x FAIL -> 1.7x FAIL) | 0.452 s -> 0.043 s | 0.1 s **PASS** (was FAIL) | 67.5 -> 67.5 MB | 100 MB PASS |
+| 100 | 1 | `auto` | no | 8.899 s -> 5.687 s | 0.5 s **FAIL** | 3.194 s -> 1.763 s | 1.0 s **FAIL** | 127.7 -> 127.8 MB | 1000 MB PASS |
+| 100 | 24 | `auto` | no | 212.044 s -> 121.468 s | 12 s **FAIL** | 119.951 s -> 47.055 s | 25 s **FAIL** | 420.1 -> 421.1 MB | 2000 MB PASS |
+| 1000 | 1 | `auto` | no | 50.679 s -> 47.387 s | 5 s **FAIL** | 14.688 s -> 13.803 s | 10 s **FAIL** | 725.9 -> 726.1 MB | 8000 MB PASS |
+| 1 | 1 | `cg` | no | 1.099 s -> 0.427 s | 0.05 s **FAIL** | 0.435 s -> 0.143 s | 0.1 s **FAIL** | 45.1 -> 66.3 MB | 100 MB PASS |
+| 100 | 1 | `cg` | no | 8.322 s -> 5.544 s | 0.5 s **FAIL** | 2.998 s -> 2.068 s | 1.0 s **FAIL** | 128.0 -> 127.2 MB | 1000 MB PASS |
+| 100 | 24 | `cg` | no | 221.318 s -> 165.403 s | 12 s **FAIL** | 79.755 s -> 46.420 s | 25 s **FAIL** | 419.0 -> 420.9 MB | 2000 MB PASS |
+| 1000 | 1 | `cg` | no | 48.894 s -> 52.062 s | 5 s **FAIL** (got slower) | 13.511 s -> 13.643 s | 10 s **FAIL** | 725.7 -> 718.3 MB | 8000 MB PASS |
+| 100 | 24 | `auto` | **yes** | 248.178 s -> 108.362 s | 12 s **FAIL** | 68.121 s -> 88.212 s | 25 s **FAIL** (got slower) | 497.6 -> 501.4 MB | 2000 MB PASS |
+
+**Stated plainly, the honest verdict: every latency budget in the table remains unmet after
+this change, on both solvers, on every row, including the thermal row, EXCEPT ONE.** The single
+row that now passes is `auto`/ensemble 1/1 step's BACKWARD budget (0.452 s -> 0.043 s against a
+0.1 s budget) — a direct, expected consequence of the composed model's `co2` transport layer
+switching from `gmres` to `sparse_direct` at this small (single-instance) batch, consistent
+with Task 7's own 18.7x e=1 gap. Every forward row and every other backward row is still over
+budget, most by a wide margin (e.g. `auto`/100/24 forward is still 10.1x its 12 s budget, down
+from 17.7x). This is a genuine, substantial wall-clock improvement on most rows (roughly 1.4x
+to 2.3x faster on the `auto` rows, up to 2.3x on the thermal forward row) but it is NOT a pass
+on the section 6.1 gate as a whole, and `all_budgets_met` in the regenerated JSON is `false`,
+exactly as before. Two rows moved the wrong way and are called out rather than rounded past:
+`cg`/1000/1's forward (48.894 s -> 52.062 s, both FAIL regardless) and the thermal row's
+backward (68.121 s -> 88.212 s, both FAIL regardless) — both plausibly ambient-load noise on a
+shared machine (see the 20 September section's own caveat about a machine that was not idle;
+this run was not confirmed idle either) rather than a code-attributable regression, but neither
+is asserted as noise without a controlled A/B, so both are reported as measured. Peak memory
+passes on every row, before and after, unchanged in verdict; both shape gates (peak RSS vs
+nodes 1.05x, matvec time vs edges 0.83x) pass, budget 2.5x each. The matvec-time gate's GATED
+`ratio` moved 0.32 -> 0.83 and its reported-not-asserted `edge_sensitivity_ratio` (the same
+doubling re-measured at 16x/32x the reference edge count, where the operator is genuinely
+edge-bound) moved 1.003 -> 2.486 against a nominal 2.5 — this gate never touches the linear
+solver, only `AdvectionOperator.matvec` in isolation, so neither move is attributable to this
+change; both are most plausibly ambient load on a shared machine, recorded here rather than
+smoothed. The `cg`/1/1 row's peak memory
+moved from 45.1 to 66.3 MB (still comfortably under its 100 MB budget) — `"cg"` here names only
+the POTENTIAL layer's solver (`composed_model.py`'s `linear_solver=` kwarg configures that layer
+alone); the `co2` `TransportLayer` in every row, `cg` included, uses its own default `"auto"`,
+so this row's peak reflects `sparse_direct`'s modestly larger transient footprint (the SciPy
+factorisation arrays) at this small batch, not anything about PCG.
+
+**A note on the JSON's `(100, 24, "auto")` pair.** The regenerated file still contains two rows
+sharing `(ensemble=100, steps=24, solver="auto")` and differing only in `"thermal"` — the same
+shape the plan's ledger flagged as a "duplicate" row to remove. Reading `report_composed_
+scaling.py`'s own code and its comment above the `thermal_row` measurement: this is not a
+byte-for-byte duplicate (the two rows' numbers differ, and `"thermal"` is exactly the field the
+code documents as "what tells them apart") — it is one shape (the milestone-2 configuration,
+species plus a heat transport layer) measured under the same solver label as the non-thermal
+row it sits beside, which the code's own comment already defends as deliberate ("the report
+therefore holds TWO rows... which is what tells them apart"). No code change was made to
+`report_composed_scaling.py` to alter this: the gate script is a shared asset a reviewer reads
+concurrently, changing its row-identity scheme risks moving `all_budgets_met`'s semantics (the
+thermal row currently counts toward it, via the same `solver == "auto"` filter, and any
+relabelling would need to preserve that deliberately), and no genuine data duplication exists to
+fix. Flagged here rather than silently resolved either way, since the ledger's wording assumed
+regenerating would remove it and this regeneration does not.
 
 ## Appendix: the source tree
 

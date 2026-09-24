@@ -1,5 +1,6 @@
-"""Tests for pcg (Jacobi-preconditioned CG, per-instance status, never raises) and, appended
-by Task 6, gmres (restarted, nonsymmetric-capable, per-instance status, never raises).
+"""Tests for pcg (Jacobi-preconditioned CG, per-instance status, never raises) and gmres
+(restarted, nonsymmetric-capable, per-instance status, never raises), including Task 6's
+left preconditioner hook (Jacobi, ILU(0) via SciPy, and a caller-supplied callable).
 """
 
 import pytest
@@ -475,3 +476,271 @@ def test_pcg_results_are_pinned():
     assert result_mid.iterations.tolist() == [3, 3, 3]
     assert result_mid.converged.tolist() == [False, False, False]
     assert result_mid.status.tolist() == [int(SolverStatus.MAX_ITER)] * 3
+
+
+# =============================================================================================
+# Task 6: gmres's left preconditioner hook (Jacobi, ILU(0) via SciPy, a caller-supplied
+# callable). Arnoldi runs on M^-1 A / M^-1 b; the TRUE residual norm(b - A x) is what
+# `SolveResult.residual`/`converged` report, recomputed at every cycle end -- never the
+# preconditioned Givens estimate. `preconditioner=None` must stay bit-identical to gmres
+# before this task: no restructuring of the unpreconditioned path, only a branch added
+# around it.
+# =============================================================================================
+
+
+class _SparseTestOperator:
+    """`DenseOperator` plus the optional `assemble_sparse` member, so gmres's `"ilu"`
+    preconditioner (which requires a sparse form) can be exercised here without pulling in
+    `GraphLaplacianOperator`'s own topology. Mirrors `tests/solvers/test_select.py`'s
+    `_SparseFakeOperator`: the COO triplet is derived from `A`'s own nonzero pattern, since
+    what gmres's ILU hook needs exercised is the CONTRACT (shared int64 indices,
+    batch-leading values), not any particular operator's derivation.
+    """
+
+    def __init__(self, A: torch.Tensor, *, symmetric: bool = False) -> None:
+        self.A = A
+        self.shape = tuple(A.shape)
+        self.dtype = A.dtype
+        self.device = A.device
+        self.symmetric = symmetric
+
+    def matvec(self, x: torch.Tensor) -> torch.Tensor:
+        return (self.A @ x.unsqueeze(-1)).squeeze(-1)
+
+    def rmatvec(self, x: torch.Tensor) -> torch.Tensor:
+        return (self.A.transpose(-1, -2) @ x.unsqueeze(-1)).squeeze(-1)
+
+    def diagonal(self) -> torch.Tensor:
+        return torch.diagonal(self.A, dim1=-2, dim2=-1)
+
+    def assemble(self) -> torch.Tensor:
+        return self.A
+
+    def assemble_sparse(self):
+        if self.A.dim() > 2:
+            pattern = (self.A != 0).any(dim=tuple(range(self.A.dim() - 2)))
+        else:
+            pattern = self.A != 0
+        row, col = torch.nonzero(pattern, as_tuple=True)
+        values = self.A[..., row, col]
+        return row.to(torch.int64), col.to(torch.int64), values
+
+    def spd_certificate(self):
+        return None
+
+
+class _NoSparseFormOperator(_SparseTestOperator):
+    def assemble_sparse(self):
+        return None
+
+
+def _diag_spread_system(
+    seed: int, m: int = 8, batch: int | None = None, scale: float = 0.1
+):
+    """`A = D + scale * R`, `D` log-spaced 1e-3..1e3 (a large diagonal spread), `R` random
+    and nonsymmetric -- the brief's construction. At the default `m`/`scale` this is mild
+    enough for gmres to converge within its default `restart=30` regardless of
+    preconditioning (a single Arnoldi cycle covers the whole m-dimensional space either way,
+    GMRES's finite-termination property) -- fine for a value comparison against
+    `torch.linalg.solve`, but not for an ITERATION-COUNT comparison, which needs `restart <
+    m` (see `_stiff_diag_spread_system` below).
+    """
+    gen = torch.Generator().manual_seed(seed)
+    d = torch.logspace(-3, 3, m, dtype=torch.float64)
+    if batch is None:
+        R = torch.randn(m, m, generator=gen, dtype=torch.float64)
+        A = torch.diag(d) + scale * R
+        b = torch.randn(m, generator=gen, dtype=torch.float64)
+    else:
+        R = torch.randn(batch, m, m, generator=gen, dtype=torch.float64)
+        A = torch.diag(d).expand(batch, m, m) + scale * R
+        b = torch.randn(batch, m, generator=gen, dtype=torch.float64)
+    return A, b
+
+
+def _stiff_diag_spread_system():
+    """A harder instance of the same `A = D + scale * R` construction (m=20, scale=0.01,
+    seed fixed), meant to be used with a `restart < m` that forfeits GMRES's exact
+    finite-termination property (which only holds within a single cycle of length >= m):
+    measured, unpreconditioned gmres does not converge within 500 matvecs at any restart
+    tried here, while Jacobi and ILU do, in reproducibly different numbers of cycles at
+    `restart=10` -- see `test_gmres_jacobi_and_ilu_reduce_iterations_versus_unpreconditioned`.
+
+    Fix round 1 note: at `restart=15`, an EARLIER version of this docstring claimed "Jacobi
+    converges in 13 and ILU in 2". That "13" was the pre-fix-round `iterations` value, taken
+    from the in-cycle Givens estimate compared against the true-scale `tol` while Arnoldi ran
+    on `M^-1 A` (preconditioned units) -- one step BEFORE the true residual `b - A x`
+    (recomputed at cycle end, which is what actually gates convergence) first met `tol` at
+    step 14. `x`/`converged`/`residual` were never wrong; only that reported count was.
+    `iterations` under a preconditioner is now the CYCLE-GRANULAR count (see `gmres`'s
+    docstring), so at `restart=15` both Jacobi and ILU converge inside the first cycle and
+    are reported as 15 -- which is why the "fewer iterations" test below uses `restart=10`
+    instead, where ILU still converges in cycle 1 (reported 10) but Jacobi needs a second
+    cycle (reported 30), keeping the comparison meaningful.
+    """
+    A, b = _diag_spread_system(seed=3, m=20, scale=0.01)
+    return A, b
+
+
+def test_gmres_preconditioner_none_is_bit_identical_to_the_default():
+    """`preconditioner=None` (explicit) must be bit-for-bit identical to today's default
+    (unspecified) gmres -- the non-negotiable pin from the brief."""
+    A, b = _diag_spread_system(seed=1, batch=3)
+    op = _SparseTestOperator(A, symmetric=False)
+    result_default = gmres(op, b, restart=5, max_iter=40)
+    result_none = gmres(op, b, restart=5, max_iter=40, preconditioner=None)
+    assert torch.equal(result_default.x, result_none.x)
+    assert torch.equal(result_default.residual, result_none.residual)
+    assert torch.equal(result_default.iterations, result_none.iterations)
+    assert torch.equal(result_default.converged, result_none.converged)
+    assert torch.equal(result_default.status, result_none.status)
+
+
+def test_gmres_jacobi_and_ilu_match_torch_linalg_solve_on_a_batched_nonsymmetric_system():
+    A, b = _diag_spread_system(seed=2, batch=4)
+    op = _SparseTestOperator(A, symmetric=False)
+    x_ref = torch.linalg.solve(A, b)
+
+    result_jacobi = gmres(op, b, preconditioner="jacobi", max_iter=100)
+    torch.testing.assert_close(result_jacobi.x, x_ref, atol=1e-10, rtol=1e-10)
+    assert bool(torch.all(result_jacobi.converged))
+
+    result_ilu = gmres(op, b, preconditioner="ilu", max_iter=100)
+    torch.testing.assert_close(result_ilu.x, x_ref, atol=1e-10, rtol=1e-10)
+    assert bool(torch.all(result_ilu.converged))
+
+
+def test_gmres_jacobi_and_ilu_reduce_iterations_versus_unpreconditioned():
+    """The whole point of the preconditioner: on a system with a large diagonal spread AND
+    a restart short enough to forfeit GMRES's exact finite-termination property, both
+    Jacobi and ILU must converge in FEWER iterations than plain gmres -- which, at this
+    restart, does not converge within the given budget at all.
+
+    `restart=10` (not 15, see `_stiff_diag_spread_system`'s fix-round note): ILU converges
+    inside the first cycle (reported 10) while Jacobi needs a second cycle (reported 30),
+    so the cycle-granular `iterations` (Task 6 fix round) still separates them cleanly.
+    """
+    A, b = _stiff_diag_spread_system()
+    op = _SparseTestOperator(A, symmetric=False)
+
+    result_none = gmres(op, b, preconditioner=None, restart=10, max_iter=500)
+    result_jacobi = gmres(op, b, preconditioner="jacobi", restart=10, max_iter=500)
+    result_ilu = gmres(op, b, preconditioner="ilu", restart=10, max_iter=500)
+
+    assert not bool(result_none.converged), "the unpreconditioned case must stall"
+    assert bool(result_jacobi.converged)
+    assert bool(result_ilu.converged)
+    n_none = int(result_none.iterations)
+    n_jacobi = int(result_jacobi.iterations)
+    n_ilu = int(result_ilu.iterations)
+    print(f"none={n_none} jacobi={n_jacobi} ilu={n_ilu}")
+    assert n_jacobi < n_none, f"jacobi={n_jacobi} none={n_none}"
+    assert n_ilu < n_none, f"ilu={n_ilu} none={n_none}"
+    assert n_ilu < n_jacobi, f"ilu={n_ilu} jacobi={n_jacobi}"
+
+
+def test_gmres_jacobi_iterations_never_undercount_the_true_convergence_step():
+    """Fix round 1: the reported `iterations`, under a preconditioner, must never be SMALLER
+    than the step at which the TRUE residual (`b - A x`, recomputed at cycle end) actually
+    first met `tol` -- the bug this round fixes was exactly that (reported 13, true 14, on
+    this fixture at `restart=15`). The independent check: sweep `max_iter=1, 2, 3, ...` and
+    take the first one whose `result.converged` fires (equivalent to the true residual
+    meeting `tol`, since `converged` is always gated on the true recompute, never on the
+    in-cycle Givens estimate); the fix chosen here is CYCLE-GRANULAR (see `gmres`'s
+    docstring), which can overshoot to the end of the cycle but must never undershoot, so
+    this asserts `>=`, not `==`.
+    """
+    A, b = _stiff_diag_spread_system()
+    op = _SparseTestOperator(A, symmetric=False)
+    restart = 15
+
+    true_first_k = None
+    for k in range(1, 60):
+        probe = gmres(op, b, preconditioner="jacobi", restart=restart, max_iter=k)
+        if bool(probe.converged):
+            true_first_k = k
+            break
+    assert true_first_k is not None, "the independent sweep must find a converging max_iter"
+
+    result = gmres(op, b, preconditioner="jacobi", restart=restart, max_iter=500)
+    assert bool(result.converged)
+    n_reported = int(result.iterations)
+    print(f"true_first_k={true_first_k} reported={n_reported}")
+    assert n_reported >= true_first_k, (
+        f"reported iterations={n_reported} must not be smaller than the independently "
+        f"swept true convergence step={true_first_k}"
+    )
+
+
+def test_gmres_callable_preconditioner_is_applied():
+    """A callable preconditioner is applied as given: a uniform scalar left-preconditioner
+    does not change the mathematical solution (same Krylov subspace, a rescaled residual
+    minimisation), so this both proves the callable path runs and that it is wired correctly
+    (a bug that ignored the callable, or applied it to the wrong operand, would generally
+    still "converge" to something -- but not to the right x to tight tolerance from a
+    poorly-scaled start).
+    """
+    A, b = _diag_spread_system(seed=4)
+    op = _SparseTestOperator(A, symmetric=False)
+    x_ref = torch.linalg.solve(A, b)
+
+    calls = {"count": 0}
+
+    def scale_by_three(v: torch.Tensor) -> torch.Tensor:
+        calls["count"] += 1
+        return 3.0 * v
+
+    result = gmres(op, b, preconditioner=scale_by_three, max_iter=200)
+    assert calls["count"] > 0
+    torch.testing.assert_close(result.x, x_ref, atol=1e-8, rtol=1e-8)
+
+
+def test_gmres_reports_the_true_residual_not_the_preconditioned_one():
+    """`SolveResult.residual` must be `norm(b - A x) / norm(b)`, recomputed explicitly --
+    never the preconditioned Givens estimate -- so the tolerance keeps its meaning."""
+    A, b = _diag_spread_system(seed=5)
+    op = _SparseTestOperator(A, symmetric=False)
+    # A small max_iter well short of convergence: the reported residual must still be the
+    # TRUE one at this partial state, not an artifact of the preconditioned scale.
+    result = gmres(op, b, preconditioner="jacobi", max_iter=2)
+    assert not bool(result.converged)
+    r_true = b - op.matvec(result.x)
+    expected_residual = torch.linalg.vector_norm(r_true) / torch.linalg.vector_norm(b)
+    torch.testing.assert_close(result.residual, expected_residual, atol=1e-13, rtol=1e-12)
+
+
+def test_gmres_per_instance_convergence_and_freezing_with_a_preconditioner():
+    """Per-instance status/freezing (the pre-existing contract) is unaffected by adding a
+    preconditioner: instance 0 (b=0, trivially solved) must freeze bit-identically whether
+    or not its sibling is still iterating."""
+    torch.manual_seed(11)
+    n = 10
+    A1, b1 = _diag_spread_system(seed=6, m=n)
+    A0 = torch.eye(n, dtype=torch.float64) * 2.0
+    b0 = torch.zeros(n, dtype=torch.float64)
+    A_batch = torch.stack([A0, A1])
+    b_batch = torch.stack([b0, b1])
+    op = _SparseTestOperator(A_batch, symmetric=False)
+
+    result_full = gmres(op, b_batch, preconditioner="jacobi", restart=5, max_iter=200)
+    assert bool(torch.all(result_full.converged))
+    assert int(result_full.iterations[0]) == 0
+
+    result_3 = gmres(op, b_batch, preconditioner="jacobi", restart=5, max_iter=3)
+    assert bool(result_3.converged[0])
+    assert not bool(result_3.converged[1])
+    assert torch.equal(result_full.x[0], result_3.x[0])
+
+
+def test_gmres_ilu_refuses_by_name_without_a_sparse_form():
+    A, b = _diag_spread_system(seed=7)
+    op = _NoSparseFormOperator(A, symmetric=False)
+    with pytest.raises(ValueError, match="assemble_sparse"):
+        gmres(op, b, preconditioner="ilu")
+
+
+def test_gmres_rejects_unknown_preconditioner_name():
+    A, b = _diag_spread_system(seed=8)
+    op = _SparseTestOperator(A, symmetric=False)
+    with pytest.raises(ValueError, match="preconditioner"):
+        gmres(op, b, preconditioner="bogus")

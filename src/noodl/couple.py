@@ -265,7 +265,11 @@ class CoupledModel:
     rather than the unrolled truncation error O(rho^passes) counted from the start state, and
     backward memory is one pass rather than all of them (P1-2). `diagnostics["adjoint"]` says
     whether that pass ran: `"implicit"` when it did, `None` when nothing differentiable
-    reached the state and no extra pass was needed.
+    reached the state and no extra pass was needed. `diagnostics["adjoint_batched"]` says
+    whether that solve ran as one independent GMRES system per batch instance (every link's
+    forward value carrying the batch as its leading dims) or, when some link's value is
+    shared across instances, as today's single system flattened over the whole interface;
+    `False` when `"adjoint"` is `None` too.
     """
 
     def __init__(
@@ -516,14 +520,15 @@ class CoupledModel:
                 # types as the iterated path (a 0-d bool tensor, a per-link dict).
                 # `adjoint` is None here for the same reason `max_change` is empty: a
                 # single explicit pass has no fixed point to differentiate implicitly, so no
-                # adjoint was attached. The key is present so that both paths report the
-                # same set.
+                # adjoint was attached, and `adjoint_batched` is False along with it. The
+                # keys are present so that both paths report the same set.
                 diagnostics.update({
                     "passes": 1,
                     "converged": torch.ones((), dtype=torch.bool),
                     "max_change": {},
                     "transfers": {},
                     "adjoint": None,
+                    "adjoint_batched": False,
                 })
             return new
         return self._iterate(start, drivers, dt, diagnostics)
@@ -748,6 +753,7 @@ class CoupledModel:
         # `out` of every pass agree by construction.
         tags = list(new)
         keys = {tag: list(new[tag]) for tag in tags}
+        adjoint_batched = False
         if needs_adjoint:
             final_transfers: dict[str, Tensor] = {}
 
@@ -764,9 +770,21 @@ class CoupledModel:
                 z_next = [self._forward_value(link, out, pd) for link in self.links]
                 return outputs, z_next
 
+            # Every link's forward value is one number per instance, so its own shape IS the
+            # batch shape (the docstring above) -- exactly the leading dims `converged`
+            # carries, since `converged` is built by reducing over nothing but the two-way
+            # links themselves. A run with a value shared across instances (a one-way link
+            # fed from an unbatched driver, say) fails that check per entry and
+            # `differentiate_fixed_point` falls back to the flattened solve on its own.
+            # `batch_shape` also asserts (see that function's docstring) that instances do not
+            # couple through `pass_fn` -- true here because `_one_pass` steps every model and
+            # applies every transfer per instance, never mixing one instance's state into
+            # another's.
+            adjoint_report: dict = {}
             flat = differentiate_fixed_point(
                 values, pass_fn, rtol=self.adjoint_rtol,
                 where="CoupledModel two-way coupling",
+                batch_shape=tuple(converged.shape), report=adjoint_report,
             )
             result: dict[str, State] = {}
             it = iter(flat)
@@ -779,12 +797,13 @@ class CoupledModel:
             # single pass, which is exactly the truncated derivative P1-2 removes.
             reported = {k: v.detach() for k, v in final_transfers.items()}
             adjoint = "implicit"
+            adjoint_batched = bool(adjoint_report["batched"])
         else:
             result, reported, adjoint = new, last_transfers, None
         if diagnostics is not None:
             diagnostics.update(
                 {"passes": passes, "converged": converged, "max_change": change,
-                 "transfers": reported, "adjoint": adjoint}
+                 "transfers": reported, "adjoint": adjoint, "adjoint_batched": adjoint_batched}
             )
         return result
 

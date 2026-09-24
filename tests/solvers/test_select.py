@@ -1148,3 +1148,59 @@ def test_no_warning_when_the_solve_is_not_grad_safe(monkeypatch):
     with warnings_module.catch_warnings():
         warnings_module.simplefilter("error")
         solve(op, torch.ones(1, 2))
+
+
+# -- Task 6: `preconditioner` forwarded to gmres (default stays None), and `"ilu"` -----------
+
+
+def test_gmres_default_preconditioner_stays_none_when_unspecified(monkeypatch):
+    """Today's behaviour, pinned: a caller who never mentions `preconditioner` at all must
+    still get plain (unpreconditioned) gmres, even though `solve`'s own default -- used for
+    pcg -- is `"jacobi"`. The two backends must not share one literal default.
+    """
+    import noodl.solvers.select as select_module
+
+    calls = []
+    real_gmres = select_module.gmres
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs.get("preconditioner", "MISSING"))
+        return real_gmres(*args, **kwargs)
+
+    monkeypatch.setattr(select_module, "gmres", spy)
+    op = _FakeOperator(_A_NS, symmetric=False, certificate=None)
+    solve(op, _B_NS, method="gmres")
+    assert calls == [None]
+
+    calls.clear()
+    solve(op, _B_NS)  # method="auto" also routes here (certificate=None)
+    assert calls == [None]
+
+
+def test_gmres_ilu_preconditioner_matches_reference_on_a_sparse_operator():
+    op = _SparseFakeOperator(_A_NS, symmetric=False, certificate=None)
+    result = solve(op, _B_NS, method="gmres", preconditioner="ilu")
+    torch.testing.assert_close(
+        result.x, torch.linalg.solve(_A_NS, _B_NS), rtol=1e-8, atol=1e-8
+    )
+    assert bool(torch.all(result.converged))
+
+
+def test_gmres_ilu_preconditioner_refused_by_name_without_a_sparse_form():
+    op = _FakeOperator(_A_NS, symmetric=False, certificate=None)
+    try:
+        solve(op, _B_NS, method="gmres", preconditioner="ilu")
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "assemble_sparse" in str(exc)
+
+
+def test_gmres_explicit_preconditioner_is_still_forwarded_when_requested(monkeypatch):
+    """Unlike the default, an EXPLICITLY requested preconditioner is honoured for a
+    gmres-routed solve -- this is what makes 'gmres_jacobi'/'gmres_ilu' possible at all.
+    """
+    op = _FakeOperator(_A_NS, symmetric=False, certificate=None)
+    result = solve(op, _B_NS, method="gmres", preconditioner="jacobi")
+    torch.testing.assert_close(
+        result.x, torch.linalg.solve(_A_NS, _B_NS), rtol=1e-6, atol=1e-6
+    )
