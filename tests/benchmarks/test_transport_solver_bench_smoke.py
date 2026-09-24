@@ -40,7 +40,10 @@ def test_quick_run_writes_one_row_per_solver_with_expected_keys(tmp_path) -> Non
     assert result["coupling"] == []
 
     machine = result["machine"]
-    for key in ("torch_version", "num_threads", "platform", "timestamp", "noodl_file"):
+    expected_machine_keys = (
+        "torch_version", "num_threads", "platform", "timestamp", "noodl_file", "git_commit",
+    )
+    for key in expected_machine_keys:
         assert key in machine
     assert "noodl" in machine["noodl_file"]
 
@@ -70,8 +73,12 @@ def test_machine_block_has_the_expected_keys() -> None:
     machine = machine_block()
     assert set(machine) == {
         "torch_version", "num_threads", "platform", "python_version", "timestamp", "noodl_file",
+        "git_commit",
     }
     assert isinstance(machine["num_threads"], int)
+    # `git_commit` is `None` only when git itself is unavailable; this worktree has git, so a
+    # short hash is expected here.
+    assert machine["git_commit"] is None or isinstance(machine["git_commit"], str)
 
 
 def test_bench_composed_ensemble_reports_a_row_per_solver_and_direction() -> None:

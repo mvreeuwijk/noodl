@@ -36,6 +36,7 @@ import argparse
 import json
 import platform
 import statistics
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -277,6 +278,21 @@ def bench_coupling(rounds: int) -> list[dict]:
 # --- machine block, table, main ---------------------------------------------------------------
 
 
+def _git_commit() -> str | None:
+    """The short commit the benchmark ran at, so a future run (or a stale one straddling a
+    behaviour change, as F-B2 recorded) is attributable without cross-referencing a timestamp.
+    `None` when git itself is unavailable rather than raising -- attributability is a nicety,
+    not a benchmark precondition."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, check=True,
+        )
+        return out.stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
 def machine_block() -> dict:
     return {
         "torch_version": torch.__version__,
@@ -285,6 +301,7 @@ def machine_block() -> dict:
         "python_version": platform.python_version(),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "noodl_file": noodl.__file__,
+        "git_commit": _git_commit(),
     }
 
 

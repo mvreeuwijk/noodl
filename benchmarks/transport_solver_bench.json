@@ -7,6 +7,9 @@
     "timestamp": "2026-09-24T12:22:02+0100",
     "noodl_file": "<repo>\\src\\noodl\\__init__.py"
   },
+  "notes": [
+    "This run straddled commit 9699db5, which made gmres's reported `iterations` cycle-granular under a preconditioner (an upper bound on the true-residual iteration, exact only when unpreconditioned); Python had already imported the old module when the run crossed that commit. The `gmres_jacobi` and `gmres_ilu` rows' `iterations` field (3) was measured before 9699db5 and is stale -- the current code reports 30 at restart=30. Timings and the `gmres`/`sparse_direct` rows' iteration counts are unaffected. The benchmark was not re-run to fix this."
+  ],
   "quick": false,
   "composed": [
     {

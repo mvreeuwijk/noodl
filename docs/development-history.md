@@ -1335,7 +1335,13 @@ shared machine (see the 20 September section's own caveat about a machine that w
 this run was not confirmed idle either) rather than a code-attributable regression, but neither
 is asserted as noise without a controlled A/B, so both are reported as measured. Peak memory
 passes on every row, before and after, unchanged in verdict; both shape gates (peak RSS vs
-nodes 1.05x, matvec time vs edges 0.83x) pass, budget 2.5x each. The `cg`/1/1 row's peak memory
+nodes 1.05x, matvec time vs edges 0.83x) pass, budget 2.5x each. The matvec-time gate's GATED
+`ratio` moved 0.32 -> 0.83 and its reported-not-asserted `edge_sensitivity_ratio` (the same
+doubling re-measured at 16x/32x the reference edge count, where the operator is genuinely
+edge-bound) moved 1.003 -> 2.486 against a nominal 2.5 — this gate never touches the linear
+solver, only `AdvectionOperator.matvec` in isolation, so neither move is attributable to this
+change; both are most plausibly ambient load on a shared machine, recorded here rather than
+smoothed. The `cg`/1/1 row's peak memory
 moved from 45.1 to 66.3 MB (still comfortably under its 100 MB budget) — `"cg"` here names only
 the POTENTIAL layer's solver (`composed_model.py`'s `linear_solver=` kwarg configures that layer
 alone); the `co2` `TransportLayer` in every row, `cg` included, uses its own default `"auto"`,

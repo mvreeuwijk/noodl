@@ -179,8 +179,11 @@ class _LinearSolve(torch.autograd.Function):
     `{"backend", "iterations", "residual"}` from the forward solve's own `SolveResult` and
     `solve()`'s `backend_out` -- `iterations`/`residual` reduced with `.max()` over whatever
     batch shape this solve carries, since a per-instance breakdown has nowhere to go through
-    a single dict entry. Threading a mutable dict OUT of a `torch.autograd.Function.forward`
-    is fine: it is a plain (non-tensor) argument to `apply`, filled in place, never returned.
+    a single dict entry. `iterations` is exact only when the resolved method is unpreconditioned;
+    under a preconditioner it is `gmres`'s own cycle-granular count, an upper bound on the
+    iteration at which the true residual actually met tolerance -- see `gmres`'s docstring for
+    why. Threading a mutable dict OUT of a `torch.autograd.Function.forward` is fine: it is a
+    plain (non-tensor) argument to `apply`, filled in place, never returned.
     """
 
     @staticmethod
@@ -275,6 +278,11 @@ class _AffineSystemOperator:
         self.shape = M.shape
         self.dtype = M.dtype
         self.device = M.device
+        # Cache for `assemble_sparse`'s identity-block row/col index (D-B1): this object is
+        # built fresh per solve and `m`/`device` never change over its life, so this is a
+        # tidy-up (one `torch.arange` fewer when `assemble_sparse` runs more than once for the
+        # same instance, e.g. forward then backward), not a speedup that matters on its own.
+        self._eye_idx: torch.Tensor | None = None
 
     def matvec(self, x: torch.Tensor) -> torch.Tensor:
         return x - self.alpha * self.M.matvec(x)
@@ -306,7 +314,9 @@ class _AffineSystemOperator:
             return None
         row, col, values = triplet
         m = self.shape[-1]
-        eye_idx = torch.arange(m, dtype=torch.int64, device=row.device)
+        if self._eye_idx is None or self._eye_idx.device != row.device:
+            self._eye_idx = torch.arange(m, dtype=torch.int64, device=row.device)
+        eye_idx = self._eye_idx
         ones = torch.ones(*values.shape[:-1], m, dtype=values.dtype, device=values.device)
         return (
             torch.cat([eye_idx, row]),
@@ -620,16 +630,22 @@ class TransportLayer:
     def _auto_sparse_direct_ok(self, op, rhs: torch.Tensor | None) -> bool:
         """Whether `"auto"` may resolve to `sparse_direct` right now -- the two hazards in
         `_resolve_solver`'s docstring, hazard 2 first (cheaper: no import, and usually a
-        no-op because `op`/`rhs` are `None` or grad is disabled), hazard 1 second.
+        no-op because `op`/`rhs` are `None` or grad is disabled), hazard 1 second. Within
+        hazard 2 itself, `rhs.requires_grad` is tested before `assemble_sparse()` is ever
+        called: it is a plain attribute read, whereas `assemble_sparse()` is a real sparse
+        assembly, so a grad-enabled `on_failure="return"` solve whose rhs already requires
+        grad returns False without paying for it.
         """
         global _WARNED_AUTO_NEEDS_SCIPY
         if op is not None and rhs is not None and torch.is_grad_enabled():
+            if rhs.requires_grad:
+                return False
             values_require_grad = False
             assemble_sparse = getattr(op, "assemble_sparse", None)
             if assemble_sparse is not None:
                 triplet = assemble_sparse()
                 values_require_grad = triplet is not None and bool(triplet[2].requires_grad)
-            if rhs.requires_grad or values_require_grad:
+            if values_require_grad:
                 return False
         if not _scipy_sparse_linalg_importable():
             if not _WARNED_AUTO_NEEDS_SCIPY:
