@@ -1170,3 +1170,44 @@ def test_iterate_pays_for_the_adjoint_pass_only_when_a_gradient_is_wanted():
     assert out["species.x"].requires_grad
     out["species.x"].sum().backward()
     assert el.C.grad is not None
+
+
+def test_iterate_gradient_is_per_instance_on_a_batched_model():
+    """I8-2 (part 3 follow-up): two wind speeds through coupling="iterate" with a learnable
+    element. Each instance's sensitivity must match its OWN central difference, so the adjoint
+    solve keeps instances apart; the instances must also differ, or a batch-mixing error could
+    hide. Sources at 5e-4 as in the near-fixed-point test, so the feedback gain is strong.
+    Solver tolerances tightened for the central-difference reference (ruling R21)."""
+    _, model, state, drivers, el, _ = _build(
+        learnable=True, closures=[_Feedback(2e3)], coupling="iterate",
+        iterate_tol={"species": 1e-13}, iterate_max=80,
+    )
+    drv = dict(drivers)
+    drv["wind"] = torch.tensor([[5.0, 0.0, 0.0], [2.0, 0.0, 0.0]], dtype=F64)
+    drv["species.sources"] = torch.tensor([0.0, 5e-4, 0.0], dtype=F64)
+    tight = {"atol": 1e-14, "rtol": 1e-14}
+
+    def run():
+        return model.step(state, drv, 600.0, **tight)["species.x"]      # (2, n_i)
+
+    diag: dict = {}
+    x = model.step(state, drv, 600.0, diagnostics=diag, **tight)["species.x"]
+    assert x.shape == (2, 2)
+    assert diag["adjoint"] == "implicit"
+    assert diag["converged"].shape == (2,) and bool(diag["converged"].all())
+    grads = []
+    for i in range(2):
+        el.C.grad = None
+        x[i].sum().backward(retain_graph=True)
+        grads.append(el.C.grad[0].item())
+    h = 1e-6
+    with torch.no_grad():
+        el.C[0] += h
+        up = run().sum(-1)
+        el.C[0] -= 2 * h
+        down = run().sum(-1)
+        el.C[0] += h
+    cd = ((up - down) / (2 * h)).tolist()
+    for i in range(2):
+        assert grads[i] == pytest.approx(cd[i], rel=1e-5), i
+    assert grads[0] != pytest.approx(grads[1], rel=1e-3)
