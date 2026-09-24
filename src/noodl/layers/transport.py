@@ -511,6 +511,17 @@ class TransportLayer:
         differently). `"sparse_direct"` and `"direct"` pass straight through:
         `preconditioner`/`restart` are irrelevant to both and `solvers.select.solve` ignores
         them for those two methods.
+
+        `"gmres_ilu"` COST (fix round 1, undocumented before): `"ilu"` factorises a fresh
+        SciPy `spilu` PER INSTANCE on every `gmres()` call (see
+        `iterative._gmres_ilu_preconditioner`), and a differentiable transport step calls
+        `gmres` from BOTH `_LinearSolve.forward` and `.backward` -- so one transport step
+        under `"gmres_ilu"` pays that per-instance factorisation TWICE, on every step, not
+        once and reused across steps. `"sparse_direct"` instead pays one full LU per solve
+        (also per instance, also not reused) and then an exact solve with no outer iteration;
+        `"gmres_ilu"` pays a cheaper, incomplete factorisation on both passes and then still
+        iterates GMRES to convergence. Task 8's backend choice should weigh that trade, not
+        just iteration counts.
         """
         if self.linear_solver == "gmres_jacobi":
             return {"method": "gmres", "preconditioner": "jacobi", "restart": 30}

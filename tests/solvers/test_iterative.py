@@ -560,11 +560,23 @@ def _diag_spread_system(
 
 def _stiff_diag_spread_system():
     """A harder instance of the same `A = D + scale * R` construction (m=20, scale=0.01,
-    seed fixed), together with a `restart=15 < m` that forfeits GMRES's exact
+    seed fixed), meant to be used with a `restart < m` that forfeits GMRES's exact
     finite-termination property (which only holds within a single cycle of length >= m):
-    measured, unpreconditioned gmres does not converge within 500 matvecs at this restart,
-    while Jacobi converges in 13 and ILU in 2 -- a large, reproducible margin for the
-    "fewer iterations" comparison the brief asks for.
+    measured, unpreconditioned gmres does not converge within 500 matvecs at any restart
+    tried here, while Jacobi and ILU do, in reproducibly different numbers of cycles at
+    `restart=10` -- see `test_gmres_jacobi_and_ilu_reduce_iterations_versus_unpreconditioned`.
+
+    Fix round 1 note: at `restart=15`, an EARLIER version of this docstring claimed "Jacobi
+    converges in 13 and ILU in 2". That "13" was the pre-fix-round `iterations` value, taken
+    from the in-cycle Givens estimate compared against the true-scale `tol` while Arnoldi ran
+    on `M^-1 A` (preconditioned units) -- one step BEFORE the true residual `b - A x`
+    (recomputed at cycle end, which is what actually gates convergence) first met `tol` at
+    step 14. `x`/`converged`/`residual` were never wrong; only that reported count was.
+    `iterations` under a preconditioner is now the CYCLE-GRANULAR count (see `gmres`'s
+    docstring), so at `restart=15` both Jacobi and ILU converge inside the first cycle and
+    are reported as 15 -- which is why the "fewer iterations" test below uses `restart=10`
+    instead, where ILU still converges in cycle 1 (reported 10) but Jacobi needs a second
+    cycle (reported 30), keeping the comparison meaningful.
     """
     A, b = _diag_spread_system(seed=3, m=20, scale=0.01)
     return A, b
@@ -603,13 +615,17 @@ def test_gmres_jacobi_and_ilu_reduce_iterations_versus_unpreconditioned():
     a restart short enough to forfeit GMRES's exact finite-termination property, both
     Jacobi and ILU must converge in FEWER iterations than plain gmres -- which, at this
     restart, does not converge within the given budget at all.
+
+    `restart=10` (not 15, see `_stiff_diag_spread_system`'s fix-round note): ILU converges
+    inside the first cycle (reported 10) while Jacobi needs a second cycle (reported 30),
+    so the cycle-granular `iterations` (Task 6 fix round) still separates them cleanly.
     """
     A, b = _stiff_diag_spread_system()
     op = _SparseTestOperator(A, symmetric=False)
 
-    result_none = gmres(op, b, preconditioner=None, restart=15, max_iter=500)
-    result_jacobi = gmres(op, b, preconditioner="jacobi", restart=15, max_iter=500)
-    result_ilu = gmres(op, b, preconditioner="ilu", restart=15, max_iter=500)
+    result_none = gmres(op, b, preconditioner=None, restart=10, max_iter=500)
+    result_jacobi = gmres(op, b, preconditioner="jacobi", restart=10, max_iter=500)
+    result_ilu = gmres(op, b, preconditioner="ilu", restart=10, max_iter=500)
 
     assert not bool(result_none.converged), "the unpreconditioned case must stall"
     assert bool(result_jacobi.converged)
@@ -621,6 +637,39 @@ def test_gmres_jacobi_and_ilu_reduce_iterations_versus_unpreconditioned():
     assert n_jacobi < n_none, f"jacobi={n_jacobi} none={n_none}"
     assert n_ilu < n_none, f"ilu={n_ilu} none={n_none}"
     assert n_ilu < n_jacobi, f"ilu={n_ilu} jacobi={n_jacobi}"
+
+
+def test_gmres_jacobi_iterations_never_undercount_the_true_convergence_step():
+    """Fix round 1: the reported `iterations`, under a preconditioner, must never be SMALLER
+    than the step at which the TRUE residual (`b - A x`, recomputed at cycle end) actually
+    first met `tol` -- the bug this round fixes was exactly that (reported 13, true 14, on
+    this fixture at `restart=15`). The independent check: sweep `max_iter=1, 2, 3, ...` and
+    take the first one whose `result.converged` fires (equivalent to the true residual
+    meeting `tol`, since `converged` is always gated on the true recompute, never on the
+    in-cycle Givens estimate); the fix chosen here is CYCLE-GRANULAR (see `gmres`'s
+    docstring), which can overshoot to the end of the cycle but must never undershoot, so
+    this asserts `>=`, not `==`.
+    """
+    A, b = _stiff_diag_spread_system()
+    op = _SparseTestOperator(A, symmetric=False)
+    restart = 15
+
+    true_first_k = None
+    for k in range(1, 60):
+        probe = gmres(op, b, preconditioner="jacobi", restart=restart, max_iter=k)
+        if bool(probe.converged):
+            true_first_k = k
+            break
+    assert true_first_k is not None, "the independent sweep must find a converging max_iter"
+
+    result = gmres(op, b, preconditioner="jacobi", restart=restart, max_iter=500)
+    assert bool(result.converged)
+    n_reported = int(result.iterations)
+    print(f"true_first_k={true_first_k} reported={n_reported}")
+    assert n_reported >= true_first_k, (
+        f"reported iterations={n_reported} must not be smaller than the independently "
+        f"swept true convergence step={true_first_k}"
+    )
 
 
 def test_gmres_callable_preconditioner_is_applied():
