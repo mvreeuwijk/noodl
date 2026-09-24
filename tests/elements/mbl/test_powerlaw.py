@@ -113,7 +113,7 @@ def test_volume_form_flow_is_rho_default_times_mbl_powerlaw(m, dp_t):
     expected = rho_default * _mbl_powerlaw_np(C, dp_np, m, dp_t)
     got = el.flow(dp)
     torch.testing.assert_close(
-        got, torch.tensor(expected, dtype=torch.float64), rtol=1e-12, atol=1e-12
+        got, torch.tensor(expected, dtype=torch.float64), rtol=1e-12, atol=1e-15
     )
 
 
@@ -133,7 +133,7 @@ def test_mass_form_flow_is_mbl_powerlaw_without_rho_default(m, dp_t):
     expected = _mbl_powerlaw_np(C, dp_np, m, dp_t)
     got = el.flow(dp)
     torch.testing.assert_close(
-        got, torch.tensor(expected, dtype=torch.float64), rtol=1e-12, atol=1e-12
+        got, torch.tensor(expected, dtype=torch.float64), rtol=1e-12, atol=1e-15
     )
 
 
@@ -185,9 +185,15 @@ def test_continuity_of_value_and_first_two_derivatives_at_transition(m, dp_t):
         (d2_in,) = torch.autograd.grad(d1_in, inside)
         (d2_out,) = torch.autograd.grad(d1_out, outside)
 
-        torch.testing.assert_close(v_in, v_out, rtol=1e-9, atol=1e-9)
-        torch.testing.assert_close(d1_in, d1_out, rtol=1e-9, atol=1e-9)
-        torch.testing.assert_close(d2_in, d2_out, rtol=1e-9, atol=1e-9)
+        torch.testing.assert_close(v_in, v_out, rtol=1e-12, atol=1e-15)
+        torch.testing.assert_close(d1_in, d1_out, rtol=1e-12, atol=1e-15)
+        # d2 is the analytic SECOND derivative of a 7th-order polynomial vs. of |dp|^m,
+        # computed through two nested torch.autograd.grad calls; for m == 1.0 the true value
+        # on both sides is exactly 0, so this is a near-zero comparison dominated by float64
+        # roundoff accumulated over the extra differentiation (observed ~1e-13), not by a
+        # genuine discontinuity -- atol is loosened accordingly, unlike the exact
+        # flow-vs-reference comparisons elsewhere in this file (rtol=1e-12, atol=1e-15).
+        torch.testing.assert_close(d2_in, d2_out, rtol=1e-9, atol=1e-12)
 
 
 # ---------------------------------------------------------------------------------------
@@ -288,15 +294,19 @@ def test_mbl_points_coefficient(dpMea, mMea):
     assert el.form == "mass"
 
 
-def test_mbl_coefficient_is_a_direct_pass_through():
+@pytest.mark.parametrize(
+    "C,m,rho_default",
+    [(0.01, 0.59, 1.2), (3.33e-5 / 1.2, 0.59, 1.2)],
+)
+def test_mbl_coefficient_is_a_direct_pass_through(C, m, rho_default):
     """Coefficient_V_flow.mo/Coefficient_m_flow.mo: `C`/`k` and `m` are given directly."""
-    el_v = mbl_coefficient(C=0.01, m=0.59, form="volume", rho_default=1.2)
-    torch.testing.assert_close(el_v.C, torch.tensor(0.01, dtype=torch.float64))
-    torch.testing.assert_close(el_v.m, torch.tensor(0.59, dtype=torch.float64))
+    el_v = mbl_coefficient(C=C, m=m, form="volume", rho_default=rho_default)
+    torch.testing.assert_close(el_v.C, torch.tensor(C, dtype=torch.float64))
+    torch.testing.assert_close(el_v.m, torch.tensor(m, dtype=torch.float64))
     assert el_v.form == "volume"
 
-    el_m = mbl_coefficient(C=3.33e-5, m=0.59, form="mass", rho_default=1.2)
-    torch.testing.assert_close(el_m.C, torch.tensor(3.33e-5, dtype=torch.float64))
+    el_m = mbl_coefficient(C=C, m=m, form="mass", rho_default=rho_default)
+    torch.testing.assert_close(el_m.C, torch.tensor(C, dtype=torch.float64))
     assert el_m.form == "mass"
 
 
@@ -312,6 +322,90 @@ def test_mbl_points_fit_reproduces_both_measured_points():
     dp = torch.tensor(dpMea, dtype=torch.float64)
     got = el.flow(dp)
     torch.testing.assert_close(got, torch.tensor(mMea, dtype=torch.float64), rtol=1e-12, atol=0.0)
+
+
+# ---------------------------------------------------------------------------------------
+# 7. Broadcasting over leading batch dimensions (global constraint, per PowerLaw)
+# ---------------------------------------------------------------------------------------
+
+
+def test_mblpowerlaw_broadcasts_leading_batch_dims_against_per_edge_parameters():
+    """Elements broadcast over leading batch dims, like every other noodl element
+    (``noodl.elements.powerlaw.PowerLaw``'s own
+    ``test_broadcasts_batched_parameters_against_batched_dp``) -- ``MBLPowerLaw`` must too,
+    since ``_regularised`` uses only ordinary elementwise torch broadcasting with no
+    special-casing of ``dp``'s shape. Per-edge ``C``/``m`` of shape ``(b,)`` against ``dp`` of
+    shape ``(B, b)`` and ``(B1, B2, b)``.
+    """
+    dp_t = 0.1
+    C = torch.tensor([1.0, 1.3, 0.7], dtype=torch.float64)  # per-edge, shape (b=3,)
+    m = torch.tensor([0.5, 0.65, 1.0], dtype=torch.float64)  # per-edge, shape (b=3,)
+    b = C.shape[0]
+    el = MBLPowerLaw(C=C, m=m, dp_turbulent=dp_t, form="mass", rho_default=1.2)
+
+    dp_np = _dp_grid(dp_t)  # shape (B,)
+    B = dp_np.shape[0]
+    dp2 = torch.tensor(dp_np, dtype=torch.float64).unsqueeze(-1).expand(B, b).contiguous()
+    q2 = el.flow(dp2)
+    assert q2.shape == (B, b)
+    for e in range(b):
+        expected = _mbl_powerlaw_np(C[e].item(), dp_np, m[e].item(), dp_t)
+        torch.testing.assert_close(
+            q2[:, e], torch.tensor(expected, dtype=torch.float64), rtol=1e-12, atol=1e-15
+        )
+
+    B1, B2 = 4, 5
+    dp3_np = np.linspace(-2 * dp_t, 2 * dp_t, B1 * B2).reshape(B1, B2)
+    dp3 = torch.tensor(dp3_np, dtype=torch.float64).unsqueeze(-1).expand(B1, B2, b).contiguous()
+    q3 = el.flow(dp3)
+    assert q3.shape == (B1, B2, b)
+    for e in range(b):
+        expected = _mbl_powerlaw_np(C[e].item(), dp3_np, m[e].item(), dp_t)
+        torch.testing.assert_close(
+            q3[..., e], torch.tensor(expected, dtype=torch.float64), rtol=1e-12, atol=1e-15
+        )
+
+    dp2_grad = dp2.clone().requires_grad_(True)
+    assert torch.autograd.gradcheck(lambda x: el.flow(x), (dp2_grad,), eps=1e-6, atol=1e-8)
+
+
+def test_mbl_orifice_constructor_broadcasts_leading_batch_dims():
+    """Same broadcasting requirement for a constructor's output: ``mbl_orifice`` with a
+    per-edge area ``A`` of shape ``(b,)`` against ``dp`` of shape ``(B, b)`` and
+    ``(B1, B2, b)``.
+    """
+    dp_t = 0.1
+    rho_default = 1.2
+    A = torch.tensor([0.01, 0.02, 0.03], dtype=torch.float64)  # per-edge, shape (b=3,)
+    b = A.shape[0]
+    el = mbl_orifice(A=A, CD=0.65, dp_turbulent=dp_t, rho_default=rho_default)
+    expected_C = 0.65 * A * math.sqrt(2.0 / rho_default)
+    torch.testing.assert_close(el.C, expected_C, rtol=1e-12, atol=0.0)
+
+    dp_np = _dp_grid(dp_t)
+    B = dp_np.shape[0]
+    dp2 = torch.tensor(dp_np, dtype=torch.float64).unsqueeze(-1).expand(B, b).contiguous()
+    q2 = el.flow(dp2)
+    assert q2.shape == (B, b)
+    for e in range(b):
+        expected = rho_default * _mbl_powerlaw_np(expected_C[e].item(), dp_np, 0.5, dp_t)
+        torch.testing.assert_close(
+            q2[:, e], torch.tensor(expected, dtype=torch.float64), rtol=1e-12, atol=1e-15
+        )
+
+    B1, B2 = 4, 5
+    dp3_np = np.linspace(-2 * dp_t, 2 * dp_t, B1 * B2).reshape(B1, B2)
+    dp3 = torch.tensor(dp3_np, dtype=torch.float64).unsqueeze(-1).expand(B1, B2, b).contiguous()
+    q3 = el.flow(dp3)
+    assert q3.shape == (B1, B2, b)
+    for e in range(b):
+        expected = rho_default * _mbl_powerlaw_np(expected_C[e].item(), dp3_np, 0.5, dp_t)
+        torch.testing.assert_close(
+            q3[..., e], torch.tensor(expected, dtype=torch.float64), rtol=1e-12, atol=1e-15
+        )
+
+    dp2_grad = dp2.clone().requires_grad_(True)
+    assert torch.autograd.gradcheck(lambda x: el.flow(x), (dp2_grad,), eps=1e-6, atol=1e-8)
 
 
 # ---------------------------------------------------------------------------------------

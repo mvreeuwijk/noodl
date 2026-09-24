@@ -82,6 +82,19 @@ def _moist_air_gas_constant(X_w) -> Tensor:
     return _R_AIR * (1 - X_w) + _R_H2O * X_w
 
 
+def _moist_air_buoyancy_density(T, X_w) -> Tensor:
+    """``d = p_default/(R(X_w)*T)``, shared by ``Buildings.Media.Air`` (``density_pTX.mo:5-16``)
+    and ``Buildings.Media.Specialized.Air.PerfectGas`` (``PerfectGas.mo:229-231``,
+    ``:134-136``) -- both build the identical mixture gas constant from the identical two
+    species records (see ``_moist_air_gas_constant`` above), so the two media's
+    buoyancy-relevant density is the same function of ``T``/``X_w``, evaluated at each
+    medium's own fixed ``p_default`` (never the actual port pressure).
+    """
+    T = torch.as_tensor(T)
+    R = _moist_air_gas_constant(X_w).to(T.dtype)
+    return _P_DEFAULT / (R * T)
+
+
 @dataclass(frozen=True)
 class MBLMedium:
     """One MBL/MSL medium's default state and the two densities its flow elements need.
@@ -127,13 +140,6 @@ def _air_medium() -> MBLMedium:
     pStp = _P_DEFAULT  # reference_p, Air.mo does not override PartialMedium's p_default
     rho_default = _P_DEFAULT * dStp / pStp
 
-    def buoyancy(T, X_w):
-        # Utilities/Psychrometrics/Functions/density_pTX.mo:5-16: d := p/(R*T), evaluated at
-        # this medium's fixed p_default (never the actual port pressure).
-        T = torch.as_tensor(T)
-        R = _moist_air_gas_constant(X_w).to(T.dtype)
-        return _P_DEFAULT / (R * T)
-
     return MBLMedium(
         name="Buildings.Media.Air",
         p_default=_P_DEFAULT,
@@ -141,7 +147,7 @@ def _air_medium() -> MBLMedium:
         X_default=(0.01, 0.99),  # Air.mo:9 (reference_X={0.01,0.99}); X_default=reference_X
         rho_default=rho_default,
         has_moisture=True,
-        _buoyancy=buoyancy,
+        _buoyancy=_moist_air_buoyancy_density,
     )
 
 
@@ -159,14 +165,6 @@ def _perfectgas_medium() -> MBLMedium:
     r_at_x_default = _R_AIR * (1 - 0.01) + _R_H2O * 0.01
     rho_default = _P_DEFAULT / (r_at_x_default * _T_DEFAULT)
 
-    def buoyancy(T, X_w):
-        # "The medium's own ideal-gas law at p_default" (design resolution): identical
-        # functional form to Buildings.Media.Air's density_pTX, since PerfectGas's gasConstant
-        # uses the same two species records.
-        T = torch.as_tensor(T)
-        R = _moist_air_gas_constant(X_w).to(T.dtype)
-        return _P_DEFAULT / (R * T)
-
     return MBLMedium(
         name="Buildings.Media.Specialized.Air.PerfectGas",
         p_default=_P_DEFAULT,
@@ -174,7 +172,10 @@ def _perfectgas_medium() -> MBLMedium:
         X_default=(0.01, 0.99),
         rho_default=rho_default,
         has_moisture=True,
-        _buoyancy=buoyancy,
+        # "The medium's own ideal-gas law at p_default" (design resolution): identical
+        # functional form to Buildings.Media.Air's density_pTX, since PerfectGas's gasConstant
+        # uses the same two species records -- see _moist_air_buoyancy_density above.
+        _buoyancy=_moist_air_buoyancy_density,
     )
 
 
