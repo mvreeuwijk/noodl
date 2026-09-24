@@ -6,7 +6,7 @@ import torch
 from noodl.cycles import flow_direction_count
 from noodl.topology import Network
 
-GOLD = json.loads((Path(__file__).parent / "golden" / "legacy" / "tutorial.json").read_text())
+GOLD = json.loads((Path(__file__).parent / "golden" / "worked_examples.json").read_text())
 
 
 def _from_edges(edges):
@@ -23,7 +23,7 @@ def test_triangle_admits_two_flow_directions():
     assert GOLD["partitions_triangle"] == 2
 
 
-def test_six_edge_graph_matches_the_legacy_count():
+def test_six_edge_graph_matches_the_worked_example_count():
     net = _from_edges([(0, 1), (0, 2), (0, 3), (1, 2), (2, 3), (3, 1)])
     assert flow_direction_count(net) == GOLD["partitions_six_edge_graph"]
 
