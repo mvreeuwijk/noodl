@@ -145,7 +145,10 @@ that would fail if the claim stopped holding.
   pass to *solver accuracy*, not identically by construction. Conservation does not depend on
   which route ran: it is a property of the pass function itself
   (see [Coupling](../applications/coupling.md#differentiating-the-fixed-point) for the full
-  derivation).
+  derivation). The GMRES solve runs on the interface flattened across the batch rather than
+  per instance, so its cost can scale up to linearly with batch size in the worst case even
+  though the interface Jacobian is block-diagonal there; the result is still correct, and a
+  per-instance solve is a planned follow-up (see [Coupling](../applications/coupling.md#limitations)).
 - **Nonsmooth element laws have declared piecewise semantics, named per element.** `Damper`
   evaluates both signed power-law branches everywhere and selects with `torch.where`, so its
   `dflow` is finite at the kink (`dp = 0`) and matches finite differences away from it

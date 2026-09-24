@@ -886,6 +886,107 @@ def test_n1_closure_carried_state_advances_once_per_step_not_once_per_pass():
     assert float(new["demo.n"]) == pytest.approx(dt, rel=0.0, abs=1e-9)
 
 
+class _ParametrizedIntegratingCounter:
+    """Like `_IntegratingCounter`, but the per-call increment is a differentiable PARAMETER
+    rather than a fixed float, and the call tolerates its declared key being absent from the
+    state it is handed: I8-1's edge case is exactly a step-start state that never seeds
+    "demo.n" at all, so `__call__` must not do the bare `state["demo.n"]` lookup
+    `_IntegratingCounter` does."""
+
+    state_keys = ("demo.n",)
+    integrates = False
+
+    def __init__(self, increment: torch.Tensor) -> None:
+        self.increment = increment
+
+    def __call__(self, state, drivers):
+        n = state.get("demo.n")
+        if n is None:
+            n = torch.zeros((), dtype=F64)
+        return {"demo.n": n + self.increment}
+
+
+def test_i8_1_a_closure_state_key_missing_from_the_step_start_state_gets_a_truncated_gradient():
+    """I8-1 (Task 8 review): `_iterate`'s interface excludes every `closure_state_keys` entry
+    UNCONDITIONALLY (`keys = [... if k not in self.closure_state_keys ...]`), whether or not
+    N1's own `if key in base:` pinning applies to it. When the key IS seeded (see the control
+    below) that costs nothing: N1 pins the closure's read to the step-start state on every
+    pass, and the one differentiable re-run of the certified pass reads that same
+    graph-carrying tensor directly (`step_from=state`), so the gradient survives untouched.
+
+    When the key is ABSENT from the step-start state -- the one case N1 does not pin,
+    documented in `_iterate`'s own docstring ("a closure-carried key MISSING from the
+    step-start state ... drops a path that only exists because that key was not seeded in the
+    first place") -- the closure instead reads the PREVIOUS pass's own value on every pass, so
+    "demo.n" genuinely COMPOUNDS the parameter once per PASS, and this fixture's true,
+    central-difference sensitivity equals its own pass count. The one differentiable pass the
+    adjoint runs sees that compounded history only as a plain, already-detached number and
+    re-applies the closure ONCE more, so it can return only THAT one application's own local
+    derivative (exactly 1.0 here) -- not the true, pass-count-sized sensitivity, and,
+    measured here, not literally zero either: a looser paraphrase of this finding elsewhere
+    (the review ledger) says the adjoint "returns ZERO gradient through it", but the single
+    surviving local term is what this test pins, verified by directly running this fixture
+    before writing the assertion. Either way this is the documented SAFE side of the trade
+    (silently wrong-by-omission, never wrong-signed or blown up) and NOT a runtime refusal --
+    the first step is allowed to lack the key by design (`_pass`'s `if key in base:` guard)."""
+    param = torch.tensor(0.5, dtype=F64, requires_grad=True)
+    _, model, state, drivers, _, _ = _build(
+        closures=[_Feedback(2e3), _ParametrizedIntegratingCounter(param)],
+        coupling="iterate", iterate_tol={"species": 1e-12}, iterate_max=60,
+    )
+    diag: dict = {}
+    new = model.step(state, drivers, 600.0, diagnostics=diag)   # "demo.n" NOT seeded
+    assert diag["passes"] >= 2      # the compounding needs more than one pass to be visible
+    assert diag["adjoint"] == "implicit"
+    (grad,) = torch.autograd.grad(new["demo.n"], (param,))
+    assert grad.item() == pytest.approx(1.0, rel=0.0, abs=1e-9)   # the single local term only
+
+    def _unseeded_value(pval: float) -> float:
+        p = torch.tensor(pval, dtype=F64)
+        _, m, s, d, _, _ = _build(
+            closures=[_Feedback(2e3), _ParametrizedIntegratingCounter(p)],
+            coupling="iterate", iterate_tol={"species": 1e-12}, iterate_max=60,
+        )
+        with torch.no_grad():
+            return m.step(s, d, 600.0)["demo.n"].item()
+
+    h = 1e-6
+    cd = (_unseeded_value(0.5 + h) - _unseeded_value(0.5 - h)) / (2 * h)
+    assert cd == pytest.approx(float(diag["passes"]), rel=1e-6)   # true sensitivity ~ pass count
+    assert grad.item() < 0.2 * cd   # the adjoint drops nearly all of that true sensitivity
+
+
+def test_i8_1_control_the_same_gradient_matches_central_differences_once_seeded():
+    """Control for the test above: the identical closure and parameter, seeded this time, so
+    N1 pins "demo.n" to the step-start state on every pass and the gradient the implicit
+    adjoint returns is the fixed point's own, matching central differences the way every other
+    `coupling="iterate"` gradient test in this module does."""
+    param = torch.tensor(0.5, dtype=F64, requires_grad=True)
+    _, model, state, drivers, _, _ = _build(
+        closures=[_Feedback(2e3), _ParametrizedIntegratingCounter(param)],
+        coupling="iterate", iterate_tol={"species": 1e-12}, iterate_max=60,
+    )
+    start = dict(state, **{"demo.n": torch.zeros((), dtype=F64)})
+    diag: dict = {}
+    new = model.step(start, drivers, 600.0, diagnostics=diag)
+    assert diag["adjoint"] == "implicit"
+    (grad,) = torch.autograd.grad(new["demo.n"], (param,))
+
+    def _seeded_value(pval: float) -> float:
+        p = torch.tensor(pval, dtype=F64)
+        _, m, s, d, _, _ = _build(
+            closures=[_Feedback(2e3), _ParametrizedIntegratingCounter(p)],
+            coupling="iterate", iterate_tol={"species": 1e-12}, iterate_max=60,
+        )
+        s = dict(s, **{"demo.n": torch.zeros((), dtype=F64)})
+        with torch.no_grad():
+            return m.step(s, d, 600.0)["demo.n"].item()
+
+    h = 1e-6
+    cd = (_seeded_value(0.5 + h) - _seeded_value(0.5 - h)) / (2 * h)
+    assert grad.item() == pytest.approx(cd, rel=1e-6)
+
+
 def test_current_flows_returns_closure_written_driver_prescribed_flow():
     """A transport layer with no owning potential layer: its flow is written by a closure,
     only visible after closures run -- `current_flows` must run them and return it."""

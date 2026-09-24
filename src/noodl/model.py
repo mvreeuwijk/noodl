@@ -973,6 +973,14 @@ class Model:
                 # could still happen -- a closure returning a driver it read straight out of
                 # the fed state -- is named here rather than surfacing as a singular
                 # `I - G_z` from inside the adjoint solve.
+                # "<pot>.phi" and "<layer>.capacity" may legitimately sit in `keys` even
+                # though the potential solve detaches its warm start and the capacity is
+                # closure-derived: both are genuinely RECOMPUTED by this pass (a fresh
+                # `phi0`-detached solve, a fresh closure call), so they contribute a zero
+                # row/column here, not a unit one -- see the class docstring and
+                # .superpowers/sdd/2026-09-20-framework-hardening-part-3/task-8-report.md for
+                # why that is harmless and this guard is what would catch it if it stopped
+                # being true.
                 echoed = [k for k, n, t in zip(keys, z_next, z, strict=True) if n is t]
                 if echoed:
                     raise RuntimeError(

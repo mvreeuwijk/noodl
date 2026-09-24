@@ -324,8 +324,9 @@ run standalone against this worktree's `src`; three repeats at batch 1 and batch
 batch 100): batch 1 — 39.934 s / 54.663 s / 61.883 s (median 54.663 s), 107 outer passes on
 every run; batch 10 — 47.353 s / 48.240 s / 60.769 s (median 48.240 s), 118 outer passes on
 every run; batch 100 — 137.442 s, 118 outer passes. Pass counts are exactly repeatable at a
-given batch size; wall time is not — spreads of 15-20 s at fixed batch size and pass count, on
-the same machine whose ambient load the development-history decision record documents — so the
+given batch size; wall time is not — a spread of about 22 s at batch 1 (61.883 − 39.934 s) and
+about 13 s at batch 10 (60.769 − 47.353 s), at fixed batch size and pass count, on the same
+machine whose ambient load the development-history decision record documents — so the
 absolute seconds above are one machine's snapshot and the *ratios* are what carries information.
 Batch 1 alone needs fewer passes than batch 10 or batch 100 because `U_ref` is drawn from
 `torch.linspace(1.0, 4.0, batch_size)`: batch 1 sees only the single wind speed 1.0, while every
@@ -376,3 +377,8 @@ is set.
   itself — is not available.
 - **`Model.current_flows`'s first-pass branch re-solves** the owning potential layer from scratch
   rather than reusing the pass's own upcoming solve. A recorded inefficiency.
+- **The adjoint GMRES solves the interface flattened across the batch.** The interface Jacobian
+  is block-diagonal across batch instances, but the solve does not exploit that yet, so with `B`
+  batched instances it can need up to `B` times the matvecs a single instance would — the results
+  are still correct, only the adjoint solve's cost is worse than it needs to be. A per-instance
+  solve is a planned follow-up (`solvers.fixed_point`'s module docstring records the same point).
