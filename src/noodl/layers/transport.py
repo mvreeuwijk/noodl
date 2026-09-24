@@ -1018,7 +1018,8 @@ class TransportLayer:
         names, coef = self._coefficients()
 
         def build_system(x_, q_, sources_, xb_, cap_, cap_prev_, *coef_):
-            op = self._advection_operator(q_, cap_, dict(zip(names, coef_, strict=True)))
+            coef_map = dict(zip(names, coef_, strict=True))
+            op = self._advection_operator(q_, cap_, coef_map)
             xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
             src_s, _ = self._to_stacked(self._sources_interior(sources_), self.n_i, "sources")
             x_s, _ = self._to_stacked(x_, self.n_i, "x")
@@ -1034,7 +1035,7 @@ class TransportLayer:
             ratio = self._capacity_stacked(dtype, cap_prev_) / cap
             op_old = (
                 op if cap_prev_ is cap_
-                else self._advection_operator(q_, cap_prev_, dict(zip(names, coef_, strict=True)))
+                else self._advection_operator(q_, cap_prev_, coef_map)
             )
             rhs = ratio * (x_s + 0.5 * dt * op_old.matvec(x_s)) + dt * b0
             system = _AffineSystemOperator(op, 0.5 * dt)

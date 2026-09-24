@@ -44,11 +44,14 @@ the forward action, so nothing extra is built.
 The practical consequence: a model that takes 12 Newton iterations to converge costs the same to
 differentiate as one that takes 3.
 
-**The exception is iteration at the `Model` level.** `coupling="iterate"` is differentiated by
-*unrolling* its passes, so memory does grow with pass count there. The convergence decision
-itself is made on detached copies and never enters the graph. The same applies to
-`CoupledModel`'s two-way fixed point; an implicit treatment of that outer loop is a recorded
-follow-up.
+**The exception is iteration at the `Model` level — and it is no longer an unrolled exception.**
+`coupling="iterate"` and `CoupledModel`'s two-way fixed point both run their passes to
+convergence without a graph, run the certified pass once more on the graph at the converged
+interface, and attach the implicit adjoint of the interface equations
+(`solvers.fixed_point.differentiate_fixed_point`): one small GMRES solve at the converged
+interface, backward memory is one pass, and the gradient error is of the order of the primal
+residual rather than the unrolled truncation counted from the start state. The convergence
+decision itself is still made on detached copies and never enters the graph.
 
 ## The contract
 
@@ -121,14 +124,28 @@ that would fail if the claim stopped holding.
   tests/layers/test_transport_coefficients.py::test_removal_gradient and
   tests/layers/test_transport_coefficients.py::test_conductance_gradient, all parametrised
   over scheme, plus each one's `_steady` counterpart).
-- **Coupled fixed points are differentiated by unrolling.** Both `Model`'s own `coupling="iterate"`
-  and `couple.CoupledModel`'s two-way join repeat a pass to convergence and keep every pass on
-  the autograd graph, so memory grows with the pass count; the convergence decision itself is
-  made on detached copies and never enters the graph. An implicit interface adjoint (one solve
-  at the converged interface state, independent of pass count) is a recorded follow-up, not
-  yet implemented. The cross-interface gradient this unrolling produces is checked against
-  central differences for every transport scheme
-  (pinned by tests/test_couple_conservation.py::test_cross_interface_gradient_matches_central_differences_for_each_scheme).
+- **Coupled fixed points are differentiated implicitly.** Both `Model`'s own `coupling="iterate"`
+  and `couple.CoupledModel`'s two-way join run their passes to convergence WITHOUT a graph, run
+  the certified pass once more on the graph, and attach the implicit adjoint of the interface
+  equations (`solvers.fixed_point`): one small GMRES solve on $(I - J^T)$ at the converged
+  interface, with its own residual check that raises by name. The gradient is therefore the
+  fixed point's: its error is of the order of the primal residual (the interface is a fixed
+  point only to within the primal tolerance), not the unrolled $O(\rho^{\text{passes}})$
+  truncation counted from the *start* state and tied to nothing the caller controls; it is
+  exact where the interface equations are linear in the interface, which is why the pinned
+  tests return $1/3$ and $2/3$ to one ulp at `iterate_rtol` $10^{-12}$ and $10^{-3}$ alike.
+  Memory is one pass. Second-order differentiation through it is refused by name
+  (pinned by tests/test_couple_conservation.py::test_gradient_at_a_converged_start_is_the_coupled_derivative,
+  tests/test_couple_conservation.py::test_gradient_does_not_depend_on_the_primal_tolerance,
+  tests/test_model.py::test_iterate_gradient_from_a_near_fixed_point_start_matches_central_differences
+  and tests/solvers/test_fixed_point.py::test_second_order_differentiation_is_refused_by_name).
+  The certified pass is *re-run* for the adjoint, and `solvers/select.py` drops the SuperLU fast
+  path when a differentiating input requires grad, so the adjoint pass can take a different
+  linear-solver route than the primal passes did — the returned state reproduces the certified
+  pass to *solver accuracy*, not identically by construction. Conservation does not depend on
+  which route ran: it is a property of the pass function itself
+  (see [Coupling](../applications/coupling.md#differentiating-the-fixed-point) for the full
+  derivation).
 - **Nonsmooth element laws have declared piecewise semantics, named per element.** `Damper`
   evaluates both signed power-law branches everywhere and selects with `torch.where`, so its
   `dflow` is finite at the kink (`dp = 0`) and matches finite differences away from it

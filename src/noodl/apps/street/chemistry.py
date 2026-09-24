@@ -52,7 +52,10 @@ def street_steady(
 
     The iteration is plain successive substitution -- solve transport at the current
     composition, relax the composition to its photostationary state, repeat -- and it is
-    differentiable by unrolling, like `Model`'s own iterated coupling. `tol` is an ABSOLUTE
+    differentiable by unrolling: every pass stays on the autograd graph, so memory grows
+    with the pass count here (unlike `Model`'s own `coupling="iterate"`, which differentiates
+    its converged fixed point implicitly -- see `noodl.solvers.fixed_point`; this loop is a
+    separate mechanism and has not been given the same treatment). `tol` is an ABSOLUTE
     tolerance on the state in its own units (kg/m3), tested on the largest change over all
     streets and species; a budget it cannot meet raises, naming the pass count and the
     change that was left.

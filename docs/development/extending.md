@@ -133,6 +133,14 @@ real application adds more of the same kind of thing, in a fixed place:
   the builder as a template and overwritten by the caller (or by a closure) at each step. See
   the [Layers and models](../concepts/layers.md) page for the full key vocabulary.
 
+**Numerical blocks are not extension points (yet).** The tested extension path is laws and
+applications, as above — a new `Element` and a new builder composing existing layers. A new
+solver or layer class is a framework change, not an extension: it goes through the plan/review
+process this repository uses for its own development, the same as any other change under
+`src/noodl/layers` or `src/noodl/solvers`. `ConstitutiveLayer` is the worked example of a
+standalone numerical block that was added this way rather than adapted into an existing
+extension point — see [Layers and models](../concepts/layers.md#constitutivelayer).
+
 ## Checking it
 
 The test itself does two things with `build_two_zone`, both cheap sanity checks a new law and

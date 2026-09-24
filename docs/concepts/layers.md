@@ -159,6 +159,13 @@ layer = ConstitutiveLayer(net, "smd", kind="pipe", law=spring_mass_damper)
 p, q = layer.solve(theta, z0=z0)   # z0: the previous step's own z, for a dynamic law
 ```
 
+**A standalone block.** `ConstitutiveLayer` is not one of the three layer kinds `Model` steps
+(`PotentialFlowLayer`, `TransportLayer`, `CapacitatedTransferLayer`); `Model` refuses it by name
+at construction. It is used directly through `solve()`, as the legacy port's tests do, and a
+dynamic law carries its own previous state in `theta`. Making it steppable inside `Model` would
+need a declared state key and a step contract; nothing needs that yet, so the boundary is
+explicit rather than adapted.
+
 ## `Reaction`
 
 Applied to a transport layer's state after its step, operator-split:
@@ -324,8 +331,12 @@ builds on.
 
 ### Differentiability
 
-Ping-pong is one pass of differentiable operations. Iterate is differentiable by unrolling its
-passes — memory grows with pass count — and the convergence *decision* is made on detached
-copies, so it never appears in the graph. `**solve_kwargs` on `step`/`steady` reach the
-**potential solves only** (`differentiable`, `on_failure`, `method`, Newton options); transport
-steps always raise on failure.
+Ping-pong is one pass of differentiable operations. Iterate runs its passes to convergence
+without a graph, then re-runs the certified pass once more on the graph and attaches the
+implicit adjoint of the interface equations — memory is one pass, not all of them, and the
+gradient error is of the order of the primal residual rather than tied to the pass count. The
+convergence *decision* is still made on detached copies, so it never appears in the graph. See
+[Differentiability](differentiability.md#what-is-guaranteed) and
+[Coupling](../applications/coupling.md#differentiating-the-fixed-point) for the full contract.
+`**solve_kwargs` on `step`/`steady` reach the **potential solves only** (`differentiable`,
+`on_failure`, `method`, Newton options); transport steps always raise on failure.
