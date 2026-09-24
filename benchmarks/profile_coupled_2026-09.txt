@@ -8,7 +8,7 @@
 #   that isolates code-attributable slowdown from this ambient load.
 # Sorted by cumulative time, top 25 of 8824 profiled functions.
 
-Sun Sep 20 16:07:11 2026    <repo>/coupled.prof
+Sun Sep 20 16:07:11 2026    <repo>/.superpowers/sdd/2026-09-20-framework-hardening-part-2/coupled.prof
 
          16762376 function calls (16687562 primitive calls) in 84.452 seconds
 

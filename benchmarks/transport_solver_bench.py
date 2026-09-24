@@ -294,13 +294,18 @@ def _git_commit() -> str | None:
 
 
 def machine_block() -> dict:
+    repo_root = Path(__file__).resolve().parent.parent
+    try:
+        noodl_file = str(Path(noodl.__file__).resolve().relative_to(repo_root))
+    except ValueError:
+        noodl_file = noodl.__file__  # outside the repo (e.g. an unrelated install)
     return {
         "torch_version": torch.__version__,
         "num_threads": torch.get_num_threads(),
         "platform": platform.platform(),
         "python_version": platform.python_version(),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "noodl_file": noodl.__file__,
+        "noodl_file": noodl_file,
         "git_commit": _git_commit(),
     }
 
