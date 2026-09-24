@@ -883,7 +883,7 @@ class Model:
                 f"compounding path. Seed it before the first step (the application's "
                 f"initial_state helper, or Model.initial_capacities for capacities).",
                 RuntimeWarning,
-                stacklevel=3,
+                stacklevel=4,
             )
         fed: State = dict(state)
         # The fed state of the pass being run RIGHT NOW. Equal to `fed` on the converged

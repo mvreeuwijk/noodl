@@ -1012,11 +1012,24 @@ def test_iterate_warns_when_a_closure_carried_key_is_missing_from_the_step_start
     """A3: on such a step the key is not pinned to the step start (N1's `if key in base`), so
     its closure integrates once per PASS and the adjoint omits the compounding path. The
     misconfiguration is named where it happens; it is not refused, because the first step is
-    allowed to lack the key by design."""
+    allowed to lack the key by design.
+
+    `stacklevel` is pinned here too, not just the message text: the warning must be attributed
+    to the CALLER of `step`/`steady` (this test module), not to a line inside `model.py` itself
+    -- `warnings.warn`'s default filter dedupes on (message, category, module, lineno), so a
+    warning permanently attributed to one internal line would let a second, later, genuinely
+    different caller's identical warning go silently missing (A3 fix round). Both `step` and
+    `steady` reach `_iterate` through the same `_advance`, so one `stacklevel` serves both --
+    checked on both calls below."""
     model, state, drivers = _iterate_model_with_counter()   # the I8-1 tests' builder
     unseeded = {k: v for k, v in state.items() if k != "demo.n"}
-    with pytest.warns(RuntimeWarning, match=r"closure-carried state.*'demo\.n'.*once per pass"):
+    match = r"closure-carried state.*'demo\.n'.*once per pass"
+    with pytest.warns(RuntimeWarning, match=match) as record:
         model.step(unseeded, drivers, 600.0)
+    assert record[0].filename.endswith("test_model.py")
+    with pytest.warns(RuntimeWarning, match=match) as record:
+        model.steady(unseeded, drivers)
+    assert record[0].filename.endswith("test_model.py")
 
 
 def test_iterate_does_not_warn_when_the_key_is_seeded():
