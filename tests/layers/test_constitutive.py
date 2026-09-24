@@ -1,8 +1,8 @@
 """Tests for ConstitutiveLayer: the loop formulation for general branch laws.
 
-``tests/golden/legacy/tutorial.json`` (``GOLD``) holds the 2019 ``Circuit`` tutorial's
-captured numeric references for the same triangle (edges (0,1), (1,2), (2,0), kind "pipe") used
-throughout this file.
+``tests/golden/worked_examples.json`` (``GOLD``) holds a worked example's captured numeric
+references for the same triangle (edges (0,1), (1,2), (2,0), kind "pipe") used throughout this
+file.
 """
 
 import json
@@ -14,14 +14,14 @@ import torch
 from noodl.layers.constitutive import ConstitutiveLayer
 from noodl.topology import Network
 
-_GOLD_PATH = Path(__file__).parent.parent / "golden" / "legacy" / "tutorial.json"
+_GOLD_PATH = Path(__file__).parent.parent / "golden" / "worked_examples.json"
 GOLD = json.loads(_GOLD_PATH.read_text())
 
 F64 = torch.float64
 
 
 def _triangle_net() -> Network:
-    """Nodes 0, 1, 2; edges (0, 1), (1, 2), (2, 0), all kind 'pipe' -- the legacy tutorial's
+    """Nodes 0, 1, 2; edges (0, 1), (1, 2), (2, 0), all kind 'pipe' -- the worked example's
     single mesh."""
     net = Network(dtype=F64)
     net.add_node(0)
@@ -34,7 +34,8 @@ def _triangle_net() -> Network:
 
 
 def _quadratic_loop_law(p: torch.Tensor, q: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
-    """Legacy's ``loop``: a prescribed drive on edge 0, quadratic dissipation on edges 1, 2."""
+    """The worked example's ``loop``: a prescribed drive on edge 0, quadratic dissipation on
+    edges 1, 2."""
     a0, a1, a2 = theta[0], theta[1], theta[2]
     return torch.stack(
         [
@@ -46,10 +47,10 @@ def _quadratic_loop_law(p: torch.Tensor, q: torch.Tensor, theta: torch.Tensor) -
 
 
 def _spring_mass_damper_law(p: torch.Tensor, q: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
-    """Legacy's ``spring_mass_damper``: inductor (edge 0), resistor (edge 1), capacitor
-    (edge 2), stepped implicitly. ``theta = [L, R, C, q0_prev, p2_prev, dt]``; L does not
-    appear explicitly (the legacy tutorial's own law does not use it, folding L = 1 into the
-    dt/L term as dt)."""
+    """The worked example's ``spring_mass_damper``: inductor (edge 0), resistor (edge 1),
+    capacitor (edge 2), stepped implicitly. ``theta = [L, R, C, q0_prev, p2_prev, dt]``; L
+    does not appear explicitly (the worked example's own law does not use it, folding L = 1
+    into the dt/L term as dt)."""
     _l, r, _c, q0_prev, p2_prev, dt = theta
     return torch.stack(
         [
@@ -63,7 +64,7 @@ def _spring_mass_damper_law(p: torch.Tensor, q: torch.Tensor, theta: torch.Tenso
 # --------------------------------------------------------------------- (a) quadratic loop
 
 
-def test_quadratic_loop_matches_the_legacy_p_and_q():
+def test_quadratic_loop_matches_the_worked_example_p_and_q():
     net = _triangle_net()
     layer = ConstitutiveLayer(net, "loop", kind="pipe", law=_quadratic_loop_law)
 
@@ -76,7 +77,7 @@ def test_quadratic_loop_matches_the_legacy_p_and_q():
     torch.testing.assert_close(q, want_q, rtol=1e-8, atol=0.0)
 
 
-def test_quadratic_loop_jacobian_matches_the_legacy_dp_da_dq_da():
+def test_quadratic_loop_jacobian_matches_the_worked_example_dp_da_dq_da():
     net = _triangle_net()
     layer = ConstitutiveLayer(net, "loop", kind="pipe", law=_quadratic_loop_law)
 
@@ -96,12 +97,12 @@ def test_quadratic_loop_jacobian_matches_the_legacy_dp_da_dq_da():
 # --------------------------------------------------------------- (b) spring-mass-damper
 
 
-def test_spring_mass_damper_matches_the_legacy_displacement_series():
+def test_spring_mass_damper_matches_the_worked_example_displacement_series():
     net = _triangle_net()
     layer = ConstitutiveLayer(net, "smd", kind="pipe", law=_spring_mass_damper_law)
 
     theta = torch.tensor([1.0, 0.2, 1.0, 0.0, 1.0, 0.2], dtype=F64)
-    displacement = [1.0]  # p2(t0) / C, prepended (legacy's own initial xs = [p2/C])
+    displacement = [1.0]  # p2(t0) / C, prepended (the worked example's own initial xs = [p2/C])
     z0 = None
     for _ in range(50):
         p, q = layer.solve(theta, z0=z0)

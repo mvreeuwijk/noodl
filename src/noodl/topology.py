@@ -30,8 +30,8 @@ as PyTorch tensors:
 * Tellegen's residual ``power_residual(p, q) = sum(p * q)``, which vanishes
   identically for ``p`` in the cut space and ``q`` in the cycle space.
 
-The conventions follow John Craske's 2019 ``Tellegen`` package (after Brayton
-and Moser, 1964), rebuilt on ``networkx.MultiDiGraph`` and ``torch``.
+The conventions follow Brayton and Moser (1964), built on ``networkx.MultiDiGraph``
+and ``torch``.
 """
 
 from __future__ import annotations

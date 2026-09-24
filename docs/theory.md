@@ -1,8 +1,7 @@
 # Theoretical background for `noodl`
 
 > Status (11 Sep 2026): research survey drafted by an AI agent from web sources; claims are
-> to be verified against the cited sources. The design spec
-> (`docs/superpowers/specs/2026-09-11-tellegen-framework-design.md`) supersedes this note
+> to be verified against the cited sources. The internal design spec supersedes this note
 > where they differ; in particular the framework is nodal-primary with the cycle space
 > retained for latent flows, not loop-primary as section 3 states.
 
@@ -75,8 +74,7 @@ Consequences used throughout `noodl`:
   in §4.
 - **Cross-checks between different times/systems**: because `f` and `e` need not come
   from the same evaluation, Tellegen's theorem underlies mixed potential/Brayton–Moser
-  formulations (the origin of the 2019 `Tellegen` package) and time-domain
-  reciprocity identities.
+  formulations and time-domain reciprocity identities.
 
 ### Two dual formulations
 

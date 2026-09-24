@@ -8,7 +8,7 @@ shape, not a guide to using it — for that, start at the
 
 The design specs and implementation plans these milestones were executed from are kept
 under `docs/superpowers/`. Like this page, they are part of the repository but not of the
-published site, and they still refer to the package by its former name, `tellegen`.
+published site.
 
 ## Milestone 1b status
 

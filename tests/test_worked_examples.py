@@ -1,7 +1,8 @@
-"""Parity tests against the captured 2019 Tellegen tutorial golden references.
+"""Parity tests against captured worked-example golden references.
 
-``tests/golden/legacy/tutorial.json`` holds the legacy tutorial's numeric results, generated
-by a separate (pre-``noodl``) implementation. Each test here reproduces one of the tutorial's
+``tests/golden/worked_examples.json`` holds numeric results for three worked examples -- a
+quadratic-drag loop, a spring-mass-damper stepped implicitly, and a three-zone contaminant
+exchange -- computed independently of this codebase. Each test here reproduces one of the
 examples with today's public layer API and checks the result against the captured reference,
 not against a value re-derived from today's code -- that is what makes this a PARITY test
 rather than an ordinary regression test.
@@ -18,15 +19,15 @@ from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.transport import TransportLayer
 from noodl.topology import Network
 
-GOLD = json.loads((Path(__file__).parent / "golden" / "legacy" / "tutorial.json").read_text())
+GOLD = json.loads((Path(__file__).parent / "golden" / "worked_examples.json").read_text())
 
 F64 = torch.float64
 
 
-def test_three_zone_exchange_matches_the_legacy_backward_euler_series():
-    """Legacy's three-zone tutorial: nodes 0 (V=10), 1 (V=1), 2 (V=2), a cycle 0->1->2->0
+def test_three_zone_exchange_matches_the_backward_euler_series():
+    """Three-zone contaminant exchange: nodes 0 (V=10), 1 (V=1), 2 (V=2), a cycle 0->1->2->0
     carrying constant flow Q=1 with upwind switching, backward Euler in the concentrations
-    (dt=0.2), initial concentrations (0, 2, 1). Legacy's implicit relation is
+    (dt=0.2), initial concentrations (0, 2, 1). The worked example's implicit relation is
     ``p_new - p_old + dt * q/V = 0`` with q_i the net outflow of node i -- exactly backward
     Euler on ``V dp/dt = inflow - outflow``, which is precisely
     ``TransportLayer(scheme="implicit")``.
@@ -85,8 +86,8 @@ def test_three_zone_exchange_matches_the_legacy_backward_euler_series():
         max_dev = max(max_dev, float((got - want).abs().max()))
 
 
-def test_quadratic_loop_matches_the_legacy_series_resistance_solution():
-    """Legacy's quadratic-loop tutorial: a single mesh with edges (0, 1), (1, 2), (2, 0) and
+def test_quadratic_loop_matches_the_series_resistance_solution():
+    """The quadratic-loop worked example: a single mesh with edges (0, 1), (1, 2), (2, 0) and
     branch laws p0 = a0 (a prescribed potential difference), p1 = a1 |q1| q1,
     p2 = a2 |q2| q2. With a = (1, 1, 1) the loop current is q = -0.7071 on every edge
     (``GOLD["quadratic_loop_a111"]``).
@@ -94,8 +95,8 @@ def test_quadratic_loop_matches_the_legacy_series_resistance_solution():
     Since a single mesh carries the SAME current through every branch, p1 and p2 combine as
     one series quadratic resistor of coefficient a1 + a2 (their potential drops add:
     (a1 + a2) |q| q = a1 |q1| q1 + a2 |q2| q2 when q1 == q2 == q). This is reproduced here as
-    the SERIES-REDUCED form of the legacy loop -- same physics, one branch -- rather than the
-    full three-edge mesh, which ``PotentialFlowLayer`` (a nodal-potential solver, not a
+    the SERIES-REDUCED form of the worked example -- same physics, one branch -- rather than
+    the full three-edge mesh, which ``PotentialFlowLayer`` (a nodal-potential solver, not a
     mesh-current one) would otherwise need a third, purely-topological node for.
 
     Network: two nodes, both boundary (``n0`` at the prescribed drive a0, ``n1`` at 0), one
@@ -103,8 +104,8 @@ def test_quadratic_loop_matches_the_legacy_series_resistance_solution():
     ``src/noodl/elements/quadratic.py``, whose law is ``dp = a q + b |q| q``; read
     ``tests/elements/test_quadratic.py`` for the sign/parameter convention). Setting the
     element's own linear coefficient a=0 and quadratic coefficient b = a1 + a2 = 2 makes
-    ``dp = b |q| q``, matching the legacy pure-quadratic branch laws exactly; then
-    dp = a0 - 0 = a0, so q = sqrt(a0 / b) = sqrt(a0 / 2) in magnitude.
+    ``dp = b |q| q``, matching the pure-quadratic branch laws exactly; then dp = a0 - 0 = a0,
+    so q = sqrt(a0 / b) = sqrt(a0 / 2) in magnitude.
 
     With both endpoints boundary there is no interior unknown at all (the network is fully
     determined by the two prescribed potentials), so this drives ``layer.dp``/``layer.flows``
@@ -113,7 +114,7 @@ def test_quadratic_loop_matches_the_legacy_series_resistance_solution():
     divides by the element's linear coefficient a and would divide by zero here) is only ever
     a starting guess, never required. Differentiating d|q|/da0 through ``layer.flows`` is
     therefore ordinary reverse-mode autograd on the assembled potential, not the implicit
-    adjoint -- exactly the same derivative the tutorial's own analytic
+    adjoint -- exactly the same derivative the worked example's own analytic
     d|q|/da0 = 1 / (2 sqrt(2 a0)) gives.
     """
     net = Network(dtype=F64)
@@ -149,12 +150,12 @@ def test_quadratic_loop_matches_the_legacy_series_resistance_solution():
     )
 
 
-def test_spring_mass_damper_matches_legacy_tutorial():
-    """Legacy's spring-mass-damper tutorial (``GOLD["spring_mass_damper_displacement"]``):
+def test_spring_mass_damper_matches_the_worked_example():
+    """The spring-mass-damper worked example (``GOLD["spring_mass_damper_displacement"]``):
     a single mesh (edges (0, 1), (1, 2), (2, 0), kind "pipe") carrying an inductor, a
     resistor and a capacitor, stepped implicitly (``ConstitutiveLayer``, Task 22).
 
-    ``theta = [L, R, C, q0_prev, p2_prev, dt]``; the legacy tutorial's own branch law does
+    ``theta = [L, R, C, q0_prev, p2_prev, dt]``; the worked example's own branch law does
     not use ``L`` explicitly, folding ``dt / L = dt`` into the inductor term since ``L = 1``
     for this example.
     """
@@ -179,7 +180,7 @@ def test_spring_mass_damper_matches_legacy_tutorial():
     layer = ConstitutiveLayer(net, "smd", kind="pipe", law=spring_mass_damper)
 
     theta = torch.tensor([1.0, 0.2, 1.0, 0.0, 1.0, 0.2], dtype=F64)
-    displacement = [1.0]  # p2(t0) / C, prepended -- legacy's own initial xs = [p2/C]
+    displacement = [1.0]  # p2(t0) / C, prepended -- the worked example's own initial xs = [p2/C]
     z0 = None
     for _ in range(50):
         p, q = layer.solve(theta, z0=z0)
