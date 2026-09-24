@@ -199,6 +199,29 @@ class _AffineSystemOperator:
         eye = torch.eye(m, dtype=dense.dtype, device=dense.device)
         return eye - self.alpha * dense
 
+    def assemble_sparse(self):
+        """COO `(row, col, values)` for `I - alpha * M`: `M`'s own sparse form (Task 4) with
+        an identity diagonal added, `None` propagating unchanged if `M` has none to give.
+
+        DUPLICATES are how the identity and `M`'s diagonal entries combine: `M`'s own COO
+        form already carries duplicate (row, col) pairs at a diagonal position (e.g. an Out
+        term and a self-loop In term at the same interior node), all summed by the COO
+        consumer; appending one more `1.0` per diagonal position is the same mechanism, not
+        a special case.
+        """
+        triplet = self.M.assemble_sparse()
+        if triplet is None:
+            return None
+        row, col, values = triplet
+        m = self.shape[-1]
+        eye_idx = torch.arange(m, dtype=torch.int64, device=row.device)
+        ones = torch.ones(*values.shape[:-1], m, dtype=values.dtype, device=values.device)
+        return (
+            torch.cat([eye_idx, row]),
+            torch.cat([eye_idx, col]),
+            torch.cat([ones, -self.alpha * values], dim=-1),
+        )
+
     def spd_certificate(self):
         return None
 

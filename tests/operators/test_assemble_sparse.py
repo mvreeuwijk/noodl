@@ -155,9 +155,15 @@ def test_dense_operator_assemble_sparse_returns_none():
     assert op.assemble_sparse() is None
 
 
-def test_advection_operator_assemble_sparse_returns_none():
-    """Task C's documented scope limit: the transport path stays on GMRES, so the
-    nonsymmetric advection operator declares no sparse form for this evaluation.
+def test_advection_operator_assemble_sparse_matches_its_dense_assembly():
+    """Task C's documented scope limit ("the transport path stays on GMRES, so the
+    nonsymmetric advection operator declares no sparse form") was closed by Task 4 (B1):
+    `AdvectionOperator` is still nonsymmetric and still uncertified (so `method="auto"`
+    still routes it to GMRES, unaffected by this), but it now HAS a sparse form, for
+    `method="sparse_direct"` and ILU to consume. See `tests/operators/test_advection_sparse.py`
+    for the full parity suite (batches, conduction, kinetics, removal, self-loops, an
+    inactive node, a zero-flow edge); this is the one-instance smoke test in this module's
+    own oracle style.
     """
     src = torch.tensor([0, 1])
     tgt = torch.tensor([1, 2])
@@ -166,7 +172,11 @@ def test_advection_operator_assemble_sparse_returns_none():
     capacity = torch.ones(2)
     interior_of_node = torch.tensor([0, 1, -1])
     op = AdvectionOperator(src, tgt, flow, transmission, capacity, 2, interior_of_node)
-    assert op.assemble_sparse() is None
+    row, col, values = op.assemble_sparse()
+    assert row.dtype is torch.int64 and col.dtype is torch.int64
+    torch.testing.assert_close(
+        _to_dense((row, col, values), 2, 0), op.assemble(), rtol=0.0, atol=1e-12
+    )
 
 
 def test_sparse_assembling_protocol_accepts_an_operator_that_declares_the_member():

@@ -123,6 +123,11 @@ class AdvectionOperator:
         # (b,) index arrays, so the cache holds no memory beyond those arrays either way.
         self._upwind_cache: dict[torch.dtype, tuple[torch.Tensor, torch.Tensor]] = {}
         self._bcast_cache: dict[tuple, torch.Tensor] = {}
+        # Lazily built COO index pattern for `assemble_sparse` (row, col, the positions to
+        # keep from the raw per-family value concatenation, and the node-index arrays used
+        # to gather capacity per entry): built on first use, since topology is fixed but not
+        # every AdvectionOperator is ever assembled sparsely. See `assemble_sparse`.
+        self._coo_cache: dict | None = None
 
         self.dtype = flow.dtype
         self.device = flow.device
@@ -472,26 +477,168 @@ class AdvectionOperator:
         )
 
     def assemble_sparse(self):
-        """`None`: this operator declares no COO sparse form (spec section 6.2, Task C).
+        """COO `(row, col, values)` for the interior generator M (spec section 6.2, B1).
 
-        The optional `operators.base.SparseAssembling` member, answered honestly rather
-        than approximately. A sparse form IS derivable here -- the In/Out/L blocks over the
-        node space, restricted to the interior, divided by capacity, plus the removal
-        diagonal and the kinetics species blocks -- but it is not free: the upwind/downwind
-        roles of every edge come from the SIGN of `flow`, which varies per batch instance,
-        so a shared index pattern would have to carry BOTH orientations of every edge with
-        the inactive one masked to zero, roughly doubling nnz and adding a second structure
-        to keep in step with `matvec`.
+        The optional `operators.base.SparseAssembling` member. `M` is nonsymmetric (its
+        `spd_certificate()` is `None`, so `method="auto"` still routes it to GMRES whatever
+        this returns), but `method="sparse_direct"` and Task 6's ILU both need this form, and
+        so does `_AffineSystemOperator.assemble_sparse` (`I - alpha * M`), which just adds an
+        identity diagonal to it.
 
-        It was left out of Task C's scope because the sparse-direct evaluation this member
-        exists for is about the POTENTIAL block: `AdvectionOperator` is nonsymmetric and its
-        `spd_certificate()` is `None`, so `method="auto"` routes it to GMRES and would
-        continue to do so whatever this returned. `method="sparse_direct"` on a transport
-        operator therefore raises a `ValueError` naming `assemble_sparse`, which is the
-        correct answer for a backend it has no sparse form for, rather than a silent
-        fallback.
+        THE STENCIL, derived from `_raw_action`/`diagonal` and matching `assemble()` bit for
+        bit (interior rows and columns only -- a boundary column is forcing, not part of
+        `M`; every entry divided by the ROW node's interior capacity except removal and
+        kinetics, which act on the intensive state directly). Species are stacked as
+        `k * n_interior + i`:
+
+          * Out, flow edge e, orientation `up = src` (active where `flow >= 0`): for every
+            species k, `(k*n_i + up, k*n_i + up) -= abs(w_e) / cap[up]`, where `up` interior.
+          * In, same orientation (`down = tgt`): `(k*n_i + down, k*n_i + up)
+            += t[k, e] * abs(w_e) / cap[down]`, where `up` AND `down` interior.
+          * Out and In, orientation `up = tgt, down = src` (active where `flow < 0`): as
+            above with the endpoint roles swapped.
+          * conduction edge (u, v, g): `(u, u)` and `(v, v)` each `-= g / cap[row]`; `(u, v)`
+            and `(v, u)` each `+= g / cap[row]`; every species; row and col interior.
+          * removal: `(k*n_i + i, k*n_i + i) -= removal[i, k]`.
+          * kinetics: `(k*n_i + i, l*n_i + i) += kinetics[i, k, l]` for all k, l.
+
+        BOTH flow orientations are emitted for every edge, so the index pattern (`row`,
+        `col`) never depends on the SIGN of `flow`: only the inactive orientation's VALUES
+        are multiplied by 0.0 per batch instance (`positive = flow >= 0`, then `positive`/
+        `~positive` as float masks). This is what lets one index set serve a whole batch of
+        signed flow fields, at the cost of at most doubling nnz for the flow terms. A
+        self-loop edge (`src == tgt`) degenerates harmlessly: both orientations land on the
+        same (row, col), and the batch mask still picks exactly one contribution, matching
+        `assemble()`'s single-orientation self-loop term. An edge with `flow == 0` is zeroed
+        by `abs(w_e) == 0` regardless of the mask, matching `assemble()` exactly (which is
+        indifferent to which "orientation" a zero-weight edge is assigned).
+
+        CACHING mirrors `GraphLaplacianOperator.assemble_sparse`: topology is fixed once an
+        instance is built (only coefficient VALUES vary from one call to the next), so the
+        interior compact-index map, the final filtered `(row, col)` and the per-edge/
+        per-conduction-edge node-index arrays needed to gather values are all built ONCE, on
+        first call, and reused. Only `values` -- one O(edges) vectorised expression, no
+        Python loop -- is recomputed every call.
         """
-        return None
+        K, n_i = self.n_species, self.n_interior
+        dtype, device = self.dtype, self.device
+        cache = self._coo_cache
+        if cache is None:
+            compact = torch.full((self._n,), -1, dtype=torch.long, device=device)
+            compact[self._interior_idx] = torch.arange(n_i, device=device)
+
+            up_c_A, down_c_A = compact[self._src], compact[self._tgt]
+            # Orientation B is the mirror of A: up/down simply swap roles.
+
+            k_idx = torch.arange(K, device=device)
+
+            def tile(node_idx: torch.Tensor) -> torch.Tensor:
+                """`k * n_i + node_idx[e]`, flattened k-major (matches `.repeat(K)`)."""
+                return (k_idx.view(K, 1) * n_i + node_idx.view(1, -1)).reshape(-1)
+
+            row_parts, col_parts, keep_parts = [], [], []
+
+            # Out, both orientations (diagonal in (row, col)).
+            row_parts += [tile(up_c_A), tile(down_c_A)]
+            col_parts += [tile(up_c_A), tile(down_c_A)]
+            keep_parts += [(up_c_A >= 0).repeat(K), (down_c_A >= 0).repeat(K)]
+
+            # In, both orientations.
+            keep_in = (up_c_A >= 0) & (down_c_A >= 0)
+            row_parts += [tile(down_c_A), tile(up_c_A)]
+            col_parts += [tile(up_c_A), tile(down_c_A)]
+            keep_parts += [keep_in.repeat(K), keep_in.repeat(K)]
+
+            u_c = v_c = None
+            if self.conduction is not None:
+                csrc, ctgt, _ = self.conduction
+                u_c, v_c = compact[csrc], compact[ctgt]
+                keep_uv = (u_c >= 0) & (v_c >= 0)
+                row_parts += [tile(u_c), tile(v_c), tile(u_c), tile(v_c)]
+                col_parts += [tile(u_c), tile(v_c), tile(v_c), tile(u_c)]
+                keep_parts += [
+                    (u_c >= 0).repeat(K), (v_c >= 0).repeat(K),
+                    keep_uv.repeat(K), keep_uv.repeat(K),
+                ]
+
+            if self.removal is not None:
+                i_idx = torch.arange(n_i, device=device)
+                row_parts.append(tile(i_idx))
+                col_parts.append(tile(i_idx))
+                keep_parts.append(torch.ones(K * n_i, dtype=torch.bool, device=device))
+
+            if self.kinetics is not None:
+                i_idx = torch.arange(n_i, device=device)
+                l_idx = torch.arange(K, device=device)
+                row_kli = (k_idx.view(K, 1, 1) * n_i + i_idx.view(1, 1, -1)).expand(K, K, n_i)
+                col_kli = (l_idx.view(1, K, 1) * n_i + i_idx.view(1, 1, -1)).expand(K, K, n_i)
+                row_parts.append(row_kli.reshape(-1))
+                col_parts.append(col_kli.reshape(-1))
+                keep_parts.append(torch.ones(K * K * n_i, dtype=torch.bool, device=device))
+
+            row_raw = torch.cat(row_parts).to(torch.int64)
+            col_raw = torch.cat(col_parts).to(torch.int64)
+            keep_idx = torch.nonzero(torch.cat(keep_parts), as_tuple=False).flatten()
+            cache = {
+                "row": row_raw[keep_idx], "col": col_raw[keep_idx], "keep_idx": keep_idx,
+                "up_c_A": up_c_A, "down_c_A": down_c_A, "u_c": u_c, "v_c": v_c,
+            }
+            self._coo_cache = cache
+
+        row, col, keep_idx = cache["row"], cache["col"], cache["keep_idx"]
+        up_c_A, down_c_A = cache["up_c_A"], cache["down_c_A"]
+        batch_shape = self.batch_shape
+
+        def cap_at(idx: torch.Tensor) -> torch.Tensor:
+            return self.capacity.to(dtype).index_select(-1, idx.clamp_min(0))
+
+        def tile_species(x: torch.Tensor, n: int) -> torch.Tensor:
+            """A (..., n) value with no species axis, broadcast across all K species."""
+            x = x.expand(*batch_shape, n)
+            return x.unsqueeze(-2).expand(*batch_shape, K, n).reshape(*batch_shape, K * n)
+
+        def flat_species(x: torch.Tensor, n: int) -> torch.Tensor:
+            """A (..., K, n) value, expanded to batch_shape and flattened k-major."""
+            return x.expand(*batch_shape, K, n).reshape(*batch_shape, K * n)
+
+        flow = self.flow.to(dtype)
+        w = flow.abs()
+        pos = (flow >= 0).to(dtype)
+        neg = 1.0 - pos
+        t = self.transmission.to(dtype)
+        n_e = self._n_edges
+
+        cap_up, cap_down = cap_at(up_c_A), cap_at(down_c_A)
+        val_parts = [
+            tile_species(-(w / cap_up) * pos, n_e),        # Out, orientation A
+            tile_species(-(w / cap_down) * neg, n_e),       # Out, orientation B
+            flat_species(t * (w / cap_down * pos).unsqueeze(-2), n_e),   # In, orientation A
+            flat_species(t * (w / cap_up * neg).unsqueeze(-2), n_e),    # In, orientation B
+        ]
+
+        if self.conduction is not None:
+            _csrc, _ctgt, g = self.conduction
+            g = g.to(dtype)
+            n_c = g.shape[-1]
+            cap_u, cap_v = cap_at(cache["u_c"]), cap_at(cache["v_c"])
+            val_parts += [
+                tile_species(-(g / cap_u), n_c),
+                tile_species(-(g / cap_v), n_c),
+                tile_species(g / cap_u, n_c),
+                tile_species(g / cap_v, n_c),
+            ]
+
+        if self.removal is not None:
+            removal = self.removal.to(dtype).transpose(-1, -2)  # (..., K, n_i)
+            val_parts.append(flat_species(removal.neg(), n_i))
+
+        if self.kinetics is not None:
+            kin = self.kinetics.to(dtype).movedim(-3, -1)  # (..., K(k), K(l), n_i)
+            kin = kin.expand(*batch_shape, K, K, n_i)
+            val_parts.append(kin.reshape(*batch_shape, K * K * n_i))
+
+        values = torch.cat(val_parts, dim=-1).index_select(-1, keep_idx)
+        return row, col, values
 
     def spd_certificate(self):
         return None
