@@ -1009,12 +1009,16 @@ mean-diagonal shift (commit `e451872`, PR-1) changed the work three cases take:
 - The forced mixed-stiffness batch in `tests/layers/test_transport_sparse.py`
   (`test_expm_action_mixed_stiffness_batch_matches_standalone_within_tolerance`, removal
   rates 0.01 and 500.0 batched together so the whole batch halves its step whenever either
-  instance hasn't converged): 104,280 matvecs after the fix (1896 substeps x 55 terms). There
-  is no instrumented pre-fix count for this specific case.
+  instance hasn't converged): 107,030 matvecs (1946 substeps x 55 terms) (re-measured after
+  the P1-1 schedule; the forced case pays for the derivative bound -- 104,280 matvecs (1896
+  substeps x 55 terms) before P1-1). There is no instrumented pre-fix count from the original
+  review.
 - The smaller mixed-stiffness case in `tests/layers/test_expm_schedule.py`
   (`test_a_mixed_stiffness_batch_shares_one_schedule_and_matches_the_reference`, a 4-node
-  chain, removal-free capacities 1.0 and 1e-3): 4,180 matvecs after the fix (76 substeps x 55
-  terms), measured directly on this branch for this re-baseline.
+  chain, removal-free capacities 1.0 and 1e-3): 4,290 matvecs (78 substeps x 55 terms)
+  (re-measured after P1-1b, which also bounds the state polynomial's own coefficient
+  derivative on this shift-eligible path -- 4,180 matvecs, 76 substeps x 55 terms, before
+  P1-1b), measured directly on this branch for this re-baseline.
 
 ## Decision record: what the re-baseline says (20 Sep 2026)
 
@@ -1030,8 +1034,11 @@ the ~1.2x noise band the machine's ambient load requires. The composed ensemble-
 step (implicit-scheme transport only, no `exact`-scheme closures) gave the same verdict:
 0.733 s / 0.711 s / 0.686 s median, ratios 1.031 / 1.036, again inside noise. The 1.5-3x
 deltas the 20 September re-baseline table shows against the 17 September numbers are
-therefore machine load (another session's ~3 GB resident Python process, active at launch and
-throughout both runs), not a regression introduced by this branch. Head does converge the
+therefore not attributable to this branch's code FOR THE TWO WORKLOADS THE A/B RAN (the
+coupling demo at batch 1 and the composed ensemble-1 forward step); machine load (another
+session's ~3 GB resident Python process, active at launch and throughout both runs) is the
+remaining explanation for those two, and the other rows of the re-baseline table were not
+A/B'd. Head does converge the
 coupled iteration in fewer outer passes than main and pre-hardening (107 vs 116, repeatable
 every round) -- a real, deterministic effect of part 1 of the hardening already on `main`
 before this branch -- but it happens to cost slightly more per pass, so it produces no
@@ -1094,8 +1101,11 @@ benchmark -- not commitments made here:
 **Exponential-action work counts.** The mean-diagonal-shift fix changed matvec counts as
 recorded above: the pure-decay case collapses from 184,459 matvecs to 1 (the shift makes
 `M - mu*I` vanish for a case that is structurally an exact-shift-eligible pure decay); the
-committed forced mixed-stiffness batch test needs 104,280 matvecs after the fix, with no
-instrumented pre-fix count to compare against; the smaller mixed-stiffness case needs 4,180.
+committed forced mixed-stiffness batch test needs 107,030 matvecs (re-measured after the
+P1-1 schedule; the forced case pays for the derivative bound -- 104,280 before P1-1), with
+no instrumented pre-fix count to compare against; the smaller (zero-forcing, shift-eligible)
+mixed-stiffness case is unaffected by P1-1 but IS affected by P1-1b (the shifted path's own
+derivative bound), needing 4,290 matvecs (was 4,180 before P1-1b).
 Separately, and by design, `_expm_action` (`src/noodl/layers/transport.py`) now enforces a
 work budget rather than relying only on the recursion-depth limit the review flagged: it
 raises `RuntimeError` naming the predicted substep x Taylor-term matvec count when that count
@@ -1122,6 +1132,75 @@ rule of the general layer, which takes signed flows.
 Nothing else in noodl imported `physics`. `tests/layers/test_transport.py` already covered
 every physics case the deleted tests did, bar zero-flow source accumulation, which was
 ported into it; `tests/test_flows.py` now imports from `cycles` directly.
+
+## Framework hardening part 3 (20 Sep 2026): second review
+
+A second review of `852c65d` (part 1 + part 2 of the hardening) found six defects and closed
+all of them on branch `worktree-framework-hardening-3`. One line each, fix and measured effect:
+
+- **P1-1 — the exponential-action forcing schedule** bounded the state polynomial's truncation
+  but not the *forcing* polynomial's own coefficient-derivative tail, so a coefficient gradient
+  near a zero forced operator was wrong (a `r=1e-3` case reproduced it too: observed derivative
+  error 1.2505e-07 against the forcing polynomial's own tail 1.2503e-07 at three terms — the
+  defect, not a tolerance artefact). Fixed by widening the term-count table to bound both
+  polynomials' derivatives together. Cost: the committed forced mixed-stiffness fixture moved
+  104,280 → 107,030 matvecs (1896 → 1946 substeps at 55 terms); the pure-decay case stays at 1
+  matvec (the mean-diagonal shift from part 1 made `M - mu*I` vanish there, unaffected by this
+  fix); on a same-norm (2000.0) synthetic comparison the schedule itself costs +2.6 %
+  (old bound s=152, m=55 → 8360 matvecs; new bound s=156, m=55 → 8580 matvecs).
+- **P1-1b — the sixth defect, found reviewing the P1-1 fix, not in the original review.** The
+  *shifted* (homogeneous, pure-decay-eligible) path bounded only `R_x`, leaving `D_x` — the
+  state polynomial's own coefficient derivative — unbounded, so a coefficient gradient degraded
+  near a zero shifted operator too: 5.25e-06 relative at a 1e-6 removal spread, against a value
+  error of 3.0e-13. Fixed at one extra Taylor term (`D_x(theta, m) == _taylor_remainder(theta,
+  m-1)` exactly), which costs nothing at theta = 0 (`D_x(0, 1) == 0`) so the pure-decay
+  184,459 → 1 result is untouched, and costs the same +2.6 % elsewhere: a zero-forcing
+  mixed-stiffness fixture moved 4,180 → 4,290 matvecs (76 → 78 substeps at 55 terms).
+- **P1-2 — the coupled fixed point's gradient was the truncated iteration's, not the fixed
+  point's**, for both `Model`'s `coupling="iterate"` and `couple.CoupledModel`'s two-way join,
+  because both differentiated by unrolling. Fixed with the implicit adjoint of the interface
+  equations (`solvers.fixed_point.differentiate_fixed_point`, new module). Headline: gradients
+  at a converged one-pass start moved 0.5 / 0.5 → 0.33333333333333337 / 0.66666666666666663 —
+  exactly 1/3 and 2/3 — for the coupler; the onion's own fixture went from **3.23 % wrong**
+  (main, unrolled) to **3.1e-7** (this branch, implicit adjoint), stable across finite-difference
+  step sizes 1e-5/1e-6/1e-7. A loose `iterate_rtol` (1e-3) now returns the *same* gradient as a
+  tight one (1e-12), where before it returned 0.333984 / 0.666016 instead of 1/3, 2/3. The
+  coupling demo's own headline numbers are unchanged to every printed digit (0.5897 % / 27
+  passes synthetic, 7.191e-5 / 21 passes real) — the certified pass, and therefore conservation,
+  does not depend on which adjoint mechanism ran. My own first construction of the adjoint was
+  wrong and had to be corrected before Tasks 7/8 could use it: it projected onto outputs with
+  `torch.autograd.grad(z_next, outputs, v)`, double-counting whenever one output is computed
+  from another (exactly the shape of a Gauss-Seidel sweep, and of `Model._pass`) — on a
+  hand-derived two-variable fixed point with true derivatives 2/3 and 1/3, that construction
+  would have returned 5/6 and 5/12.
+- **P1-3 — the trapezoidal (Crank-Nicolson) step's old-time term used the NEW capacity** instead
+  of the old one for removal and kinetics, which act on the amount `V x` rather than a
+  capacity-free rate. Fixed by building a second operator at the old capacity (`op_old`) for the
+  old-time term only, bit-identical to the classic step when capacity is fixed (`op_old is op`,
+  `ratio == 1.0` exactly via `x/x`).
+- **P2-4 — a model could be both the recipient and the donor of a two-way link** (a duplicate or
+  cyclic boundary-entry writer), which the coupler's Gauss-Seidel schedule has no defined order
+  for. Refused at construction, by name, for every duplicate writer including one-way links —
+  Maarten's decision, not just the minimal fix for the reviewed case.
+- **P2-5 — one `AdvectionOperator` batch shape** (derived from a subset of the coefficient
+  families) disagreed with the others, failing 8 of 18 (family, scheme) ensemble pairs,
+  including two the original review did not name (`transmission` under `exact`, `removal` under
+  `implicit`). Fixed by deriving every batch shape from the same coefficient set; all 18 pairs
+  green.
+
+**Decisions made on this branch, beyond the individual fixes:**
+
+- **Shared/duplicate link ownership is refused outright**, not merely diagnosed — the safer,
+  stricter reading of P2-4, covering one-way links too.
+- **`ConstitutiveLayer`'s boundary is documented, not adapted.** It stays a standalone block
+  outside `Model`'s three steppable layer kinds; `Model` refuses it by name. Making it steppable
+  would need a declared state key and a step contract that nothing yet needs.
+- **The performance next step is unchanged from part 2's conclusion**, now scoped as its own,
+  separate plan rather than folded into this hardening pass: sparse (COO/CSR) assembly of
+  `AdvectionOperator` paired with a nonsymmetric sparse-direct eligibility path, a preconditioner
+  for GMRES on the advection system, and preconditioner quality for the potential layer's Newton
+  solve under high conductance contrast. None of the three is implemented here.
+
 
 ## Appendix: the source tree
 

@@ -28,9 +28,11 @@ per step.
 `**solve_kwargs` of `step`/`steady` reach the POTENTIAL solves only (`differentiable`,
 `on_failure`, `method`, Newton kwargs). Transport steps always raise on failure.
 
-Differentiability: ping-pong is one pass of differentiable operations; iterate is
-differentiable by unrolling its passes (the convergence decision is made on detached copies,
-as Newton's mask is). Failure follows the layers: raise by default, naming the offender.
+Differentiability: ping-pong is one pass of differentiable operations; iterate carries no
+graph on its primal passes and attaches the IMPLICIT adjoint of its converged interface to
+one extra pass instead of unrolling them, so the gradient is the landed fixed point's rather
+than the truncated iteration's (P1-2; the convergence decision is made on detached copies, as
+Newton's mask is). Failure follows the layers: raise by default, naming the offender.
 """
 
 from __future__ import annotations
@@ -46,12 +48,30 @@ from noodl.layers.capacitated import CapacitatedTransferLayer
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.reaction import Reaction
 from noodl.layers.transport import TransportLayer
+from noodl.solvers.fixed_point import differentiate_fixed_point
 from noodl.topology import Network
 
 Tensor = torch.Tensor
 State = dict[str, Tensor]
 Drivers = dict[str, Tensor]
 _STATE_SUFFIXES = ("phi", "q", "x", "s")
+
+
+def _detached(diag):
+    """The same (nested) diagnostics structure with every tensor detached.
+
+    Diagnostics are a REPORT. A tensor in them that is still attached to a pass's graph
+    offers a second, silent route around the fixed-point adjoint: a loss touching it would
+    be differentiated through that single pass, which is exactly the truncated derivative
+    P1-2 removes. `_iterate` therefore detaches the diagnostics of both the pass it runs
+    only to discover whether anything differentiable reaches the state and the one the
+    adjoint is attached to.
+    """
+    if isinstance(diag, Tensor):
+        return diag.detach()
+    if isinstance(diag, dict):
+        return {k: _detached(v) for k, v in diag.items()}
+    return diag
 
 
 @runtime_checkable
@@ -118,6 +138,19 @@ class Model:
     fractions are ~1e-3 wants when a thermal layer in kelvin sets the pace. Convergence is
     decided per batch instance, and a batch that does not converge within `iterate_max`
     raises, naming the instances (`on_failure="return"` with `diagnostics` returns instead).
+
+    The onion's fixed point is differentiated IMPLICITLY, not by unrolling the passes: the
+    primal passes carry no graph, and after convergence the certified pass runs once more on
+    the graph with `solvers.fixed_point.differentiate_fixed_point` attaching the adjoint of
+    the interface equations (`adjoint_rtol`, the GMRES tolerance of that one small solve).
+    The returned gradient is the derivative of the fixed point the iteration LANDED on, so
+    what remains of the pass count and of `iterate_tol` in it is only that the landing point
+    is a fixed point to within `iterate_tol` -- an O(primal residual) error, against the
+    unrolled O(contraction^passes) truncation it replaces, and exactly zero where the
+    interface is linear. Backward memory is one pass rather than all of them (P1-2).
+    `diagnostics["adjoint"]` says whether that pass ran: `"implicit"` when it did, `None`
+    when nothing differentiable reached the state (or the iteration did not converge) and no
+    extra pass was needed.
     """
 
     def __init__(
@@ -130,6 +163,7 @@ class Model:
         iterate_tol: Mapping[str, float] | None = None,
         iterate_max: int = 20,
         substeps: Mapping[str, int] | None = None,
+        adjoint_rtol: float = 1e-10,
     ) -> None:
         if coupling not in ("pingpong", "iterate"):
             raise ValueError(
@@ -282,6 +316,15 @@ class Model:
         self.coupling = coupling
         self.iterate_tol = dict(iterate_tol or {})
         self.iterate_max = int(iterate_max)
+        # The tolerance of the ONE implicit-adjoint GMRES solve at the converged interface
+        # (P1-2), deliberately independent of the primal `iterate_tol`: that independence is
+        # the whole point of differentiating the fixed point instead of the iteration.
+        self.adjoint_rtol = float(adjoint_rtol)
+        if not self.adjoint_rtol > 0.0:
+            raise ValueError(
+                f"Model: adjoint_rtol must be positive, got {adjoint_rtol!r}; it is the "
+                f"relative tolerance of the fixed-point adjoint's GMRES solve"
+            )
         if coupling == "iterate":
             if not self.iterate_tol:
                 raise ValueError(
@@ -466,6 +509,7 @@ class Model:
     def _pass(
         self, state, drivers, dt, solve_kwargs, *, step_from: State | None = None,
         t: float | None = None, boundary_transfers: bool | Collection[str] = False,
+        produced: list[str] | None = None,
     ) -> tuple[State, dict, Drivers]:
         """One closures -> potential -> capacitated -> transport -> reactions pass;
         `dt=None` means steady (and is refused outright by a model owning a capacitated
@@ -488,6 +532,15 @@ class Model:
         names one linked layer out of several must not pay `step_with_transfer`'s extra cost
         (no diagonal shift on the `exact` scheme's Taylor accumulator, milestone 5 R2 review
         finding) on layers whose transfer nothing reads.
+
+        `produced` (a keyword out-parameter, like `_apply_closures`'s `written` and `solve`'s
+        `diagnostics`; `None` by default, so every other caller is unaffected) is REPLACED
+        with the state keys this pass actually RECOMPUTED, in write order. The returned state
+        starts as a copy of the fed one, so a key no layer here writes is handed back
+        UNCHANGED, and `_iterate` must know which is which: an unchanged entry in the
+        implicit adjoint's interface is a unit row in the interface Jacobian and makes
+        `I - G_z` exactly singular (`solvers.fixed_point`). Asking the pass itself is the
+        only answer that cannot drift from what the pass does.
         """
         base: State = state if step_from is None else step_from
         # N1: closure-carried state (spec 4.6a) must be evaluated from the STEP-START state
@@ -505,6 +558,8 @@ class Model:
         ctx = StepContext(dt=dt, t=t)
         drv = self._apply_closures(closure_state, drivers, written, ctx)
         new: State = dict(state)
+        made: list[str] = [] if produced is None else produced
+        made.clear()
         diag: dict = {}
         for name, layer in self.potential.items():
             pb = self._require(drv, f"{name}.phi_boundary")
@@ -514,6 +569,7 @@ class Model:
             d: dict = {}
             phi, q = layer.solve(pb, drv, sources, phi0=phi0, diagnostics=d, **solve_kwargs)
             new[f"{name}.phi"], new[f"{name}.q"] = phi, q
+            made += [f"{name}.phi", f"{name}.q"]
             diag[name] = d
         if self.capacitated and dt is None:
             raise ValueError(
@@ -535,6 +591,7 @@ class Model:
             cd: dict = {}
             s_new, f = layer.step(s_prev, drv, dt, diagnostics=cd)
             new[f"{name}.s"], new[f"{name}.q"] = s_new, f
+            made += [f"{name}.s", f"{name}.q"]
             diag[name] = cd
         if isinstance(boundary_transfers, str):
             # Defensive: `step()` already refuses a bare string before reaching here, but
@@ -618,10 +675,12 @@ class Model:
                                        capacity_prev=cap_prev_j)
                 if cap is not None:
                     new[f"{name}.capacity"] = cap
+                    made.append(f"{name}.capacity")
                 for lname, reaction in self.reactions:
                     if lname == name:
                         x = reaction.apply(x, dt, drv)
             new[f"{name}.x"] = x
+            made.append(f"{name}.x")
             diag[name] = {"substeps": self.substeps[name]}
             if want_transfer:
                 diag[name]["boundary_transfer"] = transfer_total
@@ -640,6 +699,7 @@ class Model:
                     f"call"
                 )
             new[key] = drv[key]
+            made.append(key)
         return new, diag, drv
 
     # ------------------------------------------------------------------ public
@@ -752,15 +812,66 @@ class Model:
         previous pass's own output (N1) -- a closure that integrates (a sewer manhole's
         storage sweep, a tank level) would otherwise advance once per PASS instead of once
         per STEP. The returned state is the LAST pass's own output, never a relaxed one.
-        Convergence is judged per instance on detached copies; the passes themselves stay on
-        the autograd graph (unrolled).
+        Convergence is judged per instance on detached copies.
 
-        The fixed point is therefore differentiated by unrolling, which carries the whole
-        chain of passes on the graph. An implicit-function treatment of the fixed point (one
-        adjoint solve at the converged state, memory independent of the pass count) is a
-        follow-up, not this milestone.
+        Differentiation: the primal passes carry no graph. After convergence the certified
+        pass runs once more on the graph at the SAME fed state and
+        `solvers.fixed_point.differentiate_fixed_point` attaches the implicit adjoint of the
+        interface equations, so the returned gradient is the FIXED POINT's own and not the
+        truncated iteration's (P1-2). What remains of the pass count and of `iterate_tol` in
+        it is only that the landing point is a fixed point to within `iterate_tol`: the error
+        is O(primal residual) rather than the unrolled O(contraction^passes), and it is
+        exactly zero where the interface is linear. Backward memory is one pass. Pass 1 runs
+        on the graph only to learn whether anything differentiable reaches the state -- a
+        structural question no inspection of `state` and `drivers` can answer, since a
+        differentiable parameter may be captured inside an element, a drive or a closure and
+        never appear in either -- and its graph is dropped at once; if nothing does, no extra
+        pass runs and a forward-only simulation costs exactly the passes it always did. A run
+        that does NOT converge attaches no adjoint either: there is no fixed point to
+        differentiate, and handing back the last pass's graph would be exactly the truncated
+        derivative this replaced.
+
+        The INTERFACE is every state key the pass RECOMPUTES (`_pass`'s `produced`), minus
+        the closure-carried ones. Both exclusions are deliberate:
+
+        * A key no layer writes is copied through `_pass`'s `new = dict(state)` UNCHANGED, so
+          it would hand its own input straight back: a unit row in the interface Jacobian,
+          `I - G_z` exactly singular, and the adjoint solve failing by name. Such a key is
+          not an unknown of the interface at all -- the pass never updates it -- so it is
+          simply not in `produced`. Its own graph is preserved another way, below.
+        * Closure-carried state is pinned to the STEP-START state on every pass by N1, so a
+          pass does not read it from the fed state and it carries no feedback at all; and it
+          is the one key a closure may legitimately return unchanged, which would be that
+          same unit row. Its gradient path survives regardless, because the differentiable
+          pass reads it from `state` itself (`step_from=state`), graph and all -- as do the
+          transport and capacitated steps, which advance from `state` for the same reason.
+          (A closure-carried key MISSING from the step-start state is the one case N1 does
+          not pin; there the pass reads the previous pass's value, and holding it fixed here
+          drops a path that only exists because that key was not seeded in the first place.)
+
+        Everything else the pass writes is IN, for the reason the coupler's one-way links
+        are: the whole of `new` is fed back to the next pass, and holding any of it fixed
+        against the parameters would silently drop the gradient path running through it. An
+        entry the pass turns out not to depend on costs a zero row and a zero column, which
+        is harmless -- only its share of the GMRES dimension.
+
+        The interface is taken at `fed`, the state the CERTIFIED pass (the one whose output
+        was just judged converged) was actually run with -- relaxed `"<layer>.x"` and all --
+        so re-running `_pass` on it reproduces that pass, and the state it returns is the
+        certified one to solver accuracy. Not necessarily BITWISE: `solvers/select.py` drops
+        the SuperLU fast path for an input that requires grad, so this pass may take a
+        different linear-solver route than the grad-free primal ones did. The next iterate
+        handed to the adjoint is the pass's own UNRELAXED
+        output: relaxation does not move the fixed point, but differentiating the relaxed map
+        would scale `(I - G_z)^-1` by 1/relaxation and return a gradient wrong by that
+        factor.
         """
         fed: State = dict(state)
+        # The fed state of the pass being run RIGHT NOW. Equal to `fed` on the converged
+        # exit, which breaks before `fed` is rebuilt, but named separately so that a later
+        # edit to the loop's tail cannot silently hand the adjoint the wrong linearisation
+        # point.
+        certified_fed: State = fed
         prev: State | None = None
         change: dict[str, Tensor] = {}
         # A placeholder the second pass always replaces: `iterate_max >= 2` and a non-empty
@@ -770,15 +881,27 @@ class Model:
         passes = 0
         diag: dict = {}
         new: State = dict(state)
+        produced: list[str] = []
+        needs_adjoint = False
         # A `while` rather than `for passes in range(...)`: the pass count is wanted AFTER
         # the loop (it goes into the diagnostics and into the failure message), which a loop
         # control variable unused inside the body is not (ruff B007).
         while passes < self.iterate_max:
             passes += 1
-            new, diag, _ = self._pass(
-                fed, drivers, dt, solve_kwargs, step_from=state, t=t,
-                boundary_transfers=boundary_transfers,
-            )
+            certified_fed = fed
+            # Pass 1 runs with grad ENABLED only to learn whether anything differentiable
+            # reaches the state -- its graph is dropped three lines later -- and every other
+            # primal pass runs with no graph at all. The returned derivative comes from the
+            # ONE differentiable pass after the loop, never from these.
+            with torch.set_grad_enabled(passes == 1 and torch.is_grad_enabled()):
+                new, diag, _ = self._pass(
+                    fed, drivers, dt, solve_kwargs, step_from=state, t=t,
+                    boundary_transfers=boundary_transfers, produced=produced,
+                )
+                if passes == 1:
+                    needs_adjoint = any(new[k].requires_grad for k in produced)
+                    new = {k: v.detach() for k, v in new.items()}
+                    diag = _detached(diag)
             if prev is not None:
                 with torch.no_grad():
                     ok: Tensor | None = None
@@ -810,9 +933,79 @@ class Model:
             )
             if not (solve_kwargs.get("on_failure") == "return" and diagnostics is not None):
                 raise RuntimeError(message)
+        # A key `_pass` does not write is carried through it verbatim, pass after pass, so
+        # its value in the returned state is the caller's own -- and so is its graph, which
+        # the detached primal passes above replaced with a graph-free copy of the same
+        # numbers. Put the ORIGINAL tensors back. They are not unknowns of the interface
+        # (the docstring says why), so this restores a path the adjoint never covers and
+        # changes no number.
+        written_here = set(produced)
+        carried = {k: v for k, v in state.items() if k not in written_here}
+        adjoint: str | None = None
+        if needs_adjoint and bool(converged.all()):
+            # `k in certified_fed` only guards the impossible: every produced key is in the
+            # previous pass's output and so in the fed state of any pass after the first,
+            # and convergence is only ever declared from pass 2 on.
+            keys = [
+                k for k in dict.fromkeys(produced)
+                if k not in self.closure_state_keys and k in certified_fed
+            ]
+            out_keys: list[str] = []
+            adjoint_diag: dict = {}
+
+            def pass_fn(z: list[Tensor]) -> tuple[list[Tensor], list[Tensor]]:
+                f = dict(certified_fed)
+                f.update(carried)
+                f.update(zip(keys, z, strict=True))
+                out, d, _ = self._pass(
+                    f, drivers, dt, solve_kwargs, step_from=state, t=t,
+                    boundary_transfers=boundary_transfers,
+                )
+                adjoint_diag.clear()
+                adjoint_diag.update(d)
+                # `out` is only READ here and below: `differentiate_fixed_point` hands its
+                # outputs back as VIEWS of these tensors, and writing into one would mutate
+                # the retained pass graph under autograd.
+                out_keys[:] = list(out)
+                z_next = [out[k] for k in keys]
+                # Every entry recomputed by the pass, never a leaf of `z` handed back: the
+                # keys were chosen for exactly that (see the docstring), and the one way it
+                # could still happen -- a closure returning a driver it read straight out of
+                # the fed state -- is named here rather than surfacing as a singular
+                # `I - G_z` from inside the adjoint solve.
+                # "<pot>.phi" and "<layer>.capacity" may legitimately sit in `keys` even
+                # though the potential solve detaches its warm start and the capacity is
+                # closure-derived: both are genuinely RECOMPUTED by this pass (a fresh
+                # `phi0`-detached solve, a fresh closure call), so they contribute a zero
+                # row/column here, not a unit one -- see the class docstring and
+                # .superpowers/sdd/2026-09-20-framework-hardening-part-3/task-8-report.md for
+                # why that is harmless and this guard is what would catch it if it stopped
+                # being true.
+                echoed = [k for k, n, t in zip(keys, z_next, z, strict=True) if n is t]
+                if echoed:
+                    raise RuntimeError(
+                        f"Model: coupling='iterate' cannot differentiate its fixed point "
+                        f"because the pass hands the state key(s) {echoed} back unchanged "
+                        f"instead of recomputing them, which makes the interface Jacobian "
+                        f"singular; a closure writing such a key must compute it rather "
+                        f"than echo the state it was given"
+                    )
+                return [out[k] for k in out_keys], z_next
+
+            flat = differentiate_fixed_point(
+                [certified_fed[k] for k in keys], pass_fn, rtol=self.adjoint_rtol,
+                where="Model coupling='iterate'",
+            )
+            new = dict(zip(out_keys, flat, strict=True))
+            # The differentiated pass's own diagnostics, DETACHED: see `_detached`.
+            diag = _detached(adjoint_diag)
+            adjoint = "implicit"
+        else:
+            new = {**new, **carried}
         if diagnostics is not None:
             diagnostics.update(
-                {"passes": passes, "converged": converged, "max_change": change, "layers": diag}
+                {"passes": passes, "converged": converged, "max_change": change,
+                 "layers": diag, "adjoint": adjoint}
             )
         return new
 

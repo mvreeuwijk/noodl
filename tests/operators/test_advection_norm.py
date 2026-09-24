@@ -51,3 +51,21 @@ def test_abs_column_sums_match_the_dense_assembly(seed, conduction, kinetics, re
     dense = op.assemble().abs().sum(dim=-2)          # (..., m): column sums of |M|
     torch.testing.assert_close(op.abs_column_sums(), dense, rtol=1e-12, atol=1e-12)
     torch.testing.assert_close(op.norm1_bound(), dense.amax(-1), rtol=1e-12, atol=1e-12)
+
+
+def test_abs_column_sums_match_the_dense_assembly_for_a_kinetics_only_batch():
+    """A batch that lives ONLY in kinetics (P2-5): flow, capacity and transmission unbatched."""
+    g = torch.Generator().manual_seed(7)
+    net = Network(dtype=F64)
+    for n in ("ambient", "a", "b"):
+        net.add_node(n)
+    net.add_edge("ambient", "a", kind="flow")
+    net.add_edge("a", "b", kind="flow")
+    net.add_edge("b", "ambient", kind="flow")
+    kinetics = torch.randn(3, 2, 2, 2, generator=g, dtype=F64)        # (batch 3, n_i 2, K, K)
+    layer = TransportLayer(net, "c", capacity=torch.ones(2, dtype=F64), flow_kind="flow",
+                           boundary=["ambient"], n_species=2, kinetics=kinetics)
+    op = layer._advection_operator(torch.ones(3, dtype=F64))
+    assert op.shape == (3, 4, 4)
+    dense = op.assemble()
+    torch.testing.assert_close(op.abs_column_sums(), dense.abs().sum(-2), rtol=1e-12, atol=1e-12)

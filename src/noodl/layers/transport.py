@@ -996,12 +996,17 @@ class TransportLayer:
         dt/2 (F(x_{n+1}) + F(x_n))`, with `F(x) = G x + N_raw x_b + s` the capacity-FREE
         amount rate. Dividing through by `V_new` and using `F(x_n) / V_new = M_new x_n +
         N_new x_b + s / V_new = op.matvec(x_n) + b0` (the operator's own capacity-divided
-        blocks at the NEW capacity -- there is no separate old-capacity operator to build):
+        blocks at the NEW capacity) for x_{n+1}'s coefficient, but `F(x_n) / V_new =
+        (V_old / V_new) * (F(x_n) / V_old) = (V_old / V_new) * op_old.matvec(x_n)` for the
+        OLD-time term: advection and conduction are capacity-free amount rates, so op_old
+        agrees with op there, but removal and kinetics act on the amount `V x` and so must
+        carry V_old at the old time, not V_new (P1-3):
 
-            (I - dt/2 M_new) x_{n+1} = (V_old / V_new) x_n + dt/2 op.matvec(x_n) + dt b0
+            (I - dt/2 M_new) x_{n+1} = (V_old / V_new) (x_n + dt/2 op_old.matvec(x_n)) + dt b0
 
-        `capacity_prev` defaults to `capacity` (fixed storage), which recovers the classic
-        `(I - dt/2 M) x_{n+1} = (I + dt/2 M) x_n + dt b0` step bit for bit (ratio == 1)."""
+        `capacity_prev` defaults to `capacity` (fixed storage), in which case op_old is op
+        itself and this recovers the classic `(I - dt/2 M) x_{n+1} = (I + dt/2 M) x_n + dt b0`
+        step bit for bit (ratio == 1)."""
         dtype = torch.float64
         x = x.to(dtype)
         q = q.to(dtype)
@@ -1013,14 +1018,26 @@ class TransportLayer:
         names, coef = self._coefficients()
 
         def build_system(x_, q_, sources_, xb_, cap_, cap_prev_, *coef_):
-            op = self._advection_operator(q_, cap_, dict(zip(names, coef_, strict=True)))
+            coef_map = dict(zip(names, coef_, strict=True))
+            op = self._advection_operator(q_, cap_, coef_map)
             xb_s, _ = self._to_stacked(xb_, self.n_b, "x_boundary")
             src_s, _ = self._to_stacked(self._sources_interior(sources_), self.n_i, "sources")
             x_s, _ = self._to_stacked(x_, self.n_i, "x")
             cap = self._capacity_stacked(dtype, cap_)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
+            # The old-time term is F(x_n) / V_new with F the AMOUNT rate. Advection and
+            # conduction are capacity-free amount rates, but removal and kinetics act on the
+            # amount V x, so at t_n they carry V_old, not V_new (P1-3). Since
+            # op_old.matvec(x) == F_old(x) / V_old, the whole old-time term is
+            # (V_old / V_new) * op_old.matvec(x_n): one operator at the OLD capacity, and
+            # the ratio in front of both x_n and its rate. With a fixed capacity op_old is
+            # op itself and the result is bit-identical to the classic Crank-Nicolson step.
             ratio = self._capacity_stacked(dtype, cap_prev_) / cap
-            rhs = ratio * x_s + 0.5 * dt * op.matvec(x_s) + dt * b0
+            op_old = (
+                op if cap_prev_ is cap_
+                else self._advection_operator(q_, cap_prev_, coef_map)
+            )
+            rhs = ratio * (x_s + 0.5 * dt * op_old.matvec(x_s)) + dt * b0
             system = _AffineSystemOperator(op, 0.5 * dt)
             return system, rhs
 
@@ -1091,16 +1108,97 @@ def _taylor_remainder(theta: float, m: int) -> float:
     return total
 
 
+def _forced_remainder(theta: float, m: int) -> float:
+    """The largest of the four Taylor tails a degree-m step with FORCING leaves behind, all
+    in units of their own leading term, for any ||hA|| <= theta:
+
+        R_x   = sum_{k>m} theta^k / k!            e^{hA} x0 itself (`_taylor_remainder`)
+        R_phi = sum_{k>m} theta^(k-1) / k!        the forcing polynomial sum_j h^j/j! A^(j-1) b0
+        D_x   = sum_{k>m} k theta^(k-1) / k!      d/dA of the x0 polynomial  (= R_x at m-1)
+        D_phi = sum_{k>m} (k-1) theta^(k-2) / k!  d/dA of the forcing polynomial
+
+    The schedule used to bound R_x alone (P1-1). The forcing polynomial is one power of A
+    short of the exponential's, so its tail is one power of theta LARGER than R_x, and its
+    A-derivative another power larger still: at theta -> 0, D_phi(theta, 1) -> 1/2, which
+    is the reviewed case -- one term keeps the forced VALUE exact at r = 0 and drops every
+    coefficient sensitivity of the forcing. Bounding D_phi (which dominates the other three
+    for theta <= m/(m+1) < 1, the crossover with D_x, and is dominated by D_x -- not R_x --
+    near theta_max, e.g. at theta=14, m=5: D_x = 1.200e6 > R_x = 1.196e6) makes autograd
+    through the polynomial an approximation of the exponential's derivative to the same
+    tolerance as the value. `m = 1` is never admissible with forcing; `theta = 0` needs
+    `m = 2`. The `m < 2` branch below is a SENTINEL, not itself "the largest of the four
+    tails": `math.inf` for theta > 0 exists only to pin the forced table's m = 1 entry at
+    0.0 during `_theta_table`'s bisection, since none of the four tails is even defined at
+    m = 1 in a way that stays finite and useful (D_phi's first surviving term needs k >= 2,
+    i.e. m >= 1, but R_phi and D_x at m = 1 already equal the m = 0 sums of a step with no
+    forcing bound to speak of).
+    """
+    if m < 2:
+        return 0.5 if theta <= 0.0 else math.inf
+    if theta <= 0.0:
+        return 0.0
+    k = m + 1
+    log_t = k * math.log(theta) - math.lgamma(k + 1)      # log(theta^k / k!)
+    r_x = r_phi = d_x = d_phi = 0.0
+    while k < m + 2000:
+        t = math.exp(log_t)
+        r_x += t
+        r_phi += t / theta
+        d_x += k * t / theta
+        d_phi += (k - 1) * t / (theta * theta)
+        if (k - 1) * t / (theta * theta) < 1e-300:
+            break
+        k += 1
+        log_t += math.log(theta) - math.log(k)
+    return max(r_x, r_phi, d_x, d_phi)
+
+
+def _shifted_remainder(theta: float, m: int) -> float:
+    """max(R_x, D_x): the state polynomial's own tail AND its A-derivative's tail, for any
+    ||hA|| <= theta on the shifted (homogeneous, `b0` structurally zero) path.
+
+        R_x = sum_{k>m} theta^k / k!        e^{hA} x0 itself (`_taylor_remainder`)
+        D_x = sum_{k>m} k theta^(k-1) / k!  d/dA of the x0 polynomial
+
+    Re-indexing `k' = k - 1` gives `D_x(theta, m) = sum_{k'>=m} (k'+1) theta^k' / (k'+1)! =
+    sum_{k'>m-1} theta^k' / k'! = _taylor_remainder(theta, m - 1)` exactly -- the derivative
+    tail is the VALUE tail one Taylor degree down. Since `_taylor_remainder` is monotone
+    decreasing in its degree argument, `_taylor_remainder(theta, m - 1) >=
+    _taylor_remainder(theta, m)` for every m >= 1, so the max is just the one-degree-down
+    value tail; both are computed and maxed anyway so the identity above stays a checked
+    invariant of this function's behaviour rather than an unenforced assumption.
+
+    Bounding D_x, not just R_x, is required for the same reason `_forced_remainder` bounds
+    D_phi (P1-1): the schedule fixes (s, m) before any arithmetic on the state, so autograd
+    through the fixed-degree recurrence differentiates that literal polynomial, and its
+    coefficient sensitivities need their own tolerance guarantee near a zero SHIFTED
+    operator, not just the polynomial's value. `m = 0` is not a valid Taylor degree, so this
+    is only ever called with m >= 1; at m = 1, `_taylor_remainder(theta, 0) = e^theta - 1`,
+    which vanishes only at theta = 0 -- every term carries a positive power of theta, so
+    `_shifted_remainder(0.0, 1) == 0.0` exactly, which is what keeps a truly zero-norm
+    shifted operator admissible at one term (though `_taylor_schedule` never actually
+    consults this table at norm == 0.0; it special-cases that norm directly).
+    """
+    return max(_taylor_remainder(theta, m), _taylor_remainder(theta, m - 1))
+
+
 @functools.cache
-def _theta_table(tol: float, m_max: int) -> tuple[float, ...]:
-    """theta_m for m = 1..m_max: the largest ||A|| that m Taylor terms bring within tol
-    (one bisection per m, computed once per tol and cached). Monotone increasing in m."""
+def _theta_table(tol: float, m_max: int, *, forcing: bool) -> tuple[float, ...]:
+    """theta_m for m = 1..m_max: the largest ||A|| that m Taylor terms bring within tol, under
+    `_forced_remainder` when `forcing` (the affine step, also bounding the forcing
+    polynomial's own tail and its A-derivative, P1-1) and `_shifted_remainder` otherwise (the
+    homogeneous, shifted step, bounding the state polynomial's tail and its A-derivative,
+    P1-1b). Monotone increasing in m; the forced table's m = 1 entry is 0.0 (one term is
+    never admissible with forcing). `forcing` is keyword-only and has no default -- like
+    `_taylor_schedule`'s -- so `functools.cache` cannot hold separate entries for the same
+    (tol, m_max, forcing) table reached once positionally and once by keyword."""
+    bound = _forced_remainder if forcing else _shifted_remainder
     table = []
     for m in range(1, m_max + 1):
         lo, hi = 0.0, 4.0 * m_max
         for _ in range(60):
             mid = 0.5 * (lo + hi)
-            if _taylor_remainder(mid, m) <= tol:
+            if bound(mid, m) <= tol:
                 lo = mid
             else:
                 hi = mid
@@ -1108,17 +1206,24 @@ def _theta_table(tol: float, m_max: int) -> tuple[float, ...]:
     return tuple(table)
 
 
-def _theta_max(tol: float, m_max: int) -> float:
-    return _theta_table(tol, m_max)[-1]
+def _theta_max(tol: float, m_max: int, *, forcing: bool) -> float:
+    return _theta_table(tol, m_max, forcing=forcing)[-1]
 
 
-def _taylor_schedule(norm: float, tol: float, m_max: int = _TAYLOR_M_MAX) -> tuple[int, int]:
+def _taylor_schedule(
+    norm: float, tol: float, m_max: int = _TAYLOR_M_MAX, *, forcing: bool
+) -> tuple[int, int]:
     """(substeps s, terms m), s * m minimal over a window of s, with theta = norm / s <= theta_m.
 
     Independent of the state and the forcing by construction: the term count is fixed before
-    a single matvec runs, so autograd through the recurrence is the exact derivative of the
-    same polynomial that produced the value (R3). The window `s_min .. s_min + 15` is enough:
-    m falls by at most a few terms per extra substep while s grows by one, so the product's
+    a single matvec runs, so autograd through the recurrence is the derivative of the same
+    polynomial that produced the value, and the schedule bounds that polynomial's distance
+    from the exponential AND its derivative's, on BOTH paths: the affine step's forcing
+    polynomial and its coefficient derivative (P1-1, `_forced_remainder`), and the homogeneous
+    step's state polynomial and its coefficient derivative (P1-1b, `_shifted_remainder`).
+    `forcing` selects which of the two bounds applies; the term count is still fixed before
+    any arithmetic on the state or the forcing. The window `s_min .. s_min + 15` is enough: m
+    falls by at most a few terms per extra substep while s grows by one, so the product's
     minimum sits at or just above the smallest admissible s.
     """
     if not math.isfinite(norm) or norm < 0.0:
@@ -1126,8 +1231,8 @@ def _taylor_schedule(norm: float, tol: float, m_max: int = _TAYLOR_M_MAX) -> tup
             f"_taylor_schedule: operator norm bound must be finite and >= 0, got {norm!r}"
         )
     if norm == 0.0:
-        return 1, 1
-    table = _theta_table(tol, m_max)
+        return (1, 2) if forcing else (1, 1)
+    table = _theta_table(tol, m_max, forcing=forcing)
     s_min = max(1, math.ceil(norm / table[-1]))
     best: tuple[int, int] | None = None
     for s in range(s_min, s_min + 16):
@@ -1161,7 +1266,15 @@ def _expm_action(
     The recurrence per substep of length h: u = M x + b0, x_next = x + sum_{j>=1} h^j/j!
     M^{j-1} u; and, when `integrate`, int_0^h x(tau) dtau = h x + sum_{j>=1} h^{j+1}/(j+1)!
     M^{j-1} u (the same terms, shifted coefficients). One (s, m) serves the whole batch: the
-    bound is taken as the batch maximum, which is conservative for every instance.
+    bound is taken as the batch maximum, which is conservative for every instance. The
+    schedule is `_taylor_schedule(norm, tol, forcing=not shift)`: `shift=True` is only ever
+    reached when `b0` is structurally zero (this function's own rule, below), so `not shift`
+    is exactly "forcing may be present" and selects the bound that also covers the forcing
+    polynomial's coefficient derivative (P1-1); `shift=True` selects the bound that covers
+    the state polynomial's OWN coefficient derivative instead (P1-1b, `_shifted_remainder`),
+    since forcing is structurally absent whenever the shift is taken but the state
+    polynomial's tangent still needs its own tolerance guarantee near a zero shifted
+    operator.
 
     Shift: when applied, M is replaced by M - mu I with mu the mean diagonal per instance and
     the result multiplied by e^{h mu}; this is exact and removes the common decay rate from
@@ -1206,7 +1319,11 @@ def _expm_action(
             mu_ng = diag.mean(-1, keepdim=True)
             colsum = colsum - diag.abs() + (diag - mu_ng).abs()
         norm = float((colsum.amax(-1) * dt).max())
-    s, m = _taylor_schedule(norm, tol)
+    # `shift=True` is only ever reached when `b0` is structurally zero (the function's own
+    # rule above), so `not shift` is exactly "forcing may be present" and selects the bound
+    # that also covers the forcing polynomial's coefficient derivative (P1-1); when shifted,
+    # it selects the bound covering the state polynomial's own coefficient derivative (P1-1b).
+    s, m = _taylor_schedule(norm, tol, forcing=not shift)
     if s * m > max_matvecs:
         raise RuntimeError(
             f"{where}: the exponential action needs about {s * m} matvecs (||dt M||_1 = "

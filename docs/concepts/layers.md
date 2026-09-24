@@ -115,13 +115,17 @@ sub-stepping; `"implicit"` is implicit Euler; `"trapezoidal"` is the second-orde
 The exact scheme bases its sub-stepping on the operator's one-norm `||dt M||_1`, computed from
 the state-independent matrix before any arithmetic on the state; if the predicted work exceeds
 the budget, the step is refused, raising an error that names the layer and advises the implicit
-or trapezoidal schemes. All coefficients the layer owns—carrier, transmission, kinetics, removal,
-and conductance—are differentiable under every scheme.
+or trapezoidal schemes. A stiff operator (large `||dt M||_1`, e.g. fast removal with a nonzero
+forcing) costs the exact scheme thousands of matvecs per step by nature; `scheme="implicit"` is
+the documented choice there, not a larger budget. All coefficients the layer owns—carrier,
+transmission, kinetics, removal, and conductance—are differentiable under every scheme.
 
 **Changing storage.** A transport layer's capacity may change over a step: a sewer pipe's wetted
 volume, or a headspace volume as the water level changes. The step conserves the stored amount
 `V x` in amount form: `V_new x_new - V_old x_old = dt F(x_new)` (implicit) or `= dt/2 (F(x_new) + F(x_old))`
-(trapezoidal). The argument `capacity_prev` (the storage at the step's start, when it differs from
+(trapezoidal). In the trapezoidal form the old-time rate `F(x_old)` is evaluated with the OLD
+capacity, which matters for removal and kinetics (they act on the amount `V x`), not for advection
+or conduction (capacity-free amount rates). The argument `capacity_prev` (the storage at the step's start, when it differs from
 the `capacity` argument at the step's end) implements this; a fixed-storage layer omits both and
 recovers the classical form. The driver `"<layer>.capacity"` holds the storage at the step's end.
 When a closure writes that driver, the step-start state must carry the key `"<layer>.capacity"`,
@@ -154,6 +158,13 @@ def spring_mass_damper(p, q, theta):
 layer = ConstitutiveLayer(net, "smd", kind="pipe", law=spring_mass_damper)
 p, q = layer.solve(theta, z0=z0)   # z0: the previous step's own z, for a dynamic law
 ```
+
+**A standalone block.** `ConstitutiveLayer` is not one of the three layer kinds `Model` steps
+(`PotentialFlowLayer`, `TransportLayer`, `CapacitatedTransferLayer`); `Model` refuses it by name
+at construction. It is used directly through `solve()`, as the legacy port's tests do, and a
+dynamic law carries its own previous state in `theta`. Making it steppable inside `Model` would
+need a declared state key and a step contract; nothing needs that yet, so the boundary is
+explicit rather than adapted.
 
 ## `Reaction`
 
@@ -320,8 +331,12 @@ builds on.
 
 ### Differentiability
 
-Ping-pong is one pass of differentiable operations. Iterate is differentiable by unrolling its
-passes — memory grows with pass count — and the convergence *decision* is made on detached
-copies, so it never appears in the graph. `**solve_kwargs` on `step`/`steady` reach the
-**potential solves only** (`differentiable`, `on_failure`, `method`, Newton options); transport
-steps always raise on failure.
+Ping-pong is one pass of differentiable operations. Iterate runs its passes to convergence
+without a graph, then re-runs the certified pass once more on the graph and attaches the
+implicit adjoint of the interface equations — memory is one pass, not all of them, and the
+gradient error is of the order of the primal residual rather than tied to the pass count. The
+convergence *decision* is still made on detached copies, so it never appears in the graph. See
+[Differentiability](differentiability.md#what-is-guaranteed) and
+[Coupling](../applications/coupling.md#differentiating-the-fixed-point) for the full contract.
+`**solve_kwargs` on `step`/`steady` reach the **potential solves only** (`differentiable`,
+`on_failure`, `method`, Newton options); transport steps always raise on failure.

@@ -445,7 +445,9 @@ def test_iterate_reports_non_convergence_per_instance_or_raises():
     assert diag["max_change"]["species"].item() > 1e-15
 
 
-def test_iterate_is_differentiable_by_unrolling():
+def test_iterate_gradient_is_the_fixed_points_derivative_from_a_cold_start():
+    """Renamed in part 3 (P1-2): the mechanism is the implicit interface adjoint, not
+    unrolling; the check is the same central-difference comparison, from the zero state."""
     _, model, state, drivers, el, _ = _build(
         learnable=True, closures=[_Feedback(2e3)], coupling="iterate",
         iterate_tol={"species": 1e-13}, iterate_max=80,
@@ -884,6 +886,107 @@ def test_n1_closure_carried_state_advances_once_per_step_not_once_per_pass():
     assert float(new["demo.n"]) == pytest.approx(dt, rel=0.0, abs=1e-9)
 
 
+class _ParametrizedIntegratingCounter:
+    """Like `_IntegratingCounter`, but the per-call increment is a differentiable PARAMETER
+    rather than a fixed float, and the call tolerates its declared key being absent from the
+    state it is handed: I8-1's edge case is exactly a step-start state that never seeds
+    "demo.n" at all, so `__call__` must not do the bare `state["demo.n"]` lookup
+    `_IntegratingCounter` does."""
+
+    state_keys = ("demo.n",)
+    integrates = False
+
+    def __init__(self, increment: torch.Tensor) -> None:
+        self.increment = increment
+
+    def __call__(self, state, drivers):
+        n = state.get("demo.n")
+        if n is None:
+            n = torch.zeros((), dtype=F64)
+        return {"demo.n": n + self.increment}
+
+
+def test_i8_1_a_closure_state_key_missing_from_the_step_start_state_gets_a_truncated_gradient():
+    """I8-1 (Task 8 review): `_iterate`'s interface excludes every `closure_state_keys` entry
+    UNCONDITIONALLY (`keys = [... if k not in self.closure_state_keys ...]`), whether or not
+    N1's own `if key in base:` pinning applies to it. When the key IS seeded (see the control
+    below) that costs nothing: N1 pins the closure's read to the step-start state on every
+    pass, and the one differentiable re-run of the certified pass reads that same
+    graph-carrying tensor directly (`step_from=state`), so the gradient survives untouched.
+
+    When the key is ABSENT from the step-start state -- the one case N1 does not pin,
+    documented in `_iterate`'s own docstring ("a closure-carried key MISSING from the
+    step-start state ... drops a path that only exists because that key was not seeded in the
+    first place") -- the closure instead reads the PREVIOUS pass's own value on every pass, so
+    "demo.n" genuinely COMPOUNDS the parameter once per PASS, and this fixture's true,
+    central-difference sensitivity equals its own pass count. The one differentiable pass the
+    adjoint runs sees that compounded history only as a plain, already-detached number and
+    re-applies the closure ONCE more, so it can return only THAT one application's own local
+    derivative (exactly 1.0 here) -- not the true, pass-count-sized sensitivity, and,
+    measured here, not literally zero either: a looser paraphrase of this finding elsewhere
+    (the review ledger) says the adjoint "returns ZERO gradient through it", but the single
+    surviving local term is what this test pins, verified by directly running this fixture
+    before writing the assertion. Either way this is the documented SAFE side of the trade
+    (silently wrong-by-omission, never wrong-signed or blown up) and NOT a runtime refusal --
+    the first step is allowed to lack the key by design (`_pass`'s `if key in base:` guard)."""
+    param = torch.tensor(0.5, dtype=F64, requires_grad=True)
+    _, model, state, drivers, _, _ = _build(
+        closures=[_Feedback(2e3), _ParametrizedIntegratingCounter(param)],
+        coupling="iterate", iterate_tol={"species": 1e-12}, iterate_max=60,
+    )
+    diag: dict = {}
+    new = model.step(state, drivers, 600.0, diagnostics=diag)   # "demo.n" NOT seeded
+    assert diag["passes"] >= 2      # the compounding needs more than one pass to be visible
+    assert diag["adjoint"] == "implicit"
+    (grad,) = torch.autograd.grad(new["demo.n"], (param,))
+    assert grad.item() == pytest.approx(1.0, rel=0.0, abs=1e-9)   # the single local term only
+
+    def _unseeded_value(pval: float) -> float:
+        p = torch.tensor(pval, dtype=F64)
+        _, m, s, d, _, _ = _build(
+            closures=[_Feedback(2e3), _ParametrizedIntegratingCounter(p)],
+            coupling="iterate", iterate_tol={"species": 1e-12}, iterate_max=60,
+        )
+        with torch.no_grad():
+            return m.step(s, d, 600.0)["demo.n"].item()
+
+    h = 1e-6
+    cd = (_unseeded_value(0.5 + h) - _unseeded_value(0.5 - h)) / (2 * h)
+    assert cd == pytest.approx(float(diag["passes"]), rel=1e-6)   # true sensitivity ~ pass count
+    assert grad.item() < 0.2 * cd   # the adjoint drops nearly all of that true sensitivity
+
+
+def test_i8_1_control_the_same_gradient_matches_central_differences_once_seeded():
+    """Control for the test above: the identical closure and parameter, seeded this time, so
+    N1 pins "demo.n" to the step-start state on every pass and the gradient the implicit
+    adjoint returns is the fixed point's own, matching central differences the way every other
+    `coupling="iterate"` gradient test in this module does."""
+    param = torch.tensor(0.5, dtype=F64, requires_grad=True)
+    _, model, state, drivers, _, _ = _build(
+        closures=[_Feedback(2e3), _ParametrizedIntegratingCounter(param)],
+        coupling="iterate", iterate_tol={"species": 1e-12}, iterate_max=60,
+    )
+    start = dict(state, **{"demo.n": torch.zeros((), dtype=F64)})
+    diag: dict = {}
+    new = model.step(start, drivers, 600.0, diagnostics=diag)
+    assert diag["adjoint"] == "implicit"
+    (grad,) = torch.autograd.grad(new["demo.n"], (param,))
+
+    def _seeded_value(pval: float) -> float:
+        p = torch.tensor(pval, dtype=F64)
+        _, m, s, d, _, _ = _build(
+            closures=[_Feedback(2e3), _ParametrizedIntegratingCounter(p)],
+            coupling="iterate", iterate_tol={"species": 1e-12}, iterate_max=60,
+        )
+        s = dict(s, **{"demo.n": torch.zeros((), dtype=F64)})
+        with torch.no_grad():
+            return m.step(s, d, 600.0)["demo.n"].item()
+
+    h = 1e-6
+    cd = (_seeded_value(0.5 + h) - _seeded_value(0.5 - h)) / (2 * h)
+    assert grad.item() == pytest.approx(cd, rel=1e-6)
+
+
 def test_current_flows_returns_closure_written_driver_prescribed_flow():
     """A transport layer with no owning potential layer: its flow is written by a closure,
     only visible after closures run -- `current_flows` must run them and return it."""
@@ -980,3 +1083,90 @@ def test_current_flows_refuses_a_flow_driver_beside_a_potential_owner_on_the_sol
     }
     with pytest.raises(ValueError, match="one source of flows, not two"):
         model.current_flows("x", state, drivers)
+
+
+def test_iterate_gradient_from_a_near_fixed_point_start_matches_central_differences():
+    """Start the step at the model's own steady state: the primal needs only the structural
+    two passes, and the derivative it returns must still be the fixed point's (P1-2).
+
+    Two things this test needs that the fixture's own defaults do not give, both measured
+    while it was written -- and neither of them a loosened assertion:
+
+    * A FEEDBACK WORTH DIFFERENTIATING. With the fixture's 2e-6 kg/s source nearly all of
+      z1's mass fraction is the boundary's own 1e-3, which no amount of wind moves, so the
+      pass map contracts at dx_new/dx_fed = -0.004 and even a two-pass unrolling is right to
+      1.2e-5 (~ that ratio squared): the bug would be invisible here whatever the tolerance.
+      The source is raised to 5e-4 kg/s, where the loop gain is -0.23, the two-pass
+      derivative is 3.2 % wrong and the implicit one is right to 3e-7.
+    * RULING R21 for the tight Newton tolerances. The CENTRAL DIFFERENCE is the reference,
+      and at the default (~1.5e-8) each perturbed run chases the solver's own noise through
+      several extra passes; the drift that leaves in (up - down) does not scale with h, so
+      the measured "derivative" swings by 9 % between h=1e-6 and h=1e-5 and is no reference
+      at all. Tight, it is stable to seven digits across h=1e-5..1e-7. The solve is asked
+      for the accuracy the reference needs; the assertion below is untouched.
+    """
+    tight = {"atol": 1e-14, "rtol": 1e-14}
+    _, model, state, drivers, el, _ = _build(
+        learnable=True, closures=[_Feedback(2e3)], coupling="iterate",
+        iterate_tol={"species": 1e-13}, iterate_max=80,
+    )
+    drivers = dict(drivers, **{"species.sources": torch.tensor([0.0, 5e-4, 0.0], dtype=F64)})
+    with torch.no_grad():
+        ss = model.steady(state, drivers, differentiable=False, **tight)
+    start = {k: v.detach().clone() for k, v in ss.items()}
+
+    def loss():
+        return model.step(start, drivers, 600.0, **tight)["species.x"].sum()
+
+    diag: dict = {}
+    model.step(start, drivers, 600.0, diagnostics=diag, **tight)
+    assert diag["passes"] == 2          # the structural floor: the start IS the fixed point
+    assert diag["adjoint"] == "implicit"
+    el.C.grad = None
+    loss().backward()
+    grad = el.C.grad[0].item()
+    h = 1e-6
+    with torch.no_grad():
+        el.C[0] += h
+        up = loss().item()
+        el.C[0] -= 2 * h
+        down = loss().item()
+        el.C[0] += h
+    assert grad == pytest.approx((up - down) / (2 * h), rel=1e-5)
+
+
+def test_iterate_pays_for_the_adjoint_pass_only_when_a_gradient_is_wanted():
+    """`passes` counts PRIMAL passes. A run nothing differentiable reaches costs exactly
+    those and reports `adjoint is None`; a differentiable one costs ONE more -- the single
+    pass the implicit adjoint is attached to -- and never one per pass (P1-2)."""
+    tight = {"atol": 1e-14, "rtol": 1e-14}
+    _, model, state, drivers, el, _ = _build(
+        learnable=True, closures=[_Feedback(2e3)], coupling="iterate",
+        iterate_tol={"species": 1e-13}, iterate_max=80,
+    )
+    calls: list[int] = []
+    real = model._pass
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    model._pass = counting                      # shadows the bound method on this instance
+    for kwargs, expect in (
+        ({}, None),                             # under no_grad below: nothing to attach
+        ({"differentiable": False}, None),      # detached solves: nothing reaches the state
+    ):
+        calls.clear()
+        diag: dict = {}
+        with torch.no_grad() if not kwargs else torch.enable_grad():
+            model.steady(state, drivers, diagnostics=diag, **kwargs, **tight)
+        assert diag["adjoint"] is expect
+        assert len(calls) == diag["passes"]
+    calls.clear()
+    diag = {}
+    out = model.steady(state, drivers, diagnostics=diag, **tight)
+    assert diag["adjoint"] == "implicit"
+    assert len(calls) == diag["passes"] + 1
+    assert out["species.x"].requires_grad
+    out["species.x"].sum().backward()
+    assert el.C.grad is not None
