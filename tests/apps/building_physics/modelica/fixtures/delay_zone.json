@@ -1,0 +1,84 @@
+{
+  "format": "noodl-modelica/1",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.23.0",
+  "model": "test.DelayZone",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 60.0,
+    "Interval": 1.0,
+    "Tolerance": 1e-06
+  },
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "extraPropertiesNames": [],
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "bouA",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "p": 101330.0,
+        "T": 303.15,
+        "nPorts": 1
+      }
+    },
+    {
+      "name": "bouB",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "p": 101325.0,
+        "T": 293.15,
+        "nPorts": 1
+      }
+    },
+    {
+      "name": "del",
+      "class": "Buildings.Fluid.Delays.DelayFirstOrder",
+      "parameters": {
+        "m_flow_nominal": 0.1,
+        "tau": 60.0,
+        "T_start": 293.15,
+        "nPorts": 2,
+        "energyDynamics": "FixedInitial"
+      }
+    },
+    {
+      "name": "oriA",
+      "class": "Buildings.Airflow.Multizone.Orifice",
+      "parameters": {
+        "A": 0.01
+      }
+    },
+    {
+      "name": "oriB",
+      "class": "Buildings.Airflow.Multizone.Orifice",
+      "parameters": {
+        "A": 0.01
+      }
+    }
+  ],
+  "connections": [
+    [
+      "bouA.ports[1]",
+      "oriA.port_a"
+    ],
+    [
+      "oriA.port_b",
+      "del.ports[1]"
+    ],
+    [
+      "del.ports[2]",
+      "oriB.port_a"
+    ],
+    [
+      "oriB.port_b",
+      "bouB.ports[1]"
+    ]
+  ],
+  "signals": []
+}

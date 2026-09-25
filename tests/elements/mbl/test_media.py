@@ -169,3 +169,40 @@ def test_simpleair_buoyancy_density_matches_its_own_ideal_gas_law(t_kelvin):
     torch.testing.assert_close(
         got, torch.tensor(expected, dtype=torch.float64), rtol=1e-12, atol=0.0
     )
+
+
+# ---------------------------------------------------------------------------------------
+# Medium.density and specificHeatCapacityCp (Task 6: zone mass and heat capacity, zonal
+# flow density). Transcribed from the three media's own functions.
+# ---------------------------------------------------------------------------------------
+
+
+def test_air_density_is_pressure_only():
+    # Buildings/Media/Air.mo:210-215: d := state.p*dStp/pStp (dStp = 1.2, pStp = 101325).
+    m = media.medium("Buildings.Media.Air")
+    p = torch.tensor([101325.0, 101330.0], dtype=torch.float64)
+    got = m.density(p, torch.tensor([280.0, 310.0], dtype=torch.float64), 0.02)
+    np.testing.assert_allclose(got.numpy(), p.numpy() * 1.2 / 101325.0, rtol=1e-15)
+
+
+def test_perfectgas_and_simpleair_density_are_ideal_gas():
+    # PerfectGas.mo:229-231, :134-136; SimpleAir.mo:6-8 with package.mo:6321-6323.
+    pg = media.medium("Buildings.Media.Specialized.Air.PerfectGas")
+    got = pg.density(torch.tensor(101000.0, dtype=torch.float64), 300.0, 0.012)
+    expected = 101000.0 / ((_R_AIR * (1 - 0.012) + _R_H2O * 0.012) * 300.0)
+    assert float(got) == pytest.approx(expected, rel=1e-15)
+    sa = media.medium("Modelica.Media.Air.SimpleAir")
+    got = sa.density(torch.tensor(101000.0, dtype=torch.float64), 300.0, 0.5)
+    assert float(got) == pytest.approx(101000.0 / (_MODELICA_CONSTANTS_R / _MM_AIR * 300.0),
+                                       rel=1e-15)
+
+
+def test_specific_heat_capacity_cp():
+    # Air.mo:567-575 and PerfectGas.mo:382-387: cp = dryair.cp*(1 - X_w) + steam.cp*X_w with
+    # Buildings/Utilities/Psychrometrics/Constants.mo:6,8 (cpAir = 1006, cpSte = 1860);
+    # SimpleAir.mo:6 (cp_const = 1005.45).
+    for name in ("Buildings.Media.Air", "Buildings.Media.Specialized.Air.PerfectGas"):
+        assert media.medium(name).specific_heat_cp(0.01) == pytest.approx(
+            1006 * 0.99 + 1860 * 0.01, rel=1e-15
+        )
+    assert media.medium("Modelica.Media.Air.SimpleAir").specific_heat_cp(0.3) == 1005.45

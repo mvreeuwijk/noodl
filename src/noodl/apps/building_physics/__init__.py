@@ -19,6 +19,7 @@ from noodl.apps.building_physics.elements import (
     mass_orifice,
     orifice_elements_from_edges,
 )
+from noodl.apps.building_physics.modelica import read_modelica
 from noodl.apps.building_physics.prj import (
     Project,
     project_to_model,
@@ -64,6 +65,7 @@ __all__ = [
     "mass_orifice",
     "orifice_elements_from_edges",
     "project_to_model",
+    "read_modelica",
     "read_prj",
     "read_wth",
     "run_steady",

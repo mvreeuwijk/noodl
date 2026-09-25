@@ -70,6 +70,13 @@ _R_H2O = _R_NASA_2002 / _MM_H2O
 _P_DEFAULT = 101325.0
 _T_DEFAULT = 293.15
 
+# Buildings/Utilities/Psychrometrics/Constants.mo:6 (cpAir), :8 (cpSte): the dry-air and steam
+# specific heat capacities both moist-air media use (Air.mo:28,34; PerfectGas.mo:565,570).
+_CP_AIR = 1006.0
+_CP_STEAM = 1860.0
+# Modelica/Media/Air/SimpleAir.mo:6 (cp_const).
+_CP_SIMPLEAIR = 1005.45
+
 
 def _moist_air_gas_constant(X_w) -> Tensor:
     """R(X_w) = R_air*(1 - X_w) + R_h2o*X_w.
@@ -80,6 +87,11 @@ def _moist_air_gas_constant(X_w) -> Tensor:
     """
     X_w = torch.as_tensor(X_w)
     return _R_AIR * (1 - X_w) + _R_H2O * X_w
+
+
+def _moist_air_cp(X_w: float) -> float:
+    """``cp = dryair.cp (1 - X_w) + steam.cp X_w`` (``Air.mo:570``, ``PerfectGas.mo:385``)."""
+    return _CP_AIR * (1 - X_w) + _CP_STEAM * X_w
 
 
 def _moist_air_buoyancy_density(T, X_w) -> Tensor:
@@ -112,6 +124,8 @@ class MBLMedium:
     rho_default: float
     has_moisture: bool
     _buoyancy: Callable[[Tensor, Tensor | float], Tensor] = field(repr=False, compare=False)
+    _density: Callable[..., Tensor] = field(repr=False, compare=False, default=None)
+    _cp: Callable[[float], float] = field(repr=False, compare=False, default=None)
 
     def buoyancy_density(self, T: Tensor, X_w: Tensor | float) -> Tensor:
         """The buoyancy-relevant density at this medium's fixed ``p_default`` and actual T/X_w.
@@ -123,6 +137,23 @@ class MBLMedium:
         (``has_moisture`` is ``False``).
         """
         return self._buoyancy(T, X_w)
+
+    def density(self, p: Tensor, T: Tensor | float, X_w: Tensor | float) -> Tensor:
+        """``Medium.density(setState_pTX(p, T, X))``: the medium's OWN density function at the
+        actual pressure ``p`` (Pa), unlike :meth:`buoyancy_density`. For
+        ``Buildings.Media.Air`` it is pressure-only (``Air.mo:210-215``,
+        ``d = p dStp/pStp``); for the two ideal gases ``p/(R T)`` with their own gas constant.
+        MBL uses it for a volume's fluid mass (``ConservationEquation.mo:246-258``) and for
+        ``ZonalFlow_ACS``'s density (``ZonalFlow_ACS.mo:40``). ``X_w`` is unused without
+        moisture.
+        """
+        return self._density(torch.as_tensor(p), T, X_w)
+
+    def specific_heat_cp(self, X_w: float) -> float:
+        """``Medium.specificHeatCapacityCp`` at water mass fraction ``X_w`` (J/(kg K)), a
+        plain float: ``cpAir (1 - X_w) + cpSte X_w`` for the two moist-air media
+        (``Air.mo:567-575``, ``PerfectGas.mo:382-387``), ``cp_const`` for ``SimpleAir``."""
+        return self._cp(float(X_w))
 
 
 def _air_medium() -> MBLMedium:
@@ -148,6 +179,8 @@ def _air_medium() -> MBLMedium:
         rho_default=rho_default,
         has_moisture=True,
         _buoyancy=_moist_air_buoyancy_density,
+        _density=lambda p, T, X_w: p * dStp / pStp,  # Air.mo:210-215
+        _cp=_moist_air_cp,
     )
 
 
@@ -176,6 +209,9 @@ def _perfectgas_medium() -> MBLMedium:
         # functional form to Buildings.Media.Air's density_pTX, since PerfectGas's gasConstant
         # uses the same two species records -- see _moist_air_buoyancy_density above.
         _buoyancy=_moist_air_buoyancy_density,
+        # PerfectGas.mo:229-231: d := state.p/(gasConstant(state)*state.T).
+        _density=lambda p, T, X_w: p / ((_R_AIR * (1 - X_w) + _R_H2O * X_w) * T),
+        _cp=_moist_air_cp,
     )
 
 
@@ -204,6 +240,8 @@ def _simpleair_medium() -> MBLMedium:
         rho_default=rho_default,
         has_moisture=False,
         _buoyancy=buoyancy,
+        _density=lambda p, T, X_w: p / (r_gas * T),  # package.mo:6321-6323
+        _cp=lambda X_w: _CP_SIMPLEAIR,
     )
 
 

@@ -1,0 +1,410 @@
+"""`read_modelica` / `assemble.build` / `run.simulate` on hand-written `noodl-modelica/1` fixtures.
+
+Reference values are computed here from the MBL source formulas (cited per test), never by
+calling the elements under test. OpenModelica parity lives in Tasks 8-9.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import math
+from pathlib import Path
+
+import pytest
+import torch
+
+from noodl.apps.building_physics import read_modelica
+from noodl.apps.building_physics.modelica import ModelicaImportError
+from noodl.apps.building_physics.modelica.run import simulate, step_drivers
+
+FIX = Path(__file__).parent / "fixtures"
+F64 = torch.float64
+
+# MSL SingleGasesData.mo:5,49,9187 (R_NASA_2002, Air.MM, H2O.MM).
+R_AIR = 8.314510 / 0.0289651159
+R_H2O = 8.314510 / 0.01801528
+P_DEFAULT = 101325.0
+
+
+def _load(name: str):
+    return read_modelica(FIX / name, return_names=True)
+
+
+def _write(tmp_path: Path, doc: dict) -> Path:
+    path = tmp_path / "model.json"
+    path.write_text(json.dumps(doc))
+    return path
+
+
+def _doc(name: str) -> dict:
+    return json.loads((FIX / name).read_text())
+
+
+# ---------------------------------------------------------------------------- (a) orifice
+def test_orifice_between_two_boundaries_matches_the_mbl_power_law():
+    model, state, drivers, names = _load("two_zones_orifice.json")
+    assert not model.transport  # no volumes: algebraic in the boundary values
+    hist = simulate(model, state, drivers, names.times[:3])
+    # PerfectGas rho_default (PerfectGas.mo:229-231 at p_default, T_default, X_default).
+    rho = P_DEFAULT / ((R_AIR * 0.99 + R_H2O * 0.01) * 293.15)
+    C = 0.6 * 0.01 * math.sqrt(2.0 / rho)  # Orifice.mo:3-5
+    expected = rho * C * 5.0**0.5  # Coefficient_V_flow.mo:4, |dp| > dp_turbulent
+    ((col, sign),) = names.edges["ori"]
+    got = sign * hist["air.q"][:, col]
+    assert torch.allclose(got, torch.full_like(got, expected), rtol=1e-12, atol=0.0)
+
+
+# ------------------------------------------------------------------- (b) two-volume door
+def test_door_between_two_volumes_exchanges_air_with_zero_net_flow_and_mixes():
+    model, state, drivers, names = _load("door_two_volumes.json")
+    hist = simulate(model, state, drivers, names.times)  # 0..60 s
+    (c_ab, s_ab), (c_ba, s_ba) = names.edges["doo"]
+    q_ab, q_ba = s_ab * hist["air.q"][:, c_ab], s_ba * hist["air.q"][:, c_ba]
+    iA, iB = names.nodes["volA"], names.nodes["volB"]
+    # Equal pressures (one zone of the closed pair is the pressure reference, the other is
+    # solved): the pressure term vanishes and the two directions are +-mABt.
+    assert torch.allclose(hist["p"][:, iA], hist["p"][:, iB], rtol=0.0, atol=1e-9)
+    assert float(q_ab[0]) > 1e-3  # warm A to B at the top
+    assert torch.allclose(q_ab, -q_ba, rtol=1e-12, atol=1e-15)
+    assert float((q_ab + q_ba).abs().max()) < 1e-12
+    T_A, T_B = hist["T"][:, iA], hist["T"][:, iB]
+    assert float(T_A[0]) == pytest.approx(295.15)
+    assert float(T_A[-1]) < float(T_A[0]) - 0.1
+    assert float(T_B[-1]) > float(T_B[0]) + 0.1
+    # Equal volumes and capacities: the mean temperature is conserved by the exchange.
+    assert torch.allclose(T_A + T_B, torch.full_like(T_A, 295.15 + 293.15), atol=1e-9)
+    # The door port flows are exposed separately: port_a2.m_flow = -(the "ba" edge flow).
+    ((c2, s2),) = names.edges["doo.port_a2"]
+    assert c2 == c_ba and s2 == -1
+
+
+# --------------------------------------------------------------------- (c) Ramp driver
+def test_ramp_on_a_boundary_pressure_becomes_the_driver_series():
+    model, state, drivers, names = _load("ramp_boundary.json")
+    t = names.times
+    series = drivers["series:air.phi_boundary"]
+    air = model.potential["air"]
+    j = air.bound.tolist().index(names.nodes["bouA"])
+    # Sources.mo:244-252 with height 10, duration 30, offset 101325, startTime 10, as gauge
+    # pressure relative to p_default.
+    expected = torch.where(t < 10.0, torch.zeros_like(t),
+                           torch.where(t < 40.0, (t - 10.0) * 10.0 / 30.0,
+                                       torch.full_like(t, 10.0)))
+    assert torch.allclose(series[:, j], expected, rtol=0.0, atol=1e-10)
+    k = air.bound.tolist().index(names.nodes["bouB"])
+    assert torch.all(series[:, k] == 0.0)
+    hist = simulate(model, state, drivers, t)
+    ((col, sign),) = names.edges["ori"]
+    rho = 1.2  # Buildings.Media.Air rho_default (Air.mo:43-45, 210-215)
+    C = 0.65 * 0.01 * math.sqrt(2.0 / rho)
+    assert float(sign * hist["air.q"][-1, col]) == pytest.approx(rho * C * math.sqrt(10.0),
+                                                                rel=1e-12)
+    assert float(hist["air.q"][0, col]) == 0.0
+
+
+def test_step_drivers_slices_the_series_and_keeps_constants():
+    model, state, drivers, names = _load("ramp_boundary.json")
+    d = step_drivers(drivers, names.times, 25.0)
+    air = model.potential["air"]
+    j = air.bound.tolist().index(names.nodes["bouA"])
+    assert float(d["air.phi_boundary"][j]) == pytest.approx(5.0)
+    assert not any(key.startswith("series:") for key in d)
+    with pytest.raises(ValueError, match="not on the experiment grid"):
+        step_drivers(drivers, names.times, 25.5)
+
+
+# ------------------------------------------------------------ (d) pinned temperature
+def test_fixed_temperature_through_a_stiff_conductor_pins_the_zone():
+    model, state, drivers, names = _load("thermal_and_source.json")
+    i = names.nodes["volA"]
+    assert "thermal" not in model.transport  # the only zone is pinned: no thermal unknown
+    assert "species" in model.transport  # CO2
+    hist = simulate(model, state, drivers, names.times[:11])
+    assert torch.all(hist["T"][:, i] == 298.15)
+
+
+def test_a_finite_conductor_is_refused_by_name():
+    with pytest.raises(ModelicaImportError, match="conA") as exc:
+        read_modelica(FIX / "conductor_too_small.json")
+    assert "ThermalConductor" in str(exc.value)
+    assert "1e+06" in str(exc.value) or "1000000" in str(exc.value)
+
+
+# ---------------------------------------------------------------- (e) DelayFirstOrder
+def test_delay_first_order_zone_gets_the_mbl_volume():
+    model, _state, _drivers, names = _load("delay_zone.json")
+    # DelayFirstOrder.mo:5-6,11-12: V = V_nominal = m_flow_nominal*tau/rho_default.
+    V = model.net.node_attr("volume")[names.nodes["del"]]
+    assert float(V) == pytest.approx(0.1 * 60.0 / 1.2, rel=1e-15)
+    assert "thermal" in model.transport
+
+
+# ------------------------------------------------------------------------- zonal flows
+def test_zonal_flows_are_prescribed_directional_edges_and_carry_moisture():
+    model, state, drivers, names = _load("zonal_flow.json")
+    assert "species" in model.transport  # X_start differs between the rooms: X_w carried
+    hist = simulate(model, state, drivers, names.times)  # 0..600 s, every 10 s
+    (za, sa), (zb, sb) = names.edges["zonFlo"]
+    # ZonalFlow_ACS.mo:38-42: m_flow = V*ACS*(density(sta_a1) + density(sta_a2))/2, and
+    # Buildings.Media.Air's density is p*dStp/pStp (Air.mo:210-215) at the port pressure,
+    # here p_start = p_default in both rooms.
+    m = 1.0 * 5.0 / 3600.0 * 1.2
+    n = names.times.numel()
+    assert torch.allclose(sa * hist["air.q"][:, za], torch.full((n,), m, dtype=F64),
+                          rtol=1e-12)
+    assert torch.allclose(sb * hist["air.q"][:, zb], torch.full((n,), -m, dtype=F64),
+                          rtol=1e-12)
+    (fa, s1), (fb, s2) = names.edges["floExc"]
+    assert torch.allclose(s1 * hist["air.q"][:, fa], torch.full((n,), 0.02, dtype=F64))
+    assert torch.allclose(s2 * hist["air.q"][:, fb], torch.full((n,), -0.02, dtype=F64))
+    assert names.air_references == ("rooA", "rooB")  # no boundary, no pressure path
+    iA, iB = names.nodes["rooA"], names.nodes["rooB"]
+    X = hist["X_w"]
+    assert float(X[0, iA]) == pytest.approx(0.015) and float(X[0, iB]) == pytest.approx(0.01)
+    # The small room (1.2 kg of air, 0.0217 kg/s in) takes on the large room's moisture and
+    # temperature within a few 55 s time constants.
+    assert float(X[-1, iB]) > 0.0149
+    assert float(hist["T"][-1, iB]) > 302.9
+
+
+# -------------------------------------------------- mixed: doors, stack, sources, balance
+def test_mixed_model_conserves_mass_and_accumulates_the_trace_substance():
+    model, state, drivers, names = _load("mixed_rooms.json")
+    assert len(names.edges["dooDis"]) == 4  # nCom = 4 compartment edges
+    hist = simulate(model, state, drivers, names.times)
+    air = model.potential["air"]
+    q = hist["air.q"]
+    s = drivers["air.sources"]
+    net_out = torch.stack([air._accumulate(q[k]) for k in range(q.shape[0])])
+    for zone in ("volA", "volB", "volTop"):
+        i = names.nodes[zone]
+        # Quasi-steady mass balance at every zone: outflow = injected mass (the CO2 source).
+        assert torch.allclose(net_out[:, i], s[i].expand(q.shape[0]), rtol=0.0, atol=1e-10)
+    assert float(s[names.nodes["volA"]]) == pytest.approx(1e-5)
+    C = hist["C"][:, names.nodes["volA"], 0]
+    assert float(C[0]) == 0.0 and float(C[-1]) > float(C[1]) > 0.0
+    # The step on the door opening changes the door flow magnitude.
+    cols = [c for c, _ in names.edges["dooDis"]]
+    before = q[4, cols].abs().sum()
+    after = q[6, cols].abs().sum()
+    assert float(after) > 5.0 * float(before)
+
+
+# ------------------------------------------------------------------------ gradients
+def test_gradient_of_a_zone_temperature_wrt_an_orifice_coefficient():
+    model, state, drivers, names = _load("zone_two_orifices.json")
+    kind = names.kinds["oriA"][0]
+    el, _ = model.potential["air"].element_for(kind)
+    d = step_drivers(drivers, names.times, 1.0)
+    el.C.requires_grad_(True)
+    new = model.step(state, d, 1.0)
+    T = new["thermal.x"][0]
+    (g,) = torch.autograd.grad(T, el.C)
+    h = 1e-4 * float(el.C.detach().abs())
+    with torch.no_grad():
+        c0 = el.C.detach().clone()
+        el.C.copy_(c0 + h)
+        tp = float(model.step(state, d, 1.0)["thermal.x"][0])
+        el.C.copy_(c0 - h)
+        tm = float(model.step(state, d, 1.0)["thermal.x"][0])
+        el.C.copy_(c0)
+    assert float(g) == pytest.approx((tp - tm) / (2 * h), rel=1e-6)
+    assert float(g) > 0.0  # more hot inflow warms the zone faster
+
+
+# ------------------------------------------------------------------------ refusals
+def test_steady_state_energy_balance_is_refused(tmp_path):
+    doc = _doc("zone_two_orifices.json")
+    doc["components"][2]["parameters"]["energyDynamics"] = "SteadyState"
+    with pytest.raises(ModelicaImportError, match="vol .*energyDynamics"):
+        read_modelica(_write(tmp_path, doc))
+
+
+def test_actual_column_density_is_refused(tmp_path):
+    doc = _doc("mixed_rooms.json")
+    for c in doc["components"]:
+        if c["name"] == "colTop":
+            c["parameters"]["densitySelection"] = "actual"
+    with pytest.raises(ModelicaImportError, match="colTop"):
+        read_modelica(_write(tmp_path, doc))
+
+
+def test_missing_and_unused_signals_are_refused_together(tmp_path):
+    doc = _doc("ramp_boundary.json")
+    doc["signals"][0]["drives"] = "bouB.T_in"  # bouA.p_in now undriven, bouB.T_in unused
+    with pytest.raises(ModelicaImportError) as exc:
+        read_modelica(_write(tmp_path, doc))
+    msg = str(exc.value)
+    assert "bouA" in msg and "p_in" in msg
+    assert "ramp" in msg and "bouB.T_in" in msg
+
+
+def test_use_default_properties_false_is_refused(tmp_path):
+    doc = _doc("two_zones_orifice.json")
+    doc["components"][2]["parameters"]["useDefaultProperties"] = False
+    with pytest.raises(ModelicaImportError, match="ori"):
+        read_modelica(_write(tmp_path, doc))
+
+
+def test_unknown_medium_is_refused(tmp_path):
+    doc = copy.deepcopy(_doc("two_zones_orifice.json"))
+    doc["medium"]["class"] = "Modelica.Media.Water.StandardWater"
+    with pytest.raises(ModelicaImportError, match="StandardWater"):
+        read_modelica(_write(tmp_path, doc))
+
+
+def test_read_modelica_returns_the_contam_route_triple():
+    out = read_modelica(FIX / "door_two_volumes.json")
+    assert len(out) == 3
+    model, state, drivers = out
+    assert "thermal.x" in state and "air.phi" in state
+    assert drivers["air.phi_boundary"].dtype == F64
+
+
+# ----------------------------------------------------------- hydrostatic column chain
+def test_fused_column_chain_holds_the_hydrostatic_balance_at_zero_flow():
+    # stack_chain.json: volWes - colWesBot(fromBottom) - oriWesTop - colWesTop(fromTop) -
+    # volTop, and nothing else, so the orifice carries no flow and (graph.py docstring,
+    # MediumColumn.mo `port_a.p - port_b.p = -h rho g_n`) p(volWes) - p(volTop) =
+    # h g (rho(volTop) + rho(volWes)) with rho = density_pTX(p_default, T, X_default).
+    model, state, drivers, names = _load("stack_chain.json")
+    hist = simulate(model, state, drivers, names.times[:2])
+    ((col, _),) = names.edges["oriWesTop"]
+    assert float(hist["air.q"][0, col].abs()) < 1e-12
+
+    def rho(T):
+        return P_DEFAULT / ((R_AIR * 0.99 + R_H2O * 0.01) * T)
+
+    expected = 1.5 * 9.80665 * (rho(293.15) + rho(298.15))
+    phi = hist["air.phi"][0]
+    got = phi[names.nodes["volWes"]] - phi[names.nodes["volTop"]]
+    assert float(got) == pytest.approx(expected, rel=1e-9)
+    assert names.air_references == ("volWes",)
+
+
+# --------------------------------------------------------------------- mass sources
+def _with_supply(m_flow: float) -> dict:
+    doc = _doc("zone_two_orifices.json")
+    doc["components"][2]["parameters"]["nPorts"] = 3
+    doc["components"].append({
+        "name": "sup", "class": "Buildings.Fluid.Sources.MassFlowSource_T",
+        "parameters": {"m_flow": m_flow, "T": 310.0, "nPorts": 1},
+    })
+    doc["connections"].append(["sup.ports[1]", "vol.ports[3]"])
+    return doc
+
+
+def test_mass_flow_source_injects_mass_and_enthalpy(tmp_path):
+    model, state, drivers, names = read_modelica(_write(tmp_path, _with_supply(0.01)),
+                                                 return_names=True)
+    i = names.nodes["vol"]
+    cp = 1006.0 * 0.99 + 1860.0 * 0.01  # Air.mo:567-575 at X_default
+    assert float(drivers["air.sources"][i]) == pytest.approx(0.01)
+    assert float(drivers["thermal.sources"][i]) == pytest.approx(cp * 0.01 * 310.0)
+    hist = simulate(model, state, drivers, names.times[:3])
+    air = model.potential["air"]
+    assert float(air._accumulate(hist["air.q"][-1])[i]) == pytest.approx(0.01, abs=1e-10)
+
+
+def test_extracting_mass_flow_source_is_refused(tmp_path):
+    with pytest.raises(ModelicaImportError, match="sup .*negative"):
+        read_modelica(_write(tmp_path, _with_supply(-0.01)))
+
+
+def test_outside_without_weather_signals_is_refused(tmp_path):
+    doc = _doc("two_zones_orifice.json")
+    doc["components"][1]["class"] = "Buildings.Fluid.Sources.Outside"
+    with pytest.raises(ModelicaImportError, match="bouB .*weather"):
+        read_modelica(_write(tmp_path, doc))
+
+
+# ---------------------------------------------- every one-way class and both open doors
+def _two_boundaries(element: dict, signals=(), dp: float = 5.0) -> dict:
+    doc = _doc("ramp_boundary.json")
+    doc["components"] = [
+        {"name": "bouA", "class": "Buildings.Fluid.Sources.Boundary_pT",
+         "parameters": {"p": P_DEFAULT + dp, "T": 293.15, "nPorts": 2}},
+        {"name": "bouB", "class": "Buildings.Fluid.Sources.Boundary_pT",
+         "parameters": {"p": P_DEFAULT, "T": 293.15, "nPorts": 2}},
+        element,
+    ]
+    ports = (("port_a1", "port_b2"), ("port_b1", "port_a2")) if "Door" in element["class"] \
+        else (("port_a",), ("port_b",))
+    doc["connections"] = (
+        [[f"bouA.ports[{i + 1}]", f"el.{p}"] for i, p in enumerate(ports[0])]
+        + [[f"el.{p}", f"bouB.ports[{i + 1}]"] for i, p in enumerate(ports[1])]
+    )
+    doc["signals"] = list(signals)
+    doc["experiment"]["StopTime"] = 2.0
+    return doc
+
+
+_M = "Buildings.Airflow.Multizone."
+_CVAL_DOOR = 0.65 * 0.9 * 2.1 * math.sqrt(2.0 / 1.2)  # DoorOpen.mo:27, Door.mo:41
+
+
+@pytest.mark.parametrize(
+    ("cls", "params", "expected"),
+    [
+        # Point_m_flow.mo:4-5: k = mMea/dpMea^m.
+        ("Point_m_flow", {"dpMea_nominal": 10.0, "mMea_flow_nominal": 0.02, "m": 0.6},
+         0.02 * 0.5**0.6),
+        # Points_m_flow.mo: the fit passes through its first point (5 Pa, 0.01 kg/s).
+        ("Points_m_flow", {"dpMea_nominal": [5.0, 20.0], "mMea_flow_nominal": [0.01, 0.03]},
+         0.01),
+        # Coefficient_V_flow.mo:4: m_flow = rho_default*C*dp^m.
+        ("Coefficient_V_flow", {"C": 0.01, "m": 0.6}, 1.2 * 0.01 * 5.0**0.6),
+        # A collinear table: the monotone Hermite spline is the line itself.
+        ("Table_m_flow", {"dpMea_nominal": [-10.0, 0.0, 10.0],
+                          "mMea_flow_nominal": [-0.02, 0.0, 0.02]}, 0.01),
+        ("Table_V_flow", {"dpMea_nominal": [-10.0, 0.0, 10.0],
+                          "VMea_flow_nominal": [-0.02, 0.0, 0.02]}, 1.2 * 0.01),
+        # Equal temperatures: no buoyancy term, the two edges share the orifice flow
+        # (Door.mo:64-65 with mABt = 0).
+        ("DoorOpen", {}, 1.2 * _CVAL_DOOR * math.sqrt(5.0)),
+    ],
+)
+def test_one_way_classes_and_open_door_between_two_boundaries(tmp_path, cls, params,
+                                                               expected):
+    doc = _two_boundaries({"name": "el", "class": _M + cls, "parameters": params})
+    model, state, drivers, names = read_modelica(_write(tmp_path, doc), return_names=True)
+    hist = simulate(model, state, drivers, names.times[:2])
+    net = sum(s * hist["air.q"][:, c] for c, s in names.edges["el"])
+    assert torch.allclose(net, torch.full_like(net, expected), rtol=1e-10)
+
+
+def test_operable_and_discretised_doors_build_and_follow_their_signal(tmp_path):
+    y = [{"name": "y", "class": "Modelica.Blocks.Sources.Step",
+          "parameters": {"startTime": 1.0}, "drives": "el.y"}]
+    doc = _two_boundaries({"name": "el", "class": _M + "DoorOperable",
+                           "parameters": {"LClo": 0.001}}, y)
+    model, state, drivers, names = read_modelica(_write(tmp_path, doc), return_names=True)
+    hist = simulate(model, state, drivers, names.times)
+    net = sum(s * hist["air.q"][:, c] for c, s in names.edges["el"])
+    assert float(net[2]) == pytest.approx(1.2 * _CVAL_DOOR * math.sqrt(5.0), rel=1e-10)
+    assert 0.0 < float(net[0]) < 0.1 * float(net[2])  # closed crack before the step
+    doc = _two_boundaries({"name": "el", "class": _M + "DoorDiscretizedOpen",
+                           "parameters": {"nCom": 3}})
+    model, state, drivers, names = read_modelica(_write(tmp_path, doc), return_names=True)
+    assert len(names.edges["el"]) == 3
+    hist = simulate(model, state, drivers, names.times[:1])
+    assert float(sum(s * hist["air.q"][0, c] for c, s in names.edges["el"])) > 0.0
+
+
+def test_boundary_temperature_and_concentration_inputs(tmp_path):
+    doc = _doc("thermal_and_source.json")
+    doc["components"][1]["parameters"].update({"use_T_in": True, "use_C_in": True,
+                                               "p": P_DEFAULT - 5.0})
+    doc["signals"] = [
+        {"name": "TOut", "class": "Modelica.Blocks.Sources.Ramp",
+         "parameters": {"height": 10.0, "duration": 100.0, "offset": 280.0},
+         "drives": "bouB.T_in"},
+        {"name": "COut", "class": "Modelica.Blocks.Sources.Constant",
+         "parameters": {"k": 4e-4}, "drives": "bouB.C_in[1]"},
+    ]
+    model, state, drivers, names = read_modelica(_write(tmp_path, doc), return_names=True)
+    j = model.transport["species"].boundary.index("bouB")
+    assert float(drivers["species.x_boundary"][j, 0]) == pytest.approx(4e-4)
+    th = drivers["series:thermal.x_boundary"]
+    assert float(th[50, 0]) == pytest.approx(285.0)

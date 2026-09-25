@@ -1,0 +1,86 @@
+{
+  "format": "noodl-modelica/1",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.23.0",
+  "model": "test.ZoneTwoOrifices",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 60.0,
+    "Interval": 1.0,
+    "Tolerance": 1e-06
+  },
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "extraPropertiesNames": [],
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "bouA",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "p": 101330.0,
+        "T": 303.15,
+        "nPorts": 1
+      }
+    },
+    {
+      "name": "bouB",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "p": 101325.0,
+        "T": 293.15,
+        "nPorts": 1
+      }
+    },
+    {
+      "name": "vol",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "V": 10.0,
+        "T_start": 293.15,
+        "nPorts": 2,
+        "m_flow_nominal": 0.001,
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial"
+      }
+    },
+    {
+      "name": "oriA",
+      "class": "Buildings.Airflow.Multizone.Orifice",
+      "parameters": {
+        "A": 0.01,
+        "CD": 0.65
+      }
+    },
+    {
+      "name": "oriB",
+      "class": "Buildings.Airflow.Multizone.Orifice",
+      "parameters": {
+        "A": 0.02,
+        "CD": 0.65
+      }
+    }
+  ],
+  "connections": [
+    [
+      "bouA.ports[1]",
+      "oriA.port_a"
+    ],
+    [
+      "oriA.port_b",
+      "vol.ports[1]"
+    ],
+    [
+      "vol.ports[2]",
+      "oriB.port_a"
+    ],
+    [
+      "oriB.port_b",
+      "bouB.ports[1]"
+    ]
+  ],
+  "signals": []
+}
