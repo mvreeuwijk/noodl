@@ -53,7 +53,7 @@ def _t(value):
     return torch.tensor([value], dtype=DT)
 
 
-def test_t1_sirane_exchange_velocity():
+def test_t1_sirane_exchange_velocity(record_property):
     """S11 Eq. (5) p. 7386; K18 Eq. (3) p. 613; K22 Eq. (B10) p. 7387;
     `StreetNetworkTransport.cxx:3273`. The regression guard against `1/sqrt(2 pi)`."""
     assert abs(SIRANE_EXCHANGE - 0.225079079039277) < 1e-15
@@ -61,6 +61,12 @@ def test_t1_sirane_exchange_velocity():
     # The record quotes 0.08681174 to eight significant figures.
     assert abs(float(u_d) / 0.08681174 - 1.0) < 1e-7
     assert abs(1.0 / math.sqrt(2.0 * math.pi) - 0.398942280401433) < 1e-15
+    record_property("check", "Exchange velocity u_d")
+    record_property("tolerance", "rel 1e-7")
+    record_property("measured_rel", abs(float(u_d) / 0.08681174 - 1.0))
+    record_property("check2", "SIRANE_EXCHANGE constant")
+    record_property("tolerance2", "< 1e-15")
+    record_property("measured2_diff", abs(SIRANE_EXCHANGE - 0.225079079039277))
 
 
 def test_t2_schulte_mixing_length_and_exchange_velocity():
@@ -110,7 +116,7 @@ def test_t4_exponential_canyon_wind_is_kim_2022_b14_and_not_kim_2018_9_to_11():
         assert abs(float(got) / expected - 1.0) < 1e-6      # quoted to seven figures
 
 
-def test_t5_macdonald_displacement_roughness_and_roof_wind():
+def test_t5_macdonald_displacement_roughness_and_roof_wind(record_property):
     """K22 Eqs. (1)-(3) p. 7373 and (B13); `ComputeMacdonaldProfile` `:3302-3353`."""
     d_c, z0c = macdonald_profile(_t(H), _t(W))
     assert abs(float(d_c) - 4.617352498423888) < 1e-12
@@ -120,9 +126,13 @@ def test_t5_macdonald_displacement_roughness_and_roof_wind():
     assert abs(float(u_h) - 0.9063192631810709) < 1e-12
     u_star_from_ref = 5.0 * KAPPA_MUNICH / math.log((30.0 - float(d_c)) / float(z0c))
     assert abs(u_star_from_ref - 0.5620494130195227) < 1e-12
+    worst = max(abs(float(d_c) - 4.617352498423888), abs(float(z0c) - 0.6614635677623194))
+    record_property("check", "Macdonald d_c, z_0c")
+    record_property("tolerance", "< 1e-12")
+    record_property("measured_diff", worst)
 
 
-def test_t6_soulhac_shape_parameter_and_bessel_roof_wind():
+def test_t6_soulhac_shape_parameter_and_bessel_roof_wind(record_property):
     """K22 Eqs. (B12) and (B15) p. 7387-7388; ATM `MeteorologyStreet.cxx:114-226`."""
     delta_i = min(H, W / 2.0)
     assert delta_i == 3.75
@@ -136,6 +146,9 @@ def test_t6_soulhac_shape_parameter_and_bessel_roof_wind():
                     kappa=KAPPA_MUNICH)
     # u_H/u* = (u_M/u*) * f_mean = 8.611791 * 0.880654, both quoted to seven figures.
     assert abs(float(u_h) / U_STAR / (8.611791 * 0.880654) - 1.0) < 2e-6
+    record_property("check", "soulhac_shape root c")
+    record_property("tolerance", "< 1e-13")
+    record_property("measured_diff", abs(float(c) - 0.6198293039179747))
 
 
 @pytest.mark.parametrize(
@@ -143,12 +156,20 @@ def test_t6_soulhac_shape_parameter_and_bessel_roof_wind():
     [(2, 0.431928), (3, 1.013848), (4, 0.995837), (5, 0.990866), (6, 0.986315),
      (7, 0.982560), (8, 0.979509), (9, 0.977016), (10, 0.974953)],
 )
-def test_t7_the_nine_unnormalised_quadrature_weight_sums(n, total):
+def test_t7_the_nine_unnormalised_quadrature_weight_sums(n, total, record_property):
     """K22 Eq. (B16) p. 7388; `ComputeWindDirectionFluctuation` `:3562-3616`."""
     sigma = _t((n + 0.5) * math.pi / 180.0)
     _offsets, weights = direction_offsets("munich", sigma)
     assert weights.shape[-1] == n
-    assert abs(float(weights.sum()) - total) < 1e-6      # quoted to six decimal places
+    measured = float(weights.sum())
+    assert abs(measured - total) < 1e-6      # quoted to six decimal places
+    # `measured` is recorded as the ABSOLUTE DIFFERENCE from the quoted K22 total, not the
+    # raw sum -- the raw sum (e.g. 0.432 for n=2) reads, out of context in a results
+    # table, as a failed check against some unstated target (final whole-branch review,
+    # finding/minor 10).
+    record_property("check", f"Direction-quadrature weight sum, n={n}, vs the K22 quoted {total}")
+    record_property("tolerance", "1e-6")
+    record_property("measured_abs_diff", abs(measured - total))
 
 
 def test_t7_sigma_v_sigma_theta_and_the_sample_count():

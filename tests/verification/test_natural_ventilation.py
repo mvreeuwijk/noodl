@@ -97,7 +97,7 @@ def _volumetric_inflow(model, ss) -> float:
     return q[0].item() / RHO_0
 
 
-def test_buoyancy_only_matches_li_delsante_closed_form():
+def test_buoyancy_only_matches_li_delsante_closed_form(record_property):
     # `T_start` is off ambient because this is the ONE case with neither wind nor an envelope
     # conductance: at T_z == T_o the stack head is identically zero, so the first pass solves
     # the airflow as exactly q = 0 and the steady heat balance 0 = M x + N x_b + E/C is then
@@ -109,21 +109,30 @@ def test_buoyancy_only_matches_li_delsante_closed_form():
     _, model, state, drivers = _single_zone(A=A, h=h, E=E, T_start=T_O + 5.0)
     ss = model.steady(state, drivers, **TIGHT)
     alpha, _, _ = _params(A, h, E)
-    assert _volumetric_inflow(model, ss) == pytest.approx(2.0 ** (1.0 / 3.0) * alpha, rel=1e-6)
+    q_ref = 2.0 ** (1.0 / 3.0) * alpha
+    q = _volumetric_inflow(model, ss)
+    assert q == pytest.approx(q_ref, rel=1e-6)
     dT = ss["thermal.x"][0].item() - T_O
-    assert dT == pytest.approx(E / (RHO_0 * CP_AIR * _volumetric_inflow(model, ss)), rel=1e-8)
+    assert dT == pytest.approx(E / (RHO_0 * CP_AIR * q), rel=1e-8)
+    record_property("check", "Buoyancy-only zone vs the Li and Delsante closed form")
+    record_property("tolerance", "rel 1e-6")
+    record_property("measured_rel", abs(q / q_ref - 1.0))
 
 
-def test_envelope_loss_matches_the_cubic_root():
+def test_envelope_loss_matches_the_cubic_root(record_property):
     A, h, E, UA = 0.5, 3.0, 2000.0, 150.0
     _, model, state, drivers = _single_zone(A=A, h=h, E=E, UA=UA)
     ss = model.steady(state, drivers, **TIGHT)
     alpha, beta, _ = _params(A, h, E, UA)
     (root,) = _positive_real_roots([1.0, 3.0 * beta, 0.0, -2.0 * alpha**3])
-    assert _volumetric_inflow(model, ss) == pytest.approx(root, rel=1e-6)
+    q = _volumetric_inflow(model, ss)
+    assert q == pytest.approx(root, rel=1e-6)
+    record_property("check", "Envelope-loss zone vs the cubic root")
+    record_property("tolerance", "rel 1e-6")
+    record_property("measured_rel", abs(q / root - 1.0))
 
 
-def test_assisting_wind_matches_the_cubic_root():
+def test_assisting_wind_matches_the_cubic_root(record_property):
     A, h, E, UA, V = 0.5, 3.0, 2000.0, 150.0, 2.0
     cp_low, cp_high = 0.5, -0.3
     _, model, state, drivers = _single_zone(A=A, h=h, E=E, UA=UA, cp_low=cp_low, cp_high=cp_high)
@@ -134,7 +143,11 @@ def test_assisting_wind_matches_the_cubic_root():
     (root,) = _positive_real_roots(
         [1.0, 3.0 * beta, -3.0 * gamma**2, -2.0 * alpha**3 - 9.0 * gamma**2 * beta]
     )
-    assert _volumetric_inflow(model, ss) == pytest.approx(root, rel=1e-6)
+    q = _volumetric_inflow(model, ss)
+    assert q == pytest.approx(root, rel=1e-6)
+    record_property("check", "Assisting-wind zone vs the cubic root")
+    record_property("tolerance", "rel 1e-6")
+    record_property("measured_rel", abs(q / root - 1.0))
 
 
 def _opposing_wind_case(coupling: str = "iterate"):
@@ -263,7 +276,7 @@ def _two_zone_doorway():
     return net, model, initial_state(model), drivers, E_A
 
 
-def test_two_zone_doorway_matches_an_independent_root_finding_reference():
+def test_two_zone_doorway_matches_an_independent_root_finding_reference(record_property):
     from scipy.optimize import fsolve
 
     net, model, state, drivers, E_A = _two_zone_doorway()
@@ -289,6 +302,10 @@ def test_two_zone_doorway_matches_an_independent_root_finding_reference():
     assert T["B"] == pytest.approx(TB_ref, abs=1e-5)
     q = model.potential["air"].flows_of_kind(ss["air.q"], "airpath")
     assert (q[0] + q[1]).abs().item() < 1e-10          # doorway: no net flow
+    worst_abs = max(abs(T["A"] - TA_ref), abs(T["B"] - TB_ref))
+    record_property("check", "Two-zone doorway vs an independent scipy.optimize.fsolve reference")
+    record_property("tolerance", "abs 1e-5 K")
+    record_property("measured_abs_K", worst_abs)
 
 
 def _three_zone_stack(coupling: str, tol: float = 0.05):
@@ -347,7 +364,7 @@ def test_hensen_table_fine_steps_agree_and_coarse_pingpong_errs_more_than_coarse
     assert err_pp > err_on
 
 
-def test_golden_matches_stored_reference():
+def test_golden_matches_stored_reference(record_property):
     """The `benchmarks/natural_ventilation.py` demo against its committed trajectory.
 
     Two simulated hours at 600 s under `coupling="iterate"`, compared term by term. The demo
@@ -368,10 +385,14 @@ def test_golden_matches_stored_reference():
 
     ref = load_golden("natural_ventilation")
     now = run("iterate", 600.0, hours=2.0)
+    worst_rel = 0.0
     for key in ("T_A", "T_B", "door_kg_s"):
-        torch.testing.assert_close(
-            torch.tensor(now[key], dtype=F64),
-            torch.tensor(ref[key], dtype=F64),
-            rtol=1e-8,
-            atol=1e-10,
+        now_t = torch.tensor(now[key], dtype=F64)
+        ref_t = torch.tensor(ref[key], dtype=F64)
+        torch.testing.assert_close(now_t, ref_t, rtol=1e-8, atol=1e-10)
+        worst_rel = max(
+            worst_rel, ((now_t - ref_t) / ref_t.abs().clamp_min(1e-12)).abs().max().item()
         )
+    record_property("check", "Natural-ventilation demo golden regression")
+    record_property("tolerance", "rel 1e-8")
+    record_property("measured_rel", worst_rel)
