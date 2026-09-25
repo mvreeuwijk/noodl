@@ -189,8 +189,28 @@ def test_signal_is_parsed(tmp_path: Path) -> None:
     ])
     path = _write(tmp_path, doc)
     parsed = load(path)
-    assert parsed.signals[0].drives == "bouB.p_in"
+    assert parsed.signals[0].drives == ("bouB.p_in",)
     assert parsed.signals[0].parameters == {"height": 100, "duration": 500}
+
+
+def test_signal_may_drive_several_inputs(tmp_path: Path) -> None:
+    # Examples/ZonalFlow.mo connects one Constant m_flow to floExc.mAB_flow and mBA_flow.
+    doc = _base_doc(signals=[
+        {"name": "m_flow", "class": "Modelica.Blocks.Sources.Constant",
+         "parameters": {"k": 0.02}, "drives": ["floExc.mAB_flow", "floExc.mBA_flow"]}
+    ])
+    parsed = load(_write(tmp_path, doc))
+    assert parsed.signals[0].drives == ("floExc.mAB_flow", "floExc.mBA_flow")
+
+
+@pytest.mark.parametrize("drives", [[], ["a.b", 3], 7])
+def test_signal_drives_must_be_a_string_or_a_list_of_strings(tmp_path: Path, drives) -> None:
+    doc = _base_doc(signals=[
+        {"name": "s", "class": "Modelica.Blocks.Sources.Constant", "parameters": {"k": 1},
+         "drives": drives}
+    ])
+    with pytest.raises(ModelicaImportError, match=r"signals\[0\] \(s\)\.drives"):
+        load(_write(tmp_path, doc))
 
 
 def test_refusal_reason_for_known_and_unknown_classes() -> None:

@@ -49,6 +49,18 @@ mass is held at its start value: heat capacity `V rho_start cp + CSen`, species 
 pressure capacity `m cp` above is what a fixed-mass open zone at constant pressure has. The
 heat carrier on the edges is the same `cp`, so the balance is conservative.
 
+When water vapour is carried, `cp` is still the one value at `X_default` for every zone and
+edge (review fix round 1, item 4, checked against MBL). With `h = cp_air (1 - X)(T - T_ref) +
+X (cp_ste (T - T_ref) + h_fg)` (`Air.mo:116-124`), `der(U) = sum m_in h_in - m_out h`
+(`ConservationEquation.mo:303`) and the water balance `m dX/dt = sum m_in (X_in - X)`, the
+latent and cross terms cancel exactly and MBL's zone temperature obeys
+`m cp(X) dT/dt = sum m_in cp(X_in) (T_in - T)`: only the RATIO of the upstream stream's `cp`
+to the zone's own enters. One common `cp` makes that ratio 1, which is exact between zones of
+equal moisture and off by `|cp(X_in)/cp(X) - 1| <= 8.5e2 |X_in - X|` otherwise (4e-3 for the
+0.015/0.01 rooms of the ZonalFlow example, decaying as they mix). A per-zone `cp(X_start)` in
+the capacity with a fixed carrier would not reduce this: it would make the ratio wrong by
+`|cp(X_start)/cp(X_default) - 1|` for all time instead.
+
 Moisture (controller ruling)
 ----------------------------
 For a medium with moisture, water vapour is carried as a species only when the model needs
@@ -62,8 +74,11 @@ it: a volume's `X_start[1]` or a boundary's `X[1]` differs from `X_default[1]`, 
 at interior nodes from the state's last solved `"air.phi"` (seeded with `p_start - p_default`
 in the initial state). With `coupling="iterate"` (used whenever a transport layer exists)
 each pass reads the previous pass's `"air.phi"`, so within a step the interior pressure
-converges with the temperatures; the iteration tests the thermal state (1e-4 K, below the
-reference simulation's declared relative tolerance times 300 K), not `phi` itself.
+converges with the temperatures and mass fractions; the iteration tests the transport
+states (`THERMAL_ITERATE_TOL`, `SPECIES_ITERATE_TOL`), not `phi` itself. A model with no
+transport layer (every zone pinned, no species) runs ping-pong: there the interior `p_abs`
+lags one step behind the solved pressure. It enters only the discretised-door and zonal
+densities, whose sensitivity to it is ~1e-5 relative per pascal-order change.
 
 Closed zone groups
 ------------------
@@ -73,9 +88,11 @@ MBL fixes it through mass storage (`der(m) = sum(ports.m_flow)`): with balanced 
 mass, hence for `Buildings.Media.Air` the pressure, stays at `p_start`. The reader therefore
 makes the first zone of every group of zones joined by pressure-dependent edges (paths and
 doors, not zonal flows) and holding no boundary node a pressure boundary of the air layer at
-its own `p_start`. This is exact for balanced prescribed flows; mass a source injects into
-such a zone is absorbed by the reference (reported, not approximated silently: the
-docstring of `build` says so and `names.air_references` lists the zones).
+its own `p_start` (`names.air_references` lists them). This is exact for balanced
+prescribed flows. An unbalanced one would accumulate heat and species without bound in the
+reference zone (an air boundary but a transport interior node), so a closed group holding
+a source, or joined by a `ZonalFlow_m_flow` whose two directions are not the same flow, is
+refused by name.
 
 Sources
 -------
@@ -128,8 +145,11 @@ F64 = torch.float64
 
 G_N = 9.80665  # MSL Modelica/Constants.mo:38
 G_PIN_MIN = 1e6  # W/K, spec section 6
-THERMAL_ITERATE_TOL = 1e-4  # K
-SPECIES_ITERATE_TOL = 1e-10  # kg/kg
+# Absolute `coupling="iterate"` tolerances (review fix round 1, item 3): 1e-8 K is ~3e-11 of
+# the temperature, and 1e-12 kg/kg the same order relative to a water mass fraction of 0.01;
+# the airflow is solved to 1e-13 kg/s by `run.simulate`, so both are reachable.
+THERMAL_ITERATE_TOL = 1e-8  # K
+SPECIES_ITERATE_TOL = 1e-12  # kg/kg
 ITERATE_MAX = 50
 
 _FREE_ENERGY = ("FixedInitial", "DynamicFreeInitial")
@@ -213,28 +233,33 @@ class _Signals:
         self.by_target: dict[str, schema.Signal] = {}
         self.used: set[str] = set()
         self.kind_of = kind_of
+        self._values: dict[str, Tensor | None] = {}
         for s in doc.signals:
-            if s.drives in self.by_target:
-                errors.append(
-                    f"{s.name} ({s.cls}): drives {s.drives}, which "
-                    f"{self.by_target[s.drives].name} already drives"
-                )
-                continue
-            self.by_target[s.drives] = s
+            for target in s.drives:  # one block output may feed several inputs
+                if target in self.by_target:
+                    errors.append(
+                        f"{s.name} ({s.cls}): drives {target}, which "
+                        f"{self.by_target[target].name} already drives"
+                    )
+                    continue
+                self.by_target[target] = s
 
     def get(self, target: str) -> Tensor | None:
         s = self.by_target.get(target)
         if s is None:
             return None
         self.used.add(target)
-        try:
-            y = signals.evaluate(s, self.times)
-        except ModelicaImportError as exc:
-            self.errors.append(str(exc).removeprefix("modelica: "))
-            return None
-        if bool((y == y[0]).all()):
-            return y[0].clone()  # a constant signal stays a constant driver
-        return y
+        if s.name not in self._values:  # evaluated once, however many inputs it feeds
+            try:
+                y = signals.evaluate(s, self.times)
+            except ModelicaImportError as exc:
+                self.errors.append(str(exc).removeprefix("modelica: "))
+                y = None
+            if y is not None and bool((y == y[0]).all()):
+                y = y[0].clone()  # a constant signal stays a constant driver
+            self._values[s.name] = y
+        y = self._values[s.name]
+        return None if y is None else y.clone()
 
     def require(self, comp: Component, port: str) -> Tensor | None:
         y = self.get(f"{comp.name}.{port}")
@@ -547,6 +572,8 @@ class _Builder:
         # Element inputs fed by signals (door `y`, zonal `ACS`/`mAB_flow`/`mBA_flow`), keyed
         # by their driver name "<instance>.<input>"; scalars or series over the grid.
         self._inputs: dict[str, Tensor] = {}
+        # ZonalFlow_m_flow instances: (component, mAB_flow, mBA_flow, side A, side B).
+        self._zonal_pairs: list[tuple[Component, Tensor, Tensor, int, int]] = []
 
     # ------------------------------------------------------------- boundaries
     def boundary(self, comp: Component) -> dict | None:
@@ -668,14 +695,6 @@ class _Builder:
 
         sources = self._sources(zones, index, water, K)
         self.sig.check_unused()
-        if errors:
-            unique = sorted(set(errors))
-            count = "1 item" if len(unique) == 1 else f"{len(unique)} items"
-            raise ModelicaImportError(
-                f"modelica: refused {count}:\n" + "\n".join(f"  - {e}" for e in unique)
-            )
-        if not elements:
-            raise ModelicaImportError("modelica: the model has no flow element")
 
         n = net.n
         # Closed zone groups -> air-layer pressure references (module docstring).
@@ -698,6 +717,37 @@ class _Builder:
                 continue
             seen_roots.add(r)
             references.append(name)
+        # A closed group can only hold balanced exchanges (review fix round 1, item 1): its
+        # reference zone is a pressure boundary of the air layer but an interior node of the
+        # transport layers, so any net inflow would accumulate heat and species there
+        # without bound. Refuse every source in such a group, and every ZonalFlow_m_flow
+        # touching one whose two directions are not the same flow.
+        closed = {find(index[r]) for r in references}
+        for comp, node in g.sources:
+            if node in index and find(index[node]) in closed:
+                errors.append(
+                    f"{comp.name} ({comp.cls}): feeds {node}, whose zone group has no "
+                    f"boundary (it is joined to the rest only by prescribed flows), so the "
+                    f"injected mass could not leave; not supported"
+                )
+        for comp, mab, mba, iA, iB in self._zonal_pairs:
+            if find(iA) not in closed and find(iB) not in closed:
+                continue
+            if not (mab.shape == mba.shape and torch.equal(mab, mba)):
+                errors.append(
+                    f"{comp.name} ({comp.cls}): mAB_flow and mBA_flow are not balanced (not "
+                    f"the same flow) and a zone group it joins has no boundary, so the net "
+                    f"flow would accumulate there; not supported"
+                )
+
+        if errors:
+            unique = sorted(set(errors))
+            count = "1 item" if len(unique) == 1 else f"{len(unique)} items"
+            raise ModelicaImportError(
+                f"modelica: refused {count}:\n" + "\n".join(f"  - {e}" for e in unique)
+            )
+        if not elements:
+            raise ModelicaImportError("modelica: the model has no flow element")
         air_boundary = list(g.boundaries) + references
 
         air = PotentialFlowLayer(net, "air", elements, drives=drives, boundary=air_boundary,
@@ -726,7 +776,7 @@ class _Builder:
                                     for i in sp_int.tolist()], dtype=F64)
                 layers["species"] = TransportLayer(
                     net, "species", capacity=cap, flow_kind=flow_kinds, boundary=sp_boundary,
-                    n_species=K, scheme="implicit", quantity="mass_fraction", unit="kg/kg",
+                    n_species=K, scheme="exact", quantity="mass_fraction", unit="kg/kg",
                 )
 
         # ---------------------------------------------------------- drivers
@@ -794,12 +844,14 @@ class _Builder:
             sp_bound=net.boundary_index(sp_boundary) if sp_interior is not None else None,
             water=water, n_species=K,
         )
+        tol = {}
         if "thermal" in layers:
+            tol["thermal"] = THERMAL_ITERATE_TOL
+        if "species" in layers:
+            tol["species"] = SPECIES_ITERATE_TOL
+        if tol:
             model = Model(net, layers, closures=[closure], coupling="iterate",
-                          iterate_tol={"thermal": THERMAL_ITERATE_TOL}, iterate_max=ITERATE_MAX)
-        elif "species" in layers:
-            model = Model(net, layers, closures=[closure], coupling="iterate",
-                          iterate_tol={"species": SPECIES_ITERATE_TOL}, iterate_max=ITERATE_MAX)
+                          iterate_tol=tol, iterate_max=ITERATE_MAX)
         else:
             model = Model(net, layers, closures=[closure])
 
@@ -950,6 +1002,7 @@ class _Builder:
                 return
             self._inputs[f"{comp.name}.mAB_flow"] = mab
             self._inputs[f"{comp.name}.mBA_flow"] = mba
+            self._zonal_pairs.append((comp, mab, mba, iA, iB))
             V, use_default = None, True
             specs = [(kab, "ab", f"{comp.name}.mAB_flow"), (kba, "ba", f"{comp.name}.mBA_flow")]
         for kind, direction, key in specs:
@@ -989,9 +1042,25 @@ class _Builder:
             if cls == "TraceSubstancesFlowSource":
                 T_in = _t(med.T_default)  # h_default
                 X_in = med.X_default[0] if med.has_moisture else 0.0
+                # TraceSubstancesFlowSource.mo:31-37: isEqual(..., caseSensitive=false);
+                # :49: assert(sum(C_in_internal) > 1E-4) -- the substance must exist.
                 name = str(p.get("substanceName", "CO2"))
-                C_in = [_t(1.0 if s == name else 0.0) for s in self.species_names]
+                C_in = [_t(1.0 if s.lower() == name.lower() else 0.0)
+                        for s in self.species_names]
+                if not any(float(c) > 0.0 for c in C_in):
+                    self.errors.append(
+                        f"{comp.name} ({comp.cls}): trace substance {name!r} is not among the "
+                        f"medium's extraPropertiesNames {self.species_names}"
+                    )
+                    continue
             else:  # MassFlowSource_T
+                bad = [k for k in ("use_X_in", "use_Xi_in") if p.get(k)]
+                if bad:
+                    self.errors.append(
+                        f"{comp.name} ({comp.cls}): composition inputs ({', '.join(bad)}) are "
+                        f"not supported"
+                    )
+                    continue
                 T_in = (self.sig.require(comp, "T_in") if p.get("use_T_in")
                         else _t(float(p.get("T", med.T_default))))
                 X = p.get("X", list(med.X_default))

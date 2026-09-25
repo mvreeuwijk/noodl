@@ -392,19 +392,109 @@ def test_operable_and_discretised_doors_build_and_follow_their_signal(tmp_path):
     assert float(sum(s * hist["air.q"][0, c] for c, s in names.edges["el"])) > 0.0
 
 
-def test_boundary_temperature_and_concentration_inputs(tmp_path):
-    doc = _doc("thermal_and_source.json")
-    doc["components"][1]["parameters"].update({"use_T_in": True, "use_C_in": True,
-                                               "p": P_DEFAULT - 5.0})
+def test_boundary_temperature_and_concentration_inputs_reach_the_zone(tmp_path):
+    # zone_two_orifices: bouA -> oriA -> vol -> oriB -> bouB, flow independent of the zone
+    # state. bouA's T_in and C_in[1] come from Constant signals, so the zone relaxes as
+    # x(t) = x_in + (x0 - x_in) exp(-F t/(rho V)) with the (constant) through-flow F; the
+    # exact transport scheme integrates exactly that on frozen flows.
+    doc = _doc("zone_two_orifices.json")
+    doc["medium"]["extraPropertiesNames"] = ["CO2"]
+    doc["components"][0]["parameters"].update({"use_T_in": True, "use_C_in": True})
     doc["signals"] = [
-        {"name": "TOut", "class": "Modelica.Blocks.Sources.Ramp",
-         "parameters": {"height": 10.0, "duration": 100.0, "offset": 280.0},
-         "drives": "bouB.T_in"},
-        {"name": "COut", "class": "Modelica.Blocks.Sources.Constant",
-         "parameters": {"k": 4e-4}, "drives": "bouB.C_in[1]"},
+        {"name": "TIn", "class": "Modelica.Blocks.Sources.Constant",
+         "parameters": {"k": 313.15}, "drives": "bouA.T_in"},
+        {"name": "CIn", "class": "Modelica.Blocks.Sources.Constant",
+         "parameters": {"k": 4e-4}, "drives": "bouA.C_in[1]"},
     ]
     model, state, drivers, names = read_modelica(_write(tmp_path, doc), return_names=True)
-    j = model.transport["species"].boundary.index("bouB")
-    assert float(drivers["species.x_boundary"][j, 0]) == pytest.approx(4e-4)
-    th = drivers["series:thermal.x_boundary"]
-    assert float(th[50, 0]) == pytest.approx(285.0)
+    t = names.times[:31]
+    hist = simulate(model, state, drivers, t)
+    ((col, sign),) = names.edges["oriA"]
+    F = float(sign * hist["air.q"][0, col])
+    decay = torch.exp(-F * t / (1.2 * 10.0))
+    i = names.nodes["vol"]
+    assert torch.allclose(hist["T"][:, i], 313.15 + (293.15 - 313.15) * decay, rtol=0.0,
+                          atol=1e-7)
+    assert torch.allclose(hist["C"][:, i, 0], 4e-4 * (1.0 - decay), rtol=0.0, atol=1e-13)
+
+
+# ------------------------------------------------ transport time course (review item 2)
+def test_heat_and_moisture_relax_on_the_same_exact_time_course():
+    # Two rooms exchanging F = V ACS rho + m_flow each way (balanced), no boundary. Both the
+    # temperature and the water mass fraction obey dD/dt = -F (1/M_A + 1/M_B) D for the
+    # normalised room difference D, with M = rho_start V (the heat capacity's cp cancels
+    # the carrier's). Frozen flows make the exact scheme exact, so D matches the
+    # exponential to the iteration and solve tolerances (1e-8 K on a 10 K difference,
+    # 1e-12 on 0.005).
+    model, state, drivers, names = _load("zonal_flow.json")
+    hist = simulate(model, state, drivers, names.times)
+    iA, iB = names.nodes["rooA"], names.nodes["rooB"]
+    F = 5.0 / 3600.0 * 1.2 * 1.0 + 0.02
+    rate = F * (1.0 / (1.2 * 100.0) + 1.0 / (1.2 * 1.0))
+    expected = torch.exp(-rate * names.times)
+    DT = (hist["T"][:, iA] - hist["T"][:, iB]) / (303.15 - 293.15)
+    DX = (hist["X_w"][:, iA] - hist["X_w"][:, iB]) / (0.015 - 0.01)
+    for k in (1, 2, 3, 6, 12):
+        assert float(DT[k]) == pytest.approx(float(expected[k]), rel=1e-7, abs=1e-9)
+        assert float(DX[k]) == pytest.approx(float(expected[k]), rel=1e-7, abs=1e-9)
+        assert abs(float(DT[k] - DX[k])) < 1e-8
+
+
+# ------------------------------------------ unbalanced closed groups (review item 1)
+def test_unbalanced_closed_zone_groups_are_refused_by_name(tmp_path):
+    doc = _doc("zonal_flow.json")
+    doc["signals"][1]["drives"] = "floExc.mAB_flow"
+    doc["signals"].append({"name": "m_flow2", "class": "Modelica.Blocks.Sources.Constant",
+                           "parameters": {"k": 0.01}, "drives": "floExc.mBA_flow"})
+    doc["components"][0]["parameters"]["nPorts"] = 5
+    doc["components"].append({
+        "name": "sou", "class": "Buildings.Fluid.Sources.TraceSubstancesFlowSource",
+        "parameters": {"nPorts": 1, "m_flow": 1e-6, "substanceName": "CO2"}})
+    doc["medium"]["extraPropertiesNames"] = ["CO2"]
+    doc["connections"].append(["sou.ports[1]", "rooA.ports[5]"])
+    with pytest.raises(ModelicaImportError) as exc:
+        read_modelica(_write(tmp_path, doc))
+    msg = str(exc.value)
+    assert "floExc" in msg and "ZonalFlow_m_flow" in msg and "not balanced" in msg
+    assert "sou" in msg and "TraceSubstancesFlowSource" in msg and "no boundary" in msg
+
+
+def test_equal_constants_on_both_zonal_directions_count_as_balanced(tmp_path):
+    doc = _doc("zonal_flow.json")
+    doc["signals"][1]["drives"] = "floExc.mAB_flow"
+    doc["signals"].append({"name": "m_flow2", "class": "Modelica.Blocks.Sources.Constant",
+                           "parameters": {"k": 0.02}, "drives": "floExc.mBA_flow"})
+    _model, _state, _drivers, names = read_modelica(_write(tmp_path, doc), return_names=True)
+    assert names.air_references == ("rooA", "rooB")
+
+
+# ------------------------------------------------------ trace sources (review item 5)
+def test_trace_substance_name_is_matched_case_insensitively(tmp_path):
+    doc = _doc("mixed_rooms.json")
+    doc["components"][-1]["parameters"]["substanceName"] = "co2"
+    _model, _state, drivers, names = read_modelica(_write(tmp_path, doc), return_names=True)
+    assert float(drivers["species.sources"][names.nodes["volA"], 0]) == pytest.approx(1e-5)
+    doc["components"][-1]["parameters"]["substanceName"] = "NO2"
+    with pytest.raises(ModelicaImportError, match="sou .*NO2"):
+        read_modelica(_write(tmp_path, doc))
+
+
+def test_mass_flow_source_composition_inputs_are_refused(tmp_path):
+    doc = _with_supply(0.01)
+    doc["components"][-1]["parameters"]["use_X_in"] = True
+    with pytest.raises(ModelicaImportError, match="sup .*use_X_in"):
+        read_modelica(_write(tmp_path, doc))
+
+
+def test_iteration_converges_to_the_tight_tolerances():
+    for name in ("door_two_volumes.json", "mixed_rooms.json", "zonal_flow.json"):
+        model, state, drivers, names = _load(name)
+        assert model.iterate_tol.get("thermal") == pytest.approx(1e-8)
+        if "species" in model.transport:
+            assert model.iterate_tol["species"] == pytest.approx(1e-12)
+        d = step_drivers(drivers, names.times, float(names.times[1]))
+        diag: dict = {}
+        model.step(state, d, float(names.times[1] - names.times[0]), diagnostics=diag,
+                   atol=1e-13, rtol=1e-12)
+        assert bool(diag["converged"].all())
+        assert diag["passes"] < model.iterate_max

@@ -111,15 +111,10 @@
       "parameters": {
         "k": 0.02
       },
-      "drives": "floExc.mAB_flow"
-    },
-    {
-      "name": "m_flow2",
-      "class": "Modelica.Blocks.Sources.Constant",
-      "parameters": {
-        "k": 0.02
-      },
-      "drives": "floExc.mBA_flow"
+      "drives": [
+        "floExc.mAB_flow",
+        "floExc.mBA_flow"
+      ]
     }
   ]
 }

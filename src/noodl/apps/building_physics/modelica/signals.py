@@ -14,8 +14,20 @@ is refused, since OpenModelica's export always writes the evaluated value.
 ``evaluate(signal, t)`` returns the block output ``y`` at every entry of ``t`` (float64, the
 shape of ``t``). The time events MSL uses to locate table intervals and pulse periods are
 replaced by the equivalent closed-form interval selection at each grid time: a grid time
-that falls exactly on a table knot or a period boundary takes the value AFTER the event,
-which is what the solver reports at an output instant that coincides with a time event.
+that falls on a table knot, a start time or a period boundary takes the value AFTER the
+event, which is what the solver reports at an output instant that coincides with a time
+event. "On" is judged with MSL's own relative epsilon: every event comparison uses
+``t + TimeEps |t|`` with ``TimeEps = 100 eps`` (``TimeTable``'s ``getInterpolationCoefficients``,
+``Sources.mo:1411-1413,1473``), so a grid time computed as ``start + k interval`` that lands a
+rounding error before an event is treated as at it; the signal VALUE is still evaluated at
+``t`` itself.
+
+Limits of the closed forms: ``Periodic`` ``CombiTimeTable`` maps ``t`` into the table range
+with ``tOffset = floor((t - tMin)/T) T`` (``ModelicaStandardTables.c:1856``) and then
+interpolates as inside the table. The C code's additional event-interval corrections
+(``:953-1002``) only change the value returned DURING event iteration at an interval
+boundary; off event instants the two agree, and at an instant the closed form returns the
+post-event value, like the other blocks.
 
 Supported ``CombiTimeTable`` settings: ``smoothness`` ``LinearSegments`` (the default) or
 ``ConstantSegments``; ``extrapolation`` ``LastTwoPoints`` (the default), ``HoldLastPoint``,
@@ -57,6 +69,14 @@ def _get(sig: Signal, key: str, default: float) -> float:
     return float(sig.parameters.get(key, default))
 
 
+_TIME_EPS = 100 * torch.finfo(F64).eps  # Sources.mo:1473 (100*Modelica.Constants.eps)
+
+
+def _ev(t: Tensor) -> Tensor:
+    """``t`` nudged forward by MSL's relative event epsilon, for event comparisons only."""
+    return t + _TIME_EPS * t.abs()
+
+
 def _enum(value, default: str) -> str:
     return str(value if value is not None else default).rsplit(".", 1)[-1]
 
@@ -70,7 +90,8 @@ def _step(sig: Signal, t: Tensor) -> Tensor:
     # Sources.mo:204-208: y = offset + (if time < startTime then 0 else height).
     height, offset = _get(sig, "height", 1.0), _get(sig, "offset", 0.0)
     start = _get(sig, "startTime", 0.0)
-    return offset + torch.where(t < start, torch.zeros_like(t), torch.full_like(t, height))
+    return offset + torch.where(_ev(t) < start, torch.zeros_like(t),
+                                torch.full_like(t, height))
 
 
 def _ramp(sig: Signal, t: Tensor) -> Tensor:
@@ -81,8 +102,9 @@ def _ramp(sig: Signal, t: Tensor) -> Tensor:
     start = _get(sig, "startTime", 0.0)
     safe = duration if duration > 0.0 else 1.0  # the branch is unreachable at duration 0
     rising = (t - start) * height / safe
-    y = torch.where(t < start + duration, rising, torch.full_like(t, height))
-    return offset + torch.where(t < start, torch.zeros_like(t), y)
+    te = _ev(t)
+    y = torch.where(te < start + duration, rising, torch.full_like(t, height))
+    return offset + torch.where(te < start, torch.zeros_like(t), y)
 
 
 def _sine(sig: Signal, t: Tensor) -> Tensor:
@@ -95,7 +117,7 @@ def _sine(sig: Signal, t: Tensor) -> Tensor:
     continuous = bool(sig.parameters.get("continuous", False))
     wave = amplitude * torch.sin(2 * math.pi * f * (t - start) + phase)
     before = amplitude * math.sin(phase) if continuous else 0.0
-    return offset + torch.where(t < start, torch.full_like(t, before), wave)
+    return offset + torch.where(_ev(t) < start, torch.full_like(t, before), wave)
 
 
 def _pulse(sig: Signal, t: Tensor) -> Tensor:
@@ -109,14 +131,15 @@ def _pulse(sig: Signal, t: Tensor) -> Tensor:
     nperiod = int(sig.parameters.get("nperiod", -1))
     start = _get(sig, "startTime", 0.0)
     t_width = period * width / 100.0
-    count = torch.floor((t - start) / period)
+    te = _ev(t)
+    count = torch.floor((te - start) / period)
     t_start = start + count * period
-    off = t < start
+    off = te < start
     if nperiod == 0:
         off = torch.ones_like(off)
     elif nperiod > 0:
         off = off | (count >= nperiod)
-    high = torch.where(t < t_start + t_width, torch.full_like(t, amplitude),
+    high = torch.where(te < t_start + t_width, torch.full_like(t, amplitude),
                        torch.zeros_like(t))
     return offset + torch.where(off, torch.zeros_like(t), high)
 
@@ -160,13 +183,15 @@ def _timetable(sig: Signal, t: Tensor) -> Tensor:
     start = _get(sig, "startTime", 0.0)
     shift = _get(sig, "shiftTime", start)
     ts = t / time_scale
-    before = ts < start / time_scale
+    ts_e = _ev(ts)  # getInterpolationCoefficients: tp = timeScaled + TimeEps*|timeScaled|
+    before = ts_e < start / time_scale
     x, y = table[:, 0].contiguous(), table[:, 1].contiguous()
     if table.shape[0] == 1:
         value = torch.full_like(t, float(y[0]))
     else:
         tp = ts - shift / time_scale
-        nxt = torch.searchsorted(x, tp, right=True).clamp(1, x.numel() - 1)
+        tp_e = ts_e - shift / time_scale
+        nxt = torch.searchsorted(x, tp_e, right=True).clamp(1, x.numel() - 1)
         value = _linear(x, y, nxt - 1, tp)
     return offset + torch.where(before, torch.zeros_like(t), value)
 
@@ -205,23 +230,26 @@ def _combitimetable(sig: Signal, t: Tensor) -> Tensor:
 
     # ModelicaStandardTables.c:926-928: before startTime the table returns 0.
     ts = t / time_scale
-    before = ts < start / time_scale
+    ts_e = _ev(ts)
+    before = ts_e < start / time_scale
     x, y = table[:, 0].contiguous(), table[:, columns[0] - 1].contiguous()
     n = x.numel()
     if n == 1:  # :938-941
         return offset + torch.where(before, torch.zeros_like(t), torch.full_like(t, float(y[0])))
     tp = ts - shift / time_scale  # :948-950
+    tp_e = ts_e - shift / time_scale
     t_min, t_max = x[0], x[-1]
     if extrapolation == "Periodic":  # :953-1002, tOffset = floor((t - tMin)/T)*T (:1856)
         period = t_max - t_min
-        tp = tp - torch.floor((tp - t_min) / period) * period
+        k_off = torch.floor((tp_e - t_min) / period) * period
+        tp, tp_e = tp - k_off, tp_e - k_off
         left = torch.zeros_like(tp, dtype=torch.bool)
         right = torch.zeros_like(tp, dtype=torch.bool)
     else:
-        left = tp < t_min  # :1003-1005
-        right = tp >= t_max  # :1006-1014
+        left = tp_e < t_min  # :1003-1005
+        right = tp_e >= t_max  # :1006-1014
         if extrapolation == "NoExtrapolation":  # :1172-1178 (end points accepted here)
-            outside = (tp < t_min) | (tp > t_max)
+            outside = (tp_e < t_min) | (tp > t_max)
             if bool(outside.any()):
                 bad = t[outside].tolist()
                 raise ModelicaImportError(
@@ -232,11 +260,11 @@ def _combitimetable(sig: Signal, t: Tensor) -> Tensor:
 
     # In the table (:1016-1100): `last` is the row with x[last] <= t (findRowIndex), capped
     # to the second-to-last row.
-    last = (torch.searchsorted(x, tp, right=True) - 1).clamp(0, n - 2)
+    last = (torch.searchsorted(x, tp_e, right=True) - 1).clamp(0, n - 2)
     if smoothness == "LinearSegments":  # :1080-1092
         inside = _linear(x, y, last, tp)
     else:  # CONSTANT_SEGMENTS :1094-1099
-        last = torch.where(tp >= x[last + 1], last + 1, last)
+        last = torch.where(tp_e >= x[last + 1], last + 1, last)
         inside = y[last]
 
     if extrapolation == "HoldLastPoint":  # :1166-1169

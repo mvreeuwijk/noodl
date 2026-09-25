@@ -156,12 +156,17 @@ class Component:
 
 @dataclass(frozen=True)
 class Signal:
-    """One instance from the JSON's `signals` array: a driver plus the port it feeds."""
+    """One instance from the JSON's `signals` array: a driver plus the input(s) it feeds.
+
+    `drives` is written in the JSON as one `"<instance>.<input>"` string or a list of them
+    (one block output may feed several inputs: `Examples/ZonalFlow.mo` connects one
+    `Constant` to both `floExc.mAB_flow` and `floExc.mBA_flow`); it is always a tuple here.
+    """
 
     name: str
     cls: str
     parameters: dict
-    drives: str
+    drives: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -224,7 +229,17 @@ def _signal_from(raw: Any, index: int) -> Signal:
     name = _require_str(obj.get("name"), f"{where}.name")
     cls = _require_str(obj.get("class"), f"{where} ({name}).class")
     parameters = _parameters_of(obj, f"{where} ({name})")
-    drives = _require_str(obj.get("drives"), f"{where} ({name}).drives")
+    raw_drives = obj.get("drives")
+    if isinstance(raw_drives, str):
+        drives = (raw_drives,)
+    elif (isinstance(raw_drives, list) and raw_drives
+          and all(isinstance(d, str) for d in raw_drives)):
+        drives = tuple(raw_drives)
+    else:
+        raise ModelicaImportError(
+            f"modelica: {where} ({name}).drives must be a string or a non-empty list of "
+            f"strings, found {raw_drives!r}"
+        )
     return Signal(name=name, cls=cls, parameters=parameters, drives=drives)
 
 

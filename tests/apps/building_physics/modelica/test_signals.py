@@ -24,7 +24,7 @@ F64 = torch.float64
 
 def _sig(cls: str, **parameters) -> Signal:
     return Signal(name="s", cls=f"Modelica.Blocks.Sources.{cls}", parameters=parameters,
-                  drives="x.y")
+                  drives=("x.y",))
 
 
 def _eval(sig: Signal, times) -> list[float]:
@@ -177,6 +177,22 @@ def test_refusals_name_the_signal(cls, params, match):
 
 def test_unknown_block_refused():
     sig = Signal(name="pid", cls="Modelica.Blocks.Continuous.LimPID", parameters={},
-                 drives="a.b")
+                 drives=("a.b",))
     with pytest.raises(ModelicaImportError, match="pid"):
         signals.evaluate(sig, torch.zeros(1, dtype=F64))
+
+
+def test_a_grid_time_one_ulp_before_an_event_takes_the_post_event_value():
+    # MSL detects time events with a relative epsilon (TimeTable's TimeEps = 100*eps,
+    # Sources.mo:1473-1474), so an output time a rounding error before the event reports
+    # the value after it.
+    before = math.nextafter(2.1, 0.0)
+    assert _eval(_sig("Step", startTime=2.1), [before]) == [1.0]
+    assert _eval(_sig("Pulse", period=2.1, width=10.0, startTime=0.0), [before]) == [1.0]
+    tt = _sig("TimeTable", table=[[0.0, 0.0], [2.1, 0.0], [2.1, 5.0], [3.0, 5.0]])
+    assert _eval(tt, [before]) == pytest.approx([5.0])
+    ct = _sig("CombiTimeTable", table=[[0.0, 0.0], [2.1, 1.0], [3.0, 1.0]],
+              smoothness="ConstantSegments")
+    assert _eval(ct, [before]) == [1.0]
+    # Well before the event, the pre-event value.
+    assert _eval(_sig("Step", startTime=2.1), [2.0999]) == [0.0]
