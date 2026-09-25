@@ -274,6 +274,25 @@ class _MBLDoorCompartmentBase(_InflowDensities, Element):
         dVBA = -dV * (1 - gai)  # DoorDiscretized.mo:71
         return rho_A * dVAB - rho_B * dVBA
 
+    def port_flows(self, dp: Tensor, drivers=None) -> tuple[Tensor, Tensor]:
+        """MBL's two port flows of the whole door, ``(port_a1.m_flow, port_a2.m_flow)`` =
+        ``(mAB_flow, mBA_flow)`` (``TwoWayFlowElement.mo:85-86,91-92``: ``rho_a1_inflow
+        VAB_flow`` and ``rho_a2_inflow VBA_flow``, with ``VAB_flow = sum(dVAB_flow)``,
+        ``VBA_flow = sum(dVBA_flow)``, ``DoorDiscretized.mo:74-75``), kg/s, each summed over
+        the last (compartment) dimension of ``dp``.
+
+        These are the reference's ``m1_flow``/``m2_flow`` and ``mAB_flow``/``mBA_flow``
+        outputs EXACTLY, including compartments inside the ``smoothHeaviside`` band, where the
+        plain sums of the positive and negative edge flows differ from them (module
+        docstring); their difference is the sum of :meth:`flow`."""
+        self._check_width(dp)
+        rho_A, rho_B = self._densities(drivers)
+        dV, VZerCom = self._volume_flow(dp, drivers)
+        gai = _smooth_heaviside(dV, VZerCom)  # DoorDiscretized.mo:69
+        mAB = (rho_A * dV * gai).sum(dim=-1)  # DoorDiscretized.mo:70,74 (rho_A per edge)
+        mBA = (rho_B * -dV * (1 - gai)).sum(dim=-1)  # DoorDiscretized.mo:71,75
+        return mAB, mBA
+
     def linear_init(self, drivers=None) -> tuple[Tensor, Tensor]:
         """Tangent at ``dp = 0`` on a per-edge zero (the base class's 0-d zero would sum
         the autograd slope over the compartments)."""

@@ -478,6 +478,39 @@ def test_smoothing_constant_is_what_the_docstring_states():
     assert abs(_c_smooth() - 0.0705529) < 1e-7
 
 
+@pytest.mark.parametrize("operable", [False, True], ids=["open", "operable"])
+def test_port_flows_are_mbl_mAB_and_mBA_exactly_inside_the_smoothing_band(operable):
+    """`port_flows` returns MBL's port_a1.m_flow = mAB_flow and port_a2.m_flow = mBA_flow
+    (TwoWayFlowElement.mo:85-86,91-92) -- the reference's dooDis.m1_flow/m2_flow outputs --
+    which the plain directional sums of the edge flows only approximate inside the band
+    (test above). Cases: the stratified CASES plus a near-neutral plane (dphi = 1e-5 Pa,
+    TA = TB) where every compartment's |dV| is inside the band, so the smoothed split,
+    not a sign test, decides both sums."""
+    comp, head = (_operable() if operable else _open())
+    cases = [*CASES, (1e-5, 293.15, 293.15, 0.01, 0.01)]
+    for y in ([0.0, 0.4, 1.0] if operable else [None]):
+        for dphi, TA, TB, XA, XB in cases:
+            pA, pB = P_DEFAULT + dphi, P_DEFAULT
+            drv = _drivers(pA, pB, TA, TB, XA, XB)
+            oper = None
+            if operable:
+                drv["y"] = torch.tensor(y, dtype=F64)
+                oper = dict(OPER, y=y)
+            ref = door_discretized_np(pA, pB, TA, TB, XA, XB, med=AIR, operable=oper,
+                                      dphi=dphi, **GEOM)
+            dp = torch.as_tensor(dphi, dtype=F64)[..., None] + head(drv)
+            mAB, mBA = comp.port_flows(dp, drv)
+            scale = abs(ref["mAB"]) + abs(ref["mBA"])
+            np.testing.assert_allclose(float(mAB), ref["mAB"], rtol=RTOL, atol=1e-13 * scale)
+            np.testing.assert_allclose(float(mBA), ref["mBA"], rtol=RTOL, atol=1e-13 * scale)
+            np.testing.assert_allclose(float(mAB - mBA), float(comp.flow(dp, drv).sum()),
+                                       rtol=0, atol=1e-13 * scale)
+    # The near-neutral case really is inside the band for every compartment.
+    ref = door_discretized_np(P_DEFAULT + 1e-5, P_DEFAULT, 293.15, 293.15, 0.01, 0.01,
+                              med=AIR, dphi=1e-5, **GEOM)
+    assert np.all(np.abs(ref["dV"]) < ref["VZerCom"])
+
+
 # ---------------------------------------------------------------------------------------
 # 3. Geometry of the builders
 # ---------------------------------------------------------------------------------------

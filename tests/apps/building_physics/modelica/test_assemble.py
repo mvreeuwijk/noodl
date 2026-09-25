@@ -537,7 +537,8 @@ def test_math_signal_chain_matches_the_closed_form():
     assert torch.allclose(phi[:, 0], 2.0 * ramp + 101325.0 - P_DEFAULT, rtol=0, atol=1e-9)
     assert torch.equal(phi[:, 1], torch.full_like(t, -3.0))
     T = drivers["series:thermal.x_boundary"]
-    expected_T = torch.where(t < 5.0, torch.full_like(t, 290.0), torch.full_like(t, 290.0 * 1.1))
+    # t <= 5: at its startTime 5 the Step takes the left limit (signals module docstring).
+    expected_T = torch.where(t <= 5.0, torch.full_like(t, 290.0), torch.full_like(t, 290.0 * 1.1))
     assert torch.allclose(T[:, 1], expected_T, rtol=1e-15, atol=0.0)
     hist = simulate(model, state, drivers, t[:4])
     ((col, sign),) = names.edges["ori"]

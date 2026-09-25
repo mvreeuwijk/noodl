@@ -13,21 +13,32 @@ is refused, since OpenModelica's export always writes the evaluated value.
 
 ``evaluate(signal, t)`` returns the block output ``y`` at every entry of ``t`` (float64, the
 shape of ``t``). The time events MSL uses to locate table intervals and pulse periods are
-replaced by the equivalent closed-form interval selection at each grid time: a grid time
-that falls on a table knot, a start time or a period boundary takes the value AFTER the
-event, which is what the solver reports at an output instant that coincides with a time
-event. "On" is judged with MSL's own relative epsilon: every event comparison uses
-``t + TimeEps |t|`` with ``TimeEps = 100 eps`` (``TimeTable``'s ``getInterpolationCoefficients``,
-``Sources.mo:1411-1413,1473``), so a grid time computed as ``start + k interval`` that lands a
-rounding error before an event is treated as at it; the signal VALUE is still evaluated at
-``t`` itself.
+replaced by the equivalent closed-form interval selection at each grid time.
+
+Event-time convention: a grid time that falls on a table knot, a start time or a period
+boundary takes the value BEFORE the event (the left limit). That is what OpenModelica 1.27.1
+records at an output instant that coincides with a time event (exported with
+``-noEventEmit``, one row per output time): ``Validation/DoorOpenClosed.mo``'s ``Step``
+(``startTime = 0.5``) is still 0 in the row at ``t = 0.5`` and 1 from ``t = 0.502``, and
+``Validation/OpenDoorPressure.mo``'s ``TimeTable`` knot at 3600 s still carries the
+pre-knot pressure at ``t = 3600``. This holds for ``Step`` at its ``startTime`` too, although
+the MSL equation ``if time < startTime then 0 else height`` gives ``height`` AT the instant:
+the solver writes the output point before it handles the event, so the CSV shows the left
+limit, and the reader follows the CSV. The one exception is the experiment's start time
+``t_start`` (``evaluate``'s keyword): there is no left limit at the initial instant, and
+Modelica's initialization evaluates the relations as written (a ``Step`` with ``startTime =
+0`` is ``height`` at ``t = 0``). "On" is judged with MSL's own relative epsilon: every event
+comparison uses ``t - TimeEps |t|`` with ``TimeEps = 100 eps`` (the size of
+``TimeTable``'s ``getInterpolationCoefficients`` epsilon, ``Sources.mo:1411-1413,1473``), so a
+grid time computed as ``start + k interval`` that lands a rounding error after an event is
+treated as at it; the signal VALUE is still evaluated at ``t`` itself.
 
 Limits of the closed forms: ``Periodic`` ``CombiTimeTable`` maps ``t`` into the table range
 with ``tOffset = floor((t - tMin)/T) T`` (``ModelicaStandardTables.c:1856``) and then
 interpolates as inside the table. The C code's additional event-interval corrections
 (``:953-1002``) only change the value returned DURING event iteration at an interval
 boundary; off event instants the two agree, and at an instant the closed form returns the
-post-event value, like the other blocks.
+pre-event value, like the other blocks.
 
 Supported ``CombiTimeTable`` settings: ``smoothness`` ``LinearSegments`` (the default) or
 ``ConstantSegments``; ``extrapolation`` ``LastTwoPoints`` (the default), ``HoldLastPoint``,
@@ -89,29 +100,34 @@ def _get(sig: Signal, key: str, default: float) -> float:
 _TIME_EPS = 100 * torch.finfo(F64).eps  # Sources.mo:1473 (100*Modelica.Constants.eps)
 
 
-def _ev(t: Tensor) -> Tensor:
-    """``t`` nudged forward by MSL's relative event epsilon, for event comparisons only."""
-    return t + _TIME_EPS * t.abs()
+def _ev(t: Tensor, t_start: float | None) -> Tensor:
+    """``t`` nudged BACK by MSL's relative event epsilon, for event comparisons only, so a
+    grid time on an event takes the left limit (module docstring); ``t == t_start`` (the
+    initial instant) is left as it is."""
+    te = t - _TIME_EPS * t.abs()
+    if t_start is None:
+        return te
+    return torch.where(t == t_start, t, te)
 
 
 def _enum(value, default: str) -> str:
     return str(value if value is not None else default).rsplit(".", 1)[-1]
 
 
-def _constant(sig: Signal, t: Tensor) -> Tensor:
+def _constant(sig: Signal, t: Tensor, te: Tensor) -> Tensor:
     # Sources.mo:164-168: y = k.
     return torch.full_like(t, _required(sig, "k"))
 
 
-def _step(sig: Signal, t: Tensor) -> Tensor:
+def _step(sig: Signal, t: Tensor, te: Tensor) -> Tensor:
     # Sources.mo:204-208: y = offset + (if time < startTime then 0 else height).
     height, offset = _get(sig, "height", 1.0), _get(sig, "offset", 0.0)
     start = _get(sig, "startTime", 0.0)
-    return offset + torch.where(_ev(t) < start, torch.zeros_like(t),
+    return offset + torch.where(te < start, torch.zeros_like(t),
                                 torch.full_like(t, height))
 
 
-def _ramp(sig: Signal, t: Tensor) -> Tensor:
+def _ramp(sig: Signal, t: Tensor, te: Tensor) -> Tensor:
     # Sources.mo:244-252: y = offset + (if time < startTime then 0 else if time < startTime
     # + duration then (time - startTime)*height/duration else height).
     height, offset = _get(sig, "height", 1.0), _get(sig, "offset", 0.0)
@@ -119,12 +135,11 @@ def _ramp(sig: Signal, t: Tensor) -> Tensor:
     start = _get(sig, "startTime", 0.0)
     safe = duration if duration > 0.0 else 1.0  # the branch is unreachable at duration 0
     rising = (t - start) * height / safe
-    te = _ev(t)
     y = torch.where(te < start + duration, rising, torch.full_like(t, height))
     return offset + torch.where(te < start, torch.zeros_like(t), y)
 
 
-def _sine(sig: Signal, t: Tensor) -> Tensor:
+def _sine(sig: Signal, t: Tensor, te: Tensor) -> Tensor:
     # Sources.mo:291-305: continuous -> offset + amplitude*(sin(phase) before startTime);
     # otherwise offset + (0 before startTime).
     amplitude, offset = _get(sig, "amplitude", 1.0), _get(sig, "offset", 0.0)
@@ -134,10 +149,10 @@ def _sine(sig: Signal, t: Tensor) -> Tensor:
     continuous = bool(sig.parameters.get("continuous", False))
     wave = amplitude * torch.sin(2 * math.pi * f * (t - start) + phase)
     before = amplitude * math.sin(phase) if continuous else 0.0
-    return offset + torch.where(_ev(t) < start, torch.full_like(t, before), wave)
+    return offset + torch.where(te < start, torch.full_like(t, before), wave)
 
 
-def _pulse(sig: Signal, t: Tensor) -> Tensor:
+def _pulse(sig: Signal, t: Tensor, te: Tensor) -> Tensor:
     # Sources.mo:773-800: T_width = period*width/100; count = integer((time -
     # startTime)/period); T_start = startTime + count*period; y = offset + (if time <
     # startTime or nperiod == 0 or (nperiod > 0 and count >= nperiod) then 0 else if time <
@@ -148,7 +163,6 @@ def _pulse(sig: Signal, t: Tensor) -> Tensor:
     nperiod = int(sig.parameters.get("nperiod", -1))
     start = _get(sig, "startTime", 0.0)
     t_width = period * width / 100.0
-    te = _ev(t)
     count = torch.floor((te - start) / period)
     t_start = start + count * period
     off = te < start
@@ -184,7 +198,7 @@ def _linear(x: Tensor, y: Tensor, j: Tensor, t: Tensor) -> Tensor:
     return torch.where(degenerate, y1, y0 + (y1 - y0) * (t - x0) / safe)
 
 
-def _timetable(sig: Signal, t: Tensor) -> Tensor:
+def _timetable(sig: Signal, t: Tensor, te: Tensor) -> Tensor:
     # Sources.mo:1378-1484. Before startTime: offset. One row: offset + table[1, 2].
     # Otherwise the interval is found by `while next < nrow and tp >= table[next, 1]` (the
     # first knot strictly after tp, capped to the last row, at least row 2), so beyond either
@@ -200,7 +214,7 @@ def _timetable(sig: Signal, t: Tensor) -> Tensor:
     start = _get(sig, "startTime", 0.0)
     shift = _get(sig, "shiftTime", start)
     ts = t / time_scale
-    ts_e = _ev(ts)  # getInterpolationCoefficients: tp = timeScaled + TimeEps*|timeScaled|
+    ts_e = te / time_scale  # the event comparisons (getInterpolationCoefficients' tp)
     before = ts_e < start / time_scale
     x, y = table[:, 0].contiguous(), table[:, 1].contiguous()
     if table.shape[0] == 1:
@@ -213,7 +227,7 @@ def _timetable(sig: Signal, t: Tensor) -> Tensor:
     return offset + torch.where(before, torch.zeros_like(t), value)
 
 
-def _combitimetable(sig: Signal, t: Tensor) -> Tensor:
+def _combitimetable(sig: Signal, t: Tensor, te: Tensor) -> Tensor:
     if bool(sig.parameters.get("tableOnFile", False)):
         raise ModelicaImportError(
             f"modelica: {_where(sig)}: tableOnFile = true is not supported (the table must be "
@@ -247,7 +261,7 @@ def _combitimetable(sig: Signal, t: Tensor) -> Tensor:
 
     # ModelicaStandardTables.c:926-928: before startTime the table returns 0.
     ts = t / time_scale
-    ts_e = _ev(ts)
+    ts_e = te / time_scale
     before = ts_e < start / time_scale
     x, y = table[:, 0].contiguous(), table[:, columns[0] - 1].contiguous()
     n = x.numel()
@@ -266,7 +280,7 @@ def _combitimetable(sig: Signal, t: Tensor) -> Tensor:
         left = tp_e < t_min  # :1003-1005
         right = tp_e >= t_max  # :1006-1014
         if extrapolation == "NoExtrapolation":  # :1172-1178 (end points accepted here)
-            outside = (tp_e < t_min) | (tp > t_max)
+            outside = (tp < t_min) | (tp > t_max)
             if bool(outside.any()):
                 bad = t[outside].tolist()
                 raise ModelicaImportError(
@@ -378,8 +392,12 @@ def combine(sig: Signal, inputs: dict[str, Tensor]) -> Tensor:
     return u[0] / u[1]  # Division
 
 
-def evaluate(signal: Signal, t: Tensor) -> Tensor:
+def evaluate(signal: Signal, t: Tensor, *, t_start: float | None = None) -> Tensor:
     """The output ``y`` of ``signal`` at the times ``t`` (s), float64, shape of ``t``.
+
+    A time on an event takes the pre-event value (the left limit), except ``t == t_start``,
+    the experiment's start time, where the relations are evaluated as written (module
+    docstring, "Event-time convention").
 
     Raises ``ModelicaImportError`` naming the signal for a block this module does not
     transcribe, a missing required parameter, or an unsupported table setting.
@@ -392,4 +410,4 @@ def evaluate(signal: Signal, t: Tensor) -> Tensor:
             f"{', '.join(_PREFIX + k for k in _BLOCKS)})"
         )
     t = torch.as_tensor(t, dtype=F64)
-    return fn(signal, t).to(F64)
+    return fn(signal, t, _ev(t, t_start)).to(F64)

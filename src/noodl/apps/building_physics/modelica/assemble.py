@@ -205,7 +205,8 @@ class ModelicaNames:
     `port_a2.m_flow`. An in-line flow sensor (`graph.InlineSensor`) is listed under its own
     name as its `port_a.m_flow`, i.e. the flow of the element port it is wired to; a sensor
     with no single element port, or next to a discretised door (whose port flows are not a
-    signed sum of its compartment flows), is left out. `nodes[name]` is the node position of
+    signed sum of its compartment flows), is left out; a discretised door's own port flows
+    are its element's `port_flows` at the solved `dp`. `nodes[name]` is the node position of
     a zone or boundary. `kinds[name]`
     are the instance's air-layer edge kinds. `times` is the experiment output grid.
     `air_references` lists the zones made air-layer pressure references (module docstring,
@@ -335,7 +336,7 @@ class _Signals:
                 if len(inputs) == len(signals.math_inputs(s)):
                     y = signals.combine(s, inputs).expand(self.times.shape).clone()
             else:
-                y = signals.evaluate(s, self.times)
+                y = signals.evaluate(s, self.times, t_start=float(self.times[0]))
         except ModelicaImportError as exc:
             self.errors.append(str(exc).removeprefix("modelica: "))
             y = None
