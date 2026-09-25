@@ -360,7 +360,7 @@ def test_step_conserves_with_n_passes_1_vs_5():
     competitor's request falls short of what a naive fair share would hand it, freeing
     headroom that only a LATER pass redistributes to the others. This fixture (three
     edges into one sink, one deliberately under-demanding) is the minimal case that
-    needs more than one pass, and was hand-verified pass-by-pass in the task report.
+    needs more than one pass, and was hand-verified pass by pass.
     """
     net = _star_net()
     s_max = torch.tensor([100.0, 100.0, 100.0, 3.0], dtype=F64)  # D's headroom is 3.0

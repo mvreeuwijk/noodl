@@ -120,7 +120,7 @@ def test_nonlinear_coupled_map_matches_the_dense_implicit_solve():
 
 
 def test_a_gauss_seidel_sweep_whose_outputs_feed_each_other():
-    """The coupled sweep P1-2 is really about: x is solved first, then y is solved WITH THE
+    """A coupled Gauss-Seidel sweep: x is solved first, then y is solved WITH THE
     NEW x, and both are interface states. x = (y + a)/2, y = (x + b)/2 has the closed form
     x* = (2a + b)/3, y* = (a + 2b)/3, so the true sensitivities are 2/3 and 1/3 (and 1/3,
     2/3), while one unrolled pass from the fixed point reports 1/2, 0 (and 1/4, 1/2).

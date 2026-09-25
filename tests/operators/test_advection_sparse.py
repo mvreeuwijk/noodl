@@ -146,7 +146,7 @@ def test_sparse_form_matches_the_dense_assembly_with_a_zero_flow_edge():
 
 
 def test_sparse_form_matches_the_dense_assembly_for_a_batched_conductance_only_operator():
-    """P2-5 shape: a batch that lives ONLY in conductance -- flow, capacity and transmission
+    """A batch that lives ONLY in conductance -- flow, capacity and transmission
     unbatched.
     """
     net = Network(dtype=F64)

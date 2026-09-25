@@ -198,8 +198,6 @@ class GraphLaplacianOperator:
         (batch, 2 * edges) tensor, which is more than the one `scatter_add_` dispatch it
         saves. The accumulator zeros tensor is already shared by both scatters, so there was
         never a second one to save.
-
-        History: see docs/development-history.md (Milestone 1b).
         """
         n_i = self.n_interior
         batch_shape, src, tgt = self._endpoints_for(x.shape[:-1], x.device)

@@ -1,4 +1,4 @@
-"""P2-5: an ensemble batched in exactly ONE coefficient family must step like the
+"""An ensemble batched in exactly ONE coefficient family must step like the
 per-instance unbatched layers, under every scheme."""
 
 from __future__ import annotations

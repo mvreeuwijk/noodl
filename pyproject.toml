@@ -25,11 +25,10 @@ Issues = "https://github.com/mvreeuwijk/noodl/issues"
 [project.optional-dependencies]
 # `sparse` is a RUNTIME extra, not a developer convenience. `method="auto"` prefers the
 # SciPy SuperLU backend for a certified-SPD operator with a sparse form at a flat batch of
-# at most 32 (spec section 6.2 step 2), so on a plain `pip install noodl` the documented
+# at most 32, so on a plain `pip install noodl` the documented
 # default silently never fires and every such solve falls back to PCG -- correct, and 4.6x
 # slower at ensemble 1. It stays OPTIONAL rather than becoming a hard dependency because the
-# evidence for the default is one platform at one problem size (spec section 2: "selected on
-# evidence, per platform"), and PCG remains a complete answer without it.
+# evidence for the default is one platform at one problem size, and PCG remains a complete answer without it.
 sparse = ["scipy>=1.11"]
 # `dev` restates `sparse`'s requirement rather than referencing the extra recursively: the
 # test suite exercises the sparse-direct backend directly, and a plain pin is one fewer
@@ -45,16 +44,16 @@ sparse = ["scipy>=1.11"]
 # 62.9 MB, numpy 53.7 MB, matplotlib + fontTools + Pillow 64.9 MB, networkx 15.5 MB; wntr's
 # own code and its four DLLs are 10.8 MB). Test-only (`importorskip`); NOT a runtime extra,
 # for the same reason.
-# wsimod parity (milestone 4b, rows W1-W7): BSD-3-Clause. Pinned exactly (`==0.8.1`), unlike
+# wsimod parity (rows W1-W7): BSD-3-Clause. Pinned exactly (`==0.8.1`), unlike
 # the `>=` pins above, because the committed fixtures under tests/data/wsimod/ freeze one
-# specific wsimod run (design spec section 10, "Fixture staleness") -- a newer release could
+# specific wsimod run -- a newer release could
 # silently change quickstart_demo/oxford_demo's forcing or node parameters, which an `>=` pin
 # would not catch. Test-only (`importorskip`); never a runtime dependency of noodl itself.
 dev = [
     "pytest>=8", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy>=1.11", "netCDF4>=1.7",
     "pyswmm>=2.1", "wntr>=1.5", "wsimod==0.8.1",
 ]
-# ContamX parity (spec section 9): NIST's `contamxpy` ships a Windows x86-64 wheel that
+# ContamX parity: NIST's `contamxpy` ships a Windows x86-64 wheel that
 # BUNDLES the ContamX 3.4.1.7 engine, so no CONTAM installation is needed -- but there is
 # no wheel for any other platform, hence the marker. Tests that need it carry `external`
 # and skip themselves when the import fails, so CI on Linux is unaffected.

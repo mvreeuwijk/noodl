@@ -131,7 +131,7 @@ def time_ensemble(ensemble: int, repeats: int = 5) -> float:
     return median
 
 
-# --- section 6.2 step 2: the in-process auto-vs-sparse_direct comparison ---------------------
+# --- the in-process auto-vs-sparse_direct comparison -----------------------------------------
 #
 # The budget report (`benchmarks.report_composed_scaling`) measures the same two solvers from
 # a fresh child process per sample, which is right for a MEMORY peak and for an end-to-end
@@ -259,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--compare-solvers",
         action="store_true",
-        help="auto vs sparse_direct, forward and backward, in process (section 6.2 step 2)",
+        help="auto vs sparse_direct, forward and backward, in process",
     )
     parser.add_argument(
         "--forward-only", action="store_true", help="--compare-solvers: forward rows only"

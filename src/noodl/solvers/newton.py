@@ -27,9 +27,6 @@ own arithmetic, so one instance being exactly singular cannot make the call
 fail for its siblings; that instance's own step is simply garbage (possibly
 NaN), and it is discarded by the ``torch.where`` on ``step`` below.
 
-History: see docs/development-history.md (Milestone 1b) for the identity-substitution
-trick this replaced.
-
 An auto-wrapped dense tensor resolves to ``method="direct"`` (LU of the explicit
 matrix, per instance) rather than to the iterative default, because that is the
 whole point of the shim: a caller who hands Newton an explicit dense Jacobian is
@@ -76,8 +73,6 @@ def inner_solve_rtol(dtype: torch.dtype) -> float:
     solve instead of to the Newton convergence test. It lives here, next to that default,
     rather than in any one caller: ``PotentialFlowLayer.linear_init`` needs the identical
     floor for the identical reason.
-
-    History: see docs/development-history.md (Milestone 1b).
     """
     return max(_INNER_RTOL, _INNER_RTOL_ULPS * float(torch.finfo(dtype).eps))
 

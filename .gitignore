@@ -19,7 +19,7 @@ venv/
 .idea/
 *.swp
 
-# Claude Code local state (worktrees, settings) -- never part of the tracked tree
+# Local tool state -- never part of the tracked tree
 .claude/
 .worktrees/
 
@@ -50,5 +50,5 @@ benchmarks_stderr.log
 # MkDocs build output (`mkdocs build` writes here; the site is published from CI).
 /site/
 
-# SDD plan workspaces (ledgers, briefs, review packages)
+# Local tool workspaces
 .superpowers/

@@ -1,7 +1,7 @@
 """Sparse-path tests for cycles.py: particular_flow and branch_flows migrated off
 a dense per-component tree solve and a materialised cycle-basis matmul, onto a level-
 synchronous elimination over the spanning forest. Each test compares the migrated function
-to an independent DENSE reference (the pre-Task-13 algorithm, reproduced here verbatim) on
+to an independent DENSE reference (the earlier dense algorithm, reproduced here verbatim) on
 a multi-kind, multi-component network, plus a gradcheck through both.
 """
 
@@ -18,7 +18,7 @@ from noodl.topology import Network
 
 
 def _dense_particular_flow_reference(net, sources, kind=None):
-    """The exact pre-Task-13 algorithm: a dense per-component tree solve. Kept here, not in
+    """The earlier dense algorithm: a per-component tree solve. Kept here, not in
     production code, purely as this test file's independent reference."""
     A = net.incidence(kind)
     tree_cols, chord_cols = net.spanning_forest(kind)
@@ -117,7 +117,7 @@ def test_tree_elimination_helpers_are_importable():
 
 
 def _dense_branch_flows_reference(net, amplitudes, kind=None):
-    """The exact pre-Task-13 algorithm: materialise cycle_basis(kind) and matmul."""
+    """The earlier dense algorithm: materialise cycle_basis(kind) and matmul."""
     J = net.cycle_basis(kind).to(amplitudes.dtype)
     return amplitudes @ J
 

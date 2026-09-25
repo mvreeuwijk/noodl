@@ -581,8 +581,6 @@ class PotentialFlowLayer:
         with a strictly positive entry there is grounded independent of any edge path (see
         `_extra_grounded`), so passing it here is what keeps a node grounded ONLY through a
         node source from being reported ungrounded.
-
-        History: see docs/development-history.md (Milestone 1b).
         """
         extra_grounded = self._extra_grounded(node_slopes)
         certified = spd_certificate(
@@ -597,7 +595,7 @@ class PotentialFlowLayer:
         )
         if certified.ndim == 0:
             # Unbatched: one instance, so a bare batch index would say nothing. Name the
-            # nodes (or edges) directly, as the pre-Task-11 message did.
+            # nodes (or edges) directly.
             raise RuntimeError(
                 f"PotentialFlowLayer {self.name!r}: {where}: "
                 f"{self._describe_grounding(records[0])}"
@@ -811,8 +809,6 @@ class PotentialFlowLayer:
         calling: a caller who wants gradients calls `differentiable=True`, which is unchanged
         (`solvers.implicit._Implicit.forward` already solved under `no_grad` and takes its
         gradients from the adjoint).
-
-        History: see docs/development-history.md (Milestone 1b).
         """
         drivers = drivers or {}
         newton_kwargs.setdefault("method", self.linear_solver)
@@ -842,7 +838,6 @@ class PotentialFlowLayer:
         # the iteration started from, so tracing the guess buys no gradient at all.
         # `linear_init` itself is untouched and stays differentiable for callers who want it
         # directly.
-        # History: see docs/development-history.md (Milestone 1b).
         with torch.no_grad():
             if phi0 is None:
                 phi0 = self.linear_init(phi_boundary, drivers, sources)

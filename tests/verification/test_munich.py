@@ -6,7 +6,7 @@ published 12-street idealised case of Kim et al. 2022 Fig. 1, whose INPUTS WERE 
 PUBLISHED, so what is
 checked is every scale-invariant property of it and nothing else.
 
-Tolerances. Where the research record carries a number at full double precision the check
+Tolerances. Where the worked value is quoted at full double precision the check
 is at 1e-12; where it quotes six or seven significant figures the check is at the precision
 those figures support, and the comment says so. Nothing here is loosened to make a test
 pass: a miss is a transcription error.
@@ -59,7 +59,7 @@ def test_t1_sirane_exchange_velocity(record_property):
     `StreetNetworkTransport.cxx:3273`. The regression guard against `1/sqrt(2 pi)`."""
     assert abs(SIRANE_EXCHANGE - 0.225079079039277) < 1e-15
     u_d = exchange_velocity(_t(SIGMA_W), _t(H), _t(W), form="sirane")
-    # The record quotes 0.08681174 to eight significant figures.
+    # The worked value 0.08681174 is quoted to eight significant figures.
     assert abs(float(u_d) / 0.08681174 - 1.0) < 1e-7
     assert abs(1.0 / math.sqrt(2.0 * math.pi) - 0.398942280401433) < 1e-15
     record_property("check", "Exchange velocity u_d")
@@ -94,7 +94,7 @@ def test_t3_sigma_w_in_all_three_stability_branches():
     stable = layer.sigma_w(_t(H), lmo=_t(100.0), stability="munich")
     assert abs(float(stable) - 0.38798000423523393) < 1e-13
     unstable = layer.sigma_w(_t(H), lmo=_t(-50.0), stability="munich")
-    # The record quotes 0.473173 to six significant figures.
+    # The worked value 0.473173 is quoted to six significant figures.
     assert abs(float(unstable) / 0.473173 - 1.0) < 1e-6
     # And the neutral branch IS IMPAQ's formula, evaluated at z = H.
     torch.testing.assert_close(neutral, layer.sigma_w(_t(H)), rtol=1e-15, atol=0)
@@ -219,7 +219,7 @@ def test_t9_the_node_closure_both_ways():
 
 
 def test_t10_the_steady_single_street():
-    """Research record T10: the stationary solve of
+    """T10: the stationary solve of
     `StreetNetworkTransport.cxx:2573-2575` on one street with no inflow."""
     length = 100.0
     u_d = float(exchange_velocity(_t(SIGMA_W), _t(H), _t(W), form="schulte"))

@@ -143,7 +143,7 @@ def test_air_buoyancy_density_matches_density_pTX(t_kelvin, x_w):
 @pytest.mark.parametrize("x_w", [0.0, 0.01, 0.02])
 def test_perfectgas_buoyancy_density_matches_its_own_ideal_gas_law(t_kelvin, x_w):
     """PerfectGas.mo:229-231/:134-136: the medium's own ideal-gas density function,
-    `d = p/(gasConstant(X)*T)`, evaluated at `p_default` per the design's resolution
+    `d = p/(gasConstant(X)*T)`, evaluated at `p_default` by convention
     ("the medium's own ideal-gas law at p_default" for media other than Buildings.Media.Air).
     """
     r = _moist_air_gas_constant_np(x_w)

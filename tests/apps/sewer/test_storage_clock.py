@@ -66,7 +66,7 @@ def test_without_a_declared_dt_the_step_interval_is_used():
 
 
 def test_each_leaf_manholes_60_s_level_satisfies_its_own_implicit_euler_residual():
-    """T5-1: the recorded 60 s levels are more than a pinned regression
+    """The recorded 60 s levels are more than a pinned regression
     value -- each LEAF manhole's own implicit-Euler residual
 
         A_s * H / dt + Q_manning(H) = lateral inflow

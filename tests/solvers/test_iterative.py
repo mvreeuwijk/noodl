@@ -352,9 +352,9 @@ _NORM_ULP_RTOL = 4 * torch.finfo(torch.float64).eps
 def test_pcg_results_are_pinned():
     """BIT-IDENTICAL pin of `pcg`'s output on a fixed system.
 
-    Task B rewrites `pcg`'s iteration (hoisting allocations, collapsing `torch.where` calls)
-    and `GraphLaplacianOperator._apply` (cached indices, one fused `index_add`) for speed
-    ALONE: the arithmetic must be untouched, and "untouched" here means the last bit, not
+    `pcg`'s iteration (hoisting allocations, collapsing `torch.where` calls) and
+    `GraphLaplacianOperator._apply` (cached indices, one fused `index_add`) were rewritten for
+    speed ALONE: the arithmetic must be untouched, and "untouched" here means the last bit, not
     `assert_close`. Reordering a floating-point accumulation (two scatter-adds into one,
     say) or replacing a `torch.where` with a multiplicative mask changes results in the last
     ulp or, where an inactive instance's step holds inf/nan, catastrophically -- and an
