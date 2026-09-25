@@ -16,6 +16,12 @@ dependencies = [
     "numpy>=1.26"
 ]
 
+[project.urls]
+Homepage = "https://github.com/mvreeuwijk/noodl"
+Documentation = "https://mvreeuwijk.github.io/noodl/"
+Repository = "https://github.com/mvreeuwijk/noodl"
+Issues = "https://github.com/mvreeuwijk/noodl/issues"
+
 [project.optional-dependencies]
 # `sparse` is a RUNTIME extra, not a developer convenience. `method="auto"` prefers the
 # SciPy SuperLU backend for a certified-SPD operator with a sparse form at a flat batch of
