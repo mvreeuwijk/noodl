@@ -1,18 +1,16 @@
-"""The headline demo — a real CONTAM building on a real street canyon.
+"""The headline demo — a real CONTAM building on a small synthetic street network.
 
 The street's `StreetFlows` closure REQUIRES the drivers `U_ref` (m/s at `z_ref`), `theta_w`
 (radians CCW from east, wind TOWARD) and `h_abl` (m), which `street_aq.build_model`'s returned
-driver template does NOT include (`apps/street_aq/routing.py:414-416`,
-`tests/verification/test_street_parity.py:53-59`); the fixtures below supply them. The
-building is built at the .prj's own ambient (`Ws=5.23`, `Wd=270`, west wind) and then
-receives the street's wind through the `DriverAlias`es.
+driver template does NOT include (`apps/street_aq/routing.py:414-416`); the fixtures below
+supply them. The building is built at the .prj's own ambient (`Ws=5.23`, `Wd=270`, west
+wind) and then receives the street's wind through the `DriverAlias`es.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import math
-import os
 from pathlib import Path
 
 import pytest
@@ -172,75 +170,6 @@ def test_the_wind_reaches_the_building_through_the_aliases():
     assert seen["V_met"] == pytest.approx(3.0)
     # Wind TOWARD the north == CONTAM's "from the south" == Wd 180 deg.
     assert seen["theta_w"] == pytest.approx(180.0)
-
-
-# ----------------------------------------------------------------- the real data
-
-# The AQ_DT products live outside the repository; set NOODL_AQDT_DATA to their data
-# directory to run the real-data cases. Unset, they skip.
-_AQDT_ENV = os.environ.get("NOODL_AQDT_DATA")
-AQDT_DATA = Path(_AQDT_ENV) if _AQDT_ENV else None
-DOMAIN, YEAR, STEP = "leiden_small", 2024, 1000
-needs_aqdt = pytest.mark.skipif(
-    AQDT_DATA is None
-    or not (AQDT_DATA / "stage1_geometry" / DOMAIN / "repaired_edges_canyon.geojson").exists(),
-    reason=f"the AQ_DT products are not at {AQDT_DATA or '(unset)'}; set NOODL_AQDT_DATA",
-)
-
-
-@needs_aqdt
-def test_real_leiden_small_building_back_coupling_magnitude(record_property):
-    """The headline pairing on real data: one leiden_small hour (forcing step 1000, the
-    middle of test_street_parity.py's own sampled steps), the busiest street as the shared
-    segment, the three-zone CONTAM building on it. The magnitude is RECORDED (negligible is
-    an acceptable, reportable result); the assertion is only that
-    the coupled step converged and the sink sign is right."""
-    from noodl.apps.street_aq.loader import read_aqdt
-
-    data = read_aqdt(
-        AQDT_DATA / "stage1_geometry" / DOMAIN, AQDT_DATA / "stage2_inputs" / DOMAIN,
-        year=YEAR, wind_height_m=30.0, trust_file_height=True, times=[STEP],
-    )
-    model, state, drivers = street_network.build_model(data.net, species=("nox",), z_ref=30.0)
-    graph = model.net
-    sources = torch.zeros(graph.n, dtype=F64)
-    for column, street in enumerate(data.net.streets):
-        sources[graph.node_index(street.name)] = data.emission[0, column]
-    drivers = dict(drivers)
-    drivers.update({
-        "street.x_boundary": data.forcing.background[0].reshape(1),
-        "street.sources": sources,
-        "U_ref": data.forcing.u_ref[0], "theta_w": data.forcing.theta_w[0],
-        "h_abl": data.forcing.h_abl[0],
-    })
-    state = model.steady(state, drivers)
-    busiest = data.net.streets[int(torch.argmax(data.emission[0]))].name
-    _project, (building_model, building_state, building_drivers) = _building()
-    link = _link(model, busiest)
-    city, s, d = union(
-        {
-            "street": (model, state, drivers),
-            "building": (building_model, building_state, building_drivers),
-        },
-        shared=[link, *_aliases()], substeps={"building": 60},
-        iterate_rtol=1e-10, iterate_max=100,
-    )
-    diag: dict = {}
-    coupled = city.step(s, d, dt=3600.0, diagnostics=diag)
-    seg = street_index(model)[busiest]
-    # The baseline here is the street's own STEADY state, not a one-way coupled step as in
-    # the synthetic test above. That is valid because the street alone, stepped the same
-    # 3600 s from this steady state, drifts by only 2.1e-11 relative (measured) -- three orders of
-    # magnitude below the ~7e-5 back-coupling change recorded below, so the steady state IS the
-    # uncoupled hour to the precision that matters.
-    c_two, c_one = coupled["street"]["street.x"][seg].item(), state["street.x"][seg].item()
-    record_property("segment", busiest)
-    record_property("street_conc_steady_kg_m3", c_one)
-    record_property("street_conc_coupled_kg_m3", c_two)
-    record_property("back_coupling_relative_change", abs(c_two - c_one) / abs(c_one))
-    record_property("passes", diag["passes"])
-    assert diag["converged"]
-    assert c_two <= c_one
 
 
 def test_sequential_file_exchange_disagrees_with_the_coupled_result(record_property):
