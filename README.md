@@ -27,7 +27,7 @@ pip install noodl
 
 Python 3.11 or newer; PyTorch, NetworkX and NumPy are the only hard dependencies. The optional
 extras are genuinely optional — `[sparse]` (sparse-direct linear solver), `[street_aq]` (the
-street air quality application's NetCDF I/O and IMPAQ port), `[contam]` (ContamX parity, Windows
+street air quality application's NetCDF I/O), `[contam]` (ContamX parity, Windows
 x86-64 only) and `[dev]` (everything the test suite needs). For a checkout:
 
 ```
@@ -73,10 +73,10 @@ core, and each is checked against the standard reference implementation in its f
 | Application | Physical system | Reference model |
 |---|---|---|
 | Building physics | Multi-zone airflow, heat and contaminant transport | CONTAM / ContamX, Modelica Buildings Library |
-| Street air quality | Urban air quality, canyon exchange and routing | MUNICH, SIRANE (IMPAQ port check) |
+| Street air quality | Urban air quality, canyon exchange and routing | MUNICH |
 | Sewers | Gravity sewer hydraulics, headspace air, sulfide | SWMM |
 | Water distribution | Pressurised mains, pumps, tanks, demand | EPANET 2.2 |
-| Capacitated transfer | Rule-based water-systems allocation | WSIMOD |
+| WSIMOD — rule-based water-system allocation | Requested flows clipped to arc capacity and free storage at the receiving node | WSIMOD |
 | Coupling | Two independent models exchanging values | — |
 
 ## Repository layout
@@ -112,5 +112,4 @@ one stroke.
 The topology layer is built on PyTorch, and the physics is implemented as nodal state-space
 modules with storage at nodes, typed edges, and batching over instances.
 
-Authors: John Craske and Maarten van Reeuwijk. MIT licensed, with the agreement of the original
-author.
+MIT licensed.

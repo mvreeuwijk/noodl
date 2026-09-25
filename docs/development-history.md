@@ -1515,6 +1515,114 @@ two MUNICH-excerpt fixture directories, `tests/data/street/munich_case_excerpt/`
 `munich_paris_excerpt/`; they were dropped before this branch's final review found no test or
 source file in this repository reads them.)
 
+## Documentation clean-up and Darcy-Weisbach fix (25 Sep 2026)
+
+The application pages' Limitations sections were rewritten as user-facing statements. The
+development detail they carried is kept here.
+
+**Darcy-Weisbach units.** The water layer balances volumetric flow (m3/s) in pressure form
+(`dp = rho g h`), but `Duct` is written for mass flow (`F = sqrt(2 rho A^2 dp / (f L/D))`,
+`Re = F D / (mu A)`). `build_model` passed it `rho` and the dynamic viscosity, so the D-W path
+returned `rho Q` and evaluated `Re` from it: on a single 500 m, 0.3 m pipe at 0.05 m3/s the head
+loss was 2.0e-5 m instead of 0.868 m. The earlier Limitations entry had noticed only the
+secondary symptom (with both `SPECIFIC GRAVITY` and `VISCOSITY` non-default the kinematic
+viscosity came out divided by the specific gravity). The fix feeds the Duct `rho' = 1/rho` and
+`mu' = nu = (1.002e-3 / 998.2) x VISCOSITY`, so it returns `Q` with `Re = V D / nu` and specific
+gravity cancels from the head loss, as in EPANET 2.2. Parity row D4 moved from 3.822e-2 (heads)
+/ 4.446e-1 (flows) to 3.566e-4 / 2.731e-3; the old D4 residual had been attributed to the
+friction-factor formulae (Swamee-Jain vs Colebrook), which in fact account only for the new,
+smaller one. Using EPANET's own water viscosity (1.1e-5 ft2/s) moves the heads residual only to
+3.0e-4.
+
+**MathJax delimiters.** `docs/javascripts/mathjax.js` wrote the arithmatex delimiters with single
+backslashes, which JavaScript reads as plain parentheses and brackets. Typesetting the built site
+in MathJax (Node) with that config found only 81 of the 250 formulas as math, 6 of them as TeX
+errors, on 13 pages; with the escaped delimiters all 250 typeset cleanly.
+
+**Moved from the Limitations sections:**
+
+- Building physics: the Li and Delsante opposing-wind three-root case is an
+  `xfail(strict=True)` test under `coupling="iterate"`; the hard-coded 0.5 relaxation in
+  `Model._iterate` diverges from the wind-driven-upward stable root even when started exactly on
+  it, while a companion ping-pong time-stepping test resolves all three roots. The blocker is the
+  fixed relaxation, not successive substitution as a method. The doorway `dp_transition`
+  approximation (doorways get `PowerLaw`'s 1e-3 Pa default instead of a value derived from the
+  record's `lam`) is a recorded follow-up; no doorway flow is compared against ContamX.
+- Coupling: `Model.current_flows`'s first-pass branch re-solves the owning potential layer from
+  scratch rather than reusing the pass's own upcoming solve (a recorded inefficiency). The
+  per-instance adjoint precondition (every interface tensor carries the batch shape as its
+  leading dims) is checked only by shape; `diagnostics["adjoint_batched"]` reports which path
+  ran, and `solvers.fixed_point`'s module docstring has the full contract. The two-way
+  single-species rule exists because `_reduced`'s single-species layout rule is ambiguous for a
+  multi-species state and the recipient's transfer is read at one boundary node of a
+  single-flow-kind layer. `CoSim` and the WSIMOD `Node` wrapper are out of scope.
+- Street air quality: the MUNICH relative-pattern test asserts `worst < 0.6` as a loose
+  regression guard (measured worst residual 0.507, seven of nineteen ratios within 15 %, against
+  a 5 % target). IMPAQ's unguarded `sigma_w` went negative on 7 of the 474,336 (time, street)
+  pairs of `leiden_small`. Earlier documentation held that the SIRANE exchange coefficient
+  should be `sigma_w / sqrt(2 pi)`; that was retracted after checking the source PDFs at glyph
+  level, and a test pins the `1 / (sqrt(2) pi)` constant the code uses. The saved real AQ_DT
+  product used for one parity check was found stale against its geometry file (160 edges vs 162
+  features, 94 of 160 rows with mismatched `edge_osmid`); that test skips itself with the
+  diagnosis recorded.
+- Water: D8 is a single-source smoke row; a discriminating two-source trace (EPANET's Net3-style
+  "percent of Lake water") is a recorded follow-up. No batched caller of
+  `TankLevels.event_step` exists yet.
+- Sewer: the relative-velocity form of `Drag` is a recorded follow-up; `f_i`'s
+  non-differentiability is structural, not an oversight.
+
+## Documentation clean-up, round 2 (25 Sep 2026)
+
+**Darcy-Weisbach minor losses.** The D-W path built its `Duct` without `sum_C`, so a `[PIPES]`
+minor-loss coefficient was silently dropped; it is now passed (K = 5 on a 500 m, 0.3 m pipe at
+0.05 m3/s: 0.9952 m, was 0.8677 m). The laminar D-W branch (a straight line to the Colebrook
+point at Re = 2000) is 1.56x EPANET's Hagen-Poiseuille head loss on that pipe; it is documented
+as a limitation and not changed.
+
+**IMPAQ and `leiden_small` removed from the published pages.** IMPAQ is the owner's internal
+prototype, not a reference, and the `leiden_small` AQ_DT domain is not distributed. The facts the
+street, coupling and theory pages carried about them are kept here:
+
+- `impaq.py` is a byte-faithful numpy/scipy port of the AQ_DT prototype and reproduces it to
+  rtol 1e-12. On the prototype's four-node network, after fixing its two documented bugs, noodl
+  and the port agree to < 1e-9 relative; with the bugs left in they disagree by 30-45 %. On
+  `leiden_small` (162 streets, 230 junctions) canyon velocities matched exactly and
+  concentrations matched the fixed port with median relative difference below 1e-9.
+- The port check found a third, undocumented defect in the prototype's `flow_route`: it sorts by
+  angle with `argsort` but un-sorts with `order` rather than `argsort(order)`, mis-permuting
+  routing at three-way junctions and breaking the port's own conservation (12 roads at one step,
+  worst factor 13.95). The port reproduces it; noodl's model does not have it.
+- The strict prototype configuration is `build_model(net, canyon_wind="soulhac",
+  exchange="sirane", direction_averaging="none", kappa=0.4, canyon_wind_min=0.0, u_d_min=0.0,
+  stability="impaq", z_ref=30.0, pblh_floor=False)`.
+- On a `leiden_small` snapshot, `read_aqdt(align="edge_index")` disagreed with the key table on
+  515 of 904 rows (the geometry file was regenerated after the parameters file and gained a
+  feature), and its `kg_per_year` emission series was entirely NaN.
+- Coupling: on `leiden_small` segment 783 the steady street concentration moved from
+  2.079110e-07 to 2.078961e-07 kg/m3 when coupled (7.191e-5 relative, 21 passes). Moving from
+  the Jacobi-style coupler to the recipient-first Gauss-Seidel schedule changed pass counts by
+  one (28 to 27 synthetic, 22 to 21 real) because the new schedule gives a real convergence
+  verdict on the first pass.
+
+**Coupling throughput, full record** (moved from coupling.md): re-measured for
+framework-hardening part 3, Task 9, running `benchmarks/coupling_street_building.py`
+standalone against the worktree's `src`: batch 1 39.934 / 54.663 / 61.883 s (107 passes each),
+batch 10 47.353 / 48.240 / 60.769 s (118 passes), batch 100 137.442 s (118 passes). The
+benchmark's `.prj` building model carries one transport layer, which is also the linked one,
+so Task 18b's `boundary_transfers` saving (only the linked layers take `step_with_transfer`)
+does not show in it; it is covered by `tests/test_couple_conservation.py` and
+`tests/test_model_transfers.py`. Also removed from the pages: "design record / internal design
+spec amended 25 Sep 2026, section 6" (building physics), "P1-2 fixtures" (coupling), "recorded
+follow-up" (WSIMOD page, theory §9) and "parity ledgers" (now "parity records").
+
+**theory.md rewritten as a plain theory page.** The "research survey drafted by an AI agent"
+status note, the first-person survey voice, and pointers to README sections, internal design
+spec sections, rulings (M4-R4, M4-R19, M4-R22, N4, N9) and task reviews were removed or replaced
+by links to the published application pages. The page now states that the potential layers are
+nodal (the note previously claimed a loop-primary formulation for air networks), that the
+adjoint is noodl's own implicit-function rule (`noodl.solvers.implicit`), and that coupling is
+native (`union`) rather than FMI.
+
 ## Appendix: the source tree
 
 A module-by-module map of the repository, as it stood at the end of milestone 5.

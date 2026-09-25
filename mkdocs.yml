@@ -61,12 +61,13 @@ nav:
       - Street air quality: applications/street_aq.md
       - Sewers: applications/sewer.md
       - Water distribution: applications/water.md
-      - Capacitated transfer: applications/capacitated.md
+      - "WSIMOD — rule-based water-system allocation": applications/capacitated.md
       - Coupling: applications/coupling.md
   - Development:
       - Extending noodl: development/extending.md
   - API reference: api.md
   - Theory: theory.md
+  - About: about.md
 
 # Internal design specs, implementation plans and review reports are kept in the
 # repository but are not part of the published documentation.
@@ -84,7 +85,7 @@ plugins:
           paths: [src]
           options:
             show_root_heading: true
-            show_source: true
+            show_source: false
             show_signature_annotations: true
             separate_signature: true
             signature_crossrefs: true

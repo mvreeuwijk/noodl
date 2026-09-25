@@ -35,7 +35,7 @@ calibration, sensitivity analysis and design optimisation.
 |---|---|
 | **One topology layer** | A typed multigraph with incidence, gradient and cycle-basis operators, boundary/interior selectors, spanning forests and sign-aware upwind/downwind indexing. Edges carry a `kind`, so one network holds several physical systems at once. |
 | **Four ways to determine an edge flow** | Solve for a potential (Newton on a nodal conservation residual); prescribe the flow from a driver; compute it from a closure; or clip a requested flow against arc capacity and receiver headroom. Most network tools support exactly one of these. |
-| **Composable physics layers** | Potential flow, multi-species and heat transport, reactions, and capacitated transfer — several of them on one network, stepped together under either of two coupling schemes. |
+| **Composable physics layers** | Potential flow, multi-species and heat transport, reactions, and WSIMOD-style capacity-limited allocation — several of them on one network, stepped together under either of two coupling schemes. |
 | **Matvec-free solvers** | A `LinearOperator` contract with dense, graph-Laplacian and advection implementations; Newton with per-instance convergence; an implicit-function adjoint so gradients cost one linear solve rather than an unrolled tape. |
 | **Batching over instances** | Every solve is batched. A thousand building variants, or one network under a thousand weather realisations, is one call. |
 | **Checked against reference implementations** | Each application is checked against the established engine for its domain — CONTAM, MUNICH, SWMM, EPANET, WSIMOD — with the tolerances and measured errors written down. |
@@ -48,10 +48,10 @@ core, and each is checked against the standard reference implementation in its f
 | Application | Physical system | Reference model |
 |---|---|---|
 | [Building physics](applications/building_physics.md) | Multi-zone airflow, heat and contaminant transport | CONTAM / ContamX, Modelica Buildings Library |
-| [Street air quality](applications/street_aq.md) | Urban air quality, canyon exchange and routing | MUNICH, SIRANE, IMPAQ |
+| [Street air quality](applications/street_aq.md) | Urban air quality, canyon exchange and routing | MUNICH |
 | [Sewers](applications/sewer.md) | Gravity sewer hydraulics, headspace air, sulfide | SWMM |
 | [Water distribution](applications/water.md) | Pressurised mains, pumps, tanks, demand | EPANET 2.2 |
-| [Capacitated transfer](applications/capacitated.md) | Rule-based water-systems allocation | WSIMOD |
+| [WSIMOD — rule-based water-system allocation](applications/capacitated.md) | Requested flows clipped to arc capacity and free storage at the receiving node | WSIMOD |
 | [Coupling](applications/coupling.md) | Two independent models exchanging values | — |
 
 They are also the argument for the framework: the same core carries a Newton solve on a
@@ -79,4 +79,4 @@ one stroke.
 The topology layer is built on PyTorch, and the physics is implemented as nodal state-space
 modules with storage at nodes, typed edges, and batching over instances.
 
-Authors: John Craske and Maarten van Reeuwijk. MIT licensed.
+MIT licensed.

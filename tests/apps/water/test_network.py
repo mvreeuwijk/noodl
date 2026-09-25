@@ -2,6 +2,7 @@
 
 import csv
 import dataclasses
+import math
 from pathlib import Path
 
 import pytest
@@ -297,14 +298,87 @@ def test_a_non_default_specific_gravity_on_hazen_williams_is_refused():
         build_model(net)
 
 
+def _hand_head_losses(q, length, diameter, eps, nu):
+    """Darcy-Weisbach head loss (m) for a VOLUMETRIC flow q (m3/s), by hand.
+
+    EPANET 2.2 (Manual section 13.1; hydraul.c): Re = 4 q / (pi D nu) with nu the
+    KINEMATIC viscosity, nu = VISCOSITY x nu_water(20 C), and h = f L/D V^2 / (2 g) in
+    metres of the flowing fluid -- SPECIFIC GRAVITY does not enter the head loss. Returns
+    (Re, h with the Colebrook form `Duct` uses [CONTAM TN 1887r1 eq. 50], h with the
+    Swamee-Jain f EPANET uses above Re = 4000).
+    """
+    area = math.pi * diameter**2 / 4.0
+    velocity = q / area
+    reynolds = velocity * diameter / nu
+    rel = eps / diameter
+    g = 8.0
+    for _ in range(200):
+        g = 1.14 - 2.0 * math.log10(rel) - 2.0 * math.log10(1.0 + 9.3 / (reynolds * rel / g))
+    swamee = 0.25 / math.log10(rel / 3.7 + 5.74 / reynolds**0.9) ** 2
+    scale = length / diameter * velocity**2 / (2.0 * 9.80665)
+    return reynolds, scale / g**2, scale * swamee
+
+
+def _single_dw_pipe(options: WaterOptions, minor_loss: float = 0.0) -> WaterNetwork:
+    return WaterNetwork(
+        junctions=(Junction("J1", 0.0, 0.05),),
+        reservoirs=(Reservoir("R1", 50.0),),
+        pipes=(WaterPipe("P1", "R1", "J1", 500.0, 0.3, 0.26e-3, minor_loss),),
+        headloss="D-W",
+        options=options,
+    )
+
+
+@pytest.mark.parametrize(
+    "gravity, viscosity", [(1.0, 1.0), (1.1, 1.0), (1.0, 1.5), (1.1, 1.5)]
+)
+def test_darcy_weisbach_head_loss_matches_the_hand_computed_epanet_value(
+    gravity, viscosity
+):
+    """Flows are m3/s and heads metres; nu = VISCOSITY x nu_w, and SPECIFIC GRAVITY
+    changes only the pressure scale, never the head loss (EPANET 2.2's definitions)."""
+    net = _single_dw_pipe(WaterOptions(specific_gravity=gravity, viscosity=viscosity))
+    model, state, drivers = build_model(net)
+    final = water_steady(model, state, drivers, atol=1e-12, rtol=1e-12)
+    head = final["water.phi"] / model.head_scale
+    names = net.nodes()
+    loss = float(head[names.index("R1")] - head[names.index("J1")])
+    nu = 1.002e-3 / 998.2 * viscosity
+    reynolds, colebrook, swamee_jain = _hand_head_losses(0.05, 500.0, 0.3, 0.26e-3, nu)
+    assert reynolds > 4000.0  # turbulent, so EPANET is on its Swamee-Jain branch
+    assert float(final["water.q"][0]) == pytest.approx(0.05, rel=1e-9)
+    assert loss == pytest.approx(colebrook, rel=1e-6)
+    # EPANET's own value: Swamee-Jain is an explicit fit to Colebrook, within ~1 %
+    assert loss == pytest.approx(swamee_jain, rel=2e-2)
+
+
+@pytest.mark.parametrize("gravity", [1.0, 1.1])
+def test_a_darcy_weisbach_pipe_carries_its_minor_loss(gravity):
+    """A [PIPES] minor-loss coefficient K adds K V^2 / (2 g) to the D-W head loss, as in
+    EPANET (Manual section 13.1), rather than being dropped."""
+    net = _single_dw_pipe(WaterOptions(specific_gravity=gravity), minor_loss=5.0)
+    model, state, drivers = build_model(net)
+    final = water_steady(model, state, drivers, atol=1e-12, rtol=1e-12)
+    head = final["water.phi"] / model.head_scale
+    names = net.nodes()
+    loss = float(head[names.index("R1")] - head[names.index("J1")])
+    _, colebrook, _ = _hand_head_losses(0.05, 500.0, 0.3, 0.26e-3, 1.002e-3 / 998.2)
+    velocity = 0.05 / (math.pi * 0.3**2 / 4.0)
+    expected = colebrook + 5.0 * velocity**2 / (2.0 * 9.80665)
+    assert expected == pytest.approx(0.996, abs=1e-3)
+    assert loss == pytest.approx(expected, rel=1e-6)
+
+
 def test_a_non_default_viscosity_and_gravity_reach_the_darcy_weisbach_duct():
+    """The Duct works in mass-flow form; fed rho' = 1/rho and mu' = nu it returns the
+    VOLUMETRIC flow the water layer balances, with Re = V D / nu."""
     net = dataclasses.replace(
         twoloop(), options=WaterOptions(specific_gravity=1.1, viscosity=1.5)
     )
     model, _, _ = build_model(net, headloss="D-W")
     duct = model.potential["water"]._elements[0]
-    assert duct.rho == pytest.approx(998.2 * 1.1, rel=1e-15)
-    assert duct.mu == pytest.approx(1.002e-3 * 1.5, rel=1e-15)
+    assert duct.rho == pytest.approx(1.0 / (998.2 * 1.1), rel=1e-15)
+    assert duct.mu == pytest.approx(1.002e-3 / 998.2 * 1.5, rel=1e-15)
     assert model.head_scale == pytest.approx(998.2 * 1.1 * 9.80665, rel=1e-15)
 
 

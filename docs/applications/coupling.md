@@ -223,11 +223,14 @@ Failure to converge in `iterate_max` passes raises naming the link — for examp
 `"street:street.x[0]->building:species.x_boundary"` — the failing instances, and the largest
 change.
 
-With `diagnostics`, you get `{"passes", "converged", "max_change", "transfers", "adjoint"}` —
+With `diagnostics`, you get `{"passes", "converged", "max_change", "transfers", "adjoint",
+"adjoint_batched"}` —
 `transfers` is the recipient's own integrated transfer per two-way link, from the pass that
 produced the returned state, keyed the same way as `max_change`; `passes` counts **primal**
 passes; `adjoint` is `"implicit"` when the returned state carries the fixed point's adjoint and
-`None` when nothing differentiable reached it. Every value in the dict is detached: diagnostics
+`None` when nothing differentiable reached it; `adjoint_batched` says whether the adjoint was
+solved per batch instance (`True`) or across the whole batch as one system (`False`, also
+when no adjoint was attached; see [Limitations](#limitations)). Every value in the dict is detached: diagnostics
 are a report, and a transfer still attached to the pass graph would offer a silent route around
 the adjoint.
 
@@ -250,7 +253,7 @@ pass. Three consequences:
   the order of the primal residual, rather than the unrolled $O(\rho^{\text{passes}})$ counted
   from the *start* state — an error tied to nothing the caller controls, and worst exactly where
   the primal is cheapest. Where the interface equations are **linear** in the interface the
-  adjoint is exact whatever the residual, which is why the P1-2 fixtures return $1/3$ and $2/3$
+  adjoint is exact whatever the residual, which is why the linear two-model test fixtures return $1/3$ and $2/3$
   to one ulp at `iterate_rtol` $10^{-12}$ and $10^{-3}$ alike;
 - backward **memory is one pass**, not all of them;
 - a forward-only run pays nothing: pass 1 runs on the graph only to learn whether anything
@@ -301,89 +304,61 @@ the street side. Both demos assert that sign.
 | 2×2 analytic fixed point (one implicit step each, unit source into the recipient) solves to $(4/3, 5/3)$ | abs 1e-9 | holds |
 | Structural guard: a two-way step assembles no dense topology operator (`upwind`/`incidence`/selectors) | n/a | holds |
 | Synthetic back-coupling, 2×3 m canyon: one-way 4.169740e-08 vs two-way 4.145151e-08 kg/m³ | measured | **0.5897 %** change, 27 passes |
-| Real `leiden_small`, segment 783, steady 2.079110e-07 vs coupled 2.078961e-07 kg/m³ | measured | **7.191e-5** (0.007191 %) change, 21 passes |
 | Loose sequential file exchange vs the two-way result | measured | 0.5897 % discrepancy — equal to the street-side change, as expected for a boundary response linear in the shared value |
 | Inverse 1: leakage calibration through the join | rel err < 0.05 | **1.288e-4**, final loss 3.4574e-08 |
 | Inverse 2: source attribution by one adjoint pass vs central differences | rel 1e-4 | 1.3e-8, 2.0e-9; third source structurally zero |
 | Inverse 3: one measured path recovers all four branch flows | rtol 1e-10 | exact |
 
-The real-data row is worth reading carefully. A 0.007191 % change is **negligible** — and that is
-the honest result, not a disappointing one. One building's infiltration should not measurably
-change a whole street's concentration, and the number is correctly signed. The synthetic case,
-deliberately sized so the building matters, shows 0.5897 %.
+The synthetic case is deliberately sized so that the building matters: a 2×3 m canyon, where
+the building's infiltration changes the street concentration by 0.5897 %. On a street of
+realistic size one building's infiltration changes the street's concentration very little, and
+the coupled result should be read with that in mind.
 
-Pass counts moved by one relative to the previous (Jacobi-style successive-substitution) coupler
-— 28 → 27 on the synthetic fixture, 22 → 21 on the real one — because the recipient-first
-Gauss-Seidel schedule now produces a real per-instance convergence verdict on the **first** pass
-(the old scheme's first pass wrote a placeholder that no pass could satisfy), rather than because
-the new schedule needs systematically more or fewer passes to close the loop.
+**Performance.** The street ↔ building demo (`benchmarks/coupling_street_building.py`) couples
+6 hours with 60 building sub-steps per street hour. On one workstation it took about 55 s at
+batch 1, 48 s at batch 10 and 137 s at batch 100 (medians; wall time varied by up to about
+20 s between repeats, while pass counts did not vary at all). Three things set the cost:
 
-Throughput, on the headline union over 6 coupled hours with 60 building sub-steps per street
-hour, re-measured for framework-hardening-part-3's Task 9 (`benchmarks/coupling_street_building.py`,
-run standalone against this worktree's `src`; three repeats at batch 1 and batch 10, one at
-batch 100): batch 1 — 39.934 s / 54.663 s / 61.883 s (median 54.663 s), 107 outer passes on
-every run; batch 10 — 47.353 s / 48.240 s / 60.769 s (median 48.240 s), 118 outer passes on
-every run; batch 100 — 137.442 s, 118 outer passes. Pass counts are exactly repeatable at a
-given batch size; wall time is not — a spread of about 22 s at batch 1 (61.883 − 39.934 s) and
-about 13 s at batch 10 (60.769 − 47.353 s), at fixed batch size and pass count, on the same
-machine whose ambient load the development-history decision record documents — so the
-absolute seconds above are one machine's snapshot and the *ratios* are what carries information.
-Batch 1 alone needs fewer passes than batch 10 or batch 100 because `U_ref` is drawn from
-`torch.linspace(1.0, 4.0, batch_size)`: batch 1 sees only the single wind speed 1.0, while every
-larger batch also carries wind speeds nearer 4.0, and the outer iteration is judged converged
-only once every instance in the batch is inside tolerance. This benchmark's building model
-(`project_to_model`) still carries exactly ONE transport layer, `species`, which is also the
-ONE linked layer, so `boundary_transfers=True` (every transport layer) and
-`boundary_transfers={"species"}` (only the linked one) request `step_with_transfer` on the
-same set here — nothing to skip. Task 18b's `boundary_transfers` saving is for a recipient
-that ALSO carries an unlinked transport layer (e.g. a `thermal` layer alongside `species`, as
-the building application's own thermal builder produces, though this benchmark's `.prj`-based
-model does not build one — "no thermal layer: a .prj carries no thermal data"); that case is
-covered by `tests/test_couple_conservation.py`'s dedicated two-layer fixture and
-`tests/test_model_transfers.py`'s `boundary_transfers` collection tests, not by this benchmark.
-Median wall time keeps the same sub-linear pattern the earlier measurements showed: 137.442 s
-at batch 100 is about 2.5x the batch-1 median for 100x the batch, well under 10x. No budget
-is set.
+- **Outer passes.** The run needs 107 passes at batch 1 and 118 at batches 10 and 100: a batch
+  is converged only when every instance is, so a batch spanning a wider range of conditions
+  (here wind speeds of 1–4 m/s rather than 1 m/s alone) takes as many passes as its slowest
+  instance.
+- **Batch size.** Cost grows far more slowly than the batch: 100 instances cost about 2.5 times
+  one instance. Batching many scenarios into one run is much cheaper than running them one by
+  one.
+- **Boundary transfers.** A two-way link reads the recipient's boundary transfer, which costs
+  more than a plain step. `union` requests it only from the linked transport layers, so an
+  unlinked layer on the recipient (a `thermal` layer, say) takes the cheaper plain step; there
+  is nothing to set.
 
 ## Limitations
 
-- **`CoupledModel.steady` is not built**, though the design names it in the intended public
-  surface.
-- **Relaxation is fixed at 0.5** in practice — it is a constructor parameter, but no adaptive
-  scheme exists. Convergence takes 21–27 passes to rtol $10^{-10}$ on the demo fixtures. This is
-  flagged as a known risk: recipient-first Gauss-Seidel substitution at fixed 0.5 relaxation can
-  still converge to the wrong root of a repelling fixed point, the same issue the
-  [building application's](building_physics.md#limitations) three-root case runs into.
-- **Single species, single flow kind only.** A two-way link is refused at construction
-  (`ValueError`) unless both layers have `n_species == 1` and the recipient's layer has exactly
-  one flow kind: `_reduced`'s single-species layout rule is ambiguous for a multi-species state,
-  and the recipient's own transfer is read at one boundary node of a single-flow-kind layer.
-- **The recipient-first schedule assumes no cycles of two-way links.** A model that is both a
-  recipient and a donor is refused at construction, by name, in the error message — the
-  conservative schedule is defined only when every two-way link can be given a strict
-  recipient-before-donor order, which a cycle cannot.
-- **The one-way interface entries are not part of the convergence test.** A one-way link's
-  forward value is read from the previous pass's output like every other interface entry, but
-  only the two-way entries are measured, so a one-way entry is converged only as far as the
-  state it reads has settled — exactly as true of the returned state itself, which is read from
-  that same pass.
-- **Ambient temperature is not coupled** in the demo — it reaches the building only through
-  `rho_amb`, computed once from the `.prj`'s own `Ta`, and the AQ_DT forcing carries no
-  temperature field.
-- **A three-way union** (sewer + street + building) is deferred. The mechanism is expected to
-  extend; it has not been built or tested.
-- **`CoSim` and the WSIMOD `Node` wrapper are out of scope.** `union` is the only coupling route
-  built. Coupling to a non-differentiable model outside the framework — EnergyPlus, WSIMOD
-  itself — is not available.
-- **`Model.current_flows`'s first-pass branch re-solves** the owning potential layer from scratch
-  rather than reusing the pass's own upcoming solve. A recorded inefficiency.
-- **The adjoint GMRES solves one independent system per batch instance when every interface
-  tensor carries the batch shape as its leading dims.** That is a documented precondition on
-  the caller (`_iterate` passes it because its instances do not couple through the pass), checked
-  only by shape, not proven from it; `union`'s own `_iterate` passes it too. When some interface
-  entry does not carry the batch shape (a value shared across instances, which genuinely
-  couples them), the solve falls back to the interface flattened across the whole batch, whose
-  cost can need up to `B` times the matvecs a single instance would for `B` batched instances.
-  `diagnostics["adjoint_batched"]` says which of the two ran; on the per-instance path the
-  adjoint's cost no longer scales with batch size (`solvers.fixed_point`'s module docstring has
-  the full contract).
+- **No steady solve.** `CoupledModel` steps in time only; there is no `CoupledModel.steady`. To
+  reach a coupled steady state, step until the interface values stop changing.
+- **Fixed relaxation.** Each step is iterated with a constant relaxation factor (`relaxation`,
+  default 0.5); there is no adaptive scheme. The demo fixtures converge in 21–27 passes to rtol
+  $10^{-10}$. Where the coupled problem has several fixed points, a constant relaxation can
+  settle on the wrong one or fail to hold an unstable one — the same behaviour as the
+  [building application's three-steady-state case](building_physics.md#limitations). Check a
+  suspect result against a smaller `relaxation` or a different starting state.
+- **Two-way links carry a single species on a single flow kind.** A two-way link is refused at
+  construction (`ValueError`) unless both layers have `n_species == 1` and the recipient's layer
+  has exactly one flow kind. Couple several species with one-way links, or one model per species.
+- **No cycles of two-way links.** Each two-way link is solved recipient first, so a model that is
+  both a recipient and a donor of two-way links is refused at construction, with an error naming
+  it.
+- **One-way links are not in the convergence test.** Only two-way interface values are checked
+  for convergence. A one-way value is passed on from the previous pass and is as converged as the
+  state it is read from — which is also the state `step` returns.
+- **Three-way unions are untested.** `union` has been verified on two-model pairings (street ↔
+  building above). A three-model union such as sewer + street + building is expected to work but
+  has not been built or tested.
+- **Only noodl models can be coupled.** `union` joins noodl `Model`s. There is no co-simulation
+  interface to non-differentiable tools such as EnergyPlus or WSIMOD itself.
+- **Ambient temperature is not coupled in the street ↔ building demo.** The building sees the
+  street only through species concentrations; its ambient density comes from the `.prj` file's
+  own outdoor temperature, and the AQ_DT forcing carries no temperature.
+- **Batched gradients.** When every interface value carries the batch dimension, the adjoint
+  solves each batch instance independently and its cost does not grow with the batch size. A
+  value shared across instances couples them, and the adjoint then solves the whole batch as one
+  system, which can cost up to `B` times as much for `B` instances.

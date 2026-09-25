@@ -107,8 +107,7 @@ def j_no2(zenith_deg, attenuation=1.0) -> torch.Tensor:
     `J = Zatt * J_tabulated` and nothing else -- there is no separate canyon shading
     factor. The SOLAR GEOMETRY is deliberately not computed here: a zenith angle wants a
     date, a latitude and a longitude, none of which the street application carries, and
-    the milestone exercises chemistry on synthetic cases only (the Leiden data is
-    NOx-only). Pass the angle you want.
+    chemistry is exercised on synthetic cases only. Pass the angle you want.
     """
     zenith = torch.as_tensor(zenith_deg, dtype=torch.float64)
     angles = torch.tensor(J_NO2_ZENITH_DEG, dtype=torch.float64)

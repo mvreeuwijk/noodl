@@ -237,8 +237,7 @@ ModelicaImportError: modelica: refused 3 items:
   - west (Buildings.Fluid.Sources.Outside_CpLowRise): wind pressure is not supported
 ```
 
-**Conventions and deviations from the design record** (the internal design spec was amended
-25 Sep 2026 to match, section 6):
+**Conventions:**
 
 - `DoorOpen`/`DoorOperable` use MBL's fixed default density (`Door.mo`); a discretised door
   (`DoorDiscretizedOpen`/`Operable`) evaluates density at the actual port pressure
@@ -317,7 +316,7 @@ than assume success. 9 of the 12 dynamic parity tests take 30 s–5 min each and
 `@pytest.mark.slow`, excluded by the repository's default `pytest` run; `pytest -m slow` runs
 them.
 
-Regenerating the committed parity ledgers (`tests/data/modelica/parity-{algebraic,dynamic}.json`,
+Regenerating the committed parity records (`tests/data/modelica/parity-{algebraic,dynamic}.json`,
 below) needs no OpenModelica — they are written by `tests/verification/test_modelica_parity.py`
 itself, only when the environment variable `NOODL_RECORD_PARITY=1` is set:
 
@@ -328,7 +327,7 @@ NOODL_RECORD_PARITY=1 pytest tests/verification/test_modelica_parity.py -m slow
 
 (two runs, since the default `addopts` excludes `slow`-marked tests and a command-line `-m`
 replaces rather than adds to it). Without the variable, the suite reads and checks the
-fixtures but never rewrites the ledgers.
+fixtures but never rewrites the records.
 
 ## Verification
 
@@ -478,28 +477,37 @@ regression at rtol 1e-8.
 
 ## Limitations
 
-- **The coupling default is a trap.** `build_model`'s `coupling` defaults to `"pingpong"`, one
-  pass. A `.steady()` call at the defaults solves the airflow at the *initial* temperatures and
-  never re-converges. On the linear-density single-zone case it silently returns
-  $T_z = T_o + S / (c_p F(293.15\,\mathrm{K}))$ rather than the coupled answer. Pass
-  `coupling="iterate"` with an `iterate_tol` whenever the airflow depends on the temperatures it
-  carries.
-- **`iterate_tol` has a residual floor** set by the potential solve's own Newton tolerance
-  propagated through $dT/dF$. Too tight a value stalls, and `steady` raises naming the layer, the
-  change and the tolerance.
-- **The three-root case does not converge under `"iterate"`.** For a documented Li and Delsante
-  opposing-wind case with three roots, the hard-coded 0.5 relaxation in `Model._iterate` cannot
-  reach the wind-driven-upward stable root — it diverges from it even when started exactly on it.
-  The test is `xfail(strict=True)`. The physics is sound: ping-pong **time stepping** resolves
-  all three roots correctly, and a companion test passes. The blocker is the fixed relaxation,
-  not successive substitution as a method.
-- **Wall conductance is not learnable** through this application's API — `WallMass` takes a plain
-  float.
-- **Doorway `dp_transition` is approximated.** Doorway openings do not derive `dp_transition`
-  from the record's `lam`; both openings get `PowerLaw`'s generic 1e-3 Pa default instead of the
-  smaller value the formula would give. The error is bounded twice over — confined to
-  $\lvert \Delta p \rvert < 10^{-3}$ Pa, and no doorway flow is compared against ContamX anywhere
-  — and it is recorded as a follow-up rather than quietly fixed.
+- **Airflow is quasi-steady.** On both the CONTAM and the Modelica route a zone's air mass is
+  held fixed within a step, as in CONTAM: pressures and flows balance instantly and the air
+  itself does not compress or expand. Where that storage matters — a closed, heated room
+  expanding through its leakage, or a model that starts from unbalanced pressures — noodl's
+  results differ from a model that resolves it, such as the Modelica Buildings Library. The
+  [storage-dominated parity group](#against-openmodelica-modelica-buildings-library) shows by
+  how much.
+- **The default coupling is a single pass.** `build_model`'s `coupling` defaults to
+  `"pingpong"`: a `.steady()` call then solves the airflow at the *initial* temperatures and does
+  not re-converge. On the linear-density single-zone case it returns
+  $T_z = T_o + S / (c_p F(293.15\,\mathrm{K}))$ rather than the coupled answer. Whenever the
+  airflow depends on the temperatures it carries, pass `coupling="iterate"` with an
+  `iterate_tol`.
+- **`iterate_tol` cannot be tighter than the airflow solve itself.** Its floor is the potential
+  solve's own Newton tolerance, propagated through the temperature response. A tolerance below
+  that floor stalls, and `steady` raises an error naming the layer, the change reached and the
+  tolerance asked for. Loosen `iterate_tol`, or tighten the airflow solve by passing Newton's
+  `atol`/`rtol` as keyword arguments to `step` or `steady` (they reach the potential solve).
+- **Multiple steady states: `"iterate"` may not find the one you want.** On Li and Delsante's
+  opposing-wind single-zone case, which has three steady states, `coupling="iterate"` (a fixed
+  0.5 relaxation) cannot hold the wind-driven, upward-flow state: it moves away from it even when
+  started on it. Time stepping with the default `"pingpong"` coupling resolves all three states
+  correctly, so for a case like this, step to steady state instead of calling `.steady()`.
+- **Wall conductance is not learnable** through this application's API: `WallMass` takes plain
+  floats for `ua_zone` and `ua_ambient`, so gradients do not reach them.
+- **Doorway laminar transition is approximated.** Doorway openings use the generic laminar
+  transition of `PowerLaw` (1e-3 Pa) rather than one derived from the door's own record. The
+  effect is confined to pressure differences below $10^{-3}$ Pa across the doorway.
+- **The Modelica import accepts a stated subset.** Wind pressure, weather data, controllers,
+  dynamic medium columns and components that need compressible volume storage are refused with a
+  named error; see [the Modelica import's refused content](#modelica-buildings-library).
 
 ## Install
 

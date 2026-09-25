@@ -346,8 +346,9 @@ def build_model(
 
     `net.options.specific_gravity`/`viscosity` (relative to water at 20 C) reach the
     Darcy-Weisbach path, which is the only element here parameterised by fluid density and
-    viscosity at all (`Duct`'s Reynolds-number friction factor; `scale`, below, uses the
-    SAME density so a D-W network's head/pressure conversion stays self-consistent).
+    viscosity at all (`Duct`'s Reynolds-number friction factor, from the KINEMATIC
+    viscosity; `scale`, below, uses the density for the head/pressure conversion, and it
+    cancels from the head loss exactly as in EPANET).
     Hazen-Williams has no such parameters -- EPANET's own H-W formula is calibrated for
     water and does not take them either -- so a NON-DEFAULT `SPECIFIC GRAVITY` or
     `VISCOSITY` on an H-W network is refused by name rather than silently ignored.
@@ -389,8 +390,14 @@ def build_model(
             f"does not take fluid density or viscosity (EPANET's own H-W formula is "
             f"calibrated for water); use headloss='D-W' or leave both at 1.0"
         )
+    # EPANET 2.2: SPECIFIC GRAVITY is the density ratio and VISCOSITY the KINEMATIC
+    # viscosity ratio to water at 20 C, so rho = RHO_W sg and nu = (MU_W / RHO_W) visc.
+    # `Duct` is written for MASS flow (F = rho Q, Re = F D / (mu A)); fed rho' = 1 / rho
+    # and mu' = nu at dp = rho g h it returns the VOLUMETRIC flow Q = A sqrt(2 g h D /
+    # (f L)) with Re = V D / nu, which is what this layer balances (demands in m3/s).
+    # Specific gravity then cancels from the head loss, as in EPANET.
     rho = RHO_W * options.specific_gravity
-    mu = MU_W * options.viscosity
+    nu = MU_W / RHO_W * options.viscosity
     graph = Network(dtype=F64)
     node_names = net.nodes()
     for junction in net.junctions:
@@ -427,8 +434,9 @@ def build_model(
         else:
             notes["headloss"] = (
                 f"Darcy-Weisbach uses the existing Duct element (Colebrook, unrolled "
-                f"fixed point) at rho = {rho} kg/m3 and mu = {mu} Pa s (998.2 / 1.002e-3 "
-                f"scaled by [OPTIONS] SPECIFIC GRAVITY / VISCOSITY); EPANET uses "
+                f"fixed point) at kinematic viscosity nu = {nu} m2/s (1.002e-3 / 998.2 "
+                f"scaled by [OPTIONS] VISCOSITY; SPECIFIC GRAVITY {options.specific_gravity} "
+                f"sets only the head-to-pressure scale); EPANET uses "
                 f"Swamee-Jain above Re = 4000, Hagen-Poiseuille below 2000 and Dunlop's "
                 f"cubic between, and spec row D4 RECORDS the resulting residual"
             )
@@ -437,7 +445,10 @@ def build_model(
                     torch.tensor([p.length for p in net.pipes], dtype=F64),
                     torch.tensor([p.diameter for p in net.pipes], dtype=F64),
                     torch.tensor([p.roughness for p in net.pipes], dtype=F64),
-                    rho=rho, mu=mu, n_iter=12, kind="pipe",
+                    # EPANET's minor loss K adds K V^2 / (2 g): Duct's sum_C term, which at
+                    # rho' = 1/rho and dp = rho g h is exactly that head.
+                    sum_C=torch.tensor([p.minor_loss for p in net.pipes], dtype=F64),
+                    rho=1.0 / rho, mu=nu, n_iter=12, kind="pipe",
                 )
             )
     if net.pumps:

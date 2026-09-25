@@ -17,7 +17,8 @@ branch is fed `dp_t` instead of |dp| so it never sees dp = 0 (the PowerLaw idiom
 
 `rho` and `mu` are fixed at construction (milestone 2 plan, Task 4 deviation): a per-step
 density correction from `drivers` would need the transition pressure `dp_t` recomputed on
-every call, since `dp_t` depends on `rho`. The building application passes `rho_0`.
+every call, since `dp_t` depends on `rho`. The water application's Darcy-Weisbach path
+builds it with `rho = 1/(rho_w SG)` and `mu = nu`, so that it returns VOLUMETRIC flow.
 
 Dtype: every quantity this element derives internally (`A` when not given explicitly, the
 Colebrook constants `a`/`b`, and the transition values from `_transition()`) is built from
@@ -68,8 +69,10 @@ class Duct(Element):
     `_turbulent(dp_t)` would make the branches agree by construction but would give up
     `Re = Re_t` exactly at the transition, which is the physical definition of the transition
     point and is separately pinned; the alternative -- correcting dp_t to the root of
-    `_turbulent(dp) = F_t` -- is new numerics on the flow path. Neither is urgent: `Duct` is
-    used by no verification case, and the `.prj` reader refuses duct networks outright.
+    `_turbulent(dp) = F_t` -- is new numerics on the flow path. Neither is urgent: the one
+    verification case that uses `Duct`, the water application's Darcy-Weisbach row D4, builds
+    it at `n_iter=12`, where the step is far below its tolerance, and the `.prj` reader
+    refuses duct networks outright.
     """
 
     def __init__(

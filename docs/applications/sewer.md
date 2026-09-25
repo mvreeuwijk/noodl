@@ -270,17 +270,20 @@ publish numbers from this application.
 
 ## Limitations
 
-- **Surcharge and backwater are out of scope** and refused by name, not modelled.
-- **Dendritic networks only** — one outgoing pipe per manhole, no cycles.
-- **No gas-phase sulfide sink** is modelled at all.
-- **`Drag` uses absolute, not relative, surface velocity.** The relative form $(U_s -
-  U_{\text{air}})$ would need the air layer's own solved state, which a `Drive` may not read.
-  Recorded as a follow-up.
-- **`f_i` is not differentiable** by this framework's design — it is a `Drive` attribute, and the
-  differentiable-solve check refuses `requires_grad=True` on it. Stated as structural, not an
-  oversight.
-- **Without a ground elevation**, manhole shafts contribute no headspace volume, so the air
-  quality capacity is the conduit headspace alone. Recorded in `model.notes`.
+- **No surcharge or backwater.** Networks that would surcharge or need backwater are refused by
+  name; they are not modelled.
+- **Dendritic networks only:** one outgoing pipe per manhole, no loops.
+- **No gas-phase sulfide sink.** H₂S leaves the headspace by ventilation, at the outfall, and
+  by re-absorption into the water (the two-film flux is signed); no wall uptake or gas-phase
+  oxidation is modelled.
+- **Headspace drag uses the absolute water-surface velocity.** `Drag` drives the air with
+  $U_s$ rather than the relative velocity $U_s - U_{\text{air}}$, which would need the air
+  layer's own solved state. The drag is overestimated where the headspace air already moves
+  with the water.
+- **`f_i` is not differentiable.** It is a `Drive` attribute, and the differentiable solve
+  refuses `requires_grad=True` on it; you cannot fit it by gradient descent.
+- **Without a ground elevation, manhole shafts add no headspace volume**, so the air-quality
+  capacity is the conduit headspace alone. `model.notes` says when this applies.
 
 ## Install
 

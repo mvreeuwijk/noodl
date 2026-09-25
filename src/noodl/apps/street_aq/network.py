@@ -196,8 +196,8 @@ def build_model(
     `StreetFlows` reads its indices from.
 
     `pblh_floor=True` (the default) applies MUNICH's `pblh := max(H, PBLH)` guard with the
-    network's tallest street, which keeps `sigma_w` positive. Pass `False` for IMPAQ parity,
-    where the prototype has no such guard -- and expect `exchange_velocity` to refuse the
+    network's tallest street, which keeps `sigma_w` positive. Pass `False` for the
+    prototype's unguarded behaviour -- and expect `exchange_velocity` to refuse the
     step if a street is taller than 1.25 times the boundary-layer height.
 
     `kappa=None` (the default, ruling M3-R1) is passed straight through to `StreetFlows`,

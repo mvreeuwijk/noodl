@@ -63,7 +63,7 @@ if you chose `stability="munich"`).
 |---|---|
 | `Street(name, u, v, length, width, height, z0_b=0.15, emission_scale=1.0)` | One canyon segment between two junctions. |
 | `StreetNetwork(streets, x, y)` | The network plus junction coordinates. `azimuth` gives each street's bearing in radians CCW from east; `junctions` and `degree(node)` describe the topology. |
-| `from_test_network()` | IMPAQ's 4-junction, 3-road network, reproduced exactly. |
+| `from_test_network()` | A 4-junction, 3-street test network. |
 | `munich_idealised(L=100.0, W=20.0, H=20.0)` | The 12-street network of Kim et al. 2022 Fig. 1. `L`, `W`, `H` are arguments because the paper never published them. |
 | `read_aqdt(...)` | A real AQ_DT domain from its GeoJSON and NetCDF products. |
 
@@ -97,7 +97,7 @@ closure are wrapped into a `Model`.
 
 ### The closure choices
 
-These select between the IMPAQ/SIRANE and MUNICH lineages, and they are independent:
+These select between the SIRANE forms and MUNICH's, and they are independent:
 
 | Option | Values | What changes |
 |---|---|---|
@@ -108,18 +108,10 @@ These select between the IMPAQ/SIRANE and MUNICH lineages, and they are independ
 | | `"schulte"` | $u_d = \sigma_w \beta / (1 + H/W)$, MUNICH v2's default. Equals the SIRANE form exactly at $H = W$. |
 | `routing` | `"mixing"` / `"sirane"` | Perfect mixing, or SIRANE's non-crossing-streamline rule. They differ only at junctions with 2+ inflows **and** 2+ outflows. |
 | `direction_averaging` | `"none"` / `"munich"` / `"gauss"` | Single direction; MUNICH's own quadrature over a turbulence-derived $\sigma_\theta$; or noodl's normalised Gauss–Hermite rule. |
-| `stability` | `"impaq"` / `"munich"` | Neutral only, or MUNICH's three-branch stability dependence (needs an `lmo` driver). |
+| `stability` | `"impaq"` / `"munich"` | Neutral only ($\sigma_w = 1.3\,u_*(1 - 0.8\,z/h_{\text{abl}})$), or MUNICH's three-branch stability dependence (needs an `lmo` driver). |
 
 `kappa=None` resolves automatically: MUNICH's 0.41 if any MUNICH-style option is chosen, else
-IMPAQ's 0.40. An explicit value always wins.
-
-For strict IMPAQ parity:
-
-```python
-build_model(net, canyon_wind="soulhac", exchange="sirane",
-            direction_averaging="none", kappa=0.4, canyon_wind_min=0.0,
-            u_d_min=0.0, stability="impaq", z_ref=30.0, pblh_floor=False)
-```
+0.40. An explicit value always wins.
 
 ### The canyon physics
 
@@ -171,10 +163,9 @@ worth knowing before you point it at your own data:
   with no extrapolation. Override with `trust_file_height=True` only if you know better.
 - `align="emission_key"` (the default) matches emission rows to features through the
   `(osmid, u, v)` key table. `align="edge_index"` trusts the NetCDF's positional contract, and is
-  *verified* against the key table when present — on a real `leiden_small` snapshot the two
-  disagreed on 515 of 904 rows, and the reader raises naming them.
-- `emissions="kg_per_year"` raises if that series is non-finite anywhere, which it is on the
-  `leiden_small` snapshot.
+  *verified* against the key table when present; if the two disagree, the reader raises naming
+  the rows.
+- `emissions="kg_per_year"` raises if that series is non-finite anywhere.
 
 `write_network_concentration(path, ...)` writes `network_concentration_<year>.nc` in AQ_DT's own
 layout, with two recorded differences: classic CDF rather than NETCDF4 (so `scipy` can read it),
@@ -201,44 +192,38 @@ one. The same applies to `soulhac_shape`: MUNICH quantises the root to a 0.01 gr
 solves it continuously (0.6198293…), and the resulting 4e-4 relative difference in $u_M$ is
 documented rather than matched.
 
-### IMPAQ port check
+### MUNICH idealised 12-street case
 
-`impaq.py` is a byte-faithful numpy/scipy port of the AQ_DT prototype, kept so the port check needs
-no external checkout. It reproduces the prototype to rtol $10^{-12}$.
+Kim et al. (2022) Fig. 1 gives concentrations on an idealised 12-street network, but not the
+street length, width and height behind them, so `munich_idealised(L, W, H)` takes them as
+arguments and the case can only be compared in terms that do not depend on them.
 
-On IMPAQ's four-node network, after fixing the prototype's two documented bugs, noodl and the
-port agree to **machine precision** (< 1e-9 relative). With those bugs left unfixed the two
-disagree by **30–45%** — which is reported, not hidden. On the real `leiden_small` domain (162
-streets, 230 junctions) canyon velocities match exactly and concentrations match the fixed port
-with median relative difference below $10^{-9}$.
+| Check | Target | Measured |
+|---|---|---|
+| Linearity in wind speed at 210° and 240°: doubling $U$ halves every concentration | < 1e-9 | holds (an exact model identity) |
+| 270° canyon-wind ratio pattern | paper's value | 1.99451, against the paper's 1.99451 |
+| Concentrations relative to one reference street, 19 ratios | 5 % | **not met**: worst ratio off by 51 %, 7 of 19 within 15 % |
 
-The port check also turned up a **third, undocumented defect** in IMPAQ's `flow_route`: it sorts
-by angle with `argsort` but un-sorts with `order` rather than `argsort(order)`, mis-permuting
-routing at three-way junctions and breaking the port's own conservation — measured at 12 roads
-at one step, worst factor 13.95. The port reproduces it faithfully because its purpose is to
-reproduce IMPAQ, defects included; noodl's own model does not have the defect.
+The relative-pattern miss is the one open discrepancy against MUNICH; it is listed under
+[Limitations](#limitations-and-caveats).
 
 ## Limitations and caveats
 
-- **`impaq.py` is the IMPAQ port, not a model path.** It is numpy and scipy, it is not
-  differentiable, and nothing else in the application imports it.
-- **The MUNICH 12-street idealised case cannot be reproduced absolutely.** Its published figure
-  depends on a geometry that was never published. Scale-invariant properties *are* checked and do
-  pass — exact 2x linearity in wind speed (< 1e-9, a provable model identity), and the 270°
-  canyon-wind ratio pattern (model 1.99451 vs paper 1.99451). But the absolute relative-pattern
-  comparison **does not reach its 5% target**: the worst residual is 0.507, with seven of
-  nineteen ratios inside 15%. The test asserts `worst < 0.6` as a loose regression guard and says
-  so, rather than reporting a false pass.
-- **IMPAQ's $\sigma_w$ is unguarded** and goes negative when a street is taller than
-  $1.25\,h_{\text{abl}}$ — measured on 7 of the 474,336 (time, street) pairs of `leiden_small`.
-  `exchange_velocity` then raises rather than silently clamping. `pblh_floor=True` (the default)
-  applies MUNICH's guard; strict IMPAQ parity needs `pblh_floor=False` and accepts the risk.
-- **A retracted claim.** Earlier documentation held that the SIRANE exchange coefficient should
-  be $\sigma_w/\sqrt{2\pi}$ rather than $\sigma_w/(\sqrt{2}\,\pi)$. That was retracted after
-  checking the source PDFs at glyph level; the code uses the latter and a test pins it.
-- **The saved real AQ_DT product used for the parity check was found stale** against its own geometry
-  file — 160 edges vs 162 features, 94 of 160 rows with mismatched `edge_osmid`. That test skips
-  itself with the diagnosis recorded rather than reporting a false pass or fail.
+- **`impaq.py` is kept for development only.** It is a numpy/scipy port of the prototype
+  noodl's street model grew from. It is not differentiable, nothing else in the application
+  uses it, and it is not a reference. Build models with `build_model`.
+- **The MUNICH 12-street idealised case is not reproduced.** Its street geometry was never
+  published, so absolute concentrations cannot be compared, and the pattern of concentrations
+  relative to one street misses its 5 % target: the worst of the nineteen ratios is off by
+  51 %, and seven are within 15 %. The scale-invariant checks (linearity in wind speed, the
+  270° canyon-wind ratio) do match; see [Verification](#munich-idealised-12-street-case).
+- **Tall streets need the boundary-layer guard.** The neutral $\sigma_w$ goes negative when a
+  street is taller than $1.25\,h_{\text{abl}}$. `build_model`'s `pblh_floor=True` (the default)
+  applies MUNICH's guard, raising the boundary-layer height to at least the tallest street. With
+  `pblh_floor=False`, `exchange_velocity` raises an error on such a step rather than clamping
+  it.
+- **SIRANE exchange coefficient.** The code uses $\sigma_w / (\sqrt{2}\,\pi)$
+  (`SIRANE_EXCHANGE` = 0.225079…), as in MUNICH's source, not $\sigma_w/\sqrt{2\pi}$.
 
 ## Install
 
@@ -246,5 +231,5 @@ reproduce IMPAQ, defects included; noodl's own model does not have the defect.
 pip install "noodl[street_aq]"
 ```
 
-Needed for `read_aqdt`, `write_network_concentration` and `impaq.py`. The modelling API —
+Needed for `read_aqdt`, `write_network_concentration` and the development port `impaq.py`. The modelling API —
 `build_model`, `street_steady`, the closures — needs only the base dependencies.
