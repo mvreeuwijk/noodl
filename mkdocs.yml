@@ -67,6 +67,7 @@ nav:
       - Extending noodl: development/extending.md
   - API reference: api.md
   - Theory: theory.md
+  - About: about.md
 
 # Internal design specs, implementation plans and review reports are kept in the
 # repository but are not part of the published documentation.
