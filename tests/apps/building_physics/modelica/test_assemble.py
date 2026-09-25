@@ -230,6 +230,21 @@ def test_actual_column_density_is_refused(tmp_path):
         read_modelica(_write(tmp_path, doc))
 
 
+def test_bad_door_dp_turbulent_joins_the_gather_all_error(tmp_path):
+    """A bad exported `dp_turbulent` (<= 0) on a `DoorOpen`/`DoorOperable` must not escape as a
+    raw `ValueError` and skip gather-all (final review, Minor 2): `_door` catches it and names
+    the door, alongside an independent error from a different phase, in the one raised
+    `ModelicaImportError`."""
+    doc = _doc("door_wiring.json")
+    doc["components"][2]["parameters"]["dp_turbulent"] = 0.0  # dooOpeClo
+    doc["components"][0]["parameters"]["energyDynamics"] = "SteadyState"  # volWes, unrelated
+    with pytest.raises(ModelicaImportError) as exc:
+        read_modelica(_write(tmp_path, doc))
+    msg = str(exc.value)
+    assert "dooOpeClo" in msg and "dp_turbulent" in msg
+    assert "volWes" in msg and "energyDynamics" in msg
+
+
 def test_missing_and_unused_signals_are_refused_together(tmp_path):
     doc = _doc("ramp_boundary.json")
     doc["signals"][0]["drives"] = "bouB.T_in"  # bouA.p_in now undriven, bouB.T_in unused

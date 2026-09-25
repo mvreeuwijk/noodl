@@ -232,10 +232,25 @@ class _ChainRefused(Exception):
         self.quiet = quiet
 
 
-def _split(ref: str) -> tuple[str, str]:
+def _split(ref: str, errors: list[str] | None = None) -> tuple[str, str] | None:
+    """`<instance>.<port>` -> `(instance, port)`.
+
+    A malformed reference (no `.`) is unreachable from the exporter's own output (every
+    `doc.connections` entry it writes is `<instance>.<port>`), but `schema.load` does not
+    check the format, so a hand-edited or malformed JSON document can still reach it. When
+    `errors` is given (the two phases that read `doc.connections` directly, still untrusted),
+    the message is appended there and `None` returned instead of raising, so the gather-all
+    phases keep running (final review, Minor 3). An internal call with no `errors` (already
+    on an instance/port pair this module itself built) still raises: that would be this
+    module's own bug, not bad input.
+    """
     instance, sep, port = ref.partition(".")
     if not sep:
-        raise ModelicaImportError(f"modelica: {ref!r} is not an '<instance>.<port>' reference")
+        message = f"modelica: {ref!r} is not an '<instance>.<port>' reference"
+        if errors is None:
+            raise ModelicaImportError(message)
+        errors.append(message)
+        return None
     return instance, port
 
 
@@ -360,8 +375,11 @@ def _classify_components(doc: ModelicaDoc) -> _Ctx:
 def _process_fluid_connections(doc: ModelicaDoc, ctx: _Ctx) -> None:
     """Union every fluid `connect()` pair; note a signal-style connection's refusal, if any."""
     for a, b in doc.connections:
-        ia, pa = _split(a)
-        ib, pb = _split(b)
+        split_a, split_b = _split(a, ctx.errors), _split(b, ctx.errors)
+        if split_a is None or split_b is None:
+            continue
+        ia, pa = split_a
+        ib, pb = split_b
         if ia not in ctx.by_name:
             ctx.errors.append(f"{a}: connection references unknown instance {ia!r}")
             continue
@@ -649,8 +667,11 @@ def _resolve_pins(doc: ModelicaDoc, ctx: _Ctx) -> tuple[list[Pin], list[tuple[Co
     `PrescribedHeatFlow.port` -> zone `heatPort`."""
     heat_partner: dict[tuple[str, str], tuple[str, str]] = {}
     for a, b in doc.connections:
-        ia, pa = _split(a)
-        ib, pb = _split(b)
+        split_a, split_b = _split(a, ctx.errors), _split(b, ctx.errors)
+        if split_a is None or split_b is None:
+            continue
+        ia, pa = split_a
+        ib, pb = split_b
         if ia not in ctx.by_name or ib not in ctx.by_name:
             continue
         ka, kb = ctx.kind_of[ia], ctx.kind_of[ib]

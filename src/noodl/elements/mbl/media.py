@@ -16,20 +16,28 @@ research inventory section C):
   Medium.setState_pTX(T=Medium.T_default, p=Medium.p_default, X=Medium.X_default)``,
   ``rho_default = Medium.density(sta_default)``). It is a plain Python ``float``, computed once
   and never revisited at simulation time.
-* ``buoyancy_density(T, X_w)``: the buoyancy-relevant density MBL's ``MediumColumn``,
-  ``TwoWayFlowElement`` and ``DoorDiscretized`` call instead of ``Medium.density`` -- always
-  ``Buildings.Utilities.Psychrometrics.Functions.density_pTX`` (or, for a medium other than
-  ``Buildings.Media.Air``, that medium's own ideal-gas density function), evaluated at the
-  medium's fixed ``p_default`` but the *actual* local temperature and water content. This
-  method is differentiable in ``T`` (and ``X_w`` where applicable): the design's door/column
-  primitives (a later task) read live zone temperatures through it.
+* ``buoyancy_density(T, X_w)``: each medium's own density law evaluated at its *fixed*
+  ``p_default`` but the *actual* local temperature and water content -- for
+  ``Buildings.Media.Air``/``PerfectGas`` this is
+  ``Buildings.Utilities.Psychrometrics.Functions.density_pTX``; for ``SimpleAir`` its own
+  ideal-gas law (``package.mo:6321-6323``, the CODATA ``R_gas`` its own ``density`` also uses --
+  NOT ``density_pTX``'s NASA-2002 constant, which is what ``TwoWayFlowElement.mo`` would use if
+  SimpleAir were ever wired through it: a 5.8e-6 relative difference, moot below). This method
+  is differentiable in ``T`` (and ``X_w`` where applicable), but nothing in this reader calls
+  it: ``MediumColumn``'s head (``assemble.py``'s ``_ColumnHead``) and the discretised door
+  (``door_discretized.py``) each evaluate ``density_pTX`` with their own inlined copy of the
+  formula instead of this method -- the column at ``p_default`` (matching
+  ``MediumColumn.mo:62-76``), the door at the ACTUAL port pressure (matching
+  ``TwoWayFlowElement.mo:72-81``) -- and no element reads the ``"rho"`` full-node driver this
+  method used to feed (dropped, final review: nothing in the Modelica route read it). It is
+  kept as the medium's own general-purpose buoyancy-density law, for a caller that wants it.
 
-For ``Buildings.Media.Air`` these two are NOT the same function: ``Medium.density`` is
-pressure-only (``Air.mo``'s own banner: "decouples pressure and temperature"), so
-``rho_default`` is a fixed ~1.2 kg/m3 regardless of temperature, while ``buoyancy_density``
-genuinely depends on ``T``. Only the ``useDefaultProperties=true`` path (MBL's default, and the
-only one this task implements) is covered; a class whose default is ``false`` is out of scope
-for this task.
+For ``Buildings.Media.Air`` ``buoyancy_density`` and ``density`` are NOT the same function:
+``Medium.density`` (this module's ``density``) is pressure-only (``Air.mo``'s own banner:
+"decouples pressure and temperature"), so ``rho_default`` is a fixed ~1.2 kg/m3 regardless of
+temperature, while ``buoyancy_density`` genuinely depends on ``T``. Only the
+``useDefaultProperties=true`` path (MBL's default) is covered; a class whose default is
+``false`` is out of scope.
 """
 
 from __future__ import annotations

@@ -11,6 +11,10 @@ never run by the test suite. The pure-Python writer (`build_document`, `compared
 `write_json`, `write_csv`) needs no OpenModelica, so the contract test
 (`tests/apps/building_physics/modelica/test_export_contract.py`) imports this file by path.
 
+`main` exits non-zero if a requested simulation fails (the JSON is still written, with the
+instance API's Reals instead of the simulated values, for inspection); `--no-simulate` always
+exits 0, since it never asks for a simulation in the first place.
+
 How OpenModelica is driven
 --------------------------
 OMPython is not installed in the WSL environment, so the script writes `.mos` scripts and
@@ -861,6 +865,11 @@ def main(argv: list[str] | None = None) -> int:
     summary = export(args.model, args.out, args.mbl.expanduser(),
                      run_simulation=not args.no_simulate, keep=args.keep)
     print(json.dumps(summary))
+    # A requested simulation that failed still gets a JSON-only export ("warning: simulation
+    # of ... failed" above, on stderr) but no "csv" key in the summary; a batch script over
+    # many models should not treat that as success (final review, Minor 9).
+    if not args.no_simulate and "csv" not in summary:
+        return 1
     return 0
 
 

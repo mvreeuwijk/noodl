@@ -102,6 +102,22 @@ def test_refused_classes_are_named_together() -> None:
     assert "feedback controllers are not supported" in message
 
 
+def test_malformed_connection_ref_is_gathered_not_raised_immediately() -> None:
+    """`graph._split` must append a malformed (no '.') connection reference to the error list
+    rather than raising immediately, so gather-all keeps running and names the OTHER error
+    (`bouOut`'s wind-pressure refusal, found in an earlier phase) in the same
+    `ModelicaImportError` (final review, Minor 3). `schema.load` does not itself check the
+    '<instance>.<port>' format, so this is reachable from a malformed document even though the
+    exporter itself never writes one."""
+    with pytest.raises(ModelicaImportError) as excinfo:
+        _graph("malformed_connection_ref.json")
+    message = str(excinfo.value)
+    assert "not_a_dotted_reference" in message
+    assert "is not an '<instance>.<port>' reference" in message
+    assert "bouOut" in message
+    assert "wind pressure is not supported" in message
+
+
 def _head(path, rho: float, g: float) -> float:
     """`(phi_src - phi_tgt) + sum(sign * h * rho * g)`'s column term (module docstring)."""
     return sum(sign * col.parameters["h"] * rho * g for col, sign in path.columns)

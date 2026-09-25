@@ -287,3 +287,31 @@ def test_omc_helpers(exporter) -> None:
     assert exporter.medium_reference(MODEL) == "Medium"
     assert exporter.model_classes(MODEL) == ["test.Derived", "test.Base",
                                              "Modelica.Icons.Example"]
+
+
+# ------------------------------------------------------------------------------ exit code
+def test_main_exits_non_zero_when_a_requested_simulation_fails(exporter, monkeypatch) -> None:
+    """A requested simulation that fails still gets a JSON-only `export()` (no "csv" key in
+    the summary: `export`'s own `if run_simulation and not simulated` branch, which only
+    warns) -- `main` must not report that as success (final review, Minor 9). Checked without
+    OpenModelica by monkeypatching `export` itself, since the failure path needs `omc`."""
+    monkeypatch.setattr(
+        exporter, "export",
+        lambda model, out, mbl, *, run_simulation, keep: {"model": model, "json": "x.json"})
+    assert exporter.main(["test.Whatever"]) == 1
+
+
+def test_main_exits_zero_when_the_simulation_succeeds(exporter, monkeypatch) -> None:
+    monkeypatch.setattr(
+        exporter, "export",
+        lambda model, out, mbl, *, run_simulation, keep: {"model": model, "json": "x.json",
+                                                          "csv": "x.csv"})
+    assert exporter.main(["test.Whatever"]) == 0
+
+
+def test_main_exits_zero_with_no_simulate_even_without_a_csv(exporter, monkeypatch) -> None:
+    """`--no-simulate` never produces a "csv" key by design; that is not a failure."""
+    monkeypatch.setattr(
+        exporter, "export",
+        lambda model, out, mbl, *, run_simulation, keep: {"model": model, "json": "x.json"})
+    assert exporter.main(["test.Whatever", "--no-simulate"]) == 0

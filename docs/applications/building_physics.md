@@ -271,8 +271,8 @@ see `docs/superpowers/specs/2026-09-24-modelica-import-design.md` section 6):
 is quasi-steady at every step. MBL's volumes do store mass, so a model whose dynamics are
 dominated by that storage — a closed, heated room expanding through its leakage, or an initial
 pressure imbalance draining away — parts company with noodl by more than round-off (see the
-parity table below). Adding volume mass storage would close this gap; it is a follow-up, offered
-to Maarten and not implemented in this release.
+parity table below). Adding volume mass storage would close this gap; it is a possible
+extension, not implemented in this release.
 
 **Reproducing the export (WSL only — the test suite itself needs none of this).** Tested on
 Ubuntu 22.04 (`jammy`) in WSL with OpenModelica 1.27.1. Install OpenModelica from its own apt
@@ -303,14 +303,32 @@ in every fixture's JSON.) Then, with `omc` on the WSL `PATH` (this release was e
 `OpenModelica 1.27.1~2-g6db4671`):
 
 ```bash
-python3 scripts/modelica_export.py <Model> --out tests/data/modelica
+python3 scripts/modelica_export.py Buildings.Airflow.Multizone.Validation.ThreeRoomsContam --out tests/data/modelica
 ```
 
-writes `tests/data/modelica/<Model>.json` (the component graph) and `<Model>.csv` (OpenModelica's
+(`<Model>` is the model's fully qualified name; the exporter writes `<Short>.json`/`<Short>.csv`
+under `<Short>`, its last component — `ThreeRoomsContam.json`/`ThreeRoomsContam.csv` here.) This
+writes `tests/data/modelica/<Short>.json` (the component graph) and `<Short>.csv` (OpenModelica's
 own simulated reference) as committed fixtures. `scripts/modelica_export.py` is not imported by
-the package and is not run by the test suite. 9 of the 12 dynamic parity tests take 30 s–5 min
-each and are marked `@pytest.mark.slow`, excluded by the repository's default `pytest` run;
-`pytest -m slow` runs them.
+the package and is not run by the test suite. It exits non-zero if the simulation fails (the
+JSON is still written, with the instance API's Reals instead of the simulated values, so the
+export can be inspected); a batch script over every model should check the exit code rather
+than assume success. 9 of the 12 dynamic parity tests take 30 s–5 min each and are marked
+`@pytest.mark.slow`, excluded by the repository's default `pytest` run; `pytest -m slow` runs
+them.
+
+Regenerating the committed parity ledgers (`tests/data/modelica/parity-{algebraic,dynamic}.json`,
+below) needs no OpenModelica — they are written by `tests/verification/test_modelica_parity.py`
+itself, only when the environment variable `NOODL_RECORD_PARITY=1` is set:
+
+```bash
+NOODL_RECORD_PARITY=1 pytest tests/verification/test_modelica_parity.py -m "not slow"
+NOODL_RECORD_PARITY=1 pytest tests/verification/test_modelica_parity.py -m slow
+```
+
+(two runs, since the default `addopts` excludes `slow`-marked tests and a command-line `-m`
+replaces rather than adds to it). Without the variable, the suite reads and checks the
+fixtures but never rewrites the ledgers.
 
 ## Verification
 
@@ -355,9 +373,9 @@ simulation, `|noodl - omc| <= 1e-6 |omc| + 1e-9` kg/s:
 | PowerLaw | 6.1e-16 | 501 |
 
 All at round-off except `OpenDoorTemperature`, whose discretised-door port flows sit at 1.8e-11
-relative — still five orders of magnitude inside the 1e-6 bound, and diagnosed as an
+relative — still five orders of magnitude inside the 1e-6 bound, and attributed to an
 OpenModelica nonlinear-solver residual on the door's inflow-density loop, not a formula
-difference.
+difference (likely, not diagnosed: not shown by a tighter `omc` tolerance).
 
 The **CONTAM cross-check** on `OneWayFlow` (13 pressure-difference knots × 8 elements, from
 CONTAM's own validation table, `OneWayFlow.mo`'s `contamData`): noodl differs from CONTAM by at
@@ -373,7 +391,8 @@ the model's own largest flow — the more informative view, since T and p in kel
 insensitive to relative error and a flow that reverses sign makes a relative error explode near
 the crossing.
 
-*Parity* — agrees with OpenModelica to its own discretisation/solver tolerance:
+*Parity* — agrees with OpenModelica to its own discretisation/solver tolerance, except
+`ZonalFlow`'s T (explained below):
 
 | Model | T, abs (K) | p, abs (Pa) | flow, abs (kg/s) | flow, % of model's largest flow |
 |---|---|---|---|---|
@@ -390,6 +409,16 @@ only just begun to receive it. An independent DOP853 integration of the same spe
 (reusing noodl's flows) shows OpenModelica's own error dominates from about t > 5000 s: up to
 3.8 % of the peak concentration, against noodl's 0.6 %.
 
+`ZonalFlow`'s T, 1.0e-2 K (`rooB.T`, 3.5e-5 relative, peaking at t = 36 s), is not solver
+tolerance. `rooA` and `rooB` start 10 K and 0.005 kg/kg water apart (`ZonalFlow.json`), and
+noodl carries heat between zones with one common `cp` instead of MBL's per-zone `cp(X)`
+(`assemble.py`'s "Capacities" derivation: `|cp(X_in)/cp(X) - 1| <= 0.84 |dX_w|`, here
+`0.84 x 0.005 = 4.2e-3` relative). Applied to the zones' 10 K starting gap, that bounds the
+resulting error at about 0.04 K — the same order of magnitude as the measured 1.0e-2 K (about
+4x tighter, plausibly because `rooB`'s 1 m3 is 1 % of `rooA`'s 100 m3 and the gap decays as
+they mix). This is the most likely cause; it has not been confirmed by rerunning with a
+per-zone `cp`.
+
 *Step-limited* — first order in noodl's time step; halving the step halves the error:
 
 | Model | T, abs (K) | p, abs (Pa) | flow, abs (kg/s) | flow, % of model's largest flow |
@@ -400,8 +429,9 @@ only just begun to receive it. An independent DOP853 integration of the same spe
 | ReverseBuoyancy3Zones | 2.0e-2 | 1.6e-3 | 1.3e-3 | 0.46 % |
 
 Confirmed directly: halving `OpenDoorBuoyancyDynamic`'s step scales its worst door-flow and
-boundary-temperature error by a factor of 1.97–2.04
-(`test_step_limited_error_halves_with_the_step`).
+boundary-temperature error by 1.97 (`test_step_limited_error_halves_with_the_step`).
+`OpenDoorBuoyancyPressureDynamic` shows a comparable 2.04 (measured the same way during
+development, but not independently asserted by a test).
 
 *Storage-dominated* — MBL's volumes compress and expand; noodl's airflow is quasi-steady, like
 CONTAM's, so it does not:
@@ -428,10 +458,15 @@ which noodl's quasi-steady solve starts already balanced against. This is an ini
 difference from how the two solvers reach their first row, not a parity failure, and the test
 still prints it.
 
-Every column's numbers (not just the worst) are in
-`.superpowers/sdd/2026-09-24-modelica-import/parity-algebraic.json` and `parity-dynamic.json`.
-Volume mass storage — the mechanism behind every number above 1 % here — is the natural next
-step to close this gap; it is not implemented in this release.
+Every column's numbers (not just the worst) are committed at
+`tests/data/modelica/parity-algebraic.json` and `parity-dynamic.json` (regenerated only with
+`NOODL_RECORD_PARITY=1`, "Reproducing the export" above). Only the *storage-dominated* group
+above (`ClosedDoors`, `OneOpenDoor`, `ReverseBuoyancy`) is caused by MBL's volume mass storage,
+which noodl's quasi-steady airflow does not model. The *step-limited* group's numbers are
+noodl's first-order time step instead (confirmed by halving it, above); `ZonalFlow`'s T is the
+single-`cp` carrier (above); and `CO2TransportStep`'s excluded 170 % is its pulse spread over
+a step, not storage. Adding volume mass storage would close the remaining gap in the
+storage-dominated group; it is a possible extension, not implemented in this release.
 
 ### Against analytical solutions
 

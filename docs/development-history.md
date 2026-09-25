@@ -1420,18 +1420,19 @@ volumes that would need compressible volume storage (`OneEffectiveAirLeakageArea
 **Quasi-steady airflow.** Like the CONTAM route, a zone's air mass is not stored — the airflow is
 solved quasi-steady at every step. The 6 algebraic models (no volumes) agree with OpenModelica to
 round-off (worst 1.8e-11, on `OpenDoorTemperature`'s discretised door — five orders of magnitude
-inside tolerance, diagnosed as an OpenModelica solver residual, not a formula difference). Of the
+inside tolerance, attributed to an OpenModelica solver residual, not a formula difference). Of the
 12 models with volumes: 5 agree closely (`ThreeRoomsContam[DiscretizedDoor]`, `OneRoom`,
-`ZonalFlow`, and `CO2TransportStep` outside the row right after its CO2 pulse); 4 are limited by
-noodl's first-order time step, confirmed by halving it
+`ZonalFlow`, and `CO2TransportStep` outside the row right after its CO2 pulse) except `ZonalFlow`'s
+T (1.0e-2 K, attributed to noodl's single common `cp` against MBL's per-zone `cp(X)`); 4 are
+limited by noodl's first-order time step, confirmed by halving it
 (`OpenDoorBuoyancyDynamic[Pressure]`, `NaturalVentilation`, `ReverseBuoyancy3Zones`); 3 are
 dominated by MBL's volume mass storage, which noodl does not model — two closed, heated rooms
 whose MBL-to-noodl temperature-rise ratio is `cp/cv` (measured 1.40), and one model whose zones
 start pressurised 1325 Pa above the boundary and cool as MBL releases the excess through storage.
-Every number is in `docs/applications/building_physics.md` and
-`.superpowers/sdd/2026-09-24-modelica-import/parity-{algebraic,dynamic}.json`. Adding volume mass
-storage would close the remaining gap; it was offered to Maarten as a scope change and is not
-implemented here.
+Every number is in `docs/applications/building_physics.md` and committed at
+`tests/data/modelica/parity-{algebraic,dynamic}.json` (regenerated only with
+`NOODL_RECORD_PARITY=1`). Adding volume mass storage would close the remaining gap; it is a
+possible extension, not implemented here.
 
 **Notable rulings**, kept for the record because each corrects or extends the design as first
 written:
@@ -1453,6 +1454,20 @@ written:
   quasi-steady solve does not reproduce; the row is still printed, not hidden.
 - `OneEffectiveAirLeakageArea` moved from supported to refused once the exporter ran on it: its
   mass source feeds two boundary-less volumes, so the air can only go into compressing them.
+
+**Follow-ups** (final review, left for later because none touches numerics or public
+behaviour):
+
+- Consolidate the small helpers duplicated across `noodl.elements.mbl` (`_f64`, the power-law
+  regularisation, `density_pTX`, `_G_N`, `_GAMMA`, `_check_width`/`_y`, the refusal-message
+  formatter) into a private `mbl/_common.py`.
+- `MBLTable` does not check `y` for monotonicity the way MBL's `splineDerivatives.mo` does
+  (`ensureMonotonicity=true`), and refuses a strictly decreasing `x` that MBL itself accepts;
+  only matters for a direct user of the public class, since the reader only sees models `omc`
+  already accepted.
+- `signals.interval_means`'s docstring claims exactness "for Math combinations of degree
+  <= 15", which understates `Division` of time-varying signals: that case is quadrature
+  accuracy, not exact.
 
 **Terminology.** MBL and OpenModelica are a reference implementation; agreement with them is
 parity, never "validated" (reserved for measurements) and never "oracle" — the same rule the
@@ -1542,8 +1557,8 @@ src/noodl/
   apps/inpfile.py  the section-keyed `.inp` tokenizer shared by apps/sewer/inp.py and
                  apps/water/inp.py, and nothing else
 scripts/         modelica_export.py: the OpenModelica export script (spec section 4), run in
-                 WSL with OMPython or omc/.mos to write tests/data/modelica's JSON+CSV
-                 fixtures; not imported by the package and not run by the test suite
+                 WSL with omc/.mos scripts (no OMPython) to write tests/data/modelica's
+                 JSON+CSV fixtures; not imported by the package and not run by the test suite
 docs/superpowers/  design spec and implementation plans
 tests/
   conftest.py, test_topology.py, test_endpoints.py, test_cycles.py, test_cycles_sparse.py,

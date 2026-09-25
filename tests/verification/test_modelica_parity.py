@@ -35,14 +35,16 @@ exactly from the solved pressures by the door element's own `port_flows`. A CSV 
 maps to nothing fails the test: nothing is skipped.
 
 The maximum relative error per model and variable is printed (visible with `-s`) and, when
-the git-ignored ledger directory exists, recorded in
-`.superpowers/sdd/2026-09-24-modelica-import/parity-algebraic.json` (dynamic models:
-`parity-dynamic.json`) for the documentation.
+the environment variable `NOODL_RECORD_PARITY=1` is set, written to the committed
+`tests/data/modelica/parity-algebraic.json` (dynamic models: `parity-dynamic.json`) for the
+documentation. Recording is opt-in and off by default (controller ruling): a plain checkout
+or a CI run never rewrites those files, only a deliberate re-recording pass does.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -57,8 +59,7 @@ from noodl.apps.building_physics.modelica.schema import ModelicaImportError
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / "tests" / "data" / "modelica"
-LEDGER = ROOT / ".superpowers" / "sdd" / "2026-09-24-modelica-import"
-RECORD = LEDGER / "parity-algebraic.json"
+RECORD = DATA / "parity-algebraic.json"
 
 RTOL, ATOL = 1e-6, 1e-9  # spec section 8; never loosened
 ALGEBRAIC = ("OneWayFlow", "DoorOpenClosed", "OpenDoorPressure", "OpenDoorTemperature",
@@ -76,10 +77,11 @@ def _csv(model: str) -> tuple[list[str], np.ndarray]:
 
 
 def _record(model: str, stats: dict, record: Path = RECORD) -> None:
-    # Deliberate side effect: the measured errors go into the git-ignored ledger directory
-    # for the documentation (Task 11); only when that directory exists, so a plain checkout
-    # or a CI run writes nothing.
-    if not LEDGER.is_dir():
+    # Deliberate side effect: the measured errors go into the committed
+    # tests/data/modelica/parity-*.json for the documentation (final review's controller
+    # ruling), only when NOODL_RECORD_PARITY=1 is set -- a plain checkout or a CI run never
+    # rewrites the recorded numbers.
+    if os.environ.get("NOODL_RECORD_PARITY") != "1":
         return
     try:
         doc = json.loads(record.read_text()) if record.exists() else {}
@@ -265,7 +267,7 @@ def test_refused_models_name_their_offending_instances(model):
 
 
 # ===================================================================== dynamic models
-RECORD_DYNAMIC = LEDGER / "parity-dynamic.json"
+RECORD_DYNAMIC = DATA / "parity-dynamic.json"
 # Relative errors are |noodl - omc| / max(|omc|, floor). The floor for a flow is FLOOR_FRAC
 # of the model's largest |flow| over the bounded rows, one floor for all its flow columns:
 # a door's directional flows and a stack's orifices pass through zero, and there the
@@ -355,7 +357,9 @@ DYNAMIC_BOUNDS = {
 
 
 def test_every_fixture_is_parity_checked_or_refused():
-    fixtures = {p.stem for p in DATA.glob("*.json")}
+    # "parity-algebraic"/"parity-dynamic" are the committed recorded-error ledgers this
+    # module writes (see RECORD/RECORD_DYNAMIC, NOODL_RECORD_PARITY), not model fixtures.
+    fixtures = {p.stem for p in DATA.glob("*.json")} - {"parity-algebraic", "parity-dynamic"}
     sets = (set(ALGEBRAIC), set(DYNAMIC), set(REFUSED))
     assert set().union(*sets) == fixtures
     assert sum(len(s) for s in sets) == len(fixtures)  # disjoint
@@ -379,6 +383,15 @@ def test_parity_on_the_dynamic_models(model):
       mixing temperatures, flows to <= 2.4e-6 relative (the reference's own 1e-6 tolerance).
       Xi up to 3.5e-4: MBL's Xi[1] of a volume moves by X dp/p while the volume's pressure
       re-balances through mass storage (volTop: 35 Pa of 101325), noodl's Xi stays.
+      ZonalFlow's T is the one number in this group that is not round-off: rooB.T peaks at
+      1.04e-2 K (3.5e-5 relative) at t = 36 s. Not solver tolerance: rooA and rooB start
+      10 K and 0.005 kg/kg water apart (ZonalFlow.json), and noodl carries heat with one
+      common `cp` instead of MBL's per-zone `cp(X)` (assemble.py's "Capacities" derivation,
+      `|cp(X_in)/cp(X) - 1| <= 0.84 |dX_w|` here 0.84 * 0.005 = 4.2e-3 relative). Applied to
+      the 10 K starting gap that bounds the error at about 0.04 K, the same order of
+      magnitude as the measured 1.04e-2 K (about 4x tighter, plausibly because rooB's 1 m3
+      is 1 % of rooA's 100 m3 and the gap decays as they mix). This is the most likely
+      cause; it has not been isolated by rerunning with a per-zone `cp`.
     * OpenDoorBuoyancyDynamic, OpenDoorBuoyancyPressureDynamic: flows 2.4 %, temperatures
       0.011 K: noodl's first-order step (halving the step halves both errors, ratio 2.0).
     * CO2TransportStep: T, p as ThreeRoomsContam; flows 1.3e-5, six times ThreeRoomsContam's,

@@ -29,9 +29,9 @@ What each MBL construct becomes
 * **Species layer** ("species", `TransportLayer`, kg/kg) with one species per
   `extraPropertiesNames` entry and, when the model needs it (see "Moisture"), water vapour
   `X_w` as the LAST species. Boundaries = boundary nodes. Omitted when it has no species.
-* **Closure** (`_MBLClosure`) writing the full-node drivers `"T"` (K), `"p_abs"` (Pa),
-  `"rho"` (buoyancy density, `medium.buoyancy_density`) and, when moisture is carried,
-  `"X_w"`; otherwise `"X_w"` is a constant driver at the medium default (0 for SimpleAir).
+* **Closure** (`_MBLClosure`) writing the full-node drivers `"T"` (K), `"p_abs"` (Pa) and,
+  when moisture is carried, `"X_w"`; otherwise `"X_w"` is a constant driver at the medium
+  default (0 for SimpleAir).
 
 Capacities (controller ruling; MBL v13 sources)
 ------------------------------------------------
@@ -57,9 +57,10 @@ X (cp_ste (T - T_ref) + h_fg)` (`Air.mo:116-124`), `der(U) = sum m_in h_in - m_o
 latent and cross terms cancel exactly and MBL's zone temperature obeys
 `m cp(X) dT/dt = sum m_in cp(X_in) (T_in - T)`: only the RATIO of the upstream stream's `cp`
 to the zone's own enters. One common `cp` makes that ratio 1, which is exact between zones of
-equal moisture and off by `|cp(X_in)/cp(X) - 1| <= 8.5e2 |X_in - X|` otherwise (4e-3 for the
-0.015/0.01 rooms of the ZonalFlow example, decaying as they mix). A per-zone `cp(X_start)` in
-the capacity with a fixed carrier would not reduce this: it would make the ratio wrong by
+equal moisture and off by `|cp(X_in)/cp(X) - 1| <= 0.84 |X_in - X|` otherwise (`(cp_ste -
+cp_air)/cp ~ 0.84` at `X_default`; 4.2e-3 for the 0.015/0.01 rooms of the ZonalFlow example,
+decaying as they mix). A per-zone `cp(X_start)` in the capacity with a fixed carrier would not
+reduce this: it would make the ratio wrong by
 `|cp(X_start)/cp(X_default) - 1|` for all time instead.
 
 Moisture (controller ruling)
@@ -509,9 +510,9 @@ class _ZonalFlowEdge(Element):
 
 # ------------------------------------------------------------------------- closure
 class _MBLClosure:
-    """Writes the full-node drivers `"T"`, `"p_abs"`, `"rho"` (and `"X_w"` when moisture is
-    carried) from the transport states, the boundary drivers and the last solved `"air.phi"`
-    (module docstring, "p_abs")."""
+    """Writes the full-node drivers `"T"`, `"p_abs"` (and `"X_w"` when moisture is carried)
+    from the transport states, the boundary drivers and the last solved `"air.phi"` (module
+    docstring, "p_abs")."""
 
     def __init__(self, *, medium: MBLMedium, p_ref: float, T0: Tensor, phi0: Tensor,
                  X0: Tensor,
@@ -570,11 +571,7 @@ class _MBLClosure:
         T = self.temperatures(state, drivers)
         out = {"T": T, "p_abs": self.pressures(state, drivers)}
         if self.water is not None:
-            X = self.species(state, drivers)[..., self.water]
-            out["X_w"] = X
-        else:
-            X = drivers["X_w"]
-        out["rho"] = self.medium.buoyancy_density(T, X)
+            out["X_w"] = self.species(state, drivers)[..., self.water]
         return out
 
 
@@ -1147,10 +1144,16 @@ class _Builder:
                            dpCloRat=p.get("dpCloRat", 4.0), CDCloRat=p.get("CDCloRat", 1.0),
                            y_key=f"{comp.name}.y")
                 ctor = MBLDoorOperable
-            for kind, direction in ((kab, "ab"), (kba, "ba")):
+            try:
+                built = [ctor(direction=direction, src=[iA], tgt=[iB], medium=med,
+                             kind=kind, **law)
+                         for kind, direction in ((kab, "ab"), (kba, "ba"))]
+            except ValueError as exc:
+                self.errors.append(f"{comp.name} ({comp.cls}): {exc}")
+                return
+            for kind, el in zip((kab, kba), built, strict=True):
                 net.add_edge(door.side_a, door.side_b, kind=kind)
-                elements.append(ctor(direction=direction, src=[iA], tgt=[iB], medium=med,
-                                     kind=kind, **law))
+                elements.append(el)
             kinds[comp.name] = (kab, kba)
             edge_dirs[comp.name] = [(kab, 0, 1), (kba, 0, 1)]
             extra_ports[f"{comp.name}.port_a1"] = (kab, 0, 1)

@@ -2,11 +2,12 @@
 
 `simulate(model, state, drivers, times)` steps the model from `times[0]` through every later
 grid time, with each step's time-varying drivers taken at the step's END time (the implicit
-end-of-interval convention of the transport schemes), and returns the time histories MBL's
-reference CSV holds: every air-layer edge flow, every node's absolute pressure, temperature,
-water mass fraction and trace-substance mass fractions. A model without zones (no transport
-layer) is algebraic in its boundary values and is solved with `model.steady` at every grid
-time instead. Row 0 is the initial state with its quasi-steady flows.
+end-of-interval convention of the transport schemes), except sources, which are the MEAN of
+their value over the step instead (`assemble.py`, "Sources"), and returns the time histories
+MBL's reference CSV holds: every air-layer edge flow, every node's absolute pressure,
+temperature, water mass fraction and trace-substance mass fractions. A model without zones (no
+transport layer) is algebraic in its boundary values and is solved with `model.steady` at every
+grid time instead. Row 0 is the initial state with its quasi-steady flows.
 """
 
 from __future__ import annotations
