@@ -1,6 +1,6 @@
 """Units and output for the street application.
 
-The model works in kg/m3 throughout (spec section 4); people read ug/m3, and AQ_DT's own
+The model works in kg/m3 throughout; people read ug/m3, and AQ_DT's own
 stage-3 product is a classic-CDF file with one record per (time, edge). Both live here so
 that no unit conversion is written twice and no output format is invented twice.
 """

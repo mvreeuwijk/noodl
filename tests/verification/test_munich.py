@@ -1,6 +1,6 @@
-"""MUNICH as the independent reference — spec section 7, rows 10 and 11.
+"""MUNICH as the independent reference.
 
-Part one: the exact input/output pairs of the milestone 3 MUNICH research record (numbered
+Part one: exact input/output pairs worked from the MUNICH sources and the papers (numbered
 T1 to T13 in the test names), each with its equation, page and `file:line`. Part two: the
 published 12-street idealised case of Kim et al. 2022 Fig. 1, whose INPUTS WERE NEVER
 PUBLISHED, so what is
@@ -141,7 +141,7 @@ def test_t6_soulhac_shape_parameter_and_bessel_roof_wind(record_property):
     assert abs(ratio - 0.0026666666666666666) < 1e-18
     c = soulhac_shape(_t(ratio))
     # MUNICH searches a 0.01 grid and returns 0.62; this is the continuous root, and the
-    # quantisation costs 4e-4 relative in u_M (research record T6).
+    # quantisation costs 4e-4 relative in u_M (T6).
     assert abs(float(c) - 0.6198293039179747) < 1e-13
     u_h = roof_wind(_t(U_STAR), _t(H), _t(W), form="sirane", z0_s=Z0_S,
                     kappa=KAPPA_MUNICH)
@@ -166,8 +166,7 @@ def test_t7_the_nine_unnormalised_quadrature_weight_sums(n, total, record_proper
     assert abs(measured - total) < 1e-6      # quoted to six decimal places
     # `measured` is recorded as the ABSOLUTE DIFFERENCE from the quoted K22 total, not the
     # raw sum -- the raw sum (e.g. 0.432 for n=2) reads, out of context in a results
-    # table, as a failed check against some unstated target (final whole-branch review,
-    # finding/minor 10).
+    # table, as a failed check against some unstated target.
     record_property("check", f"Direction-quadrature weight sum, n={n}, vs the K22 quoted {total}")
     record_property("tolerance", "1e-6")
     record_property("measured_abs_diff", abs(measured - total))
@@ -378,17 +377,17 @@ def test_the_labelled_and_unlabelled_pattern_is_reproduced():
                     f"label threshold, and the paper "
                     f"{'labels' if theirs else 'leaves blank'} it"
                 )
-    # Measured while the plan was written: exactly two marginal cells, street 2 of panel
+    # Measured: exactly two marginal cells, street 2 of panel
     # (a) at 0.0051 and street 10 of panel (f) at 0.0050, both within a hair of 0.005.
     assert len(marginal) <= 2
 
 
 def test_the_relative_pattern_is_compared_and_its_residual_recorded(capsys):
-    """Spec section 7's last row for this case, honestly.
+    """The relative pattern of Kim et al. 2022 Fig. 1, honestly.
 
     The paper's inputs are unpublished, so the comparison is made under the fixture's
     STATED uniform geometry -- the best of a 150-point grid. Under that assumption seven of
-    the nineteen printed ratios land inside 15 % and the worst is 51 %; the spec's 5 % is NOT
+    the nineteen printed ratios land inside 15 % and the worst is 51 %; a 5 % target is NOT
     attained, and this test records the residual rather than absorbing it. A change in any
     of these numbers is a change in the model.
     """
@@ -413,7 +412,7 @@ def test_the_relative_pattern_is_compared_and_its_residual_recorded(capsys):
     with capsys.disabled():
         print(f"  worst residual {worst:.1%}; {inside_15} of {len(rows)} ratios "
               f"inside 15 %")
-    # Measured 0.507 on 18 September 2026 (seven of nineteen ratios inside 15 %); a
+    # Measured 0.507 (seven of nineteen ratios inside 15 %); a
     # regression past 0.6 is a real change in the relative pattern, not noise. The bounds
     # are wide enough to be a regression guard and tight enough that a real change trips
     # them.
@@ -422,7 +421,7 @@ def test_the_relative_pattern_is_compared_and_its_residual_recorded(capsys):
 
 
 def test_photostationary_chemistry_on_the_twelve_street_network():
-    """Ruling M3-R8 (spec section 4.6 as amended at 2280a7e).
+    """Photostationary chemistry on the twelve-street network.
 
     MUNICH's idealised case itself has NO chemistry -- its 5-vs-10 m/s ratios are exactly 2
     -- and its inputs are unpublished, so the photostationary reaction is checked here on the

@@ -14,8 +14,8 @@ delivered (`REQUIRED PRESSURE`, default 0.0 -- so PDA is a NO-OP unless both are
 The limits are global, one set for the whole network, exactly as EPANET applies them.
 
 Measured against EPANET's own PDA on the committed two-loop fixture at `P_req = 60 m`:
-heads agree to 3.521e-7 relative and delivered demands to 2.184e-7 (spec row D5, amended to
-1e-5).
+heads agree to 3.521e-7 relative and delivered demands to 2.184e-7 (verification row D5,
+tolerance 1e-5).
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ F64 = torch.float64
 class PressureDrivenDemand(NodeSource):
     """The Wagner demand function as a `NodeSource` (withdrawal, positive OUT).
 
-    ``flow`` uses a GUARDED kink (ruling M4-R14), not a plain floor-and-power: the piecewise
+    ``flow`` uses a GUARDED kink, not a plain floor-and-power: the piecewise
     law is EXACTLY zero at and below `P_min` (not the `q_required * 1e-12**exponent` leak a
     naive `clamp(min=1e-12)` would deliver there), and it is EXACTLY `q_required` at and
     above `P_req`. `active = fraction > 0` selects the branch; the base fed to `** exponent`

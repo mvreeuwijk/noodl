@@ -67,7 +67,7 @@ def test_build_model_names_layers_and_tags_them():
 
 def test_energy_balance_closes_at_steady_state():
     net, model, state, drivers, _ = _single_zone()
-    # Controller ruling R21: the assertions below are at the solve's own accuracy, so the
+    # The assertions below are at the solve's own accuracy, so the
     # tolerance is tightened rather than the assertion loosened. At Newton's dtype-derived
     # default (1.5e-8 on a ~6e-3 kg/s mass balance) the iterate coupling stalls with a
     # per-pass thermal change of ~1e-4 K, well above its own 1e-9 K tolerance.
@@ -83,7 +83,7 @@ def test_energy_balance_closes_at_steady_state():
 
 def test_ventilated_zone_with_a_wall_matches_the_algebraic_balance():
     net, model, state, drivers, _ = _single_zone(wall=True)
-    ss = model.steady(state, drivers, atol=1e-14, rtol=1e-14)  # R21, as above
+    ss = model.steady(state, drivers, atol=1e-14, rtol=1e-14)  # tight, as above
     th = model.layers["thermal"]
     names = [net.nodes[i] for i in th.interior_idx.tolist()]
     T = dict(zip(names, ss["thermal.x"].tolist(), strict=True))
@@ -148,7 +148,7 @@ def test_gradients_flow_through_the_application_built_model():
     drv = dict(drivers, **{"thermal.sources": src})
 
     def loss(d):
-        # R21: the C gradient is ~4e1, so a 1e-7 step moves the loss by ~8e-6 K -- below the
+        # The C gradient is ~4e1, so a 1e-7 step moves the loss by ~8e-6 K -- below the
         # noise of a solve stopped at Newton's default 1.5e-8 residual. Tighten the solve.
         return model.step(state, d, 600.0, atol=1e-14, rtol=1e-14)["thermal.x"].sum()
 
@@ -197,16 +197,16 @@ def test_wall_mass_refuses_a_non_positive_conductance_naming_it():
 
 
 def test_gradient_to_a_wall_conductance_matches_central_differences():
-    """Spec section 9's gradcheck with respect to a WALL CONDUCTANCE.
+    """A gradcheck with respect to a WALL CONDUCTANCE.
 
     `thermal_layer` builds the layer's conductance from the network attribute `ua`
     (`net.edge_attr("ua", "wall")`), which is a plain tensor of floats, so the application
     offers no LEARNABLE route to it today: the conductance is reached here through the
     layer's own conduction state, `TransportLayer._conduction_edges`, whose third entry is
     the per-edge conductance vector `g`. Making `WallMass`/`thermal_layer` accept a tensor
-    (or `learnable=True`) conductance is a MILESTONE 3 item and is deliberately NOT added
-    here; this test pins that the derivative itself is correct and unbroken, so that the
-    milestone-3 API has something to be wired onto.
+    (or `learnable=True`) conductance is deliberately NOT added here; this test pins that
+    the derivative itself is correct and unbroken, so that such an API has something to be
+    wired onto.
 
     Two `wall` edges (zone->wall, wall->ambient) on a `build_model`-built model, one
     ping-pong step, loss = sum of the interior temperatures; central differences on both
@@ -222,7 +222,7 @@ def test_gradient_to_a_wall_conductance_matches_central_differences():
     assert g0.tolist() == [100.0, 20.0]                       # ua_zone, ua_ambient
     g = g0.clone().requires_grad_(True)
     th._conduction_edges = (csrc, ctgt, g)
-    # R21 as elsewhere in this file: the finite differences below must not be compared
+    # As elsewhere in this file: the finite differences below must not be compared
     # against a solve stopped at Newton's dtype-derived default residual.
     model.step(state, drivers, 600.0, atol=1e-14, rtol=1e-14)["thermal.x"].sum().backward()
 

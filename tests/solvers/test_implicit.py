@@ -49,9 +49,9 @@ def test_adjoint_solves_the_transposed_system():
 
 
 def test_second_order_differentiation_raises_instead_of_silently_dropping_a_term():
-    # Review finding 1: a gradient-penalty-shaped loss `(dx/dc)**2 + c**2`, computed via
+    # A gradient-penalty-shaped loss `(dx/dc)**2 + c**2`, computed via
     # `torch.autograd.grad(x, c, create_graph=True)` followed by a second `.backward()`,
-    # used to succeed silently and give a WRONG number: the (dx/dc)**2 term contributed
+    # would otherwise succeed silently and give a WRONG number: the (dx/dc)**2 term contributed
     # zero (implicit_solve's backward never builds a graph over its own gradient, since its
     # internal `torch.autograd.grad` call uses the default `create_graph=False`), while the
     # `c**2` term alone kept the second `.backward()` from raising at all. Confirmed this
@@ -78,10 +78,10 @@ def test_second_order_differentiation_raises_instead_of_silently_dropping_a_term
 
 
 def test_implicit_solve_ignores_a_grad_requiring_but_functionally_unused_parameter():
-    """Regression for the Task 8 (milestone 5) bug: a residual that never reads one of its
+    """Regression: a residual that never reads one of its
     own params -- e.g. `PotentialFlowLayer.solve` threading every key of a shared coupled
     `drivers` mapping into `implicit_solve`'s params positionally, including a key only a
-    DIFFERENT layer's residual reads -- used to make `_Implicit.backward` raise
+    DIFFERENT layer's residual reads -- must not make `_Implicit.backward` raise
     `RuntimeError: element 0 of tensors does not require grad and does not have a grad_fn`
     whenever that unused param was the ONLY one requiring grad. `allow_unused=True` only
     excuses individual unused INPUTS to `torch.autograd.grad`; it does not excuse calling

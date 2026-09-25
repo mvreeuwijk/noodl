@@ -40,7 +40,7 @@ def test_cutoff_source_vanishes_at_the_cutoff_concentration():
 
 
 def test_cutoff_source_clamps_at_zero_above_the_cutoff_instead_of_reversing_sign():
-    # Controller ruling R31: CONTAM's cutoff source shuts generation off past x_cut; the
+    # CONTAM's cutoff source shuts generation off past x_cut; the
     # bare eq. 17 formula would go negative (a sink) there, which is not the model.
     s = CutoffSource(node=2, G=1e-5, x_cut=1e-3)
     x = torch.tensor([0.0, 0.0, 2e-3], dtype=F64)  # 2x the cutoff
@@ -89,17 +89,16 @@ def test_assemble_sources_sums_contributions_in_full_node_order():
         CutoffSource(node=2, G=1e-6, x_cut=1.0),
     ]
     x = torch.zeros(3, dtype=F64)
-    # Ruling R11: `n` is dropped from the signature (it was never read; the shape comes
-    # from `x_full`), so this is a 3-argument call, not the brief's dictated 4-argument one.
+    # There is no node-count argument (the shape comes from `x_full`), so this is a
+    # 3-argument call.
     out = assemble_sources(srcs, 0.0, x)
     torch.testing.assert_close(out, torch.tensor([0.0, 3e-6, 1e-6], dtype=F64))
 
 
 # --------------------------------------------------------------------------------------
-# `sources_from_project` -- untested by the brief's Step 1 fixtures. Rulings R5 and R10
-# both change its error behaviour (a checked `KeyError` for an unresolvable zone, a
-# checked `ValueError` for an unrecognised source type), so both paths get their own test
-# here, plus one exercising the normal four-type translation.
+# `sources_from_project`: both of its error paths (a checked `KeyError` for an
+# unresolvable zone, a checked `ValueError` for an unrecognised source type) get their own
+# test here, plus one exercising the normal four-type translation.
 # --------------------------------------------------------------------------------------
 
 

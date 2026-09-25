@@ -19,7 +19,7 @@ v13.0.0 (commit 55abf579598ca81cae0a82f337350375958e6722) and the Modelica Stand
 * MSL `Modelica/Constants.mo:38` (g_n), `Media/IdealGases/Common/SingleGasesData.mo:5,49,59,
   9187,9197` (R_NASA_2002, Air.MM, Air.R_s, H2O.MM, H2O.R_s).
 
-Wiring (design section 6): side A holds `port_a1` (and `port_b2`), side B holds `port_a2`
+Wiring: side A holds `port_a1` (and `port_b2`), side B holds `port_a2`
 (and `port_b1`); every compartment edge runs from A (`src`) to B (`tgt`).
 
 The one rearrangement: MBL writes `dpAB[i] = (p_a1 + rho_A hAg[i]) - (p_a2 + rho_B hBg[i])`

@@ -1,4 +1,4 @@
-"""Signal sources of the Modelica Standard Library, evaluated on a time grid (spec section 6).
+"""Signal sources of the Modelica Standard Library, evaluated on a time grid.
 
 Transcribed from the Modelica Standard Library (MSL) v4.1.0 source, not from its
 documentation: ``Modelica/Blocks/Sources.mo`` (``Constant`` :164-175, ``Step`` :204-216,
@@ -474,8 +474,8 @@ def interval_means(fn, grid: Tensor, breaks) -> Tensor:
     ``fn`` depends on this is exact to round-off for the piecewise-linear blocks and their
     ``Math`` combinations of degree <= 15, and to ~1e-15 relative for ``Sine``.
 
-    This is what a quantity integrated over a step needs (a source's mass or heat, spec
-    section 7's step from ``grid[k-1]`` to ``grid[k]`` with the drivers of ``grid[k]``): the
+    This is what a quantity integrated over a step needs (a source's mass or heat, over the
+    step from ``grid[k-1]`` to ``grid[k]`` with the drivers of ``grid[k]``): the
     point value at ``grid[k]`` misses an event inside the interval, e.g.
     ``Examples/CO2TransportStep.mo``'s 3.6 s CO2 pulse between two 172.8 s output times.
     """

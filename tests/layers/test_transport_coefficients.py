@@ -1,4 +1,4 @@
-"""Every coefficient family gets a gradient under every scheme (R4), checked against central
+"""Every coefficient family gets a gradient under every scheme, checked against central
 differences by torch.autograd.gradcheck in float64."""
 
 from __future__ import annotations
@@ -210,7 +210,7 @@ def test_transmission_gradient_steady():
 @pytest.mark.parametrize("scheme", ["implicit", "trapezoidal"])
 def test_shared_coefficient_across_two_layers_accumulates_both_gradients(scheme):
     """One learnable removal tensor used by two layers: the gradient is the sum of both
-    layers' contributions (the shared-parameter case the review asks for)."""
+    layers' contributions (the shared-parameter case)."""
     r = _t([0.5], requires_grad=True)
     nets = []
     for _ in range(2):

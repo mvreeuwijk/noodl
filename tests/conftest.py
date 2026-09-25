@@ -65,7 +65,7 @@ def composed_model():
     network, about 1030 nodes and 2200 edges, with one reference physics configuration
     (`benchmarks.composed_model.build_composed`, defaults, ensemble=1). Used by the
     migration tasks (9-14) that need a realistic joined topology, and by the composed-model
-    scaling gate (Task 14). Tests must not mutate the returned model's elements.
+    scaling gate. Tests must not mutate the returned model's elements.
     """
     return build_composed()
 

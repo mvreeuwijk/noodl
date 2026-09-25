@@ -307,7 +307,7 @@ def test_symmetric_is_false_and_spd_certificate_is_none():
 
 
 def test_diagonal_and_assemble_match_dense_with_kinetics_removal_and_conduction():
-    """Coverage fix (fix round 1): every prior test calling .diagonal()/.assemble() used the
+    """Coverage fix: every prior test calling .diagonal()/.assemble() used the
     plain three_node_chain() CO2 layer, so the kinetics/removal/conduction branches inside
     those two methods (as opposed to matvec/rmatvec, which already exercised them) were never
     hit. This test combines all three terms -- three-species kinetics + removal (as in
@@ -419,7 +419,7 @@ def test_gradcheck_rmatvec_wrt_flow_and_y():
 
 
 def test_matvec_broadcasts_an_unbatched_state_against_a_batched_flow():
-    """Final-review finding C1: the operator's own batch must broadcast against the state.
+    """The operator's own batch must broadcast against the state.
 
     `x` is one initial condition; `flow` is an ensemble of 5 realisations. The result must
     be (5, m) and equal the explicitly-batched call entry for entry.
@@ -451,11 +451,11 @@ def test_matvec_broadcasts_an_unbatched_state_against_a_batched_flow():
     torch.testing.assert_close(yt, op.rmatvec(x.expand(5, 2)), rtol=1e-12, atol=1e-14)
 
 
-# ------------------------------------------------- I2: constructor shape validation
-# Global Constraint: "ValueError for bad shapes, naming the offender". Before this wave a
-# wrong edge count in `transmission` constructed silently and then raised an opaque
-# broadcast RuntimeError at the first matvec, and an `n_interior` inconsistent with
-# `interior_of_node` was not detected at all.
+# ------------------------------------------------- constructor shape validation
+# ValueError for bad shapes, naming the offender. Without these checks a wrong edge count
+# in `transmission` would construct silently and then raise an opaque broadcast
+# RuntimeError at the first matvec, and an `n_interior` inconsistent with
+# `interior_of_node` would not be detected at all.
 
 
 def _valid_args():

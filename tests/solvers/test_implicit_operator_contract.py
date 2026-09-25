@@ -1,4 +1,4 @@
-"""Tests for the operator-based adjoint (Task 12): adjoint() solves against a
+"""Tests for the operator-based adjoint: adjoint() solves against a
 TransposeOperator wrapping op.rmatvec, and never reuses op.matvec as the transpose action
 (which is only valid for a symmetric operator -- transport advection, and many coupled
 Jacobians, are not).
@@ -99,7 +99,7 @@ def test_gradcheck_on_a_nonsymmetric_transport_shaped_problem_via_the_adjoint():
         return implicit_solve(residual, operator_buggy, x0, (A_,), atol=1e-13, rtol=1e-13)
 
     # torch's own GradcheckError subclasses RuntimeError, NOT AssertionError, so the bare
-    # `pytest.raises(AssertionError)` the task brief writes here would let the buggy case
+    # `pytest.raises(AssertionError)` here would let the buggy case
     # escape uncaught (verified against this .venv's torch 2.14). Both are accepted so the
     # test pins "gradcheck rejects the buggy operator" regardless of which torch version
     # raises which; the `assert` in front keeps the AssertionError route live for a
@@ -109,14 +109,13 @@ def test_gradcheck_on_a_nonsymmetric_transport_shaped_problem_via_the_adjoint():
 
 
 def test_implicit_solve_refuses_on_failure_return_on_the_differentiable_path():
-    # Final-review finding C2. This test previously asserted the WEAKER guarantee that the
-    # forward could complete non-converged under on_failure="return" as long as the backward
-    # raised. That is not enough: the backward raises only if the adjoint system itself is
-    # degenerate, and at a merely non-converged (but perfectly nonsingular) point the adjoint
-    # solve converges happily and hands back a gradient linearised at the wrong point, with
-    # nothing reporting it. The escape hatch is therefore refused at the front door on the
-    # differentiable path -- design section 3.2, "a wrong gradient is worse than no
-    # gradient". `newton` itself still honours on_failure="return"; only the differentiable
+    # The WEAKER guarantee -- that the forward may complete non-converged under
+    # on_failure="return" as long as the backward raises -- is not enough: the backward raises only
+    # if the adjoint system itself is degenerate, and at a merely non-converged (but perfectly
+    # nonsingular) point the adjoint solve converges happily and hands back a gradient linearised at
+    # the wrong point, with nothing reporting it. The escape hatch is therefore refused at the front
+    # door on the differentiable path -- a wrong gradient is worse than no
+    # gradient. `newton` itself still honours on_failure="return"; only the differentiable
     # wrapper refuses it.
     c = torch.tensor([[2.0]], dtype=torch.float64, requires_grad=True)
     x0 = torch.tensor([[5.0]], dtype=torch.float64)
@@ -132,7 +131,7 @@ def test_implicit_solve_refuses_on_failure_return_on_the_differentiable_path():
 
 
 def test_backward_raises_unconditionally_on_a_singular_adjoint_system():
-    # on_failure never applies to the backward pass (design section 3.2). Here the FORWARD
+    # on_failure never applies to the backward pass. Here the FORWARD
     # converges exactly (identity Jacobian on a linear residual), and the operator callable
     # is degenerate only at the converged point -- which is precisely where the adjoint
     # system is built. The backward must raise rather than return whatever the singular

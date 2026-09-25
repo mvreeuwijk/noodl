@@ -1,5 +1,6 @@
-"""Milestone 5 demonstration: batched throughput of the coupled street-building model
-(design spec section 6). Not a speedup claim against anything -- no existing tool runs this
+"""Coupling demonstration: batched throughput of the coupled street-building model.
+
+Not a speedup claim against anything -- no existing tool runs this
 pair at all -- a sanity number in the spirit of `benchmarks/wsimod_oxford.py`. Batches over
 B independent copies of the SAME pair (both apps broadcast a leading batch axis: the street
 parity test batches its forcing, `project_to_model`'s drives take `(B,)` winds), with the

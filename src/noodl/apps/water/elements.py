@@ -1,8 +1,7 @@
 """Branch elements for a pressurised water distribution network (EPANET 2.2 forms).
 
 Potential is hydraulic HEAD in metres; flow is m^3/s, signed along the edge's own
-orientation. All constants are SI and are recorded in the milestone 4 spec's coefficient
-register with their verification status.
+orientation. All constants are SI.
 """
 
 from __future__ import annotations
@@ -94,9 +93,8 @@ class HazenWilliams(Element):
         dpt = self.dp_transition
         mask = dp.abs() < dpt
         # The un-taken branch must never see |dp| == 0: |dp|^(1/1.852 - 1) is infinite
-        # there, and where()'s backward would turn inf * 0 into nan (the milestone 3
-        # lesson). Substituting the constant transition value on the masked entries keeps
-        # both branches finite.
+        # there, and where()'s backward would turn inf * 0 into nan. Substituting the
+        # constant transition value on the masked entries keeps both branches finite.
         dp_safe = torch.where(mask, torch.full_like(dp, dpt), dp.abs())
         if not self._has_minor:
             sharp = (dp_safe / k) ** (1.0 / 1.852)
@@ -181,15 +179,15 @@ class PumpCurve(Element):
     ``w`` is the relative speed setting (EPANET's affinity laws, Manual p.108); ``status``
     is read per edge from the driver ``status_key`` when given (0 closed, 1 open), which is
     how a ``[CONTROLS]`` line reaches the element. The fitted curve is a strict power law,
-    so no root solve is needed; the monotone root the spec anticipated would only be needed
-    for a MULTI-point (piecewise-linear) curve, which is out of scope (spec 13.5).
+    so no root solve is needed; a monotone root solve would only be needed
+    for a MULTI-point (piecewise-linear) curve, which is out of scope.
 
     Flow is monotone increasing in ``dp`` (``dq/ddp > 0``), so the Newton Jacobian stays
     SPD-certifiable. At shut-off the slope of the sharp branch diverges, so the law is
     laminar-blended over ``h0 + dp/w^2 < dp_transition`` with a safe input substituted on
     BOTH branches of the ``where``.
 
-    ``q_max`` (spec 13.1, ruling M4-R13) is the flow at zero head gain,
+    ``q_max`` is the flow at zero head gain,
     ``w (h0/r)^(1/n)`` -- EPANET's own curve is only DEFINED up to this point (its own
     "two more points" construction stops there), and beyond it a positive ``dp`` (the
     pump run backwards, discharge below suction) still has a well-defined closed-form
@@ -198,7 +196,7 @@ class PumpCurve(Element):
     transient iterate, before the solve has had a chance to walk back inside the curve's
     domain -- and leaves the refusal to ``water_steady``, which checks only the CONVERGED
     flow against ``q_max`` and raises by name (no clamp, no warning, matching EPANET's own
-    silent extrapolation being exactly what this milestone declines to reproduce
+    silent extrapolation being exactly what this application declines to reproduce
     uncontrolled).
     """
 

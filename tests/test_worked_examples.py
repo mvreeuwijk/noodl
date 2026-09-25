@@ -72,8 +72,8 @@ def test_three_zone_exchange_matches_the_backward_euler_series():
         want = torch.tensor(expected, dtype=F64)
         if step == 1:
             # If this very first comparison fails, stop rather than loosen tolerances: it
-            # would mean a sign/scheme convention difference worth a ruling, not a numerical
-            # artifact. Print both rows and the rate at the initial state for the report.
+            # would mean a sign/scheme convention difference worth investigating, not a
+            # numerical artifact. Print both rows and the rate at the initial state for the report.
             if not torch.allclose(got, want, rtol=1e-10, atol=1e-12):
                 rate0 = layer.rate(
                     torch.tensor([0.0, 2.0, 1.0], dtype=F64), q, sources, x_boundary
@@ -153,7 +153,7 @@ def test_quadratic_loop_matches_the_series_resistance_solution():
 def test_spring_mass_damper_matches_the_worked_example():
     """The spring-mass-damper worked example (``GOLD["spring_mass_damper_displacement"]``):
     a single mesh (edges (0, 1), (1, 2), (2, 0), kind "pipe") carrying an inductor, a
-    resistor and a capacitor, stepped implicitly (``ConstitutiveLayer``, Task 22).
+    resistor and a capacitor, stepped implicitly (``ConstitutiveLayer``).
 
     ``theta = [L, R, C, q0_prev, p2_prev, dt]``; the worked example's own branch law does
     not use ``L`` explicitly, folding ``dt / L = dt`` into the inductor term since ``L = 1``

@@ -1,6 +1,6 @@
 """Drive protocol: additive potential-difference terms added to an element's dp.
 
-A drive is a function of the `drivers` mapping ONLY (milestone 2 spec section 4.1): it never
+A drive is a function of the `drivers` mapping ONLY: it never
 sees the potential `phi`. The Newton Jacobian `A_I diag(g') A_I^T` is therefore exact and stays
 symmetric, which is what the SPD certificate and the conjugate-gradient path rely on. Anything a
 drive needs that depends on the state -- zone densities for a stack term -- is computed by a
@@ -38,7 +38,7 @@ class Drive(Protocol):
 def check_drive_signature(drive, *, where: str) -> None:
     """Raise `TypeError` unless `drive` is callable as `drive(drivers)`.
 
-    Loud migration guard for the pre-milestone-2 `(phi, drivers)` form: a two-argument drive
+    Loud guard against the older `(phi, drivers)` form: a two-argument drive
     would otherwise fail deep inside `PotentialFlowLayer.dp` with an unattributed TypeError.
     """
     try:
@@ -54,7 +54,7 @@ def check_drive_signature(drive, *, where: str) -> None:
         raise TypeError(
             f"{where}: drive {type(drive).__name__} (kind {getattr(drive, 'kind', '?')!r}) "
             f"must be callable as drive(drivers) -- a Drive is a function of the drivers "
-            f"mapping only (milestone 2 spec section 4.1); got parameters {positional}. A "
+            f"mapping only; got parameters {positional}. A "
             f"drive that used to take (phi, drivers) must drop phi."
         )
 
@@ -261,17 +261,17 @@ class Wind:
         """Build from edge attributes.
 
         `profiles` is either a plain sequence -- numbered 1..N by position -- or a
-        `Mapping[int, WindProfile]` keyed by CONTAM's own profile NUMBER (Ruling R3). The
-        CONTAM reader (Task 12) stores the file's profile number verbatim in each edge's
-        `profile` attribute, and the two forms agree only when a project numbers its profiles
-        contiguously from 1; a project numbering them, say, 2 and 5 needs the mapping form to
-        resolve correctly. Numbers are remapped to dense positions once, here, so the hot path
+        `Mapping[int, WindProfile]` keyed by CONTAM's own profile NUMBER. The
+        CONTAM reader (`apps.building_physics.prj`) stores the file's profile number verbatim in
+        each edge's `profile` attribute, and the two forms agree only when a project numbers its
+        profiles contiguously from 1; a project numbering them, say, 2 and 5 needs the mapping form
+        to resolve correctly. Numbers are remapped to dense positions once, here, so the hot path
         (`__call__`) stays a plain index lookup. `profile=` is shorthand: one profile for
         every envelope edge that carries no `profile` attribute at all. `profile = 0` is the
         only value that means "no profile, use the constant `Cp` attribute" -- it is a
         configured, non-silent choice, not a fallback. Every OTHER value an edge's `profile`
         attribute names must resolve in `profiles`, including when `profiles` is empty
-        entirely: raises `KeyError` naming the edge and the number (Ruling R22). A caller
+        entirely: raises `KeyError` naming the edge and the number. A caller
         who sets `profile=k` on edges and forgets to pass `profiles` must get a loud error,
         not a silently vanishing wind pressure from the constant `Cp` attribute defaulting
         to zero.

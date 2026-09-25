@@ -41,8 +41,8 @@ H_MAX_RATIO = 0.938
 #: Floor applied to the divisor of ``A / T`` (hydraulic mean depth) and ``A_air / P_air``
 #: (air hydraulic diameter) at their respective ``0/0`` points. Both are removable
 #: singularities of the VALUE but genuine singularities of the DERIVATIVE, so the safe
-#: divisor is substituted on BOTH branches of every ``torch.where`` below (milestone 3
-#: lesson: a masked-out branch still back-propagates, and ``inf * 0`` is ``nan``).
+#: divisor is substituted on BOTH branches of every ``torch.where`` below (a masked-out
+#: branch still back-propagates, and ``inf * 0`` is ``nan``).
 _EPS = 1e-12
 
 #: Below this half-angle ``1 - sin(theta)/theta`` is evaluated by its series.
@@ -158,8 +158,7 @@ def normal_depth(
     ``0``: a positive floor is substituted into the solve on BOTH branches of the mask so
     the un-taken branch back-propagates a finite (zero-weighted) gradient rather than
     ``inf * 0 = nan``. The true sensitivity ``dh/dq = 1/(dQ/dh)`` diverges as ``q -> 0``, so
-    the gradient reported at exactly zero flow is ``0``: a documented modelling choice
-    (spec amendment A7).
+    the gradient reported at exactly zero flow is ``0``: a documented modelling choice.
     """
     if bool(torch.any(~torch.isfinite(q))):
         raise ValueError("sewer.normal_depth: discharge must be finite")
@@ -181,7 +180,7 @@ def normal_depth(
         raise ValueError(
             f"sewer.normal_depth: surcharge at pipe(s) {label}: discharge {worst} m3/s "
             f"exceeds the Manning capacity {cap} m3/s at h = {H_MAX_RATIO} D; surcharged "
-            f"and backwater flow are out of scope for this milestone"
+            f"and backwater flow are out of scope"
         )
     active = q > 0
     q_floor = 1e-6 * q_max * torch.ones_like(q)

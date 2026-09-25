@@ -8,7 +8,7 @@ CombiTimeTable :1588) and, for `CombiTimeTable`, the C evaluation in
 times -- never by calling the implementation under test. Times always include one before
 `startTime` and one after the end of the signal's own definition range.
 
-Event-time convention (controller ruling, Task 9): a time ON an event (a start time, a
+Event-time convention: a time ON an event (a start time, a
 table knot, a period boundary) takes the value BEFORE the event, the left limit, because
 that is what OpenModelica 1.27.1 records at an output time that coincides with a time event:
 the solver writes the output point before it handles the event. The reference CSVs show it

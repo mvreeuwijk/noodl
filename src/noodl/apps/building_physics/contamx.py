@@ -82,7 +82,7 @@ def _snapshot(cx) -> tuple[list[float], list[list[float]]]:
     `getPathFlow` returns the path's two directional flows; their sum is the net flow, and
     that net is POSITIVE IN THE from_zone -> to_zone DIRECTION -- the same orientation
     `prj.py` gives the edge it builds for the path, so nothing is negated here. The
-    convention is measured, not assumed and not tuned to a test outcome (Ruling R12); two
+    convention is measured, not assumed and not tuned to a test outcome; two
     cases whose direction is known before the engine is consulted fix it, both run against
     ContamX 3.4.1.7 via contamxpy 0.0.9:
 

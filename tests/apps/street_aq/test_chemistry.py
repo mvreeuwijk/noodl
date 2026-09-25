@@ -1,4 +1,4 @@
-"""Photostationary chemistry on a street model -- spec section 4.6."""
+"""Photostationary chemistry on a street model."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def test_photostationary_for_streets_finds_the_three_columns():
 
 
 def test_model_steady_does_not_apply_the_reaction():
-    """Spec section 5 claims `Model.steady` iterates transport AND reaction; it does not
+    """One might expect `Model.steady` to iterate transport AND reaction; it does not
     (`Model._pass` applies reactions only when `dt` is not None, and `Model.steady`'s own
     docstring says so). `street_steady` is what the street application uses instead."""
     sn = _network()

@@ -1,6 +1,6 @@
 """Streets, junctions, and the builder that turns them into a `Model`.
 
-The network is the eliminated one of spec section 2, approach A: every street is a storage
+The network is the ELIMINATED form: every street is a storage
 node, every intersection has been eliminated into directed `route` edges between the
 streets meeting there, and the atmosphere is the single boundary node that the `vent` and
 `exchange` edges reach. There is no potential layer and no junction node; the flows are
@@ -98,7 +98,7 @@ class StreetNetwork:
         return out
 
     def degree(self, node: str) -> int:
-        """How many street ends meet at `node`. Degree one is a dead end (spec 4.5b)."""
+        """How many street ends meet at `node`. Degree one is a dead end."""
         return sum((s.u == node) + (s.v == node) for s in self.streets)
 
 
@@ -141,8 +141,7 @@ def munich_idealised(
 
     Four real junctions on a square of side `L` (`A` NW, `B` NE, `C` SW, `D` SE) and eight
     dead ends one spacing out along each stub, so all twelve segments have the same length.
-    `L`, `W` and `H` are ARGUMENTS because the paper never published them -- see spec
-    section 7: the absolute
+    `L`, `W` and `H` are ARGUMENTS because the paper never published them: the absolute
     concentrations of Fig. 1 cannot be reproduced, only the ratios and the pattern.
     Returns the network and the street names `"1"` ... `"12"`, with `"11"` the emitter.
     """
@@ -200,7 +199,7 @@ def build_model(
     prototype's unguarded behaviour -- and expect `exchange_velocity` to refuse the
     step if a street is taller than 1.25 times the boundary-layer height.
 
-    `kappa=None` (the default, ruling M3-R1) is passed straight through to `StreetFlows`,
+    `kappa=None` (the default) is passed straight through to `StreetFlows`,
     which resolves it to MUNICH's 0.41 whenever any MUNICH-style form is selected
     (`canyon_wind="exponential"`, `exchange="schulte"` or `roof_wind_form="macdonald"`) and
     to IMPAQ's 0.4 otherwise; an explicit float always wins over that resolution.

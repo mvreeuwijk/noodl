@@ -1,4 +1,4 @@
-"""Sparse-path tests for cycles.py (Task 13): particular_flow and branch_flows migrated off
+"""Sparse-path tests for cycles.py: particular_flow and branch_flows migrated off
 a dense per-component tree solve and a materialised cycle-basis matmul, onto a level-
 synchronous elimination over the spanning forest. Each test compares the migrated function
 to an independent DENSE reference (the pre-Task-13 algorithm, reproduced here verbatim) on
@@ -45,7 +45,7 @@ def _multi_kind_multi_component_network() -> Network:
     bridge edge between them: airpath-kind operations must see 2 components, matching the
     component-labelling behaviour test_cycles.py already exercises elsewhere.
 
-    Amendment A7.2: the star also carries one extra airpath chord (h1 -> h2) so the
+    The star also carries one extra airpath chord (h1 -> h2) so the
     airpath sub-network has a nonzero cycle-space dimension (l = 1); b_air becomes 6 and
     n_air_components stays 2.
     """
@@ -65,7 +65,7 @@ def _multi_kind_multi_component_network() -> Network:
 def test_particular_flow_matches_dense_reference_on_multi_kind_multi_component_network():
     net = _multi_kind_multi_component_network()
     torch.manual_seed(0)
-    raw = torch.rand(3, dtype=torch.float64)  # 3 leaves (amendment A7)
+    raw = torch.rand(3, dtype=torch.float64)  # 3 leaves
     star_sources = torch.cat([-(raw.sum()).unsqueeze(0), raw])  # zero-sum on the star
     chain_sources = torch.tensor([0.3, -0.1, -0.2], dtype=torch.float64)  # zero-sum
     sources = torch.cat([star_sources, chain_sources])
@@ -130,12 +130,12 @@ def test_branch_flows_matches_dense_reference_on_multi_kind_network():
     l_dim = b_air - 7 + n_air_components  # 7 airpath-touching nodes across both components
     torch.manual_seed(1)
     amplitudes = torch.tensor([0.7], dtype=torch.float64)
-    assert amplitudes.shape[-1] == l_dim  # non-vacuous: l_dim must be 1 after amendment A7.2
+    assert amplitudes.shape[-1] == l_dim  # non-vacuous: l_dim must be 1 with the extra chord
 
     q = branch_flows(net, amplitudes, kind="airpath")
     q_ref = _dense_branch_flows_reference(net, amplitudes, kind="airpath")
     torch.testing.assert_close(q, q_ref, rtol=1e-9, atol=1e-12)
-    assert not torch.all(q == 0)  # amendment A7.2: a nonzero chord amplitude is really injected
+    assert not torch.all(q == 0)  # a nonzero chord amplitude is really injected
 
     A_air = net.incidence(kind="airpath")
     torch.testing.assert_close(
@@ -170,13 +170,13 @@ def test_branch_flows_never_materialises_the_dense_cycle_basis_matrix():
     # inside branch_flows (that is precisely the dense O(l * b) materialisation being
     # removed). Patch it to raise if touched, and confirm branch_flows still works.
     #
-    # NOTE: the brief's literal version of this test used kind="hydronic", but the
+    # NOTE: kind="hydronic" would not work here: the
     # network's only hydronic edge (h3 -> c0) is itself a spanning-tree edge (it is the
     # first edge to connect two previously separate hydronic components), so
     # spanning_forest("hydronic") has zero chords; amplitudes=[0.5] would then mismatch
     # chord_cols.numel() == 0 and *even the dense* branch_flows raises ValueError on that
-    # input (confirmed by direct execution against the pre-Task-13 code). Using
-    # kind="airpath" instead exercises the one real chord amendment A7.2 introduced,
+    # input (confirmed by direct execution against the dense code). Using
+    # kind="airpath" instead exercises the one real chord of the fixture,
     # which is what this test needs to inject a nonzero amplitude at all.
     net = _multi_kind_multi_component_network()
     amplitudes = torch.tensor([0.5], dtype=torch.float64)
@@ -197,7 +197,7 @@ def test_particular_flow_1000_node_chain_is_faster_than_dense():
     Memory is not measured here: tracemalloc does not see PyTorch's C-level allocator (an
     80 MB torch.zeros shows as 0.000 MB under tracemalloc, measured on this machine), so a
     tracemalloc-based memory comparison would be a vacuous pass on Python-object overhead
-    only (amendment A4). This test therefore reports TIME only.
+    only. This test therefore reports TIME only.
 
     Measured on this machine: sparse 20.13 ms vs dense 70.07 ms.
     """

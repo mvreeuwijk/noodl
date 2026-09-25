@@ -79,7 +79,7 @@ def test_several_interface_tensors_of_different_shapes():
 
 
 def test_nonlinear_coupled_map_matches_the_dense_implicit_solve():
-    """The brief's other maps are all linear and most are uncoupled; P1-2's real target is a
+    """The other maps here are all linear and most are uncoupled; the real target is a
     COUPLED nonlinear model, where one pass's derivative and the fixed point's differ. The
     independent reference here is the implicit function theorem evaluated with dense
     Jacobians and an LU solve -- a wholly different code path from the utility's
@@ -127,7 +127,7 @@ def test_a_gauss_seidel_sweep_whose_outputs_feed_each_other():
 
     DO NOT DELETE THIS AS REDUNDANT. It is the ONLY test in this file that kills the
     plausible-looking variant of the adjoint in which v is projected back onto the outputs by
-    one more VJP of `z_next` against them (the form the Task 6 brief specified): that VJP
+    one more VJP of `z_next` against them: that VJP
     follows the x -> y edge as well and returns dx*/da = 5/6 against a true 2/3. Every other
     test here either has no inter-output edge or has it pointing the other way, and all of
     them pass against the wrong form. See the module docstring.
@@ -157,8 +157,8 @@ def test_a_gauss_seidel_sweep_whose_outputs_feed_each_other():
 
 
 def test_a_sliced_read_of_a_packed_state_output():
-    """The shape Task 8 takes: the pass hands on ONE packed state tensor and the next iterate
-    is a SLICE of it, so the read is a genuine non-identity linear map rather than `z_next`
+    """The shape a model coupling takes: the pass hands on ONE packed state tensor and the next
+    iterate is a SLICE of it, so the read is a genuine non-identity linear map rather than `z_next`
     being an `outputs` entry. `iface = M iface + b theta` packed with a diagnostic
     `|iface|^2`; the closed form is d iface*/d theta = (I - M)^{-1} b, and the diagnostic
     contributes 2 iface*^T times the same.
@@ -391,7 +391,7 @@ def test_out_of_range_solver_knobs_are_refused_at_call_time(kwargs, message):
 
 
 def test_restart_is_passed_through_to_the_adjoint_gmres():
-    """Each matvec is a full VJP through the pass graph, so Task 8 may want a smaller Krylov
+    """Each matvec is a full VJP through the pass graph, so a caller may want a smaller Krylov
     basis than the default min(m, 100). A restart of 2 on the 3x3 map reaches the same closed
     form as `test_linear_map_matches_the_closed_form_solve`; and `restart` really is the
     basis size, not a relabelled iteration count -- a full basis converges exactly in 3
@@ -422,7 +422,7 @@ def test_restart_is_passed_through_to_the_adjoint_gmres():
         run(restart=1, max_iter=4)
 
 
-# --------------------------------------------------------------------- batch_shape (Task 9)
+# --------------------------------------------------------------------- batch_shape
 
 def _batched_scalar_contraction():
     """Four INDEPENDENT scalar contractions z_i = rho_i z_i + theta_i, distinct rho and

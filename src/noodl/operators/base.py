@@ -7,7 +7,7 @@ trustworthy only once a caller has checked them (the symmetry tests in
 `tests/operators/test_base.py`, and `solvers.grounding.spd_certificate` for the SPD case).
 
 `SolveResult` is what every `solvers.*` entry point returns; it never raises on
-non-convergence (see the milestone design, section 3.2). Only `raise_on_failure` turns a
+non-convergence. Only `raise_on_failure` turns a
 per-instance failure into an exception, and only when a caller -- a public simulation or
 gradient entry point -- chooses to call it.
 """
@@ -74,7 +74,7 @@ class SolveResult:
 def as_operator(op: LinearOperator | Tensor) -> LinearOperator:
     """Auto-wrap a plain dense tensor as a ``DenseOperator``; pass a ``LinearOperator`` through.
 
-    The single compatibility shim that makes every pre-Milestone-1b caller -- each of which
+    The single compatibility shim that makes every dense caller -- each of which
     passes a callable returning a dense ``(..., m, m)`` tensor rather than a ``LinearOperator``
     -- invisible to `newton.newton` and `implicit.adjoint`, the two entry points that call it.
     ``DenseOperator``'s ``symmetric=False`` default is load-bearing: it lets this wrap happen
@@ -130,7 +130,7 @@ class LinearOperator(Protocol):
 
 @runtime_checkable
 class SparseAssembling(Protocol):
-    """The OPTIONAL sparse-assembly extension to `LinearOperator` (spec section 6.2).
+    """The OPTIONAL sparse-assembly extension to `LinearOperator`.
 
     `assemble_sparse()` returns `(row, col, values)` in COO form, or `None` when this
     operator has no sparse form to offer (the honest answer for a dense operator, and for

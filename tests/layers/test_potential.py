@@ -214,9 +214,8 @@ def test_batched_wind_driver_matches_looped_solves(two_zone_layer):
 
 
 def test_power_residual_is_zero_at_solution_and_nonzero_when_perturbed(two_zone_layer):
-    # NOTE (deviation from the brief, documented in task-7-report.md): the brief's original
-    # version of this test perturbed `phi` (not `q`) and expected `power_residual` to become
-    # large. That is unsatisfiable for any mathematically correct implementation of the
+    # NOTE: perturbing `phi` (not `q`) and expecting `power_residual` to become large is
+    # unsatisfiable for any mathematically correct implementation of the
     # specified formula: algebraically, power_residual(phi, q, drivers) collapses to exactly
     # phi_interior . (A_interior @ q) (the dp*q and drive*q terms cancel down to phi^T(A q),
     # and the boundary term removes the boundary half of that dot product), so it depends on
@@ -241,9 +240,9 @@ def test_power_residual_is_zero_at_solution_and_nonzero_when_perturbed(two_zone_
 
 
 def test_power_residual_is_zero_at_solution_with_interior_sources():
-    # SPECIFIC GUIDANCE (controller) requires power_residual to take an optional `sources`
-    # argument and to be exercised both with and without interior sources: the brief's own
-    # tests above only ever call power_residual with sources=None, which cannot distinguish
+    # power_residual takes an optional `sources` argument and must be exercised both with
+    # and without interior sources: the tests above only ever call power_residual with
+    # sources=None, which cannot distinguish
     # a correctly-signed interior-source term from an incorrectly-signed one (the term is
     # multiplied by a zero source vector either way). This test uses a nonzero interior
     # source so the sign of that term is actually exercised.
@@ -270,10 +269,10 @@ def test_power_residual_is_zero_at_solution_with_interior_sources():
 
 
 def test_floating_group_with_no_path_to_boundary_raises_runtime_error():
-    # CODE REVIEW FINDING 1: a floating GROUP (two or more mutually-connected nodes with no
-    # path, as a group, to any boundary node) was previously undetected, because each
-    # member's own J0 diagonal is nonzero from its internal (within-group) edges -- only an
-    # isolated SINGLE floating node was caught. Reproduction from the review: ambient-z0 and
+    # Regression: a floating GROUP (two or more mutually-connected nodes with no path, as a
+    # group, to any boundary node) must be detected even though each member's own J0
+    # diagonal is nonzero from its internal (within-group) edges -- not only an isolated
+    # SINGLE floating node. Reproduction: ambient-z0 and
     # f1-f2 are each tied together by a Conductance edge (nonzero slope), and z0-f1 is a
     # FixedFlow ("duct") edge, whose slope is identically zero and so cannot rescue the
     # {f1, f2} group's connection to the boundary node "ambient".
@@ -298,7 +297,7 @@ def test_floating_group_with_no_path_to_boundary_raises_runtime_error():
 
 
 def test_drive_kind_not_in_layer_raises_value_error_naming_it():
-    # CODE REVIEW FINDING 2 (part 1): a drive whose kind matches none of the layer's own
+    # Regression: a drive whose kind matches none of the layer's own
     # element kinds was previously silently dropped (dp() only ever loops over kinds that
     # ARE in the layer, so a "hydronic" drive on an airpath-only layer never gets applied
     # and no error is raised anywhere).
@@ -314,7 +313,7 @@ def test_drive_kind_not_in_layer_raises_value_error_naming_it():
 
 
 def test_wrong_width_drive_raises_value_error_naming_widths():
-    # CODE REVIEW FINDING 2 (part 2): a drive tensor whose trailing width does not match its
+    # Regression: a drive tensor whose trailing width does not match its
     # kind's own edge count previously corrupted `dp` silently: torch.cat in dp() would
     # accept the wrongly-widened block, shifting every later kind's slice out from under the
     # (still correctly-sized) `_elem_slices`, so a DIFFERENT element ends up being fed part
@@ -342,13 +341,13 @@ def test_wrong_width_drive_raises_value_error_naming_widths():
 
 
 def test_floating_group_with_mixed_slope_same_kind_edges_raises_runtime_error():
-    # CODE REVIEW FINDING 1 (re-review): the first fix gated connectivity at KIND
-    # granularity ("does this kind have any nonzero-slope edge anywhere"), which let a
-    # zero-slope edge of an otherwise nonzero-slope kind still connect a group -- exactly
-    # what the fix was meant to prevent. Reproduction: a single Conductance kind with a
-    # closed damper (g=0 on ambient->z1) and an open one (g=1 on z1->z2). {z1, z2} genuinely
-    # floats: there is no nonzero-slope path from either to "ambient", even though both
-    # edges share the "conduction" kind (which does have a nonzero-slope edge elsewhere).
+    # Regression: gating connectivity at KIND granularity ("does this kind have any
+    # nonzero-slope edge anywhere") would let a zero-slope edge of an otherwise
+    # nonzero-slope kind still connect a group -- exactly what the check must prevent. Reproduction:
+    # a single Conductance kind with a closed damper (g=0 on ambient->z1) and an open one (g=1 on
+    # z1->z2). {z1, z2} genuinely floats: there is no nonzero-slope path from either to "ambient",
+    # even though both edges share the "conduction" kind (which does have a nonzero-slope edge
+    # elsewhere).
     net = Network(dtype=torch.float64)
     net.add_node("ambient")
     net.add_node("z1")
@@ -513,7 +512,7 @@ def test_differentiable_false_matches_differentiable_true(two_zone_layer):
 
 
 def test_solve_raises_for_element_tensor_with_requires_grad_but_not_learnable(two_zone_layer):
-    # Review finding 2: `Element._param` deliberately supports holding a tensor with
+    # `Element._param` deliberately supports holding a tensor with
     # `requires_grad=True` unwrapped (learnable=False) so an external graph is preserved for
     # `differentiable=False`; but such a tensor is absent from `named_parameters()`, so the
     # differentiable solve (which threads only registered parameters through
@@ -535,7 +534,7 @@ def test_solve_raises_for_element_tensor_with_requires_grad_but_not_learnable(tw
 
 
 def test_solve_raises_for_drive_owning_its_own_differentiable_tensor(two_zone_layer):
-    # Review finding 3: a Drive is captured by closure inside the differentiable solve, not
+    # A Drive is captured by closure inside the differentiable solve, not
     # threaded through Function.apply, so a Drive that owns a learnable tensor directly
     # (instead of reading it from the `drivers` mapping every call) would get a silently
     # absent gradient. `solve(differentiable=True)` must refuse instead.
@@ -856,7 +855,7 @@ def test_a_phi_independent_node_source_is_refused():
 
 class _LinearGround(NodeSource):
     """w = g * phi: a linear virtual-ground withdrawal, dflow = g everywhere (well-defined
-    at phi = 0, unlike `_Emitter`'s sqrt law) -- built for the FR-1 grounding tests below."""
+    at phi = 0, unlike `_Emitter`'s sqrt law) -- built for the grounding tests below."""
 
     def __init__(self, nodes, g):
         super().__init__(nodes)
@@ -867,8 +866,8 @@ class _LinearGround(NodeSource):
 
 
 def test_grounding_counts_a_node_source_at_a_fixed_flow_only_node():
-    """FR-1: a node reachable from every boundary only through FixedFlow edges (dflow == 0
-    everywhere, spec's own "structurally singular subnetwork" example) is ungrounded by
+    """A node reachable from every boundary only through FixedFlow edges (dflow == 0
+    everywhere, the "structurally singular subnetwork" case) is ungrounded by
     edges alone; a NodeSource with a positive slope at that node must still let it solve,
     because the node source's own diagonal shift IS the SPD contribution a boundary
     connection would otherwise have to supply."""
@@ -892,7 +891,7 @@ def test_grounding_counts_a_node_source_at_a_fixed_flow_only_node():
     assert float(phi[..., layer.interior]) == pytest.approx(expected, rel=1e-9)
 
     # Without the fix (edge-only grounding), this same layer is refused: the FixedFlow edge
-    # contributes a zero slope, so the pre-FR-1 check saw an ungrounded interior node.
+    # contributes a zero slope, so an edge-only check sees an ungrounded interior node.
     without_source = PotentialFlowLayer(
         net, "bare", elements, boundary=["R"], linear_solver="direct",
     )
@@ -901,7 +900,7 @@ def test_grounding_counts_a_node_source_at_a_fixed_flow_only_node():
 
 
 def test_two_node_sources_on_one_node_sum_their_withdrawals():
-    """FR-9: EPANET semantics -- several node sources at one junction sum, exactly as if a
+    """EPANET semantics -- several node sources at one junction sum, exactly as if a
     single node source carried their combined coefficient."""
     net = Network(dtype=torch.float64)
     net.add_node("J")
@@ -926,7 +925,7 @@ def test_two_node_sources_on_one_node_sum_their_withdrawals():
 
 
 def test_node_source_with_a_batched_parameter_solves_each_instance_independently():
-    """FR-9: a NodeSource whose own parameter carries a leading batch dim solves each
+    """A NodeSource whose own parameter carries a leading batch dim solves each
     instance to the same answer an unbatched, single-instance solve would give it."""
     net = Network(dtype=torch.float64)
     net.add_node("J")
@@ -955,7 +954,7 @@ def test_node_source_with_a_batched_parameter_solves_each_instance_independently
 
 
 def test_node_source_with_an_unregistered_grad_tensor_is_named_as_a_node_source():
-    """FR-8: the unreachable-tensor guard must call a NodeSource a "node source" (not an
+    """The unreachable-tensor guard must call a NodeSource a "node source" (not an
     "element") and must not tell the caller to pass learnable=True -- a NodeSource has no
     such constructor kwarg; the fix is to register the tensor as an nn.Parameter."""
 
@@ -988,7 +987,7 @@ def test_node_source_with_an_unregistered_grad_tensor_is_named_as_a_node_source(
 
 
 def test_element_for_returns_the_element_and_its_q_slice():
-    """FR-13: the public accessor a caller outside this layer uses instead of reaching into
+    """The public accessor a caller outside this layer uses instead of reaching into
     `_elements`/`_elem_slices` directly."""
     net = Network(dtype=torch.float64)
     net.add_node("a")

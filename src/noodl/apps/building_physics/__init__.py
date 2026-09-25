@@ -2,7 +2,7 @@
 
 A model built ON TOP of the core package. The core supplies every solve; this package
 decides which elements, drives, closures and layers a building network has, and in which
-units (milestone 2 spec 6.4). Nothing under `src/noodl/` outside `apps/` imports from
+units. Nothing under `src/noodl/` outside `apps/` imports from
 here.
 """
 

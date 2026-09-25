@@ -1,4 +1,4 @@
-"""Circular geometry and the Manning inversion (spec rows W5, W6)."""
+"""Circular geometry and the Manning inversion (rows W5, W6)."""
 
 import pytest
 import torch
@@ -57,9 +57,9 @@ def test_manning_uses_the_si_constant_one():
 
 
 def test_manning_flow_is_zero_and_finite_gradient_at_a_dry_pipe():
-    """M4-R15: R^(2/3) has an infinite local derivative at R = 0 (h = 0), and diameter
+    """R^(2/3) has an infinite local derivative at R = 0 (h = 0), and diameter
     reaches hydraulic_radius through a plain multiplicative factor that bypasses _theta's
-    clamp gate, so d(Q)/d(diameter) was NaN at exactly h = 0 before the R-floor guard."""
+    clamp gate, so d(Q)/d(diameter) is NaN at exactly h = 0 without the R-floor guard."""
     h = torch.zeros(1, dtype=F64, requires_grad=True)
     d = torch.tensor([0.30], dtype=F64, requires_grad=True)
     n = torch.tensor([0.013], dtype=F64, requires_grad=True)
@@ -88,7 +88,7 @@ def test_capacity_is_the_discharge_at_the_peak_depth():
     assert float(g.capacity_flow(d, n, s)) == pytest.approx(
         float(g.manning_flow(g.H_MAX_RATIO * d, d, n, s)), rel=0.0
     )
-    # Measured by the plan writer: 0.10402157331502969 m3/s.
+    # Measured: 0.10402157331502969 m3/s.
     assert float(g.capacity_flow(d, n, s)) == pytest.approx(0.10402157331502969, rel=1e-12)
 
 
@@ -111,7 +111,7 @@ def test_w5_manning_inversion_round_trip(diameter):
 
 def test_normal_depth_reproduces_the_committed_tree():
     """The five conduits of tests/data/sewer/tree_steady.inp, measured against an independent
-    bisection solver of the Manning equation, written for the milestone 4 research note."""
+    bisection solver of the Manning equation."""
     d = torch.tensor([0.30, 0.30, 0.45, 0.30, 0.45], dtype=F64)
     n = torch.full((5,), 0.013, dtype=F64)
     s = torch.tensor([0.010, 0.010, 0.005, 0.010, 0.005], dtype=F64)
@@ -131,7 +131,7 @@ def test_zero_flow_gives_zero_depth_and_finite_gradients():
     h.sum().backward()
     assert torch.isfinite(q.grad).all()
     assert torch.isfinite(n.grad).all()
-    # Spec amendment A7: the zero-flow pipe's reported sensitivity is exactly zero.
+    # The zero-flow pipe's reported sensitivity is exactly zero (a documented choice).
     assert float(q.grad[1]) == 0.0
     assert float(n.grad[1]) == 0.0
     assert float(q.grad[0]) > 0.0
@@ -156,8 +156,8 @@ def test_negative_discharge_is_refused():
 
 
 def test_non_finite_discharge_is_refused():
-    """FR-14: `normal_depth`'s non-finite guard (checked BEFORE the negative-discharge and
-    surcharge checks) was the one uncovered line in this module."""
+    """`normal_depth`'s non-finite guard (checked BEFORE the negative-discharge and
+    surcharge checks)."""
     with pytest.raises(ValueError, match="discharge must be finite"):
         g.normal_depth(
             torch.tensor([float("nan")], dtype=F64), torch.tensor([0.30], dtype=F64),

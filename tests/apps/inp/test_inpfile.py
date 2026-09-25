@@ -55,7 +55,7 @@ def test_raw_text_is_preserved(sample):
 def test_content_before_any_section_is_refused(tmp_path):
     path = tmp_path / "bad.inp"
     path.write_text("J1 12.0\n[JUNCTIONS]\n")
-    # FR-5: punctuation (a colon) right after the line number, matching every other
+    # Punctuation (a colon) right after the line number, matching every other
     # refusal in this module.
     with pytest.raises(ValueError, match="line 1: .* before any .section."):
         read_sections(path)
@@ -69,7 +69,7 @@ def test_a_malformed_header_is_refused(tmp_path):
 
 
 def test_a_header_with_more_than_one_bracket_pair_is_refused(tmp_path):
-    """FR-4: `[JUNC[TIONS]` ends with `]` and has length >= 3, but is not a single
+    """`[JUNC[TIONS]` ends with `]` and has length >= 3, but is not a single
     `[NAME]` pair -- it must be refused as a malformed header, not silently read as the
     section name `JUNC[TIONS`."""
     path = tmp_path / "bad.inp"

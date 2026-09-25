@@ -1,4 +1,4 @@
-"""Tests for the OPTIONAL `assemble_sparse()` operator member (spec section 6.2, Task C).
+"""Tests for the OPTIONAL `assemble_sparse()` operator member.
 
 `assemble_sparse()` returns `(row, col, values)` in COO form: `row`/`col` are int64 index
 arrays SHARED across the batch, `values` is batch-leading `(..., nnz)`. Duplicate
@@ -35,7 +35,7 @@ def _set_float64_dtype():
 
 
 def _chain_op(slopes: torch.Tensor) -> GraphLaplacianOperator:
-    """The milestone's chain fixture: 3 nodes, node 2 is the boundary node, edges (0,1), (1,2)."""
+    """The chain fixture: 3 nodes, node 2 is the boundary node, edges (0,1), (1,2)."""
     src = torch.tensor([0, 1])
     tgt = torch.tensor([1, 2])
     interior_of_node = torch.tensor([0, 1, -1])
@@ -156,10 +156,8 @@ def test_dense_operator_assemble_sparse_returns_none():
 
 
 def test_advection_operator_assemble_sparse_matches_its_dense_assembly():
-    """Task C's documented scope limit ("the transport path stays on GMRES, so the
-    nonsymmetric advection operator declares no sparse form") was closed by Task 4 (B1):
-    `AdvectionOperator` is still nonsymmetric and still uncertified (so `method="auto"`
-    still routes it to GMRES, unaffected by this), but it now HAS a sparse form, for
+    """`AdvectionOperator` is nonsymmetric and uncertified (so `method="auto"`
+    routes it to GMRES, unaffected by this), but it HAS a sparse form, for
     `method="sparse_direct"` and ILU to consume. See `tests/operators/test_advection_sparse.py`
     for the full parity suite (batches, conduction, kinetics, removal, self-loops, an
     inactive node, a zero-flow edge); this is the one-instance smoke test in this module's

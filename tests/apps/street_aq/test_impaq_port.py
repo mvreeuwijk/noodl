@@ -1,4 +1,4 @@
-"""The IMPAQ port against the AQ_DT prototype — spec section 6.4.
+"""The IMPAQ port against the AQ_DT prototype.
 
 The prototype lives outside this repository, so the byte-for-byte comparison is guarded
 and the numbers it produces are ALSO stored in `tests/golden/impaq_test_network.json`,

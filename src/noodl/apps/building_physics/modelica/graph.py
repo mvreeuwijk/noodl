@@ -1,15 +1,15 @@
-"""Component graph over a `ModelicaDoc` (spec section 6, conversion rules).
+"""Component graph over a `ModelicaDoc`: the conversion rules.
 
 `build(doc)` resolves every `connect()` pair the JSON carries (`doc.connections`) to a port on
 one of `doc.components`, groups ports into NODES with union-find, fuses hydrostatic-column
 chains into single edges, checks two-way wiring, and returns a `ComponentGraph`. It never
 evaluates a Modelica expression: every parameter it reads was already evaluated by
-OpenModelica, and every check here is about topology and class support, not physics. Task 6
-turns the result into a noodl `Model`.
+OpenModelica, and every check here is about topology and class support, not physics.
+`assemble` turns the result into a noodl `Model`.
 
 Every phase below runs to completion and only ADDS to a shared error list; nothing raises
 until `build` has run every phase, so one `ModelicaImportError` names everything wrong with
-the document, not just the first thing found (fix round 1, review item 2). A phase that
+the document, not just the first thing found. A phase that
 depends on a node a previous phase could not resolve (the "conflict" node kind below) skips
 just that one piece of work rather than crashing.
 
@@ -20,12 +20,12 @@ owns exactly one node, named after the component: every one of its own fluid por
 its declared `ports[i]`) is the SAME node, because a lumped volume or boundary is a single
 pressure state that happens to expose several connection points. A `TraceSubstancesFlowSource`
 or `MassFlowSource_T` ("source") likewise shares whichever node its own port(s) resolve to --
-it is not a node in its own right, it decorates one (spec section 6, "becomes a node source").
+it is not a node in its own right, it decorates one (it becomes a node source).
 
 Every other `connect()` pair between two ports that belong to NEITHER a zone/boundary/source
 component is a plain wire: it creates a JUNCTION node, named `"_j<k>"`. Junctions are numbered
 in a deterministic order: sorted by the lexicographically smallest port reference string
-(`"<instance>.<port>"`) in the group (Task 5 resolution). A junction with more than two
+(`"<instance>.<port>"`) in the group. A junction with more than two
 connections -- i.e. a group of more than two port references, meaning three or more distinct
 components meet at that wire rather than two -- is refused; so is a group holding ports from
 two DIFFERENT zone/boundary components (nothing here wires two zones directly with no flow
@@ -41,7 +41,7 @@ Hydrostatic column chains and path orientation
 -----------------------------------------------
 A one-way flow element (`Orifice` and friends) together with any number of `MediumColumn`s
 and degree-two junctions between it and each of its two end zones/boundaries fuses into one
-`FlowPath` (spec section 6). The path is ORIENTED from the element's `port_a` side to its
+`FlowPath`. The path is ORIENTED from the element's `port_a` side to its
 `port_b` side: `FlowPath.src` (the element's "tail") is the zone/boundary reached by walking
 from the element's `port_a`, `FlowPath.tgt` (its "head") the one reached from `port_b`.
 
@@ -50,15 +50,14 @@ Each column on the path gets a sign: **+1** if, walking the path from its `src` 
 `Buildings/Airflow/Multizone/MediumColumn.mo`: `port_a` is the "positive design flow
 direction" inlet, drawn at the top of the icon, `port_b` at the bottom) is reached before its
 `port_b` (its bottom); **-1** otherwise. `FlowPath.columns` lists them `(component, sign)` in
-that `src`-to-`tgt` order, so Task 6 computes the flow element's own driving pressure
+that `src`-to-`tgt` order, so `assemble` computes the flow element's own driving pressure
 difference as
 
     dp_element = (phi_src - phi_tgt) + sum(sign * h * rho * g)
 
-`rho` chosen per each column's own `densitySelection` parameter (fix round 1, review item 1 --
-an earlier draft had this negated). Derivation, checked against the ThreeRoomsContam west
-stack this module's tests fix as `stack_chain.json` (`MediumColumn.mo`'s own relation is
-`port_a.p - port_b.p = -h*rho*g_n`, i.e. the bottom port is at the higher pressure):
+`rho` chosen per each column's own `densitySelection` parameter. Derivation, checked against the
+ThreeRoomsContam west stack this module's tests fix as `stack_chain.json` (`MediumColumn.mo`'s own
+relation is `port_a.p - port_b.p = -h*rho*g_n`, i.e. the bottom port is at the higher pressure):
 `oriWesTop.port_a` is wired straight through `colWesTop` to `volTop` (`src`), so
 `p(colWesTop.port_a) = p(volTop)` and hence `p(oriWesTop.port_a) = p(volTop) + h*rho*g`;
 symmetrically `oriWesTop.port_b` is wired through `colWesBot` to `volWes` (`tgt`), giving
@@ -107,8 +106,8 @@ Heat ports
 ----------
 Fluid ports and heat ports never share a node: a `FixedTemperature.port` -> a
 `ThermalConductor.port_a`/`port_b` -> a zone's `heatPort` is a separate two-hop chain, recorded
-as a `Pin` for Task 6 (which reads the conductor's `G` and decides whether it is large enough
-to pin the zone's temperature -- spec section 6's threshold is not applied here). Any other
+as a `Pin` for `assemble` (which reads the conductor's `G` and decides whether it is large
+enough to pin the zone's temperature -- `assemble.G_PIN_MIN` is not applied here). Any other
 heat-port wiring -- a bare `FixedTemperature` with no conductor, a conductor whose other end is
 not a zone, and so on -- is refused. A `PrescribedHeatFlow` whose `port` is wired to a zone's
 `heatPort` is recorded in `ComponentGraph.heat_sources` as `(component, zone)`; wired to
@@ -224,7 +223,7 @@ class _UnionFind:
 
 class _ChainRefused(Exception):
     """`quiet`: the chain ends at a port wired to a refused component, which is already
-    named in the error; the chain adds no message of its own (review fix round 1)."""
+    named in the error; the chain adds no message of its own."""
 
     def __init__(self, message: str, quiet: bool = False) -> None:
         super().__init__(message)
@@ -240,7 +239,7 @@ def _split(ref: str, errors: list[str] | None = None) -> tuple[str, str] | None:
     check the format, so a hand-edited or malformed JSON document can still reach it. When
     `errors` is given (the two phases that read `doc.connections` directly, still untrusted),
     the message is appended there and `None` returned instead of raising, so the gather-all
-    phases keep running (final review, Minor 3). An internal call with no `errors` (already
+    phases keep running. An internal call with no `errors` (already
     on an instance/port pair this module itself built) still raises: that would be this
     module's own bug, not bad input.
     """
@@ -320,7 +319,7 @@ def _raise(errors: list[str]) -> None:
 class _Ctx:
     """Shared, mutable state threaded through every phase of `build`.
 
-    `errors` accumulates across every phase (fix round 1, review item 2): nothing raises until
+    `errors` accumulates across every phase: nothing raises until
     `build` has run all of them, so one `ModelicaImportError` names everything wrong with the
     document. `root_to_kind` can hold `"conflict"` for a node a phase could not resolve (two
     zone/boundary components wired directly together); later phases check for that and skip
@@ -398,9 +397,9 @@ def _process_fluid_connections(doc: ModelicaDoc, ctx: _Ctx) -> None:
             pass  # resolved separately by `_resolve_pins`, re-reading `doc.connections`
         else:
             # Neither a fluid nor a heat connection: a signal-style wire between blocks
-            # (spec section 6 / Task 5 resolution). Only refuse it if it feeds a component
+            # Only refuse it if it feeds a component
             # this reader does not otherwise support; a legitimate signal link is not
-            # recorded anywhere in `ComponentGraph` -- Task 6 reads `doc.signals` and
+            # recorded anywhere in `ComponentGraph` -- `assemble` reads `doc.signals` and
             # `doc.connections` directly for that.
             for inst in (ia, ib):
                 reason = schema.refusal_reason(ctx.by_name[inst].cls)
@@ -445,7 +444,7 @@ def _assign_nodes(ctx: _Ctx) -> None:
         bou_refs = sorted(ctx.fluid_refs_by_instance.get(bou, [])) if bou else []
         if len(zb_names) == 2 and len(zone_names) == 1 and len(bou_refs) != 1:
             # The boundary has further connected ports: in MBL they carry the boundary's
-            # own state and mass, which the zone's node cannot represent (review fix round 1).
+            # own state and mass, which the zone's node cannot represent.
             ctx.errors.append(
                 f"{bou} ({ctx.by_name[bou].cls}): wired straight to volume {zone_names[0]} "
                 f"and also through {', '.join(r for r in bou_refs)}; a boundary on a volume "
@@ -487,7 +486,7 @@ def _two_way_edges(ctx: _Ctx, want_kind: str) -> list[TwoWayEdge]:
         refs = [f"{name}.{p}" for p in _FOUR_PORT]
         missing = [r for r in refs if r not in ctx.uf]
         if missing and all(r in ctx.beside_refused for r in missing):
-            continue  # the refused neighbour is named already (review fix round 1)
+            continue  # the refused neighbour is named already
         if missing:
             ctx.errors.append(
                 f"{name} ({comp.cls}): port(s) {', '.join(missing)} are not connected"

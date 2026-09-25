@@ -91,7 +91,7 @@ def test_headspace_refuses_a_missing_driver():
 
 
 def test_headspace_resistance_names_only_the_missing_key():
-    """FR-11: only the ACTUALLY missing key is named, not always both -- a caller who gave
+    """Only the ACTUALLY missing key is named, not always both -- a caller who gave
     `sewer.D_h` but forgot `sewer.A_air` must not be told `sewer.D_h` is missing too."""
     el = Headspace(torch.tensor([15.0], dtype=F64), torch.tensor([0]))
     with pytest.raises(KeyError, match=r"\['sewer\.A_air'\]") as excinfo:
@@ -142,7 +142,7 @@ def test_drag_refuses_a_missing_driver():
 def test_a1_pescod_and_price_air_to_water_velocity_ratio(h_over_d, v_w, measured):
     """Row A1. A 300 mm UPVC pipe, 15 m, open at BOTH ends: two half-length headspace edges
     in series with both outer nodes prescribed at ambient pressure and one interior manhole
-    between them. Measured by the plan writer: 24.139 %, 24.995 %, 25.149 % -- all inside
+    between them. Measured: 24.139 %, 24.995 %, 25.149 % -- all inside
     the 20-40 % band, and equal to the closed form to 1.12e-8 relative."""
     net = Network(dtype=F64)
     for name in ("A1", "M", "A2"):

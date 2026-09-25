@@ -138,7 +138,7 @@ def node_closure(flux: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
 
     The correction lands on ONE side only, never on both -- that asymmetry is MUNICH's, and
     it is what makes a degree-one junction (a dead end) a one-way exchange with the
-    background rather than a wall, which spec section 4.5b requires. Returns
+    background rather than a wall. Returns
     `(p_in, p_out, to_atmosphere, from_atmosphere)`, all `(..., d)` and all `>= 0`.
     """
     p_in = torch.clamp(flux, min=0.0)
@@ -267,7 +267,7 @@ class StreetFlows:
     flux matrix. Reproducing that is what makes the direction averaging comparable with
     MUNICH at all.
 
-    `kappa=None` (the default, ruling M3-R1) resolves to MUNICH's 0.41 whenever any
+    `kappa=None` (the default) resolves to MUNICH's 0.41 whenever any
     MUNICH-style form is selected (`canyon_wind="exponential"`, `exchange="schulte"` or
     `roof_wind_form="macdonald"`), and to IMPAQ's 0.4 otherwise; an explicit float always
     wins over that resolution.
@@ -352,9 +352,9 @@ class StreetFlows:
 
         There is exactly one junction enumeration in this application and it lives in
         `build_model`, which writes it onto the edges. Nothing here re-derives it:
-        an earlier draft of this plan had the two enumerate junctions by different rules
-        (`u + v` over all streets against `(u, v)` per street), which put the flows on the
-        wrong edges and moved the answer by 34 % with no error anywhere.
+        two enumerations by different rules (`u + v` over all streets against `(u, v)` per
+        street) would put the flows on the wrong edges and move the answer by 34 % with no
+        error anywhere.
         """
         edges = net.edges
         vent_rows: list[tuple[int, int, int, int]] = []

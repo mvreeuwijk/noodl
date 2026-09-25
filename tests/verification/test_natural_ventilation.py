@@ -44,7 +44,7 @@ CD = 0.6
 # units (K), and it cannot be met below the potential solve's own residual floor propagated
 # through dT/dF (~3.6e3 K.s/kg here). Newton's dtype-derived default (sqrt(eps) = 1.49e-8)
 # leaves ~5e-5 K of coupling noise, so the 1e-9 K `iterate_tol` these verification cases ask
-# for stalls at the default. Ruling R21 -- tighten the SOLVE, never loosen the assertion --
+# for stalls at the default. Tighten the SOLVE, never loosen the assertion --
 # so every `steady` below carries the Newton tolerances its coupling tolerance requires.
 TIGHT = {"atol": 1e-14, "rtol": 1e-14}
 
@@ -185,8 +185,8 @@ def _opposing_wind_case(coupling: str = "iterate"):
         "these same measured relations at omega = 0.15 from 46.0 K gives 46.414, 46.261, "
         "46.305, 46.291, 46.295, converging on the root. So: no TOLERANCE reaches it (which "
         "is what this xfail is about, and why nothing here was loosened), but adaptive or "
-        "user-settable under-relaxation is a candidate remedy alongside the spec's section "
-        "13 monolithic Newton, and the evidence does not choose between them. The physics "
+        "user-settable under-relaxation is a candidate remedy alongside a monolithic "
+        "Newton coupling, and the evidence does not choose between them. The physics "
         "is sound -- the model resolves all three roots under TIME STEPPING, see "
         "test_opposing_wind_multiplicity_resolves_per_instance_under_time_stepping, which "
         "is the per-instance multiplicity check this case is here to make."
@@ -196,9 +196,9 @@ def test_opposing_wind_three_root_case_converges_per_instance_to_a_stable_root()
     """Li and Delsante's beta = 0, alpha = 0.9, gamma = 1 example: three steady states
     (q = 0.45 up, 0.54 down [unstable], 1.40 down). A cold start (wind wins) and a hot start
     (buoyancy wins) are run as one batch; each instance must land on a root of its branch's
-    cubic. If the fixed-point coupling fails to converge here, that is the spec's section 13
-    monolithic-Newton trigger: record it in the ledger and mark this test
-    xfail(strict=True) with that reason -- do not loosen the tolerances.
+    cubic. If the fixed-point coupling fails to converge here, that is the case for a
+    monolithic-Newton coupling: mark this test xfail(strict=True) with that reason -- do
+    not loosen the tolerances.
     """
     model, state, drivers, alpha, _ = _opposing_wind_case()
     starts = dict(state, **{"thermal.x": torch.tensor([[T_O], [T_O + 40.0]], dtype=F64)})
@@ -369,7 +369,7 @@ def test_golden_matches_stored_reference(record_property):
 
     Two simulated hours at 600 s under `coupling="iterate"`, compared term by term. The demo
     has no RNG, so it regenerates bit-exactly and the tolerance here (1e-8 relative) is far
-    tighter than any physical claim: this is a change detector for the whole milestone-2
+    tighter than any physical claim: this is a change detector for the whole building
     stack at once -- `build_model`, `Stack`, the density closure, the large opening and the
     iterated coupling -- not a verification, which is what every other test in this file is.
     Regenerate with `.venv/Scripts/python benchmarks/regenerate_golden.py` only when a change

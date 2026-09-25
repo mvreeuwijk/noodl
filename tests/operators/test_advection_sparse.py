@@ -1,5 +1,5 @@
 """Parity tests for `AdvectionOperator.assemble_sparse`, `_AffineSystemOperator.assemble_sparse`
-and `TransposeOperator.assemble_sparse` (Task 4, B1): the sparse COO form must scatter, via
+and `TransposeOperator.assemble_sparse`: the sparse COO form must scatter, via
 `index_put_(accumulate=True)`, to exactly the same dense matrix as the operator's own
 `assemble()`, to 1e-14 -- the dense code is the reference throughout.
 """
@@ -105,7 +105,7 @@ def test_sparse_form_matches_the_dense_assembly_with_a_self_loop_edge():
 
 def test_sparse_form_matches_the_dense_assembly_with_an_inactive_node():
     """A node no edge of the layer's kinds touches: `_boundary_idx` differs from "not
-    interior" (spec 14, 4.5), but `assemble_sparse`'s interior filter must still agree with
+    interior", but `assemble_sparse`'s interior filter must still agree with
     `assemble()`'s, which is built from `_interior_idx` alone.
     """
     net = Network(dtype=F64)

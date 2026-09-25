@@ -1,4 +1,4 @@
-"""Measurement primitives for the milestone-1b benchmarks: backward memory, wall clock, RSS.
+"""Measurement primitives for the composed-model benchmarks: backward memory, wall clock, RSS.
 
 `tracemalloc` cannot be used to measure PyTorch backward memory: it tracks only allocations
 made through Python's own memory allocator (and any allocator that explicitly registers with
@@ -18,9 +18,9 @@ every such tensor as it is saved, sum its footprint (`numel() * element_size()`)
 the tensor unchanged so the forward computation is unaffected.
 
 `isolated_peak_rss` is the same argument applied to whole-process PEAK memory budgets (the
-milestone design's section 6.1 table): since `tracemalloc` cannot see torch's allocator, the
-only honest measurement of "how much memory did this workload need" is the operating system's
-own working-set high-water mark, taken in a FRESH process that does nothing but import the
+budget table in `benchmarks/report_composed_scaling.py`): since `tracemalloc` cannot see torch's
+allocator, the only honest measurement of "how much memory did this workload need" is the operating
+system's own working-set high-water mark, taken in a FRESH process that does nothing but import the
 workload and run it. Isolation is by construction -- one process per measurement -- rather
 than by resetting a counter, and the interpreter + torch import baseline is subtracted so the
 figure is the workload's own footprint.

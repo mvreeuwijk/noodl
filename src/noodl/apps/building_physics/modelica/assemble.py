@@ -1,6 +1,6 @@
 """Turn a `ComponentGraph` into a noodl `Model`, its initial `State` and its `Drivers`.
 
-Spec sections 5-7. Every number comes from the evaluated JSON (`schema.ModelicaDoc`); this
+Every number comes from the evaluated JSON (`schema.ModelicaDoc`); this
 module never evaluates a Modelica expression. A parameter the export omits takes the MBL
 declaration's own default (cited where used); a parameter MBL declares without a default is
 required and its absence is refused. All refusals are gathered and raised as ONE
@@ -33,8 +33,8 @@ What each MBL construct becomes
   when moisture is carried, `"X_w"`; otherwise `"X_w"` is a constant driver at the medium
   default (0 for SimpleAir).
 
-Capacities (controller ruling; MBL v13 sources)
-------------------------------------------------
+Capacities (MBL v13 sources)
+----------------------------
 `ConservationEquation.mo:245-266`: a volume's fluid mass is `m = V rho_start` under
 `massDynamics = SteadyState` and `m = V medium.d` (the ACTUAL density) otherwise, with
 `U = m u + CSen (T - reference_T)` and `CSen = (mSenFac - 1) rho_default cp_default V`
@@ -51,7 +51,7 @@ pressure capacity `m cp` above is what a fixed-mass open zone at constant pressu
 heat carrier on the edges is the same `cp`, so the balance is conservative.
 
 When water vapour is carried, `cp` is still the one value at `X_default` for every zone and
-edge (review fix round 1, item 4, checked against MBL). With `h = cp_air (1 - X)(T - T_ref) +
+edge (checked against MBL). With `h = cp_air (1 - X)(T - T_ref) +
 X (cp_ste (T - T_ref) + h_fg)` (`Air.mo:116-124`), `der(U) = sum m_in h_in - m_out h`
 (`ConservationEquation.mo:303`) and the water balance `m dX/dt = sum m_in (X_in - X)`, the
 latent and cross terms cancel exactly and MBL's zone temperature obeys
@@ -63,8 +63,8 @@ decaying as they mix). A per-zone `cp(X_start)` in the capacity with a fixed car
 reduce this: it would make the ratio wrong by
 `|cp(X_start)/cp(X_default) - 1|` for all time instead.
 
-Moisture (controller ruling)
-----------------------------
+Moisture
+--------
 For a medium with moisture, water vapour is carried as a species only when the model needs
 it: a volume's `X_start[1]` or a boundary's `X[1]` differs from `X_default[1]`, or a
 `MassFlowSource_T` injects air of another composition. Otherwise `"X_w"` is the constant
@@ -81,8 +81,8 @@ result, but the airflow is solved to `run.AIR_ATOL = 1e-13` kg/s, and the round-
 3e-13 Pa of noise in every `dp`, which a door's stiff laminar branch turns into a residual
 floor above the tolerance.
 
-`p_abs` (controller ruling)
----------------------------
+`p_abs`
+-------
 `"p_abs" = p_ref + phi`: at air-layer boundary nodes from `"air.phi_boundary"` (exact),
 at interior nodes from the state's last solved `"air.phi"` (seeded with `p_start - p_ref`
 in the initial state). With `coupling="iterate"` (used whenever a transport layer exists)
@@ -117,7 +117,7 @@ the other volumes AND of the attached volume itself. noodl's quasi-steady group 
 so the exchange is zero and the boundary's temperature and composition never enter. With a
 constant boundary pressure and a pressure-only density (`Buildings.Media.Air`,
 `Air.mo:210-215`) the attached volume's own mass is constant and the only neglected
-exchange is the other volumes' storage (the quasi-steady approximation of spec section 6);
+exchange is the other volumes' storage (the quasi-steady approximation);
 with a time-varying `p_in`, or a medium whose density depends on temperature (`SimpleAir`,
 `PerfectGas`), the attached volume's own storage is neglected too, and with it the
 boundary's state carried by that inflow. That holds only if the group is otherwise closed, so
@@ -196,8 +196,8 @@ Tensor = torch.Tensor
 F64 = torch.float64
 
 G_N = 9.80665  # MSL Modelica/Constants.mo:38
-G_PIN_MIN = 1e6  # W/K, spec section 6
-# Absolute `coupling="iterate"` tolerances (review fix round 1, item 3): 1e-8 K is ~3e-11 of
+G_PIN_MIN = 1e6  # W/K: a conductor at least this large pins the zone's temperature
+# Absolute `coupling="iterate"` tolerances: 1e-8 K is ~3e-11 of
 # the temperature, and 1e-12 kg/kg the same order relative to a water mass fraction of 0.01;
 # the airflow is solved to 1e-13 kg/s by `run.simulate`, so both are reachable.
 THERMAL_ITERATE_TOL = 1e-8  # K
@@ -421,7 +421,7 @@ class _Signals:
                 continue
             inst = target.split(".", 1)[0]
             if self.kind_of.get(inst) == "observer":
-                continue  # feeds a block the reader ignores (spec section 4)
+                continue  # feeds a block the reader ignores
             if inst in self.signal_names:
                 continue  # feeds a Math block that is itself unused: reported for that block
             self.errors.append(
@@ -432,7 +432,7 @@ class _Signals:
 
 # ------------------------------------------------------------------------- drives
 class _ColumnHead:
-    """Hydrostatic head of a fused column chain (spec section 6, graph.py docstring):
+    """Hydrostatic head of a fused column chain (see the graph.py docstring):
     `sum(sign h rho g_n)` with `rho = density_pTX(p_default, T, X_w)` of the node each
     column's `densitySelection` names (`MediumColumn.mo`, equation section: `fromTop` reads
     `inStream(port_a...)`, the state beyond the column's top port, `fromBottom` the one beyond
@@ -453,7 +453,7 @@ class _ColumnHead:
 
 # ------------------------------------------------------------------------ elements
 class _ZonalFlowEdge(Element):
-    """One direction of a `ZonalFlow_ACS`/`ZonalFlow_m_flow` (spec section 5): a prescribed
+    """One direction of a `ZonalFlow_ACS`/`ZonalFlow_m_flow`: a prescribed
     flow, independent of `dp` (`dp_independent`), oriented side A -> side B.
 
     `ZonalFlow_m_flow.mo:10-11`: `port_a1.m_flow = mAB_flow`, `port_a2.m_flow = mBA_flow`.
@@ -781,7 +781,7 @@ class _Builder:
             if b is not None:
                 attached_p[zone] = b["p"]
 
-        # Pinned temperatures (spec section 6).
+        # Pinned temperatures.
         for pin in g.pins:
             G = _param(pin.conductor, "G", errors, required=True)
             T = _param(pin.source, "T", errors, required=True)
@@ -879,7 +879,7 @@ class _Builder:
                 continue
             seen_roots.add(r)
             references.append(name)
-        # A closed group can only hold balanced exchanges (review fix round 1, item 1): its
+        # A closed group can only hold balanced exchanges: its
         # reference zone is a pressure boundary of the air layer but an interior node of the
         # transport layers, so any net inflow would accumulate heat and species there
         # without bound. Refuse every source in such a group, and every ZonalFlow_m_flow

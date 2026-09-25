@@ -1,15 +1,14 @@
 """Instruments a live WSIMOD run to capture per-arc requests and realised flows.
 
-Test-only. WSIMOD is never reimplemented (framework spec 4.2b, milestone 4b design spec
-section 1): this module runs WSIMOD's OWN engine on WSIMOD's OWN demo models and
-records what it actually did, so `CapacitatedTransferLayer` can be validated by replay
-rather than by re-deriving WSIMOD's node science (design spec section 4.4).
+Test-only. WSIMOD is never reimplemented: this module runs WSIMOD's OWN engine on WSIMOD's OWN demo
+models and records what it actually did, so `CapacitatedTransferLayer` can be validated by replay
+rather than by re-deriving WSIMOD's node science.
 
 This module is a plain helper, not a test file, so it does not itself guard the
 `wsimod` import -- every test module that imports it must call
 `pytest.importorskip("wsimod")` before doing so, matching the pyswmm/wntr pattern.
 
-Hook point (design spec amendment A1): `Arc.send_push_request`/`send_pull_request` is
+Hook point: `Arc.send_push_request`/`send_pull_request` is
 the one place both the per-arc REQUEST (pre-clip, the `vqip` argument) and the REALISED
 transfer (`requested - reply`, or `reply` itself for a pull -- see each wrapper below)
 are visible together, at exactly the per-edge granularity `CapacitatedTransferLayer`'s
@@ -28,20 +27,20 @@ of that one demo, not a general guarantee, and earlier versions of this docstrin
 it held for both. Anything replaying these events through one
 `CapacitatedTransferLayer.step` per timestep must therefore ACCUMULATE a `(arc, t)`
 group's rows rather than assign them one at a time -- `tests/verification/
-test_wsimod_parity.py` (Tasks 6/7) does exactly that, and the fixture-writing script
+test_wsimod_parity.py` does exactly that, and the fixture-writing script
 `scripts/regenerate_wsimod_fixtures.py` aggregates only over (arc, DIRECTION, timestep),
 leaving push and pull as separate rows for the replay to sum.
 
 Timestep index: `wsimod.orchestration.model.Model` has no `.t` or other current-
-timestep attribute of its own (confirmed by inspecting a constructed `Model` directly,
-milestone 4b Task 5's smoke check). `Model.run` instead sets `node.t = date` on every
+timestep attribute of its own (confirmed by inspecting a constructed `Model` directly).
+`Model.run` instead sets `node.t = date` on every
 node in `model.nodelist` at the START of each timestep, before that timestep's push/pull
 calls are dispatched -- so `arc.in_port.t` holds the date active during any call this
 harness intercepts. `t` in each captured event is that date's 0-based position in
 `model.dates` (looked up once per event against a `{date: index}` table built when
 `capture_events` is entered), which requires `model.dates` to already be set -- true for
-every model built by `create_oxford_model` or the quickstart inline build (design spec
-amendment A3) before `.run()` is ever called.
+every model built by `create_oxford_model` or the quickstart inline build before `.run()`
+is ever called.
 """
 
 from __future__ import annotations
@@ -57,8 +56,8 @@ def capture_events(model):
 
     Each dict: `{"arc": str, "direction": "push" | "pull", "t": int, "requested":
     float, "realised": float}`. `requested`/`realised` are WSIMOD's raw per-timestep
-    volumes (WSIMOD's native unit, not m^3/s -- callers convert at the boundary, design
-    spec section 2). See the module docstring for what `t` means and for why a caller
+    volumes (WSIMOD's native unit, not m^3/s -- callers convert at the boundary). See the
+    module docstring for what `t` means and for why a caller
     must aggregate per `(arc, timestep)` itself -- an arc CAN see several events in one
     timestep, and this function never sums them.
 
@@ -74,7 +73,7 @@ def capture_events(model):
     if dates is None:
         # `Model.__init__` never sets `self.dates` at all (confirmed directly, not
         # assumed) -- it is only assigned after construction, by `create_oxford_model`
-        # or the quickstart inline build (design spec amendment A3). `getattr` here is
+        # or the quickstart inline build. `getattr` here is
         # a genuine "has this been set yet" check, not a guess at an alternative
         # attribute name.
         raise ValueError(
@@ -152,8 +151,8 @@ def extract_topology(model) -> dict:
 
     Reads `model.nodes`/`model.arcs` (plain `dict`s, see `capture_events`) and each
     arc's own `.in_port`/`.out_port`/`.capacity` attributes directly off the constructed
-    WSIMOD `Model` -- never hand-transcribed, closing off the class of bug milestone 3
-    hit with the hand-ported IMPAQ prototype.
+    WSIMOD `Model` -- never hand-transcribed, closing off the class of bug a hand-port
+    invites.
     """
     if not model.arcs:
         raise ValueError(f"extract_topology: model {model!r} has no arcs")

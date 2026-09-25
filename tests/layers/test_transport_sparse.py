@@ -1,5 +1,5 @@
 """Parity tests between TransportLayer's new operator-based paths and its retained
-dense reference (`operator()`, unchanged since milestone 1). Every test here compares
+dense reference (`operator()`). Every test here compares
 the SPARSE result against the DENSE one on the same problem; `tests/layers/
 test_transport.py` is untouched and re-verifies the dense/analytic behaviour on
 its own.
@@ -27,7 +27,7 @@ from noodl.topology import Network
 
 
 def _full(layer, s_interior, node_dim=-1):
-    """Interior-order sources -> FULL node order with zeros on boundary nodes (spec 4.2)."""
+    """Interior-order sources -> FULL node order with zeros on boundary nodes."""
     shape = list(s_interior.shape)
     shape[node_dim] = layer.net.n
     full = torch.zeros(shape, dtype=s_interior.dtype)
@@ -187,7 +187,7 @@ def test_backward_memory_independent_of_solver_iterations():
     FORWARD iteration counts -- asserted and printed below, so a future regression that
     accidentally makes the two tolerances equally cheap is visible.
 
-    Backward memory is measured with `saved_tensor_bytes` (amendment A4(a)), not
+    Backward memory is measured with `saved_tensor_bytes`, not
     `tracemalloc`: `tracemalloc` sees zero bytes of PyTorch tensor allocations on this
     `.venv` (measured; see `benchmarks/measure.py`'s module docstring), so a
     `tracemalloc`-based assertion here would pass vacuously regardless of whether the
@@ -205,7 +205,7 @@ def test_backward_memory_independent_of_solver_iterations():
     iteration count in general, so the adjoint's flat count is a real property of the
     adjoint, not an artifact of the measurement.
 
-    Fixture note: the brief's original 3-node fixture (`three_node_chain`, capacities
+    Fixture note: a 3-node fixture (`three_node_chain`, capacities
     [50, 8000], `q0 = [0.05, -0.03, 0.02]`) reverses the middle edge, which makes node A a
     pure sink with no outgoing advective edge at all -- the resulting 2x2 M is EXACTLY
     singular (confirmed against the dense `operator()` reference too, independent of
@@ -214,7 +214,7 @@ def test_backward_memory_independent_of_solver_iterations():
     for `m = 2`, so ONE full-size cycle always covers the entire Krylov space regardless of
     `rtol`, and `saved_tensor_bytes` (which reflects actual computation, not just the
     reported `iterations` count) is IDENTICAL for both tolerances -- vacuous for exactly the
-    reason A4(a) rejects `tracemalloc`, just one level deeper. A genuinely restart-bound
+    reason `tracemalloc` is rejected, just one level deeper. A genuinely restart-bound
     problem needs `m` large enough, relative to GMRES's default `restart=30`, that a loose
     tolerance converges within the first restart cycle while a tight one needs several more
     -- a 40-node chain with capacities spanning 4 orders of magnitude does this.
@@ -566,7 +566,7 @@ def test_error_control_triggers_substepping_on_a_stiff_case():
     # a genuinely zero-forcing pure decay collapse to one term by design (see
     # test_pure_decay_with_no_forcing_costs_one_term_after_the_diagonal_shift in
     # test_expm_schedule.py) -- does not apply, and this stays a genuinely stiff, multi-
-    # substep case (R3 follow-up: the shift is correct and intentional, not a bug to work
+    # substep case (the shift is correct and intentional, not a bug to work
     # around; this test's own intent -- exercising real substepping -- needs forcing now).
     sources = torch.tensor([50.0], dtype=torch.float64)
     dt = 50.0  # dt * rate = 25000: far past the Taylor series' single-step radius
@@ -605,7 +605,7 @@ def test_error_control_refuses_a_step_that_exceeds_the_matvec_budget():
 
 
 def test_step_passes_the_structural_shift_verdict_computed_from_xb_and_sources(monkeypatch):
-    """T8-4: `b0 = boundary_forcing(x_boundary) + sources / capacity` has `requires_grad=True`
+    """`b0 = boundary_forcing(x_boundary) + sources / capacity` has `requires_grad=True`
     whenever `q` requires grad, even with `x_boundary` and `sources` constant zero, which
     would silently disable `_expm_action`'s own (value/requires_grad-based) default shift
     inference under training -- a ~139k-matvec budget cliff for what is structurally still an
@@ -641,7 +641,7 @@ def test_step_passes_the_structural_shift_verdict_computed_from_xb_and_sources(m
 
 def test_step_records_shift_false_when_sources_require_grad(monkeypatch):
     """Negative case: `sources` requiring grad (even though it is 0 at this call) must record
-    `shift=False`. The existing R3 reference (test_transport_derivatives.py) already covers the
+    `shift=False`. The existing reference (test_transport_derivatives.py) already covers the
     resulting gradient's correctness; this only pins the recorded flag."""
     net = flow_through_zone()
     layer = TransportLayer(
@@ -690,20 +690,19 @@ def test_expm_action_backward_memory_scales_with_substep_count():
     iteration grows from a non-stiff case (1 substep) to a genuinely stiff one (several
     substeps). Both `run_and_measure` calls below build `b0` from `xb`/`sources` with
     `requires_grad=True`, so even though their VALUES are 0, `_expm_action`'s default
-    (`shift=None`) inference disables the diagonal shift on `b0.requires_grad` alone (T8-4)
+    (`shift=None`) inference disables the diagonal shift on `b0.requires_grad` alone
     -- unlike test_error_control_triggers_substepping_on_a_stiff_case (which now needs an
     explicit nonzero `sources=50` to stay stiff, since IT calls through a b0 with
     `requires_grad=False`), the stiffness here comes from the grad-tracked zeros, not from
-    forcing. Unlike Task 9's linear-solve adjoint, no O(state) bound is asserted here --
-    see this task's Mathematics section for why none is expected. `tracemalloc` cannot be
-    used (amendment A4(a)): it sees zero bytes of PyTorch allocations on this `.venv`, so a
-    tracemalloc-based assertion would pass vacuously regardless of whether more sub-steps
+    forcing. Unlike the linear-solve adjoint, no O(state) bound is asserted here: the
+    exact scheme is differentiated through its sub-steps, so its backward memory grows with
+    them. `tracemalloc` cannot be used: it sees zero bytes of PyTorch allocations on this `.venv`,
+    so a tracemalloc-based assertion would pass vacuously regardless of whether more sub-steps
     genuinely cost more backward memory. `saved_tensor_bytes` instead counts exactly the
     tensors autograd will need for backward(), deterministically. The printed numbers are
-    what a future composed-model-gate report (design spec section 6.1) would compare
-    against its timestep-history memory budget; if that gate is ever breached, section
-    6.2 already names checkpointing the sub-steps as the follow-up, not a change to this
-    test.
+    what a future composed-model-gate report would compare
+    against its timestep-history memory budget; if that budget is ever breached, the remedy
+    is checkpointing the sub-steps, not a change to this test.
     """
     net = flow_through_zone()
     layer_mild = TransportLayer(
@@ -792,9 +791,9 @@ def test_expm_action_mixed_stiffness_batch_matches_standalone_within_tolerance()
         f"wall time={elapsed:.4f}s, out.matvecs={out.matvecs} (substeps={out.substeps}, "
         f"terms={out.terms})"
     )
-    # No wall-clock assertion here (finding: a flaky bound that guarded only this ~16 s
-    # action call, not the ~57 s the whole test actually takes with the standalone
-    # comparisons and backward passes below) -- the print above is the ledger record.
+    # No wall-clock assertion here (a wall-clock bound would be flaky, and would guard only
+    # this ~16 s action call, not the ~57 s the whole test actually takes with the standalone
+    # comparisons and backward passes below) -- the print above is the record.
     assert out.substeps > 1
     sparse = out.x
 
@@ -828,9 +827,9 @@ def test_expm_action_mixed_stiffness_batch_matches_standalone_within_tolerance()
 def _conduction_chain_layer() -> TransportLayer:
     """ambient (boundary) -- A -- B with three airpath edges and ONE conduction edge A->B.
 
-    Used by the Task 15 structural tests: the conduction branch is the one that used to
-    build an (n, n) `self.L` in `__init__`, and the no-conduction branch is the one that
-    allocated an (n, n) block of ZEROS for nothing at all.
+    Used by the structural tests: the conduction branch is the one that could build an
+    (n, n) `self.L` in `__init__`, and the no-conduction branch the one that could allocate
+    an (n, n) block of ZEROS for nothing at all.
     """
     net = Network(dtype=torch.float64)
     for name in ("ambient", "A", "B"):
@@ -851,16 +850,15 @@ def _conduction_chain_layer() -> TransportLayer:
 
 
 def test_transport_layer_allocates_no_dense_L_at_construction():
-    # Task 15: `self.L` is (n, n) and grew 4x per node doubling in the composed-model
-    # memory gate, and in the NO-conduction case it was a block of zeros that operator()
-    # subtracted for nothing. Construction must hold no tensor whose shape scales with the
-    # full node count `n` -- strengthened (final review) from the original "exactly (n, n)"
-    # check to ANY 2-D+ tensor with `n` anywhere in its shape, since an (n, b) or (b, n)
-    # matrix reintroduces exactly the same O(n) scaling an (n, n) one does; it just isn't
-    # square. `transmission` is exempted BY NAME: its own shape is (K, b_flow), and in this
-    # fixture's network b_flow (three airpath edges) happens to equal n (three nodes) --  a
-    # coincidental collision with the quantity this test guards against, not evidence of a
-    # node-count-shaped tensor.
+    # A dense `self.L` is (n, n) and grows 4x per node doubling in the composed-model
+    # memory budget, and in the NO-conduction case it would be a block of zeros that
+    # operator() subtracts for nothing. Construction must hold no tensor whose shape scales
+    # with the full node count `n` -- not just "exactly (n, n)" but ANY 2-D+ tensor with `n`
+    # anywhere in its shape, since an (n, b) or (b, n) matrix reintroduces exactly the same O(n)
+    # scaling an (n, n) one does; it just isn't square. `transmission` is exempted BY NAME: its own
+    # shape is (K, b_flow), and in this fixture's network b_flow (three airpath edges) happens to
+    # equal n (three nodes) --  a coincidental collision with the quantity this test guards against,
+    # not evidence of a node-count-shaped tensor.
     net = three_node_chain()
     plain = TransportLayer(
         net,
@@ -923,11 +921,10 @@ def test_operator_reference_still_includes_conduction():
 
 
 # ---------------------------------------------------------------- batch broadcasting
-# Final-review finding C1: an unbatched state against a BATCHED flow (one initial
-# condition against an ensemble of flow realisations -- the milestone's own calibration
-# use case) used to work at the pre-milestone dense `transport.py` and regressed to a raw
-# RuntimeError out of `AdvectionOperator._raw_action`, which expanded the state only to
-# its OWN batch shape rather than to the operator's.
+# An unbatched state against a BATCHED flow (one initial condition against an ensemble of
+# flow realisations -- the calibration use case) must work: expanding the state only to
+# its OWN batch shape rather than to the operator's raises a raw RuntimeError out of
+# `AdvectionOperator._raw_action`.
 def _ensemble_flow() -> torch.Tensor:
     base = torch.tensor([0.3, -0.2, 0.25], dtype=torch.float64)
     scale = torch.linspace(0.5, 1.5, 5, dtype=torch.float64).unsqueeze(-1)
@@ -1013,8 +1010,8 @@ def test_steady_broadcasts_unbatched_state_against_batched_flow():
 def _k2_full_layer(scheme: str, linear_solver: str = "auto") -> TransportLayer:
     """ambient (boundary) -- A -- B, three airpath edges plus one conduction edge A->B, TWO
     species with both inter-species kinetics and a per-species removal rate -- every term
-    `operator()` assembles (advection, conduction, removal, kinetics) present at once, which
-    the final review flagged as never jointly exercised through a batched, mixed-sign flow.
+    `operator()` assembles (advection, conduction, removal, kinetics) present at once,
+    jointly exercised through a batched, mixed-sign flow.
     """
     net = Network(dtype=torch.float64)
     for name in ("ambient", "A", "B"):
@@ -1112,7 +1109,7 @@ def test_k2_kinetics_removal_conduction_batched_mixed_sign_steady_matches_dense_
         torch.testing.assert_close(x_sparse[i], x_dense_i_unstacked, rtol=1e-8, atol=1e-10)
 
 
-# ------------------------------------------------------------- Task 5: linear_solver option
+# ------------------------------------------------------------- linear_solver option
 def test_unknown_linear_solver_refused_by_name_at_construction():
     net = flow_through_zone()
     with pytest.raises(ValueError, match="bogus"):
@@ -1124,10 +1121,10 @@ def test_unknown_linear_solver_refused_by_name_at_construction():
 
 @pytest.mark.parametrize("name", ["gmres_jacobi", "gmres_ilu"])
 def test_gmres_preconditioner_names_match_the_dense_reference(name):
-    """Task 6: `gmres_jacobi`/`gmres_ilu` are real preconditioners now, not a stub that
-    raises. Same problem, dense reference solved by hand -- the same comparison
-    `test_k2_kinetics_removal_conduction_batched_mixed_sign_step_matches_dense_reference`
-    already makes for the default solver, repeated here for both new preconditioner names.
+    """`gmres_jacobi`/`gmres_ilu` are real preconditioners. Same problem, dense reference solved by
+    hand -- the same comparison
+    `test_k2_kinetics_removal_conduction_batched_mixed_sign_step_matches_dense_reference` already
+    makes for the default solver, repeated here for both new preconditioner names.
     """
     layer = _k2_full_layer("implicit", linear_solver=name)
     q = _batched_mixed_sign_flow()
@@ -1158,8 +1155,8 @@ def test_gmres_preconditioner_names_match_the_dense_reference(name):
 @pytest.mark.parametrize("name", ["gmres_jacobi", "gmres_ilu"])
 def test_gradcheck_gmres_preconditioner_names_through_implicit_step(name):
     """Both names must be differentiable end to end through `layer.step`: gradients come
-    from `_LinearSolve`'s implicit adjoint (forward AND backward run under `no_grad`, per
-    Task 5), so this proves the adjoint's own resolved kwargs (`method='gmres'`,
+    from `_LinearSolve`'s implicit adjoint (forward AND backward run under `no_grad`),
+    so this proves the adjoint's own resolved kwargs (`method='gmres'`,
     `preconditioner=name.removeprefix('gmres_')`) produce a correct gradient -- not merely
     that the forward value is right.
     """
@@ -1202,12 +1199,11 @@ def test_diagnostics_linear_reports_the_resolved_preconditioner_backend(name):
 
 
 def test_gmres_resolves_bit_identical_to_the_bare_select_solve_auto():
-    """Regression proof for the EXPLICIT `linear_solver="gmres"` option (what `"auto"` used
-    to resolve to unconditionally, before Task 8; `"auto"` itself now differs -- see the two
-    tests below): builds the exact same affine system `TransportLayer.step` does and solves
-    it directly with `solvers.select.solve(method="auto", ...)` and no other kwargs -- this
+    """Regression proof for the EXPLICIT `linear_solver="gmres"` option (`"auto"` differs --
+    see the two tests below): builds the exact same affine system `TransportLayer.step` does and
+    solves it directly with `solvers.select.solve(method="auto", ...)` and no other kwargs -- this
     operator never certifies SPD (`_AffineSystemOperator.spd_certificate()` is `None`), so
-    `select.solve`'s OWN "auto" (untouched by this plan, ledger ruling B-1) always routes it
+    `select.solve`'s OWN "auto" (a separate policy) always routes it
     to plain gmres too, making this comparison bit-identical either way -- then compares
     against `step()`'s own result under `linear_solver="gmres"`.
     """
@@ -1239,8 +1235,8 @@ def test_gmres_resolves_bit_identical_to_the_bare_select_solve_auto():
 
 
 def test_auto_resolves_to_sparse_direct_at_or_under_the_batch_cap():
-    """Task 8 (ledger ruling B-14), pinned directly against `_resolve_solver`: the batch-1
-    and batch-cap (`_SPARSE_DIRECT_MAX_BATCH == 32`) rows of Task 7's interleaved benchmark
+    """Pinned directly against `_resolve_solver`: the batch-1 and batch-cap
+    (`_SPARSE_DIRECT_MAX_BATCH == 32`) rows of `benchmarks/transport_solver_bench.py`
     both favour `sparse_direct` by a wide, spread-clear margin, so `"auto"` resolves to it
     at or under the cap.
     """
@@ -1257,9 +1253,9 @@ def test_auto_resolves_to_sparse_direct_at_or_under_the_batch_cap():
 
 
 def test_auto_resolves_to_gmres_above_the_batch_cap():
-    """Above `_SPARSE_DIRECT_MAX_BATCH`, `sparse_direct` is not applicable at all (Task 7's
-    e=100 rows exclude it before construction, not tried-then-caught), and the gmres family's
-    own internal ordering was not clean enough within the measured spread to prefer a
+    """Above `_SPARSE_DIRECT_MAX_BATCH`, `sparse_direct` is not applicable at all (the
+    benchmark's e=100 rows exclude it before construction, not tried-then-caught), and the gmres
+    family's own internal ordering was not clean enough within the measured spread to prefer a
     preconditioner over plain gmres, so `"auto"` falls back to plain `gmres` -- never
     `gmres_jacobi`/`gmres_ilu`.
     """
@@ -1336,7 +1332,7 @@ def test_steady_sparse_direct_matches_gmres_to_high_precision():
 def test_gradcheck_implicit_step_sparse_direct_adjoint_through_superlu():
     """The backward's transposed solve must go through SuperLU too when the forward did --
     proof, not merely a claim, that `_LinearSolve.backward` uses the SAME resolved kwargs as
-    `forward` (design point in the brief)."""
+    `forward`."""
     net = flow_through_zone()
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
@@ -1375,7 +1371,7 @@ def test_diagnostics_linear_reports_gmres_backend_and_at_least_one_iteration():
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
         boundary=["ambient"], scheme="implicit",
-        linear_solver="gmres",  # Task 8: default "auto" now resolves to sparse_direct here
+        linear_solver="gmres",  # the default "auto" resolves to sparse_direct here
     )
     q = torch.tensor([0.5, 0.5], dtype=torch.float64)
     c0 = torch.tensor([100.0], dtype=torch.float64)
@@ -1388,8 +1384,8 @@ def test_diagnostics_linear_reports_gmres_backend_and_at_least_one_iteration():
 
 
 def test_diagnostics_linear_reports_sparse_direct_backend_under_the_default_auto():
-    """Task 8: the default `linear_solver="auto"` at a small batch (1 instance, well under
-    `_SPARSE_DIRECT_MAX_BATCH`) now reports `sparse_direct`, not `gmres` -- the companion of
+    """The default `linear_solver="auto"` at a small batch (1 instance, well under
+    `_SPARSE_DIRECT_MAX_BATCH`) reports `sparse_direct`, not `gmres` -- the companion of
     the test above, which pins the same problem's diagnostics under the explicit spelling.
     """
     net = flow_through_zone()
@@ -1409,7 +1405,7 @@ def test_diagnostics_linear_reports_sparse_direct_backend_under_the_default_auto
 
 
 def test_auto_falls_back_to_gmres_and_warns_once_when_scipy_is_not_importable(monkeypatch):
-    """Hazard 1 (Task 8): the one fall-back that is an ENVIRONMENT fault (SciPy, the
+    """Hazard 1: the one fall-back that is an ENVIRONMENT fault (SciPy, the
     `noodl[sparse]` extra, missing) rather than a modelling or grad-safety fact, so it is
     the only one that warns, and only once per process.
     """
@@ -1441,7 +1437,7 @@ def test_auto_falls_back_to_gmres_and_warns_once_when_scipy_is_not_importable(mo
 
 
 def test_auto_falls_back_to_gmres_for_a_grad_requiring_on_failure_return_solve():
-    """Hazard 2 (Task 8): `steady`/`_implicit_step_sparse`/`_trapezoidal_step_sparse`'s
+    """Hazard 2: `steady`/`_implicit_step_sparse`/`_trapezoidal_step_sparse`'s
     `on_failure="return"` paths call `_resolve_solver` OUTSIDE `_LinearSolve`'s `no_grad`
     (unlike the differentiable forward/backward path, which always resolves under
     `no_grad`). An explicit `method="sparse_direct"` reaching `solvers.select.solve` there
@@ -1466,24 +1462,22 @@ def test_auto_falls_back_to_gmres_for_a_grad_requiring_on_failure_return_solve()
 
 
 def test_differentiable_step_builds_the_system_exactly_once_per_pass(monkeypatch):
-    """Fix round 1 regression guard: resolving `linear_solver` used to require a separate
-    probe `build_system` call (purely to learn `rhs.shape[:-1].numel()`) before invoking
-    `_linear_solve`, which doubled the cost of `_advection_operator`'s own
+    """Regression guard: resolving `linear_solver` must not need a separate probe
+    `build_system` call (purely to learn `rhs.shape[:-1].numel()`) before invoking
+    `_linear_solve`, which would double the cost of `_advection_operator`'s own
     `boundary_forcing` (an embed/gather/`scatter_add_` over every edge, the same cost order
-    as a matvec) on the differentiable path this whole plan exists to speed up. Counts
+    as a matvec) on the differentiable path. Counts
     `TransportLayer._advection_operator` invocations directly: `build_system` calls it
     exactly once per invocation (for a fixed, non-changing capacity), so this is a direct
     proxy for `build_system`'s own call count.
 
     FORWARD must call it exactly ONCE (never a probe-and-solve pair). BACKWARD calls it
-    TWICE, not once -- `_LinearSolve.backward` (unrelated to this fix, pre-existing since
-    before Task 5: confirmed against commit cf354dc, this worktree's base) rebuilds the
-    system twice by design: once for the adjoint solve's operator (`op`, under `no_grad`)
-    and once more for the residual pass that produces the parameter gradients (`op_p`,
-    under `enable_grad`), per `solvers/implicit.py`'s `_Implicit` structure this class
-    mirrors. So a correct forward+backward pass totals THREE calls (1 + 2), exactly the
-    pre-Task-5 baseline -- not two, and the earlier (buggy) probe-based implementation of
-    this task made it FOUR (2 + 2) by adding a redundant probe call in forward alone.
+    TWICE, not once -- `_LinearSolve.backward` rebuilds the system twice by design: once for the
+    adjoint solve's operator (`op`, under `no_grad`) and once more for the residual pass that
+    produces the parameter gradients (`op_p`, under `enable_grad`), per `solvers/implicit.py`'s
+    `_Implicit` structure this class mirrors. So a correct forward+backward pass totals THREE calls
+    (1 + 2) -- not two, and a probe-based implementation would make it FOUR (2 + 2) by adding a
+    redundant probe call in forward alone.
     """
     net = flow_through_zone()
     layer = TransportLayer(

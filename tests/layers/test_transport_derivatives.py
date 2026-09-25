@@ -1,4 +1,5 @@
-"""Independent derivative references for the transport findings R3 and R4.
+"""Independent derivative references for the transport layer: autograd through the exact
+scheme is the derivative of the exponential, and every coefficient receives its gradient.
 
 One compartment: node `zone` with unit capacity, a single edge zone->ambient carrying q=1
 (pure outflow) unless `circulation=True` adds ambient->zone with q=1 as well. Every expected

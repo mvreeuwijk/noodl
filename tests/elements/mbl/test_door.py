@@ -15,7 +15,7 @@ Standard Library (MSL) v4.1.0 sources, never by importing `noodl.elements.mbl.do
 * MSL `Modelica/Constants.mo:38` (g_n), `Media/IdealGases/Common/SingleGasesData.mo:5,49,59`
   (R_NASA_2002, Air.MM, Air.R_s), MBL `Media/Air.mo:45` (dStp).
 
-Wiring (design section 6): side A holds `port_a1` and `port_b2`, side B holds `port_b1` and
+Wiring: side A holds `port_a1` and `port_b2`, side B holds `port_b1` and
 `port_a2`. Edge `ab` is path 1 and carries `port_a1.m_flow`; edge `ba` is path 2 signed from A
 to B, i.e. `-port_a2.m_flow = port_b2.m_flow` (`Door.mo:79`).
 """

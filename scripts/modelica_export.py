@@ -1,11 +1,11 @@
 """Export one Modelica Buildings Library (MBL) model to `noodl-modelica/1` JSON and a CSV.
 
-Run inside WSL, where OpenModelica is installed (spec section 3)::
+Run inside WSL, where OpenModelica is installed::
 
     python3 scripts/modelica_export.py Buildings.Airflow.Multizone.Validation.ThreeRoomsContam \
         [--out tests/data/modelica] [--mbl ~/modelica/modelica-buildings] [--no-simulate]
 
-It writes `<Short>.json` (spec section 4) and `<Short>.csv` into `--out`, where `<Short>` is
+It writes `<Short>.json` and `<Short>.csv` into `--out`, where `<Short>` is
 the last component of the model name. Standard library only; it never imports `noodl` and is
 never run by the test suite. The pure-Python writer (`build_document`, `compared_variables`,
 `write_json`, `write_csv`) needs no OpenModelica, so the contract test
@@ -18,7 +18,7 @@ exits 0, since it never asks for a simulation in the first place.
 How OpenModelica is driven
 --------------------------
 OMPython is not installed in the WSL environment, so the script writes `.mos` scripts and
-runs `omc` on them (plan Task 7 allows either). Four `omc` runs per model, all in a fresh
+runs `omc` on them. Four `omc` runs per model, all in a fresh
 temporary directory:
 
 1. *Introspection.* `loadModel(Modelica, {"4.1.0"})` (MBL v13 needs MSL 4.1.0; install it
@@ -73,7 +73,7 @@ Every top-level element of the model (and of its base models) whose class is a `
 `block` is exported; plain variables of the model (`Real dP = ...`) are not. A block is a
 SIGNAL when one of its outputs reaches, directly or through other blocks, an input of a
 non-block component; its `drives` lists every input its outputs are connected to (a string
-for one, a list for several, spec section 4). Every other block, and every
+for one, a list for several). Every other block, and every
 `Buildings.Fluid.Sensors.*` instance, is an OBSERVER: listed in `components` with
 `"role": "observer"`. `connections` holds every `connect()` whose two ends are components
 (signal wiring is carried by `drives` alone, since the reader resolves connection ends
@@ -266,7 +266,7 @@ def _model_components(instance: dict) -> list[dict]:
 
 def build_document(instance: dict, *, model: str, medium: dict, experiment: dict,
                    mbl_commit: str, openmodelica: str, extra: dict | None = None) -> dict:
-    """The `noodl-modelica/1` document for one `getModelInstance` tree (spec section 4)."""
+    """The `noodl-modelica/1` document for one `getModelInstance` tree."""
     comps = _model_components(instance)
     by_name = {c["name"]: c for c in comps}
     cls_of = {n: _type_name(c["type"]) for n, c in by_name.items()}
@@ -887,7 +887,7 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps(summary))
     # A requested simulation that failed still gets a JSON-only export ("warning: simulation
     # of ... failed" above, on stderr) but no "csv" key in the summary; a batch script over
-    # many models should not treat that as success (final review, Minor 9).
+    # many models should not treat that as success.
     if not args.no_simulate and "csv" not in summary:
         return 1
     return 0

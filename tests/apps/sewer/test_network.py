@@ -148,7 +148,7 @@ def test_initial_state_refuses_an_unknown_quantity():
 
 
 def test_read_swmm_inp_sulfide_source_uses_each_manholes_own_outgoing_pipe():
-    """M4-R4/M4-R9 amendment: `tree_steady.inp`'s `[CONDUITS]` order (C1..C5) does not match
+    """`tree_steady.inp`'s `[CONDUITS]` order (C1..C5) does not match
     its `[JUNCTIONS]` order (J1, J2, J5, J3, J4), so `read_swmm_inp` gives the non-identity
     `out_pipe = [0, 1, 3, 2, 4]`. The model's sulfide source at each manhole must equal
     `sulfide_rate` evaluated on THAT manhole's own outgoing pipe's hydraulics, not on the
@@ -188,15 +188,14 @@ def test_read_swmm_inp_sulfide_source_uses_each_manholes_own_outgoing_pipe():
 
 
 def test_the_outfall_pipe_is_found_by_where_it_drains_not_by_position():
-    """M4-R19 Important 1: the brief's dictated `outfall_manhole = net.pipes[-1].u`
-    assumed the LAST pipe drains to the outfall. Moving C5 (J4 -> Outfall) to the FRONT of
-    `net.pipes` used to attach the outfall-flagged `headspace` edge (and the geometry it
-    borrows) to J3 -- the upstream end of whatever pipe happened to be last, C3 (J3 -> J4)
-    -- instead of J4. Fixed by finding the pipe whose `v` is an outfall, wherever it sits;
-    both orderings must now attach the outfall edge to J4 and produce identical air-side
-    steady results, compared by node NAME (node order is the same for both builds -- only
-    `net.pipes`' order differs -- so this also incidentally checks position-for-position,
-    but the comparison is done by name as asked)."""
+    """`outfall_manhole = net.pipes[-1].u` would assume the LAST pipe drains to the
+    outfall. Moving C5 (J4 -> Outfall) to the FRONT of `net.pipes` would then attach the
+    outfall-flagged `headspace` edge (and the geometry it borrows) to J3 -- the upstream
+    end of whatever pipe happened to be last, C3 (J3 -> J4) -- instead of J4. The builder
+    finds the pipe whose `v` is an outfall, wherever it sits; both orderings must attach the outfall
+    edge to J4 and produce identical air-side steady results, compared by node NAME (node order is
+    the same for both builds -- only `net.pipes`' order differs -- so this also incidentally checks
+    position-for-position, but the comparison is done by name)."""
     canonical = tree_steady()
     reordered = SewerNetwork(
         manholes=canonical.manholes,
@@ -229,7 +228,7 @@ def test_the_outfall_pipe_is_found_by_where_it_drains_not_by_position():
 
 
 def test_the_headspace_stack_drive_uses_the_pipe_crown_not_the_mean_invert():
-    """M4-R19 Important 2: `_stack_for`'s `headspace` branch must use the pipe CROWN
+    """`_stack_for`'s `headspace` branch must use the pipe CROWN
     elevation (mean invert plus diameter), not the bare mean invert, as `z_path`. Built
     with `T_head != T_amb` (the builder's own defaults, 293.15 K vs 283.15 K) so the drive
     carries a non-trivial value, and checked against the drive's own formula
@@ -271,11 +270,11 @@ def test_the_headspace_stack_drive_uses_the_pipe_crown_not_the_mean_invert():
     assert torch.allclose(value, expected)
 
 
-# ------------------------------------------------------------------------------------ N2
+# ------------------------------------------------------------------------- leak dtype
 
 
 def test_the_leak_element_is_built_float64_not_the_default_dtype():
-    """N2: the leak's `PowerLaw` is built DIRECTLY (never through `Orifice`, which casts
+    """The leak's `PowerLaw` is built DIRECTLY (never through `Orifice`, which casts
     with `torch.get_default_dtype()` -- float32 in this repository -- regardless of its
     inputs' own dtype); both `C` and `n` must be float64."""
     model, _, _ = build_model(tree_steady())
@@ -284,7 +283,7 @@ def test_the_leak_element_is_built_float64_not_the_default_dtype():
     assert leak.n.dtype == torch.float64
 
 
-# ------------------------------------------------------------------------------------ N4
+# ------------------------------------------------------------------------------ forests
 
 
 def _two_component_forest():
@@ -304,8 +303,8 @@ def test_a_two_component_forest_builds_and_steps_with_air_false():
 
 
 def test_a_two_component_forest_builds_and_steps_with_air_true():
-    """N4: `build_model(air=True)` used to refuse any network whose pipe subgraph
-    was not a single tree with exactly one outfall pipe. A forest gets one outfall-to-
+    """`build_model(air=True)` accepts a network whose pipe subgraph is not a single tree
+    with exactly one outfall pipe. A forest gets one outfall-to-
     ambient headspace edge PER outfall pipe instead, each borrowing its own pipe's length
     and diameter, with the drive zeroed on both appended edges."""
     net = _two_component_forest()
@@ -317,8 +316,8 @@ def test_a_two_component_forest_builds_and_steps_with_air_true():
 
 
 def test_two_manholes_draining_into_one_outfall_is_still_refused_by_name():
-    """The forest generalisation (N4) must not silently accept two DIFFERENT manholes
-    draining directly into the SAME outfall (M4-R19's own accepted deviation)."""
+    """The forest generalisation must not silently accept two DIFFERENT manholes
+    draining directly into the SAME outfall."""
     net = SewerNetwork(
         manholes=(Manhole("A", invert=10.0), Manhole("B", invert=9.0)),
         pipes=(Pipe("PA", "A", "Out", 100.0, 0.30, 0.013, 0.01),
@@ -329,14 +328,14 @@ def test_two_manholes_draining_into_one_outfall_is_still_refused_by_name():
         build_model(net, air=True)
 
 
-# ------------------------------------------------------------------------------------ N8
+# ---------------------------------------------------------------------- ground levels
 
 
 def test_a_ground_level_of_exactly_zero_is_not_dropped():
-    """N8: `_stack_for` used an `or`-chain (`node.get("ground") or node.get("invert", 0.0)
-    or 0.0`), which treats an explicitly given `ground=0.0` as falsy and falls through to
-    the invert instead. A manhole with `invert=-5.0, ground=0.0` must give the leak's own
-    `z_path` (the manhole's ground, `_stack_for`'s `kind='leak'` branch) as exactly 0.0,
+    """`_stack_for` must not use an `or`-chain (`node.get("ground") or
+    node.get("invert", 0.0) or 0.0`), which treats an explicitly given `ground=0.0` as falsy and
+    falls through to the invert instead. A manhole with `invert=-5.0, ground=0.0` must give the
+    leak's own `z_path` (the manhole's ground, `_stack_for`'s `kind='leak'` branch) as exactly 0.0,
     not -5.0."""
     net = SewerNetwork(
         manholes=(Manhole("A", invert=-5.0, ground=0.0),),
@@ -354,14 +353,14 @@ def test_a_ground_level_of_exactly_zero_is_not_dropped():
     assert float(leak_stack.z_path[pos]) == 0.0
 
 
-# ----------------------------------------------------------------------------- N10, N11
+# ---------------------------------------------------------------- notes, initial state
 
 
 def test_model_notes_reflects_the_closures_own_notes_dict():
-    """N10: `model.notes` is the SAME dict object as the hydraulics closure's own `notes`,
+    """`model.notes` is the SAME dict object as the hydraulics closure's own `notes`,
     not a one-time copy taken at build time, so a note the closure adds only once a step
     actually hits it (`capacity_floor`, added lazily on a dry pipe) shows up on
-    `model.notes` too. R5: `build_model`'s initial-storage query
+    `model.notes` too. `build_model`'s initial-storage query
     (`Model.initial_capacities`) already evaluates the closure once at construction, so on a
     network that is dry from the start the `capacity_floor` note can already be present
     before the first `model.step` call -- this test therefore checks the identity through the
@@ -387,7 +386,7 @@ def test_fr21_one_step_with_a_lateral_bod_load_raises_only_j1():
     concentration after one implicit step of the water_quality transport layer is the
     closed form for that case: `x = source * dt / (V_wet + Q_out * dt)`
     (`source = inflow * bod_in`, `Q_out` = J1's own outgoing pipe discharge) -- NOT the
-    brief's own first-order-in-dt sketch `inflow * bod_in * dt / V_wet`, which is the SAME
+    first-order-in-dt sketch `inflow * bod_in * dt / V_wet`, which is the SAME
     formula only in the limit `Q_out * dt << V_wet`; here `Q_out * dt / V_wet = 0.414`, so
     that limit does not hold and the naive figure is measured 41% off. MEASURED: the
     transport-layer-only step (bypassing `SulfideGeneration`'s reaction, verified separately
@@ -424,7 +423,7 @@ def test_fr21_one_step_with_a_lateral_bod_load_raises_only_j1():
 
 
 def test_initial_state_builds_sewer_h_and_a_storage_step_runs():
-    """N11: `initial_state(model)` must build `"sewer.H"` itself when `storage=True`, as
+    """`initial_state(model)` must build `"sewer.H"` itself when `storage=True`, as
     `SewerHydraulics`'s own `KeyError` message already promises."""
     model, _, drivers = build_model(tree_steady(), storage=True, dt_storage=60.0)
     state = initial_state(model, drivers)

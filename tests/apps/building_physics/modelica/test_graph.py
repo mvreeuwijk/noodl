@@ -1,4 +1,4 @@
-"""Tests for `noodl.apps.building_physics.modelica.graph` (spec section 6)."""
+"""Tests for `noodl.apps.building_physics.modelica.graph`."""
 
 from __future__ import annotations
 
@@ -106,7 +106,7 @@ def test_malformed_connection_ref_is_gathered_not_raised_immediately() -> None:
     """`graph._split` must append a malformed (no '.') connection reference to the error list
     rather than raising immediately, so gather-all keeps running and names the OTHER error
     (`bouOut`'s wind-pressure refusal, found in an earlier phase) in the same
-    `ModelicaImportError` (final review, Minor 3). `schema.load` does not itself check the
+    `ModelicaImportError`. `schema.load` does not itself check the
     '<instance>.<port>' format, so this is reachable from a malformed document even though the
     exporter itself never writes one."""
     with pytest.raises(ModelicaImportError) as excinfo:
@@ -124,7 +124,7 @@ def _head(path, rho: float, g: float) -> float:
 
 
 def test_stack_chain_head_matches_hand_derived_hydrostatic_balance() -> None:
-    """Physics check (fix round 1, review item 1), not mere self-consistency.
+    """Physics check, not mere self-consistency.
 
     `MediumColumn.mo`'s own relation is `port_a.p - port_b.p = -h*rho*g_n` (the bottom port,
     `port_b`, sits at the HIGHER pressure). Chasing that through the west stack's wiring by
@@ -305,7 +305,7 @@ def test_two_boundaries_or_two_volumes_wired_together_stay_refused(tmp_path) -> 
 
 
 def test_attached_boundary_with_further_connected_ports_is_refused(tmp_path) -> None:
-    """Review fix round 1: `bou.ports[2] -> ori -> volB` beside `bou.ports[1] -> volA`. In
+    """`bou.ports[2] -> ori -> volB` beside `bou.ports[1] -> volA`. In
     MBL the air leaving `bou.ports[2]` carries the boundary's own state and mass; merged onto
     volA's node it would carry volA's. Refused by name instead of re-wired."""
     import json
@@ -330,7 +330,7 @@ def test_attached_boundary_with_further_connected_ports_is_refused(tmp_path) -> 
 
 
 def test_ports_beside_a_refused_component_add_no_follow_on_message(tmp_path) -> None:
-    """Review fix round 1: an orifice wired to a refused `Outside_CpLowRise` is not also
+    """An orifice wired to a refused `Outside_CpLowRise` is not also
     reported as "not connected"; the refusal names the root cause once."""
     import json
 

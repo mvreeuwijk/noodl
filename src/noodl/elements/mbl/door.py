@@ -42,7 +42,7 @@ What the flows depend on
 ``Medium.temperature`` of that state is independent of pressure for all three supported media
 (``Media/Air.mo:823-840``: "the temperature is independent of the pressure"; the two ideal
 gases' ``h(T)`` has no pressure term). With ``port_a1`` on side A and ``port_a2`` on side B
-(the wiring the reader enforces, design section 6), ``inStream`` of each is that zone's own
+(the wiring the reader enforces), ``inStream`` of each is that zone's own
 enthalpy, so the two temperatures are the zone temperatures ``T_A`` and ``T_B``. The door
 flows are therefore functions of ``(dp, T_A, T_B)`` alone: NOT of moisture (which enters only
 through ``h -> T``, and the zone temperature is supplied directly) and NOT of absolute

@@ -45,10 +45,9 @@ def street_steady(
     """The steady state of transport AND chemistry, by an explicit fixed point.
 
     `Model.steady` does NOT apply reactions -- `Model._pass` applies them only on its
-    stepping branch, and `Model.steady`'s own docstring records that as deliberate. The
-    milestone 3 spec's section 5 says otherwise; it is wrong, and this function is the
-    correction. With `reaction=None` this is exactly `model.steady(...)`, returned
-    unchanged.
+    stepping branch, and `Model.steady`'s own docstring records that as deliberate. This
+    function is the steady state WITH chemistry. With `reaction=None` this is exactly
+    `model.steady(...)`, returned unchanged.
 
     The iteration is plain successive substitution -- solve transport at the current
     composition, relax the composition to its photostationary state, repeat -- and it is

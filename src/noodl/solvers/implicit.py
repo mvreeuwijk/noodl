@@ -54,7 +54,7 @@ class TransposeOperator:
     only for a symmetric operator, and not assumed here even then -- the swap always
     happens, so a bug in a caller's own claimed rmatvec is exposed rather than masked).
 
-    This is the general counterpart of ``layers.transport._TransposeView`` (Task 9), which
+    This is the general counterpart of ``layers.transport._TransposeView``, which
     is the same adapter specialised to that layer's own advection operator; the two agree
     method for method, except that this one can forward an SPD certificate (see
     ``spd_certificate``) where the transport-local view, whose operator never certifies,
@@ -125,7 +125,7 @@ def adjoint(
 ) -> torch.Tensor:
     """Solve the adjoint system ``op^T @ lambda = grad_x`` via ``op.rmatvec`` (never
     ``op.matvec``): the two coincide only when ``op`` is symmetric, which is not assumed
-    here. ``op`` may be a plain dense tensor (backward compatible with every pre-1b caller)
+    here. ``op`` may be a plain dense tensor (for a caller that assembles densely)
     or a ``LinearOperator``; a tensor is auto-wrapped in ``DenseOperator``.
 
     ``method`` is forwarded to ``solvers.select.solve``, with the same compatibility shim
@@ -134,7 +134,7 @@ def adjoint(
     always had rather than silently acquiring a Krylov solver's own error floor. An explicit
     ``method`` always wins, and a real operator's ``"auto"`` goes through the eligibility
     table in ``solvers.select``'s module docstring: sparse-direct when the TransposeOperator
-    certifies SPD and offers a transposed COO form (spec section 6.2 step 2), PCG when it
+    certifies SPD and offers a transposed COO form, PCG when it
     certifies but cannot, GMRES otherwise.
 
     Always raises on failure (``on_failure="raise"``, not exposed as a parameter): every
@@ -171,14 +171,14 @@ class _Implicit(torch.autograd.Function):
             # caller-supplied dict is the narrowest way to expose them without changing what
             # `implicit_solve` RETURNS (a plain tensor, which is what autograd needs) or
             # making every caller that does not care pay for a richer result type. The
-            # convergence STATUS goes in alongside them (design section 3.2: a solve result
+            # convergence STATUS goes in alongside them (a solve result
             # always carries its status), even though this path can only ever report
             # success -- `implicit_solve` refuses `on_failure="return"` outright, so a
             # non-converged forward raises out of `newton` above rather than reaching here.
             diagnostics["newton_iterations"] = result.iterations
             diagnostics["linear_iterations"] = result.linear_iterations
             # The backend that actually ran, not the method requested: with "auto" the two
-            # differ on runtime predicates the caller cannot see (final review I5).
+            # differ on runtime predicates the caller cannot see.
             diagnostics["backend"] = result.backend
             diagnostics["converged"] = result.converged
             diagnostics["residual_norm"] = result.residual_norm
@@ -242,7 +242,7 @@ class _Implicit(torch.autograd.Function):
             # be asked to return a non-converged instance instead of raising -- a
             # calibration loop inspecting or down-weighting it -- but a backward pass has no
             # such caller: a wrong gradient silently reaching an optimiser is strictly worse
-            # than an exception (design section 3.2). `method` IS forwarded, so a layer
+            # than an exception. `method` IS forwarded, so a layer
             # configured with linear_solver="direct" keeps the dense numerics it asked for
             # on both passes rather than only on the forward one.
             lam = adjoint(
@@ -275,10 +275,10 @@ def implicit_solve(
     """Differentiable solve of ``residual(x, *params) = 0``; returns the converged ``x``.
 
     ``operator`` is called as ``operator(x, *params)`` at the current iterate and returns
-    either a ``LinearOperator`` (the Milestone-1b contract) or a plain dense ``(..., m, m)``
-    tensor (auto-wrapped, for every pre-1b caller); it is the same callable contract
-    ``newton`` takes, and the same object is re-evaluated at the converged point to build
-    the backward pass's adjoint system.
+    either a ``LinearOperator`` (the matvec-free operator contract) or a plain dense
+    ``(..., m, m)`` tensor (auto-wrapped, for a caller that assembles densely); it is the same
+    callable contract ``newton`` takes, and the same object is re-evaluated at the converged point
+    to build the backward pass's adjoint system.
 
     ``diagnostics``, when a dict is given, is filled with the forward Newton solve's own
     ``newton_iterations``, ``linear_iterations``, ``backend``, ``converged`` and
@@ -293,9 +293,9 @@ def implicit_solve(
     non-differentiable path. The implicit-function adjoint linearises at the point the
     forward returned and assumes that point solves ``residual(x, *params) = 0``; at a
     non-converged point that assumption is false, the adjoint solve nevertheless converges
-    happily, and the gradient handed back is silently wrong. Design section 3.2 legislates
-    exactly this: the backward pass raises unconditionally because "a wrong gradient is
-    worse than no gradient" -- so the escape hatch must not be reachable on the
+    happily, and the gradient handed back is silently wrong. The backward pass therefore
+    raises unconditionally, because a wrong gradient is worse than no gradient -- so the
+    escape hatch must not be reachable on the
     differentiable path at all. Use ``differentiable=False`` (or ``newton`` directly) if a
     non-converged instance is something the caller wants to inspect rather than abort on.
     """
@@ -303,7 +303,7 @@ def implicit_solve(
         raise ValueError(
             "implicit_solve: on_failure='return' is not supported on the differentiable "
             "path -- a non-converged forward has no defined adjoint, so the gradient would "
-            "be silently wrong (design section 3.2: the backward pass raises "
+            "be silently wrong (the backward pass raises "
             "unconditionally). Use the non-differentiable solve if a non-converged instance "
             "must be returned rather than raised on."
         )

@@ -1,10 +1,10 @@
-"""Tests for solvers.select.solve: the method="auto" eligibility table (design section 3.1)
-and the raise/return failure boundary (design section 3.2).
+"""Tests for solvers.select.solve: the method="auto" eligibility table
+and the raise/return failure boundary.
 
 Uses a small test-only operator double, _FakeOperator, rather than DenseOperator or
 GraphLaplacianOperator: these tests are about select.solve's OWN branching on whatever
 spd_certificate() and symmetric happen to say, not about whether a real operator computes
-its certificate correctly (Tasks 3 and 4 already cover that).
+its certificate correctly (tests/solvers/test_grounding.py and tests/operators/ cover that).
 """
 
 import pytest
@@ -59,7 +59,7 @@ _B_NS = torch.tensor([1.0, 2.0], dtype=torch.float64)
 
 
 def _chain_op(slopes: torch.Tensor) -> GraphLaplacianOperator:
-    """The chain fixture used throughout the milestone: 3 nodes, node 2 is the boundary
+    """The chain fixture used throughout: 3 nodes, node 2 is the boundary
     (grounded) node, nodes 0 and 1 are interior; edges (0,1) and (1,2). slopes = [[1,1],[0,1]]
     certifies instance 0 (grounded through both edges) but not instance 1 (edge (0,1) has
     zero slope, so {0, 1} has no path to the boundary through strictly positive slope).
@@ -91,8 +91,7 @@ def _spy(monkeypatch, target, name):
 
 def test_all_instances_certify_and_no_sparse_form_selects_pcg(monkeypatch):
     """PCG rather than sparse-direct because `_FakeOperator` declares no `assemble_sparse`,
-    not because certification alone still means PCG -- since spec section 6.2 step 2 it does
-    not. The name says the reason, so this test cannot be read as pinning the old rule.
+    not because certification alone means PCG -- it does not. The name says the reason.
     """
     import noodl.solvers.select as select_module
 
@@ -156,7 +155,7 @@ def test_mixed_certification_raises_naming_the_non_certifying_instances():
 def test_mixed_certification_does_not_split_the_batch(monkeypatch):
     # Confirm the refusal happens BEFORE either solver runs -- neither pcg nor gmres is
     # ever called on a mixed-certification batch, since silently splitting it is exactly
-    # what design section 3.1 says would hide a modelling error.
+    # what would hide a modelling error.
     import noodl.solvers.select as select_module
 
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
@@ -210,11 +209,11 @@ def test_on_failure_raise_is_the_default_and_does_raise():
 
 
 def test_error_message_names_instances_status_and_residual():
-    # select.solve raises via SolveResult.raise_on_failure (Task 1), which is where the
-    # naming of instances/status/residual actually happens per design section 3.2 -- this
+    # select.solve raises via SolveResult.raise_on_failure, which is where the
+    # naming of instances/status/residual actually happens -- this
     # test exercises that content THROUGH select.solve's default on_failure="raise" path,
     # rather than re-implementing the naming here. If this assertion ever fails, the fix
-    # belongs in Task 1's raise_on_failure, not in this file's solve().
+    # belongs in `SolveResult.raise_on_failure`, not in this file's solve().
     A_sing = torch.tensor([[1.0, 2.0], [2.0, 4.0]])
     b_sing = torch.tensor([1.0, 3.0])
     op = _FakeOperator(A_sing, symmetric=False, certificate=None)
@@ -227,7 +226,7 @@ def test_error_message_names_instances_status_and_residual():
         assert "residual" in message or "status" in message
 
 
-# -- A2: spd_diagnosis wired into select.solve's refusal messages --------------------------
+# -- spd_diagnosis wired into select.solve's refusal messages ------------------------------
 
 
 def test_mixed_certification_on_graph_laplacian_names_ungrounded_interior_nodes():
@@ -250,7 +249,7 @@ def test_spd_diagnosis_is_never_called_on_the_success_path(monkeypatch):
     assert calls["count"] == 0
 
 
-# -- A3.1: method="direct" -------------------------------------------------------------------
+# -- method="direct" -------------------------------------------------------------------------
 
 
 def test_direct_matches_torch_linalg_solve_on_spd_batch():
@@ -346,7 +345,7 @@ def test_direct_is_not_selected_by_auto(monkeypatch):
     assert gmres_calls["count"] == 0
 
 
-# -- A3.2: explicit kwarg forwarding and on_failure applying only to numerical failure --------
+# -- explicit kwarg forwarding and on_failure applying only to numerical failure --------------
 
 
 def test_x0_is_forwarded_to_pcg_and_gmres():
@@ -372,8 +371,8 @@ def test_solve_forwards_preconditioner_to_pcg_only():
 
 
 def test_solve_drops_preconditioner_kwarg_when_gmres_is_selected():
-    # A reviewer confirmed solve(op_nonsym, b, preconditioner="jacobi") used to raise TypeError
-    # from gmres, which does not accept that kwarg. solve must silently drop it instead.
+    # solve(op_nonsym, b, preconditioner="jacobi") must not raise TypeError from a backend
+    # that does not accept that kwarg; solve must silently drop it instead.
     op = _FakeOperator(_A_NS, symmetric=False, certificate=None)
     result = solve(op, _B_NS, preconditioner="jacobi")
     x_ref = torch.linalg.solve(_A_NS, _B_NS)
@@ -450,9 +449,9 @@ class pytest_raises_containing:
 
 
 def test_negative_slope_refusal_message_names_the_offending_edges():
-    """Finding I1: before the certificate tested section 3.1's condition 2, a
-    grounded-but-negative-slope instance certified True, so `select.solve`'s negative-slope
-    message branch was unreachable in practice and untested.
+    """A certificate that did not test the non-negative-slope condition would certify a
+    grounded-but-negative-slope instance True, leaving `select.solve`'s negative-slope
+    message branch unreachable in practice and untested.
     """
     src = torch.tensor([0, 1, 0])
     tgt = torch.tensor([1, 2, 1])  # a parallel 0--1 edge, so grounding survives
@@ -535,7 +534,7 @@ def test_sparse_direct_broadcasts_an_unbatched_operator_against_a_batched_rhs():
 
 
 def test_sparse_direct_reports_per_instance_singular_status_without_raising():
-    """The per-instance failure contract (design section 3.2) on the sparse path: one
+    """The per-instance failure contract on the sparse path: one
     singular instance is reported as SINGULAR with x = 0, and its siblings are still solved.
     """
     A = torch.stack([_A_SPD, torch.zeros(2, 2)])
@@ -983,7 +982,7 @@ def test_the_batch_threshold_counts_every_leading_dimension(monkeypatch):
     assert splu_calls["count"] == 0
 
 
-# -- I5: reporting the RESOLVED backend, and the one fall-back that is an environment fault --
+# -- reporting the RESOLVED backend, and the one fall-back that is an environment fault ------
 
 
 def test_backend_out_reports_sparse_direct_for_a_small_certified_batch():
@@ -1150,7 +1149,7 @@ def test_no_warning_when_the_solve_is_not_grad_safe(monkeypatch):
         solve(op, torch.ones(1, 2))
 
 
-# -- Task 6: `preconditioner` forwarded to gmres (default stays None), and `"ilu"` -----------
+# -- `preconditioner` forwarded to gmres (default stays None), and `"ilu"` -------------------
 
 
 def test_gmres_default_preconditioner_stays_none_when_unspecified(monkeypatch):

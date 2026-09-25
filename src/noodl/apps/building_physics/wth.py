@@ -1,7 +1,7 @@
 """CONTAM weather file (.wth) reader: TN 1887r1 section 3.15. Tab- or space-separated.
 
 RECORD LAYOUT (the only place this reader's line-consumption assumptions live; verified
-against NIST's own `contamxpy` 0.0.9 sample weather files, 15 Sep 2026, one to a year long):
+against NIST's own `contamxpy` 0.0.9 sample weather files, one day to a year long):
 
     line 1      `WeatherFile ContamW 2.0` -- the file signature; anything else is refused.
     line 2      a free-text description (ignored).
@@ -17,16 +17,16 @@ against NIST's own `contamxpy` 0.0.9 sample weather files, 15 Sep 2026, one to a
                 the section actually read: `Date Time Ta Pb Ws Wd` (the rest ignored).
 
     Verified structural fact, checked directly rather than assumed (the two counted
-    sections Task 12 found in the .prj format -- one all on a single line, one whose
-    header count was values rather than rows -- have no analogue here: this format
+    sections of the .prj format that are easy to miscount -- one all on a single line, one
+    whose header count is values rather than rows -- have no analogue here: this format
     carries no explicit record count anywhere, so it cannot be miscounted the same way).
     Both header lines occur EXACTLY ONCE per file, regardless of how many days the file
     spans -- checked against every sample in `contamxpy`'s demo set, from one day
     (`valThreeZonesWthCtm.wth`, the committed fixture) to a full year
     (`valThreeZonesWthCtmYear.wth`, 365 day rows, still one time header). A reader that
-    consumed one day header per day (as Task 12's contaminants-section bug consumed one
-    line per index) would eat the time header itself on day 2 and misparse everything
-    after it; this reader instead looks for the marker line itself
+    consumed one day header per day (as a .prj reader can wrongly consume one line per
+    index in the contaminants section) would eat the time header itself on day 2 and misparse
+    everything after it; this reader instead looks for the marker line itself
     (`startswith("!Date") and "Time" in line`) on every line, not just once, so it is
     unaffected either way a file happens to be laid out.
 

@@ -29,12 +29,13 @@ own formula evaluated at that same fixed ``m``, evaluating the polynomial direct
 those coefficients once and calling ``powerLawFixedM`` -- ``test_powerlaw.py`` checks this
 equivalence independently in NumPy.
 
-Two forms share this one law (design section 5's "volume"/"mass" split):
+Two forms share this one law (the "volume"/"mass" split):
 
 * ``form="volume"`` (``Coefficient_V_flow``, and hence ``Orifice``/``EffectiveAirLeakageArea``,
   which extend it): the law computes a VOLUME flow rate, ``m_flow = rho_default * V_flow(dp)``
-  (``Coefficient_V_flow.mo:4``: ``m_flow = V_flow*rho``, with ``rho = rho_default`` under this
-  task's ``useDefaultProperties=true`` scope, ``BaseClasses/PartialOneWayFlowElement.mo:54-57``).
+  (``Coefficient_V_flow.mo:4``: ``m_flow = V_flow*rho``, with ``rho = rho_default`` under the
+  ``useDefaultProperties=true`` scope implemented here,
+  ``BaseClasses/PartialOneWayFlowElement.mo:54-57``).
 * ``form="mass"`` (``Coefficient_m_flow``, and hence ``Point_m_flow``/``Points_m_flow``, which
   extend it): the parameter is a MASS-flow coefficient ``k`` and the law computes ``m_flow``
   directly, with no separate ``rho`` multiplication needed here -- ``Coefficient_m_flow.mo:31``
@@ -44,7 +45,7 @@ Two forms share this one law (design section 5's "volume"/"mass" split):
   exactly: ``m_flow = rho_default * (k/rho_default) * dp^m = k * dp^m``. This module's
   ``form="mass"`` therefore evaluates the polynomial directly on the caller's ``C`` (MBL's
   ``k``) with no ``rho_default`` factor, which is exact under ``useDefaultProperties=true``
-  (this task's only implemented path) and is what the docstrings above call "the same
+  (the only implemented path) and is what the docstrings above call "the same
   regularisation" on a plain mass-flow coefficient.
 """
 
@@ -63,7 +64,7 @@ _GAMMA = 1.5  # BaseClasses/PowerLawResistanceParameters.mo:6 (also powerLaw.mo:
 
 def _f64(value) -> Tensor:
     """A caller's tensor keeps its own dtype; a bare Python number becomes float64 -- this
-    package is explicit-float64 throughout (Task 1 brief's global constraint), unlike
+    package is explicit-float64 throughout, unlike
     ``noodl.elements.powerlaw``'s default-dtype convenience, which this new package has no
     need to mirror.
     """

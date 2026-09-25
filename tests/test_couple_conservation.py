@@ -1,4 +1,6 @@
-"""Independent references for the coupling findings R1 and R2 of the 19 September review.
+"""Independent references for two coupling properties: conservation (the donor receives
+exactly the recipient's own integrated transfer) and convergence judged on the returned
+state.
 
 Two unit-capacity compartments. A: one edge zone->ambient that carries no flow, so A changes
 only through the sources the coupler adds. B: zone->ambient and ambient->zone, both carrying
@@ -81,7 +83,7 @@ def test_two_way_iteration_returns_the_coupled_backward_euler_solution():
 
     A: a = 1 + (b - a)          ->  2a - b = 1
     B: b = 1 + 1 + (a - b)      -> -a + 2b = 2
-    Solution (4/3, 5/3). The old code returned (1.5, 1.5) with converged=True (R2).
+    Solution (4/3, 5/3). The old code returned (1.5, 1.5) with converged=True.
     """
     a, b, diagnostics = coupled_case("implicit", 1, source=1.0, initial_b=1.0)
     assert bool(diagnostics["converged"].all())
@@ -164,7 +166,7 @@ def test_external_sources_on_both_sides_enter_the_budget_exactly():
 
 def test_two_recipients_of_one_donor_conserve_and_report_each_transfer():
     a = compartment("a", scheme="implicit")
-    # initial=0.0, as the R1/R2 fixtures above do: with every compartment starting at the
+    # initial=0.0, as the fixtures above do: with every compartment starting at the
     # same 1.0, A's boundary value would already equal each recipient's own state and no
     # transfer would ever be nonzero.
     b1 = compartment("b1", scheme="implicit", circulation=True, initial=0.0)
@@ -197,11 +199,11 @@ def test_batch_with_mixed_convergence_is_reported_per_instance():
     # state and the coupling converges trivially on pass 1 for both instances.
     b = compartment("b", scheme="implicit", circulation=True, initial=0.0)
     b_model, b_state, b_drivers = b
-    # Instance 1 exchanges 20x faster than instance 0. Measured (re-pinned for the
-    # recipient-first schedule, task 17): instance 1's faster exchange reaches its own
+    # Instance 1 exchanges 20x faster than instance 0. Measured (for the
+    # recipient-first schedule): instance 1's faster exchange reaches its own
     # boundary equilibrium sooner and is the FIRST to satisfy the per-pass criterion (by
     # pass 8); instance 0's slower exchange is still short of it at pass 8 and needs 18 --
-    # the opposite instance from the old previous-pass-residual criterion.
+    # the opposite instance from a previous-pass-residual criterion.
     b_model.closures[0] = lambda s, d: {"b.q": torch.stack([_t([1.0, 1.0]), _t([20.0, 20.0])])}
     model, state, drivers = union(
         {"A": a, "B": (b_model, b_state, b_drivers)},
@@ -279,7 +281,7 @@ def test_partitioned_error_against_a_monolithic_reference_shrinks_with_the_step(
 def test_a_recipient_with_an_extra_unlinked_layer_runs_step_with_transfer_only_on_the_linked_one(  # noqa: E501
     monkeypatch,
 ):
-    """Task 18b: a recipient's OWN unlinked layer (an `exact`-scheme thermal layer in the
+    """A recipient's OWN unlinked layer (an `exact`-scheme thermal layer in the
     real building/street coupling) must not pay `step_with_transfer`'s extra cost -- the
     coupler must ask only for the linked layer's transfer, never every transport layer of
     the recipient."""
@@ -385,8 +387,9 @@ def test_diagnostics_report_the_adjoint_and_the_primal_pass_count():
 
 
 def test_the_differentiated_pass_conserves_exactly_like_the_primal_one():
-    """R1 on the pass that is actually RETURNED when a gradient is wanted. The returned state
-    now comes from the extra differentiable pass rather than from the last primal one, so the
+    """Conservation on the pass that is actually RETURNED when a gradient is wanted. The
+    returned state comes from the extra differentiable pass rather than from the last primal
+    one, so the
     conservation property has to hold there too -- it does, by construction, because both run
     the same `_one_pass` and the donor receives the recipient's own integrated transfer.
 
@@ -438,7 +441,7 @@ def test_a_one_way_link_riding_on_the_iteration_carries_its_own_gradient():
 
 
 def test_the_adjoint_solves_a_batched_interface_per_instance():
-    """The link's forward value carries the batch as its leading dim, so (Task 9) the adjoint
+    """The link's forward value carries the batch as its leading dim, so the adjoint
     solves one small system PER INSTANCE rather than flattening the whole batch into one --
     `diagnostics["adjoint_batched"]` says so. A batch of instances with DIFFERENT couplings
     still has to come back with each instance's own derivative either way. Weighted so a

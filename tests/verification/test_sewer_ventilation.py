@@ -66,7 +66,7 @@ def _vented_reach(diameter, length, h_over_d, v_w, leak_area, fan=None):
 
 
 def test_a2_the_tyneside_band_is_bracketed():
-    """Row A2, as amended (spec amendment A5). A 1650 mm, 100 m reach at 175 mm depth and
+    """Row A2. A 1650 mm, 100 m reach at 175 mm depth and
     1 m/s surface velocity. MEASURED: open at both ends 1253.78 m3/h (a velocity ratio of
     17.27 %, inside Pescod and Price's own 5-30 % envelope); vented through one 8 cm2
     pick-hole cover 0.24 m3/h. The published 105-315 m3/h band lies strictly between them.
@@ -86,7 +86,7 @@ def test_a2_the_tyneside_band_is_bracketed():
 
 def test_a3_a_fan_draws_exactly_through_the_leaks():
     """Row A3, 1e-12 on the flow balance. Measured 1.234e-14; the nodal residual is
-    6.3e-15 and the power residual 8.1e-13 (checked at 1e-11, spec amendment A6)."""
+    6.3e-15 and the power residual 8.1e-13 (checked at 1e-11)."""
     layer, phi, q, _, drv = _vented_reach(0.30, 15.0, 0.6, 0.0, 8e-4, fan=0.01)
     leaks = -(float(q[1]) + float(q[2]))
     assert leaks == pytest.approx(float(q[3]), abs=1e-12)
@@ -96,15 +96,14 @@ def test_a3_a_fan_draws_exactly_through_the_leaks():
 
 
 def test_h3_transfer_dominated_steady_state_is_henry_equilibrium():
-    """Row H3, 1e-10 (spec). N7: the earlier version of this test asserted an ALGEBRAIC
-    identity of `two_film_flux` directly -- it never ran the model at all. This version
-    builds a genuine `Model` (one manhole `M`, one boundary node `B`, a `water_quality` and
-    an `air_quality` `TransportLayer` each on their own zero-flow edge kind, and
-    `H2STransfer` as the model's only closure) and steps it with `Model.step`/no reaction,
-    starting the water sulfide away from equilibrium and the headspace at zero, until the
-    fixed point.
+    """Row H3, 1e-10. Rather than assert an ALGEBRAIC identity of `two_film_flux`
+    directly (which would never run the model at all), this test builds a genuine `Model` (one
+    manhole `M`, one boundary node `B`, a `water_quality` and an `air_quality` `TransportLayer` each
+    on their own zero-flow edge kind, and `H2STransfer` as the model's only closure) and steps it
+    with `Model.step`/no reaction, starting the water sulfide away from equilibrium and the
+    headspace at zero, until the fixed point.
 
-    There is no gas-phase sink in this application at all (spec's `k_gas` is a documented,
+    There is no gas-phase sink in this application at all (`k_gas` is a documented,
     always-zero, unverified parameter with no reaction registered for it -- confirmed by
     inspection of `build_model` and `quality.py`, neither of which builds one), so
     "no gas-phase sink" needs no extra step to arrange.
@@ -114,7 +113,7 @@ def test_h3_transfer_dominated_steady_state_is_henry_equilibrium():
     a net flow path to the outfall's own headspace edge, so mass continuously leaves the
     system and true Henry equilibrium is never reached there, only approached asymptotically
     as leak/outfall losses shrink relative to the two-film transfer rate -- exactly the
-    caveat this row's brief anticipates. The single CLOSED manhole model here has zero flow
+    caveat this row anticipates. The single CLOSED manhole model here has zero flow
     on both `water`/`air` kinds (no boundary exchange at all, `"...q"` supplied as zero
     drivers rather than solved by a potential layer), so the only thing that can happen is
     mass moving between the two phases until the two-film flux itself is zero -- which is
@@ -123,7 +122,7 @@ def test_h3_transfer_dominated_steady_state_is_henry_equilibrium():
     MEASURED: 600 steps of dt = 60 s from sulfide = 1e-3 kg/m3 (S), gas = 0, reach a
     relative difference between the headspace concentration and its Henry-equilibrium value
     of 1.4e-16 -- far inside the row's 1e-10, recorded here as the measured figure the
-    assertion actually uses (1e-10, unchanged from the spec). A fixed 600-step `model.step`
+    assertion actually uses (1e-10). A fixed 600-step `model.step`
     loop is used rather than `sewer_steady`'s own tolerance-driven early exit, which (on
     this system's absolute per-step-change test, applied to both quality layers) stops
     noticeably before the relative gas/equilibrium gap has fully settled."""

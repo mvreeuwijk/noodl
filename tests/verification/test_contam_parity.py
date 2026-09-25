@@ -1,4 +1,4 @@
-"""Parity with NIST's ContamX engine through contamxpy (spec section 9, amendments 14).
+"""Parity with NIST's ContamX engine through contamxpy.
 
 Skipped when contamxpy is not importable. Flows are compared after ContamX's initial
 steady-state airflow solve; concentrations over a 24-step transient at the project's own
@@ -16,8 +16,8 @@ from noodl.apps.building_physics.prj import project_to_model, read_prj
 
 DATA = Path(__file__).resolve().parents[1] / "data" / "contam"
 THREE = DATA / "valThreeZonesWthCtm-UseApi.prj"
-# Ruling R30: NOT NIST's `test_OneZoneSsStack-UseApi.prj`. That project attaches a
-# constant-efficiency filter (`f# = 1`) removing 10% of sarin on path 1, which Task 12's
+# NOT NIST's `test_OneZoneSsStack-UseApi.prj`. That project attaches a
+# constant-efficiency filter (`f# = 1`) removing 10% of sarin on path 1, which the `.prj`
 # reader refuses -- a filter is invisible to airflow but not to the species layer, so
 # loading it would silently corrupt contaminant results. `test_OneZoneWthCtmStack-UseApi`
 # below is the same one-zone stack geometry from the same demo set with no filter on any
@@ -36,7 +36,7 @@ STACK_AMBIENT_T = 273.15
 STACK_AMBIENT_SWEEP = (273.15, 283.15, 303.15, 313.15)
 # `doorway_damper_fan.prj` path 5 carries flow element 1, an `fan_cmf` constant-MASS-flow fan
 # rated at this many kg/s, on a path declared zone -> ambient. Written once here and asserted
-# against both the file and the engine below (see `contamx._snapshot`, Ruling R12).
+# against both the file and the engine below (see `contamx._snapshot`).
 FAN_CMF_RATING = 0.200683
 FAN_CMF_PATH = 5
 # The ambient mass fraction of the three-zone project's single species. ONE constant: it is
@@ -110,7 +110,7 @@ def test_stack_project_flow_directions_match_contamx(contamx, record_property):
     # With the zone 20 K warmer than outside, buoyancy admits cold air at the LOW opening
     # and expels warm air at the high one: the net is positive on path 1 and negative on
     # path 2, and that is known before either engine is consulted. This is the independent
-    # check on the from->to sign convention `contamx.py` documents (Ruling R12).
+    # check on the from->to sign convention `contamx.py` documents.
     assert torch.equal(torch.sign(ours), torch.tensor([1.0, -1.0], dtype=F64))
     assert torch.equal(torch.sign(ours), torch.sign(ref["flow"]))
     record_property("check", "Stack project, flow directions")
@@ -121,11 +121,11 @@ def test_stack_project_flow_directions_match_contamx(contamx, record_property):
 @pytest.mark.external
 @pytest.mark.parametrize("Ta", STACK_AMBIENT_SWEEP)
 def test_stack_project_flow_magnitudes_match_contamx(contamx, Ta, record_property):
-    """The non-isothermal parity case, live at the milestone's own 1e-3 (Task 14b).
+    """The non-isothermal parity case, at the 1e-3 tolerance.
 
-    This was `xfail(strict=True)` through Task 14 at a measured 1.7e-2 -- seventeen times
-    the tolerance -- because `prj.py` froze every orifice coefficient at the reference
-    density RHO_0 while ContamX evaluates it at the density of the air entering the path.
+    Freezing every orifice coefficient at the reference density RHO_0 (while ContamX
+    evaluates it at the density of the air entering the path) measured 1.7e-2 --
+    seventeen times the tolerance.
     With `UpstreamDensityPowerLaw` carrying that correction the agreement across the whole
     +-20 K sweep is 4.1e-5 to 4.4e-5 relative, twenty-five times INSIDE the tolerance, and
     the residual is flat in temperature rather than growing with it -- i.e. what is left is
@@ -173,7 +173,7 @@ def test_a_constant_mass_flow_fan_delivers_its_rating_in_the_from_to_direction(
     contamx, record_property
 ):
     """The from->to sign convention `contamx._snapshot` documents, asserted rather than
-    merely written down (hardening carried from the Task 14 review).
+    merely written down.
 
     `doorway_damper_fan.prj` path 5 is declared `n# 1` to `m# -1` (zone -> ambient) and
     carries a constant-MASS-flow fan. A fixed-flow fan has no freedom: it must deliver its
@@ -231,9 +231,9 @@ def test_three_zone_transient_concentrations_match_contamx(contamx, record_prope
         state = model.step(state, drivers, ref["dt"])
         trace.append(state["species.x"].clone())
     ours = torch.stack(trace)                                   # (steps+1, 3, 1)
-    # Spec section 9's tolerance for zone mass fractions is 1e-3 relative; the measured
+    # The tolerance for zone mass fractions is 1e-3 relative, fixed in advance; the measured
     # pointwise maximum relative error over the whole (25, 3, 1) trace is 6.5e-6, so the
-    # tolerance is the spec's, not a looser one chosen to fit.
+    # tolerance is not a looser one chosen to fit.
     torch.testing.assert_close(ours, ref["mf"], rtol=1e-3, atol=1e-7)
     worst_rel = ((ours - ref["mf"]) / ref["mf"].abs().clamp_min(1e-12)).abs().max().item()
     record_property("check", "Three-zone project, transient concentrations, 24 steps at 300 s")

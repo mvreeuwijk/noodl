@@ -11,7 +11,7 @@ from noodl.topology import Network
 
 RHO_0 = 1.2041
 
-# The building application is float64 THROUGHOUT (milestone 2 spec 6.4): a stack head is a
+# The building application is float64 THROUGHOUT: a stack head is a
 # difference of two ~1e5 Pa hydrostatic terms, so a float32 element coefficient would cost
 # the very digits the natural-ventilation cases are asserted on. `Element._param` converts a
 # bare Python float at `torch.get_default_dtype()` (float32 in this project), so every float

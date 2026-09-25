@@ -1,4 +1,4 @@
-"""Sparse-path tests for PotentialFlowLayer (Task 11): grounding via the per-instance
+"""Sparse-path tests for PotentialFlowLayer: grounding via the per-instance
 certificate from solvers.grounding, and linear_init/solve routed through
 GraphLaplacianOperator + solvers.select.solve rather than a dense einsum Jacobian.
 """
@@ -27,7 +27,7 @@ def _three_node_chain() -> Network:
 
 
 def test_batched_counterexample_raises_naming_instance_1_not_empty_list():
-    # The verified defect (spec section 3.1): per-instance slopes [[1, 1], [0, 1]] on a
+    # The verified defect: per-instance slopes [[1, 1], [0, 1]] on a
     # grounded 3-node chain. Instance 0 (slopes [1, 1]) is fully grounded (min eigenvalue
     # 0.382); instance 1 (slopes [0, 1]) has its ambient-z1 edge closed (slope 0), so {z1,
     # z2} floats as a group (min eigenvalue 0.0) even though z2 alone still "looks" fine
@@ -42,7 +42,7 @@ def test_batched_counterexample_raises_naming_instance_1_not_empty_list():
     # [1]") -- after a dense (n_I, n_I) Jacobian had been assembled and factorised, with no
     # statement of WHY instance 1 is singular and no check at all on any path that does not
     # end in a dense factorisation. The assertions below therefore pin the message to the
-    # grounding check itself and to the per-instance diagnosis (amendment A2) it must carry.
+    # grounding check itself and to the per-instance diagnosis it must carry.
     net = _three_node_chain()
     g = torch.tensor([[1.0, 1.0], [0.0, 1.0]], dtype=torch.float64)
     layer = PotentialFlowLayer(
@@ -231,8 +231,8 @@ def test_solve_never_assembles_the_dense_einsum_jacobian(monkeypatch, differenti
 
 
 def test_direct_and_auto_linear_solvers_agree_on_a_contam_style_series_network():
-    # linear_solver="direct" is the RETAINED milestone-1 numerics: the operator's explicit
-    # A_I diag(g) A_I^T, LU-factorised. It must agree with the migrated (sparse, Krylov)
+    # linear_solver="direct" is the RETAINED dense reference: the operator's explicit
+    # A_I diag(g) A_I^T, LU-factorised. It must agree with the (sparse, Krylov)
     # default to solver-contract tolerance, or the retained reference is not a reference.
     auto_layer, drivers, phi_b = _series_layer("auto")
     direct_layer, _, _ = _series_layer("direct")
@@ -246,10 +246,10 @@ def test_direct_and_auto_linear_solvers_agree_on_a_contam_style_series_network()
 
 def test_auto_goes_through_sparse_lu_and_direct_goes_through_a_dense_lu(monkeypatch):
     # The numeric agreement above is only meaningful if the two are genuinely different code
-    # paths; these spies are what establish that. UPDATED for the spec section 6.2 step 2
-    # default: `auto` on a certified-SPD operator with a sparse form now factorises through
-    # `scipy.sparse.linalg.splu` (measured 1.1x-4.6x faster than PCG at every ensemble size;
-    # see `solvers.select`'s module docstring), where it used to run `select.pcg`. "direct"
+    # paths; these spies are what establish that. By default `auto` on a certified-SPD
+    # operator with a sparse form factorises through `scipy.sparse.linalg.splu` (measured
+    # 1.1x-4.6x faster than PCG at every ensemble size; see `solvers.select`'s module
+    # docstring) rather than running `select.pcg`. "direct"
     # is unchanged and still dense-LU-factorises the ASSEMBLED operator, so the two remain
     # the two distinct paths this parity gate needs -- one sparse kernel, one dense one --
     # and `select.pcg` must now be called by NEITHER.
@@ -310,8 +310,9 @@ def test_solve_fills_a_supplied_diagnostics_dict():
 
 
 def test_diagnostics_are_filled_on_the_differentiable_path_too():
-    # Task 14 reads these alongside its timings, and its backward budget runs the
-    # differentiable path -- so diagnostics must not be a non-differentiable-only feature.
+    # The composed-model scaling benchmark reads these alongside its timings, and its
+    # backward budget runs the differentiable path -- so diagnostics must not be a
+    # non-differentiable-only feature.
     layer, drivers, phi_b = _series_layer()
     diagnostics: dict = {}
 
@@ -363,10 +364,10 @@ def test_sparse_adjoint_matches_dense_jacobian_transpose_solve(two_zone_layer):
 
 
 def test_adjoint_routes_through_the_layers_own_linear_solver(monkeypatch, two_zone_layer):
-    # Amendment A3.3 requires `linear_solver` to reach `adjoint` too, not only `linear_init`
-    # and `solve`: a layer configured with the retained milestone-1 dense numerics must keep
+    # `linear_solver` must reach `adjoint` too, not only `linear_init`
+    # and `solve`: a layer configured with the retained dense numerics must keep
     # them on the BACKWARD pass as well, or "direct" is only half a reference. The numbers
-    # must agree with the migrated default (first assertion) AND the two must genuinely be
+    # must agree with the default (first assertion) AND the two must genuinely be
     # different code paths (the spies) -- either alone proves nothing.
     net, elements, drives, boundary = two_zone_layer
     phi_b = torch.zeros(1, dtype=torch.float64)
@@ -416,9 +417,9 @@ def test_adjoint_routes_through_the_layers_own_linear_solver(monkeypatch, two_zo
         lu_calls.clear()
         lam[linear_solver] = layer.adjoint(phi_i, phi_b, drivers, grad_phi_i)
         if linear_solver == "auto":
-            # Spec section 6.2 step 2: `auto` on the TransposeOperator of a certified-SPD
-            # GraphLaplacianOperator now takes the sparse LU -- the transposed COO triplet --
-            # rather than pcg. What A3.3 asserts is unchanged: the layer's own configured
+            # `auto` on the TransposeOperator of a certified-SPD
+            # GraphLaplacianOperator takes the sparse LU -- the transposed COO triplet --
+            # rather than pcg. What this asserts: the layer's own configured
             # solver reaches the backward pass, and the two configurations stay two paths.
             assert splu_calls, "adjoint under linear_solver 'auto' must go through splu"
             assert not lu_calls, "adjoint under linear_solver 'auto' must not dense-LU"
@@ -432,13 +433,13 @@ def test_adjoint_routes_through_the_layers_own_linear_solver(monkeypatch, two_zo
 
 
 def test_hot_path_never_touches_the_dense_incidence(monkeypatch, two_zone_layer):
-    # Task 15's structural gate. `A` (n x b) and `_diff` (b x n) are the last dense objects
-    # the layer holds; the milestone's rule is that nothing on a per-Newton-step path may
+    # Structural gate. `A` (n x b) and `_diff` (b x n) are the last dense objects
+    # the layer holds; the rule is that nothing on a per-Newton-step path may
     # form or read one. Patching them on the CLASS with a raising property is what makes the
     # guard non-vacuous: `property` is a data descriptor, so it intercepts the read even if
-    # an instance attribute (the pre-Task-15 `self.A = ...`) or a `cached_property` entry is
+    # an instance attribute (an eager `self.A = ...`) or a `cached_property` entry is
     # already sitting in the instance __dict__ -- a plain instance-attribute delete would
-    # not. Every call below is on the hot path (`assemble` included, which used to read
+    # not. Every call below is on the hot path (`assemble` included, which must not read
     # `self.A.shape[0]` for the node count); `jacobian()` is deliberately NOT called here,
     # because it remains the dense reference and is allowed to build A.
     net, elements, drives, boundary = two_zone_layer
@@ -498,7 +499,7 @@ def test_dense_incidence_is_computed_lazily(two_zone_layer):
 
 
 def test_differentiable_solve_does_not_trace_the_initial_guess(two_zone_layer):
-    # Task 15 Step 2b. The Task 14 reviewer's `saved_tensor_bytes` probe attributed 2567 MB
+    # A `saved_tensor_bytes` probe attributed 2567 MB
     # of the 2571 MB saved per differentiable timestep at ensemble 100 to ONE thing: solve()
     # computing its initial guess with grad enabled, which traces the whole inner Krylov
     # loop (134 iterations, every iterate and every int64 gather index) into the autograd
@@ -541,13 +542,12 @@ def test_differentiable_solve_does_not_trace_the_initial_guess(two_zone_layer):
     assert src_supplied.grad.abs().max() > 0, "a zero gradient would make this vacuous"
 
 
-# --------------------------------------------------- C2: on_failure="return" carries status
-# Final-review finding C2: `solve` read only `NewtonResult.x` and discarded
-# `converged`/`residual_norm`, so `on_failure="return"` returned a non-converged solution
-# with nothing anywhere reporting it -- and on the differentiable path linearised the
-# adjoint at that non-converged point, producing a silently wrong gradient. Spec section
-# 3.2: the escape hatch "is never silent: the result carries the status", and a
-# non-converged forward has no defined adjoint.
+# --------------------------------------------------- on_failure="return" carries status
+# A `solve` that read only `NewtonResult.x` and discarded `converged`/`residual_norm` would
+# return a non-converged solution with nothing anywhere reporting it -- and on the
+# differentiable path linearise the adjoint at that non-converged point, producing a
+# silently wrong gradient. The escape hatch is never silent: the result carries the status,
+# and a non-converged forward has no defined adjoint.
 
 
 def test_solve_on_failure_return_reports_non_convergence_through_diagnostics():
@@ -597,7 +597,7 @@ def test_differentiable_solve_refuses_on_failure_return_outright():
 
 
 def test_an_inner_solve_refusal_inside_newton_names_the_layer():
-    """Finding I3. Grounding is certified at `phi0`, but slopes change between Newton
+    """Grounding is certified at `phi0`, but slopes change between Newton
     iterates, so an instance can lose it mid-iteration -- here instance 1's fan is driven
     past the top of its curve, where `dflow` is exactly zero and the only edge tying `z` to
     the boundary goes inactive. The refusal then comes from `solvers.select.solve` INSIDE
@@ -637,7 +637,7 @@ def test_an_inner_solve_refusal_inside_newton_names_the_layer():
 def test_sparse_direct_linear_solver_matches_direct_on_the_two_zone_layer(two_zone_layer):
     """Parity of the whole layer solve, not merely of one inner linear solve: `linear_init`,
     every Newton inner solve and the returned flows all run through SciPy SuperLU instead of
-    the dense LU, and must agree with the retained milestone-1 numerics to 1e-9.
+    the dense LU, and must agree with the retained dense numerics to 1e-9.
     """
     net, elements, drives, boundary = two_zone_layer
     drivers = {"wind": torch.tensor([5.0, 0.0, 0.0], dtype=torch.float64)}
@@ -827,12 +827,12 @@ def test_auto_backend_is_independent_of_the_callers_grad_context(monkeypatch):
     """`solve(differentiable=False)` must factorise through the SAME backend whatever grad
     mode and grad-requiring inputs the caller happens to have.
 
-    The hazard this pins (controller finding, Task C fix round 1): Newton's inner solves used
-    to run under the caller's AMBIENT grad mode, so `select.solve`'s `"auto"` saw a
-    grad-requiring system and correctly declined the non-differentiable sparse-direct backend
-    -- meaning the identical call took SuperLU from a plain call site and PCG (4.6x slower)
-    from inside `torch.enable_grad()` with `sources.requires_grad_(True)`. Now the whole
-    branch runs under `no_grad`, so the backend is a property of the layer, not of the caller.
+    The hazard this pins: if Newton's inner solves ran under the caller's AMBIENT grad mode,
+    `select.solve`'s `"auto"` would see a grad-requiring system and correctly decline the
+    non-differentiable sparse-direct backend -- so the identical call would take SuperLU
+    from a plain call site and PCG (4.6x slower) from inside `torch.enable_grad()` with
+    `sources.requires_grad_(True)`. The whole branch runs under `no_grad`, so the backend is a
+    property of the layer, not of the caller.
 
     The `differentiable=True` case is here too: its forward already solves under `no_grad`
     inside `_Implicit`, so it must also never reach pcg -- its gradient comes from the
@@ -927,14 +927,14 @@ def test_non_differentiable_solve_returns_detached_tensors_whatever_the_caller_d
     assert not q.requires_grad
 
 
-# -- I5: diagnostics report the RESOLVED backend, not only the requested method -------------
+# -- diagnostics report the RESOLVED backend, not only the requested method -----------------
 
 
 def test_diagnostics_report_the_resolved_backend_at_a_small_ensemble():
     """`diagnostics["method"]` is the REQUEST ("auto"); `diagnostics["backend"]` is what
     actually ran. With the default conditional on four runtime predicates -- chief among them
     "SciPy is importable", an optional extra -- a user on a plain install silently got the
-    4.6x-slower path with nothing in the diagnostics saying so (final review I5).
+    4.6x-slower path with nothing in the diagnostics saying so.
     """
     layer, drivers, phi_b = _series_layer()
     diagnostics: dict = {}

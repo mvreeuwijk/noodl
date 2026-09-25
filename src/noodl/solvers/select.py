@@ -1,19 +1,18 @@
-"""method="auto" eligibility resolution (design section 3.1) and the raise/return failure
-boundary (design section 3.2), on top of solvers.iterative's pcg and gmres, plus the retained
-dense LU reference (`method="direct"`, amendment A3.1) and the SciPy sparse LU reference
-(`method="sparse_direct"`, spec section 6.2 step 2).
+"""method="auto" eligibility resolution and the raise/return failure boundary, on top of
+solvers.iterative's pcg and gmres, plus the retained dense LU reference (`method="direct"`)
+and the SciPy sparse LU reference (`method="sparse_direct"`).
 
 solvers.iterative.pcg/gmres never raise; this is the one layer where a failed NUMERICAL solve
 becomes an exception by default. `on_failure="return"` is the explicit, narrow, non-default
-escape hatch for that numerical-failure case only (never applies to a backward pass -- Task 12
-always raises unconditionally there, bypassing this function's on_failure entirely). It does
+escape hatch for that numerical-failure case only (never applies to a backward pass -- the
+implicit adjoint always raises unconditionally there, bypassing this function's on_failure
+entirely). It does
 NOT apply to an eligibility refusal: requesting `method="cg"` on an operator that cannot
 certify SPD, or letting `method="auto"` see a batch where some but not all instances certify,
 is a contract violation and raises regardless of `on_failure` -- there is no SolveResult to
 return in that case, only a modelling error to report.
 
-THE ELIGIBILITY TABLE for `method="auto"` (design section 3.1, amended by spec section 6.2
-step 2). Read top to bottom; the first matching row wins:
+THE ELIGIBILITY TABLE for `method="auto"`. Read top to bottom; the first matching row wins:
 
   spd_certificate() mixed over the batch          -> RuntimeError (never split a batch)
   certified SPD, and sparse-direct is applicable  -> sparse_direct  (SciPy SuperLU per instance)
@@ -28,8 +27,8 @@ per-instance Python loop has lost to PCG's batched arithmetic). Every one of tho
 FALL-BACK to pcg when it fails, never a refusal: `auto` is a promise to choose a backend that
 works.
 
-WHY sparse-direct is the certified-SPD default (spec section 2, "selected on evidence, per
-platform"; the platform here is CPU + SciPy). Measured in process on the reference composed
+WHY sparse-direct is the certified-SPD default (selected on evidence, per platform; the
+platform here is CPU + SciPy). Measured in process on the reference composed
 model -- 1028 unknowns, ~5300 nonzeros, float64, 14 threads -- median of 3 warm runs via
 `benchmarks.profile_forward --compare-solvers`:
 
@@ -79,7 +78,7 @@ Tensor = torch.Tensor
 # ensemble 1 (0.097 s vs 0.210 s). 32 is the last measured point at which the factorisation
 # is still clearly ahead (0.68) and 64 is the tie; the whole 32-64 band is within 1.0-1.5x,
 # so the cost of choosing 32 rather than 64 is small either way. Like the rest of this rule
-# (spec section 2, "selected on evidence, per platform") it is a CPU + SciPy measurement at
+# (selected on evidence, per platform) it is a CPU + SciPy measurement at
 # one problem size, and is the thing to re-measure when either changes.
 _SPARSE_DIRECT_MAX_BATCH = 32
 
@@ -120,7 +119,7 @@ def _direct(A: Tensor, b: Tensor) -> SolveResult:
     """LU solve of the assembled operator with PER-INSTANCE singularity status.
 
     torch.linalg.solve raises for the whole batch if any one instance is singular, which is
-    the very behaviour the milestone-1 Newton had to work around with an identity
+    the very behaviour an earlier Newton implementation had to work around with an identity
     substitution. lu_factor_ex reports singularity per instance through `info` instead.
 
     `converged` HERE MAKES NO RESIDUAL CLAIM: it is `finite & ~singular`, so a factorisation
@@ -128,11 +127,11 @@ def _direct(A: Tensor, b: Tensor) -> SolveResult:
     is informational rather than a gate (unlike `pcg`/`gmres`, where convergence IS a
     residual test). LU is backward stable, so the residual is genuinely ~0 wherever the
     factorisation succeeds; what the caller does not get is a forward-accuracy guarantee on
-    an ill-conditioned system. `_sparse_direct` shares this contract, and since section 6.2
-    step 2 made it the default for small certified batches it is the SHIPPED failure
-    signature: a badly-conditioned certified system that PCG would have reported as
-    MAX_ITER or BREAKDOWN now returns a finite, backward-stable, forward-inaccurate answer
-    marked CONVERGED, and Newton's own residual test will not catch it either.
+    an ill-conditioned system. `_sparse_direct` shares this contract, and since it is
+    the default for small certified batches it is the SHIPPED failure signature: a badly-conditioned
+    certified system that PCG would have reported as MAX_ITER or BREAKDOWN now returns a finite,
+    backward-stable, forward-inaccurate answer marked CONVERGED, and Newton's own residual test will
+    not catch it either.
     """
     batch = torch.broadcast_shapes(A.shape[:-2], b.shape[:-1])
     m = A.shape[-1]
@@ -172,7 +171,7 @@ def _auto_sparse_triplet(op, b: Tensor):
     """The COO triplet `method="auto"` should factorise for a CERTIFIED-SPD operator, or
     `None` to stay on PCG. Never raises: every "no" here is a fall-back, not a refusal.
 
-    This is where the section 6.2 step 2 default lives. `auto` is a promise to pick a
+    This is where the sparse-direct default lives. `auto` is a promise to pick a
     backend that works, so each of the five ways sparse-direct can be inapplicable makes it
     return None and leaves `solve` on the Krylov path it had before:
 
@@ -245,10 +244,10 @@ def _auto_sparse_triplet(op, b: Tensor):
 
 def _sparse_direct(op, b: Tensor, where: str, triplet=None) -> SolveResult:
     """SciPy sparse LU (SuperLU) of `op.assemble_sparse()`, PER INSTANCE, with per-instance
-    singularity status -- the spec's section 6.2 sparse-direct reference path.
+    singularity status -- the sparse-direct reference path.
 
-    KNOWN LIMITATION, and the reason a vendor backend stays open (spec section 2, "a vendor
-    sparse-direct path stays admissible and is selected on evidence, per platform"): the
+    KNOWN LIMITATION, and the reason a vendor backend stays open (a vendor sparse-direct path
+    stays admissible and would be selected on evidence, per platform): the
     factorisation is a PYTHON LOOP over the flat batch. SciPy's SuperLU bindings factor one
     matrix at a time and have no batched entry point, so an ensemble of `N` realisations
     costs `N` independent `splu` calls with `N` round trips through the interpreter. That is
@@ -337,8 +336,8 @@ def _sparse_direct(op, b: Tensor, where: str, triplet=None) -> SolveResult:
             lu = scipy.sparse.linalg.splu(A_i)
         except RuntimeError:
             # SuperLU reports an exactly singular factor by raising, for THIS instance only;
-            # its siblings are independent matrices and are still solved (design section 3.2:
-            # per-instance status, never a whole-batch abort).
+            # its siblings are independent matrices and are still solved (per-instance
+            # status, never a whole-batch abort).
             singular_flat[i] = True
             x_np[i] = 0.0
             continue
@@ -372,8 +371,7 @@ def _sparse_direct(op, b: Tensor, where: str, triplet=None) -> SolveResult:
 _METHODS = ("auto", "cg", "gmres", "direct", "sparse_direct")
 _ON_FAILURE = ("raise", "return")
 
-# `preconditioner`'s DEFAULT differs by backend: pcg's is `"jacobi"` (unchanged since
-# before Task 6), gmres's is `None` (today's behaviour, unchanged by Task 6 either). One
+# `preconditioner`'s DEFAULT differs by backend: pcg's is `"jacobi"`, gmres's is `None`. One
 # shared literal default could not represent both, so the public default is this private
 # sentinel instead -- meaning "the caller did not mention `preconditioner` at all", resolved
 # per backend just below. An explicitly passed value (including the literal string
@@ -401,24 +399,23 @@ def solve(
     an explicit method, then apply the raise/return boundary on the NUMERICAL outcome.
 
     Accepts the explicit union of backend keyword arguments -- `rtol`, `atol`, `max_iter`,
-    `x0` (both pcg and gmres), `preconditioner` (pcg AND, since Task 6, gmres), `restart`
+    `x0` (both pcg and gmres), `preconditioner` (pcg AND gmres), `restart`
     (gmres only) -- and forwards to the chosen backend only the ones it accepts, silently
-    dropping the rest (no `**kw`: a reviewer found `solve(op_nonsym, b,
-    preconditioner="jacobi")` raising `TypeError` from gmres before this signature was made
-    explicit). `method="direct"` and `method="sparse_direct"` accept and ignore all of them.
+    dropping the rest (no `**kw`, so `solve(op_nonsym, b, preconditioner="jacobi")` cannot
+    raise `TypeError` from a backend). `method="direct"` and `method="sparse_direct"` accept and
+    ignore all of them.
 
-    `preconditioner` left UNSPECIFIED resolves to `"jacobi"` for pcg (unchanged) and to
-    `None` for gmres (today's behaviour, unchanged: `method="auto"`/`"gmres"` still run
-    plain gmres by default). An EXPLICIT `preconditioner` -- including the literal string
-    `"jacobi"` -- is honoured for whichever backend actually runs, gmres included: this is
-    what makes `TransportLayer`'s `"gmres_jacobi"`/`"gmres_ilu"` possible at all (Task 6).
-    `preconditioner="ilu"` on a gmres-routed solve requires `op.assemble_sparse()` and SciPy,
-    exactly like `method="sparse_direct"` does, and raises `ValueError` by name for either
-    missing piece -- it was asked for explicitly, so this is a refusal, never a fall-back
-    (that check lives in `gmres`'s own `"ilu"` preconditioner builder, which this function
-    does not duplicate).
+    `preconditioner` left UNSPECIFIED resolves to `"jacobi"` for pcg and to
+    `None` for gmres (`method="auto"`/`"gmres"` run plain gmres by default). An EXPLICIT
+    `preconditioner` -- including the literal string `"jacobi"` -- is honoured for whichever backend
+    actually runs, gmres included: this is what makes `TransportLayer`'s
+    `"gmres_jacobi"`/`"gmres_ilu"` possible at all. `preconditioner="ilu"` on a gmres-routed solve
+    requires `op.assemble_sparse()` and SciPy, exactly like `method="sparse_direct"` does, and
+    raises `ValueError` by name for either missing piece -- it was asked for explicitly, so this is
+    a refusal, never a fall-back (that check lives in `gmres`'s own `"ilu"` preconditioner builder,
+    which this function does not duplicate).
 
-    `method="sparse_direct"` is the spec's section 6.2 sparse-direct reference: SciPy SuperLU
+    `method="sparse_direct"` is the sparse-direct reference: SciPy SuperLU
     of `op.assemble_sparse()`, per instance. It is a DIRECT method, so it makes no SPD or
     symmetry assumption and never consults the certificate; it requires the optional
     `assemble_sparse` member (`ValueError` otherwise) and SciPy (`ImportError` otherwise);
@@ -502,12 +499,12 @@ def solve(
                 f"Certify all instances, or pass an explicit method."
             )
         if cert is not None and bool(torch.all(cert)):
-            # Spec section 6.2 step 2, decided on the Task C measurement (see this module's
-            # docstring): a certified-SPD operator that can hand over a sparse form is
-            # factorised rather than iterated, up to `_SPARSE_DIRECT_MAX_BATCH` instances.
-            # `_auto_sparse_triplet` returns None -- and never raises -- whenever that is not
-            # applicable, which is what keeps every other certified-SPD operator, every
-            # SciPy-less installation, and every larger ensemble on PCG.
+            # Decided on the measurement in this module's docstring: a certified-SPD operator that
+            # can hand over a sparse form is factorised rather than iterated, up to
+            # `_SPARSE_DIRECT_MAX_BATCH` instances. `_auto_sparse_triplet` returns None -- and never
+            # raises -- whenever that is not applicable, which is what keeps every other
+            # certified-SPD operator, every SciPy-less installation, and every larger ensemble on
+            # PCG.
             triplet = _auto_sparse_triplet(op, b)
             if triplet is not None:
                 backend = "sparse_direct"

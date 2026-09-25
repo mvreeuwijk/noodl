@@ -1,4 +1,4 @@
-"""Units and the NetCDF product — spec section 8."""
+"""Units and the NetCDF product."""
 
 from __future__ import annotations
 

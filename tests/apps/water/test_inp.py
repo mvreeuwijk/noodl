@@ -1,4 +1,4 @@
-"""The documented EPANET `.inp` subset (spec 13.5)."""
+"""The documented EPANET `.inp` subset."""
 
 from pathlib import Path
 
@@ -271,7 +271,7 @@ def test_darcy_weisbach_roughness_is_converted_from_millifeet(tmp_path):
     assert pipe.roughness == pytest.approx(0.85 * FOOT * 1e-3, rel=1e-15)
 
 
-# --------------------------------------------------------------------- [OPTIONS] (N5)
+# --------------------------------------------------------------------- [OPTIONS]
 def test_a_default_file_reads_dda_with_epanets_own_defaults():
     """Neither committed fixture writes `DEMAND MODEL`, `MINIMUM PRESSURE`, `REQUIRED
     PRESSURE` or `PRESSURE EXPONENT`, so all four fall back to `WaterOptions`'s defaults."""
@@ -312,7 +312,7 @@ def test_an_unknown_demand_model_is_refused(tmp_path):
 
 def test_an_unrecognised_option_is_recorded_not_dropped():
     """`Trials`, `Accuracy`, `CHECKFREQ`, ... are solver/report cosmetics this reader does
-    not model, but N5 requires they be RECORDED rather than silently dropped."""
+    not model, but they must be RECORDED rather than silently dropped."""
     net = read_epanet_inp(DATA / "twoloop_si.inp")
     assert "unrecognised_options" in net.notes
     assert "Trials" in net.notes["unrecognised_options"]

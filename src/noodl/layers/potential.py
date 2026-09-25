@@ -23,9 +23,9 @@ from noodl.solvers.select import solve as select_solve
 from noodl.topology import Network
 
 # Inner linear solvers a layer may be configured with; forwarded verbatim as
-# `solvers.select.solve`'s `method`. "direct" is the retained milestone-1 reference (the
-# operator's explicit A_I diag(g) A_I^T, LU-factorised); "auto" is the migrated default;
-# "sparse_direct" is the spec's section 6.2 SciPy SuperLU reference, which factorises the
+# `solvers.select.solve`'s `method`. "direct" is the retained dense reference (the
+# operator's explicit A_I diag(g) A_I^T, LU-factorised); "auto" is the default;
+# "sparse_direct" is the SciPy SuperLU reference, which factorises the
 # operator's O(E) COO form per instance instead. All four reach BOTH passes: `linear_init`
 # and every Newton inner solve on the forward, and the implicit adjoint on the backward.
 #
@@ -41,7 +41,7 @@ _LINEAR_SOLVERS = ("auto", "cg", "gmres", "direct", "sparse_direct")
 
 class _DiagonalShifted:
     """`A_I diag(g) A_I^T + diag(d)`: the Jacobian of a layer carrying potential-dependent
-    NODAL sources (spec 13.4), satisfying the LinearOperator duck type
+    NODAL sources, satisfying the LinearOperator duck type
     `solvers.select.solve` reads.
 
     The shift is symmetric by construction, so the whole operator stays symmetric and the
@@ -112,7 +112,7 @@ class PotentialFlowLayer:
                 f"of {_LINEAR_SOLVERS}"
             )
         self.linear_solver = linear_solver
-        # Metadata only: what this layer's potential IS and what it is measured in (spec 4.4).
+        # Metadata only: what this layer's potential IS and what it is measured in.
         # Nothing in the numerics reads them; `Model` reports them, and a caller composing
         # several layers over one network uses them to tell a pressure layer from a
         # temperature one without matching on layer names.
@@ -164,8 +164,8 @@ class PotentialFlowLayer:
         # per-instance SPD certificate) without a per-solve Python loop. net.endpoints()
         # (kind=None) returns whole-graph (src, tgt) arrays in network edge order; indexing
         # by self.cols restricts them to this layer's own edges, exactly as the lazy
-        # self.A == net.incidence()[:, self.cols] does for the incidence matrix. Since
-        # Task 15 these ARE the layer's representation of its own topology: every hot-path
+        # self.A == net.incidence()[:, self.cols] does for the incidence matrix. These
+        # ARE the layer's representation of its own topology: every hot-path
         # site gathers or scatter-adds with them instead of contracting against A/_diff.
         src_all, tgt_all = net.endpoints()
         self._src = src_all[self.cols]
@@ -189,7 +189,7 @@ class PotentialFlowLayer:
         touched[self._src] = True
         touched[self._tgt] = True
         all_interior = net.interior_index(boundary)
-        # Spec 14, 4.5: a node no edge of this layer's kinds touches is INACTIVE for this
+        # A node no edge of this layer's kinds touches is INACTIVE for this
         # layer -- not an unknown, and not a singular row. A wall-mass node in a building
         # network is the motivating case: it has conduction edges and no airpath edges.
         # `touched` is built from this layer's OWN edge endpoints (`self._src`/`self._tgt`,
@@ -218,7 +218,7 @@ class PotentialFlowLayer:
         self._boundary_mask = torch.zeros(net.n, dtype=torch.bool)
         self._boundary_mask[self.bound] = True
 
-        # POTENTIAL-DEPENDENT NODAL SOURCES (spec 13.4). Empty by default, so every
+        # POTENTIAL-DEPENDENT NODAL SOURCES. Empty by default, so every
         # existing layer is unchanged. Each source's nodes must be INTERIOR unknowns of
         # this layer: a withdrawal at a prescribed node is absorbed by the boundary and
         # changes nothing, and one at an inactive node has no row to enter -- both are
@@ -252,10 +252,10 @@ class PotentialFlowLayer:
     def A(self) -> torch.Tensor:
         """This layer's (n, b_layer) incidence matrix, built on FIRST ACCESS only.
 
-        Held as a `cached_property` rather than an `__init__` attribute since Task 15: at
+        Held as a `cached_property` rather than an `__init__` attribute: at
         the composed model's reference size this matrix is 18.1 MB per layer and grows 4x
-        per node doubling, which on its own broke the milestone's memory shape gate
-        (measured 3.16x against a 2.5x budget in Task 14). Nothing inside this class reads
+        per node doubling, which on its own broke the composed model's memory-scaling budget
+        (measured 3.16x against a 2.5x budget). Nothing inside this class reads
         it except `jacobian()`, the retained dense reference -- every hot-path site gathers or
         scatter-adds with `_src`/`_tgt` instead (`dp`, `residual`, `linear_init`,
         `power_residual`). It stays public, with exactly its old value
@@ -320,7 +320,7 @@ class PotentialFlowLayer:
         self, phi: torch.Tensor, drivers: Mapping
     ) -> torch.Tensor | None:
         """Total potential-dependent withdrawal per INTERIOR row, or `None` when this layer
-        has no node sources (spec 13.4). `phi` is full-node."""
+        has no node sources. `phi` is full-node."""
         if not self._node_sources:
             return None
         out = None
@@ -357,7 +357,7 @@ class PotentialFlowLayer:
         diagonal at the current iterate for all but `linear_init`, which instead passes its
         own tangent-at-zero `k` -- the same operator shape, at a different slope.
 
-        `node_slopes` (spec 13.4) is the `diag(w')` a potential-dependent nodal source adds to
+        `node_slopes` is the `diag(w')` a potential-dependent nodal source adds to
         that Jacobian; `None` (the usual case) returns the bare Laplacian, so nothing about an
         existing layer's operator changes.
         """
@@ -420,7 +420,7 @@ class PotentialFlowLayer:
 
     def element_for(self, kind: str) -> tuple[Element, slice]:
         """This layer's own `Element` instance for `kind`, and the slice of `q`'s (and
-        `dp`'s) columns it occupies (FR-13): the PUBLIC accessor a caller outside this layer
+        `dp`'s) columns it occupies: the PUBLIC accessor a caller outside this layer
         uses instead of reaching into its private `_elements`/`_elem_slices`. Raises
         `KeyError` naming the kind and this layer's known kinds when absent, exactly as
         `kind_slice` does (each element kind is unique within a layer, so the two agree by
@@ -496,7 +496,7 @@ class PotentialFlowLayer:
         # (A_I q), by scatter-add over this layer's edges then a select of the interior
         # rows, rather than einsum against the (n_I, b) slice of the dense incidence: this
         # is once per Newton residual evaluation, and at ensemble 100 the einsum form alone
-        # cost 14.2 ms of a 41.8 ms residual (Task 14's profile).
+        # cost 14.2 ms of a 41.8 ms residual (profiled on the composed model).
         lhs = self._accumulate_interior(q)
         s_I = self._source_interior(sources, phi_interior)
         w = self._node_source_withdrawal(phi, drivers)
@@ -551,7 +551,7 @@ class PotentialFlowLayer:
     def _extra_grounded(self, node_slopes: torch.Tensor | None) -> torch.Tensor | None:
         """Full-node-order bool from `node_slopes` (per COMPACT interior row, as
         `_node_source_slopes` returns): True at an interior node whose own node-source slope
-        is strictly positive there (FR-1). Such a node is grounded independent of any edge
+        is strictly positive there. Such a node is grounded independent of any edge
         path -- `_DiagonalShifted`'s positive diagonal shift there is exactly the SPD
         contribution a boundary connection would otherwise have to supply -- so
         `_grounding_check` must treat it exactly like a boundary node when deciding whether
@@ -576,7 +576,7 @@ class PotentialFlowLayer:
         it is per instance, so an edge closed in one instance but open in another cannot be
         conflated with it.
 
-        `node_slopes` (spec 13.4), when this layer has node sources, is `diag(w')`
+        `node_slopes`, when this layer has node sources, is `diag(w')`
         per compact interior row -- the same tensor `_node_source_slopes` returns. A node
         with a strictly positive entry there is grounded independent of any edge path (see
         `_extra_grounded`), so passing it here is what keeps a node grounded ONLY through a
@@ -636,7 +636,7 @@ class PotentialFlowLayer:
         rhs = self._source_interior(sources, phi0) - self._accumulate_interior(c + k * dp0)
         # A node source contributes its tangent at phi = 0 to the same linearisation:
         # w(phi) ~ w(0) + w'(0) phi, so w(0) moves to the right-hand side and w'(0) joins
-        # the operator's diagonal (spec 13.4).
+        # the operator's diagonal.
         node_slopes = None
         if self._node_sources:
             w0 = self._node_source_withdrawal(phi0, drivers)
@@ -663,8 +663,8 @@ class PotentialFlowLayer:
         return result.x
 
     def _check_no_unreachable_differentiable_tensors(self) -> None:
-        """Guard against a gradient that would be silently wrong or absent (review finding
-        2/3): the differentiable solve threads only two kinds of tensor into
+        """Guard against a gradient that would be silently wrong or absent: the differentiable
+        solve threads only two kinds of tensor into
         `Function.apply` -- each Element's own registered `nn.Parameter`s (found via
         `named_parameters()`, substituted in via `functional_call`) and whatever is reachable
         through the `drivers`/`sources`/`phi_boundary` arguments to `solve()`. Any OTHER
@@ -675,7 +675,7 @@ class PotentialFlowLayer:
         (`Element._param`'s documented pass-through exception, which is still a correct
         construction -- its graph is reachable through this layer's own component calls
         (`flows`, `dflows`, `residual`, `jacobian`, `linear_init`), though NOT through
-        `solve(differentiable=False)`, which since the Task C fix returns detached tensors);
+        `solve(differentiable=False)`, which returns detached tensors);
         for a Drive, this happens whenever a Drive
         implementation owns a learnable coefficient directly instead of reading it from the
         `drivers` mapping passed to `solve()`. Raise now, before dispatching, rather than
@@ -686,7 +686,7 @@ class PotentialFlowLayer:
             for name, value in vars(el).items():
                 if isinstance(value, torch.Tensor) and value.requires_grad:
                     if isinstance(el, NodeSource):
-                        # FR-8: a NodeSource has no `learnable=` constructor kwarg (unlike
+                        # A NodeSource has no `learnable=` constructor kwarg (unlike
                         # Element) -- its fix is to register the tensor as an nn.Parameter
                         # directly, so it must be named and fixed as a node source, not
                         # rendered (and told to construct itself) as if it were an Element.
@@ -778,7 +778,7 @@ class PotentialFlowLayer:
 
         `on_failure` (forwarded to `newton` among `newton_kwargs`) is `"raise"` by default:
         a batch that fails to converge within `max_iter` raises, naming the failing
-        instances. `"return"` is the explicit, narrow escape hatch of design section 3.2 --
+        instances. `"return"` is the explicit, narrow escape hatch --
         a calibration loop that would rather inspect or down-weight a failed instance than
         abort -- and it is accepted here under two conditions, because this method returns
         `(phi, q)` tensors with no room for a status:
@@ -825,8 +825,8 @@ class PotentialFlowLayer:
         if newton_kwargs.get("on_failure") == "return" and diagnostics is None:
             # `solve` returns (phi, q) tensors; without a diagnostics dict there is nowhere
             # for `converged`/`residual_norm` to go, and a non-converged phi would be
-            # indistinguishable from a converged one. Design section 3.2: the escape hatch
-            # "is never silent: the result carries the status".
+            # indistinguishable from a converged one. The escape hatch is never silent: the
+            # result carries the status.
             raise ValueError(
                 f"PotentialFlowLayer {self.name!r}: on_failure='return' requires "
                 f"diagnostics= so the status is not silently dropped; pass a dict and read "
@@ -874,8 +874,7 @@ class PotentialFlowLayer:
             #    implicit adjoint, so any graph it leaves behind is an UNROLLED trace through
             #    the converged Newton iterate -- real gradients, but not the ones
             #    `differentiable=True` computes, retained for a caller who asked for the
-            #    non-differentiable path. Task 11 recorded that leak as a pre-existing wart;
-            #    this closes it.
+            #    non-differentiable path.
             # 2. It made the inner solver's choice depend on the CALLER's ambient grad mode.
             #    `solvers.select.solve`'s "auto" refuses the non-differentiable sparse-direct
             #    backend when grad mode is on and an input requires grad (correctly: it would
@@ -911,11 +910,11 @@ class PotentialFlowLayer:
                     # `method` is what was REQUESTED, `backend` what RAN. Under "auto" the
                     # two differ: the batch threshold and SciPy's presence decide which
                     # side of `select`'s eligibility table this solve landed on, and
-                    # nothing else reports it (final review I5).
+                    # nothing else reports it.
                     diagnostics["backend"] = result.backend
                     # The per-instance STATUS, not only the cost. Without these two,
                     # `on_failure="return"` returned a non-converged phi with nothing
-                    # anywhere reporting it (final review C2).
+                    # anywhere reporting it.
                     diagnostics["converged"] = result.converged
                     diagnostics["residual_norm"] = result.residual_norm
                 phi = self.assemble(result.x, phi_boundary)
@@ -1033,9 +1032,9 @@ class PotentialFlowLayer:
                 dp_slice = dp_full[..., s:e].detach().requires_grad_(True)
                 # The REDUCTION `flow.sum()` must itself execute inside the enable_grad
                 # block, not just the `functional_call` that produces `flow`: this whole
-                # method runs under the outer no_grad of Newton's forward solve (Task 8's
-                # memory-saving guarantee), and `.sum()` is an ordinary tensor op like any
-                # other -- performed under the ambient grad mode at the point it actually
+                # method runs under the outer no_grad of Newton's forward solve (which is
+                # what keeps the forward's memory flat), and `.sum()` is an ordinary tensor op like
+                # any other -- performed under the ambient grad mode at the point it actually
                 # runs, regardless of whether its input (`flow`) already carries a grad_fn
                 # from an earlier, enable_grad-wrapped computation. Writing
                 # `torch.autograd.grad(flow.sum(), dp_slice)` with the `with
@@ -1062,8 +1061,8 @@ class PotentialFlowLayer:
                     # the adjoint gradient computed from that Jacobian was silently wrong.
                     if el.dp_independent:
                         # Cross-check the declaration against the element's own analytic
-                        # dflow(), which for a genuinely dp-independent law (FixedFlow's
-                        # spec) must be identically zero. This is called on `el` directly
+                        # dflow(), which for a genuinely dp-independent law (FixedFlow's,
+                        # say) must be identically zero. This is called on `el` directly
                         # (not through functional_call/`d`) rather than via a second
                         # functional_call: torch.func.functional_call always invokes the
                         # module's forward()/flow(), with no way to redirect it to dflow(),
@@ -1134,8 +1133,8 @@ class PotentialFlowLayer:
         transposed action comes from the operator's `rmatvec` via
         `solvers.implicit.TransposeOperator`; for this symmetric Laplacian that equals its
         `matvec`, but nothing here assumes it. `method=self.linear_solver` carries the
-        layer's configured inner solver onto the backward pass too (amendment A3.3), so
-        `linear_solver="direct"` is the retained milestone-1 numerics on BOTH passes.
+        layer's configured inner solver onto the backward pass too, so
+        `linear_solver="direct"` is the dense reference numerics on BOTH passes.
 
         CALLED DIRECTLY UNDER GRAD MODE with grad-requiring `drivers` (or a grad-requiring
         `phi_interior`/`phi_boundary`), `linear_solver="auto"` falls back to PCG here rather

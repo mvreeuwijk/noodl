@@ -1,6 +1,6 @@
-"""Batched iterative solvers behind the operator/solver contract: pcg (SPD, Task 5) and gmres
-(nonsymmetric, Task 6). Neither ever raises; both return SolveResult unconditionally, per
-instance -- the raise/return boundary lives in solvers/select.py (Task 7), one layer up.
+"""Batched iterative solvers behind the operator/solver contract: pcg (SPD) and gmres
+(nonsymmetric). Neither ever raises; both return SolveResult unconditionally, per
+instance -- the raise/return boundary lives in solvers/select.py, one layer up.
 """
 
 from __future__ import annotations
@@ -100,7 +100,7 @@ def pcg(
     breakdown = torch.zeros_like(converged)
     iterations = torch.zeros(batch_shape, dtype=torch.long, device=device)
 
-    # Hoisted out of the iteration (milestone-1b follow-up, Task B): at ensemble 1 this loop
+    # Hoisted out of the iteration: at ensemble 1 this loop
     # is DISPATCH bound -- ~40 tensor ops per iteration on 1028-element vectors, each costing
     # more in Python/ATen dispatch than in arithmetic -- so every op removed from the body is
     # a real saving, and none of the removals below changes a single bit of the result.
@@ -183,7 +183,7 @@ def _gmres_ilu_preconditioner(
     Python loop and batch-flattening `solvers.select._sparse_direct` uses, reused here rather
     than reinvented.
 
-    COST (fix round 1, undocumented before): this function is called ONCE PER `gmres()` CALL,
+    COST: this function is called ONCE PER `gmres()` CALL,
     and it factorises `spilu` PER INSTANCE in a Python loop, same as `_sparse_direct` -- there
     is no batched SuperLU entry point, so the cost is linear in the ensemble size, same shape
     as `_sparse_direct`'s documented limitation. Unlike `_sparse_direct`, this is NOT a one-off
@@ -247,7 +247,7 @@ def _gmres_ilu_preconditioner(
 def _gmres_callable_preconditioner(
     fn: Callable[[Tensor], Tensor], batch_shape: torch.Size, m: int, B: int
 ) -> Callable[[Tensor], Tensor]:
-    """Wraps a caller-supplied preconditioner (applied "as given", per the brief) so it can
+    """Wraps a caller-supplied preconditioner (applied "as given") so it can
     sit next to `mv` in gmres's flattened-batch working shape: reshape flat -> the caller's
     natural `batch_shape + (m,)`, call it, reshape back.
     """
@@ -290,23 +290,22 @@ def gmres(
     per-instance state that is far simpler to index with one flat batch axis than with
     arbitrary leading dims, unlike pcg's per-element vector ops which need no such reshape.
 
-    `preconditioner` (Task 6) is a LEFT preconditioner: Arnoldi runs on `M^-1 A` with
+    `preconditioner` is a LEFT preconditioner: Arnoldi runs on `M^-1 A` with
     `M^-1 b`, so the per-cycle Givens residual estimate (`g[:, k+1]`) is in the
     PRECONDITIONED scale. The quantity that gates convergence -- `beta`/`r`, compared
     against `tol` -- is always the TRUE, unpreconditioned residual `b - A x`, recomputed via
-    the ordinary (unpreconditioned) `mv` at every cycle end and at exit, exactly as it
-    already was before this parameter existed; `preconditioner=None` takes that original
-    code path completely unchanged (`r`/`beta` are aliased, not recomputed, so this is
-    bit-identical to gmres before Task 6). `"jacobi"` is `1 / diag(A)`; `"ilu"` is SciPy's
+    the ordinary (unpreconditioned) `mv` at every cycle end and at exit;
+    `preconditioner=None` takes the plain code path (`r`/`beta` are aliased, not
+    recomputed). `"jacobi"` is `1 / diag(A)`; `"ilu"` is SciPy's
     incomplete LU of `op.assemble_sparse()`, per instance (see `_gmres_ilu_preconditioner`,
     including its FACTORISATION COST -- read that before choosing `"ilu"`); a callable is
     applied as given, on vectors of the operator's own `batch_shape + (m,)`. Breakdown
     detection is unaffected in meaning: it operates on whatever Arnoldi sees, which is now
     `M^-1 A v_k`.
 
-    `iterations` (fix round 1): unpreconditioned, this is the exact within-cycle step at
-    which the Givens estimate first met `tol` -- unchanged, and bit-identical, from before
-    Task 6, because that estimate already IS the true-scale residual there. PRECONDITIONED,
+    `iterations`: unpreconditioned, this is the exact within-cycle step at
+    which the Givens estimate first met `tol`, because that estimate already IS the
+    true-scale residual there. PRECONDITIONED,
     the Givens estimate is in `M^-1`-weighted units while `tol` is built from `||b||`, so
     the two scales generally disagree and the in-cycle estimate cannot be trusted to report
     the true convergence step -- measured on this module's own stiff fixture
@@ -354,9 +353,8 @@ def gmres(
         return op.matvec(v).reshape(B, m)
 
     # Built once per call, applied every Arnoldi step. `precond_apply is None` is the
-    # untouched pre-Task-6 path: `mv_pre` becomes `mv` itself (no wrapper, no extra call),
-    # which is what makes `preconditioner=None` bit-identical to gmres before this parameter
-    # existed -- see the docstring.
+    # plain path: `mv_pre` becomes `mv` itself (no wrapper, no extra call) -- see the
+    # docstring.
     if preconditioner is None:
         precond_apply = None
     elif callable(preconditioner):

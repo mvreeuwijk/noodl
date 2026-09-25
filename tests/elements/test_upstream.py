@@ -1,6 +1,6 @@
 """UpstreamDensityPowerLaw: CONTAM's upstream-density orifice coefficient.
 
-Every tensor here is built float64 explicitly (Ruling R7): ``torch.get_default_dtype()`` is
+Every tensor here is built float64 explicitly: ``torch.get_default_dtype()`` is
 float32 in this repository, and the reference values these tests compare against are
 computed in Python floats, so a float32 element would agree with them only to ~1e-7.
 """

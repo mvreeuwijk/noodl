@@ -62,7 +62,7 @@ def test_difference_is_transpose_of_incidence():
 
 
 def test_difference_is_the_negative_of_gradient():
-    """MUST FIX 3 (whole-branch review): `difference()` and `gradient()` are opposite sign
+    """`difference()` and `gradient()` are opposite sign
     conventions on the same quantity -- `difference()` is source minus target (what
     `PotentialFlowLayer.dp()` actually uses), `gradient()` is target minus source. They must
     be exact negatives of each other on every network, not just on the hand-checked case

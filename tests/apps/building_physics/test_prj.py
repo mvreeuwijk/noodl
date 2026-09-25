@@ -1,4 +1,4 @@
-"""CONTAM .prj reader on NIST's sample projects (documented subset, spec section 8 and 14)."""
+"""CONTAM .prj reader on NIST's sample projects (the documented subset)."""
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ from noodl.elements import Damper, FixedFlow, UpstreamDensityPowerLaw
 DATA = Path(__file__).resolve().parents[2] / "data" / "contam"
 THREE = DATA / "valThreeZonesWthCtm-UseApi.prj"
 MIXED = DATA / "doorway_damper_fan.prj"
-# NIST's own one-zone stack demo. Ruling R30 replaced it with the unfiltered
-# `test_OneZoneWthCtmStack-UseApi.prj` for the ContamX parity comparison because it attaches
+# NIST's own one-zone stack demo. The ContamX parity comparison uses the unfiltered
+# `test_OneZoneWthCtmStack-UseApi.prj` instead, because this one attaches
 # a constant-efficiency filter to path 1; it stays in the fixture set as the project that
 # pins the refusal.
 SS_STACK = DATA / "test_OneZoneSsStack-UseApi.prj"
@@ -69,7 +69,7 @@ def test_element_coefficients_follow_contam_conventions():
     # correction, not a plain `PowerLaw` (which `UpstreamDensityPowerLaw` satisfies too, so
     # `isinstance(el, PowerLaw)` alone would not catch a revert to the uncorrected element).
     assert isinstance(el, UpstreamDensityPowerLaw) and el.kind == "pl_3"
-    turb_mass = 0.141421 * math.sqrt(1.2041)          # orifice: turb * sqrt(rho) (spec 14)
+    turb_mass = 0.141421 * math.sqrt(1.2041)          # orifice: turb * sqrt(rho)
     torch.testing.assert_close(el.C, torch.full((4,), turb_mass, dtype=F64))
     torch.testing.assert_close(el.n, torch.full((4,), 0.5, dtype=F64))
     torch.testing.assert_close(el.m, torch.full((4,), 0.5, dtype=F64))
@@ -105,7 +105,7 @@ def test_a_volumetric_family_kind_gets_exponent_one(tmp_path):
 
 
 def test_the_reader_builds_a_float64_application():
-    """Ruling R7: the default dtype is float32; every file value must arrive as float64."""
+    """The default dtype is float32; every file value must arrive as float64."""
     p = read_prj(THREE)
     assert p.net.dtype is F64
     assert p.T_zone.dtype is F64 and p.zone_volumes.dtype is F64 and p.x0.dtype is F64
@@ -125,8 +125,8 @@ def test_project_to_model_solves_the_wind_driven_case_and_conserves_species():
     flows = p.path_flows(ss["air.q"])
     assert flows.shape == (4,)
     assert flows[0] > 0 and flows[3] < 0                # west wind: in at 270, out at 90
-    # Ruling R21: the brief asked for 1e-9; this Newton solve lands the nodal balance
-    # at exactly 0.0, so the assertion is tightened rather than left slack.
+    # This Newton solve lands the nodal balance at exactly 0.0, so the assertion is tight
+    # rather than a slack 1e-9.
     assert model.residuals(ss, drivers)["air"].abs().max().item() < 1e-14
     drivers["species.x_boundary"] = torch.tensor([[0.0023254]], dtype=F64)
     ss2 = model.steady(state, drivers)
@@ -162,7 +162,7 @@ def test_reads_the_hand_written_doorway_damper_fan_project():
 
 
 def test_a_doorway_reads_ht_wd_and_cd_from_fields_4_5_and_6():
-    """Ruling R9, verified against NIST's own numbers.
+    """Doorway field positions, verified against NIST's own numbers.
 
     `doorway_damper_fan.prj` element 5 is `reg_solverContTrace-mz-MH-trans-3day.prj`'s
     `dor_door` record copied verbatim: ` 0.148966 2.54558 0.5 0.01 2 0.9 1 0 0 0`, i.e.
@@ -204,7 +204,8 @@ def test_reads_a_multi_species_project():
 
 
 def test_the_round_trip_keeps_levels_zone_numbers_and_sources():
-    """Ruling R5: Task 13 resolves a source's zone through `zone_nr_to_name`, not by position."""
+    """`sources_from_project` resolves a source's zone through `zone_nr_to_name`, not by
+    position."""
     p = read_prj(MIXED)
     assert p.zones == ["singleZone"]
     assert p.zone_nr_to_name == {1: "singleZone"}
@@ -224,7 +225,7 @@ def test_the_round_trip_keeps_levels_zone_numbers_and_sources():
 
 
 def test_path_flows_index_q_in_the_layers_kind_block_layout():
-    """Ruling R2: `q` is laid out in element-KIND blocks, not in path order.
+    """`q` is laid out in element-KIND blocks, not in path order.
 
     `doorway_damper_fan.prj` has five kinds. Network edge order is path order --
     pl_2, pl_2, door_3, door_3, bd_4, fan_1, door_5, door_5 -- but `PotentialFlowLayer`
@@ -252,7 +253,7 @@ def test_path_flows_index_q_in_the_layers_kind_block_layout():
     q = torch.arange(p.net.b, dtype=F64)
     flows = p.path_flows(q)
     assert flows.tolist() == [float(sum(expected[nr])) for nr in (1, 2, 3, 4, 5, 6)]
-    # And batched, so Task 14 can compare a whole time series at once.
+    # And batched, so the ContamX comparison can compare a whole time series at once.
     batched = p.path_flows(q.expand(7, p.net.b))
     assert batched.shape == (7, 6)
     torch.testing.assert_close(batched[0], flows)
@@ -266,7 +267,7 @@ def _variant(text: str, old: str, new: str, tmp_path: Path) -> Path:
 
 
 def test_ambient_conditions_come_from_the_steady_simulation_line(tmp_path):
-    """Ruling R8: the label picks the block, not its position among the `! Ta` blocks."""
+    """The label picks the block, not its position among the `! Ta` blocks."""
     text = THREE.read_text()
     steady = "293.150 101325.0  5.230 270.0 0.000 1 2 0 0 1 ! steady simulation"
     windy = "293.150 101325.0 14.793 270.0 0.000 1 2 0 0 1 ! wind pressure test"
@@ -280,7 +281,7 @@ def test_ambient_conditions_come_from_the_steady_simulation_line(tmp_path):
 
 
 def test_a_path_naming_an_absent_wind_profile_raises_naming_edge_and_number(tmp_path):
-    """Ruling R3: profiles are keyed by CONTAM's profile NUMBER and the lookup is strict."""
+    """Profiles are keyed by CONTAM's profile NUMBER and the lookup is strict."""
     text = THREE.read_text()
     path1 = "   1    1  -1   1   3   0   3   0"
     with pytest.raises(KeyError, match=r"profile number 7"):
@@ -288,7 +289,7 @@ def test_a_path_naming_an_absent_wind_profile_raises_naming_edge_and_number(tmp_
 
 
 def test_the_filtered_one_zone_stack_project_is_refused_naming_the_filter():
-    """Ruling R30, on NIST's own file rather than on a hand-edited variant.
+    """The filter refusal, on NIST's own file rather than on a hand-edited variant.
 
     A filter is invisible to the airflow solve but not to the species layer, so loading this
     project would silently drop a 10% sarin sink on path 1 and return contaminant results
@@ -405,7 +406,7 @@ def _set_path_field(text: str, path_nr: int, index: int, value: str) -> tuple[st
 def test_the_path_record_carries_cdvf_and_cfd_at_fields_28_and_29(tmp_path):
     """A path line has 30 fields: an unnamed `clr` sits between `dir` and `u[4]`.
 
-    ContamW's own header comment omits it, which is where the brief's 27/28 came from.
+    ContamW's own header comment omits it, which suggests positions 27/28 instead.
     Every shipped fixture reads 0 at 27, 28 AND 29, so without this test a regression to
     27/28 leaves the whole file green -- while refusing most NIST projects, whose field 27
     (`u[4]`'s last unit code) takes values 0, 1, 3 and 4.

@@ -1,6 +1,6 @@
 """Modelica Buildings Library (MBL) primitive elements: media constants, the power-law
-flow-element family (Task 1), the tabulated flow law (Task 2), the two-way doors (Task 3) and
-the discretised doors (Task 4) of the Modelica import plan. See ``noodl.elements.mbl.media``/
+flow-element family, the tabulated flow law, the two-way doors and
+the discretised doors used by the Modelica import. See ``noodl.elements.mbl.media``/
 ``noodl.elements.mbl.powerlaw``/``noodl.elements.mbl.table``/``noodl.elements.mbl.door``/
 ``noodl.elements.mbl.door_discretized`` for the transcribed equations.
 """

@@ -1,8 +1,5 @@
 """The headline demo — a real CONTAM building on a real street canyon.
 
-Milestone 5 coupling design spec, sections 3, 4 and 10; amendments A2 (units), A3 (wind
-conventions), A5 (layouts).
-
 The street's `StreetFlows` closure REQUIRES the drivers `U_ref` (m/s at `z_ref`), `theta_w`
 (radians CCW from east, wind TOWARD) and `h_abl` (m), which `street_aq.build_model`'s returned
 driver template does NOT include (`apps/street_aq/routing.py:414-416`,
@@ -44,7 +41,7 @@ SHARED = "r2"
 def _small_street_network() -> StreetNetwork:
     """`from_test_network()`'s topology at 1/10 scale with 2 m x 3 m canyons, so one CONTAM
     building's ~0.05 m3/s of exhaust is a few percent of a segment's own ventilation and the
-    back-coupling code path produces a MEASURABLE change (design spec section 10)."""
+    back-coupling code path produces a MEASURABLE change."""
     x = {"n0": 0.0, "n1": 30.0, "n2": 60.0, "n3": 30.0}
     y = {"n0": 40.0, "n1": 30.0, "n2": 40.0, "n3": 0.0}
     spec = [("r1", "n0", "n1"), ("r2", "n1", "n2"), ("r3", "n3", "n1")]
@@ -58,7 +55,7 @@ def _small_street_network() -> StreetNetwork:
 def _street(net: StreetNetwork, *, u_ref=U_REF, theta_w=THETA_W, h_abl=H_ABL,
             background=BACKGROUND, emission=EMISSION):
     """`(model, state, drivers)` with EVERY driver `StreetFlows` needs. `z_ref=10.0`: the
-    street's reference wind is the 10 m wind the building's `V_met` also names (spec A3)."""
+    street's reference wind is the 10 m wind the building's `V_met` also names."""
     model, state, drivers = street_network.build_model(net, species=("nox",), z_ref=10.0)
     graph = model.net
     sources = torch.zeros(graph.n, dtype=F64)
@@ -84,7 +81,7 @@ def _building():
 
 
 def _link(street_model, segment: str) -> ValueLink:
-    # `convert_back=None`: the feedback is a mass flux, kg/s on both sides (spec A2).
+    # `convert_back=None`: the feedback is a mass flux, kg/s on both sides.
     return ValueLink(
         from_model="street", from_key="street.x",
         from_index=street_index(street_model)[segment],
@@ -173,7 +170,7 @@ def test_the_wind_reaches_the_building_through_the_aliases():
     finally:
         building_model.step = real_step
     assert seen["V_met"] == pytest.approx(3.0)
-    # Wind TOWARD the north == CONTAM's "from the south" == Wd 180 deg (spec A3).
+    # Wind TOWARD the north == CONTAM's "from the south" == Wd 180 deg.
     assert seen["theta_w"] == pytest.approx(180.0)
 
 
@@ -195,8 +192,8 @@ needs_aqdt = pytest.mark.skipif(
 def test_real_leiden_small_building_back_coupling_magnitude(record_property):
     """The headline pairing on real data: one leiden_small hour (forcing step 1000, the
     middle of test_street_parity.py's own sampled steps), the busiest street as the shared
-    segment, the three-zone CONTAM building on it. The magnitude is RECORDED (design spec
-    section 4: negligible is an acceptable, reportable result); the assertion is only that
+    segment, the three-zone CONTAM building on it. The magnitude is RECORDED (negligible is
+    an acceptable, reportable result); the assertion is only that
     the coupled step converged and the sink sign is right."""
     from noodl.apps.street_aq.loader import read_aqdt
 
@@ -233,9 +230,9 @@ def test_real_leiden_small_building_back_coupling_magnitude(record_property):
     seg = street_index(model)[busiest]
     # The baseline here is the street's own STEADY state, not a one-way coupled step as in
     # the synthetic test above. That is valid because the street alone, stepped the same
-    # 3600 s from this steady state, drifts by only 2.1e-11 relative (measured in the final
-    # whole-branch review) -- three orders of magnitude below the ~7e-5 back-coupling change
-    # recorded below, so the steady state IS the uncoupled hour to the precision that matters.
+    # 3600 s from this steady state, drifts by only 2.1e-11 relative (measured) -- three orders of
+    # magnitude below the ~7e-5 back-coupling change recorded below, so the steady state IS the
+    # uncoupled hour to the precision that matters.
     c_two, c_one = coupled["street"]["street.x"][seg].item(), state["street.x"][seg].item()
     record_property("segment", busiest)
     record_property("street_conc_steady_kg_m3", c_one)
@@ -248,7 +245,7 @@ def test_real_leiden_small_building_back_coupling_magnitude(record_property):
 
 def test_sequential_file_exchange_disagrees_with_the_coupled_result(record_property):
     """Today's practice: run the street for the hour, hand the resulting concentration to
-    the building, no feedback (framework spec section 7 item 5). Against the two-way coupled
+    the building, no feedback. Against the two-way coupled
     step on the same fixture and forcing, report the indoor discrepancy."""
     net = _small_street_network()
     street_model, street_state, street_drivers = _street(net)

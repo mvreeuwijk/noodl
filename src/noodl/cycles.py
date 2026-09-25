@@ -1,8 +1,6 @@
 """Cycle-space utilities: conserved flows from cycle amplitudes and from tree solutions.
 
-``branch_flows`` and ``assert_forward_oriented`` moved here verbatim from the
-``physics/flows.py`` of milestone 1, which was retired once its downstream callers
-imported them from here directly.
+``branch_flows`` and ``assert_forward_oriented`` also live here.
 """
 
 from __future__ import annotations
@@ -176,14 +174,13 @@ def _tree_solve(net: Network, kind: str | None, rhs: torch.Tensor) -> torch.Tens
     guarantees it by build, since it only ever moves +m/-m between two nodes already in the
     same tree component). Returns `(..., b_kind)`.
 
-    Algorithm: level-synchronous elimination, deepest level first (see this task's header
-    note). At each level, every child's excess demand is read off (gather), its parent tree
-    edge is solved for directly (`A[child, edge]` is +-1, so dividing is multiplying by the
-    same sign), and the child's ENTIRE excess is handed up to its parent (scatter-add) --
-    physically, "whatever this child's own subtree could not satisfy internally must now be
-    satisfied by the rest of the tree above it." A node with two or more children at the
-    same level scatters onto the same parent additively, which is exactly why scatter_add_
-    (not a plain index assignment) is used for the handoff.
+    Algorithm: level-synchronous elimination, deepest level first. At each level, every child's
+    excess demand is read off (gather), its parent tree edge is solved for directly (`A[child,
+    edge]` is +-1, so dividing is multiplying by the same sign), and the child's ENTIRE excess is
+    handed up to its parent (scatter-add) -- physically, "whatever this child's own subtree could
+    not satisfy internally must now be satisfied by the rest of the tree above it." A node with two
+    or more children at the same level scatters onto the same parent additively, which is exactly
+    why scatter_add_ (not a plain index assignment) is used for the handoff.
 
     The per-level write into `q` uses `Tensor.scatter` (out-of-place, autograd-safe), not
     `q[..., idx] = value` with a batch-shaped `idx`: plain `__setitem__` with an index tensor

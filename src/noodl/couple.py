@@ -1,5 +1,4 @@
-"""Orchestration-level coupling between two independently-built `Model`s (framework spec
-section 4.3, and the milestone 5 coupling design spec).
+"""Orchestration-level coupling between two independently-built `Model`s.
 
 `union` never merges networks or rebuilds layers/closures: it exchanges named driver/state
 values between two ordinary `Model.step` calls each outer step, iterated to a fixed point
@@ -49,7 +48,7 @@ _CONVERSIONS: dict[str, Conversion] = {
         "kg/kg", "kg/m3", lambda value, drivers: value * drivers["rho_amb"]),
     # CONTAM's Wd: degrees clockwise from north, the direction the wind blows FROM. The
     # street app's theta_w: radians counter-clockwise from east, the direction it blows
-    # TOWARD (design spec A3). West wind: Wd=270 <-> theta=0. These two are used by
+    # TOWARD. West wind: Wd=270 <-> theta=0. These two are used by
     # `DriverAlias` targets, and a DRIVER carries no unit metadata to check against -- their
     # "rad"/"deg" are recorded here for the reader, not enforced anywhere.
     STREET_RAD_TO_CONTAM_DEG: Conversion(
@@ -64,7 +63,7 @@ _CONVERSIONS: dict[str, Conversion] = {
 def _reduced(x: Tensor, n_last: int) -> Tensor:
     """A single-species tensor in REDUCED layout `(..., n_last)`. `TransportLayer` accepts a
     single-species state either reduced or stacked `(..., n_last, 1)` (the CONTAM reader's
-    `x0` and `x_boundary` are stacked, the street app's are reduced -- design spec A5); the
+    `x0` and `x_boundary` are stacked, the street app's are reduced); the
     glue works in the reduced form. A batched reduced `(1, 1)` and a stacked `(1, 1)` hold
     the same single number, so the ambiguity when `n_last == 1` is harmless."""
     if _is_stacked(x, n_last):
@@ -109,8 +108,7 @@ def apply_conversion(name: str | None, value: Tensor, drivers: Mapping[str, Tens
     """`value` unchanged if `name` is None; the registered conversion otherwise.
 
     Raises `KeyError` naming `name` and the known conversions if it is not registered --
-    an unregistered conversion must never be silently treated as identity (design spec
-    section 3 point 1, section 8).
+    an unregistered conversion must never be silently treated as identity.
     """
     if name is None:
         return value
@@ -136,18 +134,17 @@ def transport_boundary_inflow(
 ) -> Tensor:
     """Net mass INFLOW, `(...,)`, at the boundary node `boundary_idx[node_position]`, in a
     transport layer's own units, for a SINGLE-SPECIES layer (`x_interior`/`x_boundary` are
-    `(..., n_i)`/`(..., n_b)`, never `(..., n_i, K)` -- milestone 5's global constraint).
+    `(..., n_i)`/`(..., n_b)`, never `(..., n_i, K)`).
 
     `TransportLayer` never exposes this: its own `rate()` has no row for boundary nodes at
-    all (design spec section 3, `Model.ports()` reports boundary flows only for potential
-    layers). Built here with `net.endpoints` + gather + `net.accumulate` to avoid assembling
-    a dense topology selector.
+    all (`Model.ports()` reports boundary flows only for potential layers). Built here with
+    `net.endpoints` + gather + `net.accumulate` to avoid assembling a dense topology selector.
     """
     kind = flow_kinds[0] if len(flow_kinds) == 1 else None
     if kind is None:
         raise NotImplementedError(
             f"transport_boundary_inflow: multiple flow_kinds {flow_kinds!r} not supported "
-            f"(milestone 5 scope is single-flow-kind transport layers)"
+            f"(only single-flow-kind transport layers are supported)"
         )
     batch_shape = torch.broadcast_shapes(x_interior.shape[:-1], x_boundary.shape[:-1], q.shape[:-1])
     full = torch.zeros(*batch_shape, net.n, dtype=x_interior.dtype, device=x_interior.device)
@@ -163,7 +160,7 @@ def transport_boundary_inflow(
 
 @dataclass(frozen=True)
 class ValueLink:
-    """One shared-node value relationship (design spec section 3 points 1-2, A2, A5).
+    """One shared-node value relationship.
 
     `from_key` is a transport layer's state key ("<layer>.x") and `from_index` a position on
     that layer's ACTIVE INTERIOR axis; `to_key` is a transport layer's boundary driver
@@ -179,7 +176,7 @@ class ValueLink:
 
     WHICH state a ONE-WAY link reads depends on the company it keeps, deliberately. In a
     union with no two-way link there is one pass, and the forward value is read from the
-    STEP-START state -- the explicit-coupling ping-pong the design spec asks for. In a union
+    STEP-START state -- an explicit-coupling ping-pong. In a union
     that also has a two-way link, the iteration's passes read every link (one-way included)
     from the previous pass's OUTPUT, so a one-way link there carries an END-of-step value,
     consistent with the two-way glue beside it. One-way links are NOT part of the
@@ -195,8 +192,8 @@ class ValueLink:
     metadata at construction: `convert=None` requires equal units, and a named conversion
     must map the from-layer's unit to the to-layer's. `convert_back` is NOT unit-checked: it
     acts on a FLUX, not on the state value, and a flux's units are the from-layer's own
-    source units (kg/s of pollutant on both sides of this milestone's join, which is exactly
-    why the demo leaves it `None` -- design spec A2); the layers' `unit` strings, which
+    source units (kg/s of pollutant on both sides of the street-building join, which is
+    exactly why the demo leaves it `None`); the layers' `unit` strings, which
     describe the STATE, say nothing about it.
 
     OWNERSHIP. Each boundary entry `(to_model, to_key, to_index)` has exactly one writing
@@ -227,7 +224,7 @@ class ValueLink:
 
 @dataclass(frozen=True)
 class DriverAlias:
-    """One driver value shared across models (design spec section 3 point 3, A3): `source`
+    """One driver value shared across models: `source`
     is authoritative; every target is overwritten from it through that target's own
     registered conversion (or none).
 
@@ -247,9 +244,7 @@ class CoupledModel:
     `iterate_max=50` is a floor, not a measurement pinned here: the recipient-first schedule
     changed the per-pass cost and the pass counts a coupling needs to reach a given
     tolerance, so see `docs/applications/coupling.md` for current numbers rather than this
-    docstring. The former default of 20 was below the milestone's own headline case, so
-    every call site had to override it -- which hid, rather than fixed, the fact that the
-    default could not run the demo.
+    docstring. A default of 20 is below what the street-building coupling demo needs.
 
     `iterate_atol=0.0` is a pure relative criterion: a shared value that is legitimately ZERO
     (no emission at the coupled node, say) can never satisfy `|d| <= rtol * |f|` unless `d` is
@@ -263,7 +258,7 @@ class CoupledModel:
     The returned gradient is therefore the CONVERGED INTERFACE's, with an error of the order
     of the primal residual (exact where the interface equations are linear in the interface)
     rather than the unrolled truncation error O(rho^passes) counted from the start state, and
-    backward memory is one pass rather than all of them (P1-2). `diagnostics["adjoint"]` says
+    backward memory is one pass rather than all of them. `diagnostics["adjoint"]` says
     whether that pass ran: `"implicit"` when it did, `None` when nothing differentiable
     reached the state and no extra pass was needed. `diagnostics["adjoint_batched"]` says
     whether that solve ran as one independent GMRES system per batch instance (every link's
@@ -344,7 +339,7 @@ class CoupledModel:
                     f"[{link.to_index}] is written by two links, {self._link_key(first)} and "
                     f"{self._link_key(link)}; every boundary entry has exactly one writer. A "
                     f"second two-way link would forward the recipient's ONE transfer to two "
-                    f"donors (counting it twice, P2-4) and a second one-way link would "
+                    f"donors (counting it twice) and a second one-way link would "
                     f"silently overwrite the first in list order"
                 )
             owners[target] = link
@@ -385,7 +380,7 @@ class CoupledModel:
         is accepted and is silently wrong by a factor of `rho_amb` -- a plausible mistake that
         no test of either application can catch, because both models keep running happily.
         `convert_back` is deliberately NOT checked here: it acts on a flux, whose units are
-        the from-layer's own source units rather than either layer's state unit (spec A2, and
+        the from-layer's own source units rather than either layer's state unit (see
         `ValueLink`'s docstring).
         """
         what = (
@@ -411,7 +406,7 @@ class CoupledModel:
             )
 
     def _check_two_way_scope(self, link: ValueLink, from_layer, to_layer) -> None:
-        """Milestone 5's two-way scope: one flow kind on the TO layer, one species on both.
+        """The supported two-way scope: one flow kind on the TO layer, one species on both.
 
         The recipient's own transfer is read off `Model.step`'s `boundary_transfer` at ONE
         boundary node of a single-flow-kind layer (`_apply_transfer`), so a TO layer with more
@@ -478,7 +473,7 @@ class CoupledModel:
         `transfer` is `boundary_transfer` in the TO layer's own boundary layout, exactly as
         `Model.step(..., boundary_transfers=True)` reported it for the recipient's own step
         over the whole outer `dt` -- not a flux recomputed from a stale state, so conservation
-        holds on every returned pass by construction (R1). The sources tensor goes through
+        holds on every returned pass by construction. The sources tensor goes through
         `_write_at` like every other glue write, so a STACKED single-species `(n, 1)` sources
         tensor is reduced before the node index is applied and restored afterwards.
         """
@@ -538,12 +533,11 @@ class CoupledModel:
         *, want_transfers: Collection[str],
     ) -> tuple[State, dict[str, Tensor]]:
         """Step model `tag` ONCE over `dt` -- in `k` sub-steps of `dt/k` when named in
-        `substeps`, its glue-derived drivers held constant across them (design spec section 3
-        point 4). `want_transfers` names the transport layer(s) to report the boundary
-        transfer for (empty: none, a plain step); `Model.step` runs `step_with_transfer` on
-        ONLY those layers, not every transport layer of the model -- a recipient with an
-        unlinked layer must not pay `step_with_transfer`'s extra cost on a layer nothing
-        reads a transfer from (task 18b). The returned dict sums each named layer's
+        `substeps`, its glue-derived drivers held constant across them. `want_transfers` names the
+        transport layer(s) to report the boundary transfer for (empty: none, a plain step);
+        `Model.step` runs `step_with_transfer` on ONLY those layers, not every transport layer of
+        the model -- a recipient with an unlinked layer must not pay `step_with_transfer`'s extra
+        cost on a layer nothing reads a transfer from. The returned dict sums each named layer's
         transfer over these `k` outer sub-steps too -- the total amount that crossed each
         boundary node during THIS model's whole `dt`, in the layer's own boundary layout."""
         k = self.substeps.get(tag, 1)
@@ -581,7 +575,7 @@ class CoupledModel:
 
         This is the whole pass, and it is the ONLY place a pass is run -- the iteration below
         calls it for each primal pass and `differentiate_fixed_point` calls it once more, at
-        the converged values, for the returned differentiable one. Conservation (R1) is a
+        the converged values, for the returned differentiable one. Conservation is a
         property of THIS function, so it holds on every pass it produces, certified or
         differentiated, by construction: the donor receives exactly the amount the recipient's
         own scheme integrated across the linked boundary node in this same pass.
@@ -621,8 +615,8 @@ class CoupledModel:
         schedule: each pass steps every recipient (`self._recipients`) from `start` first,
         with the pass's relaxed forward values written into its boundary drivers, then applies
         each two-way link's donor transfer -- the recipient's own integrated boundary
-        transfer this pass, as a source RATE over the donor's whole `dt` (`_apply_transfer`,
-        R1) -- into the DONOR's pass drivers, and only then steps every other model
+        transfer this pass, as a source RATE over the donor's whole `dt` (`_apply_transfer`)
+        -- into the DONOR's pass drivers, and only then steps every other model
         (`self._others`, donors and uncoupled models) from `start`. The donor therefore
         always receives exactly what the recipient's own scheme integrated THIS pass, so
         conservation holds on every returned pass by construction; no separate residual is
@@ -632,7 +626,7 @@ class CoupledModel:
         Convergence is judged PER INSTANCE, on detached copies inside `torch.no_grad()`, on
         EVERY pass including the first: the donor's RETURNED forward value (computed from
         `new`, this pass's own donor output) against the relaxed forward value the recipient
-        was actually stepped with in this same pass (R2) -- the returned state is what is
+        was actually stepped with in this same pass -- the returned state is what is
         certified, not the previous pass's forward value. This is the fixed-point map's own
         UNRELAXED residual, `g(v_k) - v_k`: the returned forward value `g(v_k)` against the
         relaxed iterate `v_k` the recipient was just stepped with, not the relaxed increment
@@ -644,14 +638,14 @@ class CoupledModel:
         Differentiation: the primal passes carry no graph. After convergence the certified
         pass runs once more on the graph at the SAME interface values and
         `solvers.fixed_point.differentiate_fixed_point` attaches the implicit adjoint of the
-        interface equations (P1-2); memory is one pass. What that buys, stated no higher than
+        interface equations; memory is one pass. What that buys, stated no higher than
         it is: the gradient is the CONVERGED INTERFACE's, so its error is of the order of the
         primal residual at `values` -- not the unrolled truncation error O(rho^passes)
         counted from the START state, which is tied to nothing the caller controls and is
         worst exactly where the primal is cheapest. Where the interface equations are LINEAR
-        in the interface the adjoint is exact whatever the residual, which is why the P1-2
-        fixtures return 1/3 and 2/3 to one ulp both at `iterate_rtol=1e-12` and at 1e-3.
-        Pass 1 runs on the
+        in the interface the adjoint is exact whatever the residual, which is why the
+        linear-interface test fixtures return 1/3 and 2/3 to one ulp both at `iterate_rtol=1e-12`
+        and at 1e-3. Pass 1 runs on the
         graph only to learn whether anything differentiable reaches the state -- a structural
         question no inspection of `start` and `drivers` can answer, since a differentiable
         parameter may be captured inside a model's own closure and never appear in either --
@@ -794,7 +788,7 @@ class CoupledModel:
             # and the rest of this dict (`converged`, `max_change`) is grad-free already.
             # A transfer still attached to the pass graph would offer a second, silent route
             # around the adjoint -- a loss touching it would be differentiated through the
-            # single pass, which is exactly the truncated derivative P1-2 removes.
+            # single pass, which is exactly the truncated derivative the adjoint replaces.
             reported = {k: v.detach() for k, v in final_transfers.items()}
             adjoint = "implicit"
             adjoint_batched = bool(adjoint_report["batched"])
@@ -820,7 +814,7 @@ def union(
     adjoint_rtol: float = 1e-10,
 ) -> tuple[CoupledModel, dict[str, State], dict[str, Drivers]]:
     """Couple `models` by exchanging the driver/state values `shared` names, WITHOUT merging
-    any model's `Network`, layers, or closures (design spec section 3). Never modifies the
+    any model's `Network`, layers, or closures. Never modifies the
     `Model`/`State`/`Drivers` objects passed in -- returns fresh dict copies.
 
     `iterate_max=50` is a floor, not a measurement pinned here: the recipient-first schedule
@@ -829,7 +823,7 @@ def union(
     docstring. `iterate_atol=0.0` makes the criterion purely relative, so a shared value that
     is legitimately ZERO needs a positive `iterate_atol` to be judged converged at all.
     `adjoint_rtol` is the tolerance of the implicit adjoint solve at the converged interface,
-    and is independent of the primal `iterate_rtol` -- that independence is the point (P1-2).
+    and is independent of the primal `iterate_rtol` -- that independence is the point.
     See `CoupledModel`.
     """
     model_map = {tag: m for tag, (m, _s, _d) in models.items()}

@@ -148,7 +148,7 @@ def test_sqrt_law_dead_end_does_not_cycle_once_relaxation_switches_off():
     the sewer application, a closed room behind one orifice in a building) is a scalar
     equation on which an UNDAMPED Newton step maps ``dp`` to ``-dp`` exactly, so once the
     relaxation had switched to 1 the iterate cycled at constant residual until ``max_iter``
-    (observed on the milestone-4 sewer benchmark: 400 iterations at a residual of 2.9e-4).
+    (observed on the sewer benchmark: 400 iterations at a residual of 2.9e-4).
     Here the first component is linear and converges fast enough to trigger the switch;
     the second is the square-root law. The solver must fall back to the relaxed step
     when a full step fails to shrink the residual, and converge."""

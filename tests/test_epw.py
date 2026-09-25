@@ -89,7 +89,7 @@ def test_read_epw_rejects_a_second_calendar_year_of_rows(tmp_path):
     # calendar month, so the fixed day-of-year table this reader uses produces a REPEATED,
     # not just shifted, sequence -- `Weather.at()`'s `np.interp` would silently return
     # garbage past the repeat instead of erroring. This is the actual defect the fixed
-    # calendar does not protect against by itself (final whole-branch review, finding 6),
+    # calendar does not protect against by itself,
     # distinct from the single-stitched-year leap-boundary case above, which this reader
     # handles correctly.
     rows = [_row(1, 1, h, 0.0, 101325, 0, 1.0, year="2001") for h in range(1, 25)]

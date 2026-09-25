@@ -1,6 +1,6 @@
-"""Parity with the Modelica Buildings Library on its multizone models (spec section 8).
+"""Parity with the Modelica Buildings Library on its multizone models.
 
-The algebraic models are checked to the spec's fixed tolerance (below); the dynamic models,
+The algebraic models are checked to a fixed tolerance (below); the dynamic models,
 those with volumes, against per-model bounds set from measurement (`DYNAMIC_BOUNDS` and
 `test_parity_on_the_dynamic_models`, at the end of this module).
 
@@ -11,7 +11,7 @@ every compared variable of the CSV is checked at EVERY row against
 
     |noodl - omc| <= 1e-6 |omc| + 1e-9   (kg/s),
 
-the spec's "1e-6 relative, or 1e-9 kg/s absolute near zero flow". The tolerance is not
+i.e. 1e-6 relative, or 1e-9 kg/s absolute near zero flow. The tolerance is not
 loosened for any model or row.
 
 The algebraic set is the models with no `MixingVolume`/`DelayFirstOrder` (checked from each
@@ -37,7 +37,7 @@ maps to nothing fails the test: nothing is skipped.
 The maximum relative error per model and variable is printed (visible with `-s`) and, when
 the environment variable `NOODL_RECORD_PARITY=1` is set, written to the committed
 `tests/data/modelica/parity-algebraic.json` (dynamic models: `parity-dynamic.json`) for the
-documentation. Recording is opt-in and off by default (controller ruling): a plain checkout
+documentation. Recording is opt-in and off by default: a plain checkout
 or a CI run never rewrites those files, only a deliberate re-recording pass does.
 """
 
@@ -61,7 +61,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / "tests" / "data" / "modelica"
 RECORD = DATA / "parity-algebraic.json"
 
-RTOL, ATOL = 1e-6, 1e-9  # spec section 8; never loosened
+RTOL, ATOL = 1e-6, 1e-9  # never loosened
 ALGEBRAIC = ("OneWayFlow", "DoorOpenClosed", "OpenDoorPressure", "OpenDoorTemperature",
              "Orifice", "PowerLaw")
 VOLUME_CLASSES = ("Buildings.Fluid.MixingVolumes.MixingVolume",
@@ -78,8 +78,8 @@ def _csv(model: str) -> tuple[list[str], np.ndarray]:
 
 def _record(model: str, stats: dict, record: Path = RECORD) -> None:
     # Deliberate side effect: the measured errors go into the committed
-    # tests/data/modelica/parity-*.json for the documentation (final review's controller
-    # ruling), only when NOODL_RECORD_PARITY=1 is set -- a plain checkout or a CI run never
+    # tests/data/modelica/parity-*.json for the documentation, only when
+    # NOODL_RECORD_PARITY=1 is set -- a plain checkout or a CI run never
     # rewrites the recorded numbers.
     if os.environ.get("NOODL_RECORD_PARITY") != "1":
         return
@@ -205,7 +205,7 @@ def test_one_way_flow_against_the_embedded_contam_table():
     CONTAM and MBL are separate implementations (different media: the model uses
     `Buildings.Media.Specialized.Air.PerfectGas`), and MBL itself departs from the table by
     more than its last digit for 41 of the 104 entries (worst 0.74 %, `tabDat_m_flow` at
-    -40 Pa; measured, 25 Sep 2026). The assertion is therefore that noodl's departure from
+    -40 Pa; measured). The assertion is therefore that noodl's departure from
     CONTAM is MBL's own, to the parity tolerance: `|noodl - contam| <= |omc - contam| +
     1e-6 |omc| + 1e-9` at every entry. The maximum difference and how many entries agree
     within half a unit of the table's last digit are printed and recorded.
@@ -251,7 +251,7 @@ REFUSED = {
     # A mass- and heat-storing MediumColumnDynamic, plus the controller.
     "ChimneyShaftWithVolume": {"con", "sha", "temSen"},
     # A mass source into two volumes with no boundary: only compressible storage could
-    # take the injected mass (controller ruling: out of scope).
+    # take the injected mass (out of scope).
     "OneEffectiveAirLeakageArea": {"sou"},
 }
 
@@ -310,18 +310,18 @@ DYNAMIC = ("OpenDoorBuoyancyDynamic", "OpenDoorBuoyancyPressureDynamic", "ThreeR
            "ThreeRoomsContamDiscretizedDoor", "CO2TransportStep", "ClosedDoors",
            "NaturalVentilation", "OneOpenDoor", "OneRoom", "ReverseBuoyancy",
            "ReverseBuoyancy3Zones", "ZonalFlow")
-# Measured wall time above 30 s (Task 10 report: 38-315 s): `slow`, deselected by the
+# Measured wall time above 30 s (38-315 s): `slow`, deselected by the
 # default `-m "not slow"` addopts, run with `-m slow`. The other three took 25-55 s
 # depending on machine load and stay in the default run, so that it checks one model of
 # each kind: trace source (CO2TransportStep), stack (OneRoom), zonal flows (ZonalFlow).
 SLOW_DYNAMIC = frozenset(DYNAMIC) - {"CO2TransportStep", "OneRoom", "ZonalFlow"}
 
-# Controller ruling (Task 10 review): three groups. "parity": noodl agrees to the reference's
+# Three groups. "parity": noodl agrees to the reference's
 # tolerance (CO2TransportStep outside the rows right after its source pulse). "step": the
 # difference is noodl's first-order step at the CSV interval (halving the step halves it;
 # asserted on OpenDoorBuoyancyDynamic by `test_step_limited_error_halves_with_the_step`).
-# "storage": MBL's volume mass storage, which noodl's quasi-steady airflow does not model
-# (spec section 6); each such test also asserts the diagnosed mechanism
+# "storage": MBL's volume mass storage, which noodl's quasi-steady airflow does not model;
+# each such test also asserts the diagnosed mechanism
 # (`_check_storage_mechanism`).
 DYNAMIC_GROUP = {
     "ThreeRoomsContam": "parity", "ThreeRoomsContamDiscretizedDoor": "parity",
@@ -333,8 +333,8 @@ DYNAMIC_GROUP = {
 UNITS = {"flow": "kg/s", "T": "K", "p": "Pa", "Xi": "kg/kg", "C": "kg/kg"}
 
 # The bound on the worst relative error (FLOOR_FRAC floor) over every row after
-# t = StartTime, per model and variable: 1.25 times the value measured on 25 Sep 2026
-# (Task 10), rounded up to two digits, 1e-12 where the measurement is round-off. Set once
+# t = StartTime, per model and variable: 1.25 times the measured value, rounded up to two
+# digits, 1e-12 where the measurement is round-off. Set once
 # from that measurement and justified per model in the test docstring; never loosened.
 DYNAMIC_BOUNDS = {
     "OpenDoorBuoyancyDynamic": {"flow": 3.1e-02, "T": 4.4e-05, "p": 2.6e-09, "Xi": 2.5e-07},
@@ -357,7 +357,7 @@ DYNAMIC_BOUNDS = {
 
 
 def test_every_fixture_is_parity_checked_or_refused():
-    # "parity-algebraic"/"parity-dynamic" are the committed recorded-error ledgers this
+    # "parity-algebraic"/"parity-dynamic" are the committed recorded-error files this
     # module writes (see RECORD/RECORD_DYNAMIC, NOODL_RECORD_PARITY), not model fixtures.
     fixtures = {p.stem for p in DATA.glob("*.json")} - {"parity-algebraic", "parity-dynamic"}
     sets = (set(ALGEBRAIC), set(DYNAMIC), set(REFUSED))
@@ -373,11 +373,11 @@ def test_parity_on_the_dynamic_models(model):
 
     OpenModelica solves each model with DASSL at the declared tolerance (1e-6 relative;
     1e-8 for the two OpenDoorBuoyancy*Dynamic) and adaptive steps; noodl solves the airflow
-    quasi-steadily (spec section 6: no volume mass storage) and steps heat and species with
+    quasi-steadily (no volume mass storage) and steps heat and species with
     the exact scheme at the CSV interval, the flows held at their end-of-step values
     (`coupling="iterate"`), which is first order in the step. Relative errors use the
     FLOOR_FRAC floor (1e-3 of the model's largest flow for flows). The measurements behind
-    each bound, the step-halving and mass-storage checks, are in the Task 10 report:
+    each bound, the step-halving and mass-storage checks, are summarised here:
 
     * ThreeRoomsContam, ThreeRoomsContamDiscretizedDoor, OneRoom, ZonalFlow: pinned or
       mixing temperatures, flows to <= 2.4e-6 relative (the reference's own 1e-6 tolerance).
@@ -465,7 +465,7 @@ def _volumes(doc: dict) -> dict[str, dict]:
 
 def _check_storage_mechanism(model: str, head: list[str], data: np.ndarray,
                              run: dict) -> dict:
-    """Assert the mechanism diagnosed for a storage-dominated model (Task 10 report) and
+    """Assert the mechanism diagnosed for a storage-dominated model and
     return its numbers for the record."""
     doc = json.loads((DATA / f"{model}.json").read_text())
     if model == "ReverseBuoyancy":

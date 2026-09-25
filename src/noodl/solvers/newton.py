@@ -9,13 +9,13 @@ back to the damped value for any instance whose residual failed to shrink under 
 full step (the undamped step on a square-root law cycles ``dp -> -dp`` forever).
 
 ``operator`` returns, at the current iterate, either a ``LinearOperator`` (the
-contract of Milestone 1b) or a plain dense ``(..., m, m)`` tensor for backward
-compatibility with every pre-1b caller; a returned tensor is auto-wrapped in
+matvec-free operator contract) or a plain dense ``(..., m, m)`` tensor for a
+caller that assembles densely; a returned tensor is auto-wrapped in
 ``DenseOperator``. The inner linear solve goes through ``solvers.select.solve``
 with ``on_failure="return"``, so a NUMERICAL failure (non-convergence,
 breakdown, singularity) never raises mid-iteration -- only the final
 convergence check below can, and only when ``on_failure="raise"``. This does
-NOT cover an ELIGIBILITY refusal (amendment A3.2): ``solvers.select.solve``
+NOT cover an ELIGIBILITY refusal: ``solvers.select.solve``
 raises ``RuntimeError`` regardless of ``on_failure`` when an explicit
 ``method="cg"`` cannot certify SPD, or when ``method="auto"`` would have to
 split a batch between certified and uncertified instances -- both are
@@ -155,7 +155,7 @@ def newton(
 
     ``on_failure="raise"`` (default) raises ``RuntimeError`` naming the batch indices that
     failed to converge after ``max_iter`` iterations, exactly as before. ``on_failure="return"``
-    is the explicit, non-default escape hatch (design section 3.2): it returns the
+    is the explicit, non-default escape hatch: it returns the
     ``NewtonResult`` with ``converged`` reflecting the true per-instance state instead of
     raising, for a caller (e.g. a calibration loop, or a differentiable forward pass that
     passes ``on_failure`` through) that would rather inspect or down-weight a failed
@@ -196,7 +196,7 @@ def newton(
 
     while not bool(torch.all(converged)) and iterations < max_iter:
         raw = operator(x)
-        # A bare dense tensor (the pre-1b compatibility shim) keeps the dense LU numerics
+        # A bare dense tensor (the dense compatibility shim) keeps the dense LU numerics
         # it has always had; a genuine LinearOperator goes through the eligibility table.
         step_method = "direct" if method == "auto" and isinstance(raw, torch.Tensor) else method
         result = select_solve(
