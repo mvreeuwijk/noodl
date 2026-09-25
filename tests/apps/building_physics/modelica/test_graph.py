@@ -193,3 +193,54 @@ def test_thermal_pin_and_source_are_resolved() -> None:
     source, node = g.sources[0]
     assert source.name == "souA"
     assert node == "volA"
+
+
+# ------------------------------------------------------------------ in-line flow sensors
+def test_inline_flow_sensors_are_transparent_wires() -> None:
+    """A two-port flow sensor (`Fluid/Sensors/BaseClasses/PartialFlowSensor.mo:14-16`:
+    `port_b.m_flow = -port_a.m_flow`, `port_a.p = port_b.p`) joins its two ports into one
+    node and counts for nothing in a junction's degree, so a sensor in series with a flow
+    element or inside a column chain leaves the network unchanged."""
+    g = _graph("inline_sensors.json")
+
+    assert g.zones == ("vol",)
+    assert g.boundaries == ("bouA", "bouB")
+    # One junction: oriCol.port_b ... senC1 ... senC2 ... col.port_a (degree two once the
+    # sensor ports are discounted). The one-port TraceSubstances sensor and the
+    # RelativePressure sensor (no flow through it) are observers, not wires.
+    assert {n for n, k in g.nodes.items() if k == "junction"} == {"_j0"}
+    paths = {p.element.name: p for p in g.paths}
+    assert set(paths) == {"ori", "oriCol", "oriOut"}
+    assert (paths["ori"].src, paths["ori"].tgt) == ("bouA", "bouB")
+    assert (paths["oriCol"].src, paths["oriCol"].tgt) == ("bouA", "vol")
+    assert [(c.name, s) for c, s in paths["oriCol"].columns] == [("col", 1)]
+    assert [(d.component.name, d.side_a, d.side_b) for d in g.doors] == [("doo", "bouA", "bouB")]
+
+
+def test_inline_sensors_record_the_element_port_they_measure() -> None:
+    """Each sensor's `port_a.m_flow` equals `sign * m_flow` into one flow-element port: the
+    port reached from the sensor's `port_a` side (sign -1, the flow leaves that element port
+    into the sensor) or, failing that, from its `port_b` side (sign +1), walking through
+    other in-line sensors."""
+    g = _graph("inline_sensors.json")
+    got = {s.component.name: (s.node, s.port, s.sign) for s in g.sensors}
+    assert got == {
+        "senOri": ("bouB", "ori.port_b", -1),
+        "senDoo": ("bouB", "doo.port_a2", -1),
+        "senC1": ("_j0", "col.port_a", -1),
+        "senC2": ("_j0", "col.port_a", -1),
+    }
+
+
+def test_inline_sensor_without_flow_reversal_is_refused(tmp_path) -> None:
+    import json
+
+    doc = json.loads((FIXTURES / "inline_sensors.json").read_text())
+    for c in doc["components"]:
+        if c["name"] == "senOri":
+            c["parameters"]["allowFlowReversal"] = False
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ModelicaImportError, match=r"senOri \(Buildings.Fluid.Sensors.MassFlowRate\)"
+                       r": allowFlowReversal = false"):
+        build(load(path))

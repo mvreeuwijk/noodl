@@ -36,6 +36,23 @@ does; the end points themselves are accepted); the table given in the model, one
 column. The spline smoothness options, ``tableOnFile = true`` and several output columns
 are refused by name. Enumeration values may be written in full
 (``Modelica.Blocks.Types.Smoothness.LinearSegments``) or by their last component.
+
+Math blocks
+-----------
+A ``Modelica.Blocks.Math`` block in the JSON's ``signals`` combines other signals: MBL's
+examples add an offset to a ramp (``Examples/Orifice.mo``: ``Math.Add``), sum two sources
+(``Validation/OneWayFlow.mo``: ``Math.Sum``) or scale a sine into a heat flow
+(``Examples/ClosedDoors.mo``: ``Math.Gain``). ``math_inputs`` names a block's input
+connectors (``u``; ``u1``, ``u2``(, ``u3``); ``u[1]`` .. ``u[n]``), ``combine`` applies its
+equation to the input values, transcribed from MSL v4.1.0 ``Modelica/Blocks/Math.mo``:
+``Gain`` :552 ``y = k*u`` (``k`` required, declared with only a start value); ``MultiSum``
+:624 ``y = k*u``, 0 when ``nu = 0`` (``nu = 0``, ``k = fill(1, nu)``,
+``Interfaces.mo:395``); ``Sum`` :791 ``y = k*u`` (``nin = 1``, ``Interfaces.mo:376``,
+``k = ones(nin)``); ``Feedback`` :832 ``y = u1 - u2``; ``Add`` :880 ``y = k1*u1 + k2*u2``
+(``k1 = k2 = +1``); ``Add3`` :934 likewise with ``k3``; ``Product`` :976 ``y = u1*u2``;
+``Division`` :1004 ``y = u1/u2``. The caller (``assemble``) finds each input's value by the
+signal that ``drives`` ``"<block>.<input>"``, so a chain of blocks is evaluated from its
+sources outwards.
 """
 
 from __future__ import annotations
@@ -288,6 +305,77 @@ _BLOCKS = {
     "TimeTable": _timetable,
     "CombiTimeTable": _combitimetable,
 }
+
+
+_MATH_PREFIX = "Modelica.Blocks.Math."
+_MATH_TWO = ("u1", "u2")
+_MATH_BLOCKS = ("Gain", "Add", "Add3", "Sum", "MultiSum", "Product", "Feedback", "Division")
+
+
+def _math_short(sig: Signal) -> str | None:
+    if not sig.cls.startswith(_MATH_PREFIX):
+        return None
+    short = sig.cls[len(_MATH_PREFIX):]
+    return short if short in _MATH_BLOCKS else None
+
+
+def is_math(sig: Signal) -> bool:
+    """Whether ``sig`` is a ``Modelica.Blocks.Math`` block this module combines."""
+    return _math_short(sig) is not None
+
+
+def _vector_size(sig: Signal, short: str) -> int:
+    key, default = ("nin", 1) if short == "Sum" else ("nu", 0)  # Interfaces.mo:376, :395
+    return int(sig.parameters.get(key, default))
+
+
+def math_inputs(sig: Signal) -> tuple[str, ...]:
+    """The input connector names of Math block ``sig``, in MSL declaration order."""
+    short = _math_short(sig)
+    if short is None:
+        raise ModelicaImportError(
+            f"modelica: {_where(sig)}: signal block is not supported (supported Math blocks: "
+            f"{', '.join(_MATH_PREFIX + k for k in _MATH_BLOCKS)})"
+        )
+    if short == "Gain":
+        return ("u",)
+    if short == "Add3":
+        return ("u1", "u2", "u3")
+    if short in ("Sum", "MultiSum"):
+        return tuple(f"u[{i + 1}]" for i in range(_vector_size(sig, short)))
+    return _MATH_TWO
+
+
+def _gains(sig: Signal, n: int) -> list[float]:
+    k = sig.parameters.get("k", [1.0] * n)
+    k = k if isinstance(k, list) else [k]
+    if len(k) != n:
+        raise ModelicaImportError(
+            f"modelica: {_where(sig)}: gain vector k has {len(k)} entries for {n} inputs"
+        )
+    return [float(v) for v in k]
+
+
+def combine(sig: Signal, inputs: dict[str, Tensor]) -> Tensor:
+    """The output ``y`` of Math block ``sig`` from its input values (by connector name)."""
+    short = _math_short(sig)
+    names = math_inputs(sig)
+    u = [torch.as_tensor(inputs[n], dtype=F64) for n in names]
+    if short == "Gain":
+        return _required(sig, "k") * u[0]
+    if short in ("Sum", "MultiSum"):
+        k = _gains(sig, len(u))
+        if not u:
+            return torch.zeros((), dtype=F64)
+        return sum((kk * uu for kk, uu in zip(k, u, strict=True)), torch.zeros((), dtype=F64))
+    if short in ("Add", "Add3"):
+        k = [_get(sig, f"k{i + 1}", 1.0) for i in range(len(u))]
+        return sum((kk * uu for kk, uu in zip(k, u, strict=True)), torch.zeros((), dtype=F64))
+    if short == "Product":
+        return u[0] * u[1]
+    if short == "Feedback":
+        return u[0] - u[1]
+    return u[0] / u[1]  # Division
 
 
 def evaluate(signal: Signal, t: Tensor) -> Tensor:

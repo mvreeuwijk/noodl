@@ -196,3 +196,57 @@ def test_a_grid_time_one_ulp_before_an_event_takes_the_post_event_value():
     assert _eval(ct, [before]) == [1.0]
     # Well before the event, the pre-event value.
     assert _eval(_sig("Step", startTime=2.1), [2.0999]) == [0.0]
+
+
+# ------------------------------------------------------------------ Math blocks
+# Closed forms from MSL v4.1.0 `Modelica/Blocks/Math.mo`: Gain :552 `y = k*u`; MultiSum :624
+# `y = k*u` (0 for nu = 0); Sum :791 `y = k*u` with `k = ones(nin)` by default; Feedback :832
+# `y = u1 - u2`; Add :880 `y = k1*u1 + k2*u2`; Add3 :934; Product :976 `y = u1*u2`; Division
+# :1004 `y = u1/u2`.
+def _math(cls: str, **parameters) -> Signal:
+    return Signal(name="m", cls=f"Modelica.Blocks.Math.{cls}", parameters=parameters,
+                  drives=("x.y",))
+
+
+U1 = torch.tensor([1.0, -2.0, 4.0], dtype=F64)
+U2 = torch.tensor([0.5, 3.0, -1.0], dtype=F64)
+U3 = torch.tensor([10.0, 20.0, 30.0], dtype=F64)
+
+
+@pytest.mark.parametrize("cls, params, inputs, expected", [
+    ("Gain", {"k": 2.5}, {"u": U1}, [2.5, -5.0, 10.0]),
+    ("Add", {}, {"u1": U1, "u2": U2}, [1.5, 1.0, 3.0]),
+    ("Add", {"k1": 2.0, "k2": -1.0}, {"u1": U1, "u2": U2}, [1.5, -7.0, 9.0]),
+    ("Add3", {"k3": 0.5}, {"u1": U1, "u2": U2, "u3": U3}, [6.5, 11.0, 18.0]),
+    ("Sum", {"nin": 2}, {"u[1]": U1, "u[2]": U2}, [1.5, 1.0, 3.0]),
+    ("Sum", {"nin": 3, "k": [1.0, -1.0, 0.1]}, {"u[1]": U1, "u[2]": U2, "u[3]": U3},
+     [1.5, -3.0, 8.0]),
+    ("MultiSum", {"nu": 2, "k": [3.0, 1.0]}, {"u[1]": U1, "u[2]": U2}, [3.5, -3.0, 11.0]),
+    ("Product", {}, {"u1": U1, "u2": U2}, [0.5, -6.0, -4.0]),
+    ("Feedback", {}, {"u1": U1, "u2": U2}, [0.5, -5.0, 5.0]),
+    ("Division", {}, {"u1": U1, "u2": U2}, [2.0, -2.0 / 3.0, -4.0]),
+])
+def test_math_blocks_match_msl(cls, params, inputs, expected):
+    sig = _math(cls, **params)
+    assert signals.is_math(sig)
+    assert set(signals.math_inputs(sig)) == set(inputs)
+    y = signals.combine(sig, inputs)
+    assert y.dtype == F64
+    assert torch.allclose(y, torch.tensor(expected, dtype=F64), rtol=1e-15, atol=0.0)
+
+
+def test_math_block_input_names_follow_msl_connectors():
+    assert signals.math_inputs(_math("Gain", k=1.0)) == ("u",)
+    assert signals.math_inputs(_math("Sum")) == ("u[1]",)  # MISO nin = 1 by default
+    assert signals.math_inputs(_math("MultiSum")) == ()  # PartialRealMISO nu = 0
+    assert signals.combine(_math("MultiSum"), {}).tolist() == 0.0
+
+
+def test_math_refusals_name_the_block():
+    with pytest.raises(ModelicaImportError, match=r"m \(Modelica.Blocks.Math.Gain\).*'k'"):
+        signals.combine(_math("Gain"), {"u": U1})  # MSL declares k with no default
+    with pytest.raises(ModelicaImportError, match=r"m \(Modelica.Blocks.Math.Sum\).*k"):
+        signals.combine(_math("Sum", nin=2, k=[1.0]), {"u[1]": U1, "u[2]": U2})
+    assert not signals.is_math(_math("Abs"))
+    with pytest.raises(ModelicaImportError, match=r"m \(Modelica.Blocks.Math.Abs\)"):
+        signals.math_inputs(_math("Abs"))

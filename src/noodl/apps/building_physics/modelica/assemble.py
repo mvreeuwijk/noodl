@@ -165,7 +165,11 @@ class ModelicaNames:
     door or zonal flow, the sum over the compartments of a discretised door. For
     `DoorOpen`/`DoorOperable` and the zonal flows the two port flows are listed too:
     `edges["<name>.port_a1"]` is `port_a1.m_flow` and `edges["<name>.port_a2"]` is
-    `port_a2.m_flow`. `nodes[name]` is the node position of a zone or boundary. `kinds[name]`
+    `port_a2.m_flow`. An in-line flow sensor (`graph.InlineSensor`) is listed under its own
+    name as its `port_a.m_flow`, i.e. the flow of the element port it is wired to; a sensor
+    with no single element port, or next to a discretised door (whose port flows are not a
+    signed sum of its compartment flows), is left out. `nodes[name]` is the node position of
+    a zone or boundary. `kinds[name]`
     are the instance's air-layer edge kinds. `times` is the experiment output grid.
     `air_references` lists the zones made air-layer pressure references (module docstring,
     "Closed zone groups").
@@ -224,7 +228,13 @@ def _stack_nested(rows: list[list[Tensor]], K: int, n_t: int) -> tuple[Tensor, b
 
 
 class _Signals:
-    """The document's signals keyed by the input they drive, evaluated on the time grid."""
+    """The document's signals keyed by the input they drive, evaluated on the time grid.
+
+    A `Modelica.Blocks.Math` block (`signals.combine`) takes the value of each of its inputs
+    `"<block>.<input>"` from the signal that drives it, recursively, so a chain such as
+    `ramp -> add.u1`, `add -> bouA.p_in` is evaluated from its sources outwards. A block
+    input nothing drives, and a loop of blocks (feedback), are refused by name.
+    """
 
     def __init__(self, doc: ModelicaDoc, times: Tensor, kind_of: Mapping[str, str],
                  errors: list[str]) -> None:
@@ -233,6 +243,7 @@ class _Signals:
         self.by_target: dict[str, schema.Signal] = {}
         self.used: set[str] = set()
         self.kind_of = kind_of
+        self.signal_names = {s.name for s in doc.signals}
         self._values: dict[str, Tensor | None] = {}
         for s in doc.signals:
             for target in s.drives:  # one block output may feed several inputs
@@ -249,17 +260,47 @@ class _Signals:
         if s is None:
             return None
         self.used.add(target)
-        if s.name not in self._values:  # evaluated once, however many inputs it feeds
-            try:
+        y = self._series(s, ())
+        if y is None:
+            return None
+        if bool((y == y[0]).all()):
+            return y[0].clone()  # a constant signal stays a constant driver
+        return y.clone()
+
+    def _series(self, s: schema.Signal, chain: tuple[str, ...]) -> Tensor | None:
+        """`s`'s output over the whole grid, `(n_t,)`; `None` (with an error) if it cannot
+        be evaluated. Evaluated once, however many inputs it feeds."""
+        if s.name in self._values:
+            return self._values[s.name]
+        if s.name in chain:
+            loop = " -> ".join((*chain[chain.index(s.name):], s.name))
+            self.errors.append(f"{s.name} ({s.cls}): signal loop {loop} (feedback is not "
+                               f"supported)")
+            return None
+        y: Tensor | None = None
+        try:
+            if signals.is_math(s):
+                inputs: dict[str, Tensor] = {}
+                for port in signals.math_inputs(s):
+                    target = f"{s.name}.{port}"
+                    src = self.by_target.get(target)
+                    if src is None:
+                        self.errors.append(f"{s.name} ({s.cls}): input {port} is not driven "
+                                           f"by any supported signal")
+                        continue
+                    self.used.add(target)
+                    value = self._series(src, (*chain, s.name))
+                    if value is not None:
+                        inputs[port] = value
+                if len(inputs) == len(signals.math_inputs(s)):
+                    y = signals.combine(s, inputs).expand(self.times.shape).clone()
+            else:
                 y = signals.evaluate(s, self.times)
-            except ModelicaImportError as exc:
-                self.errors.append(str(exc).removeprefix("modelica: "))
-                y = None
-            if y is not None and bool((y == y[0]).all()):
-                y = y[0].clone()  # a constant signal stays a constant driver
-            self._values[s.name] = y
-        y = self._values[s.name]
-        return None if y is None else y.clone()
+        except ModelicaImportError as exc:
+            self.errors.append(str(exc).removeprefix("modelica: "))
+            y = None
+        self._values[s.name] = y
+        return y
 
     def require(self, comp: Component, port: str) -> Tensor | None:
         y = self.get(f"{comp.name}.{port}")
@@ -277,6 +318,8 @@ class _Signals:
             inst = target.split(".", 1)[0]
             if self.kind_of.get(inst) == "observer":
                 continue  # feeds a block the reader ignores (spec section 4)
+            if inst in self.signal_names:
+                continue  # feeds a Math block that is itself unused: reported for that block
             self.errors.append(
                 f"{s.name} ({s.cls}): drives {target}, which this reader does not read "
                 f"(the input is disabled or not supported)"
@@ -572,6 +615,8 @@ class _Builder:
         # Element inputs fed by signals (door `y`, zonal `ACS`/`mAB_flow`/`mBA_flow`), keyed
         # by their driver name "<instance>.<input>"; scalars or series over the grid.
         self._inputs: dict[str, Tensor] = {}
+        # MediumColumn name -> (the flow element whose path holds it, its sign there).
+        self._columns: dict[str, tuple[str, int]] = {}
         # ZonalFlow_m_flow instances: (component, mAB_flow, mBA_flow, side A, side B).
         self._zonal_pairs: list[tuple[Component, Tensor, Tensor, int, int]] = []
 
@@ -877,11 +922,41 @@ class _Builder:
             edges[name] = tuple((air.kind_slice(k).start + j, s) for k, j, s in entries)
         for key, (k, j, s) in extra_ports.items():
             edges[key] = ((air.kind_slice(k).start + j, s),)
+        for sensor in g.sensors:
+            entries = self._port_flow(sensor.port, edges)
+            if entries is not None:
+                edges[sensor.component.name] = tuple((c, sensor.sign * s) for c, s in entries)
         names = ModelicaNames(edges=edges, nodes=dict(index), kinds=kinds,
                               times=self.times.clone(), air_references=tuple(references))
         return model, state, drivers, names
 
     # ------------------------------------------------------------- edges
+    def _port_flow(self, ref: str | None, edges) -> tuple[tuple[int, int], ...] | None:
+        """`m_flow` INTO port `ref` (`"<instance>.<port>"`) as `(column, sign)` entries of
+        `"air.q"`, or `None` when it is not a signed sum of edge flows."""
+        if ref is None:
+            return None
+        inst, port = ref.split(".", 1)
+
+        def neg(entries):
+            return tuple((c, -s) for c, s in entries)
+
+        if port in ("port_a", "port_b") and inst in edges and inst not in self._columns:
+            return edges[inst] if port == "port_a" else neg(edges[inst])
+        if inst in self._columns:  # a column on the path of element `owner`
+            owner, sign = self._columns[inst]
+            if owner not in edges:
+                return None
+            # sign +1: the column's port_a faces the path's src, so the path flow enters it.
+            into_a = edges[owner] if sign > 0 else neg(edges[owner])
+            return into_a if port == "port_a" else neg(into_a)
+        a1, a2 = f"{inst}.port_a1", f"{inst}.port_a2"
+        if a1 in edges and a2 in edges:  # DoorOpen/DoorOperable and zonal flows
+            # PartialFourPortInterface: port_b1.m_flow = -port_a1.m_flow, likewise 2.
+            return {"port_a1": edges[a1], "port_b1": neg(edges[a1]),
+                    "port_a2": edges[a2], "port_b2": neg(edges[a2])}.get(port)
+        return None
+
     def _path(self, path: FlowPath, net, index, elements, drives, kinds, edge_dirs,
               pressure_edges) -> None:
         comp = path.element
@@ -905,6 +980,7 @@ class _Builder:
                 continue
             coeff.append(sign * h * G_N)
             nodes.append(index[node])
+            self._columns[col.name] = (comp.name, sign)
         if el is None:
             return
         net.add_edge(path.src, path.tgt, kind=kind)

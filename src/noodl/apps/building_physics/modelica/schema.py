@@ -96,6 +96,31 @@ SIGNALS = frozenset({
     "Modelica.Blocks.Sources.TimeTable",
     "Modelica.Blocks.Sources.CombiTimeTable",
 })
+# Math blocks that combine other signals (`signals.combine`, MSL v4.1.0 `Blocks/Math.mo`). In
+# the JSON's `signals` a Math block's inputs are the `"<block>.<input>"` names other signals
+# `drives`, so a chain of blocks is resolved from its sources outwards.
+MATH = frozenset({
+    "Modelica.Blocks.Math." + name for name in (
+        "Gain", "Add", "Add3", "Sum", "MultiSum", "Product", "Feedback", "Division",
+    )
+})
+# In-line (two-port, flow-through) sensors: every `Buildings.Fluid.Sensors` class that extends
+# `Sensors/BaseClasses/PartialFlowSensor.mo` (directly or through `PartialDynamicFlowSensor`),
+# whose equations (`:13-24`) are `port_b.m_flow = -port_a.m_flow`, `port_a.p = port_b.p` and
+# isenthalpic, species-preserving pass-through: no pressure drop, no storage. `graph.build`
+# joins such a sensor's two ports into one node (a transparent wire) and records it so a
+# caller can map it to the flow it carries. `RelativePressure` is NOT one of these: its two
+# ports sit on different nodes and carry no flow (`RelativePressure.mo`), so it stays a plain
+# observer, as do the one-port sensors (`TraceSubstances`, `Temperature`, ...).
+INLINE_SENSORS = frozenset({
+    "Buildings.Fluid.Sensors." + name for name in (
+        "DensityTwoPort", "EnthalpyFlowRate", "EntropyFlowRate", "HeatMeter",
+        "LatentEnthalpyFlowRate", "MassFlowRate", "MassFractionTwoPort", "PPMTwoPort",
+        "RelativeHumidityTwoPort", "SensibleEnthalpyFlowRate", "SpecificEnthalpyTwoPort",
+        "SpecificEntropyTwoPort", "TemperatureTwoPort", "TemperatureWetBulbTwoPort",
+        "TraceSubstancesTwoPort", "Velocity", "VolumeFlowRate",
+    )
+})
 # Sensors, adders and other blocks used only to compare a supported model against a reference
 # (spec section 4: "listed with role: observer and ignored by the reader"). A component is
 # ALSO treated as an observer whenever its own `"role": "observer"` field says so, whatever its
@@ -115,7 +140,7 @@ OBSERVERS = frozenset({
 
 SUPPORTED = (
     ZONES | BOUNDARIES | ONE_WAY | TWO_WAY | COLUMNS | ZONAL | THERMAL_PIN | SOURCES
-    | SIGNALS | OBSERVERS
+    | SIGNALS | MATH | INLINE_SENSORS | OBSERVERS
 )
 
 # Refused classes named in spec section 6, each with the short reason `graph.build` reports

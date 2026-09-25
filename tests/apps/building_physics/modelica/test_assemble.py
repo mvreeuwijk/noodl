@@ -498,3 +498,77 @@ def test_iteration_converges_to_the_tight_tolerances():
                    atol=1e-13, rtol=1e-12)
         assert bool(diag["converged"].all())
         assert diag["passes"] < model.iterate_max
+
+
+# ------------------------------------------------------------------ in-line flow sensors
+def test_inline_sensors_map_to_the_flow_of_the_element_in_series():
+    """`names.edges[<sensor>]` is the sensor's own `port_a.m_flow`
+    (`PartialFlowSensor.mo:13`): the flow of the element it sits in series with, signed by
+    which way round the sensor is wired."""
+    model, state, drivers, names = _load("inline_sensors.json")
+    hist = simulate(model, state, drivers, names.times[:3])
+    q = hist["air.q"]
+
+    def flow(key):
+        return sum(s * q[:, c] for c, s in names.edges[key])
+
+    # ori.port_a -> senOri -> bouB: the sensor carries ori's own port_a.m_flow.
+    assert names.edges["senOri"] == names.edges["ori"]
+    # doo.port_a2 -> senDoo.port_a: the sensor carries -port_a2.m_flow (flow B -> A in the
+    # door's second direction leaves port_a2 into the sensor).
+    assert torch.equal(flow("senDoo"), -flow("doo.port_a2"))
+    # senC1 is wired backwards (its port_b faces oriCol): it reads minus oriCol's flow, and
+    # senC2 (port_a facing the column) likewise.
+    assert torch.equal(flow("senC1"), -flow("oriCol"))
+    assert torch.equal(flow("senC2"), -flow("oriCol"))
+    # The network is the one without sensors: bouA 5 Pa above bouB drives ori forwards.
+    assert bool((flow("ori") > 0).all())
+
+
+# ------------------------------------------------------------------ Math signal chains
+def test_math_signal_chain_matches_the_closed_form():
+    """Boundary inputs fed by chains of `Modelica.Blocks.Math` blocks (MSL `Math.mo`: Add
+    :880, Sum :791, Gain :552, Product :976) over sources: `bouA.p_in = 2 ramp + pAmb`,
+    `bouB.p_in = pAmb - 3`, `bouB.T_in = 290 * (1 * step)`."""
+    model, state, drivers, names = _load("math_chain.json")
+    t = names.times
+    phi = drivers["series:air.phi_boundary"]
+    ramp = 10.0 * torch.clamp(t / 10.0, max=1.0)
+    assert torch.allclose(phi[:, 0], 2.0 * ramp + 101325.0 - P_DEFAULT, rtol=0, atol=1e-9)
+    assert torch.equal(phi[:, 1], torch.full_like(t, -3.0))
+    T = drivers["series:thermal.x_boundary"]
+    expected_T = torch.where(t < 5.0, torch.full_like(t, 290.0), torch.full_like(t, 290.0 * 1.1))
+    assert torch.allclose(T[:, 1], expected_T, rtol=1e-15, atol=0.0)
+    hist = simulate(model, state, drivers, t[:4])
+    ((col, sign),) = names.edges["ori"]
+    assert bool((sign * hist["air.q"][1:, col] > 0).all())  # bouA above bouB once ramping
+
+
+def _chain_doc(**edits):
+    doc = _doc("math_chain.json")
+    sig = {s["name"]: s for s in doc["signals"]}
+    for name, fields in edits.items():
+        if fields is None:
+            doc["signals"].remove(sig[name])
+        else:
+            sig[name].update(fields)
+    return doc
+
+
+def test_math_block_loop_is_refused(tmp_path):
+    doc = _chain_doc(gai={"drives": ["prod.u2", "add.u2"]}, pAmb={"drives": "sum.u[1]"},
+                     add={"drives": ["bouA.p_in", "gai.u"]}, ste=None)
+    with pytest.raises(ModelicaImportError, match=r"add \(Modelica.Blocks.Math.Add\).*loop"):
+        read_modelica(_write(tmp_path, doc))
+
+
+def test_math_block_with_an_undriven_input_is_refused(tmp_path):
+    doc = _chain_doc(off=None)
+    with pytest.raises(ModelicaImportError, match=r"sum \(Modelica.Blocks.Math.Sum\).*u\[2\]"):
+        read_modelica(_write(tmp_path, doc))
+
+
+def test_unsupported_math_block_is_refused_by_name(tmp_path):
+    doc = _chain_doc(gai={"class": "Modelica.Blocks.Math.Abs"})
+    with pytest.raises(ModelicaImportError, match=r"gai \(Modelica.Blocks.Math.Abs\)"):
+        read_modelica(_write(tmp_path, doc))

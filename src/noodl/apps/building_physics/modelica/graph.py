@@ -81,6 +81,24 @@ and `port_a2` (`Validation/ThreeRoomsContam.mo:149-179` wires `dooOpeClo` this w
 pairing -- `port_a1` and `port_b2` resolving to different nodes, or the two sides coinciding --
 is refused, naming the instance.
 
+In-line flow sensors
+--------------------
+A two-port flow-through sensor (`schema.INLINE_SENSORS`: `MassFlowRate`, `DensityTwoPort`,
+`TemperatureTwoPort` and every other `Buildings.Fluid.Sensors` class extending
+`Sensors/BaseClasses/PartialFlowSensor.mo`) has no pressure drop and no storage
+(`PartialFlowSensor.mo:13-24`: `port_b.m_flow = -port_a.m_flow`, `port_a.p = port_b.p`, and
+enthalpy, water and trace substances passed through unchanged). Its two ports are joined into
+one node -- the sensor is a transparent wire -- and its ports do not count towards a junction's
+degree, so `ori.port_b - sen.port_a`, `sen.port_b - col.port_a` is the same degree-two junction
+as `ori.port_b - col.port_a`. Each such sensor is recorded as an `InlineSensor`: the node it
+sits on and, where one exists, the one flow-element port whose flow it measures, found by
+walking out of the sensor's `port_a` (through any further in-line sensors) to the single
+non-sensor port there; failing that, out of its `port_b`. The sensor's `port_a.m_flow` is then
+`sign * m_flow` into that port, `sign = -1` on the `port_a` side (the flow leaving the element
+port enters the sensor) and `+1` on the `port_b` side. A sensor with `allowFlowReversal = false`
+is refused: MBL then sends `h_default`, `X_default` and zero trace substances backwards through
+it (`PartialFlowSensor.mo:18-23`), which is not a transparent wire.
+
 Heat ports
 ----------
 Fluid ports and heat ports never share a node: a `FixedTemperature.port` -> a
@@ -142,6 +160,19 @@ class Pin:
 
 
 @dataclass(frozen=True)
+class InlineSensor:
+    """A two-port flow-through sensor joined into `node` (module docstring). Its
+    `port_a.m_flow` is `sign * m_flow` into the flow-element port `port`
+    (`"<instance>.<port>"`), or `port` is `None` (and `sign` 0) when no single element port
+    is reachable, e.g. a sensor wired straight between a volume and a boundary."""
+
+    component: Component
+    node: str
+    port: str | None
+    sign: int
+
+
+@dataclass(frozen=True)
 class ComponentGraph:
     nodes: dict[str, str]  # node name -> "zone" | "boundary" | "junction"
     zones: tuple[str, ...]
@@ -151,6 +182,7 @@ class ComponentGraph:
     zonal: tuple[TwoWayEdge, ...]
     pins: tuple[Pin, ...]
     sources: tuple[tuple[Component, str], ...]
+    sensors: tuple[InlineSensor, ...] = ()
 
 
 class _UnionFind:
@@ -195,6 +227,8 @@ def _split(ref: str) -> tuple[str, str]:
 
 
 def _kind_of(cls: str, role: str | None) -> str:
+    if cls in schema.INLINE_SENSORS:
+        return "inline"  # before the role check: the exporter marks sensors as observers
     if role == "observer":
         return "observer"
     if cls in schema.ZONES:
@@ -223,7 +257,7 @@ def _kind_of(cls: str, role: str | None) -> str:
 def _is_fluid_port(kind: str, port: str) -> bool:
     if kind in ("zone", "boundary", "source"):
         return bool(_ARRAY_PORT.match(port))
-    if kind in ("one_way", "column"):
+    if kind in ("one_way", "column", "inline"):
         return port in _TWO_PORT
     if kind in ("door", "zonal"):
         return port in _FOUR_PORT
@@ -285,12 +319,17 @@ def _classify_components(doc: ModelicaDoc) -> _Ctx:
         by_name[c.name] = c
         kind = _kind_of(c.cls, c.role)
         kind_of[c.name] = kind
+        if kind == "inline" and c.parameters.get("allowFlowReversal", True) is False:
+            errors.append(
+                f"{c.name} ({c.cls}): allowFlowReversal = false is not supported (MBL then "
+                f"passes default properties backwards through the sensor)"
+            )
         if kind == "unknown":
             reason = schema.refusal_reason(c.cls) or "component class is not supported"
             errors.append(f"{c.name} ({c.cls}): {reason}")
 
     for s in doc.signals:
-        if s.cls not in schema.SIGNALS:
+        if s.cls not in schema.SIGNALS and s.cls not in schema.MATH:
             reason = schema.refusal_reason(s.cls) or "signal source is not supported"
             errors.append(f"{s.name} ({s.cls}): {reason}")
 
@@ -329,9 +368,10 @@ def _process_fluid_connections(doc: ModelicaDoc, ctx: _Ctx) -> None:
                 if reason is not None:
                     ctx.errors.append(f"{inst} ({ctx.by_name[inst].cls}): {reason}")
 
-    # Self-union: every port of the SAME zone/boundary/source instance is the same node.
+    # Self-union: every port of the SAME zone/boundary/source instance is the same node, and
+    # an in-line sensor's two ports are one node (a transparent wire).
     for inst, refs in ctx.fluid_refs_by_instance.items():
-        if ctx.kind_of[inst] in ("zone", "boundary", "source"):
+        if ctx.kind_of[inst] in ("zone", "boundary", "source", "inline"):
             first = refs[0]
             for r in refs[1:]:
                 ctx.uf.union(first, r)
@@ -344,7 +384,13 @@ def _assign_nodes(ctx: _Ctx) -> None:
     rather than skipped, so later phases that touch it can decline that one piece of work
     instead of hitting a missing dict entry.
     """
-    ctx.members_of_root = ctx.uf.groups()
+    # In-line sensor ports are left out of every group's members: a sensor is a wire, not a
+    # connection, so it adds nothing to a junction's degree (module docstring). A group of
+    # sensor ports alone (a sensor connected to nothing else) is no node at all.
+    ctx.members_of_root = {
+        root: kept for root, members in ctx.uf.groups().items()
+        if (kept := {m for m in members if ctx.kind_of[_split(m)[0]] != "inline"})
+    }
     junction_groups: list[tuple[str, set[str]]] = []
     for root, members in ctx.members_of_root.items():
         zb_names = sorted({
@@ -417,6 +463,60 @@ def _resolve_sources(ctx: _Ctx) -> list[tuple[Component, str]]:
             continue
         sources.append((comp, next(iter(node_names))))
     return sources
+
+
+def _resolve_sensors(doc: ModelicaDoc, ctx: _Ctx) -> list[InlineSensor]:
+    """The node and measured element port of every in-line sensor (module docstring)."""
+    adjacent: dict[str, list[str]] = {}
+    for a, b in doc.connections:
+        if a in ctx.uf and b in ctx.uf and ctx.uf.find(a) == ctx.uf.find(b):
+            adjacent.setdefault(a, []).append(b)
+            adjacent.setdefault(b, []).append(a)
+
+    def beyond(ref: str) -> list[str]:
+        """The non-sensor port references reached from sensor port `ref`, through sensors."""
+        found: list[str] = []
+        seen = {ref}
+        todo = [ref]
+        while todo:
+            for nb in adjacent.get(todo.pop(), []):
+                if nb in seen:
+                    continue
+                seen.add(nb)
+                inst, port = _split(nb)
+                if ctx.kind_of[inst] == "inline":
+                    other = f"{inst}.{'port_b' if port == 'port_a' else 'port_a'}"
+                    if other not in seen:
+                        seen.add(other)
+                        todo.append(other)
+                else:
+                    found.append(nb)
+        return found
+
+    sensors: list[InlineSensor] = []
+    for name, comp in ctx.by_name.items():
+        if ctx.kind_of[name] != "inline":
+            continue
+        refs = [r for r in (f"{name}.port_a", f"{name}.port_b") if r in ctx.uf]
+        if not refs:
+            continue  # connected to nothing: a detached observer
+        root = ctx.uf.find(refs[0])
+        if root not in ctx.members_of_root:
+            ctx.errors.append(f"{name} ({comp.cls}): connects to no flow element or volume")
+            continue
+        if ctx.root_to_kind[root] == "conflict":
+            continue  # `_assign_nodes` already reported the underlying conflict
+        port, sign = None, 0
+        for side, s in (("port_a", -1), ("port_b", 1)):
+            found = beyond(f"{name}.{side}")
+            if len(found) == 1 and ctx.kind_of[_split(found[0])[0]] in (
+                "one_way", "door", "zonal", "column"
+            ):
+                port, sign = found[0], s
+                break
+        sensors.append(InlineSensor(component=comp, node=ctx.root_to_name[root], port=port,
+                                    sign=sign))
+    return sensors
 
 
 def _fuse_paths(ctx: _Ctx) -> list[FlowPath]:
@@ -564,10 +664,11 @@ def build(doc: ModelicaDoc) -> ComponentGraph:
     sources = tuple(_resolve_sources(ctx))
     paths = tuple(_fuse_paths(ctx))
     pins = tuple(_resolve_pins(doc, ctx))
+    sensors = tuple(_resolve_sensors(doc, ctx))
 
     _raise(ctx.errors)
 
     return ComponentGraph(
         nodes=nodes, zones=zones, boundaries=boundaries, paths=paths, doors=doors,
-        zonal=zonal, pins=pins, sources=sources,
+        zonal=zonal, pins=pins, sources=sources, sensors=sensors,
     )
