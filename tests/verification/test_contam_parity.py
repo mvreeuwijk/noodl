@@ -101,7 +101,7 @@ def _stack_case(contamx_run_steady, Ta=STACK_AMBIENT_T):
 
 
 @pytest.mark.external
-def test_stack_project_flow_directions_match_contamx(contamx):
+def test_stack_project_flow_directions_match_contamx(contamx, record_property):
     from noodl.apps.building.contamx import run_steady
 
     p, ref, ours = _stack_case(run_steady)
@@ -113,11 +113,14 @@ def test_stack_project_flow_directions_match_contamx(contamx):
     # check on the from->to sign convention `contamx.py` documents (Ruling R12).
     assert torch.equal(torch.sign(ours), torch.tensor([1.0, -1.0], dtype=F64))
     assert torch.equal(torch.sign(ours), torch.sign(ref["flow"]))
+    record_property("check", "Stack project, flow directions")
+    record_property("tolerance", "exact signs")
+    record_property("measured_status", "match")
 
 
 @pytest.mark.external
 @pytest.mark.parametrize("Ta", STACK_AMBIENT_SWEEP)
-def test_stack_project_flow_magnitudes_match_contamx(contamx, Ta):
+def test_stack_project_flow_magnitudes_match_contamx(contamx, Ta, record_property):
     """The non-isothermal parity case, live at the milestone's own 1e-3 (Task 14b).
 
     This was `xfail(strict=True)` through Task 14 at a measured 1.7e-2 -- seventeen times
@@ -134,10 +137,16 @@ def test_stack_project_flow_magnitudes_match_contamx(contamx, Ta):
 
     _p, ref, ours = _stack_case(run_steady, Ta)
     torch.testing.assert_close(ours, ref["flow"], rtol=1e-3, atol=1e-6)
+    worst_rel = ((ours - ref["flow"]) / ref["flow"]).abs().max().item()
+    record_property("check", "Stack project, flow magnitudes, over a +-20 K ambient sweep")
+    record_property("tolerance", "rel 1e-3")
+    record_property("measured_rel", worst_rel)
 
 
 @pytest.mark.external
-def test_the_stack_residual_is_flat_across_the_sweep_not_proportional_to_dT(contamx):
+def test_the_stack_residual_is_flat_across_the_sweep_not_proportional_to_dT(
+    contamx, record_property
+):
     """Guards the DIAGNOSIS, not just the tolerance: before the correction the relative
     error was proportional to |T_zone - T_ambient| (1.72e-2 at 20 K, 8.61e-3 at 10 K, 0 at
     0 K), which is the signature of the frozen density. Afterwards it must NOT scale with
@@ -154,10 +163,15 @@ def test_the_stack_residual_is_flat_across_the_sweep_not_proportional_to_dT(cont
     # 10 K and 20 K differ by less than a factor 1.5, against the factor 2.0 a residual
     # linear in the temperature difference would show.
     assert max(rel) / min(rel) < 1.5
+    record_property("check", "Residual flatness across the sweep (max/min ratio)")
+    record_property("tolerance", "< 1.5")
+    record_property("measured_ratio", max(rel) / min(rel))
 
 
 @pytest.mark.external
-def test_a_constant_mass_flow_fan_delivers_its_rating_in_the_from_to_direction(contamx):
+def test_a_constant_mass_flow_fan_delivers_its_rating_in_the_from_to_direction(
+    contamx, record_property
+):
     """The from->to sign convention `contamx._snapshot` documents, asserted rather than
     merely written down (hardening carried from the Task 14 review).
 
@@ -179,10 +193,13 @@ def test_a_constant_mass_flow_fan_delivers_its_rating_in_the_from_to_direction(c
     ours = p.path_flows(model.steady(state, drivers)["air.q"])
     j = [path.nr for path in p.paths].index(FAN_CMF_PATH)
     assert ours[j].item() == pytest.approx(FAN_CMF_RATING, rel=1e-5)
+    record_property("check", "Constant-mass-flow fan delivers its rating (0.200683 kg/s)")
+    record_property("tolerance", "rel 1e-5")
+    record_property("measured_rel", abs(ours[j].item() / FAN_CMF_RATING - 1.0))
 
 
 @pytest.mark.external
-def test_three_zone_steady_flows_match_contamx(contamx):
+def test_three_zone_steady_flows_match_contamx(contamx, record_property):
     from noodl.apps.building.contamx import run_steady
 
     p = read_prj(THREE)
@@ -190,11 +207,16 @@ def test_three_zone_steady_flows_match_contamx(contamx):
     ref = run_steady(THREE, ambient=amb)
     model, state, drivers = project_to_model(p, ambient=amb)
     ss = model.steady(state, drivers)
-    torch.testing.assert_close(p.path_flows(ss["air.q"]), ref["flow"], rtol=1e-3, atol=1e-6)
+    ours = p.path_flows(ss["air.q"])
+    torch.testing.assert_close(ours, ref["flow"], rtol=1e-3, atol=1e-6)
+    worst_rel = ((ours - ref["flow"]) / ref["flow"].abs().clamp_min(1e-12)).abs().max().item()
+    record_property("check", "Three-zone project, steady flows")
+    record_property("tolerance", "rel 1e-3, abs 1e-6")
+    record_property("measured_rel", worst_rel)
 
 
 @pytest.mark.external
-def test_three_zone_transient_concentrations_match_contamx(contamx):
+def test_three_zone_transient_concentrations_match_contamx(contamx, record_property):
     from noodl.apps.building.contamx import run_transient
 
     p = read_prj(THREE)
@@ -213,3 +235,7 @@ def test_three_zone_transient_concentrations_match_contamx(contamx):
     # pointwise maximum relative error over the whole (25, 3, 1) trace is 6.5e-6, so the
     # tolerance is the spec's, not a looser one chosen to fit.
     torch.testing.assert_close(ours, ref["mf"], rtol=1e-3, atol=1e-7)
+    worst_rel = ((ours - ref["mf"]) / ref["mf"].abs().clamp_min(1e-12)).abs().max().item()
+    record_property("check", "Three-zone project, transient concentrations, 24 steps at 300 s")
+    record_property("tolerance", "rel 1e-3")
+    record_property("measured_rel", worst_rel)

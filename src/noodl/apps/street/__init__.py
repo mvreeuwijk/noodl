@@ -22,6 +22,13 @@ from noodl.apps.street.canyon import (
     soulhac_shape,
 )
 from noodl.apps.street.chemistry import photostationary_for_streets, street_steady
+from noodl.apps.street.exposure import (
+    Q_INHALATION,
+    exposure_reduction_adjoint,
+    exposure_reduction_forward,
+    street_population,
+    total_exposure,
+)
 from noodl.apps.street.loader import RHO_AIR, AqdtData, Forcing, read_aqdt
 from noodl.apps.street.network import (
     Street,
@@ -52,6 +59,7 @@ __all__ = [
     "GAMMA_E",
     "KAPPA_IMPAQ",
     "KAPPA_MUNICH",
+    "Q_INHALATION",
     "RHO_AIR",
     "SCHULTE_BETA",
     "SIRANE_EXCHANGE",
@@ -69,6 +77,8 @@ __all__ = [
     "canyon_velocity",
     "direction_offsets",
     "exchange_velocity",
+    "exposure_reduction_adjoint",
+    "exposure_reduction_forward",
     "from_test_network",
     "from_ug_m3",
     "initial_state",
@@ -84,7 +94,9 @@ __all__ = [
     "soulhac_shape",
     "street_geometry",
     "street_index",
+    "street_population",
     "street_steady",
     "to_ug_m3",
+    "total_exposure",
     "write_network_concentration",
 ]

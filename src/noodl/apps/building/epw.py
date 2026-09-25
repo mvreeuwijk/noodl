@@ -1,0 +1,112 @@
+"""EnergyPlus weather (EPW) as the building application's `Weather`, and the CONTAM `.wth`
+writer that lets one long sequence drive both the street and the building.
+
+EPW rows are hourly; row (month, day, hour) holds the hour ENDING at `hour` local standard
+time, so hour 1 of 1 January is t = 3600 s from 00:00. Only dry-bulb temperature (column 6,
+degC), station pressure (9, Pa), wind direction (20, degrees FROM north, clockwise -- the
+CONTAM convention) and wind speed (21, m/s) are read.
+
+Day-of-year is computed from `wth.py`'s FIXED, non-leap `_DAYS_BEFORE_MONTH` table --
+NEVER from each row's own `year` column via `datetime`/`tm_yday`. A "typical year" (TMY/
+IWEC/TMYx) EPW file stitches each month in from a different real source year (the
+Paris-Orly TMYx file, for instance, has January from 2000, February from
+1982, ..., December from 1977), and those source years' leap status differs from month to
+month. Computing day-of-year with the real calendar (which inserts a 29 February whenever
+that row's OWN year happens to be a leap year) makes the day count jump by +-1 day at
+month boundaries where the leap status changes on either side, breaking the monotonic `t`
+that `Weather.at()`'s `np.interp` requires. The fixed table sidesteps this by never
+consulting `year` for the day count at all. A 29 February row therefore has nowhere to go
+under this fixed table (real TMY files do not carry one; a stitched leap-year February is
+truncated to 28 days in practice) and is dropped.
+"""
+from __future__ import annotations
+
+import datetime as _dt
+from pathlib import Path
+
+import torch
+
+from noodl.apps.building.wth import _DAYS_BEFORE_MONTH, Weather
+
+_HEADER_LINES = 8
+_COL_TEMP, _COL_PRESSURE, _COL_WD, _COL_WS = 6, 9, 20, 21
+
+
+def _fixed_day_of_year(month: int, day: int) -> int:
+    """Day of year under `wth.py`'s fixed, non-leap calendar (see the module docstring)."""
+    return _DAYS_BEFORE_MONTH[month - 1] + day
+
+
+# A non-leap year, used only as an arithmetic anchor for turning a "seconds from the start
+# date" offset into an M/D string. `wth.read_wth`'s day-of-year table (`_DAYS_BEFORE_MONTH`)
+# assumes the standard, non-leap month lengths (31, 28, 31, ...) with no year of its own;
+# anchoring at a real leap year (e.g. 2024, which the .epw fixture rows carry in their date
+# column) would insert a 29 February that table does not know about and shift every later
+# month/day pair by one day relative to what `read_wth` will decode. 2023 has no such day.
+_ANCHOR_YEAR = 2023
+
+
+def read_epw(path, *, start_day: int = 1, n_hours: int | None = None) -> Weather:
+    rows = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()[_HEADER_LINES:]
+    t, Ta, Pb, Ws, Wd = [], [], [], [], []
+    for line in rows:
+        if not line.strip():
+            continue
+        c = line.split(",")
+        month, day, hour = int(c[1]), int(c[2]), int(c[3])
+        if month == 2 and day == 29:
+            # A source year stitched into February happened to be a leap year; the fixed
+            # calendar this reader uses has no 29 February (see the module docstring), and
+            # real TMY/IWEC/TMYx files do not carry one in practice, so it is dropped.
+            continue
+        doy = _fixed_day_of_year(month, day)
+        if doy < start_day:
+            continue
+        seconds = (doy - start_day) * 86400.0 + hour * 3600.0
+        t.append(seconds)
+        Ta.append(float(c[_COL_TEMP]) + 273.15)
+        Pb.append(float(c[_COL_PRESSURE]))
+        Wd.append(float(c[_COL_WD]) % 360.0)
+        Ws.append(float(c[_COL_WS]))
+        if n_hours is not None and len(t) >= n_hours:
+            break
+    if not t:
+        raise ValueError(f"read_epw: no rows at or after day {start_day} in {path}")
+    f = lambda v: torch.tensor(v, dtype=torch.float64)  # noqa: E731
+    return Weather(t=f(t), Ta=f(Ta), Pb=f(Pb), Ws=f(Ws), Wd=f(Wd))
+
+
+def write_wth(weather: Weather, path, *, start_date: str = "1/1") -> Path:
+    """`WeatherFile ContamW 2.0`, one row per sample, the columns `read_wth` reads.
+
+    Header layout (must match `wth.read_wth`'s record layout exactly):
+    line 1 the file signature, line 2 free-text description (ignored), line 3
+    `"<start date>\\t<end date>"` (only the start date is used, to turn every later `M/D`
+    into a day-of-year offset from it), then ONE day-header comment line (`read_wth` skips
+    everything up to its own time-header marker, so no per-day rows are needed here) and
+    ONE time-header comment line, followed by the data rows: `Date Time Ta Pb Ws Wd` plus
+    zeros for the humidity, solar and ground columns `read_wth` ignores.
+    """
+    path = Path(path)
+    month, day = (int(s) for s in start_date.split("/"))
+    base = _dt.datetime(_ANCHOR_YEAR, month, day)
+    n = weather.t.numel()
+    end_stamp = base + _dt.timedelta(seconds=float(weather.t[-1])) if n else base
+    lines = [
+        "WeatherFile ContamW 2.0",
+        "Generated by noodl.apps.building.epw.write_wth",
+        f"{month}/{day}\t{end_stamp.month}/{end_stamp.day}",
+        "!Date\tDofW\tDtype\tDST\tTgrnd",
+        "!Date\tTime\tTa [K]\tPb [Pa]\tWs [m/s]\tWd [deg]\tHr [g/kg]\tIts [W/m^2]"
+        "\tIdn [W/m^2]\tTs [K]\tRn\tSn",
+    ]
+    for k in range(n):
+        stamp = base + _dt.timedelta(seconds=float(weather.t[k]))
+        lines.append("\t".join([
+            f"{stamp.month}/{stamp.day}", stamp.strftime("%H:%M:%S"),
+            f"{weather.Ta[k].item():.3f}", f"{weather.Pb[k].item():.1f}",
+            f"{weather.Ws[k].item():.3f}", f"{weather.Wd[k].item():.1f}",
+            "0", "0", "0", "0", "0", "0",
+        ]))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
