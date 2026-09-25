@@ -1,4 +1,8 @@
-"""Parity with the Modelica Buildings Library on its algebraic multizone models (spec section 8).
+"""Parity with the Modelica Buildings Library on its multizone models (spec section 8).
+
+The algebraic models are checked to the spec's fixed tolerance (below); the dynamic models,
+those with volumes, against per-model bounds set from measurement (`DYNAMIC_BOUNDS` and
+`test_parity_on_the_dynamic_models`, at the end of this module).
 
 The reference implementation is MBL v13.0.0 (commit 55abf579) simulated by OpenModelica
 1.27.1 (`tests/data/modelica/NOTICE.md`); agreement with it is parity. Each model below is
@@ -32,13 +36,15 @@ maps to nothing fails the test: nothing is skipped.
 
 The maximum relative error per model and variable is printed (visible with `-s`) and, when
 the git-ignored ledger directory exists, recorded in
-`.superpowers/sdd/2026-09-24-modelica-import/parity-algebraic.json` for the documentation.
+`.superpowers/sdd/2026-09-24-modelica-import/parity-algebraic.json` (dynamic models:
+`parity-dynamic.json`) for the documentation.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 
 import numpy as np
@@ -69,15 +75,18 @@ def _csv(model: str) -> tuple[list[str], np.ndarray]:
     return head, data
 
 
-def _record(model: str, stats: dict) -> None:
+def _record(model: str, stats: dict, record: Path = RECORD) -> None:
+    # Deliberate side effect: the measured errors go into the git-ignored ledger directory
+    # for the documentation (Task 11); only when that directory exists, so a plain checkout
+    # or a CI run writes nothing.
     if not LEDGER.is_dir():
         return
     try:
-        doc = json.loads(RECORD.read_text()) if RECORD.exists() else {}
+        doc = json.loads(record.read_text()) if record.exists() else {}
     except json.JSONDecodeError:
         doc = {}
     doc[model] = stats
-    RECORD.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+    record.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
 
 
 def _discretised_port_flows(model, drivers, names, out, inst: str) -> tuple[np.ndarray, ...]:
@@ -101,6 +110,10 @@ def _discretised_port_flows(model, drivers, names, out, inst: str) -> tuple[np.n
     return np.array(m1), np.array(m2)
 
 
+# Node columns `<zone or boundary>.<var>` -> the `simulate` history holding them.
+_NODE_VARS = {"T": "T", "p": "p", "Xi[1]": "X_w"}
+
+
 def _noodl_columns(model: str, head: list[str], data: np.ndarray) -> dict[str, np.ndarray]:
     net, state, drivers, names = read_modelica(DATA / f"{model}.json", return_names=True)
     times = torch.tensor(data[:, 0], dtype=torch.float64)
@@ -112,6 +125,15 @@ def _noodl_columns(model: str, head: list[str], data: np.ndarray) -> dict[str, n
     doors: dict[str, tuple[np.ndarray, ...]] = {}
     for h in head[1:]:
         inst, var = h.rsplit(".", 1)
+        if inst in names.nodes and (var in _NODE_VARS or var.startswith("C[")):
+            # A volume's or boundary's T (K), p (Pa), Xi[1] (water, kg/kg) and C[k] (trace
+            # substance k = the species layer's k-th species; water, when carried, is last).
+            i = names.nodes[inst]
+            if var.startswith("C["):
+                cols[h] = out["C"][:, i, int(var[2:-1]) - 1].numpy()
+            else:
+                cols[h] = out[_NODE_VARS[var]][:, i].numpy()
+            continue
         kinds = names.kinds.get(inst, ())
         if kinds and kinds[0].startswith("door_c:") and var in (
                 "m1_flow", "m2_flow", "mAB_flow", "mBA_flow"):
@@ -119,9 +141,11 @@ def _noodl_columns(model: str, head: list[str], data: np.ndarray) -> dict[str, n
                 doors[inst] = _discretised_port_flows(net, drivers, names, out, inst)
             cols[h] = doors[inst][0 if var in ("m1_flow", "mAB_flow") else 1]
             continue
-        key = {"m_flow": inst, "m1_flow": f"{inst}.port_a1",
-               "m2_flow": f"{inst}.port_a2"}.get(var)
-        assert key in names.edges, f"{model}: CSV column {h!r} maps to no noodl flow"
+        # A two-way element's mAB_flow/mBA_flow are its m1_flow/m2_flow (MBL
+        # `PartialFourPortInterface`: `mAB_flow = port_a1.m_flow`, `mBA_flow = port_a2.m_flow`).
+        key = {"m_flow": inst, "m1_flow": f"{inst}.port_a1", "m2_flow": f"{inst}.port_a2",
+               "mAB_flow": f"{inst}.port_a1", "mBA_flow": f"{inst}.port_a2"}.get(var)
+        assert key in names.edges, f"{model}: CSV column {h!r} maps to no noodl variable"
         cols[h] = sum(s * q[:, c] for c, s in names.edges[key])
     return cols
 
@@ -233,3 +257,155 @@ def test_refused_models_name_their_offending_instances(model):
     named = set(re.findall(r"^\s+- (\S+) \(", message, flags=re.MULTILINE))
     assert named == REFUSED[model], message
     assert f"refused {len(REFUSED[model])} item" in message
+
+
+# ===================================================================== dynamic models
+RECORD_DYNAMIC = LEDGER / "parity-dynamic.json"
+# Relative errors are |noodl - omc| / max(|omc|, floor). The floor for a flow is FLOOR_FRAC
+# of the model's largest |flow| over the bounded rows, one floor for all its flow columns:
+# a door's directional flows and a stack's orifices pass through zero, and there the
+# relative error would measure the absolute error of the solution divided by a number near
+# zero, not the agreement of the flow. For the other variables the floor is FLOOR_FRAC of
+# the column's own largest |value| (it only acts on a trace substance, which starts at 0;
+# T, p and Xi are never near zero).
+FLOOR_FRAC = 1e-3
+
+
+def _kind(column: str) -> str:
+    var = column.rsplit(".", 1)[1]
+    return "flow" if var.endswith("_flow") else var.split("[")[0]
+
+
+def _dynamic_stats(head: list[str], data: np.ndarray,
+                   cols: dict[str, np.ndarray]) -> dict[str, dict]:
+    """Per column: the worst relative and absolute error over every row after the first
+    (t = StartTime, reported separately: MBL's volumes re-balance their pressures through
+    mass storage at initialisation, which noodl's quasi-steady airflow does not model), the
+    time of the worst relative error, and the t = StartTime row's errors."""
+    flows = [j for j, h in enumerate(head) if j and _kind(h) == "flow"]
+    flow_floor = FLOOR_FRAC * float(np.abs(data[1:, flows]).max()) if flows else 0.0
+    stats = {}
+    for j, h in enumerate(head[1:], start=1):
+        omc, got = data[:, j], np.asarray(cols[h], dtype=float)
+        err = np.abs(got - omc)
+        floor = flow_floor if _kind(h) == "flow" else FLOOR_FRAC * float(np.abs(omc[1:]).max())
+        den = np.maximum(np.abs(omc), floor)
+        rel = np.divide(err, den, out=np.zeros_like(err), where=den > 0)
+        k = int(np.argmax(rel[1:])) + 1
+        stats[h] = {"kind": _kind(h), "max_rel": float(rel[1:].max()),
+                    "max_abs": float(err[1:].max()), "t_max_rel": float(data[k, 0]),
+                    "floor": floor, "t0_rel": float(rel[0]), "t0_abs": float(err[0]),
+                    "rows": int(omc.size - 1)}
+    return stats
+
+
+DYNAMIC = ("OpenDoorBuoyancyDynamic", "OpenDoorBuoyancyPressureDynamic", "ThreeRoomsContam",
+           "ThreeRoomsContamDiscretizedDoor", "CO2TransportStep", "ClosedDoors",
+           "NaturalVentilation", "OneOpenDoor", "OneRoom", "ReverseBuoyancy",
+           "ReverseBuoyancy3Zones", "ZonalFlow")
+# Measured wall time above 30 s (Task 10 report: 38-315 s): `slow`, deselected by the
+# default `-m "not slow"` addopts, run with `-m slow`. The other three took 25-55 s
+# depending on machine load and stay in the default run, so that it checks one model of
+# each kind: trace source (CO2TransportStep), stack (OneRoom), zonal flows (ZonalFlow).
+SLOW_DYNAMIC = frozenset(DYNAMIC) - {"CO2TransportStep", "OneRoom", "ZonalFlow"}
+
+# The bound on the worst relative error (FLOOR_FRAC floor) over every row after
+# t = StartTime, per model and variable: 1.25 times the value measured on 25 Sep 2026
+# (Task 10), rounded up to two digits, 1e-12 where the measurement is round-off. Set once
+# from that measurement and justified per model in the test docstring; never loosened.
+DYNAMIC_BOUNDS = {
+    "OpenDoorBuoyancyDynamic": {"flow": 3.1e-02, "T": 4.4e-05, "p": 2.6e-09, "Xi": 2.5e-07},
+    "OpenDoorBuoyancyPressureDynamic": {"flow": 3.0e-02, "T": 4.8e-05, "p": 2.5e-09,
+                                        "Xi": 5.8e-05},
+    "ThreeRoomsContam": {"flow": 2.7e-06, "T": 8.9e-09, "p": 4.6e-10, "Xi": 4.4e-04,
+                         "C": 1.0e-12},
+    "ThreeRoomsContamDiscretizedDoor": {"flow": 3.0e-06, "T": 8.8e-09, "p": 4.6e-10,
+                                        "Xi": 4.4e-04, "C": 1.0e-12},
+    "CO2TransportStep": {"flow": 1.7e-05, "T": 8.9e-09, "p": 6.2e-10, "Xi": 4.4e-04,
+                         "C": 2.2e+00},
+    "ClosedDoors": {"flow": 4.1e+02, "T": 1.4e-03, "p": 3.0e-03, "Xi": 4.4e-03},
+    "NaturalVentilation": {"flow": 3.6e-01, "T": 4.7e-06, "p": 1.5e-06, "Xi": 1.5e-06},
+    "OneOpenDoor": {"flow": 8.6e-01, "T": 1.3e-03, "p": 4.6e-03},
+    "OneRoom": {"flow": 2.0e-11, "T": 1.0e-12, "p": 1.0e-12, "Xi": 1.0e-12},
+    "ReverseBuoyancy": {"flow": 1.4e+01, "T": 3.8e-03, "p": 7.1e-03, "Xi": 1.8e-02},
+    "ReverseBuoyancy3Zones": {"flow": 1.2e+00, "T": 8.7e-05, "p": 2.1e-08, "Xi": 4.4e-04},
+    "ZonalFlow": {"flow": 1.0e-12, "T": 4.4e-05, "p": 1.0e-12, "Xi": 3.3e-06},
+}
+
+
+def test_every_fixture_is_parity_checked_or_refused():
+    fixtures = {p.stem for p in DATA.glob("*.json")}
+    sets = (set(ALGEBRAIC), set(DYNAMIC), set(REFUSED))
+    assert set().union(*sets) == fixtures
+    assert sum(len(s) for s in sets) == len(fixtures)  # disjoint
+    assert set(DYNAMIC_BOUNDS) == set(DYNAMIC)
+
+
+@pytest.mark.parametrize("model", [pytest.param(m, marks=pytest.mark.slow)
+                                   if m in SLOW_DYNAMIC else m for m in DYNAMIC])
+def test_parity_on_the_dynamic_models(model):
+    """Every CSV column after t = StartTime within its model's bound (`DYNAMIC_BOUNDS`).
+
+    OpenModelica solves each model with DASSL at the declared tolerance (1e-6 relative;
+    1e-8 for the two OpenDoorBuoyancy*Dynamic) and adaptive steps; noodl solves the airflow
+    quasi-steadily (spec section 6: no volume mass storage) and steps heat and species with
+    the exact scheme at the CSV interval, the flows held at their end-of-step values
+    (`coupling="iterate"`), which is first order in the step. Relative errors use the
+    FLOOR_FRAC floor (1e-3 of the model's largest flow for flows). The measurements behind
+    each bound, the step-halving and mass-storage checks, are in the Task 10 report:
+
+    * ThreeRoomsContam, ThreeRoomsContamDiscretizedDoor, OneRoom, ZonalFlow: pinned or
+      mixing temperatures, flows to <= 2.4e-6 relative (the reference's own 1e-6 tolerance).
+      Xi up to 3.5e-4: MBL's Xi[1] of a volume moves by X dp/p while the volume's pressure
+      re-balances through mass storage (volTop: 35 Pa of 101325), noodl's Xi stays.
+    * OpenDoorBuoyancyDynamic, OpenDoorBuoyancyPressureDynamic: flows 2.4 %, temperatures
+      0.011 K: noodl's first-order step (halving the step halves both errors, ratio 2.0).
+    * CO2TransportStep: flows, T, p as ThreeRoomsContam. C up to 170 % in the row after the
+      3.6 s source pulse, which noodl spreads over its 172.8 s step (the injected mass is
+      exact: source drivers are step means; halving the step divides this by 2.9); later
+      rows are dominated by the reference's own error: against an independent tight
+      integration of the same equations with the same flows, MBL is off by 12 % at
+      46310 s where noodl is off by 0.2 % (trace substances are scaled by C_nominal = 0.01
+      against values ~1e-7).
+    * ClosedDoors, OneOpenDoor: closed rooms of an ideal gas (PerfectGas, SimpleAir) heated
+      by a 100 W sine. In MBL the heated air expands against the closed doors (V drho/dt up
+      to 2.2 times the largest door flow in ClosedDoors, pressure up 243 and 366 Pa) and
+      heats at constant volume: the summed zone temperature rises exceed noodl's constant-
+      pressure ones by cp/cv (measured 1.402 and 1.400; unchanged by halving the step). No
+      storage, no expansion flow: flow errors up to 73 % (ClosedDoors, storage-driven) and
+      0.9 % (OneOpenDoor, buoyancy from the cp/cv temperature offset plus the first-order
+      step: halving it divides them by 1.3-1.5) of the largest flow.
+    * NaturalVentilation, ReverseBuoyancy3Zones: absolute flow errors <= 0.15 % and 0.27 %
+      of the largest flow, from the first-order step (halving it divides them by 1.3-1.4
+      and 2.0); the relative bound is set where the flows reverse through zero.
+    * ReverseBuoyancy: the zones start at 101325 Pa against a 100000 Pa outside; MBL
+      releases the excess air through storage (V drho/dt 0.13 kg/s at t = 7.2 s, 35 % of
+      the largest flow) and cools the zones by the flow work, 1325 Pa / (dStp cp) = 1.05 K
+      predicted, 0.9 K measured; noodl starts at the equilibrium pressures. The temperature
+      difference persists and drives the stack flows.
+    """
+    head, data = _csv(model)
+    start = time.perf_counter()
+    cols = _noodl_columns(model, head, data)
+    seconds = time.perf_counter() - start
+    assert set(cols) == set(head[1:])
+    stats = _dynamic_stats(head, data, cols)
+    worst: dict[str, dict] = {}
+    for h, s in stats.items():
+        w = worst.setdefault(s["kind"], {"max_rel": -1.0})
+        if s["max_rel"] > w["max_rel"]:
+            w.update(max_rel=s["max_rel"], column=h, t=s["t_max_rel"])
+        w["max_abs"] = max(w.get("max_abs", 0.0), s["max_abs"])
+        w["t0_rel"] = max(w.get("t0_rel", 0.0), s["t0_rel"])
+        w["t0_abs"] = max(w.get("t0_abs", 0.0), s["t0_abs"])
+    for kind, w in worst.items():
+        print(f"{model} {kind}: max rel {w['max_rel']:.3e} ({w['column']} at t = {w['t']:g}), "
+              f"max abs {w['max_abs']:.3e}; t0 row rel {w['t0_rel']:.3e}, abs "
+              f"{w['t0_abs']:.3e}")
+    _record(model, {"columns": stats, "worst": worst, "bounds": DYNAMIC_BOUNDS[model],
+                    "floor_frac": FLOOR_FRAC, "seconds": seconds}, RECORD_DYNAMIC)
+    assert set(worst) == set(DYNAMIC_BOUNDS[model])
+    failures = [f"{kind}: max rel {w['max_rel']:.3e} ({w['column']} at t = {w['t']:g}) > "
+                f"{DYNAMIC_BOUNDS[model][kind]:.1e}" for kind, w in worst.items()
+                if not w["max_rel"] <= DYNAMIC_BOUNDS[model][kind]]
+    assert not failures, f"{model} outside its bounds:\n" + "\n".join(failures)
