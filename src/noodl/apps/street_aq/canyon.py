@@ -46,9 +46,8 @@ Z0_S_DEFAULT = 0.01
 SIRANE_EXCHANGE = 1.0 / (math.sqrt(2.0) * math.pi)
 """`u_d / sigma_w` in SIRANE: 0.225079079039277. S11 Eq. (5) p. 7386, K18 Eq. (3) p. 613,
 K22 Eq. (B10) p. 7387 and `StreetNetworkTransport.cxx:3273` all read `sigma_w/(sqrt(2) pi)`
--- the radical covers only the 2, verified at glyph level in all three PDFs. The framework
-spec's and IMPAQ's docstring's "issue C" (that this should be `sigma_w/sqrt(2 pi)`) is
-RETRACTED; `1/sqrt(2 pi) = 0.398942280401433` appears in no source."""
+-- the radical covers only the 2, verified at glyph level in all three PDFs. The reading
+`sigma_w/sqrt(2 pi)` (`1/sqrt(2 pi) = 0.398942280401433`) appears in no source."""
 
 SCHULTE_BETA = 2.0 / (math.sqrt(2.0) * math.pi)
 """`beta` in Schulte's mixing-length form: 0.450158158078553, fixed by matching the SIRANE
@@ -218,8 +217,8 @@ class BoundaryLayer:
 
         `stability="impaq"` is `1.3 u* (1 - 0.8 z / h_abl)` (IMPAQ's
         `BoundaryLayer.sigma_w`), with NO guard: it goes NEGATIVE for `z > 1.25 h_abl`,
-        which happens on 7 of the 474336 (time, street) pairs of `leiden_small` (3 of its
-        2928 forcing steps, measured). Use `boundary_layer(pblh_floor=...)` to apply
+        which a tall street under a shallow boundary layer can reach. Use
+        `boundary_layer(pblh_floor=...)` to apply
         MUNICH's `pblh := max(H, PBLH)` guard, or `exchange_velocity` will refuse the
         result.
 
@@ -473,7 +472,7 @@ def canyon_velocity(
     `ComputeExpUstreet`, `MeteorologyStreet.cxx:257-263` computes B14 and nothing else.
 
     `canyon_wind_min` is MUNICH's `ustreet_min`, default 0.1 m/s there (SRC `:3451`,
-    `Minimum_Street_Wind_Speed`) and 0.0 here so that IMPAQ parity is the default. The
+    `Minimum_Street_Wind_Speed`) and 0.0 here, the prototype's behaviour, by default. The
     floor keeps the sign: `U = sign * max(|u|, u_min)` with `sign = +1` wherever the
     unfloored value is `>= 0`. The `>=` matters exactly once -- at `phi = pi/2`, where the
     unfloored value is `+0` and MUNICH's own `>` classification makes the street an

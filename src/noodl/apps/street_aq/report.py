@@ -43,7 +43,7 @@ def write_network_concentration(
     Dimensions `time` and `edge`; variables `time_hours`, `edge_feature_index`,
     `edge_osmid`, `forcing_background_concentration (time)`,
     `canyon_velocity_mps (time, edge)` and `concentration_increment (time, edge)` -- the
-    names read off the real `leiden_small` product on 17 September 2026. Two deliberate
+    names AQ_DT's own products use. Two deliberate
     differences from AQ_DT's own writer, both recorded as attributes on the file: this one
     writes CLASSIC CDF (AQ_DT writes NETCDF4, which `scipy.io.netcdf_file` cannot read at
     all) and float64 rather than float32.

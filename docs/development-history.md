@@ -1571,6 +1571,47 @@ errors, on 13 pages; with the escaped delimiters all 250 typeset cleanly.
 - Sewer: the relative-velocity form of `Drag` is a recorded follow-up; `f_i`'s
   non-differentiability is structural, not an oversight.
 
+## Documentation clean-up, round 2 (25 Sep 2026)
+
+**Darcy-Weisbach minor losses.** The D-W path built its `Duct` without `sum_C`, so a `[PIPES]`
+minor-loss coefficient was silently dropped; it is now passed (K = 5 on a 500 m, 0.3 m pipe at
+0.05 m3/s: 0.9952 m, was 0.8677 m). The laminar D-W branch (a straight line to the Colebrook
+point at Re = 2000) is 1.56x EPANET's Hagen-Poiseuille head loss on that pipe; it is documented
+as a limitation and not changed.
+
+**IMPAQ and `leiden_small` removed from the published pages.** IMPAQ is the owner's internal
+prototype, not a reference, and the `leiden_small` AQ_DT domain is not distributed. The facts the
+street, coupling and theory pages carried about them are kept here:
+
+- `impaq.py` is a byte-faithful numpy/scipy port of the AQ_DT prototype and reproduces it to
+  rtol 1e-12. On the prototype's four-node network, after fixing its two documented bugs, noodl
+  and the port agree to < 1e-9 relative; with the bugs left in they disagree by 30-45 %. On
+  `leiden_small` (162 streets, 230 junctions) canyon velocities matched exactly and
+  concentrations matched the fixed port with median relative difference below 1e-9.
+- The port check found a third, undocumented defect in the prototype's `flow_route`: it sorts by
+  angle with `argsort` but un-sorts with `order` rather than `argsort(order)`, mis-permuting
+  routing at three-way junctions and breaking the port's own conservation (12 roads at one step,
+  worst factor 13.95). The port reproduces it; noodl's model does not have it.
+- The strict prototype configuration is `build_model(net, canyon_wind="soulhac",
+  exchange="sirane", direction_averaging="none", kappa=0.4, canyon_wind_min=0.0, u_d_min=0.0,
+  stability="impaq", z_ref=30.0, pblh_floor=False)`.
+- On a `leiden_small` snapshot, `read_aqdt(align="edge_index")` disagreed with the key table on
+  515 of 904 rows (the geometry file was regenerated after the parameters file and gained a
+  feature), and its `kg_per_year` emission series was entirely NaN.
+- Coupling: on `leiden_small` segment 783 the steady street concentration moved from
+  2.079110e-07 to 2.078961e-07 kg/m3 when coupled (7.191e-5 relative, 21 passes). Moving from
+  the Jacobi-style coupler to the recipient-first Gauss-Seidel schedule changed pass counts by
+  one (28 to 27 synthetic, 22 to 21 real) because the new schedule gives a real convergence
+  verdict on the first pass.
+
+**theory.md rewritten as a plain theory page.** The "research survey drafted by an AI agent"
+status note, the first-person survey voice, and pointers to README sections, internal design
+spec sections, rulings (M4-R4, M4-R19, M4-R22, N4, N9) and task reviews were removed or replaced
+by links to the published application pages. The page now states that the potential layers are
+nodal (the note previously claimed a loop-primary formulation for air networks), that the
+adjoint is noodl's own implicit-function rule (`noodl.solvers.implicit`), and that coupling is
+native (`union`) rather than FMI.
+
 ## Appendix: the source tree
 
 A module-by-module map of the repository, as it stood at the end of milestone 5.

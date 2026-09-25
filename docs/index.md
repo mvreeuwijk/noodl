@@ -48,7 +48,7 @@ core, and each is checked against the standard reference implementation in its f
 | Application | Physical system | Reference model |
 |---|---|---|
 | [Building physics](applications/building_physics.md) | Multi-zone airflow, heat and contaminant transport | CONTAM / ContamX, Modelica Buildings Library |
-| [Street air quality](applications/street_aq.md) | Urban air quality, canyon exchange and routing | MUNICH, SIRANE, IMPAQ |
+| [Street air quality](applications/street_aq.md) | Urban air quality, canyon exchange and routing | MUNICH |
 | [Sewers](applications/sewer.md) | Gravity sewer hydraulics, headspace air, sulfide | SWMM |
 | [Water distribution](applications/water.md) | Pressurised mains, pumps, tanks, demand | EPANET 2.2 |
 | [WSIMOD — rule-based water-system allocation](applications/capacitated.md) | Requested flows clipped to arc capacity and free storage at the receiving node | WSIMOD |

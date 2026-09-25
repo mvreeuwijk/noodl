@@ -7,7 +7,7 @@ the tolerances and measured errors written down rather than asserted.
 | Application | Physical system | Reference model | Entry point |
 |---|---|---|---|
 | [Building physics](building_physics.md) | Multi-zone airflow, heat, contaminants | CONTAM / ContamX 3.4.1.7, Modelica Buildings Library | `build_model`, `read_prj` |
-| [Street air quality](street_aq.md) | Urban air quality, canyon exchange, routing | MUNICH, SIRANE (IMPAQ port check) | `build_model`, `read_aqdt` |
+| [Street air quality](street_aq.md) | Urban air quality, canyon exchange, routing | MUNICH | `build_model`, `read_aqdt` |
 | [Sewers](sewer.md) | Gravity hydraulics, headspace air, sulfide | SWMM 5.2.4 | `build_model`, `read_swmm_inp` |
 | [Water distribution](water.md) | Pressurised mains, pumps, tanks, demand | EPANET 2.2 | `build_model`, `read_epanet_inp` |
 | [WSIMOD — rule-based water-system allocation](capacitated.md) | Requested flows clipped to arc capacity and free storage at the receiving node | WSIMOD 0.8.1 | `CapacitatedTransferLayer` |
@@ -53,10 +53,6 @@ Three words are used with fixed meanings throughout these pages.
   reference has not been run, as for MUNICH on this release, the check is instead against the
   formulas and published results the reference documents, and the application page says so.
 - **Validation** means comparison against measurements. No application claims it yet.
-
-IMPAQ is the prototype the street application grew from, written by the same author, so
-agreement with its port is a **port check** rather than a parity test against an independent
-reference.
 
 Each page states its parity rows with an explicit tolerance and the value actually measured. The
 pages are equally explicit about what the comparison *does not* show, and those caveats are

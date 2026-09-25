@@ -14,8 +14,7 @@ TWO INPUT AMBIGUITIES, both handled explicitly rather than inherited (spec secti
   `u10`/`v10` with no extrapolation. The height is therefore an explicit ARGUMENT,
   defaulting to the physical truth of 10.0 m, and a file that disagrees raises unless
   `trust_file_height=True` accepts the disagreement with the file's `reference_height_m`
-  label and proceeds with `wind_height_m` (the label itself is recorded in `notes`; the
-  IMPAQ comparison proceeds with 30 m, because the prototype uses 30 m).
+  label and proceeds with `wind_height_m` (the label itself is recorded in `notes`).
 """
 
 from __future__ import annotations
@@ -122,11 +121,10 @@ def read_aqdt(
     `"emission_key"` (the default) matches by the `(osmid, u, v)` key of
     `edge_emissions_normalized.geojson`, whose feature order IS the NetCDF's row order.
     `"edge_index"` uses the `edge_index` variable as a position into the geometry file,
-    which is the AQ_DT contract -- and is VERIFIED here rather than trusted, because on the
-    `leiden_small` snapshot of 17 September 2026 it is wrong: the geometry file was
-    regenerated (2026-06-09T17:17:50) after the parameters file was written
-    (08:55:55), it gained a feature, and 515 of the 904 rows land on a different feature
-    than their own. The verification is what turns that into an error instead of a
+    which is the AQ_DT contract -- and is VERIFIED here rather than trusted, because a
+    geometry file regenerated after its parameters file (gaining or losing a feature)
+    silently shifts rows onto the wrong features. The verification is what turns that into
+    an error instead of a
     plausible-looking wrong answer.
 
     `wind_height_m` is the height the forcing wind is taken to be valid at, and
@@ -200,7 +198,7 @@ def read_aqdt(
             raise ValueError(
                 f"read_aqdt: feature {index} of "
                 f"{stage1 / 'repaired_edges_canyon.geojson'} has osmid {value!r}, which "
-                f"is not an integer; both Leiden domains carry integer osmids everywhere, "
+                f"is not an integer; AQ_DT products carry integer osmids everywhere, "
                 f"so this is an unrecognised product rather than a value to stand in for"
             )
         osmid.append(int(value))
@@ -228,9 +226,7 @@ def read_aqdt(
             f"wind_height_m is {wind_height_m} m. On the AQ_DT products the label is "
             f"metadata and the wind is ERA5's 10 m u10/v10 with no extrapolation, so the "
             f"label is wrong; pass trust_file_height=True to proceed with the height "
-            f"you gave; the file's label is recorded in `notes`. The IMPAQ comparison "
-            f"proceeds with wind_height_m={reference_height} that way, because the "
-            f"prototype uses the file's height"
+            f"you gave; the file's label is recorded in `notes`"
         )
     if times is not None:
         selector = (torch.arange(len(time_hours))[times] if isinstance(times, slice)
@@ -259,8 +255,7 @@ def read_aqdt(
             bad = int((~torch.isfinite(per_year)).sum())
             raise ValueError(
                 f"read_aqdt: edge_emission_rate_nox_kg_per_year is not finite at {bad} of "
-                f"{per_year.numel()} rows of {where} (it is entirely NaN on the "
-                f"leiden_small snapshot of 17 September 2026); emissions='kg_per_year' "
+                f"{per_year.numel()} rows of {where}; emissions='kg_per_year' "
                 f"cannot be scaled from it -- use emissions='normalized'"
             )
         safe = torch.where(normalized > 0, normalized, torch.ones_like(normalized))
@@ -306,9 +301,9 @@ def _emission_rows(stage2: Path, features, edge_index, align: str, where: str
                    ) -> dict[int, int]:
     """Feature index -> emission row, verified against `edge_emissions_normalized.geojson`.
 
-    That file's feature order IS the parameters NetCDF's row order (checked on
-    `leiden_small`: `edge_emission_rate_nox_normalized[i]` equals feature `i`'s
-    `emission_rate_nox_normalized` exactly, at every one of its 904 rows), and it carries
+    That file's feature order IS the parameters NetCDF's row order
+    (`edge_emission_rate_nox_normalized[i]` equals feature `i`'s
+    `emission_rate_nox_normalized`), and it carries
     the `(osmid, u, v)` key that identifies a feature independently of any position. A key
     that occurs more than once in that file is a contradiction -- it is never resolved by
     last-write-wins, because that would make an unselected feature silently donate its

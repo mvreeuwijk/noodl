@@ -304,22 +304,15 @@ the street side. Both demos assert that sign.
 | 2×2 analytic fixed point (one implicit step each, unit source into the recipient) solves to $(4/3, 5/3)$ | abs 1e-9 | holds |
 | Structural guard: a two-way step assembles no dense topology operator (`upwind`/`incidence`/selectors) | n/a | holds |
 | Synthetic back-coupling, 2×3 m canyon: one-way 4.169740e-08 vs two-way 4.145151e-08 kg/m³ | measured | **0.5897 %** change, 27 passes |
-| Real `leiden_small`, segment 783, steady 2.079110e-07 vs coupled 2.078961e-07 kg/m³ | measured | **7.191e-5** (0.007191 %) change, 21 passes |
 | Loose sequential file exchange vs the two-way result | measured | 0.5897 % discrepancy — equal to the street-side change, as expected for a boundary response linear in the shared value |
 | Inverse 1: leakage calibration through the join | rel err < 0.05 | **1.288e-4**, final loss 3.4574e-08 |
 | Inverse 2: source attribution by one adjoint pass vs central differences | rel 1e-4 | 1.3e-8, 2.0e-9; third source structurally zero |
 | Inverse 3: one measured path recovers all four branch flows | rtol 1e-10 | exact |
 
-The real-data row is worth reading carefully. A 0.007191 % change is **negligible** — and that is
-the honest result, not a disappointing one. One building's infiltration should not measurably
-change a whole street's concentration, and the number is correctly signed. The synthetic case,
-deliberately sized so the building matters, shows 0.5897 %.
-
-Pass counts moved by one relative to the previous (Jacobi-style successive-substitution) coupler
-— 28 → 27 on the synthetic fixture, 22 → 21 on the real one — because the recipient-first
-Gauss-Seidel schedule now produces a real per-instance convergence verdict on the **first** pass
-(the old scheme's first pass wrote a placeholder that no pass could satisfy), rather than because
-the new schedule needs systematically more or fewer passes to close the loop.
+The synthetic case is deliberately sized so that the building matters: a 2×3 m canyon, where
+the building's infiltration changes the street concentration by 0.5897 %. On a street of
+realistic size one building's infiltration changes the street's concentration very little, and
+the coupled result should be read with that in mind.
 
 Throughput, on the headline union over 6 coupled hours with 60 building sub-steps per street
 hour, re-measured for framework-hardening-part-3's Task 9 (`benchmarks/coupling_street_building.py`,
