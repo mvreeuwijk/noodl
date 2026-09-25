@@ -36,7 +36,7 @@ AQDT_ROOT = Path(_AQDT_ENV) if _AQDT_ENV else None
 def _prototype():
     """The AQ_DT prototype module, or a skip. Never modifies anything in that tree."""
     if AQDT_ROOT is None or not (AQDT_ROOT / "aqdt" / "impaq.py").exists():
-        pytest.skip(f"the AQ_DT prototype is not at {AQDT_ROOT}; set NOODL_AQDT_ROOT")
+        pytest.skip(f"the AQ_DT prototype is not at {AQDT_ROOT or '(unset)'}; set NOODL_AQDT_ROOT")
     if str(AQDT_ROOT) not in sys.path:
         sys.path.insert(0, str(AQDT_ROOT))
     return pytest.importorskip("aqdt.impaq")

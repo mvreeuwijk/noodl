@@ -187,7 +187,7 @@ DOMAIN, YEAR, STEP = "leiden_small", 2024, 1000
 needs_aqdt = pytest.mark.skipif(
     AQDT_DATA is None
     or not (AQDT_DATA / "stage1_geometry" / DOMAIN / "repaired_edges_canyon.geojson").exists(),
-    reason=f"the AQ_DT products are not at {AQDT_DATA}; set NOODL_AQDT_DATA",
+    reason=f"the AQ_DT products are not at {AQDT_DATA or '(unset)'}; set NOODL_AQDT_DATA",
 )
 
 
