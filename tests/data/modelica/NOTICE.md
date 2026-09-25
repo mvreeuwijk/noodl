@@ -2,9 +2,10 @@ The JSON and CSV files in this directory are derived from the Modelica Buildings
 (MBL) v13.0.0, commit `55abf579598ca81cae0a82f337350375958e6722`, by OpenModelica 1.27.1
 (`OpenModelica 1.27.1~2-g6db4671`) with `scripts/modelica_export.py`. They export the 8
 `Buildings.Airflow.Multizone.Validation.*` and 15 `Buildings.Airflow.Multizone.Examples.*`
-models: each `.json` is the model's structure and parameters (`noodl-modelica/1`, spec
-section 4) and each `.csv` is a reference simulation trajectory (`# key: value` header lines,
-then `time` and one column per compared variable). Every JSON records the MBL commit and the
+models: each `.json` is the model's structure and parameters (format `noodl-modelica/1`,
+defined in `src/noodl/apps/building_physics/modelica/schema.py`) and each `.csv` is a
+reference simulation trajectory (`# key: value` header lines, then `time` and one column per
+compared variable). Every JSON records the MBL commit and the
 OpenModelica version it was generated with; every CSV repeats them in its header.
 
 MBL is licensed under a 3-clause BSD licence (with an added paragraph on accepting

@@ -20,7 +20,7 @@ Three solve paths are compared, all on CPU (this repo's .venv has no CUDA):
                shape (B, n_i, n_i)), matvec via torch.bmm, used as the
                operator inside the same CG loop. torch.sparse.spsolve is
                also attempted directly and the failure is reported (it is
-               expected to fail on this build; see the report).
+               expected to fail on this build).
 
 A companion section benchmarks *assembly*: A @ q and A^T @ phi (the
 topology operator itself, independent of the linear solve) via dense matmul
@@ -53,8 +53,7 @@ DTYPE = torch.float64  # matches noodl's own choice for its solve paths (see
 # the accuracy comparison meaningless -- at the conductance spread this benchmark
 # uses (up to 6 decades), cond(J) reaches ~1e6, and cond*eps_fp32 (~1.2e-7) is
 # already ~0.1, so torch.linalg.solve itself returns ~10% wrong answers in fp32
-# before CG or torch.sparse ever enter the picture. See the report for the
-# measured numbers.
+# before CG or torch.sparse ever enter the picture.
 SEED = 0
 
 
@@ -285,7 +284,7 @@ DENSE_MEM_BUDGET_BYTES = 4e8  # ~400 MB: gates on the DOMINANT term, the (B, n_i
 # B=1000 it is "only" ~1.4 GB but the batched matmul against it was still, empirically,
 # far slower than its FLOP count suggests it should be (a non-standard batched-broadcast
 # shape apparently not hitting an optimised batched-GEMM path in this build). Rather than
-# spend more of this report's time budget diagnosing that specific slowdown, dense is
+# spend more of this benchmark's time budget diagnosing that specific slowdown, dense is
 # gated tightly here; the qualitative point -- dense assembly cost is O(n_i * b) per
 # batch element and blows up fast -- is already visible well inside this budget.
 
@@ -296,7 +295,7 @@ def main() -> None:
     batches = [1, 100, 1000]
     # Part A (the full solve-time sweep) is the expensive part of this script -- on this
     # machine, a full run took over an hour of wall time even after three rounds of tuning
-    # down its iteration caps (see the report and the comments above). Its results are
+    # down its iteration caps (see the comments above). Its results are
     # already captured in benchmarks/sparse_scaling_results_partA.txt from an earlier run;
     # SKIP_PART_A=1 re-runs only Parts A2/B/B2/C (all fast and bounded) without repeating it.
     skip_part_a = __import__("os").environ.get("SKIP_PART_A") == "1"
@@ -347,7 +346,7 @@ def main() -> None:
 
             # ---- matrix-free CG, no preconditioner ----
             # Unpreconditioned CG at this 6-decade conductance spread turns out (measured
-            # below, and see the report) NOT to converge for n >= 300 at any batch size --
+            # below) NOT to converge for n >= 300 at any batch size --
             # so it always runs to max_iter, and cost scales with B * max_iter regardless of
             # the cap chosen. max_iter is scaled down as B * n_i grows so the *wall-clock*
             # cost of demonstrating "does not converge" stays roughly flat across the sweep;

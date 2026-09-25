@@ -69,13 +69,6 @@ nav:
   - Theory: theory.md
   - About: about.md
 
-# Internal design specs, implementation plans and review reports are kept in the
-# repository but are not part of the published documentation.
-exclude_docs: |
-  superpowers/
-  sparse_operators_report.md
-  sparse_operators_review.md
-
 plugins:
   - search
   - mkdocstrings:
