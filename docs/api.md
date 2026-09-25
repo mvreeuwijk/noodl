@@ -134,9 +134,6 @@ Generated from the package's own docstrings. For the ideas behind these objects,
     options:
       members: [StreetFlows, StreetGeometry, routing_matrix, node_closure, direction_offsets]
 ::: noodl.apps.street_aq.chemistry
-::: noodl.apps.street_aq.loader
-    options:
-      members: [read_aqdt, AqdtData, Forcing]
 ::: noodl.apps.street_aq.report
 
 ### Sewers

@@ -40,7 +40,7 @@ pip install "noodl[dev]"           # everything needed to run the test suite
 | Extra | Adds | Why you might want it |
 |---|---|---|
 | `sparse` | `scipy>=1.11` | The SciPy SuperLU backend. This is a **runtime** extra, not a developer convenience — see the note below. |
-| `street_aq` | `scipy>=1.11` | The [street air quality application](applications/street_aq.md) reads its AQ_DT NetCDF products through `scipy.io.netcdf_file`; the development port `impaq.py` also needs `scipy.optimize` and `scipy.special`. |
+| `street_aq` | `scipy>=1.11` | The [street air quality application](applications/street_aq.md) writes its per-street NetCDF product (`write_network_concentration`) through `scipy.io.netcdf_file`. The modelling API itself needs only the base dependencies. |
 | `contam` | `contamxpy>=0.0.9` (Windows x86-64 only) | Runs NIST's ContamX engine directly for the [building physics application's](applications/building_physics.md) parity tests. The wheel bundles ContamX 3.4.1.7, so no separate CONTAM installation is needed. There is no wheel for any other platform, hence the marker. |
 | `dev` | pytest, ruff, hypothesis, pytest-cov, plus the reference engines | The full test suite, including parity against SWMM (`pyswmm`), EPANET (`wntr`) and WSIMOD. |
 

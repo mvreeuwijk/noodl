@@ -14,7 +14,7 @@ layer advects on what it wrote.
 from noodl.apps.street_aq import (
     build_model, street_steady, street_index, initial_state,
     StreetNetwork, Street, from_test_network, munich_idealised,
-    read_aqdt, write_network_concentration, to_ug_m3,
+    write_network_concentration, to_ug_m3,
     photostationary_for_streets,
 )
 ```
@@ -65,10 +65,38 @@ if you chose `stability="munich"`).
 | `StreetNetwork(streets, x, y)` | The network plus junction coordinates. `azimuth` gives each street's bearing in radians CCW from east; `junctions` and `degree(node)` describe the topology. |
 | `from_test_network()` | A 4-junction, 3-street test network. |
 | `munich_idealised(L=100.0, W=20.0, H=20.0)` | The 12-street network of Kim et al. 2022 Fig. 1. `L`, `W`, `H` are arguments because the paper never published them. |
-| `read_aqdt(...)` | A real AQ_DT domain from its GeoJSON and NetCDF products. |
 
 Construction validates: unique street names, `u != v`, coordinates for every named junction, and
 strictly positive `length`, `width`, `height` and `z0_b`.
+
+For your own streets, build the `StreetNetwork` directly from whatever source you have (a GIS
+layer, OpenStreetMap, a hand-drawn sketch): one `Street` per canyon segment, named by its two
+junctions, plus a coordinate for every junction. The coordinates only set each street's bearing
+relative to the wind, so any projected system in metres will do; the lengths are yours to give.
+
+```python
+import math
+from noodl.apps.street_aq import Street, StreetNetwork, build_model, street_index
+
+x = {"a": 0.0, "b": 200.0, "c": 200.0, "d": 400.0}    # junction coordinates, m
+y = {"a": 0.0, "b": 0.0, "c": 150.0, "d": 0.0}
+
+def street(name, u, v, width, height):
+    return Street(name, u, v, math.hypot(x[v] - x[u], y[v] - y[u]), width, height)
+
+net = StreetNetwork(
+    streets=[street("main_w", "a", "b", 20.0, 18.0),
+             street("main_e", "b", "d", 20.0, 18.0),
+             street("side", "b", "c", 12.0, 15.0)],
+    x=x, y=y,
+)
+model, state, drivers = build_model(net)
+street_index(model)                           # {'main_w': 0, 'main_e': 1, 'side': 2}
+```
+
+From there the drivers are supplied exactly as in the worked example above: emissions in
+`street.sources` at each street's node, a background in `street.x_boundary`, and the wind and
+boundary layer in `U_ref`, `theta_w` and `h_abl`.
 
 ## `build_model`
 
@@ -145,31 +173,13 @@ matching columns of `species`, case-insensitively, and raises naming any missing
 `j_no2(zenith_deg, attenuation=1.0)` gives the clear-sky photolysis rate from MUNICH's 11-point
 tabulation. **Solar geometry is not computed** — you pass the zenith angle you want.
 
-## Reading and writing AQ_DT products
+## Writing results
 
-```python
-data = read_aqdt(stage1_dir, stage2_dir, year=2024, select="network_transport",
-                 emissions="normalized", align="emission_key")
-```
-
-Reads junction and edge GeoJSON, plus forcing and emission NetCDF, into an `AqdtData` carrying a
-`StreetNetwork`, a `Forcing` record and an emission array. Needs the
+`write_network_concentration(path, ...)` writes a `network_concentration_<year>.nc` with one
+record per (time, street): the time axis, each street's feature index and OSM id, the background,
+the signed canyon velocity and the concentration increment. The file is classic CDF (so `scipy`
+can read it back) in float64 throughout. Needs the
 [`street_aq` extra](../installation.md#optional-extras).
-
-Its ambiguities are handled by **explicit failure rather than silent defaults**, and this is
-worth knowing before you point it at your own data:
-
-- The file's `reference_height_m` label is not trusted — the wind is really ERA5 10 m `u10`/`v10`
-  with no extrapolation. Override with `trust_file_height=True` only if you know better.
-- `align="emission_key"` (the default) matches emission rows to features through the
-  `(osmid, u, v)` key table. `align="edge_index"` trusts the NetCDF's positional contract, and is
-  *verified* against the key table when present; if the two disagree, the reader raises naming
-  the rows.
-- `emissions="kg_per_year"` raises if that series is non-finite anywhere.
-
-`write_network_concentration(path, ...)` writes `network_concentration_<year>.nc` in AQ_DT's own
-layout, with two recorded differences: classic CDF rather than NETCDF4 (so `scipy` can read it),
-and float64 rather than float32.
 
 ## Verification
 
@@ -209,9 +219,6 @@ The relative-pattern miss is the one open discrepancy against MUNICH; it is list
 
 ## Limitations and caveats
 
-- **`impaq.py` is kept for development only.** It is a numpy/scipy port of the prototype
-  noodl's street model grew from. It is not differentiable, nothing else in the application
-  uses it, and it is not a reference. Build models with `build_model`.
 - **The MUNICH 12-street idealised case is not reproduced.** Its street geometry was never
   published, so absolute concentrations cannot be compared, and the pattern of concentrations
   relative to one street misses its 5 % target: the worst of the nineteen ratios is off by
@@ -231,5 +238,5 @@ The relative-pattern miss is the one open discrepancy against MUNICH; it is list
 pip install "noodl[street_aq]"
 ```
 
-Needed for `read_aqdt`, `write_network_concentration` and the development port `impaq.py`. The modelling API —
-`build_model`, `street_steady`, the closures — needs only the base dependencies.
+Needed only for `write_network_concentration`. The modelling API — `build_model`,
+`street_steady`, the closures — needs only the base dependencies.
