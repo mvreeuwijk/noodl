@@ -220,25 +220,21 @@ reproduce IMPAQ, defects included; noodl's own model does not have the defect.
 
 ## Limitations and caveats
 
-- **`impaq.py` is the IMPAQ port, not a model path.** It is numpy and scipy, it is not
-  differentiable, and nothing else in the application imports it.
-- **The MUNICH 12-street idealised case cannot be reproduced absolutely.** Its published figure
-  depends on a geometry that was never published. Scale-invariant properties *are* checked and do
-  pass — exact 2x linearity in wind speed (< 1e-9, a provable model identity), and the 270°
-  canyon-wind ratio pattern (model 1.99451 vs paper 1.99451). But the absolute relative-pattern
-  comparison **does not reach its 5% target**: the worst residual is 0.507, with seven of
-  nineteen ratios inside 15%. The test asserts `worst < 0.6` as a loose regression guard and says
-  so, rather than reporting a false pass.
-- **IMPAQ's $\sigma_w$ is unguarded** and goes negative when a street is taller than
-  $1.25\,h_{\text{abl}}$ — measured on 7 of the 474,336 (time, street) pairs of `leiden_small`.
-  `exchange_velocity` then raises rather than silently clamping. `pblh_floor=True` (the default)
-  applies MUNICH's guard; strict IMPAQ parity needs `pblh_floor=False` and accepts the risk.
-- **A retracted claim.** Earlier documentation held that the SIRANE exchange coefficient should
-  be $\sigma_w/\sqrt{2\pi}$ rather than $\sigma_w/(\sqrt{2}\,\pi)$. That was retracted after
-  checking the source PDFs at glyph level; the code uses the latter and a test pins it.
-- **The saved real AQ_DT product used for the parity check was found stale** against its own geometry
-  file — 160 edges vs 162 features, 94 of 160 rows with mismatched `edge_osmid`. That test skips
-  itself with the diagnosis recorded rather than reporting a false pass or fail.
+- **`impaq.py` is a port check, not a model path.** It is plain numpy/scipy, not
+  differentiable, and nothing else in the application uses it. Build models with
+  `build_model`.
+- **The MUNICH 12-street idealised case can only be compared in relative terms.** Its published
+  figure depends on a street geometry that was never published. The scale-invariant properties
+  match — exact linearity in wind speed and the 270° canyon-wind ratio pattern (1.99451 against
+  the paper's 1.99451) — but the pattern of concentrations relative to one street does not: the
+  worst of the nineteen ratios is off by 51 %, and seven are within 15 %.
+- **Tall streets need the boundary-layer guard.** IMPAQ's $\sigma_w$ goes negative when a street
+  is taller than $1.25\,h_{\text{abl}}$. `build_model`'s `pblh_floor=True` (the default) applies
+  MUNICH's guard, raising the boundary-layer height to at least the tallest street. With
+  `pblh_floor=False` (strict IMPAQ behaviour) `exchange_velocity` raises an error on such a step
+  rather than clamping it.
+- **SIRANE exchange coefficient.** The code uses $\sigma_w / (\sqrt{2}\,\pi)$
+  (`SIRANE_EXCHANGE` = 0.225079…), as in MUNICH's source, not $\sigma_w/\sqrt{2\pi}$.
 
 ## Install
 

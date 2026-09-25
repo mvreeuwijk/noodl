@@ -205,20 +205,20 @@ independent loop is a property of the cycle-space formulation, and it holds exac
 
 - **Not modelled, refused by name:** PRV/PSV/PBV/GPV valves; time-based controls and `[RULES]`;
   variable-speed pumps; non-cylindrical tanks; emitters; leakage; energy and cost reports;
-  Chezy-Manning head loss; pipe-status controls and check valves.
-- **Pump curves** are single- or three-point only, with the exponent pinned at $n = 2$; curves
-  with four or more points, which EPANET connects piecewise-linearly, are refused.
-- **D8 is a smoke test.** A genuinely discriminating two-source trace — EPANET's Net3-style
-  "percent of Lake water" — is a recorded follow-up.
-- **Tank area is not reachable by a single `water_steady` call.** Only `bottom + level` enters the
-  steady solve, so gradients with respect to tank area flow through `TankLevels.advance`, not
-  through the steady state.
-- **`TankLevels.event_step` is not batch-safe.** It indexes its level and rate tensors positionally
-  on the first dimension, so a batched `(B, n_tanks)` rollout would index into the batch dimension
-  incorrectly. No batched caller exists yet.
-- **A latent unit bug**: on a Darcy-Weisbach file setting both `SPECIFIC GRAVITY` and `VISCOSITY`
-  away from their defaults, the effective kinematic viscosity is divided by specific gravity once
-  too often. No fixture currently sets both.
+  Chezy-Manning head loss; pipe-status controls and check valves. A file using any of these
+  raises an error naming the feature.
+- **Pump curves** are single- or three-point only, with the exponent fixed at $n = 2$. Curves
+  with four or more points, which EPANET connects piecewise-linearly, are refused; fit a
+  three-point curve instead.
+- **Water-quality tracing is verified on a single source only.** The TRACE check (D8) uses a
+  network with one source, where the answer is 100 % everywhere it reaches; mixing of several
+  traced sources has not been compared against EPANET.
+- **Tank area does not enter a single `water_steady` call.** Only the tank's head
+  (`bottom + level`) enters the steady solve, so gradients with respect to tank area come from
+  a time-stepped run (`TankLevels.advance`), not from the steady state.
+- **Tank level events are not batch-safe.** `TankLevels.event_step` indexes tanks along the
+  first tensor dimension, so a batched `(B, n_tanks)` rollout with level-triggered controls
+  gives wrong results. Run batched tank simulations one instance at a time.
 
 ## Install
 

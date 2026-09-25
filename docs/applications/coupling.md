@@ -347,43 +347,32 @@ is set.
 
 ## Limitations
 
-- **`CoupledModel.steady` is not built**, though the design names it in the intended public
-  surface.
-- **Relaxation is fixed at 0.5** in practice — it is a constructor parameter, but no adaptive
-  scheme exists. Convergence takes 21–27 passes to rtol $10^{-10}$ on the demo fixtures. This is
-  flagged as a known risk: recipient-first Gauss-Seidel substitution at fixed 0.5 relaxation can
-  still converge to the wrong root of a repelling fixed point, the same issue the
-  [building application's](building_physics.md#limitations) three-root case runs into.
-- **Single species, single flow kind only.** A two-way link is refused at construction
-  (`ValueError`) unless both layers have `n_species == 1` and the recipient's layer has exactly
-  one flow kind: `_reduced`'s single-species layout rule is ambiguous for a multi-species state,
-  and the recipient's own transfer is read at one boundary node of a single-flow-kind layer.
-- **The recipient-first schedule assumes no cycles of two-way links.** A model that is both a
-  recipient and a donor is refused at construction, by name, in the error message — the
-  conservative schedule is defined only when every two-way link can be given a strict
-  recipient-before-donor order, which a cycle cannot.
-- **The one-way interface entries are not part of the convergence test.** A one-way link's
-  forward value is read from the previous pass's output like every other interface entry, but
-  only the two-way entries are measured, so a one-way entry is converged only as far as the
-  state it reads has settled — exactly as true of the returned state itself, which is read from
-  that same pass.
-- **Ambient temperature is not coupled** in the demo — it reaches the building only through
-  `rho_amb`, computed once from the `.prj`'s own `Ta`, and the AQ_DT forcing carries no
-  temperature field.
-- **A three-way union** (sewer + street + building) is deferred. The mechanism is expected to
-  extend; it has not been built or tested.
-- **`CoSim` and the WSIMOD `Node` wrapper are out of scope.** `union` is the only coupling route
-  built. Coupling to a non-differentiable model outside the framework — EnergyPlus, WSIMOD
-  itself — is not available.
-- **`Model.current_flows`'s first-pass branch re-solves** the owning potential layer from scratch
-  rather than reusing the pass's own upcoming solve. A recorded inefficiency.
-- **The adjoint GMRES solves one independent system per batch instance when every interface
-  tensor carries the batch shape as its leading dims.** That is a documented precondition on
-  the caller (`_iterate` passes it because its instances do not couple through the pass), checked
-  only by shape, not proven from it; `union`'s own `_iterate` passes it too. When some interface
-  entry does not carry the batch shape (a value shared across instances, which genuinely
-  couples them), the solve falls back to the interface flattened across the whole batch, whose
-  cost can need up to `B` times the matvecs a single instance would for `B` batched instances.
-  `diagnostics["adjoint_batched"]` says which of the two ran; on the per-instance path the
-  adjoint's cost no longer scales with batch size (`solvers.fixed_point`'s module docstring has
-  the full contract).
+- **No steady solve.** `CoupledModel` steps in time only; there is no `CoupledModel.steady`. To
+  reach a coupled steady state, step until the interface values stop changing.
+- **Fixed relaxation.** Each step is iterated with a constant relaxation factor (`relaxation`,
+  default 0.5); there is no adaptive scheme. The demo fixtures converge in 21–27 passes to rtol
+  $10^{-10}$. Where the coupled problem has several fixed points, a constant relaxation can
+  settle on the wrong one or fail to hold an unstable one — the same behaviour as the
+  [building application's three-steady-state case](building_physics.md#limitations). Check a
+  suspect result against a smaller `relaxation` or a different starting state.
+- **Two-way links carry a single species on a single flow kind.** A two-way link is refused at
+  construction (`ValueError`) unless both layers have `n_species == 1` and the recipient's layer
+  has exactly one flow kind. Couple several species with one-way links, or one model per species.
+- **No cycles of two-way links.** Each two-way link is solved recipient first, so a model that is
+  both a recipient and a donor of two-way links is refused at construction, with an error naming
+  it.
+- **One-way links are not in the convergence test.** Only two-way interface values are checked
+  for convergence. A one-way value is passed on from the previous pass and is as converged as the
+  state it is read from — which is also the state `step` returns.
+- **Three-way unions are untested.** `union` has been verified on two-model pairings (street ↔
+  building above). A three-model union such as sewer + street + building is expected to work but
+  has not been built or tested.
+- **Only noodl models can be coupled.** `union` joins noodl `Model`s. There is no co-simulation
+  interface to non-differentiable tools such as EnergyPlus or WSIMOD itself.
+- **Ambient temperature is not coupled in the street ↔ building demo.** The building sees the
+  street only through species concentrations; its ambient density comes from the `.prj` file's
+  own outdoor temperature, and the AQ_DT forcing carries no temperature.
+- **Batched gradients.** When every interface value carries the batch dimension, the adjoint
+  solves each batch instance independently and its cost does not grow with the batch size. A
+  value shared across instances couples them, and the adjoint then solves the whole batch as one
+  system, which can cost up to `B` times as much for `B` instances.

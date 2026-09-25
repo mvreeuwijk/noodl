@@ -1515,6 +1515,62 @@ two MUNICH-excerpt fixture directories, `tests/data/street/munich_case_excerpt/`
 `munich_paris_excerpt/`; they were dropped before this branch's final review found no test or
 source file in this repository reads them.)
 
+## Documentation clean-up and Darcy-Weisbach fix (25 Sep 2026)
+
+The application pages' Limitations sections were rewritten as user-facing statements. The
+development detail they carried is kept here.
+
+**Darcy-Weisbach units.** The water layer balances volumetric flow (m3/s) in pressure form
+(`dp = rho g h`), but `Duct` is written for mass flow (`F = sqrt(2 rho A^2 dp / (f L/D))`,
+`Re = F D / (mu A)`). `build_model` passed it `rho` and the dynamic viscosity, so the D-W path
+returned `rho Q` and evaluated `Re` from it: on a single 500 m, 0.3 m pipe at 0.05 m3/s the head
+loss was 2.0e-5 m instead of 0.868 m. The earlier Limitations entry had noticed only the
+secondary symptom (with both `SPECIFIC GRAVITY` and `VISCOSITY` non-default the kinematic
+viscosity came out divided by the specific gravity). The fix feeds the Duct `rho' = 1/rho` and
+`mu' = nu = (1.002e-3 / 998.2) x VISCOSITY`, so it returns `Q` with `Re = V D / nu` and specific
+gravity cancels from the head loss, as in EPANET 2.2. Parity row D4 moved from 3.822e-2 (heads)
+/ 4.446e-1 (flows) to 3.566e-4 / 2.731e-3; the old D4 residual had been attributed to the
+friction-factor formulae (Swamee-Jain vs Colebrook), which in fact account only for the new,
+smaller one. Using EPANET's own water viscosity (1.1e-5 ft2/s) moves the heads residual only to
+3.0e-4.
+
+**MathJax delimiters.** `docs/javascripts/mathjax.js` wrote the arithmatex delimiters with single
+backslashes, which JavaScript reads as plain parentheses and brackets. Typesetting the built site
+in MathJax (Node) with that config found only 81 of the 250 formulas as math, 6 of them as TeX
+errors, on 13 pages; with the escaped delimiters all 250 typeset cleanly.
+
+**Moved from the Limitations sections:**
+
+- Building physics: the Li and Delsante opposing-wind three-root case is an
+  `xfail(strict=True)` test under `coupling="iterate"`; the hard-coded 0.5 relaxation in
+  `Model._iterate` diverges from the wind-driven-upward stable root even when started exactly on
+  it, while a companion ping-pong time-stepping test resolves all three roots. The blocker is the
+  fixed relaxation, not successive substitution as a method. The doorway `dp_transition`
+  approximation (doorways get `PowerLaw`'s 1e-3 Pa default instead of a value derived from the
+  record's `lam`) is a recorded follow-up; no doorway flow is compared against ContamX.
+- Coupling: `Model.current_flows`'s first-pass branch re-solves the owning potential layer from
+  scratch rather than reusing the pass's own upcoming solve (a recorded inefficiency). The
+  per-instance adjoint precondition (every interface tensor carries the batch shape as its
+  leading dims) is checked only by shape; `diagnostics["adjoint_batched"]` reports which path
+  ran, and `solvers.fixed_point`'s module docstring has the full contract. The two-way
+  single-species rule exists because `_reduced`'s single-species layout rule is ambiguous for a
+  multi-species state and the recipient's transfer is read at one boundary node of a
+  single-flow-kind layer. `CoSim` and the WSIMOD `Node` wrapper are out of scope.
+- Street air quality: the MUNICH relative-pattern test asserts `worst < 0.6` as a loose
+  regression guard (measured worst residual 0.507, seven of nineteen ratios within 15 %, against
+  a 5 % target). IMPAQ's unguarded `sigma_w` went negative on 7 of the 474,336 (time, street)
+  pairs of `leiden_small`. Earlier documentation held that the SIRANE exchange coefficient
+  should be `sigma_w / sqrt(2 pi)`; that was retracted after checking the source PDFs at glyph
+  level, and a test pins the `1 / (sqrt(2) pi)` constant the code uses. The saved real AQ_DT
+  product used for one parity check was found stale against its geometry file (160 edges vs 162
+  features, 94 of 160 rows with mismatched `edge_osmid`); that test skips itself with the
+  diagnosis recorded.
+- Water: D8 is a single-source smoke row; a discriminating two-source trace (EPANET's Net3-style
+  "percent of Lake water") is a recorded follow-up. No batched caller of
+  `TankLevels.event_step` exists yet.
+- Sewer: the relative-velocity form of `Drag` is a recorded follow-up; `f_i`'s
+  non-differentiability is structural, not an oversight.
+
 ## Appendix: the source tree
 
 A module-by-module map of the repository, as it stood at the end of milestone 5.
