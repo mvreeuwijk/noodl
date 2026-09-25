@@ -484,7 +484,8 @@ skipped with that measurement recorded rather than compared against stale rows.
 
 **The measured runs (17 September 2026, on this machine).** Spec section 11 budgets nothing
 for this milestone: both runs are RECORDED, and neither of the two conditional follow-up
-triggers fired.
+triggers fired. (The benchmark script behind them read the unpublished AQ_DT data and has
+since been removed from the repository; the numbers stand as a record.)
 
 | run | measured | trigger |
 |---|---|---|
@@ -1667,8 +1668,6 @@ benchmarks/
   sparse_scaling.py           gather/scatter vs shared-CSR matvec timing across thread counts
   sparse_review_checks.py     standalone numerical checks used during the sparse-path review
   report_composed_scaling.py  writes benchmarks/composed_scaling_report.json
-  street_leiden.py            load/build/solve timing for the street model on the real
-                              AQ_DT `leiden_small` and `leiden` domains
   coupling_street_building.py batched throughput of `city.step` across batch sizes, on the
                               headline street+building coupled demo (milestone 5)
   regenerate_golden.py        rewrites tests/golden/contam_airflow.json and
