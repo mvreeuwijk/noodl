@@ -179,12 +179,14 @@ def test_the_wind_reaches_the_building_through_the_aliases():
 
 # ----------------------------------------------------------------- the real data
 
-AQDT_DATA = Path(os.environ.get(
-    "NOODL_AQDT_DATA", r"<workspace>\tmp\2026_AQ_DT\data"
-))
+# The AQ_DT products live outside the repository; set NOODL_AQDT_DATA to their data
+# directory to run the real-data cases. Unset, they skip.
+_AQDT_ENV = os.environ.get("NOODL_AQDT_DATA")
+AQDT_DATA = Path(_AQDT_ENV) if _AQDT_ENV else None
 DOMAIN, YEAR, STEP = "leiden_small", 2024, 1000
 needs_aqdt = pytest.mark.skipif(
-    not (AQDT_DATA / "stage1_geometry" / DOMAIN / "repaired_edges_canyon.geojson").exists(),
+    AQDT_DATA is None
+    or not (AQDT_DATA / "stage1_geometry" / DOMAIN / "repaired_edges_canyon.geojson").exists(),
     reason=f"the AQ_DT products are not at {AQDT_DATA}; set NOODL_AQDT_DATA",
 )
 

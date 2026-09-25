@@ -282,6 +282,18 @@ def test_array_parameters_are_indexed_like_the_result_file(exporter) -> None:
     assert doc["components"][0]["parameters"]["table"] == [[1.0, 2.0], [3.5, 4.0]]
 
 
+def test_library_paths_are_written_relative_to_the_mbl_root(exporter) -> None:
+    mbl = "/opt/mbl"
+    doc = {"components": [{"parameters": {
+        "filNam": "/opt/mbl/Buildings/Resources/weatherdata/x.mos",
+        "other": "/elsewhere/y.mos", "n": 1.0, "names": ["/opt/mbl/Buildings/z.txt"]}}]}
+    out = exporter.relative_library_paths(doc, mbl)["components"][0]["parameters"]
+    assert out["filNam"] == "modelica://Buildings/Resources/weatherdata/x.mos"
+    assert out["other"] == "/elsewhere/y.mos"
+    assert out["n"] == 1.0
+    assert out["names"] == ["modelica://Buildings/z.txt"]
+
+
 def test_omc_helpers(exporter) -> None:
     assert exporter.parse_omc_matrix("{{0.0, 0.5}, {1.0, NaN}}")[0] == [0.0, 0.5]
     assert exporter.medium_reference(MODEL) == "Medium"

@@ -7,8 +7,9 @@ scaling gate) is triggered.
     .venv/Scripts/python -m benchmarks.street_leiden --domain leiden_small
     .venv/Scripts/python -m benchmarks.street_leiden --domain leiden --steps 1
 
-The data directory comes from `NOODL_AQDT_DATA`, defaulting to the location on the
-machine this milestone was written on. Nothing is written into it.
+The data directory is `--data`, or else the environment variable `NOODL_AQDT_DATA`; there is
+no default, and the run stops with an error naming both if neither is given. Nothing is
+written into it.
 """
 
 from __future__ import annotations
@@ -25,14 +26,13 @@ from noodl.apps.street_aq.loader import read_aqdt
 from noodl.apps.street_aq.network import build_model
 from noodl.apps.street_aq.report import to_ug_m3, write_network_concentration
 
-DEFAULT_DATA = Path(os.environ.get(
-    "NOODL_AQDT_DATA", r"<workspace>\tmp\2026_AQ_DT\data"
-))
+_DATA_ENV = os.environ.get("NOODL_AQDT_DATA")
+DEFAULT_DATA = Path(_DATA_ENV) if _DATA_ENV else None
 DTYPE = torch.float64
 
 
 def run(domain: str = "leiden_small", *, year: int = 2024, steps: int | None = None,
-        chunk: int = 96, data: Path = DEFAULT_DATA, out: Path | None = None) -> dict:
+        chunk: int = 96, data: Path | None = DEFAULT_DATA, out: Path | None = None) -> dict:
     """Load `domain`, solve every forcing step quasi-steadily in chunks, and report.
 
     `chunk` is the number of forcing steps solved in one batched call. Every chunk is one
@@ -40,6 +40,9 @@ def run(domain: str = "leiden_small", *, year: int = 2024, steps: int | None = N
     is inversely so; 96 (twelve days at the 3-hourly step) is a compromise measured to fit
     comfortably at the `leiden_small` size.
     """
+    if data is None:
+        raise SystemExit("no AQ_DT data directory: pass --data or set NOODL_AQDT_DATA "
+                         "to the directory holding stage1_geometry/ and stage2_inputs/")
     stage1 = Path(data) / "stage1_geometry" / domain
     stage2 = Path(data) / "stage2_inputs" / domain
     started = time.perf_counter()

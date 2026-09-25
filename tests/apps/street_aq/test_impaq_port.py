@@ -27,14 +27,16 @@ from noodl.apps.street_aq.impaq import (
 from noodl.apps.street_aq.network import from_test_network
 from tests.golden import load_golden
 
-AQDT_ROOT = Path(os.environ.get("NOODL_AQDT_ROOT",
-                                r"<workspace>\tmp\2026_AQ_DT"))
+# The AQ_DT prototype lives outside the repository; set NOODL_AQDT_ROOT to its checkout
+# to run the port check. Unset, it skips.
+_AQDT_ENV = os.environ.get("NOODL_AQDT_ROOT")
+AQDT_ROOT = Path(_AQDT_ENV) if _AQDT_ENV else None
 
 
 def _prototype():
     """The AQ_DT prototype module, or a skip. Never modifies anything in that tree."""
-    if not (AQDT_ROOT / "aqdt" / "impaq.py").exists():
-        pytest.skip(f"the AQ_DT prototype is not at {AQDT_ROOT}")
+    if AQDT_ROOT is None or not (AQDT_ROOT / "aqdt" / "impaq.py").exists():
+        pytest.skip(f"the AQ_DT prototype is not at {AQDT_ROOT}; set NOODL_AQDT_ROOT")
     if str(AQDT_ROOT) not in sys.path:
         sys.path.insert(0, str(AQDT_ROOT))
     return pytest.importorskip("aqdt.impaq")
