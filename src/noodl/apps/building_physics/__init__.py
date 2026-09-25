@@ -20,6 +20,7 @@ from noodl.apps.building_physics.elements import (
     orifice_elements_from_edges,
 )
 from noodl.apps.building_physics.epw import read_epw, write_wth
+from noodl.apps.building_physics.modelica import read_modelica
 from noodl.apps.building_physics.prj import (
     Project,
     project_to_model,
@@ -66,6 +67,7 @@ __all__ = [
     "orifice_elements_from_edges",
     "project_to_model",
     "read_epw",
+    "read_modelica",
     "read_prj",
     "read_wth",
     "run_steady",

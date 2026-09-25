@@ -1,0 +1,49 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "test.ReverseColumn",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.23.0",
+  "experiment": {"StartTime": 0, "StopTime": 500, "Interval": 1, "Tolerance": 1e-6},
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "extraPropertiesNames": [],
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "volA",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "T_start": 293.15, "V": 62.5, "nPorts": 1, "m_flow_nominal": 0.001,
+        "energyDynamics": "FixedInitial"
+      }
+    },
+    {
+      "name": "volB",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "T_start": 293.15, "V": 62.5, "nPorts": 1, "m_flow_nominal": 0.001,
+        "energyDynamics": "FixedInitial"
+      }
+    },
+    {
+      "name": "oriX",
+      "class": "Buildings.Airflow.Multizone.Orifice",
+      "parameters": {"A": 0.01, "m": 0.5}
+    },
+    {
+      "name": "colRev",
+      "class": "Buildings.Airflow.Multizone.MediumColumn",
+      "parameters": {"h": 2.0, "densitySelection": "actual"}
+    }
+  ],
+  "connections": [
+    ["volA.ports[1]", "oriX.port_a"],
+    ["oriX.port_b", "colRev.port_b"],
+    ["colRev.port_a", "volB.ports[1]"]
+  ],
+  "signals": []
+}

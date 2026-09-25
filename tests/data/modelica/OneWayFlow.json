@@ -1,0 +1,674 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "Buildings.Airflow.Multizone.Validation.OneWayFlow",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 500.0,
+    "Interval": 1.0,
+    "Tolerance": 1e-06
+  },
+  "medium": {
+    "class": "Buildings.Media.Specialized.Air.PerfectGas",
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "X_default": [
+      0.01,
+      0.99
+    ],
+    "nXi": 1,
+    "extraPropertiesNames": []
+  },
+  "components": [
+    {
+      "name": "bouA",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "nPorts": 8,
+        "verifyInputs": false,
+        "use_X_in": false,
+        "use_Xi_in": false,
+        "use_C_in": false,
+        "X": [
+          0.01,
+          0.99
+        ],
+        "C": [],
+        "use_p_in": true,
+        "p": 101325.0,
+        "use_T_in": false,
+        "T": 293.15
+      }
+    },
+    {
+      "name": "bouB",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "nPorts": 8,
+        "verifyInputs": false,
+        "use_X_in": false,
+        "use_Xi_in": false,
+        "use_C_in": false,
+        "X": [
+          0.01,
+          0.99
+        ],
+        "C": [],
+        "use_p_in": true,
+        "p": 101325.0,
+        "use_T_in": false,
+        "T": 293.15
+      }
+    },
+    {
+      "name": "ela",
+      "class": "Buildings.Airflow.Multizone.EffectiveAirLeakageArea",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0006571780758503292,
+        "m_flow_small": 6.571780758503292e-08,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.65,
+        "C": 0.005490974539050507,
+        "dpRat": 10.0,
+        "CDRat": 0.6,
+        "L": 0.01
+      }
+    },
+    {
+      "name": "ori",
+      "class": "Buildings.Airflow.Multizone.Orifice",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0009282887056415302,
+        "m_flow_small": 9.282887056415303e-08,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.5,
+        "C": 0.007756207692976464,
+        "A": 0.01,
+        "CD": 0.6
+      }
+    },
+    {
+      "name": "pow_1dat",
+      "class": "Buildings.Airflow.Multizone.Point_m_flow",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.00095,
+        "m_flow_small": 9.5e-08,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.5,
+        "k": 0.0095,
+        "dpMea_nominal": 4.0,
+        "mMea_flow_nominal": 0.019
+      }
+    },
+    {
+      "name": "pow_2dat",
+      "class": "Buildings.Airflow.Multizone.Points_m_flow",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0010020983664452631,
+        "m_flow_small": 1.0020983664452632e-07,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.4614876437254079,
+        "k": 0.01002098366445263,
+        "dpMea_nominal": [
+          4.0,
+          10.0
+        ],
+        "mMea_flow_nominal": [
+          0.019,
+          0.029
+        ]
+      }
+    },
+    {
+      "name": "pow_m_flow",
+      "class": "Buildings.Airflow.Multizone.Coefficient_m_flow",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.001,
+        "m_flow_small": 1.0000000000000001e-07,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.5,
+        "k": 0.01
+      }
+    },
+    {
+      "name": "pow_V_flow",
+      "class": "Buildings.Airflow.Multizone.Coefficient_V_flow",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0011968332236411492,
+        "m_flow_small": 1.1968332236411493e-07,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.5,
+        "C": 0.01
+      }
+    },
+    {
+      "name": "tabDat_m_flow",
+      "class": "Buildings.Airflow.Multizone.Table_m_flow",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 50.0,
+        "m_flow_small": 0.005,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "dpMea_nominal": [
+          -50.0,
+          -25.0,
+          -10.0,
+          -5.0,
+          -3.0,
+          -2.0,
+          -1.0,
+          0.0,
+          1.0,
+          2.0,
+          3.0,
+          4.5,
+          50.0
+        ],
+        "mMea_flow_nominal": [
+          -0.08709,
+          -0.06158,
+          -0.03895,
+          -0.02754,
+          -0.02133,
+          -0.01742,
+          -0.01232,
+          0.0,
+          0.01232,
+          0.01742,
+          0.02133,
+          0.02613,
+          0.02614
+        ]
+      }
+    },
+    {
+      "name": "tabDat_V_flow",
+      "class": "Buildings.Airflow.Multizone.Table_V_flow",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 50.0,
+        "m_flow_small": 0.005,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "dpMea_nominal": [
+          -50.0,
+          -25.0,
+          -10.0,
+          -5.0,
+          -3.0,
+          -2.0,
+          -1.0,
+          0.0,
+          1.0,
+          2.0,
+          3.0,
+          4.5,
+          50.0
+        ],
+        "mMea_flow_nominal": [
+          -0.10423220544690769,
+          -0.07370098991182197,
+          -0.04661665406082276,
+          -0.03296078697907725,
+          -0.02552845266026571,
+          -0.02084883475582882,
+          -0.014744985315258956,
+          0.0,
+          0.014744985315258956,
+          0.02084883475582882,
+          0.02552845266026571,
+          0.031273252133743226,
+          0.03128522046597964
+        ],
+        "VMea_flow_nominal": [
+          -0.08709,
+          -0.06158,
+          -0.03895,
+          -0.02754,
+          -0.02133,
+          -0.01742,
+          -0.01232,
+          0.0,
+          0.01232,
+          0.01742,
+          0.02133,
+          0.02613,
+          0.02614
+        ]
+      }
+    },
+    {
+      "name": "sen_ela",
+      "class": "Buildings.Fluid.Sensors.MassFlowRate",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0,
+        "m_flow_small": 0.0
+      },
+      "role": "observer"
+    },
+    {
+      "name": "sen_ori",
+      "class": "Buildings.Fluid.Sensors.MassFlowRate",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0,
+        "m_flow_small": 0.0
+      },
+      "role": "observer"
+    },
+    {
+      "name": "sen_pow_1dat",
+      "class": "Buildings.Fluid.Sensors.MassFlowRate",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0,
+        "m_flow_small": 0.0
+      },
+      "role": "observer"
+    },
+    {
+      "name": "sen_pow_2dat",
+      "class": "Buildings.Fluid.Sensors.MassFlowRate",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0,
+        "m_flow_small": 0.0
+      },
+      "role": "observer"
+    },
+    {
+      "name": "sen_pow_m_flow",
+      "class": "Buildings.Fluid.Sensors.MassFlowRate",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0,
+        "m_flow_small": 0.0
+      },
+      "role": "observer"
+    },
+    {
+      "name": "sen_pow_V_flow",
+      "class": "Buildings.Fluid.Sensors.MassFlowRate",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0,
+        "m_flow_small": 0.0
+      },
+      "role": "observer"
+    },
+    {
+      "name": "sen_tabDat_m_flow",
+      "class": "Buildings.Fluid.Sensors.MassFlowRate",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0,
+        "m_flow_small": 0.0
+      },
+      "role": "observer"
+    },
+    {
+      "name": "sen_tabDat_V_flow",
+      "class": "Buildings.Fluid.Sensors.MassFlowRate",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0,
+        "m_flow_small": 0.0
+      },
+      "role": "observer"
+    },
+    {
+      "name": "contamData",
+      "class": "Modelica.Blocks.Tables.CombiTable1Dv",
+      "parameters": {
+        "n": 8,
+        "tableOnFile": false,
+        "table": [
+          [
+            -50.0,
+            -0.0838,
+            -0.0658,
+            -0.0672,
+            -0.0609,
+            -0.0707,
+            -0.0851,
+            -0.0871,
+            -0.105
+          ],
+          [
+            -40.0,
+            -0.0725,
+            -0.0589,
+            -0.0601,
+            -0.055,
+            -0.0632,
+            -0.0762,
+            -0.0769,
+            -0.0926
+          ],
+          [
+            -25.0,
+            -0.0534,
+            -0.0466,
+            -0.0475,
+            -0.0443,
+            -0.05,
+            -0.0602,
+            -0.0616,
+            -0.0741
+          ],
+          [
+            -10.0,
+            -0.0294,
+            -0.0294,
+            -0.03,
+            -0.029,
+            -0.0316,
+            -0.0381,
+            -0.039,
+            -0.0469
+          ],
+          [
+            -5.0,
+            -0.0188,
+            -0.0208,
+            -0.0212,
+            -0.0211,
+            -0.0224,
+            -0.0269,
+            -0.0275,
+            -0.0332
+          ],
+          [
+            -1.0,
+            -0.00659,
+            -0.00931,
+            -0.0095,
+            -0.01,
+            -0.01,
+            -0.012,
+            -0.0123,
+            -0.0148
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            1.0,
+            0.00659,
+            0.00931,
+            0.0095,
+            0.01,
+            0.01,
+            0.012,
+            0.0123,
+            0.0148
+          ],
+          [
+            5.0,
+            0.0188,
+            0.0208,
+            0.0212,
+            0.0211,
+            0.0224,
+            0.0269,
+            0.0261,
+            0.0315
+          ],
+          [
+            10.0,
+            0.0294,
+            0.0294,
+            0.03,
+            0.029,
+            0.0316,
+            0.0381,
+            0.0261,
+            0.0315
+          ],
+          [
+            25.0,
+            0.0534,
+            0.0466,
+            0.0475,
+            0.0443,
+            0.05,
+            0.0602,
+            0.0261,
+            0.0315
+          ],
+          [
+            40.0,
+            0.0725,
+            0.0589,
+            0.0601,
+            0.055,
+            0.0632,
+            0.0762,
+            0.0261,
+            0.0315
+          ],
+          [
+            50.0,
+            0.0838,
+            0.0658,
+            0.0672,
+            0.0609,
+            0.0707,
+            0.0851,
+            0.0261,
+            0.0315
+          ]
+        ],
+        "tableName": "NoName",
+        "fileName": "NoName",
+        "delimiter": ",",
+        "nHeaderLines": 0,
+        "verboseRead": true,
+        "smoothness": "Modelica.Blocks.Types.Smoothness.MonotoneContinuousDerivative2",
+        "extrapolation": "Modelica.Blocks.Types.Extrapolation.LastTwoPoints",
+        "verboseExtrapolation": false
+      },
+      "unevaluated": [
+        "columns",
+        "u_min",
+        "u_max"
+      ],
+      "role": "observer"
+    },
+    {
+      "name": "replicator",
+      "class": "Modelica.Blocks.Routing.Replicator",
+      "parameters": {
+        "nout": 8
+      },
+      "role": "observer"
+    }
+  ],
+  "connections": [
+    [
+      "replicator.y",
+      "contamData.u"
+    ],
+    [
+      "bouA.ports[1]",
+      "ela.port_a"
+    ],
+    [
+      "bouA.ports[2]",
+      "ori.port_a"
+    ],
+    [
+      "bouA.ports[3]",
+      "pow_1dat.port_a"
+    ],
+    [
+      "bouA.ports[4]",
+      "pow_2dat.port_a"
+    ],
+    [
+      "bouA.ports[5]",
+      "pow_m_flow.port_a"
+    ],
+    [
+      "bouA.ports[6]",
+      "pow_V_flow.port_a"
+    ],
+    [
+      "bouA.ports[7]",
+      "tabDat_m_flow.port_a"
+    ],
+    [
+      "bouA.ports[8]",
+      "tabDat_V_flow.port_a"
+    ],
+    [
+      "ela.port_b",
+      "sen_ela.port_a"
+    ],
+    [
+      "sen_ela.port_b",
+      "bouB.ports[1]"
+    ],
+    [
+      "ori.port_b",
+      "sen_ori.port_a"
+    ],
+    [
+      "sen_ori.port_b",
+      "bouB.ports[2]"
+    ],
+    [
+      "pow_1dat.port_b",
+      "sen_pow_1dat.port_a"
+    ],
+    [
+      "sen_pow_1dat.port_b",
+      "bouB.ports[3]"
+    ],
+    [
+      "pow_2dat.port_b",
+      "sen_pow_2dat.port_a"
+    ],
+    [
+      "sen_pow_2dat.port_b",
+      "bouB.ports[4]"
+    ],
+    [
+      "pow_m_flow.port_b",
+      "sen_pow_m_flow.port_a"
+    ],
+    [
+      "sen_pow_m_flow.port_b",
+      "bouB.ports[5]"
+    ],
+    [
+      "pow_V_flow.port_b",
+      "sen_pow_V_flow.port_a"
+    ],
+    [
+      "sen_pow_V_flow.port_b",
+      "bouB.ports[6]"
+    ],
+    [
+      "tabDat_m_flow.port_b",
+      "sen_tabDat_m_flow.port_a"
+    ],
+    [
+      "sen_tabDat_m_flow.port_b",
+      "bouB.ports[7]"
+    ],
+    [
+      "tabDat_V_flow.port_b",
+      "sen_tabDat_V_flow.port_a"
+    ],
+    [
+      "sen_tabDat_V_flow.port_b",
+      "bouB.ports[8]"
+    ]
+  ],
+  "signals": [
+    {
+      "name": "ramp_min50_50pa",
+      "class": "Modelica.Blocks.Sources.Ramp",
+      "parameters": {
+        "height": 100.0,
+        "duration": 500.0,
+        "offset": -50.0,
+        "startTime": 0.0
+      },
+      "drives": [
+        "sum.u[1]",
+        "replicator.u"
+      ]
+    },
+    {
+      "name": "PAmb",
+      "class": "Modelica.Blocks.Sources.Constant",
+      "parameters": {
+        "k": 101325.0
+      },
+      "drives": [
+        "sum.u[2]",
+        "bouB.p_in"
+      ]
+    },
+    {
+      "name": "sum",
+      "class": "Modelica.Blocks.Math.Sum",
+      "parameters": {
+        "nin": 2,
+        "k": [
+          1.0,
+          1.0
+        ]
+      },
+      "drives": "bouA.p_in"
+    }
+  ],
+  "modelica_standard_library": "4.1.0",
+  "experiment_declared": [
+    "StopTime",
+    "Interval",
+    "Tolerance"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

@@ -72,7 +72,7 @@ core, and each is checked against the standard reference implementation in its f
 
 | Application | Physical system | Reference model |
 |---|---|---|
-| Building physics | Multi-zone airflow, heat and contaminant transport | CONTAM / ContamX |
+| Building physics | Multi-zone airflow, heat and contaminant transport | CONTAM / ContamX, Modelica Buildings Library |
 | Street air quality | Urban air quality, canyon exchange and routing | MUNICH, SIRANE (IMPAQ port check) |
 | Sewers | Gravity sewer hydraulics, headspace air, sulfide | SWMM |
 | Water distribution | Pressurised mains, pumps, tanks, demand | EPANET 2.2 |

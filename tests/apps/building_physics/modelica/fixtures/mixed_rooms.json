@@ -1,0 +1,199 @@
+{
+  "format": "noodl-modelica/1",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.23.0",
+  "model": "test.MixedRooms",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 20.0,
+    "Interval": 1.0,
+    "Tolerance": 1e-06
+  },
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "extraPropertiesNames": [
+      "CO2"
+    ],
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "volA",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "V": 50.0,
+        "T_start": 296.15,
+        "nPorts": 4,
+        "m_flow_nominal": 0.001,
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial"
+      }
+    },
+    {
+      "name": "volB",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "V": 40.0,
+        "T_start": 293.15,
+        "nPorts": 3,
+        "m_flow_nominal": 0.001,
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial"
+      }
+    },
+    {
+      "name": "volTop",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "V": 80.0,
+        "T_start": 291.15,
+        "nPorts": 2,
+        "m_flow_nominal": 0.001,
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial"
+      }
+    },
+    {
+      "name": "bouOut",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "p": 101325.0,
+        "T": 283.15,
+        "nPorts": 2
+      }
+    },
+    {
+      "name": "dooDis",
+      "class": "Buildings.Airflow.Multizone.DoorDiscretizedOperable",
+      "parameters": {
+        "LClo": 0.002,
+        "nCom": 4,
+        "wOpe": 0.9,
+        "hOpe": 2.1,
+        "hA": 1.35,
+        "hB": 1.35
+      }
+    },
+    {
+      "name": "colBot",
+      "class": "Buildings.Airflow.Multizone.MediumColumn",
+      "parameters": {
+        "h": 1.5,
+        "densitySelection": "fromBottom"
+      }
+    },
+    {
+      "name": "oriTop",
+      "class": "Buildings.Airflow.Multizone.Orifice",
+      "parameters": {
+        "A": 0.01
+      }
+    },
+    {
+      "name": "colTop",
+      "class": "Buildings.Airflow.Multizone.MediumColumn",
+      "parameters": {
+        "h": 1.5,
+        "densitySelection": "fromTop"
+      }
+    },
+    {
+      "name": "ela",
+      "class": "Buildings.Airflow.Multizone.EffectiveAirLeakageArea",
+      "parameters": {
+        "L": 0.002
+      }
+    },
+    {
+      "name": "cof",
+      "class": "Buildings.Airflow.Multizone.Coefficient_m_flow",
+      "parameters": {
+        "k": 0.01,
+        "m": 0.6
+      }
+    },
+    {
+      "name": "sou",
+      "class": "Buildings.Fluid.Sources.TraceSubstancesFlowSource",
+      "parameters": {
+        "nPorts": 1,
+        "substanceName": "CO2",
+        "use_m_flow_in": true
+      }
+    }
+  ],
+  "connections": [
+    [
+      "volA.ports[1]",
+      "dooDis.port_a1"
+    ],
+    [
+      "dooDis.port_b1",
+      "volB.ports[1]"
+    ],
+    [
+      "volB.ports[2]",
+      "dooDis.port_a2"
+    ],
+    [
+      "dooDis.port_b2",
+      "volA.ports[2]"
+    ],
+    [
+      "volA.ports[3]",
+      "colBot.port_b"
+    ],
+    [
+      "colBot.port_a",
+      "oriTop.port_b"
+    ],
+    [
+      "oriTop.port_a",
+      "colTop.port_b"
+    ],
+    [
+      "colTop.port_a",
+      "volTop.ports[1]"
+    ],
+    [
+      "volTop.ports[2]",
+      "ela.port_a"
+    ],
+    [
+      "ela.port_b",
+      "bouOut.ports[1]"
+    ],
+    [
+      "bouOut.ports[2]",
+      "cof.port_a"
+    ],
+    [
+      "cof.port_b",
+      "volB.ports[3]"
+    ],
+    [
+      "sou.ports[1]",
+      "volA.ports[4]"
+    ]
+  ],
+  "signals": [
+    {
+      "name": "yDoo",
+      "class": "Modelica.Blocks.Sources.Step",
+      "parameters": {
+        "height": 1.0,
+        "offset": 0.0,
+        "startTime": 5.0
+      },
+      "drives": "dooDis.y"
+    },
+    {
+      "name": "mCO2",
+      "class": "Modelica.Blocks.Sources.Constant",
+      "parameters": {
+        "k": 1e-05
+      },
+      "drives": "sou.m_flow_in"
+    }
+  ]
+}

@@ -6,7 +6,7 @@ the tolerances and measured errors written down rather than asserted.
 
 | Application | Physical system | Reference model | Entry point |
 |---|---|---|---|
-| [Building physics](building_physics.md) | Multi-zone airflow, heat, contaminants | CONTAM / ContamX 3.4.1.7 | `build_model`, `read_prj` |
+| [Building physics](building_physics.md) | Multi-zone airflow, heat, contaminants | CONTAM / ContamX 3.4.1.7, Modelica Buildings Library | `build_model`, `read_prj` |
 | [Street air quality](street_aq.md) | Urban air quality, canyon exchange, routing | MUNICH, SIRANE (IMPAQ port check) | `build_model`, `read_aqdt` |
 | [Sewers](sewer.md) | Gravity hydraulics, headspace air, sulfide | SWMM 5.2.4 | `build_model`, `read_swmm_inp` |
 | [Water distribution](water.md) | Pressurised mains, pumps, tanks, demand | EPANET 2.2 | `build_model`, `read_epanet_inp` |

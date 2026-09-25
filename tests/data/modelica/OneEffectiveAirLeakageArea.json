@@ -1,0 +1,183 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "Buildings.Airflow.Multizone.Examples.OneEffectiveAirLeakageArea",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 7200.0,
+    "Interval": 14.4,
+    "Tolerance": 1e-08
+  },
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "X_default": [
+      0.01,
+      0.99
+    ],
+    "nXi": 1,
+    "extraPropertiesNames": [],
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "volA",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "massDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "substanceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "traceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "p_start": 101325.0,
+        "T_start": 293.15,
+        "X_start": [
+          0.01,
+          0.99
+        ],
+        "C_start": [],
+        "C_nominal": [],
+        "mSenFac": 1.0,
+        "initialize_p": true,
+        "m_flow_nominal": 0.01,
+        "nPorts": 2,
+        "m_flow_small": 1.0000000000000002e-06,
+        "allowFlowReversal": true,
+        "V": 62.5,
+        "use_C_flow": false
+      }
+    },
+    {
+      "name": "volB",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "massDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "substanceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "traceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "p_start": 101325.0,
+        "T_start": 293.15,
+        "X_start": [
+          0.01,
+          0.99
+        ],
+        "C_start": [],
+        "C_nominal": [],
+        "mSenFac": 1.0,
+        "initialize_p": true,
+        "m_flow_nominal": 0.01,
+        "nPorts": 1,
+        "m_flow_small": 1.0000000000000002e-06,
+        "allowFlowReversal": true,
+        "V": 62.5,
+        "use_C_flow": false
+      }
+    },
+    {
+      "name": "preHeaFlo",
+      "class": "Modelica.Thermal.HeatTransfer.Sources.PrescribedHeatFlow",
+      "parameters": {
+        "T_ref": 293.15,
+        "alpha": 0.0
+      }
+    },
+    {
+      "name": "cra",
+      "class": "Buildings.Airflow.Multizone.EffectiveAirLeakageArea",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0002516672003203813,
+        "m_flow_small": 2.516672003203813e-08,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.65,
+        "C": 0.002097226669336511,
+        "dpRat": 4.0,
+        "CDRat": 1.0,
+        "L": 0.002
+      }
+    },
+    {
+      "name": "sou",
+      "class": "Buildings.Fluid.Sources.MassFlowSource_T",
+      "parameters": {
+        "nPorts": 1,
+        "verifyInputs": false,
+        "use_X_in": false,
+        "use_Xi_in": false,
+        "use_C_in": false,
+        "X": [
+          0.01,
+          0.99
+        ],
+        "C": [],
+        "use_m_flow_in": true,
+        "m_flow": 0.0,
+        "use_T_in": false,
+        "T": 293.15
+      }
+    }
+  ],
+  "connections": [
+    [
+      "sou.ports[1]",
+      "volA.ports[1]"
+    ],
+    [
+      "volB.ports[1]",
+      "cra.port_b"
+    ],
+    [
+      "volA.ports[2]",
+      "cra.port_a"
+    ],
+    [
+      "preHeaFlo.port",
+      "volB.heatPort"
+    ]
+  ],
+  "signals": [
+    {
+      "name": "heaFloBou",
+      "class": "Modelica.Blocks.Sources.Sine",
+      "parameters": {
+        "amplitude": 1.0,
+        "f": 0.0002777777777777778,
+        "phase": 0.0,
+        "continuous": false,
+        "offset": 0.0,
+        "startTime": 0.0
+      },
+      "drives": "gai.u"
+    },
+    {
+      "name": "gai",
+      "class": "Modelica.Blocks.Math.Gain",
+      "parameters": {
+        "k": 100.0
+      },
+      "drives": "preHeaFlo.Q_flow"
+    },
+    {
+      "name": "ramSou",
+      "class": "Modelica.Blocks.Sources.Ramp",
+      "parameters": {
+        "height": 0.01,
+        "duration": 3600.0,
+        "offset": 0.0,
+        "startTime": 1800.0
+      },
+      "drives": "sou.m_flow_in"
+    }
+  ],
+  "modelica_standard_library": "4.1.0",
+  "experiment_declared": [
+    "StopTime",
+    "Tolerance"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

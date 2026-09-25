@@ -1,0 +1,201 @@
+{
+  "DoorOpenClosed": {
+    "doo.m1_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 501
+    },
+    "doo.m2_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 501
+    },
+    "dooOpeClo.m1_flow": {
+      "max_abs": 4.336808689942018e-19,
+      "max_err_over_tol": 9.464855174411907e-11,
+      "max_rel": 1.2107183911660627e-16,
+      "rows": 501
+    },
+    "dooOpeClo.m2_flow": {
+      "max_abs": 4.336808689942018e-19,
+      "max_err_over_tol": 9.464855174411907e-11,
+      "max_rel": 1.2107183911660627e-16,
+      "rows": 501
+    },
+    "lea.m_flow": {
+      "max_abs": 8.673617379884035e-19,
+      "max_err_over_tol": 1.0624191977087758e-10,
+      "max_rel": 1.2107183911660627e-16,
+      "rows": 501
+    }
+  },
+  "OneWayFlow": {
+    "ela.m_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 501
+    },
+    "ori.m_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 501
+    },
+    "pow_1dat.m_flow": {
+      "max_abs": 1.3877787807814457e-17,
+      "max_err_over_tol": 2.153462349389454e-10,
+      "max_rel": 2.1874050386628316e-16,
+      "rows": 501
+    },
+    "pow_2dat.m_flow": {
+      "max_abs": 1.3877787807814457e-17,
+      "max_err_over_tol": 2.388844177842562e-10,
+      "max_rel": 2.430684612830786e-16,
+      "rows": 501
+    },
+    "pow_V_flow.m_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 501
+    },
+    "pow_m_flow.m_flow": {
+      "max_abs": 1.3877787807814457e-17,
+      "max_err_over_tol": 2.1495622786181086e-10,
+      "max_rel": 2.183381168667501e-16,
+      "rows": 501
+    },
+    "tabDat_V_flow.m_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 501
+    },
+    "tabDat_m_flow.m_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 501
+    }
+  },
+  "OneWayFlow:CONTAM": {
+    "entries": 104,
+    "max_abs": 0.0007677945530923103,
+    "max_rel": 0.007437191157347251,
+    "within_last_digit": 63,
+    "worst": "tabDat_m_flow at dp = -40 Pa"
+  },
+  "OpenDoorPressure": {
+    "doo.m1_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 49
+    },
+    "doo.m2_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 49
+    },
+    "dooDis.m1_flow": {
+      "max_abs": 1.7763568394002505e-15,
+      "max_err_over_tol": 2.415974465002497e-10,
+      "max_rel": 2.4163030997936225e-16,
+      "rows": 49
+    },
+    "dooDis.m2_flow": {
+      "max_abs": 1.7763568394002505e-15,
+      "max_err_over_tol": 2.4156169093595804e-10,
+      "max_rel": 2.4159454468777257e-16,
+      "rows": 49
+    },
+    "dooDis.mAB_flow": {
+      "max_abs": 1.7763568394002505e-15,
+      "max_err_over_tol": 2.415974465002497e-10,
+      "max_rel": 2.4163030997936225e-16,
+      "rows": 49
+    },
+    "dooDis.mBA_flow": {
+      "max_abs": 1.7763568394002505e-15,
+      "max_err_over_tol": 2.4156169093595804e-10,
+      "max_rel": 2.4159454468777257e-16,
+      "rows": 49
+    }
+  },
+  "OpenDoorTemperature": {
+    "doo.m1_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 49
+    },
+    "doo.m2_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 49
+    },
+    "dooDis.m1_flow": {
+      "max_abs": 5.434430683237679e-12,
+      "max_err_over_tol": 1.838349172237546e-05,
+      "max_rel": 1.8445890138777013e-11,
+      "rows": 49
+    },
+    "dooDis.m2_flow": {
+      "max_abs": 5.529132707238205e-12,
+      "max_err_over_tol": 1.8385893817693468e-05,
+      "max_rel": 1.8447235973833223e-11,
+      "rows": 49
+    },
+    "dooDis.mAB_flow": {
+      "max_abs": 5.434430683237679e-12,
+      "max_err_over_tol": 1.838349172237546e-05,
+      "max_rel": 1.8445890138777013e-11,
+      "rows": 49
+    },
+    "dooDis.mBA_flow": {
+      "max_abs": 5.529132707238205e-12,
+      "max_err_over_tol": 1.8385893817693468e-05,
+      "max_rel": 1.8447235973833223e-11,
+      "rows": 49
+    }
+  },
+  "Orifice": {
+    "ori.m_flow": {
+      "max_abs": 5.551115123125783e-17,
+      "max_err_over_tol": 3.84975557952241e-10,
+      "max_rel": 3.959596417352309e-16,
+      "rows": 501
+    }
+  },
+  "PowerLaw": {
+    "pow_1dat.m_flow": {
+      "max_abs": 1.3552527156068805e-20,
+      "max_err_over_tol": 1.2762805305228788e-11,
+      "max_rel": 4.0730380912362354e-16,
+      "rows": 501
+    },
+    "pow_2dat.m_flow": {
+      "max_abs": 1.3552527156068805e-20,
+      "max_err_over_tol": 1.2770860114281607e-11,
+      "max_rel": 6.055983863969412e-16,
+      "rows": 501
+    },
+    "pow_V_flow.m_flow": {
+      "max_abs": 3.3881317890172014e-21,
+      "max_err_over_tol": 3.360055092207845e-12,
+      "max_rel": 4.054718241272876e-16,
+      "rows": 501
+    },
+    "pow_m_flow.m_flow": {
+      "max_abs": 1.3552527156068805e-20,
+      "max_err_over_tol": 1.2766817823505111e-11,
+      "max_rel": 4.054718241272876e-16,
+      "rows": 501
+    }
+  }
+}

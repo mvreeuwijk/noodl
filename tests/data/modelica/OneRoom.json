@@ -1,0 +1,186 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "Buildings.Airflow.Multizone.Examples.OneRoom",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 1.0,
+    "Interval": 0.002,
+    "Tolerance": 1e-06
+  },
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "X_default": [
+      0.01,
+      0.99
+    ],
+    "nXi": 1,
+    "extraPropertiesNames": [],
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "volEas",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "massDynamics": "Modelica.Fluid.Types.Dynamics.SteadyStateInitial",
+        "substanceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "traceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "p_start": 101325.0,
+        "T_start": 293.15,
+        "X_start": [
+          0.01,
+          0.99
+        ],
+        "C_start": [],
+        "C_nominal": [],
+        "mSenFac": 1.0,
+        "initialize_p": true,
+        "m_flow_nominal": 0.001,
+        "nPorts": 2,
+        "m_flow_small": 1.0000000000000001e-07,
+        "allowFlowReversal": true,
+        "V": 62.5,
+        "use_C_flow": false
+      }
+    },
+    {
+      "name": "oriOutBot",
+      "class": "Buildings.Airflow.Multizone.Orifice",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0010069756700139285,
+        "m_flow_small": 1.0069756700139285e-07,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.5,
+        "C": 0.008391463916782737,
+        "A": 0.01,
+        "CD": 0.65
+      }
+    },
+    {
+      "name": "colOutTop",
+      "class": "Buildings.Airflow.Multizone.MediumColumn",
+      "parameters": {
+        "h": 1.5,
+        "densitySelection": "Buildings.Airflow.Multizone.Types.densitySelection.fromBottom"
+      }
+    },
+    {
+      "name": "oriOutTop",
+      "class": "Buildings.Airflow.Multizone.Orifice",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0010069756700139285,
+        "m_flow_small": 1.0069756700139285e-07,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.5,
+        "C": 0.008391463916782737,
+        "A": 0.01,
+        "CD": 0.65
+      }
+    },
+    {
+      "name": "colEasInTop",
+      "class": "Buildings.Airflow.Multizone.MediumColumn",
+      "parameters": {
+        "h": 1.5,
+        "densitySelection": "Buildings.Airflow.Multizone.Types.densitySelection.fromBottom"
+      }
+    },
+    {
+      "name": "volOut",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "massDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "substanceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "traceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "p_start": 101325.0,
+        "T_start": 283.15,
+        "X_start": [
+          0.01,
+          0.99
+        ],
+        "C_start": [],
+        "C_nominal": [],
+        "mSenFac": 1.0,
+        "initialize_p": true,
+        "m_flow_nominal": 0.001,
+        "nPorts": 2,
+        "m_flow_small": 1.0000000000000001e-07,
+        "allowFlowReversal": true,
+        "V": 1000000000000.0,
+        "use_C_flow": false
+      }
+    },
+    {
+      "name": "colEasInBot",
+      "class": "Buildings.Airflow.Multizone.MediumColumn",
+      "parameters": {
+        "h": 1.5,
+        "densitySelection": "Buildings.Airflow.Multizone.Types.densitySelection.fromTop"
+      }
+    },
+    {
+      "name": "colOutBot",
+      "class": "Buildings.Airflow.Multizone.MediumColumn",
+      "parameters": {
+        "h": 1.5,
+        "densitySelection": "Buildings.Airflow.Multizone.Types.densitySelection.fromTop"
+      }
+    }
+  ],
+  "connections": [
+    [
+      "colEasInTop.port_a",
+      "oriOutTop.port_a"
+    ],
+    [
+      "colEasInTop.port_b",
+      "volEas.ports[1]"
+    ],
+    [
+      "colEasInBot.port_a",
+      "volEas.ports[2]"
+    ],
+    [
+      "colEasInBot.port_b",
+      "oriOutBot.port_a"
+    ],
+    [
+      "oriOutBot.port_b",
+      "colOutBot.port_b"
+    ],
+    [
+      "colOutBot.port_a",
+      "volOut.ports[1]"
+    ],
+    [
+      "colOutTop.port_b",
+      "volOut.ports[2]"
+    ],
+    [
+      "colOutTop.port_a",
+      "oriOutTop.port_b"
+    ]
+  ],
+  "signals": [],
+  "modelica_standard_library": "4.1.0",
+  "experiment_declared": [
+    "Tolerance",
+    "StopTime"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

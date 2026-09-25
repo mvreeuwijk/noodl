@@ -1,0 +1,254 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "Buildings.Airflow.Multizone.Validation.DoorOpenClosed",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 1.0,
+    "Interval": 0.002,
+    "Tolerance": 1e-06
+  },
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "X_default": [
+      0.01,
+      0.99
+    ],
+    "nXi": 1,
+    "extraPropertiesNames": [],
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "bouA",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "nPorts": 5,
+        "verifyInputs": false,
+        "use_X_in": false,
+        "use_Xi_in": false,
+        "use_C_in": false,
+        "X": [
+          0.01,
+          0.99
+        ],
+        "C": [],
+        "use_p_in": false,
+        "p": 101330.0,
+        "use_T_in": false,
+        "T": 294.15
+      }
+    },
+    {
+      "name": "bouB",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "nPorts": 5,
+        "verifyInputs": false,
+        "use_X_in": false,
+        "use_Xi_in": false,
+        "use_C_in": false,
+        "X": [
+          0.01,
+          0.99
+        ],
+        "C": [],
+        "use_p_in": false,
+        "p": 101325.0,
+        "use_T_in": false,
+        "T": 293.15
+      }
+    },
+    {
+      "name": "doo",
+      "class": "Buildings.Airflow.Multizone.DoorOpen",
+      "parameters": {
+        "allowFlowReversal1": true,
+        "allowFlowReversal2": true,
+        "m1_flow_nominal": 0.0033333333333333335,
+        "m2_flow_nominal": 0.0033333333333333335,
+        "m1_flow_small": 3.3333333333333335e-07,
+        "m2_flow_small": 3.3333333333333335e-07,
+        "show_T": false,
+        "wOpe": 0.9,
+        "hOpe": 2.1,
+        "dp_turbulent": 0.01,
+        "CD": 0.65,
+        "m": 0.5
+      }
+    },
+    {
+      "name": "lea",
+      "class": "Buildings.Airflow.Multizone.EffectiveAirLeakageArea",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 2.5166720032038132e-05,
+        "m_flow_small": 2.516672003203813e-09,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.01,
+        "m": 0.65,
+        "C": 0.002097226669336511,
+        "dpRat": 4.0,
+        "CDRat": 1.0,
+        "L": 0.002
+      }
+    },
+    {
+      "name": "dooOpeClo",
+      "class": "Buildings.Airflow.Multizone.DoorOperable",
+      "parameters": {
+        "allowFlowReversal1": true,
+        "allowFlowReversal2": true,
+        "m1_flow_nominal": 0.0033333333333333335,
+        "m2_flow_nominal": 0.0033333333333333335,
+        "m1_flow_small": 3.3333333333333335e-07,
+        "m2_flow_small": 3.3333333333333335e-07,
+        "show_T": false,
+        "wOpe": 0.9,
+        "hOpe": 2.1,
+        "dp_turbulent": 0.01,
+        "CDOpe": 0.65,
+        "mOpe": 0.5,
+        "LClo": 0.002,
+        "mClo": 0.65,
+        "dpCloRat": 4.0,
+        "CDCloRat": 1.0
+      }
+    },
+    {
+      "name": "senMasFlo1",
+      "class": "Buildings.Fluid.Sensors.MassFlowRate",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0,
+        "m_flow_small": 0.0
+      },
+      "role": "observer"
+    },
+    {
+      "name": "senMasFlo2",
+      "class": "Buildings.Fluid.Sensors.MassFlowRate",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0,
+        "m_flow_small": 0.0
+      },
+      "role": "observer"
+    },
+    {
+      "name": "mNet_flow",
+      "class": "Modelica.Blocks.Math.Add",
+      "parameters": {
+        "k1": 1.0,
+        "k2": 1.0
+      },
+      "role": "observer"
+    },
+    {
+      "name": "yDooCom",
+      "class": "Modelica.Blocks.Sources.Step",
+      "parameters": {
+        "height": -1.0,
+        "offset": 1.0,
+        "startTime": 0.5
+      },
+      "role": "observer"
+    },
+    {
+      "name": "mNetClo_flow",
+      "class": "Modelica.Blocks.Math.Product",
+      "parameters": {},
+      "role": "observer"
+    }
+  ],
+  "connections": [
+    [
+      "bouA.ports[1]",
+      "doo.port_a1"
+    ],
+    [
+      "bouA.ports[2]",
+      "doo.port_b2"
+    ],
+    [
+      "bouA.ports[3]",
+      "lea.port_a"
+    ],
+    [
+      "bouA.ports[4]",
+      "dooOpeClo.port_a1"
+    ],
+    [
+      "bouA.ports[5]",
+      "dooOpeClo.port_b2"
+    ],
+    [
+      "doo.port_b1",
+      "bouB.ports[1]"
+    ],
+    [
+      "doo.port_a2",
+      "bouB.ports[2]"
+    ],
+    [
+      "lea.port_b",
+      "bouB.ports[3]"
+    ],
+    [
+      "dooOpeClo.port_b1",
+      "senMasFlo1.port_a"
+    ],
+    [
+      "senMasFlo1.port_b",
+      "bouB.ports[4]"
+    ],
+    [
+      "dooOpeClo.port_a2",
+      "senMasFlo2.port_a"
+    ],
+    [
+      "senMasFlo2.port_b",
+      "bouB.ports[5]"
+    ],
+    [
+      "senMasFlo1.m_flow",
+      "mNet_flow.u1"
+    ],
+    [
+      "senMasFlo2.m_flow",
+      "mNet_flow.u2"
+    ],
+    [
+      "yDooCom.y",
+      "mNetClo_flow.u2"
+    ],
+    [
+      "mNet_flow.y",
+      "mNetClo_flow.u1"
+    ]
+  ],
+  "signals": [
+    {
+      "name": "yDoo",
+      "class": "Modelica.Blocks.Sources.Step",
+      "parameters": {
+        "height": 1.0,
+        "offset": 0.0,
+        "startTime": 0.5
+      },
+      "drives": "dooOpeClo.y"
+    }
+  ],
+  "modelica_standard_library": "4.1.0",
+  "experiment_declared": [
+    "StopTime",
+    "Tolerance"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

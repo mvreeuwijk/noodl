@@ -1,0 +1,58 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "test.ThermalAndSource",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.23.0",
+  "experiment": {"StartTime": 0, "StopTime": 3600, "Interval": 1, "Tolerance": 1e-6},
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "extraPropertiesNames": ["CO2"],
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "volA",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "T_start": 293.15, "V": 62.5, "nPorts": 2, "m_flow_nominal": 0.001,
+        "energyDynamics": "FixedInitial"
+      }
+    },
+    {
+      "name": "bouB",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {"p": 101325.0, "T": 293.15, "nPorts": 1}
+    },
+    {
+      "name": "oriAB",
+      "class": "Buildings.Airflow.Multizone.Orifice",
+      "parameters": {"A": 0.01, "m": 0.5}
+    },
+    {
+      "name": "TA",
+      "class": "Buildings.HeatTransfer.Sources.FixedTemperature",
+      "parameters": {"T": 298.15}
+    },
+    {
+      "name": "conA",
+      "class": "Modelica.Thermal.HeatTransfer.Components.ThermalConductor",
+      "parameters": {"G": 1000000000.0}
+    },
+    {
+      "name": "souA",
+      "class": "Buildings.Fluid.Sources.TraceSubstancesFlowSource",
+      "parameters": {"nPorts": 1, "C": [1e-6]}
+    }
+  ],
+  "connections": [
+    ["volA.ports[1]", "oriAB.port_a"],
+    ["oriAB.port_b", "bouB.ports[1]"],
+    ["TA.port", "conA.port_a"],
+    ["conA.port_b", "volA.heatPort"],
+    ["souA.ports[1]", "volA.ports[2]"]
+  ],
+  "signals": []
+}

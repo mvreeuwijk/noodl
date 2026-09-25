@@ -1,0 +1,235 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "Buildings.Airflow.Multizone.Validation.OpenDoorTemperature",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 28800.0,
+    "Interval": 600.0,
+    "Tolerance": 1e-06
+  },
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "X_default": [
+      0.01,
+      0.99
+    ],
+    "nXi": 1,
+    "extraPropertiesNames": [],
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "doo",
+      "class": "Buildings.Airflow.Multizone.DoorOpen",
+      "parameters": {
+        "allowFlowReversal1": true,
+        "allowFlowReversal2": true,
+        "m1_flow_nominal": 0.0033333333333333335,
+        "m2_flow_nominal": 0.0033333333333333335,
+        "m1_flow_small": 3.3333333333333335e-07,
+        "m2_flow_small": 3.3333333333333335e-07,
+        "show_T": false,
+        "wOpe": 0.9,
+        "hOpe": 2.1,
+        "dp_turbulent": 0.01,
+        "CD": 0.65,
+        "m": 0.5
+      }
+    },
+    {
+      "name": "bouA",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "nPorts": 4,
+        "verifyInputs": false,
+        "use_X_in": false,
+        "use_Xi_in": false,
+        "use_C_in": false,
+        "X": [
+          0.01,
+          0.99
+        ],
+        "C": [],
+        "use_p_in": false,
+        "p": 101325.0,
+        "use_T_in": false,
+        "T": 293.15
+      }
+    },
+    {
+      "name": "bouB",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "nPorts": 4,
+        "verifyInputs": false,
+        "use_X_in": false,
+        "use_Xi_in": false,
+        "use_C_in": false,
+        "X": [
+          0.01,
+          0.99
+        ],
+        "C": [],
+        "use_p_in": false,
+        "p": 101325.0,
+        "use_T_in": true,
+        "T": 293.15
+      }
+    },
+    {
+      "name": "dooDis",
+      "class": "Buildings.Airflow.Multizone.DoorDiscretizedOpen",
+      "parameters": {
+        "allowFlowReversal1": true,
+        "allowFlowReversal2": true,
+        "m1_flow_nominal": 0.0033333333333333335,
+        "m2_flow_nominal": 0.0033333333333333335,
+        "m1_flow_small": 3.3333333333333335e-07,
+        "m2_flow_small": 3.3333333333333335e-07,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "vZer": 0.001,
+        "wOpe": 0.9,
+        "hOpe": 2.1,
+        "hA": 1.05,
+        "hB": 1.05,
+        "nCom": 10,
+        "dp_turbulent": 0.01,
+        "CD": 0.65
+      }
+    }
+  ],
+  "connections": [
+    [
+      "doo.port_b1",
+      "bouB.ports[1]"
+    ],
+    [
+      "doo.port_a2",
+      "bouB.ports[2]"
+    ],
+    [
+      "doo.port_a1",
+      "bouA.ports[1]"
+    ],
+    [
+      "doo.port_b2",
+      "bouA.ports[2]"
+    ],
+    [
+      "bouA.ports[3]",
+      "dooDis.port_a1"
+    ],
+    [
+      "bouA.ports[4]",
+      "dooDis.port_b2"
+    ],
+    [
+      "dooDis.port_b1",
+      "bouB.ports[3]"
+    ],
+    [
+      "dooDis.port_a2",
+      "bouB.ports[4]"
+    ]
+  ],
+  "signals": [
+    {
+      "name": "bouTem",
+      "class": "Modelica.Blocks.Sources.TimeTable",
+      "parameters": {
+        "table": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            1.0,
+            0.0
+          ],
+          [
+            1.0,
+            5.0
+          ],
+          [
+            2.0,
+            5.0
+          ],
+          [
+            2.0,
+            10.0
+          ],
+          [
+            3.0,
+            10.0
+          ],
+          [
+            3.0,
+            15.0
+          ],
+          [
+            4.0,
+            15.0
+          ],
+          [
+            4.0,
+            20.0
+          ],
+          [
+            5.0,
+            20.0
+          ],
+          [
+            5.0,
+            25.0
+          ],
+          [
+            6.0,
+            25.0
+          ],
+          [
+            6.0,
+            30.0
+          ],
+          [
+            7.0,
+            30.0
+          ],
+          [
+            7.0,
+            35.0
+          ],
+          [
+            8.0,
+            35.0
+          ],
+          [
+            8.0,
+            40.0
+          ],
+          [
+            24.0,
+            40.0
+          ]
+        ],
+        "timeScale": 3600.0,
+        "offset": 273.15,
+        "startTime": 0.0,
+        "shiftTime": 0.0
+      },
+      "drives": "bouB.T_in"
+    }
+  ],
+  "modelica_standard_library": "4.1.0",
+  "experiment_declared": [
+    "StopTime",
+    "Interval",
+    "Tolerance"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

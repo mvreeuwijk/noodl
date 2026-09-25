@@ -1,0 +1,120 @@
+{
+  "format": "noodl-modelica/1",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.23.0",
+  "model": "test.ZonalFlow",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 600.0,
+    "Interval": 10.0,
+    "Tolerance": 1e-06
+  },
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "extraPropertiesNames": [],
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "rooA",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "V": 100.0,
+        "T_start": 303.15,
+        "nPorts": 4,
+        "m_flow_nominal": 0.001,
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "X_start": [
+          0.015,
+          0.985
+        ]
+      }
+    },
+    {
+      "name": "rooB",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "V": 1.0,
+        "T_start": 293.15,
+        "nPorts": 4,
+        "m_flow_nominal": 0.001,
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "X_start": [
+          0.01,
+          0.99
+        ]
+      }
+    },
+    {
+      "name": "zonFlo",
+      "class": "Buildings.Airflow.Multizone.ZonalFlow_ACS",
+      "parameters": {
+        "V": 1.0,
+        "useDefaultProperties": false
+      }
+    },
+    {
+      "name": "floExc",
+      "class": "Buildings.Airflow.Multizone.ZonalFlow_m_flow",
+      "parameters": {}
+    }
+  ],
+  "connections": [
+    [
+      "rooA.ports[1]",
+      "zonFlo.port_a1"
+    ],
+    [
+      "zonFlo.port_b1",
+      "rooB.ports[1]"
+    ],
+    [
+      "zonFlo.port_b2",
+      "rooA.ports[2]"
+    ],
+    [
+      "zonFlo.port_a2",
+      "rooB.ports[2]"
+    ],
+    [
+      "floExc.port_a1",
+      "rooA.ports[3]"
+    ],
+    [
+      "floExc.port_b1",
+      "rooB.ports[3]"
+    ],
+    [
+      "floExc.port_a2",
+      "rooB.ports[4]"
+    ],
+    [
+      "floExc.port_b2",
+      "rooA.ports[4]"
+    ]
+  ],
+  "signals": [
+    {
+      "name": "ACS",
+      "class": "Modelica.Blocks.Sources.Constant",
+      "parameters": {
+        "k": 0.001388888888888889
+      },
+      "drives": "zonFlo.ACS"
+    },
+    {
+      "name": "m_flow",
+      "class": "Modelica.Blocks.Sources.Constant",
+      "parameters": {
+        "k": 0.02
+      },
+      "drives": [
+        "floExc.mAB_flow",
+        "floExc.mBA_flow"
+      ]
+    }
+  ]
+}
