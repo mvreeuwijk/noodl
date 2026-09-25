@@ -83,6 +83,9 @@ THERMAL_PIN = frozenset({
     "Buildings.HeatTransfer.Sources.FixedTemperature",
     "Modelica.Thermal.HeatTransfer.Components.ThermalConductor",
 })
+# A prescribed heat flow into a volume's `heatPort` (MSL `Thermal/HeatTransfer/Sources/
+# PrescribedHeatFlow.mo:15`): a heat source of the zone's energy balance (`assemble`).
+HEAT_SOURCES = frozenset({"Modelica.Thermal.HeatTransfer.Sources.PrescribedHeatFlow"})
 SOURCES = frozenset({
     "Buildings.Fluid.Sources.TraceSubstancesFlowSource",
     "Buildings.Fluid.Sources.MassFlowSource_T",
@@ -139,8 +142,8 @@ OBSERVERS = frozenset({
 })
 
 SUPPORTED = (
-    ZONES | BOUNDARIES | ONE_WAY | TWO_WAY | COLUMNS | ZONAL | THERMAL_PIN | SOURCES
-    | SIGNALS | MATH | INLINE_SENSORS | OBSERVERS
+    ZONES | BOUNDARIES | ONE_WAY | TWO_WAY | COLUMNS | ZONAL | THERMAL_PIN | HEAT_SOURCES
+    | SOURCES | SIGNALS | MATH | INLINE_SENSORS | OBSERVERS
 )
 
 # Refused classes named in spec section 6, each with the short reason `graph.build` reports

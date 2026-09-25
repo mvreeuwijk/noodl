@@ -572,3 +572,107 @@ def test_unsupported_math_block_is_refused_by_name(tmp_path):
     doc = _chain_doc(gai={"class": "Modelica.Blocks.Math.Abs"})
     with pytest.raises(ModelicaImportError, match=r"gai \(Modelica.Blocks.Math.Abs\)"):
         read_modelica(_write(tmp_path, doc))
+
+
+# ----------------------------------------------------------------- prescribed heat flow
+def test_prescribed_heat_flow_heats_the_zone_at_the_closed_form_rate():
+    """`PrescribedHeatFlow.mo:15` `port.Q_flow = -Q_flow (1 + alpha (T - T_ref))` with
+    `alpha = 0` puts `Q_flow` into the volume's energy balance (`PartialMixingVolume.mo:185-
+    189`, `ConservationEquation.mo:303` `der(U) = Hb_flow + Q_flow`). No air moves (one
+    orifice to a boundary at the zone's pressure), so `T = T_start + Q t / (V rho cp)`."""
+    model, state, drivers, names = _load("heat_flow.json")
+    t = names.times
+    hist = simulate(model, state, drivers, t)
+    rho = 1.2 * P_DEFAULT / 101325.0  # Air.mo:210-215, d = p dStp/pStp
+    cp = 1006.0 * 0.99 + 1860.0 * 0.01  # Air.mo:567-575 at X_default
+    expected = 293.15 + 100.0 * t / (10.0 * rho * cp)
+    T = hist["T"][:, names.nodes["vol"]]
+    assert torch.allclose(T, expected, rtol=1e-12, atol=0.0)
+
+
+def test_temperature_dependent_heat_flow_is_refused(tmp_path):
+    doc = _doc("heat_flow.json")
+    doc["components"][3]["parameters"]["alpha"] = 0.01
+    with pytest.raises(ModelicaImportError, match=r"preHea .*alpha"):
+        read_modelica(_write(tmp_path, doc))
+
+
+# ------------------------------------------------------- boundary wired straight to a volume
+def test_boundary_wired_straight_to_a_volume_sets_its_pressure():
+    """The attached boundary makes its volume the air-layer pressure reference of the volume's
+    group at the boundary's own pressure. The group has no other boundary, so the boundary
+    exchanges no air (the door's net flow into the closed volB is zero) and its temperature
+    never enters: the two rooms mix exactly as without it."""
+    model, state, drivers, names = _load("attached_boundary.json")
+    assert names.air_references == ("volA",)
+    assert names.attached == {"bou": "volA"}
+    hist = simulate(model, state, drivers, names.times)
+    iA, iB = names.nodes["volA"], names.nodes["volB"]
+    assert torch.allclose(hist["p"][:, iA], torch.full_like(hist["p"][:, iA], 101327.0),
+                          rtol=0.0, atol=1e-9)
+    (c_ab, s_ab), (c_ba, s_ba) = names.edges["doo"]
+    net = s_ab * hist["air.q"][:, c_ab] + s_ba * hist["air.q"][:, c_ba]
+    assert float(net.abs().max()) < 1e-12
+    T_A, T_B = hist["T"][:, iA], hist["T"][:, iB]
+    assert float(T_A[-1]) < float(T_A[0]) - 0.1
+    assert torch.allclose(T_A + T_B, torch.full_like(T_A, 295.15 + 293.15), atol=1e-9)
+
+
+def test_attached_boundary_in_a_group_with_another_boundary_is_refused(tmp_path):
+    doc = _doc("attached_boundary.json")
+    doc["components"][2]["parameters"]["nPorts"] = 3
+    doc["components"] += [
+        {"name": "bouX", "class": "Buildings.Fluid.Sources.Boundary_pT",
+         "parameters": {"nPorts": 1}},
+        {"name": "oriX", "class": "Buildings.Airflow.Multizone.Orifice",
+         "parameters": {"A": 0.01}},
+    ]
+    doc["connections"] += [["volB.ports[3]", "oriX.port_a"], ["oriX.port_b", "bouX.ports[1]"]]
+    with pytest.raises(ModelicaImportError,
+                       match=r"bou \(Buildings.Fluid.Sources.Boundary_pT\): wired straight to "
+                             r"volA"):
+        read_modelica(_write(tmp_path, doc))
+
+
+# --------------------------------------------------------------- airflow solve robustness
+def test_gauge_reference_is_the_first_boundary_pressure(tmp_path):
+    """With the boundary at 1e5 Pa (`Examples/ReverseBuoyancy.mo` sets `volOut.p = 100000`)
+    a `p_default` gauge would carry 1325 Pa in every potential, whose round-off (3e-13 Pa per
+    `dp`) the door's stiff laminar branch turns into a residual floor above `AIR_ATOL`; the
+    reader gauges against the boundary instead (assemble docstring, "Gauge reference")."""
+    doc = _doc("mixed_rooms.json")
+    for c in doc["components"]:
+        if c["name"] == "bouOut":
+            c["parameters"]["p"] = 100000.0
+    doc["signals"][0] = {"name": "yDoo", "class": "Modelica.Blocks.Sources.Constant",
+                         "parameters": {"k": 1.0}, "drives": "dooDis.y"}
+    model, state, drivers, names = read_modelica(_write(tmp_path, doc), return_names=True)
+    assert names.p_ref == 100000.0
+    assert torch.equal(drivers["air.phi_boundary"], torch.zeros(1, dtype=F64))
+    hist = simulate(model, state, drivers, names.times[:3])  # converges to AIR_ATOL
+    assert float(hist["p"][0, names.nodes["bouOut"]]) == 100000.0
+    # The layer's own linear initial guess converges at the same tolerances too.
+    layer = model.potential["air"]
+    d = step_drivers(drivers, names.times, 0.0)
+    for c in model.closures:
+        d.update(c(state, d))
+    layer.solve(d["air.phi_boundary"], d, d.get("air.sources"), atol=1e-13, rtol=1e-12)
+
+
+def test_initial_airflow_solve_starts_from_the_linear_guess():
+    """`three_rooms_discretized_door.json` is the topology of
+    `Validation/ThreeRoomsContamDiscretizedDoor.mo` (three pinned rooms, a stack, an open
+    ten-compartment door). Newton seeded with every zone at `p_start` cycles (residual 0.084
+    kg/s after 50 iterations); from the layer's linear initial guess it converges in three.
+    The quasi-steady initial flows are therefore solved from that guess."""
+    model, state, drivers, names = _load("three_rooms_discretized_door.json")
+    hist = simulate(model, state, drivers, names.times)
+    q = hist["air.q"]
+
+    def flow(key):
+        return sum(s * q[:, c] for c, s in names.edges[key])
+
+    # volWes (the door's side A) exchanges air only through the door and oriWesTop (volTop
+    # -> volWes): its mass balance closes.
+    assert float((flow("oriWesTop") - flow("dooOpeClo")).abs().max()) < 1e-12
+    assert float(flow("oriWesTop").abs().min()) > 1e-3

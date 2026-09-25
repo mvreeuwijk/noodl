@@ -1,0 +1,39 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "test.HeatFlow",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1",
+  "experiment": {"StartTime": 0.0, "StopTime": 100.0, "Interval": 10.0, "Tolerance": 1e-06},
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "extraPropertiesNames": [],
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "X_default": [0.01, 0.99],
+    "nXi": 1,
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {"name": "vol", "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+     "parameters": {"V": 10.0, "T_start": 293.15, "nPorts": 1, "m_flow_nominal": 0.01,
+                    "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial"}},
+    {"name": "bou", "class": "Buildings.Fluid.Sources.Boundary_pT",
+     "parameters": {"p": 101325.0, "T": 293.15, "nPorts": 1}},
+    {"name": "ori", "class": "Buildings.Airflow.Multizone.Orifice",
+     "parameters": {"A": 0.01, "CD": 0.65, "m": 0.5, "dp_turbulent": 0.1}},
+    {"name": "preHea", "class": "Modelica.Thermal.HeatTransfer.Sources.PrescribedHeatFlow",
+     "parameters": {"T_ref": 293.15, "alpha": 0.0}}
+  ],
+  "connections": [
+    ["vol.ports[1]", "ori.port_a"],
+    ["ori.port_b", "bou.ports[1]"],
+    ["preHea.port", "vol.heatPort"]
+  ],
+  "signals": [
+    {"name": "one", "class": "Modelica.Blocks.Sources.Constant", "parameters": {"k": 1.0},
+     "drives": "gai.u"},
+    {"name": "gai", "class": "Modelica.Blocks.Math.Gain", "parameters": {"k": 100.0},
+     "drives": "preHea.Q_flow"}
+  ]
+}

@@ -60,16 +60,20 @@ def _closure(model: Model) -> _MBLClosure:
 
 def _solve_air(model: Model, state: State, drivers: Drivers, **solve_kwargs) -> State:
     """The potential layers alone at `state` (closures first): the quasi-steady flows of the
-    initial state, without advancing any transport layer."""
+    initial state, without advancing any transport layer.
+
+    Newton starts from the layer's own linear initial guess (`phi0=None`,
+    `PotentialFlowLayer.linear_init`), not from the state's `p_start` seed: every zone at
+    `p_start` is far from a stack's hydrostatic solution, and from there Newton cycles on
+    MBL's discretised doors (`Validation/ThreeRoomsContamDiscretizedDoor.mo`: residual
+    0.084 kg/s after 50 iterations), while the linear guess converges in three."""
     drv = dict(drivers)
     for c in model.closures:
         drv.update(c(state, drv))
     new = dict(state)
     for name, layer in model.potential.items():
-        phi_prev = state.get(f"{name}.phi")
-        phi0 = None if phi_prev is None else phi_prev[..., layer.interior]
         phi, q = layer.solve(drv[f"{name}.phi_boundary"], drv, drv.get(f"{name}.sources"),
-                             phi0=phi0, **solve_kwargs)
+                             phi0=None, **solve_kwargs)
         new[f"{name}.phi"], new[f"{name}.q"] = phi, q
     return new
 
@@ -79,7 +83,8 @@ def simulate(model: Model, state: State, drivers: Drivers, times,
     """Time histories over `times` (a subset of the experiment grid, increasing).
 
     Returns `"time"` `(N,)`, `"air.q"` `(N, b)` in the air layer's edge order (see
-    `ModelicaNames.edges`), `"air.phi"` `(N, n)` gauge pressure, `"p"` `(N, n)` absolute
+    `ModelicaNames.edges`), `"air.phi"` `(N, n)` gauge pressure (relative to
+    `ModelicaNames.p_ref`), `"p"` `(N, n)` absolute
     pressure (Pa), `"T"` `(N, n)` (K), `"X_w"` `(N, n)`, and `"C"` `(N, n, K)` for the species
     layer's mass fractions (water last when carried) when the model has one. `step_kwargs`
     reach `Model.step`/`Model.steady` (and so the airflow solves); the airflow Newton

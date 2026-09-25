@@ -29,9 +29,13 @@ in a deterministic order: sorted by the lexicographically smallest port referenc
 connections -- i.e. a group of more than two port references, meaning three or more distinct
 components meet at that wire rather than two -- is refused; so is a group holding ports from
 two DIFFERENT zone/boundary components (nothing here wires two zones directly with no flow
-element between them). Either case marks the node "conflict" rather than dropping it, so
-later phases that touch it can skip cleanly instead of raising a `KeyError`; a conflict node
-never appears in the `ComponentGraph.nodes` a caller sees.
+element between them), with one exception: ONE boundary wired straight to ONE zone
+(`Validation/OpenDoorBuoyancyDynamic.mo`, `connect(bou.ports[1], bouA.ports[3])`) fixes that
+volume's pressure. The group is then the zone's node, and the boundary is recorded in
+`ComponentGraph.attached` instead of `boundaries` (`assemble` makes the zone the air-layer
+pressure reference at the boundary's pressure). Either refused case marks the node "conflict"
+rather than dropping it, so later phases that touch it can skip cleanly instead of raising a
+`KeyError`; a conflict node never appears in the `ComponentGraph.nodes` a caller sees.
 
 Hydrostatic column chains and path orientation
 -----------------------------------------------
@@ -106,7 +110,9 @@ Fluid ports and heat ports never share a node: a `FixedTemperature.port` -> a
 as a `Pin` for Task 6 (which reads the conductor's `G` and decides whether it is large enough
 to pin the zone's temperature -- spec section 6's threshold is not applied here). Any other
 heat-port wiring -- a bare `FixedTemperature` with no conductor, a conductor whose other end is
-not a zone, and so on -- is refused.
+not a zone, and so on -- is refused. A `PrescribedHeatFlow` whose `port` is wired to a zone's
+`heatPort` is recorded in `ComponentGraph.heat_sources` as `(component, zone)`; wired to
+anything else it is refused.
 """
 
 from __future__ import annotations
@@ -183,6 +189,9 @@ class ComponentGraph:
     pins: tuple[Pin, ...]
     sources: tuple[tuple[Component, str], ...]
     sensors: tuple[InlineSensor, ...] = ()
+    heat_sources: tuple[tuple[Component, str], ...] = ()
+    # (zone, boundary component) for a boundary wired straight to a zone (module docstring).
+    attached: tuple[tuple[str, Component], ...] = ()
 
 
 class _UnionFind:
@@ -245,6 +254,8 @@ def _kind_of(cls: str, role: str | None) -> str:
         return "zonal"
     if cls in schema.THERMAL_PIN:
         return "pin"
+    if cls in schema.HEAT_SOURCES:
+        return "heat_source"
     if cls in schema.SOURCES:
         return "source"
     if cls in schema.SIGNALS:
@@ -267,6 +278,8 @@ def _is_fluid_port(kind: str, port: str) -> bool:
 def _is_heat_port(kind: str, cls: str, port: str) -> bool:
     if kind == "zone":
         return port == "heatPort"
+    if kind == "heat_source":
+        return port == "port"
     if kind == "pin":
         if cls == _FIXED_TEMPERATURE:
             return port == "port"
@@ -303,6 +316,7 @@ class _Ctx:
     members_of_root: dict[str, set[str]] = field(default_factory=dict)
     root_to_name: dict[str, str] = field(default_factory=dict)
     root_to_kind: dict[str, str] = field(default_factory=dict)
+    attached: dict[str, str] = field(default_factory=dict)  # zone -> boundary wired to it
 
     def node_of(self, ref: str) -> str:
         return self.root_to_name[self.uf.find(ref)]
@@ -397,7 +411,14 @@ def _assign_nodes(ctx: _Ctx) -> None:
             ctx.by_name[_split(m)[0]].name for m in members
             if ctx.kind_of[_split(m)[0]] in ("zone", "boundary")
         })
-        if len(zb_names) > 1:
+        zone_names = [n for n in zb_names if ctx.kind_of[n] == "zone"]
+        if len(zb_names) == 2 and len(zone_names) == 1:
+            # One boundary wired straight to one zone: the zone's node (module docstring).
+            zone = zone_names[0]
+            ctx.attached[zone] = next(n for n in zb_names if n != zone)
+            ctx.root_to_name[root] = zone
+            ctx.root_to_kind[root] = "zone"
+        elif len(zb_names) > 1:
             ctx.errors.append(
                 f"{' and '.join(zb_names)}: connected directly to each other with no flow "
                 f"element between them"
@@ -596,8 +617,9 @@ def _fuse_paths(ctx: _Ctx) -> list[FlowPath]:
     return paths
 
 
-def _resolve_pins(doc: ModelicaDoc, ctx: _Ctx) -> list[Pin]:
-    """`FixedTemperature.port` -> `ThermalConductor.port_a`/`port_b` -> zone `heatPort`."""
+def _resolve_pins(doc: ModelicaDoc, ctx: _Ctx) -> tuple[list[Pin], list[tuple[Component, str]]]:
+    """`FixedTemperature.port` -> `ThermalConductor.port_a`/`port_b` -> zone `heatPort`, and
+    `PrescribedHeatFlow.port` -> zone `heatPort`."""
     heat_partner: dict[tuple[str, str], tuple[str, str]] = {}
     for a, b in doc.connections:
         ia, pa = _split(a)
@@ -643,7 +665,17 @@ def _resolve_pins(doc: ModelicaDoc, ctx: _Ctx) -> list[Pin]:
         ):
             ctx.errors.append(f"{name} ({comp.cls}): unsupported heat-port wiring")
 
-    return pins
+    heat_sources: list[tuple[Component, str]] = []
+    for name, comp in ctx.by_name.items():
+        if ctx.kind_of[name] != "heat_source":
+            continue
+        partner = heat_partner.get((name, "port"))
+        if partner is None or ctx.kind_of[partner[0]] != "zone":
+            ctx.errors.append(f"{name} ({comp.cls}): unsupported heat-port wiring (its port "
+                              f"must connect to a volume's heatPort)")
+            continue
+        heat_sources.append((comp, partner[0]))
+    return pins, heat_sources
 
 
 def build(doc: ModelicaDoc) -> ComponentGraph:
@@ -657,18 +689,23 @@ def build(doc: ModelicaDoc) -> ComponentGraph:
         if kind != "conflict"
     }
     zones = tuple(c.name for c in doc.components if ctx.kind_of[c.name] == "zone")
-    boundaries = tuple(c.name for c in doc.components if ctx.kind_of[c.name] == "boundary")
+    attached_boundaries = set(ctx.attached.values())
+    boundaries = tuple(c.name for c in doc.components
+                       if ctx.kind_of[c.name] == "boundary" and c.name not in attached_boundaries)
+    attached = tuple((zone, ctx.by_name[b]) for zone, b in ctx.attached.items())
 
     doors = tuple(_two_way_edges(ctx, "door"))
     zonal = tuple(_two_way_edges(ctx, "zonal"))
     sources = tuple(_resolve_sources(ctx))
     paths = tuple(_fuse_paths(ctx))
-    pins = tuple(_resolve_pins(doc, ctx))
+    pin_list, heat_list = _resolve_pins(doc, ctx)
+    pins, heat_sources = tuple(pin_list), tuple(heat_list)
     sensors = tuple(_resolve_sensors(doc, ctx))
 
     _raise(ctx.errors)
 
     return ComponentGraph(
         nodes=nodes, zones=zones, boundaries=boundaries, paths=paths, doors=doors,
-        zonal=zonal, pins=pins, sources=sources, sensors=sensors,
+        zonal=zonal, pins=pins, sources=sources, sensors=sensors, heat_sources=heat_sources,
+        attached=attached,
     )

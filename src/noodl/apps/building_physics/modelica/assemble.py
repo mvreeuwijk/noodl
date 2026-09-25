@@ -12,16 +12,17 @@ What each MBL construct becomes
   (`Boundary_pT`, `Outside`), in the document's component order, zones first. Junction nodes
   of fused column chains do not appear: each chain is one edge (`graph.FlowPath`).
 * **Air layer** ("air", `PotentialFlowLayer`, quantity pressure, Pa). Potentials are GAUGE
-  pressures relative to `medium.p_default`. One edge kind per MBL instance, so that each
-  element keeps its own `dp_turbulent`, form and drives: `"airpath:<name>"` for a one-way
-  element (edge from its `port_a` side to its `port_b` side), `"door_ab:<name>"` and
-  `"door_ba:<name>"` for `DoorOpen`/`DoorOperable` (`noodl.elements.mbl.door`),
-  `"door_c:<name>"` for the `nCom` compartment edges of a discretised door
-  (`noodl.elements.mbl.door_discretized`, with its `DoorCompartmentHead` drive), and
-  `"zonal_ab:<name>"`/`"zonal_ba:<name>"` for a zonal flow. A fused column chain adds a
-  `_ColumnHead` drive to its path. The air-layer boundary is every boundary node plus, for
-  each group of zones joined by pressure-dependent edges with no boundary among them, the
-  group's first zone at its own `p_start` (see "Closed zone groups" below).
+  pressures relative to `names.p_ref` (see "Gauge reference" below). One edge kind per MBL
+  instance, so that each element keeps its own `dp_turbulent`, form and drives:
+  `"airpath:<name>"` for a one-way element (edge from its `port_a` side to its `port_b`
+  side), `"door_ab:<name>"` and `"door_ba:<name>"` for `DoorOpen`/`DoorOperable`
+  (`noodl.elements.mbl.door`), `"door_c:<name>"` for the `nCom` compartment edges of a
+  discretised door (`noodl.elements.mbl.door_discretized`, with its `DoorCompartmentHead`
+  drive), and `"zonal_ab:<name>"`/`"zonal_ba:<name>"` for a zonal flow. A fused column chain
+  adds a `_ColumnHead` drive to its path. The air-layer boundary is every boundary node plus,
+  for each group of zones joined by pressure-dependent edges with no boundary among them, the
+  group's zone wired straight to a boundary (at that boundary's pressure) or else its first
+  zone at its own `p_start` (see "Closed zone groups" below).
 * **Thermal layer** ("thermal", `TransportLayer`, K) over every edge kind, boundaries =
   boundary nodes plus the zones pinned by a `FixedTemperature` -> `ThermalConductor`
   (`G >= 1e6` W/K) construction. Omitted when no zone is left unpinned.
@@ -68,10 +69,21 @@ it: a volume's `X_start[1]` or a boundary's `X[1]` differs from `X_default[1]`, 
 `MassFlowSource_T` injects air of another composition. Otherwise `"X_w"` is the constant
 `X_default[1]` everywhere, which is exactly MBL's value throughout such a model.
 
+Gauge reference
+---------------
+`p_ref` is the first boundary node's pressure at the first grid time (a boundary wired
+straight to a zone counts; with no boundary, the first zone's `p_start`, and `p_default`
+if there is none). Flows depend on pressure DIFFERENCES only, so the reference changes no
+result, but the airflow is solved to `run.AIR_ATOL = 1e-13` kg/s, and the round-off of
+`phi_i - phi_j` is `eps |phi|`: with `p_default` as reference a network at 1e5 Pa
+(`Examples/ReverseBuoyancy.mo` sets `volOut.p = 100000`) carries `|phi| = 1325` Pa, i.e.
+3e-13 Pa of noise in every `dp`, which a door's stiff laminar branch turns into a residual
+floor above the tolerance.
+
 `p_abs` (controller ruling)
 ---------------------------
-`"p_abs" = p_default + phi`: at air-layer boundary nodes from `"air.phi_boundary"` (exact),
-at interior nodes from the state's last solved `"air.phi"` (seeded with `p_start - p_default`
+`"p_abs" = p_ref + phi`: at air-layer boundary nodes from `"air.phi_boundary"` (exact),
+at interior nodes from the state's last solved `"air.phi"` (seeded with `p_start - p_ref`
 in the initial state). With `coupling="iterate"` (used whenever a transport layer exists)
 each pass reads the previous pass's `"air.phi"`, so within a step the interior pressure
 converges with the temperatures and mass fractions; the iteration tests the transport
@@ -94,6 +106,17 @@ reference zone (an air boundary but a transport interior node), so a closed grou
 a source, or joined by a `ZonalFlow_m_flow` whose two directions are not the same flow, is
 refused by name.
 
+A boundary wired straight to a zone (`graph.ComponentGraph.attached`;
+`Validation/OpenDoorBuoyancyDynamic.mo` connects `bou.ports[1]` to `bouA.ports[3]`) fixes
+that volume's pressure: the zone becomes its group's pressure reference, at the boundary's
+pressure (constant or driven by `p_in`) instead of `p_start`, and stays a transport interior
+node. In MBL the boundary then exchanges exactly the air the rest of the group stores or
+releases (`der(m)` of the other volumes); noodl's quasi-steady group stores none, so the
+exchange is zero and the boundary's temperature and composition never enter. That holds only
+if the group is otherwise closed, so the same refusals apply (a source, an unbalanced
+`ZonalFlow_m_flow`), and an attached boundary whose group also reaches a boundary node or
+another attached boundary is refused by name.
+
 Sources
 -------
 `TraceSubstancesFlowSource` (`TraceSubstancesFlowSource.mo`, equation section): it injects
@@ -103,12 +126,19 @@ a thermal source `cp m T_default`, a species source `m` for the substance and, w
 is carried, `m X_default[1]` of water. `MassFlowSource_T` injects `m_flow` at `T`, `X`, `C`
 likewise; a negative (extracting) flow is refused, since the extracted enthalpy would depend
 on the zone state.
+
+`PrescribedHeatFlow` into a volume's `heatPort` (MSL `PrescribedHeatFlow.mo:15`:
+`port.Q_flow = -Q_flow (1 + alpha (port.T - T_ref))`; the volume adds `heatPort.Q_flow` to
+`der(U)`, `PartialMixingVolume.mo:185-189`, `ConservationEquation.mo:303`) becomes a thermal
+source `Q_flow` W at that zone, read from the signal driving its `Q_flow` input. Only
+`alpha = 0` (the MSL default) is supported: a temperature-dependent heat flow is refused. Into
+a pinned zone it has no effect, as in MBL, where the stiff conductor carries it away.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
@@ -172,7 +202,8 @@ class ModelicaNames:
     a zone or boundary. `kinds[name]`
     are the instance's air-layer edge kinds. `times` is the experiment output grid.
     `air_references` lists the zones made air-layer pressure references (module docstring,
-    "Closed zone groups").
+    "Closed zone groups"); `attached` maps a boundary wired straight to a zone to that zone.
+    `p_ref` is the gauge reference of `"air.phi"` (module docstring, "Gauge reference").
     """
 
     edges: dict[str, tuple[tuple[int, int], ...]]
@@ -180,6 +211,8 @@ class ModelicaNames:
     kinds: dict[str, tuple[str, ...]]
     times: Tensor
     air_references: tuple[str, ...]
+    attached: dict[str, str] = field(default_factory=dict)  # boundary -> zone it is wired to
+    p_ref: float = 101325.0  # Pa; `"air.phi"` is `p - p_ref` (module docstring)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -410,11 +443,13 @@ class _MBLClosure:
     carried) from the transport states, the boundary drivers and the last solved `"air.phi"`
     (module docstring, "p_abs")."""
 
-    def __init__(self, *, medium: MBLMedium, T0: Tensor, phi0: Tensor, X0: Tensor,
+    def __init__(self, *, medium: MBLMedium, p_ref: float, T0: Tensor, phi0: Tensor,
+                 X0: Tensor,
                  air_interior: Tensor, air_bound: Tensor, th_interior: Tensor | None,
                  th_bound: Tensor, sp_interior: Tensor | None, sp_bound: Tensor | None,
                  water: int | None, n_species: int) -> None:
         self.medium = medium
+        self.p_ref = float(p_ref)
         self.T0, self.phi0, self.X0 = T0, phi0, X0
         self.air_interior, self.air_bound = air_interior, air_bound
         self.th_interior, self.th_bound = th_interior, th_bound
@@ -459,7 +494,7 @@ class _MBLClosure:
         phi = state.get("air.phi")
         if phi is not None and self.air_interior.numel():
             parts.append((phi[..., self.air_interior], self.air_interior))
-        return self.medium.p_default + self._scatter(self.phi0, parts)
+        return self.p_ref + self._scatter(self.phi0, parts)
 
     def __call__(self, state, drivers):
         T = self.temperatures(state, drivers)
@@ -673,6 +708,11 @@ class _Builder:
             b = self.boundary(self.by_name[name])
             if b is not None:
                 bounds[name] = b
+        attached_p: dict[str, Tensor] = {}  # zone -> the attached boundary's pressure
+        for zone, bcomp in g.attached:
+            b = self.boundary(bcomp)
+            if b is not None:
+                attached_p[zone] = b["p"]
 
         # Pinned temperatures (spec section 6).
         for pin in g.pins:
@@ -756,6 +796,16 @@ class _Builder:
         has_boundary = {find(index[b]) for b in g.boundaries}
         references: list[str] = []
         seen_roots: set[int] = set()
+        for zone, bcomp in g.attached:  # module docstring, "Closed zone groups"
+            r = find(index[zone])
+            if r in has_boundary or r in seen_roots:
+                errors.append(
+                    f"{bcomp.name} ({bcomp.cls}): wired straight to {zone}, whose zone group "
+                    f"also reaches another boundary; not supported (the boundary would "
+                    f"exchange air with the zone)"
+                )
+            seen_roots.add(r)
+            references.append(zone)
         for name in g.zones:
             r = find(index[name])
             if r in has_boundary or r in seen_roots:
@@ -772,8 +822,9 @@ class _Builder:
             if node in index and find(index[node]) in closed:
                 errors.append(
                     f"{comp.name} ({comp.cls}): feeds {node}, whose zone group has no "
-                    f"boundary (it is joined to the rest only by prescribed flows), so the "
-                    f"injected mass could not leave; not supported"
+                    f"boundary node, so the injected mass could only be stored by "
+                    f"compressing the volumes (volume mass storage is not modelled); not "
+                    f"supported"
                 )
         for comp, mab, mba, iA, iB in self._zonal_pairs:
             if find(iA) not in closed and find(iB) not in closed:
@@ -836,8 +887,18 @@ class _Builder:
             else:
                 const[key] = value
 
-        phi_b = [bounds[b]["p"] - med.p_default for b in g.boundaries]
-        phi_b += [_t(zones[r].p_start - med.p_default) for r in references]
+        # Gauge reference (module docstring): the first boundary's pressure at t0.
+        p_firsts = [bounds[b]["p"] for b in g.boundaries] + [attached_p[r] for r in references
+                                                             if r in attached_p]
+        if p_firsts:
+            p_ref = float(p_firsts[0].reshape(-1)[0])
+        elif references:
+            p_ref = zones[references[0]].p_start
+        else:
+            p_ref = med.p_default
+        phi_b = [bounds[b]["p"] - p_ref for b in g.boundaries]
+        phi_b += [attached_p[r] - p_ref if r in attached_p
+                  else _t(zones[r].p_start - p_ref) for r in references]
         put("air.phi_boundary", _stack(phi_b, self.n_t))
         Tb = [bounds[b]["T"] for b in g.boundaries] + [_t(zones[z].pinned) for z in pinned]
         put("thermal.x_boundary", _stack(Tb, self.n_t))
@@ -876,12 +937,12 @@ class _Builder:
         # ---------------------------------------------------------- closure + model
         T0 = torch.tensor([zones[nm].T_start if nm in zones else med.T_default
                            for nm in node_names], dtype=F64)
-        phi0 = torch.tensor([zones[nm].p_start - med.p_default if nm in zones else 0.0
+        phi0 = torch.tensor([zones[nm].p_start - p_ref if nm in zones else 0.0
                              for nm in node_names], dtype=F64)
         X0 = torch.tensor([zones[nm].X_w if nm in zones else X_const for nm in node_names],
                           dtype=F64)
         closure = _MBLClosure(
-            medium=med, T0=T0, phi0=phi0, X0=X0, air_interior=air.interior,
+            medium=med, p_ref=p_ref, T0=T0, phi0=phi0, X0=X0, air_interior=air.interior,
             air_bound=air.bound,
             th_interior=layers["thermal"].interior_idx if "thermal" in layers else None,
             th_bound=net.boundary_index(th_boundary),
@@ -927,7 +988,8 @@ class _Builder:
             if entries is not None:
                 edges[sensor.component.name] = tuple((c, sensor.sign * s) for c, s in entries)
         names = ModelicaNames(edges=edges, nodes=dict(index), kinds=kinds,
-                              times=self.times.clone(), air_references=tuple(references))
+                              times=self.times.clone(), air_references=tuple(references),
+                              attached={b.name: z for z, b in g.attached}, p_ref=p_ref)
         return model, state, drivers, names
 
     # ------------------------------------------------------------- edges
@@ -1157,6 +1219,17 @@ class _Builder:
                 s_sp[i][k] = s_sp[i][k] + m * c
             if water is not None:
                 s_sp[i][water] = s_sp[i][water] + m * X_in
+        for comp, node in self.graph.heat_sources:
+            alpha = float(comp.parameters.get("alpha", 0.0))  # PrescribedHeatFlow.mo:5
+            if alpha != 0.0:
+                self.errors.append(f"{comp.name} ({comp.cls}): alpha = {alpha!r} (a "
+                                   f"temperature-dependent heat flow) is not supported")
+                continue
+            Q = self.sig.require(comp, "Q_flow")
+            if Q is None or node not in zones:
+                continue
+            i = index[node]
+            s_th[i] = s_th[i] + Q
         return s_air, s_th, s_sp
 
 

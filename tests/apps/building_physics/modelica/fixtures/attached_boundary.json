@@ -1,0 +1,87 @@
+{
+  "format": "noodl-modelica/1",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.23.0",
+  "model": "test.AttachedBoundary",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 60.0,
+    "Interval": 1.0,
+    "Tolerance": 1e-06
+  },
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "extraPropertiesNames": [],
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "bou",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "p": 101327.0,
+        "T": 283.15,
+        "nPorts": 1
+      }
+    },
+    {
+      "name": "volA",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "V": 62.5,
+        "T_start": 295.15,
+        "nPorts": 3,
+        "m_flow_nominal": 0.001,
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial"
+      }
+    },
+    {
+      "name": "volB",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "V": 62.5,
+        "T_start": 293.15,
+        "nPorts": 2,
+        "m_flow_nominal": 0.001,
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial"
+      }
+    },
+    {
+      "name": "doo",
+      "class": "Buildings.Airflow.Multizone.DoorOpen",
+      "parameters": {
+        "wOpe": 0.9,
+        "hOpe": 2.1,
+        "CD": 0.65,
+        "m": 0.5,
+        "dp_turbulent": 0.01
+      }
+    }
+  ],
+  "connections": [
+    [
+      "volA.ports[1]",
+      "doo.port_a1"
+    ],
+    [
+      "doo.port_b1",
+      "volB.ports[1]"
+    ],
+    [
+      "volB.ports[2]",
+      "doo.port_a2"
+    ],
+    [
+      "doo.port_b2",
+      "volA.ports[2]"
+    ],
+    [
+      "bou.ports[1]",
+      "volA.ports[3]"
+    ]
+  ],
+  "signals": []
+}

@@ -244,3 +244,45 @@ def test_inline_sensor_without_flow_reversal_is_refused(tmp_path) -> None:
     with pytest.raises(ModelicaImportError, match=r"senOri \(Buildings.Fluid.Sensors.MassFlowRate\)"
                        r": allowFlowReversal = false"):
         build(load(path))
+
+
+# ----------------------------------------------------------------- prescribed heat flow
+def test_prescribed_heat_flow_into_a_zone_is_resolved() -> None:
+    g = _graph("heat_flow.json")
+    assert [(c.name, zone) for c, zone in g.heat_sources] == [("preHea", "vol")]
+
+
+def test_prescribed_heat_flow_not_into_a_zone_is_refused(tmp_path) -> None:
+    import json
+
+    doc = json.loads((FIXTURES / "heat_flow.json").read_text())
+    doc["connections"][-1] = ["preHea.port", "bou.heatPort"]
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ModelicaImportError, match=r"preHea \(Modelica.Thermal.HeatTransfer"
+                       r".Sources.PrescribedHeatFlow\): unsupported heat-port wiring"):
+        build(load(path))
+
+
+# ------------------------------------------------------- boundary wired straight to a volume
+def test_boundary_wired_straight_to_a_volume_shares_its_node() -> None:
+    """`Validation/OpenDoorBuoyancyDynamic.mo` connects `bou.ports[1]` to `bouA.ports[3]`:
+    the boundary fixes the volume's pressure. The two are one node, named after the volume,
+    and the boundary is recorded as attached to it rather than listed as a boundary node."""
+    g = _graph("attached_boundary.json")
+    assert g.nodes == {"volA": "zone", "volB": "zone"}
+    assert g.zones == ("volA", "volB")
+    assert g.boundaries == ()
+    assert [(z, b.name) for z, b in g.attached] == [("volA", "bou")]
+    assert [(d.side_a, d.side_b) for d in g.doors] == [("volA", "volB")]
+
+
+def test_two_boundaries_or_two_volumes_wired_together_stay_refused(tmp_path) -> None:
+    import json
+
+    doc = json.loads((FIXTURES / "attached_boundary.json").read_text())
+    doc["connections"].append(["bou.ports[1]", "volB.ports[3]"])
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ModelicaImportError, match="bou and volA and volB: connected directly"):
+        build(load(path))
