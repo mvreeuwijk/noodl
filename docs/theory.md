@@ -591,8 +591,8 @@ the drivers alone and is never allowed to read the layer's own solved potential 
 (§1, `drives.py`): letting the drag depend on the air's own flow would put a term into the
 Newton residual that the Jacobian $A \operatorname{diag}(g') A^\top$ does not account for, silently breaking
 the solver's own convergence theory. The absolute form is therefore not a simplification of
-convenience but the one shape the framework's `Drive` protocol admits; the relative form is
-recorded as a follow-up requiring an element-side formulation (a batched monotone root on
+convenience but the one shape the framework's `Drive` protocol admits; the relative form
+would need an element-side formulation (a batched monotone root on
 $R \lvert Q \rvert Q - \tfrac{1}{2} f_i\, \rho\, (U_s - Q/A)^2\, T L / A_{\text{air}} = \Delta p$) rather than a drive.
 
 **The two-film coupling, and its lagged pass.** Total sulfide in the water and H₂S in the

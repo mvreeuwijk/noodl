@@ -237,8 +237,7 @@ ModelicaImportError: modelica: refused 3 items:
   - west (Buildings.Fluid.Sources.Outside_CpLowRise): wind pressure is not supported
 ```
 
-**Conventions and deviations from the design record** (the internal design spec was amended
-25 Sep 2026 to match, section 6):
+**Conventions:**
 
 - `DoorOpen`/`DoorOperable` use MBL's fixed default density (`Door.mo`); a discretised door
   (`DoorDiscretizedOpen`/`Operable`) evaluates density at the actual port pressure
@@ -317,7 +316,7 @@ than assume success. 9 of the 12 dynamic parity tests take 30 s–5 min each and
 `@pytest.mark.slow`, excluded by the repository's default `pytest` run; `pytest -m slow` runs
 them.
 
-Regenerating the committed parity ledgers (`tests/data/modelica/parity-{algebraic,dynamic}.json`,
+Regenerating the committed parity records (`tests/data/modelica/parity-{algebraic,dynamic}.json`,
 below) needs no OpenModelica — they are written by `tests/verification/test_modelica_parity.py`
 itself, only when the environment variable `NOODL_RECORD_PARITY=1` is set:
 
@@ -328,7 +327,7 @@ NOODL_RECORD_PARITY=1 pytest tests/verification/test_modelica_parity.py -m slow
 
 (two runs, since the default `addopts` excludes `slow`-marked tests and a command-line `-m`
 replaces rather than adds to it). Without the variable, the suite reads and checks the
-fixtures but never rewrites the ledgers.
+fixtures but never rewrites the records.
 
 ## Verification
 

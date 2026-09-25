@@ -274,8 +274,8 @@ branch never runs, and every pass after the first is a no-op. It measures the ch
 - **Species and quality transport riding on a capacitated layer** is not wired up.
 - **Time-varying arc capacities and storage bounds** — construction-time buffers only, since
   WSIMOD's own capacities are static within a run.
-- A recorded follow-up: a small synthetic fixture with a deliberately tight `c_arc`, captured
-  through WSIMOD's own push/pull, to close the parity gap described above.
+- A WSIMOD-captured fixture with a deliberately tight `c_arc`, which would close the parity gap
+  described above, does not exist yet.
 
 ## Install
 

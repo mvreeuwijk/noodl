@@ -253,7 +253,7 @@ pass. Three consequences:
   the order of the primal residual, rather than the unrolled $O(\rho^{\text{passes}})$ counted
   from the *start* state — an error tied to nothing the caller controls, and worst exactly where
   the primal is cheapest. Where the interface equations are **linear** in the interface the
-  adjoint is exact whatever the residual, which is why the P1-2 fixtures return $1/3$ and $2/3$
+  adjoint is exact whatever the residual, which is why the linear two-model test fixtures return $1/3$ and $2/3$
   to one ulp at `iterate_rtol` $10^{-12}$ and $10^{-3}$ alike;
 - backward **memory is one pass**, not all of them;
 - a forward-only run pays nothing: pass 1 runs on the graph only to learn whether anything
@@ -314,32 +314,22 @@ the building's infiltration changes the street concentration by 0.5897 %. On a s
 realistic size one building's infiltration changes the street's concentration very little, and
 the coupled result should be read with that in mind.
 
-Throughput, on the headline union over 6 coupled hours with 60 building sub-steps per street
-hour, re-measured for framework-hardening-part-3's Task 9 (`benchmarks/coupling_street_building.py`,
-run standalone against this worktree's `src`; three repeats at batch 1 and batch 10, one at
-batch 100): batch 1 — 39.934 s / 54.663 s / 61.883 s (median 54.663 s), 107 outer passes on
-every run; batch 10 — 47.353 s / 48.240 s / 60.769 s (median 48.240 s), 118 outer passes on
-every run; batch 100 — 137.442 s, 118 outer passes. Pass counts are exactly repeatable at a
-given batch size; wall time is not — a spread of about 22 s at batch 1 (61.883 − 39.934 s) and
-about 13 s at batch 10 (60.769 − 47.353 s), at fixed batch size and pass count, on the same
-machine whose ambient load the development-history decision record documents — so the
-absolute seconds above are one machine's snapshot and the *ratios* are what carries information.
-Batch 1 alone needs fewer passes than batch 10 or batch 100 because `U_ref` is drawn from
-`torch.linspace(1.0, 4.0, batch_size)`: batch 1 sees only the single wind speed 1.0, while every
-larger batch also carries wind speeds nearer 4.0, and the outer iteration is judged converged
-only once every instance in the batch is inside tolerance. This benchmark's building model
-(`project_to_model`) still carries exactly ONE transport layer, `species`, which is also the
-ONE linked layer, so `boundary_transfers=True` (every transport layer) and
-`boundary_transfers={"species"}` (only the linked one) request `step_with_transfer` on the
-same set here — nothing to skip. Task 18b's `boundary_transfers` saving is for a recipient
-that ALSO carries an unlinked transport layer (e.g. a `thermal` layer alongside `species`, as
-the building application's own thermal builder produces, though this benchmark's `.prj`-based
-model does not build one — "no thermal layer: a .prj carries no thermal data"); that case is
-covered by `tests/test_couple_conservation.py`'s dedicated two-layer fixture and
-`tests/test_model_transfers.py`'s `boundary_transfers` collection tests, not by this benchmark.
-Median wall time keeps the same sub-linear pattern the earlier measurements showed: 137.442 s
-at batch 100 is about 2.5x the batch-1 median for 100x the batch, well under 10x. No budget
-is set.
+**Performance.** The street ↔ building demo (`benchmarks/coupling_street_building.py`) couples
+6 hours with 60 building sub-steps per street hour. On one workstation it took about 55 s at
+batch 1, 48 s at batch 10 and 137 s at batch 100 (medians; wall time varied by up to about
+20 s between repeats, while pass counts did not vary at all). Three things set the cost:
+
+- **Outer passes.** The run needs 107 passes at batch 1 and 118 at batches 10 and 100: a batch
+  is converged only when every instance is, so a batch spanning a wider range of conditions
+  (here wind speeds of 1–4 m/s rather than 1 m/s alone) takes as many passes as its slowest
+  instance.
+- **Batch size.** Cost grows far more slowly than the batch: 100 instances cost about 2.5 times
+  one instance. Batching many scenarios into one run is much cheaper than running them one by
+  one.
+- **Boundary transfers.** A two-way link reads the recipient's boundary transfer, which costs
+  more than a plain step. `union` requests it only from the linked transport layers, so an
+  unlinked layer on the recipient (a `thermal` layer, say) takes the cheaper plain step; there
+  is nothing to set.
 
 ## Limitations
 

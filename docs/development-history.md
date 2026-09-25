@@ -1604,6 +1604,17 @@ street, coupling and theory pages carried about them are kept here:
   one (28 to 27 synthetic, 22 to 21 real) because the new schedule gives a real convergence
   verdict on the first pass.
 
+**Coupling throughput, full record** (moved from coupling.md): re-measured for
+framework-hardening part 3, Task 9, running `benchmarks/coupling_street_building.py`
+standalone against the worktree's `src`: batch 1 39.934 / 54.663 / 61.883 s (107 passes each),
+batch 10 47.353 / 48.240 / 60.769 s (118 passes), batch 100 137.442 s (118 passes). The
+benchmark's `.prj` building model carries one transport layer, which is also the linked one,
+so Task 18b's `boundary_transfers` saving (only the linked layers take `step_with_transfer`)
+does not show in it; it is covered by `tests/test_couple_conservation.py` and
+`tests/test_model_transfers.py`. Also removed from the pages: "design record / internal design
+spec amended 25 Sep 2026, section 6" (building physics), "P1-2 fixtures" (coupling), "recorded
+follow-up" (WSIMOD page, theory §9) and "parity ledgers" (now "parity records").
+
 **theory.md rewritten as a plain theory page.** The "research survey drafted by an AI agent"
 status note, the first-person survey voice, and pointers to README sections, internal design
 spec sections, rulings (M4-R4, M4-R19, M4-R22, N4, N9) and task reviews were removed or replaced
