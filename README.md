@@ -96,7 +96,7 @@ The [API reference](docs/api.md) is organised module by module.
 ## Status
 
 The framework core and all six applications are built and checked against reference
-implementations; the suite is 1677 tests at 96.7 % coverage.
+implementations.
 
 ## The name
 
