@@ -319,11 +319,11 @@ def _hand_head_losses(q, length, diameter, eps, nu):
     return reynolds, scale / g**2, scale * swamee
 
 
-def _single_dw_pipe(options: WaterOptions) -> WaterNetwork:
+def _single_dw_pipe(options: WaterOptions, minor_loss: float = 0.0) -> WaterNetwork:
     return WaterNetwork(
         junctions=(Junction("J1", 0.0, 0.05),),
         reservoirs=(Reservoir("R1", 50.0),),
-        pipes=(WaterPipe("P1", "R1", "J1", 500.0, 0.3, 0.26e-3),),
+        pipes=(WaterPipe("P1", "R1", "J1", 500.0, 0.3, 0.26e-3, minor_loss),),
         headloss="D-W",
         options=options,
     )
@@ -350,6 +350,23 @@ def test_darcy_weisbach_head_loss_matches_the_hand_computed_epanet_value(
     assert loss == pytest.approx(colebrook, rel=1e-6)
     # EPANET's own value: Swamee-Jain is an explicit fit to Colebrook, within ~1 %
     assert loss == pytest.approx(swamee_jain, rel=2e-2)
+
+
+@pytest.mark.parametrize("gravity", [1.0, 1.1])
+def test_a_darcy_weisbach_pipe_carries_its_minor_loss(gravity):
+    """A [PIPES] minor-loss coefficient K adds K V^2 / (2 g) to the D-W head loss, as in
+    EPANET (Manual section 13.1), rather than being dropped."""
+    net = _single_dw_pipe(WaterOptions(specific_gravity=gravity), minor_loss=5.0)
+    model, state, drivers = build_model(net)
+    final = water_steady(model, state, drivers, atol=1e-12, rtol=1e-12)
+    head = final["water.phi"] / model.head_scale
+    names = net.nodes()
+    loss = float(head[names.index("R1")] - head[names.index("J1")])
+    _, colebrook, _ = _hand_head_losses(0.05, 500.0, 0.3, 0.26e-3, 1.002e-3 / 998.2)
+    velocity = 0.05 / (math.pi * 0.3**2 / 4.0)
+    expected = colebrook + 5.0 * velocity**2 / (2.0 * 9.80665)
+    assert expected == pytest.approx(0.996, abs=1e-3)
+    assert loss == pytest.approx(expected, rel=1e-6)
 
 
 def test_a_non_default_viscosity_and_gravity_reach_the_darcy_weisbach_duct():

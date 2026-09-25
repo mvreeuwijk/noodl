@@ -445,6 +445,9 @@ def build_model(
                     torch.tensor([p.length for p in net.pipes], dtype=F64),
                     torch.tensor([p.diameter for p in net.pipes], dtype=F64),
                     torch.tensor([p.roughness for p in net.pipes], dtype=F64),
+                    # EPANET's minor loss K adds K V^2 / (2 g): Duct's sum_C term, which at
+                    # rho' = 1/rho and dp = rho g h is exactly that head.
+                    sum_C=torch.tensor([p.minor_loss for p in net.pipes], dtype=F64),
                     rho=1.0 / rho, mu=nu, n_iter=12, kind="pipe",
                 )
             )
