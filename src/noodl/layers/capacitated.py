@@ -8,8 +8,7 @@ flow is either realised on the edge or left unmet at the source; overflow at a f
 is a separate, reported quantity, never silently dropped.
 
 The docstrings below record the mathematics and the failure modes each guard exists for,
-which is what a later reader needs; the DESIGN HISTORY behind them (which alternatives
-were tried, and in what order) is summarised in `docs/development-history.md`.
+which is what a later reader needs.
 """
 from __future__ import annotations
 

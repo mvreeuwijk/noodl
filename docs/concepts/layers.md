@@ -140,8 +140,8 @@ step (`"exact"` has none). `linear_solver` names it: `"auto"` (the default), `"g
 picks `"sparse_direct"` (SciPy's sparse LU, one exact factor-and-solve, no outer iteration) at or
 under a batch cap of 32 instances, and plain `"gmres"` above it — chosen on an interleaved
 forward/backward benchmark across the whole family (`gmres`, `gmres_jacobi`, `gmres_ilu`,
-`sparse_direct`), not on iteration counts alone; see the dated decision record in
-`docs/development-history.md` for the full table. `"auto"` never picks
+`sparse_direct`), not on iteration counts alone (`benchmarks/transport_solver_bench.py`).
+`"auto"` never picks
 `gmres_jacobi`/`gmres_ilu`: the benchmark found `gmres_ilu`'s per-instance ILU factorisation cost
 (paid twice per differentiable step — once in the forward solve, once in the backward adjoint,
 since preconditioning is not reused across the two) the clear loser at every batch size measured,

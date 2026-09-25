@@ -50,7 +50,6 @@ from noodl.topology import Network, Node
 # `_TransposeView` is `solvers.implicit.TransposeOperator`. Both this layer's operators
 # (`AdvectionOperator`, `_AffineSystemOperator` below) declare `symmetric = False`, so
 # `TransposeOperator.spd_certificate()` returns None for them.
-# History: see docs/development-history.md (Milestone 1b).
 
 
 def active_interior(
@@ -504,7 +503,6 @@ class TransportLayer:
             # the (n, n) Laplacian, are this layer's whole representation of its conduction
             # topology; `operator()`, the dense reference, forms its (n, n) `L` from it on
             # demand (`_conduction_matrix`).
-            # History: see docs/development-history.md (Milestone 1b).
             csrc, ctgt = net.endpoints(conduction_kind)
             b_c = len(csrc)
             g = torch.as_tensor(conductance, dtype=net.dtype)
@@ -553,8 +551,7 @@ class TransportLayer:
         `"auto"` may pick `sparse_direct` under grad (hazard 2 below); no solve reads them.
 
         `"auto"` (decided on the interleaved benchmark in
-        `benchmarks/transport_solver_bench.json` -- see `docs/development-history.md`'s
-        decision record for the full table): resolves to `method="sparse_direct"` when
+        `benchmarks/transport_solver_bench.json`): resolves to `method="sparse_direct"` when
         `batch_size <= _SPARSE_DIRECT_MAX_BATCH` (the SAME constant `solvers.select` uses for
         its own, separate "auto" -- imported, never re-hard-coded) and to plain `gmres`
         above it. `gmres_jacobi`/`gmres_ilu` are never chosen by `auto`: the benchmark found
@@ -654,7 +651,7 @@ class TransportLayer:
                     f"factorised this solve with SciPy's sparse LU (batch size at or under "
                     f"{_SPARSE_DIRECT_MAX_BATCH}), but scipy could not be imported, so it "
                     f"fell back to plain gmres. The answer is correct; it is slower at small "
-                    f"batches (see the benchmark in docs/development-history.md). Install "
+                    f"batches (see benchmarks/transport_solver_bench.py). Install "
                     f"the extra to get the documented default: pip install noodl[sparse]. "
                     f"This warning is issued once per process; diagnostics['linear']"
                     f"['backend'] reports the backend that actually ran on every solve.",
@@ -1070,7 +1067,6 @@ class TransportLayer:
         if on_failure == "return" and self.scheme == "exact":
             # Both `on_failure` checks are ARGUMENT VALIDITY and both belong here, before any
             # work. `on_failure='return'` is wrong for this scheme whatever the shapes.
-            # History: see docs/development-history.md (Milestone 1b).
             raise ValueError(
                 f"TransportLayer '{self.name}': on_failure='return' has no effect for "
                 f"scheme='exact' (there is no linear solve to return the status of; "

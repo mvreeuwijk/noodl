@@ -87,19 +87,16 @@ src/noodl/        the package: topology, elements, drives, layers, solvers, oper
 tests/            the suite, including verification/ — the parity cases against CONTAM,
                   MUNICH, SWMM, EPANET and WSIMOD, and the performance gates
 benchmarks/       timing and scaling scripts, and the composed reference model
-docs/             the published documentation and the development history
+docs/             the published documentation
 scripts/          fixture-regeneration scripts (Modelica, WSIMOD)
 ```
 
-A module-by-module map is in the
-[development history appendix](docs/development-history.md#appendix-the-source-tree).
+The [API reference](docs/api.md) is organised module by module.
 
 ## Status
 
 The framework core and all six applications are built and checked against reference
-implementations; the suite is 1677 tests at 96.7 % coverage. The per-milestone engineering
-record — what each milestone added, the decisions behind it, the measured errors and what it
-left open — is in [docs/development-history.md](docs/development-history.md).
+implementations; the suite is 1677 tests at 96.7 % coverage.
 
 ## The name
 

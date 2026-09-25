@@ -22,7 +22,6 @@ must be told this loudly rather than silently receiving an incomplete result in 
 second-order term is simply missing (contributing zero) while any other, first-order term in
 the same loss still produces a gradient.
 
-History: see docs/development-history.md (Milestone 1b) for why
 `@torch.autograd.function.once_differentiable` does not catch this case.
 
 Instead, `backward` checks `torch.is_grad_enabled()` at its own entry, before any of its own
