@@ -5,7 +5,12 @@ Their eq. 3: e_i = p_i C_i q (q the inhalation rate); eq. 4: e = q p o (A Q); eq
 reduction R_j from an emission cut delta_Q in street j is delta_Q * sum_i E_ij, the
 out-degree of node j in the exposure network. They build A by one dispersion run per street
 per wind direction. Here R is ONE backward pass of the total exposure through the model:
-R_j = delta_Q * d e_tot / d Q_j, exact for the model as solved, whatever its nonlinearity.
+R_j = delta_Q * d e_tot / d Q_j. The derivative itself is exact for the model as solved,
+whatever its nonlinearity; R is its first-order (linearised) extrapolation over the finite
+cut delta_Q, and is identical to the finite cut e_tot(Q) - e_tot(Q - delta_Q e_j) -- what
+`exposure_reduction_forward` below computes directly -- ONLY for a passive (linear) tracer,
+where the model's response to a source is linear in the source (`tests/test_exposure.py`,
+"passive scalar: linear in Q").
 
 Single instance, single species: every function here takes an UNBATCHED `"street.sources"`
 (shape `(n,)`) and an unbatched `"street.x"` (shape `(n_i,)`); a batch axis or more than one

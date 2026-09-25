@@ -163,9 +163,13 @@ def test_t7_the_nine_unnormalised_quadrature_weight_sums(n, total, record_proper
     assert weights.shape[-1] == n
     measured = float(weights.sum())
     assert abs(measured - total) < 1e-6      # quoted to six decimal places
-    record_property("check", f"Direction-quadrature weight sum, n={n}")
+    # `measured` is recorded as the ABSOLUTE DIFFERENCE from the quoted K22 total, not the
+    # raw sum -- the raw sum (e.g. 0.432 for n=2) reads, out of context in a results
+    # table, as a failed check against some unstated target (final whole-branch review,
+    # finding/minor 10).
+    record_property("check", f"Direction-quadrature weight sum, n={n}, vs the K22 quoted {total}")
     record_property("tolerance", "1e-6")
-    record_property("measured_sum", measured)
+    record_property("measured_abs_diff", abs(measured - total))
 
 
 def test_t7_sigma_v_sigma_theta_and_the_sample_count():

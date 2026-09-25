@@ -1398,10 +1398,10 @@ auditing a verification run's junit output. Alongside this,
 this project's standing position (see the milestone 5/framework-hardening entries above) is
 that IMPAQ and MUNICH are reference implementations to port-check against, not oracles, and
 this is name/wording only with no effect on any measured value. `tests/apps/street/
-test_impaq_port.py` and two new fixture directories, `tests/data/street/munich_case_excerpt/`
-and `tests/data/street/munich_paris_excerpt/` (small excerpts of a MUNICH test case and of the
-real Le Perreux-sur-Marne case used for a street-network parity comparison), came over the
-same way.
+test_impaq_port.py` came over the same way. (An earlier version of this branch also carried
+two MUNICH-excerpt fixture directories, `tests/data/street/munich_case_excerpt/` and
+`munich_paris_excerpt/`; they were dropped before this branch's final review found no test or
+source file in this repository reads them.)
 
 ## Appendix: the source tree
 

@@ -127,6 +127,19 @@ def read_wth(path) -> Weather:
         if len(tok) < 6:
             continue
         t = (_day_of_year(tok[0]) - day0) * 86400.0 + _seconds(tok[1])
+        # This reader has no year field -- only a day-of-year offset from the file's own
+        # start date -- so it cannot tell a window that wraps past 31 December from a file
+        # whose dates are simply out of order. A DECREASE here means either: `write_wth`
+        # wrote a window that crossed the year boundary (`write_wth` itself now refuses to,
+        # but a `.wth` file from elsewhere is not guaranteed to), or the file's rows are not
+        # in chronological order. Either way, `Weather.at()`'s `np.interp` needs a monotonic
+        # axis, so raise rather than hand it a decreasing one silently.
+        if rows and t < rows[-1][0]:
+            raise ValueError(
+                f"wth: {path} time axis decreases at {tok[0]} {tok[1]} (day-of-year offset "
+                f"{t}s follows {rows[-1][0]}s) -- a window crossing 31 December, or rows out "
+                f"of order? this reader has no year field to disambiguate"
+            )
         rows.append((t, float(tok[2]), float(tok[3]), float(tok[4]), float(tok[5])))
     if not rows:
         raise ValueError(f"wth: {path} has no weather rows")
