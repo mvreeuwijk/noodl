@@ -10,7 +10,7 @@ the tolerances and measured errors written down rather than asserted.
 | [Street air quality](street_aq.md) | Urban air quality, canyon exchange, routing | MUNICH, SIRANE (IMPAQ port check) | `build_model`, `read_aqdt` |
 | [Sewers](sewer.md) | Gravity hydraulics, headspace air, sulfide | SWMM 5.2.4 | `build_model`, `read_swmm_inp` |
 | [Water distribution](water.md) | Pressurised mains, pumps, tanks, demand | EPANET 2.2 | `build_model`, `read_epanet_inp` |
-| [Capacitated transfer](capacitated.md) | Rule-based water-systems allocation | WSIMOD 0.8.1 | `CapacitatedTransferLayer` |
+| [WSIMOD — rule-based water-system allocation](capacitated.md) | Requested flows clipped to arc capacity and free storage at the receiving node | WSIMOD 0.8.1 | `CapacitatedTransferLayer` |
 | [Coupling](coupling.md) | Two independent models exchanging values | — | `union` |
 
 ![The four flow-determination modes](../assets/four-modes.svg)
@@ -29,7 +29,7 @@ all four:
 - The **sewer** application's water side exploits the fact that a tree has an empty cycle space:
   continuity alone fixes every discharge, in closed form, with no solve. Its *headspace air*
   side, on the same graph, is a full Newton potential solve.
-- The **capacitated** application has no potential and no continuity solve — a request, clipped
+- The **WSIMOD allocation** application has no potential and no continuity solve — a request, clipped
   against capacity and headroom.
 
 And they share machinery in ways that would be coincidence if the abstraction were wrong. The
@@ -46,7 +46,7 @@ Three words are used with fixed meanings throughout these pages.
 - A **reference implementation** is an established, independently written code that solves the
   same equations: CONTAM and ContamX for building physics, MUNICH for street air quality, SWMM
   (through pyswmm) for sewers, EPANET 2.2 (through WNTR) for water distribution, and WSIMOD for
-  capacitated transfer.
+  rule-based water-system allocation.
 - A **parity test** runs noodl and a reference implementation on the same input and compares the
   outputs at a stated tolerance. Parity shows that noodl solves the same model as the reference;
   it is a code-to-code comparison, not evidence that the model describes reality. Where the
@@ -62,12 +62,12 @@ Each page states its parity rows with an explicit tolerance and the value actual
 pages are equally explicit about what the comparison *does not* show, and those caveats are
 sometimes the most important thing on the page:
 
-- The [capacitated](capacitated.md#what-the-wsimod-parity-does-not-show) page explains that
+- The [WSIMOD allocation](capacitated.md#what-the-wsimod-parity-does-not-show) page explains that
   neither WSIMOD reference demo ever exercises a binding capacity clip, so the parity checks
   the identity path only — the binding branches are covered by synthetic tests instead.
 - The [street air quality](street_aq.md#limitations-and-caveats) page records that the published
   MUNICH idealised case cannot be reproduced absolutely, because its geometry was never
-  published, and reports the residual honestly rather than hiding a loose pass.
+  published, and states the size of the remaining difference.
 - The [sewer](sewer.md#coefficient-provenance) page marks each coefficient as verified,
   calibrated, or unverified, naming the source.
 

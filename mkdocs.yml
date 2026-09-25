@@ -61,7 +61,7 @@ nav:
       - Street air quality: applications/street_aq.md
       - Sewers: applications/sewer.md
       - Water distribution: applications/water.md
-      - Capacitated transfer: applications/capacitated.md
+      - "WSIMOD — rule-based allocation": applications/capacitated.md
       - Coupling: applications/coupling.md
   - Development:
       - Extending noodl: development/extending.md

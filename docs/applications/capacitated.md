@@ -1,7 +1,9 @@
-# Capacitated transfer
+# WSIMOD — rule-based water-system allocation
 
-Rule-based capacitated transfer — the WSIMOD class of problem, and the framework's **fourth
-flow-determination mode**.
+Each arc carries the flow that is requested of it, clipped to the arc's capacity and to the free
+storage at the receiving node — the allocation rule of WSIMOD, Imperial College's Water Systems
+Integrated Modelling framework. In noodl this is implemented by `CapacitatedTransferLayer`, and
+it is the framework's **fourth flow-determination mode**.
 
 Every other application on this site determines a flow from physics: a potential difference, a
 closure, or continuity. This one does not. Each edge carries a *requested* flow, typically

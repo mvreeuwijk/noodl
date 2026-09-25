@@ -208,7 +208,7 @@ the cases rather than leaving you to discover them.
 - **At a hard clip.** `CapacitatedTransferLayer` in `mode="hard"` carries *exactly zero*
   gradient across a capacity or headroom crossing — the branch choice is discrete. That is the
   entire reason `mode="smooth"` and `mode="projection"` exist. See
-  [Capacitated transfer](../applications/capacitated.md).
+  [WSIMOD allocation](../applications/capacitated.md).
 - **At the sharing site, in smooth mode.** Smooth mode's proportional-share formula depends only
   on preference weights and total headroom, never on any individual competitor's request, so the
   cross-gradient $\partial f_i / \partial r_j$ is provably zero. `mode="projection"` routes that

@@ -76,7 +76,7 @@ core, and each is checked against the standard reference implementation in its f
 | Street air quality | Urban air quality, canyon exchange and routing | MUNICH, SIRANE (IMPAQ port check) |
 | Sewers | Gravity sewer hydraulics, headspace air, sulfide | SWMM |
 | Water distribution | Pressurised mains, pumps, tanks, demand | EPANET 2.2 |
-| Capacitated transfer | Rule-based water-systems allocation | WSIMOD |
+| WSIMOD — rule-based water-system allocation | Requested flows clipped to arc capacity and free storage at the receiving node | WSIMOD |
 | Coupling | Two independent models exchanging values | — |
 
 ## Repository layout

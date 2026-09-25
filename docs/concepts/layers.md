@@ -229,7 +229,7 @@ s_new, f = layer.step(s, drivers, dt, diagnostics=diag)
 
 In the simplest case the realised flow is just $f = \min(r,\; c_{\text{arc}},\; h)$. The three
 modes differ in gradient behaviour, which is the whole reason there is more than one — see the
-[capacitated transfer application page](../applications/capacitated.md) for the full treatment.
+[WSIMOD allocation application page](../applications/capacitated.md) for the full treatment.
 
 A capacitated layer is inherently discrete-time. A `Model` owning one refuses a steady pass and
 refuses `residuals()` outright, because a clip-and-allocate rule has no steady meaning to report.
