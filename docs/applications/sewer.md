@@ -273,8 +273,9 @@ publish numbers from this application.
 - **No surcharge or backwater.** Networks that would surcharge or need backwater are refused by
   name; they are not modelled.
 - **Dendritic networks only:** one outgoing pipe per manhole, no loops.
-- **No gas-phase sulfide sink.** H₂S leaves the headspace only by ventilation and at the
-  outfall; no wall uptake or gas-phase oxidation is modelled.
+- **No gas-phase sulfide sink.** H₂S leaves the headspace by ventilation, at the outfall, and
+  by re-absorption into the water (the two-film flux is signed); no wall uptake or gas-phase
+  oxidation is modelled.
 - **Headspace drag uses the absolute water-surface velocity.** `Drag` drives the air with
   $U_s$ rather than the relative velocity $U_s - U_{\text{air}}$, which would need the air
   layer's own solved state. The drag is overestimated where the headspace air already moves

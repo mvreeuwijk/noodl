@@ -494,7 +494,8 @@ regression at rtol 1e-8.
 - **`iterate_tol` cannot be tighter than the airflow solve itself.** Its floor is the potential
   solve's own Newton tolerance, propagated through the temperature response. A tolerance below
   that floor stalls, and `steady` raises an error naming the layer, the change reached and the
-  tolerance asked for; loosen `iterate_tol` or tighten the airflow solver's tolerance.
+  tolerance asked for. Loosen `iterate_tol`, or tighten the airflow solve by passing Newton's
+  `atol`/`rtol` as keyword arguments to `step` or `steady` (they reach the potential solve).
 - **Multiple steady states: `"iterate"` may not find the one you want.** On Li and Delsante's
   opposing-wind single-zone case, which has three steady states, `coupling="iterate"` (a fixed
   0.5 relaxation) cannot hold the wind-driven, upward-flow state: it moves away from it even when

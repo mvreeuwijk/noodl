@@ -112,4 +112,4 @@ one stroke.
 The topology layer is built on PyTorch, and the physics is implemented as nodal state-space
 modules with storage at nodes, typed edges, and batching over instances.
 
-MIT licensed, with the agreement of the original author.
+MIT licensed.

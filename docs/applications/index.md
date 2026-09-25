@@ -34,8 +34,8 @@ all four:
 
 And they share machinery in ways that would be coincidence if the abstraction were wrong. The
 sewer's headspace air layer drives its Newton solve with the *same* `Stack` buoyancy term the
-building application uses for room air. The water application reuses the building's `Duct`
-element for Darcy-Weisbach pipes. The sewer and water `.inp` readers share one tokenizer. The
+building application uses for room air. The water application's Darcy-Weisbach pipes are the
+framework's own `Duct` element, the CONTAM duct law, in volumetric form. The sewer and water `.inp` readers share one tokenizer. The
 `solve_monotone` root-finder that inverts Manning's equation for sewer depth also solves the
 per-node QP inside the capacitated layer's projection mode.
 

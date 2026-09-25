@@ -223,11 +223,14 @@ Failure to converge in `iterate_max` passes raises naming the link — for examp
 `"street:street.x[0]->building:species.x_boundary"` — the failing instances, and the largest
 change.
 
-With `diagnostics`, you get `{"passes", "converged", "max_change", "transfers", "adjoint"}` —
+With `diagnostics`, you get `{"passes", "converged", "max_change", "transfers", "adjoint",
+"adjoint_batched"}` —
 `transfers` is the recipient's own integrated transfer per two-way link, from the pass that
 produced the returned state, keyed the same way as `max_change`; `passes` counts **primal**
 passes; `adjoint` is `"implicit"` when the returned state carries the fixed point's adjoint and
-`None` when nothing differentiable reached it. Every value in the dict is detached: diagnostics
+`None` when nothing differentiable reached it; `adjoint_batched` says whether the adjoint was
+solved per batch instance (`True`) or across the whole batch as one system (`False`, also
+when no adjoint was attached; see [Limitations](#limitations)). Every value in the dict is detached: diagnostics
 are a report, and a transfer still attached to the pass graph would offer a silent route around
 the adjoint.
 

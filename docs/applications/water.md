@@ -210,6 +210,12 @@ independent loop is a property of the cycle-space formulation, and it holds exac
 - **Pump curves** are single- or three-point only, with the exponent fixed at $n = 2$. Curves
   with four or more points, which EPANET connects piecewise-linearly, are refused; fit a
   three-point curve instead.
+- **Laminar Darcy-Weisbach pipes differ from EPANET.** Below a Reynolds number of 2000 a D-W
+  pipe's head loss follows a straight line to the Colebrook value at Re = 2000, not EPANET's
+  Hagen-Poiseuille law ($f = 64/Re$): on a 0.3 m pipe with 0.26 mm roughness it is 1.56 times
+  EPANET's value. Between Re 2000 and 4000 EPANET's interpolating cubic is not reproduced either.
+  The absolute head loss in such near-stagnant pipes is very small, but compare their flows and
+  head losses with care.
 - **Water-quality tracing is verified on a single source only.** The TRACE check (D8) uses a
   network with one source, where the answer is 100 % everywhere it reaches; mixing of several
   traced sources has not been compared against EPANET.
