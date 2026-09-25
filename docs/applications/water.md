@@ -180,7 +180,7 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | D1 | noodl's own nodal continuity | 1e-13 | **2.093e-14** |
 | D2 | Net1 single period: heads, flows, pump head gain | 1e-6 / 1e-5 / 1e-6 | 7.058e-8, 2.868e-6, 1.189e-7 |
 | D3 | Net1 24 h tank level with level-triggered pump controls | 2e-4 m | **8.181e-5 m** worst of 25 steps |
-| D4 | Darcy-Weisbach vs EPANET's own D-W | recorded band, not asserted | 3.822e-2 heads, 4.446e-1 flows |
+| D4 | Darcy-Weisbach vs EPANET's own D-W | recorded band | 3.566e-4 heads, 2.731e-3 flows |
 | D5 | Pressure-driven demand vs EPANET's `DEMAND MODEL PDA` | 1e-5 | 3.521e-7 heads, 2.184e-7 demands |
 | D6 | Head loss sums to zero around every cycle-basis loop | 1e-12 | **exactly 0.0** |
 | D7 | Autodiff vs central differences | 1e-6 × scale | 3.212e-6 / 2.505e-10 / 1.007e-6 / 2.753e-9 |
@@ -193,10 +193,10 @@ Two rows deserve comment.
 continuity at Net1 node 13 by 4.5e-10 m³/s. The ~1e-7 residuals in D1 and D2 are attributable to
 EPANET's float32 output path and its own mild continuity violation, not to this solver.
 
-**D4 is deliberately loose.** EPANET switches between Swamee-Jain, Hagen-Poiseuille and Dunlop's
+**D4 is looser than D1.** EPANET switches between Swamee-Jain, Hagen-Poiseuille and Dunlop's
 cubic depending on Reynolds number, while noodl reuses the existing `Duct` element (Colebrook,
-unrolled). The test records the discrepancy in a wide band rather than asserting agreement.
-Hazen-Williams, not Darcy-Weisbach, is this application's parity formula.
+unrolled); the two turbulent friction factors differ by up to about 1 %, which is the residual
+this row reports. Hazen-Williams, not Darcy-Weisbach, is this application's parity formula.
 
 **D6 is a formulation identity, not a comparison** — head loss summing to zero around every
 independent loop is a property of the cycle-space formulation, and it holds exactly.

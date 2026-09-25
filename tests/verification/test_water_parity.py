@@ -287,13 +287,16 @@ def test_d3_a_tank_outside_its_limits_is_refused(tmp_path):
 def test_d4_darcy_weisbach_residual_is_recorded_not_bounded(tmp_path):
     """Row D4 RECORDS its residual, as spec section 13.3 asks.
 
-    MEASURED on the two-loop fixture at roughness 0.26 mm: heads 3.822e-2 relative, flows
-    4.446e-1 relative (on P7, the near-stagnant loop-closer at 6.6e-4 m3/s; pipe P2, an
-    ordinary one, differs by 3.9 %). EPANET uses Swamee-Jain above Re = 4000,
+    MEASURED on the two-loop fixture at roughness 0.26 mm: heads 3.566e-4 relative, flows
+    2.731e-3 relative (worst link). EPANET uses Swamee-Jain above Re = 4000,
     Hagen-Poiseuille below 2000 and Dunlop's cubic interpolation between (Manual section
     13.1 item 3, p.111, quoted in full in the research note section 3), while the existing
-    `Duct` element uses Colebrook throughout. Hazen-Williams is this milestone's parity
-    formula; D-W is offered, and this row states what it costs.
+    `Duct` element uses Colebrook throughout; the two turbulent friction factors differ by
+    up to about 1 %. (EPANET's water viscosity, 1.1e-5 ft2/s = 1.022e-6 m2/s, against this
+    reader's 1.002e-3 / 998.2 = 1.004e-6 m2/s moves the heads residual only to 3.0e-4.)
+    Before the Duct was fed rho' = 1/rho and mu' = nu -- i.e. while it returned MASS flow
+    into a layer that balances m3/s -- this row recorded 3.822e-2 / 4.446e-1. Hazen-Williams
+    is this milestone's parity formula; D-W is offered, and this row states what it costs.
     """
     # ONE literal replacement covers all eight pipes: the "roughness / minor loss / status"
     # run is identical on every [PIPES] row of the fixture (it occurs exactly 8 times) and
@@ -322,8 +325,8 @@ def test_d4_darcy_weisbach_residual_is_recorded_not_bounded(tmp_path):
     # Recorded, not bounded: the band is one order of magnitude either side of the measured
     # pair, so a CHANGE in the friction-factor treatment is caught while the known
     # difference is not asserted away.
-    assert 3.8e-3 < worst_h < 3.8e-1, worst_h
-    assert 4.4e-2 < worst_q < 4.4e0, worst_q
+    assert 3.5e-5 < worst_h < 3.5e-3, worst_h
+    assert 2.7e-4 < worst_q < 2.7e-2, worst_q
 
 
 # --------------------------------------------------------------------------- D5
