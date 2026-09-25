@@ -311,3 +311,75 @@ def test_combitimetable_single_row_and_coincident_first_rows():
     jump = _sig("CombiTimeTable", table=[[0.0, 1.0], [0.0, 2.0], [5.0, 3.0]],
                 startTime=-10.0, shiftTime=0.0)
     assert _eval(jump, [-1.0, 2.5]) == pytest.approx([1.0, 2.5], rel=1e-15)
+
+
+# ------------------------------------------------------------------ interval means
+# `interval_means(fn, grid, breakpoints(...))` against the closed-form integral of each
+# block's MSL equation over each grid interval, written here by hand. Entry 0 is the value at
+# grid[0]; entry k the mean over (grid[k-1], grid[k]).
+def _means(sig: Signal, grid) -> list[float]:
+    grid = torch.as_tensor(grid, dtype=F64)
+    lo, hi = float(grid[0]), float(grid[-1])
+    y = signals.interval_means(lambda t: signals.evaluate(sig, t), grid,
+                               signals.breakpoints(sig, lo, hi))
+    return y.tolist()
+
+
+def test_a_pulse_shorter_than_the_interval_keeps_its_amount():
+    # Examples/CO2TransportStep.mo: width 100/24/1000 % of 86400 s = 3.6 s at 3600 s, far
+    # shorter than the 172.8 s output interval; every grid point misses it.
+    sig = _sig("Pulse", amplitude=8.18e-6, width=100.0 / 24000.0, period=86400.0,
+               startTime=3600.0)
+    grid = 172.8 * torch.arange(501, dtype=F64)
+    assert all(v == 0.0 for v in signals.evaluate(sig, grid).tolist())
+    y = _means(sig, grid)
+    k = int(torch.searchsorted(grid, torch.tensor(3600.0, dtype=F64)))  # (3456, 3628.8]
+    assert y[k] == pytest.approx(8.18e-6 * 3.6 / 172.8, rel=1e-12)
+    assert all(v == 0.0 for j, v in enumerate(y) if j != k)
+    assert signals.breakpoints(sig, 0.0, 86400.0) == pytest.approx([3600.0, 3603.6])
+
+
+def test_a_pulse_train_mean_over_whole_and_partial_periods():
+    # width 25 % of period 4: high on [1 + 4j, 2 + 4j), nperiod = 2 -> two pulses only.
+    sig = _sig("Pulse", amplitude=2.0, width=25.0, period=4.0, startTime=1.0, nperiod=2,
+               offset=0.5)
+    y = _means(sig, [0.0, 1.5, 4.0, 8.0, 12.0])
+    assert y == pytest.approx([0.5, 0.5 + 2.0 * 0.5 / 1.5, 0.5 + 2.0 * 0.5 / 2.5,
+                               0.5 + 2.0 / 4.0, 0.5], rel=1e-14)
+
+
+def test_step_and_ramp_means_split_at_their_corners():
+    step = _sig("Step", height=3.0, offset=1.0, startTime=0.25)
+    assert _means(step, [0.0, 1.0, 2.0]) == pytest.approx([1.0, 1.0 + 0.75 * 3.0, 4.0],
+                                                           rel=1e-14)
+    ramp = _sig("Ramp", height=2.0, duration=1.0, startTime=0.5)
+    # (0, 1): 0 on (0, .5), 2(t - .5) on (.5, 1) -> 0.25 / 1; (1, 2): 2(t - .5) on (1, 1.5),
+    # then 2 -> (0.5*(1 + 2) * 0.5 + 2 * 0.5) / 1.
+    assert _means(ramp, [0.0, 1.0, 2.0]) == pytest.approx([0.0, 0.25, 1.75], rel=1e-14)
+
+
+def test_sine_mean_is_the_closed_form_integral():
+    A, f, phase = 100.0, 1.0 / 3600.0, 0.3
+    sig = _sig("Sine", amplitude=A, f=f, phase=phase)
+    grid = torch.linspace(0.0, 7200.0, 11, dtype=F64)
+    w = 2 * math.pi * f
+    a, b = grid[:-1], grid[1:]
+    exact = A * (torch.cos(w * a + phase) - torch.cos(w * b + phase)) / (w * (b - a))
+    y = torch.tensor(_means(sig, grid), dtype=F64)
+    assert float(y[0]) == pytest.approx(A * math.sin(phase), rel=1e-15)
+    assert torch.allclose(y[1:], exact, rtol=1e-13, atol=1e-12 * A)
+
+
+def test_table_means_split_at_the_knots():
+    # TimeTable y(t) through (0,0), (1,2), (3,2) shifted by 1 s: the knots at 1, 2, 4.
+    tab = _sig("TimeTable", table=[[0.0, 0.0], [1.0, 2.0], [3.0, 2.0]], startTime=1.0)
+    assert signals.breakpoints(tab, 0.0, 5.0) == pytest.approx([1.0, 2.0, 4.0])
+    # (0, 2.5): 0 on (0, 1), 2(t - 1) on (1, 2) -> 1, then 2 on (2, 2.5) -> 1; mean 2/2.5.
+    assert _means(tab, [0.0, 2.5]) == pytest.approx([0.0, 2.0 / 2.5], rel=1e-14)
+    # Periodic CombiTimeTable, period 2: triangle 0 -> 1 -> 0, mean 1/2 over each period;
+    # (0.5, 1.5) covers 0.5..1 up and 1..1.5 down: mean (0.75 + 0.75)/2 = 0.75.
+    per = _sig("CombiTimeTable", table=[[0.0, 0.0], [1.0, 1.0], [2.0, 0.0]],
+               extrapolation="Periodic")
+    assert _means(per, [0.5, 1.5, 5.5, 6.0]) == pytest.approx([0.5, 0.75, 0.5, 0.25],
+                                                              rel=1e-14)
+    assert _means(_sig("Constant", k=4.0), [0.0, 1.0, 3.0]) == [4.0, 4.0, 4.0]

@@ -140,6 +140,15 @@ on the zone state.
 source `Q_flow` W at that zone, read from the signal driving its `Q_flow` input. Only
 `alpha = 0` (the MSL default) is supported: a temperature-dependent heat flow is refused. Into
 a pinned zone it has no effect, as in MBL, where the stiff conductor carries it away.
+
+Every source driver (air, heat and species) is the MEAN of the source over each step, not its
+value at the step's end time (`_Signals.mean`, `signals.interval_means`): row `k >= 1` of the
+series is the mean over `(times[k-1], times[k])`, row 0 the value at `times[0]`. The transport
+step from `times[k-1]` to `times[k]` holds its drivers constant, so this makes the amount
+injected per step exact; the end value would miss an event inside the step
+(`Examples/CO2TransportStep.mo` injects its CO2 in a 3.6 s pulse that falls between two
+172.8 s output times, found by the dynamic parity test). Boundary values, openings and
+prescribed flows stay point values at the step's end time.
 """
 
 from __future__ import annotations
@@ -350,6 +359,54 @@ class _Signals:
                 f"{comp.name} ({comp.cls}): input {port} is enabled but no supported signal "
                 f"drives it"
             )
+        return y
+
+    # --------------------------------------------------------- interval means
+    def _at(self, s: schema.Signal, t: Tensor) -> Tensor:
+        """`s`'s output at arbitrary times `t` (interior quadrature nodes; `get`/`require`
+        have already evaluated `s` on the grid and recorded any error, so this cannot
+        fail on a signal they returned)."""
+        if signals.is_math(s):
+            inputs = {port: self._at(self.by_target[f"{s.name}.{port}"], t)
+                      for port in signals.math_inputs(s)}
+            return signals.combine(s, inputs).expand(t.shape)
+        return signals.evaluate(s, t)
+
+    def _breaks(self, s: schema.Signal, lo: float, hi: float) -> set[float]:
+        if signals.is_math(s):
+            out: set[float] = set()
+            for port in signals.math_inputs(s):
+                out |= self._breaks(self.by_target[f"{s.name}.{port}"], lo, hi)
+            return out
+        return set(signals.breakpoints(s, lo, hi))
+
+    def mean(self, fn, *terms) -> Tensor:
+        """`fn(*values)` averaged over every step (`signals.interval_means`): entry `k >= 1`
+        is its mean over `(times[k-1], times[k])`, entry 0 its value at `times[0]`. Each
+        term is a constant (float or 0-d tensor) or the name of a driven input (evaluated
+        at the quadrature nodes). All-constant terms give the 0-d constant `fn(*terms)`.
+
+        Used for the quantities a step INTEGRATES, the mass, heat and species sources:
+        `run.simulate` advances from `times[k-1]` to `times[k]` with the drivers of
+        `times[k]`, so a point value would hold the end value over the whole step and miss
+        an event inside it (`Examples/CO2TransportStep.mo`: a 3.6 s pulse between two
+        172.8 s output times would inject nothing). The mean makes the injected amount
+        per step exact."""
+        driven = [self.by_target[x] for x in terms if isinstance(x, str)]
+        if not driven:
+            return torch.as_tensor(fn(*terms), dtype=F64)
+        lo, hi = float(self.times[0]), float(self.times[-1])
+        breaks: set[float] = set()
+        for s in driven:
+            breaks |= self._breaks(s, lo, hi)
+
+        def values(t: Tensor) -> Tensor:
+            return fn(*(self._at(self.by_target[x], t) if isinstance(x, str)
+                        else torch.as_tensor(x, dtype=F64) for x in terms))
+
+        y = signals.interval_means(values, self.times, breaks)
+        if bool((y == y[0]).all()):
+            return y[0].clone()
         return y
 
     def check_unused(self) -> None:
@@ -1177,8 +1234,10 @@ class _Builder:
                 continue
             if p.get("use_m_flow_in"):
                 m = self.sig.require(comp, "m_flow_in")
+                m_term = f"{comp.name}.m_flow_in"
             else:
                 m = _t(float(p.get("m_flow", 0.0)))
+                m_term = float(m)
             if m is None:
                 continue
             if bool((m < 0).any()):
@@ -1186,14 +1245,14 @@ class _Builder:
                                    f"flow is not supported")
                 continue
             if cls == "TraceSubstancesFlowSource":
-                T_in = _t(med.T_default)  # h_default
+                T_in = T_term = float(med.T_default)  # h_default
                 X_in = med.X_default[0] if med.has_moisture else 0.0
                 # TraceSubstancesFlowSource.mo:31-37: isEqual(..., caseSensitive=false);
                 # :49: assert(sum(C_in_internal) > 1E-4) -- the substance must exist.
                 name = str(p.get("substanceName", "CO2"))
-                C_in = [_t(1.0 if s.lower() == name.lower() else 0.0)
+                C_in = [1.0 if s.lower() == name.lower() else 0.0
                         for s in self.species_names]
-                if not any(float(c) > 0.0 for c in C_in):
+                if not any(c > 0.0 for c in C_in):
                     self.errors.append(
                         f"{comp.name} ({comp.cls}): trace substance {name!r} is not among the "
                         f"medium's extraPropertiesNames {self.species_names}"
@@ -1209,24 +1268,29 @@ class _Builder:
                     continue
                 T_in = (self.sig.require(comp, "T_in") if p.get("use_T_in")
                         else _t(float(p.get("T", med.T_default))))
+                T_term = f"{comp.name}.T_in" if p.get("use_T_in") else float(T_in)
                 X = p.get("X", list(med.X_default))
                 X_in = float(X[0]) if med.has_moisture and X else 0.0
                 C_par = p.get("C", [0.0] * len(self.species_names))
                 C_in = []
                 for k in range(len(self.species_names)):
                     if p.get("use_C_in"):
-                        C_in.append(self.sig.require(comp, f"C_in[{k + 1}]"))
+                        c = self.sig.require(comp, f"C_in[{k + 1}]")
+                        C_in.append(None if c is None else f"{comp.name}.C_in[{k + 1}]")
                     else:
-                        C_in.append(_t(float(C_par[k]) if k < len(C_par) else 0.0))
+                        C_in.append(float(C_par[k]) if k < len(C_par) else 0.0)
                 if T_in is None or any(c is None for c in C_in):
                     continue
+            # Step means, not point values (`_Signals.mean`): the amount injected over each
+            # step is exact whatever the signal does inside it.
+            mean = self.sig.mean
             i = index[node]
-            s_air[i] = s_air[i] + m
-            s_th[i] = s_th[i] + cp * m * T_in
+            s_air[i] = s_air[i] + mean(lambda m: m, m_term)
+            s_th[i] = s_th[i] + mean(lambda m, T: cp * m * T, m_term, T_term)
             for k, c in enumerate(C_in):
-                s_sp[i][k] = s_sp[i][k] + m * c
+                s_sp[i][k] = s_sp[i][k] + mean(lambda m, c: m * c, m_term, c)
             if water is not None:
-                s_sp[i][water] = s_sp[i][water] + m * X_in
+                s_sp[i][water] = s_sp[i][water] + mean(lambda m, x=X_in: m * x, m_term)
         for comp, node in self.graph.heat_sources:
             alpha = float(comp.parameters.get("alpha", 0.0))  # PrescribedHeatFlow.mo:5
             if alpha != 0.0:
@@ -1237,7 +1301,7 @@ class _Builder:
             if Q is None or node not in zones:
                 continue
             i = index[node]
-            s_th[i] = s_th[i] + Q
+            s_th[i] = s_th[i] + self.sig.mean(lambda q: q, f"{comp.name}.Q_flow")
         return s_air, s_th, s_sp
 
 

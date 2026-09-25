@@ -591,6 +591,45 @@ def test_prescribed_heat_flow_heats_the_zone_at_the_closed_form_rate():
     assert torch.allclose(T, expected, rtol=1e-12, atol=0.0)
 
 
+def test_a_heat_pulse_inside_one_step_delivers_its_energy(tmp_path):
+    """Source drivers are step means (module docstring, "Sources"): a 3 s pulse of 100 W
+    between the 10 s output times of `heat_flow.json` is zero at every grid time, yet the
+    zone must gain its 300 J, `T = T_start + 300 / (V rho cp)` from that step on."""
+    doc = _doc("heat_flow.json")
+    doc["signals"][0] = {"name": "one", "class": "Modelica.Blocks.Sources.Pulse",
+                         "parameters": {"amplitude": 1.0, "width": 3.0, "period": 100.0,
+                                        "startTime": 23.0, "nperiod": 1},
+                         "drives": "gai.u"}
+    model, state, drivers, names = read_modelica(_write(tmp_path, doc), return_names=True)
+    t = names.times
+    i = names.nodes["vol"]
+    Q = drivers["series:thermal.sources"][:, i]
+    expected_Q = torch.zeros_like(t)
+    expected_Q[3] = 100.0 * 3.0 / 10.0  # the step (20, 30) holds the pulse [23, 26)
+    assert torch.allclose(Q, expected_Q, rtol=1e-13, atol=1e-12)
+    hist = simulate(model, state, drivers, t)
+    rho = 1.2 * P_DEFAULT / 101325.0  # Air.mo:210-215
+    cp = 1006.0 * 0.99 + 1860.0 * 0.01  # Air.mo:567-575 at X_default
+    rise = torch.tensor(300.0 / (10.0 * rho * cp), dtype=F64)
+    expected = 293.15 + torch.where(t >= 30.0, rise, torch.zeros_like(t))
+    assert torch.allclose(hist["T"][:, i], expected, rtol=1e-12, atol=0.0)
+
+
+def test_a_trace_pulse_inside_one_step_injects_its_mass():
+    """`Examples/CO2TransportStep`'s source: 8.18e-6 kg/s for 3.6 s at 3600 s, between the
+    3456 s and 3628.8 s output times. The air, species and (moisture off) sources of that
+    step are the pulse's mean, every other step's zero."""
+    path = Path(__file__).parents[3] / "data" / "modelica" / "CO2TransportStep.json"
+    _model, _state, drivers, names = read_modelica(path, return_names=True)
+    i = names.nodes["volWes"]
+    dt = names.times[1:] - names.times[:-1]
+    mass = drivers["series:air.sources"][1:, i] * dt
+    co2 = drivers["series:species.sources"][1:, i, 0] * dt
+    assert float(mass.sum()) == pytest.approx(8.18e-6 * 3.6, rel=1e-12)
+    assert torch.equal(mass, co2)
+    assert int((mass != 0).sum()) == 1
+
+
 def test_temperature_dependent_heat_flow_is_refused(tmp_path):
     doc = _doc("heat_flow.json")
     doc["components"][3]["parameters"]["alpha"] = 0.01

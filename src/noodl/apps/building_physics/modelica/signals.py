@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import torch
 
 from noodl.apps.building_physics.modelica.schema import ModelicaImportError, Signal
@@ -411,3 +412,85 @@ def evaluate(signal: Signal, t: Tensor, *, t_start: float | None = None) -> Tens
         )
     t = torch.as_tensor(t, dtype=F64)
     return fn(signal, t, _ev(t, t_start)).to(F64)
+
+
+# ------------------------------------------------------------------ interval means
+# Gauss-Legendre nodes and weights on [-1, 1] (8 points: exact for polynomials of degree 15).
+_GL_X, _GL_W = (torch.as_tensor(v, dtype=F64) for v in np.polynomial.legendre.leggauss(8))
+
+
+def breakpoints(signal: Signal, lo: float, hi: float) -> list[float]:
+    """The times in ``(lo, hi)`` where ``signal``'s output (a ``Sources`` block) is not
+    smooth: its events (a step, a ramp's corners, a pulse's edges, a table's knots) and, for
+    ``Sine``, every quarter period, so that between two consecutive breakpoints the output
+    is a polynomial of degree <= 1 or a quarter sine wave, both integrated to round-off by
+    ``interval_means``' 8-point Gauss-Legendre rule. ``Constant`` has none; a ``Math`` block
+    has none of its own (the caller collects its inputs' breakpoints)."""
+    short = signal.cls[len(_PREFIX):] if signal.cls.startswith(_PREFIX) else None
+    start = _get(signal, "startTime", 0.0)
+    pts: list[float] = []
+    if short == "Step":
+        pts = [start]
+    elif short == "Ramp":
+        pts = [start, start + _required(signal, "duration")]
+    elif short == "Sine":
+        quarter = 0.25 / _required(signal, "f")
+        k0 = max(0, math.floor((lo - start) / quarter))
+        pts = [start] + [start + k * quarter
+                         for k in range(k0, math.ceil((hi - start) / quarter) + 1)]
+    elif short == "Pulse":
+        period = _required(signal, "period")
+        width = period * _get(signal, "width", 50.0) / 100.0
+        nperiod = int(signal.parameters.get("nperiod", -1))
+        k1 = math.ceil((hi - start) / period) + 1
+        if nperiod >= 0:
+            k1 = min(k1, nperiod)
+        for k in range(max(0, math.floor((lo - start) / period)), k1):
+            pts += [start + k * period, start + k * period + width]
+    elif short in ("TimeTable", "CombiTimeTable"):
+        x = _table(signal)[:, 0]
+        scale = _get(signal, "timeScale", 1.0)
+        shift = _get(signal, "shiftTime", start)
+        knots = x
+        periodic = _enum(signal.parameters.get("extrapolation"), "") == "Periodic"
+        if short == "CombiTimeTable" and periodic and x.numel() > 1:
+            period = float(x[-1] - x[0])
+            t_lo, t_hi = (lo - shift) / scale, (hi - shift) / scale
+            ks = range(math.floor((t_lo - float(x[0])) / period),
+                       math.floor((t_hi - float(x[0])) / period) + 1)
+            knots = torch.cat([x + k * period for k in ks])
+        pts = [start] + (shift + scale * knots).tolist()
+    return sorted({p for p in pts if lo < p < hi})
+
+
+def interval_means(fn, grid: Tensor, breaks) -> Tensor:
+    """The mean of ``fn(t)`` over every grid interval: ``(n_t,)`` with entry ``k >= 1`` the
+    mean over ``(grid[k-1], grid[k])`` and entry 0 ``fn(grid[0])`` (no interval ends
+    there).
+
+    Each interval is split at the ``breaks`` inside it and every piece integrated with the
+    8-point Gauss-Legendre rule; the nodes are interior, so the event convention of
+    ``evaluate`` never enters. With ``breaks`` from ``breakpoints`` of every signal that
+    ``fn`` depends on this is exact to round-off for the piecewise-linear blocks and their
+    ``Math`` combinations of degree <= 15, and to ~1e-15 relative for ``Sine``.
+
+    This is what a quantity integrated over a step needs (a source's mass or heat, spec
+    section 7's step from ``grid[k-1]`` to ``grid[k]`` with the drivers of ``grid[k]``): the
+    point value at ``grid[k]`` misses an event inside the interval, e.g.
+    ``Examples/CO2TransportStep.mo``'s 3.6 s CO2 pulse between two 172.8 s output times.
+    """
+    grid = torch.as_tensor(grid, dtype=F64)
+    inner = torch.as_tensor(sorted(float(b) for b in breaks
+                                   if float(grid[0]) < float(b) < float(grid[-1])), dtype=F64)
+    knots = torch.unique(torch.cat([grid, inner]))  # sorted
+    a, b = knots[:-1], knots[1:]
+    half = 0.5 * (b - a)
+    nodes = (0.5 * (a + b)).unsqueeze(0) + half.unsqueeze(0) * _GL_X.unsqueeze(1)  # (8, P)
+    values = torch.as_tensor(fn(nodes.reshape(-1)), dtype=F64).expand(nodes.numel())
+    piece = half * (_GL_W.unsqueeze(1) * values.reshape(nodes.shape)).sum(0)
+    k = torch.searchsorted(grid, a, right=True)  # a in [grid[k-1], grid[k])
+    total = torch.zeros(grid.numel(), dtype=F64).index_add_(0, k, piece)
+    out = torch.empty(grid.numel(), dtype=F64)
+    out[0] = torch.as_tensor(fn(grid[:1]), dtype=F64).reshape(-1)[0]
+    out[1:] = total[1:] / (grid[1:] - grid[:-1])
+    return out
