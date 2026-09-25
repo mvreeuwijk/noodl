@@ -117,7 +117,7 @@ def street_geometry(net: StreetNetwork) -> StreetGeometry:
 
 
 def from_test_network() -> StreetNetwork:
-    """IMPAQ's `build_test_network`: four junctions, three roads (`impaq.py:61-80`).
+    """The IMPAQ prototype's `build_test_network`: four junctions, three roads.
 
     Coordinates, widths, heights and the 0.15 m roughness are the prototype's own; the
     lengths are recomputed from the coordinates exactly as `compute_road_geometry` does,

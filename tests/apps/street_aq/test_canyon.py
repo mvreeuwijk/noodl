@@ -1,10 +1,10 @@
 """Canyon boundary layer, wind and exchange velocity.
 
 The Soulhac reference here is written out in scipy INSIDE this module, from IMPAQ's
-`canyon_velocity` formula, so the test needs neither the AQ_DT repository nor the IMPAQ
-port. `brentq` replaces IMPAQ's `fsolve`: `fsolve` from x0 = 1.0 silently returns 1.0
-unconverged for roughness ratios above about 0.5 (measured), which is outside this test's
-range but is not a property a reference should have.
+`canyon_velocity` formula, so the test needs no external code. `brentq` replaces IMPAQ's
+`fsolve`: `fsolve` from x0 = 1.0 silently returns 1.0 unconverged for roughness ratios
+above about 0.5 (measured), which is outside this test's range but is not a property a
+reference should have.
 """
 
 from __future__ import annotations
