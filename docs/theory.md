@@ -1,17 +1,13 @@
 # Theoretical background for `noodl`
 
-> Status (11 Sep 2026): research survey drafted by an AI agent from web sources; claims are
-> to be verified against the cited sources. The internal design spec supersedes this note
-> where they differ; in particular the framework is nodal-primary with the cycle space
-> retained for latent flows, not loop-primary as section 3 states.
-
 A general-purpose, differentiable network solver for conservative transport — pressures
 and buoyancy in multizone buildings, heat, contaminant species, sewer flow, and urban
 street-canyon exchange — needs one topology layer and one small set of constitutive
-patterns that specialise per physical domain. This note gives the graph-theoretic and
-physical foundations, surveys existing multi-physics network solvers for comparison, and
-covers the differentiable-programming and co-simulation questions that follow from
-building this in PyTorch. Uncertain or unverified claims are flagged explicitly.
+patterns that specialise per physical domain. This page gives the graph-theoretic and
+physical foundations, compares existing multi-physics network solvers, and covers the
+differentiable-programming and co-simulation questions that follow from building this in
+PyTorch. Sections 7 to 10 describe how each application maps onto the framework; the
+[application pages](applications/index.md) give the details and the verification.
 
 ## 1. Graph fundamentals: incidence, cycle, cutset, and Tellegen's theorem
 
@@ -100,7 +96,7 @@ complement** of the branch Jacobian onto the nodal potentials (`solvers/newton.p
 implementation is a damped, batched iteration whose relaxation factor `omega` per instance
 switches to a full step once the residual has shrunk enough, and falls back to the damped
 step for any instance whose residual did NOT shrink under a full step — a dead-end
-square-root-law edge otherwise cycles $\Delta p \to -\Delta p$ forever, milestone 4's M4-R22). Nodal analysis handles
+square-root-law edge otherwise cycles $\Delta p \to -\Delta p$ forever). Nodal analysis handles
 flow sources trivially (add to $s$) but a branch whose *natural* law fixes a flow or
 potential directly (an ideal pump, a fixed-flow fan, a prescribed pressure boundary)
 cannot be written as $f = g(e)$; this is handled by **Modified Nodal Analysis (MNA)**,
@@ -114,10 +110,10 @@ $$
 f = B^\top \lambda + f_p, \qquad A f_p = s
 $$
 
-which satisfies KCL *by construction*, for any $\lambda$ (this is exactly
-`cycles.py: branch_flows`, which builds `f = λ @ B` so mass conservation is exact
-to floating-point precision independent of solver convergence — a deliberate design
-choice in `noodl`). What remains is KVL on the branch effort law $e = h(f)$:
+which satisfies KCL *by construction*, for any $\lambda$ (`cycles.branch_flows` builds
+`f = λ @ B` this way, so mass conservation is exact to floating-point precision
+independent of solver convergence). What remains is KVL on the branch effort law
+$e = h(f)$:
 
 $$
 B\, h(B^\top \lambda + f_p) = 0.
@@ -131,9 +127,12 @@ solution rather than extra unknowns; a branch with a *prescribed potential drop*
 the dual augmentation instead. Neither formulation is unconditionally better-conditioned
 — both reduce to a congruence transform of the same branch Jacobian — so the practical
 choice is driven by $n$ vs $l$ and by which sources are naturally flow- or
-potential-type. `Network.assert_forward_oriented` encodes a related implementation
-constraint: only an entrywise non-negative cycle basis guarantees non-negative $\lambda$ maps
-to non-negative $f$, needed for the constant upwind operator of §2.
+potential-type. `noodl`'s potential layers are nodal: Newton on the nodal residual above.
+The cycle space is kept for flows that are not potential-driven — prescribed or
+closure-computed flows, and the closed-form continuity solve on a tree
+(`cycles.particular_flow`, §9). `cycles.assert_forward_oriented` encodes a related
+constraint: only an entrywise non-negative cycle basis guarantees non-negative $\lambda$
+maps to non-negative $f$, needed for the constant upwind operator of §2.
 
 ## 2. Port-Hamiltonian systems, bond graphs, and advected quantities
 
@@ -206,9 +205,8 @@ None of these is differentiable in the autograd sense (uncertain: no published
 "differentiable EPANET/CONTAM" was found; the closest is differentiable AC/DC
 [power-flow optimisation](https://arxiv.org/pdf/2603.28203)). Two patterns matter for
 `noodl`: every mature tool is **nodal** in the pressure/head variable (cheap, robust
-SPD systems), whereas `noodl` deliberately chose the **loop** formulation for air
-networks to get exact conservation by construction (§1) — an intentional trade-off; and
-Modelica's stream connectors are the strongest existing precedent for carrying enthalpy
+SPD systems), and `noodl`'s potential layers are nodal too (§1); and Modelica's stream
+connectors are the strongest existing precedent for carrying enthalpy
 and species *with* the flow, matching the advection-matrix construction in §2.
 
 For sewer networks, EPA's **SWMM** solves the full 1-D Saint-Venant equations (dynamic
@@ -233,21 +231,20 @@ so the backward pass is one linear solve with the (transposed) converged Jacobia
 $O(1)$ extra memory regardless of iteration count, and (§1) *exactly* the classical
 adjoint-network / reciprocity computation Tellegen's theorem licenses: run the network
 once forward, once "backward" with sources moved to where the gradient is wanted, and
-read sensitivities off a single extra solve. `torch.linalg.solve`'s built-in backward
-implements this adjoint rule directly, so building the branch Newton step and the
-loop/nodal linear solve on top of it (rather than a custom non-differentiable
-factorisation) gives calibration/data-assimilation gradients "for free." Related
+read sensitivities off a single extra solve. `noodl` applies this rule itself
+(`noodl.solvers.implicit`): the backward pass of a potential solve, and of a coupled fixed
+point, is one adjoint linear solve at the converged state, rather than autograd traced
+through the Newton iterations. Related
 libraries: `torchdiffeq` (adjoint-sensitivity Neural ODEs, Chen et al. 2018); on the JAX
 side, `jaxopt`'s implicit-differentiation layer (Blondel et al., ["Efficient and Modular
 Implicit Differentiation"](https://arxiv.org/pdf/2105.15183), NeurIPS 2021) and
 Optimistix/Diffrax; Theseus (Meta) and OptNet (Amos & Kolter 2017) are differentiable
 nonlinear/QP solver layers in the same family; Deep Equilibrium Models (Bai et al. 2019)
-popularised implicit differentiation for fixed-point layers generally. **Caveat**:
-PyTorch's native sparse-tensor autograd coverage is limited, so a practical `noodl`
-sparse solver likely needs a custom `autograd.Function` wrapping a sparse solve with an
-*analytic* adjoint via the rule above rather than autograd tracing the factorisation;
+popularised implicit differentiation for fixed-point layers generally. PyTorch's native
+sparse-tensor autograd coverage is limited, which is a further reason to differentiate a
+sparse solve through an *analytic* adjoint rather than by tracing the factorisation;
 recent work (`torch-sla`, [arXiv:2601.13994](https://arxiv.org/html/2601.13994v2))
-targets this gap but is new and unverified for production use here.
+targets the same gap.
 
 ## 5. Co-simulation and coupling for digital twins
 
@@ -274,17 +271,15 @@ over a window, iterating until the exchanged trajectories converge before accept
 1982); it is the natural generalisation when coupling windows are long relative to the
 fastest coupled timescale.
 
-For a Python/PyTorch solver whose entire point is end-to-end autograd, I would recommend
-*not* defaulting to opaque FMI co-simulation for internal coupling: expose typed ports
-(pressure/flow, temperature/heat-flow, concentration/species-flow — directly analogous to
-Modelica's stream connectors) and couple modules with a differentiable Jacobi or Picard
-iteration whose fixed point is itself differentiated via the implicit function theorem
-(§4), reserving FMI (likely CS, since ME would require exposing PyTorch's internal state
-derivatives through a C API) purely as the boundary adapter to legacy, non-differentiable
-tools such as EnergyPlus, where gradients across that boundary are either unavailable or
-must be obtained by a surrogate/finite-difference approximation. This is a design
-recommendation, not an established result — I did not find published work coupling a
-PyTorch network solver to FMI, so treat it as a hypothesis to validate.
+For a PyTorch solver whose point is end-to-end autograd, opaque FMI co-simulation is a
+poor fit for internal coupling: gradients cannot cross an FMU boundary. `noodl` instead
+couples models through named values — directly analogous to Modelica's stream connectors
+— iterated to a fixed point by Gauss-Seidel substitution, and differentiates that fixed
+point through the implicit function theorem (§4; see [Coupling](applications/coupling.md)).
+FMI (most naturally CS, since ME would require exposing PyTorch's internal state
+derivatives through a C API) remains the natural boundary adapter to non-differentiable
+tools such as EnergyPlus, where gradients across the boundary are unavailable or must come
+from a surrogate or finite differences; `noodl` does not implement it.
 
 On topology and metadata standards for auto-generating the graph: **Brick schema**
 (Balaji et al., BuildSys 2016) and the W3C **Building Topology Ontology (BOT)** are
@@ -295,8 +290,7 @@ for airflow-path topology, `IfcDistributionElement` for duct/pipe branches). **P
 Haystack** is a competing/overlapping industry tagging convention for the same purpose.
 **ISO 23247** ("digital twin framework for manufacturing") is explicitly a
 manufacturing-domain standard; any building-digital-twin use is by analogy, not direct
-applicability — flagged as uncertain and likely needs a building-specific standard (none
-as mature as ISO 23247 currently exists for buildings, to my knowledge).
+applicability, and no building-specific standard of comparable maturity is known.
 
 ## 6. Time integration for stiff advection-reaction on networks
 
@@ -314,8 +308,9 @@ Z = \begin{pmatrix} A_c \Delta t & b\, \Delta t \\ 0 & 0 \end{pmatrix}, \qquad
 e^Z = \begin{pmatrix} e^{A_c \Delta t} & \Phi \\ 0 & I \end{pmatrix}
 $$
 
-with $\Phi$ the exact integrated forcing term — exactly what `layers/transport.py`
-implements for its two-block augmented system. Because this step is *exact* for the
+with $\Phi$ the exact integrated forcing term. `layers/transport.py`'s `exact` scheme
+applies this augmented exponential as a matrix-exponential action (a Taylor series on the
+augmented system), never forming a dense exponential. Because this step is *exact* for the
 linear operator, it inherits whatever positivity/conservation structure $A_c$ has: since
 $A_c$ is (negative) Metzler/M-matrix (§2), $e^{A_c \Delta t}$ is entrywise non-negative for
 *any* $\Delta t > 0$ — unconditional positivity, with no CFL-type step restriction, which is
@@ -338,9 +333,6 @@ flow-equilibration timescale and the finite thermal/species timescale, matching 
 quasi-steady-state assumption already built into CONTAM, COMIS and EnergyPlus AFN.
 
 ## 7. Heat as a transport layer, and coupling modes
-
-*(Written from the implementation, milestone 2, not from the survey: this section describes
-what `noodl` does and why, and its verification cases are in the repository.)*
 
 **The heat balance IS the transport equation.** For a well-mixed zone $i$ of volume $V_i$
 at temperature $T_i$, with air mass flows $F_e$ on the paths incident to it, an envelope
@@ -380,9 +372,8 @@ flow direction) is exactly such a term. The framework therefore defines a `Drive
 function of the DRIVERS only: the node densities entering a stack head are computed from the
 temperatures held fixed for the duration of the pass, and any flow-direction dependence lives
 inside the ELEMENT, where it enters $f'$ and keeps the Jacobian symmetric (this is what
-`UpstreamDensityPowerLaw` does, and why the spec's proposed closure-based
-`ReferenceCorrection` could not work: a closure runs before the solve and cannot see the flow
-direction). CONTAM makes the same choice -- its air densities are held at the values from the
+`UpstreamDensityPowerLaw` does, and why a closure-based reference-density correction could
+not work: a closure runs before the solve and cannot see the flow direction). CONTAM makes the same choice -- its air densities are held at the values from the
 previous thermal update within an airflow solve -- so matching CONTAM's numbers is partly a
 consequence of matching this convention, not only of matching its element laws.
 
@@ -401,7 +392,7 @@ $\Delta t \to 0$, which is why a fine-step ping-pong run and a fine-step onion r
 coarse-step ping-pong run is the one that drifts -- the table
 `tests/verification/test_natural_ventilation.py` prints.
 
-Two warnings the implementation earned. Successive substitution converges to a fixed point
+Two warnings. Successive substitution converges to a fixed point
 only where the quasi-steady map is a contraction, and stability of the DYNAMICS is a
 different question from contractivity of that map: in Li and Delsante's three-root opposing
 wind case the upward root is dynamically stable and yet repelling under substitution at 0.5
@@ -415,12 +406,9 @@ set below the airflow solve's own residual floor propagated through $dT/dF$.
 three-root opposing-wind case -- are the reference for the coupled steady states, together
 with Brown and Solvason's doorway exchange, an $m c / UA$ wall RC time constant, and a
 two-zone doorway against an independent `scipy` root find; ContamX itself is the reference
-for the transient and for the stack. All live in `tests/verification/`.
+for the transient and for the stack. See [Building physics](applications/building_physics.md#verification).
 
 ## 8. Street canyons as a transport layer
-
-*(Written from the implementation, milestone 3: this section describes what `apps/street_aq`
-does and why, and its verification cases are in the repository.)*
 
 **The street balance IS the framework's transport equation, again.** For a canyon street
 $i$ of length $L_i$, width $W_i$ and height $H_i$, holding a well-mixed pollutant mass
@@ -451,7 +439,7 @@ meeting there, but the only physical constraint at a street intersection is that
 prescribed-flow edges (`route`, `vent`) that would carry that balance are FIXED-FLOW, not
 potential-driven, edges. A potential layer built entirely from fixed-flow edges has no
 element relating a node's potential to anything, so its would-be conductance matrix is
-identically zero -- singular by construction (framework spec section 9). Eliminating the
+identically zero -- singular by construction. Eliminating the
 junction sidesteps that non-problem entirely: what a junction actually does is redistribute
 the fixed street-end fluxes among each other and the atmosphere, and that redistribution is
 computed once per solve, outside any potential layer, as a routed flux (`routing_matrix`,
@@ -467,19 +455,19 @@ the topology.** Each of these three edge kinds is added to the graph in BOTH dir
 physical flow that reverses under a wind-direction change does not need its own sign: it is
 a different, non-negative amount on the OTHER edge of the pair, exactly as
 `assert_forward_oriented` already requires of every fixed-flow edge in the framework. This
-reproduces, for free, MUNICH's one-way dead ends (spec section 4.5b): a street whose one
+reproduces, for free, MUNICH's one-way dead ends: a street whose one
 open end is unambiguously downwind gets zero flux on the edge that would carry flow the
 other way, not a negative one, because that edge's non-negative closure output is zero
 there -- no special-cased dead-end branch is needed anywhere in `StreetFlows`.
 
 **The two canyon-wind closures and the two exchange closures.** `canyon_velocity` (Soulhac,
-Perkins and Salizzoni 2008; Soulhac et al. 2011, the SIRANE/IMPAQ form) and the exponential
+Perkins and Salizzoni 2008; Soulhac et al. 2011, the SIRANE form) and the exponential
 in-canyon profile (Kim et al. 2018, 2022; the MUNICH form) both turn a reference wind into
 an along-street canyon velocity, differing in their treatment of the boundary-layer profile
-above the canyon and in their von Karman constant (`KAPPA_IMPAQ = 0.4` against
-`KAPPA_MUNICH = 0.41`). `exchange_velocity` similarly has a SIRANE branch
+above the canyon and in their von Karman constant (0.40 against MUNICH's 0.41). `exchange_velocity` similarly has a SIRANE branch
 ($u_d = \sigma_w/(\sqrt{2}\,\pi)$, S11 Eq. (5), K18 Eq. (3), K22 Eq. (B10), `StreetNetworkTransport.cxx
-:3273` -- see the issue-C retraction in the README) and a Schulte mixing-length branch
+:3273`; see the street page's [note on this constant](applications/street_aq.md#limitations-and-caveats))
+and a Schulte mixing-length branch
 (`SCHULTE_BETA` $= 2/(\sqrt{2}\,\pi)$, fixed by matching the SIRANE form at $a_r = 1$, K18 p.
 613). Both pairs are selectable independently (`canyon_wind=`, `exchange=`) because the two
 source codebases do not always pair them the same way, and the parity tests exercise both
@@ -518,7 +506,7 @@ junction's inflows counter-clockwise and its outflows clockwise, greedily fillin
 inflow/outflow cell with $\min(\text{remaining}_{\text{in}}, \text{remaining}_{\text{out}})$ -- which is exactly the
 transportation-problem north-west-corner rule applied to the two ORDERED marginals, and so
 has the closed form $F_{pr} = \max\bigl(0, \min(A_p, B_r) - \max(A_{p-1}, B_{r-1})\bigr)$ on their
-cumulative sums $A$, $B$ (`routing_matrix`, spec section 4.4). Writing it this way rather
+cumulative sums $A$, $B$ (`routing_matrix`). Writing it this way rather
 than as MUNICH's literal loop makes the fill BATCHED (every junction, every wind direction,
 every forcing step in one call) and DIFFERENTIABLE (piecewise linear in the marginals, so
 `torch.autograd` sees a gradient through the fluxes), while the one genuinely
@@ -528,18 +516,13 @@ only change at a measure-zero set of exactly-tied angles), so no gradient throug
 either needed or well-defined, and keeping it out of the traced graph is what lets the
 fluxes it feeds stay differentiable.
 
-**Verification.** `tests/verification/test_munich.py` pins the thirteen exact formula pairs
-against MUNICH's own source (each at the precision its source publishes) and the idealised
-12-street case against Kim et al. (2022) Fig. 1; `tests/verification/test_street_parity.py`
-checks the IMPAQ port against both a four-node hand network and the real
-`leiden_small` domain. Conservation, junction elimination against hand algebra, and
-gradients through the whole model against central differences are in
-`tests/apps/street_aq/test_conservation.py`.
+**Verification.** Thirteen exact formula pairs are checked against MUNICH's own source
+(each at the precision its source publishes), and the idealised 12-street case against Kim
+et al. (2022) Fig. 1; conservation, junction elimination against hand algebra, and
+gradients through the whole model against central differences are checked as well. See
+[Street air quality](applications/street_aq.md#verification).
 
 ## 9. Sewers and water distribution
-
-*(Written from the implementation, milestone 4: this section describes what `apps/sewer`
-and `apps/water` do and why, and their verification cases are in the repository.)*
 
 **Why the sewer's water side is CONTINUITY-first and the water-distribution side is a
 potential layer, on the same framework.** A gravity sewer runs free-surface: on the
@@ -547,7 +530,7 @@ dendritic tree of section 1's own analysis, normal flow at every pipe is set by 
 alone -- the net inflow upstream of it (`cycles.particular_flow`, closed form on a tree,
 no Newton solve at all) -- and depth follows from Manning's law given that flow, not the
 other way round; a head difference does not drive the water, so a Newton potential layer
-built on head is the wrong shape for it (spec section 1). A pressurised water-distribution
+built on head is the wrong shape for it. A pressurised water-distribution
 network is the opposite case, and it is exactly the framework's own: every pipe runs full,
 and head loss is a monotone function of the head difference at each pipe, pump and valve,
 so `noodl.apps.water` is an ordinary `PotentialFlowLayer` (§1, §3 above) with
@@ -560,31 +543,31 @@ are OUT of scope here, and SWMM's KINWAVE (kinematic wave) routing, which shares
 continuity-first assumption, is the parity target for rows W1-W4 rather than SWMM's own
 dynamic-wave engine.
 
-**The manhole-level storage idealisation, and what it is not.** With `storage=True`
-(spec 3.2), each manhole gets a surface area and a level advanced by implicit Euler,
+**The manhole-level storage idealisation, and what it is not.** With `storage=True`,
+each manhole gets a surface area and a level advanced by implicit Euler,
 $A_s\, dH/dt = \sum \text{inflow} - Q_{\text{out}}(H)$, where $Q_{\text{out}}$ is read off the SAME Manning law as the
 quasi-steady case at depth $H$. This is a lumped storage-node approximation -- "the
 manhole's level equals its own outgoing pipe's entrance depth" -- not a hydraulic profile
 along the pipe and not SWMM's dynamic wave, which carries one head per junction and a
 backwater-coupled momentum equation between them; under constant inflow the storage sweep's
-fixed point is the quasi-steady solution of section 3.1 (measured 5.7e-15 relative on flows,
-4.4e-15 on depths, row W7), which is the only property this idealisation is required to
+fixed point is the quasi-steady solution (measured 5.7e-15 relative on flows, 4.4e-15 on
+depths, row W7), which is the only property this idealisation is required to
 have. The sweep advances every manhole LEVEL-SYNCHRONOUSLY, leaves to the outfall, in the
 same order the tree's own closed-form flow solve uses: it precomputes, once, the leaf-to-
 root level order and, per level, flat gather/scatter index tensors, so the per-call sweep is
 one batched `solve_monotone` call plus one `index_add` per tree LEVEL rather than a Python
 loop over manholes -- the loop count is the tree depth, not the manhole count, satisfying
-the "no Python loop on a per-step path" constraint (spec section 8). The pipe carrying each
+the rule that no per-step path loops in Python. The pipe carrying each
 manhole's outflow is found by which pipe drains INTO that manhole's own outfall, never
 assumed to be the last pipe read from the file, because the reader's pipe order is whatever
-order the `.inp` lists conduits in, not necessarily the order the tree drains in (M4-R19);
+order the `.inp` lists conduits in, not necessarily the order the tree drains in;
 and the headspace `Stack` buoyancy drive's `z_path` on a `headspace` edge is the pipe's
 CROWN elevation -- the mean of its two end inverts plus its own diameter -- not the mean
-invert alone, which is only the pipe's invert at its midpoint (M4-R19). A forest of more
-than one tree (spec 3.1) is supported on both the water and air sides: each component gets
+invert alone, which is only the pipe's invert at its midpoint. A forest of more
+than one tree is supported on both the water and air sides: each component gets
 its own outfall and, on the air side, its own outfall-to-ambient headspace edge, so `air.q`
 and `sewer.q` conserve mass within each component independently rather than at one shared
-sink (N4).
+sink.
 
 **The `air.phi` datum.** Every `leak` edge's `Stack` carries a manhole term that cancels
 against the manhole's own ground level (`z_ref - z_path = 0` there) but an AMBIENT term that
@@ -594,10 +577,10 @@ open-air edge and at `ambient`'s own fixed boundary condition (`air.phi_boundary
 every air pressure in the solve is shifted by the same constant -- `air.phi` is
 DATUM-REFERENCED to this convention, not to a physical zero, and every drive, refusal and
 verification row reads only DIFFERENCES between manholes, which the convention leaves
-unaffected (N9).
+unaffected.
 
 **The headspace momentum balance, and the `Drive`-cannot-see-`phi` rule.** Air in the
-headspace above the flow is driven by three terms per pipe (spec 3.3): Darcy-Weisbach wall
+headspace above the flow is driven by three terms per pipe: Darcy-Weisbach wall
 friction on the air itself, buoyancy from the density difference between a warm manhole
 shaft and ambient (the SAME `Stack` drive the building application's stack effect uses, one
 full-node air-density driver, `rho_air_nodes`), and drag from the moving water surface
@@ -617,7 +600,7 @@ headspace air are two separate `TransportLayer` species, coupled by one closure,
 `H2STransfer`, computing a flux $J = K_L a\, V_{\text{wet}} (f C_S - C_G/H)$ per manhole from the free-
 sulfide fraction $f$, Henry's constant $H(T)$ and a two-film transfer coefficient $K_L a$,
 and writing $+J$ onto the air side and $-J$ onto the water side (equal in moles of S by
-construction, checked node by node, row C2). Spec 4.2's own lateral inflow-concentration
+construction, checked node by node, row C2). The lateral inflow-concentration
 drivers, `bod_in`/`sulfide_in`, enter the water-quality layer's source term the same way
 every other nodal load does -- $\text{inflow} \times \text{concentration}$ (m³/s times kg/m³, kg/s per species)
 -- written by a separate closure, `LateralLoads`, registered before `H2STransfer` so its
@@ -625,31 +608,25 @@ load and the two-film transfer's own source term add rather than one overwriting
 Both correlations read per-PIPE quantities --
 hydraulic radius, slope, wetted velocity, mean depth -- at each manhole's own SINGLE
 outgoing pipe (a tree guarantees exactly one), gathered once at construction into a
-per-manhole index (`out_pipe`) rather than looked up per call (M4-R4); the same gather
+per-manhole index (`out_pipe`) rather than looked up per call; the same gather
 underlies the Pomeroy-Parkhurst sulfide-generation reaction. The closure reads the PREVIOUS
 pass's concentrations -- the framework's ordinary lagged coupling (§5, §7 above) -- so
 `coupling="pingpong"` carries a one-pass lag on the cross-phase source terms exactly as the
 building application's heat/species coupling does, and `coupling="iterate"` removes it by
 Hensen's-onion successive substitution when the two quality layers' own `iterate_tol` is set.
 
-**Verification.** `tests/verification/test_sewer_parity.py` checks water flows, depths,
-velocities and a first-order-decay tracer against pyswmm/SWMM 5.2.4 under KINWAVE routing
-(rows W1-W4); `tests/verification/test_sewer_ventilation.py` checks the air side against
-Pescod and Price's laboratory ratios and Tyneside field range (rows A1-A3) and the H₂S
-two-film transfer's Henry-equilibrium fixed point (row H3); `tests/verification/
-test_water_parity.py` checks the water-distribution application's heads, flows, pump gain,
-tank trajectory, pressure-driven demand, loop consistency, gradients and a trace-quality row
-against EPANET 2.2 through wntr (rows D1-D8, G2). $f_i$ and $f_{\text{air}}$ are CALIBRATED to a
-single source (Pescod and Price Test 8), not literature-pinned, so rows A1 and A2 are
-consistency checks against the calibration source rather than independent validation (spec
-section 10) -- the same caveat the README states for the same reason.
+**Verification.** The sewer's water flows, depths, velocities and a first-order-decay
+tracer are checked against pyswmm/SWMM 5.2.4 under KINWAVE routing (rows W1-W4); the air
+side against Pescod and Price's laboratory ratios and Tyneside field range (rows A1-A3) and
+the H₂S two-film transfer's Henry-equilibrium fixed point (row H3); the water-distribution
+application's heads, flows, pump gain, tank trajectory, pressure-driven demand, loop
+consistency, gradients and a trace-quality row against EPANET 2.2 through wntr (rows D1-D8,
+G2). $f_i$ and $f_{\text{air}}$ are CALIBRATED to a single source (Pescod and Price Test 8),
+not literature-pinned, so rows A1 and A2 are consistency checks against the calibration
+source rather than independent validation. See [Sewers](applications/sewer.md) and
+[Water distribution](applications/water.md#verification).
 
 ## 10. A fourth flow-determination mode: clip-and-allocate capacitated transfer
-
-*(Written from the implementation, milestone 4b: this section documents
-`CapacitatedTransferLayer`'s physics and why it needed a genuinely new differentiability
-mechanism at one site; the full derivation is in the milestone's internal design spec,
-section 3.)*
 
 **Why this is a fourth way of determining flows, not a variant of the potential layer.**
 Sections 1 and 9 above both describe networks where flow at an edge is either the closed-
@@ -658,14 +635,13 @@ form output of a Newton potential solve or of continuity alone on a tree. WSIMOD
 to carry a REQUESTED flow (typically emitted by some upstream process closure, not a
 pressure difference) and simply clips it against two independent bounds -- its own arc
 capacity and the downstream node's remaining storage headroom -- with no potential variable
-anywhere in the calculation. The framework spec names this explicitly as the fourth way an
-edge's flow can be determined (alongside a potential-flow Newton solve, a driver-prescribed
+anywhere in the calculation. This is the fourth way an edge's flow can be determined (alongside a potential-flow Newton solve, a driver-prescribed
 flow, and a closure-computed flow), and `CapacitatedTransferLayer`
 (`src/noodl/layers/capacitated.py`) is its implementation: a `Model` layer type that owns
 one or more edge kinds exactly like `PotentialFlowLayer` does, but whose per-step output is
 an explicit clip-and-allocate computation rather than a solve.
 
-**The clip/allocation math, condensed (design spec section 3).** Given the previous
+**The clip/allocation math, condensed.** Given the previous
 per-node storage $s$, a per-edge capacity $c_{\text{arc}}$ and a per-edge REQUEST driver $r$:
 receiver headroom is $h = (s_{\max} - s)/\Delta t$ at each edge's downstream node (a boundary node
 has $s_{\max} = \infty$ and never constrains) -- a RATE, in the same units as $r$ and $f$, which is
@@ -702,8 +678,8 @@ $\sum_i f_i \le \text{free headroom}$ jointly -- because the FIRST implementatio
 reused hard-clip's own preference-proportional share formula, which depends only on
 preference weights and total headroom, never on any individual edge's own request; being
 provably independent of a competitor's request, it could not carry a gradient between
-competing edges no matter how it was wrapped, defeating the framework spec's stated purpose
-for this mode ("gradients flow through which arc absorbs a constraint"). The real QP's
+competing edges no matter how it was wrapped, defeating the purpose of this mode, which
+is that gradients flow through which arc absorbs a constraint. The real QP's
 Lagrangian stationarity, with the box bound applied, reduces to
 $f_i = \operatorname{clamp}(\text{remaining}_i - \lambda/\text{pref}_i,\ 0,\ \text{avail}_i)$ for one scalar $\lambda$ SHARED by every edge competing at
 that node -- so $\partial f_i / \partial r_j$ for a competing edge $j \ne i$ is genuinely nonzero, flowing
@@ -717,16 +693,12 @@ Fischer-Burmeister-smoothed complementarity condition fed through
 harder to verify for no accuracy benefit. The resulting cross-gradient,
 $\partial f_{BD} / \partial r_{CD} = -0.5$ on this specific SYMMETRIC-preference four-node diamond test
 fixture, was hand-derived and is checked directly (sign and magnitude) by
-`test_projection_mode_sharing_has_nonzero_cross_gradient` -- the one genuinely new numerical
-result this milestone needed to produce, as opposed to reproducing an existing mechanism
-(the plain clip) at a new site. The general mechanism behind it -- the KKT derivation
+`test_projection_mode_sharing_has_nonzero_cross_gradient`. The general mechanism behind
+it is the KKT derivation
 $\partial f_i / \partial r_j = -(1/\text{pref}_i) / \sum_k (1/\text{pref}_k)$, of which −0.5 is the
-symmetric-weight special case -- was separately hand-verified against different,
-asymmetric-preference fixtures during Task 4's review (`pref=[1,3]` and `pref=[1,2,5]`,
-confirmed to 4 decimal places in the review record); that confirms the mechanism
-generalises correctly, not that the value −0.5 itself does -- for asymmetric weights the
-value is generically different (e.g. `pref=[1,3]` gives −0.25), and no committed test
-asserts the literal −0.5 value under asymmetric weights.
+symmetric-weight special case; it was also hand-checked against asymmetric preferences
+(`pref=[1,3]` and `pref=[1,2,5]`), where the value differs (e.g. `pref=[1,3]` gives
+−0.25).
 
 **Verification, and what it does and does not show.** `tests/verification/
 test_wsimod_parity.py` replays WSIMOD's own captured per-arc requests from its packaged
@@ -743,18 +715,18 @@ different reason, of the clip's other bound: both fixtures set $s_{\max} = \inft
 everywhere too and the proportional-sharing branch never runs against WSIMOD's numbers. Both
 mechanisms are separately and rigorously covered by synthetic unit fixtures
 with deliberately tight bounds; what remains unvalidated is specifically WSIMOD's own
-numbers at a binding point, not the mechanism (README, "Milestone 4b status", amendment A7,
-has the full account and the recorded follow-up that would close this gap).
+numbers at a binding point, not the mechanism (see
+[what the WSIMOD parity does not show](applications/capacitated.md#what-the-wsimod-parity-does-not-show)).
 
-## Summary of flags/uncertainties
+## Caveats
 
 - Pseudo-bond-graph $(T, \Phi)$ vs true bond-graph $(T, dS/dt)$: only the latter is
-  literally power-conjugate; check which convention any energy-balance check assumes.
-- No published "differentiable EPANET"/"differentiable CONTAM" was found; the closest
+  literally power-conjugate; an energy-balance check must state which convention it
+  assumes.
+- No published "differentiable EPANET" or "differentiable CONTAM" is known; the closest
   precedent is differentiable AC/DC power flow.
-- `torch-sla` and similar differentiable-sparse-linear-algebra packages are recent
-  (2026) and unverified for production use here.
+- `torch-sla` and similar differentiable sparse linear-algebra packages are recent (2026).
 - ISO 23247 is a manufacturing standard; its fit to buildings is an analogy, not a
   citation of direct applicability.
-- FMI-vs-native-port coupling recommendation in §5 is a design opinion, not a result
-  drawn from existing published systems.
+- §5's preference for native, differentiable coupling over FMI is a design choice, not a
+  result drawn from existing published systems.
