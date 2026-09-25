@@ -137,7 +137,7 @@ def test_backward_raises_unconditionally_on_a_singular_adjoint_system():
     # system is built. The backward must raise rather than return whatever the singular
     # solve produced.
     #
-    # The `match` is not decoration: the pre-Task-12 dense `torch.linalg.solve` ALSO raised
+    # The `match` is not decoration: the earlier dense `torch.linalg.solve` ALSO raised
     # here (LinAlgError is a RuntimeError subclass), so a bare `pytest.raises(RuntimeError)`
     # cannot tell the two implementations apart. What is new is that the failure is reported
     # through the operator contract's own raise/return boundary, naming the `where` it came
@@ -161,7 +161,7 @@ def test_backward_raises_unconditionally_on_a_singular_adjoint_system():
         torch.autograd.grad(x.sum(), c)
 
 
-# -- section 6.2 step 2: the transposed sparse form the adjoint solve needs -------------------
+# -- the transposed sparse form the adjoint solve needs ---------------------------------------
 
 
 def _asymmetric_sparse_operator():

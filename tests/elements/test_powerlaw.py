@@ -102,8 +102,8 @@ def test_broadcasts_batched_parameters_against_batched_dp():
 
 def test_single_edge_element_with_trailing_unit_dim_broadcasts_against_b_kind_dp():
     """Binding requirement: a single-edge element's parameters carry trailing shape (..., 1)
-    so they broadcast against (..., b_kind) potential differences, as later composition
-    tasks (4/7) require when combining many single-edge elements into a per-kind batch."""
+    so they broadcast against (..., b_kind) potential differences, as composition
+    requires when combining many single-edge elements into a per-kind batch."""
     C = torch.tensor([2.0])  # shape (1,): one edge's worth of parameter
     n = torch.tensor([0.6])  # shape (1,)
     el = PowerLaw(C=C, n=n, dp_transition=1e-3)

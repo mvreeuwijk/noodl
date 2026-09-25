@@ -213,7 +213,7 @@ def build_batched_coo(edge_index: torch.Tensor, g: torch.Tensor, n: int) -> torc
     """Batched (B, n_i, n_i) sparse COO Laplacian. Indices MUST be replicated per batch
     element (torch.sparse has no way to share one (2, nnz) index array across a batch
     dimension the way manual gather/scatter shares `edge_index`) -- this replication is
-    itself part of what section 5/6 of the report is about.
+    itself part of what this benchmark measures.
     """
     B, b = g.shape
     src, dst = edge_index[0], edge_index[1]
@@ -373,8 +373,8 @@ def main() -> None:
             )
 
             # ---- torch.sparse (COO, batched, bmm-as-matvec CG) ----
-            # Capped: torch.sparse's batched-bmm matvec (see Part B2 below and the report's
-            # section 1) has per-call overhead far above the manual gather/scatter matvec, so
+            # Capped: torch.sparse's batched-bmm matvec (see Part B2 below) has per-call overhead
+            # far above the manual gather/scatter matvec, so
             # running it to full CG convergence at the same max_iter as the other two methods
             # is only affordable while B * n_i is small -- above that this is bounded to a
             # fixed, small iteration count instead of being run to convergence (an earlier,

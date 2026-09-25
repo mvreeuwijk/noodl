@@ -135,9 +135,8 @@ real application adds more of the same kind of thing, in a fixed place:
 
 **Numerical blocks are not extension points (yet).** The tested extension path is laws and
 applications, as above — a new `Element` and a new builder composing existing layers. A new
-solver or layer class is a framework change, not an extension: it goes through the plan/review
-process this repository uses for its own development, the same as any other change under
-`src/noodl/layers` or `src/noodl/solvers`. `ConstitutiveLayer` is the worked example of a
+solver or layer class is a framework change, not an extension: it needs the same design,
+testing and review as any other change under `src/noodl/layers` or `src/noodl/solvers`. `ConstitutiveLayer` is the worked example of a
 standalone numerical block that was added this way rather than adapted into an existing
 extension point — see [Layers and models](../concepts/layers.md#constitutivelayer).
 

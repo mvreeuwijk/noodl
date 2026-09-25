@@ -183,7 +183,7 @@ mass flux in kg/s on both sides already.
 ## The fixed point
 
 When any link is two-way, `step` routes through the iteration, on a **recipient-first**
-Gauss-Seidel schedule (closing review findings R1, R2 and R7): the model that a two-way link
+Gauss-Seidel schedule: the model that a two-way link
 writes its forward value *into* — the **recipient** — is stepped before its **donor**, and the
 donor receives exactly the amount the recipient's own step integrated across the shared
 boundary, never a flux recomputed from a state that has not been stepped yet.

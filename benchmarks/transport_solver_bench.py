@@ -280,7 +280,7 @@ def bench_coupling(rounds: int) -> list[dict]:
 
 def _git_commit() -> str | None:
     """The short commit the benchmark ran at, so a future run (or a stale one straddling a
-    behaviour change, as F-B2 recorded) is attributable without cross-referencing a timestamp.
+    behaviour change) is attributable without cross-referencing a timestamp.
     `None` when git itself is unavailable rather than raising -- attributability is a nicety,
     not a benchmark precondition."""
     try:

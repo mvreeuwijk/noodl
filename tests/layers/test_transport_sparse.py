@@ -885,7 +885,7 @@ def test_transport_layer_allocates_no_dense_L_at_construction():
 
 def test_operator_reference_still_includes_conduction():
     # The dense reference keeps its exact values. These are the (M, N) this fixture produced
-    # with the pre-Task-15 code (conduction folded in via the construction-time `self.L`),
+    # with the earlier code (conduction folded in via the construction-time `self.L`),
     # recorded before the change and hard-coded here, so a conduction term silently dropped
     # when L stopped being an attribute would fail this test rather than pass a
     # self-consistent comparison.

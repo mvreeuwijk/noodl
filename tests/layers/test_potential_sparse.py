@@ -114,7 +114,7 @@ def _shutoff_fan_layer() -> tuple[PotentialFlowLayer, torch.Tensor, torch.Tensor
 
 
 def test_grounding_is_checked_on_actual_slopes_even_when_phi0_is_supplied():
-    # The pre-Task-11 code checked grounding only inside linear_init, on linear_init's own
+    # An earlier implementation checked grounding only inside linear_init, on linear_init's own
     # tangent-at-zero slopes, and skipped it entirely whenever a caller supplied phi0 (`if
     # phi0 is None: phi0 = self.linear_init(...)` never runs, and with it neither does its
     # check). FanCurve is what makes the two distinguishable: its slope is dp-dependent AND
@@ -631,7 +631,7 @@ def test_an_inner_solve_refusal_inside_newton_names_the_layer():
     assert "instance 1" in message, message
 
 
-# -- section 6.2 step 2: linear_solver="sparse_direct" end to end -----------------------------
+# -- linear_solver="sparse_direct" end to end -----------------------------------------------
 
 
 def test_sparse_direct_linear_solver_matches_direct_on_the_two_zone_layer(two_zone_layer):

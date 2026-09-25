@@ -174,7 +174,7 @@ def test_composed_layer_and_dense_layer_agree_and_take_different_paths(monkeypat
 
 
 def test_build_composed_forwards_linear_solver_to_the_migrated_layer_only():
-    """The section 6.2 solver comparison measures the SAME model under two inner solvers, so
+    """The inner-solver comparison measures the SAME model under two inner solvers, so
     `linear_solver` has to reach `layer` and nothing else: `dense_layer` is the parity
     reference and stays on the dense LU whatever `layer` is configured with.
     """

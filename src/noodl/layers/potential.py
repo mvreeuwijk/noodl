@@ -595,7 +595,7 @@ class PotentialFlowLayer:
         )
         if certified.ndim == 0:
             # Unbatched: one instance, so a bare batch index would say nothing. Name the
-            # nodes (or edges) directly, as the pre-Task-11 message did.
+            # nodes (or edges) directly.
             raise RuntimeError(
                 f"PotentialFlowLayer {self.name!r}: {where}: "
                 f"{self._describe_grounding(records[0])}"

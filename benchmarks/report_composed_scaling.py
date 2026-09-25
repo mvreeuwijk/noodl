@@ -99,7 +99,7 @@ def measure_budget_row(
     carried into the child process and recorded in the row. It defaults to `"auto"`, the
     shipped default, so the gate keeps measuring what ships; the report additionally measures
     every entry of `SOLVERS`, which is the evidence the `"auto"` default is
-    chosen on. The BUDGETS do not vary with it -- they are the design's, not the backend's.
+    chosen on. The BUDGETS do not vary with it -- they are fixed targets, not the backend's.
 
     `thermal` measures the building-physics configuration instead: the same air and species
     layers plus a second (heat) transport layer, stepped together through `Model.step`

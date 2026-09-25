@@ -468,7 +468,7 @@ def test_negative_slope_refusal_message_names_the_offending_edges():
         solve(op, b)
 
 
-# -- section 6.2 step 2: method="sparse_direct" ----------------------------------------------
+# -- method="sparse_direct" ------------------------------------------------------------------
 
 
 class _SparseFakeOperator(_FakeOperator):
@@ -688,7 +688,7 @@ def test_sparse_direct_ignores_the_certificate_entirely(monkeypatch):
     assert bool(result.converged[0])
 
 
-# -- section 6.2 step 2: what method="auto" selects, on the evidence measured in Task C -------
+# -- what method="auto" selects, on the measured evidence ------------------------------------
 #
 # Measured in process on the reference composed model (14-thread CPU, float64, 1028 unknowns),
 # median of 3 warm runs -- `benchmarks.profile_forward --compare-solvers`:

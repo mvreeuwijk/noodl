@@ -542,7 +542,7 @@ def gmres(
         # ||M^-1(b - A x_k)||, compared above against `tol`, which is built from the
         # TRUE-scale ||b||): unpreconditioned, that estimate already IS the true-scale
         # residual, so the within-cycle count is exact and this is the untouched, bit-
-        # identical pre-Task-6 expression. Preconditioned, the two scales generally
+        # identical original expression. Preconditioned, the two scales generally
         # disagree -- reproduced on the shipped stiff fixture, where the estimate crosses
         # `tol` one step before the TRUE residual (recomputed as `beta` just above) actually
         # does -- so the within-cycle count cannot be trusted there; this reports the

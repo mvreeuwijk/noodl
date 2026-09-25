@@ -39,7 +39,7 @@ def test_remainder_is_the_tail_of_the_exponential_series():
     d_x = sum(k * theta ** (k - 1) / math.factorial(k) for k in range(m + 1, 60))
     d_phi = sum((k - 1) * theta ** (k - 2) / math.factorial(k) for k in range(m + 1, 60))
     assert _forced_remainder(theta, m) == pytest.approx(max(r_x, r_phi, d_x, d_phi), rel=1e-10)
-    # P1-1b: the shifted (homogeneous) path's own derivative tail D_x = sum_{k>m} k
+    # The shifted (homogeneous) path's own derivative tail D_x = sum_{k>m} k
     # theta^(k-1)/k! equals the VALUE tail one Taylor degree down, `_taylor_remainder(theta,
     # m - 1)`, exactly (re-index k' = k - 1). `_shifted_remainder` is `max(R_x, D_x)`, which
     # is `_taylor_remainder(theta, m - 1)` because the tail is monotone decreasing in degree.

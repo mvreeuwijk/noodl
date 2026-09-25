@@ -9,7 +9,7 @@ from noodl.apps.sewer.inp import read_swmm_inp
 DATA = Path(__file__).resolve().parents[2] / "data" / "sewer"
 
 
-def test_the_committed_fixture_round_trips_to_the_research_network():
+def test_the_committed_fixture_round_trips_to_the_reference_tree():
     net, inflows, pollutants = read_swmm_inp(DATA / "tree_steady.inp")
     net.validate()
     assert [m.name for m in net.manholes] == ["J1", "J2", "J5", "J3", "J4"]

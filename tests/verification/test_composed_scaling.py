@@ -199,7 +199,7 @@ def test_gradient_across_a_join_matches_central_finite_differences():
 def test_composed_model_meets_its_section_6_1_budget(
     ensemble, steps, forward_budget, backward_budget, memory_budget
 ):
-    """One row of the design's section 6.1 budget table, on the reference composed model.
+    """One row of the performance budget table, on the reference composed model.
 
     A STEP is one `layer.solve` plus one implicit `transport.step` at dt=60 s on the airpath
     slice of the resulting `q`, with `x` fed forward; the backward figure is the backward of

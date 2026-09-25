@@ -18,7 +18,7 @@ from noodl.drives import Stack
 F64 = torch.float64
 
 
-def test_the_fixture_tree_is_the_research_network():
+def test_the_fixture_tree_is_the_reference_tree():
     net = tree_steady()
     assert [m.name for m in net.manholes] == ["J1", "J2", "J5", "J3", "J4"]
     assert [p.name for p in net.pipes] == ["C1", "C2", "C4", "C3", "C5"]
@@ -376,8 +376,8 @@ def test_model_notes_reflects_the_closures_own_notes_dict():
     assert "PA" in model.notes["capacity_floor"]
 
 
-def test_fr21_one_step_with_a_lateral_bod_load_raises_only_j1():
-    """FR-21 (a): `bod_in = 0.3` at J1 only. `LateralLoads`'s own contract puts the
+def test_one_step_with_a_lateral_bod_load_raises_only_j1():
+    """`bod_in = 0.3` at J1 only. `LateralLoads`'s own contract puts the
     resulting source at EXACTLY J1's row and EXACTLY the BOD column (verified directly at
     the closure level in `test_quality.py`); this test verifies the FULL WIRING through
     `build_model` and one `model.step`.

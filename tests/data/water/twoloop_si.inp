@@ -1,5 +1,5 @@
 [TITLE]
-Minimal SI two-loop test network (hand-made for noodl milestone 4 fixture)
+Minimal SI two-loop test network (hand-made noodl test fixture)
 1 reservoir, 6 junctions, 8 pipes, 2 independent loops, Hazen-Williams, LPS units.
 
 [JUNCTIONS]
