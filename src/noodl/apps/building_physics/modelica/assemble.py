@@ -148,7 +148,12 @@ step from `times[k-1]` to `times[k]` holds its drivers constant, so this makes t
 injected per step exact; the end value would miss an event inside the step
 (`Examples/CO2TransportStep.mo` injects its CO2 in a 3.6 s pulse that falls between two
 172.8 s output times, found by the dynamic parity test). Boundary values, openings and
-prescribed flows stay point values at the step's end time.
+prescribed flows stay point values at the step's end time. The air-layer source is a step
+mean too, so the quasi-steady flows reported at `times[k]` carry the mean injection of the
+step ending there, not the instantaneous one (consistent with the mass the transport layers
+receive; it is why CO2TransportStep's flows in its pulse row differ from MBL's six times
+more than ThreeRoomsContam's). The means are exact only for a run over consecutive grid
+times, which `run.simulate` therefore requires when a source varies in time.
 """
 
 from __future__ import annotations

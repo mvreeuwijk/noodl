@@ -630,6 +630,20 @@ def test_a_trace_pulse_inside_one_step_injects_its_mass():
     assert int((mass != 0).sum()) == 1
 
 
+def test_simulate_refuses_a_grid_that_skips_source_intervals():
+    """Source drivers are step means over the driver grid's intervals (module docstring,
+    "Sources"), so a `times` grid that skips intervals, or leaves the grid, would drop
+    injected amounts: refused by name. A run of consecutive grid times is accepted."""
+    path = Path(__file__).parents[3] / "data" / "modelica" / "CO2TransportStep.json"
+    model, state, drivers, names = read_modelica(path, return_names=True)
+    with pytest.raises(ValueError, match=r"consecutive grid times; times\[1\] = 345.6"):
+        simulate(model, state, drivers, names.times[:5:2])
+    with pytest.raises(ValueError, match="is not a grid time"):
+        simulate(model, state, drivers, torch.tensor([0.0, 100.0], dtype=F64))
+    hist = simulate(model, state, drivers, names.times[2:4])
+    assert hist["time"].tolist() == names.times[2:4].tolist()
+
+
 def test_temperature_dependent_heat_flow_is_refused(tmp_path):
     doc = _doc("heat_flow.json")
     doc["components"][3]["parameters"]["alpha"] = 0.01

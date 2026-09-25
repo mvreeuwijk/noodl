@@ -51,6 +51,33 @@ def step_drivers(drivers: Mapping[str, Tensor], grid: Tensor, t: float) -> Drive
     return out
 
 
+def _require_consecutive(drivers: Mapping[str, Tensor], grid: Tensor, times: Tensor) -> None:
+    """Refuse `times` that skip grid intervals when a source driver is a step-mean series."""
+    sources = sorted(k[len(_SERIES):] for k in drivers
+                     if k.startswith(_SERIES) and k.endswith(".sources"))
+    if not sources or times.numel() < 2:
+        return
+    grid = torch.as_tensor(grid, dtype=F64)
+    tol = 1e-9 * max(1.0, float(grid.abs().max()))
+    diff = (times.unsqueeze(1) - grid.unsqueeze(0)).abs()
+    idx = diff.argmin(dim=1)
+    off = diff.gather(1, idx.unsqueeze(1)).squeeze(1) > tol
+    gaps = (idx[1:] - idx[:-1]) != 1
+    if bool(off.any()):
+        k = int(torch.nonzero(off)[0])
+        why = "is not a grid time"
+    elif bool(gaps.any()):
+        k = int(torch.nonzero(gaps)[0]) + 1
+        why = f"is not the grid time after {float(times[k - 1])!r}"
+    else:
+        return
+    raise ValueError(
+        f"simulate: time-varying sources ({', '.join(sources)}) are step means over the "
+        f"driver grid's intervals, so `times` must be consecutive grid times; times[{k}] = "
+        f"{float(times[k])!r} {why} (grid interval {float(grid[1] - grid[0])!r} s)"
+    )
+
+
 def _closure(model: Model) -> _MBLClosure:
     for c in model.closures:
         if isinstance(c, _MBLClosure):
@@ -89,10 +116,17 @@ def simulate(model: Model, state: State, drivers: Drivers, times,
     layer's mass fractions (water last when carried) when the model has one. `step_kwargs`
     reach `Model.step`/`Model.steady` (and so the airflow solves); the airflow Newton
     tolerances default to `atol=AIR_ATOL`, `rtol=AIR_RTOL`.
+
+    When a source driver varies in time, `times` must be CONSECUTIVE grid times (any run of
+    the grid, e.g. a prefix): each series row of a source is its mean over the one grid
+    interval ending there (`assemble` module docstring, "Sources"), so a step spanning
+    several grid intervals would inject only the last interval's amount. Anything else
+    raises `ValueError`.
     """
     step_kwargs = {"atol": AIR_ATOL, "rtol": AIR_RTOL, **step_kwargs}
     times = torch.as_tensor(times, dtype=F64)
     grid = drivers.get("series:time", times)
+    _require_consecutive(drivers, grid, times)
     closure = _closure(model)
     dynamic = bool(model.transport)
     rows: dict[str, list[Tensor]] = {"air.q": [], "air.phi": [], "p": [], "T": [], "X_w": []}
