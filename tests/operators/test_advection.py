@@ -1,7 +1,7 @@
 """Tests for AdvectionOperator: the nonsymmetric transport spatial operator.
 
 Every test compares the operator's ACTION against TransportLayer's existing dense
-assembly (the retained oracle), never against a second copy of the gather/scatter
+assembly (the retained dense reference), never against a second copy of the gather/scatter
 formulas -- a bug shared between the operator and its own test would otherwise be
 invisible.
 """

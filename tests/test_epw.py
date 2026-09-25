@@ -3,8 +3,8 @@ import math
 import pytest
 import torch
 
-from noodl.apps.building.epw import read_epw, write_wth
-from noodl.apps.building.wth import Weather, read_wth
+from noodl.apps.building_physics.epw import read_epw, write_wth
+from noodl.apps.building_physics.wth import Weather, read_wth
 
 # Two hours of an EPW file: 8 header lines, then rows with the 35 documented columns.
 # Column indices (0-based): 6 dry-bulb C, 9 station pressure Pa, 20 wind direction deg,

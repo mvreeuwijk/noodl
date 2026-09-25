@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from noodl.apps.sewer.network import build_sewer_model, sewer_steady, tree_steady
+from noodl.apps.sewer.network import build_model, sewer_steady, tree_steady
 
 F64 = torch.float64
 
@@ -22,7 +22,7 @@ def test_c1_the_air_layer_balances_at_its_solution():
     6.141e-12 W. Ruling M4-R20b's tolerances (1e-11 on the residual, 1e-10 on the power
     identity) stay unchanged -- both float64 figures still clear them comfortably, with
     considerably more margin than the float32 ones did."""
-    model, state, drivers = build_sewer_model(tree_steady())
+    model, state, drivers = build_model(tree_steady())
     new = model.step(state, drivers, 60.0)
     residuals = model.residuals(new, drivers)
     assert float(residuals["air"].abs().max()) < 1e-11
@@ -34,7 +34,7 @@ def test_c1_the_air_layer_balances_at_its_solution():
 
 def test_c1_the_water_flows_balance_every_manhole():
     """Continuity on the pipe tree, node by node: exact, by construction."""
-    model, state, drivers = build_sewer_model(tree_steady(), air=False, quality=False)
+    model, state, drivers = build_model(tree_steady(), air=False, quality=False)
     resolved = model._apply_closures(state, drivers)
     q = resolved["sewer.q"]
     src, tgt = model.net.endpoints("pipe")
@@ -49,7 +49,7 @@ def test_c1_the_water_flows_balance_every_manhole():
 def test_c2_cross_phase_sulfide_is_conserved_node_by_node():
     """Row C2, 1e-12: moles of S removed from the water equal moles added to the air.
 
-    FR-21 (b): `build_sewer_model`'s default `sulfide_in = 0` (this test's `drivers`,
+    FR-21 (b): `build_model`'s default `sulfide_in = 0` (this test's `drivers`,
     unmodified), so `LateralLoads`'s own sulfide column is exactly zero everywhere and this
     invariant is unaffected by its presence -- the equality below is between `H2STransfer`'s
     OWN two source terms (`water_quality.sources[..., 1]` and `air_quality.sources`), which
@@ -59,7 +59,7 @@ def test_c2_cross_phase_sulfide_is_conserved_node_by_node():
     either: it lands in the BOD column, never the sulfide one this test reads."""
     from noodl.apps.sewer.quality import M_H2S, M_S
 
-    model, state, drivers = build_sewer_model(tree_steady())
+    model, state, drivers = build_model(tree_steady())
     state = dict(state)
     state["water_quality.x"] = torch.full_like(state["water_quality.x"], 1e-3)
     state["air_quality.x"] = torch.full_like(state["air_quality.x"], 1e-6)
@@ -78,7 +78,7 @@ def test_c3_gradients_against_central_differences():
 
     N6: the spec/README/docstring text names `f_i`, `f_air`, `T_head` and the leak area as
     well, but until this fix only the inflows were ever DIFFERENCED here -- `f_i`, `f_air`
-    and `leak_area` were passed as plain Python floats into a FRESH `build_sewer_model`
+    and `leak_area` were passed as plain Python floats into a FRESH `build_model`
     call inside `loss`, so no gradient tape ever reached them; the assertions below only
     ever exercised `inflow`. Three drivers/parameters are genuinely differentiable and are
     now each pinned by their own test:
@@ -99,7 +99,7 @@ def test_c3_gradients_against_central_differences():
     """
 
     def loss(inflow, f_i, f_air, leak_area):
-        model, state, drivers = build_sewer_model(
+        model, state, drivers = build_model(
             tree_steady(), quality=False, f_i=float(f_i), f_air=float(f_air),
             leak_area=float(leak_area),
         )
@@ -146,14 +146,14 @@ def test_c3_gradient_reaches_t_head():
     against the analytic adjoint gradient, comfortably inside the row's 1e-6."""
 
     def loss(t_head):
-        model, state, drivers = build_sewer_model(tree_steady(), quality=False)
+        model, state, drivers = build_model(tree_steady(), quality=False)
         drivers = dict(drivers)
         drivers["T_head"] = torch.tensor(float(t_head), dtype=F64)
         new = model.step(state, drivers, 60.0)
         return float(new["air.q"].abs().sum())
 
     base = 293.15
-    model, state, drivers = build_sewer_model(tree_steady(), quality=False)
+    model, state, drivers = build_model(tree_steady(), quality=False)
     drivers = dict(drivers)
     t_head = torch.tensor(base, dtype=F64, requires_grad=True)
     drivers["T_head"] = t_head
@@ -175,12 +175,12 @@ def test_c3_gradient_reaches_a_learnable_leak_area():
     `test_c3_gradient_reaches_a_learnable_headspace_friction` reaches `f_air` -- a
     non-learnable element's already-registered `nn.Parameter` with `requires_grad_(True)`
     set on it afterward, never a fresh tensor built with `requires_grad=True` and passed
-    into a NEW `build_sewer_model` call (which `PotentialFlowLayer`'s own safety check
+    into a NEW `build_model` call (which `PotentialFlowLayer`'s own safety check
     would refuse: an unregistered grad-tracked element attribute).
 
     `C = leak_cd * leak_area * sqrt(2 / rho_air)`, uniform over the manholes, so
     `d(loss)/d(leak_area) = sum_i(d(loss)/d(C_i)) * leak_cd * sqrt(2 / rho_air)` by the
-    chain rule; the Richardson check perturbs `leak_area` itself (a `build_sewer_model`
+    chain rule; the Richardson check perturbs `leak_area` itself (a `build_model`
     keyword, rebuilding the whole model, exactly as the inflow/`T_head` checks do) and
     compares against that chain-ruled analytic gradient. MEASURED (eps = 1e-3 * leak_area):
     relative error 9.67e-9, comfortably inside the row's 1e-6."""
@@ -192,13 +192,13 @@ def test_c3_gradient_reaches_a_learnable_leak_area():
     leak_cd = 0.6
 
     def loss(leak_area):
-        model, state, drivers = build_sewer_model(
+        model, state, drivers = build_model(
             tree_steady(), quality=False, leak_area=float(leak_area), leak_cd=leak_cd,
         )
         new = model.step(state, drivers, 60.0)
         return float(new["air.q"].abs().sum())
 
-    model, state, drivers = build_sewer_model(
+    model, state, drivers = build_model(
         tree_steady(), quality=False, leak_area=base, leak_cd=leak_cd,
     )
     leak = next(el for el in model.potential["air"]._elements if el.kind == "leak")
@@ -218,7 +218,7 @@ def test_c3_gradient_reaches_a_learnable_leak_area():
 
 
 def test_c3_gradient_reaches_a_learnable_headspace_friction():
-    model, state, drivers = build_sewer_model(tree_steady(), quality=False)
+    model, state, drivers = build_model(tree_steady(), quality=False)
     element = next(
         el for el in model.potential["air"]._elements if el.kind == "headspace"
     )
@@ -234,7 +234,7 @@ def test_the_golden_case_is_reproduced():
     from tests.golden import load_golden
 
     golden = load_golden("sewer_tree")
-    model, state, drivers = build_sewer_model(tree_steady())
+    model, state, drivers = build_model(tree_steady())
     final = sewer_steady(model, state, drivers)
     for key, expected in golden.items():
         actual = final[key] if key in final else None

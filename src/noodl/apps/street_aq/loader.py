@@ -28,8 +28,8 @@ from pathlib import Path
 
 import torch
 
-from noodl.apps.street.canyon import Z0_B_DEFAULT
-from noodl.apps.street.network import Street, StreetNetwork
+from noodl.apps.street_aq.canyon import Z0_B_DEFAULT
+from noodl.apps.street_aq.network import Street, StreetNetwork
 
 _DTYPE = torch.float64
 EARTH_RADIUS_M = 6371000.0

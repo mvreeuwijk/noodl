@@ -7,15 +7,15 @@ from pathlib import Path
 import pytest
 import torch
 
-from noodl.apps.building.elements import orifice_elements_from_edges
-from noodl.apps.building.thermal import (
+from noodl.apps.building_physics.elements import orifice_elements_from_edges
+from noodl.apps.building_physics.thermal import (
     R_AIR,
     Zone,
     add_zone,
     build_model,
     initial_state,
 )
-from noodl.apps.building.wth import Weather, read_wth
+from noodl.apps.building_physics.wth import Weather, read_wth
 from noodl.drives import Stack
 from noodl.topology import Network
 
@@ -59,7 +59,7 @@ def test_interpolates_linearly_between_rows_and_across_days(tmp_path):
     assert d["V_met"].dtype == torch.float64 and d["V_met"].dim() == 0
 
 
-def test_drivers_at_emits_the_keys_a_build_model_model_actually_consumes(tmp_path):
+def test_drivers_at_emits_the_keys_a_built_model_actually_consumes(tmp_path):
     """The seam test: not that `drivers_at` returns four keys, but that they are the keys a
     `build_model`-built model reads. Updating such a model's drivers with them must move the
     ambient temperature the density closure sees -- which `"T_amb"`/`"P_amb"` never did."""

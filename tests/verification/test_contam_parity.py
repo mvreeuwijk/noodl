@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from noodl.apps.building.prj import project_to_model, read_prj
+from noodl.apps.building_physics.prj import project_to_model, read_prj
 
 DATA = Path(__file__).resolve().parents[1] / "data" / "contam"
 THREE = DATA / "valThreeZonesWthCtm-UseApi.prj"
@@ -22,7 +22,7 @@ THREE = DATA / "valThreeZonesWthCtm-UseApi.prj"
 # loading it would silently corrupt contaminant results. `test_OneZoneWthCtmStack-UseApi`
 # below is the same one-zone stack geometry from the same demo set with no filter on any
 # path. That the filtered project is genuinely REFUSED, rather than merely unused, is
-# asserted by `tests/apps/building/test_prj.py::
+# asserted by `tests/apps/building_physics/test_prj.py::
 # test_the_filtered_one_zone_stack_project_is_refused_naming_the_filter`.
 STACK = DATA / "test_OneZoneWthCtmStack-UseApi.prj"
 MIXED = DATA / "doorway_damper_fan.prj"
@@ -58,7 +58,7 @@ def test_contamx_module_names_the_missing_package(monkeypatch):
     import sys
 
     monkeypatch.setitem(sys.modules, "contamxpy", None)
-    contamx = importlib.import_module("noodl.apps.building.contamx")
+    contamx = importlib.import_module("noodl.apps.building_physics.contamx")
     with pytest.raises(ImportError, match=r"contamxpy.*pip install"):
         contamx.run_steady(THREE, ambient={"Ta": 293.15, "Pb": 101325.0, "Ws": 0.0, "Wd": 0.0})
 
@@ -69,7 +69,7 @@ def test_a_refused_project_is_reported_by_the_path_the_caller_gave(monkeypatch):
     points at a path that no longer exists and that the caller never asked for. No engine is
     needed to pin this: a stub whose `setupSimulation` refuses is enough.
     """
-    from noodl.apps.building import contamx
+    from noodl.apps.building_physics import contamx
 
     class _Refusing:
         def __init__(self, *_a, **_k):
@@ -102,7 +102,7 @@ def _stack_case(contamx_run_steady, Ta=STACK_AMBIENT_T):
 
 @pytest.mark.external
 def test_stack_project_flow_directions_match_contamx(contamx, record_property):
-    from noodl.apps.building.contamx import run_steady
+    from noodl.apps.building_physics.contamx import run_steady
 
     p, ref, ours = _stack_case(run_steady)
     assert [int(n) for n in ref["path_nr"]] == [path.nr for path in p.paths]
@@ -133,7 +133,7 @@ def test_stack_project_flow_magnitudes_match_contamx(contamx, Ta, record_propert
     correction from a constant rescaling, and both signs of the temperature difference are
     needed because the correction switches which endpoint it reads when the flow reverses.
     """
-    from noodl.apps.building.contamx import run_steady
+    from noodl.apps.building_physics.contamx import run_steady
 
     _p, ref, ours = _stack_case(run_steady, Ta)
     torch.testing.assert_close(ours, ref["flow"], rtol=1e-3, atol=1e-6)
@@ -153,7 +153,7 @@ def test_the_stack_residual_is_flat_across_the_sweep_not_proportional_to_dT(
     the temperature difference -- if a future change reintroduced a density error at, say, a
     tenth of the size, a fixed 1e-3 tolerance alone would not notice.
     """
-    from noodl.apps.building.contamx import run_steady
+    from noodl.apps.building_physics.contamx import run_steady
 
     rel = []
     for Ta in STACK_AMBIENT_SWEEP:
@@ -181,7 +181,7 @@ def test_a_constant_mass_flow_fan_delivers_its_rating_in_the_from_to_direction(
     own reader must agree on both, which is what makes this a convention test and not just
     an engine smoke test.
     """
-    from noodl.apps.building.contamx import run_steady
+    from noodl.apps.building_physics.contamx import run_steady
 
     p = read_prj(MIXED)
     amb = dict(p.ambient_conditions)
@@ -200,7 +200,7 @@ def test_a_constant_mass_flow_fan_delivers_its_rating_in_the_from_to_direction(
 
 @pytest.mark.external
 def test_three_zone_steady_flows_match_contamx(contamx, record_property):
-    from noodl.apps.building.contamx import run_steady
+    from noodl.apps.building_physics.contamx import run_steady
 
     p = read_prj(THREE)
     amb = dict(p.ambient_conditions, mf={0: THREE_AMBIENT_MF})
@@ -217,7 +217,7 @@ def test_three_zone_steady_flows_match_contamx(contamx, record_property):
 
 @pytest.mark.external
 def test_three_zone_transient_concentrations_match_contamx(contamx, record_property):
-    from noodl.apps.building.contamx import run_transient
+    from noodl.apps.building_physics.contamx import run_transient
 
     p = read_prj(THREE)
     amb = dict(p.ambient_conditions, mf={0: THREE_AMBIENT_MF})

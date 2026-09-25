@@ -1,7 +1,7 @@
 """Tests for ConstitutiveLayer: the loop formulation for general branch laws.
 
 ``tests/golden/worked_examples.json`` (``GOLD``) holds a worked example's captured numeric
-oracles for the same triangle (edges (0,1), (1,2), (2,0), kind "pipe") used throughout this
+references for the same triangle (edges (0,1), (1,2), (2,0), kind "pipe") used throughout this
 file.
 """
 

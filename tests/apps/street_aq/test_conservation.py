@@ -1,7 +1,7 @@
 """Conservation, junction elimination and gradients — spec section 7, rows 4 to 7 and 11.
 
-These are the physics gate: they use no oracle at all, only the model's own balance and
-algebra done by hand in the test.
+These are the physics gate: they use no reference implementation at all, only the model's own
+balance and algebra done by hand in the test.
 """
 
 from __future__ import annotations
@@ -10,16 +10,16 @@ import math
 
 import torch
 
-from noodl.apps.street.canyon import (
+from noodl.apps.street_aq.canyon import (
     KAPPA_IMPAQ,
     boundary_layer,
     canyon_velocity,
     exchange_velocity,
 )
-from noodl.apps.street.network import (
+from noodl.apps.street_aq.network import (
     Street,
     StreetNetwork,
-    build_street_model,
+    build_model,
     from_test_network,
 )
 from noodl.layers.transport import TransportLayer
@@ -74,7 +74,7 @@ def _atmosphere_balance(model, state, drivers):
 
 
 def test_the_steady_state_has_a_zero_nodal_balance_at_every_street():
-    model, state, _ = build_street_model(from_test_network(), pblh_floor=False)
+    model, state, _ = build_model(from_test_network(), pblh_floor=False)
     drivers = _drivers(model)
     solved = model.steady(state, drivers)
     residual = model.residuals(solved, drivers)["street"]
@@ -92,9 +92,9 @@ def test_everything_emitted_leaves_through_the_atmosphere():
 
     These three are conservation IDENTITIES of the advection operator, not
     misattribution checks: a flow written on the WRONG edge still balances, so the
-    oracle for that is `test_junction_elimination_equals_the_hand_written_dense_system`.
+    reference for that is `test_junction_elimination_equals_the_hand_written_dense_system`.
     """
-    model, state, _ = build_street_model(from_test_network(), pblh_floor=False)
+    model, state, _ = build_model(from_test_network(), pblh_floor=False)
     drivers = _drivers(model)
     solved = model.steady(state, drivers)
     emitted = drivers["street.sources"].sum()
@@ -108,9 +108,9 @@ def test_the_balance_closes_with_a_zero_background_too():
 
     These three are conservation IDENTITIES of the advection operator, not
     misattribution checks: a flow written on the WRONG edge still balances, so the
-    oracle for that is `test_junction_elimination_equals_the_hand_written_dense_system`.
+    reference for that is `test_junction_elimination_equals_the_hand_written_dense_system`.
     """
-    model, state, _ = build_street_model(from_test_network(), pblh_floor=False)
+    model, state, _ = build_model(from_test_network(), pblh_floor=False)
     drivers = _drivers(model, background=0.0)
     solved = model.steady(state, drivers)
     torch.testing.assert_close(
@@ -178,7 +178,7 @@ def _hand_reference(sn, *, emission, background, u_ref=U_REF, theta_w=THETA_W,
 
 def test_junction_elimination_equals_the_hand_written_dense_system():
     sn = from_test_network()
-    model, state, _ = build_street_model(sn, routing="mixing", pblh_floor=False)
+    model, state, _ = build_model(sn, routing="mixing", pblh_floor=False)
     emission = (1.0, 2.0, 3.0)
     solved = model.steady(state, _drivers(model, emission))
     hand = _hand_reference(sn, emission=torch.tensor(emission, dtype=DT),
@@ -231,10 +231,10 @@ def test_the_exchange_edge_pair_is_exactly_the_conduction_term():
 
 def test_gaussian_averaging_collapses_to_a_single_sample_at_zero_spread():
     sn = from_test_network()
-    plain, state, _ = build_street_model(sn, direction_averaging="none", pblh_floor=False)
+    plain, state, _ = build_model(sn, direction_averaging="none", pblh_floor=False)
     reference = plain.steady(state, _drivers(plain))["street.x"]
     for spread in (0.0, 1.0e-9):
-        model, state_g, _ = build_street_model(
+        model, state_g, _ = build_model(
             sn, direction_averaging="gauss", n_theta=5, sigma_theta=spread,
             pblh_floor=False,
         )
@@ -247,7 +247,7 @@ def test_gaussian_averaging_collapses_to_a_single_sample_at_zero_spread():
 def test_every_street_s_own_flux_is_fully_accounted_for_at_the_junction_it_enters():
     """Routing rows sum to one: the flux a street delivers to a junction leaves again,
     either into the other streets or through that junction's roof."""
-    model, state, _ = build_street_model(from_test_network(), routing="sirane",
+    model, state, _ = build_model(from_test_network(), routing="sirane",
                                          pblh_floor=False)
     drivers = _drivers(model)
     resolved = model._apply_closures(state, drivers)
@@ -283,7 +283,7 @@ def test_gradients_match_central_differences_through_the_whole_model():
     weakest sensitivity of the four), so 1e-6 is a tolerance the finite differences can
     support rather than one autograd needs.
     """
-    model, state, _ = build_street_model(from_test_network(), pblh_floor=False)
+    model, state, _ = build_model(from_test_network(), pblh_floor=False)
     for key in ("U_ref", "h_abl", "street.x_boundary"):
         drivers = _drivers(model)
         leaf = drivers[key].clone().requires_grad_(True)
@@ -323,7 +323,7 @@ def test_a_two_street_dead_end_pair_conserves_mass_in_both_wind_directions():
 
     These three are conservation IDENTITIES of the advection operator, not
     misattribution checks: a flow written on the WRONG edge still balances, so the
-    oracle for that is `test_junction_elimination_equals_the_hand_written_dense_system`.
+    reference for that is `test_junction_elimination_equals_the_hand_written_dense_system`.
     """
     sn = StreetNetwork(
         streets=[Street("r1", "a", "b", 100.0, 20.0, 20.0),
@@ -332,7 +332,7 @@ def test_a_two_street_dead_end_pair_conserves_mass_in_both_wind_directions():
         x={"a": 0.0, "b": 100.0, "c": 220.0, "d": 100.0},
         y={"a": 0.0, "b": 0.0, "c": 0.0, "d": 140.0},
     )
-    model, state, _ = build_street_model(sn, routing="sirane", pblh_floor=False)
+    model, state, _ = build_model(sn, routing="sirane", pblh_floor=False)
     for theta in (0.0, 0.5 * math.pi, math.pi, 1.3 * math.pi):
         drivers = _drivers(model, (1.0, 2.0, 3.0), theta_w=theta, background=0.0)
         solved = model.steady(state, drivers)

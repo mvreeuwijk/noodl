@@ -1,7 +1,7 @@
 """WSIMOD parity (design spec section 6, rows W1, W3, W4): CapacitatedTransferLayer
 replays WSIMOD's own captured per-arc requests and is compared against WSIMOD's own
-realised flows on the SAME topology -- WSIMOD's own hard-clipped output is the oracle,
-exactly as pyswmm/EPANET were oracles for milestone 4 (nothing here reimplements
+realised flows on the SAME topology -- WSIMOD's own hard-clipped output is the reference,
+exactly as pyswmm and EPANET were the references for milestone 4 (nothing here reimplements
 WSIMOD's node science, design spec section 1).
 
 `quickstart_demo`'s six arcs are all captured with WSIMOD's own `UNBOUNDED_CAPACITY`
@@ -43,14 +43,14 @@ WSIMOD itself provides a load-bearing test of the hard-clip branch actually clip
 something on an arc's own `c_arc` capacity. This is a real gap in what W1/W2 validate,
 not a minor footnote; a synthetic small-graph test with a deliberately tight `c_arc`
 would be needed to exercise that branch, and is recorded as a follow-up rather than
-retrofitted into this milestone's WSIMOD-oracle-only verification rows.
+retrofitted into this milestone's WSIMOD-reference-only verification rows.
 
 Oxford's `sewer_to_wwtw` arc DOES show `requested > realised` in 185 of its 1456
 timesteps (max observed gap ~3.924e6) -- but this is NOT that arc's own capacity acting
 (still 1e15, unbounded, confirmed the same way). It is WSIMOD's `WWTW` node applying its
 own internal `treatment_throughput_capacity` / stormwater-tank overflow logic
 (`wsimod/nodes/wtw.py`), a NODE-level throughput constraint this milestone's harness does
-not extract (`extract_topology`, `tests/verification/_wsimod_oracle.py`, reads only
+not extract (`extract_topology`, `tests/verification/_wsimod_reference.py`, reads only
 `arc.capacity`) and that `CapacitatedTransferLayer` does not model in this test (`s_max`
 here is a storage-headroom bound, set to infinity for every node, not a per-step
 throughput-rate cap). `test_oxford_hard_clip_matches_wsimod_realised_flows` below

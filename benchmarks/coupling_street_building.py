@@ -18,8 +18,9 @@ from pathlib import Path
 
 import torch
 
-from noodl.apps.building.prj import project_to_model, read_prj
-from noodl.apps.street.network import Street, StreetNetwork, build_street_model, street_index
+from noodl.apps.building_physics.prj import project_to_model, read_prj
+from noodl.apps.street_aq import network as street_network
+from noodl.apps.street_aq.network import Street, StreetNetwork, street_index
 from noodl.couple import (
     CONCENTRATION_TO_MASS_FRACTION,
     STREET_RAD_TO_CONTAM_DEG,
@@ -50,7 +51,7 @@ def small_street() -> StreetNetwork:
 
 def build_city(batch_size: int):
     net = small_street()
-    street_model, street_state, street_drivers = build_street_model(
+    street_model, street_state, street_drivers = street_network.build_model(
         net, species=("nox",), z_ref=10.0
     )
     graph = street_model.net

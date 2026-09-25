@@ -58,7 +58,7 @@ from pathlib import Path
 
 import torch
 
-from noodl.apps.building.thermal import R_AIR, RHO_0, species_layer
+from noodl.apps.building_physics.thermal import R_AIR, RHO_0, species_layer
 from noodl.drives import Stack, Wind, WindProfile
 from noodl.elements import (
     Damper,

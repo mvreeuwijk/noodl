@@ -53,10 +53,10 @@ dev = [
 # no wheel for any other platform, hence the marker. Tests that need it carry `external`
 # and skip themselves when the import fails, so CI on Linux is unaffected.
 contam = ["contamxpy>=0.0.9; sys_platform == 'win32'"]
-# `street` is a RUNTIME extra: `apps/street/loader.py` reads the AQ_DT NetCDF products
-# through `scipy.io.netcdf_file`, and `apps/street/impaq.py` -- the comparison oracle --
+# `street_aq` is a RUNTIME extra: `apps/street_aq/loader.py` reads the AQ_DT NetCDF products
+# through `scipy.io.netcdf_file`, and `apps/street_aq/impaq.py` -- the IMPAQ port --
 # needs `scipy.optimize` and `scipy.special`. Neither is on any path the core solves take.
-street = ["scipy>=1.11"]
+street_aq = ["scipy>=1.11"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

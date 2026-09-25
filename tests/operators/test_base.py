@@ -1,4 +1,4 @@
-"""Tests for the LinearOperator protocol, SolveResult, and the retained DenseOperator oracle."""
+"""Tests for the LinearOperator protocol, SolveResult, and the retained DenseOperator reference."""
 
 from __future__ import annotations
 

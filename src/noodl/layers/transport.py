@@ -502,7 +502,7 @@ class TransportLayer:
                 )
             # The conduction edges' ENDPOINTS, never the (n, b_c) incidence matrix and never
             # the (n, n) Laplacian, are this layer's whole representation of its conduction
-            # topology; `operator()`, the dense oracle, forms its (n, n) `L` from it on
+            # topology; `operator()`, the dense reference, forms its (n, n) `L` from it on
             # demand (`_conduction_matrix`).
             # History: see docs/development-history.md (Milestone 1b).
             csrc, ctgt = net.endpoints(conduction_kind)
@@ -669,10 +669,10 @@ class TransportLayer:
         """The (..., n, n) conduction Laplacian `A_c diag(g) A_c^T`, or None if no conduction.
 
         Built HERE, on demand, from the endpoint tuple rather than held as `self.L`: only
-        `operator()` -- the dense oracle, which is (..., K, n, n) anyway -- wants a matrix,
+        `operator()` -- the dense reference, which is (..., K, n, n) anyway -- wants a matrix,
         and every other path goes through `AdvectionOperator`'s own sparse conduction term.
         When there is no conduction this returns None rather than an (n, n) block of zeros,
-        so the oracle skips a subtraction instead of allocating n^2 doubles to subtract
+        so the reference skips a subtraction instead of allocating n^2 doubles to subtract
         nothing.
 
         `index_add` on a flattened (n*n,) view gives the same four entries per edge the
@@ -909,7 +909,7 @@ class TransportLayer:
     def rate(self, x, q, sources, x_boundary, *, capacity=None) -> torch.Tensor:
         """dx/dt = M x + N x_b + sources / capacity at (x, q); x's layout and dtype.
 
-        The balance `Model.residuals` reports for a transport layer, and the oracle the
+        The balance `Model.residuals` reports for a transport layer, and the reference the
         energy-balance tests check against. Zero at the fixed point of `steady`.
         `capacity` (keyword-only, spec 4.6b) overrides the construction-time capacity for
         this call only; see `_capacity_arg`.
@@ -1358,7 +1358,7 @@ def _van_loan_step_dense(
 ) -> torch.Tensor:
     """Exact linear step via the augmented matrix exponential (Van Loan, 1978).
 
-    Retained as the O(m^2) dense ORACLE for tests and for the small-system path; the
+    Retained as the O(m^2) dense reference for tests and for the small-system path; the
     operational path is `_expm_action`, which never forms this (2m, 2m) block.
     """
     m = M.shape[-1]

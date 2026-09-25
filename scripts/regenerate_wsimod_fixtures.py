@@ -2,7 +2,7 @@
 
 Run manually: `.venv/Scripts/python scripts/regenerate_wsimod_fixtures.py`. Never run by
 CI or by the test suite (design spec section 4.4) -- the committed fixtures ARE the
-oracle from pytest's point of view; this script is how they get produced in the first
+reference from pytest's point of view; this script is how they get produced in the first
 place, or refreshed against a newer `wsimod` release.
 
 Downloads WSIMOD's own demo forcing data on demand (design spec amendment A2: not
@@ -13,7 +13,7 @@ repository.
 What it does, in order: downloads the one forcing file both demos share into a temp
 directory; builds `quickstart_demo`'s model inline (design spec amendment A3) and
 `oxford_demo`'s via WSIMOD's own packaged `create_oxford_model`; runs each under the
-capture harness (`tests/verification/_wsimod_oracle.py`); and writes four fixtures --
+capture harness (`tests/verification/_wsimod_reference.py`); and writes four fixtures --
 `{quickstart,oxford}_topology.json` and `{quickstart,oxford}_events.csv` -- under
 `tests/data/wsimod/`. Both demos are fully implemented here (they were stubs raising
 `NotImplementedError` while milestone 4b's Task 5 only built the harness; Tasks 6 and 7
@@ -43,7 +43,7 @@ if str(REPO_ROOT) not in sys.path:
     # Run directly as `python scripts/regenerate_wsimod_fixtures.py` (this file's own
     # docstring above), sys.path[0] is `scripts/`, not the repo root -- pytest's own
     # `pythonpath = ["."]` (pyproject.toml) doesn't apply outside pytest, so the
-    # `tests.verification._wsimod_oracle` import below needs this inserted explicitly.
+    # `tests.verification._wsimod_reference` import below needs this inserted explicitly.
     sys.path.insert(0, str(REPO_ROOT))
 
 FIXTURE_DIR = REPO_ROOT / "tests" / "data" / "wsimod"
@@ -68,14 +68,14 @@ def _download_data_folder() -> str:
 def _build_and_capture_quickstart(data_folder: str) -> None:
     """Builds `quickstart_demo`'s model inline (design spec amendment A3: five node
     dicts, six arc dicts, `Model.add_nodes`/`add_arcs`), runs it under `capture_events`
-    (`tests/verification/_wsimod_oracle.py`), and writes `quickstart_topology.json` and
+    (`tests/verification/_wsimod_reference.py`), and writes `quickstart_topology.json` and
     `quickstart_events.csv` (one row per (arc, direction, timestep), aggregated from the
     harness's raw per-event rows -- see the print-out below) under `FIXTURE_DIR`."""
     import pandas as pd
     from wsimod.core import constants
     from wsimod.orchestration.model import Model
 
-    from tests.verification._wsimod_oracle import capture_events, extract_topology
+    from tests.verification._wsimod_reference import capture_events, extract_topology
 
     input_fid = os.path.join(data_folder, "processed", "timeseries_data.csv")
     input_data = pd.read_csv(input_fid)
@@ -160,12 +160,12 @@ def _build_and_capture_quickstart(data_folder: str) -> None:
 def _build_and_capture_oxford(data_folder: str) -> None:
     """Builds `oxford_demo`'s model via the packaged
     `wsimod.demo.create_oxford.create_oxford_model` (design spec amendment A3: 18 nodes,
-    21 arcs), runs it under `capture_events` (`tests/verification/_wsimod_oracle.py`),
+    21 arcs), runs it under `capture_events` (`tests/verification/_wsimod_reference.py`),
     and writes `oxford_topology.json` and `oxford_events.csv` under `FIXTURE_DIR`."""
     import pandas as pd
     from wsimod.demo.create_oxford import create_oxford_model
 
-    from tests.verification._wsimod_oracle import capture_events, extract_topology
+    from tests.verification._wsimod_reference import capture_events, extract_topology
 
     oxford_model = create_oxford_model(data_folder)
     oxford_topology = extract_topology(oxford_model)

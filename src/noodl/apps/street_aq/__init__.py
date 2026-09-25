@@ -5,7 +5,7 @@ every solve; this package decides the network, the closures and the units. Nothi
 `src/noodl/` outside `apps/` imports from here.
 """
 
-from noodl.apps.street.canyon import (
+from noodl.apps.street_aq.canyon import (
     GAMMA_E,
     KAPPA_IMPAQ,
     KAPPA_MUNICH,
@@ -21,31 +21,31 @@ from noodl.apps.street.canyon import (
     roof_wind,
     soulhac_shape,
 )
-from noodl.apps.street.chemistry import photostationary_for_streets, street_steady
-from noodl.apps.street.exposure import (
+from noodl.apps.street_aq.chemistry import photostationary_for_streets, street_steady
+from noodl.apps.street_aq.exposure import (
     Q_INHALATION,
     exposure_reduction_adjoint,
     exposure_reduction_forward,
     street_population,
     total_exposure,
 )
-from noodl.apps.street.loader import RHO_AIR, AqdtData, Forcing, read_aqdt
-from noodl.apps.street.network import (
+from noodl.apps.street_aq.loader import RHO_AIR, AqdtData, Forcing, read_aqdt
+from noodl.apps.street_aq.network import (
     Street,
     StreetNetwork,
-    build_street_model,
+    build_model,
     from_test_network,
     initial_state,
     munich_idealised,
     street_geometry,
     street_index,
 )
-from noodl.apps.street.report import (
+from noodl.apps.street_aq.report import (
     from_ug_m3,
     to_ug_m3,
     write_network_concentration,
 )
-from noodl.apps.street.routing import (
+from noodl.apps.street_aq.routing import (
     StreetFlows,
     StreetGeometry,
     direction_offsets,
@@ -73,7 +73,7 @@ __all__ = [
     "StreetGeometry",
     "StreetNetwork",
     "boundary_layer",
-    "build_street_model",
+    "build_model",
     "canyon_velocity",
     "direction_offsets",
     "exchange_velocity",

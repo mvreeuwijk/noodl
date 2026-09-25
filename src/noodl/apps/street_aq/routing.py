@@ -17,7 +17,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from noodl.apps.street.canyon import (
+from noodl.apps.street_aq.canyon import (
     KAPPA_IMPAQ,
     KAPPA_MUNICH,
     Z0_S_DEFAULT,
@@ -39,7 +39,7 @@ MAX_N_THETA = 10
 
 _FLOW_KINDS = ("route", "vent", "exchange")
 """The edge kinds `StreetFlows` writes its concatenated `q` in, and the order
-`build_street_model` must build the transport layer with. Checked at construction."""
+`build_model` must build the transport layer with. Checked at construction."""
 
 
 def sigma_theta_munich(sigma_v: Tensor, u_ref: Tensor) -> Tensor:
@@ -351,7 +351,7 @@ class StreetFlows:
         """The WHOLE slot layout and every index tensor, from the edges' own attributes.
 
         There is exactly one junction enumeration in this application and it lives in
-        `build_street_model`, which writes it onto the edges. Nothing here re-derives it:
+        `build_model`, which writes it onto the edges. Nothing here re-derives it:
         an earlier draft of this plan had the two enumerate junctions by different rules
         (`u + v` over all streets against `(u, v)` per street), which put the flows on the
         wrong edges and moved the answer by 34 % with no error anywhere.

@@ -38,17 +38,17 @@ calibration, sensitivity analysis and design optimisation.
 | **Composable physics layers** | Potential flow, multi-species and heat transport, reactions, and capacitated transfer — several of them on one network, stepped together under either of two coupling schemes. |
 | **Matvec-free solvers** | A `LinearOperator` contract with dense, graph-Laplacian and advection implementations; Newton with per-instance convergence; an implicit-function adjoint so gradients cost one linear solve rather than an unrolled tape. |
 | **Batching over instances** | Every solve is batched. A thousand building variants, or one network under a thousand weather realisations, is one call. |
-| **Validated against the reference tools** | Each application is checked against the established engine for its domain — CONTAM, MUNICH, SWMM, EPANET, WSIMOD — with the tolerances and measured errors written down. |
+| **Checked against reference implementations** | Each application is checked against the established engine for its domain — CONTAM, MUNICH, SWMM, EPANET, WSIMOD — with the tolerances and measured errors written down. |
 
 ## Applications
 
 noodl ships six worked applications. Each is a thin layer of domain physics over the shared
-core, and each is validated against the standard tool in its field.
+core, and each is checked against the standard reference implementation in its field.
 
 | Application | Physical system | Reference model |
 |---|---|---|
-| [Buildings](applications/building.md) | Multi-zone airflow, heat and contaminant transport | CONTAM / ContamX |
-| [Street canyons](applications/street.md) | Urban air quality, canyon exchange and routing | MUNICH, SIRANE, IMPAQ |
+| [Building physics](applications/building_physics.md) | Multi-zone airflow, heat and contaminant transport | CONTAM / ContamX |
+| [Street air quality](applications/street_aq.md) | Urban air quality, canyon exchange and routing | MUNICH, SIRANE, IMPAQ |
 | [Sewers](applications/sewer.md) | Gravity sewer hydraulics, headspace air, sulfide | SWMM |
 | [Water distribution](applications/water.md) | Pressurised mains, pumps, tanks, demand | EPANET 2.2 |
 | [Capacitated transfer](applications/capacitated.md) | Rule-based water-systems allocation | WSIMOD |

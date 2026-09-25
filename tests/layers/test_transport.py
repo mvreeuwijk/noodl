@@ -498,7 +498,7 @@ def test_boundary_values_pair_with_the_caller_s_boundary_order_not_node_order():
 
     This PINS the caller-order convention on the operator path. `AdvectionOperator` used to
     derive its boundary positions as "every node that is not interior", which is ASCENDING
-    node order, while the dense oracle `operator()` has always taken its `N` columns from
+    node order, while the dense reference `operator()` has always taken its `N` columns from
     `self.boundary_idx` -- `Network.boundary_index`, "in the order given". The two therefore
     disagreed for any layer whose `boundary` list is not in ascending node order, and nothing
     pinned either of them (the composed model's two boundary values are equal, so it cannot

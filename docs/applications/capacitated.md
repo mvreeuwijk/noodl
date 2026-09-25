@@ -199,7 +199,7 @@ to the true max-min-fair split and never past it. The default of 5 matches WSIMO
 batched differentiability — each round is strictly non-expansive, so a fixed cap is a safe
 over-approximation rather than a different algorithm.
 
-## Validation
+## Verification
 
 Against WSIMOD 0.8.1 (Dobson, Liu and Mijic), pinned **exactly** rather than with `>=`, because
 the committed fixtures freeze one specific WSIMOD run and a newer release could silently change
@@ -215,13 +215,13 @@ committed fixtures mean the parity tests run **without WSIMOD installed**.
 | W2 | Same, `oxford_demo`, 20 of 21 arcs | 1e-6 abs | **1.86e-9** |
 | W3 | `"smooth"` at $\tau=10^{-3}$ vs W1's own hard-clip output | 3e-3 abs | **1.79e-3** |
 | W4 | `"projection"` vs W1's own hard-clip output | 1e-9 abs | **9.10e-13** |
-| W5 | Conservation, both demos, all three modes | exact | holds, no oracle needed |
+| W5 | Conservation, both demos, all three modes | exact | holds, no reference needed |
 | W6 | `gradcheck` through smooth and projection on the diamond | analytic | holds |
 | W7 | `n_passes=5` vs a hand-converged reference | exact | holds |
 
 ### What the WSIMOD parity does not show
 
-**Read this before citing W1 or W2 as validating the capacity clip itself.**
+**Read this before citing W1 or W2 as verifying the capacity clip itself.**
 
 Neither reference demo ever exercises a genuine arc-capacity clip. Of `quickstart_demo`'s 6 arcs
 and `oxford_demo`'s 21, all but one sit at WSIMOD's own `UNBOUNDED_CAPACITY` of 1e15 for the
@@ -230,7 +230,7 @@ sees a request above about 30,934 across oxford's full 1,456-day run. This was c
 the fixture data directly: `requested > capacity` is true for **zero rows, for every arc, in the
 whole fixture**.
 
-W1 and W2 therefore validate the clip arithmetic **only on the identity path**
+W1 and W2 therefore check the clip arithmetic **only on the identity path**
 ($\min(x, c) = x$), never on the branch where $c$ actually binds.
 
 The same applies, for a different reason, to the *other* bound: both fixtures set
@@ -244,7 +244,7 @@ rigorously unit-tested on synthetic fixtures with deliberately tight bounds. The
 and specific: WSIMOD's own numbers have never cross-checked the behaviour *at* the point a
 constraint binds, because neither demo pushes any arc that far. It is the same distinction the
 other applications draw between a coefficient *calibrated* to one source and one *independently
-validated*.
+verified*.
 
 A separate exclusion: `oxford_demo`'s `sewer_to_wwtw` arc is left out of W2 (20 of 21 arcs
 compared) because it shows 185 of 1,456 mismatched timesteps, root-caused to WSIMOD's own `WWTW`

@@ -32,7 +32,7 @@ network, solve it, or differentiate through it.
 
 ```bash
 pip install "noodl[sparse]"        # sparse-direct linear solver
-pip install "noodl[street]"        # the street application's file I/O and oracle
+pip install "noodl[street_aq]"     # the street air quality application's file I/O and IMPAQ port
 pip install "noodl[contam]"        # ContamX parity, Windows x86-64 only
 pip install "noodl[dev]"           # everything needed to run the test suite
 ```
@@ -40,8 +40,8 @@ pip install "noodl[dev]"           # everything needed to run the test suite
 | Extra | Adds | Why you might want it |
 |---|---|---|
 | `sparse` | `scipy>=1.11` | The SciPy SuperLU backend. This is a **runtime** extra, not a developer convenience — see the note below. |
-| `street` | `scipy>=1.11` | The [street application](applications/street.md) reads its AQ_DT NetCDF products through `scipy.io.netcdf_file`, and its IMPAQ comparison oracle needs `scipy.optimize` and `scipy.special`. |
-| `contam` | `contamxpy>=0.0.9` (Windows x86-64 only) | Runs NIST's ContamX engine directly for the [building application's](applications/building.md) parity tests. The wheel bundles ContamX 3.4.1.7, so no separate CONTAM installation is needed. There is no wheel for any other platform, hence the marker. |
+| `street_aq` | `scipy>=1.11` | The [street air quality application](applications/street_aq.md) reads its AQ_DT NetCDF products through `scipy.io.netcdf_file`, and its IMPAQ port check needs `scipy.optimize` and `scipy.special`. |
+| `contam` | `contamxpy>=0.0.9` (Windows x86-64 only) | Runs NIST's ContamX engine directly for the [building physics application's](applications/building_physics.md) parity tests. The wheel bundles ContamX 3.4.1.7, so no separate CONTAM installation is needed. There is no wheel for any other platform, hence the marker. |
 | `dev` | pytest, ruff, hypothesis, pytest-cov, plus the reference engines | The full test suite, including parity against SWMM (`pyswmm`), EPANET (`wntr`) and WSIMOD. |
 
 **The `sparse` extra deserves a moment.** The default linear-solver selection,

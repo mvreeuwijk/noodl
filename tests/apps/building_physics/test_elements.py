@@ -7,7 +7,7 @@ import math
 import pytest
 import torch
 
-from noodl.apps.building.elements import (
+from noodl.apps.building_physics.elements import (
     add_large_opening,
     mass_orifice,
     orifice_elements_from_edges,

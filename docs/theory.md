@@ -418,7 +418,7 @@ for the transient and for the stack. All live in `tests/verification/`.
 
 ## 8. Street canyons as a transport layer
 
-*(Written from the implementation, milestone 3: this section describes what `apps/street`
+*(Written from the implementation, milestone 3: this section describes what `apps/street_aq`
 does and why, and its verification cases are in the repository.)*
 
 **The street balance IS the framework's transport equation, again.** For a canyon street
@@ -499,7 +499,7 @@ on is
 u_h = u* sqrt(pi/(sqrt(2) kappa^2 c) [Y0(c) - J0(c) Y1(c)/J1(c)])
 ```
 
-The four Bessel functions are the reason `apps/street/canyon.py` wraps
+The four Bessel functions are the reason `apps/street_aq/canyon.py` wraps
 `torch.special.bessel_j0/j1/y0/y1` in `torch.autograd.Function`s: the torch kernels carry
 no `grad_fn` at all, and `solve_monotone` differentiates its own residual.
 
@@ -530,10 +530,10 @@ fluxes it feeds stay differentiable.
 **Verification.** `tests/verification/test_munich.py` pins the thirteen exact formula pairs
 against MUNICH's own source (each at the precision its source publishes) and the idealised
 12-street case against Kim et al. (2022) Fig. 1; `tests/verification/test_street_parity.py`
-checks the ported IMPAQ oracle against both a four-node hand network and the real
+checks the IMPAQ port against both a four-node hand network and the real
 `leiden_small` domain. Conservation, junction elimination against hand algebra, and
 gradients through the whole model against central differences are in
-`tests/apps/street/test_conservation.py`.
+`tests/apps/street_aq/test_conservation.py`.
 
 ## 9. Sewers and water distribution
 
@@ -731,7 +731,7 @@ asserts the literal -0.5 value under asymmetric weights.
 **Verification, and what it does and does not show.** `tests/verification/
 test_wsimod_parity.py` replays WSIMOD's own captured per-arc requests from its packaged
 `quickstart_demo` and `oxford_demo` scripts through `CapacitatedTransferLayer` and compares
-against WSIMOD's own realised flows -- WSIMOD's output is the oracle here, the same
+against WSIMOD's own realised flows -- WSIMOD is the reference implementation here, the same
 relationship pyswmm and EPANET have with the sewer and water applications above, and it is
 NOT an independent measurement. This comparison has a real, specific limitation: of
 `quickstart_demo`'s 6 arcs and `oxford_demo`'s 21 arcs, all but one sit at WSIMOD's own

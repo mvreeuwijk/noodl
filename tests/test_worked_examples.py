@@ -1,11 +1,11 @@
-"""Parity tests against captured worked-example oracles.
+"""Parity tests against captured worked-example golden references.
 
 ``tests/golden/worked_examples.json`` holds numeric results for three worked examples -- a
 quadratic-drag loop, a spring-mass-damper stepped implicitly, and a three-zone contaminant
 exchange -- computed independently of this codebase. Each test here reproduces one of the
-examples with today's public layer API and checks the result against the captured oracle, not
-against a value re-derived from today's code -- that is what makes this a PARITY test rather
-than an ordinary regression test.
+examples with today's public layer API and checks the result against the captured reference,
+not against a value re-derived from today's code -- that is what makes this a PARITY test
+rather than an ordinary regression test.
 """
 
 import json

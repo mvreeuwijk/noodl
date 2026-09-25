@@ -12,8 +12,8 @@ from pathlib import Path
 
 import torch
 
-from noodl.apps.building.elements import add_large_opening, orifice_elements_from_edges
-from noodl.apps.building.thermal import Zone, add_zone, build_model, initial_state
+from noodl.apps.building_physics.elements import add_large_opening, orifice_elements_from_edges
+from noodl.apps.building_physics.thermal import Zone, add_zone, build_model, initial_state
 from noodl.drives import Stack
 from noodl.topology import Network
 

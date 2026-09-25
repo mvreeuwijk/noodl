@@ -15,8 +15,8 @@ from dataclasses import dataclass, field
 
 import torch
 
-from noodl.apps.street.canyon import Z0_B_DEFAULT, Z0_S_DEFAULT
-from noodl.apps.street.routing import StreetFlows, StreetGeometry
+from noodl.apps.street_aq.canyon import Z0_B_DEFAULT, Z0_S_DEFAULT
+from noodl.apps.street_aq.routing import StreetFlows, StreetGeometry
 from noodl.layers.reaction import Reaction
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Drivers, Model, State
@@ -162,7 +162,7 @@ def munich_idealised(
     return net, [s.name for s in streets]
 
 
-def build_street_model(
+def build_model(
     net: StreetNetwork,
     *,
     canyon_wind: str = "soulhac",
@@ -208,7 +208,7 @@ def build_street_model(
     names = [s.name for s in net.streets]
     if atmosphere in names:
         raise ValueError(
-            f"build_street_model: a street is called {atmosphere!r}, which is the name of "
+            f"build_model: a street is called {atmosphere!r}, which is the name of "
             f"the boundary node; rename the street or pass another `atmosphere`"
         )
     graph = Network(dtype=_DTYPE)
@@ -245,7 +245,7 @@ def build_street_model(
     ordered = [graph.nodes[i] for i in interior.tolist()]
     if ordered != names:
         raise ValueError(
-            f"build_street_model: the layer's active interior came out as {ordered}, not "
+            f"build_model: the layer's active interior came out as {ordered}, not "
             f"the street order {names}; every index in this application assumes they agree"
         )
     capacity = torch.tensor(
@@ -290,7 +290,7 @@ def initial_state(model: Model) -> State:
             raise ValueError(
                 f"initial_state: transport layer {name!r} has quantity "
                 f"{layer.quantity!r}, which the street application has no initial value "
-                f"for (it knows 'concentration'); build it with build_street_model, or "
+                f"for (it knows 'concentration'); build it with build_model, or "
                 f"set that layer's own state key {name + '.x'!r} yourself"
             )
         shape = (layer.n_i,) if layer.n_species == 1 else (layer.n_i, layer.n_species)

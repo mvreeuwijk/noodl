@@ -1,4 +1,4 @@
-"""DenseOperator: the retained dense test oracle every sparse operator is checked against."""
+"""DenseOperator: the retained dense reference every sparse operator is checked against."""
 
 from __future__ import annotations
 

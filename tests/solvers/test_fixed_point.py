@@ -81,8 +81,9 @@ def test_several_interface_tensors_of_different_shapes():
 def test_nonlinear_coupled_map_matches_the_dense_implicit_solve():
     """The brief's other maps are all linear and most are uncoupled; P1-2's real target is a
     COUPLED nonlinear model, where one pass's derivative and the fixed point's differ. The
-    oracle here is the implicit function theorem evaluated with dense Jacobians and an LU
-    solve -- a wholly different code path from the utility's GMRES-on-VJPs.
+    independent reference here is the implicit function theorem evaluated with dense
+    Jacobians and an LU solve -- a wholly different code path from the utility's
+    GMRES-on-VJPs.
     """
     theta = torch.tensor(0.4, dtype=F64, requires_grad=True)
 

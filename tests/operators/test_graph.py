@@ -45,7 +45,7 @@ def test_assemble_matches_hand_derived_chain_fixture():
     torch.testing.assert_close(A[1], expect1)
 
 
-def test_matvec_matches_dense_oracle_on_random_batched_inputs():
+def test_matvec_matches_dense_reference_on_random_batched_inputs():
     slopes = torch.tensor([[1.0, 1.0], [0.0, 1.0]])
     op = _chain_op(slopes)
     dense = DenseOperator(op.assemble(), symmetric=True)

@@ -8,13 +8,13 @@ import pytest
 import torch
 
 from noodl.apps.sewer import geometry as geom
-from noodl.apps.sewer.network import build_sewer_model, tree_steady
+from noodl.apps.sewer.network import build_model, tree_steady
 
 F64 = torch.float64
 
 
 def test_transport_through_a_filling_and_draining_sewer_conserves_the_amount():
-    model, state, drivers = build_sewer_model(
+    model, state, drivers = build_model(
         tree_steady(), air=False, quality=True, storage=True,
     )
     model.reactions = []                       # transport alone: no sulfide generation or BOD decay

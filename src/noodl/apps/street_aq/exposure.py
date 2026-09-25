@@ -22,7 +22,7 @@ from collections.abc import Sequence
 
 import torch
 
-from noodl.apps.street.network import StreetNetwork, street_index
+from noodl.apps.street_aq.network import StreetNetwork, street_index
 
 Q_INHALATION = 0.571 / 3600.0   # m3/s per person: 0.571 m3/h (Li et al. 2023, section 2.3)
 

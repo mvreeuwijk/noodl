@@ -1,4 +1,4 @@
-"""Independent oracles for the coupling findings R1 and R2 of the 19 September review.
+"""Independent references for the coupling findings R1 and R2 of the 19 September review.
 
 Two unit-capacity compartments. A: one edge zone->ambient that carries no flow, so A changes
 only through the sources the coupler adds. B: zone->ambient and ambient->zone, both carrying

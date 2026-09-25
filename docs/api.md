@@ -104,30 +104,30 @@ Generated from the package's own docstrings. For the ideas behind these objects,
 
 ## Applications
 
-### Buildings
+### Building physics
 
-::: noodl.apps.building.thermal
-::: noodl.apps.building.elements
-::: noodl.apps.building.prj
+::: noodl.apps.building_physics.thermal
+::: noodl.apps.building_physics.elements
+::: noodl.apps.building_physics.prj
     options:
       members: [read_prj, project_to_model, Project]
-::: noodl.apps.building.wth
+::: noodl.apps.building_physics.wth
     options:
       members: [read_wth, Weather]
-::: noodl.apps.building.sources
+::: noodl.apps.building_physics.sources
 
-### Street canyons
+### Street air quality
 
-::: noodl.apps.street.network
-::: noodl.apps.street.canyon
-::: noodl.apps.street.routing
+::: noodl.apps.street_aq.network
+::: noodl.apps.street_aq.canyon
+::: noodl.apps.street_aq.routing
     options:
       members: [StreetFlows, StreetGeometry, routing_matrix, node_closure, direction_offsets]
-::: noodl.apps.street.chemistry
-::: noodl.apps.street.loader
+::: noodl.apps.street_aq.chemistry
+::: noodl.apps.street_aq.loader
     options:
       members: [read_aqdt, AqdtData, Forcing]
-::: noodl.apps.street.report
+::: noodl.apps.street_aq.report
 
 ### Sewers
 
@@ -140,7 +140,7 @@ Generated from the package's own docstrings. For the ideas behind these objects,
 ::: noodl.apps.sewer.quality
 ::: noodl.apps.sewer.inp
     options:
-      members: [read_inp]
+      members: [read_swmm_inp]
 ::: noodl.apps.sewer.report
 
 ### Water distribution

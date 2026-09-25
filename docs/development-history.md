@@ -1364,6 +1364,35 @@ relabelling would need to preserve that deliberately), and no genuine data dupli
 fix. Flagged here rather than silently resolved either way, since the ledger's wording assumed
 regenerating would remove it and this regeneration does not.
 
+## Application names and reference terminology (24 Sep 2026)
+
+Earlier records in this file, and every document under `docs/superpowers/`, use the pre-rename
+package paths and builder names -- the building and street application packages without their
+current suffixes, each builder named after its own application rather than sharing one name, and
+the SWMM reader under its old, shorter name -- together with the retired word "oracle".
+
+**Renames.** `noodl.apps.building` is now `noodl.apps.building_physics`, and `noodl.apps.street`
+is now `noodl.apps.street_aq` -- each package now says what it models. `sewer` and `water` are
+unchanged. `build_street_model`, `build_sewer_model` and `build_water_model` are now all
+`build_model`: every application exposes the same name, and the qualified import already says
+which application it builds for. Sewer's `read_inp` is now `read_swmm_inp`, matching
+`read_epanet_inp`. The install extra `noodl[street]` is now `noodl[street_aq]`. State keys such
+as `"street.x"` and `"sewer.H"` are unchanged, because they name physical layers and appear in
+saved fixtures.
+
+**No compatibility shims.** noodl is a prototype. The old import paths fail with
+`ModuleNotFoundError` rather than warning; downstream code is updated by its owner.
+
+**Terminology.** The word "oracle" is retired. The retired term is standard software-testing
+vocabulary, but the readers of these pages are modellers. The pages now speak of reference
+implementations, parity tests and validation, defined on the [applications page]
+(applications/index.md). Dense code paths kept for checking sparse ones are "dense references",
+and agreement with the IMPAQ port is a port check.
+
+**Deferred.** A `noodl.apps.wsimod` package with a WSIMOD configuration reader and a parity case
+where capacities bind is its own milestone. Moving the MUNICH reader from a separate analysis
+pipeline into `noodl.apps.street_aq` is also deferred.
+
 ## Weather and exposure additions (25 September 2026)
 
 Two general-purpose additions to the building and street applications:
@@ -1431,7 +1460,7 @@ src/noodl/
                  closures (milestone 5)
   operators/     the matvec-free linear-operator contract: base.py (LinearOperator protocol,
                  SolveResult, SolverStatus), dense.py (DenseOperator, the retained dense
-                 oracle), graph.py (GraphLaplacianOperator), advection.py (AdvectionOperator)
+                 reference), graph.py (GraphLaplacianOperator), advection.py (AdvectionOperator)
   solvers/       scalar.py (solve_monotone), linear.py (solve, the dense reference),
                  grounding.py (spd_certificate, spd_diagnosis), iterative.py (pcg, gmres;
                  never raise), select.py (solve: the method="auto" eligibility table and the
@@ -1439,32 +1468,35 @@ src/noodl/
                  implicit.py (implicit_solve, adjoint)
   layers/        potential.py (PotentialFlowLayer), transport.py (TransportLayer),
                  reaction.py (Reaction, FirstOrderDecay)
-  apps/building/ the building application: thermal.py (Zone, WallMass, thermal_layer,
+  apps/building_physics/ the building application: thermal.py (Zone, WallMass, thermal_layer,
                  species_layer, IdealGasDensity, LinearDensity, build_model), elements.py
                  (mass_orifice, add_large_opening), prj.py (the CONTAM .prj reader, a
                  documented subset, and project_to_model), wth.py (the .wth weather reader),
-                 sources.py (the four CONTAM source types), contamx.py (the ContamX driver
-                 over contamxpy)
-  apps/street/   the street application: canyon.py (BoundaryLayer, canyon_velocity,
+                 epw.py (read_epw, write_wth -- an EnergyPlus .epw weather file read into a
+                 Weather and written back out as a CONTAM .wth file), sources.py (the four
+                 CONTAM source types), contamx.py (the ContamX driver over contamxpy)
+  apps/street_aq/ the street application: canyon.py (BoundaryLayer, canyon_velocity,
                  exchange_velocity, the soulhac/macdonald closures), routing.py
                  (StreetGeometry, StreetFlows, routing_matrix, node_closure,
                  direction_offsets -- the north-west-corner routing), network.py
-                 (StreetNetwork, build_street_model, street_geometry, street_index,
+                 (StreetNetwork, build_model, street_geometry, street_index,
                  munich_idealised), chemistry.py (photostationary_for_streets,
-                 street_steady), loader.py (read_aqdt, the AQ_DT GeoJSON/NetCDF reader),
-                 impaq.py (the IMPAQ prototype ported as a numpy/scipy comparison oracle,
-                 kept as per-edge Python loops by design -- it is the oracle, not the
-                 model path), report.py (to_ug_m3, from_ug_m3,
-                 write_network_concentration)
+                 street_steady), exposure.py (street_population, total_exposure,
+                 exposure_reduction_forward, exposure_reduction_adjoint -- population-
+                 weighted exposure and its adjoint-based reduction sensitivity), loader.py
+                 (read_aqdt, the AQ_DT GeoJSON/NetCDF reader), impaq.py (the IMPAQ prototype
+                 ported as a numpy/scipy reference implementation, kept as per-edge Python
+                 loops by design -- it is the port, not the model path), report.py
+                 (to_ug_m3, from_ug_m3, write_network_concentration)
   apps/sewer/    the gravity-sewer application: geometry.py (exact circular geometry, the
                  batched Manning normal-depth inversion), hydraulics.py (SewerHydraulics --
                  closure-first tree flow, depth, the optional implicit-Euler storage
                  sweep), air.py (Headspace, Drag, air_density), quality.py (Henry's law,
                  the two-film flux, Pomeroy-Parkhurst sulfide generation, BOD decay,
-                 LateralLoads), network.py (SewerNetwork, build_sewer_model, sewer_steady),
-                 inp.py (a documented SWMM .inp subset) and report.py
+                 LateralLoads), network.py (SewerNetwork, build_model, sewer_steady),
+                 inp.py (a documented SWMM .inp subset, read_swmm_inp) and report.py
   apps/water/    the pressurised water-distribution application: network.py (Junction/
-                 Reservoir/Tank/WaterPipe/Pump/Valve, WaterNetwork, build_water_model,
+                 Reservoir/Tank/WaterPipe/Pump/Valve, WaterNetwork, build_model,
                  water_steady), elements.py (HazenWilliams, PumpCurve, MinorLoss),
                  tanks.py (TankLevels), demand.py (PressureDrivenDemand), inp.py (a
                  documented EPANET 2.2 .inp subset) and report.py
@@ -1475,7 +1507,10 @@ tests/
   conftest.py, test_topology.py, test_endpoints.py, test_cycles.py, test_cycles_sparse.py,
   test_drives.py, test_flows.py, test_import.py, test_model.py,
   test_couple.py (the union mechanism: conversions, one- and
-  two-way links, aliases, substeps, gradients across the join)
+  two-way links, aliases, substeps, gradients across the join),
+  test_epw.py (apps.building_physics.epw: unit conversion, the fixed-calendar time axis,
+  EPW missing-value and multi-year rejection), test_exposure.py (apps.street_aq.exposure:
+  street_population, total_exposure, and the forward/adjoint reduction agreement)
   elements/      test_base.py, test_powerlaw.py, test_quadratic.py, test_fixed.py,
                  test_conductance.py, test_fan.py
   operators/     test_base.py, test_graph.py, test_advection.py, test_assemble_sparse.py
@@ -1484,15 +1519,15 @@ tests/
                  test_implicit.py, test_implicit_operator_contract.py
   layers/        test_potential.py, test_potential_sparse.py, test_transport.py,
                  test_transport_sparse.py, test_reaction.py
-  apps/building/ test_thermal.py, test_elements.py, test_prj.py, test_wth.py,
+  apps/building_physics/ test_thermal.py, test_elements.py, test_prj.py, test_wth.py,
                  test_sources.py; tests/data/contam holds the sample projects
-  apps/street/   test_canyon.py, test_routing.py, test_network.py, test_chemistry.py,
+  apps/street_aq/ test_canyon.py, test_routing.py, test_network.py, test_chemistry.py,
                  test_loader.py, test_impaq_port.py, test_conservation.py, test_report.py;
                  tests/data/street holds the AQ_DT and MUNICH fixtures
   verification/  CONTAM-style closed-form airflow cases, batched against scipy roots;
                  test_composed_model.py (parity, interface conservation, cross-join
                  gradients); test_natural_ventilation.py (Li and Delsante closed forms, a
-                 two-zone scipy oracle, Hensen's ping-pong/onion table, the golden);
+                 two-zone scipy reference, Hensen's ping-pong/onion table, the golden);
                  test_contam_parity.py (ContamX through contamxpy, skipped when absent);
                  CPU performance budgets and test_composed_scaling.py, the milestone-1b
                  and milestone-2 acceptance gates (both marked slow, skipped by default);
@@ -1528,3 +1563,4 @@ benchmarks/
   regenerate_golden.py        rewrites tests/golden/contam_airflow.json and
                               tests/golden/natural_ventilation.json (explicit action)
 ```
+

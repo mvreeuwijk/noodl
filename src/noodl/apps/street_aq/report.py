@@ -75,7 +75,7 @@ def write_network_concentration(
     with netcdf_file(str(path), "w") as handle:
         handle.product_description = (
             "Network-only AQ product: canyon concentration increments on "
-            "network-transport edges, written by noodl.apps.street.report"
+            "network-transport edges, written by noodl.apps.street_aq.report"
         )
         handle.solver_background = str(float(solver_background))
         handle.file_format_note = (

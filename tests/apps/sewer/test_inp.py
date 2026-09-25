@@ -4,13 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from noodl.apps.sewer.inp import read_inp
+from noodl.apps.sewer.inp import read_swmm_inp
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "sewer"
 
 
 def test_the_committed_fixture_round_trips_to_the_research_network():
-    net, inflows, pollutants = read_inp(DATA / "tree_steady.inp")
+    net, inflows, pollutants = read_swmm_inp(DATA / "tree_steady.inp")
     net.validate()
     assert [m.name for m in net.manholes] == ["J1", "J2", "J5", "J3", "J4"]
     assert [o.name for o in net.outfalls] == ["Outfall"]
@@ -30,7 +30,7 @@ def test_the_committed_fixture_round_trips_to_the_research_network():
 
 
 def test_the_pollutant_variant_carries_the_tracer():
-    net, inflows, pollutants = read_inp(DATA / "tree_kinwave_pollut.inp")
+    net, inflows, pollutants = read_swmm_inp(DATA / "tree_kinwave_pollut.inp")
     assert set(pollutants) == {"Tracer"}
     # MG/L is converted to kg/m3 by 1e-3, and Kdecay 1/day to 1/s
     assert pollutants["Tracer"]["decay"] == pytest.approx(5.0 / 86400.0, rel=1e-14)
@@ -50,7 +50,7 @@ def test_conduit_offsets_shift_the_effective_invert_under_link_offsets_depth(tmp
     text = original.replace(old_line, " ".join(fields))
     path = tmp_path / "offset.inp"
     path.write_text(text)
-    net, _, _ = read_inp(path)
+    net, _, _ = read_swmm_inp(path)
     pipe = next(p for p in net.pipes if p.name == "C1")
     fall = 12.0 - (10.0 + 0.5)
     assert pipe.slope == pytest.approx(fall / (200.0**2 - fall**2) ** 0.5, rel=1e-12)
@@ -59,7 +59,7 @@ def test_conduit_offsets_shift_the_effective_invert_under_link_offsets_depth(tmp
 def test_conduits_are_normalised_upstream_to_downstream():
     """C1 is written J1 -> J3 with inverts 12.0 and 10.0, so it already runs downhill; the
     reader still recomputes the slope from the inverts and the 3-D chord length."""
-    net, _, _ = read_inp(DATA / "tree_steady.inp")
+    net, _, _ = read_swmm_inp(DATA / "tree_steady.inp")
     pipe = next(p for p in net.pipes if p.name == "C1")
     assert (pipe.u, pipe.v) == ("J1", "J3")
     assert pipe.slope == pytest.approx(2.0 / (200.0**2 - 2.0**2) ** 0.5, rel=1e-12)
@@ -72,7 +72,7 @@ def test_non_cms_flow_units_are_refused(tmp_path):
     path = tmp_path / "cfs.inp"
     path.write_text(text)
     with pytest.raises(ValueError, match="FLOW_UNITS must be CMS"):
-        read_inp(path)
+        read_swmm_inp(path)
 
 
 def test_an_unknown_section_with_content_is_refused(tmp_path):
@@ -80,7 +80,7 @@ def test_an_unknown_section_with_content_is_refused(tmp_path):
     path = tmp_path / "pumps.inp"
     path.write_text(text)
     with pytest.raises(ValueError, match=r"\[PUMPS\]"):
-        read_inp(path)
+        read_swmm_inp(path)
 
 
 def test_a_time_series_inflow_is_refused(tmp_path):
@@ -91,7 +91,7 @@ def test_a_time_series_inflow_is_refused(tmp_path):
     path = tmp_path / "ts.inp"
     path.write_text(text)
     with pytest.raises(ValueError, match="time series"):
-        read_inp(path)
+        read_swmm_inp(path)
 
 
 def test_a_non_circular_cross_section_is_refused(tmp_path):
@@ -101,7 +101,7 @@ def test_a_non_circular_cross_section_is_refused(tmp_path):
     path = tmp_path / "rect.inp"
     path.write_text(text)
     with pytest.raises(ValueError, match="only CIRCULAR"):
-        read_inp(path)
+        read_swmm_inp(path)
 
 
 def test_a_conduit_with_zero_fall_is_refused(tmp_path):
@@ -111,7 +111,7 @@ def test_a_conduit_with_zero_fall_is_refused(tmp_path):
     path = tmp_path / "flat.inp"
     path.write_text(text)
     with pytest.raises(ValueError, match="zero or adverse fall"):
-        read_inp(path)
+        read_swmm_inp(path)
 
 
 def test_a_dwf_section_is_refused(tmp_path):
@@ -119,9 +119,9 @@ def test_a_dwf_section_is_refused(tmp_path):
     path = tmp_path / "dwf.inp"
     path.write_text(text)
     with pytest.raises(ValueError, match=r"\[DWF\]"):
-        read_inp(path)
+        read_swmm_inp(path)
 
 
 def test_the_kinwave_variant_records_its_routing():
-    net, _, _ = read_inp(DATA / "tree_kinwave.inp")
+    net, _, _ = read_swmm_inp(DATA / "tree_kinwave.inp")
     assert net.routing == "KINWAVE"

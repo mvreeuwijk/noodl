@@ -14,7 +14,7 @@ import math
 import pytest
 import torch
 
-from noodl.apps.street.canyon import (
+from noodl.apps.street_aq.canyon import (
     C_BRACKET_HI,
     C_BRACKET_LO,
     GAMMA_E,

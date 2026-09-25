@@ -321,7 +321,7 @@ def twoloop() -> WaterNetwork:
     )
 
 
-def build_water_model(
+def build_model(
     net: WaterNetwork,
     *,
     headloss: str | None = None,
@@ -371,7 +371,7 @@ def build_water_model(
     headloss = headloss or net.headloss
     if headloss not in ("H-W", "D-W"):
         raise ValueError(
-            f"build_water_model: headloss must be 'H-W' or 'D-W', got {headloss!r}"
+            f"build_model: headloss must be 'H-W' or 'D-W', got {headloss!r}"
         )
     options = net.options
     if pda is None:
@@ -384,7 +384,7 @@ def build_water_model(
         exponent = options.pressure_exponent
     if headloss == "H-W" and (options.specific_gravity != 1.0 or options.viscosity != 1.0):
         raise ValueError(
-            f"build_water_model: [OPTIONS] SPECIFIC GRAVITY {options.specific_gravity!r} "
+            f"build_model: [OPTIONS] SPECIFIC GRAVITY {options.specific_gravity!r} "
             f"/ VISCOSITY {options.viscosity!r} are not the defaults, but Hazen-Williams "
             f"does not take fluid density or viscosity (EPANET's own H-W formula is "
             f"calibrated for water); use headloss='D-W' or leave both at 1.0"
@@ -481,7 +481,7 @@ def build_water_model(
     node_sources: list = []
     if pda:
         if not net.junctions:
-            raise ValueError("build_water_model: pda=True on a network with no junctions")
+            raise ValueError("build_model: pda=True on a network with no junctions")
         node_sources.append(
             PressureDrivenDemand(
                 torch.tensor(
@@ -538,7 +538,7 @@ def build_water_model(
 
     if quality is not None:
         if not net.pipes:
-            raise ValueError("build_water_model: quality on a network with no pipes")
+            raise ValueError("build_model: quality on a network with no pipes")
         volume = torch.tensor(
             [torch.pi * p.diameter**2 / 4.0 * p.length for p in net.pipes], dtype=F64
         )
@@ -555,7 +555,7 @@ def build_water_model(
                 if value <= 0
             ]
             raise ValueError(
-                f"build_water_model: junction(s) {bad} touch no pipe, so their quality "
+                f"build_model: junction(s) {bad} touch no pipe, so their quality "
                 f"capacity is zero; a node with no volume cannot hold a concentration"
             )
         demand = torch.tensor([j.demand for j in net.junctions], dtype=F64)
@@ -598,7 +598,7 @@ def _fit_three_points(points, name: str) -> tuple[Tensor, Tensor]:
     (q1, h1), (q2, h2), (q3, h3) = sorted(points)
     if q1 != 0.0:
         raise ValueError(
-            f"build_water_model: pump {name!r} has a three-point curve whose first point "
+            f"build_model: pump {name!r} has a three-point curve whose first point "
             f"is at flow {q1}, not 0; EPANET's fit takes the shut-off head there"
         )
     h0 = torch.tensor(h1, dtype=F64)
@@ -606,7 +606,7 @@ def _fit_three_points(points, name: str) -> tuple[Tensor, Tensor]:
     predicted = h1 - float(r) * q3**2
     if abs(predicted - h3) > 1e-6 * max(abs(h3), 1.0):
         raise ValueError(
-            f"build_water_model: pump {name!r}'s three points are not consistent with the "
+            f"build_model: pump {name!r}'s three points are not consistent with the "
             f"exponent 2 this application fits (the third point implies {predicted}, the "
             f"curve gives {h3}); a general exponent is a recorded follow-up"
         )

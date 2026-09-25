@@ -93,7 +93,7 @@ def test_transport_over_two_flow_kinds_matches_the_single_kind_layer():
     x0 = torch.tensor([1.0, 2.0], dtype=F64)
     torch.testing.assert_close(two.step(x0, q_two, s, xb, dt=30.0),
                                one.step(x0, q_one, s, xb, dt=30.0), rtol=1e-12, atol=1e-12)
-    # The dense oracle agrees too.
+    # The dense reference agrees too.
     M2, N2 = two.operator(q_two)
     M1, N1 = one.operator(q_one)
     torch.testing.assert_close(M2, M1, rtol=1e-12, atol=1e-12)

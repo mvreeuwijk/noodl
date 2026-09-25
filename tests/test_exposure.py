@@ -1,14 +1,14 @@
 import pytest
 import torch
 
-from noodl.apps.street.exposure import (
+from noodl.apps.street_aq.exposure import (
     Q_INHALATION,
     exposure_reduction_adjoint,
     exposure_reduction_forward,
     street_population,
     total_exposure,
 )
-from noodl.apps.street.network import build_street_model, from_test_network
+from noodl.apps.street_aq.network import build_model, from_test_network
 
 F64 = torch.float64
 
@@ -19,7 +19,7 @@ def _street():
     # to 30 m tall, and boundary_layer requires z_ref to clear H's displacement height plus
     # roughness -- 10 m (test_coupling_demo._street()'s value, for its own 3 m network)
     # does not, and raises. z_ref is unrelated to this module's own physics.
-    model, state, drivers = build_street_model(net, species=("nox",))
+    model, state, drivers = build_model(net, species=("nox",))
     graph = model.net
     sources = torch.zeros(graph.n, dtype=F64)
     for k, s in enumerate(net.streets):

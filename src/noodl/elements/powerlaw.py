@@ -116,7 +116,7 @@ def Orifice(
     float64 network is not silently downcast to `torch.get_default_dtype()` (float32 in
     this project). A bare Python float still takes `torch.get_default_dtype()`, unchanged
     from before. `n` is built at the resulting `C`'s own dtype so it is never the odd one
-    out (mirrors `apps.building.elements.mass_orifice`, which is explicit-float64 rather
+    out (mirrors `apps.building_physics.elements.mass_orifice`, which is explicit-float64 rather
     than default-dtype and so never had this bug).
     """
     Cd_t = Cd if isinstance(Cd, torch.Tensor) else torch.as_tensor(

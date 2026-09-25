@@ -1,9 +1,9 @@
 """EPANET 2.2 parity for `noodl.apps.water` (spec rows D1-D8 and the golden case G2).
 
-The oracle is the REAL EPANET 2.2 engine: `wntr` 1.5.0 bundles `epanet22.dll` and
+The reference implementation is the REAL EPANET 2.2 engine: `wntr` 1.5.0 bundles `epanet22.dll` and
 `wntr.sim.EpanetSimulator` drives it. `EpanetSimulator` reads EPANET's binary output, whose
 on-disk reals are FLOAT32 (`wntr/epanet/io.py`, `ftype = '=f4'`, matching the manual's
-Appendix C.4), so roughly 1e-7 relative is the ORACLE's own floor and tightening
+Appendix C.4), so roughly 1e-7 relative is the reference's own floor and tightening
 `ACCURACY`/`HEADERROR`/`FLOWCHANGE` is bit-identical -- measured on both committed
 fixtures. Every test copies its fixture into `tmp_path` and passes `file_prefix`, so
 EPANET's `.rpt`/`.bin` side files never land in the repository.
@@ -23,7 +23,7 @@ import torch
 
 from noodl.apps.water.inp import read_epanet_inp
 from noodl.apps.water.network import (
-    build_water_model,
+    build_model,
     tank_inflow,
     twoloop,
     water_steady,
@@ -81,7 +81,7 @@ def test_d1_two_loop_heads_and_flows(tmp_path):
     """
     path, results = _epanet(tmp_path, "twoloop_si.inp")
     net = read_epanet_inp(path)
-    model, state, drivers = build_water_model(net)
+    model, state, drivers = build_model(net)
     final = water_steady(model, state, drivers)
     heads = results.node["head"].loc[0]
     flows = results.link["flowrate"].loc[0]
@@ -94,18 +94,18 @@ def test_d1_two_loop_heads_and_flows(tmp_path):
 def test_d1_reservoir_head_is_held_exactly(tmp_path):
     path, _ = _epanet(tmp_path, "twoloop_si.inp")
     net = read_epanet_inp(path)
-    model, state, drivers = build_water_model(net)
+    model, state, drivers = build_model(net)
     final = water_steady(model, state, drivers)
     assert float(final["water.phi"][model.node_names.index("R1")]) == 50.0
 
 
 def test_d1_nodal_continuity_is_exact(tmp_path):
     """This model's own flows satisfy continuity to machine precision, which is why the
-    D1/D2 residuals above are attributable to the oracle: EPANET's reported flows miss
+    D1/D2 residuals above are attributable to the reference: EPANET's reported flows miss
     continuity at Net1's node 13 by 4.5e-10 m3/s (measured)."""
     path, _ = _epanet(tmp_path, "twoloop_si.inp")
     net = read_epanet_inp(path)
-    model, state, drivers = build_water_model(net)
+    model, state, drivers = build_model(net)
     final = water_steady(model, state, drivers)
     layer = model.potential["water"]
     residual = layer.residual(
@@ -122,14 +122,14 @@ def test_d2_net1_single_period(tmp_path):
     """Row D2: heads 1e-6, FLOWS 1e-5, pump head gain 1e-6 (spec amendment A11).
 
     MEASURED: heads 7.058e-8, flows 2.868e-6 on pipe 113 (0.00185 m3/s, the smallest in the
-    network), pump head gain 1.189e-7. The flow residual is the ORACLE's: EPANET's own
+    network), pump head gain 1.189e-7. The flow residual is the reference's: EPANET's own
     reported flows miss continuity at node 13 by 4.5e-10 m3/s while this model's satisfy it
     to 1e-17, and tightening ACCURACY/HEADERROR/FLOWCHANGE to 1e-8/1e-9/1e-9 with 500
     trials leaves EPANET's output BIT-IDENTICAL.
     """
     path, results = _epanet(tmp_path, "Net1.inp", duration=0)
     net = read_epanet_inp(path)
-    model, state, drivers = build_water_model(net)
+    model, state, drivers = build_model(net)
     final = water_steady(model, state, drivers)
     heads = results.node["head"].loc[0]
     flows = results.link["flowrate"].loc[0]
@@ -224,12 +224,12 @@ def test_d3_net1_extended_period_tank_level(tmp_path):
     MEASURED: 8.181e-5 m worst over the 25 reported steps, with 26 hydraulic sub-steps for
     24 report steps. A FIXED 1 h step instead diverges by 2.07 m, because EPANET shortens
     its own step to the instant the level reaches the 140 ft trigger and a fixed step
-    switches the pump a whole hour late. The 8.2e-5 m floor is the oracle's float32 head
+    switches the pump a whole hour late. The 8.2e-5 m floor is the reference's float32 head
     output, whose resolution at 296 m is 3.5e-5 m.
     """
     path, results = _epanet(tmp_path, "Net1.inp")
     net = read_epanet_inp(path)
-    model, state, drivers = build_water_model(net)
+    model, state, drivers = build_model(net)
     levels, n_sub = _extended_period(net, model, state, drivers)
     reference = results.node["head"]["2"] - net.tanks[0].elevation
     assert len(levels) == len(reference)
@@ -246,7 +246,7 @@ def test_d3_the_pump_switches_within_one_reported_step(tmp_path):
     """The switch TIME must agree, which is what the event shortening buys."""
     path, results = _epanet(tmp_path, "Net1.inp")
     net = read_epanet_inp(path)
-    model, state, drivers = build_water_model(net)
+    model, state, drivers = build_model(net)
     levels, _ = _extended_period(net, model, state, drivers)
     reference = (results.node["head"]["2"] - net.tanks[0].elevation).tolist()
     mine_peak = levels.index(max(levels))
@@ -257,7 +257,7 @@ def test_d3_the_pump_switches_within_one_reported_step(tmp_path):
 def test_d3_event_step_returns_the_nominal_step_when_nothing_is_crossed(tmp_path):
     path, _ = _epanet(tmp_path, "Net1.inp")
     net = read_epanet_inp(path)
-    model, _, _ = build_water_model(net)
+    model, _, _ = build_model(net)
     closure = model.tank_closure
     assert closure.event_step(
         torch.tensor([36.576], dtype=F64), torch.tensor([0.0], dtype=F64), 3600.0
@@ -276,7 +276,7 @@ def test_d3_event_step_returns_the_nominal_step_when_nothing_is_crossed(tmp_path
 def test_d3_a_tank_outside_its_limits_is_refused(tmp_path):
     path, _ = _epanet(tmp_path, "Net1.inp")
     net = read_epanet_inp(path)
-    model, state, drivers = build_water_model(net)
+    model, state, drivers = build_model(net)
     state = dict(state)
     state["water.tank_level"] = torch.tensor([100.0], dtype=F64)
     with pytest.raises(ValueError, match=r"tank\(s\) \['2'\] are outside"):
@@ -312,7 +312,7 @@ def test_d4_darcy_weisbach_residual_is_recorded_not_bounded(tmp_path):
     net = read_epanet_inp(path)
     assert net.headloss == "D-W"
     assert net.pipes[0].roughness == pytest.approx(0.26e-3, rel=1e-15)
-    model, state, drivers = build_water_model(net)
+    model, state, drivers = build_model(net)
     final = water_steady(model, state, drivers, atol=1e-10, rtol=1e-10)
     heads = results.node["head"].loc[0]
     flows = results.link["flowrate"].loc[0]
@@ -343,7 +343,7 @@ def test_d5_pressure_driven_demand(tmp_path):
     virtual pipe from the junction to a fictitious reservoir" (Manual section 13.1, p.110),
     i.e. as exactly this potential-dependent nodal source.
 
-    `build_water_model` is called with NO `pda=`/`p_min=`/`p_req=`/`exponent=` (N5): the
+    `build_model` is called with NO `pda=`/`p_min=`/`p_req=`/`exponent=` (N5): the
     file's own `[OPTIONS]` edit below is what turns PDA on, exactly as `read_epanet_inp`
     -> `net.options` -> the builder's own defaults are meant to be exercised together,
     rather than the test re-supplying by hand what the file already says.
@@ -353,7 +353,7 @@ def test_d5_pressure_driven_demand(tmp_path):
     assert net.options.demand_model == "PDA"
     assert (net.options.minimum_pressure, net.options.required_pressure,
             net.options.pressure_exponent) == (0.0, 60.0, 0.5)
-    model, state, drivers = build_water_model(net)
+    model, state, drivers = build_model(net)
     final = water_steady(model, state, drivers)
     heads = results.node["head"].loc[0]
     demands = results.node["demand"].loc[0]
@@ -372,7 +372,7 @@ def test_d5_pda_delivers_less_than_the_required_demand(tmp_path):
     """The whole point of PDA: below the required pressure the demand is curtailed."""
     path, _ = _epanet(tmp_path, "twoloop_si.inp", edits=[_PDA_EDIT])
     net = read_epanet_inp(path)
-    model, state, drivers = build_water_model(net)
+    model, state, drivers = build_model(net)
     final = water_steady(model, state, drivers)
     source = model.potential["water"]._node_sources[0]
     delivered = source.flow(final["water.phi"][..., source.nodes]).detach()
@@ -385,7 +385,7 @@ def test_d5_a_zero_pressure_span_is_refused(tmp_path):
     path, _ = _epanet(tmp_path, "twoloop_si.inp")
     net = read_epanet_inp(path)
     with pytest.raises(ValueError, match="must exceed MINIMUM PRESSURE"):
-        build_water_model(net, pda=True, p_min=0.0, p_req=0.0)
+        build_model(net, pda=True, p_min=0.0, p_req=0.0)
 
 
 # --------------------------------------------------------------------------- D6
@@ -400,7 +400,7 @@ def test_d6_head_loss_sums_to_zero_around_every_loop(tmp_path):
     """
     path, _ = _epanet(tmp_path, "twoloop_si.inp")
     net = read_epanet_inp(path)
-    model, state, drivers = build_water_model(net)
+    model, state, drivers = build_model(net)
     final = water_steady(model, state, drivers)
     layer = model.potential["water"]
     basis = model.net.cycle_basis("pipe")
@@ -440,14 +440,14 @@ def test_d7_gradients_against_central_differences(tmp_path):
                     ),
                 }
             )
-        model, state, drivers = build_water_model(local)
+        model, state, drivers = build_model(local)
         if sources is not None:
             drivers = dict(drivers)
             drivers["water.sources"] = sources
         final = water_steady(model, state, drivers)
         return model, final
 
-    model, _, drivers = build_water_model(net)
+    model, _, drivers = build_model(net)
     element = model.potential["water"]._elements[0]
     sources = drivers["water.sources"].clone().requires_grad_(True)
     element.roughness.requires_grad_(True)
@@ -518,14 +518,14 @@ def test_d7_gradient_reaches_the_pump_head_gain_h0(tmp_path):
     net = read_epanet_inp(path)
 
     def solve_with_h0(delta: float):
-        model, state, drivers = build_water_model(net)
+        model, state, drivers = build_model(net)
         pump = next(el for el in model.potential["water"]._elements if el.kind == "pump")
         with torch.no_grad():
             pump.h0.add_(delta)
         final = water_steady(model, state, drivers)
         return model, final
 
-    model, state, drivers = build_water_model(net)
+    model, state, drivers = build_model(net)
     pump = next(el for el in model.potential["water"]._elements if el.kind == "pump")
     pump.h0.requires_grad_(True)
     final = water_steady(model, state, drivers, differentiable=True)
@@ -553,7 +553,7 @@ def test_d7_tank_area_is_not_reached_by_a_single_steady_solve(tmp_path):
     """
     path, _ = _epanet(tmp_path, "Net1.inp", duration=0)
     net = read_epanet_inp(path)
-    model, state, drivers = build_water_model(net)
+    model, state, drivers = build_model(net)
     closure = model.tank_closure
     closure.area.requires_grad_(True)
     final = water_steady(model, state, drivers, differentiable=True)
@@ -567,7 +567,7 @@ def test_d7_gradient_reaches_the_tank_area_through_advance(tmp_path):
     """
     path, _ = _epanet(tmp_path, "Net1.inp", duration=0)
     net = read_epanet_inp(path)
-    model, state, drivers = build_water_model(net)
+    model, state, drivers = build_model(net)
     closure = model.tank_closure
     final = water_steady(model, state, drivers)
     inflow = tank_inflow(model, final).detach()
@@ -591,7 +591,7 @@ def test_d7_gradient_reaches_the_tank_area_through_advance(tmp_path):
 def test_d7_gradient_reaches_a_learnable_roughness(tmp_path):
     path, _ = _epanet(tmp_path, "twoloop_si.inp")
     net = read_epanet_inp(path)
-    model, state, drivers = build_water_model(net)
+    model, state, drivers = build_model(net)
     element = model.potential["water"]._elements[0]
     element.roughness.requires_grad_(True)
     final = water_steady(model, state, drivers, differentiable=True)
@@ -606,7 +606,7 @@ def test_d7_gradient_reaches_a_learnable_roughness(tmp_path):
 def test_d8_trace_quality_on_the_two_loop(tmp_path):
     """Row D8, 1e-3 on the steady trace fraction. MEASURED: 6.438e-12 percentage points
     (FR-16: refreshed from a stale 2.501e-12; both are noise many orders below the 1e-3
-    tolerance, floating on the oracle's own float32 output and this solve's Newton
+    tolerance, floating on the reference's own float32 output and this solve's Newton
     tolerance rather than on any physics this row could regress).
 
     A SMOKE row, as spec 13.3 states: the fixture has a single source, so mass balance
@@ -619,7 +619,7 @@ def test_d8_trace_quality_on_the_two_loop(tmp_path):
     """
     path, results = _epanet(tmp_path, "twoloop_trace.inp")
     net = read_epanet_inp(path)
-    model, state, drivers = build_water_model(net, quality=0.0)
+    model, state, drivers = build_model(net, quality=0.0)
     drivers = dict(drivers)
     drivers["quality.x_boundary"] = torch.tensor([100.0], dtype=F64)
     final = water_steady(model, state, drivers)
@@ -635,7 +635,7 @@ def test_d8_without_the_demand_removal_the_system_is_singular(tmp_path):
     """The measurement behind spec amendment A15, pinned so a future edit cannot undo it."""
     path, _ = _epanet(tmp_path, "twoloop_trace.inp")
     net = read_epanet_inp(path)
-    model, _, _ = build_water_model(net, quality=0.0)
+    model, _, _ = build_model(net, quality=0.0)
     layer = model.transport["quality"]
     assert layer.removal is not None
     assert float(layer.removal.abs().min()) > 0.0
@@ -647,7 +647,7 @@ def test_d8_without_the_demand_removal_the_system_is_singular(tmp_path):
 def test_d8_a_junction_capacity_is_half_of_every_incident_pipe(tmp_path):
     path, _ = _epanet(tmp_path, "twoloop_trace.inp")
     net = read_epanet_inp(path)
-    model, _, _ = build_water_model(net, quality=0.0)
+    model, _, _ = build_model(net, quality=0.0)
     volume = {
         p.name: torch.pi * p.diameter**2 / 4.0 * p.length for p in net.pipes
     }
@@ -664,7 +664,7 @@ def test_the_water_golden_case_is_reproduced(tmp_path):
     from tests.golden import load_golden
 
     golden = load_golden("water_twoloop")
-    model, state, drivers = build_water_model(twoloop())
+    model, state, drivers = build_model(twoloop())
     final = water_steady(model, state, drivers)
     for key, expected in golden.items():
         assert key in final, key

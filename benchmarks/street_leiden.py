@@ -21,9 +21,9 @@ from pathlib import Path
 
 import torch
 
-from noodl.apps.street.loader import read_aqdt
-from noodl.apps.street.network import build_street_model
-from noodl.apps.street.report import to_ug_m3, write_network_concentration
+from noodl.apps.street_aq.loader import read_aqdt
+from noodl.apps.street_aq.network import build_model
+from noodl.apps.street_aq.report import to_ug_m3, write_network_concentration
 
 DEFAULT_DATA = Path(os.environ.get(
     "NOODL_AQDT_DATA", r"<workspace>\tmp\2026_AQ_DT\data"
@@ -48,7 +48,7 @@ def run(domain: str = "leiden_small", *, year: int = 2024, steps: int | None = N
     load_seconds = time.perf_counter() - started
     n_time = int(aqdt.emission.shape[0]) if steps is None else int(steps)
     started = time.perf_counter()
-    model, _state, _drivers = build_street_model(
+    model, _state, _drivers = build_model(
         aqdt.net, canyon_wind="soulhac", exchange="sirane", routing="sirane",
         direction_averaging="none", kappa=0.4, pblh_floor=True, z_ref=10.0,
     )

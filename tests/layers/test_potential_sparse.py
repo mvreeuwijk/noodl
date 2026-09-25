@@ -218,7 +218,7 @@ def test_solve_never_assembles_the_dense_einsum_jacobian(monkeypatch, differenti
     # before Newton's per-iteration operator became a GraphLaplacianOperator (that refactor
     # is a no-op for correctness), so what has to be asserted is that the dense
     # (n_interior, n_interior) einsum is no longer built at all. layer.jacobian() itself is
-    # deliberately untouched -- it remains the dense oracle other tests call directly -- so
+    # deliberately untouched -- it remains the dense reference other tests call directly -- so
     # the assertion is that solve() does not call it.
     layer, drivers, phi_b = _series_layer()
 
@@ -440,7 +440,7 @@ def test_hot_path_never_touches_the_dense_incidence(monkeypatch, two_zone_layer)
     # already sitting in the instance __dict__ -- a plain instance-attribute delete would
     # not. Every call below is on the hot path (`assemble` included, which used to read
     # `self.A.shape[0]` for the node count); `jacobian()` is deliberately NOT called here,
-    # because it remains the dense oracle and is allowed to build A.
+    # because it remains the dense reference and is allowed to build A.
     net, elements, drives, boundary = two_zone_layer
     el = PowerLaw(
         elements[0].C.detach().clone().requires_grad_(True), elements[0].n, learnable=True

@@ -1,8 +1,8 @@
 """`SewerNetwork`, its validation, and the (Model, State, Drivers) builder.
 
-Follows `apps/street/network.py`'s builder shape: dataclasses describing the physical
+Follows `apps/street_aq/network.py`'s builder shape: dataclasses describing the physical
 network, one `validate()` that refuses every topology this milestone does not model BY NAME,
-one `build_sewer_model` that assembles the `Network`, the layers and the closures and
+one `build_model` that assembles the `Network`, the layers and the closures and
 returns the triple, and one `initial_state` dispatching on each layer's `quantity`.
 """
 
@@ -176,7 +176,7 @@ def tree_steady() -> SewerNetwork:
     )
 
 
-def build_sewer_model(
+def build_model(
     net: SewerNetwork,
     *,
     storage: bool = False,
@@ -217,7 +217,7 @@ def build_sewer_model(
         [graph.nodes.index(name) for name in manhole_names], dtype=torch.long
     )
     # Manhole i's outgoing pipe's position in `net.pipes` (per-pipe driver order). On
-    # `tree_steady()` this happens to be the identity, but `read_inp` reads `[CONDUITS]` in
+    # `tree_steady()` this happens to be the identity, but `read_swmm_inp` reads `[CONDUITS]` in
     # its own file order, which need not match `[JUNCTIONS]` order at all -- the committed
     # `tree_steady.inp` gives `out_pipe = [0, 1, 3, 2, 4]` (M4-R4 amendment).
     out_pipe = torch.tensor([outgoing[name] for name in manhole_names], dtype=torch.long)
@@ -271,14 +271,14 @@ def build_sewer_model(
         ]
         if not outfall_pipe_candidates:
             raise ValueError(
-                f"build_sewer_model: no pipe drains to an outfall; outfalls are "
+                f"build_model: no pipe drains to an outfall; outfalls are "
                 f"{sorted(outfall_names)}"
             )
         drained = [net.pipes[i].v for i in outfall_pipe_candidates]
         if len(drained) != len(set(drained)):
             dupes = sorted({v for v in drained if drained.count(v) > 1})
             raise ValueError(
-                f"build_sewer_model: outfall(s) {dupes} each have more than one pipe "
+                f"build_model: outfall(s) {dupes} each have more than one pipe "
                 f"draining into them; a dendritic sewer (or forest) gives each outfall "
                 f"exactly one"
             )
@@ -347,12 +347,12 @@ def build_sewer_model(
         )
         # `out_pipe` above indexes the per-pipe driver vectors by POSITION in `manhole_names`,
         # so the map is correct only if `TransportLayer`'s own active-interior order agrees
-        # with `manhole_names` exactly (the same self-check `apps/street/network.py`
+        # with `manhole_names` exactly (the same self-check `apps/street_aq/network.py`
         # performs) -- checked ONCE, here, rather than trusted (M4-R4/M4-R9 amendment).
         ordered = [graph.nodes[i] for i in layers["water_quality"].interior_idx.tolist()]
         if ordered != manhole_names:
             raise ValueError(
-                f"build_sewer_model: the water_quality layer's active interior came out as "
+                f"build_model: the water_quality layer's active interior came out as "
                 f"{ordered}, not the manhole order {manhole_names}; out_pipe indexes by "
                 f"position into manhole_names and assumes they agree"
             )
@@ -399,7 +399,7 @@ def build_sewer_model(
             ordered = [graph.nodes[i] for i in layers["air_quality"].interior_idx.tolist()]
             if ordered != manhole_names:
                 raise ValueError(
-                    f"build_sewer_model: the air_quality layer's active interior came out "
+                    f"build_model: the air_quality layer's active interior came out "
                     f"as {ordered}, not the manhole order {manhole_names}; H2STransfer "
                     f"reads 'air_quality.x' as a per-manhole array and assumes they agree"
                 )

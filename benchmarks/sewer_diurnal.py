@@ -3,7 +3,7 @@
 Runs 24 h at dt = 60 s with storage on, batched over 8 instances that VARY `f_i` and the
 leak area across the batch (FR-18: `Drag.f_i` and the leak `PowerLaw`'s `C` already accept
 a tensor carrying a leading batch dimension without any core or element change -- ordinary
-broadcasting and `Element._param`'s pass-through rule do the rest -- so `build_sewer_model`
+broadcasting and `Element._param`'s pass-through rule do the rest -- so `build_model`
 is handed `f_i`/`leak_area` shaped `(n_instances, 1)` rather than the plain floats every
 other caller uses), and prints the wall time and the peak headspace H2S per manhole in ppm.
 Budget (spec section 7): the run must finish in under 60 s on the CPU used; if it does not,
@@ -41,7 +41,7 @@ import time
 import torch
 
 from noodl.apps.sewer.air import F_I_DEFAULT
-from noodl.apps.sewer.network import build_sewer_model, tree_steady
+from noodl.apps.sewer.network import build_model, tree_steady
 from noodl.apps.sewer.report import to_ppm
 
 F64 = torch.float64
@@ -52,7 +52,7 @@ def main() -> None:
     n_instances = 8
     # FR-18: vary f_i and the leak area 0.5x-1.5x of their defaults across the 8 instances.
     scale = torch.linspace(0.5, 1.5, n_instances, dtype=F64).unsqueeze(-1)
-    model, state, drivers = build_sewer_model(
+    model, state, drivers = build_model(
         net, storage=True, dt_storage=60.0,
         f_i=F_I_DEFAULT * scale, leak_area=8e-4 * scale,
     )

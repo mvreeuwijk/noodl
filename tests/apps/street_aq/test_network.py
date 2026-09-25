@@ -1,4 +1,4 @@
-"""StreetNetwork, build_street_model and the two named networks -- spec sections 6.1, 6.2."""
+"""StreetNetwork, build_model and the two named networks -- spec sections 6.1, 6.2."""
 
 from __future__ import annotations
 
@@ -7,10 +7,10 @@ import math
 import pytest
 import torch
 
-from noodl.apps.street.network import (
+from noodl.apps.street_aq.network import (
     Street,
     StreetNetwork,
-    build_street_model,
+    build_model,
     from_test_network,
     initial_state,
     munich_idealised,
@@ -83,9 +83,9 @@ def test_munich_idealised_topology():
     assert abs(azimuth["9"] - 0.0) < 1e-12
 
 
-def test_build_street_model_wires_the_layer_and_the_three_edge_kinds():
+def test_build_model_wires_the_layer_and_the_three_edge_kinds():
     sn = _line_network()
-    model, state, drivers = build_street_model(sn, pblh_floor=False)
+    model, state, drivers = build_model(sn, pblh_floor=False)
     net = model.net
     assert net.n == 3                      # two streets and the atmosphere
     assert model.flow_layer_of["street"] is None
@@ -110,7 +110,7 @@ def test_build_street_model_wires_the_layer_and_the_three_edge_kinds():
 def test_a_dead_end_is_a_one_way_exchange_with_the_background_not_a_wall():
     """Spec section 4.5b, pinned on the two-street hand case."""
     sn = _line_network()
-    model, state, _ = build_street_model(sn, pblh_floor=False)
+    model, state, _ = build_model(sn, pblh_floor=False)
     downwind = model.steady(state, _wind(model, 3.0, 0.0, emission={"s1": 1.0}))
     upwind = model.steady(state, _wind(model, 3.0, math.pi, emission={"s1": 1.0}))
     c_down = downwind["street.x"]
@@ -124,9 +124,9 @@ def test_a_dead_end_is_a_one_way_exchange_with_the_background_not_a_wall():
     torch.testing.assert_close(c_up[0], c_down[0], rtol=1e-12, atol=0)
 
 
-def test_build_street_model_batches_over_forcing_steps_and_keeps_float64():
+def test_build_model_batches_over_forcing_steps_and_keeps_float64():
     sn = from_test_network()
-    model, state, _ = build_street_model(sn, kappa=0.4, pblh_floor=False)
+    model, state, _ = build_model(sn, kappa=0.4, pblh_floor=False)
     net = model.net
     sources = torch.zeros(net.n, dtype=DT)
     for name in ("r1", "r2", "r3"):
@@ -146,14 +146,14 @@ def test_build_street_model_batches_over_forcing_steps_and_keeps_float64():
     assert bool((out["street.x"][1] < out["street.x"][0]).all())
 
 
-def test_build_street_model_accepts_every_documented_option_combination():
+def test_build_model_accepts_every_documented_option_combination():
     sn = from_test_network()
     for canyon_wind, exchange, routing, averaging in (
         ("soulhac", "sirane", "mixing", "none"),
         ("soulhac", "schulte", "sirane", "gauss"),
         ("exponential", "schulte", "sirane", "munich"),
     ):
-        model, state, _ = build_street_model(
+        model, state, _ = build_model(
             sn, canyon_wind=canyon_wind, exchange=exchange, routing=routing,
             direction_averaging=averaging, n_theta=3, sigma_theta=0.05,
             kappa=0.41, canyon_wind_min=0.1, roof_wind_form="macdonald",
@@ -162,7 +162,7 @@ def test_build_street_model_accepts_every_documented_option_combination():
         assert torch.isfinite(out["street.x"]).all()
 
 
-def test_build_street_model_names_every_bad_input():
+def test_build_model_names_every_bad_input():
     good = _line_network()
     with pytest.raises(ValueError, match=r"StreetNetwork.*duplicate street name.*'s1'"):
         StreetNetwork(streets=[good.streets[0], good.streets[0]], x=good.x, y=good.y)
@@ -175,8 +175,8 @@ def test_build_street_model_names_every_bad_input():
     with pytest.raises(ValueError, match=r"StreetNetwork.*'s1'.*width.*-1"):
         StreetNetwork(streets=[Street("s1", "a", "b", 1.0, -1.0, 1.0)],
                       x={"a": 0.0, "b": 1.0}, y={"a": 0.0, "b": 0.0})
-    with pytest.raises(ValueError, match=r"build_street_model.*'atmosphere'"):
-        build_street_model(StreetNetwork(
+    with pytest.raises(ValueError, match=r"build_model.*'atmosphere'"):
+        build_model(StreetNetwork(
             streets=[Street("atmosphere", "a", "b", 1.0, 1.0, 1.0)],
             x={"a": 0.0, "b": 1.0}, y={"a": 0.0, "b": 0.0}))
 
@@ -193,9 +193,9 @@ def test_street_geometry_carries_the_azimuth_and_the_per_street_roughness():
 
 def test_initial_state_is_zero_and_shaped_by_the_species_count():
     sn = _line_network()
-    _, state, _ = build_street_model(sn, species=("nox",))
+    _, state, _ = build_model(sn, species=("nox",))
     assert state["street.x"].shape == (2,)
-    model, state3, drivers3 = build_street_model(sn, species=("no", "no2", "o3"))
+    model, state3, drivers3 = build_model(sn, species=("no", "no2", "o3"))
     assert state3["street.x"].shape == (2, 3)
     assert drivers3["street.sources"].shape == (3, 3)
     assert drivers3["street.x_boundary"].shape == (1, 3)

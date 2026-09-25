@@ -99,8 +99,8 @@ union(
 ) -> (CoupledModel, {tag: State}, {tag: Drivers})
 ```
 
-The `(Model, State, Drivers)` triple is exactly what `build_street_model`, `project_to_model`,
-`build_sewer_model` and `build_water_model` all return. `union` returns fresh copies and never
+The `(Model, State, Drivers)` triple is exactly what `street_aq.build_model`, `project_to_model`,
+`sewer.build_model` and `water.build_model` all return. `union` returns fresh copies and never
 mutates its inputs.
 
 Two-wayness is set **per link** through `ValueLink.two_way`, not by an argument to `union`.
@@ -155,7 +155,7 @@ unregistered conversion is never silently treated as identity.
 layer, computed from a single state snapshot. `Model.ports()` cannot supply this: it reports
 `boundary_flows` for *potential* layers only. The coupler itself no longer calls this to build
 the two-way feedback (see "The fixed point" below) — it is kept as a public helper and used in
-tests as an independent hand-reconstruction oracle.
+tests as an independent hand reconstruction.
 
 ## Unit conversions
 
@@ -290,7 +290,7 @@ way** — that is a property of the pass itself, not of which solver ran inside 
 Physically, infiltration draws segment air into the building and the building acts as a sink on
 the street side. Both demos assert that sign.
 
-## Validation
+## Verification
 
 | Check | Tolerance | Measured |
 |---|---|---|
@@ -353,7 +353,7 @@ is set.
   scheme exists. Convergence takes 21–27 passes to rtol $10^{-10}$ on the demo fixtures. This is
   flagged as a known risk: recipient-first Gauss-Seidel substitution at fixed 0.5 relaxation can
   still converge to the wrong root of a repelling fixed point, the same issue the
-  [building application's](building.md#limitations) three-root case runs into.
+  [building application's](building_physics.md#limitations) three-root case runs into.
 - **Single species, single flow kind only.** A two-way link is refused at construction
   (`ValueError`) unless both layers have `n_species == 1` and the recipient's layer has exactly
   one flow kind: `_reduced`'s single-species layout rule is ambiguous for a multi-species state,

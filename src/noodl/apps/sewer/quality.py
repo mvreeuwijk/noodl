@@ -153,7 +153,7 @@ class LateralLoads:
     existed, `bod_in`/`sulfide_in` were created by the builder and read by nothing, so no
     lateral load ever reached the water-quality layer.
 
-    Registered BEFORE `H2STransfer` in `build_sewer_model`'s closure list: `H2STransfer`
+    Registered BEFORE `H2STransfer` in `build_model`'s closure list: `H2STransfer`
     reads `drivers.get("<water_layer>.sources")` and ADDS its own transfer term to it
     (rather than overwriting), so this closure's load survives regardless of whether
     `H2STransfer` also runs (it is registered whenever `quality=True`, with or without
@@ -236,7 +236,7 @@ class SulfideGeneration(Reaction):
         self.out_pipe = (
             None if out_pipe is None else torch.as_tensor(out_pipe, dtype=torch.long)
         )
-        # FR-12/N3: when given (the `build_sewer_model` builder passes both), `T_water` is
+        # FR-12/N3: when given (the `build_model` builder passes both), `T_water` is
         # resolved through the shared `resolve_nodal_driver` helper (0-d / full-node /
         # trailing-singleton, spec 4.2); when either is omitted (the dictated unit tests'
         # own convention) `T_water` is used exactly as given, already per-manhole or scalar.
@@ -286,7 +286,7 @@ class H2STransfer:
     exactly opposite in MOLES of sulfur, which row C2 asserts node by node.
 
     ADDS to an existing `"<water_layer>.sources"`/`"<air_layer>.sources"` driver rather than
-    overwriting it (FR-21): registered AFTER `LateralLoads` in `build_sewer_model`'s closure
+    overwriting it (FR-21): registered AFTER `LateralLoads` in `build_model`'s closure
     list, so `drivers` here already carries `LateralLoads`'s inflow-concentration term (spec
     3.4's `s_j C_in,j`) when quality is built with lateral loads, and this closure's own
     transfer term is added on top rather than silently discarding it.
