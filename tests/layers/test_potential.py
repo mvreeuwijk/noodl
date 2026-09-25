@@ -676,7 +676,7 @@ class _WronglyDeclaredDpIndependent(Element):
 
 
 def test_solve_raises_when_dp_independent_is_wrongly_declared():
-    # Design choice evaluated in the report: dp_independent is cross-checked against the
+    # Design choice: dp_independent is cross-checked against the
     # element's own analytic dflow() so a WRONG declaration (not just a missing one) is also
     # caught, instead of being trusted silently.
     net = Network(dtype=torch.float64)

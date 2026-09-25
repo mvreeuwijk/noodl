@@ -73,7 +73,7 @@ def test_three_zone_exchange_matches_the_backward_euler_series():
         if step == 1:
             # If this very first comparison fails, stop rather than loosen tolerances: it
             # would mean a sign/scheme convention difference worth investigating, not a
-            # numerical artifact. Print both rows and the rate at the initial state for the report.
+            # numerical artifact. Print both rows and the rate at the initial state.
             if not torch.allclose(got, want, rtol=1e-10, atol=1e-12):
                 rate0 = layer.rate(
                     torch.tensor([0.0, 2.0, 1.0], dtype=F64), q, sources, x_boundary
