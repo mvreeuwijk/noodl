@@ -1,7 +1,7 @@
-"""Tests for the per-instance SPD grounding certificate (milestone 1b design, section 3.1):
-every interior node reaches a boundary node through a path of STRICTLY POSITIVE slopes, in
-that instance. Unweighted connectivity is not sufficient -- this is exactly the defect the
-design verifies against `PotentialFlowLayer._floating_group_nodes`'s blind spot (slopes
+"""Tests for the per-instance SPD grounding certificate: every interior node reaches a
+boundary node through a path of STRICTLY POSITIVE slopes, in that instance. Unweighted
+connectivity is not sufficient -- this is exactly the blind spot of an unweighted
+floating-group check (slopes
 [[1, 1], [0, 1]] on a grounded three-node chain: instance 0 has minimum eigenvalue 0.382,
 instance 1 has 0.0, and an unweighted connectivity check reports nothing wrong with either).
 """
@@ -229,13 +229,13 @@ def test_spd_diagnosis_is_empty_when_every_instance_certifies():
     assert spd_diagnosis(src, tgt, slopes, interior_of_node, boundary_mask) == []
 
 
-# ---------------------------------------------------- section 3.1 condition 2: g >= 0
-# Final-review finding I1: the certificate implemented condition 3 (grounding through
-# strictly positive slopes) only. A NEGATIVE slope merely makes an edge inactive for
-# propagation, so an instance grounded through other positive edges certified True while
-# its assembled operator was indefinite -- and `method="auto"` then dispatched PCG to it.
+# ---------------------------------------------------- condition 2: g >= 0
+# A certificate that implemented only condition 3 (grounding through strictly positive
+# slopes) would be wrong: a NEGATIVE slope merely makes an edge inactive for propagation,
+# so an instance grounded through other positive edges would certify True while its
+# assembled operator is indefinite -- and `method="auto"` would then dispatch PCG to it.
 # Element slopes are non-negative by construction, but a learnable conductance driven
-# negative by an optimiser (this milestone's stated calibration use case) reaches it.
+# negative by an optimiser (the calibration use case) reaches it.
 
 
 def _chain_with_parallel_edge():

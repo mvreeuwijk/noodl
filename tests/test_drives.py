@@ -1,4 +1,4 @@
-"""Tests for the Drive protocol and ConstantDrive (milestone 2 spec section 4.1)."""
+"""Tests for the Drive protocol and ConstantDrive."""
 
 from __future__ import annotations
 
@@ -287,7 +287,7 @@ def test_wind_from_network_names_an_unknown_ambient_and_a_missing_driver():
     net = _wind_net()
     with pytest.raises(KeyError, match="outside"):
         Wind.from_network(net, "airpath", ambient="outside")
-    # _wind_net()'s envelope edges reference profile 1 (Ruling R22: validation is strict,
+    # _wind_net()'s envelope edges reference profile 1 (validation is strict,
     # so this construction must be given that profile to succeed) -- the point of this
     # test is the ambient and driver errors, not profile configuration.
     prof = WindProfile([0.0, 180.0], [0.6, -0.4])
@@ -319,7 +319,7 @@ def test_wind_refuses_a_negative_profile_index_naming_the_edges():
 
 
 def test_wind_from_network_accepts_a_profile_number_mapping_with_gaps():
-    """Ruling R3: `profiles` may be a Mapping[int, WindProfile] keyed by CONTAM's own,
+    """`profiles` may be a Mapping[int, WindProfile] keyed by CONTAM's own,
     possibly non-contiguous, profile number -- here 5 and 2, not 1 and 2."""
     net = Network(dtype=F64)
     for name in ("ambient", "z1", "z2"):
@@ -346,7 +346,7 @@ def test_wind_from_network_accepts_a_profile_number_mapping_with_gaps():
 
 
 def test_wind_from_network_names_the_edge_and_number_for_an_absent_profile():
-    """Ruling R3: a profile number an edge references but that is absent from a `profiles`
+    """A profile number an edge references but that is absent from a `profiles`
     Mapping is a KeyError naming the edge and the number, not a silent mismatch."""
     net = _wind_net()
     prof = WindProfile([0.0, 180.0], [0.6, -0.4])

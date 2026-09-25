@@ -1,4 +1,4 @@
-"""R6: the model owns the clock. Integrating closures declare themselves and receive it."""
+"""The model owns the clock. Integrating closures declare themselves and receive it."""
 
 from __future__ import annotations
 
@@ -123,7 +123,7 @@ def test_plain_algebraic_closures_are_unchanged():
 def test_step_context_is_frozen_and_carries_t():
     ctx = StepContext(dt=2.0, t=10.0)
     assert (ctx.dt, ctx.t) == (2.0, 10.0)
-    # `pytest.raises(Exception)` in the brief is ruff B017 ("blind exception"); the concrete
+    # `pytest.raises(Exception)` is ruff B017 ("blind exception"); the concrete
     # exception a frozen dataclass raises is `dataclasses.FrozenInstanceError` -- more
     # precise, and it is what actually gets raised here.
     with pytest.raises(FrozenInstanceError):

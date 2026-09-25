@@ -1,4 +1,4 @@
-"""`TankLevels.event_step`, per tank (N13)."""
+"""`TankLevels.event_step`, per tank."""
 
 import torch
 
@@ -22,11 +22,11 @@ def _two_tank_closure(controls):
 
 
 def test_event_step_tests_each_control_against_its_own_tank():
-    """N13: `TankLevels.event_step` used to test EVERY control against tank 0's level and
-    rate, no matter which tank the control actually named. Here the control names "TB",
+    """`TankLevels.event_step` must not test EVERY control against tank 0's level and
+    rate, whichever tank the control actually names. Here the control names "TB",
     which is far from its trigger and barely moving (a crossing at 5000 s, past the 100 s
     nominal step): the step must stay nominal. Tank "TA" (index 0) is deliberately placed
-    RIGHT next to a level of 10 with a fast rate, so that the pre-fix bug -- reading index
+    RIGHT next to a level of 10 with a fast rate, so that the bug -- reading index
     0 regardless of the control's own node -- would have crossed almost immediately and
     wrongly shortened the step to about 0.01 s.
     """

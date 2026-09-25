@@ -1,10 +1,11 @@
-"""The Milestone 1b acceptance gate: composed-model correctness and scaling (design section 6).
+"""The composed-model acceptance gate: correctness and scaling.
 
-Fast tests (no marker) run in CI by default; `@pytest.mark.slow` tests are the full section 6.1
-budget table and the two shape gates, deselected by the existing `-m "not slow"` addopts.
+Fast tests (no marker) run in CI by default; `@pytest.mark.slow` tests are the full
+budget table (`benchmarks/report_composed_scaling.py`) and the two shape gates, deselected by the
+existing `-m "not slow"` addopts.
 
 Memory here is measured with `benchmarks.measure.isolated_peak_rss`, never `tracemalloc`:
-`tracemalloc` does not see PyTorch's own allocator at all (amendment A4), so a
+`tracemalloc` does not see PyTorch's own allocator at all, so a
 `tracemalloc`-based memory gate would measure Python bookkeeping overhead and pass vacuously.
 """
 
@@ -35,7 +36,7 @@ def test_time_call_returns_a_nonnegative_elapsed_seconds_and_the_callables_resul
 
 def test_isolated_peak_rss_sees_pytorch_allocations_a_200_mib_tensor_makes():
     # Non-vacuous by construction: the workload's only allocation is a torch tensor, which
-    # `tracemalloc` reports as 0 bytes (amendment A4). A subprocess RSS measurement must see
+    # `tracemalloc` reports as 0 bytes. A subprocess RSS measurement must see
     # it. 150 MiB, not 200, leaves room for the allocator returning pages in large blocks.
     peak_bytes, result = isolated_peak_rss(
         "benchmarks.composed_model", "workload_alloc", {"mb": 200}
@@ -115,15 +116,15 @@ def test_gradient_across_a_join_matches_central_finite_differences():
     receive a correct gradient from a loss inside a BUILDING (the potential at its manhole
     node). Small configuration so the central-difference loop is cheap.
 
-    Amendment A3.5's gate, at BUILDING 1 rather than the amendment's building 0. Building 0
-    was a bug in the amendment: `build_composed` wires building `i`'s ambient node to
+    The gate is at BUILDING 1, not building 0. Building 0 would be vacuous: `build_composed`
+    wires building `i`'s ambient node to
     `street_names[i % street_nodes]` and its manhole to `sewer_names[i % sewer_nodes]`, and
     the boundary is `["street_0", "sewer_0"]` -- so building 0, alone among the buildings,
     attaches directly to BOTH boundary nodes. Its submodel is enclosed between two fixed
     potentials and depends on nothing outside itself, so no street conductance can move its
     manhole: autograd returned exactly 0.0 for all ten street conductances and central
-    differences returned one ULP of noise (3.5e-12), and the gate asserted 0 == 0. It would
-    have passed with the cross-join adjoint entirely broken.
+    differences returned one ULP of noise (3.5e-12), so a gate there asserts 0 == 0 and
+    would pass with the cross-join adjoint entirely broken.
 
     Building 1's ambient attaches to `street_1` and its manhole to `sewer_1`, both interior,
     so the loss genuinely depends on every street conductance through a path that leaves the
@@ -211,8 +212,7 @@ def test_composed_model_meets_its_section_6_1_budget(
     execution rather than two. Iteration counts are printed beside the times because a
     conditioning regression is invisible in wall clock when threading masks it.
 
-    A missed budget is a FAILED gate. Do not loosen the budgets here; design section 6.2 is
-    the table of follow-ups a failure triggers.
+    A missed budget is a FAILED gate. Do not loosen the budgets here.
     """
     row = measure_budget_row(ensemble, steps, forward_budget, backward_budget, memory_budget)
     print("\n" + format_budget_row(row))
@@ -243,7 +243,7 @@ def test_composed_model_meets_its_section_6_1_budget(
 
 
 def test_thermal_composed_configuration_steps_and_differentiates_on_a_small_model():
-    """The milestone-2 gate row's configuration, at a size that runs in CI in a second.
+    """The thermal gate row's configuration, at a size that runs in CI in a second.
 
     The gate itself is `slow` and takes tens of minutes, so nothing else here would notice a
     typo in `build_composed(thermal=True)` or in `run_steps(..., thermal=True)` until that
@@ -273,19 +273,18 @@ def test_thermal_composed_configuration_steps_and_differentiates_on_a_small_mode
 
 @pytest.mark.slow
 def test_composed_model_with_thermal_layer_24_steps_within_budget():
-    """The milestone-2 row: ensemble 100, 24 steps, air + species + HEAT through `Model.step`.
+    """The thermal row: ensemble 100, 24 steps, air + species + HEAT through `Model.step`.
 
     `build_composed(thermal=True)` adds a second `TransportLayer` (carrier c_p, capacity in
     J/K, implicit) over the same airpath flows and runs air, species and heat together
     through `Model.step`; the backward figure differentiates a loss over BOTH transport
     states, so both transport adjoints are exercised, not just the species one.
 
-    It is judged against the SAME section 6.1 budgets as the 100x24 row (12 s forward, 25 s
+    It is judged against the SAME budgets as the 100x24 row (12 s forward, 25 s
     backward, that row's memory budget), which is what makes the comparison mean anything:
     the configuration differs from that row in the added layer and the `Model.step` dispatch
     around it (the closure loop, the driver lookups, `flows_of_kind` and the per-pass dict
-    copies), and in nothing else. A miss is a FAILED gate, recorded in the README and the
-    ledger; the budgets are never edited here.
+    copies), and in nothing else. A miss is a FAILED gate; the budgets are never edited here.
     """
     ensemble, steps, forward_budget, backward_budget, memory_budget = next(
         r for r in BUDGET_TABLE if r[0] == 100 and r[1] == 24

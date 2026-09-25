@@ -1,23 +1,21 @@
 """Regenerates the committed WSIMOD parity fixtures under tests/data/wsimod/.
 
 Run manually: `.venv/Scripts/python scripts/regenerate_wsimod_fixtures.py`. Never run by
-CI or by the test suite (design spec section 4.4) -- the committed fixtures ARE the
+CI or by the test suite -- the committed fixtures ARE the
 reference from pytest's point of view; this script is how they get produced in the first
 place, or refreshed against a newer `wsimod` release.
 
-Downloads WSIMOD's own demo forcing data on demand (design spec amendment A2: not
-shipped in the `wsimod` PyPI wheel) rather than committing it -- only the COMPUTED
+Downloads WSIMOD's own demo forcing data on demand (it is not shipped in the `wsimod`
+PyPI wheel) rather than committing it -- only the COMPUTED
 fixture outputs (topology, captured events, WSIMOD's own realised flows) belong in this
 repository.
 
 What it does, in order: downloads the one forcing file both demos share into a temp
-directory; builds `quickstart_demo`'s model inline (design spec amendment A3) and
+directory; builds `quickstart_demo`'s model inline and
 `oxford_demo`'s via WSIMOD's own packaged `create_oxford_model`; runs each under the
 capture harness (`tests/verification/_wsimod_reference.py`); and writes four fixtures --
 `{quickstart,oxford}_topology.json` and `{quickstart,oxford}_events.csv` -- under
-`tests/data/wsimod/`. Both demos are fully implemented here (they were stubs raising
-`NotImplementedError` while milestone 4b's Task 5 only built the harness; Tasks 6 and 7
-filled them in).
+`tests/data/wsimod/`. Both demos are fully implemented here.
 
 Each `_events.csv` holds one row per (arc, DIRECTION, timestep), aggregated from the
 harness's raw per-event rows. Push and pull are deliberately NOT merged into one row:
@@ -56,8 +54,7 @@ DATA_URL = (
 def _download_data_folder() -> str:
     """Downloads timeseries_data.csv into a temp dir laid out as `create_oxford_model`
     and `quickstart_demo`'s inline build both expect (`<data_folder>/processed/
-    timeseries_data.csv`, design spec amendments A2 and A3 -- both demos read the same
-    file)."""
+    timeseries_data.csv` -- both demos read the same file)."""
     tmp = tempfile.mkdtemp(prefix="wsimod_data_")
     processed = Path(tmp) / "processed"
     processed.mkdir()
@@ -66,7 +63,7 @@ def _download_data_folder() -> str:
 
 
 def _build_and_capture_quickstart(data_folder: str) -> None:
-    """Builds `quickstart_demo`'s model inline (design spec amendment A3: five node
+    """Builds `quickstart_demo`'s model inline (five node
     dicts, six arc dicts, `Model.add_nodes`/`add_arcs`), runs it under `capture_events`
     (`tests/verification/_wsimod_reference.py`), and writes `quickstart_topology.json` and
     `quickstart_events.csv` (one row per (arc, direction, timestep), aggregated from the
@@ -159,7 +156,7 @@ def _build_and_capture_quickstart(data_folder: str) -> None:
 
 def _build_and_capture_oxford(data_folder: str) -> None:
     """Builds `oxford_demo`'s model via the packaged
-    `wsimod.demo.create_oxford.create_oxford_model` (design spec amendment A3: 18 nodes,
+    `wsimod.demo.create_oxford.create_oxford_model` (18 nodes,
     21 arcs), runs it under `capture_events` (`tests/verification/_wsimod_reference.py`),
     and writes `oxford_topology.json` and `oxford_events.csv` under `FIXTURE_DIR`."""
     import pandas as pd

@@ -1,4 +1,4 @@
-"""Model: several layers on one graph, stepped together (milestone 2 spec section 7)."""
+"""Model: several layers on one graph, stepped together."""
 
 from __future__ import annotations
 
@@ -89,7 +89,7 @@ def test_step_produces_every_state_key_and_the_implicit_step_satisfies_the_balan
 
 
 def test_steady_is_the_limit_of_stepping_and_residuals_vanish_there():
-    # Ruling R21: the residual this test asserts on is the air layer's own Newton residual,
+    # The residual this test asserts on is the air layer's own Newton residual,
     # so the solve is asked for the accuracy the assertion needs (the default is the
     # dtype-derived sqrt(eps) ~ 1.5e-8, which leaves it at ~1e-9) rather than the assertion
     # being loosened. `**solve_kwargs` of step/steady reach the potential solves only.
@@ -152,7 +152,7 @@ def test_a_missing_required_driver_is_named():
 
 def test_a_transport_layer_whose_kinds_no_potential_layer_provides_reads_a_driver():
     """The rule this replaces refused the model outright. A transport layer advecting on a
-    kind the potential layer does not provide is now driver-prescribed (spec section 5)."""
+    kind the potential layer does not provide is now driver-prescribed."""
     net = _net()
     net.add_edge("z1", "z2", kind="duct")
     air = PotentialFlowLayer(
@@ -211,8 +211,8 @@ def test_reactions_apply_after_the_transport_step():
 
 
 def test_reactions_are_a_splitting_of_step_only_and_stay_out_of_steady_and_residuals():
-    # Pins the plan-mandated placement: a reaction is applied AFTER a transport step, so it
-    # is outside both `steady` and the balance `residuals` reports. A later task must not
+    # Pins the documented placement: a reaction is applied AFTER a transport step, so it
+    # is outside both `steady` and the balance `residuals` reports. A later change must not
     # "fix" this by folding the reaction into either.
     tight = {"atol": 1e-14, "rtol": 1e-14}
     _, model, state, drivers, _, _ = _build(reactions=[("species", FirstOrderDecay(1e-3))])
@@ -229,14 +229,14 @@ def test_diagnostics_carry_the_layers_status_and_the_pass_count():
     assert diag["passes"] == 1
     assert bool(diag["layers"]["air"]["converged"].all())
     assert diag["layers"]["species"]["substeps"] == 1
-    # Task 8: default linear_solver="auto" now resolves to sparse_direct at this small
-    # (single-instance) batch size, per the interleaved benchmark's decision (ledger B-14).
+    # The default linear_solver="auto" resolves to sparse_direct at this small
+    # (single-instance) batch size (see `benchmarks/transport_solver_bench.py`).
     assert diag["layers"]["species"]["linear"]["backend"] == "sparse_direct"
 
 
 def test_ports_round_trip_and_air_boundary_flow_balances_the_interior():
     _, model, state, drivers, _, _ = _build()
-    # Ruling R21 again: the boundary flow this asserts on IS the air layer's interior
+    # The boundary flow this asserts on IS the air layer's interior
     # residual (A q sums to zero over all nodes), so the solve is asked for the accuracy the
     # bound needs instead of relying on two default-tolerance residuals cancelling.
     new = model.step(state, drivers, 60.0, atol=1e-14, rtol=1e-14)
@@ -307,11 +307,10 @@ def test_a_two_species_layer_steps_to_a_steady_state_in_the_stacked_layout():
     # The (n_i, K) half of the "<l>.x" layout promise, including the zero-sources default,
     # whose stacked branch no single-species test reaches. Both routes to the steady state
     # are checked and must agree: STEPPING (what the test's name promises) and
-    # `Model.steady`. The comment that used to stand here said the second route had to be
-    # avoided because `TransportLayer.steady` was unreliable for K > 1 -- true when it was
-    # written, and fixed in Task 8b: a K-species operator is block diagonal with K
-    # identical blocks, so its Krylov space is invariant after n_i steps, and `gmres` was
-    # mishandling that near-breakdown. See `tests/solvers/test_gmres_breakdown.py`.
+    # `Model.steady`. `TransportLayer.steady` is reliable for K > 1: a K-species operator
+    # is block diagonal with K identical blocks, so its Krylov space is invariant after n_i
+    # steps, and `gmres` must handle that near-breakdown. See
+    # `tests/solvers/test_gmres_breakdown.py`.
     model, state, drivers, gas = _build_multi()
     zero = torch.zeros(3, 2, dtype=F64)
     new = model.step(state, drivers, 600.0)
@@ -353,8 +352,8 @@ def test_closures_and_reactions_are_checked_for_callability_at_construction():
 
 def test_gradient_of_a_steady_species_loss_wrt_leakage_matches_finite_differences():
     # `steady` is the other differentiable entry point (the transport steady solve on the
-    # potential layer's adjoint); the dictated tests cover `step` only. Tight Newton
-    # tolerances (ruling R21) so the finite difference is not comparing solver noise.
+    # potential layer's adjoint); the tests above cover `step` only. Tight Newton
+    # tolerances so the finite difference is not comparing solver noise.
     tight = {"atol": 1e-14, "rtol": 1e-14}
     _, model, state, drivers, el, _ = _build(learnable=True)
 
@@ -451,8 +450,8 @@ def test_iterate_reports_non_convergence_per_instance_or_raises():
 
 
 def test_iterate_gradient_is_the_fixed_points_derivative_from_a_cold_start():
-    """Renamed in part 3 (P1-2): the mechanism is the implicit interface adjoint, not
-    unrolling; the check is the same central-difference comparison, from the zero state."""
+    """The mechanism is the implicit interface adjoint, not unrolling; the check is a
+    central-difference comparison, from the zero state."""
     _, model, state, drivers, el, _ = _build(
         learnable=True, closures=[_Feedback(2e3)], coupling="iterate",
         iterate_tol={"species": 1e-13}, iterate_max=80,
@@ -480,7 +479,7 @@ def test_iterate_batched_convergence_is_per_instance():
     )
     winds = torch.tensor([[5.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=F64)
     diag: dict = {}
-    # Ruling R21: at the default Newton tolerance the weaker-wind instance stagnates at the
+    # At the default Newton tolerance the weaker-wind instance stagnates at the
     # solver's own noise floor (~2e-11, measured) and never reaches the 1e-12 asked of the
     # coupling; the SOLVE is asked for the accuracy the assertion needs instead.
     model.steady(state, dict(drivers, wind=winds), diagnostics=diag, atol=1e-14, rtol=1e-14)
@@ -489,10 +488,10 @@ def test_iterate_batched_convergence_is_per_instance():
 
 
 def test_iterate_non_convergence_names_only_the_failing_batch_instances():
-    """The dictated non-convergence test is unbatched, so it reports "all"; this one pins the
-    per-instance naming the milestone asks for.
+    """The basic non-convergence test is unbatched, so it reports "all"; this one pins the
+    per-instance naming.
 
-    Tight Newton tolerances (ruling R21) so that what instance 1 runs out of is the PASS
+    Tight Newton tolerances so that what instance 1 runs out of is the PASS
     budget and not the solver's noise floor: at pass 11 the strong-wind instance is at a
     change of ~6e-15 and the weak-wind one still at ~2e-11 (measured).
     """
@@ -524,11 +523,11 @@ def test_iterate_refuses_a_pass_budget_below_two_at_construction():
 
 
 def test_iterate_steps_every_transport_layer_but_tests_only_the_named_ones():
-    """Spec 7's motivating case: a species layer in kg/kg beside a thermal layer in kelvin.
+    """The motivating case: a species layer in kg/kg beside a thermal layer in kelvin.
 
     No single absolute tolerance can straddle the two, so `iterate_tol` names the species
     layer alone. The thermal layer is still stepped on EVERY pass -- it just gets no vote on
-    convergence, and no entry in `max_change`. Ruling R21 for the tight Newton tolerances:
+    convergence, and no entry in `max_change`. On the tight Newton tolerances:
     the assertions below are three orders inside the coupling tolerance, so the solve is
     asked for the accuracy they need.
     """
@@ -719,7 +718,7 @@ class _CounterClosure:
     """A closure that carries its own integer state across steps."""
 
     state_keys = ("demo.count",)
-    # R6: advances by a FIXED 1.0 every call, regardless of the step's own interval, so it
+    # Advances by a FIXED 1.0 every call, regardless of the step's own interval, so it
     # does not integrate (does not need a StepContext).
     integrates = False
 
@@ -729,7 +728,7 @@ class _CounterClosure:
 
 class _SilentClosure:
     state_keys = ("demo.count",)
-    integrates = False  # R6: never writes its state key at all; no interval involved either.
+    integrates = False  # never writes its state key at all; no interval involved either.
 
     def __call__(self, state, drivers):
         return {}
@@ -776,7 +775,7 @@ def test_two_closures_claiming_one_state_key_are_refused():
 def test_a_closure_may_not_claim_a_layer_state_key():
     class _Bad:
         state_keys = ("c.x",)
-        integrates = False  # R6: declared so the state_keys/layer-collision check is reached.
+        integrates = False  # declared so the state_keys/layer-collision check is reached.
 
         def __call__(self, state, drivers):
             return {}
@@ -799,8 +798,8 @@ def test_a_declared_state_key_that_is_not_written_is_refused():
         model.step(state, drivers, 1.0)
 
 
-def test_n14_a_same_named_driver_does_not_satisfy_a_silent_closures_state_key():
-    """N14: `key not in drv` used to be satisfied by a caller-supplied DRIVER of the same
+def test_a_same_named_driver_does_not_satisfy_a_silent_closures_state_key():
+    """`key not in drv` alone would be satisfied by a caller-supplied DRIVER of the same
     name, sitting in `drv` from its initial `dict(drivers)` copy -- even though no closure
     ever wrote it -- freezing the closure's carried state at the caller's value with no
     error. The check must be on what the closure itself returned."""
@@ -818,8 +817,8 @@ def test_n14_a_same_named_driver_does_not_satisfy_a_silent_closures_state_key():
         model.step(state, drivers, 1.0)
 
 
-def test_fr2_a_closure_may_declare_the_flow_driver_of_an_ownerless_layer_as_state():
-    """FR-2: the construction-time state_keys/layer-state collision check must mirror
+def test_a_closure_may_declare_the_flow_driver_of_an_ownerless_layer_as_state():
+    """The construction-time state_keys/layer-state collision check must mirror
     `_apply_closures`' own ownerless-"<layer>.q" carve-out -- "<layer>.q" for a transport
     layer no potential layer owns is a DRIVER (what a flow closure writes), not that
     layer's state, so a closure may legitimately declare it as state it carries across
@@ -827,7 +826,7 @@ def test_fr2_a_closure_may_declare_the_flow_driver_of_an_ownerless_layer_as_stat
 
     class _RememberedFlow:
         state_keys = ("c.q",)
-        integrates = False  # R6: passes its own last-written flow through unchanged.
+        integrates = False  # passes its own last-written flow through unchanged.
 
         def __call__(self, state, drivers):
             return {"c.q": state["c.q"]}
@@ -840,7 +839,7 @@ def test_fr2_a_closure_may_declare_the_flow_driver_of_an_ownerless_layer_as_stat
         net, "c", capacity=torch.tensor([2.0], dtype=torch.float64), flow_kind="pipe",
         boundary=[net.nodes[1]], scheme="implicit",
     )
-    # Construction must NOT raise "which is layer 'c''s own state key" (pre-FR-2 behaviour).
+    # Construction must NOT raise "which is layer 'c''s own state key".
     model = Model(net, {"c": layer}, closures=[_RememberedFlow()])
     assert model.flow_layer_of["c"] is None
     state = {
@@ -855,13 +854,13 @@ def test_fr2_a_closure_may_declare_the_flow_driver_of_an_ownerless_layer_as_stat
 class _IntegratingCounter:
     """A closure that carries a scalar it advances by a FIXED amount every call, mimicking
     a stateful closure that integrates over time (a sewer manhole storage sweep, a tank
-    level): N1's counter-closure.
+    level): the counter-closure for the step-start pinning rule.
 
-    R6: `integrates = False` here even though the docstring says "integrates" -- the
+    `integrates = False` here even though the docstring says "integrates" -- the
     increment is a constant fixed at CONSTRUCTION (the test passes it the step's own `dt`
     so the numbers line up), never read off a `StepContext`, so this closure does not
-    consult the model's own clock and takes no `ctx`. N1 (pass-vs-step, exercised here) and
-    R6 (whose clock a closure reads) are independent concerns.
+    consult the model's own clock and takes no `ctx`. Pass-vs-step (exercised here) and
+    whose clock a closure reads are independent concerns.
     """
 
     state_keys = ("demo.n",)
@@ -874,8 +873,8 @@ class _IntegratingCounter:
         return {"demo.n": state["demo.n"] + self.increment}
 
 
-def test_n1_closure_carried_state_advances_once_per_step_not_once_per_pass():
-    """N1: under coupling='iterate', a closure-carried state key must be evaluated from the
+def test_closure_carried_state_advances_once_per_step_not_once_per_pass():
+    """Under coupling='iterate', a closure-carried state key must be evaluated from the
     STEP-START state on EVERY pass, so one model.step(dt) advances it by exactly the
     closure's own per-call increment -- never by (number of passes) * increment, which is
     what `_iterate` fed pass k-1's own output back into pass k used to produce."""
@@ -894,7 +893,7 @@ def test_n1_closure_carried_state_advances_once_per_step_not_once_per_pass():
 class _ParametrizedIntegratingCounter:
     """Like `_IntegratingCounter`, but the per-call increment is a differentiable PARAMETER
     rather than a fixed float, and the call tolerates its declared key being absent from the
-    state it is handed: I8-1's edge case is exactly a step-start state that never seeds
+    state it is handed: the edge case tested below is exactly a step-start state that never seeds
     "demo.n" at all, so `__call__` must not do the bare `state["demo.n"]` lookup
     `_IntegratingCounter` does."""
 
@@ -912,14 +911,14 @@ class _ParametrizedIntegratingCounter:
 
 
 def _iterate_model_with_counter(param=None):
-    """Shared builder for the I8-1 tests (a closure-carried key missing vs. seeded from the
-    step-start state) and A3's warning tests, all on the same `_Feedback` +
-    `_ParametrizedIntegratingCounter` iterate model. `state` is SEEDED ("demo.n" zero): A3's
-    own control test wants that, and its warning test derives the unseeded state by dropping
-    the key from it, exactly as the I8-1 control test already built its own `start`. `param`
-    defaults to a fixed, non-differentiable 0.5 for A3's tests, which never differentiate;
-    the I8-1 tests each pass their own differentiable leaf so `torch.autograd.grad` can read
-    it back afterward."""
+    """Shared builder for the missing-key tests (a closure-carried key missing vs. seeded from
+    the step-start state) and the warning tests, all on the same `_Feedback` +
+    `_ParametrizedIntegratingCounter` iterate model. `state` is SEEDED ("demo.n" zero): the
+    warning's control test wants that, and its warning test derives the unseeded state by
+    dropping the key from it, exactly as the gradient control test builds its own `start`.
+    `param` defaults to a fixed, non-differentiable 0.5 for the warning tests, which never
+    differentiate; the gradient tests each pass their own differentiable leaf so
+    `torch.autograd.grad` can read it back afterward."""
     if param is None:
         param = torch.tensor(0.5, dtype=F64)
     _, model, state, drivers, _, _ = _build(
@@ -930,15 +929,15 @@ def _iterate_model_with_counter(param=None):
     return model, state, drivers
 
 
-def test_i8_1_a_closure_state_key_missing_from_the_step_start_state_gets_a_truncated_gradient():
-    """I8-1 (Task 8 review): `_iterate`'s interface excludes every `closure_state_keys` entry
+def test_a_closure_state_key_missing_from_the_step_start_state_gets_a_truncated_gradient():
+    """`_iterate`'s interface excludes every `closure_state_keys` entry
     UNCONDITIONALLY (`keys = [... if k not in self.closure_state_keys ...]`), whether or not
-    N1's own `if key in base:` pinning applies to it. When the key IS seeded (see the control
-    below) that costs nothing: N1 pins the closure's read to the step-start state on every
+    the `if key in base:` pinning applies to it. When the key IS seeded (see the control
+    below) that costs nothing: the pinning holds the closure's read to the step-start state on every
     pass, and the one differentiable re-run of the certified pass reads that same
     graph-carrying tensor directly (`step_from=state`), so the gradient survives untouched.
 
-    When the key is ABSENT from the step-start state -- the one case N1 does not pin,
+    When the key is ABSENT from the step-start state -- the one case that is not pinned,
     documented in `_iterate`'s own docstring ("a closure-carried key MISSING from the
     step-start state ... drops a path that only exists because that key was not seeded in the
     first place") -- the closure instead reads the PREVIOUS pass's own value on every pass, so
@@ -947,10 +946,9 @@ def test_i8_1_a_closure_state_key_missing_from_the_step_start_state_gets_a_trunc
     adjoint runs sees that compounded history only as a plain, already-detached number and
     re-applies the closure ONCE more, so it can return only THAT one application's own local
     derivative (exactly 1.0 here) -- not the true, pass-count-sized sensitivity, and,
-    measured here, not literally zero either: a looser paraphrase of this finding elsewhere
-    (the review ledger) says the adjoint "returns ZERO gradient through it", but the single
-    surviving local term is what this test pins, verified by directly running this fixture
-    before writing the assertion. Either way this is the documented SAFE side of the trade
+    measured here, not literally zero either: the single surviving local term is what this
+    test pins, verified by directly running this fixture before writing the assertion.
+    Either way this is the documented SAFE side of the trade
     (silently wrong-by-omission, never wrong-signed or blown up) and NOT a runtime refusal --
     the first step is allowed to lack the key by design (`_pass`'s `if key in base:` guard)."""
     param = torch.tensor(0.5, dtype=F64, requires_grad=True)
@@ -984,9 +982,9 @@ def test_i8_1_a_closure_state_key_missing_from_the_step_start_state_gets_a_trunc
     assert grad.item() < 0.2 * cd   # the adjoint drops nearly all of that true sensitivity
 
 
-def test_i8_1_control_the_same_gradient_matches_central_differences_once_seeded():
+def test_control_the_same_gradient_matches_central_differences_once_seeded():
     """Control for the test above: the identical closure and parameter, seeded this time, so
-    N1 pins "demo.n" to the step-start state on every pass and the gradient the implicit
+    "demo.n" is pinned to the step-start state on every pass and the gradient the implicit
     adjoint returns is the fixed point's own, matching central differences the way every other
     `coupling="iterate"` gradient test in this module does."""
     param = torch.tensor(0.5, dtype=F64, requires_grad=True)
@@ -1012,7 +1010,7 @@ def test_i8_1_control_the_same_gradient_matches_central_differences_once_seeded(
 
 
 def test_iterate_warns_when_a_closure_carried_key_is_missing_from_the_step_start_state():
-    """A3: on such a step the key is not pinned to the step start (N1's `if key in base`), so
+    """On such a step the key is not pinned to the step start (`if key in base`), so
     its closure integrates once per PASS and the adjoint omits the compounding path. The
     misconfiguration is named where it happens; it is not refused, because the first step is
     allowed to lack the key by design.
@@ -1021,10 +1019,10 @@ def test_iterate_warns_when_a_closure_carried_key_is_missing_from_the_step_start
     to the CALLER of `step`/`steady` (this test module), not to a line inside `model.py` itself
     -- `warnings.warn`'s default filter dedupes on (message, category, module, lineno), so a
     warning permanently attributed to one internal line would let a second, later, genuinely
-    different caller's identical warning go silently missing (A3 fix round). Both `step` and
+    different caller's identical warning go silently missing. Both `step` and
     `steady` reach `_iterate` through the same `_advance`, so one `stacklevel` serves both --
     checked on both calls below."""
-    model, state, drivers = _iterate_model_with_counter()   # the I8-1 tests' builder
+    model, state, drivers = _iterate_model_with_counter()   # the missing-key tests' builder
     unseeded = {k: v for k, v in state.items() if k != "demo.n"}
     match = r"closure-carried state.*'demo\.n'.*once per pass"
     with pytest.warns(RuntimeWarning, match=match) as record:
@@ -1142,7 +1140,7 @@ def test_current_flows_refuses_a_flow_driver_beside_a_potential_owner_on_the_sol
 
 def test_iterate_gradient_from_a_near_fixed_point_start_matches_central_differences():
     """Start the step at the model's own steady state: the primal needs only the structural
-    two passes, and the derivative it returns must still be the fixed point's (P1-2).
+    two passes, and the derivative it returns must still be the fixed point's.
 
     Two things this test needs that the fixture's own defaults do not give, both measured
     while it was written -- and neither of them a loosened assertion:
@@ -1153,7 +1151,7 @@ def test_iterate_gradient_from_a_near_fixed_point_start_matches_central_differen
       1.2e-5 (~ that ratio squared): the bug would be invisible here whatever the tolerance.
       The source is raised to 5e-4 kg/s, where the loop gain is -0.23, the two-pass
       derivative is 3.2 % wrong and the implicit one is right to 3e-7.
-    * RULING R21 for the tight Newton tolerances. The CENTRAL DIFFERENCE is the reference,
+    * Tight Newton tolerances. The CENTRAL DIFFERENCE is the reference,
       and at the default (~1.5e-8) each perturbed run chases the solver's own noise through
       several extra passes; the drift that leaves in (up - down) does not scale with h, so
       the measured "derivative" swings by 9 % between h=1e-6 and h=1e-5 and is no reference
@@ -1193,7 +1191,7 @@ def test_iterate_gradient_from_a_near_fixed_point_start_matches_central_differen
 def test_iterate_pays_for_the_adjoint_pass_only_when_a_gradient_is_wanted():
     """`passes` counts PRIMAL passes. A run nothing differentiable reaches costs exactly
     those and reports `adjoint is None`; a differentiable one costs ONE more -- the single
-    pass the implicit adjoint is attached to -- and never one per pass (P1-2)."""
+    pass the implicit adjoint is attached to -- and never one per pass."""
     tight = {"atol": 1e-14, "rtol": 1e-14}
     _, model, state, drivers, el, _ = _build(
         learnable=True, closures=[_Feedback(2e3)], coupling="iterate",
@@ -1228,11 +1226,11 @@ def test_iterate_pays_for_the_adjoint_pass_only_when_a_gradient_is_wanted():
 
 
 def test_iterate_gradient_is_per_instance_on_a_batched_model():
-    """I8-2 (part 3 follow-up): two wind speeds through coupling="iterate" with a learnable
+    """Two wind speeds through coupling="iterate" with a learnable
     element. Each instance's sensitivity must match its OWN central difference, so the adjoint
     solve keeps instances apart; the instances must also differ, or a batch-mixing error could
     hide. Sources at 5e-4 as in the near-fixed-point test, so the feedback gain is strong.
-    Solver tolerances tightened for the central-difference reference (ruling R21)."""
+    Solver tolerances tightened for the central-difference reference."""
     _, model, state, drivers, el, _ = _build(
         learnable=True, closures=[_Feedback(2e3)], coupling="iterate",
         iterate_tol={"species": 1e-13}, iterate_max=80,
@@ -1276,7 +1274,7 @@ def test_a_non_converged_iteration_refuses_to_return_when_a_gradient_is_wanted()
     differentiate, and returning the primal state there would hand the caller a graph-free
     tensor that differentiates to nothing, silently.
 
-    Adapted from the brief's literal fixture: `model.steady(..., on_failure="return")` with a
+    Why not the obvious fixture: `model.steady(..., on_failure="return")` with a
     `learnable=True` element cannot reach `_iterate`'s own non-convergence branch with
     `needs_adjoint` True, because `solve_kwargs` (including `on_failure`) is forwarded to
     every potential-layer solve too (module docstring), and `PotentialFlowLayer.solve`'s

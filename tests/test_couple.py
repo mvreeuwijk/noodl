@@ -84,7 +84,7 @@ def test_transport_boundary_inflow_hand_computed():
 def _dense_boundary_inflow(
     net, q, kind, x_interior, x_boundary, interior_idx, boundary_idx, node_position
 ):
-    """The milestone 5 dense form, kept here as the reference for the sparse helper."""
+    """A dense form, kept here as the reference for the sparse helper."""
     batch_shape = torch.broadcast_shapes(
         x_interior.shape[:-1], x_boundary.shape[:-1], q.shape[:-1]
     )
@@ -170,7 +170,7 @@ def _tiny_building_model():
         # is never the upwind node for this edge, so `species.x_boundary`'s value never
         # enters the state update at all (`AdvectionOperator.boundary_forcing` evaluates to
         # zero regardless of x_boundary) and a test asserting on the resulting `species.x`
-        # cannot distinguish a working coupling from a no-op one (found in Task 2's review).
+        # cannot distinguish a working coupling from a no-op one.
         return {"species.q": torch.tensor([-0.5], dtype=F64)}  # ambient infiltrates INTO z0
 
     model = Model(net, {"species": layer}, closures=[closure])
@@ -231,10 +231,10 @@ def _city(**kwargs):
 
 def test_two_way_step_is_a_fixed_point_of_one_step_from_the_start_state():
     """The converged output, fed back as glue values, must reproduce itself from ONE step
-    of each model from the START state -- design spec A1. A time-compounding iteration
+    of each model from the START state. A time-compounding iteration
     (stepping from the previous pass's output) fails this: its output is not one dt away.
 
-    Task 17 (R1, R2): the coupler now steps the RECIPIENT (building) first and feeds the
+    The coupler steps the RECIPIENT (building) first and feeds the
     DONOR (street) the recipient's own integrated boundary transfer as a source rate, rather
     than an endpoint flux recomputed from a stale state; at convergence, the returned donor
     forward value equals the boundary value the recipient was stepped with (the convergence
@@ -275,7 +275,7 @@ def test_two_way_step_is_a_fixed_point_of_one_step_from_the_start_state():
         new["street"]["street.x"], expect_street["street.x"], rtol=1e-9, atol=1e-14)
 
     # The recipient's own integrated transfer, reported in diagnostics, is exactly the
-    # source RATE the donor (street) was stepped with, times dt (R1: an integrated amount,
+    # source RATE the donor (street) was stepped with, times dt (an integrated amount,
     # not an endpoint flux held fixed) -- `inflow` above IS that rate, by construction of
     # the hand reconstruction, so at this converged fixed point they must agree.
     key = "street:street.x[0]->building:species.x_boundary"
@@ -323,10 +323,10 @@ def test_two_way_convergence_and_non_convergence_are_judged_per_batch_instance()
     link and per instance, and the failure message names ONLY the instances that failed --
     as `Model._iterate` does (`model.py:595-604`).
 
-    Task 17 (R1, R2): the coupler now judges convergence on the donor's RETURNED forward
+    The coupler judges convergence on the donor's RETURNED forward
     value against the value the recipient was stepped with THIS pass, from the first pass
-    on -- re-measured below for this fixture (unchanged by the scheme change here: instance
-    0 still converges by pass 4, instance 1 needs 7 total).
+    on -- measured below for this fixture (instance 0 converges by pass 4, instance 1 needs
+    7 total).
     """
     from noodl.couple import union
 
@@ -368,7 +368,7 @@ def test_two_way_feedback_adds_to_the_callers_own_sources_and_never_overwrites_t
     """The caller's own source terms at the coupled node must survive: the feedback flux is
     ADDED to them. Every other fixture supplies zeros, where add and overwrite agree.
 
-    Task 17 (R1, R2): the added quantity is now `transfer / dt`, the recipient's own
+    The added quantity is `transfer / dt`, the recipient's own
     integrated boundary transfer (reported in `diagnostics["transfers"]`) divided by dt, not
     `transport_boundary_inflow` recomputed from the previous pass's state.
     """
@@ -443,7 +443,7 @@ def test_two_way_link_with_iterate_max_below_two_is_refused_at_construction():
 
 def test_driver_alias_writes_every_target_through_its_own_conversion():
     """The source is authoritative and each target is written from it through that target's
-    registered conversion (design spec A3): the street's theta_w, radians counter-clockwise
+    registered conversion: the street's theta_w, radians counter-clockwise
     from east, reaches the building as CONTAM's Wd, degrees clockwise from north."""
     from noodl.couple import STREET_RAD_TO_CONTAM_DEG, DriverAlias, ValueLink, union
 
@@ -811,7 +811,8 @@ def test_a_second_writer_of_a_boundary_entry_is_refused_by_name(links, extra_don
 
 def test_two_links_into_different_entries_of_one_boundary_key_are_accepted():
     """Ownership is per ENTRY: two donors feeding two different boundary indices of the same
-    recipient layer is the ordinary multi-boundary case (part 2's
+    recipient layer is the ordinary multi-boundary case
+    (tests/test_couple_conservation.py's
     test_two_recipients_of_one_donor_conserve_and_report_each_transfer is its mirror)."""
     from noodl.layers.transport import TransportLayer
     from noodl.model import Model
@@ -838,7 +839,7 @@ def test_two_links_into_different_entries_of_one_boundary_key_are_accepted():
 
 def test_gradient_flows_across_the_join_and_matches_central_differences():
     """d(building species.x) / d(street segment-0 initial concentration), through the
-    coupled two-way step -- design spec section 7, 'gradients flow across the join'."""
+    coupled two-way step: gradients flow across the join."""
     from noodl.couple import union
 
     def indoor(x0: torch.Tensor) -> torch.Tensor:

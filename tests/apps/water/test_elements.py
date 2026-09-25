@@ -67,9 +67,8 @@ def test_the_transition_is_far_below_the_fixtures_smallest_head_loss():
 
     The gradient the assertion below computes (1.939615369e-05) is THIS MODEL's own
     loss-over-length, from the closed-form Hazen-Williams inversion; the `.rpt` EPANET
-    itself writes for P7 is 1.9394165e-05 -- the ~1e-4 relative gap spec amendment A20
-    records between the model and EPANET's own float32-limited report, not a bug in
-    either.
+    itself writes for P7 is 1.9394165e-05 -- a ~1e-4 relative gap between the model and
+    EPANET's own float32-limited report, not a bug in either.
     """
     el = HazenWilliams(
         torch.tensor([300.0], dtype=F64), torch.tensor([0.150], dtype=F64),
@@ -175,9 +174,9 @@ def test_minor_loss_valve_inverts_its_quadratic():
     assert torch.isfinite(dp.grad).all()
 
 
-# ------------------------------------------------------------------------------ N12
+# ------------------------------------------------------------------ laminar blend dtype
 def test_minor_loss_laminar_blend_is_full_float64_precision():
-    """N12: the laminar-blend constant used to build with `torch.as_tensor(dpt)`, which
+    """Building the laminar-blend constant with `torch.as_tensor(dpt)` would be wrong: it
     casts a bare Python float with `torch.get_default_dtype()` (float32) BEFORE the
     division -- type promotion then upgrades the RESULT back to float64, so the bug is
     invisible to a `.dtype` check and only shows up as an ~1.4e-8 relative precision loss
@@ -199,9 +198,9 @@ def test_minor_loss_laminar_blend_is_full_float64_precision():
     assert float(el.dflow(dp0)) == pytest.approx(expected_slope, rel=1e-13)
 
 
-# --------------------------------------------------------------- M4-R14: PDA's exact kink
+# --------------------------------------------------------------- PDA's exact kink
 def test_pressure_driven_demand_is_exactly_zero_at_and_below_p_min():
-    """Ruling M4-R14: the Wagner curve is EXACTLY 0 at and below `P_min`, the fractional
+    """The Wagner curve is EXACTLY 0 at and below `P_min`, the fractional
     law strictly between, and EXACTLY `q_required` at and above `P_req`; gradients finite
     (and exactly 0 below `P_min`) everywhere."""
     demand = PressureDrivenDemand(

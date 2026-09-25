@@ -176,7 +176,7 @@ def test_gradcheck_flow_exactly_at_transition_boundaries_and_zero_no_nan():
 
 
 def test_orifice_builds_a_powerlaw_with_n_half_and_derived_C():
-    """Orifice is stated as a Task 3 deliverable interface but the brief never tests it."""
+    """Orifice is a public constructor; pin what it builds."""
     Cd, A, rho = 0.6, 0.02, 1.2
     el = Orifice(Cd, A, rho=rho)
     assert isinstance(el, PowerLaw)
@@ -200,9 +200,9 @@ def test_orifice_forwards_kind_learnable_and_transition_kwargs():
 
 
 def test_orifice_keeps_a_float64_tensor_arguments_own_dtype():
-    """N2 (core half): Cd/A given as tensors must not be silently downcast to
+    """Cd/A given as tensors must not be silently downcast to
     torch.get_default_dtype() (float32 in this project); a bare Python float still takes
-    it, unchanged."""
+    it."""
     Cd64 = torch.tensor(0.6, dtype=torch.float64)
     A64 = torch.tensor(0.02, dtype=torch.float64)
     el64 = Orifice(Cd64, A64, rho=1.2)

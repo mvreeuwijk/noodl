@@ -42,7 +42,7 @@ def test_operator_splitting_matches_removal_matrix_route_to_first_order():
     rate = 0.01
     cap = torch.tensor([1000.0], dtype=torch.float64)
     q = torch.tensor([0.2, 0.2], dtype=torch.float64)
-    src = torch.zeros(net.n, dtype=torch.float64)  # FULL node order (spec 4.2); all zero
+    src = torch.zeros(net.n, dtype=torch.float64)  # FULL node order; all zero
     x_b = torch.tensor([420.0], dtype=torch.float64)
     dt = 5.0  # small step so the splitting error stays within first-order tolerance
 
@@ -83,7 +83,7 @@ def test_rate_constant_matches_the_arrhenius_form_and_the_kg_conversion():
     assert abs(K_NO_O3_298 / k3 - 1.0) < 1e-15
     conversion = 6.02214076e23 / (1e6 * 48.0e-3)
     assert abs(K_NO_O3 / (K_NO_O3_298 * conversion) - 1.0) < 1e-15
-    # The spec's section 7 row prints k' to six significant figures; that rounding, and
+    # The quoted k' has six significant figures; that rounding, and
     # nothing else, is why this check is 2e-6 and not 1e-9.
     assert abs(K_NO_O3 / 2.45236e5 - 1.0) < 2e-6
     assert MOLAR_MASS == {"no": 30.0e-3, "no2": 46.0e-3, "o3": 48.0e-3}
@@ -157,7 +157,7 @@ def test_photostationary_names_a_missing_driver_and_a_bad_column():
                                        {"J_NO2": torch.ones(1, dtype=DT)})
 
 
-# Ruling M3-R10: the reviewer's near-titration case, NOx ~= Ox to ~1 part in 1e12 with J
+# The near-titration case, NOx ~= Ox to ~1 part in 1e12 with J
 # small/zero, catastrophically cancels the naive expanded discriminant `s*s - 4 k^2 p q`
 # to a genuinely negative float, giving `sqrt` -> NaN and (through the `denominator > 0`
 # guard) a silently unchanged output instead of the physical near-titration state.

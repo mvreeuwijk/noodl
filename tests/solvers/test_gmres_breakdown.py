@@ -1,4 +1,4 @@
-"""Regression tests for gmres near-breakdown (Task 8b).
+"""Regression tests for gmres near-breakdown.
 
 A multi-species `TransportLayer` operator is block diagonal with `K` identical blocks, so
 its minimal polynomial has degree `n_i`, not `K * n_i`: the Arnoldi process reaches an

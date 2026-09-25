@@ -1,4 +1,4 @@
-"""Task 7: interleaved benchmark of the transport layer's four linear solvers (B4).
+"""Interleaved benchmark of the transport layer's four linear solvers.
 
 Compares `TransportLayer(linear_solver=...)` in `("gmres", "gmres_jacobi", "gmres_ilu",
 "sparse_direct")` on the implicit transport step's FORWARD time (a plain `.step(...)` call)
@@ -7,7 +7,7 @@ the flow driving the step -- as the differentiable leaf, so the transposed solve
 runs through `_LinearSolve.backward`), at ensemble sizes `1`, `32` (the `sparse_direct` batch
 cap) and `100` (gmres variants only -- `sparse_direct` is not attempted there, see
 `_applicable_solvers`), on `benchmarks.composed_model.build_composed`'s reference topology.
-Then the same four solvers on the milestone-5 street/building coupling demo
+Then the same four solvers on the street/building coupling demo
 (`benchmarks.coupling_street_building`), batch 1, one coupled hour.
 
 The protocol is INTERLEAVED, not solver-by-solver: for a given ensemble, one model is built
@@ -18,11 +18,11 @@ timing can drift 15-25 s over a 50 s run of unrelated work, which would otherwis
 solver difference. Reports median, min, max (not mean: the spread is exactly what interleaving
 is trying to keep honest, so it is reported, not averaged away).
 
-This script measures. It does not decide which solver becomes the default -- that is Task 8,
-against a decision rule already written in the plan, applied to these medians.
+This script measures; the default `"auto"` rule in `TransportLayer._resolve_solver` was
+chosen on these medians.
 
-Run as a SCRIPT, with `PYTHONPATH` pointed at this worktree's `src` (the editable install
-otherwise resolves `noodl` to the main checkout, which lacks these solver options):
+Run as a SCRIPT, with `PYTHONPATH` pointed at the checkout's `src` (so that an editable
+install elsewhere does not shadow it):
 
     PYTHONPATH=src .venv/Scripts/python -m benchmarks.transport_solver_bench --quick
     PYTHONPATH=src .venv/Scripts/python -m benchmarks.transport_solver_bench

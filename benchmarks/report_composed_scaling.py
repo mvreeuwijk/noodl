@@ -1,20 +1,19 @@
-"""The milestone-1b acceptance measurements: the section 6.1 budget table and the shape gates.
+"""The composed-model acceptance measurements: the budget table and the shape gates.
 
 Every measurement lives here, and `tests/verification/test_composed_scaling.py` imports these
 functions rather than re-implementing them, so the numbers the gate asserts on and the numbers
 the JSON report records are the same numbers, produced by the same code.
 
 Times and memory both come from `benchmarks.measure.isolated_peak_rss`, i.e. from a fresh
-child process per measurement: `tracemalloc` cannot see PyTorch's allocator at all (amendment
-A4), and a peak taken in a process that has already run three other configurations is not a
-peak for any of them.
+child process per measurement: `tracemalloc` cannot see PyTorch's allocator at all, and a peak taken
+in a process that has already run three other configurations is not a peak for any of them.
 
-Iteration counts travel beside the times because design section 6.1 requires it: on a machine
+Iteration counts travel beside the times because they are needed to read them: on a machine
 with enough threads, a conditioning regression can leave wall-clock unchanged while the inner
 solver iteration count doubles.
 
-Every budget row is measured under EVERY entry of `SOLVERS` (spec section 6.2 step 2: the
-`method="auto"` default is selected on evidence, so the evidence lives in the report), and
+Every budget row is measured under EVERY entry of `SOLVERS` (the `method="auto"` default is
+selected on evidence, so the evidence lives in the report), and
 each row carries a `solver` field saying which. The row keys are otherwise unchanged, so a
 consumer that ignores `solver` reads the same schema it always did.
 
@@ -39,7 +38,7 @@ from benchmarks.composed_model import build_composed
 from benchmarks.measure import isolated_peak_rss, time_call
 from noodl.operators.graph import GraphLaplacianOperator
 
-# The reference composed model of design section 6: 8 buildings x 120 nodes, a 40-node street
+# The reference composed model: 8 buildings x 120 nodes, a 40-node street
 # and a 30-node sewer network -- 1030 nodes, about 2200 edges.
 REFERENCE_KWARGS = {
     "n_buildings": 8,
@@ -48,8 +47,8 @@ REFERENCE_KWARGS = {
     "sewer_nodes": 30,
 }
 
-# (ensemble, steps, forward_budget_s, backward_budget_s, peak_memory_budget_bytes), exactly
-# design section 6.1's table. These are the gate; they are not adjustable here.
+# (ensemble, steps, forward_budget_s, backward_budget_s, peak_memory_budget_bytes). These
+# are the gate; they are not adjustable here.
 BUDGET_TABLE = [
     (1, 1, 0.050, 0.100, 100 * 1_000_000),
     (100, 1, 0.500, 1.000, 1_000 * 1_000_000),
@@ -58,17 +57,16 @@ BUDGET_TABLE = [
 ]
 
 
-# The inner linear solvers the budget table is measured under (spec section 6.2 step 2: the
-# default for `method="auto"` is chosen ON EVIDENCE, so the evidence has to exist). "auto" is
+# The inner linear solvers the budget table is measured under (the default for
+# `method="auto"` is chosen ON EVIDENCE, so the evidence has to exist). "auto" is
 # the shipped default; "cg" is the PCG reference. The FIRST entry is the one whose numbers the
 # gate reads -- `measure_budget_row`'s own default -- so the committed report keeps meaning
 # what `tests/verification/test_composed_scaling.py` asserts.
 #
-# These two must be DISTINCT backends, not the same one measured twice: since Task C decided
-# the default, "auto" now RESOLVES to sparse_direct for a certified-SPD operator with SciPy
-# installed (see `solvers.select`'s eligibility table), so pairing it with "sparse_direct"
-# would measure one backend under two names. "cg" (PCG) is what "auto" used to select and
-# what it falls back to, so this pairing is the before/after the routing change actually made.
+# These two must be DISTINCT backends, not the same one measured twice: "auto" RESOLVES to
+# sparse_direct for a certified-SPD operator with SciPy installed (see `solvers.select`'s
+# eligibility table), so pairing it with "sparse_direct" would measure one backend under two
+# names. "cg" (PCG) is what "auto" falls back to, so this pairing compares the two routes.
 SOLVERS = ("auto", "cg")
 
 
@@ -100,13 +98,13 @@ def measure_budget_row(
     `solver` is the layer's inner linear solver (`PotentialFlowLayer(linear_solver=...)`),
     carried into the child process and recorded in the row. It defaults to `"auto"`, the
     shipped default, so the gate keeps measuring what ships; the report additionally measures
-    every entry of `SOLVERS`, which is the section 6.2 evidence the `"auto"` default is
+    every entry of `SOLVERS`, which is the evidence the `"auto"` default is
     chosen on. The BUDGETS do not vary with it -- they are the design's, not the backend's.
 
-    `thermal` measures the MILESTONE-2 configuration instead: the same air and species
+    `thermal` measures the building-physics configuration instead: the same air and species
     layers plus a second (heat) transport layer, stepped together through `Model.step`
     (`build_composed(thermal=True)`). The budgets do not vary with it either -- the row is
-    judged against the section 6.1 budgets of the row it shares its shape with, which is the
+    judged against the budgets of the row it shares its shape with, which is the
     whole point of measuring it -- and the row records `"thermal": true` so a reader can tell
     the two configurations apart.
     """
@@ -274,7 +272,7 @@ def measure_matvec_shape_gate(repetitions: int = 200, medians_of: int = 5) -> di
     `edge_sensitivity_ratio` repeats the same doubling at 16x and 32x the reference edge
     count, where the measurement is actually edge-bound rather than dispatch-bound -- see
     EDGE_SENSITIVITY_MULTIPLIERS. It is reported, not asserted; the gate is the ratio at the
-    reference size, as the design specifies.
+    reference size.
     """
     model = build_composed()
     layer = model.layer
@@ -366,9 +364,9 @@ def main() -> None:
             print(format_budget_row(row))
             budget_rows.append(row)
 
-    # The milestone-2 gate row: the ensemble-100, 24-step SHAPE with a heat layer beside the
+    # The thermal gate row: the ensemble-100, 24-step SHAPE with a heat layer beside the
     # species one, through `Model.step`, under the shipped default solver and against that
-    # row's own section 6.1 budgets. It is a gate row like any other, so it counts towards
+    # row's own budgets. It is a gate row like any other, so it counts towards
     # `all_budgets_met` below; `tests/verification/test_composed_scaling.py` asserts on the
     # same measurement. The report therefore holds TWO `(100, 24, "auto")` rows, identical in
     # every key but `"thermal"`, which is what tells them apart -- and, read side by side,

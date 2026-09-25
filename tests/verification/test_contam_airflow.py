@@ -160,8 +160,8 @@ def test_parallel_combination_batched():
     C2 = 0.005 + 0.03 * torch.rand(m, dtype=DTYPE)
     # n carries a trailing size-1 edge axis (matching the (m, 1) convention used for the
     # series/fan-driven/stack batched cases elsewhere in this file) so it broadcasts against
-    # C's (m, 2) edge axis inside PowerLaw; the brief's original draft used a bare (m,) n,
-    # which fails broadcasting against C's trailing edge dim of 2 (RuntimeError: size of
+    # C's (m, 2) edge axis inside PowerLaw; a bare (m,) n
+    # fails broadcasting against C's trailing edge dim of 2 (RuntimeError: size of
     # tensor a (2) must match size of tensor b (64)). n_flat below undoes this for the
     # per-edge closed-form reference, which needs n aligned with Dp's (m,) shape instead.
     n = 0.5 + 0.3 * torch.rand(m, 1, dtype=DTYPE)
@@ -212,8 +212,8 @@ def test_fan_driven_zone_pressure_single_instance():
     torch.testing.assert_close(phi[net.node_index("zone")], p_ref, atol=1e-6, rtol=1e-6)
 
     # atol=1e-9 matches newton()'s own default convergence tolerance (atol=1e-9, rtol=1e-9);
-    # the brief's original draft used atol=1e-10, tighter than the solver's guaranteed
-    # accuracy, and failed deterministically here (observed residual ~2.09e-10).
+    # atol=1e-10 would be tighter than the solver's guaranteed accuracy, and fails
+    # deterministically here (observed residual ~2.09e-10).
     residual = layer.residual(phi[..., layer.interior], phi_boundary, {}, None)
     torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-9, rtol=0.0)
 
@@ -265,7 +265,7 @@ def _fan_curve_layer(
     coeffs = torch.stack([a0, a1, a2, a3], dim=-1)
     # FanCurve's own default kind is "airpath" (same as PowerLaw's); without an explicit
     # kind="fan" here it collides with `leak`'s "airpath" kind and PotentialFlowLayer raises
-    # "duplicate element kind 'airpath'" (the brief's original draft omitted this argument).
+    # "duplicate element kind 'airpath'".
     fan = FanCurve(coeffs, q_max, kind="fan")
     leak = PowerLaw(C, n, dp_transition=1e-6)
     layer = PotentialFlowLayer(net, "fan_curve", [fan, leak], boundary=["ambient"])
@@ -318,10 +318,10 @@ def test_fan_curve_loop_batched():
     # than (m,)): both FanCurve (1 fan edge) and PowerLaw (1 airpath edge) here represent a
     # SINGLE edge each, and the layer's per-element dp slice for a width-1 block keeps that
     # trailing dim (shape (m, 1), not (m,)), per the shape convention documented on
-    # PowerLaw/FanCurve. The brief's original draft used bare (m,) tensors throughout, which
-    # broadcasts a (m,) parameter against a (m, 1) dp slice as (m, m) instead of (m, 1)
-    # (RuntimeError: size of tensor a (128) must match size of tensor b (2), from the (m, m)
-    # shape silently doubling the edge axis during linear_init's concatenation).
+    # PowerLaw/FanCurve. Bare (m,) tensors throughout would broadcast a (m,) parameter against a (m,
+    # 1) dp slice as (m, m) instead of (m, 1) (RuntimeError: size of tensor a (128) must match size
+    # of tensor b (2), from the (m, m) shape silently doubling the edge axis during linear_init's
+    # concatenation).
     a0 = 100.0 + 100.0 * torch.rand(m, 1, dtype=DTYPE)
     a1 = -150.0 - 50.0 * torch.rand(m, 1, dtype=DTYPE)
     a2 = -100.0 - 50.0 * torch.rand(m, 1, dtype=DTYPE)
@@ -628,12 +628,12 @@ def test_golden_matches_stored_reference():
 
 
 # ---------------------------------------------------------------------------------------
-# Whole-branch review, MUST FIX 1: every case above that exercises FixedFlow ("fan_driven")
-# passes differentiable=False only, so the default (differentiable=True) path -- which
-# computes the branch Jacobian by autograd rather than analytically -- was never exercised
-# by this suite for an element whose flow does not depend on dp at all. That path crashed
-# unconditionally for FixedFlow (RuntimeError at potential.py's autograd.grad call, in both
-# the learnable=False and learnable=True constructions) until fixed. The tests below
+# Every case above that exercises FixedFlow ("fan_driven") passes differentiable=False
+# only, so the default (differentiable=True) path -- which computes the branch Jacobian by
+# autograd rather than analytically -- would otherwise never be exercised by this suite for
+# an element whose flow does not depend on dp at all (a path that can crash for FixedFlow at
+# potential.py's autograd.grad call, in both the learnable=False and learnable=True
+# constructions). The tests below
 # parametrize the fan-driven case and two others over both paths, and add a direct
 # same-inputs comparison between the two paths so a future regression here is caught by
 # result disagreement, not just by one path failing to run.
@@ -739,12 +739,11 @@ def test_fan_driven_zone_differentiable_and_nondifferentiable_paths_agree(learna
 
 
 # ---------------------------------------------------------------------------------------
-# Whole-branch review, MUST FIX 2: newton()'s old flat atol=rtol=1e-9 default was
-# unreachable in float32 (the project's declared default dtype -- see
-# noodl/topology.py's Network(dtype: torch.dtype = torch.float32) and
+# A flat atol=rtol=1e-9 Newton default is unreachable in float32 (the project's declared
+# default dtype -- see noodl/topology.py's Network(dtype: torch.dtype = torch.float32) and
 # benchmarks/newton_scaling.py) at every network size tried. Every fixture, both
 # benchmarks, the rest of this file, the performance test and the README quick start all
-# use float64, so nothing end-to-end ran in the declared default until this case was added.
+# use float64, so without this case nothing end-to-end runs in the declared default.
 # This series case runs entirely in float32 (network, element parameters, drivers, boundary
 # conditions, and the Newton solve all float32) and checks against the same independent
 # brentq reference as test_series_closed_form_single_instance, at a tolerance appropriate to

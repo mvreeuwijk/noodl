@@ -1,4 +1,4 @@
-"""StreetNetwork, build_model and the two named networks -- spec sections 6.1, 6.2."""
+"""StreetNetwork, build_model and the two named networks."""
 
 from __future__ import annotations
 
@@ -108,7 +108,7 @@ def test_build_model_wires_the_layer_and_the_three_edge_kinds():
 
 
 def test_a_dead_end_is_a_one_way_exchange_with_the_background_not_a_wall():
-    """Spec section 4.5b, pinned on the two-street hand case."""
+    """A dead end, pinned on the two-street hand case."""
     sn = _line_network()
     model, state, _ = build_model(sn, pblh_floor=False)
     downwind = model.steady(state, _wind(model, 3.0, 0.0, emission={"s1": 1.0}))

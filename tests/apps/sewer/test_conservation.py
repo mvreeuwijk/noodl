@@ -10,18 +10,18 @@ F64 = torch.float64
 
 def test_c1_the_air_layer_balances_at_its_solution():
     """Row C1: the nodal residual of the solved air layer and Tellegen's own power identity.
-    The plan measured 6.3e-15 / 8.1e-13 on the A3 configuration with the headspace stack
-    path at the mean invert; with the path at the pipe CROWN (ruling M4-R19) the stack head
-    is larger and, with the leak's `Orifice`-built `C` still float32 (the repository's
-    default dtype, N2), the measured residual was 1.352e-12 kg/s / power 1.855e-11 W -- an
+    Measured 6.3e-15 / 8.1e-13 on the A3 configuration with the headspace stack
+    path at the mean invert; with the path at the pipe CROWN the stack head
+    is larger and, with the leak's `Orifice`-built `C` in float32 (the repository's
+    default dtype), the measured residual was 1.352e-12 kg/s / power 1.855e-11 W -- an
     ARITHMETIC floor, not a stopping criterion (Newton asked for atol = 1e-14 stalls at
-    exactly that value). N2 found that floor was MOSTLY the float32 leak coefficient: with
+    exactly that value). That floor is MOSTLY the float32 leak coefficient: with
     the leak's `PowerLaw` built directly in float64 (never through `Orifice`, which casts
     with `torch.get_default_dtype()` regardless of its inputs' own dtype), the measured
     figures drop by almost three orders of magnitude to residual 4.518e-13 kg/s / power
-    6.141e-12 W. Ruling M4-R20b's tolerances (1e-11 on the residual, 1e-10 on the power
-    identity) stay unchanged -- both float64 figures still clear them comfortably, with
-    considerably more margin than the float32 ones did."""
+    6.141e-12 W. The tolerances (1e-11 on the residual, 1e-10 on the power
+    identity) clear both float64 figures comfortably, with considerably more margin than
+    the float32 ones."""
     model, state, drivers = build_model(tree_steady())
     new = model.step(state, drivers, 60.0)
     residuals = model.residuals(new, drivers)
@@ -49,7 +49,7 @@ def test_c1_the_water_flows_balance_every_manhole():
 def test_c2_cross_phase_sulfide_is_conserved_node_by_node():
     """Row C2, 1e-12: moles of S removed from the water equal moles added to the air.
 
-    FR-21 (b): `build_model`'s default `sulfide_in = 0` (this test's `drivers`,
+    `build_model`'s default `sulfide_in = 0` (this test's `drivers`,
     unmodified), so `LateralLoads`'s own sulfide column is exactly zero everywhere and this
     invariant is unaffected by its presence -- the equality below is between `H2STransfer`'s
     OWN two source terms (`water_quality.sources[..., 1]` and `air_quality.sources`), which
@@ -76,15 +76,12 @@ def test_c3_gradients_against_central_differences():
     """Row C3, 1e-6 relative, through the tree solve, the Manning inversion AND the air
     Newton solve, with respect to the inflows.
 
-    N6: the spec/README/docstring text names `f_i`, `f_air`, `T_head` and the leak area as
-    well, but until this fix only the inflows were ever DIFFERENCED here -- `f_i`, `f_air`
-    and `leak_area` were passed as plain Python floats into a FRESH `build_model`
-    call inside `loss`, so no gradient tape ever reached them; the assertions below only
-    ever exercised `inflow`. Three drivers/parameters are genuinely differentiable and are
-    now each pinned by their own test:
+    Only the inflows are DIFFERENCED here -- `f_i`, `f_air` and `leak_area` enter a FRESH
+    `build_model` call inside `loss` as plain Python floats, so no gradient tape reaches
+    them. The other differentiable drivers/parameters are each pinned by their own test:
 
-    * `T_head` (a full-node/scalar DRIVER, spec 4.2): `test_c3_gradient_reaches_t_head`.
-    * the leak area, via the leak element's own `C` (float64 after N2):
+    * `T_head` (a full-node/scalar DRIVER): `test_c3_gradient_reaches_t_head`.
+    * the leak area, via the leak element's own `C` (float64):
       `test_c3_gradient_reaches_a_learnable_leak_area`.
     * `f_air`: already covered by `test_c3_gradient_reaches_a_learnable_headspace_friction`
       below (finite, correct sign; not a central-difference row -- `f_air` is a `Headspace`
@@ -114,7 +111,7 @@ def test_c3_gradients_against_central_differences():
     value = loss(inflow, 7.49e-4, 0.02, 8e-4)
     value.backward()
     analytic = inflow.grad.clone()
-    # MEASURED (ruling M4-R20a): the plain central difference cannot reach 1e-6 here at ANY
+    # MEASURED: the plain central difference cannot reach 1e-6 here at ANY
     # single step. The loss carries the air Newton solve's arithmetic floor (~4e-12, see C1),
     # so its differencing noise is ~4e-12 / (2 eps |f'|), i.e. 1.4e-6 relative at eps = 1e-5;
     # and its truncation error grows as eps^2 and is large (component 0: 4.9e-5 relative at
@@ -139,7 +136,7 @@ def test_c3_gradients_against_central_differences():
 
 
 def test_c3_gradient_reaches_t_head():
-    """Row C3 (N6): `T_head` is a full-node/scalar DRIVER (spec 4.2) read by the
+    """Row C3: `T_head` is a full-node/scalar DRIVER read by the
     `SewerHydraulics` closure's `_densities` and, through `rho_air_nodes`, by the air
     layer's `Stack` buoyancy drive -- a legitimate driver path, unlike `f_i` above.
     MEASURED (eps = 0.01, Richardson (4 fd(eps) - fd(2 eps)) / 3): relative error 3.57e-8
@@ -171,7 +168,7 @@ def test_c3_gradient_reaches_t_head():
 
 
 def test_c3_gradient_reaches_a_learnable_leak_area():
-    """Row C3 (N6): the leak element's `C` (float64 after N2) reached the SAME way
+    """Row C3: the leak element's `C` (float64) reached the SAME way
     `test_c3_gradient_reaches_a_learnable_headspace_friction` reaches `f_air` -- a
     non-learnable element's already-registered `nn.Parameter` with `requires_grad_(True)`
     set on it afterward, never a fresh tensor built with `requires_grad=True` and passed

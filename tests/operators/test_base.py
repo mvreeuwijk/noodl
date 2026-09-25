@@ -176,7 +176,7 @@ def test_dense_operator_matvec_broadcasts_unequal_but_broadcastable_leading_shap
 def test_dense_operator_adjoint_identity_holds_for_matvec_and_rmatvec():
     # (Ax).y == x.(A^T y) is an algebraic identity of transposition and holds for EVERY A,
     # symmetric or not -- this checks rmatvec is genuinely the transpose action, not that A
-    # is symmetric (see this task's "spec ambiguity" note above the Steps).
+    # is symmetric.
     torch.manual_seed(0)
     A = torch.randn(4, 3, 3, dtype=torch.float64)
     op = DenseOperator(A, symmetric=False)
@@ -251,8 +251,8 @@ def test_as_operator_is_reexported_from_the_operators_package():
 
 
 def test_dense_operator_reports_shape_dtype_and_device():
-    """Ledger minor (Task 1): nothing asserted the three LinearOperator attributes
-    `solvers.select.solve` and every preconditioner read off an operator."""
+    """Pin the three LinearOperator attributes `solvers.select.solve` and every
+    preconditioner read off an operator."""
     A = torch.randn(4, 3, 3, dtype=torch.float64)
     op = DenseOperator(A)
     assert op.shape == (4, 3, 3)

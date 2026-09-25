@@ -111,7 +111,7 @@ def _natural_ventilation_case() -> dict:
     """Two simulated hours (12 steps of 600 s) of the coupled airflow-heat demo, `iterate`.
 
     `benchmarks.natural_ventilation.run` is deterministic -- no RNG anywhere in it -- so this
-    is a genuine bit-for-bit regression reference for the whole milestone-2 stack at once:
+    is a genuine bit-for-bit regression reference for the whole building stack at once:
     `build_model`, the stack drive, the density closure, the large opening, and the iterated
     coupling of the air and thermal layers, step by step.
     """

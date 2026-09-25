@@ -54,7 +54,7 @@ def test_abs_column_sums_match_the_dense_assembly(seed, conduction, kinetics, re
 
 
 def test_abs_column_sums_match_the_dense_assembly_for_a_kinetics_only_batch():
-    """A batch that lives ONLY in kinetics (P2-5): flow, capacity and transmission unbatched."""
+    """A batch that lives ONLY in kinetics: flow, capacity and transmission unbatched."""
     g = torch.Generator().manual_seed(7)
     net = Network(dtype=F64)
     for n in ("ambient", "a", "b"):

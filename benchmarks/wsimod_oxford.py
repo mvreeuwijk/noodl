@@ -1,14 +1,14 @@
-"""Milestone 4b demonstration: batched `CapacitatedTransferLayer` throughput on the
-`oxford_demo` topology (design spec section 7).
+"""WSIMOD demonstration: batched `CapacitatedTransferLayer` throughput on the
+`oxford_demo` topology.
 
 NOT a fair batched-vs-unbatched speedup claim: WSIMOD itself runs exactly one instance of
 this topology in ~4 s (its own recursive push/pull message-chaining, single-threaded). This
 script instead reports noodl's own wall-clock for `B` BATCHED instances of the SAME
 21-arc, 18-node topology and the SAME 1,456-timestep length, run through
 `CapacitatedTransferLayer` in hard-clip mode -- a sanity number in the same spirit as
-milestone 4's `benchmarks/sewer_diurnal.py` and `benchmarks/water_eps.py` rows, stated as
-such rather than framed as a speedup over WSIMOD (no budget is set for this row, per spec
-section 7 and section 8, which reserves a hard budget for the sewer benchmark only).
+`benchmarks/sewer_diurnal.py` and `benchmarks/water_eps.py` rows, stated as
+such rather than framed as a speedup over WSIMOD (no budget is set for this row; only the
+sewer benchmark has a hard budget).
 
 Uses random per-step requests scaled to each arc's own capacity (`torch.rand(...) * c_arc`),
 not the committed WSIMOD fixture data: the parity claim itself (W1/W2) is already made by

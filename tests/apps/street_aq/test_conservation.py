@@ -1,4 +1,4 @@
-"""Conservation, junction elimination and gradients — spec section 7, rows 4 to 7 and 11.
+"""Conservation, junction elimination and gradients.
 
 These are the physics gate: they use no reference implementation at all, only the model's own
 balance and algebra done by hand in the test.
@@ -187,7 +187,7 @@ def test_junction_elimination_equals_the_hand_written_dense_system():
 
 
 def test_the_exchange_edge_pair_is_exactly_the_conduction_term():
-    """The deviation recorded in the plan's Conventions, pinned.
+    """The exchange-as-conduction equivalence, pinned.
 
     A two-way pair of `exchange` edges carrying `u_d W L` gives the same answer as a
     `TransportLayer` built with `conduction_kind` and that same conductance -- which is why
@@ -276,7 +276,7 @@ def test_every_street_s_own_flux_is_fully_accounted_for_at_the_junction_it_enter
 
 
 def test_gradients_match_central_differences_through_the_whole_model():
-    """Spec section 7's gradient row, on emissions, background, wind speed and ABL height.
+    """The gradient check, on emissions, background, wind speed and ABL height.
 
     Central differences are the limit here, not autograd: the measured disagreements are
     4e-10 (emissions), 2.7e-10 (`U_ref`), 1.8e-9 (background) and 1.3e-8 (`h_abl`, the

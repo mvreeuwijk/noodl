@@ -140,7 +140,8 @@ def test_forward_delegates_to_the_subclass_flow_override_not_the_base_class():
 
     That form binds the base class's own `flow` function object at class-definition time,
     so subclasses overriding `flow` would silently be unreachable through `__call__`/
-    `forward` (and therefore through `torch.func.functional_call`, which Task 8 depends on).
+    `forward` (and therefore through `torch.func.functional_call`, which the differentiable
+    solve depends on).
     """
     el = _Cubic(2.0)
     dp = torch.tensor([-2.0, 0.5, 3.0])

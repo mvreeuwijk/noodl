@@ -1,7 +1,8 @@
 """`read_modelica` / `assemble.build` / `run.simulate` on hand-written `noodl-modelica/1` fixtures.
 
 Reference values are computed here from the MBL source formulas (cited per test), never by
-calling the elements under test. OpenModelica parity lives in Tasks 8-9.
+calling the elements under test. OpenModelica parity lives in
+`tests/verification/test_modelica_parity.py`.
 """
 
 from __future__ import annotations
@@ -232,7 +233,7 @@ def test_actual_column_density_is_refused(tmp_path):
 
 def test_bad_door_dp_turbulent_joins_the_gather_all_error(tmp_path):
     """A bad exported `dp_turbulent` (<= 0) on a `DoorOpen`/`DoorOperable` must not escape as a
-    raw `ValueError` and skip gather-all (final review, Minor 2): `_door` catches it and names
+    raw `ValueError` and skip gather-all: `_door` catches it and names
     the door, alongside an independent error from a different phase, in the one raised
     `ModelicaImportError`."""
     doc = _doc("door_wiring.json")
@@ -433,7 +434,7 @@ def test_boundary_temperature_and_concentration_inputs_reach_the_zone(tmp_path):
     assert torch.allclose(hist["C"][:, i, 0], 4e-4 * (1.0 - decay), rtol=0.0, atol=1e-13)
 
 
-# ------------------------------------------------ transport time course (review item 2)
+# ------------------------------------------------ transport time course
 def test_heat_and_moisture_relax_on_the_same_exact_time_course():
     # Two rooms exchanging F = V ACS rho + m_flow each way (balanced), no boundary. Both the
     # temperature and the water mass fraction obey dD/dt = -F (1/M_A + 1/M_B) D for the
@@ -455,7 +456,7 @@ def test_heat_and_moisture_relax_on_the_same_exact_time_course():
         assert abs(float(DT[k] - DX[k])) < 1e-8
 
 
-# ------------------------------------------ unbalanced closed groups (review item 1)
+# ------------------------------------------ unbalanced closed groups
 def test_unbalanced_closed_zone_groups_are_refused_by_name(tmp_path):
     doc = _doc("zonal_flow.json")
     doc["signals"][1]["drives"] = "floExc.mAB_flow"
@@ -483,7 +484,7 @@ def test_equal_constants_on_both_zonal_directions_count_as_balanced(tmp_path):
     assert names.air_references == ("rooA", "rooB")
 
 
-# ------------------------------------------------------ trace sources (review item 5)
+# ------------------------------------------------------ trace sources
 def test_trace_substance_name_is_matched_case_insensitively(tmp_path):
     doc = _doc("mixed_rooms.json")
     doc["components"][-1]["parameters"]["substanceName"] = "co2"
@@ -748,7 +749,7 @@ def test_initial_airflow_solve_starts_from_the_linear_guess():
 
 
 def test_modelica_names_requires_its_gauge_reference():
-    """Review fix round 1: `p_ref` has no default, so no `ModelicaNames` can silently claim a
+    """`p_ref` has no default, so no `ModelicaNames` can silently claim a
     `p_default` gauge."""
     from noodl.apps.building_physics.modelica import ModelicaNames
 

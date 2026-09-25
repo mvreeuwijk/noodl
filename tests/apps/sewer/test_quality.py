@@ -45,14 +45,14 @@ def test_kla_matches_the_published_form():
     expected = 0.86 * (1.0 + 0.20 * froude2) * (0.01 * 1.3795) ** 0.375 / 0.1085 / 3600.0
     assert float(q.kla_h2s(slope, velocity, depth)) == pytest.approx(expected, rel=1e-14)
     # measured: 5.997451395e-04 1/s, i.e. 2.159083 1/h -- inside the 0.1-20 1/h plausibility
-    # band of the research note's section 6.4
+    # band from the literature
     assert 0.1 < float(q.kla_h2s(slope, velocity, depth)) * 3600.0 < 20.0
 
 
 def test_kla_is_zero_and_finite_on_a_dry_pipe():
     zero = torch.zeros(1, dtype=F64, requires_grad=True)
     value = q.kla_h2s(torch.tensor([0.01], dtype=F64), zero, torch.zeros(1, dtype=F64))
-    # ruling M4-R10: value tracks grad through `zero`, so float() gets .detach() first.
+    # value tracks grad through `zero`, so float() gets .detach() first.
     assert float(value.detach()) == 0.0
     value.sum().backward()
     assert torch.isfinite(zero.grad).all()
@@ -183,7 +183,7 @@ def test_c2_transfer_sources_are_exactly_opposite_in_moles_of_sulfur():
 
 
 def test_out_pipe_gathers_per_pipe_drivers_into_manhole_order():
-    """M4-R4 amendment: a non-identity out_pipe permutes the per-pipe drivers before use,
+    """A non-identity out_pipe permutes the per-pipe drivers before use,
     while sewer.q_slope (already per manhole) is used as given."""
     from noodl.apps.sewer.quality import H2STransfer, SulfideGeneration
 
@@ -257,11 +257,11 @@ def test_out_pipe_gathers_per_pipe_drivers_into_manhole_order():
     )
 
 
-# --------------------------------------------------------------------------------- FR-21
+# ------------------------------------------------------------------------ lateral loads
 
 
 def test_lateral_loads_writes_only_the_named_columns_at_the_named_nodes():
-    """FR-21 unit test: `LateralLoads` writes `inflow * c_in` (kg/s) at exactly the nodes
+    """`LateralLoads` writes `inflow * c_in` (kg/s) at exactly the nodes
     `inflow` names, in exactly the species columns `columns` names, and zero everywhere
     (and every other species) else -- the full-node, full-species `"...sources"` tensor
     `H2STransfer` (registered after it) is required to ADD to rather than overwrite."""
@@ -287,7 +287,7 @@ def test_lateral_loads_refuses_a_wrong_shaped_driver_by_name():
 
 
 def test_h2stransfer_adds_to_an_existing_sources_driver_rather_than_overwriting():
-    """FR-21: `H2STransfer` must ADD its own transfer term to a `"...sources"` driver a
+    """`H2STransfer` must ADD its own transfer term to a `"...sources"` driver a
     prior closure (`LateralLoads`) already wrote, not silently discard it."""
     closure = q.H2STransfer(5, torch.tensor([0, 1, 2, 3, 4]))
     x = torch.zeros(5, 2, dtype=F64)
@@ -317,7 +317,7 @@ def test_h2stransfer_adds_to_an_existing_sources_driver_rather_than_overwriting(
 
 
 def test_h2stransfer_refuses_an_out_of_range_sulfide_index():
-    """FR-12: an out-of-range species index names the driver/column rather than a bare
+    """An out-of-range species index names the driver/column rather than a bare
     IndexError from `water[..., self.sulfide]`."""
     closure = q.H2STransfer(5, torch.tensor([0, 1, 2, 3, 4]), sulfide=5)
     x = torch.zeros(5, 2, dtype=F64)
@@ -327,7 +327,7 @@ def test_h2stransfer_refuses_an_out_of_range_sulfide_index():
 
 
 def test_sulfidegeneration_refuses_an_out_of_range_species_index():
-    """FR-12: same, for `SulfideGeneration`'s `bod`/`sulfide` indices."""
+    """Same, for `SulfideGeneration`'s `bod`/`sulfide` indices."""
     reaction = q.SulfideGeneration(sulfide=5)
     x = torch.zeros(1, 2, dtype=F64)
     with pytest.raises(ValueError, match="sulfide=5"):
@@ -335,7 +335,7 @@ def test_sulfidegeneration_refuses_an_out_of_range_species_index():
 
 
 def test_h2stransfer_refuses_a_wrong_length_ph_naming_the_driver():
-    """FR-12/N3: a wrong-length `pH` (neither scalar, full-node nor a trailing singleton)
+    """A wrong-length `pH` (neither scalar, full-node nor a trailing singleton)
     is refused naming the driver, through the shared `resolve_nodal_driver` helper."""
     closure = q.H2STransfer(5, torch.tensor([0, 1, 2, 3, 4]))
     x = torch.zeros(5, 2, dtype=F64)

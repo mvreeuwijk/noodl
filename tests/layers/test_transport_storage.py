@@ -1,4 +1,4 @@
-"""Independent references for R5: a step across a changing capacity conserves the stored amount.
+"""Independent references: a step across a changing capacity conserves the stored amount.
 
 One tank `zone` with a single edge zone->ambient. The closure prescribes the edge flow q
 (q < 0 is inflow from ambient at x_boundary = 0, i.e. clean water). The state carries the

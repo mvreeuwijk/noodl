@@ -1,16 +1,15 @@
-"""Milestone 4 demonstration: Net1's 24 h extended period, over 8 demand multipliers.
+"""Water demonstration: Net1's 24 h extended period, over 8 demand multipliers.
 
 Runs EPANET's own Example Network 1 for a full day with its two tank-level pump controls,
 using the EVENT-SHORTENED hydraulic step (EPANET 2.2 Manual section 13.1 item 17, p.113),
 run SEQUENTIALLY over 8 demand multipliers -- one model per multiplier, not a batched leading
-dimension (N15). `TankLevels.event_step` shortens the step to each multiplier's OWN next
+dimension. `TankLevels.event_step` shortens the step to each multiplier's OWN next
 control crossing, so the eight instances take a different number of sub-steps and land on
 different report times mid-run; a genuinely batched rollout would need a per-instance step
 (the sub-stepping loop below only ever advances one scalar `moment` at a time) or a
 global-minimum step shared by all eight, which oversamples the seven instances that did not
-need shortening on that particular sub-step -- undesirable and, either way, not "straightforward"
-enough to fold into a fix-wave item, so this docstring records reality instead of the plan's
-original "batched" wording. Prints the wall time, the tank-level trajectory of instance 0 and
+need shortening on that particular sub-step -- undesirable either way, so the multipliers run
+sequentially. Prints the wall time, the tank-level trajectory of instance 0 and
 the number of hydraulic sub-steps the event shortening cost.
 
 Run: `.venv/Scripts/python benchmarks/water_eps.py`

@@ -1,4 +1,4 @@
-"""Tests for newton()'s operator-based contract (Task 11): the second argument is now a
+"""Tests for newton()'s operator-based contract: the second argument is now a
 callable returning a LinearOperator (or, for backward compatibility, a plain dense tensor,
 auto-wrapped in DenseOperator), and the inner linear solve goes through
 solvers.select.solve rather than torch.linalg.solve directly.
@@ -72,10 +72,10 @@ def test_method_direct_agrees_with_auto_and_reports_linear_iterations():
     # `method` is forwarded to select.solve, so the caller chooses the inner solver without
     # newton() knowing anything about the operator's storage. `linear_iterations` is the
     # per-instance MAX inner iteration count over the Newton steps actually taken: exactly 1
-    # for any direct solve (dense LU here, and SuperLU on the "auto" path since spec section
-    # 6.2 step 2 -- this fixture is a certified-SPD operator with a sparse form at a flat
-    # batch of 1), and at least 1 for a Krylov one. The `>= 1` below is deliberately the
-    # weaker claim, because it must hold whichever backend "auto" resolves to.
+    # for any direct solve (dense LU here, and SuperLU on the "auto" path -- this fixture
+    # is a certified-SPD operator with a sparse form at a flat batch of 1), and at least 1 for a
+    # Krylov one. The `>= 1` below is deliberately the weaker claim, because it must hold whichever
+    # backend "auto" resolves to.
     residual, operator = _grounded_chain()
     x0 = torch.tensor([5.0], dtype=torch.float64)
 
@@ -160,11 +160,11 @@ def test_inner_solve_rtol_is_floored_by_the_working_dtype(monkeypatch):
     # actually done -- which is the number the composed-model report publishes.
     #
     # `method="cg"`, not "auto": this fixture is a certified-SPD GraphLaplacianOperator with
-    # a sparse form at a flat batch of 1, so since spec section 6.2 step 2 "auto" factorises
-    # it through SuperLU and reports `linear_iterations == 1` no matter what the floor does.
-    # The assertion below then held vacuously and the float32 PCG floor was exercised end to
-    # end by nothing at all (final review I2). The spy is what keeps it from silently
-    # happening again: this test is about the Krylov path, so it asserts it ran.
+    # a sparse form at a flat batch of 1, so "auto" factorises it through SuperLU and
+    # reports `linear_iterations == 1` no matter what the floor does. The assertion below
+    # would then hold vacuously and the float32 PCG floor would be exercised end to end by
+    # nothing at all. The spy is what keeps that from happening: this test is about the
+    # Krylov path, so it asserts it ran.
     residual, operator, x0, m = _leaky_chain(torch.float32)
     pcg_calls = _spy_pcg(monkeypatch)
 

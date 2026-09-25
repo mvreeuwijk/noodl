@@ -325,7 +325,7 @@ def test_mbl_points_fit_reproduces_both_measured_points():
 
 
 # ---------------------------------------------------------------------------------------
-# 7. Broadcasting over leading batch dimensions (global constraint, per PowerLaw)
+# 7. Broadcasting over leading batch dimensions (as for PowerLaw)
 # ---------------------------------------------------------------------------------------
 
 

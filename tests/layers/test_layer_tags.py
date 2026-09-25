@@ -1,4 +1,4 @@
-"""Layer surface added for Model (spec 4.3, 4.4, 14): kind slices, tags, multi-kind
+"""Layer surface added for Model: kind slices, tags, multi-kind
 transport, inactive nodes."""
 
 from __future__ import annotations

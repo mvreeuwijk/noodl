@@ -1,5 +1,5 @@
 """The exponential action's Taylor work is chosen from a norm bound, independent of the
-state, so autograd through the polynomial is the polynomial's own derivative (R3)."""
+state, so autograd through the polynomial is the polynomial's own derivative."""
 
 from __future__ import annotations
 
@@ -183,7 +183,7 @@ def test_a_mixed_stiffness_batch_shares_one_schedule_and_matches_the_reference()
 
 
 def test_pure_decay_with_no_forcing_costs_one_term_after_the_diagonal_shift():
-    """dx/dt = -500 x, x(0) = 10, dt = 50: the review's instrumented case took 184,459
+    """dx/dt = -500 x, x(0) = 10, dt = 50: without the shift this case takes 184,459
     matvecs. With b0 == 0 the mean-diagonal shift makes M - mu I vanish."""
     layer = _chain(1, removal=_t([[500.0]]))
     op = layer._advection_operator(_t([0.0, 0.0]))
@@ -226,7 +226,7 @@ def test_the_work_budget_is_refused_by_name():
 
 
 def _one_node_forced(r_val: float, *, requires_grad: bool = True):
-    """dx/dt = -r x + 1 on one interior node, x(0) = 0, dt = 1: the review's P1-1 case.
+    """dx/dt = -r x + 1 on one interior node, x(0) = 0, dt = 1: the forced case.
     Nodes: ambient (0), zone (1); the single flow edge carries q = 0 so nothing advects; the
     unit forcing is `sources` on the FULL node axis; removal r is the differentiated
     coefficient."""
@@ -304,7 +304,7 @@ def test_forced_action_and_its_coefficient_gradients_match_the_dense_reference_a
 
 @pytest.mark.parametrize("spread", [1e-6, 1e-4, 1e-2, 1.0])
 def test_shifted_action_gradients_match_the_dense_reference_near_a_zero_operator(spread):
-    """P1-1b's reviewed case, mirroring the forced test above on the SHIFTED path: four nodes
+    """The shifted case, mirroring the forced test above on the SHIFTED path: four nodes
     with `removal = [100, 100, 100, 100 + spread]`, `q = 0` (pure decay, no advective
     coupling), a detached all-zero `b0` (so `shift=None` infers `shift=True`), `dt = 1`,
     against `torch.linalg.matrix_exp` directly (there is no forcing to fold into a 3-block
@@ -312,10 +312,9 @@ def test_shifted_action_gradients_match_the_dense_reference_near_a_zero_operator
     subtracts the mean removal rate from the diagonal, so the POST-shift norm scales with
     `spread`, not with the removal rate itself (~100) -- this is what makes the schedule pick
     as few as one or two Taylor terms for `spread = 1e-6` and only grows to ~14 terms by
-    `spread = 1.0`, reproducing the review's table of (s, m) pairs up to the one extra term
-    this fix adds. Before P1-1b, the schedule
-    bounded only the state polynomial's VALUE tail (`_taylor_remainder`) on this path, leaving
-    its A-derivative tail (`D_x`) unbounded, so `dx/d(removal)` degrades badly at the smallest
+    `spread = 1.0`. A schedule that bounded only the state polynomial's VALUE tail
+    (`_taylor_remainder`) on this path, leaving its A-derivative tail (`D_x`) unbounded,
+    would take one term fewer, and `dx/d(removal)` would degrade badly at the smallest
     spreads even though the VALUE stays accurate to ~1e-13 throughout."""
     removal = torch.tensor(
         [[100.0], [100.0], [100.0], [100.0 + spread]], dtype=F64, requires_grad=True

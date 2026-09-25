@@ -2,7 +2,7 @@
 one row per solver with the expected keys.
 
 Run as a normal test (not a script): pytest's own `pythonpath = ["src", "."]` setting
-(`pyproject.toml`) already resolves `noodl` to this worktree, so no `PYTHONPATH` juggling is
+(`pyproject.toml`) already resolves `noodl` to this checkout, so no `PYTHONPATH` juggling is
 needed here the way the module's own docstring requires for a standalone run.
 """
 
@@ -17,7 +17,7 @@ from benchmarks.transport_solver_bench import (
     main,
 )
 
-# Measured at ~9.5 s (pytest-reported) on this machine -- under the brief's 20 s threshold for
+# Measured at ~9.5 s (pytest-reported) on this machine -- under a 20 s threshold for
 # the `slow` marker (registered in `pyproject.toml`, excluded by default via
 # `-m "not slow"`), so this test is left unmarked and runs in the default suite.
 
@@ -25,8 +25,8 @@ from benchmarks.transport_solver_bench import (
 def test_quick_run_writes_one_row_per_solver_with_expected_keys(tmp_path) -> None:
     """`main(["--quick"])` (redirected to a scratch JSON) reports every solver at ensemble 1,
     each with forward and backward rows carrying `median_s`/`min_s`/`max_s`/`iterations`, and
-    a machine block with `noodl_file` pointing at THIS worktree's `noodl` (not the main
-    checkout's), which is the whole point of the benchmark's `PYTHONPATH` requirement for a
+    a machine block with `noodl_file` pointing at THIS checkout's `noodl` (not another
+    installation's), which is the whole point of the benchmark's `PYTHONPATH` requirement for a
     standalone run -- in-process, pytest's own `pythonpath` setting already gets this right,
     so this assertion is the regression guard that a future refactor cannot silently break it.
     """
@@ -76,7 +76,7 @@ def test_machine_block_has_the_expected_keys() -> None:
         "git_commit",
     }
     assert isinstance(machine["num_threads"], int)
-    # `git_commit` is `None` only when git itself is unavailable; this worktree has git, so a
+    # `git_commit` is `None` only when git itself is unavailable; this checkout has git, so a
     # short hash is expected here.
     assert machine["git_commit"] is None or isinstance(machine["git_commit"], str)
 

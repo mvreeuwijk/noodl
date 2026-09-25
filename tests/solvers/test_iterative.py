@@ -1,5 +1,5 @@
 """Tests for pcg (Jacobi-preconditioned CG, per-instance status, never raises) and gmres
-(restarted, nonsymmetric-capable, per-instance status, never raises), including Task 6's
+(restarted, nonsymmetric-capable, per-instance status, never raises), including gmres's
 left preconditioner hook (Jacobi, ILU(0) via SciPy, and a caller-supplied callable).
 """
 
@@ -133,7 +133,7 @@ def test_pcg_per_instance_freezing_bit_identical_after_convergence():
 def test_pcg_gradcheck_fixed_iteration_count():
     # Differentiating an iterative solve directly is only for THIS test: pcg's own backward
     # (via ordinary autograd through the loop) is never the production path -- production
-    # gradients for a certified-SPD potential solve go through the implicit adjoint (Task 12),
+    # gradients for a certified-SPD potential solve go through the implicit adjoint,
     # which differentiates the FIXED POINT, not the iteration count. max_iter=2 = the exact
     # system size (m=2), so CG converges exactly within the fixed iteration count in exact
     # arithmetic and the loop is smoothly differentiable end to end.
@@ -350,7 +350,7 @@ _NORM_ULP_RTOL = 4 * torch.finfo(torch.float64).eps
 
 
 def test_pcg_results_are_pinned():
-    """BIT-IDENTICAL pin of `pcg`'s output on a fixed system (milestone-1b follow-up, Task B).
+    """BIT-IDENTICAL pin of `pcg`'s output on a fixed system.
 
     Task B rewrites `pcg`'s iteration (hoisting allocations, collapsing `torch.where` calls)
     and `GraphLaplacianOperator._apply` (cached indices, one fused `index_add`) for speed
@@ -479,12 +479,11 @@ def test_pcg_results_are_pinned():
 
 
 # =============================================================================================
-# Task 6: gmres's left preconditioner hook (Jacobi, ILU(0) via SciPy, a caller-supplied
+# gmres's left preconditioner hook (Jacobi, ILU(0) via SciPy, a caller-supplied
 # callable). Arnoldi runs on M^-1 A / M^-1 b; the TRUE residual norm(b - A x) is what
 # `SolveResult.residual`/`converged` report, recomputed at every cycle end -- never the
-# preconditioned Givens estimate. `preconditioner=None` must stay bit-identical to gmres
-# before this task: no restructuring of the unpreconditioned path, only a branch added
-# around it.
+# preconditioned Givens estimate. `preconditioner=None` must stay bit-identical to the
+# unpreconditioned gmres path.
 # =============================================================================================
 
 
@@ -538,7 +537,7 @@ def _diag_spread_system(
     seed: int, m: int = 8, batch: int | None = None, scale: float = 0.1
 ):
     """`A = D + scale * R`, `D` log-spaced 1e-3..1e3 (a large diagonal spread), `R` random
-    and nonsymmetric -- the brief's construction. At the default `m`/`scale` this is mild
+    and nonsymmetric. At the default `m`/`scale` this is mild
     enough for gmres to converge within its default `restart=30` regardless of
     preconditioning (a single Arnoldi cycle covers the whole m-dimensional space either way,
     GMRES's finite-termination property) -- fine for a value comparison against
@@ -566,13 +565,11 @@ def _stiff_diag_spread_system():
     tried here, while Jacobi and ILU do, in reproducibly different numbers of cycles at
     `restart=10` -- see `test_gmres_jacobi_and_ilu_reduce_iterations_versus_unpreconditioned`.
 
-    Fix round 1 note: at `restart=15`, an EARLIER version of this docstring claimed "Jacobi
-    converges in 13 and ILU in 2". That "13" was the pre-fix-round `iterations` value, taken
-    from the in-cycle Givens estimate compared against the true-scale `tol` while Arnoldi ran
-    on `M^-1 A` (preconditioned units) -- one step BEFORE the true residual `b - A x`
-    (recomputed at cycle end, which is what actually gates convergence) first met `tol` at
-    step 14. `x`/`converged`/`residual` were never wrong; only that reported count was.
-    `iterations` under a preconditioner is now the CYCLE-GRANULAR count (see `gmres`'s
+    Note: at `restart=15`, the in-cycle Givens estimate (compared against the true-scale
+    `tol` while Arnoldi runs on `M^-1 A`, preconditioned units) says Jacobi converges at
+    step 13 -- one step BEFORE the true residual `b - A x` (recomputed at cycle end, which
+    is what actually gates convergence) first meets `tol` at step 14. `iterations` under a
+    preconditioner is therefore the CYCLE-GRANULAR count (see `gmres`'s
     docstring), so at `restart=15` both Jacobi and ILU converge inside the first cycle and
     are reported as 15 -- which is why the "fewer iterations" test below uses `restart=10`
     instead, where ILU still converges in cycle 1 (reported 10) but Jacobi needs a second
@@ -584,7 +581,7 @@ def _stiff_diag_spread_system():
 
 def test_gmres_preconditioner_none_is_bit_identical_to_the_default():
     """`preconditioner=None` (explicit) must be bit-for-bit identical to today's default
-    (unspecified) gmres -- the non-negotiable pin from the brief."""
+    (unspecified) gmres."""
     A, b = _diag_spread_system(seed=1, batch=3)
     op = _SparseTestOperator(A, symmetric=False)
     result_default = gmres(op, b, restart=5, max_iter=40)
@@ -616,9 +613,9 @@ def test_gmres_jacobi_and_ilu_reduce_iterations_versus_unpreconditioned():
     Jacobi and ILU must converge in FEWER iterations than plain gmres -- which, at this
     restart, does not converge within the given budget at all.
 
-    `restart=10` (not 15, see `_stiff_diag_spread_system`'s fix-round note): ILU converges
+    `restart=10` (not 15, see `_stiff_diag_spread_system`'s note): ILU converges
     inside the first cycle (reported 10) while Jacobi needs a second cycle (reported 30),
-    so the cycle-granular `iterations` (Task 6 fix round) still separates them cleanly.
+    so the cycle-granular `iterations` still separates them cleanly.
     """
     A, b = _stiff_diag_spread_system()
     op = _SparseTestOperator(A, symmetric=False)
@@ -640,13 +637,13 @@ def test_gmres_jacobi_and_ilu_reduce_iterations_versus_unpreconditioned():
 
 
 def test_gmres_jacobi_iterations_never_undercount_the_true_convergence_step():
-    """Fix round 1: the reported `iterations`, under a preconditioner, must never be SMALLER
+    """The reported `iterations`, under a preconditioner, must never be SMALLER
     than the step at which the TRUE residual (`b - A x`, recomputed at cycle end) actually
-    first met `tol` -- the bug this round fixes was exactly that (reported 13, true 14, on
+    first met `tol` (the in-cycle estimate would report 13 against a true 14, on
     this fixture at `restart=15`). The independent check: sweep `max_iter=1, 2, 3, ...` and
     take the first one whose `result.converged` fires (equivalent to the true residual
     meeting `tol`, since `converged` is always gated on the true recompute, never on the
-    in-cycle Givens estimate); the fix chosen here is CYCLE-GRANULAR (see `gmres`'s
+    in-cycle Givens estimate); the count reported is CYCLE-GRANULAR (see `gmres`'s
     docstring), which can overshoot to the end of the cycle but must never undershoot, so
     this asserts `>=`, not `==`.
     """

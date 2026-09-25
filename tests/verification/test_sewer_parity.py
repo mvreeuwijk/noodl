@@ -95,8 +95,8 @@ def test_w2_normal_depths(tmp_path, noodl_steady):
 def test_w3_velocities(tmp_path, noodl_steady):
     """Row W3, 1e-3 relative, against the BINARY output's FLOW_VELOCITY.
 
-    Spec amendment A2: under KINWAVE, `Link.ups_xsection_area` is exactly 0.0 (SWMM fills
-    it only under DYNWAVE), so the spec's `flow / ups_xsection_area` is 0/0. Measured worst
+    Under KINWAVE, `Link.ups_xsection_area` is exactly 0.0 (SWMM fills
+    it only under DYNWAVE), so `flow / ups_xsection_area` is 0/0. Measured worst
     6.257e-4.
     """
     net, resolved = noodl_steady
@@ -121,7 +121,7 @@ def test_conduit_volumes(tmp_path, noodl_steady):
 
 
 def test_w4_tracer_concentration(tmp_path):
-    """Row W4, 3e-5 relative (spec amendment A4; measured worst 7.811e-6 on conduit C5).
+    """Row W4, 3e-5 relative (measured worst 7.811e-6 on conduit C5).
 
     The model's steady state IS the tank-in-series closed form: a manhole's balance is
     `sum(q_in C_in) = (q_out + k V) C`, which is exactly `C = C_mix / (1 + k tau)` with
@@ -160,10 +160,10 @@ def test_w4_tracer_concentration(tmp_path):
     assert worst < 3e-5, worst
 
 
-def test_w4_model_run_through_the_fr21_lateral_load_path(tmp_path):
-    """FR-22: the test above never runs the model's quality layer at all -- it builds
+def test_w4_model_run_through_the_lateral_load_path(tmp_path):
+    """The test above never runs the model's quality layer at all -- it builds
     `quality=False` and resolves the tank-in-series closed form BY HAND. This test builds
-    `quality=True, air=False`, feeds the fixture's own tracer load through the FR-21
+    `quality=True, air=False`, feeds the fixture's own tracer load through the
     `LateralLoads`/`bod_in` path (mapping the tracer onto the BOD column: `Tracer` is a
     plain first-order-decay pollutant with no sulfide-generation analogue, and
     `SulfideGeneration`'s own `k_bod` IS constructor-configurable, so the model's BOD decay
@@ -183,8 +183,8 @@ def test_w4_model_run_through_the_fr21_lateral_load_path(tmp_path):
     error against SWMM was 3.47e-3 at dt = 60 s, 2.87e-4 at dt = 5 s and 5.79e-5 at dt = 1 s
     -- all short of this row's 3e-5, and dt small enough to clear it directly makes the test
     too slow. Richardson extrapolation `2 C(dt) - C(2 dt)` (the same O(dt) cancellation
-    `test_c3_gradients_against_central_differences` uses for truncation error, ruling
-    M4-R20a) removes the leading term: at dt = 10 s / 20 s the extrapolated concentrations
+    `test_c3_gradients_against_central_differences` uses for truncation error) removes the
+    leading term: at dt = 10 s / 20 s the extrapolated concentrations
     agree with SWMM to a measured worst 8.05e-6 relative -- comfortably inside 3e-5, and
     reproduced at (5 s, 10 s) and (2.5 s, 5 s) pairs to within 3e-8 of each other, so the
     residual is genuinely the O(dt^2) term, not noise."""

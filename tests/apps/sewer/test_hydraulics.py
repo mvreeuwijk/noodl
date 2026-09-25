@@ -146,7 +146,7 @@ def test_a_wrong_shaped_inflow_is_refused():
 
 
 def test_storage_without_a_declared_dt_is_now_allowed():
-    """R6: `storage=True` no longer requires a constructor `dt` -- the closure follows the
+    """`storage=True` does not require a constructor `dt` -- the closure follows the
     model's own step interval (a `StepContext`) instead of one fixed at construction. `dt`
     stays an OPTIONAL declaration: when given, a step of a different interval is refused by
     name (`test_a_constructor_dt_that_disagrees_with_the_step_is_refused_by_name`,
@@ -157,10 +157,10 @@ def test_storage_without_a_declared_dt_is_now_allowed():
 
 
 def test_w7_storage_reaches_the_quasi_steady_fixed_point():
-    """Row W7. Measured by the plan writer: 5.7e-15 relative on the flows and 4.4e-15 on
+    """Row W7. Measured: 5.7e-15 relative on the flows and 4.4e-15 on
     the depths after 200 steps of 60 s from a dry start.
 
-    R6: a direct closure call (bypassing `Model`) now passes its own `StepContext` to make
+    A direct closure call (bypassing `Model`) passes its own `StepContext` to make
     the closure ADVANCE -- without a `ctx`, `storage=True` evaluates the given state's
     levels as a query instead (see `test_storage_without_its_state_is_refused` below, which
     is unaffected because it never gets that far)."""
@@ -198,15 +198,15 @@ def test_gradients_flow_through_the_whole_closure():
     assert float(inflow.grad[5]) == 0.0
 
 
-# ------------------------------------------------------------------ M4-R17 fix round
+# ------------------------------------------------------------------ vectorised sweep
 
 
 def test_storage_sweep_is_vectorised_and_bit_identical_to_the_pinned_values():
-    """M4-R17 CRITICAL fix: the storage sweep's per-level upstream-inflow assembly is now
+    """The storage sweep's per-level upstream-inflow assembly is
     one gather (`index_select`) plus one scatter (`index_add`) per level, using the flat
     `level_idx`/`level_src`/`level_tgt` index tensors `__init__` precomputes -- no per-call
-    Python loop over manholes. The pinned values below were computed ONCE (before this fix)
-    from the previous, per-call nested-loop implementation on this fixture, 3 steps of
+    Python loop over manholes. The pinned values below were computed ONCE from a
+    per-call nested-loop reference implementation on this fixture, 3 steps of
     dt=60 s from a dry start; the vectorised sweep must reproduce them bit-for-bit."""
     net = _network()
     closure = SewerHydraulics(net, PIPES, MANHOLES, storage=True, dt=60.0)
@@ -243,7 +243,7 @@ def test_storage_surcharge_is_refused_naming_the_manhole():
 
 
 def test_storage_surcharge_batched_names_only_the_surcharging_instance():
-    """Fix round 2: `capacity_flow` carries no batch dimension; the surcharge check must
+    """`capacity_flow` carries no batch dimension; the surcharge check must
     broadcast it up to `target`'s batch shape before indexing, or a later batch instance's
     lookup raises an unnamed `IndexError` instead of the named refusal. Instance 0 here is
     ordinary and must not be blamed; only instance 1 surcharges at J1."""
@@ -284,7 +284,7 @@ def test_storage_gradients_are_finite_through_a_dry_branch():
     exactly for a dry leaf manhole (zero inflow on J5, zero initial `sewer.H`), and
     `solve_monotone`'s backward differentiates that residual with respect to the pipe
     diameter, roughness and slope -- safe only because `geometry.hydraulic_radius`'s
-    `** (2/3)` carries Task 5's M4-R15 guard at h = 0 (geometry.py is not modified here)."""
+    `** (2/3)` carries a both-branches-safe guard at h = 0."""
     net = _network()
     for target in ("sewer.H", "sewer.q"):
         closure = SewerHydraulics(net, PIPES, MANHOLES, storage=True, dt=60.0)
@@ -304,11 +304,11 @@ def test_storage_gradients_are_finite_through_a_dry_branch():
             assert torch.isfinite(g).all()
 
 
-# ------------------------------------------------------------------------------- N3
+# ------------------------------------------------------------------ nodal drivers
 
 
 def test_t_head_full_node_batched_and_scalar_all_step_and_agree():
-    """N3: `T_head` is spec 4.2 "full-node K; scalars broadcast", not scalar-or-nothing.
+    """`T_head` is "full-node K; scalars broadcast", not scalar-or-nothing.
     A 0-d scalar, a `(n_nodes,)` full-node vector, a `(B, 1)` batched broadcast and a
     `(B, n_nodes)` batched full-node array must all step, and (being the same physical
     temperature everywhere) must all agree with the plain scalar case."""
@@ -338,7 +338,7 @@ def test_t_head_full_node_batched_and_scalar_all_step_and_agree():
 
 
 def test_t_head_with_a_layout_matching_neither_scalar_nor_full_node_is_refused_by_name():
-    """N3: a `(B,)` layout with `B != n_nodes` is neither a scalar, a full-node vector nor
+    """A `(B,)` layout with `B != n_nodes` is neither a scalar, a full-node vector nor
     a trailing singleton, so it is refused by name rather than silently misinterpreted."""
     closure = SewerHydraulics(_network(), PIPES, MANHOLES)
     drivers = _drivers()
@@ -347,7 +347,7 @@ def test_t_head_with_a_layout_matching_neither_scalar_nor_full_node_is_refused_b
         closure({}, drivers)
 
 
-# ------------------------------------------------------------------------------- N4
+# ------------------------------------------------------------------ forests
 
 
 def _forest():
@@ -361,9 +361,9 @@ def _forest():
 
 
 def test_a_two_component_forest_steps_and_each_component_keeps_its_own_inflow():
-    """N4: `_tree_flow` used to subtract the WHOLE network's lateral total at every
-    outfall, which is wrong for more than one component (and raised an unnamed
-    `index_add_` error once the outfall count and manhole count disagreed with the old
+    """`_tree_flow` must not subtract the WHOLE network's lateral total at every
+    outfall, which is wrong for more than one component (and raises an unnamed
+    `index_add_` error once the outfall count and manhole count disagree with a
     single-`total` broadcast). Each one-pipe component's own pipe must carry exactly its
     own inflow, independent of the other component's."""
     net = _forest()

@@ -1,6 +1,6 @@
 """Inverse example 1 -- calibration through the join.
 
-Milestone 5 coupling design spec. Recovers the
+Recovers the
 CONTAM building's leakage coefficients (the `pl_3` `UpstreamDensityPowerLaw`'s `C`, one per
 path) by gradient descent on an indoor-concentration observation, with the gradient running
 through the whole coupled street+building step (the potential solve's implicit-function
@@ -135,7 +135,7 @@ def test_attribute_indoor_concentration_to_street_emissions_with_one_backward_pa
     # genuinely negligible signal, not a purely structural (exactly-zero) one: the FD
     # estimate happens to land on exact 0.0 while the adjoint returns ~2e-20, both
     # consistent with "below any resolvable threshold" rather than disagreeing. The
-    # load-bearing rtol=1e-4 check stays exactly as strict as the brief specifies
+    # load-bearing rtol=1e-4 check stays exactly as strict as specified
     # (atol=0.0) on r1/r2, the two streets with a real, resolvable signal; r3 gets its
     # own explicit, separate structural/negligible-zero check instead of being folded
     # into a global atol that would silently loosen the r1/r2 comparison too.

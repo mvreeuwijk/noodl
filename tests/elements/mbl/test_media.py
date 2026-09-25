@@ -172,7 +172,7 @@ def test_simpleair_buoyancy_density_matches_its_own_ideal_gas_law(t_kelvin):
 
 
 # ---------------------------------------------------------------------------------------
-# Medium.density and specificHeatCapacityCp (Task 6: zone mass and heat capacity, zonal
+# Medium.density and specificHeatCapacityCp (zone mass and heat capacity, zonal
 # flow density). Transcribed from the three media's own functions.
 # ---------------------------------------------------------------------------------------
 

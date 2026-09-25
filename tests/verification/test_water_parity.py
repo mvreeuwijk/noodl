@@ -1,4 +1,4 @@
-"""EPANET 2.2 parity for `noodl.apps.water` (spec rows D1-D8 and the golden case G2).
+"""EPANET 2.2 parity for `noodl.apps.water` (verification rows D1-D8 and the golden case G2).
 
 The reference implementation is the REAL EPANET 2.2 engine: `wntr` 1.5.0 bundles `epanet22.dll` and
 `wntr.sim.EpanetSimulator` drives it. `EpanetSimulator` reads EPANET's binary output, whose
@@ -75,7 +75,7 @@ def _worst_flows(model, state, flows):
 def test_d1_two_loop_heads_and_flows(tmp_path):
     """Row D1, 1e-6 relative on heads and flows.
 
-    MEASURED: heads 4.361e-7, flows 8.090e-8 -- the same pair the research note's own
+    MEASURED: heads 4.361e-7, flows 8.090e-8 -- the same pair an independent
     from-scratch Newton/GGA reference (iterated to a 1e-16 residual) reaches, so the
     residual is the float32 output path, not either solver.
     """
@@ -119,7 +119,7 @@ def test_d1_nodal_continuity_is_exact(tmp_path):
 
 # --------------------------------------------------------------------------- D2
 def test_d2_net1_single_period(tmp_path):
-    """Row D2: heads 1e-6, FLOWS 1e-5, pump head gain 1e-6 (spec amendment A11).
+    """Row D2: heads 1e-6, FLOWS 1e-5, pump head gain 1e-6.
 
     MEASURED: heads 7.058e-8, flows 2.868e-6 on pipe 113 (0.00185 m3/s, the smallest in the
     network), pump head gain 1.189e-7. The flow residual is the reference's: EPANET's own
@@ -219,7 +219,7 @@ def _extended_period(net, model, state, drivers):
 
 
 def test_d3_net1_extended_period_tank_level(tmp_path):
-    """Row D3, 2e-4 m ABSOLUTE per reported step (spec amendment A12).
+    """Row D3, 2e-4 m ABSOLUTE per reported step.
 
     MEASURED: 8.181e-5 m worst over the 25 reported steps, with 26 hydraulic sub-steps for
     24 report steps. A FIXED 1 h step instead diverges by 2.07 m, because EPANET shortens
@@ -285,18 +285,18 @@ def test_d3_a_tank_outside_its_limits_is_refused(tmp_path):
 
 # --------------------------------------------------------------------------- D4
 def test_d4_darcy_weisbach_residual_is_recorded_not_bounded(tmp_path):
-    """Row D4 RECORDS its residual, as spec section 13.3 asks.
+    """Row D4 RECORDS its residual rather than bounding it.
 
     MEASURED on the two-loop fixture at roughness 0.26 mm: heads 3.566e-4 relative, flows
     2.731e-3 relative (worst link). EPANET uses Swamee-Jain above Re = 4000,
     Hagen-Poiseuille below 2000 and Dunlop's cubic interpolation between (Manual section
-    13.1 item 3, p.111, quoted in full in the research note section 3), while the existing
+    13.1 item 3, p.111), while the existing
     `Duct` element uses Colebrook throughout; the two turbulent friction factors differ by
     up to about 1 %. (EPANET's water viscosity, 1.1e-5 ft2/s = 1.022e-6 m2/s, against this
     reader's 1.002e-3 / 998.2 = 1.004e-6 m2/s moves the heads residual only to 3.0e-4.)
     Before the Duct was fed rho' = 1/rho and mu' = nu -- i.e. while it returned MASS flow
     into a layer that balances m3/s -- this row recorded 3.822e-2 / 4.446e-1. Hazen-Williams
-    is this milestone's parity formula; D-W is offered, and this row states what it costs.
+    is the formula compared against EPANET; D-W is offered, and this row states what it costs.
     """
     # ONE literal replacement covers all eight pipes: the "roughness / minor loss / status"
     # run is identical on every [PIPES] row of the fixture (it occurs exactly 8 times) and
@@ -338,15 +338,15 @@ _PDA_EDIT = (
 
 
 def test_d5_pressure_driven_demand(tmp_path):
-    """Row D5, 1e-5 relative on heads and delivered demands (spec amendment A13).
+    """Row D5, 1e-5 relative on heads and delivered demands.
 
     MEASURED against EPANET's own `DEMAND MODEL PDA` at `MINIMUM PRESSURE 0`,
     `REQUIRED PRESSURE 60`, `PRESSURE EXPONENT 0.5`: heads 3.521e-7, demands 2.184e-7. The
-    row validates the core extension of spec 13.4 -- EPANET itself formulates PDA as "a
+    row validates the core's potential-dependent nodal sources -- EPANET itself formulates PDA as "a
     virtual pipe from the junction to a fictitious reservoir" (Manual section 13.1, p.110),
     i.e. as exactly this potential-dependent nodal source.
 
-    `build_model` is called with NO `pda=`/`p_min=`/`p_req=`/`exponent=` (N5): the
+    `build_model` is called with NO `pda=`/`p_min=`/`p_req=`/`exponent=`: the
     file's own `[OPTIONS]` edit below is what turns PDA on, exactly as `read_epanet_inp`
     -> `net.options` -> the builder's own defaults are meant to be exercised together,
     rather than the test re-supplying by hand what the file already says.
@@ -414,13 +414,12 @@ def test_d6_head_loss_sums_to_zero_around_every_loop(tmp_path):
 
 # --------------------------------------------------------------------------- D7
 def test_d7_gradients_against_central_differences(tmp_path):
-    """Row D7, `max|analytic - fd| <= 1e-6 * max|fd|` (spec amendment A14), for BOTH the
-    nodal demand `water.sources` and the Hazen-Williams roughness (N6: the row's own
-    docstring and the README promise "roughness, demands, pump h0, tank area", but only
-    `water.sources` used to be differenced here and `solve_sum`'s `roughness` branch was
-    dead code -- it is exercised for real below). The pump `h0` and tank AREA channels are
-    checked separately, on Net1 (`test_d7_gradient_reaches_the_pump_head_gain_h0` and
-    `test_d7_...tank_area...` below), since `twoloop_si.inp` has neither a pump nor a tank.
+    """Row D7, `max|analytic - fd| <= 1e-6 * max|fd|`, for BOTH the
+    nodal demand `water.sources` and the Hazen-Williams roughness (both channels are
+    differenced for real below, so `solve_sum`'s `roughness` branch is exercised). The pump `h0` and
+    tank AREA channels are checked separately, on Net1
+    (`test_d7_gradient_reaches_the_pump_head_gain_h0` and `test_d7_...tank_area...` below), since
+    `twoloop_si.inp` has neither a pump nor a tank.
 
     MEASURED: sources 3.212e-6 against an allowance of 4.444e-4; roughness 2.505e-10
     against an allowance of 6.259e-8. Both are SCALED criteria rather than entrywise
@@ -550,8 +549,8 @@ def test_d7_tank_area_is_not_reached_by_a_single_steady_solve(tmp_path):
     """Tank AREA never enters `TankLevels.__call__` (only `bottom + level` does), so a
     single `water_steady` call's output is STRUCTURALLY independent of it -- not a small
     gradient, but no path in the graph at all. This is the "structurally not
-    differentiable" half of N6: D7's blanket claim that roughness, demands, pump h0 AND
-    tank area all reach the steady solve overstated the last one. The next test shows
+    differentiable" case: a blanket claim that roughness, demands, pump h0 AND
+    tank area all reach the steady solve would overstate the last one. The next test shows
     where the framework DOES differentiate w.r.t. area: `TankLevels.advance()`.
     """
     path, _ = _epanet(tmp_path, "Net1.inp", duration=0)
@@ -608,16 +607,15 @@ def test_d7_gradient_reaches_a_learnable_roughness(tmp_path):
 # --------------------------------------------------------------------------- D8
 def test_d8_trace_quality_on_the_two_loop(tmp_path):
     """Row D8, 1e-3 on the steady trace fraction. MEASURED: 6.438e-12 percentage points
-    (FR-16: refreshed from a stale 2.501e-12; both are noise many orders below the 1e-3
-    tolerance, floating on the reference's own float32 output and this solve's Newton
-    tolerance rather than on any physics this row could regress).
+    (noise many orders below the 1e-3 tolerance, floating on the reference's own float32 output and
+    this solve's Newton tolerance rather than on any physics this row could regress).
 
-    A SMOKE row, as spec 13.3 states: the fixture has a single source, so mass balance
+    A SMOKE row: the fixture has a single source, so mass balance
     alone forces 100 % everywhere once transients clear. A genuinely discriminating
-    two-source trace (Net3's own "percent of Lake water" scenario) is a recorded follow-up.
+    two-source trace (Net3's own "percent of Lake water" scenario) is not implemented.
 
     What it does pin is the FORMULATION: the layer is well posed only because the nodal
-    demand enters as a first-order removal rate (spec amendment A15). Without it the
+    demand enters as a first-order removal rate. Without it the
     generator's row sums are the demands and the steady system is singular.
     """
     path, results = _epanet(tmp_path, "twoloop_trace.inp")
@@ -635,7 +633,8 @@ def test_d8_trace_quality_on_the_two_loop(tmp_path):
 
 
 def test_d8_without_the_demand_removal_the_system_is_singular(tmp_path):
-    """The measurement behind spec amendment A15, pinned so a future edit cannot undo it."""
+    """The measurement behind the demand-as-removal formulation (`build_model`'s docstring),
+    pinned so a future edit cannot undo it."""
     path, _ = _epanet(tmp_path, "twoloop_trace.inp")
     net = read_epanet_inp(path)
     model, _, _ = build_model(net, quality=0.0)

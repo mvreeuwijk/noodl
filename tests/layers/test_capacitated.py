@@ -159,18 +159,18 @@ def test_step_hard_clip_above_receiver_headroom_is_capped():
 
 @pytest.mark.parametrize(("dt", "s_max_c"), [(2.0, 10.0), (86400.0, 86400.0)])
 def test_step_receiver_headroom_clip_is_a_rate_at_dt_other_than_one(dt, s_max_c):
-    """Final-review C1 regression: the receiver-headroom clip must bound the actual
+    """Regression: the receiver-headroom clip must bound the actual
     STORAGE increase at ANY `dt`, not only at `dt == 1.0`.
 
     `headroom` is `(s_max - s) / dt` -- a RATE, in the same m3/s units as `f`,
     `committed_in`, `avail` and everything else it is compared against -- while the
     storage update multiplies by `dt`. Before the fix it was the raw VOLUME `s_max - s`,
-    which coincides with the rate only at `dt == 1.0` (every other test and benchmark in
-    this milestone). At the two `dt` values below the pre-fix arithmetic gave
+    which coincides with the rate only at `dt == 1.0` (every other test and benchmark
+    here). At the two `dt` values below the pre-fix arithmetic gave
     `f = s_max_c` instead of `s_max_c / dt`, overshot `s_max` by a factor of `dt`, and
     reported the excess as `overflow` -- volume conserved, but the clip no longer
-    bounding what it exists to bound. Spec section 2 names `dt = 86400` (one WSIMOD day
-    in seconds) as the intended use, so this was not a hypothetical `dt`.
+    bounding what it exists to bound. `dt = 86400` (one WSIMOD day in seconds) is the
+    intended use, so this was not a hypothetical `dt`.
 
     Both `(dt, s_max_c)` pairs are chosen so `s_max_c / dt` is exact in binary floating
     point and the fill lands on `s_max` to the last bit, letting the assertions be exact
@@ -240,10 +240,10 @@ def test_model_registers_capacitated_layer():
 def test_model_refuses_capacitated_layer_as_a_transport_flow_owner_by_name():
     """`Model.__init__`'s ownership scan lets a capacitated layer own a transport layer's
     flow kinds (it writes `"<name>.q"` in the same key convention), but reading those flows
-    would need `CapacitatedTransferLayer.flows_of_kind` -- the species/quality-transport
-    follow-up (design spec amendment A5), deliberately not built in 4b. `_kind_flows` used
-    to fall through to `self.potential[owner]` and raise a bare `KeyError` naming nothing;
-    it must refuse by name instead.
+    would need `CapacitatedTransferLayer.flows_of_kind` -- species/quality transport on
+    capacitated flows, deliberately not built. `_kind_flows` must not fall through to
+    `self.potential[owner]` and raise a bare `KeyError` naming nothing; it must refuse by
+    name instead.
     """
     net = _chain_net()
     s_max = torch.full((net.n,), 100.0, dtype=F64)
@@ -326,12 +326,12 @@ def test_step_shares_scarce_receiver_headroom_by_preference():
     assert torch.allclose(f[2:], torch.tensor([2.0, 1.0], dtype=F64), atol=1e-6)
     # A->B and A->C are NOT capped to match B->D/C->D. B and C each have ample headroom
     # (s_max=100) and only one in-edge apiece, so their receiver-side sharing never
-    # triggers -- each simply passes its full 10.0 request through, exactly like Task
-    # 1's single-edge hard-clip. B and C then accumulate the surplus (10 - 2 = 8, and
-    # 10 - 1 = 9 respectively) as storage this step; nothing in the spec (design spec
-    # section 3: sharing applies only "where more than one out-edge draws on one node's
-    # supply", i.e. at the CONVERGING node) or in WSIMOD's own per-arc push/pull
-    # semantics (amendment A1: a node's accept decision is its own push_check against
+    # triggers -- each simply passes its full 10.0 request through, exactly like the
+    # single-edge hard-clip. B and C then accumulate the surplus (10 - 2 = 8, and
+    # 10 - 1 = 9 respectively) as storage this step; nothing in the layer's rule (sharing
+    # applies only "where more than one out-edge draws on one node's supply", i.e. at the
+    # CONVERGING node) or in WSIMOD's own per-arc push/pull
+    # semantics (a node's accept decision is its own push_check against
     # its OWN storage headroom, never against its future ability to forward the flow
     # onward) caps an upstream edge to match a downstream bottleneck two hops away.
     assert torch.allclose(f[:2], torch.tensor([10.0, 10.0], dtype=F64), atol=1e-6)
@@ -410,7 +410,7 @@ def test_smooth_mode_converges_to_hard_clip_as_tau_shrinks():
     just not instantaneously within one pass) -- confirmed by tracing the loop
     pass-by-pass at tau=0.01: avail/share stays a small tau-scaled residual every
     round instead of collapsing to exactly 0 after the first. Hence the tightest tau
-    below is 1e-4, not 1e-2 as a naive single-clip reading of the brief would use.
+    below is 1e-4, not 1e-2 as a naive single-clip reading would use.
     """
     net = _chain_net()
     s_max = torch.full((net.n,), 100.0, dtype=F64)
@@ -527,18 +527,17 @@ def test_gradcheck_smooth_and_projection_on_diamond():
 
 
 def test_projection_mode_sharing_has_nonzero_cross_gradient():
-    """Fix-loop round 1 (Critical finding): the ORIGINAL `mode="projection"` reused
-    hard-clip's own preference-proportional-share formula at the sharing site, which is a
-    function of preference weights and total headroom alone -- never of any individual
-    edge's own request -- so it had a provably ZERO cross-gradient between competing edges,
-    delivering NONE of the spec's stated purpose ("gradients flow through which arc absorbs
-    a constraint", framework spec 4.2b). Confirmed empirically (not just by inspection) via
-    `torch.autograd.functional.jacobian`: `d(f_BD)/d(r_CD)` was byte-identical to
-    `mode="hard"`'s own (zero) cross-term at this exact fixture, across 200 random trials
-    too. `_share_via_qp`'s real coupled QP (via `solve_monotone`) fixes this: `d(f_BD)/d(r_CD)`
-    must now be genuinely nonzero, and its SIGN must be negative -- raising a competing
-    edge's request can only ever grow ITS OWN share and shrink everyone else's, since the
-    shared pool (`free_headroom`) does not grow.
+    """Regression: a `mode="projection"` that reused hard-clip's own
+    preference-proportional-share formula at the sharing site, which is a function of
+    preference weights and total headroom alone -- never of any individual edge's own
+    request -- would have a provably ZERO cross-gradient between competing edges, defeating
+    the purpose of the mode (gradients should flow through which arc absorbs a constraint).
+    Confirmed empirically (not just by inspection) via `torch.autograd.functional.jacobian`:
+    such a `d(f_BD)/d(r_CD)` was byte-identical to `mode="hard"`'s own (zero) cross-term at
+    this exact fixture, across 200 random trials too. `_share_via_qp`'s real coupled QP (via
+    `solve_monotone`) fixes this: `d(f_BD)/d(r_CD)` must be genuinely nonzero, and its SIGN must be
+    negative -- raising a competing edge's request can only ever grow ITS OWN share and shrink
+    everyone else's, since the shared pool (`free_headroom`) does not grow.
     """
     net = _diamond_net()
     s_max = torch.tensor([100.0, 100.0, 100.0, 3.0], dtype=F64)
@@ -564,7 +563,7 @@ def test_projection_mode_sharing_has_nonzero_cross_gradient():
 
 
 def test_projection_mode_sharing_is_nan_free_under_random_fixtures():
-    """Fix-loop round 1: `_share_via_qp`'s `solve_monotone`-based root-find has a genuine
+    """`_share_via_qp`'s `solve_monotone`-based root-find has a genuine
     division (`weight = -grad_output / f_x` inside `solve_monotone`'s own backward) that
     blows up to NaN whenever every competing edge at a node is simultaneously boundary-
     pinned at the converged root -- observed directly during this fix, in two distinct
@@ -617,7 +616,7 @@ def test_model_steps_capacitated_layer_end_to_end():
 
 
 def test_clip_projection_matches_box_clamp():
-    """White-box: `_clip_projection` is the new QP machinery Task 4 introduces -- pin that
+    """White-box: `_clip_projection` is the projection-mode QP machinery -- pin that
     it actually exists and computes the box-constrained least-squares projection (which has
     the closed form `clamp(r, 0, min(c_arc, headroom))`), not merely an alias for `_clip`.
     """

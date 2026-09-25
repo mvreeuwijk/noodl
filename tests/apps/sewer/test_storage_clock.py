@@ -1,4 +1,4 @@
-"""R6: the storage sweep must integrate over the step the model was asked for."""
+"""The storage sweep must integrate over the step the model was asked for."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from noodl.apps.sewer.network import build_model, tree_steady
 F64 = torch.float64
 
 # One 60 s implicit-Euler step from a dry network under tree_steady()'s constant inflows,
-# manhole order J1, J2, J5, J3, J4. Recorded from the code as it stands, where the sweep does
-# use 60 s: after R6 is fixed a 60 s step must still give exactly this.
+# manhole order J1, J2, J5, J3, J4. Recorded from a 60 s sweep: a 60 s step taken through
+# the model's own clock must give exactly this.
 H_AFTER_60_S = torch.tensor(
     [0.1477580995372192, 0.20056456811542192, 0.1102345361550266,
      0.2479186549813016, 0.27709022477286743],
@@ -36,7 +36,7 @@ def test_a_60_s_step_reproduces_the_recorded_levels():
 def test_a_1_s_step_fills_the_manholes_less_than_a_60_s_step():
     """Filling from dry under constant inflow is monotone in time: every level after 1 s is
     strictly positive and strictly below the level after 60 s. Built WITHOUT a declared
-    `dt_storage` (R6): with one declared, a 1 s step is now the declared-mismatch case that
+    `dt_storage`: with one declared, a 1 s step is now the declared-mismatch case that
     refuses by name -- see
     `test_a_constructor_dt_that_disagrees_with_the_step_is_refused_by_name`."""
     model, state, drivers = build_model(
@@ -66,7 +66,7 @@ def test_without_a_declared_dt_the_step_interval_is_used():
 
 
 def test_each_leaf_manholes_60_s_level_satisfies_its_own_implicit_euler_residual():
-    """T5-1 (controller ruling): the recorded 60 s levels are more than a pinned regression
+    """T5-1: the recorded 60 s levels are more than a pinned regression
     value -- each LEAF manhole's own implicit-Euler residual
 
         A_s * H / dt + Q_manning(H) = lateral inflow

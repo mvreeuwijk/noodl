@@ -21,9 +21,8 @@ def test_flow_recovers_q_from_p_of_q_for_sampled_q_and_is_monotone_increasing():
 
     # q(dp) = P^-1(-dp): a composition of two decreasing maps (negation, then P's decreasing
     # inverse) is increasing, so flow is monotone INCREASING in dp under this dp = -P(q) sign
-    # convention, not decreasing (corrected from the brief, which asserted <= 1e-9 here; see
-    # task-5-report.md for the derivation and the matching sign fix to the two "stalled"
-    # clip-boundary test values below and in test_dflow_matches_... below).
+    # convention, not decreasing (which is also why the two "stalled" clip-boundary test
+    # values below, and in test_dflow_matches_... below, carry the signs they do).
     dp_sweep = torch.linspace(-500.0, 100.0, 61)
     q = fan.flow(dp_sweep)
     assert torch.all(q[1:] - q[:-1] >= -1e-9)
@@ -39,8 +38,8 @@ def test_flow_clips_to_zero_above_shutoff_and_to_q_max_below_top_of_curve_pressu
 
     p_max_flow = _p(coeffs, q_max)
     # -dp < P(q_max) needs dp > -P(q_max) = -p_max_flow, i.e. -p_max_flow + X for X > 0
-    # (corrected from the brief's "- 10.0, - 100.0", which computes dp < -p_max_flow instead
-    # and so never actually falls in the stalled region for this curve's coefficients).
+    # ("- 10.0, - 100.0" would compute dp < -p_max_flow instead and so never actually fall
+    # in the stalled region for this curve's coefficients).
     stalled = torch.tensor([-p_max_flow + 10.0, -p_max_flow + 100.0])
     torch.testing.assert_close(fan.flow(stalled), q_max.expand(2))
 

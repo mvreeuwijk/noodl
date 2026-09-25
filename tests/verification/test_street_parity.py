@@ -1,7 +1,8 @@
-"""IMPAQ parity — spec section 7, rows 8 and 9.
+"""Port check of the street model against the IMPAQ prototype port.
 
-Part one, here: the four-node network, where the noodl model and the IMPAQ port can
-be compared to machine precision. Part two, Task 10: `leiden_small` on the real data.
+Part one: the four-node network, where the noodl model and the IMPAQ port can
+be compared to machine precision. Part two: the `leiden_small` AQ_DT domain on the real
+data (needs `NOODL_AQDT_DATA`).
 """
 
 from __future__ import annotations
@@ -86,8 +87,8 @@ def test_the_canyon_velocities_agree_with_the_impaq_port_s_scipy_ones(record_pro
 def test_noodl_matches_the_fixed_impaq_port_on_the_four_node_network(routing, record_property):
     """Both routing models give the same answer here: no junction of this network has two
     inflows AND two outflows, so there is nothing for a routing model to decide. The test
-    is about the ELIMINATION and the closure, not about routing -- Task 11's 2-in/2-out
-    node is what distinguishes the routing models."""
+    is about the ELIMINATION and the closure, not about routing -- the 2-in/2-out
+    node of `tests/verification/test_munich.py` is what distinguishes the routing models."""
     street_net = from_test_network()
     network, layer = _impaq_port(street_net)
     ours = _noodl(street_net, routing=routing)
@@ -114,7 +115,7 @@ def test_the_effect_of_each_impaq_fix_is_reported_not_absorbed(capsys, record_pr
         rows.append((fix_a, fix_b,
                      float(np.max(np.abs(ours - theirs) / np.abs(theirs)))))
     with capsys.disabled():
-        print("\nIMPAQ parity 1, relative difference from the noodl model:")
+        print("\nIMPAQ port check 1, relative difference from the noodl model:")
         for fix_a, fix_b, relative in rows:
             print(f"  fix_a={fix_a!s:5s} fix_b={fix_b!s:5s} -> {relative:.3e}")
     effects = {(a, b): r for a, b, r in rows}
@@ -143,7 +144,7 @@ def test_the_effect_of_each_impaq_fix_is_reported_not_absorbed(capsys, record_pr
 def test_the_exchange_coefficient_is_the_retracted_issue_c_form_on_both_sides():
     """`u_d = sigma_w/(sqrt(2) pi)`, not `sigma_w/sqrt(2 pi)`. The two differ by
     `sqrt(pi) = 1.7725`, so a model using the other one cannot agree with this port
-    check at any tolerance -- which makes the parity above evidence for the retraction."""
+    check at any tolerance -- which makes the agreement above evidence for the retraction."""
     from noodl.apps.street_aq.canyon import SIRANE_EXCHANGE
 
     assert abs(SIRANE_EXCHANGE - 1.0 / (math.sqrt(2.0) * math.pi)) < 1e-16
@@ -151,7 +152,7 @@ def test_the_exchange_coefficient_is_the_retracted_issue_c_form_on_both_sides():
     assert abs(wrong / SIRANE_EXCHANGE - math.sqrt(math.pi)) < 1e-12
 
 
-# --------------------------------------------------------------- IMPAQ parity 2
+# --------------------------------------------------------------- IMPAQ port check 2
 
 # The AQ_DT products live outside the repository; set NOODL_AQDT_DATA to their data
 # directory to run the real-data cases. Unset, they skip.
@@ -270,7 +271,7 @@ def test_the_impaq_port_s_routing_matrix_does_not_conserve_and_noodl_s_flows_do(
         for step, count, worst in report:
             print(f"  step {step:5d}: {count:3d} of 162 roads do not conserve, "
                   f"worst by a factor {1.0 + worst:.2f}")
-    # Measured on 17 September 2026: 12 roads at step 0, worst factor 13.95.
+    # Measured: 12 roads at step 0, worst factor 13.95.
     for _step, count, worst in report:
         assert count > 0 and worst > 1.0
     worst_factor = 1.0 + max(worst for _step, _count, worst in report)
@@ -286,10 +287,10 @@ def test_the_impaq_port_s_routing_matrix_does_not_conserve_and_noodl_s_flows_do(
 def test_noodl_matches_the_fixed_impaq_port_on_the_typical_leiden_small_street(
     capsys, record_property
 ):
-    """The parity that IS attainable: the median street agrees to machine precision, and
+    """The agreement that IS attainable: the median street agrees to machine precision, and
     the count of streets that do not is consistent with the mis-permuted junctions
-    diagnosed above (the set cross-reference is a recorded follow-up). The counts are
-    printed and asserted against the range measured while this plan was written."""
+    diagnosed above (the set cross-reference is not done). The counts are
+    printed and asserted against the measured range."""
     data = _leiden_small()
     _model, _drivers, solved = _noodl_leiden(data)
     ours = solved["street.x"].detach().numpy()
@@ -302,7 +303,7 @@ def test_noodl_matches_the_fixed_impaq_port_on_the_typical_leiden_small_street(
         rows.append((STEPS[step], float(np.median(relative)),
                      int((relative > 1e-9).sum()), float(relative.max())))
     with capsys.disabled():
-        print("\nIMPAQ parity 2 on leiden_small (fix_a and fix_b on):")
+        print("\nIMPAQ port check 2 on leiden_small (fix_a and fix_b on):")
         for step, median, count, worst in rows:
             print(f"  step {step:5d}: median {median:.3e}, {count:3d} of 162 streets "
                   f"over 1e-9, worst {worst:.3e}")
@@ -342,7 +343,7 @@ def test_issue_a_is_much_larger_than_the_routing_defect_on_leiden_small(capsys):
 
 @needs_aqdt
 def test_the_saved_network_concentration_product_is_checked_before_it_is_believed():
-    """Spec section 7's `network_concentration_2024.nc` row.
+    """The `network_concentration_2024.nc` product check.
 
     The product on disk was written BEFORE the geometry file it names, and describes a
     network that is no longer there: 160 edges against 162 `network_transport` features,
@@ -377,8 +378,8 @@ def test_the_saved_network_concentration_product_is_checked_before_it_is_believe
             f"the saved product describes a different network: {len(feature_index)} edges "
             f"against {len(data.net.streets)} network_transport features, and "
             f"{mismatched} of its {len(feature_index)} rows name a different osmid than "
-            f"the feature its own edge_feature_index points at. Measured on 17 September "
-            f"2026: 160, 162 and 94. Regenerate the product against the current geometry "
+            f"the feature its own edge_feature_index points at. Measured: "
+            f"160, 162 and 94. Regenerate the product against the current geometry "
             f"to make this comparison meaningful."
         )
     _model, _drivers, solved = _noodl_leiden(data)

@@ -1,5 +1,5 @@
 """Tests for Network.endpoints, difference_ep and accumulate: the gather/scatter primitives
-every sparse operator in this milestone is built from, checked for exact agreement with the
+every sparse operator is built from, checked for exact agreement with the
 existing dense incidence()/difference() they replace.
 """
 

@@ -1,4 +1,4 @@
-"""Tests for `noodl.apps.building_physics.modelica.schema` (spec section 4)."""
+"""Tests for `noodl.apps.building_physics.modelica.schema`."""
 
 from __future__ import annotations
 

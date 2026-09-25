@@ -1,10 +1,9 @@
 """Tests for the composed reference model: 8 buildings joined through a street and a sewer
-network (milestone 1b design, section 6: "the smallest thing that is honestly a digital twin
-rather than a microbenchmark"). `build_composed` returns a `ComposedModel` carrying both the
-topology (reused by later tasks' physics at whatever configuration each of them needs) and a
-reference physics configuration (PowerLaw elements, sources, capacity, a migrated
-`PotentialFlowLayer`, a dense-path `PotentialFlowLayer` and a `TransportLayer`), per the
-milestone-1b amendments (A3.4).
+network ("the smallest thing that is honestly a digital twin rather than a
+microbenchmark"). `build_composed` returns a `ComposedModel` carrying both the
+topology (reused by other tests' physics at whatever configuration each of them needs) and a
+reference physics configuration (PowerLaw elements, sources, capacity, a sparse-path
+`PotentialFlowLayer`, a dense-path `PotentialFlowLayer` and a `TransportLayer`).
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ from benchmarks.composed_model import ComposedModel, build_composed
 
 
 def _full(layer, s_interior, node_dim=-1):
-    """Interior-order sources -> FULL node order with zeros on boundary nodes (spec 4.2)."""
+    """Interior-order sources -> FULL node order with zeros on boundary nodes."""
     shape = list(s_interior.shape)
     shape[node_dim] = layer.net.n
     full = torch.zeros(shape, dtype=s_interior.dtype)
@@ -90,7 +89,7 @@ def test_build_composed_transport_steps_on_the_dense_path():
     lo, hi = model.layer._kind_slices["airpath"]
     # The TRANSPORT layer's interior, not the potential layer's: the co2 layer advects on
     # "airpath" edges only, and the street and sewer nodes carry none, so they are inactive
-    # for it and it has no row for them (spec 14, 4.5).
+    # for it and it has no row for them.
     n_i = model.transport.n_i
     assert n_i < model.layer.interior.numel()
     x0 = torch.full((1, n_i), 400.0, dtype=torch.float64)
@@ -117,15 +116,14 @@ def test_composed_model_fixture_matches_a_direct_call(composed_model):
 def test_composed_layer_and_dense_layer_agree_and_take_different_paths(monkeypatch):
     """The composed model's parity gate is only a gate if its two layers are two code paths.
 
-    `model.layer` is the migrated default (`linear_solver="auto"`); `model.dense_layer` is
-    the retained milestone-1 reference (`linear_solver="direct"`, the same operator assembled
+    `model.layer` is the default (`linear_solver="auto"`); `model.dense_layer` is
+    the retained dense reference (`linear_solver="direct"`, the same operator assembled
     and LU-factorised). The spies are what prove the second does not quietly run the first's
     solver -- without them, the parity assertions below would be comparing the sparse path
     with itself.
 
-    UPDATED for the spec section 6.2 step 2 default: `auto` on this certified-SPD
-    GraphLaplacianOperator now factorises its O(E) COO form through
-    `scipy.sparse.linalg.splu` (1.10x-4.59x faster than PCG at every measured ensemble size;
+    By default `auto` on this certified-SPD GraphLaplacianOperator factorises its O(E) COO form
+    through `scipy.sparse.linalg.splu` (1.10x-4.59x faster than PCG at every measured ensemble size;
     see `solvers.select`'s module docstring), so the spy that distinguishes the two paths is
     `splu` against `torch.linalg.lu_factor_ex` -- a sparse kernel against a dense one --
     rather than `select.pcg` against the dense one. `pcg` is now expected on NEITHER layer,

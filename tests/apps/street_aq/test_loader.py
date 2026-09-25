@@ -1,4 +1,4 @@
-"""`read_aqdt` on hand-written AQ_DT products — spec section 6.3.
+"""`read_aqdt` on hand-written AQ_DT products.
 
 Nothing here reads the real AQ_DT tree: `tests/data/street/aqdt_fixture.py` writes the same
 five products, with the same property and variable names, into `tmp_path`.

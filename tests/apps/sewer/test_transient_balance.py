@@ -1,6 +1,6 @@
-"""R5 in the application: with storage=True the water-quality capacity changes every step;
-the total amount in the network plus what left through the outfall must be constant when
-no load enters and no reaction runs."""
+"""The amount form of the transport step, in the application: with storage=True the water-quality
+capacity changes every step; the total amount in the network plus what left through the outfall must
+be constant when no load enters and no reaction runs."""
 
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
 """cProfile (and fast timing) of the composed model's NON-differentiable forward solve.
 
-This is the measurement instrument for the spec's section 6.2 forward-time follow-up, step 1
-(dispatch overhead): at the reference composed size the forward solve is ~94% `pcg`, and the
+This is the measurement instrument for the forward-time dispatch overhead: at the reference
+composed size the forward solve is ~94% `pcg`, and the
 question this script answers is how much of that `pcg` time is spent in the SOLVER'S OWN
 Python/dispatch overhead -- the per-iteration `torch.where` masking, the index re-broadcasting
 inside the operator matvecs -- rather than in the floating-point work.
@@ -13,7 +13,7 @@ Run it as a SCRIPT, never as a test:
     .venv/Scripts/python -m benchmarks.profile_forward --ensembles 1
     .venv/Scripts/python -m benchmarks.profile_forward --compare-solvers
 
-`--timing` is the before/after number the follow-up is judged on: the median over 5 warm runs
+`--timing` is the before/after number an optimisation is judged on: the median over 5 warm runs
 of `workload_forward`'s own already-warm timed section (its model build and one warm-up step
 happen outside that section, so the median is the steady per-step cost).
 
@@ -138,9 +138,9 @@ def time_ensemble(ensemble: int, repeats: int = 5) -> float:
 # wall clock but costs ~45 minutes and buries a 2x solver difference under the process start
 # and the model build. This comparison is the same question asked in ONE process, on ONE
 # already-warm model per configuration, so what it reports is the solve itself. It is what the
-# `method="auto"` default was chosen on (spec section 2: "selected on evidence, per platform").
+# `method="auto"` default was chosen on (selected on evidence, per platform).
 
-# "auto" now resolves to sparse_direct for a certified-SPD operator (Task C), so comparing it
+# "auto" now resolves to sparse_direct for a certified-SPD operator, so comparing it
 # against "sparse_direct" would measure one backend against itself; "cg" is the PCG backend
 # the evidence table in `solvers.select`'s docstring actually compares sparse_direct against.
 COMPARE_SOLVERS = ("cg", "sparse_direct")

@@ -1,9 +1,9 @@
 """The composed reference model: 8 building submodels joined through street and sewer networks,
 with a reference physics configuration on top.
 
-Used by the composed-model scaling gate (Task 14) and, as a `pytest` fixture
-(`tests/conftest.py`'s `composed_model`), by the migration tasks that need a realistic joined
-topology and physics (Tasks 9-14). `_build_topology` builds the topology ONLY -- no elements,
+Used by the composed-model scaling gate and, as a `pytest` fixture
+(`tests/conftest.py`'s `composed_model`), by the tests that need a realistic joined
+topology and physics. `_build_topology` builds the topology ONLY -- no elements,
 drives or layers; `build_composed` then attaches one reference physics configuration to it (a
 `PowerLaw` per edge kind, sources, capacity, a migrated `PotentialFlowLayer`, a dense-path
 `PotentialFlowLayer` and a `TransportLayer`) and returns both as one `ComposedModel`.
@@ -56,7 +56,7 @@ class ComposedModel:
     transport: TransportLayer
     ensemble: int
     seed: int
-    # Both are None unless `build_composed(thermal=True)`: the milestone-2 configuration,
+    # Both are None unless `build_composed(thermal=True)`: the thermal configuration,
     # which adds a SECOND transport layer (heat) over the same airpath flows and runs the
     # whole thing through `Model.step` rather than through hand-written layer calls.
     thermal: TransportLayer | None = None
@@ -90,7 +90,7 @@ def _build_topology(
 
     With the defaults this is `8 * 120 + 40 + 30 == 1030` nodes (exact, seed-independent) and,
     measured over `seed in range(5)`, 2186-2196 edges (about 2200): the reference composed
-    model of the milestone design's section 6.
+    model.
     """
     rng = torch.Generator().manual_seed(seed)
     net = Network(dtype=torch.float64)
@@ -153,11 +153,11 @@ def build_composed(
     networks. `layer` (name "composed") is the migrated, default-configured path; `dense_layer`
     (name "composed_dense") is built from the same net/elements/boundary but with
     `linear_solver="direct"`: the same operator assembled and LU-factorised, i.e. the
-    milestone-1 numerics, retained as a genuinely separate code path so the composed-model
+    dense reference numerics, retained as a genuinely separate code path so the composed-model
     parity gate compares two solvers rather than the sparse path with itself. `transport`
     (name "co2") is a single-species implicit-scheme `TransportLayer` on the "airpath" edges.
 
-    `thermal` adds the milestone-2 configuration: a SECOND `TransportLayer` ("thermal",
+    `thermal` adds the thermal configuration: a SECOND `TransportLayer` ("thermal",
     carrier `c_p = 1005`, capacity 1e5 J/K per active node, implicit, quantity "temperature"
     in K) over the same "airpath" flows, and a `Model(net, {"composed": layer, "co2":
     transport, "thermal": thermal})` that steps all three together. There are NO closures:
@@ -168,8 +168,8 @@ def build_composed(
     `Model.step` dispatch around it.
 
     `linear_solver` configures `layer` ONLY, and defaults to the layer's own default, so
-    every existing caller gets exactly the model it got before. It exists for the spec's
-    section 6.2 solver comparison, which measures the SAME model under `"auto"` and under
+    every existing caller gets exactly the model it got before. It exists for the solver
+    comparison, which measures the SAME model under `"auto"` and under
     `"sparse_direct"` and needs the two to differ in nothing else. `dense_layer` is always
     `"direct"`: it is the parity reference, and a reference that moved with the thing it
     references would not be one.
@@ -288,8 +288,8 @@ def workload_alloc(mb: int) -> int:
 def _step_state(model: ComposedModel) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """`(x0, x_boundary, zero_sources)` for the transport half of a step, at 400 ppm.
 
-    `zero_sources` is in FULL node order (spec 4.2), matching `TransportLayer.step`'s
-    milestone-2 `sources` contract, not just the transport layer's interior nodes.
+    `zero_sources` is in FULL node order, matching `TransportLayer.step`'s
+    `sources` contract, not just the transport layer's interior nodes.
     """
     dtype = model.net.dtype
     # The TRANSPORT layer's own interior, which is smaller than the potential layer's: the
@@ -361,14 +361,14 @@ def run_steps(
 ) -> tuple[torch.Tensor, torch.Tensor, dict]:
     """Advance `steps` coupled steps; return `(phi, x, diagnostics_of_the_last_solve)`.
 
-    ONE STEP, as the milestone's section 6.1 budget table means it: one
+    ONE STEP, as the budget table (`benchmarks/report_composed_scaling.py`) means it: one
     `layer.solve(phi_boundary, drivers, sources)` followed by one `transport.step` on the
     AIRPATH slice of the resulting `q` (implicit scheme, dt = 60 s), with `x` fed forward
     from one step to the next so a multi-step row is a genuine trajectory rather than the
     same step repeated.
 
     `thermal=True` takes the same steps through `model.model.step` with a second (heat)
-    transport layer alongside the species one -- the milestone-2 gate row. It requires a
+    transport layer alongside the species one -- the thermal gate row. It requires a
     model built by `build_composed(thermal=True)`; see `_model_steps`.
     """
     if sources is None:
@@ -470,7 +470,7 @@ def workload_backward(
     """Build the composed model, run `steps` DIFFERENTIABLE steps, and time `loss.backward()`.
 
     `loss = phi[..., interior].sum() + x_final.sum()` differentiated with respect to
-    `sources` exercises both adjoints the milestone migrated: the potential layer's implicit
+    `sources` exercises both adjoints: the potential layer's implicit
     adjoint (through every solve) and the transport layer's `_LinearSolve` adjoint (through
     every implicit step). Only the backward pass is timed; the forward that builds the graph
     is not, because the forward budget already covers it.

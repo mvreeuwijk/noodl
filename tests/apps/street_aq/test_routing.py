@@ -1,7 +1,7 @@
-"""Intersection routing, node closure and direction averaging — spec sections 4.4, 4.5.
+"""Intersection routing, node closure and direction averaging.
 
-Every pinned number is a worked case traced by hand through MUNICH's source (T7, T8, T9 of
-the milestone 3 research record).
+Every pinned number is a worked case traced by hand through MUNICH's source (worked cases
+T7, T8, T9, as numbered in `tests/verification/test_munich.py`).
 """
 
 from __future__ import annotations
@@ -220,10 +220,10 @@ def test_routing_matrix_names_an_unknown_model():
 def _flows_fixture() -> tuple[Network, StreetGeometry]:
     """Two streets end to end (`s1`: a->b, `s2`: b->c): one real junction of degree two
     (`b`) and two dead ends (`a`, `c`). Built by hand, replicating `build_model`'s
-    own edge-construction pattern (plan Task 5) -- `route`/`vent`/`exchange` edges carrying
-    exactly the attributes `StreetFlows._read_edges` reads -- since `network.py` (Task 5)
-    does not exist yet. Used only to construct `StreetFlows`, never called: this is the
-    fixture the M3-R1 kappa-resolution test needs, not an end-to-end run.
+    own edge-construction pattern -- `route`/`vent`/`exchange` edges carrying
+    exactly the attributes `StreetFlows._read_edges` reads -- without going through
+    `network.py`. Used only to construct `StreetFlows`, never called: this is the
+    fixture the kappa-resolution test needs, not an end-to-end run.
     """
     names = ["s1", "s2"]
     graph = Network(dtype=torch.float64)
@@ -267,7 +267,7 @@ def _flows_fixture() -> tuple[Network, StreetGeometry]:
 
 
 def test_street_flows_resolves_kappa_by_formulation():
-    """Ruling M3-R1: `kappa=None` resolves to MUNICH's 0.41 whenever a MUNICH-style form
+    """`kappa=None` resolves to MUNICH's 0.41 whenever a MUNICH-style form
     (`canyon_wind='exponential'`, `exchange='schulte'`, `roof_wind_form='macdonald'`) is
     selected, and to IMPAQ's 0.4 otherwise; an explicit float always wins."""
     net, geometry = _flows_fixture()
@@ -292,7 +292,7 @@ def _street_layer(net, kinds) -> TransportLayer:
 
 
 def test_street_flows_refuses_a_layer_whose_flow_kinds_are_in_another_order():
-    """FR-3: the closure writes `q` as one concatenated block in the order
+    """The closure writes `q` as one concatenated block in the order
     `("route", "vent", "exchange")`, so a layer built with the same kinds in any other
     order would read the route flows as vent flows with no error anywhere. `layer=None`
     stays legal -- the fixtures above drive `_flows` without a Model at all."""

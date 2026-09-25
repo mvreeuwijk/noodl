@@ -1,10 +1,10 @@
-"""Contract test for `scripts/modelica_export.py` (plan Task 7).
+"""Contract test for `scripts/modelica_export.py`.
 
 Runs without OpenModelica: it feeds the exporter's pure-Python writer a synthetic
 `getModelInstance` tree (the JSON OpenModelica's scripting API returns, reduced to the fields
 the exporter reads), writes the `noodl-modelica/1` document, and checks that the reader's own
 `schema.load` and `graph.build` accept it. The script is imported by path, so it stays out of
-the `noodl` package (spec section 3: the package never imports it).
+the `noodl` package (the package never imports it).
 """
 
 from __future__ import annotations
@@ -305,7 +305,7 @@ def test_omc_helpers(exporter) -> None:
 def test_main_exits_non_zero_when_a_requested_simulation_fails(exporter, monkeypatch) -> None:
     """A requested simulation that fails still gets a JSON-only `export()` (no "csv" key in
     the summary: `export`'s own `if run_simulation and not simulated` branch, which only
-    warns) -- `main` must not report that as success (final review, Minor 9). Checked without
+    warns) -- `main` must not report that as success. Checked without
     OpenModelica by monkeypatching `export` itself, since the failure path needs `omc`."""
     monkeypatch.setattr(
         exporter, "export",

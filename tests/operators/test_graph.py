@@ -4,9 +4,9 @@ Fixture used throughout ("the chain fixture"): 3 nodes, node 2 is the boundary (
 node, nodes 0 and 1 are interior; edges (0,1) and (1,2). Slopes are batched (2, 2):
 instance 0 = [1, 1] (grounded through both edges), instance 1 = [0, 1] (edge (0,1) has zero
 slope, so {0, 1} has no path to the boundary through strictly positive slope). This is the
-exact counterexample design section 3.1 cites for `_floating_group_nodes`'s defect, and its
+exact counterexample for a grounding check that misses floating groups, and its
 minimum eigenvalues (0.381966..., 0.0) are re-derived by hand below and checked against
-`torch.linalg.eigvalsh` directly, independently of Task 3's own tests of spd_certificate.
+`torch.linalg.eigvalsh` directly, independently of tests/solvers/test_grounding.py.
 """
 
 import pytest
@@ -74,7 +74,7 @@ def test_transpose_correctness_matvec_dot_y_equals_x_dot_rmatvec():
 
 def test_symmetry_matvec_equals_rmatvec_on_same_x():
     """matvec(x) == rmatvec(x) on the SAME x: what actually discriminates a symmetric
-    operator from a nonsymmetric one, and what method="auto" eligibility (Task 7) relies on
+    operator from a nonsymmetric one, and what method="auto" eligibility relies on
     when it trusts `symmetric = True`. A random nonsymmetric matrix fails this identity; this
     operator, being A_I diag(g) A_I^T, must pass it.
     """
@@ -167,7 +167,7 @@ def test_matvec_source_has_no_python_loop_over_edges():
 def test_rmatvec_source_has_no_python_loop_over_edges():
     """Same check as test_matvec_source_has_no_python_loop_over_edges, but for rmatvec.
 
-    A8 amendment: rmatvec must also be vectorised (no Python loop over edges).
+    rmatvec must also be vectorised (no Python loop over edges).
     """
     import inspect
 
@@ -178,10 +178,9 @@ def test_rmatvec_source_has_no_python_loop_over_edges():
 
 
 def test_apply_source_has_no_python_loop_over_edges():
-    """`matvec`/`rmatvec` are now one-line delegators to `_apply` (the consolidation this
-    review flagged): checking only their own source, as the two tests above do, would never
-    catch a loop introduced INSIDE `_apply` itself, where all the actual arithmetic now
-    lives. Checked for both `for` and `while` loops.
+    """`matvec`/`rmatvec` are one-line delegators to `_apply`: checking only their own source, as
+    the two tests above do, would never catch a loop introduced INSIDE `_apply` itself, where all
+    the actual arithmetic now lives. Checked for both `for` and `while` loops.
     """
     import inspect
 
@@ -193,8 +192,8 @@ def test_apply_source_has_no_python_loop_over_edges():
 
 
 def test_spd_diagnosis_on_ungrounded_chain_fixture():
-    """A2 amendment: add one test on the chain fixture asserting `op.spd_diagnosis()`
-    returns exactly one record for instance 1 with `reason == "ungrounded"`.
+    """On the chain fixture, `op.spd_diagnosis()` returns exactly one record for instance 1 with
+    `reason == "ungrounded"`.
     """
     slopes = torch.tensor([[1.0, 1.0], [0.0, 1.0]])
     op = _chain_op(slopes)
@@ -211,8 +210,8 @@ def test_spd_diagnosis_on_ungrounded_chain_fixture():
 
 def _chain_op_with_negative_parallel_edge() -> GraphLaplacianOperator:
     """The chain fixture plus a parallel 0--1 edge whose slope is -5: every interior node
-    is still grounded through strictly positive slopes, so the pre-I1 certificate (which
-    tested grounding only) said True while the operator is in fact indefinite."""
+    is still grounded through strictly positive slopes, so a certificate that tested
+    grounding only would say True while the operator is in fact indefinite."""
     src = torch.tensor([0, 1, 0])
     tgt = torch.tensor([1, 2, 1])
     interior_of_node = torch.tensor([0, 1, -1])
@@ -234,12 +233,12 @@ def test_a_grounded_but_negative_slope_operator_is_genuinely_indefinite():
     assert not bool(op.spd_certificate())
 
 
-# ------------------------------------------------- I2: constructor shape validation
-# Global Constraint: "ValueError for bad shapes, naming the offender". The final review
-# found the last of these four produced not an opaque torch error but a SILENT WRONG
-# ANSWER: `interior_nodes = torch.empty(n_interior)` leaves an uninitialised slot that is
-# then used as a gather index, so the operator constructed, reported shape (3, 3), and
-# `matvec` returned all zeros.
+# ------------------------------------------------- constructor shape validation
+# ValueError for bad shapes, naming the offender. Without the last of these four checks
+# the result is not an opaque torch error but a SILENT WRONG ANSWER:
+# `interior_nodes = torch.empty(n_interior)` leaves an uninitialised slot that is
+# then used as a gather index, so the operator constructs, reports shape (3, 3), and
+# `matvec` returns all zeros.
 
 
 def test_src_and_tgt_shape_mismatch_raises_value_error_naming_them():

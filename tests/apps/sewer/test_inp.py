@@ -1,4 +1,4 @@
-"""The documented SWMM .inp subset (spec 4.5)."""
+"""The documented SWMM .inp subset."""
 
 from pathlib import Path
 
@@ -15,7 +15,7 @@ def test_the_committed_fixture_round_trips_to_the_research_network():
     assert [m.name for m in net.manholes] == ["J1", "J2", "J5", "J3", "J4"]
     assert [o.name for o in net.outfalls] == ["Outfall"]
     assert [p.name for p in net.pipes] == ["C1", "C2", "C3", "C4", "C5"]
-    # 5 decimals, not 10 (deviation from the brief; see the Task 9 report): the reader's own
+    # 5 decimals, not 10: the reader's own
     # docstring and `test_conduits_are_normalised_upstream_to_downstream` below both pin the
     # slope to the 3-D CHORD formula (`dy / sqrt(L**2 - dy**2)`), which on this fixture's
     # exact elevations and length gives 0.0100005.../0.0050000625..., not 0.01/0.005 to 6 or
@@ -38,7 +38,7 @@ def test_the_pollutant_variant_carries_the_tracer():
 
 
 def test_conduit_offsets_shift_the_effective_invert_under_link_offsets_depth(tmp_path):
-    """M4-R19 minor: under `LINK_OFFSETS DEPTH` (the fixture's own default), a conduit's
+    """Under `LINK_OFFSETS DEPTH` (the fixture's own default), a conduit's
     InOffset/OutOffset add to the NODE invert at each end before the slope is computed --
     untested by the committed fixtures, which all carry zero offsets. Gives C1 an
     OutOffset of 0.5 m at J3 (invert 10.0), so its effective downstream elevation is 10.5,
