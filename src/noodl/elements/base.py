@@ -13,7 +13,7 @@ has, at each position, exactly that position's own partial derivative.
 bare ``forward = flow`` class-body assignment. The latter would bind the *base* class's
 ``flow`` function object at class-definition time, so subclasses overriding ``flow`` would
 not be reachable through ``__call__``/``forward`` (and hence not through
-``torch.func.functional_call``, which Task 8's differentiable solve relies on). Delegating
+``torch.func.functional_call``, which the differentiable solve relies on). Delegating
 through ``self.flow`` re-resolves to the most-derived override on every call.
 """
 
@@ -74,7 +74,7 @@ class Element(torch.nn.Module):
         ``dp`` is detached and re-wrapped as a fresh leaf so this never perturbs the
         caller's own graph. ``create_graph`` follows the caller's ``torch.is_grad_enabled()``
         (captured before ``enable_grad`` is forced locally): no graph is built under
-        ``torch.no_grad()`` (the batched Newton solve of Tasks 6/7); a graph is built under
+        ``torch.no_grad()`` (the batched Newton solve); a graph is built under
         ordinary tracking, including inside ``gradcheck``, which differentiates this twice.
 
         This default assumes ``flow`` actually depends on ``dp`` (true of every well-behaved

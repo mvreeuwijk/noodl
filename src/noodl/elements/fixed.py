@@ -3,7 +3,7 @@
 Used for prescribed exhaust/supply flows and, structurally, to make the nodal Jacobian
 singular on any subnetwork whose only connection to the rest of the graph is through
 fixed-flow branches (dflow = 0 contributes nothing to J = A diag(dflow) A^T);
-``solvers.grounding.spd_certificate`` (Task 3/11) detects and reports exactly this case.
+``solvers.grounding.spd_certificate`` detects and reports exactly this case.
 """
 
 from __future__ import annotations

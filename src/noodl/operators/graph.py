@@ -12,7 +12,7 @@ Every method below is built from two primitives, both O(edges) and loop-free: a 
 edge endpoints (`torch.gather`) and a SCATTER-ADD back to nodes (`Tensor.scatter_add_`), which
 correctly accumulates multiple edges landing on the same node (unlike plain fancy-index
 assignment, which would overwrite rather than sum). This mirrors `Network.difference_ep`/
-`accumulate` (Task 2) but is reimplemented here directly over the operator's own
+`accumulate` but is reimplemented here directly over the operator's own
 `src`/`tgt`/`interior_of_node`, since the operator holds no `Network` reference.
 
 The hot path (`_apply`, `diagonal`) runs those two primitives over a PADDED COMPACT domain of
@@ -47,12 +47,12 @@ class GraphLaplacianOperator:
         *,
         boundary_mask: Tensor,
     ) -> None:
-        # Global Constraint: ValueError for bad shapes, naming the offender. The last check
+        # ValueError for bad shapes, naming the offender. The last check
         # is not cosmetic: `interior_nodes = torch.empty(n_interior)` below leaves an
         # UNINITIALISED slot when `n_interior` overstates the mask, and that slot is then
-        # used as a gather index -- so before this check the operator constructed happily,
-        # reported its claimed shape, and `matvec` returned all zeros (a silent wrong
-        # answer, not the opaque torch error the deferral ruling assumed).
+        # used as a gather index -- so without this check the operator constructs happily,
+        # reports its claimed shape, and `matvec` returns all zeros (a silent wrong
+        # answer, not an opaque torch error).
         if src.shape != tgt.shape:
             raise ValueError(
                 f"GraphLaplacianOperator: src and tgt must have the same shape, got "
@@ -72,7 +72,7 @@ class GraphLaplacianOperator:
             )
         # An interior node is one that is NOT prescribed (`boundary_mask`) AND carries a
         # compact index (`interior_of_node >= 0`). The second half is what a layer's INACTIVE
-        # nodes fail (spec 14, 4.5): a node no edge of this layer's kinds touches is neither
+        # nodes fail: a node no edge of this layer's kinds touches is neither
         # an unknown of this operator nor a prescribed boundary value, so `boundary_mask`
         # alone would over-count the interior by exactly those nodes. Requiring BOTH also
         # leaves the older, looser calling convention intact, in which `interior_of_node`
@@ -130,8 +130,8 @@ class GraphLaplacianOperator:
         # Per-(input batch shape, device) cache of everything `_apply` would otherwise
         # recompute on EVERY matvec: the broadcast batch shape and the src/tgt index tensors
         # expanded to it. Both are pure functions of the key and of this operator's own
-        # construction-time arrays, so caching them is the "construction-time cost, cached"
-        # the plan's Global Constraints allow -- and at the composed reference size the
+        # construction-time arrays, so caching them is a construction-time cost -- and at
+        # the composed reference size the
         # recomputation was 11% of `pcg`'s time (820 `broadcast_shapes` calls per solve).
         # Only INDEX tensors are cached, never an expanded view of `slopes`: `slopes` can
         # require grad, and a cached view of it would carry one autograd graph's

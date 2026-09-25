@@ -1,4 +1,4 @@
-"""Explicit-in-time clip/allocation layer for capacitated networks (framework spec 4.2b).
+"""Explicit-in-time clip/allocation layer for capacitated networks.
 
 Determines edge flows by clipping requests against arc capacity and receiver headroom
 rather than solving for a potential -- the fourth way of determining flows the framework
@@ -9,8 +9,7 @@ is a separate, reported quantity, never silently dropped.
 
 The docstrings below record the mathematics and the failure modes each guard exists for,
 which is what a later reader needs; the DESIGN HISTORY behind them (which alternatives
-were tried, in what order, and who found what) is summarised in the milestone 4b record of
-`docs/development-history.md`.
+were tried, and in what order) is summarised in `docs/development-history.md`.
 """
 from __future__ import annotations
 
@@ -185,7 +184,7 @@ class CapacitatedTransferLayer:
 
         `"projection"` makes the OPPOSITE choice at the same question, deliberately: leave
         the oversubscription BRANCH decision hard, smooth/solve only the arithmetic inside
-        it. Its stated purpose (design spec section 3) is a QP posed against the constraint
+        it. Its purpose is a QP posed against the constraint
         SURFACE -- `0 <= f <= c_arc` and the headroom bound -- not a re-litigation of
         WHETHER a node is oversubscribed at all, which is a genuinely separate question
         from what the flows should be once it is. Either choice is defensible; both are
@@ -213,7 +212,7 @@ class CapacitatedTransferLayer:
     # complementarity condition first (e.g. Fischer-Burmeister) to get a residual Newton can
     # differentiate through -- at which point the "new" machinery is just a harder-to-verify
     # reimplementation of what `mode="smooth"` already does with `_clip`/`_nonneg`/`_select`,
-    # for no accuracy benefit and the exact risk design section 10 flags. `solve_monotone`
+    # for no accuracy benefit and with exactly that verification risk. `solve_monotone`
     # sidesteps this: at the sharing site, the QP's KKT system reduces to ONE scalar,
     # monotone equation per node (`_share_via_qp`'s docstring derives this), which is exactly
     # `solve_monotone`'s own contract (a batched, monotone, implicit-function-differentiable
@@ -252,7 +251,7 @@ class CapacitatedTransferLayer:
         return f
 
     def _share_via_qp(self, remaining, avail_e, free_headroom, node_oversubscribed):
-        """The REAL coupled per-node QP the design spec asks for at the sharing site --
+        """The REAL coupled per-node QP at the sharing site --
         minimise `sum_i preference_i * (f_i - remaining_i)**2` subject to
         `0 <= f_i <= avail_i` for every edge `i` targeting an oversubscribed node, AND
         `sum_i f_i <= free_headroom` for that node JOINTLY (not per edge).
@@ -263,8 +262,8 @@ class CapacitatedTransferLayer:
         on the preference-proportional split `free_headroom * preference_i / pref_sum`
         depends only on preference weights and total headroom, never on any individual edge's
         own request, so `d(share_i)/d(r_j) == 0` for a competing edge `j` -- provably, not
-        approximately. That delivers NONE of the spec's stated purpose (framework spec 4.2b:
-        "gradients flow through which arc absorbs a constraint"), and it is invisible to a
+        approximately. That defeats the purpose of the layer's differentiable modes
+        (gradients should flow through which arc absorbs a constraint), and it is invisible to a
         forward-value test: `torch.autograd.functional.jacobian` on such an implementation
         gives byte-identical zero cross-terms and byte-identical full Jacobians to
         `mode="hard"`, across 200 random trials and the diamond fixture.
@@ -276,7 +275,7 @@ class CapacitatedTransferLayer:
         avail_i)` for ONE scalar `lambda`, SHARED by every edge competing at that node. Since
         `lambda` depends on every competing edge's `remaining_j` jointly (see below),
         `d(f_i)/d(r_j)` for `i != j` is genuinely nonzero, flowing entirely through `lambda`
-        -- this is the real cross-gradient the spec wants. The covering test,
+        -- this is the real cross-gradient wanted. The covering test,
         `test_projection_mode_sharing_has_nonzero_cross_gradient`, pins its sign: increasing a
         competitor's request should make ITS share bigger and, since the shared pool of
         `free_headroom` does not grow, every OTHER competitor's share smaller.
@@ -439,13 +438,13 @@ class CapacitatedTransferLayer:
         `(s_new, f)`: `s_new` the new per-node storage, `f` the realised per-edge flow
         (m3/s). `diagnostics`, when given, is filled with `"overflow"` (m3/s, per node).
 
-        Proportional sharing (design spec section 3): sharing only ever happens at a
+        Proportional sharing: sharing only ever happens at a
         node that is the TARGET of more than one of this layer's edges -- "where more
         than one out-edge draws on one node's [headroom] supply". A node with a single
         in-edge is never touched by this loop, however many out-edges or requests are
         downstream of it: this layer never caps an edge to match a bottleneck further
         along the graph (that would need reasoning about paths, not incidence), exactly
-        mirroring WSIMOD's own per-arc semantics (design spec amendment A1): a node's
+        mirroring WSIMOD's own per-arc semantics: a node's
         accept decision is its own `push_check`/`pull_check` against its OWN storage
         headroom, never against its future ability to forward the flow onward.
 
@@ -524,7 +523,7 @@ class CapacitatedTransferLayer:
                 tentative = self._clip(remaining, avail)
                 # `active` gates which edges compete for `pref_sum` below; this is a hard
                 # boolean threshold in EVERY mode, including smooth. Scope decision: the
-                # brief's enumerated kink sites are the `minimum`/`clamp(min=0.0)` pair and
+                # smoothed kink sites are the `minimum`/`clamp(min=0.0)` pair and
                 # the `over_subscribed_e` `where` -- this narrower gate is left hard in all
                 # modes. Because `active` flips discretely the instant a competing edge's
                 # (now smooth) `tentative` crosses zero, it discretely changes
@@ -571,7 +570,7 @@ class CapacitatedTransferLayer:
         # floor, and a state handed in already above its own `s_max` (nothing here forbids
         # it) overflows by exactly that excess. There is deliberately no lower bound of zero: a
         # request is not checked against the SENDER's available storage in hard-clip mode
-        # (spec 4.2b), so a source node may be drawn below zero -- that is a modelling
+        # so a source node may be drawn below zero -- that is a modelling
         # choice upstream of this layer (e.g. a closure sizing requests off available
         # storage), not something this layer silently papers over by floors here.
         s_new = self._clip(s_unclamped, self.s_max)

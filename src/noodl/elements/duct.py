@@ -15,7 +15,7 @@ the law is the straight line through the origin that meets the turbulent curve a
 F_t = mu Re_t A / D, i.e. F = F_t dp / dp_t. `torch.where` selects; the unselected turbulent
 branch is fed `dp_t` instead of |dp| so it never sees dp = 0 (the PowerLaw idiom).
 
-`rho` and `mu` are fixed at construction (milestone 2 plan, Task 4 deviation): a per-step
+`rho` and `mu` are fixed at construction: a per-step
 density correction from `drivers` would need the transition pressure `dp_t` recomputed on
 every call, since `dp_t` depends on `rho`. The water application's Darcy-Weisbach path
 builds it with `rho = 1/(rho_w SG)` and `mu = nu`, so that it returns VOLUMETRIC flow.
@@ -65,7 +65,7 @@ class Duct(Element):
     `tests/elements/test_duct.py::test_the_transition_step_is_bounded_and_shrinks_with_n_iter`
     pins both the size and the mechanism.
 
-    Unifying the two recurrences is a FOLLOW-UP, not a change made here: defining F_t as
+    Unifying the two recurrences is not done here: defining F_t as
     `_turbulent(dp_t)` would make the branches agree by construction but would give up
     `Re = Re_t` exactly at the transition, which is the physical definition of the transition
     point and is separately pinned; the alternative -- correcting dp_t to the root of

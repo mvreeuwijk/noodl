@@ -41,15 +41,15 @@ The compartment law is a VOLUME flow with the fixed ``rho_default`` inside its c
   ``CVal = y COpe + (1-y) CClo`` and ``dV_flow[i] = powerLaw(CVal, dpAB[i], m, dp_turbulent)``.
   ``CDClo`` enters ``CClo`` twice (once through ``AClo``); this is MBL's formula and is kept.
 
-The densities (controller ruling; ``TwoWayFlowElement.mo:72-81``)
-----------------------------------------------------------------
+The densities (``TwoWayFlowElement.mo:72-81``)
+----------------------------------------------
 ``rho_a1_inflow = density_pTX(p = port_a1.p, T = T(state_a1_inflow), X_w = Xi_a1_inflow[1])``
 (``X_w = 0`` when the medium has no moisture, ``nXi == 0``), and likewise for ``a2``. This is
 ``Buildings.Utilities.Psychrometrics.Functions.density_pTX`` (``density_pTX.mo:11-16``,
 ``p / ((R_air (1 - X_w) + R_h2o X_w) T)``) for EVERY medium -- including
 ``Modelica.Media.Air.SimpleAir``, whose own density uses the CODATA gas constant: the
 discretised door does not call ``Medium.density``. It is evaluated at the ACTUAL port pressure,
-not at ``p_default``. With ``port_a1`` on side A and ``port_a2`` on side B (design section 6),
+not at ``p_default``. With ``port_a1`` on side A and ``port_a2`` on side B,
 ``inStream`` at each port is that zone's own state whatever the flow direction, so
 ``rho_A = density_pTX(p_A, T_A, X_w,A)`` and ``rho_B = density_pTX(p_B, T_B, X_w,B)``.
 

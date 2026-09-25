@@ -6,8 +6,7 @@ v4.1.0, for the three media MBL's `Buildings.Airflow.Multizone` validation/examp
 `Buildings.Media.Air`, `Buildings.Media.Specialized.Air.PerfectGas` and
 `Modelica.Media.Air.SimpleAir`.
 
-Two densities matter, and MBL keeps them structurally separate (design section 2, "Fidelity";
-research inventory section C):
+Two densities matter, and MBL keeps them structurally separate:
 
 * ``rho_default``: the medium's density at its own *fixed* default state
   (``p_default``/``T_default``/``X_default``), used to build the flow coefficient ``C``/``k``
@@ -29,7 +28,7 @@ research inventory section C):
   formula instead of this method -- the column at ``p_default`` (matching
   ``MediumColumn.mo:62-76``), the door at the ACTUAL port pressure (matching
   ``TwoWayFlowElement.mo:72-81``) -- and no element reads the ``"rho"`` full-node driver this
-  method used to feed (dropped, final review: nothing in the Modelica route read it). It is
+  method used to feed (dropped: nothing in the Modelica route read it). It is
   kept as the medium's own general-purpose buoyancy-density law, for a caller that wants it.
 
 For ``Buildings.Media.Air`` ``buoyancy_density`` and ``density`` are NOT the same function:

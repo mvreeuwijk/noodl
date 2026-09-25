@@ -1,10 +1,9 @@
 """Batched scalar root finding for monotone branch laws (e.g. inverting a fan curve).
 
-Signature corrected from the spine's one-argument ``solve_monotone(f, lo, hi, *, tol,
-max_iter)`` with ``f(x)``: an ``autograd.Function``'s ``backward`` only ever sees what
-``forward`` saved on ``ctx``, never a closure's captured cells, so any tensor ``f`` depends
-on besides ``x`` must be an explicit ``*params`` argument, ``f(x, *params)``, threaded
-through ``Function.apply``. ``FanCurve`` (this task) is written against this signature.
+Why ``f(x, *params)`` rather than a one-argument ``f(x)``: an ``autograd.Function``'s
+``backward`` only ever sees what ``forward`` saved on ``ctx``, never a closure's captured
+cells, so any tensor ``f`` depends on besides ``x`` must be an explicit ``*params`` argument,
+threaded through ``Function.apply``. ``FanCurve`` is written against this signature.
 """
 
 from __future__ import annotations

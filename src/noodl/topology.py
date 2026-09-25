@@ -327,7 +327,7 @@ class Network:
         `phi` has shape `(..., n)`; the result has shape `(..., b_kind)`, broadcasting over
         arbitrary leading batch dimensions exactly like `difference(kind) @ phi` does on a
         batched `phi`. Never forms the `(b_kind, n)` `difference()` matrix: this is the
-        gather primitive the milestone's sparse operators are built from instead.
+        gather primitive the sparse operators are built from instead.
         """
         if phi.dim() == 0:
             raise ValueError(

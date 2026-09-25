@@ -21,7 +21,7 @@ power of density folded into the coefficient:
 
 Why this lives in the ELEMENT and not in a `Closure`-written per-edge multiplier
 --------------------------------------------------------------------------------
-The milestone 2 spec sketches the correction as a `ReferenceCorrection` closure supplying a
+The obvious alternative is a `ReferenceCorrection` closure supplying a
 multiplicative driver on `C`. That cannot work: the multiplier is FLOW-DIRECTION dependent,
 and a closure runs BEFORE the solve, so it can only see the previous pass's flows -- which
 under the default ping-pong coupling do not exist at all on the first (and, for `steady()`,
@@ -50,7 +50,7 @@ cost a division on every Newton iteration for a shift of order 0.1 % in a quanti
 already a smoothing device of order 1e-3 Pa. This is the same documented approximation
 `Duct` makes for its own fixed `rho`.
 
-Dtype (Ruling R7): `m` is registered in the dtype of the `C`/`n` this element was built with,
+Dtype: `m` is registered in the dtype of the `C`/`n` this element was built with,
 and the density ratio is evaluated in the dtype of the `rho` driver, so a float64 application
 never silently downgrades through this element.
 """

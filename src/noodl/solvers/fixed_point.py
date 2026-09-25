@@ -1,4 +1,4 @@
-"""Implicit differentiation of a converged fixed point (P1-2 of the 20 Sep 2026 review).
+"""Implicit differentiation of a converged fixed point.
 
 A fixed-point iteration z_{k+1} = G(z_k, theta) that is differentiated by UNROLLING returns
 the derivative of the truncated iteration, whose error is O(rho^passes) counted from the
@@ -36,12 +36,12 @@ The `pass_fn` contract, in full, because two of its rules are traps:
   mutate the pass's graph under autograd and trip its version counter at backward time, or
   silently alias a tensor the caller still owns. Copy first if a buffer must be written.
 
-`batch_shape` (Task 9) lets the adjoint solve one independent GMRES system per batch instance
+`batch_shape` lets the adjoint solve one independent GMRES system per batch instance
 instead of one system flattened over the whole interface, which is only correct when instances
 do NOT couple through the pass -- see `differentiate_fixed_point`'s own docstring for the
 precondition this places on the CALLER, not something this utility can verify from shapes alone.
 
-The derivation in full, for the record. Let z*(theta) solve z = G(z, theta) and write the
+The derivation in full. Let z*(theta) solve z = G(z, theta) and write the
 pass's whole output as new = S(z*(theta), theta), with z_next = G(z, theta) whatever part of
 the pass produced it. Then
 

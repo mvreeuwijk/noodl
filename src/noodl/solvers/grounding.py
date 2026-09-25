@@ -1,14 +1,13 @@
 """Per-instance SPD certificate: every branch slope is non-negative, AND every interior node
 reaches a boundary node through a path of strictly positive slopes, in that instance.
 
-See the milestone design, section 3.1, which states the certificate as three conditions, all
-per instance: symmetry (structural here -- `A_I diag(g) A_I^T` is symmetric for any `g`),
-non-negative slopes (which with symmetry gives positive SEMI-definiteness), and grounding
-through strictly positive slopes (which upgrades semi-definite to definite). Both testable
-conditions are applied, by `_certified`, to `spd_certificate` and `spd_diagnosis` alike: see
-`_certified` for why grounding alone is not sufficient and not conservative. The certificate
-is computed on the ACTUAL slopes at the solve, never on initialisation slopes, and is never
-bypassed when a caller supplies its own initial guess.
+The certificate has three conditions, all per instance: symmetry (structural here -- `A_I diag(g)
+A_I^T` is symmetric for any `g`), non-negative slopes (which with symmetry gives positive
+SEMI-definiteness), and grounding through strictly positive slopes (which upgrades semi-definite to
+definite). Both testable conditions are applied, by `_certified`, to `spd_certificate` and
+`spd_diagnosis` alike: see `_certified` for why grounding alone is not sufficient and not
+conservative. The certificate is computed on the ACTUAL slopes at the solve, never on initialisation
+slopes, and is never bypassed when a caller supplies its own initial guess.
 
 Implementation: label propagation, vectorised over the batch (no Python loop over batch
 instances). A node is "grounded" once it is a boundary node or is connected, through some
@@ -16,7 +15,7 @@ chain of edges each with slope strictly greater than `atol`, to a node that is a
 grounded. An active edge connects its two endpoints UNDIRECTED for this purpose (a
 resistor's conductance, unlike its flow, has no preferred direction). Each round is
 O(B * E) (one gather and two scatters over the edge list, batched); the worst case over all
-rounds is O(B * E * diameter), the same cost class the design document quotes, and the round
+rounds is O(B * E * diameter), and the round
 count is bounded by the number of nodes regardless of graph shape.
 """
 
@@ -77,8 +76,8 @@ def _grounded(
     """(..., n) bool: every node's grounded status, by label propagation over active edges.
 
     Assumes `_validate` has already been called. A node is grounded if it is a boundary node,
-    if `extra_grounded` marks it grounded directly (FR-1: a potential-dependent NODAL source,
-    spec 13.4, is itself a virtual connection to ground -- its positive diagonal shift makes
+    if `extra_grounded` marks it grounded directly (a potential-dependent NODAL source
+    is itself a virtual connection to ground -- its positive diagonal shift makes
     the operator SPD at that node independent of any edge path), or if it is reachable from a
     grounded node through a chain of edges each with slope strictly greater than `atol` (an
     active edge connects its endpoints undirected). `extra_grounded`, when given, is
@@ -139,7 +138,7 @@ def _certified(
     atol: float = 0.0,
     extra_grounded: Tensor | None = None,
 ) -> Tensor:
-    """(...,) bool: design section 3.1's conditions 2 AND 3, per instance.
+    """(...,) bool: the module docstring's conditions 2 AND 3, per instance.
 
     Condition 1 (symmetry) is structural -- `A_I diag(g) A_I^T` is symmetric for any `g` --
     so it needs no per-instance test. Condition 2 is `g >= 0` on EVERY branch, which with
@@ -181,7 +180,7 @@ def spd_certificate(
 ) -> Tensor:
     """(...,) bool: per instance, every branch slope is non-negative AND every interior node
     reaches ground -- either a boundary node via strictly positive slopes, or a node
-    `extra_grounded` marks directly grounded (design section 3.1, conditions 2 and 3;
+    `extra_grounded` marks directly grounded (the module docstring's conditions 2 and 3;
     condition 1, symmetry, is structural).
 
     `src`, `tgt`: (b,) LongTensors, shared across the batch (as from `Network.endpoints`).
@@ -189,9 +188,9 @@ def spd_certificate(
     `interior_of_node`: (n,) LongTensor, the interior-row index of every node, or a negative
     sentinel for a boundary node. `boundary_mask`: (n,) bool, True at every boundary node.
     `atol`: a slope must strictly exceed this to count as active; `atol=0.0` is the
-    mathematical "strictly positive" condition. `extra_grounded` (FR-1): `(..., n)` bool,
+    mathematical "strictly positive" condition. `extra_grounded`: `(..., n)` bool,
     additional per-instance nodes considered grounded independent of any edge path -- a
-    potential-dependent nodal source's positive diagonal shift (spec 13.4) is exactly such a
+    potential-dependent nodal source's positive diagonal shift is exactly such a
     connection. `None` (the default) changes nothing for a layer with no node sources.
     """
     _validate(src, tgt, slopes, interior_of_node, boundary_mask)

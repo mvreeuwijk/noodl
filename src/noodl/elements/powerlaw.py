@@ -22,7 +22,7 @@ carrying trailing shape ``(..., 1)`` (e.g. ``torch.tensor([2.0])`` rather than a
 float, when the caller cares about broadcasting against a batched ``(..., b_kind)`` potential
 difference tensor for several edges of the same kind); ordinary broadcasting then produces a
 ``(..., b_kind)`` result. A bare scalar (ndim 0) also broadcasts correctly against any dp
-shape, so this convention is about a consistent contract for later composition (Task 4/7),
+shape, so this convention is about a consistent contract for composition,
 not a hard requirement enforced here.
 """
 
@@ -112,12 +112,12 @@ def Orifice(
 ) -> PowerLaw:
     """PowerLaw(C = Cd * A * sqrt(2 / rho), n = 0.5): the sharp-edged orifice equation.
 
-    N2: `Cd`/`A` given as a `torch.Tensor` keep THEIR OWN dtype -- a caller building a
+    `Cd`/`A` given as a `torch.Tensor` keep THEIR OWN dtype -- a caller building a
     float64 network is not silently downcast to `torch.get_default_dtype()` (float32 in
-    this project). A bare Python float still takes `torch.get_default_dtype()`, unchanged
-    from before. `n` is built at the resulting `C`'s own dtype so it is never the odd one
-    out (mirrors `apps.building_physics.elements.mass_orifice`, which is explicit-float64 rather
-    than default-dtype and so never had this bug).
+    this project). A bare Python float still takes `torch.get_default_dtype()`. `n` is built at the
+    resulting `C`'s own dtype so it is never the odd one out (mirrors
+    `apps.building_physics.elements.mass_orifice`, which is explicit-float64 rather than
+    default-dtype).
     """
     Cd_t = Cd if isinstance(Cd, torch.Tensor) else torch.as_tensor(
         Cd, dtype=torch.get_default_dtype()

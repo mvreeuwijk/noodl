@@ -1,7 +1,7 @@
 """Multi-species transport on nodal scalars advected by signed branch flows.
 
 The interior capacity ``V`` is fixed at construction, and ``step``/``steady``/``rate``
-accept an optional per-call ``capacity=`` that replaces it (spec 4.6b); ``Model`` supplies
+accept an optional per-call ``capacity=`` that replaces it; ``Model`` supplies
 it from the driver ``"<layer>.capacity"`` when a closure writes one.
 
 For interior capacity ``V`` (volume, or heat capacity), signed branch flow ``q``
@@ -21,7 +21,7 @@ are stacked species-major: for ``K`` species the stacked row/column index is
 ``TransportLayer.operator`` for why the stacked shape is used even when species
 do not interact).
 
-``sources`` is given in FULL node order (spec 4.2: trailing shape ``(n, K)``, or ``(n,)``
+``sources`` is given in FULL node order (trailing shape ``(n, K)``, or ``(n,)``
 for ``n_species == 1``), covering every node of the network, not just this layer's
 interior ones -- the same full-node order every other layer's inputs use, so a caller
 (``Model``) can hand every layer the same per-node source tensor without slicing it per
@@ -59,7 +59,7 @@ def active_interior(
     """Split the non-boundary nodes of `net` into the ones `kinds` touch and the ones it does
     not: `(interior_idx, inactive_idx)`, both in NODE order, both excluding `boundary`.
 
-    Spec 14, 4.5: a node that no edge of a layer's kinds touches is INACTIVE for that layer
+    A node that no edge of a layer's kinds touches is INACTIVE for that layer
     -- not an unknown, and not a singular row. A wall-mass node in a building network is the
     motivating case: it carries conduction edges and no airpath edges, so it belongs to the
     thermal layer's interior but not to a species layer's. The same holds a scale up: in the
@@ -91,18 +91,18 @@ def active_interior(
 # Inner linear solvers a TransportLayer may be configured with; resolved PER SOLVE (never
 # fixed for the layer's whole lifetime the way `PotentialFlowLayer._LINEAR_SOLVERS` is used)
 # by `TransportLayer._resolve_solver` into the kwargs `solvers.select.solve` actually reads.
-# "gmres" resolves to `method="gmres"` with no preconditioner (unchanged since before Task 8).
-# "gmres_jacobi"/"gmres_ilu" (Task 6) resolve to `method="gmres"` with a real preconditioner.
-# "sparse_direct" (SuperLU, Task 4's COO forms) and "direct" (the dense LU reference) pass
-# straight through. `select.solve`'s OWN "auto" policy (the certified-SPD potential path) is
-# not touched by this plan (ledger ruling B-1) -- this is a SEPARATE "auto", scoped to this
-# layer, chosen on Task 7's interleaved benchmark (Task 8, ledger ruling B-14): "auto" resolves
-# to `sparse_direct` at or under `_SPARSE_DIRECT_MAX_BATCH` instances (Task 7's e=1 and e=32
-# rows: sparse_direct wins both by a wide, spread-clear margin) and to plain `gmres` above it
+# "gmres" resolves to `method="gmres"` with no preconditioner.
+# "gmres_jacobi"/"gmres_ilu" resolve to `method="gmres"` with a real preconditioner.
+# "sparse_direct" (SuperLU, on the operators' COO forms) and "direct" (the dense LU reference)
+# pass straight through. `select.solve`'s OWN "auto" policy (the certified-SPD potential path)
+# is a different policy -- this is a SEPARATE "auto", scoped to this layer, chosen on the
+# interleaved benchmark in `benchmarks/transport_solver_bench.py`: "auto" resolves to
+# `sparse_direct` at or under `_SPARSE_DIRECT_MAX_BATCH` instances (the e=1 and e=32 rows:
+# sparse_direct wins both by a wide, spread-clear margin) and to plain `gmres` above it
 # (e=100: sparse_direct is not applicable at all, and the gmres family's own internal ordering
 # is not clean enough to prefer a preconditioner over plain gmres); `gmres_jacobi`/`gmres_ilu`
 # are never chosen by `auto` (gmres_ilu's per-instance ILU factorisation cost dominates at
-# every ensemble Task 7 measured, and jacobi vs plain gmres is ambiguous within the measured
+# every ensemble size measured, and jacobi vs plain gmres is ambiguous within the measured
 # spread). See `_resolve_solver` for the two hazards this default must handle: SciPy absent,
 # and a grad-requiring `on_failure="return"` solve (which runs outside `_LinearSolve`'s
 # `no_grad`, unlike the differentiable forward/backward path).
@@ -133,8 +133,8 @@ def _scipy_sparse_linalg_importable() -> bool:
 
 class _LinearSolve(torch.autograd.Function):
     """Differentiate a linear solve `A(params) x = rhs(params)` via the IMPLICIT ADJOINT,
-    never by unrolling the forward solver's iteration -- see this task's Design decisions
-    section for why this is required rather than optional.
+    never by unrolling the forward solver's iteration: unrolling would differentiate the
+    truncated iteration rather than the solution, and hold every iteration's graph.
 
     Forward: run `solvers.select.solve` under `no_grad`. Backward: solve the ADJOINT system
     `A(params)^T lam = grad_x` via `_TransposeView` (i.e. via `op.rmatvec`, never
@@ -155,26 +155,25 @@ class _LinearSolve(torch.autograd.Function):
 
     The adjoint solve inside `backward` RAISES unconditionally on non-convergence --
     independent of whatever `on_failure` the forward call was given -- because a wrong
-    gradient is worse than no gradient (design spec section 3.2).
+    gradient is worse than no gradient.
 
-    `resolve_solver` (Task 5, B2; fix round 1) is `None`, or a callable `batch_size -> dict`
+    `resolve_solver` is `None`, or a callable `batch_size -> dict`
     -- `TransportLayer._resolve_solver` bound to its layer -- called by `forward` ONCE, on
     the REAL `rhs` `build_system(*params)` already produced (never on a separate probe
     build: `build_system` runs the operator's own `boundary_forcing`, an embed/gather/
     `scatter_add_` over every edge, at the same cost order as a matvec, so a second call
-    purely to learn a shape would double this layer's dominant per-solve cost -- exactly the
-    finding this fix closes). The resolved dict (still carrying `"method"`) is merged with
-    `solver_kwargs` (whatever a direct caller of `_linear_solve` passes through verbatim,
-    e.g. `rtol`/`max_iter` in `tests/layers/test_transport_sparse.py`'s own probes, which
-    pass no `resolve_solver` at all) and stored UNMODIFIED on `ctx.solver_kwargs`, so
-    `backward` -- which builds its own `op` again from the saved params exactly as it always
-    has, but never re-resolves -- reads the SAME method a local copy, `.pop("method",
-    "auto")`, with the same `"auto"` default a caller that resolves nothing at all keeps
-    (the pre-Task-5 call sites, and every direct `_linear_solve` call in the test suite,
-    unaffected). This is what makes a `sparse_direct` forward get a SuperLU adjoint too: the
-    backward's transposed solve through `_TransposeView` runs the SAME resolved method.
+    purely to learn a shape would double this layer's dominant per-solve cost). The resolved dict
+    (still carrying `"method"`) is merged with `solver_kwargs` (whatever a direct caller of
+    `_linear_solve` passes through verbatim, e.g. `rtol`/`max_iter` in
+    `tests/layers/test_transport_sparse.py`'s own probes, which pass no `resolve_solver` at all) and
+    stored UNMODIFIED on `ctx.solver_kwargs`, so `backward` -- which builds its own `op` again from
+    the saved params exactly as it always has, but never re-resolves -- reads the SAME method a
+    local copy, `.pop("method", "auto")`, with the same `"auto"` default a caller that resolves
+    nothing at all keeps (every direct `_linear_solve` call in the test suite, unaffected). This is
+    what makes a `sparse_direct` forward get a SuperLU adjoint too: the backward's transposed solve
+    through `_TransposeView` runs the SAME resolved method.
 
-    `diagnostics` (Task 5, B2), when a dict is passed, is filled by `forward` ONLY (never by
+    `diagnostics`, when a dict is passed, is filled by `forward` ONLY (never by
     `backward`, which has no result to report to a layer's public API) with `"linear"`:
     `{"backend", "iterations", "residual"}` from the forward solve's own `SolveResult` and
     `solve()`'s `backend_out` -- `iterations`/`residual` reduced with `.max()` over whatever
@@ -278,7 +277,7 @@ class _AffineSystemOperator:
         self.shape = M.shape
         self.dtype = M.dtype
         self.device = M.device
-        # Cache for `assemble_sparse`'s identity-block row/col index (D-B1): this object is
+        # Cache for `assemble_sparse`'s identity-block row/col index: this object is
         # built fresh per solve and `m`/`device` never change over its life, so this is a
         # tidy-up (one `torch.arange` fewer when `assemble_sparse` runs more than once for the
         # same instance, e.g. forward then backward), not a speedup that matters on its own.
@@ -300,7 +299,7 @@ class _AffineSystemOperator:
         return eye - self.alpha * dense
 
     def assemble_sparse(self):
-        """COO `(row, col, values)` for `I - alpha * M`: `M`'s own sparse form (Task 4) with
+        """COO `(row, col, values)` for `I - alpha * M`: `M`'s own sparse form with
         an identity diagonal added, `None` propagating unchanged if `M` has none to give.
 
         DUPLICATES are how the identity and `M`'s diagonal entries combine: `M`'s own COO
@@ -333,17 +332,18 @@ class TransportLayer:
 
     The interior is the non-boundary nodes an edge of ``flow_kind`` (or of
     ``conduction_kind``) touches; the rest are ``inactive_idx`` and have no row here at all
-    (spec 14, 4.5, and ``active_interior``). ``capacity`` is indexed by that active interior,
+    (see ``active_interior``). ``capacity`` is indexed by that active interior,
     NOT by every non-boundary node -- a caller sizing it must use ``active_interior`` too.
 
     ``quantity``/``unit`` are metadata a ``Model`` reports ("temperature"/"K",
     "concentration"/"ppm"); nothing in the numerics reads them.
 
-    ``linear_solver`` (Task 5, B2) names one of ``_TRANSPORT_SOLVERS``, refused by name at
+    ``linear_solver`` names one of ``_TRANSPORT_SOLVERS``, refused by name at
     construction otherwise, and is resolved PER SOLVE by ``_resolve_solver`` into the kwargs
     every linear solve of this layer runs with (``steady``'s and the two implicit schemes'
     forward, backward adjoint and ``on_failure="return"`` paths alike). ``"auto"`` (the
-    default, Task 8, ledger ruling B-14, chosen on the interleaved benchmark) resolves to
+    default, chosen on the interleaved benchmark in ``benchmarks/transport_solver_bench.py``)
+    resolves to
     ``method="sparse_direct"`` at or under ``_SPARSE_DIRECT_MAX_BATCH`` instances and to plain
     ``method="gmres"`` above it, falling back to ``gmres`` (never raising) when SciPy is
     absent or when a grad-requiring ``on_failure="return"`` solve would otherwise refuse; see
@@ -358,7 +358,7 @@ class TransportLayer:
         """`(names, tensors)`: every coefficient tensor that must cross `_LinearSolve`'s
         boundary explicitly. `_LinearSolve.backward` only sees what `apply` was given, so a
         coefficient read from `self` inside `build_system` silently gets no gradient
-        (finding R4). Topology and index tensors are not coefficients and stay on `self`."""
+        Topology and index tensors are not coefficients and stay on `self`."""
         values = {
             "carrier": self.carrier,
             "transmission": self.transmission,
@@ -405,12 +405,12 @@ class TransportLayer:
         # a thermal layer advected by both "airpath" and "door" edges needs no new operator,
         # only both kinds' endpoints in one array.
         self.flow_kinds = (flow_kind,) if isinstance(flow_kind, str) else tuple(flow_kind)
-        # Metadata only (spec 4.4): what this layer's state IS and what it is measured in.
+        # Metadata only: what this layer's state IS and what it is measured in.
         self.quantity, self.unit = quantity, unit
         self.boundary = list(boundary)
         self.n_species = n_species
         self.scheme = scheme
-        # Spec 14, 4.5: nodes no edge of this layer's kinds touches are INACTIVE -- excluded
+        # Nodes no edge of this layer's kinds touches are INACTIVE -- excluded
         # from the interior rather than left as an all-zero (singular) row. Conduction counts
         # as a touch: a wall-mass node with conduction edges and no airpath edge IS an
         # unknown of a thermal layer, and is not one of a species layer over the same
@@ -540,7 +540,7 @@ class TransportLayer:
         self, batch_size: int, *, op=None, rhs: torch.Tensor | None = None,
     ) -> dict:
         """The kwargs `solvers.select.solve` should see for THIS layer's `linear_solver`
-        (`method`, `preconditioner`, `restart`) -- resolved PER SOLVE (the brief's B2), used
+        (`method`, `preconditioner`, `restart`) -- resolved PER SOLVE, used
         by every linear solve this layer runs: `steady`, `_implicit_step_sparse` and
         `_trapezoidal_step_sparse`'s differentiable path AND their `on_failure="return"`
         early-return path, and (via the resolved kwargs `_LinearSolve` saves on its `ctx`)
@@ -552,7 +552,7 @@ class TransportLayer:
         below), are the just-built operator and right-hand side, used ONLY to decide whether
         `"auto"` may pick `sparse_direct` under grad (hazard 2 below); no solve reads them.
 
-        `"auto"` (Task 8, ledger ruling B-14, decided on the interleaved benchmark in
+        `"auto"` (decided on the interleaved benchmark in
         `benchmarks/transport_solver_bench.json` -- see `docs/development-history.md`'s
         decision record for the full table): resolves to `method="sparse_direct"` when
         `batch_size <= _SPARSE_DIRECT_MAX_BATCH` (the SAME constant `solvers.select` uses for
@@ -562,8 +562,7 @@ class TransportLayer:
         factorisation cost dominates, see the COST note below) and the gmres-vs-gmres_jacobi
         ordering ambiguous within the measured spread, so there is no evidence to prefer
         either preconditioner over plain gmres as the fallback. `"gmres"` (explicit) resolves
-        to plain gmres unconditionally, regardless of `batch_size` -- unaffected by any of
-        this, exactly as before Task 8.
+        to plain gmres unconditionally, regardless of `batch_size`.
 
         TWO HAZARDS `"auto"` must handle before it can hand back `sparse_direct`, both
         fall-backs to plain `gmres` (never a raise: `auto` is a promise to choose a backend
@@ -594,7 +593,7 @@ class TransportLayer:
            silently (this is a routing fact about THIS solve, not an environment fault, so
            it never warns).
 
-        `"gmres_jacobi"`/`"gmres_ilu"` (Task 6) resolve to `method="gmres"` with a real
+        `"gmres_jacobi"`/`"gmres_ilu"` resolve to `method="gmres"` with a real
         preconditioner -- `"jacobi"` (`1 / diag(A)`) or `"ilu"` (SciPy's incomplete LU of
         `op.assemble_sparse()`, per instance) -- rather than plain GMRES under a name that
         promises preconditioning. `preconditioner` is otherwise the only thing that changes:
@@ -604,7 +603,7 @@ class TransportLayer:
         `preconditioner`/`restart` are irrelevant to both and `solvers.select.solve` ignores
         them for those two methods.
 
-        `"gmres_ilu"` COST (Task 6 fix round 1): `"ilu"` factorises a fresh SciPy `spilu` PER
+        `"gmres_ilu"` COST: `"ilu"` factorises a fresh SciPy `spilu` PER
         INSTANCE on every `gmres()` call (see `iterative._gmres_ilu_preconditioner`), and a
         differentiable transport step calls `gmres` from BOTH `_LinearSolve.forward` and
         `.backward` -- so one transport step under `"gmres_ilu"` pays that per-instance
@@ -612,7 +611,7 @@ class TransportLayer:
         instead pays one full LU per solve (also per instance, also not reused) and then an
         exact solve with no outer iteration; `"gmres_ilu"` pays a cheaper, incomplete
         factorisation on both passes and then still iterates GMRES to convergence. This cost
-        shape, not iteration counts alone, is why Task 7's benchmark found it the clear loser
+        shape, not iteration counts alone, is why the benchmark found it the clear loser
         at every ensemble measured and why `auto` never chooses it.
         """
         if self.linear_solver == "gmres_jacobi":
@@ -695,7 +694,7 @@ class TransportLayer:
         return flat.reshape(g.shape[:-1] + (n, n))
 
     def _capacity_arg(self, capacity: torch.Tensor | None) -> torch.Tensor:
-        """Validate an optional PER-STEP capacity (spec 4.6b), else `self.capacity`.
+        """Validate an optional PER-STEP capacity, else `self.capacity`.
 
         The construction-time capacity is the default and nothing changes for a layer whose
         storage is fixed. A layer whose capacity is a function of the state -- a sewer
@@ -736,7 +735,8 @@ class TransportLayer:
     ) -> AdvectionOperator:
         """The operator at flows `q`, capacity `capacity` (default the layer's) and the given
         coefficient tensors (default the layer's own). Inside a `build_system` the
-        coefficients MUST be the explicit ones handed in, never `self`'s (R4)."""
+        coefficients MUST be the explicit ones handed in, never `self`'s: a coefficient read
+        from `self` inside `build_system` gets no gradient."""
         if coefficients is None:
             names, values = self._coefficients()
             coefficients = dict(zip(names, values, strict=True))
@@ -794,9 +794,8 @@ class TransportLayer:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         net, K, n_i, n_b = self.net, self.n_species, self.n_i, self.n_b
         dtype = q.dtype
-        # FR-7: `cap_t` names the resolved per-step capacity everywhere else in this file
-        # (`rate`, `step`, `steady`, `_implicit_step_sparse`, `_trapezoidal_step_sparse`);
-        # this used to be the one place calling it `capacity_t` instead.
+        # `cap_t` names the resolved per-step capacity, as in `rate`, `step`, `steady`,
+        # `_implicit_step_sparse` and `_trapezoidal_step_sparse`.
         cap_t = self.capacity if capacity is None else capacity
         Up = self._selectors(net.upwind, q).to(dtype)    # (..., b_flow, n)
         Dn = self._selectors(net.downwind, q).to(dtype)  # (..., b_flow, n)
@@ -819,7 +818,7 @@ class TransportLayer:
         # directly on the intensive state x, unlike the advective/conductive terms in Gii,
         # Gib, which are extensive flow rates that must be divided by capacity to become a
         # concentration/temperature rate. Dividing the *whole* stacked M (as a literal
-        # reading of the spec's "finally, every row is divided by capacity" would do) instead
+        # reading of "finally, every row is divided by capacity" would do) instead
         # rescales removal/kinetics by 1/capacity too, which is wrong: e.g. the decay-chain
         # kinetics test below expects rate constants l1, l2 unchanged by capacity=1000, and
         # the removal test expects exp(-rate * t) with capacity=500 not entering at all.
@@ -865,12 +864,12 @@ class TransportLayer:
         return x.transpose(-1, -2)
 
     def _sources_interior(self, sources: torch.Tensor) -> torch.Tensor:
-        """Full-node `sources` -> interior rows (spec 4.2). Boundary rows must be zero.
+        """Full-node `sources` -> interior rows. Boundary rows must be zero.
 
         Accepts trailing shape `(n, K)` or, for `n_species == 1`, `(n,)`, in NODE order. A
         nonzero entry on a boundary node is refused by name rather than dropped: a source on
         a node whose value is prescribed is a modelling error, not a value to ignore. The
-        same holds for an INACTIVE node (spec 14, 4.5): it has no row in this layer at all,
+        same holds for an INACTIVE node: it has no row in this layer at all,
         so a source there could not be balanced by anything -- a CO2 source placed on a
         wall-mass node is a wiring mistake, and is named rather than silently discarded.
         """
@@ -911,7 +910,7 @@ class TransportLayer:
 
         The balance `Model.residuals` reports for a transport layer, and the reference the
         energy-balance tests check against. Zero at the fixed point of `steady`.
-        `capacity` (keyword-only, spec 4.6b) overrides the construction-time capacity for
+        `capacity` (keyword-only) overrides the construction-time capacity for
         this call only; see `_capacity_arg`.
         """
         dtype = torch.float64
@@ -945,21 +944,21 @@ class TransportLayer:
     ) -> torch.Tensor:
         """Advance one timestep under `self.scheme`.
 
-        `sources` is in FULL node order (spec 4.2), not just this layer's interior nodes;
+        `sources` is in FULL node order, not just this layer's interior nodes;
         see the module docstring and `_sources_interior`. `on_failure` (keyword-only,
         default `"raise"`) is threaded to the `"implicit"` and
         `"trapezoidal"` schemes' underlying linear solve; on `"return"` those two schemes
         return the raw, stacked `SolveResult` instead of a plain `Tensor` (return type
-        `torch.Tensor | SolveResult`, amendment A8). `"exact"` has no linear solve at all
-        (Task 10's augmented matrix exponential controls its own error via sub-stepping, and
+        `torch.Tensor | SolveResult`). `"exact"` has no linear solve at all
+        (its augmented matrix exponential controls its own error via sub-stepping, and
         raises `RuntimeError` directly on failure, as it always has), so it does not accept
         `on_failure="return"`: there is no `SolveResult` for it to produce, and silently
         falling back to `"raise"` behaviour would make the argument look like it had an
         effect it does not have. `on_failure="return"` with `scheme="exact"` therefore
-        raises `ValueError` naming the layer. `capacity` (keyword-only, spec 4.6b) overrides
+        raises `ValueError` naming the layer. `capacity` (keyword-only) overrides
         the construction-time capacity for this call only.
 
-        `capacity_prev` (keyword-only, R5) is the storage at the START of the step, when it
+        `capacity_prev` (keyword-only) is the storage at the START of the step, when it
         differs from `capacity` (the storage at the end of it): the AMOUNT form
         `V_new x_new - V_old x_old = dt F(x_new)` (implicit) / `= dt/2 (F(x_new) + F(x_old))`
         (trapezoidal), so that a step across a changing capacity conserves the stored amount
@@ -974,7 +973,7 @@ class TransportLayer:
         scheme's integral accumulator -- the diagonal shift that makes a sealed pure-decay
         zone cost one Taylor term stays available on this path (see `_expm_action`).
 
-        `diagnostics` (keyword-only, Task 5 B2), when a dict is passed, is filled with this
+        `diagnostics` (keyword-only), when a dict is passed, is filled with this
         step's `"linear"` entry (`{"backend", "iterations", "residual"}`) for `"implicit"`
         and `"trapezoidal"` -- see `_LinearSolve`'s docstring for exactly what it holds and
         when. `scheme="exact"` has no linear solve, so it leaves `diagnostics` untouched.
@@ -1027,7 +1026,7 @@ class TransportLayer:
         `on_failure="return"` is refused (`ValueError` naming the layer): no `SolveResult`
         carries a boundary transfer, so there is nothing sensible to return the raw solver
         status alongside. `capacity`/`capacity_prev` behave exactly as in `step`.
-        `diagnostics` (keyword-only, Task 5 B2) behaves exactly as in `step`.
+        `diagnostics` (keyword-only) behaves exactly as in `step`.
         """
         if on_failure == "return":
             raise ValueError(
@@ -1100,7 +1099,7 @@ class TransportLayer:
             cap = self._capacity_stacked(dtype, cap_t)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
             # Structural verdict for `_expm_action`'s diagonal shift, computed from
-            # `x_boundary`/`sources` THEMSELVES rather than from `b0` (T8-4): `b0.requires_grad`
+            # `x_boundary`/`sources` THEMSELVES rather than from `b0`: `b0.requires_grad`
             # would be True whenever `q` or `capacity` requires grad, even with `x_boundary`
             # and `sources` constant zero, since `b0 = boundary_forcing(x_boundary) +
             # sources / capacity` differentiates through the operator's flow/capacity
@@ -1171,7 +1170,7 @@ class TransportLayer:
     ) -> torch.Tensor:
         """Solve `0 = M x + N x_b + sources / capacity` for the steady-state `x`.
 
-        `sources` is in FULL node order (spec 4.2), not just this layer's interior nodes;
+        `sources` is in FULL node order, not just this layer's interior nodes;
         see the module docstring and `_sources_interior`. `on_failure="raise"` (the
         default) returns a plain `torch.Tensor`, matching every
         existing call site's expectation. `on_failure="return"` bypasses the differentiable
@@ -1179,9 +1178,9 @@ class TransportLayer:
         `solvers.select.solve` directly (not reshaped by `_from_stacked`): a `SolveResult`
         is not a plain `Tensor`, so it cannot be a single `torch.autograd.Function`'s output
         the way the default `Tensor` return is. Return type on that path is therefore
-        `torch.Tensor | SolveResult` (amendment A8). `capacity` (keyword-only, spec 4.6b)
+        `torch.Tensor | SolveResult`. `capacity` (keyword-only)
         overrides the construction-time capacity for this call only. `diagnostics`
-        (keyword-only, Task 5 B2), when a dict is passed, is filled with this solve's
+        (keyword-only), when a dict is passed, is filled with this solve's
         `"linear"` entry on the `on_failure="raise"` path only -- see `_LinearSolve`'s
         docstring; the `on_failure="return"` path already gives the caller the full
         `SolveResult` directly and leaves `diagnostics` untouched.
@@ -1295,7 +1294,7 @@ class TransportLayer:
         (V_old / V_new) * (F(x_n) / V_old) = (V_old / V_new) * op_old.matvec(x_n)` for the
         OLD-time term: advection and conduction are capacity-free amount rates, so op_old
         agrees with op there, but removal and kinetics act on the amount `V x` and so must
-        carry V_old at the old time, not V_new (P1-3):
+        carry V_old at the old time, not V_new:
 
             (I - dt/2 M_new) x_{n+1} = (V_old / V_new) (x_n + dt/2 op_old.matvec(x_n)) + dt b0
 
@@ -1322,7 +1321,7 @@ class TransportLayer:
             b0 = op.boundary_forcing(xb_s) + src_s / cap
             # The old-time term is F(x_n) / V_new with F the AMOUNT rate. Advection and
             # conduction are capacity-free amount rates, but removal and kinetics act on the
-            # amount V x, so at t_n they carry V_old, not V_new (P1-3). Since
+            # amount V x, so at t_n they carry V_old, not V_new. Since
             # op_old.matvec(x) == F_old(x) / V_old, the whole old-time term is
             # (V_old / V_new) * op_old.matvec(x_n): one operator at the OLD capacity, and
             # the ratio in front of both x_n and its rate. With a fixed capacity op_old is
@@ -1415,12 +1414,12 @@ def _forced_remainder(theta: float, m: int) -> float:
         D_x   = sum_{k>m} k theta^(k-1) / k!      d/dA of the x0 polynomial  (= R_x at m-1)
         D_phi = sum_{k>m} (k-1) theta^(k-2) / k!  d/dA of the forcing polynomial
 
-    The schedule used to bound R_x alone (P1-1). The forcing polynomial is one power of A
+    Bounding R_x alone is not enough. The forcing polynomial is one power of A
     short of the exponential's, so its tail is one power of theta LARGER than R_x, and its
     A-derivative another power larger still: at theta -> 0, D_phi(theta, 1) -> 1/2, which
-    is the reviewed case -- one term keeps the forced VALUE exact at r = 0 and drops every
-    coefficient sensitivity of the forcing. Bounding D_phi (which dominates the other three
-    for theta <= m/(m+1) < 1, the crossover with D_x, and is dominated by D_x -- not R_x --
+    is the failure case of an R_x-only bound -- one term keeps the forced VALUE exact at r = 0 and
+    drops every coefficient sensitivity of the forcing. Bounding D_phi (which dominates the other
+    three for theta <= m/(m+1) < 1, the crossover with D_x, and is dominated by D_x -- not R_x --
     near theta_max, e.g. at theta=14, m=5: D_x = 1.200e6 > R_x = 1.196e6) makes autograd
     through the polynomial an approximation of the exponential's derivative to the same
     tolerance as the value. `m = 1` is never admissible with forcing; `theta = 0` needs
@@ -1467,7 +1466,7 @@ def _shifted_remainder(theta: float, m: int) -> float:
     invariant of this function's behaviour rather than an unenforced assumption.
 
     Bounding D_x, not just R_x, is required for the same reason `_forced_remainder` bounds
-    D_phi (P1-1): the schedule fixes (s, m) before any arithmetic on the state, so autograd
+    D_phi: the schedule fixes (s, m) before any arithmetic on the state, so autograd
     through the fixed-degree recurrence differentiates that literal polynomial, and its
     coefficient sensitivities need their own tolerance guarantee near a zero SHIFTED
     operator, not just the polynomial's value. `m = 0` is not a valid Taylor degree, so this
@@ -1484,9 +1483,9 @@ def _shifted_remainder(theta: float, m: int) -> float:
 def _theta_table(tol: float, m_max: int, *, forcing: bool) -> tuple[float, ...]:
     """theta_m for m = 1..m_max: the largest ||A|| that m Taylor terms bring within tol, under
     `_forced_remainder` when `forcing` (the affine step, also bounding the forcing
-    polynomial's own tail and its A-derivative, P1-1) and `_shifted_remainder` otherwise (the
-    homogeneous, shifted step, bounding the state polynomial's tail and its A-derivative,
-    P1-1b). Monotone increasing in m; the forced table's m = 1 entry is 0.0 (one term is
+    polynomial's own tail and its A-derivative) and `_shifted_remainder` otherwise (the
+    homogeneous, shifted step, bounding the state polynomial's tail and its A-derivative).
+    Monotone increasing in m; the forced table's m = 1 entry is 0.0 (one term is
     never admissible with forcing). `forcing` is keyword-only and has no default -- like
     `_taylor_schedule`'s -- so `functools.cache` cannot hold separate entries for the same
     (tol, m_max, forcing) table reached once positionally and once by keyword."""
@@ -1517,8 +1516,8 @@ def _taylor_schedule(
     a single matvec runs, so autograd through the recurrence is the derivative of the same
     polynomial that produced the value, and the schedule bounds that polynomial's distance
     from the exponential AND its derivative's, on BOTH paths: the affine step's forcing
-    polynomial and its coefficient derivative (P1-1, `_forced_remainder`), and the homogeneous
-    step's state polynomial and its coefficient derivative (P1-1b, `_shifted_remainder`).
+    polynomial and its coefficient derivative (`_forced_remainder`), and the homogeneous
+    step's state polynomial and its coefficient derivative (`_shifted_remainder`).
     `forcing` selects which of the two bounds applies; the term count is still fixed before
     any arithmetic on the state or the forcing. The window `s_min .. s_min + 15` is enough: m
     falls by at most a few terms per extra substep while s grows by one, so the product's
@@ -1568,8 +1567,8 @@ def _expm_action(
     schedule is `_taylor_schedule(norm, tol, forcing=not shift)`: `shift=True` is only ever
     reached when `b0` is structurally zero (this function's own rule, below), so `not shift`
     is exactly "forcing may be present" and selects the bound that also covers the forcing
-    polynomial's coefficient derivative (P1-1); `shift=True` selects the bound that covers
-    the state polynomial's OWN coefficient derivative instead (P1-1b, `_shifted_remainder`),
+    polynomial's coefficient derivative; `shift=True` selects the bound that covers
+    the state polynomial's OWN coefficient derivative instead (`_shifted_remainder`),
     since forcing is structurally absent whenever the shift is taken but the state
     polynomial's tangent still needs its own tolerance guarantee near a zero shifted
     operator.
@@ -1592,7 +1591,7 @@ def _expm_action(
       built as `boundary_forcing(xb) + sources / capacity` has `requires_grad=True`
       whenever `q` or `capacity` requires grad, even with `xb` and `sources` constant
       zero, because `boundary_forcing` and the capacity division differentiate through
-      the OPERATOR's coefficients, not through `xb`/`sources` (T8-4) -- so the inferred
+      the OPERATOR's coefficients, not through `xb`/`sources` -- so the inferred
       default alone would silently pay full Taylor cost for what is structurally still an
       exact-shift-eligible pure decay whenever training makes `q`/`capacity` require grad.
     - `True` / `False`: the caller's own verdict, used as-is (still forced through the
@@ -1619,8 +1618,8 @@ def _expm_action(
         norm = float((colsum.amax(-1) * dt).max())
     # `shift=True` is only ever reached when `b0` is structurally zero (the function's own
     # rule above), so `not shift` is exactly "forcing may be present" and selects the bound
-    # that also covers the forcing polynomial's coefficient derivative (P1-1); when shifted,
-    # it selects the bound covering the state polynomial's own coefficient derivative (P1-1b).
+    # that also covers the forcing polynomial's coefficient derivative; when shifted,
+    # it selects the bound covering the state polynomial's own coefficient derivative.
     s, m = _taylor_schedule(norm, tol, forcing=not shift)
     if s * m > max_matvecs:
         raise RuntimeError(

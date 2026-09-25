@@ -36,10 +36,10 @@ class AdvectionOperator:
         conduction: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
         boundary_idx: torch.Tensor | None = None,
     ) -> None:
-        # Global Constraint: ValueError for bad shapes, naming the offender. Without these,
-        # a wrong edge count in `transmission` constructed silently and surfaced as an
-        # opaque broadcast RuntimeError at the first matvec, and an `n_interior`
-        # inconsistent with `interior_of_node` was never detected at all.
+        # ValueError for bad shapes, naming the offender. Without these, a wrong edge
+        # count in `transmission` would construct silently and surface as an opaque
+        # broadcast RuntimeError at the first matvec, and an `n_interior` inconsistent
+        # with `interior_of_node` would never be detected at all.
         transmission = (
             transmission if transmission.dim() >= 2 else transmission.unsqueeze(0)
         )
@@ -99,7 +99,7 @@ class AdvectionOperator:
         # defaults to "every node that is not interior, in node order", which is what a
         # two-way interior/boundary split means. A caller whose node set has a third class --
         # `TransportLayer`'s INACTIVE nodes, which no edge of the layer's kinds touches, so
-        # they are neither unknowns nor prescribed values (spec 14, 4.5) -- passes its own
+        # they are neither unknowns nor prescribed values -- passes its own
         # boundary index instead, so that `x_boundary` stays one entry per PRESCRIBED node
         # and is embedded at the node each entry actually names.
         self._boundary_idx = (
@@ -110,11 +110,10 @@ class AdvectionOperator:
         self._n_edges = src.shape[0]
 
         # Per-shape caches for `_raw_action`, which runs once per transport matvec and
-        # otherwise rebuilds the same index views every time (milestone-1b follow-up,
-        # Task B). `_upwind_cache` holds the (up, down) endpoint arrays per dtype;
-        # `_bcast_cache` holds their `_bcast_index` expansions per (name, batch shape, K).
-        # Both hold only LONG index tensors -- derived from the SIGN of `flow` and from
-        # `_src`/`_tgt`, never from `flow`'s values -- so nothing cached here can capture an
+        # otherwise rebuilds the same index views every time. `_upwind_cache` holds the (up, down)
+        # endpoint arrays per dtype; `_bcast_cache` holds their `_bcast_index` expansions per (name,
+        # batch shape, K). Both hold only LONG index tensors -- derived from the SIGN of `flow` and
+        # from `_src`/`_tgt`, never from `flow`'s values -- so nothing cached here can capture an
         # autograd graph, which a cached expansion of a float tensor (`flow`, `transmission`)
         # would: `flow` is a solved `q` on the differentiable path and does require grad.
         # Neither dict evicts, and neither needs to: an AdvectionOperator is rebuilt once
@@ -138,7 +137,7 @@ class AdvectionOperator:
             shapes.append(removal.shape[:-2])
         if kinetics is not None:
             shapes.append(kinetics.shape[:-3])
-        # EVERY coefficient family contributes to the operator's batch (P2-5): an ensemble
+        # EVERY coefficient family contributes to the operator's batch: an ensemble
         # batched in conductance, removal or kinetics alone is a first-class shape, exactly
         # like one batched in flow or capacity alone.
         self.batch_shape = torch.broadcast_shapes(*shapes)
@@ -196,8 +195,8 @@ class AdvectionOperator:
         # with a batched `flow`) is a first-class shape here, per the framework's
         # "arbitrary leading batch dimensions, torch.broadcast_tensors semantics" rule.
         # Taking `v.shape[:-2]` alone made the index tensors (which carry `flow`'s batch)
-        # disagree with `v_b`, raising a raw RuntimeError out of `_bcast_index` (final
-        # review C1). When every batch shape already agrees, the broadcast and the expand
+        # disagree with `v_b`, raising a raw RuntimeError out of `_bcast_index`. When every
+        # batch shape already agrees, the broadcast and the expand
         # below are both no-ops.
         batch_shape = torch.broadcast_shapes(v.shape[:-2], self.batch_shape)
         K = v.shape[-2]
@@ -251,9 +250,9 @@ class AdvectionOperator:
         y_i = raw.index_select(-1, self._interior_idx)
         cap = self.capacity.to(dtype).unsqueeze(-2)
         y_i = y_i / cap
-        if self.removal is not None:  # amendment A5
+        if self.removal is not None:  # a rate on x itself, not divided by capacity
             y_i = y_i - self.removal.to(dtype).transpose(-1, -2) * x_kn
-        if self.kinetics is not None:  # amendment A5
+        if self.kinetics is not None:  # likewise
             y_i = y_i + torch.einsum("...ikl,...li->...ki", self.kinetics.to(dtype), x_kn)
         return y_i.reshape(*y_i.shape[:-2], K * n_i)
 
@@ -317,9 +316,9 @@ class AdvectionOperator:
         v = self._embed(z_kn, self._interior_idx, dtype)
         raw_t = self._raw_action(v, transpose=True)
         out_i = raw_t.index_select(-1, self._interior_idx)
-        if self.removal is not None:  # amendment A5: transpose of the removal term
+        if self.removal is not None:  # transpose of the removal term
             out_i = out_i - self.removal.to(dtype).transpose(-1, -2) * y_kn
-        if self.kinetics is not None:  # amendment A5: transpose of the kinetics block
+        if self.kinetics is not None:  # transpose of the kinetics block
             out_i = out_i + torch.einsum(
                 "...ikl,...li->...ki", self.kinetics.to(dtype).transpose(-1, -2), y_kn
             )
@@ -477,11 +476,12 @@ class AdvectionOperator:
         )
 
     def assemble_sparse(self):
-        """COO `(row, col, values)` for the interior generator M (spec section 6.2, B1).
+        """COO `(row, col, values)` for the interior generator M.
 
         The optional `operators.base.SparseAssembling` member. `M` is nonsymmetric (its
         `spd_certificate()` is `None`, so `method="auto"` still routes it to GMRES whatever
-        this returns), but `method="sparse_direct"` and Task 6's ILU both need this form, and
+        this returns), but `method="sparse_direct"` and the ILU preconditioner both need this
+        form, and
         so does `_AffineSystemOperator.assemble_sparse` (`I - alpha * M`), which just adds an
         identity diagonal to it.
 

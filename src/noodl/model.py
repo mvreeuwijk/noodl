@@ -1,8 +1,8 @@
 """Model: several physics layers on one typed graph, stepped together.
 
-Per step (framework spec section 3, "time stepping of a model"): closures update the drivers
+Per step: closures update the drivers
 from the current state; every potential layer is solved quasi-steadily; every capacitated
-layer takes its one explicit clip/allocate step (spec 4.2b); every transport layer is
+layer takes its one explicit clip/allocate step; every transport layer is
 advanced (sub-stepped if asked) on the flows of its kinds; reactions are applied.
 `coupling="pingpong"` does that once per step with the state at the START of the step
 (Hensen 1995); `coupling="iterate"` ("onion") repeats it until the named transport states stop
@@ -13,18 +13,18 @@ Keys. State: "<layer>.phi" (full-node order), "<layer>.q" (the layer's kind orde
 per-node storage, full-node order; that layer also writes its realised flows to
 "<layer>.q"). Drivers: "<layer>.phi_boundary", "<layer>.x_boundary", optional
 "<layer>.sources" (FULL-node order, zeros on boundary and inactive nodes), optional
-"<layer>.capacity" (a transport layer's per-step capacity override, spec 4.6b; absent, the
+"<layer>.capacity" (a transport layer's per-step capacity override; absent, the
 layer's construction-time capacity stands), "<layer>.requests" (a capacitated layer's
 per-edge requested flow, required every step). Closures return driver updates; they may
 not write state keys. A transport layer whose kinds no
 potential layer provides reads its branch flows from the driver "<layer>.q", in the layer's
 own flow_kinds order; a layer with both a potential owner and that driver raises. A closure
-may also declare `state_keys`, keys it carries across steps itself (spec 4.6a); those are
+may also declare `state_keys`, keys it carries across steps itself; those are
 copied from its return into the returned state, evaluated from the step-start state in
-every pass of a coupling that takes more than one (N1) -- never fed forward from an earlier
+every pass of a coupling that takes more than one -- never fed forward from an earlier
 pass's own output, which would integrate a stateful closure once per pass instead of once
 per step. A `coupling="iterate"` step started without such a key already in the step-start
-state warns by name (`RuntimeWarning`, A3): N1's pinning has nothing to pin on that step, so
+state warns by name (`RuntimeWarning`): the pinning has nothing to pin on that step, so
 the closure integrates once per pass instead of once per step until the key is seeded.
 
 `**solve_kwargs` of `step`/`steady` reach the POTENTIAL solves only (`differentiable`,
@@ -33,7 +33,7 @@ the closure integrates once per pass instead of once per step until the key is s
 Differentiability: ping-pong is one pass of differentiable operations; iterate carries no
 graph on its primal passes and attaches the IMPLICIT adjoint of its converged interface to
 one extra pass instead of unrolling them, so the gradient is the landed fixed point's rather
-than the truncated iteration's (P1-2; the convergence decision is made on detached copies, as
+than the truncated iteration's (the convergence decision is made on detached copies, as
 Newton's mask is). Failure follows the layers: raise by default, naming the offender.
 """
 
@@ -66,8 +66,8 @@ def _detached(diag):
     Diagnostics are a REPORT. A tensor in them that is still attached to a pass's graph
     offers a second, silent route around the fixed-point adjoint: a loss touching it would
     be differentiated through that single pass, which is exactly the truncated derivative
-    P1-2 removes. `_iterate` therefore detaches the diagnostics of both the pass it runs
-    only to discover whether anything differentiable reaches the state and the one the
+    the implicit adjoint replaces. `_iterate` therefore detaches the diagnostics of both the pass it
+    runs only to discover whether anything differentiable reaches the state and the one the
     adjoint is attached to.
     """
     if isinstance(diag, Tensor):
@@ -81,7 +81,7 @@ def _detached(diag):
 class Closure(Protocol):
     """state, drivers -> driver updates (a mapping of NEW driver values, merged in order).
 
-    A closure that INTEGRATES some state over the step (R6) declares a class or instance
+    A closure that INTEGRATES some state over the step declares a class or instance
     attribute `integrates = True` and is instead called as `closure(state, drivers, ctx)`,
     receiving the `StepContext` it must advance by; see `StepContext` and
     `Model._apply_closures`.
@@ -104,7 +104,7 @@ class StepContext:
 
 @dataclass(frozen=True)
 class Ports:
-    """What a coupled or external model may prescribe and read (framework spec 4.1)."""
+    """What a coupled or external model may prescribe and read."""
 
     boundary_nodes: dict[str, list]
     prescribed_keys: dict[str, str]
@@ -144,7 +144,7 @@ class Model:
     but only when nothing differentiable reached the state on this call, e.g. under
     `torch.no_grad()` or with `differentiable=False`; a non-converged iteration has no fixed
     point to differentiate, so `on_failure="return"` still raises, naming that reason, when a
-    gradient was wanted (A2)).
+    gradient was wanted).
 
     The onion's fixed point is differentiated IMPLICITLY, not by unrolling the passes: the
     primal passes carry no graph, and after convergence the certified pass runs once more on
@@ -154,7 +154,7 @@ class Model:
     what remains of the pass count and of `iterate_tol` in it is only that the landing point
     is a fixed point to within `iterate_tol` -- an O(primal residual) error, against the
     unrolled O(contraction^passes) truncation it replaces, and exactly zero where the
-    interface is linear. Backward memory is one pass rather than all of them (P1-2).
+    interface is linear. Backward memory is one pass rather than all of them.
     `diagnostics["adjoint"]` says whether that pass ran: `"implicit"` when it did, `None`
     when nothing differentiable reached the state (or the iteration did not converge) and no
     extra pass was needed. `diagnostics["adjoint_batched"]` says whether that solve ran as one
@@ -201,10 +201,9 @@ class Model:
                 raise ValueError(
                     f"Model: layer {name!r} is built on a different Network than the model"
                 )
-        # Moved here (was computed at the very end of __init__) so that FR-2's
-        # closure_state_keys check below can consult `self.flow_layer_of` -- both only need
-        # `self.potential`/`self.transport`, already built above, and nothing between here
-        # and the old position read them first.
+        # Computed here, before the closure_state_keys check below, which consults
+        # `self.flow_layer_of`; both only need `self.potential`/`self.transport`, already
+        # built above.
         self.flow_layer_of: dict[str, str | None] = {}
         self.flow_driver_of: dict[str, str] = {}
         for tname, tl in self.transport.items():
@@ -215,9 +214,9 @@ class Model:
                 cn for cn, cl in self.capacitated.items()
                 if all(k in cl.kinds for k in tl.flow_kinds)
             ]
-            # Spec section 5, "Model: driver-prescribed flows". Two potential layers both
-            # providing a transport layer's kinds is still ambiguous and still refused here.
-            # ZERO owners is no longer an error: the flows are then read from the driver
+            # Driver-prescribed flows. Two potential layers both
+            # providing a transport layer's kinds is ambiguous and refused here.
+            # ZERO owners is not an error: the flows are then read from the driver
             # "<layer>.q", which a closure writes -- the street application's whole
             # architecture (prescribed canyon fluxes, routed at intersections) depends on
             # it. The driver's PRESENCE cannot be checked here, because drivers arrive per
@@ -242,12 +241,12 @@ class Model:
                     f"callable; a closure is called as closure(state, drivers) and returns "
                     f"driver updates"
                 )
-        # R6: a closure that INTEGRATES some state over the step (rather than merely
+        # A closure that INTEGRATES some state over the step (rather than merely
         # carrying it, unchanged, across steps) declares `integrates = True` and is called
         # with a third argument, the `StepContext` it must advance by -- see
         # `_apply_closures`. A closure declaring `state_keys` without declaring `integrates`
         # is refused HERE, by name, rather than left to silently integrate with whatever
-        # interval its own constructor happened to be given (R6's own bug).
+        # interval its own constructor happened to be given.
         self._integrating: set[int] = set()
         for closure in self.closures:
             declared = getattr(closure, "integrates", None)
@@ -274,7 +273,7 @@ class Model:
                         f"integrating closure is called as closure(state, drivers, ctx)"
                     )
                 self._integrating.add(id(closure))
-        # CLOSURE-CARRIED STATE (spec 4.6a). A closure may declare
+        # CLOSURE-CARRIED STATE. A closure may declare
         # `state_keys: tuple[str, ...]`: keys it both READS from the state and WRITES back
         # every call, which `_pass` copies from its return into the returned state. They are
         # neither drivers (they persist across steps) nor layer state (no layer owns them);
@@ -287,7 +286,7 @@ class Model:
             for key in getattr(closure, "state_keys", ()):
                 head, _, tail = str(key).rpartition(".")
                 if head in self.layers and tail in _STATE_SUFFIXES:
-                    # FR-2: mirror `_apply_closures`' own ownerless-"<layer>.q" carve-out --
+                    # Mirror `_apply_closures`' own ownerless-"<layer>.q" carve-out --
                     # for a transport layer no potential layer owns, "<layer>.q" is the
                     # DRIVER a flow closure writes, not that layer's state, so a closure may
                     # declare it as state_keys (a flow closure that also remembers its own
@@ -328,7 +327,7 @@ class Model:
         self.iterate_tol = dict(iterate_tol or {})
         self.iterate_max = int(iterate_max)
         # The tolerance of the ONE implicit-adjoint GMRES solve at the converged interface
-        # (P1-2), deliberately independent of the primal `iterate_tol`: that independence is
+        # deliberately independent of the primal `iterate_tol`: that independence is
         # the whole point of differentiating the fixed point instead of the iteration.
         self.adjoint_rtol = float(adjoint_rtol)
         if not self.adjoint_rtol > 0.0:
@@ -402,18 +401,18 @@ class Model:
         `written` (keyword-out-parameter, like `solve`'s `diagnostics`; `None` by default so
         every existing caller -- including several apps' tests that call this directly -- is
         unaffected) is filled with whichever `closure_state_keys` some closure's OWN return
-        actually wrote THIS call: N14's fix. A same-named entry already sitting in `drivers`
+        actually wrote THIS call. A same-named entry already sitting in `drivers`
         (the caller's own, unrelated to any closure) must not be mistaken for a closure
         having written its declared state key -- `key in drv` alone cannot tell the two
         apart, since `drv` starts as a copy of `drivers`.
 
-        `ctx` (R6) is threaded to an INTEGRATING closure only (`closure.integrates = True`):
+        `ctx` is threaded to an INTEGRATING closure only (`closure.integrates = True`):
         `StepContext(dt)` from `_pass` inside `step`, `StepContext(dt=None)` inside `steady`
         (refused here by name -- an integrating closure has no interval to integrate over),
         and `None` from a query (`residuals`, `current_flows`, `ports`, the sewer report),
         where an integrating closure evaluates its algebraic outputs at the given state
         without advancing. A non-integrating closure never sees `ctx` at all, so its call
-        signature and behaviour are exactly as before R6.
+        signature and behaviour are unaffected.
         """
         drv: Drivers = dict(drivers)
         for closure in self.closures:
@@ -480,7 +479,7 @@ class Model:
         `__init__`'s ownership scan also lets a `CapacitatedTransferLayer` become a
         transport layer's flow owner (it writes `"<name>.q"` in the same key convention).
         Reading those flows would need `CapacitatedTransferLayer.flows_of_kind`, which is
-        the species/quality-transport follow-up (design spec amendment A5) and is NOT built:
+        not built (species/quality transport on capacitated flows):
         refused here by name rather than left to raise a bare `KeyError` off
         `self.potential[owner]`.
         """
@@ -494,8 +493,8 @@ class Model:
                 raise NotImplementedError(
                     f"Model: transport layer {name!r} advects on kinds {layer.flow_kinds}, "
                     f"which capacitated layer {owner!r} provides; reading a capacitated "
-                    f"layer's flows into a transport layer is not implemented (design spec "
-                    f"amendment A5, species/quality transport). Drive {name!r} from the "
+                    f"layer's flows into a transport layer is not implemented. "
+                    f"Drive {name!r} from the "
                     f"driver {key!r} instead, or give its kinds to a potential layer"
                 )
             if key in drivers:
@@ -527,7 +526,7 @@ class Model:
         layer, which is inherently discrete-time).
 
         `t` is the caller's own start-of-step time, if it tracks one; both `dt` and `t` are
-        carried to every closure as a `StepContext` (R6), so an INTEGRATING closure reads the
+        carried to every closure as a `StepContext`, so an INTEGRATING closure reads the
         model's own clock rather than an interval fixed at its own construction.
 
         `state` is what the closures read and what the potential solves warm-start from.
@@ -541,10 +540,10 @@ class Model:
         the plain, cheaper `step`); `False` (or an empty collection) runs it on none. Only
         a layer actually asked for gets `diag[name]["boundary_transfer"]` -- a caller that
         names one linked layer out of several must not pay `step_with_transfer`'s extra cost
-        (no diagonal shift on the `exact` scheme's Taylor accumulator, milestone 5 R2 review
-        finding) on layers whose transfer nothing reads.
+        (no diagonal shift on the `exact` scheme's Taylor accumulator) on layers whose
+        transfer nothing reads.
 
-        `diag[name]["linear"]` (Task 5, B2), when this transport layer's `scheme` runs a
+        `diag[name]["linear"]`, when this transport layer's `scheme` runs a
         linear solve (`"implicit"`, `"trapezoidal"`; not `"exact"`), is the LAST substep's
         `{"backend", "iterations", "residual"}` from `TransportLayer.step`'s own
         `diagnostics=` out-parameter -- see `TransportLayer._resolve_solver` and
@@ -561,7 +560,7 @@ class Model:
         only answer that cannot drift from what the pass does.
         """
         base: State = state if step_from is None else step_from
-        # N1: closure-carried state (spec 4.6a) must be evaluated from the STEP-START state
+        # Closure-carried state must be evaluated from the STEP-START state
         # on every pass, never from the previous pass's own output -- a closure that
         # integrates (adds dt each call) would otherwise integrate once per PASS instead of
         # once per STEP, because `_iterate` feeds pass k-1's output into pass k. Every other
@@ -595,7 +594,7 @@ class Model:
                 "CapacitatedTransferLayer, which is inherently discrete-time"
             )
         for name, layer in self.capacitated.items():
-            # `base`, not `state` -- the same N1 rule the comment above states for
+            # `base`, not `state` -- the same step-start rule the comment above states for
             # closure-carried state and the transport loop below follows for `"<layer>.x"`:
             # a layer that INTEGRATES its own state must advance from the STEP-START state
             # on every pass, never from the previous pass's output, or `coupling="iterate"`
@@ -635,13 +634,13 @@ class Model:
             q_kind = self._kind_flows(name, new, drv)
             xb = self._require(drv, f"{name}.x_boundary")
             sources = drv.get(f"{name}.sources")
-            # Spec 4.6b: a per-step capacity, written by a closure that owns the geometry
+            # A per-step capacity, written by a closure that owns the geometry
             # (a sewer conduit's wetted volume, a headspace volume). Absent, the layer's
             # construction-time capacity stands, so nothing changes for a fixed-storage
             # layer. Shape and positivity are checked by the layer, naming the nodes.
             cap = drv.get(f"{name}.capacity")
             transfer_total = None
-            # Task 5 (B2): a fresh dict per layer, threaded into `steady`/`step`/
+            # A fresh dict per layer, threaded into `steady`/`step`/
             # `step_with_transfer` as an out-parameter and read back below into
             # `diag[name]["linear"]`. Only the LAST substep's entry survives (each substep
             # overwrites it), matching how `diag[name]["substeps"]` already reports a count
@@ -712,10 +711,10 @@ class Model:
                 diag[name]["linear"] = layer_diag["linear"]
             if want_transfer:
                 diag[name]["boundary_transfer"] = transfer_total
-        # Closure-carried state (spec 4.6a): a declared key is copied OUT of the closure's
+        # Closure-carried state: a declared key is copied OUT of the closure's
         # return into the state, so the next step's closures read it back. A closure that
         # declares a key and does not write it every call would freeze that state silently,
-        # so the omission is refused by name instead. N14: the check is on `written` (which
+        # so the omission is refused by name instead. The check is on `written` (which
         # closure ACTUALLY returned it this call), not on `key in drv` -- a same-named
         # DRIVER the caller passed in would otherwise already be sitting in `drv` and defeat
         # this check, freezing the closure's state at the caller's value with no error.
@@ -746,7 +745,7 @@ class Model:
         diagnostics: dict | None = None,
         boundary_transfers: bool | Collection[str] = False, **solve_kwargs,
     ):
-        """Advance one step (spec's ping-pong or iterated coupling, per `self.coupling`).
+        """Advance one step (ping-pong or iterated coupling, per `self.coupling`).
 
         `boundary_transfers` (keyword-only, default False) reports the time-integrated
         amount that crossed a transport layer's boundary during the step, summed over that
@@ -764,7 +763,7 @@ class Model:
         forces `step_with_transfer` (no diagonal shift on the `exact` scheme's Taylor
         accumulator) on every transport layer of the model, including ones nothing reads a
         transfer from -- a coupled recipient with an unlinked `exact`-scheme thermal layer
-        paid that cost on every one of its substeps for no benefit (task 18b).
+        pays that cost on every one of its substeps for no benefit.
         """
         if not dt > 0:
             raise ValueError(f"Model: dt must be positive, got {dt!r}")
@@ -796,10 +795,10 @@ class Model:
 
         REACTIONS ARE NOT APPLIED. They are an operator splitting applied AFTER a transport
         step, so they belong to `step` alone: a model carrying a reaction has a `steady` that
-        is the fixed point of transport only, not of transport-plus-reaction (spec section 7;
-        `residuals` reports the same balance). Deliberate, and pinned by a test.
+        is the fixed point of transport only, not of transport-plus-reaction (`residuals`
+        reports the same balance). Deliberate, and pinned by a test.
 
-        `dt=None` here means the `StepContext` an INTEGRATING closure (R6) receives carries
+        `dt=None` here means the `StepContext` an INTEGRATING closure receives carries
         `dt=None` too, and `_apply_closures` refuses that by the closure's own name: a
         closure that integrates some state over an interval has no interval to integrate over
         at a quasi-steady state.
@@ -835,9 +834,9 @@ class Model:
         pass 1's transport states UNRELAXED, and pass 3 is the first fed a mean. From there
         the "<layer>.x" state fed to the closures on pass k is the mean of passes k-2 and
         k-1 (Hensen 1995, successive substitution with 0.5 relaxation). CLOSURE-CARRIED
-        state (spec 4.6a, `closure_state_keys`) is the one exception to that relaxation: it
+        state (`closure_state_keys`) is the one exception to that relaxation: it
         is evaluated from the STEP-START state on every pass, never fed forward from the
-        previous pass's own output (N1) -- a closure that integrates (a sewer manhole's
+        previous pass's own output -- a closure that integrates (a sewer manhole's
         storage sweep, a tank level) would otherwise advance once per PASS instead of once
         per STEP. The returned state is the LAST pass's own output, never a relaxed one.
         Convergence is judged per instance on detached copies.
@@ -846,7 +845,7 @@ class Model:
         pass runs once more on the graph at the SAME fed state and
         `solvers.fixed_point.differentiate_fixed_point` attaches the implicit adjoint of the
         interface equations, so the returned gradient is the FIXED POINT's own and not the
-        truncated iteration's (P1-2). What remains of the pass count and of `iterate_tol` in
+        truncated iteration's. What remains of the pass count and of `iterate_tol` in
         it is only that the landing point is a fixed point to within `iterate_tol`: the error
         is O(primal residual) rather than the unrolled O(contraction^passes), and it is
         exactly zero where the interface is linear. Backward memory is one pass. Pass 1 runs
@@ -867,15 +866,16 @@ class Model:
           `I - G_z` exactly singular, and the adjoint solve failing by name. Such a key is
           not an unknown of the interface at all -- the pass never updates it -- so it is
           simply not in `produced`. Its own graph is preserved another way, below.
-        * Closure-carried state is pinned to the STEP-START state on every pass by N1, so a
+        * Closure-carried state is pinned to the STEP-START state on every pass, so a
           pass does not read it from the fed state and it carries no feedback at all; and it
           is the one key a closure may legitimately return unchanged, which would be that
           same unit row. Its gradient path survives regardless, because the differentiable
           pass reads it from `state` itself (`step_from=state`), graph and all -- as do the
           transport and capacitated steps, which advance from `state` for the same reason.
-          (A closure-carried key MISSING from the step-start state is the one case N1 does
-          not pin; there the pass reads the previous pass's value, and holding it fixed here
-          drops a path that only exists because that key was not seeded in the first place.)
+          (A closure-carried key MISSING from the step-start state is the one case the
+          pinning does not cover; there the pass reads the previous pass's value, and holding it
+          fixed here drops a path that only exists because that key was not seeded in the first
+          place.)
 
         Everything else the pass writes is IN, for the reason the coupler's one-way links
         are: the whole of `new` is fed back to the next pass, and holding any of it fixed
@@ -899,7 +899,7 @@ class Model:
             warnings.warn(
                 f"Model: coupling='iterate' started a step without the closure-carried state "
                 f"{missing} in the step-start state. On this step the key is not pinned to the "
-                f"step start (rule N1 pins only keys the state carries), so its closure "
+                f"step start (only keys the state carries are pinned), so its closure "
                 f"integrates once per pass instead of once per step and the adjoint omits its "
                 f"compounding path. Seed it before the first step (the application's "
                 f"initial_state helper, or Model.initial_capacities for capacities).",
@@ -1070,7 +1070,7 @@ class Model:
 
     def residuals(self, state, drivers) -> dict[str, Tensor]:
         """Nodal balances at `state`: interior residual per potential layer, dx/dt per
-        transport layer (spec 14). Zero (to solver tolerance) at a steady state.
+        transport layer. Zero (to solver tolerance) at a steady state.
 
         The transport balance is TRANSPORT ONLY: reactions are an operator splitting applied
         by `step` after the transport step, so they are outside the balance reported here,
@@ -1119,7 +1119,7 @@ class Model:
         driver-prescribed layer's flow is available. A potential-owned layer's flows are the
         owner's solved `q`: read from `state["<owner>.q"]` when an earlier pass or step left
         one there, otherwise SOLVED here for these drivers, exactly as `_pass` would (the
-        first pass of a step starts from a state that carries no `q` yet -- design spec A6).
+        first pass of a step starts from a state that carries no `q` yet).
 
         Two things to know about that branch. A `"<owner>.q"` already in `state` is used
         AS-IS, even when these `drivers` would solve to a different one: that is a previous
@@ -1166,8 +1166,8 @@ class Model:
         not a prescribable port, and its one driver (`"<name>.requests"`) is per EDGE, not per
         node, so it has no well-defined entry in any of `Ports`' four node-keyed dicts. A
         coupled model driving such a layer writes that per-edge driver directly; exposing it
-        here would need a fifth, edge-keyed field, which is a follow-up and not this
-        milestone's (design spec section 4.3 changes `_pass` only). Unlike `residuals`,
+        here would need a fifth, edge-keyed field, which is not implemented. Unlike
+        `residuals`,
         nothing here is silently wrong: the dicts are complete for every layer type `Ports`
         is about.
         """
