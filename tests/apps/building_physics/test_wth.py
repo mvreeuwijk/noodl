@@ -103,6 +103,26 @@ def test_rejects_a_file_that_is_not_a_contam_weather_file(tmp_path):
         read_wth(f)
 
 
+def test_rejects_a_time_axis_that_decreases(tmp_path):
+    # No year field to disambiguate a window crossing 31 December from rows genuinely out of
+    # order (`write_wth` now refuses to write the former; a `.wth` file from elsewhere is not
+    # guaranteed to avoid it) -- either way `read_wth` must raise, not hand `Weather.at()` a
+    # non-monotonic axis silently.
+    bad = """WeatherFile ContamW 2.0
+synthetic
+12/20\t1/9
+!Date\tDofW\tDtype\tDST\tTgrnd
+12/20\t1\t1\t0\t283.15
+!Date\tTime\tTa\tPb\tWs\tWd\tHr\tIth\tIdn\tTs\tRn\tSn
+12/20\t00:00:00\t280.0\t101000\t2.0\t90\t0\t0\t0\t0\t0\t0
+1/1\t00:00:00\t282.0\t101100\t3.0\t270\t0\t0\t0\t0\t0\t0
+"""
+    f = tmp_path / "bad_order.wth"
+    f.write_text(bad)
+    with pytest.raises(ValueError, match="time axis decreases"):
+        read_wth(f)
+
+
 def test_wind_direction_interpolates_on_the_shorter_arc_across_the_0_360_wrap():
     # A step from 350 deg to 10 deg sweeps forward through 0 (a 20 deg arc), not
     # backwards through 180 (a 340 deg arc): the midpoint must be 0, not 180.

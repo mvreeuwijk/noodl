@@ -1371,23 +1371,23 @@ package paths and builder names -- the building and street application packages 
 current suffixes, each builder named after its own application rather than sharing one name, and
 the SWMM reader under its old, shorter name -- together with the retired word "oracle".
 
-**Renames.** `noodl.apps.building_physics` (formerly the same path without the `_physics`
-suffix) and `noodl.apps.street_aq` (formerly the same path without the `_aq` suffix) now say
-what each package models. `sewer` and `water` are unchanged. Every application exposes
-`build_model`; the three builders that used to spell out their own application's name in the
-function name now share that one name, and the qualified import already says which one. The
-SWMM reader is `read_swmm_inp`, matching `read_epanet_inp`. The install extra `street` is now
-`street_aq`. State keys such as `"street.x"` and `"sewer.H"` are unchanged, because they name
-physical layers and appear in saved fixtures.
+**Renames.** `noodl.apps.building` is now `noodl.apps.building_physics`, and `noodl.apps.street`
+is now `noodl.apps.street_aq` -- each package now says what it models. `sewer` and `water` are
+unchanged. `build_street_model`, `build_sewer_model` and `build_water_model` are now all
+`build_model`: every application exposes the same name, and the qualified import already says
+which application it builds for. Sewer's `read_inp` is now `read_swmm_inp`, matching
+`read_epanet_inp`. The install extra `noodl[street]` is now `noodl[street_aq]`. State keys such
+as `"street.x"` and `"sewer.H"` are unchanged, because they name physical layers and appear in
+saved fixtures.
 
 **No compatibility shims.** noodl is a prototype. The old import paths fail with
 `ModuleNotFoundError` rather than warning; downstream code is updated by its owner.
 
-**Terminology.** The retired term is standard software-testing vocabulary, but the readers of
-these pages are modellers. The pages now speak of reference implementations, parity tests and
-validation, defined on the [applications page](applications/index.md). Dense code paths kept
-for checking sparse ones are "dense references", and agreement with the IMPAQ port is a port
-check.
+**Terminology.** The word "oracle" is retired. The retired term is standard software-testing
+vocabulary, but the readers of these pages are modellers. The pages now speak of reference
+implementations, parity tests and validation, defined on the [applications page]
+(applications/index.md). Dense code paths kept for checking sparse ones are "dense references",
+and agreement with the IMPAQ port is a port check.
 
 **Deferred.** A `noodl.apps.wsimod` package with a WSIMOD configuration reader and a parity case
 where capacities bind is its own milestone. Moving the MUNICH reader from a separate analysis
@@ -1474,6 +1474,45 @@ parity, never "validated" (reserved for measurements) and never "oracle" — the
 [applications page](applications/index.md#reference-implementations-parity-and-validation)
 already states for CONTAM, MUNICH, SWMM and EPANET.
 
+## Weather and exposure additions (25 September 2026)
+
+Two general-purpose additions to the building and street applications:
+
+- **`noodl.apps.building.epw`** (`read_epw`, `write_wth`): reads an EnergyPlus weather
+  (`.epw`) file into a building-app `Weather` and writes it back out as a CONTAM `.wth`
+  file, so one weather sequence can drive both a building and a CONTAM-format comparison
+  from the same source. Day-of-year is computed from `wth.py`'s fixed, non-leap calendar
+  table rather than each row's own `year` column, because a stitched "typical year" file
+  mixes source years of different leap status and a real-calendar day count would break the
+  monotonic time axis `Weather.at()` needs.
+- **`noodl.apps.street.exposure`** (`street_population`, `total_exposure`,
+  `exposure_reduction_forward`, `exposure_reduction_adjoint`, `Q_INHALATION`):
+  population-weighted exposure on a street network and its adjoint-based reduction
+  sensitivity, after Li, Fellini and van Reeuwijk (2023, *Atmos. Environ.* 292, 119432). The
+  reduction from a source cut in one street is obtained as one backward pass of total
+  exposure through the model, exact for the model as solved, rather than the one-dispersion-
+  run-per-street-per-direction sensitivity matrix the original paper builds explicitly.
+
+Both are exported from their apps' `__init__.py` alongside the existing building/street
+public API.
+
+**Verification test instrumentation and terminology.** `tests/verification/test_contam_
+parity.py`, `test_munich.py`, `test_natural_ventilation.py` and `test_street_parity.py` gained
+a `record_property` call per assertion (`check`, `tolerance`, and a `measured_*` value),
+letting `--junitxml` capture what each parity test actually checked and measured, for anyone
+auditing a verification run's junit output. Alongside this,
+`test_street_parity.py`'s IMPAQ comparison helpers and test names (`_oracle`/`_oracle_leiden`,
+`test_..._agree_with_the_oracle_...` and others) were renamed to `_impaq_port`/
+`_impaq_port_leiden` and `*_impaq_port_*`, and a `test_natural_ventilation.py` fixture and
+`test_munich.py`'s module docstring similarly renamed their "oracle" wording to "reference" —
+this project's standing position (see the milestone 5/framework-hardening entries above) is
+that IMPAQ and MUNICH are reference implementations to port-check against, not oracles, and
+this is name/wording only with no effect on any measured value. `tests/apps/street/
+test_impaq_port.py` came over the same way. (An earlier version of this branch also carried
+two MUNICH-excerpt fixture directories, `tests/data/street/munich_case_excerpt/` and
+`munich_paris_excerpt/`; they were dropped before this branch's final review found no test or
+source file in this repository reads them.)
+
 ## Appendix: the source tree
 
 A module-by-module map of the repository, as it stood at the end of milestone 5.
@@ -1521,27 +1560,31 @@ src/noodl/
                  species_layer, IdealGasDensity, LinearDensity, build_model), elements.py
                  (mass_orifice, add_large_opening), prj.py (the CONTAM .prj reader, a
                  documented subset, and project_to_model), wth.py (the .wth weather reader),
-                 sources.py (the four CONTAM source types), contamx.py (the ContamX driver
-                 over contamxpy), modelica/ the Modelica Buildings Library import route --
-                 schema.py (the noodl-modelica/1 JSON reader, ModelicaImportError), graph.py
-                 (ComponentGraph: nodes, fused hydrostatic-column paths, two-way and zonal-flow
-                 edges, in-line sensors as wires), assemble.py (the Model/State/Drivers
-                 builder, ModelicaNames, closed-zone-group and gauge-reference handling),
-                 signals.py (signal evaluation and step-mean source integration for sources
-                 that fall between output times), run.py (simulate, step_drivers) --
-                 read_modelica chains them and returns the same (Model, State, Drivers) triple
-                 as read_prj + project_to_model
+                 epw.py (read_epw, write_wth -- an EnergyPlus .epw weather file read into a
+                 Weather and written back out as a CONTAM .wth file), sources.py (the four
+                 CONTAM source types), contamx.py (the ContamX driver over contamxpy),
+                 modelica/ the Modelica Buildings Library import route -- schema.py (the
+                 noodl-modelica/1 JSON reader, ModelicaImportError), graph.py (ComponentGraph:
+                 nodes, fused hydrostatic-column paths, two-way and zonal-flow edges, in-line
+                 sensors as wires), assemble.py (the Model/State/Drivers builder,
+                 ModelicaNames, closed-zone-group and gauge-reference handling), signals.py
+                 (signal evaluation and step-mean source integration for sources that fall
+                 between output times), run.py (simulate, step_drivers) -- read_modelica
+                 chains them and returns the same (Model, State, Drivers) triple as read_prj +
+                 project_to_model
   apps/street_aq/ the street application: canyon.py (BoundaryLayer, canyon_velocity,
                  exchange_velocity, the soulhac/macdonald closures), routing.py
                  (StreetGeometry, StreetFlows, routing_matrix, node_closure,
                  direction_offsets -- the north-west-corner routing), network.py
                  (StreetNetwork, build_model, street_geometry, street_index,
                  munich_idealised), chemistry.py (photostationary_for_streets,
-                 street_steady), loader.py (read_aqdt, the AQ_DT GeoJSON/NetCDF reader),
-                 impaq.py (the IMPAQ prototype ported as a numpy/scipy reference
-                 implementation, kept as per-edge Python loops by design -- it is the
-                 port, not the model path), report.py (to_ug_m3, from_ug_m3,
-                 write_network_concentration)
+                 street_steady), exposure.py (street_population, total_exposure,
+                 exposure_reduction_forward, exposure_reduction_adjoint -- population-
+                 weighted exposure and its adjoint-based reduction sensitivity), loader.py
+                 (read_aqdt, the AQ_DT GeoJSON/NetCDF reader), impaq.py (the IMPAQ prototype
+                 ported as a numpy/scipy reference implementation, kept as per-edge Python
+                 loops by design -- it is the port, not the model path), report.py
+                 (to_ug_m3, from_ug_m3, write_network_concentration)
   apps/sewer/    the gravity-sewer application: geometry.py (exact circular geometry, the
                  batched Manning normal-depth inversion), hydraulics.py (SewerHydraulics --
                  closure-first tree flow, depth, the optional implicit-Euler storage
@@ -1564,7 +1607,10 @@ tests/
   conftest.py, test_topology.py, test_endpoints.py, test_cycles.py, test_cycles_sparse.py,
   test_drives.py, test_flows.py, test_import.py, test_model.py,
   test_couple.py (the union mechanism: conversions, one- and
-  two-way links, aliases, substeps, gradients across the join)
+  two-way links, aliases, substeps, gradients across the join),
+  test_epw.py (apps.building_physics.epw: unit conversion, the fixed-calendar time axis,
+  EPW missing-value and multi-year rejection), test_exposure.py (apps.street_aq.exposure:
+  street_population, total_exposure, and the forward/adjoint reduction agreement)
   elements/      test_base.py, test_powerlaw.py, test_quadratic.py, test_fixed.py,
                  test_conductance.py, test_fan.py; mbl/ test_powerlaw.py, test_table.py,
                  test_door.py, test_door_discretized.py, test_media.py -- each against an

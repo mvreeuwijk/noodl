@@ -60,7 +60,7 @@ def _noodl(street_net, **options):
     return model.steady(state, drivers)["street.x"].detach().numpy()
 
 
-def test_the_canyon_velocities_agree_with_the_impaq_port_s_scipy_ones():
+def test_the_canyon_velocities_agree_with_the_impaq_port_s_scipy_ones(record_property):
     street_net = from_test_network()
     network, _layer = _impaq_port(street_net)
     model, state, _ = build_model(street_net, kappa=0.4, pblh_floor=False)
@@ -69,14 +69,21 @@ def test_the_canyon_velocities_agree_with_the_impaq_port_s_scipy_ones():
         "theta_w": torch.tensor(THETA_W, dtype=DT),
         "h_abl": torch.tensor(H_ABL, dtype=DT),
     })
-    np.testing.assert_allclose(
-        resolved["street.u_canyon"].detach().numpy(),
-        network.roads.canyon_velocity_mps, rtol=1e-9, atol=1e-15,
+    ours = resolved["street.u_canyon"].detach().numpy()
+    theirs = network.roads.canyon_velocity_mps
+    np.testing.assert_allclose(ours, theirs, rtol=1e-9, atol=1e-15)
+    worst_rel = float(np.max(np.abs(ours - theirs) / np.maximum(np.abs(theirs), 1e-300)))
+    record_property(
+        "check",
+        "Four-node network, canyon velocities vs the IMPAQ port -- port check against the "
+        "IMPAQ prototype",
     )
+    record_property("tolerance", "rel 1e-9")
+    record_property("measured_rel", worst_rel)
 
 
 @pytest.mark.parametrize("routing", ["mixing", "sirane"])
-def test_noodl_matches_the_fixed_impaq_port_on_the_four_node_network(routing):
+def test_noodl_matches_the_fixed_impaq_port_on_the_four_node_network(routing, record_property):
     """Both routing models give the same answer here: no junction of this network has two
     inflows AND two outflows, so there is nothing for a routing model to decide. The test
     is about the ELIMINATION and the closure, not about routing -- Task 11's 2-in/2-out
@@ -86,9 +93,17 @@ def test_noodl_matches_the_fixed_impaq_port_on_the_four_node_network(routing):
     ours = _noodl(street_net, routing=routing)
     theirs = solve_steady_state(network, layer, fix_a=True, fix_b=True)[:len(ours)]
     np.testing.assert_allclose(ours, theirs, rtol=1e-9, atol=0)
+    worst_rel = float(np.max(np.abs(ours - theirs) / np.maximum(np.abs(theirs), 1e-300)))
+    record_property(
+        "check",
+        "Four-node network vs the IMPAQ port, both prototype bugs fixed -- "
+        "port check against the IMPAQ prototype",
+    )
+    record_property("tolerance", "rel 1e-9")
+    record_property("measured_rel", worst_rel)
 
 
-def test_the_effect_of_each_impaq_fix_is_reported_not_absorbed(capsys):
+def test_the_effect_of_each_impaq_fix_is_reported_not_absorbed(capsys, record_property):
     street_net = from_test_network()
     network, layer = _impaq_port(street_net)
     ours = _noodl(street_net, routing="mixing")
@@ -110,12 +125,25 @@ def test_the_effect_of_each_impaq_fix_is_reported_not_absorbed(capsys):
     assert effects[(True, False)] < 1e-9
     with pytest.raises(ValueError, match=r"fix_b without fix_a is only defined"):
         solve_steady_state(network, layer, fix_b=True)
+    record_property(
+        "check",
+        "Four-node network, IMPAQ port bugs fixed -- port check against the IMPAQ prototype",
+    )
+    record_property("tolerance", "< 1e-9 relative")
+    record_property("measured_rel", effects[(True, True)])
+    record_property(
+        "check2",
+        "Four-node network, IMPAQ port bugs unfixed -- port check against the IMPAQ "
+        "prototype",
+    )
+    record_property("tolerance2", "30-45% relative (documented, not a target)")
+    record_property("measured2_rel", effects[(False, False)])
 
 
 def test_the_exchange_coefficient_is_the_retracted_issue_c_form_on_both_sides():
     """`u_d = sigma_w/(sqrt(2) pi)`, not `sigma_w/sqrt(2 pi)`. The two differ by
-    `sqrt(pi) = 1.7725`, so a model using the other one cannot agree with this port at
-    any tolerance -- which makes the parity above evidence for the retraction."""
+    `sqrt(pi) = 1.7725`, so a model using the other one cannot agree with this port
+    check at any tolerance -- which makes the parity above evidence for the retraction."""
     from noodl.apps.street_aq.canyon import SIRANE_EXCHANGE
 
     assert abs(SIRANE_EXCHANGE - 1.0 / (math.sqrt(2.0) * math.pi)) < 1e-16
@@ -187,20 +215,35 @@ def test_the_loaded_leiden_small_domain_is_the_one_the_plan_measured():
 
 
 @needs_aqdt
-def test_the_canyon_velocities_agree_with_the_impaq_port_on_every_leiden_small_street():
+def test_the_canyon_velocities_agree_with_the_impaq_port_on_every_leiden_small_street(
+    record_property,
+):
     """Everything upstream of the junction algebra is identical to the prototype's."""
     data = _leiden_small()
     model, drivers, _solved = _noodl_leiden(data)
     resolved = model._apply_closures({}, drivers)
     ours = resolved["street.u_canyon"].detach().numpy()
+    worst_rel = 0.0
     for step in range(len(STEPS)):
         network, _layer = _impaq_port_leiden(data, step)
-        np.testing.assert_allclose(ours[step], network.roads.canyon_velocity_mps,
-                                   rtol=1e-9, atol=1e-12)
+        theirs = network.roads.canyon_velocity_mps
+        np.testing.assert_allclose(ours[step], theirs, rtol=1e-9, atol=1e-12)
+        worst_rel = max(
+            worst_rel,
+            float(np.max(np.abs(ours[step] - theirs) / np.maximum(np.abs(theirs), 1e-300))),
+        )
+    record_property(
+        "check",
+        "leiden_small canyon velocities -- port check against the IMPAQ prototype",
+    )
+    record_property("tolerance", "rel 1e-9")
+    record_property("measured_rel", worst_rel)
 
 
 @needs_aqdt
-def test_the_impaq_port_s_routing_matrix_does_not_conserve_and_noodl_s_flows_do(capsys):
+def test_the_impaq_port_s_routing_matrix_does_not_conserve_and_noodl_s_flows_do(
+    capsys, record_property
+):
     """The diagnosis. IMPAQ's `flow_route` mis-permutes at three-way junctions, so its
     routing matrix's row sums are not the streets' own fluxes; the noodl model's
     prescribed flows close the mass balance exactly. This is why the comparison below
@@ -228,10 +271,19 @@ def test_the_impaq_port_s_routing_matrix_does_not_conserve_and_noodl_s_flows_do(
     # Measured on 17 September 2026: 12 roads at step 0, worst factor 13.95.
     for _step, count, worst in report:
         assert count > 0 and worst > 1.0
+    worst_factor = 1.0 + max(worst for _step, _count, worst in report)
+    record_property(
+        "check",
+        "IMPAQ flow_route mis-permutation defect -- port check against the IMPAQ prototype",
+    )
+    record_property("tolerance", "documented defect, not a target (count > 0, factor > 1)")
+    record_property("measured_worst_factor", worst_factor)
 
 
 @needs_aqdt
-def test_noodl_matches_the_fixed_impaq_port_on_the_typical_leiden_small_street(capsys):
+def test_noodl_matches_the_fixed_impaq_port_on_the_typical_leiden_small_street(
+    capsys, record_property
+):
     """The parity that IS attainable: the median street agrees to machine precision, and
     the count of streets that do not is consistent with the mis-permuted junctions
     diagnosed above (the set cross-reference is a recorded follow-up). The counts are
@@ -255,6 +307,14 @@ def test_noodl_matches_the_fixed_impaq_port_on_the_typical_leiden_small_street(c
     for _step, median, count, _worst in rows:
         assert median < 1e-9
         assert count <= 30      # measured: 15, 21 and 12
+    worst_median = max(median for _step, median, _count, _worst in rows)
+    record_property(
+        "check",
+        "leiden_small concentrations vs the IMPAQ port, both prototype bugs fixed -- "
+        "port check against the IMPAQ prototype",
+    )
+    record_property("tolerance", "median < 1e-9")
+    record_property("measured_median_rel", worst_median)
 
 
 @needs_aqdt
