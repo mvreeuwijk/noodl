@@ -228,10 +228,9 @@ def spd_diagnosis(
         extra_grounded=extra_grounded,
     )
     # The SAME condition `spd_certificate` applies, so an instance the certificate refuses
-    # always has a record here (before I1 the two disagreed for a grounded instance with a
-    # negative slope: the certificate said True and the diagnosis, keyed on grounding alone,
-    # produced no record, which is why select.solve's negative-slope message branch was
-    # effectively unreachable).
+    # always has a record here (a diagnosis keyed on grounding alone would produce no
+    # record for a grounded instance with a negative slope, leaving select.solve's
+    # negative-slope message branch unreachable).
     certified = (slopes >= 0).all(dim=-1) & grounded[..., interior_mask].all(dim=-1)
     failing = ~certified
 

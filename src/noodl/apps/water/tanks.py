@@ -162,7 +162,7 @@ class TankLevels:
 
         `level` and `rate` (dy/dt, m/s) are given for EVERY tank, not just the one the
         caller happens to be tracking: each control tests its OWN tank (`control.node`)
-        against that tank's own level and rate (N13). A single scalar pair, tested against
+        against that tank's own level and rate. A single scalar pair, tested against
         every control regardless of which tank it names, is wrong the moment a second
         controlled tank exists -- it silently uses the wrong tank's level.
         """
