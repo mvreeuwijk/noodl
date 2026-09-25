@@ -142,7 +142,7 @@ def munich_idealised(
     Four real junctions on a square of side `L` (`A` NW, `B` NE, `C` SW, `D` SE) and eight
     dead ends one spacing out along each stub, so all twelve segments have the same length.
     `L`, `W` and `H` are ARGUMENTS because the paper never published them -- see spec
-    section 7 and `.superpowers/munich-formulas.md` section 5.5: the absolute
+    section 7: the absolute
     concentrations of Fig. 1 cannot be reproduced, only the ratios and the pattern.
     Returns the network and the street names `"1"` ... `"12"`, with `"11"` the emitter.
     """

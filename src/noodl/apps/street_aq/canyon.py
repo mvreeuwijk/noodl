@@ -4,8 +4,7 @@ Every formula here carries its source. The two families are SIRANE's (Soulhac, P
 Salizzoni 2008; Soulhac et al. 2011), which IMPAQ implements, and MUNICH's (Kim et al.
 2018 and 2022 plus the MUNICH/AtmoData sources), which the parity checks of Task 11 pin.
 Where the two papers disagree with each other or with the code, the CODE wins and the
-disagreement is named in the docstring -- see `.superpowers/munich-formulas.md` sections 0,
-2.3 and 3.
+disagreement is named in the docstring.
 
 `torch.special.bessel_j0/j1/y0/y1` are NOT differentiable in torch 2.14 (their output has
 no `grad_fn` at all), so all four are wrapped below in `torch.autograd.Function`s carrying

@@ -1,7 +1,7 @@
 """The headline demo — a real CONTAM building on a real street canyon.
 
-Design spec `docs/superpowers/specs/2026-09-19-milestone-5-coupling-design.md`, sections 3,
-4 and 10; amendments A2 (units), A3 (wind conventions), A5 (layouts).
+Milestone 5 coupling design spec, sections 3, 4 and 10; amendments A2 (units), A3 (wind
+conventions), A5 (layouts).
 
 The street's `StreetFlows` closure REQUIRES the drivers `U_ref` (m/s at `z_ref`), `theta_w`
 (radians CCW from east, wind TOWARD) and `h_abl` (m), which `street_aq.build_model`'s returned

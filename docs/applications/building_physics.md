@@ -237,8 +237,8 @@ ModelicaImportError: modelica: refused 3 items:
   - west (Buildings.Fluid.Sources.Outside_CpLowRise): wind pressure is not supported
 ```
 
-**Conventions and deviations from the design record** (the spec was amended 25 Sep 2026 to match;
-see `docs/superpowers/specs/2026-09-24-modelica-import-design.md` section 6):
+**Conventions and deviations from the design record** (the internal design spec was amended
+25 Sep 2026 to match, section 6):
 
 - `DoorOpen`/`DoorOperable` use MBL's fixed default density (`Door.mo`); a discretised door
   (`DoorDiscretizedOpen`/`Operable`) evaluates density at the actual port pressure

@@ -1,10 +1,9 @@
 """Modelica Buildings Library (MBL) multizone import.
 
-Design: `docs/superpowers/specs/2026-09-24-modelica-import-design.md`. This package reads the
-intermediate JSON an OpenModelica export script writes (spec section 4,
-`scripts/modelica_export.py`) and builds a noodl `Model` from it. It never parses Modelica
-source and never evaluates a Modelica expression: every parameter it reads was already
-evaluated by OpenModelica.
+This package reads the intermediate JSON an OpenModelica export script writes (spec
+section 4, `scripts/modelica_export.py`) and builds a noodl `Model` from it. It never parses
+Modelica source and never evaluates a Modelica expression: every parameter it reads was
+already evaluated by OpenModelica.
 
 `schema.load` parses and structurally validates the JSON; `graph.build` resolves it into a
 `ComponentGraph` (nodes, fused hydrostatic-column paths, two-way edges, heat pins, sources),

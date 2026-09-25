@@ -1,14 +1,13 @@
 # cProfile of the coupled street-building step (Task 28)
-# Command: PYTHONPATH=src python -m cProfile -o .superpowers/sdd/2026-09-20-framework-hardening-part-2/coupled.prof benchmarks/coupling_street_building.py 1
+# Command: PYTHONPATH=src python -m cProfile -o coupled.prof benchmarks/coupling_street_building.py 1
 # Commit: c07db07c11957698f7721273a104326b4f1277d8 (worktree-framework-hardening-2, worktree framework-hardening-2)
 # Date: 2026-09-20
 # Machine: Windows 11, 14 cores / 20 logical processors, 65176 MB RAM; a second python.exe
 #   (~3.0 GB RSS at time of this run, tasklist-observed) from another session ran throughout,
-#   per controller ruling T18-2/F2-1 -- see task-28-report.md for the interleaved A/B timing
-#   that isolates code-attributable slowdown from this ambient load.
+#   so absolute timings include that ambient load.
 # Sorted by cumulative time, top 25 of 8824 profiled functions.
 
-Sun Sep 20 16:07:11 2026    <repo>/.superpowers/sdd/2026-09-20-framework-hardening-part-2/coupled.prof
+Sun Sep 20 16:07:11 2026    <repo>/coupled.prof
 
          16762376 function calls (16687562 primitive calls) in 84.452 seconds
 

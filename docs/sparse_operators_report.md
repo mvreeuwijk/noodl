@@ -2,8 +2,8 @@
 
 > Status (12 Sep 2026): drafted by an AI agent (Claude) from web sources, direct
 > introspection of this repo's `.venv` (torch 2.14.0+cpu), and a benchmark script at
-> `benchmarks/sparse_scaling.py`. Answers the open question in
-> `docs/superpowers/specs/2026-09-11-noodl-framework-design.md` section 4.0: "the
+> `benchmarks/sparse_scaling.py`. Answers the open question in the framework design
+> spec, section 4.0: "the
 > choice between a formed sparse Jacobian and a matrix-free operator is being settled by
 > measurement." Sections 4-5 are measured on this machine (CPU only, no CUDA); GPU claims
 > elsewhere are from cited literature, marked as such.

@@ -1,6 +1,6 @@
 """Inverse example 1 -- calibration through the join.
 
-Design spec `docs/superpowers/specs/2026-09-19-milestone-5-coupling-design.md`. Recovers the
+Milestone 5 coupling design spec. Recovers the
 CONTAM building's leakage coefficients (the `pl_3` `UpstreamDensityPowerLaw`'s `C`, one per
 path) by gradient descent on an indoor-concentration observation, with the gradient running
 through the whole coupled street+building step (the potential solve's implicit-function

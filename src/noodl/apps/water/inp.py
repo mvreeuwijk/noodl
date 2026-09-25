@@ -1,8 +1,8 @@
 """A documented EPANET 2.2 `.inp` subset (spec 13.5).
 
 READ: `[JUNCTIONS] [RESERVOIRS] [TANKS] [PIPES] [PUMPS] [VALVES] [DEMANDS] [PATTERNS]
-[CURVES] [CONTROLS] [OPTIONS] [TIMES]`, with the column layouts of the manual's Appendix
-C.2 as quoted verbatim in `.superpowers/epanet-research/epanet-research.md` section 9.
+[CURVES] [CONTROLS] [OPTIONS] [TIMES]`, with the column layouts of the EPANET 2.2 manual's
+Appendix C.2.
 
 IGNORED because nothing in the hydraulics references them: `[TITLE]`, `[REPORT]` ("for the
 Windows version of EPANET, the only [REPORT] option recognized is STATUS", Manual p.142),
