@@ -1025,10 +1025,9 @@ class Model:
                 # though the potential solve detaches its warm start and the capacity is
                 # closure-derived: both are genuinely RECOMPUTED by this pass (a fresh
                 # `phi0`-detached solve, a fresh closure call), so they contribute a zero
-                # row/column here, not a unit one -- see the class docstring and
-                # .superpowers/sdd/2026-09-20-framework-hardening-part-3/task-8-report.md for
-                # why that is harmless and this guard is what would catch it if it stopped
-                # being true.
+                # row/column here, not a unit one -- see the class docstring for why that
+                # is harmless and this guard is what would catch it if it stopped being
+                # true.
                 echoed = [k for k, n, t in zip(keys, z_next, z, strict=True) if n is t]
                 if echoed:
                     raise RuntimeError(

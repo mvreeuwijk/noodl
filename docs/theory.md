@@ -647,8 +647,8 @@ section 10) -- the same caveat the README states for the same reason.
 
 *(Written from the implementation, milestone 4b: this section documents
 `CapacitatedTransferLayer`'s physics and why it needed a genuinely new differentiability
-mechanism at one site; the full derivation is in the design spec,
-`docs/superpowers/specs/2026-09-18-milestone-4b-wsimod-design.md`, section 3.)*
+mechanism at one site; the full derivation is in the milestone's internal design spec,
+section 3.)*
 
 **Why this is a fourth way of determining flows, not a variant of the potential layer.**
 Sections 1 and 9 above both describe networks where flow at an edge is either the closed-
@@ -722,8 +722,7 @@ result this milestone needed to produce, as opposed to reproducing an existing m
 `d(f_i)/d(r_j) = -(1/preference_i) / sum_k(1/preference_k)`, of which -0.5 is the
 symmetric-weight special case -- was separately hand-verified against different,
 asymmetric-preference fixtures during Task 4's review (`pref=[1,3]` and `pref=[1,2,5]`,
-confirmed to 4 decimal places; see the ledger at
-`.superpowers/sdd/2026-09-18-milestone-4b-wsimod/progress.md`); that confirms the mechanism
+confirmed to 4 decimal places in the review record); that confirms the mechanism
 generalises correctly, not that the value -0.5 itself does -- for asymmetric weights the
 value is generically different (e.g. `pref=[1,3]` gives -0.25), and no committed test
 asserts the literal -0.5 value under asymmetric weights.

@@ -1,5 +1,5 @@
 """Orchestration-level coupling between two independently-built `Model`s (framework spec
-section 4.3, design spec `docs/superpowers/specs/2026-09-19-milestone-5-coupling-design.md`).
+section 4.3, and the milestone 5 coupling design spec).
 
 `union` never merges networks or rebuilds layers/closures: it exchanges named driver/state
 values between two ordinary `Model.step` calls each outer step, iterated to a fixed point

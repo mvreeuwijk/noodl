@@ -1,7 +1,7 @@
 """Water quality and H2S: sulfide generation, BOD decay and two-film transfer.
 
-Formula set and verification status from the milestone 4 research note
-(`.superpowers/sewer-gas-research.md`) and recorded in the spec's coefficient register:
+Formula set and verification status from the milestone 4 literature review, recorded in the
+spec's coefficient register:
 
 * Henry's law, H2S, dimensionless gas-over-liquid
   ``H(T) = 1 / (H_cp(T) R T)`` with ``H_cp(298.15) = 1.0e-3 mol m^-3 Pa^-1`` and van 't Hoff

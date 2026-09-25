@@ -110,8 +110,8 @@ def test_w5_manning_inversion_round_trip(diameter):
 
 
 def test_normal_depth_reproduces_the_committed_tree():
-    """The five conduits of tests/data/sewer/tree_steady.inp, measured against the research
-    note's independent bisection solver (`.superpowers/swmm-research/manning_design.py`)."""
+    """The five conduits of tests/data/sewer/tree_steady.inp, measured against an independent
+    bisection solver of the Manning equation, written for the milestone 4 research note."""
     d = torch.tensor([0.30, 0.30, 0.45, 0.30, 0.45], dtype=F64)
     n = torch.full((5,), 0.013, dtype=F64)
     s = torch.tensor([0.010, 0.010, 0.005, 0.010, 0.005], dtype=F64)

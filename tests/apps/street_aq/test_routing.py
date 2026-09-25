@@ -1,6 +1,7 @@
 """Intersection routing, node closure and direction averaging — spec sections 4.4, 4.5.
 
-Every pinned number is from `.superpowers/munich-formulas.md` (T7, T8, T9).
+Every pinned number is a worked case traced by hand through MUNICH's source (T7, T8, T9 of
+the milestone 3 research record).
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ DT = torch.float64
 
 
 def test_sirane_routing_is_munich_s_worked_two_in_two_out_example():
-    # `.superpowers/munich-formulas.md` T8: inflows [10, 4] counter-clockwise against
+    # Worked case T8, traced through MUNICH's code: inflows [10, 4] counter-clockwise against
     # outflows [6, 8] clockwise, already balanced, give the greedy non-crossing fill.
     flux_in = torch.tensor([10.0, 4.0], dtype=DT)
     flux_out = torch.tensor([6.0, 8.0], dtype=DT)

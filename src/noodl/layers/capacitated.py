@@ -9,9 +9,8 @@ is a separate, reported quantity, never silently dropped.
 
 The docstrings below record the mathematics and the failure modes each guard exists for,
 which is what a later reader needs; the DESIGN HISTORY behind them (which alternatives
-were tried, in what order, and who found what) is in the design spec's amendments,
-`docs/superpowers/specs/2026-09-18-milestone-4b-wsimod-design.md`, and the ledger
-`.superpowers/sdd/2026-09-18-milestone-4b-wsimod/progress.md`.
+were tried, in what order, and who found what) is summarised in the milestone 4b record of
+`docs/development-history.md`.
 """
 from __future__ import annotations
 

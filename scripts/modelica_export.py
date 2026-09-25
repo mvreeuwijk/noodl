@@ -441,6 +441,24 @@ def apply_exact_values(doc: dict, refs: dict, values: dict[str, float]) -> list[
     return missing
 
 
+def relative_library_paths(obj, mbl: str | Path):
+    """`obj` with every string naming a file under the MBL checkout `mbl` rewritten as a
+    `modelica://` URI relative to the library root.
+
+    OpenModelica evaluates `loadResource("modelica://Buildings/...")` bindings (a weather
+    file's `filNam`, say) to absolute paths on the exporting machine; a committed fixture
+    must not carry them. The reader never opens these files, so the URI is informative only.
+    """
+    root = str(mbl).rstrip("/") + "/"
+    if isinstance(obj, str):
+        return "modelica://" + obj[len(root):] if obj.startswith(root) else obj
+    if isinstance(obj, list):
+        return [relative_library_paths(v, mbl) for v in obj]
+    if isinstance(obj, dict):
+        return {k: relative_library_paths(v, mbl) for k, v in obj.items()}
+    return obj
+
+
 def write_json(doc: dict, path: str | Path) -> None:
     Path(path).write_text(json.dumps(doc, indent=2) + "\n")
 
@@ -807,6 +825,8 @@ def export(model: str, out: Path, mbl: Path, run_simulation: bool = True,
             "Reals from the simulation result (full double precision)" if not missing else
             f"Reals from the simulation result except {len(missing)} value(s) absent from it; "
             f"those keep the instance API's six significant digits (see 'approximate')")
+        for root in {mbl.as_posix(), mbl.resolve().as_posix()}:
+            doc = relative_library_paths(doc, root)
         write_json(doc, out / f"{short}.json")
         summary.update(json=str(out / f"{short}.json"), approximate=missing,
                        introspect_s=round(t_intro - t_start, 1),

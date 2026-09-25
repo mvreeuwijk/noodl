@@ -6,9 +6,9 @@ measured, and what was left open. They are a record of how the package reached i
 shape, not a guide to using it — for that, start at the
 [published documentation](https://mvreeuwijk.github.io/noodl/).
 
-The design specs and implementation plans these milestones were executed from are kept
-under `docs/superpowers/`. Like this page, they are part of the repository but not of the
-published site.
+The records refer to the internal design specs and implementation plans the milestones were
+executed from ("spec section 4.2", "Task 8"); those working documents are not part of the
+public repository, and each record states the decisions it depends on.
 
 ## Milestone 1b status
 
@@ -484,7 +484,8 @@ skipped with that measurement recorded rather than compared against stale rows.
 
 **The measured runs (17 September 2026, on this machine).** Spec section 11 budgets nothing
 for this milestone: both runs are RECORDED, and neither of the two conditional follow-up
-triggers fired.
+triggers fired. (The benchmark script behind them read the unpublished AQ_DT data and has
+since been removed from the repository; the numbers stand as a record.)
 
 | run | measured | trigger |
 |---|---|---|
@@ -703,8 +704,8 @@ pyswmm and EPANET.
   general sharing mechanism -- the KKT derivation `d(f_i)/d(r_j) = -(1/preference_i) /
   sum_k(1/preference_k)`, of which -0.5 is the symmetric-weight special case -- was
   separately hand-verified against DIFFERENT, asymmetric-preference fixtures during Task 4's
-  review (`pref=[1,3]` and `pref=[1,2,5]`, confirmed to 4 decimal places; see the ledger at
-  `.superpowers/sdd/2026-09-18-milestone-4b-wsimod/progress.md`, lines ~241-244). That
+  review (`pref=[1,3]` and `pref=[1,2,5]`, confirmed to 4 decimal places in the review
+  record). That
   confirms the mechanism generalises correctly, not that -0.5 itself does -- for asymmetric
   weights the value is generically different (e.g. `pref=[1,3]` gives -0.25, not -0.5), and
   no committed test asserts the literal -0.5 value under asymmetric weights.
@@ -1120,7 +1121,8 @@ kept `physics/species.py` (`SpeciesTransport`) and `physics/flows.py` (`branch_f
 `assert_forward_oriented`) as thin wrappers, so that downstream code written against the
 milestone-0 interface kept running unchanged across the rewrite. That debt is now paid:
 callers build a `TransportLayer` directly and import the cycle helpers from `cycles.py`, and
-the `physics/` package has been removed along with `tests/test_species.py` and `tests/test_species_compat.py`.
+the `physics/` package has been removed along with `tests/test_species.py` and
+`tests/test_species_compat.py`.
 
 The two mismatches the wrapper absorbed moved to the caller, which is where they belong: a
 caller that assembles its sources per interior node must expand them to the full node order
@@ -1366,7 +1368,7 @@ regenerating would remove it and this regeneration does not.
 
 ## Application names and reference terminology (24 Sep 2026)
 
-Earlier records in this file, and every document under `docs/superpowers/`, use the pre-rename
+Earlier records in this file, and the internal specs and plans, use the pre-rename
 package paths and builder names -- the building and street application packages without their
 current suffixes, each builder named after its own application rather than sharing one name, and
 the SWMM reader under its old, shorter name -- together with the retired word "oracle".
@@ -1395,8 +1397,8 @@ pipeline into `noodl.apps.street_aq` is also deferred.
 
 ## Modelica Buildings Library import and parity (25 Sep 2026)
 
-Design: `docs/superpowers/specs/2026-09-24-modelica-import-design.md` (amended 25 Sep 2026, see
-below); ledger and every measurement in `.superpowers/sdd/2026-09-24-modelica-import/`.
+Designed from the internal Modelica import spec (amended 25 Sep 2026, see below); the
+measurements below were recorded in the milestone's review ledger.
 
 `noodl.apps.building_physics.read_modelica` imports multizone airflow models built with the
 Modelica Buildings Library (MBL) v13.0.0 (commit `55abf579598ca81cae0a82f337350375958e6722`),
@@ -1602,7 +1604,6 @@ src/noodl/
 scripts/         modelica_export.py: the OpenModelica export script (spec section 4), run in
                  WSL with omc/.mos scripts (no OMPython) to write tests/data/modelica's
                  JSON+CSV fixtures; not imported by the package and not run by the test suite
-docs/superpowers/  design spec and implementation plans
 tests/
   conftest.py, test_topology.py, test_endpoints.py, test_cycles.py, test_cycles_sparse.py,
   test_drives.py, test_flows.py, test_import.py, test_model.py,
@@ -1667,8 +1668,6 @@ benchmarks/
   sparse_scaling.py           gather/scatter vs shared-CSR matvec timing across thread counts
   sparse_review_checks.py     standalone numerical checks used during the sparse-path review
   report_composed_scaling.py  writes benchmarks/composed_scaling_report.json
-  street_leiden.py            load/build/solve timing for the street model on the real
-                              AQ_DT `leiden_small` and `leiden` domains
   coupling_street_building.py batched throughput of `city.step` across batch sizes, on the
                               headline street+building coupled demo (milestone 5)
   regenerate_golden.py        rewrites tests/golden/contam_airflow.json and

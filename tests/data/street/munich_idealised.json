@@ -7,8 +7,7 @@
     "The concentrations are printed as TEXT inside the figure's raster at two decimal",
     "places, so this table is exact to the paper's own precision and carries no",
     "digitisation error. A blank cell means no number was printed beside that street; the",
-    "caption's threshold is 0.005 ug/m3 (see `.superpowers/munich-formulas.md` section",
-    "5.4)."
+    "caption's threshold is 0.005 ug/m3."
   ],
   "unpublished": [
     "The paper gives no street length, width or building height, no emission rate, no",

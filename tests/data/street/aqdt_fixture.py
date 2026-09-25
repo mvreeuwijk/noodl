@@ -1,7 +1,7 @@
 """Hand-written AQ_DT products, in the exact formats of the real ones.
 
 The GeoJSON property names, the NetCDF variable names, their dimensions and their dtypes
-are copied from `.superpowers/aqdt-repo-research.md` and were checked against the real
+are copied from the AQ_DT repository's documented products and were checked against the real
 `leiden_small` products on 17 September 2026. The fixture is WRITTEN rather than committed
 as bytes: a classic-CDF file is not reviewable in a diff, whereas this module is, and
 `scipy.io.netcdf_file` is the same reader the loader uses.

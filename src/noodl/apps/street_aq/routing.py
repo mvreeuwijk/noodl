@@ -3,8 +3,8 @@ that turns the wind into every prescribed edge flow.
 
 Every rule here is MUNICH's `ComputeIntersectionFlux`
 (`include/models/StreetNetworkTransport.cxx:2851-3040`), `ComputeAlpha` (`:3620-3648`) and
-`ComputeWindDirectionFluctuation` (`:3562-3616`), transcribed in
-`.superpowers/munich-formulas.md` sections 4.2 and 4.3. Nothing loops over junctions at
+`ComputeWindDirectionFluctuation` (`:3562-3616`), transcribed from the MUNICH source.
+Nothing loops over junctions at
 call time: the junction layout is padded to the greatest degree once, at construction, and
 every step below is a batched tensor operation.
 """
@@ -174,7 +174,7 @@ def routing_matrix(flux_in: Tensor, flux_out: Tensor, *, model: str) -> Tensor:
 
     -- which is exact, batched, and piecewise linear in the marginals, so the gradient runs
     through the fluxes while the combinatorics live entirely in the ORDERING. Checked
-    against MUNICH's own worked example (`.superpowers/munich-formulas.md` T8): inflows
+    against a worked example traced through MUNICH's own code: inflows
     `[10, 4]` against outflows `[6, 8]` give `[[6, 4], [0, 4]]`, where perfect mixing would
     give `[[4.286, 5.714], [1.714, 2.286]]`.
     """
@@ -260,7 +260,7 @@ class StreetFlows:
     SIGNED along-canyon velocity per street, for reporting). Reads `"U_ref"`, `"theta_w"`,
     `"h_abl"` and -- for `stability="munich"` -- `"lmo"`, each shaped `(...,)`.
 
-    Order of operations, which is MUNICH's (`.superpowers/munich-formulas.md` section 4.2):
+    Order of operations, which is MUNICH's (`ComputeIntersectionFlux`):
     the canyon velocities are computed ONCE from the MEAN wind direction and are NOT
     recomputed for the perturbed directions; only the in/out classification and the angular
     ordering change from sample to sample, and the weighted sum is taken over the resulting

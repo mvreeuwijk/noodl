@@ -35,7 +35,7 @@ class FirstOrderDecay(Reaction):
 #   R2  O + O2 + M -> O3 + M      effectively instantaneous
 #   R3  O3 + NO -> NO2 + O2       k3 = 3.0e-12 exp(-1500/T) cm3 molecule^-1 s^-1
 #                                 (SPACK `ARR2 A B` == A exp(-B/T); NASA/JPL 2003)
-# See `.superpowers/munich-formulas.md` section 6 and its T11.
+# The constant below is k3 evaluated at 298 K.
 K_NO_O3_298 = 1.9546779094727322e-14
 """k3 at 298 K, cm3 molecule^-1 s^-1."""
 

@@ -1,6 +1,6 @@
 """Read the AQ_DT products into a `StreetNetwork`, a `Forcing` and an emission table.
 
-The products are the ones `.superpowers/aqdt-repo-research.md` documents, read with the
+The products are the AQ_DT repository's documented outputs, read with the
 standard library `json` and `scipy.io.netcdf_file` -- both inputs are classic CDF, checked.
 Nothing here writes to the AQ_DT tree.
 

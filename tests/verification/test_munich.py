@@ -1,8 +1,9 @@
 """MUNICH as the independent reference — spec section 7, rows 10 and 11.
 
-Part one: the thirteen exact input/output pairs of `.superpowers/munich-formulas.md`
-section 8, each with its equation, page and `file:line`. Part two: the published 12-street
-idealised case of Kim et al. 2022 Fig. 1, whose INPUTS WERE NEVER PUBLISHED, so what is
+Part one: the exact input/output pairs of the milestone 3 MUNICH research record (numbered
+T1 to T13 in the test names), each with its equation, page and `file:line`. Part two: the
+published 12-street idealised case of Kim et al. 2022 Fig. 1, whose INPUTS WERE NEVER
+PUBLISHED, so what is
 checked is every scale-invariant property of it and nothing else.
 
 Tolerances. Where the research record carries a number at full double precision the check
@@ -140,7 +141,7 @@ def test_t6_soulhac_shape_parameter_and_bessel_roof_wind(record_property):
     assert abs(ratio - 0.0026666666666666666) < 1e-18
     c = soulhac_shape(_t(ratio))
     # MUNICH searches a 0.01 grid and returns 0.62; this is the continuous root, and the
-    # quantisation costs 4e-4 relative in u_M (`.superpowers/munich-formulas.md` T6).
+    # quantisation costs 4e-4 relative in u_M (research record T6).
     assert abs(float(c) - 0.6198293039179747) < 1e-13
     u_h = roof_wind(_t(U_STAR), _t(H), _t(W), form="sirane", z0_s=Z0_S,
                     kappa=KAPPA_MUNICH)
@@ -219,7 +220,7 @@ def test_t9_the_node_closure_both_ways():
 
 
 def test_t10_the_steady_single_street():
-    """`.superpowers/munich-formulas.md` T10: the stationary solve of
+    """Research record T10: the stationary solve of
     `StreetNetworkTransport.cxx:2573-2575` on one street with no inflow."""
     length = 100.0
     u_d = float(exchange_velocity(_t(SIGMA_W), _t(H), _t(W), form="schulte"))
