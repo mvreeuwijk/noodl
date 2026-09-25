@@ -274,12 +274,33 @@ pressure imbalance draining away — parts company with noodl by more than round
 parity table below). Adding volume mass storage would close this gap; it is a follow-up, offered
 to Maarten and not implemented in this release.
 
-**Reproducing the export (WSL only — the test suite itself needs none of this).** OpenModelica
-runs in WSL (Ubuntu 22.04), installed from the OpenModelica apt repository (needs `sudo`, done
-once by whoever administers the WSL environment). MBL is cloned at
-`~/modelica/modelica-buildings`, tag `v13.0.0`; the Modelica Standard Library (MSL) v4.1.0 that
-MBL v13 depends on is installed alongside it. This release was exported against
-`OpenModelica 1.27.1~2-g6db4671`. With `omc` on the WSL `PATH`:
+**Reproducing the export (WSL only — the test suite itself needs none of this).** Tested on
+Ubuntu 22.04 (`jammy`) in WSL with OpenModelica 1.27.1. Install OpenModelica from its own apt
+repository (needs `sudo`, done once by whoever administers the WSL environment):
+
+```bash
+sudo apt-get update && sudo apt-get install -y ca-certificates curl gnupg
+curl -fsSL http://build.openmodelica.org/apt/openmodelica.asc | sudo gpg --dearmor -o /usr/share/keyrings/openmodelica-keyring.gpg
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/openmodelica-keyring.gpg] https://build.openmodelica.org/apt jammy stable" | sudo tee /etc/apt/sources.list.d/openmodelica.list
+sudo apt-get update && sudo apt-get install -y omc
+```
+
+MBL v13 needs the Modelica Standard Library (MSL) 4.1.0, installed once, without `sudo`, with
+`omc`'s own `installPackage` (it writes into `~/.openmodelica/libraries`, not a system path):
+
+```bash
+echo 'installPackage(Modelica, "4.1.0");' > /tmp/install_msl.mos && omc /tmp/install_msl.mos
+```
+
+Clone MBL at the tag this release was exported against:
+
+```bash
+git clone --depth 1 --branch v13.0.0 https://github.com/lbl-srg/modelica-buildings.git ~/modelica/modelica-buildings
+```
+
+(`git rev-parse HEAD` there is `55abf579598ca81cae0a82f337350375958e6722`, the commit recorded
+in every fixture's JSON.) Then, with `omc` on the WSL `PATH` (this release was exported against
+`OpenModelica 1.27.1~2-g6db4671`):
 
 ```bash
 python3 scripts/modelica_export.py <Model> --out tests/data/modelica
@@ -394,7 +415,7 @@ CONTAM's, so it does not:
 Each test asserts the physical mechanism, not just a bound. `ClosedDoors` and `OneOpenDoor` are
 closed, ideal-gas rooms heated by a sinusoidal source: MBL's rooms heat at constant volume, while
 noodl's zone capacity is the constant-pressure `m cp`, so the ratio of MBL's to noodl's
-temperature rise should be `cp/cv` — measured 1.4016 and 1.3996 against `cp/cv` = 1.398 and
+temperature rise should be `cp/cv` — measured 1.4016 and 1.3995 against `cp/cv` = 1.398 and
 1.400. `ReverseBuoyancy`'s zones start 1325 Pa above the boundary; MBL releases the excess through
 mass storage and cools by close to the flow-work-minus-latent-heat prediction (0.83 K measured
 against 0.78 K predicted, within the ruled 10 % tolerance), while noodl starts already balanced
