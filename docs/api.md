@@ -33,6 +33,13 @@ Generated from the package's own docstrings. For the ideas behind these objects,
 ::: noodl.elements.damper
 ::: noodl.elements.upstream
 
+::: noodl.elements.mbl
+    options:
+      members: [MBLPowerLaw, mbl_orifice, mbl_ela, mbl_point, mbl_points, mbl_coefficient,
+                MBLTable, MBLDoorOpen, MBLDoorOperable, mbl_door_pair, mbl_operable_door_pair,
+                MBLDoorCompartment, MBLDoorCompartmentOperable, DoorCompartmentHead,
+                mbl_discretized_door, mbl_discretized_operable_door, MBLMedium, medium]
+
 ::: noodl.drives
     options:
       members: [Drive, ConstantDrive, Stack, Wind, WindProfile]
@@ -115,6 +122,9 @@ Generated from the package's own docstrings. For the ideas behind these objects,
     options:
       members: [read_wth, Weather]
 ::: noodl.apps.building_physics.sources
+::: noodl.apps.building_physics.modelica
+    options:
+      members: [read_modelica, ModelicaNames, ModelicaImportError, simulate, step_drivers]
 
 ### Street air quality
 

@@ -1393,6 +1393,72 @@ check.
 where capacities bind is its own milestone. Moving the MUNICH reader from a separate analysis
 pipeline into `noodl.apps.street_aq` is also deferred.
 
+## Modelica Buildings Library import and parity (25 Sep 2026)
+
+Design: `docs/superpowers/specs/2026-09-24-modelica-import-design.md` (amended 25 Sep 2026, see
+below); ledger and every measurement in `.superpowers/sdd/2026-09-24-modelica-import/`.
+
+`noodl.apps.building_physics.read_modelica` imports multizone airflow models built with the
+Modelica Buildings Library (MBL) v13.0.0 (commit `55abf579598ca81cae0a82f337350375958e6722`),
+giving the building physics application a second reference implementation, independent of
+CONTAM. OpenModelica, run once in WSL, exports each model's component graph and evaluated
+parameters as JSON and its own simulated result as CSV (`scripts/modelica_export.py`, spec
+section 4); both are committed fixtures, so the test suite needs no OpenModelica install. New
+primitives in `noodl.elements.mbl` (the power-law family, the tabulated flow law, the doors and
+the discretised doors) transcribe MBL's equations exactly, including its regularisation, each
+checked to 1e-12 relative against an independent NumPy transcription of the cited MBL source
+line before being wired into any model.
+
+**Scope.** `Buildings.Airflow.Multizone` elements, `MixingVolume` zones, pressure/temperature
+boundaries and trace substances — not `Buildings.ThermalZones`, HVAC, wind, weather or district
+networks. 18 of the library's 23 multizone example/validation models are supported (8
+`Validation` + 10 `Examples`); the other 5 are refused by name: wind pressure, weather data,
+feedback controllers or a dynamic hydrostatic column (`PressurizationData`, `TrickleVent`,
+`ChimneyShaftNoVolume`, `ChimneyShaftWithVolume`), and a mass source into two boundary-less
+volumes that would need compressible volume storage (`OneEffectiveAirLeakageArea`).
+
+**Quasi-steady airflow.** Like the CONTAM route, a zone's air mass is not stored — the airflow is
+solved quasi-steady at every step. The 6 algebraic models (no volumes) agree with OpenModelica to
+round-off (worst 1.8e-11, on `OpenDoorTemperature`'s discretised door — five orders of magnitude
+inside tolerance, diagnosed as an OpenModelica solver residual, not a formula difference). Of the
+12 models with volumes: 5 agree closely (`ThreeRoomsContam[DiscretizedDoor]`, `OneRoom`,
+`ZonalFlow`, and `CO2TransportStep` outside the row right after its CO2 pulse); 4 are limited by
+noodl's first-order time step, confirmed by halving it
+(`OpenDoorBuoyancyDynamic[Pressure]`, `NaturalVentilation`, `ReverseBuoyancy3Zones`); 3 are
+dominated by MBL's volume mass storage, which noodl does not model — two closed, heated rooms
+whose MBL-to-noodl temperature-rise ratio is `cp/cv` (measured 1.40), and one model whose zones
+start pressurised 1325 Pa above the boundary and cool as MBL releases the excess through storage.
+Every number is in `docs/applications/building_physics.md` and
+`.superpowers/sdd/2026-09-24-modelica-import/parity-{algebraic,dynamic}.json`. Adding volume mass
+storage would close the remaining gap; it was offered to Maarten as a scope change and is not
+implemented here.
+
+**Notable rulings**, kept for the record because each corrects or extends the design as first
+written:
+
+- The hydrostatic-column head sign in spec section 6 was inverted in an early draft, corrected
+  against a hand check on `ThreeRoomsContam`'s west stack
+  (`dp = p_volTop - p_volWes + 2 h rho g_n`).
+- A signal may drive several inputs — MBL's `ZonalFlow` example drives two flows from one
+  `Constant`.
+- `MediumColumn.densitySelection = "actual"`, `Outside` without a weather-bus signal, and a
+  closed zone group with a net flow imbalance are refused by name rather than supported, as an
+  earlier draft of the spec implied — no supported model needs any of the three.
+- Every source driver (air, heat, species) is the MEAN of its value over each step, not its
+  end-of-step value, so a pulse shorter than the output interval still injects its exact mass
+  (found from `CO2TransportStep`'s 3.6 s pulse landing between two 172.8 s outputs — a reader
+  defect, now fixed).
+- Dynamic parity excludes the `t = StartTime` row from its bound: OpenModelica's own
+  initialisation starts some models pressure-unbalanced (up to 1325 Pa), which noodl's
+  quasi-steady solve does not reproduce; the row is still printed, not hidden.
+- `OneEffectiveAirLeakageArea` moved from supported to refused once the exporter ran on it: its
+  mass source feeds two boundary-less volumes, so the air can only go into compressing them.
+
+**Terminology.** MBL and OpenModelica are a reference implementation; agreement with them is
+parity, never "validated" (reserved for measurements) and never "oracle" — the same rule the
+[applications page](applications/index.md#reference-implementations-parity-and-validation)
+already states for CONTAM, MUNICH, SWMM and EPANET.
+
 ## Appendix: the source tree
 
 A module-by-module map of the repository, as it stood at the end of milestone 5.
@@ -1408,7 +1474,14 @@ src/noodl/
                  quadratic.py (Quadratic), fixed.py (FixedFlow), conductance.py (Conductance),
                  fan.py (FanCurve), duct.py (Duct: Colebrook friction, unrolled), damper.py
                  (Damper), upstream.py (UpstreamDensityPowerLaw, the upstream-density
-                 correction on CONTAM power-law elements)
+                 correction on CONTAM power-law elements); mbl/ the Modelica Buildings Library
+                 (MBL) v13 primitives -- powerlaw.py (MBLPowerLaw and its mbl_orifice/mbl_ela/
+                 mbl_point/mbl_points/mbl_coefficient constructors), table.py (MBLTable, monotone
+                 cubic Hermite), door.py (MBLDoorOpen, MBLDoorOperable: MBL's fixed default
+                 density), door_discretized.py (MBLDoorCompartment[Operable],
+                 DoorCompartmentHead: density at the actual port pressure), media.py (MBLMedium,
+                 medium) -- each transcribed from a cited MBL v13/MSL 4.1 source line, checked
+                 to 1e-12 relative against an independent NumPy transcription
   drives.py      Drive protocol (a function of the DRIVERS alone), ConstantDrive, Stack,
                  Wind, WindProfile (profiles identified by CONTAM's profile number)
   model.py       Model: several physics layers on one network, stepped together;
@@ -1434,7 +1507,15 @@ src/noodl/
                  (mass_orifice, add_large_opening), prj.py (the CONTAM .prj reader, a
                  documented subset, and project_to_model), wth.py (the .wth weather reader),
                  sources.py (the four CONTAM source types), contamx.py (the ContamX driver
-                 over contamxpy)
+                 over contamxpy), modelica/ the Modelica Buildings Library import route --
+                 schema.py (the noodl-modelica/1 JSON reader, ModelicaImportError), graph.py
+                 (ComponentGraph: nodes, fused hydrostatic-column paths, two-way and zonal-flow
+                 edges, in-line sensors as wires), assemble.py (the Model/State/Drivers
+                 builder, ModelicaNames, closed-zone-group and gauge-reference handling),
+                 signals.py (signal evaluation and step-mean source integration for sources
+                 that fall between output times), run.py (simulate, step_drivers) --
+                 read_modelica chains them and returns the same (Model, State, Drivers) triple
+                 as read_prj + project_to_model
   apps/street_aq/ the street application: canyon.py (BoundaryLayer, canyon_velocity,
                  exchange_velocity, the soulhac/macdonald closures), routing.py
                  (StreetGeometry, StreetFlows, routing_matrix, node_closure,
@@ -1460,6 +1541,9 @@ src/noodl/
                  documented EPANET 2.2 .inp subset) and report.py
   apps/inpfile.py  the section-keyed `.inp` tokenizer shared by apps/sewer/inp.py and
                  apps/water/inp.py, and nothing else
+scripts/         modelica_export.py: the OpenModelica export script (spec section 4), run in
+                 WSL with OMPython or omc/.mos to write tests/data/modelica's JSON+CSV
+                 fixtures; not imported by the package and not run by the test suite
 docs/superpowers/  design spec and implementation plans
 tests/
   conftest.py, test_topology.py, test_endpoints.py, test_cycles.py, test_cycles_sparse.py,
@@ -1467,7 +1551,9 @@ tests/
   test_couple.py (the union mechanism: conversions, one- and
   two-way links, aliases, substeps, gradients across the join)
   elements/      test_base.py, test_powerlaw.py, test_quadratic.py, test_fixed.py,
-                 test_conductance.py, test_fan.py
+                 test_conductance.py, test_fan.py; mbl/ test_powerlaw.py, test_table.py,
+                 test_door.py, test_door_discretized.py, test_media.py -- each against an
+                 independent NumPy transcription of the cited MBL source, not noodl's own code
   operators/     test_base.py, test_graph.py, test_advection.py, test_assemble_sparse.py
   solvers/       test_scalar.py, test_linear.py, test_grounding.py, test_iterative.py,
                  test_select.py, test_newton.py, test_newton_operator_contract.py,
@@ -1475,7 +1561,12 @@ tests/
   layers/        test_potential.py, test_potential_sparse.py, test_transport.py,
                  test_transport_sparse.py, test_reaction.py
   apps/building_physics/ test_thermal.py, test_elements.py, test_prj.py, test_wth.py,
-                 test_sources.py; tests/data/contam holds the sample projects
+                 test_sources.py; tests/data/contam holds the sample projects; modelica/
+                 test_schema.py, test_graph.py, test_assemble.py, test_signals.py,
+                 test_export_contract.py (the exporter's JSON writer, checked without
+                 OpenModelica), test_fixtures_present.py; tests/data/modelica holds the 23
+                 exported JSON+CSV fixtures (18 supported, 5 refused), committed so the suite
+                 needs no OpenModelica install
   apps/street_aq/ test_canyon.py, test_routing.py, test_network.py, test_chemistry.py,
                  test_loader.py, test_impaq_port.py, test_conservation.py, test_report.py;
                  tests/data/street holds the AQ_DT and MUNICH fixtures
@@ -1493,7 +1584,11 @@ tests/
                  leiden_small/CONTAM pairing, plus the loose sequential file-exchange
                  comparison); test_coupling_inverse.py (the three inverse examples:
                  calibration through the join, source attribution by one adjoint pass,
-                 latent infiltration via the cycle space; the calibration test is `slow`)
+                 latent infiltration via the cycle space; the calibration test is `slow`);
+                 test_modelica_parity.py (the Modelica Buildings Library parity: 6 algebraic
+                 models to round-off plus the CONTAM cross-check on OneWayFlow, 12 dynamic
+                 models in parity/step-limited/storage-dominated groups, 5 named refusals; 9
+                 of the 12 dynamic cases are `slow`)
   golden/        stored reference results (contam_airflow.json, natural_ventilation.json)
                  and load_golden/save_golden
 benchmarks/

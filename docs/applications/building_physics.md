@@ -191,6 +191,106 @@ shortest arc. `drivers_at(t)` returns the driver keys a `build_model`-built mode
 `"<thermal>.x_boundary"`, `"P_ref"`, `"V_met"`, `"theta_w"`. It handles the single-boundary-node
 case; a model with several prescribed temperatures must build its own boundary vector.
 
+### Modelica Buildings Library
+
+`read_modelica(path) -> (model, state, drivers)` imports a multizone airflow model built with the
+Modelica Buildings Library (MBL) v13.0.0 (commit `55abf579598ca81cae0a82f337350375958e6722`)
+through an OpenModelica JSON export — a second reference implementation for this application,
+independent of CONTAM. The reader never parses Modelica source and never evaluates a Modelica
+expression: every number in the JSON was already evaluated by OpenModelica.
+
+```python
+from noodl.apps.building_physics import read_modelica
+from noodl.apps.building_physics.modelica import simulate
+
+model, state, drivers, names = read_modelica("tests/data/modelica/OneRoom.json", return_names=True)
+result = simulate(model, state, drivers, names.times)
+
+print(result["T"][-1])       # zone temperatures (K) at the last grid time, node order names.nodes
+print(result["air.q"][-1])   # edge flows (kg/s); names.edges maps an MBL instance to its columns
+```
+
+**Supported (18 models: 8 `Validation` + 10 `Examples`).** `Buildings.Airflow.Multizone`
+elements, `MixingVolume` zones, pressure/temperature boundaries and trace substances — not
+`Buildings.ThermalZones`, HVAC, wind, weather or district networks. `Validation`: `OneWayFlow`,
+`DoorOpenClosed`, `OpenDoorPressure`, `OpenDoorTemperature`, `ThreeRoomsContam`,
+`ThreeRoomsContamDiscretizedDoor`, `OpenDoorBuoyancyDynamic`, `OpenDoorBuoyancyPressureDynamic`.
+`Examples`: `CO2TransportStep`, `ClosedDoors`, `NaturalVentilation`, `OneOpenDoor`, `OneRoom`,
+`Orifice`, `PowerLaw`, `ReverseBuoyancy`, `ReverseBuoyancy3Zones`, `ZonalFlow`.
+
+**Refused, each with a named error** (`ModelicaImportError` lists every offending instance and
+its class):
+
+- `PressurizationData`, `TrickleVent`, `ChimneyShaftNoVolume`, `ChimneyShaftWithVolume` — wind
+  pressure, weather data, feedback controllers, or a dynamic (mass- and heat-storing) hydrostatic
+  medium column, none of which is in scope.
+- `OneEffectiveAirLeakageArea` — a mass source feeding two boundary-less volumes; the injected
+  air can only go into compressing them, which needs the compressible volume storage this
+  release does not model.
+
+For example, reading `PressurizationData` raises:
+
+```
+ModelicaImportError: modelica: refused 3 items:
+  - east (Buildings.Fluid.Sources.Outside_CpLowRise): wind pressure is not supported
+  - weaDat (Buildings.BoundaryConditions.WeatherData.ReaderTMY3): weather data is not supported
+  - west (Buildings.Fluid.Sources.Outside_CpLowRise): wind pressure is not supported
+```
+
+**Conventions and deviations from the design record** (the spec was amended 25 Sep 2026 to match;
+see `docs/superpowers/specs/2026-09-24-modelica-import-design.md` section 6):
+
+- `DoorOpen`/`DoorOperable` use MBL's fixed default density (`Door.mo`); a discretised door
+  (`DoorDiscretizedOpen`/`Operable`) evaluates density at the actual port pressure
+  (`TwoWayFlowElement.mo`) instead — the two door families do not share one convention.
+- A door becomes two directional noodl edges between the same pair of zones; a discretised door
+  becomes one edge per compartment, each with its own hydrostatic head.
+- Zonal flows are four-port, like doors (not the two-port shape a one-way element has), and
+  become two directional edges the same way.
+- An in-line flow sensor (`Buildings.Fluid.Sensors`, flow-through) is a transparent wire: it adds
+  no node and no pressure drop.
+- `PrescribedHeatFlow` is supported only at `alpha = 0` (MSL's default: no temperature
+  dependence); a nonzero `alpha` is refused.
+- A boundary wired straight to one zone's port, and to no other port, is supported: it fixes that
+  zone's pressure.
+- `"air.phi"` is GAUGE pressure relative to a per-model reference `p_ref` (the first boundary's
+  pressure, or an attached boundary's, at the first grid time; the first zone's `p_start` with
+  neither) — flows depend only on pressure differences, so the choice changes no result.
+- Every source driver (air, heat and species) is the MEAN of the source over each step, not its
+  end-of-step value, so that a pulse shorter than the output interval still injects its exact
+  mass (found from `CO2TransportStep`'s 3.6 s pulse landing between two 172.8 s outputs).
+- A signal may drive several inputs (`drives` accepts one name or a list) — MBL's `ZonalFlow`
+  example drives two flows from one `Constant`.
+- Refused, also with a named error: a closed group of zones (joined only by pressure-dependent
+  edges or zonal flows, no boundary among them) with a net flow imbalance — an unequal
+  `ZonalFlow_m_flow` pair or a mass source into it; `MediumColumn.densitySelection = "actual"`;
+  and `Outside` without a weather-bus signal driving it. None of the 18 supported models needs
+  any of the three.
+
+**Quasi-steady airflow.** Like the CONTAM route, a volume's air mass is not stored: the airflow
+is quasi-steady at every step. MBL's volumes do store mass, so a model whose dynamics are
+dominated by that storage — a closed, heated room expanding through its leakage, or an initial
+pressure imbalance draining away — parts company with noodl by more than round-off (see the
+parity table below). Adding volume mass storage would close this gap; it is a follow-up, offered
+to Maarten and not implemented in this release.
+
+**Reproducing the export (WSL only — the test suite itself needs none of this).** OpenModelica
+runs in WSL (Ubuntu 22.04), installed from the OpenModelica apt repository (needs `sudo`, done
+once by whoever administers the WSL environment). MBL is cloned at
+`~/modelica/modelica-buildings`, tag `v13.0.0`; the Modelica Standard Library (MSL) v4.1.0 that
+MBL v13 depends on is installed alongside it. This release was exported against
+`OpenModelica 1.27.1~2-g6db4671`. With `omc` on the WSL `PATH`:
+
+```bash
+python3 scripts/modelica_export.py <Model> --out tests/data/modelica
+```
+
+writes `tests/data/modelica/<Model>.json` (the component graph) and `<Model>.csv` (OpenModelica's
+own simulated reference) as committed fixtures. `scripts/modelica_export.py` is not imported by
+the package and is not run by the test suite. 9 of the 12 dynamic parity tests take 30 s–5 min
+each and are marked `@pytest.mark.slow`, excluded by the repository's default `pytest` run;
+`pytest -m slow` runs them.
+
 ## Verification
 
 ### Against ContamX
@@ -218,6 +318,99 @@ a residual proportional to $\Delta T$ even if the absolute number stayed small.
 
 The path-flow sign convention was verified independently against two cases rather than assumed,
 since `contamxpy`'s own documentation does not pin the sign of `getPathFlow`.
+
+### Against OpenModelica (Modelica Buildings Library)
+
+**Algebraic models (6, no volumes).** Every CSV row and column against OpenModelica's own
+simulation, `|noodl - omc| <= 1e-6 |omc| + 1e-9` kg/s:
+
+| Model | Worst relative error | Rows compared |
+|---|---|---|
+| OneWayFlow | 2.4e-16 | 501 |
+| DoorOpenClosed | 1.2e-16 | 501 |
+| OpenDoorPressure | 2.4e-16 | 49 |
+| OpenDoorTemperature | 1.8e-11 | 49 |
+| Orifice | 4.0e-16 | 501 |
+| PowerLaw | 6.1e-16 | 501 |
+
+All at round-off except `OpenDoorTemperature`, whose discretised-door port flows sit at 1.8e-11
+relative — still five orders of magnitude inside the 1e-6 bound, and diagnosed as an
+OpenModelica nonlinear-solver residual on the door's inflow-density loop, not a formula
+difference.
+
+The **CONTAM cross-check** on `OneWayFlow` (13 pressure-difference knots × 8 elements, from
+CONTAM's own validation table, `OneWayFlow.mo`'s `contamData`): noodl differs from CONTAM by at
+most 0.74 % relative (7.68e-4 kg/s absolute) — exactly the amount MBL itself differs from CONTAM.
+The assertion is `|noodl - contam| <= |omc - contam| + 1e-6 |omc| + 1e-9` at every entry: noodl
+adds nothing to MBL's own departure from the table (41 of 104 entries miss the table's 3
+significant figures, in MBL as much as in noodl).
+
+**Dynamic models (12, with volumes).** The error metric is `|noodl - omc| / max(|omc|, floor)`
+over every row after `t = StartTime`; the table below instead reports, per model, the worst
+ABSOLUTE error in temperature (K) and pressure (Pa), and the worst flow error as a percentage of
+the model's own largest flow — the more informative view, since T and p in kelvin and pascal are
+insensitive to relative error and a flow that reverses sign makes a relative error explode near
+the crossing.
+
+*Parity* — agrees with OpenModelica to its own discretisation/solver tolerance:
+
+| Model | T, abs (K) | p, abs (Pa) | flow, abs (kg/s) | flow, % of model's largest flow |
+|---|---|---|---|---|
+| ThreeRoomsContam | 2.1e-6 | 3.7e-5 | 2.3e-7 | 5.4e-5 % |
+| ThreeRoomsContamDiscretizedDoor | 2.1e-6 | 3.7e-5 | 1.1e-7 | 2.6e-5 % |
+| OneRoom | 5.8e-11 | 1.5e-11 | 1.2e-13 | 1.6e-9 % |
+| ZonalFlow | 1.0e-2 | 1.5e-11 | 0 | 0 % |
+| CO2TransportStep | 2.1e-6 | 5.0e-5 | 2.6e-7 | 6.2e-5 % |
+
+`CO2TransportStep`'s trace-gas mass fraction `C` is excluded from this group: the row just after
+its 3.6 s CO2 pulse differs from OpenModelica by up to 170 % relative (6.0e-8 kg/kg absolute) —
+noodl injects the pulse's exact mass but spreads it over its 172.8 s step, while OpenModelica has
+only just begun to receive it. An independent DOP853 integration of the same species equations
+(reusing noodl's flows) shows OpenModelica's own error dominates from about t > 5000 s: up to
+3.8 % of the peak concentration, against noodl's 0.6 %.
+
+*Step-limited* — first order in noodl's time step; halving the step halves the error:
+
+| Model | T, abs (K) | p, abs (Pa) | flow, abs (kg/s) | flow, % of model's largest flow |
+|---|---|---|---|---|
+| OpenDoorBuoyancyDynamic | 1.0e-2 | 2.1e-4 | 2.0e-3 | 1.2 % |
+| OpenDoorBuoyancyPressureDynamic | 1.1e-2 | 2.0e-4 | 1.9e-3 | 1.1 % |
+| NaturalVentilation | 1.1e-3 | 0.12 | 5.3e-5 | 0.15 % |
+| ReverseBuoyancy3Zones | 2.0e-2 | 1.6e-3 | 1.3e-3 | 0.46 % |
+
+Confirmed directly: halving `OpenDoorBuoyancyDynamic`'s step scales its worst door-flow and
+boundary-temperature error by a factor of 1.97–2.04
+(`test_step_limited_error_halves_with_the_step`).
+
+*Storage-dominated* — MBL's volumes compress and expand; noodl's airflow is quasi-steady, like
+CONTAM's, so it does not:
+
+| Model | T, abs (K) | p, abs (Pa) | flow, abs (kg/s) | flow, % of model's largest flow |
+|---|---|---|---|---|
+| ClosedDoors | 0.31 | 243 | 8.3e-5 | 73 % |
+| OneOpenDoor | 0.30 | 366 | 8.2e-4 | 0.9 % |
+| ReverseBuoyancy | 0.90 | 566 | 0.20 | 53 % |
+
+Each test asserts the physical mechanism, not just a bound. `ClosedDoors` and `OneOpenDoor` are
+closed, ideal-gas rooms heated by a sinusoidal source: MBL's rooms heat at constant volume, while
+noodl's zone capacity is the constant-pressure `m cp`, so the ratio of MBL's to noodl's
+temperature rise should be `cp/cv` — measured 1.4016 and 1.3996 against `cp/cv` = 1.398 and
+1.400. `ReverseBuoyancy`'s zones start 1325 Pa above the boundary; MBL releases the excess through
+mass storage and cools by close to the flow-work-minus-latent-heat prediction (0.83 K measured
+against 0.78 K predicted, within the ruled 10 % tolerance), while noodl starts already balanced
+and does not cool.
+
+**The `t = StartTime` row** is excluded from every bound above, and reported separately. At that
+row OpenModelica holds MBL's own pressure initialisation — up to 35 Pa off balance in the
+`ThreeRooms*`/`CO2TransportStep`/`ReverseBuoyancy3Zones` stack, 1325 Pa in `ReverseBuoyancy` —
+which noodl's quasi-steady solve starts already balanced against. This is an initial-transient
+difference from how the two solvers reach their first row, not a parity failure, and the test
+still prints it.
+
+Every column's numbers (not just the worst) are in
+`.superpowers/sdd/2026-09-24-modelica-import/parity-algebraic.json` and `parity-dynamic.json`.
+Volume mass storage — the mechanism behind every number above 1 % here — is the natural next
+step to close this gap; it is not implemented in this release.
 
 ### Against analytical solutions
 
