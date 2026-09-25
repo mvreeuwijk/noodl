@@ -1,0 +1,168 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "Buildings.Airflow.Multizone.Examples.ZonalFlow",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 3600.0,
+    "Interval": 7.2,
+    "Tolerance": 1e-06
+  },
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "X_default": [
+      0.01,
+      0.99
+    ],
+    "nXi": 1,
+    "extraPropertiesNames": [],
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "rooA",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "massDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "substanceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "traceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "p_start": 101325.0,
+        "T_start": 303.15,
+        "X_start": [
+          0.015,
+          0.985
+        ],
+        "C_start": [],
+        "C_nominal": [],
+        "mSenFac": 1.0,
+        "initialize_p": true,
+        "m_flow_nominal": 0.001,
+        "nPorts": 4,
+        "m_flow_small": 1.0000000000000001e-07,
+        "allowFlowReversal": true,
+        "V": 100.0,
+        "use_C_flow": false
+      }
+    },
+    {
+      "name": "rooB",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "massDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "substanceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "traceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "p_start": 101325.0,
+        "T_start": 293.15,
+        "X_start": [
+          0.01,
+          0.99
+        ],
+        "C_start": [],
+        "C_nominal": [],
+        "mSenFac": 1.0,
+        "initialize_p": true,
+        "m_flow_nominal": 0.001,
+        "nPorts": 4,
+        "m_flow_small": 1.0000000000000001e-07,
+        "allowFlowReversal": true,
+        "V": 1.0,
+        "use_C_flow": false
+      }
+    },
+    {
+      "name": "zonFlo",
+      "class": "Buildings.Airflow.Multizone.ZonalFlow_ACS",
+      "parameters": {
+        "allowFlowReversal1": false,
+        "allowFlowReversal2": false,
+        "m1_flow_nominal": 0.0033333333333333335,
+        "m2_flow_nominal": 0.0033333333333333335,
+        "m1_flow_small": 3.3333333333333335e-07,
+        "m2_flow_small": 3.3333333333333335e-07,
+        "show_T": false,
+        "useDefaultProperties": false,
+        "V": 1.0
+      }
+    },
+    {
+      "name": "floExc",
+      "class": "Buildings.Airflow.Multizone.ZonalFlow_m_flow",
+      "parameters": {
+        "allowFlowReversal1": false,
+        "allowFlowReversal2": false,
+        "m1_flow_nominal": 0.0033333333333333335,
+        "m2_flow_nominal": 0.0033333333333333335,
+        "m1_flow_small": 3.3333333333333335e-07,
+        "m2_flow_small": 3.3333333333333335e-07,
+        "show_T": false
+      }
+    }
+  ],
+  "connections": [
+    [
+      "rooA.ports[1]",
+      "zonFlo.port_a1"
+    ],
+    [
+      "zonFlo.port_b1",
+      "rooB.ports[1]"
+    ],
+    [
+      "zonFlo.port_b2",
+      "rooA.ports[2]"
+    ],
+    [
+      "zonFlo.port_a2",
+      "rooB.ports[2]"
+    ],
+    [
+      "floExc.port_a1",
+      "rooA.ports[3]"
+    ],
+    [
+      "floExc.port_b1",
+      "rooB.ports[3]"
+    ],
+    [
+      "floExc.port_a2",
+      "rooB.ports[4]"
+    ],
+    [
+      "floExc.port_b2",
+      "rooA.ports[4]"
+    ]
+  ],
+  "signals": [
+    {
+      "name": "ACS",
+      "class": "Modelica.Blocks.Sources.Constant",
+      "parameters": {
+        "k": 0.001388888888888889
+      },
+      "drives": "zonFlo.ACS"
+    },
+    {
+      "name": "m_flow",
+      "class": "Modelica.Blocks.Sources.Constant",
+      "parameters": {
+        "k": 0.02
+      },
+      "drives": [
+        "floExc.mAB_flow",
+        "floExc.mBA_flow"
+      ]
+    }
+  ],
+  "modelica_standard_library": "4.1.0",
+  "experiment_declared": [
+    "Tolerance",
+    "StopTime"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

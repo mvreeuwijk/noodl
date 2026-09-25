@@ -1,0 +1,184 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "Buildings.Airflow.Multizone.Examples.PressurizationData",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 2592000.0,
+    "Interval": 5184.0,
+    "Tolerance": 1e-06
+  },
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "X_default": [
+      0.01,
+      0.99
+    ],
+    "nXi": 1,
+    "extraPropertiesNames": [],
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "weaDat",
+      "class": "Buildings.BoundaryConditions.WeatherData.ReaderTMY3",
+      "parameters": {
+        "filNam": "modelica://Buildings/Resources/weatherdata/USA_CA_San.Francisco.Intl.AP.724940_TMY3.mos",
+        "computeWetBulbTemperature": true,
+        "pAtmSou": "Buildings.BoundaryConditions.Types.DataSource.Parameter",
+        "pAtm": 101325.0,
+        "TDryBulSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "TDryBul": 293.15,
+        "TDewPoiSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "TDewPoi": 283.15,
+        "TBlaSkySou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "TBlaSky": 273.15,
+        "relHumSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "relHum": 0.5,
+        "winSpeSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "winSpe": 1.0,
+        "winDirSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "winDir": 1.0,
+        "HInfHorSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "HInfHor": 0.0,
+        "HSou": "Buildings.BoundaryConditions.Types.RadiationDataSource.File",
+        "ceiHeiSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "ceiHei": 20000.0,
+        "totSkyCovSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "totSkyCov": 0.5,
+        "opaSkyCovSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "opaSkyCov": 0.5,
+        "calTSky": "Buildings.BoundaryConditions.Types.SkyTemperatureCalculation.TemperaturesAndSkyCover"
+      },
+      "unevaluated": [
+        "lon",
+        "lat",
+        "timZon",
+        "alt"
+      ]
+    },
+    {
+      "name": "west",
+      "class": "Buildings.Fluid.Sources.Outside_CpLowRise",
+      "parameters": {
+        "nPorts": 1,
+        "verifyInputs": true,
+        "use_C_in": false,
+        "C": [],
+        "Cp0": 0.6,
+        "s": 5.0,
+        "azi": 1.5707963267948966
+      }
+    },
+    {
+      "name": "east",
+      "class": "Buildings.Fluid.Sources.Outside_CpLowRise",
+      "parameters": {
+        "nPorts": 1,
+        "verifyInputs": true,
+        "use_C_in": false,
+        "C": [],
+        "Cp0": 0.6,
+        "s": 5.0,
+        "azi": -1.5707963267948966
+      }
+    },
+    {
+      "name": "room",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "massDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "substanceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "traceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "p_start": 101325.0,
+        "T_start": 293.15,
+        "X_start": [
+          0.01,
+          0.99
+        ],
+        "C_start": [],
+        "C_nominal": [],
+        "mSenFac": 1.0,
+        "initialize_p": true,
+        "m_flow_nominal": 0.01,
+        "nPorts": 2,
+        "m_flow_small": 1.0000000000000002e-06,
+        "allowFlowReversal": true,
+        "V": 62.5,
+        "use_C_flow": false
+      }
+    },
+    {
+      "name": "pow_1dat",
+      "class": "Buildings.Airflow.Multizone.Point_m_flow",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.8508094785806997,
+        "m_flow_small": 8.508094785806997e-05,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.66,
+        "k": 8.508094785806996,
+        "dpMea_nominal": 50.0,
+        "mMea_flow_nominal": 112.5
+      }
+    },
+    {
+      "name": "pow_1dat1",
+      "class": "Buildings.Airflow.Multizone.Point_m_flow",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.8508094785806997,
+        "m_flow_small": 8.508094785806997e-05,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.66,
+        "k": 8.508094785806996,
+        "dpMea_nominal": 50.0,
+        "mMea_flow_nominal": 112.5
+      }
+    }
+  ],
+  "connections": [
+    [
+      "weaDat.weaBus",
+      "west.weaBus"
+    ],
+    [
+      "east.weaBus",
+      "weaDat.weaBus"
+    ],
+    [
+      "east.ports[1]",
+      "pow_1dat.port_a"
+    ],
+    [
+      "pow_1dat.port_b",
+      "room.ports[1]"
+    ],
+    [
+      "pow_1dat1.port_a",
+      "room.ports[2]"
+    ],
+    [
+      "pow_1dat1.port_b",
+      "west.ports[1]"
+    ]
+  ],
+  "signals": [],
+  "modelica_standard_library": "4.1.0",
+  "experiment_declared": [
+    "StopTime",
+    "Tolerance"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

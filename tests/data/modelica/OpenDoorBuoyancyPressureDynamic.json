@@ -1,0 +1,260 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "Buildings.Airflow.Multizone.Validation.OpenDoorBuoyancyPressureDynamic",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 14400.0,
+    "Interval": 28.8,
+    "Tolerance": 1e-08
+  },
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "X_default": [
+      0.01,
+      0.99
+    ],
+    "nXi": 1,
+    "extraPropertiesNames": [],
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "doo",
+      "class": "Buildings.Airflow.Multizone.DoorOpen",
+      "parameters": {
+        "allowFlowReversal1": true,
+        "allowFlowReversal2": true,
+        "m1_flow_nominal": 0.0033333333333333335,
+        "m2_flow_nominal": 0.0033333333333333335,
+        "m1_flow_small": 3.3333333333333335e-07,
+        "m2_flow_small": 3.3333333333333335e-07,
+        "show_T": false,
+        "wOpe": 0.9,
+        "hOpe": 2.1,
+        "dp_turbulent": 0.01,
+        "CD": 0.65,
+        "m": 0.5
+      }
+    },
+    {
+      "name": "bou",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "nPorts": 1,
+        "verifyInputs": false,
+        "use_X_in": false,
+        "use_Xi_in": false,
+        "use_C_in": false,
+        "X": [
+          0.01,
+          0.99
+        ],
+        "C": [],
+        "use_p_in": false,
+        "p": 101325.0,
+        "use_T_in": false,
+        "T": 293.15
+      }
+    },
+    {
+      "name": "bouA",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "massDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "substanceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "traceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "p_start": 101325.0,
+        "T_start": 292.15,
+        "X_start": [
+          0.01,
+          0.99
+        ],
+        "C_start": [],
+        "C_nominal": [],
+        "mSenFac": 1.0,
+        "initialize_p": true,
+        "m_flow_nominal": 0.01,
+        "nPorts": 3,
+        "m_flow_small": 1.0000000000000002e-06,
+        "allowFlowReversal": true,
+        "V": 62.5,
+        "use_C_flow": false
+      }
+    },
+    {
+      "name": "bouB",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "massDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "substanceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "traceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "p_start": 101320.0,
+        "T_start": 294.15,
+        "X_start": [
+          0.01,
+          0.99
+        ],
+        "C_start": [],
+        "C_nominal": [],
+        "mSenFac": 1.0,
+        "initialize_p": true,
+        "m_flow_nominal": 0.01,
+        "nPorts": 2,
+        "m_flow_small": 1.0000000000000002e-06,
+        "allowFlowReversal": true,
+        "V": 62.5,
+        "use_C_flow": false
+      }
+    },
+    {
+      "name": "dooDis",
+      "class": "Buildings.Airflow.Multizone.DoorDiscretizedOpen",
+      "parameters": {
+        "allowFlowReversal1": true,
+        "allowFlowReversal2": true,
+        "m1_flow_nominal": 0.0033333333333333335,
+        "m2_flow_nominal": 0.0033333333333333335,
+        "m1_flow_small": 3.3333333333333335e-07,
+        "m2_flow_small": 3.3333333333333335e-07,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "vZer": 0.001,
+        "wOpe": 0.9,
+        "hOpe": 2.1,
+        "hA": 1.35,
+        "hB": 1.35,
+        "nCom": 10,
+        "dp_turbulent": 0.01,
+        "CD": 0.65
+      }
+    },
+    {
+      "name": "bouDis",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "nPorts": 1,
+        "verifyInputs": false,
+        "use_X_in": false,
+        "use_Xi_in": false,
+        "use_C_in": false,
+        "X": [
+          0.01,
+          0.99
+        ],
+        "C": [],
+        "use_p_in": false,
+        "p": 101325.0,
+        "use_T_in": false,
+        "T": 293.15
+      }
+    },
+    {
+      "name": "bouADis",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "massDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "substanceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "traceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "p_start": 101325.0,
+        "T_start": 292.15,
+        "X_start": [
+          0.01,
+          0.99
+        ],
+        "C_start": [],
+        "C_nominal": [],
+        "mSenFac": 1.0,
+        "initialize_p": true,
+        "m_flow_nominal": 0.01,
+        "nPorts": 3,
+        "m_flow_small": 1.0000000000000002e-06,
+        "allowFlowReversal": true,
+        "V": 62.5,
+        "use_C_flow": false
+      }
+    },
+    {
+      "name": "bouBDis",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "massDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "substanceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "traceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "p_start": 101320.0,
+        "T_start": 294.15,
+        "X_start": [
+          0.01,
+          0.99
+        ],
+        "C_start": [],
+        "C_nominal": [],
+        "mSenFac": 1.0,
+        "initialize_p": true,
+        "m_flow_nominal": 0.01,
+        "nPorts": 2,
+        "m_flow_small": 1.0000000000000002e-06,
+        "allowFlowReversal": true,
+        "V": 62.5,
+        "use_C_flow": false
+      }
+    }
+  ],
+  "connections": [
+    [
+      "doo.port_b1",
+      "bouB.ports[1]"
+    ],
+    [
+      "doo.port_a2",
+      "bouB.ports[2]"
+    ],
+    [
+      "doo.port_a1",
+      "bouA.ports[1]"
+    ],
+    [
+      "doo.port_b2",
+      "bouA.ports[2]"
+    ],
+    [
+      "bou.ports[1]",
+      "bouA.ports[3]"
+    ],
+    [
+      "dooDis.port_b1",
+      "bouBDis.ports[1]"
+    ],
+    [
+      "dooDis.port_a2",
+      "bouBDis.ports[2]"
+    ],
+    [
+      "dooDis.port_a1",
+      "bouADis.ports[1]"
+    ],
+    [
+      "dooDis.port_b2",
+      "bouADis.ports[2]"
+    ],
+    [
+      "bouDis.ports[1]",
+      "bouADis.ports[3]"
+    ]
+  ],
+  "signals": [],
+  "modelica_standard_library": "4.1.0",
+  "experiment_declared": [
+    "StopTime",
+    "Tolerance"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

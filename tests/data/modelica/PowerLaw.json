@@ -1,0 +1,256 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "Buildings.Airflow.Multizone.Examples.PowerLaw",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 1.0,
+    "Interval": 0.002,
+    "Tolerance": 1e-06
+  },
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "X_default": [
+      0.01,
+      0.99
+    ],
+    "nXi": 1,
+    "extraPropertiesNames": [],
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "pow_m_flow",
+      "class": "Buildings.Airflow.Multizone.Coefficient_m_flow",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 3.3300000000000003e-06,
+        "m_flow_small": 3.3300000000000004e-10,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.59,
+        "k": 3.33e-05
+      }
+    },
+    {
+      "name": "roo1",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "nPorts": 1,
+        "verifyInputs": false,
+        "use_X_in": false,
+        "use_Xi_in": false,
+        "use_C_in": false,
+        "X": [
+          0.01,
+          0.99
+        ],
+        "C": [],
+        "use_p_in": true,
+        "p": 101325.0,
+        "use_T_in": false,
+        "T": 278.15
+      }
+    },
+    {
+      "name": "roo2",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "nPorts": 1,
+        "verifyInputs": false,
+        "use_X_in": false,
+        "use_Xi_in": false,
+        "use_C_in": false,
+        "X": [
+          0.01,
+          0.99
+        ],
+        "C": [],
+        "use_p_in": true,
+        "p": 101325.0,
+        "use_T_in": false,
+        "T": 293.15
+      }
+    },
+    {
+      "name": "den1",
+      "class": "Buildings.Fluid.Sensors.DensityTwoPort",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.1,
+        "m_flow_small": 1e-05,
+        "tau": 0.0,
+        "initType": "Modelica.Blocks.Types.Init.InitialState",
+        "d_start": 1.2,
+        "T_start": 293.15,
+        "p_start": 101325.0,
+        "X_start": [
+          0.01,
+          0.99
+        ]
+      },
+      "role": "observer"
+    },
+    {
+      "name": "den2",
+      "class": "Buildings.Fluid.Sensors.DensityTwoPort",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.1,
+        "m_flow_small": 1e-05,
+        "tau": 0.0,
+        "initType": "Modelica.Blocks.Types.Init.InitialState",
+        "d_start": 1.2,
+        "T_start": 293.15,
+        "p_start": 101325.0,
+        "X_start": [
+          0.01,
+          0.99
+        ]
+      },
+      "role": "observer"
+    },
+    {
+      "name": "pow_V_flow",
+      "class": "Buildings.Airflow.Multizone.Coefficient_V_flow",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 3.3300000000000007e-06,
+        "m_flow_small": 3.330000000000001e-10,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.59,
+        "C": 2.7750000000000004e-05
+      }
+    },
+    {
+      "name": "pow_1dat",
+      "class": "Buildings.Airflow.Multizone.Point_m_flow",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 3.315022212164123e-06,
+        "m_flow_small": 3.315022212164123e-10,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.59,
+        "k": 3.315022212164123e-05,
+        "dpMea_nominal": 50.0,
+        "mMea_flow_nominal": 0.0003333333333333333
+      }
+    },
+    {
+      "name": "pow_2dat",
+      "class": "Buildings.Airflow.Multizone.Points_m_flow",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 3.3333333333333337e-06,
+        "m_flow_small": 3.3333333333333337e-10,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.5885919100677792,
+        "k": 3.3333333333333335e-05,
+        "dpMea_nominal": [
+          1.0,
+          50.0
+        ],
+        "mMea_flow_nominal": [
+          3.3333333333333335e-05,
+          0.0003333333333333333
+        ]
+      }
+    }
+  ],
+  "connections": [
+    [
+      "roo1.ports[1]",
+      "den1.port_a"
+    ],
+    [
+      "den1.port_b",
+      "pow_m_flow.port_a"
+    ],
+    [
+      "pow_m_flow.port_b",
+      "den2.port_a"
+    ],
+    [
+      "den2.port_b",
+      "roo2.ports[1]"
+    ],
+    [
+      "den1.port_b",
+      "pow_V_flow.port_a"
+    ],
+    [
+      "pow_V_flow.port_b",
+      "den2.port_a"
+    ],
+    [
+      "den1.port_b",
+      "pow_1dat.port_a"
+    ],
+    [
+      "den1.port_b",
+      "pow_2dat.port_a"
+    ],
+    [
+      "pow_1dat.port_b",
+      "den2.port_a"
+    ],
+    [
+      "pow_2dat.port_b",
+      "den2.port_a"
+    ]
+  ],
+  "signals": [
+    {
+      "name": "ramp1",
+      "class": "Modelica.Blocks.Sources.Ramp",
+      "parameters": {
+        "height": 6.0,
+        "duration": 0.5,
+        "offset": -3.0,
+        "startTime": 0.25
+      },
+      "drives": "add.u2"
+    },
+    {
+      "name": "pressure",
+      "class": "Modelica.Blocks.Sources.Constant",
+      "parameters": {
+        "k": 100000.0
+      },
+      "drives": [
+        "add.u1",
+        "roo1.p_in"
+      ]
+    },
+    {
+      "name": "add",
+      "class": "Modelica.Blocks.Math.Add",
+      "parameters": {
+        "k1": 1.0,
+        "k2": 1.0
+      },
+      "drives": "roo2.p_in"
+    }
+  ],
+  "modelica_standard_library": "4.1.0",
+  "experiment_declared": [
+    "StopTime",
+    "Tolerance"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

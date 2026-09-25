@@ -1,0 +1,335 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "Buildings.Airflow.Multizone.Examples.ChimneyShaftNoVolume",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 3600.0,
+    "Interval": 7.2,
+    "Tolerance": 1e-06
+  },
+  "medium": {
+    "class": "Modelica.Media.Air.SimpleAir",
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "X_default": [
+      1.0
+    ],
+    "nXi": 0,
+    "extraPropertiesNames": []
+  },
+  "components": [
+    {
+      "name": "roo",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "massDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "substanceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "traceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "p_start": 101325.0,
+        "T_start": 293.15,
+        "X_start": [
+          1.0
+        ],
+        "C_start": [],
+        "C_nominal": [],
+        "mSenFac": 1.0,
+        "initialize_p": true,
+        "m_flow_nominal": 0.05,
+        "nPorts": 3,
+        "m_flow_small": 5e-06,
+        "allowFlowReversal": true,
+        "V": 62.5,
+        "use_C_flow": false
+      }
+    },
+    {
+      "name": "oriChiTop",
+      "class": "Buildings.Airflow.Multizone.Orifice",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0010087005420201711,
+        "m_flow_small": 1.0087005420201712e-07,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.5,
+        "C": 0.008377114562739103,
+        "A": 0.01,
+        "CD": 0.65
+      }
+    },
+    {
+      "name": "boundary",
+      "class": "Buildings.Fluid.Sources.MassFlowSource_T",
+      "parameters": {
+        "nPorts": 1,
+        "verifyInputs": false,
+        "use_X_in": false,
+        "use_Xi_in": false,
+        "use_C_in": false,
+        "X": [
+          1.0
+        ],
+        "C": [],
+        "use_m_flow_in": true,
+        "m_flow": 0.0,
+        "use_T_in": false,
+        "T": 293.15
+      }
+    },
+    {
+      "name": "bou0",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "nPorts": 2,
+        "verifyInputs": false,
+        "use_X_in": false,
+        "use_Xi_in": false,
+        "use_C_in": false,
+        "X": [
+          1.0
+        ],
+        "C": [],
+        "use_p_in": false,
+        "p": 101325.0,
+        "use_T_in": false,
+        "T": 273.15
+      }
+    },
+    {
+      "name": "oriBot",
+      "class": "Buildings.Airflow.Multizone.Orifice",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0010087005420201711,
+        "m_flow_small": 1.0087005420201712e-07,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.5,
+        "C": 0.008377114562739103,
+        "A": 0.01,
+        "CD": 0.65
+      }
+    },
+    {
+      "name": "staOut",
+      "class": "Buildings.Airflow.Multizone.MediumColumn",
+      "parameters": {
+        "h": 1.5,
+        "densitySelection": "Buildings.Airflow.Multizone.Types.densitySelection.fromTop"
+      }
+    },
+    {
+      "name": "oriChiBot",
+      "class": "Buildings.Airflow.Multizone.Orifice",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0010087005420201711,
+        "m_flow_small": 1.0087005420201712e-07,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.5,
+        "C": 0.008377114562739103,
+        "A": 0.01,
+        "CD": 0.65
+      }
+    },
+    {
+      "name": "preHea",
+      "class": "Modelica.Thermal.HeatTransfer.Sources.PrescribedHeatFlow",
+      "parameters": {
+        "T_ref": 293.15,
+        "alpha": 0.0
+      }
+    },
+    {
+      "name": "temSen",
+      "class": "Modelica.Thermal.HeatTransfer.Sensors.TemperatureSensor",
+      "parameters": {}
+    },
+    {
+      "name": "sha",
+      "class": "Buildings.Airflow.Multizone.MediumColumn",
+      "parameters": {
+        "h": 3.0,
+        "densitySelection": "Buildings.Airflow.Multizone.Types.densitySelection.actual"
+      }
+    },
+    {
+      "name": "staIn",
+      "class": "Buildings.Airflow.Multizone.MediumColumn",
+      "parameters": {
+        "h": 1.5,
+        "densitySelection": "Buildings.Airflow.Multizone.Types.densitySelection.fromBottom"
+      }
+    }
+  ],
+  "connections": [
+    [
+      "sha.port_a",
+      "oriChiTop.port_a"
+    ],
+    [
+      "sha.port_b",
+      "oriChiBot.port_b"
+    ],
+    [
+      "staOut.port_b",
+      "oriBot.port_a"
+    ],
+    [
+      "preHea.port",
+      "roo.heatPort"
+    ],
+    [
+      "roo.heatPort",
+      "temSen.port"
+    ],
+    [
+      "bou0.ports[1]",
+      "oriChiTop.port_b"
+    ],
+    [
+      "bou0.ports[2]",
+      "staOut.port_a"
+    ],
+    [
+      "oriBot.port_b",
+      "staIn.port_a"
+    ],
+    [
+      "boundary.ports[1]",
+      "roo.ports[1]"
+    ],
+    [
+      "roo.ports[2]",
+      "staIn.port_b"
+    ],
+    [
+      "roo.ports[3]",
+      "oriChiBot.port_a"
+    ]
+  ],
+  "signals": [
+    {
+      "name": "mRoo_flow",
+      "class": "Modelica.Blocks.Sources.CombiTimeTable",
+      "parameters": {
+        "nout": 1,
+        "tableOnFile": false,
+        "table": [
+          [
+            0.0,
+            0.05
+          ],
+          [
+            600.0,
+            0.05
+          ],
+          [
+            601.0,
+            0.0
+          ],
+          [
+            1800.0,
+            0.0
+          ],
+          [
+            1801.0,
+            -0.05
+          ],
+          [
+            2400.0,
+            -0.05
+          ],
+          [
+            2401.0,
+            0.0
+          ],
+          [
+            3600.0,
+            0.0
+          ]
+        ],
+        "tableName": "NoName",
+        "fileName": "NoName",
+        "delimiter": ",",
+        "nHeaderLines": 0,
+        "verboseRead": true,
+        "smoothness": "Modelica.Blocks.Types.Smoothness.LinearSegments",
+        "extrapolation": "Modelica.Blocks.Types.Extrapolation.LastTwoPoints",
+        "timeScale": 1.0,
+        "offset": [
+          0.0
+        ],
+        "startTime": 0.0,
+        "shiftTime": 0.0,
+        "timeEvents": "Modelica.Blocks.Types.TimeEvents.Always",
+        "verboseExtrapolation": false
+      },
+      "unevaluated": [
+        "columns",
+        "t_min",
+        "t_max",
+        "t_minScaled",
+        "t_maxScaled"
+      ],
+      "drives": "boundary.m_flow_in"
+    },
+    {
+      "name": "con",
+      "class": "Modelica.Blocks.Continuous.LimPID",
+      "parameters": {
+        "controllerType": "Modelica.Blocks.Types.SimpleController.P",
+        "k": 5.0,
+        "Ti": 60.0,
+        "Td": 10.0,
+        "yMax": 1.0,
+        "yMin": -1.0,
+        "wp": 1.0,
+        "wd": 0.0,
+        "Ni": 0.9,
+        "Nd": 10.0,
+        "withFeedForward": false,
+        "kFF": 1.0,
+        "initType": "Modelica.Blocks.Types.Init.InitialState",
+        "xi_start": 0.0,
+        "xd_start": 0.0,
+        "y_start": 0.0,
+        "homotopyType": "Modelica.Blocks.Types.LimiterHomotopy.Linear",
+        "strict": false
+      },
+      "drives": "gain.u"
+    },
+    {
+      "name": "TSet",
+      "class": "Modelica.Blocks.Sources.Constant",
+      "parameters": {
+        "k": 293.15
+      },
+      "drives": "con.u_s"
+    },
+    {
+      "name": "gain",
+      "class": "Modelica.Blocks.Math.Gain",
+      "parameters": {
+        "k": 3000.0
+      },
+      "drives": "preHea.Q_flow"
+    }
+  ],
+  "modelica_standard_library": "4.1.0",
+  "experiment_declared": [
+    "StopTime",
+    "Tolerance"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

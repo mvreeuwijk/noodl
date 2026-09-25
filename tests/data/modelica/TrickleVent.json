@@ -1,0 +1,315 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "Buildings.Airflow.Multizone.Examples.TrickleVent",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 2592000.0,
+    "Interval": 600.0,
+    "Tolerance": 1e-06
+  },
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "X_default": [
+      0.01,
+      0.99
+    ],
+    "nXi": 1,
+    "extraPropertiesNames": [],
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "weaDat",
+      "class": "Buildings.BoundaryConditions.WeatherData.ReaderTMY3",
+      "parameters": {
+        "filNam": "modelica://Buildings/Resources/weatherdata/USA_CA_San.Francisco.Intl.AP.724940_TMY3.mos",
+        "computeWetBulbTemperature": true,
+        "pAtmSou": "Buildings.BoundaryConditions.Types.DataSource.Parameter",
+        "pAtm": 101325.0,
+        "TDryBulSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "TDryBul": 293.15,
+        "TDewPoiSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "TDewPoi": 283.15,
+        "TBlaSkySou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "TBlaSky": 273.15,
+        "relHumSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "relHum": 0.5,
+        "winSpeSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "winSpe": 1.0,
+        "winDirSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "winDir": 1.0,
+        "HInfHorSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "HInfHor": 0.0,
+        "HSou": "Buildings.BoundaryConditions.Types.RadiationDataSource.File",
+        "ceiHeiSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "ceiHei": 20000.0,
+        "totSkyCovSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "totSkyCov": 0.5,
+        "opaSkyCovSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "opaSkyCov": 0.5,
+        "calTSky": "Buildings.BoundaryConditions.Types.SkyTemperatureCalculation.TemperaturesAndSkyCover"
+      },
+      "unevaluated": [
+        "lon",
+        "lat",
+        "timZon",
+        "alt"
+      ]
+    },
+    {
+      "name": "west",
+      "class": "Buildings.Fluid.Sources.Outside_CpLowRise",
+      "parameters": {
+        "nPorts": 1,
+        "verifyInputs": true,
+        "use_C_in": false,
+        "C": [],
+        "Cp0": 0.6,
+        "s": 5.0,
+        "azi": 1.5707963267948966
+      }
+    },
+    {
+      "name": "east",
+      "class": "Buildings.Fluid.Sources.Outside_CpLowRise",
+      "parameters": {
+        "nPorts": 1,
+        "verifyInputs": true,
+        "use_C_in": false,
+        "C": [],
+        "Cp0": 0.6,
+        "s": 5.0,
+        "azi": -1.5707963267948966
+      }
+    },
+    {
+      "name": "room",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "massDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "substanceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "traceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "p_start": 101325.0,
+        "T_start": 293.15,
+        "X_start": [
+          0.01,
+          0.99
+        ],
+        "C_start": [],
+        "C_nominal": [],
+        "mSenFac": 1.0,
+        "initialize_p": true,
+        "m_flow_nominal": 0.01,
+        "nPorts": 2,
+        "m_flow_small": 1.0000000000000002e-06,
+        "allowFlowReversal": true,
+        "V": 62.5,
+        "use_C_flow": false
+      }
+    },
+    {
+      "name": "preHea",
+      "class": "Modelica.Thermal.HeatTransfer.Sources.PrescribedHeatFlow",
+      "parameters": {
+        "T_ref": 293.15,
+        "alpha": 0.0
+      }
+    },
+    {
+      "name": "temSen",
+      "class": "Modelica.Thermal.HeatTransfer.Sensors.TemperatureSensor",
+      "parameters": {}
+    },
+    {
+      "name": "tabDat_m_flow",
+      "class": "Buildings.Airflow.Multizone.Table_m_flow",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 50.0,
+        "m_flow_small": 0.005,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "dpMea_nominal": [
+          -50.0,
+          -25.0,
+          -10.0,
+          -5.0,
+          -3.0,
+          -2.0,
+          -1.0,
+          0.0,
+          1.0,
+          2.0,
+          3.0,
+          4.5,
+          50.0
+        ],
+        "mMea_flow_nominal": [
+          -0.08709,
+          -0.06158,
+          -0.03895,
+          -0.02754,
+          -0.02133,
+          -0.01742,
+          -0.01232,
+          0.0,
+          0.01232,
+          0.01742,
+          0.02133,
+          0.02613,
+          0.02614
+        ]
+      }
+    },
+    {
+      "name": "tabDat_V_flow",
+      "class": "Buildings.Airflow.Multizone.Table_V_flow",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 50.0,
+        "m_flow_small": 0.005,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "dpMea_nominal": [
+          -50.0,
+          -25.0,
+          -10.0,
+          -5.0,
+          -3.0,
+          -2.0,
+          -1.0,
+          0.0,
+          1.0,
+          2.0,
+          3.0,
+          4.5,
+          50.0
+        ],
+        "mMea_flow_nominal": [
+          -0.1254096,
+          -0.0886752,
+          -0.05608799999999999,
+          -0.0396576,
+          -0.030715199999999998,
+          -0.025084799999999997,
+          -0.0177408,
+          0.0,
+          0.0177408,
+          0.025084799999999997,
+          0.030715199999999998,
+          0.0376272,
+          0.0376416
+        ],
+        "VMea_flow_nominal": [
+          -0.104508,
+          -0.073896,
+          -0.04674,
+          -0.033048,
+          -0.025596,
+          -0.020904,
+          -0.014784,
+          0.0,
+          0.014784,
+          0.020904,
+          0.025596,
+          0.031356,
+          0.031368
+        ]
+      }
+    }
+  ],
+  "connections": [
+    [
+      "weaDat.weaBus",
+      "west.weaBus"
+    ],
+    [
+      "east.weaBus",
+      "weaDat.weaBus"
+    ],
+    [
+      "room.heatPort",
+      "temSen.port"
+    ],
+    [
+      "preHea.port",
+      "room.heatPort"
+    ],
+    [
+      "east.ports[1]",
+      "tabDat_m_flow.port_a"
+    ],
+    [
+      "tabDat_m_flow.port_b",
+      "room.ports[1]"
+    ],
+    [
+      "tabDat_V_flow.port_a",
+      "room.ports[2]"
+    ],
+    [
+      "tabDat_V_flow.port_b",
+      "west.ports[1]"
+    ]
+  ],
+  "signals": [
+    {
+      "name": "con",
+      "class": "Modelica.Blocks.Continuous.LimPID",
+      "parameters": {
+        "controllerType": "Modelica.Blocks.Types.SimpleController.P",
+        "k": 5.0,
+        "Ti": 60.0,
+        "Td": 10.0,
+        "yMax": 1.0,
+        "yMin": -1.0,
+        "wp": 1.0,
+        "wd": 0.0,
+        "Ni": 0.9,
+        "Nd": 10.0,
+        "withFeedForward": false,
+        "kFF": 1.0,
+        "initType": "Modelica.Blocks.Types.Init.InitialState",
+        "xi_start": 0.0,
+        "xd_start": 0.0,
+        "y_start": 0.0,
+        "homotopyType": "Modelica.Blocks.Types.LimiterHomotopy.Linear",
+        "strict": false
+      },
+      "drives": "gain.u"
+    },
+    {
+      "name": "TSet",
+      "class": "Modelica.Blocks.Sources.Constant",
+      "parameters": {
+        "k": 293.15
+      },
+      "drives": "con.u_s"
+    },
+    {
+      "name": "gain",
+      "class": "Modelica.Blocks.Math.Gain",
+      "parameters": {
+        "k": 3000.0
+      },
+      "drives": "preHea.Q_flow"
+    }
+  ],
+  "modelica_standard_library": "4.1.0",
+  "experiment_declared": [
+    "StopTime",
+    "Interval",
+    "Tolerance"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

@@ -1,0 +1,210 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "Buildings.Airflow.Multizone.Examples.OneOpenDoor",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 7200.0,
+    "Interval": 14.4,
+    "Tolerance": 1e-06
+  },
+  "medium": {
+    "class": "Modelica.Media.Air.SimpleAir",
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "X_default": [
+      1.0
+    ],
+    "nXi": 0,
+    "extraPropertiesNames": []
+  },
+  "components": [
+    {
+      "name": "dooOpe",
+      "class": "Buildings.Airflow.Multizone.DoorDiscretizedOpen",
+      "parameters": {
+        "allowFlowReversal1": true,
+        "allowFlowReversal2": true,
+        "m1_flow_nominal": 0.0033333333333333335,
+        "m2_flow_nominal": 0.0033333333333333335,
+        "m1_flow_small": 3.3333333333333335e-07,
+        "m2_flow_small": 3.3333333333333335e-07,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "vZer": 0.001,
+        "wOpe": 0.9,
+        "hOpe": 2.1,
+        "hA": 1.35,
+        "hB": 1.35,
+        "nCom": 10,
+        "dp_turbulent": 0.01,
+        "CD": 0.65
+      }
+    },
+    {
+      "name": "volA",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "massDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "substanceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "traceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "p_start": 101325.0,
+        "T_start": 293.15,
+        "X_start": [
+          1.0
+        ],
+        "C_start": [],
+        "C_nominal": [],
+        "mSenFac": 1.0,
+        "initialize_p": true,
+        "m_flow_nominal": 0.01,
+        "nPorts": 4,
+        "m_flow_small": 1.0000000000000002e-06,
+        "allowFlowReversal": true,
+        "V": 62.5,
+        "use_C_flow": false
+      }
+    },
+    {
+      "name": "volB",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "massDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "substanceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "traceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "p_start": 101325.0,
+        "T_start": 293.15,
+        "X_start": [
+          1.0
+        ],
+        "C_start": [],
+        "C_nominal": [],
+        "mSenFac": 1.0,
+        "initialize_p": true,
+        "m_flow_nominal": 0.01,
+        "nPorts": 4,
+        "m_flow_small": 1.0000000000000002e-06,
+        "allowFlowReversal": true,
+        "V": 62.5,
+        "use_C_flow": false
+      }
+    },
+    {
+      "name": "preHeaFlo",
+      "class": "Modelica.Thermal.HeatTransfer.Sources.PrescribedHeatFlow",
+      "parameters": {
+        "T_ref": 293.15,
+        "alpha": 0.0
+      }
+    },
+    {
+      "name": "dooOpeClo",
+      "class": "Buildings.Airflow.Multizone.DoorDiscretizedOperable",
+      "parameters": {
+        "allowFlowReversal1": true,
+        "allowFlowReversal2": true,
+        "m1_flow_nominal": 0.0033333333333333335,
+        "m2_flow_nominal": 0.0033333333333333335,
+        "m1_flow_small": 3.3333333333333335e-07,
+        "m2_flow_small": 3.3333333333333335e-07,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "vZer": 0.001,
+        "wOpe": 0.9,
+        "hOpe": 2.1,
+        "hA": 1.35,
+        "hB": 1.35,
+        "nCom": 10,
+        "dp_turbulent": 0.01,
+        "dpCloRat": 4.0,
+        "CDCloRat": 1.0,
+        "LClo": 0.002,
+        "CDOpe": 0.65,
+        "CDClo": 0.65,
+        "mOpe": 0.5,
+        "mClo": 0.65
+      }
+    }
+  ],
+  "connections": [
+    [
+      "preHeaFlo.port",
+      "volB.heatPort"
+    ],
+    [
+      "volA.ports[1]",
+      "dooOpeClo.port_b2"
+    ],
+    [
+      "volA.ports[2]",
+      "dooOpeClo.port_a1"
+    ],
+    [
+      "volA.ports[3]",
+      "dooOpe.port_b2"
+    ],
+    [
+      "volA.ports[4]",
+      "dooOpe.port_a1"
+    ],
+    [
+      "volB.ports[1]",
+      "dooOpe.port_b1"
+    ],
+    [
+      "volB.ports[2]",
+      "dooOpe.port_a2"
+    ],
+    [
+      "volB.ports[3]",
+      "dooOpeClo.port_b1"
+    ],
+    [
+      "volB.ports[4]",
+      "dooOpeClo.port_a2"
+    ]
+  ],
+  "signals": [
+    {
+      "name": "heaSou",
+      "class": "Modelica.Blocks.Sources.Sine",
+      "parameters": {
+        "amplitude": 1.0,
+        "f": 0.0002777777777777778,
+        "phase": 0.0,
+        "continuous": false,
+        "offset": 0.0,
+        "startTime": 0.0
+      },
+      "drives": "gai.u"
+    },
+    {
+      "name": "gai",
+      "class": "Modelica.Blocks.Math.Gain",
+      "parameters": {
+        "k": 100.0
+      },
+      "drives": "preHeaFlo.Q_flow"
+    },
+    {
+      "name": "ramp",
+      "class": "Modelica.Blocks.Sources.Ramp",
+      "parameters": {
+        "height": 1.0,
+        "duration": 120.0,
+        "offset": 0.0,
+        "startTime": 1000.0
+      },
+      "drives": "dooOpeClo.y"
+    }
+  ],
+  "modelica_standard_library": "4.1.0",
+  "experiment_declared": [
+    "StopTime",
+    "Tolerance"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}
