@@ -1364,6 +1364,45 @@ relabelling would need to preserve that deliberately), and no genuine data dupli
 fix. Flagged here rather than silently resolved either way, since the ledger's wording assumed
 regenerating would remove it and this regeneration does not.
 
+## Weather and exposure additions (25 September 2026)
+
+Two general-purpose additions to the building and street applications:
+
+- **`noodl.apps.building.epw`** (`read_epw`, `write_wth`): reads an EnergyPlus weather
+  (`.epw`) file into a building-app `Weather` and writes it back out as a CONTAM `.wth`
+  file, so one weather sequence can drive both a building and a CONTAM-format comparison
+  from the same source. Day-of-year is computed from `wth.py`'s fixed, non-leap calendar
+  table rather than each row's own `year` column, because a stitched "typical year" file
+  mixes source years of different leap status and a real-calendar day count would break the
+  monotonic time axis `Weather.at()` needs.
+- **`noodl.apps.street.exposure`** (`street_population`, `total_exposure`,
+  `exposure_reduction_forward`, `exposure_reduction_adjoint`, `Q_INHALATION`):
+  population-weighted exposure on a street network and its adjoint-based reduction
+  sensitivity, after Li, Fellini and van Reeuwijk (2023, *Atmos. Environ.* 292, 119432). The
+  reduction from a source cut in one street is obtained as one backward pass of total
+  exposure through the model, exact for the model as solved, rather than the one-dispersion-
+  run-per-street-per-direction sensitivity matrix the original paper builds explicitly.
+
+Both are exported from their apps' `__init__.py` alongside the existing building/street
+public API.
+
+**Verification test instrumentation and terminology.** `tests/verification/test_contam_
+parity.py`, `test_munich.py`, `test_natural_ventilation.py` and `test_street_parity.py` gained
+a `record_property` call per assertion (`check`, `tolerance`, and a `measured_*` value),
+letting `--junitxml` capture what each parity test actually checked and measured, for anyone
+auditing a verification run's junit output. Alongside this,
+`test_street_parity.py`'s IMPAQ comparison helpers and test names (`_oracle`/`_oracle_leiden`,
+`test_..._agree_with_the_oracle_...` and others) were renamed to `_impaq_port`/
+`_impaq_port_leiden` and `*_impaq_port_*`, and a `test_natural_ventilation.py` fixture and
+`test_munich.py`'s module docstring similarly renamed their "oracle" wording to "reference" —
+this project's standing position (see the milestone 5/framework-hardening entries above) is
+that IMPAQ and MUNICH are reference implementations to port-check against, not oracles, and
+this is name/wording only with no effect on any measured value. `tests/apps/street/
+test_impaq_port.py` and two new fixture directories, `tests/data/street/munich_case_excerpt/`
+and `tests/data/street/munich_paris_excerpt/` (small excerpts of a MUNICH test case and of the
+real Le Perreux-sur-Marne case used for a street-network parity comparison), came over the
+same way.
+
 ## Appendix: the source tree
 
 A module-by-module map of the repository, as it stood at the end of milestone 5.
