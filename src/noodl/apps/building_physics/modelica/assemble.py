@@ -110,12 +110,19 @@ A boundary wired straight to a zone (`graph.ComponentGraph.attached`;
 `Validation/OpenDoorBuoyancyDynamic.mo` connects `bou.ports[1]` to `bouA.ports[3]`) fixes
 that volume's pressure: the zone becomes its group's pressure reference, at the boundary's
 pressure (constant or driven by `p_in`) instead of `p_start`, and stays a transport interior
-node. In MBL the boundary then exchanges exactly the air the rest of the group stores or
-releases (`der(m)` of the other volumes); noodl's quasi-steady group stores none, so the
-exchange is zero and the boundary's temperature and composition never enter. That holds only
-if the group is otherwise closed, so the same refusals apply (a source, an unbalanced
-`ZonalFlow_m_flow`), and an attached boundary whose group also reaches a boundary node or
-another attached boundary is refused by name.
+node. The boundary may have no other connected port (`graph.build` refuses one that has).
+In MBL the boundary then exchanges the air the whole group stores or releases: `der(m)` of
+the other volumes AND of the attached volume itself. noodl's quasi-steady group stores none,
+so the exchange is zero and the boundary's temperature and composition never enter. With a
+constant boundary pressure and a pressure-only density (`Buildings.Media.Air`,
+`Air.mo:210-215`) the attached volume's own mass is constant and the only neglected
+exchange is the other volumes' storage (the quasi-steady approximation of spec section 6);
+with a time-varying `p_in`, or a medium whose density depends on temperature (`SimpleAir`,
+`PerfectGas`), the attached volume's own storage is neglected too, and with it the
+boundary's state carried by that inflow. That holds only if the group is otherwise closed, so
+the same refusals apply (a source, an unbalanced `ZonalFlow_m_flow`), and an attached
+boundary whose group also reaches a boundary node or another attached boundary is refused by
+name.
 
 Sources
 -------
@@ -211,8 +218,8 @@ class ModelicaNames:
     kinds: dict[str, tuple[str, ...]]
     times: Tensor
     air_references: tuple[str, ...]
+    p_ref: float  # Pa; `"air.phi"` is `p - p_ref` (module docstring, "Gauge reference")
     attached: dict[str, str] = field(default_factory=dict)  # boundary -> zone it is wired to
-    p_ref: float = 101325.0  # Pa; `"air.phi"` is `p - p_ref` (module docstring)
 
 
 # --------------------------------------------------------------------------- helpers

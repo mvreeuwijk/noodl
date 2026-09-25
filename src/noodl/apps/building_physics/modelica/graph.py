@@ -223,9 +223,13 @@ class _UnionFind:
 
 
 class _ChainRefused(Exception):
-    def __init__(self, message: str) -> None:
+    """`quiet`: the chain ends at a port wired to a refused component, which is already
+    named in the error; the chain adds no message of its own (review fix round 1)."""
+
+    def __init__(self, message: str, quiet: bool = False) -> None:
         super().__init__(message)
         self.message = message
+        self.quiet = quiet
 
 
 def _split(ref: str) -> tuple[str, str]:
@@ -313,6 +317,9 @@ class _Ctx:
     errors: list[str]
     uf: _UnionFind = field(default_factory=_UnionFind)
     fluid_refs_by_instance: dict[str, list[str]] = field(default_factory=dict)
+    # Fluid ports of supported components wired to a refused ("unknown") component: their
+    # "not connected" follow-on is suppressed, the refused component being the root cause.
+    beside_refused: set[str] = field(default_factory=set)
     members_of_root: dict[str, set[str]] = field(default_factory=dict)
     root_to_name: dict[str, str] = field(default_factory=dict)
     root_to_kind: dict[str, str] = field(default_factory=dict)
@@ -381,6 +388,10 @@ def _process_fluid_connections(doc: ModelicaDoc, ctx: _Ctx) -> None:
                 reason = schema.refusal_reason(ctx.by_name[inst].cls)
                 if reason is not None:
                     ctx.errors.append(f"{inst} ({ctx.by_name[inst].cls}): {reason}")
+            if a_fluid and kb == "unknown":
+                ctx.beside_refused.add(a)
+            if b_fluid and ka == "unknown":
+                ctx.beside_refused.add(b)
 
     # Self-union: every port of the SAME zone/boundary/source instance is the same node, and
     # an in-line sensor's two ports are one node (a transparent wire).
@@ -412,10 +423,23 @@ def _assign_nodes(ctx: _Ctx) -> None:
             if ctx.kind_of[_split(m)[0]] in ("zone", "boundary")
         })
         zone_names = [n for n in zb_names if ctx.kind_of[n] == "zone"]
-        if len(zb_names) == 2 and len(zone_names) == 1:
-            # One boundary wired straight to one zone: the zone's node (module docstring).
+        bou = next((n for n in zb_names if n not in zone_names), None)
+        bou_refs = sorted(ctx.fluid_refs_by_instance.get(bou, [])) if bou else []
+        if len(zb_names) == 2 and len(zone_names) == 1 and len(bou_refs) != 1:
+            # The boundary has further connected ports: in MBL they carry the boundary's
+            # own state and mass, which the zone's node cannot represent (review fix round 1).
+            ctx.errors.append(
+                f"{bou} ({ctx.by_name[bou].cls}): wired straight to volume {zone_names[0]} "
+                f"and also through {', '.join(r for r in bou_refs)}; a boundary on a volume "
+                f"must have that one connected port only"
+            )
+            ctx.root_to_name[root] = f"_conflict({','.join(zb_names)})"
+            ctx.root_to_kind[root] = "conflict"
+        elif len(zb_names) == 2 and len(zone_names) == 1:
+            # One boundary wired straight to one zone, by its only connected port: the
+            # zone's node (module docstring).
             zone = zone_names[0]
-            ctx.attached[zone] = next(n for n in zb_names if n != zone)
+            ctx.attached[zone] = bou
             ctx.root_to_name[root] = zone
             ctx.root_to_kind[root] = "zone"
         elif len(zb_names) > 1:
@@ -444,6 +468,8 @@ def _two_way_edges(ctx: _Ctx, want_kind: str) -> list[TwoWayEdge]:
             continue
         refs = [f"{name}.{p}" for p in _FOUR_PORT]
         missing = [r for r in refs if r not in ctx.uf]
+        if missing and all(r in ctx.beside_refused for r in missing):
+            continue  # the refused neighbour is named already (review fix round 1)
         if missing:
             ctx.errors.append(
                 f"{name} ({comp.cls}): port(s) {', '.join(missing)} are not connected"
@@ -554,17 +580,17 @@ def _fuse_paths(ctx: _Ctx) -> list[FlowPath]:
         module docstring defines signs against, so both the per-column sign and the final
         list order (handled by the caller) are flipped relative to a plain forward walk.
         """
-        if own_ref not in ctx.uf:
-            raise _ChainRefused(f"{own_ref}: not connected")
         ref = own_ref
         columns: list[tuple[Component, int]] = []
         while True:
+            if ref not in ctx.uf:
+                raise _ChainRefused(f"{ref}: not connected", quiet=ref in ctx.beside_refused)
             root = ctx.uf.find(ref)
             kind = ctx.root_to_kind[root]
             if kind in ("zone", "boundary"):
                 return ctx.root_to_name[root], columns
             if kind == "conflict":
-                raise _ChainRefused("touches a node that was already refused")
+                raise _ChainRefused("touches a node that was already refused", quiet=True)
             visited_junction_roots.add(root)
             members = ctx.members_of_root[root]
             if len(members) != 2:
@@ -596,7 +622,8 @@ def _fuse_paths(ctx: _Ctx) -> list[FlowPath]:
             src, cols_a = walk(f"{name}.port_a", reversed_walk=True)
             tgt, cols_b = walk(f"{name}.port_b", reversed_walk=False)
         except _ChainRefused as exc:
-            ctx.errors.append(f"{name} ({comp.cls}): {exc.message}")
+            if not exc.quiet:
+                ctx.errors.append(f"{name} ({comp.cls}): {exc.message}")
             continue
         columns = tuple(reversed(cols_a)) + tuple(cols_b)
         paths.append(FlowPath(element=comp, src=src, tgt=tgt, columns=columns))

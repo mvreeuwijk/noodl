@@ -66,7 +66,8 @@ Compartment ``i`` of a door is one noodl edge from side A (``src``) to side B (`
 
 * :class:`DoorCompartmentHead` is a drive (``noodl.drives`` protocol) returning
   ``rho_A hAg[i] - rho_B hBg[i]``, so that the layer's ``dp = (phi_A - phi_B) + head`` is
-  ``dpAB[i]`` (with ``phi = p - p_default`` the port pressures' difference is the potentials').
+  ``dpAB[i]`` (with ``phi = p - p_ref``, any fixed gauge reference -- the Modelica reader uses
+  the first boundary's pressure -- the port pressures' difference is the potentials').
 * :class:`MBLDoorCompartment` / :class:`MBLDoorCompartmentOperable` return that
   compartment's share of the port mass flows, positive from A to B:
 

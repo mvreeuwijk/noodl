@@ -676,3 +676,13 @@ def test_initial_airflow_solve_starts_from_the_linear_guess():
     # -> volWes): its mass balance closes.
     assert float((flow("oriWesTop") - flow("dooOpeClo")).abs().max()) < 1e-12
     assert float(flow("oriWesTop").abs().min()) > 1e-3
+
+
+def test_modelica_names_requires_its_gauge_reference():
+    """Review fix round 1: `p_ref` has no default, so no `ModelicaNames` can silently claim a
+    `p_default` gauge."""
+    from noodl.apps.building_physics.modelica import ModelicaNames
+
+    with pytest.raises(TypeError, match="p_ref"):
+        ModelicaNames(edges={}, nodes={}, kinds={}, times=torch.zeros(1, dtype=F64),
+                      air_references=())

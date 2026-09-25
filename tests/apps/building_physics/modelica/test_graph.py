@@ -286,3 +286,44 @@ def test_two_boundaries_or_two_volumes_wired_together_stay_refused(tmp_path) -> 
     path.write_text(json.dumps(doc))
     with pytest.raises(ModelicaImportError, match="bou and volA and volB: connected directly"):
         build(load(path))
+
+
+def test_attached_boundary_with_further_connected_ports_is_refused(tmp_path) -> None:
+    """Review fix round 1: `bou.ports[2] -> ori -> volB` beside `bou.ports[1] -> volA`. In
+    MBL the air leaving `bou.ports[2]` carries the boundary's own state and mass; merged onto
+    volA's node it would carry volA's. Refused by name instead of re-wired."""
+    import json
+
+    doc = json.loads((FIXTURES / "attached_boundary.json").read_text())
+    for c in doc["components"]:
+        if c["name"] == "bou":
+            c["parameters"]["nPorts"] = 2
+        if c["name"] == "volB":
+            c["parameters"]["nPorts"] = 3
+    doc["components"].append({"name": "ori", "class": "Buildings.Airflow.Multizone.Orifice",
+                              "parameters": {"A": 0.01}})
+    doc["connections"] += [["bou.ports[2]", "ori.port_a"], ["ori.port_b", "volB.ports[3]"]]
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ModelicaImportError) as exc:
+        build(load(path))
+    msg = str(exc.value)
+    assert "refused 1 item" in msg
+    assert ("bou (Buildings.Fluid.Sources.Boundary_pT): wired straight to volume volA and "
+            "also through bou.ports[1], bou.ports[2]") in msg
+
+
+def test_ports_beside_a_refused_component_add_no_follow_on_message(tmp_path) -> None:
+    """Review fix round 1: an orifice wired to a refused `Outside_CpLowRise` is not also
+    reported as "not connected"; the refusal names the root cause once."""
+    import json
+
+    doc = json.loads((FIXTURES / "two_zones_orifice.json").read_text())
+    doc["components"][0]["class"] = "Buildings.Fluid.Sources.Outside_CpLowRise"
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ModelicaImportError) as exc:
+        build(load(path))
+    msg = str(exc.value)
+    assert "refused 1 item" in msg and "bouA (Buildings.Fluid.Sources.Outside_CpLowRise)" in msg
+    assert "not connected" not in msg
