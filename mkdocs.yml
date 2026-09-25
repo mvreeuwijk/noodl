@@ -85,7 +85,7 @@ plugins:
           paths: [src]
           options:
             show_root_heading: true
-            show_source: true
+            show_source: false
             show_signature_annotations: true
             separate_signature: true
             signature_crossrefs: true
