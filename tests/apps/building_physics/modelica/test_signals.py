@@ -288,3 +288,26 @@ def test_math_refusals_name_the_block():
     assert not signals.is_math(_math("Abs"))
     with pytest.raises(ModelicaImportError, match=r"m \(Modelica.Blocks.Math.Abs\)"):
         signals.math_inputs(_math("Abs"))
+
+
+@pytest.mark.parametrize(
+    ("params", "match"),
+    [
+        ({}, "parameter 'table' is required"),
+        ({"table": [[0.0], [1.0]]}, "non-empty matrix"),
+        ({"table": [[0.0, 1.0], [1.0, 2.0]], "extrapolation": "Bogus"}, "extrapolation"),
+    ],
+)
+def test_combitimetable_table_and_extrapolation_refusals(params, match):
+    with pytest.raises(ModelicaImportError, match=match):
+        signals.evaluate(_sig("CombiTimeTable", **params), torch.zeros(1, dtype=F64))
+
+
+def test_combitimetable_single_row_and_coincident_first_rows():
+    # One row (ModelicaStandardTables.c:938-941): that value from startTime on.
+    one = _sig("CombiTimeTable", table=[[0.0, 4.0]], offset=[1.0])
+    assert _eval(one, [-1.0, 0.0, 9.0]) == [1.0, 5.0, 5.0]
+    # Coincident first rows: left of the table the outer value y0 (LastTwoPoints).
+    jump = _sig("CombiTimeTable", table=[[0.0, 1.0], [0.0, 2.0], [5.0, 3.0]],
+                startTime=-10.0, shiftTime=0.0)
+    assert _eval(jump, [-1.0, 2.5]) == pytest.approx([1.0, 2.5], rel=1e-15)

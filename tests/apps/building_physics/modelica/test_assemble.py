@@ -687,3 +687,66 @@ def test_modelica_names_requires_its_gauge_reference():
     with pytest.raises(TypeError, match="p_ref"):
         ModelicaNames(edges={}, nodes={}, kinds={}, times=torch.zeros(1, dtype=F64),
                       air_references=())
+
+
+# One-way elements with a parameter MBL declares without a default: the export must carry
+# it, and its absence is refused naming the instance and the parameter.
+_ONE_WAY_REQUIRED = [
+    ("Orifice", {"CD": 0.6}, "A"),
+    ("EffectiveAirLeakageArea", {}, "L"),
+    ("Point_m_flow", {"mMea_flow_nominal": 0.01}, "dpMea_nominal"),
+    ("Points_m_flow", {"dpMea_nominal": [1.0, 10.0]}, "mMea_flow_nominal"),
+    ("Coefficient_V_flow", {"C": 0.01}, "m"),
+    ("Coefficient_m_flow", {}, "k"),
+    ("Table_V_flow", {"dpMea_nominal": [0.0, 10.0]}, "VMea_flow_nominal"),
+    ("Table_m_flow", {"mMea_flow_nominal": [0.0, 0.1]}, "dpMea_nominal"),
+]
+
+
+@pytest.mark.parametrize(("cls", "params", "missing"), _ONE_WAY_REQUIRED,
+                         ids=[c for c, _, _ in _ONE_WAY_REQUIRED])
+def test_a_one_way_element_without_a_required_parameter_is_refused(tmp_path, cls, params,
+                                                                   missing):
+    doc = _doc("two_zones_orifice.json")
+    doc["components"][2]["class"] = f"Buildings.Airflow.Multizone.{cls}"
+    doc["components"][2]["parameters"] = dict(params)
+    with pytest.raises(ModelicaImportError,
+                       match=rf"ori \(Buildings\.Airflow\.Multizone\.{cls}\): parameter "
+                             rf"'{missing}' is required"):
+        read_modelica(_write(tmp_path, doc))
+
+
+def test_a_non_positive_output_interval_is_refused(tmp_path):
+    doc = _doc("two_zones_orifice.json")
+    doc["experiment"]["Interval"] = 0.0
+    with pytest.raises(ModelicaImportError, match="Interval > 0"):
+        read_modelica(_write(tmp_path, doc))
+
+
+def test_two_signals_driving_one_input_are_refused(tmp_path):
+    doc = _doc("ramp_boundary.json")
+    doc["signals"].append(dict(copy.deepcopy(doc["signals"][0]), name="ramp2"))
+    with pytest.raises(ModelicaImportError, match="ramp2 .*already drives"):
+        read_modelica(_write(tmp_path, doc))
+
+
+@pytest.mark.parametrize(
+    ("fixture", "name", "change", "match"),
+    [
+        ("zone_two_orifices.json", "vol", {"V": None}, r"vol .*parameter 'V' is required"),
+        ("zone_two_orifices.json", "vol", {"V": 0.0}, r"vol .*volume must be positive"),
+        ("delay_zone.json", "del", {"m_flow_nominal": None},
+         r"del .*parameter 'm_flow_nominal' is required"),
+    ],
+    ids=["no-V", "zero-V", "delay-no-m_flow_nominal"],
+)
+def test_a_zone_without_a_positive_volume_is_refused(tmp_path, fixture, name, change, match):
+    doc = _doc(fixture)
+    (comp,) = [c for c in doc["components"] if c["name"] == name]
+    for key, value in change.items():
+        if value is None:
+            comp["parameters"].pop(key)
+        else:
+            comp["parameters"][key] = value
+    with pytest.raises(ModelicaImportError, match=match):
+        read_modelica(_write(tmp_path, doc))
