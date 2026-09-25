@@ -245,6 +245,7 @@ Non-SWMM checks, for the physics SWMM does not model:
 
 | Check | Result |
 |---|---|
+| A1: Pescod & Price Tests 7–9, air-to-water velocity ratio in a 300 mm UPVC pipe, 15 m, open at both ends (20–40 % band) | 24.14 %, 25.00 %, 25.15 % against measured 35 %, 25 %, 27.5 % (Test 8 calibrates `f_i`); each inside the band and equal to the closed form to round-off (asserted at rel 1e-6) |
 | A2: Pescod & Price Tyneside ventilation band (105–315 m³/h) | bracketed; open-both-ends gives 1253.78 m³/h, a 17.27% velocity ratio, inside their 5–30% envelope |
 | A3: fan draws exactly through the leaks | balance 1.234e-14, nodal residual 6.3e-15, power residual 8.1e-13 |
 | H3: transfer-dominated state reaches Henry equilibrium | rel 1e-10, **measured 1.4e-16** |
