@@ -1,7 +1,7 @@
 """Modelica Buildings Library (MBL) multizone import.
 
-This package reads the intermediate JSON an OpenModelica export script writes (spec
-section 4, `scripts/modelica_export.py`) and builds a noodl `Model` from it. It never parses
+This package reads the intermediate JSON an OpenModelica export script writes
+(`scripts/modelica_export.py`) and builds a noodl `Model` from it. It never parses
 Modelica source and never evaluates a Modelica expression: every parameter it reads was
 already evaluated by OpenModelica.
 

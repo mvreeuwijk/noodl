@@ -38,16 +38,16 @@ F64 = torch.float64
 State = dict[str, Tensor]
 Drivers = dict[str, Tensor]
 
-#: Water at 20 C (spec section 11, verified standard): density (kg/m3) and dynamic
+#: Water at 20 C (standard reference values): density (kg/m3) and dynamic
 #: viscosity (Pa s). Used only by the Darcy-Weisbach path, which works in PRESSURE.
 RHO_W = 998.2
 MU_W = 1.002e-3
 G = 9.80665
 
-#: Valve types this milestone models, and the ones it refuses (spec 13.5). PRV, PSV and PBV
+#: Valve types this application models, and the ones it refuses. PRV, PSV and PBV
 #: switch status (open / closed / active) with the explicit if/else logic the EPANET 2.2
 #: Manual states on p.113, which is not differentiable without a smoothed relaxation; GPV
-#: needs a tabulated head-loss curve. All four are recorded follow-ups.
+#: needs a tabulated head-loss curve. None of the four is implemented.
 _VALVES_MODELLED = ("TCV", "FCV")
 _VALVES_REFUSED = ("PRV", "PSV", "PBV", "GPV")
 
@@ -58,7 +58,7 @@ class WaterOptions:
 
     `demand_model` is `"DDA"` or `"PDA"`; `minimum_pressure`/`required_pressure` are in
     METRES of head (this reader converts a US file's native psi at the same boundary as
-    every other length, research note section 9's `PSI_TO_M`); `pressure_exponent` is
+    every other length, with `PSI_TO_M`); `pressure_exponent` is
     dimensionless; `specific_gravity`/`viscosity` are relative to water at 20 C. The
     `required_pressure` default 0.1 is EPANET's own lower limit on the value ("0.1 in psi
     or m", `wntr`'s inp writer), not the manual OPTIONS table's literal 0.0, which only
@@ -170,7 +170,7 @@ class WaterNetwork:
         return [*self.pipes, *self.pumps, *tcv, *fcv]
 
     def validate(self) -> None:
-        """Refuse, BY NAME, everything this milestone does not model (spec 13.5)."""
+        """Refuse, BY NAME, everything this application does not model."""
         names = self.nodes()
         seen: set[str] = set()
         for name in names:
@@ -211,14 +211,14 @@ class WaterNetwork:
                 raise ValueError(
                     f"WaterNetwork: pipe {pipe.name!r} has status {status}; a closed pipe "
                     f"and a check valve are both status-switching devices and are out of "
-                    f"scope (recorded follow-up)"
+                    f"scope"
                 )
         for pump in self.pumps:
             if pump.power is not None:
                 raise ValueError(
                     f"WaterNetwork: pump {pump.name!r} is a constant-POWER pump; the "
                     f"head-flow relation EPANET uses internally for one is not stated in "
-                    f"the manual (research note section 4, UNVERIFIED), so only HEAD-curve "
+                    f"the manual (UNVERIFIED), so only HEAD-curve "
                     f"pumps are modelled"
                 )
             if pump.curve is None:
@@ -237,7 +237,7 @@ class WaterNetwork:
                     f"WaterNetwork: pump {pump.name!r} uses curve {pump.curve!r} with "
                     f"{len(points)} points; EPANET fits the power law h = h0 - r q^n to a "
                     f"single point or to three, and connects four or more with straight "
-                    f"segments, which is out of scope (spec 13.5)"
+                    f"segments, which is out of scope"
                 )
             if not pump.speed > 0.0:
                 raise ValueError(
@@ -251,7 +251,7 @@ class WaterNetwork:
                     f"WaterNetwork: valve {valve.name!r} is a {kind}; PRV, PSV and PBV "
                     f"switch status with the if/else logic of EPANET 2.2 Manual p.113 and "
                     f"GPV needs a tabulated curve -- none is differentiable without a "
-                    f"smoothed relaxation, and all four are out of scope (spec 13.5)"
+                    f"smoothed relaxation, and all four are out of scope"
                 )
             if kind not in _VALVES_MODELLED:
                 raise ValueError(
@@ -266,7 +266,7 @@ class WaterNetwork:
         if self.headloss not in ("H-W", "D-W"):
             raise ValueError(
                 f"WaterNetwork: headloss {self.headloss!r}; only H-W and D-W are modelled "
-                f"(Chezy-Manning's SI constant is UNVERIFIED, spec section 11)"
+                f"(Chezy-Manning's SI constant is UNVERIFIED)"
             )
         if self.options.demand_model not in ("DDA", "PDA"):
             raise ValueError(
@@ -284,7 +284,7 @@ class WaterNetwork:
             if control.link not in pump_names:
                 raise ValueError(
                     f"WaterNetwork: control names link {control.link!r}, which is not a "
-                    f"pump; pipe controls are a recorded follow-up"
+                    f"pump; pipe controls are not implemented"
                 )
 
 
@@ -354,19 +354,19 @@ def build_model(
     `VISCOSITY` on an H-W network is refused by name rather than silently ignored.
 
     `quality` is a bulk decay coefficient in 1/day (EPANET's own `[REACTIONS] Global Bulk`
-    units, Manual Table 8.4 p.78), or `None`. TWO facts the plan writer MEASURED go with it
-    (spec amendment A15). First, the junction DEMAND must enter the transport layer as a
+    units, Manual Table 8.4 p.78), or `None`. TWO measured facts go with it.
+    First, the junction DEMAND must enter the transport layer as a
     first-order removal rate `q_demand,j / V_j` (1/s): without it the advective generator
     has non-zero row sums -- a junction's edge inflow exceeds its edge outflow by exactly
     its demand -- and the steady system is SINGULAR (`torch.linalg.solve` raises on the
     committed two-loop fixture). Second, a junction's capacity on a LOOPED network is HALF
-    the volume of every incident pipe; spec 3.4's "the volume of its single outgoing pipe"
-    is a TREE property and does not carry over. Both are recorded in `model.notes`.
+    the volume of every incident pipe; "the volume of its single outgoing pipe" is a TREE
+    property and does not carry over. Both are recorded in `model.notes`.
 
     The Darcy-Weisbach path reuses the existing `Duct`, which works in PRESSURE, so the
     whole layer does: heads are multiplied by `rho g` on the way in and `model.head_scale`
-    carries the factor back out. Hazen-Williams (the default, and this milestone's parity
-    formula) works directly in metres of head and `head_scale` is 1.
+    carries the factor back out. Hazen-Williams (the default, and the formula of the EPANET
+    comparison) works directly in metres of head and `head_scale` is 1.
     """
     net.validate()
     headloss = headloss or net.headloss
@@ -438,7 +438,8 @@ def build_model(
                 f"scaled by [OPTIONS] VISCOSITY; SPECIFIC GRAVITY {options.specific_gravity} "
                 f"sets only the head-to-pressure scale); EPANET uses "
                 f"Swamee-Jain above Re = 4000, Hagen-Poiseuille below 2000 and Dunlop's "
-                f"cubic between, and spec row D4 RECORDS the resulting residual"
+                f"cubic between; verification row D4 (docs/applications/water.md) "
+                f"records the resulting residual"
             )
             elements.append(
                 Duct(
@@ -573,7 +574,7 @@ def build_model(
         removal = (demand / cap_i + quality / 86400.0).unsqueeze(-1)
         notes["quality_capacity"] = (
             "on a looped network a junction's capacity is HALF the volume of every "
-            "incident pipe; spec 3.4's single outgoing pipe is a tree property"
+            "incident pipe; a single outgoing pipe is a tree property"
         )
         notes["quality_removal"] = (
             "the nodal demand enters as a first-order removal rate q_demand / V; without "
@@ -602,8 +603,8 @@ def _fit_three_points(points, name: str) -> tuple[Tensor, Tensor]:
     """`(h0, r)` for `h = h0 - r q^2` through EPANET's three-point form.
 
     EPANET fits `h_G = A - B q^C` through the three given points (Manual p.19). This
-    application pins `C = 2`, which is what the SINGLE-point construction forces exactly
-    (spec amendment A10); for a genuine three-point curve the fit is refused unless the
+    application pins `C = 2`, which is what the SINGLE-point construction forces exactly;
+    for a genuine three-point curve the fit is refused unless the
     third point is consistent with that exponent, rather than silently fitted to another.
     """
     (q1, h1), (q2, h2), (q3, h3) = sorted(points)
@@ -619,7 +620,7 @@ def _fit_three_points(points, name: str) -> tuple[Tensor, Tensor]:
         raise ValueError(
             f"build_model: pump {name!r}'s three points are not consistent with the "
             f"exponent 2 this application fits (the third point implies {predicted}, the "
-            f"curve gives {h3}); a general exponent is a recorded follow-up"
+            f"curve gives {h3}); a general exponent is not implemented"
         )
     return h0, r
 
@@ -675,12 +676,11 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     the fidelity.
 
     After the solve, every `pump` edge's CONVERGED flow is checked against its own
-    `q_max` (ruling M4-R13, spec 13.1: "a demand for more than `q_max` is refused by
-    name"). `PumpCurve.flow`/`dflow` extrapolate the fitted curve indefinitely so that
-    Newton's intermediate iterates are never aborted mid-solve; this is where that
-    extrapolation is finally held to account, once there is a converged answer to check.
-    No clamp, no warning: an exceedance raises `RuntimeError` naming the pump, the batch
-    instance and the flow against `q_max`.
+    `q_max`: a demand for more than `q_max` is refused by name. `PumpCurve.flow`/`dflow` extrapolate
+    the fitted curve indefinitely so that Newton's intermediate iterates are never aborted
+    mid-solve; this is where that extrapolation is finally held to account, once there is a
+    converged answer to check. No clamp, no warning: an exceedance raises `RuntimeError` naming the
+    pump, the batch instance and the flow against `q_max`.
     """
     solve_kwargs.setdefault("atol", 1e-11)
     solve_kwargs.setdefault("rtol", 1e-11)
@@ -691,10 +691,9 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
 
 
 def _refuse_pump_overflow(model: Model, state: State) -> None:
-    """Ruling M4-R13: refuse, by name, a converged pump flow beyond its own `q_max`.
+    """Refuse, by name, a converged pump flow beyond its own `q_max`.
 
-    FR-13: reads the layer through its public `element_for` (kind -> `(element, slice)`)
-    rather than the private `_elements`/`_kind_slices` this used to reach into.
+    Reads the layer through its public `element_for` (kind -> `(element, slice)`).
     """
     layer = model.potential.get("water")
     if layer is None or "pump" not in layer.kinds:

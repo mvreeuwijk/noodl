@@ -7,13 +7,13 @@ and source/sinks of the constant, cutoff, decaying and burst types. Everything e
 skipped to its -999 terminator; a RECORD that references a skipped section by a nonzero
 index (schedule, control, filter, kinetic reaction, AHS) raises ValueError naming it, as does
 a CFD or 1-D zone, a duct network, an unsupported element type, a constant wind pressure
-(wPset with no profile) and a fan curve on a path with mult != 1 (spec sections 8 and 14).
+(wPset with no profile) and a fan curve on a path with mult != 1.
 
 The control-node section is the motivating case for "skipped, not refused": NIST's own sample
 projects carry dozens of sensor and logger control nodes that no zone and no path points at,
 and those projects must load.
 
-Conventions (spec section 14): mass flow; orifice/leak/crack turbulence coefficient
+Conventions: mass flow; orifice/leak/crack turbulence coefficient
 `turb` is C_d A sqrt(2) so C = mult turb sqrt(rho); fcn/test/conn/stair/shaft C = mult turb;
 qcn C = mult rho turb; laminar `lam` gives F = lam (rho/mu) dp, so the laminar/turbulent
 crossing is dp_t = (C_mass mu / (lam rho))^(1/(1-n)). One element KIND per CONTAM element
@@ -32,8 +32,7 @@ over: it is confined to |dp| < 1e-3 Pa, where the two laws differ by a fraction 
 that a 1e-3 Pa pressure difference drives at all; and NO doorway flow is compared against ContamX
 anywhere (the three-zone and one-zone stack parity projects carry no doorway at all, and the
 one parity test that loads `doorway_damper_fan.prj` compares path 5, its fan, alone). Deriving
-it
-properly would move test numbers and is a recorded FOLLOW-UP, not a change made here.
+it properly would move test numbers and is not done here.
 
 The `rho` in those coefficients is the density of the air ENTERING the path, not a fixed
 reference: ContamX re-evaluates it per path and per flow direction. Every power-law kind is
@@ -42,9 +41,9 @@ above) and which multiplies it by `(rho_upstream / RHO_0)**m` at solve time, m b
 or 1 for the three CONTAM families. Freezing it at RHO_0 instead costs about 0.086% per
 kelvin of zone-to-ambient temperature difference -- 1.7% in mass flow on a 20 K stack. The
 quadratic, damper and fan families keep their reference-density coefficients (they are not
-part of this milestone's parity evidence); `dp_t` above likewise stays at RHO_0.
+part of the ContamX comparison); `dp_t` above likewise stays at RHO_0.
 
-Dtype (Ruling R7): `torch.get_default_dtype()` is float32 in this repository, and a CONTAM
+Dtype: `torch.get_default_dtype()` is float32 in this repository, and a CONTAM
 parity comparison is a float64 exercise. The `Network`, every element parameter and every
 tensor `Project` carries are built with an EXPLICIT float64 dtype -- never by letting a
 Python float fall through to the default.
@@ -76,14 +75,14 @@ MU_0 = 1.81625e-5
 
 # --------------------------------------------------------------------------------------
 # RECORD LAYOUTS. Every field position this reader depends on lives here and nowhere else;
-# all of it is verified against NIST's `contamxpy` 0.0.9 sample projects (13-15 Sep 2026)
-# unless a comment says otherwise.
+# all of it is verified against NIST's `contamxpy` 0.0.9 sample projects unless a comment
+# says otherwise.
 #
 #   header line 1   `ContamW <version> <flag>`, then the project's own file name.
 #   run control     labelled comment lines each followed by one or more data lines, to -999.
 #                   `! Ta Pb Ws Wd rh day u..` heads SEVERAL data lines, one per simulation
 #                   case, each labelled by its OWN trailing comment; the ambient state is
-#                   the one labelled `steady simulation` (Ruling R8). `!dens grav` heads
+#                   the one labelled `steady simulation`. `!dens grav` heads
 #                   `rho g`.
 #   section header  `N ! <name>:`; the section's N records then run to a `-999` line.
 #                   `! contaminants:` is the exception: N index lines and NO terminator.
@@ -110,9 +109,9 @@ MU_0 = 1.81625e-5
 #                   -- the two doorway types differ ONLY in field 3 (a minimum temperature
 #                   difference versus the half-separation of the two openings); `ht wd cd`
 #                   sit at 4, 5, 6 in both, which is why the code below has ONE assignment
-#                   for them (Ruling R9). The `dor_pl2` half is documented from TN 1887r1
-#                   Appendix A and from the milestone plan's own dictated record: no NIST
-#                   sample carries a dor_pl2, so only `dor_door` is file-verified.
+#                   for them. The `dor_pl2` half is documented from TN 1887r1
+#                   Appendix A only: no NIST sample carries a dor_pl2, so only `dor_door`
+#                   is file-verified.
 #     plr_bdq/bdf   `lam Cp xp Cn xn ...`
 #   zone            19 fields: `# f s# c# k# l# relHt Vol T0 P0 name clr uH uT uP uV axs
 #                   cdvf cfd`. `clr` is not in ContamW's own header comment but IS written.
@@ -197,16 +196,16 @@ class Project:
     x0: torch.Tensor                  # (n_zones, K)
     sources: list[PrjSource]
     kinds: list[str]
-    # CONTAM numbers zones; it does not promise they are 1..N in file order, and Task 13
-    # resolves a source's `z#` through this map rather than assuming `zones[nr - 1]`
-    # (Ruling R5).
+    # CONTAM numbers zones; it does not promise they are 1..N in file order, and
+    # `sources_from_project` resolves a source's `z#` through this map rather than
+    # assuming `zones[nr - 1]`.
     zone_nr_to_name: dict[int, str]
 
     def path_flows(self, q: torch.Tensor) -> torch.Tensor:
         """Net mass flow per path in path-number order (a doorway sums its two edges).
 
         `q` is the air layer's flow vector, which `PotentialFlowLayer` lays out in element-
-        KIND blocks, in `self.elements` order -- NOT in path order (Ruling R2). Each path's
+        KIND blocks, in `self.elements` order -- NOT in path order. Each path's
         `edge_columns` already carries that translation.
         """
         cols = [torch.as_tensor(p.edge_columns, dtype=torch.long) for p in self.paths]
@@ -268,7 +267,7 @@ def _read_ambient_block(lines: _Lines) -> dict[str, float] | None:
 
     CONTAM writes one such line per simulation case (steady, wind pressure test, ...), each
     labelled by its own trailing comment. Only the `steady simulation` line is the project's
-    ambient state -- taking the first or the last of them is wrong (Ruling R8).
+    ambient state -- taking the first or the last of them is wrong.
     """
     found: dict[str, float] | None = None
     while lines.i < len(lines.lines):
@@ -654,7 +653,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
             # `ht wd cd` sit at fields 4, 5, 6 for BOTH doorway types; only field 3 differs
             # (dor_door's dTmin versus dor_pl2's half-separation dH). Verified for dor_door
             # against NIST's own record and its turb = cd A sqrt(2) identity; see the layout
-            # block at the top of this module (Ruling R9).
+            # block at the top of this module.
             ht, wd, cd = first[4], first[5], first[6]
             dh = (2.0 * ht / 9.0) if d == "dor_door" else first[3]
             area = wd * ht / 2.0
@@ -774,7 +773,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         )
     kinds = [el.kind for el in built]
 
-    # Ruling R2: `PotentialFlowLayer` concatenates `q` in element-KIND blocks, in
+    # `PotentialFlowLayer` concatenates `q` in element-KIND blocks, in
     # `built` order -- NOT in path order, which is the network's own edge order. The two
     # coincide only for a project with a single element kind, so translate here, once.
     layout: dict[int, int] = {}
@@ -791,7 +790,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         if isinstance(el, FixedFlow):
             continue                              # a fixed flow ignores dp; a drive is moot
         drives.append(Stack.from_network(net, el.kind, g=g))
-        # Ruling R3: profiles are keyed by CONTAM's own profile NUMBER, and the lookup is
+        # Profiles are keyed by CONTAM's own profile NUMBER, and the lookup is
         # deliberately strict -- an edge naming a number no profile carries raises inside
         # `Wind.from_network`, naming the edge and the number. That is why the drive is
         # built whenever an edge names a profile, even when `profiles` is empty: a missing

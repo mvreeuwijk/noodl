@@ -4,7 +4,7 @@ The products are the AQ_DT repository's documented outputs, read with the
 standard library `json` and `scipy.io.netcdf_file` -- both inputs are classic CDF, checked.
 Nothing here writes to the AQ_DT tree.
 
-TWO INPUT AMBIGUITIES, both handled explicitly rather than inherited (spec section 6.3):
+TWO INPUT AMBIGUITIES, both handled explicitly rather than inherited:
 
 * **Units.** `background_concentration` is CAMS EAC4 NO2 MASS MIXING RATIO (kg/kg) written
   with no `units` attribute at all. It is converted here with `rho_air = 1.2041 kg/m3` and

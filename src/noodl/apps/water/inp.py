@@ -1,4 +1,4 @@
-"""A documented EPANET 2.2 `.inp` subset (spec 13.5).
+"""A documented EPANET 2.2 `.inp` subset.
 
 READ: `[JUNCTIONS] [RESERVOIRS] [TANKS] [PIPES] [PUMPS] [VALVES] [DEMANDS] [PATTERNS]
 [CURVES] [CONTROLS] [OPTIONS] [TIMES]`, with the column layouts of the EPANET 2.2 manual's
@@ -125,7 +125,7 @@ def read_epanet_inp(path) -> WaterNetwork:
             raise ValueError(
                 f"{path}: section [{name}] (line {sections[name][0].number}) carries "
                 f"content; rule-based controls, emitters and explicit link statuses are "
-                f"out of scope (spec 13.5)"
+                f"out of scope"
             )
     for name, lines in sections.items():
         if name in _READ or name in _IGNORED or not lines:
@@ -268,7 +268,7 @@ def read_epanet_inp(path) -> WaterNetwork:
         if len(line.fields) > 7 and line.fields[7] not in ("", "*"):
             raise ValueError(
                 f"{path}: line {line.number}: tank {line.fields[0]!r} has the volume curve "
-                f"{line.fields[7]!r}; only cylindrical tanks are modelled (spec 13.5)"
+                f"{line.fields[7]!r}; only cylindrical tanks are modelled"
             )
         diameter = as_float(line, 5, "the diameter", path) * length_scale
         if not diameter > 0:
@@ -331,7 +331,7 @@ def read_epanet_inp(path) -> WaterNetwork:
             elif keyword == "PATTERN":
                 raise ValueError(
                     f"{path}: line {line.number}: pump {line.fields[0]!r} has a SPEED "
-                    f"PATTERN; variable-speed pumps are out of scope (spec 13.5)"
+                    f"PATTERN; variable-speed pumps are out of scope"
                 )
             else:
                 raise ValueError(

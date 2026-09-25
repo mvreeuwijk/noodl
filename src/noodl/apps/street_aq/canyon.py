@@ -2,7 +2,8 @@
 
 Every formula here carries its source. The two families are SIRANE's (Soulhac, Perkins and
 Salizzoni 2008; Soulhac et al. 2011), which IMPAQ implements, and MUNICH's (Kim et al.
-2018 and 2022 plus the MUNICH/AtmoData sources), which the parity checks of Task 11 pin.
+2018 and 2022 plus the MUNICH/AtmoData sources), which the MUNICH comparison
+(`tests/verification/test_munich.py`) pins.
 Where the two papers disagree with each other or with the code, the CODE wins and the
 disagreement is named in the docstring.
 
@@ -144,7 +145,7 @@ def soulhac_residual(c: Tensor, ratio: Tensor) -> Tensor:
 def soulhac_shape(ratio: Tensor) -> Tensor:
     """The root `c` of `soulhac_residual`, batched and differentiable in `ratio`.
 
-    Bracket `[1e-4, 3.0]`, justified in the plan's Task 3: the residual is `+0.5 r c > 0`
+    Bracket `[1e-4, 3.0]`, justified as follows: the residual is `+0.5 r c > 0`
     at the low end (the exponential underflows to exactly zero there) and
     `1.5 r - 2.527 < 0` at the high end for every `r < 1.685`, and it changes sign exactly
     once in between. A ratio at or above 1.6 is refused rather than handed to the solver,
@@ -263,7 +264,7 @@ class BoundaryLayer:
         `stability="impaq"` selects the neutral branch, which collapses to exactly
         `1.2 u*` (the mean of `1 - 0.8 z/PBLH` over 10 equally spaced points on `[0, PBLH]`
         is 0.6). IMPAQ has no `sigma_v` of its own; this is the value the MUNICH direction
-        averaging of Task 4 needs, and it is stated here rather than invented there.
+        averaging (`routing`) needs, and it is stated here rather than invented there.
         """
         levels = torch.arange(10, dtype=self.u_star.dtype) / 9.0
         z_over_pblh = levels.reshape(*([1] * self.u_star.dim()), 10)
@@ -551,7 +552,7 @@ def exchange_velocity(
 
     `form="sirane"`: `u_d = sigma_w / (sqrt(2) pi)`, independent of the aspect ratio.
     S11 Eq. (5), K18 Eq. (3), K22 Eq. (B10), `StreetNetworkTransport.cxx:3273`. See
-    `SIRANE_EXCHANGE` for why the framework spec's "issue C" is retracted.
+    `SIRANE_EXCHANGE` for why the reading `sigma_w / sqrt(2 pi)` is not used.
 
     `form="schulte"`: `u_d = beta sigma_w / (1 + H/W)` with `beta = 2/(sqrt(2) pi)`
     (K18 Eqs. 4-8, K22 Eq. B11, ATM `ComputeSchulteLm`), MUNICH v2's default. The two

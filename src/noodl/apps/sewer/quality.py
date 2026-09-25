@@ -1,7 +1,6 @@
 """Water quality and H2S: sulfide generation, BOD decay and two-film transfer.
 
-Formula set and verification status from the milestone 4 literature review, recorded in the
-spec's coefficient register:
+Formula set and verification status, from the literature:
 
 * Henry's law, H2S, dimensionless gas-over-liquid
   ``H(T) = 1 / (H_cp(T) R T)`` with ``H_cp(298.15) = 1.0e-3 mol m^-3 Pa^-1`` and van 't Hoff
@@ -138,20 +137,18 @@ def ppm_from_concentration(
 def _gather(value: Tensor, out_pipe: Tensor | None) -> Tensor:
     """Gather a per-PIPE driver into manhole order through ``out_pipe`` (see the two
     classes' docstrings for the two orders); returns ``value`` unchanged when ``out_pipe``
-    is ``None`` (the dictated unit tests hand per-manhole vectors directly)."""
+    is ``None`` (the direct unit tests hand per-manhole vectors directly)."""
     if out_pipe is None:
         return value
     return value.index_select(-1, out_pipe)
 
 
 class LateralLoads:
-    """Lateral inflow-concentration loads (spec 3.4/4.2), as a `Model` closure.
+    """Lateral inflow-concentration loads, as a `Model` closure.
 
-    `bod_in`/`sulfide_in` (kg/m3, full-node, spec 4.2) times `inflow` (m3/s, full-node)
-    gives the load `s_j C_in,j` in kg/s per species (spec 3.4's water_quality source term),
-    written to `"<water_layer>.sources"` in FULL node order. FR-21: before this closure
-    existed, `bod_in`/`sulfide_in` were created by the builder and read by nothing, so no
-    lateral load ever reached the water-quality layer.
+    `bod_in`/`sulfide_in` (kg/m3, full-node) times `inflow` (m3/s, full-node)
+    gives the load `s_j C_in,j` in kg/s per species (the water_quality source term),
+    written to `"<water_layer>.sources"` in FULL node order.
 
     Registered BEFORE `H2STransfer` in `build_model`'s closure list: `H2STransfer`
     reads `drivers.get("<water_layer>.sources")` and ADDS its own transfer term to it
@@ -208,12 +205,12 @@ class SulfideGeneration(Reaction):
     as the framework applies every `Reaction`. `x` carries the species in the layer's own
     column order, defaulting to ``("bod", "sulfide")``; the per-pipe hydraulic drivers
     ``"sewer.R_h"``, ``"sewer.v"`` and ``"sewer.d_m"`` are gathered from PIPE order into
-    MANHOLE order (the layer's own interior order) through ``out_pipe`` when it is given
-    (M4-R4 amendment): ``value.index_select(-1, out_pipe)``, where ``out_pipe[i]`` is the
+    MANHOLE order (the layer's own interior order) through ``out_pipe`` when it is given:
+    ``value.index_select(-1, out_pipe)``, where ``out_pipe[i]`` is the
     position, in the per-pipe driver vectors, of manhole ``i``'s outgoing pipe.
     ``"sewer.q_slope"`` is ALREADY per manhole (the builder supplies it as a constant
     driver) and is NEVER gathered. When ``out_pipe`` is ``None`` every driver is used
-    exactly as given -- the per-manhole vectors the dictated unit tests hand in directly.
+    exactly as given -- the per-manhole vectors the direct unit tests hand in directly.
     """
 
     def __init__(
@@ -236,9 +233,9 @@ class SulfideGeneration(Reaction):
         self.out_pipe = (
             None if out_pipe is None else torch.as_tensor(out_pipe, dtype=torch.long)
         )
-        # FR-12/N3: when given (the `build_model` builder passes both), `T_water` is
+        # When given (the `build_model` builder passes both), `T_water` is
         # resolved through the shared `resolve_nodal_driver` helper (0-d / full-node /
-        # trailing-singleton, spec 4.2); when either is omitted (the dictated unit tests'
+        # trailing-singleton); when either is omitted (the direct unit tests'
         # own convention) `T_water` is used exactly as given, already per-manhole or scalar.
         self.manhole_idx = (
             None if manhole_idx is None else torch.as_tensor(manhole_idx, dtype=torch.long)
@@ -286,22 +283,22 @@ class H2STransfer:
     exactly opposite in MOLES of sulfur, which row C2 asserts node by node.
 
     ADDS to an existing `"<water_layer>.sources"`/`"<air_layer>.sources"` driver rather than
-    overwriting it (FR-21): registered AFTER `LateralLoads` in `build_model`'s closure
-    list, so `drivers` here already carries `LateralLoads`'s inflow-concentration term (spec
-    3.4's `s_j C_in,j`) when quality is built with lateral loads, and this closure's own
+    overwriting it: registered AFTER `LateralLoads` in `build_model`'s closure
+    list, so `drivers` here already carries `LateralLoads`'s inflow-concentration term
+    (`s_j C_in,j`) when quality is built with lateral loads, and this closure's own
     transfer term is added on top rather than silently discarding it.
 
     The per-pipe hydraulic drivers ``"sewer.v"``, ``"sewer.d_m"`` and ``"sewer.V_wet"`` are
     gathered from PIPE order into MANHOLE order
     (this closure's own interior order, ``manhole_idx``) through ``out_pipe`` when it is
-    given (M4-R4 amendment): ``value.index_select(-1, out_pipe)``, where ``out_pipe[i]`` is
+    given: ``value.index_select(-1, out_pipe)``, where ``out_pipe[i]`` is
     the position, in the per-pipe driver vectors, of manhole ``i``'s outgoing pipe.
     ``"sewer.q_slope"`` is ALREADY per manhole (the builder supplies it as a constant
     driver) and is NEVER gathered. When ``out_pipe`` is ``None`` every per-pipe driver is
-    used exactly as given -- the per-manhole vectors the dictated unit tests hand in
+    used exactly as given -- the per-manhole vectors the direct unit tests hand in
     directly.
 
-    The closure never returns a layer's own state key, so nothing here needs spec 4.6a.
+    The closure never returns a layer's own state key, so it carries no closure state.
     """
 
     def __init__(

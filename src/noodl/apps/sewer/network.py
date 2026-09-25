@@ -1,7 +1,7 @@
 """`SewerNetwork`, its validation, and the (Model, State, Drivers) builder.
 
 Follows `apps/street_aq/network.py`'s builder shape: dataclasses describing the physical
-network, one `validate()` that refuses every topology this milestone does not model BY NAME,
+network, one `validate()` that refuses every topology this application does not model BY NAME,
 one `build_model` that assembles the `Network`, the layers and the closures and
 returns the triple, and one `initial_state` dispatching on each layer's `quantity`.
 """
@@ -73,7 +73,7 @@ class SewerNetwork:
     notes: dict[str, str] = field(default_factory=dict)
 
     def validate(self) -> None:
-        """Refuse, BY NAME, everything this milestone does not model."""
+        """Refuse, BY NAME, everything this application does not model."""
         names: set[str] = set()
         for node in (*self.manholes, *self.outfalls):
             if node.name in names:
@@ -219,7 +219,7 @@ def build_model(
     # Manhole i's outgoing pipe's position in `net.pipes` (per-pipe driver order). On
     # `tree_steady()` this happens to be the identity, but `read_swmm_inp` reads `[CONDUITS]` in
     # its own file order, which need not match `[JUNCTIONS]` order at all -- the committed
-    # `tree_steady.inp` gives `out_pipe = [0, 1, 3, 2, 4]` (M4-R4 amendment).
+    # `tree_steady.inp` gives `out_pipe = [0, 1, 3, 2, 4]`.
     out_pipe = torch.tensor([outgoing[name] for name in manhole_names], dtype=torch.long)
     length = torch.tensor([p.length for p in net.pipes], dtype=F64)
     diameter = torch.tensor([p.diameter for p in net.pipes], dtype=F64)
@@ -256,14 +256,14 @@ def build_model(
         # Kind order: `headspace` (one per pipe, then one outfall edge PER outfall pipe),
         # `leak`, `fan`. Each outfall pipe is the one that DRAINS TO an outfall
         # (`p.v in outfall_names`), found by where it drains rather than assumed to be
-        # `net.pipes[-1]` (M4-R19 Important 1: a network whose outfall conduit is listed
-        # first silently attached the outfall-flagged headspace edge, and its geometry, to
+        # `net.pipes[-1]` (otherwise a network whose outfall conduit is listed
+        # first would silently attach the outfall-flagged headspace edge, and its geometry, to
         # the wrong manhole). `SewerNetwork.validate()` guarantees every manhole has exactly
         # one outgoing pipe and every outfall has none, but does not itself forbid two
         # different manholes both draining directly into the same outfall; this builder
         # wires exactly ONE outfall-to-ambient headspace edge per OUTFALL NODE, so that case
         # is refused here by name instead of silently wiring only one of the two. A forest
-        # (spec 3.1 puts it in scope; N4) has one outfall pipe per component -- each gets its
+        # has one outfall pipe per component -- each gets its
         # own appended headspace edge, borrowing its own pipe's own length and diameter.
         outfall_names = {o.name for o in net.outfalls}
         outfall_pipe_candidates = [
@@ -298,13 +298,13 @@ def build_model(
         air_lengths = torch.cat([length, length.index_select(-1, outfall_pipe_idx)])
         positions = torch.tensor(pipe_positions, dtype=torch.long)
         # Leak law: `PowerLaw(C = Cd A sqrt(2/rho), n = 0.5, kind="leak")` built DIRECTLY,
-        # never through `Orifice` (N2): `Orifice` casts with `torch.get_default_dtype()`
-        # (float32 in this repository) regardless of its inputs' own dtype, which silently
-        # downcast the leak's `C` and floored C1's residual on the float32 arithmetic of
+        # never through `Orifice`: `Orifice` casts with `torch.get_default_dtype()`
+        # (float32 in this repository) regardless of its inputs' own dtype, which would
+        # downcast the leak's `C` and floor check C1's residual on the float32 arithmetic of
         # the leak branch alone (measured 1.352e-12 / 1.855e-11 in float32; 4.518e-13 /
-        # 6.141e-12 in float64, ruling N2). `leak_cd`/`leak_area` are ordinary floats by
+        # 6.141e-12 in float64). `leak_cd`/`leak_area` are ordinary floats by
         # default but may also be tensors carrying a leading batch (instance) dimension
-        # (FR-18: `sewer_diurnal` varies them per instance without any core or element
+        # (`benchmarks/sewer_diurnal.py` varies them per instance without any core or element
         # change, since `PowerLaw._param`'s pass-through rule and ordinary broadcasting
         # do the rest).
         leak_c = (
@@ -348,7 +348,7 @@ def build_model(
         # `out_pipe` above indexes the per-pipe driver vectors by POSITION in `manhole_names`,
         # so the map is correct only if `TransportLayer`'s own active-interior order agrees
         # with `manhole_names` exactly (the same self-check `apps/street_aq/network.py`
-        # performs) -- checked ONCE, here, rather than trusted (M4-R4/M4-R9 amendment).
+        # performs) -- checked ONCE, here, rather than trusted.
         ordered = [graph.nodes[i] for i in layers["water_quality"].interior_idx.tolist()]
         if ordered != manhole_names:
             raise ValueError(
@@ -359,8 +359,8 @@ def build_model(
         drivers["water_quality.x_boundary"] = torch.zeros(
             len(net.outfalls), len(species), dtype=F64
         )
-        # FR-21: the lateral inflow-concentration loads (`bod_in`/`sulfide_in`, spec 4.2)
-        # were created as zero drivers and read by nothing; `LateralLoads` is registered
+        # The lateral inflow-concentration loads (`bod_in`/`sulfide_in`) are read by
+        # `LateralLoads`, which is registered
         # whenever quality is built at all (with or without `air`), and BEFORE `H2STransfer`
         # below (which adds its own transfer term on top rather than overwriting).
         species_drivers = {"bod": "bod_in", "sulfide": "sulfide_in"}
@@ -376,8 +376,8 @@ def build_model(
             # if the network carries no edge of that kind at all -- not merely an empty
             # interior. `fan` edges exist only when `fans` is non-empty, so the kind tuple
             # must match `flow_kind`'s below exactly rather than naming `fan` unconditionally
-            # (the brief's own text would otherwise raise `KeyError: unknown edge kind
-            # 'fan'` on every fan-less network, including the dictated fixture's default).
+            # (which would raise `KeyError: unknown edge kind 'fan'` on every fan-less
+            # network, including the default fixture).
             air_kinds = ("headspace", "leak", "fan") if fans else ("headspace", "leak")
             # Every pipe, including the one draining to the outfall, gets a PARALLEL
             # headspace edge (Conventions block), so the outfall NODE itself (not just
@@ -387,7 +387,7 @@ def build_model(
             # node must be a BOUNDARY of this layer too, exactly like water_quality, or the
             # layer's active interior would be 6 nodes (5 manholes + the outfall) where 5
             # are wanted; `two_film_flux` would then fail on a shape mismatch against
-            # water_quality's 5-node interior (found by running this task's tests).
+            # water_quality's 5-node interior.
             air_boundary = ["ambient"] + [o.name for o in net.outfalls]
             air_interior, _ = active_interior(graph, air_kinds, air_boundary)
             layers["air_quality"] = TransportLayer(
@@ -421,8 +421,8 @@ def build_model(
             else None
         ),
     )
-    # N10: the SAME dict object as the closure's own `notes`, not a one-time copy, so a
-    # note the closure adds later (e.g. `capacity_floor`, spec 4.7, added only once a step
+    # The SAME dict object as the closure's own `notes`, not a one-time copy, so a
+    # note the closure adds later (e.g. `capacity_floor`, added only once a step
     # actually hits a dry pipe) is visible on `model.notes` too, rather than frozen at the
     # dict copy this builder made at construction time.
     model.notes = hydraulics.notes
@@ -452,7 +452,7 @@ def build_model(
 
 def _ground_of(node_attrs) -> float:
     """A node's ground level: its own `ground`, else its `invert`, else `0.0` (`ambient`'s
-    case, carrying neither). N8: `is None` throughout, not an `or`-chain -- `or` treats an
+    case, carrying neither). `is None` throughout, not an `or`-chain -- `or` treats an
     explicitly given `0.0` ground (or invert) as falsy and falls through to the next
     fallback, silently dropping a real ground-level-zero manhole to whatever its invert (or
     the hard-coded `0.0`) happens to be instead."""
@@ -466,10 +466,10 @@ def _ground_of(node_attrs) -> float:
 def _stack_for(
     kind: str, graph: Network, net: SewerNetwork, *, crown: Tensor | None = None
 ) -> Stack:
-    """The existing buoyancy drive on one air kind (spec 3.3).
+    """The existing buoyancy drive on one air kind.
 
     On `headspace` edges `z_path` is the pipe CROWN elevation: the mean of the two end
-    inverts plus the pipe's own diameter (M4-R19 Important 2 -- the mean invert alone is
+    inverts plus the pipe's own diameter (the mean invert alone is
     the pipe's INVERT at its midpoint, not its crown; `crown` is the per-headspace-edge
     diameter, in the same order as `graph.endpoints("headspace")`, i.e. `net.pipes` order
     then the outfall pipe's diameter again for the extra outfall-to-ambient edge, exactly
@@ -477,15 +477,14 @@ def _stack_for(
     headspace column in a manhole shaft is lighter than the outside column of the same
     height -- the building application's stack effect, unchanged.
 
-    DATUM CONVENTION (N9; corrects the earlier claim that a leak carries no stack term at
-    all). `ground` falls back to the node's own `invert` when no `ground` was given, and to
-    `0.0` when neither was given -- which is exactly `ambient`'s case, since `ambient` is
-    added as a bare node with no `invert` or `ground` attribute at all. On a `leak` edge
-    `z_path` is the manhole's own ground level (`ground[src]`), so the MANHOLE term of the
-    Stack law cancels (`z_ref[src] - z_path = 0`), but the AMBIENT term does not: `z_ref` at
-    `ambient` is `0.0`, not the manhole's ground level, so every leak in fact carries a
-    `g * rho_ambient * ground[manhole]` term, not zero. This is self-consistent rather than
-    a bug: `ambient`'s `0.0` datum is used identically at every leak and at the outfall's
+    DATUM CONVENTION (a leak DOES carry a stack term). `ground` falls back to the node's own
+    `invert` when no `ground` was given, and to `0.0` when neither was given -- which is exactly
+    `ambient`'s case, since `ambient` is added as a bare node with no `invert` or `ground` attribute
+    at all. On a `leak` edge `z_path` is the manhole's own ground level (`ground[src]`), so the
+    MANHOLE term of the Stack law cancels (`z_ref[src] - z_path = 0`), but the AMBIENT term does
+    not: `z_ref` at `ambient` is `0.0`, not the manhole's ground level, so every leak in fact
+    carries a `g * rho_ambient * ground[manhole]` term, not zero. This is self-consistent rather
+    than a bug: `ambient`'s `0.0` datum is used identically at every leak and at the outfall's
     open-air `headspace` edge, and `ambient` is itself a fixed boundary node
     (`air.phi_boundary = 0`), so the datum choice only ever shifts every air pressure by the
     same constant -- `air.phi` is DATUM-REFERENCED to this convention, not to a physical
@@ -521,17 +520,18 @@ def _stack_for(
 def initial_state(model: Model, drivers: Drivers | None = None) -> State:
     """All-zero state, dispatching on each layer's `quantity` (the app convention).
 
-    N11: also builds every closure-carried state key (spec 4.6a) this application knows --
+    Also builds every closure-carried state key this application knows --
     `"sewer.H"`, the `SewerHydraulics` closure's manhole levels, when it is running with
     `storage=True` -- so that `step(initial_state(model, drivers))` works exactly as
     `SewerHydraulics`'s own `KeyError` message (raised when `"sewer.H"` is missing) already
     promises, rather than requiring the caller to know to add it separately.
 
-    R5: `SewerHydraulics` writes `"<quality layer>.capacity"` every call (the wetted/headspace
-    volume, spec 4.6b), and `Model` now requires the step-start state to carry that key
-    whenever the driver is supplied (the storage at the state's own time, R5's amount form).
-    When `drivers` is given, `model.initial_capacities(state, drivers)` supplies it -- Task
-    10's QUERY call (`Model._apply_closures` with no `ctx`), so `SewerHydraulics` evaluates
+    `SewerHydraulics` writes `"<quality layer>.capacity"` every call (the wetted/headspace
+    volume), and `Model` requires the step-start state to carry that key
+    whenever the driver is supplied (the storage at the state's own time, for the amount
+    form of the transport step). When `drivers` is given,
+    `model.initial_capacities(state, drivers)` supplies it -- a QUERY call
+    (`Model._apply_closures` with no `ctx`), so `SewerHydraulics` evaluates
     its geometry at this all-zero, dry state (`sewer.H = 0` from the block above) WITHOUT
     advancing it; the wetted volumes come out at the documented floor `CAPACITY_FLOOR`
     (`hydraulics.py`), so the first real step conserves the (negligible) initial amount.

@@ -1,29 +1,29 @@
 """Tank levels and simple `[CONTROLS]`, as one closure carrying its own state.
 
-`state_keys = ("water.tank_level", "water.link_status")` (spec 4.6a): the level of every
+`state_keys = ("water.tank_level", "water.link_status")`: the level of every
 tank (m above its bottom) and the open/closed status of every controlled link. Both persist
 across steps and belong to no layer.
 
 Per call the closure (1) applies every control's level test with EPANET's semantics, under
 `no_grad` -- the switch itself is a combinatorial decision; and (2) writes the prescribed head
 at every tank into `"water.phi_boundary"` and the per-pump status into `"water.status"`. The
-closure itself only PASSES the level through (spec 4.6a: a closure returns driver updates and
+closure itself only PASSES the level through (a closure returns driver updates and
 whatever state it carries across steps, unchanged, unless something else advances it);
 ADVANCING the level to the next time step is `advance()`, called explicitly by the
-extended-period driver (Task 12) with the net inflow from the solve this closure's own boundary
-values just fed into -- it is not called from `__call__`, which only ever reads the CURRENT
-level.
+extended-period driver (e.g. `benchmarks/water_eps.py`) with the net inflow from the solve this
+closure's own boundary values just fed into -- it is not called from `__call__`, which only ever
+reads the CURRENT level.
 
 `event_step` is EPANET's ADAPTIVE shortening, and it is not optional: measured on Net1 over
 24 h, a fixed 1 h step diverges from EPANET by 2.07 m because the pump switches a whole
 hour late, while shortening the step to the linearly-projected trigger crossing costs 2
-extra sub-steps and brings the worst reported-step difference to 8.181e-5 m (spec
-amendment A12, row D3). It implements only the CONTROL-CROSSING half of EPANET's rule
+extra sub-steps and brings the worst reported-step difference to 8.181e-5 m (verification
+row D3). It implements only the CONTROL-CROSSING half of EPANET's rule
 (Manual section 13.1 item 17, p.113: the next step is the minimum of the nominal step and
-the time to the next control crossing) -- not the demand-PERIOD boundary half, which this
-milestone's driver does not need: Net1's pattern step (2 h) is an exact multiple of its
+the time to the next control crossing) -- not the demand-PERIOD boundary half, which the
+Net1 driver does not need: Net1's pattern step (2 h) is an exact multiple of its
 hydraulic step (1 h), so no demand-period boundary ever falls strictly inside a step and the
-omission is masked on every fixture this plan measures against.
+omission is masked on every fixture the application is measured against.
 
 A level outside `[y_min, y_max]` is REFUSED by name: EPANET closes links instead, and
 silently doing the same would change the network the user asked for.
@@ -54,9 +54,9 @@ class TankLevels:
     """Tank levels, simple controls and the boundary heads they prescribe."""
 
     state_keys = ("water.tank_level", "water.link_status")
-    # R6: `__call__` only ever PASSES the level through unchanged (see the module
+    # `__call__` only ever PASSES the level through unchanged (see the module
     # docstring); `advance()` is what actually integrates it, called explicitly by the
-    # extended-period driver (Task 12), so this closure does not integrate and takes no
+    # extended-period driver, so this closure does not integrate and takes no
     # `StepContext`.
     integrates = False
 
@@ -94,8 +94,8 @@ class TankLevels:
             if control.link not in self.pump_names:
                 raise ValueError(
                     f"TankLevels: control names link {control.link!r}, which is not a pump "
-                    f"of this network ({self.pump_names}); pipe controls are a recorded "
-                    f"follow-up"
+                    f"of this network ({self.pump_names}); pipe controls are not "
+                    f"implemented"
                 )
             if control.test not in ("BELOW", "ABOVE"):
                 raise ValueError(

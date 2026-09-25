@@ -93,9 +93,7 @@ class BurstSource(_NodeSource):
 def assemble_sources(sources, t: float, x_full: torch.Tensor) -> torch.Tensor:
     """Sum of every source's contribution, full-node order, shape like `x_full`.
 
-    Ruling R11: the brief's `n` parameter was never read (the output shape comes from
-    `x_full`), so it is dropped here; the brief's own "Interfaces" line still shows the
-    four-argument form, but the task text and this ruling win over it.
+    The output shape comes from `x_full`; there is no separate node-count argument.
     """
     out = torch.zeros_like(x_full)
     for s in sources:
@@ -104,16 +102,18 @@ def assemble_sources(sources, t: float, x_full: torch.Tensor) -> torch.Tensor:
 
 
 def sources_from_project(project, *, dt: float = 60.0) -> list:
-    """Task 12's `PrjSource` records -> source objects. CONTAM source element data lines:
-    ccf: G R ...; cut: G x_cut ...; eds: G0 k ... (k the decay rate, tau = 1/k); brs: M ...
-    (verify against TN 1887r1 Appendix A section 9 when a project with sources is loaded).
+    """The project's `PrjSource` records (from `read_prj`) -> source objects.
 
-    Ruling R5: a source's `z#` is resolved through `Project.zone_nr_to_name` -- NOT the
-    unchecked `project.zones[s.zone_nr - 1]` the brief used -- raising `KeyError` naming
+    CONTAM source element data lines: ccf: G R ...; cut: G x_cut ...; eds: G0 k ... (k the
+    decay rate, tau = 1/k); brs: M ... (verify against TN 1887r1 Appendix A section 9 when
+    a project with sources is loaded).
+
+    A source's `z#` is resolved through `Project.zone_nr_to_name` -- NOT an unchecked
+    `project.zones[s.zone_nr - 1]` -- raising `KeyError` naming
     both the source and the zone number when the project never defines that zone.
 
-    Ruling R10: the source-type dispatch ends in `else: raise ValueError`, naming both the
-    source and its type, rather than the brief's silent fallthrough that would drop an
+    The source-type dispatch ends in `else: raise ValueError`, naming both the
+    source and its type, rather than a silent fallthrough that would drop an
     unrecognised source from the model with no error at all.
     """
     out = []

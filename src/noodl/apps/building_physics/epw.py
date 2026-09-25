@@ -26,7 +26,7 @@ than once, so the fixed day-of-year sequence repeats or goes backwards even thou
 is individually well-formed. `read_epw` checks the result rather than trusting the input: it
 raises `ValueError` if the assembled `t` is not strictly increasing, so a genuinely non-
 monotonic input fails loudly instead of handing `Weather.at()` a broken interpolation axis
-silently (final whole-branch review, finding 6). It also rejects EPW's own missing-value
+silently. It also rejects EPW's own missing-value
 sentinels on the four columns read here (dry-bulb temperature 99.9 degC, station pressure
 999999 Pa, wind direction 999 deg, wind speed 999.0 m/s -- EPW data dictionary, `energyplus.
 net`/`bigladdersoftware.com`): a complete typical-year file carries none of these, and a file

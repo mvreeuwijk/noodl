@@ -41,7 +41,7 @@ def read_sections(path, *, comment: str = ";") -> dict[str, list[InpLine]]:
         if not text:
             continue
         if text.startswith("["):
-            # FR-4: exactly one bracket pair -- `text.endswith("]")` alone let a stray
+            # Exactly one bracket pair -- `text.endswith("]")` alone let a stray
             # inner `[` through (`[JUNC[TIONS]` read as the section name `JUNC[TIONS`,
             # surfacing later as a confusing "unknown section" instead of naming the
             # malformed header itself).
@@ -57,7 +57,7 @@ def read_sections(path, *, comment: str = ";") -> dict[str, list[InpLine]]:
             sections.setdefault(current, [])
             continue
         if current is None:
-            # FR-5: punctuation after the line number, matching every other refusal in this
+            # Punctuation after the line number, matching every other refusal in this
             # module (`require_fields`, `as_float`).
             raise ValueError(
                 f"{path}: line {number}: content {raw.strip()!r} appears before any "

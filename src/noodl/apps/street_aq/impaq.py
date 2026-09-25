@@ -1,9 +1,9 @@
 """A faithful numpy/scipy port of the IMPAQ prototype, used for the port check.
 
 `aqdt/impaq.py` (483 lines, byte-identical in both AQ_DT copies) is reproduced here so that
-the parity tests need no import from the AQ_DT repository, and so that its two remaining
+the port-check tests need no import from the AQ_DT repository, and so that its two remaining
 documented issues can be switched on and off one at a time and their effect reported
-separately (framework spec section 9). Nothing here is used by the model: this module is
+separately. Nothing here is used by the model: this module is
 numpy and scipy, it is not differentiable, and nothing else in `apps/street_aq/` imports it.
 
 THE THIRD ISSUE IS RETRACTED. The prototype's docstring calls its ventilation coefficient
@@ -11,8 +11,7 @@ THE THIRD ISSUE IS RETRACTED. The prototype's docstring calls its ventilation co
 It is not an error: Soulhac et al. 2011 Eq. (5), Kim et al. 2018 Eq. (3) and Kim et al.
 2022 Eq. (B10) all typeset `sigma_w/(sqrt(2) pi)` -- the radical covers only the 2, checked
 at glyph level in all three PDFs -- and MUNICH implements exactly that at
-`StreetNetworkTransport.cxx:3273`. There is therefore no `fix_c`, and the retraction is
-recorded in the README against both the framework spec and the prototype's docstring.
+`StreetNetworkTransport.cxx:3273`. There is therefore no `fix_c`.
 """
 
 from __future__ import annotations
@@ -343,7 +342,7 @@ def build_transport_system(
         # Without fix_a the advective edges are indexed by INTERSECTION, so they need the
         # oversized state that issue B is about. Shrinking it to n_roads + 1 rows aliases
         # an intersection onto the environment row (4 intersections, 3 roads) or indexes
-        # past the end of the matrix (230 intersections, 162 roads on leiden_small). The
+        # past the end of the matrix (e.g. 230 intersections, 162 roads). The
         # two fixes are not independent, and saying so beats a corrupted answer.
         raise ValueError(
             f"impaq.build_transport_system: fix_b without fix_a is only defined when "
@@ -439,7 +438,7 @@ def solve_steady_state(
     rhs[-1] = boundary_layer.background_concentration
     try:
         solution = np.linalg.solve(matrix, rhs)
-    # Kept verbatim from the prototype (it is the port); if this ever fires a parity
+    # Kept verbatim from the prototype (it is the port); if this ever fires a port-check
     # number silently becomes a least-squares answer -- see the diagnosis tests in
     # tests/verification/test_street_parity.py.
     except np.linalg.LinAlgError:
@@ -449,7 +448,7 @@ def solve_steady_state(
 
 
 def network_from_street_network(net, emission: np.ndarray) -> ImpaqNetwork:
-    """A `StreetNetwork` (Task 5) and a per-street emission as an `ImpaqNetwork`.
+    """A `StreetNetwork` and a per-street emission as an `ImpaqNetwork`.
 
     The junction order is the `StreetNetwork`'s own (`net.junctions`), so road index `i`
     here is street `i` there and the two models can be compared row by row. `z0_b` becomes

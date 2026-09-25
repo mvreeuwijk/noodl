@@ -13,7 +13,7 @@ surface, and the stack term ``B`` from the existing `drives.Stack`.
 pass, exactly as `UpstreamDensityPowerLaw` reads its density driver: an element may read
 `drivers` inside `flow`/`dflow`/`linear_init`, a Drive may read `drivers` and nothing else.
 
-Coefficient status (spec section 11): ``f_air`` default 0.02 is UNVERIFIED (the reported
+Coefficient status: ``f_air`` default 0.02 is UNVERIFIED (the reported
 range for sewer crowns is 0.015-0.045, Edwini-Bonsu and Steffler 2006, paywalled);
 ``F_I_DEFAULT`` is CALIBRATED here against Pescod and Price's Test 8 as tabulated by
 Edwini-Bonsu and Steffler 2004, Table 1 p.337.
@@ -50,7 +50,7 @@ F_AIR_DEFAULT = 0.02
 #: form ``U_air / V_w = sqrt((f_i / f_air) T D_h / A_air)``, which at that geometry gives
 #: ``f_i = 0.02 * 0.25^2 / 1.668281 = 7.492741e-4``, rounded to 7.49e-4. The same value
 #: reproduces Tests 7 and 9 at 24.14 % and 25.15 % against measured 35 % and 27.5 % (both
-#: inside the 20-40 % acceptance band of spec row A1). MEASURED by the plan writer.
+#: inside the 20-40 % acceptance band of verification check A1). MEASURED.
 F_I_DEFAULT = 7.49e-4
 
 
@@ -97,7 +97,7 @@ class Headspace(Element):
         )
 
     def resistance(self, drivers: Mapping | None) -> Tensor:
-        # FR-11: name only the key(s) that are actually missing, not always both -- a
+        # Name only the key(s) that are actually missing, not always both -- a
         # caller who supplied `area_key` but forgot `dh_key` (or the reverse) otherwise
         # gets an error naming a driver it DID give, which reads as if the code were wrong
         # about its own requirement.
@@ -155,7 +155,8 @@ class Drag:
     area.
 
     SIGN. The layer evaluates ``dp = (phi_src - phi_tgt) + sum(drives)`` and the element's
-    law is ``dp = R |Q| Q``, so the spec's ``phi_src - phi_tgt = R|Q|Q - D - B`` means the
+    law is ``dp = R |Q| Q``, so the momentum balance ``phi_src - phi_tgt = R|Q|Q - D - B``
+    means the
     drive returns ``+D``: with both ends at ambient the drag alone then produces
     ``R|Q|Q = D``, i.e. flow from the upstream manhole towards the downstream one, which is
     the direction the wastewater drags the air. (Returning ``-D`` reverses the airflow and
@@ -163,7 +164,7 @@ class Drag:
 
     A `Drive` reads DRIVERS ONLY -- never `phi`, never another layer's state -- which is
     what keeps the Newton Jacobian exactly ``A_I diag(g') A_I^T``. The relative-velocity
-    form ``(U_s - V_air)`` is therefore out of scope and is a recorded follow-up.
+    form ``(U_s - V_air)`` is therefore out of scope and not implemented.
 
     ``zero_positions`` names edge positions within this kind's block whose drive is zeroed:
     the outfall edge, whose "pipe" is the open end and carries no water surface of its own.

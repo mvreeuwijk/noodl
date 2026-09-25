@@ -1,6 +1,6 @@
 """Zones, walls, the heat layer as a TransportLayer, density closures, and build_model.
 
-Units (milestone 2 spec 6.4): mass flow kg/s, temperature K, heat W, mass fraction kg/kg.
+Units: mass flow kg/s, temperature K, heat W, mass fraction kg/kg.
 The heat layer is `TransportLayer(carrier=c_p, capacity=rho_0 c_p V [+ wall capacity],
 conduction on 'wall' edges with conductance UA)`; nothing here solves anything itself.
 Zone air heat capacity is held at the reference density (CONTAM likewise holds zone air mass
@@ -88,7 +88,7 @@ def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
     boundary = [ambient, *fixed_temperature]
     kinds = tuple(flow_kinds)
     has_walls = conduction_kind in net.edge_kinds()
-    # `active_interior` (spec 14, 4.5) is the ONE place the active-interior rule lives, and
+    # `active_interior` is the ONE place the active-interior rule lives, and
     # is exactly what `TransportLayer` sizes its own interior with -- a wall-mass node has
     # conduction edges and no airpath edges, so conduction must be counted as a touch here
     # too or the capacity vector would be one entry short of the layer's rows.

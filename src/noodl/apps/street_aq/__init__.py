@@ -1,6 +1,6 @@
 """The street application: a SIRANE/MUNICH-type street-network dispersion model.
 
-A model built ON TOP of the core package (milestone 3 spec section 1). The core supplies
+A model built ON TOP of the core package. The core supplies
 every solve; this package decides the network, the closures and the units. Nothing under
 `src/noodl/` outside `apps/` imports from here.
 """

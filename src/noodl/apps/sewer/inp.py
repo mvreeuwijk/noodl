@@ -1,4 +1,4 @@
-"""A documented SWMM 5 `.inp` subset (spec 4.5).
+"""A documented SWMM 5 `.inp` subset.
 
 READ: `[TITLE]`, `[OPTIONS]` (`FLOW_UNITS` must be `CMS`; `FLOW_ROUTING` is recorded),
 `[JUNCTIONS]`, `[OUTFALLS]`, `[CONDUITS]`, `[XSECTIONS]` (only `CIRCULAR`), `[INFLOWS]`

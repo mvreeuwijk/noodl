@@ -1,7 +1,7 @@
-"""JSON schema for the `noodl-modelica/1` intermediate format (spec section 4).
+"""JSON schema for the `noodl-modelica/1` intermediate format.
 
 One JSON object per Modelica Buildings Library (MBL) model, written by
-`scripts/modelica_export.py` (Task 8) from OpenModelica's own evaluated component tree. Every
+`scripts/modelica_export.py` from OpenModelica's own evaluated component tree. Every
 parameter in the file has already been evaluated by OpenModelica -- `load` never parses
 Modelica source and never evaluates a Modelica expression itself. It only checks the file's
 SHAPE: the required top-level keys, the `format` marker, and every component's, connection's
@@ -11,7 +11,7 @@ and signal's required fields. It raises `ModelicaImportError` naming the first m
 that is `graph.build`'s job (`noodl.apps.building_physics.modelica.graph`), once every
 connection has been resolved to a port and a node. This module only supplies the vocabulary
 `graph.build` checks classes against: `SUPPORTED` groups the fully qualified MBL/MSL class
-names the reader recognises (spec sections 5-6), and `REFUSED` (plus `REFUSED_PREFIXES` for the
+names the reader recognises, and `REFUSED` (plus `REFUSED_PREFIXES` for the
 weather-data package) maps a class this importer explicitly declines to convert to the short
 reason `graph.build` reports against every offending instance.
 """
@@ -29,14 +29,14 @@ FORMAT = "noodl-modelica/1"
 class ModelicaImportError(ValueError):
     """Raised for malformed `noodl-modelica/1` JSON, or for unsupported model content.
 
-    The message names every offending field, instance or class (spec section 2, "Unsupported
-    content" -- nothing is silently approximated or dropped). `graph.build` gathers every
+    The message names every offending field, instance or class (unsupported content is
+    never silently approximated or dropped). `graph.build` gathers every
     refusal it finds and raises exactly one of these, rather than stopping at the first one.
     """
 
 
 # --------------------------------------------------------------------------------------
-# Supported classes (spec sections 5-6), grouped as the Task 5 brief lists them. Every set
+# Supported classes, grouped by role. Every set
 # holds fully qualified Modelica class names exactly as OpenModelica's scripting API and this
 # reader's hand-written fixtures spell them (verified against MBL v13.0.0 source, commit
 # 55abf579598ca81cae0a82f337350375958e6722, and MSL v4.1.0 for the signal blocks).
@@ -69,8 +69,8 @@ TWO_WAY = frozenset({
 COLUMNS = frozenset({"Buildings.Airflow.Multizone.MediumColumn"})
 # `ZonalFlow_ACS`/`ZonalFlow_m_flow` extend `BaseClasses.ZonalFlow`, which extends
 # `Fluid.Interfaces.PartialFourPortInterface` exactly like a door -- FOUR ports
-# (`port_a1`/`port_b1`/`port_a2`/`port_b2`), not the two-port `port_a`/`port_b` interface an
-# earlier task briefing assumed (verified directly against
+# (`port_a1`/`port_b1`/`port_a2`/`port_b2`), not the two-port `port_a`/`port_b` interface one
+# might assume (verified directly against
 # `Buildings/Airflow/Multizone/BaseClasses/ZonalFlow.mo` and `ZonalFlow_ACS.mo`, both of which
 # write `port_a1.h_outflow`/`port_a2.m_flow` equations). The reader wires a `ZonalFlow_*`
 # exactly like a door: side A holds `port_a1` and `port_b2`, side B holds `port_b1` and
@@ -125,7 +125,7 @@ INLINE_SENSORS = frozenset({
     )
 })
 # Sensors, adders and other blocks used only to compare a supported model against a reference
-# (spec section 4: "listed with role: observer and ignored by the reader"). A component is
+# (listed with role "observer" and ignored by the reader). A component is
 # ALSO treated as an observer whenever its own `"role": "observer"` field says so, whatever its
 # class (`graph.build`); this list only covers the classes the MBL inventory names, so a
 # genuine network component cannot be smuggled past the reader as an "observer" by a class
@@ -146,7 +146,7 @@ SUPPORTED = (
     | SOURCES | SIGNALS | MATH | INLINE_SENSORS | OBSERVERS
 )
 
-# Refused classes named in spec section 6, each with the short reason `graph.build` reports
+# Refused classes, each with the short reason `graph.build` reports
 # against every instance of it.
 REFUSED: dict[str, str] = {
     "Buildings.Fluid.Sources.Outside_CpLowRise": "wind pressure is not supported",
@@ -155,7 +155,7 @@ REFUSED: dict[str, str] = {
         "a dynamic (mass- and heat-storing) hydrostatic column is not supported"
     ),
 }
-# `BoundaryConditions.WeatherData.*` (spec section 6): any class under this package, whichever
+# `BoundaryConditions.WeatherData.*`: any class under this package, whichever
 # reader the model uses (`ReaderTMY3` and friends), not just one named class.
 REFUSED_PREFIXES: dict[str, str] = {
     "Buildings.BoundaryConditions.WeatherData.": "weather data is not supported",
@@ -174,7 +174,7 @@ def refusal_reason(cls: str) -> str | None:
 
 @dataclass(frozen=True)
 class Component:
-    """One instance from the JSON's `components` array (spec section 4)."""
+    """One instance from the JSON's `components` array."""
 
     name: str
     cls: str

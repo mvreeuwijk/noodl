@@ -1,4 +1,4 @@
-"""Run a model `read_modelica` built over its experiment grid (spec section 7).
+"""Run a model `read_modelica` built over its experiment grid.
 
 `simulate(model, state, drivers, times)` steps the model from `times[0]` through every later
 grid time, with each step's time-varying drivers taken at the step's END time (the implicit
