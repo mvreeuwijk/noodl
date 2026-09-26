@@ -65,6 +65,12 @@ _MUNICH_U_D_MIN = 0.001
 (`StreetNetworkTransport.cxx:206` and `:3295`): not a configuration key, so every MUNICH
 case implies it."""
 
+_MUNICH_FLOAT_DEFAULTS = {"Minimum_Street_Wind_Speed": 0.1}
+"""`_MUNICH_FLOAT_MAP` keys MUNICH itself defaults when `[street]` lacks them, instead of
+`model_options` raising: `Minimum_Street_Wind_Speed` -> `ustreet_min = 0.1`
+(`StreetNetworkTransport.cxx:164-168`). `Zref` has no such default and still raises when
+absent."""
+
 
 def _hours_by(value, n_hours: int, tail: tuple[int, ...], label: str) -> np.ndarray:
     """`value` broadcast to `(n_hours, *tail)`: a scalar, a `(n_hours,)` time series, or
@@ -198,7 +204,9 @@ class StreetCase:
         `Minimum_Street_Wind_Speed` -> `canyon_wind_min`; always `stability="munich"` and
         MUNICH's hard-coded `u_d_min=0.001`. A value with no noodl counterpart (e.g. the
         `Wang` transfer) raises `NotImplementedError` naming the key and value; a missing
-        key raises `ValueError`.
+        key raises `ValueError`, except `Minimum_Street_Wind_Speed`, which MUNICH itself
+        defaults to `0.1` when absent (see `_MUNICH_FLOAT_DEFAULTS`) -- an unparsable value
+        still raises.
 
         Any other source raises `NotImplementedError`: a synthetic case carries no source
         model's options (pass `build_model`'s keywords directly), and SIRANE's are a later
@@ -228,7 +236,10 @@ class StreetCase:
                 )
             options[keyword] = mapping[raw.strip().lower()]
         for key, keyword in _MUNICH_FLOAT_MAP.items():
-            options[keyword] = float(value(key))
+            if key not in street and key in _MUNICH_FLOAT_DEFAULTS:
+                options[keyword] = _MUNICH_FLOAT_DEFAULTS[key]
+            else:
+                options[keyword] = float(value(key))
         options["stability"] = "munich"
         options["u_d_min"] = _MUNICH_U_D_MIN
         return options
@@ -262,7 +273,10 @@ def write_case(
     `case.start` must be set (MUNICH dates every input). A case read from the same format
     writes its own native options back (`read_case` -> `write_case` round-trips);
     `options` are the format's own overrides -- for MUNICH, any `munich.cfg` `[street]`
-    key, plus `lat0_deg`/`lon0_deg`, the lon/lat of a synthetic network's `(0, 0)`.
+    key; any of the six `[meteo]` fields MUNICH always requires (`Rain`, `SolarRadiation`,
+    `SpecificHumidity`, `SurfacePressure`, `SurfaceTemperature`, `Attenuation` -- see
+    `_munich_files._REQUIRED_METEO_DEFAULTS`); plus `lat0_deg`/`lon0_deg`, the lon/lat of a
+    synthetic network's `(0, 0)`.
     """
     if format != "munich":
         raise NotImplementedError(

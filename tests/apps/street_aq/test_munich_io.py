@@ -178,6 +178,44 @@ def test_a_read_case_writes_back_to_the_same_case(tmp_path):
     np.testing.assert_allclose(again.background, case.background, rtol=1e-6)
 
 
+def test_writer_always_lists_the_six_mandatory_meteo_fields(tmp_path):
+    # MUNICH v2.2 stops with "undefined variable SurfacePressure" without these, even with
+    # chemistry, deposition and scavenging off (StreetNetworkTransport.cxx:750-776's
+    # unconditional InitData calls, plus StreetNetworkChemistry.cxx:744-751's Attenuation).
+    net, _ = munich_idealised()
+    write_case(tmp_path, _case(net, 1))
+    text = (tmp_path / "munich-data.cfg").read_text()
+    meteo_section = text.split("[meteo]", 1)[1]
+    fields_line = next(ln for ln in meteo_section.splitlines() if ln.startswith("Fields:"))
+    expected = {
+        "Rain": 0.0, "SolarRadiation": 0.0, "SpecificHumidity": 0.01,
+        "SurfacePressure": 101325.0, "SurfaceTemperature": 293.15, "Attenuation": 1.0,
+    }
+    for name in expected:
+        assert name in fields_line.split()
+        line = next(ln for ln in meteo_section.splitlines() if ln.startswith(f"{name} "))
+        assert float(line.split()[1]) == pytest.approx(expected[name])
+
+
+def test_options_override_a_mandatory_meteo_field(tmp_path):
+    net, _ = munich_idealised()
+    write_case(tmp_path, _case(net, 1), options={"SurfacePressure": 100000.0})
+    data_text = (tmp_path / "munich-data.cfg").read_text()
+    meteo_section = data_text.split("[meteo]", 1)[1]
+    line = next(ln for ln in meteo_section.splitlines() if ln.startswith("SurfacePressure "))
+    assert float(line.split()[1]) == pytest.approx(100000.0)
+    # The override is a [meteo] value, not a [street] closure option.
+    assert "SurfacePressure" not in (tmp_path / "munich.cfg").read_text()
+
+
+def test_case_with_temperature_writes_its_own_surface_temperature(tmp_path):
+    net, _ = munich_idealised()
+    write_case(tmp_path, _case(net, 1, temperature=310.0))
+    meteo_section = (tmp_path / "munich-data.cfg").read_text().split("[meteo]", 1)[1]
+    line = next(ln for ln in meteo_section.splitlines() if ln.startswith("SurfaceTemperature "))
+    assert float(line.split()[1]) == pytest.approx(310.0)
+
+
 def test_write_case_refuses_a_non_munich_format(tmp_path):
     net, _ = munich_idealised()
     with pytest.raises(NotImplementedError, match="sirane"):
@@ -273,6 +311,25 @@ def test_model_options_follow_non_default_keys(tmp_path):
         stability="munich", u_d_min=0.001,
     )
     build_model(case.network, species=("NO2",), **options)       # every keyword is valid
+
+
+def test_model_options_defaults_a_missing_minimum_street_wind_speed(tmp_path):
+    # MUNICH itself defaults `ustreet_min = 0.1` when the key is absent
+    # (StreetNetworkTransport.cxx:164-168), not an error.
+    net, _ = munich_idealised()
+    write_case(tmp_path, _case(net, 1))
+    lines = [ln for ln in (tmp_path / "munich.cfg").read_text().splitlines()
+             if not ln.startswith("Minimum_Street_Wind_Speed")]
+    (tmp_path / "munich.cfg").write_text("\n".join(lines) + "\n")
+    case = read_case(tmp_path)
+    assert case.model_options()["canyon_wind_min"] == pytest.approx(0.1)
+
+
+def test_model_options_still_refuses_an_unparsable_minimum_street_wind_speed(tmp_path):
+    net, _ = munich_idealised()
+    write_case(tmp_path, _case(net, 1), options={"Minimum_Street_Wind_Speed": "abc"})
+    with pytest.raises(ValueError):
+        read_case(tmp_path).model_options()
 
 
 def test_model_options_refuse_what_noodl_does_not_implement(tmp_path):

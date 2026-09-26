@@ -421,6 +421,25 @@ these; `write_munich_case`'s `options` override both."""
 _FILE_KEYS = ("Street", "Intersection")
 """`[street]` keys naming files this writer itself writes -- never taken from a read case."""
 
+_REQUIRED_METEO_DEFAULTS: dict[str, float] = {
+    "Rain": 0.0,
+    "SolarRadiation": 0.0,
+    "SpecificHumidity": 0.01,
+    "SurfacePressure": 101325.0,
+    "SurfaceTemperature": 293.15,
+    "Attenuation": 1.0,
+}
+"""`[meteo]` fields MUNICH v2.2 requires listed in `Fields` even with chemistry, deposition
+and scavenging off -- `StreetNetworkTransport.cxx:750-776`'s unconditional `InitData` calls
+for `SurfaceTemperature`, `SurfacePressure`, `Rain`, `SpecificHumidity`, and
+`StreetNetworkChemistry.cxx:744-751`'s for `Attenuation` (read whenever `With_local_data` is
+`yes`, this writer's own default); without them MUNICH stops with `undefined variable
+SurfacePressure`. `write_munich_case` always writes all six; a value the case itself
+supplies (`SurfaceTemperature` from `meteo["temperature"]`) is used instead of the default
+here, and any of the six is overridable through `options` (e.g.
+`options={"SurfacePressure": 100000.0}`). The defaults are the values the paper's verified
+MUNICH runs used."""
+
 
 def _lonlat(x_m: float, y_m: float, *, lat_ref_deg: float, lat0_deg: float,
             lon0_deg: float) -> tuple[float, float]:
@@ -474,15 +493,24 @@ def write_munich_case(
     MUNICH's saver reads up to two steps past the run's last hour to finish its hourly
     averaging, when every meteo field varies in time. Emission and background need none.
 
+    The `[meteo]` `Fields` list always carries the six MUNICH v2.2 requires regardless of
+    the case's own meteo (see `_REQUIRED_METEO_DEFAULTS`): `Rain`, `SolarRadiation`,
+    `SpecificHumidity`, `SurfacePressure`, `SurfaceTemperature`, `Attenuation` -- from the
+    case where it has one (only `SurfaceTemperature`, from `meteo["temperature"]`), else
+    `_REQUIRED_METEO_DEFAULTS`'s constant, unless `options` overrides it.
+
     `native`, when given (a case read from MUNICH files), supplies its own `[street]`
     section (over `_DEFAULT_STREET_OPTIONS`, file names excepted) and its own `projection`.
-    `options` overrides any `[street]` key, and two further keys set the geographic anchor
-    of a network in local metres: `lat0_deg`, `lon0_deg` (the lon/lat of `(x, y) = (0, 0)`;
-    default `DEFAULT_LAT0_DEG`, `DEFAULT_LON0_DEG`).
+    `options` overrides any `[street]` key or `_REQUIRED_METEO_DEFAULTS` key, and two
+    further keys set the geographic anchor of a network in local metres: `lat0_deg`,
+    `lon0_deg` (the lon/lat of `(x, y) = (0, 0)`; default `DEFAULT_LAT0_DEG`,
+    `DEFAULT_LON0_DEG`).
     """
     out_dir = Path(out_dir)
     native = dict(native or {})
     options = dict(options or {})
+    meteo_overrides = {k: float(options.pop(k)) for k in list(options)
+                       if k in _REQUIRED_METEO_DEFAULTS}
     species = list(species)
     n_hours = len(times)
     n_streets = len(network.streets)
@@ -668,6 +696,12 @@ Text_file: no
             if key == "wind_dir_from_deg":
                 arr = deg_from_to_munich_rad(arr)
             entries.append((to_munich[key] + suffix, arr))
+
+    present = {name for name, _ in entries}
+    for name, default in _REQUIRED_METEO_DEFAULTS.items():
+        if name in present:
+            continue
+        entries.append((name, np.array([meteo_overrides.get(name, default)])))
 
     n_meteo_rows = n_hours + 2
     meteo_lines = [""] + section_head("meteo", n_meteo_rows, [name for name, _ in entries])
