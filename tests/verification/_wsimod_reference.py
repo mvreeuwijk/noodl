@@ -22,14 +22,20 @@ where the replay semantics are known, not silently here.
 `oxford_demo` has four such arcs (`abstraction_to_farmoor`, `evenlode_to_thames`,
 `thames_to_thames`, `thames_to_farmoor`), each with both a push and a pull event in the
 same timestep -- 5824 of its 28056 distinct `(arc, timestep)` pairs carry two rows.
-`quickstart_demo` happens to have none (7464 events, 7464 pairs), but that is a property
-of that one demo, not a general guarantee, and earlier versions of this docstring claimed
-it held for both. Anything replaying these events through one
+`quickstart_demo` has no push+pull pairs, but BOTH demos have several SAME-direction
+events per (arc, timestep): a pass-through `Node` forwards each push it receives as its
+own push (quickstart `catchment_outflow`: two or three every timestep, 10184 raw events
+in 7464 (arc, direction, timestep) rows; oxford: 48995 raw events in 33880 rows, over
+seven arcs). Earlier versions of this docstring claimed one event per row for both.
+Anything replaying these events through one
 `CapacitatedTransferLayer.step` per timestep must therefore ACCUMULATE a `(arc, t)`
 group's rows rather than assign them one at a time -- `tests/verification/
 test_wsimod_parity.py` does exactly that, and the fixture-writing script
-`scripts/regenerate_wsimod_fixtures.py` aggregates only over (arc, DIRECTION, timestep),
-leaving push and pull as separate rows for the replay to sum.
+`scripts/regenerate_wsimod_fixtures.py` sums over (arc, DIRECTION, timestep), leaving
+push and pull as separate rows for the replay to sum. Both sums are exact for a
+per-timestep replay: `get_excess` clips event k at `capacity - flow_in` with `flow_in`
+the sum of events 1..k-1, so the timestep total is `min(sum of requests, capacity)`
+whatever the order (`tests/verification/test_wsimod_capacity.py`).
 
 Timestep index: `wsimod.orchestration.model.Model` has no `.t` or other current-
 timestep attribute of its own (confirmed by inspecting a constructed `Model` directly).

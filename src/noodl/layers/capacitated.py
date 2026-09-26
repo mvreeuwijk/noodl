@@ -442,10 +442,13 @@ class CapacitatedTransferLayer:
         than one out-edge draws on one node's [headroom] supply". A node with a single
         in-edge is never touched by this loop, however many out-edges or requests are
         downstream of it: this layer never caps an edge to match a bottleneck further
-        along the graph (that would need reasoning about paths, not incidence), exactly
-        mirroring WSIMOD's own per-arc semantics: a node's
-        accept decision is its own `push_check`/`pull_check` against its OWN storage
-        headroom, never against its future ability to forward the flow onward.
+        along the graph (that would need reasoning about paths, not incidence). This
+        matches a WSIMOD STORING node (`Storage`, `Waste`), whose accept decision is a
+        `push_check` against its OWN headroom; it does not match a WSIMOD pass-through
+        `Node`, which accepts only what it can forward in the same step. Where several
+        edges compete for one node's headroom, WSIMOD serves requests first-come-first-
+        served in call order; this layer shares preference-proportionally and order-free
+        (totals agree; `tests/verification/test_wsimod_capacity.py` pins both).
 
         Each of the fixed `n_passes` rounds: computes `tentative` flow per edge (request
         still unmet, capped by remaining arc capacity and the TARGET's headroom still

@@ -60,10 +60,10 @@ Each page states its comparisons with an explicit tolerance and the value actual
 pages are equally explicit about what a comparison *does not* show, and those caveats are
 sometimes the most important thing on the page:
 
-- The [capacitated allocation](capacitated.md#what-the-wsimod-parity-does-not-show) page
-  explains that neither WSIMOD reference demo ever exercises a binding capacity clip, so the
-  comparison checks the identity path only — the binding branches are covered by synthetic tests
-  instead.
+- The [capacitated allocation](capacitated.md#where-the-layer-differs-from-wsimod) page
+  explains that WSIMOD's shipped demos never exercise a binding clip, how scripted WSIMOD cases
+  cover those branches instead, and where the layer's semantics differ from WSIMOD's: sharing
+  one node's headroom, and bottlenecks behind a pass-through node.
 - The [street air quality](street_aq.md#limitations-and-caveats) page records that the published
   MUNICH idealised case cannot be reproduced absolutely, because its geometry was never
   published, and states the size of the remaining difference.

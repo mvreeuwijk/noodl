@@ -11,20 +11,24 @@ fixture outputs (topology, captured events, WSIMOD's own realised flows) belong 
 repository.
 
 What it does, in order: downloads the one forcing file both demos share into a temp
-directory; builds `quickstart_demo`'s model inline and
-`oxford_demo`'s via WSIMOD's own packaged `create_oxford_model`; runs each under the
-capture harness (`tests/verification/_wsimod_reference.py`); and writes four fixtures --
-`{quickstart,oxford}_topology.json` and `{quickstart,oxford}_events.csv` -- under
-`tests/data/wsimod/`. Both demos are fully implemented here.
+directory; builds `quickstart_demo`'s model inline (twice: as shipped, and as
+`quickstart_tight` with `QUICKSTART_TIGHT`'s lowered arc capacities) and `oxford_demo`'s
+via WSIMOD's own packaged `create_oxford_model`; runs each under the capture harness
+(`tests/verification/_wsimod_reference.py`); and writes six fixtures --
+`{quickstart,quickstart_tight,oxford}_topology.json` and `..._events.csv` -- under
+`tests/data/wsimod/`.
 
-Each `_events.csv` holds one row per (arc, DIRECTION, timestep), aggregated from the
+Each `_events.csv` holds one row per (arc, DIRECTION, timestep), SUMMED over the
 harness's raw per-event rows. Push and pull are deliberately NOT merged into one row:
 whether to sum them is the replay's decision, and `tests/verification/
 test_wsimod_parity.py` does sum them (it must -- four oxford arcs see both a push and a
-pull in the same timestep). Each build prints its raw-event and aggregated-row counts
-and warns when they differ, i.e. when some arc saw two events of the SAME direction in
-one timestep; neither demo currently does (quickstart 7464/7464, oxford 33880/33880),
-which is what makes the aggregation here a pure relabelling rather than a summation.
+pull in the same timestep). Same-direction events ARE summed here, and both demos have
+them: a pass-through `Node` forwards each push it receives as its own push, so e.g.
+quickstart's `catchment_outflow` sees two or three pushes every timestep (10184 raw
+events -> 7464 rows) and oxford seven arcs (48995 -> 33880). Summing is exact for the
+per-timestep replay: WSIMOD clips each event against the arc's accumulated `flow_in`, so
+the per-timestep total is `min(sum of requests, capacity)` whatever the order (see
+`tests/verification/test_wsimod_capacity.py`).
 """
 
 from __future__ import annotations
@@ -50,6 +54,16 @@ DATA_URL = (
     "data/processed/timeseries_data.csv"
 )
 
+# `quickstart_demo` with three arcs' capacities lowered below their peak requests:
+# `baseflow`'s own arc clip then cuts 1085 of its daily requests, and `runoff` and
+# `percolation` run at capacity on 866 and 552 days (via `Land`'s check-sized
+# requests, see `tests/verification/test_wsimod_capacity.py`). Chosen on arcs
+# whose receivers accept everything offered (a pass-through `Node` onto a `Waste`, and
+# `Groundwater` well below its capacity), so no other bound interferes;
+# `tests/verification/test_wsimod_capacity.py` explains why a bottleneck on
+# `catchment_outflow` would not be a fair case.
+QUICKSTART_TIGHT = {"runoff": 0.03, "baseflow": 0.04, "percolation": 0.08}
+
 
 def _download_data_folder() -> str:
     """Downloads timeseries_data.csv into a temp dir laid out as `create_oxford_model`
@@ -62,12 +76,18 @@ def _download_data_folder() -> str:
     return tmp
 
 
-def _build_and_capture_quickstart(data_folder: str) -> None:
+def _build_and_capture_quickstart(
+    data_folder: str, prefix: str = "quickstart", capacities: dict | None = None
+) -> None:
     """Builds `quickstart_demo`'s model inline (five node
     dicts, six arc dicts, `Model.add_nodes`/`add_arcs`), runs it under `capture_events`
-    (`tests/verification/_wsimod_reference.py`), and writes `quickstart_topology.json` and
-    `quickstart_events.csv` (one row per (arc, direction, timestep), aggregated from the
-    harness's raw per-event rows -- see the print-out below) under `FIXTURE_DIR`."""
+    (`tests/verification/_wsimod_reference.py`), and writes `{prefix}_topology.json` and
+    `{prefix}_events.csv` (one row per (arc, direction, timestep), aggregated from the
+    harness's raw per-event rows -- see the print-out below) under `FIXTURE_DIR`.
+
+    `capacities` overrides named arcs' WSIMOD `capacity` (default: every arc at WSIMOD's
+    `UNBOUNDED_CAPACITY`, i.e. the demo as shipped). `quickstart_tight` uses it to make
+    arcs genuinely bind -- see `QUICKSTART_TIGHT`."""
     import pandas as pd
     from wsimod.core import constants
     from wsimod.orchestration.model import Model
@@ -126,16 +146,18 @@ def _build_and_capture_quickstart(data_folder: str) -> None:
     quickstart_model = Model()
     quickstart_model.dates = dates
     quickstart_model.add_nodes([sewer, land, gw, node, waste])
-    quickstart_model.add_arcs(
-        [urban_drainage, percolation, runoff, storm_outflow, baseflow, catchment_outflow]
-    )
+    arcs = [urban_drainage, percolation, runoff, storm_outflow, baseflow, catchment_outflow]
+    for name, capacity in (capacities or {}).items():
+        (arc,) = [a for a in arcs if a["name"] == name]
+        arc["capacity"] = capacity
+    quickstart_model.add_arcs(arcs)
 
     topology = extract_topology(quickstart_model)
     with capture_events(quickstart_model) as events:
         quickstart_model.run(verbose=False)
 
     FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
-    (FIXTURE_DIR / "quickstart_topology.json").write_text(json.dumps(topology, indent=2))
+    (FIXTURE_DIR / f"{prefix}_topology.json").write_text(json.dumps(topology, indent=2))
     raw = pd.DataFrame(events)
     aggregated = raw.groupby(["arc", "direction", "t"], as_index=False)[
         ["requested", "realised"]
@@ -143,15 +165,15 @@ def _build_and_capture_quickstart(data_folder: str) -> None:
     n_events = len(raw)
     n_rows = len(aggregated)
     print(
-        f"quickstart: {n_events} raw push/pull events aggregated into {n_rows} "
+        f"{prefix}: {n_events} raw push/pull events aggregated into {n_rows} "
         f"(arc, direction, timestep) rows"
     )
     if n_events != n_rows:
         print(
-            "quickstart: at least one arc saw more than one event in a single "
-            "timestep -- inspect before trusting the aggregation (harness docstring)"
+            f"{prefix}: some arcs saw more than one same-direction event in a "
+            "timestep; their rows are sums (harness docstring)"
         )
-    aggregated.to_csv(FIXTURE_DIR / "quickstart_events.csv", index=False)
+    aggregated.to_csv(FIXTURE_DIR / f"{prefix}_events.csv", index=False)
 
 
 def _build_and_capture_oxford(data_folder: str) -> None:
@@ -180,8 +202,8 @@ def _build_and_capture_oxford(data_folder: str) -> None:
     print(f"oxford: {n_events} raw events aggregated into {n_rows} rows")
     if n_events != n_rows:
         print(
-            "oxford: at least one arc saw more than one event in a single "
-            "timestep -- inspect before trusting the aggregation (harness docstring)"
+            "oxford: some arcs saw more than one same-direction event in a "
+            "timestep; their rows are sums (harness docstring)"
         )
     oxford_aggregated.to_csv(FIXTURE_DIR / "oxford_events.csv", index=False)
 
@@ -190,4 +212,5 @@ if __name__ == "__main__":
     data_folder = _download_data_folder()
     print(f"Downloaded WSIMOD demo data to {data_folder}")
     _build_and_capture_quickstart(data_folder)
+    _build_and_capture_quickstart(data_folder, "quickstart_tight", QUICKSTART_TIGHT)
     _build_and_capture_oxford(data_folder)
