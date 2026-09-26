@@ -10,8 +10,8 @@ copyright: Copyright &copy; 2026 John Craske, Maarten van Reeuwijk and Imperial 
 
 theme:
   name: material
-  logo: assets/noodl-symbol.png
-  favicon: assets/noodl-symbol.png
+  logo: assets/noodl-physics-symbol-white.svg
+  favicon: assets/noodl-physics-symbol.svg
   font:
     text: Inter
     code: JetBrains Mono
@@ -111,6 +111,7 @@ markdown_extensions:
 
 extra_javascript:
   - javascripts/mathjax.js
+  - javascripts/theme-figures.js
   - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
 
 extra:

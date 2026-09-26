@@ -1,7 +1,10 @@
 # noodl
 
 <p align="center">
-  <img src="docs/assets/noodl-logo.png" alt="noodl — a differentiable library for network physics" width="640">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/noodl-physics-full-dark.svg">
+    <img src="docs/assets/noodl-physics-full-light.svg" alt="noodl physics — complex networks, differentiable by design" width="640">
+  </picture>
 </p>
 
 **noodl** — the **N**etwork-**O**riented **O**pen **D**ifferentiable **L**ibrary — is a generic
