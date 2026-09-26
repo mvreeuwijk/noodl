@@ -3,8 +3,10 @@
 READ: `[TITLE]`, `[OPTIONS]` (`FLOW_UNITS` must be `CMS`; `FLOW_ROUTING` is recorded),
 `[JUNCTIONS]`, `[OUTFALLS]`, `[CONDUITS]`, `[XSECTIONS]` (only `CIRCULAR`), `[INFLOWS]`
 (constant `FLOW` baselines and constant `CONCENTRATION` pollutant baselines),
-`[POLLUTANTS]`. IGNORED because no conduit or node ever references them: `[EVAPORATION]`,
-`[REPORT]`, `[TAGS]`, `[MAP]`, `[COORDINATES]`.
+`[POLLUTANTS]`. The network uses SWMM's own tabulated circular section
+(``geometry="swmm"``, `swmm_xsect.py`) unless ``geometry="analytic"`` is passed.
+IGNORED because no conduit or node ever references them: `[EVAPORATION]`, `[REPORT]`,
+`[TAGS]`, `[MAP]`, `[COORDINATES]`.
 
 REFUSED BY NAME, because skipping them would silently change the physics: `[DWF]`,
 `[STORAGE]` with a non-constant area, `[PUMPS]`, `[WEIRS]`, `[ORIFICES]`, `[OUTLETS]`,
@@ -33,8 +35,15 @@ _READ = {"OPTIONS", "JUNCTIONS", "OUTFALLS", "CONDUITS", "XSECTIONS", "INFLOWS",
          "POLLUTANTS"}
 
 
-def read_swmm_inp(path) -> tuple[SewerNetwork, dict[str, dict[str, float]], dict[str, dict]]:
-    """`(network, {node: {pollutant: kg/m3}}, {pollutant: {...}})` for `path`."""
+def read_swmm_inp(
+    path, *, geometry: str = "swmm"
+) -> tuple[SewerNetwork, dict[str, dict[str, float]], dict[str, dict]]:
+    """`(network, {node: {pollutant: kg/m3}}, {pollutant: {...}})` for `path`.
+
+    `geometry` defaults to ``"swmm"``: a network read from a SWMM file is read to reproduce
+    SWMM, so its conduits use SWMM 5.2's own tabulated circular section
+    (`noodl.apps.sewer.swmm_xsect`). Pass ``geometry="analytic"`` for the exact circle.
+    """
     path = Path(path)
     sections = read_sections(path)
     for name, lines in sections.items():
@@ -197,7 +206,7 @@ def read_swmm_inp(path) -> tuple[SewerNetwork, dict[str, dict[str, float]], dict
     ]
     network = SewerNetwork(
         manholes=tuple(manholes), pipes=tuple(pipes), outfalls=tuple(outfalls),
-        routing=routing,
+        routing=routing, geometry=geometry,
     )
     network.validate()
     return network, loads, pollutants
