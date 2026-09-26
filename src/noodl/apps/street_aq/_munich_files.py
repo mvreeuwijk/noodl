@@ -437,8 +437,17 @@ for `SurfaceTemperature`, `SurfacePressure`, `Rain`, `SpecificHumidity`, and
 SurfacePressure`. `write_munich_case` always writes all six; a value the case itself
 supplies (`SurfaceTemperature` from `meteo["temperature"]`) is used instead of the default
 here, and any of the six is overridable through `options` (e.g.
-`options={"SurfacePressure": 100000.0}`). The defaults are the values the paper's verified
-MUNICH runs used."""
+`options={"SurfacePressure": 100000.0}`) -- an override wins even over a value the case
+itself supplies. The defaults are the values the paper's verified MUNICH runs used."""
+
+_DERIVABLE_INTER_FIELDS = ("WindDirection", "WindSpeed", "PBLH", "UST", "LMO")
+"""The five `...Inter` junction meteo fields MUNICH v2.2 requires whenever `With_transport:
+yes` (this writer's own default) -- `StreetNetworkTransport.cxx:1690-1699`'s "is needed but
+no input data file was provided" checks. When `meteo_junction` supplies none of these,
+`write_munich_case` derives it from the streets meeting at that junction (in
+`network.junctions` order), with the same reduction `case.py`'s network-wide ("uniform")
+meteo uses: `circular_mean_rad` for `WindDirection`, `reciprocal_mean` for `LMO`, a plain
+mean otherwise."""
 
 
 def _lonlat(x_m: float, y_m: float, *, lat_ref_deg: float, lat0_deg: float,
@@ -452,6 +461,23 @@ def _lonlat(x_m: float, y_m: float, *, lat_ref_deg: float, lat0_deg: float,
 
 def _is_constant(arr: np.ndarray) -> bool:
     return bool(np.all(arr == arr.flat[0]))
+
+
+def circular_mean_rad(rad: np.ndarray, axis: int) -> np.ndarray:
+    """The mean DIRECTION of angles in radians -- invariant to where the angles wrap (an
+    arithmetic mean of angles straddling the wrap lands on the opposite side). Shared by
+    `case.py`'s network-wide ("uniform") meteo reduction and this module's derivation of a
+    junction's meteo from the streets that meet there, when a case supplies no
+    `meteo_junction` of its own -- see `_DERIVABLE_INTER_FIELDS`."""
+    return np.arctan2(np.sin(rad).mean(axis=axis), np.cos(rad).mean(axis=axis)) % (2.0 * np.pi)
+
+
+def reciprocal_mean(values: np.ndarray, axis: int) -> np.ndarray:
+    """The mean of a quantity through its reciprocal, `1 / mean(1 / x)`: the Obukhov length's
+    stability branches depend continuously on `1/L`, and a plain mean of `L` across values
+    that straddle zero (stable next to unstable) can land on the wrong sign. Shared the same
+    way as `circular_mean_rad`."""
+    return 1.0 / np.mean(1.0 / values, axis=axis)
 
 
 def write_munich_case(
@@ -497,20 +523,34 @@ def write_munich_case(
     the case's own meteo (see `_REQUIRED_METEO_DEFAULTS`): `Rain`, `SolarRadiation`,
     `SpecificHumidity`, `SurfacePressure`, `SurfaceTemperature`, `Attenuation` -- from the
     case where it has one (only `SurfaceTemperature`, from `meteo["temperature"]`), else
-    `_REQUIRED_METEO_DEFAULTS`'s constant, unless `options` overrides it.
+    `_REQUIRED_METEO_DEFAULTS`'s constant; `options` overrides any of the six, WINNING even
+    over a value the case itself supplies.
+
+    Likewise, any of the five `...Inter` junction fields `meteo_junction` does not supply
+    (see `_DERIVABLE_INTER_FIELDS`) is derived from the streets meeting at that junction,
+    when the case has the corresponding street-level field.
 
     `native`, when given (a case read from MUNICH files), supplies its own `[street]`
     section (over `_DEFAULT_STREET_OPTIONS`, file names excepted) and its own `projection`.
-    `options` overrides any `[street]` key or `_REQUIRED_METEO_DEFAULTS` key, and two
-    further keys set the geographic anchor of a network in local metres: `lat0_deg`,
-    `lon0_deg` (the lon/lat of `(x, y) = (0, 0)`; default `DEFAULT_LAT0_DEG`,
-    `DEFAULT_LON0_DEG`).
+    `options` overrides any `[street]` key or `_REQUIRED_METEO_DEFAULTS` key (a non-numeric
+    value for the latter raises `ValueError` naming the key), and two further keys set the
+    geographic anchor of a network in local metres: `lat0_deg`, `lon0_deg` (the lon/lat of
+    `(x, y) = (0, 0)`; default `DEFAULT_LAT0_DEG`, `DEFAULT_LON0_DEG`).
     """
     out_dir = Path(out_dir)
     native = dict(native or {})
     options = dict(options or {})
-    meteo_overrides = {k: float(options.pop(k)) for k in list(options)
-                       if k in _REQUIRED_METEO_DEFAULTS}
+    meteo_overrides: dict[str, float] = {}
+    for key in list(options):
+        if key not in _REQUIRED_METEO_DEFAULTS:
+            continue
+        raw = options.pop(key)
+        try:
+            meteo_overrides[key] = float(raw)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"write_case: options[{key!r}] = {raw!r} is not a number"
+            ) from None
     species = list(species)
     n_hours = len(times)
     n_streets = len(network.streets)
@@ -697,11 +737,38 @@ Text_file: no
                 arr = deg_from_to_munich_rad(arr)
             entries.append((to_munich[key] + suffix, arr))
 
+    # MUNICH needs every `...Inter` junction field whenever `With_transport: yes` (see
+    # `_DERIVABLE_INTER_FIELDS`); derive whichever one `meteo_junction` did not supply from
+    # the streets meeting at that junction, when the street-level field itself is present.
+    street_col = {street.name: i for i, street in enumerate(network.streets)}
+    by_name = {name: arr for name, arr in entries}
+    present_inter = {name for name in by_name if name.endswith(_INTER_SUFFIX)}
+    for name in _DERIVABLE_INTER_FIELDS:
+        inter_name = name + _INTER_SUFFIX
+        if inter_name in present_inter or name not in by_name:
+            continue
+        arr = by_name[name]                                        # (n_hours, n_streets)
+        columns = []
+        for junction in junctions:
+            cols = [street_col[s] for s in street_touches[junction]]
+            sub = arr[:, cols]
+            if name == "WindDirection":
+                columns.append(circular_mean_rad(sub, axis=1))
+            elif name == "LMO":
+                columns.append(reciprocal_mean(sub, axis=1))
+            else:
+                columns.append(sub.mean(axis=1))
+        entries.append((inter_name, np.stack(columns, axis=1)))
+
+    # An `options` override of one of the six always-required fields wins even over a value
+    # the case itself supplies (e.g. `meteo["temperature"]`'s own `SurfaceTemperature`).
+    entries = [(name, arr) for name, arr in entries if name not in meteo_overrides]
     present = {name for name, _ in entries}
     for name, default in _REQUIRED_METEO_DEFAULTS.items():
-        if name in present:
-            continue
-        entries.append((name, np.array([meteo_overrides.get(name, default)])))
+        if name in meteo_overrides:
+            entries.append((name, np.array([meteo_overrides[name]])))
+        elif name not in present:
+            entries.append((name, np.array([default])))
 
     n_meteo_rows = n_hours + 2
     meteo_lines = [""] + section_head("meteo", n_meteo_rows, [name for name, _ in entries])

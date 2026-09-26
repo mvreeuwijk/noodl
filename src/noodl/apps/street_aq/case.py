@@ -296,19 +296,6 @@ def write_case(
     )
 
 
-def _circular_mean(rad: np.ndarray, axis: int) -> np.ndarray:
-    """The mean DIRECTION of angles in radians -- invariant to where the angles wrap
-    (an arithmetic mean of angles straddling the wrap lands on the opposite side)."""
-    return np.arctan2(np.sin(rad).mean(axis=axis), np.cos(rad).mean(axis=axis)) % (2.0 * np.pi)
-
-
-def _reciprocal_mean(lmo: np.ndarray, axis: int) -> np.ndarray:
-    """The mean of the Obukhov length through its reciprocal, `1 / mean(1 / L)`: the
-    stability branches depend continuously on `1/L`, and a plain mean of `L` across values
-    that straddle zero (stable next to unstable) can land on the wrong sign."""
-    return 1.0 / np.mean(1.0 / lmo, axis=axis)
-
-
 def drivers_at(
     case: StreetCase, model: Model, k: int, *, species: Sequence[str] | None = None
 ) -> dict[str, torch.Tensor]:
@@ -424,7 +411,7 @@ def drivers_at(
                 out[f"{key}_junction"] = value
     else:
         out["theta_w"] = torch.tensor(
-            float(_circular_mean(theta_w_all.numpy(), axis=0)), dtype=F64
+            float(_munich_files.circular_mean_rad(theta_w_all.numpy(), axis=0)), dtype=F64
         )
         out["U_ref"] = torch.tensor(float(np.mean(wind_speed)), dtype=F64)
         if u_star is not None:
@@ -432,6 +419,8 @@ def drivers_at(
         if h_abl is not None:
             out["h_abl"] = torch.tensor(float(np.mean(h_abl)), dtype=F64)
         if lmo is not None:
-            out["lmo"] = torch.tensor(float(_reciprocal_mean(lmo, axis=0)), dtype=F64)
+            out["lmo"] = torch.tensor(
+                float(_munich_files.reciprocal_mean(lmo, axis=0)), dtype=F64
+            )
 
     return out

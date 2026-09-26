@@ -118,14 +118,17 @@ def test_a_data_section_on_another_time_grid_is_refused(tmp_path):
 
 def test_a_short_data_section_is_refused_not_cycled(tmp_path):
     net, _ = munich_idealised()
-    n = len(net.streets)
+    n, n_j = len(net.streets), len(net.junctions)
     write_case(tmp_path, _case(net, 3, wind_speed=np.array([5.0, 6.0, 7.0])))
     np.full((2, n), 5.0, dtype="<f4").tofile(tmp_path / "meteo_WindSpeed.bin")
     _set_data_cfg(tmp_path, "meteo", "Nt", "2")
     with pytest.raises(ValueError, match=r"\[meteo\] field 'WindSpeed' has 2 records.*needs 3"):
         read_case(tmp_path)
-    # A one-record field IS broadcast, like a constant.
+    # A one-record field IS broadcast, like a constant. `WindSpeedInter` -- derived and
+    # persisted by `write_case` since this case has no `meteo_junction` of its own -- shares
+    # the same [meteo] section Nt, so it is re-written to match too.
     np.full((1, n), 4.0, dtype="<f4").tofile(tmp_path / "meteo_WindSpeed.bin")
+    np.full((1, n_j), 4.0, dtype="<f4").tofile(tmp_path / "meteo_WindSpeedInter.bin")
     _set_data_cfg(tmp_path, "meteo", "Nt", "1")
     np.testing.assert_array_equal(read_case(tmp_path).meteo["wind_speed"],
                                   np.full((3, n), 4.0))
@@ -214,6 +217,71 @@ def test_case_with_temperature_writes_its_own_surface_temperature(tmp_path):
     meteo_section = (tmp_path / "munich-data.cfg").read_text().split("[meteo]", 1)[1]
     line = next(ln for ln in meteo_section.splitlines() if ln.startswith("SurfaceTemperature "))
     assert float(line.split()[1]) == pytest.approx(310.0)
+
+
+def test_options_override_wins_over_a_value_the_case_already_supplies(tmp_path):
+    net, _ = munich_idealised()
+    write_case(tmp_path, _case(net, 1, temperature=310.0),
+               options={"SurfaceTemperature": 250.0})
+    meteo_section = (tmp_path / "munich-data.cfg").read_text().split("[meteo]", 1)[1]
+    line = next(ln for ln in meteo_section.splitlines() if ln.startswith("SurfaceTemperature "))
+    assert float(line.split()[1]) == pytest.approx(250.0)
+
+
+def test_a_non_numeric_meteo_override_is_named(tmp_path):
+    net, _ = munich_idealised()
+    with pytest.raises(ValueError, match=r"write_case: options\['SurfacePressure'\] = "
+                                        r"'abc' is not a number"):
+        write_case(tmp_path, _case(net, 1), options={"SurfacePressure": "abc"})
+
+
+def test_missing_meteo_junction_is_derived_from_the_streets_touching_it(tmp_path):
+    # MUNICH requires all five `...Inter` junction fields whenever `With_transport: yes`
+    # (this writer's default) -- StreetNetworkTransport.cxx:1690-1699's "is needed but no
+    # input data file was provided" checks -- even when the case carries no genuine
+    # per-junction meteorology of its own.
+    net, _ = munich_idealised()
+    n = len(net.streets)
+    col = {s.name: i for i, s in enumerate(net.streets)}
+    # Junction "A" is touched by streets 1, 3, 4, 6; alternate their direction just either
+    # side of north so the circular mean is ~0/360, where an arithmetic mean of angles in
+    # [0, 360) would land near 180.
+    wind_dir = np.full(n, 200.0)
+    for name, value in (("1", 359.0), ("3", 1.0), ("4", 359.0), ("6", 1.0)):
+        wind_dir[col[name]] = value
+    case = StreetCase.synthetic(
+        net, species=("NO2",), times=[0.0],
+        meteo=dict(wind_dir_from_deg=wind_dir[None, :], wind_speed=5.0, h_abl=1000.0,
+                  u_star=0.5, lmo=1e6),
+        emissions=5e-6, background=2e-8, start=START,
+    )
+    write_case(tmp_path, case)
+    meteo_section = (tmp_path / "munich-data.cfg").read_text().split("[meteo]", 1)[1]
+    fields_line = next(ln for ln in meteo_section.splitlines() if ln.startswith("Fields:"))
+    for name in ("WindDirectionInter", "WindSpeedInter", "PBLHInter", "USTInter", "LMOInter"):
+        assert name in fields_line.split()
+    again = read_case(tmp_path)
+    # Junction ids are renumbered on write (they are not MUNICH's numeric form), but their
+    # ORDER is preserved, so "A"'s position in the original network locates it in `again`.
+    j = net.junctions.index("A")
+    derived = again.meteo_junction["wind_dir_from_deg"][0, j] % 360.0
+    assert min(derived, 360.0 - derived) < 0.1
+    assert again.meteo_junction["wind_speed"][0, j] == pytest.approx(5.0)
+    assert again.meteo_junction["h_abl"][0, j] == pytest.approx(1000.0)
+    assert again.meteo_junction["u_star"][0, j] == pytest.approx(0.5)
+    assert again.meteo_junction["lmo"][0, j] == pytest.approx(1e6)
+
+
+def test_a_supplied_meteo_junction_key_is_not_overwritten_by_the_derivation(tmp_path):
+    net, _ = munich_idealised()
+    n_j = len(net.junctions)
+    supplied = np.arange(n_j, dtype=float)
+    write_case(tmp_path, _case(net, 1, meteo_junction=dict(wind_speed=supplied[None, :])))
+    case = read_case(tmp_path)
+    np.testing.assert_allclose(case.meteo_junction["wind_speed"][0], supplied)
+    # The other four are still derived (not left missing).
+    for key in ("wind_dir_from_deg", "h_abl", "u_star", "lmo"):
+        assert key in case.meteo_junction
 
 
 def test_write_case_refuses_a_non_munich_format(tmp_path):
@@ -397,11 +465,17 @@ def test_direction_exactly_on_the_wrap(tmp_path):
     # MUNICH directions of exactly 0 and exactly 2 pi -- the latter as a float32 file holds
     # it, 6.2831855 > 2 pi -- are the same direction: toward north, noodl theta_w = pi/2.
     net, _ = munich_idealised()
-    n = len(net.streets)
+    n, n_j = len(net.streets), len(net.junctions)
     write_case(tmp_path, _case(net, 1, wind_dir_from_deg=np.linspace(0.0, 90.0, n)[None]))
     row = np.where(np.arange(n) % 2 == 0, 0.0, 2 * math.pi).astype("<f4")
     assert float(row[1]) > 2 * math.pi
     np.tile(row, (3, 1)).tofile(tmp_path / "meteo_WindDirection.bin")
+    # `WindDirectionInter` was derived and persisted by `write_case` from the ORIGINAL
+    # (pre-overwrite) linspace directions; with every street now exactly north, every
+    # junction's circular mean is trivially also exactly north, so its binary is re-written
+    # the same way (a differently-sized array of the same two representations).
+    row_j = np.where(np.arange(n_j) % 2 == 0, 0.0, 2 * math.pi).astype("<f4")
+    np.tile(row_j, (3, 1)).tofile(tmp_path / "meteo_WindDirectionInter.bin")
     case = read_case(tmp_path)
     np.testing.assert_allclose(case.meteo["wind_dir_from_deg"], 180.0, atol=1e-4)
     uni, _, _ = build_model(case.network, species=("NO2",), **MUNICH)
