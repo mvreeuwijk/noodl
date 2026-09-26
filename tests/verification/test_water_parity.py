@@ -343,8 +343,8 @@ def test_pressure_driven_demand(tmp_path):
 
     MEASURED against EPANET's own `DEMAND MODEL PDA` at `MINIMUM PRESSURE 0`,
     `REQUIRED PRESSURE 60`, `PRESSURE EXPONENT 0.5`: heads 3.521e-7, demands 2.184e-7. This
-    test validates the core's potential-dependent nodal sources -- EPANET itself formulates PDA as "a
-    virtual pipe from the junction to a fictitious reservoir" (Manual section 13.1, p.110),
+    test verifies the core's potential-dependent nodal sources -- EPANET itself formulates PDA
+    as "a virtual pipe from the junction to a fictitious reservoir" (Manual section 13.1, p.110),
     i.e. as exactly this potential-dependent nodal source.
 
     `build_model` is called with NO `pda=`/`p_min=`/`p_req=`/`exponent=`: the
