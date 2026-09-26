@@ -15,6 +15,7 @@ are measured, and both matter here: 1e-14 does not converge at all (the residual
 pipe 10 dead-ended (136 are needed there). See `apps.water.network.water_steady`.
 """
 
+import math
 import warnings
 from pathlib import Path
 
@@ -284,50 +285,142 @@ def test_a_tank_outside_its_limits_is_refused(tmp_path):
 
 
 # --------------------------------------------------------------------------- Darcy-Weisbach
-def test_darcy_weisbach_residual_is_recorded_not_bounded(tmp_path):
-    """This test RECORDS its residual rather than bounding it.
+# EPANET 2.2's D-W is a COMPOSITE friction law (`hydcoeffs.c`, `DWpipecoeff` and
+# `frictionFactor`): Hagen-Poiseuille below Re = 2000, Dunlop's cubic to 4000, Swamee-Jain
+# above, evaluated in feet and cfs with g = 32.2 ft/s^2 and water at 1.1e-5 ft^2/s.
+# `build_model` reproduces it (`EpanetDarcyWeisbach`, `friction="epanet"`, the default), so
+# these tests hold D-W to the SAME tolerances as the Hazen-Williams tests above, which are
+# the float32 output floor (`2**-24` = 6e-8 relative per reported value) with an order of
+# magnitude to spare -- NOT a band around a measurement. The generic Colebrook `Duct`
+# (`friction="colebrook"`) is a different law and misses by 1e-4..1e-1 (last test).
 
-    MEASURED on the two-loop fixture at roughness 0.26 mm: heads 3.566e-4 relative, flows
-    2.731e-3 relative (worst link). EPANET uses Swamee-Jain above Re = 4000,
-    Hagen-Poiseuille below 2000 and Dunlop's cubic interpolation between (Manual section
-    13.1 item 3, p.111), while the existing
-    `Duct` element uses Colebrook throughout; the two turbulent friction factors differ by
-    up to about 1 %. (EPANET's water viscosity, 1.1e-5 ft2/s = 1.022e-6 m2/s, against this
-    reader's 1.002e-3 / 998.2 = 1.004e-6 m2/s moves the heads residual only to 3.0e-4.)
-    Before the Duct was fed rho' = 1/rho and mu' = nu -- i.e. while it returned MASS flow
-    into a layer that balances m3/s -- this test recorded 3.822e-2 / 4.446e-1. Hazen-Williams
-    is the formula compared against EPANET; D-W is offered, and this test states what it
-    costs.
-    """
-    # ONE literal replacement covers all eight pipes: the "roughness / minor loss / status"
-    # run is identical on every [PIPES] row of the fixture (it occurs exactly 8 times) and
-    # `str.replace` rewrites every occurrence. Replacing per (length, diameter) pair does
-    # NOT work -- P2 and P5 are both 400 m by 250 mm, so the first pass would consume both
-    # and the second would find nothing.
-    edits = [
-        (" Headloss           \tH-W", " Headloss           \tD-W"),
-        ("130         \t0           \tOpen", "0.26        \t0           \tOpen"),
-    ]
-    # The edit's roughness (0.26 mm) is already in D-W units, so wntr's own warning that
-    # switching HEADLOSS to D-W leaves the roughness units unchanged is expected and benign.
+# ONE literal replacement covers all eight two-loop pipes: the "roughness / minor loss /
+# status" run is identical on every [PIPES] row (it occurs exactly 8 times) and
+# `str.replace` rewrites every occurrence. Replacing per (length, diameter) pair does NOT
+# work -- P2 and P5 are both 400 m by 250 mm, so the first pass would consume both.
+_DW_TWO_LOOP = [
+    (" Headloss           \tH-W", " Headloss           \tD-W"),
+    ("130         \t0           \tOpen", "0.26        \t0           \tOpen"),
+]
+# Net1's twelve pipes all read roughness 100 (H-W C); 0.5 millifeet is 0.152 mm.
+_DW_NET1 = [
+    (" Headloss           \tH-W", " Headloss           \tD-W"),
+    ("100         \t0           \tOpen", "0.5         \t0           \tOpen"),
+]
+
+
+def _dw_epanet(tmp_path, name, edits=(), duration=None):
+    # The edits' roughness is already in D-W units, so wntr's warning that switching
+    # HEADLOSS to D-W leaves the roughness units unchanged is expected and benign.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
-        path, results = _epanet(tmp_path, "twoloop_si.inp", edits=edits)
+        return _epanet(tmp_path, name, edits=edits, duration=duration)
+
+
+def test_darcy_weisbach_two_loop(tmp_path):
+    """1e-6 relative on heads and flows, as for Hazen-Williams.
+
+    MEASURED: heads 5.819e-8, flows 6.482e-8 (the float32 floor). With the Colebrook
+    `Duct` this was 3.566e-4 / 2.731e-3, and with EPANET's law but the EXACT cfs
+    conversion instead of EPANET's rounded ``LPSperCFS = 28.317`` it is 4.292e-7 heads:
+    the rounding is part of what EPANET computes, and reproducing it is what reaches the
+    floor.
+    """
+    path, results = _dw_epanet(tmp_path, "twoloop_si.inp", _DW_TWO_LOOP)
     net = read_epanet_inp(path)
     assert net.headloss == "D-W"
+    assert net.options.flow_units == "LPS"
     assert net.pipes[0].roughness == pytest.approx(0.26e-3, rel=1e-15)
     model, state, drivers = build_model(net)
-    final = water_steady(model, state, drivers, atol=1e-10, rtol=1e-10)
-    heads = results.node["head"].loc[0]
+    final = water_steady(model, state, drivers)
+    worst_h = _worst_heads(model, final, results.node["head"].loc[0], skip=("R1",))
+    worst_q = _worst_flows(model, final, results.link["flowrate"].loc[0])
+    assert worst_h < 1e-6, worst_h
+    assert worst_q < 1e-6, worst_q
+
+
+def test_darcy_weisbach_net1_single_period(tmp_path):
+    """Heads 1e-6, flows 1e-5: the Hazen-Williams Net1 tolerances, for the same reason.
+
+    MEASURED: heads 7.009e-8, flows 3.986e-6. The flow residual is again the smallest
+    flow in the network, where EPANET's own reported flows miss continuity (see
+    `test_net1_single_period`); Colebrook gave 1.344e-4 / 1.466e-3.
+    """
+    path, results = _dw_epanet(tmp_path, "Net1.inp", _DW_NET1, duration=0)
+    net = read_epanet_inp(path)
+    assert net.headloss == "D-W"
+    assert net.pipes[0].roughness == pytest.approx(0.5e-3 * 0.3048, rel=1e-15)
+    model, state, drivers = build_model(net)
+    final = water_steady(model, state, drivers)
+    worst_h = _worst_heads(model, final, results.node["head"].loc[0], skip=("9", "2"))
+    worst_q = _worst_flows(model, final, results.link["flowrate"].loc[0])
+    assert worst_h < 1e-6, worst_h
+    assert worst_q < 1e-5, worst_q
+
+
+def test_darcy_weisbach_laminar_transitional_and_turbulent_pipes(tmp_path):
+    """All three branches of EPANET's composite law, against EPANET.
+
+    `lowflow_dw_si.inp` is built so that EPANET's own flows put pipe P6 laminar
+    (Re ~ 1000), P2, P3, P4, P5 in Dunlop's transition (2017..3513) and P1 turbulent
+    (Re ~ 5731); P5 also carries a minor loss K = 2. Its `Accuracy` is 1e-8, because at
+    EPANET's default 1e-3 the REFERENCE stops short of its float32 floor on the loop
+    flows (5.0e-7 measured on P4; 9.4e-8 at 1e-8).
+
+    Heads and flows: 1e-6 relative, as above. MEASURED 3.5e-8 / 9.4e-8.
+    Per-pipe head LOSS is the sharp check here, because losses are only a few per cent
+    of the heads. Its bound is DERIVED from how EPANET reports a head: the hydraulic
+    solution is written to its scratch hydraulics file as FLOAT32 FEET (`output.c`,
+    `savehyd`), read back for the reporting step and written again as FLOAT32 METRES
+    (`nodeoutput`), so each reported head carries at most half a float32 spacing in feet
+    (2**-22 ft for heads in [4, 8) ft) plus half a spacing in metres (2**-24 m for heads
+    in [1, 2] m), and a loss twice that: 2 (0.3048 * 2**-22 + 2**-24) = 2.65e-7 m.
+    MEASURED 9.6e-8 m worst (P4). The Colebrook `Duct` misses these losses by 2 % (P1,
+    turbulent) to 81 % (P3, Re just above 2000).
+    """
+    path, results = _dw_epanet(tmp_path, "lowflow_dw_si.inp")
+    net = read_epanet_inp(path)
+    assert net.headloss == "D-W"
     flows = results.link["flowrate"].loc[0]
-    worst_h = _worst_heads(model, final, heads, skip=("R1",))
-    worst_q = _worst_flows(model, final, flows)
-    print(f"\nDarcy-Weisbach: heads {worst_h:.3e} relative, flows {worst_q:.3e}")
-    # Recorded, not bounded: the band is one order of magnitude either side of the measured
-    # pair, so a CHANGE in the friction-factor treatment is caught while the known
-    # difference is not asserted away.
-    assert 3.5e-5 < worst_h < 3.5e-3, worst_h
-    assert 2.7e-4 < worst_q < 2.7e-2, worst_q
+    heads = results.node["head"].loc[0]
+    nu = 1.1e-5 * 0.3048**2
+    reynolds = {
+        p.name: 4.0 * abs(float(flows[p.name])) / (math.pi * p.diameter * nu)
+        for p in net.pipes
+    }
+    assert reynolds["P6"] < 2000.0
+    assert all(2000.0 < reynolds[n] < 4000.0 for n in ("P2", "P3", "P4", "P5"))
+    assert reynolds["P1"] > 4000.0
+    # every reported head is in [1, 2] m (so in [4, 8) ft), where the spacings above hold
+    assert all(1.0 <= float(h) <= 2.0 for h in heads)
+
+    model, state, drivers = build_model(net)
+    final = water_steady(model, state, drivers)
+    assert _worst_heads(model, final, heads, skip=("R1",)) < 1e-6
+    assert _worst_flows(model, final, flows) < 1e-6
+    phi = final["water.phi"] / model.head_scale
+    index = {name: i for i, name in enumerate(model.node_names)}
+    for pipe in net.pipes:
+        mine = float(phi[index[pipe.u]] - phi[index[pipe.v]])
+        theirs = float(heads[pipe.u]) - float(heads[pipe.v])
+        assert abs(mine - theirs) <= 2.0 * (0.3048 * 2.0**-22 + 2.0**-24), (
+            pipe.name, mine - theirs
+        )
+
+
+@pytest.mark.parametrize(
+    "name, edits", [("twoloop_si.inp", _DW_TWO_LOOP), ("lowflow_dw_si.inp", [])]
+)
+def test_the_colebrook_duct_remains_available_and_is_not_epanet(tmp_path, name, edits):
+    """`friction="colebrook"` keeps the generic `Duct`. It is a DIFFERENT law (implicit
+    Colebrook throughout, a straight laminar line to its Re = 2000 value), so it does not
+    reproduce EPANET. MEASURED heads 3.566e-4 (two-loop) and 3.574e-2 (low-flow)."""
+    path, results = _dw_epanet(tmp_path, name, edits)
+    net = read_epanet_inp(path)
+    model, state, drivers = build_model(net, friction="colebrook")
+    final = water_steady(model, state, drivers)
+    worst_h = _worst_heads(model, final, results.node["head"].loc[0], skip=("R1",))
+    assert worst_h > 1e-4, worst_h
 
 
 # --------------------------------------------------------------------------- PDA

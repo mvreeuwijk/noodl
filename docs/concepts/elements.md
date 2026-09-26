@@ -58,7 +58,7 @@ gradient. See [Differentiability](differentiability.md#the-contract).
 | `Conductance(g)` | $q = g\,\Delta p$ | Linear conduction — thermal walls, passive exchange. |
 | `FixedFlow(q0)` | $q = q_0$, independent of $\Delta p$ | Constant-flow fans. Declares `dp_independent = True`, which lets the solve take an exact-zero Jacobian column. |
 | `FanCurve(coeffs, q_max)` | Cubic pressure-flow curve inverted for $q$ on $[0, q_{\max}]$ | Fans specified by a performance curve. |
-| `Duct(...)` | Colebrook friction, laminar below a transition Reynolds number | Ducts and Darcy-Weisbach pipes. |
+| `Duct(...)` | Colebrook friction, laminar below a transition Reynolds number | Ducts, and Darcy-Weisbach pipes with the water application's `friction="colebrook"`. |
 | `Damper(...)` | Separate power-law coefficient and exponent per flow direction | Backdraught dampers, one-way devices. |
 | `UpstreamDensityPowerLaw(...)` | `PowerLaw` with $C$ scaled by $(\rho_{\text{up}}/\rho_{\text{ref}})^{m}$ | The upstream-density correction on CONTAM power-law elements. |
 
@@ -72,8 +72,8 @@ same physics — power laws, tables, doors — as MBL's own equations rather tha
 [Airflow elements](../applications/building_physics.md#airflow-elements) for the physics, the
 law each one evaluates and how it differs from its CONTAM counterpart.
 
-Applications add their own: the water application contributes `HazenWilliams`, `PumpCurve` and
-`MinorLoss`; the sewer application contributes `Headspace`.
+Applications add their own: the water application contributes `HazenWilliams`,
+`EpanetDarcyWeisbach`, `PumpCurve` and `MinorLoss`; the sewer application contributes `Headspace`.
 
 ### A note on `Duct`
 
