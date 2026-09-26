@@ -30,43 +30,71 @@ Elements are grouped below by the physics they express, as in
 ### Power-law openings
 
 ::: noodl.elements.powerlaw
+    options:
+      heading_level: 4
 ::: noodl.elements.powerlaw_mbl
+    options:
+      heading_level: 4
 
 ### Density upwinding
 
 ::: noodl.elements.upstream
+    options:
+      heading_level: 4
 
 ### Quadratic and tabulated laws
 
 ::: noodl.elements.quadratic
+    options:
+      heading_level: 4
 ::: noodl.elements.table
+    options:
+      heading_level: 4
 
 ### Large openings and doors
 
 ::: noodl.elements.door
+    options:
+      heading_level: 4
 ::: noodl.elements.door_discretized
+    options:
+      heading_level: 4
 
 ### Ducts, dampers, fans, fixed flows and conductances
 
 ::: noodl.elements.duct
+    options:
+      heading_level: 4
 ::: noodl.elements.damper
+    options:
+      heading_level: 4
 ::: noodl.elements.fan
+    options:
+      heading_level: 4
 ::: noodl.elements.fixed
+    options:
+      heading_level: 4
 ::: noodl.elements.conductance
+    options:
+      heading_level: 4
 
 ### Air properties
 
 ::: noodl.elements.media
+    options:
+      heading_level: 4
 
 ### Drives
 
 ::: noodl.drives
     options:
       members: [Drive, ConstantDrive, Stack, Wind, WindProfile]
+      heading_level: 4
 
 ::: noodl.nodesources
     options:
       members: [NodeSource]
+      heading_level: 4
 
 ## Layers
 

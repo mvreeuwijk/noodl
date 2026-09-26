@@ -9,9 +9,8 @@ importer itself as prescribed-flow edge pairs, as set out below.
 
 `read_modelica(path) -> (model, state, drivers)` imports a multizone airflow model built with the
 Modelica Buildings Library (MBL) v13.0.0 (commit `55abf579598ca81cae0a82f337350375958e6722`)
-through an OpenModelica JSON export — a second reference implementation for this application,
-independent of CONTAM. The reader never parses Modelica source and never evaluates a Modelica
-expression: every number in the JSON was already evaluated by OpenModelica.
+through an OpenModelica JSON export. The reader never parses Modelica source and never evaluates
+a Modelica expression: every number in the JSON was already evaluated by OpenModelica.
 
 ```python
 from noodl.apps.building_physics import read_modelica
@@ -71,7 +70,7 @@ ModelicaImportError: modelica: refused 3 items:
   neither) — flows depend only on pressure differences, so the choice changes no result.
 - Every source driver (air, heat and species) is the MEAN of the source over each step, not its
   end-of-step value, so that a pulse shorter than the output interval still injects its exact
-  mass (found from `CO2TransportStep`'s 3.6 s pulse landing between two 172.8 s outputs).
+  mass (e.g. `CO2TransportStep`'s 3.6 s pulse landing between two 172.8 s outputs).
 - A signal may drive several inputs (`drives` accepts one name or a list) — MBL's `ZonalFlow`
   example drives two flows from one `Constant`.
 - Refused, also with a named error: a closed group of zones (joined only by pressure-dependent

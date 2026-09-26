@@ -62,6 +62,16 @@ gradient. See [Differentiability](differentiability.md#the-contract).
 | `Damper(...)` | Separate power-law coefficient and exponent per flow direction | Backdraught dampers, one-way devices. |
 | `UpstreamDensityPowerLaw(...)` | `PowerLaw` with $C$ scaled by $(\rho_{\text{up}}/\rho_{\text{ref}})^{m}$ | The upstream-density correction on CONTAM power-law elements. |
 
+`noodl.elements` also carries the Modelica Buildings Library (MBL) family, which expresses the
+same physics — power laws, tables, doors — as MBL's own equations rather than CONTAM's:
+`MBLPowerLaw` (built by `mbl_orifice`, `mbl_ela`, `mbl_point`, `mbl_points` and
+`mbl_coefficient`) is the power law family; `MBLTable` a tabulated pressure-flow curve;
+`MBLDoorOpen`/`MBLDoorOperable` a lumped door pair and `MBLDoorCompartment`/
+`MBLDoorCompartmentOperable`, with the `DoorCompartmentHead` drive, a height-discretised one;
+`MBLMedium`, built by `medium(name)`, the fixed-density medium the others read. See
+[Airflow elements](../applications/building_physics.md#airflow-elements) for the physics, the
+law each one evaluates and how it differs from its CONTAM counterpart.
+
 Applications add their own: the water application contributes `HazenWilliams`, `PumpCurve` and
 `MinorLoss`; the sewer application contributes `Headspace`.
 
@@ -104,7 +114,10 @@ Two rules worth stating explicitly, because both produce wrong answers rather th
 
 - **Regularise at zero.** A law whose derivative diverges or vanishes at $\Delta p = 0$ will
   stall Newton at the first iteration, since a cold start usually sits there. Every built-in
-  element blends to a laminar (linear) form below a `dp_transition` threshold. `PowerLaw` with
+  element is regularised there, but not all the same way: `PowerLaw` blends to a laminar
+  (linear) form below a `dp_transition` threshold, while the MBL power-law family blends to a
+  polynomial below a (wider) `dp_turbulent` threshold — see
+  [Airflow elements](../applications/building_physics.md#airflow-elements). `PowerLaw` with
   $n < 1$ has infinite slope at the origin without it.
 - **Keep `dflow` consistent with `flow`.** Nothing checks them against each other at runtime. An
   inconsistent pair converges to the right answer slowly, or to a wrong one confidently. Test it

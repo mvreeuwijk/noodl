@@ -128,8 +128,10 @@ them from a `.prj`'s own source records.
 ## Airflow elements
 
 Every edge of the air layer carries an element: a law giving the flow $F$ through the edge from
-the pressure difference $\Delta p$ (Pa) across it, together with its derivative for Newton. All
-of them live in `noodl.elements` and are grouped here by the physics they express. Where two
+the pressure difference $\Delta p$ (Pa) across it, together with its derivative for Newton. The
+element classes live in `noodl.elements`; two builder helpers used below, `mass_orifice` and
+`orifice_elements_from_edges`, come from this building application instead. They are grouped
+here by the physics they express. Where two
 elements describe the same physics they differ in two respects that matter in practice: how the
 law is regularised near $\Delta p = 0$, where a power law with $n < 1$ has infinite slope, and
 which air density enters its coefficient. The **Source** line under each group says where the
@@ -167,9 +169,10 @@ The two families evaluate the same law but differ physically in two places.
   switch.
 - **Density.** `Orifice` and `mass_orifice` fold one fixed density into $C$ when they build it
   (both produce a `PowerLaw`, which itself takes $C$ and $n$ as given). MBL's volume form
-  multiplies by the medium's `rho_default`, its density at the medium's own fixed default state, which does not follow the zone temperatures; the mass form
-  involves no density at all. Neither uses the density of the air actually passing through the
-  opening; `UpstreamDensityPowerLaw`, below, does.
+  multiplies by the medium's `rho_default`, its density at the medium's own fixed default
+  state, which does not follow the zone temperatures; the mass form involves no density at
+  all. Neither uses the density of the air actually passing through the opening;
+  `UpstreamDensityPowerLaw`, below, does.
 
 **Source:** `PowerLaw`/`Orifice`: CONTAM's power-law element (TN 1887r1). `MBLPowerLaw` and the
 `mbl_*` constructors: MBL's `Buildings.Airflow.Multizone` power-law elements (`Orifice`,
@@ -268,7 +271,7 @@ exponents and areas by $y$.
 | Element | What it computes |
 |---|---|
 | `Duct(L, D, eps, sum_C=0.0, *, A=None, Re_t=2000.0, rho=1.2041, mu=1.81625e-5, n_iter=4)` | Flow through a duct of length `L`, diameter `D` and roughness `eps` (m) with dynamic loss coefficients `sum_C`: $F = \sqrt{2 \rho A^2 \lvert\Delta p\rvert / (f L/D + \sum C)}$, the friction factor $f$ from the Colebrook equation iterated `n_iter` times, and a straight line through the origin below the transition Reynolds number `Re_t`. `rho` and `mu` are fixed at construction. **Source:** CONTAM TN 1887r1 section 8.3.3, eq. 50–52. |
-| `Damper(C_pos, n_pos, C_neg, n_neg, *, dp_transition=1e-3)` | A backdraft damper: a separate power law, with `PowerLaw`'s laminar blend, for each flow direction. **Source:** CONTAM's `PL_BDF`/`PL_BDQ` elements. |
+| `Damper(C_pos, n_pos, C_neg, n_neg, *, dp_transition=1e-3)` | A backdraught damper: a separate power law, with `PowerLaw`'s laminar blend, for each flow direction. **Source:** CONTAM's `PL_BDF`/`PL_BDQ` elements. |
 | `FanCurve(coeffs, q_max)` | A fan with cubic pressure rise $P(q) = a_0 + a_1 q + a_2 q^2 + a_3 q^3$, decreasing on $0 \le q \le q_{\max}$; the branch law $\Delta p = -P(q)$ is inverted for $q$. The flow is 0 when the back-pressure exceeds the shutoff pressure $P(0)$, and $q_{\max}$ when it is below $P(q_{\max})$. **Source:** CONTAM's cubic fan element. |
 | `FixedFlow(q0)` | A prescribed supply or exhaust, $F = q_0$ whatever $\Delta p$. A zone connected to the rest of the network only through fixed flows makes the Jacobian singular; `solvers.grounding.spd_certificate` reports that case. **Source:** CONTAM's constant-flow fans. |
 | `Conductance(g)` | The linear law $F = g\,\Delta p$, used for thermal conduction and passive exchange. |
@@ -397,8 +400,7 @@ per-zone `cp`.
 
 Confirmed directly: halving `OpenDoorBuoyancyDynamic`'s step scales its worst door-flow and
 boundary-temperature error by 1.97 (`test_step_limited_error_halves_with_the_step`).
-`OpenDoorBuoyancyPressureDynamic` shows a comparable 2.04 (measured the same way during
-development, but not independently asserted by a test).
+`OpenDoorBuoyancyPressureDynamic` shows a comparable 2.04 (not asserted by a test).
 
 *Storage-dominated* — MBL's volumes compress and expand; noodl's airflow is quasi-steady, like
 CONTAM's, so it does not:
@@ -415,7 +417,7 @@ noodl's zone capacity is the constant-pressure `m cp`, so the ratio of MBL's to 
 temperature rise should be `cp/cv` — measured 1.4016 and 1.3995 against `cp/cv` = 1.398 and
 1.400. `ReverseBuoyancy`'s zones start 1325 Pa above the boundary; MBL releases the excess through
 mass storage and cools by close to the flow-work-minus-latent-heat prediction (0.83 K measured
-against 0.78 K predicted, within the ruled 10 % tolerance), while noodl starts already balanced
+against 0.78 K predicted, within the test's 10 % tolerance), while noodl starts already balanced
 and does not cool.
 
 **The `t = StartTime` row** is excluded from every bound above, and reported separately. At that
