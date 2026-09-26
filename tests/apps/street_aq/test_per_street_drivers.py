@@ -312,3 +312,64 @@ def test_safe_atan2_and_reciprocal_have_finite_gradients_at_their_singular_point
     assert torch.isfinite(r_).all() and float(r_[2]) == 0.25 and float(r_[3]) < 0
     r.sum().backward()
     assert torch.isfinite(x.grad).all()
+
+
+def test_gradients_flow_through_every_per_street_driver():
+    """d(total street concentration)/d(each per-street driver), through `model.steady`:
+    finite everywhere, and non-zero for every driver (a driver the forward pass silently
+    dropped, or a masked NaN, would show here)."""
+    net, _ = munich_idealised()
+    n = len(net.streets)
+    per, state, _ = build_model(net, meteo="per_street", background="per_street", **MUNICH)
+    d = _expand(_uniform_drivers(per), n)
+    k = torch.arange(n, dtype=DT)
+    leaves = {
+        "U_ref": 5.0 + 0.1 * k,
+        "theta_w": 0.3 + 0.05 * k,
+        "h_abl": 800.0 + 10.0 * k,
+        "lmo": torch.where(k % 3 == 0, -50.0 - k, 200.0 + 10.0 * k),
+        "u_star": 0.3 + 0.01 * k,
+        "street.x_boundary": 2e-8 * (1.0 + 0.1 * k),
+    }
+    for value in leaves.values():
+        value.requires_grad_(True)
+    x = per.steady(state, dict(d, **leaves))["street.x"]
+    grads = torch.autograd.grad(x.sum(), list(leaves.values()))
+    for (key, _), g in zip(leaves.items(), grads, strict=True):
+        assert torch.isfinite(g).all(), key
+        assert float(g.abs().max()) > 0.0, key
+
+
+def test_u_star_driver_under_per_street_meteo():
+    net, _ = munich_idealised()
+    n = len(net.streets)
+    per, _, _ = build_model(net, meteo="per_street", **MUNICH)
+    uniform, _, _ = build_model(net, **MUNICH)
+    d = _uniform_drivers(uniform)
+    du = dict(d, u_star=torch.tensor(0.4, dtype=DT))
+    dp = _expand(du, n)
+    torch.testing.assert_close(_q(per, dp), _q(uniform, du), rtol=1e-13, atol=1e-18)
+    # Each street's exchange follows its own u_star: doubling one street's changes only
+    # that street's two exchange flows (the last 2 n entries: street k owns 2k, 2k + 1).
+    doubled = dict(dp, u_star=dp["u_star"].clone())
+    doubled["u_star"][4] = 0.8
+    ex_a, ex_b = _q(per, dp)[-2 * n:], _q(per, doubled)[-2 * n:]
+    changed = sorted({i // 2 for i in (ex_a != ex_b).nonzero().flatten().tolist()})
+    assert changed == [4]
+    # Where it is given, the junctions route with the mean of the streets' u_star.
+    j = per.closures[0].junction_values(doubled)["u_star"]
+    assert torch.isfinite(j).all() and float(j.max()) > 0.4
+
+
+def test_per_street_and_junction_shape_errors_are_named():
+    net, _ = munich_idealised()
+    n, n_j = len(net.streets), len(net.junctions)
+    per, _, _ = build_model(net, meteo="per_street", **MUNICH)
+    d = _expand(_uniform_drivers(per), n)
+    with pytest.raises(ValueError, match=rf"'U_ref' with a trailing street axis of length {n}"):
+        _q(per, dict(d, U_ref=torch.full((n + 1,), 5.0, dtype=DT)))
+    with pytest.raises(ValueError, match=r"'lmo' with a trailing street axis.*shape \(\)"):
+        _q(per, dict(d, lmo=torch.tensor(1e6, dtype=DT)))
+    with pytest.raises(ValueError, match=rf"'theta_w_junction' needs a trailing junction "
+                                         rf"axis of length {n_j}"):
+        _q(per, dict(d, theta_w_junction=torch.zeros(n_j - 1, dtype=DT)))
