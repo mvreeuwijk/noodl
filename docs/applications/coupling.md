@@ -78,8 +78,8 @@ With `street.x[0] = 3.0` kg/m³ and the building's `rho_amb = 1.2`, the building
 mass fraction of $3.0 / 1.2 = 2.5$ kg/kg for that step.
 
 *(Condensed from `tests/test_couple.py`. Each model is built in the ordinary way; the full
-real-data demo in `tests/verification/test_coupling_demo.py` uses a CONTAM `.prj` and an AQ_DT
-street domain and is longer only because of the wiring, not the coupling API.)*
+demo in `tests/verification/test_coupling_demo.py` puts a CONTAM `.prj` building on a small
+synthetic street network and is longer only because of the wiring, not the coupling API.)*
 
 ## The API
 
@@ -357,7 +357,7 @@ batch 1, 48 s at batch 10 and 137 s at batch 100 (medians; wall time varied by u
   interface to non-differentiable tools such as EnergyPlus or WSIMOD itself.
 - **Ambient temperature is not coupled in the street ↔ building demo.** The building sees the
   street only through species concentrations; its ambient density comes from the `.prj` file's
-  own outdoor temperature, and the AQ_DT forcing carries no temperature.
+  own outdoor temperature, and the street model's drivers carry no temperature.
 - **Batched gradients.** When every interface value carries the batch dimension, the adjoint
   solves each batch instance independently and its cost does not grow with the batch size. A
   value shared across instances couples them, and the adjoint then solves the whole batch as one

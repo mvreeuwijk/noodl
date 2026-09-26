@@ -33,9 +33,6 @@ sparse = ["scipy>=1.11"]
 # `dev` restates `sparse`'s requirement rather than referencing the extra recursively: the
 # test suite exercises the sparse-direct backend directly, and a plain pin is one fewer
 # resolver feature for `pip install -e ".[dev]"` to depend on. Keep the two in step.
-# netCDF4 reads the ONE NETCDF4 file this project touches, AQ_DT's saved
-# network_concentration_<year>.nc; every product noodl writes is classic CDF, which
-# scipy reads. Test-only, and the tests that need it use pytest.importorskip.
 # pyswmm parity (rows W1-W4): BSD-2-Clause, wrapping SWMM 5, whose engine is public domain
 # (US-government work) / CC0. Test-only (`importorskip`); the sewer application itself needs
 # nothing beyond torch and the existing `sparse` extra.
@@ -50,7 +47,7 @@ sparse = ["scipy>=1.11"]
 # silently change quickstart_demo/oxford_demo's forcing or node parameters, which an `>=` pin
 # would not catch. Test-only (`importorskip`); never a runtime dependency of noodl itself.
 dev = [
-    "pytest>=8", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy>=1.11", "netCDF4>=1.7",
+    "pytest>=8", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy>=1.11",
     "pyswmm>=2.1", "wntr>=1.5", "wsimod==0.8.1",
 ]
 # ContamX parity: NIST's `contamxpy` ships a Windows x86-64 wheel that
@@ -58,9 +55,9 @@ dev = [
 # no wheel for any other platform, hence the marker. Tests that need it carry `external`
 # and skip themselves when the import fails, so CI on Linux is unaffected.
 contam = ["contamxpy>=0.0.9; sys_platform == 'win32'"]
-# `street_aq` is a RUNTIME extra: `apps/street_aq/loader.py` reads the AQ_DT NetCDF products
-# through `scipy.io.netcdf_file`, and `apps/street_aq/impaq.py` -- the IMPAQ port --
-# needs `scipy.optimize` and `scipy.special`. Neither is on any path the core solves take.
+# `street_aq` is a RUNTIME extra: `apps/street_aq/report.py`'s `write_network_concentration`
+# writes its classic-CDF product through `scipy.io.netcdf_file`. Nothing else in the street
+# application, and no path the core solves take, needs it.
 street_aq = ["scipy>=1.11"]
 
 [tool.setuptools.packages.find]

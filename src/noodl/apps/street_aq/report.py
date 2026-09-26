@@ -1,8 +1,8 @@
 """Units and output for the street application.
 
-The model works in kg/m3 throughout; people read ug/m3, and AQ_DT's own
-stage-3 product is a classic-CDF file with one record per (time, edge). Both live here so
-that no unit conversion is written twice and no output format is invented twice.
+The model works in kg/m3 throughout; people read ug/m3, and the network product is a
+classic-CDF file with one record per (time, edge). Both live here so that no unit
+conversion is written twice and no output format is invented twice.
 """
 
 from __future__ import annotations
@@ -38,15 +38,13 @@ def write_network_concentration(
     year: int | None = None,
     solver_background: float = 0.0,
 ) -> Path:
-    """Write a `network_concentration_<year>.nc` in AQ_DT's own shape, as classic CDF.
+    """Write a `network_concentration_<year>.nc` of per-street results, as classic CDF.
 
     Dimensions `time` and `edge`; variables `time_hours`, `edge_feature_index`,
     `edge_osmid`, `forcing_background_concentration (time)`,
-    `canyon_velocity_mps (time, edge)` and `concentration_increment (time, edge)` -- the
-    names AQ_DT's own products use. Two deliberate
-    differences from AQ_DT's own writer, both recorded as attributes on the file: this one
-    writes CLASSIC CDF (AQ_DT writes NETCDF4, which `scipy.io.netcdf_file` cannot read at
-    all) and float64 rather than float32.
+    `canyon_velocity_mps (time, edge)` and `concentration_increment (time, edge)`. The file
+    is CLASSIC CDF, which `scipy.io.netcdf_file` reads and writes (it cannot read NETCDF4),
+    in float64 throughout; both choices are recorded as an attribute on the file.
     """
     from scipy.io import netcdf_file
 
@@ -79,7 +77,7 @@ def write_network_concentration(
         )
         handle.solver_background = str(float(solver_background))
         handle.file_format_note = (
-            "classic CDF and float64, where AQ_DT's own writer uses NETCDF4 and float32"
+            "classic CDF (readable by scipy.io.netcdf_file), float64 throughout"
         )
         if year is not None:
             handle.year = str(int(year))

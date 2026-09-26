@@ -18,7 +18,7 @@ def test_the_unit_helpers_are_exact_inverses():
     x = torch.tensor([1.0e-9, 5.5e-8, 0.0], dtype=DT)
     torch.testing.assert_close(to_ug_m3(x), x * 1e9, rtol=0, atol=0)
     torch.testing.assert_close(from_ug_m3(to_ug_m3(x)), x, rtol=1e-15, atol=0)
-    # 40 ug/m3 is AQ_DT's own `display_max_ugm3`, so it is the value to sanity-check on.
+    # 40 ug/m3 is the EU annual NO2 limit value, a typical magnitude to sanity-check on.
     assert abs(float(from_ug_m3(torch.tensor(40.0, dtype=DT))) - 4.0e-8) < 1e-23
 
 
