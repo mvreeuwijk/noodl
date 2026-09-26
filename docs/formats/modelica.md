@@ -1,10 +1,11 @@
 # Modelica Buildings Library
 
 Reading a Modelica export produces a model for [building
-physics](../applications/building_physics.md). Each imported instance becomes one of the
-[`noodl.elements`](../applications/building_physics.md#airflow-elements) objects the building
-application assembles into a network by hand — a door becomes an orifice pair, a zonal-flow
-component becomes a directed edge pair, and so on, as set out below.
+physics](../applications/building_physics.md). Power-law, tabulated and door components become
+the [`noodl.elements`](../applications/building_physics.md#airflow-elements) classes of the
+same physics — an open door, for example, becomes an `MBLDoorOpen` edge pair and a discretised
+door one `MBLDoorCompartment` edge per compartment — while zonal flows are assembled by the
+importer itself as prescribed-flow edge pairs, as set out below.
 
 `read_modelica(path) -> (model, state, drivers)` imports a multizone airflow model built with the
 Modelica Buildings Library (MBL) v13.0.0 (commit `55abf579598ca81cae0a82f337350375958e6722`)

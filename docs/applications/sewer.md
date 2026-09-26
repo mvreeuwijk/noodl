@@ -1,8 +1,14 @@
 # Sewers
 
-A differentiable gravity sewer: water, headspace air and sulfide, coupled.
+Gravity sewer networks, with the water, the air above it and the sulfide it carries coupled on one
+network. Manholes are nodes and circular pipes are edges, draining as a tree to an outfall;
+wastewater flows downhill under gravity, and the question the model answers is corrosion and
+odour risk: how much H₂S is generated, and how much reaches the air where it attacks the crown
+of the pipe.
 
-Three physical subsystems share one network, and each uses a different part of the framework:
+Three physical subsystems share the network, each conserving its own quantity at every manhole —
+water volume, headspace air, and BOD and sulfide mass — and each uses a different part of the
+framework:
 
 - **Water hydraulics** — partially full circular pipes under gravity, Manning's equation. On a
   dendritic network the cycle space is empty, so continuity alone fixes every discharge in
@@ -14,14 +20,14 @@ Three physical subsystems share one network, and each uses a different part of t
 - **Water quality** — BOD decay and Pomeroy–Parkhurst sulfide generation in the wastewater, with
   two-film Henry's-law transfer of H₂S into the headspace air, as two coupled transport layers.
 
-The question it answers is corrosion and odour risk: how much H₂S is generated, and how much
-reaches the air where it attacks the crown of the pipe.
+**Units.** Water and headspace air flow m³/s, depth and head m, pressure Pa, concentrations
+kg/m³ (with helpers to mg/L and ppm), sulfide transfer kg S/s.
 
 ```python
 from noodl.apps.sewer import (
     SewerNetwork, Manhole, Pipe, Outfall, tree_steady,
     build_model, sewer_steady, initial_state,
-    read_swmm_inp, pipe_table, to_ppm, to_mg_per_litre,
+    pipe_table, to_ppm, to_mg_per_litre,
 )
 ```
 
@@ -42,9 +48,7 @@ rows = pipe_table(model, final, drivers, path="pipes.csv")
 *(From `tests/apps/sewer/test_report.py`.)* `tree_steady()` is the committed 5-conduit, 6-node
 fixture; its steady discharges are 0.05, 0.08, 0.03, 0.13 and 0.16 m³/s.
 
-Models can also be read from SWMM `.inp` files — see [File formats](../formats/swmm.md).
-
-From a SWMM file instead:
+A model can also be read from a SWMM `.inp` file (see [File formats](../formats/swmm.md)):
 
 ```python
 from noodl.apps.sewer import read_swmm_inp, build_model
@@ -206,20 +210,20 @@ the flux is symmetric between the two source terms in moles of S.
 Against SWMM 5.2.4 through `pyswmm`, on the committed `tree_kinwave.inp` fixture. The engine
 identity itself is pinned: `engine_version == "5.2.4"` and `flow_routing_error == 0.0`.
 
-| Row | Check | Tolerance | Measured |
-|---|---|---|---|
-| W1 | Pipe flows | rel 1e-9 | **1.370e-14** |
-| W2 | Normal depths | rel 1e-3 | **5.464e-4** |
-| W3 | Velocities, against the binary output series | rel 1e-3 | **6.257e-4** |
-| — | Conduit volumes | rel 1e-3 | **6.438e-4** |
-| W4 | Tracer concentration, closed form | rel 3e-5 | **7.811e-6** |
-| W4 | Tracer, the actual model, Richardson-extrapolated | rel 3e-5 | **8.05e-6** |
+| Check | Tolerance | Measured |
+|---|---|---|
+| Pipe flows | rel 1e-9 | **1.370e-14** |
+| Normal depths | rel 1e-3 | **5.464e-4** |
+| Velocities, against the binary output series | rel 1e-3 | **6.257e-4** |
+| Conduit volumes | rel 1e-3 | **6.438e-4** |
+| Tracer concentration, closed form | rel 3e-5 | **7.811e-6** |
+| Tracer, the actual model, Richardson-extrapolated | rel 3e-5 | **8.05e-6** |
 
-The W2 test additionally asserts the discrepancy is **greater than 1e-5** — a deliberate guard.
+The normal-depth test additionally asserts the discrepancy is **greater than 1e-5** — a deliberate guard.
 Too close a match would mean noodl had accidentally reproduced SWMM's lookup-table quantisation
 rather than the exact closed form, which is a bug in the other direction.
 
-The second W4 row needs explanation. noodl's reaction is explicit forward Euler, operator-split
+The Richardson-extrapolated tracer row needs explanation. noodl's reaction is explicit forward Euler, operator-split
 from transport; SWMM's is a continuous exponential decay. The $O(\Delta t)$ difference measures
 3.47e-3 at $\Delta t = 60$ s, 2.87e-4 at 5 s and 5.79e-5 at 1 s — none inside the 3e-5 target
 directly. Richardson extrapolation $2C(\Delta t) - C(2\Delta t)$ removes the leading term and
@@ -229,14 +233,14 @@ Non-SWMM checks, for the physics SWMM does not model:
 
 | Check | Result |
 |---|---|
-| A1: Pescod & Price Tests 7–9, air-to-water velocity ratio in a 300 mm UPVC pipe, 15 m, open at both ends (20–40 % band) | 24.14 %, 25.00 %, 25.15 % against measured 35 %, 25 %, 27.5 % (Test 8 calibrates `f_i`); each inside the band and equal to the closed form to round-off (asserted at rel 1e-6) |
-| A2: Pescod & Price Tyneside ventilation band (105–315 m³/h) | bracketed; open-both-ends gives 1253.78 m³/h, a 17.27% velocity ratio, inside their 5–30% envelope |
-| A3: fan draws exactly through the leaks | balance 1.234e-14, nodal residual 6.3e-15, power residual 8.1e-13 |
-| H3: transfer-dominated state reaches Henry equilibrium | rel 1e-10, **measured 1.4e-16** |
-| C1: air-layer nodal residual, and Tellegen power balance | 4.518e-13 kg/s, 6.141e-12 W |
-| C2: cross-phase sulfide conservation | rtol 1e-12 |
-| C3: adjoint gradients vs Richardson-extrapolated central differences | rel 1e-6, holds |
-| W7: storage sweep vs the closed-form steady state | **5.7e-15** on flows, **4.4e-15** on depths |
+| Pescod & Price Tests 7–9, air-to-water velocity ratio in a 300 mm UPVC pipe, 15 m, open at both ends (20–40 % band) | 24.14 %, 25.00 %, 25.15 % against measured 35 %, 25 %, 27.5 % (Test 8 calibrates `f_i`); each inside the band and equal to the closed form to round-off (asserted at rel 1e-6) |
+| Pescod & Price Tyneside ventilation band (105–315 m³/h) | bracketed; open-both-ends gives 1253.78 m³/h, a 17.27% velocity ratio, inside their 5–30% envelope |
+| Fan draws exactly through the leaks | balance 1.234e-14, nodal residual 6.3e-15, power residual 8.1e-13 |
+| Transfer-dominated state reaches Henry equilibrium | rel 1e-10, **measured 1.4e-16** |
+| Air-layer nodal residual, and Tellegen power balance | 4.518e-13 kg/s, 6.141e-12 W |
+| Cross-phase sulfide conservation | rtol 1e-12 |
+| Adjoint gradients vs Richardson-extrapolated central differences | rel 1e-6, holds |
+| Storage sweep vs the closed-form steady state | **5.7e-15** on flows, **4.4e-15** on depths |
 
 ## Coefficient provenance
 

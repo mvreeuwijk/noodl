@@ -1,19 +1,21 @@
 # Water distribution
 
-Pressurised water distribution — the EPANET class of problem. Reservoirs and tanks at fixed or
-slowly varying head, junctions with demand, connected by full pipes, pumps and valves.
+Pressurised water distribution: reservoirs and tanks at fixed or slowly varying head, and
+junctions with demand, are nodes; full pipes, pumps and valves are edges. Water is conserved at
+every junction, and flow is driven by differences in hydraulic head.
 
-This is the framework's own case, stated plainly in the module's own words: every pipe is full,
-the head loss is a monotone function of the head difference, and the whole thing is **one**
-`PotentialFlowLayer` whose potential is hydraulic head in metres. That is exactly what
+Every pipe is full and its head loss is a monotone function of the head difference, so the whole
+network is **one** `PotentialFlowLayer` whose potential is hydraulic head. That is exactly what
 distinguishes it from the free-surface [sewer](sewer.md), whose normal flow is set by slope and
 upstream inflow rather than by head difference.
+
+**Units.** Head and elevation m, flow and demand m³/s, pressure head m (with a helper to kPa).
 
 ```python
 from noodl.apps.water import (
     Junction, Reservoir, Tank, WaterPipe, Pump, Valve, WaterNetwork, WaterOptions,
     build_model, water_steady, initial_state, twoloop,
-    read_epanet_inp, pressure_head, to_kilopascal, link_table, tank_inflow,
+    pressure_head, to_kilopascal, link_table, tank_inflow,
 )
 ```
 
@@ -22,31 +24,29 @@ from noodl.apps.water import (
 ## A worked example
 
 ```python
-from noodl.apps.water import read_epanet_inp, build_model, water_steady
+from noodl.apps.water import build_model, water_steady, twoloop
 
-net = read_epanet_inp("twoloop_si.inp")
-model, state, drivers = build_model(net)
+model, state, drivers = build_model(twoloop())
 final = water_steady(model, state, drivers)
 
 # final["water.phi"] is head (m) at every node
 # final["water.q"] is flow (m3/s) in every link
 ```
 
-Or without a file, using the built-in fixture:
+`twoloop()` is a hand-built network: reservoir `R1` at 50 m, six junctions with demands
+5/8/6/10/7/9 L/s, eight Hazen-Williams pipes at $C=130$ forming two independent loops. Its heads
+are 49.267731, 48.877316, 48.430882, 48.213867, 48.117119 and 48.122936 m, the same as EPANET 2.2
+gives for the equivalent `twoloop_si.inp`.
+
+The same network can be read from an EPANET `.inp` file (see [File formats](../formats/epanet.md)):
 
 ```python
-from noodl.apps.water import build_model, water_steady, twoloop
+from noodl.apps.water import read_epanet_inp, build_model, water_steady
 
-model, state, drivers = build_model(twoloop())
+net = read_epanet_inp("twoloop_si.inp")
+model, state, drivers = build_model(net)
 final = water_steady(model, state, drivers)
 ```
-
-`twoloop()` is the committed hand-built network matching `twoloop_si.inp`: reservoir `R1` at
-50 m, six junctions with demands 5/8/6/10/7/9 L/s, eight Hazen-Williams pipes at $C=130$ forming
-two independent loops. Its reference heads from EPANET 2.2 are 49.267731, 48.877316, 48.430882,
-48.213867, 48.117119 and 48.122936 m.
-
-Models can also be read from EPANET `.inp` files — see [File formats](../formats/epanet.md).
 
 ## The objects
 
@@ -86,7 +86,7 @@ the curve.
 
 ## The physics
 
-### Hazen-Williams — the parity formula
+### Hazen-Williams
 
 $$
 h_L = K q^{1.852} + m q^2, \qquad
@@ -155,31 +155,33 @@ Against the real EPANET 2.2 engine through `wntr` 1.5.0, which bundles `epanet22
 reference implementation's own floor: `EpanetSimulator` reads EPANET's binary output, whose
 on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precision, not noodl's.
 
-| Row | Check | Tolerance | Measured |
-|---|---|---|---|
-| D1 | `twoloop_si.inp` heads and flows | rel 1e-6 | **4.361e-7** heads, **8.090e-8** flows |
-| D1 | noodl's own nodal continuity | 1e-13 | **2.093e-14** |
-| D2 | Net1 single period: heads, flows, pump head gain | 1e-6 / 1e-5 / 1e-6 | 7.058e-8, 2.868e-6, 1.189e-7 |
-| D3 | Net1 24 h tank level with level-triggered pump controls | 2e-4 m | **8.181e-5 m** worst of 25 steps |
-| D4 | Darcy-Weisbach vs EPANET's own D-W | recorded band | 3.566e-4 heads, 2.731e-3 flows |
-| D5 | Pressure-driven demand vs EPANET's `DEMAND MODEL PDA` | 1e-5 | 3.521e-7 heads, 2.184e-7 demands |
-| D6 | Head loss sums to zero around every cycle-basis loop | 1e-12 | **exactly 0.0** |
-| D7 | Autodiff vs central differences | 1e-6 × scale | 3.212e-6 / 2.505e-10 / 1.007e-6 / 2.753e-9 |
-| D8 | TRACE water quality, single source | 1e-3 | 6.438e-12 percentage points |
-| G2 | Golden regression | 1e-10 | **0.0** |
+| Check | Tolerance | Measured |
+|---|---|---|
+| `twoloop_si.inp` heads and flows | rel 1e-6 | **4.361e-7** heads, **8.090e-8** flows |
+| `twoloop_si.inp`, noodl's own nodal continuity | 1e-13 | **2.093e-14** |
+| Net1 single period: heads, flows, pump head gain | 1e-6 / 1e-5 / 1e-6 | 7.058e-8, 2.868e-6, 1.189e-7 |
+| Net1 24 h tank level with level-triggered pump controls | 2e-4 m | **8.181e-5 m** worst of 25 steps |
+| Darcy-Weisbach vs EPANET's own D-W | recorded band | 3.566e-4 heads, 2.731e-3 flows |
+| Pressure-driven demand vs EPANET's `DEMAND MODEL PDA` | 1e-5 | 3.521e-7 heads, 2.184e-7 demands |
+| Head loss sums to zero around every cycle-basis loop | 1e-12 | **exactly 0.0** |
+| Autodiff vs central differences | 1e-6 × scale | 3.212e-6 / 2.505e-10 / 1.007e-6 / 2.753e-9 |
+| TRACE water quality, single source | 1e-3 | 6.438e-12 percentage points |
+| Golden regression | 1e-10 | **0.0** |
 
-Two rows deserve comment.
+Three rows deserve comment.
 
-**D1's continuity** is machine-precision exact for noodl (2.093e-14), while EPANET itself misses
-continuity at Net1 node 13 by 4.5e-10 m³/s. The ~1e-7 residuals in D1 and D2 are attributable to
-EPANET's float32 output path and its own mild continuity violation, not to this solver.
+**Continuity** is machine-precision exact for noodl (2.093e-14), while EPANET itself misses
+continuity at Net1 node 13 by 4.5e-10 m³/s. The ~1e-7 residuals on `twoloop_si.inp` and the
+Net1 single period are attributable to EPANET's float32 output path and its own mild continuity
+violation, not to this solver.
 
-**D4 is looser than D1.** EPANET switches between Swamee-Jain, Hagen-Poiseuille and Dunlop's
+**Darcy-Weisbach is looser than Hazen-Williams.** EPANET switches between Swamee-Jain, Hagen-Poiseuille and Dunlop's
 cubic depending on Reynolds number, while noodl reuses the existing `Duct` element (Colebrook,
 unrolled); the two turbulent friction factors differ by up to about 1 %, which is the residual
-this row reports. Hazen-Williams, not Darcy-Weisbach, is this application's parity formula.
+this row reports. Hazen-Williams, not Darcy-Weisbach, is the head-loss law the comparison is
+made on.
 
-**D6 is a formulation identity, not a comparison** — head loss summing to zero around every
+**The loop head-loss row is a formulation identity, not a comparison** — head loss summing to zero around every
 independent loop is a property of the cycle-space formulation, and it holds exactly.
 
 ## Limitations
@@ -197,7 +199,7 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   EPANET's value. Between Re 2000 and 4000 EPANET's interpolating cubic is not reproduced either.
   The absolute head loss in such near-stagnant pipes is very small, but compare their flows and
   head losses with care.
-- **Water-quality tracing is verified on a single source only.** The TRACE check (D8) uses a
+- **Water-quality tracing is verified on a single source only.** The TRACE check uses a
   network with one source, where the answer is 100 % everywhere it reaches; mixing of several
   traced sources has not been compared against EPANET.
 - **Tank area does not enter a single `water_steady` call.** Only the tank's head

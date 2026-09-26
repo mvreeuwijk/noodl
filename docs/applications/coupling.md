@@ -1,7 +1,12 @@
 # Coupling
 
-Two independently built models, exchanging named values each step, iterated to a fixed point —
-and differentiable across the join.
+Two physical systems that meet at a shared boundary, each modelled as its own network: a street
+canyon and a building ventilated from it, for example, where infiltration draws the street's
+polluted air into the building and the building acts as a sink on the street. Each model
+conserves its own quantities on its own graph; at the boundary they exchange named values each
+step (a concentration one way, a mass flux in kg/s the other), iterated to a fixed point, so that
+what one side loses the other gains. The join is differentiable: gradients flow across it as if
+the two models were one.
 
 ## Two levels of coupling
 

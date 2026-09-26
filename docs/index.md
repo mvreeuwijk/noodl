@@ -42,22 +42,33 @@ calibration, sensitivity analysis and design optimisation.
 
 ## Applications
 
-noodl ships six worked applications. Each is a thin layer of domain physics over the shared
-core, and each is checked against the standard reference implementation in its field.
+noodl is one generic solver for networks whose edges carry a flow and whose nodes conserve it.
+The applications are physical systems modelled with that solver, each a thin layer of domain
+physics over the shared core:
 
-| Application | Physical system | Reference model |
-|---|---|---|
-| [Building physics](applications/building_physics.md) | Multi-zone airflow, heat and contaminant transport | CONTAM / ContamX, Modelica Buildings Library |
-| [Street air quality](applications/street_aq.md) | Urban air quality, canyon exchange and routing | MUNICH |
-| [Sewers](applications/sewer.md) | Gravity sewer hydraulics, headspace air, sulfide | SWMM |
-| [Water distribution](applications/water.md) | Pressurised mains, pumps, tanks, demand | EPANET 2.2 |
-| [WSIMOD — rule-based water-system allocation](applications/capacitated.md) | Requested flows clipped to arc capacity and free storage at the receiving node | WSIMOD |
-| [Coupling](applications/coupling.md) | Two independent models exchanging values | — |
+| Application | Physical system | Flow determination | Entry point |
+|---|---|---|---|
+| [Building physics](applications/building_physics.md) | Multi-zone airflow, heat and contaminant transport | Potential: Newton on zone pressure | `build_model` |
+| [Street air quality](applications/street_aq.md) | Urban air quality, canyon exchange and routing | Closure: flows computed from the wind aloft | `build_model`, `StreetNetwork` |
+| [Sewers](applications/sewer.md) | Gravity sewer hydraulics, headspace air, sulfide | Continuity on a tree for the water; Newton potential for the headspace air | `build_model` |
+| [Water distribution](applications/water.md) | Pressurised mains, pumps, tanks, demand | Potential: Newton on hydraulic head | `build_model` |
+| [Capacitated allocation](applications/capacitated.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Capacitated clip | `CapacitatedTransferLayer` |
+| [Coupling](applications/coupling.md) | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
 
-They are also the argument for the framework: the same core carries a Newton solve on a
-building's pressure network, an advection-reaction sweep along a street, a tree traversal down
-a sewer, and a clip-and-allocate rule on a water-resources graph, without any of them knowing
-about the others.
+## Reading model files
+
+A model can be built directly in Python or, where a reader exists, read from a file in an
+established exchange format. A model read from a file can be batched, differentiated and coupled
+exactly like one built by hand.
+
+| Format | Reader | What it describes | Produces a model for |
+|---|---|---|---|
+| [CONTAM](formats/contam.md) `.prj` / `.wth` | `read_prj`, `project_to_model`, `read_wth` | Multi-zone building airflow and contaminants; weather | [Building physics](applications/building_physics.md) |
+| [Modelica Buildings Library](formats/modelica.md) (JSON + CSV export) | `read_modelica` | Multi-zone airflow models built from MBL components | [Building physics](applications/building_physics.md) |
+| [SWMM](formats/swmm.md) `.inp` | `read_swmm_inp` | Gravity sewer and drainage networks | [Sewers](applications/sewer.md) |
+| [EPANET](formats/epanet.md) `.inp` | `read_epanet_inp` | Pressurised water distribution | [Water distribution](applications/water.md) |
+
+See [File formats](formats/index.md) for what each reader accepts and refuses.
 
 ## Where to go next
 

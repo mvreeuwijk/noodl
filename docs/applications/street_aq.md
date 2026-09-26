@@ -1,9 +1,11 @@
 # Street air quality
 
-Urban air quality on a street network — the SIRANE/MUNICH class of problem. Road segments
-flanked by buildings are "canyons"; pollutant builds up in each from traffic emissions, is
-ventilated into the atmosphere above roof level, and is transported between streets through
-junctions.
+Urban air quality on a street network. Road segments flanked by buildings are "canyons", and
+each canyon is a node holding a well-mixed pollutant concentration (kg/m³); the atmosphere above
+roof level is the boundary node. Edges carry air between streets at junctions, and exchange it
+with the atmosphere at junctions and through the canyon roof. Pollutant mass is conserved in
+every canyon: it builds up from traffic emissions (kg/s), is ventilated into the atmosphere, and
+is carried from street to street by the wind-driven flow along them.
 
 This application is the framework's clearest case of **closure-computed flows**. There is no
 potential variable anywhere: the along-canyon velocity is a closed-form function of the wind
@@ -13,7 +15,7 @@ layer advects on what it wrote.
 ```python
 from noodl.apps.street_aq import (
     build_model, street_steady, street_index, initial_state,
-    StreetNetwork, Street, from_test_network, munich_idealised,
+    StreetNetwork, Street, from_test_network,
     write_network_concentration, to_ug_m3,
     photostationary_for_streets,
 )
