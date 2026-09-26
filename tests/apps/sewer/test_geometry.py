@@ -1,4 +1,4 @@
-"""Circular geometry and the Manning inversion (rows W5, W6)."""
+"""Circular geometry and the Manning inversion."""
 
 import pytest
 import torch
@@ -93,8 +93,8 @@ def test_capacity_is_the_discharge_at_the_peak_depth():
 
 
 @pytest.mark.parametrize("diameter", [0.15, 0.30, 0.45, 1.65])
-def test_w5_manning_inversion_round_trip(diameter):
-    """Row W5. Measured worst 7.5e-14 relative over h/D in [0.01, 0.938]; BELOW h/D = 0.01
+def test_manning_inversion_round_trip(diameter):
+    """Measured worst 7.5e-14 relative over h/D in [0.01, 0.938]; BELOW h/D = 0.01
     the solver's absolute bracket tolerance dominates and it degrades to 1.1e-10, which is
     why the sweep starts at 0.01."""
     frac = torch.linspace(0.01, g.H_MAX_RATIO, 401, dtype=F64)
@@ -137,8 +137,8 @@ def test_zero_flow_gives_zero_depth_and_finite_gradients():
     assert float(q.grad[0]) > 0.0
 
 
-def test_w6_surcharge_is_refused_naming_the_pipe():
-    """Row W6."""
+def test_surcharge_is_refused_naming_the_pipe():
+    """The surcharge guard reports the offending pipe by name."""
     with pytest.raises(ValueError, match=r"surcharge at pipe\(s\) \['C1'\]"):
         g.normal_depth(
             torch.tensor([0.2], dtype=F64), torch.tensor([0.30], dtype=F64),

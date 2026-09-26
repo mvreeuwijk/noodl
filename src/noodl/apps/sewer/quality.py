@@ -280,7 +280,9 @@ class H2STransfer:
 
     Reads the PREVIOUS pass's concentrations (the framework's lagged cross-layer coupling)
     and writes the two layers' `sources` drivers. Both are in FULL node order and both are
-    exactly opposite in MOLES of sulfur, which row C2 asserts node by node.
+    exactly opposite in MOLES of sulfur, which
+    `tests/apps/sewer/test_conservation.py::test_cross_phase_sulfide_is_conserved_node_by_node`
+    asserts node by node.
 
     ADDS to an existing `"<water_layer>.sources"`/`"<air_layer>.sources"` driver rather than
     overwriting it: registered AFTER `LateralLoads` in `build_model`'s closure

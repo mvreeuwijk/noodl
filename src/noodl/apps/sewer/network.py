@@ -195,7 +195,7 @@ def build_model(
 ) -> tuple[Model, State, Drivers]:
     """Assemble the sewer model and return `(model, state, drivers)`.
 
-    `air=False` builds the water-only model the pyswmm parity rows use; `quality=False`
+    `air=False` builds the water-only model the SWMM comparison tests use; `quality=False`
     drops both quality layers. `fans` names the manholes carrying a prescribed extraction
     (m3/s, positive OUT through the `fan` kind).
     """

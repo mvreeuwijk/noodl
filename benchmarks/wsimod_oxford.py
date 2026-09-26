@@ -11,7 +11,7 @@ such rather than framed as a speedup over WSIMOD (no budget is set for this row;
 sewer benchmark has a hard budget).
 
 Uses random per-step requests scaled to each arc's own capacity (`torch.rand(...) * c_arc`),
-not the committed WSIMOD fixture data: the parity claim itself (W1/W2) is already made by
+not the committed WSIMOD fixture data: the parity claim itself is already made by
 `tests/verification/test_wsimod_parity.py` against the real captured requests; this script
 only exercises the SAME topology's shape and step count for a throughput number, so random
 per-instance requests are enough and let every batch instance differ (unlike replaying one

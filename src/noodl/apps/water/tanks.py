@@ -17,8 +17,9 @@ reads the CURRENT level.
 `event_step` is EPANET's ADAPTIVE shortening, and it is not optional: measured on Net1 over
 24 h, a fixed 1 h step diverges from EPANET by 2.07 m because the pump switches a whole
 hour late, while shortening the step to the linearly-projected trigger crossing costs 2
-extra sub-steps and brings the worst reported-step difference to 8.181e-5 m (verification
-row D3). It implements only the CONTROL-CROSSING half of EPANET's rule
+extra sub-steps and brings the worst reported-step difference to 8.181e-5 m (checked in
+`tests/verification/test_water_parity.py::test_net1_extended_period_tank_level`). It
+implements only the CONTROL-CROSSING half of EPANET's rule
 (Manual section 13.1 item 17, p.113: the next step is the minimum of the nominal step and
 the time to the next control crossing) -- not the demand-PERIOD boundary half, which the
 Net1 driver does not need: Net1's pattern step (2 h) is an exact multiple of its

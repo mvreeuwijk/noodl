@@ -119,7 +119,8 @@ def test_the_pump_curve_inverts_its_fitted_law():
     # MEASURED 0.11773752856904683 against EPANET's own 0.11773740500211716, i.e. 1.05e-6
     # relative. The head gain fed in is EPANET's FLOAT32 report (-62.285091400146484), and
     # inverting a quadratic curve at a float32 head cannot do better than the head's own
-    # precision; the full solve agrees to 9.553e-7 (row D2).
+    # precision; the full solve agrees to 9.553e-7 (checked in
+    # `tests/verification/test_water_parity.py::test_net1_single_period`).
     assert float(q) == pytest.approx(0.11773740500211716, rel=1e-5)
 
 

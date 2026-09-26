@@ -185,8 +185,9 @@ def test_the_demand_enters_as_a_negative_nodal_source():
 
 
 def test_the_two_loop_solves_to_the_measured_heads():
-    """The same numbers verification row D1 asserts against EPANET, pinned here without
-    wntr."""
+    """The same numbers
+    `tests/verification/test_water_parity.py::test_two_loop_heads_and_flows` asserts
+    against EPANET, pinned here without wntr."""
     model, state, drivers = build_model(twoloop())
     final = water_steady(model, state, drivers)
     assert final["water.phi"].tolist() == pytest.approx(
@@ -270,7 +271,8 @@ def test_an_unmodelled_headloss_argument_is_refused():
 # --------------------------------------------------------------------- [OPTIONS]
 def test_pda_defaults_from_the_networks_own_options():
     """`build_model(net)` with NO `pda=`/`p_min=`/... reads them from `net.options`,
-    exactly as a `DEMAND MODEL PDA` `.inp` would set them (row D5)."""
+    exactly as a `DEMAND MODEL PDA` `.inp` would set them (checked in
+    `tests/verification/test_water_parity.py::test_pressure_driven_demand`)."""
     net = dataclasses.replace(
         twoloop(),
         options=WaterOptions(
@@ -427,8 +429,9 @@ def test_link_table_writes_every_link(tmp_path):
 
 
 def test_tank_inflow_is_the_net_inflow_at_the_tank():
-    """A tank-free network has no tank rows, so this is exercised on Net1 in D3; here the
-    identity itself is checked on the reservoir, which is the same accumulation."""
+    """A tank-free network has no tank rows, so this is exercised on Net1 in
+    `tests/verification/test_water_parity.py::test_net1_extended_period_tank_level`; here
+    the identity itself is checked on the reservoir, which is the same accumulation."""
     model, state, drivers = build_model(twoloop())
     final = water_steady(model, state, drivers)
     layer = model.potential["water"]
@@ -463,7 +466,8 @@ def test_water_steady_refuses_a_converged_pump_flow_beyond_q_max():
 
 def test_net1_pump_stays_below_q_max_and_is_not_refused():
     """The converse of the refusal above: Net1's own duty point never approaches q_max
-    (verification row D2), so `water_steady` must NOT raise on it."""
+    (checked in `tests/verification/test_water_parity.py::test_net1_single_period`), so
+    `water_steady` must NOT raise on it."""
     data = Path(__file__).resolve().parents[2] / "data" / "water"
     net = read_epanet_inp(data / "Net1.inp")
     model, state, drivers = build_model(net)

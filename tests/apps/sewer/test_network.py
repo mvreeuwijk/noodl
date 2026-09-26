@@ -390,7 +390,8 @@ def test_one_step_with_a_lateral_bod_load_raises_only_j1():
     formula only in the limit `Q_out * dt << V_wet`; here `Q_out * dt / V_wet = 0.414`, so
     that limit does not hold and the naive figure is measured 41% off. MEASURED: the
     transport-layer-only step (bypassing `SulfideGeneration`'s reaction, verified separately
-    at S1) matches the closed form above to rel 0.0 (bit-exact -- it is that layer's OWN
+    in `tests/apps/sewer/test_quality.py::test_sulfide_rate_against_the_closed_form`)
+    matches the closed form above to rel 0.0 (bit-exact -- it is that layer's OWN
     scheme, not an approximation of it)."""
     model, state, drivers = build_model(tree_steady())
     n = model.net.n

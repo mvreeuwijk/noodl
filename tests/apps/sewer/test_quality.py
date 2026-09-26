@@ -1,4 +1,4 @@
-"""Thermodynamics, kinetics and two-film transfer (rows H1, H2, S1)."""
+"""Thermodynamics, kinetics and two-film transfer."""
 
 import pytest
 import torch
@@ -8,8 +8,8 @@ from noodl.apps.sewer import quality as q
 F64 = torch.float64
 
 
-def test_h1_henry_constant_against_sander_2023():
-    """Row H1. Measured: H(293.15) = 0.363854, H(298.15) = 0.403418."""
+def test_henry_constant_against_sander_2023():
+    """Measured: H(293.15) = 0.363854, H(298.15) = 0.403418."""
     assert float(q.henry_h2s(torch.tensor(293.15, dtype=F64))) == pytest.approx(
         0.36, abs=0.01
     )
@@ -58,8 +58,8 @@ def test_kla_is_zero_and_finite_on_a_dry_pipe():
     assert torch.isfinite(zero.grad).all()
 
 
-def test_s1_sulfide_rate_against_the_closed_form():
-    """Row S1. Measured: exact agreement (relative difference 0.0)."""
+def test_sulfide_rate_against_the_closed_form():
+    """Measured: exact agreement (relative difference 0.0)."""
     theta = 1.07 ** (18.0 - 20.0)
     expected = (
         0.32e-3 * 0.3 * theta / 0.0764
@@ -91,8 +91,8 @@ def test_bod_decay_is_first_order_with_the_temperature_factor():
     assert float(value) == pytest.approx(expected, rel=1e-12)
 
 
-def test_h2_two_film_flux_against_the_closed_form():
-    """Row H2. Measured: exact agreement (relative difference 0.0)."""
+def test_two_film_flux_against_the_closed_form():
+    """Measured: exact agreement (relative difference 0.0)."""
     sulfide = torch.tensor([2.0e-3], dtype=F64)
     gas = torch.tensor([5.0e-5], dtype=F64)
     volume = torch.tensor([7.25], dtype=F64)
@@ -109,7 +109,8 @@ def test_h2_two_film_flux_against_the_closed_form():
 
 
 def test_the_flux_vanishes_at_henry_equilibrium():
-    """Row H3's algebraic core: at C_G = H f C_S M_H2S / M_S there is no net transfer."""
+    """The two-film flux's algebraic core: at C_G = H f C_S M_H2S / M_S there is no net
+    transfer."""
     sulfide = torch.tensor([2.0e-3], dtype=F64)
     volume = torch.tensor([7.25], dtype=F64)
     kla = torch.tensor([1e-3], dtype=F64)
@@ -156,8 +157,8 @@ def test_sulfide_generation_refuses_a_missing_driver():
         SulfideGeneration().apply(torch.zeros(1, 2, dtype=F64), 60.0, {})
 
 
-def test_c2_transfer_sources_are_exactly_opposite_in_moles_of_sulfur():
-    """Row C2's algebraic core, node by node."""
+def test_transfer_sources_are_exactly_opposite_in_moles_of_sulfur():
+    """The cross-phase conservation check's algebraic core, node by node."""
     from noodl.apps.sewer.quality import H2STransfer
 
     closure = H2STransfer(4, torch.tensor([0, 1, 2]))
