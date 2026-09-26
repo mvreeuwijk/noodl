@@ -21,7 +21,10 @@ A constant-power pump is refused with a specific reason: the head-flow relation 
 internally for one is not stated in the manual, so implementing it would be a guess.
 
 **Units** follow `[OPTIONS] UNITS`: `CFS GPM MGD IMGD AFD` are US, `LPS LPM MLD CMH CMD` are SI,
-and everything is converted to SI on read. Unrecognised `[OPTIONS]` lines are recorded verbatim in
+and everything is converted to SI on read. D-W roughness is millimetres (SI) or millifeet (US).
+A `VISCOSITY` above 1e-3 is a multiplier on water's viscosity, anything else the actual kinematic
+viscosity (m²/s or ft²/s), as in EPANET. A `HEADLOSS D-W` file is modelled with EPANET's own
+composite friction law by default (see [Darcy-Weisbach](../applications/water.md#darcy-weisbach)). Unrecognised `[OPTIONS]` lines are recorded verbatim in
 `notes["unrecognised_options"]` rather than dropped.
 
 ```python

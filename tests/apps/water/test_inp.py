@@ -271,6 +271,29 @@ def test_darcy_weisbach_roughness_is_converted_from_millifeet(tmp_path):
     assert pipe.roughness == pytest.approx(0.85 * FOOT * 1e-3, rel=1e-15)
 
 
+def test_the_flow_unit_is_carried_onto_the_options():
+    assert read_epanet_inp(DATA / "twoloop_si.inp").options.flow_units == "LPS"
+    assert read_epanet_inp(DATA / "Net1.inp").options.flow_units == "GPM"
+
+
+@pytest.mark.parametrize(
+    "name, value, ratio",
+    [
+        ("twoloop_si.inp", "1.5", 1.5),
+        # at or below 1e-3 EPANET reads the ACTUAL kinematic viscosity (`input1.c`):
+        # m2/s in an SI file, ft2/s in a US one
+        ("twoloop_si.inp", "2.0439e-6", 2.0439e-6 / (1.1e-5 * FOOT**2)),
+        ("Net1.inp", "2.2e-5", 2.0),
+    ],
+)
+def test_viscosity_is_a_multiplier_or_an_actual_value_as_in_epanet(
+    tmp_path, name, value, ratio
+):
+    old = " Viscosity          \t1.0"
+    path = _edit(tmp_path, name, (old, f" Viscosity          \t{value}"))
+    assert read_epanet_inp(path).options.viscosity == pytest.approx(ratio, rel=1e-12)
+
+
 # --------------------------------------------------------------------- [OPTIONS]
 def test_a_default_file_reads_dda_with_epanets_own_defaults():
     """Neither committed fixture writes `DEMAND MODEL`, `MINIMUM PRESSURE`, `REQUIRED

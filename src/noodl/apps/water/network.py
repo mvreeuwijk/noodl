@@ -20,6 +20,9 @@ import torch
 
 from noodl.apps.water.demand import PressureDrivenDemand
 from noodl.apps.water.elements import (
+    EPANET_NU,
+    EPANET_QCF,
+    EpanetDarcyWeisbach,
     HazenWilliams,
     MinorLoss,
     PumpCurve,
@@ -65,6 +68,10 @@ class WaterOptions:
     describes the no-op DDA case; `wntr`'s `HydraulicOptions.required_pressure = 0.07` is
     that SAME 0.1 converted from psi assuming US units, which does not apply here since
     this reader is always SI.
+
+    `flow_units` is the `.inp` file's `[OPTIONS] UNITS` (`None` for a network built by
+    hand). It changes nothing physical: the EPANET-exact Darcy-Weisbach law uses it only to
+    reproduce EPANET's own ROUNDED conversion of that unit to cfs (`EPANET_QCF`).
     """
 
     demand_model: str = "DDA"
@@ -73,6 +80,7 @@ class WaterOptions:
     pressure_exponent: float = 0.5
     specific_gravity: float = 1.0
     viscosity: float = 1.0
+    flow_units: str | None = None
 
 
 @dataclass(frozen=True)
@@ -321,6 +329,15 @@ def twoloop() -> WaterNetwork:
     )
 
 
+def _epanet_cfs_per_m3s(flow_units: str | None) -> float | None:
+    """EPANET's internal cfs per m3/s for a file in `flow_units` (None: exact)."""
+    if flow_units is None:
+        return None
+    from noodl.apps.water.inp import FLOW_UNITS  # the reader imports this module
+
+    return 1.0 / (FLOW_UNITS[flow_units] * EPANET_QCF[flow_units])
+
+
 def build_model(
     net: WaterNetwork,
     *,
@@ -332,6 +349,7 @@ def build_model(
     quality: float | None = None,
     coupling: str = "pingpong",
     dt: float | None = None,
+    friction: str = "epanet",
 ) -> tuple[Model, State, Drivers]:
     """Assemble the water model and return `(model, state, drivers)`.
 
@@ -363,16 +381,29 @@ def build_model(
     the volume of every incident pipe; "the volume of its single outgoing pipe" is a TREE
     property and does not carry over. Both are recorded in `model.notes`.
 
-    The Darcy-Weisbach path reuses the existing `Duct`, which works in PRESSURE, so the
-    whole layer does: heads are multiplied by `rho g` on the way in and `model.head_scale`
-    carries the factor back out. Hazen-Williams (the default, and the formula of the EPANET
-    comparison) works directly in metres of head and `head_scale` is 1.
+    `friction` selects the Darcy-Weisbach friction law. `"epanet"` (the default) is
+    `EpanetDarcyWeisbach`, EPANET 2.2's own composite -- Hagen-Poiseuille below Re = 2000,
+    Dunlop's cubic to 4000, Swamee-Jain above -- with EPANET's constants (32.2 ft/s^2,
+    0.02517, `VISCOS = 1.1e-5 ft^2/s`) and, when `net.options.flow_units` is known, its
+    rounded flow-unit factor; this is the default because the application's reference is
+    EPANET, and a `.inp` with `HEADLOSS D-W` then reproduces EPANET to its float32 output.
+    `"colebrook"` keeps the generic `Duct` (Colebrook, laminar line below Re = 2000, water
+    at 1.002e-3 / 998.2 m^2/s) for users who want the implicit Colebrook law instead.
+
+    The Darcy-Weisbach path works in PRESSURE (`Duct` is written for it), so the whole
+    layer does: heads are multiplied by `rho g` on the way in and `model.head_scale`
+    carries the factor back out. Hazen-Williams (the default) works directly in metres of
+    head and `head_scale` is 1.
     """
     net.validate()
     headloss = headloss or net.headloss
     if headloss not in ("H-W", "D-W"):
         raise ValueError(
             f"build_model: headloss must be 'H-W' or 'D-W', got {headloss!r}"
+        )
+    if friction not in ("epanet", "colebrook"):
+        raise ValueError(
+            f"build_model: friction must be 'epanet' or 'colebrook', got {friction!r}"
         )
     options = net.options
     if pda is None:
@@ -432,26 +463,47 @@ def build_model(
                 )
             )
         else:
-            notes["headloss"] = (
-                f"Darcy-Weisbach uses the existing Duct element (Colebrook, unrolled "
-                f"fixed point) at kinematic viscosity nu = {nu} m2/s (1.002e-3 / 998.2 "
-                f"scaled by [OPTIONS] VISCOSITY; SPECIFIC GRAVITY {options.specific_gravity} "
-                f"sets only the head-to-pressure scale); EPANET uses "
-                f"Swamee-Jain above Re = 4000, Hagen-Poiseuille below 2000 and Dunlop's "
-                f"cubic between; the Darcy-Weisbach comparison in "
-                f"docs/applications/water.md records the resulting residual"
-            )
-            elements.append(
-                Duct(
-                    torch.tensor([p.length for p in net.pipes], dtype=F64),
-                    torch.tensor([p.diameter for p in net.pipes], dtype=F64),
-                    torch.tensor([p.roughness for p in net.pipes], dtype=F64),
-                    # EPANET's minor loss K adds K V^2 / (2 g): Duct's sum_C term, which at
-                    # rho' = 1/rho and dp = rho g h is exactly that head.
-                    sum_C=torch.tensor([p.minor_loss for p in net.pipes], dtype=F64),
-                    rho=1.0 / rho, mu=nu, n_iter=12, kind="pipe",
+            lengths = torch.tensor([p.length for p in net.pipes], dtype=F64)
+            diameters = torch.tensor([p.diameter for p in net.pipes], dtype=F64)
+            roughness = torch.tensor([p.roughness for p in net.pipes], dtype=F64)
+            minor = torch.tensor([p.minor_loss for p in net.pipes], dtype=F64)
+            if friction == "epanet":
+                cfs = _epanet_cfs_per_m3s(options.flow_units)
+                nu_epanet = EPANET_NU * options.viscosity
+                notes["headloss"] = (
+                    f"Darcy-Weisbach with EPANET 2.2's own friction law "
+                    f"(EpanetDarcyWeisbach: Hagen-Poiseuille below Re = 2000, Dunlop's "
+                    f"cubic to 4000, Swamee-Jain above) at kinematic viscosity "
+                    f"nu = {nu_epanet} m2/s (EPANET's 1.1e-5 ft2/s scaled by [OPTIONS] "
+                    f"VISCOSITY), flows converted to cfs with "
+                    + (
+                        f"EPANET's own {options.flow_units} factor ({cfs} cfs per m3/s)"
+                        if cfs is not None
+                        else "the exact 1 / 0.3048^3 (no file flow unit)"
+                    )
                 )
-            )
+                elements.append(
+                    EpanetDarcyWeisbach(
+                        lengths, diameters, roughness, minor_loss=minor,
+                        nu=nu_epanet, cfs_per_m3s=cfs, scale=scale, kind="pipe",
+                    )
+                )
+            else:
+                notes["headloss"] = (
+                    f"Darcy-Weisbach with the generic Duct element (Colebrook, unrolled "
+                    f"fixed point) at kinematic viscosity nu = {nu} m2/s (1.002e-3 / "
+                    f"998.2 scaled by [OPTIONS] VISCOSITY; SPECIFIC GRAVITY "
+                    f"{options.specific_gravity} sets only the head-to-pressure scale); "
+                    f"this is NOT EPANET's law -- friction='epanet' is"
+                )
+                elements.append(
+                    Duct(
+                        lengths, diameters, roughness,
+                        # EPANET's minor loss K adds K V^2 / (2 g): Duct's sum_C term,
+                        # which at rho' = 1/rho and dp = rho g h is exactly that head.
+                        sum_C=minor, rho=1.0 / rho, mu=nu, n_iter=12, kind="pipe",
+                    )
+                )
     if net.pumps:
         h0_list, r_list = [], []
         for pump in net.pumps:
