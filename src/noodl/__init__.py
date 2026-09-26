@@ -3,6 +3,6 @@
 from noodl.model import Model
 from noodl.nodesources import NodeSource
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"
 
 __all__ = ["Model", "NodeSource", "__version__"]
