@@ -310,9 +310,9 @@ the street side. Both demos assert that sign.
 | Structural guard: a two-way step assembles no dense topology operator (`upwind`/`incidence`/selectors) | n/a | holds |
 | Synthetic back-coupling, 2×3 m canyon: one-way 4.169740e-08 vs two-way 4.145151e-08 kg/m³ | measured | **0.5897 %** change, 27 passes |
 | Loose sequential file exchange vs the two-way result | measured | 0.5897 % discrepancy — equal to the street-side change, as expected for a boundary response linear in the shared value |
-| Inverse 1: leakage calibration through the join | rel err < 0.05 | **1.288e-4**, final loss 3.4574e-08 |
-| Inverse 2: source attribution by one adjoint pass vs central differences | rel 1e-4 | 1.3e-8, 2.0e-9; third source structurally zero |
-| Inverse 3: one measured path recovers all four branch flows | rtol 1e-10 | exact |
+| Leakage calibration through the join | rel err < 0.05 | **1.288e-4**, final loss 3.4574e-08 |
+| Source attribution by one adjoint pass vs central differences | rel 1e-4 | 1.3e-8, 2.0e-9; third source structurally zero |
+| One measured path recovers all four branch flows | rtol 1e-10 | exact |
 
 The synthetic case is deliberately sized so that the building matters: a 2×3 m canyon, where
 the building's infiltration changes the street concentration by 0.5897 %. On a street of

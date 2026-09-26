@@ -15,7 +15,7 @@ layer advects on what it wrote.
 ```python
 from noodl.apps.street_aq import (
     build_model, street_steady, street_index, initial_state,
-    StreetNetwork, Street, from_test_network,
+    StreetNetwork, Street, from_test_network, munich_idealised,
     write_network_concentration, to_ug_m3,
     photostationary_for_streets,
 )

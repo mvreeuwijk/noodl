@@ -165,9 +165,9 @@ The two families evaluate the same law but differ physically in two places.
   $F = C\,\Delta p_{\text{turb}}^{\,m}\,\pi\,(a + \pi^2(b + \pi^2(c + \pi^2 d)))$, whose
   coefficients depend only on $m$ and make the law twice continuously differentiable at the
   switch.
-- **Density.** `PowerLaw`, `Orifice` and `mass_orifice` fold one fixed density into $C$ at
-  construction. MBL's volume form multiplies by the medium's `rho_default`, its density at the
-  medium's own fixed default state, which does not follow the zone temperatures; the mass form
+- **Density.** `Orifice` and `mass_orifice` fold one fixed density into $C$ when they build it
+  (both produce a `PowerLaw`, which itself takes $C$ and $n$ as given). MBL's volume form
+  multiplies by the medium's `rho_default`, its density at the medium's own fixed default state, which does not follow the zone temperatures; the mass form
   involves no density at all. Neither uses the density of the air actually passing through the
   opening; `UpstreamDensityPowerLaw`, below, does.
 
