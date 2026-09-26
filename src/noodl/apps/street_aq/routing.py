@@ -260,6 +260,19 @@ class StreetFlows:
     SIGNED along-canyon velocity per street, for reporting). Reads `"U_ref"`, `"theta_w"`,
     `"h_abl"` and -- for `stability="munich"` -- `"lmo"`, each shaped `(...,)`.
 
+    `"u_star"`, when present, is the friction velocity itself and replaces the log law
+    `u* = kappa U_ref / ln((z_ref - d)/z0)` (MUNICH takes it as an input on its
+    `With_local_data` path). `U_ref` is then needed only for MUNICH's direction spread
+    `sigma_theta = sigma_v / U`, i.e. only with `direction_averaging="munich"`.
+
+    `meteo="per_street"` gives every one of those drivers a trailing STREET axis,
+    `(..., n_streets)`: each street's canyon wind and roof exchange come from its own
+    values. Junction routing then uses per-junction values `(..., n_junctions)`, in
+    `StreetNetwork.junctions` order, read from `"<name>_junction"` drivers when given
+    (MUNICH's `WindDirectionInter`, `WindSpeedInter`, `USTInter`, `PBLHInter`,
+    `LMOInter`) and otherwise the mean over the streets meeting there -- circular for the
+    direction, through the reciprocal for the Obukhov length (`junction_values`).
+
     Order of operations, which is MUNICH's (`ComputeIntersectionFlux`):
     the canyon velocities are computed ONCE from the MEAN wind direction and are NOT
     recomputed for the perturbed directions; only the in/out classification and the angular
@@ -293,8 +306,13 @@ class StreetFlows:
         z0_s: float = Z0_S_DEFAULT,
         z_ref: float = 30.0,
         pblh_floor: bool = True,
+        meteo: str = "uniform",
         layer_name: str = "street",
     ) -> None:
+        if meteo not in ("uniform", "per_street"):
+            raise ValueError(
+                f"StreetFlows: meteo must be 'uniform' or 'per_street', got {meteo!r}"
+            )
         if canyon_wind not in ("soulhac", "exponential"):
             raise ValueError(
                 f"StreetFlows: canyon_wind must be 'soulhac' or 'exponential', got "
@@ -341,6 +359,7 @@ class StreetFlows:
         self.z0_s = float(z0_s)
         self.z_ref = float(z_ref)
         self.pblh_floor = bool(pblh_floor)
+        self.meteo = meteo
         self.layer_name = layer_name
         self.h_mean = geometry.height.mean()
         self.w_mean = geometry.width.mean()
@@ -408,26 +427,68 @@ class StreetFlows:
             exchange_street.append(int(net.graph.edges[a, b, key]["street"]))
         self.exchange_street = torch.tensor(exchange_street, dtype=torch.long)
 
+    # ---------------------------------------------------------------- the drivers
+
+    def _driver(self, drivers, key: str, *, required: bool = True) -> Tensor | None:
+        value = drivers.get(key)
+        if value is None:
+            if required:
+                raise KeyError(
+                    f"StreetFlows: the driver {key!r} is missing; it is needed here "
+                    f"(canyon_wind={self.canyon_wind!r}, "
+                    f"direction_averaging={self.direction_averaging!r}, "
+                    f"meteo={self.meteo!r})"
+                )
+            return None
+        return torch.as_tensor(value, dtype=torch.float64)
+
+    def _on_streets(self, value: Tensor | None, key: str) -> Tensor | None:
+        """A driver as a per-street tensor `(..., n_streets)`: an instance value gains a
+        trailing street axis (`meteo="uniform"`), a per-street one is checked."""
+        if value is None:
+            return None
+        n = len(self.geometry.names)
+        if self.meteo == "uniform":
+            return value.unsqueeze(-1)
+        if value.dim() == 0 or value.shape[-1] != n:
+            raise ValueError(
+                f"StreetFlows: meteo='per_street' needs {key!r} with a trailing street "
+                f"axis of length {n}, got shape {tuple(value.shape)}"
+            )
+        return value
+
+    def _boundary_layer(self, u_ref: Tensor | None, u_star: Tensor | None,
+                        h_abl: Tensor) -> BoundaryLayer:
+        """The boundary layer at whatever shape its inputs have: from `u_star` when the
+        driver gives it, else from the log law on `U_ref`."""
+        floor = self.h_max if self.pblh_floor else None
+        if u_star is None:
+            if u_ref is None:
+                raise KeyError(
+                    "StreetFlows: neither 'U_ref' nor 'u_star' is among the drivers; one "
+                    "of them sets the friction velocity"
+                )
+            return boundary_layer(self.h_mean, u_ref, h_abl, z_ref=self.z_ref,
+                                  kappa=self.kappa, pblh_floor=floor)
+        template = boundary_layer(self.h_mean, torch.ones((), dtype=torch.float64),
+                                  torch.ones((), dtype=torch.float64), z_ref=self.z_ref,
+                                  kappa=self.kappa)
+        if floor is not None:
+            h_abl = torch.maximum(h_abl, torch.as_tensor(floor, dtype=torch.float64))
+        return BoundaryLayer(u_star=u_star, h_abl=h_abl, z_ref=template.z_ref,
+                             d=template.d, z0=template.z0, kappa=self.kappa)
+
     def velocities(self, drivers) -> tuple[BoundaryLayer, Tensor, Tensor]:
-        """`(boundary layer, signed canyon velocity per street, exchange velocity)`."""
+        """`(per-street boundary layer, signed canyon velocity per street, exchange
+        velocity)`, every tensor `(..., n_streets)`."""
         g = self.geometry
-        u_ref = torch.as_tensor(drivers["U_ref"], dtype=torch.float64)
-        theta_w = torch.as_tensor(drivers["theta_w"], dtype=torch.float64)
-        h_abl = torch.as_tensor(drivers["h_abl"], dtype=torch.float64)
-        lmo = drivers.get("lmo")
-        if lmo is not None:
-            lmo = torch.as_tensor(lmo, dtype=torch.float64)
-        bl = boundary_layer(
-            self.h_mean, u_ref, h_abl, z_ref=self.z_ref, kappa=self.kappa,
-            pblh_floor=self.h_max if self.pblh_floor else None,
-        )
-        # A per-street VIEW of the same boundary layer: one extra trailing axis so that
-        # every per-instance quantity broadcasts against the street axis.
-        bl_s = BoundaryLayer(
-            u_star=bl.u_star.unsqueeze(-1), h_abl=bl.h_abl.unsqueeze(-1),
-            z_ref=bl.z_ref, d=bl.d, z0=bl.z0, kappa=bl.kappa,
-        )
-        phi = theta_w.unsqueeze(-1) - g.azimuth
+        u_ref = self._on_streets(self._driver(drivers, "U_ref", required=False), "U_ref")
+        u_star = self._on_streets(self._driver(drivers, "u_star", required=False), "u_star")
+        theta_w = self._on_streets(self._driver(drivers, "theta_w"), "theta_w")
+        h_abl = self._on_streets(self._driver(drivers, "h_abl"), "h_abl")
+        lmo = self._on_streets(self._driver(drivers, "lmo", required=False), "lmo")
+        bl_s = self._boundary_layer(u_ref, u_star, h_abl)
+        phi = theta_w - g.azimuth
         if self.canyon_wind == "soulhac":
             u_street = canyon_velocity(
                 g.width, g.height, phi, u_star=bl_s.u_star, form="soulhac",
@@ -442,39 +503,120 @@ class StreetFlows:
                 g.width, g.height, phi, u_h=u_h, form="exponential", z0_s=self.z0_s,
                 canyon_wind_min=self.canyon_wind_min,
             )
-        lmo_s = None if lmo is None else lmo.unsqueeze(-1)
-        sigma_w = bl_s.sigma_w(g.height, lmo=lmo_s, stability=self.stability)
+        sigma_w = bl_s.sigma_w(g.height, lmo=lmo, stability=self.stability)
         u_d = exchange_velocity(sigma_w, g.height, g.width, form=self.exchange,
                                 u_d_min=self.u_d_min)
-        return bl, u_street, u_d
+        return bl_s, u_street, u_d
 
-    def _samples(self, bl: BoundaryLayer, drivers) -> tuple[Tensor, Tensor]:
-        theta_w = torch.as_tensor(drivers["theta_w"], dtype=torch.float64)
-        lmo = drivers.get("lmo")
-        if lmo is not None:
-            lmo = torch.as_tensor(lmo, dtype=torch.float64)
+    def _street_mean(self, values: Tensor, how: str) -> Tensor:
+        """Per-street `(..., n_streets)` -> per-junction `(..., n_junctions)`, the mean over
+        the streets meeting at each junction."""
+        per_slot = values[..., self.slot_street]                     # (..., n_j, d)
+        active = self.slot_active.to(values.dtype)
+        count = active.sum(-1)
+        if how == "circular":
+            s = (torch.sin(per_slot) * active).sum(-1)
+            c = (torch.cos(per_slot) * active).sum(-1)
+            return torch.remainder(torch.atan2(s, c), TWO_PI)
+        if how == "reciprocal":
+            inverse = ((1.0 / per_slot) * active).sum(-1) / count
+            return 1.0 / inverse
+        return (per_slot * active).sum(-1) / count
+
+    def junction_values(self, drivers) -> dict[str, Tensor | None]:
+        """The meteorology each junction routes with, `(..., n_junctions)` per key:
+        `theta_w`, `U_ref`, `u_star`, `h_abl`, `lmo` (`None` where not available).
+
+        `meteo="uniform"`: the instance values, the same at every junction.
+        `meteo="per_street"`: the `"<key>_junction"` driver when given, else the mean over
+        the streets meeting at the junction (circular for `theta_w`, through `1/L` for
+        `lmo`); `u_star` falls back to the streets' friction velocities, whether driven or
+        from the log law."""
+        n_j = self.n_junctions
+        how = {"theta_w": "circular", "lmo": "reciprocal"}
+        out: dict[str, Tensor | None] = {}
+        for key in ("theta_w", "U_ref", "u_star", "h_abl", "lmo"):
+            value = self._driver(drivers, key, required=False)
+            if value is None:
+                out[key] = None
+                continue
+            if self.meteo == "uniform":
+                out[key] = value.unsqueeze(-1).expand(*value.shape, n_j)
+                continue
+            given = self._driver(drivers, f"{key}_junction", required=False)
+            if given is not None:
+                if given.dim() == 0 or given.shape[-1] != n_j:
+                    raise ValueError(
+                        f"StreetFlows: {key + '_junction'!r} needs a trailing junction "
+                        f"axis of length {n_j}, got shape {tuple(given.shape)}"
+                    )
+                out[key] = given
+            else:
+                out[key] = self._street_mean(
+                    self._on_streets(value, key), how.get(key, "arithmetic")
+                )
+        if self.meteo == "per_street":
+            for key in ("theta_w", "U_ref", "u_star", "h_abl", "lmo"):
+                if out[key] is None:
+                    given = self._driver(drivers, f"{key}_junction", required=False)
+                    if given is not None:
+                        out[key] = given
+        if out["u_star"] is None and self.direction_averaging == "munich":
+            if self.meteo == "uniform":
+                if out["U_ref"] is None:
+                    raise KeyError("StreetFlows: 'U_ref' is missing")
+                out["u_star"] = self._boundary_layer(
+                    out["U_ref"], None, out["h_abl"]
+                ).u_star
+            else:
+                bl_s, _, _ = self.velocities(drivers)
+                out["u_star"] = self._street_mean(bl_s.u_star, "arithmetic")
+        return out
+
+    def _samples(self, drivers) -> tuple[Tensor, Tensor, Tensor]:
+        """`(junction direction (..., n_j), offsets (..., n_j, m), weights (..., n_j, m))`."""
+        j = self.junction_values(drivers)
+        theta_j = j["theta_w"]
+        if theta_j is None:
+            raise KeyError("StreetFlows: the driver 'theta_w' is missing")
         if self.direction_averaging == "munich":
-            sigma_v = bl.sigma_v(lmo=lmo, stability=self.stability)
-            u_ref = torch.as_tensor(drivers["U_ref"], dtype=torch.float64)
-            sigma = sigma_theta_munich(sigma_v, u_ref)
+            if j["U_ref"] is None:
+                raise KeyError(
+                    "StreetFlows: direction_averaging='munich' needs the driver 'U_ref' "
+                    "(or 'U_ref_junction'): MUNICH's direction spread is "
+                    "sigma_theta = sigma_v / U, even when 'u_star' is given"
+                )
+            h_abl_j = j["h_abl"]
+            if self.pblh_floor:
+                h_abl_j = torch.maximum(h_abl_j, torch.as_tensor(self.h_max,
+                                                                  dtype=torch.float64))
+            bl_j = BoundaryLayer(u_star=j["u_star"], h_abl=h_abl_j,
+                                 z_ref=torch.as_tensor(self.z_ref, dtype=torch.float64),
+                                 d=torch.zeros((), dtype=torch.float64),
+                                 z0=torch.ones((), dtype=torch.float64), kappa=self.kappa)
+            sigma_v = bl_j.sigma_v(lmo=j["lmo"], stability=self.stability)
+            sigma = sigma_theta_munich(sigma_v, j["U_ref"])
         elif self.sigma_theta is not None:
-            sigma = torch.full_like(theta_w, float(self.sigma_theta))
+            sigma = torch.full_like(theta_j, float(self.sigma_theta))
         else:
-            sigma = torch.zeros_like(theta_w)
-        return direction_offsets(self.direction_averaging, sigma, n_theta=self.n_theta)
+            sigma = torch.zeros_like(theta_j)
+        offsets, weights = direction_offsets(self.direction_averaging, sigma,
+                                             n_theta=self.n_theta)
+        return theta_j, offsets, weights
 
     def __call__(self, state, drivers) -> dict[str, Tensor]:
         g = self.geometry
-        bl, u_street, u_d = self.velocities(drivers)
-        theta_w = torch.as_tensor(drivers["theta_w"], dtype=torch.float64)
-        offsets, weights = self._samples(bl, drivers)
-        theta_k = theta_w.unsqueeze(-1) + offsets                    # (..., m)
+        _bl, u_street, u_d = self.velocities(drivers)
+        theta_j, offsets, weights = self._samples(drivers)
+        # Samples first, junctions second: (..., m, n_j).
+        theta_k = (theta_j.unsqueeze(-1) + offsets).transpose(-1, -2)
+        weights = weights.transpose(-1, -2)
         d, n_j = self.d_max, self.n_junctions
         with torch.no_grad():
             # `cos(theta - street angle) < 0` is MUNICH's `pi/2 < dangle < 3 pi/2` test
             # (`:2871-2882`), with the STRICT inequality that makes a street exactly
             # perpendicular to the wind an OUTFLOW.
-            d_angle = theta_k[..., None, None] - self.slot_angle     # (..., m, n_j, d)
+            d_angle = theta_k[..., None] - self.slot_angle           # (..., m, n_j, d)
             is_in = (torch.cos(d_angle) < 0) & self.slot_active
             is_out = (~is_in) & self.slot_active
             order_in = order_slots(
@@ -496,7 +638,7 @@ class StreetFlows:
         f_slot = f_slot.scatter_add(
             -1, flat_idx, f_ord.reshape(*f_ord.shape[:-2], d * d)
         )
-        w = weights[..., None, None]
+        w = weights[..., None]                                       # (..., m, n_j, 1)
         f_slot = (f_slot * w).sum(-3).reshape(*f_slot.shape[:-3], n_j * d * d)
         to_atm = (to_atm * w).sum(-3).reshape(*to_atm.shape[:-3], n_j * d)
         from_atm = (from_atm * w).sum(-3).reshape(*from_atm.shape[:-3], n_j * d)

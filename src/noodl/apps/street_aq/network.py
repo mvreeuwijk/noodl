@@ -181,6 +181,7 @@ def build_model(
     z0_s: float = Z0_S_DEFAULT,
     z_ref: float = 30.0,
     pblh_floor: bool = True,
+    meteo: str = "uniform",
     atmosphere: str = "atmosphere",
     layer_name: str = "street",
 ) -> tuple[Model, State, Drivers]:
@@ -203,7 +204,17 @@ def build_model(
     which resolves it to MUNICH's 0.41 whenever any MUNICH-style form is selected
     (`canyon_wind="exponential"`, `exchange="schulte"` or `roof_wind_form="macdonald"`) and
     to IMPAQ's 0.4 otherwise; an explicit float always wins over that resolution.
+
+    `meteo="uniform"` (the default) drives the whole network from one instance value per
+    driver. `meteo="per_street"` gives every street its own wind and boundary layer (a
+    trailing street axis on `U_ref`, `u_star`, `theta_w`, `h_abl`, `lmo`), with junction
+    routing from the mean over the streets meeting there, or from an explicit
+    `"<key>_junction"` driver -- see `StreetFlows` for the details.
     """
+    if meteo not in ("uniform", "per_street"):
+        raise ValueError(
+            f"build_model: meteo must be 'uniform' or 'per_street', got {meteo!r}"
+        )
     names = [s.name for s in net.streets]
     if atmosphere in names:
         raise ValueError(
@@ -260,7 +271,7 @@ def build_model(
         routing=routing, direction_averaging=direction_averaging, n_theta=n_theta,
         sigma_theta=sigma_theta, kappa=kappa, canyon_wind_min=canyon_wind_min,
         u_d_min=u_d_min, stability=stability, roof_wind_form=roof_wind_form, z0_s=z0_s,
-        z_ref=z_ref, pblh_floor=pblh_floor, layer_name=layer_name,
+        z_ref=z_ref, pblh_floor=pblh_floor, meteo=meteo, layer_name=layer_name,
     )
     reactions = [(layer_name, chemistry)] if chemistry is not None else []
     model = Model(graph, {layer_name: layer}, closures=[closure], reactions=reactions)
