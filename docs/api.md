@@ -188,6 +188,7 @@ Elements are grouped below by the physics they express, as in
 
 ::: noodl.apps.sewer.network
 ::: noodl.apps.sewer.geometry
+::: noodl.apps.sewer.swmm_xsect
 ::: noodl.apps.sewer.hydraulics
     options:
       members: [SewerHydraulics, resolve_nodal_driver]

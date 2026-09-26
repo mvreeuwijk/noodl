@@ -64,16 +64,28 @@ class Pipe:
 
 @dataclass(frozen=True)
 class SewerNetwork:
-    """A dendritic gravity sewer: manholes, one outgoing pipe each, outfalls."""
+    """A dendritic gravity sewer: manholes, one outgoing pipe each, outfalls.
+
+    `geometry` selects the circular cross-section: ``"analytic"`` (the exact circle,
+    `geometry.py`; the default for networks built in code) or ``"swmm"`` (SWMM 5.2's own
+    tables, lookup rules and unit constants, `swmm_xsect.py`; the default of
+    `read_swmm_inp`, whose purpose is to reproduce SWMM). ``"swmm"`` is a steady
+    kinematic-wave geometry and is refused with ``storage=True`` by `SewerHydraulics`.
+    """
 
     manholes: tuple[Manhole, ...]
     pipes: tuple[Pipe, ...]
     outfalls: tuple[Outfall, ...]
     routing: str = "KINWAVE"
     notes: dict[str, str] = field(default_factory=dict)
+    geometry: str = "analytic"
 
     def validate(self) -> None:
         """Refuse, BY NAME, everything this application does not model."""
+        if self.geometry not in ("analytic", "swmm"):
+            raise ValueError(
+                f"SewerNetwork: geometry must be 'analytic' or 'swmm', got {self.geometry!r}"
+            )
         names: set[str] = set()
         for node in (*self.manholes, *self.outfalls):
             if node.name in names:
@@ -230,6 +242,7 @@ def build_model(
     closures: list = []
     hydraulics = SewerHydraulics(
         graph, list(net.pipes), list(net.manholes), storage=storage, dt=dt_storage,
+        geometry=net.geometry,
         surface_area=(
             torch.tensor(
                 [m.surface_area if m.surface_area is not None else 1.167
