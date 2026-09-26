@@ -70,9 +70,11 @@ drawn below zero, which is a modelling choice belonging upstream of this layer.
 
 ## The API
 
-The allocation rules (push/pull requests, the per-arc capacity clip, the receiver's headroom
-check and proportional sharing between competing arcs) follow those of WSIMOD, Imperial
-College's Water Systems Integrated Modelling framework.
+The allocation rules (push/pull requests, the per-arc capacity clip and the receiver's headroom
+check) follow those of WSIMOD, Imperial College's Water Systems Integrated Modelling framework.
+Sharing between arcs competing for one node's headroom does not: WSIMOD serves such requests
+first come, first served, and this layer shares preference-proportionally (see
+[where the layer differs from WSIMOD](#where-the-layer-differs-from-wsimod)).
 
 `CapacitatedTransferLayer` has exactly two public methods.
 
@@ -177,9 +179,10 @@ reimplementation of what smooth mode already does, for no accuracy benefit.
 
 Sharing happens only at a node that is the **target of more than one edge**. A node with a single
 in-edge is never touched, however many out-edges lie downstream: this layer never caps an edge to
-match a bottleneck further along the graph. That mirrors WSIMOD's own per-arc semantics — a node's
-accept decision is its own check against its *own* headroom, never against its future ability to
-forward the flow onward.
+match a bottleneck further along the graph. That matches WSIMOD for storing nodes (`Storage`,
+`Waste`), whose accept decision is a check against their *own* headroom. It does not match a WSIMOD
+pass-through `Node`, which accepts only what it can forward in the same step (see
+[where the layer differs from WSIMOD](#where-the-layer-differs-from-wsimod)).
 
 Each of the `n_passes` rounds computes a tentative flow, finds the nodes whose summed demand
 exceeds their free headroom, and on those nodes replaces the tentative flow with a
@@ -221,39 +224,60 @@ committed fixtures mean the parity tests run **without WSIMOD installed**.
 | Conservation, both demos, all three modes | exact | holds, no reference needed |
 | `gradcheck` through smooth and projection on the diamond | analytic | holds |
 | `n_passes=5` vs a hand-converged reference | exact | holds |
+| Scripted WSIMOD networks with binding arcs and tanks (6 cases, `dt` = 86400 s): realised volumes and storage | 1e-12 × case scale | **≤ 4.4e-16** |
+| `quickstart_tight` (three arc capacities lowered), all 6 arcs, 1,456 steps | 1e-12 × 0.113 | **1.04e-16** |
 
-### What the WSIMOD parity does not show
+### Binding capacities and headroom
 
-**Read this before citing the two hard-clip comparisons as verifying the capacity clip itself.**
+The two shipped demos never bind: all but one of their 27 arcs sit at WSIMOD's
+`UNBOUNDED_CAPACITY` of 1e15, the one finite arc (`abstraction_to_farmoor`, 50000) never sees a
+request above about 30,934, and the replay sets $s_{\max} = \infty$. On their own they check
+only the identity path, $\min(x, c) = x$.
 
-Neither reference demo ever exercises a genuine arc-capacity clip. Of `quickstart_demo`'s 6 arcs
-and `oxford_demo`'s 21, all but one sit at WSIMOD's own `UNBOUNDED_CAPACITY` of 1e15 for the
-entire run — and the single finite-capacity arc (`abstraction_to_farmoor`, capacity 50000.0) never
-sees a request above about 30,934 across oxford's full 1,456-day run. This was confirmed against
-the fixture data directly: `requested > capacity` is true for **zero rows, for every arc, in the
-whole fixture**.
+`tests/verification/test_wsimod_capacity.py` covers the binding branches against WSIMOD's own
+numbers. It runs small networks built from WSIMOD's own `Arc`, `Node`, `Storage` and `Waste`
+classes, driven by WSIMOD's `push_distributed` and `pull_distributed`, and checks from
+WSIMOD's output that each targeted bound really cut a request before it compares:
 
-The two hard-clip comparisons therefore check the clip arithmetic **only on the identity path**
-($\min(x, c) = x$), never on the branch where $c$ actually binds.
+- a push clipped by arc capacity, with one or several requests in a timestep;
+- a push and a pull on the same arc in one timestep, sharing its capacity;
+- a tank whose headroom and inflow-arc capacity bind in turn as its storage evolves;
+- WSIMOD's preference-weighted `push_distributed` and `pull_distributed`, where a round's
+  request exceeds an arc's capacity and WSIMOD's own clip cuts it.
 
-The same applies, for a different reason, to the *other* bound: both fixtures set
-$s_{\max} = \infty$ at every node, because the harness captures per-arc capacity only — WSIMOD's
-node science, not its arcs, decides what a node accepts. So the receiver-headroom clip is the
-identity everywhere and the proportional-sharing branch never runs against WSIMOD's numbers
-either.
+It also replays `quickstart_tight`, which is `quickstart_demo` with `runoff`, `baseflow` and
+`percolation` lowered to 0.03, 0.04 and 0.08. WSIMOD cuts `baseflow` to its capacity on 1,085
+days. `runoff` and `percolation` run at capacity on 866 and 552 days, but WSIMOD's `Land` node
+sizes those requests from the arc's own check, so there request = capacity.
 
-**This is not a gap in the layer's correctness.** Both binding branches are directly and
-rigorously unit-tested on synthetic fixtures with deliberately tight bounds. The gap is narrower
-and specific: WSIMOD's own numbers have never cross-checked the behaviour *at* the point a
-constraint binds, because neither demo pushes any arc that far. It is the same distinction the
-other applications draw between a coefficient *calibrated* to one source and one *independently
-verified*.
+WSIMOD clips each request against `capacity - flow_in`, and `flow_in` accumulates every push and
+pull already realised on the arc in that timestep. The split between requests therefore depends
+on their order, but the timestep total is $\min(\sum_k r_k, c)$ in any order, and that total is
+what one layer step computes from the summed request.
 
-A separate exclusion: `oxford_demo`'s `sewer_to_wwtw` arc is left out of the `oxford_demo`
-comparison (20 of 21 arcs compared) because it shows 185 of 1,456 mismatched timesteps, root-caused to WSIMOD's own `WWTW`
-node applying an internal treatment-throughput constraint — a node-level *rate* cap the harness
-does not extract and which this layer does not model, since `s_max` is a storage-headroom bound.
-That arc's own capacity is still 1e15 throughout.
+#### Where the layer differs from WSIMOD
+
+These differences are tested, not tolerated:
+
+- **Several arcs competing for one node's headroom.** WSIMOD serves them in call order. The
+  layer shares by preference and ignores order. Two 10-unit pushes into 12 units of headroom
+  give `[10, 2]` or `[2, 10]` in WSIMOD, depending on which is called first, and `[6, 6]` in the
+  layer. The total and the storage agree. WSIMOD's own proportional sharing happens earlier,
+  when a sender or puller sizes its requests, so it is already in the requests the layer
+  replays.
+- **Same-step outflow.** The layer uses the headroom at the start of the step. WSIMOD frees
+  headroom for an inflow if an outflow is called first.
+- **Bottlenecks behind a pass-through node.** A WSIMOD `Node` forwards each push immediately
+  and hands back what it cannot forward, so a tight arc downstream also limits the arcs
+  feeding it. The layer is receiver-local. With `quickstart_demo`'s `catchment_outflow` lowered
+  to 0.1, that arc replays exactly, but `baseflow` and `storm_outflow` differ by up to 0.24 and
+  0.04.
+- **Node-level limits.** These are source availability on a pull, and throughput caps such as
+  `oxford_demo`'s `WWTW` node. That is why `sewer_to_wwtw` is left out of the `oxford_demo`
+  comparison (20 of 21 arcs compared): it mismatches on 185 of 1,456 steps, although its own
+  capacity is 1e15.
+- **Not compared at all.** `QueueArc` and `DecayArc` travel time and decay, `force=True`
+  pushes, and pollutants. The layer does not model any of them.
 
 ### Throughput
 
@@ -275,8 +299,6 @@ branch never runs, and every pass after the first is a no-op. It measures the ch
 - **Species and quality transport riding on a capacitated layer** is not wired up.
 - **Time-varying arc capacities and storage bounds** — construction-time buffers only, since
   WSIMOD's own capacities are static within a run.
-- A WSIMOD-captured fixture with a deliberately tight `c_arc`, which would close the parity gap
-  described above, does not exist yet.
 
 ## Install
 

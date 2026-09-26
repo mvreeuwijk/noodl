@@ -14,13 +14,20 @@ arithmetic (`min(request, huge_capacity) == request`) rather than an actively-bi
 clip. This is not a weaker fixture by choice -- `oxford_demo`
 (`test_oxford_hard_clip_matches_wsimod_realised_flows`) was hoped
 to be where a genuinely bounded arc gets exercised; as shown below, it isn't either.
+The binding branches are compared against WSIMOD in `test_wsimod_capacity.py` instead
+(scripted WSIMOD networks with tight arcs and tanks, and the `quickstart_tight` fixture).
 
 **Multiple events per (arc, timestep), and why every replay loop below ACCUMULATES.**
 The committed fixtures hold one row per (arc, DIRECTION, timestep), so an arc that sees
 both a push and a pull event within one WSIMOD timestep contributes TWO rows to the same
 `(arc, t)`. Quickstart has none (7464 rows, 7464 distinct `(arc, t)` pairs); oxford has
 5824 such pairs across four arcs -- `abstraction_to_farmoor`, `evenlode_to_thames`,
-`thames_to_thames` and `thames_to_farmoor` (33880 rows, 28056 distinct pairs). Every
+`thames_to_thames` and `thames_to_farmoor` (33880 rows, 28056 distinct pairs). Each row is
+itself already a SUM over same-direction events (quickstart: 10184 raw events, e.g. two or
+three pushes on `catchment_outflow` every timestep; oxford: 48995), summed by the
+regeneration script. Summing is exact for a per-timestep replay: WSIMOD clips each event
+against the arc's accumulated `flow_in`, so the timestep's total is `min(sum, capacity)`
+in any order (`test_wsimod_capacity.py` checks this against WSIMOD directly). Every
 replay loop below therefore sums a group's rows into `r`/`wsimod_realised` (`+=`) rather
 than assigning; an earlier version assigned, which silently kept only the LAST row of
 each group ("push", sorted after "pull" in the fixture) and so replayed
@@ -43,9 +50,11 @@ capacitated layer's identity path (`min(request, capacity) == request`) for ever
 whose CAPACITY this harness can see -- neither reference demo shipped by
 WSIMOD itself provides a load-bearing test of the hard-clip branch actually clipping
 something on an arc's own `c_arc` capacity. This is a real gap in what these tests
-validate, not a minor footnote; a synthetic small-graph test with a deliberately tight
-`c_arc` would be needed to exercise that branch; it is not retrofitted into these
-WSIMOD-reference-only verification tests.
+validate here, not a minor footnote; `test_wsimod_capacity.py` closes it against WSIMOD's
+own numbers (arc capacity, receiver headroom, push and pull sharing one arc's capacity,
+several requests per timestep), and pins where the layer deliberately differs (several
+arcs competing for one node's headroom: WSIMOD first-come-first-served, the layer
+preference-proportional).
 
 Oxford's `sewer_to_wwtw` arc DOES show `requested > realised` in 185 of its 1456
 timesteps (max observed gap ~3.924e6) -- but this is NOT that arc's own capacity acting
@@ -203,10 +212,9 @@ def test_quickstart_projection_mode_converges_to_hard_clip():
         max_abs_error = max(max_abs_error, (f_proj - f_hard).abs().max().item())
     # Observed max_abs_error: 9.0955e-13 -- pure QP-solver/float64 arithmetic noise (no
     # arc in quickstart is ever actually capacity-bound, so this exercises
-    # projection mode's identity path, not its active-constraint QP; the oxford
-    # fixture (`test_oxford_hard_clip_matches_wsimod_realised_flows`) is where an
-    # arc's capacity actually binds). 1e-9 is ~1000x
-    # above the observed noise floor.
+    # projection mode's identity path, not its active-constraint QP; no arc binds in
+    # the oxford fixture either -- binding cases are in `test_wsimod_capacity.py`).
+    # 1e-9 is ~1000x above the observed noise floor.
     assert max_abs_error < 1e-9
 
 
