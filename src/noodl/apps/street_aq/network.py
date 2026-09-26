@@ -182,18 +182,22 @@ def build_model(
     z_ref: float = 30.0,
     pblh_floor: bool = True,
     meteo: str = "uniform",
+    background: str = "uniform",
     atmosphere: str = "atmosphere",
     layer_name: str = "street",
 ) -> tuple[Model, State, Drivers]:
     """`(Model, initial state, driver template)` for one street network.
 
-    The graph: the boundary node `atmosphere` FIRST, then one node per street in the
-    network's own order -- which makes the layer's active interior exactly the street order
-    (checked below rather than assumed, because every index in this application depends on
-    it). Then, for every junction, a directed `route` edge for each ordered pair of
-    DISTINCT street ends meeting there; two `vent` edges per (street, end), one each way;
-    two `exchange` edges per street, one each way. Every edge carries the attributes
-    `StreetFlows` reads its indices from.
+    The graph: the boundary node(s) FIRST -- `atmosphere` alone with `background="uniform"`,
+    or one node per street, `f"{atmosphere}:{street.name}"` in street order, with
+    `background="per_street"` -- then one node per street in the network's own order --
+    which makes the layer's active interior exactly the street order (checked below rather
+    than assumed, because every index in this application depends on it). Then, for every
+    junction, a directed `route` edge for each ordered pair of DISTINCT street ends meeting
+    there; two `vent` edges per (street, end), one each way; two `exchange` edges per
+    street, one each way. Every edge carries the attributes `StreetFlows` reads its indices
+    from; only the atmosphere endpoint of the `vent` and `exchange` edges changes between
+    the two modes.
 
     `pblh_floor=True` (the default) applies MUNICH's `pblh := max(H, PBLH)` guard with the
     network's tallest street, which keeps `sigma_w` positive. Pass `False` for the
@@ -210,19 +214,36 @@ def build_model(
     trailing street axis on `U_ref`, `u_star`, `theta_w`, `h_abl`, `lmo`), with junction
     routing from the mean over the streets meeting there, or from an explicit
     `"<key>_junction"` driver -- see `StreetFlows` for the details.
+
+    `background="uniform"` (the default) drives every street's `vent` and `exchange` inflow
+    from the atmosphere with the same `"<layer>.x_boundary"` value. `background="per_street"`
+    gives every street its own atmosphere node instead, so `"<layer>.x_boundary"` becomes
+    `(n_streets,)` or `(n_streets, n_species)` in street order: this is MUNICH's rule
+    (`ComputeInflowRateExtended`) that the atmosphere's contribution to a street is that
+    street's OWN background, carried in by that street's own vent and exchange flows, never
+    a network-wide value shared across streets.
     """
     if meteo not in ("uniform", "per_street"):
         raise ValueError(
             f"build_model: meteo must be 'uniform' or 'per_street', got {meteo!r}"
         )
-    names = [s.name for s in net.streets]
-    if atmosphere in names:
+    if background not in ("uniform", "per_street"):
         raise ValueError(
-            f"build_model: a street is called {atmosphere!r}, which is the name of "
-            f"the boundary node; rename the street or pass another `atmosphere`"
+            f"build_model: background must be 'uniform' or 'per_street', got {background!r}"
+        )
+    per_street_bg = background == "per_street"
+    names = [s.name for s in net.streets]
+    atm_of = (lambda name: f"{atmosphere}:{name}") if per_street_bg else (lambda name: atmosphere)
+    boundary = [atm_of(s.name) for s in net.streets] if per_street_bg else [atmosphere]
+    clash = set(boundary) & set(names)
+    if clash:
+        raise ValueError(
+            f"build_model: street name(s) {sorted(clash)} collide with the boundary node "
+            f"name(s); rename the street or pass another `atmosphere`"
         )
     graph = Network(dtype=_DTYPE)
-    graph.add_node(atmosphere)
+    for node in boundary:
+        graph.add_node(node)
     for street in net.streets:
         graph.add_node(street.name, volume=street.length * street.width * street.height)
     junctions = net.junctions
@@ -242,16 +263,18 @@ def build_model(
                                slot_a=a, slot_b=b)
     for j, members in enumerate(slots):
         for s, (i, end) in enumerate(members):
-            graph.add_edge(names[i], atmosphere, kind="vent", junction=j, slot=s,
+            atm = atm_of(names[i])
+            graph.add_edge(names[i], atm, kind="vent", junction=j, slot=s,
                            street=i, end=end, direction="out")
-            graph.add_edge(atmosphere, names[i], kind="vent", junction=j, slot=s,
+            graph.add_edge(atm, names[i], kind="vent", junction=j, slot=s,
                            street=i, end=end, direction="in")
     for i, street in enumerate(net.streets):
-        graph.add_edge(street.name, atmosphere, kind="exchange", street=i,
+        atm = atm_of(street.name)
+        graph.add_edge(street.name, atm, kind="exchange", street=i,
                        direction="out")
-        graph.add_edge(atmosphere, street.name, kind="exchange", street=i, direction="in")
+        graph.add_edge(atm, street.name, kind="exchange", street=i, direction="in")
     kinds = ("route", "vent", "exchange")
-    interior, _inactive = active_interior(graph, kinds, [atmosphere])
+    interior, _inactive = active_interior(graph, kinds, boundary)
     ordered = [graph.nodes[i] for i in interior.tolist()]
     if ordered != names:
         raise ValueError(
@@ -263,7 +286,7 @@ def build_model(
     )
     n_species = len(tuple(species))
     layer = TransportLayer(
-        graph, layer_name, capacity=capacity, flow_kind=kinds, boundary=[atmosphere],
+        graph, layer_name, capacity=capacity, flow_kind=kinds, boundary=boundary,
         n_species=n_species, scheme=scheme, quantity="concentration", unit="kg/m3",
     )
     closure = StreetFlows(
@@ -281,9 +304,10 @@ def build_model(
             (n_streets,) if n_species == 1 else (n_streets, n_species), dtype=_DTYPE
         )
     }
+    n_b = len(boundary)
     drivers: Drivers = {
         f"{layer_name}.x_boundary": torch.zeros(
-            (1,) if n_species == 1 else (1, n_species), dtype=_DTYPE
+            (n_b,) if n_species == 1 else (n_b, n_species), dtype=_DTYPE
         ),
         f"{layer_name}.sources": torch.zeros(
             (graph.n,) if n_species == 1 else (graph.n, n_species), dtype=_DTYPE

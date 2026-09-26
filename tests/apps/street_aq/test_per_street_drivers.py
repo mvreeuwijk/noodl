@@ -230,6 +230,23 @@ def test_per_street_background_enters_only_through_that_streets_own_inflow():
                                rtol=1e-10, atol=0)
 
 
+def test_per_street_background_with_species_and_chemistry():
+    from noodl.apps.street_aq.chemistry import photostationary_for_streets, street_steady
+    net, _ = munich_idealised()
+    reaction = photostationary_for_streets(("no", "no2", "o3"))
+    per, state, drivers = build_model(net, species=("no", "no2", "o3"), chemistry=reaction,
+                                      background="per_street", **MUNICH)
+    assert drivers["street.x_boundary"].shape == (len(net.streets), 3)
+    d = dict(_uniform_drivers(per), J_NO2=torch.tensor(5e-3, dtype=DT))
+    d["street.sources"] = torch.zeros(per.net.n, 3, dtype=DT)
+    bg = torch.zeros(len(net.streets), 3, dtype=DT)
+    bg[:, 2] = 8e-8
+    d["street.x_boundary"] = bg
+    out = street_steady(per, state, d, reaction=reaction, tol=1e-18, max_iter=200)
+    torch.testing.assert_close(out["street.x"][:, 2], torch.full((len(net.streets),), 8e-8,
+                               dtype=DT), rtol=1e-10, atol=0)
+
+
 def test_bad_options_are_named():
     net, _ = munich_idealised()
     with pytest.raises(ValueError, match="meteo"):
