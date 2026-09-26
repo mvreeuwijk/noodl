@@ -343,10 +343,12 @@ v2.2 requires regardless of the options actually exercised (`Compute_Macdonald_f
 key here may be overridden through `write_munich_case`'s own `options` argument."""
 
 
-def _broadcast_to_hours_streets(value, n_hours: int, n_streets: int) -> np.ndarray:
-    """A meteo/emission/background array in `(n_hours, n_streets)` layout: a `(n_hours,)`
-    array gains a street axis (the same value on every street); a `(n_hours, n_streets)`
-    array is passed through, checked."""
+def _broadcast_to_hours_columns(value, n_hours: int, n_columns: int) -> np.ndarray:
+    """A meteo/emission/background array in `(n_hours, n_columns)` layout: a `(n_hours,)`
+    array gains a column axis (the same value in every column); a `(n_hours, n_columns)`
+    array is passed through, checked. `n_columns` is `len(network.streets)` for a
+    street-indexed field, or `len(network.junctions)` for one of MUNICH's `...Inter`
+    (per-intersection) fields -- the caller picks."""
     arr = np.asarray(value, dtype=np.float64)
     if arr.ndim == 1:
         if arr.shape[0] != n_hours:
@@ -354,12 +356,12 @@ def _broadcast_to_hours_streets(value, n_hours: int, n_streets: int) -> np.ndarr
                 f"write_case: a 1-D array must have length n_hours={n_hours}, got shape "
                 f"{arr.shape}"
             )
-        return np.tile(arr.reshape(n_hours, 1), (1, n_streets))
+        return np.tile(arr.reshape(n_hours, 1), (1, n_columns))
     if arr.ndim == 2:
-        if arr.shape != (n_hours, n_streets):
+        if arr.shape != (n_hours, n_columns):
             raise ValueError(
-                f"write_case: a 2-D array must have shape (n_hours, n_streets) = "
-                f"({n_hours}, {n_streets}), got {arr.shape}"
+                f"write_case: a 2-D array must have shape (n_hours, n_columns) = "
+                f"({n_hours}, {n_columns}), got {arr.shape}"
             )
         return arr
     raise ValueError(f"write_case: an array driver must be 1-D or 2-D, got ndim={arr.ndim}")
@@ -394,10 +396,12 @@ def write_munich_case(
 
     `meteo` keys are MUNICH's own field names (`WindDirection`, `WindSpeed`, `PBLH`, `UST`,
     `LMO`, `SurfaceTemperature`, or their `...Inter` per-intersection counterparts); a scalar
-    value is written as an `is_num` constant override, an array as a `(n_hours, n_streets)`
-    (or `(n_hours,)`, broadcast across streets) binary. `WindDirection` is MUNICH's own
-    convention (radians TOWARD, clockwise from north) -- this writer does no conversion, so
-    a caller wanting a degrees-FROM direction must convert it first with
+    value is written as an `is_num` constant override, an array as a `(n_hours,)` (broadcast
+    across columns) or `(n_hours, n_columns)` binary -- `n_columns = len(network.streets)`
+    for a plain field, `len(network.junctions)` for an `...Inter` field, in `network.junctions`
+    order (the same order `intersection.dat`'s rows are written in, just above). `WindDirection`
+    is MUNICH's own convention (radians TOWARD, clockwise from north) -- this writer does no
+    conversion, so a caller wanting a degrees-FROM direction must convert it first with
     `case.deg_from_to_munich_rad`.
 
     Every array-valued meteo field is written with `n_hours + 2` look-ahead rows (the last
@@ -419,6 +423,7 @@ def write_munich_case(
     n_streets = len(network.streets)
 
     junctions = network.junctions
+    n_junctions = len(junctions)
     junction_id = {name: str(i + 1) for i, name in enumerate(junctions)}
     street_touches: dict[str, list[str]] = {name: [] for name in junctions}
     for street in network.streets:
@@ -529,7 +534,7 @@ Text_file: no
         arr = np.asarray(value, dtype=np.float64)
         if arr.ndim == 0:
             return None, float(arr)
-        return _broadcast_to_hours_streets(arr, n_hours, n_streets), None
+        return _broadcast_to_hours_columns(arr, n_hours, n_streets), None
 
     def mass_section(title: str, value, *, filename: str) -> list[str]:
         arr, const = constant_or_array(value)
@@ -560,7 +565,8 @@ Text_file: no
         if arr.ndim == 0:
             meteo_lines.append(f"{key} {float(arr)!r}")
         else:
-            full = _broadcast_to_hours_streets(arr, n_hours, n_streets)
+            n_columns = n_junctions if key.endswith(_INTER_SUFFIX) else n_streets
+            full = _broadcast_to_hours_columns(arr, n_hours, n_columns)
             pad = np.tile(full[-1:], (n_meteo_rows - n_hours, 1))
             _write_binary(out_dir / f"meteo_{key}.bin", np.concatenate([full, pad]))
             meteo_lines.append(f"{key} meteo_{key}.bin")
