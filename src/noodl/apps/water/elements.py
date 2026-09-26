@@ -42,13 +42,15 @@ class HazenWilliams(Element):
     ``dp_transition`` defaults to ``1e-9`` m. MEASURED, and NOT for the reason one would
     guess: on the committed two-loop fixture the choice is irrelevant -- the smallest head
     loss there is 5.8188e-3 m (pipe P7, the near-stagnant loop-closer), above every
-    candidate, and the whole D1 parity is bit-identical at 1e-3, 1e-6, 1e-9 and 1e-12.
+    candidate, and the whole `test_two_loop_heads_and_flows` comparison is bit-identical
+    at 1e-3, 1e-6, 1e-9 and 1e-12.
     Where it bites is a pipe carrying EXACTLY zero flow, which Net1 produces the moment a
     control closes its pump and leaves pipe 10 dead-ended: there ``dp`` is exactly 0, the
     blend is the only thing keeping the Jacobian finite, and its tangent slope
     ``(dp_transition/K)^(1/1.852) / dp_transition`` grows as the transition shrinks. Over
     Net1's 24 h duty cycle the worst Newton iteration count runs 50, 93, 136, 179 at
-    1e-3, 1e-6, 1e-9, 1e-12, while the D3 tank trajectory CONVERGES with respect to the
+    1e-3, 1e-6, 1e-9, 1e-12, while the Net1 tank trajectory
+    (`test_net1_extended_period_tank_level`) CONVERGES with respect to the
     transition at 1e-6 and below (8.1813e-5 m against EPANET at 1e-6, 1e-9 and 1e-12;
     6.4922e-5 m at 1e-3, which is a coincidence of EPANET's own unquantified low-flow
     linearisation, not a better answer). 1e-9 is therefore the converged, faithful choice,

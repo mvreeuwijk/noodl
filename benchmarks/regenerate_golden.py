@@ -130,7 +130,7 @@ def _munich_idealised_case() -> dict:
 
 
 def _sewer_tree_case() -> dict:
-    """Steady water, air and quality on the committed sewer fixture (row G1)."""
+    """Steady water, air and quality on the committed sewer fixture."""
     from noodl.apps.sewer import network as sewer_network
     from noodl.apps.sewer.network import sewer_steady
 
@@ -140,7 +140,7 @@ def _sewer_tree_case() -> dict:
 
 
 def _water_twoloop_case() -> dict:
-    """Row G2: steady heads and flows on the committed two-loop water fixture.
+    """Steady heads and flows on the committed two-loop water fixture.
 
     Built from `twoloop()` rather than from the `.inp`, so regenerating the golden does not
     depend on the reader; `test_water_parity.py` pins that the two agree.

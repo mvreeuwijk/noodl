@@ -1,4 +1,4 @@
-"""The SewerHydraulics closure: tree flow, depths, capacities, storage (rows W1, W7)."""
+"""The SewerHydraulics closure: tree flow, depths, capacities, storage."""
 
 from dataclasses import dataclass
 
@@ -68,8 +68,8 @@ def test_construction_caches_the_level_order():
     assert closure.state_keys == ()
 
 
-def test_w1_tree_flow_is_the_net_upstream_inflow():
-    """Row W1's own side: every pipe carries the sum of the inflows above it, exactly."""
+def test_tree_flow_is_the_net_upstream_inflow():
+    """Every pipe carries the sum of the inflows above it, exactly."""
     closure = SewerHydraulics(_network(), PIPES, MANHOLES)
     out = closure({}, _drivers())
     assert out["sewer.q"].tolist() == pytest.approx(
@@ -156,8 +156,8 @@ def test_storage_without_a_declared_dt_is_now_allowed():
     assert closure.integrates is True
 
 
-def test_w7_storage_reaches_the_quasi_steady_fixed_point():
-    """Row W7. Measured: 5.7e-15 relative on the flows and 4.4e-15 on
+def test_storage_reaches_the_quasi_steady_fixed_point():
+    """Measured: 5.7e-15 relative on the flows and 4.4e-15 on
     the depths after 200 steps of 60 s from a dry start.
 
     A direct closure call (bypassing `Model`) passes its own `StepContext` to make

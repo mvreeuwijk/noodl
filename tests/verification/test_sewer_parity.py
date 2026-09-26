@@ -1,4 +1,4 @@
-"""SWMM parity on the committed tree (rows W1-W4), through pyswmm 2.1.0 / SWMM 5.2.4.
+"""SWMM parity on the committed tree, through pyswmm 2.1.0 / SWMM 5.2.4.
 
 pyswmm ALWAYS writes a `.rpt` and a `.out` next to the model it runs (`pyswmm/swmm5.py`
 silently derives both paths when they are not given), so every test here copies the fixture
@@ -67,8 +67,8 @@ def test_the_engine_is_the_one_the_measurements_used(tmp_path):
     assert result["error"] == 0.0
 
 
-def test_w1_pipe_flows(tmp_path, noodl_steady):
-    """Row W1, 1e-9 relative. Measured worst 1.370e-14."""
+def test_pipe_flows(tmp_path, noodl_steady):
+    """1e-9 relative. Measured worst 1.370e-14."""
     net, resolved = noodl_steady
     swmm = _run_swmm(tmp_path, "tree_kinwave.inp")
     order = [p.name for p in net.pipes]
@@ -79,8 +79,8 @@ def test_w1_pipe_flows(tmp_path, noodl_steady):
     assert worst < 1e-9, worst
 
 
-def test_w2_normal_depths(tmp_path, noodl_steady):
-    """Row W2, 1e-3 relative. Measured worst 5.464e-4 (conduit C3), which is SWMM's own
+def test_normal_depths(tmp_path, noodl_steady):
+    """1e-3 relative. Measured worst 5.464e-4 (conduit C3), which is SWMM's own
     51-point circular lookup table (Ref. Man. Vol. II section 5.1.3), not solver noise."""
     net, resolved = noodl_steady
     swmm = _run_swmm(tmp_path, "tree_kinwave.inp")
@@ -92,8 +92,8 @@ def test_w2_normal_depths(tmp_path, noodl_steady):
     assert worst > 1e-5, "the lookup-table difference has disappeared: check the geometry"
 
 
-def test_w3_velocities(tmp_path, noodl_steady):
-    """Row W3, 1e-3 relative, against the BINARY output's FLOW_VELOCITY.
+def test_velocities(tmp_path, noodl_steady):
+    """1e-3 relative, against the BINARY output's FLOW_VELOCITY.
 
     Under KINWAVE, `Link.ups_xsection_area` is exactly 0.0 (SWMM fills
     it only under DYNWAVE), so `flow / ups_xsection_area` is 0/0. Measured worst
@@ -109,8 +109,8 @@ def test_w3_velocities(tmp_path, noodl_steady):
 
 
 def test_conduit_volumes(tmp_path, noodl_steady):
-    """Not a numbered row, but the capacity every quality layer is built on. Measured worst
-    6.438e-4 relative, the same lookup-table difference as W2."""
+    """The capacity every quality layer is built on. Measured worst
+    6.438e-4 relative, the same lookup-table difference as the normal-depth check above."""
     net, resolved = noodl_steady
     swmm = _run_swmm(tmp_path, "tree_kinwave.inp")
     worst = 0.0
@@ -120,13 +120,13 @@ def test_conduit_volumes(tmp_path, noodl_steady):
     assert worst < 1e-3, worst
 
 
-def test_w4_tracer_concentration(tmp_path):
-    """Row W4, 3e-5 relative (measured worst 7.811e-6 on conduit C5).
+def test_tracer_concentration(tmp_path):
+    """3e-5 relative (measured worst 7.811e-6 on conduit C5).
 
     The model's steady state IS the tank-in-series closed form: a manhole's balance is
     `sum(q_in C_in) = (q_out + k V) C`, which is exactly `C = C_mix / (1 + k tau)` with
     `tau = V / q`. SWMM's own conduit model is the same completely-mixed reactor (Ref. Man.
-    Vol. III Eq. 5-4), which is why the row is this tight.
+    Vol. III Eq. 5-4), which is why the tolerance is this tight.
     """
     from noodl.layers.reaction import FirstOrderDecay
 
@@ -160,7 +160,7 @@ def test_w4_tracer_concentration(tmp_path):
     assert worst < 3e-5, worst
 
 
-def test_w4_model_run_through_the_lateral_load_path(tmp_path):
+def test_tracer_model_run_through_the_lateral_load_path(tmp_path):
     """The test above never runs the model's quality layer at all -- it builds
     `quality=False` and resolves the tank-in-series closed form BY HAND. This test builds
     `quality=True, air=False`, feeds the fixture's own tracer load through the
@@ -174,16 +174,18 @@ def test_w4_model_run_through_the_lateral_load_path(tmp_path):
     `T_water` is set to 20 C (`theta = 1.07 ** (T - 20) == 1`) so the reaction's temperature
     correction (absent from SWMM's own plain first-order decay, and from the hand-resolved
     closed form) does not contaminate the comparison; `T_water`'s temperature-dependence is
-    tested on its own terms elsewhere (S1).
+    tested on its own terms elsewhere
+    (`tests/apps/sewer/test_quality.py::test_sulfide_rate_against_the_closed_form`).
 
     MEASURED (diagnosed, not loosened): `Model.step`'s reaction is operator-split and
     applied by EXPLICIT forward Euler (`SulfideGeneration.apply`), unlike the closed form's
     continuous exponential decay, so the model's own steady state carries an O(dt)
     discretization error the hand-resolved closed form does not: worst measured relative
     error against SWMM was 3.47e-3 at dt = 60 s, 2.87e-4 at dt = 5 s and 5.79e-5 at dt = 1 s
-    -- all short of this row's 3e-5, and dt small enough to clear it directly makes the test
-    too slow. Richardson extrapolation `2 C(dt) - C(2 dt)` (the same O(dt) cancellation
-    `test_c3_gradients_against_central_differences` uses for truncation error) removes the
+    -- all short of this test's 3e-5 tolerance, and dt small enough to clear it directly makes
+    the test too slow. Richardson extrapolation `2 C(dt) - C(2 dt)` (the same O(dt) cancellation
+    `tests/apps/sewer/test_conservation.py::test_gradients_against_central_differences`
+    uses for truncation error) removes the
     leading term: at dt = 10 s / 20 s the extrapolated concentrations
     agree with SWMM to a measured worst 8.05e-6 relative -- comfortably inside 3e-5, and
     reproduced at (5 s, 10 s) and (2.5 s, 5 s) pairs to within 3e-8 of each other, so the

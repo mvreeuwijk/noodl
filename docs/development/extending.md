@@ -195,3 +195,21 @@ this repository ships four kinds of test beyond ordinary unit coverage of its ow
 `tests/test_extension_recipe.py` ships (1)-(3) in miniature for `Sigmoid`/`build_two_zone`; a
 real application under `src/noodl/apps/<name>/` ships all four, sized to its own domain, the
 way `tests/apps/street_aq/`, `tests/apps/sewer/` and `tests/apps/water/` do for theirs.
+
+## A file-format reader
+
+Reading a model from a file is not a third extension point on top of the two above: a reader
+builds the same kind of network, elements and layers `build_two_zone` builds by hand, just
+driven by a parsed file. It lives next to the application it feeds — `apps/sewer/inp.py`,
+`apps/water/inp.py`, `apps/building_physics/prj.py` — rather than in a shared location, because
+each format's own section names, column layouts and units are specific to it. The reader parses
+the file into the network and domain objects the application needs (`read_swmm_inp` and
+`read_epanet_inp` return a network the caller then passes to the application's own
+`build_model`; `project_to_model` in `apps/building_physics/prj.py` takes the extra step of
+assembling `(model, state, drivers)` itself, from the elements and drives `read_prj` already
+built).
+
+For an `.inp`-style format, reuse `noodl.apps.inpfile` for the shared lexical layer —
+`[SECTION]` headers, `;` comments, whitespace-separated fields and blank lines — rather than
+writing a new line parser; `apps/sewer/inp.py` and `apps/water/inp.py` both build on it. See
+[File formats](../formats/index.md) for what every existing reader covers.

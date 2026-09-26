@@ -1,8 +1,8 @@
-"""Tests for `noodl.elements.mbl.media`: MBL/MSL media constants and densities.
+"""Tests for `noodl.elements.media`: MBL/MSL media constants and densities.
 
 Every reference value below is transcribed directly from the Modelica Buildings Library (MBL)
 v13.0.0 (commit 55abf579598ca81cae0a82f337350375958e6722) and the Modelica Standard Library
-(MSL) v4.1.0 source, never by importing `noodl.elements.mbl.media` itself.
+(MSL) v4.1.0 source, never by importing `noodl.elements.media` itself.
 """
 
 from __future__ import annotations
@@ -11,10 +11,10 @@ import numpy as np
 import pytest
 import torch
 
-from noodl.elements.mbl import media
+from noodl.elements import media
 
 # ---------------------------------------------------------------------------------------
-# NumPy/Python transcription of the MBL/MSL source (independent of noodl.elements.mbl.media)
+# NumPy/Python transcription of the MBL/MSL source (independent of noodl.elements.media)
 # ---------------------------------------------------------------------------------------
 
 # Modelica Standard Library, Modelica/Constants.mo:47 (k, Boltzmann), :53 (N_A, Avogadro),

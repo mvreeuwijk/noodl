@@ -1,9 +1,9 @@
-"""Tests for `noodl.elements.mbl.door`: MBL's `DoorOpen` and `DoorOperable` as two directional
+"""Tests for `noodl.elements.door`: MBL's `DoorOpen` and `DoorOperable` as two directional
 noodl edges.
 
 The NumPy reference functions below are transcribed directly from the Modelica Buildings
 Library (MBL) v13.0.0 (commit 55abf579598ca81cae0a82f337350375958e6722) and the Modelica
-Standard Library (MSL) v4.1.0 sources, never by importing `noodl.elements.mbl.door` itself:
+Standard Library (MSL) v4.1.0 sources, never by importing `noodl.elements.door` itself:
 
 * `Airflow/Multizone/BaseClasses/Door.mo:43-54,64-65` (conTP, rho_default, the two port flows),
 * `Airflow/Multizone/DoorOpen.mo:16-35,39-69` (CVal, kT, m_flow_turbulent, pressure and
@@ -28,7 +28,7 @@ import numpy as np
 import pytest
 import torch
 
-from noodl.elements.mbl import (
+from noodl.elements import (
     MBLDoorOpen,
     MBLDoorOperable,
     mbl_door_pair,
@@ -565,7 +565,7 @@ def test_dp_of_wrong_width_raises():
 
 def _layer():
     """out (boundary) -- orifice -- A == door pair == B -- orifice -- out."""
-    from noodl.elements.mbl import mbl_orifice
+    from noodl.elements import mbl_orifice
 
     net = Network(dtype=F64)
     for n in ("out", "A", "B"):

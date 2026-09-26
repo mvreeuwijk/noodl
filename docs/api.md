@@ -24,29 +24,77 @@ Generated from the package's own docstrings. For the ideas behind these objects,
     options:
       members: [Element]
 
-::: noodl.elements.powerlaw
-::: noodl.elements.quadratic
-::: noodl.elements.conductance
-::: noodl.elements.fixed
-::: noodl.elements.fan
-::: noodl.elements.duct
-::: noodl.elements.damper
-::: noodl.elements.upstream
+Elements are grouped below by the physics they express, as in
+[Airflow elements](applications/building_physics.md#airflow-elements).
 
-::: noodl.elements.mbl
+### Power-law openings
+
+::: noodl.elements.powerlaw
     options:
-      members: [MBLPowerLaw, mbl_orifice, mbl_ela, mbl_point, mbl_points, mbl_coefficient,
-                MBLTable, MBLDoorOpen, MBLDoorOperable, mbl_door_pair, mbl_operable_door_pair,
-                MBLDoorCompartment, MBLDoorCompartmentOperable, DoorCompartmentHead,
-                mbl_discretized_door, mbl_discretized_operable_door, MBLMedium, medium]
+      heading_level: 4
+::: noodl.elements.powerlaw_mbl
+    options:
+      heading_level: 4
+
+### Density upwinding
+
+::: noodl.elements.upstream
+    options:
+      heading_level: 4
+
+### Quadratic and tabulated laws
+
+::: noodl.elements.quadratic
+    options:
+      heading_level: 4
+::: noodl.elements.table
+    options:
+      heading_level: 4
+
+### Large openings and doors
+
+::: noodl.elements.door
+    options:
+      heading_level: 4
+::: noodl.elements.door_discretized
+    options:
+      heading_level: 4
+
+### Ducts, dampers, fans, fixed flows and conductances
+
+::: noodl.elements.duct
+    options:
+      heading_level: 4
+::: noodl.elements.damper
+    options:
+      heading_level: 4
+::: noodl.elements.fan
+    options:
+      heading_level: 4
+::: noodl.elements.fixed
+    options:
+      heading_level: 4
+::: noodl.elements.conductance
+    options:
+      heading_level: 4
+
+### Air properties
+
+::: noodl.elements.media
+    options:
+      heading_level: 4
+
+### Drives
 
 ::: noodl.drives
     options:
       members: [Drive, ConstantDrive, Stack, Wind, WindProfile]
+      heading_level: 4
 
 ::: noodl.nodesources
     options:
       members: [NodeSource]
+      heading_level: 4
 
 ## Layers
 

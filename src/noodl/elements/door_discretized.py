@@ -1,5 +1,6 @@
-"""MBL's discretised doors, ``DoorDiscretizedOpen`` and ``DoorDiscretizedOperable``, as
-``nCom`` compartment edges plus a hydrostatic-head drive.
+"""Two-way flow through a large opening, discretised into ``nCom`` height compartments with a
+hydrostatic-head drive, transcribed from the Modelica Buildings Library's
+``DoorDiscretizedOpen``/``DoorDiscretizedOperable``.
 
 Transcribed from Modelica Buildings Library (MBL) v13.0.0
 (commit 55abf579598ca81cae0a82f337350375958e6722), with constants from the Modelica Standard
@@ -90,8 +91,8 @@ from collections.abc import Mapping
 import torch
 
 from noodl.elements.base import Element
-from noodl.elements.mbl.door import _power_law
-from noodl.elements.mbl.media import _R_AIR, _R_H2O, MBLMedium
+from noodl.elements.door import _power_law
+from noodl.elements.media import _R_AIR, _R_H2O, MBLMedium
 
 Tensor = torch.Tensor
 

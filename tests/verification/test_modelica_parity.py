@@ -489,7 +489,7 @@ def _check_closed_heated_rooms(doc: dict, head: list[str], data: np.ndarray,
     energy closure to 1e-6 of its peak (measured 7.5e-8 on ClosedDoors, the iterate and
     airflow tolerances; a lost or doubled source would be of order 1). `int Q` is the closed
     form of the JSON's signals."""
-    from noodl.elements.mbl import medium as mbl_medium
+    from noodl.elements import medium as mbl_medium
 
     med = mbl_medium(doc["medium"]["class"])
     sine, gain = (next(s for s in doc["signals"] if s["class"].endswith(c))

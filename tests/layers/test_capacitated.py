@@ -193,7 +193,7 @@ def test_step_receiver_headroom_clip_is_a_rate_at_dt_other_than_one(dt, s_max_c)
 
 
 def test_step_reports_overflow_when_storage_starts_above_s_max():
-    """Row W5's `overflow` diagnostic, asserted directly against a hand-computed value.
+    """The `overflow` diagnostic, asserted directly against a hand-computed value.
 
     With C1 fixed, the receiver-headroom clip genuinely bounds every INFLOW, so a node
     can only end a step above its own `s_max` if it began one there -- nothing in this

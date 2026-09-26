@@ -1,4 +1,4 @@
-"""MBL's tabulated flow law, transcribed from MBL v13.0.0
+"""Tabulated pressure-flow law, transcribed from the Modelica Buildings Library (MBL) v13.0.0
 (commit 55abf579598ca81cae0a82f337350375958e6722): ``Buildings.Airflow.Multizone.Table_m_flow``
 and its ``Table_V_flow`` extension.
 
@@ -16,7 +16,7 @@ mass-flow units *before* ``splineDerivatives``/``interpolate`` ever see it:
 
     mMea_flow_nominal = VMea_flow_nominal * rho_default    (``Table_V_flow.mo:5``)
 
-This is a different order to :mod:`noodl.elements.mbl.powerlaw`'s volume form, which multiplies
+This is a different order to :mod:`noodl.elements.powerlaw_mbl`'s volume form, which multiplies
 ``rho_default`` in *after* evaluating the volumetric law -- correct there because that law is a
 plain algebraic function of ``dp``, so pre- and post-scaling agree trivially. Here the
 ``ensureMonotonicity=true`` correction inside ``splineDerivatives`` (below) is only *positively
@@ -55,7 +55,7 @@ _MODELICA_SMALL = sys.float_info.min
 
 def _f64(value) -> Tensor:
     """A caller's tensor keeps its own dtype; a bare Python number/sequence becomes float64
-    -- see ``noodl.elements.mbl.powerlaw._f64`` (duplicated locally: the ``mbl`` package has
+    -- see ``noodl.elements.powerlaw_mbl._f64`` (duplicated locally: ``noodl.elements`` has
     no shared-utility module yet).
     """
     if isinstance(value, torch.Tensor):
