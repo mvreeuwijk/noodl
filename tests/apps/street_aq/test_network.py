@@ -45,7 +45,7 @@ def _wind(model, u_ref, theta_w, h_abl=1000.0, emission=None):
     }
 
 
-def test_from_test_network_reproduces_impaq_s_four_node_geometry():
+def test_from_test_network_has_the_four_junction_geometry():
     net = from_test_network()
     assert [s.name for s in net.streets] == ["r1", "r2", "r3"]
     lengths = torch.tensor([s.length for s in net.streets], dtype=DT)

@@ -1,7 +1,7 @@
 """Street-canyon boundary layer, in-canyon wind and roof exchange velocity.
 
 Every formula here carries its source. The two families are SIRANE's (Soulhac, Perkins and
-Salizzoni 2008; Soulhac et al. 2011), which IMPAQ implements, and MUNICH's (Kim et al.
+Salizzoni 2008; Soulhac et al. 2011) and MUNICH's (Kim et al.
 2018 and 2022 plus the MUNICH/AtmoData sources), which the MUNICH comparison
 (`tests/verification/test_munich.py`) pins.
 Where the two papers disagree with each other or with the code, the CODE wins and the
@@ -28,18 +28,18 @@ from noodl.solvers.scalar import solve_monotone
 
 Tensor = torch.Tensor
 
-KAPPA_IMPAQ = 0.4
-"""von Karman constant as IMPAQ uses it (`impaq.canyon_velocity`, `kappa = 0.4`)."""
+KAPPA = 0.4
+"""von Karman constant for the neutral form (`canyon_velocity`'s default, `kappa = 0.4`)."""
 
 KAPPA_MUNICH = 0.41
 """von Karman constant as MUNICH uses it (`StreetNetworkTransport.cxx:21`)."""
 
 GAMMA_E = 0.577
-"""Euler-Mascheroni as BOTH codes hard-code it -- not 0.5772156649. IMPAQ
-`canyon_velocity`; ATM `MeteorologyStreet.cxx:118`. Worth about 4e-5 relative."""
+"""Euler-Mascheroni, truncated -- not 0.5772156649. ATM `MeteorologyStreet.cxx:118`
+hard-codes the same truncated value. Worth about 4e-5 relative."""
 
 Z0_B_DEFAULT = 0.15
-"""In-canyon (building) roughness, IMPAQ's loader default, m."""
+"""In-canyon (building) roughness, the default, m."""
 
 Z0_S_DEFAULT = 0.01
 """Surface roughness `z0_surface`, MUNICH's default (`StreetNetworkTransport.cxx:155`)."""
@@ -132,8 +132,8 @@ def bessel_y1(x: Tensor) -> Tensor:
 def soulhac_residual(c: Tensor, ratio: Tensor) -> Tensor:
     """`0.5 (z0/di) c - exp((pi/2) Y1(c)/J1(c) - gamma_E)`; zero at the shape parameter.
 
-    IMPAQ's `canyon_velocity` writes exactly this; MUNICH writes the same equation as
-    `z0_s/delta_i = (2/C) exp(...)` (K22 Eq. B12; ATM `MeteorologyStreet.cxx:119-153`,
+    The Soulhac-Perkins-Salizzoni closed form writes exactly this; MUNICH writes the same
+    equation as `z0_s/delta_i = (2/C) exp(...)` (K22 Eq. B12; ATM `MeteorologyStreet.cxx:119-153`,
     where it is solved by a brute-force search on a 0.01 grid, so MUNICH's `C` is quantised
     -- worth 4e-4 relative in `u_M`. This solve is continuous.)
     """
@@ -201,8 +201,8 @@ class BoundaryLayer:
 
     `u_star`, `h_abl`, `z_ref`, `d` and `z0` broadcast against one another and against the
     street axis a caller adds. `kappa` is the constant the `u_star` in this object was
-    derived with, kept so that `sigma_v` and MUNICH's `w*` use the same one (0.4 for IMPAQ,
-    0.41 for MUNICH -- 2.5 % on `u_star`).
+    derived with, kept so that `sigma_v` and MUNICH's `w*` use the same one (0.4 for the
+    neutral form, 0.41 for MUNICH -- 2.5 % on `u_star`).
     """
 
     u_star: Tensor
@@ -210,29 +210,28 @@ class BoundaryLayer:
     z_ref: Tensor
     d: Tensor
     z0: Tensor
-    kappa: float = KAPPA_IMPAQ
+    kappa: float = KAPPA
 
     def sigma_w(self, z: Tensor, *, lmo: Tensor | None = None,
-                stability: str = "impaq") -> Tensor:
+                stability: str = "neutral") -> Tensor:
         """Vertical velocity standard deviation at height `z`.
 
-        `stability="impaq"` is `1.3 u* (1 - 0.8 z / h_abl)` (IMPAQ's
-        `BoundaryLayer.sigma_w`), with NO guard: it goes NEGATIVE for `z > 1.25 h_abl`,
-        which a tall street under a shallow boundary layer can reach. Use
-        `boundary_layer(pblh_floor=...)` to apply
+        `stability="neutral"` is `1.3 u* (1 - 0.8 z / h_abl)`, with NO guard: it goes
+        NEGATIVE for `z > 1.25 h_abl`, which a tall street under a shallow boundary layer
+        can reach. Use `boundary_layer(pblh_floor=...)` to apply
         MUNICH's `pblh := max(H, PBLH)` guard, or `exchange_velocity` will refuse the
         result.
 
         `stability="munich"` is `ComputeSigmaW`, `StreetNetworkTransport.cxx:3221-3260`,
-        in three branches on the Monin-Obukhov length. Its neutral branch is IMPAQ's
-        formula exactly.
+        in three branches on the Monin-Obukhov length. Its neutral branch is exactly the
+        `stability="neutral"` formula above.
         """
         z = torch.as_tensor(z, dtype=self.u_star.dtype)
-        if stability == "impaq":
+        if stability == "neutral":
             return 1.3 * self.u_star * (1.0 - 0.8 * z / self.h_abl)
         if stability != "munich":
             raise ValueError(
-                f"BoundaryLayer.sigma_w: stability must be 'impaq' or 'munich', got "
+                f"BoundaryLayer.sigma_w: stability must be 'neutral' or 'munich', got "
                 f"{stability!r}"
             )
         if lmo is None:
@@ -257,24 +256,25 @@ class BoundaryLayer:
         unstable = _guarded_sqrt(sigma_wc * sigma_wc + neutral * neutral)
         return torch.where(is_unstable, unstable, torch.where(lmo < pblh, stable, neutral))
 
-    def sigma_v(self, *, lmo: Tensor | None = None, stability: str = "impaq") -> Tensor:
+    def sigma_v(self, *, lmo: Tensor | None = None, stability: str = "neutral") -> Tensor:
         """Horizontal velocity standard deviation, MUNICH's `ComputeSigmaV`
         (`StreetNetworkTransport.cxx:3194-3216`): a 10-level average over `z in [0, PBLH]`.
 
-        `stability="impaq"` selects the neutral branch, which collapses to exactly
+        `stability="neutral"` selects the neutral branch, which collapses to exactly
         `1.2 u*` (the mean of `1 - 0.8 z/PBLH` over 10 equally spaced points on `[0, PBLH]`
-        is 0.6). IMPAQ has no `sigma_v` of its own; this is the value the MUNICH direction
-        averaging (`routing`) needs, and it is stated here rather than invented there.
+        is 0.6). There is no separate neutral-only `sigma_v` form; this is the value the
+        MUNICH direction averaging (`routing`) needs, and it is stated here rather than
+        invented there.
         """
         levels = torch.arange(10, dtype=self.u_star.dtype) / 9.0
         z_over_pblh = levels.reshape(*([1] * self.u_star.dim()), 10)
         u_star = self.u_star.unsqueeze(-1)
         neutral = 2.0 * u_star * (1.0 - 0.8 * z_over_pblh)
-        if stability == "impaq":
+        if stability == "neutral":
             return neutral.mean(-1)
         if stability != "munich":
             raise ValueError(
-                f"BoundaryLayer.sigma_v: stability must be 'impaq' or 'munich', got "
+                f"BoundaryLayer.sigma_v: stability must be 'neutral' or 'munich', got "
                 f"{stability!r}"
             )
         if lmo is None:
@@ -301,10 +301,11 @@ def boundary_layer(
     h_abl: Tensor,
     *,
     z_ref: Tensor | float = 30.0,
-    kappa: float = KAPPA_IMPAQ,
+    kappa: float = KAPPA,
     pblh_floor: Tensor | float | None = None,
 ) -> BoundaryLayer:
-    """IMPAQ's `compute_boundary_layer`, batched and differentiable.
+    """Friction velocity and the boundary-layer height from the network-mean geometry and
+    reference wind, batched and differentiable.
 
     `d = 2 h_mean / 3`, `z0 = h_mean / 10`, `u* = kappa U_ref / ln((z_ref - d) / z0)`, with
     `h_mean` the NETWORK-mean building height. `pblh_floor`, when given, raises `h_abl` to
@@ -442,7 +443,7 @@ def canyon_velocity(
     form: str = "soulhac",
     z0_b: Tensor | float = Z0_B_DEFAULT,
     z0_s: Tensor | float = Z0_S_DEFAULT,
-    kappa: float = KAPPA_IMPAQ,
+    kappa: float = KAPPA,
     canyon_wind_min: float = 0.0,
 ) -> Tensor:
     """The SIGNED along-canyon velocity, m/s. Positive means from `u` to `v`.
@@ -450,8 +451,8 @@ def canyon_velocity(
     `phi` is the angle between the wind and the street axis; it broadcasts against `W`,
     `H` and any leading forcing batch.
 
-    `form="soulhac"` (needs `u_star`) is the Soulhac-Perkins-Salizzoni (2008) closed form
-    exactly as IMPAQ's `canyon_velocity` writes it, and as K22 Eq. (B15) p. 7388 writes it:
+    `form="soulhac"` (needs `u_star`) is the Soulhac-Perkins-Salizzoni (2008) closed form,
+    exactly as K22 Eq. (B15) p. 7388 writes it:
     `di = min(W/2, H)`, `alpha = ln(di/z0_b)`, `beta = exp(c/sqrt(2) (1 - H/di))`,
     `u_h = u* sqrt(pi/(sqrt(2) kappa^2 c) [Y0(c) - J0(c) Y1(c)/J1(c)])`, and
 
@@ -559,7 +560,7 @@ def exchange_velocity(
     agree exactly at `H = W`, which a test pins.
 
     `u_d_min` is MUNICH's `Minimum_transfer_velocity`, 0.001 m/s there (SRC `:3296`) and
-    0.0 here. A NEGATIVE `sigma_w` -- which IMPAQ's unguarded
+    0.0 here. A NEGATIVE `sigma_w` -- which the unguarded neutral form
     `1.3 u* (1 - 0.8 z/h_abl)` produces whenever a street is taller than `1.25 h_abl` --
     is refused rather than clamped: it would make the roof term anti-diffusive, pumping
     mass INTO the street against its own gradient, and every solve would still report

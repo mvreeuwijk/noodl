@@ -7,7 +7,7 @@ every solve; this package decides the network, the closures and the units. Nothi
 
 from noodl.apps.street_aq.canyon import (
     GAMMA_E,
-    KAPPA_IMPAQ,
+    KAPPA,
     KAPPA_MUNICH,
     SCHULTE_BETA,
     SIRANE_EXCHANGE,
@@ -57,7 +57,7 @@ from noodl.apps.street_aq.routing import (
 
 __all__ = [
     "GAMMA_E",
-    "KAPPA_IMPAQ",
+    "KAPPA",
     "KAPPA_MUNICH",
     "Q_INHALATION",
     "SCHULTE_BETA",

@@ -117,11 +117,11 @@ def street_geometry(net: StreetNetwork) -> StreetGeometry:
 
 
 def from_test_network() -> StreetNetwork:
-    """The IMPAQ prototype's `build_test_network`: four junctions, three roads.
+    """A fixed four-junction, three-street test geometry.
 
-    Coordinates, widths, heights and the 0.15 m roughness are the prototype's own; the
-    lengths are recomputed from the coordinates exactly as `compute_road_geometry` does,
-    so `r1` and `r2` come out at 316.227766 m and `r3` at 300 m.
+    Coordinates, widths, heights and the 0.15 m roughness are fixed; the lengths are
+    recomputed from the coordinates, so `r1` and `r2` come out at 316.227766 m and `r3`
+    at 300 m.
     """
     x = {"n0": 0.0, "n1": 300.0, "n2": 600.0, "n3": 300.0}
     y = {"n0": 400.0, "n1": 300.0, "n2": 400.0, "n3": 0.0}
@@ -176,7 +176,7 @@ def build_model(
     kappa: float | None = None,
     canyon_wind_min: float = 0.0,
     u_d_min: float = 0.0,
-    stability: str = "impaq",
+    stability: str = "neutral",
     roof_wind_form: str = "sirane",
     z0_s: float = Z0_S_DEFAULT,
     z_ref: float = 30.0,
@@ -207,7 +207,7 @@ def build_model(
     `kappa=None` (the default) is passed straight through to `StreetFlows`,
     which resolves it to MUNICH's 0.41 whenever any MUNICH-style form is selected
     (`canyon_wind="exponential"`, `exchange="schulte"` or `roof_wind_form="macdonald"`) and
-    to IMPAQ's 0.4 otherwise; an explicit float always wins over that resolution.
+    to the neutral form's 0.4 otherwise; an explicit float always wins over that resolution.
 
     `meteo="uniform"` (the default) drives the whole network from one instance value per
     driver. `meteo="per_street"` gives every street its own wind and boundary layer (a

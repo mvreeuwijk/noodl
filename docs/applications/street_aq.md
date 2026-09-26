@@ -111,7 +111,7 @@ model, state, drivers = build_model(
     direction_averaging="none",   # 'none' | 'munich' | 'gauss'
     species=("nox",),
     chemistry=None,
-    stability="impaq",            # 'impaq' | 'munich'
+    stability="neutral",          # 'neutral' | 'munich'
     roof_wind_form="sirane",      # 'sirane' | 'macdonald'
     kappa=None, canyon_wind_min=0.0, u_d_min=0.0,
     z_ref=30.0, pblh_floor=True,
@@ -138,7 +138,7 @@ These select between the SIRANE forms and MUNICH's, and they are independent:
 | | `"schulte"` | $u_d = \sigma_w \beta / (1 + H/W)$, MUNICH v2's default. Equals the SIRANE form exactly at $H = W$. |
 | `routing` | `"mixing"` / `"sirane"` | Perfect mixing, or SIRANE's non-crossing-streamline rule. They differ only at junctions with 2+ inflows **and** 2+ outflows. |
 | `direction_averaging` | `"none"` / `"munich"` / `"gauss"` | Single direction; MUNICH's own quadrature over a turbulence-derived $\sigma_\theta$; or noodl's normalised Gauss–Hermite rule. |
-| `stability` | `"impaq"` / `"munich"` | Neutral only ($\sigma_w = 1.3\,u_*(1 - 0.8\,z/h_{\text{abl}})$), or MUNICH's three-branch stability dependence (needs an `lmo` driver). |
+| `stability` | `"neutral"` / `"munich"` | Neutral only ($\sigma_w = 1.3\,u_*(1 - 0.8\,z/h_{\text{abl}})$), or MUNICH's three-branch stability dependence (needs an `lmo` driver). |
 
 `kappa=None` resolves automatically: MUNICH's 0.41 if any MUNICH-style option is chosen, else
 0.40. An explicit value always wins.

@@ -18,7 +18,7 @@ import numpy as np
 import torch
 
 from noodl.apps.street_aq.canyon import (
-    KAPPA_IMPAQ,
+    KAPPA,
     KAPPA_MUNICH,
     Z0_S_DEFAULT,
     BoundaryLayer,
@@ -88,7 +88,7 @@ def direction_offsets(
 ) -> tuple[Tensor, Tensor]:
     """Wind-direction samples and their weights, `(offsets (..., m), weights (..., m))`.
 
-    `"none"`: one sample at offset 0 with weight 1 -- IMPAQ's behaviour.
+    `"none"`: one sample at offset 0 with weight 1 -- no direction averaging at all.
 
     `"munich"`: MUNICH's own scheme, reproduced including its artefacts. Uniform
     (rectangle-rule) sampling on `[-2 sigma, +2 sigma]` with both endpoints at full weight,
@@ -305,8 +305,8 @@ class StreetFlows:
 
     `kappa=None` (the default) resolves to MUNICH's 0.41 whenever any
     MUNICH-style form is selected (`canyon_wind="exponential"`, `exchange="schulte"` or
-    `roof_wind_form="macdonald"`), and to IMPAQ's 0.4 otherwise; an explicit float always
-    wins over that resolution.
+    `roof_wind_form="macdonald"`), and to the neutral form's 0.4 otherwise; an explicit
+    float always wins over that resolution.
     """
 
     def __init__(
@@ -324,7 +324,7 @@ class StreetFlows:
         kappa: float | None = None,
         canyon_wind_min: float = 0.0,
         u_d_min: float = 0.0,
-        stability: str = "impaq",
+        stability: str = "neutral",
         roof_wind_form: str = "sirane",
         z0_s: float = Z0_S_DEFAULT,
         z_ref: float = 30.0,
@@ -373,7 +373,7 @@ class StreetFlows:
                 or exchange == "schulte"
                 or roof_wind_form == "macdonald"
             )
-            kappa = KAPPA_MUNICH if munich_form else KAPPA_IMPAQ
+            kappa = KAPPA_MUNICH if munich_form else KAPPA
         self.kappa = float(kappa)
         self.canyon_wind_min = float(canyon_wind_min)
         self.u_d_min = float(u_d_min)

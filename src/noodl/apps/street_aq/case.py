@@ -276,7 +276,10 @@ def write_case(
     key; any of the six `[meteo]` fields MUNICH always requires (`Rain`, `SolarRadiation`,
     `SpecificHumidity`, `SurfacePressure`, `SurfaceTemperature`, `Attenuation` -- see
     `_munich_files._REQUIRED_METEO_DEFAULTS`); plus `lat0_deg`/`lon0_deg`, the lon/lat of a
-    synthetic network's `(0, 0)`.
+    synthetic network's `(0, 0)`. `options` overrides win even over a value the case itself
+    supplies. Missing junction (`*Inter`) meteorology is derived from the streets meeting at
+    each junction: circular mean for the direction, `1/L` for the Obukhov length, arithmetic
+    mean otherwise.
     """
     if format != "munich":
         raise NotImplementedError(

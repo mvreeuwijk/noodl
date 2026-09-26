@@ -11,7 +11,7 @@ import math
 import pytest
 import torch
 
-from noodl.apps.street_aq.canyon import KAPPA_IMPAQ, KAPPA_MUNICH
+from noodl.apps.street_aq.canyon import KAPPA, KAPPA_MUNICH
 from noodl.apps.street_aq.routing import (
     MAX_N_THETA,
     MAX_SIGMA_THETA,
@@ -269,13 +269,13 @@ def _flows_fixture() -> tuple[Network, StreetGeometry]:
 def test_street_flows_resolves_kappa_by_formulation():
     """`kappa=None` resolves to MUNICH's 0.41 whenever a MUNICH-style form
     (`canyon_wind='exponential'`, `exchange='schulte'`, `roof_wind_form='macdonald'`) is
-    selected, and to IMPAQ's 0.4 otherwise; an explicit float always wins."""
+    selected, and to the neutral form's 0.4 otherwise; an explicit float always wins."""
     net, geometry = _flows_fixture()
 
     def make(**kwargs) -> StreetFlows:
         return StreetFlows(net, None, geometry, **kwargs)
 
-    assert make().kappa == KAPPA_IMPAQ
+    assert make().kappa == KAPPA
     assert make(canyon_wind="exponential").kappa == KAPPA_MUNICH
     assert make(exchange="schulte").kappa == KAPPA_MUNICH
     assert make(roof_wind_form="macdonald").kappa == KAPPA_MUNICH

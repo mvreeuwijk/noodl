@@ -96,7 +96,7 @@ def test_t3_sigma_w_in_all_three_stability_branches():
     unstable = layer.sigma_w(_t(H), lmo=_t(-50.0), stability="munich")
     # The worked value 0.473173 is quoted to six significant figures.
     assert abs(float(unstable) / 0.473173 - 1.0) < 1e-6
-    # And the neutral branch IS IMPAQ's formula, evaluated at z = H.
+    # And the neutral branch IS the neutral form, evaluated at z = H.
     torch.testing.assert_close(neutral, layer.sigma_w(_t(H)), rtol=1e-15, atol=0)
 
 
@@ -267,7 +267,7 @@ def _run(fixture):
     options.pop("comment")
     net, names = munich_idealised(L=geometry["L_m"], W=geometry["W_m"],
                                   H=geometry["H_m"])
-    model, state, _ = build_model(net, stability="impaq", pblh_floor=True,
+    model, state, _ = build_model(net, stability="neutral", pblh_floor=True,
                                          **options)
     graph = model.net
     sources = torch.zeros(graph.n, dtype=DT)
@@ -438,7 +438,7 @@ def test_photostationary_chemistry_on_the_twelve_street_network():
                                   H=geometry["H_m"])
     reaction = photostationary_for_streets(("no", "no2", "o3"))
     model, state, _ = build_model(
-        net, species=("no", "no2", "o3"), chemistry=reaction, stability="impaq",
+        net, species=("no", "no2", "o3"), chemistry=reaction, stability="neutral",
         pblh_floor=True, **options,
     )
     graph = model.net
