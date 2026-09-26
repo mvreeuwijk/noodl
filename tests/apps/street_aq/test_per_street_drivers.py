@@ -168,10 +168,15 @@ def test_default_junction_lmo_keeps_the_unstable_sign():
     n = len(net.streets)
     d = _expand(_uniform_drivers(per), n)
     lmo = torch.full((n,), 1e6, dtype=DT)
-    lmo[0] = -10.0                                    # street "1" alone touches junction "N1"
+    lmo[0] = -10.0                                # street "1" (N1 -> A) is one of the four
+                                                   # streets meeting at junction "A"
     j = per.closures[0].junction_values(dict(d, lmo=lmo))["lmo"]
-    k = net.junctions.index("N1")
-    assert float(j[k]) < 0
+    k = net.junctions.index("A")
+    # The reciprocal (1/L) mean of {-10, 1e6, 1e6, 1e6} is ~ -40.0, dominated by the one
+    # unstable street; an ARITHMETIC mean of the same four values would be +749997.5 --
+    # firmly stable, and firmly the wrong sign. Asserting the value, not just its sign,
+    # is what tells the two apart.
+    torch.testing.assert_close(float(j[k]), -40.00120003600108, rtol=1e-9, atol=0)
 
 
 # --------------------------------------------------------------- per-street background
