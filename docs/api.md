@@ -25,6 +25,7 @@ Generated from the package's own docstrings. For the ideas behind these objects,
       members: [Element]
 
 ::: noodl.elements.powerlaw
+::: noodl.elements.powerlaw_mbl
 ::: noodl.elements.quadratic
 ::: noodl.elements.conductance
 ::: noodl.elements.fixed
@@ -32,13 +33,10 @@ Generated from the package's own docstrings. For the ideas behind these objects,
 ::: noodl.elements.duct
 ::: noodl.elements.damper
 ::: noodl.elements.upstream
-
-::: noodl.elements.mbl
-    options:
-      members: [MBLPowerLaw, mbl_orifice, mbl_ela, mbl_point, mbl_points, mbl_coefficient,
-                MBLTable, MBLDoorOpen, MBLDoorOperable, mbl_door_pair, mbl_operable_door_pair,
-                MBLDoorCompartment, MBLDoorCompartmentOperable, DoorCompartmentHead,
-                mbl_discretized_door, mbl_discretized_operable_door, MBLMedium, medium]
+::: noodl.elements.door
+::: noodl.elements.door_discretized
+::: noodl.elements.table
+::: noodl.elements.media
 
 ::: noodl.drives
     options:

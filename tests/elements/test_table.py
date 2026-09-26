@@ -1,10 +1,10 @@
-"""Tests for `noodl.elements.mbl.table`: MBL's tabulated flow law (`Table_m_flow`/
+"""Tests for `noodl.elements.table`: MBL's tabulated flow law (`Table_m_flow`/
 `Table_V_flow`).
 
 The NumPy reference functions below are transcribed directly from the Modelica Buildings
 Library (MBL) v13.0.0 (commit 55abf579598ca81cae0a82f337350375958e6722) source and the
 Modelica Standard Library (MSL) v4.1.0's `Modelica.Fluid.Utilities.cubicHermite`, never by
-importing `noodl.elements.mbl.table` itself. Each Modelica `for`/`if` loop is transcribed as
+importing `noodl.elements.table` itself. Each Modelica `for`/`if` loop is transcribed as
 its own Python loop (not vectorised with NumPy tricks like `searchsorted`), so this reference
 cannot share a bug with the `torch.searchsorted`-based production implementation.
 """
@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 import torch
 
-from noodl.elements.mbl.table import MBLTable
+from noodl.elements.table import MBLTable
 
 # ---------------------------------------------------------------------------------------
 # NumPy transcription of Modelica.Fluid.Utilities.cubicHermite (MSL Fluid/Utilities.mo:787-832)

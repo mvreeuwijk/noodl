@@ -16,8 +16,8 @@ What each MBL construct becomes
   instance, so that each element keeps its own `dp_turbulent`, form and drives:
   `"airpath:<name>"` for a one-way element (edge from its `port_a` side to its `port_b`
   side), `"door_ab:<name>"` and `"door_ba:<name>"` for `DoorOpen`/`DoorOperable`
-  (`noodl.elements.mbl.door`), `"door_c:<name>"` for the `nCom` compartment edges of a
-  discretised door (`noodl.elements.mbl.door_discretized`, with its `DoorCompartmentHead`
+  (`noodl.elements.door`), `"door_c:<name>"` for the `nCom` compartment edges of a
+  discretised door (`noodl.elements.door_discretized`, with its `DoorCompartmentHead`
   drive), and `"zonal_ab:<name>"`/`"zonal_ba:<name>"` for a zonal flow. A fused column chain
   adds a `_ColumnHead` drive to its path. The air-layer boundary is every boundary node plus,
   for each group of zones joined by pressure-dependent edges with no boundary among them, the
@@ -172,7 +172,7 @@ from noodl.apps.building_physics.modelica.schema import (
     ModelicaImportError,
 )
 from noodl.elements.base import Element
-from noodl.elements.mbl import (
+from noodl.elements import (
     MBLDoorOpen,
     MBLDoorOperable,
     MBLMedium,
@@ -186,7 +186,7 @@ from noodl.elements.mbl import (
     mbl_points,
     medium,
 )
-from noodl.elements.mbl.media import _moist_air_buoyancy_density
+from noodl.elements.media import _moist_air_buoyancy_density
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Drivers, Model, State

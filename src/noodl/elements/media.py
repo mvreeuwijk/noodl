@@ -1,4 +1,5 @@
-"""MBL/MSL media constants and densities.
+"""Air/water-vapour medium properties (default density, buoyancy density), transcribed from
+the Modelica Buildings Library's and Modelica Standard Library's media models.
 
 Transcribed from Modelica Buildings Library (MBL) v13.0.0
 (commit 55abf579598ca81cae0a82f337350375958e6722) and the Modelica Standard Library (MSL)
@@ -10,7 +11,7 @@ Two densities matter, and MBL keeps them structurally separate:
 
 * ``rho_default``: the medium's density at its own *fixed* default state
   (``p_default``/``T_default``/``X_default``), used to build the flow coefficient ``C``/``k``
-  of every power-law element in :mod:`noodl.elements.mbl.powerlaw`
+  of every power-law element in :mod:`noodl.elements.powerlaw_mbl`
   (``BaseClasses/PartialOneWayFlowElement.mo:23-28``: ``sta_default =
   Medium.setState_pTX(T=Medium.T_default, p=Medium.p_default, X=Medium.X_default)``,
   ``rho_default = Medium.density(sta_default)``). It is a plain Python ``float``, computed once

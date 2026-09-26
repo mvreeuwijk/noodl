@@ -1,9 +1,9 @@
-"""Tests for `noodl.elements.mbl.door_discretized`: MBL's `DoorDiscretizedOpen` and
+"""Tests for `noodl.elements.door_discretized`: MBL's `DoorDiscretizedOpen` and
 `DoorDiscretizedOperable` as `nCom` compartment edges plus a hydrostatic-head drive.
 
 The NumPy reference below is transcribed directly from the Modelica Buildings Library (MBL)
 v13.0.0 (commit 55abf579598ca81cae0a82f337350375958e6722) and the Modelica Standard Library
-(MSL) v4.1.0 sources, never by importing `noodl.elements.mbl.door_discretized`:
+(MSL) v4.1.0 sources, never by importing `noodl.elements.door_discretized`:
 
 * `Airflow/Multizone/BaseClasses/DoorDiscretized.mo:21,34-40,52,60-75` (dh, hAg/hBg,
   VZerCom_flow, dA, the compartment pressures, the smoothed directional split, VAB/VBA),
@@ -37,7 +37,7 @@ import numpy as np
 import pytest
 import torch
 
-from noodl.elements.mbl import (
+from noodl.elements import (
     DoorCompartmentHead,
     MBLDoorCompartment,
     MBLDoorCompartmentOperable,
@@ -756,7 +756,7 @@ def test_head_drive_is_wired_by_kind_in_a_two_boundary_layer():
 
 def test_discretised_door_solves_inside_a_potential_layer_and_gradients_reach_T():
     """out (boundary) -- orifice -- A (interior, warm) == door (nCom edges) == B (boundary)."""
-    from noodl.elements.mbl import mbl_orifice
+    from noodl.elements import mbl_orifice
 
     net = Network(dtype=F64)
     for n in ("out", "A", "B"):
