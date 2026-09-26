@@ -70,6 +70,8 @@ print(state["air.q"][0])    # doorway low-opening flow, kg/s
 
 *(Adapted from `benchmarks/natural_ventilation.py`, the golden reference case.)*
 
+Models can also be read from CONTAM `.prj`/`.wth` files or from a Modelica Buildings Library export — see [File formats](../formats/contam.md) and [Modelica Buildings Library](../formats/modelica.md).
+
 **From a CONTAM project file:**
 
 ```python
@@ -139,195 +141,6 @@ CONTAM's four source types, all in `noodl.apps.building_physics.sources`:
 
 `assemble_sources(sources, t, x_full)` sums them; `sources_from_project(project, dt=60.0)` builds
 them from a `.prj`'s own source records.
-
-## File readers
-
-### CONTAM `.prj`
-
-`read_prj(path) -> Project` parses a documented subset of TN 1887r1 Appendix A into a `Project`,
-building a float64 `Network`, its elements and its drives. `project_to_model(project, *,
-ambient=None, species=True, scheme="implicit")` returns `(model, state, drivers)`.
-
-**Supported:** run control and ambient conditions; species; wind pressure profiles; zones and
-initial concentrations; airflow paths; the power-law element family
-(`plr_orfc/leak1/leak2/leak3/crack/fcn/test1/test2/conn/stair/shaft/qcn`), the quadratic family
-(`qfr_*`), doorways (`dor_door`, `dor_pl2`), dampers (`plr_bdq`, `plr_bdf`), constant-flow fans
-(`fan_cmf`, `fan_cvf`) and the cubic fan curve (`fan_fan`); source elements `ccf`, `cut`, `eds`,
-`brs`.
-
-**Refused by name**, rather than silently dropped: schedules, control nodes, filters, kinetic
-reactions and air-handling systems referenced by nonzero index; CFD and 1-D convection/diffusion
-zones; continuous-values-file zones and paths; duct networks; a constant wind pressure with no
-profile; a fan curve on a path with `mult != 1`; `csf_*` and `sup_afe` elements.
-
-A **filter** is refused emphatically, because a filter is invisible to airflow but *not* to the
-species layer — loading one would silently corrupt contaminant results while the airflow looked
-perfect.
-
-Control nodes that no zone and no path references are silently skipped rather than refused: NIST's
-own sample projects carry dozens of unreferenced sensor and logger nodes, and those projects must
-load.
-
-**`project_to_model` never builds a thermal layer**, because a `.prj` carries no thermal data.
-
-Every power-law element is built as `UpstreamDensityPowerLaw` — re-evaluating the density of the
-air *entering* the path, per direction, matching ContamX section 3.2. The quadratic, damper and
-fan families keep reference-density coefficients, because they are not part of this application's
-parity evidence.
-
-### CONTAM `.wth`
-
-`read_wth(path) -> Weather` reads the `WeatherFile ContamW 2.0` format. Only `Date, Time, Ta, Pb,
-Ws, Wd` are used; humidity, radiation and ground-temperature columns are ignored, as is the
-per-day header block.
-
-```python
-weather = read_wth("year.wth")
-drivers.update(weather.drivers_at(t, thermal="thermal"))
-```
-
-`at(t)` interpolates linearly between listed times, with wind direction interpolated on its
-shortest arc. `drivers_at(t)` returns the driver keys a `build_model`-built model reads:
-`"<thermal>.x_boundary"`, `"P_ref"`, `"V_met"`, `"theta_w"`. It handles the single-boundary-node
-case; a model with several prescribed temperatures must build its own boundary vector.
-
-### Modelica Buildings Library
-
-`read_modelica(path) -> (model, state, drivers)` imports a multizone airflow model built with the
-Modelica Buildings Library (MBL) v13.0.0 (commit `55abf579598ca81cae0a82f337350375958e6722`)
-through an OpenModelica JSON export — a second reference implementation for this application,
-independent of CONTAM. The reader never parses Modelica source and never evaluates a Modelica
-expression: every number in the JSON was already evaluated by OpenModelica.
-
-```python
-from noodl.apps.building_physics import read_modelica
-from noodl.apps.building_physics.modelica import simulate
-
-model, state, drivers, names = read_modelica("tests/data/modelica/OneRoom.json", return_names=True)
-result = simulate(model, state, drivers, names.times)
-
-print(result["T"][-1])       # zone temperatures (K) at the last grid time, node order names.nodes
-print(result["air.q"][-1])   # edge flows (kg/s); names.edges maps an MBL instance to its columns
-```
-
-**Supported (18 models: 8 `Validation` + 10 `Examples`).** `Buildings.Airflow.Multizone`
-elements, `MixingVolume` zones, pressure/temperature boundaries and trace substances — not
-`Buildings.ThermalZones`, HVAC, wind, weather or district networks. `Validation`: `OneWayFlow`,
-`DoorOpenClosed`, `OpenDoorPressure`, `OpenDoorTemperature`, `ThreeRoomsContam`,
-`ThreeRoomsContamDiscretizedDoor`, `OpenDoorBuoyancyDynamic`, `OpenDoorBuoyancyPressureDynamic`.
-`Examples`: `CO2TransportStep`, `ClosedDoors`, `NaturalVentilation`, `OneOpenDoor`, `OneRoom`,
-`Orifice`, `PowerLaw`, `ReverseBuoyancy`, `ReverseBuoyancy3Zones`, `ZonalFlow`.
-
-**Refused, each with a named error** (`ModelicaImportError` lists every offending instance and
-its class):
-
-- `PressurizationData`, `TrickleVent`, `ChimneyShaftNoVolume`, `ChimneyShaftWithVolume` — wind
-  pressure, weather data, feedback controllers, or a dynamic (mass- and heat-storing) hydrostatic
-  medium column, none of which is in scope.
-- `OneEffectiveAirLeakageArea` — a mass source feeding two boundary-less volumes; the injected
-  air can only go into compressing them, which needs the compressible volume storage this
-  release does not model.
-
-For example, reading `PressurizationData` raises:
-
-```
-ModelicaImportError: modelica: refused 3 items:
-  - east (Buildings.Fluid.Sources.Outside_CpLowRise): wind pressure is not supported
-  - weaDat (Buildings.BoundaryConditions.WeatherData.ReaderTMY3): weather data is not supported
-  - west (Buildings.Fluid.Sources.Outside_CpLowRise): wind pressure is not supported
-```
-
-**Conventions:**
-
-- `DoorOpen`/`DoorOperable` use MBL's fixed default density (`Door.mo`); a discretised door
-  (`DoorDiscretizedOpen`/`Operable`) evaluates density at the actual port pressure
-  (`TwoWayFlowElement.mo`) instead — the two door families do not share one convention.
-- A door becomes two directional noodl edges between the same pair of zones; a discretised door
-  becomes one edge per compartment, each with its own hydrostatic head.
-- Zonal flows are four-port, like doors (not the two-port shape a one-way element has), and
-  become two directional edges the same way.
-- An in-line flow sensor (`Buildings.Fluid.Sensors`, flow-through) is a transparent wire: it adds
-  no node and no pressure drop.
-- `PrescribedHeatFlow` is supported only at `alpha = 0` (MSL's default: no temperature
-  dependence); a nonzero `alpha` is refused.
-- A boundary wired straight to one zone's port, and to no other port, is supported: it fixes that
-  zone's pressure.
-- `"air.phi"` is GAUGE pressure relative to a per-model reference `p_ref` (the first boundary's
-  pressure, or an attached boundary's, at the first grid time; the first zone's `p_start` with
-  neither) — flows depend only on pressure differences, so the choice changes no result.
-- Every source driver (air, heat and species) is the MEAN of the source over each step, not its
-  end-of-step value, so that a pulse shorter than the output interval still injects its exact
-  mass (found from `CO2TransportStep`'s 3.6 s pulse landing between two 172.8 s outputs).
-- A signal may drive several inputs (`drives` accepts one name or a list) — MBL's `ZonalFlow`
-  example drives two flows from one `Constant`.
-- Refused, also with a named error: a closed group of zones (joined only by pressure-dependent
-  edges or zonal flows, no boundary among them) with a net flow imbalance — an unequal
-  `ZonalFlow_m_flow` pair or a mass source into it; `MediumColumn.densitySelection = "actual"`;
-  and `Outside` without a weather-bus signal driving it. None of the 18 supported models needs
-  any of the three.
-
-**Quasi-steady airflow.** Like the CONTAM route, a volume's air mass is not stored: the airflow
-is quasi-steady at every step. MBL's volumes do store mass, so a model whose dynamics are
-dominated by that storage — a closed, heated room expanding through its leakage, or an initial
-pressure imbalance draining away — parts company with noodl by more than round-off (see the
-parity table below). Adding volume mass storage would close this gap; it is a possible
-extension, not implemented in this release.
-
-**Reproducing the export (WSL only — the test suite itself needs none of this).** Tested on
-Ubuntu 22.04 (`jammy`) in WSL with OpenModelica 1.27.1. Install OpenModelica from its own apt
-repository (needs `sudo`, done once by whoever administers the WSL environment):
-
-```bash
-sudo apt-get update && sudo apt-get install -y ca-certificates curl gnupg
-curl -fsSL http://build.openmodelica.org/apt/openmodelica.asc | sudo gpg --dearmor -o /usr/share/keyrings/openmodelica-keyring.gpg
-echo "deb [arch=amd64 signed-by=/usr/share/keyrings/openmodelica-keyring.gpg] https://build.openmodelica.org/apt jammy stable" | sudo tee /etc/apt/sources.list.d/openmodelica.list
-sudo apt-get update && sudo apt-get install -y omc
-```
-
-MBL v13 needs the Modelica Standard Library (MSL) 4.1.0, installed once, without `sudo`, with
-`omc`'s own `installPackage` (it writes into `~/.openmodelica/libraries`, not a system path):
-
-```bash
-echo 'installPackage(Modelica, "4.1.0");' > /tmp/install_msl.mos && omc /tmp/install_msl.mos
-```
-
-Clone MBL at the tag this release was exported against:
-
-```bash
-git clone --depth 1 --branch v13.0.0 https://github.com/lbl-srg/modelica-buildings.git ~/modelica/modelica-buildings
-```
-
-(`git rev-parse HEAD` there is `55abf579598ca81cae0a82f337350375958e6722`, the commit recorded
-in every fixture's JSON.) Then, with `omc` on the WSL `PATH` (this release was exported against
-`OpenModelica 1.27.1~2-g6db4671`):
-
-```bash
-python3 scripts/modelica_export.py Buildings.Airflow.Multizone.Validation.ThreeRoomsContam --out tests/data/modelica
-```
-
-(`<Model>` is the model's fully qualified name; the exporter writes `<Short>.json`/`<Short>.csv`
-under `<Short>`, its last component — `ThreeRoomsContam.json`/`ThreeRoomsContam.csv` here.) This
-writes `tests/data/modelica/<Short>.json` (the component graph) and `<Short>.csv` (OpenModelica's
-own simulated reference) as committed fixtures. `scripts/modelica_export.py` is not imported by
-the package and is not run by the test suite. It exits non-zero if the simulation fails (the
-JSON is still written, with the instance API's Reals instead of the simulated values, so the
-export can be inspected); a batch script over every model should check the exit code rather
-than assume success. 9 of the 12 dynamic parity tests take 30 s–5 min each and are marked
-`@pytest.mark.slow`, excluded by the repository's default `pytest` run; `pytest -m slow` runs
-them.
-
-Regenerating the committed parity records (`tests/data/modelica/parity-{algebraic,dynamic}.json`,
-below) needs no OpenModelica — they are written by `tests/verification/test_modelica_parity.py`
-itself, only when the environment variable `NOODL_RECORD_PARITY=1` is set:
-
-```bash
-NOODL_RECORD_PARITY=1 pytest tests/verification/test_modelica_parity.py -m "not slow"
-NOODL_RECORD_PARITY=1 pytest tests/verification/test_modelica_parity.py -m slow
-```
-
-(two runs, since the default `addopts` excludes `slow`-marked tests and a command-line `-m`
-replaces rather than adds to it). Without the variable, the suite reads and checks the
-fixtures but never rewrites the records.
 
 ## Verification
 
@@ -459,7 +272,8 @@ still prints it.
 
 Every column's numbers (not just the worst) are committed at
 `tests/data/modelica/parity-algebraic.json` and `parity-dynamic.json` (regenerated only with
-`NOODL_RECORD_PARITY=1`, "Reproducing the export" above). Only the *storage-dominated* group
+`NOODL_RECORD_PARITY=1`; see [Reproducing the export](../formats/modelica.md) on the Modelica
+format page). Only the *storage-dominated* group
 above (`ClosedDoors`, `OneOpenDoor`, `ReverseBuoyancy`) is caused by MBL's volume mass storage,
 which noodl's quasi-steady airflow does not model. The *step-limited* group's numbers are
 noodl's first-order time step instead (confirmed by halving it, above); `ZonalFlow`'s T is the
@@ -507,7 +321,7 @@ regression at rtol 1e-8.
   effect is confined to pressure differences below $10^{-3}$ Pa across the doorway.
 - **The Modelica import accepts a stated subset.** Wind pressure, weather data, controllers,
   dynamic medium columns and components that need compressible volume storage are refused with a
-  named error; see [the Modelica import's refused content](#modelica-buildings-library).
+  named error; see [the Modelica import's refused content](../formats/modelica.md).
 
 ## Install
 

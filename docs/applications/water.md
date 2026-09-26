@@ -46,6 +46,8 @@ final = water_steady(model, state, drivers)
 two independent loops. Its reference heads from EPANET 2.2 are 49.267731, 48.877316, 48.430882,
 48.213867, 48.117119 and 48.122936 m.
 
+Models can also be read from EPANET `.inp` files — see [File formats](../formats/epanet.md).
+
 ## The objects
 
 | Object | Fields |
@@ -146,27 +148,6 @@ $$
 
 Implemented with a guarded kink so both `where` branches stay finite and differentiable.
 `PressureDrivenDemand` refuses `p_req <= p_min` — a zero-span demand curve.
-
-## The EPANET `.inp` reader
-
-**Read:** `[JUNCTIONS]`, `[RESERVOIRS]`, `[TANKS]`, `[PIPES]`, `[PUMPS]`, `[VALVES]`,
-`[DEMANDS]`, `[PATTERNS]`, `[CURVES]`, `[CONTROLS]`, `[OPTIONS]`, `[TIMES]`.
-
-**Ignored** because nothing in the hydraulics references them: `[TITLE]`, `[REPORT]`,
-`[COORDINATES]`, `[VERTICES]`, `[LABELS]`, `[BACKDROP]`, `[TAGS]`, `[ENERGY]`, `[END]`, and the
-quality sections (a quality run is configured through `build_model(quality=...)` instead).
-
-**Refused by name:** `[RULES]`; `[EMITTERS]`; `[STATUS]` with content; time-based controls (only
-`LINK <id> OPEN|CLOSED IF NODE <tank> BELOW|ABOVE <level>` is read); PRV, PSV, PBV and GPV valves;
-a constant-**power** pump; a pump with a speed pattern; a tank with a volume curve; a `HEADLOSS`
-other than H-W or D-W; a closed pipe or check valve.
-
-A constant-power pump is refused with a specific reason: the head-flow relation EPANET uses
-internally for one is not stated in the manual, so implementing it would be a guess.
-
-**Units** follow `[OPTIONS] UNITS`: `CFS GPM MGD IMGD AFD` are US, `LPS LPM MLD CMH CMD` are SI,
-and everything is converted to SI on read. Unrecognised `[OPTIONS]` lines are recorded verbatim in
-`notes["unrecognised_options"]` rather than dropped.
 
 ## Verification
 
