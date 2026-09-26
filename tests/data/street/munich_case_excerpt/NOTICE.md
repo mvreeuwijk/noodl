@@ -11,11 +11,12 @@ file `munich-testcase-0.1.tar.bz2`, members `street_ARmodif.dat` and `graph/inte
 
 Licence: **CC-BY 4.0** (Zenodo record 6167477).
 
-`munich.cfg`, `munich-data.cfg` and `species.dat` in this directory are NOT copied from
-CEREA's distribution -- they are authored here, to the input-file schema discovered by
-reading the MUNICH v2.2 source (`cerea-lab/munich`, commit pinned in
-`paper/munich/README.md`) and the shipped `processing/photochemistry` example, so that this
-excerpt is a small, self-contained, runnable-shaped case for the reader's unit tests. They
-use the `is_num` constant shortcut MUNICH's own `InputFiles::Read` supports (a `Filename`
-that parses as a number is broadcast as a constant instead of naming a binary file), so no
-binary fixture is needed here.
+`munich.cfg`, `munich-data.cfg`, `species.dat` and `wind_direction.bin` in this directory are
+NOT copied from CEREA's distribution -- they are authored here, to the input-file schema of
+the MUNICH v2.2 source (github.com/cerea-lab/munich: `InputFiles::Read` and
+`StreetNetworkTransport::ReadConfiguration`) and its shipped `processing/photochemistry`
+example, so that this excerpt is a small, self-contained case for the reader's unit tests.
+It mixes the two ways MUNICH's `InputFiles::Read` takes a field: `WindDirection` names a
+float32 binary (`wind_direction.bin`: 2 hours x 4 streets, toward north in the first hour
+and toward east in the second), and every other field uses the `is_num` constant shortcut (a
+`Filename` that parses as a number is broadcast as a constant instead of naming a file).

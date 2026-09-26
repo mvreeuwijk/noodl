@@ -1,32 +1,22 @@
 """The format-neutral street case: ONE `StreetCase` structure that every street-model
 source (MUNICH's own files, and, in a later plan, SIRANE's decks) is read into and written
-from -- no MUNICH- or SIRANE-specific element belongs on `StreetCase` itself. MUNICH's own
-file format (its `[section]`/`key: value` dialect, the semicolon street/intersection
-tables, the binaries) lives in the private `_munich_files` module; this module knows only
-plain arrays and the `StreetNetwork` they describe.
-
-`UG_PER_KG` and `EARTH_RADIUS_M` are MUNICH-specific constants, re-exported here (from
-`_munich_files`, which owns and documents them) because callers reading/writing MUNICH data
-through this module's own units and geometry need them without reaching into the private
-module.
+from -- no MUNICH- or SIRANE-specific element belongs on `StreetCase` itself. Each source
+model's own file format (names, units, direction conventions) lives in a private module
+(`_munich_files` for MUNICH); this module knows only plain SI arrays in the neutral
+vocabulary and the `StreetNetwork` they describe.
 """
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import torch
 
 from noodl.apps.street_aq import _munich_files
-from noodl.apps.street_aq._munich_files import (
-    EARTH_RADIUS_M,
-    UG_PER_KG,
-    deg_from_to_munich_rad,
-    munich_rad_to_deg_from,
-)
-from noodl.apps.street_aq.network import StreetNetwork
+from noodl.apps.street_aq.network import StreetNetwork, street_index
 from noodl.apps.street_aq.routing import StreetFlows
 from noodl.couple import CONTAM_DEG_TO_STREET_RAD, apply_conversion
 from noodl.model import Model
@@ -34,15 +24,20 @@ from noodl.model import Model
 F64 = torch.float64
 
 __all__ = [
-    "EARTH_RADIUS_M",
-    "UG_PER_KG",
+    "METEO_KEYS",
     "StreetCase",
-    "deg_from_to_munich_rad",
     "drivers_at",
-    "munich_rad_to_deg_from",
     "read_case",
     "write_case",
 ]
+
+METEO_KEYS = ("wind_dir_from_deg", "wind_speed", "h_abl", "u_star", "lmo", "temperature")
+"""The neutral meteorology keys a `StreetCase` may carry: the wind direction in degrees
+clockwise from north, the direction the wind blows FROM; the reference wind speed (m/s);
+the boundary-layer height (m); the friction velocity (m/s); the Obukhov length (m); the
+surface temperature (K). The first two are required."""
+
+_REQUIRED_METEO = ("wind_dir_from_deg", "wind_speed")
 
 _JUNCTION_CASE_KEY = {"theta_w": "wind_dir_from_deg", "U_ref": "wind_speed"}
 """`drivers_at`'s driver key -> the `StreetCase.meteo`/`meteo_junction` key it reads from,
@@ -50,39 +45,75 @@ for the two keys whose names differ (`theta_w` is stored as `wind_dir_from_deg`,
 degrees, until converted; `U_ref` is stored as `wind_speed`). Every other key
 (`u_star`, `h_abl`, `lmo`) is spelled the same on both sides."""
 
+_MUNICH_OPTION_MAP: dict[str, tuple[str, dict[str, str]]] = {
+    "Mean_wind_speed_parameterization": (
+        "canyon_wind", {"exponential": "exponential", "sirane": "soulhac"}),
+    "Transfer_parameterization": ("exchange", {"schulte": "schulte", "sirane": "sirane"}),
+    "Building_height_wind_speed_parameterization": (
+        "roof_wind_form", {"sirane": "sirane", "macdonald": "macdonald"}),
+    "With_horizontal_fluctuation": ("direction_averaging", {"yes": "munich", "no": "none"}),
+}
+"""MUNICH `[street]` key -> (the `build_model` keyword it sets, MUNICH value (lower case) ->
+noodl value). A value missing from its map (e.g. MUNICH's `Wang` transfer) has no noodl
+counterpart."""
+
+_MUNICH_FLOAT_MAP = {"Zref": "z_ref", "Minimum_Street_Wind_Speed": "canyon_wind_min"}
+"""MUNICH `[street]` key -> the float `build_model` keyword it sets."""
+
+_MUNICH_U_D_MIN = 0.001
+"""MUNICH's hard-coded minimum exchange velocity, `min_velocity`
+(`StreetNetworkTransport.cxx:206` and `:3295`): not a configuration key, so every MUNICH
+case implies it."""
+
+
+def _hours_by(value, n_hours: int, tail: tuple[int, ...], label: str) -> np.ndarray:
+    """`value` broadcast to `(n_hours, *tail)`: a scalar, a `(n_hours,)` time series, or
+    an array whose leading axes are `(n_hours, *tail[:k])` (the rest broadcast)."""
+    arr = np.asarray(value, dtype=np.float64)
+    full = (n_hours, *tail)
+    if arr.ndim == 0:
+        return np.full(full, float(arr))
+    if arr.ndim > len(full) or arr.shape != full[: arr.ndim]:
+        raise ValueError(
+            f"StreetCase.synthetic: {label} must be a scalar or have leading shape of "
+            f"{full} (n_hours first), got {arr.shape}"
+        )
+    return np.broadcast_to(arr.reshape(arr.shape + (1,) * (len(full) - arr.ndim)),
+                           full).copy()
+
 
 @dataclass(frozen=True)
 class StreetCase:
     """One street-network case: the network plus every array a `Model` built on it needs
-    to run, independent of which source model (`source`) it was read from.
+    to run, independent of which source model (`source`) it came from.
 
     Attributes:
-        source: `"munich"` or `"sirane"` -- which reader produced this case (and which
-            `model_options` resolves against).
+        source: Which reader produced this case -- `"munich"` (and, later, `"sirane"`), or
+            `"synthetic"` for one built in Python with `StreetCase.synthetic`.
         network: The case's `StreetNetwork` (metres).
-        times: `(n_hours,)`, seconds since the case's own start (not necessarily an
-            absolute date).
+        times: `(n_hours,)`, seconds since `start`.
         street_ids: `network.streets`' names, in the order `emissions`'/`background`'s
             street axis uses (== `network.streets` order).
         junction_ids: The source model's OWN node ids for `network.junctions`, in that
             same order (MUNICH: the intersection ids from `intersection.dat`).
         species: The case's species names, in the order `emissions`'/`background`'s last
             axis uses.
-        meteo: One `(n_hours, n_streets)` array per key: `wind_dir_from_deg` (degrees
-            clockwise from north, the direction the wind blows FROM) and `wind_speed`
-            always; `h_abl`, `u_star`, `lmo`, `temperature` wherever the source provides
-            them.
+        meteo: One `(n_hours, n_streets)` array per `METEO_KEYS` key: `wind_dir_from_deg`
+            (degrees clockwise from north, the direction the wind blows FROM) and
+            `wind_speed` always; `h_abl`, `u_star`, `lmo`, `temperature` wherever the source
+            provides them.
         meteo_junction: The same keys, `(n_hours, n_junctions)`, in `network.junctions`
             order -- may be empty (or missing some keys) when the source has no genuine
-            per-junction meteorology (MUNICH: the `...Inter` fields).
-        emissions: `(n_hours, n_streets, n_species)`, **kg/s** per street (MUNICH's own
-            files are micrograms/s; converted at read time -- see `UG_PER_KG`).
-        background: `(n_hours, n_streets, n_species)`, **kg/m3**, per street (kept per
-            street, unlike an earlier version of this reader that reduced it to one
-            network-wide value at read time).
+            per-junction meteorology.
+        emissions: `(n_hours, n_streets, n_species)`, **kg/s** per street.
+        background: `(n_hours, n_streets, n_species)`, **kg/m3**, per street.
         native: The source model's own options, as read (MUNICH: one dict per `munich.cfg`
-            section) -- `model_options` reads this to translate them into `build_model`
-            keywords.
+            section, plus the lon/lat projection the reader used) -- `model_options`
+            translates them into `build_model` keywords, and `write_case` writes them back
+            when the format matches.
+        start: The absolute date and time of `times[0]`, or `None` when the case has none
+            (a synthetic case built without one; writing it to a file format that needs a
+            date then raises).
     """
 
     source: str
@@ -96,33 +127,117 @@ class StreetCase:
     emissions: np.ndarray
     background: np.ndarray
     native: dict
+    start: datetime | None = None
+
+    @classmethod
+    def synthetic(
+        cls,
+        network: StreetNetwork,
+        *,
+        species: Sequence[str],
+        times: Sequence[float],
+        meteo: Mapping[str, float | np.ndarray],
+        emissions: float | np.ndarray,
+        background: float | np.ndarray,
+        meteo_junction: Mapping[str, float | np.ndarray] | None = None,
+        start: datetime | None = None,
+    ) -> StreetCase:
+        """A case built in Python (`source="synthetic"`), e.g. an idealised network to
+        write out for another street model.
+
+        `meteo` takes `METEO_KEYS` keys (`wind_dir_from_deg` and `wind_speed` required);
+        each value is a scalar, a `(n_hours,)` series (the same at every street) or a
+        `(n_hours, n_streets)` array. `meteo_junction` likewise with `n_junctions`, in
+        `network.junctions` order. `emissions` (kg/s per street) and `background` (kg/m3)
+        are a scalar, `(n_hours,)`, `(n_hours, n_streets)` or
+        `(n_hours, n_streets, n_species)`. The junction ids are `network.junctions`' own
+        names.
+        """
+        species = list(species)
+        times = [float(t) for t in times]
+        n_hours, n_streets = len(times), len(network.streets)
+        n_junctions, n_species = len(network.junctions), len(species)
+        missing = [k for k in _REQUIRED_METEO if k not in meteo]
+        if missing:
+            raise ValueError(
+                f"StreetCase.synthetic: meteo needs {list(_REQUIRED_METEO)}; missing "
+                f"{missing}"
+            )
+        tables = {}
+        for label, table, n_columns in (("meteo", meteo, n_streets),
+                                        ("meteo_junction", meteo_junction or {}, n_junctions)):
+            unknown = sorted(set(table) - set(METEO_KEYS))
+            if unknown:
+                raise ValueError(
+                    f"StreetCase.synthetic: {label} keys {unknown} are not among "
+                    f"{list(METEO_KEYS)}"
+                )
+            tables[label] = {k: _hours_by(v, n_hours, (n_columns,), f"{label}[{k!r}]")
+                             for k, v in table.items()}
+        return cls(
+            source="synthetic", network=network, times=times,
+            street_ids=[s.name for s in network.streets],
+            junction_ids=list(network.junctions), species=species,
+            meteo=tables["meteo"], meteo_junction=tables["meteo_junction"],
+            emissions=_hours_by(emissions, n_hours, (n_streets, n_species), "emissions"),
+            background=_hours_by(background, n_hours, (n_streets, n_species), "background"),
+            native={}, start=start,
+        )
 
     def model_options(self) -> dict:
-        """The `build_model`/`StreetFlows` keywords this case's own source model implies --
-        e.g. MUNICH's `Mean_wind_speed_parameterization: Exponential` becomes
-        `canyon_wind="exponential"`.
+        """The `build_model` keywords this case's own source model implies, translated from
+        its native options.
 
-        Only `source="munich"` is implemented; any other source raises `NotImplementedError`
-        naming it (SIRANE's own options are Plan 2's job).
+        MUNICH (`source="munich"`), from `munich.cfg`'s `[street]` section:
+        `Mean_wind_speed_parameterization` (`Exponential` -> `canyon_wind="exponential"`,
+        `Sirane` -> `"soulhac"`), `Transfer_parameterization` (`Schulte` ->
+        `exchange="schulte"`, `Sirane` -> `"sirane"`),
+        `Building_height_wind_speed_parameterization` (`Sirane`/`Macdonald` ->
+        `roof_wind_form`), `With_horizontal_fluctuation` (`yes` ->
+        `direction_averaging="munich"`, `no` -> `"none"`), `Zref` -> `z_ref`,
+        `Minimum_Street_Wind_Speed` -> `canyon_wind_min`; always `stability="munich"` and
+        MUNICH's hard-coded `u_d_min=0.001`. A value with no noodl counterpart (e.g. the
+        `Wang` transfer) raises `NotImplementedError` naming the key and value; a missing
+        key raises `ValueError`.
+
+        Any other source raises `NotImplementedError`: a synthetic case carries no source
+        model's options (pass `build_model`'s keywords directly), and SIRANE's are a later
+        plan's job.
         """
         if self.source != "munich":
             raise NotImplementedError(
-                f"StreetCase.model_options: source {self.source!r} is not implemented; "
-                f"only 'munich' is"
+                f"StreetCase.model_options: source {self.source!r} carries no source-model "
+                f"options this function can translate; only 'munich' is implemented"
             )
         street = self.native.get("street", {})
-        canyon_wind_min = float(street.get("Minimum_Street_Wind_Speed", 0.1))
-        return dict(
-            canyon_wind="exponential", exchange="schulte", stability="munich",
-            direction_averaging="munich", roof_wind_form="sirane",
-            canyon_wind_min=canyon_wind_min, u_d_min=0.001,
-        )
+
+        def value(key: str) -> str:
+            if key not in street:
+                raise ValueError(
+                    f"StreetCase.model_options: munich.cfg [street] has no {key!r}"
+                )
+            return street[key]
+
+        options: dict = {}
+        for key, (keyword, mapping) in _MUNICH_OPTION_MAP.items():
+            raw = value(key)
+            if raw.strip().lower() not in mapping:
+                raise NotImplementedError(
+                    f"StreetCase.model_options: MUNICH {key}: {raw} has no noodl "
+                    f"counterpart; supported: {sorted(mapping)}"
+                )
+            options[keyword] = mapping[raw.strip().lower()]
+        for key, keyword in _MUNICH_FLOAT_MAP.items():
+            options[keyword] = float(value(key))
+        options["stability"] = "munich"
+        options["u_d_min"] = _MUNICH_U_D_MIN
+        return options
 
 
 def read_case(path: Path) -> StreetCase:
     """`StreetCase` from `path`: a directory holding `munich.cfg` is read as a MUNICH case;
-    a SIRANE master `.dat` file will be read as a SIRANE case once Plan 2 implements it.
-    Anything else raises `ValueError` naming both expectations.
+    a SIRANE master `.dat` file will be read as a SIRANE case once a later plan implements
+    it. Anything else raises `ValueError` naming both expectations.
     """
     path = Path(path)
     if path.is_dir() and (path / "munich.cfg").is_file():
@@ -136,30 +251,34 @@ def read_case(path: Path) -> StreetCase:
 
 def write_case(
     out_dir: Path,
-    network: StreetNetwork,
+    case: StreetCase,
     *,
     format: str = "munich",
-    species: Sequence[str],
-    date_min: str,
-    n_hours: int,
-    meteo: Mapping[str, float | np.ndarray],
-    emissions_kg_s: float | np.ndarray,
-    background_kg_m3: float | np.ndarray,
-    options: Mapping[str, str] | None = None,
-    lat0_deg: float = 48.85,
-    lon0_deg: float = 2.35,
+    options: Mapping[str, object] | None = None,
 ) -> Path:
-    """Writes `network` as a case in `format` under `out_dir`, and returns `out_dir`. Only
-    `format="munich"` is implemented -- see `_munich_files.write_munich_case` for its
-    argument semantics (`meteo`'s keys are MUNICH's own field names)."""
+    """Writes `case` under `out_dir` in `format`, and returns `out_dir`. Only
+    `format="munich"` is implemented.
+
+    `case.start` must be set (MUNICH dates every input). A case read from the same format
+    writes its own native options back (`read_case` -> `write_case` round-trips);
+    `options` are the format's own overrides -- for MUNICH, any `munich.cfg` `[street]`
+    key, plus `lat0_deg`/`lon0_deg`, the lon/lat of a synthetic network's `(0, 0)`.
+    """
     if format != "munich":
         raise NotImplementedError(
             f"write_case: format {format!r} is not implemented; only 'munich' is"
         )
+    if case.start is None:
+        raise ValueError(
+            "write_case: case.start is None; MUNICH needs an absolute start date "
+            "(set StreetCase.start)"
+        )
     return _munich_files.write_munich_case(
-        out_dir, network, species=species, date_min=date_min, n_hours=n_hours, meteo=meteo,
-        emissions_kg_s=emissions_kg_s, background_kg_m3=background_kg_m3, options=options,
-        lat0_deg=lat0_deg, lon0_deg=lon0_deg,
+        out_dir, network=case.network, times=case.times, start=case.start,
+        junction_ids=case.junction_ids,
+        species=case.species, meteo=case.meteo, meteo_junction=case.meteo_junction,
+        emissions=case.emissions, background=case.background,
+        native=case.native if case.source == "munich" else None, options=options,
     )
 
 
@@ -190,16 +309,38 @@ def drivers_at(
     Similarly, the transport layer's own boundary count decides whether `"<layer>.x_boundary"`
     is per-street or a single network-wide mean.
 
-    `u_star` is supplied whenever `case` has it (MUNICH's `UST`/`USTInter`); `U_ref` is
-    `case`'s own wind speed (not derived through noodl's log law -- `u_star`, when present,
-    is what actually sets the friction velocity; `U_ref` is needed only for the direction
-    spread `sigma_theta = sigma_v / U_ref`).
+    The model's street order (`street_index(model)`) must be `case.street_ids`: the
+    per-street arrays are placed by position. `species` (default `case.species`) selects
+    and orders the species.
+
+    `u_star` is supplied whenever `case` has it; `U_ref` is `case`'s own wind speed (not
+    derived through noodl's log law -- `u_star`, when present, is what actually sets the
+    friction velocity; `U_ref` is needed only for the direction spread
+    `sigma_theta = sigma_v / U_ref`).
     """
     flows = next(c for c in model.closures if isinstance(c, StreetFlows))
     layer = model.transport[flows.layer_name]
     n_streets = len(case.street_ids)
 
+    model_streets = list(street_index(model, layer_name=flows.layer_name))
+    if model_streets != list(case.street_ids):
+        raise ValueError(
+            f"drivers_at: the model's street order {model_streets} is not the case's "
+            f"street_ids {list(case.street_ids)}; build the model on case.network"
+        )
+    missing = [key for key in _REQUIRED_METEO if key not in case.meteo]
+    if missing:
+        raise KeyError(
+            f"drivers_at: case.meteo has no {missing}; every StreetCase needs "
+            f"{list(_REQUIRED_METEO)}"
+        )
+
     species_names = list(species) if species is not None else list(case.species)
+    unknown = [s for s in species_names if s not in case.species]
+    if unknown:
+        raise ValueError(
+            f"drivers_at: species {unknown} are not in the case's species {case.species}"
+        )
     s_idx = [case.species.index(s) for s in species_names]
     n_species = len(species_names)
 

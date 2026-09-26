@@ -1,12 +1,14 @@
 # Source and licence
 
+Despite the directory's name, this is NOT central Paris: it is an excerpt of the
+Le Perreux-sur-Marne street network (a suburb east of Paris), MUNICH's published test case.
+
 `street.dat` and `intersection.dat` are the same four-street/five-junction excerpt as
 `tests/data/street/munich_case_excerpt/` (see that directory's own `NOTICE.md`).
 
-The `.bin` files here are genuine excerpts (3 hours x 4 streets = 12 float32 records each,
-well under the 20-record limit) of the REAL per-street MUNICH input arrays for those same
-four streets (rows 0, 1, 6, 9 of `street_ARmodif.dat`, i.e. street ids 1, 3, 8, 11), sliced
-from:
+The `.bin` files here are genuine excerpts (3 hours x 4 streets = 12 float32 records each)
+of the REAL per-street MUNICH input arrays for those same four streets (rows 0, 1, 6, 9 of
+`street_ARmodif.dat`, i.e. street ids 1, 3, 8, 11), sliced from:
 
 Kim, Youngseob (2022). *MUNICH input data for GMD paper (Le Perreux-sur-Marne)*. Zenodo.
 DOI: [10.5281/zenodo.6167477](https://doi.org/10.5281/zenodo.6167477), file
@@ -16,12 +18,10 @@ DOI: [10.5281/zenodo.6167477](https://doi.org/10.5281/zenodo.6167477), file
 
 Licence: **CC-BY 4.0** (Zenodo record 6167477).
 
-This is the fixture that exercises `read_munich_case` and `drivers_at` against REAL binary
-values on all the required fields at once, including `background_concentration` being
-per-street (not the domain-wide single value the excerpt-based
-`tests/data/street/munich_case_excerpt/` fixture, built before the real archive was fetched,
-first assumed -- `paper/munich/read_case.py`'s `background` reading was corrected once this
-was discovered; see `paper/munich/README.md`).
+This is the fixture that exercises `read_case` and `drivers_at` against REAL binary values on
+all the required fields at once, including `background_concentration`, which MUNICH holds
+per street (`StreetNetworkTransport.cxx:600`, `Background_i.Resize(GridS2D, GridST2D)`), not
+as one domain-wide value.
 
 `munich.cfg`, `munich-data.cfg` and `species.dat` here are authored (not copied from CEREA),
-to the same schema `paper/munich/paris_case.py` writes for the real run.
+to the same MUNICH v2.2 input-file schema as `munich_case_excerpt`'s.

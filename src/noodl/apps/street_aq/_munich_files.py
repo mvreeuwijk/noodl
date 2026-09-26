@@ -3,16 +3,16 @@ tables, the `[section]`/`key: value` config dialect, and the `float32` binaries 
 
 Private to `noodl.apps.street_aq`: `case.py` is the format-neutral public surface
 (`StreetCase`, `read_case`, `write_case`, `drivers_at`); this module knows nothing about
-that dataclass -- it reads and writes plain dicts/arrays, so it stays reusable for a future
-SIRANE module without either importing the other.
+that dataclass -- it reads and writes plain dicts/arrays in the neutral vocabulary
+(`wind_dir_from_deg`, `wind_speed`, `h_abl`, `u_star`, `lmo`, `temperature`; kg/s; kg/m3),
+and every MUNICH name, unit and convention is translated here, in both directions.
 
 The schema here is the one discovered by reading the MUNICH v2.2 source
-(`cerea-lab/munich`; the pinned commit is recorded in `noodl-paper/paper/munich/README.md`)
-and its shipped `processing/photochemistry` example, NOT the full Talos config grammar --
-this module reads and writes exactly what `write_munich_case` produces (one `key: value`
-or `key = value` pair per line, or a bare `key value` override line, inside `[section]`
-blocks), which is also what MUNICH's own `Talos::ConfigStream` accepts (verified in
-`noodl-paper` by running the real `munich` binary on this writer's output).
+(github.com/cerea-lab/munich) and its shipped `processing/photochemistry` example, NOT the
+full Talos config grammar -- this module reads and writes exactly what `write_munich_case`
+produces (one `key: value` or `key = value` pair per line, or a bare `key value` override
+line, inside `[section]` blocks), which is also what MUNICH's own `Talos::ConfigStream`
+accepts (verified by running MUNICH v2.2's own `munich` binary on this writer's output).
 
 MUNICH's own files are in micrograms (emissions in micrograms/s per street, concentrations
 in micrograms/m3 -- matching `StreetNetworkTransport.cxx:2536`'s
@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -35,17 +36,12 @@ EARTH_RADIUS_M = 6371229.0
 """`StreetNetworkTransport.cxx:18`'s `earth_radius` -- the constant MUNICH itself uses to
 turn a street's endpoint lon/lat into metres. Reusing it here means a network written by
 `write_munich_case` and re-projected internally by MUNICH recovers the same `x`, `y` metres
-this reader would compute directly, to sub-millimetre precision on a few-hundred-metre
-network (`read_munich_case` re-derives its own reference latitude from the file's own
-coordinates, not from whatever `lat0_deg` the writer used, but the two differ only by the
-network's own north-south extent divided by the Earth's radius -- a few parts per million on
-a network a few hundred metres across)."""
+this reader would compute directly."""
 
 UG_PER_KG = 1e9
 """MUNICH's native mass unit (micrograms) per kg (noodl's SI unit). `read_munich_case`
 divides emissions/background by this AT READ TIME; `write_munich_case` multiplies by it at
-write time. The one factor is defined once, here, where MUNICH's units are documented, not
-duplicated as a second magic number anywhere else."""
+write time."""
 
 _METEO_FIELDS = {
     "WindSpeed": "wind_speed",
@@ -54,10 +50,20 @@ _METEO_FIELDS = {
     "LMO": "lmo",
     "SurfaceTemperature": "temperature",
 }
-"""MUNICH meteo field name -> the `StreetCase.meteo` key it becomes. `WindDirection` is
-handled separately because it needs the degrees-FROM conversion (`munich_rad_to_deg_from`)."""
+"""MUNICH meteo field name -> the neutral meteo key it becomes. `WindDirection` is handled
+separately because it needs the degrees-FROM conversion (`munich_rad_to_deg_from`)."""
 
 _INTER_SUFFIX = "Inter"
+
+_STREET_COLUMNS = ("id", "begin_inter", "end_inter", "length", "width", "height", "typo")
+"""`street.dat`'s columns, in order -- the layout MUNICH's shipped cases use."""
+
+DEFAULT_LAT0_DEG = 48.85
+DEFAULT_LON0_DEG = 2.35
+"""Where `write_munich_case` anchors a network whose metres are LOCAL (a synthetic case):
+its `(x, y) = (0, 0)` goes to this lon/lat. Only the network's own extent matters to
+MUNICH's geometry, so any mid-latitude anchor works; a case read from MUNICH files carries
+its own projection instead (see `read_munich_case`'s `projection`)."""
 
 
 def munich_rad_to_deg_from(direction_rad) -> np.ndarray:
@@ -80,6 +86,29 @@ def deg_from_to_munich_rad(deg_from) -> np.ndarray:
     """The inverse of `munich_rad_to_deg_from` -- what a MUNICH `WindDirection`/
     `WindDirectionInter` binary field holds (radians TOWARD) for a degrees-FROM direction."""
     return np.radians((np.asarray(deg_from, dtype=np.float64) + 180.0) % 360.0)
+
+
+def parse_date(text: str, *, where: str) -> datetime:
+    """A MUNICH/Talos date string -> `datetime`. Talos reads the DIGITS of the string, in
+    the order year (4), month, day, hour, minute, second (2 each), ignoring separators --
+    `2014-03-16-00`, `2014-03-16_00-00-00` and `2014031600` are the same hour. `where`
+    names the file/section for the error message."""
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) not in (8, 10, 12, 14):
+        raise ValueError(
+            f"read_case: {where} Date_min {text!r} is not a date "
+            f"(expected YYYY-MM-DD[-HH[-MM[-SS]]], any separators)"
+        )
+    parts = [int(digits[:4])] + [int(digits[i:i + 2]) for i in range(4, len(digits), 2)]
+    return datetime(*parts)
+
+
+def format_date(start: datetime) -> str:
+    """`start` as a MUNICH `Date_min`: `YYYY-MM-DD-HH` on the hour (the form verified against
+    the MUNICH v2.2 binary), `YYYY-MM-DD_HH-MM-SS` otherwise."""
+    if start.minute == 0 and start.second == 0 and start.microsecond == 0:
+        return start.strftime("%Y-%m-%d-%H")
+    return start.strftime("%Y-%m-%d_%H-%M-%S")
 
 
 def _parse_cfg(path: Path) -> dict[str, dict[str, str]]:
@@ -129,19 +158,71 @@ def _read_binary_field(path: Path, nt: int, n_columns: int) -> np.ndarray:
     return data.reshape(nt, n_columns)
 
 
+def _section_value(section: Mapping[str, str], key: str, *, where: str) -> str:
+    """`section[key]`, or a `ValueError` naming the section and the missing key."""
+    try:
+        return section[key]
+    except KeyError:
+        raise ValueError(f"read_case: {where} has no {key!r} entry") from None
+
+
 def _resolve_field(
-    section: Mapping[str, str], field: str, *, root: Path, nt: int, n_columns: int
+    section: Mapping[str, str],
+    field: str,
+    *,
+    where: str,
+    root: Path,
+    n_columns: int,
+    nt: int,
+    start: datetime,
+    delta_t: float,
 ) -> np.ndarray:
-    """`section`'s value for `field` (an override line, or the section's generic
-    `Filename` template with `&f` replaced) -- a constant broadcast to `(nt, n_columns)`
-    if it parses as a number (MUNICH's own `InputFiles::Read`/`is_num` shortcut), else a
-    `(nt, n_columns)` float32 binary file read relative to `root`."""
+    """The domain's `(nt, n_columns)` rows of `section`'s `field`, starting at the domain's
+    own `start` and stepping by its `delta_t`.
+
+    The field's value is an override line, or the section's generic `Filename` template with
+    `&f` replaced. A value that parses as a number is a constant broadcast to every row
+    (MUNICH's own `InputFiles::Read`/`is_num` shortcut). Otherwise it names a float32 binary
+    of `(section Nt, n_columns)` records, relative to `root`, that begins at the SECTION's
+    own `Date_min` and steps by the section's own `Delta_t` -- MUNICH locates the domain's
+    rows by date, so the domain's first row is record
+    `(domain Date_min - section Date_min) / Delta_t`. A one-record binary (`Nt: 1`) is
+    broadcast to every row, as a constant is. Anything else must cover the domain exactly
+    on its own time grid: a different `Delta_t`, a start that is not a whole number of steps
+    at or before the domain's, or too few records raises `ValueError` naming the section,
+    the field and both sizes.
+    """
     raw = section.get(field)
     if raw is None:
-        raw = section["Filename"].replace("&f", field)
+        raw = _section_value(section, "Filename", where=where).replace("&f", field)
     if _is_num(raw):
         return np.full((nt, n_columns), float(raw), dtype=np.float64)
-    return _read_binary_field(root / raw, nt, n_columns)
+    n_records = int(float(_section_value(section, "Nt", where=where)))
+    data = _read_binary_field(root / raw, n_records, n_columns)
+    if n_records == 1:
+        return np.repeat(data, nt, axis=0)
+    section_dt = float(_section_value(section, "Delta_t", where=where))
+    if section_dt != delta_t:
+        raise ValueError(
+            f"read_case: {where} field {field!r} has Delta_t {section_dt!r} s, but the "
+            f"domain's is {delta_t!r} s; this reader does not resample"
+        )
+    section_start = parse_date(_section_value(section, "Date_min", where=where), where=where)
+    lag = (start - section_start).total_seconds() / delta_t
+    offset = int(round(lag))
+    if lag < 0 or abs(lag - offset) > 1e-9:
+        raise ValueError(
+            f"read_case: {where} starts at {section_start.isoformat()}, which is not a whole "
+            f"number of {delta_t!r} s steps at or before the domain's start "
+            f"{start.isoformat()}"
+        )
+    if offset + nt > n_records:
+        raise ValueError(
+            f"read_case: {where} field {field!r} has {n_records} records from "
+            f"{section_start.isoformat()}; the domain needs {nt} from record {offset} "
+            f"(i.e. {offset + nt}), and only a 1-record field or a constant is broadcast"
+        )
+    return data[offset:offset + nt]
 
 
 def _read_species_list(path: Path) -> list[str]:
@@ -174,41 +255,48 @@ def _write_binary(path: Path, values: np.ndarray) -> None:
     np.asarray(values, dtype=np.float64).astype("<f4").tofile(path)
 
 
-def _truncate_or_tile(field: np.ndarray, nt: int) -> np.ndarray:
-    """`field[:nt]` if it has at least `nt` rows, else `field` tiled to at least `nt` rows
-    and truncated -- the same look-ahead handling MUNICH's own saver needs on the write side
-    (see `write_munich_case`'s `n_hours + 2`), inverted for reading."""
-    if field.shape[0] >= nt:
-        return field[:nt]
-    reps = -(-nt // field.shape[0])  # ceil division
-    return np.tile(field, (reps, 1))[:nt]
-
-
 # ------------------------------------------------------------------------------- reading
 
 def read_munich_case(root: Path) -> dict:
     """Every array here is already SI (converting MUNICH's own micrograms at read time --
-    see `UG_PER_KG`), and every per-street array is kept PER STREET (not reduced to a
-    network-wide value the way an earlier version of this reader did) -- reduction to
-    whatever a particular `Model` needs is `noodl.apps.street_aq.case.drivers_at`'s job, not
-    the reader's, so the same `StreetCase` can drive a uniform or a per-street model.
+    see `UG_PER_KG`), and every per-street array is kept PER STREET -- reduction to whatever
+    a particular `Model` needs is `noodl.apps.street_aq.case.drivers_at`'s job, not the
+    reader's, so the same `StreetCase` can drive a uniform or a per-street model.
 
-    Returns a plain dict of the fields `StreetCase` takes: `network`, `times`, `street_ids`,
-    `junction_ids` (in `network.junctions` order), `species`, `meteo`, `meteo_junction`,
-    `emissions`, `background`, `native`.
+    Returns a plain dict of the fields `StreetCase` takes: `network`, `times`, `start`,
+    `street_ids`, `junction_ids` (in `network.junctions` order), `species`, `meteo`,
+    `meteo_junction`, `emissions`, `background`, `native` (one dict per `munich.cfg`
+    section, plus `"projection"`: the `lat_ref_deg`/`lat0_deg`/`lon0_deg` this reader
+    projected lon/lat to metres with, so that `write_munich_case` can invert it exactly).
     """
     root = Path(root)
     cfg = _parse_cfg(root / "munich.cfg")
     domain = cfg["domain"]
     nt = int(float(domain["Nt"]))
     delta_t = float(domain["Delta_t"])
+    start = parse_date(domain["Date_min"], where="munich.cfg [domain]")
     times = [i * delta_t for i in range(nt)]
 
     species = _read_species_list(root / domain["Species"])
 
     street_section = cfg["street"]
-    street_rows = _read_semicolon_table(root / street_section["Street"])
-    intersection_rows = _read_semicolon_table(root / street_section["Intersection"])
+    street_path = root / street_section["Street"]
+    intersection_path = root / street_section["Intersection"]
+    street_rows = _read_semicolon_table(street_path)
+    intersection_rows = _read_semicolon_table(intersection_path)
+    for row in street_rows:
+        if len(row) != len(_STREET_COLUMNS):
+            raise ValueError(
+                f"read_case: {street_path.name} row {';'.join(row)!r} has {len(row)} "
+                f"columns; this reader expects the {len(_STREET_COLUMNS)} columns "
+                f"{';'.join(_STREET_COLUMNS)}"
+            )
+    for row in intersection_rows:
+        if len(row) < 3:
+            raise ValueError(
+                f"read_case: {intersection_path.name} row {';'.join(row)!r} has "
+                f"{len(row)} columns; expected at least id;lon;lat"
+            )
 
     coordinates = {row[0]: (float(row[1]), float(row[2])) for row in intersection_rows}
     col_of_intersection_id = {row[0]: i for i, row in enumerate(intersection_rows)}
@@ -243,46 +331,32 @@ def read_munich_case(root: Path) -> dict:
     junction_cols = [col_of_intersection_id[jid] for jid in junction_ids]
     n_intersections = len(intersection_rows)
 
-    data_cfg = _parse_cfg(root / cfg["data"]["Data_description"])
+    data_name = cfg["data"]["Data_description"]
+    data_cfg = _parse_cfg(root / data_name)
 
-    emission_section = data_cfg["emission"]
-    n_emission_t = int(float(emission_section["Nt"]))
-    emissions = np.zeros((nt, n_streets, len(species)), dtype=np.float64)
-    for s, sp in enumerate(species):
-        field = _resolve_field(
-            emission_section, sp, root=root, nt=n_emission_t, n_columns=n_streets
+    def field(section: str, name: str, n_columns: int) -> np.ndarray:
+        return _resolve_field(
+            data_cfg[section], name, where=f"{data_name} [{section}]", root=root,
+            n_columns=n_columns, nt=nt, start=start, delta_t=delta_t,
         )
-        emissions[:, :, s] = _truncate_or_tile(field, nt)
-    emissions /= UG_PER_KG  # MUNICH's micrograms/s -> kg/s.
 
-    background_section = data_cfg["background_concentration"]
-    n_bg_t = int(float(background_section["Nt"]))
+    emissions = np.zeros((nt, n_streets, len(species)), dtype=np.float64)
     background = np.zeros((nt, n_streets, len(species)), dtype=np.float64)
     for s, sp in enumerate(species):
+        emissions[:, :, s] = field("emission", sp, n_streets)
         # Per-street, exactly like emission and meteo (`StreetNetworkTransport.cxx:600`,
-        # `Background_i.Resize(GridS2D, GridST2D)`) -- kept per-street here, not reduced to
-        # a domain mean the way an earlier version of this reader did.
-        field = _resolve_field(
-            background_section, sp, root=root, nt=n_bg_t, n_columns=n_streets
-        )
-        background[:, :, s] = _truncate_or_tile(field, nt)
+        # `Background_i.Resize(GridS2D, GridST2D)`).
+        background[:, :, s] = field("background_concentration", sp, n_streets)
+    emissions /= UG_PER_KG   # MUNICH's micrograms/s -> kg/s.
     background /= UG_PER_KG  # MUNICH's micrograms/m3 -> kg/m3.
 
-    meteo_section = data_cfg["meteo"]
-    n_meteo_t = int(float(meteo_section["Nt"]))
-    fields_available = set(meteo_section.get("Fields", "").split())
+    fields_available = set(data_cfg["meteo"].get("Fields", "").split())
 
     def street_field(name: str) -> np.ndarray:
-        field = _resolve_field(
-            meteo_section, name, root=root, nt=n_meteo_t, n_columns=n_streets
-        )
-        return _truncate_or_tile(field, nt)
+        return field("meteo", name, n_streets)
 
     def junction_field(name: str) -> np.ndarray:
-        field = _resolve_field(
-            meteo_section, name, root=root, nt=n_meteo_t, n_columns=n_intersections
-        )
-        return _truncate_or_tile(field, nt)[:, junction_cols]
+        return field("meteo", name, n_intersections)[:, junction_cols]
 
     meteo: dict[str, np.ndarray] = {}
     if "WindDirection" in fields_available:
@@ -301,12 +375,14 @@ def read_munich_case(root: Path) -> dict:
         if inter_name in fields_available:
             meteo_junction[key] = junction_field(inter_name)
 
-    native = {name: dict(values) for name, values in cfg.items()}
+    native: dict = {name: dict(values) for name, values in cfg.items()}
+    native["projection"] = {"lat_ref_deg": lat0, "lat0_deg": 0.0, "lon0_deg": 0.0}
 
     return dict(
-        network=network, times=times, street_ids=street_ids, junction_ids=junction_ids,
-        species=species, meteo=meteo, meteo_junction=meteo_junction,
-        emissions=emissions, background=background, native=native,
+        network=network, times=times, start=start, street_ids=street_ids,
+        junction_ids=junction_ids, species=species, meteo=meteo,
+        meteo_junction=meteo_junction, emissions=emissions, background=background,
+        native=native,
     )
 
 
@@ -335,96 +411,127 @@ _DEFAULT_STREET_OPTIONS: dict[str, str] = {
 equivalents of `canyon_wind="exponential"`, `exchange="schulte"`, `roof_wind_form="sirane"`,
 `direction_averaging="munich"` (`With_horizontal_fluctuation`) and
 `With_stationary_hypothesis: yes` (each hour's steady street balance by fixed-point
-iteration, not MUNICH's default unstable explicit integrator -- see
-`noodl-paper/paper/munich/README.md`, "MUNICH's time integration") -- plus the keys MUNICH
-v2.2 requires regardless of the options actually exercised (`Compute_Macdonald_from`,
-`Deposition_wind_profile`, `Sub_delta_t_min`, `Building_density`, `With_tree_aerodynamic`,
-`With_tree_deposition`; the shipped example predates them and was never run to notice). Any
-key here may be overridden through `write_munich_case`'s own `options` argument."""
+iteration, rather than MUNICH's default explicit integrator, which is unstable at hour-long
+steps on short streets) -- plus the keys MUNICH v2.2 requires regardless of the options
+actually exercised (`Compute_Macdonald_from`, `Deposition_wind_profile`, `Sub_delta_t_min`,
+`Building_density`, `With_tree_aerodynamic`, `With_tree_deposition`; the shipped example
+predates them). A case read from MUNICH files writes its own `[street]` section back over
+these; `write_munich_case`'s `options` override both."""
+
+_FILE_KEYS = ("Street", "Intersection")
+"""`[street]` keys naming files this writer itself writes -- never taken from a read case."""
 
 
-def _broadcast_to_hours_columns(value, n_hours: int, n_columns: int) -> np.ndarray:
-    """A meteo/emission/background array in `(n_hours, n_columns)` layout: a `(n_hours,)`
-    array gains a column axis (the same value in every column); a `(n_hours, n_columns)`
-    array is passed through, checked. `n_columns` is `len(network.streets)` for a
-    street-indexed field, or `len(network.junctions)` for one of MUNICH's `...Inter`
-    (per-intersection) fields -- the caller picks."""
-    arr = np.asarray(value, dtype=np.float64)
-    if arr.ndim == 1:
-        if arr.shape[0] != n_hours:
-            raise ValueError(
-                f"write_case: a 1-D array must have length n_hours={n_hours}, got shape "
-                f"{arr.shape}"
-            )
-        return np.tile(arr.reshape(n_hours, 1), (1, n_columns))
-    if arr.ndim == 2:
-        if arr.shape != (n_hours, n_columns):
-            raise ValueError(
-                f"write_case: a 2-D array must have shape (n_hours, n_columns) = "
-                f"({n_hours}, {n_columns}), got {arr.shape}"
-            )
-        return arr
-    raise ValueError(f"write_case: an array driver must be 1-D or 2-D, got ndim={arr.ndim}")
-
-
-def _lonlat(x_m: float, y_m: float, *, lat0_deg: float, lon0_deg: float) -> tuple[float, float]:
-    """The inverse of `read_munich_case`'s projection -- see `EARTH_RADIUS_M`."""
-    lat0_rad = math.radians(lat0_deg)
-    lon = lon0_deg + math.degrees(x_m / (EARTH_RADIUS_M * math.cos(lat0_rad)))
+def _lonlat(x_m: float, y_m: float, *, lat_ref_deg: float, lat0_deg: float,
+            lon0_deg: float) -> tuple[float, float]:
+    """The inverse of the equirectangular projection `x = R cos(lat_ref) (lon - lon0)`,
+    `y = R (lat - lat0)` -- `read_munich_case`'s own with `lat0 = lon0 = 0`."""
+    lon = lon0_deg + math.degrees(x_m / (EARTH_RADIUS_M * math.cos(math.radians(lat_ref_deg))))
     lat = lat0_deg + math.degrees(y_m / EARTH_RADIUS_M)
     return lon, lat
 
 
+def _is_constant(arr: np.ndarray) -> bool:
+    return bool(np.all(arr == arr.flat[0]))
+
+
 def write_munich_case(
     out_dir: Path,
-    network: StreetNetwork,
     *,
+    network: StreetNetwork,
+    times: Sequence[float],
+    start: datetime,
+    junction_ids: Sequence[str],
     species: Sequence[str],
-    date_min: str,
-    n_hours: int,
-    meteo: Mapping[str, float | np.ndarray],
-    emissions_kg_s: float | np.ndarray,
-    background_kg_m3: float | np.ndarray,
-    options: Mapping[str, str] | None = None,
-    lat0_deg: float = 48.85,
-    lon0_deg: float = 2.35,
+    meteo: Mapping[str, np.ndarray],
+    meteo_junction: Mapping[str, np.ndarray],
+    emissions: np.ndarray,
+    background: np.ndarray,
+    native: Mapping[str, Mapping] | None = None,
+    options: Mapping[str, object] | None = None,
 ) -> Path:
-    """Writes a complete MUNICH case for `network`: `munich.cfg`, `munich-data.cfg`,
-    `munich-saver.cfg`, `species.dat`, `street.dat`, `intersection.dat`, and whichever
-    binaries the array-valued `meteo`/`emissions_kg_s`/`background_kg_m3` need. Returns
-    `out_dir`.
+    """Writes a complete MUNICH case: `munich.cfg`, `munich-data.cfg`, `munich-saver.cfg`,
+    `species.dat`, `street.dat`, `intersection.dat`, and whichever binaries the arrays need.
+    Returns `out_dir`.
 
-    `meteo` keys are MUNICH's own field names (`WindDirection`, `WindSpeed`, `PBLH`, `UST`,
-    `LMO`, `SurfaceTemperature`, or their `...Inter` per-intersection counterparts); a scalar
-    value is written as an `is_num` constant override, an array as a `(n_hours,)` (broadcast
-    across columns) or `(n_hours, n_columns)` binary -- `n_columns = len(network.streets)`
-    for a plain field, `len(network.junctions)` for an `...Inter` field, in `network.junctions`
-    order (the same order `intersection.dat`'s rows are written in, just above). `WindDirection`
-    is MUNICH's own convention (radians TOWARD, clockwise from north) -- this writer does no
-    conversion, so a caller wanting a degrees-FROM direction must convert it first with
-    `case.deg_from_to_munich_rad`.
+    Every input is in the neutral vocabulary `StreetCase` uses: `meteo` holds
+    `(n_hours, n_streets)` arrays under `wind_dir_from_deg`, `wind_speed`, `h_abl`,
+    `u_star`, `lmo`, `temperature`; `meteo_junction` the same keys `(n_hours, n_junctions)`
+    in `network.junctions` order (written as MUNICH's `...Inter` fields, in the order
+    `intersection.dat`'s rows are written); `emissions` `(n_hours, n_streets, n_species)`
+    kg/s; `background` the same shape in kg/m3. The direction is converted to MUNICH's
+    radians TOWARD, and masses to micrograms, here. An array holding one value throughout
+    is written as an `is_num` constant; any other as a float32 binary.
 
-    Every array-valued meteo field is written with `n_hours + 2` look-ahead rows (the last
-    row repeated): MUNICH's saver reads up to two steps past the run's last hour to finish
-    its hourly averaging (`noodl-paper/paper/munich/README.md`, "The real Paris run" --
-    the idealised case only needed one look-ahead row, but the real Paris run, with every
-    meteo field genuinely time-varying, needed two; this writer always writes two, the safe
-    superset). `emissions_kg_s`/`background_kg_m3` need no look-ahead (only meteo does).
+    `junction_ids` (in `network.junctions` order) become `intersection.dat`'s ids when every
+    one is a distinct whole number, as MUNICH's are (so a read case writes back with its own
+    ids); otherwise the junctions are numbered 1, 2, ... in that order.
 
-    `options` overrides the default `[street]` section (`_DEFAULT_STREET_OPTIONS` --
-    MUNICH's equivalents of `canyon_wind="exponential"`, `exchange="schulte"`,
-    `roof_wind_form="sirane"`, `direction_averaging="munich"`, and
-    `With_stationary_hypothesis: yes`).
+    `times` must be evenly spaced (it sets `Delta_t`; one time step writes 3600 s); `start`
+    becomes every section's `Date_min`.
+
+    Every meteo binary is written with 2 look-ahead records (the last row repeated):
+    MUNICH's saver reads up to two steps past the run's last hour to finish its hourly
+    averaging, when every meteo field varies in time. Emission and background need none.
+
+    `native`, when given (a case read from MUNICH files), supplies its own `[street]`
+    section (over `_DEFAULT_STREET_OPTIONS`, file names excepted) and its own `projection`.
+    `options` overrides any `[street]` key, and two further keys set the geographic anchor
+    of a network in local metres: `lat0_deg`, `lon0_deg` (the lon/lat of `(x, y) = (0, 0)`;
+    default `DEFAULT_LAT0_DEG`, `DEFAULT_LON0_DEG`).
     """
     out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "results").mkdir(exist_ok=True)
+    native = dict(native or {})
+    options = dict(options or {})
     species = list(species)
+    n_hours = len(times)
     n_streets = len(network.streets)
-
     junctions = network.junctions
     n_junctions = len(junctions)
-    junction_id = {name: str(i + 1) for i, name in enumerate(junctions)}
+
+    def check_shape(label: str, value, shape: tuple[int, ...]) -> None:
+        if np.shape(value) != shape:
+            raise ValueError(
+                f"write_case: {label} must have shape {shape}, got {np.shape(value)}"
+            )
+
+    for key, value in meteo.items():
+        check_shape(f"meteo[{key!r}]", value, (n_hours, n_streets))
+    for key, value in meteo_junction.items():
+        check_shape(f"meteo_junction[{key!r}]", value, (n_hours, n_junctions))
+    check_shape("emissions", emissions, (n_hours, n_streets, len(species)))
+    check_shape("background", background, (n_hours, n_streets, len(species)))
+
+    if n_hours > 1:
+        steps = np.diff(np.asarray(times, dtype=np.float64))
+        if not np.allclose(steps, steps[0], rtol=0, atol=1e-9) or steps[0] <= 0:
+            raise ValueError(
+                f"write_case: MUNICH needs evenly spaced, increasing times (one Delta_t); "
+                f"got steps {steps.tolist()}"
+            )
+        delta_t = float(steps[0])
+    else:
+        delta_t = 3600.0
+
+    projection = dict(native.get("projection", {}))
+    if "lat0_deg" in options or "lon0_deg" in options or not projection:
+        lat0 = float(options.pop("lat0_deg", DEFAULT_LAT0_DEG))
+        lon0 = float(options.pop("lon0_deg", DEFAULT_LON0_DEG))
+        projection = {"lat_ref_deg": lat0, "lat0_deg": lat0, "lon0_deg": lon0}
+
+    street_options = dict(_DEFAULT_STREET_OPTIONS)
+    street_options.update({k: str(v) for k, v in native.get("street", {}).items()
+                           if k not in _FILE_KEYS})
+    street_options.update({k: str(v) for k, v in options.items()})
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "results").mkdir(exist_ok=True)
+
+    ids = [str(j) for j in junction_ids]
+    if not (len(ids) == n_junctions and all(j.isdigit() for j in ids)
+            and len(set(ids)) == n_junctions):
+        ids = [str(i + 1) for i in range(n_junctions)]
+    junction_id = dict(zip(junctions, ids, strict=True))
     street_touches: dict[str, list[str]] = {name: [] for name in junctions}
     for street in network.streets:
         street_touches[street.u].append(street.name)
@@ -432,13 +539,13 @@ def write_munich_case(
 
     intersection_lines = ["#id;lon;lat;number_of_streets;1st_street_id;2nd_street_id;..."]
     for name in junctions:
-        lon, lat = _lonlat(network.x[name], network.y[name], lat0_deg=lat0_deg, lon0_deg=lon0_deg)
+        lon, lat = _lonlat(network.x[name], network.y[name], **projection)
         touching = street_touches[name]
         row = [junction_id[name], repr(lon), repr(lat), str(len(touching)), *touching]
         intersection_lines.append(";".join(row) + ";")
     (out_dir / "intersection.dat").write_text("\n".join(intersection_lines) + "\n")
 
-    street_lines = ["#id;begin_inter;end_inter;length;width;height;typo"]
+    street_lines = ["#" + ";".join(_STREET_COLUMNS)]
     for street in network.streets:
         row = [
             street.name, junction_id[street.u], junction_id[street.v],
@@ -467,10 +574,8 @@ def write_munich_case(
     species_lines += species_section("diffusivity", "0.14")
     (out_dir / "species.dat").write_text("\n".join(species_lines) + "\n")
 
-    street_options = dict(_DEFAULT_STREET_OPTIONS)
-    if options:
-        street_options.update({k: str(v) for k, v in options.items()})
     street_block = "\n".join(f"{k}: {v}" for k, v in street_options.items())
+    date_min = format_date(start)
 
     munich_cfg = f"""\
 [display]
@@ -482,7 +587,7 @@ Show_configuration: yes
 [domain]
 
 Date_min: {date_min}
-Delta_t: 3600.0
+Delta_t: {delta_t!r}
 Nt: {n_hours}
 Species: species.dat
 
@@ -530,46 +635,49 @@ Text_file: no
 """
     (out_dir / "munich-saver.cfg").write_text(saver_cfg)
 
-    def constant_or_array(value) -> tuple[np.ndarray | None, float | None]:
-        arr = np.asarray(value, dtype=np.float64)
-        if arr.ndim == 0:
-            return None, float(arr)
-        return _broadcast_to_hours_columns(arr, n_hours, n_streets), None
+    def section_head(title: str, nt: int, fields: Sequence[str]) -> list[str]:
+        return [f"[{title}]", "", f"Date_min: {date_min}", f"Delta_t: {delta_t!r}",
+                f"Nt: {nt}", f"Fields: {' '.join(fields)}", "Filename: 0.0"]
 
-    def mass_section(title: str, value, *, filename: str) -> list[str]:
-        arr, const = constant_or_array(value)
-        lines = [
-            f"[{title}]", "", f"Date_min: {date_min}", "Delta_t: 3600.0", f"Nt: {n_hours}",
-            f"Fields: {' '.join(species)}",
-        ]
-        if const is not None:
-            lines.append(f"Filename: {const * UG_PER_KG!r}")
-        else:
-            lines.append("Filename: 0.0")
-            _write_binary(out_dir / filename, arr * UG_PER_KG)
-            lines += [f"{sp} {filename}" for sp in species]
+    def mass_section(title: str, values: np.ndarray, stem: str) -> list[str]:
+        lines = section_head(title, n_hours, species)
+        for s, sp in enumerate(species):
+            arr = np.asarray(values[:, :, s], dtype=np.float64) * UG_PER_KG
+            if _is_constant(arr):
+                lines.append(f"{sp} {float(arr.flat[0])!r}")
+            else:
+                filename = f"{stem}_{sp}.bin"
+                _write_binary(out_dir / filename, arr)
+                lines.append(f"{sp} {filename}")
         return lines
 
-    data_lines = mass_section("emission", emissions_kg_s, filename="emission.bin")
-    data_lines += [""] + mass_section(
-        "background_concentration", background_kg_m3, filename="background.bin"
-    )
+    data_lines = mass_section("emission", emissions, "emission")
+    data_lines += [""] + mass_section("background_concentration", background, "background")
+
+    to_munich = {key: name for name, key in _METEO_FIELDS.items()}
+    to_munich["wind_dir_from_deg"] = "WindDirection"
+    entries: list[tuple[str, np.ndarray]] = []
+    for table, suffix in ((meteo, ""), (meteo_junction, _INTER_SUFFIX)):
+        for key, value in table.items():
+            if key not in to_munich:
+                raise ValueError(
+                    f"write_case: meteo key {key!r} has no MUNICH field; expected one of "
+                    f"{sorted(to_munich)}"
+                )
+            arr = np.asarray(value, dtype=np.float64)
+            if key == "wind_dir_from_deg":
+                arr = deg_from_to_munich_rad(arr)
+            entries.append((to_munich[key] + suffix, arr))
 
     n_meteo_rows = n_hours + 2
-    meteo_lines = [
-        "", "[meteo]", "", f"Date_min: {date_min}", "Delta_t: 3600.0", f"Nt: {n_meteo_rows}",
-        f"Fields: {' '.join(meteo.keys())}", "Filename: 0.0",
-    ]
-    for key, value in meteo.items():
-        arr = np.asarray(value, dtype=np.float64)
-        if arr.ndim == 0:
-            meteo_lines.append(f"{key} {float(arr)!r}")
+    meteo_lines = [""] + section_head("meteo", n_meteo_rows, [name for name, _ in entries])
+    for name, arr in entries:
+        if _is_constant(arr):
+            meteo_lines.append(f"{name} {float(arr.flat[0])!r}")
         else:
-            n_columns = n_junctions if key.endswith(_INTER_SUFFIX) else n_streets
-            full = _broadcast_to_hours_columns(arr, n_hours, n_columns)
-            pad = np.tile(full[-1:], (n_meteo_rows - n_hours, 1))
-            _write_binary(out_dir / f"meteo_{key}.bin", np.concatenate([full, pad]))
-            meteo_lines.append(f"{key} meteo_{key}.bin")
+            pad = np.repeat(arr[-1:], n_meteo_rows - n_hours, axis=0)
+            _write_binary(out_dir / f"meteo_{name}.bin", np.concatenate([arr, pad]))
+            meteo_lines.append(f"{name} meteo_{name}.bin")
     data_lines += meteo_lines
     (out_dir / "munich-data.cfg").write_text("\n".join(data_lines) + "\n")
 
