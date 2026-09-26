@@ -24,19 +24,41 @@ Generated from the package's own docstrings. For the ideas behind these objects,
     options:
       members: [Element]
 
+Elements are grouped below by the physics they express, as in
+[Airflow elements](applications/building_physics.md#airflow-elements).
+
+### Power-law openings
+
 ::: noodl.elements.powerlaw
 ::: noodl.elements.powerlaw_mbl
-::: noodl.elements.quadratic
-::: noodl.elements.conductance
-::: noodl.elements.fixed
-::: noodl.elements.fan
-::: noodl.elements.duct
-::: noodl.elements.damper
+
+### Density upwinding
+
 ::: noodl.elements.upstream
+
+### Quadratic and tabulated laws
+
+::: noodl.elements.quadratic
+::: noodl.elements.table
+
+### Large openings and doors
+
 ::: noodl.elements.door
 ::: noodl.elements.door_discretized
-::: noodl.elements.table
+
+### Ducts, dampers, fans, fixed flows and conductances
+
+::: noodl.elements.duct
+::: noodl.elements.damper
+::: noodl.elements.fan
+::: noodl.elements.fixed
+::: noodl.elements.conductance
+
+### Air properties
+
 ::: noodl.elements.media
+
+### Drives
 
 ::: noodl.drives
     options:

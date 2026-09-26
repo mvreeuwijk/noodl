@@ -158,9 +158,9 @@ unregistered conversion is never silently treated as identity.
 
 `transport_boundary_inflow(...)` returns the net mass inflow at a boundary node of a transport
 layer, computed from a single state snapshot. `Model.ports()` cannot supply this: it reports
-`boundary_flows` for *potential* layers only. The coupler itself no longer calls this to build
-the two-way feedback (see "The fixed point" below) — it is kept as a public helper and used in
-tests as an independent hand reconstruction.
+`boundary_flows` for *potential* layers only. The coupler builds the two-way feedback through
+`differentiate_fixed_point` instead (see "The fixed point" below); `transport_boundary_inflow`
+is kept as a public helper and used in tests as an independent hand reconstruction.
 
 ## Unit conversions
 
@@ -289,7 +289,7 @@ way** — that is a property of the pass itself, not of which solver ran inside 
   `theta_w` → `theta_w` through the wind-direction conversion.
 - **Multi-rate:** `substeps={"building": 60}` — the street steps once per hour, the building
   sixty times at 60 s, with the glue-derived boundary held constant across the inner steps. That
-  is an accuracy simplification, not a conservation one, and it is now **conservative**
+  is an accuracy simplification, not a conservation one, and it is **conservative**
   regardless: whatever the building actually integrates across those sixty sub-steps — with the
   boundary held constant or interpolated — is exactly the amount reported back and added to the
   street's sources, so holding it constant cannot leak or fabricate mass, only make the

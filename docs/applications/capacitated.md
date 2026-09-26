@@ -140,19 +140,14 @@ sensitivity.
 
 ### `"projection"` — real cross-gradients between competing edges
 
-This mode exists because of a bug that was found, not anticipated.
-
 Smooth mode's proportional-share formula is
 $h_{\text{free}} \cdot \text{pref}_i / \sum_k \text{pref}_k$. That depends only on the preference
 weights and the total headroom — **never on any individual competitor's request**. So
 $\partial f_i / \partial r_j = 0$ for a competing edge $j$, provably and not approximately. It
-was confirmed empirically too: byte-identical zero cross-terms across 200 random trials.
-
-The first implementation of projection mode reused that same formula, and therefore delivered
-none of the mode's stated purpose — *gradients flowing through which arc absorbs a constraint*.
-No amount of wrapping could have fixed it.
-
-The fix routes the sharing site through a real coupled QP: minimise
+is confirmed empirically too: byte-identical zero cross-terms across 200 random trials. That
+formula cannot deliver a genuine cross-gradient — *gradients flowing through which arc absorbs a
+constraint* — however it is wrapped, which is why projection mode routes the sharing site through
+a real coupled QP instead: minimise
 $\sum_i \text{pref}_i (f_i - r_i)^2$ subject to $0 \le f_i \le \text{avail}_i$ per edge **and**
 $\sum_i f_i \le h_{\text{free}}$ jointly. Its KKT stationarity reduces to
 

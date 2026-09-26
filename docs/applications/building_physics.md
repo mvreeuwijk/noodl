@@ -316,12 +316,11 @@ fixture directory.
 | Three-zone project, steady flows | rel 1e-3, abs 1e-6 | holds |
 | Three-zone project, transient concentrations, 24 steps at 300 s | rel 1e-3 | **6.5e-6** |
 
-The magnitude row has history worth knowing. It was previously an `xfail` at a measured
-**1.7e-2** relative error — 17x over tolerance — because the reader froze orifice coefficients at
-reference density. Adding the upstream-density correction brought it to 4.1e-5, about 25x inside
-tolerance. The residual-flatness test exists to guard the fix: the old error scaled with $\Delta
-T$ (1.72e-2 at 20 K, 8.61e-3 at 10 K, 0 at 0 K), so a re-introduced density bug would show up as
-a residual proportional to $\Delta T$ even if the absolute number stayed small.
+The magnitude row's accuracy relies on the reader correcting orifice coefficients for upstream
+density rather than freezing them at reference density. The residual-flatness test exists to
+guard this: a density-related regression would show up as a residual that grows with $\Delta T$,
+because the size of the density correction scales with the temperature difference across the
+sweep, even if the absolute error stayed small.
 
 The path-flow sign convention was verified independently against two cases rather than assumed,
 since `contamxpy`'s own documentation does not pin the sign of `getPathFlow`.
