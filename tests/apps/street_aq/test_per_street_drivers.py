@@ -253,3 +253,62 @@ def test_bad_options_are_named():
         build_model(net, meteo="per_junction")
     with pytest.raises(ValueError, match="background"):
         build_model(net, background="gridded")
+
+
+def test_junction_means_stay_finite_when_street_zero_is_degenerate():
+    """Padded junction slots index street 0; a degenerate street-0 value (lmo exactly 0,
+    or a pair of exactly opposing directions) must neither poison the junctions that do
+    not touch street 0 nor give a NaN gradient."""
+    net, _ = munich_idealised()
+    per, _, _ = build_model(net, meteo="per_street", **MUNICH)
+    flows = per.closures[0]
+    n = len(net.streets)
+    d = _expand(_uniform_drivers(per), n)
+    lmo = torch.full((n,), 1e6, dtype=DT)
+    lmo[0] = 0.0
+    lmo.requires_grad_(True)
+    j = flows.junction_values(dict(d, lmo=lmo))["lmo"]
+    assert torch.isfinite(j).all()
+    untouched = [k for k in range(len(net.junctions))
+                 if 0 not in flows.slot_street[k][flows.slot_active[k]].tolist()]
+    assert untouched
+    torch.testing.assert_close(j[untouched], torch.full((len(untouched),), 1e6, dtype=DT),
+                               rtol=1e-12, atol=0)
+    j.sum().backward()
+    assert torch.isfinite(lmo.grad).all()
+    # Streets whose reciprocals cancel exactly at a junction: 1/L sums to zero.
+    lmo2 = torch.full((n,), 1e6, dtype=DT)
+    k_a = net.junctions.index("A")
+    a_streets = flows.slot_street[k_a][flows.slot_active[k_a]].tolist()
+    assert len(a_streets) == 4                    # the four-way hub of munich_idealised
+    lmo2[a_streets] = torch.tensor([50.0, -50.0, 200.0, -200.0], dtype=DT)
+    lmo2.requires_grad_(True)
+    j2 = flows.junction_values(dict(d, lmo=lmo2))["lmo"]
+    assert torch.isfinite(j2).all() and float(j2[k_a].detach()) > 1e100     # neutral, not NaN
+    j2.sum().backward()
+    assert torch.isfinite(lmo2.grad).all()
+    # Exactly opposing directions: sin and cos sums both vanish (atan2 at the origin).
+    theta = torch.zeros(n, dtype=DT)
+    theta[a_streets] = torch.tensor([0.0, math.pi, math.pi / 2, 3 * math.pi / 2], dtype=DT)
+    theta.requires_grad_(True)
+    t = flows.junction_values(dict(d, theta_w=theta))["theta_w"]
+    assert torch.isfinite(t).all()
+    t.sum().backward()
+    assert torch.isfinite(theta.grad).all()
+
+
+def test_safe_atan2_and_reciprocal_have_finite_gradients_at_their_singular_points():
+    from noodl.apps.street_aq.routing import _safe_atan2, _safe_reciprocal
+    s = torch.zeros(2, dtype=DT, requires_grad=True)
+    c = torch.tensor([0.0, 2.0], dtype=DT, requires_grad=True)
+    out = _safe_atan2(s, c)
+    assert out.detach().tolist() == [0.0, 0.0]   # torch.atan2 itself gives a 0 gradient here;
+                                                 # the guard keeps it so on every backend
+    out.sum().backward()
+    assert torch.isfinite(s.grad).all() and torch.isfinite(c.grad).all()
+    x = torch.tensor([0.0, -0.0, 4.0, -1e-320], dtype=DT, requires_grad=True)
+    r = _safe_reciprocal(x)
+    r_ = r.detach()
+    assert torch.isfinite(r_).all() and float(r_[2]) == 0.25 and float(r_[3]) < 0
+    r.sum().backward()
+    assert torch.isfinite(x.grad).all()

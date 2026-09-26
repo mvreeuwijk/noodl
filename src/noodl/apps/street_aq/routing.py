@@ -41,6 +41,29 @@ _FLOW_KINDS = ("route", "vent", "exchange")
 """The edge kinds `StreetFlows` writes its concatenated `q` in, and the order
 `build_model` must build the transport layer with. Checked at construction."""
 
+_SAFE_RECIPROCAL = 1e-300
+"""The smallest magnitude `_safe_reciprocal` divides by: `1 / 1e-300` is finite, and even a
+junction's worth of such terms summed stays far below the float64 maximum."""
+
+
+def _safe_reciprocal(x: Tensor) -> Tensor:
+    """`1 / x` with `|x| < _SAFE_RECIPROCAL` replaced by `+-_SAFE_RECIPROCAL` keeping `x`'s
+    sign (`+` at an exact zero): finite forward value and finite gradient everywhere. Equal
+    to `1 / x` bit for bit wherever `|x| >= _SAFE_RECIPROCAL`."""
+    small = x.abs() < _SAFE_RECIPROCAL
+    signed = torch.where(x < 0, torch.full_like(x, -_SAFE_RECIPROCAL),
+                         torch.full_like(x, _SAFE_RECIPROCAL))
+    return 1.0 / torch.where(small, signed, x)
+
+
+def _safe_atan2(s: Tensor, c: Tensor) -> Tensor:
+    """`atan2(s, c)`, with the origin `(0, 0)` -- where the forward value is already 0 but
+    the gradient is `0 / 0` -- replaced by the safe input `(0, 1)`: same forward value,
+    zero gradient there instead of NaN."""
+    origin = (s == 0) & (c == 0)
+    return torch.atan2(torch.where(origin, torch.zeros_like(s), s),
+                       torch.where(origin, torch.ones_like(c), c))
+
 
 def sigma_theta_munich(sigma_v: Tensor, u_ref: Tensor) -> Tensor:
     """`sigma_theta = min(sigma_v / U, 10 deg)` (SRC `:3567`; Blackadar 1997, Soulhac 2009).
@@ -510,17 +533,27 @@ class StreetFlows:
 
     def _street_mean(self, values: Tensor, how: str) -> Tensor:
         """Per-street `(..., n_streets)` -> per-junction `(..., n_junctions)`, the mean over
-        the streets meeting at each junction."""
+        the streets meeting at each junction.
+
+        Padded (inactive) slots index street 0, so every non-linear step masks them BEFORE
+        it is applied (a `* active` afterwards would turn a non-finite street-0 value into
+        `inf * 0 = NaN`). The three singular points -- `1/L` at `L = 0`, `1/mean(1/L)` where
+        the reciprocals cancel, and `atan2` at the origin (exactly opposing directions) --
+        go through safe inputs selected by `torch.where`, so neither the forward value nor
+        the gradient is ever NaN; the forward value moves only where it would otherwise be
+        infinite (to a finite magnitude of at least `1 / _SAFE_RECIPROCAL`, the same side of
+        every stability threshold) or undefined."""
         per_slot = values[..., self.slot_street]                     # (..., n_j, d)
         active = self.slot_active.to(values.dtype)
         count = active.sum(-1)
         if how == "circular":
             s = (torch.sin(per_slot) * active).sum(-1)
             c = (torch.cos(per_slot) * active).sum(-1)
-            return torch.remainder(torch.atan2(s, c), TWO_PI)
+            return torch.remainder(_safe_atan2(s, c), TWO_PI)
         if how == "reciprocal":
-            inverse = ((1.0 / per_slot) * active).sum(-1) / count
-            return 1.0 / inverse
+            reciprocal = torch.where(self.slot_active, _safe_reciprocal(per_slot),
+                                     torch.zeros_like(per_slot))
+            return _safe_reciprocal(reciprocal.sum(-1) / count)
         return (per_slot * active).sum(-1) / count
 
     def junction_values(self, drivers) -> dict[str, Tensor | None]:
