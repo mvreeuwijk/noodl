@@ -1,4 +1,4 @@
-"""EPANET 2.2 parity for `noodl.apps.water` (verification rows D1-D8 and the golden case G2).
+"""EPANET 2.2 parity for `noodl.apps.water`.
 
 The reference implementation is the REAL EPANET 2.2 engine: `wntr` 1.5.0 bundles `epanet22.dll` and
 `wntr.sim.EpanetSimulator` drives it. `EpanetSimulator` reads EPANET's binary output, whose
@@ -71,9 +71,9 @@ def _worst_flows(model, state, flows):
     )
 
 
-# --------------------------------------------------------------------------- D1
-def test_d1_two_loop_heads_and_flows(tmp_path):
-    """Row D1, 1e-6 relative on heads and flows.
+# --------------------------------------------------------------------------- two-loop
+def test_two_loop_heads_and_flows(tmp_path):
+    """1e-6 relative on heads and flows.
 
     MEASURED: heads 4.361e-7, flows 8.090e-8 -- the same pair an independent
     from-scratch Newton/GGA reference (iterated to a 1e-16 residual) reaches, so the
@@ -91,7 +91,7 @@ def test_d1_two_loop_heads_and_flows(tmp_path):
     assert worst_q < 1e-6, worst_q
 
 
-def test_d1_reservoir_head_is_held_exactly(tmp_path):
+def test_reservoir_head_is_held_exactly(tmp_path):
     path, _ = _epanet(tmp_path, "twoloop_si.inp")
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net)
@@ -99,10 +99,10 @@ def test_d1_reservoir_head_is_held_exactly(tmp_path):
     assert float(final["water.phi"][model.node_names.index("R1")]) == 50.0
 
 
-def test_d1_nodal_continuity_is_exact(tmp_path):
+def test_nodal_continuity_is_exact(tmp_path):
     """This model's own flows satisfy continuity to machine precision, which is why the
-    D1/D2 residuals above are attributable to the reference: EPANET's reported flows miss
-    continuity at Net1's node 13 by 4.5e-10 m3/s (measured)."""
+    two-loop and Net1 residuals above are attributable to the reference: EPANET's reported
+    flows miss continuity at Net1's node 13 by 4.5e-10 m3/s (measured)."""
     path, _ = _epanet(tmp_path, "twoloop_si.inp")
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net)
@@ -117,9 +117,9 @@ def test_d1_nodal_continuity_is_exact(tmp_path):
     assert float(residual.abs().max()) < 1e-13
 
 
-# --------------------------------------------------------------------------- D2
-def test_d2_net1_single_period(tmp_path):
-    """Row D2: heads 1e-6, FLOWS 1e-5, pump head gain 1e-6.
+# --------------------------------------------------------------------------- Net1 single period
+def test_net1_single_period(tmp_path):
+    """Heads 1e-6, FLOWS 1e-5, pump head gain 1e-6.
 
     MEASURED: heads 7.058e-8, flows 2.868e-6 on pipe 113 (0.00185 m3/s, the smallest in the
     network), pump head gain 1.189e-7. The flow residual is the reference's: EPANET's own
@@ -146,8 +146,8 @@ def test_d2_net1_single_period(tmp_path):
     assert abs(gain - expected_gain) / abs(expected_gain) < 1e-6
 
 
-def test_d2_the_reader_converts_net1_gpm_and_feet(tmp_path):
-    """The unit conversion D2 rests on, pinned field by field."""
+def test_the_reader_converts_net1_gpm_and_feet(tmp_path):
+    """The unit conversion the Net1 single-period check rests on, pinned field by field."""
     path, _ = _epanet(tmp_path, "Net1.inp", duration=0)
     net = read_epanet_inp(path)
     assert net.notes["flow_units"] == "GPM"
@@ -174,7 +174,7 @@ def test_d2_the_reader_converts_net1_gpm_and_feet(tmp_path):
     )
 
 
-# --------------------------------------------------------------------------- D3
+# --------------------------------------------------------------------------- Net1 extended period
 def _pattern_factor(net, seconds):
     """EPANET's demand pattern at `seconds`: `floor(t / pattern step) mod len`."""
     if net.demand_pattern is None or net.demand_pattern not in net.patterns:
@@ -218,8 +218,8 @@ def _extended_period(net, model, state, drivers):
     return levels, n_sub
 
 
-def test_d3_net1_extended_period_tank_level(tmp_path):
-    """Row D3, 2e-4 m ABSOLUTE per reported step.
+def test_net1_extended_period_tank_level(tmp_path):
+    """2e-4 m ABSOLUTE per reported step.
 
     MEASURED: 8.181e-5 m worst over the 25 reported steps, with 26 hydraulic sub-steps for
     24 report steps. A FIXED 1 h step instead diverges by 2.07 m, because EPANET shortens
@@ -242,7 +242,7 @@ def test_d3_net1_extended_period_tank_level(tmp_path):
     assert n_sub <= 2 * len(reference)
 
 
-def test_d3_the_pump_switches_within_one_reported_step(tmp_path):
+def test_the_pump_switches_within_one_reported_step(tmp_path):
     """The switch TIME must agree, which is what the event shortening buys."""
     path, results = _epanet(tmp_path, "Net1.inp")
     net = read_epanet_inp(path)
@@ -254,7 +254,7 @@ def test_d3_the_pump_switches_within_one_reported_step(tmp_path):
     assert abs(mine_peak - their_peak) <= 1
 
 
-def test_d3_event_step_returns_the_nominal_step_when_nothing_is_crossed(tmp_path):
+def test_event_step_returns_the_nominal_step_when_nothing_is_crossed(tmp_path):
     path, _ = _epanet(tmp_path, "Net1.inp")
     net = read_epanet_inp(path)
     model, _, _ = build_model(net)
@@ -273,7 +273,7 @@ def test_d3_event_step_returns_the_nominal_step_when_nothing_is_crossed(tmp_path
     ) == pytest.approx(672.0, abs=1e-6)
 
 
-def test_d3_a_tank_outside_its_limits_is_refused(tmp_path):
+def test_a_tank_outside_its_limits_is_refused(tmp_path):
     path, _ = _epanet(tmp_path, "Net1.inp")
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net)
@@ -283,9 +283,9 @@ def test_d3_a_tank_outside_its_limits_is_refused(tmp_path):
         water_steady(model, state, drivers)
 
 
-# --------------------------------------------------------------------------- D4
-def test_d4_darcy_weisbach_residual_is_recorded_not_bounded(tmp_path):
-    """Row D4 RECORDS its residual rather than bounding it.
+# --------------------------------------------------------------------------- Darcy-Weisbach
+def test_darcy_weisbach_residual_is_recorded_not_bounded(tmp_path):
+    """This test RECORDS its residual rather than bounding it.
 
     MEASURED on the two-loop fixture at roughness 0.26 mm: heads 3.566e-4 relative, flows
     2.731e-3 relative (worst link). EPANET uses Swamee-Jain above Re = 4000,
@@ -295,8 +295,9 @@ def test_d4_darcy_weisbach_residual_is_recorded_not_bounded(tmp_path):
     up to about 1 %. (EPANET's water viscosity, 1.1e-5 ft2/s = 1.022e-6 m2/s, against this
     reader's 1.002e-3 / 998.2 = 1.004e-6 m2/s moves the heads residual only to 3.0e-4.)
     Before the Duct was fed rho' = 1/rho and mu' = nu -- i.e. while it returned MASS flow
-    into a layer that balances m3/s -- this row recorded 3.822e-2 / 4.446e-1. Hazen-Williams
-    is the formula compared against EPANET; D-W is offered, and this row states what it costs.
+    into a layer that balances m3/s -- this test recorded 3.822e-2 / 4.446e-1. Hazen-Williams
+    is the formula compared against EPANET; D-W is offered, and this test states what it
+    costs.
     """
     # ONE literal replacement covers all eight pipes: the "roughness / minor loss / status"
     # run is identical on every [PIPES] row of the fixture (it occurs exactly 8 times) and
@@ -321,7 +322,7 @@ def test_d4_darcy_weisbach_residual_is_recorded_not_bounded(tmp_path):
     flows = results.link["flowrate"].loc[0]
     worst_h = _worst_heads(model, final, heads, skip=("R1",))
     worst_q = _worst_flows(model, final, flows)
-    print(f"\nD4 Darcy-Weisbach: heads {worst_h:.3e} relative, flows {worst_q:.3e}")
+    print(f"\nDarcy-Weisbach: heads {worst_h:.3e} relative, flows {worst_q:.3e}")
     # Recorded, not bounded: the band is one order of magnitude either side of the measured
     # pair, so a CHANGE in the friction-factor treatment is caught while the known
     # difference is not asserted away.
@@ -329,7 +330,7 @@ def test_d4_darcy_weisbach_residual_is_recorded_not_bounded(tmp_path):
     assert 2.7e-4 < worst_q < 2.7e-2, worst_q
 
 
-# --------------------------------------------------------------------------- D5
+# --------------------------------------------------------------------------- PDA
 _PDA_EDIT = (
     " Tolerance          \t0.01",
     " Tolerance          \t0.01\n DEMAND MODEL       \tPDA\n"
@@ -337,13 +338,13 @@ _PDA_EDIT = (
 )
 
 
-def test_d5_pressure_driven_demand(tmp_path):
-    """Row D5, 1e-5 relative on heads and delivered demands.
+def test_pressure_driven_demand(tmp_path):
+    """1e-5 relative on heads and delivered demands.
 
     MEASURED against EPANET's own `DEMAND MODEL PDA` at `MINIMUM PRESSURE 0`,
-    `REQUIRED PRESSURE 60`, `PRESSURE EXPONENT 0.5`: heads 3.521e-7, demands 2.184e-7. The
-    row validates the core's potential-dependent nodal sources -- EPANET itself formulates PDA as "a
-    virtual pipe from the junction to a fictitious reservoir" (Manual section 13.1, p.110),
+    `REQUIRED PRESSURE 60`, `PRESSURE EXPONENT 0.5`: heads 3.521e-7, demands 2.184e-7. This
+    test verifies the core's potential-dependent nodal sources -- EPANET itself formulates PDA
+    as "a virtual pipe from the junction to a fictitious reservoir" (Manual section 13.1, p.110),
     i.e. as exactly this potential-dependent nodal source.
 
     `build_model` is called with NO `pda=`/`p_min=`/`p_req=`/`exponent=`: the
@@ -371,7 +372,7 @@ def test_d5_pressure_driven_demand(tmp_path):
     assert worst_d < 1e-5, worst_d
 
 
-def test_d5_pda_delivers_less_than_the_required_demand(tmp_path):
+def test_pda_delivers_less_than_the_required_demand(tmp_path):
     """The whole point of PDA: below the required pressure the demand is curtailed."""
     path, _ = _epanet(tmp_path, "twoloop_si.inp", edits=[_PDA_EDIT])
     net = read_epanet_inp(path)
@@ -384,20 +385,20 @@ def test_d5_pda_delivers_less_than_the_required_demand(tmp_path):
     assert bool((delivered > 0.8 * required).all())
 
 
-def test_d5_a_zero_pressure_span_is_refused(tmp_path):
+def test_a_zero_pressure_span_is_refused(tmp_path):
     path, _ = _epanet(tmp_path, "twoloop_si.inp")
     net = read_epanet_inp(path)
     with pytest.raises(ValueError, match="must exceed MINIMUM PRESSURE"):
         build_model(net, pda=True, p_min=0.0, p_req=0.0)
 
 
-# --------------------------------------------------------------------------- D6
-def test_d6_head_loss_sums_to_zero_around_every_loop(tmp_path):
-    """Row D6, 1e-12. MEASURED: exactly 0.0 on both independent loops.
+# --------------------------------------------------------------------------- loop head loss
+def test_head_loss_sums_to_zero_around_every_loop(tmp_path):
+    """1e-12. MEASURED: exactly 0.0 on both independent loops.
 
     This is an IDENTITY of the formulation, not a convergence result: the pipe kind carries
     no drive, so `dp = A^T phi` and every cycle-basis row annihilates it by construction.
-    The row therefore pins that `Network.cycle_basis` and the layer's own `difference`
+    This test therefore pins that `Network.cycle_basis` and the layer's own `difference`
     sign convention agree -- which is a real thing to get wrong -- rather than that the
     Newton solve converged.
     """
@@ -412,13 +413,14 @@ def test_d6_head_loss_sums_to_zero_around_every_loop(tmp_path):
     assert float(loops.abs().max()) < 1e-12
 
 
-# --------------------------------------------------------------------------- D7
-def test_d7_gradients_against_central_differences(tmp_path):
-    """Row D7, `max|analytic - fd| <= 1e-6 * max|fd|`, for BOTH the
+# --------------------------------------------------------------------------- gradients
+def test_gradients_against_central_differences(tmp_path):
+    """`max|analytic - fd| <= 1e-6 * max|fd|`, for BOTH the
     nodal demand `water.sources` and the Hazen-Williams roughness (both channels are
     differenced for real below, so `solve_sum`'s `roughness` branch is exercised). The pump `h0` and
     tank AREA channels are checked separately, on Net1
-    (`test_d7_gradient_reaches_the_pump_head_gain_h0` and `test_d7_...tank_area...` below), since
+    (`test_gradient_reaches_the_pump_head_gain_h0` and
+    `test_gradient_reaches_the_tank_area_through_advance` below), since
     `twoloop_si.inp` has neither a pump nor a tank.
 
     MEASURED: sources 3.212e-6 against an allowance of 4.444e-4; roughness 2.505e-10
@@ -511,8 +513,8 @@ def test_d7_gradients_against_central_differences(tmp_path):
     assert worst_r <= 1e-6 * scale_r, (worst_r, 1e-6 * scale_r)
 
 
-def test_d7_gradient_reaches_the_pump_head_gain_h0(tmp_path):
-    """Row D7's pump `h0` channel, on Net1 (`twoloop_si.inp` has no pump).
+def test_gradient_reaches_the_pump_head_gain_h0(tmp_path):
+    """The pump `h0` channel, on Net1 (`twoloop_si.inp` has no pump).
 
     MEASURED: 1.007e-6 relative (analytic 0.430638, central difference 0.430638).
     """
@@ -545,7 +547,7 @@ def test_d7_gradient_reaches_the_pump_head_gain_h0(tmp_path):
     assert abs(analytic - fd) <= 1e-5 * abs(fd), (analytic, fd)
 
 
-def test_d7_tank_area_is_not_reached_by_a_single_steady_solve(tmp_path):
+def test_tank_area_is_not_reached_by_a_single_steady_solve(tmp_path):
     """Tank AREA never enters `TankLevels.__call__` (only `bottom + level` does), so a
     single `water_steady` call's output is STRUCTURALLY independent of it -- not a small
     gradient, but no path in the graph at all. This is the "structurally not
@@ -562,8 +564,8 @@ def test_d7_tank_area_is_not_reached_by_a_single_steady_solve(tmp_path):
     assert not final["water.phi"].requires_grad
 
 
-def test_d7_gradient_reaches_the_tank_area_through_advance(tmp_path):
-    """Row D7's tank-area channel is `TankLevels.advance`'s explicit-Euler update (the
+def test_gradient_reaches_the_tank_area_through_advance(tmp_path):
+    """The tank-area channel is `TankLevels.advance`'s explicit-Euler update (the
     previous test), not the steady solve. MEASURED: 2.753e-9 relative (analytic
     -5.0256097e-3, central difference -5.0256097e-3).
     """
@@ -590,7 +592,7 @@ def test_d7_gradient_reaches_the_tank_area_through_advance(tmp_path):
     assert abs(analytic - fd) <= 1e-5 * abs(fd), (analytic, fd)
 
 
-def test_d7_gradient_reaches_a_learnable_roughness(tmp_path):
+def test_gradient_reaches_a_learnable_roughness(tmp_path):
     path, _ = _epanet(tmp_path, "twoloop_si.inp")
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net)
@@ -604,13 +606,13 @@ def test_d7_gradient_reaches_a_learnable_roughness(tmp_path):
     assert float(element.roughness.grad.abs().max()) > 0.0
 
 
-# --------------------------------------------------------------------------- D8
-def test_d8_trace_quality_on_the_two_loop(tmp_path):
-    """Row D8, 1e-3 on the steady trace fraction. MEASURED: 6.438e-12 percentage points
+# --------------------------------------------------------------------------- trace quality
+def test_trace_quality_on_the_two_loop(tmp_path):
+    """1e-3 on the steady trace fraction. MEASURED: 6.438e-12 percentage points
     (noise many orders below the 1e-3 tolerance, floating on the reference's own float32 output and
-    this solve's Newton tolerance rather than on any physics this row could regress).
+    this solve's Newton tolerance rather than on any physics this test could regress).
 
-    A SMOKE row: the fixture has a single source, so mass balance
+    A SMOKE test: the fixture has a single source, so mass balance
     alone forces 100 % everywhere once transients clear. A genuinely discriminating
     two-source trace (Net3's own "percent of Lake water" scenario) is not implemented.
 
@@ -632,7 +634,7 @@ def test_d8_trace_quality_on_the_two_loop(tmp_path):
     assert worst < 1e-3, worst
 
 
-def test_d8_without_the_demand_removal_the_system_is_singular(tmp_path):
+def test_without_the_demand_removal_the_system_is_singular(tmp_path):
     """The measurement behind the demand-as-removal formulation (`build_model`'s docstring),
     pinned so a future edit cannot undo it."""
     path, _ = _epanet(tmp_path, "twoloop_trace.inp")
@@ -646,7 +648,7 @@ def test_d8_without_the_demand_removal_the_system_is_singular(tmp_path):
     assert torch.allclose(layer.removal.squeeze(-1), expected, rtol=1e-14)
 
 
-def test_d8_a_junction_capacity_is_half_of_every_incident_pipe(tmp_path):
+def test_a_junction_capacity_is_half_of_every_incident_pipe(tmp_path):
     path, _ = _epanet(tmp_path, "twoloop_trace.inp")
     net = read_epanet_inp(path)
     model, _, _ = build_model(net, quality=0.0)
@@ -662,7 +664,7 @@ def test_d8_a_junction_capacity_is_half_of_every_incident_pipe(tmp_path):
 
 # --------------------------------------------------------------------------- golden
 def test_the_water_golden_case_is_reproduced(tmp_path):
-    """Row G2, 1e-10, against `tests/golden/water_twoloop.json`."""
+    """1e-10, against `tests/golden/water_twoloop.json`."""
     from tests.golden import load_golden
 
     golden = load_golden("water_twoloop")

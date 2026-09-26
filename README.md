@@ -67,26 +67,43 @@ print("flows (m3/s):  ", dict(zip(("room->ambient",), q.tolist())))
 
 ## Applications
 
-noodl ships six worked applications. Each is a thin layer of domain physics over the shared
-core, and each is checked against the standard reference implementation in its field.
+noodl is one generic solver for networks whose edges carry a flow and whose nodes conserve it.
+The applications are physical systems modelled with that solver, each a thin layer of domain
+physics over the shared core:
 
-| Application | Physical system | Reference model |
-|---|---|---|
-| Building physics | Multi-zone airflow, heat and contaminant transport | CONTAM / ContamX, Modelica Buildings Library |
-| Street air quality | Urban air quality, canyon exchange and routing | MUNICH |
-| Sewers | Gravity sewer hydraulics, headspace air, sulfide | SWMM |
-| Water distribution | Pressurised mains, pumps, tanks, demand | EPANET 2.2 |
-| WSIMOD — rule-based water-system allocation | Requested flows clipped to arc capacity and free storage at the receiving node | WSIMOD |
-| Coupling | Two independent models exchanging values | — |
+| Application | Physical system | Flow determination | Entry point |
+|---|---|---|---|
+| Building physics | Multi-zone airflow, heat and contaminant transport | Potential: Newton on zone pressure | `build_model` |
+| Street air quality | Urban air quality, canyon exchange and routing | Closure: flows computed from the wind aloft | `build_model`, `StreetNetwork` |
+| Sewers | Gravity sewer hydraulics, headspace air, sulfide | Continuity on a tree for the water; Newton potential for the headspace air | `build_model` |
+| Water distribution | Pressurised mains, pumps, tanks, demand | Potential: Newton on hydraulic head | `build_model` |
+| Capacitated allocation | Requested flows clipped to arc capacity and free storage at the receiving node | Capacitated clip | `CapacitatedTransferLayer` |
+| Coupling | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
+
+## Reading model files
+
+A model can be built directly in Python or, where a reader exists, read from a file in an
+established exchange format. A model read from a file can be batched, differentiated and coupled
+exactly like one built by hand.
+
+| Format | Reader | What it describes | Produces a model for |
+|---|---|---|---|
+| CONTAM `.prj` / `.wth` | `read_prj`, `project_to_model`, `read_wth` | Multi-zone building airflow and contaminants; weather | Building physics |
+| Modelica Buildings Library (JSON + CSV export) | `read_modelica` | Multi-zone airflow models built from MBL components | Building physics |
+| SWMM `.inp` | `read_swmm_inp` | Gravity sewer and drainage networks | Sewers |
+| EPANET `.inp` | `read_epanet_inp` | Pressurised water distribution | Water distribution |
 
 ## Repository layout
 
 ```
-src/noodl/        the package: topology, elements, drives, layers, solvers, operators,
-                  Model and couple, and apps/ (building_physics, street_aq, sewer, water)
-tests/            the suite, including verification/ — the parity cases against CONTAM,
-                  MUNICH, SWMM, EPANET and WSIMOD, and the performance gates
-benchmarks/       timing and scaling scripts, and the composed reference model
+src/noodl/        the package: topology, elements (every branch law, grouped by physics),
+                  drives, layers, solvers, operators, Model and couple, and apps/
+                  (building_physics with its CONTAM and Modelica readers, street_aq, sewer,
+                  water, and inpfile, the tokenizer the two .inp readers share)
+tests/            the suite, including verification/ — code-to-code comparisons against
+                  reference models and analytical solutions — and the performance gates
+benchmarks/       timing and scaling scripts, and the composed model: eight buildings
+                  joined through street and sewer networks
 docs/             the published documentation
 scripts/          fixture-regeneration scripts (Modelica, WSIMOD)
 ```
@@ -95,8 +112,8 @@ The [API reference](docs/api.md) is organised module by module.
 
 ## Status
 
-The framework core and all six applications are built and checked against reference
-implementations.
+Version 0.1.0. The core and all six applications are implemented, each with its verification
+cases in the test suite.
 
 ## The name
 

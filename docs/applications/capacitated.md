@@ -1,9 +1,11 @@
-# WSIMOD — rule-based water-system allocation
+# Capacitated allocation
 
-Each arc carries the flow that is requested of it, clipped to the arc's capacity and to the free
-storage at the receiving node — the allocation rule of WSIMOD, Imperial College's Water Systems
-Integrated Modelling framework. In noodl this is implemented by `CapacitatedTransferLayer`, and
-it is the framework's **fourth flow-determination mode**.
+Rule-based allocation of water between stores. Nodes are stores (reservoirs, treatment works,
+demand points) with a storage ceiling; edges are arcs with a capacity. Each arc carries the flow
+that is requested of it, clipped to the arc's capacity and to the free storage at the receiving
+node, and storage is conserved exactly at every node. Requests and flows are in m³/s, storage in
+m³. In noodl this is implemented by `CapacitatedTransferLayer`, and it is the framework's
+**fourth flow-determination mode**.
 
 Every other application on this site determines a flow from physics: a potential difference, a
 closure, or continuity. This one does not. Each edge carries a *requested* flow, typically
@@ -15,7 +17,7 @@ $$
 f = \min\left(r,\; c_{\text{arc}},\; h_{\text{receiver}}\right)
 $$
 
-This is push/pull semantics in the WSIMOD sense. An edge pushes a request at its target; the
+This is push/pull semantics. An edge pushes a request at its target; the
 target accepts up to its own headroom; the difference is left unmet at the source. Conservation
 is exact by construction.
 
@@ -67,6 +69,10 @@ Note that `s1[0]` is negative. `step` bounds storage from **above** only — a s
 drawn below zero, which is a modelling choice belonging upstream of this layer.
 
 ## The API
+
+The allocation rules (push/pull requests, the per-arc capacity clip, the receiver's headroom
+check and proportional sharing between competing arcs) follow those of WSIMOD, Imperial
+College's Water Systems Integrated Modelling framework.
 
 `CapacitatedTransferLayer` has exactly two public methods.
 
@@ -134,19 +140,14 @@ sensitivity.
 
 ### `"projection"` — real cross-gradients between competing edges
 
-This mode exists because of a bug that was found, not anticipated.
-
 Smooth mode's proportional-share formula is
 $h_{\text{free}} \cdot \text{pref}_i / \sum_k \text{pref}_k$. That depends only on the preference
 weights and the total headroom — **never on any individual competitor's request**. So
 $\partial f_i / \partial r_j = 0$ for a competing edge $j$, provably and not approximately. It
-was confirmed empirically too: byte-identical zero cross-terms across 200 random trials.
-
-The first implementation of projection mode reused that same formula, and therefore delivered
-none of the mode's stated purpose — *gradients flowing through which arc absorbs a constraint*.
-No amount of wrapping could have fixed it.
-
-The fix routes the sharing site through a real coupled QP: minimise
+is confirmed empirically too: byte-identical zero cross-terms across 200 random trials. That
+formula cannot deliver a genuine cross-gradient — *gradients flowing through which arc absorbs a
+constraint* — however it is wrapped, which is why projection mode routes the sharing site through
+a real coupled QP instead: minimise
 $\sum_i \text{pref}_i (f_i - r_i)^2$ subject to $0 \le f_i \le \text{avail}_i$ per edge **and**
 $\sum_i f_i \le h_{\text{free}}$ jointly. Its KKT stationarity reduces to
 
@@ -211,19 +212,19 @@ The harness monkeypatches `Arc.send_push_request` / `send_pull_request` to captu
 requested/realised pair while WSIMOD runs its own `quickstart_demo` and `oxford_demo`. The
 committed fixtures mean the parity tests run **without WSIMOD installed**.
 
-| Row | Check | Tolerance | Measured |
-|---|---|---|---|
-| W1 | Hard clip vs WSIMOD's realised flows, `quickstart_demo`, all 1,456 steps | 1e-9 abs | **1.11e-16** |
-| W2 | Same, `oxford_demo`, 20 of 21 arcs | 1e-6 abs | **1.86e-9** |
-| W3 | `"smooth"` at $\tau=10^{-3}$ vs W1's own hard-clip output | 3e-3 abs | **1.79e-3** |
-| W4 | `"projection"` vs W1's own hard-clip output | 1e-9 abs | **9.10e-13** |
-| W5 | Conservation, both demos, all three modes | exact | holds, no reference needed |
-| W6 | `gradcheck` through smooth and projection on the diamond | analytic | holds |
-| W7 | `n_passes=5` vs a hand-converged reference | exact | holds |
+| Check | Tolerance | Measured |
+|---|---|---|
+| Hard clip vs WSIMOD's realised flows, `quickstart_demo`, all 1,456 steps | 1e-9 abs | **1.11e-16** |
+| Same, `oxford_demo`, 20 of 21 arcs | 1e-6 abs | **1.86e-9** |
+| `"smooth"` at $\tau=10^{-3}$ vs the hard clip's own output on `quickstart_demo` | 3e-3 abs | **1.79e-3** |
+| `"projection"` vs the hard clip's own output on `quickstart_demo` | 1e-9 abs | **9.10e-13** |
+| Conservation, both demos, all three modes | exact | holds, no reference needed |
+| `gradcheck` through smooth and projection on the diamond | analytic | holds |
+| `n_passes=5` vs a hand-converged reference | exact | holds |
 
 ### What the WSIMOD parity does not show
 
-**Read this before citing W1 or W2 as verifying the capacity clip itself.**
+**Read this before citing the two hard-clip comparisons as verifying the capacity clip itself.**
 
 Neither reference demo ever exercises a genuine arc-capacity clip. Of `quickstart_demo`'s 6 arcs
 and `oxford_demo`'s 21, all but one sit at WSIMOD's own `UNBOUNDED_CAPACITY` of 1e15 for the
@@ -232,7 +233,7 @@ sees a request above about 30,934 across oxford's full 1,456-day run. This was c
 the fixture data directly: `requested > capacity` is true for **zero rows, for every arc, in the
 whole fixture**.
 
-W1 and W2 therefore check the clip arithmetic **only on the identity path**
+The two hard-clip comparisons therefore check the clip arithmetic **only on the identity path**
 ($\min(x, c) = x$), never on the branch where $c$ actually binds.
 
 The same applies, for a different reason, to the *other* bound: both fixtures set
@@ -248,8 +249,8 @@ constraint binds, because neither demo pushes any arc that far. It is the same d
 other applications draw between a coefficient *calibrated* to one source and one *independently
 verified*.
 
-A separate exclusion: `oxford_demo`'s `sewer_to_wwtw` arc is left out of W2 (20 of 21 arcs
-compared) because it shows 185 of 1,456 mismatched timesteps, root-caused to WSIMOD's own `WWTW`
+A separate exclusion: `oxford_demo`'s `sewer_to_wwtw` arc is left out of the `oxford_demo`
+comparison (20 of 21 arcs compared) because it shows 185 of 1,456 mismatched timesteps, root-caused to WSIMOD's own `WWTW`
 node applying an internal treatment-throughput constraint — a node-level *rate* cap the harness
 does not extract and which this layer does not model, since `s_max` is a storage-headroom bound.
 That arc's own capacity is still 1e15 throughout.

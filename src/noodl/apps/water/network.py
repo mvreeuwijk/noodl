@@ -438,8 +438,8 @@ def build_model(
                 f"scaled by [OPTIONS] VISCOSITY; SPECIFIC GRAVITY {options.specific_gravity} "
                 f"sets only the head-to-pressure scale); EPANET uses "
                 f"Swamee-Jain above Re = 4000, Hagen-Poiseuille below 2000 and Dunlop's "
-                f"cubic between; verification row D4 (docs/applications/water.md) "
-                f"records the resulting residual"
+                f"cubic between; the Darcy-Weisbach comparison in "
+                f"docs/applications/water.md records the resulting residual"
             )
             elements.append(
                 Duct(
@@ -660,8 +660,9 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     the eight demand multipliers 0.7 to 1.4: 1e-14 does not converge at all (the residual
     floors at 1.3e-14 against a flow scale of 0.1 m3/s), 1e-12 fails at multiplier 1.2
     (floor 5.4e-12), and 5e-12 is the tightest value at which all eight converge. 1e-11 is
-    that with a factor of two in hand, and it is still four orders below the parity rows'
-    own float32-limited residuals, so it does not move D1, D2, D3 or D5.
+    that with a factor of two in hand, and it is still four orders below the comparison tests'
+    own float32-limited residuals, so it does not move the two-loop, Net1 single-period,
+    Net1 extended-period or pressure-driven-demand comparisons.
 
     `max_iter` defaults to 200, NOT Newton's own 50. When a `[CONTROLS]` line CLOSES a
     pump, the pipe immediately downstream of it is left carrying exactly zero flow, and
@@ -671,9 +672,9 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     the switch. MEASURED on Net1's 24 h duty cycle: the switch step needs 136 Newton
     iterations and every other step needs a handful, so 50 fails outright (residual
     9.6e-4) and 200 clears it with margin. Raising `dp_transition` would reduce the count
-    (measured: 50 at 1e-3, 93 at 1e-6, 136 at 1e-9, 179 at 1e-12) but 1e-9 is where the D3
-    trajectory has CONVERGED with respect to it, so the iterations are spent rather than
-    the fidelity.
+    (measured: 50 at 1e-3, 93 at 1e-6, 136 at 1e-9, 179 at 1e-12) but 1e-9 is where the Net1
+    extended-period tank trajectory has CONVERGED with respect to it, so the iterations
+    are spent rather than the fidelity.
 
     After the solve, every `pump` edge's CONVERGED flow is checked against its own
     `q_max`: a demand for more than `q_max` is refused by name. `PumpCurve.flow`/`dflow` extrapolate

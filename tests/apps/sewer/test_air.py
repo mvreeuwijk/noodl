@@ -139,8 +139,8 @@ def test_drag_refuses_a_missing_driver():
 @pytest.mark.parametrize(
     "h_over_d, v_w, measured", [(0.50, 0.2, 0.35), (0.60, 0.8, 0.25), (0.62, 0.4, 0.275)]
 )
-def test_a1_pescod_and_price_air_to_water_velocity_ratio(h_over_d, v_w, measured):
-    """Row A1. A 300 mm UPVC pipe, 15 m, open at BOTH ends: two half-length headspace edges
+def test_pescod_and_price_air_to_water_velocity_ratio(h_over_d, v_w, measured):
+    """A 300 mm UPVC pipe, 15 m, open at BOTH ends: two half-length headspace edges
     in series with both outer nodes prescribed at ambient pressure and one interior manhole
     between them. Measured: 24.139 %, 24.995 %, 25.149 % -- all inside
     the 20-40 % band, and equal to the closed form to round-off (2.2e-16 relative)."""

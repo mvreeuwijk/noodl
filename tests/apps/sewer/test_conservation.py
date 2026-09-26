@@ -1,4 +1,4 @@
-"""Conservation and gradients on the committed tree (rows C1, C2, C3)."""
+"""Conservation and gradients on the committed sewer tree."""
 
 import pytest
 import torch
@@ -8,9 +8,9 @@ from noodl.apps.sewer.network import build_model, sewer_steady, tree_steady
 F64 = torch.float64
 
 
-def test_c1_the_air_layer_balances_at_its_solution():
-    """Row C1: the nodal residual of the solved air layer and Tellegen's own power identity.
-    Measured 6.3e-15 / 8.1e-13 on the A3 configuration with the headspace stack
+def test_the_air_layer_balances_at_its_solution():
+    """The nodal residual of the solved air layer and Tellegen's own power identity.
+    Measured 6.3e-15 / 8.1e-13 with the headspace stack
     path at the mean invert; with the path at the pipe CROWN the stack head
     is larger and, with the leak's `Orifice`-built `C` in float32 (the repository's
     default dtype), the measured residual was 1.352e-12 kg/s / power 1.855e-11 W -- an
@@ -32,7 +32,7 @@ def test_c1_the_air_layer_balances_at_its_solution():
     assert float(power.abs().max()) < 1e-10
 
 
-def test_c1_the_water_flows_balance_every_manhole():
+def test_the_water_flows_balance_every_manhole():
     """Continuity on the pipe tree, node by node: exact, by construction."""
     model, state, drivers = build_model(tree_steady(), air=False, quality=False)
     resolved = model._apply_closures(state, drivers)
@@ -46,8 +46,8 @@ def test_c1_the_water_flows_balance_every_manhole():
     assert float(balance[interior].abs().max()) < 1e-15
 
 
-def test_c2_cross_phase_sulfide_is_conserved_node_by_node():
-    """Row C2, 1e-12: moles of S removed from the water equal moles added to the air.
+def test_cross_phase_sulfide_is_conserved_node_by_node():
+    """1e-12: moles of S removed from the water equal moles added to the air.
 
     `build_model`'s default `sulfide_in = 0` (this test's `drivers`,
     unmodified), so `LateralLoads`'s own sulfide column is exactly zero everywhere and this
@@ -72,19 +72,19 @@ def test_c2_cross_phase_sulfide_is_conserved_node_by_node():
     assert float(moles_out.abs().max()) > 0.0
 
 
-def test_c3_gradients_against_central_differences():
-    """Row C3, 1e-6 relative, through the tree solve, the Manning inversion AND the air
+def test_gradients_against_central_differences():
+    """1e-6 relative, through the tree solve, the Manning inversion AND the air
     Newton solve, with respect to the inflows.
 
     Only the inflows are DIFFERENCED here -- `f_i`, `f_air` and `leak_area` enter a FRESH
     `build_model` call inside `loss` as plain Python floats, so no gradient tape reaches
     them. The other differentiable drivers/parameters are each pinned by their own test:
 
-    * `T_head` (a full-node/scalar DRIVER): `test_c3_gradient_reaches_t_head`.
+    * `T_head` (a full-node/scalar DRIVER): `test_gradient_reaches_t_head`.
     * the leak area, via the leak element's own `C` (float64):
-      `test_c3_gradient_reaches_a_learnable_leak_area`.
-    * `f_air`: already covered by `test_c3_gradient_reaches_a_learnable_headspace_friction`
-      below (finite, correct sign; not a central-difference row -- `f_air` is a `Headspace`
+      `test_gradient_reaches_a_learnable_leak_area`.
+    * `f_air`: already covered by `test_gradient_reaches_a_learnable_headspace_friction`
+      below (finite, correct sign; not central-differenced here -- `f_air` is a `Headspace`
       element parameter reached the SAME way `leak_area` now is).
 
     `f_i` is NOT one of them: it is a `Drag` DRIVE's plain attribute (never a registered
@@ -112,13 +112,14 @@ def test_c3_gradients_against_central_differences():
     value.backward()
     analytic = inflow.grad.clone()
     # MEASURED: the plain central difference cannot reach 1e-6 here at ANY
-    # single step. The loss carries the air Newton solve's arithmetic floor (~4e-12, see C1),
+    # single step. The loss carries the air Newton solve's arithmetic floor (~4e-12, see
+    # test_the_air_layer_balances_at_its_solution above),
     # so its differencing noise is ~4e-12 / (2 eps |f'|), i.e. 1.4e-6 relative at eps = 1e-5;
     # and its truncation error grows as eps^2 and is large (component 0: 4.9e-5 relative at
     # eps = 1e-4, 4.95e-3 at 1e-3), so at eps = 2e-5 component 0 still misses by 1.95e-6.
     # Richardson extrapolation (4 fd(eps) - fd(2 eps)) / 3 removes the eps^2 term: at
     # eps = 1e-4 the three components agree to 3.17e-8, 3.16e-9 and 1.16e-8 relative (5e-5:
-    # 6.4e-8 / 2.0e-7 / 3.8e-7; 2e-4: 5.5e-7 / 8.1e-9 / 3.0e-8). The row's tolerance
+    # 6.4e-8 / 2.0e-7 / 3.8e-7; 2e-4: 5.5e-7 / 8.1e-9 / 3.0e-8). This test's tolerance
     # (rel 1e-6) is unchanged; only the differencing scheme moved.
     eps = 1e-4
 
@@ -135,12 +136,12 @@ def test_c3_gradients_against_central_differences():
         assert float(analytic[i]) == pytest.approx(fd, rel=1e-6, abs=1e-14)
 
 
-def test_c3_gradient_reaches_t_head():
-    """Row C3: `T_head` is a full-node/scalar DRIVER read by the
+def test_gradient_reaches_t_head():
+    """`T_head` is a full-node/scalar DRIVER read by the
     `SewerHydraulics` closure's `_densities` and, through `rho_air_nodes`, by the air
     layer's `Stack` buoyancy drive -- a legitimate driver path, unlike `f_i` above.
     MEASURED (eps = 0.01, Richardson (4 fd(eps) - fd(2 eps)) / 3): relative error 3.57e-8
-    against the analytic adjoint gradient, comfortably inside the row's 1e-6."""
+    against the analytic adjoint gradient, comfortably inside this test's 1e-6 tolerance."""
 
     def loss(t_head):
         model, state, drivers = build_model(tree_steady(), quality=False)
@@ -167,9 +168,9 @@ def test_c3_gradient_reaches_t_head():
     assert analytic == pytest.approx(fd, rel=1e-6, abs=1e-14)
 
 
-def test_c3_gradient_reaches_a_learnable_leak_area():
-    """Row C3: the leak element's `C` (float64) reached the SAME way
-    `test_c3_gradient_reaches_a_learnable_headspace_friction` reaches `f_air` -- a
+def test_gradient_reaches_a_learnable_leak_area():
+    """The leak element's `C` (float64) reached the SAME way
+    `test_gradient_reaches_a_learnable_headspace_friction` reaches `f_air` -- a
     non-learnable element's already-registered `nn.Parameter` with `requires_grad_(True)`
     set on it afterward, never a fresh tensor built with `requires_grad=True` and passed
     into a NEW `build_model` call (which `PotentialFlowLayer`'s own safety check
@@ -180,7 +181,7 @@ def test_c3_gradient_reaches_a_learnable_leak_area():
     chain rule; the Richardson check perturbs `leak_area` itself (a `build_model`
     keyword, rebuilding the whole model, exactly as the inflow/`T_head` checks do) and
     compares against that chain-ruled analytic gradient. MEASURED (eps = 1e-3 * leak_area):
-    relative error 9.67e-9, comfortably inside the row's 1e-6."""
+    relative error 9.67e-9, comfortably inside this test's 1e-6 tolerance."""
     import math
 
     from noodl.apps.sewer.air import RHO_AIR_REF
@@ -214,7 +215,7 @@ def test_c3_gradient_reaches_a_learnable_leak_area():
     assert analytic == pytest.approx(fd, rel=1e-6, abs=1e-14)
 
 
-def test_c3_gradient_reaches_a_learnable_headspace_friction():
+def test_gradient_reaches_a_learnable_headspace_friction():
     model, state, drivers = build_model(tree_steady(), quality=False)
     element = next(
         el for el in model.potential["air"]._elements if el.kind == "headspace"
@@ -227,7 +228,7 @@ def test_c3_gradient_reaches_a_learnable_headspace_friction():
 
 
 def test_the_golden_case_is_reproduced():
-    """Row G1, 1e-10, against `tests/golden/sewer_tree.json`."""
+    """1e-10 against the committed `tests/golden/sewer_tree.json`."""
     from tests.golden import load_golden
 
     golden = load_golden("sewer_tree")

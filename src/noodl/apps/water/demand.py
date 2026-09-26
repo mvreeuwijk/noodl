@@ -14,8 +14,9 @@ delivered (`REQUIRED PRESSURE`, default 0.0 -- so PDA is a NO-OP unless both are
 The limits are global, one set for the whole network, exactly as EPANET applies them.
 
 Measured against EPANET's own PDA on the committed two-loop fixture at `P_req = 60 m`:
-heads agree to 3.521e-7 relative and delivered demands to 2.184e-7 (verification row D5,
-tolerance 1e-5).
+heads agree to 3.521e-7 relative and delivered demands to 2.184e-7 (checked in
+`tests/verification/test_water_parity.py::test_pressure_driven_demand` against a 1e-5
+tolerance).
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""WSIMOD parity (rows W1, W3, W4): CapacitatedTransferLayer
+"""WSIMOD parity: CapacitatedTransferLayer
 replays WSIMOD's own captured per-arc requests and is compared against WSIMOD's own
 realised flows on the SAME topology -- WSIMOD's own hard-clipped output is the reference,
 exactly as pyswmm and EPANET are the references for the sewer and water applications
@@ -8,9 +8,11 @@ exactly as pyswmm and EPANET are the references for the sewer and water applicat
 (1e15, confirmed directly against `wsimod.core.constants.UNBOUNDED_CAPACITY` while
 regenerating these fixtures) and every captured `requested` equals its `realised` --
 WSIMOD's own node science never lets this particular demo's push requests exceed a
-downstream node's headroom, so W1 here exercises the identity path of the clip
+downstream node's headroom, so `test_quickstart_hard_clip_matches_wsimod_realised_flows`
+here exercises the identity path of the clip
 arithmetic (`min(request, huge_capacity) == request`) rather than an actively-binding
-clip. This is not a weaker fixture by choice -- `oxford_demo` (row W2) was hoped
+clip. This is not a weaker fixture by choice -- `oxford_demo`
+(`test_oxford_hard_clip_matches_wsimod_realised_flows`) was hoped
 to be where a genuinely bounded arc gets exercised; as shown below, it isn't either.
 
 **Multiple events per (arc, timestep), and why every replay loop below ACCUMULATES.**
@@ -35,14 +37,15 @@ capacity (50000.0, WSIMOD's own volume units) -- but across the full 1456-timest
 2009-2013 run, that arc's captured `requested` volume never exceeds ~30934.2, well under
 its 50000 capacity, so it is NEVER clipped either (confirmed directly against the
 committed `oxford_events.csv`, not assumed: `requested > capacity` is true for zero rows,
-for every arc, in the whole fixture). So W1 AND W2 both only ever exercise the
+for every arc, in the whole fixture). So the quickstart and oxford checks above both
+only ever exercise the
 capacitated layer's identity path (`min(request, capacity) == request`) for every arc
 whose CAPACITY this harness can see -- neither reference demo shipped by
 WSIMOD itself provides a load-bearing test of the hard-clip branch actually clipping
-something on an arc's own `c_arc` capacity. This is a real gap in what W1/W2 validate,
-not a minor footnote; a synthetic small-graph test with a deliberately tight `c_arc`
-would be needed to exercise that branch; it is not retrofitted into these
-WSIMOD-reference-only verification rows.
+something on an arc's own `c_arc` capacity. This is a real gap in what these tests
+validate, not a minor footnote; a synthetic small-graph test with a deliberately tight
+`c_arc` would be needed to exercise that branch; it is not retrofitted into these
+WSIMOD-reference-only verification tests.
 
 Oxford's `sewer_to_wwtw` arc DOES show `requested > realised` in 185 of its 1456
 timesteps (max observed gap ~3.924e6) -- but this is NOT that arc's own capacity acting
@@ -200,8 +203,9 @@ def test_quickstart_projection_mode_converges_to_hard_clip():
         max_abs_error = max(max_abs_error, (f_proj - f_hard).abs().max().item())
     # Observed max_abs_error: 9.0955e-13 -- pure QP-solver/float64 arithmetic noise (no
     # arc in quickstart is ever actually capacity-bound, so this exercises
-    # projection mode's identity path, not its active-constraint QP; row W2's oxford
-    # fixture is where an arc's capacity actually binds). 1e-9 is ~1000x
+    # projection mode's identity path, not its active-constraint QP; the oxford
+    # fixture (`test_oxford_hard_clip_matches_wsimod_realised_flows`) is where an
+    # arc's capacity actually binds). 1e-9 is ~1000x
     # above the observed noise floor.
     assert max_abs_error < 1e-9
 
@@ -212,7 +216,7 @@ def test_quickstart_projection_mode_converges_to_hard_clip():
 # OWN `.capacity`, which is 1e15/unbounded -- see the module docstring's oxford_demo
 # section). `extract_topology` only captures per-arc capacity, and this test's `s_max`
 # models storage headroom, not a per-step throughput rate, so this one node-level
-# constraint is out of scope for what W2 can replay -- excluded by name, not
+# constraint is out of scope for what this test can replay -- excluded by name, not
 # papered over with a loosened global tolerance.
 OXFORD_NODE_CAPACITY_ARCS = {"sewer_to_wwtw"}
 

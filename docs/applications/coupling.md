@@ -1,7 +1,12 @@
 # Coupling
 
-Two independently built models, exchanging named values each step, iterated to a fixed point —
-and differentiable across the join.
+Two physical systems that meet at a shared boundary, each modelled as its own network: a street
+canyon and a building ventilated from it, for example, where infiltration draws the street's
+polluted air into the building and the building acts as a sink on the street. Each model
+conserves its own quantities on its own graph; at the boundary they exchange named values each
+step (a concentration one way, a mass flux in kg/s the other), iterated to a fixed point, so that
+what one side loses the other gains. The join is differentiable: gradients flow across it as if
+the two models were one.
 
 ## Two levels of coupling
 
@@ -153,9 +158,9 @@ unregistered conversion is never silently treated as identity.
 
 `transport_boundary_inflow(...)` returns the net mass inflow at a boundary node of a transport
 layer, computed from a single state snapshot. `Model.ports()` cannot supply this: it reports
-`boundary_flows` for *potential* layers only. The coupler itself no longer calls this to build
-the two-way feedback (see "The fixed point" below) — it is kept as a public helper and used in
-tests as an independent hand reconstruction.
+`boundary_flows` for *potential* layers only. The coupler builds the two-way feedback through
+`differentiate_fixed_point` instead (see "The fixed point" below); `transport_boundary_inflow`
+is kept as a public helper and used in tests as an independent hand reconstruction.
 
 ## Unit conversions
 
@@ -284,7 +289,7 @@ way** — that is a property of the pass itself, not of which solver ran inside 
   `theta_w` → `theta_w` through the wind-direction conversion.
 - **Multi-rate:** `substeps={"building": 60}` — the street steps once per hour, the building
   sixty times at 60 s, with the glue-derived boundary held constant across the inner steps. That
-  is an accuracy simplification, not a conservation one, and it is now **conservative**
+  is an accuracy simplification, not a conservation one, and it is **conservative**
   regardless: whatever the building actually integrates across those sixty sub-steps — with the
   boundary held constant or interpolated — is exactly the amount reported back and added to the
   street's sources, so holding it constant cannot leak or fabricate mass, only make the
@@ -305,9 +310,9 @@ the street side. Both demos assert that sign.
 | Structural guard: a two-way step assembles no dense topology operator (`upwind`/`incidence`/selectors) | n/a | holds |
 | Synthetic back-coupling, 2×3 m canyon: one-way 4.169740e-08 vs two-way 4.145151e-08 kg/m³ | measured | **0.5897 %** change, 27 passes |
 | Loose sequential file exchange vs the two-way result | measured | 0.5897 % discrepancy — equal to the street-side change, as expected for a boundary response linear in the shared value |
-| Inverse 1: leakage calibration through the join | rel err < 0.05 | **1.288e-4**, final loss 3.4574e-08 |
-| Inverse 2: source attribution by one adjoint pass vs central differences | rel 1e-4 | 1.3e-8, 2.0e-9; third source structurally zero |
-| Inverse 3: one measured path recovers all four branch flows | rtol 1e-10 | exact |
+| Leakage calibration through the join | rel err < 0.05 | **1.288e-4**, final loss 3.4574e-08 |
+| Source attribution by one adjoint pass vs central differences | rel 1e-4 | 1.3e-8, 2.0e-9; third source structurally zero |
+| One measured path recovers all four branch flows | rtol 1e-10 | exact |
 
 The synthetic case is deliberately sized so that the building matters: a 2×3 m canyon, where
 the building's infiltration changes the street concentration by 0.5897 %. On a street of

@@ -540,7 +540,7 @@ Section 3's own table already says why: SWMM solves the sewer's full 1-D Saint-V
 equations (dynamic wave routing) with surcharging and reverse flow, "a genuinely dynamic
 (not quasi-steady) network" -- exactly why surcharge, backwater and dynamic-wave routing
 are OUT of scope here, and SWMM's KINWAVE (kinematic wave) routing, which shares the
-continuity-first assumption, is the parity target for rows W1-W4 rather than SWMM's own
+continuity-first assumption, is the comparison target rather than SWMM's own
 dynamic-wave engine.
 
 **The manhole-level storage idealisation, and what it is not.** With `storage=True`,
@@ -551,7 +551,7 @@ manhole's level equals its own outgoing pipe's entrance depth" -- not a hydrauli
 along the pipe and not SWMM's dynamic wave, which carries one head per junction and a
 backwater-coupled momentum equation between them; under constant inflow the storage sweep's
 fixed point is the quasi-steady solution (measured 5.7e-15 relative on flows, 4.4e-15 on
-depths, row W7), which is the only property this idealisation is required to
+depths), which is the only property this idealisation is required to
 have. The sweep advances every manhole LEVEL-SYNCHRONOUSLY, leaves to the outfall, in the
 same order the tree's own closed-form flow solve uses: it precomputes, once, the leaf-to-
 root level order and, per level, flat gather/scatter index tensors, so the per-call sweep is
@@ -600,7 +600,7 @@ headspace air are two separate `TransportLayer` species, coupled by one closure,
 `H2STransfer`, computing a flux $J = K_L a\, V_{\text{wet}} (f C_S - C_G/H)$ per manhole from the free-
 sulfide fraction $f$, Henry's constant $H(T)$ and a two-film transfer coefficient $K_L a$,
 and writing $+J$ onto the air side and $-J$ onto the water side (equal in moles of S by
-construction, checked node by node, row C2). The lateral inflow-concentration
+construction, checked node by node). The lateral inflow-concentration
 drivers, `bod_in`/`sulfide_in`, enter the water-quality layer's source term the same way
 every other nodal load does -- $\text{inflow} \times \text{concentration}$ (m³/s times kg/m³, kg/s per species)
 -- written by a separate closure, `LateralLoads`, registered before `H2STransfer` so its
@@ -616,15 +616,15 @@ building application's heat/species coupling does, and `coupling="iterate"` remo
 Hensen's-onion successive substitution when the two quality layers' own `iterate_tol` is set.
 
 **Verification.** The sewer's water flows, depths, velocities and a first-order-decay
-tracer are checked against pyswmm/SWMM 5.2.4 under KINWAVE routing (rows W1-W4); the air
-side against Pescod and Price's laboratory ratios and Tyneside field range (rows A1-A3) and
-the H₂S two-film transfer's Henry-equilibrium fixed point (row H3); the water-distribution
+tracer are checked against pyswmm/SWMM 5.2.4 under KINWAVE routing; the air
+side against Pescod and Price's laboratory ratios and Tyneside field range and
+the H₂S two-film transfer's Henry-equilibrium fixed point; the water-distribution
 application's heads, flows, pump gain, tank trajectory, pressure-driven demand, loop
-consistency, gradients and a trace-quality row against EPANET 2.2 through wntr (rows D1-D8,
-G2). $f_i$ and $f_{\text{air}}$ are CALIBRATED to a single source (Pescod and Price Test 8),
-not literature-pinned, so rows A1 and A2 are consistency checks against the calibration
-source rather than independent validation. See [Sewers](applications/sewer.md) and
-[Water distribution](applications/water.md#verification).
+consistency, gradients and trace quality against EPANET 2.2 through wntr. $f_i$ and
+$f_{\text{air}}$ are CALIBRATED to a single source (Pescod and Price Test 8), not
+literature-pinned, so the air-side ratio and Tyneside-band checks are consistency checks
+against the calibration source rather than independent validation. See
+[Sewers](applications/sewer.md) and [Water distribution](applications/water.md#verification).
 
 ## 10. A fourth flow-determination mode: clip-and-allocate capacitated transfer
 

@@ -70,8 +70,8 @@ class Duct(Element):
     `Re = Re_t` exactly at the transition, which is the physical definition of the transition
     point and is separately pinned; the alternative -- correcting dp_t to the root of
     `_turbulent(dp) = F_t` -- is new numerics on the flow path. Neither is urgent: the one
-    verification case that uses `Duct`, the water application's Darcy-Weisbach row D4, builds
-    it at `n_iter=12`, where the step is far below its tolerance, and the `.prj` reader
+    verification case that uses `Duct`, the water application's Darcy-Weisbach comparison,
+    builds it at `n_iter=12`, where the step is far below its tolerance, and the `.prj` reader
     refuses duct networks outright.
     """
 

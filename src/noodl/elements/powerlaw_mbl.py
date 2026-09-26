@@ -1,5 +1,6 @@
-"""MBL's power-law flow-element family, transcribed from MBL v13.0.0
-(commit 55abf579598ca81cae0a82f337350375958e6722).
+"""Regularised power-law flow through a fixed opening, transcribed from the Modelica Buildings
+Library's `Buildings.Airflow.Multizone` power-law element family (MBL v13.0.0,
+commit 55abf579598ca81cae0a82f337350375958e6722).
 
 All six of MBL's `Buildings.Airflow.Multizone` power-law elements (`Orifice`,
 `EffectiveAirLeakageArea`, `Point_m_flow`, `Points_m_flow`, `Coefficient_V_flow`,

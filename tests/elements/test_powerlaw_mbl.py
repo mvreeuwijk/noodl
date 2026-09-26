@@ -1,8 +1,8 @@
-"""Tests for `noodl.elements.mbl.powerlaw`: MBL's power-law flow-element family.
+"""Tests for `noodl.elements.powerlaw_mbl`: MBL's power-law flow-element family.
 
 The NumPy reference functions below are transcribed directly from the Modelica Buildings
 Library (MBL) v13.0.0 (commit 55abf579598ca81cae0a82f337350375958e6722) source, never by
-importing `noodl.elements.mbl.powerlaw` itself.
+importing `noodl.elements.powerlaw_mbl` itself.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import torch
 
-from noodl.elements.mbl.powerlaw import (
+from noodl.elements.powerlaw_mbl import (
     MBLPowerLaw,
     mbl_coefficient,
     mbl_ela,

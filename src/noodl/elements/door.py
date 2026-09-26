@@ -1,4 +1,5 @@
-"""MBL's large-opening doors, ``DoorOpen`` and ``DoorOperable``, as two directional noodl edges.
+"""Two-way flow through a large opening (door), transcribed from the Modelica Buildings
+Library's ``DoorOpen``/``DoorOperable`` as two directional noodl edges.
 
 Transcribed from Modelica Buildings Library (MBL) v13.0.0
 (commit 55abf579598ca81cae0a82f337350375958e6722), with constants from the Modelica Standard
@@ -75,7 +76,7 @@ from collections.abc import Mapping
 import torch
 
 from noodl.elements.base import Element
-from noodl.elements.mbl.media import _R_AIR, MBLMedium
+from noodl.elements.media import _R_AIR, MBLMedium
 
 Tensor = torch.Tensor
 

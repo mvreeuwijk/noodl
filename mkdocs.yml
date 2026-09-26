@@ -6,7 +6,7 @@ site_url: https://mvreeuwijk.github.io/noodl/
 repo_url: https://github.com/mvreeuwijk/noodl
 repo_name: mvreeuwijk/noodl
 edit_uri: edit/main/docs/
-copyright: MIT licensed.
+copyright: Copyright &copy; 2026 John Craske, Maarten van Reeuwijk and Imperial College London. BSD 3-Clause licence.
 
 theme:
   name: material
@@ -61,8 +61,14 @@ nav:
       - Street air quality: applications/street_aq.md
       - Sewers: applications/sewer.md
       - Water distribution: applications/water.md
-      - "WSIMOD — rule-based water-system allocation": applications/capacitated.md
+      - Capacitated allocation: applications/capacitated.md
       - Coupling: applications/coupling.md
+  - File formats:
+      - formats/index.md
+      - CONTAM (.prj, .wth): formats/contam.md
+      - Modelica Buildings Library: formats/modelica.md
+      - SWMM (.inp): formats/swmm.md
+      - EPANET (.inp): formats/epanet.md
   - Development:
       - Extending noodl: development/extending.md
   - API reference: api.md

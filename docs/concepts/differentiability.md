@@ -44,7 +44,7 @@ the forward action, so nothing extra is built.
 The practical consequence: a model that takes 12 Newton iterations to converge costs the same to
 differentiate as one that takes 3.
 
-**The exception is iteration at the `Model` level — and it is no longer an unrolled exception.**
+**The exception is iteration at the `Model` level — and it is not an unrolled exception.**
 `coupling="iterate"` and `CoupledModel`'s two-way fixed point both run their passes to
 convergence without a graph, run the certified pass once more on the graph at the converged
 interface, and attach the implicit adjoint of the interface equations
@@ -152,7 +152,7 @@ that would fail if the claim stopped holding.
   is still correct but whose cost can scale up to linearly with batch size even though the
   interface Jacobian is block-diagonal there. `diagnostics["adjoint_batched"]` says which of
   the two ran. `CoupledModel` and `Model` both pass the batch shape through, so on the
-  per-instance path the adjoint's cost no longer scales with batch size
+  per-instance path the adjoint's cost does not scale with batch size
   (see [Coupling](../applications/coupling.md#limitations)).
 - **Nonsmooth element laws have declared piecewise semantics, named per element.** `Damper`
   evaluates both signed power-law branches everywhere and selects with `torch.where`, so its
@@ -208,12 +208,11 @@ the cases rather than leaving you to discover them.
 - **At a hard clip.** `CapacitatedTransferLayer` in `mode="hard"` carries *exactly zero*
   gradient across a capacity or headroom crossing — the branch choice is discrete. That is the
   entire reason `mode="smooth"` and `mode="projection"` exist. See
-  [WSIMOD allocation](../applications/capacitated.md).
+  [Capacitated allocation](../applications/capacitated.md).
 - **At the sharing site, in smooth mode.** Smooth mode's proportional-share formula depends only
   on preference weights and total headroom, never on any individual competitor's request, so the
   cross-gradient $\partial f_i / \partial r_j$ is provably zero. `mode="projection"` routes that
-  site through a real coupled QP to give a genuine cross-gradient. This was found as a live bug,
-  not anticipated.
+  site through a real coupled QP to give a genuine cross-gradient.
 - **At zero flow in the sewer.** `normal_depth` returns exactly $h = 0$ with gradient $0$ at
   $q = 0$, a documented modelling choice, because the true $dh/dq$ diverges there.
 - **Structurally, for `f_i`.** The sewer's interfacial drag coefficient is a `Drive` attribute
@@ -229,9 +228,9 @@ Every application checks its gradients against finite differences, and the numbe
 
 | Application | Check | Tolerance | Measured |
 |---|---|---|---|
-| Water (D7) | demand, roughness, pump $h_0$, tank area | $10^{-6}\times$ scale | 3.2e-6 / 2.5e-10 / 1.0e-6 / 2.8e-9 |
-| Sewer (C3) | inflow, `T_head`, leak area, `f_air`, vs Richardson-extrapolated central differences | rel $10^{-6}$ | holds |
-| Capacitated (W6) | `torch.autograd.gradcheck` through smooth and projection modes | analytic | holds |
+| Water | demand, roughness, pump $h_0$, tank area | $10^{-6}\times$ scale | 3.2e-6 / 2.5e-10 / 1.0e-6 / 2.8e-9 |
+| Sewer | inflow, `T_head`, leak area, `f_air`, vs Richardson-extrapolated central differences | rel $10^{-6}$ | holds |
+| Capacitated | `torch.autograd.gradcheck` through smooth and projection modes | analytic | holds |
 | Coupling | gradient across the join vs central differences | rel $10^{-5}$ | holds |
 
 If you write your own element, do the same: `torch.autograd.gradcheck` in float64 against a
