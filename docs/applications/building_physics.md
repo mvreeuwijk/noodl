@@ -308,22 +308,33 @@ one of `"Buildings.Media.Air"`, `"Buildings.Media.Specialized.Air.PerfectGas"` a
 The reference is NIST's ContamX 3.4.1.7, driven through `contamxpy` (the `contam` extra, Windows
 x86-64 only — the wheel bundles the engine). `noodl.apps.building_physics.contamx` provides `run_steady`
 and `run_transient`, which run the engine on a scratch copy of the project and never mutate your
-fixture directory.
+fixture directory; `airflow_convergence=(rcnvg, acnvg)` tightens ContamX's airflow tolerances in
+that copy.
+
+ContamX holds project input data in single precision (the fan rated 0.200683 kg/s comes back as
+float32(0.200683) exactly), so the reference is only as precise as a float32 roundoff,
+$u = 2^{-24} \approx 6\times10^{-8}$, in each input. Every tolerance below is a first-order budget
+of such roundoffs through the compared quantity, not a fit to the measured error; ContamX's
+airflow iteration is run at `(1e-10, 1e-12)` and noodl physics' Newton at 1e-14 kg/s so that neither
+solver contributes.
 
 | Check | Tolerance | Measured |
 |---|---|---|
 | Stack project, flow directions | exact signs | match |
-| Stack project, flow magnitudes, over a ±20 K ambient sweep | rel 1e-3 | **4.1e-5 – 4.4e-5** |
-| Residual flatness across the sweep (max/min ratio) | < 1.5 | holds |
-| Constant-mass-flow fan delivers its rating (0.200683 kg/s) | rel 1e-5 | holds |
-| Three-zone project, steady flows | rel 1e-3, abs 1e-6 | holds |
-| Three-zone project, transient concentrations, 24 steps at 300 s | rel 1e-3 | **6.5e-6** |
+| Stack project, flow magnitudes, over a ±20 K ambient sweep | rel 16.6–31.8 $u$ (9.9e-7 – 1.9e-6) | **7e-8 – 1.0e-7** |
+| Stack residual without / with the zone-pressure density | 3e-5 – 6e-5 flat / < 1 % of that | 4.4e-5 / 1.0e-7 |
+| Constant-mass-flow fan delivers its rating (0.200683 kg/s) | engine rel $u$, noodl physics rel 1e-12 | holds |
+| Three-zone project, steady flows | rel 16 $u$ (9.5e-7) | **9.1e-8** |
+| Three-zone project, transient concentrations, 24 steps at 300 s | rel 64 $u$ (3.8e-6) | **2.0e-7** |
 
-The magnitude row's accuracy relies on the reader correcting orifice coefficients for upstream
-density rather than freezing them at reference density. The residual-flatness test exists to
-guard this: a density-related regression would show up as a residual that grows with $\Delta T$,
-because the size of the density correction scales with the temperature difference across the
-sweep, even if the absolute error stayed small.
+The stack rows rely on two density effects matching ContamX's. Orifice coefficients are
+corrected for the density of the air entering the path (freezing them at reference density
+cost 1.7e-2, growing with $\Delta T$). And the project sets `densZP = 1`, zone density at the
+zone's absolute pressure: ignoring it left a residual of 4.1e-5 – 4.4e-5, flat across the sweep,
+because the stack pressure is a density difference that amplifies the |P_zone| / Pb ≈ 6e-6
+density change about fourteenfold. The three-zone transient was 6.5e-6 while zone air mass was
+held at the reference density 1.2041 kg/m³ rather than ContamX's `Pb / (R T)` (2.2e-6 apart at
+293.15 K). What remains everywhere is one or two float32 roundoffs.
 
 The path-flow sign convention was verified independently against two cases rather than assumed,
 since `contamxpy`'s own documentation does not pin the sign of `getPathFlow`.
@@ -348,21 +359,21 @@ OpenModelica nonlinear-solver residual on the door's inflow-density loop, not a 
 difference (likely, not diagnosed: not shown by a tighter `omc` tolerance).
 
 The **CONTAM cross-check** on `OneWayFlow` (13 pressure-difference knots × 8 elements, from
-CONTAM's own validation table, `OneWayFlow.mo`'s `contamData`): noodl differs from CONTAM by at
+CONTAM's own validation table, `OneWayFlow.mo`'s `contamData`): noodl physics differs from CONTAM by at
 most 0.74 % relative (7.68e-4 kg/s absolute) — exactly the amount MBL itself differs from CONTAM.
-The assertion is `|noodl - contam| <= |omc - contam| + 1e-6 |omc| + 1e-9` at every entry: noodl
+The assertion is `|noodl - contam| <= |omc - contam| + 1e-6 |omc| + 1e-9` at every entry: noodl physics
 adds nothing to MBL's own departure from the table (41 of 104 entries miss the table's 3
-significant figures, in MBL as much as in noodl).
+significant figures, in MBL as much as in noodl physics).
 
 **Dynamic models (12, with volumes).** The error metric is `|noodl - omc| / max(|omc|, floor)`
 over every row after `t = StartTime` (the floor: 1e-3 of the model's largest flow for flows, 1e-3
-of the column's largest value otherwise). Nine models share all their physics with noodl; three
-are dominated by MBL's volume mass storage, which noodl's quasi-steady airflow does not model.
+of the column's largest value otherwise). Nine models share all their physics with noodl physics; three
+are dominated by MBL's volume mass storage, which noodl physics' quasi-steady airflow does not model.
 
 *Parity* — the nine models are compared at the reference's own precision. Their reference CSVs
 were regenerated with DASSL at a tolerance of 1e-12 (at the models' declared 1e-6 the reference's
 own error was of the order of the comparison: 5.6e-5 K on `ZonalFlow`, a 5e-5 relative door-flow
-wiggle after `CO2TransportStep`'s pulse). noodl runs its symmetric, second-order
+wiggle after `CO2TransportStep`'s pulse). noodl physics runs its symmetric, second-order
 `scheme="midpoint"` at one and two steps per output interval and combines them by Richardson
 extrapolation (`run.extrapolate`, fourth order), on a driver grid that puts every signal event
 (the pulse's edges) on a step boundary. The tolerance is 1e-6 relative for every column:
@@ -381,7 +392,7 @@ extrapolation (`run.extrapolate`, fourth order), on a driver grid that puts ever
 
 Three corrections made this possible, each a difference in physics or numerics found by the
 comparison: MBL's moist-air heat balance, `m cp(X) dT/dt = sum m_in cp(X_in) (T_in - T)`, which
-noodl's single-`cp` carrier missed by up to `0.84 |X_in - X|` (1e-2 K on `ZonalFlow`); the zone
+noodl physics' single-`cp` carrier missed by up to `0.84 |X_in - X|` (1e-2 K on `ZonalFlow`); the zone
 mass taken at the initial quasi-steady pressure rather than at `p_start` (3.5e-4 on
 `CO2TransportStep`'s trace gas); and a closed zone group's pressure level set by its mass, with
 its largest zone as the reference (0.12 Pa on `NaturalVentilation`). The previous first-order
@@ -390,11 +401,11 @@ step at the output interval had left 2-3 % in the door flows.
 MBL's volumes also start at `p_start` and relax to the airflow's pressures within the first
 interval; that storage moves Xi by `X dp/p` (`ConservationEquation.mo` evolves
 `der(Xi) = mbXi_flow/m`, without the `-Xi der(m)` term) and the temperature by the flow work
-`(pStp/dStp - X dh/dX) dp/p / cp`. The test starts noodl from that relaxed state (3.5e-4 in Xi
+`(pStp/dStp - X dh/dX) dp/p / cp`. The test starts noodl physics from that relaxed state (3.5e-4 in Xi
 on the `ThreeRooms*` stack, 2.9e-3 K in `OpenDoorBuoyancyPressureDynamic`). The values in
 *italics* are what remains where the volumes keep storing or releasing air later on (bounded at
 1.25 times these values): the storage flow itself, its flow work and its Xi term. Adding the
-last two as sources computed from noodl's own quasi-steady `dp/dt` brings `NaturalVentilation`'s
+last two as sources computed from noodl physics' own quasi-steady `dp/dt` brings `NaturalVentilation`'s
 Xi from 4.6e-7 to 4e-11 and its flows to 3.5e-6, the storage flow's own size (measured over its
 first 60 rows). In `ReverseBuoyancy3Zones` it is the air `volTop` releases in its first seconds,
 carried into the neighbouring rooms (2.1e-3 K in `volWes` at 7.2 s); the relative flow errors
@@ -403,7 +414,7 @@ peak where the flows reverse through zero.
 The default `pytest` run compares the first 26-101 rows of each (about 95 s together);
 `pytest -m slow` compares every row (30 s to 6 min per model).
 
-*Storage-dominated* — MBL's volumes compress and expand; noodl's airflow is quasi-steady, like
+*Storage-dominated* — MBL's volumes compress and expand; noodl physics' airflow is quasi-steady, like
 CONTAM's, so it does not:
 
 | Model | T, abs (K) | p, abs (Pa) | flow, abs (kg/s) | flow, % of model's largest flow |
@@ -414,15 +425,15 @@ CONTAM's, so it does not:
 
 Each test asserts the physical mechanism, not just a bound. `ClosedDoors` and `OneOpenDoor` are
 closed, ideal-gas rooms heated by a sinusoidal source: MBL's rooms heat at constant volume, while
-noodl's zone capacity is the constant-pressure `m cp`, so the ratio of MBL's to noodl's
+noodl physics' zone capacity is the constant-pressure `m cp`, so the ratio of MBL's to noodl physics'
 temperature rise should be `cp/cv` — measured 1.4016 and 1.3995 against `cp/cv` = 1.398 and
 1.400. `ReverseBuoyancy`'s zones start 1325 Pa above the boundary; MBL releases the excess through
 mass storage and cools by close to the flow-work-minus-latent-heat prediction (0.83 K measured
-against 0.78 K predicted, within the test's 10 % tolerance), while noodl starts already balanced
+against 0.78 K predicted, within the test's 10 % tolerance), while noodl physics starts already balanced
 and does not cool.
 
 **The `t = StartTime` row** is excluded from every bound above, and reported separately: at
-that row OpenModelica holds MBL's own pressure initialisation, which noodl's quasi-steady solve
+that row OpenModelica holds MBL's own pressure initialisation, which noodl physics' quasi-steady solve
 starts already balanced against.
 
 Every column's numbers (not just the worst) are committed at
@@ -445,7 +456,7 @@ regression at rtol 1e-8.
 - **Airflow is quasi-steady.** On both the CONTAM and the Modelica route a zone's air mass is
   held fixed within a step, as in CONTAM: pressures and flows balance instantly and the air
   itself does not compress or expand. Where that storage matters — a closed, heated room
-  expanding through its leakage, or a model that starts from unbalanced pressures — noodl's
+  expanding through its leakage, or a model that starts from unbalanced pressures — noodl physics'
   results differ from a model that resolves it, such as the Modelica Buildings Library. The
   [storage-dominated parity group](#against-openmodelica-modelica-buildings-library) shows by
   how much.
@@ -480,5 +491,5 @@ The application needs nothing beyond the base dependencies. The `contam` extra i
 to run ContamX itself for a side-by-side comparison:
 
 ```bash
-pip install "noodl[contam]"    # Windows x86-64 only
+pip install "noodl-physics[contam]"    # Windows x86-64 only
 ```

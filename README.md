@@ -1,11 +1,14 @@
-# noodl
+# noodl physics
 
 <p align="center">
-  <img src="docs/assets/noodl-logo.png" alt="noodl — a differentiable library for network physics" width="640">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/noodl-physics-full-dark.svg">
+    <img src="docs/assets/noodl-physics-full-light.svg" alt="noodl physics — complex networks, differentiable by design" width="640">
+  </picture>
 </p>
 
-**noodl** — the **N**etwork-**O**riented **O**pen **D**ifferentiable **L**ibrary — is a generic
-framework for solving physics problems on networks, built on PyTorch. It combines graph
+**noodl physics** is an open-source framework for differentiable network modelling of physical
+systems, built on PyTorch. It combines graph
 topology, conservation laws, and modular descriptions of physical processes to model flows,
 storage, transport, and reactions within a common framework. Different physical systems can be
 composed and coupled through shared network structures, while differentiable solvers support
@@ -22,7 +25,7 @@ simulation, parameter estimation, and optimisation.
 ## Installation
 
 ```
-pip install noodl
+pip install noodl-physics
 ```
 
 Python 3.11 or newer; PyTorch, NetworkX and NumPy are the only hard dependencies. The optional
@@ -67,7 +70,7 @@ print("flows (m3/s):  ", dict(zip(("room->ambient",), q.tolist())))
 
 ## Applications
 
-noodl is one generic solver for networks whose edges carry a flow and whose nodes conserve it.
+noodl physics is one generic solver for networks whose edges carry a flow and whose nodes conserve it.
 The applications are physical systems modelled with that solver, each a thin layer of domain
 physics over the shared core:
 
@@ -117,9 +120,10 @@ cases in the test suite.
 
 ## The name
 
-*noodl* stands for **N**etwork-**O**riented **O**pen **D**ifferentiable **L**ibrary. The mark is
-a single continuous path through two nodes and a junction — flow through a network, drawn in
-one stroke.
+*noodl* stands for **N**etwork-**O**riented **O**pen **D**ifferentiable **L**ibrary; *physics*
+says what it is for. The package is installed as `noodl-physics` and imported as `noodl`. The
+mark is a single continuous pipe between two nodes — flow through a network, drawn in one
+stroke.
 
 ## Credits and licence
 

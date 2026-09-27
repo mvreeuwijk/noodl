@@ -1406,7 +1406,7 @@ def test_diagnostics_linear_reports_sparse_direct_backend_under_the_default_auto
 
 def test_auto_falls_back_to_gmres_and_warns_once_when_scipy_is_not_importable(monkeypatch):
     """Hazard 1: the one fall-back that is an ENVIRONMENT fault (SciPy, the
-    `noodl[sparse]` extra, missing) rather than a modelling or grad-safety fact, so it is
+    `noodl-physics[sparse]` extra, missing) rather than a modelling or grad-safety fact, so it is
     the only one that warns, and only once per process.
     """
     import builtins

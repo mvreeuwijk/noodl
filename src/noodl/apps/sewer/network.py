@@ -426,8 +426,15 @@ def build_model(
         )]
         if quality else []
     )
+    # `reaction_order="before_transport"`: SWMM's `qualrout.c::findLinkQual` reacts a
+    # conduit's step-start concentration (`getReactedQual`) and then mixes it with the
+    # inflow over the conduit volume (`getMixedQual`), and reports the concentration AFTER
+    # mixing. Reacting before the transport step makes the returned `"water_quality.x"` that
+    # same sample (the default order, after transport, would return `(1 - k dt)` times it at
+    # the fixed point).
     model = Model(
         graph, layers, closures=closures, reactions=reactions, coupling=coupling,
+        reaction_order="before_transport",
         iterate_tol=(
             {"water_quality": 1e-12, "air_quality": 1e-12}
             if coupling == "iterate" and quality

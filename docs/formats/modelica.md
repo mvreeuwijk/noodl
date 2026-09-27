@@ -55,7 +55,7 @@ ModelicaImportError: modelica: refused 3 items:
 - `DoorOpen`/`DoorOperable` use MBL's fixed default density (`Door.mo`); a discretised door
   (`DoorDiscretizedOpen`/`Operable`) evaluates density at the actual port pressure
   (`TwoWayFlowElement.mo`) instead — the two door families do not share one convention.
-- A door becomes two directional noodl edges between the same pair of zones; a discretised door
+- A door becomes two directional noodl physics edges between the same pair of zones; a discretised door
   becomes one edge per compartment, each with its own hydrostatic head.
 - Zonal flows are four-port, like doors (not the two-port shape a one-way element has), and
   become two directional edges the same way.
@@ -82,7 +82,7 @@ ModelicaImportError: modelica: refused 3 items:
 **Quasi-steady airflow.** Like the CONTAM route, a volume's air mass is not stored: the airflow
 is quasi-steady at every step. MBL's volumes do store mass, so a model whose dynamics are
 dominated by that storage — a closed, heated room expanding through its leakage, or an initial
-pressure imbalance draining away — parts company with noodl by more than round-off (see [the
+pressure imbalance draining away — parts company with noodl physics by more than round-off (see [the
 Modelica parity tables](../applications/building_physics.md#against-openmodelica-modelica-buildings-library)).
 Adding volume mass storage would close this gap; it is a possible extension, not implemented in
 this release.

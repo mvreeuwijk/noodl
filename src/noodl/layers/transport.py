@@ -108,7 +108,7 @@ def active_interior(
 _TRANSPORT_SOLVERS = ("auto", "gmres", "gmres_jacobi", "gmres_ilu", "sparse_direct", "direct")
 
 # Set once, mirroring `solvers.select._WARNED_SPARSE_DIRECT_NEEDS_SCIPY`: the one fall-back
-# from this layer's "auto" to gmres that is an ENVIRONMENT fault (SciPy, the `noodl[sparse]`
+# from this layer's "auto" to gmres that is an ENVIRONMENT fault (SciPy, the `noodl-physics[sparse]`
 # extra, is absent) rather than a modelling or grad-safety fact, so it is the only one that
 # warns, and only once per process -- a per-solve warning at this default's small-batch,
 # every-step call frequency would be unusable noise. Module state rather than a `warnings`
@@ -565,7 +565,7 @@ class TransportLayer:
         fall-backs to plain `gmres` (never a raise: `auto` is a promise to choose a backend
         that works, the same contract `solvers.select`'s own `auto` makes):
 
-        1. **SciPy absent.** `sparse_direct` needs SciPy (`noodl[sparse]`, an optional
+        1. **SciPy absent.** `sparse_direct` needs SciPy (`noodl-physics[sparse]`, an optional
            extra). When it is not importable, `auto` falls back to `gmres` and warns ONCE
            per process (`_WARNED_AUTO_NEEDS_SCIPY`, mirroring `solvers.select`'s own
            `_WARNED_SPARSE_DIRECT_NEEDS_SCIPY` pattern and for the same reason: a per-solve
@@ -652,7 +652,7 @@ class TransportLayer:
                     f"{_SPARSE_DIRECT_MAX_BATCH}), but scipy could not be imported, so it "
                     f"fell back to plain gmres. The answer is correct; it is slower at small "
                     f"batches (see benchmarks/transport_solver_bench.py). Install "
-                    f"the extra to get the documented default: pip install noodl[sparse]. "
+                    f"the extra to get the documented default: pip install noodl-physics[sparse]. "
                     f"This warning is issued once per process; diagnostics['linear']"
                     f"['backend'] reports the backend that actually ran on every solve.",
                     RuntimeWarning,

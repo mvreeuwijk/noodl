@@ -24,8 +24,32 @@ def _cxlib():
     return cxLib
 
 
+def _set_airflow_convergence(prj: Path, rcnvg: float, acnvg: float) -> None:
+    """Rewrite `afrcnvg`/`afacnvg` in the COPY's `!sim_af` run-control record.
+
+    ContamX stops its airflow Newton iteration at these tolerances (TN 1887r1 Appendix A:
+    `sim_af afcalc afmaxi afrcnvg afacnvg afrelax uac Pbldg uPb`; relative and absolute,
+    the latter in kg/s). NIST's sample projects carry 1e-5 / 1e-6, which leaves ContamX's own
+    path flows unbalanced at the ~1e-6 relative level; a comparison meant to resolve
+    anything finer has to ask the reference engine for it. contamxpy exposes no setter, so
+    the record is edited in the scratch copy -- never in the fixture.
+    """
+    lines = prj.read_bytes().decode().splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("!sim_af"):
+            tok = lines[i + 1].split()
+            if len(tok) < 9:
+                break
+            tok[3], tok[4] = f"{float(rcnvg):.6e}", f"{float(acnvg):.6e}"
+            ending = lines[i + 1][len(lines[i + 1].rstrip("\r\n")):]
+            lines[i + 1] = " ".join(tok) + ending
+            prj.write_bytes("".join(lines).encode())
+            return
+    raise ValueError(f"contamx: {prj.name} has no '!sim_af' record with 9 fields to edit")
+
+
 @contextlib.contextmanager
-def _isolated(prj_path):
+def _isolated(prj_path, airflow_convergence=None):
     """Yield a path to a COPY of the project inside a scratch directory.
 
     ContamX writes its `.sim`, `.log`, `.ach` and `.xlog` output beside the `.prj` it is
@@ -44,6 +68,8 @@ def _isolated(prj_path):
     with tempfile.TemporaryDirectory(prefix="noodl-contamx-") as tmp:
         for sibling in sorted(src.parent.glob(f"{src.stem}.*")):
             shutil.copy2(sibling, Path(tmp) / sibling.name)
+        if airflow_convergence is not None:
+            _set_airflow_convergence(Path(tmp) / src.name, *airflow_convergence)
         yield Path(tmp) / src.name
 
 
@@ -124,9 +150,13 @@ def _result(cx, flows, mf, dt=None) -> dict:
     return out
 
 
-def run_steady(prj_path, *, ambient: dict) -> dict:
-    """Path net flows [kg/s] and zone mass fractions after the initial steady-state solve."""
-    with _isolated(prj_path) as prj:
+def run_steady(prj_path, *, ambient: dict, airflow_convergence=None) -> dict:
+    """Path net flows [kg/s] and zone mass fractions after the initial steady-state solve.
+
+    `airflow_convergence=(rcnvg, acnvg)` overrides the project's airflow tolerances in the
+    scratch copy (see `_set_airflow_convergence`); `None` runs the project as written.
+    """
+    with _isolated(prj_path, airflow_convergence) as prj:
         cx = _open(prj, ambient, reported_as=prj_path)
         try:
             flows, mf = _snapshot(cx)
@@ -135,10 +165,11 @@ def run_steady(prj_path, *, ambient: dict) -> dict:
             cx.endSimulation()
 
 
-def run_transient(prj_path, *, steps: int, ambient: dict) -> dict:
+def run_transient(prj_path, *, steps: int, ambient: dict, airflow_convergence=None) -> dict:
     """`steps` steps of the project's own time step; results stacked with the initial state
-    first: flow (steps+1, n_paths), mf (steps+1, n_zones, K)."""
-    with _isolated(prj_path) as prj:
+    first: flow (steps+1, n_paths), mf (steps+1, n_zones, K). `airflow_convergence` as in
+    `run_steady`."""
+    with _isolated(prj_path, airflow_convergence) as prj:
         cx = _open(prj, ambient, reported_as=prj_path)
         try:
             dt = float(cx.getSimTimeStep())

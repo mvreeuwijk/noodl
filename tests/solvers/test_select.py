@@ -885,7 +885,7 @@ def test_auto_sparse_direct_reports_one_iteration_and_a_converged_status():
 def _no_interior_op() -> GraphLaplacianOperator:
     """One edge between two BOUNDARY nodes: zero unknowns, and so zero COO entries too.
 
-    Not a contrived shape: `tests/verification/test_contam_airflow.py`'s parallel-combination
+    Not a contrived shape: `tests/verification/test_airflow_closed_forms.py`'s parallel-combination
     fixtures are exactly this network, and they reach `linear_init` with an empty right-hand
     side before `newton` gets its own chance to short-circuit on it.
     """
@@ -1071,7 +1071,7 @@ def _rearm_scipy_warning(monkeypatch):
 def test_auto_warns_once_when_scipy_is_the_only_thing_missing(monkeypatch):
     """The one fall-back that is an ENVIRONMENT fault rather than a modelling fact: this
     operator certifies SPD, offers a sparse form and is within the batch threshold, so the
-    only reason it is not being factorised is that the `noodl[sparse]` extra is absent.
+    only reason it is not being factorised is that the `noodl-physics[sparse]` extra is absent.
     PCG is still a correct answer, so this is a warning and not an error -- and it fires
     once per process, because a per-solve warning would be unusable noise.
     """

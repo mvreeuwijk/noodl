@@ -1,4 +1,4 @@
-"""Local per-node reactions applied after a transport step by operator splitting, some
+"""Local per-node reactions applied around a transport step by operator splitting, some
 rate-based and others instantaneous equilibria."""
 
 from __future__ import annotations
@@ -9,7 +9,8 @@ import torch
 
 
 class Reaction:
-    """A local, per-node nonlinear map applied to the state after a transport step."""
+    """A local, per-node nonlinear map applied to the state after a transport step (or before
+    it, under `Model(reaction_order="before_transport")`)."""
 
     def apply(
         self, x: torch.Tensor, dt: float, drivers: Mapping[str, torch.Tensor] | None = None

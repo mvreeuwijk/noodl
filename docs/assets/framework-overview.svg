@@ -23,8 +23,8 @@
   <line x1="410" y1="118" x2="410" y2="140" stroke="#7C8A99" stroke-width="2" stroke-linecap="round" marker-end="url(#arm)"/>
   <line x1="410" y1="198" x2="410" y2="220" stroke="#7C8A99" stroke-width="2" stroke-linecap="round" marker-end="url(#arm)"/>
   <line x1="410" y1="278" x2="410" y2="300" stroke="#7C8A99" stroke-width="2" stroke-linecap="round" marker-end="url(#arm)"/>
-  <text x="790" y="92" font-size="11.5" fill="#7C8A99" text-anchor="end" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">framework</text>
-  <text x="790" y="172" font-size="11.5" fill="#17A398" text-anchor="end" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">yours</text>
-  <text x="790" y="252" font-size="11.5" fill="#7C8A99" text-anchor="end" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">framework</text>
-  <text x="790" y="332" font-size="11.5" fill="#7C8A99" text-anchor="end" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">framework</text>
+  <text x="742" y="92" font-size="11.5" fill="#7C8A99" text-anchor="end" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">framework</text>
+  <text x="742" y="172" font-size="11.5" fill="#17A398" text-anchor="end" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">yours</text>
+  <text x="742" y="252" font-size="11.5" fill="#7C8A99" text-anchor="end" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">framework</text>
+  <text x="742" y="332" font-size="11.5" fill="#7C8A99" text-anchor="end" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">framework</text>
 </svg>
