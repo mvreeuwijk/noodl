@@ -11,7 +11,7 @@ reads is therefore known to it only to the float32 unit roundoff `F32_U` = 2**-2
 and each tolerance below is a first-order budget of such roundoffs through the quantity
 compared (derived at each test). The solver-side contributions are pushed below that:
 ContamX's airflow iteration is run at `TIGHT_AIRFLOW` rather than the sample projects'
-1e-5 / 1e-6, and noodl's Newton at an absolute residual of `NOODL_ATOL` kg/s.
+1e-5 / 1e-6, and noodl physics' Newton at an absolute residual of `NOODL_ATOL` kg/s.
 """
 
 from __future__ import annotations
@@ -234,10 +234,10 @@ def test_a_constant_mass_flow_fan_delivers_its_rating_in_the_from_to_direction(
     model, state, drivers = project_to_model(p, ambient=amb)
     ours = p.path_flows(steady(model, state, drivers)["air.q"])
     j = [path.nr for path in p.paths].index(FAN_CMF_PATH)
-    # noodl's is the rating in float64: a fixed flow has nothing to solve for.
+    # noodl physics' is the rating in float64: a fixed flow has nothing to solve for.
     assert ours[j].item() == pytest.approx(FAN_CMF_RATING, rel=1e-12)
     record_property("check", "Constant-mass-flow fan delivers its rating (0.200683 kg/s)")
-    record_property("tolerance", "engine rel 2**-24 (float32), noodl rel 1e-12")
+    record_property("tolerance", "engine rel 2**-24 (float32), noodl physics rel 1e-12")
     record_property("measured_rel", abs(ours[j].item() / FAN_CMF_RATING - 1.0))
 
 
@@ -283,7 +283,7 @@ def test_three_zone_transient_concentrations_match_contamx(contamx, record_prope
     # and rho V two more (R, T; V and dt are exact). Early in a transient the k-th of k zones
     # in series responds as the PRODUCT of k such rates, so a relative rate error reaches it
     # up to k times: 3 zones x 18 F32_U = 54, budgeted as 64 F32_U (3.8e-6). Measured
-    # 2.0e-7. It was 6.5e-6 while noodl held zone air mass at RHO_0 V rather than ContamX's
+    # 2.0e-7. It was 6.5e-6 while noodl physics held zone air mass at RHO_0 V rather than ContamX's
     # Pb / (R T) V (2.2e-6 apart even at 293.15 K), amplified about threefold, as above.
     tol = 64 * F32_U
     torch.testing.assert_close(ours, ref["mf"], rtol=tol, atol=1e-15)

@@ -315,7 +315,7 @@ ContamX holds project input data in single precision (the fan rated 0.200683 kg/
 float32(0.200683) exactly), so the reference is only as precise as a float32 roundoff,
 $u = 2^{-24} \approx 6\times10^{-8}$, in each input. Every tolerance below is a first-order budget
 of such roundoffs through the compared quantity, not a fit to the measured error; ContamX's
-airflow iteration is run at `(1e-10, 1e-12)` and noodl's Newton at 1e-14 kg/s so that neither
+airflow iteration is run at `(1e-10, 1e-12)` and noodl physics' Newton at 1e-14 kg/s so that neither
 solver contributes.
 
 | Check | Tolerance | Measured |
@@ -323,7 +323,7 @@ solver contributes.
 | Stack project, flow directions | exact signs | match |
 | Stack project, flow magnitudes, over a ±20 K ambient sweep | rel 16.6–31.8 $u$ (9.9e-7 – 1.9e-6) | **7e-8 – 1.0e-7** |
 | Stack residual without / with the zone-pressure density | 3e-5 – 6e-5 flat / < 1 % of that | 4.4e-5 / 1.0e-7 |
-| Constant-mass-flow fan delivers its rating (0.200683 kg/s) | engine rel $u$, noodl rel 1e-12 | holds |
+| Constant-mass-flow fan delivers its rating (0.200683 kg/s) | engine rel $u$, noodl physics rel 1e-12 | holds |
 | Three-zone project, steady flows | rel 16 $u$ (9.5e-7) | **9.1e-8** |
 | Three-zone project, transient concentrations, 24 steps at 300 s | rel 64 $u$ (3.8e-6) | **2.0e-7** |
 

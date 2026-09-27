@@ -300,11 +300,11 @@ def _read_density_options(line: str) -> bool:
     fixture that sets it. `project_to_model` honours it (see `ZonePressureDensity`).
 
     `stackD = 1` asks ContamX for a variable-density stack-pressure calculation (density
-    varying with height rather than one value per zone); noodl's `Stack` holds one density
+    varying with height rather than one value per zone); noodl physics' `Stack` holds one density
     per node, so a project asking for it is REFUSED rather than silently simulated with
     uniform densities. `tsdens`, `relax`, `tsmaxi`, `cnvgSS` and
     `dodMdt` govern ContamX's own iteration and its dM/dt term, which is zero while zone
-    temperatures are constant -- and a `.prj` gives noodl no thermal layer to change them.
+    temperatures are constant -- and a `.prj` gives noodl physics no thermal layer to change them.
     """
     tok = line.split()
     if len(tok) < 6:
@@ -316,7 +316,7 @@ def _read_density_options(line: str) -> bool:
     if stack_d != 0:
         raise ValueError(
             f"prj: stackD = {stack_d} asks for a variable-density stack calculation "
-            f"(density varying with height); noodl holds one density per node, so this is "
+            f"(density varying with height); noodl physics holds one density per node, so this is "
             f"unsupported"
         )
     return dens_zp != 0
