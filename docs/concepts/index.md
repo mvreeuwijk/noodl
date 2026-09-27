@@ -1,6 +1,6 @@
 # Concepts
 
-noodl is built from five ideas that stack. Each section below is a page; read them in order the
+noodl physics is built from five ideas that stack. Each section below is a page; read them in order the
 first time.
 
 | Page | What it covers |
@@ -13,7 +13,7 @@ first time.
 
 ## The shape of a model
 
-Every noodl model is the same four-part object, whatever the physics:
+Every noodl physics model is the same four-part object, whatever the physics:
 
 ```
 Network            a typed multigraph: nodes hold storage, edges carry flow
@@ -32,7 +32,7 @@ framework owns the graph, the conservation law and the solve; your problem owns 
 laws, the drives and the closures. Everything domain-specific in the six
 [applications](../applications/index.md) lives in those last three boxes.
 
-![The noodl model stack](../assets/framework-overview.svg)
+![The noodl physics model stack](../assets/framework-overview.svg)
 
 ## The central claim
 
@@ -53,7 +53,7 @@ Storage and transport add time: nodes accumulate, edges advect what the flows ca
 incidence structure serves both, which is why heat riding on an airflow needs no new operator —
 only the flows of the kinds it advects on.
 
-## What noodl does not decide for you
+## What noodl physics does not decide for you
 
 Three choices are deliberately left in your hands, and each has bitten someone:
 

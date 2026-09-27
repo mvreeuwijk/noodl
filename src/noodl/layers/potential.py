@@ -769,7 +769,7 @@ class PotentialFlowLayer:
         resolved that request to, which under `"auto"` depends on runtime predicates the
         caller has no other way to observe (the ensemble size against
         `select._SPARSE_DIRECT_MAX_BATCH`, and whether SciPy is importable at all -- it is
-        an optional extra, `pip install noodl[sparse]`). Without it, an installation
+        an optional extra, `pip install noodl-physics[sparse]`). Without it, an installation
         missing that extra takes the ~4.6x-slower PCG path with nothing saying so; the
         indirect signal is `"linear_iterations"` (1 for a factorisation, ~170 for PCG).
         It is `None` only when no linear solve happened at all.

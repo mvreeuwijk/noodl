@@ -1,10 +1,10 @@
-# Extending noodl
+# Extending noodl physics
 
-This page walks through the two extension levels noodl supports below "a new numerical
+This page walks through the two extension levels noodl physics supports below "a new numerical
 block/backend": **a new branch law inside an existing layer**, and **a new application
 composed of existing blocks**. The exact code below is `tests/test_extension_recipe.py`, an
 extension-level integration test that imports nothing from `noodl.apps` and does not modify
-anything under `src/` — proof that both levels work through noodl's ordinary public surface,
+anything under `src/` — proof that both levels work through noodl physics' ordinary public surface,
 with no core change required.
 
 ## Level 1: a new branch law

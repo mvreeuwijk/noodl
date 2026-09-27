@@ -1,7 +1,7 @@
 # Quick start
 
 This page builds a working model in about fifteen lines, then shows the two things that make
-noodl different from a conventional network solver: it batches, and it differentiates.
+noodl physics different from a conventional network solver: it batches, and it differentiates.
 
 ## A two-node network
 

@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "noodl"
+name = "noodl-physics"
 version = "0.1.0"
-description = "Network topology and conservative physics on graphs for building simulation (PyTorch)"
+description = "Open-source framework for differentiable network modelling of physical systems (PyTorch)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "BSD-3-Clause"}
@@ -25,7 +25,7 @@ Issues = "https://github.com/mvreeuwijk/noodl/issues"
 [project.optional-dependencies]
 # `sparse` is a RUNTIME extra, not a developer convenience. `method="auto"` prefers the
 # SciPy SuperLU backend for a certified-SPD operator with a sparse form at a flat batch of
-# at most 32, so on a plain `pip install noodl` the documented
+# at most 32, so on a plain `pip install noodl-physics` the documented
 # default silently never fires and every such solve falls back to PCG -- correct, and 4.6x
 # slower at ensemble 1. It stays OPTIONAL rather than becoming a hard dependency because the
 # evidence for the default is one platform at one problem size, and PCG remains a complete answer without it.
