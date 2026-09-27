@@ -346,6 +346,14 @@ class StreetFlows:
                 f"StreetFlows: direction_averaging must be 'none', 'munich' or 'gauss', "
                 f"got {direction_averaging!r}"
             )
+        if exchange not in ("sirane", "schulte"):
+            raise ValueError(
+                f"StreetFlows: exchange must be 'sirane' or 'schulte', got {exchange!r}"
+            )
+        if stability not in ("neutral", "munich"):
+            raise ValueError(
+                f"StreetFlows: stability must be 'neutral' or 'munich', got {stability!r}"
+            )
         # `q` is written as one concatenated block, so the layer's own `flow_kinds` order
         # IS the slot layout this closure assumes; a layer built with the kinds in any
         # other order would take the route flows for vent flows with no error anywhere.
