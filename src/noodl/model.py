@@ -3,7 +3,8 @@
 Per step: closures update the drivers
 from the current state; every potential layer is solved quasi-steadily; every capacitated
 layer takes its one explicit clip/allocate step; every transport layer is
-advanced (sub-stepped if asked) on the flows of its kinds; reactions are applied.
+advanced (sub-stepped if asked) on the flows of its kinds; reactions are applied, after
+the transport step by default or before it with `reaction_order="before_transport"`.
 `coupling="pingpong"` does that once per step with the state at the START of the step
 (Hensen 1995); `coupling="iterate"` ("onion") repeats it until the named transport states stop
 changing.
@@ -129,6 +130,12 @@ class Model:
     wrote it; see `_pass`). It is cheap and it is what a weakly coupled model wants; its
     splitting error is first order in `dt`.
 
+    `reaction_order` places the reactions in that split: `"after_transport"` (the default,
+    T then R) returns the reacted state; `"before_transport"` (R then T) reacts the
+    step-start state and returns the transported one, which is where SWMM samples its
+    water quality (`apps.sewer` builds with it). The step sequence is the same either way;
+    only the sampling point differs.
+
     `"iterate"` (the "onion") repeats that pass within the one step until the transport
     states named in `iterate_tol` stop changing, at most `iterate_max` times. Successive
     substitution with 0.5 relaxation, which takes a pass to start: pass 1 sees the state at
@@ -176,11 +183,25 @@ class Model:
         substeps: Mapping[str, int] | None = None,
         adjoint_rtol: float = 1e-10,
         iterate_relaxation: float = 0.5,
+        reaction_order: str = "after_transport",
     ) -> None:
         if coupling not in ("pingpong", "iterate"):
             raise ValueError(
                 f"Model: coupling must be 'pingpong' or 'iterate', got {coupling!r}"
             )
+        # WHERE in the operator split the reactions sit, and so where the returned state is
+        # SAMPLED. Both orders take the same `... R T R T ...` sequence; they differ only in
+        # which half-step the returned `"<layer>.x"` follows. `"after_transport"` (T then R,
+        # the default) returns the reacted state; `"before_transport"` (R then T) reacts the
+        # step-start state and returns the transported one -- the order of SWMM's
+        # `qualrout.c::findLinkQual` (`getReactedQual`, then `getMixedQual`), which reports
+        # the concentration after mixing. The sewer application builds with it.
+        if reaction_order not in ("after_transport", "before_transport"):
+            raise ValueError(
+                f"Model: reaction_order must be 'after_transport' or 'before_transport', "
+                f"got {reaction_order!r}"
+            )
+        self.reaction_order = reaction_order
         self.net = net
         self.layers = dict(layers)
         self.potential: dict[str, PotentialFlowLayer] = {}
@@ -530,7 +551,8 @@ class Model:
         t: float | None = None, boundary_transfers: bool | Collection[str] = False,
         produced: list[str] | None = None,
     ) -> tuple[State, dict, Drivers]:
-        """One closures -> potential -> capacitated -> transport -> reactions pass;
+        """One closures -> potential -> capacitated -> transport -> reactions pass (reactions
+        before transport under `reaction_order="before_transport"`);
         `dt=None` means steady (and is refused outright by a model owning a capacitated
         layer, which is inherently discrete-time).
 
@@ -676,6 +698,13 @@ class Model:
                     )
                 if sources is None:
                     sources = self._zero_sources(layer, x, layer.n_i)
+                if self.reaction_order == "before_transport":
+                    # R then T: react the step-start state over the whole step, then
+                    # transport it (over the step-start storage `cap_prev` in the amount
+                    # form below, exactly like SWMM's reaction over the old volume).
+                    for lname, reaction in self.reactions:
+                        if lname == name:
+                            x = reaction.apply(x, dt, drv)
                 cap_prev = None
                 if cap is not None:
                     cap_prev = base.get(f"{name}.capacity")
@@ -710,9 +739,10 @@ class Model:
                 if cap is not None:
                     new[f"{name}.capacity"] = cap
                     made.append(f"{name}.capacity")
-                for lname, reaction in self.reactions:
-                    if lname == name:
-                        x = reaction.apply(x, dt, drv)
+                if self.reaction_order == "after_transport":
+                    for lname, reaction in self.reactions:
+                        if lname == name:
+                            x = reaction.apply(x, dt, drv)
             new[f"{name}.x"] = x
             made.append(f"{name}.x")
             diag[name] = {"substeps": self.substeps[name]}
@@ -766,7 +796,9 @@ class Model:
         `diagnostics` is created internally when the caller passes none, so the state
         returned is unchanged either way -- only a caller who wants the transfers passes a
         dict. Sign and unit convention: see `TransportLayer.step_with_transfer`. REACTIONS
-        ARE APPLIED AFTER TRANSPORT and are not part of the reported transfer.
+        ARE NOT PART OF THE REPORTED TRANSFER: after transport (the default) they act on the
+        transported state; under `reaction_order="before_transport"` the transfer is that
+        of transporting the already-reacted step-start state.
 
         Naming only the layer(s) actually linked to a coupling matters for cost: `True`
         forces `step_with_transfer` (no diagonal shift on the `exact` scheme's Taylor
@@ -802,8 +834,9 @@ class Model:
         """The quasi-steady state of every layer at `drivers` (transport layers solved to
         `rate == 0` rather than advanced).
 
-        REACTIONS ARE NOT APPLIED. They are an operator splitting applied AFTER a transport
-        step, so they belong to `step` alone: a model carrying a reaction has a `steady` that
+        REACTIONS ARE NOT APPLIED. They are an operator splitting applied around a transport
+        step (after it, or before it under `reaction_order="before_transport"`), so they
+        belong to `step` alone: a model carrying a reaction has a `steady` that
         is the fixed point of transport only, not of transport-plus-reaction (`residuals`
         reports the same balance). Deliberate, and pinned by a test.
 
@@ -1084,7 +1117,7 @@ class Model:
         transport layer. Zero (to solver tolerance) at a steady state.
 
         The transport balance is TRANSPORT ONLY: reactions are an operator splitting applied
-        by `step` after the transport step, so they are outside the balance reported here,
+        by `step` around the transport step, so they are outside the balance reported here,
         exactly as they are outside `steady`. A model with a reaction is therefore at zero
         residual at `steady`'s fixed point, not at the reaction's.
 

@@ -24,6 +24,12 @@ therefore reproduce SWMM's rather than the exact circle's (see
 `geometry="analytic"` for the exact circle. `geometry="swmm"` does not combine with
 `storage=True`.
 
+**Water quality.** The sewer model reacts first and mixes second, and returns the
+concentration after mixing, which is where SWMM's `qualrout.c` samples it. A steady pollutant
+therefore matches SWMM's link quality to round-off at any step (see
+[the SWMM comparison](../applications/sewer.md#verification)). In a transient, conduits fed by upstream
+conduits differ by SWMM's one-step junction lag, which is first order in the step.
+
 **Not supported**, which rules out most published SWMM examples as they stand:
 
 - flow units other than CMS;

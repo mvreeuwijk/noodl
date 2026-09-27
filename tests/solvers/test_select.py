@@ -885,7 +885,7 @@ def test_auto_sparse_direct_reports_one_iteration_and_a_converged_status():
 def _no_interior_op() -> GraphLaplacianOperator:
     """One edge between two BOUNDARY nodes: zero unknowns, and so zero COO entries too.
 
-    Not a contrived shape: `tests/verification/test_contam_airflow.py`'s parallel-combination
+    Not a contrived shape: `tests/verification/test_airflow_closed_forms.py`'s parallel-combination
     fixtures are exactly this network, and they reach `linear_init` with an empty right-hand
     side before `newton` gets its own chance to short-circuit on it.
     """
