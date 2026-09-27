@@ -186,53 +186,30 @@ def test_tracer_concentration(tmp_path):
     assert worst < 1e-9, worst
 
 
-def test_tracer_model_run_through_the_lateral_load_path(tmp_path):
-    """The test above never runs the model's quality layer at all -- it builds
-    `quality=False` and resolves the tank-in-series closed form BY HAND. This test builds
-    `quality=True, air=False`, feeds the fixture's own tracer load through the
-    `LateralLoads`/`bod_in` path (mapping the tracer onto the BOD column: `Tracer` is a
-    plain first-order-decay pollutant with no sulfide-generation analogue, and
-    `SulfideGeneration`'s own `k_bod` IS constructor-configurable, so the model's BOD decay
-    is set to the fixture's own `Kdecay`, converted back from `read_swmm_inp`'s per-SECOND
-    `pollutants[...]["decay"]` to the per-DAY units `k_bod` expects), runs `sewer_steady`,
-    and compares against the SAME SWMM values the hand-resolved closed form above used.
 
+
+def _tracer_model(net, loads, pollutants):
+    """`build_model(quality=True, air=False)` carrying the fixture's `Tracer` on the BOD column.
+
+    `Tracer` is a plain first-order-decay pollutant with no sulfide-generation analogue, and
+    `SulfideGeneration`'s own `k_bod` IS constructor-configurable, so the model's BOD decay is
+    set to the fixture's own `Kdecay`, converted back from `read_swmm_inp`'s per-SECOND
+    `pollutants[...]["decay"]` to the per-DAY units `k_bod` expects. `Model.reactions` is a
+    plain list attribute, so this substitutes the reaction's PARAMETER only; the reaction's
+    position in the step and the sampling point are the builder's own.
     `T_water` is set to 20 C (`theta = 1.07 ** (T - 20) == 1`) so the reaction's temperature
-    correction (absent from SWMM's own plain first-order decay) does not contaminate the
-    comparison; `T_water`'s temperature-dependence is tested on its own terms elsewhere
-    (`tests/apps/sewer/test_quality.py::test_sulfide_rate_against_the_closed_form`).
-
-    Same scheme, different sampling point. Both codes split each step into an explicit
-    first-order decay `R: c -> c (1 - k dt)` and an implicit upwind mixing `T` over the
-    conduit volume (`qualrout.c::findLinkQual`: `getReactedQual`, then `getMixedQual`;
-    `Model.step`: the transport layer's implicit step, then `SulfideGeneration.apply`).
-    The step sequences are the same, `... R T R T ...`, but SWMM reports the concentration
-    after `T` and `Model.step` returns it after `R`, so the model's fixed point `x*` is
-    `(1 - k dt)` times SWMM's (3.47e-3 relative at dt = 60 s, which the previous version of
-    this test removed by Richardson extrapolation). Sampling the model after `T` instead --
-    one TRANSPORT-ONLY step from `x*`, `T(x*)` -- is exactly SWMM's sample, at any dt: its
-    fixed point satisfies `y (q + k V) = sum(q_u y_u) + load`, the closed form above.
-
-    1e-9 relative, as above: `sewer_steady` stops when no concentration changes by more than
-    1e-14 kg/m3 in a step (1e-13 relative on the 0.1 kg/m3 load), and with `dt / tau > 0.35`
-    per tank the remaining distance to the fixed point is at most a few times that.
+    correction (absent from SWMM's plain first-order decay) does not enter the comparison;
+    it is tested on its own terms in
+    `tests/apps/sewer/test_quality.py::test_sulfide_rate_against_the_closed_form`.
     """
-    net, loads, pollutants = read_swmm_inp(DATA / "tree_kinwave_pollut.inp")
-    k_per_second = pollutants["Tracer"]["decay"]
-    dt = 60.0
-
     from noodl.apps.sewer.quality import SulfideGeneration
 
     model, state, drivers = build_model(net, air=False, quality=True)
-    # Replace the builder's default-parameter reaction with one carrying the fixture's own
-    # decay constant -- `Model.reactions` is a plain list attribute, not reconstructed
-    # machinery, so this is a supported one-line substitution rather than a
-    # private-internals hack.
     model.reactions = [(
         "water_quality",
         SulfideGeneration(
             out_pipe=model.out_pipe, manhole_idx=model.manhole_idx,
-            n_nodes=model.net.n, k_bod=k_per_second * 86400.0,
+            n_nodes=model.net.n, k_bod=pollutants["Tracer"]["decay"] * 86400.0,
         ),
     )]
     drivers = dict(drivers)
@@ -241,11 +218,41 @@ def test_tracer_model_run_through_the_lateral_load_path(tmp_path):
         bod_in[model.net.nodes.index(node)] = species["Tracer"]
     drivers["bod_in"] = bod_in
     drivers["T_water"] = torch.tensor(20.0, dtype=F64)
-    final = sewer_steady(model, state, drivers, dt=dt, max_iter=100_000, tol=1e-14)
-    model.reactions = []
-    sampled = model.step(final, drivers, dt)["water_quality.x"]
+    return model, state, drivers
+
+
+def _per_pipe(model, net, x):
+    """The water_quality state (manhole order, BOD column) as `{pipe name: kg/m3}`: a
+    manhole's concentration IS its outgoing conduit's."""
     pipe_to_manhole = {int(model.out_pipe[m]): m for m in range(len(model.out_pipe))}
-    mine = {p.name: float(sampled[pipe_to_manhole[pos], 0]) for pos, p in enumerate(net.pipes)}
+    return {p.name: float(x[pipe_to_manhole[pos], 0]) for pos, p in enumerate(net.pipes)}
+
+
+def test_tracer_model_run_through_the_lateral_load_path(tmp_path):
+    """The test above never runs the model's quality layer at all -- it builds
+    `quality=False` and resolves the tank-in-series closed form BY HAND. This test runs the
+    app's own model (`quality=True, air=False`, the fixture's tracer load through the
+    `LateralLoads`/`bod_in` path, see `_tracer_model`) to its fixed point with
+    `sewer_steady`, and compares the state it RETURNS -- no reaction removed, no extra
+    step -- against the SAME SWMM values.
+
+    Same scheme, same sampling point. Both codes split each step into an explicit
+    first-order decay `R: c -> c (1 - k dt)` and an implicit upwind mixing `T` over the
+    conduit volume (`qualrout.c::findLinkQual`: `getReactedQual`, then `getMixedQual`), and
+    report the concentration after `T`: `build_model` sets
+    `Model(reaction_order="before_transport")`. The fixed point of `T(R(x))` satisfies
+    `x (q + k V) = sum(q_u x_u) + load` at any dt, the closed form above, which is also
+    SWMM's. (Sampled after `R` instead, the model's fixed point would be `(1 - k dt)` times
+    SWMM's, 3.47e-3 relative at dt = 60 s.)
+
+    1e-9 relative, as above: `sewer_steady` stops when no concentration changes by more than
+    1e-14 kg/m3 in a step (1e-13 relative on the 0.1 kg/m3 load), and with `dt / tau > 0.35`
+    per tank the remaining distance to the fixed point is at most a few times that.
+    """
+    net, loads, pollutants = read_swmm_inp(DATA / "tree_kinwave_pollut.inp")
+    model, state, drivers = _tracer_model(net, loads, pollutants)
+    final = sewer_steady(model, state, drivers, dt=60.0, max_iter=100_000, tol=1e-14)
+    mine = _per_pipe(model, net, final["water_quality.x"])
 
     swmm = _run_swmm(tmp_path, "tree_kinwave_pollut.inp")
     worst = 0.0
@@ -256,3 +263,129 @@ def test_tracer_model_run_through_the_lateral_load_path(tmp_path):
             continue
         worst = max(worst, abs(mine[name] - theirs) / theirs)
     assert worst < 1e-9, worst
+
+
+#: The transient variant of `tree_kinwave_pollut.inp`, written into `tmp_path` only: the
+#: `J1` tracer concentration follows a time series (zero for the first hour, while SWMM's
+#: kinematic-wave hydraulics spin up to the steady flows, then a ramp to 100 mg/L, a
+#: plateau and a ramp back down), and the run ends at 01:40.
+_TRANSIENT_EDITS = (
+    (
+        'J1               Tracer           ""               CONCENTRATION   1.0      1.0'
+        "      100.0",
+        "J1               Tracer           TRC              CONCENTRATION   1.0      1.0"
+        "      0.0",
+    ),
+    ("END_TIME             02:00:00", "END_TIME             01:40:00"),
+    (
+        "[REPORT]",
+        "[TIMESERIES]\n"
+        "TRC  01/01/2026 01:00 0.0\n"
+        "TRC  01/01/2026 01:10 100.0\n"
+        "TRC  01/01/2026 01:20 100.0\n"
+        "TRC  01/01/2026 01:25 0.0\n"
+        "TRC  01/01/2026 02:00 0.0\n\n"
+        "[REPORT]",
+    ),
+)
+
+
+def test_tracer_transient_at_every_step(tmp_path):
+    """Time-varying tracer load, compared at EVERY 5 s routing step of SWMM.
+
+    SWMM's live step loop (`pyswmm.Simulation` iterates one routing step at a time) is
+    sampled after each step: the link concentrations, and the `J1` node concentration,
+    which for a node fed by nothing but its lateral inflow IS the inflow concentration SWMM
+    applied over that step. The model is driven with that same value per step (`bod_in` at
+    `J1`), so the time at which SWMM evaluates its time series (the step start, to within
+    its own datetime rounding) does not enter the comparison.
+
+    What is compared, and why:
+
+    * `C1`, the conduit fed only by `J1`'s lateral inflow: SWMM's step is
+      `c' = (c (1 - k dt) V1 + c_in q dt) / (V1 + q dt)`, and the model's R-then-implicit-T
+      step at the steady storage (`V1 = V2 = V`, `q_in = q_out = q`) is the same
+      expression, so the returned state must equal SWMM's sample at every step: 1e-9
+      relative, as for the steady tests (measured 1.1e-14).
+    * `C3`, `C5`, the conduits fed by upstream conduits: SWMM's junction mixing
+      (`findLinkMassFlow`) uses the upstream links' START-of-step concentrations
+      (`Link.oldQual`), an explicit one-step lag per junction, where the model's transport
+      solve is implicit over the whole tree. That difference is first order in dt and is not
+      a sampling-point question: as a fraction of each conduit's peak it measures 1.08e-2
+      (C3) and 1.75e-2 (C5) at dt = 5 s, and 2.2e-3 and 3.5e-3 at dt = 1 s. What IS
+      asserted for them, at 1e-9 relative, is that SWMM equals exactly that lagged
+      recursion built on the model's own `V` and `q` (measured 5e-15), so the lag is the
+      whole of the difference.
+    * `C2`, `C4` carry no load and stay exactly zero in both codes.
+
+    Transient HYDRAULICS are not compared here and cannot be: the model's water side is
+    quasi-steady (or manhole storage under `storage=True`), not SWMM's kinematic wave, so
+    under a time-varying FLOW the storages differ before any quality question arises. For
+    the record, SWMM mixes over the step-start volume, `(c V1 + c_in q_in dt) / (V1 +
+    q_in dt)`, where the model's amount form is `(c V1 + c_in q_in dt) / (V2 + q_out dt)`;
+    the two denominators agree exactly when `V2 - V1 = (q_in - q_out) dt`.
+    """
+    text = (DATA / "tree_kinwave_pollut.inp").read_text()
+    for old, new in _TRANSIENT_EDITS:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    inp = tmp_path / "tree_kinwave_pollut_transient.inp"
+    inp.write_text(text)
+    samples = []
+    with pyswmm.Simulation(
+        str(inp), str(tmp_path / f"{inp.stem}.rpt"), str(tmp_path / f"{inp.stem}.out")
+    ) as sim:
+        links, nodes = pyswmm.Links(sim), pyswmm.Nodes(sim)
+        for _ in sim:
+            samples.append((
+                (sim.current_time - sim.start_time).total_seconds(),
+                nodes["J1"].pollut_quality["Tracer"] * 1e-3,
+                {name: links[name].pollut_quality["Tracer"] * 1e-3 for name in LINKS},
+            ))
+
+    net, loads, pollutants = read_swmm_inp(DATA / "tree_kinwave_pollut.inp")
+    model, state, drivers = _tracer_model(net, loads, pollutants)
+    k = pollutants["Tracer"]["decay"]
+    resolved = model._apply_closures(state, drivers)
+    order = {p.name: i for i, p in enumerate(net.pipes)}
+    volume = {name: float(resolved["sewer.V_wet"][order[name]]) for name in LINKS}
+    q = {name: float(resolved["sewer.q"][order[name]]) for name in LINKS}
+    upstream = {"C3": ("C1", "C2"), "C5": ("C3", "C4")}
+    j1 = model.net.nodes.index("J1")
+
+    current, lagged, t_prev = state, dict.fromkeys(LINKS, 0.0), 0.0
+    worst_c1 = worst_lag = 0.0
+    loaded = 0
+    for t, c_j1, theirs in samples:
+        dt = t - t_prev
+        t_prev = t
+        bod_in = torch.zeros(model.net.n, dtype=F64)
+        bod_in[j1] = c_j1
+        current = model.step(current, {**drivers, "bod_in": bod_in}, dt)
+        mine = _per_pipe(model, net, current["water_quality.x"])
+        # SWMM's own recursion (qualrout.c), upstream links at their step-START values.
+        c_in = {"C1": c_j1, "C2": 0.0, "C4": 0.0}
+        for name, ups in upstream.items():
+            c_in[name] = sum(q[u] * lagged[u] for u in ups) / q[name]
+        lagged = {
+            name: (lagged[name] * (1.0 - k * dt) * volume[name] + c_in[name] * q[name] * dt)
+            / (volume[name] + q[name] * dt)
+            for name in LINKS
+        }
+        for name in ("C2", "C4"):
+            assert mine[name] == 0.0 and theirs[name] == 0.0
+        if theirs["C1"] != 0.0:
+            loaded += 1
+            worst_c1 = max(worst_c1, abs(mine["C1"] - theirs["C1"]) / theirs["C1"])
+        else:
+            assert mine["C1"] == 0.0
+        for name in upstream:
+            if theirs[name] == 0.0:
+                assert lagged[name] == 0.0
+                continue
+            worst_lag = max(worst_lag, abs(lagged[name] - theirs[name]) / theirs[name])
+    # Every 5 s routing step up to the end of the run (pyswmm yields all but the last).
+    assert [t for t, _, _ in samples] == [5.0 * (i + 1) for i in range(1199)]
+    assert loaded > 400                             # the load pulse was really seen
+    assert worst_c1 < 1e-9, worst_c1
+    assert worst_lag < 1e-9, worst_lag

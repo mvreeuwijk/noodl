@@ -189,7 +189,7 @@ explicit rather than adapted.
 
 ## `Reaction`
 
-Applied to a transport layer's state after its step, operator-split:
+Applied to a transport layer's state after its step (by default), operator-split:
 
 ```python
 from noodl.layers.reaction import FirstOrderDecay
@@ -199,6 +199,11 @@ model = Model(net, layers, reactions=[("species", FirstOrderDecay(k))])
 
 `FirstOrderDecay` and `Photostationary` (Leighton NO/NO₂/O₃) ship built in; the sewer
 application adds `SulfideGeneration`.
+
+`Model(reaction_order="before_transport")` applies the reactions to the step-start state
+before the transport step instead, so the returned state is the one after transport. The
+sequence of operations is the same; only the point where the state is sampled moves. The sewer
+application uses it because SWMM reports its water quality after mixing.
 
 **`Model.steady` never applies reactions.** This is deliberate — a steady state under a reaction
 is a different fixed-point problem, not the transport steady state. The street and sewer
@@ -272,7 +277,8 @@ State and driver keys are namespaced by layer name:
 
 ### The order within a pass
 
-Closures → potential solves → capacitated steps → transport steps → reactions.
+Closures → potential solves → capacitated steps → transport steps → reactions (reactions before
+the transport steps under `reaction_order="before_transport"`).
 
 The capacitated step sits between the potential solves and the transport steps so that a
 transport layer reading `"<layer>.q"` sees a freshly written flow, whichever kind of layer wrote

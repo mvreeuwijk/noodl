@@ -229,6 +229,10 @@ the flux is symmetric between the two source terms in moles of S.
 `LateralLoads` must be registered **before** `H2STransfer` in the closure list, so that
 `H2STransfer` adds its transfer term rather than overwriting the lateral load.
 
+The model is built with `reaction_order="before_transport"`: each step applies sulfide generation
+and BOD decay to the step-start state, then transports it, and returns the post-transport
+concentration, as SWMM does. `H2STransfer` reads the step-start state either way.
+
 ## Verification
 
 Against SWMM 5.2.4 through `pyswmm`, with `geometry="swmm"`, on three kinematic-wave networks
@@ -250,20 +254,35 @@ pinned: `engine_version == "5.2.4"` and `flow_routing_error == 0.0`.
 | Volumes (live, float64) | rel 1e-10 | 8.6e-15 / 1.8e-15 / 2.3e-14 | 6.5e-4 / 1.7e-3 / 4.8e-3 |
 | Velocities (binary output, float32) | rel 1e-7 | 3.7e-8 / 5.8e-8 / 5.3e-8 | 6.3e-4 / 2.5e-3 / 1.8e-1 |
 | Tracer, tank-in-series closed form | rel 1e-9 | 4.5e-15 | 7.8e-6 |
-| Tracer, the model's quality layer | rel 1e-9 | 4.6e-13 | 3.5e-3 at dt = 60 s |
+| Tracer, the model's quality layer, steady | rel 1e-9 | 6.3e-13 | 3.5e-3 at dt = 60 s if sampled after the reaction |
+| Tracer, time-varying load, every 5 s step, head conduit | rel 1e-9 | 1.1e-14 | |
+| Tracer, same run, downstream conduits (SWMM's junction lag, see below) | not asserted | 1.1e-2 / 1.7e-2 of peak at 5 s | 2.2e-3 / 3.5e-3 at 1 s |
 
 The tolerances are not fitted to these numbers. Depth and volume are read live, as float64, and
 both sides run the same float64 operations. 1e-10 is three decades above a rounding bound of
 about 1e-13. Velocity has no live accessor under KINWAVE. The binary output stores it as float32,
 whose half-ulp is 5.96e-8.
 
-The quality layer already uses SWMM's scheme. Both codes split a step into an explicit
-first-order decay $c \to c(1 - k\Delta t)$ and an implicit upwind mixing over the conduit volume
-(SWMM `qualrout.c`: `getReactedQual`, then `getMixedQual`). SWMM reports the concentration after
-the mixing, and `Model.step` returns it after the reaction. The model's fixed point is therefore
-$(1 - k\Delta t)$ times SWMM's (3.47e-3 at 60 s). One transport-only step from the fixed point
-samples the model where SWMM samples. The two then agree at any $\Delta t$, because the fixed
-point of either ordering satisfies $c(q + kV) = \sum q_u c_u + \text{load}$.
+The quality layer uses SWMM's scheme and reports where SWMM reports. Both codes split a step
+into an explicit first-order decay $c \to c(1 - k\Delta t)$ followed by an implicit upwind mixing
+over the conduit volume (SWMM `qualrout.c`: `getReactedQual`, then `getMixedQual`), and both
+return the concentration after the mixing: `build_model` sets
+`Model(reaction_order="before_transport")`. The fixed point satisfies
+$c(q + kV) = \sum q_u c_u + \text{load}$ at any $\Delta t$, which is SWMM's own. Sampled after the
+reaction instead (the framework's default order), the fixed point would be $(1 - k\Delta t)$
+times SWMM's, 3.47e-3 at 60 s.
+
+The transient check drives the model with the inflow concentration SWMM applied at each step
+(its `J1` node quality) and compares every routing step. A conduit fed only by a lateral inflow
+takes exactly SWMM's step. A conduit fed by upstream conduits does not: SWMM mixes a junction's
+inflow from the upstream links' start-of-step concentrations (`findLinkMassFlow` reads
+`Link.oldQual`), a one-step lag per junction, where the model solves the whole tree implicitly.
+That difference is first order in $\Delta t$. The test asserts that SWMM equals exactly this
+lagged recursion on the model's own volumes and flows (5e-15), so the lag is the whole
+difference. Transient hydraulics are not compared: the model's water side is quasi-steady (or
+manhole storage), not a kinematic wave. SWMM also mixes over the step-start volume,
+$(cV_1 + c_{in} q_{in}\Delta t)/(V_1 + q_{in}\Delta t)$, where the model's amount form divides by
+$V_2 + q_{out}\Delta t$; the two agree when $V_2 - V_1 = (q_{in} - q_{out})\Delta t$.
 
 Non-SWMM checks, for the physics SWMM does not model:
 
