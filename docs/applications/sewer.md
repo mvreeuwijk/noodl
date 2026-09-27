@@ -315,5 +315,5 @@ publish numbers from this application.
 Nothing beyond the base dependencies. `pyswmm` is needed only to reproduce the SWMM parity tests:
 
 ```bash
-pip install "noodl[dev]"
+pip install "noodl-physics[dev]"
 ```
