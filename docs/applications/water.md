@@ -153,12 +153,12 @@ Implemented with a guarded kink so both `where` branches stay finite and differe
 
 Against the real EPANET 2.2 engine through `wntr` 1.5.0, which bundles `epanet22.dll`. Note the
 reference implementation's own floor: `EpanetSimulator` reads EPANET's binary output, whose
-on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precision, not noodl's.
+on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precision, not noodl physics'.
 
 | Check | Tolerance | Measured |
 |---|---|---|
 | `twoloop_si.inp` heads and flows | rel 1e-6 | **4.361e-7** heads, **8.090e-8** flows |
-| `twoloop_si.inp`, noodl's own nodal continuity | 1e-13 | **2.093e-14** |
+| `twoloop_si.inp`, noodl physics' own nodal continuity | 1e-13 | **2.093e-14** |
 | Net1 single period: heads, flows, pump head gain | 1e-6 / 1e-5 / 1e-6 | 7.058e-8, 2.868e-6, 1.189e-7 |
 | Net1 24 h tank level with level-triggered pump controls | 2e-4 m | **8.181e-5 m** worst of 25 steps |
 | Darcy-Weisbach vs EPANET's own D-W | recorded band | 3.566e-4 heads, 2.731e-3 flows |
@@ -170,13 +170,13 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 
 Three rows deserve comment.
 
-**Continuity** is machine-precision exact for noodl (2.093e-14), while EPANET itself misses
+**Continuity** is machine-precision exact for noodl physics (2.093e-14), while EPANET itself misses
 continuity at Net1 node 13 by 4.5e-10 m³/s. The ~1e-7 residuals on `twoloop_si.inp` and the
 Net1 single period are attributable to EPANET's float32 output path and its own mild continuity
 violation, not to this solver.
 
 **Darcy-Weisbach is looser than Hazen-Williams.** EPANET switches between Swamee-Jain, Hagen-Poiseuille and Dunlop's
-cubic depending on Reynolds number, while noodl reuses the existing `Duct` element (Colebrook,
+cubic depending on Reynolds number, while noodl physics reuses the existing `Duct` element (Colebrook,
 unrolled); the two turbulent friction factors differ by up to about 1 %, which is the residual
 this row reports. Hazen-Williams, not Darcy-Weisbach, is the head-loss law the comparison is
 made on.
@@ -216,5 +216,5 @@ implementation — is test-only and deliberately **not** a runtime extra, becaus
 measured 351 MB of mandatory dependencies.
 
 ```bash
-pip install "noodl[dev]"     # only if you want to run the EPANET parity tests
+pip install "noodl-physics[dev]"     # only if you want to run the EPANET parity tests
 ```

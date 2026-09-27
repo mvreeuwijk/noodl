@@ -133,7 +133,7 @@ $$
 These exact relations are used deliberately in place of SWMM's own 51-point lookup table — SWMM's
 manual states the tables are a speed optimisation over these same trigonometric relations. That
 choice is the source of the ~1e-3 depth and volume discrepancy in the parity rows below, and
-noodl's numbers are the more accurate ones.
+noodl physics' numbers are the more accurate ones.
 
 Numerical care worth noting: the `arccos` argument is clamped to the *exact* domain $[-1, 1]$,
 not an epsilon-shrunk one — that was tried and rejected because it shifts the boundary value by
@@ -220,10 +220,10 @@ identity itself is pinned: `engine_version == "5.2.4"` and `flow_routing_error =
 | Tracer, the actual model, Richardson-extrapolated | rel 3e-5 | **8.05e-6** |
 
 The normal-depth test additionally asserts the discrepancy is **greater than 1e-5** — a deliberate guard.
-Too close a match would mean noodl had accidentally reproduced SWMM's lookup-table quantisation
+Too close a match would mean noodl physics had accidentally reproduced SWMM's lookup-table quantisation
 rather than the exact closed form, which is a bug in the other direction.
 
-The Richardson-extrapolated tracer row needs explanation. noodl's reaction is explicit forward Euler, operator-split
+The Richardson-extrapolated tracer row needs explanation. noodl physics' reaction is explicit forward Euler, operator-split
 from transport; SWMM's is a continuous exponential decay. The $O(\Delta t)$ difference measures
 3.47e-3 at $\Delta t = 60$ s, 2.87e-4 at 5 s and 5.79e-5 at 1 s — none inside the 3e-5 target
 directly. Richardson extrapolation $2C(\Delta t) - C(2\Delta t)$ removes the leading term and
@@ -279,5 +279,5 @@ publish numbers from this application.
 Nothing beyond the base dependencies. `pyswmm` is needed only to reproduce the SWMM parity tests:
 
 ```bash
-pip install "noodl[dev]"
+pip install "noodl-physics[dev]"
 ```

@@ -1,12 +1,12 @@
-# noodl
+# noodl physics
 
 <p align="center">
   <img src="assets/noodl-physics-full-light.svg#only-light" alt="noodl physics — complex networks, differentiable by design" width="640">
   <img src="assets/noodl-physics-full-dark.svg#only-dark" alt="noodl physics — complex networks, differentiable by design" width="640">
 </p>
 
-**noodl** — the **N**etwork-**O**riented **O**pen **D**ifferentiable **L**ibrary — is a generic
-framework for solving physics problems on networks, built on PyTorch. It combines graph
+**noodl physics** is an open-source framework for differentiable network modelling of physical
+systems, built on PyTorch. It combines graph
 topology, conservation laws, and modular descriptions of physical processes to model flows,
 storage, transport, and reactions within a common framework. Different physical systems can be
 composed and coupled through shared network structures, while differentiable solvers support
@@ -19,7 +19,7 @@ between the rooms of a building through leaks and doors; water falls through a s
 pumped through a distribution main; pollutants are carried along a street and exchanged with
 the air above. Each of these has its own literature and its own simulation tool, and each of
 those tools re-implements the same three things: a graph, a conservation law at every node, and
-a constitutive law on every edge. noodl factors that common core out once. What remains
+a constitutive law on every edge. noodl physics factors that common core out once. What remains
 specific to a problem — the pressure-flow relation of a crack, the friction law of a pipe,
 the chemistry of a street canyon — is a small, replaceable object plugged into the core.
 
@@ -28,7 +28,7 @@ differentiable. The same model that simulates forward will also tell you the der
 output with respect to any parameter, which is what turns a simulator into a tool for
 calibration, sensitivity analysis and design optimisation.
 
-![The noodl model stack: a network, then elements drives and closures, then layers, then a Model that steps them together](assets/framework-overview.svg)
+![The noodl physics model stack: a network, then elements drives and closures, then layers, then a Model that steps them together](assets/framework-overview.svg)
 
 ## What it gives you
 
@@ -43,7 +43,7 @@ calibration, sensitivity analysis and design optimisation.
 
 ## Applications
 
-noodl is one generic solver for networks whose edges carry a flow and whose nodes conserve it.
+noodl physics is one generic solver for networks whose edges carry a flow and whose nodes conserve it.
 The applications are physical systems modelled with that solver, each a thin layer of domain
 physics over the shared core:
 
@@ -82,9 +82,10 @@ See [File formats](formats/index.md) for what each reader accepts and refuses.
 
 ## The name
 
-*noodl* stands for **N**etwork-**O**riented **O**pen **D**ifferentiable **L**ibrary. The mark is
-a single continuous path through two nodes and a junction — flow through a network, drawn in
-one stroke.
+*noodl* stands for **N**etwork-**O**riented **O**pen **D**ifferentiable **L**ibrary; *physics*
+says what it is for. The package is installed as `noodl-physics` and imported as `noodl`. The
+mark is a single continuous pipe between two nodes — flow through a network, drawn in one
+stroke.
 
 ## Credits and licence
 

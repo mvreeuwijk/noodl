@@ -1,7 +1,7 @@
-site_name: noodl
+site_name: noodl physics
 site_description: >-
-  Network-Oriented Open Differentiable Library — a generic framework for solving
-  physics problems on networks, built on PyTorch.
+  noodl physics — an open-source framework for differentiable network modelling of
+  physical systems, built on PyTorch.
 site_url: https://mvreeuwijk.github.io/noodl/
 repo_url: https://github.com/mvreeuwijk/noodl
 repo_name: mvreeuwijk/noodl
