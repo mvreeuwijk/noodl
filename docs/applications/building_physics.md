@@ -355,52 +355,53 @@ adds nothing to MBL's own departure from the table (41 of 104 entries miss the t
 significant figures, in MBL as much as in noodl).
 
 **Dynamic models (12, with volumes).** The error metric is `|noodl - omc| / max(|omc|, floor)`
-over every row after `t = StartTime`; the table below instead reports, per model, the worst
-ABSOLUTE error in temperature (K) and pressure (Pa), and the worst flow error as a percentage of
-the model's own largest flow — the more informative view, since T and p in kelvin and pascal are
-insensitive to relative error and a flow that reverses sign makes a relative error explode near
-the crossing.
+over every row after `t = StartTime` (the floor: 1e-3 of the model's largest flow for flows, 1e-3
+of the column's largest value otherwise). Nine models share all their physics with noodl; three
+are dominated by MBL's volume mass storage, which noodl's quasi-steady airflow does not model.
 
-*Parity* — agrees with OpenModelica to its own discretisation/solver tolerance, except
-`ZonalFlow`'s T (explained below):
+*Parity* — the nine models are compared at the reference's own precision. Their reference CSVs
+were regenerated with DASSL at a tolerance of 1e-12 (at the models' declared 1e-6 the reference's
+own error was of the order of the comparison: 5.6e-5 K on `ZonalFlow`, a 5e-5 relative door-flow
+wiggle after `CO2TransportStep`'s pulse). noodl runs its symmetric, second-order
+`scheme="midpoint"` at one and two steps per output interval and combines them by Richardson
+extrapolation (`run.extrapolate`, fourth order), on a driver grid that puts every signal event
+(the pulse's edges) on a step boundary. The tolerance is 1e-6 relative for every column:
 
-| Model | T, abs (K) | p, abs (Pa) | flow, abs (kg/s) | flow, % of model's largest flow |
-|---|---|---|---|---|
-| ThreeRoomsContam | 2.1e-6 | 3.7e-5 | 2.3e-7 | 5.4e-5 % |
-| ThreeRoomsContamDiscretizedDoor | 2.1e-6 | 3.7e-5 | 1.1e-7 | 2.6e-5 % |
-| OneRoom | 5.8e-11 | 1.5e-11 | 1.2e-13 | 1.6e-9 % |
-| ZonalFlow | 1.0e-2 | 1.5e-11 | 0 | 0 % |
-| CO2TransportStep | 2.1e-6 | 5.0e-5 | 2.6e-7 | 6.2e-5 % |
+| Model | flow | T | p | Xi | C |
+|---|---|---|---|---|---|
+| ThreeRoomsContam | 4.2e-7 | 7.1e-9 | 8.0e-14 | 7.2e-8 | 0 |
+| ThreeRoomsContamDiscretizedDoor | 4.1e-7 | 7.0e-9 | 6.5e-13 | 7.1e-8 | 0 |
+| OneRoom | 2.0e-11 | 6.7e-14 | 1.4e-16 | 3.5e-16 | — |
+| ZonalFlow | 0 | 1.1e-10 | 1.4e-16 | 1.2e-11 | — |
+| CO2TransportStep | 4.9e-7 | 7.1e-9 | 5.4e-13 | *1.1e-6* | *5.5e-6* |
+| OpenDoorBuoyancyDynamic | *8.9e-6* | 2.5e-8 | 4.7e-13 | 1.4e-7 | — |
+| OpenDoorBuoyancyPressureDynamic | *2.0e-3* | 2.6e-7 | 3.7e-12 | 1.4e-7 | — |
+| NaturalVentilation | *1.6e-2* | 2.3e-7 | 4.3e-11 | *1.4e-6* | — |
+| ReverseBuoyancy3Zones | *1.2e-1* | *7.1e-6* | 1.8e-9 | 5.1e-7 | — |
 
-`CO2TransportStep`'s trace-gas mass fraction `C` is excluded from this group: the row just after
-its 3.6 s CO2 pulse differs from OpenModelica by up to 170 % relative (6.0e-8 kg/kg absolute) —
-noodl injects the pulse's exact mass but spreads it over its 172.8 s step, while OpenModelica has
-only just begun to receive it. An independent DOP853 integration of the same species equations
-(reusing noodl's flows) shows OpenModelica's own error dominates from about t > 5000 s: up to
-3.8 % of the peak concentration, against noodl's 0.6 %.
+Three corrections made this possible, each a difference in physics or numerics found by the
+comparison: MBL's moist-air heat balance, `m cp(X) dT/dt = sum m_in cp(X_in) (T_in - T)`, which
+noodl's single-`cp` carrier missed by up to `0.84 |X_in - X|` (1e-2 K on `ZonalFlow`); the zone
+mass taken at the initial quasi-steady pressure rather than at `p_start` (3.5e-4 on
+`CO2TransportStep`'s trace gas); and a closed zone group's pressure level set by its mass, with
+its largest zone as the reference (0.12 Pa on `NaturalVentilation`). The previous first-order
+step at the output interval had left 2-3 % in the door flows.
 
-`ZonalFlow`'s T, 1.0e-2 K (`rooB.T`, 3.5e-5 relative, peaking at t = 36 s), is not solver
-tolerance. `rooA` and `rooB` start 10 K and 0.005 kg/kg water apart (`ZonalFlow.json`), and
-noodl carries heat between zones with one common `cp` instead of MBL's per-zone `cp(X)`
-(`assemble.py`'s "Capacities" derivation: `|cp(X_in)/cp(X) - 1| <= 0.84 |dX_w|`, here
-`0.84 x 0.005 = 4.2e-3` relative). Applied to the zones' 10 K starting gap, that bounds the
-resulting error at about 0.04 K — the same order of magnitude as the measured 1.0e-2 K (about
-4x tighter, plausibly because `rooB`'s 1 m3 is 1 % of `rooA`'s 100 m3 and the gap decays as
-they mix). This is the most likely cause; it has not been confirmed by rerunning with a
-per-zone `cp`.
+MBL's volumes also start at `p_start` and relax to the airflow's pressures within the first
+interval; that storage moves Xi by `X dp/p` (`ConservationEquation.mo` evolves
+`der(Xi) = mbXi_flow/m`, without the `-Xi der(m)` term) and the temperature by the flow work
+`(pStp/dStp - X dh/dX) dp/p / cp`. The test starts noodl from that relaxed state (3.5e-4 in Xi
+on the `ThreeRooms*` stack, 2.9e-3 K in `OpenDoorBuoyancyPressureDynamic`). The values in
+*italics* are what remains where the volumes keep storing or releasing air later on (bounded at
+1.25 times these values): the storage flow itself, its flow work and its Xi term. Adding the
+last two as sources computed from noodl's own quasi-steady `dp/dt` brings `NaturalVentilation`'s
+Xi from 4.6e-7 to 4e-11 and its flows to 3.5e-6, the storage flow's own size (measured over its
+first 60 rows). In `ReverseBuoyancy3Zones` it is the air `volTop` releases in its first seconds,
+carried into the neighbouring rooms (2.1e-3 K in `volWes` at 7.2 s); the relative flow errors
+peak where the flows reverse through zero.
 
-*Step-limited* — first order in noodl's time step; halving the step halves the error:
-
-| Model | T, abs (K) | p, abs (Pa) | flow, abs (kg/s) | flow, % of model's largest flow |
-|---|---|---|---|---|
-| OpenDoorBuoyancyDynamic | 1.0e-2 | 2.1e-4 | 2.0e-3 | 1.2 % |
-| OpenDoorBuoyancyPressureDynamic | 1.1e-2 | 2.0e-4 | 1.9e-3 | 1.1 % |
-| NaturalVentilation | 1.1e-3 | 0.12 | 5.3e-5 | 0.15 % |
-| ReverseBuoyancy3Zones | 2.0e-2 | 1.6e-3 | 1.3e-3 | 0.46 % |
-
-Confirmed directly: halving `OpenDoorBuoyancyDynamic`'s step scales its worst door-flow and
-boundary-temperature error by 1.97 (`test_step_limited_error_halves_with_the_step`).
-`OpenDoorBuoyancyPressureDynamic` shows a comparable 2.04 (not asserted by a test).
+The default `pytest` run compares the first 26-101 rows of each (about 95 s together);
+`pytest -m slow` compares every row (30 s to 6 min per model).
 
 *Storage-dominated* — MBL's volumes compress and expand; noodl's airflow is quasi-steady, like
 CONTAM's, so it does not:
@@ -420,23 +421,16 @@ mass storage and cools by close to the flow-work-minus-latent-heat prediction (0
 against 0.78 K predicted, within the test's 10 % tolerance), while noodl starts already balanced
 and does not cool.
 
-**The `t = StartTime` row** is excluded from every bound above, and reported separately. At that
-row OpenModelica holds MBL's own pressure initialisation — up to 35 Pa off balance in the
-`ThreeRooms*`/`CO2TransportStep`/`ReverseBuoyancy3Zones` stack, 1325 Pa in `ReverseBuoyancy` —
-which noodl's quasi-steady solve starts already balanced against. This is an initial-transient
-difference from how the two solvers reach their first row, not a parity failure, and the test
-still prints it.
+**The `t = StartTime` row** is excluded from every bound above, and reported separately: at
+that row OpenModelica holds MBL's own pressure initialisation, which noodl's quasi-steady solve
+starts already balanced against.
 
 Every column's numbers (not just the worst) are committed at
 `tests/data/modelica/parity-algebraic.json` and `parity-dynamic.json` (regenerated only with
 `NOODL_RECORD_PARITY=1`; see [Reproducing the export](../formats/modelica.md) on the Modelica
-format page). Only the *storage-dominated* group
-above (`ClosedDoors`, `OneOpenDoor`, `ReverseBuoyancy`) is caused by MBL's volume mass storage,
-which noodl's quasi-steady airflow does not model. The *step-limited* group's numbers are
-noodl's first-order time step instead (confirmed by halving it, above); `ZonalFlow`'s T is the
-single-`cp` carrier (above); and `CO2TransportStep`'s excluded 170 % is its pulse spread over
-a step, not storage. Adding volume mass storage would close the remaining gap in the
-storage-dominated group; it is a possible extension, not implemented in this release.
+format page). Adding volume mass storage would close the remaining gap in the
+storage-dominated group and the italic entries above; it is a possible extension, not
+implemented in this release.
 
 ### Against analytical solutions
 

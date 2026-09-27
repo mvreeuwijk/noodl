@@ -12,12 +12,13 @@ import json
 import math
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
 from noodl.apps.building_physics import read_modelica
 from noodl.apps.building_physics.modelica import ModelicaImportError
-from noodl.apps.building_physics.modelica.run import simulate, step_drivers
+from noodl.apps.building_physics.modelica.run import extrapolate, simulate, step_drivers
 
 FIX = Path(__file__).parent / "fixtures"
 F64 = torch.float64
@@ -296,7 +297,7 @@ def test_fused_column_chain_holds_the_hydrostatic_balance_at_zero_flow():
     phi = hist["air.phi"][0]
     got = phi[names.nodes["volWes"]] - phi[names.nodes["volTop"]]
     assert float(got) == pytest.approx(expected, rel=1e-9)
-    assert names.air_references == ("volWes",)
+    assert names.air_references == ("volTop",)  # the closed group's largest zone
 
 
 # --------------------------------------------------------------------- mass sources
@@ -427,33 +428,61 @@ def test_boundary_temperature_and_concentration_inputs_reach_the_zone(tmp_path):
     hist = simulate(model, state, drivers, t)
     ((col, sign),) = names.edges["oriA"]
     F = float(sign * hist["air.q"][0, col])
-    decay = torch.exp(-F * t / (1.2 * 10.0))
     i = names.nodes["vol"]
+    # The zone mass at its quasi-steady pressure (assemble "Capacities"; Air.mo:210-215).
+    rho = 1.2 * float(hist["p"][0, i]) / 101325.0
+    decay = torch.exp(-F * t / (rho * 10.0))
     assert torch.allclose(hist["T"][:, i], 313.15 + (293.15 - 313.15) * decay, rtol=0.0,
                           atol=1e-7)
     assert torch.allclose(hist["C"][:, i, 0], 4e-4 * (1.0 - decay), rtol=0.0, atol=1e-13)
 
 
 # ------------------------------------------------ transport time course
-def test_heat_and_moisture_relax_on_the_same_exact_time_course():
-    # Two rooms exchanging F = V ACS rho + m_flow each way (balanced), no boundary. Both the
-    # temperature and the water mass fraction obey dD/dt = -F (1/M_A + 1/M_B) D for the
-    # normalised room difference D, with M = rho_start V (the heat capacity's cp cancels
-    # the carrier's). Frozen flows make the exact scheme exact, so D matches the
-    # exponential to the iteration and solve tolerances (1e-8 K on a 10 K difference,
-    # 1e-12 on 0.005).
-    model, state, drivers, names = _load("zonal_flow.json")
-    hist = simulate(model, state, drivers, names.times)
+def test_heat_and_moisture_relax_with_the_moist_air_heat_carrier():
+    # Two rooms exchanging F = V ACS rho + m_flow each way (balanced), no boundary. The
+    # water mass fraction obeys dD/dt = -F (1/M_A + 1/M_B) D for the normalised room
+    # difference D, with M = rho_start V; frozen flows make the exact scheme exact, so D
+    # matches the exponential to the solve tolerances. The temperatures obey MBL's
+    # moist-air balance (assemble module docstring, "Capacities"):
+    # M_A cp(X_A) dT_A/dt = F cp(X_B) (T_B - T_A) and likewise for B, with
+    # cp(X) = 1006 (1 - X) + 1860 X (Air.mo:567-575), integrated here by RK4 at 0.01 s
+    # (error ~1e-11 K). The noodl run is `scheme="midpoint"` at 1 and 2 substeps combined by
+    # `extrapolate` (fourth order): within 1e-6 K, 1e-7 of the 10 K difference (measured
+    # 1.2e-7 K). With one common cp the difference would be 1.7e-3 K off it here.
+    runs = []
+    for r in (1, 2):
+        model, state, drivers, names = read_modelica(FIX / "zonal_flow.json",
+                                                     return_names=True, substeps=r)
+        runs.append(simulate(model, state, drivers, names.times, scheme="midpoint"))
+    hist = extrapolate(*runs)
     iA, iB = names.nodes["rooA"], names.nodes["rooB"]
     F = 5.0 / 3600.0 * 1.2 * 1.0 + 0.02
-    rate = F * (1.0 / (1.2 * 100.0) + 1.0 / (1.2 * 1.0))
+    MA, MB = 1.2 * 100.0, 1.2 * 1.0
+    rate = F * (1.0 / MA + 1.0 / MB)
     expected = torch.exp(-rate * names.times)
-    DT = (hist["T"][:, iA] - hist["T"][:, iB]) / (303.15 - 293.15)
-    DX = (hist["X_w"][:, iA] - hist["X_w"][:, iB]) / (0.015 - 0.01)
-    for k in (1, 2, 3, 6, 12):
-        assert float(DT[k]) == pytest.approx(float(expected[k]), rel=1e-7, abs=1e-9)
-        assert float(DX[k]) == pytest.approx(float(expected[k]), rel=1e-7, abs=1e-9)
-        assert abs(float(DT[k] - DX[k])) < 1e-8
+    DX = (runs[1]["X_w"][:, iA] - runs[1]["X_w"][:, iB]) / (0.015 - 0.01)
+    assert torch.allclose(DX, expected, rtol=1e-9, atol=1e-12)
+
+    def cp(X):
+        return 1006.0 * (1.0 - X) + 1860.0 * X
+
+    def rhs(y):
+        TA, TB, XA, XB = y
+        return np.array([F * cp(XB) * (TB - TA) / (MA * cp(XA)),
+                         F * cp(XA) * (TA - TB) / (MB * cp(XB)),
+                         F * (XB - XA) / MA, F * (XA - XB) / MB])
+
+    y, h, ref = np.array([303.15, 293.15, 0.015, 0.01]), 0.01, [np.array([303.15, 293.15])]
+    for _ in range(names.times.numel() - 1):
+        for _ in range(round(10.0 / h)):  # the fixture's 10 s output interval
+            k1 = rhs(y)
+            k2 = rhs(y + 0.5 * h * k1)
+            k3 = rhs(y + 0.5 * h * k2)
+            k4 = rhs(y + h * k3)
+            y = y + h / 6.0 * (k1 + 2 * k2 + 2 * k3 + k4)
+        ref.append(y[:2].copy())
+    T = hist["T"][:, [iA, iB]].numpy()
+    assert np.abs(T - np.array(ref)).max() <= 1e-6
 
 
 # ------------------------------------------ unbalanced closed groups
@@ -608,9 +637,11 @@ def test_prescribed_heat_flow_heats_the_zone_at_the_closed_form_rate():
 
 
 def test_a_heat_pulse_inside_one_step_delivers_its_energy(tmp_path):
-    """Source drivers are step means (module docstring, "Sources"): a 3 s pulse of 100 W
-    between the 10 s output times of `heat_flow.json` is zero at every grid time, yet the
-    zone must gain its 300 J, `T = T_start + 300 / (V rho cp)` from that step on."""
+    """A 3 s pulse of 100 W between the 10 s output times of `heat_flow.json`: its edges
+    (23 s, 26 s) are added to the driver grid (`assemble.driver_grid`), so the source
+    driver, a step mean (module docstring, "Sources"), is 100 W on the step (23, 26) and
+    zero on every other, and the zone gains its 300 J, `T = T_start + 300 / (V rho cp)` from
+    the step on."""
     doc = _doc("heat_flow.json")
     doc["signals"][0] = {"name": "one", "class": "Modelica.Blocks.Sources.Pulse",
                          "parameters": {"amplitude": 1.0, "width": 3.0, "period": 100.0,
@@ -618,10 +649,11 @@ def test_a_heat_pulse_inside_one_step_delivers_its_energy(tmp_path):
                          "drives": "gai.u"}
     model, state, drivers, names = read_modelica(_write(tmp_path, doc), return_names=True)
     t = names.times
+    grid = drivers["series:time"]
+    assert grid.tolist() == sorted([*t.tolist(), 23.0, 26.0])
     i = names.nodes["vol"]
     Q = drivers["series:thermal.sources"][:, i]
-    expected_Q = torch.zeros_like(t)
-    expected_Q[3] = 100.0 * 3.0 / 10.0  # the step (20, 30) holds the pulse [23, 26)
+    expected_Q = torch.where(grid == 26.0, 100.0, 0.0).to(F64)
     assert torch.allclose(Q, expected_Q, rtol=1e-13, atol=1e-12)
     hist = simulate(model, state, drivers, t)
     rho = 1.2 * P_DEFAULT / 101325.0  # Air.mo:210-215
@@ -633,31 +665,39 @@ def test_a_heat_pulse_inside_one_step_delivers_its_energy(tmp_path):
 
 def test_a_trace_pulse_inside_one_step_injects_its_mass():
     """`Examples/CO2TransportStep`'s source: 8.18e-6 kg/s for 3.6 s at 3600 s, between the
-    3456 s and 3628.8 s output times. The air, species and (moisture off) sources of that
-    step are the pulse's mean, every other step's zero."""
+    3456 s and 3628.8 s output times. Its edges are driver-grid times, so the air, species
+    and (moisture off) sources are the pulse's value on the step (3600, 3603.6) and zero on
+    every other."""
     path = Path(__file__).parents[3] / "data" / "modelica" / "CO2TransportStep.json"
     _model, _state, drivers, names = read_modelica(path, return_names=True)
     i = names.nodes["volWes"]
-    dt = names.times[1:] - names.times[:-1]
+    grid = drivers["series:time"]
+    assert {3600.0, 3603.6} <= set(grid.tolist())
+    assert grid.numel() == names.times.numel() + 2
+    dt = grid[1:] - grid[:-1]
     mass = drivers["series:air.sources"][1:, i] * dt
     co2 = drivers["series:species.sources"][1:, i, 0] * dt
     assert float(mass.sum()) == pytest.approx(8.18e-6 * 3.6, rel=1e-12)
     assert torch.equal(mass, co2)
     assert int((mass != 0).sum()) == 1
+    k = grid.tolist().index(3603.6)
+    assert float(drivers["series:air.sources"][k, i]) == pytest.approx(8.18e-6, rel=1e-12)
 
 
-def test_simulate_refuses_a_grid_that_skips_source_intervals():
-    """Source drivers are step means over the driver grid's intervals (module docstring,
-    "Sources"), so a `times` grid that skips intervals, or leaves the grid, would drop
-    injected amounts: refused by name. A run of consecutive grid times is accepted."""
+def test_simulate_steps_over_every_driver_grid_time():
+    """`simulate` steps over every driver-grid time between the times asked for, so rows
+    asked for with gaps equal the same rows of a run over every output time (the injected
+    amounts are exact whichever rows are reported), and a time off the grid is refused."""
     path = Path(__file__).parents[3] / "data" / "modelica" / "CO2TransportStep.json"
     model, state, drivers, names = read_modelica(path, return_names=True)
-    with pytest.raises(ValueError, match=r"consecutive grid times; times\[1\] = 345.6"):
-        simulate(model, state, drivers, names.times[:5:2])
     with pytest.raises(ValueError, match="is not a grid time"):
         simulate(model, state, drivers, torch.tensor([0.0, 100.0], dtype=F64))
-    hist = simulate(model, state, drivers, names.times[2:4])
-    assert hist["time"].tolist() == names.times[2:4].tolist()
+    with pytest.raises(ValueError, match="increasing"):
+        simulate(model, state, drivers, names.times[[0, 2, 1]])
+    every = simulate(model, state, drivers, names.times[:23])
+    gaps = simulate(model, state, drivers, names.times[:23:11])
+    for key in ("air.q", "T", "C"):
+        assert torch.allclose(gaps[key], every[key][::11], rtol=1e-10, atol=1e-15), key
 
 
 def test_temperature_dependent_heat_flow_is_refused(tmp_path):

@@ -44,6 +44,7 @@ or a CI run never rewrites those files, only a deliberate re-recording pass does
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
@@ -310,49 +311,34 @@ DYNAMIC = ("OpenDoorBuoyancyDynamic", "OpenDoorBuoyancyPressureDynamic", "ThreeR
            "ThreeRoomsContamDiscretizedDoor", "CO2TransportStep", "ClosedDoors",
            "NaturalVentilation", "OneOpenDoor", "OneRoom", "ReverseBuoyancy",
            "ReverseBuoyancy3Zones", "ZonalFlow")
-# Measured wall time above 30 s (38-315 s): `slow`, deselected by the
-# default `-m "not slow"` addopts, run with `-m slow`. The other three took 25-55 s
-# depending on machine load and stay in the default run, so that it checks one model of
-# each kind: trace source (CO2TransportStep), stack (OneRoom), zonal flows (ZonalFlow).
-SLOW_DYNAMIC = frozenset(DYNAMIC) - {"CO2TransportStep", "OneRoom", "ZonalFlow"}
+# The "storage" models run in `test_parity_on_the_dynamic_models` (60-110 s each: `slow`,
+# deselected by the default `-m "not slow"` addopts, run with `-m slow`); the "parity"
+# models in `test_dynamic_parity_at_the_reference_precision` (a window of rows by default,
+# every row with `-m slow`).
+SLOW_DYNAMIC = frozenset(DYNAMIC)
 
-# Three groups. "parity": noodl agrees to the reference's
-# tolerance (CO2TransportStep outside the rows right after its source pulse). "step": the
-# difference is noodl's first-order step at the CSV interval (halving the step halves it;
-# asserted on OpenDoorBuoyancyDynamic by `test_step_limited_error_halves_with_the_step`).
+# Two groups. "parity": noodl agrees to PARITY_RTOL, the reference's own precision
+# (`test_dynamic_parity_at_the_reference_precision`, at the end of this module).
 # "storage": MBL's volume mass storage, which noodl's quasi-steady airflow does not model;
 # each such test also asserts the diagnosed mechanism
 # (`_check_storage_mechanism`).
 DYNAMIC_GROUP = {
     "ThreeRoomsContam": "parity", "ThreeRoomsContamDiscretizedDoor": "parity",
     "OneRoom": "parity", "ZonalFlow": "parity", "CO2TransportStep": "parity",
-    "OpenDoorBuoyancyDynamic": "step", "OpenDoorBuoyancyPressureDynamic": "step",
-    "NaturalVentilation": "step", "ReverseBuoyancy3Zones": "step",
+    "OpenDoorBuoyancyDynamic": "parity", "OpenDoorBuoyancyPressureDynamic": "parity",
+    "NaturalVentilation": "parity", "ReverseBuoyancy3Zones": "parity",
     "ClosedDoors": "storage", "OneOpenDoor": "storage", "ReverseBuoyancy": "storage",
 }
 UNITS = {"flow": "kg/s", "T": "K", "p": "Pa", "Xi": "kg/kg", "C": "kg/kg"}
 
 # The bound on the worst relative error (FLOOR_FRAC floor) over every row after
-# t = StartTime, per model and variable: 1.25 times the measured value, rounded up to two
+# t = StartTime, per "storage" model and variable: 1.25 times the measured value, rounded up to two
 # digits, 1e-12 where the measurement is round-off. Set once
 # from that measurement and justified per model in the test docstring; never loosened.
 DYNAMIC_BOUNDS = {
-    "OpenDoorBuoyancyDynamic": {"flow": 3.1e-02, "T": 4.4e-05, "p": 2.6e-09, "Xi": 2.5e-07},
-    "OpenDoorBuoyancyPressureDynamic": {"flow": 3.0e-02, "T": 4.8e-05, "p": 2.5e-09,
-                                        "Xi": 5.8e-05},
-    "ThreeRoomsContam": {"flow": 2.7e-06, "T": 8.9e-09, "p": 4.6e-10, "Xi": 4.4e-04,
-                         "C": 1.0e-12},
-    "ThreeRoomsContamDiscretizedDoor": {"flow": 3.0e-06, "T": 8.8e-09, "p": 4.6e-10,
-                                        "Xi": 4.4e-04, "C": 1.0e-12},
-    "CO2TransportStep": {"flow": 1.7e-05, "T": 8.9e-09, "p": 6.2e-10, "Xi": 4.4e-04,
-                         "C": 2.2e+00},
     "ClosedDoors": {"flow": 4.1e+02, "T": 1.4e-03, "p": 3.0e-03, "Xi": 4.4e-03},
-    "NaturalVentilation": {"flow": 3.6e-01, "T": 4.7e-06, "p": 1.5e-06, "Xi": 1.5e-06},
     "OneOpenDoor": {"flow": 8.6e-01, "T": 1.3e-03, "p": 4.6e-03},
-    "OneRoom": {"flow": 2.0e-11, "T": 1.0e-12, "p": 1.0e-12, "Xi": 1.0e-12},
     "ReverseBuoyancy": {"flow": 1.4e+01, "T": 3.8e-03, "p": 7.1e-03, "Xi": 1.8e-02},
-    "ReverseBuoyancy3Zones": {"flow": 1.2e+00, "T": 8.7e-05, "p": 2.1e-08, "Xi": 4.4e-04},
-    "ZonalFlow": {"flow": 1.0e-12, "T": 4.4e-05, "p": 1.0e-12, "Xi": 3.3e-06},
 }
 
 
@@ -363,47 +349,25 @@ def test_every_fixture_is_parity_checked_or_refused():
     sets = (set(ALGEBRAIC), set(DYNAMIC), set(REFUSED))
     assert set().union(*sets) == fixtures
     assert sum(len(s) for s in sets) == len(fixtures)  # disjoint
-    assert set(DYNAMIC_BOUNDS) == set(DYNAMIC) == set(DYNAMIC_GROUP)
+    assert set(DYNAMIC) == set(DYNAMIC_GROUP)
+    assert set(DYNAMIC_BOUNDS) == {m for m in DYNAMIC if DYNAMIC_GROUP[m] == "storage"}
+    assert set(PARITY_ROWS) == set(PARITY) and set(PARITY_STORAGE) <= set(PARITY)
 
 
 @pytest.mark.parametrize("model", [pytest.param(m, marks=pytest.mark.slow)
-                                   if m in SLOW_DYNAMIC else m for m in DYNAMIC])
+                                   if m in SLOW_DYNAMIC else m for m in DYNAMIC_BOUNDS])
 def test_parity_on_the_dynamic_models(model):
-    """Every CSV column after t = StartTime within its model's bound (`DYNAMIC_BOUNDS`).
+    """Every CSV column of a "storage" model after t = StartTime within its model's bound
+    (`DYNAMIC_BOUNDS`).
 
-    OpenModelica solves each model with DASSL at the declared tolerance (1e-6 relative;
-    1e-8 for the two OpenDoorBuoyancy*Dynamic) and adaptive steps; noodl solves the airflow
-    quasi-steadily (no volume mass storage) and steps heat and species with
-    the exact scheme at the CSV interval, the flows held at their end-of-step values
-    (`coupling="iterate"`), which is first order in the step. Relative errors use the
-    FLOOR_FRAC floor (1e-3 of the model's largest flow for flows). The measurements behind
-    each bound, the step-halving and mass-storage checks, are summarised here:
+    OpenModelica solves each model with DASSL at the declared tolerance (1e-6 relative) and
+    adaptive steps; noodl solves the airflow quasi-steadily (no volume mass storage) and
+    steps heat and species with the exact scheme at the CSV interval, the flows held at
+    their end-of-step values (`coupling="iterate"`), which is first order in the step.
+    Relative errors use the FLOOR_FRAC floor (1e-3 of the model's largest flow for flows).
+    The measurements behind each bound and the mass-storage checks are summarised here (the
+    "parity" models: `test_dynamic_parity_at_the_reference_precision`):
 
-    * ThreeRoomsContam, ThreeRoomsContamDiscretizedDoor, OneRoom, ZonalFlow: pinned or
-      mixing temperatures, flows to <= 2.4e-6 relative (the reference's own 1e-6 tolerance).
-      Xi up to 3.5e-4: MBL's Xi[1] of a volume moves by X dp/p while the volume's pressure
-      re-balances through mass storage (volTop: 35 Pa of 101325), noodl's Xi stays.
-      ZonalFlow's T is the one number in this group that is not round-off: rooB.T peaks at
-      1.04e-2 K (3.5e-5 relative) at t = 36 s. Not solver tolerance: rooA and rooB start
-      10 K and 0.005 kg/kg water apart (ZonalFlow.json), and noodl carries heat with one
-      common `cp` instead of MBL's per-zone `cp(X)` (assemble.py's "Capacities" derivation,
-      `|cp(X_in)/cp(X) - 1| <= 0.84 |dX_w|` here 0.84 * 0.005 = 4.2e-3 relative). Applied to
-      the 10 K starting gap that bounds the error at about 0.04 K, the same order of
-      magnitude as the measured 1.04e-2 K (about 4x tighter, plausibly because rooB's 1 m3
-      is 1 % of rooA's 100 m3 and the gap decays as they mix). This is the most likely
-      cause; it has not been isolated by rerunning with a per-zone `cp`.
-    * OpenDoorBuoyancyDynamic, OpenDoorBuoyancyPressureDynamic: flows 2.4 %, temperatures
-      0.011 K: noodl's first-order step (halving the step halves both errors, ratio 2.0).
-    * CO2TransportStep: T, p as ThreeRoomsContam; flows 1.3e-5, six times ThreeRoomsContam's,
-      in the pulse row, because the air source is a step mean too. C up to 170 % in the row
-      after the 3.6 s source pulse, which noodl spreads over its 172.8 s step (the injected
-      mass is exact: source drivers are step means; halving the step divides this by 2.9).
-      A tight integration (DOP853, rtol 1e-12) of the same three-zone species equations,
-      reusing noodl's flows (equal to MBL's to 4e-7) and the exact pulse, so independent in
-      the time integration only, puts noodl 22 % off it two rows after the pulse (volTop,
-      3801.6 s; MBL 1.8 %). From about t > 5000 s the reference's own error dominates: MBL
-      is off it by 12 % at 46310 s where noodl is off by 0.2 % (trace substances are scaled
-      by C_nominal = 0.01 against values ~1e-7).
     * ClosedDoors, OneOpenDoor: closed rooms of an ideal gas (PerfectGas, SimpleAir) heated
       by a 100 W sine. In MBL the heated air expands against the closed doors (V drho/dt up
       to 2.2 times the largest door flow in ClosedDoors, pressure up 243 and 366 Pa) and
@@ -602,3 +566,197 @@ def test_step_limited_error_halves_with_the_step(tmp_path):
     ratios = [float(a / b) for a, b in zip(errs[1], errs[2], strict=True)]
     print(f"step halving on {model}: error ratios (flow, T) {ratios}")
     assert all(1.8 <= x <= 2.2 for x in ratios), ratios
+
+
+# ------------------------------------------------ "parity": at the reference's precision
+# The dynamic models whose physics noodl shares with MBL (everything but volume mass
+# storage). Their reference CSVs are regenerated at a DASSL tolerance of 1e-12
+# (`scripts/modelica_export.py --tolerance 1e-12`, `tests/data/modelica/NOTICE.md`): at the
+# declared 1e-6 the reference's own error was of the order of the parity tolerance (ZonalFlow:
+# 5.6e-5 K and 2.8e-8 kg/kg; CO2TransportStep's door flow 5e-5 relative after its pulse,
+# still there at 1e-10, gone at 1e-12). noodl runs `scheme="midpoint"` at 1 and 2 substeps
+# per output interval, combined by `run.extrapolate` (fourth order), from the state MBL's
+# volumes reach once they have relaxed from `p_start` (`_mbl_initialised`), and must agree
+# with every column at every row after t0 to PARITY_RTOL, relative with the FLOOR_FRAC floor
+# of `_dynamic_stats`: 1e-6, the models' declared solver tolerance and the algebraic parity
+# tolerance. The size of the extrapolation's correction (`own error` in the output, the
+# 2-substep run's own time-integration error) is printed and recorded.
+PARITY = tuple(m for m in DYNAMIC if DYNAMIC_GROUP[m] == "parity")
+PARITY_RTOL = 1e-6
+# Where MBL's volumes keep storing or releasing air AFTER the initial relaxation, noodl's
+# quasi-steady airflow cannot follow to 1e-6, and the bound is set from measurement (1.25
+# times the full-run value, rounded up to two digits; a change detector, like
+# DYNAMIC_BOUNDS). The mechanism: as temperatures change, the hydrostatic pressures of a
+# volume that is not held by a boundary drift, its mass changes by `dm = V dp pStp/dStp`
+# and MBL (`ConservationEquation.mo`) (a) passes that storage flow through the flow
+# elements, (b) adds the flow work `(pStp/dStp - X dh/dX) dm/dt` to the volume's energy
+# (`u = h - pStp/dStp`) and (c) moves Xi by `X dm/m` (`der(Xi) = mbXi_flow/m`, see
+# `_mbl_initialised`). Evidence, measured on NaturalVentilation over its first 60 rows:
+# adding (b) and (c) as heat and water sources computed from noodl's own quasi-steady `dp/dt`
+# brings Xi from 4.6e-7 to 4e-11 and T from 8.6e-8 to 3e-9 relative, and the flows from 1.6e-5
+# to 3.5e-6, the size of (a) itself. The trace substance C of CO2TransportStep and its Xi
+# differ in the pulse row alone: the injected air is partly stored in volWes while the pulse
+# lasts. In ReverseBuoyancy3Zones the ~0.1 kg of air volTop releases while its pressure falls
+# 35 Pa (the relaxation `_mbl_initialised` accounts for in volTop itself) flows through the
+# open door into volWes and volEas and carries volTop's 2-5 K cooler air there (volWes 2.1e-3
+# K at 7.2 s; (b) and (c) above change nothing here); the temperature offset then drives the
+# door flows, largest in relative terms where they reverse through zero at 864 s.
+PARITY_STORAGE = {
+    "CO2TransportStep": {"Xi": 1.4e-06, "C": 6.9e-06},
+    "OpenDoorBuoyancyDynamic": {"flow": 1.2e-05},
+    "OpenDoorBuoyancyPressureDynamic": {"flow": 2.6e-03},
+    "NaturalVentilation": {"flow": 2.1e-02, "Xi": 1.8e-06},
+    "ReverseBuoyancy3Zones": {"flow": 1.5e-01, "T": 8.9e-06},
+}
+# The default run compares the first rows only (the initial transient, where the step error
+# peaked, and CO2TransportStep's pulse at 3600 s); `-m slow` compares every row.
+PARITY_ROWS = {"OpenDoorBuoyancyDynamic": 26, "OpenDoorBuoyancyPressureDynamic": 26,
+               "ThreeRoomsContam": 51, "ThreeRoomsContamDiscretizedDoor": 51,
+               "CO2TransportStep": 26, "NaturalVentilation": 26, "OneRoom": 101,
+               "ReverseBuoyancy3Zones": 26, "ZonalFlow": 61}
+_VOLUME_FREE_P = ("FixedInitial", "DynamicFreeInitial")
+
+
+def _mbl_initialised(model: str, tmp_path: Path) -> tuple[Path, dict]:
+    """The model's JSON with each volume's `X_start` and `T_start` replaced by the state MBL
+    holds once its volumes have relaxed from `p_start` to the airflow's pressures, and the
+    numbers behind it.
+
+    MBL starts every volume with a dynamic mass balance at `p_start` (its t0 row holds it);
+    within the first output interval the volume's pressure relaxes to the hydrostatic
+    solution noodl starts at, its mass changing by `dm = m dp/p` (`Buildings.Media.Air`'s
+    density is pressure-only, `Air.mo:210-215`). Two consequences of that storage, which
+    noodl's quasi-steady airflow does not model:
+
+    * `ConservationEquation.mo:315` evolves the water mass fraction as
+      `der(Xi) = mbXi_flow/m`, without the `-Xi der(m)` term of the water balance
+      `der(m Xi) = mbXi_flow`: air leaving or entering at the volume's own composition
+      changes Xi by `dXi = Xi dm/m`, so `Xi = X_start p/p_start` (volTop of
+      ThreeRoomsContam: 35 Pa of 101325, Xi down 3.5e-6, 3.5e-4 relative).
+    * `U = m u` with `u = h - pStp/dStp` (`Air.mo:782-788`) and `der(U) = h dm` for that
+      exchange give `m du = (pStp/dStp) dm`; with `du = cp dT + dh/dX dXi` and
+      `dh/dX = h_fg + (cp_ste - cp_air)(T - 273.15)` (`Air.mo:116-124`),
+      `cp dT = (pStp/dStp - X dh/dX) dm/m`, i.e. `T = T_start + (pStp/dStp - X dh/dX)
+      ln(p/p_start)/cp` (bouB of OpenDoorBuoyancyPressureDynamic: 5 Pa, 2.9e-3 K).
+
+    Starting noodl at that state reproduces both; nothing else about the model changes.
+    Volumes whose pressure does not move, or with a steady initial mass balance, keep their
+    start values; the correction applies to `Buildings.Media.Air` only (every model here)."""
+    from noodl.elements import medium as mbl_medium
+
+    src = DATA / f"{model}.json"
+    doc = json.loads(src.read_text())
+    if doc["medium"]["class"] != "Buildings.Media.Air":
+        return src, {}
+    med = mbl_medium(doc["medium"]["class"])
+    cp_air, cp_ste = med.specific_heat_cp(0.0), med.specific_heat_cp(1.0)
+    h_fg, c = 2501014.5, 101325.0 / 1.2  # Air.mo: h_fg, pStp/dStp
+    net, state, drivers, names = read_modelica(src, return_names=True)
+    p = simulate(net, state, drivers, names.times[:1])["p"][0].numpy()
+    changed = {}
+    for comp in doc["components"]:
+        if comp["class"] not in VOLUME_CLASSES:
+            continue
+        prm = comp["parameters"]
+        dyn = str(prm.get("massDynamics", "DynamicFreeInitial")).rsplit(".", 1)[-1]
+        p0, p1 = float(prm["p_start"]), float(p[names.nodes[comp["name"]]])
+        if dyn not in _VOLUME_FREE_P or p1 == p0:
+            continue
+        X0, T0 = float(prm.get("X_start", med.X_default)[0]), float(prm["T_start"])
+        dh_dX = h_fg + (cp_ste - cp_air) * (T0 - 273.15)
+        X1 = X0 * p1 / p0
+        T1 = T0 + (c - X0 * dh_dX) * math.log(p1 / p0) / med.specific_heat_cp(X0)
+        prm["X_start"] = [X1, 1.0 - X1]
+        prm["T_start"] = T1
+        changed[comp["name"]] = {"p_start": p0, "p": p1, "X_start": X0, "Xi": X1,
+                                 "T_start": T0, "T": T1}
+    if not changed:
+        return src, {}
+    path = tmp_path / f"{model}.json"
+    path.write_text(json.dumps(doc))
+    return path, changed
+
+
+def _columns_of(out: dict, names, head: list[str], net, drivers) -> dict[str, np.ndarray]:
+    q = out["air.q"].numpy()
+    cols: dict[str, np.ndarray] = {}
+    doors: dict[str, tuple[np.ndarray, ...]] = {}
+    for h in head[1:]:
+        inst, var = h.rsplit(".", 1)
+        if inst in names.nodes and (var in _NODE_VARS or var.startswith("C[")):
+            i = names.nodes[inst]
+            cols[h] = (out["C"][:, i, int(var[2:-1]) - 1].numpy() if var.startswith("C[")
+                       else out[_NODE_VARS[var]][:, i].numpy())
+            continue
+        kinds = names.kinds.get(inst, ())
+        if kinds and kinds[0].startswith("door_c:") and var in (
+                "m1_flow", "m2_flow", "mAB_flow", "mBA_flow"):
+            if inst not in doors:
+                doors[inst] = _discretised_port_flows(net, drivers, names, out, inst)
+            cols[h] = doors[inst][0 if var in ("m1_flow", "mAB_flow") else 1]
+            continue
+        key = {"m_flow": inst, "m1_flow": f"{inst}.port_a1", "m2_flow": f"{inst}.port_a2",
+               "mAB_flow": f"{inst}.port_a1", "mBA_flow": f"{inst}.port_a2"}.get(var)
+        assert key in names.edges, f"CSV column {h!r} maps to no noodl variable"
+        cols[h] = sum(s * q[:, c] for c, s in names.edges[key])
+    return cols
+
+
+def _worst(stats: dict[str, dict]) -> dict[str, dict]:
+    worst: dict[str, dict] = {}
+    for h, s in stats.items():
+        w = worst.setdefault(s["kind"], {"max_rel": -1.0})
+        if s["max_rel"] > w["max_rel"]:
+            w.update(max_rel=s["max_rel"], column=h, t=s["t_max_rel"], max_abs=s["max_abs"])
+    return worst
+
+
+def _check_parity(model: str, rows: int | None, tmp_path: Path) -> None:
+    head, data = _csv(model)
+    data = data if rows is None else data[:rows]
+    start = time.perf_counter()
+    path, initialised = _mbl_initialised(model, tmp_path)
+    runs, cols = [], []
+    for r in (1, 2):
+        net, state, drivers, names = read_modelica(path, return_names=True, substeps=r)
+        times = names.times[:data.shape[0]]
+        assert torch.allclose(times, torch.tensor(data[:, 0], dtype=torch.float64),
+                              rtol=0.0, atol=1e-9)
+        runs.append(simulate(net, state, drivers, times, scheme="midpoint"))
+        cols.append(_columns_of(runs[-1], names, head, net, drivers))
+    best = {h: cols[1][h] + (cols[1][h] - cols[0][h]) / 3.0 for h in head[1:]}  # extrapolate
+    seconds = time.perf_counter() - start
+    stats = _dynamic_stats(head, data, best)
+    own = _dynamic_stats(head, np.column_stack([data[:, 0]] + [best[h] for h in head[1:]]),
+                         cols[1])
+    worst, own_worst = _worst(stats), _worst(own)
+    for kind, w in worst.items():
+        print(f"{model} {kind}: max rel {w['max_rel']:.3e} ({w['column']} at t = {w['t']:g}), "
+              f"max abs {w['max_abs']:.3e} {UNITS[kind]}; own error "
+              f"{own_worst[kind]['max_rel']:.3e}")
+    print(f"{model}: {data.shape[0]} rows in {seconds:.1f} s")
+    if rows is None:
+        _record(model, {"group": "parity", "columns": stats, "worst": worst,
+                        "own_error": own_worst, "rtol": PARITY_RTOL,
+                        "storage_bounds": PARITY_STORAGE.get(model, {}),
+                        "floor_frac": FLOOR_FRAC, "initialised": initialised,
+                        "reference_tolerance": 1e-12, "seconds": seconds}, RECORD_DYNAMIC)
+    bound = {kind: PARITY_STORAGE.get(model, {}).get(kind, PARITY_RTOL) for kind in worst}
+    failures = [f"{kind}: max rel {w['max_rel']:.3e} ({w['column']} at t = {w['t']:g}) > "
+                f"{bound[kind]:.1e}" for kind, w in worst.items()
+                if not w["max_rel"] <= bound[kind]]
+    assert not failures, f"{model} outside its tolerance:\n" + "\n".join(failures)
+
+
+@pytest.mark.parametrize("model", PARITY)
+def test_dynamic_parity_at_the_reference_precision(model, tmp_path):
+    """The first `PARITY_ROWS[model]` rows of every "parity" model within PARITY_RTOL
+    (see the block comment above PARITY)."""
+    _check_parity(model, PARITY_ROWS[model], tmp_path)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("model", PARITY)
+def test_dynamic_parity_at_the_reference_precision_every_row(model, tmp_path):
+    """As `test_dynamic_parity_at_the_reference_precision`, over the whole experiment."""
+    _check_parity(model, None, tmp_path)

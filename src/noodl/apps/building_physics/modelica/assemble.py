@@ -40,28 +40,33 @@ Capacities (MBL v13 sources)
 `U = m u + CSen (T - reference_T)` and `CSen = (mSenFac - 1) rho_default cp_default V`
 (`:124-125`); `mC = m C` (`:266`); `der(U) = Hb_flow + Q_flow` (`:303`). For
 `Buildings.Media.Air`, `u = h - pStp/dStp` (`Air.mo:782-788`), so `du/dT = cp`, and the
-density is pressure-only (`Air.mo:210-215`), so `m` differs from `V rho_start` only by the
-relative pressure change (~1e-5). noodl's airflow is quasi-steady (no mass storage), so the
-mass is held at its start value: heat capacity `V rho_start cp + CSen`, species capacity
-`V rho_start`, with `rho_start = Medium.density(p_start, T_start, X_start)`
-(`PartialMixingVolume.mo:92-93`) and `cp = Medium.specificHeatCapacityCp` at `X_default`
+density is pressure-only (`Air.mo:210-215`). noodl's airflow is quasi-steady (no mass
+storage), so the mass is held fixed, at its value at the INITIAL QUASI-STEADY pressure
+(`_Builder._equilibrium_capacities`: one airflow solve at the start state): MBL's volumes
+start at `p_start` but relax to the airflow's pressures within the first output interval,
+and from then on `m = V d(p)` at those pressures, not at `p_start` (volTop of
+`Validation/ThreeRoomsContam.mo`: 35 Pa below `p_start`, a mass 3.5e-4 smaller, which a
+`p_start` mass puts straight into its trace-substance concentrations). Heat capacity
+`m cp + CSen`, species capacity `m`, with `m = V Medium.density(p, T_start, X_start)`
+(`V rho_start` for `SteadyState`) and `cp = Medium.specificHeatCapacityCp` at `X_default`
 (`ConservationEquation.mo:131-132` uses it for `CSen`). For the two ideal-gas media MBL's
 `U = m u` with a temperature-dependent `m` has no quasi-steady counterpart; the constant-
 pressure capacity `m cp` above is what a fixed-mass open zone at constant pressure has. The
 heat carrier on the edges is the same `cp`, so the balance is conservative.
 
-When water vapour is carried, `cp` is still the one value at `X_default` for every zone and
-edge (checked against MBL). With `h = cp_air (1 - X)(T - T_ref) +
-X (cp_ste (T - T_ref) + h_fg)` (`Air.mo:116-124`), `der(U) = sum m_in h_in - m_out h`
+When water vapour is carried, MBL's `cp` depends on it. With `h = cp_air (1 - X)(T - T_ref)
++ X (cp_ste (T - T_ref) + h_fg)` (`Air.mo:116-124`), `der(U) = sum m_in h_in - m_out h`
 (`ConservationEquation.mo:303`) and the water balance `m dX/dt = sum m_in (X_in - X)`, the
 latent and cross terms cancel exactly and MBL's zone temperature obeys
 `m cp(X) dT/dt = sum m_in cp(X_in) (T_in - T)`: only the RATIO of the upstream stream's `cp`
-to the zone's own enters. One common `cp` makes that ratio 1, which is exact between zones of
-equal moisture and off by `|cp(X_in)/cp(X) - 1| <= 0.84 |X_in - X|` otherwise (`(cp_ste -
-cp_air)/cp ~ 0.84` at `X_default`; 4.2e-3 for the 0.015/0.01 rooms of the ZonalFlow example,
-decaying as they mix). A per-zone `cp(X_start)` in the capacity with a fixed carrier would not
-reduce this: it would make the ratio wrong by
-`|cp(X_start)/cp(X_default) - 1|` for all time instead.
+to the zone's own enters. The thermal layer keeps one carrier and capacity `cp` (at
+`X_default`), and the closure adds the difference as a heat source,
+`c0 sum_in |q| (cp(X_up)/cp(X_i) - 1) (T_up - T_i)` (`_MBLClosure.cp_correction`), which
+makes the layer's balance MBL's exactly. Without it the ratio is off by up to
+`0.84 |X_in - X|` (`(cp_ste - cp_air)/cp`; 4.2e-3 for the 0.015/0.01 rooms of
+`Examples/ZonalFlow.mo`, where it put rooB's temperature 1e-2 K off MBL's). A stream injected
+by a source is carried at `cp(X_default)` (exact for `TraceSubstancesFlowSource`, which
+injects at `X_default`, into a zone at `X_default`).
 
 Moisture
 --------
@@ -99,10 +104,16 @@ MBL's `ZonalFlow` example has two rooms joined only by prescribed flows and no b
 airflow alone leaves their pressure undetermined, and the potential layer would be singular.
 MBL fixes it through mass storage (`der(m) = sum(ports.m_flow)`): with balanced flows the
 mass, hence for `Buildings.Media.Air` the pressure, stays at `p_start`. The reader therefore
-makes the first zone of every group of zones joined by pressure-dependent edges (paths and
-doors, not zonal flows) and holding no boundary node a pressure boundary of the air layer at
-its own `p_start` (`names.air_references` lists them). This is exact for balanced
-prescribed flows. An unbalanced one would accumulate heat and species without bound in the
+makes the largest zone (the first on a tie) of every group of zones joined by
+pressure-dependent edges (paths and doors, not zonal flows) and holding no boundary node a
+pressure boundary of the air layer (`names.air_references` lists them), at the level that
+gives the group its start mass: MBL's storage conserves the group's mass while its volumes
+relax from `p_start` to the airflow's pressure differences, so the reference's pressure is
+set once, at the initial state, such that `sum V rho(p, T_start, X_start)` over the group
+equals `sum V rho(p_start, T_start, X_start)` (`_Builder._closed_group_levels`). The largest
+zone is the one whose pressure that storage moves least (`Examples/NaturalVentilation.mo`:
+a 1e10 m3 `volOut` next to a 125 m3 room). This is exact for balanced prescribed flows.
+An unbalanced one would accumulate heat and species without bound in the
 reference zone (an air boundary but a transport interior node), so a closed group holding
 a source, or joined by a `ZonalFlow_m_flow` whose two directions are not the same flow, is
 refused by name.
@@ -144,21 +155,20 @@ a pinned zone it has no effect, as in MBL, where the stiff conductor carries it 
 
 Every source driver (air, heat and species) is the MEAN of the source over each step, not its
 value at the step's end time (`_Signals.mean`, `signals.interval_means`): row `k >= 1` of the
-series is the mean over `(times[k-1], times[k])`, row 0 the value at `times[0]`. The transport
-step from `times[k-1]` to `times[k]` holds its drivers constant, so this makes the amount
-injected per step exact; the end value would miss an event inside the step
-(`Examples/CO2TransportStep.mo` injects its CO2 in a 3.6 s pulse that falls between two
-172.8 s output times, found by the dynamic parity test). Boundary values, openings and
-prescribed flows stay point values at the step's end time. The air-layer source is a step
-mean too, so the quasi-steady flows reported at `times[k]` carry the mean injection of the
-step ending there, not the instantaneous one (consistent with the mass the transport layers
-receive; it is why CO2TransportStep's flows in its pulse row differ from MBL's six times
-more than ThreeRoomsContam's). The means are exact only for a run over consecutive grid
-times, which `run.simulate` therefore requires when a source varies in time.
+series is the mean over `(times[k-1], times[k])`, row 0 the value at `times[0]`, where
+`times` is the DRIVER grid (`driver_grid`): the output grid, optionally split into substeps,
+plus the event times of the signals whose output jumps (a `Step`'s start, a `Pulse`'s
+edges, a table's knots). The transport step from `times[k-1]` to `times[k]` holds its
+drivers constant, so this makes the amount injected per step exact, and with the events on
+the grid the source is also constant within each step: `Examples/CO2TransportStep.mo` injects
+its CO2 in a 3.6 s pulse that falls between two 172.8 s output times, and is stepped as its
+own 3.6 s step. Boundary values, openings and prescribed flows stay point values at the step's
+end time. `run.simulate` steps over every driver-grid time between the times it reports.
 """
 
 from __future__ import annotations
 
+import bisect
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
@@ -223,7 +233,8 @@ class ModelicaNames:
     signed sum of its compartment flows), is left out; a discretised door's own port flows
     are its element's `port_flows` at the solved `dp`. `nodes[name]` is the node position of
     a zone or boundary. `kinds[name]`
-    are the instance's air-layer edge kinds. `times` is the experiment output grid.
+    are the instance's air-layer edge kinds. `times` is the experiment output grid (the
+    driver grid `"series:time"` holds it and may be finer: `driver_grid`).
     `air_references` lists the zones made air-layer pressure references (module docstring,
     "Closed zone groups"); `attached` maps a boundary wired straight to a zone to that zone.
     `p_ref` is the gauge reference of `"air.phi"` (module docstring, "Gauge reference").
@@ -260,6 +271,50 @@ def experiment_times(doc: ModelicaDoc) -> Tensor:
         )
     n = int(round((stop - start) / interval))
     return start + interval * torch.arange(n + 1, dtype=F64)
+
+
+# Signal blocks whose output jumps: their breakpoints (`signals.breakpoints`) are added to
+# the driver grid, so that no step straddles a discontinuity (`driver_grid`). A Ramp's
+# corners and a Sine's quarter periods are continuous and are left alone.
+_EVENT_BLOCKS = ("Step", "Pulse", "TimeTable", "CombiTimeTable")
+
+
+def driver_grid(doc: ModelicaDoc, substeps: int = 1) -> Tensor:
+    """The time grid the drivers are evaluated on and `run.simulate` steps over: the
+    output grid (`experiment_times`) with each interval split into `substeps` equal steps,
+    plus every event time strictly inside the run of a signal whose output jumps (a `Step`'s
+    start, a `Pulse`'s edges, a table's knots). With the source drivers step means
+    (module docstring, "Sources"), a step then never straddles an event: the drivers are
+    smooth within every step (`Examples/CO2TransportStep.mo`'s 3.6 s pulse starts and ends
+    on step boundaries instead of being spread over a 172.8 s step)."""
+    if int(substeps) != substeps or substeps < 1:
+        raise ValueError(f"modelica: substeps must be a positive integer, got {substeps!r}")
+    out = experiment_times(doc)
+    lo, hi = float(out[0]), float(out[-1])
+    pts = set(out.tolist())
+    if substeps > 1:
+        frac = torch.arange(1, substeps, dtype=F64) / substeps
+        a, b = out[:-1], out[1:]
+        pts |= set((a.unsqueeze(1) + (b - a).unsqueeze(1) * frac).reshape(-1).tolist())
+    for sig in doc.signals:
+        if signals.is_math(sig) or sig.cls.rsplit(".", 1)[-1] not in _EVENT_BLOCKS:
+            continue
+        try:
+            pts |= set(signals.breakpoints(sig, lo, hi))
+        except ModelicaImportError:
+            continue  # reported by name when the signal is evaluated
+    # An event within round-off of an output time or sub-step time is that time.
+    tol = 1e-9 * max(1.0, abs(hi))
+    outs = out.tolist()
+    kept: list[float] = []
+    for t in sorted(pts):
+        if kept and t - kept[-1] <= tol:
+            continue
+        k = bisect.bisect_left(outs, t)
+        near = [outs[i] for i in (k - 1, k) if 0 <= i < len(outs)]
+        kept.append(min(near, key=lambda o: abs(o - t)) if near and
+                    min(abs(o - t) for o in near) <= tol else t)
+    return torch.tensor(sorted(set(kept)), dtype=F64)
 
 
 def _stack(values: list[Tensor], n_t: int) -> tuple[Tensor, bool]:
@@ -518,7 +573,8 @@ class _MBLClosure:
                  X0: Tensor,
                  air_interior: Tensor, air_bound: Tensor, th_interior: Tensor | None,
                  th_bound: Tensor, sp_interior: Tensor | None, sp_bound: Tensor | None,
-                 water: int | None, n_species: int) -> None:
+                 water: int | None, n_species: int,
+                 heat_edges: tuple[Tensor, Tensor] | None = None) -> None:
         self.medium = medium
         self.p_ref = float(p_ref)
         self.T0, self.phi0, self.X0 = T0, phi0, X0
@@ -527,6 +583,13 @@ class _MBLClosure:
         self.sp_interior, self.sp_bound = sp_interior, sp_bound
         self.water = water
         self.n_species = n_species
+        # Moist-air heat carrier (module docstring, "Capacities"): the (src, tgt) node of
+        # every air-layer edge in `"air.q"` order, set only when water vapour is carried
+        # into a thermal layer by a medium whose cp depends on it.
+        self.heat_edges = heat_edges
+        self.c0 = medium.specific_heat_cp(medium.X_default[0] if medium.has_moisture else 0.0)
+        self.cp_dry = medium.specific_heat_cp(0.0)
+        self.cp_slope = medium.specific_heat_cp(1.0) - self.cp_dry
 
     @staticmethod
     def _scatter(base: Tensor, parts: list[tuple[Tensor, Tensor]]) -> Tensor:
@@ -567,11 +630,36 @@ class _MBLClosure:
             parts.append((phi[..., self.air_interior], self.air_interior))
         return self.p_ref + self._scatter(self.phi0, parts)
 
+    def cp_correction(self, q: Tensor, T: Tensor, X: Tensor) -> Tensor:
+        """Full-node heat source (W) that turns the thermal layer's one-`cp` balance into
+        MBL's moist-air one (module docstring, "Capacities"): at thermal-interior node `i`,
+        `c0 sum_in |q| (cp(X_up)/cp(X_i) - 1) (T_up - T_i)` over the edges flowing into `i`,
+        with `c0` the layer's carrier and capacity `cp` (at `X_default`). With it,
+        `m c0 dT_i/dt = (c0/cp(X_i)) sum_in |q| cp(X_up) (T_up - T_i)`, which is
+        `m cp(X_i) dT_i/dt = sum_in m_in cp(X_in) (T_in - T_i)`."""
+        src, tgt = self.heat_edges
+        up = torch.where(q >= 0, src, tgt)
+        dn = torch.where(q >= 0, tgt, src)
+        cp = self.cp_dry + self.cp_slope * X
+        T_up, T_dn = T.gather(-1, up), T.gather(-1, dn)
+        cp_up, cp_dn = cp.gather(-1, up), cp.gather(-1, dn)
+        w = self.c0 * q.abs() * (cp_up / cp_dn - 1.0) * (T_up - T_dn)
+        out = torch.zeros(q.shape[:-1] + T.shape[-1:], dtype=F64)
+        out = out.scatter_add(-1, dn.expand(w.shape), w)
+        keep = torch.zeros(T.shape[-1], dtype=torch.bool)
+        keep[self.th_interior] = True
+        return torch.where(keep, out, torch.zeros_like(out))
+
     def __call__(self, state, drivers):
         T = self.temperatures(state, drivers)
         out = {"T": T, "p_abs": self.pressures(state, drivers)}
         if self.water is not None:
             out["X_w"] = self.species(state, drivers)[..., self.water]
+            q = state.get("air.q")
+            if self.heat_edges is not None and q is not None:
+                src = self.cp_correction(q, T, out["X_w"])
+                base = drivers.get("thermal.sources")
+                out["thermal.sources"] = src if base is None else base + src
         return out
 
 
@@ -586,6 +674,8 @@ class _Zone:
     C: list[float]
     rho_start: float
     heat_capacity: float
+    csen: float = 0.0  # ConservationEquation.mo:124-125, J/K
+    steady_mass: bool = False  # massDynamics = SteadyState: m = V rho_start
     pinned: float | None = None
 
 
@@ -691,13 +781,15 @@ def _zone(comp: Component, med: MBLMedium, errors: list[str]) -> _Zone | None:
     rho_start = float(med.density(_t(p_start), T_start, X_w))
     cp = med.specific_heat_cp(med.X_default[0] if med.has_moisture else 0.0)
     # ConservationEquation.mo:124-125: CSen = (mSenFac - 1)*rho_default*cp_default*V.
-    heat = rho_start * V * cp + (mSenFac - 1.0) * med.rho_default * cp * V
+    csen = (mSenFac - 1.0) * med.rho_default * cp * V
+    heat = rho_start * V * cp + csen
+    steady = _short(p.get("massDynamics"), "DynamicFreeInitial") == "SteadyState"
     return _Zone(comp=comp, V=V, T_start=T_start, p_start=p_start, X_w=X_w, C=C,
-                 rho_start=rho_start, heat_capacity=heat)
+                 rho_start=rho_start, heat_capacity=heat, csen=csen, steady_mass=steady)
 
 
 class _Builder:
-    def __init__(self, graph: ComponentGraph, doc: ModelicaDoc) -> None:
+    def __init__(self, graph: ComponentGraph, doc: ModelicaDoc, substeps: int = 1) -> None:
         self.graph, self.doc = graph, doc
         self.errors: list[str] = []
         try:
@@ -705,7 +797,8 @@ class _Builder:
         except KeyError as exc:
             raise ModelicaImportError(f"modelica: {exc.args[0]}") from None
         self.species_names = [str(s) for s in doc.medium.get("extraPropertiesNames", [])]
-        self.times = experiment_times(doc)
+        self.out_times = experiment_times(doc)
+        self.times = driver_grid(doc, substeps)  # the drivers' grid (`driver_grid`)
         self.n_t = int(self.times.numel())
         kind_of = {
             c.name: "observer" if (c.role == "observer" or c.cls in schema.OBSERVERS)
@@ -873,12 +966,16 @@ class _Builder:
                 )
             seen_roots.add(r)
             references.append(zone)
+        # Each remaining closed group's reference is its LARGEST zone (the first on a tie):
+        # the one whose pressure MBL's mass storage moves least (module docstring).
+        largest: dict[int, str] = {}
         for name in g.zones:
             r = find(index[name])
-            if r in has_boundary or r in seen_roots:
+            if r in has_boundary or r in seen_roots or name not in zones:
                 continue
-            seen_roots.add(r)
-            references.append(name)
+            if r not in largest or zones[name].V > zones[largest[r]].V:
+                largest[r] = name
+        references.extend(largest.values())
         # A closed group can only hold balanced exchanges: its
         # reference zone is a pressure boundary of the air layer but an interior node of the
         # transport layers, so any net inflow would accumulate heat and species there
@@ -1016,6 +1113,9 @@ class _Builder:
             sp_interior=sp_interior,
             sp_bound=net.boundary_index(sp_boundary) if sp_interior is not None else None,
             water=water, n_species=K,
+            heat_edges=self._heat_edges(air, net) if (
+                water is not None and "thermal" in layers
+                and med.specific_heat_cp(1.0) != med.specific_heat_cp(0.0)) else None,
         )
         tol = {}
         if "thermal" in layers:
@@ -1043,6 +1143,13 @@ class _Builder:
                     row.append(z.X_w)
                 rows.append(row)
             state["species.x"] = torch.tensor(rows, dtype=F64).reshape(-1, K)
+        n_b = len(g.boundaries)
+        closed_groups = {n_b + j: [z for z in zones if find(index[z]) == find(index[r])]
+                         for j, r in enumerate(references) if r not in attached_p}
+        self._closed_group_levels(closed_groups, zones, index, air, closure, state, const,
+                                  drivers, med)
+        self._equilibrium_capacities(zones, node_names, layers, air, closure, state, const,
+                                     med)
 
         # ---------------------------------------------------------- names
         edges: dict[str, tuple[tuple[int, int], ...]] = {}
@@ -1055,9 +1162,92 @@ class _Builder:
             if entries is not None:
                 edges[sensor.component.name] = tuple((c, sensor.sign * s) for c, s in entries)
         names = ModelicaNames(edges=edges, nodes=dict(index), kinds=kinds,
-                              times=self.times.clone(), air_references=tuple(references),
+                              times=self.out_times.clone(),
+                              air_references=tuple(references),
                               attached={b.name: z for z, b in g.attached}, p_ref=p_ref)
         return model, state, drivers, names
+
+    @staticmethod
+    def _closed_group_levels(groups, zones, index, air, closure, state, const, drivers,
+                             med) -> None:
+        """Set each closed zone group's pressure level by its mass (module docstring,
+        "Closed zone groups"): the reference zone's pressure is shifted so that the group's
+        air mass at the initial quasi-steady pressures, `sum V rho(p, T_start, X_start)`,
+        equals its start mass `sum V rho(p_start, T_start, X_start)`, as MBL's mass storage
+        conserves it while the volumes relax. The flows depend on pressure differences only;
+        the level decides which zones' pressures move from `p_start` (`Examples/
+        NaturalVentilation.mo`: the 1e10 m3 `volOut` stays at `p_start`, the room moves)."""
+        if not groups:
+            return
+        pb = const["air.phi_boundary"]
+        series = drivers.get("series:air.phi_boundary")
+        for _ in range(4):
+            drv = dict(const)
+            drv.update(closure(state, drv))
+            with torch.no_grad():
+                phi, _ = air.solve(drv["air.phi_boundary"], drv, drv.get("air.sources"),
+                                   phi0=None, atol=1e-13, rtol=1e-12, differentiable=False)
+            p = closure.pressures({"air.phi": phi}, drv)
+            worst = 0.0
+            for col, members in groups.items():
+                f = dm = 0.0
+                for z in members:
+                    zn, i = zones[z], index[z]
+                    rho = float(med.density(p[i], zn.T_start, zn.X_w))
+                    f += zn.V * (rho - zn.rho_start)
+                    dm += zn.V * (float(med.density(p[i] + 1.0, zn.T_start, zn.X_w)) - rho)
+                delta = -f / dm
+                worst = max(worst, abs(delta))
+                if series is not None:
+                    series[:, col] = series[:, col] + delta
+                if series is None or pb.data_ptr() != series[0].data_ptr():
+                    pb[col] = pb[col] + delta
+            state["air.phi"][air.bound] = pb
+            if worst < 1e-9:
+                return
+
+    @staticmethod
+    def _equilibrium_capacities(zones, node_names, layers, air, closure, state, const,
+                                med) -> None:
+        """Hold each zone's mass at its value at the INITIAL QUASI-STEADY pressure (module
+        docstring, "Capacities"): the airflow is solved once at the start state and the
+        transport layers' capacities are re-evaluated at those pressures."""
+        if not any(k in layers for k in ("thermal", "species")):
+            return
+        if all(z.steady_mass for z in zones.values()):
+            return
+        drv = dict(const)
+        drv.update(closure(state, drv))
+        with torch.no_grad():
+            phi, _ = air.solve(drv["air.phi_boundary"], drv, drv.get("air.sources"),
+                               phi0=None, atol=1e-13, rtol=1e-12, differentiable=False)
+        p = closure.pressures({"air.phi": phi}, drv)
+        cp = med.specific_heat_cp(med.X_default[0] if med.has_moisture else 0.0)
+
+        def mass(i: int) -> float:
+            z = zones[node_names[i]]
+            rho = z.rho_start if z.steady_mass else float(
+                med.density(p[i], z.T_start, z.X_w))
+            return rho * z.V
+
+        if "thermal" in layers:
+            idx = layers["thermal"].interior_idx.tolist()
+            layers["thermal"].capacity = torch.tensor(
+                [mass(i) * cp + zones[node_names[i]].csen for i in idx], dtype=F64)
+        if "species" in layers:
+            idx = layers["species"].interior_idx.tolist()
+            layers["species"].capacity = torch.tensor([mass(i) for i in idx], dtype=F64)
+
+    @staticmethod
+    def _heat_edges(air: PotentialFlowLayer, net: Network) -> tuple[Tensor, Tensor]:
+        """`(src, tgt)` node positions of every air-layer edge, in `"air.q"` column order."""
+        src = torch.empty(sum(air.kind_slice(k).stop - air.kind_slice(k).start
+                              for k in dict.fromkeys(air.kinds)), dtype=torch.long)
+        tgt = torch.empty_like(src)
+        for k in dict.fromkeys(air.kinds):
+            sl = air.kind_slice(k)
+            src[sl], tgt[sl] = net.endpoints(k)
+        return src, tgt
 
     # ------------------------------------------------------------- edges
     def _port_flow(self, ref: str | None, edges) -> tuple[tuple[int, int], ...] | None:
@@ -1313,14 +1503,16 @@ class _Builder:
         return s_air, s_th, s_sp
 
 
-def build(graph: ComponentGraph, doc: ModelicaDoc) -> tuple[Model, State, Drivers,
-                                                           ModelicaNames]:
+def build(graph: ComponentGraph, doc: ModelicaDoc, *, substeps: int = 1
+          ) -> tuple[Model, State, Drivers, ModelicaNames]:
     """Assemble the noodl `Model`, initial `State`, `Drivers` and `ModelicaNames`.
 
     Drivers that a signal makes time-varying are stored twice: at their first-time value
     under their own key (so `model.step(state, drivers, dt)` runs as is), and as the full
-    series over `names.times` under `"series:<key>"` (plus `"series:time"`), which
+    series over the driver grid (`driver_grid(doc, substeps)`: the output grid
+    `names.times`, each interval split into `substeps` steps, plus the signals' event
+    times) under `"series:<key>"` (plus `"series:time"`, the grid itself), which
     `run.simulate`/`run.step_drivers` slice per step. See the module docstring for the
     conversion rules and `ModelicaNames` for the name mapping.
     """
-    return _Builder(graph, doc).build()
+    return _Builder(graph, doc, substeps).build()

@@ -86,6 +86,10 @@ parameters and the trajectories; OpenModelica's own CSV writer would need a seco
 compilation and cannot hold parameters): `#` header lines (model, MBL commit, OpenModelica
 and MSL versions, tolerance, start, stop, interval, solver), then `time` and one column per
 compared variable, every number in Python's shortest round-trip form of OpenModelica's double.
+`--tolerance` simulates at a solver tolerance other than the model's declared one (the JSON
+keeps the declared experiment; the CSV header records the tolerance actually used): the
+dynamic parity references are regenerated tighter than declared, so that their own
+integration error is well below the tolerance the parity test asserts.
 Columns: each one-way flow element's `m_flow`, each four-port element's `m1_flow`/`m2_flow`
 (and `mAB_flow`/`mBA_flow` when the class declares them as variables), each volume's `T`,
 `p`, `Xi[1]` (when the medium has moisture) and `C[k]` (one per trace substance). If the
@@ -669,7 +673,7 @@ def _probe_sim_model(probe_info: dict) -> str:
 
 
 def simulate(model: str, mbl: Path, workdir: Path, experiment: dict, probe_info: dict,
-             run_model: bool) -> tuple[list[str] | None, str]:
+             run_model: bool, tolerance: float | None = None) -> tuple[list[str] | None, str]:
     """Simulate the medium's Real-constants probe and (if `run_model`) the model.
 
     Returns `(result variable names, or None if the model was not simulated, omc output)`.
@@ -688,7 +692,8 @@ end if;
         v = experiment["values"]
         script += _echo_block("model_sim", f"""simulate({model}, startTime={v["StartTime"]!r},
   stopTime={v["StopTime"]!r}, numberOfIntervals={experiment["numberOfIntervals"]},
-  tolerance={v["Tolerance"]!r}, method="dassl", outputFormat="mat",
+  tolerance={tolerance if tolerance is not None else v["Tolerance"]!r}, method="dassl",
+  outputFormat="mat",
   fileNamePrefix="noodl_export", simflags="-noEventEmit -emit_protected")""") + """
 getErrorString();
 names := readSimulationResultVars("noodl_export_res.mat", readParameters=true,
@@ -778,7 +783,7 @@ def _mbl_commit(mbl: Path) -> str:
 
 
 def export(model: str, out: Path, mbl: Path, run_simulation: bool = True,
-           keep: Path | None = None) -> dict:
+           keep: Path | None = None, tolerance: float | None = None) -> dict:
     """Export `model`; returns a summary (paths, timings, CSV rows, precision notes)."""
     t_start = time.perf_counter()
     commit = _mbl_commit(mbl)
@@ -795,7 +800,7 @@ def export(model: str, out: Path, mbl: Path, run_simulation: bool = True,
         probe_info = probe_medium(instance, mbl, workdir, medium_reference(instance))
         t_probe = time.perf_counter()
         result_names, sim_out = simulate(model, mbl, workdir, experiment, probe_info,
-                                         run_simulation)
+                                         run_simulation, tolerance)
         t_sim = time.perf_counter()
         # A provisional document (instance-API values) fixes the compared variables and the
         # Real parameters to re-read; nXi/nC come from the probe tree.
@@ -839,7 +844,7 @@ def export(model: str, out: Path, mbl: Path, run_simulation: bool = True,
                 "mbl_commit": commit,
                 "openmodelica": omc,
                 "modelica_standard_library": msl,
-                "tolerance": repr(v["Tolerance"]),
+                "tolerance": repr(tolerance if tolerance is not None else v["Tolerance"]),
                 "start_time": repr(v["StartTime"]),
                 "stop_time": repr(v["StopTime"]),
                 "interval": repr(v["Interval"]),
@@ -881,9 +886,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="write the JSON only (Reals keep six significant digits)")
     ap.add_argument("--keep", type=Path, default=None,
                     help="copy the omc working directory here (debugging)")
+    ap.add_argument("--tolerance", type=float, default=None,
+                    help="solver tolerance for the simulation (default: the model's own)")
     args = ap.parse_args(argv)
     summary = export(args.model, args.out, args.mbl.expanduser(),
-                     run_simulation=not args.no_simulate, keep=args.keep)
+                     run_simulation=not args.no_simulate, keep=args.keep,
+                     tolerance=args.tolerance)
     print(json.dumps(summary))
     # A requested simulation that failed still gets a JSON-only export ("warning: simulation
     # of ... failed" above, on stderr) but no "csv" key in the summary; a batch script over

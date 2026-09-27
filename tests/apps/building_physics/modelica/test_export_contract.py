@@ -309,15 +309,14 @@ def test_main_exits_non_zero_when_a_requested_simulation_fails(exporter, monkeyp
     OpenModelica by monkeypatching `export` itself, since the failure path needs `omc`."""
     monkeypatch.setattr(
         exporter, "export",
-        lambda model, out, mbl, *, run_simulation, keep: {"model": model, "json": "x.json"})
+        lambda model, out, mbl, **_kw: {"model": model, "json": "x.json"})
     assert exporter.main(["test.Whatever"]) == 1
 
 
 def test_main_exits_zero_when_the_simulation_succeeds(exporter, monkeypatch) -> None:
     monkeypatch.setattr(
         exporter, "export",
-        lambda model, out, mbl, *, run_simulation, keep: {"model": model, "json": "x.json",
-                                                          "csv": "x.csv"})
+        lambda model, out, mbl, **_kw: {"model": model, "json": "x.json", "csv": "x.csv"})
     assert exporter.main(["test.Whatever"]) == 0
 
 
@@ -325,5 +324,5 @@ def test_main_exits_zero_with_no_simulate_even_without_a_csv(exporter, monkeypat
     """`--no-simulate` never produces a "csv" key by design; that is not a failure."""
     monkeypatch.setattr(
         exporter, "export",
-        lambda model, out, mbl, *, run_simulation, keep: {"model": model, "json": "x.json"})
+        lambda model, out, mbl, **_kw: {"model": model, "json": "x.json"})
     assert exporter.main(["test.Whatever", "--no-simulate"]) == 0

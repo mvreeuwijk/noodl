@@ -20,22 +20,27 @@ from pathlib import Path
 
 from noodl.apps.building_physics.modelica import assemble, graph, schema
 from noodl.apps.building_physics.modelica.assemble import ModelicaNames
-from noodl.apps.building_physics.modelica.run import simulate, step_drivers
+from noodl.apps.building_physics.modelica.run import extrapolate, simulate, step_drivers
 from noodl.apps.building_physics.modelica.schema import ModelicaImportError
 
 
-def read_modelica(path: str | Path, *, return_names: bool = False):
+def read_modelica(path: str | Path, *, return_names: bool = False, substeps: int = 1):
     """Read one `noodl-modelica/1` JSON file into `(model, state, drivers)`.
+
+    The drivers are evaluated on `assemble.driver_grid`: the experiment's output grid with
+    each interval split into `substeps` equal steps, plus the event times of the signals
+    whose output jumps; `run.simulate` steps over all of it and reports the times asked for.
 
     With `return_names=True` a fourth item, the `ModelicaNames` mapping MBL instance names to
     the model's edge columns and node positions (and carrying the experiment grid), is
     returned too. Raises `ModelicaImportError` naming every unsupported instance.
     """
     doc = schema.load(path)
-    model, state, drivers, names = assemble.build(graph.build(doc), doc)
+    model, state, drivers, names = assemble.build(graph.build(doc), doc, substeps=substeps)
     if return_names:
         return model, state, drivers, names
     return model, state, drivers
 
 
-__all__ = ["ModelicaImportError", "ModelicaNames", "read_modelica", "simulate", "step_drivers"]
+__all__ = ["ModelicaImportError", "ModelicaNames", "extrapolate", "read_modelica", "simulate",
+           "step_drivers"]

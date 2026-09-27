@@ -8,6 +8,16 @@ reference simulation trajectory (`# key: value` header lines, then `time` and on
 compared variable). Every JSON records the MBL commit and the
 OpenModelica version it was generated with; every CSV repeats them in its header.
 
+The reference CSVs of the nine dynamic "parity" models (`CO2TransportStep`,
+`NaturalVentilation`, `OneRoom`, `OpenDoorBuoyancyDynamic`, `OpenDoorBuoyancyPressureDynamic`,
+`ReverseBuoyancy3Zones`, `ThreeRoomsContam`, `ThreeRoomsContamDiscretizedDoor`, `ZonalFlow`)
+were regenerated with `scripts/modelica_export.py --tolerance 1e-12` (DASSL at a relative
+tolerance of 1e-12 instead of each model's declared 1e-6 or 1e-8; the CSV header's
+`tolerance` line records it; the JSON, which keeps the declared experiment, came out
+byte-identical). At the declared tolerance the references' own integration error was
+comparable to the parity tolerance (ZonalFlow: 5.6e-5 K, 2.8e-8 kg/kg; CO2TransportStep's
+door flow 5e-5 relative after its source pulse, still visible at 1e-10 and gone at 1e-12).
+
 MBL is licensed under a 3-clause BSD licence (with an added paragraph on accepting
 enhancements), reproduced below from `Buildings/legal.html` in the MBL source tree:
 
