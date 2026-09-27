@@ -1,6 +1,6 @@
 # File formats
 
-noodl reads each of these formats into the same kind of object — a network with elements and
+noodl physics reads each of these formats into the same kind of object — a network with elements and
 layers — so a model read from a file can be batched, differentiated and coupled exactly like one
 built by hand in Python. Reading a file is one of two ways in to an application; the other is
 building the network directly, shown on each application page.

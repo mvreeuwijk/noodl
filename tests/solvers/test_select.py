@@ -1071,7 +1071,7 @@ def _rearm_scipy_warning(monkeypatch):
 def test_auto_warns_once_when_scipy_is_the_only_thing_missing(monkeypatch):
     """The one fall-back that is an ENVIRONMENT fault rather than a modelling fact: this
     operator certifies SPD, offers a sparse form and is within the batch threshold, so the
-    only reason it is not being factorised is that the `noodl[sparse]` extra is absent.
+    only reason it is not being factorised is that the `noodl-physics[sparse]` extra is absent.
     PCG is still a correct answer, so this is a warning and not an error -- and it fires
     once per process, because a per-solve warning would be unusable noise.
     """

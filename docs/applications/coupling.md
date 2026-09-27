@@ -358,7 +358,7 @@ batch 1, 48 s at batch 10 and 137 s at batch 100 (medians; wall time varied by u
 - **Three-way unions are untested.** `union` has been verified on two-model pairings (street ↔
   building above). A three-model union such as sewer + street + building is expected to work but
   has not been built or tested.
-- **Only noodl models can be coupled.** `union` joins noodl `Model`s. There is no co-simulation
+- **Only noodl physics models can be coupled.** `union` joins noodl physics `Model`s. There is no co-simulation
   interface to non-differentiable tools such as EnergyPlus or WSIMOD itself.
 - **Ambient temperature is not coupled in the street ↔ building demo.** The building sees the
   street only through species concentrations; its ambient density comes from the `.prj` file's

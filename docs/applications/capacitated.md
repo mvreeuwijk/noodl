@@ -4,7 +4,7 @@ Rule-based allocation of water between stores. Nodes are stores (reservoirs, tre
 demand points) with a storage ceiling; edges are arcs with a capacity. Each arc carries the flow
 that is requested of it, clipped to the arc's capacity and to the free storage at the receiving
 node, and storage is conserved exactly at every node. Requests and flows are in m³/s, storage in
-m³. In noodl this is implemented by `CapacitatedTransferLayer`, and it is the framework's
+m³. In noodl physics this is implemented by `CapacitatedTransferLayer`, and it is the framework's
 **fourth flow-determination mode**.
 
 Every other application on this site determines a flow from physics: a potential difference, a
@@ -198,7 +198,7 @@ preference, requests `[0.5, 10.0, 10.0]`:
 
 `remaining` only shrinks and `f` only grows round over round, so more passes move a share closer
 to the true max-min-fair split and never past it. The default of 5 matches WSIMOD's own
-`constants.MAXITER`; WSIMOD uses a `while` loop with early exit, and noodl uses a fixed count for
+`constants.MAXITER`; WSIMOD uses a `while` loop with early exit, and noodl physics uses a fixed count for
 batched differentiability — each round is strictly non-expansive, so a fixed cap is a safe
 over-approximation rather than a different algorithm.
 
@@ -268,7 +268,7 @@ branch never runs, and every pass after the first is a no-op. It measures the ch
 
 ## Out of scope
 
-- The **WSIMOD `Node` wrapper** — embedding a noodl `Model` as a live WSIMOD node via
+- The **WSIMOD `Node` wrapper** — embedding a noodl physics `Model` as a live WSIMOD node via
   `push_set`/`pull_set` — is deferred.
 - **The other nine WSIMOD pollutants.** The layer is species-count-agnostic, so this is a matter
   of widening a transport layer's species list and the fixture capture, not a change here.
