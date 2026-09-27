@@ -130,7 +130,7 @@ a directory holding a `munich.cfg` is read as a MUNICH case; anything else raise
 naming what noodl recognises.
 
 ```python
-from noodl.apps.street_aq.case import read_case
+from noodl.apps.street_aq import read_case
 
 case = read_case("tests/data/street/munich_paris_excerpt")
 case.street_ids           # ['1', '3', '8', '11'], the emissions/background street axis
@@ -164,16 +164,18 @@ own files hold micrograms, converted at read and write time.
 
 ### `drivers_at`
 
-`drivers_at(case, model, k) -> dict` is the driver mapping at time index `k` for `model`, built
-from `case`. It follows the model's own shape: `meteo="uniform"` reduces every meteorology array
-to one network-wide value (circular mean for direction, through the reciprocal for the Obukhov
-length, a plain mean otherwise); `meteo="per_street"` keeps every driver's trailing street axis
-and adds the `"<key>_junction"` drivers junction routing needs, from `case.meteo_junction` when
-the source has it, otherwise the same street-to-junction reduction. `u_star` is supplied
-whenever `case.meteo` has it, and drives the friction velocity directly rather than through
-noodl's log law. `background` follows the model's own boundary count the same way: one
-`"<layer>.x_boundary"` row per street, or one network-wide mean. The model's own street order
-(`street_index(model)`) must equal `case.street_ids` -- build the model on `case.network` itself.
+`drivers_at(case, model, k, *, species=None) -> dict` is the driver mapping at time index `k` for
+`model`, built from `case`. It follows the model's own shape: `meteo="uniform"` reduces every
+meteorology array to one network-wide value (circular mean for direction, through the reciprocal
+for the Obukhov length, a plain mean otherwise); `meteo="per_street"` keeps every driver's
+trailing street axis and adds the `"<key>_junction"` drivers junction routing needs, from
+`case.meteo_junction` when the source has it, otherwise the same street-to-junction reduction.
+`u_star` is supplied whenever `case.meteo` has it, and drives the friction velocity directly
+rather than through noodl's log law. `background` follows the model's own boundary count the same
+way: one `"<layer>.x_boundary"` row per street, or one network-wide mean. `species` (default
+`case.species`) selects and orders which of the case's species end up on the emissions and
+background drivers. The model's own street order (`street_index(model)`) must equal
+`case.street_ids` -- build the model on `case.network` itself.
 
 ### `StreetCase.model_options()`
 
@@ -181,36 +183,43 @@ noodl's log law. `background` follows the model's own boundary count the same wa
 `source="munich"`, that is `munich.cfg`'s `[street]` section, translated into `build_model`
 keywords (`canyon_wind`, `exchange`, `roof_wind_form`, `direction_averaging`, `z_ref`,
 `canyon_wind_min`), plus `stability="munich"` and MUNICH's own hard-coded `u_d_min=0.001`. A
-`synthetic` case raises `NotImplementedError` -- pass `build_model`'s keywords directly instead.
+missing `Minimum_Street_Wind_Speed` defaults to MUNICH's own `0.1` m/s (`canyon_wind_min=0.1`);
+`Zref`'s absence still raises. A `synthetic` case raises `NotImplementedError` -- pass
+`build_model`'s keywords directly instead.
 
 ### `StreetCase.synthetic`
 
 `StreetCase.synthetic(network, *, species, times, meteo, emissions, background,
 meteo_junction=None, start=None)` builds a case in Python -- an idealised network to drive
-directly, or to write out with `write_case`. `meteo` (and `meteo_junction`) need
-`wind_dir_from_deg` and `wind_speed`; the rest are optional. Each value is a scalar, an
-`(n_hours,)` series, or the full `(n_hours, n_streets)` (`n_junctions` for `meteo_junction`)
-array. `emissions` and `background` broadcast the same way, with an optional trailing species
-axis.
+directly, or to write out with `write_case`. `meteo` needs `wind_dir_from_deg` and
+`wind_speed`; the rest are optional. `meteo_junction` takes any subset of the same keys, or
+none at all. Each value is a scalar, an `(n_hours,)` series, or the full `(n_hours, n_streets)`
+(`n_junctions` for `meteo_junction`) array. `emissions` and `background` broadcast the same way,
+with an optional trailing species axis. Writing the case out with `write_case(format="munich")`
+additionally needs `meteo` to carry `h_abl`, `u_star` and `lmo`.
 
 ### `write_case`
 
 `write_case(out_dir, case, *, format="munich", options=None) -> Path` writes `case` under
-`out_dir`; only `format="munich"` is implemented, and `case.start` must be set. A case read from
-MUNICH files writes its own native options back (`read_case` then `write_case` round-trips);
-`options` are the format's own overrides -- for MUNICH, any `[street]` closure key, any of the
-six `[meteo]` fields MUNICH always requires (`Rain`, `SolarRadiation`, `SpecificHumidity`,
-`SurfacePressure`, `SurfaceTemperature`, `Attenuation`), or `lat0_deg`/`lon0_deg` (the lon/lat a
-synthetic network's `(0, 0)` is anchored to). `options` win even over a value the case itself
-supplies. Missing per-junction meteorology is derived from the streets meeting at each junction
-(circular mean for direction, through the reciprocal for the Obukhov length, a plain mean
-otherwise).
+`out_dir`; only `format="munich"` is implemented, and `case.start` must be set, and `case.meteo`
+must have `h_abl`, `u_star` and `lmo` -- MUNICH needs their `PBLH`, `UST`, `LMO` fields whenever
+transport is on, which this writer always turns on. A case read from MUNICH files writes its own
+`[street]` section and projection back (`read_case` then `write_case` round-trips those two);
+`[options]` itself always turns chemistry, photolysis, deposition and scavenging off, and the six
+`[meteo]` fields MUNICH always requires (`Rain`, `SolarRadiation`, `SpecificHumidity`,
+`SurfacePressure`, `SurfaceTemperature`, `Attenuation`) come from the case where it has one (only
+`SurfaceTemperature`, from `meteo["temperature"]`), else a constant default -- either way,
+`options` overrides them. `options` are the format's own overrides -- for MUNICH, any `[street]`
+closure key, any of those six `[meteo]` fields, or `lat0_deg`/`lon0_deg` (the lon/lat a synthetic
+network's `(0, 0)` is anchored to). `options` win even over a value the case itself supplies.
+Missing per-junction meteorology is derived from the streets meeting at each junction (circular
+mean for direction, through the
+reciprocal for the Obukhov length, a plain mean otherwise).
 
 ### Worked example
 
 ```python
-from noodl.apps.street_aq import build_model
-from noodl.apps.street_aq.case import drivers_at, read_case
+from noodl.apps.street_aq import build_model, drivers_at, read_case
 
 case = read_case("tests/data/street/munich_paris_excerpt")
 

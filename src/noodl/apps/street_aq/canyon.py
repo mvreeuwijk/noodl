@@ -474,7 +474,7 @@ def canyon_velocity(
     `ComputeExpUstreet`, `MeteorologyStreet.cxx:257-263` computes B14 and nothing else.
 
     `canyon_wind_min` is MUNICH's `ustreet_min`, default 0.1 m/s there (SRC `:3451`,
-    `Minimum_Street_Wind_Speed`) and 0.0 here, the prototype's behaviour, by default. The
+    `Minimum_Street_Wind_Speed`) and 0.0 here by default. The
     floor keeps the sign: `U = sign * max(|u|, u_min)` with `sign = +1` wherever the
     unfloored value is `>= 0`. The `>=` matters exactly once -- at `phi = pi/2`, where the
     unfloored value is `+0` and MUNICH's own `>` classification makes the street an
