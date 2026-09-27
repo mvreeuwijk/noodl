@@ -68,7 +68,7 @@ such enhancements or derivative works thereof, in binary and source code form.
 
 ---
 
-Five of the 23 models are refused by `read_modelica` (`ModelicaImportError`, naming the
+Four of the 23 models are refused by `read_modelica` (`ModelicaImportError`, naming the
 offending instances); their JSON is exported and kept here for the refusal tests:
 
 - `PressurizationData.json` — wind-pressure boundaries (`Outside_CpLowRise`) and weather data
@@ -79,13 +79,10 @@ offending instances); their JSON is exported and kept here for the refusal tests
   feedback controller are not supported.
 - `ChimneyShaftWithVolume.json` — a dynamic (mass- and heat-storing) hydrostatic column
   (`MediumColumnDynamic`) and a feedback controller are not supported.
-- `OneEffectiveAirLeakageArea.json` — a mass flow source into a zone group with no boundary
-  node (the injected mass could only be stored by compressing a volume, which is not
-  modelled) is not supported.
 
-All five still simulate cleanly in OpenModelica, so their `.csv` was exported too (this
+All four still simulate cleanly in OpenModelica, so their `.csv` was exported too (this
 export script does not know which models `noodl`'s reader refuses); they are kept here for
-completeness even though noodl's tests only read the JSON of these five.
+completeness even though noodl's tests only read the JSON of these four.
 
 Also derived from MBL, elsewhere in this repository: `tests/apps/building_physics/modelica/
 fixtures/three_rooms_discretized_door.json` reuses the instance names of

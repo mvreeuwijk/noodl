@@ -2,7 +2,9 @@
 
 The algebraic models are checked to a fixed tolerance (below); the dynamic models,
 those with volumes, against per-model bounds set from measurement (`DYNAMIC_BOUNDS` and
-`test_parity_on_the_dynamic_models`, at the end of this module).
+`test_parity_on_the_dynamic_models`, at the end of this module), except the storage-dominated
+ones, checked against the reference's own tolerance plus one output interval's change
+(`_storage_tolerance`).
 
 The reference implementation is MBL v13.0.0 (commit 55abf579) simulated by OpenModelica
 1.27.1 (`tests/data/modelica/NOTICE.md`); agreement with it is parity. Each model below is
@@ -18,8 +20,8 @@ The algebraic set is the models with no `MixingVolume`/`DelayFirstOrder` (checke
 JSON by `test_the_algebraic_set_has_no_volumes`): between two or more pressure boundaries the
 flows are algebraic in the boundary signals, so noodl's steady solve at each grid time is the
 same problem the DAE solver solves, and parity is to round-off, not to the solver tolerance.
-`OneEffectiveAirLeakageArea` has two volumes and a mass source and is refused (below), so it
-is not in this set.
+`OneEffectiveAirLeakageArea` has two volumes and a mass source (a dynamic, storage model), so
+it is not in this set.
 
 At an output time exactly on a signal event (`DoorOpenClosed`: the `Step` at 0.5 s;
 `OpenDoorPressure`/`OpenDoorTemperature`: the `TimeTable` knots every 3600 s) OpenModelica's
@@ -250,9 +252,6 @@ REFUSED = {
     "ChimneyShaftNoVolume": {"con", "oriChiBot", "oriChiTop", "temSen"},
     # A mass- and heat-storing MediumColumnDynamic, plus the controller.
     "ChimneyShaftWithVolume": {"con", "sha", "temSen"},
-    # A mass source into two volumes with no boundary: only compressible storage could
-    # take the injected mass (out of scope).
-    "OneEffectiveAirLeakageArea": {"sou"},
 }
 
 
@@ -309,7 +308,7 @@ def _dynamic_stats(head: list[str], data: np.ndarray,
 DYNAMIC = ("OpenDoorBuoyancyDynamic", "OpenDoorBuoyancyPressureDynamic", "ThreeRoomsContam",
            "ThreeRoomsContamDiscretizedDoor", "CO2TransportStep", "ClosedDoors",
            "NaturalVentilation", "OneOpenDoor", "OneRoom", "ReverseBuoyancy",
-           "ReverseBuoyancy3Zones", "ZonalFlow")
+           "ReverseBuoyancy3Zones", "ZonalFlow", "OneEffectiveAirLeakageArea")
 # Measured wall time above 30 s (38-315 s): `slow`, deselected by the
 # default `-m "not slow"` addopts, run with `-m slow`. The other three took 25-55 s
 # depending on machine load and stay in the default run, so that it checks one model of
@@ -320,8 +319,9 @@ SLOW_DYNAMIC = frozenset(DYNAMIC) - {"CO2TransportStep", "OneRoom", "ZonalFlow"}
 # tolerance (CO2TransportStep outside the rows right after its source pulse). "step": the
 # difference is noodl's first-order step at the CSV interval (halving the step halves it;
 # asserted on OpenDoorBuoyancyDynamic by `test_step_limited_error_halves_with_the_step`).
-# "storage": MBL's volume mass storage, which noodl's quasi-steady airflow does not model;
-# each such test also asserts the diagnosed mechanism
+# "storage": dominated by MBL's volume mass storage, which the reader models
+# (`modelica/storage.py`); each is checked against `_storage_tolerance`, not a measured bound,
+# and its test also asserts that noodl reproduces the storage mechanism
 # (`_check_storage_mechanism`).
 DYNAMIC_GROUP = {
     "ThreeRoomsContam": "parity", "ThreeRoomsContamDiscretizedDoor": "parity",
@@ -329,6 +329,7 @@ DYNAMIC_GROUP = {
     "OpenDoorBuoyancyDynamic": "step", "OpenDoorBuoyancyPressureDynamic": "step",
     "NaturalVentilation": "step", "ReverseBuoyancy3Zones": "step",
     "ClosedDoors": "storage", "OneOpenDoor": "storage", "ReverseBuoyancy": "storage",
+    "OneEffectiveAirLeakageArea": "storage",
 }
 UNITS = {"flow": "kg/s", "T": "K", "p": "Pa", "Xi": "kg/kg", "C": "kg/kg"}
 
@@ -346,11 +347,8 @@ DYNAMIC_BOUNDS = {
                                         "Xi": 4.4e-04, "C": 1.0e-12},
     "CO2TransportStep": {"flow": 1.7e-05, "T": 8.9e-09, "p": 6.2e-10, "Xi": 4.4e-04,
                          "C": 2.2e+00},
-    "ClosedDoors": {"flow": 4.1e+02, "T": 1.4e-03, "p": 3.0e-03, "Xi": 4.4e-03},
     "NaturalVentilation": {"flow": 3.6e-01, "T": 4.7e-06, "p": 1.5e-06, "Xi": 1.5e-06},
-    "OneOpenDoor": {"flow": 8.6e-01, "T": 1.3e-03, "p": 4.6e-03},
     "OneRoom": {"flow": 2.0e-11, "T": 1.0e-12, "p": 1.0e-12, "Xi": 1.0e-12},
-    "ReverseBuoyancy": {"flow": 1.4e+01, "T": 3.8e-03, "p": 7.1e-03, "Xi": 1.8e-02},
     "ReverseBuoyancy3Zones": {"flow": 1.2e+00, "T": 8.7e-05, "p": 2.1e-08, "Xi": 4.4e-04},
     "ZonalFlow": {"flow": 1.0e-12, "T": 4.4e-05, "p": 1.0e-12, "Xi": 3.3e-06},
 }
@@ -363,7 +361,9 @@ def test_every_fixture_is_parity_checked_or_refused():
     sets = (set(ALGEBRAIC), set(DYNAMIC), set(REFUSED))
     assert set().union(*sets) == fixtures
     assert sum(len(s) for s in sets) == len(fixtures)  # disjoint
-    assert set(DYNAMIC_BOUNDS) == set(DYNAMIC) == set(DYNAMIC_GROUP)
+    storage = {m for m, g in DYNAMIC_GROUP.items() if g == "storage"}
+    assert set(DYNAMIC_BOUNDS) | storage == set(DYNAMIC) == set(DYNAMIC_GROUP)
+    assert not set(DYNAMIC_BOUNDS) & storage
 
 
 @pytest.mark.parametrize("model", [pytest.param(m, marks=pytest.mark.slow)
@@ -372,17 +372,19 @@ def test_parity_on_the_dynamic_models(model):
     """Every CSV column after t = StartTime within its model's bound (`DYNAMIC_BOUNDS`).
 
     OpenModelica solves each model with DASSL at the declared tolerance (1e-6 relative;
-    1e-8 for the two OpenDoorBuoyancy*Dynamic) and adaptive steps; noodl solves the airflow
-    quasi-steadily (no volume mass storage) and steps heat and species with
-    the exact scheme at the CSV interval, the flows held at their end-of-step values
-    (`coupling="iterate"`), which is first order in the step. Relative errors use the
+    1e-8 for the two OpenDoorBuoyancy*Dynamic) and adaptive steps; noodl stores each
+    volume's mass by backward Euler (`modelica/storage.py`; the first interval on a graded
+    sub-grid, `run.START_GRADING`) and steps heat and species with the exact scheme at the
+    CSV interval, the flows held at their end-of-step values (`coupling="iterate"`), which is
+    first order in the step. Relative errors use the
     FLOOR_FRAC floor (1e-3 of the model's largest flow for flows). The measurements behind
     each bound, the step-halving and mass-storage checks, are summarised here:
 
     * ThreeRoomsContam, ThreeRoomsContamDiscretizedDoor, OneRoom, ZonalFlow: pinned or
       mixing temperatures, flows to <= 2.4e-6 relative (the reference's own 1e-6 tolerance).
-      Xi up to 3.5e-4: MBL's Xi[1] of a volume moves by X dp/p while the volume's pressure
-      re-balances through mass storage (volTop: 35 Pa of 101325), noodl's Xi stays.
+      Xi to 2.6e-6: MBL's Xi[1] of a volume moves by X dp/p while the volume's pressure
+      re-balances through mass storage (volTop: 35 Pa of 101325), and so does noodl's with
+      volume mass storage (3.5e-4 on the quasi-steady route, where it stayed).
       ZonalFlow's T is the one number in this group that is not round-off: rooB.T peaks at
       1.04e-2 K (3.5e-5 relative) at t = 36 s. Not solver tolerance: rooA and rooB start
       10 K and 0.005 kg/kg water apart (ZonalFlow.json), and noodl carries heat with one
@@ -404,26 +406,27 @@ def test_parity_on_the_dynamic_models(model):
       3801.6 s; MBL 1.8 %). From about t > 5000 s the reference's own error dominates: MBL
       is off it by 12 % at 46310 s where noodl is off by 0.2 % (trace substances are scaled
       by C_nominal = 0.01 against values ~1e-7).
-    * ClosedDoors, OneOpenDoor: closed rooms of an ideal gas (PerfectGas, SimpleAir) heated
-      by a 100 W sine. In MBL the heated air expands against the closed doors (V drho/dt up
-      to 2.2 times the largest door flow in ClosedDoors, pressure up 243 and 366 Pa) and
-      heats at constant volume: the summed zone temperature rises exceed noodl's constant-
-      pressure ones by cp/cv (measured 1.402 and 1.400; unchanged by halving the step). No
-      storage, no expansion flow: flow errors up to 73 % (ClosedDoors, storage-driven) and
-      0.9 % (OneOpenDoor, buoyancy from the cp/cv temperature offset plus the first-order
-      step: halving it divides them by 1.3-1.5) of the largest flow.
+    * ClosedDoors, OneOpenDoor ("storage", `_storage_tolerance`): closed rooms of an ideal
+      gas (PerfectGas, SimpleAir) heated by a 100 W sine; the heated air expands against the
+      closed doors (pressure up 243 and 366 Pa) and heats at constant volume. The
+      quasi-steady route (`mass_storage=False`) was off by the cp/cv ratio of the
+      temperature rises (0.31 K, 243 Pa, flows 73 % of the largest); with storage: ClosedDoors
+      T 1.5e-4 K (5.0e-7 relative), p 2.0e-2 Pa (1.9e-7), Xi 4.9e-9, flows 1.4e-6 kg/s (1.3 %
+      of the largest, 1.15e-4 kg/s); OneOpenDoor T 2.8e-3 K, p 8.2e-2 Pa (8.1e-7), flows
+      6.9e-4 kg/s (0.8 % of 0.087). Halving the step: ClosedDoors flows / 1.99, T / 1.38,
+      p / 1.28 (the rest, 2e-7 relative, is at the reference's tolerance); OneOpenDoor T
+      / 1.99, flows / 1.41, p / 1.02 (8e-7 relative: the reference's own tolerance, 0.1 Pa).
     * NaturalVentilation, ReverseBuoyancy3Zones: absolute flow errors <= 0.15 % and 0.27 %
       of the largest flow, from the first-order step (halving it divides them by 1.3-1.4
       and 2.0); the relative bound is set where the flows reverse through zero.
-    * ReverseBuoyancy: the zones start at 101325 Pa against a 100000 Pa outside; MBL
-      releases the excess air through storage (V drho/dt 0.13 kg/s at t = 7.2 s, 35 % of
-      the largest flow) and cools the zones; noodl starts at the equilibrium pressures. By
-      the flow work alone (`u = h - pStp/dStp`, so `cp dT = (pStp/dStp) dp/p`) the cooling
-      would be (pStp/(dStp cp)) ln(p0/p) = 1.096 K (bottom zones; 1.125 K top; mass-weighted
-      1.115 K); MBL's water balance (`ConservationEquation.mo`, `der(Xi) = mbXi_flow/m`)
-      also lowers Xi by X dp/p, and the latent enthalpy released, h_fg dX, offsets part of
-      it: predicted 0.785 K mass-weighted, measured 0.830 K at 21.6-28.8 s (the remaining
-      5 % is not explained). The temperature difference persists and drives the flows.
+    * ReverseBuoyancy ("storage"): the zones start at 101325 Pa against a 100000 Pa
+      outside; MBL and noodl release the excess air through storage (V drho/dt 0.13 kg/s at
+      t = 7.2 s) and cool the zones by the flow work less the latent heat of MBL's Xi drop
+      (`_check_initial_imbalance`); the quasi-steady route started balanced and was off by
+      0.90 K, 566 Pa. With storage the t = StartTime row agrees (flows 1e-10 relative)
+      and the worst errors, all during the release at t = 14.4-21.6 s, are T 5.7e-2 K, p
+      98 Pa (9.8e-4 relative), Xi 9.6e-6, flows 5.0e-2 kg/s: first order in the step once
+      the release is resolved (`test_storage_models_converge_with_the_step`).
     """
     head, data = _csv(model)
     start = time.perf_counter()
@@ -445,11 +448,23 @@ def test_parity_on_the_dynamic_models(model):
         print(f"{model} {kind}: max rel {w['max_rel']:.3e} ({w['column']} at t = {w['t']:g}), "
               f"max abs {w['max_abs']:.3e} {w['unit']} ({w['abs_column']}); t0 row rel "
               f"{w['t0_rel']:.3e}, abs {w['t0_abs']:.3e} {w['unit']}")
-    mechanism = (_check_storage_mechanism(model, head, data, run)
-                 if DYNAMIC_GROUP[model] == "storage" else None)
+    if DYNAMIC_GROUP[model] == "storage":
+        mechanism = _check_storage_mechanism(model, head, data, run)
+        tol = _storage_tolerance(model, head, data)
+        _record(model, {"group": "storage", "columns": stats, "worst": worst,
+                        "tolerance": tol, "mechanism": mechanism, "seconds": seconds},
+                RECORD_DYNAMIC)
+        failures = []
+        for j, h in enumerate(head[1:], start=1):
+            err = np.abs(np.asarray(cols[h], dtype=float) - data[:, j])
+            if not err.max() <= tol[h]:  # every row, t = StartTime included
+                k = int(np.argmax(err))
+                failures.append(f"{h}: {err.max():.3e} at t = {data[k, 0]:g} > {tol[h]:.3e}")
+        assert not failures, f"{model} outside _storage_tolerance:\n" + "\n".join(failures)
+        return
     _record(model, {"group": DYNAMIC_GROUP[model], "columns": stats, "worst": worst,
                     "bounds": DYNAMIC_BOUNDS[model], "floor_frac": FLOOR_FRAC,
-                    "mechanism": mechanism, "seconds": seconds}, RECORD_DYNAMIC)
+                    "mechanism": None, "seconds": seconds}, RECORD_DYNAMIC)
     assert set(worst) == set(DYNAMIC_BOUNDS[model])
     failures = [f"{kind}: max rel {w['max_rel']:.3e} ({w['column']} at t = {w['t']:g}) > "
                 f"{DYNAMIC_BOUNDS[model][kind]:.1e}" for kind, w in worst.items()
@@ -463,14 +478,63 @@ def _volumes(doc: dict) -> dict[str, dict]:
             if c["class"] in VOLUME_CLASSES}
 
 
+def _storage_tolerance(model: str, head: list[str], data: np.ndarray) -> dict[str, float]:
+    """Per column: `Tolerance max|omc| + max_k |omc_k - omc_(k-1)|`, the reference's own
+    declared relative tolerance (DASSL, `experiment.Tolerance`) plus the column's largest
+    change over one output interval.
+
+    The second term is the error budget of noodl's first-order step, justified rather than
+    measured: the reader steps storage by backward Euler and heat and species with the
+    flows held at their end-of-step values, so a flow reported at `t_k` is the storage
+    rate averaged over `(t_(k-1), t_k)`, which lags the instantaneous one by about half an
+    interval's change, and a state lags likewise; the error halves with the step
+    (`test_storage_models_converge_with_the_step`). The bound holds at every row,
+    t = StartTime included (the reader reproduces MBL's initial equations there)."""
+    doc = json.loads((DATA / f"{model}.json").read_text())
+    rtol = float(doc["experiment"]["Tolerance"])
+    return {h: float(rtol * np.abs(data[:, j]).max() + np.abs(np.diff(data[:, j])).max())
+            for j, h in enumerate(head) if j}
+
+
 def _check_storage_mechanism(model: str, head: list[str], data: np.ndarray,
                              run: dict) -> dict:
-    """Assert the mechanism diagnosed for a storage-dominated model and
+    """Assert that noodl reproduces the storage mechanism of a storage-dominated model and
     return its numbers for the record."""
     doc = json.loads((DATA / f"{model}.json").read_text())
     if model == "ReverseBuoyancy":
         return _check_initial_imbalance(doc, head, data, run)
+    if model == "OneEffectiveAirLeakageArea":
+        return _check_injected_mass(doc, head, data, run)
     return _check_closed_heated_rooms(doc, head, data, run)
+
+
+def _check_injected_mass(doc: dict, head: list[str], data: np.ndarray, run: dict) -> dict:
+    """OneEffectiveAirLeakageArea: a `MassFlowSource_T` ramping to 0.01 kg/s (`Ramp`,
+    1800-5400 s) feeds one of two volumes that exchange air only with each other through a
+    crack, so every kilogram injected is stored by compression (the quasi-steady route had to
+    refuse the model). `Buildings.Media.Air`'s mass is `V p dStp/pStp` (`Air.mo:210-215`), so
+    `sum V dp dStp/pStp = int m_flow`: asserted to 1e-6 of the final injected mass for MBL and
+    for noodl (whose source drivers are step means, so its injected mass is exact)."""
+    (ramp,) = [s["parameters"] for s in doc["signals"] if s["class"].endswith("Ramp")]
+    t = data[:, 0]
+    a, d, h = ramp["startTime"], ramp["duration"], ramp["height"]
+    tau = np.clip(t - a, 0.0, d)
+    injected = h * tau ** 2 / (2 * d) + h * np.maximum(t - a - d, 0.0)   # int of the ramp
+    vols = _volumes(doc)
+    names, out = run["names"], run["out"]
+    p_n = out["p"].numpy()
+    stored = {
+        "mbl": sum(v["V"] * 1.2 / 101325.0
+                   * (data[:, head.index(f"{z}.p")] - data[0, head.index(f"{z}.p")])
+                   for z, v in vols.items()),
+        "noodl": sum(v["V"] * 1.2 / 101325.0 * (p_n[:, names.nodes[z]] - p_n[0, names.nodes[z]])
+                     for z, v in vols.items()),
+    }
+    off = {k: float(np.abs(v - injected).max() / injected[-1]) for k, v in stored.items()}
+    print(f"mechanism: stored vs injected mass off by {off['noodl']:.2e} (noodl), "
+          f"{off['mbl']:.2e} (MBL) of the {injected[-1]:.1f} kg injected")
+    assert off["noodl"] <= 1e-6 and off["mbl"] <= 1e-6
+    return {"stored_vs_injected": off, "injected_kg": float(injected[-1])}
 
 
 def _check_closed_heated_rooms(doc: dict, head: list[str], data: np.ndarray,
@@ -481,14 +545,12 @@ def _check_closed_heated_rooms(doc: dict, head: list[str], data: np.ndarray,
     MBL (`ConservationEquation.mo`: `m = V medium.d`, `U = m medium.u`, `der(U) = Hb_flow +
     Q_flow`; `u = h - R T` for both ideal gases) heats the closed building at constant
     volume: with `p V = m R T` and `U = m cv T`, `sum V dp = (R/cv) int Q` whatever the door
-    flows, and the zone temperatures rise cp/cv times faster than at constant pressure.
-    noodl's zones hold their start mass at constant pressure (capacity `V rho_start cp`,
-    `assemble` "Capacities"), so its energy closes as `sum rho_start V cp dT = int Q`.
-    Asserted: the MBL pressure balance to 1e-3 of its peak, the ratio of the V-weighted
-    temperature rises MBL/noodl equal to cp/cv to 0.5 % at the peak of `int Q`, and noodl's
-    energy closure to 1e-6 of its peak (measured 7.5e-8 on ClosedDoors, the iterate and
-    airflow tolerances; a lost or doubled source would be of order 1). `int Q` is the closed
-    form of the JSON's signals."""
+    flows, and the zone temperatures rise cp/cv times faster than at constant pressure (the
+    quasi-steady route, `mass_storage=False`, rose 1.40 times too slowly). Asserted, on
+    noodl's own history: the same pressure balance to 1e-3 of its peak (as MBL's, measured
+    6.1e-5 and 2.2e-4), and the ratio of the V-weighted temperature rises MBL/noodl at the
+    peak of `int Q` equal to 1 to 1e-4 (not cp/cv). `int Q` is the closed form of the JSON's
+    signals."""
     from noodl.elements import medium as mbl_medium
 
     med = mbl_medium(doc["medium"]["class"])
@@ -509,70 +571,64 @@ def _check_closed_heated_rooms(doc: dict, head: list[str], data: np.ndarray,
     cp = med.specific_heat_cp(X)
     cv = cp - R
     names, out = run["names"], run["out"]
-    sum_vdp = sum(v["V"] * (data[:, head.index(f"{z}.p")] - data[0, head.index(f"{z}.p")])
-                  for z, v in vols.items())
+    p_n, T_n = out["p"].numpy(), out["T"].numpy()
     predicted = R / cv * int_q
-    p_balance = float(np.abs(sum_vdp - predicted).max() / np.abs(predicted).max())
+    sum_vdp = {
+        "mbl": sum(v["V"] * (data[:, head.index(f"{z}.p")] - data[0, head.index(f"{z}.p")])
+                   for z, v in vols.items()),
+        "noodl": sum(v["V"] * (p_n[:, names.nodes[z]] - p_n[0, names.nodes[z]])
+                     for z, v in vols.items()),
+    }
+    balance = {key: float(np.abs(v - predicted).max() / np.abs(predicted).max())
+               for key, v in sum_vdp.items()}
     k = int(np.argmax(np.abs(int_q)))
     rise_mbl = sum(v["V"] * (data[k, head.index(f"{z}.T")] - data[0, head.index(f"{z}.T")])
                    for z, v in vols.items())
-    T = out["T"].numpy()
-    rise_noodl = sum(v["V"] * (T[k, names.nodes[z]] - T[0, names.nodes[z]])
+    rise_noodl = sum(v["V"] * (T_n[k, names.nodes[z]] - T_n[0, names.nodes[z]])
                      for z, v in vols.items())
     ratio = float(rise_mbl / rise_noodl)
-    energy = sum(float(med.density(torch.tensor(float(v["p_start"])), float(v["T_start"]), X))
-                 * v["V"] * cp * (T[:, names.nodes[z]] - T[0, names.nodes[z]])
-                 for z, v in vols.items())
-    closure = float(np.abs(energy - int_q).max() / np.abs(int_q).max())
-    print(f"mechanism: sum V dp vs (R/cv) int Q off by {p_balance:.2e} of the peak; "
-          f"temperature-rise ratio MBL/noodl {ratio:.5f} vs cp/cv {cp / cv:.5f}; noodl "
-          f"energy closure {closure:.2e}")
-    assert p_balance <= 1e-3
-    assert abs(ratio / (cp / cv) - 1.0) <= 5e-3
-    assert closure <= 1e-6
-    return {"sum_V_dp_vs_R_over_cv_int_Q": p_balance, "rise_ratio_mbl_over_noodl": ratio,
-            "cp_over_cv": cp / cv, "noodl_energy_closure": closure}
+    print(f"mechanism: sum V dp vs (R/cv) int Q off by {balance['noodl']:.2e} of the peak "
+          f"(MBL {balance['mbl']:.2e}); temperature-rise ratio MBL/noodl {ratio:.7f} "
+          f"(cp/cv {cp / cv:.5f})")
+    assert balance["noodl"] <= 1e-3 and balance["mbl"] <= 1e-3
+    assert abs(ratio - 1.0) <= 1e-4
+    return {"sum_V_dp_vs_R_over_cv_int_Q": balance, "rise_ratio_mbl_over_noodl": ratio,
+            "cp_over_cv": cp / cv}
 
 
 def _check_initial_imbalance(doc: dict, head: list[str], data: np.ndarray,
                              run: dict) -> dict:
-    """ReverseBuoyancy: every zone starts at `p_start` = 101325 Pa and MBL's t0 row still
-    holds it, against the outside boundary at 100000 Pa, while noodl starts at the
-    quasi-steady pressures (within 100 Pa of the boundary: the stack heads only). The
-    mass-weighted cooling of MBL's zones over the release (to 21.6 s) is the flow work
-    `(pStp/dStp) ln(p/p0)` less the latent enthalpy of MBL's Xi drop,
-    `(h_fg + (cp_ste - cp_air)(T0 - 273.15)) dX`, both from the CSV, divided by cp (`Air.mo`
-    `u = h - pStp/dStp`; `ConservationEquation.mo` `der(Xi) = mbXi_flow/m`): asserted within
-    10 % (measured 0.830 K against 0.785 K predicted; 1.115 K by the flow work alone)."""
+    """ReverseBuoyancy: every zone starts at `p_start` = 101325 Pa against the outside
+    boundary at 100000 Pa, in MBL (`FixedInitial`, `initialize_p`) and in noodl, whose
+    t = StartTime row must hold the same pressures to 1e-9 Pa. Releasing the excess through
+    storage cools the zones: the mass-weighted cooling by t = 21.6 s is the flow work
+    `(pStp/dStp) ln(p0/p)` less the latent enthalpy of MBL's Xi drop (`Air.mo`
+    `u = h - pStp/dStp`; `ConservationEquation.mo` `der(Xi) = mbXi_flow/m`), 0.830 K in MBL
+    and none in the quasi-steady route, which started balanced. Asserted: noodl's cooling
+    within 2 % of MBL's (a first-order step over a release lasting a few intervals; see
+    `_storage_tolerance`)."""
     (bou,) = [c["parameters"] for c in doc["components"]
               if c["class"].endswith("Boundary_pT")]
     vols = _volumes(doc)
     names, out = run["names"], run["out"]
-    p_noodl0 = out["p"][0].numpy()
+    p_n, T_n = out["p"].numpy(), out["T"].numpy()
     assert bou["p"] == 100000.0
     for z, v in vols.items():
         assert data[0, head.index(f"{z}.p")] == v["p_start"] == 101325.0
-        assert abs(p_noodl0[names.nodes[z]] - bou["p"]) < 100.0
+        assert abs(p_n[0, names.nodes[z]] - v["p_start"]) <= 1e-9
     k = int(np.argmin(np.abs(data[:, 0] - 21.6)))
-    cp_air, cp_ste, h_fg = 1006.0, 1860.0, 2501014.5  # Air.mo: dryair.cp, steam.cp, h_fg
-    X = 0.01
-    cp = cp_air * (1 - X) + cp_ste * X
-    c = 101325.0 / 1.2  # pStp/dStp, Air.mo:43-45
-    mass = cooling = predicted = 0.0
+    mass = cool_mbl = cool_noodl = 0.0
     for z, v in vols.items():
-        col = {q: data[:, head.index(f"{z}.{q}")] for q in ("T", "p", "Xi[1]")}
-        m = v["V"] * 1.2 * col["p"][0] / 101325.0
+        m = v["V"] * 1.2 * v["p_start"] / 101325.0
         mass += m
-        cooling += m * (col["T"][0] - col["T"][k])
-        dX = col["Xi[1]"][k] - col["Xi[1]"][0]
-        predicted -= m * (c * np.log(col["p"][k] / col["p"][0])
-                          - (h_fg + (cp_ste - cp_air) * (col["T"][0] - 273.15)) * dX) / cp
-    cooling, predicted = float(cooling / mass), float(predicted / mass)
-    print(f"mechanism: MBL mass-weighted cooling {cooling:.4f} K by t = {data[k, 0]:g} s, "
-          f"predicted {predicted:.4f} K")
-    assert abs(cooling / predicted - 1.0) <= 0.10
-    return {"mbl_t0_p_equals_p_start": True, "cooling_K": cooling,
-            "predicted_cooling_K": predicted, "t": float(data[k, 0])}
+        cool_mbl += m * (data[0, head.index(f"{z}.T")] - data[k, head.index(f"{z}.T")])
+        cool_noodl += m * (T_n[0, names.nodes[z]] - T_n[k, names.nodes[z]])
+    cool_mbl, cool_noodl = float(cool_mbl / mass), float(cool_noodl / mass)
+    print(f"mechanism: mass-weighted cooling by t = {data[k, 0]:g} s: MBL {cool_mbl:.4f} K, "
+          f"noodl {cool_noodl:.4f} K")
+    assert abs(cool_noodl / cool_mbl - 1.0) <= 0.02
+    return {"t0_p_equals_p_start": True, "cooling_mbl_K": cool_mbl,
+            "cooling_noodl_K": cool_noodl, "t": float(data[k, 0])}
 
 
 @pytest.mark.slow
@@ -582,7 +638,8 @@ def test_step_limited_error_halves_with_the_step(tmp_path):
     first order (flows held at their end-of-step values), and that is the whole difference.
     Over the first 24 rows past t0 (the error peaks at 173-518 s), the ratio of the worst
     absolute errors at r = 1 and r = 2 must lie in [1.8, 2.2] for the door flow and the zone
-    temperature (measured over the full run: 1.97 for both)."""
+    temperature (measured over the full run: 1.97 for both on the quasi-steady route; 1.86
+    and 1.83 over the 24 rows with volume mass storage)."""
     model, n = "OpenDoorBuoyancyDynamic", 25
     head, data = _csv(model)
     errs = {}
@@ -602,3 +659,43 @@ def test_step_limited_error_halves_with_the_step(tmp_path):
     ratios = [float(a / b) for a, b in zip(errs[1], errs[2], strict=True)]
     print(f"step halving on {model}: error ratios (flow, T) {ratios}")
     assert all(1.8 <= x <= 2.2 for x in ratios), ratios
+
+
+def _worst_abs(model: str, kind: str, n: int, r: int, tmp_path) -> float:
+    """Worst absolute error of `kind` over CSV rows 1..n-1, noodl run on the grid refined
+    r times (the experiment Interval divided by r) and compared on the CSV rows."""
+    head, data = _csv(model)
+    data = data[:n]
+    doc = json.loads((DATA / f"{model}.json").read_text())
+    doc["experiment"]["Interval"] /= r
+    path = tmp_path / f"{model}_r{r}.json"
+    path.write_text(json.dumps(doc))
+    net, state, drivers, names = read_modelica(path, return_names=True)
+    out = simulate(net, state, drivers, names.times[:r * (n - 1) + 1])
+    assert np.allclose(out["time"][::r].numpy(), data[:, 0], atol=1e-9)
+    worst = 0.0
+    for j, h in enumerate(head[1:], start=1):
+        inst, var = h.rsplit(".", 1)
+        if _kind(h) != kind or kind == "flow":
+            continue
+        got = out[_NODE_VARS[var]][::r, names.nodes[inst]].numpy()
+        worst = max(worst, float(np.abs(got - data[:, j])[1:].max()))
+    return worst
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("model, kind, n, r", [
+    ("OneOpenDoor", "T", 80, 1),        # its worst T error, at t = 1123.2 s (row 78)
+    ("ReverseBuoyancy", "p", 13, 4),    # the release, worst at t = 14.4 s (row 2)
+])
+def test_storage_models_converge_with_the_step(model, kind, n, r, tmp_path):
+    """The storage models' remaining difference is noodl's first-order step
+    (`_storage_tolerance`): refining the grid from r to 2r divides the worst error by 2
+    within [1.7, 2.3]. Measured: OneOpenDoor's T 1.99 (r = 1 -> 2); ReverseBuoyancy's p
+    1.34, 1.72, 1.88 for r = 1 -> 2 -> 4 -> 8 (98, 73, 43, 23 Pa: the release takes a few
+    intervals and is first order only once they are resolved), so it is tested at r = 4."""
+    coarse = _worst_abs(model, kind, n, r, tmp_path)
+    fine = _worst_abs(model, kind, n, 2 * r, tmp_path)
+    ratio = coarse / fine
+    print(f"step halving on {model} {kind}: {coarse:.3e} -> {fine:.3e}, ratio {ratio:.3f}")
+    assert 1.7 <= ratio <= 2.3, ratio

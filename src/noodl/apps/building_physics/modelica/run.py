@@ -12,11 +12,13 @@ grid time instead. Row 0 is the initial state with its quasi-steady flows.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 
 import torch
 
 from noodl.apps.building_physics.modelica.assemble import _MBLClosure
+from noodl.apps.building_physics.modelica.storage import StorageClosure
 from noodl.model import Drivers, Model, State
 
 Tensor = torch.Tensor
@@ -28,6 +30,12 @@ _SERIES = "series:"
 # Newton converges quadratically, so this costs about one more iteration.
 AIR_ATOL = 1e-13
 AIR_RTOL = 1e-12
+# With volume mass storage (`storage` module) the zones leave the quasi-steady pressures:
+# ReverseBuoyancy's start 1325 Pa above its boundary, and there the round-off of a door's
+# `dp`, `eps |phi|` = 1.5e-13 Pa at 650 Pa, times an open door's slope (~3 kg/s/Pa) is a
+# residual floor of 3e-13 to 8e-13 kg/s (measured), above AIR_ATOL. 1e-11 kg/s is still
+# 1e-7 of ClosedDoors' smallest reported crack flows (~1e-4 kg/s).
+STORAGE_AIR_ATOL = 1e-11
 
 
 def step_drivers(drivers: Mapping[str, Tensor], grid: Tensor, t: float) -> Drivers:
@@ -86,6 +94,70 @@ def _closure(model: Model) -> _MBLClosure:
     raise TypeError("simulate: the model was not built by read_modelica (no MBL closure)")
 
 
+def _storage(model: Model) -> StorageClosure | None:
+    return next((c for c in model.closures if isinstance(c, StorageClosure)), None)
+
+
+def _initial_air(model: Model, store: StorageClosure, state: State, drivers: Drivers,
+                 **solve_kwargs) -> State:
+    """The t = StartTime airflow of a model with volume mass storage (`storage` module
+    docstring, "Initial state"): every storing zone at its start pressure (the state's own
+    `"air.phi"`) and the flows the elements give there, or, when some zone's initial
+    equation is `der(p) = 0`, the air layer solved with the others held at their start
+    pressures. The carried `"air.storage"` is re-evaluated at the result."""
+    drv = dict(drivers)
+    drv.update(_closure(model)(state, drv))
+    new = dict(state)
+    air = model.potential["air"]
+    if store.init_layer is None:
+        new["air.q"] = air.flows(state["air.phi"], drv)
+    else:
+        init = store.init_layer
+        phi_b = state["air.phi"][..., init.bound]
+        new["air.phi"], new["air.q"] = init.solve(phi_b, drv, drv.get("air.sources"),
+                                                  phi0=None, **solve_kwargs)
+    drv.update(_closure(model)(new, drv))
+    new["air.storage"] = store(new, drv)["air.storage"]
+    return new
+
+
+# The first interval of a model with volume mass storage: MBL starts every `FixedInitial`
+# volume at `p_start` (`storage` module docstring, "Initial state"), and the imbalance relaxes
+# in the volumes' own time `V k / (dq/dp)`, typically well under a second. A backward-Euler
+# step h leaves `tau/(tau + h)` of it, i.e. reports the mean release rate over the step
+# (CO2TransportStep: 1.5e-4 kg/s at its first 172.8 s row against OpenModelica's ~0), so the
+# first interval is cut into steps growing geometrically from `h0 = 1e-4` of it by `ratio`.
+# The last sub-step is then `(1 - 1/ratio)` of the interval and still leaves `tau/(tau + h)` of
+# whatever slower part of the imbalance remains: ThreeRoomsContam's first-row flow error is
+# 3.6e-5, 3.2e-7 and 2.3e-7 kg/s at ratios 2, 1.25 and 1.1 (measured; its flows are 3.9e-3 to
+# 6e-2 kg/s), so 1.1 (about 120 sub-steps, once per run).
+# Not smaller: the airflow residual's round-off floor grows as 1/h (the storage slope
+# `V k / h` times `eps |phi|`): at 1e-6 of ReverseBuoyancy's 7.2 s it is 1.6e-11 kg/s,
+# above STORAGE_AIR_ATOL (measured: Newton stalls there).
+START_GRADING = (1e-4, 1.1)
+
+
+def _graded(dt: float) -> list[float]:
+    """Cumulative sub-step ends `(0, dt]` of the first interval, the last exactly `dt`."""
+    h0, ratio = START_GRADING
+    n = math.ceil(math.log(1.0 + (ratio - 1.0) / h0) / math.log(ratio))
+    scale = dt * (ratio - 1.0) / (ratio ** n - 1.0)
+    ends = [scale * (ratio ** (j + 1) - 1.0) / (ratio - 1.0) for j in range(n)]
+    ends[-1] = dt
+    return ends
+
+
+def _resync_storage(model: Model, store: StorageClosure, state: State,
+                    drivers: Drivers) -> State:
+    """`"air.storage"` re-evaluated at the returned state itself. The model carries the
+    last coupling pass's INPUT state (`StorageClosure`), equal to the returned one to the
+    coupling tolerance; the difference, `V k dphi` per step, would otherwise accumulate as a
+    mass drift (measured 1.2e-11 of ClosedDoors' mass over 40 steps, growing with the run)."""
+    drv = dict(drivers)
+    drv.update(_closure(model)(state, drv))
+    return {**state, "air.storage": store(state, drv)["air.storage"]}
+
+
 def _solve_air(model: Model, state: State, drivers: Drivers, **solve_kwargs) -> State:
     """The potential layers alone at `state` (closures first): the quasi-steady flows of the
     initial state, without advancing any transport layer.
@@ -116,7 +188,8 @@ def simulate(model: Model, state: State, drivers: Drivers, times,
     pressure (Pa), `"T"` `(N, n)` (K), `"X_w"` `(N, n)`, and `"C"` `(N, n, K)` for the species
     layer's mass fractions (water last when carried) when the model has one. `step_kwargs`
     reach `Model.step`/`Model.steady` (and so the airflow solves); the airflow Newton
-    tolerances default to `atol=AIR_ATOL`, `rtol=AIR_RTOL`.
+    tolerances default to `atol=AIR_ATOL` (`STORAGE_AIR_ATOL` with volume mass storage),
+    `rtol=AIR_RTOL`.
 
     When a source driver varies in time, `times` must be CONSECUTIVE grid times (any run of
     the grid, e.g. a prefix): each series row of a source is its mean over the one grid
@@ -124,11 +197,13 @@ def simulate(model: Model, state: State, drivers: Drivers, times,
     several grid intervals would inject only the last interval's amount. Anything else
     raises `ValueError`.
     """
-    step_kwargs = {"atol": AIR_ATOL, "rtol": AIR_RTOL, **step_kwargs}
+    atol = AIR_ATOL if _storage(model) is None else STORAGE_AIR_ATOL
+    step_kwargs = {"atol": atol, "rtol": AIR_RTOL, **step_kwargs}
     times = torch.as_tensor(times, dtype=F64)
     grid = drivers.get("series:time", times)
     _require_consecutive(drivers, grid, times)
     closure = _closure(model)
+    store = _storage(model)
     dynamic = bool(model.transport)
     rows: dict[str, list[Tensor]] = {"air.q": [], "air.phi": [], "p": [], "T": [], "X_w": []}
     if closure.sp_interior is not None:
@@ -139,10 +214,19 @@ def simulate(model: Model, state: State, drivers: Drivers, times,
         if not dynamic:
             state = model.steady(state, d, **step_kwargs)
         elif k == 0:
-            state = _solve_air(model, state, d, **step_kwargs)
-        else:
+            state = (_solve_air(model, state, d, **step_kwargs) if store is None
+                     else _initial_air(model, store, state, d, **step_kwargs))
+        elif store is None:
             state = model.step(state, d, t - float(times[k - 1]), t=float(times[k - 1]),
                                **step_kwargs)
+        else:
+            # The start-row imbalance relaxes much faster than a grid interval; the first
+            # interval is stepped on a graded sub-grid (`START_GRADING`).
+            t0 = float(times[k - 1])
+            cuts = _graded(t - t0) if k == 1 else [t - t0]
+            for a, b in zip([0.0, *cuts[:-1]], cuts, strict=True):
+                state = model.step(state, d, b - a, t=t0 + a, **step_kwargs)
+                state = _resync_storage(model, store, state, d)
         extra = closure(state, d)
         rows["air.q"].append(state["air.q"])
         rows["air.phi"].append(state["air.phi"])

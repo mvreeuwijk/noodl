@@ -33,6 +33,18 @@ What each MBL construct becomes
   when moisture is carried, `"X_w"`; otherwise `"X_w"` is a constant driver at the medium
   default (0 for SimpleAir).
 
+Volume mass storage
+-------------------
+By default (`build(..., mass_storage=None)`) every volume whose `massDynamics` is not
+`SteadyState` stores mass compressibly, as in MBL, and the quasi-steady rules below
+("Capacities", "Closed zone groups") are replaced by the `storage` module's: the zone pressure
+is an air-layer unknown held by a backward-Euler storage node source, the thermal and species
+capacities are the zone's actual mass per step, the thermal layer is in the storage-rate form
+(`TransportLayer(dilution=...)`), water is always carried for a moist-air medium (MBL's `Xi`
+moves with the stored mass), closed zone groups need no pressure reference, and the coupling
+passes are plain successive substitution. `mass_storage=False` keeps the quasi-steady airflow
+described below throughout.
+
 Capacities (MBL v13 sources)
 ----------------------------
 `ConservationEquation.mo:245-266`: a volume's fluid mass is `m = V rho_start` under
@@ -164,7 +176,7 @@ from dataclasses import dataclass, field
 
 import torch
 
-from noodl.apps.building_physics.modelica import schema, signals
+from noodl.apps.building_physics.modelica import schema, signals, storage
 from noodl.apps.building_physics.modelica.graph import ComponentGraph, FlowPath, TwoWayEdge
 from noodl.apps.building_physics.modelica.schema import (
     Component,
@@ -236,6 +248,7 @@ class ModelicaNames:
     air_references: tuple[str, ...]
     p_ref: float  # Pa; `"air.phi"` is `p - p_ref` (module docstring, "Gauge reference")
     attached: dict[str, str] = field(default_factory=dict)  # boundary -> zone it is wired to
+    storage: tuple[str, ...] = ()  # zones with volume mass storage (storage.py)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -586,6 +599,11 @@ class _Zone:
     C: list[float]
     rho_start: float
     heat_capacity: float
+    csen: float = 0.0
+    # LumpedVolumeDeclarations.mo:18 (massDynamics = energyDynamics by default);
+    # PartialMixingVolume.mo:6 (initialize_p = not singleState: true for the three media).
+    mass_dynamics: str = "DynamicFreeInitial"
+    initialize_p: bool = True
     pinned: float | None = None
 
 
@@ -691,14 +709,20 @@ def _zone(comp: Component, med: MBLMedium, errors: list[str]) -> _Zone | None:
     rho_start = float(med.density(_t(p_start), T_start, X_w))
     cp = med.specific_heat_cp(med.X_default[0] if med.has_moisture else 0.0)
     # ConservationEquation.mo:124-125: CSen = (mSenFac - 1)*rho_default*cp_default*V.
-    heat = rho_start * V * cp + (mSenFac - 1.0) * med.rho_default * cp * V
+    csen = (mSenFac - 1.0) * med.rho_default * cp * V
+    heat = rho_start * V * cp + csen
+    energy = p.get("energyDynamics")
+    mass_dyn = _short(p.get("massDynamics", energy), "DynamicFreeInitial")
     return _Zone(comp=comp, V=V, T_start=T_start, p_start=p_start, X_w=X_w, C=C,
-                 rho_start=rho_start, heat_capacity=heat)
+                 rho_start=rho_start, heat_capacity=heat, csen=csen,
+                 mass_dynamics=mass_dyn, initialize_p=bool(p.get("initialize_p", True)))
 
 
 class _Builder:
-    def __init__(self, graph: ComponentGraph, doc: ModelicaDoc) -> None:
+    def __init__(self, graph: ComponentGraph, doc: ModelicaDoc,
+                 mass_storage: bool | None = None) -> None:
         self.graph, self.doc = graph, doc
+        self.mass_storage = mass_storage
         self.errors: list[str] = []
         try:
             self.med = medium(str(doc.medium.get("class")))
@@ -806,6 +830,14 @@ class _Builder:
                     f"{name} ({z.comp.cls}): energyDynamics = {dyn} is not supported (the "
                     f"zone temperature starts at T_start: FixedInitial or DynamicFreeInitial)"
                 )
+        # Volume mass storage (module docstring): every zone whose massDynamics is not
+        # SteadyState, unless the caller asked for the quasi-steady airflow.
+        storage_zones = ({nm for nm, z in zones.items() if z.mass_dynamics != "SteadyState"}
+                         if self.mass_storage is not False else set())
+        if self.mass_storage is True and not storage_zones:
+            errors.append("mass_storage=True: no volume has a dynamic mass balance "
+                          "(massDynamics is SteadyState everywhere)")
+        use_storage = bool(storage_zones)
 
         node_names = [n for n in g.zones] + [n for n in g.boundaries]
         index = {n: i for i, n in enumerate(node_names)}
@@ -834,7 +866,8 @@ class _Builder:
 
         # Moisture (module docstring).
         carry_water = med.has_moisture and (
-            any(abs(z.X_w - med.X_default[0]) > 0.0 for z in zones.values())
+            use_storage  # MBL's Xi changes by X dm/m in a storing volume (storage.py)
+            or any(abs(z.X_w - med.X_default[0]) > 0.0 for z in zones.values())
             or any(abs(float(b["X_w"]) - med.X_default[0]) > 0.0 for b in bounds.values())
             or any(
                 c.cls.endswith("MassFlowSource_T")
@@ -861,6 +894,8 @@ class _Builder:
         for a, b in pressure_edges:
             parent[find(a)] = find(b)
         has_boundary = {find(index[b]) for b in g.boundaries}
+        # A group holding a storing zone is grounded by that storage (storage.py).
+        stored_roots = {find(index[z]) for z in storage_zones}
         references: list[str] = []
         seen_roots: set[int] = set()
         for zone, bcomp in g.attached:  # module docstring, "Closed zone groups"
@@ -875,7 +910,7 @@ class _Builder:
             references.append(zone)
         for name in g.zones:
             r = find(index[name])
-            if r in has_boundary or r in seen_roots:
+            if r in has_boundary or r in seen_roots or r in stored_roots:
                 continue
             seen_roots.add(r)
             references.append(name)
@@ -884,14 +919,15 @@ class _Builder:
         # transport layers, so any net inflow would accumulate heat and species there
         # without bound. Refuse every source in such a group, and every ZonalFlow_m_flow
         # touching one whose two directions are not the same flow.
-        closed = {find(index[r]) for r in references}
+        closed = {find(index[r]) for r in references} - stored_roots
         for comp, node in g.sources:
             if node in index and find(index[node]) in closed:
                 errors.append(
                     f"{comp.name} ({comp.cls}): feeds {node}, whose zone group has no "
                     f"boundary node, so the injected mass could only be stored by "
-                    f"compressing the volumes (volume mass storage is not modelled); not "
-                    f"supported"
+                    f"compressing the volumes, which the quasi-steady airflow "
+                    f"(mass_storage=False, or massDynamics = SteadyState) does not model; "
+                    f"not supported"
                 )
         for comp, mab, mba, iA, iB in self._zonal_pairs:
             if find(iA) not in closed and find(iB) not in closed:
@@ -913,8 +949,30 @@ class _Builder:
             raise ModelicaImportError("modelica: the model has no flow element")
         air_boundary = list(g.boundaries) + references
 
+        # Gauge reference (module docstring): the first boundary's pressure at t0.
+        p_firsts = [bounds[b]["p"] for b in g.boundaries] + [attached_p[r] for r in references
+                                                             if r in attached_p]
+        if p_firsts:
+            p_ref = float(p_firsts[0].reshape(-1)[0])
+        elif references:
+            p_ref = zones[references[0]].p_start
+        else:
+            p_ref = zones[g.zones[0]].p_start if g.zones else med.p_default
+
         air = PotentialFlowLayer(net, "air", elements, drives=drives, boundary=air_boundary,
                                  quantity="pressure", unit="Pa")
+        th_store = storage.thermo(med) if use_storage else None
+        storage_air: list[int] = []
+        if use_storage:
+            interior = set(air.interior.tolist())
+            storage_air = [index[z] for z in g.zones if z in storage_zones
+                           and index[z] in interior]
+            if storage_air:
+                vols = torch.tensor([zones[node_names[i]].V for i in storage_air], dtype=F64)
+                air = PotentialFlowLayer(
+                    net, "air", elements, drives=drives, boundary=air_boundary,
+                    node_sources=[storage.ZoneStorage(storage_air, vols, p_ref, th_store)],
+                    quantity="pressure", unit="Pa")
         layers: dict = {"air": air}
         flow_kinds = tuple(air.kinds)
 
@@ -922,12 +980,31 @@ class _Builder:
         th_boundary = list(g.boundaries) + pinned
         th_interior, _ = active_interior(net, flow_kinds, th_boundary)
         cp = med.specific_heat_cp(med.X_default[0] if med.has_moisture else 0.0)
+        # Zone fluid masses at t = StartTime: `V k p0` of a storing zone (storage.py; p0 its
+        # start pressure, or its attached boundary's), `V rho_start` otherwise.
+        m0: dict[str, float] = {}
+        for nm, z in zones.items():
+            if nm in storage_zones:
+                p0 = (float(attached_p[nm].reshape(-1)[0]) if nm in attached_p
+                      else z.p_start)
+                k0 = th_store.k(_t(z.T_start), _t(z.X_w))
+                m0[nm] = float(z.V * k0 * p0)
+            else:
+                m0[nm] = z.rho_start * z.V
+        lam_T = (storage.thermal_dilution(th_store, med.T_default,
+                                          med.X_default[0] if med.has_moisture else 0.0)
+                 if use_storage else None)
         if th_interior.numel():
-            cap = torch.tensor([zones[node_names[i]].heat_capacity for i in th_interior.tolist()],
-                               dtype=F64)
+            if use_storage:
+                cap = torch.tensor([m0[node_names[i]] * th_store.u_T + zones[node_names[i]].csen
+                                    for i in th_interior.tolist()], dtype=F64)
+            else:
+                cap = torch.tensor([zones[node_names[i]].heat_capacity
+                                    for i in th_interior.tolist()], dtype=F64)
             layers["thermal"] = TransportLayer(
                 net, "thermal", capacity=cap, flow_kind=flow_kinds, boundary=th_boundary,
                 carrier=float(cp), scheme="exact", quantity="temperature", unit="K",
+                dilution=lam_T,
             )
         sp_boundary = list(g.boundaries)
         sp_interior = None
@@ -935,11 +1012,15 @@ class _Builder:
             sp_int, _ = active_interior(net, flow_kinds, sp_boundary)
             if sp_int.numel():
                 sp_interior = sp_int
-                cap = torch.tensor([zones[node_names[i]].rho_start * zones[node_names[i]].V
-                                    for i in sp_int.tolist()], dtype=F64)
+                cap = torch.tensor([m0[node_names[i]] for i in sp_int.tolist()], dtype=F64)
+                # storage.py: a trace substance's amount is `m C` (dilution 1); MBL's water
+                # balance integrates the fraction itself (dilution 0).
+                sp_dilution = (torch.tensor([0.0 if k == water else 1.0 for k in range(K)],
+                                            dtype=F64) if use_storage else None)
                 layers["species"] = TransportLayer(
                     net, "species", capacity=cap, flow_kind=flow_kinds, boundary=sp_boundary,
                     n_species=K, scheme="exact", quantity="mass_fraction", unit="kg/kg",
+                    dilution=sp_dilution,
                 )
 
         # ---------------------------------------------------------- drivers
@@ -954,15 +1035,6 @@ class _Builder:
             else:
                 const[key] = value
 
-        # Gauge reference (module docstring): the first boundary's pressure at t0.
-        p_firsts = [bounds[b]["p"] for b in g.boundaries] + [attached_p[r] for r in references
-                                                             if r in attached_p]
-        if p_firsts:
-            p_ref = float(p_firsts[0].reshape(-1)[0])
-        elif references:
-            p_ref = zones[references[0]].p_start
-        else:
-            p_ref = med.p_default
         phi_b = [bounds[b]["p"] - p_ref for b in g.boundaries]
         phi_b += [attached_p[r] - p_ref if r in attached_p
                   else _t(zones[r].p_start - p_ref) for r in references]
@@ -996,6 +1068,20 @@ class _Builder:
             if any(bool((v != 0).any()) for r in rows for v in r):
                 put("species.sources", _stack_nested(rows, K, self.n_t))
 
+        attached_store = [(z, b) for z, b in g.attached if z in storage_zones]
+        if attached_store:
+            # storage.StorageClosure: the state of a boundary wired straight to a storing
+            # zone, carried by the air that zone draws from it.
+            vals = [_t(0.0)] * n
+            rows = [[_t(0.0)] * K for _ in range(n)]
+            for z, bcomp in attached_store:
+                b = self.boundary(bcomp)
+                vals[index[z]] = b["T"]
+                rows[index[z]] = [b["X_w"] if k == water else b["C"][k] for k in range(K)]
+            put("storage.T_attached", _stack(vals, self.n_t))
+            if K:
+                put("storage.x_attached", _stack_nested(rows, K, self.n_t))
+
         drivers: Drivers = dict(const)
         for key, value in series.items():
             drivers[f"series:{key}"] = value
@@ -1017,16 +1103,33 @@ class _Builder:
             sp_bound=net.boundary_index(sp_boundary) if sp_interior is not None else None,
             water=water, n_species=K,
         )
+        closures: list = [closure]
+        store = None
+        if use_storage:
+            if not ("thermal" in layers or "species" in layers):
+                raise ModelicaImportError(
+                    "modelica: volume mass storage needs a thermal or species layer to "
+                    "iterate the step with (every zone is pinned and no species is carried); "
+                    "read the model with mass_storage=False"
+                )
+            store = self._storage_closure(
+                closure, th_store, p_ref, zones, node_names, index, storage_zones,
+                storage_air, air, air_boundary, elements, drives, layers, sp_interior,
+                sp_dilution if "species" in layers else None, m0, net, lam_T)
+            closures.append(store)
         tol = {}
         if "thermal" in layers:
             tol["thermal"] = THERMAL_ITERATE_TOL
         if "species" in layers:
             tol["species"] = SPECIES_ITERATE_TOL
         if tol:
-            model = Model(net, layers, closures=[closure], coupling="iterate",
-                          iterate_tol=tol, iterate_max=ITERATE_MAX)
+            # storage.py, "Coupling": with volume mass storage the passes are successive
+            # substitution (no relaxation), which the coupling gain there makes contract.
+            model = Model(net, layers, closures=closures, coupling="iterate",
+                          iterate_tol=tol, iterate_max=ITERATE_MAX,
+                          iterate_relaxation=1.0 if use_storage else 0.5)
         else:
-            model = Model(net, layers, closures=[closure])
+            model = Model(net, layers, closures=closures)
 
         # ---------------------------------------------------------- initial state
         phi_init = phi0.clone()
@@ -1043,6 +1146,12 @@ class _Builder:
                     row.append(z.X_w)
                 rows.append(row)
             state["species.x"] = torch.tensor(rows, dtype=F64).reshape(-1, K)
+        if store is not None:
+            state["air.storage"] = store.carried(p_ref + phi_init, T0, X0)
+            if "thermal" in layers:
+                state["thermal.capacity"] = layers["thermal"].capacity.clone()
+            if "species" in layers:
+                state["species.capacity"] = layers["species"].capacity.clone()
 
         # ---------------------------------------------------------- names
         edges: dict[str, tuple[tuple[int, int], ...]] = {}
@@ -1056,8 +1165,42 @@ class _Builder:
                 edges[sensor.component.name] = tuple((c, sensor.sign * s) for c, s in entries)
         names = ModelicaNames(edges=edges, nodes=dict(index), kinds=kinds,
                               times=self.times.clone(), air_references=tuple(references),
-                              attached={b.name: z for z, b in g.attached}, p_ref=p_ref)
+                              attached={b.name: z for z, b in g.attached}, p_ref=p_ref,
+                              storage=tuple(z for z in g.zones if z in storage_zones))
         return model, state, drivers, names
+
+    def _storage_closure(self, mbl, th, p_ref, zones, node_names, index, storage_zones,
+                         storage_air, air, air_boundary, elements, drives, layers,
+                         sp_interior, sp_dilution, m0, net, lam_T) -> storage.StorageClosure:
+        is_zone = [nm in zones for nm in node_names]
+        V = torch.tensor([zones[nm].V if z else 0.0 for nm, z in zip(node_names, is_zone,
+                                                                    strict=True)], dtype=F64)
+        stores = torch.tensor([nm in storage_zones for nm in node_names], dtype=torch.bool)
+        m_fixed = torch.tensor([m0[nm] if z and nm not in storage_zones else 0.0
+                                for nm, z in zip(node_names, is_zone, strict=True)], dtype=F64)
+        csen = torch.tensor([zones[nm].csen if z else 0.0
+                             for nm, z in zip(node_names, is_zone, strict=True)], dtype=F64)
+        attached = [index[z] for z, _ in self.graph.attached if z in storage_zones]
+        # storage.py, "Initial state": a zone held at p_start at t = StartTime unless its
+        # initial equation is der(p) = 0.
+        free = [i for i in storage_air
+                if zones[node_names[i]].mass_dynamics == "SteadyStateInitial"
+                and zones[node_names[i]].initialize_p]
+        init_layer = None
+        if free:
+            fixed = [node_names[i] for i in storage_air if i not in free]
+            init_layer = PotentialFlowLayer(net, "air", elements, drives=drives,
+                                            boundary=list(air_boundary) + fixed,
+                                            quantity="pressure", unit="Pa")
+        return storage.StorageClosure(
+            mbl=mbl, th=th, p_ref=p_ref, volumes=V, storage=stores, m_fixed=m_fixed,
+            air_nodes=torch.tensor(storage_air, dtype=torch.long),
+            attached=torch.tensor(attached, dtype=torch.long),
+            air_src=air._src, air_tgt=air._tgt, csen=csen,
+            th_interior=layers["thermal"].interior_idx if "thermal" in layers else None,
+            sp_interior=sp_interior, sp_dilution=sp_dilution, lam_T=lam_T,
+            init_layer=init_layer,
+        )
 
     # ------------------------------------------------------------- edges
     def _port_flow(self, ref: str | None, edges) -> tuple[tuple[int, int], ...] | None:
@@ -1313,9 +1456,14 @@ class _Builder:
         return s_air, s_th, s_sp
 
 
-def build(graph: ComponentGraph, doc: ModelicaDoc) -> tuple[Model, State, Drivers,
-                                                           ModelicaNames]:
+def build(graph: ComponentGraph, doc: ModelicaDoc, *, mass_storage: bool | None = None,
+          ) -> tuple[Model, State, Drivers, ModelicaNames]:
     """Assemble the noodl `Model`, initial `State`, `Drivers` and `ModelicaNames`.
+
+    `mass_storage` (module docstring, "Volume mass storage"): `None` (the default) models
+    the compressible mass storage of every volume whose `massDynamics` is not
+    `SteadyState`, as MBL does; `False` is the quasi-steady airflow throughout; `True`
+    also refuses a model in which no volume stores mass.
 
     Drivers that a signal makes time-varying are stored twice: at their first-time value
     under their own key (so `model.step(state, drivers, dt)` runs as is), and as the full
@@ -1323,4 +1471,4 @@ def build(graph: ComponentGraph, doc: ModelicaDoc) -> tuple[Model, State, Driver
     `run.simulate`/`run.step_drivers` slice per step. See the module docstring for the
     conversion rules and `ModelicaNames` for the name mapping.
     """
-    return _Builder(graph, doc).build()
+    return _Builder(graph, doc, mass_storage).build()

@@ -24,15 +24,22 @@ from noodl.apps.building_physics.modelica.run import simulate, step_drivers
 from noodl.apps.building_physics.modelica.schema import ModelicaImportError
 
 
-def read_modelica(path: str | Path, *, return_names: bool = False):
+def read_modelica(path: str | Path, *, return_names: bool = False,
+                  mass_storage: bool | None = None):
     """Read one `noodl-modelica/1` JSON file into `(model, state, drivers)`.
+
+    `mass_storage` (`assemble.build`, `storage` module): `None` (the default) models the
+    compressible mass storage of every volume whose `massDynamics` is not `SteadyState`, as
+    MBL does; `False` reads the quasi-steady airflow; `True` also refuses a model with no
+    storing volume.
 
     With `return_names=True` a fourth item, the `ModelicaNames` mapping MBL instance names to
     the model's edge columns and node positions (and carrying the experiment grid), is
     returned too. Raises `ModelicaImportError` naming every unsupported instance.
     """
     doc = schema.load(path)
-    model, state, drivers, names = assemble.build(graph.build(doc), doc)
+    model, state, drivers, names = assemble.build(graph.build(doc), doc,
+                                                  mass_storage=mass_storage)
     if return_names:
         return model, state, drivers, names
     return model, state, drivers

@@ -23,13 +23,14 @@ print(result["T"][-1])       # zone temperatures (K) at the last grid time, node
 print(result["air.q"][-1])   # edge flows (kg/s); names.edges maps an MBL instance to its columns
 ```
 
-**Supported (18 models: 8 `Validation` + 10 `Examples`).** `Buildings.Airflow.Multizone`
+**Supported (19 models: 8 `Validation` + 11 `Examples`).** `Buildings.Airflow.Multizone`
 elements, `MixingVolume` zones, pressure/temperature boundaries and trace substances — not
 `Buildings.ThermalZones`, HVAC, wind, weather or district networks. `Validation`: `OneWayFlow`,
 `DoorOpenClosed`, `OpenDoorPressure`, `OpenDoorTemperature`, `ThreeRoomsContam`,
 `ThreeRoomsContamDiscretizedDoor`, `OpenDoorBuoyancyDynamic`, `OpenDoorBuoyancyPressureDynamic`.
-`Examples`: `CO2TransportStep`, `ClosedDoors`, `NaturalVentilation`, `OneOpenDoor`, `OneRoom`,
-`Orifice`, `PowerLaw`, `ReverseBuoyancy`, `ReverseBuoyancy3Zones`, `ZonalFlow`.
+`Examples`: `CO2TransportStep`, `ClosedDoors`, `NaturalVentilation`, `OneEffectiveAirLeakageArea`,
+`OneOpenDoor`, `OneRoom`, `Orifice`, `PowerLaw`, `ReverseBuoyancy`, `ReverseBuoyancy3Zones`,
+`ZonalFlow`.
 
 **Refused, each with a named error** (`ModelicaImportError` lists every offending instance and
 its class):
@@ -37,9 +38,6 @@ its class):
 - `PressurizationData`, `TrickleVent`, `ChimneyShaftNoVolume`, `ChimneyShaftWithVolume` — wind
   pressure, weather data, feedback controllers, or a dynamic (mass- and heat-storing) hydrostatic
   medium column, none of which is in scope.
-- `OneEffectiveAirLeakageArea` — a mass source feeding two boundary-less volumes; the injected
-  air can only go into compressing them, which needs the compressible volume storage this
-  release does not model.
 
 For example, reading `PressurizationData` raises:
 
@@ -73,19 +71,20 @@ ModelicaImportError: modelica: refused 3 items:
   mass (e.g. `CO2TransportStep`'s 3.6 s pulse landing between two 172.8 s outputs).
 - A signal may drive several inputs (`drives` accepts one name or a list) — MBL's `ZonalFlow`
   example drives two flows from one `Constant`.
-- Refused, also with a named error: a closed group of zones (joined only by pressure-dependent
+- Refused, also with a named error: with `mass_storage=False` (or volumes whose `massDynamics`
+  is `SteadyState`), a closed group of zones (joined only by pressure-dependent
   edges or zonal flows, no boundary among them) with a net flow imbalance — an unequal
   `ZonalFlow_m_flow` pair or a mass source into it; `MediumColumn.densitySelection = "actual"`;
-  and `Outside` without a weather-bus signal driving it. None of the 18 supported models needs
+  and `Outside` without a weather-bus signal driving it. With storage, none of the 19 supported models needs
   any of the three.
 
-**Quasi-steady airflow.** Like the CONTAM route, a volume's air mass is not stored: the airflow
-is quasi-steady at every step. MBL's volumes do store mass, so a model whose dynamics are
-dominated by that storage — a closed, heated room expanding through its leakage, or an initial
-pressure imbalance draining away — parts company with noodl physics by more than round-off (see [the
-Modelica parity tables](../applications/building_physics.md#against-openmodelica-modelica-buildings-library)).
-Adding volume mass storage would close this gap; it is a possible extension, not implemented in
-this release.
+**Volume mass storage.** Like MBL, the reader stores each volume's air compressibly unless its
+`massDynamics` is `SteadyState`: zone pressures are states, the t = StartTime row holds MBL's
+`p_start` initialisation, a closed zone group needs no pressure reference, and a mass source
+may feed one (see [the Modelica parity
+tables](../applications/building_physics.md#against-openmodelica-modelica-buildings-library)).
+`read_modelica(path, mass_storage=False)` gives the quasi-steady airflow of the CONTAM route
+instead, with its closed-group rules below.
 
 **Reproducing the export (WSL only — the test suite itself needs none of this).** Tested on
 Ubuntu 22.04 (`jammy`) in WSL with OpenModelica 1.27.1. Install OpenModelica from its own apt

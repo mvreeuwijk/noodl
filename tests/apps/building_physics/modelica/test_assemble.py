@@ -3,6 +3,10 @@
 Reference values are computed here from the MBL source formulas (cited per test), never by
 calling the elements under test. OpenModelica parity lives in
 `tests/verification/test_modelica_parity.py`.
+
+Every model here is read with `mass_storage=False`: these tests pin the quasi-steady airflow
+route (closed-group pressure references, constant zone masses). Volume mass storage, the
+reader's default for MBL volumes, is tested in `test_storage.py`.
 """
 
 from __future__ import annotations
@@ -15,7 +19,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from noodl.apps.building_physics import read_modelica
+from noodl.apps.building_physics import read_modelica as _read_modelica
 from noodl.apps.building_physics.modelica import ModelicaImportError
 from noodl.apps.building_physics.modelica.run import simulate, step_drivers
 
@@ -26,6 +30,11 @@ F64 = torch.float64
 R_AIR = 8.314510 / 0.0289651159
 R_H2O = 8.314510 / 0.01801528
 P_DEFAULT = 101325.0
+
+
+def read_modelica(path, **kwargs):
+    kwargs.setdefault("mass_storage", False)  # module docstring
+    return _read_modelica(path, **kwargs)
 
 
 def _load(name: str):
