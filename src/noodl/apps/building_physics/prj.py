@@ -83,7 +83,9 @@ MU_0 = 1.81625e-5
 #                   `! Ta Pb Ws Wd rh day u..` heads SEVERAL data lines, one per simulation
 #                   case, each labelled by its OWN trailing comment; the ambient state is
 #                   the one labelled `steady simulation`. `!dens grav` heads
-#                   `rho g`.
+#                   `rho g`. `!tsdens relax tsmaxi cnvgSS densZP stackD dodMdt` heads the
+#                   density options; `densZP` (field 4) and `stackD` (field 5) are read,
+#                   see `_read_density_options`.
 #   section header  `N ! <name>:`; the section's N records then run to a `-999` line.
 #                   `! contaminants:` is the exception: N index lines and NO terminator.
 #   species         `# s t molwt mdiam edens decay Dm CCdef Cp Kuv u[5] name` + description.
@@ -200,6 +202,8 @@ class Project:
     # `sources_from_project` resolves a source's `z#` through this map rather than
     # assuming `zones[nr - 1]`.
     zone_nr_to_name: dict[int, str]
+    # The file's `densZP` run-control flag (see `_read_density_options`).
+    density_uses_zone_pressure: bool = False
 
     def path_flows(self, q: torch.Tensor) -> torch.Tensor:
         """Net mass flow per path in path-number order (a doorway sums its two edges).
@@ -284,9 +288,44 @@ def _read_ambient_block(lines: _Lines) -> dict[str, float] | None:
     return found
 
 
-def _read_run_control(lines: _Lines) -> tuple[dict[str, float], float]:
+def _read_density_options(line: str) -> bool:
+    """`densZP` from the `!tsdens relax tsmaxi cnvgSS densZP stackD dodMdt` data line.
+
+    `densZP = 1` makes ContamX evaluate each zone's air density at the zone's ABSOLUTE
+    pressure, `Pb + P_zone`, instead of at the barometric pressure `Pb` alone. The
+    correction is tiny in the density itself (|P_zone| / Pb, ~6e-6 for a 20 K stack over
+    1.5 m) but a stack flow is driven by a density DIFFERENCE, which amplifies it by
+    rho / |delta rho| (~14 at 20 K): ignoring it left a flat 4.1-4.4e-5 relative gap to
+    ContamX over the whole +-20 K sweep of `test_OneZoneWthCtmStack-UseApi.prj`, the one
+    fixture that sets it. `project_to_model` honours it (see `ZonePressureDensity`).
+
+    `stackD = 1` asks ContamX for a variable-density stack-pressure calculation (density
+    varying with height rather than one value per zone); noodl's `Stack` holds one density
+    per node, so a project asking for it is REFUSED rather than silently simulated with
+    uniform densities. `tsdens`, `relax`, `tsmaxi`, `cnvgSS` and
+    `dodMdt` govern ContamX's own iteration and its dM/dt term, which is zero while zone
+    temperatures are constant -- and a `.prj` gives noodl no thermal layer to change them.
+    """
+    tok = line.split()
+    if len(tok) < 6:
+        raise ValueError(
+            f"prj: the '!tsdens ... densZP stackD dodMdt' data line has {len(tok)} fields, "
+            f"expected at least 6: {line.strip()!r}"
+        )
+    dens_zp, stack_d = int(tok[4]), int(tok[5])
+    if stack_d != 0:
+        raise ValueError(
+            f"prj: stackD = {stack_d} asks for a variable-density stack calculation "
+            f"(density varying with height); noodl holds one density per node, so this is "
+            f"unsupported"
+        )
+    return dens_zp != 0
+
+
+def _read_run_control(lines: _Lines) -> tuple[dict[str, float], float, bool]:
     ambient: dict[str, float] | None = None
     g: float | None = None
+    dens_zp = False
     while True:
         line = lines.raw()
         stripped = line.strip()
@@ -296,6 +335,8 @@ def _read_run_control(lines: _Lines) -> tuple[dict[str, float], float]:
             continue
         if stripped[1:].split()[:1] == ["Ta"]:
             ambient = _read_ambient_block(lines) or ambient
+        elif stripped.startswith("!tsdens"):
+            dens_zp = _read_density_options(lines.raw())
         elif stripped.startswith("!dens"):
             g = float(lines.raw().split()[1])
     if ambient is None:
@@ -306,7 +347,7 @@ def _read_run_control(lines: _Lines) -> tuple[dict[str, float], float]:
         )
     if g is None:
         raise ValueError("prj: the run-control section lacks the '!dens grav' line")
-    return ambient, g
+    return ambient, g, dens_zp
 
 
 def _read_contaminants(lines: _Lines, count: int) -> None:
@@ -531,7 +572,7 @@ def read_prj(path) -> Project:
     if not header or header[0] != "ContamW":
         raise ValueError(f"prj: not a ContamW project file (first line {header!r})")
     lines.raw()                                   # the project's own file name line
-    ambient_conditions, g = _read_run_control(lines)
+    ambient_conditions, g, dens_zp = _read_run_control(lines)
 
     species: list[str] = []
     levels: dict[int, float] = {}
@@ -582,12 +623,12 @@ def read_prj(path) -> Project:
     return _build(
         ambient_conditions=ambient_conditions, g=g, species=species, levels=levels,
         profiles=profiles, elements=elements, zones=zones, x0_rows=x0_rows, paths=paths,
-        sources=sources,
+        sources=sources, dens_zp=dens_zp,
     )
 
 
 def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones, x0_rows,
-           paths, sources) -> Project:
+           paths, sources, dens_zp=False) -> Project:
     """Turn the parsed records into a `Network`, elements, drives and a `Project`."""
     net = Network(dtype=F64)
     ambient = "ambient"
@@ -810,30 +851,72 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         species=species, T_zone=torch.tensor(T_list, dtype=F64),
         zone_volumes=torch.tensor(V_list, dtype=F64), g=g,
         ambient_conditions=ambient_conditions, profiles=profiles, x0=x0, sources=sources,
-        kinds=kinds, zone_nr_to_name=zone_nr_to_name,
+        kinds=kinds, zone_nr_to_name=zone_nr_to_name, density_uses_zone_pressure=dens_zp,
     )
+
+
+class ZonePressureDensity:
+    """ContamX's `densZP = 1`: zone densities at the zone's absolute pressure.
+
+    Writes `rho = rho_Pb * (1 + phi / Pb)` over the full-node `drivers["rho"]`, which
+    `project_to_model` evaluates at the barometric pressure alone (`Pb / (R T)`), so the
+    result is `(Pb + phi) / (R T)`. `phi` is the air layer's gauge pressure at each node's
+    reference height, read from `state["air.phi"]` -- the PREVIOUS solve's, because a
+    closure runs before the solve it feeds. The ambient node is the zero-gauge boundary, so
+    `rho_amb` is unchanged. With no `"air.phi"` in the state (the initial state
+    `project_to_model` returns) the correction is zero.
+
+    Consequently a single `model.steady` is one fixed-point pass; `steady` below repeats it
+    to convergence. A transient `model.step` uses the pressures of the step before, a lag of
+    one step on a term of relative size |P_zone| / Pb.
+
+    NOT corrected: the species layer's capacity, `rho V`, is fixed when the layer is built
+    and stays at `Pb / (R T)`; under `densZP` ContamX's zone air mass carries the same
+    |P_zone| / Pb factor, which is NOT amplified there (no density difference is involved),
+    i.e. ~6e-6 on the stack project's zone masses. No transient ContamX comparison runs on a
+    `densZP` project.
+    """
+
+    def __init__(self, Pb: float, *, layer: str = "air") -> None:
+        self.Pb = float(Pb)
+        self.key = f"{layer}.phi"
+
+    def __call__(self, state, drivers):
+        phi = state.get(self.key)
+        if phi is None:
+            return {}
+        return {"rho": drivers["rho"] * (1.0 + phi / self.Pb)}
 
 
 def project_to_model(project: Project, *, ambient: dict | None = None, species: bool = True,
                      scheme: str = "implicit"):
     """Air layer + species layer (no thermal layer: a .prj carries no thermal data), the
-    initial state and the drivers for the project's ambient conditions (or `ambient`)."""
+    initial state and the drivers for the project's ambient conditions (or `ambient`).
+
+    Node densities are `Pb / (R_AIR T)` (plus the zone-pressure term of
+    `ZonePressureDensity` when the file sets `densZP`), and the species layer's capacity is
+    each zone's air mass at THAT density, `rho_zone V` -- as ContamX holds it -- not at the
+    reference RHO_0: 1.2041 is `Pb / (R T)` only at 293.15 K and 101325 Pa to five figures
+    (2.2e-6 off even there, which alone put 6.5e-6 into the three-zone transient
+    concentrations against ContamX), and about 3.4 % off per 10 K away from it.
+    """
     amb = dict(project.ambient_conditions)
     if ambient:
         amb.update({k: v for k, v in ambient.items() if k in ("Ta", "Pb", "Ws", "Wd")})
     net = project.net
+    T = net.node_attr("T0")
+    T[net.node_index(project.ambient)] = amb["Ta"]
+    rho = amb["Pb"] / (R_AIR * T)
     air = PotentialFlowLayer(net, "air", project.elements, drives=project.drives,
                              boundary=[project.ambient], quantity="pressure", unit="Pa")
     layers: dict = {"air": air}
     if species and project.species:
         layers["species"] = species_layer(
             net, ambient=project.ambient, flow_kinds=tuple(project.kinds),
-            n_species=len(project.species), scheme=scheme,
+            n_species=len(project.species), scheme=scheme, rho=rho,
         )
-    model = Model(net, layers)
-    T = net.node_attr("T0")
-    T[net.node_index(project.ambient)] = amb["Ta"]
-    rho = amb["Pb"] / (R_AIR * T)
+    closures = [ZonePressureDensity(amb["Pb"])] if project.density_uses_zone_pressure else []
+    model = Model(net, layers, closures=closures)
     drivers = {
         "air.phi_boundary": torch.zeros(1, dtype=F64),
         "rho": rho,
@@ -847,3 +930,34 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         drivers["species.x_boundary"] = torch.zeros(1, K, dtype=F64)
         state["species.x"] = project.x0.clone()
     return model, state, drivers
+
+
+def steady(model: Model, state, drivers, *, rtol: float = 1e-12, max_iter: int = 10,
+           **solve_kwargs):
+    """`model.steady`, repeated to a fixed point when the model carries a
+    `ZonePressureDensity` closure (a `.prj` with `densZP = 1`); one call otherwise.
+
+    Each pass feeds the previous pass's `"air.phi"` back to the closure. The loop stops when
+    no node pressure moves by more than `rtol * Pb` -- a relative change in density of
+    `rtol` -- and raises if that has not happened within `max_iter` passes. The map
+    contracts by about `g dz rho / Pb` per pass (~1e-4 for a storey-high opening), so two or
+    three passes reach float64 precision. The passes are left on the autograd graph: the
+    returned state is differentiable, through the unrolled iteration.
+    """
+    if max_iter < 1:
+        raise ValueError(f"prj.steady: max_iter must be at least 1, got {max_iter!r}")
+    zp = [c for c in model.closures if isinstance(c, ZonePressureDensity)]
+    out = model.steady(state, drivers, **solve_kwargs)
+    if not zp:
+        return out
+    key, Pb = zp[0].key, zp[0].Pb
+    for _ in range(max_iter):
+        new = model.steady({**state, key: out[key]}, drivers, **solve_kwargs)
+        change = (new[key] - out[key]).abs().max().item()
+        out = new
+        if change <= rtol * Pb:
+            return out
+    raise RuntimeError(
+        f"prj.steady: the zone-pressure density did not converge in {max_iter} passes "
+        f"(last pressure change {change:.3e} Pa > rtol * Pb = {rtol * Pb:.3e} Pa)"
+    )

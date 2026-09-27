@@ -308,22 +308,33 @@ one of `"Buildings.Media.Air"`, `"Buildings.Media.Specialized.Air.PerfectGas"` a
 The reference is NIST's ContamX 3.4.1.7, driven through `contamxpy` (the `contam` extra, Windows
 x86-64 only — the wheel bundles the engine). `noodl.apps.building_physics.contamx` provides `run_steady`
 and `run_transient`, which run the engine on a scratch copy of the project and never mutate your
-fixture directory.
+fixture directory; `airflow_convergence=(rcnvg, acnvg)` tightens ContamX's airflow tolerances in
+that copy.
+
+ContamX holds project input data in single precision (the fan rated 0.200683 kg/s comes back as
+float32(0.200683) exactly), so the reference is only as precise as a float32 roundoff,
+$u = 2^{-24} \approx 6\times10^{-8}$, in each input. Every tolerance below is a first-order budget
+of such roundoffs through the compared quantity, not a fit to the measured error; ContamX's
+airflow iteration is run at `(1e-10, 1e-12)` and noodl's Newton at 1e-14 kg/s so that neither
+solver contributes.
 
 | Check | Tolerance | Measured |
 |---|---|---|
 | Stack project, flow directions | exact signs | match |
-| Stack project, flow magnitudes, over a ±20 K ambient sweep | rel 1e-3 | **4.1e-5 – 4.4e-5** |
-| Residual flatness across the sweep (max/min ratio) | < 1.5 | holds |
-| Constant-mass-flow fan delivers its rating (0.200683 kg/s) | rel 1e-5 | holds |
-| Three-zone project, steady flows | rel 1e-3, abs 1e-6 | holds |
-| Three-zone project, transient concentrations, 24 steps at 300 s | rel 1e-3 | **6.5e-6** |
+| Stack project, flow magnitudes, over a ±20 K ambient sweep | rel 16.6–31.8 $u$ (9.9e-7 – 1.9e-6) | **7e-8 – 1.0e-7** |
+| Stack residual without / with the zone-pressure density | 3e-5 – 6e-5 flat / < 1 % of that | 4.4e-5 / 1.0e-7 |
+| Constant-mass-flow fan delivers its rating (0.200683 kg/s) | engine rel $u$, noodl rel 1e-12 | holds |
+| Three-zone project, steady flows | rel 16 $u$ (9.5e-7) | **9.1e-8** |
+| Three-zone project, transient concentrations, 24 steps at 300 s | rel 64 $u$ (3.8e-6) | **2.0e-7** |
 
-The magnitude row's accuracy relies on the reader correcting orifice coefficients for upstream
-density rather than freezing them at reference density. The residual-flatness test exists to
-guard this: a density-related regression would show up as a residual that grows with $\Delta T$,
-because the size of the density correction scales with the temperature difference across the
-sweep, even if the absolute error stayed small.
+The stack rows rely on two density effects matching ContamX's. Orifice coefficients are
+corrected for the density of the air entering the path (freezing them at reference density
+cost 1.7e-2, growing with $\Delta T$). And the project sets `densZP = 1`, zone density at the
+zone's absolute pressure: ignoring it left a residual of 4.1e-5 – 4.4e-5, flat across the sweep,
+because the stack pressure is a density difference that amplifies the |P_zone| / Pb ≈ 6e-6
+density change about fourteenfold. The three-zone transient was 6.5e-6 while zone air mass was
+held at the reference density 1.2041 kg/m³ rather than ContamX's `Pb / (R T)` (2.2e-6 apart at
+293.15 K). What remains everywhere is one or two float32 roundoffs.
 
 The path-flow sign convention was verified independently against two cases rather than assumed,
 since `contamxpy`'s own documentation does not pin the sign of `getPathFlow`.

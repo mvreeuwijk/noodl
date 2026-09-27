@@ -3,16 +3,26 @@
 Skipped when contamxpy is not importable. Flows are compared after ContamX's initial
 steady-state airflow solve; concentrations over a 24-step transient at the project's own
 5-minute step with the implicit-Euler contaminant solver on both sides.
+
+TOLERANCES ARE SET BY THE REFERENCE'S PRECISION, not by the measured agreement. ContamX
+holds project input data in SINGLE precision: `doorway_damper_fan.prj`'s fan rated 0.200683
+kg/s comes back as 0.20068299770355225, which is float32(0.200683) exactly. Each input it
+reads is therefore known to it only to the float32 unit roundoff `F32_U` = 2**-24 = 6.0e-8,
+and each tolerance below is a first-order budget of such roundoffs through the quantity
+compared (derived at each test). The solver-side contributions are pushed below that:
+ContamX's airflow iteration is run at `TIGHT_AIRFLOW` rather than the sample projects'
+1e-5 / 1e-6, and noodl's Newton at an absolute residual of `NOODL_ATOL` kg/s.
 """
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
 import torch
 
-from noodl.apps.building_physics.prj import project_to_model, read_prj
+from noodl.apps.building_physics.prj import project_to_model, read_prj, steady
 
 DATA = Path(__file__).resolve().parents[1] / "data" / "contam"
 THREE = DATA / "valThreeZonesWthCtm-UseApi.prj"
@@ -45,6 +55,11 @@ FAN_CMF_PATH = 5
 # transient against a different problem.
 THREE_AMBIENT_MF = 0.0023254
 F64 = torch.float64
+F32_U = 2.0**-24
+# ContamX's airflow (afrcnvg, afacnvg): relative, and absolute in kg/s. See
+# `contamx._set_airflow_convergence`.
+TIGHT_AIRFLOW = (1e-10, 1e-12)
+NOODL_ATOL = 1e-14
 # NOT a module-level `pytestmark`: the two tests below monkeypatch their way to the behaviour
 # they pin and need no engine at all, so marking them `external` would misreport what this
 # file requires (and would hide them from a `-m "not external"` run that could perfectly well
@@ -91,13 +106,28 @@ def test_a_refused_project_is_reported_by_the_path_the_caller_gave(monkeypatch):
     assert "noodl-contamx-" not in str(exc.value)          # not the scratch copy
 
 
-def _stack_case(contamx_run_steady, Ta=STACK_AMBIENT_T):
+def _stack_case(contamx_run_steady, Ta=STACK_AMBIENT_T, *, zone_pressure_density=True):
     p = read_prj(STACK)
+    if not zone_pressure_density:
+        p = dataclasses.replace(p, density_uses_zone_pressure=False)
     amb = dict(p.ambient_conditions, Ta=Ta)
-    ref = contamx_run_steady(STACK, ambient=amb)
+    ref = contamx_run_steady(STACK, ambient=amb, airflow_convergence=TIGHT_AIRFLOW)
     model, state, drivers = project_to_model(p, ambient=amb)
-    ss = model.steady(state, drivers)
+    ss = steady(model, state, drivers, atol=NOODL_ATOL)
     return p, ref, p.path_flows(ss["air.q"])
+
+
+def _stack_budget(Ta, Tz=293.15):
+    """First-order float32 budget for a two-opening stack flow, relative.
+
+    F = C sqrt(rho_up) sqrt(dp) with dp ~ g h (rho_a - rho_z) and rho = Pb / (R T). A
+    relative roundoff u in each input moves F by at most: C 1u; rho_up (R, T_up) 1u; g
+    0.5u; R in the density difference 0.5u; and Ta, Tz through the DIFFERENCE
+    (1/Ta - 1/Tz), which amplifies them to 0.5 (Ta + Tz) / |Tz - Ta| u. Pb (101325) and the
+    opening heights (0, 1.5 m) are exact in float32. 16.6u = 9.9e-7 at 20 K, 31.8u = 1.9e-6
+    at 10 K.
+    """
+    return F32_U * (3.0 + 0.5 * (Ta + Tz) / abs(Tz - Ta))
 
 
 @pytest.mark.external
@@ -121,51 +151,62 @@ def test_stack_project_flow_directions_match_contamx(contamx, record_property):
 @pytest.mark.external
 @pytest.mark.parametrize("Ta", STACK_AMBIENT_SWEEP)
 def test_stack_project_flow_magnitudes_match_contamx(contamx, Ta, record_property):
-    """The non-isothermal parity case, at the 1e-3 tolerance.
+    """The non-isothermal parity case, at the float32 budget `_stack_budget(Ta)`.
 
-    Freezing every orifice coefficient at the reference density RHO_0 (while ContamX
-    evaluates it at the density of the air entering the path) measured 1.7e-2 --
-    seventeen times the tolerance.
-    With `UpstreamDensityPowerLaw` carrying that correction the agreement across the whole
-    +-20 K sweep is 4.1e-5 to 4.4e-5 relative, twenty-five times INSIDE the tolerance, and
-    the residual is flat in temperature rather than growing with it -- i.e. what is left is
-    no longer a density error. The sweep matters: a single ambient would not distinguish the
-    correction from a constant rescaling, and both signs of the temperature difference are
-    needed because the correction switches which endpoint it reads when the flow reverses.
+    Two density effects had to match ContamX's for this to hold:
+
+    * Freezing every orifice coefficient at the reference density RHO_0 (while ContamX
+      evaluates it at the density of the air ENTERING the path) measured 1.7e-2, growing
+      linearly with |T_zone - T_ambient|. `UpstreamDensityPowerLaw` removes it.
+    * The project sets `densZP = 1`: ContamX evaluates zone density at the zone's absolute
+      pressure Pb + P_zone. Ignoring it left 4.1e-5 to 4.4e-5, FLAT across the sweep: the
+      stack pressure is a density DIFFERENCE, which amplifies the |P_zone| / Pb ~ 6e-6
+      density change by rho / |delta rho| ~ 14, and P_zone itself scales with that
+      difference. `prj.ZonePressureDensity` removes it; see
+      `test_the_zone_pressure_density_is_what_closed_the_stack_residual`.
+
+    What remains is 7e-8 to 1e-7 (1.2-1.6 F32_U) against a budget of 16.6-31.8 F32_U. The
+    sweep matters: both signs of the temperature difference are needed because the upstream
+    density switches endpoint when the flow reverses.
     """
     from noodl.apps.building_physics.contamx import run_steady
 
     _p, ref, ours = _stack_case(run_steady, Ta)
-    torch.testing.assert_close(ours, ref["flow"], rtol=1e-3, atol=1e-6)
+    tol = _stack_budget(Ta)
+    torch.testing.assert_close(ours, ref["flow"], rtol=tol, atol=1e-12)
     worst_rel = ((ours - ref["flow"]) / ref["flow"]).abs().max().item()
     record_property("check", "Stack project, flow magnitudes, over a +-20 K ambient sweep")
-    record_property("tolerance", "rel 1e-3")
+    record_property("tolerance", f"rel {tol:.2e} (float32 input budget)")
     record_property("measured_rel", worst_rel)
 
 
 @pytest.mark.external
-def test_the_stack_residual_is_flat_across_the_sweep_not_proportional_to_dT(
+def test_the_zone_pressure_density_is_what_closed_the_stack_residual(
     contamx, record_property
 ):
-    """Guards the DIAGNOSIS, not just the tolerance: before the correction the relative
-    error was proportional to |T_zone - T_ambient| (1.72e-2 at 20 K, 8.61e-3 at 10 K, 0 at
-    0 K), which is the signature of the frozen density. Afterwards it must NOT scale with
-    the temperature difference -- if a future change reintroduced a density error at, say, a
-    tenth of the size, a fixed 1e-3 tolerance alone would not notice.
+    """Guards the DIAGNOSIS, not just the tolerance.
+
+    With `densZP` ignored the residual must come back at its old size and shape -- 3e-5 to
+    6e-5 at every ambient, and flat (max/min < 1.5, where a residual linear in the
+    temperature difference would give 2.0 between 10 K and 20 K) -- and honouring it must
+    remove at least 99 % of it. If the zone-pressure density were lost, or the 4e-5 ever
+    closed by something else, this fails where a tolerance alone would not say why.
     """
     from noodl.apps.building_physics.contamx import run_steady
 
-    rel = []
+    off, on = [], []
     for Ta in STACK_AMBIENT_SWEEP:
+        _p, ref, ours = _stack_case(run_steady, Ta, zone_pressure_density=False)
+        off.append(((ours - ref["flow"]) / ref["flow"]).abs().max().item())
         _p, ref, ours = _stack_case(run_steady, Ta)
-        rel.append(((ours - ref["flow"]) / ref["flow"]).abs().max().item())
-    assert max(rel) < 1e-4
-    # 10 K and 20 K differ by less than a factor 1.5, against the factor 2.0 a residual
-    # linear in the temperature difference would show.
-    assert max(rel) / min(rel) < 1.5
-    record_property("check", "Residual flatness across the sweep (max/min ratio)")
-    record_property("tolerance", "< 1.5")
-    record_property("measured_ratio", max(rel) / min(rel))
+        on.append(((ours - ref["flow"]) / ref["flow"]).abs().max().item())
+    assert all(3e-5 < r < 6e-5 for r in off), off
+    assert max(off) / min(off) < 1.5
+    assert all(r_on < 1e-2 * r_off for r_on, r_off in zip(on, off, strict=True)), (on, off)
+    record_property("check", "Stack residual with and without the zone-pressure density")
+    record_property("tolerance", "off: 3e-5..6e-5 and flat; on: < 1 % of off")
+    record_property("measured_off_max", max(off))
+    record_property("measured_on_max", max(on))
 
 
 @pytest.mark.external
@@ -188,13 +229,15 @@ def test_a_constant_mass_flow_fan_delivers_its_rating_in_the_from_to_direction(
     ref = run_steady(MIXED, ambient=amb)
     i = ref["path_nr"].index(FAN_CMF_PATH)
     assert ref["from_zone"][i] != 0 and ref["to_zone"][i] == 0      # zone -> ambient
-    assert ref["flow"][i].item() == pytest.approx(FAN_CMF_RATING, rel=1e-5)
+    # The engine's value is the rating rounded to float32: within one unit roundoff.
+    assert ref["flow"][i].item() == pytest.approx(FAN_CMF_RATING, rel=F32_U)
     model, state, drivers = project_to_model(p, ambient=amb)
-    ours = p.path_flows(model.steady(state, drivers)["air.q"])
+    ours = p.path_flows(steady(model, state, drivers)["air.q"])
     j = [path.nr for path in p.paths].index(FAN_CMF_PATH)
-    assert ours[j].item() == pytest.approx(FAN_CMF_RATING, rel=1e-5)
+    # noodl's is the rating in float64: a fixed flow has nothing to solve for.
+    assert ours[j].item() == pytest.approx(FAN_CMF_RATING, rel=1e-12)
     record_property("check", "Constant-mass-flow fan delivers its rating (0.200683 kg/s)")
-    record_property("tolerance", "rel 1e-5")
+    record_property("tolerance", "engine rel 2**-24 (float32), noodl rel 1e-12")
     record_property("measured_rel", abs(ours[j].item() / FAN_CMF_RATING - 1.0))
 
 
@@ -204,14 +247,19 @@ def test_three_zone_steady_flows_match_contamx(contamx, record_property):
 
     p = read_prj(THREE)
     amb = dict(p.ambient_conditions, mf={0: THREE_AMBIENT_MF})
-    ref = run_steady(THREE, ambient=amb)
+    ref = run_steady(THREE, ambient=amb, airflow_convergence=TIGHT_AIRFLOW)
     model, state, drivers = project_to_model(p, ambient=amb)
-    ss = model.steady(state, drivers)
+    ss = steady(model, state, drivers, atol=NOODL_ATOL)
     ours = p.path_flows(ss["air.q"])
-    torch.testing.assert_close(ours, ref["flow"], rtol=1e-3, atol=1e-6)
+    # Isothermal and wind-driven: each flow is a product of powers (exponents <= 1) of about
+    # ten single-precision inputs -- flow coefficients, wind speed, Cp, R, T -- with no
+    # difference to amplify them, so <= ~10 F32_U first-order; the budget is 16 F32_U
+    # (9.5e-7). Measured 9.1e-8.
+    tol = 16 * F32_U
+    torch.testing.assert_close(ours, ref["flow"], rtol=tol, atol=1e-12)
     worst_rel = ((ours - ref["flow"]) / ref["flow"].abs().clamp_min(1e-12)).abs().max().item()
     record_property("check", "Three-zone project, steady flows")
-    record_property("tolerance", "rel 1e-3, abs 1e-6")
+    record_property("tolerance", f"rel {tol:.2e} (16 float32 roundoffs)")
     record_property("measured_rel", worst_rel)
 
 
@@ -222,7 +270,7 @@ def test_three_zone_transient_concentrations_match_contamx(contamx, record_prope
     p = read_prj(THREE)
     amb = dict(p.ambient_conditions, mf={0: THREE_AMBIENT_MF})
     steps = 24
-    ref = run_transient(THREE, steps=steps, ambient=amb)
+    ref = run_transient(THREE, steps=steps, ambient=amb, airflow_convergence=TIGHT_AIRFLOW)
     assert ref["dt"] == pytest.approx(300.0)
     model, state, drivers = project_to_model(p, ambient=amb, scheme="implicit")
     drivers["species.x_boundary"] = torch.tensor([[THREE_AMBIENT_MF]], dtype=F64)
@@ -231,11 +279,15 @@ def test_three_zone_transient_concentrations_match_contamx(contamx, record_prope
         state = model.step(state, drivers, ref["dt"])
         trace.append(state["species.x"].clone())
     ours = torch.stack(trace)                                   # (steps+1, 3, 1)
-    # The tolerance for zone mass fractions is 1e-3 relative, fixed in advance; the measured
-    # pointwise maximum relative error over the whole (25, 3, 1) trace is 6.5e-6, so the
-    # tolerance is not a looser one chosen to fit.
-    torch.testing.assert_close(ours, ref["mf"], rtol=1e-3, atol=1e-7)
+    # Budget: each zone's rate is flow / (rho V); flows carry 16 F32_U (steady test above)
+    # and rho V two more (R, T; V and dt are exact). Early in a transient the k-th of k zones
+    # in series responds as the PRODUCT of k such rates, so a relative rate error reaches it
+    # up to k times: 3 zones x 18 F32_U = 54, budgeted as 64 F32_U (3.8e-6). Measured
+    # 2.0e-7. It was 6.5e-6 while noodl held zone air mass at RHO_0 V rather than ContamX's
+    # Pb / (R T) V (2.2e-6 apart even at 293.15 K), amplified about threefold, as above.
+    tol = 64 * F32_U
+    torch.testing.assert_close(ours, ref["mf"], rtol=tol, atol=1e-15)
     worst_rel = ((ours - ref["mf"]) / ref["mf"].abs().clamp_min(1e-12)).abs().max().item()
     record_property("check", "Three-zone project, transient concentrations, 24 steps at 300 s")
-    record_property("tolerance", "rel 1e-3")
+    record_property("tolerance", f"rel {tol:.2e} (64 float32 roundoffs)")
     record_property("measured_rel", worst_rel)

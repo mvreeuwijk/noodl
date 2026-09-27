@@ -438,3 +438,83 @@ def test_a_zone_reading_a_continuous_values_file_is_refused(tmp_path):
                 tmp_path,
             )
         )
+
+
+# --------------------------------------------------------------------------------------
+# Density options (`!tsdens relax tsmaxi cnvgSS densZP stackD dodMdt`) and zone air mass.
+
+WTH_STACK = DATA / "test_OneZoneWthCtmStack-UseApi.prj"
+_TSDENS_WTH_STACK = "   1    0.75    20     1      1      0      1"
+
+
+def test_dens_zp_is_read_and_stack_d_is_refused(tmp_path):
+    from noodl.apps.building_physics.prj import ZonePressureDensity
+
+    assert read_prj(WTH_STACK).density_uses_zone_pressure is True
+    assert read_prj(THREE).density_uses_zone_pressure is False
+    model, _s, _d = project_to_model(read_prj(WTH_STACK))
+    assert any(isinstance(c, ZonePressureDensity) for c in model.closures)
+    model, _s, _d = project_to_model(read_prj(THREE))
+    assert model.closures == []
+    text = WTH_STACK.read_text()
+    with pytest.raises(ValueError, match=r"stackD = 1.*unsupported"):
+        read_prj(_variant(text, _TSDENS_WTH_STACK, "   1    0.75    20     1      1      1      1",
+                          tmp_path))
+    with pytest.raises(ValueError, match=r"densZP stackD dodMdt.*4 fields"):
+        read_prj(_variant(text, _TSDENS_WTH_STACK, "   1    0.75    20     1", tmp_path))
+
+
+def test_zone_pressure_density_is_the_absolute_pressure_ideal_gas():
+    from noodl.apps.building_physics.prj import ZonePressureDensity
+
+    zp = ZonePressureDensity(101325.0)
+    rho = torch.tensor([1.29, 1.20], dtype=F64)
+    assert zp({}, {"rho": rho}) == {}                     # no pressures yet: no correction
+    phi = torch.tensor([0.0, -0.65], dtype=F64)
+    out = zp({"air.phi": phi}, {"rho": rho})["rho"]
+    torch.testing.assert_close(out, rho * (101325.0 + phi) / 101325.0, rtol=1e-15, atol=0)
+
+
+def test_prj_steady_converges_the_zone_pressure_density_to_its_fixed_point():
+    """The converged state must be self-consistent: its densities are those of its OWN
+    pressures, so one more pass changes nothing. A single `model.steady` is not (it solves
+    at `Pb` alone), and differs by the |P_zone| / Pb term amplified through the stack.
+    """
+    from noodl.apps.building_physics.prj import steady
+
+    p = read_prj(WTH_STACK)
+    model, state, drivers = project_to_model(p, ambient=dict(p.ambient_conditions, Ta=273.15))
+    one = model.steady(state, drivers, atol=1e-14)
+    ss = steady(model, state, drivers, atol=1e-14)
+    again = model.steady({**state, "air.phi": ss["air.phi"]}, drivers, atol=1e-14)
+    torch.testing.assert_close(again["air.q"], ss["air.q"], rtol=1e-12, atol=0)
+    rel = ((one["air.q"] - ss["air.q"]) / ss["air.q"]).abs().max().item()
+    assert 3e-5 < rel < 6e-5
+    with pytest.raises(RuntimeError, match=r"did not converge in 1 passes"):
+        steady(model, state, drivers, rtol=0.0, max_iter=1, atol=1e-14)
+
+
+def test_prj_steady_is_one_model_steady_without_dens_zp():
+    from noodl.apps.building_physics.prj import steady
+
+    model, state, drivers = project_to_model(read_prj(THREE))
+    torch.testing.assert_close(
+        steady(model, state, drivers)["air.q"], model.steady(state, drivers)["air.q"],
+        rtol=0, atol=0,
+    )
+
+
+def test_species_capacity_is_the_zone_air_mass_at_its_own_density(tmp_path):
+    """ContamX's zone air mass is Pb / (R T) V, not RHO_0 V: 1.2041 is that density only to
+    five figures at 293.15 K, and 3.4 % off per 10 K away from it."""
+    from noodl.apps.building_physics.thermal import R_AIR
+
+    text = THREE.read_text()
+    warm = _variant(text, "   2  3   0   0   0   1   0.000   600 293.15 0 two",
+                    "   2  3   0   0   0   1   0.000   600 303.15 0 two", tmp_path)
+    p = read_prj(warm)
+    model, _s, _d = project_to_model(p, ambient=dict(p.ambient_conditions, Pb=100000.0))
+    expected = 100000.0 / (R_AIR * torch.tensor([293.15, 303.15, 293.15], dtype=F64)) * (
+        torch.tensor([300.0, 600.0, 900.0], dtype=F64)
+    )
+    torch.testing.assert_close(model.layers["species"].capacity, expected, rtol=1e-14, atol=0)

@@ -116,9 +116,13 @@ def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
 
 
 def species_layer(net: Network, *, ambient="ambient", name: str = "species",
-                  flow_kinds=("airpath",), rho: float = RHO_0, n_species: int = 1,
-                  scheme: str = "implicit") -> TransportLayer:
-    """Species as mass fractions with zone air mass rho V as capacity (CONTAM convention)."""
+                  flow_kinds=("airpath",), rho: float | torch.Tensor = RHO_0,
+                  n_species: int = 1, scheme: str = "implicit") -> TransportLayer:
+    """Species as mass fractions with zone air mass rho V as capacity (CONTAM convention).
+
+    `rho` is one density for every node or a full-node `(n,)` tensor of per-node densities
+    (`prj.project_to_model` passes each zone's `Pb / (R T)`, as ContamX holds it).
+    """
     kinds = tuple(flow_kinds)
     interior, _ = active_interior(net, kinds, [ambient])
     capacity = (rho * net.node_attr("volume", default=0.0))[interior]
