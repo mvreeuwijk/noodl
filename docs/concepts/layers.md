@@ -3,13 +3,13 @@
 A **layer** is one physical process on one network. A **`Model`** holds several layers on one
 network and steps them together.
 
-This page covers the part of noodl least like other network solvers: there are four different
+This page covers the part of noodl physics least like other network solvers: there are four different
 ways an edge flow can be determined, and choosing the right one for your problem matters more
 than any other modelling decision you will make.
 
 ## The four flow-determination modes
 
-Most network tools support exactly one of these. noodl supports all four, and they compose on
+Most network tools support exactly one of these. noodl physics supports all four, and they compose on
 one graph.
 
 | # | Mode | The flow comes from | Implemented by |
@@ -147,7 +147,7 @@ forward/backward benchmark across the whole family (`gmres`, `gmres_jacobi`, `gm
 since preconditioning is not reused across the two) the clear loser at every batch size measured,
 and the gmres-vs-`gmres_jacobi` ordering too close to the run-to-run spread to trust as a
 tie-break. Two fall-backs, both silent (never a raise, since `"auto"` is a promise to choose a
-backend that works): SciPy absent (`"auto"` would have factorised, but the optional `noodl[sparse]`
+backend that works): SciPy absent (`"auto"` would have factorised, but the optional `noodl-physics[sparse]`
 extra is not installed) falls back to `gmres` and warns once per process; a grad-requiring solve
 on the `on_failure="return"` early-return path (which runs outside the differentiable path's own
 `no_grad`, unlike `step`'s ordinary forward/backward) falls back to `gmres` silently, since an

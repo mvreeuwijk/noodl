@@ -1,6 +1,6 @@
 # Differentiability
 
-Every quantity in noodl is a PyTorch tensor and every solve is differentiable. This is the
+Every quantity in noodl physics is a PyTorch tensor and every solve is differentiable. This is the
 difference between a simulator and a tool you can calibrate, invert and optimise with.
 
 ## What you get
@@ -28,7 +28,7 @@ The naive way to differentiate a Newton solve is to record every iteration and b
 through all of them. That costs memory proportional to the iteration count and is numerically
 noisy — the early iterates are far from the solution and contribute derivative noise.
 
-noodl does not do that. It applies the implicit-function theorem at the converged solution.
+noodl physics does not do that. It applies the implicit-function theorem at the converged solution.
 For a residual $r(x, \theta) = 0$,
 
 $$
@@ -76,7 +76,7 @@ for why this is structural rather than stylistic.
 
 ## What is guaranteed
 
-The sections above describe how noodl differentiates and what it takes to keep that safe.
+The sections above describe how noodl physics differentiates and what it takes to keep that safe.
 This section states the contract itself, as a list of bounded claims, each pinned to the test
 that would fail if the claim stopped holding.
 
@@ -163,7 +163,7 @@ that would fail if the claim stopped holding.
   transition step, checked at and either side of that boundary
   (pinned by tests/elements/test_duct.py::test_gradcheck_flow_wrt_dp_at_zero_inside_and_outside_the_transition).
   `UpstreamDensityPowerLaw` declares its own transition and is finite through it too — see
-  `tests/elements/test_upstream.py` for that element's own kink tests. No element in noodl
+  `tests/elements/test_upstream.py` for that element's own kink tests. No element in noodl physics
   claims to be globally smooth where its law is not; where it is not, the transition is
   declared and tested, not left to autograd to discover.
 
@@ -202,7 +202,7 @@ design variable.
 
 ## Where gradients are zero, and why
 
-Not every derivative that exists mathematically is non-zero in the model, and noodl documents
+Not every derivative that exists mathematically is non-zero in the model, and noodl physics documents
 the cases rather than leaving you to discover them.
 
 - **At a hard clip.** `CapacitatedTransferLayer` in `mode="hard"` carries *exactly zero*
