@@ -154,10 +154,15 @@ class StreetCase:
         `meteo` takes `METEO_KEYS` keys (`wind_dir_from_deg` and `wind_speed` required);
         each value is a scalar, a `(n_hours,)` series (the same at every street) or a
         `(n_hours, n_streets)` array. `meteo_junction` likewise with `n_junctions`, in
-        `network.junctions` order. `emissions` (kg/s per street) and `background` (kg/m3)
-        are a scalar, `(n_hours,)`, `(n_hours, n_streets)` or
-        `(n_hours, n_streets, n_species)`. The junction ids are `network.junctions`' own
-        names.
+        `network.junctions` order (any subset of `METEO_KEYS`, or none at all). `emissions`
+        (kg/s per street) and `background` (kg/m3) are a scalar, `(n_hours,)`,
+        `(n_hours, n_streets)` or `(n_hours, n_streets, n_species)`. The junction ids are
+        `network.junctions`' own names.
+
+        Writing the case out with `write_case(format="munich")` needs `meteo` to also carry
+        `h_abl`, `u_star` and `lmo`: MUNICH requires their `PBLH`, `UST`, `LMO` fields (and
+        the `...Inter` junction counterparts derived from them) whenever transport is on,
+        which `write_case` always turns on.
         """
         species = list(species)
         times = [float(t) for t in times]
@@ -248,15 +253,14 @@ class StreetCase:
 def read_case(path: Path) -> StreetCase:
     """`StreetCase` from `path`: a directory holding `munich.cfg` is read as a MUNICH case;
     a SIRANE master `.dat` file will be read as a SIRANE case once a later plan implements
-    it. Anything else raises `ValueError` naming both expectations.
+    it. Anything else raises `ValueError` naming the expectation.
     """
     path = Path(path)
     if path.is_dir() and (path / "munich.cfg").is_file():
         raw = _munich_files.read_munich_case(path)
         return StreetCase(source="munich", **raw)
     raise ValueError(
-        f"read_case: {path} is neither a directory holding 'munich.cfg' (a MUNICH case) "
-        f"nor a SIRANE master '.dat' file (a SIRANE case)"
+        f"read_case: {path} is not a directory holding 'munich.cfg' (a MUNICH case)"
     )
 
 
@@ -270,12 +274,21 @@ def write_case(
     """Writes `case` under `out_dir` in `format`, and returns `out_dir`. Only
     `format="munich"` is implemented.
 
-    `case.start` must be set (MUNICH dates every input). A case read from the same format
-    writes its own native options back (`read_case` -> `write_case` round-trips);
-    `options` are the format's own overrides -- for MUNICH, any `munich.cfg` `[street]`
-    key; any of the six `[meteo]` fields MUNICH always requires (`Rain`, `SolarRadiation`,
-    `SpecificHumidity`, `SurfacePressure`, `SurfaceTemperature`, `Attenuation` -- see
-    `_munich_files._REQUIRED_METEO_DEFAULTS`); plus `lat0_deg`/`lon0_deg`, the lon/lat of a
+    `case.start` must be set (MUNICH dates every input), and `case.meteo` must have `h_abl`,
+    `u_star` and `lmo`: MUNICH needs their `PBLH`, `UST`, `LMO` fields (and the `...Inter`
+    junction counterparts derived from them) whenever transport is on, which this writer
+    always turns on; a `ValueError` names whichever of the three is missing.
+
+    A case read from MUNICH files writes its own `[street]` section and projection back
+    (`read_case` -> `write_case` round-trips those two); `[options]` itself always turns
+    chemistry, photolysis, deposition and scavenging off, and the six `[meteo]` fields
+    MUNICH always requires (`Rain`, `SolarRadiation`, `SpecificHumidity`, `SurfacePressure`,
+    `SurfaceTemperature`, `Attenuation` -- see `_munich_files._REQUIRED_METEO_DEFAULTS`) come
+    from the case where it has one (only `SurfaceTemperature`, from `meteo["temperature"]`),
+    else a constant default -- either way, `options` overrides them.
+
+    `options` are the format's own overrides -- for MUNICH, any `munich.cfg` `[street]` key;
+    any of the six mandatory `[meteo]` fields; plus `lat0_deg`/`lon0_deg`, the lon/lat of a
     synthetic network's `(0, 0)`. `options` overrides win even over a value the case itself
     supplies. Missing junction (`*Inter`) meteorology is derived from the streets meeting at
     each junction: circular mean for the direction, `1/L` for the Obukhov length, arithmetic

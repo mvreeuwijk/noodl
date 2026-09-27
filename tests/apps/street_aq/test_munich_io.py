@@ -249,10 +249,16 @@ def test_missing_meteo_junction_is_derived_from_the_streets_touching_it(tmp_path
     wind_dir = np.full(n, 200.0)
     for name, value in (("1", 359.0), ("3", 1.0), ("4", 359.0), ("6", 1.0)):
         wind_dir[col[name]] = value
+    # Junction "A"'s streets also get mixed-sign Obukhov lengths, so the derived `LMOInter`
+    # can only match `1/mean(1/L)`: a plain arithmetic mean of these four (28.75, positive)
+    # would fail the assertion below, which is negative.
+    lmo = np.full(n, 1e6)
+    for name, value in (("1", 50.0), ("3", -25.0), ("4", 100.0), ("6", -10.0)):
+        lmo[col[name]] = value
     case = StreetCase.synthetic(
         net, species=("NO2",), times=[0.0],
         meteo=dict(wind_dir_from_deg=wind_dir[None, :], wind_speed=5.0, h_abl=1000.0,
-                  u_star=0.5, lmo=1e6),
+                  u_star=0.5, lmo=lmo[None, :]),
         emissions=5e-6, background=2e-8, start=START,
     )
     write_case(tmp_path, case)
@@ -269,7 +275,9 @@ def test_missing_meteo_junction_is_derived_from_the_streets_touching_it(tmp_path
     assert again.meteo_junction["wind_speed"][0, j] == pytest.approx(5.0)
     assert again.meteo_junction["h_abl"][0, j] == pytest.approx(1000.0)
     assert again.meteo_junction["u_star"][0, j] == pytest.approx(0.5)
-    assert again.meteo_junction["lmo"][0, j] == pytest.approx(1e6)
+    expected_lmo = 1.0 / np.mean(1.0 / np.array([50.0, -25.0, 100.0, -10.0]))
+    assert expected_lmo < 0.0
+    assert again.meteo_junction["lmo"][0, j] == pytest.approx(expected_lmo)
 
 
 def test_a_supplied_meteo_junction_key_is_not_overwritten_by_the_derivation(tmp_path):
@@ -288,6 +296,21 @@ def test_write_case_refuses_a_non_munich_format(tmp_path):
     net, _ = munich_idealised()
     with pytest.raises(NotImplementedError, match="sirane"):
         write_case(tmp_path, _case(net, 1), format="sirane")
+
+
+def test_write_case_refuses_missing_transport_meteo(tmp_path):
+    # MUNICH needs PBLH, UST, LMO (and their *Inter counterparts) whenever `With_transport:
+    # yes`, which this writer always sets -- a case missing any of the street-level fields
+    # they come from must be refused up front, not written as a case MUNICH itself refuses.
+    net, _ = munich_idealised()
+    case = StreetCase.synthetic(
+        net, species=("NO2",), times=[0.0],
+        meteo=dict(wind_dir_from_deg=200.0, wind_speed=5.0, u_star=0.5),
+        emissions=5e-6, background=2e-8, start=START,
+    )
+    with pytest.raises(ValueError, match=r"format='munich' needs meteo keys.*"
+                                        r"missing \['h_abl', 'lmo'\]"):
+        write_case(tmp_path, case)
 
 
 def test_write_case_needs_a_start_date(tmp_path):
@@ -409,10 +432,9 @@ def test_model_options_refuse_what_noodl_does_not_implement(tmp_path):
         _case(net, 1).model_options()
 
 
-def test_read_case_names_both_expectations_for_an_unknown_path(tmp_path):
-    with pytest.raises(ValueError) as excinfo:
+def test_read_case_names_its_expectation_for_an_unknown_path(tmp_path):
+    with pytest.raises(ValueError, match="munich.cfg"):
         read_case(tmp_path)
-    assert "MUNICH" in str(excinfo.value) and "SIRANE" in str(excinfo.value)
 
 
 # ------------------------------------------------------------------------------ drivers

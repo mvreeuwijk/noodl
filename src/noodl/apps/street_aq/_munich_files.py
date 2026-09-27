@@ -449,6 +449,16 @@ no input data file was provided" checks. When `meteo_junction` supplies none of 
 meteo uses: `circular_mean_rad` for `WindDirection`, `reciprocal_mean` for `LMO`, a plain
 mean otherwise."""
 
+_REQUIRED_TRANSPORT_METEO = ("h_abl", "u_star", "lmo")
+"""Street-level `meteo` keys `write_munich_case` itself requires -- MUNICH's own `PBLH`,
+`UST`, `LMO` (`_METEO_FIELDS`) are, like their `...Inter` counterparts
+(`_DERIVABLE_INTER_FIELDS`), needed whenever `With_transport: yes` (this writer's own
+default, always set): `StreetNetworkTransport.cxx:1690-1699`'s "is needed but no input data
+file was provided" checks. Unlike the six `_REQUIRED_METEO_DEFAULTS` fields, MUNICH has no
+built-in default for these three, and a street-level field that is entirely absent cannot be
+derived into its `...Inter` form either, so `write_munich_case` refuses up front instead of
+writing a case MUNICH itself would refuse to run."""
+
 
 def _lonlat(x_m: float, y_m: float, *, lat_ref_deg: float, lat0_deg: float,
             lon0_deg: float) -> tuple[float, float]:
@@ -506,7 +516,11 @@ def write_munich_case(
     `intersection.dat`'s rows are written); `emissions` `(n_hours, n_streets, n_species)`
     kg/s; `background` the same shape in kg/m3. The direction is converted to MUNICH's
     radians TOWARD, and masses to micrograms, here. An array holding one value throughout
-    is written as an `is_num` constant; any other as a float32 binary.
+    is written as an `is_num` constant; any other as a float32 binary. `meteo` must have
+    `h_abl`, `u_star` and `lmo` (see `_REQUIRED_TRANSPORT_METEO`): MUNICH needs their
+    `PBLH`, `UST`, `LMO` fields, and the `...Inter` counterparts derived from them, whenever
+    `With_transport: yes` (always set here), and a `ValueError` names whichever is missing
+    up front rather than writing a case MUNICH itself would refuse to run.
 
     `junction_ids` (in `network.junctions` order) become `intersection.dat`'s ids when every
     one is a distinct whole number, as MUNICH's are (so a read case writes back with its own
@@ -569,6 +583,13 @@ def write_munich_case(
         check_shape(f"meteo_junction[{key!r}]", value, (n_hours, n_junctions))
     check_shape("emissions", emissions, (n_hours, n_streets, len(species)))
     check_shape("background", background, (n_hours, n_streets, len(species)))
+
+    missing_transport = [k for k in _REQUIRED_TRANSPORT_METEO if k not in meteo]
+    if missing_transport:
+        raise ValueError(
+            f"write_case: format='munich' needs meteo keys {list(_REQUIRED_TRANSPORT_METEO)} "
+            f"(each (n_hours, n_streets)); missing {missing_transport}"
+        )
 
     if n_hours > 1:
         steps = np.diff(np.asarray(times, dtype=np.float64))
