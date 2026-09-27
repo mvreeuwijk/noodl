@@ -125,9 +125,11 @@ own simulated reference) as committed fixtures. `scripts/modelica_export.py` is 
 the package and is not run by the test suite. It exits non-zero if the simulation fails (the
 JSON is still written, with the instance API's Reals instead of the simulated values, so the
 export can be inspected); a batch script over every model should check the exit code rather
-than assume success. 9 of the 12 dynamic parity tests take 30 s–5 min each and are marked
-`@pytest.mark.slow`, excluded by the repository's default `pytest` run; `pytest -m slow` runs
-them.
+than assume success. The dynamic parity tests compare a window of rows in the repository's
+default `pytest` run; every row, and the three storage-dominated models (30 s–6 min each), run
+under `@pytest.mark.slow` (`pytest -m slow`). `--tolerance` simulates at a solver tolerance other
+than the model's declared one; the nine dynamic parity references were regenerated with
+`--tolerance 1e-12` (`tests/data/modelica/NOTICE.md`).
 
 Regenerating the committed parity records (`tests/data/modelica/parity-{algebraic,dynamic}.json`,
 in [the building physics parity tables](../applications/building_physics.md#against-openmodelica-modelica-buildings-library))

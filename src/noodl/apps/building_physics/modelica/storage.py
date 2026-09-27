@@ -31,26 +31,27 @@ airflow solve and the `exact` transport steps per `coupling="iterate"` pass):
   of the air layer, grounded by the storage itself, so closed zone groups need no pressure
   reference.
 * **Energy**: substituting the mass and water balances, with `u_T = du/dT`, `u_X = du/dX`,
-  the carrier `cp` of the thermal layer (one value at `X_default`, as in the quasi-steady
-  route) and `net = sum_in q - sum_out q` of the edges,
+  `cp(X) = dh/dT`, `g = h - u - X u_X`, the storage rate `w` and the sums over every inflow
+  (edges, sources, an attached boundary), MBL's balance is exactly
 
-      (m u_T + CSen) dT/dt = sum_in cp q T_in - sum_out cp q T - u_T net T
-                             + e(T, X) w + cp s T_s - u_T s T + Q,
-      e = (h - u) - (cp - u_T) T - X u_X,
+      (m u_T + CSen) dT/dt = sum_in q [cp(X_in)(T_in - T) + (h_X - u_X)(X_in - X)] + g w + Q.
 
-  which is the thermal `TransportLayer` with capacity `m u_T + CSen` (a per-step driver),
-  `dilution = lam_T` and the source terms, `(lam_T - u_T) T net` restoring the balance's own
-  dilution (`thermal_dilution`, "Coupling" below). `e` vanishes for an ideal
-  gas without moisture (`SimpleAir`: `h - u = R T`, `cp - u_T = R`); for
-  `Buildings.Media.Air` it is `pStp/dStp - X h_X` (`u = h - pStp/dStp`: the flow work `V dp`
-  of the pressure-only density, less the latent heat of MBL's water-fraction change). The
-  cross term `(h_X - u_X)(X_in - X)` of an inflow of another composition (zero for
-  `Buildings.Media.Air`, `R_X T dX` for `PerfectGas`) is neglected, like the per-zone `cp`.
+  The thermal `TransportLayer` carries one `cp` (at `X_default`) and `- lam net T`
+  (`dilution = lam`, `thermal_dilution`); with capacity `m u_T(X) + CSen` (a per-step
+  driver) the closure adds the rest as sources (`StorageClosure.terms`):
+  `(g - (cp - lam) T) net + g (s + f) - cp s T` and, per inflowing edge,
+  `|q| [(cp(X_up) - cp)(T_up - T) + (h_X - u_X)(X_up - X)]`. `g` is `R T` for `SimpleAir`,
+  `pStp/dStp - X h_X` for `Buildings.Media.Air` (`u = h - pStp/dStp`: the flow work `V dp`
+  of the pressure-only density, less the latent heat of MBL's water-fraction change), and
+  `h_X - u_X` is `R_X T` for `PerfectGas`, zero for the others.
 * **Water** is the species layer's conservative flux form (`dilution = 0`) with capacity
   `m`; a **trace substance** has `dilution = 1` and a source correction `- s C`.
 
-`w`, `m`, `e w`, `- u_T s T` and `- s C` use the pass's (previous iterate's) state; at
-convergence they are the end-of-step values, like everything else in the step. The carried
+In `Model.step` (`run.simulate(scheme="implicit")`) the storage is backward Euler and
+`w`, `m` and the source terms use the pass's (previous iterate's) state; at convergence they
+are the end-of-step values, like everything else in the step. `run.simulate(scheme="midpoint")`
+takes the mean of the terms at the two ends of the step and the volumes' storage rate by the
+L-stable BDF2 formula (`run._Midpoint`). The carried
 `"air.storage"` is likewise the last pass's input state, equal to its output to the coupling
 tolerance (`run.simulate` re-evaluates it at each returned state).
 
@@ -111,27 +112,38 @@ class StorageThermo:
     """What the storage balances need from one MBL medium (module docstring).
 
     `k(T, X)` is the volume mass density per unit pressure (`rho_m = p k`), `k_T` its
-    derivative in `T`; `h_minus_u(T, X)`
-    and `u_X(T, X)` are `h - u` and `du/dX`; `u_T` is `du/dT` at `X_default` (the thermal
-    dilution and the capacity per unit mass, a float); `cp` is the thermal layer's carrier.
-    The callables take and return tensors and are differentiable."""
+    derivative in `T`; `h_minus_u(T, X)`, `u_X(T, X)` and `u_T(T, X)` are `h - u`, `du/dX`
+    and `du/dT`; `cp_X(X)` is `dh/dT`, `hX_minus_uX(T)` is `dh/dX - du/dX`. `cp` is the
+    thermal layer's carrier (`cp` at `X_default`) and `u_T0` is `u_T` at `X_default`. The
+    callables take and return tensors and are differentiable."""
 
     k: Callable[[Tensor, Tensor], Tensor]
     k_T: Callable[[Tensor, Tensor], Tensor]
     h_minus_u: Callable[[Tensor, Tensor], Tensor]
     u_X: Callable[[Tensor, Tensor], Tensor]
-    u_T: float
+    u_T: Callable[[Tensor, Tensor], Tensor]
+    cp_X: Callable[[Tensor], Tensor]
+    hX_minus_uX: Callable[[Tensor], Tensor]
+    u_T0: float
     cp: float
 
-    def e(self, T: Tensor, X: Tensor) -> Tensor:
-        """`e = (h - u) - (cp - u_T) T - X u_X` (J/kg), the storage-rate coefficient of the
-        energy source."""
-        return self.h_minus_u(T, X) - (self.cp - self.u_T) * T - X * self.u_X(T, X)
+    def g(self, T: Tensor, X: Tensor) -> Tensor:
+        """`g = h - u - X u_X` (J/kg): the energy a unit of stored mass brings with it beyond
+        the zone's own `u` (module docstring, "Energy")."""
+        return self.h_minus_u(T, X) - X * self.u_X(T, X)
+
+
+def _t64(T) -> Tensor:
+    return torch.as_tensor(T, dtype=F64)
 
 
 def _h_X(T: Tensor) -> Tensor:
     # dh/dX of both moist-air media (Air.mo:123-124, PerfectGas.mo:60-61).
     return (_CP_STEAM - _CP_AIR) * (T - _T_REF) + _H_FG
+
+
+def _cp_moist(X):
+    return _CP_AIR * (1 - X) + _CP_STEAM * X
 
 
 def thermo(med: MBLMedium) -> StorageThermo:
@@ -142,11 +154,14 @@ def thermo(med: MBLMedium) -> StorageThermo:
         k = 1.2 / med.p_default
         cp = med.specific_heat_cp(med.X_default[0])
         return StorageThermo(
-            k=lambda T, X: torch.full_like(torch.as_tensor(T, dtype=F64), k),
-            k_T=lambda T, X: torch.zeros_like(torch.as_tensor(T, dtype=F64)),
-            h_minus_u=lambda T, X: torch.full_like(torch.as_tensor(T, dtype=F64), c),
+            k=lambda T, X: torch.full_like(_t64(T), k),
+            k_T=lambda T, X: torch.zeros_like(_t64(T)),
+            h_minus_u=lambda T, X: torch.full_like(_t64(T), c),
             u_X=lambda T, X: _h_X(T),
-            u_T=cp, cp=cp,
+            u_T=lambda T, X: _cp_moist(X) + 0.0 * T,
+            cp_X=_cp_moist,
+            hX_minus_uX=lambda T: torch.zeros_like(_t64(T)),
+            u_T0=cp, cp=cp,
         )
     if med.name == "Buildings.Media.Specialized.Air.PerfectGas":
         # PerfectGas.mo:60-66 (h, R_s(X), u = h - R_s T), :229-231 (density), :494
@@ -156,43 +171,45 @@ def thermo(med: MBLMedium) -> StorageThermo:
         R_d = _R_AIR * (1 - X_d) + _R_H2O * X_d
 
         def T_d(T, X):
-            cp_X = _CP_AIR * (1 - X) + _CP_STEAM * X
-            return _T_REF + ((T - _T_REF) * cp_X + _H_FG * (X - X_d)) / cp
-
-        def k_T(T, X):
-            cp_X = _CP_AIR * (1 - X) + _CP_STEAM * X
-            return -cp_X / (cp * R_d * T_d(T, X) ** 2)
+            return _T_REF + ((T - _T_REF) * _cp_moist(X) + _H_FG * (X - X_d)) / cp
 
         return StorageThermo(
-            k=lambda T, X: 1.0 / (R_d * T_d(T, X)), k_T=k_T,
+            k=lambda T, X: 1.0 / (R_d * T_d(T, X)),
+            k_T=lambda T, X: -_cp_moist(X) / (cp * R_d * T_d(T, X) ** 2),
             h_minus_u=lambda T, X: (_R_AIR * (1 - X) + _R_H2O * X) * T,
             u_X=lambda T, X: _h_X(T) - (_R_H2O - _R_AIR) * T,
-            u_T=cp - R_d, cp=cp,
+            u_T=lambda T, X: _cp_moist(X) - (_R_AIR * (1 - X) + _R_H2O * X) + 0.0 * T,
+            cp_X=_cp_moist,
+            hX_minus_uX=lambda T: (_R_H2O - _R_AIR) * T,
+            u_T0=cp - R_d, cp=cp,
         )
     if med.name == "Modelica.Media.Air.SimpleAir":
         # MSL Media/package.mo PartialSimpleIdealGasMedium: h = cp (T - T0), u = h - R T,
         # d = p/(R T); SimpleAir.mo:6-8 (cp_const, R_gas).
         R = _MODELICA_CONSTANTS_R / _MM_AIR
+        cv = _CP_SIMPLEAIR - R
         return StorageThermo(
             k=lambda T, X: 1.0 / (R * T),
             k_T=lambda T, X: -1.0 / (R * T ** 2),
             h_minus_u=lambda T, X: R * T,
-            u_X=lambda T, X: torch.zeros_like(torch.as_tensor(T, dtype=F64)),
-            u_T=_CP_SIMPLEAIR - R, cp=_CP_SIMPLEAIR,
+            u_X=lambda T, X: torch.zeros_like(_t64(T)),
+            u_T=lambda T, X: torch.full_like(_t64(T), cv),
+            cp_X=lambda X: torch.full_like(_t64(X), _CP_SIMPLEAIR),
+            hX_minus_uX=lambda T: torch.zeros_like(_t64(T)),
+            u_T0=cv, cp=_CP_SIMPLEAIR,
         )
     raise KeyError(f"volume mass storage: no thermodynamics for medium {med.name!r}")
 
 
 def thermal_dilution(th: StorageThermo, T_ref: float, X_ref: float) -> float:
-    """The thermal layer's `dilution`: `u_T - e(T_ref, X_ref)/T_ref`.
+    """The thermal layer's `dilution`: `cp - g(T_ref, X_ref)/T_ref`.
 
-    The balance's `- u_T net T + e w` (module docstring, "Energy") has `w = net` at a zone
-    with no source, and `e` changes little with `T`, so `- (u_T - e/T) net T` is most of it:
-    carried by the operator it is implicit in the step's own flows, and only the remainder
-    `(lam - u_T + e/T) net T` lags a coupling pass. `u_T` itself for an ideal gas without
-    moisture (`e = 0`)."""
+    The balance's `- (cp - g/T) net T` (module docstring, "Energy") has `g/T` nearly
+    constant (`R` for an ideal gas without moisture, where this is `cv`): carried by the
+    operator it is implicit in the step's own flows, and only the remainder
+    `(lam - cp + g/T) net T` lags a coupling pass."""
     T = torch.tensor(T_ref, dtype=F64)
-    return float(th.u_T - th.e(T, torch.tensor(X_ref, dtype=F64)) / T)
+    return float(th.cp - th.g(T, torch.tensor(X_ref, dtype=F64)) / T)
 
 
 def mass_change(V, k, phi, k_prev, phi_prev, p_ref: float) -> Tensor:
@@ -204,15 +221,16 @@ def mass_change(V, k, phi, k_prev, phi_prev, p_ref: float) -> Tensor:
 class ZoneStorage(NodeSource):
     """The air-layer withdrawal at the storage zones (module docstring, "Mass"):
 
-        w = (rate (m - m_prev) + a w_fed) / (1 + a),
+        w = (rate (m - m_prev) - offset + a w_fed) / (1 + a),
 
-    `rate (m - m_prev)` the backward-Euler storage at the pass's temperature, `w_fed` the
-    storage rate of the pass's input state and `a >= 0` the coupling gain (module
-    docstring, "Coupling"). At a converged step `w_fed = rate (m - m_prev)` and `w` is
-    the backward-Euler storage itself. Reads the full-node drivers `"T"`, `"X_w"` and the
-    per-zone drivers `"air.storage_prev"` (`(..., n_s, 2)`: `phi`, `k` at the start of the
-    step), `"air.storage_rate"` (1/s), `"air.storage_w_fed"` (kg/s) and `"air.storage_gain"`,
-    which `StorageClosure` writes."""
+    `rate (m - m_prev) - offset` the discrete storage rate (backward Euler: `rate = 1/h`,
+    `offset = 0`; the trapezoidal rule of `run.simulate(scheme="midpoint")`: `rate = 2/h`,
+    `offset` the start-of-step rate), `w_fed` the storage rate of the pass's input state and
+    `a >= 0` the coupling gain (module docstring, "Coupling"). At a converged step
+    `w_fed = rate (m - m_prev) - offset` and `w` is the discrete storage rate itself. Reads
+    the full-node drivers `"T"`, `"X_w"` and the per-zone drivers `"air.storage_prev"`
+    (`(..., n_s, 2)`: `phi`, `k` at the start of the step), `"air.storage_rate"` (1/s),
+    `"air.storage_offset"`, `"air.storage_w_fed"` (kg/s) and `"air.storage_gain"`."""
 
     def __init__(self, nodes, volumes: Tensor, p_ref: float, th: StorageThermo) -> None:
         super().__init__(nodes)
@@ -228,7 +246,8 @@ class ZoneStorage(NodeSource):
         dm = mass_change(self.V, self._k(drivers), phi_nodes, prev[..., 1], prev[..., 0],
                          self.p_ref)
         a = drivers["air.storage_gain"]
-        return (drivers["air.storage_rate"] * dm + a * drivers["air.storage_w_fed"]) / (1 + a)
+        rate = drivers["air.storage_rate"] * dm - drivers["air.storage_offset"]
+        return (rate + a * drivers["air.storage_w_fed"]) / (1 + a)
 
     def dflow(self, phi_nodes: Tensor, drivers: Mapping | None = None) -> Tensor:
         slope = (drivers["air.storage_rate"] * self.V * self._k(drivers)
@@ -243,9 +262,9 @@ class StorageClosure:
 
     Runs after the reader's `_MBLClosure` (`mbl`), whose `"T"`, `"X_w"` and `"p_abs"` drivers
     it reads, and whose `species` gives the full-node mass fractions. With a `StepContext` it
-    writes `"air.storage_prev"`/`"air.storage_rate"` (the backward-Euler storage of the
-    step), `"thermal.capacity"`, `"species.capacity"` and the storage terms added to
-    `"thermal.sources"`/`"species.sources"`; without one (a query) only the carried state.
+    writes `"air.storage_*"` (the backward-Euler storage of the step), `"thermal.capacity"`,
+    `"species.capacity"` and the storage terms added to `"thermal.sources"`/
+    `"species.sources"` (`terms`); without one (a query) only the carried state.
 
     A zone wired straight to a boundary (`attached`) is held at the boundary's pressure, so it
     is not an air-layer unknown: the air it stores or releases is exchanged with that boundary,
@@ -260,7 +279,8 @@ class StorageClosure:
                  storage: Tensor, m_fixed: Tensor, air_nodes: Tensor, attached: Tensor,
                  air_src: Tensor, air_tgt: Tensor, csen: Tensor,
                  th_interior: Tensor | None, sp_interior: Tensor | None,
-                 sp_dilution: Tensor | None, lam_T: float, init_layer=None) -> None:
+                 sp_dilution: Tensor | None, lam_T: float, water: int | None,
+                 init_layer=None) -> None:
         self.mbl = mbl
         self.th = th
         self.lam_T = float(lam_T)       # the thermal layer's dilution (thermal_dilution)
@@ -274,6 +294,7 @@ class StorageClosure:
         self.csen = csen                # (n,) CSen (J/K)
         self.th_interior, self.sp_interior = th_interior, sp_interior
         self.sp_dilution = sp_dilution  # (K,)
+        self.water = water              # the water species' index, or None
         # The air layer of the t = StartTime equations when some storage zone is not held
         # at p_start there (module docstring), else None.
         self.init_layer = init_layer
@@ -286,6 +307,8 @@ class StorageClosure:
             self._sp_mask[sp_interior] = True
         self._att_mask = torch.zeros(n, dtype=torch.bool)
         self._att_mask[attached] = True
+        self._air_mask = torch.zeros(n, dtype=torch.bool)
+        self._air_mask[air_nodes] = True
 
     def carried(self, p: Tensor, T: Tensor, X: Tensor) -> Tensor:
         """The `"air.storage"` value `(..., n, 2)` at absolute pressures `p` (full node)."""
@@ -298,9 +321,90 @@ class StorageClosure:
         m = self.V * self.th.k(T, X) * p
         return torch.where(self.storage, m, self.m_fixed)
 
-    def _net(self, q: Tensor) -> Tensor:
+    def net(self, q: Tensor | None, like: Tensor) -> Tensor:
+        """Full-node net inflow of the air-layer edges (kg/s)."""
+        if q is None:
+            return torch.zeros_like(like)
         full = torch.zeros(q.shape[:-1] + self.V.shape, dtype=q.dtype)
         return full.index_add(-1, self.air_tgt, q).index_add(-1, self.air_src, -q)
+
+    def rate_from_mass(self, now: Tensor, prev: Tensor, h: float) -> Tensor:
+        """Full-node `(m - m_prev)/h` from two `"air.storage"` values, 0 off storage."""
+        dm = mass_change(self.V, now[..., 1], now[..., 0], prev[..., 1], prev[..., 0],
+                         self.p_ref)
+        return torch.where(self.storage, dm / h, torch.zeros_like(dm))
+
+    def _inflow_correction(self, q: Tensor | None, T: Tensor, X: Tensor) -> Tensor:
+        """Full-node `sum_in |q| [(cp(X_up) - cp)(T_up - T) + (h_X - u_X)(X_up - X)]` over
+        the air-layer edges flowing into each node: the part of MBL's moist-air heat carrier
+        the thermal layer's one `cp` leaves out (module docstring, "Energy")."""
+        if q is None:
+            return torch.zeros_like(T)
+        up = torch.where(q >= 0, self.air_src, self.air_tgt)
+        dn = torch.where(q >= 0, self.air_tgt, self.air_src)
+        th = self.th
+        T_up, T_dn = T.gather(-1, up), T.gather(-1, dn)
+        X_up, X_dn = X.gather(-1, up), X.gather(-1, dn)
+        w = q.abs() * ((th.cp_X(X_up) - th.cp) * (T_up - T_dn)
+                       + th.hX_minus_uX(T_dn) * (X_up - X_dn))
+        out = torch.zeros(q.shape[:-1] + T.shape[-1:], dtype=F64)
+        return out.scatter_add(-1, dn.expand(w.shape), w)
+
+    def terms(self, state: Mapping, drivers: Mapping, w: Tensor, net: Tensor,
+              s: Tensor, dnet: Tensor | None = None) -> dict[str, Tensor]:
+        """The transport layers' storage terms at one state: `"thermal.capacity"`,
+        `"species.capacity"` (interior order) and the EXTRA sources `"thermal.extra"`,
+        `"species.extra"` (full node) to add to the base ones, for the full-node storage
+        rate `w` (kg/s), net edge inflow `net` and air sources `s` (module docstring,
+        "Energy" and "Water"). The discrete scheme decides `w` (`__call__`,
+        `run._Midpoint`). `dnet`, when given, is the part of the storage rate the transport
+        layers' own flows do not carry (`w - s - net` of the flows they are stepped with):
+        the terms the balances would otherwise take from those flows are added for it."""
+        T, X, p = drivers["T"], drivers["X_w"], drivers["p_abs"]
+        th = self.th
+        m = self.masses(p, T, X)
+        out: dict[str, Tensor] = {}
+        f = torch.where(self._att_mask, w - net - s, torch.zeros_like(w))
+        f_in, f_out = f.clamp(min=0.0), (-f).clamp(min=0.0)
+        if self.th_interior is not None:
+            cap = m * th.u_T(T, X) + self.csen
+            out["thermal.capacity"] = cap[..., self.th_interior]
+            g = torch.where(self.storage, th.g(T, X), torch.zeros_like(T))
+            c0, lam = th.cp, self.lam_T
+            src = (g - (c0 - lam) * T) * net + g * (s + f) - c0 * s * T
+            src = src + self._inflow_correction(drivers.get("_q"), T, X)
+            if dnet is not None:
+                src = src + torch.where(self.storage, th.g(T, X), torch.zeros_like(T)) * dnet
+            if self.attached.numel():
+                T_b = drivers["storage.T_attached"]
+                x_b = drivers.get("storage.x_attached")
+                X_b = X if (x_b is None or self.water is None) else x_b[..., self.water]
+                src = src + f_in * (th.cp_X(X_b) * (T_b - T)
+                                    + th.hX_minus_uX(T) * (X_b - X))
+            out["thermal.extra"] = torch.where(self._th_mask, src, torch.zeros_like(src))
+        if self.sp_interior is not None:
+            out["species.capacity"] = m[..., self.sp_interior]
+            x = self.mbl.species(state, drivers)          # (..., n, K)
+            lam = self.sp_dilution.to(F64)
+            src = -(s.unsqueeze(-1) * x) * lam
+            if dnet is not None:
+                src = src + (1.0 - lam) * x * dnet.unsqueeze(-1)
+            if self.attached.numel():
+                x_b = drivers["storage.x_attached"]
+                src = (src + f_in.unsqueeze(-1) * (x_b - lam * x)
+                       - f_out.unsqueeze(-1) * (1.0 - lam) * x)
+            out["species.extra"] = torch.where(self._sp_mask.unsqueeze(-1), src,
+                                               torch.zeros_like(src))
+        return out
+
+    def gain(self, drivers: Mapping, cap: Tensor | None = None) -> Tensor:
+        """Per air-storage node, the coupling gain `a` (module docstring, "Coupling")."""
+        T, X, p = drivers["T"], drivers["X_w"], drivers["p_abs"]
+        th = self.th
+        cap = self.masses(p, T, X) * th.u_T(T, X) + self.csen
+        a = -self.V * p * th.k_T(T, X) * (th.cp - self.lam_T) * T / cap
+        a = torch.where(self._th_mask & self.storage, a, torch.zeros_like(a))
+        return a[..., self.air_nodes]
 
     def __call__(self, state, drivers, ctx=None):
         T, X, p = drivers["T"], drivers["X_w"], drivers["p_abs"]
@@ -310,52 +414,22 @@ class StorageClosure:
             return out
         prev = state["air.storage"]
         dt = float(ctx.dt)
-        out["air.storage_prev"] = prev[..., self.air_nodes, :]
-        out["air.storage_rate"] = torch.full((self.air_nodes.numel(),), 1.0 / dt, dtype=F64)
+        n_s = self.air_nodes.numel()
         s = drivers.get("air.sources")
         s = torch.zeros_like(p) if s is None else s.to(F64)
         q = state.get("air.q")
-        net = self._net(q) if q is not None else torch.zeros_like(p)
-        dm = mass_change(self.V, now[..., 1], now[..., 0], prev[..., 1], prev[..., 0],
-                         self.p_ref)
-        w = torch.where(self.storage, dm / dt, torch.zeros_like(dm))   # (n,) dm/dt
-        m = self.masses(p, T, X)
-        th = self.th
-        # Coupling (module docstring): the gain `a` of the temperature a storage rate
-        # implies, fed back into that rate.
-        cap = m * th.u_T + self.csen
-        a = -self.V * p * th.k_T(T, X) * (th.cp - self.lam_T) * T / cap
-        a = torch.where(self._th_mask & self.storage, a, torch.zeros_like(a))
-        w_fed = torch.where(self.storage, net + s, torch.zeros_like(net))
-        out["air.storage_gain"] = a[..., self.air_nodes]
-        out["air.storage_w_fed"] = w_fed[..., self.air_nodes]
-        f_in = f_out = None
-        ff = torch.zeros_like(w)
-        if self.attached.numel():
-            ff = torch.where(self._att_mask, w - net - s, torch.zeros_like(w))
-            f_in, f_out = ff.clamp(min=0.0), (-ff).clamp(min=0.0)
-        if self.th_interior is not None:
-            out["thermal.capacity"] = cap[..., self.th_interior]
-            # (thermal_dilution): the operator carries `- lam_T net T`; the balance wants
-            # `- u_T net T + e w`, `w = net + s + f` at a storing zone.
-            e = torch.where(self.storage, th.e(T, X), torch.zeros_like(T))
-            src = ((self.lam_T - th.u_T) * T + e) * net + e * (s + ff) - th.u_T * s * T
-            if f_in is not None:
-                T_b = drivers["storage.T_attached"]
-                src = src + f_in * (th.cp * T_b - th.u_T * T) - f_out * (th.cp - th.u_T) * T
-            src = torch.where(self._th_mask, src, torch.zeros_like(src))
-            base = drivers.get("thermal.sources")
-            out["thermal.sources"] = src if base is None else base + src
-        if self.sp_interior is not None:
-            out["species.capacity"] = m[..., self.sp_interior]
-            x = self.mbl.species(state, drivers)          # (..., n, K)
-            lam = self.sp_dilution.to(F64)
-            src = -(s.unsqueeze(-1) * x) * lam
-            if f_in is not None:
-                x_b = drivers["storage.x_attached"]
-                src = (src + f_in.unsqueeze(-1) * (x_b - lam * x)
-                       - f_out.unsqueeze(-1) * (1.0 - lam) * x)
-            src = torch.where(self._sp_mask.unsqueeze(-1), src, torch.zeros_like(src))
-            base = drivers.get("species.sources")
-            out["species.sources"] = src if base is None else base + src
+        net = self.net(q, p)
+        out["air.storage_prev"] = prev[..., self.air_nodes, :]
+        out["air.storage_rate"] = torch.full((n_s,), 1.0 / dt, dtype=F64)
+        out["air.storage_offset"] = torch.zeros(n_s, dtype=F64)
+        out["air.storage_gain"] = self.gain(drivers)
+        out["air.storage_w_fed"] = (net + s)[..., self.air_nodes]
+        w = self.rate_from_mass(now, prev, dt)      # backward Euler: (m - m_prev)/dt
+        terms = self.terms(state, {**drivers, "_q": q}, w, net, s)
+        for name in ("thermal", "species"):
+            if f"{name}.capacity" in terms:
+                out[f"{name}.capacity"] = terms[f"{name}.capacity"]
+                base = drivers.get(f"{name}.sources")
+                extra = terms[f"{name}.extra"]
+                out[f"{name}.sources"] = extra if base is None else base + extra
         return out

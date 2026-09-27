@@ -54,7 +54,8 @@ def _drivers(th, phi_prev, T, dt, *, gain=0.0, w_fed=0.0):
     k = th.k(_t([T]), _t([0.0]))
     return {"T": _t([T, T]), "X_w": _t([0.0, 0.0]),
             "air.storage_prev": torch.stack([_t([phi_prev]), k], dim=-1),
-            "air.storage_rate": _t([1.0 / dt]), "air.storage_gain": _t([gain]),
+            "air.storage_rate": _t([1.0 / dt]), "air.storage_offset": _t([0.0]),
+            "air.storage_gain": _t([gain]),
             "air.storage_w_fed": _t([w_fed])}
 
 
@@ -103,7 +104,8 @@ def test_storage_gradcheck_through_the_airflow_solve():
         k_prev = th.k(_t([293.15]), _t([0.0]))
         drv = {"T": torch.cat([T, T]), "X_w": _t([0.0, 0.0]),
                "air.storage_prev": torch.stack([phi_prev, k_prev], dim=-1),
-               "air.storage_rate": _t([0.2]), "air.storage_gain": _t([0.0]),
+               "air.storage_rate": _t([0.2]), "air.storage_offset": _t([0.0]),
+               "air.storage_gain": _t([0.0]),
                "air.storage_w_fed": _t([0.0])}
         phi, _ = layer.solve(_t([0.0]), drv, None, phi0=_t([50.0]), atol=1e-14, rtol=1e-14)
         return phi
