@@ -693,6 +693,27 @@ def test_a_trace_pulse_inside_one_step_injects_its_mass():
     assert float(drivers["series:air.sources"][k, i]) == pytest.approx(8.18e-6, rel=1e-12)
 
 
+def test_ramp_corners_are_grid_kinks_and_air_sources_have_point_values():
+    """`Examples/OneEffectiveAirLeakageArea`'s source ramps from 0 to 0.01 kg/s over
+    1800-5400 s: its corners are kinks of the driver grid (`assemble.grid_events`), no
+    jumps, and the air source is carried both as step means (`"air.sources"`) and as point
+    values at the grid times (`"air.sources_point"`, the ramp itself)."""
+    path = Path(__file__).parents[3] / "data" / "modelica" / "OneEffectiveAirLeakageArea.json"
+    _model, _state, drivers, _names = _read_modelica(path, return_names=True)  # storage
+    assert drivers["series:jumps"].numel() == 0
+    assert drivers["series:kinks"].tolist() == [1800.0, 5400.0]
+    grid = drivers["series:time"]
+    (i,) = torch.nonzero(drivers["series:air.sources"][-1]).flatten().tolist()
+    ramp = 0.01 * torch.clamp((grid - 1800.0) / 3600.0, 0.0, 1.0)
+    assert torch.allclose(drivers["series:air.sources_point"][:, i], ramp, rtol=1e-13,
+                          atol=1e-18)
+    k = grid.tolist().index(1814.4)  # the first step of the ramp: mean of 0 .. ramp(1814.4)
+    assert float(drivers["series:air.sources"][k, i]) == pytest.approx(0.5 * float(ramp[k]),
+                                                                      rel=1e-12)
+    for key in ("series:time", "series:jumps", "series:kinks"):
+        assert key[len("series:"):] not in step_drivers(drivers, grid, 1800.0)
+
+
 def test_simulate_steps_over_every_driver_grid_time():
     """`simulate` steps over every driver-grid time between the times asked for, so rows
     asked for with gaps equal the same rows of a run over every output time (the injected

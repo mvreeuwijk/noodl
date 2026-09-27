@@ -54,7 +54,12 @@ import pytest
 import torch
 
 from noodl.apps.building_physics import read_modelica
-from noodl.apps.building_physics.modelica.run import extrapolate, simulate, step_drivers
+from noodl.apps.building_physics.modelica.run import (
+    GRADING_WINDOW,
+    extrapolate,
+    simulate,
+    step_drivers,
+)
 from noodl.apps.building_physics.modelica.schema import ModelicaImportError
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -470,6 +475,33 @@ def test_dynamic_parity_at_the_reference_precision(model):
 def test_dynamic_parity_at_the_reference_precision_every_row(model):
     """As `test_dynamic_parity_at_the_reference_precision`, over the whole experiment."""
     _check_parity(model, None)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(("scheme", "order"), [("implicit", 1), ("midpoint", 2)])
+def test_time_integration_error_falls_with_the_order_of_the_scheme(scheme, order):
+    """ZonalFlow, without extrapolation: the error of `rooB.T` against the reference over
+    the rows after the graded start (`run.GRADING_WINDOW`) falls by 2**order from 1 to 2
+    substeps per output interval: first order for `"implicit"` (flows at the step's end),
+    second for `"midpoint"`, whose symmetric step is what `extrapolate` relies on. The ratio
+    must be within 10 % of 2**order (measured: 1.91 and 3.87). `rooB.T` is the column with
+    the largest time-integration error; the zonal flows are prescribed, and the pressures sit
+    at the reference's own resolution."""
+    model, rows, column = "ZonalFlow", 20, "rooB.T"
+    head, data = _csv(model)
+    data = data[:rows]
+    first = GRADING_WINDOW + 2  # the first row past the graded start's last interval
+    errors = []
+    for r in (1, 2):
+        net, state, drivers, names = read_modelica(DATA / f"{model}.json", return_names=True,
+                                                   substeps=r)
+        out = simulate(net, state, drivers, names.times[:rows], scheme=scheme)
+        cols = _columns_of(out, names, head, net, drivers)
+        errors.append(float(np.abs(cols[column] - data[:, head.index(column)])[first:].max()))
+    ratio = errors[0] / errors[1]
+    print(f"{model} {column}, {scheme}: error {errors[0]:.3e} K at 1 substep, {errors[1]:.3e} "
+          f"K at 2; ratio {ratio:.3f} (2**{order} = {2 ** order})")
+    assert abs(ratio / 2 ** order - 1.0) <= 0.1, ratio
 
 
 # ------------------------------------------------------- storage-dominated: the mechanism

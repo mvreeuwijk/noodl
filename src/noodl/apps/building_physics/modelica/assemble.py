@@ -286,20 +286,37 @@ def experiment_times(doc: ModelicaDoc) -> Tensor:
     return start + interval * torch.arange(n + 1, dtype=F64)
 
 
-# Signal blocks whose output jumps: their breakpoints (`signals.breakpoints`) are added to
-# the driver grid, so that no step straddles a discontinuity (`driver_grid`). A Ramp's
-# corners and a Sine's quarter periods are continuous and are left alone.
-_EVENT_BLOCKS = ("Step", "Pulse", "TimeTable", "CombiTimeTable")
+# Signal events (`signals.events`): the times where a signal's output jumps and where it
+# kinks (a Ramp's corners, a linearly interpolated table's knots) are added to the driver
+# grid, so that no step straddles one (`driver_grid`), and `run.simulate` restarts its
+# step sequence at each (`grid_events`). A Sine's quarter periods are smooth and are left
+# alone.
+
+
+def _signal_events(doc: ModelicaDoc, lo: float, hi: float) -> tuple[set[float], set[float]]:
+    jumps: set[float] = set()
+    kinks: set[float] = set()
+    for sig in doc.signals:
+        if signals.is_math(sig):
+            continue
+        try:
+            j, k = signals.events(sig, lo, hi)
+        except ModelicaImportError:
+            continue  # reported by name when the signal is evaluated
+        jumps |= set(j)
+        kinks |= set(k)
+    return jumps, kinks - jumps
 
 
 def driver_grid(doc: ModelicaDoc, substeps: int = 1) -> Tensor:
     """The time grid the drivers are evaluated on and `run.simulate` steps over: the
     output grid (`experiment_times`) with each interval split into `substeps` equal steps,
-    plus every event time strictly inside the run of a signal whose output jumps (a `Step`'s
-    start, a `Pulse`'s edges, a table's knots). With the source drivers step means
-    (module docstring, "Sources"), a step then never straddles an event: the drivers are
-    smooth within every step (`Examples/CO2TransportStep.mo`'s 3.6 s pulse starts and ends
-    on step boundaries instead of being spread over a 172.8 s step)."""
+    plus every event time strictly inside the run (`signals.events`: where a signal's
+    output jumps, a `Step`'s start, a `Pulse`'s edges, or kinks, a `Ramp`'s corners, a
+    table's knots). With the source drivers step means (module docstring, "Sources"), a
+    step then never straddles an event: the drivers are smooth within every step
+    (`Examples/CO2TransportStep.mo`'s 3.6 s pulse starts and ends on step boundaries
+    instead of being spread over a 172.8 s step)."""
     if int(substeps) != substeps or substeps < 1:
         raise ValueError(f"modelica: substeps must be a positive integer, got {substeps!r}")
     out = experiment_times(doc)
@@ -309,13 +326,8 @@ def driver_grid(doc: ModelicaDoc, substeps: int = 1) -> Tensor:
         frac = torch.arange(1, substeps, dtype=F64) / substeps
         a, b = out[:-1], out[1:]
         pts |= set((a.unsqueeze(1) + (b - a).unsqueeze(1) * frac).reshape(-1).tolist())
-    for sig in doc.signals:
-        if signals.is_math(sig) or sig.cls.rsplit(".", 1)[-1] not in _EVENT_BLOCKS:
-            continue
-        try:
-            pts |= set(signals.breakpoints(sig, lo, hi))
-        except ModelicaImportError:
-            continue  # reported by name when the signal is evaluated
+    jumps, kinks = _signal_events(doc, lo, hi)
+    pts |= jumps | kinks
     # An event within round-off of an output time or sub-step time is that time.
     tol = 1e-9 * max(1.0, abs(hi))
     outs = out.tolist()
@@ -328,6 +340,25 @@ def driver_grid(doc: ModelicaDoc, substeps: int = 1) -> Tensor:
         kept.append(min(near, key=lambda o: abs(o - t)) if near and
                     min(abs(o - t) for o in near) <= tol else t)
     return torch.tensor(sorted(set(kept)), dtype=F64)
+
+
+def grid_events(doc: ModelicaDoc, grid: Tensor) -> tuple[Tensor, Tensor]:
+    """`(jumps, kinks)`: the times of `grid` (a `driver_grid`) at which a signal's output
+    jumps, and those at which it only kinks (`signals.events`), each event moved to the
+    grid time it was merged into."""
+    grid = torch.as_tensor(grid, dtype=F64)
+    lo, hi = float(grid[0]), float(grid[-1])
+    jumps, kinks = _signal_events(doc, lo, hi)
+
+    def on_grid(ts: set[float]) -> Tensor:
+        if not ts:
+            return torch.zeros(0, dtype=F64)
+        t = torch.tensor(sorted(ts), dtype=F64)
+        k = (t.unsqueeze(1) - grid.unsqueeze(0)).abs().argmin(dim=1)
+        return torch.unique(grid[k])
+
+    j, k = on_grid(jumps), on_grid(kinks)
+    return j, k[~torch.isin(k, j)]
 
 
 def _stack(values: list[Tensor], n_t: int) -> tuple[Tensor, bool]:
@@ -480,6 +511,16 @@ class _Signals:
 
         y = signals.interval_means(values, self.times, breaks)
         if bool((y == y[0]).all()):
+            return y[0].clone()
+        return y
+
+    def point(self, fn, *terms) -> Tensor:
+        """`fn(*values)` at every grid time (the left limit at an event, `signals`
+        module docstring), with the terms of `mean`; a constant stays 0-d."""
+        values = [self.get(x) if isinstance(x, str) else torch.as_tensor(x, dtype=F64)
+                  for x in terms]
+        y = torch.as_tensor(fn(*values), dtype=F64)
+        if y.ndim and bool((y == y[0]).all()):
             return y[0].clone()
         return y
 
@@ -1150,11 +1191,15 @@ class _Builder:
         if water is None:
             const["X_w"] = torch.full((n,), X_const, dtype=F64)
 
-        s_air, s_th, s_sp = sources
+        s_air, s_th, s_sp, s_air_point = sources
         air_idx = set(air.interior.tolist())
         vals = [s_air[i] if i in air_idx else _t(0.0) for i in range(n)]
         if any(bool((v != 0).any()) for v in vals):
             put("air.sources", _stack(vals, self.n_t))
+            # The same sources' point values at the grid times (`_Signals.point`): the
+            # storage rate `run._Midpoint` forms at a step's end balances these.
+            put("air.sources_point", _stack([s_air_point[i] if i in air_idx else _t(0.0)
+                                             for i in range(n)], self.n_t))
         if "thermal" in layers:
             th_idx = set(layers["thermal"].interior_idx.tolist())
             vals = [s_th[i] if i in th_idx else _t(0.0) for i in range(n)]
@@ -1185,6 +1230,8 @@ class _Builder:
         for key, value in series.items():
             drivers[f"series:{key}"] = value
         drivers["series:time"] = self.times.clone()
+        # The grid's signal events (`grid_events`), where `run.simulate` restarts its steps.
+        drivers["series:jumps"], drivers["series:kinks"] = grid_events(self.doc, self.times)
 
         # ---------------------------------------------------------- closure + model
         T0 = torch.tensor([zones[nm].T_start if nm in zones else med.T_default
@@ -1569,6 +1616,7 @@ class _Builder:
         med, n = self.med, len(index)
         zero = _t(0.0)
         s_air = [zero] * n
+        s_air_point = [zero] * n
         s_th = [zero] * n
         s_sp = [[zero] * K for _ in range(n)]
         cp = med.specific_heat_cp(med.X_default[0] if med.has_moisture else 0.0)
@@ -1633,6 +1681,7 @@ class _Builder:
             mean = self.sig.mean
             i = index[node]
             s_air[i] = s_air[i] + mean(lambda m: m, m_term)
+            s_air_point[i] = s_air_point[i] + self.sig.point(lambda m: m, m_term)
             s_th[i] = s_th[i] + mean(lambda m, T: cp * m * T, m_term, T_term)
             for k, c in enumerate(C_in):
                 s_sp[i][k] = s_sp[i][k] + mean(lambda m, c: m * c, m_term, c)
@@ -1649,7 +1698,7 @@ class _Builder:
                 continue
             i = index[node]
             s_th[i] = s_th[i] + self.sig.mean(lambda q: q, f"{comp.name}.Q_flow")
-        return s_air, s_th, s_sp
+        return s_air, s_th, s_sp, s_air_point
 
 
 def build(graph: ComponentGraph, doc: ModelicaDoc, *, substeps: int = 1,

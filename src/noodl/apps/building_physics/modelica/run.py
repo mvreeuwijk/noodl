@@ -26,6 +26,9 @@ from noodl.model import Drivers, Model, State
 Tensor = torch.Tensor
 F64 = torch.float64
 _SERIES = "series:"
+# Driver-grid metadata, not per-time drivers: the grid and its signal events
+# (`assemble.grid_events`).
+_GRID_KEYS = ("series:time", "series:jumps", "series:kinks")
 # Newton tolerances for the airflow solves (kg/s). The layer default, sqrt(eps) = 1.5e-8 in
 # absolute and relative terms, is 1e-4 of a small crack flow; the reference simulation's
 # declared tolerance is 1e-6 relative, so the airflow is solved to round-off instead.
@@ -45,7 +48,7 @@ def step_drivers(drivers: Mapping[str, Tensor], grid: Tensor, t: float) -> Drive
     series entries themselves dropped. Raises `ValueError` if `t` is not on the grid."""
     out: Drivers = {k: v for k, v in drivers.items() if not k.startswith(_SERIES)}
     series = {k[len(_SERIES):]: v for k, v in drivers.items()
-              if k.startswith(_SERIES) and k != "series:time"}
+              if k.startswith(_SERIES) and k not in _GRID_KEYS}
     if not series:
         return out
     grid = torch.as_tensor(grid, dtype=F64)
@@ -158,16 +161,19 @@ def _graded(t_start: float, t0: float, t1: float, h0: float, grading: bool,
 
 
 def _sub_drivers(d0: Drivers, d1: Drivers, u: float, v: float, h: float, *, first: bool,
-                 constant: bool, d2: Drivers | None = None) -> tuple[Drivers, Drivers]:
+                 constant: bool, d2: Drivers | None = None,
+                 kink: bool = False) -> tuple[Drivers, Drivers]:
     """The drivers at the two ends of the sub-step `(t0 + u, t0 + v)` of a grid step of
     length `h` (the graded start, `GRADING_RATIO`): point values linearly interpolated
     between the step's own `d0` and `d1`, and every source (`"<layer>.sources"`, a step mean
     on the grid) the mean over the sub-step of its quadratic reconstruction from the step
     means (`d0`: the mean before, or at the run's first time (`first`) the point value;
     `d1`: the step's; `d2`: the next step's, when there is one, else a linear one): its mean
-    over the whole step is the grid's, and it is exact for a quadratic signal. After an
-    event (`constant`, the grid step changed there) the source is held at its step mean and
-    the point values at the step's end, as on the grid."""
+    over the whole step is the grid's, and it is exact for a quadratic signal. After a
+    signal's kink (`kink`) the mean before is not used: the source is the linear one through
+    the step's and the next step's means (constant without `d2`). After a jump (`constant`)
+    the source is held at its step mean and the point values at the step's end, as on the
+    grid."""
     a, b = u / h, v / h
     du, dv = dict(d1), dict(d1)
     for key, v1 in d1.items():
@@ -178,20 +184,24 @@ def _sub_drivers(d0: Drivers, d1: Drivers, u: float, v: float, h: float, *, firs
             if constant:
                 continue
             v2 = None if d2 is None else d2.get(key)
-            du[key] = dv[key] = _cell_mean(v0, v1, v2, a, b, first)
+            du[key] = dv[key] = _cell_mean(None if kink else v0, v1, v2, a, b, first)
         elif not constant and not torch.equal(v0, v1):
             du[key] = v0 + (v1 - v0) * a
             dv[key] = v0 + (v1 - v0) * b
     return du, dv
 
 
-def _cell_mean(v0: Tensor, m: Tensor, v2: Tensor | None, a: float, b: float,
+def _cell_mean(v0: Tensor | None, m: Tensor, v2: Tensor | None, a: float, b: float,
                first: bool) -> Tensor:
     """Mean over `(a, b)` (fractions of the step) of `s(x) = m + c1 (x - 1/2) +
     c2 ((x - 1/2)^2 - 1/12)`, whose mean over the step is `m`, fitted to the mean `v2` of the
     next step and either the mean `v0` of the step before or (`first`) the point value `v0`
-    at the step's start; linear (`c2 = 0`) without `v2`."""
-    if v2 is None:
+    at the step's start; linear (`c2 = 0`) without `v2` or without `v0` (then through `m`
+    and `v2`, or constant without both)."""
+    if v0 is None:
+        c1 = torch.zeros_like(m) if v2 is None else v2 - m
+        c2 = torch.zeros_like(m)
+    elif v2 is None:
         left = v0 if first else 0.5 * (v0 + m)  # s(0)
         c1, c2 = 2.0 * (m - left), torch.zeros_like(m)
     elif first:  # s(0) = v0, mean over (1, 2) = v2
@@ -201,6 +211,21 @@ def _cell_mean(v0: Tensor, m: Tensor, v2: Tensor | None, a: float, b: float,
         c1, c2 = 0.5 * (v2 - v0), 0.5 * (v2 - 2.0 * m + v0)
     sq = ((b - 0.5) ** 3 - (a - 0.5) ** 3) / (3.0 * (b - a))
     return m + c1 * (0.5 * (a + b) - 0.5) + c2 * (sq - 1.0 / 12.0)
+
+
+def _event_indices(drivers: Drivers, grid: Tensor) -> tuple[set[int] | None, set[int]]:
+    """The grid positions of the jumps and of the kinks (`assemble.grid_events`), or
+    `(None, set())` when the drivers carry no event lists."""
+    if "series:jumps" not in drivers:
+        return None, set()
+
+    def where(ts) -> set[int]:
+        ts = torch.as_tensor(ts, dtype=F64)
+        if ts.numel() == 0:
+            return set()
+        return set(_grid_index(grid, ts))
+
+    return where(drivers["series:jumps"]), where(drivers.get("series:kinks", ()))
 
 
 def _resync_storage(model: Model, store: StorageClosure, state: State,
@@ -296,10 +321,15 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
         record(state, d)
         mid = (_Midpoint(model, closure, step_kwargs, store) if scheme == "midpoint"
                else None)
-        # The grading window (`GRADING_RATIO`): one output interval from the start and from
-        # every change of the grid step, which marks a signal event
-        # (`assemble.driver_grid`: a source pulse is its own step). In absolute time, so
-        # that the runs `extrapolate` combines (1 and 2 substeps) grade alike.
+        # The grading window (`GRADING_RATIO`): from the start and from every signal event
+        # on the grid (`assemble.grid_events`: a jump, or a kink of a piecewise-linear
+        # signal), where the midpoint scheme also restarts its storage rate
+        # (`_Midpoint.restart`), so that no step's history straddles the event. In absolute
+        # time, so that the runs `extrapolate` combines (1 and 2 substeps) grade alike.
+        # Drivers built without the event lists mark a jump by a change of the grid step
+        # (a source pulse is its own step).
+        jumps, kinks = _event_indices(drivers, grid)
+        explicit = jumps is not None
         out_dt = float(times[1] - times[0]) if times.numel() > 1 else 0.0
         h0 = GRADING_H0 * out_dt
         t_start, h_prev, grading = float(grid[idx[0]]), None, False
@@ -309,16 +339,22 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
                 t0, t1 = float(grid[j - 1]), float(grid[j])
                 d0, d1 = step_drivers(drivers, grid, t0), step_drivers(drivers, grid, t1)
                 h = t1 - t0
-                event = h_prev is not None and abs(h - h_prev) > 1e-9 * max(h, h_prev)
-                if h_prev is None or event:
+                if explicit:
+                    event, kink = j - 1 in jumps, j - 1 in kinks
+                else:
+                    event = h_prev is not None and abs(h - h_prev) > 1e-9 * max(h, h_prev)
+                    kink = False
+                if h_prev is None or event or kink:
                     t_start, grading = t0, True
+                    if mid is not None and h_prev is not None:
+                        mid.restart()
                 h_prev = h
                 window = GRADING_WINDOW * out_dt
                 if grading and t0 >= t_start + window - 1e-9 * max(1.0, window):
                     grading = False  # then the ramp up to the grid step (`_graded`)
                 ramp = h_last is not None and h_last < h * (1 - 1e-9)
                 d2 = (step_drivers(drivers, grid, float(grid[j + 1]))
-                      if j + 1 < grid.numel()
+                      if j + 1 < grid.numel() and not (explicit and (j in jumps or j in kinks))
                       and abs(float(grid[j + 1] - grid[j]) - h) <= 1e-9 * h else None)
                 # Scaled with the grid step (1/r of the output interval at r substeps):
                 # the runs `extrapolate` combines then grade with steps in ratio 2 too.
@@ -328,7 +364,7 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
                 for u, v in zip([0.0, *cuts[:-1]], cuts, strict=True):
                     du, dv = ((d0, d1) if len(cuts) == 1 else
                               _sub_drivers(d0, d1, u, v, h, first=j == idx[0] + 1,
-                                           constant=event, d2=d2))
+                                           constant=event, d2=d2, kink=kink))
                     if mid is None:
                         state = model.step(state, dv, v - u, t=t0 + u, **step_kwargs)
                         if store is not None:
@@ -400,6 +436,11 @@ class _Midpoint:
         self.storage_last: tuple[float, Tensor, Tensor] | None = None
         self.kw = dict(solve_kwargs, differentiable=False)
         self.last: tuple[float, Tensor, Tensor] | None = None  # (h, z at start, z at end)
+
+    def restart(self) -> None:
+        """Forget the storage rate's BDF2 history (at a signal event, `simulate`): the next
+        step takes backward Euler, and BDF2 then builds up again from the event on."""
+        self.storage_last = None
 
     # z = [each transport layer's x, flattened; the air layer's interior potentials]
     def _pack(self, state: State) -> Tensor:
@@ -491,6 +532,14 @@ class _Midpoint:
         store = self.store
         if store is not None:
             drv0, _, net0, s_air, air_drv = self._storage_drivers(s0, d0, d1, h)
+        # The air balance at state 1: with storage, the BDF2 storage rate there is the
+        # derivative of the mass at the step's END, so it balances the sources' point values
+        # (`"air.sources_point"`), not their step mean. The step mean would lag the stored
+        # mass by half a step of a varying source: OneEffectiveAirLeakageArea's ramped
+        # injection, 0.07 kg of 36 kg at 1 substep, first order in the step (measured).
+        s_end = d1.get(f"{name}.sources")
+        if store is not None:
+            s_end = d1.get(f"{name}.sources_point", s_end)
 
         def G(z: Tensor) -> tuple[Tensor, State]:
             s = self._unpack(z, s0)
@@ -498,7 +547,7 @@ class _Midpoint:
             drv.update(self.closure(s, drv))
             if store is not None:
                 drv.update(air_drv)
-            phi, q = air.solve(drv[f"{name}.phi_boundary"], drv, drv.get(f"{name}.sources"),
+            phi, q = air.solve(drv[f"{name}.phi_boundary"], drv, s_end,
                                phi0=s[f"{name}.phi"][..., air.interior], **self.kw)
             s[f"{name}.phi"], s[f"{name}.q"] = phi, q
             extra1 = self._extra_sources(s, d1)
