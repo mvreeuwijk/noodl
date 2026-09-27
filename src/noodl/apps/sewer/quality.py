@@ -201,16 +201,17 @@ class LateralLoads:
 class SulfideGeneration(Reaction):
     """Operator-split Pomeroy-Parkhurst sulfide generation and bulk BOD decay.
 
-    Applied per manhole (equivalently per outgoing pipe) after the transport step, exactly
-    as the framework applies every `Reaction`. `x` carries the species in the layer's own
-    column order, defaulting to ``("bod", "sulfide")``; the per-pipe hydraulic drivers
-    ``"sewer.R_h"``, ``"sewer.v"`` and ``"sewer.d_m"`` are gathered from PIPE order into
-    MANHOLE order (the layer's own interior order) through ``out_pipe`` when it is given:
-    ``value.index_select(-1, out_pipe)``, where ``out_pipe[i]`` is the
-    position, in the per-pipe driver vectors, of manhole ``i``'s outgoing pipe.
-    ``"sewer.q_slope"`` is ALREADY per manhole (the builder supplies it as a constant
-    driver) and is NEVER gathered. When ``out_pipe`` is ``None`` every driver is used
-    exactly as given -- the per-manhole vectors the direct unit tests hand in directly.
+    Applied per manhole (equivalently per outgoing pipe) BEFORE the transport step:
+    `build_model` sets `Model(reaction_order="before_transport")`, SWMM's order (react, then
+    mix), so the returned state is the post-mixing concentration SWMM reports. `x` carries
+    the species in the layer's own column order, defaulting to ``("bod", "sulfide")``; the
+    per-pipe hydraulic drivers ``"sewer.R_h"``, ``"sewer.v"`` and ``"sewer.d_m"`` are
+    gathered from PIPE order into MANHOLE order (the layer's own interior order) through
+    ``out_pipe`` when it is given: ``value.index_select(-1, out_pipe)``, where
+    ``out_pipe[i]`` is the position, in the per-pipe driver vectors, of manhole ``i``'s
+    outgoing pipe. ``"sewer.q_slope"`` is ALREADY per manhole (the builder supplies it as a
+    constant driver) and is NEVER gathered. When ``out_pipe`` is ``None`` every driver is
+    used exactly as given -- the per-manhole vectors the direct unit tests hand in directly.
     """
 
     def __init__(
