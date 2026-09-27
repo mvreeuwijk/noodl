@@ -11,7 +11,7 @@ import math
 import torch
 
 from noodl.apps.street_aq.canyon import (
-    KAPPA_IMPAQ,
+    KAPPA,
     boundary_layer,
     canyon_velocity,
     exchange_velocity,
@@ -134,9 +134,9 @@ def _hand_reference(sn, *, emission, background, u_ref=U_REF, theta_w=THETA_W,
     length = torch.tensor([s.length for s in streets], dtype=DT)
     azimuth = torch.tensor(sn.azimuth, dtype=DT)
     layer = boundary_layer(height.mean(), torch.tensor(u_ref, dtype=DT),
-                           torch.tensor(h_abl, dtype=DT), z_ref=30.0, kappa=KAPPA_IMPAQ)
+                           torch.tensor(h_abl, dtype=DT), z_ref=30.0, kappa=KAPPA)
     u = canyon_velocity(width, height, torch.tensor(theta_w, dtype=DT) - azimuth,
-                        u_star=layer.u_star, form="soulhac", kappa=KAPPA_IMPAQ)
+                        u_star=layer.u_star, form="soulhac", kappa=KAPPA)
     sigma_w = 1.3 * layer.u_star * (1.0 - 0.8 * height / layer.h_abl)
     u_d = exchange_velocity(sigma_w, height, width, form="sirane")
     flux = u * width * height

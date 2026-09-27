@@ -7,6 +7,10 @@ with the atmosphere at junctions and through the canyon roof. Pollutant mass is 
 every canyon: it builds up from traffic emissions (kg/s), is ventilated into the atmosphere, and
 is carried from street to street by the wind-driven flow along them.
 
+A street network is built by hand, as `StreetNetwork` and `Street` objects, or read from a
+street-network case on disk with `read_case` -- see [Reading and writing street-network
+cases](#reading-and-writing-street-network-cases).
+
 This application is the framework's clearest case of **closure-computed flows**. There is no
 potential variable anywhere: the along-canyon velocity is a closed-form function of the wind
 aloft and the canyon geometry, so a closure computes every flow and writes it, and the transport
@@ -59,6 +63,24 @@ crosses the atmosphere boundary exactly, rtol $10^{-12}$.)*
 `x_boundary` and `sources`; you must supply `U_ref`, `theta_w` and `h_abl` yourself (and `lmo`
 if you chose `stability="munich"`).
 
+`u_star`, when given, is the friction velocity itself and replaces the log law that would
+otherwise derive it from `U_ref`; `U_ref` is then needed only for `direction_averaging="munich"`'s
+direction spread, $\sigma_\theta = \sigma_v / U$.
+
+`meteo="per_street"` gives every one of `U_ref`, `theta_w`, `h_abl`, `u_star` and `lmo` a
+trailing street axis, `(..., n_streets)`, so each street gets its own wind and boundary layer.
+Junction routing then reads an explicit `"<key>_junction"` driver when given --
+`theta_w_junction`, `U_ref_junction`, `u_star_junction`, `h_abl_junction`, `lmo_junction`, in
+`StreetNetwork.junctions` order -- and otherwise falls back to the mean of the streets meeting
+at that junction (circular for direction, through $1/L$ for the Obukhov length).
+
+`background="per_street"` gives every street its own atmosphere node, so `"<layer>.x_boundary"`
+becomes `(n_streets,)` or `(n_streets, n_species)`, in street order, instead of one
+network-wide value shared by every street.
+
+A case read with `read_case` supplies all of these automatically -- see [Reading and writing
+street-network cases](#reading-and-writing-street-network-cases).
+
 ## Building a network
 
 | Object | Purpose |
@@ -100,6 +122,122 @@ From there the drivers are supplied exactly as in the worked example above: emis
 `street.sources` at each street's node, a background in `street.x_boundary`, and the wind and
 boundary layer in `U_ref`, `theta_w` and `h_abl`.
 
+## Reading and writing street-network cases
+
+A street-network case bundles a network with the meteorology, emissions and background
+concentrations that drive it hour by hour. `read_case(path) -> StreetCase` reads one from disk:
+a directory holding a `munich.cfg` is read as a MUNICH case; anything else raises `ValueError`
+naming what noodl physics recognises.
+
+```python
+from noodl.apps.street_aq import read_case
+
+case = read_case("tests/data/street/munich_paris_excerpt")
+case.street_ids           # ['1', '3', '8', '11'], the emissions/background street axis
+case.species               # ['NO2']
+case.meteo["u_star"].shape  # (3, 4): 3 hours, 4 streets
+```
+
+### `StreetCase`
+
+| Field | Holds |
+|---|---|
+| `source` | Which reader produced the case: `"munich"`, or `"synthetic"` for one built with `StreetCase.synthetic`. |
+| `network` | The case's `StreetNetwork`, in metres. |
+| `times` | `(n_hours,)`, seconds since `start`. |
+| `street_ids` | The streets' names, in `network.streets` order -- the axis `emissions` and `background` use. |
+| `junction_ids` | The source model's own node ids for `network.junctions`, in that order (MUNICH: `intersection.dat`'s ids). |
+| `species` | The case's species names, the last axis of `emissions` and `background`. |
+| `meteo` | One `(n_hours, n_streets)` array per key: `wind_dir_from_deg` and `wind_speed` always; `h_abl`, `u_star`, `lmo`, `temperature` wherever the source provides them. |
+| `meteo_junction` | The same keys, `(n_hours, n_junctions)`, in `network.junctions` order -- may be empty or partial when the source has no genuine per-junction meteorology. |
+| `emissions` | `(n_hours, n_streets, n_species)`, kg/s per street. |
+| `background` | `(n_hours, n_streets, n_species)`, kg/m3 per street. |
+| `native` | The source's own options, as read (MUNICH: one dict per `munich.cfg` section, plus the lon/lat projection the reader used); `model_options` translates these into `build_model` keywords, and `write_case` writes them back when the format matches. |
+| `start` | The absolute date and time of `times[0]`, or `None` for a synthetic case built without one (writing such a case to MUNICH then raises). |
+
+`wind_dir_from_deg` is degrees clockwise from north, the direction the wind blows FROM. MUNICH's
+own `WindDirection` is radians clockwise from north, the direction the wind blows TOWARD (MUNICH's
+`preprocessing/meteo.py`, `compute_wdir`); `read_case` and `write_case` convert at the file
+boundary, and `drivers_at` converts degrees-FROM into noodl physics' `theta_w` (radians
+counter-clockwise from east, TOWARD). Every mass in `StreetCase` is SI (kg/s, kg/m3); MUNICH's
+own files hold micrograms, converted at read and write time.
+
+### `drivers_at`
+
+`drivers_at(case, model, k, *, species=None) -> dict` is the driver mapping at time index `k` for
+`model`, built from `case`. It follows the model's own shape: `meteo="uniform"` reduces every
+meteorology array to one network-wide value (circular mean for direction, through the reciprocal
+for the Obukhov length, a plain mean otherwise); `meteo="per_street"` keeps every driver's
+trailing street axis and adds the `"<key>_junction"` drivers junction routing needs, from
+`case.meteo_junction` when the source has it, otherwise the same street-to-junction reduction.
+`u_star` is supplied whenever `case.meteo` has it, and drives the friction velocity directly
+rather than through noodl physics' log law. `background` follows the model's own boundary count the same
+way: one `"<layer>.x_boundary"` row per street, or one network-wide mean. `species` (default
+`case.species`) selects and orders which of the case's species end up on the emissions and
+background drivers. The model's own street order (`street_index(model)`) must equal
+`case.street_ids` -- build the model on `case.network` itself.
+
+### `StreetCase.model_options()`
+
+`case.model_options()` reads the closure options `case`'s own source model implies. For
+`source="munich"`, that is `munich.cfg`'s `[street]` section, translated into `build_model`
+keywords (`canyon_wind`, `exchange`, `roof_wind_form`, `direction_averaging`, `z_ref`,
+`canyon_wind_min`), plus `stability="munich"` and MUNICH's own hard-coded `u_d_min=0.001`. A
+missing `Minimum_Street_Wind_Speed` defaults to MUNICH's own `0.1` m/s (`canyon_wind_min=0.1`);
+`Zref`'s absence still raises. A `synthetic` case raises `NotImplementedError` -- pass
+`build_model`'s keywords directly instead.
+
+### `StreetCase.synthetic`
+
+`StreetCase.synthetic(network, *, species, times, meteo, emissions, background,
+meteo_junction=None, start=None)` builds a case in Python -- an idealised network to drive
+directly, or to write out with `write_case`. `meteo` needs `wind_dir_from_deg` and
+`wind_speed`; the rest are optional. `meteo_junction` takes any subset of the same keys, or
+none at all. Each value is a scalar, an `(n_hours,)` series, or the full `(n_hours, n_streets)`
+(`n_junctions` for `meteo_junction`) array. `emissions` and `background` broadcast the same way,
+with an optional trailing species axis. Writing the case out with `write_case(format="munich")`
+additionally needs `meteo` to carry `h_abl`, `u_star` and `lmo`.
+
+### `write_case`
+
+`write_case(out_dir, case, *, format="munich", options=None) -> Path` writes `case` under
+`out_dir`; only `format="munich"` is implemented, and `case.start` must be set, and `case.meteo`
+must have `h_abl`, `u_star` and `lmo` -- MUNICH needs their `PBLH`, `UST`, `LMO` fields whenever
+transport is on, which this writer always turns on. A case read from MUNICH files writes its own
+`[street]` section and projection back (`read_case` then `write_case` round-trips those two);
+`[options]` itself always turns chemistry, photolysis, deposition and scavenging off, and the six
+`[meteo]` fields MUNICH always requires (`Rain`, `SolarRadiation`, `SpecificHumidity`,
+`SurfacePressure`, `SurfaceTemperature`, `Attenuation`) come from the case where it has one (only
+`SurfaceTemperature`, from `meteo["temperature"]`), else a constant default -- either way,
+`options` overrides them. `options` are the format's own overrides -- for MUNICH, any `[street]`
+closure key, any of those six `[meteo]` fields, or `lat0_deg`/`lon0_deg` (the lon/lat a synthetic
+network's `(0, 0)` is anchored to). `options` win even over a value the case itself supplies.
+Missing per-junction meteorology is derived from the streets meeting at each junction (circular
+mean for direction, through the
+reciprocal for the Obukhov length, a plain mean otherwise).
+
+### Worked example
+
+```python
+from noodl.apps.street_aq import build_model, drivers_at, read_case
+
+case = read_case("tests/data/street/munich_paris_excerpt")
+
+model, state, _ = build_model(
+    case.network, species=case.species, meteo="per_street", background="per_street",
+    **case.model_options(),
+)
+
+for k in range(len(case.times)):
+    drivers = drivers_at(case, model, k)
+    state = model.steady(state, drivers)
+
+print(state["street.x"])          # kg/m3 per street, at the case's last hour
+```
+
+*(`munich_paris_excerpt` is a four-street excerpt of MUNICH's own published test case -- see
+`tests/data/street/munich_paris_excerpt/NOTICE.md`.)*
+
 ## `build_model`
 
 ```python
@@ -111,10 +249,12 @@ model, state, drivers = build_model(
     direction_averaging="none",   # 'none' | 'munich' | 'gauss'
     species=("nox",),
     chemistry=None,
-    stability="impaq",            # 'impaq' | 'munich'
+    stability="neutral",          # 'neutral' | 'munich'
     roof_wind_form="sirane",      # 'sirane' | 'macdonald'
     kappa=None, canyon_wind_min=0.0, u_d_min=0.0,
     z_ref=30.0, pblh_floor=True,
+    meteo="uniform",               # 'uniform' | 'per_street'
+    background="uniform",          # 'uniform' | 'per_street'
 )
 ```
 
@@ -138,7 +278,9 @@ These select between the SIRANE forms and MUNICH's, and they are independent:
 | | `"schulte"` | $u_d = \sigma_w \beta / (1 + H/W)$, MUNICH v2's default. Equals the SIRANE form exactly at $H = W$. |
 | `routing` | `"mixing"` / `"sirane"` | Perfect mixing, or SIRANE's non-crossing-streamline rule. They differ only at junctions with 2+ inflows **and** 2+ outflows. |
 | `direction_averaging` | `"none"` / `"munich"` / `"gauss"` | Single direction; MUNICH's own quadrature over a turbulence-derived $\sigma_\theta$; or noodl physics' normalised Gauss–Hermite rule. |
-| `stability` | `"impaq"` / `"munich"` | Neutral only ($\sigma_w = 1.3\,u_*(1 - 0.8\,z/h_{\text{abl}})$), or MUNICH's three-branch stability dependence (needs an `lmo` driver). |
+| `stability` | `"neutral"` / `"munich"` | Neutral only ($\sigma_w = 1.3\,u_*(1 - 0.8\,z/h_{\text{abl}})$), or MUNICH's three-branch stability dependence (needs an `lmo` driver). |
+| `meteo` | `"uniform"` / `"per_street"` | One instance value per driver, or a trailing street axis on `U_ref`, `theta_w`, `h_abl`, `u_star`, `lmo`, with junction routing from the mean of the streets meeting there (or an explicit `"<key>_junction"` driver). |
+| `background` | `"uniform"` / `"per_street"` | One atmosphere boundary node shared by every street, or one atmosphere node per street with its own `"<layer>.x_boundary"` row. |
 
 `kappa=None` resolves automatically: MUNICH's 0.41 if any MUNICH-style option is chosen, else
 0.40. An explicit value always wins.
