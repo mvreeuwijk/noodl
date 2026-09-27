@@ -1,12 +1,12 @@
 # Installation
 
-noodl needs **Python 3.11 or newer**. Its only hard dependencies are PyTorch, NetworkX and
+noodl physics needs **Python 3.11 or newer**. Its only hard dependencies are PyTorch, NetworkX and
 NumPy; everything else is an optional extra, described below.
 
 ## From PyPI
 
 ```bash
-pip install noodl
+pip install noodl-physics
 ```
 
 ## From source
@@ -18,7 +18,7 @@ pip install -e .
 ```
 
 On a machine without a CUDA-capable GPU, install the CPU build of PyTorch first — it is a far
-smaller download, and noodl runs perfectly well on CPU:
+smaller download, and noodl physics runs perfectly well on CPU:
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -27,14 +27,14 @@ pip install -e .
 
 ## Optional extras
 
-noodl keeps its optional dependencies genuinely optional. Nothing below is needed to build a
+noodl physics keeps its optional dependencies genuinely optional. Nothing below is needed to build a
 network, solve it, or differentiate through it.
 
 ```bash
-pip install "noodl[sparse]"        # sparse-direct linear solver
-pip install "noodl[street_aq]"     # the street air quality application's file I/O
-pip install "noodl[contam]"        # ContamX parity, Windows x86-64 only
-pip install "noodl[dev]"           # everything needed to run the test suite
+pip install "noodl-physics[sparse]"        # sparse-direct linear solver
+pip install "noodl-physics[street_aq]"     # the street air quality application's file I/O
+pip install "noodl-physics[contam]"        # ContamX parity, Windows x86-64 only
+pip install "noodl-physics[dev]"           # everything needed to run the test suite
 ```
 
 | Extra | Adds | Why you might want it |
@@ -95,5 +95,5 @@ pip install -r docs/requirements.txt
 mkdocs serve
 ```
 
-The API reference is generated from the package's own docstrings, so noodl must be installed in
+The API reference is generated from the package's own docstrings, so noodl physics must be installed in
 the same environment for that section to build.

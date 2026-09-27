@@ -277,7 +277,7 @@ These select between the SIRANE forms and MUNICH's, and they are independent:
 | `exchange` | `"sirane"` | $u_d = \sigma_w / (\sqrt{2}\,\pi)$, aspect-ratio independent. |
 | | `"schulte"` | $u_d = \sigma_w \beta / (1 + H/W)$, MUNICH v2's default. Equals the SIRANE form exactly at $H = W$. |
 | `routing` | `"mixing"` / `"sirane"` | Perfect mixing, or SIRANE's non-crossing-streamline rule. They differ only at junctions with 2+ inflows **and** 2+ outflows. |
-| `direction_averaging` | `"none"` / `"munich"` / `"gauss"` | Single direction; MUNICH's own quadrature over a turbulence-derived $\sigma_\theta$; or noodl's normalised Gauss–Hermite rule. |
+| `direction_averaging` | `"none"` / `"munich"` / `"gauss"` | Single direction; MUNICH's own quadrature over a turbulence-derived $\sigma_\theta$; or noodl physics' normalised Gauss–Hermite rule. |
 | `stability` | `"neutral"` / `"munich"` | Neutral only ($\sigma_w = 1.3\,u_*(1 - 0.8\,z/h_{\text{abl}})$), or MUNICH's three-branch stability dependence (needs an `lmo` driver). |
 | `meteo` | `"uniform"` / `"per_street"` | One instance value per driver, or a trailing street axis on `U_ref`, `theta_w`, `h_abl`, `u_star`, `lmo`, with junction routing from the mean of the streets meeting there (or an explicit `"<key>_junction"` driver). |
 | `background` | `"uniform"` / `"per_street"` | One atmosphere boundary node shared by every street, or one atmosphere node per street with its own `"<layer>.x_boundary"` row. |
@@ -342,7 +342,7 @@ precision that source publishes:
 
 That last row is deliberate: MUNICH's weights are **not** normalised to 1, and reproducing that
 artefact is the point. "Fixing" it would introduce a bias relative to MUNICH rather than remove
-one. The same applies to `soulhac_shape`: MUNICH quantises the root to a 0.01 grid (0.62), noodl
+one. The same applies to `soulhac_shape`: MUNICH quantises the root to a 0.01 grid (0.62), noodl physics
 solves it continuously (0.6198293…), and the resulting 4e-4 relative difference in $u_M$ is
 documented rather than matched.
 
@@ -379,7 +379,7 @@ The relative-pattern miss is the one open discrepancy against MUNICH; it is list
 ## Install
 
 ```bash
-pip install "noodl[street_aq]"
+pip install "noodl-physics[street_aq]"
 ```
 
 Needed only for `write_network_concentration`. The modelling API — `build_model`,

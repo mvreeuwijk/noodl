@@ -1,6 +1,6 @@
 # Applications
 
-noodl is one solver. The applications below are physical systems modelled with it, each a thin
+noodl physics is one solver. The applications below are physical systems modelled with it, each a thin
 layer of domain physics (its elements, drives and closures) over the shared core. Any of them can
 be built directly in Python, as each page shows, or, where a reader exists, read from a model
 file; see [File formats](../formats/index.md).
@@ -35,8 +35,9 @@ all four:
 
 And they share machinery in ways that would be coincidence if the abstraction were wrong. The
 sewer's headspace air layer drives its Newton solve with the *same* `Stack` buoyancy term the
-building application uses for room air. The water application's Darcy-Weisbach pipes are the
-framework's own `Duct` element in volumetric form. The sewer and water `.inp` readers share one
+building application uses for room air. The water application's Darcy-Weisbach pipes can be the
+framework's own `Duct` element in volumetric form (`friction="colebrook"`), though by default
+they follow EPANET's own composite friction law. The sewer and water `.inp` readers share one
 tokenizer. The `solve_monotone` root-finder that inverts Manning's equation for sewer depth also
 solves the per-node QP inside the capacitated layer's projection mode.
 
@@ -48,8 +49,8 @@ Buildings Library for building physics, MUNICH for street air quality, SWMM thro
 sewers, EPANET 2.2 through WNTR for water distribution, WSIMOD for capacitated allocation), plus
 checks against analytical solutions, conservation identities and finite-difference gradients.
 
-A comparison of this kind runs noodl and a reference model on the same input and compares the
-outputs at a stated tolerance. It shows that noodl solves the same model as the reference; it is
+A comparison of this kind runs noodl physics and a reference model on the same input and compares the
+outputs at a stated tolerance. It shows that noodl physics solves the same model as the reference; it is
 not evidence that the model describes reality. Where the reference model has not been run, as
 for MUNICH on this release, the check is instead against the formulas and published results the
 reference documents, and the application page says so. **Validation**, comparison against
@@ -59,19 +60,19 @@ Each page states its comparisons with an explicit tolerance and the value actual
 pages are equally explicit about what a comparison *does not* show, and those caveats are
 sometimes the most important thing on the page:
 
-- The [capacitated allocation](capacitated.md#what-the-wsimod-parity-does-not-show) page
-  explains that neither WSIMOD reference demo ever exercises a binding capacity clip, so the
-  comparison checks the identity path only — the binding branches are covered by synthetic tests
-  instead.
+- The [capacitated allocation](capacitated.md#where-the-layer-differs-from-wsimod) page
+  explains that WSIMOD's shipped demos never exercise a binding clip, how scripted WSIMOD cases
+  cover those branches instead, and where the layer's semantics differ from WSIMOD's: sharing
+  one node's headroom, and bottlenecks behind a pass-through node.
 - The [street air quality](street_aq.md#limitations-and-caveats) page records that the published
   MUNICH idealised case cannot be reproduced absolutely, because its geometry was never
   published, and states the size of the remaining difference.
 - The [sewer](sewer.md#coefficient-provenance) page marks each coefficient as verified,
   calibrated, or unverified, naming the source.
 
-Where a reference model and noodl disagree, the pages say which is more likely to be right and
+Where a reference model and noodl physics disagree, the pages say which is more likely to be right and
 why. Several of the remaining discrepancies are the *reference*'s approximation — SWMM's
-51-point circular-geometry lookup table, EPANET's float32 binary output — not noodl's.
+51-point circular-geometry lookup table, EPANET's float32 binary output — not noodl physics'.
 
 ## Starting a new application
 

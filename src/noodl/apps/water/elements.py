@@ -319,3 +319,248 @@ class MinorLoss(Element):
         slope = torch.sqrt(torch.as_tensor(dpt, dtype=m.dtype) / m) / dpt
         zero = torch.zeros_like(slope)
         return zero, slope + zero
+
+
+# --------------------------------------------------------------------------- EPANET D-W
+#: EPANET 2.2's own constants for the Darcy-Weisbach friction factor, copied digit for
+#: digit from `src/hydcoeffs.c` (v2.2). ``w = q / (nu d) = Re pi / 4``, so ``A1`` is
+#: Re = 4000 and ``A2`` is Re = 2000.
+EPANET_A1 = 3.14159265358979323850e03  # 1000 pi
+EPANET_A2 = 1.57079632679489661930e03  # 500 pi
+EPANET_A8 = 4.61841319859066668690e00  # 5.74 (pi/4)^0.9
+EPANET_A9 = -8.68588963806503655300e-01  # -2 / ln(10)
+EPANET_AB = 3.28895476345399058690e-03  # 5.74 / 4000^0.9
+EPANET_AC = -5.14214965799093883760e-03  # -2 * 0.9 * 2 / ln(10) * AB
+
+#: EPANET computes in feet and cfs. ``MperFT`` (`types.h`) is exact; the gravity in the
+#: D-W resistance ``R = L / (2 * 32.2 * d * A^2)`` (`hydcoeffs.c`, `resistcoeff`) is
+#: 32.2 ft/s^2, NOT standard gravity's 32.174, and the minor-loss conversion
+#: ``0.02517 K / d^4`` (`input1.c`, `convertunits`) is ``8 / (32.2 pi^2)`` ROUNDED to
+#: four figures. Both are part of what EPANET computes, so both are reproduced here.
+EPANET_FOOT = 0.3048
+EPANET_G_FT = 32.2
+EPANET_KM = 0.02517
+#: EPANET's default kinematic viscosity of water, ``VISCOS = 1.1e-5`` ft^2/s (`types.h`),
+#: = 1.0219e-6 m^2/s; ``[OPTIONS] VISCOSITY`` multiplies it.
+EPANET_VISCOS_FT2 = 1.1e-5
+EPANET_NU = EPANET_VISCOS_FT2 * EPANET_FOOT**2
+#: EPANET's own flow-unit factors, file units per cfs (`types.h`, ``GPMperCFS`` ...).
+#: Several are rounded (``LPSperCFS = 28.317`` against the exact 28.3168466), and EPANET
+#: divides a file's flows by exactly these numbers on the way in.
+EPANET_QCF = {
+    "CFS": 1.0,
+    "GPM": 448.831,
+    "MGD": 0.64632,
+    "IMGD": 0.5382,
+    "AFD": 1.9837,
+    "LPS": 28.317,
+    "LPM": 1699.0,
+    "MLD": 2.4466,
+    "CMH": 101.94,
+    "CMD": 2446.6,
+}
+
+
+def _dunlop(w: Tensor, e: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Dunlop's cubic coefficients ``x1..x4`` in ``r = w / A2`` (`frictionFactor`)."""
+    y2 = e / 3.7 + EPANET_AB
+    y3 = EPANET_A9 * torch.log(y2)
+    fa = 1.0 / (y3 * y3)
+    fb = (2.0 + EPANET_AC / (y2 * y3)) * fa
+    x1 = 7.0 * fa - fb
+    x2 = 0.128 - 17.0 * fa + 2.5 * fb
+    x3 = -0.128 + 13.0 * fa - (fb + fb)
+    x4 = 0.032 - 3.0 * fa + 0.5 * fb
+    return x1, x2, x3, x4
+
+
+def epanet_friction_factor(q: Tensor, e: Tensor, s: Tensor) -> tuple[Tensor, Tensor]:
+    """EPANET 2.2's ``frictionFactor`` (`hydcoeffs.c`) for ``Re > 2000``: ``(f, df/dq)``.
+
+    ``q`` is ``|flow|``, ``e`` the relative roughness ``eps / d`` and ``s = nu d`` (any
+    consistent units: ``w = q / s = Re pi / 4``). Swamee-Jain for Re >= 4000, Dunlop's
+    cubic in ``r = Re / 2000`` between 2000 and 4000. The laminar ``f = 64 / Re`` is not
+    here because EPANET does not compute it as a friction factor either: `DWpipecoeff`
+    applies Hagen-Poiseuille to the head loss directly.
+
+    Both branches are evaluated everywhere and selected with ``where``; the Swamee-Jain
+    branch sees ``w`` clamped to at least ``A1`` so its un-taken values stay finite.
+    """
+    w = q / s
+    turbulent = w >= EPANET_A1
+    w_sj = torch.clamp(w, min=EPANET_A1)
+    q_sj = w_sj * s
+    y1 = EPANET_A8 / w_sj**0.9
+    y2 = e / 3.7 + y1
+    y3 = EPANET_A9 * torch.log(y2)
+    f_sj = 1.0 / (y3 * y3)
+    dfdq_sj = 1.8 * f_sj * y1 * EPANET_A9 / y2 / y3 / q_sj
+    x1, x2, x3, x4 = _dunlop(w, e)
+    r = w / EPANET_A2
+    f_tr = x1 + r * (x2 + r * (x3 + r * x4))
+    dfdq_tr = (x2 + r * (2.0 * x3 + r * 3.0 * x4)) / s / EPANET_A2
+    return torch.where(turbulent, f_sj, f_tr), torch.where(turbulent, dfdq_sj, dfdq_tr)
+
+
+class EpanetDarcyWeisbach(Element):
+    """EPANET 2.2's Darcy-Weisbach pipe, reproduced operation for operation (`DWpipecoeff`).
+
+    Head loss in EPANET's units (feet, cfs; ``q`` signed)::
+
+        h = (16 pi nu d R + m |q|) q        Re <= 2000   (Hagen-Poiseuille)
+        h = (f(Re) R + m) |q| q             Re >  2000   (Dunlop cubic, then Swamee-Jain)
+
+    with ``R = L / (2 * 32.2 * d * A^2)`` and ``m = 0.02517 K / d^4``. The composite is
+    C^1 in exact arithmetic: Dunlop's cubic matches ``64 / Re`` in value and slope at
+    Re = 2000 and Swamee-Jain in value and slope at Re = 4000. EPANET has NO low-flow
+    linearisation for D-W (the ``RQtol`` floor in `pipecoeff` is on the H-W / C-M branch
+    only): the laminar branch is already linear through ``q = 0``, which is also why this
+    element needs no transition blend and has a finite slope at ``dp = 0``.
+
+    Inputs are SI (m, m^3/s, m^2/s) and are converted to feet internally. ``cfs_per_m3s``
+    is the flow conversion EPANET itself applies: it reads flows in the file's units and
+    divides by its own ROUNDED factor (``LPSperCFS = 28.317``, ``GPMperCFS = 448.831``, ...
+    in `types.h`), so the internal cfs of an LPS file are ``1000 / 28.317`` per m^3/s,
+    not ``1 / 0.3048^3``. ``None`` selects the exact conversion.
+
+    The layer potential may be head times ``scale`` (the water application's D-W path
+    works in pressure, ``scale = rho g``): ``dp = scale * h`` with ``h`` in metres.
+
+    ``flow(dp)`` inverts the odd, strictly increasing ``h(q)`` by Newton's method with
+    EPANET's own analytic gradient, safeguarded by bisection on ``[0, q_hi]`` (``q_hi``
+    doubled until it brackets the root) and run without autograd; ONE final Newton step is
+    then taken on the graph, whose value is the converged flow and whose first derivative
+    in ``dp`` and in every parameter is the implicit-function one, ``-(dh/dtheta) / h'(q)``.
+    It is taken on the SIGNED flow, so the derivative at ``q = 0`` is the finite laminar
+    ``1 / h'(0)`` rather than the zero a ``sign(dp)`` factor would give. (A generic
+    ``solve_monotone`` inversion was measured 5x slower, since it needs an autograd
+    derivative per iteration and a collapsed bracket to stop.)
+    """
+
+    def __init__(
+        self,
+        length,
+        diameter,
+        roughness,
+        *,
+        minor_loss=0.0,
+        nu: float = EPANET_NU,
+        cfs_per_m3s: float | None = None,
+        scale: float = 1.0,
+        rtol: float = 1e-15,
+        max_iter: int = 100,
+        kind: str = "pipe",
+        learnable: bool = False,
+    ) -> None:
+        super().__init__(kind)
+        self.length = self._param(length, False)
+        self.diameter = self._param(diameter, False)
+        self.roughness = self._param(roughness, learnable)
+        self.minor_loss = self._param(minor_loss, False)
+        self.nu = float(nu)
+        self.cfs_per_m3s = (
+            1.0 / EPANET_FOOT**3 if cfs_per_m3s is None else float(cfs_per_m3s)
+        )
+        self.scale = float(scale)
+        self.rtol = float(rtol)
+        self.max_iter = int(max_iter)
+
+    def _coefficients(self) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """``(R, m, e, s)`` in feet/cfs: resistance, minor-loss coefficient, relative
+        roughness and ``nu d``, broadcast to a common shape."""
+        d = self.diameter / EPANET_FOOT
+        length = self.length / EPANET_FOOT
+        area = torch.pi * d**2 / 4.0
+        r = length / 2.0 / EPANET_G_FT / d / area**2
+        m = EPANET_KM * self.minor_loss / d**2 / d**2
+        e = (self.roughness / EPANET_FOOT) / d
+        s = (self.nu / EPANET_FOOT**2) * d
+        return torch.broadcast_tensors(r, m, e, s)
+
+    @staticmethod
+    def _head_ft(q: Tensor, r: Tensor, m: Tensor, e: Tensor, s: Tensor) -> Tensor:
+        """Signed head loss (ft) at signed flow ``q`` (cfs)."""
+        a = q.abs()
+        laminar = a <= EPANET_A2 * s
+        f, _ = epanet_friction_factor(torch.where(laminar, EPANET_A2 * s, a), e, s)
+        h_lam = (16.0 * torch.pi * s * r + m * a) * q
+        h_turb = (f * r + m) * a * q
+        return torch.where(laminar, h_lam, h_turb)
+
+    def head_loss(self, q: Tensor) -> Tensor:
+        """Signed head loss in METRES at signed flow ``q`` in m^3/s (EPANET's ``hloss``)."""
+        r, m, e, s = self._coefficients()
+        return EPANET_FOOT * self._head_ft(q * self.cfs_per_m3s, r, m, e, s)
+
+    @staticmethod
+    def _grad_ft(a: Tensor, r: Tensor, m: Tensor, e: Tensor, s: Tensor) -> Tensor:
+        """EPANET's ``hgrad`` (ft per cfs) at ``|q| = a`` (cfs)."""
+        laminar = a <= EPANET_A2 * s
+        a_t = torch.where(laminar, EPANET_A2 * s, a)
+        f, dfdq = epanet_friction_factor(a_t, e, s)
+        g_lam = 16.0 * torch.pi * s * r + 2.0 * m * a
+        g_turb = 2.0 * (f * r + m) * a + dfdq * r * a * a
+        return torch.where(laminar, g_lam, g_turb)
+
+    def head_gradient(self, q: Tensor) -> Tensor:
+        """``dh/dq`` in m per (m^3/s), from EPANET's own analytic ``hgrad``."""
+        r, m, e, s = self._coefficients()
+        a = (q * self.cfs_per_m3s).abs()
+        return EPANET_FOOT * self.cfs_per_m3s * self._grad_ft(a, r, m, e, s)
+
+    def flow(self, dp: Tensor, drivers=None) -> Tensor:
+        r, m, e, s = self._coefficients()
+        c = self.cfs_per_m3s
+        h_ft, r, m, e, s = torch.broadcast_tensors(
+            dp / self.scale / EPANET_FOOT, r, m, e, s
+        )
+        with torch.no_grad():
+            r0, m0, e0, s0 = r.detach(), m.detach(), e.detach(), s.detach()
+            target = h_ft.detach().abs()
+            # Upper bound on |q|: the larger of the laminar flow and the flow at an
+            # optimistic f = 0.005, doubled until the head loss there reaches the target.
+            hi = torch.maximum(
+                torch.sqrt(target / (0.005 * r0 + m0)),
+                target / (16.0 * torch.pi * s0 * r0),
+            )
+            for _ in range(200):
+                short = self._head_ft(hi, r0, m0, e0, s0) < target
+                if not bool(short.any()):
+                    break
+                hi = torch.where(short, 2.0 * hi, hi)
+            # Safeguarded Newton with EPANET's analytic gradient, from the upper bound.
+            lo = torch.zeros_like(hi)
+            a = hi.clone()
+            for _ in range(self.max_iter):
+                res = self._head_ft(a, r0, m0, e0, s0) - target
+                hi = torch.where(res > 0, a, hi)
+                lo = torch.where(res < 0, a, lo)
+                step = res / self._grad_ft(a, r0, m0, e0, s0)
+                nxt = a - step
+                inside = (nxt >= lo) & (nxt <= hi) & torch.isfinite(nxt)
+                nxt = torch.where(inside, nxt, 0.5 * (lo + hi))
+                converged = (res == 0) | ((nxt - a).abs() <= self.rtol * a)
+                a = torch.where(res == 0, a, nxt)
+                if bool(converged.all()):
+                    break
+            else:
+                raise RuntimeError(
+                    f"EpanetDarcyWeisbach (kind {self.kind!r}): the head-loss inversion "
+                    f"did not converge in {self.max_iter} iterations"
+                )
+            q_star = torch.sign(h_ft.detach()) * a
+            g_star = self._grad_ft(a, r0, m0, e0, s0)
+        # One Newton step taken WITH the autograd graph: its value is q_star (the residual
+        # is zero to rounding) and its first derivative in every input is the implicit-
+        # function one, -(dh/dtheta - dh_t/dtheta) / h'(q), finite at q = 0.
+        q_cfs = q_star - (self._head_ft(q_star, r, m, e, s) - h_ft) / g_star
+        return q_cfs / c
+
+    def dflow(self, dp: Tensor, drivers=None) -> Tensor:
+        q = self.flow(dp, drivers)
+        return 1.0 / (self.scale * self.head_gradient(q))
+
+    def linear_init(self, drivers=None) -> tuple[Tensor, Tensor]:
+        # The laminar tangent at q = 0, as `Duct.linear_init` uses its laminar line.
+        slope = self.dflow(torch.zeros_like(self.length * self.diameter), drivers)
+        return torch.zeros_like(slope), slope

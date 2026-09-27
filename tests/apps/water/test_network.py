@@ -301,25 +301,32 @@ def test_a_non_default_specific_gravity_on_hazen_williams_is_refused():
         build_model(net)
 
 
-def _hand_head_losses(q, length, diameter, eps, nu):
+def _hand_head_losses(q, length, diameter, eps, nu, g=9.80665):
     """Darcy-Weisbach head loss (m) for a VOLUMETRIC flow q (m3/s), by hand.
 
-    EPANET 2.2 (Manual section 13.1; hydraul.c): Re = 4 q / (pi D nu) with nu the
-    KINEMATIC viscosity, nu = VISCOSITY x nu_water(20 C), and h = f L/D V^2 / (2 g) in
+    Re = 4 q / (pi D nu) with nu the KINEMATIC viscosity, and h = f L/D V^2 / (2 g) in
     metres of the flowing fluid -- SPECIFIC GRAVITY does not enter the head loss. Returns
     (Re, h with the Colebrook form `Duct` uses [CONTAM TN 1887r1 eq. 50], h with the
-    Swamee-Jain f EPANET uses above Re = 4000).
+    Swamee-Jain f EPANET 2.2 uses above Re = 4000).
     """
     area = math.pi * diameter**2 / 4.0
     velocity = q / area
     reynolds = velocity * diameter / nu
     rel = eps / diameter
-    g = 8.0
+    root = 8.0
     for _ in range(200):
-        g = 1.14 - 2.0 * math.log10(rel) - 2.0 * math.log10(1.0 + 9.3 / (reynolds * rel / g))
+        root = 1.14 - 2.0 * math.log10(rel) - 2.0 * math.log10(
+            1.0 + 9.3 / (reynolds * rel / root)
+        )
     swamee = 0.25 / math.log10(rel / 3.7 + 5.74 / reynolds**0.9) ** 2
-    scale = length / diameter * velocity**2 / (2.0 * 9.80665)
-    return reynolds, scale / g**2, scale * swamee
+    scale = length / diameter * velocity**2 / (2.0 * g)
+    return reynolds, scale / root**2, scale * swamee
+
+
+#: EPANET 2.2 computes in feet: water at VISCOS = 1.1e-5 ft2/s and, in the D-W resistance,
+#: g = 32.2 ft/s2 (`hydcoeffs.c`, `resistcoeff`) -- not standard gravity.
+EPANET_NU_SI = 1.1e-5 * 0.3048**2
+EPANET_G_SI = 32.2 * 0.3048
 
 
 def _single_dw_pipe(options: WaterOptions, minor_loss: float = 0.0) -> WaterNetwork:
@@ -332,39 +339,73 @@ def _single_dw_pipe(options: WaterOptions, minor_loss: float = 0.0) -> WaterNetw
     )
 
 
+def _single_pipe_loss(net, **kw):
+    model, state, drivers = build_model(net, **kw)
+    final = water_steady(model, state, drivers, atol=1e-12, rtol=1e-12)
+    head = final["water.phi"] / model.head_scale
+    names = net.nodes()
+    assert float(final["water.q"][0]) == pytest.approx(0.05, rel=1e-9)
+    return float(head[names.index("R1")] - head[names.index("J1")])
+
+
 @pytest.mark.parametrize(
     "gravity, viscosity", [(1.0, 1.0), (1.1, 1.0), (1.0, 1.5), (1.1, 1.5)]
 )
 def test_darcy_weisbach_head_loss_matches_the_hand_computed_epanet_value(
     gravity, viscosity
 ):
-    """Flows are m3/s and heads metres; nu = VISCOSITY x nu_w, and SPECIFIC GRAVITY
-    changes only the pressure scale, never the head loss (EPANET 2.2's definitions)."""
+    """The default friction law is EPANET's: Swamee-Jain at this Re, with EPANET's own
+    water (1.1e-5 ft2/s x VISCOSITY) and 32.2 ft/s2. Flows are m3/s and heads metres;
+    SPECIFIC GRAVITY changes only the pressure scale, never the head loss."""
     net = _single_dw_pipe(WaterOptions(specific_gravity=gravity, viscosity=viscosity))
-    model, state, drivers = build_model(net)
-    final = water_steady(model, state, drivers, atol=1e-12, rtol=1e-12)
-    head = final["water.phi"] / model.head_scale
-    names = net.nodes()
-    loss = float(head[names.index("R1")] - head[names.index("J1")])
-    nu = 1.002e-3 / 998.2 * viscosity
-    reynolds, colebrook, swamee_jain = _hand_head_losses(0.05, 500.0, 0.3, 0.26e-3, nu)
+    loss = _single_pipe_loss(net)
+    reynolds, _, swamee_jain = _hand_head_losses(
+        0.05, 500.0, 0.3, 0.26e-3, EPANET_NU_SI * viscosity, g=EPANET_G_SI
+    )
     assert reynolds > 4000.0  # turbulent, so EPANET is on its Swamee-Jain branch
-    assert float(final["water.q"][0]) == pytest.approx(0.05, rel=1e-9)
+    assert loss == pytest.approx(swamee_jain, rel=1e-9)
+
+
+@pytest.mark.parametrize(
+    "gravity, viscosity", [(1.0, 1.0), (1.1, 1.0), (1.0, 1.5), (1.1, 1.5)]
+)
+def test_the_colebrook_option_matches_the_hand_computed_colebrook_value(
+    gravity, viscosity
+):
+    """`friction="colebrook"` keeps the generic `Duct`: Colebrook, water at
+    1.002e-3 / 998.2 m2/s x VISCOSITY, standard gravity."""
+    net = _single_dw_pipe(WaterOptions(specific_gravity=gravity, viscosity=viscosity))
+    loss = _single_pipe_loss(net, friction="colebrook")
+    nu = 1.002e-3 / 998.2 * viscosity
+    _, colebrook, swamee_jain = _hand_head_losses(0.05, 500.0, 0.3, 0.26e-3, nu)
     assert loss == pytest.approx(colebrook, rel=1e-6)
-    # EPANET's own value: Swamee-Jain is an explicit fit to Colebrook, within ~1 %
+    # Swamee-Jain is an explicit fit to Colebrook: the two laws differ, by ~1 % here
     assert loss == pytest.approx(swamee_jain, rel=2e-2)
 
 
 @pytest.mark.parametrize("gravity", [1.0, 1.1])
 def test_a_darcy_weisbach_pipe_carries_its_minor_loss(gravity):
     """A [PIPES] minor-loss coefficient K adds K V^2 / (2 g) to the D-W head loss, as in
-    EPANET (Manual section 13.1), rather than being dropped."""
+    EPANET, rather than being dropped -- with EPANET's own ``0.02517 K / d^4`` (feet,
+    cfs), which is ``8 / (32.2 pi^2)`` rounded to four figures (`input1.c`)."""
     net = _single_dw_pipe(WaterOptions(specific_gravity=gravity), minor_loss=5.0)
-    model, state, drivers = build_model(net)
-    final = water_steady(model, state, drivers, atol=1e-12, rtol=1e-12)
-    head = final["water.phi"] / model.head_scale
-    names = net.nodes()
-    loss = float(head[names.index("R1")] - head[names.index("J1")])
+    loss = _single_pipe_loss(net)
+    _, _, friction = _hand_head_losses(
+        0.05, 500.0, 0.3, 0.26e-3, EPANET_NU_SI, g=EPANET_G_SI
+    )
+    q_cfs = 0.05 / 0.3048**3
+    minor = 0.3048 * 0.02517 * 5.0 / (0.3 / 0.3048) ** 4 * q_cfs**2
+    velocity = 0.05 / (math.pi * 0.3**2 / 4.0)
+    exact = 5.0 * velocity**2 / (2.0 * EPANET_G_SI)
+    # 0.02517 is 1.2e-4 below 8 / (32.2 pi^2) = 0.025173, and EPANET uses 0.02517
+    assert minor / exact == pytest.approx(0.02517 * 32.2 * math.pi**2 / 8.0, rel=1e-12)
+    assert loss == pytest.approx(friction + minor, rel=1e-9)
+
+
+@pytest.mark.parametrize("gravity", [1.0, 1.1])
+def test_a_colebrook_pipe_carries_its_minor_loss(gravity):
+    net = _single_dw_pipe(WaterOptions(specific_gravity=gravity), minor_loss=5.0)
+    loss = _single_pipe_loss(net, friction="colebrook")
     _, colebrook, _ = _hand_head_losses(0.05, 500.0, 0.3, 0.26e-3, 1.002e-3 / 998.2)
     velocity = 0.05 / (math.pi * 0.3**2 / 4.0)
     expected = colebrook + 5.0 * velocity**2 / (2.0 * 9.80665)
@@ -372,17 +413,38 @@ def test_a_darcy_weisbach_pipe_carries_its_minor_loss(gravity):
     assert loss == pytest.approx(expected, rel=1e-6)
 
 
-def test_a_non_default_viscosity_and_gravity_reach_the_darcy_weisbach_duct():
-    """The Duct works in mass-flow form; fed rho' = 1/rho and mu' = nu it returns the
-    VOLUMETRIC flow the water layer balances, with Re = V D / nu."""
+def test_a_non_default_viscosity_and_gravity_reach_the_darcy_weisbach_elements():
+    """EPANET's law takes nu = 1.1e-5 ft2/s x VISCOSITY and works in head x rho g; the
+    Colebrook Duct works in mass-flow form, fed rho' = 1/rho and mu' = nu, so it returns
+    the VOLUMETRIC flow the water layer balances, with Re = V D / nu."""
     net = dataclasses.replace(
         twoloop(), options=WaterOptions(specific_gravity=1.1, viscosity=1.5)
     )
     model, _, _ = build_model(net, headloss="D-W")
+    pipe = model.potential["water"]._elements[0]
+    assert pipe.nu == pytest.approx(EPANET_NU_SI * 1.5, rel=1e-15)
+    assert pipe.scale == pytest.approx(998.2 * 1.1 * 9.80665, rel=1e-15)
+    assert pipe.cfs_per_m3s == pytest.approx(1.0 / 0.3048**3, rel=1e-15)
+    model, _, _ = build_model(net, headloss="D-W", friction="colebrook")
     duct = model.potential["water"]._elements[0]
     assert duct.rho == pytest.approx(1.0 / (998.2 * 1.1), rel=1e-15)
     assert duct.mu == pytest.approx(1.002e-3 / 998.2 * 1.5, rel=1e-15)
     assert model.head_scale == pytest.approx(998.2 * 1.1 * 9.80665, rel=1e-15)
+
+
+def test_an_unknown_friction_law_is_refused():
+    with pytest.raises(ValueError, match="friction must be 'epanet' or 'colebrook'"):
+        build_model(twoloop(), headloss="D-W", friction="swamee")
+
+
+def test_a_files_flow_units_select_epanets_rounded_cfs_factor(tmp_path):
+    """An LPS file reaches EPANET as q / 28.317 cfs, not q / 28.3168466."""
+    net = dataclasses.replace(
+        twoloop(), headloss="D-W", options=WaterOptions(flow_units="LPS")
+    )
+    model, _, _ = build_model(net)
+    pipe = model.potential["water"]._elements[0]
+    assert pipe.cfs_per_m3s == pytest.approx(1000.0 / 28.317, rel=1e-15)
 
 
 def test_initial_state_refuses_an_unknown_quantity():

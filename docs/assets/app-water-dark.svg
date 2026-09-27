@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 286" width="820" height="286" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
+  <title id="t">The water application</title>
+  <desc id="d">A reservoir, pump, looped network and tank.</desc>
+  <rect width="820" height="286" rx="10" fill="#262A33"/>
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2EC4B6"/></marker>
+    <marker id="arn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#E3EAF0"/></marker>
+    <marker id="arm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#A3AFBC"/></marker>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#E68F57"/></marker>
+  </defs>
+  <text x="40" y="34" font-size="15" fill="#E3EAF0" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Pressurised distribution: one potential is hydraulic head</text>
+  <path d="M 60 120 L 130 120 L 130 172 L 60 172 Z" fill="#1E4541" stroke="#E3EAF0" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="95" y="190" font-size="11" fill="#E3EAF0" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">reservoir</text>
+  <text x="95" y="206" font-size="10" fill="#A3AFBC" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">fixed head</text>
+  <line x1="130" y1="146" x2="186" y2="146" stroke="#2EC4B6" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="200" cy="146" r="15" fill="#2E333D" stroke="#2EC4B6" stroke-width="2.5"/>
+  <text x="200" y="151" font-size="12" fill="#2EC4B6" text-anchor="middle" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">P</text>
+  <text x="200" y="182" font-size="10.5" fill="#A3AFBC" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">pump</text>
+  <line x1="280" y1="100" x2="400" y2="100" stroke="#2EC4B6" stroke-width="3" stroke-linecap="round"/>
+  <line x1="400" y1="100" x2="400" y2="200" stroke="#2EC4B6" stroke-width="3" stroke-linecap="round"/>
+  <line x1="400" y1="200" x2="280" y2="200" stroke="#2EC4B6" stroke-width="3" stroke-linecap="round"/>
+  <line x1="280" y1="200" x2="280" y2="100" stroke="#2EC4B6" stroke-width="3" stroke-linecap="round"/>
+  <line x1="400" y1="100" x2="510" y2="150" stroke="#2EC4B6" stroke-width="3" stroke-linecap="round"/>
+  <line x1="400" y1="200" x2="510" y2="150" stroke="#2EC4B6" stroke-width="3" stroke-linecap="round"/>
+  <line x1="215" y1="146" x2="280" y2="120" stroke="#2EC4B6" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="280" cy="100" r="10" fill="#2EC4B6" stroke="#2E333D" stroke-width="2.5"/>
+  <circle cx="400" cy="100" r="10" fill="#2EC4B6" stroke="#2E333D" stroke-width="2.5"/>
+  <circle cx="400" cy="200" r="10" fill="#2EC4B6" stroke="#2E333D" stroke-width="2.5"/>
+  <circle cx="280" cy="200" r="10" fill="#2EC4B6" stroke="#2E333D" stroke-width="2.5"/>
+  <circle cx="510" cy="150" r="10" fill="#2EC4B6" stroke="#2E333D" stroke-width="2.5"/>
+  <text x="340" y="232" font-size="11" fill="#A3AFBC" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">junctions carry demand</text>
+  <line x1="510" y1="150" x2="590" y2="150" stroke="#2EC4B6" stroke-width="3" stroke-linecap="round"/>
+  <path d="M 590 176 L 590 108 L 660 108 L 660 176 Z" fill="#2E333D" stroke="#E3EAF0" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 590 176 L 590 142 L 660 142 L 660 176 Z" fill="#1E4541" stroke="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="590" y1="142" x2="660" y2="142" stroke="#2EC4B6" stroke-width="2.5" stroke-linecap="round"/>
+  <text x="625" y="194" font-size="11" fill="#E3EAF0" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">tank</text>
+  <text x="625" y="210" font-size="10" fill="#A3AFBC" text-anchor="middle" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">level integrates</text>
+  <text x="40" y="262" font-size="11.5" fill="#A3AFBC" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">two independent loops — the cycle space is what makes this a solve, not a traversal</text>
+  <rect x="560" y="238" width="220" height="34" rx="6" fill="#1E4541" stroke="#2EC4B6" stroke-width="1.5"/>
+  <text x="670" y="260" font-size="11" fill="#E3EAF0" text-anchor="middle" font-weight="400" font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace">h_L = K q^1.852  (Hazen-Williams)</text>
+</svg>

@@ -84,7 +84,7 @@ _SPARSE_DIRECT_MAX_BATCH = 32
 
 # Set once, the first time `auto` falls back to PCG for the ONE reason that is an environment
 # fault rather than a modelling fact: a certified-SPD operator offered a sparse form, the
-# batch was within the threshold, the solve was grad-safe, and SciPy -- the `noodl[sparse]`
+# batch was within the threshold, the solve was grad-safe, and SciPy -- the `noodl-physics[sparse]`
 # extra -- was the only thing missing. Warning on EVERY such solve would be unusable noise on
 # a machine that simply has not installed the extra, and PCG is a correct answer; warning
 # never at all leaves a user silently on the 4.6x-slower path with `diagnostics["backend"]`
@@ -186,7 +186,7 @@ def _auto_sparse_triplet(op, b: Tensor):
        under `no_grad`, so this is the non-differentiable-`solve`-with-learnable-elements
        case and a handful of direct callers, not the implicit adjoint;
     4. the operator declares the member but has no sparse form to give (returns None);
-    5. SciPy is not importable (it is an OPTIONAL extra, `noodl[sparse]` -- an explicit
+    5. SciPy is not importable (it is an OPTIONAL extra, `noodl-physics[sparse]` -- an explicit
        `method="sparse_direct"` raises ImportError, but `auto` must not).
 
     ORDER MATTERS, and 5 is deliberately last even though it is the cheapest test after 1.
@@ -232,7 +232,7 @@ def _auto_sparse_triplet(op, b: Tensor):
                 "with SciPy's sparse LU, but scipy could not be imported, so it fell back "
                 "to preconditioned CG. The answer is correct; it is roughly 4.6x slower at "
                 "small ensembles. Install the extra to get the documented default: "
-                "pip install noodl[sparse]. This warning is issued once per process; "
+                "pip install noodl-physics[sparse]. This warning is issued once per process; "
                 "PotentialFlowLayer.solve's diagnostics['backend'] reports the backend that "
                 "actually ran on every solve.",
                 RuntimeWarning,

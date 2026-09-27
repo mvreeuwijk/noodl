@@ -656,10 +656,10 @@ per-node bounded `while`-with-early-exit -- each pass is strictly non-expansive,
 count no worse than WSIMOD's own cap is a safe over-approximation of the same fixed point,
 not an approximation of a different algorithm. This sharing is deliberately
 RECEIVER-LOCAL: it triggers only at the node actually oversubscribed and never propagates a
-downstream bottleneck back to an earlier edge in the same step, mirroring WSIMOD's own
-per-arc semantics (a node's accept decision is against its own headroom, never its future
-ability to forward flow onward) and matching what storage itself is for in a discrete-time
-capacitated network. The storage update is $s' = \min(s + A_{\text{in}} f - A_{\text{out}} f,\ s_{\max})$ with
+downstream bottleneck back to an earlier edge in the same step. That matches WSIMOD's
+storing nodes, whose accept decision is against their own headroom, but not a WSIMOD
+pass-through `Node`, which accepts only what it can forward within the step; it matches what
+storage itself is for in a discrete-time capacitated network. The storage update is $s' = \min(s + A_{\text{in}} f - A_{\text{out}} f,\ s_{\max})$ with
 `overflow = relu(...)` reported as a diagnostic, never fed back -- and deliberately has NO
 floor at zero: $f$ is already clipped against the RECEIVER's headroom, never the sender's
 own available storage, so a caller requesting more than is actually available upstream is
@@ -709,14 +709,17 @@ NOT an independent measurement. This comparison has a real, specific limitation:
 `quickstart_demo`'s 6 arcs and `oxford_demo`'s 21 arcs, all but one sit at WSIMOD's own
 unbounded capacity for the whole run, and the one finite-capacity arc never sees its request
 approach its own capacity either -- so neither demo's numbers ever exercise the branch where
-$c_{\text{arc}}$ actually binds, only the identity path $\min(x, c_{\text{arc}}) = x$. The same holds, for a
-different reason, of the clip's other bound: both fixtures set $s_{\max} = \infty$ at every node
-(the harness captures per-arc capacity only), so the receiver-headroom clip is the identity
-everywhere too and the proportional-sharing branch never runs against WSIMOD's numbers. Both
-mechanisms are separately and rigorously covered by synthetic unit fixtures
-with deliberately tight bounds; what remains unvalidated is specifically WSIMOD's own
-numbers at a binding point, not the mechanism (see
-[what the WSIMOD parity does not show](applications/capacitated.md#what-the-wsimod-parity-does-not-show)).
+$c_{\text{arc}}$ actually binds, only the identity path $\min(x, c_{\text{arc}}) = x$, and both set
+$s_{\max} = \infty$. `tests/verification/test_wsimod_capacity.py` closes that gap against
+WSIMOD's own numbers: scripted networks of WSIMOD's own classes in which arc capacity and tank
+headroom bind, including several requests on one arc per timestep (WSIMOD clips each against
+the arc's accumulated `flow_in`, so the timestep total is $\min(\sum_k r_k, c_{\text{arc}})$ in
+any order), and a `quickstart_demo` variant with three capacities lowered. It also pins where
+the semantics differ: several arcs competing for one node's headroom are served
+first-come-first-served by WSIMOD but preference-proportionally here, and a bottleneck behind
+a WSIMOD pass-through `Node` propagates upstream within the step, which this receiver-local
+layer does not do (see
+[where the layer differs from WSIMOD](applications/capacitated.md#where-the-layer-differs-from-wsimod)).
 
 ## Caveats
 

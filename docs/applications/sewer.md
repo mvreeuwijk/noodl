@@ -130,10 +130,34 @@ R = \frac{A}{P} = \frac{D}{4}\left(1 - \frac{\sin\theta}{\theta}\right),\quad
 T = D\sin\frac{\theta}{2}
 $$
 
-These exact relations are used deliberately in place of SWMM's own 51-point lookup table — SWMM's
-manual states the tables are a speed optimisation over these same trigonometric relations. That
-choice is the source of the ~1e-3 depth and volume discrepancy in the parity rows below, and
-noodl's numbers are the more accurate ones.
+These exact relations are the default for networks built in code (`SewerNetwork(...,
+geometry="analytic")`).
+
+### SWMM's own circular geometry
+
+SWMM 5 does not evaluate the circle. For a `CIRCULAR` conduit it interpolates 51-point tables
+(`A/Afull`, `Y/Yfull` and the section factor `S/Sfull`, from `xsect.dat`) and near the invert
+switches to closed forms solved by Newton iterations with their own starting guesses and stopping
+rule (`xsect.c`). The tables differ from the true circle by up to ~5e-3 in depth, and by far more
+in velocity near the invert. `geometry="swmm"` (module `noodl.apps.sewer.swmm_xsect`) reproduces
+all of it, operation for operation, and is what `read_swmm_inp` uses by default, because a
+network read from a SWMM file is read to reproduce SWMM (`read_swmm_inp(path,
+geometry="analytic")` gives the exact circle).
+
+At a kinematic-wave steady state SWMM gives a conduit carrying $q$ an inlet area
+$a_1 = A(S = q/\beta)$ (inverse section-factor lookup) and an outlet area $a_2$ solving
+$\beta\,S(a_2) = q$. It reports depth $\tfrac12(Y(a_1) + Y(a_2))$, volume
+$\tfrac12(a_1 + a_2)L$, and velocity $q / A(\text{depth})$, which is zero at a depth of 0.01 ft
+or less. $a_1 = a_2$ on the tables. Near the invert the two Newton solves differ slightly, and
+both are carried. SWMM's units are reproduced too: it computes in feet with Manning's 1.486, but
+converts CMS flows and volumes with 0.02832 m³/ft³ rather than $0.3048^3$. That is an effective
+1.6e-4 on the Manning coefficient and 1.2e-4 on reported volumes. Everything is differentiable:
+piecewise-linear tables, unrolled Newton loops, and one implicit-function root.
+
+Scope: `geometry="swmm"` covers the steady kinematic-wave path only, and is refused by name with
+`storage=True`. The discharge limit is SWMM's `Qfull` rather than the analytic 0.938 D capacity.
+The headspace, top width, hydraulic radius and mean depth (air side, sulfide) remain the exact
+circle, evaluated at SWMM's depth. SWMM has no headspace to compare them with.
 
 Numerical care worth noting: the `arccos` argument is clamped to the *exact* domain $[-1, 1]$,
 not an epsilon-shrunk one — that was tried and rejected because it shifts the boundary value by
@@ -207,27 +231,39 @@ the flux is symmetric between the two source terms in moles of S.
 
 ## Verification
 
-Against SWMM 5.2.4 through `pyswmm`, on the committed `tree_kinwave.inp` fixture. The engine
-identity itself is pinned: `engine_version == "5.2.4"` and `flow_routing_error == 0.0`.
+Against SWMM 5.2.4 through `pyswmm`, with `geometry="swmm"`, on three kinematic-wave networks
+of circular conduits:
 
-| Check | Tolerance | Measured |
-|---|---|---|
-| Pipe flows | rel 1e-9 | **1.370e-14** |
-| Normal depths | rel 1e-3 | **5.464e-4** |
-| Velocities, against the binary output series | rel 1e-3 | **6.257e-4** |
-| Conduit volumes | rel 1e-3 | **6.438e-4** |
-| Tracer concentration, closed form | rel 3e-5 | **7.811e-6** |
-| Tracer, the actual model, Richardson-extrapolated | rel 3e-5 | **8.05e-6** |
+- `tree_kinwave.inp`, the hand-built 5-conduit tree.
+- `example1_kinwave.inp`, the 13-conduit network of EPA SWMM's published *Example 1*. It is
+  converted to metres, and its runoff is replaced by rational-method constant inflows, because
+  runoff and CFS units are outside this reader.
+- `tree_kinwave_large.inp`, a synthetic 32-conduit tree with fills from 8e-5 to 0.81 of `Qfull`.
 
-The normal-depth test additionally asserts the discrepancy is **greater than 1e-5** — a deliberate guard.
-Too close a match would mean noodl had accidentally reproduced SWMM's lookup-table quantisation
-rather than the exact closed form, which is a bug in the other direction.
+`tests/data/sewer/make_kinwave_fixtures.py` regenerates the last two. The engine identity is
+pinned: `engine_version == "5.2.4"` and `flow_routing_error == 0.0`.
 
-The Richardson-extrapolated tracer row needs explanation. noodl's reaction is explicit forward Euler, operator-split
-from transport; SWMM's is a continuous exponential decay. The $O(\Delta t)$ difference measures
-3.47e-3 at $\Delta t = 60$ s, 2.87e-4 at 5 s and 5.79e-5 at 1 s — none inside the 3e-5 target
-directly. Richardson extrapolation $2C(\Delta t) - C(2\Delta t)$ removes the leading term and
-reaches 8.05e-6, with the three $\Delta t$ pairs agreeing to 3e-8.
+| Check | Tolerance | Measured worst (5 / 13 / 32 conduits) | Exact circle, for comparison |
+|---|---|---|---|
+| Pipe flows | rel 1e-9 | 1.4e-14 / 3.1e-15 / 6.2e-14 | the same |
+| Depths (live, float64) | rel 1e-10 | 7.5e-15 / 1.2e-15 / 1.7e-14 | 5.5e-4 / 1.8e-3 / 5.2e-3 |
+| Volumes (live, float64) | rel 1e-10 | 8.6e-15 / 1.8e-15 / 2.3e-14 | 6.5e-4 / 1.7e-3 / 4.8e-3 |
+| Velocities (binary output, float32) | rel 1e-7 | 3.7e-8 / 5.8e-8 / 5.3e-8 | 6.3e-4 / 2.5e-3 / 1.8e-1 |
+| Tracer, tank-in-series closed form | rel 1e-9 | 4.5e-15 | 7.8e-6 |
+| Tracer, the model's quality layer | rel 1e-9 | 4.6e-13 | 3.5e-3 at dt = 60 s |
+
+The tolerances are not fitted to these numbers. Depth and volume are read live, as float64, and
+both sides run the same float64 operations. 1e-10 is three decades above a rounding bound of
+about 1e-13. Velocity has no live accessor under KINWAVE. The binary output stores it as float32,
+whose half-ulp is 5.96e-8.
+
+The quality layer already uses SWMM's scheme. Both codes split a step into an explicit
+first-order decay $c \to c(1 - k\Delta t)$ and an implicit upwind mixing over the conduit volume
+(SWMM `qualrout.c`: `getReactedQual`, then `getMixedQual`). SWMM reports the concentration after
+the mixing, and `Model.step` returns it after the reaction. The model's fixed point is therefore
+$(1 - k\Delta t)$ times SWMM's (3.47e-3 at 60 s). One transport-only step from the fixed point
+samples the model where SWMM samples. The two then agree at any $\Delta t$, because the fixed
+point of either ordering satisfies $c(q + kV) = \sum q_u c_u + \text{load}$.
 
 Non-SWMM checks, for the physics SWMM does not model:
 
@@ -279,5 +315,5 @@ publish numbers from this application.
 Nothing beyond the base dependencies. `pyswmm` is needed only to reproduce the SWMM parity tests:
 
 ```bash
-pip install "noodl[dev]"
+pip install "noodl-physics[dev]"
 ```
