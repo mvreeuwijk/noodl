@@ -127,7 +127,7 @@ boundary layer in `U_ref`, `theta_w` and `h_abl`.
 A street-network case bundles a network with the meteorology, emissions and background
 concentrations that drive it hour by hour. `read_case(path) -> StreetCase` reads one from disk:
 a directory holding a `munich.cfg` is read as a MUNICH case; anything else raises `ValueError`
-naming what noodl recognises.
+naming what noodl physics recognises.
 
 ```python
 from noodl.apps.street_aq import read_case
@@ -158,7 +158,7 @@ case.meteo["u_star"].shape  # (3, 4): 3 hours, 4 streets
 `wind_dir_from_deg` is degrees clockwise from north, the direction the wind blows FROM. MUNICH's
 own `WindDirection` is radians clockwise from north, the direction the wind blows TOWARD (MUNICH's
 `preprocessing/meteo.py`, `compute_wdir`); `read_case` and `write_case` convert at the file
-boundary, and `drivers_at` converts degrees-FROM into noodl's `theta_w` (radians
+boundary, and `drivers_at` converts degrees-FROM into noodl physics' `theta_w` (radians
 counter-clockwise from east, TOWARD). Every mass in `StreetCase` is SI (kg/s, kg/m3); MUNICH's
 own files hold micrograms, converted at read and write time.
 
@@ -171,7 +171,7 @@ for the Obukhov length, a plain mean otherwise); `meteo="per_street"` keeps ever
 trailing street axis and adds the `"<key>_junction"` drivers junction routing needs, from
 `case.meteo_junction` when the source has it, otherwise the same street-to-junction reduction.
 `u_star` is supplied whenever `case.meteo` has it, and drives the friction velocity directly
-rather than through noodl's log law. `background` follows the model's own boundary count the same
+rather than through noodl physics' log law. `background` follows the model's own boundary count the same
 way: one `"<layer>.x_boundary"` row per street, or one network-wide mean. `species` (default
 `case.species`) selects and orders which of the case's species end up on the emissions and
 background drivers. The model's own street order (`street_index(model)`) must equal
