@@ -35,10 +35,6 @@ __all__ = [
 CLOSURES = ("munich", "sirane")
 """The rate closures `photostationary_for_streets` offers."""
 
-SIRANE_K_FLOOR_PPB = 2.0
-"""ppb: SIRANE's lower bound on `k1/k3` in its photostationary split."""
-
-
 def photostationary_for_streets(
     species: Sequence[str],
     *,
@@ -61,7 +57,9 @@ def photostationary_for_streets(
     - `"sirane"`: `k_no_o3_sirane`, 1.325e6 exp(-1430/T) m3 mol^-1 s^-1, with
       `K = max(J/k, 2 ppb)` (`SIRANE_K_FLOOR_PPB`). The ppb conversion uses the driver
       `molar_volume_key` (m3/mol) when given, else `molar_volume(T)` at 101325 Pa.
-      SIRANE's `k1` is `j_no2_sirane`, passed as the `j_key` driver.
+      SIRANE's `k1` is `j_no2_sirane`, passed as the `j_key` driver. Reproducing SIRANE
+      exactly needs the molar-volume driver (SIRANE's ground-level V_m): the fallback
+      uses T and 101325 Pa.
 
     `floor_ppb` overrides the closure's floor (0 means none). With either closure the
     equilibrium conserves molar NOx and Ox, so background NO, NO2 and O3 enter through
@@ -204,6 +202,9 @@ SIRANE_K3_PREFACTOR = 1.325e6
 
 SIRANE_K3_ACTIVATION = 1430.0
 """K: the activation temperature of SIRANE's k(NO + O3)."""
+
+SIRANE_K_FLOOR_PPB = 2.0
+"""ppb: SIRANE's lower bound on `k1/k3` in its photostationary split."""
 
 
 def solar_elevation(latitude_deg, day_of_year, hour) -> torch.Tensor:

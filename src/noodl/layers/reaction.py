@@ -92,16 +92,19 @@ class Photostationary(Reaction):
 
     The rate ``k`` of NO + O3 is ``rate(T)`` in m3 mol^-1 s^-1, evaluated at the driver
     ``temperature_key`` (absolute temperature, K; it broadcasts against the state's leading
-    shape, so it may be one value or one per node). The default ``rate`` is MUNICH's
+    shape, so it may be one value or one per node). Without a ``rate`` it is MUNICH's
     ``k_no_o3_munich``. A constant ``k_no_o3`` (m3 kg^-1 s^-1 for the kg/m3 state, e.g.
-    ``K_NO_O3``, the 298 K value) replaces the rate and makes the temperature unnecessary.
+    ``K_NO_O3``, the 298 K value) is used instead of a rate and makes the temperature
+    unnecessary; giving both ``rate`` and ``k_no_o3`` raises.
 
     ``floor_ppb`` bounds the ratio ``J/k`` from below, ``K = max(J/k, floor)``, with the
     floor in ppb converted to mol/m3 by ``1e-9 / V_m``. ``V_m`` (m3/mol) is the driver
     ``molar_volume_key`` if given, else ``molar_volume(T)`` at 101325 Pa. The molar volume
     enters nowhere else: without a floor (``floor_ppb = 0``, the default) the equilibrium
-    is the same whatever unit it is solved in. The floor is a clip, so the gradient with
-    respect to ``J`` is zero wherever it is active.
+    is the same whatever unit it is solved in. Reproducing SIRANE exactly needs the
+    molar-volume driver (SIRANE's ground-level V_m), since the fallback uses T and
+    101325 Pa. The floor is a clip, so the gradient with respect to ``J`` is zero
+    wherever it is active.
 
     The quadratic ``k z^2 - (k (P+Q) + J) z + k P Q = 0`` in ``z = [NO2]`` has its physical
     root at the MINUS sign; it is evaluated as ``2 k P Q / (S + sqrt(S^2 - 4 k^2 P Q))``
@@ -125,7 +128,7 @@ class Photostationary(Reaction):
         o3: int,
         *,
         j_key: str = "J_NO2",
-        rate: Callable[[torch.Tensor], torch.Tensor] = k_no_o3_munich,
+        rate: Callable[[torch.Tensor], torch.Tensor] | None = None,
         temperature_key: str = "temperature",
         k_no_o3: float | None = None,
         floor_ppb: float = 0.0,
@@ -134,9 +137,14 @@ class Photostationary(Reaction):
         m_no2: float = MOLAR_MASS["no2"],
         m_o3: float = MOLAR_MASS["o3"],
     ) -> None:
+        if rate is not None and k_no_o3 is not None:
+            raise ValueError(
+                "Photostationary: give either rate (a function of temperature) or "
+                "k_no_o3 (a constant), not both"
+            )
         self.columns = (int(no), int(no2), int(o3))
         self.j_key = str(j_key)
-        self.rate = rate
+        self.rate = k_no_o3_munich if rate is None else rate
         self.temperature_key = str(temperature_key)
         self.molar_volume_key = str(molar_volume_key)
         self.masses = (float(m_no), float(m_no2), float(m_o3))

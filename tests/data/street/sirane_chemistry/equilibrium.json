@@ -1515,7 +1515,7 @@
   },
   {
    "case": "stable",
-   "description": "20 March 10:00-11:00, 6 octas, 5 C, 1/L = 0.02 1/m, u* = 0.3 m/s",
+   "description": "20 March 10:00-11:00, 6 octas input, 8 used (zero solar radiation), 5 C, 1/L = 0.02 1/m, u* = 0.3 m/s",
    "latitude_deg": 51.49415,
    "background_NO2_NO_O3": [
     25.0,

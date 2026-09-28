@@ -255,6 +255,8 @@ def test_the_temperature_is_required_unless_the_rate_is_constant():
     constant = Photostationary(0, 1, 2, k_no_o3=K_NO_O3).apply(x, None, {"J_NO2": 5.0e-3})
     at_298 = Photostationary(0, 1, 2).apply(x, None, {"J_NO2": 5.0e-3, "temperature": T298})
     torch.testing.assert_close(constant, at_298, rtol=1e-14, atol=0)
+    with pytest.raises(ValueError, match=r"Photostationary: give either rate"):
+        Photostationary(0, 1, 2, rate=k_no_o3_munich, k_no_o3=K_NO_O3)
     renamed = Photostationary(0, 1, 2, temperature_key="T_air")
     torch.testing.assert_close(renamed.apply(x, None, {"J_NO2": 5.0e-3, "T_air": T298}),
                                at_298, rtol=0, atol=0)
