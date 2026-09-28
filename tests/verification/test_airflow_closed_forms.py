@@ -1,8 +1,10 @@
-"""CONTAM-style closed-form airflow verification for PotentialFlowLayer.
+"""Closed-form airflow verification for PotentialFlowLayer (CONTAM's element laws).
 
-Each case is checked against an independent closed-form or scipy.optimize.brentq reference,
-once for a single parameter instance and once for a batch of 64 random instances
+The element laws are CONTAM's (power law, fixed flow, fan curve), but NO case here runs
+CONTAM: each is checked against an independent closed-form or scipy.optimize.brentq
+reference, once for a single parameter instance and once for a batch of 64 random instances
 (torch.manual_seed(0)), each batch element checked against its own per-instance reference.
+Code-to-code comparison with NIST's ContamX engine is `test_contam_parity.py`.
 """
 
 import math
@@ -565,6 +567,15 @@ def test_golden_helper_round_trip(tmp_path, monkeypatch):
 
 
 def test_golden_matches_stored_reference():
+    """The series, parallel, fan-driven and fan-curve cases above against committed solutions.
+
+    The cases are deterministic, so they regenerate bit-exactly and the tolerance here (1e-9)
+    is far tighter than any physical claim: this is a CHANGE DETECTOR for the potential
+    solve on these networks, not a verification -- the closed-form tests above are that,
+    and nothing here is compared with CONTAM. Regenerate with
+    `.venv/Scripts/python benchmarks/regenerate_golden.py` only when a change to those
+    numbers is intended.
+    """
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from golden import load_golden
 

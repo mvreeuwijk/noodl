@@ -463,6 +463,58 @@ def breakpoints(signal: Signal, lo: float, hi: float) -> list[float]:
     return sorted({p for p in pts if lo < p < hi})
 
 
+def events(signal: Signal, lo: float, hi: float) -> tuple[list[float], list[float]]:
+    """The times in ``(lo, hi)`` where ``signal``'s output (a ``Sources`` block) jumps, and
+    those where it is continuous but its slope jumps (the kinks of a piecewise-linear
+    signal): ``(jumps, kinks)``. A ``Step``'s start and a ``Pulse``'s edges are jumps; a
+    ``Ramp``'s two corners are kinks (jumps if ``duration = 0``); a ``Sine`` starting inside
+    the run has a kink there (a jump when it starts at a non-zero value and is not
+    ``continuous``), its quarter periods are smooth and are neither; a table's knots are
+    kinks with ``LinearSegments`` interpolation and jumps where two rows share a time, with
+    ``ConstantSegments``, at the table's ``startTime`` and where a ``Periodic`` table wraps.
+    ``Constant`` and a ``Math`` block have none of their own."""
+    short = signal.cls[len(_PREFIX):] if signal.cls.startswith(_PREFIX) else None
+    start = _get(signal, "startTime", 0.0)
+    jumps: list[float] = []
+    kinks: list[float] = []
+    if short in ("Step", "Pulse"):
+        jumps = breakpoints(signal, lo, hi)
+    elif short == "Ramp":
+        pts = breakpoints(signal, lo, hi)
+        if _required(signal, "duration") > 0.0:
+            kinks = pts
+        else:
+            jumps = pts
+    elif short == "Sine":
+        value = _get(signal, "amplitude", 1.0) * math.sin(_get(signal, "phase", 0.0))
+        smooth = bool(signal.parameters.get("continuous", False)) or value == 0.0
+        (kinks if smooth else jumps).append(start)
+    elif short in ("TimeTable", "CombiTimeTable"):
+        table = _table(signal)
+        x = table[:, 0]
+        scale = _get(signal, "timeScale", 1.0)
+        shift = _get(signal, "shiftTime", start)
+        constant = (short == "CombiTimeTable" and _enum(
+            signal.parameters.get("smoothness"), "LinearSegments") == "ConstantSegments")
+        periodic = (short == "CombiTimeTable" and x.numel() > 1 and _enum(
+            signal.parameters.get("extrapolation"), "") == "Periodic")
+        jumps = [start]
+        for t in breakpoints(signal, lo, hi):  # `start` itself is a jump already
+            xt = (t - shift) / scale
+            if periodic:
+                period = float(x[-1] - x[0])
+                xt = float(x[0]) + (xt - float(x[0])) % period
+                wrap = min(abs(xt - float(x[0])), abs(xt - float(x[0]) - period))
+                if wrap <= 1e-12 * max(1.0, period):
+                    jumps.append(t)
+                    continue
+            twin = int((torch.abs(x - xt) <= 1e-12 * max(1.0, abs(xt))).sum()) > 1
+            (jumps if constant or twin else kinks).append(t)
+    jumps = sorted({t for t in jumps if lo < t < hi})
+    kinks = sorted({t for t in kinks if lo < t < hi} - set(jumps))
+    return jumps, kinks
+
+
 def interval_means(fn, grid: Tensor, breaks) -> Tensor:
     """The mean of ``fn(t)`` over every grid interval: ``(n_t,)`` with entry ``k >= 1`` the
     mean over ``(grid[k-1], grid[k])`` and entry 0 ``fn(grid[0])`` (no interval ends

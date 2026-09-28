@@ -421,3 +421,26 @@ def test_invalid_form_is_rejected():
             form="bogus",
             rho_default=1.2,
         )
+
+
+def test_switching_values_mark_the_band_edges_where_the_law_changes_piece():
+    """`switching` is `((dp - dp_t)/dp_t, (dp + dp_t)/dp_t)`: zero exactly at the two band
+    edges, where the law passes from the polynomial to the sharp branch. The law is twice
+    continuously differentiable there, not three times: the third difference quotient jumps
+    across the edge, which is why a time integrator puts a step boundary on it."""
+    law = MBLPowerLaw(C=0.3, m=0.65, dp_turbulent=0.1, form="volume", rho_default=1.2)
+    dp = torch.tensor([-0.2, -0.1, 0.0, 0.1, 0.2], dtype=torch.float64)
+    sw = law.switching(dp)
+    assert sw.shape == (10,)
+    torch.testing.assert_close(sw[:5], (dp - 0.1) / 0.1, rtol=0, atol=0)
+    torch.testing.assert_close(sw[5:], (dp + 0.1) / 0.1, rtol=0, atol=0)
+    assert float(sw[3]) == 0.0 and float(sw[6]) == 0.0
+
+    def third(x0, side):
+        h = 1e-3 * side
+        x = torch.tensor([x0 + k * h for k in range(4)], dtype=torch.float64)
+        f = law.flow(x)
+        return float((f[3] - 3 * f[2] + 3 * f[1] - f[0]) / h**3)
+
+    inside, outside = third(0.1 - 1e-9, -1.0), third(0.1 + 1e-9, 1.0)
+    assert abs(inside - outside) > 0.1 * abs(outside)

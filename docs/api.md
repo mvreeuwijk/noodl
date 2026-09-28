@@ -165,7 +165,7 @@ Elements are grouped below by the physics they express, as in
 ::: noodl.apps.building_physics.elements
 ::: noodl.apps.building_physics.prj
     options:
-      members: [read_prj, project_to_model, Project]
+      members: [read_prj, project_to_model, steady, ZonePressureDensity, Project]
 ::: noodl.apps.building_physics.wth
     options:
       members: [read_wth, Weather]

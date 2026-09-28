@@ -22,7 +22,8 @@ initial concentrations; airflow paths; the power-law element family
 **Refused by name**, rather than silently dropped: schedules, control nodes, filters, kinetic
 reactions and air-handling systems referenced by nonzero index; CFD and 1-D convection/diffusion
 zones; continuous-values-file zones and paths; duct networks; a constant wind pressure with no
-profile; a fan curve on a path with `mult != 1`; `csf_*` and `sup_afe` elements.
+profile; a fan curve on a path with `mult != 1`; `csf_*` and `sup_afe` elements; `stackD = 1`
+(densities varying with height inside a zone).
 
 A **filter** is refused emphatically, because a filter is invisible to airflow but *not* to the
 species layer — loading one would silently corrupt contaminant results while the airflow looked
@@ -39,12 +40,21 @@ air *entering* the path, per direction, matching ContamX section 3.2. The quadra
 fan families keep reference-density coefficients, because they are not part of this application's
 parity evidence.
 
+Node densities are `Pb / (R T)`, and the species layer's capacity is each zone's air mass at that
+density, `rho V`, as ContamX holds it. When the run control sets **`densZP = 1`**, ContamX
+evaluates each zone's density at its absolute pressure `Pb + P_zone`; `project_to_model` then
+adds a `ZonePressureDensity` closure that does the same from the previous solve's pressures,
+and `prj.steady(model, state, drivers)` repeats `model.steady` to that fixed point (a single call
+when `densZP = 0`). The term is small in the density (|P_zone| / Pb, ~1e-5) but a stack flow is
+driven by a density *difference*, which amplifies it: on a 20 K stack it is 4e-5 of the flow.
+
 ```python
 from noodl.apps.building_physics import read_prj, project_to_model
+from noodl.apps.building_physics.prj import steady
 
 project = read_prj("valThreeZonesWthCtm-UseApi.prj")
 model, state, drivers = project_to_model(project)
-solved = model.steady(state, drivers)
+solved = steady(model, state, drivers)
 
 flows = project.path_flows(solved["air.q"])   # in CONTAM path-number order
 ```

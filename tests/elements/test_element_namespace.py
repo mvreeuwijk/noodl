@@ -10,6 +10,7 @@ NAMES = [
     "Conductance", "Damper", "Duct", "Element", "FanCurve", "FixedFlow", "Orifice", "PowerLaw",
     "Quadratic", "UpstreamDensityPowerLaw",
     "DoorCompartmentHead", "MBLDoorCompartment", "MBLDoorCompartmentOperable", "MBLDoorOpen",
+    "MBLDoorPortStream",
     "MBLDoorOperable", "MBLMedium", "MBLPowerLaw", "MBLTable", "medium", "mbl_coefficient",
     "mbl_discretized_door", "mbl_discretized_operable_door", "mbl_door_pair", "mbl_ela",
     "mbl_operable_door_pair", "mbl_orifice", "mbl_point", "mbl_points",

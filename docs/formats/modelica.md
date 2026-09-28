@@ -4,7 +4,7 @@ Reading a Modelica export produces a model for [building
 physics](../applications/building_physics.md). Power-law, tabulated and door components become
 the [`noodl.elements`](../applications/building_physics.md#airflow-elements) classes of the
 same physics — an open door, for example, becomes an `MBLDoorOpen` edge pair and a discretised
-door one `MBLDoorCompartment` edge per compartment — while zonal flows are assembled by the
+door an `MBLDoorPortStream` pair, its two port streams — while zonal flows are assembled by the
 importer itself as prescribed-flow edge pairs, as set out below.
 
 `read_modelica(path) -> (model, state, drivers)` imports a multizone airflow model built with the
@@ -23,13 +23,14 @@ print(result["T"][-1])       # zone temperatures (K) at the last grid time, node
 print(result["air.q"][-1])   # edge flows (kg/s); names.edges maps an MBL instance to its columns
 ```
 
-**Supported (18 models: 8 `Validation` + 10 `Examples`).** `Buildings.Airflow.Multizone`
+**Supported (19 models: 8 `Validation` + 11 `Examples`).** `Buildings.Airflow.Multizone`
 elements, `MixingVolume` zones, pressure/temperature boundaries and trace substances — not
 `Buildings.ThermalZones`, HVAC, wind, weather or district networks. `Validation`: `OneWayFlow`,
 `DoorOpenClosed`, `OpenDoorPressure`, `OpenDoorTemperature`, `ThreeRoomsContam`,
 `ThreeRoomsContamDiscretizedDoor`, `OpenDoorBuoyancyDynamic`, `OpenDoorBuoyancyPressureDynamic`.
-`Examples`: `CO2TransportStep`, `ClosedDoors`, `NaturalVentilation`, `OneOpenDoor`, `OneRoom`,
-`Orifice`, `PowerLaw`, `ReverseBuoyancy`, `ReverseBuoyancy3Zones`, `ZonalFlow`.
+`Examples`: `CO2TransportStep`, `ClosedDoors`, `NaturalVentilation`, `OneEffectiveAirLeakageArea`,
+`OneOpenDoor`, `OneRoom`, `Orifice`, `PowerLaw`, `ReverseBuoyancy`, `ReverseBuoyancy3Zones`,
+`ZonalFlow`.
 
 **Refused, each with a named error** (`ModelicaImportError` lists every offending instance and
 its class):
@@ -37,9 +38,6 @@ its class):
 - `PressurizationData`, `TrickleVent`, `ChimneyShaftNoVolume`, `ChimneyShaftWithVolume` — wind
   pressure, weather data, feedback controllers, or a dynamic (mass- and heat-storing) hydrostatic
   medium column, none of which is in scope.
-- `OneEffectiveAirLeakageArea` — a mass source feeding two boundary-less volumes; the injected
-  air can only go into compressing them, which needs the compressible volume storage this
-  release does not model.
 
 For example, reading `PressurizationData` raises:
 
@@ -55,8 +53,10 @@ ModelicaImportError: modelica: refused 3 items:
 - `DoorOpen`/`DoorOperable` use MBL's fixed default density (`Door.mo`); a discretised door
   (`DoorDiscretizedOpen`/`Operable`) evaluates density at the actual port pressure
   (`TwoWayFlowElement.mo`) instead — the two door families do not share one convention.
-- A door becomes two directional noodl physics edges between the same pair of zones; a discretised door
-  becomes one edge per compartment, each with its own hydrostatic head.
+- A door becomes two directional noodl physics edges between the same pair of zones; so does a
+  discretised door, whose two edges are its port streams `mAB_flow` and `-mBA_flow`
+  (`MBLDoorPortStream`), the compartments and their hydrostatic heads evaluated inside the
+  element.
 - Zonal flows are four-port, like doors (not the two-port shape a one-way element has), and
   become two directional edges the same way.
 - An in-line flow sensor (`Buildings.Fluid.Sensors`, flow-through) is a transparent wire: it adds
@@ -73,19 +73,20 @@ ModelicaImportError: modelica: refused 3 items:
   mass (e.g. `CO2TransportStep`'s 3.6 s pulse landing between two 172.8 s outputs).
 - A signal may drive several inputs (`drives` accepts one name or a list) — MBL's `ZonalFlow`
   example drives two flows from one `Constant`.
-- Refused, also with a named error: a closed group of zones (joined only by pressure-dependent
+- Refused, also with a named error: with `mass_storage=False` (or volumes whose `massDynamics`
+  is `SteadyState`), a closed group of zones (joined only by pressure-dependent
   edges or zonal flows, no boundary among them) with a net flow imbalance — an unequal
   `ZonalFlow_m_flow` pair or a mass source into it; `MediumColumn.densitySelection = "actual"`;
-  and `Outside` without a weather-bus signal driving it. None of the 18 supported models needs
+  and `Outside` without a weather-bus signal driving it. With storage, none of the 19 supported models needs
   any of the three.
 
-**Quasi-steady airflow.** Like the CONTAM route, a volume's air mass is not stored: the airflow
-is quasi-steady at every step. MBL's volumes do store mass, so a model whose dynamics are
-dominated by that storage — a closed, heated room expanding through its leakage, or an initial
-pressure imbalance draining away — parts company with noodl physics by more than round-off (see [the
-Modelica parity tables](../applications/building_physics.md#against-openmodelica-modelica-buildings-library)).
-Adding volume mass storage would close this gap; it is a possible extension, not implemented in
-this release.
+**Volume mass storage.** Like MBL, the reader stores each volume's air compressibly unless its
+`massDynamics` is `SteadyState`: zone pressures are states, the t = StartTime row holds MBL's
+`p_start` initialisation, a closed zone group needs no pressure reference, and a mass source
+may feed one (see [the Modelica parity
+tables](../applications/building_physics.md#against-openmodelica-modelica-buildings-library)).
+`read_modelica(path, mass_storage=False)` gives the quasi-steady airflow of the CONTAM route
+instead, with its closed-group rules below.
 
 **Reproducing the export (WSL only — the test suite itself needs none of this).** Tested on
 Ubuntu 22.04 (`jammy`) in WSL with OpenModelica 1.27.1. Install OpenModelica from its own apt
@@ -126,9 +127,12 @@ own simulated reference) as committed fixtures. `scripts/modelica_export.py` is 
 the package and is not run by the test suite. It exits non-zero if the simulation fails (the
 JSON is still written, with the instance API's Reals instead of the simulated values, so the
 export can be inspected); a batch script over every model should check the exit code rather
-than assume success. 9 of the 12 dynamic parity tests take 30 s–5 min each and are marked
-`@pytest.mark.slow`, excluded by the repository's default `pytest` run; `pytest -m slow` runs
-them.
+than assume success. The dynamic parity tests compare a window of rows of every dynamic model
+in the repository's default `pytest` run; every row of every model runs under
+`@pytest.mark.slow` (`pytest -m slow`). `--tolerance` simulates at a solver tolerance other than the model's
+declared one; the thirteen dynamic parity references were regenerated with
+`--tolerance 1e-13` (`tests/data/modelica/NOTICE.md`). At 1e-14 OpenModelica's DASSL returns
+no trajectory for these models, so 1e-13 is the finest reference available.
 
 Regenerating the committed parity records (`tests/data/modelica/parity-{algebraic,dynamic}.json`,
 in [the building physics parity tables](../applications/building_physics.md#against-openmodelica-modelica-buildings-library))
