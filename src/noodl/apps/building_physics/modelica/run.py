@@ -160,7 +160,7 @@ GRADING_WINDOW = round(1.0 / (GRADING_RATIO - 1.0))
 
 
 def _graded(t_start: float, t0: float, t1: float, h0: float, grading: bool,
-            h_last: float | None, scale: float = 1.0) -> list[float]:
+            h_last: float | None) -> list[float]:
     """Sub-step ends in `(t0, t1]` (offsets from `t0`, the last exactly `t1 - t0`): inside
     the grading window (`grading`) `h = max(h0, (GRADING_RATIO - 1)(t - t_start))`; after
     it, `h` doubles from the last sub-step (`h_last`) until it is the grid step, so that the
@@ -169,7 +169,7 @@ def _graded(t_start: float, t0: float, t1: float, h0: float, grading: bool,
     ends, t = [], t0
     while True:
         if grading:
-            h = max(h0, (GRADING_RATIO - 1.0) * (t - t_start) * scale)
+            h = max(h0, (GRADING_RATIO - 1.0) * (t - t_start))
         elif h_last is not None:
             h = 2.0 * h_last
         else:
@@ -472,8 +472,12 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
             if grading and p0 >= t_start + window - 1e-9 * max(1.0, window):
                 grading = False  # then the ramp up to the base step (`_graded`)
             ramp = h_last is not None and h_last < H * (1 - 1e-9)
-            scale = H / out_dt if out_dt > 0 else 1.0
-            cuts = (_graded(t_start, p0, p1, h0 * scale, grading, h_last, scale)
+            # In absolute time, whatever the base step's length: a base step shortened by a
+            # signal event (CO2TransportStep's 3.6 s pulse) grades like any other. Graded in
+            # proportion to its length (h0 3.6e-5 s, growing 50 times more slowly), the pulse
+            # left 6e-14 kg/kg (2.1e-5 of the floor) in the trace substance after it at 1 and
+            # at 2 substeps alike, against 1.1e-15 kg/kg graded in absolute time (measured).
+            cuts = (_graded(t_start, p0, p1, h0, grading, h_last)
                     if store is not None and (grading or ramp) else [H])
             if len(cuts) == 1:
                 pieces = [g[k0:k1 + 1]]

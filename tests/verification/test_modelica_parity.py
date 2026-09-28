@@ -2,7 +2,7 @@
 
 The algebraic models are checked to a fixed tolerance (below); the dynamic models, those
 with volumes, to the same relative tolerance against references simulated at a DASSL
-tolerance of 1e-12 (`test_dynamic_parity_at_the_reference_precision`, at the end of this
+tolerance of 1e-13 (`test_dynamic_parity_at_the_reference_precision`, at the end of this
 module).
 
 The reference implementation is MBL v13.0.0 (commit 55abf579) simulated by OpenModelica
@@ -41,7 +41,9 @@ or a CI run never rewrites those files, only a deliberate re-recording pass does
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
+import multiprocessing
 import os
 import re
 import time
@@ -52,7 +54,7 @@ import pytest
 import torch
 
 from noodl.apps.building_physics import read_modelica
-from noodl.apps.building_physics.modelica.run import GRADING_WINDOW, extrapolate, simulate
+from noodl.apps.building_physics.modelica.run import extrapolate, simulate
 from noodl.apps.building_physics.modelica.schema import ModelicaImportError
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -81,12 +83,25 @@ def _record(model: str, stats: dict, record: Path = RECORD) -> None:
     # rewrites the recorded numbers.
     if os.environ.get("NOODL_RECORD_PARITY") != "1":
         return
+    lock = record.with_suffix(".lock")
+    for _ in range(6000):  # one writer at a time: models may be re-recorded in parallel
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            time.sleep(0.05)
+    else:
+        raise TimeoutError(f"{lock} held for 5 minutes")
     try:
-        doc = json.loads(record.read_text()) if record.exists() else {}
-    except json.JSONDecodeError:
-        doc = {}
-    doc[model] = stats
-    record.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        try:
+            doc = json.loads(record.read_text()) if record.exists() else {}
+        except json.JSONDecodeError:
+            doc = {}
+        doc[model] = stats
+        record.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+    finally:
+        os.close(fd)
+        os.remove(lock)
 
 
 # Node columns `<zone or boundary>.<var>` -> the `simulate` history holding them.
@@ -249,12 +264,13 @@ def _kind(column: str) -> str:
     return "flow" if var.endswith("_flow") else var.split("[")[0]
 
 
-def _dynamic_stats(head: list[str], data: np.ndarray,
-                   cols: dict[str, np.ndarray]) -> dict[str, dict]:
+def _dynamic_stats(head: list[str], data: np.ndarray, cols: dict[str, np.ndarray],
+                   resolution: dict[str, float] | None = None) -> dict[str, dict]:
     """Per column: the worst relative and absolute error over every row after the first
-    (t = StartTime, reported separately: MBL's volumes re-balance their pressures through
-    mass storage at initialisation, which noodl's quasi-steady airflow does not model), the
-    time of the worst relative error, and the t = StartTime row's errors."""
+    (t = StartTime, MBL's `p_start` initialisation, reported separately), the time of the
+    worst relative error, the t = StartTime row's errors, and the worst relative error beyond
+    the reference's resolution (`resolution[kind]`, absolute, REFERENCE_RESOLUTION): the
+    part of the difference the reference resolves, which the tolerance applies to."""
     flows = [j for j, h in enumerate(head) if j and _kind(h) == "flow"]
     flow_floor = FLOOR_FRAC * float(np.abs(data[1:, flows]).max()) if flows else 0.0
     stats = {}
@@ -264,11 +280,17 @@ def _dynamic_stats(head: list[str], data: np.ndarray,
         floor = flow_floor if _kind(h) == "flow" else FLOOR_FRAC * float(np.abs(omc[1:]).max())
         den = np.maximum(np.abs(omc), floor)
         rel = np.divide(err, den, out=np.zeros_like(err), where=den > 0)
+        res = (resolution or {}).get(_kind(h), 0.0)
+        beyond = np.divide(np.maximum(err - res, 0.0), den, out=np.zeros_like(err),
+                           where=den > 0)
         k = int(np.argmax(rel[1:])) + 1
+        kb = int(np.argmax(beyond[1:])) + 1
         stats[h] = {"kind": _kind(h), "max_rel": float(rel[1:].max()),
                     "max_abs": float(err[1:].max()), "t_max_rel": float(data[k, 0]),
                     "floor": floor, "t0_rel": float(rel[0]), "t0_abs": float(err[0]),
-                    "rows": int(omc.size - 1)}
+                    "rows": int(omc.size - 1), "resolution": res,
+                    "max_rel_beyond_resolution": float(beyond[1:].max()),
+                    "t_max_rel_beyond_resolution": float(data[kb, 0])}
     return stats
 
 
@@ -291,64 +313,85 @@ def test_every_fixture_is_parity_checked_or_refused():
     sets = (set(ALGEBRAIC), set(DYNAMIC), set(REFUSED))
     assert set().union(*sets) == fixtures
     assert sum(len(s) for s in sets) == len(fixtures)  # disjoint
-    assert set(PARITY_ROWS) <= set(DYNAMIC) and set(PARITY_STORAGE) <= set(DYNAMIC)
+    assert set(PARITY_ROWS) == set(DYNAMIC) == set(REFERENCE_RESOLUTION)
+    assert set(PARITY_STORAGE) <= set(DYNAMIC) and set(PARITY_SUBSTEPS) <= set(DYNAMIC)
+    assert set(DEFAULT_SUBSTEPS) <= set(DYNAMIC)
     assert set(STORAGE_DOMINATED) <= set(DYNAMIC)
 
 
 # ------------------------------------------------ parity at the reference's precision
-# Every dynamic model. The reference CSVs are simulated at a DASSL tolerance of 1e-12
-# (`scripts/modelica_export.py --tolerance 1e-12`, `tests/data/modelica/NOTICE.md`): at the
-# declared 1e-6 the reference's own error was of the order of the parity tolerance (ZonalFlow:
-# 5.6e-5 K and 2.8e-8 kg/kg; CO2TransportStep's door flow 5e-5 relative after its pulse,
-# still there at 1e-10, gone at 1e-12). noodl reads each model as it is, with its volumes'
-# mass storage (`modelica/storage.py`: every volume starts at MBL's `p_start` and stores
-# what the airflow does not balance, with MBL's own balance forms), runs
+# Every dynamic model. The reference CSVs are simulated at a DASSL tolerance of 1e-13
+# (`scripts/modelica_export.py --tolerance 1e-13`, `tests/data/modelica/NOTICE.md`; at 1e-14
+# DASSL returns no trajectory): at the declared 1e-6 the reference's own error was of the
+# order of the parity tolerance (ZonalFlow: 5.6e-5 K and 2.8e-8 kg/kg; CO2TransportStep's
+# door flow 5e-5 relative after its pulse, still there at 1e-10). noodl reads each model as it
+# is, with its volumes' mass storage (`modelica/storage.py`: every volume starts at MBL's
+# `p_start` and stores what the airflow does not balance, with MBL's own balance forms), runs
 # `scheme="midpoint"` (second order; the volumes' mass by the L-stable BDF2 rate, from a
-# graded start, `run.GRADING_WINDOW`) at 1 and 2 substeps per output interval, combined by
-# `run.extrapolate`, and must agree with every
-# column at every row after t0 to PARITY_RTOL, relative with the FLOOR_FRAC floor of
-# `_dynamic_stats`: 1e-6, the models' declared solver tolerance and the algebraic parity
-# tolerance. The t0 row (MBL's `p_start` initialisation, reproduced) is printed and recorded.
-# The size of the extrapolation's correction (`own error` in the output, the 2-substep run's
-# own time-integration error) is printed and recorded.
+# graded start, `run.GRADING_WINDOW`, or a smooth one when the start is in balance; every
+# signal event and every switch of an element law or a flow's sign on a step boundary) at
+# two step sizes in ratio 2 (PARITY_SUBSTEPS), combined by `run.extrapolate`, and must agree
+# with every column at every row after t0 to PARITY_RTOL, relative with the FLOOR_FRAC floor
+# of `_dynamic_stats`: 1e-6, the models' declared solver tolerance and the algebraic parity
+# tolerance, beyond the reference's own resolution (REFERENCE_RESOLUTION). The t0 row (MBL's
+# `p_start` initialisation, reproduced) is printed and recorded. The size of the
+# extrapolation's correction (`own error` in the output, the finer run's own
+# time-integration error) is printed and recorded.
 PARITY_RTOL = 1e-6
-# Where a model is not at PARITY_RTOL, its bound is set from measurement (1.25 times the
-# full-run value, rounded up to two digits), a change detector; what is known of each:
-# * Flows where they reverse through zero, where the FLOOR_FRAC floor makes a small absolute
-#   error a large relative one: ClosedDoors 4.9e-10 kg/s (crack flows of ~1e-4 kg/s, driven
-#   by mPa pressure differences; `run.MIDPOINT_ATOL`'s 1e-9 Pa is of that order),
-#   NaturalVentilation 4.9e-9 kg/s, ReverseBuoyancy 4.3e-5 kg/s at 633.6 s,
-#   ReverseBuoyancy3Zones 6.9e-5 kg/s at 864 s (as large on the quasi-steady route: not the
-#   storage; not diagnosed), OneOpenDoor 5.6e-6 kg/s of 0.08 kg/s door flows at 5731 s (not
-#   diagnosed), OpenDoorBuoyancyPressureDynamic 5.4e-6 kg/s at its last row (as large on the
-#   quasi-steady route; not diagnosed).
-# * OpenDoorBuoyancyDynamic's door flow, 4.1e-6 at 172.8 s: the extrapolation's remainder
-#   (its own correction there is 6.7e-5).
-# * ReverseBuoyancy's T and Xi, 1.8e-6: the release of its 1325 Pa start imbalance, resolved
-#   by the graded start (`run.GRADING_WINDOW`) to this level (1.5e-5 with a coarser grading).
-# * CO2TransportStep's C, 1.5e-6 relative in the row after its pulse: 7.7e-14 kg/kg absolute,
-#   the order of the reference's own resolution of a trace substance with C_nominal = 0.01.
-# * OneEffectiveAirLeakageArea (every variable): its source is a Ramp (1800-5400 s), whose
-#   corners are continuous and so not grid events; the storage rate's BDF2 history and the
-#   midpoint step straddle them, first order in the step there (16 Pa at 5400 s, the stored
-#   mass 6.7e-4 of the injected 36 kg behind). Restarting the storage rate at a corner (it is
-#   on the grid) would remove it; not done.
-PARITY_STORAGE: dict[str, dict[str, float]] = {
-    "CO2TransportStep": {"C": 1.9e-06},
-    "ClosedDoors": {"flow": 7.0e-04},
-    "NaturalVentilation": {"flow": 4.7e-05},
-    "OneOpenDoor": {"flow": 1.6e-04},
-    "OpenDoorBuoyancyDynamic": {"flow": 5.1e-06},
-    "OpenDoorBuoyancyPressureDynamic": {"flow": 2.6e-03},
-    "ReverseBuoyancy": {"flow": 8.0e-02, "T": 2.3e-06, "Xi": 2.3e-06},
-    "ReverseBuoyancy3Zones": {"flow": 1.2e-01},
-    "OneEffectiveAirLeakageArea": {"flow": 2.2e-01, "T": 3.2e-05, "p": 1.8e-04,
-                                   "Xi": 1.8e-04},
+# The reference's resolution, absolute, per model and variable kind: the largest change of
+# any column of that kind, over the rows after t0, from the references simulated at a DASSL
+# tolerance of 1e-12 (the CSVs of commit d6ea26a) to these at 1e-13, rounded up to two
+# digits. A difference the reference itself moves by when its tolerance is tightened
+# tenfold is not resolved by it, so the tolerance applies to the difference beyond this.
+# It decides only where a model's relative error alone is above PARITY_RTOL (measured, at
+# the full runs): OneOpenDoor's door flows at 28.8 s, 1.2e-8 kg/s from the reference where
+# noodl's runs at 1, 2 and 4 substeps agree to 1e-10 kg/s and the reference itself moved by
+# up to 2.9e-8 kg/s over its first rows; NaturalVentilation's orifices at their reversal,
+# 5.0e-10 kg/s (unchanged from 1-2 to 2-4 substeps) where the reference moved by 1.8e-10 to
+# 3.7e-9 kg/s from row to row there; ReverseBuoyancy's door flow at 612 s, 4.7e-9 kg/s,
+# where the reference moved by 5.1e-9 kg/s.
+REFERENCE_RESOLUTION: dict[str, dict[str, float]] = {
+    "ClosedDoors": {"T": 1.2e-09, "Xi": 2.2e-14, "flow": 1.3e-11, "p": 1.5e-07},
+    "CO2TransportStep": {"C": 6.0e-14, "T": 1.5e-12, "Xi": 5.3e-14, "flow": 3.3e-08,
+                         "p": 1.3e-09},
+    "NaturalVentilation": {"T": 2.8e-10, "Xi": 1.2e-15, "flow": 4.9e-09, "p": 1.1e-08},
+    "OneEffectiveAirLeakageArea": {"T": 3.4e-09, "Xi": 8.8e-15, "flow": 3.1e-11,
+                                   "p": 9.6e-08},
+    "OneOpenDoor": {"T": 1.6e-08, "flow": 4.5e-08, "p": 3.6e-06},
+    "OneRoom": {"T": 1.9e-12, "Xi": 1.8e-18, "flow": 1.9e-13, "p": 1.5e-11},
+    "OpenDoorBuoyancyDynamic": {"T": 1.1e-08, "Xi": 1.5e-16, "flow": 1.5e-08, "p": 1.4e-09},
+    "OpenDoorBuoyancyPressureDynamic": {"T": 7.1e-09, "Xi": 8.3e-15, "flow": 2.9e-09,
+                                        "p": 1.9e-10},
+    "ReverseBuoyancy": {"T": 2.8e-10, "Xi": 1.5e-14, "flow": 2.2e-08, "p": 8.6e-09},
+    "ReverseBuoyancy3Zones": {"T": 1.2e-09, "Xi": 5.1e-16, "flow": 1.8e-08, "p": 4.3e-09},
+    "ThreeRoomsContam": {"C": 0.0, "T": 2.3e-13, "Xi": 3.5e-14, "flow": 4.7e-09,
+                         "p": 1.4e-10},
+    "ThreeRoomsContamDiscretizedDoor": {"C": 0.0, "T": 2.3e-13, "Xi": 1.1e-13,
+                                        "flow": 2.9e-10, "p": 1.2e-10},
+    "ZonalFlow": {"T": 3.2e-10, "Xi": 1.6e-13, "flow": 0.0, "p": 0.0},
 }
-# The default run compares the first rows of three models (a stack with a trace substance,
-# a 2 ms step, zonal flows between rooms of different moisture), each past its graded start
-# (`run.GRADING_WINDOW`, five output intervals); `-m slow` compares every row of every model.
-PARITY_ROWS = {"ThreeRoomsContam": 51, "OneRoom": 101, "ZonalFlow": 61}
+# The substeps per output interval of the two runs `run.extrapolate` combines: (1, 2), or
+# (2, 4) where one step per output interval is too long for the extrapolation to be
+# asymptotic (measured, worst flow error at (1, 2) and (2, 4) substeps): ClosedDoors'
+# 14.4 s steps across its crack flows switching on (3.5e-10 and 1.2e-12 kg/s at 993.6 s,
+# against a 1.3e-11 kg/s resolution), ReverseBuoyancy's 7.2 s steps across its orifices'
+# reversal at 18 s (8.4e-8 and 1.6e-8 kg/s at 21.6 s).
+PARITY_SUBSTEPS: dict[str, tuple[int, int]] = {"ClosedDoors": (2, 4),
+                                               "ReverseBuoyancy": (2, 4)}
+# Bounds above PARITY_RTOL (beyond the resolution), each with its demonstrated cause: none.
+PARITY_STORAGE: dict[str, dict[str, float]] = {}
+# The default run compares the first rows of every model (`-m slow` compares every row),
+# the models in parallel (`default_windows`): where the start releases an imbalance, its
+# first output intervals, most of whose cost is the graded start (`run.GRADING_WINDOW`);
+# where it is in balance, a stretch past its smooth start. ReverseBuoyancy's window ends
+# before its orifices reverse (18 s), the rows that need (2, 4) substeps (PARITY_SUBSTEPS),
+# and runs at (1, 2) (DEFAULT_SUBSTEPS), a third of the cost.
+PARITY_ROWS = {"ClosedDoors": 3, "CO2TransportStep": 2, "NaturalVentilation": 3,
+               "OneEffectiveAirLeakageArea": 8, "OneOpenDoor": 4, "OneRoom": 21,
+               "OpenDoorBuoyancyDynamic": 2, "OpenDoorBuoyancyPressureDynamic": 2,
+               "ReverseBuoyancy": 2, "ReverseBuoyancy3Zones": 2, "ThreeRoomsContam": 3,
+               "ThreeRoomsContamDiscretizedDoor": 3, "ZonalFlow": 11}
+DEFAULT_SUBSTEPS: dict[str, tuple[int, int]] = {"ReverseBuoyancy": (1, 2)}
 
 
 def _columns_of(out: dict, names, head: list[str], net, drivers) -> dict[str, np.ndarray]:
@@ -371,19 +414,30 @@ def _columns_of(out: dict, names, head: list[str], net, drivers) -> dict[str, np
 def _worst(stats: dict[str, dict]) -> dict[str, dict]:
     worst: dict[str, dict] = {}
     for h, s in stats.items():
-        w = worst.setdefault(s["kind"], {"max_rel": -1.0})
+        w = worst.setdefault(s["kind"], {"max_rel": -1.0, "beyond": -1.0})
         if s["max_rel"] > w["max_rel"]:
             w.update(max_rel=s["max_rel"], column=h, t=s["t_max_rel"], max_abs=s["max_abs"])
+        if s.get("max_rel_beyond_resolution", s["max_rel"]) > w["beyond"]:
+            w.update(beyond=s.get("max_rel_beyond_resolution", s["max_rel"]),
+                     beyond_column=h,
+                     beyond_t=s.get("t_max_rel_beyond_resolution", s["t_max_rel"]))
         w["t0_rel"] = max(w.get("t0_rel", 0.0), s["t0_rel"])
     return worst
 
 
-def _check_parity(model: str, rows: int | None) -> None:
+def _check_parity(model: str, rows: int | None, threads: int | None = None,
+                  substeps: tuple[int, int] | None = None) -> list[str]:
+    """Run `model` over its first `rows` rows (every row: `None`, recorded) at `substeps`
+    (default PARITY_SUBSTEPS) and return the failures against its tolerance (none: parity).
+    `threads` sets torch's thread count (a worker of the default run's pool)."""
+    if threads is not None:
+        torch.set_num_threads(threads)
     head, data = _csv(model)
     data = data if rows is None else data[:rows]
     start = time.perf_counter()
     runs, cols = [], []
-    for r in (1, 2):
+    substeps = substeps or PARITY_SUBSTEPS.get(model, (1, 2))
+    for r in substeps:
         net, state, drivers, names = read_modelica(DATA / f"{model}.json", return_names=True,
                                                    substeps=r)
         times = names.times[:data.shape[0]]
@@ -393,15 +447,16 @@ def _check_parity(model: str, rows: int | None) -> None:
         cols.append(_columns_of(runs[-1], names, head, net, drivers))
     best = {h: cols[1][h] + (cols[1][h] - cols[0][h]) / 3.0 for h in head[1:]}  # extrapolate
     seconds = time.perf_counter() - start
-    stats = _dynamic_stats(head, data, best)
+    stats = _dynamic_stats(head, data, best, REFERENCE_RESOLUTION[model])
     own = _dynamic_stats(head, np.column_stack([data[:, 0]] + [best[h] for h in head[1:]]),
                          cols[1])
     worst, own_worst = _worst(stats), _worst(own)
     for kind, w in worst.items():
         print(f"{model} {kind}: max rel {w['max_rel']:.3e} ({w['column']} at t = {w['t']:g}), "
-              f"max abs {w['max_abs']:.3e} {UNITS[kind]}; t0 row {w['t0_rel']:.1e}; own "
-              f"error {own_worst[kind]['max_rel']:.3e}")
-    print(f"{model}: {data.shape[0]} rows in {seconds:.1f} s")
+              f"max abs {w['max_abs']:.3e} {UNITS[kind]}; beyond the reference's resolution "
+              f"{w['beyond']:.3e}; t0 row {w['t0_rel']:.1e}; own error "
+              f"{own_worst[kind]['max_rel']:.3e}")
+    print(f"{model}: {data.shape[0]} rows at {substeps} substeps in {seconds:.1f} s")
     mechanism = None
     if model in STORAGE_DOMINATED:
         mechanism = _check_storage_mechanism(
@@ -411,42 +466,65 @@ def _check_parity(model: str, rows: int | None) -> None:
                         "columns": stats, "worst": worst, "own_error": own_worst,
                         "rtol": PARITY_RTOL, "storage_bounds": PARITY_STORAGE.get(model, {}),
                         "floor_frac": FLOOR_FRAC, "mechanism": mechanism,
-                        "reference_tolerance": 1e-12, "seconds": seconds}, RECORD_DYNAMIC)
+                        "reference_resolution": REFERENCE_RESOLUTION[model],
+                        "substeps": list(substeps),
+                        "reference_tolerance": 1e-13, "seconds": seconds}, RECORD_DYNAMIC)
     bound = {kind: PARITY_STORAGE.get(model, {}).get(kind, PARITY_RTOL) for kind in worst}
-    failures = [f"{kind}: max rel {w['max_rel']:.3e} ({w['column']} at t = {w['t']:g}) > "
+    failures = [f"{kind}: max rel beyond the reference's resolution {w['beyond']:.3e} "
+                f"({w['beyond_column']} at t = {w['beyond_t']:g}; max rel {w['max_rel']:.3e}) > "
                 f"{bound[kind]:.1e}" for kind, w in worst.items()
-                if not w["max_rel"] <= bound[kind]]
-    assert not failures, f"{model} outside its tolerance:\n" + "\n".join(failures)
+                if not w["beyond"] <= bound[kind]]
+    return [f"{model} outside its tolerance:", *failures] if failures else []
+
+
+@pytest.fixture(scope="module")
+def default_windows() -> dict[str, list[str]]:
+    """`_check_parity` on the first PARITY_ROWS rows of every dynamic model, the models in
+    parallel worker processes (most of each window's time is its graded start, `run`
+    module), so that the default run takes about as long as its slowest window."""
+    models = sorted(PARITY_ROWS)
+    cpus = os.cpu_count() or 1
+    workers = max(1, min(len(models), cpus))
+    threads = max(1, cpus // workers)
+    context = multiprocessing.get_context("spawn")
+    with concurrent.futures.ProcessPoolExecutor(workers, mp_context=context) as pool:
+        futures = {m: pool.submit(_check_parity, m, PARITY_ROWS[m], threads,
+                                  DEFAULT_SUBSTEPS.get(m)) for m in models}
+        return {m: f.result() for m, f in futures.items()}
 
 
 @pytest.mark.parametrize("model", sorted(PARITY_ROWS))
-def test_dynamic_parity_at_the_reference_precision(model):
+def test_dynamic_parity_at_the_reference_precision(model, default_windows):
     """The first `PARITY_ROWS[model]` rows of every dynamic model within PARITY_RTOL
     (see the block comment above PARITY_RTOL)."""
-    _check_parity(model, PARITY_ROWS[model])
+    failures = default_windows[model]
+    assert not failures, "\n".join(failures)
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize("model", DYNAMIC)
 def test_dynamic_parity_at_the_reference_precision_every_row(model):
     """As `test_dynamic_parity_at_the_reference_precision`, over the whole experiment."""
-    _check_parity(model, None)
+    failures = _check_parity(model, None)
+    assert not failures, "\n".join(failures)
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize(("scheme", "order"), [("implicit", 1), ("midpoint", 2)])
 def test_time_integration_error_falls_with_the_order_of_the_scheme(scheme, order):
     """ZonalFlow, without extrapolation: the error of `rooB.T` against the reference over
-    the rows after the graded start (`run.GRADING_WINDOW`) falls by 2**order from 1 to 2
-    substeps per output interval: first order for `"implicit"` (flows at the step's end),
-    second for `"midpoint"`, whose symmetric step is what `extrapolate` relies on. The ratio
-    must be within 10 % of 2**order (measured: 1.91 and 3.87). `rooB.T` is the column with
-    the largest time-integration error; the zonal flows are prescribed, and the pressures sit
-    at the reference's own resolution."""
+    the rows after its start falls by 2**order from 1 to 2 substeps per output interval:
+    first order for `"implicit"` (flows at the step's end), second for `"midpoint"`, whose
+    symmetric step is what `extrapolate` relies on. The ratio must be within 10 % of
+    2**order (measured: 1.97 and 4.00). `rooB.T` is the column with the largest
+    time-integration error; the zonal flows are prescribed, and the pressures sit at the
+    reference's own resolution. ZonalFlow starts in balance (`run._balanced`), so its
+    steps reach the grid step within the first two output intervals (steps doubling up
+    from `run.GRADING_H0`)."""
     model, rows, column = "ZonalFlow", 20, "rooB.T"
     head, data = _csv(model)
     data = data[:rows]
-    first = GRADING_WINDOW + 2  # the first row past the graded start's last interval
+    first = 3  # the first row past the smooth start
     errors = []
     for r in (1, 2):
         net, state, drivers, names = read_modelica(DATA / f"{model}.json", return_names=True,
@@ -483,8 +561,9 @@ def _check_injected_mass(doc: dict, head: list[str], data: np.ndarray, run: dict
     1800-5400 s) feeds one of two volumes that exchange air only with each other through a
     crack, so every kilogram injected is stored by compression (the quasi-steady route had to
     refuse the model). `Buildings.Media.Air`'s mass is `V p dStp/pStp` (`Air.mo:210-215`), so
-    `sum V dp dStp/pStp = int m_flow`: asserted to 1e-6 of the final injected mass for MBL
-    (measured 3.5e-12) and to 8.4e-4 for noodl (measured 6.7e-4, see PARITY_STORAGE)."""
+    `sum V dp dStp/pStp = int m_flow`: asserted to 1e-6 of the final injected mass for both
+    (measured 1.3e-13 for MBL, 3.5e-14 for noodl, whose storage rate balances the ramp's
+    point values and restarts at its corners, `run._Midpoint`)."""
     (ramp,) = [s["parameters"] for s in doc["signals"] if s["class"].endswith("Ramp")]
     t = data[:, 0]
     a, d, h = ramp["startTime"], ramp["duration"], ramp["height"]
@@ -504,9 +583,7 @@ def _check_injected_mass(doc: dict, head: list[str], data: np.ndarray, run: dict
     off = {k: float(np.abs(v - injected).max() / scale) for k, v in stored.items()}
     print(f"mechanism: stored vs injected mass off by {off['noodl']:.2e} (noodl), "
           f"{off['mbl']:.2e} (MBL) of the {injected[-1]:.1f} kg injected")
-    # noodl's stored mass lags where the Ramp's corners are (PARITY_STORAGE): 6.7e-4
-    # measured, bounded like the rest at 1.25 times.
-    assert off["noodl"] <= 8.4e-4 and off["mbl"] <= 1e-6
+    assert off["noodl"] <= 1e-6 and off["mbl"] <= 1e-6
     return {"stored_vs_injected": off, "injected_kg": float(injected[-1])}
 
 
