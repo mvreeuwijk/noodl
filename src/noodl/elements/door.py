@@ -75,7 +75,7 @@ from collections.abc import Mapping
 
 import torch
 
-from noodl.elements.base import Element
+from noodl.elements.base import Element, band_edges
 from noodl.elements.media import _R_AIR, MBLMedium
 
 Tensor = torch.Tensor
@@ -222,6 +222,20 @@ class _MBLDoor(Element):
         half = self.rho_default * V_p / 2
         return half + m_t if self.direction == "ab" else half - m_t
 
+    def _buoyancy(self, drivers) -> tuple[Tensor, Tensor, Tensor]:
+        """``(conTP (T_A - T_B), kT, m_flow_turbulent)`` of the buoyancy term; by each door."""
+        raise NotImplementedError
+
+    def switching(self, dp: Tensor, drivers=None) -> Tensor:
+        """The band edges of the pressure term, ``dp = +-dp_turbulent`` (``_power_law``),
+        and of the buoyancy term, ``conTP (T_A - T_B) = +-(m_flow_turbulent/kT)^2``
+        (``basicFlowFunction_dp``); both regularisations are twice continuously
+        differentiable at their edges, not three times."""
+        self._check_width(dp)
+        x, kT, m_flow_turbulent = self._buoyancy(drivers)
+        return torch.cat([band_edges(dp, self.dp_turbulent),
+                          band_edges(x, (m_flow_turbulent / kT) ** 2)], dim=-1)
+
     def linear_init(self, drivers=None) -> tuple[Tensor, Tensor]:
         """Tangent at ``dp = 0`` per edge: ``c`` is the pure-exchange flow ``+-mABt`` and
         ``k = rho_default/2 dVABp/ddp > 0``. Evaluated on a per-edge zero (not the base
@@ -269,7 +283,7 @@ class MBLDoorOpen(_MBLDoor):
         self.CD = self._param(_f64(CD), learnable)
         self.m = self._param(_f64(m), learnable)
 
-    def _terms(self, dp: Tensor, drivers) -> tuple[Tensor, Tensor]:
+    def _buoyancy(self, drivers) -> tuple[Tensor, Tensor, Tensor]:
         rho = self.rho_default
         AOpe = self.wOpe * self.hOpe  # Door.mo:41
         CVal = self.CD * AOpe * math.sqrt(2 / rho)  # DoorOpen.mo:27
@@ -283,10 +297,12 @@ class MBLDoorOpen(_MBLDoor):
             )
         )
         m_flow_turbulent = CVal * rho * math.sqrt(self.dp_turbulent)  # DoorOpen.mo:33-35
+        return _CON_TP * self._delta_T(drivers), kT, m_flow_turbulent  # DoorOpen.mo:68
+
+    def _terms(self, dp: Tensor, drivers) -> tuple[Tensor, Tensor]:
+        CVal = self.CD * self.wOpe * self.hOpe * math.sqrt(2 / self.rho_default)  # :27
         V_p = _power_law(CVal, dp, self.m, self.dp_turbulent)  # DoorOpen.mo:39-59
-        m_t = _basic_flow_function_dp(  # DoorOpen.mo:66-69
-            _CON_TP * self._delta_T(drivers), kT, m_flow_turbulent
-        )
+        m_t = _basic_flow_function_dp(*self._buoyancy(drivers))  # DoorOpen.mo:66-69
         return V_p, m_t
 
 
@@ -363,13 +379,10 @@ class MBLDoorOperable(_MBLDoor):
             )
         return y
 
-    def _terms(self, dp: Tensor, drivers) -> tuple[Tensor, Tensor]:
+    def _buoyancy(self, drivers) -> tuple[Tensor, Tensor, Tensor]:
         rho = self.rho_default
-        y = self._y(drivers)
         AOpe = self.wOpe * self.hOpe  # Door.mo:41
-        AClo = self.LClo * self.dpCloRat ** (0.5 - self.mClo)  # DoorOperable.mo:46-47
         CVal_ope = self.CDOpe * AOpe * math.sqrt(2 / rho)  # DoorOperable.mo:48-51
-        CVal_clo = self.CDCloRat * AClo * math.sqrt(2 / rho)
         kT = (
             rho
             * self.CDOpe
@@ -380,12 +393,19 @@ class MBLDoorOperable(_MBLDoor):
             )
         )
         m_flow_turbulent = CVal_ope * rho * math.sqrt(self.dp_turbulent)  # :57-59
+        return _CON_TP * self._delta_T(drivers), kT, m_flow_turbulent  # :106-109
+
+    def _terms(self, dp: Tensor, drivers) -> tuple[Tensor, Tensor]:
+        rho = self.rho_default
+        y = self._y(drivers)
+        AOpe = self.wOpe * self.hOpe  # Door.mo:41
+        AClo = self.LClo * self.dpCloRat ** (0.5 - self.mClo)  # DoorOperable.mo:46-47
+        CVal_ope = self.CDOpe * AOpe * math.sqrt(2 / rho)  # DoorOperable.mo:48-51
+        CVal_clo = self.CDCloRat * AClo * math.sqrt(2 / rho)
         V_ope = _power_law(CVal_ope, dp, self.mOpe, self.dp_turbulent)  # :68-88
         V_clo = _power_law(CVal_clo, dp, self.mClo, self.dp_turbulent)  # :91-99
         V_p = y * V_ope + (1 - y) * V_clo  # DoorOperable.mo:100
-        m_t = y * _basic_flow_function_dp(  # DoorOperable.mo:106-109
-            _CON_TP * self._delta_T(drivers), kT, m_flow_turbulent
-        )
+        m_t = y * _basic_flow_function_dp(*self._buoyancy(drivers))  # :106-109
         return V_p, m_t
 
 

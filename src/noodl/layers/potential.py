@@ -89,7 +89,18 @@ class _DiagonalShifted:
     def spd_certificate(self):
         if bool((self.diag_shift < 0).any()):
             return None
-        return self.base.spd_certificate()
+        # A strictly positive shift grounds its node (`PotentialFlowLayer._extra_grounded`,
+        # the rule the layer's own grounding check applies): a network with no boundary path
+        # held only by its node sources (a closed building of compressible volumes) is SPD.
+        b = self.base
+        idx = b.interior_of_node
+        interior = idx >= 0
+        positive = self.diag_shift > 0
+        extra = torch.zeros(positive.shape[:-1] + idx.shape, dtype=torch.bool,
+                            device=positive.device)
+        extra[..., interior] = positive[..., idx[interior]]
+        return spd_certificate(b.src, b.tgt, b.slopes, idx, b.boundary_mask,
+                               extra_grounded=extra)
 
 
 class PotentialFlowLayer:

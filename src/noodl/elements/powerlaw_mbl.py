@@ -56,7 +56,7 @@ import math
 
 import torch
 
-from noodl.elements.base import Element
+from noodl.elements.base import Element, band_edges
 
 Tensor = torch.Tensor
 
@@ -140,6 +140,11 @@ class MBLPowerLaw(Element):
         if self.form == "volume":
             return self.rho_default * q
         return q
+
+    def switching(self, dp: Tensor, drivers=None) -> Tensor:
+        """The band edges ``dp = +-dp_turbulent``, where the polynomial meets the sharp law
+        (twice continuously differentiable there, not three times)."""
+        return band_edges(dp, self.dp_turbulent)
 
 
 def mbl_orifice(

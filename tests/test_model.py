@@ -581,6 +581,22 @@ def test_iterate_refuses_a_pass_budget_below_two_at_construction():
     _build(iterate_max=1)
 
 
+def test_iterate_relaxation_moves_no_fixed_point():
+    """`iterate_relaxation` (the newest pass's weight in the fed transport state) is refused
+    outside (0, 1]; inside, it changes how the passes reach the step, not where: 0.5
+    (Hensen's default) and 1 (plain successive substitution) land on the same state."""
+    for bad in (0.0, -0.5, 1.5):
+        with pytest.raises(ValueError, match="iterate_relaxation"):
+            _build(coupling="iterate", iterate_tol={"species": 1e-12}, iterate_relaxation=bad)
+    out = []
+    for w in (0.5, 1.0):
+        _, model, state, drivers, _, _ = _build(
+            closures=[_Feedback(2e3)], coupling="iterate", iterate_tol={"species": 1e-13},
+            iterate_max=60, iterate_relaxation=w)
+        out.append(model.step(state, drivers, 60.0, atol=1e-14, rtol=1e-14)["species.x"])
+    assert torch.allclose(out[0], out[1], rtol=0, atol=1e-11)
+
+
 def test_iterate_steps_every_transport_layer_but_tests_only_the_named_ones():
     """The motivating case: a species layer in kg/kg beside a thermal layer in kelvin.
 

@@ -182,6 +182,7 @@ class Model:
         iterate_max: int = 20,
         substeps: Mapping[str, int] | None = None,
         adjoint_rtol: float = 1e-10,
+        iterate_relaxation: float = 0.5,
         reaction_order: str = "after_transport",
     ) -> None:
         if coupling not in ("pingpong", "iterate"):
@@ -347,6 +348,14 @@ class Model:
         self.coupling = coupling
         self.iterate_tol = dict(iterate_tol or {})
         self.iterate_max = int(iterate_max)
+        # The weight of the newest pass in the transport state fed to the next one (`_iterate`):
+        # 0.5 is Hensen's (1995) mean of the last two passes, 1 plain successive substitution.
+        # It moves no fixed point, only how fast (or whether) the passes reach it.
+        self.iterate_relaxation = float(iterate_relaxation)
+        if not 0.0 < self.iterate_relaxation <= 1.0:
+            raise ValueError(
+                f"Model: iterate_relaxation must lie in (0, 1], got {iterate_relaxation!r}"
+            )
         # The tolerance of the ONE implicit-adjoint GMRES solve at the converged interface
         # deliberately independent of the primal `iterate_tol`: that independence is
         # the whole point of differentiating the fixed point instead of the iteration.
@@ -865,8 +874,9 @@ class Model:
 
         The relaxation takes a pass to start: `prev` is None after pass 1, so pass 2 is fed
         pass 1's transport states UNRELAXED, and pass 3 is the first fed a mean. From there
-        the "<layer>.x" state fed to the closures on pass k is the mean of passes k-2 and
-        k-1 (Hensen 1995, successive substitution with 0.5 relaxation). CLOSURE-CARRIED
+        the "<layer>.x" state fed to the closures on pass k is `x_{k-2} + w (x_{k-1} -
+        x_{k-2})`, `w = iterate_relaxation`: by default 0.5, the mean of passes k-2 and k-1
+        (Hensen 1995, successive substitution with 0.5 relaxation). CLOSURE-CARRIED
         state (`closure_state_keys`) is the one exception to that relaxation: it
         is evaluated from the STEP-START state on every pass, never fed forward from the
         previous pass's own output -- a closure that integrates (a sewer manhole's
@@ -992,7 +1002,8 @@ class Model:
             if prev is not None:
                 for name in self.transport:
                     key = f"{name}.x"
-                    fed[key] = 0.5 * (prev[key] + new[key])
+                    w = self.iterate_relaxation
+                    fed[key] = prev[key] + w * (new[key] - prev[key])
             prev = new
         if not bool(converged.all()):
             failing = (
