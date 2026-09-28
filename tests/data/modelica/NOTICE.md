@@ -12,12 +12,16 @@ The reference CSVs of the 13 dynamic models (`ClosedDoors`, `CO2TransportStep`,
 `NaturalVentilation`, `OneEffectiveAirLeakageArea`, `OneOpenDoor`, `OneRoom`,
 `OpenDoorBuoyancyDynamic`, `OpenDoorBuoyancyPressureDynamic`, `ReverseBuoyancy`,
 `ReverseBuoyancy3Zones`, `ThreeRoomsContam`, `ThreeRoomsContamDiscretizedDoor`, `ZonalFlow`)
-were regenerated with `scripts/modelica_export.py --tolerance 1e-12` (DASSL at a relative
-tolerance of 1e-12 instead of each model's declared 1e-6 or 1e-8; the CSV header's
+were regenerated with `scripts/modelica_export.py --tolerance 1e-13` (DASSL at a relative
+tolerance of 1e-13 instead of each model's declared 1e-6 or 1e-8; the CSV header's
 `tolerance` line records it; the JSON, which keeps the declared experiment, came out
 byte-identical). At the declared tolerance the references' own integration error was
 comparable to the parity tolerance (ZonalFlow: 5.6e-5 K, 2.8e-8 kg/kg; CO2TransportStep's
-door flow 5e-5 relative after its source pulse, still visible at 1e-10 and gone at 1e-12).
+door flow 5e-5 relative after its source pulse, still visible at 1e-10). From 1e-12 to 1e-13
+the references still moved by up to 1.1e-4 of the flow floor (`ClosedDoors`' crack flows,
+1.2e-11 kg/s), 3.7e-5 (`NaturalVentilation`'s orifices at their reversal, 3.7e-9 kg/s),
+4.7e-5 (`OneOpenDoor`'s door at 28.8 s, 7.9e-9 kg/s) and 1.2e-6 in `CO2TransportStep`'s
+trace substance (6e-14 kg/kg); at 1e-14 DASSL returns no trajectory for these models.
 
 MBL is licensed under a 3-clause BSD licence (with an added paragraph on accepting
 enhancements), reproduced below from `Buildings/legal.html` in the MBL source tree:
