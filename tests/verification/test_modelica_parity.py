@@ -27,12 +27,10 @@ recorded row holds the pre-event value; `signals` evaluates the left limit there
 docstring), and these models align row for row with that convention.
 
 Column mapping (`ModelicaNames`): `<inst>.m_flow` is `names.edges[inst]` (an in-line sensor's
-own name maps to the flow of the element in series with it); `<inst>.m1_flow`/`m2_flow` of
-a `DoorOpen`/`DoorOperable` are `names.edges["<inst>.port_a1"]`/`["<inst>.port_a2"]`. A
-discretised door's port flows are not a signed sum of its compartment edge flows (its
-`smoothHeaviside` split), so its `m1_flow = mAB_flow` and `m2_flow = mBA_flow` are recomputed
-exactly from the solved pressures by the door element's own `port_flows`. A CSV column that
-maps to nothing fails the test: nothing is skipped.
+own name maps to the flow of the element in series with it); `<inst>.m1_flow`/`m2_flow`
+(= `mAB_flow`/`mBA_flow`) of a door, plain or discretised (whose two edges are its port
+streams, `MBLDoorPortStream`), are `names.edges["<inst>.port_a1"]`/`["<inst>.port_a2"]`. A
+CSV column that maps to nothing fails the test: nothing is skipped.
 
 The maximum relative error per model and variable is printed (visible with `-s`) and, when
 the environment variable `NOODL_RECORD_PARITY=1` is set, written to the committed
@@ -54,12 +52,7 @@ import pytest
 import torch
 
 from noodl.apps.building_physics import read_modelica
-from noodl.apps.building_physics.modelica.run import (
-    GRADING_WINDOW,
-    extrapolate,
-    simulate,
-    step_drivers,
-)
+from noodl.apps.building_physics.modelica.run import GRADING_WINDOW, extrapolate, simulate
 from noodl.apps.building_physics.modelica.schema import ModelicaImportError
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -96,27 +89,6 @@ def _record(model: str, stats: dict, record: Path = RECORD) -> None:
     record.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
 
 
-def _discretised_port_flows(model, drivers, names, out, inst: str) -> tuple[np.ndarray, ...]:
-    """`(port_a1.m_flow, port_a2.m_flow)` of discretised door `inst` at every row of `out`,
-    from the door element's `port_flows` at the solved pressures and the closure's node
-    states (`p_abs`, `T`, `X_w`) of that row."""
-    (kind,) = names.kinds[inst]
-    layer = model.potential["air"]
-    el, sl = layer.element_for(kind)
-    grid = drivers["series:time"]
-    m1, m2 = [], []
-    n = out["p"].shape[-1]
-    for k in range(out["time"].numel()):
-        d = step_drivers(drivers, grid, float(out["time"][k]))
-        d.update({"p_abs": out["p"][k], "T": out["T"][k],
-                  "X_w": torch.as_tensor(out["X_w"][k], dtype=torch.float64).expand(n)})
-        dp = layer.dp(out["air.phi"][k], d)[..., sl]
-        a, b = el.port_flows(dp, d)
-        m1.append(float(a))
-        m2.append(float(b))
-    return np.array(m1), np.array(m2)
-
-
 # Node columns `<zone or boundary>.<var>` -> the `simulate` history holding them.
 _NODE_VARS = {"T": "T", "p": "p", "Xi[1]": "X_w"}
 
@@ -134,7 +106,6 @@ def _noodl_columns(model: str, head: list[str], data: np.ndarray,
         run.update(out=out, names=names)
     q = out["air.q"].numpy()
     cols: dict[str, np.ndarray] = {}
-    doors: dict[str, tuple[np.ndarray, ...]] = {}
     for h in head[1:]:
         inst, var = h.rsplit(".", 1)
         if inst in names.nodes and (var in _NODE_VARS or var.startswith("C[")):
@@ -145,13 +116,6 @@ def _noodl_columns(model: str, head: list[str], data: np.ndarray,
                 cols[h] = out["C"][:, i, int(var[2:-1]) - 1].numpy()
             else:
                 cols[h] = out[_NODE_VARS[var]][:, i].numpy()
-            continue
-        kinds = names.kinds.get(inst, ())
-        if kinds and kinds[0].startswith("door_c:") and var in (
-                "m1_flow", "m2_flow", "mAB_flow", "mBA_flow"):
-            if inst not in doors:
-                doors[inst] = _discretised_port_flows(net, drivers, names, out, inst)
-            cols[h] = doors[inst][0 if var in ("m1_flow", "mAB_flow") else 1]
             continue
         # A two-way element's mAB_flow/mBA_flow are its m1_flow/m2_flow (MBL
         # `PartialFourPortInterface`: `mAB_flow = port_a1.m_flow`, `mBA_flow = port_a2.m_flow`).
@@ -390,20 +354,12 @@ PARITY_ROWS = {"ThreeRoomsContam": 51, "OneRoom": 101, "ZonalFlow": 61}
 def _columns_of(out: dict, names, head: list[str], net, drivers) -> dict[str, np.ndarray]:
     q = out["air.q"].numpy()
     cols: dict[str, np.ndarray] = {}
-    doors: dict[str, tuple[np.ndarray, ...]] = {}
     for h in head[1:]:
         inst, var = h.rsplit(".", 1)
         if inst in names.nodes and (var in _NODE_VARS or var.startswith("C[")):
             i = names.nodes[inst]
             cols[h] = (out["C"][:, i, int(var[2:-1]) - 1].numpy() if var.startswith("C[")
                        else out[_NODE_VARS[var]][:, i].numpy())
-            continue
-        kinds = names.kinds.get(inst, ())
-        if kinds and kinds[0].startswith("door_c:") and var in (
-                "m1_flow", "m2_flow", "mAB_flow", "mBA_flow"):
-            if inst not in doors:
-                doors[inst] = _discretised_port_flows(net, drivers, names, out, inst)
-            cols[h] = doors[inst][0 if var in ("m1_flow", "mAB_flow") else 1]
             continue
         key = {"m_flow": inst, "m1_flow": f"{inst}.port_a1", "m2_flow": f"{inst}.port_a2",
                "mAB_flow": f"{inst}.port_a1", "mBA_flow": f"{inst}.port_a2"}.get(var)

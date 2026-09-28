@@ -609,3 +609,77 @@ def mbl_discretized_operable_door(
         p_key=p_key,
     )
     return comp, head
+
+
+class MBLDoorPortStream(Element):
+    """One of the two port streams of a whole discretised door, as ONE edge from side A to
+    side B: ``direction="ab"`` returns ``port_a1.m_flow = mAB_flow``, ``"ba"`` returns
+    ``port_b2.m_flow = -port_a2.m_flow = -mBA_flow`` (kg/s, both positive from A to B), from
+    the compartment law ``comp`` (:class:`MBLDoorCompartment` or
+    :class:`MBLDoorCompartmentOperable`, one door) at the compartment pressure differences
+    ``dp + head(drivers)`` (:class:`DoorCompartmentHead`). The edge's own ``dp`` is the zones'
+    potential difference ``phi_A - phi_B``.
+
+    Why two stream edges and not ``nCom`` compartment edges: MBL moves a discretised door's
+    enthalpy, moisture and trace substances on its two PORT flows (``TwoWayFlowElement.mo:
+    94-111``: ``port_b1.h_outflow = inStream(port_a1.h_outflow)`` etc.), each upwinded on its
+    own sign (``actualStream``), i.e. on the SUM over the compartments of ``dVAB_flow`` resp.
+    ``dVBA_flow``. A compartment inside the ``smoothHeaviside`` band (``|dV_flow| <
+    VZerCom_flow``) contributes to both paths with opposite signs, which cancel in the
+    exchange; a transport over compartment edges would upwind each compartment's NET flow and
+    carry all of it with one zone's state. With the two stream edges every transport layer,
+    every time scheme and the moist-air heat carrier see MBL's streams, and the edges' flows
+    ARE the door's ``m1_flow``/``m2_flow`` (``mAB_flow``, ``-mBA_flow``). The node mass balance
+    is the same (``mAB - mBA`` is the compartments' net flow).
+    """
+
+    def __init__(self, comp: _MBLDoorCompartmentBase, head: DoorCompartmentHead,
+                 direction: str, kind: str) -> None:
+        Element.__init__(self, kind)
+        if direction not in ("ab", "ba"):
+            raise ValueError(
+                f"MBLDoorPortStream (kind {kind!r}): direction must be 'ab' or 'ba', got "
+                f"{direction!r}"
+            )
+        pairs = set(zip(comp.src.tolist(), comp.tgt.tolist(), strict=True))
+        if len(pairs) != 1:
+            raise ValueError(
+                f"MBLDoorPortStream (kind {kind!r}): the compartment element must be ONE door "
+                f"(every compartment edge between the same two nodes), got {sorted(pairs)}"
+            )
+        self.comp, self.head, self.direction = comp, head, direction
+        self.register_buffer("src", comp.src[:1].clone())
+        self.register_buffer("tgt", comp.tgt[:1].clone())
+
+    def _streams(self, dp: Tensor, drivers) -> tuple[Tensor, Tensor]:
+        dpi = dp + self.head(drivers)  # (..., 1) + (..., nCom): the compartments' dpAB
+        return self.comp.port_flows(dpi, drivers)
+
+    def flow(self, dp: Tensor, drivers=None) -> Tensor:
+        """``mAB_flow`` (``"ab"``) or ``-mBA_flow`` (``"ba"``), shape ``dp``'s (one edge)."""
+        mAB, mBA = self._streams(dp, drivers)
+        out = mAB if self.direction == "ab" else -mBA
+        return out.unsqueeze(-1) if dp.ndim else out
+
+    def dflow(self, dp: Tensor, drivers=None) -> Tensor:
+        """HALF the slope of the door's net flow ``mAB_flow - mBA_flow``, for either stream.
+
+        One stream's own slope can be negative: ``d(dV gaiFlo)/d dV = gaiFlo + dV
+        gaiFlo'`` dips below 0 for a compartment just below zero inside the
+        ``smoothHeaviside`` band (``ClosedDoors``: -5e-5 kg/(s Pa)). The two stream edges join
+        the same two nodes at the same ``dp``, so the airflow Jacobian (and every per-edge
+        slope a potential layer sums into its Laplacian) only ever sees the SUM of their
+        slopes, which is the net flow's, positive; reporting it split evenly keeps that sum
+        exact and each edge's slope nonnegative for the layer's grounding certificate."""
+        grad_enabled = torch.is_grad_enabled()
+        x = dp.detach().clone()
+        x.requires_grad_(True)
+        with torch.enable_grad():
+            mAB, mBA = self._streams(x, drivers)
+            (grad,) = torch.autograd.grad((mAB - mBA).sum(), x, create_graph=grad_enabled)
+        return 0.5 * grad
+
+    def linear_init(self, drivers=None) -> tuple[Tensor, Tensor]:
+        """Tangent at ``dp = 0`` on a one-edge zero."""
+        zero = torch.zeros(1, dtype=self._dtype())
+        return self.flow(zero, drivers), self.dflow(zero, drivers)

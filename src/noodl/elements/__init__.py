@@ -19,6 +19,7 @@ from noodl.elements.door_discretized import (
     DoorCompartmentHead,
     MBLDoorCompartment,
     MBLDoorCompartmentOperable,
+    MBLDoorPortStream,
     mbl_discretized_door,
     mbl_discretized_operable_door,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "FixedFlow",
     "MBLDoorCompartment",
     "MBLDoorCompartmentOperable",
+    "MBLDoorPortStream",
     "MBLDoorOpen",
     "MBLDoorOperable",
     "MBLMedium",

@@ -16,9 +16,11 @@ What each MBL construct becomes
   instance, so that each element keeps its own `dp_turbulent`, form and drives:
   `"airpath:<name>"` for a one-way element (edge from its `port_a` side to its `port_b`
   side), `"door_ab:<name>"` and `"door_ba:<name>"` for `DoorOpen`/`DoorOperable`
-  (`noodl.elements.door`), `"door_c:<name>"` for the `nCom` compartment edges of a
-  discretised door (`noodl.elements.door_discretized`, with its `DoorCompartmentHead`
-  drive), and `"zonal_ab:<name>"`/`"zonal_ba:<name>"` for a zonal flow. A fused column chain
+  (`noodl.elements.door`) and for a discretised door (`MBLDoorPortStream`: the door's
+  two port streams `mAB_flow`/`-mBA_flow`, its `nCom` compartments and their
+  `DoorCompartmentHead` evaluated inside the element, so that the streams carry the door's
+  enthalpy, moisture and trace substances as MBL's ports do), and
+  `"zonal_ab:<name>"`/`"zonal_ba:<name>"` for a zonal flow. A fused column chain
   adds a `_ColumnHead` drive to its path. The air-layer boundary is every boundary node plus,
   for each group of zones joined by pressure-dependent edges with no boundary among them, the
   group's zone wired straight to a boundary (at that boundary's pressure) or else its first
@@ -196,6 +198,7 @@ from noodl.apps.building_physics.modelica.schema import (
 from noodl.elements import (
     MBLDoorOpen,
     MBLDoorOperable,
+    MBLDoorPortStream,
     MBLMedium,
     MBLTable,
     mbl_coefficient,
@@ -236,14 +239,12 @@ class ModelicaNames:
     `edges[name]` lists `(column, sign)` pairs into the air layer's flow vector `"air.q"`
     whose signed sum is the flow from the element's `port_a` (one-way) or side-A (two-way)
     side to its other side: `port_a.m_flow` of a one-way element, `mAB_flow - mBA_flow` of a
-    door or zonal flow, the sum over the compartments of a discretised door. For
-    `DoorOpen`/`DoorOperable` and the zonal flows the two port flows are listed too:
-    `edges["<name>.port_a1"]` is `port_a1.m_flow` and `edges["<name>.port_a2"]` is
-    `port_a2.m_flow`. An in-line flow sensor (`graph.InlineSensor`) is listed under its own
-    name as its `port_a.m_flow`, i.e. the flow of the element port it is wired to; a sensor
-    with no single element port, or next to a discretised door (whose port flows are not a
-    signed sum of its compartment flows), is left out; a discretised door's own port flows
-    are its element's `port_flows` at the solved `dp`. `nodes[name]` is the node position of
+    door (plain or discretised) or zonal flow. For the doors and the zonal flows the two
+    port flows are listed too: `edges["<name>.port_a1"]` is `port_a1.m_flow` and
+    `edges["<name>.port_a2"]` is `port_a2.m_flow`. An in-line flow sensor
+    (`graph.InlineSensor`) is listed under its own name as its `port_a.m_flow`, i.e. the flow
+    of the element port it is wired to; a sensor with no single element port is left out.
+    `nodes[name]` is the node position of
     a zone or boundary. `kinds[name]`
     are the instance's air-layer edge kinds. `times` is the experiment output grid (the
     driver grid `"series:time"` holds it and may be finer: `driver_grid`).
@@ -1545,7 +1546,7 @@ class _Builder:
             extra_ports[f"{comp.name}.port_a1"] = (kab, 0, 1)
             extra_ports[f"{comp.name}.port_a2"] = (kba, 0, -1)
         else:
-            kind = f"door_c:{comp.name}"
+            kind = f"door_c:{comp.name}"  # the compartment law's own kind (no edges)
             geo = dict(nCom=int(p.get("nCom", 10)), wOpe=float(common["wOpe"]),
                        hOpe=float(common["hOpe"]), hA=float(p.get("hA", 2.7 / 2)),
                        hB=float(p.get("hB", 2.7 / 2)), dp_turbulent=common["dp_turbulent"],
@@ -1569,12 +1570,17 @@ class _Builder:
             except ValueError as exc:
                 self.errors.append(f"{comp.name} ({comp.cls}): {exc}")
                 return
-            for _ in range(geo["nCom"]):
-                net.add_edge(door.side_a, door.side_b, kind=kind)
-            elements.append(el)
-            drives.append(head)
-            kinds[comp.name] = (kind,)
-            edge_dirs[comp.name] = [(kind, j, 1) for j in range(geo["nCom"])]
+            # The door's two port streams as two edges (`MBLDoorPortStream`: MBL carries
+            # the door's enthalpy, moisture and trace substances on them, each upwinded on
+            # its own sign), the compartment law and heads inside.
+            kab, kba = f"door_ab:{comp.name}", f"door_ba:{comp.name}"
+            for k, direction in ((kab, "ab"), (kba, "ba")):
+                net.add_edge(door.side_a, door.side_b, kind=k)
+                elements.append(MBLDoorPortStream(el, head, direction, k))
+            kinds[comp.name] = (kab, kba)
+            edge_dirs[comp.name] = [(kab, 0, 1), (kba, 0, 1)]
+            extra_ports[f"{comp.name}.port_a1"] = (kab, 0, 1)
+            extra_ports[f"{comp.name}.port_a2"] = (kba, 0, -1)
         pressure_edges.append((iA, iB))
 
     def _zonal(self, zf: TwoWayEdge, net, index, elements, kinds, edge_dirs,

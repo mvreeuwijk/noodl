@@ -182,7 +182,9 @@ def test_zonal_flows_are_prescribed_directional_edges_and_carry_moisture():
 # -------------------------------------------------- mixed: doors, stack, sources, balance
 def test_mixed_model_conserves_mass_and_accumulates_the_trace_substance():
     model, state, drivers, names = _load("mixed_rooms.json")
-    assert len(names.edges["dooDis"]) == 4  # nCom = 4 compartment edges
+    # a discretised door is its two port streams (MBLDoorPortStream), whatever its nCom
+    assert names.kinds["dooDis"] == ("door_ab:dooDis", "door_ba:dooDis")
+    assert len(names.edges["dooDis"]) == 2
     hist = simulate(model, state, drivers, names.times)
     air = model.potential["air"]
     q = hist["air.q"]
@@ -413,9 +415,22 @@ def test_operable_and_discretised_doors_build_and_follow_their_signal(tmp_path):
     doc = _two_boundaries({"name": "el", "class": _M + "DoorDiscretizedOpen",
                            "parameters": {"nCom": 3}})
     model, state, drivers, names = read_modelica(_write(tmp_path, doc), return_names=True)
-    assert len(names.edges["el"]) == 3
+    assert len(names.edges["el"]) == 2  # its two port streams, nCom = 3 inside
     hist = simulate(model, state, drivers, names.times[:1])
     assert float(sum(s * hist["air.q"][0, c] for c, s in names.edges["el"])) > 0.0
+    # The edges ARE MBL's port flows: port_a1.m_flow = mAB_flow, port_a2.m_flow = mBA_flow
+    # (the element's `port_flows` at the solved compartment pressure differences).
+    el, sl = model.potential["air"].element_for("door_ab:el")
+    d = dict(drivers)
+    d.update(step_drivers(drivers, drivers["series:time"], float(names.times[0])))
+    for c in model.closures:
+        d.update(c({**state, "air.phi": hist["air.phi"][0]}, d))
+    dpi = model.potential["air"].dp(hist["air.phi"][0], d)[..., sl] + el.head(d)
+    mAB, mBA = el.comp.port_flows(dpi, d)
+    a1 = sum(s * hist["air.q"][0, c] for c, s in names.edges["el.port_a1"])
+    a2 = sum(s * hist["air.q"][0, c] for c, s in names.edges["el.port_a2"])
+    assert float(a1) == pytest.approx(float(mAB), rel=1e-12)
+    assert float(a2) == pytest.approx(float(mBA), rel=1e-12)
 
 
 def test_boundary_temperature_and_concentration_inputs_reach_the_zone(tmp_path):

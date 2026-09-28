@@ -132,9 +132,21 @@ def _initial_air(model: Model, store: StorageClosure, state: State, drivers: Dri
 # ReverseBuoyancy's release of its 1325 Pa start imbalance over its first ~30 s: at a
 # ratio of 1.1 over one interval it was off by 1.4 Pa and 2.9e-5 relative in T, at 1.02 over
 # five by 8e-10 in p and 3.7e-8 in T (measured, extrapolated; 1.05: 3.8e-7 and 1.5e-7).
+# OpenDoorBuoyancyPressureDynamic (a 5 Pa imbalance across a 1.9 m2 open door, `tau` of a
+# few ms) needs a finer first step: at `h0 = 1e-4` its first sub-step (2.9 ms) left 1.5e-5 K
+# in both rooms' T and 1.1e-5 in the door flows at 28.8 s (not removed by `extrapolate`, and
+# only 4x smaller at 2 and 4 substeps); at 1e-5 8e-9 kg/s (6e-8 K). 1e-6 (3e-10 kg/s) is
+# too fine: ReverseBuoyancy's airflow Newton then stalls at a 1.7e-11 kg/s residual, the
+# round-off of its storage terms at a 7 us step.
+# The window lasts until the graded step `(ratio - 1) t` has grown to the grid step
+# (`1/(ratio - 1)` output intervals), so that no doubling ramp follows it: with a window of 5
+# the ramp from 2.9 s to the 28.8 s grid step at 144 s left 4.1e-6 in the door flows of
+# OpenDoorBuoyancy(Pressure)Dynamic at 172.8 s (the extrapolation's remainder there), with
+# the full window 3e-7.
 # The sources over a sub-step are the means of their quadratic reconstruction from the
 # grid's step means (`_sub_drivers`).
-GRADING_H0, GRADING_RATIO, GRADING_WINDOW = 1e-4, 1.02, 5
+GRADING_H0, GRADING_RATIO = 1e-5, 1.02
+GRADING_WINDOW = round(1.0 / (GRADING_RATIO - 1.0))
 
 
 def _graded(t_start: float, t0: float, t1: float, h0: float, grading: bool,
