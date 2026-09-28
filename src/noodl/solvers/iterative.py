@@ -9,6 +9,7 @@ from collections.abc import Callable
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
 from noodl.operators.base import SolveResult, SolverStatus
 
 Tensor = torch.Tensor
@@ -69,7 +70,7 @@ def pcg(
         raise ValueError(f"pcg: max_iter must be >= 1 when given, got {max_iter!r}")
 
     m = op.shape[-1]
-    batch_shape = torch.broadcast_shapes(op.shape[:-2], b.shape[:-1])
+    batch_shape = broadcast_shapes(op.shape[:-2], b.shape[:-1])
     dtype, device = b.dtype, b.device
     b = b.expand(batch_shape + (m,))
     if max_iter is None:
@@ -331,7 +332,7 @@ def gmres(
         raise ValueError(f"gmres: max_iter must be >= 1 when given, got {max_iter!r}")
 
     m = op.shape[-1]
-    batch_shape = torch.broadcast_shapes(op.shape[:-2], b.shape[:-1])
+    batch_shape = broadcast_shapes(op.shape[:-2], b.shape[:-1])
     dtype, device = b.dtype, b.device
     b = b.expand(batch_shape + (m,))
     if x0 is None:

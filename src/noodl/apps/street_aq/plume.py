@@ -128,6 +128,7 @@ from typing import NamedTuple
 import torch
 from torch.utils.checkpoint import checkpoint
 
+from noodl._broadcast import broadcast_shapes
 from noodl.apps.street_aq.canyon import KAPPA
 from noodl.apps.street_aq.network import StreetNetwork
 
@@ -478,7 +479,7 @@ def plume_table(
     parts = {"u_star": u_star, "h_abl": h_abl, "lmo": lmo, "h_r": h_r, "z0": z0, "d": d,
              "sphi": sphi, "sv": sv, "sw": sw, "n_bv": n_bv, "a": a, "ty": ty, "tz": tz,
              "c": _f64(centre_c), "k": _f64(centre_k)}
-    batch = tuple(torch.broadcast_shapes(*(v.shape for v in parts.values())))
+    batch = tuple(broadcast_shapes(*(v.shape for v in parts.values())))
     p = {key: v.expand(batch).reshape(-1) for key, v in parts.items()}
     n_grid = int(math.floor(x_max / TABLE_STEP_M + 1e-9)) + 1
     if (n_grid - 1) * TABLE_STEP_M < x_max:
@@ -772,7 +773,7 @@ def _setup(table: PlumeTable, theta_w: Tensor | float, width: Tensor | float,
     theta = _f64(theta_w)
     width, clamp = _f64(width), _f64(clamp)
     src_shapes = [v.shape[:-1] if v.dim() else () for v in (width, clamp)]
-    batch = tuple(torch.broadcast_shapes(table.batch, theta.shape, *src_shapes))
+    batch = tuple(broadcast_shapes(table.batch, theta.shape, *src_shapes))
     n_b = max(1, math.prod(batch))
     n_grid = table.u.shape[-1]
     flat = {key: getattr(table, key).reshape(*table.batch, n_grid).expand(*batch, n_grid)

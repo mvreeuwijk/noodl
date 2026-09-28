@@ -86,6 +86,7 @@ from dataclasses import dataclass
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
 from noodl.elements.media import (
     _CP_AIR,
     _CP_SIMPLEAIR,
@@ -252,7 +253,7 @@ class ZoneStorage(NodeSource):
     def dflow(self, phi_nodes: Tensor, drivers: Mapping | None = None) -> Tensor:
         slope = (drivers["air.storage_rate"] * self.V * self._k(drivers)
                  / (1 + drivers["air.storage_gain"]))
-        return slope.expand(torch.broadcast_shapes(slope.shape, phi_nodes.shape))
+        return slope.expand(broadcast_shapes(slope.shape, phi_nodes.shape))
 
 
 class StorageClosure:

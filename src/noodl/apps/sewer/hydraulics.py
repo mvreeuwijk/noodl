@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
 from noodl.apps.sewer import geometry as geom
 from noodl.apps.sewer import swmm_xsect
 from noodl.apps.sewer.air import air_density
@@ -558,7 +559,7 @@ class SewerHydraulics:
                 t_head, self.manhole_idx, self.net.n, key="T_head", name=self.name
             )
         )
-        batch = torch.broadcast_shapes(rho.shape[:-1], head.shape[:-1])
+        batch = broadcast_shapes(rho.shape[:-1], head.shape[:-1])
         rho = rho.expand(batch + (self.net.n,)).clone()
         head = head.expand(batch + (len(self.manhole_names),))
         return rho.index_copy(-1, self.manhole_idx, head)

@@ -14,6 +14,7 @@ from typing import NamedTuple
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
 from noodl.model import Drivers, Model, State
 from noodl.solvers.fixed_point import differentiate_fixed_point
 from noodl.topology import Network
@@ -91,7 +92,7 @@ def _write_at(
     contribution added to it, never overwritten.
     """
     reduced = _reduced(target, n_last)
-    batch = torch.broadcast_shapes(reduced.shape[:-1], value.shape)
+    batch = broadcast_shapes(reduced.shape[:-1], value.shape)
     reduced = reduced.expand(*batch, n_last).clone()
     reduced[..., position] = reduced[..., position] + value if add else value
     stacked = _is_stacked(target, n_last)
@@ -146,7 +147,7 @@ def transport_boundary_inflow(
             f"transport_boundary_inflow: multiple flow_kinds {flow_kinds!r} not supported "
             f"(only single-flow-kind transport layers are supported)"
         )
-    batch_shape = torch.broadcast_shapes(x_interior.shape[:-1], x_boundary.shape[:-1], q.shape[:-1])
+    batch_shape = broadcast_shapes(x_interior.shape[:-1], x_boundary.shape[:-1], q.shape[:-1])
     full = torch.zeros(*batch_shape, net.n, dtype=x_interior.dtype, device=x_interior.device)
     full[..., interior_idx] = x_interior.expand(*batch_shape, interior_idx.numel())
     full[..., boundary_idx] = x_boundary.expand(*batch_shape, boundary_idx.numel())

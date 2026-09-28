@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
+
 
 def solve(A: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     try:
@@ -18,7 +20,7 @@ def solve(A: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         # solve per element instead reuses torch's own singularity judgement, so it
         # is consistent with the failure above regardless of dtype.
         n = A.shape[-1]
-        batch_shape = torch.broadcast_shapes(A.shape[:-2], b.shape[:-1])
+        batch_shape = broadcast_shapes(A.shape[:-2], b.shape[:-1])
         flat_A = A.expand(*batch_shape, n, n).reshape(-1, n, n)
         flat_b = b.expand(*batch_shape, n).reshape(-1, n)
         bad = []

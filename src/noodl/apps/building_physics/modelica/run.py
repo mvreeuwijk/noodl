@@ -774,9 +774,12 @@ class _Midpoint:
                                 dtype=F64))
         return torch.cat(parts) + MIDPOINT_RTOL * z.abs()
 
-    def _extra_sources(self, state: State, d: Drivers) -> dict[str, Tensor]:
-        """The closure's state-dependent sources: what it adds to `"<layer>.sources"`."""
-        written = self.closure(state, d)
+    def _extra_sources(self, state: State, d: Drivers,
+                       written: Drivers | None = None) -> dict[str, Tensor]:
+        """The closure's state-dependent sources: what it adds to `"<layer>.sources"`
+        (`written`: the closure's output at `state`, `d`, when already evaluated)."""
+        if written is None:
+            written = self.closure(state, d)
         return {n: written[f"{n}.sources"] - d.get(f"{n}.sources", 0.0)
                 for n in self.layers if f"{n}.sources" in written}
 
@@ -880,12 +883,13 @@ class _Midpoint:
                 drv.update(air_drv)
             phi, q = self._solve_air(drv, s_end, s[f"{name}.phi"][..., air.interior], h)
             s[f"{name}.phi"], s[f"{name}.q"] = phi, q
-            extra1 = self._extra_sources(s, d1)
+            written1 = self.closure(s, d1)  # at state 1 (the closure reads, never writes, d1)
+            extra1 = self._extra_sources(s, d1, written1)
             qm = 0.5 * (q0 + q)
             cap: dict[str, Tensor] = {}
             if store is not None:
                 drv1 = dict(d1)
-                drv1.update(self.closure(s, drv1))
+                drv1.update(written1)
                 now1 = store(s, drv1)["air.storage"]
                 w_mass = store.rate_from_mass(now1, s0["air.storage"], h)
                 net_mean = store.net(qm, s_air)
