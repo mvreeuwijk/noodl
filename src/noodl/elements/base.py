@@ -26,6 +26,16 @@ import torch
 Tensor = torch.Tensor
 
 
+def band_edges(x: Tensor, width) -> Tensor:
+    """``((x - w)/w, (x + w)/w)`` side by side on the last dimension: the two edges
+    ``x = -w`` and ``x = +w`` of a regularisation band ``|x| < w`` as switching values
+    (:meth:`Element.switching`), in units of the band's width."""
+    w = torch.as_tensor(width, dtype=x.dtype)
+    shape = torch.broadcast_shapes(x.shape, w.shape)
+    return torch.cat([torch.broadcast_to((x - w) / w, shape),
+                      torch.broadcast_to((x + w) / w, shape)], dim=-1)
+
+
 class Element(torch.nn.Module):
     """Abstract branch law: flow as a function of potential difference.
 
@@ -116,6 +126,16 @@ class Element(torch.nn.Module):
                     f"graph (e.g. a stray dp.detach())."
                 ) from exc
         return grad
+
+    def switching(self, dp: Tensor, drivers: Mapping[str, Tensor] | None = None
+                  ) -> Tensor | None:
+        """Where the law's smoothness breaks: values (last dimension of any length), each of
+        which changes sign where ``flow`` switches between two analytic pieces (the edges of
+        a regularisation band, :func:`band_edges`), in units of the piece's own scale. ``None``
+        (the default): the law is smooth in ``dp`` and in its drivers. A time integrator can
+        put a step boundary on every switch (``noodl.apps.building_physics.modelica.run``), so
+        that the flows are smooth within every step."""
+        return None
 
     def linear_init(
         self, drivers: Mapping[str, Tensor] | None = None

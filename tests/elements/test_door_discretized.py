@@ -811,3 +811,24 @@ def test_discretised_door_solves_inside_a_potential_layer_and_gradients_reach_T(
     with torch.no_grad():
         fd = (top_flow(TA0 + h) - top_flow(TA0 - h)) / (2 * h)
     torch.testing.assert_close(TA.grad, fd, rtol=1e-5, atol=1e-10)
+
+
+def test_switching_values_are_zero_on_the_compartment_band_edges():
+    """Per compartment: the power law's edges `dpAB = +-dp_turbulent` and smoothHeaviside's
+    `dV_flow = +-VZerCom_flow`, in units of their band widths, compartments in edge order."""
+    comp, head = _open()
+    drv = _drivers(101325.0, 101325.0, 293.15, 295.15)
+    dp = 0.004 + head(drv)
+    sw = comp.switching(dp, drv)
+    assert sw.shape == (4 * NCOM,)
+    dV, VZ = comp._volume_flow(dp, drv)
+    torch.testing.assert_close(sw[:NCOM], (dp - 0.01) / 0.01)
+    torch.testing.assert_close(sw[NCOM:2 * NCOM], (dp + 0.01) / 0.01)
+    torch.testing.assert_close(sw[2 * NCOM:3 * NCOM], (dV - VZ) / VZ)
+    torch.testing.assert_close(sw[3 * NCOM:], (dV + VZ) / VZ)
+    # smoothHeaviside meets 1 (and 0) exactly where the switching value is zero
+    VZ = VZ.reshape(-1)[:1]
+    edge = VZ.clone()
+    from noodl.elements.door_discretized import _smooth_heaviside
+    assert float(_smooth_heaviside(edge, VZ)) == 1.0
+    assert float(_smooth_heaviside(-edge, VZ)) == 0.0

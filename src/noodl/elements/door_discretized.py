@@ -90,7 +90,7 @@ from collections.abc import Mapping
 
 import torch
 
-from noodl.elements.base import Element
+from noodl.elements.base import Element, band_edges
 from noodl.elements.door import _power_law
 from noodl.elements.media import _R_AIR, _R_H2O, MBLMedium
 
@@ -293,6 +293,14 @@ class _MBLDoorCompartmentBase(_InflowDensities, Element):
         mAB = (rho_A * dV * gai).sum(dim=-1)  # DoorDiscretized.mo:70,74 (rho_A per edge)
         mBA = (rho_B * -dV * (1 - gai)).sum(dim=-1)  # DoorDiscretized.mo:71,75
         return mAB, mBA
+
+    def switching(self, dp: Tensor, drivers=None) -> Tensor:
+        """Per compartment, the band edges of the power law, ``dpAB = +-dp_turbulent``, and
+        of ``smoothHeaviside``, ``dV_flow = +-VZerCom_flow`` (where it meets 0 and 1): all
+        twice continuously differentiable, not three times."""
+        self._check_width(dp)
+        dV, VZerCom = self._volume_flow(dp, drivers)
+        return torch.cat([band_edges(dp, self.dp_turbulent), band_edges(dV, VZerCom)], dim=-1)
 
     def linear_init(self, drivers=None) -> tuple[Tensor, Tensor]:
         """Tangent at ``dp = 0`` on a per-edge zero (the base class's 0-d zero would sum
@@ -678,6 +686,11 @@ class MBLDoorPortStream(Element):
             mAB, mBA = self._streams(x, drivers)
             (grad,) = torch.autograd.grad((mAB - mBA).sum(), x, create_graph=grad_enabled)
         return 0.5 * grad
+
+    def switching(self, dp: Tensor, drivers=None) -> Tensor:
+        """The compartments' switches (:meth:`_MBLDoorCompartmentBase.switching`) at their
+        pressure differences ``dp + head``."""
+        return self.comp.switching(dp + self.head(drivers), drivers)
 
     def linear_init(self, drivers=None) -> tuple[Tensor, Tensor]:
         """Tangent at ``dp = 0`` on a one-edge zero."""

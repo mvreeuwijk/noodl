@@ -34,6 +34,15 @@ autograd round-trip per iteration would dominate the cost.
 take many Newton iterations or fail outright; solving the linear surrogate first puts the
 iteration inside the basin of attraction. Every built-in element provides one.
 
+An element may also report where its law stops being smooth. `switching(dp, drivers)` returns
+values that change sign where the flow switches between two analytic pieces, such as the edges
+of a regularisation band, in units of the band's width (`noodl.elements.base.band_edges(x, w)` builds the pair
+`(x - w)/w`, `(x + w)/w`). The default, `None`, means the law is smooth. The MBL laws report
+their bands: the power law's `dp = ±dp_turbulent`, a door's buoyancy band and a discretised
+door's compartment bands. A time integrator can then put a step boundary on every switch
+(`simulate(scheme="midpoint")` in the Modelica runner does), because a band crossed inside a
+step spoils the error expansion that Richardson extrapolation relies on.
+
 ### Parameters and learnability
 
 An element's differentiable quantities must be **registered parameters**, constructed with
