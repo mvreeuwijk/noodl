@@ -65,6 +65,7 @@ nav:
       - Water distribution: applications/water.md
       - Capacitated allocation: applications/capacitated.md
       - Coupling: applications/coupling.md
+  - Verification: verification.md
   - File formats:
       - formats/index.md
       - CONTAM (.prj, .wth): formats/contam.md
