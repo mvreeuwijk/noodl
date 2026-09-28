@@ -292,10 +292,10 @@ def test_a_supplied_meteo_junction_key_is_not_overwritten_by_the_derivation(tmp_
         assert key in case.meteo_junction
 
 
-def test_write_case_refuses_a_non_munich_format(tmp_path):
+def test_write_case_refuses_an_unknown_format(tmp_path):
     net, _ = munich_idealised()
-    with pytest.raises(NotImplementedError, match="sirane"):
-        write_case(tmp_path, _case(net, 1), format="sirane")
+    with pytest.raises(NotImplementedError, match="netcdf"):
+        write_case(tmp_path, _case(net, 1), format="netcdf")
 
 
 def test_write_case_refuses_missing_transport_meteo(tmp_path):

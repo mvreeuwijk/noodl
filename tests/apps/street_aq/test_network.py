@@ -151,6 +151,7 @@ def test_build_model_accepts_every_documented_option_combination():
     for canyon_wind, exchange, routing, averaging in (
         ("soulhac", "sirane", "mixing", "none"),
         ("soulhac", "schulte", "sirane", "gauss"),
+        ("soulhac", "sirane", "sirane", "sirane"),
         ("exponential", "schulte", "sirane", "munich"),
     ):
         model, state, _ = build_model(

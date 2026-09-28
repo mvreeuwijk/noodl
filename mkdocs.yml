@@ -58,7 +58,9 @@ nav:
   - Applications:
       - applications/index.md
       - Building physics: applications/building_physics.md
-      - Street air quality: applications/street_aq.md
+      - Street air quality:
+          - applications/street_aq.md
+          - Reading and writing cases: applications/street_aq_cases.md
       - Sewers: applications/sewer.md
       - Water distribution: applications/water.md
       - Capacitated allocation: applications/capacitated.md

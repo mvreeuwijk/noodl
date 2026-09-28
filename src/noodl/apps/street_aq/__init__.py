@@ -5,6 +5,7 @@ every solve; this package decides the network, the closures and the units. Nothi
 `src/noodl/` outside `apps/` imports from here.
 """
 
+from noodl.apps.street_aq.above_roof import street_steady_with_plume
 from noodl.apps.street_aq.canyon import (
     GAMMA_E,
     KAPPA,
@@ -21,7 +22,15 @@ from noodl.apps.street_aq.canyon import (
     roof_wind,
     soulhac_shape,
 )
-from noodl.apps.street_aq.case import StreetCase, drivers_at, read_case, write_case
+from noodl.apps.street_aq.case import (
+    StreetCase,
+    StreetResults,
+    drivers_at,
+    read_case,
+    read_results,
+    write_case,
+    write_sweep,
+)
 from noodl.apps.street_aq.chemistry import photostationary_for_streets, street_steady
 from noodl.apps.street_aq.exposure import (
     Q_INHALATION,
@@ -40,6 +49,18 @@ from noodl.apps.street_aq.network import (
     street_geometry,
     street_index,
 )
+from noodl.apps.street_aq.plume import (
+    SEUIL_GAUSS,
+    PlumeTable,
+    StreetSources,
+    downwind_cutoff,
+    junction_kernel,
+    junction_sources,
+    plume_kernel,
+    plume_table,
+    source_points,
+    street_kernel,
+)
 from noodl.apps.street_aq.report import (
     from_ug_m3,
     to_ug_m3,
@@ -53,6 +74,7 @@ from noodl.apps.street_aq.routing import (
     node_closure,
     routing_matrix,
     sigma_theta_munich,
+    sirane_direction_samples,
 )
 
 __all__ = [
@@ -61,19 +83,24 @@ __all__ = [
     "KAPPA_MUNICH",
     "Q_INHALATION",
     "SCHULTE_BETA",
+    "SEUIL_GAUSS",
     "SIRANE_EXCHANGE",
     "Z0_B_DEFAULT",
     "Z0_S_DEFAULT",
     "BoundaryLayer",
+    "PlumeTable",
     "Street",
     "StreetCase",
     "StreetFlows",
+    "StreetResults",
+    "StreetSources",
     "StreetGeometry",
     "StreetNetwork",
     "boundary_layer",
     "build_model",
     "canyon_velocity",
     "direction_offsets",
+    "downwind_cutoff",
     "drivers_at",
     "exchange_velocity",
     "exposure_reduction_adjoint",
@@ -81,22 +108,32 @@ __all__ = [
     "from_test_network",
     "from_ug_m3",
     "initial_state",
+    "junction_kernel",
+    "junction_sources",
     "macdonald_profile",
     "munich_idealised",
     "n_theta_munich",
     "node_closure",
     "photostationary_for_streets",
+    "plume_kernel",
+    "plume_table",
     "read_case",
+    "read_results",
     "roof_wind",
     "routing_matrix",
     "sigma_theta_munich",
+    "sirane_direction_samples",
+    "source_points",
     "soulhac_shape",
     "street_geometry",
     "street_index",
+    "street_kernel",
     "street_population",
     "street_steady",
+    "street_steady_with_plume",
     "to_ug_m3",
     "total_exposure",
     "write_case",
     "write_network_concentration",
+    "write_sweep",
 ]

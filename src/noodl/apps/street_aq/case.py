@@ -1,12 +1,14 @@
 """The format-neutral street case: ONE `StreetCase` structure that every street-model
-source (MUNICH's own files, and, in a later plan, SIRANE's decks) is read into and written
-from -- no MUNICH- or SIRANE-specific element belongs on `StreetCase` itself. Each source
-model's own file format (names, units, direction conventions) lives in a private module
-(`_munich_files` for MUNICH); this module knows only plain SI arrays in the neutral
+source (MUNICH's own files, SIRANE's decks) is read into and written from -- no MUNICH- or
+SIRANE-specific element belongs on `StreetCase` itself. Each source model's own file format
+(names, units, direction conventions) lives in a private module (`_munich_files` for MUNICH,
+`_sirane_files` for SIRANE); this module knows only plain SI arrays in the neutral
 vocabulary and the `StreetNetwork` they describe.
 """
 from __future__ import annotations
 
+import re
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from noodl.apps.street_aq import _munich_files
+from noodl.apps.street_aq import _munich_files, _sirane_files
 from noodl.apps.street_aq.network import StreetNetwork, street_index
 from noodl.apps.street_aq.routing import StreetFlows
 from noodl.couple import CONTAM_DEG_TO_STREET_RAD, apply_conversion
@@ -26,9 +28,12 @@ F64 = torch.float64
 __all__ = [
     "METEO_KEYS",
     "StreetCase",
+    "StreetResults",
     "drivers_at",
     "read_case",
+    "read_results",
     "write_case",
+    "write_sweep",
 ]
 
 METEO_KEYS = ("wind_dir_from_deg", "wind_speed", "h_abl", "u_star", "lmo", "temperature")
@@ -94,14 +99,16 @@ class StreetCase:
     to run, independent of which source model (`source`) it came from.
 
     Attributes:
-        source: Which reader produced this case -- `"munich"` (and, later, `"sirane"`), or
+        source: Which reader produced this case -- `"munich"` or `"sirane"`, or
             `"synthetic"` for one built in Python with `StreetCase.synthetic`.
         network: The case's `StreetNetwork` (metres).
         times: `(n_hours,)`, seconds since `start`.
         street_ids: `network.streets`' names, in the order `emissions`'/`background`'s
             street axis uses (== `network.streets` order).
         junction_ids: The source model's OWN node ids for `network.junctions`, in that
-            same order (MUNICH: the intersection ids from `intersection.dat`).
+            same order (MUNICH: the intersection ids from `intersection.dat`; SIRANE: the
+            node ids of the network's `NDDEB`/`NDFIN` fields, which are also the junction
+            names).
         species: The case's species names, in the order `emissions`'/`background`'s last
             axis uses.
         meteo: One `(n_hours, n_streets)` array per `METEO_KEYS` key: `wind_dir_from_deg`
@@ -114,7 +121,10 @@ class StreetCase:
         emissions: `(n_hours, n_streets, n_species)`, **kg/s** per street.
         background: `(n_hours, n_streets, n_species)`, **kg/m3**, per street.
         native: The source model's own options, as read (MUNICH: one dict per `munich.cfg`
-            section, plus the lon/lat projection the reader used) -- `model_options`
+            section, plus the lon/lat projection the reader used; SIRANE: the master file's
+            options by SIRANE keyword, the two site files, each street's network fields,
+            the one-sided streets and the raw meteo columns -- see
+            `_sirane_files.read_sirane_case`) -- `model_options`
             translates them into `build_model` keywords, and `write_case` writes them back
             when the format matches.
         start: The absolute date and time of `times[0]`, or `None` when the case has none
@@ -213,14 +223,40 @@ class StreetCase:
         defaults to `0.1` when absent (see `_MUNICH_FLOAT_DEFAULTS`) -- an unparsable value
         still raises.
 
+        SIRANE (`source="sirane"`): SIRANE's closure set, which its master file does not
+        switch -- `canyon_wind="soulhac"` (the in-canyon velocity of Soulhac et al. 2008),
+        `exchange="sirane"` (`u_d = sigma_w / (sqrt(2) pi)`), `routing="sirane"` (the
+        non-crossing-streamline junction exchange), `direction_averaging="sirane"` (SIRANE's
+        normalised Gaussian integral of the junction exchange over the direction spread,
+        Soulhac et al. 2011, Eq. 7, evaluated exactly: the integrand is piecewise constant
+        in the direction; SIRANE's spread varies hourly, so it is supplied as the
+        `sigma_theta` driver rather than fixed here), `stability="munich"` (SIRANE's
+        three-branch stable/neutral/unstable `sigma_w`; noodl physics' `"munich"` form is
+        the closest it has). `z_ref` is left at `build_model`'s default: noodl physics has no
+        SIRANE meteorological preprocessor (SIRANE derives u*, the boundary-layer height,
+        the Obukhov length and sigma_theta from the meteo site's wind, temperature and cloud
+        cover, over that site's own roughness), so a SIRANE case is driven with SIRANE's own
+        u* -- e.g. from its `Resul_Meteo.dat` -- through the `u_star` driver, never through
+        noodl's log law from the measured `wind_speed`. Likewise the dispersion site's `Z0D`
+        and `ZDISPL` are recorded in `native["site_disp"]` but not used: noodl physics'
+        canopy takes `d = 2 h_mean / 3` and `z0 = h_mean / 10` from the network.
+
         Any other source raises `NotImplementedError`: a synthetic case carries no source
-        model's options (pass `build_model`'s keywords directly), and SIRANE's are a later
-        plan's job.
+        model's options (pass `build_model`'s keywords directly).
         """
+        if self.source == "sirane":
+            return {
+                "canyon_wind": "soulhac",
+                "exchange": "sirane",
+                "routing": "sirane",
+                "direction_averaging": "sirane",
+                "stability": "munich",
+            }
         if self.source != "munich":
             raise NotImplementedError(
                 f"StreetCase.model_options: source {self.source!r} carries no source-model "
-                f"options this function can translate; only 'munich' is implemented"
+                f"options this function can translate; only 'munich' and 'sirane' are "
+                f"implemented"
             )
         street = self.native.get("street", {})
 
@@ -250,17 +286,106 @@ class StreetCase:
         return options
 
 
+@dataclass(frozen=True)
+class StreetResults:
+    """One street model's own results, read format-neutral by `read_results` from a SIRANE
+    result directory or a MUNICH `results/` directory.
+
+    Attributes:
+        source: `"sirane"` or `"munich"` (which reader produced it).
+        times: The absolute time of each output hour.
+        street_ids: What `c_in`/`c_above`/`u_canyon`/`sigma_w_roof`/`u_exchange`'s street
+            axis indexes, in that order (SIRANE: its own record-order ids -- matching
+            `StreetCase.street_ids` for a case read from the same deck; MUNICH:
+            `case.street_ids`).
+        species: `c_in`/`c_above`'s dict keys, in their in-file order.
+        c_in: One `(n_hours, n_streets)` array per species, kg/m3 -- the in-canyon
+            concentration (SIRANE `Cint`; MUNICH's own street concentration).
+        c_above: The same, kg/m3, for the concentration just above the canyon (SIRANE
+            `Cext`) -- `{}` for MUNICH, which has no such output.
+        u_canyon: `(n_hours, n_streets)`, m/s, the mean in-canyon velocity (SIRANE
+            `U_moy`) -- `None` for MUNICH.
+        sigma_w_roof: `(n_hours, n_streets)`, m/s, the vertical-velocity fluctuation at
+            roof height (SIRANE `Sigma_wH`) -- `None` for MUNICH.
+        u_exchange: `(n_hours, n_streets)`, m/s, the roof-level exchange velocity, read AS
+            PRINTED (SIRANE `u_d`), not recomputed -- `None` for MUNICH. Pinned against
+            SIRANE's own output: `u_exchange == sigma_w_roof * SIRANE_EXCHANGE`
+            (`sigma_w_roof / (sqrt(2) pi)`, `noodl.apps.street_aq.canyon`), to the two
+            decimals SIRANE prints.
+        meteo: `u_star`, `sigma_theta` (radians -- SIRANE's own `SigmaTheta` is degrees),
+            `h_abl`, `lmo`, `wind_speed`, `wind_dir_from_deg`, `temperature` (K), each
+            `(n_hours, n_streets)`, network-wide (SIRANE's `Resul_Meteo.dat`, one
+            meteorological station for the whole case) -- `{}` for MUNICH, whose own
+            meteorology is the case's `meteo`, not a result.
+    """
+
+    source: str
+    times: list[datetime]
+    street_ids: list[str]
+    species: list[str]
+    c_in: dict[str, np.ndarray]
+    c_above: dict[str, np.ndarray]
+    u_canyon: np.ndarray | None
+    sigma_w_roof: np.ndarray | None
+    u_exchange: np.ndarray | None
+    meteo: dict[str, np.ndarray]
+
+
+def read_results(
+    path: Path, *, case: StreetCase | None = None, hours: str = "case"
+) -> StreetResults:
+    """`StreetResults` from `path`: a SIRANE result directory (holding `RUES_PAR_HEURE/` and
+    `METEO/Resul_Meteo.dat`) or a MUNICH `results/` directory of `<species>.bin` files (see
+    `_sirane_files.read_sirane_results`, `_munich_files.read_munich_results` for what each
+    reads).
+
+    A MUNICH results directory always needs `case`: its binaries carry no street order,
+    species or absolute time of their own. A SIRANE result directory needs it only for
+    `hours="case"` (the default): the hours inside `case`'s own period (`case.start` +
+    `case.times`) -- an archived result directory can mix hours from more than one run (see
+    `tests/data/street/sirane_south_kensington`'s NOTICE.md), so this is the safer default;
+    a case hour missing from the directory raises `ValueError` naming it. `hours="all"`
+    returns every hour the directory holds, in time order, with or without a `case`.
+    `hours` applies to a SIRANE result directory only: a MUNICH result is the case's own
+    period, so any other `hours` than `"case"` is refused for it by name.
+
+    A path with no `RUES_PAR_HEURE/` and no `case` is refused, naming both expectations.
+    """
+    path = Path(path)
+    if (path / "RUES_PAR_HEURE").is_dir():
+        raw = _sirane_files.read_sirane_results(path, case=case, hours=hours)
+        return StreetResults(source="sirane", **raw)
+    if case is None:
+        raise ValueError(
+            f"read_results: {path} has no RUES_PAR_HEURE (not a SIRANE result directory) "
+            f"and no case was given to read it as a MUNICH results/ directory"
+        )
+    if hours != "case":
+        raise ValueError(
+            f"read_results: hours={hours!r} applies to a SIRANE result directory only; "
+            f"{path} is read as a MUNICH results/ directory, which covers the case's own "
+            f"period (hours='case')"
+        )
+    raw = _munich_files.read_munich_results(path, case=case)
+    return StreetResults(source="munich", **raw)
+
+
 def read_case(path: Path) -> StreetCase:
     """`StreetCase` from `path`: a directory holding `munich.cfg` is read as a MUNICH case;
-    a SIRANE master `.dat` file will be read as a SIRANE case once a later plan implements
-    it. Anything else raises `ValueError` naming the expectation.
+    a `.dat` file is read as a SIRANE master file (`Donnees_*.dat`) with the deck it names
+    (see `_sirane_files.read_sirane_case` for what is read and what is refused). Anything
+    else raises `ValueError` naming both expectations.
     """
     path = Path(path)
     if path.is_dir() and (path / "munich.cfg").is_file():
         raw = _munich_files.read_munich_case(path)
         return StreetCase(source="munich", **raw)
+    if path.is_file() and path.suffix.lower() == ".dat":
+        raw = _sirane_files.read_sirane_case(path)
+        return StreetCase(source="sirane", **raw)
     raise ValueError(
-        f"read_case: {path} is not a directory holding 'munich.cfg' (a MUNICH case)"
+        f"read_case: {path} is neither a directory holding 'munich.cfg' (a MUNICH case) "
+        f"nor a SIRANE master .dat file"
     )
 
 
@@ -271,13 +396,13 @@ def write_case(
     format: str = "munich",
     options: Mapping[str, object] | None = None,
 ) -> Path:
-    """Writes `case` under `out_dir` in `format`, and returns `out_dir`. Only
-    `format="munich"` is implemented.
+    """Writes `case` under `out_dir` in `format` (`"munich"` or `"sirane"`), and returns
+    `out_dir`. `case.start` must be set: both formats date every input.
 
-    `case.start` must be set (MUNICH dates every input), and `case.meteo` must have `h_abl`,
-    `u_star` and `lmo`: MUNICH needs their `PBLH`, `UST`, `LMO` fields (and the `...Inter`
-    junction counterparts derived from them) whenever transport is on, which this writer
-    always turns on; a `ValueError` names whichever of the three is missing.
+    **`format="munich"`**: `case.meteo` must have `h_abl`, `u_star` and `lmo`: MUNICH needs
+    their `PBLH`, `UST`, `LMO` fields (and the `...Inter` junction counterparts derived from
+    them) whenever transport is on, which this writer always turns on; a `ValueError` names
+    whichever of the three is missing.
 
     A case read from MUNICH files writes its own `[street]` section and projection back
     (`read_case` -> `write_case` round-trips those two); `[options]` itself always turns
@@ -293,16 +418,46 @@ def write_case(
     supplies. Missing junction (`*Inter`) meteorology is derived from the streets meeting at
     each junction: circular mean for the direction, `1/L` for the Obukhov length, arithmetic
     mean otherwise.
+
+    **`format="sirane"`**: a SIRANE v2.1 deck, master file `out_dir / "Donnees.dat"` in
+    French labels (see `_sirane_files.write_sirane_case` for every file and default).
+    `times` must be whole consecutive hours; meteorology, background and the streets'
+    `z0_b` must each be one value for the network (SIRANE has one meteo station, one
+    background and one building roughness); the wind speed a multiple of 0.1 m/s and the
+    direction whole degrees (the meteo file's format); the species SIRANE species (a
+    passive tracer is written as an existing one, e.g. NO2, with chemistry and deposition
+    off). Masses are written in SIRANE's units (g/s, micrograms/m3). The deck's input folder is
+    `out_dir` relative to its parent (SIRANE's working directory) and its results folder
+    `<out_dir>/RESULT` (created in advance, with SIRANE's result subfolders).
+    Every numeric setting is checked against SIRANE's own range and refused by name
+    outside it. A case read from a SIRANE deck writes its own physics and
+    numerical settings, site files, street fields and species flags back. `options`:
+    `chapman` (0/1, SIRANE's Chapman NO-NO2-O3 chemistry; default 0), `plume` (0/1,
+    SIRANE's street-plume model above the roofs; default 1), `deposition` (0/1; default
+    0), `latitude` (deg; default 51.5), `measurement_height` (m, the height of the wind
+    speed; default 10), `input_dir`/`result_dir` (SIRANE's two folders, relative to its
+    working directory), and SIRANE's own keyword for any physics or numerical setting it
+    writes back (e.g. `U_MIN`).
     """
-    if format != "munich":
+    if format not in ("munich", "sirane"):
         raise NotImplementedError(
-            f"write_case: format {format!r} is not implemented; only 'munich' is"
+            f"write_case: format {format!r} is not implemented; only 'munich' and 'sirane' "
+            f"are"
         )
     if case.start is None:
         raise ValueError(
-            "write_case: case.start is None; MUNICH needs an absolute start date "
-            "(set StreetCase.start)"
+            f"write_case: case.start is None; {format} needs an absolute start date "
+            f"(set StreetCase.start)"
         )
+    if format == "sirane":
+        _sirane_files.write_sirane_case(
+            out_dir, network=case.network, times=case.times, start=case.start,
+            junction_ids=case.junction_ids, species=case.species, meteo=case.meteo,
+            emissions=case.emissions, background=case.background,
+            native=case.native if case.source == "sirane" else None,
+            options=dict(options or {}),
+        )
+        return Path(out_dir)
     return _munich_files.write_munich_case(
         out_dir, network=case.network, times=case.times, start=case.start,
         junction_ids=case.junction_ids,
@@ -310,6 +465,187 @@ def write_case(
         emissions=case.emissions, background=case.background,
         native=case.native if case.source == "munich" else None, options=options,
     )
+
+
+_SWEEP_START = datetime(2014, 1, 7)
+"""The sweep's default start (00:00, 7 January 2014): the archived South Kensington SIRANE
+results' own night-time hour. SIRANE's meteorological preprocessor sets the stability from the solar
+elevation, so the hour of day matters."""
+
+_RUN_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def write_sweep(
+    out_dir: Path,
+    base_case: StreetCase,
+    *,
+    directions_deg: Sequence[float],
+    speeds: Sequence[float],
+    sources: str | Sequence[str] = "unit_impulse",
+    species: str = "NO2",
+    variants: Mapping[str, Mapping[str, object]] | None = None,
+    chapman: int = 0,
+) -> Path:
+    """Writes a sweep of SIRANE decks under `out_dir` -- one per (direction, speed, source
+    street, variant) -- plus `runs.csv`, a manifest of each deck's parameters; returns
+    `out_dir`.
+
+    Each deck follows the South Kensington deck: `base_case.network`, two hours from
+    `base_case.start` (default `_SWEEP_START`) -- the first a warm-up -- with
+    the wind from `direction` (degrees clockwise from north, whole degrees) at
+    `speed` (m/s at the meteo site's height, a multiple of 0.1), the
+    temperature of `base_case`'s first hour when it has one, zero background, and a unit
+    emission (1 g/s, i.e. 1e-3 kg/s) of `species` on the source street only.
+    `sources="unit_impulse"` takes every street in turn; a sequence of street ids
+    (`base_case.street_ids`) takes those. With `chapman=0` (default) the case has
+    `species` alone -- a passive tracer written as that SIRANE species, chemistry off; with
+    `chapman=1` it has NO2, NO and O3 (`species` among them) and SIRANE's chemistry on.
+    Deposition is off unless a variant sets `deposition`. A `base_case` read from a SIRANE
+    deck keeps its site files, street fields and physics settings.
+
+    Every argument, every variant's options and the base case itself (by writing the
+    first deck to a temporary directory) are checked before anything is written under
+    `out_dir`. Writing into an existing `out_dir` leaves any older decks there in place;
+    `runs.csv` lists only this sweep's decks.
+
+    `variants`: name -> `write_case` options for that variant (default
+    `{"plume_on": {"plume": 1}, "plume_off": {"plume": 0}}`); `chapman` applies to every
+    variant that does not set its own. Names must be letters, digits, `_` or `-`.
+
+    Layout: `decks/<run-id>/` (each deck, with its results folder `decks/<run-id>/RESULT/`,
+    whose SIRANE output reads back with `read_results`). The run id is
+    `d<direction>_u<speed>_s<street index>_<variant>`, e.g. `d045_u5p0_s07_plume_on` (the street
+    index is SIRANE's own street number, the record order; `runs.csv` maps it to the case's
+    street id).
+    """
+    out_dir = Path(out_dir)
+    variants = dict(variants if variants is not None
+                    else {"plume_on": {"plume": 1}, "plume_off": {"plume": 0}})
+    if not variants:
+        raise ValueError("write_sweep: variants is empty; give at least one")
+    bad = [name for name in variants if not _RUN_NAME.match(name)]
+    if bad:
+        raise ValueError(
+            f"write_sweep: variant name(s) {bad} must be letters, digits, '_' or '-' (they "
+            f"become file names)"
+        )
+    if chapman not in (0, 1):
+        raise ValueError(f"write_sweep: chapman must be 0 or 1, got {chapman!r}")
+    if chapman == 1:
+        if species not in ("NO2", "NO", "O3"):
+            raise ValueError(
+                f"write_sweep: with chapman=1 the emitted species must be NO2, NO or O3, got "
+                f"{species!r}"
+            )
+        case_species = ["NO2", "NO", "O3"]
+    else:
+        case_species = [species]
+    def run_options(variant_options: Mapping[str, object]) -> dict:
+        own_chapman = {"chapman", "CHAPMAN"} & set(variant_options)
+        return dict({} if own_chapman else {"chapman": chapman}, **variant_options)
+
+    for variant_options in variants.values():
+        forbidden = sorted({"input_dir", "result_dir"} & set(variant_options))
+        if forbidden:
+            raise ValueError(
+                f"write_sweep: a variant may not set {forbidden}; the sweep lays out its "
+                f"own decks and results"
+            )
+        _sirane_files.check_sirane_options(run_options(variant_options), case_species,
+                                           who="write_sweep")
+    directions = [float(d) for d in directions_deg]
+    speed_values = [float(u) for u in speeds]
+    if not directions or not speed_values:
+        raise ValueError("write_sweep: directions_deg and speeds must each be non-empty")
+    for d in directions:
+        if abs(d - round(d)) > 1e-9:
+            raise ValueError(
+                f"write_sweep: direction {d} deg is not whole degrees (SIRANE's meteo file "
+                f"format)"
+            )
+    for u in speed_values:
+        if not u > 0 or abs(u * 10 - round(u * 10)) > 1e-9:
+            raise ValueError(
+                f"write_sweep: speed {u} m/s must be positive and a multiple of 0.1 m/s "
+                f"(SIRANE's meteo file format)"
+            )
+    street_ids = list(base_case.street_ids)
+    if isinstance(sources, str):
+        if sources != "unit_impulse":
+            raise ValueError(
+                f"write_sweep: sources must be 'unit_impulse' or a sequence of street ids, "
+                f"got {sources!r}"
+            )
+        source_streets = street_ids
+    else:
+        source_streets = list(sources)
+        unknown = [s for s in source_streets if s not in street_ids]
+        if unknown:
+            raise ValueError(
+                f"write_sweep: source street(s) {unknown} are not in base_case.street_ids"
+            )
+    start = base_case.start or _SWEEP_START
+    n_streets = len(street_ids)
+    width = len(str(n_streets - 1))
+    meteo_base = {}
+    if "temperature" in base_case.meteo:
+        meteo_base["temperature"] = float(np.mean(base_case.meteo["temperature"][0]))
+    native: dict = {}
+    if base_case.source == "sirane":
+        native = {k: v for k, v in base_case.native.items()
+                  if k in ("options", "site_disp", "site_meteo", "streets")}
+        raw = base_case.native.get("meteo_raw", {})
+        native["meteo_raw"] = {k: [v[0], v[0]] for k, v in raw.items() if v}
+
+    runs = []
+    for d in directions:
+        for u in speed_values:
+            for source in source_streets:
+                index = street_ids.index(source)
+                for variant, variant_options in variants.items():
+                    run_id = (f"d{int(round(d)) % 360:03d}_u{u:.1f}".replace(".", "p")
+                              + f"_s{index:0{width}d}_{variant}")
+                    runs.append({"run_id": run_id, "direction_deg": d, "speed": u,
+                                 "source_street": source, "source_index": index,
+                                 "variant": variant, "options": run_options(variant_options)})
+    ids = [r["run_id"] for r in runs]
+    if len(set(ids)) != len(ids):
+        duplicated = sorted({i for i in ids if ids.count(i) > 1})
+        raise ValueError(
+            f"write_sweep: run ids {duplicated[:5]} repeat (a direction, speed or source "
+            f"given twice, or two directions equal modulo 360?)"
+        )
+
+    s_index = case_species.index(species)
+    zeros = np.zeros((2, n_streets, len(case_species)), dtype=np.float64)
+
+    def write_run(root: Path, run: dict) -> None:
+        emissions = zeros.copy()
+        emissions[:, run["source_index"], s_index] = 1e-3
+        meteo = {key: np.full((2, n_streets), value, dtype=np.float64)
+                 for key, value in dict(meteo_base, wind_dir_from_deg=run["direction_deg"],
+                                        wind_speed=run["speed"]).items()}
+        case = StreetCase(
+            source="sirane" if native else "synthetic", network=base_case.network,
+            times=[0.0, 3600.0], street_ids=street_ids,
+            junction_ids=list(base_case.junction_ids), species=case_species, meteo=meteo,
+            meteo_junction={}, emissions=emissions, background=zeros.copy(),
+            native=native, start=start,
+        )
+        run_id = run["run_id"]
+        options = dict(run["options"], input_dir=f"decks/{run_id}",
+                       result_dir=f"decks/{run_id}/{_sirane_files.RESULT_SUBDIR}")
+        write_case(root / "decks" / run_id, case, format="sirane", options=options)
+
+    # Every deck-level check (the network, the base case's own settings) runs on a throwaway
+    # copy of the first deck before anything is written under out_dir.
+    with tempfile.TemporaryDirectory() as scratch:
+        write_run(Path(scratch), runs[0])
+    for run in runs:
+        write_run(out_dir, run)
+
+    _sirane_files.write_sweep_manifest(out_dir, runs=runs)
+    return out_dir
 
 
 def drivers_at(

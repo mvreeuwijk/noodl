@@ -23,6 +23,7 @@ from noodl.apps.street_aq.routing import (
     order_slots,
     routing_matrix,
     sigma_theta_munich,
+    sirane_direction_samples,
 )
 from noodl.layers.transport import TransportLayer
 from noodl.topology import Network
@@ -199,6 +200,63 @@ def test_none_and_gauss_schemes():
         direction_offsets("gauss", sigma)
     with pytest.raises(ValueError, match=r"'none', 'munich' or 'gauss'"):
         direction_offsets("rectangle", sigma)
+
+
+def test_sirane_samples_are_one_per_interval_between_switch_angles():
+    # Junction 0: slots at 0 and pi/2 -> switches at +-pi/2 and 0, pi (mod 2 pi).
+    # Junction 1: one slot at pi/4 -> switches at 3 pi/4 and -pi/4. Padded to d = 2.
+    slot_angle = torch.tensor([[0.0, math.pi / 2.0], [math.pi / 4.0, 0.0]], dtype=DT)
+    slot_active = torch.tensor([[True, True], [True, False]])
+    theta = torch.tensor([0.1, 0.1], dtype=DT)
+    sigma = torch.tensor([0.05, 0.05], dtype=DT)
+    offsets, weights = sirane_direction_samples(theta, sigma, slot_angle, slot_active)
+    # Junction 0 has one switch in reach (0, at -0.1 = -2 sigma); junction 1 none, so it
+    # gets one sample at the mean and a zero-weight pad.
+    assert offsets.shape == weights.shape == (2, 2)
+    below = 0.5 * math.erfc(2.0 / math.sqrt(2.0))
+    torch.testing.assert_close(weights[0], torch.tensor([below, 1.0 - below], dtype=DT),
+                               rtol=1e-14, atol=0)
+    torch.testing.assert_close(weights[1], torch.tensor([1.0, 0.0], dtype=DT),
+                               rtol=0, atol=0)
+    # Midpoints of the window-clipped intervals [-8 sigma, -0.1] and [-0.1, 8 sigma].
+    torch.testing.assert_close(offsets[0], torch.tensor([-0.25, 0.15], dtype=DT),
+                               rtol=1e-14, atol=1e-15)
+    assert float(offsets[1, 0]) == 0.0
+    # Every junction's weights sum to one, whatever its number of switches in reach.
+    torch.testing.assert_close(weights.sum(-1), torch.ones(2, dtype=DT), rtol=1e-15,
+                               atol=0)
+    # No spread: one sample at the mean for every junction.
+    offsets, weights = sirane_direction_samples(theta, torch.zeros(2, dtype=DT),
+                                                slot_angle, slot_active)
+    assert offsets.shape == (2, 1)
+    torch.testing.assert_close(weights, torch.ones(2, 1, dtype=DT), rtol=0, atol=0)
+    with pytest.raises(ValueError, match=r"direction_averaging='sirane' needs "
+                                         r"0 <= sigma_theta < pi/4"):
+        sirane_direction_samples(theta, torch.full((2,), 0.8, dtype=DT), slot_angle,
+                                 slot_active)
+
+
+def test_sirane_samples_never_cross_a_switch_of_the_next_turn():
+    # With 8 sigma > pi, an end interval clipped only to the window would reach past +-pi
+    # and its midpoint cross a WRAPPED switch (here 3.18 = -3.1 + 2 pi): its whole mass
+    # would then be routed with the wrong in/out pattern.
+    slot_angle = torch.tensor([[0.5 - math.pi / 2.0, -3.1 + math.pi / 2.0]], dtype=DT)
+    slot_active = torch.tensor([[True, True]])
+    theta = torch.zeros(1, dtype=DT)
+    sigma = torch.full((1,), 0.75, dtype=DT)
+    offsets, weights = sirane_direction_samples(theta, sigma, slot_angle, slot_active)
+    assert bool((offsets.abs() < math.pi).all())
+
+    def pattern(phi):                                   # the in/out classification
+        return (torch.cos(phi[..., None] - slot_angle[0]) < 0).to(DT)
+
+    # The averaged classification against a fine rectangle rule over (-pi, pi): they
+    # differ only by the Gaussian mass beyond +-pi (2.7e-5) and the rule's own error.
+    x = torch.linspace(-math.pi, math.pi, 400001, dtype=DT)[1:-1]
+    pdf = torch.exp(-0.5 * (x / 0.75) ** 2)
+    brute = ((pdf / pdf.sum())[:, None] * pattern(x)).sum(0)
+    exact = (weights[0, :, None] * pattern(offsets[0])).sum(0)
+    torch.testing.assert_close(exact, brute, rtol=0, atol=1e-4)
 
 
 def test_order_slots_sorts_and_rotates_at_most_once():

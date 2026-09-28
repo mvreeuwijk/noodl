@@ -9,7 +9,7 @@ is carried from street to street by the wind-driven flow along them.
 
 A street network is built by hand, as `StreetNetwork` and `Street` objects, or read from a
 street-network case on disk with `read_case` -- see [Reading and writing street-network
-cases](#reading-and-writing-street-network-cases).
+cases](street_aq_cases.md), which covers both MUNICH's own file format and SIRANE's decks.
 
 This application is the framework's clearest case of **closure-computed flows**. There is no
 potential variable anywhere: the along-canyon velocity is a closed-form function of the wind
@@ -67,6 +67,11 @@ if you chose `stability="munich"`).
 otherwise derive it from `U_ref`; `U_ref` is then needed only for `direction_averaging="munich"`'s
 direction spread, $\sigma_\theta = \sigma_v / U$.
 
+`direction_averaging="gauss"` or `"sirane"` take the direction spread as the `sigma_theta`
+driver instead (radians; one value per instance, or one per junction under
+`meteo="per_street"`) -- useful whenever the spread itself varies hour by hour, as SIRANE's
+does, since it needs no rebuilt model. `direction_averaging="none"` ignores it.
+
 `meteo="per_street"` gives every one of `U_ref`, `theta_w`, `h_abl`, `u_star` and `lmo` a
 trailing street axis, `(..., n_streets)`, so each street gets its own wind and boundary layer.
 Junction routing then reads an explicit `"<key>_junction"` driver when given --
@@ -79,7 +84,7 @@ becomes `(n_streets,)` or `(n_streets, n_species)`, in street order, instead of 
 network-wide value shared by every street.
 
 A case read with `read_case` supplies all of these automatically -- see [Reading and writing
-street-network cases](#reading-and-writing-street-network-cases).
+street-network cases](street_aq_cases.md).
 
 ## Building a network
 
@@ -125,118 +130,10 @@ boundary layer in `U_ref`, `theta_w` and `h_abl`.
 ## Reading and writing street-network cases
 
 A street-network case bundles a network with the meteorology, emissions and background
-concentrations that drive it hour by hour. `read_case(path) -> StreetCase` reads one from disk:
-a directory holding a `munich.cfg` is read as a MUNICH case; anything else raises `ValueError`
-naming what noodl physics recognises.
-
-```python
-from noodl.apps.street_aq import read_case
-
-case = read_case("tests/data/street/munich_paris_excerpt")
-case.street_ids           # ['1', '3', '8', '11'], the emissions/background street axis
-case.species               # ['NO2']
-case.meteo["u_star"].shape  # (3, 4): 3 hours, 4 streets
-```
-
-### `StreetCase`
-
-| Field | Holds |
-|---|---|
-| `source` | Which reader produced the case: `"munich"`, or `"synthetic"` for one built with `StreetCase.synthetic`. |
-| `network` | The case's `StreetNetwork`, in metres. |
-| `times` | `(n_hours,)`, seconds since `start`. |
-| `street_ids` | The streets' names, in `network.streets` order -- the axis `emissions` and `background` use. |
-| `junction_ids` | The source model's own node ids for `network.junctions`, in that order (MUNICH: `intersection.dat`'s ids). |
-| `species` | The case's species names, the last axis of `emissions` and `background`. |
-| `meteo` | One `(n_hours, n_streets)` array per key: `wind_dir_from_deg` and `wind_speed` always; `h_abl`, `u_star`, `lmo`, `temperature` wherever the source provides them. |
-| `meteo_junction` | The same keys, `(n_hours, n_junctions)`, in `network.junctions` order -- may be empty or partial when the source has no genuine per-junction meteorology. |
-| `emissions` | `(n_hours, n_streets, n_species)`, kg/s per street. |
-| `background` | `(n_hours, n_streets, n_species)`, kg/m3 per street. |
-| `native` | The source's own options, as read (MUNICH: one dict per `munich.cfg` section, plus the lon/lat projection the reader used); `model_options` translates these into `build_model` keywords, and `write_case` writes them back when the format matches. |
-| `start` | The absolute date and time of `times[0]`, or `None` for a synthetic case built without one (writing such a case to MUNICH then raises). |
-
-`wind_dir_from_deg` is degrees clockwise from north, the direction the wind blows FROM. MUNICH's
-own `WindDirection` is radians clockwise from north, the direction the wind blows TOWARD (MUNICH's
-`preprocessing/meteo.py`, `compute_wdir`); `read_case` and `write_case` convert at the file
-boundary, and `drivers_at` converts degrees-FROM into noodl physics' `theta_w` (radians
-counter-clockwise from east, TOWARD). Every mass in `StreetCase` is SI (kg/s, kg/m3); MUNICH's
-own files hold micrograms, converted at read and write time.
-
-### `drivers_at`
-
-`drivers_at(case, model, k, *, species=None) -> dict` is the driver mapping at time index `k` for
-`model`, built from `case`. It follows the model's own shape: `meteo="uniform"` reduces every
-meteorology array to one network-wide value (circular mean for direction, through the reciprocal
-for the Obukhov length, a plain mean otherwise); `meteo="per_street"` keeps every driver's
-trailing street axis and adds the `"<key>_junction"` drivers junction routing needs, from
-`case.meteo_junction` when the source has it, otherwise the same street-to-junction reduction.
-`u_star` is supplied whenever `case.meteo` has it, and drives the friction velocity directly
-rather than through noodl physics' log law. `background` follows the model's own boundary count the same
-way: one `"<layer>.x_boundary"` row per street, or one network-wide mean. `species` (default
-`case.species`) selects and orders which of the case's species end up on the emissions and
-background drivers. The model's own street order (`street_index(model)`) must equal
-`case.street_ids` -- build the model on `case.network` itself.
-
-### `StreetCase.model_options()`
-
-`case.model_options()` reads the closure options `case`'s own source model implies. For
-`source="munich"`, that is `munich.cfg`'s `[street]` section, translated into `build_model`
-keywords (`canyon_wind`, `exchange`, `roof_wind_form`, `direction_averaging`, `z_ref`,
-`canyon_wind_min`), plus `stability="munich"` and MUNICH's own hard-coded `u_d_min=0.001`. A
-missing `Minimum_Street_Wind_Speed` defaults to MUNICH's own `0.1` m/s (`canyon_wind_min=0.1`);
-`Zref`'s absence still raises. A `synthetic` case raises `NotImplementedError` -- pass
-`build_model`'s keywords directly instead.
-
-### `StreetCase.synthetic`
-
-`StreetCase.synthetic(network, *, species, times, meteo, emissions, background,
-meteo_junction=None, start=None)` builds a case in Python -- an idealised network to drive
-directly, or to write out with `write_case`. `meteo` needs `wind_dir_from_deg` and
-`wind_speed`; the rest are optional. `meteo_junction` takes any subset of the same keys, or
-none at all. Each value is a scalar, an `(n_hours,)` series, or the full `(n_hours, n_streets)`
-(`n_junctions` for `meteo_junction`) array. `emissions` and `background` broadcast the same way,
-with an optional trailing species axis. Writing the case out with `write_case(format="munich")`
-additionally needs `meteo` to carry `h_abl`, `u_star` and `lmo`.
-
-### `write_case`
-
-`write_case(out_dir, case, *, format="munich", options=None) -> Path` writes `case` under
-`out_dir`; only `format="munich"` is implemented, and `case.start` must be set, and `case.meteo`
-must have `h_abl`, `u_star` and `lmo` -- MUNICH needs their `PBLH`, `UST`, `LMO` fields whenever
-transport is on, which this writer always turns on. A case read from MUNICH files writes its own
-`[street]` section and projection back (`read_case` then `write_case` round-trips those two);
-`[options]` itself always turns chemistry, photolysis, deposition and scavenging off, and the six
-`[meteo]` fields MUNICH always requires (`Rain`, `SolarRadiation`, `SpecificHumidity`,
-`SurfacePressure`, `SurfaceTemperature`, `Attenuation`) come from the case where it has one (only
-`SurfaceTemperature`, from `meteo["temperature"]`), else a constant default -- either way,
-`options` overrides them. `options` are the format's own overrides -- for MUNICH, any `[street]`
-closure key, any of those six `[meteo]` fields, or `lat0_deg`/`lon0_deg` (the lon/lat a synthetic
-network's `(0, 0)` is anchored to). `options` win even over a value the case itself supplies.
-Missing per-junction meteorology is derived from the streets meeting at each junction (circular
-mean for direction, through the
-reciprocal for the Obukhov length, a plain mean otherwise).
-
-### Worked example
-
-```python
-from noodl.apps.street_aq import build_model, drivers_at, read_case
-
-case = read_case("tests/data/street/munich_paris_excerpt")
-
-model, state, _ = build_model(
-    case.network, species=case.species, meteo="per_street", background="per_street",
-    **case.model_options(),
-)
-
-for k in range(len(case.times)):
-    drivers = drivers_at(case, model, k)
-    state = model.steady(state, drivers)
-
-print(state["street.x"])          # kg/m3 per street, at the case's last hour
-```
-
-*(`munich_paris_excerpt` is a four-street excerpt of MUNICH's own published test case -- see
-`tests/data/street/munich_paris_excerpt/NOTICE.md`.)*
+concentrations that drive it hour by hour, read from a MUNICH case directory or a SIRANE
+master `.dat` file with `read_case`, and driven with `drivers_at` -- see [Reading and
+writing street-network cases](street_aq_cases.md) for `StreetCase`, `read_results` /
+`StreetResults`, `model_options()`, `write_case` and `write_sweep`.
 
 ## `build_model`
 
@@ -246,7 +143,7 @@ model, state, drivers = build_model(
     canyon_wind="soulhac",        # 'soulhac' | 'exponential'
     exchange="sirane",            # 'sirane'  | 'schulte'
     routing="sirane",             # 'sirane'  | 'mixing'
-    direction_averaging="none",   # 'none' | 'munich' | 'gauss'
+    direction_averaging="none",   # 'none' | 'munich' | 'gauss' | 'sirane'
     species=("nox",),
     chemistry=None,
     stability="neutral",          # 'neutral' | 'munich'
@@ -277,10 +174,10 @@ These select between the SIRANE forms and MUNICH's, and they are independent:
 | `exchange` | `"sirane"` | $u_d = \sigma_w / (\sqrt{2}\,\pi)$, aspect-ratio independent. |
 | | `"schulte"` | $u_d = \sigma_w \beta / (1 + H/W)$, MUNICH v2's default. Equals the SIRANE form exactly at $H = W$. |
 | `routing` | `"mixing"` / `"sirane"` | Perfect mixing, or SIRANE's non-crossing-streamline rule. They differ only at junctions with 2+ inflows **and** 2+ outflows. |
-| `direction_averaging` | `"none"` / `"munich"` / `"gauss"` | Single direction; MUNICH's own quadrature over a turbulence-derived $\sigma_\theta$; or noodl physics' normalised Gauss–Hermite rule. |
+| `direction_averaging` | `"none"` / `"munich"` / `"gauss"` / `"sirane"` | Single direction; MUNICH's own quadrature over a turbulence-derived $\sigma_\theta$; noodl physics' normalised Gauss–Hermite rule; or SIRANE's exact Gaussian average of the junction routing over the direction spread (Soulhac et al. 2011, Eq. 7) -- the routing changes only where a street switches between inflow and outflow, so the average is a sum over those intervals weighted by the Gaussian mass. |
 | `stability` | `"neutral"` / `"munich"` | Neutral only ($\sigma_w = 1.3\,u_*(1 - 0.8\,z/h_{\text{abl}})$), or MUNICH's three-branch stability dependence (needs an `lmo` driver). |
 | `meteo` | `"uniform"` / `"per_street"` | One instance value per driver, or a trailing street axis on `U_ref`, `theta_w`, `h_abl`, `u_star`, `lmo`, with junction routing from the mean of the streets meeting there (or an explicit `"<key>_junction"` driver). |
-| `background` | `"uniform"` / `"per_street"` | One atmosphere boundary node shared by every street, or one atmosphere node per street with its own `"<layer>.x_boundary"` row. |
+| `background` | `"uniform"` / `"per_street"` | One atmosphere boundary node shared by every street, or one atmosphere node per street with its own `"<layer>.x_boundary"` row -- needed for the coupled above-roof plume, see [Above-roof concentration](#above-roof-concentration). |
 
 `kappa=None` resolves automatically: MUNICH's 0.41 if any MUNICH-style option is chosen, else
 0.40. An explicit value always wins.
@@ -325,6 +222,118 @@ the signed canyon velocity and the concentration increment. The file is classic 
 can read it back) in float64 throughout. Needs the
 [`street_aq` extra](../installation.md#optional-extras).
 
+## Above-roof concentration
+
+By default the atmosphere above the canyon is whatever the `"<layer>.x_boundary"` driver
+says -- an input, not a modelled quantity. Optionally, as in SIRANE, `C_ext`, the
+concentration just above each street's roof, is instead computed as the sum of a fixed
+background and the superposed plumes of every upwind street's roof flux and every upwind
+junction's vertical flux:
+
+```
+C_ext = C_bg + K_s F_s + K_j F_j
+```
+
+`F_s` is each street's signed roof flux, $u_d W L (C - C_{\text{ext}})$ -- read off the same
+`exchange` edges the transport layer already carries, so it conserves mass exactly with the
+street solve. `F_j` is each junction's vertical flux: the excess over background carried up
+out of the canopy through its outgoing `vent` edges (`junction_source="upward"`, the
+default), or that minus what comes back down through the incoming vents
+(`junction_source="net"`, for comparison). `K_s` and `K_j` are kernels, s/m3, built once per
+hour from the network geometry and meteorology by `street_kernel` and `junction_kernel`
+(`noodl.apps.street_aq.plume`).
+
+### The kernel
+
+The kernel is SIRANE v2.1's own street-plume mechanism, reverse-engineered from SIRANE
+reference data for single-street cases (one isolated street under imposed meteorology, its
+concentration grid) rather than derived from the paper's closed forms: SIRANE does not
+evaluate a Gaussian for each source-receptor pair, it tabulates one plume trajectory per hour and reads every
+pair off that table (Soulhac, Salizzoni, Cierco and Perkins 2011, *Atmospheric Environment*
+45:7379-7395; equation numbers below are that paper's).
+
+For each hour, `plume_table` builds the trajectory:
+
+- Meteorology is evaluated at `H_R`, SIRANE's reflection height, with `sigma_v` and
+  `sigma_w` floored at SIRANE's own defaults (0.5 and 0.3 m/s; either floor can be turned
+  off) and no floor on the plume's advection speed.
+- The trajectory advances in 10 s steps: the plume's height follows an empirical centre
+  law (below) from the previous step's `sigma_z`, its speed is the wind at that height, and
+  `sigma_y`, `sigma_z` follow Eqs. (28)-(29), each evaluated at a time offset (`tau_y`,
+  `tau_z`, also fitted) behind the step's own clock. The vertical profile at `H_R` is a
+  Gaussian of that height with its image in the roof and its image in the inversion.
+- The trajectory is resampled onto a 10 m distance grid; every source-receptor pair is
+  then a linear read of that grid rather than a fresh evaluation.
+
+Sources: a street of coordinate length `L` is cut into `floor(L / 10) + 1` equal
+sub-sources, each a flat-top crosswind profile of the sub-source's projected length
+`(L/n)|sin phi|` spliced into the Gaussian tail, and a vertical profile capped at `min(10 / W, 1 / (H (1 - |sin phi|)))`
+(`W`, `H` the street's width and height, `phi` the angle between the street and the wind).
+A junction is one point source of the width and height of the streets meeting there,
+capped at `1 / H`. A receptor's height is not used -- the above-roof field has no vertical
+structure of its own.
+
+A pair contributes exactly zero upwind of the receptor, more than four crosswind standard
+deviations beyond the source's flat top, or beyond the downwind cut-off: the x-size of
+SIRANE's meteorology grid cell over the cosine of the wind's angle to it (`meteo_cell_dx`),
+or 700 m (`DOWNWIND_CUTOFF_M`) when no cell size is given. That is SIRANE's own rule,
+valid for cells of about 700 m or larger; smaller cells switch SIRANE to a cell-based far
+field that this kernel does not model.
+
+### Empirical inputs
+
+Four elements of the mechanism are fitted to SIRANE's output rather than derived from the
+paper, each a named parameter of `plume_table` with a default:
+
+| Parameter | Default | What it is |
+|---|---|---|
+| `tau_y`, `tau_z` | `TAU_Y_BY_SIGMA_V`, `TAU_Z_BY_SIGMA_W`: piecewise-linear tables of the hour's floored `sigma_v`, `sigma_w` | The time offsets behind which `sigma_y` (Eq. 28) and `sigma_z` (Eq. 29) are evaluated. |
+| `centre_c`, `centre_k` | 10 m, 0.675 | The plume-centre law, `z_c = max(H_R, d + E\|N(c - d, (k sigma_z)^2)\|)`. |
+| `theta_star` | `u*^2 T / (kappa g L)` | The temperature scale in the Brunt-Vaisala frequency. On the one stable hour with a real SIRANE comparison (South Kensington), SIRANE's own preprocessor prints 0.072 K, but 0.060 K reproduces its output far better (see Verification). |
+| `meteo_cell_dx` | none (falls back to the table's `x_max`, 700 m) | The x-size of SIRANE's meteorology grid cell, for the downwind cut-off. |
+
+All four were fitted on the SIRANE reference data described above, across neutral and
+stable meteorology and a range of street orientation, width, height and length.
+
+### Differentiability
+
+The kernel is linear in the fluxes, and differentiable in `u*`, the boundary-layer height,
+the Obukhov length, the wind direction, `sigma_theta`, the roughness `z0`, the displacement
+height `d`, the reflection height `H_R`, the temperature and the four empirical parameters
+above; a street's width and height (which set its sub-sources' widths and caps) carry no
+gradient. Several elements are piecewise constant or linear -- exact to SIRANE's own
+mechanism, not a smoothing choice: the trajectory's speed steps through integer heights,
+the 10 m table and its linear reads have kinks every 10 m, the default `tau_y`/`tau_z`
+tables are piecewise linear with a floor, and the crosswind and downwind cut-offs are hard
+(a pair that crosses one jumps to exactly zero, and its gradient is that of whichever side
+it sits on).
+
+Not implemented: the unstable regime (a negative Monin-Obukhov length -- the paper's
+bi-Gaussian and Lagrangian time scale for that regime cannot be transcribed as printed),
+plume rise, wet-deposition depletion, and SIRANE's cell-based retrotrajectory path
+(`B_RUE_DECOUP = 1`).
+
+### Cost
+
+Measured at Paris scale (577 streets, one hour, CPU): building the plume table takes about
+0.03 s and the street kernel about 0.5 s; the whole coupled forward solve below is
+0.9-2.0 s.
+
+`street_steady_with_plume` (`noodl.apps.street_aq.above_roof`) solves the street network and
+this relation together: starting from `C_ext = C_bg`, it solves the network, recomputes
+`C_ext` from the resulting fluxes, and repeats until the largest change (relative to the
+largest `|C_ext|`) falls below `tol` -- typically 6-13 passes on a network the size of
+Paris. It needs a model built with `background="per_street"`, and takes the two kernels as
+required keyword arguments: there is no `build_model` option for this, since the kernels
+depend on the wind and must be rebuilt every hour. The gradient is that of the converged
+fixed point, by an implicit adjoint (one GMRES solve per instance, hours never coupled).
+
+| Option | Values | What changes |
+|---|---|---|
+| `junction_source` | `"upward"` / `"net"` | The junction plume source: the excess flux carried up out of the canopy, or that minus the excess carried back down. `"upward"` is the default; on SIRANE's archived output the two agree equally well. |
+| `self_contribution` (`street_kernel`) | `False` / `True` | Whether a street's own roof-flux points contribute to its own `C_ext`. Excluded by default: including them overstates `C_ext` (measured median ratio 2.33 against SIRANE's own fluxes). |
+| `meteo_cell_dx` (`street_kernel`, `junction_kernel`) | the x-size of SIRANE's meteorology grid cell, m | The downwind cut-off, `meteo_cell_dx / \|cos theta_w\|`; `None` (the default) uses the table's own extent, 700 m. |
+
 ## Verification
 
 ### MUNICH formulas
@@ -360,6 +369,67 @@ arguments and the case can only be compared in terms that do not depend on them.
 
 The relative-pattern miss is the one open discrepancy against MUNICH; it is listed under
 [Limitations](#limitations-and-caveats).
+
+### SIRANE
+
+A code-to-code comparison against SIRANE v2.1 rev 128 on its own South Kensington network
+(46 streets, 36 junctions), using part of its archived results -- hours 00 and 01 of
+7 January 2014 (`tests/verification/test_sirane.py`; the fixture and its own caveats are in
+`tests/data/street/sirane_south_kensington/NOTICE.md`). That archived run's own meteorology
+differs from the deck's meteo file (a wind from 315°, where the deck's file gives 135°, and
+every street's `Sigma_wH` at SIRANE's default 0.30 m/s floor, where the deck's file turns
+that floor off), so every comparison here drives noodl physics with the *results'* own
+meteorology (`read_results(...).meteo`), never the deck's.
+
+- **Roof exchange velocity.** `exchange_velocity(form="sirane")`, evaluated at SIRANE's own
+  printed `Sigma_wH` with each street's own height and width, reproduces SIRANE's printed
+  `u_d` on all 46 streets across both hours to within SIRANE's own printed half-step
+  (0.005 m/s) -- the tightest bound two-decimal printed output allows; the worst street
+  misses by 0.0025 m/s. The alternative reading `sigma_w / sqrt(2 pi)` misses by far more
+  (about ten printed half-steps on every street), which is what confirms SIRANE's own
+  exchange constant, $\sigma_w / (\sqrt{2}\,\pi)$, rather than $\sigma_w/\sqrt{2\pi}$.
+
+- **In-canyon wind.** The Soulhac canyon velocity, driven per street with SIRANE's own
+  friction velocity (0.14 m/s) and direction (315°), agrees with SIRANE's printed `U_moy` on
+  all 46 streets to within its own printing precision: median relative difference 4.5 %, 90th
+  percentile 12.8 %, and every street inside the rounding envelope that SIRANE's own two
+  printed quantities allow (`printed half-step + 3.6 % |noodl physics' value|`, since u*
+  itself is printed to +-3.6 %). The one-sided streets (buildings on one side only, height
+  `mean(HG, HD)`) are no worse than the rest.
+
+- **Source-receptor concentration.** With SIRANE's own above-roof concentration imposed as
+  the per-street background, and the deck's unit emission (1 g/s of O3 on one street), the
+  archived run's own mass balance -- SIRANE's roof export plus its dry-deposition flux,
+  computed entirely from SIRANE's own printed output -- comes to more than ten times the
+  deck's stated emission, and the street with the highest in-canyon concentration is not the
+  emitting one. That is inconsistent with a 1 g/s source, so this fixture's archived
+  concentrations come from a different emission field than the deck's, and a concentration
+  comparison against them is not meaningful at this emission. noodl physics' own residual
+  under the deck's stated emission (median relative difference 0.888) is recorded rather than
+  checked against a tolerance. A meaningful concentration comparison needs a result whose
+  emission field is known, e.g. from `write_sweep`'s own decks.
+
+- **Above-roof plume kernel.** Fed SIRANE's own archived roof and junction fluxes directly
+  (not noodl physics' own street solve), `street_kernel` and `junction_kernel` reproduce
+  SIRANE's printed `Cext` on 45 of the network's 46 streets (the 46th sits at the upwind
+  corner, with `Cext` exactly zero) across both hours, under the library's defaults: median
+  relative difference 0.3 %, 90th percentile 1.4 %. This uses two inputs the archive does
+  not print exactly -- `u*` = 0.138 m/s, read off the near-field plateau of a matching
+  kernel-probe case below rather than SIRANE's own two-decimal 0.14 m/s, and `theta*` =
+  0.060 K, fitted to the probe cases of the same meteorology rather than SIRANE's own printed
+  0.072 K; using the printed values instead gives visibly larger errors (the 90th percentile
+  roughly doubles with printed `theta*`, and the largest error roughly doubles with printed
+  `u*`, 0.055 against 0.028). The check is out of sample in geometry (mixed street lengths, widths, heights and
+  angles, 36 junctions), though the default time offsets and `theta*` were fitted partly on
+  this hour's meteorology.
+
+  Ten further runs of one isolated street under imposed meteorology (across, along and
+  oblique to the wind, neutral and stable; `tests/data/street/sirane_kernel_probe`) check
+  the kernel directly against SIRANE's own concentration grids. These are in sample -- the
+  empirical parameters above are fitted on them -- and give a per-run median relative
+  difference of about 0.02-0.6 % over the sampled cells. Including a street's own roof-flux
+  points in its own `Cext` (`self_contribution=True`) overstates it (measured median ratio
+  2.33 on the South Kensington fluxes), which is why it is excluded by default.
 
 ## Limitations and caveats
 
