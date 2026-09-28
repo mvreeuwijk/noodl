@@ -9,15 +9,15 @@ import torch
 
 from noodl.apps.street_aq.chemistry import (
     SIRANE_K_FLOOR_PPB,
-    j_no2_sirane,
-    k_no_o3_sirane,
+    j_no2_elevation_cloud,
+    k_no_o3_soulhac2011,
     molar_volume,
     photostationary_for_streets,
     solar_elevation,
     street_steady,
 )
 from noodl.apps.street_aq.network import Street, StreetNetwork, build_model
-from noodl.layers.reaction import MOLAR_MASS
+from noodl.layers.reaction import MOLAR_MASS, k_no_o3_jpl2003
 
 DT = torch.float64
 MASSES = torch.tensor([MOLAR_MASS["no"], MOLAR_MASS["no2"], MOLAR_MASS["o3"]], dtype=DT)
@@ -58,35 +58,36 @@ def test_solar_elevation_broadcasts_and_is_differentiable():
 
 def test_k1_overhead_threshold_night_and_cloud():
     # Overhead, clear: 0.5699 / 60 = 9.50e-3 1/s.
-    assert abs(float(j_no2_sirane(90.0)) - 0.5699 / 60.0) < 1e-18
-    assert f"{float(j_no2_sirane(90.0)):.2e}" == "9.50e-03"
+    assert abs(float(j_no2_elevation_cloud(90.0)) - 0.5699 / 60.0) < 1e-18
+    assert f"{float(j_no2_elevation_cloud(90.0)):.2e}" == "9.50e-03"
     # The bracket 0.5699 - [9.056e-3 (90 - a)]^2.546 reaches zero at a = 1.458 degrees.
     threshold = 90.0 - 0.5699 ** (1.0 / 2.546) / 9.056e-3
     assert abs(threshold - 1.458) < 5e-4
-    assert float(j_no2_sirane(threshold - 1e-6)) == 0.0
-    assert float(j_no2_sirane(threshold + 1e-3)) > 0.0
-    assert float(j_no2_sirane(0.0)) == 0.0 and float(j_no2_sirane(-20.0)) == 0.0
+    assert float(j_no2_elevation_cloud(threshold - 1e-6)) == 0.0
+    assert float(j_no2_elevation_cloud(threshold + 1e-3)) > 0.0
+    assert float(j_no2_elevation_cloud(0.0)) == 0.0 and float(j_no2_elevation_cloud(-20.0)) == 0.0
     # A hand value at 30 degrees under 4 octas.
     a, n = 30.0, 4.0
     by_hand = (0.5699 - (9.056e-3 * (90 - a)) ** 2.546) / 60 * (1 - 0.75 * (n / 8) ** 3.4)
-    assert abs(float(j_no2_sirane(a, n)) / by_hand - 1.0) < 1e-14
+    assert abs(float(j_no2_elevation_cloud(a, n)) / by_hand - 1.0) < 1e-14
     # Full cloud keeps a quarter.
-    assert abs(float(j_no2_sirane(45.0, 8.0)) / float(j_no2_sirane(45.0)) - 0.25) < 1e-15
+    full = float(j_no2_elevation_cloud(45.0, 8.0))
+    assert abs(full / float(j_no2_elevation_cloud(45.0)) - 0.25) < 1e-15
 
 
 def test_k1_names_cloud_outside_zero_to_eight():
-    with pytest.raises(ValueError, match=r"j_no2_sirane: cloud_octas"):
-        j_no2_sirane(30.0, 9.0)
-    with pytest.raises(ValueError, match=r"j_no2_sirane: cloud_octas"):
-        j_no2_sirane(30.0, -0.5)
+    with pytest.raises(ValueError, match=r"j_no2_elevation_cloud: cloud_octas"):
+        j_no2_elevation_cloud(30.0, 9.0)
+    with pytest.raises(ValueError, match=r"j_no2_elevation_cloud: cloud_octas"):
+        j_no2_elevation_cloud(30.0, -0.5)
 
 
 def test_k1_is_differentiable_away_from_the_clip():
     a = torch.tensor([10.0, 45.0, 80.0], dtype=DT, requires_grad=True)
     n = torch.tensor([0.5, 4.0, 7.0], dtype=DT, requires_grad=True)
-    torch.autograd.gradcheck(j_no2_sirane, (a, n))
+    torch.autograd.gradcheck(j_no2_elevation_cloud, (a, n))
     below = torch.tensor([0.5, -10.0], dtype=DT, requires_grad=True)
-    (g,) = torch.autograd.grad(j_no2_sirane(below).sum(), below)
+    (g,) = torch.autograd.grad(j_no2_elevation_cloud(below).sum(), below)
     assert torch.equal(g, torch.zeros(2, dtype=DT))
 
 
@@ -94,15 +95,15 @@ def test_k1_is_differentiable_away_from_the_clip():
 
 def test_k3_at_given_temperatures_and_in_ppb():
     for t in (263.15, 293.15, 308.15):
-        assert abs(float(k_no_o3_sirane(t)) / (1.325e6 * math.exp(-1430.0 / t)) - 1.0) < 1e-15
+        assert abs(float(k_no_o3_soulhac2011(t)) / (1.325e6 * math.exp(-1430.0 / t)) - 1.0) < 1e-15
     # 1.325e6 m3 mol^-1 s^-1 is 2.2e-12 cm3 molecule^-1 s^-1 x N_A (to four figures).
     assert abs(1.325e6 / (2.2e-12 * 6.02214076e23 * 1e-6) - 1.0) < 5e-4
     # In ppb^-1 s^-1: k3 * 1e-9 / V_m. SIRANE prints 3.01e-04 at a ground temperature of
     # -3.0 C and a molar volume of 22.15 L/mol.
-    k3_ppb = float(k_no_o3_sirane(273.15 - 3.0)) * 1e-9 / 22.15e-3
+    k3_ppb = float(k_no_o3_soulhac2011(273.15 - 3.0)) * 1e-9 / 22.15e-3
     assert f"{k3_ppb:.2e}" == "3.01e-04"
     t = torch.tensor([280.0, 300.0], dtype=DT, requires_grad=True)
-    torch.autograd.gradcheck(k_no_o3_sirane, (t,))
+    torch.autograd.gradcheck(k_no_o3_soulhac2011, (t,))
 
 
 # ---------------------------------------------------------------- the photostationary split
@@ -126,7 +127,7 @@ def test_the_sirane_closure_is_eq31_in_ppb_with_its_floor(k1):
     K = max(k1/k3, 2 ppb); the three k1 values put K well above, just under and at the
     floor."""
     t, v_l = 291.0, 23.95                                     # K, L/mol
-    reaction = photostationary_for_streets(("no", "no2", "o3"), closure="sirane")
+    reaction = photostationary_for_streets(("no", "no2", "o3"), preset="sirane")
     assert reaction.floor_ppb == SIRANE_K_FLOOR_PPB == 2.0
     bg = {"no2": 40.0, "no": 15.0, "o3": 50.0}                # ug/m3
     passive = {"no2": 12.0, "no": 55.0}                       # ug/m3, emissions only
@@ -138,7 +139,7 @@ def test_the_sirane_closure_is_eq31_in_ppb_with_its_floor(k1):
         return value * v_l / (MOLAR_MASS[species] * 1e3)
 
     no2_d, no_d = ppb(passive["no2"], "no2"), ppb(passive["no"], "no")
-    k_ppb = max(k1 / (float(k_no_o3_sirane(t)) * 1e-6 / v_l), 2.0)
+    k_ppb = max(k1 / (float(k_no_o3_soulhac2011(t)) * 1e-6 / v_l), 2.0)
     want = _eq31_ppb(ppb(bg["no2"], "no2"), ppb(bg["no"], "no"), ppb(bg["o3"], "o3"),
                      no2_d + no_d, no2_d / (no2_d + no_d), k_ppb)
     back = [want[0] * 30.0 / v_l, want[1] * 46.0 / v_l, want[2] * 48.0 / v_l]
@@ -146,7 +147,7 @@ def test_the_sirane_closure_is_eq31_in_ppb_with_its_floor(k1):
 
 
 def test_the_molar_volume_only_matters_through_the_floor():
-    reaction = photostationary_for_streets(("no", "no2", "o3"), closure="sirane")
+    reaction = photostationary_for_streets(("no", "no2", "o3"), preset="sirane")
     x = torch.tensor([[70e-9, 52e-9, 50e-9]], dtype=DT)
     day_a = reaction.apply(x, None, _sirane_drivers(6e-3, 291.0, 0.0240))
     day_b = reaction.apply(x, None, _sirane_drivers(6e-3, 291.0, 0.0220))
@@ -162,7 +163,7 @@ def test_the_molar_volume_only_matters_through_the_floor():
 
 
 def test_the_sirane_closure_conserves_nox_and_ox_and_is_differentiable():
-    reaction = photostationary_for_streets(("no", "no2", "o3"), closure="sirane")
+    reaction = photostationary_for_streets(("no", "no2", "o3"), preset="sirane")
     ug = torch.tensor([[70.0, 52.0, 50.0], [5.0, 30.0, 80.0]], dtype=DT, requires_grad=True)
     k1 = torch.tensor([6e-3, 2e-3], dtype=DT, requires_grad=True)
     t = torch.tensor([291.0, 280.0], dtype=DT, requires_grad=True)
@@ -180,12 +181,45 @@ def test_the_sirane_closure_conserves_nox_and_ox_and_is_differentiable():
     torch.autograd.gradcheck(split, (ug, k1, t))
 
 
-def test_the_closure_is_named_and_the_munich_default_has_no_floor():
-    assert photostationary_for_streets(("no", "no2", "o3")).floor_ppb == 0.0
-    assert photostationary_for_streets(("no", "no2", "o3"), closure="sirane",
+def test_the_preset_is_named_and_sets_the_rate_and_the_floor():
+    default = photostationary_for_streets(("no", "no2", "o3"))
+    assert default.floor_ppb == SIRANE_K_FLOOR_PPB and default.rate is k_no_o3_soulhac2011
+    munich = photostationary_for_streets(("no", "no2", "o3"), preset="munich")
+    assert munich.floor_ppb == 0.0 and munich.rate is k_no_o3_jpl2003
+    assert photostationary_for_streets(("no", "no2", "o3"), preset="sirane",
                                        floor_ppb=0.0).floor_ppb == 0.0
-    with pytest.raises(ValueError, match=r"photostationary_for_streets: closure"):
-        photostationary_for_streets(("no", "no2", "o3"), closure="chapman")
+    mixed = photostationary_for_streets(("no", "no2", "o3"), no_o3_rate="jpl_2003")
+    assert mixed.rate is k_no_o3_jpl2003 and mixed.floor_ppb == SIRANE_K_FLOOR_PPB
+    custom = photostationary_for_streets(("no", "no2", "o3"), no_o3_rate=k_no_o3_soulhac2011,
+                                         preset="munich")
+    assert custom.rate is k_no_o3_soulhac2011 and custom.floor_ppb == 0.0
+    with pytest.raises(ValueError, match=r"photostationary_for_streets: preset must be one "
+                                         r"of \('sirane', 'munich'\), got 'chapman'"):
+        photostationary_for_streets(("no", "no2", "o3"), preset="chapman")
+    with pytest.raises(ValueError, match=r"no_o3_rate must be one of \('soulhac_2011', "
+                                         r"'jpl_2003'\) or a callable"):
+        photostationary_for_streets(("no", "no2", "o3"), no_o3_rate="arrhenius")
+
+
+def test_the_closure_keyword_is_a_deprecated_spelling_of_preset():
+    with pytest.warns(DeprecationWarning, match=r"'closure' is deprecated; use "
+                                                r"preset='munich'"):
+        old = photostationary_for_streets(("no", "no2", "o3"), closure="munich")
+    assert old.rate is k_no_o3_jpl2003 and old.floor_ppb == 0.0
+    with pytest.raises(TypeError, match=r"preset or its deprecated spelling closure"):
+        photostationary_for_streets(("no", "no2", "o3"), closure="munich", preset="sirane")
+
+
+def test_the_old_rate_names_are_the_same_functions():
+    from noodl.apps.street_aq import chemistry
+    from noodl.layers import reaction
+
+    assert chemistry.k_no_o3_sirane is chemistry.k_no_o3_soulhac2011
+    assert chemistry.j_no2_sirane is chemistry.j_no2_elevation_cloud
+    assert chemistry.j_no2 is chemistry.j_no2_zenith_table
+    assert reaction.k_no_o3_munich is reaction.k_no_o3_jpl2003
+    assert chemistry.NO_O3_RATES == {"soulhac_2011": k_no_o3_soulhac2011,
+                                     "jpl_2003": k_no_o3_jpl2003}
 
 
 # ------------------------------------------ the coupled steady state and post-processing
@@ -201,7 +235,7 @@ def test_street_steady_equals_the_equilibrium_of_the_passive_steady_state():
         x={"a": 0.0, "b": 100.0, "c": 200.0, "d": 100.0},
         y={"a": 0.0, "b": 0.0, "c": 0.0, "d": 80.0},
     )
-    reaction = photostationary_for_streets(("no", "no2", "o3"), closure="sirane")
+    reaction = photostationary_for_streets(("no", "no2", "o3"), preset="sirane")
     model, state, _ = build_model(sn, species=("no", "no2", "o3"), chemistry=reaction,
                                   pblh_floor=False)
     net = model.net

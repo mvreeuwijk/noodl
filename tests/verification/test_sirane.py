@@ -11,7 +11,7 @@ and the direction spread -- never with the deck's.
 
 Five comparisons, each by case:
 
-- the roof exchange velocity: noodl physics' `exchange_velocity(form="sirane")` at
+- the roof exchange velocity: noodl physics' `exchange_velocity(form="turbulent_velocity")` at
   SIRANE's own `Sigma_wH` against SIRANE's printed `u_d`, street by street and hour by hour;
 - the in-canyon wind: noodl physics' Soulhac canyon velocity under SIRANE's u* and
   direction against SIRANE's `U_moy`, with the one-sided streets reported separately;
@@ -78,10 +78,11 @@ def _driven_case():
 
 
 def _model(**extra):
+    """The model of the case's own options (`model_options()`), `extra` overriding them."""
     case = _case()
     model, state, _ = build_model(
         case.network, species=(SPECIES,), meteo="per_street", background="per_street",
-        **case.model_options(), **extra,
+        **dict(case.model_options(), **extra),
     )
     return model, state
 
@@ -99,7 +100,7 @@ def _drivers(model, k):
 
 
 def test_the_exchange_velocity_of_every_street_and_hour_is_sirane_own(record_property):
-    """noodl physics' `exchange_velocity(form="sirane")`, evaluated at SIRANE's printed
+    """noodl physics' `exchange_velocity(form="turbulent_velocity")`, evaluated at SIRANE's printed
     `Sigma_wH` with each street's own height and width, reproduces SIRANE's printed `u_d`
     on all 46 streets in both hours, to the printed two decimals -- and the reading
     `sigma_w / sqrt(2 pi)` does not (Soulhac et al. 2011, Eq. 5)."""
@@ -109,7 +110,7 @@ def test_the_exchange_velocity_of_every_street_and_hour_is_sirane_own(record_pro
     worst = 0.0
     for k in range(len(res.times)):
         sigma_w = torch.as_tensor(res.sigma_w_roof[k], dtype=DT)
-        ours = exchange_velocity(sigma_w, height, width, form="sirane").numpy()
+        ours = exchange_velocity(sigma_w, height, width, form="turbulent_velocity").numpy()
         miss = np.abs(ours - res.u_exchange[k])
         worst = max(worst, float(miss.max()))
         # The rejected reading misses by far more than the printing can explain: measured
@@ -123,6 +124,20 @@ def test_the_exchange_velocity_of_every_street_and_hour_is_sirane_own(record_pro
     record_property("tolerance", "abs 0.005 m/s (SIRANE prints u_d to 0.01)")
     record_property("measured_abs_max", worst)
     record_property("constant", SIRANE_EXCHANGE)
+
+
+def test_the_sigma_w_floor_is_the_exchange_velocity_floor_on_the_case():
+    """SIRANE's sigma_w floor as `sigma_w_min` gives the same flows, bit for bit, as the
+    same floor applied to the exchange velocity, `u_d_min = 0.30 / (sqrt(2) pi)`: `u_d`
+    is linear in sigma_w, and the floor binds on every street of this run."""
+    floored, state = _model(sigma_w_min=SIGMA_W_FLOOR)
+    on_u_d, _ = _model(sigma_w_min=0.0, u_d_min=SIGMA_W_FLOOR * SIRANE_EXCHANGE)
+    bare, _ = _model()
+    for k in range(len(_results().times)):
+        drivers = _drivers(floored, k)
+        q = floored.current_flows("street", state, drivers)
+        assert torch.equal(q, on_u_d.current_flows("street", state, drivers))
+        assert not torch.equal(q, bare.current_flows("street", state, drivers))
 
 
 def test_the_canyon_wind_of_every_street_against_sirane(record_property, capsys):
@@ -189,9 +204,10 @@ def test_the_archived_concentrations_come_from_another_emission_field(record_pro
     meteorology and SIRANE's direction spread from `Resul_Meteo.dat`. O3 is passive here:
     NO and NO2 are zero in every `Cint` and `Cext` (asserted below), so Chapman's
     `k3 [NO][O3]` vanishes (and `k1 = 0` at night), even though `chemistry_on` is set.
-    noodl physics has no sigma_w floor; SIRANE's 0.30 m/s floor binds on every street in
-    this run (noodl's own sigma_w here is 0.17 m/s), and because `u_d` is linear in sigma_w
-    the floor is exactly `u_d_min = 0.30 SIRANE_EXCHANGE`, which is what is passed.
+    The archived run used SIRANE's default 0.30 m/s sigma_w floor (the deck zeroes it,
+    so `model_options()` gives `sigma_w_min=0`); it binds on every street in this run
+    (noodl's own sigma_w here is 0.17 m/s), so the model is built with
+    `sigma_w_min=0.30`.
 
     The comparison fails, and not because of noodl physics. SIRANE's own output alone
     fixes how much O3 leaves the canyons through their roofs,
@@ -209,7 +225,7 @@ def test_the_archived_concentrations_come_from_another_emission_field(record_pro
         for field in (res.c_in, res.c_above):
             assert not bool(np.any(field[other]))
     area = np.array([s.length * s.width for s in case.network.streets])
-    model, state = _model(u_d_min=SIGMA_W_FLOOR * SIRANE_EXCHANGE)
+    model, state = _model(sigma_w_min=SIGMA_W_FLOOR)
     per_hour = []
     for k in range(len(res.times)):
         c_in, c_above = res.c_in[SPECIES][k], res.c_above[SPECIES][k]
@@ -260,14 +276,14 @@ def _plume_inputs(k):
     """`(F_s, F_up, F_down, theta_w)` at hour `k`: every street's roof flux and every
     junction's vertical fluxes, kg/s, from SIRANE's `Cint`/`Cext` and noodl physics' flows.
 
-    The model is built with SIRANE's sigma_w floor as `u_d_min`, so its exchange flow is
+    The model is built with SIRANE's sigma_w floor (`sigma_w_min`), so its exchange flow is
     `u_d W L` with SIRANE's own `u_d` (the first test above) and `F_s` is SIRANE's roof
     flux. The junction fluxes are noodl physics' own: its vent flows (junction routing
     under SIRANE's u* and direction) carrying SIRANE's `Cint` of the street each vent
     leaves (`F_up`) and SIRANE's `Cext` of the street it enters (`F_down`), as excess over
     the (zero) background -- SIRANE does not print its intersection fluxes."""
     res = _results()
-    model, state = _model(u_d_min=SIGMA_W_FLOOR * SIRANE_EXCHANGE)
+    model, state = _model(sigma_w_min=SIGMA_W_FLOOR)
     drivers = _drivers(model, k)
     q = model.current_flows("street", state, drivers)
     c_in = torch.as_tensor(res.c_in[SPECIES][k], dtype=DT)[:, None]

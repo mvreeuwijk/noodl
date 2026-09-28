@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import torch
 
+from noodl.apps.street_aq.closures import PRESETS, preset_options, warn_deprecated
 from noodl.layers.reaction import (
     Photostationary,
     Reaction,
+    k_no_o3_jpl2003,
     k_no_o3_munich,
     molar_volume,
 )
@@ -18,13 +20,18 @@ __all__ = [
     "CLOSURES",
     "J_NO2_CLEAR_SKY",
     "J_NO2_ZENITH_DEG",
+    "NO_O3_RATES",
     "SIRANE_K3_ACTIVATION",
     "SIRANE_K3_PREFACTOR",
     "SIRANE_K_FLOOR_PPB",
     "j_no2",
+    "j_no2_elevation_cloud",
     "j_no2_sirane",
+    "j_no2_zenith_table",
+    "k_no_o3_jpl2003",
     "k_no_o3_munich",
     "k_no_o3_sirane",
+    "k_no_o3_soulhac2011",
     "molar_volume",
     "photostationary_for_streets",
     "solar_elevation",
@@ -32,17 +39,20 @@ __all__ = [
 ]
 
 
-CLOSURES = ("munich", "sirane")
-"""The rate closures `photostationary_for_streets` offers."""
+CLOSURES = tuple(PRESETS)
+"""The presets `photostationary_for_streets` offers (`"sirane"`, `"munich"`)."""
+
 
 def photostationary_for_streets(
     species: Sequence[str],
     *,
+    preset: str | None = None,
+    no_o3_rate: str | Callable[[torch.Tensor], torch.Tensor] | None = None,
+    floor_ppb: float | None = None,
     j_key: str = "J_NO2",
-    closure: str = "munich",
     temperature_key: str = "temperature",
     molar_volume_key: str = "molar_volume",
-    floor_ppb: float | None = None,
+    closure: str | None = None,
 ) -> Photostationary:
     """The Leighton reaction wired to the `"no"`, `"no2"` and `"o3"` columns of `species`.
 
@@ -50,31 +60,53 @@ def photostationary_for_streets(
     guessed at, because a silently mis-wired species column produces a plausible-looking
     answer that is simply wrong.
 
-    `closure` picks the rate of NO + O3 and the floor on `J/k`, both evaluated at the
-    driver `temperature_key` (K):
+    `preset` (default `"sirane"`) sets the rate of NO + O3 and the floor on `J/k`
+    (`closures.PRESETS[preset]["chemistry"]`), both evaluated at the driver
+    `temperature_key` (K); `no_o3_rate` and `floor_ppb` override them:
 
-    - `"munich"`: `k_no_o3_munich`, 3.0e-12 exp(-1500/T) cm3 molecule^-1 s^-1; no floor.
-    - `"sirane"`: `k_no_o3_sirane`, 1.325e6 exp(-1430/T) m3 mol^-1 s^-1, with
-      `K = max(J/k, 2 ppb)` (`SIRANE_K_FLOOR_PPB`). The ppb conversion uses the driver
-      `molar_volume_key` (m3/mol) when given, else `molar_volume(T)` at 101325 Pa.
-      SIRANE's `k1` is `j_no2_sirane`, passed as the `j_key` driver. Reproducing SIRANE
-      exactly needs the molar-volume driver (SIRANE's ground-level V_m): the fallback
-      uses T and 101325 Pa.
+    - `no_o3_rate="soulhac_2011"` (preset `"sirane"`): `k_no_o3_soulhac2011`,
+      1.325e6 exp(-1430/T) m3 mol^-1 s^-1, with `K = max(J/k, 2 ppb)`
+      (`SIRANE_K_FLOOR_PPB`). The ppb conversion uses the driver `molar_volume_key`
+      (m3/mol) when given, else `molar_volume(T)` at 101325 Pa. SIRANE's `k1` is
+      `j_no2_elevation_cloud`, passed as the `j_key` driver. Reproducing SIRANE exactly
+      needs the molar-volume driver (SIRANE's ground-level V_m): the fallback uses T and
+      101325 Pa.
+    - `no_o3_rate="jpl_2003"` (preset `"munich"`): `k_no_o3_jpl2003`,
+      3.0e-12 exp(-1500/T) cm3 molecule^-1 s^-1; no floor.
+    - `no_o3_rate=<callable>`: any rate `k(T)` in m3 mol^-1 s^-1.
 
-    `floor_ppb` overrides the closure's floor (0 means none). With either closure the
+    `floor_ppb` overrides the preset's floor (0 means none). With any rate the
     equilibrium conserves molar NOx and Ox, so background NO, NO2 and O3 enter through
     those two totals and the NO2 share of the transported NOx plays the role of SIRANE's
-    emitted NO2/NOx ratio.
+    emitted NO2/NOx ratio. `closure=` is the deprecated spelling of `preset`.
     """
-    if closure not in CLOSURES:
+    if closure is not None:
+        if preset is not None:
+            raise TypeError(
+                "photostationary_for_streets: give preset or its deprecated spelling "
+                "closure, not both"
+            )
+        warn_deprecated(f"photostationary_for_streets: the keyword 'closure' is deprecated; "
+                        f"use preset={closure!r}")
+        preset = closure
+    preset = "sirane" if preset is None else preset
+    if preset not in PRESETS:
         raise ValueError(
-            f"photostationary_for_streets: closure must be one of {CLOSURES}, got "
-            f"{closure!r}"
+            f"photostationary_for_streets: preset must be one of {CLOSURES}, got "
+            f"{preset!r}"
         )
-    if closure == "sirane":
-        rate, default_floor = k_no_o3_sirane, SIRANE_K_FLOOR_PPB
+    settings = preset_options(preset)["chemistry"]
+    chosen = settings["no_o3_rate"] if no_o3_rate is None else no_o3_rate
+    if callable(chosen):
+        rate = chosen
+    elif chosen in NO_O3_RATES:
+        rate = NO_O3_RATES[chosen]
     else:
-        rate, default_floor = k_no_o3_munich, 0.0
+        raise ValueError(
+            f"photostationary_for_streets: no_o3_rate must be one of {tuple(NO_O3_RATES)} "
+            f"or a callable k(T), got {chosen!r}"
+        )
+    default_floor = settings["floor_ppb"]
     lowered = [str(name).lower() for name in species]
     columns = []
     for wanted in ("no", "no2", "o3"):
@@ -164,7 +196,7 @@ J_NO2_CLEAR_SKY = (
 line (a RACM tabulation, per the comment there)."""
 
 
-def j_no2(zenith_deg, attenuation=1.0) -> torch.Tensor:
+def j_no2_zenith_table(zenith_deg, attenuation=1.0) -> torch.Tensor:
     """Clear-sky `J_NO2` [1/s] at `zenith_deg`, times `attenuation`.
 
     Piecewise-linear in the zenith angle between MUNICH's eleven tabulated points, and
@@ -188,6 +220,10 @@ def j_no2(zenith_deg, attenuation=1.0) -> torch.Tensor:
     weight = (clamped - angles[lower]) / span
     interpolated = values[lower] + weight * (values[upper] - values[lower])
     return interpolated * torch.as_tensor(attenuation, dtype=torch.float64)
+
+
+j_no2 = j_no2_zenith_table
+"""Deprecated name of `j_no2_zenith_table`."""
 
 
 # ------------------------------------------------------------- SIRANE's chemistry closure
@@ -226,7 +262,7 @@ def solar_elevation(latitude_deg, day_of_year, hour) -> torch.Tensor:
     return torch.rad2deg(torch.asin(torch.clamp(sin_a, -1.0, 1.0)))
 
 
-def j_no2_sirane(elevation_deg, cloud_octas=0.0) -> torch.Tensor:
+def j_no2_elevation_cloud(elevation_deg, cloud_octas=0.0) -> torch.Tensor:
     """SIRANE's NO2 photolysis rate `k1` (1/s) at solar elevation `elevation_deg` under
     `cloud_octas` of cloud (0 to 8).
 
@@ -240,7 +276,7 @@ def j_no2_sirane(elevation_deg, cloud_octas=0.0) -> torch.Tensor:
     with torch.no_grad():
         if not bool(torch.isfinite(cloud).all()) or bool(((cloud < 0) | (cloud > 8)).any()):
             raise ValueError(
-                f"j_no2_sirane: cloud_octas must lie in [0, 8]; got "
+                f"j_no2_elevation_cloud: cloud_octas must lie in [0, 8]; got "
                 f"{cloud.detach().flatten()[:4].tolist()}"
             )
     zenith = torch.clamp(90.0 - elevation, min=0.0)
@@ -248,11 +284,23 @@ def j_no2_sirane(elevation_deg, cloud_octas=0.0) -> torch.Tensor:
     return clear * (1.0 - 0.75 * (cloud / 8.0) ** 3.4)
 
 
-def k_no_o3_sirane(temperature) -> torch.Tensor:
-    """SIRANE's k(NO + O3) = 1.325e6 exp(-1430/T) m3 mol^-1 s^-1 at `temperature` (K).
+j_no2_sirane = j_no2_elevation_cloud
+"""Deprecated name of `j_no2_elevation_cloud`."""
+
+
+def k_no_o3_soulhac2011(temperature) -> torch.Tensor:
+    """k(NO + O3) = 1.325e6 exp(-1430/T) m3 mol^-1 s^-1 at `temperature` (K), SIRANE's
+    rate (Soulhac et al. 2011, with the prefactor that reproduces SIRANE v2.1 output).
 
     In SIRANE the temperature is its ground-level air temperature. Divided by the molar
     volume in litres and times 1e-6 it is the rate in ppb^-1 s^-1 that SIRANE prints.
     """
     t = torch.as_tensor(temperature, dtype=torch.float64)
     return SIRANE_K3_PREFACTOR * torch.exp(-SIRANE_K3_ACTIVATION / t)
+
+
+k_no_o3_sirane = k_no_o3_soulhac2011
+"""Deprecated name of `k_no_o3_soulhac2011`."""
+
+NO_O3_RATES = {"soulhac_2011": k_no_o3_soulhac2011, "jpl_2003": k_no_o3_jpl2003}
+"""The named NO + O3 rates `photostationary_for_streets(no_o3_rate=...)` takes."""

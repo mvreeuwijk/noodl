@@ -19,8 +19,7 @@ DATA = Path(__file__).resolve().parents[2] / "data" / "street"
 # `munich_paris_excerpt` is four streets of the Le Perreux-sur-Marne network (MUNICH's
 # published test case, east of Paris) with real per-street binaries; `munich_case_excerpt`
 # is the same four streets with authored constant fields and one binary. See their NOTICEs.
-MUNICH = dict(canyon_wind="exponential", exchange="schulte", stability="munich",
-              direction_averaging="munich", roof_wind_form="sirane")
+MUNICH = dict(preset="munich", canyon_wind_min=0.0, u_d_min=0.0)
 START = datetime(2014, 3, 16)
 
 
@@ -380,9 +379,9 @@ def test_meteo_junction_survives_a_permuted_intersection_file(tmp_path):
 def test_model_options_reads_the_case_own_closure_settings():
     case = read_case(DATA / "munich_paris_excerpt")
     assert case.model_options() == dict(
-        canyon_wind="exponential", exchange="schulte", roof_wind_form="sirane",
-        direction_averaging="munich", z_ref=30.0, canyon_wind_min=0.1,
-        stability="munich", u_d_min=0.001,
+        preset="munich", canyon_wind="exponential_profile",
+        roof_exchange="aspect_ratio_scaled", roof_wind="bessel_canyon_mean",
+        direction_averaging="rectangle_rule", z_ref=30.0, canyon_wind_min=0.1,
     )
 
 
@@ -397,9 +396,9 @@ def test_model_options_follow_non_default_keys(tmp_path):
     case = read_case(tmp_path)
     options = case.model_options()
     assert options == dict(
-        canyon_wind="soulhac", exchange="sirane", roof_wind_form="macdonald",
-        direction_averaging="none", z_ref=20.0, canyon_wind_min=0.25,
-        stability="munich", u_d_min=0.001,
+        preset="munich", canyon_wind="bessel_profile", roof_exchange="turbulent_velocity",
+        roof_wind="canopy_log_law", direction_averaging="none", z_ref=20.0,
+        canyon_wind_min=0.25,
     )
     build_model(case.network, species=("NO2",), **options)       # every keyword is valid
 

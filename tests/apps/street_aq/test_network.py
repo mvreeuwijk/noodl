@@ -148,17 +148,26 @@ def test_build_model_batches_over_forcing_steps_and_keeps_float64():
 
 def test_build_model_accepts_every_documented_option_combination():
     sn = from_test_network()
-    for canyon_wind, exchange, routing, averaging in (
-        ("soulhac", "sirane", "mixing", "none"),
-        ("soulhac", "schulte", "sirane", "gauss"),
-        ("soulhac", "sirane", "sirane", "sirane"),
-        ("exponential", "schulte", "sirane", "munich"),
+    for canyon_wind, exchange, routing, averaging, spread in (
+        ("bessel_profile", "turbulent_velocity", "perfect_mixing", "none", "driver"),
+        ("bessel_profile", "aspect_ratio_scaled", "non_crossing_streamlines",
+         "gauss_hermite", "driver"),
+        ("bessel_profile", "turbulent_velocity", "non_crossing_streamlines",
+         "exact_gaussian", "driver"),
+        ("exponential_profile", "aspect_ratio_scaled", "non_crossing_streamlines",
+         "rectangle_rule", "turbulence_intensity"),
+        ("exponential_profile", "turbulent_velocity", "perfect_mixing",
+         "exact_gaussian", "turbulence_intensity"),
     ):
         model, state, _ = build_model(
-            sn, canyon_wind=canyon_wind, exchange=exchange, routing=routing,
-            direction_averaging=averaging, n_theta=3, sigma_theta=0.05,
-            kappa=0.41, canyon_wind_min=0.1, roof_wind_form="macdonald",
+            sn, canyon_wind=canyon_wind, roof_exchange=exchange, junction_routing=routing,
+            direction_averaging=averaging, direction_spread=spread, n_theta=3,
+            sigma_theta=0.05, kappa=0.41, canyon_wind_min=0.1, roof_wind="canopy_log_law",
         )
+        out = model.steady(state, _wind(model, 5.0, 0.3, 500.0, {"r1": 1.0}))
+        assert torch.isfinite(out["street.x"]).all()
+    for preset in ("sirane", "munich"):
+        model, state, _ = build_model(sn, preset=preset)
         out = model.steady(state, _wind(model, 5.0, 0.3, 500.0, {"r1": 1.0}))
         assert torch.isfinite(out["street.x"]).all()
 

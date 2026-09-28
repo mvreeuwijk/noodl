@@ -1,6 +1,6 @@
 """SIRANE's NO-NO2-O3 chemistry: code-to-code verification of the street application's
-`closure="sirane"` photostationary split, and of `solar_elevation`, `j_no2_sirane` and
-`k_no_o3_sirane`, against SIRANE v2.1 output (`tests/data/street/sirane_chemistry`, see its
+`preset="sirane"` photostationary split, and of `solar_elevation`, `j_no2_elevation_cloud` and
+`k_no_o3_soulhac2011`, against SIRANE v2.1 output (`tests/data/street/sirane_chemistry`, see its
 NOTICE.md).
 
 Two comparisons, each to SIRANE's print precision:
@@ -37,8 +37,8 @@ from pathlib import Path
 import torch
 
 from noodl.apps.street_aq.chemistry import (
-    j_no2_sirane,
-    k_no_o3_sirane,
+    j_no2_elevation_cloud,
+    k_no_o3_soulhac2011,
     photostationary_for_streets,
     solar_elevation,
 )
@@ -95,7 +95,7 @@ def test_k1_matches_every_printed_value(record_property):
     """k1 from noodl physics' own elevation (not the rounded printed one, which near the
     1.458 deg threshold moves k1 by more than its printed precision)."""
     h = _hours()
-    k1 = j_no2_sirane(_elevation(h, h["latitude_deg"]), h["cloud_octas"])
+    k1 = j_no2_elevation_cloud(_elevation(h, h["latitude_deg"]), h["cloud_octas"])
     printed = h["k1_per_s"]
     night = printed == 0
     assert torch.equal(k1[night], torch.zeros_like(k1[night]))
@@ -110,12 +110,12 @@ def test_k1_matches_every_printed_value(record_property):
 
 
 def test_k3_matches_every_printed_value(record_property):
-    """k3 in ppb^-1 s^-1 = k_no_o3_sirane(T_g) 1e-6 / V_m[L]; the interval spanned by the
+    """k3 in ppb^-1 s^-1 = k_no_o3_soulhac2011(T_g) 1e-6 / V_m[L]; the interval spanned by the
     printed T_g and V_m's rounding must meet the printed k3's."""
     h = _hours()
     t, v = h["temperature_ground_C"] + KELVIN, h["molar_volume_L"]
-    low = k_no_o3_sirane(t - HALF_T) * 1e-6 / (v + HALF_VM)
-    high = k_no_o3_sirane(t + HALF_T) * 1e-6 / (v - HALF_VM)
+    low = k_no_o3_soulhac2011(t - HALF_T) * 1e-6 / (v + HALF_VM)
+    high = k_no_o3_soulhac2011(t + HALF_T) * 1e-6 / (v - HALF_VM)
     printed, half = h["k3_per_ppb_s"], _half_unit(h["k3_per_ppb_s"])
     inside = (low <= printed + half) & (high >= printed - half)
     record_property("k3_consistent_hours", int(inside.sum()))
@@ -124,7 +124,7 @@ def test_k3_matches_every_printed_value(record_property):
     # these hours exercise both.
     assert bool((h["temperature_ground_C"] != h["temperature_in_C"]).any())
     # Negative control: the paper's 1.325e5 prefactor matches no row.
-    paper = k_no_o3_sirane(t) * 0.1 * 1e-6 / v
+    paper = k_no_o3_soulhac2011(t) * 0.1 * 1e-6 / v
     paper_hits = int(((paper - printed).abs() <= half).sum())
     record_property("k3_rows_matched_with_paper_prefactor", paper_hits)
     assert paper_hits == 0
@@ -133,15 +133,15 @@ def test_k3_matches_every_printed_value(record_property):
 # ----------------------------------------------------------------------------- per point
 
 def _predict(deck, hour, k3_scale=1.0):
-    """SIRANE's chemistry values, via the `closure="sirane"` split, over the rounding
+    """SIRANE's chemistry values, via the `preset="sirane"` split, over the rounding
     envelope of the printed inputs: returns the chemistry values printed by SIRANE
     `(n_points, 3)` and the prediction `(n_envelope, n_points, 3)`, NO2, NO, O3 in ug/m3."""
-    reaction = photostationary_for_streets(("no2", "no", "o3"), closure="sirane")
+    reaction = photostationary_for_streets(("no2", "no", "o3"), preset="sirane")
     keys = sorted(hour["chemistry"])
     printed = torch.tensor([hour["chemistry"][k] for k in keys], dtype=DT)
     passive = torch.tensor([hour["passive"][k] for k in keys], dtype=DT)
     background = torch.tensor(deck["background_NO2_NO_O3"], dtype=DT)
-    k1 = j_no2_sirane(_elevation({key: torch.tensor(float(hour[key]), dtype=DT)
+    k1 = j_no2_elevation_cloud(_elevation({key: torch.tensor(float(hour[key]), dtype=DT)
                                   for key in ("day_of_year", "hour", "minute")},
                                  deck["latitude_deg"]), hour["cloud_octas"])
     t_g = hour["temperature_ground_C"] + KELVIN
@@ -224,7 +224,7 @@ def test_the_floor_is_what_sets_the_night():
     deck = next(d for d in _decks() if d["case"] == "night")
     hour = deck["hours"][0]
     printed, pred = _predict(deck, hour)
-    unfloored = photostationary_for_streets(("no2", "no", "o3"), closure="sirane",
+    unfloored = photostationary_for_streets(("no2", "no", "o3"), preset="sirane",
                                             floor_ppb=0.0)
     keys = sorted(hour["chemistry"])
     passive = torch.tensor([hour["passive"][k] + [0.0] for k in keys], dtype=DT)

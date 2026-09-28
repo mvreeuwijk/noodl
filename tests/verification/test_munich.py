@@ -32,6 +32,7 @@ from noodl.apps.street_aq.canyon import (
     soulhac_shape,
 )
 from noodl.apps.street_aq.chemistry import photostationary_for_streets, street_steady
+from noodl.apps.street_aq.closures import resolve
 from noodl.apps.street_aq.network import build_model, munich_idealised, street_index
 from noodl.apps.street_aq.routing import (
     direction_offsets,
@@ -40,7 +41,7 @@ from noodl.apps.street_aq.routing import (
     routing_matrix,
     sigma_theta_munich,
 )
-from noodl.layers.reaction import K_NO_O3, K_NO_O3_298, MOLAR_MASS, k_no_o3_munich
+from noodl.layers.reaction import K_NO_O3, K_NO_O3_298, MOLAR_MASS, k_no_o3_jpl2003
 
 DT = torch.float64
 FIXTURE = Path(__file__).resolve().parents[1] / "data" / "street" / "munich_idealised.json"
@@ -57,7 +58,7 @@ def test_sirane_exchange_velocity(record_property):
     """S11 Eq. (5) p. 7386; K18 Eq. (3) p. 613; K22 Eq. (B10) p. 7387;
     `StreetNetworkTransport.cxx:3273`. The regression guard against `1/sqrt(2 pi)`."""
     assert abs(SIRANE_EXCHANGE - 0.225079079039277) < 1e-15
-    u_d = exchange_velocity(_t(SIGMA_W), _t(H), _t(W), form="sirane")
+    u_d = exchange_velocity(_t(SIGMA_W), _t(H), _t(W), form="turbulent_velocity")
     # The worked value 0.08681174 is quoted to eight significant figures.
     assert abs(float(u_d) / 0.08681174 - 1.0) < 1e-7
     assert abs(1.0 / math.sqrt(2.0 * math.pi) - 0.398942280401433) < 1e-15
@@ -74,12 +75,12 @@ def test_schulte_mixing_length_and_exchange_velocity():
     assert abs(SCHULTE_BETA - 0.450158158078553) < 1e-15
     lm = SCHULTE_BETA / (1.0 + H / W)
     assert abs(lm - 0.234457373999246) < 1e-15
-    u_d = exchange_velocity(_t(SIGMA_W), _t(H), _t(W), form="schulte")
+    u_d = exchange_velocity(_t(SIGMA_W), _t(H), _t(W), form="aspect_ratio_scaled")
     assert abs(float(u_d) / 0.09042890 - 1.0) < 1e-7
     # At a_r = 1 the Schulte form collapses onto the SIRANE one exactly.
-    same = exchange_velocity(_t(SIGMA_W), _t(10.0), _t(10.0), form="schulte")
+    same = exchange_velocity(_t(SIGMA_W), _t(10.0), _t(10.0), form="aspect_ratio_scaled")
     torch.testing.assert_close(
-        same, exchange_velocity(_t(SIGMA_W), _t(10.0), _t(10.0), form="sirane"),
+        same, exchange_velocity(_t(SIGMA_W), _t(10.0), _t(10.0), form="turbulent_velocity"),
         rtol=1e-15, atol=0,
     )
 
@@ -88,11 +89,11 @@ def test_sigma_w_in_all_three_stability_branches():
     """`ComputeSigmaW`, `StreetNetworkTransport.cxx:3221-3260`; neither paper gives it."""
     layer = BoundaryLayer(u_star=_t(U_STAR), h_abl=_t(PBLH), z_ref=_t(30.0),
                           d=_t(4.6), z0=_t(0.69), kappa=KAPPA_MUNICH)
-    neutral = layer.sigma_w(_t(H), lmo=_t(1.0e6), stability="munich")
+    neutral = layer.sigma_w(_t(H), lmo=_t(1.0e6), stability="monin_obukhov")
     assert abs(float(neutral) - 0.3856944) < 1e-13
-    stable = layer.sigma_w(_t(H), lmo=_t(100.0), stability="munich")
+    stable = layer.sigma_w(_t(H), lmo=_t(100.0), stability="monin_obukhov")
     assert abs(float(stable) - 0.38798000423523393) < 1e-13
-    unstable = layer.sigma_w(_t(H), lmo=_t(-50.0), stability="munich")
+    unstable = layer.sigma_w(_t(H), lmo=_t(-50.0), stability="monin_obukhov")
     # The worked value 0.473173 is quoted to six significant figures.
     assert abs(float(unstable) / 0.473173 - 1.0) < 1e-6
     # And the neutral branch IS the neutral form, evaluated at z = H.
@@ -106,13 +107,13 @@ def test_exponential_canyon_wind_is_kim_2022_b14_and_not_kim_2018_9_to_11():
     aspect-ratio regimes with a `2/pi` prefactor integrated from 0 -- a different formula
     under the same name, and 37 % away for a narrow canyon.
     """
-    u_street = canyon_velocity(_t(W), _t(H), _t(0.0), u_h=_t(5.0), form="exponential",
+    u_street = canyon_velocity(_t(W), _t(H), _t(0.0), u_h=_t(5.0), form="exponential_profile",
                                z0_s=Z0_S)
     assert abs(float(u_street) - 4.003210417532266) < 1e-12
     assert abs(float(u_street) / 5.0 - 0.8006420835064532) < 1e-13
     for angle, expected in ((30.0, 3.466882), (60.0, 2.001605)):
         got = canyon_velocity(_t(W), _t(H), _t(math.radians(angle)), u_h=_t(5.0),
-                              form="exponential", z0_s=Z0_S)
+                              form="exponential_profile", z0_s=Z0_S)
         assert abs(float(got) / expected - 1.0) < 1e-6      # quoted to seven figures
 
 
@@ -121,7 +122,7 @@ def test_macdonald_displacement_roughness_and_roof_wind(record_property):
     d_c, z0c = macdonald_profile(_t(H), _t(W))
     assert abs(float(d_c) - 4.617352498423888) < 1e-12
     assert abs(float(z0c) - 0.6614635677623194) < 1e-12
-    u_h = roof_wind(_t(U_STAR), _t(H), _t(W), form="macdonald", h_mean=_t(H),
+    u_h = roof_wind(_t(U_STAR), _t(H), _t(W), form="canopy_log_law", h_mean=_t(H),
                     w_mean=_t(W))
     assert abs(float(u_h) - 0.9063192631810709) < 1e-12
     u_star_from_ref = 5.0 * KAPPA_MUNICH / math.log((30.0 - float(d_c)) / float(z0c))
@@ -142,7 +143,7 @@ def test_soulhac_shape_parameter_and_bessel_roof_wind(record_property):
     # MUNICH searches a 0.01 grid and returns 0.62; this is the continuous root, and the
     # quantisation costs 4e-4 relative in u_M.
     assert abs(float(c) - 0.6198293039179747) < 1e-13
-    u_h = roof_wind(_t(U_STAR), _t(H), _t(W), form="sirane", z0_s=Z0_S,
+    u_h = roof_wind(_t(U_STAR), _t(H), _t(W), form="bessel_canyon_mean", z0_s=Z0_S,
                     kappa=KAPPA_MUNICH)
     # u_H/u* = (u_M/u*) * f_mean = 8.611791 * 0.880654, both quoted to seven figures.
     assert abs(float(u_h) / U_STAR / (8.611791 * 0.880654) - 1.0) < 2e-6
@@ -159,7 +160,7 @@ def test_soulhac_shape_parameter_and_bessel_roof_wind(record_property):
 def test_the_nine_unnormalised_quadrature_weight_sums(n, total, record_property):
     """K22 Eq. (B16) p. 7388; `ComputeWindDirectionFluctuation` `:3562-3616`."""
     sigma = _t((n + 0.5) * math.pi / 180.0)
-    _offsets, weights = direction_offsets("munich", sigma)
+    _offsets, weights = direction_offsets("rectangle_rule", sigma)
     assert weights.shape[-1] == n
     measured = float(weights.sum())
     assert abs(measured - total) < 1e-6      # quoted to six decimal places
@@ -193,11 +194,11 @@ def test_the_non_crossing_routing_matrix_distinguishes_sirane_from_mixing():
     flux_in = torch.tensor([10.0, 4.0], dtype=DT)
     flux_out = torch.tensor([6.0, 8.0], dtype=DT)
     torch.testing.assert_close(
-        routing_matrix(flux_in, flux_out, model="sirane"),
+        routing_matrix(flux_in, flux_out, model="non_crossing_streamlines"),
         torch.tensor([[6.0, 4.0], [0.0, 4.0]], dtype=DT), rtol=0, atol=1e-14,
     )
     torch.testing.assert_close(
-        routing_matrix(flux_in, flux_out, model="mixing"),
+        routing_matrix(flux_in, flux_out, model="perfect_mixing"),
         torch.tensor([[30.0 / 7.0, 40.0 / 7.0], [12.0 / 7.0, 16.0 / 7.0]], dtype=DT),
         rtol=1e-14, atol=0,
     )
@@ -221,7 +222,7 @@ def test_the_steady_single_street():
     """The stationary solve of
     `StreetNetworkTransport.cxx:2573-2575` on one street with no inflow."""
     length = 100.0
-    u_d = float(exchange_velocity(_t(SIGMA_W), _t(H), _t(W), form="schulte"))
+    u_d = float(exchange_velocity(_t(SIGMA_W), _t(H), _t(W), form="aspect_ratio_scaled"))
     roof = u_d * W * length
     outflow = H * W * 4.0
     assert abs(roof - 67.82167214) < 1e-7          # quoted to ten figures
@@ -240,8 +241,8 @@ def test_the_leighton_rate_constant_and_its_conversion():
     assert abs(K_NO_O3 / 2.45236e5 - 1.0) < 2e-6                  # six figures
     # The temperature-dependent rate, in m3 mol^-1 s^-1, at the worked temperatures.
     n_a_cm3 = 6.02214076e23 * 1e-6
-    assert abs(float(k_no_o3_munich(298.15)) / (1.959634e-14 * n_a_cm3) - 1.0) < 1e-6
-    assert abs(float(k_no_o3_munich(300.0)) / (2.021384e-14 * n_a_cm3) - 1.0) < 1e-6
+    assert abs(float(k_no_o3_jpl2003(298.15)) / (1.959634e-14 * n_a_cm3) - 1.0) < 1e-6
+    assert abs(float(k_no_o3_jpl2003(300.0)) / (2.021384e-14 * n_a_cm3) - 1.0) < 1e-6
 
 
 def test_the_two_paper_versus_paper_divergences_are_pinned():
@@ -270,8 +271,7 @@ def _run(fixture):
     options.pop("comment")
     net, names = munich_idealised(L=geometry["L_m"], W=geometry["W_m"],
                                   H=geometry["H_m"])
-    model, state, _ = build_model(net, stability="neutral", pblh_floor=True,
-                                         **options)
+    model, state, _ = build_model(net, pblh_floor=True, **options)
     graph = model.net
     sources = torch.zeros(graph.n, dtype=DT)
     sources[graph.node_index(fixture["emitting_street"])] = 1.0
@@ -286,6 +286,24 @@ def _run(fixture):
         })["street.x"]
         out[scenario["panel"]] = {n: float(solved[i]) for i, n in enumerate(names)}
     return out, names
+
+
+def test_the_fixture_options_are_the_reference_option_set():
+    """The fixture's `preset="munich"` plus its two overrides resolve to the full option
+    set this comparison was measured with."""
+    options = dict(_fixture()["options"])
+    options.pop("comment")
+    assert options.pop("z_ref") == 30.0
+    resolved = resolve(options.pop("preset"), options, "test")
+    resolved.pop("chemistry")
+    assert resolved == {
+        "canyon_wind": "exponential_profile", "roof_wind": "canopy_log_law",
+        "roof_exchange": "aspect_ratio_scaled",
+        "junction_routing": "non_crossing_streamlines",
+        "direction_averaging": "rectangle_rule", "direction_spread": "turbulence_intensity",
+        "stability": "neutral", "kappa": 0.41, "canyon_wind_min": 0.1, "u_d_min": 0.001,
+        "sigma_w_min": 0.0, "sigma_v_min": 0.0,
+    }
 
 
 def test_the_fixture_matches_the_network_the_application_builds():
@@ -439,10 +457,9 @@ def test_photostationary_chemistry_on_the_twelve_street_network():
     options.pop("comment")
     net, names = munich_idealised(L=geometry["L_m"], W=geometry["W_m"],
                                   H=geometry["H_m"])
-    reaction = photostationary_for_streets(("no", "no2", "o3"))
+    reaction = photostationary_for_streets(("no", "no2", "o3"), preset="munich")
     model, state, _ = build_model(
-        net, species=("no", "no2", "o3"), chemistry=reaction, stability="neutral",
-        pblh_floor=True, **options,
+        net, species=("no", "no2", "o3"), chemistry=reaction, pblh_floor=True, **options,
     )
     graph = model.net
     sources = torch.zeros(graph.n, 3, dtype=DT)

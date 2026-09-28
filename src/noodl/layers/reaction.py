@@ -37,7 +37,7 @@ class FirstOrderDecay(Reaction):
 #   R2  O + O2 + M -> O3 + M      effectively instantaneous
 #   R3  O3 + NO -> NO2 + O2       k3 = 3.0e-12 exp(-1500/T) cm3 molecule^-1 s^-1
 #                                 (SPACK `ARR2 A B` == A exp(-B/T); NASA/JPL 2003)
-# `Photostationary` evaluates k3 at the temperature it is given (`k_no_o3_munich`); the
+# `Photostationary` evaluates k3 at the temperature it is given (`k_no_o3_jpl2003`); the
 # K_NO_O3 constants below are its value at 298 K.
 AVOGADRO = 6.02214076e23
 """1/mol (SI, exact)."""
@@ -62,14 +62,19 @@ K_NO_O3 = K_NO_O3_298 * (AVOGADRO / (1e6 * 48.0e-3))
 """k3(298 K) in m3 kg^-1 s^-1 for a kg/m3 state: 245236.36481890274."""
 
 
-def k_no_o3_munich(temperature) -> torch.Tensor:
+def k_no_o3_jpl2003(temperature) -> torch.Tensor:
     """k(NO + O3) = 3.0e-12 exp(-1500/T) cm3 molecule^-1 s^-1, returned in m3 mol^-1 s^-1.
 
-    MUNICH's Leighton rate (NASA/JPL 2003) at the absolute temperature `temperature` (K),
-    times `N_A * 1e-6`. It is `Photostationary`'s default rate.
+    The NASA/JPL (2003) rate, as in MUNICH's Leighton mechanism, at the absolute
+    temperature `temperature` (K), times `N_A * 1e-6`. It is `Photostationary`'s default
+    rate.
     """
     t = torch.as_tensor(temperature, dtype=torch.float64)
     return 3.0e-12 * AVOGADRO * 1e-6 * torch.exp(-1500.0 / t)
+
+
+k_no_o3_munich = k_no_o3_jpl2003
+"""Deprecated name of `k_no_o3_jpl2003`."""
 
 
 def molar_volume(temperature, pressure=P_STANDARD) -> torch.Tensor:
@@ -93,8 +98,8 @@ class Photostationary(Reaction):
 
     The rate ``k`` of NO + O3 is ``rate(T)`` in m3 mol^-1 s^-1, evaluated at the driver
     ``temperature_key`` (absolute temperature, K; it broadcasts against the state's leading
-    shape, so it may be one value or one per node). Without a ``rate`` it is MUNICH's
-    ``k_no_o3_munich``. A constant ``k_no_o3`` (m3 kg^-1 s^-1 for the kg/m3 state, e.g.
+    shape, so it may be one value or one per node). Without a ``rate`` it is the JPL
+    (2003) rate ``k_no_o3_jpl2003``. A constant ``k_no_o3`` (m3 kg^-1 s^-1 for the kg/m3 state, e.g.
     ``K_NO_O3``, the 298 K value) is used instead of a rate and makes the temperature
     unnecessary; giving both ``rate`` and ``k_no_o3`` raises.
 
@@ -145,7 +150,7 @@ class Photostationary(Reaction):
             )
         self.columns = (int(no), int(no2), int(o3))
         self.j_key = str(j_key)
-        self.rate = k_no_o3_munich if rate is None else rate
+        self.rate = k_no_o3_jpl2003 if rate is None else rate
         self.temperature_key = str(temperature_key)
         self.molar_volume_key = str(molar_volume_key)
         self.masses = (float(m_no), float(m_no2), float(m_o3))

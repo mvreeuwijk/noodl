@@ -3,9 +3,9 @@
 SIRANE reference data: compact extracts of SIRANE v2.1 rev 128 output (LMFA / École
 Centrale de Lyon, http://air.ec-lyon.fr/SIRANE/; the model is described in Soulhac et al.
 2011, *Atmospheric Environment* 45, 7379-7395) with its NO-NO2-O3 chemistry switched on.
-They are the reference for the street application's `closure="sirane"` chemistry
-(`solar_elevation`, `j_no2_sirane`, `k_no_o3_sirane` and the photostationary split) and are
-used by `tests/verification/test_sirane_chemistry.py`.
+They are the reference for the street application's `preset="sirane"` chemistry
+(`solar_elevation`, `j_no2_elevation_cloud`, `k_no_o3_soulhac2011` and the photostationary
+split) and are used by `tests/verification/test_sirane_chemistry.py`.
 
 The cases are single-street variants of the kernel cases in `../sirane_kernel_probe`,
 which derive from the South Kensington deck (`../sirane_south_kensington`), included with

@@ -32,12 +32,17 @@ from noodl.apps.street_aq.case import (
     write_sweep,
 )
 from noodl.apps.street_aq.chemistry import (
+    j_no2_elevation_cloud,
     j_no2_sirane,
+    j_no2_zenith_table,
+    k_no_o3_jpl2003,
     k_no_o3_sirane,
+    k_no_o3_soulhac2011,
     photostationary_for_streets,
     solar_elevation,
     street_steady,
 )
+from noodl.apps.street_aq.closures import OPTIONS, PRESETS
 from noodl.apps.street_aq.exposure import (
     Q_INHALATION,
     exposure_reduction_adjoint,
@@ -87,6 +92,8 @@ __all__ = [
     "GAMMA_E",
     "KAPPA",
     "KAPPA_MUNICH",
+    "OPTIONS",
+    "PRESETS",
     "Q_INHALATION",
     "SCHULTE_BETA",
     "SEUIL_GAUSS",
@@ -114,10 +121,14 @@ __all__ = [
     "from_test_network",
     "from_ug_m3",
     "initial_state",
+    "j_no2_elevation_cloud",
     "j_no2_sirane",
+    "j_no2_zenith_table",
     "junction_kernel",
     "junction_sources",
+    "k_no_o3_jpl2003",
     "k_no_o3_sirane",
+    "k_no_o3_soulhac2011",
     "macdonald_profile",
     "munich_idealised",
     "n_theta_munich",

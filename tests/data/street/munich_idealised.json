@@ -179,19 +179,18 @@
     "h_abl_m": 500.0
   },
   "options": {
-    "canyon_wind": "exponential",
-    "exchange": "schulte",
-    "routing": "sirane",
-    "direction_averaging": "munich",
-    "kappa": 0.41,
-    "canyon_wind_min": 0.1,
-    "u_d_min": 0.001,
-    "roof_wind_form": "macdonald",
+    "preset": "munich",
+    "roof_wind": "canopy_log_law",
+    "stability": "neutral",
     "z_ref": 30.0,
     "comment": [
-      "K22 Table 2's reference option set, except that the roof wind is MACDONALD rather",
-      "than SIRANE -- K22 pp. 7380 and 7382 recommend Macdonald on the strength of Maison",
-      "et al. (2022), and it is the option this comparison was measured with."
+      "K22 Table 2's reference option set (the munich preset: exponential canyon profile,",
+      "aspect-ratio-scaled exchange, non-crossing routing, rectangle-rule direction",
+      "averaging over the turbulence-intensity spread, kappa 0.41, canyon wind floor",
+      "0.1 m/s, exchange floor 0.001 m/s), except that the roof wind is the canopy log law",
+      "(Macdonald) rather than the Bessel canyon mean -- K22 pp. 7380 and 7382 recommend",
+      "Macdonald on the strength of Maison et al. (2022), and it is the option this",
+      "comparison was measured with -- and the turbulence is neutral."
     ]
   }
 }

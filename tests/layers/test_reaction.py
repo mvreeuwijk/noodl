@@ -11,7 +11,7 @@ from noodl.layers.reaction import (
     MOLAR_MASS,
     FirstOrderDecay,
     Photostationary,
-    k_no_o3_munich,
+    k_no_o3_jpl2003,
     molar_volume,
 )
 from noodl.layers.transport import TransportLayer
@@ -236,7 +236,7 @@ def test_the_default_rate_is_evaluated_at_the_temperature_driver():
     """k(NO + O3) = 3.0e-12 exp(-1500/T): at 298 K it is K_NO_O3, and at other temperatures
     the equilibrium follows the rate at THAT temperature, not the 298 K one."""
     n_a = 6.02214076e23
-    assert abs(float(k_no_o3_munich(298.0)) / (K_NO_O3 * MOLAR_MASS["o3"]) - 1.0) < 1e-14
+    assert abs(float(k_no_o3_jpl2003(298.0)) / (K_NO_O3 * MOLAR_MASS["o3"]) - 1.0) < 1e-14
     x = _state(2.0e-8, 4.0e-8, 6.0e-8, n=3)
     temps = torch.tensor([263.15, 298.0, 308.15], dtype=DT)
     y = Photostationary(0, 1, 2).apply(x, None, {"temperature": temps, "J_NO2": 5.0e-3})
@@ -256,7 +256,7 @@ def test_the_temperature_is_required_unless_the_rate_is_constant():
     at_298 = Photostationary(0, 1, 2).apply(x, None, {"J_NO2": 5.0e-3, "temperature": T298})
     torch.testing.assert_close(constant, at_298, rtol=1e-14, atol=0)
     with pytest.raises(ValueError, match=r"Photostationary: give either rate"):
-        Photostationary(0, 1, 2, rate=k_no_o3_munich, k_no_o3=K_NO_O3)
+        Photostationary(0, 1, 2, rate=k_no_o3_jpl2003, k_no_o3=K_NO_O3)
     renamed = Photostationary(0, 1, 2, temperature_key="T_air")
     torch.testing.assert_close(renamed.apply(x, None, {"J_NO2": 5.0e-3, "T_air": T298}),
                                at_298, rtol=0, atol=0)
@@ -288,7 +288,7 @@ def test_the_floor_bounds_j_over_k_and_is_inactive_above_it():
     floor changes nothing; the floor is in ppb, converted with the molar volume."""
     x = _state(2.0e-8, 4.0e-8, 6.0e-8)
     v_m = 0.0245                                       # m3/mol
-    k = float(k_no_o3_munich(T298))
+    k = float(k_no_o3_jpl2003(T298))
     floor_mol = 2.0e-9 / v_m
     base = {"temperature": T298, "molar_volume": v_m}
     floored = Photostationary(0, 1, 2, floor_ppb=2.0)

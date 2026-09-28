@@ -4,6 +4,7 @@ rewritten with SIRANE's English ones, the date formats SIRANE's files mix, and w
 reader refuses by name."""
 import math
 import shutil
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -14,6 +15,7 @@ import torch
 from noodl.apps.street_aq import build_model
 from noodl.apps.street_aq._sirane_files import parse_date
 from noodl.apps.street_aq.case import StreetCase, drivers_at, read_case
+from noodl.apps.street_aq.closures import resolve
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "street" / "sirane_south_kensington"
 MASTER = DATA / "Donnees_SouthKensington.dat"
@@ -245,17 +247,33 @@ def test_background_is_micrograms_to_kg_per_m3(tmp_path):
 
 def test_model_options_are_sirane_s_closures(case):
     options = case.model_options()
-    assert options["canyon_wind"] == "soulhac"
-    assert options["exchange"] == "sirane"
-    assert options["routing"] == "sirane"
+    # SIRANE's closure set is the sirane preset; the deck adds its own turbulence floors
+    # (this deck zeroes both).
+    assert options == {"preset": "sirane", "sigma_w_min": 0.0, "sigma_v_min": 0.0}
+    resolved = resolve("sirane", {}, "test")
+    assert resolved["canyon_wind"] == "bessel_profile"
+    assert resolved["roof_exchange"] == "turbulent_velocity"
+    assert resolved["junction_routing"] == "non_crossing_streamlines"
     # The exact Gaussian average over the direction spread (Soulhac et al. 2011, Eq. 7),
     # not a fixed quadrature: no node count to choose.
-    assert options["direction_averaging"] == "sirane"
+    assert resolved["direction_averaging"] == "exact_gaussian"
+    assert resolved["direction_spread"] == "driver"
     assert "n_theta" not in options
-    assert options["stability"] == "munich"
+    assert resolved["stability"] == "monin_obukhov"
     # No z_ref: noodl physics has no SIRANE meteorological preprocessor, so a SIRANE case
     # is driven with SIRANE's own u* (the `u_star` driver), never noodl's log law.
     assert "z_ref" not in options
+
+
+def test_model_options_fall_back_to_sirane_s_default_floors(case):
+    deck = {k: v for k, v in case.native["options"].items()
+            if k not in ("SIGMA_W_MIN", "SIGMA_V_MIN")}
+    bare = replace(case, native=dict(case.native, options=deck))
+    assert bare.model_options() == {"preset": "sirane"}
+    set_ = replace(case, native=dict(case.native, options=dict(deck, SIGMA_W_MIN="0.3",
+                                                               SIGMA_V_MIN="0.5")))
+    assert set_.model_options() == {"preset": "sirane", "sigma_w_min": 0.3,
+                                    "sigma_v_min": 0.5}
 
 
 def test_the_case_drives_a_model_built_from_its_own_options(case):

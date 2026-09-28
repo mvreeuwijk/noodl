@@ -36,11 +36,13 @@ __all__ = [
     "write_sweep",
 ]
 
-METEO_KEYS = ("wind_dir_from_deg", "wind_speed", "h_abl", "u_star", "lmo", "temperature")
+METEO_KEYS = ("wind_dir_from_deg", "wind_speed", "h_abl", "u_star", "lmo", "temperature",
+              "sigma_theta")
 """The neutral meteorology keys a `StreetCase` may carry: the wind direction in degrees
 clockwise from north, the direction the wind blows FROM; the reference wind speed (m/s);
 the boundary-layer height (m); the friction velocity (m/s); the Obukhov length (m); the
-surface temperature (K). The first two are required."""
+surface temperature (K); the wind-direction spread (radians). The first two are
+required."""
 
 _REQUIRED_METEO = ("wind_dir_from_deg", "wind_speed")
 
@@ -52,23 +54,24 @@ degrees, until converted; `U_ref` is stored as `wind_speed`). Every other key
 
 _MUNICH_OPTION_MAP: dict[str, tuple[str, dict[str, str]]] = {
     "Mean_wind_speed_parameterization": (
-        "canyon_wind", {"exponential": "exponential", "sirane": "soulhac"}),
-    "Transfer_parameterization": ("exchange", {"schulte": "schulte", "sirane": "sirane"}),
+        "canyon_wind", {"exponential": "exponential_profile", "sirane": "bessel_profile"}),
+    "Transfer_parameterization": (
+        "roof_exchange", {"schulte": "aspect_ratio_scaled", "sirane": "turbulent_velocity"}),
     "Building_height_wind_speed_parameterization": (
-        "roof_wind_form", {"sirane": "sirane", "macdonald": "macdonald"}),
-    "With_horizontal_fluctuation": ("direction_averaging", {"yes": "munich", "no": "none"}),
+        "roof_wind", {"sirane": "bessel_canyon_mean", "macdonald": "canopy_log_law"}),
+    "With_horizontal_fluctuation": (
+        "direction_averaging", {"yes": "rectangle_rule", "no": "none"}),
 }
 """MUNICH `[street]` key -> (the `build_model` keyword it sets, MUNICH value (lower case) ->
 noodl value). A value missing from its map (e.g. MUNICH's `Wang` transfer) has no noodl
-counterpart."""
+counterpart. MUNICH's direction spread is the `munich` preset's
+`direction_spread="turbulence_intensity"`."""
+
+_SIRANE_FLOOR_MAP = {"SIGMA_W_MIN": "sigma_w_min", "SIGMA_V_MIN": "sigma_v_min"}
+"""SIRANE master-file keyword -> the `build_model` turbulence floor it sets."""
 
 _MUNICH_FLOAT_MAP = {"Zref": "z_ref", "Minimum_Street_Wind_Speed": "canyon_wind_min"}
 """MUNICH `[street]` key -> the float `build_model` keyword it sets."""
-
-_MUNICH_U_D_MIN = 0.001
-"""MUNICH's hard-coded minimum exchange velocity, `min_velocity`
-(`StreetNetworkTransport.cxx:206` and `:3295`): not a configuration key, so every MUNICH
-case implies it."""
 
 _MUNICH_FLOAT_DEFAULTS = {"Minimum_Street_Wind_Speed": 0.1}
 """`_MUNICH_FLOAT_MAP` keys MUNICH itself defaults when `[street]` lacks them, instead of
@@ -207,32 +210,34 @@ class StreetCase:
 
     def model_options(self) -> dict:
         """The `build_model` keywords this case's own source model implies, translated from
-        its native options.
+        its native options: `{"preset": ...}` plus the options the source's files set.
 
-        MUNICH (`source="munich"`), from `munich.cfg`'s `[street]` section:
-        `Mean_wind_speed_parameterization` (`Exponential` -> `canyon_wind="exponential"`,
-        `Sirane` -> `"soulhac"`), `Transfer_parameterization` (`Schulte` ->
-        `exchange="schulte"`, `Sirane` -> `"sirane"`),
-        `Building_height_wind_speed_parameterization` (`Sirane`/`Macdonald` ->
-        `roof_wind_form`), `With_horizontal_fluctuation` (`yes` ->
-        `direction_averaging="munich"`, `no` -> `"none"`), `Zref` -> `z_ref`,
-        `Minimum_Street_Wind_Speed` -> `canyon_wind_min`; always `stability="munich"` and
-        MUNICH's hard-coded `u_d_min=0.001`. A value with no noodl counterpart (e.g. the
-        `Wang` transfer) raises `NotImplementedError` naming the key and value; a missing
-        key raises `ValueError`, except `Minimum_Street_Wind_Speed`, which MUNICH itself
-        defaults to `0.1` when absent (see `_MUNICH_FLOAT_DEFAULTS`) -- an unparsable value
-        still raises.
+        MUNICH (`source="munich"`): `preset="munich"` (whose `stability="monin_obukhov"`,
+        `direction_spread="turbulence_intensity"` and hard-coded `u_d_min=0.001` every
+        MUNICH case implies), plus, from `munich.cfg`'s `[street]` section:
+        `Mean_wind_speed_parameterization` (`Exponential` ->
+        `canyon_wind="exponential_profile"`, `Sirane` -> `"bessel_profile"`),
+        `Transfer_parameterization` (`Schulte` -> `roof_exchange="aspect_ratio_scaled"`,
+        `Sirane` -> `"turbulent_velocity"`), `Building_height_wind_speed_parameterization`
+        (`Sirane` -> `roof_wind="bessel_canyon_mean"`, `Macdonald` -> `"canopy_log_law"`),
+        `With_horizontal_fluctuation` (`yes` -> `direction_averaging="rectangle_rule"`,
+        `no` -> `"none"`), `Zref` -> `z_ref`, `Minimum_Street_Wind_Speed` ->
+        `canyon_wind_min`. A value with no noodl counterpart (e.g. the `Wang` transfer)
+        raises `NotImplementedError` naming the key and value; a missing key raises
+        `ValueError`, except `Minimum_Street_Wind_Speed`, which MUNICH itself defaults to
+        `0.1` when absent (see `_MUNICH_FLOAT_DEFAULTS`) -- an unparsable value still
+        raises.
 
-        SIRANE (`source="sirane"`): SIRANE's closure set, which its master file does not
-        switch -- `canyon_wind="soulhac"` (the in-canyon velocity of Soulhac et al. 2008),
-        `exchange="sirane"` (`u_d = sigma_w / (sqrt(2) pi)`), `routing="sirane"` (the
-        non-crossing-streamline junction exchange), `direction_averaging="sirane"` (SIRANE's
-        normalised Gaussian integral of the junction exchange over the direction spread,
-        Soulhac et al. 2011, Eq. 7, evaluated exactly: the integrand is piecewise constant
-        in the direction; SIRANE's spread varies hourly, so it is supplied as the
-        `sigma_theta` driver rather than fixed here), `stability="munich"` (SIRANE's
-        three-branch stable/neutral/unstable `sigma_w`; noodl physics' `"munich"` form is
-        the closest it has). `z_ref` is left at `build_model`'s default: noodl physics has no
+        SIRANE (`source="sirane"`): `preset="sirane"` -- SIRANE's closure set, which its
+        master file does not switch: the Bessel canyon wind (Soulhac et al. 2008),
+        `u_d = sigma_w / (sqrt(2) pi)`, non-crossing junction routing, the exact Gaussian
+        average of the junction routing over the direction spread (Soulhac et al. 2011,
+        Eq. 7; SIRANE's spread varies hourly, so it is supplied as the `sigma_theta`
+        driver), and the three-branch stable/neutral/unstable `sigma_w`
+        (`stability="monin_obukhov"`) -- plus the deck's turbulence floors `SIGMA_W_MIN`
+        -> `sigma_w_min` and `SIGMA_V_MIN` -> `sigma_v_min` where the master file sets
+        them (the preset's 0.30 and 0.5 m/s, SIRANE's defaults, otherwise). `z_ref` is
+        left at `build_model`'s default: noodl physics has no
         SIRANE meteorological preprocessor (SIRANE derives u*, the boundary-layer height,
         the Obukhov length and sigma_theta from the meteo site's wind, temperature and cloud
         cover, over that site's own roughness), so a SIRANE case is driven with SIRANE's own
@@ -245,13 +250,12 @@ class StreetCase:
         model's options (pass `build_model`'s keywords directly).
         """
         if self.source == "sirane":
-            return {
-                "canyon_wind": "soulhac",
-                "exchange": "sirane",
-                "routing": "sirane",
-                "direction_averaging": "sirane",
-                "stability": "munich",
-            }
+            options: dict = {"preset": "sirane"}
+            deck = self.native.get("options", {})
+            for key, keyword in _SIRANE_FLOOR_MAP.items():
+                if key in deck:
+                    options[keyword] = float(deck[key])
+            return options
         if self.source != "munich":
             raise NotImplementedError(
                 f"StreetCase.model_options: source {self.source!r} carries no source-model "
@@ -267,7 +271,7 @@ class StreetCase:
                 )
             return street[key]
 
-        options: dict = {}
+        options = {"preset": "munich"}
         for key, (keyword, mapping) in _MUNICH_OPTION_MAP.items():
             raw = value(key)
             if raw.strip().lower() not in mapping:
@@ -281,8 +285,6 @@ class StreetCase:
                 options[keyword] = _MUNICH_FLOAT_DEFAULTS[key]
             else:
                 options[keyword] = float(value(key))
-        options["stability"] = "munich"
-        options["u_d_min"] = _MUNICH_U_D_MIN
         return options
 
 
@@ -670,7 +672,11 @@ def drivers_at(
     derived through noodl's log law -- `u_star`, when present, is what actually sets the
     friction velocity; `U_ref` is needed only for the direction spread
     `sigma_theta = sigma_v / U_ref`). `temperature` (K) is supplied whenever `case` has it;
-    the photostationary chemistry evaluates its rate there.
+    the photostationary chemistry evaluates its rate there. `sigma_theta` (radians) is
+    supplied whenever `case` has it and the model takes its spread from the driver
+    (`direction_spread="driver"`): per junction under `meteo="per_street"` (from
+    `case.meteo_junction` when the source has it, else the mean over the streets meeting
+    there), one network-wide mean otherwise.
     """
     flows = next(c for c in model.closures if isinstance(c, StreetFlows))
     layer = model.transport[flows.layer_name]
@@ -734,6 +740,8 @@ def drivers_at(
     h_abl = case.meteo["h_abl"][k] if "h_abl" in case.meteo else None
     lmo = case.meteo["lmo"][k] if "lmo" in case.meteo else None
     temperature = case.meteo["temperature"][k] if "temperature" in case.meteo else None
+    spread = (case.meteo["sigma_theta"][k]
+              if "sigma_theta" in case.meteo and flows.direction_spread == "driver" else None)
     theta_w_all = apply_conversion(
         CONTAM_DEG_TO_STREET_RAD, torch.as_tensor(theta_deg, dtype=F64), {}
     )
@@ -765,6 +773,13 @@ def drivers_at(
         for key, value in flows.junction_values(junction_drivers).items():
             if value is not None:
                 out[f"{key}_junction"] = value
+        if spread is not None:
+            if "sigma_theta" in case.meteo_junction:
+                out["sigma_theta"] = torch.as_tensor(case.meteo_junction["sigma_theta"][k],
+                                                     dtype=F64)
+            else:
+                out["sigma_theta"] = flows._street_mean(
+                    torch.as_tensor(spread, dtype=F64), "arithmetic")
     else:
         out["theta_w"] = torch.tensor(
             float(_munich_files.circular_mean_rad(theta_w_all.numpy(), axis=0)), dtype=F64
@@ -780,5 +795,7 @@ def drivers_at(
             )
         if temperature is not None:
             out["temperature"] = torch.tensor(float(np.mean(temperature)), dtype=F64)
+        if spread is not None:
+            out["sigma_theta"] = torch.tensor(float(np.mean(spread)), dtype=F64)
 
     return out

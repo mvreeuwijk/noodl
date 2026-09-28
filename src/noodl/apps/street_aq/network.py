@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 import torch
 
 from noodl.apps.street_aq.canyon import Z0_B_DEFAULT, Z0_S_DEFAULT
+from noodl.apps.street_aq.closures import resolve
 from noodl.apps.street_aq.routing import StreetFlows, StreetGeometry
 from noodl.layers.reaction import Reaction
 from noodl.layers.transport import TransportLayer, active_interior
@@ -164,20 +165,24 @@ def munich_idealised(
 def build_model(
     net: StreetNetwork,
     *,
-    canyon_wind: str = "soulhac",
-    exchange: str = "sirane",
-    routing: str = "sirane",
-    direction_averaging: str = "none",
+    preset: str = "sirane",
+    canyon_wind: str | None = None,
+    roof_wind: str | None = None,
+    roof_exchange: str | None = None,
+    junction_routing: str | None = None,
+    direction_averaging: str | None = None,
+    direction_spread: str | None = None,
+    stability: str | None = None,
     n_theta: int | None = None,
     sigma_theta: float | None = None,
     species: Sequence[str] = ("nox",),
     chemistry: Reaction | None = None,
     scheme: str = "implicit",
     kappa: float | None = None,
-    canyon_wind_min: float = 0.0,
-    u_d_min: float = 0.0,
-    stability: str = "neutral",
-    roof_wind_form: str = "sirane",
+    canyon_wind_min: float | None = None,
+    u_d_min: float | None = None,
+    sigma_w_min: float | None = None,
+    sigma_v_min: float | None = None,
     z0_s: float = Z0_S_DEFAULT,
     z_ref: float = 30.0,
     pblh_floor: bool = True,
@@ -185,8 +190,19 @@ def build_model(
     background: str = "uniform",
     atmosphere: str = "atmosphere",
     layer_name: str = "street",
+    **deprecated,
 ) -> tuple[Model, State, Drivers]:
     """`(Model, initial state, driver template)` for one street network.
+
+    The closures are preset `preset`'s (`"sirane"`, the default, or `"munich"`; see
+    `noodl.apps.street_aq.closures.PRESETS`). Every closure keyword left at `None` takes
+    the preset's value and any other value overrides it: `canyon_wind`, `roof_wind`,
+    `roof_exchange`, `junction_routing`, `direction_averaging`, `direction_spread`,
+    `stability`, `kappa` and the floors `canyon_wind_min`, `u_d_min`, `sigma_w_min`,
+    `sigma_v_min`. The earlier keywords `exchange`, `routing` and `roof_wind_form`, and the
+    earlier values (`"soulhac"`, `"schulte"`, `"munich"`, ...), are accepted with a
+    `DeprecationWarning` naming the replacement. `StreetFlows` documents what each option
+    computes.
 
     The graph: the boundary node(s) FIRST -- `atmosphere` alone with `background="uniform"`,
     or one node per street, `f"{atmosphere}:{street.name}"` in street order, with
@@ -204,10 +220,10 @@ def build_model(
     unguarded neutral form's behaviour -- and expect `exchange_velocity` to refuse the
     step if a street is taller than 1.25 times the boundary-layer height.
 
-    `kappa=None` (the default) is passed straight through to `StreetFlows`,
-    which resolves it to MUNICH's 0.41 whenever any MUNICH-style form is selected
-    (`canyon_wind="exponential"`, `exchange="schulte"` or `roof_wind_form="macdonald"`) and
-    to the neutral form's 0.4 otherwise; an explicit float always wins over that resolution.
+    `kappa=None` (the default) is the preset's von Karman constant; with any closure
+    option given explicitly it is 0.41 whenever a choice written with that constant is
+    selected (`canyon_wind="exponential_profile"`, `roof_exchange="aspect_ratio_scaled"` or
+    `roof_wind="canopy_log_law"`) and 0.40 otherwise. An explicit float always wins.
 
     `meteo="uniform"` (the default) drives the whole network from one instance value per
     driver. `meteo="per_street"` gives every street its own wind and boundary layer (a
@@ -227,6 +243,14 @@ def build_model(
         raise ValueError(
             f"build_model: meteo must be 'uniform' or 'per_street', got {meteo!r}"
         )
+    options = resolve(preset, dict(
+        deprecated, canyon_wind=canyon_wind, roof_wind=roof_wind,
+        roof_exchange=roof_exchange, junction_routing=junction_routing,
+        direction_averaging=direction_averaging, direction_spread=direction_spread,
+        stability=stability, kappa=kappa, canyon_wind_min=canyon_wind_min,
+        u_d_min=u_d_min, sigma_w_min=sigma_w_min, sigma_v_min=sigma_v_min,
+    ), "build_model")
+    options.pop("chemistry")
     if background not in ("uniform", "per_street"):
         raise ValueError(
             f"build_model: background must be 'uniform' or 'per_street', got {background!r}"
@@ -290,11 +314,9 @@ def build_model(
         n_species=n_species, scheme=scheme, quantity="concentration", unit="kg/m3",
     )
     closure = StreetFlows(
-        graph, layer, street_geometry(net), canyon_wind=canyon_wind, exchange=exchange,
-        routing=routing, direction_averaging=direction_averaging, n_theta=n_theta,
-        sigma_theta=sigma_theta, kappa=kappa, canyon_wind_min=canyon_wind_min,
-        u_d_min=u_d_min, stability=stability, roof_wind_form=roof_wind_form, z0_s=z0_s,
-        z_ref=z_ref, pblh_floor=pblh_floor, meteo=meteo, layer_name=layer_name,
+        graph, layer, street_geometry(net), preset=preset, n_theta=n_theta,
+        sigma_theta=sigma_theta, z0_s=z0_s, z_ref=z_ref, pblh_floor=pblh_floor,
+        meteo=meteo, layer_name=layer_name, **options,
     )
     reactions = [(layer_name, chemistry)] if chemistry is not None else []
     model = Model(graph, {layer_name: layer}, closures=[closure], reactions=reactions)
