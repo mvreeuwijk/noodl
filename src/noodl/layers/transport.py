@@ -351,7 +351,9 @@ class TransportLayer:
 
     #: The differentiable operator coefficients a layer owns, in the fixed order the
     #: custom autograd boundary flattens them. Absent optional ones are skipped by name.
-    _COEFFICIENT_NAMES = ("carrier", "transmission", "kinetics", "removal", "conductance")
+    _COEFFICIENT_NAMES = (
+        "carrier", "transmission", "kinetics", "removal", "conductance", "dilution",
+    )
 
     def _coefficients(self) -> tuple[tuple[str, ...], list[torch.Tensor]]:
         """`(names, tensors)`: every coefficient tensor that must cross `_LinearSolve`'s
@@ -364,6 +366,7 @@ class TransportLayer:
             "kinetics": self.kinetics,
             "removal": self.removal,
             "conductance": None if self._conduction_edges is None else self._conduction_edges[2],
+            "dilution": self.dilution,
         }
         names = tuple(n for n in self._COEFFICIENT_NAMES if values[n] is not None)
         return names, [values[n] for n in names]
@@ -383,6 +386,7 @@ class TransportLayer:
         removal: torch.Tensor | None = None,
         conduction_kind: str | None = None,
         conductance: torch.Tensor | None = None,
+        dilution: torch.Tensor | float | None = None,
         scheme: Literal["exact", "implicit", "trapezoidal"] = "exact",
         linear_solver: str = "auto",
         quantity: str = "scalar",
@@ -491,6 +495,30 @@ class TransportLayer:
                     f"({self.n_i}, {K}), got {tuple(removal.shape)}"
                 )
         self.removal = removal
+
+        # DILUTION (per species, in the carrier's units; `None` by default, so every
+        # existing layer is unchanged): the balance
+        #     V dx/dt = (In(q) - Out(q)) x - dilution * net(q) x + N x_b + sources,
+        # `net(q)_i` the signed net inflow of the layer's flow edges into interior node `i`.
+        # With balanced flows (`net = 0` wherever there is no source) it is the plain flux
+        # form. Where the flows do NOT balance -- a compressible volume whose stored mass
+        # changes, so that `net` is the rate of change of that mass -- `dilution = 0` is the
+        # conservative flux form for a fixed `V` and `dilution = carrier` the ADVECTIVE form
+        # `V dx/dt = sum_in carrier q (x_in - x)`, the balance of a quantity whose amount is
+        # `V x` with `V` growing by `net`. Any value in between (an ideal gas's energy, whose
+        # storage coefficient `cv` is not its carrier `cp`) is the balance of an amount whose
+        # own capacity grows by `dilution * net`. With `dilution` set the capacity is a rate
+        # COEFFICIENT, evaluated at the end of the step: `capacity_prev` is not used.
+        if dilution is not None:
+            dilution = torch.as_tensor(dilution, dtype=net.dtype)
+            if dilution.dim() == 0:
+                dilution = dilution.expand(K)
+            if dilution.shape != (K,):
+                raise ValueError(
+                    f"TransportLayer '{name}': dilution must be a scalar or have shape "
+                    f"({K},), got {tuple(dilution.shape)}"
+                )
+        self.dilution = dilution
 
         self.conduction_kind = conduction_kind
         if conduction_kind is not None:
@@ -745,7 +773,9 @@ class TransportLayer:
             conduction = (csrc, ctgt, coefficients["conductance"].to(dtype))
         cap = self.capacity if capacity is None else capacity
         kinetics = coefficients.get("kinetics")
-        removal = coefficients.get("removal")
+        removal = self._with_dilution(
+            coefficients.get("removal"), coefficients.get("dilution"), q, cap.to(dtype)
+        )
         return AdvectionOperator(
             src, tgt,
             flow=coefficients["carrier"].to(dtype) * q,
@@ -762,6 +792,25 @@ class TransportLayer:
             # otherwise expect an `x_boundary` entry for it.
             boundary_idx=self.boundary_idx,
         )
+
+    def net_inflow(self, q: torch.Tensor) -> torch.Tensor:
+        """`(..., n_i)`: the signed net inflow of the layer's flow edges into each ACTIVE
+        interior node (`sum` over edges INTO the node of `q` minus `sum` over edges OUT of
+        it; `q` positive from an edge's source to its target), un-weighted by the carrier."""
+        full = torch.zeros(q.shape[:-1] + (self.net.n,), dtype=q.dtype, device=q.device)
+        full = full.index_add(-1, self._flow_tgt, q).index_add(-1, self._flow_src, -q)
+        return full.index_select(-1, self.interior_idx)
+
+    def _with_dilution(
+        self, removal: torch.Tensor | None, dilution: torch.Tensor | None,
+        q: torch.Tensor, cap: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """`removal` plus the dilution rate `dilution * net_inflow(q) / capacity`
+        (`(..., n_i, K)`), or `removal` itself when the layer has no dilution."""
+        if dilution is None:
+            return None if removal is None else removal.to(q.dtype)
+        rate = (self.net_inflow(q) / cap).unsqueeze(-1) * dilution.to(q.dtype)
+        return rate if removal is None else removal.to(q.dtype) + rate
 
     # ------------------------------------------------------------ assembly
     def _capacity_stacked(
@@ -823,8 +872,9 @@ class TransportLayer:
         Gii = Gii / cap
         Gib = Gib / cap
 
-        if self.removal is not None:
-            Gii = Gii - torch.diag_embed(self.removal.to(dtype).transpose(-1, -2))
+        removal = self._with_dilution(self.removal, self.dilution, q, cap_t.to(dtype))
+        if removal is not None:
+            Gii = Gii - torch.diag_embed(removal.transpose(-1, -2))
 
         eyeK = torch.eye(K, dtype=dtype)
         M_block = torch.einsum("kl,...kij->...kilj", eyeK, Gii)   # (..., K, n_i, K, n_i)
@@ -1076,6 +1126,10 @@ class TransportLayer:
             )
         out_dtype = x.dtype
         dtype = torch.float64
+        if self.dilution is not None:
+            # The rate form (`dilution` in `__init__`): the capacity is a coefficient at the
+            # END of the step, and the change of storage is the dilution term itself.
+            capacity_prev = None
         cap_t = self._capacity_arg(capacity)
         cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev)
         if self.scheme == "exact" and not torch.equal(cap_prev_t, cap_t):

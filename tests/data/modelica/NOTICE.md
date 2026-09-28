@@ -8,6 +8,21 @@ reference simulation trajectory (`# key: value` header lines, then `time` and on
 compared variable). Every JSON records the MBL commit and the
 OpenModelica version it was generated with; every CSV repeats them in its header.
 
+The reference CSVs of the 13 dynamic models (`ClosedDoors`, `CO2TransportStep`,
+`NaturalVentilation`, `OneEffectiveAirLeakageArea`, `OneOpenDoor`, `OneRoom`,
+`OpenDoorBuoyancyDynamic`, `OpenDoorBuoyancyPressureDynamic`, `ReverseBuoyancy`,
+`ReverseBuoyancy3Zones`, `ThreeRoomsContam`, `ThreeRoomsContamDiscretizedDoor`, `ZonalFlow`)
+were regenerated with `scripts/modelica_export.py --tolerance 1e-13` (DASSL at a relative
+tolerance of 1e-13 instead of each model's declared 1e-6 or 1e-8; the CSV header's
+`tolerance` line records it; the JSON, which keeps the declared experiment, came out
+byte-identical). At the declared tolerance the references' own integration error was
+comparable to the parity tolerance (ZonalFlow: 5.6e-5 K, 2.8e-8 kg/kg; CO2TransportStep's
+door flow 5e-5 relative after its source pulse, still visible at 1e-10). From 1e-12 to 1e-13
+the references still moved by up to 1.1e-4 of the flow floor (`ClosedDoors`' crack flows,
+1.2e-11 kg/s), 3.7e-5 (`NaturalVentilation`'s orifices at their reversal, 3.7e-9 kg/s),
+4.7e-5 (`OneOpenDoor`'s door at 28.8 s, 7.9e-9 kg/s) and 1.2e-6 in `CO2TransportStep`'s
+trace substance (6e-14 kg/kg); at 1e-14 DASSL returns no trajectory for these models.
+
 MBL is licensed under a 3-clause BSD licence (with an added paragraph on accepting
 enhancements), reproduced below from `Buildings/legal.html` in the MBL source tree:
 
@@ -68,7 +83,7 @@ such enhancements or derivative works thereof, in binary and source code form.
 
 ---
 
-Five of the 23 models are refused by `read_modelica` (`ModelicaImportError`, naming the
+Four of the 23 models are refused by `read_modelica` (`ModelicaImportError`, naming the
 offending instances); their JSON is exported and kept here for the refusal tests:
 
 - `PressurizationData.json` — wind-pressure boundaries (`Outside_CpLowRise`) and weather data
@@ -79,13 +94,10 @@ offending instances); their JSON is exported and kept here for the refusal tests
   feedback controller are not supported.
 - `ChimneyShaftWithVolume.json` — a dynamic (mass- and heat-storing) hydrostatic column
   (`MediumColumnDynamic`) and a feedback controller are not supported.
-- `OneEffectiveAirLeakageArea.json` — a mass flow source into a zone group with no boundary
-  node (the injected mass could only be stored by compressing a volume, which is not
-  modelled) is not supported.
 
-All five still simulate cleanly in OpenModelica, so their `.csv` was exported too (this
+All four still simulate cleanly in OpenModelica, so their `.csv` was exported too (this
 export script does not know which models `noodl`'s reader refuses); they are kept here for
-completeness even though noodl's tests only read the JSON of these five.
+completeness even though noodl's tests only read the JSON of these four.
 
 Also derived from MBL, elsewhere in this repository: `tests/apps/building_physics/modelica/
 fixtures/three_rooms_discretized_door.json` reuses the instance names of

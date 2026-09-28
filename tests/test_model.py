@@ -210,8 +210,67 @@ def test_reactions_apply_after_the_transport_step():
         _build(reactions=[("nope", FirstOrderDecay(1e-3))])
 
 
+def test_reaction_order_before_transport_reacts_the_step_start_state_then_transports_it():
+    # R then T: the returned state is the transport step of the REACTED step-start state,
+    # the sample SWMM reports. Pinned against the plain model stepped from the reacted state
+    # by hand, from a nonzero start so the reaction actually acts; the default order is
+    # "after_transport", and anything else is refused by name.
+    decay = FirstOrderDecay(1e-3)
+    _, model, state, drivers, _, _ = _build(
+        reactions=[("species", decay)], reaction_order="before_transport",
+    )
+    _, plain, _, _, _, _ = _build()
+    assert plain.reaction_order == "after_transport"
+    start = {"species.x": torch.tensor([4e-4, 7e-4], dtype=F64)}
+    x_r = model.step(start, drivers, 600.0)["species.x"]
+    reacted = {"species.x": decay.apply(start["species.x"], 600.0)}
+    torch.testing.assert_close(x_r, plain.step(reacted, drivers, 600.0)["species.x"])
+    # The two orders' fixed points differ by exactly one reaction: x_TR = R(x_RT).
+    x_rt = x_tr = start
+    _, after, _, _, _, _ = _build(reactions=[("species", decay)])
+    for _ in range(400):
+        x_rt = model.step(x_rt, drivers, 600.0)
+        x_tr = after.step(x_tr, drivers, 600.0)
+    torch.testing.assert_close(
+        x_tr["species.x"], decay.apply(x_rt["species.x"], 600.0), rtol=1e-12, atol=1e-18,
+    )
+    with pytest.raises(ValueError, match="reaction_order"):
+        _build(reaction_order="sideways")
+
+
+def test_reaction_order_before_transport_keeps_the_gradient_and_the_iterated_coupling():
+    decay = FirstOrderDecay(1e-3)
+    _, model, state, drivers, el, _ = _build(
+        learnable=True, reactions=[("species", decay)], reaction_order="before_transport",
+    )
+    start = {"species.x": torch.tensor([4e-4, 7e-4], dtype=F64)}
+
+    def loss():
+        return model.step(start, drivers, 600.0)["species.x"].sum()
+
+    loss().backward()
+    grad = el.C.grad[1].item()
+    h = 1e-6
+    with torch.no_grad():
+        el.C[1] += h
+        up = loss().item()
+        el.C[1] -= 2 * h
+        down = loss().item()
+        el.C[1] += h
+    assert grad == pytest.approx((up - down) / (2 * h), rel=1e-5)
+    _, onion, _, _, _, _ = _build(
+        reactions=[("species", decay)], reaction_order="before_transport",
+        coupling="iterate", iterate_tol={"species": 1e-14},
+    )
+    torch.testing.assert_close(
+        onion.step(start, drivers, 600.0)["species.x"],
+        model.step(start, drivers, 600.0)["species.x"].detach(),
+        rtol=1e-10, atol=1e-18,
+    )
+
+
 def test_reactions_are_a_splitting_of_step_only_and_stay_out_of_steady_and_residuals():
-    # Pins the documented placement: a reaction is applied AFTER a transport step, so it
+    # Pins the documented placement: a reaction is applied around a transport step, so it
     # is outside both `steady` and the balance `residuals` reports. A later change must not
     # "fix" this by folding the reaction into either.
     tight = {"atol": 1e-14, "rtol": 1e-14}
@@ -520,6 +579,22 @@ def test_iterate_refuses_a_pass_budget_below_two_at_construction():
             _build(coupling="iterate", iterate_tol={"species": 1e-9}, iterate_max=bad)
     # `pingpong` never iterates, so the same value is none of its business
     _build(iterate_max=1)
+
+
+def test_iterate_relaxation_moves_no_fixed_point():
+    """`iterate_relaxation` (the newest pass's weight in the fed transport state) is refused
+    outside (0, 1]; inside, it changes how the passes reach the step, not where: 0.5
+    (Hensen's default) and 1 (plain successive substitution) land on the same state."""
+    for bad in (0.0, -0.5, 1.5):
+        with pytest.raises(ValueError, match="iterate_relaxation"):
+            _build(coupling="iterate", iterate_tol={"species": 1e-12}, iterate_relaxation=bad)
+    out = []
+    for w in (0.5, 1.0):
+        _, model, state, drivers, _, _ = _build(
+            closures=[_Feedback(2e3)], coupling="iterate", iterate_tol={"species": 1e-13},
+            iterate_max=60, iterate_relaxation=w)
+        out.append(model.step(state, drivers, 60.0, atol=1e-14, rtol=1e-14)["species.x"])
+    assert torch.allclose(out[0], out[1], rtol=0, atol=1e-11)
 
 
 def test_iterate_steps_every_transport_layer_but_tests_only_the_named_ones():

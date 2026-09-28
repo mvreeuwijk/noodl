@@ -383,3 +383,35 @@ def test_table_means_split_at_the_knots():
     assert _means(per, [0.5, 1.5, 5.5, 6.0]) == pytest.approx([0.5, 0.75, 0.5, 0.25],
                                                               rel=1e-14)
     assert _means(_sig("Constant", k=4.0), [0.0, 1.0, 3.0]) == [4.0, 4.0, 4.0]
+
+
+def test_events_split_breakpoints_into_jumps_and_kinks():
+    """`signals.events`: a Step's start and a Pulse's edges are jumps; a Ramp's corners are
+    kinks (jumps at zero duration); a Sine has a kink at a start inside the run (a jump when
+    it starts at a non-zero value, not continuous) and nothing at its quarter periods; a
+    linearly interpolated table's knots are kinks, except a repeated time, the start time
+    and constant segments, which are jumps."""
+    assert signals.events(_sig("Step", startTime=2.0), 0.0, 10.0) == ([2.0], [])
+    pulse = _sig("Pulse", period=4.0, width=25.0, startTime=1.0)
+    assert signals.events(pulse, 0.0, 10.0) == ([1.0, 2.0, 5.0, 6.0, 9.0], [])
+    ramp = _sig("Ramp", height=1.0, duration=3.0, startTime=2.0)
+    assert signals.events(ramp, 0.0, 10.0) == ([], [2.0, 5.0])
+    assert signals.events(ramp, 0.0, 4.0) == ([], [2.0])
+    step_ramp = _sig("Ramp", height=1.0, duration=0.0, startTime=2.0)
+    assert signals.events(step_ramp, 0.0, 10.0) == ([2.0], [])
+    assert signals.events(_sig("Sine", f=0.25, startTime=1.0), 0.0, 10.0) == ([], [1.0])
+    assert signals.events(_sig("Sine", f=0.25, phase=0.5, startTime=1.0),
+                          0.0, 10.0) == ([1.0], [])
+    assert signals.events(_sig("Sine", f=0.25), 0.0, 10.0) == ([], [])
+    tab = _sig("TimeTable", table=[[0.0, 0.0], [1.0, 2.0], [1.0, 3.0], [3.0, 2.0]],
+               startTime=1.0)
+    assert signals.events(tab, 0.0, 10.0) == ([1.0, 2.0], [4.0])
+    lin = _sig("CombiTimeTable", table=[[0.0, 0.0], [1.0, 2.0], [3.0, 2.0]])
+    assert signals.events(lin, 0.0, 10.0) == ([], [1.0, 3.0])
+    const = _sig("CombiTimeTable", table=[[0.0, 0.0], [1.0, 2.0], [3.0, 2.0]],
+                 smoothness="ConstantSegments")
+    assert signals.events(const, 0.0, 10.0) == ([1.0, 3.0], [])
+    per = _sig("CombiTimeTable", table=[[0.0, 0.0], [1.0, 1.0], [2.0, 0.0]],
+               extrapolation="Periodic")
+    assert signals.events(per, 0.0, 5.0) == ([2.0, 4.0], [1.0, 3.0])
+    assert signals.events(_sig("Constant", k=1.0), 0.0, 10.0) == ([], [])

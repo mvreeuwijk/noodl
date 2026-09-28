@@ -899,6 +899,33 @@ def test_grounding_counts_a_node_source_at_a_fixed_flow_only_node():
         without_source.solve(pb, {}, None, differentiable=False)
 
 
+def test_a_network_grounded_only_by_node_sources_is_certified_spd():
+    """Two nodes joined by a conductance, no boundary at all, each held by a positive-slope
+    node source (a closed building of compressible volumes): the Jacobian is SPD, and the
+    `auto` solver selection must see that (sparse direct, not the certificate-free GMRES
+    fallback). Solution by hand: g (a - b) + ga a = s, g (b - a) + gb b = 0."""
+    net = Network(dtype=torch.float64)
+    net.add_node("A")
+    net.add_node("B")
+    net.add_edge("A", "B", kind="c")
+    layer = PotentialFlowLayer(
+        net, "test", [Conductance(torch.tensor([2.0], dtype=torch.float64), kind="c")],
+        node_sources=[_LinearGround(torch.tensor([0]), 0.5),
+                      _LinearGround(torch.tensor([1]), 0.25)],
+    )
+    diag: dict = {}
+    phi, _ = layer.solve(torch.zeros(0, dtype=torch.float64), {},
+                         torch.tensor([1.0, 0.0], dtype=torch.float64),
+                         phi0=torch.zeros(2, dtype=torch.float64),  # one Newton step to run
+                         differentiable=False, atol=1e-14, rtol=1e-14, diagnostics=diag)
+    a, b = float(phi[0]), float(phi[1])
+    # b = 2a/2.25 from B's row; A's row: 2(a - b) + 0.5a = 1.
+    a_ref = 1.0 / (2.5 - 4.0 / 2.25)
+    assert a == pytest.approx(a_ref, rel=1e-12) and b == pytest.approx(2 * a_ref / 2.25,
+                                                                      rel=1e-12)
+    assert diag["backend"] == "sparse_direct"
+
+
 def test_two_node_sources_on_one_node_sum_their_withdrawals():
     """EPANET semantics -- several node sources at one junction sum, exactly as if a
     single node source carried their combined coefficient."""

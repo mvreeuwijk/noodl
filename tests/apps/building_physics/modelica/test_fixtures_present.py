@@ -2,8 +2,8 @@
 
 Fast: no simulation, so this runs on every test invocation. It only checks that the fixtures
 exist, record their provenance (the MBL commit and an OpenModelica version) and parse with
-`schema.load`; exercising `read_modelica`/`run.simulate` (18 models) and the
-`ModelicaImportError` refusal (5 models) against them is
+`schema.load`; exercising `read_modelica`/`run.simulate` (19 models) and the
+`ModelicaImportError` refusal (4 models) against them is
 `tests/verification/test_modelica_parity.py`'s job, not repeated here.
 """
 

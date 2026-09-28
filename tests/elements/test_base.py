@@ -149,3 +149,9 @@ def test_forward_delegates_to_the_subclass_flow_override_not_the_base_class():
     torch.testing.assert_close(el.forward(dp), el.flow(dp))
     with pytest.raises(NotImplementedError):
         Element(kind="airpath").forward(torch.tensor([1.0]))
+
+
+def test_a_smooth_element_has_no_switching_values():
+    from noodl.elements import Conductance
+
+    assert Conductance(1.0).switching(torch.tensor([0.5])) is None

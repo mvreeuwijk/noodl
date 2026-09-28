@@ -610,3 +610,19 @@ def test_door_pair_solves_inside_a_potential_layer_and_the_gradient_reaches_T():
     with torch.no_grad():
         fd = (net_flow(TA0 + h) - net_flow(TA0 - h)) / (2 * h)
     torch.testing.assert_close(TA.grad, fd, rtol=1e-5, atol=1e-10)
+
+
+def test_switching_values_mark_the_pressure_and_buoyancy_band_edges():
+    """The pressure term's band `|dp| < dp_turbulent` and the buoyancy term's
+    `|conTP (T_A - T_B)| < (m_flow_turbulent/kT)^2` (`basicFlowFunction_dp`), each as two
+    edge values in units of the band width."""
+    door = MBLDoorOpen(direction="ab", src=[0], tgt=[1], medium=AIR, kind="d")
+    drv = {"T": torch.tensor([293.15, 293.16], dtype=F64)}
+    dp = torch.tensor([0.003], dtype=F64)
+    sw = door.switching(dp, drv)
+    x, kT, mft = door._buoyancy(drv)
+    w = float((mft / kT) ** 2)
+    torch.testing.assert_close(sw, torch.tensor(
+        [(0.003 - 0.01) / 0.01, (0.003 + 0.01) / 0.01, (float(x) - w) / w, (float(x) + w) / w],
+        dtype=F64))
+    assert float(x) == pytest.approx(CON_TP * (293.15 - 293.16), rel=1e-12)
