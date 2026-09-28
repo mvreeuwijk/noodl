@@ -11,7 +11,7 @@ Two densities matter, and MBL keeps them structurally separate:
 
 * ``rho_default``: the medium's density at its own *fixed* default state
   (``p_default``/``T_default``/``X_default``), used to build the flow coefficient ``C``/``k``
-  of every power-law element in :mod:`noodl.elements.powerlaw_mbl`
+  of every power-law element in :mod:`noodl.elements.powerlaw_regularized`
   (``BaseClasses/PartialOneWayFlowElement.mo:23-28``: ``sta_default =
   Medium.setState_pTX(T=Medium.T_default, p=Medium.p_default, X=Medium.X_default)``,
   ``rho_default = Medium.density(sta_default)``). It is a plain Python ``float``, computed once
@@ -57,7 +57,7 @@ Tensor = torch.Tensor
 # (R = k * N_A, the CODATA universal gas constant Modelica.Media.Air.SimpleAir uses).
 _BOLTZMANN_K = 1.380649e-23
 _AVOGADRO_N_A = 6.02214076e23
-_MODELICA_CONSTANTS_R = _BOLTZMANN_K * _AVOGADRO_N_A
+_GAS_CONSTANT_R = _BOLTZMANN_K * _AVOGADRO_N_A
 
 # Modelica/Media/IdealGases/Common/SingleGasesData.mo:5 (R_NASA_2002, the NASA-2002 universal
 # gas constant every ideal-gas species record uses to build its own specific gas constant
@@ -116,8 +116,11 @@ def _moist_air_buoyancy_density(T, X_w) -> Tensor:
 
 
 @dataclass(frozen=True)
-class MBLMedium:
-    """One MBL/MSL medium's default state and the two densities its flow elements need.
+class AirMedium:
+    """An air medium's default state and the two densities its flow elements need.
+
+    Each is one MBL/MSL medium (``name`` is its Modelica class path); build one with
+    :func:`medium`. The pre-rename name ``MBLMedium`` is an alias.
 
     ``buoyancy_density`` is stored as a private callable rather than dispatched by ``name``,
     so each medium's own ideal-gas law (or, for ``Buildings.Media.Air``, ``density_pTX``) is
@@ -164,7 +167,7 @@ class MBLMedium:
         return self._cp(float(X_w))
 
 
-def _air_medium() -> MBLMedium:
+def _air_medium() -> AirMedium:
     """Buildings.Media.Air (Buildings/Media/Air.mo).
 
     ``Air.mo:43-45``: ``pStp = reference_p`` (=101325 Pa, MSL default), ``dStp = 1.2`` kg/m3.
@@ -179,7 +182,7 @@ def _air_medium() -> MBLMedium:
     pStp = _P_DEFAULT  # reference_p, Air.mo does not override PartialMedium's p_default
     rho_default = _P_DEFAULT * dStp / pStp
 
-    return MBLMedium(
+    return AirMedium(
         name="Buildings.Media.Air",
         p_default=_P_DEFAULT,
         T_default=_T_DEFAULT,
@@ -192,7 +195,7 @@ def _air_medium() -> MBLMedium:
     )
 
 
-def _perfectgas_medium() -> MBLMedium:
+def _perfectgas_medium() -> AirMedium:
     """Buildings.Media.Specialized.Air.PerfectGas (Buildings/Media/Specialized/Air/PerfectGas.mo).
 
     A true ideal gas: ``PerfectGas.mo:229-231`` (function ``density``):
@@ -206,7 +209,7 @@ def _perfectgas_medium() -> MBLMedium:
     r_at_x_default = _R_AIR * (1 - 0.01) + _R_H2O * 0.01
     rho_default = _P_DEFAULT / (r_at_x_default * _T_DEFAULT)
 
-    return MBLMedium(
+    return AirMedium(
         name="Buildings.Media.Specialized.Air.PerfectGas",
         p_default=_P_DEFAULT,
         T_default=_T_DEFAULT,
@@ -223,7 +226,7 @@ def _perfectgas_medium() -> MBLMedium:
     )
 
 
-def _simpleair_medium() -> MBLMedium:
+def _simpleair_medium() -> AirMedium:
     """Modelica.Media.Air.SimpleAir (MSL Modelica/Media/Air/SimpleAir.mo).
 
     No moisture (single substance, ``nXi=0``). ``SimpleAir.mo:6-8``:
@@ -232,7 +235,7 @@ def _simpleair_medium() -> MBLMedium:
     ``Modelica/Media/package.mo:6321-6323`` (``PartialSimpleIdealGasMedium``, function
     ``density``): ``d := state.p/(R_gas*state.T)``.
     """
-    r_gas = _MODELICA_CONSTANTS_R / _MM_AIR
+    r_gas = _GAS_CONSTANT_R / _MM_AIR
     rho_default = _P_DEFAULT / (r_gas * _T_DEFAULT)
 
     def buoyancy(T, X_w):
@@ -240,7 +243,7 @@ def _simpleair_medium() -> MBLMedium:
         T = torch.as_tensor(T)
         return _P_DEFAULT / (r_gas * T)
 
-    return MBLMedium(
+    return AirMedium(
         name="Modelica.Media.Air.SimpleAir",
         p_default=_P_DEFAULT,
         T_default=_T_DEFAULT,
@@ -253,23 +256,41 @@ def _simpleair_medium() -> MBLMedium:
     )
 
 
-_MEDIA: dict[str, Callable[[], MBLMedium]] = {
+#: The three media by physical name. Each is also registered under its Modelica class path
+#: (``_MEDIA_BY_MODELICA_PATH``), which is what the Modelica importer looks up and what
+#: ``AirMedium.name`` reports.
+_MEDIA: dict[str, Callable[[], AirMedium]] = {
+    # Buildings.Media.Air: moist air whose density depends on pressure only.
+    "moist_air": _air_medium,
+    # Buildings.Media.Specialized.Air.PerfectGas: moist air as an ideal-gas mixture.
+    "moist_air_ideal_gas": _perfectgas_medium,
+    # Modelica.Media.Air.SimpleAir: dry air as an ideal gas with constant cp.
+    "dry_air_ideal_gas": _simpleair_medium,
+}
+_MEDIA_BY_MODELICA_PATH: dict[str, Callable[[], AirMedium]] = {
     "Buildings.Media.Air": _air_medium,
     "Buildings.Media.Specialized.Air.PerfectGas": _perfectgas_medium,
     "Modelica.Media.Air.SimpleAir": _simpleair_medium,
 }
 
 
-def medium(name: str) -> MBLMedium:
-    """Look up one of the three MBL/MSL media this importer supports.
+def medium(name: str) -> AirMedium:
+    """Look up one of the three air media, by physical name or by Modelica class path.
 
-    Raises ``KeyError`` naming the three supported media if ``name`` is anything else.
+    ``"moist_air"`` (``Buildings.Media.Air``, density from pressure only),
+    ``"moist_air_ideal_gas"`` (``Buildings.Media.Specialized.Air.PerfectGas``) and
+    ``"dry_air_ideal_gas"`` (``Modelica.Media.Air.SimpleAir``). The Modelica class path is
+    accepted as well, and is what the returned medium's ``name`` reports.
+
+    Raises ``KeyError`` naming the supported media if ``name`` is anything else.
     """
-    try:
-        factory = _MEDIA[name]
-    except KeyError:
-        supported = ", ".join(sorted(_MEDIA))
+    factory = _MEDIA.get(name) or _MEDIA_BY_MODELICA_PATH.get(name)
+    if factory is None:
+        supported = ", ".join([*_MEDIA, *_MEDIA_BY_MODELICA_PATH])
         raise KeyError(
-            f"unsupported MBL medium {name!r}; supported media are: {supported}"
-        ) from None
+            f"unsupported medium {name!r}; supported media are: {supported}"
+        )
     return factory()
+
+# Pre-rename names, kept as aliases so existing code keeps working.
+MBLMedium = AirMedium  # alias, the pre-rename name

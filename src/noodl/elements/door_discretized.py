@@ -69,7 +69,7 @@ Compartment ``i`` of a door is one noodl edge from side A (``src``) to side B (`
   ``rho_A hAg[i] - rho_B hBg[i]``, so that the layer's ``dp = (phi_A - phi_B) + head`` is
   ``dpAB[i]`` (with ``phi = p - p_ref``, any fixed gauge reference -- the Modelica reader uses
   the first boundary's pressure -- the port pressures' difference is the potentials').
-* :class:`MBLDoorCompartment` / :class:`MBLDoorCompartmentOperable` return that
+* :class:`DoorCompartment` / :class:`OperableDoorCompartment` return that
   compartment's share of the port mass flows, positive from A to B:
 
       q_i = rho_A dVAB_flow[i] - rho_B dVBA_flow[i]
@@ -92,7 +92,7 @@ import torch
 
 from noodl.elements.base import Element, band_edges
 from noodl.elements.door import _power_law
-from noodl.elements.media import _R_AIR, _R_H2O, MBLMedium
+from noodl.elements.media import _R_AIR, _R_H2O, AirMedium
 
 Tensor = torch.Tensor
 
@@ -139,7 +139,7 @@ class _InflowDensities:
 
     src: Tensor
     tgt: Tensor
-    medium: MBLMedium
+    medium: AirMedium
     kind: str
     T_key: str
     Xw_key: str
@@ -193,7 +193,7 @@ class DoorCompartmentHead(_InflowDensities):
         tgt,
         hAg,
         hBg,
-        medium: MBLMedium,
+        medium: AirMedium,
         T_key: str = "T",
         Xw_key: str = "X_w",
         p_key: str = "p_abs",
@@ -217,7 +217,7 @@ class DoorCompartmentHead(_InflowDensities):
         return rho_A * self.hAg.to(rho_A.dtype) - rho_B * self.hBg.to(rho_B.dtype)
 
 
-class _MBLDoorCompartmentBase(_InflowDensities, Element):
+class _DoorCompartmentBase(_InflowDensities, Element):
     """Endpoints, drivers and the smoothed density weighting shared by both doors."""
 
     def __init__(
@@ -225,7 +225,7 @@ class _MBLDoorCompartmentBase(_InflowDensities, Element):
         *,
         src,
         tgt,
-        medium: MBLMedium,
+        medium: AirMedium,
         dp_turbulent: float,
         vZer: float,
         T_key: str,
@@ -309,7 +309,7 @@ class _MBLDoorCompartmentBase(_InflowDensities, Element):
         return self.flow(zero, drivers), self.dflow(zero, drivers)
 
 
-class MBLDoorCompartment(_MBLDoorCompartmentBase):
+class DoorCompartment(_DoorCompartmentBase):
     """One compartment of ``Buildings.Airflow.Multizone.DoorDiscretizedOpen`` per edge.
 
     ``dA`` is the compartment area ``A/nCom`` (``DoorDiscretized.mo:60``), scalar or one value
@@ -319,7 +319,7 @@ class MBLDoorCompartment(_MBLDoorCompartmentBase):
     ``DoorDiscretizedOpen.mo:10,22``). The smoothing width is
     ``VZerCom_flow = vZer A/nCom = vZer dA`` (``DoorDiscretized.mo:52``,
     ``TwoWayFlowElement.mo:83``). Defaults are MBL's: ``CD = 0.65``, ``dp_turbulent = 0.01``,
-    ``vZer = 0.001``. Build a whole door with :func:`mbl_discretized_door`.
+    ``vZer = 0.001``. Build a whole door with :func:`discretized_door`.
     """
 
     def __init__(
@@ -327,7 +327,7 @@ class MBLDoorCompartment(_MBLDoorCompartmentBase):
         *,
         src,
         tgt,
-        medium: MBLMedium,
+        medium: AirMedium,
         dA,
         CD=0.65,
         m=_M_FIXED,
@@ -360,7 +360,7 @@ class MBLDoorCompartment(_MBLDoorCompartmentBase):
         return dV, self.vZer * self.dA  # DoorDiscretized.mo:52, TwoWayFlowElement.mo:83
 
 
-class MBLDoorCompartmentOperable(_MBLDoorCompartmentBase):
+class OperableDoorCompartment(_DoorCompartmentBase):
     """One compartment of ``Buildings.Airflow.Multizone.DoorDiscretizedOperable`` per edge,
     blended between the open door and the closed crack by ``y = drivers[y_key]``.
 
@@ -385,7 +385,7 @@ class MBLDoorCompartmentOperable(_MBLDoorCompartmentBase):
         *,
         src,
         tgt,
-        medium: MBLMedium,
+        medium: AirMedium,
         y_key: str,
         AOpe,
         LClo,
@@ -429,14 +429,14 @@ class MBLDoorCompartmentOperable(_MBLDoorCompartmentBase):
     def _y(self, drivers) -> Tensor:
         if drivers is None or self.y_key not in drivers:
             raise KeyError(
-                f"MBLDoorCompartmentOperable (kind {self.kind!r}): driver {self.y_key!r} not "
+                f"OperableDoorCompartment (kind {self.kind!r}): driver {self.y_key!r} not "
                 f"found; it needs the door opening signal y (0 closed, 1 open)"
             )
         y = torch.as_tensor(drivers[self.y_key])
         n_edges = self.src.numel()
         if y.ndim and y.shape[-1] not in (1, n_edges):
             raise ValueError(
-                f"MBLDoorCompartmentOperable (kind {self.kind!r}): driver {self.y_key!r} has "
+                f"OperableDoorCompartment (kind {self.kind!r}): driver {self.y_key!r} has "
                 f"last dimension {y.shape[-1]}; expected 1 or the edge count {n_edges}"
             )
         return y
@@ -497,11 +497,11 @@ def _check_ncom(nCom) -> int:
     return n
 
 
-def mbl_discretized_door(
+def discretized_door(
     *,
     src,
     tgt,
-    medium: MBLMedium,
+    medium: AirMedium,
     nCom: int = 10,
     wOpe: float = 0.9,
     hOpe: float = 2.1,
@@ -515,7 +515,7 @@ def mbl_discretized_door(
     T_key: str = "T",
     Xw_key: str = "X_w",
     p_key: str = "p_abs",
-) -> tuple[MBLDoorCompartment, DoorCompartmentHead]:
+) -> tuple[DoorCompartment, DoorCompartmentHead]:
     """One ``DoorDiscretizedOpen`` as ``nCom`` edges of ``kind``: the compartment element and
     its head drive. Defaults are MBL's (``DoorDiscretized.mo:6-11``,
     ``TwoWayFlowElementBuoyancy.mo:6-14``, ``DoorDiscretizedOpen.mo:6``,
@@ -525,7 +525,7 @@ def mbl_discretized_door(
     s, t = _door_endpoints(n, src, tgt)
     hAg, hBg = _heights(n, hOpe, hA, hB)
     dA = torch.full((n,), float(wOpe) * float(hOpe) / n, dtype=torch.float64)
-    comp = MBLDoorCompartment(
+    comp = DoorCompartment(
         src=s,
         tgt=t,
         medium=medium,
@@ -553,11 +553,11 @@ def mbl_discretized_door(
     return comp, head
 
 
-def mbl_discretized_operable_door(
+def discretized_operable_door(
     *,
     src,
     tgt,
-    medium: MBLMedium,
+    medium: AirMedium,
     y_key: str,
     LClo: float,
     nCom: int = 10,
@@ -577,14 +577,14 @@ def mbl_discretized_operable_door(
     T_key: str = "T",
     Xw_key: str = "X_w",
     p_key: str = "p_abs",
-) -> tuple[MBLDoorCompartmentOperable, DoorCompartmentHead]:
+) -> tuple[OperableDoorCompartment, DoorCompartmentHead]:
     """One ``DoorDiscretizedOperable`` as ``nCom`` edges of ``kind``; see
-    :func:`mbl_discretized_door`. ``AOpe = wOpe hOpe`` (``DoorDiscretizedOperable.mo:35``);
+    :func:`discretized_door`. ``AOpe = wOpe hOpe`` (``DoorDiscretizedOperable.mo:35``);
     ``LClo`` has no MBL default."""
     n = _check_ncom(nCom)
     s, t = _door_endpoints(n, src, tgt)
     hAg, hBg = _heights(n, hOpe, hA, hB)
-    comp = MBLDoorCompartmentOperable(
+    comp = OperableDoorCompartment(
         src=s,
         tgt=t,
         medium=medium,
@@ -619,12 +619,12 @@ def mbl_discretized_operable_door(
     return comp, head
 
 
-class MBLDoorPortStream(Element):
+class DoorPortStream(Element):
     """One of the two port streams of a whole discretised door, as ONE edge from side A to
     side B: ``direction="ab"`` returns ``port_a1.m_flow = mAB_flow``, ``"ba"`` returns
     ``port_b2.m_flow = -port_a2.m_flow = -mBA_flow`` (kg/s, both positive from A to B), from
-    the compartment law ``comp`` (:class:`MBLDoorCompartment` or
-    :class:`MBLDoorCompartmentOperable`, one door) at the compartment pressure differences
+    the compartment law ``comp`` (:class:`DoorCompartment` or
+    :class:`OperableDoorCompartment`, one door) at the compartment pressure differences
     ``dp + head(drivers)`` (:class:`DoorCompartmentHead`). The edge's own ``dp`` is the zones'
     potential difference ``phi_A - phi_B``.
 
@@ -641,18 +641,18 @@ class MBLDoorPortStream(Element):
     is the same (``mAB - mBA`` is the compartments' net flow).
     """
 
-    def __init__(self, comp: _MBLDoorCompartmentBase, head: DoorCompartmentHead,
+    def __init__(self, comp: _DoorCompartmentBase, head: DoorCompartmentHead,
                  direction: str, kind: str) -> None:
         Element.__init__(self, kind)
         if direction not in ("ab", "ba"):
             raise ValueError(
-                f"MBLDoorPortStream (kind {kind!r}): direction must be 'ab' or 'ba', got "
+                f"DoorPortStream (kind {kind!r}): direction must be 'ab' or 'ba', got "
                 f"{direction!r}"
             )
         pairs = set(zip(comp.src.tolist(), comp.tgt.tolist(), strict=True))
         if len(pairs) != 1:
             raise ValueError(
-                f"MBLDoorPortStream (kind {kind!r}): the compartment element must be ONE door "
+                f"DoorPortStream (kind {kind!r}): the compartment element must be ONE door "
                 f"(every compartment edge between the same two nodes), got {sorted(pairs)}"
             )
         self.comp, self.head, self.direction = comp, head, direction
@@ -688,7 +688,7 @@ class MBLDoorPortStream(Element):
         return 0.5 * grad
 
     def switching(self, dp: Tensor, drivers=None) -> Tensor:
-        """The compartments' switches (:meth:`_MBLDoorCompartmentBase.switching`) at their
+        """The compartments' switches (:meth:`_DoorCompartmentBase.switching`) at their
         pressure differences ``dp + head``."""
         return self.comp.switching(dp + self.head(drivers), drivers)
 
@@ -696,3 +696,10 @@ class MBLDoorPortStream(Element):
         """Tangent at ``dp = 0`` on a one-edge zero."""
         zero = torch.zeros(1, dtype=self._dtype())
         return self.flow(zero, drivers), self.dflow(zero, drivers)
+
+# Pre-rename names, kept as aliases so existing code keeps working.
+MBLDoorCompartment = DoorCompartment  # alias, the pre-rename name
+MBLDoorCompartmentOperable = OperableDoorCompartment  # alias, the pre-rename name
+MBLDoorPortStream = DoorPortStream  # alias, the pre-rename name
+mbl_discretized_door = discretized_door  # alias, the pre-rename name
+mbl_discretized_operable_door = discretized_operable_door  # alias, the pre-rename name

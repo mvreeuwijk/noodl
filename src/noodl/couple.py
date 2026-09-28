@@ -22,8 +22,18 @@ Tensor = torch.Tensor
 
 CONCENTRATION_TO_MASS_FRACTION = "concentration_to_mass_fraction"
 MASS_FRACTION_TO_CONCENTRATION = "mass_fraction_to_concentration"
-STREET_RAD_TO_CONTAM_DEG = "street_rad_to_contam_deg"
-CONTAM_DEG_TO_STREET_RAD = "contam_deg_to_street_rad"
+#: Wind direction, mathematical convention (radians counter-clockwise from east, the
+#: direction the wind blows TOWARD) to compass convention (degrees clockwise from north, the
+#: direction it blows FROM), and back.
+MATH_RAD_TO_COMPASS_DEG = "math_rad_to_compass_deg"
+COMPASS_DEG_TO_MATH_RAD = "compass_deg_to_math_rad"
+STREET_RAD_TO_CONTAM_DEG = MATH_RAD_TO_COMPASS_DEG  # alias, the pre-rename name
+CONTAM_DEG_TO_STREET_RAD = COMPASS_DEG_TO_MATH_RAD  # alias, the pre-rename name
+#: Pre-rename conversion names, accepted wherever a conversion is named.
+_CONVERSION_ALIASES = {
+    "street_rad_to_contam_deg": MATH_RAD_TO_COMPASS_DEG,
+    "contam_deg_to_street_rad": COMPASS_DEG_TO_MATH_RAD,
+}
 
 
 class Conversion(NamedTuple):
@@ -46,18 +56,25 @@ _CONVERSIONS: dict[str, Conversion] = {
         "kg/m3", "kg/kg", lambda value, drivers: value / drivers["rho_amb"]),
     MASS_FRACTION_TO_CONCENTRATION: Conversion(
         "kg/kg", "kg/m3", lambda value, drivers: value * drivers["rho_amb"]),
-    # CONTAM's Wd: degrees clockwise from north, the direction the wind blows FROM. The
-    # street app's theta_w: radians counter-clockwise from east, the direction it blows
-    # TOWARD. West wind: Wd=270 <-> theta=0. These two are used by
+    # Compass Wd (CONTAM's convention): degrees clockwise from north, the direction the
+    # wind blows FROM. Mathematical theta_w (the street app's convention): radians
+    # counter-clockwise from east, the direction it blows TOWARD. West wind: Wd=270 <->
+    # theta=0. These two are used by
     # `DriverAlias` targets, and a DRIVER carries no unit metadata to check against -- their
     # "rad"/"deg" are recorded here for the reader, not enforced anywhere.
-    STREET_RAD_TO_CONTAM_DEG: Conversion(
+    MATH_RAD_TO_COMPASS_DEG: Conversion(
         "rad", "deg",
         lambda value, drivers: torch.remainder(270.0 - torch.rad2deg(value), 360.0)),
-    CONTAM_DEG_TO_STREET_RAD: Conversion(
+    COMPASS_DEG_TO_MATH_RAD: Conversion(
         "deg", "rad",
         lambda value, drivers: torch.remainder(torch.deg2rad(270.0 - value), 2.0 * math.pi)),
 }
+_CONVERSIONS.update({old: _CONVERSIONS[new] for old, new in _CONVERSION_ALIASES.items()})
+
+
+def _registered_conversions() -> list[str]:
+    """The registered conversion names for an error message, without the pre-rename aliases."""
+    return sorted(set(_CONVERSIONS) - set(_CONVERSION_ALIASES))
 
 
 def _reduced(x: Tensor, n_last: int) -> Tensor:
@@ -117,7 +134,7 @@ def apply_conversion(name: str | None, value: Tensor, drivers: Mapping[str, Tens
     except KeyError as exc:
         raise KeyError(
             f"couple: unknown unit conversion {name!r}; registered conversions are "
-            f"{sorted(_CONVERSIONS)}"
+            f"{_registered_conversions()}"
         ) from exc
     return conversion.fn(value, drivers)
 
@@ -299,7 +316,7 @@ class CoupledModel:
                     raise KeyError(
                         f"CoupledModel: link {link.from_model}:{link.from_key} -> "
                         f"{link.to_model}:{link.to_key} names conversion {name!r}; registered "
-                        f"conversions are {sorted(_CONVERSIONS)}"
+                        f"conversions are {_registered_conversions()}"
                     )
             # The suffixes are not decoration: `to_key` is written with `_write_at` on the
             # to-layer's BOUNDARY axis and `sources_key` with an ADD on the from-model's FULL
@@ -327,7 +344,7 @@ class CoupledModel:
                 if name is not None and name not in _CONVERSIONS:
                     raise KeyError(
                         f"CoupledModel: alias of {alias.source} names conversion {name!r}; "
-                        f"registered conversions are {sorted(_CONVERSIONS)}"
+                        f"registered conversions are {_registered_conversions()}"
                     )
         owners: dict[tuple[str, str, int], ValueLink] = {}
         for link in self.links:
@@ -394,7 +411,7 @@ class CoupledModel:
                     f"CoupledModel: link {self._link_key(link)} has convert=None but {what}; "
                     f"an unconverted link requires equal units -- name a conversion mapping "
                     f"{from_layer.unit!r} to {to_layer.unit!r} (registered conversions are "
-                    f"{sorted(_CONVERSIONS)})"
+                    f"{_registered_conversions()})"
                 )
             return
         conversion = _CONVERSIONS[link.convert]   # registration already checked above

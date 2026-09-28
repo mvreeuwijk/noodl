@@ -20,7 +20,7 @@ from collections.abc import Mapping
 
 import torch
 
-from noodl.apps.building_physics.modelica.assemble import _MBLClosure
+from noodl.apps.building_physics.modelica.assemble import _ZoneStateClosure
 from noodl.apps.building_physics.modelica.storage import StorageClosure, mass_change
 from noodl.elements import Element
 from noodl.model import Drivers, Model, State
@@ -91,9 +91,9 @@ def _grid_index(grid: Tensor, times: Tensor) -> list[int]:
     return out
 
 
-def _closure(model: Model) -> _MBLClosure:
+def _closure(model: Model) -> _ZoneStateClosure:
     for c in model.closures:
-        if isinstance(c, _MBLClosure):
+        if isinstance(c, _ZoneStateClosure):
             return c
     raise TypeError("simulate: the model was not built by read_modelica (no MBL closure)")
 
@@ -529,7 +529,7 @@ class _Switches:
     advected state switches from one end's to the other's where a flow reverses). `parts`
     are the elements that have switches."""
 
-    def __init__(self, model: Model, closure: _MBLClosure, q_scale: float) -> None:
+    def __init__(self, model: Model, closure: _ZoneStateClosure, q_scale: float) -> None:
         ((self.name, self.air),) = model.potential.items()
         self.closure = closure
         self.q_scale = q_scale
@@ -704,7 +704,7 @@ class _Midpoint:
     its own exact scheme (`TransportLayer.step`, the flows held constant over the step) at
     the MEAN flows `(q0 + q1)/2`, the mean boundary values `(x_b0 + x_b1)/2` and its step-mean
     source driver plus the mean of the closure's state-dependent sources (the moist-air heat
-    carrier, `_MBLClosure.cp_correction`). State 1 is the fixed point of that map together
+    carrier, `_ZoneStateClosure.cp_correction`). State 1 is the fixed point of that map together
     with the airflow solve at state 1 (and the interior pressures `p_abs`, which the closure
     feeds back): an Anderson-accelerated fixed-point iteration (depth `_ANDERSON_DEPTH`) on
     the transport states and the air layer's interior potentials, started from the linear
@@ -723,7 +723,7 @@ class _Midpoint:
     (`StorageClosure.terms`: capacity and sources) at the two states, with the step's mass
     change `(m1 - m0)/h` as the storage rate."""
 
-    def __init__(self, model: Model, closure: _MBLClosure, solve_kwargs: dict,
+    def __init__(self, model: Model, closure: _ZoneStateClosure, solve_kwargs: dict,
                  store: StorageClosure | None = None) -> None:
         if len(model.potential) != 1:
             raise ValueError("simulate(scheme='midpoint'): one potential layer expected")

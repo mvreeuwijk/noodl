@@ -321,29 +321,30 @@ class MinorLoss(Element):
         return zero, slope + zero
 
 
-# --------------------------------------------------------------------------- EPANET D-W
+# ------------------------------------------------------------- composite (EPANET) D-W
 #: EPANET 2.2's own constants for the Darcy-Weisbach friction factor, copied digit for
-#: digit from `src/hydcoeffs.c` (v2.2). ``w = q / (nu d) = Re pi / 4``, so ``A1`` is
-#: Re = 4000 and ``A2`` is Re = 2000.
-EPANET_A1 = 3.14159265358979323850e03  # 1000 pi
-EPANET_A2 = 1.57079632679489661930e03  # 500 pi
-EPANET_A8 = 4.61841319859066668690e00  # 5.74 (pi/4)^0.9
-EPANET_A9 = -8.68588963806503655300e-01  # -2 / ln(10)
-EPANET_AB = 3.28895476345399058690e-03  # 5.74 / 4000^0.9
-EPANET_AC = -5.14214965799093883760e-03  # -2 * 0.9 * 2 / ln(10) * AB
+#: digit from `src/hydcoeffs.c` (v2.2), where they are ``A1``, ``A2``, ``A8``, ``A9``,
+#: ``AB`` and ``AC``. ``w = q / (nu d) = Re pi / 4``, so ``W_RE_4000`` (``A1``) is
+#: Re = 4000 and ``W_RE_2000`` (``A2``) is Re = 2000.
+W_RE_4000 = 3.14159265358979323850e03  # 1000 pi
+W_RE_2000 = 1.57079632679489661930e03  # 500 pi
+SWAMEE_JAIN_W_COEFF = 4.61841319859066668690e00  # 5.74 (pi/4)^0.9
+SWAMEE_JAIN_LOG_COEFF = -8.68588963806503655300e-01  # -2 / ln(10)
+DUNLOP_AB = 3.28895476345399058690e-03  # 5.74 / 4000^0.9
+DUNLOP_AC = -5.14214965799093883760e-03  # -2 * 0.9 * 2 / ln(10) * AB
 
 #: EPANET computes in feet and cfs. ``MperFT`` (`types.h`) is exact; the gravity in the
 #: D-W resistance ``R = L / (2 * 32.2 * d * A^2)`` (`hydcoeffs.c`, `resistcoeff`) is
 #: 32.2 ft/s^2, NOT standard gravity's 32.174, and the minor-loss conversion
 #: ``0.02517 K / d^4`` (`input1.c`, `convertunits`) is ``8 / (32.2 pi^2)`` ROUNDED to
 #: four figures. Both are part of what EPANET computes, so both are reproduced here.
-EPANET_FOOT = 0.3048
-EPANET_G_FT = 32.2
-EPANET_KM = 0.02517
+M_PER_FT = 0.3048
+G_FT_S2 = 32.2
+MINOR_LOSS_K_FT = 0.02517
 #: EPANET's default kinematic viscosity of water, ``VISCOS = 1.1e-5`` ft^2/s (`types.h`),
 #: = 1.0219e-6 m^2/s; ``[OPTIONS] VISCOSITY`` multiplies it.
-EPANET_VISCOS_FT2 = 1.1e-5
-EPANET_NU = EPANET_VISCOS_FT2 * EPANET_FOOT**2
+NU_WATER_FT2 = 1.1e-5
+NU_WATER_REF = NU_WATER_FT2 * M_PER_FT**2
 #: EPANET's own flow-unit factors, file units per cfs (`types.h`, ``GPMperCFS`` ...).
 #: Several are rounded (``LPSperCFS = 28.317`` against the exact 28.3168466), and EPANET
 #: divides a file's flows by exactly these numbers on the way in.
@@ -363,10 +364,10 @@ EPANET_QCF = {
 
 def _dunlop(w: Tensor, e: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """Dunlop's cubic coefficients ``x1..x4`` in ``r = w / A2`` (`frictionFactor`)."""
-    y2 = e / 3.7 + EPANET_AB
-    y3 = EPANET_A9 * torch.log(y2)
+    y2 = e / 3.7 + DUNLOP_AB
+    y3 = SWAMEE_JAIN_LOG_COEFF * torch.log(y2)
     fa = 1.0 / (y3 * y3)
-    fb = (2.0 + EPANET_AC / (y2 * y3)) * fa
+    fb = (2.0 + DUNLOP_AC / (y2 * y3)) * fa
     x1 = 7.0 * fa - fb
     x2 = 0.128 - 17.0 * fa + 2.5 * fb
     x3 = -0.128 + 13.0 * fa - (fb + fb)
@@ -374,8 +375,10 @@ def _dunlop(w: Tensor, e: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     return x1, x2, x3, x4
 
 
-def epanet_friction_factor(q: Tensor, e: Tensor, s: Tensor) -> tuple[Tensor, Tensor]:
-    """EPANET 2.2's ``frictionFactor`` (`hydcoeffs.c`) for ``Re > 2000``: ``(f, df/dq)``.
+def composite_friction_factor(q: Tensor, e: Tensor, s: Tensor) -> tuple[Tensor, Tensor]:
+    """Composite friction factor for ``Re > 2000``: ``(f, df/dq)``.
+
+    This is EPANET 2.2's ``frictionFactor`` (`hydcoeffs.c`).
 
     ``q`` is ``|flow|``, ``e`` the relative roughness ``eps / d`` and ``s = nu d`` (any
     consistent units: ``w = q / s = Re pi / 4``). Swamee-Jain for Re >= 4000, Dunlop's
@@ -387,23 +390,26 @@ def epanet_friction_factor(q: Tensor, e: Tensor, s: Tensor) -> tuple[Tensor, Ten
     branch sees ``w`` clamped to at least ``A1`` so its un-taken values stay finite.
     """
     w = q / s
-    turbulent = w >= EPANET_A1
-    w_sj = torch.clamp(w, min=EPANET_A1)
+    turbulent = w >= W_RE_4000
+    w_sj = torch.clamp(w, min=W_RE_4000)
     q_sj = w_sj * s
-    y1 = EPANET_A8 / w_sj**0.9
+    y1 = SWAMEE_JAIN_W_COEFF / w_sj**0.9
     y2 = e / 3.7 + y1
-    y3 = EPANET_A9 * torch.log(y2)
+    y3 = SWAMEE_JAIN_LOG_COEFF * torch.log(y2)
     f_sj = 1.0 / (y3 * y3)
-    dfdq_sj = 1.8 * f_sj * y1 * EPANET_A9 / y2 / y3 / q_sj
+    dfdq_sj = 1.8 * f_sj * y1 * SWAMEE_JAIN_LOG_COEFF / y2 / y3 / q_sj
     x1, x2, x3, x4 = _dunlop(w, e)
-    r = w / EPANET_A2
+    r = w / W_RE_2000
     f_tr = x1 + r * (x2 + r * (x3 + r * x4))
-    dfdq_tr = (x2 + r * (2.0 * x3 + r * 3.0 * x4)) / s / EPANET_A2
+    dfdq_tr = (x2 + r * (2.0 * x3 + r * 3.0 * x4)) / s / W_RE_2000
     return torch.where(turbulent, f_sj, f_tr), torch.where(turbulent, dfdq_sj, dfdq_tr)
 
 
-class EpanetDarcyWeisbach(Element):
-    """EPANET 2.2's Darcy-Weisbach pipe, reproduced operation for operation (`DWpipecoeff`).
+class CompositeDarcyWeisbach(Element):
+    """Composite Darcy-Weisbach pipe: Hagen-Poiseuille, Dunlop's cubic, then Swamee-Jain.
+
+    This is EPANET 2.2's Darcy-Weisbach pipe, reproduced operation for operation
+    (`DWpipecoeff`). The pre-rename name ``EpanetDarcyWeisbach`` is an alias.
 
     Head loss in EPANET's units (feet, cfs; ``q`` signed)::
 
@@ -444,7 +450,7 @@ class EpanetDarcyWeisbach(Element):
         roughness,
         *,
         minor_loss=0.0,
-        nu: float = EPANET_NU,
+        nu: float = NU_WATER_REF,
         cfs_per_m3s: float | None = None,
         scale: float = 1.0,
         rtol: float = 1e-15,
@@ -459,7 +465,7 @@ class EpanetDarcyWeisbach(Element):
         self.minor_loss = self._param(minor_loss, False)
         self.nu = float(nu)
         self.cfs_per_m3s = (
-            1.0 / EPANET_FOOT**3 if cfs_per_m3s is None else float(cfs_per_m3s)
+            1.0 / M_PER_FT**3 if cfs_per_m3s is None else float(cfs_per_m3s)
         )
         self.scale = float(scale)
         self.rtol = float(rtol)
@@ -468,21 +474,21 @@ class EpanetDarcyWeisbach(Element):
     def _coefficients(self) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """``(R, m, e, s)`` in feet/cfs: resistance, minor-loss coefficient, relative
         roughness and ``nu d``, broadcast to a common shape."""
-        d = self.diameter / EPANET_FOOT
-        length = self.length / EPANET_FOOT
+        d = self.diameter / M_PER_FT
+        length = self.length / M_PER_FT
         area = torch.pi * d**2 / 4.0
-        r = length / 2.0 / EPANET_G_FT / d / area**2
-        m = EPANET_KM * self.minor_loss / d**2 / d**2
-        e = (self.roughness / EPANET_FOOT) / d
-        s = (self.nu / EPANET_FOOT**2) * d
+        r = length / 2.0 / G_FT_S2 / d / area**2
+        m = MINOR_LOSS_K_FT * self.minor_loss / d**2 / d**2
+        e = (self.roughness / M_PER_FT) / d
+        s = (self.nu / M_PER_FT**2) * d
         return torch.broadcast_tensors(r, m, e, s)
 
     @staticmethod
     def _head_ft(q: Tensor, r: Tensor, m: Tensor, e: Tensor, s: Tensor) -> Tensor:
         """Signed head loss (ft) at signed flow ``q`` (cfs)."""
         a = q.abs()
-        laminar = a <= EPANET_A2 * s
-        f, _ = epanet_friction_factor(torch.where(laminar, EPANET_A2 * s, a), e, s)
+        laminar = a <= W_RE_2000 * s
+        f, _ = composite_friction_factor(torch.where(laminar, W_RE_2000 * s, a), e, s)
         h_lam = (16.0 * torch.pi * s * r + m * a) * q
         h_turb = (f * r + m) * a * q
         return torch.where(laminar, h_lam, h_turb)
@@ -490,14 +496,14 @@ class EpanetDarcyWeisbach(Element):
     def head_loss(self, q: Tensor) -> Tensor:
         """Signed head loss in METRES at signed flow ``q`` in m^3/s (EPANET's ``hloss``)."""
         r, m, e, s = self._coefficients()
-        return EPANET_FOOT * self._head_ft(q * self.cfs_per_m3s, r, m, e, s)
+        return M_PER_FT * self._head_ft(q * self.cfs_per_m3s, r, m, e, s)
 
     @staticmethod
     def _grad_ft(a: Tensor, r: Tensor, m: Tensor, e: Tensor, s: Tensor) -> Tensor:
         """EPANET's ``hgrad`` (ft per cfs) at ``|q| = a`` (cfs)."""
-        laminar = a <= EPANET_A2 * s
-        a_t = torch.where(laminar, EPANET_A2 * s, a)
-        f, dfdq = epanet_friction_factor(a_t, e, s)
+        laminar = a <= W_RE_2000 * s
+        a_t = torch.where(laminar, W_RE_2000 * s, a)
+        f, dfdq = composite_friction_factor(a_t, e, s)
         g_lam = 16.0 * torch.pi * s * r + 2.0 * m * a
         g_turb = 2.0 * (f * r + m) * a + dfdq * r * a * a
         return torch.where(laminar, g_lam, g_turb)
@@ -506,13 +512,13 @@ class EpanetDarcyWeisbach(Element):
         """``dh/dq`` in m per (m^3/s), from EPANET's own analytic ``hgrad``."""
         r, m, e, s = self._coefficients()
         a = (q * self.cfs_per_m3s).abs()
-        return EPANET_FOOT * self.cfs_per_m3s * self._grad_ft(a, r, m, e, s)
+        return M_PER_FT * self.cfs_per_m3s * self._grad_ft(a, r, m, e, s)
 
     def flow(self, dp: Tensor, drivers=None) -> Tensor:
         r, m, e, s = self._coefficients()
         c = self.cfs_per_m3s
         h_ft, r, m, e, s = torch.broadcast_tensors(
-            dp / self.scale / EPANET_FOOT, r, m, e, s
+            dp / self.scale / M_PER_FT, r, m, e, s
         )
         with torch.no_grad():
             r0, m0, e0, s0 = r.detach(), m.detach(), e.detach(), s.detach()
@@ -545,7 +551,7 @@ class EpanetDarcyWeisbach(Element):
                     break
             else:
                 raise RuntimeError(
-                    f"EpanetDarcyWeisbach (kind {self.kind!r}): the head-loss inversion "
+                    f"CompositeDarcyWeisbach (kind {self.kind!r}): the head-loss inversion "
                     f"did not converge in {self.max_iter} iterations"
                 )
             q_star = torch.sign(h_ft.detach()) * a
@@ -564,3 +570,19 @@ class EpanetDarcyWeisbach(Element):
         # The laminar tangent at q = 0, as `Duct.linear_init` uses its laminar line.
         slope = self.dflow(torch.zeros_like(self.length * self.diameter), drivers)
         return torch.zeros_like(slope), slope
+
+
+# Pre-rename names, kept as aliases so existing code keeps working.
+EpanetDarcyWeisbach = CompositeDarcyWeisbach  # alias, the pre-rename name
+epanet_friction_factor = composite_friction_factor  # alias, the pre-rename name
+EPANET_A1 = W_RE_4000  # alias, the pre-rename name
+EPANET_A2 = W_RE_2000  # alias, the pre-rename name
+EPANET_A8 = SWAMEE_JAIN_W_COEFF  # alias, the pre-rename name
+EPANET_A9 = SWAMEE_JAIN_LOG_COEFF  # alias, the pre-rename name
+EPANET_AB = DUNLOP_AB  # alias, the pre-rename name
+EPANET_AC = DUNLOP_AC  # alias, the pre-rename name
+EPANET_FOOT = M_PER_FT  # alias, the pre-rename name
+EPANET_G_FT = G_FT_S2  # alias, the pre-rename name
+EPANET_KM = MINOR_LOSS_K_FT  # alias, the pre-rename name
+EPANET_VISCOS_FT2 = NU_WATER_FT2  # alias, the pre-rename name
+EPANET_NU = NU_WATER_REF  # alias, the pre-rename name

@@ -142,7 +142,7 @@ test.
 ```python
 DriverAlias(
     source=("street", "theta_w"),
-    targets=(("building", "theta_w", "street_rad_to_contam_deg"),),
+    targets=(("building", "theta_w", "math_rad_to_compass_deg"),),
 )
 ```
 
@@ -168,8 +168,8 @@ is kept as a public helper and used in tests as an independent hand reconstructi
 |---|---|
 | `concentration_to_mass_fraction` | $x = c / \rho_{\text{amb}}$ |
 | `mass_fraction_to_concentration` | $c = x \cdot \rho_{\text{amb}}$ |
-| `street_rad_to_contam_deg` | $W_d = (270° - \deg\theta) \bmod 360°$ |
-| `contam_deg_to_street_rad` | $\theta = \big(\mathrm{rad}(270° - W_d)\big) \bmod 2\pi$ |
+| `math_rad_to_compass_deg` | $W_d = (270° - \deg\theta) \bmod 360°$ |
+| `compass_deg_to_math_rad` | $\theta = \big(\mathrm{rad}(270° - W_d)\big) \bmod 2\pi$ |
 
 The density pair is a **genuine unit mismatch**, not a scale factor: the street application's
 transport state is a concentration in kg/m³, while CONTAM's species convention is a mass fraction

@@ -135,8 +135,8 @@ here by the physics they express. Where two
 elements describe the same physics they differ in two respects that matter in practice: how the
 law is regularised near $\Delta p = 0$, where a power law with $n < 1$ has infinite slope, and
 which air density enters its coefficient. The **Source** line under each group says where the
-equations come from; elements with the `MBL` prefix follow the Modelica Buildings Library (MBL)
-v13.0.0.
+equations come from; `RegularizedPowerLaw`, `SplineFlowTable`, the door elements and
+`AirMedium` follow the Modelica Buildings Library (MBL) v13.0.0.
 
 ### Power-law openings
 
@@ -148,12 +148,12 @@ Cracks, leaks, orifices and other small openings: $F = C\,\operatorname{sign}(\D
 | `Orifice(Cd, A, *, rho=1.2)` | `PowerLaw` with $C = C_d A \sqrt{2/\rho}$, $n = 0.5$: the sharp-edged orifice, as a volume flow in m³/s ($A$ in m²). |
 | `mass_orifice(Cd, A, *, rho=1.2041)` | `PowerLaw` with $C = C_d A \sqrt{2\rho}$, $n = 0.5$: the same orifice as a mass flow in kg/s (in `noodl.apps.building_physics`). |
 | `orifice_elements_from_edges(net, kind, *, rho=1.2041)` | One mass-flow `PowerLaw` over every edge of a kind, $C_e = C_{d,e} A_e \sqrt{2\rho}$, reading `Cd` and `area` off each edge (in `noodl.apps.building_physics`). |
-| `MBLPowerLaw(C, m, *, dp_turbulent=0.1, form, rho_default)` | The power law with exponent $m$, always returning mass flow in kg/s. `form="volume"`: $C$ is a volume-flow coefficient and the result is multiplied by `rho_default`. `form="mass"`: $C$ is a mass-flow coefficient, used as it is. |
-| `mbl_orifice(A, CD=0.65, m=0.5, dp_turbulent=0.1, *, rho_default)` | Volume form, $C = C_D A \sqrt{2/\rho_{\text{default}}}$. |
-| `mbl_ela(L, dpRat=4.0, CDRat=1.0, m=0.65, dp_turbulent=0.1, *, rho_default)` | Volume form from an effective leakage area $L$ (m²) at the reference pressure difference `dpRat` (Pa): $C = L\,C_{D,\text{Rat}} \sqrt{2/\rho_{\text{default}}}\;\text{dpRat}^{\,0.5 - m}$. |
-| `mbl_point(dpMea, mMea_flow, m=0.5, dp_turbulent=0.1, *, rho_default)` | Mass form fitted to one measured pair: $k = \dot m_{\text{Mea}} / \Delta p_{\text{Mea}}^{\,m}$. |
-| `mbl_points(dpMea, mMea_flow, dp_turbulent=0.1, *, rho_default)` | Mass form fitted to two measured pairs: $m = \ln(\dot m_0/\dot m_1) / \ln(\Delta p_0/\Delta p_1)$, then $k = \dot m_0 / \Delta p_0^{\,m}$. |
-| `mbl_coefficient(C, m, form, dp_turbulent=0.1, *, rho_default)` | $C$ (or $k$) and $m$ given directly. |
+| `RegularizedPowerLaw(C, m, *, dp_turbulent=0.1, form, rho_default)` | The power law with exponent $m$, always returning mass flow in kg/s. `form="volume"`: $C$ is a volume-flow coefficient and the result is multiplied by `rho_default`. `form="mass"`: $C$ is a mass-flow coefficient, used as it is. |
+| `regularized_orifice(A, CD=0.65, m=0.5, dp_turbulent=0.1, *, rho_default)` | Volume form, $C = C_D A \sqrt{2/\rho_{\text{default}}}$. |
+| `effective_leakage_area(L, dpRat=4.0, CDRat=1.0, m=0.65, dp_turbulent=0.1, *, rho_default)` | Volume form from an effective leakage area $L$ (m²) at the reference pressure difference `dpRat` (Pa): $C = L\,C_{D,\text{Rat}} \sqrt{2/\rho_{\text{default}}}\;\text{dpRat}^{\,0.5 - m}$. |
+| `power_law_from_point(dpMea, mMea_flow, m=0.5, dp_turbulent=0.1, *, rho_default)` | Mass form fitted to one measured pair: $k = \dot m_{\text{Mea}} / \Delta p_{\text{Mea}}^{\,m}$. |
+| `power_law_from_points(dpMea, mMea_flow, dp_turbulent=0.1, *, rho_default)` | Mass form fitted to two measured pairs: $m = \ln(\dot m_0/\dot m_1) / \ln(\Delta p_0/\Delta p_1)$, then $k = \dot m_0 / \Delta p_0^{\,m}$. |
+| `power_law_coefficient(C, m, form, dp_turbulent=0.1, *, rho_default)` | $C$ (or $k$) and $m$ given directly. |
 
 The two families evaluate the same law but differ physically in two places.
 
@@ -162,7 +162,7 @@ The two families evaluate the same law but differ physically in two places.
   that the flow is continuous in value at the switch; this is the laminar blend CONTAM applies
   below a transition Reynolds number. Its slope changes there by the factor $n$. With
   `regularised=eps` it instead uses $F = C\,\Delta p\,(\Delta p^2 + \varepsilon^2)^{(n-1)/2}$,
-  smooth everywhere. `MBLPowerLaw` replaces the law below `dp_turbulent` (default 0.1 Pa, a
+  smooth everywhere. `RegularizedPowerLaw` replaces the law below `dp_turbulent` (default 0.1 Pa, a
   hundred times wider) by a seventh-order odd polynomial in $\pi = \Delta p / \Delta p_{\text{turb}}$,
   $F = C\,\Delta p_{\text{turb}}^{\,m}\,\pi\,(a + \pi^2(b + \pi^2(c + \pi^2 d)))$, whose
   coefficients depend only on $m$ and make the law twice continuously differentiable at the
@@ -174,8 +174,8 @@ The two families evaluate the same law but differ physically in two places.
   all. Neither uses the density of the air actually passing through the opening;
   `UpstreamDensityPowerLaw`, below, does.
 
-**Source:** `PowerLaw`/`Orifice`: CONTAM's power-law element (TN 1887r1). `MBLPowerLaw` and the
-`mbl_*` constructors: MBL's `Buildings.Airflow.Multizone` power-law elements (`Orifice`,
+**Source:** `PowerLaw`/`Orifice`: CONTAM's power-law element (TN 1887r1). `RegularizedPowerLaw` and its
+constructors: MBL's `Buildings.Airflow.Multizone` power-law elements (`Orifice`,
 `EffectiveAirLeakageArea`, `Point_m_flow`, `Points_m_flow`, `Coefficient_V_flow`,
 `Coefficient_m_flow`) and their shared regularisation, `BaseClasses/powerLaw.mo`.
 
@@ -207,9 +207,9 @@ switches; only its slope jumps there. `dp_transition` stays at reference conditi
 | Element | What it computes |
 |---|---|
 | `Quadratic(a, b)` | The quadratic resistance law $\Delta p = a F + b \lvert F\rvert F$, inverted in closed form: $F = \operatorname{sign}(\Delta p)\, 2\lvert\Delta p\rvert / (\sqrt{a^2 + 4 b \lvert\Delta p\rvert} + a)$. Linear, with slope $1/a$, at small $\Delta p$ and quadratic at large, so it needs no separate regularisation. Requires $a > 0$ and $b > 0$. |
-| `MBLTable(dp_points, flow_points, *, form, rho_default=None)` | A measured pressure-flow curve: a monotone cubic Hermite spline through the $(\Delta p, F)$ knots, linearly extrapolated outside them, returning mass flow in kg/s. `form="volume"` scales volume-flow knots by `rho_default` before fitting; `form="mass"` takes mass-flow knots as they are. |
+| `SplineFlowTable(dp_points, flow_points, *, form, rho_default=None)` | A measured pressure-flow curve: a monotone cubic Hermite spline through the $(\Delta p, F)$ knots, linearly extrapolated outside them, returning mass flow in kg/s. `form="volume"` scales volume-flow knots by `rho_default` before fitting; `form="mass"` takes mass-flow knots as they are. |
 
-**Source:** `Quadratic`: CONTAM's quadratic element family. `MBLTable`: MBL's `Table_m_flow` and
+**Source:** `Quadratic`: CONTAM's quadratic element family. `SplineFlowTable`: MBL's `Table_m_flow` and
 `Table_V_flow`.
 
 ### Large openings and doors
@@ -227,8 +227,8 @@ representation is exact for a neutral plane at mid-height. It uses `PowerLaw`'s 
 $10^{-3}$ Pa and the density convention of the element it is built with.
 **Source:** CONTAM's two-opening doorway (`DR_PL2`, TN 1887r1 eq. 69–70).
 
-**A closed-form door pair.** `MBLDoorOpen` and `MBLDoorOperable` (built with `mbl_door_pair` and
-`mbl_operable_door_pair`) represent one door as two edges between the same two zones, both
+**A closed-form door pair.** `OpenDoor` and `OperableDoor` (built with `open_door_pair` and
+`operable_door_pair`) represent one door as two edges between the same two zones, both
 oriented from side A to side B with the same $\Delta p = p_A - p_B$. Each edge carries half of a
 regularised power-law flow on $\Delta p$, plus or minus a buoyancy exchange term
 $\dot m_{ABt}$: a regularised square root of the temperature difference $T_A - T_B$ of the two
@@ -236,17 +236,17 @@ zones, read from `drivers["T"]`. At $\Delta p = 0$ the two edges carry $+\dot m_
 $-\dot m_{ABt}$: pure exchange, with zero net flow. The flows depend on $(\Delta p, T_A, T_B)$
 alone, and both terms use the medium's fixed `rho_default`. Parameters, with MBL's defaults: door
 width `wOpe=0.9` m, height `hOpe=2.1` m, discharge coefficient `CD=0.65`, exponent `m=0.5`,
-`dp_turbulent=0.01` Pa. `MBLDoorOperable` blends the open door with the closed door's crack by an
+`dp_turbulent=0.01` Pa. `OperableDoor` blends the open door with the closed door's crack by an
 opening signal $y$ from `drivers[y_key]`: the volume flow is $y V_{\text{open}} + (1 - y)
 V_{\text{closed}}$, the buoyancy term is scaled by $y$ (the closed crack has none), and the
 closed crack is an effective-leakage-area law with area `LClo` (m², no default).
 **Source:** MBL's `DoorOpen` and `DoorOperable` (`BaseClasses/Door.mo`).
 
-**Discretised compartments.** `MBLDoorCompartment` and `MBLDoorCompartmentOperable`, with the
+**Discretised compartments.** `DoorCompartment` and `OperableDoorCompartment`, with the
 `DoorCompartmentHead` drive, cut the opening into `nCom` compartments of height
 $\mathrm{d}h = h_{\text{Ope}} / n_{\text{Com}}$, one edge each;
-`mbl_discretized_door(*, src, tgt, medium, nCom=10, wOpe=0.9, hOpe=2.1, hA=1.35, hB=1.35, CD=0.65, ...)`
-and `mbl_discretized_operable_door` build a whole door. Compartment $i$ sees the pressure
+`discretized_door(*, src, tgt, medium, nCom=10, wOpe=0.9, hOpe=2.1, hA=1.35, hB=1.35, CD=0.65, ...)`
+and `discretized_operable_door` build a whole door. Compartment $i$ sees the pressure
 difference at its own height,
 
 $$
@@ -264,7 +264,7 @@ temperature and water content, read from `drivers["p_abs"]`, `drivers["T"]` and 
 medium) `drivers["X_w"]`. The operable variant blends the open and closed coefficients,
 exponents and areas by $y$.
 
-`MBLDoorPortStream(comp, head, direction, kind)` wraps a whole discretised door as MBL's two
+`DoorPortStream(comp, head, direction, kind)` wraps a whole discretised door as MBL's two
 port streams instead: one edge carrying `mAB_flow`, positive from A to B (`direction="ab"`), and
 one carrying `-mBA_flow` (`"ba"`), with the compartments and their heads evaluated inside the
 element. This is how the Modelica reader builds a discretised door. MBL moves the door's
@@ -296,13 +296,15 @@ The CONTAM-form elements carry one fixed reference density in their coefficients
 density reaches the airflow through the `density` closure of `build_model` (above), which feeds
 the `Stack` drive and `UpstreamDensityPowerLaw`.
 
-The `MBL` elements take their densities from a medium. `medium(name)` returns an `MBLMedium` for
-one of `"Buildings.Media.Air"`, `"Buildings.Media.Specialized.Air.PerfectGas"` and
-`"Modelica.Media.Air.SimpleAir"`, carrying:
+The MBL-derived elements take their densities from a medium. `medium(name)` returns an
+`AirMedium` for one of `"moist_air"` (`Buildings.Media.Air`), `"moist_air_ideal_gas"`
+(`Buildings.Media.Specialized.Air.PerfectGas`) and `"dry_air_ideal_gas"`
+(`Modelica.Media.Air.SimpleAir`); the Modelica class path is accepted too, and is what the
+medium's `name` reports. Each carries:
 
 - `p_default`, `T_default`, `X_default` — the medium's fixed default state;
 - `rho_default` — its density at that state, a plain number computed once and used in the
-  coefficients of every `MBL` power-law, table and door element. For `Buildings.Media.Air` it is
+  coefficients of every MBL-derived power-law, table and door element. For `Buildings.Media.Air` it is
   about 1.2 kg/m³ whatever the temperature, because that medium's density depends on pressure
   only;
 - `buoyancy_density(T, X_w)` — the density at `p_default` but at the actual temperature and

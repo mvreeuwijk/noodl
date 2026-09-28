@@ -75,7 +75,7 @@ model, state, drivers = build_model(
     quality=None,       # bulk decay coefficient, 1/day; adds a quality TransportLayer
     coupling="pingpong",
     dt=None,            # overrides net.hydraulic_timestep for the tank closure
-    friction="epanet",  # D-W friction law: 'epanet' (default) or 'colebrook'
+    friction="composite",  # D-W friction law: 'composite' (default) or 'colebrook'
 )
 ```
 
@@ -106,7 +106,8 @@ converged to 8.18e-5 m against EPANET, and Newton iteration counts run 50/93/136
 
 ### Darcy-Weisbach
 
-`EpanetDarcyWeisbach` is EPANET 2.2's own composite law, transcribed from its source
+`CompositeDarcyWeisbach` (`friction="composite"`) is EPANET 2.2's own composite law:
+Hagen-Poiseuille, then Dunlop's transition cubic, then Swamee-Jain. It is transcribed from its source
 (`hydcoeffs.c`, `DWpipecoeff` and `frictionFactor`), in EPANET's internal feet and cfs:
 
 $$
@@ -232,7 +233,7 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   three-point curve instead.
 - **The Colebrook option is not EPANET below Re = 4000.** With `friction="colebrook"` a laminar
   D-W pipe's head loss follows a straight line to the Colebrook value at Re = 2000, not
-  Hagen-Poiseuille, and Dunlop's transition cubic is not used. The default `friction="epanet"`
+  Hagen-Poiseuille, and Dunlop's transition cubic is not used. The default `friction="composite"`
   reproduces both.
 - **Water-quality tracing is verified on a single source only.** The TRACE check uses a
   network with one source, where the answer is 100 % everywhere it reaches; mixing of several

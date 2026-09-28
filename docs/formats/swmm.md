@@ -17,11 +17,11 @@ refused, because time variation belongs in the drivers.
 `[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[CURVES]`, `[TIMESERIES]`,
 `[LID_USAGE]`, and any other section carrying content.
 
-**Geometry.** `read_swmm_inp` builds its network with `geometry="swmm"`: SWMM 5.2's own
+**Geometry.** `read_swmm_inp` builds its network with `geometry="tabulated"`: SWMM 5.2's own
 tabulated circular section, lookup rules and unit constants. Depths, volumes and velocities
 therefore reproduce SWMM's rather than the exact circle's (see
 [SWMM's own circular geometry](../applications/sewer.md#swmms-own-circular-geometry)). Pass
-`geometry="analytic"` for the exact circle. `geometry="swmm"` does not combine with
+`geometry="analytic"` for the exact circle. `geometry="tabulated"` does not combine with
 `storage=True`.
 
 **Water quality.** The sewer model reacts first and mixes second, and returns the
