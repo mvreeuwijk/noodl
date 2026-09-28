@@ -4,7 +4,7 @@ Reading a Modelica export produces a model for [building
 physics](../applications/building_physics.md). Power-law, tabulated and door components become
 the [`noodl.elements`](../applications/building_physics.md#airflow-elements) classes of the
 same physics — an open door, for example, becomes an `MBLDoorOpen` edge pair and a discretised
-door one `MBLDoorCompartment` edge per compartment — while zonal flows are assembled by the
+door an `MBLDoorPortStream` pair, its two port streams — while zonal flows are assembled by the
 importer itself as prescribed-flow edge pairs, as set out below.
 
 `read_modelica(path) -> (model, state, drivers)` imports a multizone airflow model built with the
@@ -53,8 +53,10 @@ ModelicaImportError: modelica: refused 3 items:
 - `DoorOpen`/`DoorOperable` use MBL's fixed default density (`Door.mo`); a discretised door
   (`DoorDiscretizedOpen`/`Operable`) evaluates density at the actual port pressure
   (`TwoWayFlowElement.mo`) instead — the two door families do not share one convention.
-- A door becomes two directional noodl physics edges between the same pair of zones; a discretised door
-  becomes one edge per compartment, each with its own hydrostatic head.
+- A door becomes two directional noodl physics edges between the same pair of zones; so does a
+  discretised door, whose two edges are its port streams `mAB_flow` and `-mBA_flow`
+  (`MBLDoorPortStream`), the compartments and their hydrostatic heads evaluated inside the
+  element.
 - Zonal flows are four-port, like doors (not the two-port shape a one-way element has), and
   become two directional edges the same way.
 - An in-line flow sensor (`Buildings.Fluid.Sensors`, flow-through) is a transparent wire: it adds
@@ -125,11 +127,12 @@ own simulated reference) as committed fixtures. `scripts/modelica_export.py` is 
 the package and is not run by the test suite. It exits non-zero if the simulation fails (the
 JSON is still written, with the instance API's Reals instead of the simulated values, so the
 export can be inspected); a batch script over every model should check the exit code rather
-than assume success. The dynamic parity tests compare a window of rows in the repository's
-default `pytest` run; every row, and the three storage-dominated models (30 s–6 min each), run
-under `@pytest.mark.slow` (`pytest -m slow`). `--tolerance` simulates at a solver tolerance other
-than the model's declared one; the nine dynamic parity references were regenerated with
-`--tolerance 1e-12` (`tests/data/modelica/NOTICE.md`).
+than assume success. The dynamic parity tests compare a window of rows of every dynamic model
+in the repository's default `pytest` run; every row of every model runs under
+`@pytest.mark.slow` (`pytest -m slow`). `--tolerance` simulates at a solver tolerance other than the model's
+declared one; the thirteen dynamic parity references were regenerated with
+`--tolerance 1e-13` (`tests/data/modelica/NOTICE.md`). At 1e-14 OpenModelica's DASSL returns
+no trajectory for these models, so 1e-13 is the finest reference available.
 
 Regenerating the committed parity records (`tests/data/modelica/parity-{algebraic,dynamic}.json`,
 in [the building physics parity tables](../applications/building_physics.md#against-openmodelica-modelica-buildings-library))
