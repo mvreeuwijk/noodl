@@ -6,19 +6,77 @@ from collections.abc import Sequence
 
 import torch
 
-from noodl.layers.reaction import Photostationary, Reaction
+from noodl.layers.reaction import (
+    Photostationary,
+    Reaction,
+    k_no_o3_munich,
+    molar_volume,
+)
 from noodl.model import Drivers, Model, State
+
+__all__ = [
+    "CLOSURES",
+    "J_NO2_CLEAR_SKY",
+    "J_NO2_ZENITH_DEG",
+    "SIRANE_K3_ACTIVATION",
+    "SIRANE_K3_PREFACTOR",
+    "SIRANE_K_FLOOR_PPB",
+    "j_no2",
+    "j_no2_sirane",
+    "k_no_o3_munich",
+    "k_no_o3_sirane",
+    "molar_volume",
+    "photostationary_for_streets",
+    "solar_elevation",
+    "street_steady",
+]
+
+
+CLOSURES = ("munich", "sirane")
+"""The rate closures `photostationary_for_streets` offers."""
+
+SIRANE_K_FLOOR_PPB = 2.0
+"""ppb: SIRANE's lower bound on `k1/k3` in its photostationary split."""
 
 
 def photostationary_for_streets(
-    species: Sequence[str], *, j_key: str = "J_NO2"
+    species: Sequence[str],
+    *,
+    j_key: str = "J_NO2",
+    closure: str = "munich",
+    temperature_key: str = "temperature",
+    molar_volume_key: str = "molar_volume",
+    floor_ppb: float | None = None,
 ) -> Photostationary:
     """The Leighton reaction wired to the `"no"`, `"no2"` and `"o3"` columns of `species`.
 
     Names are matched case-insensitively and exactly; a missing one is named rather than
     guessed at, because a silently mis-wired species column produces a plausible-looking
     answer that is simply wrong.
+
+    `closure` picks the rate of NO + O3 and the floor on `J/k`, both evaluated at the
+    driver `temperature_key` (K):
+
+    - `"munich"`: `k_no_o3_munich`, 3.0e-12 exp(-1500/T) cm3 molecule^-1 s^-1; no floor.
+    - `"sirane"`: `k_no_o3_sirane`, 1.325e6 exp(-1430/T) m3 mol^-1 s^-1, with
+      `K = max(J/k, 2 ppb)` (`SIRANE_K_FLOOR_PPB`). The ppb conversion uses the driver
+      `molar_volume_key` (m3/mol) when given, else `molar_volume(T)` at 101325 Pa.
+      SIRANE's `k1` is `j_no2_sirane`, passed as the `j_key` driver.
+
+    `floor_ppb` overrides the closure's floor (0 means none). With either closure the
+    equilibrium conserves molar NOx and Ox, so background NO, NO2 and O3 enter through
+    those two totals and the NO2 share of the transported NOx plays the role of SIRANE's
+    emitted NO2/NOx ratio.
     """
+    if closure not in CLOSURES:
+        raise ValueError(
+            f"photostationary_for_streets: closure must be one of {CLOSURES}, got "
+            f"{closure!r}"
+        )
+    if closure == "sirane":
+        rate, default_floor = k_no_o3_sirane, SIRANE_K_FLOOR_PPB
+    else:
+        rate, default_floor = k_no_o3_munich, 0.0
     lowered = [str(name).lower() for name in species]
     columns = []
     for wanted in ("no", "no2", "o3"):
@@ -28,7 +86,11 @@ def photostationary_for_streets(
                 f"{tuple(species)}; the Leighton state needs all of 'no', 'no2' and 'o3'"
             )
         columns.append(lowered.index(wanted))
-    return Photostationary(columns[0], columns[1], columns[2], j_key=j_key)
+    return Photostationary(
+        columns[0], columns[1], columns[2], j_key=j_key, rate=rate,
+        temperature_key=temperature_key, molar_volume_key=molar_volume_key,
+        floor_ppb=default_floor if floor_ppb is None else floor_ppb,
+    )
 
 
 def street_steady(
@@ -58,6 +120,15 @@ def street_steady(
     tolerance on the state in its own units (kg/m3), tested on the largest change over all
     streets and species; a budget it cannot meet raises, naming the pass count and the
     change that was left.
+
+    For an instantaneous equilibrium that conserves molar NOx and Ox (`Photostationary`),
+    and transport that treats NO, NO2 and O3 alike (the same flows, no species-dependent
+    loss), the fixed point is the equilibrium applied street by street to the
+    transport-only steady state: the reaction leaves the two totals unchanged, transport
+    carries them as passive tracers, and the equilibrium depends on nothing else. So
+    `reaction.apply(model.steady(...)["street.x"], None, drivers)` gives the same answer in
+    one solve; it is also how the equilibrium is applied pointwise to any other
+    passive-plus-background concentration (receptors, grids), as SIRANE does.
     """
     if reaction is None:
         return model.steady(state, drivers, **solve_kwargs)
@@ -119,3 +190,68 @@ def j_no2(zenith_deg, attenuation=1.0) -> torch.Tensor:
     weight = (clamped - angles[lower]) / span
     interpolated = values[lower] + weight * (values[upper] - values[lower])
     return interpolated * torch.as_tensor(attenuation, dtype=torch.float64)
+
+
+# ------------------------------------------------------------- SIRANE's chemistry closure
+#
+# Soulhac et al. (2011), Atmospheric Environment 45, 7379-7395, Eqs. 31-32, with the
+# corrections that reproduce SIRANE v2.1 output: the k3 prefactor is 1.325e6 (the paper
+# prints 1.325e5), k1 is clipped at zero, and the split works in ppb with a 2 ppb floor on
+# k1/k3.
+
+SIRANE_K3_PREFACTOR = 1.325e6
+"""m3 mol^-1 s^-1: the prefactor of SIRANE's k(NO + O3), 2.2e-12 cm3 molecule^-1 s^-1 x N_A."""
+
+SIRANE_K3_ACTIVATION = 1430.0
+"""K: the activation temperature of SIRANE's k(NO + O3)."""
+
+
+def solar_elevation(latitude_deg, day_of_year, hour) -> torch.Tensor:
+    """The solar elevation (degrees) at `latitude_deg`, day `day_of_year` (1 January = 1)
+    and clock time `hour` (fractional hours), in SIRANE's convention.
+
+    `sin a = sin(phi) sin(delta) + cos(phi) cos(delta) cos(omega)` with Cooper's
+    declination `delta = 23.45 deg sin(360 deg (284 + n) / 365)` and the hour angle
+    `omega = 15 deg (hour - 12)`: the clock time is taken as local solar time, with no
+    longitude and no equation-of-time correction. All three arguments broadcast.
+    """
+    lat = torch.deg2rad(torch.as_tensor(latitude_deg, dtype=torch.float64))
+    n = torch.as_tensor(day_of_year, dtype=torch.float64)
+    h = torch.as_tensor(hour, dtype=torch.float64)
+    declination = torch.deg2rad(23.45 * torch.sin(torch.deg2rad(360.0 * (284.0 + n) / 365.0)))
+    omega = torch.deg2rad(15.0 * (h - 12.0))
+    sin_a = (torch.sin(lat) * torch.sin(declination)
+             + torch.cos(lat) * torch.cos(declination) * torch.cos(omega))
+    return torch.rad2deg(torch.asin(torch.clamp(sin_a, -1.0, 1.0)))
+
+
+def j_no2_sirane(elevation_deg, cloud_octas=0.0) -> torch.Tensor:
+    """SIRANE's NO2 photolysis rate `k1` (1/s) at solar elevation `elevation_deg` under
+    `cloud_octas` of cloud (0 to 8).
+
+    `k1 = (1/60) max{0, 0.5699 - [9.056e-3 (90 - a)]^2.546} [1 - 0.75 (N/8)^3.4]`: Soulhac
+    et al. (2011) Eq. 32 with the bracket clipped at zero, which makes `k1` zero for
+    `a <= 1.458 deg` and so at night. The clear-sky overhead value is 9.50e-3 1/s. The
+    clip is the only non-smooth point.
+    """
+    elevation = torch.as_tensor(elevation_deg, dtype=torch.float64)
+    cloud = torch.as_tensor(cloud_octas, dtype=torch.float64)
+    with torch.no_grad():
+        if not bool(torch.isfinite(cloud).all()) or bool(((cloud < 0) | (cloud > 8)).any()):
+            raise ValueError(
+                f"j_no2_sirane: cloud_octas must lie in [0, 8]; got "
+                f"{cloud.detach().flatten()[:4].tolist()}"
+            )
+    zenith = torch.clamp(90.0 - elevation, min=0.0)
+    clear = torch.clamp(0.5699 - (9.056e-3 * zenith) ** 2.546, min=0.0) / 60.0
+    return clear * (1.0 - 0.75 * (cloud / 8.0) ** 3.4)
+
+
+def k_no_o3_sirane(temperature) -> torch.Tensor:
+    """SIRANE's k(NO + O3) = 1.325e6 exp(-1430/T) m3 mol^-1 s^-1 at `temperature` (K).
+
+    In SIRANE the temperature is its ground-level air temperature. Divided by the molar
+    volume in litres and times 1e-6 it is the rate in ppb^-1 s^-1 that SIRANE prints.
+    """
+    t = torch.as_tensor(temperature, dtype=torch.float64)
+    return SIRANE_K3_PREFACTOR * torch.exp(-SIRANE_K3_ACTIVATION / t)

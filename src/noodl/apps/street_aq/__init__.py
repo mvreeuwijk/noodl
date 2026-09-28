@@ -31,7 +31,13 @@ from noodl.apps.street_aq.case import (
     write_case,
     write_sweep,
 )
-from noodl.apps.street_aq.chemistry import photostationary_for_streets, street_steady
+from noodl.apps.street_aq.chemistry import (
+    j_no2_sirane,
+    k_no_o3_sirane,
+    photostationary_for_streets,
+    solar_elevation,
+    street_steady,
+)
 from noodl.apps.street_aq.exposure import (
     Q_INHALATION,
     exposure_reduction_adjoint,
@@ -114,7 +120,10 @@ __all__ = [
     "munich_idealised",
     "n_theta_munich",
     "node_closure",
+    "j_no2_sirane",
+    "k_no_o3_sirane",
     "photostationary_for_streets",
+    "solar_elevation",
     "plume_kernel",
     "plume_table",
     "read_case",

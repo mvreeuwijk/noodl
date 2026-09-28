@@ -40,7 +40,7 @@ from noodl.apps.street_aq.routing import (
     routing_matrix,
     sigma_theta_munich,
 )
-from noodl.layers.reaction import K_NO_O3, K_NO_O3_298, MOLAR_MASS
+from noodl.layers.reaction import K_NO_O3, K_NO_O3_298, MOLAR_MASS, k_no_o3_munich
 
 DT = torch.float64
 FIXTURE = Path(__file__).resolve().parents[1] / "data" / "street" / "munich_idealised.json"
@@ -238,6 +238,10 @@ def test_the_leighton_rate_constant_and_its_conversion():
     conversion = 6.02214076e23 / (1e6 * 48.0e-3)
     assert abs(conversion - 1.2546126583333333e19) < 1e4
     assert abs(K_NO_O3 / 2.45236e5 - 1.0) < 2e-6                  # six figures
+    # The temperature-dependent rate, in m3 mol^-1 s^-1, at the worked temperatures.
+    n_a_cm3 = 6.02214076e23 * 1e-6
+    assert abs(float(k_no_o3_munich(298.15)) / (1.959634e-14 * n_a_cm3) - 1.0) < 1e-6
+    assert abs(float(k_no_o3_munich(300.0)) / (2.021384e-14 * n_a_cm3) - 1.0) < 1e-6
 
 
 def test_the_two_paper_versus_paper_divergences_are_pinned():
@@ -448,6 +452,7 @@ def test_photostationary_chemistry_on_the_twelve_street_network():
     background = torch.zeros(1, 3, dtype=DT)
     background[0, 2] = 8.0e-8                     # O3 aloft, kg/m3
     j = 5.0e-3                                    # 1/s, a mid-morning J_NO2
+    temperature = 293.15                          # K, MUNICH's default SurfaceTemperature
     scenario = fixture["scenarios"][0]
     drivers = {
         "street.x_boundary": background,
@@ -456,6 +461,7 @@ def test_photostationary_chemistry_on_the_twelve_street_network():
         "theta_w": torch.tensor(scenario["theta_w_rad"], dtype=DT),
         "h_abl": torch.tensor(geometry["h_abl_m"], dtype=DT),
         "J_NO2": torch.tensor(j, dtype=DT),
+        "temperature": torch.tensor(temperature, dtype=DT),
     }
     transport_only = model.steady(state, drivers)["street.x"]
     out = street_steady(model, state, drivers, reaction=reaction, tol=1e-18, max_iter=200)
@@ -471,8 +477,9 @@ def test_photostationary_chemistry_on_the_twelve_street_network():
     # k [NO][O3] = J [NO2] wherever there is any NOx at all. Streets the plume never reaches
     # hold NO = NO2 = 0 exactly (the background carries no NOx), where the balance is 0 = 0
     # and a relative residual is undefined; they are excluded by the mask, and the mask is
-    # asserted non-trivial so the check cannot pass vacuously.
-    k_mol = K_NO_O3 * MOLAR_MASS["o3"]
+    # asserted non-trivial so the check cannot pass vacuously. The rate is the ARR2 form
+    # A exp(-B/T) at the street temperature, in m3 mol^-1 s^-1.
+    k_mol = 3.0e-12 * math.exp(-1500.0 / temperature) * 6.02214076e23 * 1e-6
     scale = j * c[:, 1] + k_mol * c[:, 0] * c[:, 2]
     reached = scale > 0
     assert bool(reached[street_index(model)[fixture["emitting_street"]]])

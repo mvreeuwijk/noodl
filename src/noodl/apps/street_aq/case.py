@@ -669,7 +669,8 @@ def drivers_at(
     `u_star` is supplied whenever `case` has it; `U_ref` is `case`'s own wind speed (not
     derived through noodl's log law -- `u_star`, when present, is what actually sets the
     friction velocity; `U_ref` is needed only for the direction spread
-    `sigma_theta = sigma_v / U_ref`).
+    `sigma_theta = sigma_v / U_ref`). `temperature` (K) is supplied whenever `case` has it;
+    the photostationary chemistry evaluates its rate there.
     """
     flows = next(c for c in model.closures if isinstance(c, StreetFlows))
     layer = model.transport[flows.layer_name]
@@ -732,6 +733,7 @@ def drivers_at(
     u_star = case.meteo["u_star"][k] if "u_star" in case.meteo else None
     h_abl = case.meteo["h_abl"][k] if "h_abl" in case.meteo else None
     lmo = case.meteo["lmo"][k] if "lmo" in case.meteo else None
+    temperature = case.meteo["temperature"][k] if "temperature" in case.meteo else None
     theta_w_all = apply_conversion(
         CONTAM_DEG_TO_STREET_RAD, torch.as_tensor(theta_deg, dtype=F64), {}
     )
@@ -745,6 +747,8 @@ def drivers_at(
             out["h_abl"] = torch.as_tensor(h_abl, dtype=F64)
         if lmo is not None:
             out["lmo"] = torch.as_tensor(lmo, dtype=F64)
+        if temperature is not None:
+            out["temperature"] = torch.as_tensor(temperature, dtype=F64)
 
         junction_drivers = dict(out)
         for key in ("theta_w", "U_ref", "u_star", "h_abl", "lmo"):
@@ -774,5 +778,7 @@ def drivers_at(
             out["lmo"] = torch.tensor(
                 float(_munich_files.reciprocal_mean(lmo, axis=0)), dtype=F64
             )
+        if temperature is not None:
+            out["temperature"] = torch.tensor(float(np.mean(temperature)), dtype=F64)
 
     return out

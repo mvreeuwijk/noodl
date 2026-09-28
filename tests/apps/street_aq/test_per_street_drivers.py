@@ -242,7 +242,8 @@ def test_per_street_background_with_species_and_chemistry():
     per, state, drivers = build_model(net, species=("no", "no2", "o3"), chemistry=reaction,
                                       background="per_street", **MUNICH)
     assert drivers["street.x_boundary"].shape == (len(net.streets), 3)
-    d = dict(_uniform_drivers(per), J_NO2=torch.tensor(5e-3, dtype=DT))
+    d = dict(_uniform_drivers(per), J_NO2=torch.tensor(5e-3, dtype=DT),
+             temperature=torch.tensor(293.15, dtype=DT))
     d["street.sources"] = torch.zeros(per.net.n, 3, dtype=DT)
     bg = torch.zeros(len(net.streets), 3, dtype=DT)
     bg[:, 2] = 8e-8

@@ -11,6 +11,8 @@ from noodl.layers.reaction import (
     MOLAR_MASS,
     FirstOrderDecay,
     Photostationary,
+    k_no_o3_munich,
+    molar_volume,
 )
 from noodl.layers.transport import TransportLayer
 from noodl.topology import Network
@@ -65,6 +67,7 @@ def test_operator_splitting_matches_removal_matrix_route_to_first_order():
 
 
 DT = torch.float64
+T298 = 298.0                       # K: the temperature K_NO_O3 is quoted at
 
 
 def _state(no, no2, o3, n=1):
@@ -91,7 +94,8 @@ def test_rate_constant_matches_the_arrhenius_form_and_the_kg_conversion():
 
 def test_photostationary_satisfies_the_state_and_conserves_nox_and_ox():
     x = _state(2.0e-8, 4.0e-8, 6.0e-8)
-    y = Photostationary(0, 1, 2).apply(x, None, {"J_NO2": torch.tensor([5.0e-3], dtype=DT)})
+    drivers = {"temperature": T298, "J_NO2": torch.tensor([5.0e-3], dtype=DT)}
+    y = Photostationary(0, 1, 2).apply(x, None, drivers)
     c0, c1 = _molar(x), _molar(y)
     torch.testing.assert_close(c1[:, 0] + c1[:, 1], c0[:, 0] + c0[:, 1], rtol=1e-13, atol=0)
     torch.testing.assert_close(c1[:, 1] + c1[:, 2], c0[:, 1] + c0[:, 2], rtol=1e-13, atol=0)
@@ -103,7 +107,8 @@ def test_photostationary_satisfies_the_state_and_conserves_nox_and_ox():
 
 def test_zero_photolysis_consumes_whichever_of_no_and_o3_runs_out_first():
     y = Photostationary(0, 1, 2).apply(
-        _state(2.0e-8, 4.0e-8, 6.0e-8), None, {"J_NO2": torch.zeros(1, dtype=DT)}
+        _state(2.0e-8, 4.0e-8, 6.0e-8), None,
+        {"temperature": T298, "J_NO2": torch.zeros(1, dtype=DT)},
     )
     c = _molar(y)
     p = 2.0e-8 / MOLAR_MASS["no"] + 4.0e-8 / MOLAR_MASS["no2"]
@@ -116,7 +121,7 @@ def test_zero_photolysis_consumes_whichever_of_no_and_o3_runs_out_first():
 def test_huge_photolysis_drives_no2_towards_zero():
     x = _state(2.0e-8, 4.0e-8, 6.0e-8)
     y = Photostationary(0, 1, 2).apply(
-        x, None, {"J_NO2": torch.tensor([1.0e6], dtype=DT)}
+        x, None, {"temperature": T298, "J_NO2": torch.tensor([1.0e6], dtype=DT)}
     )
     # `z -> 2 k P Q / J` as `J -> inf`, so NO2 does not reach exactly zero in float64; what
     # matters is that essentially all of the NOx has become NO.
@@ -126,7 +131,7 @@ def test_huge_photolysis_drives_no2_towards_zero():
 
 def test_photostationary_is_idempotent():
     reaction = Photostationary(0, 1, 2)
-    drivers = {"J_NO2": torch.tensor([5.0e-3], dtype=DT)}
+    drivers = {"temperature": T298, "J_NO2": torch.tensor([5.0e-3], dtype=DT)}
     y = reaction.apply(_state(2.0e-8, 4.0e-8, 6.0e-8), None, drivers)
     torch.testing.assert_close(reaction.apply(y, None, drivers), y, rtol=1e-12, atol=0)
 
@@ -134,7 +139,7 @@ def test_photostationary_is_idempotent():
 def test_photostationary_is_differentiable_in_the_state_and_in_j():
     x = _state(2.0e-8, 4.0e-8, 6.0e-8).requires_grad_(True)
     j = torch.tensor([5.0e-3], dtype=DT, requires_grad=True)
-    y = Photostationary(0, 1, 2).apply(x, None, {"J_NO2": j})
+    y = Photostationary(0, 1, 2).apply(x, None, {"temperature": T298, "J_NO2": j})
     gx, gj = torch.autograd.grad(y[:, 1].sum(), (x, j))
     assert torch.isfinite(gx).all() and torch.isfinite(gj).all()
     assert float(gj) < 0.0          # more photolysis, less NO2
@@ -144,7 +149,7 @@ def test_photostationary_batches_over_instances_and_nodes():
     x = torch.stack([_state(2.0e-8, 4.0e-8, 6.0e-8, n=4),
                      _state(1.0e-8, 2.0e-8, 9.0e-8, n=4)])
     j = torch.tensor([[5.0e-3], [1.0e-3]], dtype=DT)
-    y = Photostationary(0, 1, 2).apply(x, None, {"J_NO2": j})
+    y = Photostationary(0, 1, 2).apply(x, None, {"temperature": T298, "J_NO2": j})
     assert y.shape == x.shape
     assert bool((y[0, 0] != y[1, 0]).any())
 
@@ -154,7 +159,7 @@ def test_photostationary_names_a_missing_driver_and_a_bad_column():
         Photostationary(0, 1, 2).apply(_state(1e-8, 1e-8, 1e-8), None, {})
     with pytest.raises(ValueError, match=r"Photostationary: column 7"):
         Photostationary(0, 1, 7).apply(_state(1e-8, 1e-8, 1e-8), None,
-                                       {"J_NO2": torch.ones(1, dtype=DT)})
+                                       {"temperature": T298, "J_NO2": torch.ones(1, dtype=DT)})
 
 
 # The near-titration case, NOx ~= Ox to ~1 part in 1e12 with J
@@ -171,7 +176,7 @@ def test_photostationary_handles_the_near_titration_kink_without_nan():
     x = _state(p * MOLAR_MASS["no"], 0.0, q * MOLAR_MASS["o3"])
     for j_value in (0.0, 1.0e-17):  # exactly at, and a hair off, the degenerate point
         y = Photostationary(0, 1, 2).apply(
-            x, None, {"J_NO2": torch.tensor([j_value], dtype=DT)}
+            x, None, {"temperature": T298, "J_NO2": torch.tensor([j_value], dtype=DT)}
         )
         assert not bool(torch.isnan(y).any())
         c0, c1 = _molar(x), _molar(y)
@@ -192,7 +197,7 @@ def test_photostationary_gradients_are_finite_at_the_near_titration_kink():
     p, q = _C_NO_TITRATION, _C_O3_TITRATION
     x = _state(p * MOLAR_MASS["no"], 0.0, q * MOLAR_MASS["o3"]).requires_grad_(True)
     j = torch.zeros(1, dtype=DT, requires_grad=True)
-    y = Photostationary(0, 1, 2).apply(x, None, {"J_NO2": j})
+    y = Photostationary(0, 1, 2).apply(x, None, {"temperature": T298, "J_NO2": j})
     gx, gj = torch.autograd.grad(y.sum(), (x, j))
     assert torch.isfinite(gx).all()
     assert torch.isfinite(gj).all()
@@ -212,8 +217,101 @@ def test_photostationary_gradients_are_finite_at_the_exactly_degenerate_point():
     assert float(x[0, 0]) / MOLAR_MASS["no"] == float(x[0, 2]) / MOLAR_MASS["o3"]
     x = x.requires_grad_(True)
     j = torch.zeros(1, dtype=DT, requires_grad=True)
-    y = Photostationary(0, 1, 2).apply(x, None, {"J_NO2": j})
+    y = Photostationary(0, 1, 2).apply(x, None, {"temperature": T298, "J_NO2": j})
     assert abs(float(y[0, 1].detach()) / (c * MOLAR_MASS["no2"]) - 1.0) < 1e-12
     gx, gj = torch.autograd.grad(y.sum(), (x, j))
     assert torch.isfinite(gx).all()
     assert torch.isfinite(gj).all()
+
+
+# ------------------------------------------------------------- the rate's temperature
+
+def _residual_rate(y, j):
+    """The k that makes `j [NO2] = k [NO][O3]` hold for the state `y`."""
+    c = _molar(y)
+    return j * c[:, 1] / (c[:, 0] * c[:, 2])
+
+
+def test_the_default_rate_is_evaluated_at_the_temperature_driver():
+    """k(NO + O3) = 3.0e-12 exp(-1500/T): at 298 K it is K_NO_O3, and at other temperatures
+    the equilibrium follows the rate at THAT temperature, not the 298 K one."""
+    n_a = 6.02214076e23
+    assert abs(float(k_no_o3_munich(298.0)) / (K_NO_O3 * MOLAR_MASS["o3"]) - 1.0) < 1e-14
+    x = _state(2.0e-8, 4.0e-8, 6.0e-8, n=3)
+    temps = torch.tensor([263.15, 298.0, 308.15], dtype=DT)
+    y = Photostationary(0, 1, 2).apply(x, None, {"temperature": temps, "J_NO2": 5.0e-3})
+    expected = 3.0e-12 * torch.exp(-1500.0 / temps) * n_a * 1e-6
+    torch.testing.assert_close(_residual_rate(y, 5.0e-3), expected, rtol=1e-10, atol=0)
+    # A faster NO + O3 (warmer air) makes more NO2 at the same J.
+    assert float(y[0, 1]) < float(y[1, 1]) < float(y[2, 1])
+
+
+def test_the_temperature_is_required_unless_the_rate_is_constant():
+    x = _state(2.0e-8, 4.0e-8, 6.0e-8)
+    with pytest.raises(KeyError, match=r"Photostationary: driver 'temperature'"):
+        Photostationary(0, 1, 2).apply(x, None, {"J_NO2": 5.0e-3})
+    with pytest.raises(ValueError, match=r"absolute temperature"):
+        Photostationary(0, 1, 2).apply(x, None, {"J_NO2": 5.0e-3, "temperature": 20.0 - 40.0})
+    constant = Photostationary(0, 1, 2, k_no_o3=K_NO_O3).apply(x, None, {"J_NO2": 5.0e-3})
+    at_298 = Photostationary(0, 1, 2).apply(x, None, {"J_NO2": 5.0e-3, "temperature": T298})
+    torch.testing.assert_close(constant, at_298, rtol=1e-14, atol=0)
+    renamed = Photostationary(0, 1, 2, temperature_key="T_air")
+    torch.testing.assert_close(renamed.apply(x, None, {"J_NO2": 5.0e-3, "T_air": T298}),
+                               at_298, rtol=0, atol=0)
+
+
+def test_the_rate_is_differentiable_in_the_temperature():
+    x = _state(2.0e-8, 4.0e-8, 6.0e-8)
+    t = torch.tensor([290.0], dtype=DT, requires_grad=True)
+    y = Photostationary(0, 1, 2).apply(x, None, {"J_NO2": 5.0e-3, "temperature": t})
+    (g,) = torch.autograd.grad(y[0, 1], t)
+    assert float(g) > 0.0
+    torch.autograd.gradcheck(
+        lambda tt: Photostationary(0, 1, 2).apply(x, None, {"J_NO2": 5.0e-3,
+                                                            "temperature": tt})[:, 1],
+        (t,),
+    )
+
+
+# ---------------------------------------------------------------------- the J/k floor
+
+def test_molar_volume_is_the_ideal_gas_value():
+    # CODATA's molar volume at 273.15 K and 101325 Pa, 22.41396954 L/mol (R to ten figures).
+    assert abs(float(molar_volume(273.15)) / 22.41396954e-3 - 1.0) < 1e-9
+    assert abs(float(molar_volume(300.0, 1.0e5)) - 8.314462618 * 300.0 / 1.0e5) < 1e-18
+
+
+def test_the_floor_bounds_j_over_k_and_is_inactive_above_it():
+    """`K = max(J/k, floor)`: below the floor the state is that of J = k floor, above it the
+    floor changes nothing; the floor is in ppb, converted with the molar volume."""
+    x = _state(2.0e-8, 4.0e-8, 6.0e-8)
+    v_m = 0.0245                                       # m3/mol
+    k = float(k_no_o3_munich(T298))
+    floor_mol = 2.0e-9 / v_m
+    base = {"temperature": T298, "molar_volume": v_m}
+    floored = Photostationary(0, 1, 2, floor_ppb=2.0)
+    plain = Photostationary(0, 1, 2)
+    # Night: J = 0 sits under the floor, so the answer is the one at J = k floor.
+    torch.testing.assert_close(
+        floored.apply(x, None, dict(base, J_NO2=0.0)),
+        plain.apply(x, None, dict(base, J_NO2=k * floor_mol)), rtol=1e-14, atol=0)
+    # Day: J / k well above 2 ppb, the floor is inactive and the answers are identical.
+    torch.testing.assert_close(
+        floored.apply(x, None, dict(base, J_NO2=5.0e-3)),
+        plain.apply(x, None, dict(base, J_NO2=5.0e-3)), rtol=0, atol=0)
+    # Without a molar-volume driver it is R T / 101325 Pa.
+    torch.testing.assert_close(
+        floored.apply(x, None, {"temperature": T298, "J_NO2": 0.0}),
+        floored.apply(x, None, dict(base, J_NO2=0.0, molar_volume=molar_volume(T298))),
+        rtol=0, atol=0)
+    with pytest.raises(ValueError, match="floor_ppb"):
+        Photostationary(0, 1, 2, floor_ppb=-1.0)
+
+
+def test_the_floored_equilibrium_conserves_nox_and_ox():
+    x = _state(2.0e-8, 4.0e-8, 6.0e-8, n=2)
+    y = Photostationary(0, 1, 2, floor_ppb=2.0).apply(
+        x, None, {"temperature": T298, "J_NO2": torch.tensor([0.0, 5.0e-3], dtype=DT)})
+    c0, c1 = _molar(x), _molar(y)
+    torch.testing.assert_close(c1[:, 0] + c1[:, 1], c0[:, 0] + c0[:, 1], rtol=1e-13, atol=0)
+    torch.testing.assert_close(c1[:, 1] + c1[:, 2], c0[:, 1] + c0[:, 2], rtol=1e-13, atol=0)
