@@ -469,9 +469,10 @@ above the canyon and in their von Karman constant (0.40 against MUNICH's 0.41). 
 :3273`; see the street page's [note on this constant](applications/street_aq.md#limitations-and-caveats))
 and a Schulte mixing-length branch
 (`SCHULTE_BETA` $= 2/(\sqrt{2}\,\pi)$, fixed by matching the SIRANE form at $a_r = 1$, K18 p.
-613). Both pairs are selectable independently (`canyon_wind=`, `exchange=`) because the two
-source codebases do not always pair them the same way, and the parity tests exercise both
-pairings.
+613). Both pairs are selectable independently (`canyon_wind="bessel_profile"` or
+`"exponential_profile"`, `roof_exchange="turbulent_velocity"` or `"aspect_ratio_scaled"`)
+because the two source codebases do not always pair them the same way, and the parity tests
+exercise both pairings; `preset="sirane"` and `preset="munich"` give each code's own pairing.
 
 **The Soulhac form, written out.** With $d_i = \min(W/2, H)$ and the in-canyon roughness
 $z_{0,b}$, the shape parameter $c$ is the root of

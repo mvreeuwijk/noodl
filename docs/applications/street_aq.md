@@ -60,17 +60,20 @@ print(solved["street.x"])                     # kg/m3 per street, interior order
 crosses the atmosphere boundary exactly, rtol $10^{-12}$.)*
 
 **The drivers returned by `build_model` are templates only.** They carry zero-shaped
-`x_boundary` and `sources`; you must supply `U_ref`, `theta_w` and `h_abl` yourself (and `lmo`
-if you chose `stability="munich"`).
+`x_boundary` and `sources`; you must supply `U_ref`, `theta_w` and `h_abl` yourself. The
+Obukhov length `lmo` is optional: with `stability="monin_obukhov"` (the default) it selects the
+stable, neutral or unstable branch, and without it the turbulence is the neutral form.
 
 `u_star`, when given, is the friction velocity itself and replaces the log law that would
-otherwise derive it from `U_ref`; `U_ref` is then needed only for `direction_averaging="munich"`'s
-direction spread, $\sigma_\theta = \sigma_v / U$.
+otherwise derive it from `U_ref`; `U_ref` is then needed only for the turbulence-intensity
+direction spread (`direction_spread="turbulence_intensity"`), $\sigma_\theta = \sigma_v / U$.
 
-`direction_averaging="gauss"` or `"sirane"` take the direction spread as the `sigma_theta`
-driver instead (radians; one value per instance, or one per junction under
-`meteo="per_street"`) -- useful whenever the spread itself varies hour by hour, as SIRANE's
-does, since it needs no rebuilt model. `direction_averaging="none"` ignores it.
+With `direction_spread="driver"` (the default) the direction spread is the `sigma_theta`
+driver (radians; one value per instance, or one per junction under `meteo="per_street"`) --
+useful whenever the spread varies hour by hour, as SIRANE's does, since it needs no rebuilt
+model. Without that driver it is the `sigma_theta` given to `build_model`, and without that
+zero: the junction routing then uses the mean direction alone, exactly as
+`direction_averaging="none"`, which ignores any spread.
 
 `meteo="per_street"` gives every one of `U_ref`, `theta_w`, `h_abl`, `u_star` and `lmo` a
 trailing street axis, `(..., n_streets)`, so each street gets its own wind and boundary layer.
@@ -140,20 +143,26 @@ writing street-network cases](street_aq_cases.md) for `StreetCase`, `read_result
 ```python
 model, state, drivers = build_model(
     net,
-    canyon_wind="soulhac",        # 'soulhac' | 'exponential'
-    exchange="sirane",            # 'sirane'  | 'schulte'
-    routing="sirane",             # 'sirane'  | 'mixing'
-    direction_averaging="none",   # 'none' | 'munich' | 'gauss' | 'sirane'
+    preset="sirane",              # 'sirane' | 'munich': the full closure set
+    canyon_wind=None,             # 'bessel_profile' | 'exponential_profile'
+    roof_wind=None,               # 'bessel_canyon_mean' | 'canopy_log_law'
+    roof_exchange=None,           # 'turbulent_velocity' | 'aspect_ratio_scaled'
+    junction_routing=None,        # 'non_crossing_streamlines' | 'perfect_mixing'
+    direction_averaging=None,     # 'none' | 'exact_gaussian' | 'rectangle_rule' | 'gauss_hermite'
+    direction_spread=None,        # 'driver' | 'turbulence_intensity'
+    stability=None,               # 'neutral' | 'monin_obukhov'
     species=("nox",),
     chemistry=None,
-    stability="neutral",          # 'neutral' | 'munich'
-    roof_wind_form="sirane",      # 'sirane' | 'macdonald'
-    kappa=None, canyon_wind_min=0.0, u_d_min=0.0,
+    kappa=None, canyon_wind_min=None, u_d_min=None, sigma_w_min=None, sigma_v_min=None,
     z_ref=30.0, pblh_floor=True,
-    meteo="uniform",               # 'uniform' | 'per_street'
-    background="uniform",          # 'uniform' | 'per_street'
+    meteo="uniform",              # 'uniform' | 'per_street'
+    background="uniform",         # 'uniform' | 'per_street'
 )
 ```
+
+Every closure keyword left at `None` takes the preset's value; any other value overrides it,
+so `build_model(net, preset="munich", roof_wind="canopy_log_law")` is MUNICH's closure set
+with Macdonald's roof wind.
 
 It builds one `atmosphere` boundary node plus one node per street, then, for every junction,
 directed `route` edges between all distinct street ends meeting there, two `vent` edges per
@@ -164,23 +173,64 @@ closure are wrapped into a `Model`.
 
 ### The closure choices
 
-These select between the SIRANE forms and MUNICH's, and they are independent:
+Every option value is named for the physics it computes. The two reference models' full sets
+are the presets (`noodl.apps.street_aq.PRESETS`); the options are independent, so any mix is
+allowed:
+
+| Option | Value | Physics | `sirane` | `munich` |
+|---|---|---|---|---|
+| `canyon_wind` | `"bessel_profile"` | Soulhac–Perkins–Salizzoni (2008) closed-form Bessel profile from the friction velocity. Needs `z0_b`. | ✓ | |
+| | `"exponential_profile"` | K22 Eq. (B14) exponential profile from the roof-level wind, $u = u_H \cos\varphi\,(2/a_r)[1 - e^{(a_r/2)(z_{0s}/H - 1)}]$. **Not** the K18 formula of the same name — they diverge by 37% for narrow canyons. | | ✓ |
+| `roof_wind` | `"bessel_canyon_mean"` | $u_H$ as the canyon mean of the Bessel profile (K22 Eq. B12). Used by `"exponential_profile"` only. | ✓ | ✓ |
+| | `"canopy_log_law"` | $u_H = (u_*/\kappa)\ln((H - d_c)/z_{0c})$ with Macdonald's (1998) network-mean displacement height and roughness (K22 Eq. B13). | | |
+| `roof_exchange` | `"turbulent_velocity"` | $u_d = \sigma_w / (\sqrt{2}\,\pi)$, aspect-ratio independent. | ✓ | |
+| | `"aspect_ratio_scaled"` | Schulte's $u_d = \beta\,\sigma_w / (1 + H/W)$, $\beta = 2/(\sqrt{2}\,\pi)$. Equals `"turbulent_velocity"` exactly at $H = W$. | | ✓ |
+| `junction_routing` | `"non_crossing_streamlines"` | Inflows fill the outflows in angular order without crossing (a closed-form north-west-corner fill). | ✓ | ✓ |
+| | `"perfect_mixing"` | Every inflow shared in proportion to the outflows. The two differ only at junctions with 2+ inflows **and** 2+ outflows. | | |
+| `direction_averaging` | `"none"` | The junction routing at the mean wind direction alone. | | |
+| | `"exact_gaussian"` | The exact Gaussian average of the junction routing over the direction spread (Soulhac et al. 2011, Eq. 7): the routing changes only where a street switches between inflow and outflow, so the average is a sum over those intervals weighted by their Gaussian mass. Differentiable in $\sigma_\theta$; needs $0 \le \sigma_\theta < \pi/4$. | ✓ | |
+| | `"rectangle_rule"` | Uniform samples on $[-2\sigma_\theta, 2\sigma_\theta]$, $n = \lfloor\sigma_\theta\text{ in degrees}\rfloor$ (at most 10), with weights $\Delta\,N(\theta_k; 0, \sigma_\theta)$ that are **not** normalised (they sum to 0.975 at $n = 10$, 0.432 at $n = 2$). | | ✓ |
+| | `"gauss_hermite"` | An `n_theta`-point Gauss–Hermite quadrature with normalised weights. | | |
+| `direction_spread` | `"driver"` | $\sigma_\theta$ from the `sigma_theta` driver, else the `sigma_theta` keyword, else 0 (a single direction). | ✓ | |
+| | `"turbulence_intensity"` | $\sigma_\theta = \min(\sigma_v / U_{\text{ref}},\ 10°)$ at each junction; a `sigma_theta` driver is refused. | | ✓ |
+| `stability` | `"neutral"` | $\sigma_w = 1.3\,u_*(1 - 0.8\,z/h_{\text{abl}})$, $\sigma_v = 1.2\,u_*$. | | |
+| | `"monin_obukhov"` | Stable, neutral and unstable branches selected by the `lmo` driver; the neutral form wherever `lmo` is not given. | ✓ | ✓ |
+| `kappa` | float | The von Karman constant. | 0.40 | 0.41 |
+| `canyon_wind_min` | m/s | Floor on $\lvert u \rvert$ in the canyon, sign kept. | 0 | 0.1 |
+| `u_d_min` | m/s | Floor on the exchange velocity. | 0 | 0.001 |
+| `sigma_w_min` | m/s | Floor on $\sigma_w$ before the exchange velocity. | 0.30 | 0 |
+| `sigma_v_min` | m/s | Floor on $\sigma_v$ before the turbulence-intensity spread. | 0.5 | 0 |
+
+Two more choices shape the drivers rather than the physics:
 
 | Option | Values | What changes |
 |---|---|---|
-| `canyon_wind` | `"soulhac"` | Soulhac–Perkins–Salizzoni (2008) closed-form Bessel profile from the friction velocity. Needs `z0_b`. |
-| | `"exponential"` | MUNICH's K22 Eq. (B14) exponential profile from the roof-level wind. **Not** the K18 formula of the same name — they diverge by 37% for narrow canyons. |
-| `roof_wind_form` | `"sirane"` / `"macdonald"` | How $u_H$ is computed when `canyon_wind="exponential"`. Macdonald uses a log law with a network-mean displacement height and roughness. |
-| `exchange` | `"sirane"` | $u_d = \sigma_w / (\sqrt{2}\,\pi)$, aspect-ratio independent. |
-| | `"schulte"` | $u_d = \sigma_w \beta / (1 + H/W)$, MUNICH v2's default. Equals the SIRANE form exactly at $H = W$. |
-| `routing` | `"mixing"` / `"sirane"` | Perfect mixing, or SIRANE's non-crossing-streamline rule. They differ only at junctions with 2+ inflows **and** 2+ outflows. |
-| `direction_averaging` | `"none"` / `"munich"` / `"gauss"` / `"sirane"` | Single direction; MUNICH's own quadrature over a turbulence-derived $\sigma_\theta$; noodl physics' normalised Gauss–Hermite rule; or SIRANE's exact Gaussian average of the junction routing over the direction spread (Soulhac et al. 2011, Eq. 7) -- the routing changes only where a street switches between inflow and outflow, so the average is a sum over those intervals weighted by the Gaussian mass. |
-| `stability` | `"neutral"` / `"munich"` | Neutral only ($\sigma_w = 1.3\,u_*(1 - 0.8\,z/h_{\text{abl}})$), or MUNICH's three-branch stability dependence (needs an `lmo` driver). |
 | `meteo` | `"uniform"` / `"per_street"` | One instance value per driver, or a trailing street axis on `U_ref`, `theta_w`, `h_abl`, `u_star`, `lmo`, with junction routing from the mean of the streets meeting there (or an explicit `"<key>_junction"` driver). |
 | `background` | `"uniform"` / `"per_street"` | One atmosphere boundary node shared by every street, or one atmosphere node per street with its own `"<layer>.x_boundary"` row -- needed for the coupled above-roof plume, see [Above-roof concentration](#above-roof-concentration). |
 
-`kappa=None` resolves automatically: MUNICH's 0.41 if any MUNICH-style option is chosen, else
-0.40. An explicit value always wins.
+`kappa=None` is the preset's constant. When any closure option is given explicitly it is instead
+0.41 if a choice written with that constant is selected (`canyon_wind="exponential_profile"`,
+`roof_exchange="aspect_ratio_scaled"` or `roof_wind="canopy_log_law"`) and 0.40 otherwise. An
+explicit value always wins.
+
+#### Earlier option names
+
+The earlier spellings are still accepted, with a `DeprecationWarning` naming the replacement
+(`noodl.apps.street_aq.closures.LEGACY`):
+
+| Earlier | Current |
+|---|---|
+| `exchange=`, `routing=`, `roof_wind_form=` | `roof_exchange=`, `junction_routing=`, `roof_wind=` |
+| `canyon_wind="soulhac"` / `"exponential"` | `"bessel_profile"` / `"exponential_profile"` |
+| `roof_wind_form="sirane"` / `"macdonald"` | `roof_wind="bessel_canyon_mean"` / `"canopy_log_law"` |
+| `exchange="sirane"` / `"schulte"` | `roof_exchange="turbulent_velocity"` / `"aspect_ratio_scaled"` |
+| `routing="sirane"` / `"mixing"` | `junction_routing="non_crossing_streamlines"` / `"perfect_mixing"` |
+| `direction_averaging="sirane"` / `"gauss"` | `"exact_gaussian"` / `"gauss_hermite"` |
+| `direction_averaging="munich"` | `"rectangle_rule"` with `direction_spread="turbulence_intensity"` |
+| `stability="munich"` | `"monin_obukhov"` |
+| `photostationary_for_streets(closure=...)` | `preset=...` |
+| `k_no_o3_munich`, `k_no_o3_sirane` | `k_no_o3_jpl2003`, `k_no_o3_soulhac2011` |
+| `j_no2`, `j_no2_sirane` | `j_no2_zenith_table`, `j_no2_elevation_cloud` |
 
 ### The canyon physics
 
@@ -191,7 +241,7 @@ These select between the SIRANE forms and MUNICH's, and they are independent:
 | `boundary_layer(h_mean, u_ref, h_abl, *, z_ref=30.0, kappa=0.4, pblh_floor=None)` | A `BoundaryLayer` with $d = 2h/3$, $z_0 = h/10$, $u_* = \kappa U_{\text{ref}} / \ln((z_{\text{ref}} - d)/z_0)$. |
 | `BoundaryLayer.sigma_w(z, ...)` / `.sigma_v(...)` | Velocity standard deviations driving the roof exchange. |
 | `canyon_velocity(W, H, phi, ...)` | The **signed** along-canyon velocity, m/s. |
-| `exchange_velocity(sigma_w, H, W, form=...)` | The roof exchange velocity $u_d$. |
+| `exchange_velocity(sigma_w, H, W, form=..., u_d_min=0.0, sigma_w_min=0.0)` | The roof exchange velocity $u_d$. |
 | `roof_wind(u_star, H, W, form=...)` | Roof-level wind $u_H$. |
 | `macdonald_profile(h_mean, w_mean, ...)` | $(d_c, z_{0c})$, Macdonald (1998) network means. |
 | `soulhac_shape(ratio)` | The Bessel shape parameter $c$, as a differentiable root. |
@@ -210,33 +260,42 @@ drivers["temperature"] = torch.tensor(293.15, dtype=torch.float64)   # K
 solved = street_steady(model, state, drivers, reaction=reaction, tol=1e-18, max_iter=200)
 ```
 
-`photostationary_for_streets(species, j_key="J_NO2", closure="munich")` wires the Leighton
-NO/NO₂/O₃ equilibrium to the matching columns of `species`, case-insensitively, and raises
-naming any missing one.
+`photostationary_for_streets(species, *, preset="sirane", no_o3_rate=None, floor_ppb=None,
+j_key="J_NO2")` wires the Leighton NO/NO₂/O₃ equilibrium to the matching columns of `species`,
+case-insensitively, and raises naming any missing one. The preset sets the rate of NO + O3
+and the floor on $J/k$; `no_o3_rate` (`"soulhac_2011"`, `"jpl_2003"` or any callable $k(T)$
+in m³ mol⁻¹ s⁻¹) and `floor_ppb` override them:
+
+| `preset` | Rate $k$ | Floor on $J/k$ |
+|---|---|---|
+| `"sirane"` (default) | `k_no_o3_soulhac2011(T)` $= 1.325\times10^{6}\exp(-1430/T)$ m³ mol⁻¹ s⁻¹ | 2 ppb |
+| `"munich"` | `k_no_o3_jpl2003(T)` $= 3.0\times10^{-12}\exp(-1500/T)$ cm³ molecule⁻¹ s⁻¹ | none |
 
 ### The Leighton equilibrium
 
 The three species relax to the state satisfying $J\,[\mathrm{NO_2}] = k\,[\mathrm{NO}][\mathrm{O_3}]$
 at the same NOx ($[\mathrm{NO}]+[\mathrm{NO_2}]$) and Ox ($[\mathrm{NO_2}]+[\mathrm{O_3}]$) as the
 input, conserved in molar terms: it is an equilibrium, not a rate, and applying it twice changes
-nothing. $J$ (the `J_NO2` driver, 1/s) is supplied by you; `j_no2(zenith_deg, attenuation=1.0)`
+nothing. $J$ (the `J_NO2` driver, 1/s) is supplied by you; `j_no2_zenith_table(zenith_deg,
+attenuation=1.0)`
 gives the clear-sky rate from MUNICH's 11-point tabulation, piecewise-linear between the
 tabulated zenith angles. **Solar geometry is not computed** for this form — you pass the zenith
 angle you want.
 
 The rate $k$ of NO + O3 is evaluated at the driver `temperature` (K), which is now **required**:
 with no constant override, a missing `temperature` driver raises by name rather than assuming a
-value. The default rate is MUNICH's `k_no_o3_munich(T) = 3.0\times10^{-12}\exp(-1500/T)` cm³
-molecule⁻¹ s⁻¹ (NASA/JPL 2003). To keep the earlier constant, 298 K rate instead of evaluating it
-at the air temperature, pass the constant override `k_no_o3=K_NO_O3`
-(`noodl.layers.reaction.K_NO_O3`, the 298 K value in m³ kg⁻¹ s⁻¹ for the kg/m³ state); with that
-override `temperature` is not read.
+value. The core `Photostationary` reaction (`noodl.layers.reaction`) defaults to the JPL rate
+`k_no_o3_jpl2003(T) = 3.0\times10^{-12}\exp(-1500/T)` cm³ molecule⁻¹ s⁻¹ (NASA/JPL 2003, as in
+MUNICH); to use a constant 298 K rate instead of evaluating it at the air temperature, pass
+the constant override `k_no_o3=K_NO_O3` (`noodl.layers.reaction.K_NO_O3`, the 298 K value in
+m³ kg⁻¹ s⁻¹ for the kg/m³ state); with that override `temperature` is not read.
 
-### The SIRANE closure
+### The SIRANE preset
 
-`closure="sirane"` picks SIRANE's own rate and floor, both evaluated at the driver `temperature`:
+`preset="sirane"` (the default) takes SIRANE's own rate and floor, both evaluated at the driver
+`temperature`:
 
-- the rate `k_no_o3_sirane(T) = 1.325\times10^{6}\exp(-1430/T)` m³ mol⁻¹ s⁻¹, at SIRANE's own
+- the rate `k_no_o3_soulhac2011(T) = 1.325\times10^{6}\exp(-1430/T)` m³ mol⁻¹ s⁻¹, at SIRANE's own
   ground-level air temperature ($T_g$: its preprocessed value, not the input temperature away
   from neutral conditions — cooler when stable, warmer when unstable);
 - a floor on the photolysis-to-rate ratio, $K = \max(J/k,\ 2\ \text{ppb})$ (`SIRANE_K_FLOOR_PPB`),
@@ -247,7 +306,7 @@ The floor and the equilibrium are solved in ppb, via the driver `molar_volume` (
 back to the ideal-gas `molar_volume(T)` at 101325 Pa when not given). `molar_volume` enters
 nowhere else: without a floor the equilibrium is the same whatever unit it is solved in.
 
-`solar_elevation(latitude_deg, day_of_year, hour)` and `j_no2_sirane(elevation_deg,
+`solar_elevation(latitude_deg, day_of_year, hour)` and `j_no2_elevation_cloud(elevation_deg,
 cloud_octas=0.0)` give SIRANE's own photolysis rate $k_1$, a corrected form of Soulhac et al.
 (2011) Eq. 32:
 
@@ -440,7 +499,7 @@ every street's `Sigma_wH` at SIRANE's default 0.30 m/s floor, where the deck's f
 that floor off), so every comparison here drives noodl physics with the *results'* own
 meteorology (`read_results(...).meteo`), never the deck's.
 
-- **Roof exchange velocity.** `exchange_velocity(form="sirane")`, evaluated at SIRANE's own
+- **Roof exchange velocity.** `exchange_velocity(form="turbulent_velocity")`, evaluated at SIRANE's own
   printed `Sigma_wH` with each street's own height and width, reproduces SIRANE's printed
   `u_d` on all 46 streets across both hours to within SIRANE's own printed half-step
   (0.005 m/s) -- the tightest bound two-decimal printed output allows; the worst street
@@ -490,16 +549,16 @@ meteorology (`read_results(...).meteo`), never the deck's.
   points in its own `Cext` (`self_contribution=True`) overstates it (measured median ratio
   2.33 on the South Kensington fluxes), which is why it is excluded by default.
 
-- **Chemistry (`closure="sirane"`).** A code-to-code comparison against SIRANE v2.1 output with
+- **Chemistry (`preset="sirane"`).** A code-to-code comparison against SIRANE v2.1 output with
   its NO-NO2-O3 chemistry switched on (`tests/data/street/sirane_chemistry`;
   `tests/verification/test_sirane_chemistry.py`), by case:
   - `solar_elevation` against 768 printed hourly values (eleven meteorology sets, every season,
     clear to overcast, day, night and the low-sun threshold): worst absolute difference
     0.000497°, inside SIRANE's own three-decimal printing (±0.0005°).
-  - `j_no2_sirane` ($k_1$) from that elevation and the printed cloud cover, against the same 768
-    printed $k_1$ values to three significant figures: 0 mismatches.
-  - `k_no_o3_sirane` ($k_3$), at SIRANE's printed ground temperature and molar volume, against the
-    same 768 printed $k_3$ values (ppb⁻¹ s⁻¹) to three significant figures: 768/768 consistent,
+  - `j_no2_elevation_cloud` ($k_1$) from that elevation and the printed cloud cover, against
+    the same 768 printed $k_1$ values to three significant figures: 0 mismatches.
+  - `k_no_o3_soulhac2011` ($k_3$), at SIRANE's printed ground temperature and molar volume,
+    against the same 768 printed $k_3$ values (ppb⁻¹ s⁻¹) to three significant figures: 768/768 consistent,
     over the rounding envelope of the printed inputs. The negative control — the paper's 1.325e5
     prefactor — matches none of the 768 rows.
   - The photostationary split itself, on 176 street and receptor values from six single-street
