@@ -198,7 +198,9 @@ model = Model(net, layers, reactions=[("species", FirstOrderDecay(k))])
 ```
 
 `FirstOrderDecay` and `Photostationary` (Leighton NO/NO₂/O₃) ship built in; the sewer
-application adds `SulfideGeneration`.
+application adds `SulfideGeneration`. `Photostationary`'s default rate is evaluated at the
+driver `"temperature"` (K), which it requires by name unless a constant `k_no_o3` rate
+overrides it.
 
 **`Model.steady` never applies reactions.** This is deliberate — a steady state under a reaction
 is a different fixed-point problem, not the transport steady state. The street and sewer
