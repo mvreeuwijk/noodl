@@ -204,7 +204,7 @@ def test_the_archived_concentrations_come_from_another_emission_field(record_pro
     meteorology and SIRANE's direction spread from `Resul_Meteo.dat`. O3 is passive here:
     NO and NO2 are zero in every `Cint` and `Cext` (asserted below), so Chapman's
     `k3 [NO][O3]` vanishes (and `k1 = 0` at night), even though `chemistry_on` is set.
-    The archived run used SIRANE's default 0.30 m/s sigma_w floor (the deck zeroes it,
+    The archived results use SIRANE's default sigma_w floor of 0.30 m/s (the deck zeroes it,
     so `model_options()` gives `sigma_w_min=0`); it binds on every street in this run
     (noodl's own sigma_w here is 0.17 m/s), so the model is built with
     `sigma_w_min=0.30`.

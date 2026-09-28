@@ -164,6 +164,13 @@ Every closure keyword left at `None` takes the preset's value; any other value o
 so `build_model(net, preset="munich", roof_wind="canopy_log_law")` is MUNICH's closure set
 with Macdonald's roof wind.
 
+**The defaults are SIRANE's.** A model built with no options floors $\sigma_w$ at 0.30 m/s
+before the roof exchange velocity (`sigma_w_min=0.30`), which binds in light winds and under
+low buildings; pass `sigma_w_min=0.0` for no floor. The default street chemistry,
+`photostationary_for_streets(species)`, is the Soulhac et al. (2011) rate with a 2 ppb floor
+on $J/k$. `preset="munich"` gives MUNICH's settings throughout: no turbulence floors, and for
+the chemistry the JPL (2003) rate with no floor.
+
 It builds one `atmosphere` boundary node plus one node per street, then, for every junction,
 directed `route` edges between all distinct street ends meeting there, two `vent` edges per
 (street, end), and two `exchange` edges per street. A `TransportLayer` and a `StreetFlows`
@@ -199,7 +206,7 @@ allowed:
 | `canyon_wind_min` | m/s | Floor on $\lvert u \rvert$ in the canyon, sign kept. | 0 | 0.1 |
 | `u_d_min` | m/s | Floor on the exchange velocity. | 0 | 0.001 |
 | `sigma_w_min` | m/s | Floor on $\sigma_w$ before the exchange velocity. | 0.30 | 0 |
-| `sigma_v_min` | m/s | Floor on $\sigma_v$ before the turbulence-intensity spread. | 0.5 | 0 |
+| `sigma_v_min` | m/s | Floor on $\sigma_v$ before the turbulence-intensity spread; acts only with `direction_spread="turbulence_intensity"` (the above-roof plume has floors of its own, `plume_table(sigma_v_min=, sigma_w_min=)`). | 0.5 | 0 |
 
 Two more choices shape the drivers rather than the physics:
 
@@ -211,7 +218,9 @@ Two more choices shape the drivers rather than the physics:
 `kappa=None` is the preset's constant. When any closure option is given explicitly it is instead
 0.41 if a choice written with that constant is selected (`canyon_wind="exponential_profile"`,
 `roof_exchange="aspect_ratio_scaled"` or `roof_wind="canopy_log_law"`) and 0.40 otherwise. An
-explicit value always wins.
+explicit value always wins. For example, `build_model(net, preset="munich",
+canyon_wind="bessel_profile", roof_exchange="turbulent_velocity")` has $\kappa = 0.40$, not
+the preset's 0.41, because no choice written with 0.41 is left.
 
 #### Earlier option names
 
@@ -229,8 +238,11 @@ The earlier spellings are still accepted, with a `DeprecationWarning` naming the
 | `direction_averaging="munich"` | `"rectangle_rule"` with `direction_spread="turbulence_intensity"` |
 | `stability="munich"` | `"monin_obukhov"` |
 | `photostationary_for_streets(closure=...)` | `preset=...` |
-| `k_no_o3_munich`, `k_no_o3_sirane` | `k_no_o3_jpl2003`, `k_no_o3_soulhac2011` |
-| `j_no2`, `j_no2_sirane` | `j_no2_zenith_table`, `j_no2_elevation_cloud` |
+
+The earlier names of four functions are kept as aliases of the same functions, without a
+warning: `k_no_o3_munich` and `k_no_o3_sirane` for `k_no_o3_jpl2003` and
+`k_no_o3_soulhac2011`, and `j_no2` and `j_no2_sirane` for `j_no2_zenith_table` and
+`j_no2_elevation_cloud`.
 
 ### The canyon physics
 

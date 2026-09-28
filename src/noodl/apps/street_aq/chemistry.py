@@ -60,7 +60,11 @@ def photostationary_for_streets(
     guessed at, because a silently mis-wired species column produces a plausible-looking
     answer that is simply wrong.
 
-    `preset` (default `"sirane"`) sets the rate of NO + O3 and the floor on `J/k`
+    By default (`preset="sirane"`) the rate is the Soulhac et al. (2011) one and `J/k` is
+    floored at 2 ppb; `preset="munich"` gives MUNICH's settings, the JPL (2003) rate with
+    no floor. `floor_ppb=0.0` removes the floor under either.
+
+    `preset` sets the rate of NO + O3 and the floor on `J/k`
     (`closures.PRESETS[preset]["chemistry"]`), both evaluated at the driver
     `temperature_key` (K); `no_o3_rate` and `floor_ppb` override them:
 

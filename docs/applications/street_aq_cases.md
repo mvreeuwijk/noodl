@@ -342,7 +342,7 @@ driven = replace(
 )
 
 # The deck zeroes SIRANE's turbulence floors (model_options() gives sigma_w_min=0.0); the
-# archived run used SIRANE's default sigma_w floor of 0.30 m/s, so that is set here.
+# archived results use SIRANE's default sigma_w floor of 0.30 m/s, so that is set here.
 model, state, _ = build_model(
     driven.network, species=driven.species, meteo="per_street", background="per_street",
     **dict(driven.model_options(), sigma_w_min=0.30),

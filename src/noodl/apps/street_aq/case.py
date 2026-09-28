@@ -676,7 +676,8 @@ def drivers_at(
     supplied whenever `case` has it and the model takes its spread from the driver
     (`direction_spread="driver"`): per junction under `meteo="per_street"` (from
     `case.meteo_junction` when the source has it, else the mean over the streets meeting
-    there), one network-wide mean otherwise.
+    there), one network-wide mean otherwise (of `case.meteo`, else of
+    `case.meteo_junction`).
     """
     flows = next(c for c in model.closures if isinstance(c, StreetFlows))
     layer = model.transport[flows.layer_name]
@@ -740,8 +741,11 @@ def drivers_at(
     h_abl = case.meteo["h_abl"][k] if "h_abl" in case.meteo else None
     lmo = case.meteo["lmo"][k] if "lmo" in case.meteo else None
     temperature = case.meteo["temperature"][k] if "temperature" in case.meteo else None
-    spread = (case.meteo["sigma_theta"][k]
-              if "sigma_theta" in case.meteo and flows.direction_spread == "driver" else None)
+    spread_driven = flows.direction_spread == "driver"
+    spread = case.meteo["sigma_theta"][k] if spread_driven and "sigma_theta" in case.meteo \
+        else None
+    spread_junction = (case.meteo_junction["sigma_theta"][k]
+                       if spread_driven and "sigma_theta" in case.meteo_junction else None)
     theta_w_all = apply_conversion(
         CONTAM_DEG_TO_STREET_RAD, torch.as_tensor(theta_deg, dtype=F64), {}
     )
@@ -773,13 +777,10 @@ def drivers_at(
         for key, value in flows.junction_values(junction_drivers).items():
             if value is not None:
                 out[f"{key}_junction"] = value
-        if spread is not None:
-            if "sigma_theta" in case.meteo_junction:
-                out["sigma_theta"] = torch.as_tensor(case.meteo_junction["sigma_theta"][k],
-                                                     dtype=F64)
-            else:
-                out["sigma_theta"] = flows._street_mean(
-                    torch.as_tensor(spread, dtype=F64), "arithmetic")
+        if spread_junction is not None:
+            out["sigma_theta"] = torch.as_tensor(spread_junction, dtype=F64)
+        elif spread is not None:
+            out["sigma_theta"] = flows.junction_mean(torch.as_tensor(spread, dtype=F64))
     else:
         out["theta_w"] = torch.tensor(
             float(_munich_files.circular_mean_rad(theta_w_all.numpy(), axis=0)), dtype=F64
@@ -797,5 +798,7 @@ def drivers_at(
             out["temperature"] = torch.tensor(float(np.mean(temperature)), dtype=F64)
         if spread is not None:
             out["sigma_theta"] = torch.tensor(float(np.mean(spread)), dtype=F64)
+        elif spread_junction is not None:
+            out["sigma_theta"] = torch.tensor(float(np.mean(spread_junction)), dtype=F64)
 
     return out

@@ -28,6 +28,8 @@ __all__ = [
     "LEGACY_VALUES",
     "OPTIONS",
     "PRESETS",
+    "SIGMA_V_MIN",
+    "SIGMA_W_MIN",
     "infer_kappa",
     "normalise",
     "preset_options",
@@ -74,6 +76,14 @@ OPTIONS: dict[str, tuple[str, ...]] = {
 CLOSURE_OPTIONS = tuple(OPTIONS)
 """The string-valued option names, in `OPTIONS` order."""
 
+SIGMA_W_MIN = 0.3
+"""SIRANE keyword `SIGMA_W_MIN` ("Minimum sigma_w", default 0.3 m/s): the sirane preset's
+`sigma_w_min`, and the above-roof plume's default floor."""
+
+SIGMA_V_MIN = 0.5
+"""SIRANE keyword `SIGMA_V_MIN` ("Minimum sigma_v", default 0.5 m/s): the sirane preset's
+`sigma_v_min`, and the above-roof plume's default floor."""
+
 _NUMERIC = ("kappa", "canyon_wind_min", "u_d_min", "sigma_w_min", "sigma_v_min")
 """The numeric settings a preset fixes besides the string options."""
 
@@ -89,8 +99,8 @@ PRESETS: dict[str, dict] = {
         "kappa": 0.40,
         "canyon_wind_min": 0.0,
         "u_d_min": 0.0,
-        "sigma_w_min": 0.30,
-        "sigma_v_min": 0.5,
+        "sigma_w_min": SIGMA_W_MIN,
+        "sigma_v_min": SIGMA_V_MIN,
         "chemistry": {"no_o3_rate": "soulhac_2011", "floor_ppb": 2.0},
     },
     "munich": {
@@ -115,6 +125,9 @@ PRESETS: dict[str, dict] = {
 routing, the exact Gaussian direction average over the driven spread, Monin-Obukhov
 turbulence, `kappa = 0.40`, SIRANE's default turbulence floors `sigma_w >= 0.30 m/s` and
 `sigma_v >= 0.5 m/s`, and the Soulhac et al. (2011) NO + O3 rate with a 2 ppb floor on `J/k`.
+`sigma_w_min` floors the `sigma_w` of the roof exchange velocity; `sigma_v_min` acts only
+with `direction_spread="turbulence_intensity"` (the `sirane` preset's driven spread never
+reads it; the above-roof plume, `plume.plume_table`, has floors of its own).
 
 `munich`: the exponential canyon wind on the Bessel roof wind, Schulte's exchange,
 non-crossing routing, the rectangle-rule direction average over the turbulence-intensity
@@ -217,6 +230,7 @@ def resolve(preset: str, options: Mapping[str, object], where: str) -> dict:
     """
     merged = preset_options(preset)
     explicit: dict[str, object] = {}
+    given_as: dict[str, str] = {}
     implied_spread = False
     for key, value in options.items():
         if value is None:
@@ -226,7 +240,10 @@ def resolve(preset: str, options: Mapping[str, object], where: str) -> dict:
             name = LEGACY_NAMES[key]
             warn_deprecated(f"{where}: the keyword {key!r} is deprecated; use {name!r}")
         if name in explicit:
-            raise TypeError(f"{where}: {name!r} given twice (once as {key!r})")
+            raise TypeError(
+                f"{where}: {given_as[name]!r} and {key!r} both set {name!r}; give only one"
+            )
+        given_as[name] = key
         if name in OPTIONS:
             if name == "direction_averaging" and value == "munich":
                 implied_spread = True

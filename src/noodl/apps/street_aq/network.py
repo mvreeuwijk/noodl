@@ -204,6 +204,10 @@ def build_model(
     `DeprecationWarning` naming the replacement. `StreetFlows` documents what each option
     computes.
 
+    With the default `preset="sirane"`, `sigma_w` is floored at 0.30 m/s before the roof
+    exchange velocity (`sigma_w_min=0.30`, SIRANE's default); pass `sigma_w_min=0.0` for no
+    floor, or `preset="munich"` for MUNICH's settings, which have no turbulence floors.
+
     The graph: the boundary node(s) FIRST -- `atmosphere` alone with `background="uniform"`,
     or one node per street, `f"{atmosphere}:{street.name}"` in street order, with
     `background="per_street"` -- then one node per street in the network's own order --

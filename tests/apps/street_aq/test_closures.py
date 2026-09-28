@@ -76,7 +76,8 @@ def test_every_legacy_keyword_maps_and_warns():
 
 
 def test_a_legacy_keyword_together_with_its_current_name_is_refused():
-    with pytest.raises(TypeError, match=r"'junction_routing' given twice"), \
+    with pytest.raises(TypeError, match=r"f: 'junction_routing' and 'routing' both set "
+                                        r"'junction_routing'; give only one"), \
             pytest.warns(DeprecationWarning):
         resolve("sirane", {"junction_routing": "perfect_mixing", "routing": "mixing"}, "f")
     with pytest.raises(TypeError, match=r"unexpected keyword argument 'wind'"):

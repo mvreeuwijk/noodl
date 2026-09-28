@@ -176,6 +176,16 @@ def test_drivers_at_passes_the_direction_spread_through():
     )
     torch.testing.assert_close(drivers_at(case_j, per, 1)["sigma_theta"],
                                torch.as_tensor(junction[1], dtype=DT), rtol=0, atol=0)
+    # The junction spread alone is enough.
+    only_j = StreetCase.synthetic(
+        net, species=["NO2"], times=[0.0, 3600.0],
+        meteo=dict(wind_dir_from_deg=200.0, wind_speed=5.0, h_abl=800.0, u_star=0.4),
+        meteo_junction=dict(sigma_theta=junction), emissions=1e-4, background=0.0,
+    )
+    torch.testing.assert_close(drivers_at(only_j, per, 0)["sigma_theta"],
+                               torch.as_tensor(junction[0], dtype=DT), rtol=0, atol=0)
+    assert float(drivers_at(only_j, uniform, 0)["sigma_theta"]) == pytest.approx(
+        float(np.mean(junction[0])), rel=1e-15)
     # A model computing its own spread is not handed one.
     munich, _, _ = build_model(net, species=("NO2",), preset="munich")
     assert "sigma_theta" not in drivers_at(case, munich, 0)

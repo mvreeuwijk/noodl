@@ -682,6 +682,13 @@ class StreetFlows:
                                 u_d_min=self.u_d_min, sigma_w_min=self.sigma_w_min)
         return bl_s, u_street, u_d
 
+    def junction_mean(self, values: Tensor) -> Tensor:
+        """Per-street values `(..., n_streets)` -> the arithmetic mean over the streets
+        meeting at each junction, `(..., n_junctions)` in `StreetNetwork.junctions` order:
+        the street-to-junction reduction `junction_values` uses for every key but the
+        direction and the Obukhov length."""
+        return self._street_mean(values, "arithmetic")
+
     def _street_mean(self, values: Tensor, how: str) -> Tensor:
         """Per-street `(..., n_streets)` -> per-junction `(..., n_junctions)`, the mean over
         the streets meeting at each junction.
