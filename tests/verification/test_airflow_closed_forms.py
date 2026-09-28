@@ -61,7 +61,16 @@ def _series_reference_q(C: list[float], n: float, Pw: float) -> float:
     return brentq(total_dp, lo, hi, xtol=1e-14, rtol=1e-14)
 
 
-def test_series_closed_form_single_instance():
+def _record(record_property, check, tolerance, ours, ref):
+    """Record the worst relative error of `ours` against `ref`, as the ContamX tests do."""
+    ref = torch.as_tensor(ref, dtype=DTYPE)
+    rel = ((ours - ref).abs() / ref.abs()).max().item()
+    record_property("check", check)
+    record_property("tolerance", tolerance)
+    record_property("measured_rel", rel)
+
+
+def test_series_closed_form_single_instance(record_property):
     C = [0.010, 0.008, 0.012]
     n = 0.65
     Pw = 12.0
@@ -90,9 +99,11 @@ def test_series_closed_form_single_instance():
     )
     residual_last = phi_z2_ref - (q_ref / C[2]) ** (1.0 / n)
     assert abs(residual_last) < 1e-6
+    _record(record_property, "Series power laws, flows vs the closed form", "rel 1e-6",
+            q, torch.full((3,), q_ref, dtype=DTYPE))
 
 
-def test_series_closed_form_batched():
+def test_series_closed_form_batched(record_property):
     torch.manual_seed(0)
     m = 64
     C = 0.004 + 0.02 * torch.rand(m, 3, dtype=DTYPE)
@@ -116,6 +127,8 @@ def test_series_closed_form_batched():
 
     c_series = (C ** (-1.0 / n)).sum(dim=-1) ** (-n.squeeze(-1))
     torch.testing.assert_close(q_ref, c_series * Pw**n.squeeze(-1), atol=1e-6, rtol=1e-6)
+    _record(record_property, "Series power laws, 64 instances, flows vs brentq", "rel 1e-6",
+            q, q_ref.unsqueeze(-1).expand(m, 3))
 
 
 def _parallel_layer(
@@ -133,7 +146,7 @@ def _parallel_layer(
     return net, layer
 
 
-def test_parallel_combination_single_instance():
+def test_parallel_combination_single_instance(record_property):
     C1 = torch.tensor(0.020, dtype=DTYPE)
     C2 = torch.tensor(0.015, dtype=DTYPE)
     n = torch.tensor(0.6, dtype=DTYPE)
@@ -153,9 +166,11 @@ def test_parallel_combination_single_instance():
         q.sum(), c_par * torch.sign(Dp) * Dp.abs() ** n, atol=1e-6, rtol=1e-6
     )
     torch.testing.assert_close(q[0] / q[1], C1 / C2, atol=1e-6, rtol=1e-6)
+    _record(record_property, "Parallel power laws, flows vs the closed form", "rel 1e-6",
+            q, torch.stack([q1_ref, q2_ref]))
 
 
-def test_parallel_combination_batched():
+def test_parallel_combination_batched(record_property):
     torch.manual_seed(0)
     m = 64
     C1 = 0.005 + 0.03 * torch.rand(m, dtype=DTYPE)
@@ -182,6 +197,8 @@ def test_parallel_combination_batched():
         q.sum(dim=-1), (C1 + C2) * torch.sign(Dp) * Dp.abs() ** n_flat, atol=1e-6, rtol=1e-6
     )
     torch.testing.assert_close(q[:, 0] / q[:, 1], C1 / C2, atol=1e-6, rtol=1e-6)
+    _record(record_property, "Parallel power laws, 64 instances, flows vs the closed form",
+            "rel 1e-6", q, torch.stack([q1_ref, q2_ref], dim=-1))
 
 
 def _fan_driven_layer(
@@ -200,7 +217,7 @@ def _fan_driven_layer(
     return net, layer
 
 
-def test_fan_driven_zone_pressure_single_instance():
+def test_fan_driven_zone_pressure_single_instance(record_property):
     C1 = torch.tensor(0.020, dtype=DTYPE)
     C2 = torch.tensor(0.010, dtype=DTYPE)
     n = torch.tensor(0.65, dtype=DTYPE)
@@ -218,9 +235,11 @@ def test_fan_driven_zone_pressure_single_instance():
     # deterministically here (observed residual ~2.09e-10).
     residual = layer.residual(phi[..., layer.interior], phi_boundary, {}, None)
     torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-9, rtol=0.0)
+    _record(record_property, "Fan-driven zone, pressure vs the closed form", "rel 1e-6",
+            phi[net.node_index("zone")], p_ref)
 
 
-def test_fan_driven_zone_pressure_batched():
+def test_fan_driven_zone_pressure_batched(record_property):
     torch.manual_seed(0)
     m = 64
     C1 = 0.005 + 0.03 * torch.rand(m, dtype=DTYPE)
@@ -247,6 +266,8 @@ def test_fan_driven_zone_pressure_batched():
 
     residual = layer.residual(phi[..., layer.interior], phi_boundary, {}, None)
     torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-8, rtol=0.0)
+    _record(record_property, "Fan-driven zone, 64 instances, pressure vs the closed form",
+            "rel 1e-6", phi[:, net.node_index("zone")], p_ref)
 
 
 def _fan_curve_layer(
@@ -286,7 +307,7 @@ def _fan_curve_reference_q(
     return brentq(f, 1e-9, q_max - 1e-9, xtol=1e-14, rtol=1e-14)
 
 
-def test_fan_curve_loop_single_instance():
+def test_fan_curve_loop_single_instance(record_property):
     a0, a1, a2, a3 = 150.0, -100.0, -80.0, 40.0
     q_max = 1.0
     C, n = 0.05, 0.5
@@ -311,9 +332,11 @@ def test_fan_curve_loop_single_instance():
         q[net.edge_index("airpath")[0]], torch.tensor(q_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6
     )
     assert 0.0 < q_ref < q_max
+    _record(record_property, "Fan curve against a leak, flows vs brentq", "rel 1e-6",
+            q, torch.full((2,), q_ref, dtype=DTYPE))
 
 
-def test_fan_curve_loop_batched():
+def test_fan_curve_loop_batched(record_property):
     torch.manual_seed(0)
     m = 64
     # Every parameter below carries an explicit trailing width-1 edge axis ((m, 1) rather
@@ -346,6 +369,8 @@ def test_fan_curve_loop_batched():
     leak_col = net.edge_index("airpath")[0]
     torch.testing.assert_close(q[:, fan_col], q_ref, atol=1e-6, rtol=1e-6)
     torch.testing.assert_close(q[:, leak_col], q_ref, atol=1e-6, rtol=1e-6)
+    _record(record_property, "Fan curve against a leak, 64 instances, flows vs brentq",
+            "rel 1e-6", q, q_ref.unsqueeze(-1).expand(m, 2))
 
 
 def _stack_layer(
@@ -411,7 +436,7 @@ def _stack_reference(
     return phi_z1, phi_z2, phi_z3, qs[0], qs[1], qs[2], qs[3]
 
 
-def test_stack_conservation_and_antisymmetry_single_instance():
+def test_stack_conservation_and_antisymmetry_single_instance(record_property):
     C = torch.tensor([0.020, 0.030, 0.025, 0.018], dtype=DTYPE)
     n = torch.tensor(0.6, dtype=DTYPE)
     drive_values = torch.tensor([2.0, 1.5, 1.5, 2.0], dtype=DTYPE)  # rho g dz per edge
@@ -451,9 +476,10 @@ def test_stack_conservation_and_antisymmetry_single_instance():
     )
     q_ref = torch.tensor([q0_ref, q1_ref, q2_ref, q3_ref], dtype=DTYPE)
     torch.testing.assert_close(q, q_ref, atol=1e-6, rtol=1e-6)
+    _record(record_property, "Three-zone stack, flows vs fsolve", "rel 1e-6", q, q_ref)
 
 
-def test_stack_conservation_and_antisymmetry_batched():
+def test_stack_conservation_and_antisymmetry_batched(record_property):
     torch.manual_seed(0)
     m = 64
     C = 0.005 + 0.03 * torch.rand(m, 4, dtype=DTYPE)
@@ -499,6 +525,8 @@ def test_stack_conservation_and_antisymmetry_batched():
         phi[:, net.node_index("z3")], phi_z3_ref, atol=1e-5, rtol=1e-5
     )
     torch.testing.assert_close(q, q_ref, atol=1e-5, rtol=1e-5)
+    _record(record_property, "Three-zone stack, 64 instances, flows vs fsolve", "rel 1e-5",
+            q, q_ref)
 
 
 def test_linear_init_reduces_newton_iterations_single_instance():
