@@ -74,6 +74,46 @@ def test_discretised_door_stream_slope_equals_autograd_bit_for_bit(operable, y):
         assert torch.equal(exact, 0.5 * grad)
 
 
+@pytest.mark.parametrize("operable", [False, True])
+def test_stream_slope_at_the_smooth_heaviside_band_edges(operable):
+    """Compartments whose `smoothHeaviside` argument sits on its clamp (u exactly 0 or 1:
+    autograd's clamp gradient is 0 there), found by scanning `dp` finely
+    across the band edges `dV = +-VZerCom_flow`, with the two sides at different densities."""
+    if operable:
+        comp, _ = mbl_discretized_operable_door(src=0, tgt=1, medium=MED, y_key="y",
+                                                LClo=0.01)
+    else:
+        comp, _ = mbl_discretized_door(src=0, tgt=1, medium=MED)
+    drivers = {"T": torch.tensor([293.15, 297.0], dtype=F64),
+               "p_abs": torch.tensor([101325.0, 101325.0], dtype=F64),
+               "X_w": torch.full((2,), 0.01, dtype=F64), "y": torch.tensor(1.0, dtype=F64)}
+    VZ = float(comp._law(drivers)[2].reshape(-1)[0])
+    n = comp.src.numel()
+
+    def dV_at(dp: float) -> float:
+        return float(comp._volume_flow(torch.full((n,), dp, dtype=F64), drivers)[0][0])
+
+    lo, hi = 0.0, 10.0
+    for _ in range(200):  # dV = VZerCom_flow (u = 1) by bisection; dV is increasing in dp
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if dV_at(mid) < VZ else (lo, mid)
+    dp_edge = hi
+    steps = torch.linspace(-3e-5, 3e-5, 8001, dtype=F64)  # 1 - u ~ (dx - 1/2)^3: u = 1 over ~1e-5
+    hits = 0
+    for sign in (1.0, -1.0):
+        dpi = (sign * dp_edge * (1.0 + steps)).unsqueeze(-1).expand(-1, comp.src.numel())
+        with torch.no_grad():
+            exact = comp.stream_slope(dpi.contiguous(), drivers)
+        x = dpi.contiguous().clone().requires_grad_(True)
+        mAB, mBA = comp.port_flows(x, drivers)
+        (grad,) = torch.autograd.grad((mAB - mBA).sum(), x)
+        assert torch.equal(exact, grad)
+        dV = comp._volume_flow(dpi, drivers)[0]
+        u = 0.5 + 0.5 * dV / VZ * (1.875 + (0.5 * dV / VZ) ** 2 * (-5 + 6 * (0.5 * dV / VZ) ** 2))
+        hits += int(((u == 0.0) | (u == 1.0)).sum())
+    assert hits > 0  # the scan reaches the clamp's bounds
+
+
 def test_slopes_under_grad_mode_are_autograd_and_differentiable():
     orifice = mbl_orifice(0.37, rho_default=1.2, learnable=True)
     dp = torch.linspace(-2.0, 2.0, 9, dtype=F64)

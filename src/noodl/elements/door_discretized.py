@@ -308,7 +308,7 @@ class _MBLDoorCompartmentBase(_InflowDensities, Element):
         tb = rho_B * -dV
         g_tb = g_e2 * (1 - gai)
         g_gai = -(g_e2 * tb) + one * (rho_A * dV)
-        g_u = torch.where((u >= 0.0).logical_and_(u <= 1.0), g_gai,
+        g_u = torch.where((u > 0.0).logical_and_(u < 1.0), g_gai,  # clamp: 0 at the bounds
                           torch.zeros((), dtype=g_gai.dtype))
         g_r1 = g_u * dx
         g_r2 = g_r1 * xpow2
