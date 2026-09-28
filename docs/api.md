@@ -181,6 +181,9 @@ Elements are grouped below by the physics they express, as in
 ::: noodl.apps.street_aq.routing
     options:
       members: [StreetFlows, StreetGeometry, routing_matrix, node_closure, direction_offsets]
+::: noodl.apps.street_aq.case
+    options:
+      members: [StreetCase, drivers_at, read_case, write_case]
 ::: noodl.apps.street_aq.chemistry
 ::: noodl.apps.street_aq.report
 

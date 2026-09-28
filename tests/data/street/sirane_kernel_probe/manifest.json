@@ -1,0 +1,412 @@
+{
+ "G1_M1": {
+  "street": [
+   [
+    0.0,
+    -100.0
+   ],
+   [
+    0.0,
+    100.0
+   ]
+  ],
+  "street_flux_g_s": 971.7,
+  "node_flux_g_s": [
+   14.15,
+   14.15
+  ],
+  "cint_ug_m3": 1406000.0,
+  "max_ug_m3": 1406194.25,
+  "n_cells_scored": 25454,
+  "meteo": {
+   "u_star": 0.6,
+   "lmo": 1000000.0,
+   "h_abl": 1000.0,
+   "sigma_theta_deg": 5.2,
+   "theta_star": 0.0,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
+ },
+ "G1_M2": {
+  "street": [
+   [
+    0.0,
+    -100.0
+   ],
+   [
+    0.0,
+    100.0
+   ]
+  ],
+  "street_flux_g_s": 963.2,
+  "node_flux_g_s": [
+   18.42,
+   18.42
+  ],
+  "cint_ug_m3": 2851000.0,
+  "max_ug_m3": 2850650.0,
+  "n_cells_scored": 28922,
+  "meteo": {
+   "u_star": 0.3,
+   "lmo": 100.0,
+   "h_abl": 200.0,
+   "sigma_theta_deg": 6.68,
+   "theta_star": 0.063,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
+ },
+ "G2_M1": {
+  "street": [
+   [
+    -100.0,
+    0.0
+   ],
+   [
+    100.0,
+    0.0
+   ]
+  ],
+  "street_flux_g_s": 0.0,
+  "node_flux_g_s": [
+   0.0,
+   1000.0
+  ],
+  "cint_ug_m3": 3570000.0,
+  "max_ug_m3": 3570287.5,
+  "n_cells_scored": 7918,
+  "meteo": {
+   "u_star": 0.6,
+   "lmo": 1000000.0,
+   "h_abl": 1000.0,
+   "sigma_theta_deg": 5.2,
+   "theta_star": 0.0,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
+ },
+ "G3_M1": {
+  "street": [
+   [
+    -70.710678,
+    -70.710678
+   ],
+   [
+    70.710678,
+    70.710678
+   ]
+  ],
+  "street_flux_g_s": 777.2,
+  "node_flux_g_s": [
+   0.0,
+   222.8
+  ],
+  "cint_ug_m3": 1125000.0,
+  "max_ug_m3": 1124778.5,
+  "n_cells_scored": 29039,
+  "meteo": {
+   "u_star": 0.6,
+   "lmo": 1000000.0,
+   "h_abl": 1000.0,
+   "sigma_theta_deg": 5.2,
+   "theta_star": 0.0,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
+ },
+ "G3_M2": {
+  "street": [
+   [
+    -70.710678,
+    -70.710678
+   ],
+   [
+    70.710678,
+    70.710678
+   ]
+  ],
+  "street_flux_g_s": 773.8,
+  "node_flux_g_s": [
+   0.0,
+   226.2
+  ],
+  "cint_ug_m3": 2290000.0,
+  "max_ug_m3": 2290223.75,
+  "n_cells_scored": 33056,
+  "meteo": {
+   "u_star": 0.3,
+   "lmo": 100.0,
+   "h_abl": 200.0,
+   "sigma_theta_deg": 6.68,
+   "theta_star": 0.063,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
+ },
+ "G6_M1": {
+  "street": [
+   [
+    -93.969262,
+    -34.202014
+   ],
+   [
+    93.969262,
+    34.202014
+   ]
+  ],
+  "street_flux_g_s": 724.2,
+  "node_flux_g_s": [
+   0.0,
+   275.8
+  ],
+  "cint_ug_m3": 1048000.0,
+  "max_ug_m3": 1047988.6875,
+  "n_cells_scored": 29333,
+  "meteo": {
+   "u_star": 0.6,
+   "lmo": 1000000.0,
+   "h_abl": 1000.0,
+   "sigma_theta_deg": 5.2,
+   "theta_star": 0.0,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
+ },
+ "G1_M1_W10": {
+  "street": [
+   [
+    0.0,
+    -100.0
+   ],
+   [
+    0.0,
+    100.0
+   ]
+  ],
+  "street_flux_g_s": 992.6,
+  "node_flux_g_s": [
+   3.716,
+   3.716
+  ],
+  "cint_ug_m3": 2873000.0,
+  "max_ug_m3": 2872802.5,
+  "n_cells_scored": 14710,
+  "meteo": {
+   "u_star": 0.6,
+   "lmo": 1000000.0,
+   "h_abl": 1000.0,
+   "sigma_theta_deg": 5.2,
+   "theta_star": 0.0,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 10.0,
+  "H": 20.0
+ },
+ "G1_M1_H10": {
+  "street": [
+   [
+    0.0,
+    -100.0
+   ],
+   [
+    0.0,
+    100.0
+   ]
+  ],
+  "street_flux_g_s": 983.3,
+  "node_flux_g_s": [
+   8.371,
+   8.371
+  ],
+  "cint_ug_m3": 1423000.0,
+  "max_ug_m3": 1422925.75,
+  "n_cells_scored": 25192,
+  "meteo": {
+   "u_star": 0.6,
+   "lmo": 1000000.0,
+   "h_abl": 1000.0,
+   "sigma_theta_deg": 5.2,
+   "theta_star": 0.0,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 10.0
+ },
+ "G1_M3F": {
+  "street": [
+   [
+    0.0,
+    -100.0
+   ],
+   [
+    0.0,
+    100.0
+   ]
+  ],
+  "street_flux_g_s": 968.7,
+  "node_flux_g_s": [
+   15.64,
+   15.64
+  ],
+  "cint_ug_m3": 3587000.0,
+  "max_ug_m3": 3586574.25,
+  "n_cells_scored": 28389,
+  "meteo": {
+   "u_star": 0.14,
+   "lmo": 100.0,
+   "h_abl": 114.5,
+   "sigma_theta_deg": 9.85,
+   "theta_star": 0.072,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 1.0,
+   "SIGMA_V_MIN": 0.5,
+   "SIGMA_W_MIN": 0.3
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
+ },
+ "G2_M3F": {
+  "street": [
+   [
+    -100.0,
+    0.0
+   ],
+   [
+    100.0,
+    0.0
+   ]
+  ],
+  "street_flux_g_s": 0.0,
+  "node_flux_g_s": [
+   0.0,
+   1000.0
+  ],
+  "cint_ug_m3": 15680000.0,
+  "max_ug_m3": 15682243.0,
+  "n_cells_scored": 5177,
+  "meteo": {
+   "u_star": 0.14,
+   "lmo": 100.0,
+   "h_abl": 114.5,
+   "sigma_theta_deg": 9.85,
+   "theta_star": 0.072,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 1.0,
+   "SIGMA_V_MIN": 0.5,
+   "SIGMA_W_MIN": 0.3
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
+ }
+}

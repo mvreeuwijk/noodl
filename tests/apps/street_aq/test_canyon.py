@@ -1,10 +1,10 @@
 """Canyon boundary layer, wind and exchange velocity.
 
-The Soulhac reference here is written out in scipy INSIDE this module, from IMPAQ's
-`canyon_velocity` formula, so the test needs no external code. `brentq` replaces IMPAQ's
-`fsolve`: `fsolve` from x0 = 1.0 silently returns 1.0 unconverged for roughness ratios
-above about 0.5 (measured), which is outside this test's range but is not a property a
-reference should have.
+The Soulhac reference here is written out in scipy INSIDE this module, from the
+Soulhac-Perkins-Salizzoni `canyon_velocity` formula, so the test needs no external code.
+`brentq` replaces a naive `fsolve`-style iteration: `fsolve` from x0 = 1.0 silently
+returns 1.0 unconverged for roughness ratios above about 0.5 (measured), which is outside
+this test's range but is not a property a reference should have.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from noodl.apps.street_aq.canyon import (
     C_BRACKET_HI,
     C_BRACKET_LO,
     GAMMA_E,
-    KAPPA_IMPAQ,
+    KAPPA,
     KAPPA_MUNICH,
     SCHULTE_BETA,
     SIRANE_EXCHANGE,
@@ -52,7 +52,8 @@ def _scipy_shape(ratio: float) -> float:
 
 
 def _scipy_canyon_velocity(width, height, roughness, phi, u_star):
-    """IMPAQ's `canyon_velocity`, scalar, with brentq for the shape parameter."""
+    """The Soulhac-Perkins-Salizzoni `canyon_velocity`, scalar, with brentq for the shape
+    parameter."""
     from scipy.special import jv, yv
 
     di = min(width / 2.0, height)
@@ -60,7 +61,7 @@ def _scipy_canyon_velocity(width, height, roughness, phi, u_star):
     alpha = math.log(di / roughness)
     beta = math.exp(c / math.sqrt(2.0) * (1.0 - height / di))
     u_h = u_star * math.sqrt(
-        math.pi / (math.sqrt(2.0) * KAPPA_IMPAQ**2 * c)
+        math.pi / (math.sqrt(2.0) * KAPPA**2 * c)
         * (yv(0, c) - jv(0, c) * yv(1, c) / jv(1, c))
     )
     return (
@@ -145,7 +146,7 @@ def test_soulhac_canyon_velocity_matches_the_scipy_reference(w_over_h, angle_deg
     got = canyon_velocity(
         torch.tensor([width], dtype=DT), torch.tensor([height], dtype=DT),
         torch.tensor([phi], dtype=DT), u_star=torch.tensor([u_star], dtype=DT),
-        form="soulhac", z0_b=Z0_B_DEFAULT, kappa=KAPPA_IMPAQ,
+        form="soulhac", z0_b=Z0_B_DEFAULT, kappa=KAPPA,
     )
     want = _scipy_canyon_velocity(width, height, Z0_B_DEFAULT, phi, u_star)
     # atol covers the 90-degree column, where cos(phi) is 1e-17 and a relative
@@ -213,10 +214,10 @@ def test_exchange_velocity_refuses_a_negative_sigma_w():
                           torch.tensor([10.0], dtype=DT), form="sirane")
 
 
-def test_boundary_layer_reproduces_impaq_and_floors_the_abl_when_asked():
+def test_boundary_layer_matches_the_neutral_form_and_floors_the_abl_when_asked():
     bl = boundary_layer(torch.tensor(23.3333333333333333, dtype=DT),
                         torch.tensor([2.0], dtype=DT), torch.tensor([1200.0], dtype=DT),
-                        z_ref=30.0, kappa=KAPPA_IMPAQ)
+                        z_ref=30.0, kappa=KAPPA)
     d = 2.0 * 23.3333333333333333 / 3.0
     z0 = 23.3333333333333333 / 10.0
     want = 0.4 * 2.0 / math.log((30.0 - d) / z0)
@@ -234,7 +235,7 @@ def test_boundary_layer_refuses_a_reference_height_inside_the_canopy():
                        torch.tensor([1200.0], dtype=DT), z_ref=10.0)
 
 
-def test_sigma_w_impaq_form_and_the_three_munich_branches():
+def test_sigma_w_neutral_form_and_the_three_munich_branches():
     bl = BoundaryLayer(u_star=torch.tensor([0.3], dtype=DT),
                        h_abl=torch.tensor([500.0], dtype=DT),
                        z_ref=torch.tensor([30.0], dtype=DT),
@@ -330,7 +331,7 @@ def test_the_munich_sigmas_are_finite_and_differentiable_at_a_calm_step():
         assert torch.isfinite(grad).all()
 
 
-def test_sigma_v_impaq_form_and_the_three_munich_branches():
+def test_sigma_v_neutral_form_and_the_three_munich_branches():
     """Mirrors the `sigma_w` three-branch test. `ComputeSigmaV` averages over ten levels
     `z/PBLH = j/9`, j = 0..9, with `neutral_j = 2 u* (1 - 0.8 z_j)`,
     `stable_j = 2 u* (1 - 0.5 z_j)^0.75` and
@@ -353,7 +354,7 @@ def test_sigma_v_impaq_form_and_the_three_munich_branches():
     unstable = bl.sigma_v(lmo=torch.tensor([-50.0], dtype=DT), stability="munich")
     torch.testing.assert_close(unstable, torch.tensor([0.6099982787520067], dtype=DT),
                                rtol=1e-12, atol=0)
-    with pytest.raises(ValueError, match=r"sigma_v.*'impaq' or 'munich'.*'stable'"):
+    with pytest.raises(ValueError, match=r"sigma_v.*'neutral' or 'munich'.*'stable'"):
         bl.sigma_v(stability="stable")
     with pytest.raises(ValueError, match=r"sigma_v.*stability='munich'.*lmo"):
         bl.sigma_v(stability="munich")

@@ -1,9 +1,8 @@
 """MUNICH as the independent reference.
 
-Part one: exact input/output pairs worked from the MUNICH sources and the papers (numbered
-T1 to T13 in the test names), each with its equation, page and `file:line`. Part two: the
-published 12-street idealised case of Kim et al. 2022 Fig. 1, whose INPUTS WERE NEVER
-PUBLISHED, so what is
+Part one: exact input/output pairs worked from the MUNICH sources and the papers, each with
+its equation, page and `file:line`. Part two: the published 12-street idealised case of Kim
+et al. 2022 Fig. 1, whose INPUTS WERE NEVER PUBLISHED, so what is
 checked is every scale-invariant property of it and nothing else.
 
 Tolerances. Where the worked value is quoted at full double precision the check
@@ -54,7 +53,7 @@ def _t(value):
     return torch.tensor([value], dtype=DT)
 
 
-def test_t1_sirane_exchange_velocity(record_property):
+def test_sirane_exchange_velocity(record_property):
     """S11 Eq. (5) p. 7386; K18 Eq. (3) p. 613; K22 Eq. (B10) p. 7387;
     `StreetNetworkTransport.cxx:3273`. The regression guard against `1/sqrt(2 pi)`."""
     assert abs(SIRANE_EXCHANGE - 0.225079079039277) < 1e-15
@@ -70,7 +69,7 @@ def test_t1_sirane_exchange_velocity(record_property):
     record_property("measured2_diff", abs(SIRANE_EXCHANGE - 0.225079079039277))
 
 
-def test_t2_schulte_mixing_length_and_exchange_velocity():
+def test_schulte_mixing_length_and_exchange_velocity():
     """K18 Eqs. (4)-(8) p. 613, K22 Eq. (B11); ATM `MeteorologyStreet.cxx:547-554`."""
     assert abs(SCHULTE_BETA - 0.450158158078553) < 1e-15
     lm = SCHULTE_BETA / (1.0 + H / W)
@@ -85,7 +84,7 @@ def test_t2_schulte_mixing_length_and_exchange_velocity():
     )
 
 
-def test_t3_sigma_w_in_all_three_stability_branches():
+def test_sigma_w_in_all_three_stability_branches():
     """`ComputeSigmaW`, `StreetNetworkTransport.cxx:3221-3260`; neither paper gives it."""
     layer = BoundaryLayer(u_star=_t(U_STAR), h_abl=_t(PBLH), z_ref=_t(30.0),
                           d=_t(4.6), z0=_t(0.69), kappa=KAPPA_MUNICH)
@@ -96,11 +95,11 @@ def test_t3_sigma_w_in_all_three_stability_branches():
     unstable = layer.sigma_w(_t(H), lmo=_t(-50.0), stability="munich")
     # The worked value 0.473173 is quoted to six significant figures.
     assert abs(float(unstable) / 0.473173 - 1.0) < 1e-6
-    # And the neutral branch IS IMPAQ's formula, evaluated at z = H.
+    # And the neutral branch IS the neutral form, evaluated at z = H.
     torch.testing.assert_close(neutral, layer.sigma_w(_t(H)), rtol=1e-15, atol=0)
 
 
-def test_t4_exponential_canyon_wind_is_kim_2022_b14_and_not_kim_2018_9_to_11():
+def test_exponential_canyon_wind_is_kim_2022_b14_and_not_kim_2018_9_to_11():
     """K22 Eq. (B14) p. 7388; ATM `ComputeExpUstreet`, `MeteorologyStreet.cxx:257-263`.
 
     Single regime, `2/a_r` prefactor, integrated from `z0_s`. K18 Eqs. (9)-(11) are three
@@ -117,7 +116,7 @@ def test_t4_exponential_canyon_wind_is_kim_2022_b14_and_not_kim_2018_9_to_11():
         assert abs(float(got) / expected - 1.0) < 1e-6      # quoted to seven figures
 
 
-def test_t5_macdonald_displacement_roughness_and_roof_wind(record_property):
+def test_macdonald_displacement_roughness_and_roof_wind(record_property):
     """K22 Eqs. (1)-(3) p. 7373 and (B13); `ComputeMacdonaldProfile` `:3302-3353`."""
     d_c, z0c = macdonald_profile(_t(H), _t(W))
     assert abs(float(d_c) - 4.617352498423888) < 1e-12
@@ -133,7 +132,7 @@ def test_t5_macdonald_displacement_roughness_and_roof_wind(record_property):
     record_property("measured_diff", worst)
 
 
-def test_t6_soulhac_shape_parameter_and_bessel_roof_wind(record_property):
+def test_soulhac_shape_parameter_and_bessel_roof_wind(record_property):
     """K22 Eqs. (B12) and (B15) p. 7387-7388; ATM `MeteorologyStreet.cxx:114-226`."""
     delta_i = min(H, W / 2.0)
     assert delta_i == 3.75
@@ -141,7 +140,7 @@ def test_t6_soulhac_shape_parameter_and_bessel_roof_wind(record_property):
     assert abs(ratio - 0.0026666666666666666) < 1e-18
     c = soulhac_shape(_t(ratio))
     # MUNICH searches a 0.01 grid and returns 0.62; this is the continuous root, and the
-    # quantisation costs 4e-4 relative in u_M (T6).
+    # quantisation costs 4e-4 relative in u_M.
     assert abs(float(c) - 0.6198293039179747) < 1e-13
     u_h = roof_wind(_t(U_STAR), _t(H), _t(W), form="sirane", z0_s=Z0_S,
                     kappa=KAPPA_MUNICH)
@@ -157,7 +156,7 @@ def test_t6_soulhac_shape_parameter_and_bessel_roof_wind(record_property):
     [(2, 0.431928), (3, 1.013848), (4, 0.995837), (5, 0.990866), (6, 0.986315),
      (7, 0.982560), (8, 0.979509), (9, 0.977016), (10, 0.974953)],
 )
-def test_t7_the_nine_unnormalised_quadrature_weight_sums(n, total, record_property):
+def test_the_nine_unnormalised_quadrature_weight_sums(n, total, record_property):
     """K22 Eq. (B16) p. 7388; `ComputeWindDirectionFluctuation` `:3562-3616`."""
     sigma = _t((n + 0.5) * math.pi / 180.0)
     _offsets, weights = direction_offsets("munich", sigma)
@@ -172,7 +171,7 @@ def test_t7_the_nine_unnormalised_quadrature_weight_sums(n, total, record_proper
     record_property("measured_abs_diff", abs(measured - total))
 
 
-def test_t7_sigma_v_sigma_theta_and_the_sample_count():
+def test_sigma_v_sigma_theta_and_the_sample_count():
     """`ComputeSigmaV` `:3194-3216`; the neutral branch collapses to exactly 1.2 u*."""
     layer = BoundaryLayer(u_star=_t(U_STAR), h_abl=_t(PBLH), z_ref=_t(30.0),
                           d=_t(4.6), z0=_t(0.69), kappa=KAPPA_MUNICH)
@@ -189,7 +188,7 @@ def test_t7_sigma_v_sigma_theta_and_the_sample_count():
     assert int(n_theta_munich(ten)) == 2
 
 
-def test_t8_the_non_crossing_routing_matrix_distinguishes_sirane_from_mixing():
+def test_the_non_crossing_routing_matrix_distinguishes_sirane_from_mixing():
     """`ComputeAlpha`, `StreetNetworkTransport.cxx:3620-3648`."""
     flux_in = torch.tensor([10.0, 4.0], dtype=DT)
     flux_out = torch.tensor([6.0, 8.0], dtype=DT)
@@ -204,7 +203,7 @@ def test_t8_the_non_crossing_routing_matrix_distinguishes_sirane_from_mixing():
     )
 
 
-def test_t9_the_node_closure_both_ways():
+def test_the_node_closure_both_ways():
     """`ComputeIntersectionFlux` `:2980-3014`."""
     _p_in, _p_out, to_atm, _from_atm = node_closure(
         torch.tensor([10.0, 4.0, -6.0, -5.0], dtype=DT)
@@ -218,8 +217,8 @@ def test_t9_the_node_closure_both_ways():
     assert abs(float(from_atm[3]) - 2.2727272727272725) < 1e-13
 
 
-def test_t10_the_steady_single_street():
-    """T10: the stationary solve of
+def test_the_steady_single_street():
+    """The stationary solve of
     `StreetNetworkTransport.cxx:2573-2575` on one street with no inflow."""
     length = 100.0
     u_d = float(exchange_velocity(_t(SIGMA_W), _t(H), _t(W), form="schulte"))
@@ -230,7 +229,7 @@ def test_t10_the_steady_single_street():
     assert abs(1.0 / (roof + outflow) / 3.63872e-3 - 1.0) < 1e-5   # six figures
 
 
-def test_t11_the_leighton_rate_constant_and_its_conversion():
+def test_the_leighton_rate_constant_and_its_conversion():
     """`include/modules/chemistry/Leighton/reactions`; SPACK `ARR2 A B` = A exp(-B/T)."""
     assert abs(K_NO_O3_298 - 1.9546779094727322e-14) < 1e-29
     assert abs(K_NO_O3_298 / 1.954678e-14 - 1.0) < 1e-6           # seven figures
@@ -241,7 +240,7 @@ def test_t11_the_leighton_rate_constant_and_its_conversion():
     assert abs(K_NO_O3 / 2.45236e5 - 1.0) < 2e-6                  # six figures
 
 
-def test_t13_the_two_paper_versus_paper_divergences_are_pinned():
+def test_the_two_paper_versus_paper_divergences_are_pinned():
     """The two places a reader of one paper alone would implement the wrong thing."""
     # (i) the exchange coefficient: 1/(sqrt2 pi), not 1/sqrt(2 pi) -- a factor sqrt(pi).
     assert abs((1.0 / math.sqrt(2.0 * math.pi)) / SIRANE_EXCHANGE
@@ -267,7 +266,7 @@ def _run(fixture):
     options.pop("comment")
     net, names = munich_idealised(L=geometry["L_m"], W=geometry["W_m"],
                                   H=geometry["H_m"])
-    model, state, _ = build_model(net, stability="impaq", pblh_floor=True,
+    model, state, _ = build_model(net, stability="neutral", pblh_floor=True,
                                          **options)
     graph = model.net
     sources = torch.zeros(graph.n, dtype=DT)
@@ -438,7 +437,7 @@ def test_photostationary_chemistry_on_the_twelve_street_network():
                                   H=geometry["H_m"])
     reaction = photostationary_for_streets(("no", "no2", "o3"))
     model, state, _ = build_model(
-        net, species=("no", "no2", "o3"), chemistry=reaction, stability="impaq",
+        net, species=("no", "no2", "o3"), chemistry=reaction, stability="neutral",
         pblh_floor=True, **options,
     )
     graph = model.net
