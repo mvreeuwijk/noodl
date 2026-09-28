@@ -310,37 +310,40 @@ def _signal_events(doc: ModelicaDoc, lo: float, hi: float) -> tuple[set[float], 
 
 
 def driver_grid(doc: ModelicaDoc, substeps: int = 1) -> Tensor:
-    """The time grid the drivers are evaluated on and `run.simulate` steps over: the
-    output grid (`experiment_times`) with each interval split into `substeps` equal steps,
-    plus every event time strictly inside the run (`signals.events`: where a signal's
-    output jumps, a `Step`'s start, a `Pulse`'s edges, or kinks, a `Ramp`'s corners, a
-    table's knots). With the source drivers step means (module docstring, "Sources"), a
-    step then never straddles an event: the drivers are smooth within every step
-    (`Examples/CO2TransportStep.mo`'s 3.6 s pulse starts and ends on step boundaries
-    instead of being spread over a 172.8 s step)."""
+    """The time grid the drivers are evaluated on and `run.simulate` steps over: the BASE
+    grid, the output grid (`experiment_times`) plus every event time strictly inside the run
+    (`signals.events`: where a signal's output jumps, a `Step`'s start, a `Pulse`'s edges, or
+    kinks, a `Ramp`'s corners, a table's knots), with each of its intervals split into
+    `substeps` equal steps. With the source drivers step means (module docstring,
+    "Sources"), a step then never straddles an event: the drivers are smooth within every
+    step (`Examples/CO2TransportStep.mo`'s 3.6 s pulse starts and ends on step boundaries
+    instead of being spread over a 172.8 s step). Splitting the base intervals, not the
+    output intervals, makes the grid at `2 r` substeps the grid at `r` with every step
+    halved, which `run.extrapolate` relies on."""
     if int(substeps) != substeps or substeps < 1:
         raise ValueError(f"modelica: substeps must be a positive integer, got {substeps!r}")
     out = experiment_times(doc)
     lo, hi = float(out[0]), float(out[-1])
-    pts = set(out.tolist())
-    if substeps > 1:
-        frac = torch.arange(1, substeps, dtype=F64) / substeps
-        a, b = out[:-1], out[1:]
-        pts |= set((a.unsqueeze(1) + (b - a).unsqueeze(1) * frac).reshape(-1).tolist())
     jumps, kinks = _signal_events(doc, lo, hi)
-    pts |= jumps | kinks
-    # An event within round-off of an output time or sub-step time is that time.
+    # An event within round-off of an output time is that time.
     tol = 1e-9 * max(1.0, abs(hi))
     outs = out.tolist()
     kept: list[float] = []
-    for t in sorted(pts):
-        if kept and t - kept[-1] <= tol:
-            continue
+    for t in sorted(set(outs) | jumps | kinks):
         k = bisect.bisect_left(outs, t)
         near = [outs[i] for i in (k - 1, k) if 0 <= i < len(outs)]
-        kept.append(min(near, key=lambda o: abs(o - t)) if near and
-                    min(abs(o - t) for o in near) <= tol else t)
-    return torch.tensor(sorted(set(kept)), dtype=F64)
+        if near and min(abs(o - t) for o in near) <= tol:
+            t = min(near, key=lambda o: abs(o - t))
+        if kept and t - kept[-1] <= tol:
+            continue
+        kept.append(t)
+    base = torch.tensor(sorted(set(kept)), dtype=F64)
+    if substeps == 1:
+        return base
+    frac = torch.arange(substeps, dtype=F64) / substeps
+    a, b = base[:-1], base[1:]
+    inner = (a.unsqueeze(1) + (b - a).unsqueeze(1) * frac).reshape(-1)
+    return torch.cat([inner, base[-1:]])
 
 
 def grid_events(doc: ModelicaDoc, grid: Tensor) -> tuple[Tensor, Tensor]:
@@ -1233,6 +1236,9 @@ class _Builder:
         drivers["series:time"] = self.times.clone()
         # The grid's signal events (`grid_events`), where `run.simulate` restarts its steps.
         drivers["series:jumps"], drivers["series:kinks"] = grid_events(self.doc, self.times)
+        # The base grid (`driver_grid` at one substep), whose steps `run.simulate` splits
+        # alike at every substep count.
+        drivers["series:base"] = driver_grid(self.doc, 1)
 
         # ---------------------------------------------------------- closure + model
         T0 = torch.tensor([zones[nm].T_start if nm in zones else med.T_default

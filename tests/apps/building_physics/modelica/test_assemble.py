@@ -729,6 +729,24 @@ def test_ramp_corners_are_grid_kinks_and_air_sources_have_point_values():
         assert key[len("series:"):] not in step_drivers(drivers, grid, 1800.0)
 
 
+def test_the_driver_grid_at_two_substeps_is_the_base_grid_halved():
+    """`driver_grid` splits the BASE grid (output times plus signal events) into equal
+    substeps, so the grid at 2 substeps is the grid at 1 with every step halved, also across
+    `CO2TransportStep`'s 3.6 s pulse: the runs `run.extrapolate` combines take the same
+    steps, halved. The drivers carry the base grid as `"series:base"`."""
+    from noodl.apps.building_physics.modelica import schema
+    from noodl.apps.building_physics.modelica.assemble import driver_grid
+
+    path = Path(__file__).parents[3] / "data" / "modelica" / "CO2TransportStep.json"
+    doc = schema.load(path)
+    one, two = driver_grid(doc, 1), driver_grid(doc, 2)
+    assert {3600.0, 3603.6} <= set(one.tolist())
+    halved = torch.stack([one[:-1], 0.5 * (one[:-1] + one[1:])], dim=1).reshape(-1)
+    assert torch.allclose(two, torch.cat([halved, one[-1:]]), rtol=0.0, atol=1e-9)
+    _model, _state, drivers, _names = read_modelica(path, return_names=True, substeps=2)
+    assert torch.equal(drivers["series:base"], one)
+
+
 def test_simulate_steps_over_every_driver_grid_time():
     """`simulate` steps over every driver-grid time between the times asked for, so rows
     asked for with gaps equal the same rows of a run over every output time (the injected
