@@ -455,6 +455,23 @@ def test_drivers_follow_the_model_mode(tmp_path):
     assert du["theta_w"].dim() == 0 and du["street.x_boundary"].shape == (1,)
 
 
+def test_drivers_at_supplies_the_temperature_the_chemistry_reads(tmp_path):
+    """`meteo["temperature"]` (K) becomes the `"temperature"` driver, at which the
+    photostationary rate is evaluated; per street or as one network-wide mean."""
+    net, _ = munich_idealised()
+    # Whole kelvins, which MUNICH's single-precision files hold exactly.
+    temps = np.tile(280.0 + 2.0 * np.arange(len(net.streets)), (2, 1))
+    write_case(tmp_path, _case(net, 2, temperature=temps))
+    case = read_case(tmp_path)
+    per, _, _ = build_model(case.network, species=("NO2",), meteo="per_street", **MUNICH)
+    d = drivers_at(case, per, 1)
+    np.testing.assert_allclose(d["temperature"].numpy(), temps[1], rtol=1e-12)
+    uni, _, _ = build_model(case.network, species=("NO2",), **MUNICH)
+    assert float(drivers_at(case, uni, 1)["temperature"]) == pytest.approx(float(temps[1].mean()),
+                                                                  rel=1e-12)
+    assert "temperature" not in drivers_at(_case(net, 1), uni, 0)
+
+
 def test_drivers_at_names_its_mismatches():
     net, _ = munich_idealised()
     case = _case(net, 1)

@@ -35,6 +35,7 @@ def _drivers(model, *, j=5.0e-3):
         "theta_w": torch.tensor(0.0, dtype=DT),
         "h_abl": torch.tensor(800.0, dtype=DT),
         "J_NO2": torch.tensor(j, dtype=DT),
+        "temperature": torch.tensor(298.0, dtype=DT),   # K: where K_NO_O3 is quoted
     }
 
 

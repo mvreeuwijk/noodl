@@ -198,7 +198,9 @@ model = Model(net, layers, reactions=[("species", FirstOrderDecay(k))])
 ```
 
 `FirstOrderDecay` and `Photostationary` (Leighton NO/NO₂/O₃) ship built in; the sewer
-application adds `SulfideGeneration`.
+application adds `SulfideGeneration`. `Photostationary`'s default rate is evaluated at the
+driver `"temperature"` (K), which it requires by name unless a constant `k_no_o3` rate
+overrides it.
 
 `Model(reaction_order="before_transport")` applies the reactions to the step-start state
 before the transport step instead, so the returned state is the one after transport. The

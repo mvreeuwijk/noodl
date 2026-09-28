@@ -206,13 +206,72 @@ from noodl.apps.street_aq import photostationary_for_streets, street_steady
 
 reaction = photostationary_for_streets(("no", "no2", "o3"))
 model, state, drivers = build_model(net, species=("no", "no2", "o3"), chemistry=reaction)
+drivers["temperature"] = torch.tensor(293.15, dtype=torch.float64)   # K
 solved = street_steady(model, state, drivers, reaction=reaction, tol=1e-18, max_iter=200)
 ```
 
-`photostationary_for_streets(species, j_key="J_NO2")` wires the Leighton NO/NO₂/O₃ cycle to the
-matching columns of `species`, case-insensitively, and raises naming any missing one.
-`j_no2(zenith_deg, attenuation=1.0)` gives the clear-sky photolysis rate from MUNICH's 11-point
-tabulation. **Solar geometry is not computed** — you pass the zenith angle you want.
+`photostationary_for_streets(species, j_key="J_NO2", closure="munich")` wires the Leighton
+NO/NO₂/O₃ equilibrium to the matching columns of `species`, case-insensitively, and raises
+naming any missing one.
+
+### The Leighton equilibrium
+
+The three species relax to the state satisfying $J\,[\mathrm{NO_2}] = k\,[\mathrm{NO}][\mathrm{O_3}]$
+at the same NOx ($[\mathrm{NO}]+[\mathrm{NO_2}]$) and Ox ($[\mathrm{NO_2}]+[\mathrm{O_3}]$) as the
+input, conserved in molar terms: it is an equilibrium, not a rate, and applying it twice changes
+nothing. $J$ (the `J_NO2` driver, 1/s) is supplied by you; `j_no2(zenith_deg, attenuation=1.0)`
+gives the clear-sky rate from MUNICH's 11-point tabulation, piecewise-linear between the
+tabulated zenith angles. **Solar geometry is not computed** for this form — you pass the zenith
+angle you want.
+
+The rate $k$ of NO + O3 is evaluated at the driver `temperature` (K), which is now **required**:
+with no constant override, a missing `temperature` driver raises by name rather than assuming a
+value. The default rate is MUNICH's `k_no_o3_munich(T) = 3.0\times10^{-12}\exp(-1500/T)` cm³
+molecule⁻¹ s⁻¹ (NASA/JPL 2003). To keep the earlier constant, 298 K rate instead of evaluating it
+at the air temperature, pass the constant override `k_no_o3=K_NO_O3`
+(`noodl.layers.reaction.K_NO_O3`, the 298 K value in m³ kg⁻¹ s⁻¹ for the kg/m³ state); with that
+override `temperature` is not read.
+
+### The SIRANE closure
+
+`closure="sirane"` picks SIRANE's own rate and floor, both evaluated at the driver `temperature`:
+
+- the rate `k_no_o3_sirane(T) = 1.325\times10^{6}\exp(-1430/T)` m³ mol⁻¹ s⁻¹, at SIRANE's own
+  ground-level air temperature ($T_g$: its preprocessed value, not the input temperature away
+  from neutral conditions — cooler when stable, warmer when unstable);
+- a floor on the photolysis-to-rate ratio, $K = \max(J/k,\ 2\ \text{ppb})$ (`SIRANE_K_FLOOR_PPB`),
+  so NO and O3 no longer titrate to whichever runs out at night. `floor_ppb` overrides the floor
+  (0 disables it).
+
+The floor and the equilibrium are solved in ppb, via the driver `molar_volume` (m³/mol; falls
+back to the ideal-gas `molar_volume(T)` at 101325 Pa when not given). `molar_volume` enters
+nowhere else: without a floor the equilibrium is the same whatever unit it is solved in.
+
+`solar_elevation(latitude_deg, day_of_year, hour)` and `j_no2_sirane(elevation_deg,
+cloud_octas=0.0)` give SIRANE's own photolysis rate $k_1$, a corrected form of Soulhac et al.
+(2011) Eq. 32:
+
+$$k_1 = \frac{1}{60}\max\{0,\ 0.5699 - [9.056\times10^{-3}(90 - \alpha)]^{2.546}\}
+\left[1 - 0.75\left(\frac{N}{8}\right)^{3.4}\right]$$
+
+with $\alpha$ the solar elevation (degrees) and $N$ the cloud cover (octas, 0-8). The bracket is
+clipped at zero, which makes $k_1$ zero for $\alpha \le 1.458°$ and so at night; the clear-sky
+overhead value is $9.50\times10^{-3}$ s⁻¹. The elevation follows Cooper's declination,
+$\delta = 23.45°\sin(360°(284+n)/365)$ with $n$ the day of year, and the hour angle
+$\omega = 15°(h-12)$ with $h$ the clock time taken as local solar time — no longitude, no
+equation-of-time correction.
+
+This differs from the published Eqs. 31-32 (Soulhac et al. 2011): the $k_3$ prefactor is ten
+times the paper's (1.325e6, not 1.325e5), its temperature is SIRANE's ground-level value rather
+than an input temperature, the split works in ppb where the paper only says "molar
+concentrations", there is a 2 ppb floor on $K$, and $k_1$ is clipped at zero at night and below
+1.458°; none of this is stated in the paper. The SIRANE reference data follow these corrected
+forms, not the printed equations.
+
+Applied pointwise — to a street's concentration, a receptor, or the grid — this equilibrium is
+exactly `street_steady`'s converged fixed point (see its docstring): transport treats NO, NO2 and
+O3 alike, so it carries NOx and Ox as passive tracers unchanged by the reaction, and the
+equilibrium depends on nothing else.
 
 ## Writing results
 
@@ -430,6 +489,24 @@ meteorology (`read_results(...).meteo`), never the deck's.
   difference of about 0.02-0.6 % over the sampled cells. Including a street's own roof-flux
   points in its own `Cext` (`self_contribution=True`) overstates it (measured median ratio
   2.33 on the South Kensington fluxes), which is why it is excluded by default.
+
+- **Chemistry (`closure="sirane"`).** A code-to-code comparison against SIRANE v2.1 output with
+  its NO-NO2-O3 chemistry switched on (`tests/data/street/sirane_chemistry`;
+  `tests/verification/test_sirane_chemistry.py`), by case:
+  - `solar_elevation` against 768 printed hourly values (eleven meteorology sets, every season,
+    clear to overcast, day, night and the low-sun threshold): worst absolute difference
+    0.000497°, inside SIRANE's own three-decimal printing (±0.0005°).
+  - `j_no2_sirane` ($k_1$) from that elevation and the printed cloud cover, against the same 768
+    printed $k_1$ values to three significant figures: 0 mismatches.
+  - `k_no_o3_sirane` ($k_3$), at SIRANE's printed ground temperature and molar volume, against the
+    same 768 printed $k_3$ values (ppb⁻¹ s⁻¹) to three significant figures: 768/768 consistent,
+    over the rounding envelope of the printed inputs. The negative control — the paper's 1.325e5
+    prefactor — matches none of the 768 rows.
+  - The photostationary split itself, on 176 street and receptor values from six single-street
+    cases (day, day without background, night, dawn, stable, NO emitted as NO2-equivalent mass):
+    176/176 reproduced within SIRANE's own printed precision (±0.005 µg/m³), allowing exactly the
+    rounding its inputs carry — the passive NO and NO2 (±0.005 µg/m³ each), the ground temperature
+    ($T_g$, ±0.05 K) and the molar volume ($V_m$, ±0.005 L/mol).
 
 ## Limitations and caveats
 
