@@ -24,6 +24,20 @@ from noodl.solvers.newton import newton
 from noodl.topology import Network
 
 DTYPE = torch.float64
+# Every closed-form comparison below solves to SOLVE_TIGHT rather than newton()'s
+# dtype-derived default (sqrt(eps), about 1.5e-8 for float64). At the default, an instance
+# whose flows are small stops with a relative flow error of up to 1.7e-6 (measured, on the
+# batched stack case), which measures the stopping rule, not the element law. The stopping
+# rule is per instance, so batching is not the cause: the 64 series instances, solved one at
+# a time, stop at the same worst error as the batch (9.84e-7 both, measured). At 1e-12 the
+# worst relative error is 9.7e-11 (batched stack) and single instances are at round-off, so
+# CLOSE's 1e-9 relative, with no absolute escape, holds with a factor of ten to spare. The
+# references are tighter still: brentq and fsolve run at xtol 1e-14 and 1e-13, and brentq
+# agrees with the series closed form to 8e-14. RESIDUAL is ten times newton()'s stopping
+# bound atol + rtol |r0| (measured up to 1.02e-12 kg/s, on the batched fan-driven zone).
+SOLVE_TIGHT = {"atol": 1e-12, "rtol": 1e-12}
+CLOSE = {"atol": 0.0, "rtol": 1e-9}
+RESIDUAL = {"atol": 1e-11, "rtol": 0.0}
 
 
 def _series_layer(
@@ -79,11 +93,11 @@ def test_series_closed_form_single_instance(record_property):
     )
     drivers = {"wind": torch.tensor([Pw, 0.0, 0.0], dtype=DTYPE)}
     phi_boundary = torch.zeros(2, dtype=DTYPE)
-    phi, q = layer.solve(phi_boundary, drivers, differentiable=False)
+    phi, q = layer.solve(phi_boundary, drivers, differentiable=False, **SOLVE_TIGHT)
 
     q_ref = _series_reference_q(C, n, Pw)
     torch.testing.assert_close(
-        q, torch.full((3,), q_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6
+        q, torch.full((3,), q_ref, dtype=DTYPE), **CLOSE
     )
 
     c_series = sum(ci ** (-1.0 / n) for ci in C) ** (-n)
@@ -92,14 +106,14 @@ def test_series_closed_form_single_instance(record_property):
     phi_z1_ref = Pw - (q_ref / C[0]) ** (1.0 / n)
     phi_z2_ref = phi_z1_ref - (q_ref / C[1]) ** (1.0 / n)
     torch.testing.assert_close(
-        phi[net.node_index("z1")], torch.tensor(phi_z1_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6
+        phi[net.node_index("z1")], torch.tensor(phi_z1_ref, dtype=DTYPE), **CLOSE
     )
     torch.testing.assert_close(
-        phi[net.node_index("z2")], torch.tensor(phi_z2_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6
+        phi[net.node_index("z2")], torch.tensor(phi_z2_ref, dtype=DTYPE), **CLOSE
     )
     residual_last = phi_z2_ref - (q_ref / C[2]) ** (1.0 / n)
-    assert abs(residual_last) < 1e-6
-    _record(record_property, "Series power laws, flows vs the closed form", "rel 1e-6",
+    assert abs(residual_last) < 1e-12
+    _record(record_property, "Series power laws, flows vs the closed form", "rel 1e-9",
             q, torch.full((3,), q_ref, dtype=DTYPE))
 
 
@@ -115,19 +129,19 @@ def test_series_closed_form_batched(record_property):
     wind[:, 0] = Pw
     drivers = {"wind": wind}
     phi_boundary = torch.zeros(m, 2, dtype=DTYPE)
-    phi, q = layer.solve(phi_boundary, drivers, differentiable=False)
+    phi, q = layer.solve(phi_boundary, drivers, differentiable=False, **SOLVE_TIGHT)
 
     q_ref = torch.empty(m, dtype=DTYPE)
     for i in range(m):
         q_ref[i] = _series_reference_q(C[i].tolist(), n[i, 0].item(), Pw[i].item())
 
-    torch.testing.assert_close(q[:, 0], q_ref, atol=1e-6, rtol=1e-6)
-    torch.testing.assert_close(q[:, 1], q_ref, atol=1e-6, rtol=1e-6)
-    torch.testing.assert_close(q[:, 2], q_ref, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(q[:, 0], q_ref, **CLOSE)
+    torch.testing.assert_close(q[:, 1], q_ref, **CLOSE)
+    torch.testing.assert_close(q[:, 2], q_ref, **CLOSE)
 
     c_series = (C ** (-1.0 / n)).sum(dim=-1) ** (-n.squeeze(-1))
-    torch.testing.assert_close(q_ref, c_series * Pw**n.squeeze(-1), atol=1e-6, rtol=1e-6)
-    _record(record_property, "Series power laws, 64 instances, flows vs brentq", "rel 1e-6",
+    torch.testing.assert_close(q_ref, c_series * Pw**n.squeeze(-1), **CLOSE)
+    _record(record_property, "Series power laws, 64 instances, flows vs brentq", "rel 1e-9",
             q, q_ref.unsqueeze(-1).expand(m, 3))
 
 
@@ -154,19 +168,19 @@ def test_parallel_combination_single_instance(record_property):
 
     net, layer = _parallel_layer(C1, C2, n)
     phi_boundary = torch.stack([Dp, torch.zeros((), dtype=DTYPE)])
-    phi, q = layer.solve(phi_boundary, differentiable=False)
+    phi, q = layer.solve(phi_boundary, differentiable=False, **SOLVE_TIGHT)
 
     q1_ref = C1 * torch.sign(Dp) * Dp.abs() ** n
     q2_ref = C2 * torch.sign(Dp) * Dp.abs() ** n
-    torch.testing.assert_close(q[0], q1_ref, atol=1e-6, rtol=1e-6)
-    torch.testing.assert_close(q[1], q2_ref, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(q[0], q1_ref, **CLOSE)
+    torch.testing.assert_close(q[1], q2_ref, **CLOSE)
 
     c_par = C1 + C2
     torch.testing.assert_close(
-        q.sum(), c_par * torch.sign(Dp) * Dp.abs() ** n, atol=1e-6, rtol=1e-6
+        q.sum(), c_par * torch.sign(Dp) * Dp.abs() ** n, **CLOSE
     )
-    torch.testing.assert_close(q[0] / q[1], C1 / C2, atol=1e-6, rtol=1e-6)
-    _record(record_property, "Parallel power laws, flows vs the closed form", "rel 1e-6",
+    torch.testing.assert_close(q[0] / q[1], C1 / C2, **CLOSE)
+    _record(record_property, "Parallel power laws, flows vs the closed form", "rel 1e-9",
             q, torch.stack([q1_ref, q2_ref]))
 
 
@@ -186,19 +200,19 @@ def test_parallel_combination_batched(record_property):
 
     net, layer = _parallel_layer(C1, C2, n)
     phi_boundary = torch.stack([Dp, torch.zeros(m, dtype=DTYPE)], dim=-1)
-    phi, q = layer.solve(phi_boundary, differentiable=False)
+    phi, q = layer.solve(phi_boundary, differentiable=False, **SOLVE_TIGHT)
 
     n_flat = n.squeeze(-1)
     q1_ref = C1 * torch.sign(Dp) * Dp.abs() ** n_flat
     q2_ref = C2 * torch.sign(Dp) * Dp.abs() ** n_flat
-    torch.testing.assert_close(q[:, 0], q1_ref, atol=1e-6, rtol=1e-6)
-    torch.testing.assert_close(q[:, 1], q2_ref, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(q[:, 0], q1_ref, **CLOSE)
+    torch.testing.assert_close(q[:, 1], q2_ref, **CLOSE)
     torch.testing.assert_close(
-        q.sum(dim=-1), (C1 + C2) * torch.sign(Dp) * Dp.abs() ** n_flat, atol=1e-6, rtol=1e-6
+        q.sum(dim=-1), (C1 + C2) * torch.sign(Dp) * Dp.abs() ** n_flat, **CLOSE
     )
-    torch.testing.assert_close(q[:, 0] / q[:, 1], C1 / C2, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(q[:, 0] / q[:, 1], C1 / C2, **CLOSE)
     _record(record_property, "Parallel power laws, 64 instances, flows vs the closed form",
-            "rel 1e-6", q, torch.stack([q1_ref, q2_ref], dim=-1))
+            "rel 1e-9", q, torch.stack([q1_ref, q2_ref], dim=-1))
 
 
 def _fan_driven_layer(
@@ -225,17 +239,14 @@ def test_fan_driven_zone_pressure_single_instance(record_property):
 
     net, layer = _fan_driven_layer(C1, C2, n, q_fan)
     phi_boundary = torch.zeros(1, dtype=DTYPE)
-    phi, q = layer.solve(phi_boundary, differentiable=False)
+    phi, q = layer.solve(phi_boundary, differentiable=False, **SOLVE_TIGHT)
 
     p_ref = -((q_fan / (C1 + C2)) ** (1.0 / n))
-    torch.testing.assert_close(phi[net.node_index("zone")], p_ref, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(phi[net.node_index("zone")], p_ref, **CLOSE)
 
-    # atol=1e-9 matches newton()'s own default convergence tolerance (atol=1e-9, rtol=1e-9);
-    # atol=1e-10 would be tighter than the solver's guaranteed accuracy, and fails
-    # deterministically here (observed residual ~2.09e-10).
     residual = layer.residual(phi[..., layer.interior], phi_boundary, {}, None)
-    torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-9, rtol=0.0)
-    _record(record_property, "Fan-driven zone, pressure vs the closed form", "rel 1e-6",
+    torch.testing.assert_close(residual, torch.zeros_like(residual), **RESIDUAL)
+    _record(record_property, "Fan-driven zone, pressure vs the closed form", "rel 1e-9",
             phi[net.node_index("zone")], p_ref)
 
 
@@ -249,25 +260,19 @@ def test_fan_driven_zone_pressure_batched(record_property):
 
     net, layer = _fan_driven_layer(C1, C2, n, q_fan)
     phi_boundary = torch.zeros(m, 1, dtype=DTYPE)
-    # atol/rtol pinned explicitly: newton()'s default is now dtype-derived (about 1.5e-8 for
-    # this test's float64 tensors, looser than the flat 1e-9 it used to be unconditionally),
-    # and the residual check below asks for 1e-8, which the new default cannot reliably clear
-    # for every one of the 64 random instances (observed: one instance's residual floored at
-    # ~1.1e-8, just over the 1e-8 bound). Ask newton() for the tighter tolerance explicitly
-    # instead of loosening this residual assertion.
-    phi, q = layer.solve(phi_boundary, differentiable=False, atol=1e-10, rtol=1e-10)
+    phi, q = layer.solve(phi_boundary, differentiable=False, **SOLVE_TIGHT)
 
     n_flat = n.squeeze(-1)
     q_fan_flat = q_fan.squeeze(-1)
     p_ref = -((q_fan_flat / (C1 + C2)) ** (1.0 / n_flat))
     torch.testing.assert_close(
-        phi[:, net.node_index("zone")], p_ref, atol=1e-6, rtol=1e-6
+        phi[:, net.node_index("zone")], p_ref, **CLOSE
     )
 
     residual = layer.residual(phi[..., layer.interior], phi_boundary, {}, None)
-    torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-8, rtol=0.0)
+    torch.testing.assert_close(residual, torch.zeros_like(residual), **RESIDUAL)
     _record(record_property, "Fan-driven zone, 64 instances, pressure vs the closed form",
-            "rel 1e-6", phi[:, net.node_index("zone")], p_ref)
+            "rel 1e-9", phi[:, net.node_index("zone")], p_ref)
 
 
 def _fan_curve_layer(
@@ -322,17 +327,17 @@ def test_fan_curve_loop_single_instance(record_property):
         torch.tensor(n, dtype=DTYPE),
     )
     phi_boundary = torch.zeros(1, dtype=DTYPE)
-    phi, q = layer.solve(phi_boundary, differentiable=False)
+    phi, q = layer.solve(phi_boundary, differentiable=False, **SOLVE_TIGHT)
 
     q_ref = _fan_curve_reference_q(a0, a1, a2, a3, q_max, C, n)
     torch.testing.assert_close(
-        q[net.edge_index("fan")[0]], torch.tensor(q_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6
+        q[net.edge_index("fan")[0]], torch.tensor(q_ref, dtype=DTYPE), **CLOSE
     )
     torch.testing.assert_close(
-        q[net.edge_index("airpath")[0]], torch.tensor(q_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6
+        q[net.edge_index("airpath")[0]], torch.tensor(q_ref, dtype=DTYPE), **CLOSE
     )
     assert 0.0 < q_ref < q_max
-    _record(record_property, "Fan curve against a leak, flows vs brentq", "rel 1e-6",
+    _record(record_property, "Fan curve against a leak, flows vs brentq", "rel 1e-9",
             q, torch.full((2,), q_ref, dtype=DTYPE))
 
 
@@ -357,7 +362,7 @@ def test_fan_curve_loop_batched(record_property):
 
     net, layer = _fan_curve_layer(a0, a1, a2, a3, q_max, C, n)
     phi_boundary = torch.zeros(m, 1, dtype=DTYPE)
-    phi, q = layer.solve(phi_boundary, differentiable=False)
+    phi, q = layer.solve(phi_boundary, differentiable=False, **SOLVE_TIGHT)
 
     q_ref = torch.empty(m, dtype=DTYPE)
     for i in range(m):
@@ -367,10 +372,10 @@ def test_fan_curve_loop_batched(record_property):
         )
     fan_col = net.edge_index("fan")[0]
     leak_col = net.edge_index("airpath")[0]
-    torch.testing.assert_close(q[:, fan_col], q_ref, atol=1e-6, rtol=1e-6)
-    torch.testing.assert_close(q[:, leak_col], q_ref, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(q[:, fan_col], q_ref, **CLOSE)
+    torch.testing.assert_close(q[:, leak_col], q_ref, **CLOSE)
     _record(record_property, "Fan curve against a leak, 64 instances, flows vs brentq",
-            "rel 1e-6", q, q_ref.unsqueeze(-1).expand(m, 2))
+            "rel 1e-9", q, q_ref.unsqueeze(-1).expand(m, 2))
 
 
 def _stack_layer(
@@ -444,19 +449,19 @@ def test_stack_conservation_and_antisymmetry_single_instance(record_property):
     net, layer = _stack_layer(C, n)
     phi_boundary = torch.zeros(2, dtype=DTYPE)
 
-    phi, q = layer.solve(phi_boundary, {"stack": drive_values}, differentiable=False)
+    phi, q = layer.solve(phi_boundary, {"stack": drive_values}, differentiable=False, **SOLVE_TIGHT)
     residual = layer.residual(
         phi[..., layer.interior], phi_boundary, {"stack": drive_values}, None
     )
-    torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-9, rtol=0.0)
+    torch.testing.assert_close(residual, torch.zeros_like(residual), **RESIDUAL)
     power = layer.power_residual(phi, q, {"stack": drive_values})
-    assert abs(power.item()) < 1e-7
+    assert abs(power.item()) < RESIDUAL["atol"]
 
     phi_rev, q_rev = layer.solve(
-        phi_boundary, {"stack": -drive_values}, differentiable=False
+        phi_boundary, {"stack": -drive_values}, differentiable=False, **SOLVE_TIGHT
     )
-    torch.testing.assert_close(q_rev, -q, atol=1e-8, rtol=1e-8)
-    torch.testing.assert_close(phi_rev, -phi, atol=1e-8, rtol=1e-8)
+    torch.testing.assert_close(q_rev, -q, **CLOSE)
+    torch.testing.assert_close(phi_rev, -phi, **CLOSE)
 
     # Independent reference (see _stack_reference's docstring): solved from the element law by
     # scipy.optimize.fsolve, with no noodl code involved. drive_values above (2.0, 1.5, 1.5,
@@ -466,17 +471,17 @@ def test_stack_conservation_and_antisymmetry_single_instance(record_property):
         C.tolist(), n.item(), drive_values.tolist()
     )
     torch.testing.assert_close(
-        phi[net.node_index("z1")], torch.tensor(phi_z1_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6
+        phi[net.node_index("z1")], torch.tensor(phi_z1_ref, dtype=DTYPE), **CLOSE
     )
     torch.testing.assert_close(
-        phi[net.node_index("z2")], torch.tensor(phi_z2_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6
+        phi[net.node_index("z2")], torch.tensor(phi_z2_ref, dtype=DTYPE), **CLOSE
     )
     torch.testing.assert_close(
-        phi[net.node_index("z3")], torch.tensor(phi_z3_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6
+        phi[net.node_index("z3")], torch.tensor(phi_z3_ref, dtype=DTYPE), **CLOSE
     )
     q_ref = torch.tensor([q0_ref, q1_ref, q2_ref, q3_ref], dtype=DTYPE)
-    torch.testing.assert_close(q, q_ref, atol=1e-6, rtol=1e-6)
-    _record(record_property, "Three-zone stack, flows vs fsolve", "rel 1e-6", q, q_ref)
+    torch.testing.assert_close(q, q_ref, **CLOSE)
+    _record(record_property, "Three-zone stack, flows vs fsolve", "rel 1e-9", q, q_ref)
 
 
 def test_stack_conservation_and_antisymmetry_batched(record_property):
@@ -489,17 +494,17 @@ def test_stack_conservation_and_antisymmetry_batched(record_property):
     net, layer = _stack_layer(C, n)
     phi_boundary = torch.zeros(m, 2, dtype=DTYPE)
 
-    phi, q = layer.solve(phi_boundary, {"stack": drive_values}, differentiable=False)
+    phi, q = layer.solve(phi_boundary, {"stack": drive_values}, differentiable=False, **SOLVE_TIGHT)
     residual = layer.residual(
         phi[..., layer.interior], phi_boundary, {"stack": drive_values}, None
     )
-    torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-7, rtol=0.0)
+    torch.testing.assert_close(residual, torch.zeros_like(residual), **RESIDUAL)
 
     phi_rev, q_rev = layer.solve(
-        phi_boundary, {"stack": -drive_values}, differentiable=False
+        phi_boundary, {"stack": -drive_values}, differentiable=False, **SOLVE_TIGHT
     )
-    torch.testing.assert_close(q_rev, -q, atol=1e-6, rtol=1e-6)
-    torch.testing.assert_close(phi_rev, -phi, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(q_rev, -q, **CLOSE)
+    torch.testing.assert_close(phi_rev, -phi, **CLOSE)
 
     # Independent per-instance reference, matching the pattern of the series case: each of the
     # 64 random instances is checked against its own scipy.optimize.fsolve solution of
@@ -516,16 +521,16 @@ def test_stack_conservation_and_antisymmetry_batched(record_property):
         q_ref[i] = torch.tensor([q0, q1, q2, q3], dtype=DTYPE)
 
     torch.testing.assert_close(
-        phi[:, net.node_index("z1")], phi_z1_ref, atol=1e-5, rtol=1e-5
+        phi[:, net.node_index("z1")], phi_z1_ref, **CLOSE
     )
     torch.testing.assert_close(
-        phi[:, net.node_index("z2")], phi_z2_ref, atol=1e-5, rtol=1e-5
+        phi[:, net.node_index("z2")], phi_z2_ref, **CLOSE
     )
     torch.testing.assert_close(
-        phi[:, net.node_index("z3")], phi_z3_ref, atol=1e-5, rtol=1e-5
+        phi[:, net.node_index("z3")], phi_z3_ref, **CLOSE
     )
-    torch.testing.assert_close(q, q_ref, atol=1e-5, rtol=1e-5)
-    _record(record_property, "Three-zone stack, 64 instances, flows vs fsolve", "rel 1e-5",
+    torch.testing.assert_close(q, q_ref, **CLOSE)
+    _record(record_property, "Three-zone stack, 64 instances, flows vs fsolve", "rel 1e-9",
             q, q_ref)
 
 
