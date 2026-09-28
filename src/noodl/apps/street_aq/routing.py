@@ -37,6 +37,17 @@ Ben Salem et al. 2015, "maximum fluctuation of +/-20 deg (2 sigma_theta)")."""
 
 MAX_N_THETA = 10
 
+MAX_SIGMA_THETA_SIRANE = math.pi / 4.0
+"""The largest direction spread `direction_averaging="sirane"` accepts (exclusive). The
+exact average integrates over the whole real line of directions, not around the circle:
+the Gaussian mass lying more than half a turn from the mean, which that ignores, is below
+`erfc(4 / sqrt 2) = 6.3e-5` at `pi/4` and below `1e-15` at 20 degrees."""
+
+SIRANE_WINDOW = 8.0
+"""Half-width of the `direction_averaging="sirane"` window, in units of `sigma_theta`:
+switch angles farther than `8 sigma_theta` from the mean direction are dropped, because
+the Gaussian mass beyond them, `Phi(-8) = 6.2e-16`, is below float64 resolution."""
+
 _FLOW_KINDS = ("route", "vent", "exchange")
 """The edge kinds `StreetFlows` writes its concatenated `q` in, and the order
 `build_model` must build the transport layer with. Checked at construction."""
@@ -100,8 +111,11 @@ def direction_offsets(
     than the widest one in the batch gets exactly zero weight in its surplus slots, which
     is the same sum MUNICH computes for it.
 
-    `"gauss"`: noodl's own, `n_theta`-point Gauss-Hermite with NORMALISED weights, for a
-    smooth derivative in the mean direction. Used in no parity test.
+    `"gauss"`: noodl's own, `n_theta`-point Gauss-Hermite with NORMALISED weights. The
+    junction routing is piecewise constant in the sample direction, so a fixed quadrature
+    mis-weights its pieces; `"sirane"` (`sirane_direction_samples`, which needs the
+    junction geometry and so is not a scheme of this function) is the exact average. Used
+    in no parity test.
     """
     sigma_theta = torch.as_tensor(sigma_theta, dtype=torch.float64)
     if scheme == "none":
@@ -146,6 +160,84 @@ def direction_offsets(
     raise ValueError(
         f"direction_offsets: scheme must be 'none', 'munich' or 'gauss', got {scheme!r}"
     )
+
+
+def sirane_direction_samples(
+    theta: Tensor, sigma_theta: Tensor, slot_angle: Tensor, slot_active: Tensor
+) -> tuple[Tensor, Tensor]:
+    """The EXACT Gaussian direction average of the junction routing, as samples and
+    weights `(offsets (..., n_j, m), weights (..., n_j, m))` -- SIRANE's
+    `P^_ij(phi0) = int f(phi - phi0) P_ij(phi) dphi` (Soulhac et al. 2011, Atmos.
+    Environ. 45:7379, Eq. 7) with `f` the normal density of standard deviation
+    `sigma_theta`.
+
+    `theta` and `sigma_theta` are the mean direction and spread per junction,
+    `(..., n_j)`; `slot_angle` and `slot_active` the junction layout, `(n_j, d)`.
+
+    With the canyon velocities held at the mean direction (as `StreetFlows` holds them),
+    the routing depends on the sample direction `phi` ONLY through the in/out
+    classification `cos(phi - slot_angle) < 0` -- the ordering follows from the
+    classification and the fixed slot angles -- so it is piecewise constant in `phi` and
+    changes only at the switch angles `slot_angle +- pi/2`. Per junction, the switch angles
+    within `SIRANE_WINDOW * sigma_theta` of the mean (taken on the branch nearest it) are
+    sorted into interval boundaries `[-inf, s_1, ..., s_k, +inf]`; each interval gets ONE
+    sample, at its midpoint (the infinite ends clipped to `+-min(8 sigma, pi)`, so a
+    junction with no switch in reach gets one sample at the mean and no sample crosses a
+    switch of the next turn), weighted by its Gaussian mass
+    `Phi((b - phi0)/sigma) - Phi((a - phi0)/sigma)`. The weights sum to one and the result
+    is exact for the piecewise-constant integrand -- to the dropped mass beyond the window
+    (`SIRANE_WINDOW`) and beyond half a turn (`MAX_SIGMA_THETA_SIRANE`) -- and
+    differentiable in `sigma_theta` and `theta` through the weights; the sample directions
+    themselves carry no gradient (they feed only the classification).
+
+    Junctions with fewer switches in reach than the busiest one are padded with
+    zero-weight samples, so every junction and instance shares one sample axis. A spread
+    of zero gives the single sample at the mean. Raises `ValueError` for a spread that is
+    negative, not finite, or at least `MAX_SIGMA_THETA_SIRANE`.
+    """
+    theta = torch.as_tensor(theta, dtype=torch.float64)
+    sigma = torch.as_tensor(sigma_theta, dtype=torch.float64)
+    with torch.no_grad():
+        bad = ~((sigma >= 0) & (sigma < MAX_SIGMA_THETA_SIRANE))
+        if bool(bad.any()):
+            raise ValueError(
+                f"sirane_direction_samples: direction_averaging='sirane' needs "
+                f"0 <= sigma_theta < pi/4 (the average runs over the real line of "
+                f"directions, not around the circle), got {int(bad.sum())} value(s) "
+                f"outside it, e.g. {float(sigma[bad].flatten()[0])!r}"
+            )
+        switch = torch.cat([slot_angle + 0.5 * math.pi, slot_angle - 0.5 * math.pi], -1)
+        active = torch.cat([slot_active, slot_active], -1)            # (n_j, 2d)
+        # Offset of every switch from the mean, on the branch nearest it: [-pi, pi).
+        rel = torch.remainder(switch - theta.unsqueeze(-1) + math.pi, TWO_PI) - math.pi
+        window = SIRANE_WINDOW * sigma.unsqueeze(-1)
+        kept = active & (rel.abs() < window)
+        rel, order = torch.sort(torch.where(kept, rel, torch.full_like(rel, math.inf)),
+                                dim=-1)
+        kept = torch.gather(kept.expand(order.shape), -1, order)
+        m = int(kept.sum(-1).max())
+        rel, kept = rel[..., :m], kept[..., :m]
+        rel = torch.where(kept, rel, torch.zeros_like(rel))
+        # Samples are placed within +-min(8 sigma, pi): the routing is 2 pi-periodic and
+        # the switches were reduced to [-pi, pi), so past +-pi an end interval's midpoint
+        # could cross a WRAPPED switch (s + 2 pi) and give its whole mass the wrong in/out
+        # pattern. Inside (-pi, pi) every switch in reach is among the kept ones.
+        limit = torch.clamp(window, max=math.pi)
+        clipped = torch.where(kept, rel, limit.expand(rel.shape))
+        edges = torch.cat([-limit, clipped, limit], -1)
+        offsets = 0.5 * (edges[..., 1:] + edges[..., :-1])            # (..., n_j, m+1)
+    # `rel` is `s - theta + 2 pi k` with `k` fixed: its value from above, its derivative
+    # `-1` in `theta`, so the weights carry the gradient in the mean direction. Padded
+    # entries hold a finite 0 and a safe spread, so their unselected branch of the
+    # `where` has a finite gradient (never `0 * inf`).
+    shift = (theta.detach() - theta).unsqueeze(-1)
+    safe = torch.where(sigma > 0, sigma, torch.ones_like(sigma)).unsqueeze(-1)
+    z = torch.where(kept, (rel + shift) / safe, torch.full_like(rel, math.inf))
+    cdf = torch.special.ndtr(z)
+    zeros = torch.zeros(*cdf.shape[:-1], 1, dtype=torch.float64)
+    cdf = torch.cat([zeros, cdf, zeros + 1.0], -1)
+    weights = cdf[..., 1:] - cdf[..., :-1]
+    return offsets, weights
 
 
 def node_closure(flux: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
@@ -288,6 +380,21 @@ class StreetFlows:
     `With_local_data` path). `U_ref` is then needed only for MUNICH's direction spread
     `sigma_theta = sigma_v / U`, i.e. only with `direction_averaging="munich"`.
 
+    `"sigma_theta"`, when present, is the direction spread (radians) for
+    `direction_averaging="gauss"` or `"sirane"` and replaces the constructor's
+    `sigma_theta` -- one value
+    per instance, `(...,)`, or, under `meteo="per_street"`, one per junction,
+    `(..., n_junctions)` -- so a spread that varies hour by hour (SIRANE's does) needs no
+    rebuilt model. `direction_averaging="none"` ignores it, as it ignores the constructor's
+    value; `"munich"` refuses it, because MUNICH computes its own spread. The routing is
+    piecewise constant in the sample direction (the in/out classification and the ordering
+    switch discretely), so under `"gauss"`, whose quadrature nodes merely move with the
+    spread, `q` carries no gradient with respect to `sigma_theta`. `"sirane"` is the EXACT
+    Gaussian average over those pieces (`sirane_direction_samples`: one sample per
+    interval between switch angles, weighted by its Gaussian mass), and carries the
+    gradient in `sigma_theta` and in the mean direction through the weights; it needs
+    `0 <= sigma_theta < pi/4`.
+
     `meteo="per_street"` gives every one of those drivers a trailing STREET axis,
     `(..., n_streets)`: each street's canyon wind and roof exchange come from its own
     values. Junction routing then uses per-junction values `(..., n_junctions)`, in
@@ -341,10 +448,18 @@ class StreetFlows:
                 f"StreetFlows: canyon_wind must be 'soulhac' or 'exponential', got "
                 f"{canyon_wind!r}"
             )
-        if direction_averaging not in ("none", "munich", "gauss"):
+        if direction_averaging not in ("none", "munich", "gauss", "sirane"):
             raise ValueError(
-                f"StreetFlows: direction_averaging must be 'none', 'munich' or 'gauss', "
-                f"got {direction_averaging!r}"
+                f"StreetFlows: direction_averaging must be 'none', 'munich', 'gauss' or "
+                f"'sirane', got {direction_averaging!r}"
+            )
+        if direction_averaging == "sirane" and sigma_theta is not None and not (
+            0.0 <= float(sigma_theta) < MAX_SIGMA_THETA_SIRANE
+        ):
+            raise ValueError(
+                f"StreetFlows: direction_averaging='sirane' needs 0 <= sigma_theta < pi/4 "
+                f"(the average runs over the real line of directions, not around the "
+                f"circle), got sigma_theta={sigma_theta!r}"
             )
         if exchange not in ("sirane", "schulte"):
             raise ValueError(
@@ -393,6 +508,11 @@ class StreetFlows:
         self.meteo = meteo
         self.layer_name = layer_name
         self.h_mean = geometry.height.mean()
+        # The canopy log-law origin, `d = 2 h_mean / 3` and `z0 = h_mean / 10` (as in
+        # `boundary_layer`), for the `u_star` path, which needs no log law and so no
+        # z_ref guard.
+        self._d = 2.0 * self.h_mean / 3.0
+        self._z0 = self.h_mean / 10.0
         self.w_mean = geometry.width.mean()
         self.h_max = float(geometry.height.max())
         self._read_edges(net)
@@ -491,7 +611,12 @@ class StreetFlows:
     def _boundary_layer(self, u_ref: Tensor | None, u_star: Tensor | None,
                         h_abl: Tensor) -> BoundaryLayer:
         """The boundary layer at whatever shape its inputs have: from `u_star` when the
-        driver gives it, else from the log law on `U_ref`."""
+        driver gives it, else from the log law on `U_ref`.
+
+        Only the log-law path checks that `z_ref` clears the canopy (`boundary_layer`'s
+        guard): with `u_star` driven, `z_ref` sets no friction velocity, so a reference
+        height inside the canopy (a SIRANE case's 10 m meteo mast over 14 m buildings) is
+        no error there."""
         floor = self.h_max if self.pblh_floor else None
         if u_star is None:
             if u_ref is None:
@@ -501,13 +626,11 @@ class StreetFlows:
                 )
             return boundary_layer(self.h_mean, u_ref, h_abl, z_ref=self.z_ref,
                                   kappa=self.kappa, pblh_floor=floor)
-        template = boundary_layer(self.h_mean, torch.ones((), dtype=torch.float64),
-                                  torch.ones((), dtype=torch.float64), z_ref=self.z_ref,
-                                  kappa=self.kappa)
         if floor is not None:
             h_abl = torch.maximum(h_abl, torch.as_tensor(floor, dtype=torch.float64))
-        return BoundaryLayer(u_star=u_star, h_abl=h_abl, z_ref=template.z_ref,
-                             d=template.d, z0=template.z0, kappa=self.kappa)
+        return BoundaryLayer(u_star=u_star, h_abl=h_abl,
+                             z_ref=torch.as_tensor(self.z_ref, dtype=torch.float64),
+                             d=self._d, z0=self._z0, kappa=self.kappa)
 
     def velocities(self, drivers) -> tuple[BoundaryLayer, Tensor, Tensor]:
         """`(per-street boundary layer, signed canyon velocity per street, exchange
@@ -620,6 +743,14 @@ class StreetFlows:
         theta_j = j["theta_w"]
         if theta_j is None:
             raise KeyError("StreetFlows: the driver 'theta_w' is missing")
+        driven = self._driver(drivers, "sigma_theta", required=False)
+        if driven is not None and self.direction_averaging == "munich":
+            raise ValueError(
+                "StreetFlows: the driver 'sigma_theta' is not used with "
+                "direction_averaging='munich', which computes its own spread "
+                "sigma_theta = sigma_v / U; drop it, or use direction_averaging='gauss' "
+                "or 'sirane'"
+            )
         if self.direction_averaging == "munich":
             if j["U_ref"] is None:
                 raise KeyError(
@@ -637,12 +768,35 @@ class StreetFlows:
                                  z0=torch.ones((), dtype=torch.float64), kappa=self.kappa)
             sigma_v = bl_j.sigma_v(lmo=j["lmo"], stability=self.stability)
             sigma = sigma_theta_munich(sigma_v, j["U_ref"])
+        elif driven is not None:
+            if self.meteo == "uniform":
+                batch = tuple(theta_j.shape[:-1])
+                if driven.dim() != 0 and tuple(driven.shape) != batch:
+                    raise ValueError(
+                        f"StreetFlows: meteo='uniform' needs 'sigma_theta' with one value "
+                        f"per instance, shape {batch} (or a scalar), got shape "
+                        f"{tuple(driven.shape)}; a per-junction spread needs "
+                        f"meteo='per_street'"
+                    )
+                sigma = driven.unsqueeze(-1).expand_as(theta_j)
+            elif driven.dim() == 0 or driven.shape[-1] != self.n_junctions:
+                raise ValueError(
+                    f"StreetFlows: meteo='per_street' needs 'sigma_theta' with a trailing "
+                    f"junction axis of length {self.n_junctions}, got shape "
+                    f"{tuple(driven.shape)}"
+                )
+            else:
+                sigma = driven
         elif self.sigma_theta is not None:
             sigma = torch.full_like(theta_j, float(self.sigma_theta))
         else:
             sigma = torch.zeros_like(theta_j)
-        offsets, weights = direction_offsets(self.direction_averaging, sigma,
-                                             n_theta=self.n_theta)
+        if self.direction_averaging == "sirane":
+            offsets, weights = sirane_direction_samples(theta_j, sigma, self.slot_angle,
+                                                        self.slot_active)
+        else:
+            offsets, weights = direction_offsets(self.direction_averaging, sigma,
+                                                 n_theta=self.n_theta)
         return theta_j, offsets, weights
 
     def __call__(self, state, drivers) -> dict[str, Tensor]:

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -383,6 +383,56 @@ def read_munich_case(root: Path) -> dict:
         junction_ids=junction_ids, species=species, meteo=meteo,
         meteo_junction=meteo_junction, emissions=emissions, background=background,
         native=native,
+    )
+
+
+# ------------------------------------------------------------------------------- results
+
+def read_munich_results(results_dir: Path, *, case) -> dict:
+    """Reads MUNICH's own `results/<species>.bin` outputs into the fields `StreetResults`
+    takes: `times`, `street_ids`, `species`, `c_in` (`c_above`, `u_canyon`, `sigma_w_roof`,
+    `u_exchange` and `meteo` are the ones only SIRANE fills -- `{}`/`None` here).
+
+    `write_munich_case`'s own saver config (`munich-saver.cfg`) templates
+    `Output_file: <Result_dir>/&f.bin` with `<Result_dir>` = `results/` and `&f` the species
+    name, so each active species writes its own `results/<species>.bin`: `float32`,
+    row-major `(n_hours, n_streets)`, micrograms/m3 -- MUNICH's own concentration unit, like
+    its emission/background inputs (see the module docstring) -- converted to kg/m3 here.
+
+    `case` supplies everything a MUNICH binary itself does not carry: the street order and
+    count (`case.street_ids`), species (`case.species`), hour count (`len(case.times)`) and
+    absolute times (`case.start` + `case.times` -- `case.start` must not be `None`). A
+    species file that does not exist, or whose size is not `n_hours * n_streets`, raises
+    naming the path and the sizes.
+    """
+    results_dir = Path(results_dir)
+    if case.start is None:
+        raise ValueError(
+            "read_results: case.start is None; a MUNICH result needs the case's own "
+            "absolute times (case.start + case.times)"
+        )
+    n_hours, n_streets = len(case.times), len(case.street_ids)
+    c_in: dict[str, np.ndarray] = {}
+    for sp in case.species:
+        path = results_dir / f"{sp}.bin"
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"read_results: {path} does not exist; every case species needs a MUNICH "
+                f"results/<species>.bin"
+            )
+        data = np.fromfile(path, dtype="<f4").astype(np.float64)
+        expected = n_hours * n_streets
+        if data.size != expected:
+            raise ValueError(
+                f"read_results: {path} has {data.size} float32 value(s), expected "
+                f"n_hours x n_streets = {n_hours} x {n_streets} = {expected}"
+            )
+        c_in[sp] = data.reshape(n_hours, n_streets) / UG_PER_KG
+
+    times = [case.start + timedelta(seconds=t) for t in case.times]
+    return dict(
+        times=times, street_ids=list(case.street_ids), species=list(case.species),
+        c_in=c_in, c_above={}, u_canyon=None, sigma_w_roof=None, u_exchange=None, meteo={},
     )
 
 

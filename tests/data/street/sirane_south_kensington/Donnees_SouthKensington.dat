@@ -1,0 +1,77 @@
+/******************************************
+/** Donnees pour l'utilisation de SIRANE **
+/******************************************
+Repertoire des donnees d'entree = SOUTH_KENSINGTON
+/----------------------
+/ Periode :
+/----------------------
+Date de debut = 07/01/2014 00:00:00
+Date de fin = 07/01/2014 01:00:00
+/----------------------
+/ Polluants :
+/----------------------
+Fichier des especes = ESPECES/Especes.dat
+Fichier de groupes de sources = ESPECES/SrceGroup.dat
+Activation du modele chimique de Chapman [0/1] = 1
+Emissions de NO en equivalent NO2 [0/1] = 0
+/----------------------
+/ Emissions :
+/----------------------
+Fichier de sources ponctuelles = EMISSIONS/Sources_Point.dat
+Fichier d'evolution des emissions lineiques et surfaciques = EMISSIONS/Emissions_Lin_Surf.dat
+Nombre de modulations lineiques = 1
+Fichier de pollution de fond = FOND/Concentration_Fond.dat
+/----------------------
+/ Caracteristiques du milieu urbain :
+/----------------------
+Decoupage des rues sur la grille retrotrajectoires [0/1] = 0
+Type de fichier de reseau [0/1/2] = 2
+Fichier de reseau = RESEAU/SIRANE_FINAL
+Fichier de site de dispersion = RESEAU/Site_Disp.dat
+Rugosite aerodynamique des batiments [m] = 1
+Hauteur de reflexion des bouffees [m] = 20.0
+/----------------------
+/ Conditions meteorologiques :
+/----------------------
+Conditions meteorologiques [0/1/2/3] = 0
+Fichier meteo = METEO/Meteo_change_1h.dat
+Fichier de site de mesures meteorologiques = METEO/Site_Meteo.dat
+Vitesse moyenne et sigma_w des rues fournis [0/1] = 0
+Vitesse du vent minimale [m/s] = 0
+Ecart-type de vitesse sigmav minimal [m/s] = 0
+Ecart-type de vitesse sigmaw minimal [m/s] = 0
+/----------------------
+/ Grilles :
+/-----------------------
+Fichier de description de la grille meteo = GRILLES/Grille_Meteo_L93.dat
+Fichier de description de la grille de sortie = GRILLES/Grille_Sortie_L93.dat
+Fichier de description de la grille d'emissions surfaciques = GRILLES/Grille_Emis_Surf_L93.dat
+/----------------------
+/ Sortie des resultats :
+/-----------------------
+Niveau d'affichage [0/1/2] = 2
+Calcul des statistiques [0/1] = 1
+Fichier de position des recepteurs ponctuels = RECEPTEURS/recep.dat
+Calcul des concentrations journalieres [0/1] = 0
+Calcul sur la grille [0/1/2] = 2
+Ecriture du depot [0/1] = 0
+Ecriture des resultats sur les rues [0/1] = 1
+Format du fichier de rues [0/1] = 0
+Calcul de la concentration aux intersections [0/1] = 0
+Format du fichier de champ de concentration [0/1/2/3/4] = 4
+Ecriture du champ de concentration au format image [0/1/2] = 1
+Fichier de colormap des especes = COLORMAPS/Colormaps_especes.dat
+Fichier de colormap des depassements = COLORMAPS/Colormap_NB.dat
+Repertoire d'ecriture des resultats = RESULT_SOUTHKENSINGTON
+/----------------------
+/ Parametres statistiques ;
+/----------------------
+Fichier de percentiles = STATISTIQUES/Percentiles.dat
+Fichier de seuils de depassement = STATISTIQUES/Seuils.dat
+/------------------------------------------------------------------------------/
+/ Parametres de calcul                                                         /
+/------------------------------------------------------------------------------/
+Ratio entre pas meteo et pas retrotrajectoires = 1
+Zone tampon en cellules pour le calcul des retrotrajectoires = 0
+Decoupage des rues sur la grille retrotrajectoires [0/1] = 0
+/------------------------------------------------------------------------------/
