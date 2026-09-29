@@ -22,8 +22,7 @@ from noodl.apps.street_aq.network import (
 )
 
 DT = torch.float64
-MUNICH = dict(canyon_wind="exponential", exchange="schulte", stability="munich",
-              direction_averaging="munich", roof_wind_form="sirane")
+MUNICH = dict(preset="munich", canyon_wind_min=0.0, u_d_min=0.0)
 
 
 def _uniform_drivers(model, *, u_ref=5.0, theta=0.3, h_abl=800.0, lmo=1e6, bg=2e-8):
@@ -73,7 +72,8 @@ def test_u_star_without_u_ref_is_refused_only_where_u_ref_is_needed():
     d["u_star"] = torch.tensor(0.5, dtype=DT)
     with pytest.raises(KeyError, match="U_ref"):
         _q(model, d)          # MUNICH's sigma_theta = sigma_v / U needs a wind speed
-    plain, _, _ = build_model(net, canyon_wind="exponential", exchange="schulte")
+    plain, _, _ = build_model(net, canyon_wind="exponential_profile",
+                              roof_exchange="aspect_ratio_scaled", direction_averaging="none")
     _q(plain, d)              # no direction averaging: u* alone is enough
 
 
@@ -383,8 +383,8 @@ def test_per_street_and_junction_shape_errors_are_named():
 
 # ------------------------------------------------------------------------- sigma_theta
 
-GAUSS = dict(canyon_wind="soulhac", exchange="sirane", stability="munich",
-             direction_averaging="gauss", n_theta=8)
+GAUSS = dict(preset="sirane", direction_averaging="gauss_hermite", n_theta=8, sigma_w_min=0.0,
+             sigma_v_min=0.0)
 
 
 def test_a_sigma_theta_driver_equal_to_the_constructor_value_is_the_same_model():
@@ -450,7 +450,8 @@ def test_a_sigma_theta_driver_is_refused_where_munich_computes_its_own():
     net, _ = munich_idealised()
     model, _, _ = build_model(net, **MUNICH)
     d = _uniform_drivers(model)
-    with pytest.raises(ValueError, match="sigma_theta.*direction_averaging='munich'"):
+    with pytest.raises(ValueError,
+                       match="sigma_theta.*direction_spread='turbulence_intensity'"):
         _q(model, dict(d, sigma_theta=torch.tensor(0.1, dtype=DT)))
 
 
@@ -485,10 +486,9 @@ def test_z_ref_inside_the_canopy_runs_with_u_star_and_is_refused_with_u_ref_only
         _q(model, _uniform_drivers(model))
 
 
-# ------------------------------------------------- direction_averaging="sirane" (exact)
+# ------------------------------------------------- direction_averaging="exact_gaussian" (exact)
 
-SIRANE = dict(canyon_wind="soulhac", exchange="sirane", stability="munich",
-              routing="sirane")
+SIRANE = dict(preset="sirane", sigma_w_min=0.0, sigma_v_min=0.0)
 
 
 def _ndtr(x: float) -> float:
@@ -525,7 +525,7 @@ def test_sirane_average_is_exact_across_a_single_switch():
     n = len(sn.streets)
     sigma, s = 0.05, _r1_switch_angle(sn)
     phi0 = s + 0.03
-    exact, _, _ = build_model(sn, direction_averaging="sirane", **SIRANE)
+    exact, _, _ = build_model(sn, direction_averaging="exact_gaussian", **SIRANE)
     fixed, _, _ = build_model(sn, direction_averaging="none", meteo="per_street", **SIRANE)
     d = dict(_uniform_drivers(exact, theta=phi0), sigma_theta=torch.tensor(sigma, dtype=DT))
     below = _routed_at(fixed, d, s - 0.2, n)
@@ -538,7 +538,7 @@ def test_sirane_average_is_exact_across_a_single_switch():
 
 def test_sirane_average_tends_to_no_average_as_the_spread_vanishes():
     net, _ = munich_idealised()
-    exact, _, _ = build_model(net, direction_averaging="sirane", **SIRANE)
+    exact, _, _ = build_model(net, direction_averaging="exact_gaussian", **SIRANE)
     none, _, _ = build_model(net, direction_averaging="none", **SIRANE)
     for theta in (0.3, 1.2, 4.0):                      # none of them on a switch angle
         d = _uniform_drivers(exact, theta=theta)
@@ -552,7 +552,7 @@ def test_sirane_average_tends_to_no_average_as_the_spread_vanishes():
 def test_sirane_average_agrees_with_a_brute_force_gaussian_average():
     net, _ = munich_idealised()
     n = len(net.streets)
-    exact, _, _ = build_model(net, direction_averaging="sirane", **SIRANE)
+    exact, _, _ = build_model(net, direction_averaging="exact_gaussian", **SIRANE)
     fixed, _, _ = build_model(net, direction_averaging="none", meteo="per_street", **SIRANE)
     # A rectangle rule on a piecewise-constant integrand errs by up to one cell's Gaussian
     # mass per switch, O(1/N): the gap is bounded by one cell's mass per switch (measured
@@ -577,7 +577,7 @@ def test_sirane_average_agrees_with_a_brute_force_gaussian_average():
 def test_sirane_average_is_differentiable_in_the_spread_and_the_mean_direction():
     sn = from_test_network()
     s = _r1_switch_angle(sn)
-    model, _, _ = build_model(sn, direction_averaging="sirane", **SIRANE)
+    model, _, _ = build_model(sn, direction_averaging="exact_gaussian", **SIRANE)
     base = _uniform_drivers(model)
     closure = model.closures[0]
 
@@ -603,8 +603,8 @@ def test_sirane_average_is_differentiable_in_the_spread_and_the_mean_direction()
 def test_sirane_average_under_per_street_meteo_and_in_a_batch():
     net, _ = munich_idealised()
     n, n_j = len(net.streets), len(net.junctions)
-    uniform, _, _ = build_model(net, direction_averaging="sirane", **SIRANE)
-    per, _, _ = build_model(net, direction_averaging="sirane", meteo="per_street",
+    uniform, _, _ = build_model(net, direction_averaging="exact_gaussian", **SIRANE)
+    per, _, _ = build_model(net, direction_averaging="exact_gaussian", meteo="per_street",
                             **SIRANE)
     d = _uniform_drivers(uniform)
     flat = _q(uniform, dict(d, sigma_theta=torch.tensor(0.15, dtype=DT)))
@@ -622,8 +622,8 @@ def test_sirane_average_under_per_street_meteo_and_in_a_batch():
 def test_sirane_average_with_a_different_spread_at_each_junction():
     net, _ = munich_idealised()
     n, n_j = len(net.streets), len(net.junctions)
-    uniform, _, _ = build_model(net, direction_averaging="sirane", **SIRANE)
-    per, _, _ = build_model(net, direction_averaging="sirane", meteo="per_street",
+    uniform, _, _ = build_model(net, direction_averaging="exact_gaussian", **SIRANE)
+    per, _, _ = build_model(net, direction_averaging="exact_gaussian", meteo="per_street",
                             **SIRANE)
     closure = per.closures[0]
     d = _uniform_drivers(uniform, theta=0.3)
@@ -646,10 +646,10 @@ def test_sirane_average_with_a_different_spread_at_each_junction():
 
 def test_sirane_average_refuses_a_spread_of_a_quarter_turn_or_more():
     net, _ = munich_idealised()
-    model, _, _ = build_model(net, direction_averaging="sirane", **SIRANE)
+    model, _, _ = build_model(net, direction_averaging="exact_gaussian", **SIRANE)
     d = _uniform_drivers(model)
     for bad in (math.pi / 4.0, 1.0, -0.01, float("nan")):
-        with pytest.raises(ValueError, match=r"direction_averaging='sirane'.*sigma_theta"):
+        with pytest.raises(ValueError, match=r"'exact_gaussian'.*sigma_theta"):
             _q(model, dict(d, sigma_theta=torch.tensor(bad, dtype=DT)))
-    with pytest.raises(ValueError, match=r"direction_averaging='sirane'.*sigma_theta"):
-        build_model(net, direction_averaging="sirane", sigma_theta=1.0, **SIRANE)
+    with pytest.raises(ValueError, match=r"'exact_gaussian'.*sigma_theta"):
+        build_model(net, direction_averaging="exact_gaussian", sigma_theta=1.0, **SIRANE)

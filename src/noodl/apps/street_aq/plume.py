@@ -129,6 +129,7 @@ import torch
 from torch.utils.checkpoint import checkpoint
 
 from noodl.apps.street_aq.canyon import KAPPA
+from noodl.apps.street_aq.closures import SIGMA_V_MIN, SIGMA_W_MIN
 from noodl.apps.street_aq.network import StreetNetwork
 
 Tensor = torch.Tensor
@@ -141,11 +142,6 @@ SEUIL_GAUSS = 4.0
 """SIRANE keyword `SEUIL_GAUSS` ("Sigma threshold to neglect a puff", default 4.0): pairs
 more than this many `sigma_y` beyond the flat top contribute exactly zero."""
 
-SIGMA_V_MIN = 0.5
-"""SIRANE keyword `SIGMA_V_MIN` ("Minimum sigma_v", default 0.5 m/s)."""
-
-SIGMA_W_MIN = 0.3
-"""SIRANE keyword `SIGMA_W_MIN` ("Minimum sigma_w", default 0.3 m/s)."""
 
 TIME_STEP_S = 10.0
 """The trajectory's time step, s: the node spacing of SIRANE's plume is exactly `10 U`

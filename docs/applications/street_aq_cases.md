@@ -71,7 +71,7 @@ the unit conversions (g/s, micrograms/m3) do. Every mass in `StreetCase` is SI (
 | `street_ids` | The streets' names, in `network.streets` order -- the axis `emissions` and `background` use. |
 | `junction_ids` | The source model's own node ids for `network.junctions`, in that order (MUNICH: `intersection.dat`'s ids; SIRANE: the network Shapefile's `NDDEB`/`NDFIN` node ids). |
 | `species` | The case's species names, the last axis of `emissions` and `background`. |
-| `meteo` | One `(n_hours, n_streets)` array per key: `wind_dir_from_deg` and `wind_speed` always; `h_abl`, `u_star`, `lmo`, `temperature` wherever the source provides them (a case read from SIRANE has neither `h_abl`, `u_star` nor `lmo` -- SIRANE derives them itself; see [`StreetCase.model_options()`](#streetcasemodel_options)). |
+| `meteo` | One `(n_hours, n_streets)` array per key: `wind_dir_from_deg` and `wind_speed` always; `h_abl`, `u_star`, `lmo`, `temperature` and `sigma_theta` (the direction spread, radians) wherever the source provides them (a case read from SIRANE has neither `h_abl`, `u_star` nor `lmo` -- SIRANE derives them itself; see [`StreetCase.model_options()`](#streetcasemodel_options)). |
 | `meteo_junction` | The same keys, `(n_hours, n_junctions)`, in `network.junctions` order -- may be empty or partial when the source has no genuine per-junction meteorology (always empty for SIRANE: one meteorological station for the whole network). |
 | `emissions` | `(n_hours, n_streets, n_species)`, kg/s per street. |
 | `background` | `(n_hours, n_streets, n_species)`, kg/m3 per street. |
@@ -138,27 +138,44 @@ species end up on the emissions and background drivers. The model's own street o
 (`street_index(model)`) must equal `case.street_ids` -- build the model on `case.network`
 itself.
 
-`drivers_at` does not supply `sigma_theta`: a SIRANE case's own direction spread varies hour
-by hour (`results.meteo["sigma_theta"]`, from `read_results`) and is added as a driver
-alongside `drivers_at`'s own mapping -- see the [SIRANE worked example](#sirane-worked-example).
+`drivers_at` supplies `sigma_theta` (radians) when the case's `meteo` carries it and the model
+takes its direction spread from the driver (`direction_spread="driver"`): one network-wide
+mean under `meteo="uniform"`, one value per junction under `meteo="per_street"` (from
+`meteo_junction["sigma_theta"]` when the case has it, else the mean over the streets meeting
+there). A case read from a SIRANE deck has no spread of its own -- SIRANE derives it hour by
+hour (`results.meteo["sigma_theta"]`, from `read_results`) -- so it is added as a driver, see
+the [SIRANE worked example](#sirane-worked-example).
 
 ## `StreetCase.model_options()`
 
-`case.model_options()` reads the closure options `case`'s own source model implies.
+`case.model_options()` reads the closure options `case`'s own source model implies: a
+`preset` plus the options the source's own files set, all as `build_model` keywords.
 
-For `source="munich"`, that is `munich.cfg`'s `[street]` section, translated into
-`build_model` keywords (`canyon_wind`, `exchange`, `roof_wind_form`, `direction_averaging`,
-`z_ref`, `canyon_wind_min`), plus `stability="munich"` and MUNICH's own hard-coded
-`u_d_min=0.001`. A missing `Minimum_Street_Wind_Speed` defaults to MUNICH's own `0.1` m/s
-(`canyon_wind_min=0.1`); `Zref`'s absence still raises.
+For `source="munich"`, that is `preset="munich"` (whose Monin-Obukhov turbulence,
+turbulence-intensity direction spread and hard-coded `u_d_min=0.001` every MUNICH case
+implies) plus `munich.cfg`'s `[street]` section, translated:
+
+| `[street]` key | Value | `build_model` keyword |
+|---|---|---|
+| `Mean_wind_speed_parameterization` | `Exponential` / `Sirane` | `canyon_wind="exponential_profile"` / `"bessel_profile"` |
+| `Transfer_parameterization` | `Schulte` / `Sirane` | `roof_exchange="aspect_ratio_scaled"` / `"turbulent_velocity"` |
+| `Building_height_wind_speed_parameterization` | `Sirane` / `Macdonald` | `roof_wind="bessel_canyon_mean"` / `"canopy_log_law"` |
+| `With_horizontal_fluctuation` | `yes` / `no` | `direction_averaging="rectangle_rule"` / `"none"` |
+| `Zref` | m | `z_ref` |
+| `Minimum_Street_Wind_Speed` | m/s | `canyon_wind_min` |
+
+A missing `Minimum_Street_Wind_Speed` defaults to MUNICH's own `0.1` m/s
+(`canyon_wind_min=0.1`); `Zref`'s absence still raises, and a value with no counterpart (e.g.
+the `Wang` transfer) raises `NotImplementedError`.
 
 For `source="sirane"`, the master file does not switch SIRANE's closures, so `model_options`
-returns them fixed: `canyon_wind="soulhac"`, `exchange="sirane"` (`u_d = sigma_w / (sqrt(2)
-pi)`), `routing="sirane"` (the non-crossing-streamline junction exchange),
-`direction_averaging="sirane"` (SIRANE's normalised Gaussian average of the junction routing
-over the direction spread, Soulhac et al. 2011, Eq. 7, evaluated exactly), and
-`stability="munich"` (SIRANE's three-branch stable/neutral/unstable `sigma_w`; noodl physics'
-`"munich"` form is the closest it has). `z_ref` is left at `build_model`'s default: noodl
+returns `preset="sirane"`: the Bessel canyon wind, `u_d = sigma_w / (sqrt(2) pi)`, the
+non-crossing-streamline junction routing, the exact Gaussian average of the junction routing
+over the direction spread (Soulhac et al. 2011, Eq. 7) with the spread from the `sigma_theta`
+driver, and the three-branch stable/neutral/unstable `sigma_w` (`stability="monin_obukhov"`).
+The deck's turbulence floors `SIGMA_W_MIN` and `SIGMA_V_MIN` become `sigma_w_min` and
+`sigma_v_min` when the master file sets them; otherwise the preset's 0.30 and 0.5 m/s,
+SIRANE's own defaults, apply. `z_ref` is left at `build_model`'s default: noodl
 physics has no SIRANE meteorological preprocessor (SIRANE derives u*, the boundary-layer
 height, the Obukhov length and the direction spread from the meteo site's wind, temperature
 and cloud cover, over that site's own roughness). A SIRANE case is therefore driven with
@@ -324,15 +341,17 @@ driven = replace(
     meteo_junction={},
 )
 
+# The deck zeroes SIRANE's turbulence floors (model_options() gives sigma_w_min=0.0); the
+# archived results use SIRANE's default sigma_w floor of 0.30 m/s, so that is set here.
 model, state, _ = build_model(
     driven.network, species=driven.species, meteo="per_street", background="per_street",
-    **driven.model_options(),
+    **dict(driven.model_options(), sigma_w_min=0.30),
 )
 
 drivers = drivers_at(driven, model, 0, species=driven.species)
 # SIRANE's own direction spread (one meteorological station for the whole network),
-# broadcast onto every junction -- direction_averaging="sirane" needs it as a driver,
-# not a constructor value, because it varies hour by hour.
+# broadcast onto every junction -- the exact Gaussian direction average takes it as a
+# driver, not a constructor value, because it varies hour by hour.
 spread = np.unique(results.meteo["sigma_theta"][0])
 drivers["sigma_theta"] = torch.full(
     (len(driven.network.junctions),), float(spread[0]), dtype=torch.float64,

@@ -71,6 +71,9 @@ markers = [
     "slow: marks tests as slow (excluded by default; run with -m slow to include them)",
     "external: needs an external engine or package (contamxpy); skipped when unavailable",
 ]
+filterwarnings = [
+    "error::DeprecationWarning:noodl.apps.street_aq",
+]
 
 [tool.coverage.run]
 source = ["noodl"]

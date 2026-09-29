@@ -36,11 +36,11 @@ def test_sirane_routing_is_munich_s_worked_two_in_two_out_example():
     # outflows [6, 8] clockwise, already balanced, give the greedy non-crossing fill.
     flux_in = torch.tensor([10.0, 4.0], dtype=DT)
     flux_out = torch.tensor([6.0, 8.0], dtype=DT)
-    sirane = routing_matrix(flux_in, flux_out, model="sirane")
+    sirane = routing_matrix(flux_in, flux_out, model="non_crossing_streamlines")
     torch.testing.assert_close(
         sirane, torch.tensor([[6.0, 4.0], [0.0, 4.0]], dtype=DT), rtol=0, atol=1e-14
     )
-    mixing = routing_matrix(flux_in, flux_out, model="mixing")
+    mixing = routing_matrix(flux_in, flux_out, model="perfect_mixing")
     torch.testing.assert_close(
         mixing, torch.tensor([[30.0 / 7.0, 40.0 / 7.0], [12.0 / 7.0, 16.0 / 7.0]], dtype=DT),
         rtol=1e-14, atol=0,
@@ -49,7 +49,7 @@ def test_sirane_routing_is_munich_s_worked_two_in_two_out_example():
     assert float((sirane - mixing).abs().max()) > 1.0
 
 
-@pytest.mark.parametrize("model", ["sirane", "mixing"])
+@pytest.mark.parametrize("model", ["non_crossing_streamlines", "perfect_mixing"])
 def test_routing_matrix_reproduces_both_marginals_exactly(model):
     flux_in = torch.tensor([[3.0, 0.0, 5.0, 2.0], [1.0, 1.0, 1.0, 1.0]], dtype=DT)
     flux_out = torch.tensor([[4.0, 6.0, 0.0, 0.0], [2.0, 0.0, 2.0, 0.0]], dtype=DT)
@@ -62,9 +62,9 @@ def test_routing_matrix_reproduces_both_marginals_exactly(model):
 def test_zero_rows_do_not_move_the_other_entries():
     """A zero entry anywhere in either ordered marginal leaves the rest of F alone."""
     a = routing_matrix(torch.tensor([10.0, 4.0], dtype=DT),
-                       torch.tensor([6.0, 8.0], dtype=DT), model="sirane")
+                       torch.tensor([6.0, 8.0], dtype=DT), model="non_crossing_streamlines")
     b = routing_matrix(torch.tensor([10.0, 0.0, 4.0], dtype=DT),
-                       torch.tensor([6.0, 0.0, 8.0], dtype=DT), model="sirane")
+                       torch.tensor([6.0, 0.0, 8.0], dtype=DT), model="non_crossing_streamlines")
     torch.testing.assert_close(b[[0, 2]][:, [0, 2]], a, rtol=0, atol=1e-14)
 
 
@@ -76,11 +76,11 @@ def test_routing_matrix_is_differentiable_in_the_fluxes():
     # for one with each inflow and not at all with the outflows.
     flux_in = torch.tensor([10.0, 4.0], dtype=DT, requires_grad=True)
     flux_out = torch.tensor([6.0, 9.0], dtype=DT, requires_grad=True)
-    f = routing_matrix(flux_in, flux_out, model="sirane")
+    f = routing_matrix(flux_in, flux_out, model="non_crossing_streamlines")
     gi, go = torch.autograd.grad(f.sum(), (flux_in, flux_out))
     torch.testing.assert_close(gi, torch.ones(2, dtype=DT), rtol=0, atol=1e-12)
     torch.testing.assert_close(go, torch.zeros(2, dtype=DT), rtol=0, atol=1e-12)
-    entry = routing_matrix(flux_in, flux_out, model="sirane")[0, 1]
+    entry = routing_matrix(flux_in, flux_out, model="non_crossing_streamlines")[0, 1]
     (grad,) = torch.autograd.grad(entry, flux_in)
     step = 1e-7
     for i in range(2):
@@ -89,8 +89,8 @@ def test_routing_matrix_is_differentiable_in_the_fluxes():
         plus[i] += step
         minus[i] -= step
         central = (
-            routing_matrix(plus, flux_out.detach(), model="sirane")[0, 1]
-            - routing_matrix(minus, flux_out.detach(), model="sirane")[0, 1]
+            routing_matrix(plus, flux_out.detach(), model="non_crossing_streamlines")[0, 1]
+            - routing_matrix(minus, flux_out.detach(), model="non_crossing_streamlines")[0, 1]
         ) / (2.0 * step)
         assert abs(float(grad[i]) - float(central)) < 1e-6
 
@@ -148,7 +148,7 @@ def test_munich_quadrature_weights_are_unnormalised_exactly_as_munich_leaves_the
     weight does not sum to one, and reproducing that is the point: normalising it would put
     a uniform few-percent bias between this model and MUNICH."""
     sigma = torch.tensor([(n + 0.5) * math.pi / 180.0], dtype=DT)
-    _, weights = direction_offsets("munich", sigma)
+    _, weights = direction_offsets("rectangle_rule", sigma)
     assert weights.shape[-1] == n
     # The published sums are quoted to six decimal places, which is what 1e-6 reflects.
     assert abs(float(weights.sum()) - expected) < 1e-6
@@ -170,7 +170,7 @@ def test_munich_sample_count_and_sigma_theta():
 
 def test_direction_offsets_handle_a_batch_with_different_sample_counts():
     sigma = torch.tensor([0.072, 0.036, 0.001], dtype=DT)
-    offsets, weights = direction_offsets("munich", sigma)
+    offsets, weights = direction_offsets("rectangle_rule", sigma)
     assert offsets.shape == weights.shape == (3, 4)
     # Row 1 needs two samples, so its two surplus slots carry exactly zero weight and its
     # sum is the one MUNICH computes for n = 2.
@@ -188,7 +188,7 @@ def test_none_and_gauss_schemes():
     assert offsets.shape == (2, 1)
     torch.testing.assert_close(offsets, torch.zeros(2, 1, dtype=DT), rtol=0, atol=0)
     torch.testing.assert_close(weights, torch.ones(2, 1, dtype=DT), rtol=0, atol=0)
-    offsets, weights = direction_offsets("gauss", sigma, n_theta=5)
+    offsets, weights = direction_offsets("gauss_hermite", sigma, n_theta=5)
     assert offsets.shape == (2, 5)
     # Gauss-Hermite weights ARE normalised -- that is the whole difference from "munich".
     torch.testing.assert_close(weights.sum(-1), torch.ones(2, dtype=DT),
@@ -196,10 +196,14 @@ def test_none_and_gauss_schemes():
     torch.testing.assert_close(
         (weights * offsets**2).sum(-1), sigma**2, rtol=1e-12, atol=0
     )
-    with pytest.raises(ValueError, match="scheme='gauss' needs n_theta"):
-        direction_offsets("gauss", sigma)
-    with pytest.raises(ValueError, match=r"'none', 'munich' or 'gauss'"):
+    with pytest.raises(ValueError, match="scheme='gauss_hermite' needs n_theta"):
+        direction_offsets("gauss_hermite", sigma)
+    with pytest.raises(ValueError, match=r"\('none', 'exact_gaussian', 'rectangle_rule', "
+                                         r"'gauss_hermite'\), got 'rectangle'"):
         direction_offsets("rectangle", sigma)
+    with pytest.raises(ValueError, match=r"scheme='exact_gaussian' needs the junction "
+                                         r"geometry"):
+        direction_offsets("exact_gaussian", sigma)
 
 
 def test_sirane_samples_are_one_per_interval_between_switch_angles():
@@ -230,7 +234,7 @@ def test_sirane_samples_are_one_per_interval_between_switch_angles():
                                                 slot_angle, slot_active)
     assert offsets.shape == (2, 1)
     torch.testing.assert_close(weights, torch.ones(2, 1, dtype=DT), rtol=0, atol=0)
-    with pytest.raises(ValueError, match=r"direction_averaging='sirane' needs "
+    with pytest.raises(ValueError, match=r"direction_averaging='exact_gaussian' needs "
                                          r"0 <= sigma_theta < pi/4"):
         sirane_direction_samples(theta, torch.full((2,), 0.8, dtype=DT), slot_angle,
                                  slot_active)
@@ -271,7 +275,9 @@ def test_order_slots_sorts_and_rotates_at_most_once():
 
 
 def test_routing_matrix_names_an_unknown_model():
-    with pytest.raises(ValueError, match=r"routing_matrix.*'mixing' or 'sirane'.*'soulhac'"):
+    with pytest.raises(ValueError, match=r"routing_matrix: junction_routing must be one of "
+                                         r"\('non_crossing_streamlines', 'perfect_mixing'\), "
+                                         r"got 'soulhac'"):
         routing_matrix(torch.ones(2, dtype=DT), torch.ones(2, dtype=DT), model="soulhac")
 
 
@@ -325,19 +331,23 @@ def _flows_fixture() -> tuple[Network, StreetGeometry]:
 
 
 def test_street_flows_resolves_kappa_by_formulation():
-    """`kappa=None` resolves to MUNICH's 0.41 whenever a MUNICH-style form
-    (`canyon_wind='exponential'`, `exchange='schulte'`, `roof_wind_form='macdonald'`) is
-    selected, and to the neutral form's 0.4 otherwise; an explicit float always wins."""
+    """`kappa=None` is the preset's constant; with a closure option given explicitly it
+    resolves to 0.41 whenever a choice written with it (`canyon_wind='exponential_profile'`,
+    `roof_exchange='aspect_ratio_scaled'`, `roof_wind='canopy_log_law'`) is selected, and to
+    0.40 otherwise; an explicit float always wins."""
     net, geometry = _flows_fixture()
 
     def make(**kwargs) -> StreetFlows:
         return StreetFlows(net, None, geometry, **kwargs)
 
     assert make().kappa == KAPPA
-    assert make(canyon_wind="exponential").kappa == KAPPA_MUNICH
-    assert make(exchange="schulte").kappa == KAPPA_MUNICH
-    assert make(roof_wind_form="macdonald").kappa == KAPPA_MUNICH
-    assert make(canyon_wind="exponential", kappa=0.38).kappa == 0.38
+    assert make(canyon_wind="exponential_profile").kappa == KAPPA_MUNICH
+    assert make(roof_exchange="aspect_ratio_scaled").kappa == KAPPA_MUNICH
+    assert make(roof_wind="canopy_log_law").kappa == KAPPA_MUNICH
+    assert make(canyon_wind="exponential_profile", kappa=0.38).kappa == 0.38
+    assert make(preset="munich").kappa == KAPPA_MUNICH
+    assert make(preset="munich", canyon_wind="bessel_profile",
+                roof_exchange="turbulent_velocity").kappa == KAPPA
 
 
 def _street_layer(net, kinds) -> TransportLayer:
@@ -349,18 +359,33 @@ def _street_layer(net, kinds) -> TransportLayer:
     )
 
 
-def test_street_flows_refuses_an_unknown_stability_or_exchange_at_construction():
-    """`stability` and `exchange` are validated in `__init__`, in the same house style as
-    `meteo`, `canyon_wind` and `direction_averaging` above -- so a bad value (e.g.
-    `stability='impaq'`) fails when `build_model` constructs the closure, not later at the
-    first `steady`/`solve` call that happens to read the bad attribute."""
+def test_street_flows_refuses_an_unknown_option_at_construction():
+    """Every closure option is validated in `__init__`, in the same house style as
+    `meteo` -- so a bad value (e.g. `stability='impaq'`) fails when `build_model`
+    constructs the closure, not later at the first `steady`/`solve` call that happens to
+    read the bad attribute."""
     net, geometry = _flows_fixture()
-    with pytest.raises(ValueError, match=r"StreetFlows: stability must be 'neutral' or "
-                                        r"'munich', got 'impaq'"):
+    with pytest.raises(ValueError, match=r"StreetFlows: stability must be one of "
+                                        r"\('neutral', 'monin_obukhov'\), got 'impaq'"):
         StreetFlows(net, None, geometry, stability="impaq")
-    with pytest.raises(ValueError, match=r"StreetFlows: exchange must be 'sirane' or "
-                                        r"'schulte', got 'impaq'"):
-        StreetFlows(net, None, geometry, exchange="impaq")
+    with pytest.raises(ValueError, match=r"StreetFlows: roof_exchange must be one of "
+                                        r"\('turbulent_velocity', 'aspect_ratio_scaled'\), "
+                                        r"got 'impaq'"):
+        StreetFlows(net, None, geometry, roof_exchange="impaq")
+    with pytest.raises(ValueError, match=r"StreetFlows: junction_routing must be one of "
+                                        r"\('non_crossing_streamlines', 'perfect_mixing'\), "
+                                        r"got 'impaq'"):
+        StreetFlows(net, None, geometry, junction_routing="impaq")
+    with pytest.raises(ValueError, match=r"StreetFlows: direction_spread must be one of "
+                                        r"\('driver', 'turbulence_intensity'\), got 'x'"):
+        StreetFlows(net, None, geometry, direction_spread="x")
+    with pytest.raises(ValueError, match=r"StreetFlows: sigma_w_min must be finite and "
+                                        r">= 0, got -0.1"):
+        StreetFlows(net, None, geometry, sigma_w_min=-0.1)
+    with pytest.raises(ValueError, match=r"preset must be one of \('sirane', 'munich'\)"):
+        StreetFlows(net, None, geometry, preset="impaq")
+    with pytest.raises(TypeError, match=r"StreetFlows: unexpected keyword argument 'wind'"):
+        StreetFlows(net, None, geometry, wind="x")
 
 
 def test_street_flows_refuses_a_layer_whose_flow_kinds_are_in_another_order():

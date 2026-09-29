@@ -18,8 +18,6 @@ import numpy as np
 import torch
 
 from noodl.apps.street_aq.canyon import (
-    KAPPA,
-    KAPPA_MUNICH,
     Z0_S_DEFAULT,
     BoundaryLayer,
     boundary_layer,
@@ -27,6 +25,7 @@ from noodl.apps.street_aq.canyon import (
     exchange_velocity,
     roof_wind,
 )
+from noodl.apps.street_aq.closures import normalise, resolve
 
 Tensor = torch.Tensor
 TWO_PI = 2.0 * math.pi
@@ -38,13 +37,13 @@ Ben Salem et al. 2015, "maximum fluctuation of +/-20 deg (2 sigma_theta)")."""
 MAX_N_THETA = 10
 
 MAX_SIGMA_THETA_SIRANE = math.pi / 4.0
-"""The largest direction spread `direction_averaging="sirane"` accepts (exclusive). The
+"""The largest direction spread `direction_averaging="exact_gaussian"` accepts (exclusive). The
 exact average integrates over the whole real line of directions, not around the circle:
 the Gaussian mass lying more than half a turn from the mean, which that ignores, is below
 `erfc(4 / sqrt 2) = 6.3e-5` at `pi/4` and below `1e-15` at 20 degrees."""
 
 SIRANE_WINDOW = 8.0
-"""Half-width of the `direction_averaging="sirane"` window, in units of `sigma_theta`:
+"""Half-width of the `direction_averaging="exact_gaussian"` window, in units of `sigma_theta`:
 switch angles farther than `8 sigma_theta` from the mean direction are dropped, because
 the Gaussian mass beyond them, `Phi(-8) = 6.2e-16`, is below float64 resolution."""
 
@@ -77,7 +76,8 @@ def _safe_atan2(s: Tensor, c: Tensor) -> Tensor:
 
 
 def sigma_theta_munich(sigma_v: Tensor, u_ref: Tensor) -> Tensor:
-    """`sigma_theta = min(sigma_v / U, 10 deg)` (SRC `:3567`; Blackadar 1997, Soulhac 2009).
+    """`sigma_theta = min(sigma_v / U, 10 deg)` (SRC `:3567`; Blackadar 1997, Soulhac 2009),
+    the `direction_spread="turbulence_intensity"` spread.
 
     NOT a free parameter: a turbulence-intensity estimate capped at 10 degrees. For the
     neutral branch `sigma_v = 1.2 u*` exactly, so `sigma_theta` is independent of the wind
@@ -101,7 +101,7 @@ def direction_offsets(
 
     `"none"`: one sample at offset 0 with weight 1 -- no direction averaging at all.
 
-    `"munich"`: MUNICH's own scheme, reproduced including its artefacts. Uniform
+    `"rectangle_rule"`: MUNICH's scheme, reproduced including its artefacts. Uniform
     (rectangle-rule) sampling on `[-2 sigma, +2 sigma]` with both endpoints at full weight,
     `step = 4 sigma/(n-1)`, `w_k = step N(theta_k; 0, sigma)`, and the weights are NOT
     normalised: they sum to 0.974953 at `n = 10` and to 0.431928 at `n = 2` (K22 Eq. B16;
@@ -111,18 +111,24 @@ def direction_offsets(
     than the widest one in the batch gets exactly zero weight in its surplus slots, which
     is the same sum MUNICH computes for it.
 
-    `"gauss"`: noodl's own, `n_theta`-point Gauss-Hermite with NORMALISED weights. The
-    junction routing is piecewise constant in the sample direction, so a fixed quadrature
-    mis-weights its pieces; `"sirane"` (`sirane_direction_samples`, which needs the
-    junction geometry and so is not a scheme of this function) is the exact average. Used
-    in no parity test.
+    `"gauss_hermite"`: an `n_theta`-point Gauss-Hermite quadrature with NORMALISED weights.
+    The junction routing is piecewise constant in the sample direction, so a fixed
+    quadrature mis-weights its pieces; `"exact_gaussian"` (`sirane_direction_samples`,
+    which needs the junction geometry and so is not a scheme of this function) is the
+    exact average. Used in no parity test.
     """
+    scheme = normalise("direction_averaging", scheme, "direction_offsets")
+    if scheme == "exact_gaussian":
+        raise ValueError(
+            "direction_offsets: scheme='exact_gaussian' needs the junction geometry; use "
+            "sirane_direction_samples"
+        )
     sigma_theta = torch.as_tensor(sigma_theta, dtype=torch.float64)
     if scheme == "none":
         shape = sigma_theta.shape + (1,)
         return (torch.zeros(shape, dtype=torch.float64),
                 torch.ones(shape, dtype=torch.float64))
-    if scheme == "munich":
+    if scheme == "rectangle_rule":
         counts = n_theta_munich(sigma_theta)
         m = int(counts.max())
         if m <= 1:
@@ -147,19 +153,15 @@ def direction_offsets(
         offsets = torch.where(single, torch.zeros_like(offsets), offsets)
         weights = torch.where(single, first, weights)
         return offsets, weights
-    if scheme == "gauss":
-        if n_theta is None or n_theta < 1:
-            raise ValueError(
-                f"direction_offsets: scheme='gauss' needs n_theta >= 1, got {n_theta!r}"
-            )
-        nodes, raw = np.polynomial.hermite_e.hermegauss(int(n_theta))
-        nodes_t = torch.as_tensor(nodes, dtype=torch.float64)
-        weights_t = torch.as_tensor(raw, dtype=torch.float64) / math.sqrt(2.0 * math.pi)
-        offsets = sigma_theta.unsqueeze(-1) * nodes_t
-        return offsets, weights_t.expand(offsets.shape).clone()
-    raise ValueError(
-        f"direction_offsets: scheme must be 'none', 'munich' or 'gauss', got {scheme!r}"
-    )
+    if n_theta is None or n_theta < 1:
+        raise ValueError(
+            f"direction_offsets: scheme='gauss_hermite' needs n_theta >= 1, got {n_theta!r}"
+        )
+    nodes, raw = np.polynomial.hermite_e.hermegauss(int(n_theta))
+    nodes_t = torch.as_tensor(nodes, dtype=torch.float64)
+    weights_t = torch.as_tensor(raw, dtype=torch.float64) / math.sqrt(2.0 * math.pi)
+    offsets = sigma_theta.unsqueeze(-1) * nodes_t
+    return offsets, weights_t.expand(offsets.shape).clone()
 
 
 def sirane_direction_samples(
@@ -201,7 +203,7 @@ def sirane_direction_samples(
         bad = ~((sigma >= 0) & (sigma < MAX_SIGMA_THETA_SIRANE))
         if bool(bad.any()):
             raise ValueError(
-                f"sirane_direction_samples: direction_averaging='sirane' needs "
+                f"sirane_direction_samples: direction_averaging='exact_gaussian' needs "
                 f"0 <= sigma_theta < pi/4 (the average runs over the real line of "
                 f"directions, not around the circle), got {int(bad.sum())} value(s) "
                 f"outside it, e.g. {float(sigma[bad].flatten()[0])!r}"
@@ -277,9 +279,10 @@ def node_closure(flux: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
 def routing_matrix(flux_in: Tensor, flux_out: Tensor, *, model: str) -> Tensor:
     """The street-to-street flux matrix `F[..., p, r]` from ORDERED, closed marginals.
 
-    `"mixing"`: perfect mixing, `F = P_in outer (P_out / sum P_out)`.
+    `"perfect_mixing"`: `F = P_in outer (P_out / sum P_out)`.
 
-    `"sirane"`: the non-crossing-streamline fill. MUNICH's `ComputeAlpha` (`:3620-3648`)
+    `"non_crossing_streamlines"`: the fill without crossing streamlines (Soulhac et al.
+    2011). MUNICH's `ComputeAlpha` (`:3620-3648`)
     walks the inflows counter-clockwise and fills the outflows clockwise with
     `min(remaining_in, remaining_out)`. That greedy sweep IS the north-west-corner rule on
     the two ordered marginals, so it is written here in closed form -- with `A` and `B` the
@@ -293,15 +296,12 @@ def routing_matrix(flux_in: Tensor, flux_out: Tensor, *, model: str) -> Tensor:
     `[10, 4]` against outflows `[6, 8]` give `[[6, 4], [0, 4]]`, where perfect mixing would
     give `[[4.286, 5.714], [1.714, 2.286]]`.
     """
-    if model == "mixing":
+    model = normalise("junction_routing", model, "routing_matrix")
+    if model == "perfect_mixing":
         total = flux_out.sum(-1, keepdim=True)
         safe = torch.where(total > 0, total, torch.ones_like(total))
         share = torch.where(total > 0, flux_out / safe, torch.zeros_like(flux_out))
         return flux_in.unsqueeze(-1) * share.unsqueeze(-2)
-    if model != "sirane":
-        raise ValueError(
-            f"routing_matrix: model must be 'mixing' or 'sirane', got {model!r}"
-        )
     a = torch.cumsum(flux_in, dim=-1)
     b = torch.cumsum(flux_out, dim=-1)
     a_prev = a - flux_in
@@ -373,27 +373,44 @@ class StreetFlows:
     Writes `"<layer>.q"` (the concatenated `route`, `vent` and `exchange` flows, all
     non-negative, in the layer's own `flow_kinds` order) and `"<layer>.u_canyon"` (the
     SIGNED along-canyon velocity per street, for reporting). Reads `"U_ref"`, `"theta_w"`,
-    `"h_abl"` and -- for `stability="munich"` -- `"lmo"`, each shaped `(...,)`.
+    `"h_abl"` and, when given, `"lmo"`, each shaped `(...,)`.
+
+    The closure options (`noodl.apps.street_aq.closures.OPTIONS`) default to preset
+    `preset` (`"sirane"` or `"munich"`, `closures.PRESETS`); any option given explicitly
+    overrides the preset's value. The earlier option names and values (`exchange=`,
+    `routing=`, `roof_wind_form=`, `"soulhac"`, `"munich"`, ...) are still accepted with a
+    `DeprecationWarning` (`closures.LEGACY`).
 
     `"u_star"`, when present, is the friction velocity itself and replaces the log law
     `u* = kappa U_ref / ln((z_ref - d)/z0)` (MUNICH takes it as an input on its
-    `With_local_data` path). `U_ref` is then needed only for MUNICH's direction spread
-    `sigma_theta = sigma_v / U`, i.e. only with `direction_averaging="munich"`.
+    `With_local_data` path). `U_ref` is then needed only for the turbulence-intensity
+    spread `sigma_theta = sigma_v / U_ref` (`direction_spread="turbulence_intensity"`).
 
-    `"sigma_theta"`, when present, is the direction spread (radians) for
-    `direction_averaging="gauss"` or `"sirane"` and replaces the constructor's
-    `sigma_theta` -- one value
-    per instance, `(...,)`, or, under `meteo="per_street"`, one per junction,
-    `(..., n_junctions)` -- so a spread that varies hour by hour (SIRANE's does) needs no
-    rebuilt model. `direction_averaging="none"` ignores it, as it ignores the constructor's
-    value; `"munich"` refuses it, because MUNICH computes its own spread. The routing is
-    piecewise constant in the sample direction (the in/out classification and the ordering
-    switch discretely), so under `"gauss"`, whose quadrature nodes merely move with the
-    spread, `q` carries no gradient with respect to `sigma_theta`. `"sirane"` is the EXACT
-    Gaussian average over those pieces (`sirane_direction_samples`: one sample per
-    interval between switch angles, weighted by its Gaussian mass), and carries the
-    gradient in `sigma_theta` and in the mean direction through the weights; it needs
-    `0 <= sigma_theta < pi/4`.
+    `"lmo"`, the Obukhov length, selects the `stability="monin_obukhov"` branch; without
+    it the turbulence is the neutral form, bit for bit `stability="neutral"`.
+
+    `direction_spread="driver"`: the spread is the `"sigma_theta"` driver (radians) when
+    present -- one value per instance, `(...,)`, or, under `meteo="per_street"`, one per
+    junction, `(..., n_junctions)`, so a spread that varies hour by hour needs no rebuilt
+    model -- else the constructor's `sigma_theta`, else zero. A zero spread routes at the
+    mean direction, bit for bit `direction_averaging="none"`.
+    `direction_spread="turbulence_intensity"`: `sigma_theta = min(sigma_v / U_ref, 10 deg)`
+    from the junction meteorology; a `"sigma_theta"` driver is refused and the
+    constructor's value ignored. `direction_averaging="none"` uses no spread at all.
+
+    The routing is piecewise constant in the sample direction (the in/out classification
+    and the ordering switch discretely), so under `"gauss_hermite"`, whose quadrature nodes
+    merely move with the spread, `q` carries no gradient with respect to `sigma_theta`.
+    `"exact_gaussian"` is the EXACT Gaussian average over those pieces
+    (`sirane_direction_samples`: one sample per interval between switch angles, weighted
+    by its Gaussian mass), and carries the gradient in `sigma_theta` and in the mean
+    direction through the weights; it needs `0 <= sigma_theta < pi/4`.
+    `"rectangle_rule"` samples `[-2 sigma, 2 sigma]` uniformly with UNNORMALISED weights
+    (`direction_offsets`).
+
+    `sigma_w_min` and `sigma_v_min` (m/s) are floors on the turbulence: `sigma_w` before
+    the roof exchange velocity, `sigma_v` before the turbulence-intensity spread.
+    `canyon_wind_min` and `u_d_min` floor the canyon wind and the exchange velocity.
 
     `meteo="per_street"` gives every one of those drivers a trailing STREET axis,
     `(..., n_streets)`: each street's canyon wind and roof exchange come from its own
@@ -410,10 +427,12 @@ class StreetFlows:
     flux matrix. Reproducing that is what makes the direction averaging comparable with
     MUNICH at all.
 
-    `kappa=None` (the default) resolves to MUNICH's 0.41 whenever any
-    MUNICH-style form is selected (`canyon_wind="exponential"`, `exchange="schulte"` or
-    `roof_wind_form="macdonald"`), and to the neutral form's 0.4 otherwise; an explicit
-    float always wins over that resolution.
+    `kappa=None` (the default) is the preset's von Karman constant (0.40 for `"sirane"`,
+    0.41 for `"munich"`). When any closure option is given explicitly it is instead 0.41
+    whenever a choice written with that constant is selected
+    (`canyon_wind="exponential_profile"`, `roof_exchange="aspect_ratio_scaled"` or
+    `roof_wind="canopy_log_law"`) and 0.40 otherwise (`closures.infer_kappa`). An explicit
+    float always wins.
     """
 
     def __init__(
@@ -422,53 +441,52 @@ class StreetFlows:
         layer,
         geometry: StreetGeometry,
         *,
-        canyon_wind: str = "soulhac",
-        exchange: str = "sirane",
-        routing: str = "sirane",
-        direction_averaging: str = "none",
+        preset: str = "sirane",
+        canyon_wind: str | None = None,
+        roof_wind: str | None = None,
+        roof_exchange: str | None = None,
+        junction_routing: str | None = None,
+        direction_averaging: str | None = None,
+        direction_spread: str | None = None,
+        stability: str | None = None,
         n_theta: int | None = None,
         sigma_theta: float | None = None,
         kappa: float | None = None,
-        canyon_wind_min: float = 0.0,
-        u_d_min: float = 0.0,
-        stability: str = "neutral",
-        roof_wind_form: str = "sirane",
+        canyon_wind_min: float | None = None,
+        u_d_min: float | None = None,
+        sigma_w_min: float | None = None,
+        sigma_v_min: float | None = None,
         z0_s: float = Z0_S_DEFAULT,
         z_ref: float = 30.0,
         pblh_floor: bool = True,
         meteo: str = "uniform",
         layer_name: str = "street",
+        **deprecated,
     ) -> None:
         if meteo not in ("uniform", "per_street"):
             raise ValueError(
                 f"StreetFlows: meteo must be 'uniform' or 'per_street', got {meteo!r}"
             )
-        if canyon_wind not in ("soulhac", "exponential"):
+        options = resolve(preset, dict(
+            deprecated, canyon_wind=canyon_wind, roof_wind=roof_wind,
+            roof_exchange=roof_exchange, junction_routing=junction_routing,
+            direction_averaging=direction_averaging, direction_spread=direction_spread,
+            stability=stability, kappa=kappa, canyon_wind_min=canyon_wind_min,
+            u_d_min=u_d_min, sigma_w_min=sigma_w_min, sigma_v_min=sigma_v_min,
+        ), "StreetFlows")
+        options.pop("chemistry")
+        if options["direction_averaging"] == "exact_gaussian" and sigma_theta is not None \
+                and not 0.0 <= float(sigma_theta) < MAX_SIGMA_THETA_SIRANE:
             raise ValueError(
-                f"StreetFlows: canyon_wind must be 'soulhac' or 'exponential', got "
-                f"{canyon_wind!r}"
+                f"StreetFlows: direction_averaging='exact_gaussian' needs "
+                f"0 <= sigma_theta < pi/4 (the average runs over the real line of "
+                f"directions, not around the circle), got sigma_theta={sigma_theta!r}"
             )
-        if direction_averaging not in ("none", "munich", "gauss", "sirane"):
-            raise ValueError(
-                f"StreetFlows: direction_averaging must be 'none', 'munich', 'gauss' or "
-                f"'sirane', got {direction_averaging!r}"
-            )
-        if direction_averaging == "sirane" and sigma_theta is not None and not (
-            0.0 <= float(sigma_theta) < MAX_SIGMA_THETA_SIRANE
-        ):
-            raise ValueError(
-                f"StreetFlows: direction_averaging='sirane' needs 0 <= sigma_theta < pi/4 "
-                f"(the average runs over the real line of directions, not around the "
-                f"circle), got sigma_theta={sigma_theta!r}"
-            )
-        if exchange not in ("sirane", "schulte"):
-            raise ValueError(
-                f"StreetFlows: exchange must be 'sirane' or 'schulte', got {exchange!r}"
-            )
-        if stability not in ("neutral", "munich"):
-            raise ValueError(
-                f"StreetFlows: stability must be 'neutral' or 'munich', got {stability!r}"
-            )
+        for key in ("canyon_wind_min", "u_d_min", "sigma_w_min", "sigma_v_min"):
+            if not (math.isfinite(options[key]) and options[key] >= 0.0):
+                raise ValueError(
+                    f"StreetFlows: {key} must be finite and >= 0, got {options[key]!r}"
+                )
         # `q` is written as one concatenated block, so the layer's own `flow_kinds` order
         # IS the slot layout this closure assumes; a layer built with the kinds in any
         # other order would take the route flows for vent flows with no error anywhere.
@@ -484,24 +502,22 @@ class StreetFlows:
         self.net = net
         self.layer = layer
         self.geometry = geometry
-        self.canyon_wind = canyon_wind
-        self.exchange = exchange
-        self.routing = routing
-        self.direction_averaging = direction_averaging
+        self.preset = preset
+        self.options = options
+        self.canyon_wind = options["canyon_wind"]
+        self.roof_wind = options["roof_wind"]
+        self.roof_exchange = options["roof_exchange"]
+        self.junction_routing = options["junction_routing"]
+        self.direction_averaging = options["direction_averaging"]
+        self.direction_spread = options["direction_spread"]
+        self.stability = options["stability"]
         self.n_theta = n_theta
         self.sigma_theta = sigma_theta
-        if kappa is None:
-            munich_form = (
-                canyon_wind == "exponential"
-                or exchange == "schulte"
-                or roof_wind_form == "macdonald"
-            )
-            kappa = KAPPA_MUNICH if munich_form else KAPPA
-        self.kappa = float(kappa)
-        self.canyon_wind_min = float(canyon_wind_min)
-        self.u_d_min = float(u_d_min)
-        self.stability = stability
-        self.roof_wind_form = roof_wind_form
+        self.kappa = options["kappa"]
+        self.canyon_wind_min = options["canyon_wind_min"]
+        self.u_d_min = options["u_d_min"]
+        self.sigma_w_min = options["sigma_w_min"]
+        self.sigma_v_min = options["sigma_v_min"]
         self.z0_s = float(z0_s)
         self.z_ref = float(z_ref)
         self.pblh_floor = bool(pblh_floor)
@@ -588,7 +604,7 @@ class StreetFlows:
                     f"StreetFlows: the driver {key!r} is missing; it is needed here "
                     f"(canyon_wind={self.canyon_wind!r}, "
                     f"direction_averaging={self.direction_averaging!r}, "
-                    f"meteo={self.meteo!r})"
+                    f"direction_spread={self.direction_spread!r}, meteo={self.meteo!r})"
                 )
             return None
         return torch.as_tensor(value, dtype=torch.float64)
@@ -632,6 +648,10 @@ class StreetFlows:
                              z_ref=torch.as_tensor(self.z_ref, dtype=torch.float64),
                              d=self._d, z0=self._z0, kappa=self.kappa)
 
+    def _stability(self, lmo: Tensor | None) -> str:
+        """The turbulence form in force: `self.stability`, or `"neutral"` without `lmo`."""
+        return "neutral" if lmo is None else self.stability
+
     def velocities(self, drivers) -> tuple[BoundaryLayer, Tensor, Tensor]:
         """`(per-street boundary layer, signed canyon velocity per street, exchange
         velocity)`, every tensor `(..., n_streets)`."""
@@ -643,24 +663,31 @@ class StreetFlows:
         lmo = self._on_streets(self._driver(drivers, "lmo", required=False), "lmo")
         bl_s = self._boundary_layer(u_ref, u_star, h_abl)
         phi = theta_w - g.azimuth
-        if self.canyon_wind == "soulhac":
+        if self.canyon_wind == "bessel_profile":
             u_street = canyon_velocity(
-                g.width, g.height, phi, u_star=bl_s.u_star, form="soulhac",
+                g.width, g.height, phi, u_star=bl_s.u_star, form="bessel_profile",
                 z0_b=g.z0_b, kappa=self.kappa, canyon_wind_min=self.canyon_wind_min,
             )
         else:
             u_h = roof_wind(
-                bl_s.u_star, g.height, g.width, form=self.roof_wind_form, z0_s=self.z0_s,
+                bl_s.u_star, g.height, g.width, form=self.roof_wind, z0_s=self.z0_s,
                 kappa=self.kappa, h_mean=self.h_mean, w_mean=self.w_mean,
             )
             u_street = canyon_velocity(
-                g.width, g.height, phi, u_h=u_h, form="exponential", z0_s=self.z0_s,
-                canyon_wind_min=self.canyon_wind_min,
+                g.width, g.height, phi, u_h=u_h, form="exponential_profile",
+                z0_s=self.z0_s, canyon_wind_min=self.canyon_wind_min,
             )
-        sigma_w = bl_s.sigma_w(g.height, lmo=lmo, stability=self.stability)
-        u_d = exchange_velocity(sigma_w, g.height, g.width, form=self.exchange,
-                                u_d_min=self.u_d_min)
+        sigma_w = bl_s.sigma_w(g.height, lmo=lmo, stability=self._stability(lmo))
+        u_d = exchange_velocity(sigma_w, g.height, g.width, form=self.roof_exchange,
+                                u_d_min=self.u_d_min, sigma_w_min=self.sigma_w_min)
         return bl_s, u_street, u_d
+
+    def junction_mean(self, values: Tensor) -> Tensor:
+        """Per-street values `(..., n_streets)` -> the arithmetic mean over the streets
+        meeting at each junction, `(..., n_junctions)` in `StreetNetwork.junctions` order:
+        the street-to-junction reduction `junction_values` uses for every key but the
+        direction and the Obukhov length."""
+        return self._street_mean(values, "arithmetic")
 
     def _street_mean(self, values: Tensor, how: str) -> Tensor:
         """Per-street `(..., n_streets)` -> per-junction `(..., n_junctions)`, the mean over
@@ -725,7 +752,7 @@ class StreetFlows:
                     given = self._driver(drivers, f"{key}_junction", required=False)
                     if given is not None:
                         out[key] = given
-        if out["u_star"] is None and self.direction_averaging == "munich":
+        if out["u_star"] is None and self._spread_from_turbulence():
             if self.meteo == "uniform":
                 if out["U_ref"] is None:
                     raise KeyError("StreetFlows: 'U_ref' is missing")
@@ -737,26 +764,32 @@ class StreetFlows:
                 out["u_star"] = self._street_mean(bl_s.u_star, "arithmetic")
         return out
 
+    def _spread_from_turbulence(self) -> bool:
+        """Whether the routing needs the turbulence-intensity spread (and so `u*` and
+        `U_ref` at every junction)."""
+        return (self.direction_spread == "turbulence_intensity"
+                and self.direction_averaging != "none")
+
     def _samples(self, drivers) -> tuple[Tensor, Tensor, Tensor]:
         """`(junction direction (..., n_j), offsets (..., n_j, m), weights (..., n_j, m))`."""
+        driven = self._driver(drivers, "sigma_theta", required=False)
+        if driven is not None and self.direction_spread == "turbulence_intensity":
+            raise ValueError(
+                "StreetFlows: the driver 'sigma_theta' is not used with "
+                "direction_spread='turbulence_intensity', which computes its own spread "
+                "sigma_theta = min(sigma_v / U_ref, 10 deg); drop it, or use "
+                "direction_spread='driver'"
+            )
         j = self.junction_values(drivers)
         theta_j = j["theta_w"]
         if theta_j is None:
             raise KeyError("StreetFlows: the driver 'theta_w' is missing")
-        driven = self._driver(drivers, "sigma_theta", required=False)
-        if driven is not None and self.direction_averaging == "munich":
-            raise ValueError(
-                "StreetFlows: the driver 'sigma_theta' is not used with "
-                "direction_averaging='munich', which computes its own spread "
-                "sigma_theta = sigma_v / U; drop it, or use direction_averaging='gauss' "
-                "or 'sirane'"
-            )
-        if self.direction_averaging == "munich":
+        if self._spread_from_turbulence():
             if j["U_ref"] is None:
                 raise KeyError(
-                    "StreetFlows: direction_averaging='munich' needs the driver 'U_ref' "
-                    "(or 'U_ref_junction'): MUNICH's direction spread is "
-                    "sigma_theta = sigma_v / U, even when 'u_star' is given"
+                    "StreetFlows: direction_spread='turbulence_intensity' needs the driver "
+                    "'U_ref' (or 'U_ref_junction'): the spread is "
+                    "sigma_theta = sigma_v / U_ref, even when 'u_star' is given"
                 )
             h_abl_j = j["h_abl"]
             if self.pblh_floor:
@@ -766,7 +799,9 @@ class StreetFlows:
                                  z_ref=torch.as_tensor(self.z_ref, dtype=torch.float64),
                                  d=torch.zeros((), dtype=torch.float64),
                                  z0=torch.ones((), dtype=torch.float64), kappa=self.kappa)
-            sigma_v = bl_j.sigma_v(lmo=j["lmo"], stability=self.stability)
+            sigma_v = bl_j.sigma_v(lmo=j["lmo"], stability=self._stability(j["lmo"]))
+            if self.sigma_v_min > 0.0:
+                sigma_v = torch.clamp(sigma_v, min=self.sigma_v_min)
             sigma = sigma_theta_munich(sigma_v, j["U_ref"])
         elif driven is not None:
             if self.meteo == "uniform":
@@ -787,11 +822,13 @@ class StreetFlows:
                 )
             else:
                 sigma = driven
-        elif self.sigma_theta is not None:
+        elif self.sigma_theta is not None and self.direction_spread == "driver":
             sigma = torch.full_like(theta_j, float(self.sigma_theta))
         else:
-            sigma = torch.zeros_like(theta_j)
-        if self.direction_averaging == "sirane":
+            # No spread anywhere: one sample at the mean direction, exactly as `"none"`.
+            offsets, weights = direction_offsets("none", torch.zeros_like(theta_j))
+            return theta_j, offsets, weights
+        if self.direction_averaging == "exact_gaussian":
             offsets, weights = sirane_direction_samples(theta_j, sigma, self.slot_angle,
                                                         self.slot_active)
         else:
@@ -826,7 +863,7 @@ class StreetFlows:
         p_in, p_out, to_atm, from_atm = node_closure(flux)
         p_in_ord = torch.gather(p_in.expand(order_in.shape), -1, order_in)
         p_out_ord = torch.gather(p_out.expand(order_out.shape), -1, order_out)
-        f_ord = routing_matrix(p_in_ord, p_out_ord, model=self.routing)
+        f_ord = routing_matrix(p_in_ord, p_out_ord, model=self.junction_routing)
         flat_idx = order_in.unsqueeze(-1) * d + order_out.unsqueeze(-2)
         flat_idx = flat_idx.expand(f_ord.shape).reshape(*f_ord.shape[:-2], d * d)
         f_slot = torch.zeros(*f_ord.shape[:-2], d * d, dtype=f_ord.dtype)

@@ -65,7 +65,7 @@ def test_model_steady_does_not_apply_the_reaction():
 
 def test_street_steady_reaches_the_photostationary_state_on_every_street():
     sn = _network()
-    reaction = photostationary_for_streets(("no", "no2", "o3"))
+    reaction = photostationary_for_streets(("no", "no2", "o3"), preset="munich")
     model, state, _ = build_model(sn, species=("no", "no2", "o3"),
                                          chemistry=reaction, pblh_floor=False)
     drivers = _drivers(model)
@@ -116,7 +116,9 @@ def test_j_no2_reproduces_munich_s_tabulation_and_interpolates_between_it():
     from noodl.apps.street_aq.chemistry import (
         J_NO2_CLEAR_SKY,
         J_NO2_ZENITH_DEG,
-        j_no2,
+    )
+    from noodl.apps.street_aq.chemistry import (
+        j_no2_zenith_table as j_no2,
     )
 
     torch.testing.assert_close(

@@ -458,8 +458,9 @@ _DEFAULT_STREET_OPTIONS: dict[str, str] = {
     "Zref": "30.0",
 }
 """The `[street]` closure options `write_munich_case` writes by default -- MUNICH's
-equivalents of `canyon_wind="exponential"`, `exchange="schulte"`, `roof_wind_form="sirane"`,
-`direction_averaging="munich"` (`With_horizontal_fluctuation`) and
+equivalents of `canyon_wind="exponential_profile"`, `roof_exchange="aspect_ratio_scaled"`,
+`roof_wind="bessel_canyon_mean"`, `direction_averaging="rectangle_rule"`
+(`With_horizontal_fluctuation`; the `munich` preset) and
 `With_stationary_hypothesis: yes` (each hour's steady street balance by fixed-point
 iteration, rather than MUNICH's default explicit integrator, which is unstable at hour-long
 steps on short streets) -- plus the keys MUNICH v2.2 requires regardless of the options

@@ -136,9 +136,9 @@ def _hand_reference(sn, *, emission, background, u_ref=U_REF, theta_w=THETA_W,
     layer = boundary_layer(height.mean(), torch.tensor(u_ref, dtype=DT),
                            torch.tensor(h_abl, dtype=DT), z_ref=30.0, kappa=KAPPA)
     u = canyon_velocity(width, height, torch.tensor(theta_w, dtype=DT) - azimuth,
-                        u_star=layer.u_star, form="soulhac", kappa=KAPPA)
+                        u_star=layer.u_star, form="bessel_profile", kappa=KAPPA)
     sigma_w = 1.3 * layer.u_star * (1.0 - 0.8 * height / layer.h_abl)
-    u_d = exchange_velocity(sigma_w, height, width, form="sirane")
+    u_d = exchange_velocity(sigma_w, height, width, form="turbulent_velocity")
     flux = u * width * height
     a = torch.zeros(n, n, dtype=DT)
     b = torch.zeros(n, dtype=DT)
@@ -178,7 +178,7 @@ def _hand_reference(sn, *, emission, background, u_ref=U_REF, theta_w=THETA_W,
 
 def test_junction_elimination_equals_the_hand_written_dense_system():
     sn = from_test_network()
-    model, state, _ = build_model(sn, routing="mixing", pblh_floor=False)
+    model, state, _ = build_model(sn, junction_routing="perfect_mixing", pblh_floor=False)
     emission = (1.0, 2.0, 3.0)
     solved = model.steady(state, _drivers(model, emission))
     hand = _hand_reference(sn, emission=torch.tensor(emission, dtype=DT),
@@ -235,7 +235,7 @@ def test_gaussian_averaging_collapses_to_a_single_sample_at_zero_spread():
     reference = plain.steady(state, _drivers(plain))["street.x"]
     for spread in (0.0, 1.0e-9):
         model, state_g, _ = build_model(
-            sn, direction_averaging="gauss", n_theta=5, sigma_theta=spread,
+            sn, direction_averaging="gauss_hermite", n_theta=5, sigma_theta=spread,
             pblh_floor=False,
         )
         got = model.steady(state_g, _drivers(model))["street.x"]
@@ -247,7 +247,7 @@ def test_gaussian_averaging_collapses_to_a_single_sample_at_zero_spread():
 def test_every_street_s_own_flux_is_fully_accounted_for_at_the_junction_it_enters():
     """Routing rows sum to one: the flux a street delivers to a junction leaves again,
     either into the other streets or through that junction's roof."""
-    model, state, _ = build_model(from_test_network(), routing="sirane",
+    model, state, _ = build_model(from_test_network(), junction_routing="non_crossing_streamlines",
                                          pblh_floor=False)
     drivers = _drivers(model)
     resolved = model._apply_closures(state, drivers)
@@ -332,7 +332,7 @@ def test_a_two_street_dead_end_pair_conserves_mass_in_both_wind_directions():
         x={"a": 0.0, "b": 100.0, "c": 220.0, "d": 100.0},
         y={"a": 0.0, "b": 0.0, "c": 0.0, "d": 140.0},
     )
-    model, state, _ = build_model(sn, routing="sirane", pblh_floor=False)
+    model, state, _ = build_model(sn, junction_routing="non_crossing_streamlines", pblh_floor=False)
     for theta in (0.0, 0.5 * math.pi, math.pi, 1.3 * math.pi):
         drivers = _drivers(model, (1.0, 2.0, 3.0), theta_w=theta, background=0.0)
         solved = model.steady(state, drivers)
