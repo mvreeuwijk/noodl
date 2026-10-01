@@ -241,9 +241,11 @@ def test_gaussian_averaging_collapses_to_a_single_sample_at_zero_spread():
             pblh_floor=False,
         )
         got = model.steady(state_g, _drivers(model))["street.x"]
-        # Exactly equal: the Gauss-Hermite weights are normalised and every offset is
-        # zero at zero spread, so the closure evaluates the identical flux matrix.
-        torch.testing.assert_close(got, reference, rtol=0, atol=0)
+        # Equal to rounding: the Gauss-Hermite weights are normalised and every offset is
+        # zero at zero spread, so the closure evaluates the identical flux matrix -- but
+        # `sum_k w_k F` is `F` only up to an ulp in floating point, even with
+        # `sum_k w_k == 1.0` exactly.
+        torch.testing.assert_close(got, reference, rtol=1e-15, atol=0)
 
 
 def test_every_street_s_own_flux_is_fully_accounted_for_at_the_junction_it_enters():
