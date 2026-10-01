@@ -73,16 +73,41 @@ gradient. See [Differentiability](differentiability.md#the-contract).
 
 `noodl.elements` also carries the Modelica Buildings Library (MBL) family, which expresses the
 same physics — power laws, tables, doors — as MBL's own equations rather than CONTAM's:
-`MBLPowerLaw` (built by `mbl_orifice`, `mbl_ela`, `mbl_point`, `mbl_points` and
-`mbl_coefficient`) is the power law family; `MBLTable` a tabulated pressure-flow curve;
-`MBLDoorOpen`/`MBLDoorOperable` a lumped door pair and `MBLDoorCompartment`/
-`MBLDoorCompartmentOperable`, with the `DoorCompartmentHead` drive, a height-discretised one;
-`MBLMedium`, built by `medium(name)`, the fixed-density medium the others read. See
+`RegularizedPowerLaw` (built by `regularized_orifice`, `effective_leakage_area`,
+`power_law_from_point`, `power_law_from_points` and `power_law_coefficient`) is the power law
+family; `SplineFlowTable` a tabulated pressure-flow curve; `OpenDoor`/`OperableDoor` a lumped
+door pair (built by `open_door_pair`/`operable_door_pair`) and `DoorCompartment`/
+`OperableDoorCompartment`, with the `DoorCompartmentHead` drive, a height-discretised one (built
+by `discretized_door`/`discretized_operable_door`, or wrapped as two port streams by
+`DoorPortStream`); `AirMedium`, built by `medium(name)`, the fixed-density medium the others
+read. See
 [Airflow elements](../applications/building_physics.md#airflow-elements) for the physics, the
 law each one evaluates and how it differs from its CONTAM counterpart.
 
 Applications add their own: the water application contributes `HazenWilliams`,
-`EpanetDarcyWeisbach`, `PumpCurve` and `MinorLoss`; the sewer application contributes `Headspace`.
+`CompositeDarcyWeisbach`, `PumpCurve` and `MinorLoss`; the sewer application contributes
+`Headspace`.
+
+**Pre-rename names.** Identifiers now say what an element does physically, not which tool it
+comes from. The earlier names still import, as aliases of the same objects:
+
+| Pre-rename name | Name |
+|---|---|
+| `MBLPowerLaw` | `RegularizedPowerLaw` |
+| `mbl_orifice`, `mbl_ela` | `regularized_orifice`, `effective_leakage_area` |
+| `mbl_point`, `mbl_points`, `mbl_coefficient` | `power_law_from_point`, `power_law_from_points`, `power_law_coefficient` |
+| `MBLTable` | `SplineFlowTable` |
+| `MBLDoorOpen`, `MBLDoorOperable` | `OpenDoor`, `OperableDoor` |
+| `mbl_door_pair`, `mbl_operable_door_pair` | `open_door_pair`, `operable_door_pair` |
+| `MBLDoorCompartment`, `MBLDoorCompartmentOperable` | `DoorCompartment`, `OperableDoorCompartment` |
+| `MBLDoorPortStream` | `DoorPortStream` |
+| `mbl_discretized_door`, `mbl_discretized_operable_door` | `discretized_door`, `discretized_operable_door` |
+| `MBLMedium` | `AirMedium` |
+| module `noodl.elements.powerlaw_mbl` | `noodl.elements.powerlaw_regularized` |
+| `EpanetDarcyWeisbach`, `epanet_friction_factor` (water) | `CompositeDarcyWeisbach`, `composite_friction_factor` |
+| `friction="epanet"` (water `build_model`) | `friction="composite"` |
+| `geometry="swmm"`, module `swmm_xsect` (sewer) | `geometry="tabulated"`, `xsect_tables` |
+| `STREET_RAD_TO_CONTAM_DEG`, `CONTAM_DEG_TO_STREET_RAD` (`noodl.couple`) | `MATH_RAD_TO_COMPASS_DEG`, `COMPASS_DEG_TO_MATH_RAD` |
 
 ### A note on `Duct`
 

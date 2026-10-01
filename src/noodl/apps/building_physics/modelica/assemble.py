@@ -16,7 +16,7 @@ What each MBL construct becomes
   instance, so that each element keeps its own `dp_turbulent`, form and drives:
   `"airpath:<name>"` for a one-way element (edge from its `port_a` side to its `port_b`
   side), `"door_ab:<name>"` and `"door_ba:<name>"` for `DoorOpen`/`DoorOperable`
-  (`noodl.elements.door`) and for a discretised door (`MBLDoorPortStream`: the door's
+  (`noodl.elements.door`) and for a discretised door (`DoorPortStream`: the door's
   two port streams `mAB_flow`/`-mBA_flow`, its `nCom` compartments and their
   `DoorCompartmentHead` evaluated inside the element, so that the streams carry the door's
   enthalpy, moisture and trace substances as MBL's ports do), and
@@ -31,7 +31,7 @@ What each MBL construct becomes
 * **Species layer** ("species", `TransportLayer`, kg/kg) with one species per
   `extraPropertiesNames` entry and, when the model needs it (see "Moisture"), water vapour
   `X_w` as the LAST species. Boundaries = boundary nodes. Omitted when it has no species.
-* **Closure** (`_MBLClosure`) writing the full-node drivers `"T"` (K), `"p_abs"` (Pa) and,
+* **Closure** (`_ZoneStateClosure`) writing the full-node drivers `"T"` (K), `"p_abs"` (Pa) and,
   when moisture is carried, `"X_w"`; otherwise `"X_w"` is a constant driver at the medium
   default (0 for SimpleAir).
 
@@ -75,7 +75,7 @@ latent and cross terms cancel exactly and MBL's zone temperature obeys
 `m cp(X) dT/dt = sum m_in cp(X_in) (T_in - T)`: only the RATIO of the upstream stream's `cp`
 to the zone's own enters. The thermal layer keeps one carrier and capacity `cp` (at
 `X_default`), and the closure adds the difference as a heat source,
-`c0 sum_in |q| (cp(X_up)/cp(X_i) - 1) (T_up - T_i)` (`_MBLClosure.cp_correction`), which
+`c0 sum_in |q| (cp(X_up)/cp(X_i) - 1) (T_up - T_i)` (`_ZoneStateClosure.cp_correction`), which
 makes the layer's balance MBL's exactly. Without it the ratio is off by up to
 `0.84 |X_in - X|` (`(cp_ste - cp_air)/cp`; 4.2e-3 for the 0.015/0.01 rooms of
 `Examples/ZonalFlow.mo`, where it put rooB's temperature 1e-2 K off MBL's). A stream injected
@@ -197,19 +197,19 @@ from noodl.apps.building_physics.modelica.schema import (
     ModelicaImportError,
 )
 from noodl.elements import (
-    MBLDoorOpen,
-    MBLDoorOperable,
-    MBLDoorPortStream,
-    MBLMedium,
-    MBLTable,
-    mbl_coefficient,
-    mbl_discretized_door,
-    mbl_discretized_operable_door,
-    mbl_ela,
-    mbl_orifice,
-    mbl_point,
-    mbl_points,
+    AirMedium,
+    DoorPortStream,
+    OpenDoor,
+    OperableDoor,
+    SplineFlowTable,
+    discretized_door,
+    discretized_operable_door,
+    effective_leakage_area,
     medium,
+    power_law_coefficient,
+    power_law_from_point,
+    power_law_from_points,
+    regularized_orifice,
 )
 from noodl.elements.base import Element, memo
 from noodl.elements.media import _moist_air_buoyancy_density
@@ -588,7 +588,7 @@ class _ZonalFlowEdge(Element):
 
     dp_independent = True
 
-    def __init__(self, *, kind: str, direction: str, src: int, tgt: int, medium: MBLMedium,
+    def __init__(self, *, kind: str, direction: str, src: int, tgt: int, medium: AirMedium,
                  key: str, V: float | None = None, use_default: bool = True) -> None:
         super().__init__(kind)
         self.direction = direction
@@ -626,12 +626,12 @@ class _ZonalFlowEdge(Element):
 
 
 # ------------------------------------------------------------------------- closure
-class _MBLClosure:
+class _ZoneStateClosure:
     """Writes the full-node drivers `"T"`, `"p_abs"` (and `"X_w"` when moisture is carried)
     from the transport states, the boundary drivers and the last solved `"air.phi"` (module
     docstring, "p_abs")."""
 
-    def __init__(self, *, medium: MBLMedium, p_ref: float, T0: Tensor, phi0: Tensor,
+    def __init__(self, *, medium: AirMedium, p_ref: float, T0: Tensor, phi0: Tensor,
                  X0: Tensor,
                  air_interior: Tensor, air_bound: Tensor, th_interior: Tensor | None,
                  th_bound: Tensor, sp_interior: Tensor | None, sp_bound: Tensor | None,
@@ -755,7 +755,7 @@ def _param(comp: Component, key: str, errors: list[str], default=None, *, requir
     return default
 
 
-def _one_way(comp: Component, kind: str, med: MBLMedium, errors: list[str]) -> Element | None:
+def _one_way(comp: Component, kind: str, med: AirMedium, errors: list[str]) -> Element | None:
     cls = comp.cls.rsplit(".", 1)[-1]
     p = comp.parameters
     if p.get("useDefaultProperties", True) is False:
@@ -773,45 +773,45 @@ def _one_way(comp: Component, kind: str, med: MBLMedium, errors: list[str]) -> E
             A = req("A")
             if A is None:
                 return None
-            return mbl_orifice(A, p.get("CD", 0.65), p.get("m", 0.5), dpt, rho_default=rho,
+            return regularized_orifice(A, p.get("CD", 0.65), p.get("m", 0.5), dpt, rho_default=rho,
                                kind=kind)
         if cls == "EffectiveAirLeakageArea":
             L = req("L")
             if L is None:
                 return None
-            return mbl_ela(L, p.get("dpRat", 4.0), p.get("CDRat", 1.0), p.get("m", 0.65), dpt,
-                           rho_default=rho, kind=kind)
+            return effective_leakage_area(L, p.get("dpRat", 4.0), p.get("CDRat", 1.0),
+                                          p.get("m", 0.65), dpt, rho_default=rho, kind=kind)
         if cls == "Point_m_flow":
             dp, mf = req("dpMea_nominal"), req("mMea_flow_nominal")
             if dp is None or mf is None:
                 return None
-            return mbl_point(dp, mf, p.get("m", 0.5), dpt, rho_default=rho, kind=kind)
+            return power_law_from_point(dp, mf, p.get("m", 0.5), dpt, rho_default=rho, kind=kind)
         if cls == "Points_m_flow":
             dp, mf = req("dpMea_nominal"), req("mMea_flow_nominal")
             if dp is None or mf is None:
                 return None
-            return mbl_points(dp, mf, dpt, rho_default=rho, kind=kind)
+            return power_law_from_points(dp, mf, dpt, rho_default=rho, kind=kind)
         if cls == "Coefficient_V_flow":
             C, m = req("C"), req("m")
             if C is None or m is None:
                 return None
-            return mbl_coefficient(C, m, "volume", dpt, rho_default=rho, kind=kind)
+            return power_law_coefficient(C, m, "volume", dpt, rho_default=rho, kind=kind)
         if cls == "Coefficient_m_flow":
             k = req("k")
             if k is None:
                 return None
-            return mbl_coefficient(k, p.get("m", 0.5), "mass", dpt, rho_default=rho,
-                                   kind=kind)
+            return power_law_coefficient(k, p.get("m", 0.5), "mass", dpt, rho_default=rho,
+                                         kind=kind)
         if cls == "Table_V_flow":
             dp, vf = req("dpMea_nominal"), req("VMea_flow_nominal")
             if dp is None or vf is None:
                 return None
-            return MBLTable(dp, vf, form="volume", rho_default=rho, kind=kind)
+            return SplineFlowTable(dp, vf, form="volume", rho_default=rho, kind=kind)
         if cls == "Table_m_flow":
             dp, mf = req("dpMea_nominal"), req("mMea_flow_nominal")
             if dp is None or mf is None:
                 return None
-            return MBLTable(dp, mf, form="mass", kind=kind)
+            return SplineFlowTable(dp, mf, form="mass", kind=kind)
     except (ValueError, TypeError) as exc:
         errors.append(f"{comp.name} ({comp.cls}): {exc}")
         return None
@@ -819,7 +819,7 @@ def _one_way(comp: Component, kind: str, med: MBLMedium, errors: list[str]) -> E
     return None
 
 
-def _zone(comp: Component, med: MBLMedium, errors: list[str]) -> _Zone | None:
+def _zone(comp: Component, med: AirMedium, errors: list[str]) -> _Zone | None:
     p = comp.parameters
     cls = comp.cls.rsplit(".", 1)[-1]
     if cls == "DelayFirstOrder":
@@ -1251,7 +1251,7 @@ class _Builder:
                              for nm in node_names], dtype=F64)
         X0 = torch.tensor([zones[nm].X_w if nm in zones else X_const for nm in node_names],
                           dtype=F64)
-        closure = _MBLClosure(
+        closure = _ZoneStateClosure(
             medium=med, p_ref=p_ref, T0=T0, phi0=phi0, X0=X0, air_interior=air.interior,
             air_bound=air.bound,
             th_interior=layers["thermal"].interior_idx if "thermal" in layers else None,
@@ -1529,7 +1529,7 @@ class _Builder:
             kab, kba = f"door_ab:{comp.name}", f"door_ba:{comp.name}"
             if cls == "DoorOpen":
                 law = dict(common, CD=p.get("CD", 0.65), m=p.get("m", 0.5))
-                ctor = MBLDoorOpen
+                ctor = OpenDoor
             else:
                 LClo = _param(comp, "LClo", self.errors, required=True)
                 y = self.sig.require(comp, "y")
@@ -1540,7 +1540,7 @@ class _Builder:
                            mOpe=p.get("mOpe", 0.5), mClo=p.get("mClo", 0.65),
                            dpCloRat=p.get("dpCloRat", 4.0), CDCloRat=p.get("CDCloRat", 1.0),
                            y_key=f"{comp.name}.y")
-                ctor = MBLDoorOperable
+                ctor = OperableDoor
             try:
                 built = [ctor(direction=direction, src=[iA], tgt=[iB], medium=med,
                              kind=kind, **law)
@@ -1563,15 +1563,15 @@ class _Builder:
                        vZer=float(p.get("vZer", 0.001)))
             try:
                 if cls == "DoorDiscretizedOpen":
-                    el, head = mbl_discretized_door(src=iA, tgt=iB, medium=med, kind=kind,
-                                                    CD=p.get("CD", 0.65), **geo)
+                    el, head = discretized_door(src=iA, tgt=iB, medium=med, kind=kind,
+                                                CD=p.get("CD", 0.65), **geo)
                 else:
                     LClo = _param(comp, "LClo", self.errors, required=True)
                     y = self.sig.require(comp, "y")
                     if LClo is None or y is None:
                         return
                     self._inputs[f"{comp.name}.y"] = y
-                    el, head = mbl_discretized_operable_door(
+                    el, head = discretized_operable_door(
                         src=iA, tgt=iB, medium=med, kind=kind, y_key=f"{comp.name}.y",
                         LClo=float(LClo), CDOpe=p.get("CDOpe", 0.65),
                         CDClo=p.get("CDClo", 0.65), CDCloRat=p.get("CDCloRat", 1.0),
@@ -1580,13 +1580,13 @@ class _Builder:
             except ValueError as exc:
                 self.errors.append(f"{comp.name} ({comp.cls}): {exc}")
                 return
-            # The door's two port streams as two edges (`MBLDoorPortStream`: MBL carries
+            # The door's two port streams as two edges (`DoorPortStream`: MBL carries
             # the door's enthalpy, moisture and trace substances on them, each upwinded on
             # its own sign), the compartment law and heads inside.
             kab, kba = f"door_ab:{comp.name}", f"door_ba:{comp.name}"
             for k, direction in ((kab, "ab"), (kba, "ba")):
                 net.add_edge(door.side_a, door.side_b, kind=k)
-                elements.append(MBLDoorPortStream(el, head, direction, k))
+                elements.append(DoorPortStream(el, head, direction, k))
             kinds[comp.name] = (kab, kba)
             edge_dirs[comp.name] = [(kab, 0, 1), (kba, 0, 1)]
             extra_ports[f"{comp.name}.port_a1"] = (kab, 0, 1)

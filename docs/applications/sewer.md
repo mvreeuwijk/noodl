@@ -139,7 +139,7 @@ SWMM 5 does not evaluate the circle. For a `CIRCULAR` conduit it interpolates 51
 (`A/Afull`, `Y/Yfull` and the section factor `S/Sfull`, from `xsect.dat`) and near the invert
 switches to closed forms solved by Newton iterations with their own starting guesses and stopping
 rule (`xsect.c`). The tables differ from the true circle by up to ~5e-3 in depth, and by far more
-in velocity near the invert. `geometry="swmm"` (module `noodl.apps.sewer.swmm_xsect`) reproduces
+in velocity near the invert. `geometry="tabulated"` (module `noodl.apps.sewer.xsect_tables`) reproduces
 all of it, operation for operation, and is what `read_swmm_inp` uses by default, because a
 network read from a SWMM file is read to reproduce SWMM (`read_swmm_inp(path,
 geometry="analytic")` gives the exact circle).
@@ -154,7 +154,7 @@ converts CMS flows and volumes with 0.02832 m³/ft³ rather than $0.3048^3$. Tha
 1.6e-4 on the Manning coefficient and 1.2e-4 on reported volumes. Everything is differentiable:
 piecewise-linear tables, unrolled Newton loops, and one implicit-function root.
 
-Scope: `geometry="swmm"` covers the steady kinematic-wave path only, and is refused by name with
+Scope: `geometry="tabulated"` covers the steady kinematic-wave path only, and is refused by name with
 `storage=True`. The discharge limit is SWMM's `Qfull` rather than the analytic 0.938 D capacity.
 The headspace, top width, hydraulic radius and mean depth (air side, sulfide) remain the exact
 circle, evaluated at SWMM's depth. SWMM has no headspace to compare them with.
@@ -235,7 +235,7 @@ concentration, as SWMM does. `H2STransfer` reads the step-start state either way
 
 ## Verification
 
-Against SWMM 5.2.4 through `pyswmm`, with `geometry="swmm"`, on three kinematic-wave networks
+Against SWMM 5.2.4 through `pyswmm`, with `geometry="tabulated"`, on three kinematic-wave networks
 of circular conduits:
 
 - `tree_kinwave.inp`, the hand-built 5-conduit tree.

@@ -77,7 +77,7 @@ import torch
 
 from noodl._broadcast import broadcast_shapes
 from noodl.elements.base import Element, band_edges, memo
-from noodl.elements.media import _R_AIR, MBLMedium
+from noodl.elements.media import _R_AIR, AirMedium
 
 Tensor = torch.Tensor
 
@@ -192,7 +192,7 @@ def _basic_flow_function_dp(dp: Tensor, k: Tensor, m_flow_turbulent: Tensor) -> 
     return torch.where(sharp_mask, sharp, inner)
 
 
-class _MBLDoor(Element):
+class _Door(Element):
     """Shared plumbing of the two door laws: endpoints, the temperature driver, direction."""
 
     def __init__(
@@ -201,7 +201,7 @@ class _MBLDoor(Element):
         direction: str,
         src,
         tgt,
-        medium: MBLMedium,
+        medium: AirMedium,
         dp_turbulent: float,
         T_key: str,
         kind: str,
@@ -307,7 +307,7 @@ class _MBLDoor(Element):
         return self.flow(zero, drivers), self.dflow(zero, drivers)
 
 
-class MBLDoorOpen(_MBLDoor):
+class OpenDoor(_Door):
     """``Buildings.Airflow.Multizone.DoorOpen``: one direction of the always-open door.
 
     Parameters default to MBL's: ``wOpe = 0.9``, ``hOpe = 2.1``, ``dp_turbulent = 0.01``
@@ -322,7 +322,7 @@ class MBLDoorOpen(_MBLDoor):
         direction: str,
         src,
         tgt,
-        medium: MBLMedium,
+        medium: AirMedium,
         wOpe=0.9,
         hOpe=2.1,
         CD=0.65,
@@ -391,7 +391,7 @@ class MBLDoorOpen(_MBLDoor):
         return _power_law_slope_at(CVal, dp, self.m, self.dp_turbulent, coeffs, grad)
 
 
-class MBLDoorOperable(_MBLDoor):
+class OperableDoor(_Door):
     """``Buildings.Airflow.Multizone.DoorOperable``: the door blended between open and closed
     by the opening signal ``y`` read from ``drivers[y_key]``.
 
@@ -415,7 +415,7 @@ class MBLDoorOperable(_MBLDoor):
         direction: str,
         src,
         tgt,
-        medium: MBLMedium,
+        medium: AirMedium,
         y_key: str,
         LClo,
         wOpe=0.9,
@@ -452,14 +452,14 @@ class MBLDoorOperable(_MBLDoor):
     def _y(self, drivers) -> Tensor:
         if drivers is None or self.y_key not in drivers:
             raise KeyError(
-                f"MBLDoorOperable (kind {self.kind!r}): driver {self.y_key!r} not found; it "
+                f"OperableDoor (kind {self.kind!r}): driver {self.y_key!r} not found; it "
                 f"needs the door opening signal y (0 closed, 1 open)"
             )
         y = torch.as_tensor(drivers[self.y_key])
         n_edges = self.src.numel()
         if y.ndim and y.shape[-1] not in (1, n_edges):
             raise ValueError(
-                f"MBLDoorOperable (kind {self.kind!r}): driver {self.y_key!r} has last "
+                f"OperableDoor (kind {self.kind!r}): driver {self.y_key!r} has last "
                 f"dimension {y.shape[-1]}; expected 1 or the door count {n_edges}"
             )
         return y
@@ -506,21 +506,27 @@ class MBLDoorOperable(_MBLDoor):
         return V_p, m_t
 
 
-def mbl_door_pair(*, kind: str = "door", **kwargs) -> tuple[MBLDoorOpen, MBLDoorOpen]:
+def open_door_pair(*, kind: str = "door", **kwargs) -> tuple[OpenDoor, OpenDoor]:
     """Both edges of one ``DoorOpen`` (or of several, with per-door ``src``/``tgt``): the
     ``"ab"`` edge (path 1) with kind ``f"{kind}_ab"`` and the ``"ba"`` edge (path 2) with kind
-    ``f"{kind}_ba"``, sharing every keyword argument of :class:`MBLDoorOpen`."""
+    ``f"{kind}_ba"``, sharing every keyword argument of :class:`OpenDoor`."""
     return (
-        MBLDoorOpen(direction="ab", kind=f"{kind}_ab", **kwargs),
-        MBLDoorOpen(direction="ba", kind=f"{kind}_ba", **kwargs),
+        OpenDoor(direction="ab", kind=f"{kind}_ab", **kwargs),
+        OpenDoor(direction="ba", kind=f"{kind}_ba", **kwargs),
     )
 
 
-def mbl_operable_door_pair(
+def operable_door_pair(
     *, kind: str = "door", **kwargs
-) -> tuple[MBLDoorOperable, MBLDoorOperable]:
-    """Both edges of one ``DoorOperable``; see :func:`mbl_door_pair`."""
+) -> tuple[OperableDoor, OperableDoor]:
+    """Both edges of one ``DoorOperable``; see :func:`open_door_pair`."""
     return (
-        MBLDoorOperable(direction="ab", kind=f"{kind}_ab", **kwargs),
-        MBLDoorOperable(direction="ba", kind=f"{kind}_ba", **kwargs),
+        OperableDoor(direction="ab", kind=f"{kind}_ab", **kwargs),
+        OperableDoor(direction="ba", kind=f"{kind}_ba", **kwargs),
     )
+
+# Pre-rename names, kept as aliases so existing code keeps working.
+MBLDoorOpen = OpenDoor  # alias, the pre-rename name
+MBLDoorOperable = OperableDoor  # alias, the pre-rename name
+mbl_door_pair = open_door_pair  # alias, the pre-rename name
+mbl_operable_door_pair = operable_door_pair  # alias, the pre-rename name
