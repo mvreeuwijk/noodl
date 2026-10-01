@@ -86,6 +86,7 @@ def test_the_munich_preset_is_the_earlier_munich_option_set():
             direction_averaging="munich", roof_wind_form="sirane", stability="munich",
             kappa=0.41, canyon_wind_min=0.1, u_d_min=0.001, sigma_w_min=0.0,
             sigma_v_min=0.0, sigma_w_height="street_height",
+            shape_constant="grid_search",
         )
     assert _flows(preset).options == _flows(spelt).options
     for lmo in (150.0, -40.0):

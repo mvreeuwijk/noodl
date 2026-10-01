@@ -506,6 +506,7 @@ class StreetFlows:
         direction_averaging: str | None = None,
         direction_spread: str | None = None,
         stability: str | None = None,
+        shape_constant: str | None = None,
         n_theta: int | None = None,
         sigma_theta: float | None = None,
         kappa: float | None = None,
@@ -530,7 +531,8 @@ class StreetFlows:
             deprecated, canyon_wind=canyon_wind, roof_wind=roof_wind,
             roof_exchange=roof_exchange, junction_routing=junction_routing,
             direction_averaging=direction_averaging, direction_spread=direction_spread,
-            stability=stability, kappa=kappa, canyon_wind_min=canyon_wind_min,
+            stability=stability, shape_constant=shape_constant, kappa=kappa,
+            canyon_wind_min=canyon_wind_min,
             u_d_min=u_d_min, sigma_w_min=sigma_w_min, sigma_v_min=sigma_v_min,
             sigma_w_height=sigma_w_height, h_canopy=h_canopy,
         ), "StreetFlows")
@@ -577,6 +579,7 @@ class StreetFlows:
         self.stability = options["stability"]
         self.sigma_w_height = options["sigma_w_height"]
         self.h_canopy = options["h_canopy"]
+        self.shape_constant = options["shape_constant"]
         self.n_theta = n_theta
         self.sigma_theta = sigma_theta
         self.kappa = options["kappa"]
@@ -641,6 +644,16 @@ class StreetFlows:
         self.slot_street = slot_street
         self.slot_active = slot_active
         self.slot_angle = torch.where(slot_active, angle, torch.zeros_like(angle))
+        # MUNICH sorts the in- and outflow lists on its OWN street angle, the compass
+        # bearing (clockwise from north, [0, 2 pi); `ComputeStreetAngle`, `:3088-3178`),
+        # and its one-gap rotation (`:2919-2930`, `:2955-2970`) only repairs a list whose
+        # wrap-around gap sits at the end it checks. The circular order -- and with three
+        # or more streets on one side of the wind, the routing -- therefore depends on
+        # WHERE the linear sort cuts the circle: north for MUNICH. Sorting the
+        # counter-clockwise-from-east `slot_angle` cuts at east instead and gives a
+        # different (and non-circular) order whenever such a list straddles east.
+        bearing = torch.remainder(0.5 * math.pi - angle, TWO_PI)
+        self.slot_bearing = torch.where(slot_active, bearing, torch.zeros_like(bearing))
         for junction, slot, _street, _sign in vent_rows:
             vent_flat.append(junction * d + slot)
         self.vent_flat = torch.tensor(vent_flat, dtype=torch.long)
@@ -742,11 +755,13 @@ class StreetFlows:
             u_street = canyon_velocity(
                 g.width, g.height, phi, u_star=bl_s.u_star, canyon_wind="bessel_profile",
                 z0_b=g.z0_b, kappa=self.kappa, canyon_wind_min=self.canyon_wind_min,
+                shape_constant=self.shape_constant,
             )
         else:
             u_h = roof_wind(
                 bl_s.u_star, g.height, g.width, roof_wind=self.roof_wind, z0_s=self.z0_s,
                 kappa=self.kappa, h_mean=self.h_mean, w_mean=self.w_mean,
+                shape_constant=self.shape_constant,
             )
             u_street = canyon_velocity(
                 g.width, g.height, phi, u_h=u_h, canyon_wind="exponential_profile",
@@ -926,11 +941,14 @@ class StreetFlows:
             d_angle = theta_k[..., None] - self.slot_angle           # (..., m, n_j, d)
             is_in = (torch.cos(d_angle) < 0) & self.slot_active
             is_out = (~is_in) & self.slot_active
+            # MUNICH's walk: inflows by DECREASING bearing, outflows by INCREASING
+            # bearing (`:2907-2972`), on the bearing so the circle is cut where
+            # MUNICH cuts it (see `_read_edges`).
             order_in = order_slots(
-                self.slot_angle.expand(is_in.shape), is_in, descending=True
+                self.slot_bearing.expand(is_in.shape), is_in, descending=True
             )
             order_out = order_slots(
-                self.slot_angle.expand(is_out.shape), is_out, descending=False
+                self.slot_bearing.expand(is_out.shape), is_out, descending=False
             )
         magnitude = (u_street * g.width * g.height).abs()
         mag = (magnitude[..., self.slot_street] * self.slot_active).unsqueeze(-3)

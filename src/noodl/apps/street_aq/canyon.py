@@ -198,6 +198,78 @@ def bessel_shape_parameter(ratio: Tensor) -> Tensor:
 soulhac_shape = bessel_shape_parameter
 """Earlier name of `bessel_shape_parameter`."""
 
+SHAPE_CONSTANT_GRID_STEP = 0.01
+"""Spacing of the grid `grid_shape_parameter` searches, `c = 0.01, 0.02, ..., 1.00`
+(ATM `ComputeSiraneC`, `MeteorologyStreet.cxx:114-152`: `maxC = 1`, `nc = 100`)."""
+
+SHAPE_CONSTANT_GRID_POINTS = 100
+"""Number of points on that grid."""
+
+SHAPE_CONSTANT_GRID_TOLERANCE = 1e-3
+"""The largest `|2/c exp((pi/2) Y1(c)/J1(c) - gamma_E) - z0/di|` the grid search accepts:
+MUNICH stops with "Fail to find a solution" above it (`MeteorologyStreet.cxx:146-149`)."""
+
+
+def _shape_constant_grid() -> Tensor:
+    """The grid, accumulated exactly as MUNICH accumulates it (`tempC += step`), so every
+    point carries MUNICH's own rounding rather than `k/100`'s."""
+    values, c = [], 0.0
+    for _ in range(SHAPE_CONSTANT_GRID_POINTS):
+        c += SHAPE_CONSTANT_GRID_STEP
+        values.append(c)
+    return torch.tensor(values, dtype=torch.float64)
+
+
+def grid_shape_parameter(ratio: Tensor) -> Tensor:
+    """The shape parameter `c` the way MUNICH evaluates it: the point of the grid
+    `c = 0.01, 0.02, ..., 1.00` that minimises `|2/c exp((pi/2) Y1(c)/J1(c) - gamma_E) - z0/di|`
+    (ATM `ComputeSiraneC`, `MeteorologyStreet.cxx:114-152`; the first minimum wins on a tie,
+    as MUNICH's strict `>` makes it).
+
+    The forward value is that grid point, so `c` is quantised to 0.01. The canyon-mean
+    factor `f_mean` is sensitive to `c`, so against the exact root (`bessel_shape_parameter`)
+    the roof wind `u_H` moves by up to about 2 % (median 0.8 % for `z0_s = 0.01` and
+    `delta_i` from 2 to 40 m), though `u_M` alone moves by only about 4e-4. The
+    argmin is piecewise constant in `ratio`, so its own derivative is zero almost everywhere;
+    the gradient carried here is instead the EXACT root's (a straight-through estimator:
+    `c_exact + (c_grid - c_exact).detach()`). That keeps the roof wind differentiable in the
+    roughness and the geometry with the slope of the continuous model, which is what an
+    optimiser or a sensitivity needs, while the forward value is MUNICH's. A ratio whose
+    best grid residual exceeds `SHAPE_CONSTANT_GRID_TOLERANCE` is refused, as MUNICH refuses
+    it.
+    """
+    ratio = torch.as_tensor(ratio, dtype=torch.float64)
+    exact = bessel_shape_parameter(ratio)
+    with torch.no_grad():
+        grid = _shape_constant_grid()
+        curve = 2.0 / grid * torch.exp(
+            (math.pi / 2.0) * torch.special.bessel_y1(grid) / torch.special.bessel_j1(grid)
+            - EULER_GAMMA_TRUNCATED
+        )
+        misfit = (curve - ratio.detach().unsqueeze(-1)).abs()
+        best, index = misfit.min(dim=-1)
+        if bool((best > SHAPE_CONSTANT_GRID_TOLERANCE).any()):
+            bad = torch.nonzero(
+                (best > SHAPE_CONSTANT_GRID_TOLERANCE).reshape(-1)).flatten().tolist()
+            raise ValueError(
+                f"grid_shape_parameter: no point of the grid c = 0.01..1.00 solves the shape "
+                f"equation to within {SHAPE_CONSTANT_GRID_TOLERANCE} at flat index/indices "
+                f"{bad} (ratios {[float(v) for v in ratio.reshape(-1)[bad]]}); use "
+                f"shape_constant='exact_root'"
+            )
+        on_grid = grid[index]
+    return exact + (on_grid - exact).detach()
+
+
+def shape_parameter(ratio: Tensor, shape_constant: str = "exact_root") -> Tensor:
+    """The Bessel shape parameter `c`, by the `shape_constant` closure option:
+    `"exact_root"` is `bessel_shape_parameter` (the continuous root), `"grid_search"` is
+    `grid_shape_parameter` (MUNICH's argmin on a 0.01 grid)."""
+    method = normalise("shape_constant", shape_constant, "shape_parameter")
+    if method == "grid_search":
+        return grid_shape_parameter(ratio)
+    return bessel_shape_parameter(ratio)
+
 
 def _guarded_sqrt(argument: Tensor) -> Tensor:
     """`sqrt(argument)`, with the exactly-zero point kept off the autograd graph.
@@ -408,9 +480,13 @@ def roof_wind(
     h_mean: Tensor | None = None,
     w_mean: Tensor | None = None,
     n_levels: int = _N_ROOF_LEVELS,
+    shape_constant: str = "exact_root",
     form: str | None = None,
 ) -> Tensor:
     """Wind speed at roof level `u_H`, from the friction velocity.
+
+    `shape_constant` is the closure option of that name: how the Bessel shape parameter
+    `C` is evaluated (`shape_parameter`), the exact root or MUNICH's 0.01-grid search.
 
     `roof_wind` is the closure option of that name (`closures.OPTIONS`), default
     `"bessel_canyon_mean"`; `form=` is its earlier, deprecated keyword.
@@ -448,7 +524,7 @@ def roof_wind(
                            torch.zeros_like(safe))
     z0_s = torch.as_tensor(z0_s, dtype=torch.float64)
     delta_i = torch.minimum(H, W / 2.0)
-    c = bessel_shape_parameter(z0_s / delta_i)
+    c = shape_parameter(z0_s / delta_i, shape_constant)
     u_m = u_star * torch.sqrt(
         math.pi / (math.sqrt(2.0) * kappa**2 * c) * _bessel_roof_factor(c)
     )
@@ -473,9 +549,13 @@ def canyon_velocity(
     z0_s: Tensor | float = Z0_S_DEFAULT,
     kappa: float = KAPPA,
     canyon_wind_min: float = 0.0,
+    shape_constant: str = "exact_root",
     form: str | None = None,
 ) -> Tensor:
     """The SIGNED along-canyon velocity, m/s. Positive means from `u` to `v`.
+
+    `shape_constant` (closure option) chooses how the Bessel profile's `c` is evaluated:
+    `"exact_root"` (default) or `"grid_search"` (MUNICH's 0.01 grid); see `shape_parameter`.
 
     `phi` is the angle between the wind and the street axis; it broadcasts against `W`,
     `H` and any leading forcing batch.
@@ -544,7 +624,7 @@ def canyon_velocity(
                 f"{[float(v) for v in wide.reshape(-1)[bad]]} m and the roughnesses are "
                 f"{[float(v) for v in rough.reshape(-1)[bad]]} m"
             )
-        c = bessel_shape_parameter(z0_b / di)
+        c = shape_parameter(z0_b / di, shape_constant)
         alpha = torch.log(di / z0_b)
         beta = torch.exp(c / math.sqrt(2.0) * (1.0 - H / di))
         u_roof = u_star * torch.sqrt(

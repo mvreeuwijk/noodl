@@ -177,6 +177,7 @@ def build_model(
     direction_averaging: str | None = None,
     direction_spread: str | None = None,
     stability: str | None = None,
+    shape_constant: str | None = None,
     n_theta: int | None = None,
     sigma_theta: float | None = None,
     species: Sequence[str] = ("nox",),
@@ -201,11 +202,11 @@ def build_model(
     """`(Model, initial state, driver template)` for one street network.
 
     The closures are preset `preset`'s (`"sirane"`, the default, or `"munich"`; see
-    `noodl.apps.street_aq.closures.PRESETS`). Every closure keyword left at `None` takes
-    the preset's value and any other value overrides it: `canyon_wind`, `roof_wind`,
+    `noodl.apps.street_aq.closures.PRESETS`). Every closure keyword left at `None` takes the
+    preset's value and any other value overrides it: `canyon_wind`, `roof_wind`,
     `roof_exchange`, `junction_routing`, `direction_averaging`, `direction_spread`,
-    `stability`, `sigma_w_height`, `kappa`, the canopy height `h_canopy` and the floors
-    `canyon_wind_min`, `u_d_min`, `sigma_w_min`, `sigma_v_min`. The earlier keywords
+    `stability`, `sigma_w_height`, `shape_constant`, `kappa`, the canopy height `h_canopy`
+    and the floors `canyon_wind_min`, `u_d_min`, `sigma_w_min`, `sigma_v_min`. The earlier keywords
     `exchange`, `routing` and `roof_wind_form`, and the earlier values (`"soulhac"`,
     `"schulte"`, `"munich"`, ...), are accepted with a `DeprecationWarning` naming the
     replacement. `StreetFlows` documents what each option computes.
@@ -260,7 +261,8 @@ def build_model(
         deprecated, canyon_wind=canyon_wind, roof_wind=roof_wind,
         roof_exchange=roof_exchange, junction_routing=junction_routing,
         direction_averaging=direction_averaging, direction_spread=direction_spread,
-        stability=stability, kappa=kappa, canyon_wind_min=canyon_wind_min,
+        stability=stability, shape_constant=shape_constant, kappa=kappa,
+        canyon_wind_min=canyon_wind_min,
         u_d_min=u_d_min, sigma_w_min=sigma_w_min, sigma_v_min=sigma_v_min,
         sigma_w_height=sigma_w_height, h_canopy=h_canopy,
     ), "build_model")

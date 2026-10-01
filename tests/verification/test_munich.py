@@ -301,7 +301,8 @@ def test_the_fixture_options_are_the_reference_option_set():
         "roof_exchange": "aspect_ratio_scaled",
         "junction_routing": "non_crossing_streamlines",
         "direction_averaging": "rectangle_rule", "direction_spread": "turbulence_intensity",
-        "stability": "neutral", "kappa": 0.41, "canyon_wind_min": 0.1, "u_d_min": 0.001,
+        "stability": "neutral", "shape_constant": "grid_search", "kappa": 0.41,
+        "canyon_wind_min": 0.1, "u_d_min": 0.001,
         "sigma_w_min": 0.0, "sigma_v_min": 0.0,
         "sigma_w_height": "street_height", "h_canopy": 20.0,
     }
