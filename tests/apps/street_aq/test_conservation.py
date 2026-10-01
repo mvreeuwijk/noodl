@@ -16,6 +16,7 @@ from noodl.apps.street_aq.canyon import (
     canyon_velocity,
     exchange_velocity,
 )
+from noodl.apps.street_aq.closures import H_CANOPY
 from noodl.apps.street_aq.network import (
     Street,
     StreetNetwork,
@@ -137,7 +138,8 @@ def _hand_reference(sn, *, emission, background, u_ref=U_REF, theta_w=THETA_W,
                            torch.tensor(h_abl, dtype=DT), z_ref=30.0, kappa=KAPPA)
     u = canyon_velocity(width, height, torch.tensor(theta_w, dtype=DT) - azimuth,
                         u_star=layer.u_star, form="bessel_profile", kappa=KAPPA)
-    sigma_w = 1.3 * layer.u_star * (1.0 - 0.8 * height / layer.h_abl)
+    # The sirane preset evaluates the exchange's sigma_w at the canopy height H_R.
+    sigma_w = 1.3 * layer.u_star * (1.0 - 0.8 * H_CANOPY / layer.h_abl) * torch.ones_like(height)
     u_d = exchange_velocity(sigma_w, height, width, form="turbulent_velocity")
     flux = u * width * height
     a = torch.zeros(n, n, dtype=DT)
@@ -239,9 +241,11 @@ def test_gaussian_averaging_collapses_to_a_single_sample_at_zero_spread():
             pblh_floor=False,
         )
         got = model.steady(state_g, _drivers(model))["street.x"]
-        # Exactly equal: the Gauss-Hermite weights are normalised and every offset is
-        # zero at zero spread, so the closure evaluates the identical flux matrix.
-        torch.testing.assert_close(got, reference, rtol=0, atol=0)
+        # Equal to rounding: the Gauss-Hermite weights are normalised and every offset is
+        # zero at zero spread, so the closure evaluates the identical flux matrix -- but
+        # `sum_k w_k F` is `F` only up to an ulp in floating point, even with
+        # `sum_k w_k == 1.0` exactly.
+        torch.testing.assert_close(got, reference, rtol=1e-15, atol=0)
 
 
 def test_every_street_s_own_flux_is_fully_accounted_for_at_the_junction_it_enters():

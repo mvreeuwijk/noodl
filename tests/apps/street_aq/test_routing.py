@@ -399,3 +399,49 @@ def test_street_flows_refuses_a_layer_whose_flow_kinds_are_in_another_order():
     swapped = _street_layer(net, ("vent", "route", "exchange"))
     with pytest.raises(ValueError, match=r"StreetFlows.*'street'.*vent.*route.*exchange"):
         StreetFlows(net, swapped, geometry)
+
+
+def test_high_degree_junction_is_walked_in_munich_s_bearing_order():
+    """A six-street junction whose four outflows straddle EAST: the in/out lists must be
+    sorted on MUNICH's compass bearing (clockwise from north), not on the
+    counter-clockwise-from-east azimuth, or the non-crossing fill pairs the wrong streets.
+
+    Bearings away from the junction A 5, B 55, C 115, D 150, E 200, F 285 degrees, wind
+    TOWARD bearing 70 (math angle 20 degrees), no direction averaging. Every canyon wind
+    sits on the floor `canyon_wind_min = 5 m/s`, so the volume fluxes are exactly
+    `5 W H`: outflows A..D 50, 100, 150, 200 and inflows E 250, F 300 m3/s. Traced by hand
+    through MUNICH v2.2 `ComputeIntersectionFlux`/`ComputeAlpha`
+    (`StreetNetworkTransport.cxx:2851-3033`, `:3620-3647`): inflows [F, E] (decreasing
+    bearing), outflows [A, B, C, D] (increasing bearing); P0 = 50 exports
+    alpha0 = 1/11 from each inflow; the greedy fill then gives F->A 50, F->B 100,
+    F->C 1350/11, E->C 300/11, E->D 200 and zero elsewhere. Sorting on the azimuth
+    instead walks the outflows as [B, A, D, C] and gives F->C 150, F->D 1350/11, ...
+    """
+    from noodl.apps.street_aq.network import Street, StreetNetwork, build_model
+
+    bearing = {"A": 5.0, "B": 55.0, "C": 115.0, "D": 150.0, "E": 200.0, "F": 285.0}
+    width = {"A": 1.0, "B": 2.0, "C": 3.0, "D": 4.0, "E": 5.0, "F": 6.0}
+    x, y, streets = {"hub": 0.0}, {"hub": 0.0}, []
+    for name, b in bearing.items():
+        x[name.lower()] = 100.0 * math.sin(math.radians(b))
+        y[name.lower()] = 100.0 * math.cos(math.radians(b))
+        streets.append(Street(name, "hub", name.lower(), 100.0, width[name], 10.0))
+    model, state, _ = build_model(
+        StreetNetwork(streets=streets, x=x, y=y), preset="munich",
+        direction_averaging="none", canyon_wind_min=5.0,
+    )
+    flows = model.closures[0]
+    out = flows(state, {
+        "U_ref": torch.tensor(0.01, dtype=DT), "theta_w": torch.tensor(
+            math.radians(20.0), dtype=DT), "h_abl": torch.tensor(1000.0, dtype=DT),
+    })
+    torch.testing.assert_close(out["street.u_canyon"].abs(),
+                               torch.full((6,), 5.0, dtype=DT), rtol=0, atol=1e-12)
+    route = model.net.edge_index("route").tolist()
+    q = out["street.q"][: len(route)]
+    got = {(model.net.edges[col][0], model.net.edges[col][1]): float(v)
+           for col, v in zip(route, q.tolist(), strict=True)}
+    want = {("F", "A"): 50.0, ("F", "B"): 100.0, ("F", "C"): 1350.0 / 11.0,
+            ("E", "C"): 300.0 / 11.0, ("E", "D"): 200.0}
+    for pair, value in got.items():
+        assert value == pytest.approx(want.get(pair, 0.0), rel=1e-12, abs=1e-9), pair

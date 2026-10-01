@@ -23,6 +23,7 @@ from collections.abc import Mapping
 
 __all__ = [
     "CLOSURE_OPTIONS",
+    "H_CANOPY",
     "KAPPA_040",
     "KAPPA_041",
     "LEGACY",
@@ -48,6 +49,8 @@ OPTIONS: dict[str, tuple[str, ...]] = {
     "direction_averaging": ("none", "exact_gaussian", "rectangle_rule", "gauss_hermite"),
     "direction_spread": ("driver", "turbulence_intensity"),
     "stability": ("neutral", "monin_obukhov"),
+    "sigma_w_height": ("canopy_height", "street_height"),
+    "shape_constant": ("exact_root", "grid_search"),
 }
 """Every string-valued closure option and its allowed values.
 
@@ -74,6 +77,13 @@ OPTIONS: dict[str, tuple[str, ...]] = {
 - `stability`: the turbulence profiles. `neutral` is `sigma_w = 1.3 u* (1 - 0.8 z/h)`;
   `monin_obukhov` switches between unstable, neutral and stable branches on the Obukhov
   length, and is the neutral form wherever no `lmo` driver is given.
+- `sigma_w_height`: the height at which the `sigma_w` of the roof exchange velocity is
+  evaluated. `canopy_height` is one network-wide height above ground, `h_canopy` (SIRANE's
+  `H_R`), the same for every street; `street_height` is each street's own height `H`.
+- `shape_constant`: how the shape parameter `c` of the Bessel canyon profile is evaluated.
+  `exact_root` solves the shape equation to machine precision; `grid_search` takes the
+  point of the grid `c = 0.01, ..., 1.00` with the smallest residual, as MUNICH does
+  (forward value quantised to 0.01, gradient of the exact root).
 """
 
 CLOSURE_OPTIONS = tuple(OPTIONS)
@@ -82,6 +92,11 @@ CLOSURE_OPTIONS = tuple(OPTIONS)
 SIGMA_W_MIN = 0.3
 """SIRANE keyword `SIGMA_W_MIN` ("Minimum sigma_w", default 0.3 m/s): the sirane preset's
 `sigma_w_min`, and the above-roof plume's default floor."""
+
+H_CANOPY = 20.0
+"""SIRANE keyword `H_R` ("Canopy height", "Hauteur de reflexion des bouffees", default
+20 m): the presets' `h_canopy`, the height above ground at which
+`sigma_w_height="canopy_height"` evaluates the exchange's `sigma_w`."""
 
 SIGMA_V_MIN = 0.5
 """SIRANE keyword `SIGMA_V_MIN` ("Minimum sigma_v", default 0.5 m/s): the sirane preset's
@@ -96,7 +111,8 @@ KAPPA_041 = 0.41
 `exponential_profile`, `aspect_ratio_scaled` and `canopy_log_law` closures are written with
 (MUNICH, `StreetNetworkTransport.cxx:21`)."""
 
-_NUMERIC = ("kappa", "canyon_wind_min", "u_d_min", "sigma_w_min", "sigma_v_min")
+_NUMERIC = ("kappa", "canyon_wind_min", "u_d_min", "sigma_w_min", "sigma_v_min",
+            "h_canopy")
 """The numeric settings a preset fixes besides the string options."""
 
 PRESETS: dict[str, dict] = {
@@ -108,11 +124,14 @@ PRESETS: dict[str, dict] = {
         "direction_averaging": "exact_gaussian",
         "direction_spread": "driver",
         "stability": "monin_obukhov",
+        "sigma_w_height": "canopy_height",
+        "shape_constant": "exact_root",
         "kappa": KAPPA_040,
         "canyon_wind_min": 0.0,
         "u_d_min": 0.0,
         "sigma_w_min": SIGMA_W_MIN,
         "sigma_v_min": SIGMA_V_MIN,
+        "h_canopy": H_CANOPY,
         "chemistry": {"no_o3_rate": "soulhac_2011", "floor_ppb": 2.0},
     },
     "munich": {
@@ -123,11 +142,14 @@ PRESETS: dict[str, dict] = {
         "direction_averaging": "rectangle_rule",
         "direction_spread": "turbulence_intensity",
         "stability": "monin_obukhov",
+        "sigma_w_height": "street_height",
+        "shape_constant": "grid_search",
         "kappa": KAPPA_041,
         "canyon_wind_min": 0.1,
         "u_d_min": 0.001,
         "sigma_w_min": 0.0,
         "sigma_v_min": 0.0,
+        "h_canopy": H_CANOPY,
         "chemistry": {"no_o3_rate": "jpl_2003", "floor_ppb": 0.0},
     },
 }
@@ -135,17 +157,22 @@ PRESETS: dict[str, dict] = {
 
 `sirane`: the Bessel canyon wind, `u_d = sigma_w / (sqrt(2) pi)`, non-crossing junction
 routing, the exact Gaussian direction average over the driven spread, Monin-Obukhov
-turbulence, `kappa = 0.40`, SIRANE's default turbulence floors `sigma_w >= 0.30 m/s` and
-`sigma_v >= 0.5 m/s`, and the Soulhac et al. (2011) NO + O3 rate with a 2 ppb floor on `J/k`.
+turbulence with the exchange's `sigma_w` evaluated at the canopy height `h_canopy = 20 m`
+(SIRANE's `H_R`) for every street, `kappa = 0.40`, the exact root for the Bessel shape
+parameter, SIRANE's default turbulence floors `sigma_w >= 0.30 m/s` and `sigma_v >= 0.5 m/s`,
+and the Soulhac et al. (2011) NO + O3 rate with a 2 ppb floor on `J/k`.
 `sigma_w_min` floors the `sigma_w` of the roof exchange velocity; `sigma_v_min` acts only
 with `direction_spread="turbulence_intensity"` (the `sirane` preset's driven spread never
 reads it; the above-roof plume, `plume.plume_table`, has floors of its own).
 
 `munich`: the exponential canyon wind on the Bessel roof wind, Schulte's exchange,
 non-crossing routing, the rectangle-rule direction average over the turbulence-intensity
-spread, Monin-Obukhov turbulence, `kappa = 0.41`, a 0.1 m/s floor on the canyon wind and a
-0.001 m/s floor on the exchange velocity, no turbulence floors, and the JPL (2003) NO + O3
-rate with no floor.
+spread, Monin-Obukhov turbulence with the exchange's `sigma_w` at each street's own height
+(`ComputeSigmaW`), `kappa = 0.41`, the Bessel shape parameter from MUNICH's 0.01-grid search
+(`shape_constant="grid_search"`, so the preset reproduces MUNICH's roof wind to the last
+digit; the exact root differs from it by up to about 2 %), a 0.1 m/s floor on the canyon wind
+and a 0.001 m/s floor on the exchange velocity, no turbulence floors, and the JPL (2003)
+NO + O3 rate with no floor.
 """
 
 LEGACY_NAMES: dict[str, str] = {

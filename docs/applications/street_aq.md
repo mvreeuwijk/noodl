@@ -151,6 +151,9 @@ model, state, drivers = build_model(
     direction_averaging=None,     # 'none' | 'exact_gaussian' | 'rectangle_rule' | 'gauss_hermite'
     direction_spread=None,        # 'driver' | 'turbulence_intensity'
     stability=None,               # 'neutral' | 'monin_obukhov'
+    sigma_w_height=None,          # 'canopy_height' | 'street_height'
+    h_canopy=None,                # m: the canopy height (SIRANE's H_R)
+    shape_constant=None,          # 'exact_root' | 'grid_search'
     species=("nox",),
     chemistry=None,
     kappa=None, canyon_wind_min=None, u_d_min=None, sigma_w_min=None, sigma_v_min=None,
@@ -165,8 +168,10 @@ so `build_model(net, preset="munich", roof_wind="canopy_log_law")` is MUNICH's c
 with Macdonald's roof wind.
 
 **The defaults are SIRANE's.** A model built with no options floors $\sigma_w$ at 0.30 m/s
-before the roof exchange velocity (`sigma_w_min=0.30`), which binds in light winds and under
-low buildings; pass `sigma_w_min=0.0` for no floor. The default street chemistry,
+before the roof exchange velocity (`sigma_w_min=0.30`), which binds in light winds; pass
+`sigma_w_min=0.0` for no floor. It evaluates that $\sigma_w$ at one height for the whole
+network, the canopy height `h_canopy` (20 m, SIRANE's `H_R`), as SIRANE does;
+`sigma_w_height="street_height"` uses each street's own height instead. The default street chemistry,
 `photostationary_for_streets(species)`, is the Soulhac et al. (2011) rate with a 2 ppb floor
 on $J/k$. `preset="munich"` gives MUNICH's settings throughout: no turbulence floors, and for
 the chemistry the JPL (2003) rate with no floor.
@@ -202,6 +207,11 @@ allowed:
 | | `"turbulence_intensity"` | $\sigma_\theta = \min(\sigma_v / U_{\text{ref}},\ 10°)$ at each junction; a `sigma_theta` driver is refused. | | ✓ |
 | `stability` | `"neutral"` | $\sigma_w = 1.3\,u_*(1 - 0.8\,z/h_{\text{abl}})$, $\sigma_v = 1.2\,u_*$. | | |
 | | `"monin_obukhov"` | Stable, neutral and unstable branches selected by the `lmo` driver; the neutral form wherever `lmo` is not given. | ✓ | ✓ |
+| `sigma_w_height` | `"canopy_height"` | The exchange's $\sigma_w$ is evaluated at $z = h_{\text{canopy}}$ above ground, the same for every street: SIRANE's $u_d$ "is only defined by the external flow condition" (Soulhac et al. 2011, Sec. 4.2.2). | ✓ | |
+| | `"street_height"` | The exchange's $\sigma_w$ at each street's own height $H$ (MUNICH's `ComputeSigmaW`). | | ✓ |
+| `h_canopy` | m | The canopy height of `"canopy_height"`, SIRANE's deck keyword `H_R` ("Canopy height", "Hauteur de reflexion des bouffees"); `StreetCase.model_options()` reads it from a SIRANE deck. | 20 | (unused) |
+| `shape_constant` | `"exact_root"` | The Bessel shape parameter $c$ (used by `"bessel_profile"` and `"bessel_canyon_mean"`) as the root of the shape equation, to machine precision. | ✓ | |
+| | `"grid_search"` | $c$ as the point of the grid $0.01, 0.02, \ldots, 1.00$ with the smallest residual, as MUNICH evaluates it (`ComputeSiraneC`). $c$ is quantised to 0.01, which moves $u_H$ by up to about 2 % against the exact root. The argmin is piecewise constant, so the gradient carried is the exact root's (straight-through). | | ✓ |
 | `kappa` | float | The von Karman constant. | 0.40 | 0.41 |
 | `canyon_wind_min` | m/s | Floor on $\lvert u \rvert$ in the canyon, sign kept. | 0 | 0.1 |
 | `u_d_min` | m/s | Floor on the exchange velocity. | 0 | 0.001 |
@@ -284,6 +294,8 @@ without a warning:
 | `roof_wind(u_star, H, W, roof_wind=...)` | Roof-level wind $u_H$. |
 | `canopy_displacement_roughness(h_mean, w_mean, ...)` | $(d_c, z_{0c})$, Macdonald (1998) network means. |
 | `bessel_shape_parameter(ratio)` | The Bessel shape parameter $c$, as a differentiable root. |
+| `grid_shape_parameter(ratio)` | $c$ on MUNICH's 0.01 grid, with the exact root's gradient. |
+| `shape_parameter(ratio, shape_constant)` | Either of the two, by the `shape_constant` option. |
 
 ## Chemistry
 
@@ -508,9 +520,13 @@ precision that source publishes:
 
 That last row is deliberate: MUNICH's weights are **not** normalised to 1, and reproducing that
 artefact is the point. "Fixing" it would introduce a bias relative to MUNICH rather than remove
-one. The same applies to `bessel_shape_parameter`: MUNICH quantises the root to a 0.01 grid (0.62), noodl physics
-solves it continuously (0.6198293…), and the resulting 4e-4 relative difference in $u_M$ is
-documented rather than matched.
+one. The same applies to the shape parameter: MUNICH quantises the root to a 0.01 grid (0.62),
+where `bessel_shape_parameter` solves it continuously (0.6198293…). The quantisation is small
+in $u_M$ (4e-4) but not in $u_H$, whose canyon-mean factor is sensitive to $c$ (up to about
+2 %), so `preset="munich"` takes MUNICH's grid search (`shape_constant="grid_search"`), and
+`preset="sirane"` keeps the exact root. With the grid search and a steady solve per hour (MUNICH's
+`With_stationary_hypothesis: yes`), noodl physics matches MUNICH's output on the idealised
+12-street case to 4.3e-8 relative at most, the float32 precision of that output.
 
 ### MUNICH idealised 12-street case
 

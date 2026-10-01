@@ -23,8 +23,10 @@ from noodl.apps.street_aq.canyon import (
     canopy_displacement_roughness,
     canyon_velocity,
     exchange_velocity,
+    grid_shape_parameter,
     macdonald_profile,
     roof_wind,
+    shape_parameter,
     soulhac_shape,
 )
 from noodl.apps.street_aq.case import (
@@ -135,6 +137,7 @@ __all__ = [
     "drivers_at",
     "exact_gaussian_direction_samples",
     "exchange_velocity",
+    "grid_shape_parameter",
     "exposure_reduction_adjoint",
     "exposure_reduction_forward",
     "from_test_network",
@@ -160,6 +163,7 @@ __all__ = [
     "read_results",
     "roof_wind",
     "routing_matrix",
+    "shape_parameter",
     "sigma_theta_munich",
     "sigma_theta_turbulence_intensity",
     "sirane_direction_samples",
