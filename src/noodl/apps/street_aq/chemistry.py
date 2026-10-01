@@ -20,7 +20,10 @@ __all__ = [
     "CLOSURES",
     "J_NO2_CLEAR_SKY",
     "J_NO2_ZENITH_DEG",
+    "K_NO_O3_SOULHAC2011_ACTIVATION",
+    "K_NO_O3_SOULHAC2011_PREFACTOR",
     "NO_O3_RATES",
+    "PHOTOSTATIONARY_FLOOR_PPB",
     "SIRANE_K3_ACTIVATION",
     "SIRANE_K3_PREFACTOR",
     "SIRANE_K_FLOOR_PPB",
@@ -70,7 +73,7 @@ def photostationary_for_streets(
 
     - `no_o3_rate="soulhac_2011"` (preset `"sirane"`): `k_no_o3_soulhac2011`,
       1.325e6 exp(-1430/T) m3 mol^-1 s^-1, with `K = max(J/k, 2 ppb)`
-      (`SIRANE_K_FLOOR_PPB`). The ppb conversion uses the driver `molar_volume_key`
+      (`PHOTOSTATIONARY_FLOOR_PPB`). The ppb conversion uses the driver `molar_volume_key`
       (m3/mol) when given, else `molar_volume(T)` at 101325 Pa. SIRANE's `k1` is
       `j_no2_elevation_cloud`, passed as the `j_key` driver. Reproducing SIRANE exactly
       needs the molar-volume driver (SIRANE's ground-level V_m): the fallback uses T and
@@ -237,14 +240,25 @@ j_no2 = j_no2_zenith_table
 # prints 1.325e5), k1 is clipped at zero, and the split works in ppb with a 2 ppb floor on
 # k1/k3.
 
-SIRANE_K3_PREFACTOR = 1.325e6
-"""m3 mol^-1 s^-1: the prefactor of SIRANE's k(NO + O3), 2.2e-12 cm3 molecule^-1 s^-1 x N_A."""
+K_NO_O3_SOULHAC2011_PREFACTOR = 1.325e6
+"""m3 mol^-1 s^-1: the prefactor of the Soulhac et al. (2011) k(NO + O3) (SIRANE's),
+2.2e-12 cm3 molecule^-1 s^-1 x N_A."""
 
-SIRANE_K3_ACTIVATION = 1430.0
-"""K: the activation temperature of SIRANE's k(NO + O3)."""
+K_NO_O3_SOULHAC2011_ACTIVATION = 1430.0
+"""K: the activation temperature of the Soulhac et al. (2011) k(NO + O3) (SIRANE's)."""
 
-SIRANE_K_FLOOR_PPB = 2.0
-"""ppb: SIRANE's lower bound on `k1/k3` in its photostationary split."""
+PHOTOSTATIONARY_FLOOR_PPB = 2.0
+"""ppb: the lower bound on `k1/k3` (`J/k`) in the photostationary split, SIRANE's 2 ppb (the
+`sirane` preset's `floor_ppb`)."""
+
+SIRANE_K3_PREFACTOR = K_NO_O3_SOULHAC2011_PREFACTOR
+"""Earlier name of `K_NO_O3_SOULHAC2011_PREFACTOR`."""
+
+SIRANE_K3_ACTIVATION = K_NO_O3_SOULHAC2011_ACTIVATION
+"""Earlier name of `K_NO_O3_SOULHAC2011_ACTIVATION`."""
+
+SIRANE_K_FLOOR_PPB = PHOTOSTATIONARY_FLOOR_PPB
+"""Earlier name of `PHOTOSTATIONARY_FLOOR_PPB`."""
 
 
 def solar_elevation(latitude_deg, day_of_year, hour) -> torch.Tensor:
@@ -300,7 +314,7 @@ def k_no_o3_soulhac2011(temperature) -> torch.Tensor:
     volume in litres and times 1e-6 it is the rate in ppb^-1 s^-1 that SIRANE prints.
     """
     t = torch.as_tensor(temperature, dtype=torch.float64)
-    return SIRANE_K3_PREFACTOR * torch.exp(-SIRANE_K3_ACTIVATION / t)
+    return K_NO_O3_SOULHAC2011_PREFACTOR * torch.exp(-K_NO_O3_SOULHAC2011_ACTIVATION / t)
 
 
 k_no_o3_sirane = k_no_o3_soulhac2011

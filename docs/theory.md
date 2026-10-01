@@ -468,7 +468,7 @@ above the canyon and in their von Karman constant (0.40 against MUNICH's 0.41). 
 ($u_d = \sigma_w/(\sqrt{2}\,\pi)$, S11 Eq. (5), K18 Eq. (3), K22 Eq. (B10), `StreetNetworkTransport.cxx
 :3273`; see the street page's [note on this constant](applications/street_aq.md#limitations-and-caveats))
 and a Schulte mixing-length branch
-(`SCHULTE_BETA` $= 2/(\sqrt{2}\,\pi)$, fixed by matching the SIRANE form at $a_r = 1$, K18 p.
+(`ASPECT_RATIO_EXCHANGE_BETA` $= 2/(\sqrt{2}\,\pi)$, fixed by matching the SIRANE form at $a_r = 1$, K18 p.
 613). Both pairs are selectable independently (`canyon_wind="bessel_profile"` or
 `"exponential_profile"`, `roof_exchange="turbulent_velocity"` or `"aspect_ratio_scaled"`)
 because the two source codebases do not always pair them the same way, and the parity tests
@@ -481,7 +481,7 @@ $$
 \frac{1}{2} \frac{z_{0,b}}{d_i}\, c = \exp\left(\frac{\pi}{2} \frac{Y_1(c)}{J_1(c)} - \gamma_E\right)
 $$
 
-(`soulhac_residual`, solved by `solve_monotone` on $[10^{-4}, 3]$ rather than by MUNICH's
+(`bessel_shape_residual`, solved by `solve_monotone` on $[10^{-4}, 3]$ rather than by MUNICH's
 0.01-wide brute-force grid), and the roof-level wind that the in-canyon integral is written
 on is
 
@@ -496,8 +496,8 @@ no `grad_fn` at all, and `solve_monotone` differentiates its own residual.
 **MUNICH's direction averaging.** The wind direction is not a single number: MUNICH spreads
 it with $\sigma_\theta = \min(\sigma_v/U,\ 10^\circ)$ and takes $n_\theta = \lfloor \sigma_\theta \text{ in degrees} \rfloor$
 samples, clamped to $[1, 10]$, uniformly on $\pm 2 \sigma_\theta$ with UNNORMALISED weights
-(`StreetNetworkTransport.cxx:3567`, `:3568`, `:3562-3616`; `sigma_theta_munich`,
-`n_theta_munich`, `direction_offsets`). The canyon velocities are computed ONCE from the
+(`StreetNetworkTransport.cxx:3567`, `:3568`, `:3562-3616`; `sigma_theta_turbulence_intensity`,
+`n_theta_rectangle_rule`, `direction_offsets`). The canyon velocities are computed ONCE from the
 MEAN direction and are NOT recomputed per sample -- only the in/out classification and the
 angular ordering at each junction change from sample to sample -- which is what makes the
 averaged flux matrix comparable with MUNICH's at all.

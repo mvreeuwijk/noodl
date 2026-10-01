@@ -19,7 +19,7 @@ layer advects on what it wrote.
 ```python
 from noodl.apps.street_aq import (
     build_model, street_steady, street_index, initial_state,
-    StreetNetwork, Street, from_test_network, munich_idealised,
+    StreetNetwork, Street, from_test_network, twelve_street_grid,
     write_network_concentration, to_ug_m3,
     photostationary_for_streets,
 )
@@ -96,7 +96,7 @@ street-network cases](street_aq_cases.md).
 | `Street(name, u, v, length, width, height, z0_b=0.15, emission_scale=1.0)` | One canyon segment between two junctions. |
 | `StreetNetwork(streets, x, y)` | The network plus junction coordinates. `azimuth` gives each street's bearing in radians CCW from east; `junctions` and `degree(node)` describe the topology. |
 | `from_test_network()` | A 4-junction, 3-street test network. |
-| `munich_idealised(L=100.0, W=20.0, H=20.0)` | The 12-street network of Kim et al. 2022 Fig. 1. `L`, `W`, `H` are arguments because the paper never published them. |
+| `twelve_street_grid(L=100.0, W=20.0, H=20.0)` | The 12-street network of Kim et al. 2022 Fig. 1 (MUNICH's idealised case). `L`, `W`, `H` are arguments because the paper never published them. |
 
 Construction validates: unique street names, `u != v`, coordinates for every named junction, and
 strictly positive `length`, `width`, `height` and `z0_b`.
@@ -218,7 +218,8 @@ Two more choices shape the drivers rather than the physics:
 `kappa=None` is the preset's constant. When any closure option is given explicitly it is instead
 0.41 if a choice written with that constant is selected (`canyon_wind="exponential_profile"`,
 `roof_exchange="aspect_ratio_scaled"` or `roof_wind="canopy_log_law"`) and 0.40 otherwise. An
-explicit value always wins. For example, `build_model(net, preset="munich",
+explicit value always wins. The two values are the constants `closures.KAPPA_040` and
+`closures.KAPPA_041`. For example, `build_model(net, preset="munich",
 canyon_wind="bessel_profile", roof_exchange="turbulent_velocity")` has $\kappa = 0.40$, not
 the preset's 0.41, because no choice written with 0.41 is left.
 
@@ -239,10 +240,36 @@ The earlier spellings are still accepted, with a `DeprecationWarning` naming the
 | `stability="munich"` | `"monin_obukhov"` |
 | `photostationary_for_streets(closure=...)` | `preset=...` |
 
-The earlier names of four functions are kept as aliases of the same functions, without a
-warning: `k_no_o3_munich` and `k_no_o3_sirane` for `k_no_o3_jpl2003` and
-`k_no_o3_soulhac2011`, and `j_no2` and `j_no2_sirane` for `j_no2_zenith_table` and
-`j_no2_elevation_cloud`.
+The lower-level functions take the same keyword as the option they implement; their earlier
+keywords are accepted with a `DeprecationWarning` too:
+
+| Earlier | Current |
+|---|---|
+| `canyon_velocity(form=...)` | `canyon_velocity(canyon_wind=...)` |
+| `roof_wind(form=...)` | `roof_wind(roof_wind=...)` |
+| `exchange_velocity(form=...)` | `exchange_velocity(roof_exchange=...)` |
+| `routing_matrix(model=...)` | `routing_matrix(junction_routing=...)` |
+| `direction_offsets(scheme=...)` | `direction_offsets(direction_averaging=...)` |
+
+The earlier, model-named functions and constants are kept as aliases of the same objects,
+without a warning:
+
+| Earlier | Current |
+|---|---|
+| `soulhac_shape`, `soulhac_residual` | `bessel_shape_parameter`, `bessel_shape_residual` |
+| `macdonald_profile` | `canopy_displacement_roughness` |
+| `sigma_theta_munich`, `n_theta_munich` | `sigma_theta_turbulence_intensity`, `n_theta_rectangle_rule` |
+| `sirane_direction_samples` | `exact_gaussian_direction_samples` |
+| `munich_idealised` | `twelve_street_grid` |
+| `SIRANE_EXCHANGE`, `SCHULTE_BETA` | `EXCHANGE_SIGMA_W_RATIO`, `ASPECT_RATIO_EXCHANGE_BETA` |
+| `KAPPA_MUNICH` | `KAPPA_041` (and `KAPPA` is `KAPPA_040`) |
+| `GAMMA_E` | `EULER_GAMMA_TRUNCATED` (0.577, deliberately truncated) |
+| `MAX_SIGMA_THETA_SIRANE`, `SIRANE_WINDOW` | `MAX_SIGMA_THETA_EXACT`, `EXACT_GAUSSIAN_WINDOW` |
+| `SEUIL_GAUSS` | `GAUSS_CUTOFF_SIGMAS` |
+| `SIRANE_K3_PREFACTOR`, `SIRANE_K3_ACTIVATION` | `K_NO_O3_SOULHAC2011_PREFACTOR`, `K_NO_O3_SOULHAC2011_ACTIVATION` |
+| `SIRANE_K_FLOOR_PPB` | `PHOTOSTATIONARY_FLOOR_PPB` |
+| `k_no_o3_munich`, `k_no_o3_sirane` | `k_no_o3_jpl2003`, `k_no_o3_soulhac2011` |
+| `j_no2`, `j_no2_sirane` | `j_no2_zenith_table`, `j_no2_elevation_cloud` |
 
 ### The canyon physics
 
@@ -253,10 +280,10 @@ warning: `k_no_o3_munich` and `k_no_o3_sirane` for `k_no_o3_jpl2003` and
 | `boundary_layer(h_mean, u_ref, h_abl, *, z_ref=30.0, kappa=0.4, pblh_floor=None)` | A `BoundaryLayer` with $d = 2h/3$, $z_0 = h/10$, $u_* = \kappa U_{\text{ref}} / \ln((z_{\text{ref}} - d)/z_0)$. |
 | `BoundaryLayer.sigma_w(z, ...)` / `.sigma_v(...)` | Velocity standard deviations driving the roof exchange. |
 | `canyon_velocity(W, H, phi, ...)` | The **signed** along-canyon velocity, m/s. |
-| `exchange_velocity(sigma_w, H, W, form=..., u_d_min=0.0, sigma_w_min=0.0)` | The roof exchange velocity $u_d$. |
-| `roof_wind(u_star, H, W, form=...)` | Roof-level wind $u_H$. |
-| `macdonald_profile(h_mean, w_mean, ...)` | $(d_c, z_{0c})$, Macdonald (1998) network means. |
-| `soulhac_shape(ratio)` | The Bessel shape parameter $c$, as a differentiable root. |
+| `exchange_velocity(sigma_w, H, W, roof_exchange=..., u_d_min=0.0, sigma_w_min=0.0)` | The roof exchange velocity $u_d$. |
+| `roof_wind(u_star, H, W, roof_wind=...)` | Roof-level wind $u_H$. |
+| `canopy_displacement_roughness(h_mean, w_mean, ...)` | $(d_c, z_{0c})$, Macdonald (1998) network means. |
+| `bessel_shape_parameter(ratio)` | The Bessel shape parameter $c$, as a differentiable root. |
 
 ## Chemistry
 
@@ -310,7 +337,7 @@ m³ kg⁻¹ s⁻¹ for the kg/m³ state); with that override `temperature` is no
 - the rate `k_no_o3_soulhac2011(T) = 1.325\times10^{6}\exp(-1430/T)` m³ mol⁻¹ s⁻¹, at SIRANE's own
   ground-level air temperature ($T_g$: its preprocessed value, not the input temperature away
   from neutral conditions — cooler when stable, warmer when unstable);
-- a floor on the photolysis-to-rate ratio, $K = \max(J/k,\ 2\ \text{ppb})$ (`SIRANE_K_FLOOR_PPB`),
+- a floor on the photolysis-to-rate ratio, $K = \max(J/k,\ 2\ \text{ppb})$ (`PHOTOSTATIONARY_FLOOR_PPB`),
   so NO and O3 no longer titrate to whichever runs out at night. `floor_ppb` overrides the floor
   (0 disables it).
 
@@ -473,22 +500,22 @@ precision that source publishes:
 
 | Quantity | Tolerance | Measured |
 |---|---|---|
-| `SIRANE_EXCHANGE` constant | < 1e-15 | 0.225079079039277, exact |
+| `EXCHANGE_SIGMA_W_RATIO` constant | < 1e-15 | 0.225079079039277, exact |
 | Exchange velocity $u_d$ | < 1e-7 relative | 0.08681174 m/s to 8 significant figures |
-| `soulhac_shape` root $c$ | < 1e-13 | 0.6198293039179747 |
+| `bessel_shape_parameter` root $c$ | < 1e-13 | 0.6198293039179747 |
 | Macdonald $d_c$, $z_{0c}$ | < 1e-12 | 4.617352498423888 m, 0.6614635677623194 m |
 | Direction-quadrature weight sums, $n = 2\ldots10$ | 1e-6 | e.g. 0.974953 at $n=10$ |
 
 That last row is deliberate: MUNICH's weights are **not** normalised to 1, and reproducing that
 artefact is the point. "Fixing" it would introduce a bias relative to MUNICH rather than remove
-one. The same applies to `soulhac_shape`: MUNICH quantises the root to a 0.01 grid (0.62), noodl physics
+one. The same applies to `bessel_shape_parameter`: MUNICH quantises the root to a 0.01 grid (0.62), noodl physics
 solves it continuously (0.6198293…), and the resulting 4e-4 relative difference in $u_M$ is
 documented rather than matched.
 
 ### MUNICH idealised 12-street case
 
 Kim et al. (2022) Fig. 1 gives concentrations on an idealised 12-street network, but not the
-street length, width and height behind them, so `munich_idealised(L, W, H)` takes them as
+street length, width and height behind them, so `twelve_street_grid(L, W, H)` takes them as
 arguments and the case can only be compared in terms that do not depend on them.
 
 | Check | Target | Measured |
@@ -511,7 +538,7 @@ every street's `Sigma_wH` at SIRANE's default 0.30 m/s floor, where the deck's f
 that floor off), so every comparison here drives noodl physics with the *results'* own
 meteorology (`read_results(...).meteo`), never the deck's.
 
-- **Roof exchange velocity.** `exchange_velocity(form="turbulent_velocity")`, evaluated at SIRANE's own
+- **Roof exchange velocity.** `exchange_velocity(roof_exchange="turbulent_velocity")`, evaluated at SIRANE's own
   printed `Sigma_wH` with each street's own height and width, reproduces SIRANE's printed
   `u_d` on all 46 streets across both hours to within SIRANE's own printed half-step
   (0.005 m/s) -- the tightest bound two-decimal printed output allows; the worst street
@@ -592,7 +619,7 @@ meteorology (`read_results(...).meteo`), never the deck's.
   `pblh_floor=False`, `exchange_velocity` raises an error on such a step rather than clamping
   it.
 - **SIRANE exchange coefficient.** The code uses $\sigma_w / (\sqrt{2}\,\pi)$
-  (`SIRANE_EXCHANGE` = 0.225079…), as in MUNICH's source, not $\sigma_w/\sqrt{2\pi}$.
+  (`EXCHANGE_SIGMA_W_RATIO` = 0.225079…), as in MUNICH's source, not $\sigma_w/\sqrt{2\pi}$.
 
 ## Install
 

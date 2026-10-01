@@ -311,7 +311,7 @@ class StreetResults:
             roof height (SIRANE `Sigma_wH`) -- `None` for MUNICH.
         u_exchange: `(n_hours, n_streets)`, m/s, the roof-level exchange velocity, read AS
             PRINTED (SIRANE `u_d`), not recomputed -- `None` for MUNICH. Pinned against
-            SIRANE's own output: `u_exchange == sigma_w_roof * SIRANE_EXCHANGE`
+            SIRANE's own output: `u_exchange == sigma_w_roof * EXCHANGE_SIGMA_W_RATIO`
             (`sigma_w_roof / (sqrt(2) pi)`, `noodl.apps.street_aq.canyon`), to the two
             decimals SIRANE prints.
         meteo: `u_star`, `sigma_theta` (radians -- SIRANE's own `SigmaTheta` is degrees),

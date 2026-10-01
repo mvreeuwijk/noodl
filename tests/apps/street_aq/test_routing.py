@@ -196,12 +196,12 @@ def test_none_and_gauss_schemes():
     torch.testing.assert_close(
         (weights * offsets**2).sum(-1), sigma**2, rtol=1e-12, atol=0
     )
-    with pytest.raises(ValueError, match="scheme='gauss_hermite' needs n_theta"):
+    with pytest.raises(ValueError, match="direction_averaging='gauss_hermite' needs n_theta"):
         direction_offsets("gauss_hermite", sigma)
     with pytest.raises(ValueError, match=r"\('none', 'exact_gaussian', 'rectangle_rule', "
                                          r"'gauss_hermite'\), got 'rectangle'"):
         direction_offsets("rectangle", sigma)
-    with pytest.raises(ValueError, match=r"scheme='exact_gaussian' needs the junction "
+    with pytest.raises(ValueError, match=r"direction_averaging='exact_gaussian' needs the junction "
                                          r"geometry"):
         direction_offsets("exact_gaussian", sigma)
 

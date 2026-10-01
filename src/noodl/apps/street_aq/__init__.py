@@ -7,6 +7,9 @@ every solve; this package decides the network, the closures and the units. Nothi
 
 from noodl.apps.street_aq.above_roof import street_steady_with_plume
 from noodl.apps.street_aq.canyon import (
+    ASPECT_RATIO_EXCHANGE_BETA,
+    EULER_GAMMA_TRUNCATED,
+    EXCHANGE_SIGMA_W_RATIO,
     GAMMA_E,
     KAPPA,
     KAPPA_MUNICH,
@@ -15,7 +18,9 @@ from noodl.apps.street_aq.canyon import (
     Z0_B_DEFAULT,
     Z0_S_DEFAULT,
     BoundaryLayer,
+    bessel_shape_parameter,
     boundary_layer,
+    canopy_displacement_roughness,
     canyon_velocity,
     exchange_velocity,
     macdonald_profile,
@@ -42,7 +47,7 @@ from noodl.apps.street_aq.chemistry import (
     solar_elevation,
     street_steady,
 )
-from noodl.apps.street_aq.closures import OPTIONS, PRESETS
+from noodl.apps.street_aq.closures import KAPPA_040, KAPPA_041, OPTIONS, PRESETS
 from noodl.apps.street_aq.exposure import (
     Q_INHALATION,
     exposure_reduction_adjoint,
@@ -59,8 +64,10 @@ from noodl.apps.street_aq.network import (
     munich_idealised,
     street_geometry,
     street_index,
+    twelve_street_grid,
 )
 from noodl.apps.street_aq.plume import (
+    GAUSS_CUTOFF_SIGMAS,
     SEUIL_GAUSS,
     PlumeTable,
     StreetSources,
@@ -81,16 +88,25 @@ from noodl.apps.street_aq.routing import (
     StreetFlows,
     StreetGeometry,
     direction_offsets,
+    exact_gaussian_direction_samples,
     n_theta_munich,
+    n_theta_rectangle_rule,
     node_closure,
     routing_matrix,
     sigma_theta_munich,
+    sigma_theta_turbulence_intensity,
     sirane_direction_samples,
 )
 
 __all__ = [
+    "ASPECT_RATIO_EXCHANGE_BETA",
+    "EULER_GAMMA_TRUNCATED",
+    "EXCHANGE_SIGMA_W_RATIO",
     "GAMMA_E",
+    "GAUSS_CUTOFF_SIGMAS",
     "KAPPA",
+    "KAPPA_040",
+    "KAPPA_041",
     "KAPPA_MUNICH",
     "OPTIONS",
     "PRESETS",
@@ -109,12 +125,15 @@ __all__ = [
     "StreetSources",
     "StreetGeometry",
     "StreetNetwork",
+    "bessel_shape_parameter",
     "boundary_layer",
     "build_model",
+    "canopy_displacement_roughness",
     "canyon_velocity",
     "direction_offsets",
     "downwind_cutoff",
     "drivers_at",
+    "exact_gaussian_direction_samples",
     "exchange_velocity",
     "exposure_reduction_adjoint",
     "exposure_reduction_forward",
@@ -132,6 +151,7 @@ __all__ = [
     "macdonald_profile",
     "munich_idealised",
     "n_theta_munich",
+    "n_theta_rectangle_rule",
     "node_closure",
     "photostationary_for_streets",
     "plume_kernel",
@@ -141,6 +161,7 @@ __all__ = [
     "roof_wind",
     "routing_matrix",
     "sigma_theta_munich",
+    "sigma_theta_turbulence_intensity",
     "sirane_direction_samples",
     "solar_elevation",
     "source_points",
@@ -153,6 +174,7 @@ __all__ = [
     "street_steady_with_plume",
     "to_ug_m3",
     "total_exposure",
+    "twelve_street_grid",
     "write_case",
     "write_network_concentration",
     "write_sweep",

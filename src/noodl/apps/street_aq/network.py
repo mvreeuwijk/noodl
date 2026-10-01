@@ -135,7 +135,7 @@ def from_test_network() -> StreetNetwork:
     return StreetNetwork(streets=streets, x=x, y=y)
 
 
-def munich_idealised(
+def twelve_street_grid(
     *, L: float = 100.0, W: float = 20.0, H: float = 20.0
 ) -> tuple[StreetNetwork, list[str]]:
     """The 12-street network of Kim et al. 2022 Fig. 1, p. 7374.
@@ -160,6 +160,10 @@ def munich_idealised(
         y={k: v[1] for k, v in coordinates.items()},
     )
     return net, [s.name for s in streets]
+
+
+munich_idealised = twelve_street_grid
+"""Earlier name of `twelve_street_grid`."""
 
 
 def build_model(

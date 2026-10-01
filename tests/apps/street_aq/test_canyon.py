@@ -131,9 +131,9 @@ def test_soulhac_shape_is_differentiable_in_the_roughness_ratio():
 
 
 def test_soulhac_shape_refuses_a_roughness_comparable_to_the_canyon():
-    with pytest.raises(ValueError, match=r"soulhac_shape.*1\.6.*index"):
+    with pytest.raises(ValueError, match=r"bessel_shape_parameter.*1\.6.*index"):
         soulhac_shape(torch.tensor([0.01, 2.0], dtype=DT))
-    with pytest.raises(ValueError, match=r"soulhac_shape.*strictly positive"):
+    with pytest.raises(ValueError, match=r"bessel_shape_parameter.*strictly positive"):
         soulhac_shape(torch.tensor([0.0], dtype=DT))
 
 
@@ -308,9 +308,9 @@ def test_unknown_form_names_the_offender():
         exchange_velocity(torch.tensor([0.3], dtype=DT), *args, form="wang")
     with pytest.raises(ValueError, match=r"roof_wind.*'bessel_canyon_mean'.*'wang'"):
         roof_wind(torch.tensor([0.3], dtype=DT), *args, form="wang")
-    with pytest.raises(ValueError, match=r"canyon_velocity.*form='bessel_profile'.*u_star"):
+    with pytest.raises(ValueError, match=r"canyon_velocity.*='bessel_profile'.*u_star"):
         canyon_velocity(*args, torch.tensor([0.0], dtype=DT), form="bessel_profile")
-    with pytest.raises(ValueError, match=r"canyon_velocity.*form='exponential_profile'.*u_h"):
+    with pytest.raises(ValueError, match=r"canyon_velocity.*='exponential_profile'.*u_h"):
         canyon_velocity(*args, torch.tensor([0.0], dtype=DT), form="exponential_profile")
 
 

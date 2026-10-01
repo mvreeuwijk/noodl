@@ -43,7 +43,7 @@ which is what that street would hold with no emissions under a uniform backgroun
   at junction `j` into street `i` is taken at `C_ext,i`, and a sink of that air at the
   junction, half a street upwind of street `i`'s own midpoint, feeds straight back into
   `C_ext,i`: `G[i, i] = -K_j[i, j] q_in`, a loop that exists only because `C_ext-int` is
-  missing. On `munich_idealised` (L = 100 m, W = H = 20 m, u* = 0.5 m/s) the spectral
+  missing. On `twelve_street_grid` (L = 100 m, W = H = 20 m, u* = 0.5 m/s) the spectral
   radius of the coupling is 0.20 at a 0.3 rad wind and 0.31 at 0 rad (the junction
   plume's vertical profile is capped at `1/H`, which keeps that loop gain below one),
   while without the sink it is exactly 0 in both.
@@ -70,7 +70,7 @@ meteorology the flows are fixed and every step is linear, so the map is affine,
 `diagnostics["contraction"]` reports the measured ratio of the last two changes. With the
 upward junction source every plume link points downwind (upwind pairs are zero, a
 street's own points are excluded), so `G` is nilpotent whenever that dependency graph has
-no cycle -- measured spectral radius exactly 0 on `munich_idealised` -- and the iteration
+no cycle -- measured spectral radius exactly 0 on `twelve_street_grid` -- and the iteration
 ends after as many passes as the network has downwind levels; streets that see each
 other's points both ways, and canyon routing between them, give a small non-zero
 radius. `relaxation < 1`

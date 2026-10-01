@@ -139,9 +139,13 @@ _DTYPE = torch.float64
 GRAVITY = 9.81
 """m/s2, as in SIRANE's `N`."""
 
-SEUIL_GAUSS = 4.0
-"""SIRANE keyword `SEUIL_GAUSS` ("Sigma threshold to neglect a puff", default 4.0): pairs
-more than this many `sigma_y` beyond the flat top contribute exactly zero."""
+GAUSS_CUTOFF_SIGMAS = 4.0
+"""The Gaussian cut-off, in lateral standard deviations: pairs more than this many
+`sigma_y` beyond the flat top contribute exactly zero. SIRANE's keyword `SEUIL_GAUSS`
+("Sigma threshold to neglect a puff", default 4.0)."""
+
+SEUIL_GAUSS = GAUSS_CUTOFF_SIGMAS
+"""Earlier name of `GAUSS_CUTOFF_SIGMAS`."""
 
 
 TIME_STEP_S = 10.0
@@ -808,7 +812,7 @@ def plume_kernel(
     theta_w: Tensor | float,
     width: Tensor | float = 0.0,
     clamp: Tensor | float = math.inf,
-    cutoff_sigma: float = SEUIL_GAUSS,
+    cutoff_sigma: float = GAUSS_CUTOFF_SIGMAS,
     meteo_cell_dx: float | None = None,
 ) -> Tensor:
     """Concentration at each receptor per unit rate at each source, s/m3: `batch + (R, P)`.
@@ -866,7 +870,7 @@ def street_kernel(
     *,
     theta_w: Tensor | float,
     self_contribution: bool = False,
-    cutoff_sigma: float = SEUIL_GAUSS,
+    cutoff_sigma: float = GAUSS_CUTOFF_SIGMAS,
     meteo_cell_dx: float | None = None,
 ) -> Tensor:
     """`batch + (n_streets, n_streets)`: `K[..., i, j]` is `C_ext` above street `i` (at its
@@ -917,7 +921,7 @@ def junction_kernel(
     table: PlumeTable,
     *,
     theta_w: Tensor | float,
-    cutoff_sigma: float = SEUIL_GAUSS,
+    cutoff_sigma: float = GAUSS_CUTOFF_SIGMAS,
     meteo_cell_dx: float | None = None,
 ) -> Tensor:
     """`batch + (n_streets, n_junctions)`: `C_ext` above street `i` (at its midpoint) per

@@ -14,7 +14,13 @@ import torch
 
 import noodl.couple as couple
 import noodl.elements as elements
-from noodl.apps import water
+from noodl.apps import street_aq, water
+from noodl.apps.street_aq import canyon as street_canyon
+from noodl.apps.street_aq import chemistry as street_chemistry
+from noodl.apps.street_aq import closures as street_closures
+from noodl.apps.street_aq import network as street_network
+from noodl.apps.street_aq import plume as street_plume
+from noodl.apps.street_aq import routing as street_routing
 from noodl.apps.water import elements as water_elements
 
 DATA = Path(__file__).parent / "data"
@@ -53,6 +59,39 @@ OBJECT_ALIASES = [
     (water_elements, "EPANET_VISCOS_FT2", "NU_WATER_FT2"),
     (couple, "STREET_RAD_TO_CONTAM_DEG", "MATH_RAD_TO_COMPASS_DEG"),
     (couple, "CONTAM_DEG_TO_STREET_RAD", "COMPASS_DEG_TO_MATH_RAD"),
+    (street_canyon, "KAPPA_MUNICH", "KAPPA_041"),
+    (street_canyon, "GAMMA_E", "EULER_GAMMA_TRUNCATED"),
+    (street_canyon, "SIRANE_EXCHANGE", "EXCHANGE_SIGMA_W_RATIO"),
+    (street_canyon, "SCHULTE_BETA", "ASPECT_RATIO_EXCHANGE_BETA"),
+    (street_canyon, "soulhac_residual", "bessel_shape_residual"),
+    (street_canyon, "soulhac_shape", "bessel_shape_parameter"),
+    (street_canyon, "macdonald_profile", "canopy_displacement_roughness"),
+    (street_routing, "MAX_SIGMA_THETA_SIRANE", "MAX_SIGMA_THETA_EXACT"),
+    (street_routing, "SIRANE_WINDOW", "EXACT_GAUSSIAN_WINDOW"),
+    (street_routing, "sigma_theta_munich", "sigma_theta_turbulence_intensity"),
+    (street_routing, "n_theta_munich", "n_theta_rectangle_rule"),
+    (street_routing, "sirane_direction_samples", "exact_gaussian_direction_samples"),
+    (street_plume, "SEUIL_GAUSS", "GAUSS_CUTOFF_SIGMAS"),
+    (street_network, "munich_idealised", "twelve_street_grid"),
+    (street_chemistry, "SIRANE_K3_PREFACTOR", "K_NO_O3_SOULHAC2011_PREFACTOR"),
+    (street_chemistry, "SIRANE_K3_ACTIVATION", "K_NO_O3_SOULHAC2011_ACTIVATION"),
+    (street_chemistry, "SIRANE_K_FLOOR_PPB", "PHOTOSTATIONARY_FLOOR_PPB"),
+    (street_chemistry, "j_no2_sirane", "j_no2_elevation_cloud"),
+    (street_chemistry, "k_no_o3_sirane", "k_no_o3_soulhac2011"),
+]
+
+STREET_PACKAGE_ALIASES = [
+    ("KAPPA_MUNICH", "KAPPA_041"),
+    ("GAMMA_E", "EULER_GAMMA_TRUNCATED"),
+    ("SIRANE_EXCHANGE", "EXCHANGE_SIGMA_W_RATIO"),
+    ("SCHULTE_BETA", "ASPECT_RATIO_EXCHANGE_BETA"),
+    ("SEUIL_GAUSS", "GAUSS_CUTOFF_SIGMAS"),
+    ("soulhac_shape", "bessel_shape_parameter"),
+    ("macdonald_profile", "canopy_displacement_roughness"),
+    ("sigma_theta_munich", "sigma_theta_turbulence_intensity"),
+    ("n_theta_munich", "n_theta_rectangle_rule"),
+    ("sirane_direction_samples", "exact_gaussian_direction_samples"),
+    ("munich_idealised", "twelve_street_grid"),
 ]
 
 
@@ -121,3 +160,72 @@ def test_geometry_swmm_is_geometry_tabulated():
         results.append(model._apply_closures(state, drivers))
     for key in ("sewer.h", "sewer.v", "sewer.V_wet"):
         assert torch.equal(results[0][key], results[1][key])
+
+
+@pytest.mark.parametrize(("old", "new"), STREET_PACKAGE_ALIASES,
+                         ids=[old for old, _ in STREET_PACKAGE_ALIASES])
+def test_street_alias_is_exported_from_the_package(old, new):
+    assert getattr(street_aq, old) is getattr(street_aq, new)
+    assert old in street_aq.__all__
+    assert new in street_aq.__all__
+
+
+def test_street_von_karman_constants_are_named_by_value():
+    assert street_closures.KAPPA_040 == 0.40
+    assert street_closures.KAPPA_041 == 0.41
+    assert street_canyon.KAPPA == street_closures.KAPPA_040
+    assert street_closures.PRESETS["sirane"]["kappa"] == street_closures.KAPPA_040
+    assert street_closures.PRESETS["munich"]["kappa"] == street_closures.KAPPA_041
+    assert street_closures.infer_kappa({"canyon_wind": "exponential_profile"}) == 0.41
+    assert street_closures.infer_kappa({"canyon_wind": "bessel_profile"}) == 0.40
+
+
+def test_street_euler_gamma_is_the_truncated_value():
+    assert street_canyon.EULER_GAMMA_TRUNCATED == 0.577
+
+
+def _t(*values):
+    return torch.tensor(values, dtype=torch.float64)
+
+
+@pytest.mark.parametrize(("function", "new", "value", "args", "kwargs"), [
+    ("canyon_velocity", "canyon_wind", "bessel_profile",
+     (_t(20.0), _t(20.0), _t(0.4)), {"u_star": _t(0.5)}),
+    ("roof_wind", "roof_wind", "canopy_log_law",
+     (_t(0.5), _t(20.0), _t(20.0)), {"h_mean": _t(15.0), "w_mean": _t(20.0)}),
+    ("exchange_velocity", "roof_exchange", "aspect_ratio_scaled",
+     (_t(0.4), _t(6.9), _t(7.5)), {}),
+])
+def test_street_form_keyword_is_the_option_keyword(function, new, value, args, kwargs):
+    fn = getattr(street_canyon, function)
+    expected = fn(*args, **{new: value}, **kwargs)
+    with pytest.warns(DeprecationWarning, match=f"'form' is deprecated; use '{new}'"):
+        got = fn(*args, form=value, **kwargs)
+    assert torch.equal(got, expected)
+    with pytest.raises(TypeError, match="give only one"):
+        fn(*args, form=value, **{new: value}, **kwargs)
+
+
+def test_street_model_keyword_is_junction_routing():
+    flux_in, flux_out = _t(10.0, 4.0), _t(6.0, 8.0)
+    expected = street_routing.routing_matrix(flux_in, flux_out,
+                                             junction_routing="non_crossing_streamlines")
+    with pytest.warns(DeprecationWarning, match="'model' is deprecated"):
+        got = street_routing.routing_matrix(flux_in, flux_out,
+                                            model="non_crossing_streamlines")
+    assert torch.equal(got, expected)
+    with pytest.raises(TypeError, match="junction_routing is required"):
+        street_routing.routing_matrix(flux_in, flux_out)
+
+
+def test_street_scheme_keyword_is_direction_averaging():
+    sigma = _t(0.1, 0.2)
+    expected = street_routing.direction_offsets("rectangle_rule", sigma)
+    keyword = street_routing.direction_offsets(direction_averaging="rectangle_rule",
+                                               sigma_theta=sigma)
+    with pytest.warns(DeprecationWarning, match="'scheme' is deprecated"):
+        old = street_routing.direction_offsets(scheme="rectangle_rule", sigma_theta=sigma)
+    for got in (keyword, old):
+        assert all(torch.equal(a, b) for a, b in zip(got, expected, strict=True))
+    with pytest.raises(TypeError, match="both required"):
+        street_routing.direction_offsets("rectangle_rule")

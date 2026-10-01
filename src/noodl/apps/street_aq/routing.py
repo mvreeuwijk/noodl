@@ -25,7 +25,7 @@ from noodl.apps.street_aq.canyon import (
     exchange_velocity,
     roof_wind,
 )
-from noodl.apps.street_aq.closures import normalise, resolve
+from noodl.apps.street_aq.closures import keyword_alias, normalise, resolve
 
 Tensor = torch.Tensor
 TWO_PI = 2.0 * math.pi
@@ -36,16 +36,22 @@ Ben Salem et al. 2015, "maximum fluctuation of +/-20 deg (2 sigma_theta)")."""
 
 MAX_N_THETA = 10
 
-MAX_SIGMA_THETA_SIRANE = math.pi / 4.0
+MAX_SIGMA_THETA_EXACT = math.pi / 4.0
 """The largest direction spread `direction_averaging="exact_gaussian"` accepts (exclusive). The
 exact average integrates over the whole real line of directions, not around the circle:
 the Gaussian mass lying more than half a turn from the mean, which that ignores, is below
 `erfc(4 / sqrt 2) = 6.3e-5` at `pi/4` and below `1e-15` at 20 degrees."""
 
-SIRANE_WINDOW = 8.0
+MAX_SIGMA_THETA_SIRANE = MAX_SIGMA_THETA_EXACT
+"""Earlier name of `MAX_SIGMA_THETA_EXACT`."""
+
+EXACT_GAUSSIAN_WINDOW = 8.0
 """Half-width of the `direction_averaging="exact_gaussian"` window, in units of `sigma_theta`:
 switch angles farther than `8 sigma_theta` from the mean direction are dropped, because
 the Gaussian mass beyond them, `Phi(-8) = 6.2e-16`, is below float64 resolution."""
+
+SIRANE_WINDOW = EXACT_GAUSSIAN_WINDOW
+"""Earlier name of `EXACT_GAUSSIAN_WINDOW`."""
 
 _FLOW_KINDS = ("route", "vent", "exchange")
 """The edge kinds `StreetFlows` writes its concatenated `q` in, and the order
@@ -75,7 +81,7 @@ def _safe_atan2(s: Tensor, c: Tensor) -> Tensor:
                        torch.where(origin, torch.ones_like(c), c))
 
 
-def sigma_theta_munich(sigma_v: Tensor, u_ref: Tensor) -> Tensor:
+def sigma_theta_turbulence_intensity(sigma_v: Tensor, u_ref: Tensor) -> Tensor:
     """`sigma_theta = min(sigma_v / U, 10 deg)` (SRC `:3567`; Blackadar 1997, Soulhac 2009),
     the `direction_spread="turbulence_intensity"` spread.
 
@@ -87,17 +93,35 @@ def sigma_theta_munich(sigma_v: Tensor, u_ref: Tensor) -> Tensor:
     return torch.clamp(sigma_v / u_ref, max=MAX_SIGMA_THETA)
 
 
-def n_theta_munich(sigma_theta: Tensor) -> Tensor:
-    """`ntheta = floor(sigma_theta in DEGREES)` (SRC `:3568`), as a long tensor, clamped to
-    `[1, 10]`. MUNICH skips the averaging entirely at 1, i.e. below two degrees."""
+sigma_theta_munich = sigma_theta_turbulence_intensity
+"""Earlier name of `sigma_theta_turbulence_intensity`."""
+
+
+def n_theta_rectangle_rule(sigma_theta: Tensor) -> Tensor:
+    """The sample count of the `rectangle_rule` direction average:
+    `ntheta = floor(sigma_theta in DEGREES)` (MUNICH, SRC `:3568`), as a long tensor,
+    clamped to `[1, 10]`. MUNICH skips the averaging entirely at 1, i.e. below two
+    degrees."""
     degrees = sigma_theta * 180.0 / math.pi
     return torch.clamp(torch.floor(degrees).long(), min=1, max=MAX_N_THETA)
 
 
+n_theta_munich = n_theta_rectangle_rule
+"""Earlier name of `n_theta_rectangle_rule`."""
+
+
 def direction_offsets(
-    scheme: str, sigma_theta: Tensor, *, n_theta: int | None = None
+    direction_averaging: str | None = None,
+    sigma_theta: Tensor | None = None,
+    *,
+    n_theta: int | None = None,
+    scheme: str | None = None,
 ) -> tuple[Tensor, Tensor]:
     """Wind-direction samples and their weights, `(offsets (..., m), weights (..., m))`.
+
+    `direction_averaging` is the closure option of that name (`closures.OPTIONS`) and
+    `sigma_theta` the spread, radians; both are required. `scheme=` is the earlier,
+    deprecated keyword for `direction_averaging`.
 
     `"none"`: one sample at offset 0 with weight 1 -- no direction averaging at all.
 
@@ -113,15 +137,21 @@ def direction_offsets(
 
     `"gauss_hermite"`: an `n_theta`-point Gauss-Hermite quadrature with NORMALISED weights.
     The junction routing is piecewise constant in the sample direction, so a fixed
-    quadrature mis-weights its pieces; `"exact_gaussian"` (`sirane_direction_samples`,
+    quadrature mis-weights its pieces; `"exact_gaussian"` (`exact_gaussian_direction_samples`,
     which needs the junction geometry and so is not a scheme of this function) is the
     exact average. Used in no parity test.
     """
+    scheme = keyword_alias("direction_offsets", "direction_averaging", direction_averaging,
+                           "scheme", scheme, None)
+    if scheme is None or sigma_theta is None:
+        raise TypeError(
+            "direction_offsets: direction_averaging and sigma_theta are both required"
+        )
     scheme = normalise("direction_averaging", scheme, "direction_offsets")
     if scheme == "exact_gaussian":
         raise ValueError(
-            "direction_offsets: scheme='exact_gaussian' needs the junction geometry; use "
-            "sirane_direction_samples"
+            "direction_offsets: direction_averaging='exact_gaussian' needs the junction "
+            "geometry; use exact_gaussian_direction_samples"
         )
     sigma_theta = torch.as_tensor(sigma_theta, dtype=torch.float64)
     if scheme == "none":
@@ -129,7 +159,7 @@ def direction_offsets(
         return (torch.zeros(shape, dtype=torch.float64),
                 torch.ones(shape, dtype=torch.float64))
     if scheme == "rectangle_rule":
-        counts = n_theta_munich(sigma_theta)
+        counts = n_theta_rectangle_rule(sigma_theta)
         m = int(counts.max())
         if m <= 1:
             shape = sigma_theta.shape + (1,)
@@ -155,7 +185,8 @@ def direction_offsets(
         return offsets, weights
     if n_theta is None or n_theta < 1:
         raise ValueError(
-            f"direction_offsets: scheme='gauss_hermite' needs n_theta >= 1, got {n_theta!r}"
+            f"direction_offsets: direction_averaging='gauss_hermite' needs n_theta >= 1, "
+            f"got {n_theta!r}"
         )
     nodes, raw = np.polynomial.hermite_e.hermegauss(int(n_theta))
     nodes_t = torch.as_tensor(nodes, dtype=torch.float64)
@@ -164,7 +195,7 @@ def direction_offsets(
     return offsets, weights_t.expand(offsets.shape).clone()
 
 
-def sirane_direction_samples(
+def exact_gaussian_direction_samples(
     theta: Tensor, sigma_theta: Tensor, slot_angle: Tensor, slot_active: Tensor
 ) -> tuple[Tensor, Tensor]:
     """The EXACT Gaussian direction average of the junction routing, as samples and
@@ -181,29 +212,30 @@ def sirane_direction_samples(
     classification `cos(phi - slot_angle) < 0` -- the ordering follows from the
     classification and the fixed slot angles -- so it is piecewise constant in `phi` and
     changes only at the switch angles `slot_angle +- pi/2`. Per junction, the switch angles
-    within `SIRANE_WINDOW * sigma_theta` of the mean (taken on the branch nearest it) are
+    within `EXACT_GAUSSIAN_WINDOW * sigma_theta` of the mean (taken on the branch nearest it) are
     sorted into interval boundaries `[-inf, s_1, ..., s_k, +inf]`; each interval gets ONE
     sample, at its midpoint (the infinite ends clipped to `+-min(8 sigma, pi)`, so a
     junction with no switch in reach gets one sample at the mean and no sample crosses a
     switch of the next turn), weighted by its Gaussian mass
     `Phi((b - phi0)/sigma) - Phi((a - phi0)/sigma)`. The weights sum to one and the result
     is exact for the piecewise-constant integrand -- to the dropped mass beyond the window
-    (`SIRANE_WINDOW`) and beyond half a turn (`MAX_SIGMA_THETA_SIRANE`) -- and
+    (`EXACT_GAUSSIAN_WINDOW`) and beyond half a turn (`MAX_SIGMA_THETA_EXACT`) -- and
     differentiable in `sigma_theta` and `theta` through the weights; the sample directions
     themselves carry no gradient (they feed only the classification).
 
     Junctions with fewer switches in reach than the busiest one are padded with
     zero-weight samples, so every junction and instance shares one sample axis. A spread
     of zero gives the single sample at the mean. Raises `ValueError` for a spread that is
-    negative, not finite, or at least `MAX_SIGMA_THETA_SIRANE`.
+    negative, not finite, or at least `MAX_SIGMA_THETA_EXACT`.
     """
     theta = torch.as_tensor(theta, dtype=torch.float64)
     sigma = torch.as_tensor(sigma_theta, dtype=torch.float64)
     with torch.no_grad():
-        bad = ~((sigma >= 0) & (sigma < MAX_SIGMA_THETA_SIRANE))
+        bad = ~((sigma >= 0) & (sigma < MAX_SIGMA_THETA_EXACT))
         if bool(bad.any()):
             raise ValueError(
-                f"sirane_direction_samples: direction_averaging='exact_gaussian' needs "
+                f"exact_gaussian_direction_samples: direction_averaging='exact_gaussian' "
+                f"needs "
                 f"0 <= sigma_theta < pi/4 (the average runs over the real line of "
                 f"directions, not around the circle), got {int(bad.sum())} value(s) "
                 f"outside it, e.g. {float(sigma[bad].flatten()[0])!r}"
@@ -212,7 +244,7 @@ def sirane_direction_samples(
         active = torch.cat([slot_active, slot_active], -1)            # (n_j, 2d)
         # Offset of every switch from the mean, on the branch nearest it: [-pi, pi).
         rel = torch.remainder(switch - theta.unsqueeze(-1) + math.pi, TWO_PI) - math.pi
-        window = SIRANE_WINDOW * sigma.unsqueeze(-1)
+        window = EXACT_GAUSSIAN_WINDOW * sigma.unsqueeze(-1)
         kept = active & (rel.abs() < window)
         rel, order = torch.sort(torch.where(kept, rel, torch.full_like(rel, math.inf)),
                                 dim=-1)
@@ -240,6 +272,10 @@ def sirane_direction_samples(
     cdf = torch.cat([zeros, cdf, zeros + 1.0], -1)
     weights = cdf[..., 1:] - cdf[..., :-1]
     return offsets, weights
+
+
+sirane_direction_samples = exact_gaussian_direction_samples
+"""Earlier name of `exact_gaussian_direction_samples`."""
 
 
 def node_closure(flux: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
@@ -276,8 +312,17 @@ def node_closure(flux: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     return p_in - to_atmosphere, p_out - from_atmosphere, to_atmosphere, from_atmosphere
 
 
-def routing_matrix(flux_in: Tensor, flux_out: Tensor, *, model: str) -> Tensor:
+def routing_matrix(
+    flux_in: Tensor,
+    flux_out: Tensor,
+    *,
+    junction_routing: str | None = None,
+    model: str | None = None,
+) -> Tensor:
     """The street-to-street flux matrix `F[..., p, r]` from ORDERED, closed marginals.
+
+    `junction_routing` (required) is the closure option of that name (`closures.OPTIONS`);
+    `model=` is its earlier, deprecated keyword.
 
     `"perfect_mixing"`: `F = P_in outer (P_out / sum P_out)`.
 
@@ -296,6 +341,10 @@ def routing_matrix(flux_in: Tensor, flux_out: Tensor, *, model: str) -> Tensor:
     `[10, 4]` against outflows `[6, 8]` give `[[6, 4], [0, 4]]`, where perfect mixing would
     give `[[4.286, 5.714], [1.714, 2.286]]`.
     """
+    model = keyword_alias("routing_matrix", "junction_routing", junction_routing, "model",
+                          model, None)
+    if model is None:
+        raise TypeError("routing_matrix: the keyword junction_routing is required")
     model = normalise("junction_routing", model, "routing_matrix")
     if model == "perfect_mixing":
         total = flux_out.sum(-1, keepdim=True)
@@ -402,7 +451,7 @@ class StreetFlows:
     and the ordering switch discretely), so under `"gauss_hermite"`, whose quadrature nodes
     merely move with the spread, `q` carries no gradient with respect to `sigma_theta`.
     `"exact_gaussian"` is the EXACT Gaussian average over those pieces
-    (`sirane_direction_samples`: one sample per interval between switch angles, weighted
+    (`exact_gaussian_direction_samples`: one sample per interval between switch angles, weighted
     by its Gaussian mass), and carries the gradient in `sigma_theta` and in the mean
     direction through the weights; it needs `0 <= sigma_theta < pi/4`.
     `"rectangle_rule"` samples `[-2 sigma, 2 sigma]` uniformly with UNNORMALISED weights
@@ -476,7 +525,7 @@ class StreetFlows:
         ), "StreetFlows")
         options.pop("chemistry")
         if options["direction_averaging"] == "exact_gaussian" and sigma_theta is not None \
-                and not 0.0 <= float(sigma_theta) < MAX_SIGMA_THETA_SIRANE:
+                and not 0.0 <= float(sigma_theta) < MAX_SIGMA_THETA_EXACT:
             raise ValueError(
                 f"StreetFlows: direction_averaging='exact_gaussian' needs "
                 f"0 <= sigma_theta < pi/4 (the average runs over the real line of "
@@ -665,20 +714,20 @@ class StreetFlows:
         phi = theta_w - g.azimuth
         if self.canyon_wind == "bessel_profile":
             u_street = canyon_velocity(
-                g.width, g.height, phi, u_star=bl_s.u_star, form="bessel_profile",
+                g.width, g.height, phi, u_star=bl_s.u_star, canyon_wind="bessel_profile",
                 z0_b=g.z0_b, kappa=self.kappa, canyon_wind_min=self.canyon_wind_min,
             )
         else:
             u_h = roof_wind(
-                bl_s.u_star, g.height, g.width, form=self.roof_wind, z0_s=self.z0_s,
+                bl_s.u_star, g.height, g.width, roof_wind=self.roof_wind, z0_s=self.z0_s,
                 kappa=self.kappa, h_mean=self.h_mean, w_mean=self.w_mean,
             )
             u_street = canyon_velocity(
-                g.width, g.height, phi, u_h=u_h, form="exponential_profile",
+                g.width, g.height, phi, u_h=u_h, canyon_wind="exponential_profile",
                 z0_s=self.z0_s, canyon_wind_min=self.canyon_wind_min,
             )
         sigma_w = bl_s.sigma_w(g.height, lmo=lmo, stability=self._stability(lmo))
-        u_d = exchange_velocity(sigma_w, g.height, g.width, form=self.roof_exchange,
+        u_d = exchange_velocity(sigma_w, g.height, g.width, roof_exchange=self.roof_exchange,
                                 u_d_min=self.u_d_min, sigma_w_min=self.sigma_w_min)
         return bl_s, u_street, u_d
 
@@ -802,7 +851,7 @@ class StreetFlows:
             sigma_v = bl_j.sigma_v(lmo=j["lmo"], stability=self._stability(j["lmo"]))
             if self.sigma_v_min > 0.0:
                 sigma_v = torch.clamp(sigma_v, min=self.sigma_v_min)
-            sigma = sigma_theta_munich(sigma_v, j["U_ref"])
+            sigma = sigma_theta_turbulence_intensity(sigma_v, j["U_ref"])
         elif driven is not None:
             if self.meteo == "uniform":
                 batch = tuple(theta_j.shape[:-1])
@@ -829,7 +878,7 @@ class StreetFlows:
             offsets, weights = direction_offsets("none", torch.zeros_like(theta_j))
             return theta_j, offsets, weights
         if self.direction_averaging == "exact_gaussian":
-            offsets, weights = sirane_direction_samples(theta_j, sigma, self.slot_angle,
+            offsets, weights = exact_gaussian_direction_samples(theta_j, sigma, self.slot_angle,
                                                         self.slot_active)
         else:
             offsets, weights = direction_offsets(self.direction_averaging, sigma,
@@ -863,7 +912,7 @@ class StreetFlows:
         p_in, p_out, to_atm, from_atm = node_closure(flux)
         p_in_ord = torch.gather(p_in.expand(order_in.shape), -1, order_in)
         p_out_ord = torch.gather(p_out.expand(order_out.shape), -1, order_out)
-        f_ord = routing_matrix(p_in_ord, p_out_ord, model=self.junction_routing)
+        f_ord = routing_matrix(p_in_ord, p_out_ord, junction_routing=self.junction_routing)
         flat_idx = order_in.unsqueeze(-1) * d + order_out.unsqueeze(-2)
         flat_idx = flat_idx.expand(f_ord.shape).reshape(*f_ord.shape[:-2], d * d)
         f_slot = torch.zeros(*f_ord.shape[:-2], d * d, dtype=f_ord.dtype)
