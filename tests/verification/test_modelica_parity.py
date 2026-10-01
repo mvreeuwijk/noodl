@@ -349,8 +349,8 @@ PARITY_RTOL = 1e-6
 # noodl's runs at 1, 2 and 4 substeps agree to 1e-10 kg/s and the reference itself moved by
 # up to 2.9e-8 kg/s over its first rows; NaturalVentilation's orifices at their reversal,
 # 5.0e-10 kg/s (unchanged from 1-2 to 2-4 substeps) where the reference moved by 1.8e-10 to
-# 3.7e-9 kg/s from row to row there; ReverseBuoyancy's door flow at 612 s, 4.7e-9 kg/s,
-# where the reference moved by 5.1e-9 kg/s.
+# 3.7e-9 kg/s from row to row there; ReverseBuoyancy's door flow at 612 s, 1.7e-8 kg/s,
+# where the reference moved by 2.2e-8 kg/s.
 REFERENCE_RESOLUTION: dict[str, dict[str, float]] = {
     "ClosedDoors": {"T": 1.2e-09, "Xi": 2.2e-14, "flow": 1.3e-11, "p": 1.5e-07},
     "CO2TransportStep": {"C": 6.0e-14, "T": 1.5e-12, "Xi": 5.3e-14, "flow": 3.3e-08,

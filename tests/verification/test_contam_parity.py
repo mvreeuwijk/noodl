@@ -124,8 +124,8 @@ def _stack_budget(Ta, Tz=293.15):
     relative roundoff u in each input moves F by at most: C 1u; rho_up (R, T_up) 1u; g
     0.5u; R in the density difference 0.5u; and Ta, Tz through the DIFFERENCE
     (1/Ta - 1/Tz), which amplifies them to 0.5 (Ta + Tz) / |Tz - Ta| u. Pb (101325) and the
-    opening heights (0, 1.5 m) are exact in float32. 16.6u = 9.9e-7 at 20 K, 31.8u = 1.9e-6
-    at 10 K.
+    opening heights (0, 1.5 m) are exact in float32. Over the sweep this is 17.2u = 1.02e-6
+    (Ta = 273.15 K, 20 K below) to 32.8u = 1.96e-6 (Ta = 303.15 K, 10 K above).
     """
     return F32_U * (3.0 + 0.5 * (Ta + Tz) / abs(Tz - Ta))
 
@@ -165,7 +165,7 @@ def test_stack_project_flow_magnitudes_match_contamx(contamx, Ta, record_propert
       difference. `prj.ZonePressureDensity` removes it; see
       `test_the_zone_pressure_density_is_what_closed_the_stack_residual`.
 
-    What remains is 7e-8 to 1e-7 (1.2-1.6 F32_U) against a budget of 16.6-31.8 F32_U. The
+    What remains is 7.2e-8 to 9.4e-8 (1.2-1.6 F32_U) against a budget of 17.2-32.8 F32_U. The
     sweep matters: both signs of the temperature difference are needed because the upstream
     density switches endpoint when the flow reverses.
     """
