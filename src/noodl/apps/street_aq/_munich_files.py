@@ -30,13 +30,11 @@ from pathlib import Path
 
 import numpy as np
 
-from noodl.apps.street_aq.network import Street, StreetNetwork
+from noodl.apps.street_aq.network import EARTH_RADIUS_M, Street, StreetNetwork
 
-EARTH_RADIUS_M = 6371229.0
-"""`StreetNetworkTransport.cxx:18`'s `earth_radius` -- the constant MUNICH itself uses to
-turn a street's endpoint lon/lat into metres. Reusing it here means a network written by
-`write_munich_case` and re-projected internally by MUNICH recovers the same `x`, `y` metres
-this reader would compute directly."""
+# `EARTH_RADIUS_M` is `StreetNetworkTransport.cxx:18`'s `earth_radius`, the constant MUNICH
+# itself turns a street's endpoint lon/lat into metres with (`network.EARTH_RADIUS_M`; kept
+# importable from here).
 
 UG_PER_KG = 1e9
 """MUNICH's native mass unit (micrograms) per kg (noodl's SI unit). `read_munich_case`
@@ -324,7 +322,13 @@ def read_munich_case(root: Path) -> dict:
                 raw_junction_id[name] = jid
         streets.append(Street(street_id, u, v, float(length), float(width), float(height)))
         street_ids.append(street_id)
-    network = StreetNetwork(streets=streets, x=x, y=y)
+    # Street directions as MUNICH computes them, from the lon/lat themselves at each
+    # street's own mid-latitude (`network.midlatitude_bearing`), not from the metres above.
+    network = StreetNetwork(
+        streets=streets, x=x, y=y, street_direction="midlatitude_bearing",
+        lon={name: coordinates[jid][0] for name, jid in raw_junction_id.items()},
+        lat={name: coordinates[jid][1] for name, jid in raw_junction_id.items()},
+    )
     n_streets = len(street_ids)
     junctions = network.junctions
     junction_ids = [raw_junction_id[name] for name in junctions]
@@ -654,7 +658,8 @@ def write_munich_case(
         delta_t = 3600.0
 
     projection = dict(native.get("projection", {}))
-    if "lat0_deg" in options or "lon0_deg" in options or not projection:
+    reanchored = "lat0_deg" in options or "lon0_deg" in options
+    if reanchored or not projection:
         lat0 = float(options.pop("lat0_deg", DEFAULT_LAT0_DEG))
         lon0 = float(options.pop("lon0_deg", DEFAULT_LON0_DEG))
         projection = {"lat_ref_deg": lat0, "lat0_deg": lat0, "lon0_deg": lon0}
@@ -678,8 +683,14 @@ def write_munich_case(
         street_touches[street.v].append(street.name)
 
     intersection_lines = ["#id;lon;lat;number_of_streets;1st_street_id;2nd_street_id;..."]
+    # A network that carries its own lon/lat (one read from MUNICH files) writes them back
+    # unchanged, unless an explicit lat0_deg/lon0_deg re-anchors it.
+    own_lonlat = network.lon is not None and network.lat is not None and not reanchored
     for name in junctions:
-        lon, lat = _lonlat(network.x[name], network.y[name], **projection)
+        if own_lonlat:
+            lon, lat = network.lon[name], network.lat[name]
+        else:
+            lon, lat = _lonlat(network.x[name], network.y[name], **projection)
         touching = street_touches[name]
         row = [junction_id[name], repr(lon), repr(lat), str(len(touching)), *touching]
         intersection_lines.append(";".join(row) + ";")

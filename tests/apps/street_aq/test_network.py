@@ -211,3 +211,100 @@ def test_initial_state_is_zero_and_shaped_by_the_species_count():
     assert drivers3["street.x_boundary"].shape == (1, 3)
     torch.testing.assert_close(initial_state(model)["street.x"], state3["street.x"],
                                rtol=0, atol=0)
+
+
+# ------------------------------------------------------- street directions from lon/lat
+
+def test_midlatitude_bearing_is_munich_s_street_angle():
+    """MUNICH's `ComputeStreetAngle` (`StreetNetworkTransport.cxx:3088-3178`) by hand:
+    east-west distance `R cos(lat_mid) dlon`, north-south `R dlat`, bearing clockwise from
+    north. Pinned at Paris, one street per quadrant, plus the four compass points."""
+    from noodl.apps.street_aq.network import midlatitude_bearing
+
+    hub = (2.35, 48.85)
+    pinned = {
+        (2.351, 48.851): 0.5819967466492452,   # NE
+        (2.36, 48.84): 2.5595454693942177,     # SE
+        (2.349, 48.849): 3.7235985712626887,   # SW
+        (2.34, 48.86): 5.7012298332532385,     # NW
+    }
+    for (lon, lat), want in pinned.items():
+        got = midlatitude_bearing(*hub, lon, lat)
+        mid = math.radians(0.5 * (hub[1] + lat))
+        by_hand = math.atan2(math.cos(mid) * (lon - hub[0]), lat - hub[1]) % (2 * math.pi)
+        assert got == pytest.approx(want, rel=0, abs=1e-15)
+        assert got == pytest.approx(by_hand, rel=0, abs=1e-15)
+    compass = {(2.35, 48.86): 0.0, (2.36, 48.85): 0.5 * math.pi,
+               (2.35, 48.84): math.pi, (2.34, 48.85): 1.5 * math.pi}
+    for (lon, lat), want in compass.items():
+        assert midlatitude_bearing(*hub, lon, lat) == pytest.approx(want, rel=0, abs=1e-15)
+    with pytest.raises(ValueError, match="coincide"):
+        midlatitude_bearing(*hub, *hub)
+
+
+def _geographic_t_junction(street_direction):
+    """A Paris T-junction with x/y projected the way `read_case(format="munich")` projects
+    them (one `cos` at the network's mean latitude) and lon/lat kept alongside."""
+    from noodl.apps.street_aq.network import EARTH_RADIUS_M
+
+    lonlat = {"hub": (2.35, 48.85), "a": (2.351, 48.851), "b": (2.35, 48.84),
+              "c": (2.34, 48.85)}
+    lat0 = math.radians(sum(lat for _, lat in lonlat.values()) / len(lonlat))
+    x = {k: EARTH_RADIUS_M * math.cos(lat0) * math.radians(lon) for k, (lon, _) in lonlat.items()}
+    y = {k: EARTH_RADIUS_M * math.radians(lat) for k, (_, lat) in lonlat.items()}
+    streets = [Street(n, "hub", n.lower(), 100.0, w, 10.0)
+               for n, w in (("A", 1.0), ("B", 2.0), ("C", 3.0))]
+    return StreetNetwork(
+        streets=streets, x=x, y=y, street_direction=street_direction,
+        lon={k: v[0] for k, v in lonlat.items()}, lat={k: v[1] for k, v in lonlat.items()},
+    )
+
+
+def test_street_direction_options_and_azimuths():
+    from noodl.apps.street_aq.network import midlatitude_bearing
+
+    net = _geographic_t_junction("midlatitude_bearing")
+    for s, az in zip(net.streets, net.azimuth, strict=True):
+        bearing = midlatitude_bearing(net.lon[s.u], net.lat[s.u], net.lon[s.v], net.lat[s.v])
+        assert az == pytest.approx(0.5 * math.pi - bearing, rel=0, abs=1e-15)
+    planar = _geographic_t_junction("planar")
+    # One projection at the mean latitude tilts street A by ~2.5e-5 rad.
+    assert abs(planar.azimuth[0] - net.azimuth[0]) > 1e-5
+    with pytest.raises(ValueError, match="street_direction"):
+        _geographic_t_junction("spherical")
+    with pytest.raises(ValueError, match="lon and lat"):
+        StreetNetwork(streets=planar.streets, x=planar.x, y=planar.y,
+                      street_direction="midlatitude_bearing")
+
+
+def test_wind_just_past_munich_s_switch_routes_street_a_as_munich_does():
+    """Street A's in/out switch sits at its bearing + 90 degrees. A wind 1 % of the way
+    from MUNICH's switch toward the planar projection's switch (about 2.5e-7 rad from
+    MUNICH's) must classify A by MUNICH's rule (`ComputeIntersectionFlux`,
+    `StreetNetworkTransport.cxx:2868-2878`: inflow iff the bearing difference is in
+    (pi/2, 3 pi/2)) under `midlatitude_bearing`, and the other way round under `planar`.
+    B (bearing 180) is then an outflow and C (270) an inflow either way."""
+    geo, planar = (_geographic_t_junction(m) for m in ("midlatitude_bearing", "planar"))
+    b_geo = (0.5 * math.pi - geo.azimuth[0]) % (2 * math.pi)
+    b_planar = (0.5 * math.pi - planar.azimuth[0]) % (2 * math.pi)
+    toward = b_geo + 0.5 * math.pi + 0.01 * (b_planar - b_geo)
+    dangle = abs(b_geo - toward)
+    a_is_inflow = 0.5 * math.pi < dangle < 1.5 * math.pi
+
+    def a_is_inflow_in(net):
+        model, state, _ = build_model(net, preset="munich", direction_averaging="none",
+                                      canyon_wind_min=5.0)
+        out = model.closures[0](state, {
+            "U_ref": torch.tensor(0.01, dtype=DT),
+            "theta_w": torch.tensor(0.5 * math.pi - toward, dtype=DT),
+            "h_abl": torch.tensor(1000.0, dtype=DT),
+        })
+        route = model.net.edge_index("route").tolist()
+        q = out["street.q"][: len(route)].tolist()
+        from_a = sum(v for col, v in zip(route, q, strict=True) if model.net.edges[col][0] == "A")
+        into_a = sum(v for col, v in zip(route, q, strict=True) if model.net.edges[col][1] == "A")
+        assert (from_a > 0) != (into_a > 0)
+        return from_a > 0
+
+    assert a_is_inflow_in(geo) == a_is_inflow
+    assert a_is_inflow_in(planar) != a_is_inflow

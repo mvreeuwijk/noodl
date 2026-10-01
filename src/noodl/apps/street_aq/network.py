@@ -42,16 +42,85 @@ class Street:
     emission_scale: float = 1.0
 
 
+STREET_DIRECTIONS = ("planar", "midlatitude_bearing")
+"""How `StreetNetwork` turns junction coordinates into street directions.
+
+- `"planar"` (the default): `atan2(dy, dx)` on the planar `x`/`y` metres.
+- `"midlatitude_bearing"`: from geographic `lon`/`lat` (degrees), on a locally flat Earth
+  whose east-west distance is scaled by the cosine of the STREET'S OWN mid-latitude
+  (`midlatitude_bearing`). This is MUNICH's street angle (`ComputeStreetAngle`,
+  `StreetNetworkTransport.cxx:3088-3178`), which `read_case(format="munich")` uses. A
+  single projection of the whole network to metres (the reader's `x`/`y`, at the
+  network's mean latitude) tilts each street by up to about `1e-4` rad on a city-sized
+  network, enough to move a junction's in/out switch past a wind sample.
+"""
+
+EARTH_RADIUS_M = 6371229.0
+"""`StreetNetworkTransport.cxx:18`'s `earth_radius` -- the Earth radius MUNICH turns a
+street's endpoint lon/lat into metres with."""
+
+
+def midlatitude_bearing(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
+    """The compass bearing (radians clockwise from north, in `[0, 2 pi]`) from point 1 to
+    point 2, both lon/lat in degrees, on a locally flat Earth: east-west distance
+    `R cos(lat_mid) dlon`, north-south `R dlat`, with `lat_mid = (lat1 + lat2) / 2`.
+
+    Written operation for operation as MUNICH's `ComputeStreetAngle`
+    (`StreetNetworkTransport.cxx:3123-3177`): `gamma = acos(|dx_m| / dl)` and one of four
+    quadrant cases, with MUNICH's own tie-breaks (`dx = 0` counts as east, `dy = 0` as
+    north for `dx >= 0` and south for `dx < 0`), so the angles agree to round-off. Plain
+    floats: this is a geometry constant, not differentiable in the coordinates (`acos`'s
+    slope is unbounded at east and west in any case).
+    """
+    pi = math.pi
+    dx = lon2 - lon1
+    x_distance = abs(EARTH_RADIUS_M * math.cos((lat1 + lat2) / 2.0 * pi / 180.0) * dx
+                     * pi / 180.0)
+    dy = lat2 - lat1
+    y_distance = abs(EARTH_RADIUS_M * dy * pi / 180.0)
+    dl = math.sqrt(x_distance**2 + y_distance**2)
+    if dl == 0.0:
+        raise ValueError("midlatitude_bearing: the two points coincide; no direction")
+    gamma = math.acos(abs(x_distance / dl))
+    if dx >= 0.0 and dy >= 0.0:
+        return pi / 2.0 - gamma
+    if dx >= 0.0:
+        return pi / 2.0 + gamma
+    if dy <= 0.0:
+        return pi * 1.5 - gamma
+    return pi * 1.5 + gamma
+
+
 @dataclass(frozen=True)
 class StreetNetwork:
-    """Streets plus the x/y coordinates (metres) of every junction they name."""
+    """Streets plus the x/y coordinates (metres) of every junction they name.
+
+    `street_direction` (one of `STREET_DIRECTIONS`) says how the street directions
+    (`azimuth`) come from the coordinates: `"planar"` from `x`/`y`, or
+    `"midlatitude_bearing"` from `lon`/`lat` (degrees, every junction), MUNICH's rule.
+    `x`/`y` stay the metres everything else (lengths, plume geometry) uses.
+    """
 
     streets: list[Street]
     x: dict[str, float]
     y: dict[str, float]
+    street_direction: str = "planar"
+    lon: dict[str, float] | None = None
+    lat: dict[str, float] | None = None
     _azimuth: list[float] = field(default_factory=list, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if self.street_direction not in STREET_DIRECTIONS:
+            raise ValueError(
+                f"StreetNetwork: street_direction must be one of {STREET_DIRECTIONS}, "
+                f"got {self.street_direction!r}"
+            )
+        geographic = self.street_direction == "midlatitude_bearing"
+        if geographic and (self.lon is None or self.lat is None):
+            raise ValueError(
+                "StreetNetwork: street_direction='midlatitude_bearing' needs lon and lat "
+                "(degrees) for every junction"
+            )
         seen: set[str] = set()
         for street in self.streets:
             if street.name in seen:
@@ -78,10 +147,27 @@ class StreetNetwork:
                         f"StreetNetwork: street {street.name!r} has {attribute} "
                         f"{value!r}; it must be strictly positive"
                     )
-        object.__setattr__(self, "_azimuth", [
-            math.atan2(self.y[s.v] - self.y[s.u], self.x[s.v] - self.x[s.u])
-            for s in self.streets
-        ])
+            if geographic:
+                missing = [n for n in (street.u, street.v)
+                           if n not in self.lon or n not in self.lat]
+                if missing:
+                    raise KeyError(
+                        f"StreetNetwork: street {street.name!r} names junction(s) "
+                        f"{missing} with no lon/lat coordinate"
+                    )
+        if geographic:
+            # Counter-clockwise from east, the convention `azimuth` keeps: pi/2 - bearing.
+            azimuth = [
+                0.5 * math.pi - midlatitude_bearing(self.lon[s.u], self.lat[s.u],
+                                                    self.lon[s.v], self.lat[s.v])
+                for s in self.streets
+            ]
+        else:
+            azimuth = [
+                math.atan2(self.y[s.v] - self.y[s.u], self.x[s.v] - self.x[s.u])
+                for s in self.streets
+            ]
+        object.__setattr__(self, "_azimuth", azimuth)
 
     @property
     def azimuth(self) -> list[float]:
