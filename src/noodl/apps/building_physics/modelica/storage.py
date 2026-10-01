@@ -86,15 +86,16 @@ from dataclasses import dataclass
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
 from noodl.elements.media import (
     _CP_AIR,
     _CP_SIMPLEAIR,
     _CP_STEAM,
+    _GAS_CONSTANT_R,
     _MM_AIR,
-    _MODELICA_CONSTANTS_R,
     _R_AIR,
     _R_H2O,
-    MBLMedium,
+    AirMedium,
 )
 from noodl.nodesources import NodeSource
 
@@ -146,7 +147,7 @@ def _cp_moist(X):
     return _CP_AIR * (1 - X) + _CP_STEAM * X
 
 
-def thermo(med: MBLMedium) -> StorageThermo:
+def thermo(med: AirMedium) -> StorageThermo:
     """The `StorageThermo` of one of the three supported media."""
     if med.name == "Buildings.Media.Air":
         # Air.mo:43-45 (pStp, dStp), :123-131 (h, u = h - pStp/dStp), :210-215 (density).
@@ -186,7 +187,7 @@ def thermo(med: MBLMedium) -> StorageThermo:
     if med.name == "Modelica.Media.Air.SimpleAir":
         # MSL Media/package.mo PartialSimpleIdealGasMedium: h = cp (T - T0), u = h - R T,
         # d = p/(R T); SimpleAir.mo:6-8 (cp_const, R_gas).
-        R = _MODELICA_CONSTANTS_R / _MM_AIR
+        R = _GAS_CONSTANT_R / _MM_AIR
         cv = _CP_SIMPLEAIR - R
         return StorageThermo(
             k=lambda T, X: 1.0 / (R * T),
@@ -252,7 +253,7 @@ class ZoneStorage(NodeSource):
     def dflow(self, phi_nodes: Tensor, drivers: Mapping | None = None) -> Tensor:
         slope = (drivers["air.storage_rate"] * self.V * self._k(drivers)
                  / (1 + drivers["air.storage_gain"]))
-        return slope.expand(torch.broadcast_shapes(slope.shape, phi_nodes.shape))
+        return slope.expand(broadcast_shapes(slope.shape, phi_nodes.shape))
 
 
 class StorageClosure:
@@ -260,7 +261,7 @@ class StorageClosure:
     `"air.storage"` (`(..., n, 2)`: gauge pressure and `k` of every node at the state's
     time) across steps.
 
-    Runs after the reader's `_MBLClosure` (`mbl`), whose `"T"`, `"X_w"` and `"p_abs"` drivers
+    Runs after the reader's `_ZoneStateClosure` (`mbl`), whose `"T"`, `"X_w"` and `"p_abs"` drivers
     it reads, and whose `species` gives the full-node mass fractions. With a `StepContext` it
     writes `"air.storage_*"` (the backward-Euler storage of the step), `"thermal.capacity"`,
     `"species.capacity"` and the storage terms added to `"thermal.sources"`/

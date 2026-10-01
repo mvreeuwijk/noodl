@@ -38,7 +38,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from noodl.apps.inpfile import as_float, read_sections, require_fields
-from noodl.apps.water.elements import EPANET_VISCOS_FT2
+from noodl.apps.water.elements import NU_WATER_FT2
 from noodl.apps.water.network import (
     Control,
     Junction,
@@ -198,7 +198,7 @@ def read_epanet_inp(path) -> WaterNetwork:
     # water's 1.1e-5 ft2/s, anything else is the ACTUAL kinematic viscosity, in m2/s for
     # an SI file and ft2/s for a US one. `WaterOptions.viscosity` is always the ratio.
     if viscosity <= 1e-3:
-        viscosity = viscosity / (EPANET_VISCOS_FT2 * (1.0 if us else FOOT**2))
+        viscosity = viscosity / (NU_WATER_FT2 * (1.0 if us else FOOT**2))
     length_scale = FOOT if us else 1.0
     diameter_scale = INCH if us else 1e-3
     pressure_scale = PSI_TO_M if us else 1.0

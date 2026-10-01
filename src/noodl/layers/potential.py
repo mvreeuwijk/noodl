@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
 from noodl.drives import Drive, check_drive_signature
 from noodl.elements.base import Element
 from noodl.nodesources import NodeSource
@@ -57,7 +58,7 @@ class _DiagonalShifted:
     def __init__(self, base: GraphLaplacianOperator, diag: torch.Tensor) -> None:
         self.base = base
         self.diag_shift = diag
-        self.shape = torch.broadcast_shapes(base.shape[:-2], diag.shape[:-1]) + base.shape[-2:]
+        self.shape = broadcast_shapes(base.shape[:-2], diag.shape[:-1]) + base.shape[-2:]
         self.dtype = base.dtype
         self.device = base.device
 
@@ -462,7 +463,7 @@ class PotentialFlowLayer:
         return torch.cat(parts, dim=-1)
 
     def assemble(self, phi_interior: torch.Tensor, phi_boundary: torch.Tensor) -> torch.Tensor:
-        batch_shape = torch.broadcast_shapes(
+        batch_shape = broadcast_shapes(
             phi_interior.shape[:-1], phi_boundary.shape[:-1]
         )
         n = self._n_nodes
@@ -501,7 +502,11 @@ class PotentialFlowLayer:
         return sources[..., self.interior]
 
     def residual(self, phi_interior, phi_boundary, drivers, sources):
-        drivers = drivers or {}
+        return self._residual_parts(phi_interior, phi_boundary, drivers or {}, sources)[0]
+
+    def _residual_parts(self, phi_interior, phi_boundary, drivers, sources):
+        """`(residual, phi, q)`: the residual and the full-node potentials and edge flows it
+        was evaluated at (`solve` reuses the last two instead of recomputing them)."""
         phi = self.assemble(phi_interior, phi_boundary)
         q = self.flows(phi, drivers)
         # (A_I q), by scatter-add over this layer's edges then a select of the interior
@@ -511,7 +516,7 @@ class PotentialFlowLayer:
         lhs = self._accumulate_interior(q)
         s_I = self._source_interior(sources, phi_interior)
         w = self._node_source_withdrawal(phi, drivers)
-        return lhs - s_I if w is None else lhs - s_I + w
+        return (lhs - s_I if w is None else lhs - s_I + w), phi, q
 
     def jacobian(self, phi_interior, phi_boundary, drivers):
         """The dense (n_I, n_I) Jacobian A_I diag(dq) A_I^T -- the retained dense reference.
@@ -545,7 +550,7 @@ class PotentialFlowLayer:
             cs.append(c_e)
             ks.append(k_e)
             n_es.append(e - s)
-        batch_shape = torch.broadcast_shapes(
+        batch_shape = broadcast_shapes(
             *(c.shape[:-1] if c.ndim > 0 else () for c in cs),
             *(k.shape[:-1] if k.ndim > 0 else () for k in ks),
         )
@@ -658,7 +663,7 @@ class PotentialFlowLayer:
         # Broadcasting both to their common batch shape first keeps the operator's own batch
         # shape and the right-hand side's in agreement, so the solve is one system per batch
         # element rather than one system with several right-hand sides.
-        solve_batch = torch.broadcast_shapes(k.shape[:-1], rhs.shape[:-1])
+        solve_batch = broadcast_shapes(k.shape[:-1], rhs.shape[:-1])
         k = k.expand(solve_batch + k.shape[-1:])
         rhs = rhs.expand(solve_batch + rhs.shape[-1:])
         op = self._operator_at(k, node_slopes)
@@ -895,15 +900,23 @@ class PotentialFlowLayer:
             # `diagnostics` is filled exactly as before (no_grad does not touch it), and the
             # returned `(phi, q)` are now unconditionally detached -- see the docstring.
             with torch.no_grad():
+                # The last residual's point, potentials and flows: Newton returns the iterate
+                # it last evaluated the residual at, whose flows are then the result's.
+                last: dict = {}
 
                 def residual_fn(x):
-                    return self.residual(x, phi_boundary, drivers, sources)
+                    r, phi, q = self._residual_parts(x, phi_boundary, drivers, sources)
+                    last.update(x=x, phi=phi, q=q)
+                    return r
 
                 def operator_fn(x):
                     # A matvec-free A_I diag(dq) A_I^T at the current iterate, instead of the
                     # dense (n_interior, n_interior) einsum layer.jacobian() assembles.
                     # Rebuilt each iteration because dq is what changes; the endpoint/index
-                    # tensors it closes over are cached on the layer at construction.
+                    # tensors it closes over are cached on the layer at construction. At the
+                    # starting point the grounding check's slopes above are those slopes.
+                    if x is phi0:
+                        return self._operator_at(dq0, node_slopes0)
                     phi = self.assemble(x, phi_boundary)
                     dq = self.dflows(phi, drivers)
                     return self._operator_at(dq, self._node_source_slopes(phi, drivers))
@@ -923,8 +936,11 @@ class PotentialFlowLayer:
                     # anywhere reporting it.
                     diagnostics["converged"] = result.converged
                     diagnostics["residual_norm"] = result.residual_norm
-                phi = self.assemble(result.x, phi_boundary)
-                q = self.flows(phi, drivers)
+                if last.get("x") is result.x:
+                    phi, q = last["phi"], last["q"]
+                else:
+                    phi = self.assemble(result.x, phi_boundary)
+                    q = self.flows(phi, drivers)
             return phi, q
 
         self._check_no_unreachable_differentiable_tensors()

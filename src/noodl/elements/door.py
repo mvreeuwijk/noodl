@@ -75,8 +75,9 @@ from collections.abc import Mapping
 
 import torch
 
-from noodl.elements.base import Element, band_edges
-from noodl.elements.media import _R_AIR, MBLMedium
+from noodl._broadcast import broadcast_shapes
+from noodl.elements.base import Element, band_edges, memo
+from noodl.elements.media import _R_AIR, AirMedium
 
 Tensor = torch.Tensor
 
@@ -105,17 +106,74 @@ def _power_law(C: Tensor, dp: Tensor, m: Tensor, dp_turbulent: float) -> Tensor:
 
     ``dp_safe`` keeps the unselected sharp branch away from the singular ``|dp|^m`` at 0.
     """
+    return _power_law_at(C, dp, m, dp_turbulent, _power_law_coeffs(C, m, dp_turbulent))
+
+
+def _power_law_coeffs(C: Tensor, m: Tensor, dp_turbulent: float) -> tuple:
+    """The dp-independent part of `_power_law`: the band polynomial's `a..d` and
+    `C dp_turbulent^m` (a law's memo keeps them across the calls of a solve)."""
     a = _GAMMA
     b = 1 / 8 * m**2 - 3 * _GAMMA - 3 / 2 * m + 35.0 / 8
     c = -1 / 4 * m**2 + 3 * _GAMMA + 5 / 2 * m - 21.0 / 4
     d = 1 / 8 * m**2 - _GAMMA - m + 15.0 / 8
+    return a, b, c, d, C * dp_turbulent**m
+
+
+def _power_law_at(C: Tensor, dp: Tensor, m: Tensor, dp_turbulent: float,
+                  coeffs: tuple) -> Tensor:
+    """`_power_law` with its coefficients `_power_law_coeffs(C, m, dp_turbulent)` given."""
+    a, b, c, d, C_dpt = coeffs
     mask = dp.abs() < dp_turbulent
     dp_safe = torch.where(mask, torch.full_like(dp, dp_turbulent), dp.abs())
     sharp = C * torch.sign(dp) * dp_safe**m
     pi = dp / dp_turbulent
     pi2 = pi * pi
-    inner = C * dp_turbulent**m * pi * (a + pi2 * (b + pi2 * (c + pi2 * d)))
+    inner = C_dpt * pi * (a + pi2 * (b + pi2 * (c + pi2 * d)))
     return torch.where(mask, inner, sharp)
+
+
+def _power_law_slope_at(C: Tensor, dp: Tensor, m: Tensor, dp_turbulent: float,
+                        coeffs: tuple, grad: Tensor) -> Tensor:
+    """`grad * d_power_law_at/d dp`, by the chain rule in the order of operations reverse-
+    mode autograd applies to `_power_law_at` (`grad` the flow's own adjoint), so that it
+    equals `torch.autograd.grad` of it bit for bit (checked in the tests) at a fraction of the
+    cost. For the Newton Jacobian, under `no_grad` (the elements' `dflow`)."""
+    a, b, c, d, C_dpt = coeffs
+    mask = dp.abs() < dp_turbulent
+    band, sharp = bool(mask.any()), not bool(mask.all())
+    out = None
+    if band:
+        g_in = torch.where(mask, grad, torch.zeros_like(grad))
+        pi = dp / dp_turbulent
+        pi2 = pi * pi
+        s1 = c + pi2 * d
+        s2 = b + pi2 * s1
+        t1 = C_dpt * pi
+        g_t1 = g_in * (a + pi2 * s2)
+        g_P = g_in * t1
+        g_s2 = g_P * pi2
+        g_s1 = g_s2 * pi2
+        g_pi2 = (g_P * s2 + g_s2 * s1) + g_s1 * d
+        g_pi2_pi = g_pi2 * pi
+        out = ((g_t1 * C_dpt + g_pi2_pi) + g_pi2_pi) / dp_turbulent
+    if sharp:
+        g_sh = torch.where(mask, torch.zeros_like(grad), grad)
+        dp_safe = torch.where(mask, torch.full_like(dp, dp_turbulent), dp.abs())
+        g_safe = torch.where(m == 0.0, torch.zeros((), dtype=dp.dtype),
+                             g_sh * (C * torch.sign(dp)) * (m * dp_safe.pow(m - 1)))
+        g_sharp = torch.where(mask, torch.zeros_like(g_safe), g_safe) * dp.sgn()
+        out = g_sharp if out is None else out + g_sharp
+    return torch.zeros_like(dp) if out is None else out
+
+
+def _slope_is_exact(dp: Tensor, *params: Tensor) -> bool:
+    """Whether the analytic slope (`_power_law_slope_at`) stands in for autograd's here:
+    under `no_grad` (no graph to build for a caller who differentiates `dflow`), and with no
+    parameter broadcasting `dp` to a larger shape (autograd would sum the slope over it)."""
+    if torch.is_grad_enabled():
+        return False
+    return all(p.shape == dp.shape or p.numel() == 1 or
+               broadcast_shapes(p.shape, dp.shape) == dp.shape for p in params)
 
 
 def _basic_flow_function_dp(dp: Tensor, k: Tensor, m_flow_turbulent: Tensor) -> Tensor:
@@ -134,7 +192,7 @@ def _basic_flow_function_dp(dp: Tensor, k: Tensor, m_flow_turbulent: Tensor) -> 
     return torch.where(sharp_mask, sharp, inner)
 
 
-class _MBLDoor(Element):
+class _Door(Element):
     """Shared plumbing of the two door laws: endpoints, the temperature driver, direction."""
 
     def __init__(
@@ -143,7 +201,7 @@ class _MBLDoor(Element):
         direction: str,
         src,
         tgt,
-        medium: MBLMedium,
+        medium: AirMedium,
         dp_turbulent: float,
         T_key: str,
         kind: str,
@@ -209,6 +267,11 @@ class _MBLDoor(Element):
             )
         return T[..., self.src] - T[..., self.tgt]
 
+    @staticmethod
+    def _driver(drivers, key: str):
+        """`drivers[key]`, or `None` (a memo key: `_delta_T` raises for a missing one)."""
+        return None if drivers is None else drivers.get(key)
+
     # ------------------------------------------------------------------ law
     def _terms(self, dp: Tensor, drivers) -> tuple[Tensor, Tensor]:
         """``(VABp_flow, mABt_flow)``; implemented by each door."""
@@ -244,7 +307,7 @@ class _MBLDoor(Element):
         return self.flow(zero, drivers), self.dflow(zero, drivers)
 
 
-class MBLDoorOpen(_MBLDoor):
+class OpenDoor(_Door):
     """``Buildings.Airflow.Multizone.DoorOpen``: one direction of the always-open door.
 
     Parameters default to MBL's: ``wOpe = 0.9``, ``hOpe = 2.1``, ``dp_turbulent = 0.01``
@@ -259,7 +322,7 @@ class MBLDoorOpen(_MBLDoor):
         direction: str,
         src,
         tgt,
-        medium: MBLMedium,
+        medium: AirMedium,
         wOpe=0.9,
         hOpe=2.1,
         CD=0.65,
@@ -299,14 +362,36 @@ class MBLDoorOpen(_MBLDoor):
         m_flow_turbulent = CVal * rho * math.sqrt(self.dp_turbulent)  # DoorOpen.mo:33-35
         return _CON_TP * self._delta_T(drivers), kT, m_flow_turbulent  # DoorOpen.mo:68
 
+    def _law(self) -> tuple:
+        """`(CVal, a, b, c, d, CVal dp_turbulent^m)` of the pressure term (a memo)."""
+        def law():
+            CVal = self.CD * self.wOpe * self.hOpe * math.sqrt(2 / self.rho_default)  # :27
+            return CVal, *_power_law_coeffs(CVal, self.m, self.dp_turbulent)
+
+        return memo(self, "law", (self.CD, self.wOpe, self.hOpe, self.m), law)
+
     def _terms(self, dp: Tensor, drivers) -> tuple[Tensor, Tensor]:
-        CVal = self.CD * self.wOpe * self.hOpe * math.sqrt(2 / self.rho_default)  # :27
-        V_p = _power_law(CVal, dp, self.m, self.dp_turbulent)  # DoorOpen.mo:39-59
-        m_t = _basic_flow_function_dp(*self._buoyancy(drivers))  # DoorOpen.mo:66-69
+        CVal, *coeffs = self._law()
+        V_p = _power_law_at(CVal, dp, self.m, self.dp_turbulent, coeffs)  # DoorOpen.mo:39-59
+        m_t = memo(self, "m_t", (self._driver(drivers, self.T_key), self.CD, self.wOpe,
+                                 self.hOpe),
+                   lambda: _basic_flow_function_dp(*self._buoyancy(drivers)))  # :66-69
         return V_p, m_t
 
+    def dflow(self, dp: Tensor, drivers=None) -> Tensor:
+        """``d flow/d dp = rho_default/2 dVABp/d dp`` (the buoyancy term does not depend on
+        ``dp``): under ``no_grad`` the power law's analytic slope (`_power_law_slope_at`,
+        equal to the autograd default bit for bit), else the autograd default."""
+        CVal, *coeffs = self._law()
+        if not _slope_is_exact(dp, CVal, self.m):
+            return super().dflow(dp, drivers)
+        self._check_width(dp)
+        # The adjoint of `flow = rho_default V_p / 2 +- m_t` at V_p: rho_default / 2.
+        grad = torch.full_like(dp, 0.5 * self.rho_default)
+        return _power_law_slope_at(CVal, dp, self.m, self.dp_turbulent, coeffs, grad)
 
-class MBLDoorOperable(_MBLDoor):
+
+class OperableDoor(_Door):
     """``Buildings.Airflow.Multizone.DoorOperable``: the door blended between open and closed
     by the opening signal ``y`` read from ``drivers[y_key]``.
 
@@ -330,7 +415,7 @@ class MBLDoorOperable(_MBLDoor):
         direction: str,
         src,
         tgt,
-        medium: MBLMedium,
+        medium: AirMedium,
         y_key: str,
         LClo,
         wOpe=0.9,
@@ -367,14 +452,14 @@ class MBLDoorOperable(_MBLDoor):
     def _y(self, drivers) -> Tensor:
         if drivers is None or self.y_key not in drivers:
             raise KeyError(
-                f"MBLDoorOperable (kind {self.kind!r}): driver {self.y_key!r} not found; it "
+                f"OperableDoor (kind {self.kind!r}): driver {self.y_key!r} not found; it "
                 f"needs the door opening signal y (0 closed, 1 open)"
             )
         y = torch.as_tensor(drivers[self.y_key])
         n_edges = self.src.numel()
         if y.ndim and y.shape[-1] not in (1, n_edges):
             raise ValueError(
-                f"MBLDoorOperable (kind {self.kind!r}): driver {self.y_key!r} has last "
+                f"OperableDoor (kind {self.kind!r}): driver {self.y_key!r} has last "
                 f"dimension {y.shape[-1]}; expected 1 or the door count {n_edges}"
             )
         return y
@@ -396,34 +481,52 @@ class MBLDoorOperable(_MBLDoor):
         return _CON_TP * self._delta_T(drivers), kT, m_flow_turbulent  # :106-109
 
     def _terms(self, dp: Tensor, drivers) -> tuple[Tensor, Tensor]:
-        rho = self.rho_default
+        params = (self.wOpe, self.hOpe, self.CDOpe, self.mOpe, self.LClo, self.mClo,
+                  self.dpCloRat, self.CDCloRat)
+
+        def law():
+            rho = self.rho_default
+            AOpe = self.wOpe * self.hOpe  # Door.mo:41
+            AClo = self.LClo * self.dpCloRat ** (0.5 - self.mClo)  # DoorOperable.mo:46-47
+            CVal_ope = self.CDOpe * AOpe * math.sqrt(2 / rho)  # DoorOperable.mo:48-51
+            CVal_clo = self.CDCloRat * AClo * math.sqrt(2 / rho)
+            return (CVal_ope, CVal_clo,
+                    *_power_law_coeffs(CVal_ope, self.mOpe, self.dp_turbulent),
+                    *_power_law_coeffs(CVal_clo, self.mClo, self.dp_turbulent))
+
+        CVal_ope, CVal_clo, *coeffs = memo(self, "law", params, law)
         y = self._y(drivers)
-        AOpe = self.wOpe * self.hOpe  # Door.mo:41
-        AClo = self.LClo * self.dpCloRat ** (0.5 - self.mClo)  # DoorOperable.mo:46-47
-        CVal_ope = self.CDOpe * AOpe * math.sqrt(2 / rho)  # DoorOperable.mo:48-51
-        CVal_clo = self.CDCloRat * AClo * math.sqrt(2 / rho)
-        V_ope = _power_law(CVal_ope, dp, self.mOpe, self.dp_turbulent)  # :68-88
-        V_clo = _power_law(CVal_clo, dp, self.mClo, self.dp_turbulent)  # :91-99
+        V_ope = _power_law_at(CVal_ope, dp, self.mOpe, self.dp_turbulent,
+                              coeffs[:5])  # :68-88
+        V_clo = _power_law_at(CVal_clo, dp, self.mClo, self.dp_turbulent,
+                              coeffs[5:])  # :91-99
         V_p = y * V_ope + (1 - y) * V_clo  # DoorOperable.mo:100
-        m_t = y * _basic_flow_function_dp(*self._buoyancy(drivers))  # :106-109
+        m_t = memo(self, "m_t", (y, self._driver(drivers, self.T_key), *params),
+                   lambda: y * _basic_flow_function_dp(*self._buoyancy(drivers)))  # :106-109
         return V_p, m_t
 
 
-def mbl_door_pair(*, kind: str = "door", **kwargs) -> tuple[MBLDoorOpen, MBLDoorOpen]:
+def open_door_pair(*, kind: str = "door", **kwargs) -> tuple[OpenDoor, OpenDoor]:
     """Both edges of one ``DoorOpen`` (or of several, with per-door ``src``/``tgt``): the
     ``"ab"`` edge (path 1) with kind ``f"{kind}_ab"`` and the ``"ba"`` edge (path 2) with kind
-    ``f"{kind}_ba"``, sharing every keyword argument of :class:`MBLDoorOpen`."""
+    ``f"{kind}_ba"``, sharing every keyword argument of :class:`OpenDoor`."""
     return (
-        MBLDoorOpen(direction="ab", kind=f"{kind}_ab", **kwargs),
-        MBLDoorOpen(direction="ba", kind=f"{kind}_ba", **kwargs),
+        OpenDoor(direction="ab", kind=f"{kind}_ab", **kwargs),
+        OpenDoor(direction="ba", kind=f"{kind}_ba", **kwargs),
     )
 
 
-def mbl_operable_door_pair(
+def operable_door_pair(
     *, kind: str = "door", **kwargs
-) -> tuple[MBLDoorOperable, MBLDoorOperable]:
-    """Both edges of one ``DoorOperable``; see :func:`mbl_door_pair`."""
+) -> tuple[OperableDoor, OperableDoor]:
+    """Both edges of one ``DoorOperable``; see :func:`open_door_pair`."""
     return (
-        MBLDoorOperable(direction="ab", kind=f"{kind}_ab", **kwargs),
-        MBLDoorOperable(direction="ba", kind=f"{kind}_ba", **kwargs),
+        OperableDoor(direction="ab", kind=f"{kind}_ab", **kwargs),
+        OperableDoor(direction="ba", kind=f"{kind}_ba", **kwargs),
     )
+
+# Pre-rename names, kept as aliases so existing code keeps working.
+MBLDoorOpen = OpenDoor  # alias, the pre-rename name
+MBLDoorOperable = OperableDoor  # alias, the pre-rename name
+mbl_door_pair = open_door_pair  # alias, the pre-rename name
+mbl_operable_door_pair = operable_door_pair  # alias, the pre-rename name

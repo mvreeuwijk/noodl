@@ -20,9 +20,9 @@ import torch
 
 from noodl.apps.water.demand import PressureDrivenDemand
 from noodl.apps.water.elements import (
-    EPANET_NU,
     EPANET_QCF,
-    EpanetDarcyWeisbach,
+    NU_WATER_REF,
+    CompositeDarcyWeisbach,
     HazenWilliams,
     MinorLoss,
     PumpCurve,
@@ -329,7 +329,11 @@ def twoloop() -> WaterNetwork:
     )
 
 
-def _epanet_cfs_per_m3s(flow_units: str | None) -> float | None:
+#: Pre-rename option values of `build_model(friction=...)`, normalised to the physical name.
+_FRICTION_ALIASES = {"epanet": "composite"}
+
+
+def _rounded_cfs_per_m3s(flow_units: str | None) -> float | None:
     """EPANET's internal cfs per m3/s for a file in `flow_units` (None: exact)."""
     if flow_units is None:
         return None
@@ -349,7 +353,7 @@ def build_model(
     quality: float | None = None,
     coupling: str = "pingpong",
     dt: float | None = None,
-    friction: str = "epanet",
+    friction: str = "composite",
 ) -> tuple[Model, State, Drivers]:
     """Assemble the water model and return `(model, state, drivers)`.
 
@@ -381,8 +385,8 @@ def build_model(
     the volume of every incident pipe; "the volume of its single outgoing pipe" is a TREE
     property and does not carry over. Both are recorded in `model.notes`.
 
-    `friction` selects the Darcy-Weisbach friction law. `"epanet"` (the default) is
-    `EpanetDarcyWeisbach`, EPANET 2.2's own composite -- Hagen-Poiseuille below Re = 2000,
+    `friction` selects the Darcy-Weisbach friction law. `"composite"` (the default) is
+    `CompositeDarcyWeisbach`, EPANET 2.2's own composite -- Hagen-Poiseuille below Re = 2000,
     Dunlop's cubic to 4000, Swamee-Jain above -- with EPANET's constants (32.2 ft/s^2,
     0.02517, `VISCOS = 1.1e-5 ft^2/s`) and, when `net.options.flow_units` is known, its
     rounded flow-unit factor; this is the default because the application's reference is
@@ -401,9 +405,10 @@ def build_model(
         raise ValueError(
             f"build_model: headloss must be 'H-W' or 'D-W', got {headloss!r}"
         )
-    if friction not in ("epanet", "colebrook"):
+    friction = _FRICTION_ALIASES.get(friction, friction)
+    if friction not in ("composite", "colebrook"):
         raise ValueError(
-            f"build_model: friction must be 'epanet' or 'colebrook', got {friction!r}"
+            f"build_model: friction must be 'composite' or 'colebrook', got {friction!r}"
         )
     options = net.options
     if pda is None:
@@ -467,14 +472,14 @@ def build_model(
             diameters = torch.tensor([p.diameter for p in net.pipes], dtype=F64)
             roughness = torch.tensor([p.roughness for p in net.pipes], dtype=F64)
             minor = torch.tensor([p.minor_loss for p in net.pipes], dtype=F64)
-            if friction == "epanet":
-                cfs = _epanet_cfs_per_m3s(options.flow_units)
-                nu_epanet = EPANET_NU * options.viscosity
+            if friction == "composite":
+                cfs = _rounded_cfs_per_m3s(options.flow_units)
+                nu_ref = NU_WATER_REF * options.viscosity
                 notes["headloss"] = (
                     f"Darcy-Weisbach with EPANET 2.2's own friction law "
-                    f"(EpanetDarcyWeisbach: Hagen-Poiseuille below Re = 2000, Dunlop's "
+                    f"(CompositeDarcyWeisbach: Hagen-Poiseuille below Re = 2000, Dunlop's "
                     f"cubic to 4000, Swamee-Jain above) at kinematic viscosity "
-                    f"nu = {nu_epanet} m2/s (EPANET's 1.1e-5 ft2/s scaled by [OPTIONS] "
+                    f"nu = {nu_ref} m2/s (EPANET's 1.1e-5 ft2/s scaled by [OPTIONS] "
                     f"VISCOSITY), flows converted to cfs with "
                     + (
                         f"EPANET's own {options.flow_units} factor ({cfs} cfs per m3/s)"
@@ -483,9 +488,9 @@ def build_model(
                     )
                 )
                 elements.append(
-                    EpanetDarcyWeisbach(
+                    CompositeDarcyWeisbach(
                         lengths, diameters, roughness, minor_loss=minor,
-                        nu=nu_epanet, cfs_per_m3s=cfs, scale=scale, kind="pipe",
+                        nu=nu_ref, cfs_per_m3s=cfs, scale=scale, kind="pipe",
                     )
                 )
             else:
@@ -494,7 +499,7 @@ def build_model(
                     f"fixed point) at kinematic viscosity nu = {nu} m2/s (1.002e-3 / "
                     f"998.2 scaled by [OPTIONS] VISCOSITY; SPECIFIC GRAVITY "
                     f"{options.specific_gravity} sets only the head-to-pressure scale); "
-                    f"this is NOT EPANET's law -- friction='epanet' is"
+                    f"this is NOT EPANET's law -- friction='composite' is"
                 )
                 elements.append(
                     Duct(

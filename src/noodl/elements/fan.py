@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
 from noodl.elements.base import Element
 from noodl.solvers.scalar import solve_monotone
 
@@ -65,7 +66,7 @@ class FanCurve(Element):
     def _bracket(self, dp: Tensor):
         p_shutoff = self.coeffs[..., 0]
         p_max_flow = self._pressure(self.q_max)
-        shape = torch.broadcast_shapes(dp.shape, p_shutoff.shape, p_max_flow.shape)
+        shape = broadcast_shapes(dp.shape, p_shutoff.shape, p_max_flow.shape)
         dp_b = torch.broadcast_to(dp, shape)
         p_shutoff_b = torch.broadcast_to(p_shutoff, shape)
         p_max_flow_b = torch.broadcast_to(p_max_flow, shape)

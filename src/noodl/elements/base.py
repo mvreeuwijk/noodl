@@ -23,7 +23,42 @@ from collections.abc import Mapping
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
+
 Tensor = torch.Tensor
+
+
+def memo(owner, name: str, deps: tuple, fn):
+    """`fn()`, remembered on `owner` under `name` for as long as `deps` are the same objects
+    (identity, and for tensors the same `_version`, so an in-place change is seen).
+
+    For the parts of a law that depend only on its drivers and parameters (a door's inflow
+    densities, a power law's coefficients): a Newton solve evaluates the law many times at
+    fixed drivers, and small tensor operations cost more in dispatch than in arithmetic. The
+    value is the one `fn()` returns, so the law's results are unchanged bit for bit. A value
+    that carries an autograd graph (a learnable parameter, a driver that requires grad) is
+    never remembered: it is recomputed on every call, as without the memo, and neither is a
+    value that depends on a tensor that requires grad or does not count its versions (an
+    inference-mode tensor)."""
+    try:
+        key = tuple((d, (d._version, d.requires_grad)) if isinstance(d, Tensor) else (d, None)
+                    for d in deps)
+    except RuntimeError:  # an inference tensor has no version counter
+        return fn()
+    if any(isinstance(d, Tensor) and d.requires_grad for d in deps):
+        return fn()
+    cache = owner.__dict__.setdefault("_memo_cache", {})
+    hit = cache.get(name)
+    if hit is not None and len(hit[0]) == len(key) and all(
+            a[0] is b[0] and a[1] == b[1] for a, b in zip(hit[0], key, strict=True)):
+        return hit[1]
+    value = fn()
+    parts = value if isinstance(value, tuple) else (value,)
+    if not any(isinstance(v, Tensor) and v.requires_grad for v in parts):
+        cache[name] = (key, value)
+    else:
+        cache.pop(name, None)
+    return value
 
 
 def band_edges(x: Tensor, width) -> Tensor:
@@ -31,7 +66,7 @@ def band_edges(x: Tensor, width) -> Tensor:
     ``x = -w`` and ``x = +w`` of a regularisation band ``|x| < w`` as switching values
     (:meth:`Element.switching`), in units of the band's width."""
     w = torch.as_tensor(width, dtype=x.dtype)
-    shape = torch.broadcast_shapes(x.shape, w.shape)
+    shape = broadcast_shapes(x.shape, w.shape)
     return torch.cat([torch.broadcast_to((x - w) / w, shape),
                       torch.broadcast_to((x + w) / w, shape)], dim=-1)
 

@@ -20,7 +20,7 @@ from noodl.apps.sewer.air import (
     Drag,
     Headspace,
 )
-from noodl.apps.sewer.hydraulics import SewerHydraulics
+from noodl.apps.sewer.hydraulics import GEOMETRY_ALIASES, SewerHydraulics
 from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
 from noodl.drives import Stack
 from noodl.elements.fixed import FixedFlow
@@ -67,9 +67,9 @@ class SewerNetwork:
     """A dendritic gravity sewer: manholes, one outgoing pipe each, outfalls.
 
     `geometry` selects the circular cross-section: ``"analytic"`` (the exact circle,
-    `geometry.py`; the default for networks built in code) or ``"swmm"`` (SWMM 5.2's own
-    tables, lookup rules and unit constants, `swmm_xsect.py`; the default of
-    `read_swmm_inp`, whose purpose is to reproduce SWMM). ``"swmm"`` is a steady
+    `geometry.py`; the default for networks built in code) or ``"tabulated"`` (SWMM 5.2's own
+    tables, lookup rules and unit constants, `xsect_tables.py`; the default of
+    `read_swmm_inp`, whose purpose is to reproduce SWMM). ``"tabulated"`` is a steady
     kinematic-wave geometry and is refused with ``storage=True`` by `SewerHydraulics`.
     """
 
@@ -80,11 +80,17 @@ class SewerNetwork:
     notes: dict[str, str] = field(default_factory=dict)
     geometry: str = "analytic"
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "geometry", GEOMETRY_ALIASES.get(self.geometry, self.geometry)
+        )
+
     def validate(self) -> None:
         """Refuse, BY NAME, everything this application does not model."""
-        if self.geometry not in ("analytic", "swmm"):
+        if self.geometry not in ("analytic", "tabulated"):
             raise ValueError(
-                f"SewerNetwork: geometry must be 'analytic' or 'swmm', got {self.geometry!r}"
+                f"SewerNetwork: geometry must be 'analytic' or 'tabulated', got "
+                f"{self.geometry!r}"
             )
         names: set[str] = set()
         for node in (*self.manholes, *self.outfalls):

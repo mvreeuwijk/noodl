@@ -104,7 +104,7 @@ def test_velocity_is_zero_at_or_below_a_hundredth_of_a_foot():
 
 
 def test_read_swmm_inp_defaults_to_swmm_geometry():
-    assert read_swmm_inp(DATA / "tree_kinwave.inp")[0].geometry == "swmm"
+    assert read_swmm_inp(DATA / "tree_kinwave.inp")[0].geometry == "tabulated"
     assert read_swmm_inp(DATA / "tree_kinwave.inp", geometry="analytic")[0].geometry == (
         "analytic"
     )
@@ -128,12 +128,12 @@ def test_swmm_geometry_changes_depth_by_the_table_difference_only():
 
 def test_swmm_geometry_refuses_storage_by_name():
     net, _, _ = read_swmm_inp(DATA / "tree_kinwave.inp")
-    with pytest.raises(ValueError, match="geometry='swmm'.*storage"):
+    with pytest.raises(ValueError, match="geometry='tabulated'.*storage"):
         build_model(net, storage=True, air=False, quality=False)
 
 
 def test_unknown_geometry_is_refused_by_name():
-    with pytest.raises(ValueError, match="geometry must be 'analytic' or 'swmm'"):
+    with pytest.raises(ValueError, match="geometry must be 'analytic' or 'tabulated'"):
         read_swmm_inp(DATA / "tree_kinwave.inp", geometry="circle")
 
 

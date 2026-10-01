@@ -16,9 +16,10 @@ mass-flow units *before* ``splineDerivatives``/``interpolate`` ever see it:
 
     mMea_flow_nominal = VMea_flow_nominal * rho_default    (``Table_V_flow.mo:5``)
 
-This is a different order to :mod:`noodl.elements.powerlaw_mbl`'s volume form, which multiplies
-``rho_default`` in *after* evaluating the volumetric law -- correct there because that law is a
-plain algebraic function of ``dp``, so pre- and post-scaling agree trivially. Here the
+This is a different order to :mod:`noodl.elements.powerlaw_regularized`'s volume form, which
+multiplies ``rho_default`` in *after* evaluating the volumetric law -- correct there because
+that law is a plain algebraic function of ``dp``, so pre- and post-scaling agree trivially. Here
+the
 ``ensureMonotonicity=true`` correction inside ``splineDerivatives`` (below) is only *positively
 homogeneous* in ``y`` (its internal ratios ``alpha = d[i]/delta[i]``, ``beta = d[i+1]/delta[i]``
 are scale-invariant, so the corrected ``d`` scales exactly with ``y`` for any positive
@@ -50,12 +51,12 @@ Tensor = torch.Tensor
 # Modelica/Constants.mo:20 ("small = Minimum normalized positive floating-point number",
 # ModelicaServices.Machine.small): for IEEE754 double precision this is DBL_MIN,
 # 2.2250738585072014e-308, identical to Python's sys.float_info.min.
-_MODELICA_SMALL = sys.float_info.min
+_SMALL = sys.float_info.min
 
 
 def _f64(value) -> Tensor:
     """A caller's tensor keeps its own dtype; a bare Python number/sequence becomes float64
-    -- see ``noodl.elements.powerlaw_mbl._f64`` (duplicated locally: ``noodl.elements`` has
+    -- see ``noodl.elements.powerlaw_regularized._f64`` (duplicated locally: ``noodl.elements`` has
     no shared-utility module yet).
     """
     if isinstance(value, torch.Tensor):
@@ -79,8 +80,8 @@ def _spline_derivatives(x: Tensor, y: Tensor) -> Tensor:
     which interval ``i - 1``'s own update may have just overwritten (each interior knot is
     shared by two consecutive intervals) -- so it is transcribed as a Python loop over knots,
     exactly as MBL's own ``for i in 1:n - 1`` is, rather than vectorised. This runs once per
-    :class:`MBLTable` construction, never inside :meth:`MBLTable.flow`, over the table's
-    typically small number of knots.
+    :class:`SplineFlowTable` construction, never inside :meth:`SplineFlowTable.flow`, over the
+    table's typically small number of knots.
     """
     n = x.shape[-1]
     if n == 1:
@@ -96,7 +97,7 @@ def _spline_derivatives(x: Tensor, y: Tensor) -> Tensor:
     for i in range(1, n - 1):  # :49, "for i in 2:n - 1"
         d[i] = (delta[i - 1] + delta[i]) / 2  # :50
 
-    small = torch.as_tensor(_MODELICA_SMALL, dtype=x.dtype)
+    small = torch.as_tensor(_SMALL, dtype=x.dtype)
     for i in range(n - 1):  # :56, "for i in 1:n - 1"
         if delta[i].abs() < small:  # :57
             d[i] = torch.zeros_like(delta[i])  # :58
@@ -111,7 +112,7 @@ def _spline_derivatives(x: Tensor, y: Tensor) -> Tensor:
     return torch.stack(d)
 
 
-class MBLTable(Element):
+class SplineFlowTable(Element):
     """MBL's tabulated flow law: a monotone cubic Hermite spline through ``(dp, flow)``
     knots, linearly extrapolated outside them; ``flow(dp)`` always returns MASS flow in kg/s.
 
@@ -134,26 +135,26 @@ class MBLTable(Element):
         super().__init__(kind)
         if form not in ("volume", "mass"):
             raise ValueError(
-                f"MBLTable (kind {kind!r}): form must be 'volume' or 'mass', got {form!r}"
+                f"SplineFlowTable (kind {kind!r}): form must be 'volume' or 'mass', got {form!r}"
             )
         dp = _f64(dp_points)
         flow = _f64(flow_points)
         if dp.shape[-1] != flow.shape[-1]:
             raise ValueError(
-                f"MBLTable (kind {kind!r}): dp_points and flow_points must have the same "
+                f"SplineFlowTable (kind {kind!r}): dp_points and flow_points must have the same "
                 f"length (Table_m_flow.mo:25-27's own size assert), got "
                 f"len(dp_points)={dp.shape[-1]} and len(flow_points)={flow.shape[-1]}"
             )
         n = dp.shape[-1]
         if n < 2:
             raise ValueError(
-                f"MBLTable (kind {kind!r}): at least 2 knots are required "
+                f"SplineFlowTable (kind {kind!r}): at least 2 knots are required "
                 f"(interpolate.mo needs two support points per interval), got {n}"
             )
         for i in range(1, n):
             if not bool(dp[i] > dp[i - 1]):
                 raise ValueError(
-                    f"MBLTable (kind {kind!r}): dp_points must be strictly increasing "
+                    f"SplineFlowTable (kind {kind!r}): dp_points must be strictly increasing "
                     f"(splineDerivatives.mo:19-21's own assert); dp_points[{i}] = "
                     f"{dp[i].item()!r} is not greater than dp_points[{i - 1}] = "
                     f"{dp[i - 1].item()!r}"
@@ -162,7 +163,7 @@ class MBLTable(Element):
         if form == "volume":
             if rho_default is None:
                 raise ValueError(
-                    f"MBLTable (kind {kind!r}): form='volume' requires rho_default "
+                    f"SplineFlowTable (kind {kind!r}): form='volume' requires rho_default "
                     f"(Table_V_flow.mo:5: mMea_flow_nominal = VMea_flow_nominal*rho_default)"
                 )
             mass_points = float(rho_default) * flow
@@ -181,7 +182,7 @@ class MBLTable(Element):
         vectorised: the interval containing each entry of ``dp`` is found with one
         ``torch.searchsorted`` call (no Python loop over points), then every entry's cubic
         Hermite value and both linear-extrapolation values are computed unconditionally and
-        selected with ``torch.where`` (cheap here: no singularity like ``MBLPowerLaw``'s
+        selected with ``torch.where`` (cheap here: no singularity like ``RegularizedPowerLaw``'s
         ``|dp|^m`` at ``dp = 0`` -- a plain polynomial has no ``dp_safe`` hazard).
 
         Interval choice: MBL's ``interpolate`` picks ``i`` = the largest ``j`` in
@@ -227,3 +228,6 @@ class MBLTable(Element):
         inside = (dp > x1) & (dp < x2)
         left = dp <= x1
         return torch.where(inside, cubic, torch.where(left, lin_left, lin_right))
+
+# Pre-rename names, kept as aliases so existing code keeps working.
+MBLTable = SplineFlowTable  # alias, the pre-rename name

@@ -39,8 +39,9 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
 from noodl.apps.sewer import geometry as geom
-from noodl.apps.sewer import swmm_xsect
+from noodl.apps.sewer import xsect_tables
 from noodl.apps.sewer.air import air_density
 from noodl.cycles import particular_flow
 from noodl.solvers.scalar import solve_monotone
@@ -55,6 +56,10 @@ F64 = torch.float64
 #: layers' per-step capacity stays strictly positive (`TransportLayer` refuses a
 #: non-positive capacity by name). Applied nowhere else, and recorded in `notes` when it is applied.
 CAPACITY_FLOOR = 1e-9
+
+#: Pre-rename values of the ``geometry`` option, normalised to the physical name:
+#: ``"swmm"`` is the tabulated (51-point lookup-table) circular cross-section.
+GEOMETRY_ALIASES = {"swmm": "tabulated"}
 
 
 class SewerHydraulics:
@@ -89,14 +94,15 @@ class SewerHydraulics:
         self.net = net
         self.name = name
         self.storage = bool(storage)
-        if geometry not in ("analytic", "swmm"):
+        geometry = GEOMETRY_ALIASES.get(geometry, geometry)
+        if geometry not in ("analytic", "tabulated"):
             raise ValueError(
-                f"SewerHydraulics {name!r}: geometry must be 'analytic' or 'swmm', got "
+                f"SewerHydraulics {name!r}: geometry must be 'analytic' or 'tabulated', got "
                 f"{geometry!r}"
             )
-        if geometry == "swmm" and self.storage:
+        if geometry == "tabulated" and self.storage:
             raise ValueError(
-                f"SewerHydraulics {name!r}: geometry='swmm' reproduces SWMM's steady "
+                f"SewerHydraulics {name!r}: geometry='tabulated' reproduces SWMM's steady "
                 f"kinematic-wave conduit (inlet and outlet areas from its section-factor "
                 f"table) and has no manhole-storage form; use geometry='analytic' with "
                 f"storage=True"
@@ -275,8 +281,8 @@ class SewerHydraulics:
             h = torch.zeros_like(q).index_copy(-1, self.out_pipe, levels)
         else:
             q = self._tree_flow(inflow, lateral)
-            if self.geometry == "swmm":
-                h, area_swmm, velocity_swmm = self._swmm_kinwave(q)
+            if self.geometry == "tabulated":
+                h, area_tab, velocity_tab = self._tabulated_kinwave(q)
             else:
                 h = geom.normal_depth(
                     q,
@@ -286,12 +292,12 @@ class SewerHydraulics:
                     names=self.pipe_names,
                 )
         area = geom.flow_area(h, self.diameter)
-        if self.geometry == "swmm":
-            # SWMM's own flow area and velocity (`swmm_xsect.kinwave_steady`): the
+        if self.geometry == "tabulated":
+            # SWMM's own flow area and velocity (`xsect_tables.kinwave_steady`): the
             # wetted volume, the quality capacity and the velocity are SWMM's. The air
             # headspace, top width, hydraulic radius and mean depth below remain the exact
             # circle evaluated at SWMM's depth -- SWMM has no headspace to compare with.
-            area = area_swmm
+            area = area_tab
         radius = geom.hydraulic_radius(h, self.diameter)
         width = geom.top_width(h, self.diameter)
         mean_depth = geom.hydraulic_mean_depth(h, self.diameter)
@@ -314,8 +320,8 @@ class SewerHydraulics:
             )
         area_safe = torch.where(dry, torch.ones_like(area), area)
         velocity = torch.where(dry, torch.zeros_like(q), q / area_safe)
-        if self.geometry == "swmm":
-            velocity = velocity_swmm
+        if self.geometry == "tabulated":
+            velocity = velocity_tab
         out.update(
             {
                 "sewer.q": q,
@@ -347,7 +353,7 @@ class SewerHydraulics:
         return out
 
     # --------------------------------------------------------------- helpers
-    def _swmm_kinwave(self, q: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    def _tabulated_kinwave(self, q: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """SWMM 5.2's steady kinematic-wave depth, area and velocity per pipe.
 
         SWMM's kinematic wave declares a conduit full (inlet area ``aFull``, capacity
@@ -359,7 +365,7 @@ class SewerHydraulics:
                 f"SewerHydraulics {self.name!r}: pipe discharges must be finite and "
                 f"non-negative"
             )
-        q_full = swmm_xsect.full_flow(self.diameter, self.roughness, self.slope)
+        q_full = xsect_tables.full_flow(self.diameter, self.roughness, self.slope)
         over = q > q_full
         if bool(torch.any(over)):
             flat = over.reshape(-1, over.shape[-1]).any(0)
@@ -370,7 +376,7 @@ class SewerHydraulics:
                 f"capacity Qfull = beta sFull "
                 f"{[float(q_full[i]) for i in idx]} m3/s; surcharged flow is out of scope"
             )
-        return swmm_xsect.kinwave_steady(q, self.diameter, self.roughness, self.slope)
+        return xsect_tables.kinwave_steady(q, self.diameter, self.roughness, self.slope)
 
     def _tree_flow(self, inflow: Tensor, lateral: Tensor) -> Tensor:
         """Every pipe's discharge from continuity alone.
@@ -558,7 +564,7 @@ class SewerHydraulics:
                 t_head, self.manhole_idx, self.net.n, key="T_head", name=self.name
             )
         )
-        batch = torch.broadcast_shapes(rho.shape[:-1], head.shape[:-1])
+        batch = broadcast_shapes(rho.shape[:-1], head.shape[:-1])
         rho = rho.expand(batch + (self.net.n,)).clone()
         head = head.expand(batch + (len(self.manhole_names),))
         return rho.index_copy(-1, self.manhole_idx, head)

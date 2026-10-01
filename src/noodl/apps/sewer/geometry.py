@@ -3,7 +3,7 @@
 Exact circular-segment identities (Chow 1959, *Open-Channel Hydraulics*): the
 ``geometry="analytic"`` section. SWMM's own 51-point lookup tables (SWMM Reference Manual
 Vol. II section 5.1.3, a speed optimisation over these same trigonometric relations) are
-reproduced separately, operation for operation, in `swmm_xsect.py` (``geometry="swmm"``).
+reproduced separately, operation for operation, in `xsect_tables.py` (``geometry="tabulated"``).
 
 With ``theta = 2 arccos(1 - 2 h / D)`` the wetted half-angle in radians:
 

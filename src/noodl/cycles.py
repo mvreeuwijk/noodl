@@ -9,6 +9,7 @@ import itertools
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
 from noodl.topology import Network
 
 
@@ -277,7 +278,7 @@ def project_measured(
     C = torch.cat([A_reduced, E], dim=0)  # (k, b)
     k = C.shape[0]
 
-    batch_shape = torch.broadcast_shapes(target.shape[:-1], sources.shape[:-1])
+    batch_shape = broadcast_shapes(target.shape[:-1], sources.shape[:-1])
     target_b = target.expand(*batch_shape, b)
     sources_reduced = sources[..., keep_rows_t].expand(*batch_shape, len(keep_rows_t))
     measured_b = target_b[..., measured_idx]

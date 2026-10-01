@@ -54,6 +54,7 @@ import warnings
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
 from noodl.operators.base import SolveResult, SolverStatus
 from noodl.solvers.iterative import gmres, pcg
 
@@ -133,7 +134,7 @@ def _direct(A: Tensor, b: Tensor) -> SolveResult:
     backward-stable, forward-inaccurate answer marked CONVERGED, and Newton's own residual test will
     not catch it either.
     """
-    batch = torch.broadcast_shapes(A.shape[:-2], b.shape[:-1])
+    batch = broadcast_shapes(A.shape[:-2], b.shape[:-1])
     m = A.shape[-1]
     A_b = A.expand(*batch, m, m)
     b_b = b.expand(*batch, m)
@@ -308,7 +309,7 @@ def _sparse_direct(op, b: Tensor, where: str, triplet=None) -> SolveResult:
 
     m = int(b.shape[-1])
     nnz = int(row.shape[-1])
-    batch = torch.broadcast_shapes(values.shape[:-1], b.shape[:-1])
+    batch = broadcast_shapes(values.shape[:-1], b.shape[:-1])
     # The flat instance count is computed, never inferred with a -1: a system with zero
     # unknowns (every node of a network is a boundary node -- the CONTAM parallel-combination
     # fixtures are exactly that) has m = 0 AND nnz = 0, and `reshape(-1, 0)` is ambiguous

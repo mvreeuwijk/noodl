@@ -3,8 +3,8 @@
 Reading a Modelica export produces a model for [building
 physics](../applications/building_physics.md). Power-law, tabulated and door components become
 the [`noodl.elements`](../applications/building_physics.md#airflow-elements) classes of the
-same physics — an open door, for example, becomes an `MBLDoorOpen` edge pair and a discretised
-door an `MBLDoorPortStream` pair, its two port streams — while zonal flows are assembled by the
+same physics — an open door, for example, becomes an `OpenDoor` edge pair and a discretised
+door an `DoorPortStream` pair, its two port streams — while zonal flows are assembled by the
 importer itself as prescribed-flow edge pairs, as set out below.
 
 `read_modelica(path) -> (model, state, drivers)` imports a multizone airflow model built with the
@@ -55,7 +55,7 @@ ModelicaImportError: modelica: refused 3 items:
   (`TwoWayFlowElement.mo`) instead — the two door families do not share one convention.
 - A door becomes two directional noodl physics edges between the same pair of zones; so does a
   discretised door, whose two edges are its port streams `mAB_flow` and `-mBA_flow`
-  (`MBLDoorPortStream`), the compartments and their hydrostatic heads evaluated inside the
+  (`DoorPortStream`), the compartments and their hydrostatic heads evaluated inside the
   element.
 - Zonal flows are four-port, like doors (not the two-port shape a one-way element has), and
   become two directional edges the same way.

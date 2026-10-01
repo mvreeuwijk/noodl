@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
+
 
 def _bcast_index(idx: torch.Tensor, batch_shape: torch.Size, k: int) -> torch.Tensor:
     """Reshape a (b,) index tensor to broadcast against a (*batch_shape, k, b) tensor."""
@@ -140,7 +142,7 @@ class AdvectionOperator:
         # EVERY coefficient family contributes to the operator's batch: an ensemble
         # batched in conductance, removal or kinetics alone is a first-class shape, exactly
         # like one batched in flow or capacity alone.
-        self.batch_shape = torch.broadcast_shapes(*shapes)
+        self.batch_shape = broadcast_shapes(*shapes)
         m = n_interior * self.n_species
         self.shape = (*self.batch_shape, m, m)
 
@@ -198,7 +200,7 @@ class AdvectionOperator:
         # disagree with `v_b`, raising a raw RuntimeError out of `_bcast_index`. When every
         # batch shape already agrees, the broadcast and the expand
         # below are both no-ops.
-        batch_shape = torch.broadcast_shapes(v.shape[:-2], self.batch_shape)
+        batch_shape = broadcast_shapes(v.shape[:-2], self.batch_shape)
         K = v.shape[-2]
         gather_name = ("down", dtype) if transpose else ("up", dtype)
         scatter_name = ("up", dtype) if transpose else ("down", dtype)
@@ -292,7 +294,7 @@ class AdvectionOperator:
 
         # If the two embedded tensors have different batch shapes due to broadcasting,
         # broadcast both to a common batch shape first
-        batch_shape = torch.broadcast_shapes(v_interior.shape[:-2], v_boundary.shape[:-2])
+        batch_shape = broadcast_shapes(v_interior.shape[:-2], v_boundary.shape[:-2])
         if v_interior.shape[:-2] != batch_shape:
             v_interior = v_interior.expand(*batch_shape, K, self._n)
         if v_boundary.shape[:-2] != batch_shape:

@@ -42,6 +42,7 @@ or a CI run never rewrites those files, only a deliberate re-recording pass does
 from __future__ import annotations
 
 import concurrent.futures
+import dataclasses
 import json
 import multiprocessing
 import os
@@ -313,7 +314,7 @@ def test_every_fixture_is_parity_checked_or_refused():
     sets = (set(ALGEBRAIC), set(DYNAMIC), set(REFUSED))
     assert set().union(*sets) == fixtures
     assert sum(len(s) for s in sets) == len(fixtures)  # disjoint
-    assert set(PARITY_ROWS) == set(DYNAMIC) == set(REFERENCE_RESOLUTION)
+    assert set(PARITY_ROWS) == set(DYNAMIC) == set(REFERENCE_RESOLUTION) == set(WINDOW_COST)
     assert set(PARITY_STORAGE) <= set(DYNAMIC) and set(PARITY_SUBSTEPS) <= set(DYNAMIC)
     assert set(DEFAULT_SUBSTEPS) <= set(DYNAMIC)
     assert set(STORAGE_DOMINATED) <= set(DYNAMIC)
@@ -348,8 +349,8 @@ PARITY_RTOL = 1e-6
 # noodl's runs at 1, 2 and 4 substeps agree to 1e-10 kg/s and the reference itself moved by
 # up to 2.9e-8 kg/s over its first rows; NaturalVentilation's orifices at their reversal,
 # 5.0e-10 kg/s (unchanged from 1-2 to 2-4 substeps) where the reference moved by 1.8e-10 to
-# 3.7e-9 kg/s from row to row there; ReverseBuoyancy's door flow at 612 s, 4.7e-9 kg/s,
-# where the reference moved by 5.1e-9 kg/s.
+# 3.7e-9 kg/s from row to row there; ReverseBuoyancy's door flow at 612 s, 1.7e-8 kg/s,
+# where the reference moved by 2.2e-8 kg/s.
 REFERENCE_RESOLUTION: dict[str, dict[str, float]] = {
     "ClosedDoors": {"T": 1.2e-09, "Xi": 2.2e-14, "flow": 1.3e-11, "p": 1.5e-07},
     "CO2TransportStep": {"C": 6.0e-14, "T": 1.5e-12, "Xi": 5.3e-14, "flow": 3.3e-08,
@@ -394,7 +395,7 @@ PARITY_ROWS = {"ClosedDoors": 3, "CO2TransportStep": 2, "NaturalVentilation": 3,
 DEFAULT_SUBSTEPS: dict[str, tuple[int, int]] = {"ReverseBuoyancy": (1, 2)}
 
 
-def _columns_of(out: dict, names, head: list[str], net, drivers) -> dict[str, np.ndarray]:
+def _columns_of(out: dict, names, head: list[str]) -> dict[str, np.ndarray]:
     q = out["air.q"].numpy()
     cols: dict[str, np.ndarray] = {}
     for h in head[1:]:
@@ -425,28 +426,55 @@ def _worst(stats: dict[str, dict]) -> dict[str, dict]:
     return worst
 
 
-def _check_parity(model: str, rows: int | None, threads: int | None = None,
-                  substeps: tuple[int, int] | None = None) -> list[str]:
-    """Run `model` over its first `rows` rows (every row: `None`, recorded) at `substeps`
-    (default PARITY_SUBSTEPS) and return the failures against its tolerance (none: parity).
-    `threads` sets torch's thread count (a worker of the default run's pool)."""
+def _run(model: str, rows: int | None, r: int, threads: int | None = None):
+    """One `scheme="midpoint"` run of `model` over its first `rows` rows (every row: `None`)
+    at `r` substeps: `(history, names, seconds)`. `threads` sets torch's thread count (a
+    worker of the default run's pool)."""
     if threads is not None:
         torch.set_num_threads(threads)
-    head, data = _csv(model)
+    _, data = _csv(model)
     data = data if rows is None else data[:rows]
     start = time.perf_counter()
-    runs, cols = [], []
+    net, state, drivers, names = read_modelica(DATA / f"{model}.json", return_names=True,
+                                               substeps=r)
+    times = names.times[:data.shape[0]]
+    assert torch.allclose(times, torch.tensor(data[:, 0], dtype=torch.float64),
+                          rtol=0.0, atol=1e-9)
+    out = simulate(net, state, drivers, times, scheme="midpoint")
+    return out, names, time.perf_counter() - start
+
+
+def _run_in_worker(model: str, rows: int | None, r: int, threads: int) -> tuple:
+    """`_run` in a worker process, its tensors returned as NumPy arrays: torch's own
+    pickling of tensors between processes (shared-memory files) crashed the parent on
+    Windows (0xc000070a in `rebuild_storage_filename`)."""
+    out, names, seconds = _run(model, rows, r, threads)
+    return ({k: v.numpy() for k, v in out.items()},
+            dataclasses.replace(names, times=names.times.numpy()), seconds)
+
+
+def _from_worker(run: tuple) -> tuple:
+    out, names, seconds = run
+    return ({k: torch.from_numpy(v) for k, v in out.items()},
+            dataclasses.replace(names, times=torch.from_numpy(names.times)), seconds)
+
+
+def _check_parity(model: str, rows: int | None, substeps: tuple[int, int] | None = None,
+                  runs: list | None = None) -> list[str]:
+    """Run `model` over its first `rows` rows (every row: `None`, recorded) at `substeps`
+    (default PARITY_SUBSTEPS) and return the failures against its tolerance (none: parity).
+    `runs`, when given, are the two runs' `_run` results, made elsewhere (the default run's
+    worker pool)."""
+    head, data = _csv(model)
+    data = data if rows is None else data[:rows]
     substeps = substeps or PARITY_SUBSTEPS.get(model, (1, 2))
-    for r in substeps:
-        net, state, drivers, names = read_modelica(DATA / f"{model}.json", return_names=True,
-                                                   substeps=r)
-        times = names.times[:data.shape[0]]
-        assert torch.allclose(times, torch.tensor(data[:, 0], dtype=torch.float64),
-                              rtol=0.0, atol=1e-9)
-        runs.append(simulate(net, state, drivers, times, scheme="midpoint"))
-        cols.append(_columns_of(runs[-1], names, head, net, drivers))
+    if runs is None:
+        runs = [_run(model, rows, r) for r in substeps]
+    seconds = sum(run[2] for run in runs)
+    names = runs[1][1]
+    cols = [_columns_of(out, nm, head) for out, nm, _ in runs]
+    runs = [out for out, _, _ in runs]
     best = {h: cols[1][h] + (cols[1][h] - cols[0][h]) / 3.0 for h in head[1:]}  # extrapolate
-    seconds = time.perf_counter() - start
     stats = _dynamic_stats(head, data, best, REFERENCE_RESOLUTION[model])
     own = _dynamic_stats(head, np.column_stack([data[:, 0]] + [best[h] for h in head[1:]]),
                          cols[1])
@@ -477,20 +505,44 @@ def _check_parity(model: str, rows: int | None, threads: int | None = None,
     return [f"{model} outside its tolerance:", *failures] if failures else []
 
 
+# The default window's cost per substep of each model (s, measured on a loaded 14-core
+# machine; only the order matters): `default_windows` starts the longest runs first, so that
+# the last to finish is about the longest one (the runs at r substeps cost about r times these).
+WINDOW_COST = {"ClosedDoors": 25, "CO2TransportStep": 43, "NaturalVentilation": 38,
+               "OneEffectiveAirLeakageArea": 1, "OneOpenDoor": 12, "OneRoom": 2,
+               "OpenDoorBuoyancyDynamic": 46, "OpenDoorBuoyancyPressureDynamic": 44,
+               "ReverseBuoyancy": 60, "ReverseBuoyancy3Zones": 56, "ThreeRoomsContam": 48,
+               "ThreeRoomsContamDiscretizedDoor": 46, "ZonalFlow": 3}
+
+
+def _default_substeps(model: str) -> tuple[int, int]:
+    return DEFAULT_SUBSTEPS.get(model) or PARITY_SUBSTEPS.get(model, (1, 2))
+
+
 @pytest.fixture(scope="module")
 def default_windows() -> dict[str, list[str]]:
-    """`_check_parity` on the first PARITY_ROWS rows of every dynamic model, the models in
-    parallel worker processes (most of each window's time is its graded start, `run`
-    module), so that the default run takes about as long as its slowest window."""
-    models = sorted(PARITY_ROWS)
+    """`_check_parity` on the first PARITY_ROWS rows of every dynamic model. Every run (two
+    per model) is made in its own worker process (most of each window's time is its graded
+    start, `run` module), the longest first (WINDOW_COST), so that the default run takes
+    about as long as its slowest run; the comparison is made here. `NOODL_PARITY_WORKERS`
+    sets the number of worker processes (default: the CPU count)."""
+    tasks = sorted(((m, r) for m in PARITY_ROWS for r in _default_substeps(m)),
+                   key=lambda task: -task[1] * WINDOW_COST[task[0]])
     cpus = os.cpu_count() or 1
-    workers = max(1, min(len(models), cpus))
+    workers = max(1, min(len(tasks), int(os.environ.get("NOODL_PARITY_WORKERS", cpus))))
     threads = max(1, cpus // workers)
     context = multiprocessing.get_context("spawn")
     with concurrent.futures.ProcessPoolExecutor(workers, mp_context=context) as pool:
-        futures = {m: pool.submit(_check_parity, m, PARITY_ROWS[m], threads,
-                                  DEFAULT_SUBSTEPS.get(m)) for m in models}
-        return {m: f.result() for m, f in futures.items()}
+        futures = {(m, r): pool.submit(_run_in_worker, m, PARITY_ROWS[m], r, threads)
+                   for m, r in tasks}
+        results = {}
+        for m in sorted(PARITY_ROWS):
+            try:
+                runs = [_from_worker(futures[m, r].result()) for r in _default_substeps(m)]
+                results[m] = _check_parity(m, PARITY_ROWS[m], _default_substeps(m), runs)
+            except Exception as exc:  # reported by the model's own test
+                results[m] = [f"{m}: {type(exc).__name__}: {exc}"]
+        return results
 
 
 @pytest.mark.parametrize("model", sorted(PARITY_ROWS))
@@ -530,7 +582,7 @@ def test_time_integration_error_falls_with_the_order_of_the_scheme(scheme, order
         net, state, drivers, names = read_modelica(DATA / f"{model}.json", return_names=True,
                                                    substeps=r)
         out = simulate(net, state, drivers, names.times[:rows], scheme=scheme)
-        cols = _columns_of(out, names, head, net, drivers)
+        cols = _columns_of(out, names, head)
         errors.append(float(np.abs(cols[column] - data[:, head.index(column)])[first:].max()))
     ratio = errors[0] / errors[1]
     print(f"{model} {column}, {scheme}: error {errors[0]:.3e} K at 1 substep, {errors[1]:.3e} "

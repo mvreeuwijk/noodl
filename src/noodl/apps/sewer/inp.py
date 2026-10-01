@@ -4,7 +4,7 @@ READ: `[TITLE]`, `[OPTIONS]` (`FLOW_UNITS` must be `CMS`; `FLOW_ROUTING` is reco
 `[JUNCTIONS]`, `[OUTFALLS]`, `[CONDUITS]`, `[XSECTIONS]` (only `CIRCULAR`), `[INFLOWS]`
 (constant `FLOW` baselines and constant `CONCENTRATION` pollutant baselines),
 `[POLLUTANTS]`. The network uses SWMM's own tabulated circular section
-(``geometry="swmm"``, `swmm_xsect.py`) unless ``geometry="analytic"`` is passed.
+(``geometry="tabulated"``, `xsect_tables.py`) unless ``geometry="analytic"`` is passed.
 IGNORED because no conduit or node ever references them: `[EVAPORATION]`, `[REPORT]`,
 `[TAGS]`, `[MAP]`, `[COORDINATES]`.
 
@@ -36,13 +36,13 @@ _READ = {"OPTIONS", "JUNCTIONS", "OUTFALLS", "CONDUITS", "XSECTIONS", "INFLOWS",
 
 
 def read_swmm_inp(
-    path, *, geometry: str = "swmm"
+    path, *, geometry: str = "tabulated"
 ) -> tuple[SewerNetwork, dict[str, dict[str, float]], dict[str, dict]]:
     """`(network, {node: {pollutant: kg/m3}}, {pollutant: {...}})` for `path`.
 
-    `geometry` defaults to ``"swmm"``: a network read from a SWMM file is read to reproduce
+    `geometry` defaults to ``"tabulated"``: a network read from a SWMM file is read to reproduce
     SWMM, so its conduits use SWMM 5.2's own tabulated circular section
-    (`noodl.apps.sewer.swmm_xsect`). Pass ``geometry="analytic"`` for the exact circle.
+    (`noodl.apps.sewer.xsect_tables`). Pass ``geometry="analytic"`` for the exact circle.
     """
     path = Path(path)
     sections = read_sections(path)

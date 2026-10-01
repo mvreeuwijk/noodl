@@ -32,7 +32,7 @@ Elements are grouped below by the physics they express, as in
 ::: noodl.elements.powerlaw
     options:
       heading_level: 4
-::: noodl.elements.powerlaw_mbl
+::: noodl.elements.powerlaw_regularized
     options:
       heading_level: 4
 
@@ -191,7 +191,7 @@ Elements are grouped below by the physics they express, as in
 
 ::: noodl.apps.sewer.network
 ::: noodl.apps.sewer.geometry
-::: noodl.apps.sewer.swmm_xsect
+::: noodl.apps.sewer.xsect_tables
 ::: noodl.apps.sewer.hydraulics
     options:
       members: [SewerHydraulics, resolve_nodal_driver]
