@@ -85,7 +85,7 @@ def test_the_munich_preset_is_the_earlier_munich_option_set():
             net, canyon_wind="exponential", exchange="schulte", routing="sirane",
             direction_averaging="munich", roof_wind_form="sirane", stability="munich",
             kappa=0.41, canyon_wind_min=0.1, u_d_min=0.001, sigma_w_min=0.0,
-            sigma_v_min=0.0,
+            sigma_v_min=0.0, sigma_w_height="street_height",
         )
     assert _flows(preset).options == _flows(spelt).options
     for lmo in (150.0, -40.0):
@@ -190,3 +190,72 @@ def test_drivers_at_passes_the_direction_spread_through():
     munich, _, _ = build_model(net, species=("NO2",), preset="munich")
     assert "sigma_theta" not in drivers_at(case, munich, 0)
     _q(munich, drivers_at(case, munich, 0))
+
+
+def _u_d(model, *, u_star, h_abl, lmo=None):
+    d = {"u_star": torch.tensor(u_star, dtype=DT), "theta_w": torch.tensor(0.3, dtype=DT),
+         "h_abl": torch.tensor(h_abl, dtype=DT)}
+    if lmo is not None:
+        d["lmo"] = torch.tensor(lmo, dtype=DT)
+    return _flows(model).velocities(d)[2]
+
+
+def test_the_sirane_preset_evaluates_the_exchange_sigma_w_at_the_canopy_height():
+    """SIRANE's `u_d = sigma_w / (sqrt(2) pi)` depends on the external flow only: `sigma_w`
+    is evaluated at the canopy height `h_canopy` (SIRANE's `H_R`, 20 m by default) for
+    every street, whatever the street's own height. `sigma_w_height="street_height"`
+    restores the per-street height, which is the `munich` preset's choice."""
+    net = from_test_network()
+    heights = torch.tensor([s.height for s in net.streets], dtype=DT)
+    assert heights.unique().numel() > 1
+    u_star, h_abl = 0.9, 400.0
+
+    def closed_form(z):
+        return 1.3 * u_star * (1.0 - 0.8 * z / h_abl) * SIRANE_EXCHANGE
+
+    default, _, _ = build_model(net, sigma_w_min=0.0)
+    assert _flows(default).sigma_w_height == "canopy_height"
+    torch.testing.assert_close(_u_d(default, u_star=u_star, h_abl=h_abl),
+                               torch.full_like(heights, closed_form(20.0)),
+                               rtol=1e-14, atol=0.0)
+    taller, _, _ = build_model(net, sigma_w_min=0.0, h_canopy=30.0)
+    torch.testing.assert_close(_u_d(taller, u_star=u_star, h_abl=h_abl),
+                               torch.full_like(heights, closed_form(30.0)),
+                               rtol=1e-14, atol=0.0)
+    per_street, _, _ = build_model(net, sigma_w_min=0.0, sigma_w_height="street_height")
+    torch.testing.assert_close(_u_d(per_street, u_star=u_star, h_abl=h_abl),
+                               closed_form(heights), rtol=1e-14, atol=0.0)
+    munich, _, _ = build_model(net, preset="munich")
+    assert _flows(munich).sigma_w_height == "street_height"
+    with pytest.raises(ValueError, match="h_canopy must be finite and > 0"):
+        build_model(net, h_canopy=0.0)
+    with pytest.raises(ValueError, match="sigma_w_height must be one of"):
+        build_model(net, sigma_w_height="roof")
+
+
+@pytest.mark.parametrize(("h_canopy", "sirane_sigma_w"),
+                         [(10.0, 1.92331), (20.0, 1.91383), (30.0, 1.90425)])
+def test_the_canopy_height_sigma_w_matches_sirane_hand_entered_values(h_canopy,
+                                                                      sirane_sigma_w):
+    """Hand-entered from three SIRANE v2.1 rev 128 runs of its South Kensington deck, hour
+    01 (wind 9 m/s from 315 degrees, turbulence floors zeroed), which differ only in the
+    canopy height `H_R` (10, 20, 30 m). SIRANE's preprocessor gave u* = 1.487 m/s,
+    h = 1615.5 m and L = 2152.72 m (the neutral branch, L > h). Each value is the median
+    over the 46 streets of `sqrt(2) pi u_d`, with `u_d` backed out of SIRANE's printed roof
+    flux, `F / (W L (C_int - C_ext))`; the 46 values spread by only 0.1 % although the
+    street heights do not. The tolerance is set by SIRANE's printed digits: u* to 3
+    decimals (3.4e-4 relative) and the flux and concentrations to 4 significant figures.
+    Moving `H_R` by 10 m moves `sigma_w` by 0.5 %, so the height is pinned to about 1 m."""
+    net = from_test_network()
+    model, _, _ = build_model(net, sigma_w_min=0.0, h_canopy=h_canopy)
+    u_d = _u_d(model, u_star=1.487, h_abl=1615.5, lmo=2152.72)
+    sigma_w = u_d / SIRANE_EXCHANGE
+    assert torch.allclose(sigma_w, torch.full_like(sigma_w, sirane_sigma_w), rtol=4e-4,
+                          atol=0.0)
+
+
+def test_the_canopy_height_sigma_w_ratio_matches_sirane_without_u_star():
+    """The same SIRANE runs at `H_R` = 10 and 30 m: the ratio of the two `sigma_w`
+    (1.92331 / 1.90425) needs no u*, and the neutral closed form gives it to 5e-5."""
+    h = 1615.5
+    assert abs((1 - 0.8 * 10 / h) / (1 - 0.8 * 30 / h) - 1.92331 / 1.90425) < 1e-4

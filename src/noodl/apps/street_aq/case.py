@@ -67,8 +67,10 @@ noodl value). A value missing from its map (e.g. MUNICH's `Wang` transfer) has n
 counterpart. MUNICH's direction spread is the `munich` preset's
 `direction_spread="turbulence_intensity"`."""
 
-_SIRANE_FLOOR_MAP = {"SIGMA_W_MIN": "sigma_w_min", "SIGMA_V_MIN": "sigma_v_min"}
-"""SIRANE master-file keyword -> the `build_model` turbulence floor it sets."""
+_SIRANE_KEYWORD_MAP = {"SIGMA_W_MIN": "sigma_w_min", "SIGMA_V_MIN": "sigma_v_min",
+                       "H_R": "h_canopy"}
+"""SIRANE master-file keyword -> the `build_model` keyword it sets: the turbulence floors
+and the canopy height at which the exchange's `sigma_w` is evaluated."""
 
 _MUNICH_FLOAT_MAP = {"Zref": "z_ref", "Minimum_Street_Wind_Speed": "canyon_wind_min"}
 """MUNICH `[street]` key -> the float `build_model` keyword it sets."""
@@ -236,7 +238,9 @@ class StreetCase:
         driver), and the three-branch stable/neutral/unstable `sigma_w`
         (`stability="monin_obukhov"`) -- plus the deck's turbulence floors `SIGMA_W_MIN`
         -> `sigma_w_min` and `SIGMA_V_MIN` -> `sigma_v_min` where the master file sets
-        them (the preset's 0.30 and 0.5 m/s, SIRANE's defaults, otherwise). `z_ref` is
+        them (the preset's 0.30 and 0.5 m/s, SIRANE's defaults, otherwise), and the
+        canopy height `H_R` -> `h_canopy`, the one height above ground at which SIRANE
+        evaluates every street's exchange `sigma_w` (the preset's 20 m otherwise). `z_ref` is
         left at `build_model`'s default: noodl physics has no
         SIRANE meteorological preprocessor (SIRANE derives u*, the boundary-layer height,
         the Obukhov length and sigma_theta from the meteo site's wind, temperature and cloud
@@ -252,7 +256,7 @@ class StreetCase:
         if self.source == "sirane":
             options: dict = {"preset": "sirane"}
             deck = self.native.get("options", {})
-            for key, keyword in _SIRANE_FLOOR_MAP.items():
+            for key, keyword in _SIRANE_KEYWORD_MAP.items():
                 if key in deck:
                     options[keyword] = float(deck[key])
             return options

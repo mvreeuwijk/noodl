@@ -461,6 +461,14 @@ class StreetFlows:
     the roof exchange velocity, `sigma_v` before the turbulence-intensity spread.
     `canyon_wind_min` and `u_d_min` floor the canyon wind and the exchange velocity.
 
+    `sigma_w_height` is where the exchange's `sigma_w` is evaluated.
+    `"canopy_height"` (the `sirane` preset) is one height above ground for the whole
+    network, `h_canopy` (m, default 20 m): SIRANE's `u_d` is "only defined by the external
+    flow condition" (Soulhac et al. 2011, Sec. 4.2.2, Eq. 5), with `sigma_w` "at roof
+    level", which SIRANE v2.1 takes to be its canopy height `H_R`, not a street's own
+    height. `"street_height"` (the `munich` preset, MUNICH's `ComputeSigmaW`) uses each
+    street's own `H`.
+
     `meteo="per_street"` gives every one of those drivers a trailing STREET axis,
     `(..., n_streets)`: each street's canyon wind and roof exchange come from its own
     values. Junction routing then uses per-junction values `(..., n_junctions)`, in
@@ -505,6 +513,8 @@ class StreetFlows:
         u_d_min: float | None = None,
         sigma_w_min: float | None = None,
         sigma_v_min: float | None = None,
+        sigma_w_height: str | None = None,
+        h_canopy: float | None = None,
         z0_s: float = Z0_S_DEFAULT,
         z_ref: float = 30.0,
         pblh_floor: bool = True,
@@ -522,6 +532,7 @@ class StreetFlows:
             direction_averaging=direction_averaging, direction_spread=direction_spread,
             stability=stability, kappa=kappa, canyon_wind_min=canyon_wind_min,
             u_d_min=u_d_min, sigma_w_min=sigma_w_min, sigma_v_min=sigma_v_min,
+            sigma_w_height=sigma_w_height, h_canopy=h_canopy,
         ), "StreetFlows")
         options.pop("chemistry")
         if options["direction_averaging"] == "exact_gaussian" and sigma_theta is not None \
@@ -536,6 +547,10 @@ class StreetFlows:
                 raise ValueError(
                     f"StreetFlows: {key} must be finite and >= 0, got {options[key]!r}"
                 )
+        if not (math.isfinite(options["h_canopy"]) and options["h_canopy"] > 0.0):
+            raise ValueError(
+                f"StreetFlows: h_canopy must be finite and > 0, got {options['h_canopy']!r}"
+            )
         # `q` is written as one concatenated block, so the layer's own `flow_kinds` order
         # IS the slot layout this closure assumes; a layer built with the kinds in any
         # other order would take the route flows for vent flows with no error anywhere.
@@ -560,6 +575,8 @@ class StreetFlows:
         self.direction_averaging = options["direction_averaging"]
         self.direction_spread = options["direction_spread"]
         self.stability = options["stability"]
+        self.sigma_w_height = options["sigma_w_height"]
+        self.h_canopy = options["h_canopy"]
         self.n_theta = n_theta
         self.sigma_theta = sigma_theta
         self.kappa = options["kappa"]
@@ -701,6 +718,15 @@ class StreetFlows:
         """The turbulence form in force: `self.stability`, or `"neutral"` without `lmo`."""
         return "neutral" if lmo is None else self.stability
 
+    def sigma_w_z(self) -> Tensor:
+        """The height (m above ground) at which each street's exchange `sigma_w` is
+        evaluated, `(n_streets,)`: `h_canopy` everywhere under
+        `sigma_w_height="canopy_height"`, the street's own height under
+        `"street_height"`."""
+        if self.sigma_w_height == "canopy_height":
+            return torch.full_like(self.geometry.height, self.h_canopy)
+        return self.geometry.height
+
     def velocities(self, drivers) -> tuple[BoundaryLayer, Tensor, Tensor]:
         """`(per-street boundary layer, signed canyon velocity per street, exchange
         velocity)`, every tensor `(..., n_streets)`."""
@@ -726,7 +752,7 @@ class StreetFlows:
                 g.width, g.height, phi, u_h=u_h, canyon_wind="exponential_profile",
                 z0_s=self.z0_s, canyon_wind_min=self.canyon_wind_min,
             )
-        sigma_w = bl_s.sigma_w(g.height, lmo=lmo, stability=self._stability(lmo))
+        sigma_w = bl_s.sigma_w(self.sigma_w_z(), lmo=lmo, stability=self._stability(lmo))
         u_d = exchange_velocity(sigma_w, g.height, g.width, roof_exchange=self.roof_exchange,
                                 u_d_min=self.u_d_min, sigma_w_min=self.sigma_w_min)
         return bl_s, u_street, u_d

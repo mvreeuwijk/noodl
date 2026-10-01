@@ -248,8 +248,9 @@ def test_background_is_micrograms_to_kg_per_m3(tmp_path):
 def test_model_options_are_sirane_s_closures(case):
     options = case.model_options()
     # SIRANE's closure set is the sirane preset; the deck adds its own turbulence floors
-    # (this deck zeroes both).
-    assert options == {"preset": "sirane", "sigma_w_min": 0.0, "sigma_v_min": 0.0}
+    # (this deck zeroes both) and its canopy height H_R, where sigma_w is evaluated.
+    assert options == {"preset": "sirane", "sigma_w_min": 0.0, "sigma_v_min": 0.0,
+                       "h_canopy": 20.0}
     resolved = resolve("sirane", {}, "test")
     assert resolved["canyon_wind"] == "bessel_profile"
     assert resolved["roof_exchange"] == "turbulent_velocity"
@@ -267,7 +268,7 @@ def test_model_options_are_sirane_s_closures(case):
 
 def test_model_options_fall_back_to_sirane_s_default_floors(case):
     deck = {k: v for k, v in case.native["options"].items()
-            if k not in ("SIGMA_W_MIN", "SIGMA_V_MIN")}
+            if k not in ("SIGMA_W_MIN", "SIGMA_V_MIN", "H_R")}
     bare = replace(case, native=dict(case.native, options=deck))
     assert bare.model_options() == {"preset": "sirane"}
     set_ = replace(case, native=dict(case.native, options=dict(deck, SIGMA_W_MIN="0.3",
