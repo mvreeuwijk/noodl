@@ -708,7 +708,7 @@ def read_sirane_results(result_dir: Path, *, case=None, hours: str = "case") -> 
     `Cext_<sp>` -> `c_above` (micrograms/m3 -> kg/m3); `U_moy` -> `u_canyon`, `Sigma_wH` ->
     `sigma_w_roof`, `u_d` -> `u_exchange` (already SI, m/s) -- `u_exchange` is read AS
     PRINTED, not recomputed from `sigma_w_roof`, so it can be checked against SIRANE's own
-    closure (`SIRANE_EXCHANGE * sigma_w_roof`, `noodl.apps.street_aq.canyon`).
+    closure (`EXCHANGE_SIGMA_W_RATIO * sigma_w_roof`, `noodl.apps.street_aq.canyon`).
 
     **`METEO/Resul_Meteo.dat`** -- the meteorological preprocessor's own derived state, one
     row per hour, dated by its `JJ/MM/AAAA` + `HH:MM` columns together: `Ustar` -> `u_star`,

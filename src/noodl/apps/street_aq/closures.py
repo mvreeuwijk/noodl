@@ -23,6 +23,8 @@ from collections.abc import Mapping
 
 __all__ = [
     "CLOSURE_OPTIONS",
+    "KAPPA_040",
+    "KAPPA_041",
     "LEGACY",
     "LEGACY_NAMES",
     "LEGACY_VALUES",
@@ -31,6 +33,7 @@ __all__ = [
     "SIGMA_V_MIN",
     "SIGMA_W_MIN",
     "infer_kappa",
+    "keyword_alias",
     "normalise",
     "preset_options",
     "resolve",
@@ -84,6 +87,15 @@ SIGMA_V_MIN = 0.5
 """SIRANE keyword `SIGMA_V_MIN` ("Minimum sigma_v", default 0.5 m/s): the sirane preset's
 `sigma_v_min`, and the above-roof plume's default floor."""
 
+KAPPA_040 = 0.40
+"""The von Karman constant 0.40: the `sirane` preset's, and `infer_kappa`'s value when no
+closure written with 0.41 is selected."""
+
+KAPPA_041 = 0.41
+"""The von Karman constant 0.41: the `munich` preset's, and the one the
+`exponential_profile`, `aspect_ratio_scaled` and `canopy_log_law` closures are written with
+(MUNICH, `StreetNetworkTransport.cxx:21`)."""
+
 _NUMERIC = ("kappa", "canyon_wind_min", "u_d_min", "sigma_w_min", "sigma_v_min")
 """The numeric settings a preset fixes besides the string options."""
 
@@ -96,7 +108,7 @@ PRESETS: dict[str, dict] = {
         "direction_averaging": "exact_gaussian",
         "direction_spread": "driver",
         "stability": "monin_obukhov",
-        "kappa": 0.40,
+        "kappa": KAPPA_040,
         "canyon_wind_min": 0.0,
         "u_d_min": 0.0,
         "sigma_w_min": SIGMA_W_MIN,
@@ -111,7 +123,7 @@ PRESETS: dict[str, dict] = {
         "direction_averaging": "rectangle_rule",
         "direction_spread": "turbulence_intensity",
         "stability": "monin_obukhov",
-        "kappa": 0.41,
+        "kappa": KAPPA_041,
         "canyon_wind_min": 0.1,
         "u_d_min": 0.001,
         "sigma_w_min": 0.0,
@@ -158,12 +170,13 @@ implies `direction_spread="turbulence_intensity"` (see `resolve`)."""
 LEGACY = {"names": LEGACY_NAMES, "values": LEGACY_VALUES}
 """Both deprecation maps together."""
 
-_MUNICH_STYLE = {
+_KAPPA_041_CHOICES = {
     "canyon_wind": "exponential_profile",
     "roof_exchange": "aspect_ratio_scaled",
     "roof_wind": "canopy_log_law",
 }
-"""The choices whose formulas are written with `kappa = 0.41` (see `infer_kappa`)."""
+"""The choices whose formulas are written with `kappa = 0.41`, `KAPPA_041` (see
+`infer_kappa`)."""
 
 
 _PACKAGE = __name__.rpartition(".")[0]
@@ -211,10 +224,29 @@ def normalise(option: str, value: str, where: str) -> str:
 
 
 def infer_kappa(options: Mapping[str, str]) -> float:
-    """0.41 when any choice written with that constant is selected (`exponential_profile`,
-    `aspect_ratio_scaled` or `canopy_log_law`), else 0.40."""
-    munich_form = any(options.get(key) == value for key, value in _MUNICH_STYLE.items())
-    return 0.41 if munich_form else 0.40
+    """`KAPPA_041` (0.41) when any choice written with that constant is selected
+    (`exponential_profile`, `aspect_ratio_scaled` or `canopy_log_law`), else `KAPPA_040`
+    (0.40)."""
+    written_with_041 = any(
+        options.get(key) == value for key, value in _KAPPA_041_CHOICES.items()
+    )
+    return KAPPA_041 if written_with_041 else KAPPA_040
+
+
+def keyword_alias(where: str, name: str, value, old_name: str, old_value, default):
+    """The value of keyword `name`, which earlier releases called `old_name`.
+
+    `old_value` (not `None`) is taken with a `DeprecationWarning` naming `name`; given
+    together with a `value` other than `None` it raises `TypeError`. With neither, the
+    result is `default`."""
+    if old_value is None:
+        return default if value is None else value
+    if value is not None:
+        raise TypeError(
+            f"{where}: {old_name!r} and {name!r} both set {name!r}; give only one"
+        )
+    warn_deprecated(f"{where}: the keyword {old_name!r} is deprecated; use {name!r}")
+    return old_value
 
 
 def resolve(preset: str, options: Mapping[str, object], where: str) -> dict:

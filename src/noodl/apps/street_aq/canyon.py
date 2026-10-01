@@ -24,20 +24,26 @@ from dataclasses import dataclass
 
 import torch
 
-from noodl.apps.street_aq.closures import normalise
+from noodl.apps.street_aq.closures import KAPPA_040, KAPPA_041, keyword_alias, normalise
 from noodl.solvers.scalar import solve_monotone
 
 Tensor = torch.Tensor
 
-KAPPA = 0.4
-"""von Karman constant for the neutral form (`canyon_velocity`'s default, `kappa = 0.4`)."""
+KAPPA = KAPPA_040
+"""von Karman constant for the neutral form (`canyon_velocity`'s default, `kappa = 0.4`);
+the same value as `closures.KAPPA_040`."""
 
-KAPPA_MUNICH = 0.41
-"""von Karman constant as MUNICH uses it (`StreetNetworkTransport.cxx:21`)."""
+KAPPA_MUNICH = KAPPA_041
+"""Earlier name of `KAPPA_041` (0.41, the constant MUNICH uses,
+`StreetNetworkTransport.cxx:21`)."""
 
-GAMMA_E = 0.577
-"""Euler-Mascheroni, truncated -- not 0.5772156649. ATM `MeteorologyStreet.cxx:118`
+EULER_GAMMA_TRUNCATED = 0.577
+"""The Euler-Mascheroni constant TRUNCATED to three decimals -- not 0.5772156649 -- in the
+Bessel shape equation (`bessel_shape_residual`). ATM `MeteorologyStreet.cxx:118`
 hard-codes the same truncated value. Worth about 4e-5 relative."""
+
+GAMMA_E = EULER_GAMMA_TRUNCATED
+"""Earlier name of `EULER_GAMMA_TRUNCATED`."""
 
 Z0_B_DEFAULT = 0.15
 """In-canyon (building) roughness, the default, m."""
@@ -45,16 +51,25 @@ Z0_B_DEFAULT = 0.15
 Z0_S_DEFAULT = 0.01
 """Surface roughness `z0_surface`, MUNICH's default (`StreetNetworkTransport.cxx:155`)."""
 
-SIRANE_EXCHANGE = 1.0 / (math.sqrt(2.0) * math.pi)
-"""`u_d / sigma_w` in SIRANE: 0.225079079039277. S11 Eq. (5) p. 7386, K18 Eq. (3) p. 613,
-K22 Eq. (B10) p. 7387 and `StreetNetworkTransport.cxx:3273` all read `sigma_w/(sqrt(2) pi)`
--- the radical covers only the 2, verified at glyph level in all three PDFs. The reading
+EXCHANGE_SIGMA_W_RATIO = 1.0 / (math.sqrt(2.0) * math.pi)
+"""`u_d / sigma_w` of the `turbulent_velocity` roof exchange (SIRANE's): 0.225079079039277.
+S11 Eq. (5) p. 7386, K18 Eq. (3) p. 613, K22 Eq. (B10) p. 7387 and
+`StreetNetworkTransport.cxx:3273` all read `sigma_w/(sqrt(2) pi)` -- the radical covers
+only the 2, verified at glyph level in all three PDFs. The reading
 `sigma_w/sqrt(2 pi)` (`1/sqrt(2 pi) = 0.398942280401433`) appears in no source."""
 
-SCHULTE_BETA = 2.0 / (math.sqrt(2.0) * math.pi)
-"""`beta` in Schulte's mixing-length form: 0.450158158078553, fixed by matching the SIRANE
-form at `a_r = 1` (K18 p. 613). ATM `ComputeSchulteLm`, `MeteorologyStreet.cxx:547-554`;
-MUNICH v1.0 used the literal 0.45 instead, a 0.035 % difference."""
+SIRANE_EXCHANGE = EXCHANGE_SIGMA_W_RATIO
+"""Earlier name of `EXCHANGE_SIGMA_W_RATIO`."""
+
+ASPECT_RATIO_EXCHANGE_BETA = 2.0 / (math.sqrt(2.0) * math.pi)
+"""`beta` in the `aspect_ratio_scaled` roof exchange `u_d = beta sigma_w / (1 + H/W)`
+(Schulte's mixing-length form): 0.450158158078553, fixed by matching the
+`turbulent_velocity` form at `a_r = 1` (K18 p. 613). ATM `ComputeSchulteLm`,
+`MeteorologyStreet.cxx:547-554`; MUNICH v1.0 used the literal 0.45 instead, a 0.035 %
+difference."""
+
+SCHULTE_BETA = ASPECT_RATIO_EXCHANGE_BETA
+"""Earlier name of `ASPECT_RATIO_EXCHANGE_BETA`."""
 
 C_BRACKET_LO = 1e-4
 C_BRACKET_HI = 3.0
@@ -130,7 +145,7 @@ def bessel_y1(x: Tensor) -> Tensor:
     return _BesselY1.apply(x)
 
 
-def soulhac_residual(c: Tensor, ratio: Tensor) -> Tensor:
+def bessel_shape_residual(c: Tensor, ratio: Tensor) -> Tensor:
     """`0.5 (z0/di) c - exp((pi/2) Y1(c)/J1(c) - gamma_E)`; zero at the shape parameter.
 
     The Soulhac-Perkins-Salizzoni closed form writes exactly this; MUNICH writes the same
@@ -139,12 +154,17 @@ def soulhac_residual(c: Tensor, ratio: Tensor) -> Tensor:
     -- worth 4e-4 relative in `u_M`. This solve is continuous.)
     """
     return 0.5 * ratio * c - torch.exp(
-        (math.pi / 2.0) * bessel_y1(c) / bessel_j1(c) - GAMMA_E
+        (math.pi / 2.0) * bessel_y1(c) / bessel_j1(c) - EULER_GAMMA_TRUNCATED
     )
 
 
-def soulhac_shape(ratio: Tensor) -> Tensor:
-    """The root `c` of `soulhac_residual`, batched and differentiable in `ratio`.
+soulhac_residual = bessel_shape_residual
+"""Earlier name of `bessel_shape_residual`."""
+
+
+def bessel_shape_parameter(ratio: Tensor) -> Tensor:
+    """The shape parameter `c` of the Bessel canyon profile: the root of
+    `bessel_shape_residual`, batched and differentiable in `ratio`.
 
     Bracket `[1e-4, 3.0]`, justified as follows: the residual is `+0.5 r c > 0`
     at the low end (the exponential underflows to exactly zero there) and
@@ -156,21 +176,27 @@ def soulhac_shape(ratio: Tensor) -> Tensor:
     if bool((ratio <= 0).any()):
         bad = torch.nonzero(ratio.reshape(-1) <= 0).flatten().tolist()
         raise ValueError(
-            f"soulhac_shape: the roughness ratio z0_b/di must be strictly positive; "
+            f"bessel_shape_parameter: the roughness ratio z0_b/di must be strictly "
+            f"positive; "
             f"non-positive at flat indices {bad}"
         )
     if bool((ratio >= C_RATIO_MAX).any()):
         bad = torch.nonzero(ratio.reshape(-1) >= C_RATIO_MAX).flatten().tolist()
         worst = float(ratio.reshape(-1)[bad].max())
         raise ValueError(
-            f"soulhac_shape: the roughness ratio z0_b/di must be below {C_RATIO_MAX} for "
+            f"bessel_shape_parameter: the roughness ratio z0_b/di must be below "
+            f"{C_RATIO_MAX} for "
             f"the shape equation to have a root in [{C_BRACKET_LO}, {C_BRACKET_HI}]; got "
             f"up to {worst} at flat index/indices {bad}. A roughness comparable to the "
             f"canyon half-width is not a canyon -- check z0_b and the street width."
         )
     lo = torch.full_like(ratio, C_BRACKET_LO)
     hi = torch.full_like(ratio, C_BRACKET_HI)
-    return solve_monotone(soulhac_residual, lo, hi, ratio, tol=1e-14, max_iter=200)
+    return solve_monotone(bessel_shape_residual, lo, hi, ratio, tol=1e-14, max_iter=200)
+
+
+soulhac_shape = bessel_shape_parameter
+"""Earlier name of `bessel_shape_parameter`."""
 
 
 def _guarded_sqrt(argument: Tensor) -> Tensor:
@@ -335,7 +361,7 @@ def boundary_layer(
     )
 
 
-def macdonald_profile(
+def canopy_displacement_roughness(
     h_mean: Tensor,
     w_mean: Tensor,
     *,
@@ -343,7 +369,7 @@ def macdonald_profile(
     big_delta: float = 4.43,
     small_delta: float = 1.0,
     c_db: float = 1.2,
-    kappa: float = KAPPA_MUNICH,
+    kappa: float = KAPPA_041,
 ) -> tuple[Tensor, Tensor]:
     """Macdonald (1998) displacement height and roughness length, `(d_c, z0c)`, in metres.
 
@@ -367,22 +393,31 @@ def macdonald_profile(
     return d_c, z0c
 
 
+macdonald_profile = canopy_displacement_roughness
+"""Earlier name of `canopy_displacement_roughness`."""
+
+
 def roof_wind(
     u_star: Tensor,
     H: Tensor,
     W: Tensor,
     *,
-    form: str = "bessel_canyon_mean",
+    roof_wind: str | None = None,
     z0_s: Tensor | float = Z0_S_DEFAULT,
-    kappa: float = KAPPA_MUNICH,
+    kappa: float = KAPPA_041,
     h_mean: Tensor | None = None,
     w_mean: Tensor | None = None,
     n_levels: int = _N_ROOF_LEVELS,
+    form: str | None = None,
 ) -> Tensor:
     """Wind speed at roof level `u_H`, from the friction velocity.
 
-    `form="bessel_canyon_mean"` is K22 Eq. (B12), p. 7387 (ATM `MeteorologyStreet.cxx:114-201`):
-    `delta_i = min(H, W/2)`, `C` from `soulhac_shape(z0_s/delta_i)`,
+    `roof_wind` is the closure option of that name (`closures.OPTIONS`), default
+    `"bessel_canyon_mean"`; `form=` is its earlier, deprecated keyword.
+
+    `roof_wind="bessel_canyon_mean"` is K22 Eq. (B12), p. 7387
+    (ATM `MeteorologyStreet.cxx:114-201`):
+    `delta_i = min(H, W/2)`, `C` from `bessel_shape_parameter(z0_s/delta_i)`,
     `u_M = u* sqrt(pi/(sqrt(2) kappa^2 C) [Y0(C) - J0(C) Y1(C)/J1(C)])` and
     `u_H = u_M f_mean` with `f_mean` the 100-level mean of
     `[J1(C) Y0(C y) - J0(C y) Y1(C)] / [J1(C) Y0(C) - J0(C) Y1(C)]` over `y = k/N`.
@@ -390,28 +425,30 @@ def roof_wind(
     a latent unit bug that never bites at the default `z0_s = 0.01`, so all 100 levels are
     taken here, exactly as MUNICH does at its default.)
 
-    `form="canopy_log_law"` is K22 Eq. (B13): `u_H = (u*/kappa) ln((H - d_c)/z0c)` with `d_c`
-    and `z0c` from `macdonald_profile(h_mean, w_mean)`. MUNICH returns 0 when
+    `roof_wind="canopy_log_law"` is K22 Eq. (B13): `u_H = (u*/kappa) ln((H - d_c)/z0c)` with
+    `d_c` and `z0c` from `canopy_displacement_roughness(h_mean, w_mean)`. MUNICH returns 0 when
     `H < d_c + z0c` (SRC `:3334`); that guard is reproduced here.
     """
-    form = normalise("roof_wind", form, "roof_wind")
+    form = normalise("roof_wind", keyword_alias(
+        "roof_wind", "roof_wind", roof_wind, "form", form, "bessel_canyon_mean"),
+        "roof_wind")
     u_star = torch.as_tensor(u_star, dtype=torch.float64)
     H = torch.as_tensor(H, dtype=torch.float64)
     W = torch.as_tensor(W, dtype=torch.float64)
     if form == "canopy_log_law":
         if h_mean is None or w_mean is None:
             raise ValueError(
-                "roof_wind: form='canopy_log_law' needs the network means h_mean and w_mean "
+                "roof_wind: roof_wind='canopy_log_law' needs the network means h_mean and w_mean "
                 "(K22 Eq. 3 is written on network means, not per-street values)"
             )
-        d_c, z0c = macdonald_profile(h_mean, w_mean, kappa=kappa)
+        d_c, z0c = canopy_displacement_roughness(h_mean, w_mean, kappa=kappa)
         above = H > d_c + z0c
         safe = torch.where(above, (H - d_c) / z0c, torch.ones_like(H * d_c))
         return torch.where(above, (u_star / kappa) * torch.log(safe),
                            torch.zeros_like(safe))
     z0_s = torch.as_tensor(z0_s, dtype=torch.float64)
     delta_i = torch.minimum(H, W / 2.0)
-    c = soulhac_shape(z0_s / delta_i)
+    c = bessel_shape_parameter(z0_s / delta_i)
     u_m = u_star * torch.sqrt(
         math.pi / (math.sqrt(2.0) * kappa**2 * c) * _bessel_roof_factor(c)
     )
@@ -431,18 +468,23 @@ def canyon_velocity(
     *,
     u_star: Tensor | None = None,
     u_h: Tensor | None = None,
-    form: str = "bessel_profile",
+    canyon_wind: str | None = None,
     z0_b: Tensor | float = Z0_B_DEFAULT,
     z0_s: Tensor | float = Z0_S_DEFAULT,
     kappa: float = KAPPA,
     canyon_wind_min: float = 0.0,
+    form: str | None = None,
 ) -> Tensor:
     """The SIGNED along-canyon velocity, m/s. Positive means from `u` to `v`.
 
     `phi` is the angle between the wind and the street axis; it broadcasts against `W`,
     `H` and any leading forcing batch.
 
-    `form="bessel_profile"` (needs `u_star`) is the Soulhac-Perkins-Salizzoni (2008) closed form,
+    `canyon_wind` is the closure option of that name (`closures.OPTIONS`), default
+    `"bessel_profile"`; `form=` is its earlier, deprecated keyword.
+
+    `canyon_wind="bessel_profile"` (needs `u_star`) is the Soulhac-Perkins-Salizzoni (2008)
+    closed form,
     exactly as K22 Eq. (B15) p. 7388 writes it:
     `di = min(W/2, H)`, `alpha = ln(di/z0_b)`, `beta = exp(c/sqrt(2) (1 - H/di))`,
     `u_h = u* sqrt(pi/(sqrt(2) kappa^2 c) [Y0(c) - J0(c) Y1(c)/J1(c)])`, and
@@ -451,11 +493,13 @@ def canyon_velocity(
             [ 2 sqrt2/c (1 - beta)(1 - c^2/3 + c^4/45)
               + beta (2 alpha - 3)/alpha + (W/di - 2)(alpha - 1)/alpha ]
 
-    The Bessel profile REFUSES `z0_b >= di`, which `soulhac_shape`'s own `z0_b/di < 1.6`
+    The Bessel profile REFUSES `z0_b >= di`, which `bessel_shape_parameter`'s own
+    `z0_b/di < 1.6`
     bound lets through: `alpha` is zero at ratio 1 and negative above it, and the answer
     comes back NaN rather than wrong-looking.
 
-    `form="exponential_profile"` (needs `u_h`) is K22 Eq. (B14), p. 7388 -- SINGLE regime, `2/a_r`
+    `canyon_wind="exponential_profile"` (needs `u_h`) is K22 Eq. (B14), p. 7388 -- SINGLE
+    regime, `2/a_r`
     prefactor, integrated from the street roughness `z0_s`:
 
         u = u_h cos(phi) (2/a_r) [1 - exp((a_r/2)(z0_s/H - 1))],   a_r = H/W
@@ -471,20 +515,22 @@ def canyon_velocity(
     unfloored value is `+0` and MUNICH's own `>` classification makes the street an
     OUTFLOW; that is what produces the 270-degree panel of K22 Fig. 1.
     """
-    form = normalise("canyon_wind", form, "canyon_velocity")
+    form = normalise("canyon_wind", keyword_alias(
+        "canyon_velocity", "canyon_wind", canyon_wind, "form", form, "bessel_profile"),
+        "canyon_velocity")
     W = torch.as_tensor(W, dtype=torch.float64)
     H = torch.as_tensor(H, dtype=torch.float64)
     phi = torch.as_tensor(phi, dtype=torch.float64)
     if form == "bessel_profile":
         if u_star is None:
             raise ValueError(
-                "canyon_velocity: form='bessel_profile' needs u_star (the Bessel profile is "
+                "canyon_velocity: canyon_wind='bessel_profile' needs u_star (the Bessel profile is "
                 "written on the friction velocity, not on the roof wind)"
             )
         u_star = torch.as_tensor(u_star, dtype=torch.float64)
         z0_b = torch.as_tensor(z0_b, dtype=torch.float64)
         di = torch.minimum(W / 2.0, H)
-        # `soulhac_shape` refuses z0_b/di >= 1.6, which is NOT enough here: `alpha` is
+        # `bessel_shape_parameter` refuses z0_b/di >= 1.6, which is NOT enough here: `alpha` is
         # ln(di/z0_b), exactly 0 at ratio 1 and negative on (1, 1.6), so the shape function
         # divides by zero or by a negative there and the answer comes back NaN with no
         # error anywhere. Refused by name rather than clamped.
@@ -492,13 +538,13 @@ def canyon_velocity(
         if bool((rough >= half).any()):
             bad = torch.nonzero((rough >= half).reshape(-1)).flatten().tolist()
             raise ValueError(
-                f"canyon_velocity: form='bessel_profile' needs the in-canyon roughness z0_b "
+                f"canyon_velocity: canyon_wind='bessel_profile' needs the in-canyon roughness z0_b "
                 f"strictly below di = min(W/2, H), because alpha = ln(di/z0_b) divides "
                 f"the shape function; at flat index/indices {bad} the widths are "
                 f"{[float(v) for v in wide.reshape(-1)[bad]]} m and the roughnesses are "
                 f"{[float(v) for v in rough.reshape(-1)[bad]]} m"
             )
-        c = soulhac_shape(z0_b / di)
+        c = bessel_shape_parameter(z0_b / di)
         alpha = torch.log(di / z0_b)
         beta = torch.exp(c / math.sqrt(2.0) * (1.0 - H / di))
         u_roof = u_star * torch.sqrt(
@@ -513,7 +559,8 @@ def canyon_velocity(
     else:
         if u_h is None:
             raise ValueError(
-                "canyon_velocity: form='exponential_profile' needs u_h (K22 Eq. B14 is written on "
+                "canyon_velocity: canyon_wind='exponential_profile' needs u_h (K22 Eq. B14 "
+                "is written on "
                 "the roof-level wind; get it from roof_wind())"
             )
         u_h = torch.as_tensor(u_h, dtype=torch.float64)
@@ -534,17 +581,23 @@ def exchange_velocity(
     H: Tensor,
     W: Tensor,
     *,
-    form: str = "turbulent_velocity",
+    roof_exchange: str | None = None,
     u_d_min: float = 0.0,
     sigma_w_min: float = 0.0,
+    form: str | None = None,
 ) -> Tensor:
     """The roof exchange velocity `u_d`, m/s.
 
-    `form="turbulent_velocity"`: `u_d = sigma_w / (sqrt(2) pi)`, independent of the aspect ratio.
-    S11 Eq. (5), K18 Eq. (3), K22 Eq. (B10), `StreetNetworkTransport.cxx:3273`. See
-    `SIRANE_EXCHANGE` for why the reading `sigma_w / sqrt(2 pi)` is not used.
+    `roof_exchange` is the closure option of that name (`closures.OPTIONS`), default
+    `"turbulent_velocity"`; `form=` is its earlier, deprecated keyword.
 
-    `form="aspect_ratio_scaled"`: `u_d = beta sigma_w / (1 + H/W)` with `beta = 2/(sqrt(2) pi)`
+    `roof_exchange="turbulent_velocity"`: `u_d = sigma_w / (sqrt(2) pi)`, independent of
+    the aspect ratio.
+    S11 Eq. (5), K18 Eq. (3), K22 Eq. (B10), `StreetNetworkTransport.cxx:3273`. See
+    `EXCHANGE_SIGMA_W_RATIO` for why the reading `sigma_w / sqrt(2 pi)` is not used.
+
+    `roof_exchange="aspect_ratio_scaled"`: `u_d = beta sigma_w / (1 + H/W)` with
+    `beta = 2/(sqrt(2) pi)`
     (K18 Eqs. 4-8, K22 Eq. B11, ATM `ComputeSchulteLm`), MUNICH v2's default. The two
     agree exactly at `H = W`, which a test pins.
 
@@ -559,15 +612,17 @@ def exchange_velocity(
     `u_d = u_d(max(sigma_w, sigma_w_min))`: SIRANE's `SIGMA_W_MIN`, 0.30 m/s by default
     there and 0.0 here.
     """
-    form = normalise("roof_exchange", form, "exchange_velocity")
+    form = normalise("roof_exchange", keyword_alias(
+        "exchange_velocity", "roof_exchange", roof_exchange, "form", form,
+        "turbulent_velocity"), "exchange_velocity")
     sigma_w = torch.as_tensor(sigma_w, dtype=torch.float64)
     H = torch.as_tensor(H, dtype=torch.float64)
     W = torch.as_tensor(W, dtype=torch.float64)
 
     def velocity(sigma: Tensor) -> Tensor:
         if form == "turbulent_velocity":
-            return sigma * SIRANE_EXCHANGE
-        return sigma * SCHULTE_BETA / (1.0 + H / W)
+            return sigma * EXCHANGE_SIGMA_W_RATIO
+        return sigma * ASPECT_RATIO_EXCHANGE_BETA / (1.0 + H / W)
 
     u_d = velocity(sigma_w)
     if bool((u_d < 0).any()):
