@@ -187,6 +187,8 @@ def build_model(
     u_d_min: float | None = None,
     sigma_w_min: float | None = None,
     sigma_v_min: float | None = None,
+    sigma_w_height: str | None = None,
+    h_canopy: float | None = None,
     z0_s: float = Z0_S_DEFAULT,
     z_ref: float = 30.0,
     pblh_floor: bool = True,
@@ -202,15 +204,18 @@ def build_model(
     `noodl.apps.street_aq.closures.PRESETS`). Every closure keyword left at `None` takes
     the preset's value and any other value overrides it: `canyon_wind`, `roof_wind`,
     `roof_exchange`, `junction_routing`, `direction_averaging`, `direction_spread`,
-    `stability`, `kappa` and the floors `canyon_wind_min`, `u_d_min`, `sigma_w_min`,
-    `sigma_v_min`. The earlier keywords `exchange`, `routing` and `roof_wind_form`, and the
-    earlier values (`"soulhac"`, `"schulte"`, `"munich"`, ...), are accepted with a
-    `DeprecationWarning` naming the replacement. `StreetFlows` documents what each option
-    computes.
+    `stability`, `sigma_w_height`, `kappa`, the canopy height `h_canopy` and the floors
+    `canyon_wind_min`, `u_d_min`, `sigma_w_min`, `sigma_v_min`. The earlier keywords
+    `exchange`, `routing` and `roof_wind_form`, and the earlier values (`"soulhac"`,
+    `"schulte"`, `"munich"`, ...), are accepted with a `DeprecationWarning` naming the
+    replacement. `StreetFlows` documents what each option computes.
 
     With the default `preset="sirane"`, `sigma_w` is floored at 0.30 m/s before the roof
     exchange velocity (`sigma_w_min=0.30`, SIRANE's default); pass `sigma_w_min=0.0` for no
     floor, or `preset="munich"` for MUNICH's settings, which have no turbulence floors.
+    The same preset evaluates that `sigma_w` at one height for the whole network,
+    `h_canopy` (20 m, SIRANE's `H_R`; `sigma_w_height="canopy_height"`); pass
+    `sigma_w_height="street_height"` for each street's own height, MUNICH's choice.
 
     The graph: the boundary node(s) FIRST -- `atmosphere` alone with `background="uniform"`,
     or one node per street, `f"{atmosphere}:{street.name}"` in street order, with
@@ -257,6 +262,7 @@ def build_model(
         direction_averaging=direction_averaging, direction_spread=direction_spread,
         stability=stability, kappa=kappa, canyon_wind_min=canyon_wind_min,
         u_d_min=u_d_min, sigma_w_min=sigma_w_min, sigma_v_min=sigma_v_min,
+        sigma_w_height=sigma_w_height, h_canopy=h_canopy,
     ), "build_model")
     options.pop("chemistry")
     if background not in ("uniform", "per_street"):

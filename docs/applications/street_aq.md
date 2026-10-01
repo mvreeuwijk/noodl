@@ -151,6 +151,8 @@ model, state, drivers = build_model(
     direction_averaging=None,     # 'none' | 'exact_gaussian' | 'rectangle_rule' | 'gauss_hermite'
     direction_spread=None,        # 'driver' | 'turbulence_intensity'
     stability=None,               # 'neutral' | 'monin_obukhov'
+    sigma_w_height=None,          # 'canopy_height' | 'street_height'
+    h_canopy=None,                # m: the canopy height (SIRANE's H_R)
     species=("nox",),
     chemistry=None,
     kappa=None, canyon_wind_min=None, u_d_min=None, sigma_w_min=None, sigma_v_min=None,
@@ -165,8 +167,10 @@ so `build_model(net, preset="munich", roof_wind="canopy_log_law")` is MUNICH's c
 with Macdonald's roof wind.
 
 **The defaults are SIRANE's.** A model built with no options floors $\sigma_w$ at 0.30 m/s
-before the roof exchange velocity (`sigma_w_min=0.30`), which binds in light winds and under
-low buildings; pass `sigma_w_min=0.0` for no floor. The default street chemistry,
+before the roof exchange velocity (`sigma_w_min=0.30`), which binds in light winds; pass
+`sigma_w_min=0.0` for no floor. It evaluates that $\sigma_w$ at one height for the whole
+network, the canopy height `h_canopy` (20 m, SIRANE's `H_R`), as SIRANE does;
+`sigma_w_height="street_height"` uses each street's own height instead. The default street chemistry,
 `photostationary_for_streets(species)`, is the Soulhac et al. (2011) rate with a 2 ppb floor
 on $J/k$. `preset="munich"` gives MUNICH's settings throughout: no turbulence floors, and for
 the chemistry the JPL (2003) rate with no floor.
@@ -202,6 +206,9 @@ allowed:
 | | `"turbulence_intensity"` | $\sigma_\theta = \min(\sigma_v / U_{\text{ref}},\ 10°)$ at each junction; a `sigma_theta` driver is refused. | | ✓ |
 | `stability` | `"neutral"` | $\sigma_w = 1.3\,u_*(1 - 0.8\,z/h_{\text{abl}})$, $\sigma_v = 1.2\,u_*$. | | |
 | | `"monin_obukhov"` | Stable, neutral and unstable branches selected by the `lmo` driver; the neutral form wherever `lmo` is not given. | ✓ | ✓ |
+| `sigma_w_height` | `"canopy_height"` | The exchange's $\sigma_w$ is evaluated at $z = h_{\text{canopy}}$ above ground, the same for every street: SIRANE's $u_d$ "is only defined by the external flow condition" (Soulhac et al. 2011, Sec. 4.2.2). | ✓ | |
+| | `"street_height"` | The exchange's $\sigma_w$ at each street's own height $H$ (MUNICH's `ComputeSigmaW`). | | ✓ |
+| `h_canopy` | m | The canopy height of `"canopy_height"`, SIRANE's deck keyword `H_R` ("Canopy height", "Hauteur de reflexion des bouffees"); `StreetCase.model_options()` reads it from a SIRANE deck. | 20 | (unused) |
 | `kappa` | float | The von Karman constant. | 0.40 | 0.41 |
 | `canyon_wind_min` | m/s | Floor on $\lvert u \rvert$ in the canyon, sign kept. | 0 | 0.1 |
 | `u_d_min` | m/s | Floor on the exchange velocity. | 0 | 0.001 |
