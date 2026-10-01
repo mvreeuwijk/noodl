@@ -498,6 +498,7 @@ class StreetFlows:
         direction_averaging: str | None = None,
         direction_spread: str | None = None,
         stability: str | None = None,
+        shape_constant: str | None = None,
         n_theta: int | None = None,
         sigma_theta: float | None = None,
         kappa: float | None = None,
@@ -520,7 +521,8 @@ class StreetFlows:
             deprecated, canyon_wind=canyon_wind, roof_wind=roof_wind,
             roof_exchange=roof_exchange, junction_routing=junction_routing,
             direction_averaging=direction_averaging, direction_spread=direction_spread,
-            stability=stability, kappa=kappa, canyon_wind_min=canyon_wind_min,
+            stability=stability, shape_constant=shape_constant, kappa=kappa,
+            canyon_wind_min=canyon_wind_min,
             u_d_min=u_d_min, sigma_w_min=sigma_w_min, sigma_v_min=sigma_v_min,
         ), "StreetFlows")
         options.pop("chemistry")
@@ -560,6 +562,7 @@ class StreetFlows:
         self.direction_averaging = options["direction_averaging"]
         self.direction_spread = options["direction_spread"]
         self.stability = options["stability"]
+        self.shape_constant = options["shape_constant"]
         self.n_theta = n_theta
         self.sigma_theta = sigma_theta
         self.kappa = options["kappa"]
@@ -716,11 +719,13 @@ class StreetFlows:
             u_street = canyon_velocity(
                 g.width, g.height, phi, u_star=bl_s.u_star, canyon_wind="bessel_profile",
                 z0_b=g.z0_b, kappa=self.kappa, canyon_wind_min=self.canyon_wind_min,
+                shape_constant=self.shape_constant,
             )
         else:
             u_h = roof_wind(
                 bl_s.u_star, g.height, g.width, roof_wind=self.roof_wind, z0_s=self.z0_s,
                 kappa=self.kappa, h_mean=self.h_mean, w_mean=self.w_mean,
+                shape_constant=self.shape_constant,
             )
             u_street = canyon_velocity(
                 g.width, g.height, phi, u_h=u_h, canyon_wind="exponential_profile",
