@@ -90,8 +90,13 @@ from collections.abc import Mapping
 
 import torch
 
-from noodl.elements.base import Element, band_edges
-from noodl.elements.door import _power_law
+from noodl.elements.base import Element, band_edges, memo
+from noodl.elements.door import (
+    _power_law_at,
+    _power_law_coeffs,
+    _power_law_slope_at,
+    _slope_is_exact,
+)
 from noodl.elements.media import _R_AIR, _R_H2O, MBLMedium
 
 Tensor = torch.Tensor
@@ -163,6 +168,13 @@ class _InflowDensities:
         return v
 
     def _densities(self, drivers: Mapping[str, Tensor] | None) -> tuple[Tensor, Tensor]:
+        if drivers is None:
+            return self._densities_of(drivers)
+        keys = (self.p_key, self.T_key, *((self.Xw_key,) if self.medium.has_moisture else ()))
+        return memo(self, "densities", tuple(drivers.get(k) for k in keys),
+                    lambda: self._densities_of(drivers))
+
+    def _densities_of(self, drivers: Mapping[str, Tensor] | None) -> tuple[Tensor, Tensor]:
         p = self._node_driver(drivers, self.p_key, "absolute pressure (Pa)")
         T = self._node_driver(drivers, self.T_key, "zone temperature")
         if self.medium.has_moisture:
@@ -213,8 +225,11 @@ class DoorCompartmentHead(_InflowDensities):
         self.T_key, self.Xw_key, self.p_key = str(T_key), str(Xw_key), str(p_key)
 
     def __call__(self, drivers: Mapping[str, Tensor]) -> Tensor:
-        rho_A, rho_B = self._densities(drivers)
-        return rho_A * self.hAg.to(rho_A.dtype) - rho_B * self.hBg.to(rho_B.dtype)
+        def head() -> Tensor:
+            rho_A, rho_B = self._densities(drivers)
+            return rho_A * self.hAg.to(rho_A.dtype) - rho_B * self.hBg.to(rho_B.dtype)
+
+        return memo(self, "head", self._densities(drivers), head)
 
 
 class _MBLDoorCompartmentBase(_InflowDensities, Element):
@@ -263,6 +278,44 @@ class _MBLDoorCompartmentBase(_InflowDensities, Element):
     def _volume_flow(self, dp: Tensor, drivers) -> tuple[Tensor, Tensor]:
         """``(dV_flow, VZerCom_flow)`` per edge; implemented by each door."""
         raise NotImplementedError
+
+    def _law(self, drivers) -> tuple:
+        """``(CVal, m, VZerCom_flow, a, b, c, d, CVal dp_turbulent^m)`` of the compartments'
+        power law (``door._power_law_coeffs``), a memo; implemented by each door."""
+        raise NotImplementedError
+
+    def stream_slope(self, dp: Tensor, drivers=None) -> Tensor | None:
+        """``d(mAB_flow - mBA_flow)/d dpAB[i]`` per compartment (:meth:`port_flows`), by the
+        chain rule in the order of operations reverse-mode autograd applies to
+        ``port_flows`` (``door._power_law_slope_at``), so that it equals the autograd
+        derivative bit for bit (checked in the tests). ``None`` where that is not assured
+        (grad mode on, or broadcasting beyond ``dp``'s shape): the caller takes autograd."""
+        rho_A, rho_B = self._densities(drivers)
+        CVal, m, VZerCom, *coeffs = self._law(drivers)
+        if not _slope_is_exact(dp, rho_A, rho_B, CVal, m, VZerCom):
+            return None
+        dV = _power_law_at(CVal, dp, m, self.dp_turbulent, coeffs)
+        # _smooth_heaviside(dV, VZerCom), forward.
+        dx = 0.5 * dV / VZerCom
+        xpow2 = dx * dx
+        r2 = -5 + 6 * xpow2
+        r1 = 1.875 + xpow2 * r2
+        u = 0.5 + dx * r1
+        gai = torch.clamp(u, 0.0, 1.0)
+        # mAB = sum(rho_A dV gai), mBA = sum(rho_B (-dV) (1 - gai)); adjoints 1 and -1.
+        one = torch.ones_like(dV)
+        g_e2 = -one
+        tb = rho_B * -dV
+        g_tb = g_e2 * (1 - gai)
+        g_gai = -(g_e2 * tb) + one * (rho_A * dV)
+        g_u = torch.where((u > 0.0).logical_and_(u < 1.0), g_gai,  # clamp: 0 at the bounds
+                          torch.zeros((), dtype=g_gai.dtype))
+        g_r1 = g_u * dx
+        g_r2 = g_r1 * xpow2
+        c = (g_r1 * r2 + g_r2 * 6) * dx
+        g_dx = (g_u * r1 + c) + c
+        g_dV = (-(g_tb * rho_B) + (one * gai) * rho_A) + (g_dx / VZerCom) * 0.5
+        return _power_law_slope_at(CVal, dp, m, self.dp_turbulent, coeffs, g_dV)
 
     def flow(self, dp: Tensor, drivers=None) -> Tensor:
         """``rho_A dVAB_flow[i] - rho_B dVBA_flow[i]`` (``DoorDiscretized.mo:69-71``,
@@ -354,10 +407,19 @@ class MBLDoorCompartment(_MBLDoorCompartmentBase):
         self.CD = self._param(_f64(CD), learnable)
         self.m = self._param(_f64(m), learnable)
 
+    def _law(self, drivers) -> tuple:
+        def law():
+            CVal = self.CD * self.dA * math.sqrt(2 / self.rho_default)  # :24
+            return (CVal, self.m, self.vZer * self.dA,  # DoorDiscretized.mo:52,
+                    *_power_law_coeffs(CVal, self.m, self.dp_turbulent))  # TwoWay...mo:83
+
+        return memo(self, "law", (self.CD, self.dA, self.m), law)
+
     def _volume_flow(self, dp: Tensor, drivers) -> tuple[Tensor, Tensor]:
-        CVal = self.CD * self.dA * math.sqrt(2 / self.rho_default)  # DoorDiscretizedOpen.mo:24
-        dV = _power_law(CVal, dp, self.m, self.dp_turbulent)  # DoorDiscretizedOpen.mo:27-35
-        return dV, self.vZer * self.dA  # DoorDiscretized.mo:52, TwoWayFlowElement.mo:83
+        CVal, m, VZerCom, *coeffs = self._law(drivers)
+        dV = _power_law_at(CVal, dp, m, self.dp_turbulent,
+                           coeffs)  # DoorDiscretizedOpen.mo:27-35
+        return dV, VZerCom
 
 
 class MBLDoorCompartmentOperable(_MBLDoorCompartmentBase):
@@ -450,16 +512,28 @@ class MBLDoorCompartmentOperable(_MBLDoorCompartmentBase):
         y = self._y(drivers)
         return y * self.AOpe + (1 - y) * self._AClo()
 
-    def _volume_flow(self, dp: Tensor, drivers) -> tuple[Tensor, Tensor]:
+    def _law(self, drivers) -> tuple:
         y = self._y(drivers)
-        s = math.sqrt(2 / self.rho_default)
-        CClo = self.CDClo * self._AClo() / self.nCom * s  # DoorDiscretizedOperable.mo:46
-        COpe = self.CDOpe * self.AOpe / self.nCom * s  # :47
-        m = y * self.mOpe + (1 - y) * self.mClo  # :50
-        A = y * self.AOpe + (1 - y) * self._AClo()  # :52
-        CVal = y * COpe + (1 - y) * CClo  # :54
-        dV = _power_law(CVal, dp, m, self.dp_turbulent)  # :57-63, powerLaw.mo:17-29
-        return dV, self.vZer * A / self.nCom  # DoorDiscretized.mo:52, TwoWayFlowElement.mo:83
+
+        def law():
+            s = math.sqrt(2 / self.rho_default)
+            CClo = self.CDClo * self._AClo() / self.nCom * s  # DoorDiscretizedOperable.mo:46
+            COpe = self.CDOpe * self.AOpe / self.nCom * s  # :47
+            m = y * self.mOpe + (1 - y) * self.mClo  # :50
+            A = y * self.AOpe + (1 - y) * self._AClo()  # :52
+            CVal = y * COpe + (1 - y) * CClo  # :54
+            return (CVal, m, self.vZer * A / self.nCom,  # DoorDiscretized.mo:52,
+                    *_power_law_coeffs(CVal, m, self.dp_turbulent))  # TwoWayFlowElement.mo:83
+
+        params = (self.nCom, self.AOpe, self.LClo, self.CDOpe, self.CDClo, self.CDCloRat,
+                  self.dpCloRat, self.mOpe, self.mClo)
+        return memo(self, "law", (y, *params), law)
+
+    def _volume_flow(self, dp: Tensor, drivers) -> tuple[Tensor, Tensor]:
+        CVal, m, VZerCom, *coeffs = self._law(drivers)
+        dV = _power_law_at(CVal, dp, m, self.dp_turbulent,
+                           coeffs)  # :57-63, powerLaw.mo:17-29
+        return dV, VZerCom
 
 
 # ---------------------------------------------------------------------------------------
@@ -659,13 +733,40 @@ class MBLDoorPortStream(Element):
         self.register_buffer("src", comp.src[:1].clone())
         self.register_buffer("tgt", comp.tgt[:1].clone())
 
-    def _streams(self, dp: Tensor, drivers) -> tuple[Tensor, Tensor]:
-        dpi = dp + self.head(drivers)  # (..., 1) + (..., nCom): the compartments' dpAB
+    def _shared(self, name: str, dp: Tensor, drivers, fn):
+        """`fn()`, shared between the door's two stream edges (they have the same `comp`):
+        both evaluate the door at the same `dp` and drivers within one pass of the layer
+        (`flows`, `dflows`), so the second takes the first's value. Keyed on `dp`'s values,
+        the compartment head (a memo of the drivers, `DoorCompartmentHead`) and the opening
+        signal; nothing that carries an autograd graph is shared."""
+        head = self.head(drivers)
+        y_key = getattr(self.comp, "y_key", None)
+        y = drivers.get(y_key) if (y_key is not None and drivers is not None) else None
+        y_ver = y._version if isinstance(y, Tensor) else None
+        shared = self.comp.__dict__.setdefault("_stream_shared", {})
+        hit = shared.get(name)
+        if (hit is not None and not dp.requires_grad and hit[0] is head and hit[1] is y
+                and hit[2] == y_ver and hit[3].shape == dp.shape and torch.equal(hit[3], dp)):
+            return hit[4]
+        value = fn(head)
+        parts = value if isinstance(value, tuple) else (value,)
+        if dp.requires_grad or head.requires_grad or any(v.requires_grad for v in parts):
+            shared.pop(name, None)
+        else:
+            shared[name] = (head, y, y_ver, dp.clone(), value)
+        return value
+
+    def _streams(self, dp: Tensor, drivers, head: Tensor | None = None
+                 ) -> tuple[Tensor, Tensor]:
+        if head is None:
+            head = self.head(drivers)
+        dpi = dp + head  # (..., 1) + (..., nCom): the compartments' dpAB
         return self.comp.port_flows(dpi, drivers)
 
     def flow(self, dp: Tensor, drivers=None) -> Tensor:
         """``mAB_flow`` (``"ab"``) or ``-mBA_flow`` (``"ba"``), shape ``dp``'s (one edge)."""
-        mAB, mBA = self._streams(dp, drivers)
+        mAB, mBA = self._shared("streams", dp, drivers,
+                                lambda head: self._streams(dp, drivers, head))
         out = mAB if self.direction == "ab" else -mBA
         return out.unsqueeze(-1) if dp.ndim else out
 
@@ -680,12 +781,22 @@ class MBLDoorPortStream(Element):
         slopes, which is the net flow's, positive; reporting it split evenly keeps that sum
         exact and each edge's slope nonnegative for the layer's grounding certificate."""
         grad_enabled = torch.is_grad_enabled()
-        x = dp.detach().clone()
-        x.requires_grad_(True)
-        with torch.enable_grad():
-            mAB, mBA = self._streams(x, drivers)
-            (grad,) = torch.autograd.grad((mAB - mBA).sum(), x, create_graph=grad_enabled)
-        return 0.5 * grad
+
+        def slope(head: Tensor) -> Tensor:
+            exact = self.comp.stream_slope(dp + head, drivers)
+            if exact is not None:
+                return 0.5 * exact.sum_to_size(dp.shape)
+            x = dp.detach().clone()
+            x.requires_grad_(True)
+            with torch.enable_grad():
+                mAB, mBA = self._streams(x, drivers, head)
+                (grad,) = torch.autograd.grad((mAB - mBA).sum(), x,
+                                              create_graph=grad_enabled)
+            return 0.5 * grad
+
+        if grad_enabled:
+            return slope(self.head(drivers))
+        return self._shared("slope", dp, drivers, slope)
 
     def switching(self, dp: Tensor, drivers=None) -> Tensor:
         """The compartments' switches (:meth:`_MBLDoorCompartmentBase.switching`) at their

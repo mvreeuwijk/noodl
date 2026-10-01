@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Model, State
@@ -148,7 +149,7 @@ class _DensityClosure:
         name = self.thermal.name
         T_i = state[f"{name}.x"]
         T_b = drivers[f"{name}.x_boundary"]
-        batch = torch.broadcast_shapes(T_i.shape[:-1], T_b.shape[:-1])
+        batch = broadcast_shapes(T_i.shape[:-1], T_b.shape[:-1])
         n = self.thermal.net.n
         T = torch.full(batch + (n,), T_REF, dtype=T_i.dtype, device=T_i.device)
         T[..., self.thermal.interior_idx] = T_i.expand(batch + (self.thermal.n_i,))

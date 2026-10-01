@@ -188,6 +188,7 @@ from dataclasses import dataclass, field
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
 from noodl.apps.building_physics.modelica import schema, signals, storage
 from noodl.apps.building_physics.modelica.graph import ComponentGraph, FlowPath, TwoWayEdge
 from noodl.apps.building_physics.modelica.schema import (
@@ -210,7 +211,7 @@ from noodl.elements import (
     mbl_points,
     medium,
 )
-from noodl.elements.base import Element
+from noodl.elements.base import Element, memo
 from noodl.elements.media import _moist_air_buoyancy_density
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.transport import TransportLayer, active_interior
@@ -558,10 +559,13 @@ class _ColumnHead:
         self.nodes = nodes
 
     def __call__(self, drivers: Mapping[str, Tensor]) -> Tensor:
-        T = drivers["T"][..., self.nodes]
-        X = drivers["X_w"][..., self.nodes]
-        rho = _moist_air_buoyancy_density(T, X)
-        return (self.coeff * rho).sum(-1, keepdim=True)
+        def head() -> Tensor:
+            T = drivers["T"][..., self.nodes]
+            X = drivers["X_w"][..., self.nodes]
+            rho = _moist_air_buoyancy_density(T, X)
+            return (self.coeff * rho).sum(-1, keepdim=True)
+
+        return memo(self, "head", (drivers.get("T"), drivers.get("X_w")), head)
 
 
 # ------------------------------------------------------------------------ elements
@@ -652,7 +656,7 @@ class _MBLClosure:
     @staticmethod
     def _scatter(base: Tensor, parts: list[tuple[Tensor, Tensor]]) -> Tensor:
         shapes = [v.shape[:-1] for v, _ in parts]
-        batch = torch.broadcast_shapes(*shapes) if shapes else torch.Size()
+        batch = broadcast_shapes(*shapes) if shapes else torch.Size()
         out = base.to(F64).expand(batch + base.shape).clone()
         for value, idx in parts:
             if idx.numel():
@@ -670,7 +674,7 @@ class _MBLClosure:
         if self.sp_interior is None:
             return None
         x_i, x_b = state["species.x"], drivers["species.x_boundary"]
-        batch = torch.broadcast_shapes(x_i.shape[:-2], x_b.shape[:-2])
+        batch = broadcast_shapes(x_i.shape[:-2], x_b.shape[:-2])
         n = self.T0.numel()
         out = torch.zeros(batch + (n, self.n_species), dtype=F64)
         if self.water is not None:

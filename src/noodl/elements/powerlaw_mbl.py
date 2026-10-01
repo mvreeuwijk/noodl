@@ -56,7 +56,8 @@ import math
 
 import torch
 
-from noodl.elements.base import Element, band_edges
+from noodl.elements.base import Element, band_edges, memo
+from noodl.elements.door import _power_law_slope_at, _slope_is_exact
 
 Tensor = torch.Tensor
 
@@ -104,6 +105,18 @@ class MBLPowerLaw(Element):
         self.form = form
         self.rho_default = float(rho_default)
 
+    def _coeffs(self) -> tuple:
+        """The band polynomial's ``b``, ``c``, ``d`` and ``C dp_turbulent^m`` (a memo)."""
+        C, m, dpt = self.C, self.m, self.dp_turbulent
+
+        def coeffs():
+            b = 1 / 8 * m**2 - 3 * _GAMMA - 3 / 2 * m + 35.0 / 8
+            c = -1 / 4 * m**2 + 3 * _GAMMA + 5 / 2 * m - 21.0 / 4
+            d = 1 / 8 * m**2 - _GAMMA - m + 15.0 / 8
+            return b, c, d, C * dpt**m
+
+        return memo(self, "coeffs", (C, m), coeffs)
+
     def _regularised(self, dp: Tensor) -> Tensor:
         """``BaseClasses/powerLaw.mo:17-29`` (equivalently ``powerLawFixedM.mo:21-30`` with
         ``a``, ``b``, ``c``, ``d`` precomputed from ``m`` by
@@ -121,9 +134,7 @@ class MBLPowerLaw(Element):
         C, m = self.C, self.m
         dpt = self.dp_turbulent
         a = _GAMMA
-        b = 1 / 8 * m**2 - 3 * _GAMMA - 3 / 2 * m + 35.0 / 8
-        c = -1 / 4 * m**2 + 3 * _GAMMA + 5 / 2 * m - 21.0 / 4
-        d = 1 / 8 * m**2 - _GAMMA - m + 15.0 / 8
+        b, c, d, C_dpt = self._coeffs()
 
         mask = dp.abs() < dpt
         dp_safe = torch.where(mask, torch.full_like(dp, dpt), dp.abs())
@@ -131,7 +142,7 @@ class MBLPowerLaw(Element):
 
         pi = dp / dpt
         pi2 = pi * pi
-        inner = C * dpt**m * pi * (a + pi2 * (b + pi2 * (c + pi2 * d)))
+        inner = C_dpt * pi * (a + pi2 * (b + pi2 * (c + pi2 * d)))
 
         return torch.where(mask, inner, sharp)
 
@@ -140,6 +151,18 @@ class MBLPowerLaw(Element):
         if self.form == "volume":
             return self.rho_default * q
         return q
+
+    def dflow(self, dp: Tensor, drivers=None) -> Tensor:
+        """Under ``no_grad`` the analytic slope (``door._power_law_slope_at``: the same law,
+        equal to the autograd default bit for bit), else the autograd default."""
+        C, m = self.C, self.m
+        if not _slope_is_exact(dp, C, m):
+            return super().dflow(dp, drivers)
+        b, c, d, C_dpt = self._coeffs()
+        grad = (torch.full_like(dp, self.rho_default) if self.form == "volume"
+                else torch.ones_like(dp))
+        return _power_law_slope_at(C, dp, m, self.dp_turbulent, (_GAMMA, b, c, d, C_dpt),
+                                   grad)
 
     def switching(self, dp: Tensor, drivers=None) -> Tensor:
         """The band edges ``dp = +-dp_turbulent``, where the polynomial meets the sharp law

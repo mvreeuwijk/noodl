@@ -521,6 +521,19 @@ def _balanced(model: Model, store: StorageClosure, state: State, d: Drivers) -> 
     return bool((net.abs() <= BALANCE_RTOL * scale).all())
 
 
+def _version(v) -> int | None:
+    return v._version if isinstance(v, Tensor) else None
+
+
+def _same(a, b) -> bool:
+    """Whether two driver values are the same values (the same object, or equal tensors)."""
+    if a is b:
+        return True
+    if isinstance(a, Tensor) and isinstance(b, Tensor):
+        return a.shape == b.shape and a.dtype == b.dtype and torch.equal(a, b)
+    return False
+
+
 class _Switches:
     """The switching values at a state: every value changes sign where the step's right-hand
     side stops being smooth. These are the air layer's elements' own switches
@@ -533,6 +546,7 @@ class _Switches:
         ((self.name, self.air),) = model.potential.items()
         self.closure = closure
         self.q_scale = q_scale
+        self._last: tuple | None = None  # (state, point drivers, values) of the last call
         self.parts = []
         for kind in self.air.kinds:
             el, sl = self.air.element_for(kind)
@@ -540,6 +554,22 @@ class _Switches:
                 self.parts.append((el, sl))
 
     def __call__(self, state: State, d: Drivers) -> Tensor:
+        # A step's start is the last step's end (`_advance_located` evaluates both): the
+        # same state objects and the same point drivers give the same values. The sources
+        # (step means, which differ from step to step) do not enter the switches.
+        point = {k: v for k, v in d.items() if "sources" not in k}
+        last = self._last
+        if (last is not None and last[0].keys() == state.keys()
+                and all(state[k] is v and _version(v) == ver
+                        for k, (v, ver) in last[0].items())
+                and last[1].keys() == point.keys()
+                and all(_same(point[k], v) for k, v in last[1].items())):
+            return last[2]
+        vals = self._values(state, d)
+        self._last = ({k: (v, _version(v)) for k, v in state.items()}, point, vals)
+        return vals
+
+    def _values(self, state: State, d: Drivers) -> Tensor:
         drv = dict(d)
         drv.update(self.closure(state, drv))
         dp = self.air.dp(state[f"{self.name}.phi"], drv)
@@ -774,9 +804,12 @@ class _Midpoint:
                                 dtype=F64))
         return torch.cat(parts) + MIDPOINT_RTOL * z.abs()
 
-    def _extra_sources(self, state: State, d: Drivers) -> dict[str, Tensor]:
-        """The closure's state-dependent sources: what it adds to `"<layer>.sources"`."""
-        written = self.closure(state, d)
+    def _extra_sources(self, state: State, d: Drivers,
+                       written: Drivers | None = None) -> dict[str, Tensor]:
+        """The closure's state-dependent sources: what it adds to `"<layer>.sources"`
+        (`written`: the closure's output at `state`, `d`, when already evaluated)."""
+        if written is None:
+            written = self.closure(state, d)
         return {n: written[f"{n}.sources"] - d.get(f"{n}.sources", 0.0)
                 for n in self.layers if f"{n}.sources" in written}
 
@@ -880,12 +913,13 @@ class _Midpoint:
                 drv.update(air_drv)
             phi, q = self._solve_air(drv, s_end, s[f"{name}.phi"][..., air.interior], h)
             s[f"{name}.phi"], s[f"{name}.q"] = phi, q
-            extra1 = self._extra_sources(s, d1)
+            written1 = self.closure(s, d1)  # at state 1 (the closure reads, never writes, d1)
+            extra1 = self._extra_sources(s, d1, written1)
             qm = 0.5 * (q0 + q)
             cap: dict[str, Tensor] = {}
             if store is not None:
                 drv1 = dict(d1)
-                drv1.update(self.closure(s, drv1))
+                drv1.update(written1)
                 now1 = store(s, drv1)["air.storage"]
                 w_mass = store.rate_from_mass(now1, s0["air.storage"], h)
                 net_mean = store.net(qm, s_air)

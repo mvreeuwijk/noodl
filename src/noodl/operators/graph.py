@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
 from noodl.solvers.grounding import spd_certificate as _spd_certificate
 from noodl.solvers.grounding import spd_diagnosis as _spd_diagnosis
 
@@ -171,7 +172,7 @@ class GraphLaplacianOperator:
         key = (tuple(x_batch), device)
         cached = self._index_cache.get(key)
         if cached is None:
-            batch_shape = torch.broadcast_shapes(x_batch, self.slopes.shape[:-1])
+            batch_shape = broadcast_shapes(x_batch, self.slopes.shape[:-1])
             edges = self.src.shape[-1]
             cached = (
                 batch_shape,

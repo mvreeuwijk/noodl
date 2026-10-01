@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
+
 Tensor = torch.Tensor
 
 
@@ -87,7 +89,7 @@ def _grounded(
     """
     n = interior_of_node.shape[0]
     b = src.shape[0]
-    batch_shape = torch.broadcast_shapes(
+    batch_shape = broadcast_shapes(
         slopes.shape[:-1], () if extra_grounded is None else extra_grounded.shape[:-1]
     )
     device = slopes.device
