@@ -300,7 +300,7 @@
     },
     "reference_tolerance": 1e-13,
     "rtol": 1e-06,
-    "seconds": 933.0876433999802,
+    "seconds": 412.092490799987,
     "storage_bounds": {},
     "substeps": [
       1,
@@ -695,7 +695,7 @@
     },
     "reference_tolerance": 1e-13,
     "rtol": 1e-06,
-    "seconds": 8111.665722400008,
+    "seconds": 2121.989750799985,
     "storage_bounds": {},
     "substeps": [
       2,
@@ -904,7 +904,7 @@
     },
     "reference_tolerance": 1e-13,
     "rtol": 1e-06,
-    "seconds": 728.42246110001,
+    "seconds": 371.5585512999969,
     "storage_bounds": {},
     "substeps": [
       1,
@@ -1106,7 +1106,7 @@
     },
     "reference_tolerance": 1e-13,
     "rtol": 1e-06,
-    "seconds": 501.10268549999455,
+    "seconds": 331.74523160001263,
     "storage_bounds": {},
     "substeps": [
       1,
@@ -1363,7 +1363,7 @@
     },
     "reference_tolerance": 1e-13,
     "rtol": 1e-06,
-    "seconds": 3012.172219400003,
+    "seconds": 965.1003552000038,
     "storage_bounds": {},
     "substeps": [
       1,
@@ -1562,7 +1562,7 @@
     },
     "reference_tolerance": 1e-13,
     "rtol": 1e-06,
-    "seconds": 74.57230569998501,
+    "seconds": 57.15560089997598,
     "storage_bounds": {},
     "substeps": [
       1,
@@ -1901,7 +1901,7 @@
     },
     "reference_tolerance": 1e-13,
     "rtol": 1e-06,
-    "seconds": 1059.4459812999994,
+    "seconds": 562.5105452999996,
     "storage_bounds": {},
     "substeps": [
       1,
@@ -2240,7 +2240,7 @@
     },
     "reference_tolerance": 1e-13,
     "rtol": 1e-06,
-    "seconds": 1045.677880800009,
+    "seconds": 532.5987357999838,
     "storage_bounds": {},
     "substeps": [
       1,
@@ -2662,7 +2662,7 @@
     },
     "reference_tolerance": 1e-13,
     "rtol": 1e-06,
-    "seconds": 3929.387996900012,
+    "seconds": 1171.4516838999698,
     "storage_bounds": {},
     "substeps": [
       2,
@@ -3027,7 +3027,7 @@
     },
     "reference_tolerance": 1e-13,
     "rtol": 1e-06,
-    "seconds": 1484.2177555999951,
+    "seconds": 668.7801007000089,
     "storage_bounds": {},
     "substeps": [
       1,
@@ -3377,7 +3377,7 @@
     },
     "reference_tolerance": 1e-13,
     "rtol": 1e-06,
-    "seconds": 267.80026779999025,
+    "seconds": 248.8030956000439,
     "storage_bounds": {},
     "substeps": [
       1,
@@ -3763,7 +3763,7 @@
     },
     "reference_tolerance": 1e-13,
     "rtol": 1e-06,
-    "seconds": 813.321232199989,
+    "seconds": 326.06888319997233,
     "storage_bounds": {},
     "substeps": [
       1,
@@ -4034,7 +4034,7 @@
     },
     "reference_tolerance": 1e-13,
     "rtol": 1e-06,
-    "seconds": 134.55686819998664,
+    "seconds": 89.76486440000008,
     "storage_bounds": {},
     "substeps": [
       1,
