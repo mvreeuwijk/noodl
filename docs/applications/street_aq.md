@@ -94,7 +94,7 @@ street-network cases](street_aq_cases.md).
 | Object | Purpose |
 |---|---|
 | `Street(name, u, v, length, width, height, z0_b=0.15, emission_scale=1.0)` | One canyon segment between two junctions. |
-| `StreetNetwork(streets, x, y)` | The network plus junction coordinates. `azimuth` gives each street's bearing in radians CCW from east; `junctions` and `degree(node)` describe the topology. |
+| `StreetNetwork(streets, x, y, street_direction="planar", lon=None, lat=None)` | The network plus junction coordinates. `azimuth` gives each street's direction in radians CCW from east, computed as `street_direction` says (see below); `junctions` and `degree(node)` describe the topology. |
 | `from_test_network()` | A 4-junction, 3-street test network. |
 | `twelve_street_grid(L=100.0, W=20.0, H=20.0)` | The 12-street network of Kim et al. 2022 Fig. 1 (MUNICH's idealised case). `L`, `W`, `H` are arguments because the paper never published them. |
 
@@ -105,6 +105,19 @@ For your own streets, build the `StreetNetwork` directly from whatever source yo
 layer, OpenStreetMap, a hand-drawn sketch): one `Street` per canyon segment, named by its two
 junctions, plus a coordinate for every junction. The coordinates only set each street's bearing
 relative to the wind, so any projected system in metres will do; the lengths are yours to give.
+
+How street directions come from the coordinates is `street_direction`:
+
+| `street_direction` | Street direction |
+|---|---|
+| `"planar"` (default) | `atan2(dy, dx)` on the planar `x`/`y` metres. |
+| `"midlatitude_bearing"` | From geographic `lon`/`lat` (degrees, one per junction): east-west distance `R cos(lat_mid) dlon` at the street's own mid-latitude, north-south `R dlat`, `R = 6371229 m`. This is MUNICH's `ComputeStreetAngle` (`StreetNetworkTransport.cxx:3088-3178`), operation for operation, as `midlatitude_bearing(lon1, lat1, lon2, lat2)`. |
+
+`read_case(format="munich")` uses `"midlatitude_bearing"`, since MUNICH's coordinates are
+lon/lat: its single projection to `x`/`y` (at the network's mean latitude) tilts each street by
+up to about `1e-4` rad on a city-sized network, which moves a junction's switch between inflow
+and outflow past a nearby wind sample. The directions are geometry constants (plain floats),
+not differentiable in the coordinates.
 
 ```python
 import math

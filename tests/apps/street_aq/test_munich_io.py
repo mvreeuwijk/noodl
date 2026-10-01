@@ -174,6 +174,12 @@ def test_a_read_case_writes_back_to_the_same_case(tmp_path):
     for name in case.network.junctions:
         assert again.network.x[name] == pytest.approx(case.network.x[name], abs=1e-3)
         assert again.network.y[name] == pytest.approx(case.network.y[name], abs=1e-3)
+    # Street directions come from the lon/lat themselves, MUNICH's rule, and the writer
+    # writes those lon/lat back unchanged, so the directions survive the round trip.
+    assert case.network.street_direction == "midlatitude_bearing"
+    assert again.network.street_direction == "midlatitude_bearing"
+    assert again.network.lon == case.network.lon and again.network.lat == case.network.lat
+    assert again.network.azimuth == case.network.azimuth
     for key, value in case.meteo.items():
         np.testing.assert_allclose(again.meteo[key], value, rtol=1e-6, atol=1e-4)
     np.testing.assert_allclose(again.emissions, case.emissions, rtol=1e-6)
