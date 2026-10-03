@@ -849,9 +849,9 @@ def union(
     drivers_map = {tag: dict(d) for tag, (_m, _s, d) in models.items()}
     links = [item for item in shared if isinstance(item, ValueLink)]
     aliases = [item for item in shared if isinstance(item, DriverAlias)]
-    city = CoupledModel(
+    coupled_model = CoupledModel(
         model_map, links, aliases, substeps or {}, relaxation=relaxation,
         iterate_rtol=iterate_rtol, iterate_atol=iterate_atol, iterate_max=iterate_max,
         adjoint_rtol=adjoint_rtol,
     )
-    return city, state_map, drivers_map
+    return coupled_model, state_map, drivers_map

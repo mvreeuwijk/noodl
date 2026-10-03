@@ -192,12 +192,12 @@ def test_one_way_union_sets_building_boundary_from_street_segment():
         to_model="building", to_key="species.x_boundary", to_index=0,
         convert="concentration_to_mass_fraction",
     )
-    city, state, drivers = union(
+    coupled_model, state, drivers = union(
         {"street": (street_model, street_state, street_drivers),
          "building": (building_model, building_state, building_drivers)},
         shared=[link],
     )
-    new_state = city.step(state, drivers, dt=1.0)
+    new_state = coupled_model.step(state, drivers, dt=1.0)
     # street.x[0] = 3.0 kg/m3 -> mass fraction 3.0 / 1.2 = 2.5 kg/kg must have been used as
     # building's species.x_boundary for this step -- checked indirectly via the building's
     # own resulting state matching a standalone run given that exact boundary value.
@@ -217,7 +217,7 @@ def _two_way_link():  # -> ValueLink (imported in-body, like every other test he
     )
 
 
-def _city(**kwargs):
+def _coupled_model(**kwargs):
     from noodl.couple import union
 
     street_model, street_state, street_drivers = _tiny_street_model()
@@ -244,10 +244,10 @@ def test_two_way_step_is_a_fixed_point_of_one_step_from_the_start_state():
     """
     from noodl.couple import transport_boundary_inflow
 
-    (city, state, drivers), (street_model, building_model) = _city(
+    (coupled_model, state, drivers), (street_model, building_model) = _coupled_model(
         iterate_rtol=1e-12, iterate_max=100)
     diag: dict = {}
-    new = city.step(state, drivers, dt=1.0, diagnostics=diag)
+    new = coupled_model.step(state, drivers, dt=1.0, diagnostics=diag)
     assert diag["converged"] and 2 <= diag["passes"] <= 100
 
     # Glue values from the OUTPUT, by hand:
@@ -285,8 +285,8 @@ def test_two_way_step_is_a_fixed_point_of_one_step_from_the_start_state():
 def test_two_way_step_differs_from_a_one_way_pass_and_is_sensitive_to_the_glue():
     from noodl.couple import ValueLink, union
 
-    (city, state, drivers), _ = _city(iterate_max=100)
-    two_way = city.step(state, drivers, dt=1.0)
+    (coupled_model, state, drivers), _ = _coupled_model(iterate_max=100)
+    two_way = coupled_model.step(state, drivers, dt=1.0)
     street_model, street_state, street_drivers = _tiny_street_model()
     building_model, building_state, building_drivers = _tiny_building_model()
     one_way_link = ValueLink(
@@ -307,9 +307,10 @@ def test_two_way_step_differs_from_a_one_way_pass_and_is_sensitive_to_the_glue()
 
 
 def test_two_way_union_raises_naming_the_link_the_instances_and_the_real_largest_change():
-    (city, state, drivers), _ = _city(iterate_rtol=0.0, iterate_atol=0.0, iterate_max=2)
+    (coupled_model, state, drivers), _ = _coupled_model(
+        iterate_rtol=0.0, iterate_atol=0.0, iterate_max=2)
     with pytest.raises(RuntimeError, match="did not converge") as excinfo:
-        city.step(state, drivers, dt=1.0)
+        coupled_model.step(state, drivers, dt=1.0)
     message = str(excinfo.value)
     key = "street:street.x[0]->building:species.x_boundary"
     assert key in message  # which LINK failed, not just "the shared value(s)"
@@ -330,7 +331,7 @@ def test_two_way_convergence_and_non_convergence_are_judged_per_batch_instance()
     """
     from noodl.couple import union
 
-    def batched_city(**kwargs):
+    def batched_coupled_model(**kwargs):
         street_model, street_state, street_drivers = _tiny_street_model()
         building_model, building_state, building_drivers = _tiny_building_model()
         # Two instances, differing tenfold at the coupled segment, so instance 1's residual
@@ -342,15 +343,15 @@ def test_two_way_convergence_and_non_convergence_are_judged_per_batch_instance()
             shared=[_two_way_link()], **kwargs,
         )
 
-    city, state, drivers = batched_city(iterate_rtol=1e-12, iterate_max=100)
+    coupled_model, state, drivers = batched_coupled_model(iterate_rtol=1e-12, iterate_max=100)
     diag: dict = {}
-    new = city.step(state, drivers, dt=1.0, diagnostics=diag)
+    new = coupled_model.step(state, drivers, dt=1.0, diagnostics=diag)
     key = "street:street.x[0]->building:species.x_boundary"
     assert diag["converged"].shape == (2,) and bool(diag["converged"].all())
     assert diag["max_change"][key].shape == (2,)
     assert new["building"]["species.x"].shape == (2, 1)
     # Instance 0 is the unbatched fixture, and must reproduce its unbatched answer:
-    (solo, s0, d0), _ = _city(iterate_rtol=1e-12, iterate_max=100)
+    (solo, s0, d0), _ = _coupled_model(iterate_rtol=1e-12, iterate_max=100)
     one = solo.step(s0, d0, dt=1.0)
     assert torch.allclose(
         new["building"]["species.x"][0], one["building"]["species.x"], rtol=1e-9, atol=1e-14)
@@ -359,9 +360,10 @@ def test_two_way_convergence_and_non_convergence_are_judged_per_batch_instance()
 
     # A tolerance instance 0 meets within 6 passes and instance 1 does not (re-measured for
     # the recipient-first schedule: instance 0 is done by pass 4, instance 1 needs 7 total):
-    city, state, drivers = batched_city(iterate_rtol=0.0, iterate_atol=0.05, iterate_max=6)
+    coupled_model, state, drivers = batched_coupled_model(
+        iterate_rtol=0.0, iterate_atol=0.05, iterate_max=6)
     with pytest.raises(RuntimeError, match=r"for instances \[1\]"):
-        city.step(state, drivers, dt=1.0)
+        coupled_model.step(state, drivers, dt=1.0)
 
 
 def test_two_way_feedback_adds_to_the_callers_own_sources_and_never_overwrites_them():
@@ -379,14 +381,14 @@ def test_two_way_feedback_adds_to_the_callers_own_sources_and_never_overwrites_t
     # atm, seg0, seg1 in full node order: seg0 (the coupled node) already emits 0.7, seg1 0.2.
     own_sources = torch.tensor([0.0, 0.7, 0.2], dtype=F64)
     street_drivers["street.sources"] = own_sources
-    city, state, drivers = union(
+    coupled_model, state, drivers = union(
         {"street": (street_model, street_state, street_drivers),
          "building": (building_model, building_state, building_drivers)},
         shared=[_two_way_link()], iterate_rtol=1e-12, iterate_max=100,
     )
     diag: dict = {}
     dt = 1.0
-    new = city.step(state, drivers, dt=dt, diagnostics=diag)
+    new = coupled_model.step(state, drivers, dt=dt, diagnostics=diag)
 
     key = "street:street.x[0]->building:species.x_boundary"
     transfer = diag["transfers"][key]
@@ -438,7 +440,7 @@ def test_a_sources_key_that_is_not_a_source_term_is_refused_at_construction():
 
 def test_two_way_link_with_iterate_max_below_two_is_refused_at_construction():
     with pytest.raises(ValueError, match="iterate_max"):
-        _city(iterate_max=1)
+        _coupled_model(iterate_max=1)
 
 
 def test_driver_alias_writes_every_target_through_its_own_conversion():
@@ -459,7 +461,7 @@ def test_driver_alias_writes_every_target_through_its_own_conversion():
         return original_step(state, drivers, dt, **kwargs)
 
     building_model.step = spy
-    city, state, drivers = union(
+    coupled_model, state, drivers = union(
         {"street": (street_model, street_state, street_drivers),
          "building": (building_model, building_state, building_drivers)},
         shared=[
@@ -470,7 +472,7 @@ def test_driver_alias_writes_every_target_through_its_own_conversion():
                         targets=(("building", "theta_w", STREET_RAD_TO_CONTAM_DEG),)),
         ],
     )
-    city.step(state, drivers, dt=1.0)
+    coupled_model.step(state, drivers, dt=1.0)
     assert seen["theta_w"].item() == pytest.approx(180.0)  # (270 - 90) mod 360
     # The source is untouched, and the caller's own driver dicts are never modified:
     assert drivers["street"]["theta_w"].item() == pytest.approx(0.5 * math.pi)
@@ -694,12 +696,12 @@ def test_original_models_still_run_standalone_unchanged_after_union():
     building_snapshot = {k: v.clone() for k, v in building_drivers.items()}
 
     from noodl.couple import union
-    city, state, drivers = union(
+    coupled_model, state, drivers = union(
         {"street": (street_model, street_state, street_drivers),
          "building": (building_model, building_state, building_drivers)},
         shared=[_two_way_link()], iterate_max=100,
     )
-    city.step(state, drivers, dt=1.0)
+    coupled_model.step(state, drivers, dt=1.0)
 
     after_street = street_model.step(dict(street_state), dict(street_drivers), dt=1.0)
     after_building = building_model.step(dict(building_state), dict(building_drivers), dt=1.0)
@@ -728,13 +730,13 @@ def test_substeps_calls_the_fast_model_k_times_with_the_glue_held_constant():
 
     building_model.step = spy  # a per-instance spy; the class is untouched
     try:
-        city, state, drivers = union(
+        coupled_model, state, drivers = union(
             {"street": (street_model, street_state, street_drivers),
              "building": (building_model, building_state, building_drivers)},
             shared=[_two_way_link()], substeps={"building": 6}, iterate_max=100,
         )
         diag: dict = {}
-        city.step(state, drivers, dt=60.0, diagnostics=diag)
+        coupled_model.step(state, drivers, dt=60.0, diagnostics=diag)
     finally:
         building_model.step = real_step
     passes = diag["passes"]
@@ -847,12 +849,12 @@ def test_gradient_flows_across_the_join_and_matches_central_differences():
         building_model, building_state, building_drivers = _tiny_building_model()
         street_state = dict(street_state)
         street_state["street.x"] = torch.stack([x0, street_state["street.x"][1]])
-        city, state, drivers = union(
+        coupled_model, state, drivers = union(
             {"street": (street_model, street_state, street_drivers),
              "building": (building_model, building_state, building_drivers)},
             shared=[_two_way_link()], iterate_rtol=1e-12, iterate_max=200,
         )
-        return city.step(state, drivers, dt=1.0)["building"]["species.x"].sum()
+        return coupled_model.step(state, drivers, dt=1.0)["building"]["species.x"].sum()
 
     x0 = torch.tensor(3.0, dtype=F64, requires_grad=True)
     grad, = torch.autograd.grad(indoor(x0), x0)
