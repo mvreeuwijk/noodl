@@ -68,7 +68,7 @@ link = ValueLink(
     convert="concentration_to_mass_fraction",
 )
 
-city, state, drivers = union(
+coupled_model, state, drivers = union(
     {
         "street": (street_model, street_state, street_drivers),
         "building": (building_model, building_state, building_drivers),
@@ -76,7 +76,7 @@ city, state, drivers = union(
     shared=[link],
 )
 
-new_state = city.step(state, drivers, dt=1.0)
+new_state = coupled_model.step(state, drivers, dt=1.0)
 ```
 
 With `street.x[0] = 3.0` kg/m³ and the building's `rho_amb = 1.2`, the building sees a boundary

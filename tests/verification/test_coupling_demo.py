@@ -112,12 +112,12 @@ def test_small_street_shows_measurable_back_coupling_and_reports_it(record_prope
     street_triple = (street_model, street_state, street_drivers)
     building_triple = (building_model, building_state, building_drivers)
 
-    city, state, drivers = _coupled(
+    coupled_model, state, drivers = _coupled(
         street_triple, building_triple, street_model,
         substeps={"building": 60}, iterate_rtol=1e-10, iterate_max=100,
     )
     diag: dict = {}
-    coupled = city.step(state, drivers, dt=3600.0, diagnostics=diag)
+    stepped = coupled_model.step(state, drivers, dt=3600.0, diagnostics=diag)
 
     # The same hour with the building NOT feeding back (one-way): the street is unaffected.
     # Identical forcing -- `union` and `step` both copy, so the triples are reusable as-is.
@@ -127,7 +127,7 @@ def test_small_street_shows_measurable_back_coupling_and_reports_it(record_prope
     )
     one_way = loose.step(s1, d1, dt=3600.0)
 
-    c_two = coupled["street"]["street.x"][seg].item()
+    c_two = stepped["street"]["street.x"][seg].item()
     c_one = one_way["street"]["street.x"][seg].item()
     rel = abs(c_two - c_one) / abs(c_one)
     record_property("segment", SHARED)
@@ -149,7 +149,7 @@ def test_the_wind_reaches_the_building_through_the_aliases():
     street_triple = _street(net, u_ref=3.0, theta_w=0.5 * math.pi)
     street_model = street_triple[0]
     _project, (building_model, building_state, building_drivers) = _building()
-    city, state, drivers = _coupled(
+    coupled_model, state, drivers = _coupled(
         street_triple, (building_model, building_state, building_drivers),
         street_model, iterate_max=100,
     )
@@ -164,7 +164,7 @@ def test_the_wind_reaches_the_building_through_the_aliases():
 
     building_model.step = spy
     try:
-        city.step(state, drivers, dt=60.0)
+        coupled_model.step(state, drivers, dt=60.0)
     finally:
         building_model.step = real_step
     assert seen["V_met"] == pytest.approx(3.0)
@@ -183,11 +183,11 @@ def test_sequential_file_exchange_disagrees_with_the_coupled_result(record_prope
 
     street_triple = (street_model, street_state, street_drivers)
     building_triple = (building_model, building_state, building_drivers)
-    city, state, drivers = _coupled(
+    coupled_model, state, drivers = _coupled(
         street_triple, building_triple,
         street_model, substeps={"building": 60}, iterate_rtol=1e-10, iterate_max=100,
     )
-    coupled = city.step(state, drivers, dt=3600.0)
+    stepped = coupled_model.step(state, drivers, dt=3600.0)
 
     # Sequential exchange: street first, frozen, then the building on that value, sixty
     # 60 s steps with the SAME wind the aliases would have supplied.
@@ -202,7 +202,7 @@ def test_sequential_file_exchange_disagrees_with_the_coupled_result(record_prope
     for _ in range(60):
         indoor = building_model.step(indoor, loose_drivers, dt=60.0)
 
-    a, b = coupled["building"]["species.x"].flatten(), indoor["species.x"].flatten()
+    a, b = stepped["building"]["species.x"].flatten(), indoor["species.x"].flatten()
     discrepancy = ((a - b).abs() / b.abs().clamp_min(1e-300)).max().item()
     record_property("indoor_mass_fraction_coupled", a.tolist())
     record_property("indoor_mass_fraction_sequential", b.tolist())
