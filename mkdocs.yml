@@ -6,7 +6,7 @@ site_url: https://mvreeuwijk.github.io/noodl/
 repo_url: https://github.com/mvreeuwijk/noodl
 repo_name: mvreeuwijk/noodl
 edit_uri: edit/main/docs/
-copyright: Copyright &copy; 2026 John Craske, Maarten van Reeuwijk and Imperial College London. BSD 3-Clause licence.
+copyright: Copyright &copy; 2026 Maarten van Reeuwijk, John Craske and Imperial College London. BSD 3-Clause licence.
 
 theme:
   name: material
