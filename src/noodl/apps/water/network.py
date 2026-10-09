@@ -88,6 +88,9 @@ class WaterOptions:
 
 @dataclass(frozen=True)
 class Junction:
+    """A junction: `elevation` (m) and base `demand` (m3/s, withdrawn), optionally scaled
+    by a time `pattern`."""
+
     name: str
     elevation: float
     demand: float = 0.0
@@ -96,6 +99,8 @@ class Junction:
 
 @dataclass(frozen=True)
 class Reservoir:
+    """A fixed-head node: total `head` (m), optionally varied by a time `pattern`."""
+
     name: str
     head: float
     pattern: str | None = None
@@ -103,6 +108,9 @@ class Reservoir:
 
 @dataclass(frozen=True)
 class Tank:
+    """A cylindrical tank: bottom `elevation`, initial, minimum and maximum water
+    levels and `diameter` (all m); its level is carried across steps by `TankLevels`."""
+
     name: str
     elevation: float
     init_level: float
@@ -113,6 +121,9 @@ class Tank:
 
 @dataclass(frozen=True)
 class WaterPipe:
+    """A pipe from `u` to `v`: `length` and `diameter` (m), `roughness` (in the
+    network's head-loss formula's units), a minor-loss coefficient and its `status`."""
+
     name: str
     u: str
     v: str
@@ -125,6 +136,8 @@ class WaterPipe:
 
 @dataclass(frozen=True)
 class Pump:
+    """A pump from `u` to `v` on a head-flow `curve` (by name), at relative `speed`."""
+
     name: str
     u: str
     v: str
@@ -135,6 +148,9 @@ class Pump:
 
 @dataclass(frozen=True)
 class Valve:
+    """A valve from `u` to `v`: `diameter` (m), EPANET `kind` (for example `TCV`) and
+    its `setting`, with a minor-loss coefficient."""
+
     name: str
     u: str
     v: str

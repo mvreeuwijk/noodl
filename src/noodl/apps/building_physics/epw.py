@@ -68,6 +68,8 @@ _ANCHOR_YEAR = 2023
 
 
 def read_epw(path, *, start_day: int = 1, n_hours: int | None = None) -> Weather:
+    """An EnergyPlus `.epw` weather file as a `Weather` series (ambient temperature,
+    pressure, wind speed and direction), from `start_day` for `n_hours` hours."""
     rows = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()[_HEADER_LINES:]
     t, Ta, Pb, Ws, Wd = [], [], [], [], []
     for line_no, line in enumerate(rows, start=_HEADER_LINES + 1):

@@ -183,6 +183,10 @@ class PrjSource:
 
 @dataclass
 class Project:
+    """A CONTAM project as read by `read_prj`: the network, its airflow elements and
+    drives, zones and their temperatures and volumes, species, initial mass fractions,
+    sources and ambient conditions. `project_to_model` builds the model from it."""
+
     net: Network
     elements: list
     drives: list
@@ -566,6 +570,8 @@ def _kind_of(nr: int, dtype: str) -> str:
 
 
 def read_prj(path) -> Project:
+    """A CONTAM `.prj` project as a `Project`: zones, airflow paths and their elements,
+    species and sources; `project_to_model` turns it into a model."""
     text = Path(path).read_text()
     lines = _Lines(text)
     header = lines.raw().split()

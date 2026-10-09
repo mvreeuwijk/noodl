@@ -21,17 +21,46 @@ from noodl.apps.water import (
 
 ![A reservoir and pump feeding a looped distribution network with a tank](../assets/app-water.svg)
 
+Every type this application offers — what it does and how to call it — is listed in its [catalogue](../catalogue/water.md). It is set up and run like every other model; see [Using noodl](../usage.md).
+
 ## A worked example
 
 ```python
 from noodl.apps.water import build_model, water_steady, twoloop
 
 model, state, drivers = build_model(twoloop())
+model.check(state, drivers).raise_for_errors(strict=True)
 final = water_steady(model, state, drivers)
 
-# final["water.phi"] is head (m) at every node
-# final["water.q"] is flow (m3/s) in every link
+water = model.refs.water
+heads = water.head.named(final[water.head])     # m, by node name
+flows = water.flow.named(final[water.flow])     # m3/s, by link name
+print(round(float(heads["J1"]), 6), round(float(flows["P1"]), 6))
 ```
+
+```text
+49.267725 0.045
+```
+
+To change an input, give it by name over the builder's own values. A demand is a
+negative source (m³/s withdrawn), and junctions not named keep their demand:
+
+```python
+from noodl.apps.water import initial_drivers
+
+more = initial_drivers(model, values={water.sources: {"J2": -0.012}})
+final = water_steady(model, state, more)
+print(round(float(water.head.named(final[water.head])["J2"]), 6))
+```
+
+```text
+48.641165
+```
+
+In the dictionaries the heads are `"water.phi"` (full node order) and the flows `"water.q"`
+(link order); tank levels and pump status are the state keys `"water.tank_level"` and
+`"water.link_status"`, set by tank and pump name with `initial_state(model, values=...)`.
+See [Using noodl](../usage.md).
 
 `twoloop()` is a hand-built network: reservoir `R1` at 50 m, six junctions with demands
 5/8/6/10/7/9 L/s, eight Hazen-Williams pipes at $C=130$ forming two independent loops. Its heads
@@ -66,7 +95,7 @@ FCVs in that order; `validate()` refuses anything out of scope by name.
 
 ## `build_model`
 
-```python
+```py
 model, state, drivers = build_model(
     net,
     headloss=None,      # 'H-W' (default) or 'D-W'; None takes the network's own
@@ -158,7 +187,7 @@ trajectory matches to **8.181e-5 m**.
 
 An extended-period run therefore looks like this:
 
-```python
+```py
 for _ in range(steps):
     drivers["water.sources"] = base_demand * pattern_factor(t)
     solved = water_steady(model, state, drivers)

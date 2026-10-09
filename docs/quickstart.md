@@ -139,7 +139,7 @@ drivers = model.drivers_from({th.sources: {"room": 500.0},
 model.check(state, drivers).raise_for_errors(strict=True)
 ```
 
-[Setting up a model](concepts/setup.md) is the complete recipe, the same for every application.
+[Using noodl](usage.md) is the complete recipe, the same for every application.
 
 ## Where to go from here
 

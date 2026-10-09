@@ -196,6 +196,23 @@ this repository ships four kinds of test beyond ordinary unit coverage of its ow
 real application under `src/noodl/apps/<name>/` ships all four, sized to its own domain, the
 way `tests/apps/street_aq/`, `tests/apps/sewer/` and `tests/apps/water/` do for theirs.
 
+It also ships its documentation, in the same change as the code:
+
+- **The common set-up.** `build_model`, `initial_state(model, *, values=None)` and
+  `initial_drivers(model, *, values=None)`, exported in `__all__` like every other
+  application, and layers built with a physical `quantity` (and `species_names`), so that
+  `model.refs` names their keys for the physics.
+- **A docstring on every public name**, whose first paragraph says what it does. The
+  [catalogue](../catalogue/core.md) is generated from them by `python
+  scripts/gen_catalogue.py`; a new application adds itself to `PAGES` there and to the
+  `Catalogue` section of `mkdocs.yml`.
+- **An application page** under `docs/applications/` whose examples run: add it to
+  `PAGES` in `tests/test_docs_usage.py`, and mark any snippet that is not meant to run on
+  its own as `py`.
+
+`tests/test_docs_catalogue.py` and `tests/test_docs_usage.py` fail until all three are in
+place, and whenever a later change leaves them behind the code.
+
 ## A file-format reader
 
 Reading a model from a file is not a third extension point on top of the two above: a reader

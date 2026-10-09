@@ -106,6 +106,11 @@ class _DiagonalShifted:
 
 
 class PotentialFlowLayer:
+    """Flows driven by a potential (pressure, head): solves nodal conservation
+    `A_I g(A^T phi) = s_I` for the interior potentials by Newton's method, with the element
+    laws on its edge kinds, drives added to the potential differences, and prescribed
+    potentials at its boundary nodes; differentiable through the converged solution."""
+
     def __init__(
         self,
         net: Network,

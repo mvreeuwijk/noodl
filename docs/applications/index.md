@@ -5,7 +5,7 @@ layer of domain physics (its elements, drives and closures) over the shared core
 be built directly in Python, as each page shows, or, where a reader exists, read from a model
 file; see [File formats](../formats/index.md). Every application is initialised the same way,
 with `initial_state(model, values=...)` and `initial_drivers(model, values=...)` by name; see
-[Setting up a model](../concepts/setup.md).
+[Using noodl](../usage.md).
 
 | Application | Physical system | Flow determination | Entry point |
 |---|---|---|---|

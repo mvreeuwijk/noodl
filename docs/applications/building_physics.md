@@ -23,6 +23,8 @@ from noodl.apps.building_physics import (
 
 ![Two zones joined by a doorway, with air, thermal and species layers on one network](../assets/app-building.svg)
 
+Every type this application offers — what it does and how to call it — is listed in its [catalogue](../catalogue/building_physics.md). It is set up and run like every other model; see [Using noodl](../usage.md).
+
 ## Building a model in Python
 
 Two rooms joined by a doorway, one of them heated, with two leaks to ambient:
@@ -30,7 +32,7 @@ Two rooms joined by a doorway, one of them heated, with two leaks to ambient:
 ```python
 import torch
 from noodl.apps.building_physics import Zone, add_zone, add_large_opening, orifice_elements_from_edges
-from noodl.apps.building_physics import build_model, initial_state
+from noodl.apps.building_physics import build_model, initial_drivers, initial_state
 from noodl.drives import Stack
 from noodl.topology import Network
 
@@ -55,22 +57,27 @@ model = build_model(
     iterate_max=50,
 )
 
-state = initial_state(model)
-sources = torch.zeros(net.n, dtype=F64)
-sources[net.node_index("A")] = 1000.0      # a 1 kW heat source in room A
-
-drivers = {
-    "air.phi_boundary": torch.zeros(1, dtype=F64),
-    "thermal.x_boundary": torch.tensor([283.15], dtype=F64),
-    "thermal.sources": sources,
-}
+air, th = model.refs.air, model.refs.thermal
+state = initial_state(model)                    # room temperatures from each zone's T0
+drivers = initial_drivers(model, values={
+    th.boundary_temperature: {"ambient": 283.15},
+    th.sources: {"A": 1000.0},                  # a 1 kW heat source in room A
+})
+model.check(state, drivers).raise_for_errors(strict=True)
 state = model.step(state, drivers, dt=60.0)
 
-print(state["thermal.x"])   # [T_A, T_B] in K
-print(state["air.q"][0])    # doorway low-opening flow, kg/s
+print(th.temperature.named(state[th.temperature]))   # {"A": T_A, "B": T_B} in K
+print(state[air.flow][0])                             # doorway low-opening flow, kg/s
 ```
 
 *(Adapted from `benchmarks/natural_ventilation.py`, the golden reference case.)*
+
+`state` and `drivers` are plain dictionaries of tensors. The references only name their keys
+(`th.temperature` is `"thermal.x"`, `th.sources` is `"thermal.sources"`, `air.flow` is
+`"air.q"`) and build each tensor in that key's node order: full node order for sources,
+the layer's boundary order for `boundary_temperature`, its active interior order for
+`temperature`. Hand-built tensors in those orders still work, and `model.check` catches one
+in the wrong shape. [Using noodl](../usage.md) covers the details.
 
 Models can also be read from CONTAM `.prj`/`.wth` files or from a Modelica Buildings Library
 export — see [File formats](../formats/index.md).
@@ -98,7 +105,7 @@ conducts nothing".
 | `species_layer(net, *, ambient, name="species", flow_kinds=("airpath",), rho=1.2041, n_species=1, scheme="implicit", species_names=None)` | The contaminant layer, as mass fractions, capacity = zone air mass $\rho V$ (CONTAM's convention). |
 | `build_model(net, *, air_elements, drives, ambient="ambient", thermal=True, species=0 (a count or a list of names), density="ideal_gas", density_kwargs=None, coupling="pingpong", iterate_tol=None, iterate_max=20, thermal_scheme="exact", species_scheme="implicit", flow_kinds=None)` | The assembled `Model`. |
 | `initial_state(model, *, values=None)` | Temperatures from each node's `T0`, zeros for species; then `values` by node name. |
-| `initial_drivers(model, *, values=None)` | Zero boundary pressures, boundary temperatures from `T0`, zero boundary species; then `values` by node name. See [Setting up a model](../concepts/setup.md). |
+| `initial_drivers(model, *, values=None)` | Zero boundary pressures, boundary temperatures from `T0`, zero boundary species; then `values` by node name. See [Using noodl](../usage.md). |
 
 `density` selects the closure relating temperature to air density:
 

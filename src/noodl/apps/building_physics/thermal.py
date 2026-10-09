@@ -61,6 +61,9 @@ class WallMass:
 
 @dataclass
 class Zone:
+    """A room: its air `volume` (m3), initial temperature `T0` (K), reference height
+    `z_ref` (m) and an optional lumped `wall` (`WallMass`). Add it with `add_zone`."""
+
     name: str
     volume: float
     T0: float = T_REF
