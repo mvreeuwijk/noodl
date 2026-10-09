@@ -9,6 +9,8 @@ within a step).
 
 from __future__ import annotations
 
+import numbers
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import torch
@@ -16,7 +18,8 @@ import torch
 from noodl._broadcast import broadcast_shapes
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.transport import TransportLayer, active_interior
-from noodl.model import Model, State
+from noodl.model import Drivers, Model, State
+from noodl.refs import drivers_from, state_from
 from noodl.topology import Network
 
 R_AIR = 287.055
@@ -118,7 +121,8 @@ def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
 
 def species_layer(net: Network, *, ambient="ambient", name: str = "species",
                   flow_kinds=("airpath",), rho: float | torch.Tensor = RHO_0,
-                  n_species: int = 1, scheme: str = "implicit") -> TransportLayer:
+                  n_species: int = 1, scheme: str = "implicit",
+                  species_names=None) -> TransportLayer:
     """Species as mass fractions with zone air mass rho V as capacity (CONTAM convention).
 
     `rho` is one density for every node or a full-node `(n,)` tensor of per-node densities
@@ -136,11 +140,15 @@ def species_layer(net: Network, *, ambient="ambient", name: str = "species",
         raise ValueError(f"species layer {name!r}: nodes {bad} have zero volume")
     return TransportLayer(
         net, name, capacity=capacity, flow_kind=kinds, boundary=[ambient], n_species=n_species,
-        scheme=scheme, quantity="mass_fraction", unit="kg/kg",
+        scheme=scheme, quantity="mass_fraction", unit="kg/kg", species_names=species_names,
     )
 
 
 class _DensityClosure:
+    # Declared driver keys (`noodl.validation`): read optionally, and written.
+    inputs = ("P_ref",)
+    outputs = ("rho", "rho_amb")
+
     def __init__(self, thermal: TransportLayer, *, ambient_index: int) -> None:
         self.thermal = thermal
         self.ambient_index = int(ambient_index)
@@ -189,7 +197,8 @@ class LinearDensity(_DensityClosure):
 
 
 def build_model(net: Network, *, air_elements, drives, ambient="ambient", thermal: bool = True,
-                species: int = 0, density: str = "ideal_gas", density_kwargs=None,
+                species: int | Sequence[str] = 0, density: str = "ideal_gas",
+                density_kwargs=None,
                 coupling: str = "pingpong", iterate_tol=None, iterate_max: int = 20,
                 thermal_scheme: str = "exact", species_scheme: str = "implicit",
                 flow_kinds=None) -> Model:
@@ -249,25 +258,42 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
                 f"build_model: density must be 'ideal_gas' or 'linear', got {density!r}"
             )
     if species:
-        layers["species"] = species_layer(net, ambient=ambient, flow_kinds=kinds,
-                                          n_species=int(species), scheme=species_scheme)
+        # A count, or the species' names (which `model.refs` then builds and reads by).
+        if isinstance(species, str):
+            raise TypeError(
+                f"build_model: species must be a count or a sequence of names, got the "
+                f"string {species!r}; pass ({species!r},)"
+            )
+        names = None if isinstance(species, numbers.Integral) else tuple(species)
+        layers["species"] = species_layer(
+            net, ambient=ambient, flow_kinds=kinds, scheme=species_scheme,
+            n_species=int(species) if names is None else len(names), species_names=names,
+        )
     return Model(net, layers, closures=closures, coupling=coupling, iterate_tol=iterate_tol,
                  iterate_max=iterate_max)
 
 
-def initial_state(model: Model) -> State:
+def initial_state(model: Model, *, values: Mapping | None = None) -> State:
     """`"<layer>.x"` for every transport layer: temperatures from the node attribute `T0`
-    (interior order), mass fractions zero.
+    (interior order), mass fractions zero; then `values`.
 
     Keyed by each layer's OWN name, and dispatched on its `quantity` tag rather than on the
     names `"thermal"`/`"species"`: a layer renamed through `thermal_layer(name=...)` must
     still get its state, and must never be answered with a silently EMPTY state that only
     surfaces later as `Model`'s "state '<name>.x' is required" from inside a step. A
     transport layer whose `quantity` this application does not know is refused by name for
-    the same reason.
+    the same reason -- unless `values` gives its state.
+
+    `values` overrides by NAME, `{layer or key: {node: value}}` (see
+    `noodl.refs.state_from`); nodes not named keep the default above:
+    `initial_state(model, values={"thermal": {"A": 295.0}, "species": {"A": 4e-4}})`.
     """
+    values = dict(values or {})
+    given = {str(k) for k in values} | {f"{k}.x" for k in map(str, values)}
     state: State = {}
     for name, layer in model.transport.items():
+        if f"{name}.x" in given and layer.quantity not in ("temperature", "mass_fraction"):
+            continue
         if layer.quantity == "temperature":
             state[f"{name}.x"] = model.net.node_attr("T0", default=T_REF)[layer.interior_idx]
         elif layer.quantity == "mass_fraction":
@@ -279,6 +305,39 @@ def initial_state(model: Model) -> State:
                 f"{layer.quantity!r}, which the building application has no initial value "
                 f"for (it knows 'temperature' and 'mass_fraction'); build it with "
                 f"thermal_layer/species_layer, or set that layer's own state key "
-                f"{name + '.x'!r} yourself"
+                f"{name + '.x'!r} yourself (initial_state(model, values={{{name!r}: ...}}))"
             )
+    if values:
+        state = state_from(model, values, base=state)
     return state
+
+
+def initial_drivers(model: Model, *, values: Mapping | None = None) -> Drivers:
+    """A complete driver set: zero boundary pressures, boundary temperatures from each
+    boundary node's `T0` attribute (`T_REF` where it has none), zero boundary mass
+    fractions; then `values`, by name (see `noodl.refs.drivers_from`):
+
+        initial_drivers(model, values={"thermal.sources": {"A": 1000.0},
+                                       "thermal.x_boundary": {"ambient": 283.15}})
+
+    Sources are optional and absent unless `values` gives them.
+    """
+    drivers: Drivers = {}
+    T0 = model.net.node_attr("T0", default=T_REF)
+    for name, layer in model.potential.items():
+        drivers[f"{name}.phi_boundary"] = torch.zeros(len(layer.bound), dtype=model.net.dtype)
+    for name, layer in model.transport.items():
+        if layer.quantity == "temperature":
+            drivers[f"{name}.x_boundary"] = T0[layer.boundary_idx]
+        elif layer.quantity == "mass_fraction":
+            shape = (layer.n_b,) if layer.n_species == 1 else (layer.n_b, layer.n_species)
+            drivers[f"{name}.x_boundary"] = torch.zeros(shape, dtype=model.net.dtype)
+        else:
+            raise ValueError(
+                f"initial_drivers: transport layer {name!r} has quantity "
+                f"{layer.quantity!r}, which the building application has no boundary value "
+                f"for; set {name + '.x_boundary'!r} yourself"
+            )
+    if values:
+        drivers = drivers_from(model, values, base=drivers)
+    return drivers

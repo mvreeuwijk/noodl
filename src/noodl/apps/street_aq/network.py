@@ -10,7 +10,7 @@ written by `StreetFlows` into the driver `"street.q"`.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 import torch
@@ -21,6 +21,8 @@ from noodl.apps.street_aq.routing import StreetFlows, StreetGeometry
 from noodl.layers.reaction import Reaction
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Drivers, Model, State
+from noodl.refs import initial_drivers as refs_initial_drivers
+from noodl.refs import state_from
 from noodl.topology import Network
 
 _DTYPE = torch.float64
@@ -414,6 +416,7 @@ def build_model(
     layer = TransportLayer(
         graph, layer_name, capacity=capacity, flow_kind=kinds, boundary=boundary,
         n_species=n_species, scheme=scheme, quantity="concentration", unit="kg/m3",
+        species_names=tuple(species),
     )
     closure = StreetFlows(
         graph, layer, street_geometry(net), preset=preset, n_theta=n_theta,
@@ -437,11 +440,14 @@ def build_model(
             (graph.n,) if n_species == 1 else (graph.n, n_species), dtype=_DTYPE
         ),
     }
+    model.driver_template = dict(drivers)
     return model, state, drivers
 
 
-def initial_state(model: Model) -> State:
-    """Zero concentration everywhere, in each transport layer's own shape."""
+def initial_state(model: Model, *, values: Mapping | None = None) -> State:
+    """Zero concentration everywhere, in each transport layer's own shape; then `values`
+    by street and species name (see `noodl.refs.state_from`):
+    `initial_state(model, values={"street": {"s1": {"nox": 1e-7}}})`."""
     state: State = {}
     for name, layer in model.transport.items():
         if layer.quantity != "concentration":
@@ -453,7 +459,20 @@ def initial_state(model: Model) -> State:
             )
         shape = (layer.n_i,) if layer.n_species == 1 else (layer.n_i, layer.n_species)
         state[f"{name}.x"] = torch.zeros(shape, dtype=_DTYPE)
+    if values:
+        state = state_from(model, values, base=state)
     return state
+
+
+def initial_drivers(model: Model, *, values: Mapping | None = None) -> Drivers:
+    """`build_model`'s driver template (copied), then `values` by name (see
+    `noodl.refs.drivers_from`), e.g. by street and species name:
+
+        initial_drivers(model, values={"street.sources": {"s1": {"nox": 2e-3}}})
+
+    The meteorology (`U_ref`, `theta_w`, ...) is the closures' own input and is given as
+    plain tensors, as before."""
+    return refs_initial_drivers(model, values=values)
 
 
 def street_index(model: Model, *, layer_name: str = "street") -> dict[str, int]:

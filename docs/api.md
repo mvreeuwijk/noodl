@@ -120,6 +120,14 @@ Elements are grouped below by the physics they express, as in
     options:
       members: [Model, Closure, Ports]
 
+::: noodl.refs
+    options:
+      members: [LayerRefs, LayerRef, Field, drivers_from, state_from, initial_drivers]
+
+::: noodl.validation
+    options:
+      members: [check_setup, SetupReport, Issue, InputRow]
+
 ::: noodl.couple
     options:
       members: [union, CoupledModel, ValueLink, DriverAlias, apply_conversion, transport_boundary_inflow]
@@ -212,6 +220,10 @@ Elements are grouped below by the physics they express, as in
     options:
       members: [read_epanet_inp]
 ::: noodl.apps.water.report
+
+### Allocation (WSIMOD)
+
+::: noodl.apps.wsimod.network
 
 ### Shared
 

@@ -48,6 +48,7 @@ from typing import Protocol, runtime_checkable
 
 import torch
 
+from noodl._tracking import TrackedDict
 from noodl.layers.allocation import AllocatedFlowLayer
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.reaction import Reaction
@@ -174,7 +175,8 @@ class Model:
     def __init__(
         self,
         net: Network,
-        layers: Mapping[str, PotentialFlowLayer | TransportLayer | AllocatedFlowLayer],
+        layers: Mapping[str, PotentialFlowLayer | TransportLayer | AllocatedFlowLayer]
+        | Sequence[PotentialFlowLayer | TransportLayer | AllocatedFlowLayer],
         closures: Sequence[Closure] = (),
         reactions: Sequence[tuple[str, Reaction]] = (),
         coupling: str = "pingpong",
@@ -203,7 +205,38 @@ class Model:
             )
         self.reaction_order = reaction_order
         self.net = net
-        self.layers = dict(layers)
+        # ONE layer identity. Every key a layer reads or writes is "<name>.<suffix>", and
+        # two different parties build those names: this model, from the name a layer is
+        # REGISTERED under, and the layer and its helpers, from the layer's OWN `.name` (a
+        # allocation layer reads "<name>.requests" itself; the building density closure
+        # reads "<thermal.name>.x"). A layer registered under any other name would split
+        # its keys between the two, so the registered name must BE the layer's name.
+        # Layers may therefore also be given as a plain sequence, keyed by their names.
+        if isinstance(layers, Mapping):
+            registered = dict(layers)
+        else:
+            registered = {}
+            for layer in layers:
+                lname = getattr(layer, "name", None)
+                if lname in registered:
+                    raise ValueError(
+                        f"Model: two layers named {lname!r}; layer names are the prefix of "
+                        f"every state and driver key and must be unique"
+                    )
+                registered[lname] = layer
+        for name, layer in registered.items():
+            own = getattr(layer, "name", name)
+            if own != name:
+                raise ValueError(
+                    f"Model: a layer is registered as {name!r} but is named {own!r}; the "
+                    f"model and the layer would then build its keys under different names "
+                    f"({name!r}.x vs {own!r}.x). Register it under its own name, or build "
+                    f"it with name={name!r}"
+                )
+        self.layers = registered
+        # Set only while `noodl.validation.check_setup` probes a step (read tracking).
+        self._probe = None
+        self._refs = None
         self.potential: dict[str, PotentialFlowLayer] = {}
         self.transport: dict[str, TransportLayer] = {}
         self.allocation: dict[str, AllocatedFlowLayer] = {}
@@ -444,7 +477,15 @@ class Model:
         without advancing. A non-integrating closure never sees `ctx` at all, so its call
         signature and behaviour are unaffected.
         """
-        drv: Drivers = dict(drivers)
+        probe = self._probe
+        if probe is None:
+            drv: Drivers = dict(drivers)
+        else:
+            # `Model.check(..., probe=True)`: record which keys are read (see
+            # `noodl.validation`). The returned drivers stay tracked, so the layers',
+            # elements' and drives' reads are recorded too.
+            drv = TrackedDict(drivers, probe.driver_reads)
+            state = TrackedDict(state, probe.state_reads)
         for closure in self.closures:
             if id(closure) in self._integrating:
                 if ctx is not None and ctx.dt is None:
@@ -455,6 +496,10 @@ class Model:
                 result = closure(state, drv, ctx)
             else:
                 result = closure(state, drv)
+            if probe is not None:
+                probe.closure_outputs.update(result)
+                probe.closure_values.update(result)
+                probe.closure_writers.update(dict.fromkeys(result, type(closure).__name__))
             for key, value in result.items():
                 head, _, tail = key.rpartition(".")
                 if head in self.layers and tail in _STATE_SUFFIXES:
@@ -767,6 +812,48 @@ class Model:
             new[key] = drv[key]
             made.append(key)
         return new, diag, drv
+
+    # ------------------------------------------------------------------- setup
+    @property
+    def capacitated(self) -> dict[str, AllocatedFlowLayer]:
+        """Pre-rename name of `allocation`, kept as an alias (the same dict)."""
+        return self.allocation
+
+    @property
+    def refs(self):
+        """`noodl.refs.LayerRefs`: every registered layer as a `LayerRef` whose attributes
+        are its state and driver keys, each knowing its node order, shape and unit
+        (`model.refs.thermal.sources`, `model.refs["air"].phi_boundary`). Built on first
+        use; `model.refs.describe()` lists everything a run needs."""
+        if self._refs is None:
+            from noodl.refs import LayerRefs
+
+            self._refs = LayerRefs(self)
+        return self._refs
+
+    def drivers_from(self, values: Mapping, *, base: Mapping | None = None) -> Drivers:
+        """A drivers dictionary from `{key: {node: value}}` / `{key: tensor}`; see
+        `noodl.refs.drivers_from`."""
+        from noodl.refs import drivers_from
+
+        return drivers_from(self, values, base=base)
+
+    def state_from(self, values: Mapping, *, base: Mapping | None = None) -> State:
+        """A state dictionary from `{key or layer: {node: value}}`; see
+        `noodl.refs.state_from`."""
+        from noodl.refs import state_from
+
+        return state_from(self, values, base=base)
+
+    def check(self, state: Mapping | None = None, drivers: Mapping | None = None, *,
+              dt: float | None = None, probe: bool = False, steady: bool = False):
+        """A `noodl.validation.SetupReport` on this model and, when given, its state and
+        drivers: required inputs, orders and shapes, units, unused edge kinds and suspicious
+        keys. `probe=True` runs one step of `dt` (or a steady solve) to learn which custom
+        keys are read. Nothing is raised; call `.raise_for_errors()` on the report."""
+        from noodl.validation import check_setup
+
+        return check_setup(self, state, drivers, dt=dt, probe=probe, steady=steady)
 
     # ------------------------------------------------------------------ public
     def initial_capacities(self, state: State, drivers: Drivers) -> dict[str, Tensor]:

@@ -3,7 +3,9 @@
 noodl physics is one solver. The applications below are physical systems modelled with it, each a thin
 layer of domain physics (its elements, drives and closures) over the shared core. Any of them can
 be built directly in Python, as each page shows, or, where a reader exists, read from a model
-file; see [File formats](../formats/index.md).
+file; see [File formats](../formats/index.md). Every application is initialised the same way,
+with `initial_state(model, values=...)` and `initial_drivers(model, values=...)` by name; see
+[Setting up a model](../concepts/setup.md).
 
 | Application | Physical system | Flow determination | Entry point |
 |---|---|---|---|
@@ -11,7 +13,7 @@ file; see [File formats](../formats/index.md).
 | [Street air quality](street_aq.md) | Urban air quality, canyon exchange, routing | Closure: flows computed from the wind aloft | `build_model`, `StreetNetwork` |
 | [Sewers](sewer.md) | Gravity hydraulics, headspace air, sulfide | Continuity on a tree for the water; Newton potential for the headspace air | `build_model` |
 | [Water distribution](water.md) | Pressurised mains, pumps, tanks, demand | Potential: Newton on hydraulic head | `build_model` |
-| [Flow allocation](allocation.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer` |
+| [Flow allocation](allocation.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer`, `wsimod.build_model` |
 | [Coupling](coupling.md) | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
 
 ![The four flow-determination modes](../assets/four-modes.svg)

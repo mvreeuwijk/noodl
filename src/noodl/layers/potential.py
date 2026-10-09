@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 import torch
 
 from noodl._broadcast import broadcast_shapes
+from noodl._tracking import bulk_values, same_tracking
 from noodl.drives import Drive, check_drive_signature
 from noodl.elements.base import Element
 from noodl.nodesources import NodeSource
@@ -956,7 +957,7 @@ class PotentialFlowLayer:
             d[name] for d, names in zip(param_dicts, param_names, strict=True) for name in names
         ]
         driver_keys = sorted(drivers.keys())
-        driver_tensors = [drivers[k] for k in driver_keys]
+        driver_tensors = bulk_values(drivers, driver_keys)
         sources_tensor = (
             sources
             if sources is not None
@@ -975,7 +976,10 @@ class PotentialFlowLayer:
                 d = {name: params[offset + j] for j, name in enumerate(names)}
                 rebuilt.append(d)
                 offset += len(names)
-            drv = dict(zip(driver_keys, params[offset : offset + len(driver_keys)], strict=True))
+            drv = same_tracking(
+                drivers,
+                dict(zip(driver_keys, params[offset : offset + len(driver_keys)], strict=True)),
+            )
             offset += len(driver_keys)
             src = params[offset]
             pb = params[offset + 1]

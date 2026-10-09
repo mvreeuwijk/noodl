@@ -129,6 +129,17 @@ repeats the pass within one step until the named states stop changing;
 `coupling="pingpong"`, the default, takes a single pass. [Layers and models](concepts/layers.md)
 covers both, and the trap in the default.
 
+`state` and `drivers` are dictionaries of tensors in several node orders. Rather than build
+them by position, give values by node name and check them before running:
+
+```python
+th = model.refs.thermal
+drivers = model.drivers_from({th.sources: {"room": 500.0}, th.x_boundary: {"ambient": 283.15}})
+model.check(state, drivers).raise_for_errors(strict=True)
+```
+
+[Setting up a model](concepts/setup.md) is the complete recipe, the same for every application.
+
 ## Where to go from here
 
 - **[Concepts](concepts/index.md)** — the framework proper: what a network, element, layer and

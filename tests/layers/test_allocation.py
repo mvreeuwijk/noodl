@@ -640,3 +640,17 @@ def test_pre_rename_names_are_aliases_of_the_same_class():
 
     assert CapacitatedTransferLayer is AllocatedFlowLayer
     assert from_old_module is AllocatedFlowLayer
+
+
+def test_the_model_attribute_keeps_its_pre_rename_alias():
+    """`Model.capacitated` was public before the rename; it is the same dict as
+    `Model.allocation`."""
+    net = Network()
+    for n in ("A", "B"):
+        net.add_node(n)
+    net.add_edge("A", "B", kind="link")
+    layer = AllocatedFlowLayer(
+        net, "cap", "link", s_max=torch.full((2,), 10.0), c_arc=torch.ones(1)
+    )
+    model = Model(net, [layer])
+    assert model.capacitated is model.allocation and list(model.allocation) == ["cap"]

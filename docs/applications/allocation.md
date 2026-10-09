@@ -69,6 +69,24 @@ requests of `[2.0, 2.0]` give `f = [2.0, 0.0]`.
 Note that `s1[0]` is negative. `step` bounds storage from **above** only — a source node may be
 drawn below zero, which is a modelling choice belonging upstream of this layer.
 
+## From a WSIMOD topology
+
+`noodl.apps.wsimod.build_model(topology)` builds the layer and a `Model` from a WSIMOD-style
+topology (`{"nodes": [{"name"}], "arcs": [{"name", "source", "target", "capacity"}]}`,
+or a JSON file of it) and returns `(model, state, drivers)` like the other applications.
+Requests and storage are then given by arc and node name:
+
+```python
+from noodl.apps import wsimod
+
+model, state, drivers = wsimod.build_model("quickstart_topology.json")
+state = wsimod.initial_state(model, values={"wsimod": {"my_groundwater": 5.0}})
+drivers = wsimod.initial_drivers(model, values={"wsimod.requests": {"baseflow": 0.3}})
+state = model.step(state, drivers, dt=86400.0)
+```
+
+See [Setting up a model](../concepts/setup.md).
+
 ## The API
 
 The allocation rules (push/pull requests, the per-arc capacity clip and the receiver's headroom

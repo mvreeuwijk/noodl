@@ -77,6 +77,11 @@ class TankLevels:
         self.tanks = list(tanks)
         self.controls = list(controls)
         self.pump_names = list(pump_names)
+        # The labels of the closure-carried state, in its order (`noodl.refs`).
+        self.key_labels = {
+            "water.tank_level": [t.name for t in self.tanks],
+            "water.link_status": list(self.pump_names),
+        }
         self.dt = float(dt)
         self.reservoir_heads = torch.as_tensor(reservoir_heads, dtype=F64)
         self.tank_first_index = int(tank_first_index)

@@ -53,6 +53,7 @@ nav:
       - Networks: concepts/networks.md
       - Elements and drives: concepts/elements.md
       - Layers and models: concepts/layers.md
+      - Setting up a model: concepts/setup.md
       - Solvers: concepts/solvers.md
       - Differentiability: concepts/differentiability.md
   - Applications:
