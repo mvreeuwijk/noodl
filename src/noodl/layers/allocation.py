@@ -38,6 +38,10 @@ _OVERSUBSCRIBED_FLOOR = 1e-9
 
 
 class AllocatedFlowLayer:
+    """Flows allocated by rule, not by a potential: each edge's requested flow is clipped
+    to the arc's capacity and the receiving node's free storage, one explicit step at a
+    time, conserving storage exactly (WSIMOD's push/pull semantics)."""
+
     def __init__(
         self,
         net: Network,

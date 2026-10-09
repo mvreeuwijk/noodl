@@ -17,8 +17,10 @@ simulation, parameter estimation, and optimisation.
 **[Documentation](https://mvreeuwijk.github.io/noodl/)** ·
 [Installation](https://mvreeuwijk.github.io/noodl/installation/) ·
 [Quick start](https://mvreeuwijk.github.io/noodl/quickstart/) ·
+[Using noodl](https://mvreeuwijk.github.io/noodl/usage/) ·
 [Concepts](https://mvreeuwijk.github.io/noodl/concepts/) ·
 [Applications](https://mvreeuwijk.github.io/noodl/applications/) ·
+[Catalogue](https://mvreeuwijk.github.io/noodl/catalogue/core/) ·
 [API reference](https://mvreeuwijk.github.io/noodl/api/) ·
 [Theory](https://mvreeuwijk.github.io/noodl/theory/)
 
@@ -108,10 +110,13 @@ tests/            the suite, including verification/ — code-to-code comparison
 benchmarks/       timing and scaling scripts, and the composed model: eight buildings
                   joined through street and sewer networks
 docs/             the published documentation
-scripts/          fixture-regeneration scripts (Modelica, WSIMOD)
+scripts/          fixture-regeneration scripts (Modelica, WSIMOD) and the catalogue generator
 ```
 
-The [API reference](docs/api.md) is organised module by module.
+Every model is set up and run the same way: see [Using noodl](docs/usage.md). The
+[catalogue](docs/catalogue/core.md) lists every type each application offers, what it
+does and how to call it, and the [API reference](docs/api.md) is organised module by
+module. Contributions: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status
 

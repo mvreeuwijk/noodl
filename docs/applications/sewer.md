@@ -33,6 +33,8 @@ from noodl.apps.sewer import (
 
 ![A sewer pipe carrying water below and headspace air above, and a dendritic network draining to an outfall](../assets/app-sewer.svg)
 
+Every type this application offers — what it does and how to call it — is listed in its [catalogue](../catalogue/sewer.md). It is set up and run like every other model; see [Using noodl](../usage.md).
+
 ## A worked example
 
 ```python
@@ -47,6 +49,28 @@ rows = pipe_table(model, final, drivers, path="pipes.csv")
 
 *(From `tests/apps/sewer/test_report.py`.)* `tree_steady()` is the committed 5-conduit, 6-node
 fixture; its steady discharges are 0.05, 0.08, 0.03, 0.13 and 0.16 m³/s.
+
+Start from a different state by naming it — here, sulfide already present in manhole
+`J1` — and read the result by manhole and species:
+
+```python
+from noodl.apps.sewer import initial_state
+
+wq = model.refs.water_quality                  # species ("bod", "sulfide"), kg/m3
+start = initial_state(model, drivers, values={wq.concentration: {"J1": {"sulfide": 1e-3}}})
+model.check(start, drivers).raise_for_errors(strict=True)
+after = model.step(start, drivers, 60.0)
+print(sorted(wq.concentration.named(after[wq.concentration])))
+```
+
+```text
+['J1', 'J2', 'J3', 'J4', 'J5']
+```
+
+The sewer's `initial_state` takes the drivers as well, because the storage it starts from
+depends on the inflows. In the dictionaries the concentrations are
+`"water_quality.x"` and `"air_quality.x"` (manhole order, species last); see
+[Using noodl](../usage.md).
 
 A model can also be read from a SWMM `.inp` file (see [File formats](../formats/swmm.md)):
 
@@ -83,7 +107,7 @@ flow solve valid.
 
 ## `build_model`
 
-```python
+```py
 model, state, drivers = build_model(
     net,
     storage=False,          # implicit-Euler manhole storage sweep

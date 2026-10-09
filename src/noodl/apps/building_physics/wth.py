@@ -60,6 +60,10 @@ def _seconds(hms: str) -> float:
 
 @dataclass
 class Weather:
+    """A weather series: time `t` (s from the file's start date), ambient temperature
+    `Ta` (K), barometric pressure `Pb` (Pa), wind speed `Ws` (m/s) and direction `Wd`
+    (degrees); `at(t)` interpolates."""
+
     t: torch.Tensor      # seconds from 00:00 of the file's start date
     Ta: torch.Tensor     # K
     Pb: torch.Tensor     # Pa
@@ -108,6 +112,8 @@ class Weather:
 
 
 def read_wth(path) -> Weather:
+    """A CONTAM `.wth` weather file as a `Weather` series (ambient temperature,
+    pressure, wind speed and direction)."""
     lines = [ln.strip() for ln in Path(path).read_text().splitlines()]
     if not lines or not lines[0].startswith("WeatherFile ContamW"):
         raise ValueError(

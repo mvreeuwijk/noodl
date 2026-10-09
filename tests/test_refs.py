@@ -256,7 +256,7 @@ def test_a_species_count_may_be_any_integer_but_not_a_string():
     kw = dict(air_elements=[orifice_elements_from_edges(net, "airpath")],
               drives=[Stack.from_network(net, "airpath")])
     assert build_model(net, species=np.int64(2), **kw).transport["species"].n_species == 2
-    with pytest.raises(TypeError, match="pass \('co2',\)"):
+    with pytest.raises(TypeError, match=r"pass \('co2',\)"):
         build_model(net, species="co2", **kw)
 
 
@@ -276,3 +276,18 @@ def test_species_names_must_be_unique_and_a_species_may_be_given_once():
     _, model = _two_zone_with_wall()
     with pytest.raises(ValueError, match="gives species 0 twice"):
         model.refs.species.sources.build({"A": {"co2": 1.0, 0: 2.0}})
+
+
+def test_keys_are_named_for_the_physics_the_layer_carries():
+    """`.x`/`.phi`/`.s`/`.q` are the solver's suffixes; the attributes users write name the
+    quantity, taken from each layer's `quantity` tag, with the suffixes kept as aliases."""
+    _, model = _two_zone_with_wall()
+    th, sp, air = model.refs.thermal, model.refs.species, model.refs.air
+    assert th.temperature is th.x and th.boundary_temperature is th.x_boundary
+    assert sp.mass_fraction is sp.x and sp.boundary_mass_fraction is sp.x_boundary
+    assert air.pressure is air.phi and air.boundary_pressure is air.phi_boundary
+    assert air.flow is air.q
+    assert th.temperature.attribute == "temperature"
+    with pytest.raises(AttributeError, match="did you mean 'temperature'"):
+        th.temprature  # noqa: B018
+    assert "temperature" in dir(th)

@@ -48,12 +48,12 @@ nav:
   - Home: index.md
   - Installation: installation.md
   - Quick start: quickstart.md
+  - Using noodl: usage.md
   - Concepts:
       - concepts/index.md
       - Networks: concepts/networks.md
       - Elements and drives: concepts/elements.md
       - Layers and models: concepts/layers.md
-      - Setting up a model: concepts/setup.md
       - Solvers: concepts/solvers.md
       - Differentiability: concepts/differentiability.md
   - Applications:
@@ -66,6 +66,13 @@ nav:
       - Water distribution: applications/water.md
       - Flow allocation: applications/allocation.md
       - Coupling: applications/coupling.md
+  - Catalogue:
+      - Core library: catalogue/core.md
+      - Building physics: catalogue/building_physics.md
+      - Street air quality: catalogue/street_aq.md
+      - Sewers: catalogue/sewer.md
+      - Water distribution: catalogue/water.md
+      - Flow allocation (WSIMOD): catalogue/wsimod.md
   - Verification: verification.md
   - File formats:
       - formats/index.md

@@ -36,6 +36,8 @@ def street_population(net: StreetNetwork, *, n_total: float) -> torch.Tensor:
 
 def total_exposure(concentration: torch.Tensor, population: torch.Tensor,
                     *, q: float = Q_INHALATION) -> torch.Tensor:
+    """Population-weighted inhaled dose rate, `sum_i q p_i c_i`: breathing rate `q` times
+    each street's population `p_i` times its concentration `c_i`."""
     return (q * population * concentration).sum()
 
 
@@ -69,6 +71,9 @@ def _emissions(model, drivers, streets):
 
 def exposure_reduction_adjoint(model, state, drivers, *, population, streets: Sequence[str],
                                 delta_fraction: float = 0.1):
+    """Exposure reduction from cutting each listed street's emission by
+    `delta_fraction` of their mean, to first order, from ONE steady solve and one
+    backward pass (the adjoint); compare `exposure_reduction_forward`."""
     cols, base = _emissions(model, drivers, streets)
     q = base[cols].detach().clone().requires_grad_(True)
     sources = base.detach().clone()
@@ -81,6 +86,9 @@ def exposure_reduction_adjoint(model, state, drivers, *, population, streets: Se
 
 def exposure_reduction_forward(model, state, drivers, *, population, streets: Sequence[str],
                                 delta_fraction: float = 0.1):
+    """The same exposure reductions as `exposure_reduction_adjoint`, by brute force:
+    one steady solve per street with that street's emission cut (`len(streets) + 1`
+    solves, no linearisation)."""
     cols, base = _emissions(model, drivers, streets)
     with torch.no_grad():
         delta_q = delta_fraction * base[cols].mean()

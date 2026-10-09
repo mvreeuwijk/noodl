@@ -18,7 +18,7 @@ layer advects on what it wrote.
 
 ```python
 from noodl.apps.street_aq import (
-    build_model, street_steady, street_index, initial_state,
+    build_model, street_steady, street_index, initial_state, initial_drivers,
     StreetNetwork, Street, from_test_network, twelve_street_grid,
     write_network_concentration, to_ug_m3,
     photostationary_for_streets,
@@ -27,40 +27,45 @@ from noodl.apps.street_aq import (
 
 ![A street canyon in cross-section with roof-level exchange and a canyon vortex, and routing at a junction](../assets/app-street.svg)
 
+Every type this application offers — what it does and how to call it — is listed in its [catalogue](../catalogue/street_aq.md). It is set up and run like every other model; see [Using noodl](../usage.md).
+
 ## A worked example
 
 ```python
 import math
 import torch
-from noodl.apps.street_aq import build_model, from_test_network
+from noodl.apps.street_aq import build_model, from_test_network, initial_drivers
 
 DT = torch.float64
 
 net = from_test_network()                     # a 4-junction, 3-street toy network
 model, state, _ = build_model(net, pblh_floor=False)
+street = model.refs.street
 
-street_net = model.net
-sources = torch.zeros(street_net.n, dtype=DT)
-for name, value in zip(("r1", "r2", "r3"), (1.0, 2.0, 3.0), strict=True):
-    sources[street_net.node_index(name)] = value
-
-drivers = {
-    "street.x_boundary": torch.tensor([1.0e-4], dtype=DT),   # background, kg/m3
-    "street.sources": sources,                                # emissions
+drivers = initial_drivers(model, values={
+    street.boundary_concentration: {"atmosphere": 1.0e-4},   # background, kg/m3
+    street.sources: {"r1": 1.0, "r2": 2.0, "r3": 3.0},       # emissions, kg/s
     "U_ref": torch.tensor(2.0, dtype=DT),                     # wind speed, m/s
     "theta_w": torch.tensor(0.25 * math.pi, dtype=DT),        # rad CCW from east, blowing TOWARD
     "h_abl": torch.tensor(1200.0, dtype=DT),                  # boundary-layer depth, m
-}
+})
+model.check(state, drivers).raise_for_errors(strict=True)
 
 solved = model.steady(state, drivers)
-print(solved["street.x"])                     # kg/m3 per street, interior order
+print(street.concentration.named(solved[street.concentration]))   # kg/m3, by street
 ```
 
 *(From `tests/apps/street_aq/test_conservation.py`, which then checks that every kilogram emitted
 crosses the atmosphere boundary exactly, rtol $10^{-12}$.)*
 
-**The drivers returned by `build_model` are templates only.** They carry zero-shaped
-`x_boundary` and `sources`; you must supply `U_ref`, `theta_w` and `h_abl` yourself. The
+Emissions and the background are given by street and boundary name; the meteorology is
+the street closures' own input and is given as plain tensors. In the dictionaries, the
+concentration is `"street.x"` (street order), the emissions `"street.sources"` (full node
+order) and the background `"street.x_boundary"` (boundary order) -- see
+[Using noodl](../usage.md).
+
+**The drivers `build_model` returns are templates only.** They carry zero `x_boundary`
+and `sources`; you must supply `U_ref`, `theta_w` and `h_abl` yourself. The
 Obukhov length `lmo` is optional: with `stability="monin_obukhov"` (the default) it selects the
 stable, neutral or unstable branch, and without it the turbulence is the neutral form.
 
@@ -319,9 +324,22 @@ without a warning:
 from noodl.apps.street_aq import photostationary_for_streets, street_steady
 
 reaction = photostationary_for_streets(("no", "no2", "o3"))
-model, state, drivers = build_model(net, species=("no", "no2", "o3"), chemistry=reaction)
-drivers["temperature"] = torch.tensor(293.15, dtype=torch.float64)   # K
+model, state, _ = build_model(net, species=("no", "no2", "o3"), chemistry=reaction)
+street = model.refs.street
+drivers = initial_drivers(model, values={
+    street.sources: {"main_w": {"no": 2.0e-3, "no2": 4.0e-4}},       # kg/s, by species
+    street.boundary_concentration: {"atmosphere": {"o3": 8.0e-8}},    # ozone aloft, kg/m3
+    "U_ref": torch.tensor(3.0, dtype=DT), "theta_w": torch.tensor(0.0, dtype=DT),
+    "h_abl": torch.tensor(800.0, dtype=DT),
+    "J_NO2": torch.tensor(5.0e-3, dtype=DT),                          # photolysis, 1/s
+    "temperature": torch.tensor(293.15, dtype=DT),                    # K
+})
 solved = street_steady(model, state, drivers, reaction=reaction, tol=1e-18, max_iter=200)
+print(street.concentration.named(solved[street.concentration])["main_w"].shape)  # NO, NO2, O3
+```
+
+```text
+torch.Size([3])
 ```
 
 `photostationary_for_streets(species, *, preset="sirane", no_o3_rate=None, floor_ppb=None,

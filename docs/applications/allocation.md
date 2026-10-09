@@ -32,6 +32,8 @@ from noodl.layers.allocation import AllocatedFlowLayer
 
 ![A request clipped by arc capacity and receiver headroom, and several edges sharing one node's headroom](../assets/app-allocation.svg)
 
+Every type this application offers — what it does and how to call it — is listed in its [catalogue](../catalogue/wsimod.md). It is set up and run like every other model; see [Using noodl](../usage.md).
+
 ## A worked example
 
 ```python
@@ -85,7 +87,7 @@ drivers = wsimod.initial_drivers(model, values={"wsimod.requests": {"baseflow": 
 state = model.step(state, drivers, dt=86400.0)
 ```
 
-See [Setting up a model](../concepts/setup.md).
+See [Using noodl](../usage.md).
 
 ## The API
 
@@ -97,7 +99,7 @@ first come, first served, and this layer shares preference-proportionally (see
 
 `AllocatedFlowLayer` has exactly two public methods.
 
-```python
+```py
 AllocatedFlowLayer(
     net, name, kind, *,
     s_max,            # per-node storage ceiling, trailing shape (net.n,); inf for unbounded

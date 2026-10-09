@@ -134,11 +134,12 @@ them by position, give values by node name and check them before running:
 
 ```python
 th = model.refs.thermal
-drivers = model.drivers_from({th.sources: {"room": 500.0}, th.x_boundary: {"ambient": 283.15}})
+drivers = model.drivers_from({th.sources: {"room": 500.0},
+                              th.boundary_temperature: {"ambient": 283.15}})
 model.check(state, drivers).raise_for_errors(strict=True)
 ```
 
-[Setting up a model](concepts/setup.md) is the complete recipe, the same for every application.
+[Using noodl](usage.md) is the complete recipe, the same for every application.
 
 ## Where to go from here
 

@@ -41,6 +41,9 @@ Drivers = dict[str, Tensor]
 
 @dataclass(frozen=True)
 class Manhole:
+    """A manhole: `invert` and `ground` elevations (m), a constant lateral `inflow`
+    (m3/s) and, for storage, its `surface_area` (m2)."""
+
     name: str
     invert: float
     ground: float | None = None
@@ -50,12 +53,17 @@ class Manhole:
 
 @dataclass(frozen=True)
 class Outfall:
+    """An outfall, where the network discharges: its `invert` elevation (m)."""
+
     name: str
     invert: float
 
 
 @dataclass(frozen=True)
 class Pipe:
+    """A conduit from manhole `u` to `v`: `length` and `diameter` (m), Manning's `n`
+    and bed `slope` (m/m)."""
+
     name: str
     u: str
     v: str
