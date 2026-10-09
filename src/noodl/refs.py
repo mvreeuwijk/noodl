@@ -113,6 +113,9 @@ class Field(str):
         for alias, i in (aliases or {}).items():
             index.setdefault(alias, i)
         self._index = index
+        # The physical attribute name `LayerRef` exposes this key under, when it has one
+        # (`"temperature"` for `"thermal.x"`); set by `LayerRef`.
+        self.attribute: str | None = None
         return self
 
     # A Field is a key first: pickle and copy it as the plain string it is equal to, so
@@ -146,8 +149,9 @@ class Field(str):
     def describe(self) -> str:
         """Several lines: the key, its order and labels, units and whether it is required."""
         shown = ", ".join(map(repr, self.labels[:8])) + (", ..." if len(self.labels) > 8 else "")
+        name = f"{self.layer}.{self.attribute} = " if self.attribute and self.layer else ""
         lines = [
-            f"{str(self)!r} ({self.role}, {self.required}): {self.description}",
+            f"{name}{str(self)!r} ({self.role}, {self.required}): {self.description}",
             f"  {self.ordering}, trailing shape {self.trailing}: [{shown}]",
         ]
         if self.species:
@@ -525,31 +529,60 @@ class LayerRef:
         self.state = state
         self.inputs = inputs
         self.flow_owner = flow_owner
+        # PHYSICAL names. The key suffixes ("x", "phi", "s", "q") are the solver's; the
+        # attributes a user writes should name the physics: `thermal.temperature`,
+        # `species.mass_fraction`, `water.head`, `wsimod.storage`. They come from the
+        # layer's own `quantity` tag, so every application gets them without code of its
+        # own; the short suffix names stay as aliases.
+        q = self.quantity if self.quantity not in ("", "potential", "scalar") else None
+        physical: dict[str, str] = {}
+        if kind == "potential":
+            if q:
+                physical.update({q: "phi", f"boundary_{q}": "phi_boundary"})
+            physical["flow"] = "q"
+        elif kind == "transport":
+            if q:
+                physical.update({q: "x", f"boundary_{q}": "x_boundary"})
+            if "flows" in inputs:
+                physical["flow"] = "flows"
+        else:
+            physical.update({"storage": "s", "flow": "q"})
+        fields = {**state, **inputs}
+        self.physical = {p: s for p, s in physical.items() if p not in fields}
+        for p, s in self.physical.items():
+            fields[s].attribute = p
 
     @property
     def fields(self) -> dict[str, Field]:
-        """Every key of this layer, state then inputs, by short name."""
+        """Every key of this layer, state then inputs, by short (suffix) name."""
         return {**self.state, **self.inputs}
 
-    def __getattr__(self, attr: str) -> Field:
-        if attr.startswith("_") or attr in ("state", "inputs"):
-            raise AttributeError(attr)
+    def _names(self) -> dict[str, Field]:
         fields = {**self.__dict__.get("state", {}), **self.__dict__.get("inputs", {})}
-        if attr in fields:
-            return fields[attr]
+        named = {p: fields[s] for p, s in self.__dict__.get("physical", {}).items()}
+        return {**named, **fields}
+
+    def __getattr__(self, attr: str) -> Field:
+        if attr.startswith("_") or attr in ("state", "inputs", "physical"):
+            raise AttributeError(attr)
+        names = self._names()
+        if attr in names:
+            return names[attr]
+        hint = difflib.get_close_matches(attr, list(names), 1, 0.6)
         raise AttributeError(
-            f"{self.kind} layer {self.__dict__.get('name')!r} has no key {attr!r}; its keys "
-            f"are {sorted(fields)}"
+            f"{self.kind} layer {self.__dict__.get('name')!r} has no key {attr!r}"
+            + (f"; did you mean {hint[0]!r}?" if hint else "")
+            + f" (its keys: {sorted(names)})"
         )
 
     def __dir__(self):
-        return sorted(set(super().__dir__()) | set(self.state) | set(self.inputs))
+        return sorted(set(super().__dir__()) | set(self._names()))
 
     def __repr__(self) -> str:
         unit = f" [{self.unit}]" if self.unit else ""
         return (
             f"LayerRef({self.name!r}, {self.kind}, {self.quantity or '?'}{unit}; "
-            f"state {sorted(self.state)}, inputs {sorted(self.inputs)})"
+            f"keys {sorted(self._names())})"
         )
 
     def describe(self) -> str:

@@ -59,31 +59,37 @@ model = build_model(
 
 # 2. Initialise, by name
 th, co2 = model.refs.thermal, model.refs.species
-state = initial_state(model, values={co2.x: {"A": 6e-4, "B": 6e-4}})
+state = initial_state(model, values={co2.mass_fraction: {"A": 6e-4, "B": 6e-4}})
 drivers = initial_drivers(model, values={
-    th.x_boundary: {"ambient": 283.15},
+    th.boundary_temperature: {"ambient": 283.15},
     th.sources: {"A": 1000.0},            # W into room A
-    co2.x_boundary: {"ambient": 6e-4},
+    co2.boundary_mass_fraction: {"ambient": 6e-4},
 })
 
 # 3. Check, then run
 model.check(state, drivers).raise_for_errors(strict=True)   # warnings fail too
 for _ in range(6):
     state = model.step(state, drivers, dt=600.0)
-print({room: round(float(T), 2) for room, T in th.x.named(state[th.x]).items()})
+T = th.temperature.named(state[th.temperature])
+print({room: round(float(value), 2) for room, value in T.items()})
 ```
 
 ```text
 {'A': 304.13, 'B': 300.93}
 ```
 
-`model.refs` holds one reference per layer. Its attributes are the layer's keys
-(`th.x`, `th.sources`, `th.x_boundary`, ...), and each key is a plain string
-(`th.sources == "thermal.sources"`) that also knows its layout:
+`model.refs` holds one reference per layer. Its attributes are the layer's keys, named
+for the physics the layer carries -- `th.temperature`, `th.boundary_temperature`,
+`th.sources`, `co2.mass_fraction`; `.pressure` or `.head` and `.flow` on an airflow or
+water layer, `.concentration` on a street or sewer quality layer, `.storage` and
+`.requests` on an allocation layer. The names come from each layer's `quantity`, so
+every application has them. Each key is a plain string
+(`th.temperature == "thermal.x"`, the solver's own spelling, which also works as
+`th.x`) that also knows its layout:
 
 ```python
 print(th.sources.ordering, th.sources.labels)
-print(th.x.ordering, th.x.labels, th.x.unit)
+print(th.temperature.ordering, th.temperature.labels, th.temperature.unit)
 ```
 
 ```text
