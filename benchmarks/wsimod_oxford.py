@@ -1,11 +1,11 @@
-"""WSIMOD demonstration: batched `CapacitatedTransferLayer` throughput on the
+"""WSIMOD demonstration: batched `AllocatedFlowLayer` throughput on the
 `oxford_demo` topology.
 
 NOT a fair batched-vs-unbatched speedup claim: WSIMOD itself runs exactly one instance of
 this topology in ~4 s (its own recursive push/pull message-chaining, single-threaded). This
 script instead reports noodl's own wall-clock for `B` BATCHED instances of the SAME
 21-arc, 18-node topology and the SAME 1,456-timestep length, run through
-`CapacitatedTransferLayer` in hard-clip mode -- a sanity number in the same spirit as
+`AllocatedFlowLayer` in hard-clip mode -- a sanity number in the same spirit as
 `benchmarks/sewer_diurnal.py` and `benchmarks/water_eps.py` rows, stated as
 such rather than framed as a speedup over WSIMOD (no budget is set for this row; only the
 sewer benchmark has a hard budget).
@@ -37,7 +37,7 @@ from pathlib import Path
 
 import torch
 
-from noodl.layers.capacitated import CapacitatedTransferLayer
+from noodl.layers.allocation import AllocatedFlowLayer
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -59,7 +59,7 @@ def build_network() -> tuple[Network, torch.Tensor]:
 def run(batch_size: int) -> float:
     net, c_arc = build_network()
     s_max = torch.full((net.n,), float("inf"), dtype=F64)
-    layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    layer = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
     s = torch.zeros(batch_size, net.n, dtype=F64)
     torch.manual_seed(0)
     r = torch.rand(batch_size, c_arc.numel(), dtype=F64) * c_arc

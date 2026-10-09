@@ -16,7 +16,7 @@
   <text x="88" y="185" font-size="12.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">your physics: branch laws, driving terms, state functions</text>
   <rect x="60" y="220" width="700" height="58" rx="8" fill="#FFFFFF" stroke="#17A398" stroke-width="2"/>
   <text x="88" y="246" font-size="16" fill="#17A398" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Layers</text>
-  <text x="88" y="265" font-size="12.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">potential flow · transport · reaction · capacitated transfer</text>
+  <text x="88" y="265" font-size="12.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">potential flow · transport · reaction · flow allocation</text>
   <rect x="60" y="300" width="700" height="58" rx="8" fill="#FFFFFF" stroke="#1E3A52" stroke-width="2"/>
   <text x="88" y="326" font-size="16" fill="#1E3A52" text-anchor="start" font-weight="600" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">Model</text>
   <text x="88" y="345" font-size="12.5" fill="#7C8A99" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">several layers on one network, stepped together</text>

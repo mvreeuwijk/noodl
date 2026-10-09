@@ -1,7 +1,7 @@
 """Model: several physics layers on one typed graph, stepped together.
 
 Per step: closures update the drivers
-from the current state; every potential layer is solved quasi-steadily; every capacitated
+from the current state; every potential layer is solved quasi-steadily; every allocation
 layer takes its one explicit clip/allocate step; every transport layer is
 advanced (sub-stepped if asked) on the flows of its kinds; reactions are applied, after
 the transport step by default or before it with `reaction_order="before_transport"`.
@@ -10,12 +10,12 @@ the transport step by default or before it with `reaction_order="before_transpor
 changing.
 
 Keys. State: "<layer>.phi" (full-node order), "<layer>.q" (the layer's kind order),
-"<layer>.x" (interior order, (n_i,) or (n_i, K)), "<layer>.s" (a capacitated layer's
+"<layer>.x" (interior order, (n_i,) or (n_i, K)), "<layer>.s" (an allocation layer's
 per-node storage, full-node order; that layer also writes its realised flows to
 "<layer>.q"). Drivers: "<layer>.phi_boundary", "<layer>.x_boundary", optional
 "<layer>.sources" (FULL-node order, zeros on boundary and inactive nodes), optional
 "<layer>.capacity" (a transport layer's per-step capacity override; absent, the
-layer's construction-time capacity stands), "<layer>.requests" (a capacitated layer's
+layer's construction-time capacity stands), "<layer>.requests" (an allocation layer's
 per-edge requested flow, required every step). Closures return driver updates; they may
 not write state keys. A transport layer whose kinds no
 potential layer provides reads its branch flows from the driver "<layer>.q", in the layer's
@@ -48,7 +48,7 @@ from typing import Protocol, runtime_checkable
 
 import torch
 
-from noodl.layers.capacitated import CapacitatedTransferLayer
+from noodl.layers.allocation import AllocatedFlowLayer
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.reaction import Reaction
 from noodl.layers.transport import TransportLayer
@@ -124,8 +124,8 @@ class Model:
     Two couplings (Hensen 1995), chosen with `coupling`:
 
     `"pingpong"` (the default) takes exactly ONE pass per step -- closures, potential solves,
-    capacitated steps, transport steps, reactions -- with the state at the START of the step
-    (the capacitated step sits between the potential solves and the transport steps so that a
+    allocation steps, transport steps, reactions -- with the state at the START of the step
+    (the allocation step sits between the potential solves and the transport steps so that a
     transport layer reading `"<layer>.q"` sees a freshly written flow whichever kind of layer
     wrote it; see `_pass`). It is cheap and it is what a weakly coupled model wants; its
     splitting error is first order in `dt`.
@@ -174,7 +174,7 @@ class Model:
     def __init__(
         self,
         net: Network,
-        layers: Mapping[str, PotentialFlowLayer | TransportLayer | CapacitatedTransferLayer],
+        layers: Mapping[str, PotentialFlowLayer | TransportLayer | AllocatedFlowLayer],
         closures: Sequence[Closure] = (),
         reactions: Sequence[tuple[str, Reaction]] = (),
         coupling: str = "pingpong",
@@ -206,18 +206,18 @@ class Model:
         self.layers = dict(layers)
         self.potential: dict[str, PotentialFlowLayer] = {}
         self.transport: dict[str, TransportLayer] = {}
-        self.capacitated: dict[str, CapacitatedTransferLayer] = {}
+        self.allocation: dict[str, AllocatedFlowLayer] = {}
         for name, layer in self.layers.items():
             if isinstance(layer, PotentialFlowLayer):
                 self.potential[name] = layer
             elif isinstance(layer, TransportLayer):
                 self.transport[name] = layer
-            elif isinstance(layer, CapacitatedTransferLayer):
-                self.capacitated[name] = layer
+            elif isinstance(layer, AllocatedFlowLayer):
+                self.allocation[name] = layer
             else:
                 raise TypeError(
                     f"Model: layer {name!r} is a {type(layer).__name__}, not a "
-                    f"PotentialFlowLayer, TransportLayer or CapacitatedTransferLayer"
+                    f"PotentialFlowLayer, TransportLayer or AllocatedFlowLayer"
                 )
             if layer.net is not net:
                 raise ValueError(
@@ -233,7 +233,7 @@ class Model:
                 pn for pn, pl in self.potential.items()
                 if all(k in pl.kinds for k in tl.flow_kinds)
             ] + [
-                cn for cn, cl in self.capacitated.items()
+                cn for cn, cl in self.allocation.items()
                 if all(k in cl.kinds for k in tl.flow_kinds)
             ]
             # Driver-prescribed flows. Two potential layers both
@@ -506,10 +506,10 @@ class Model:
         for the same flows -- and is refused by name rather than resolved by a precedence
         rule nobody would remember.
 
-        `__init__`'s ownership scan also lets a `CapacitatedTransferLayer` become a
+        `__init__`'s ownership scan also lets an `AllocatedFlowLayer` become a
         transport layer's flow owner (it writes `"<name>.q"` in the same key convention).
-        Reading those flows would need `CapacitatedTransferLayer.flows_of_kind`, which is
-        not built (species/quality transport on capacitated flows):
+        Reading those flows would need `AllocatedFlowLayer.flows_of_kind`, which is
+        not built (species/quality transport on allocated flows):
         refused here by name rather than left to raise a bare `KeyError` off
         `self.potential[owner]`.
         """
@@ -518,11 +518,11 @@ class Model:
         key = self.flow_driver_of[name]
         if owner is not None:
             # Checked BEFORE the both-sources refusal below, whose message says "potential
-            # layer" and would be factually wrong about a capacitated owner.
-            if owner in self.capacitated:
+            # layer" and would be factually wrong about an allocation owner.
+            if owner in self.allocation:
                 raise NotImplementedError(
                     f"Model: transport layer {name!r} advects on kinds {layer.flow_kinds}, "
-                    f"which capacitated layer {owner!r} provides; reading a capacitated "
+                    f"which allocation layer {owner!r} provides; reading an allocation "
                     f"layer's flows into a transport layer is not implemented. "
                     f"Drive {name!r} from the "
                     f"driver {key!r} instead, or give its kinds to a potential layer"
@@ -551,9 +551,9 @@ class Model:
         t: float | None = None, boundary_transfers: bool | Collection[str] = False,
         produced: list[str] | None = None,
     ) -> tuple[State, dict, Drivers]:
-        """One closures -> potential -> capacitated -> transport -> reactions pass (reactions
+        """One closures -> potential -> allocation -> transport -> reactions pass (reactions
         before transport under `reaction_order="before_transport"`);
-        `dt=None` means steady (and is refused outright by a model owning a capacitated
+        `dt=None` means steady (and is refused outright by a model owning an allocation
         layer, which is inherently discrete-time).
 
         `t` is the caller's own start-of-step time, if it tracks one; both `dt` and `t` are
@@ -619,12 +619,12 @@ class Model:
             new[f"{name}.phi"], new[f"{name}.q"] = phi, q
             made += [f"{name}.phi", f"{name}.q"]
             diag[name] = d
-        if self.capacitated and dt is None:
+        if self.allocation and dt is None:
             raise ValueError(
                 "Model: a steady (dt=None) pass has no defined meaning for a "
-                "CapacitatedTransferLayer, which is inherently discrete-time"
+                "AllocatedFlowLayer, which is inherently discrete-time"
             )
-        for name, layer in self.capacitated.items():
+        for name, layer in self.allocation.items():
             # `base`, not `state` -- the same step-start rule the comment above states for
             # closure-carried state and the transport loop below follows for `"<layer>.x"`:
             # a layer that INTEGRATES its own state must advance from the STEP-START state
@@ -633,7 +633,7 @@ class Model:
             s_prev = base.get(f"{name}.s")
             if s_prev is None:
                 raise KeyError(
-                    f"Model: state {name + '.s'!r} is required to step capacitated "
+                    f"Model: state {name + '.s'!r} is required to step allocation "
                     f"layer {name!r}"
                 )
             cd: dict = {}
@@ -914,7 +914,7 @@ class Model:
           is the one key a closure may legitimately return unchanged, which would be that
           same unit row. Its gradient path survives regardless, because the differentiable
           pass reads it from `state` itself (`step_from=state`), graph and all -- as do the
-          transport and capacitated steps, which advance from `state` for the same reason.
+          transport and allocation steps, which advance from `state` for the same reason.
           (A closure-carried key MISSING from the step-start state is the one case the
           pinning does not cover; there the pass reads the previous pass's value, and holding it
           fixed here drops a path that only exists because that key was not seeded in the first
@@ -1121,17 +1121,17 @@ class Model:
         exactly as they are outside `steady`. A model with a reaction is therefore at zero
         residual at `steady`'s fixed point, not at the reaction's.
 
-        A model owning a `CapacitatedTransferLayer` is REFUSED by name, for the same reason
+        A model owning an `AllocatedFlowLayer` is REFUSED by name, for the same reason
         `_pass` refuses a steady (`dt=None`) pass: this method reports the balance whose zero
         `steady` converges to, and a clip/allocate layer is inherently discrete-time -- it has
         no steady meaning to report. Returning the other layers' residuals and silently
-        omitting the capacitated one would be a balance over PART of the model presented as
+        omitting the allocation one would be a balance over PART of the model presented as
         the model's, which is worse than no answer.
         """
-        if self.capacitated:
+        if self.allocation:
             raise ValueError(
                 f"Model: residuals() has no defined meaning for a model owning the "
-                f"CapacitatedTransferLayer(s) {sorted(self.capacitated)}, which are "
+                f"AllocatedFlowLayer(s) {sorted(self.allocation)}, which are "
                 f"inherently discrete-time (same refusal as a steady, dt=None, pass); a "
                 f"residual reported over the other layers alone would be a balance over "
                 f"part of the model presented as the whole"
@@ -1202,10 +1202,10 @@ class Model:
         """Boundary nodes, the driver keys that prescribe them, and (potential layers) the net
         flow INTO each boundary node at `state`.
 
-        Capacitated layers contribute NOTHING here, and that is deliberate rather than the
+        Allocation layers contribute NOTHING here, and that is deliberate rather than the
         same omission `residuals` refuses. `Ports` answers "which NODES may a coupled model
         prescribe, and through which key" -- a boundary-node partition with a prescribed
-        potential or boundary composition. A `CapacitatedTransferLayer` has no such partition:
+        potential or boundary composition. An `AllocatedFlowLayer` has no such partition:
         every node is interior, its unbounded nodes (`s_max = inf`) are a storage property and
         not a prescribable port, and its one driver (`"<name>.requests"`) is per EDGE, not per
         node, so it has no well-defined entry in any of `Ports`' four node-keyed dicts. A

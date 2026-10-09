@@ -149,7 +149,7 @@ def test_wrong_length_law_is_refused_at_first_solve():
 def test_model_refuses_a_constitutive_layer_by_name():
     """ConstitutiveLayer is not one of the three layer kinds Model steps -- it is a standalone
     block used directly through solve(), never handed to Model. Model.__init__ refuses any
-    layer that is not a PotentialFlowLayer, TransportLayer or CapacitatedTransferLayer, naming
+    layer that is not a PotentialFlowLayer, TransportLayer or AllocatedFlowLayer, naming
     the layer and its actual type -- which, for a ConstitutiveLayer, names it by name."""
     from noodl.model import Model
 

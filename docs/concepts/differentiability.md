@@ -205,10 +205,10 @@ design variable.
 Not every derivative that exists mathematically is non-zero in the model, and noodl physics documents
 the cases rather than leaving you to discover them.
 
-- **At a hard clip.** `CapacitatedTransferLayer` in `mode="hard"` carries *exactly zero*
+- **At a hard clip.** `AllocatedFlowLayer` in `mode="hard"` carries *exactly zero*
   gradient across a capacity or headroom crossing — the branch choice is discrete. That is the
   entire reason `mode="smooth"` and `mode="projection"` exist. See
-  [Capacitated allocation](../applications/capacitated.md).
+  [Flow allocation](../applications/allocation.md).
 - **At the sharing site, in smooth mode.** Smooth mode's proportional-share formula depends only
   on preference weights and total headroom, never on any individual competitor's request, so the
   cross-gradient $\partial f_i / \partial r_j$ is provably zero. `mode="projection"` routes that
@@ -230,7 +230,7 @@ Every application checks its gradients against finite differences, and the numbe
 |---|---|---|---|
 | Water | demand, roughness, pump $h_0$, tank area | $10^{-6}\times$ scale | 3.2e-6 / 2.5e-10 / 1.0e-6 / 2.8e-9 |
 | Sewer | inflow, `T_head`, leak area, `f_air`, vs Richardson-extrapolated central differences | rel $10^{-6}$ | holds |
-| Capacitated | `torch.autograd.gradcheck` through smooth and projection modes | analytic | holds |
+| Allocation | `torch.autograd.gradcheck` through smooth and projection modes | analytic | holds |
 | Coupling | gradient across the join vs central differences | rel $10^{-5}$ | holds |
 
 If you write your own element, do the same: `torch.autograd.gradcheck` in float64 against a

@@ -17,7 +17,7 @@ one graph.
 | 1 | **Potential solve** | Newton's method on a nodal conservation residual: $A_I\,g(A^\top\phi) = s_I$ | `PotentialFlowLayer` |
 | 2 | **Driver-prescribed** | Handed in directly as a driver value | any `TransportLayer` with no potential owner |
 | 3 | **Closure-computed** | Computed from other state by an arbitrary function | a closure writing `"<layer>.q"` |
-| 4 | **Clip-and-allocate** | A *request*, clipped against arc capacity and receiver headroom — no potential variable anywhere | `CapacitatedTransferLayer` |
+| 4 | **Clip-and-allocate** | A *request*, clipped against arc capacity and receiver headroom — no potential variable anywhere | `AllocatedFlowLayer` |
 
 ![The four flow-determination modes: potential solve, driver-prescribed, closure-computed, clip-and-allocate](../assets/four-modes.svg)
 
@@ -181,7 +181,7 @@ p, q = layer.solve(theta, z0=z0)   # z0: the previous step's own z, for a dynami
 ```
 
 **A standalone block.** `ConstitutiveLayer` is not one of the three layer kinds `Model` steps
-(`PotentialFlowLayer`, `TransportLayer`, `CapacitatedTransferLayer`); `Model` refuses it by name
+(`PotentialFlowLayer`, `TransportLayer`, `AllocatedFlowLayer`); `Model` refuses it by name
 at construction. It is used directly through `solve()`, as the worked-example parity tests do,
 and a dynamic law carries its own previous state in `theta`. Making it steppable inside `Model` would
 need a declared state key and a step contract; nothing needs that yet, so the boundary is
@@ -213,16 +213,16 @@ applications each provide their own `street_steady` / `sewer_steady` helper that
 transport and chemistry together to a joint fixed point. If you have a reaction and you call
 `Model.steady`, you get the transport-only answer.
 
-## `CapacitatedTransferLayer`
+## `AllocatedFlowLayer`
 
 The fourth mode. Each edge carries a *requested* flow; the layer clips it against arc capacity
 and the receiver's remaining storage headroom, sharing proportionally when several edges compete
 for one node's headroom.
 
 ```python
-from noodl.layers.capacitated import CapacitatedTransferLayer
+from noodl.layers.allocation import AllocatedFlowLayer
 
-layer = CapacitatedTransferLayer(
+layer = AllocatedFlowLayer(
     net, "cap", kind="link",
     s_max=storage_ceilings,   # per node, full node order; inf for unbounded
     c_arc=arc_capacities,     # per edge
@@ -236,9 +236,9 @@ s_new, f = layer.step(s, drivers, dt, diagnostics=diag)
 
 In the simplest case the realised flow is just $f = \min(r,\; c_{\text{arc}},\; h)$. The three
 modes differ in gradient behaviour, which is the whole reason there is more than one — see
-[Capacitated allocation](../applications/capacitated.md) for the full treatment.
+[Flow allocation](../applications/allocation.md) for the full treatment.
 
-A capacitated layer is inherently discrete-time. A `Model` owning one refuses a steady pass and
+An allocation layer is inherently discrete-time. A `Model` owning one refuses a steady pass and
 refuses `residuals()` outright, because a clip-and-allocate rule has no steady meaning to report.
 
 ## `Model`
@@ -270,19 +270,19 @@ State and driver keys are namespaced by layer name:
 | `"<layer>.phi"` | Nodal potentials, full node order |
 | `"<layer>.q"` | Branch flows, the layer's kind order |
 | `"<layer>.x"` | Transport state, interior order, `(n_i,)` or `(n_i, K)` |
-| `"<layer>.s"` | A capacitated layer's per-node storage |
+| `"<layer>.s"` | An allocation layer's per-node storage |
 | `"<layer>.phi_boundary"` | Prescribed boundary potentials (driver) |
 | `"<layer>.x_boundary"` | Prescribed boundary transport state (driver) |
 | `"<layer>.sources"` | Nodal sources, **full node order** (driver, optional) |
 | `"<layer>.capacity"` | Per-step capacity override (driver, optional) |
-| `"<layer>.requests"` | A capacitated layer's per-edge request (driver, required) |
+| `"<layer>.requests"` | An allocation layer's per-edge request (driver, required) |
 
 ### The order within a pass
 
-Closures → potential solves → capacitated steps → transport steps → reactions (reactions before
+Closures → potential solves → allocation steps → transport steps → reactions (reactions before
 the transport steps under `reaction_order="before_transport"`).
 
-The capacitated step sits between the potential solves and the transport steps so that a
+The allocation step sits between the potential solves and the transport steps so that a
 transport layer reading `"<layer>.q"` sees a freshly written flow, whichever kind of layer wrote
 it.
 

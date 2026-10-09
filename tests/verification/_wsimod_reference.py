@@ -1,7 +1,7 @@
 """Instruments a live WSIMOD run to capture per-arc requests and realised flows.
 
 Test-only. WSIMOD is never reimplemented: this module runs WSIMOD's OWN engine on WSIMOD's OWN demo
-models and records what it actually did, so `CapacitatedTransferLayer` can be validated by replay
+models and records what it actually did, so `AllocatedFlowLayer` can be validated by replay
 rather than by re-deriving WSIMOD's node science.
 
 This module is a plain helper, not a test file, so it does not itself guard the
@@ -11,7 +11,7 @@ This module is a plain helper, not a test file, so it does not itself guard the
 Hook point: `Arc.send_push_request`/`send_pull_request` is
 the one place both the per-arc REQUEST (pre-clip, the `vqip` argument) and the REALISED
 transfer (`requested - reply`, or `reply` itself for a pull -- see each wrapper below)
-are visible together, at exactly the per-edge granularity `CapacitatedTransferLayer`'s
+are visible together, at exactly the per-edge granularity `AllocatedFlowLayer`'s
 incidence structure needs. `Arc.get_excess` clips against an ACCUMULATING per-timestep
 `flow_in`, reset only by `end_timestep`, so if an arc sees MORE THAN ONE push/pull event
 within one WSIMOD timestep, each event is captured here as a SEPARATE row -- this
@@ -28,7 +28,7 @@ own push (quickstart `catchment_outflow`: two or three every timestep, 10184 raw
 in 7464 (arc, direction, timestep) rows; oxford: 48995 raw events in 33880 rows, over
 seven arcs). Earlier versions of this docstring claimed one event per row for both.
 Anything replaying these events through one
-`CapacitatedTransferLayer.step` per timestep must therefore ACCUMULATE a `(arc, t)`
+`AllocatedFlowLayer.step` per timestep must therefore ACCUMULATE a `(arc, t)`
 group's rows rather than assign them one at a time -- `tests/verification/
 test_wsimod_parity.py` does exactly that, and the fixture-writing script
 `scripts/regenerate_wsimod_fixtures.py` sums over (arc, DIRECTION, timestep), leaving

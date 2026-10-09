@@ -1,9 +1,9 @@
-"""Tests for CapacitatedTransferLayer: hard-clip mode, registered as a first-class Model layer."""
+"""Tests for AllocatedFlowLayer: hard-clip mode, registered as a first-class Model layer."""
 
 import pytest
 import torch
 
-from noodl.layers.capacitated import CapacitatedTransferLayer
+from noodl.layers.allocation import AllocatedFlowLayer
 from noodl.layers.transport import TransportLayer
 from noodl.model import Model
 from noodl.topology import Network
@@ -27,7 +27,7 @@ def test_construction_rejects_wrong_c_arc_shape():
     s_max = torch.full((net.n,), 10.0, dtype=F64)
     bad_c_arc = torch.tensor([1.0, 2.0, 3.0], dtype=F64)  # 3 edges, network has 2
     with pytest.raises(ValueError, match="c_arc"):
-        CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=bad_c_arc)
+        AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=bad_c_arc)
 
 
 def test_construction_rejects_wrong_s_max_shape():
@@ -35,7 +35,7 @@ def test_construction_rejects_wrong_s_max_shape():
     bad_s_max = torch.full((2,), 10.0, dtype=F64)  # 2, network has 3 nodes
     c_arc = torch.full((2,), 1.0, dtype=F64)
     with pytest.raises(ValueError, match="s_max"):
-        CapacitatedTransferLayer(net, "cap", "link", s_max=bad_s_max, c_arc=c_arc)
+        AllocatedFlowLayer(net, "cap", "link", s_max=bad_s_max, c_arc=c_arc)
 
 
 def test_construction_rejects_unknown_mode():
@@ -43,7 +43,7 @@ def test_construction_rejects_unknown_mode():
     s_max = torch.full((net.n,), 10.0, dtype=F64)
     c_arc = torch.full((2,), 1.0, dtype=F64)
     with pytest.raises(ValueError, match="mode"):
-        CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="bogus")
+        AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="bogus")
 
 
 def test_construction_rejects_smooth_mode_without_tau():
@@ -51,7 +51,7 @@ def test_construction_rejects_smooth_mode_without_tau():
     s_max = torch.full((net.n,), 10.0, dtype=F64)
     c_arc = torch.full((2,), 1.0, dtype=F64)
     with pytest.raises(ValueError, match="requires tau"):
-        CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="smooth")
+        AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="smooth")
 
 
 @pytest.mark.parametrize("tau", [0.0, -1e-3])
@@ -63,7 +63,7 @@ def test_construction_rejects_non_positive_tau(tau):
     s_max = torch.full((net.n,), 10.0, dtype=F64)
     c_arc = torch.full((2,), 1.0, dtype=F64)
     with pytest.raises(ValueError, match="tau must be > 0"):
-        CapacitatedTransferLayer(
+        AllocatedFlowLayer(
             net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="smooth", tau=tau
         )
 
@@ -73,7 +73,7 @@ def test_construction_rejects_n_passes_below_one():
     s_max = torch.full((net.n,), 10.0, dtype=F64)
     c_arc = torch.full((2,), 1.0, dtype=F64)
     with pytest.raises(ValueError, match="n_passes"):
-        CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc, n_passes=0)
+        AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc, n_passes=0)
 
 
 def test_construction_rejects_edge_kind_absent_from_network():
@@ -81,7 +81,7 @@ def test_construction_rejects_edge_kind_absent_from_network():
     s_max = torch.full((net.n,), 10.0, dtype=F64)
     c_arc = torch.full((2,), 1.0, dtype=F64)
     with pytest.raises(ValueError, match="no edges"):
-        CapacitatedTransferLayer(net, "cap", "pipe", s_max=s_max, c_arc=c_arc)
+        AllocatedFlowLayer(net, "cap", "pipe", s_max=s_max, c_arc=c_arc)
 
 
 def test_construction_rejects_wrong_preference_shape():
@@ -90,7 +90,7 @@ def test_construction_rejects_wrong_preference_shape():
     c_arc = torch.full((2,), 1.0, dtype=F64)
     bad_preference = torch.full((3,), 1.0, dtype=F64)  # 3 edges, network has 2
     with pytest.raises(ValueError, match="preference has trailing size"):
-        CapacitatedTransferLayer(
+        AllocatedFlowLayer(
             net, "cap", "link", s_max=s_max, c_arc=c_arc, preference=bad_preference
         )
 
@@ -103,7 +103,7 @@ def test_construction_rejects_non_positive_preference():
     s_max = torch.full((net.n,), 10.0, dtype=F64)
     c_arc = torch.full((2,), 1.0, dtype=F64)
     with pytest.raises(ValueError, match="preference must be > 0"):
-        CapacitatedTransferLayer(
+        AllocatedFlowLayer(
             net, "cap", "link", s_max=s_max, c_arc=c_arc,
             preference=torch.tensor([0.0, 1.0], dtype=F64),
         )
@@ -115,7 +115,7 @@ def test_step_rejects_wrong_shaped_requests_driver_by_name():
     net = _chain_net()
     s_max = torch.full((net.n,), 10.0, dtype=F64)
     c_arc = torch.full((2,), 1.0, dtype=F64)
-    layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    layer = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
     s0 = torch.zeros(net.n, dtype=F64)
     with pytest.raises(ValueError, match=r"cap.requests.*trailing shape \(2,\)"):
         layer.step(s0, {"cap.requests": torch.ones(3, dtype=F64)}, dt=1.0)
@@ -125,7 +125,7 @@ def test_step_hard_clip_below_capacity_passes_request_through():
     net = _chain_net()
     s_max = torch.full((net.n,), 100.0, dtype=F64)
     c_arc = torch.full((2,), 10.0, dtype=F64)
-    layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    layer = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
     s0 = torch.zeros(net.n, dtype=F64)
     drivers = {"cap.requests": torch.tensor([2.0, 2.0], dtype=F64)}
     s1, f = layer.step(s0, drivers, dt=1.0)
@@ -138,7 +138,7 @@ def test_step_hard_clip_above_arc_capacity_is_capped():
     net = _chain_net()
     s_max = torch.full((net.n,), 100.0, dtype=F64)
     c_arc = torch.full((2,), 1.5, dtype=F64)
-    layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    layer = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
     s0 = torch.zeros(net.n, dtype=F64)
     drivers = {"cap.requests": torch.tensor([5.0, 5.0], dtype=F64)}
     _, f = layer.step(s0, drivers, dt=1.0)
@@ -150,7 +150,7 @@ def test_step_hard_clip_above_receiver_headroom_is_capped():
     # C already at s_max=1.0, so the B->C edge's headroom is 0.
     s_max = torch.tensor([100.0, 100.0, 1.0], dtype=F64)
     c_arc = torch.full((2,), 10.0, dtype=F64)
-    layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    layer = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
     s0 = torch.tensor([0.0, 0.0, 1.0], dtype=F64)
     drivers = {"cap.requests": torch.tensor([2.0, 2.0], dtype=F64)}
     _, f = layer.step(s0, drivers, dt=1.0)
@@ -179,7 +179,7 @@ def test_step_receiver_headroom_clip_is_a_rate_at_dt_other_than_one(dt, s_max_c)
     net = _chain_net()
     s_max = torch.tensor([1e9, 1e9, s_max_c], dtype=F64)
     c_arc = torch.full((2,), 1e9, dtype=F64)
-    layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    layer = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
     s0 = torch.zeros(net.n, dtype=F64)
     # B->C asks for far more than C can take; A->B asks for nothing, so C's fill comes
     # from exactly one edge and is hand-computable.
@@ -208,7 +208,7 @@ def test_step_reports_overflow_when_storage_starts_above_s_max():
     net = _chain_net()
     s_max = torch.tensor([100.0, 100.0, 3.0], dtype=F64)
     c_arc = torch.full((2,), 10.0, dtype=F64)
-    layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    layer = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
     s0 = torch.tensor([0.0, 0.0, 5.0], dtype=F64)
     drivers = {"cap.requests": torch.tensor([2.0, 2.0], dtype=F64)}
     diag: dict = {}
@@ -223,32 +223,32 @@ def test_step_missing_request_driver_raises_keyerror():
     net = _chain_net()
     s_max = torch.full((net.n,), 10.0, dtype=F64)
     c_arc = torch.full((2,), 1.0, dtype=F64)
-    layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    layer = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
     with pytest.raises(KeyError, match="cap.requests"):
         layer.step(torch.zeros(net.n, dtype=F64), {}, dt=1.0)
 
 
-def test_model_registers_capacitated_layer():
+def test_model_registers_allocation_layer():
     net = _chain_net()
     s_max = torch.full((net.n,), 100.0, dtype=F64)
     c_arc = torch.full((2,), 10.0, dtype=F64)
-    layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    layer = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
     model = Model(net, {"cap": layer})
-    assert model.capacitated == {"cap": layer}
+    assert model.allocation == {"cap": layer}
 
 
-def test_model_refuses_capacitated_layer_as_a_transport_flow_owner_by_name():
-    """`Model.__init__`'s ownership scan lets a capacitated layer own a transport layer's
+def test_model_refuses_allocation_layer_as_a_transport_flow_owner_by_name():
+    """`Model.__init__`'s ownership scan lets an allocation layer own a transport layer's
     flow kinds (it writes `"<name>.q"` in the same key convention), but reading those flows
-    would need `CapacitatedTransferLayer.flows_of_kind` -- species/quality transport on
-    capacitated flows, deliberately not built. `_kind_flows` must not fall through to
+    would need `AllocatedFlowLayer.flows_of_kind` -- species/quality transport on
+    allocated flows, deliberately not built. `_kind_flows` must not fall through to
     `self.potential[owner]` and raise a bare `KeyError` naming nothing; it must refuse by
     name instead.
     """
     net = _chain_net()
     s_max = torch.full((net.n,), 100.0, dtype=F64)
     c_arc = torch.full((2,), 10.0, dtype=F64)
-    cap = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    cap = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
     # B and C are the active interior of the "link" edges once A is the boundary.
     spec = TransportLayer(
         net, "spec", capacity=torch.tensor([50.0, 50.0], dtype=F64), flow_kind="link",
@@ -264,30 +264,30 @@ def test_model_refuses_capacitated_layer_as_a_transport_flow_owner_by_name():
         "cap.requests": torch.tensor([2.0, 2.0], dtype=F64),
         "spec.x_boundary": torch.tensor([1e-3], dtype=F64),
     }
-    with pytest.raises(NotImplementedError, match="capacitated layer 'cap'"):
+    with pytest.raises(NotImplementedError, match="allocation layer 'cap'"):
         model.step(state, drivers, dt=1.0)
 
 
-def test_model_refuses_residuals_for_a_model_owning_a_capacitated_layer():
+def test_model_refuses_residuals_for_a_model_owning_a_allocation_layer():
     """`residuals()` reports the balance whose zero `steady()` converges to, and `_pass`
-    already refuses a steady pass for a capacitated layer by name. Silently returning `{}`
+    already refuses a steady pass for an allocation layer by name. Silently returning `{}`
     (or the other layers' balances alone) would present a balance over part of the model as
     the model's."""
     net = _chain_net()
     s_max = torch.full((net.n,), 100.0, dtype=F64)
     c_arc = torch.full((2,), 10.0, dtype=F64)
-    model = Model(net, {"cap": CapacitatedTransferLayer(
+    model = Model(net, {"cap": AllocatedFlowLayer(
         net, "cap", "link", s_max=s_max, c_arc=c_arc
     )})
     with pytest.raises(ValueError, match="residuals"):
         model.residuals({"cap.s": torch.zeros(net.n, dtype=F64)}, {})
 
 
-def test_model_rejects_capacitated_layer_without_dt():
+def test_model_rejects_allocation_layer_without_dt():
     net = _chain_net()
     s_max = torch.full((net.n,), 100.0, dtype=F64)
     c_arc = torch.full((2,), 10.0, dtype=F64)
-    layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    layer = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
     model = Model(net, {"cap": layer})
     state = {"cap.s": torch.zeros(net.n, dtype=F64)}
     drivers = {"cap.requests": torch.tensor([2.0, 2.0], dtype=F64)}
@@ -313,7 +313,7 @@ def test_step_shares_scarce_receiver_headroom_by_preference():
     c_arc = torch.full((4,), 100.0, dtype=F64)
     # preference order matches edge insertion: A->B, A->C, B->D, C->D
     preference = torch.tensor([1.0, 1.0, 2.0, 1.0], dtype=F64)  # B->D favoured 2:1
-    layer = CapacitatedTransferLayer(
+    layer = AllocatedFlowLayer(
         net, "cap", "link", s_max=s_max, c_arc=c_arc, preference=preference,
         n_passes=5,
     )
@@ -369,13 +369,13 @@ def test_step_conserves_with_n_passes_1_vs_5():
     # X requests only 0.5 (below its 1.0 fair share); Y and Z each request far more
     # than theirs, so they are the ones left holding X's unused headroom.
     drivers = {"cap.requests": torch.tensor([0.5, 10.0, 10.0], dtype=F64)}
-    layer_1 = CapacitatedTransferLayer(
+    layer_1 = AllocatedFlowLayer(
         net, "cap", "link", s_max=s_max, c_arc=c_arc, preference=preference, n_passes=1
     )
-    layer_2 = CapacitatedTransferLayer(
+    layer_2 = AllocatedFlowLayer(
         net, "cap", "link", s_max=s_max, c_arc=c_arc, preference=preference, n_passes=2
     )
-    layer_5 = CapacitatedTransferLayer(
+    layer_5 = AllocatedFlowLayer(
         net, "cap", "link", s_max=s_max, c_arc=c_arc, preference=preference, n_passes=5
     )
     _, f1 = layer_1.step(torch.zeros(net.n, dtype=F64), drivers, dt=1.0)
@@ -416,11 +416,11 @@ def test_smooth_mode_converges_to_hard_clip_as_tau_shrinks():
     s_max = torch.full((net.n,), 100.0, dtype=F64)
     c_arc = torch.full((2,), 1.5, dtype=F64)
     drivers = {"cap.requests": torch.tensor([5.0, 5.0], dtype=F64)}
-    hard = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="hard")
+    hard = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="hard")
     _, f_hard = hard.step(torch.zeros(net.n, dtype=F64), drivers, dt=1.0)
     errors = []
     for tau in (1.0, 0.1, 1e-4):
-        smooth = CapacitatedTransferLayer(
+        smooth = AllocatedFlowLayer(
             net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="smooth", tau=tau
         )
         _, f_smooth = smooth.step(torch.zeros(net.n, dtype=F64), drivers, dt=1.0)
@@ -433,7 +433,7 @@ def test_smooth_mode_is_differentiable_through_requests():
     net = _chain_net()
     s_max = torch.full((net.n,), 100.0, dtype=F64)
     c_arc = torch.full((2,), 1.5, dtype=F64)
-    layer = CapacitatedTransferLayer(
+    layer = AllocatedFlowLayer(
         net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="smooth", tau=0.1
     )
     r = torch.tensor([5.0, 5.0], dtype=F64, requires_grad=True)
@@ -455,7 +455,7 @@ def test_smooth_mode_shares_scarce_receiver_headroom_by_preference():
     c_arc = torch.full((4,), 100.0, dtype=F64)
     preference = torch.tensor([1.0, 1.0, 2.0, 1.0], dtype=F64)
     tau = 0.01
-    layer = CapacitatedTransferLayer(
+    layer = AllocatedFlowLayer(
         net,
         "cap",
         "link",
@@ -484,9 +484,9 @@ def test_projection_mode_converges_to_hard_clip_as_it_gets_tighter():
     s_max = torch.full((net.n,), 100.0, dtype=F64)
     c_arc = torch.full((2,), 1.5, dtype=F64)
     drivers = {"cap.requests": torch.tensor([5.0, 5.0], dtype=F64)}
-    hard = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="hard")
+    hard = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="hard")
     _, f_hard = hard.step(torch.zeros(net.n, dtype=F64), drivers, dt=1.0)
-    projection = CapacitatedTransferLayer(
+    projection = AllocatedFlowLayer(
         net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="projection"
     )
     _, f_proj = projection.step(torch.zeros(net.n, dtype=F64), drivers, dt=1.0)
@@ -497,7 +497,7 @@ def test_projection_mode_is_differentiable_through_requests():
     net = _chain_net()
     s_max = torch.full((net.n,), 100.0, dtype=F64)
     c_arc = torch.full((2,), 1.5, dtype=F64)
-    layer = CapacitatedTransferLayer(
+    layer = AllocatedFlowLayer(
         net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="projection"
     )
     r = torch.tensor([5.0, 5.0], dtype=F64, requires_grad=True)
@@ -513,7 +513,7 @@ def test_gradcheck_smooth_and_projection_on_diamond():
     c_arc = torch.full((4,), 100.0, dtype=F64)
     preference = torch.full((4,), 1.0, dtype=F64)
     for mode, kwargs in (("smooth", {"tau": 0.1}), ("projection", {})):
-        layer = CapacitatedTransferLayer(
+        layer = AllocatedFlowLayer(
             net, "cap", "link", s_max=s_max, c_arc=c_arc, preference=preference,
             mode=mode, **kwargs,
         )
@@ -543,7 +543,7 @@ def test_projection_mode_sharing_has_nonzero_cross_gradient():
     s_max = torch.tensor([100.0, 100.0, 100.0, 3.0], dtype=F64)
     c_arc = torch.full((4,), 100.0, dtype=F64)
     preference = torch.full((4,), 1.0, dtype=F64)
-    layer = CapacitatedTransferLayer(
+    layer = AllocatedFlowLayer(
         net, "cap", "link", s_max=s_max, c_arc=c_arc, preference=preference, mode="projection"
     )
 
@@ -586,7 +586,7 @@ def test_projection_mode_sharing_is_nan_free_under_random_fixtures():
             dtype=F64,
         )
         preference = torch.rand(4, generator=generator, dtype=F64) * 2 + 0.5
-        layer = CapacitatedTransferLayer(
+        layer = AllocatedFlowLayer(
             net, "cap", "link", s_max=s_max, c_arc=c_arc, preference=preference,
             mode="projection",
         )
@@ -600,11 +600,11 @@ def test_projection_mode_sharing_is_nan_free_under_random_fixtures():
         assert torch.isfinite(jac).all(), f"NaN/Inf Jacobian at s_max={s_max}, r0={r0}"
 
 
-def test_model_steps_capacitated_layer_end_to_end():
+def test_model_steps_allocation_layer_end_to_end():
     net = _chain_net()
     s_max = torch.full((net.n,), 100.0, dtype=F64)
     c_arc = torch.full((2,), 10.0, dtype=F64)
-    layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    layer = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
     model = Model(net, {"cap": layer})
     state = {"cap.s": torch.zeros(net.n, dtype=F64)}
     drivers = {"cap.requests": torch.tensor([2.0, 2.0], dtype=F64)}
@@ -623,7 +623,7 @@ def test_clip_projection_matches_box_clamp():
     net = _chain_net()
     s_max = torch.full((net.n,), 100.0, dtype=F64)
     c_arc = torch.full((2,), 1.5, dtype=F64)
-    layer = CapacitatedTransferLayer(
+    layer = AllocatedFlowLayer(
         net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="projection"
     )
     r = torch.tensor([0.5, 2.0, -1.0], dtype=F64)
@@ -632,3 +632,11 @@ def test_clip_projection_matches_box_clamp():
     out = layer._clip_projection(r, headroom, c_arc3)
     expected = torch.clamp(r, torch.zeros_like(r), torch.minimum(c_arc3, headroom))
     assert torch.allclose(out, expected, atol=1e-9)
+
+
+def test_pre_rename_names_are_aliases_of_the_same_class():
+    from noodl.layers import CapacitatedTransferLayer
+    from noodl.layers.capacitated import CapacitatedTransferLayer as from_old_module
+
+    assert CapacitatedTransferLayer is AllocatedFlowLayer
+    assert from_old_module is AllocatedFlowLayer

@@ -22,7 +22,7 @@ Network            a typed multigraph: nodes hold storage, edges carry flow
   +-- Drives       terms added to the potential difference (stack, wind, drag)
   +-- Closures     arbitrary functions of state that produce driver values
   |
-Layers             potential flow, transport, reaction, capacitated transfer
+Layers             potential flow, transport, reaction, flow allocation
   |
 Model              several layers on one network, stepped together
 ```

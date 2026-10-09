@@ -1,4 +1,4 @@
-"""WSIMOD parity: CapacitatedTransferLayer
+"""WSIMOD parity: AllocatedFlowLayer
 replays WSIMOD's own captured per-arc requests and is compared against WSIMOD's own
 realised flows on the SAME topology -- WSIMOD's own hard-clipped output is the reference,
 exactly as pyswmm and EPANET are the references for the sewer and water applications
@@ -46,7 +46,7 @@ its 50000 capacity, so it is NEVER clipped either (confirmed directly against th
 committed `oxford_events.csv`, not assumed: `requested > capacity` is true for zero rows,
 for every arc, in the whole fixture). So the quickstart and oxford checks above both
 only ever exercise the
-capacitated layer's identity path (`min(request, capacity) == request`) for every arc
+allocation layer's identity path (`min(request, capacity) == request`) for every arc
 whose CAPACITY this harness can see -- neither reference demo shipped by
 WSIMOD itself provides a load-bearing test of the hard-clip branch actually clipping
 something on an arc's own `c_arc` capacity. This is a real gap in what these tests
@@ -62,7 +62,7 @@ timesteps (max observed gap ~3.924e6) -- but this is NOT that arc's own capacity
 own internal `treatment_throughput_capacity` / stormwater-tank overflow logic
 (`wsimod/nodes/wtw.py`), a NODE-level throughput constraint this harness does
 not extract (`extract_topology`, `tests/verification/_wsimod_reference.py`, reads only
-`arc.capacity`) and that `CapacitatedTransferLayer` does not model in this test (`s_max`
+`arc.capacity`) and that `AllocatedFlowLayer` does not model in this test (`s_max`
 here is a storage-headroom bound, set to infinity for every node, not a per-step
 throughput-rate cap). `test_oxford_hard_clip_matches_wsimod_realised_flows` below
 excludes this one arc from its strict comparison and documents exactly why at the
@@ -77,7 +77,7 @@ import pandas as pd
 import pytest
 import torch
 
-from noodl.layers.capacitated import CapacitatedTransferLayer
+from noodl.layers.allocation import AllocatedFlowLayer
 from noodl.topology import Network
 
 pytest.importorskip("wsimod")  # only the regeneration script needs it installed to
@@ -110,7 +110,7 @@ def test_quickstart_hard_clip_matches_wsimod_realised_flows():
     net, _node_names, arc_names = _build_network(topology)
     c_arc = torch.tensor([a["capacity"] for a in topology["arcs"]], dtype=F64)
     s_max = torch.full((net.n,), float("inf"), dtype=F64)
-    layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    layer = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
     s = torch.zeros(net.n, dtype=F64)
     arc_index = {name: i for i, name in enumerate(arc_names)}
     max_abs_error = 0.0
@@ -144,8 +144,8 @@ def test_quickstart_smooth_mode_converges_to_hard_clip():
     c_arc = torch.tensor([a["capacity"] for a in topology["arcs"]], dtype=F64)
     s_max = torch.full((net.n,), float("inf"), dtype=F64)
     arc_index = {name: i for i, name in enumerate(arc_names)}
-    hard = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
-    smooth = CapacitatedTransferLayer(
+    hard = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    smooth = AllocatedFlowLayer(
         net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="smooth", tau=1e-3
     )
     s_hard = torch.zeros(net.n, dtype=F64)
@@ -189,8 +189,8 @@ def test_quickstart_projection_mode_converges_to_hard_clip():
     c_arc = torch.tensor([a["capacity"] for a in topology["arcs"]], dtype=F64)
     s_max = torch.full((net.n,), float("inf"), dtype=F64)
     arc_index = {name: i for i, name in enumerate(arc_names)}
-    hard = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
-    projection = CapacitatedTransferLayer(
+    hard = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    projection = AllocatedFlowLayer(
         net, "cap", "link", s_max=s_max, c_arc=c_arc, mode="projection"
     )
     s_hard = torch.zeros(net.n, dtype=F64)
@@ -234,7 +234,7 @@ def test_oxford_hard_clip_matches_wsimod_realised_flows():
     net, _, arc_names = _build_network(topology)
     c_arc = torch.tensor([a["capacity"] for a in topology["arcs"]], dtype=F64)
     s_max = torch.full((net.n,), float("inf"), dtype=F64)
-    layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    layer = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
     s = torch.zeros(net.n, dtype=F64)
     arc_index = {name: i for i, name in enumerate(arc_names)}
     excluded = torch.tensor([name in OXFORD_NODE_CAPACITY_ARCS for name in arc_names])

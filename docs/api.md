@@ -110,9 +110,9 @@ Elements are grouped below by the physics they express, as in
     options:
       members: [Reaction, FirstOrderDecay, Photostationary]
 
-::: noodl.layers.capacitated
+::: noodl.layers.allocation
     options:
-      members: [CapacitatedTransferLayer]
+      members: [AllocatedFlowLayer]
 
 ## Model and coupling
 

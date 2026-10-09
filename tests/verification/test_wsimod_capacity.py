@@ -11,7 +11,7 @@ the harness `_wsimod_reference.capture_events` records what WSIMOD actually did)
    (`Node.push_distributed`, `Node.pull_distributed`, and a `Storage.distribute`-style
    pull-push-return) for a handful of timesteps. Each case asserts from WSIMOD's OWN
    output that the bound it targets actually cut a request (non-vacuousness), then
-   replays the captured per-arc requests through `CapacitatedTransferLayer` at
+   replays the captured per-arc requests through `AllocatedFlowLayer` at
    `dt = 86400 s` (WSIMOD's daily volumes turned into m3/s rates, so the layer's
    volume/rate conversion is exercised too) and compares realised volumes, and storage
    wherever a node's storage changes only through the captured arcs.
@@ -30,7 +30,7 @@ since the last `end_timestep`. Requests within a timestep are therefore served
 first-come-first-served: the per-EVENT split is order dependent, but the per-timestep
 AGGREGATE is `min(sum_k r_k, capacity)` whatever the order (induction on
 `F_k = F_{k-1} + min(r_k, C - F_{k-1})`), and that aggregate is exactly what one
-`CapacitatedTransferLayer.step` computes from the summed request. Likewise a single
+`AllocatedFlowLayer.step` computes from the summed request. Likewise a single
 in-arc filling a `Storage` gives `min(sum_k r_k, capacity, headroom)`. Covered: a push
 clipped by arc capacity (single and several requests per timestep, including an
 order-permutation check); push and pull sharing ONE arc's capacity in the same timestep
@@ -41,7 +41,7 @@ inside WSIMOD's `MAXITER` loop.
 
 **What is NOT the same, pinned rather than hidden.**
 - Several arcs pushing into ONE node with too little headroom: WSIMOD serves them
-  first-come-first-served in call order; `CapacitatedTransferLayer` shares the headroom
+  first-come-first-served in call order; `AllocatedFlowLayer` shares the headroom
   preference-proportionally and order-free. Totals and storage agree; the per-arc split
   does not (`test_competing_pushes_into_one_node_...` pins both). WSIMOD's own
   proportional sharing lives in the SENDER's or PULLER's request sizing
@@ -59,7 +59,7 @@ inside WSIMOD's `MAXITER` loop.
 - Source availability on a pull (`in_port.pull_check`) is WSIMOD node science the layer
   does not model; the scripted pulls stay within the source's storage.
 - `QueueArc`/`DecayArc` travel time and decay, `force=True` pushes, and pollutant
-  vectors are not compared: the layer claims none of them (the capacitated docs page
+  vectors are not compared: the layer claims none of them (the flow allocation docs page
   lists species transport on this layer as out of scope).
 
 **Tolerance.** Both sides are float64 and do the same arithmetic up to association
@@ -89,7 +89,7 @@ from wsimod.nodes.storage import Storage  # noqa: E402
 from wsimod.nodes.waste import Waste  # noqa: E402
 from wsimod.orchestration.model import Model  # noqa: E402
 
-from noodl.layers.capacitated import CapacitatedTransferLayer  # noqa: E402
+from noodl.layers.allocation import AllocatedFlowLayer  # noqa: E402
 from noodl.topology import Network  # noqa: E402
 from tests.verification._wsimod_reference import capture_events  # noqa: E402
 
@@ -190,7 +190,7 @@ def _replay(run: _Run, req: torch.Tensor):
         [n.initial_storage if isinstance(n, Storage) else 0.0 for n in run.nodes], dtype=F64
     )
     c_arc = torch.tensor([a.capacity for a in run.arcs], dtype=F64) / DT
-    layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
+    layer = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=c_arc)
     flows, states = [], []
     for t in range(req.shape[0]):
         s, f = layer.step(s, {"cap.requests": req[t] / DT}, dt=DT)
@@ -436,7 +436,7 @@ def test_quickstart_tight_capacities_match_wsimod_realised_flows():
     for arc in topology["arcs"]:
         net.add_edge(arc["source"], arc["target"], kind="link", name=arc["name"])
     s_max = torch.full((net.n,), float("inf"), dtype=F64)
-    layer = CapacitatedTransferLayer(net, "cap", "link", s_max=s_max, c_arc=cap / DT)
+    layer = AllocatedFlowLayer(net, "cap", "link", s_max=s_max, c_arc=cap / DT)
     s = torch.zeros(net.n, dtype=F64)
     f = torch.empty_like(req)
     for t in range(n_t):

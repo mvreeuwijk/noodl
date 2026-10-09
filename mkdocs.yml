@@ -63,7 +63,7 @@ nav:
           - Reading and writing cases: applications/street_aq_cases.md
       - Sewers: applications/sewer.md
       - Water distribution: applications/water.md
-      - Capacitated allocation: applications/capacitated.md
+      - Flow allocation: applications/allocation.md
       - Coupling: applications/coupling.md
   - Verification: verification.md
   - File formats:
