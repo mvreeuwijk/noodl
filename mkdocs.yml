@@ -53,6 +53,7 @@ nav:
       - Networks: concepts/networks.md
       - Elements and drives: concepts/elements.md
       - Layers and models: concepts/layers.md
+      - Setting up a model: concepts/setup.md
       - Solvers: concepts/solvers.md
       - Differentiability: concepts/differentiability.md
   - Applications:
@@ -63,7 +64,7 @@ nav:
           - Reading and writing cases: applications/street_aq_cases.md
       - Sewers: applications/sewer.md
       - Water distribution: applications/water.md
-      - Capacitated allocation: applications/capacitated.md
+      - Flow allocation: applications/allocation.md
       - Coupling: applications/coupling.md
   - Verification: verification.md
   - File formats:

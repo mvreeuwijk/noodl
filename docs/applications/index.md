@@ -3,7 +3,9 @@
 noodl physics is one solver. The applications below are physical systems modelled with it, each a thin
 layer of domain physics (its elements, drives and closures) over the shared core. Any of them can
 be built directly in Python, as each page shows, or, where a reader exists, read from a model
-file; see [File formats](../formats/index.md).
+file; see [File formats](../formats/index.md). Every application is initialised the same way,
+with `initial_state(model, values=...)` and `initial_drivers(model, values=...)` by name; see
+[Setting up a model](../concepts/setup.md).
 
 | Application | Physical system | Flow determination | Entry point |
 |---|---|---|---|
@@ -11,7 +13,7 @@ file; see [File formats](../formats/index.md).
 | [Street air quality](street_aq.md) | Urban air quality, canyon exchange, routing | Closure: flows computed from the wind aloft | `build_model`, `StreetNetwork` |
 | [Sewers](sewer.md) | Gravity hydraulics, headspace air, sulfide | Continuity on a tree for the water; Newton potential for the headspace air | `build_model` |
 | [Water distribution](water.md) | Pressurised mains, pumps, tanks, demand | Potential: Newton on hydraulic head | `build_model` |
-| [Capacitated allocation](capacitated.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Capacitated clip | `CapacitatedTransferLayer` |
+| [Flow allocation](allocation.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer`, `wsimod.build_model` |
 | [Coupling](coupling.md) | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
 
 ![The four flow-determination modes](../assets/four-modes.svg)
@@ -30,7 +32,7 @@ all four:
 - The **sewer** application's water side exploits the fact that a tree has an empty cycle space:
   continuity alone fixes every discharge, in closed form, with no solve. Its *headspace air*
   side, on the same graph, is a full Newton potential solve.
-- The **capacitated allocation** application has no potential and no continuity solve — a
+- The **flow allocation** application has no potential and no continuity solve — a
   request, clipped against capacity and headroom.
 
 And they share machinery in ways that would be coincidence if the abstraction were wrong. The
@@ -39,14 +41,14 @@ building application uses for room air. The water application's Darcy-Weisbach p
 framework's own `Duct` element in volumetric form (`friction="colebrook"`), though by default
 they follow EPANET's own composite friction law. The sewer and water `.inp` readers share one
 tokenizer. The `solve_monotone` root-finder that inverts Manning's equation for sewer depth also
-solves the per-node QP inside the capacitated layer's projection mode.
+solves the per-node QP inside the allocation layer's projection mode.
 
 ## Verification
 
 Each application page ends with a **Verification** section: code-to-code comparisons against
 established reference models that solve the same equations (CONTAM and ContamX and the Modelica
 Buildings Library for building physics, MUNICH for street air quality, SWMM through pyswmm for
-sewers, EPANET 2.2 through WNTR for water distribution, WSIMOD for capacitated allocation), plus
+sewers, EPANET 2.2 through WNTR for water distribution, WSIMOD for flow allocation), plus
 checks against analytical solutions, conservation identities and finite-difference gradients.
 
 A comparison of this kind runs noodl physics and a reference model on the same input and compares the
@@ -60,7 +62,7 @@ Each page states its comparisons with an explicit tolerance and the value actual
 pages are equally explicit about what a comparison *does not* show, and those caveats are
 sometimes the most important thing on the page:
 
-- The [capacitated allocation](capacitated.md#where-the-layer-differs-from-wsimod) page
+- The [flow allocation](allocation.md#where-the-layer-differs-from-wsimod) page
   explains that WSIMOD's shipped demos never exercise a binding clip, how scripted WSIMOD cases
   cover those branches instead, and where the layer's semantics differ from WSIMOD's: sharing
   one node's headroom, and bottlenecks behind a pass-through node.

@@ -391,6 +391,7 @@ class TransportLayer:
         linear_solver: str = "auto",
         quantity: str = "scalar",
         unit: str = "",
+        species_names: Sequence[str] | None = None,
     ) -> None:
         if linear_solver not in _TRANSPORT_SOLVERS:
             raise ValueError(
@@ -412,6 +413,19 @@ class TransportLayer:
         self.quantity, self.unit = quantity, unit
         self.boundary = list(boundary)
         self.n_species = n_species
+        # Metadata only, like `quantity`/`unit`: the names of the species columns, which
+        # `noodl.refs` uses to build and read multi-species tensors by name.
+        self.species_names = None if species_names is None else tuple(species_names)
+        if self.species_names is not None and len(self.species_names) != n_species:
+            raise ValueError(
+                f"TransportLayer '{name}': species_names has {len(self.species_names)} "
+                f"entries for n_species={n_species}"
+            )
+        if self.species_names is not None and len(set(self.species_names)) != n_species:
+            raise ValueError(
+                f"TransportLayer '{name}': species_names {list(self.species_names)} repeat a "
+                f"name; each species must have its own"
+            )
         self.scheme = scheme
         # Nodes no edge of this layer's kinds touches are INACTIVE -- excluded
         # from the interior rather than left as an all-zero (singular) row. Conduction counts

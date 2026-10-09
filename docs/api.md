@@ -110,15 +110,23 @@ Elements are grouped below by the physics they express, as in
     options:
       members: [Reaction, FirstOrderDecay, Photostationary]
 
-::: noodl.layers.capacitated
+::: noodl.layers.allocation
     options:
-      members: [CapacitatedTransferLayer]
+      members: [AllocatedFlowLayer]
 
 ## Model and coupling
 
 ::: noodl.model
     options:
       members: [Model, Closure, Ports]
+
+::: noodl.refs
+    options:
+      members: [LayerRefs, LayerRef, Field, drivers_from, state_from, initial_drivers]
+
+::: noodl.validation
+    options:
+      members: [check_setup, SetupReport, Issue, InputRow]
 
 ::: noodl.couple
     options:
@@ -212,6 +220,10 @@ Elements are grouped below by the physics they express, as in
     options:
       members: [read_epanet_inp]
 ::: noodl.apps.water.report
+
+### Allocation (WSIMOD)
+
+::: noodl.apps.wsimod.network
 
 ### Shared
 

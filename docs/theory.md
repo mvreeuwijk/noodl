@@ -627,7 +627,7 @@ literature-pinned, so the air-side ratio and Tyneside-band checks are consistenc
 against the calibration source rather than independent validation. See
 [Sewers](applications/sewer.md) and [Water distribution](applications/water.md#verification).
 
-## 10. A fourth flow-determination mode: clip-and-allocate capacitated transfer
+## 10. A fourth flow-determination mode: clip-and-allocate flow allocation
 
 **Why this is a fourth way of determining flows, not a variant of the potential layer.**
 Sections 1 and 9 above both describe networks where flow at an edge is either the closed-
@@ -637,8 +637,8 @@ to carry a REQUESTED flow (typically emitted by some upstream process closure, n
 pressure difference) and simply clips it against two independent bounds -- its own arc
 capacity and the downstream node's remaining storage headroom -- with no potential variable
 anywhere in the calculation. This is the fourth way an edge's flow can be determined (alongside a potential-flow Newton solve, a driver-prescribed
-flow, and a closure-computed flow), and `CapacitatedTransferLayer`
-(`src/noodl/layers/capacitated.py`) is its implementation: a `Model` layer type that owns
+flow, and a closure-computed flow), and `AllocatedFlowLayer`
+(`src/noodl/layers/allocation.py`) is its implementation: a `Model` layer type that owns
 one or more edge kinds exactly like `PotentialFlowLayer` does, but whose per-step output is
 an explicit clip-and-allocate computation rather than a solve.
 
@@ -660,7 +660,7 @@ RECEIVER-LOCAL: it triggers only at the node actually oversubscribed and never p
 downstream bottleneck back to an earlier edge in the same step. That matches WSIMOD's
 storing nodes, whose accept decision is against their own headroom, but not a WSIMOD
 pass-through `Node`, which accepts only what it can forward within the step; it matches what
-storage itself is for in a discrete-time capacitated network. The storage update is $s' = \min(s + A_{\text{in}} f - A_{\text{out}} f,\ s_{\max})$ with
+storage itself is for in a discrete-time capacity-limited network. The storage update is $s' = \min(s + A_{\text{in}} f - A_{\text{out}} f,\ s_{\max})$ with
 `overflow = relu(...)` reported as a diagnostic, never fed back -- and deliberately has NO
 floor at zero: $f$ is already clipped against the RECEIVER's headroom, never the sender's
 own available storage, so a caller requesting more than is actually available upstream is
@@ -703,7 +703,7 @@ symmetric-weight special case; it was also hand-checked against asymmetric prefe
 
 **Verification, and what it does and does not show.** `tests/verification/
 test_wsimod_parity.py` replays WSIMOD's own captured per-arc requests from its packaged
-`quickstart_demo` and `oxford_demo` scripts through `CapacitatedTransferLayer` and compares
+`quickstart_demo` and `oxford_demo` scripts through `AllocatedFlowLayer` and compares
 against WSIMOD's own realised flows -- WSIMOD is the reference implementation here, the same
 relationship pyswmm and EPANET have with the sewer and water applications above, and it is
 NOT an independent measurement. This comparison has a real, specific limitation: of
@@ -720,7 +720,7 @@ the semantics differ: several arcs competing for one node's headroom are served
 first-come-first-served by WSIMOD but preference-proportionally here, and a bottleneck behind
 a WSIMOD pass-through `Node` propagates upstream within the step, which this receiver-local
 layer does not do (see
-[where the layer differs from WSIMOD](applications/capacitated.md#where-the-layer-differs-from-wsimod)).
+[where the layer differs from WSIMOD](applications/allocation.md#where-the-layer-differs-from-wsimod)).
 
 ## Caveats
 

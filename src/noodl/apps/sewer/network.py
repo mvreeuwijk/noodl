@@ -9,6 +9,7 @@ returns the triple, and one `initial_state` dispatching on each layer's `quantit
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import torch
@@ -28,6 +29,8 @@ from noodl.elements.powerlaw import PowerLaw
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Model
+from noodl.refs import initial_drivers as refs_initial_drivers
+from noodl.refs import state_from
 from noodl.topology import Network
 
 Tensor = torch.Tensor
@@ -362,7 +365,7 @@ def build_model(
         layers["water_quality"] = TransportLayer(
             graph, "water_quality", capacity=water_cap, flow_kind="pipe",
             boundary=[o.name for o in net.outfalls], n_species=len(species),
-            scheme=scheme, quantity="concentration", unit="kg/m3",
+            scheme=scheme, quantity="concentration", unit="kg/m3", species_names=species,
         )
         # `out_pipe` above indexes the per-pipe driver vectors by POSITION in `manhole_names`,
         # so the map is correct only if `TransportLayer`'s own active-interior order agrees
@@ -413,7 +416,7 @@ def build_model(
                 graph, "air_quality", capacity=torch.ones(air_interior.numel(), dtype=F64),
                 flow_kind=air_kinds,
                 boundary=air_boundary, n_species=1, scheme=scheme,
-                quantity="concentration", unit="kg/m3",
+                quantity="concentration", unit="kg/m3", species_names=("h2s",),
             )
             ordered = [graph.nodes[i] for i in layers["air_quality"].interior_idx.tolist()]
             if ordered != manhole_names:
@@ -473,6 +476,7 @@ def build_model(
     model.out_pipe = out_pipe
     model.manhole_idx = manhole_idx
     model.pipe_names = [p.name for p in net.pipes]
+    model.driver_template = dict(drivers)
     return model, state, drivers
 
 
@@ -543,7 +547,9 @@ def _stack_for(
                  rho_key="rho_air_nodes", g=9.80665)
 
 
-def initial_state(model: Model, drivers: Drivers | None = None) -> State:
+def initial_state(
+    model: Model, drivers: Drivers | None = None, *, values: Mapping | None = None
+) -> State:
     """All-zero state, dispatching on each layer's `quantity` (the app convention).
 
     Also builds every closure-carried state key this application knows --
@@ -586,6 +592,8 @@ def initial_state(model: Model, drivers: Drivers | None = None) -> State:
             )
         shape = (layer.n_i,) if layer.n_species == 1 else (layer.n_i, layer.n_species)
         state[f"{name}.x"] = torch.zeros(shape, dtype=F64)
+    if values:
+        state = state_from(model, values, base=state)
     if drivers is not None:
         state.update(model.initial_capacities(state, drivers))
     elif model.transport and any(isinstance(c, SewerHydraulics) for c in model.closures):
@@ -594,6 +602,15 @@ def initial_state(model: Model, drivers: Drivers | None = None) -> State:
             "storage; call initial_state(model, drivers)"
         )
     return state
+
+
+def initial_drivers(model: Model, *, values: Mapping | None = None) -> Drivers:
+    """`build_model`'s driver template (copied), then `values` by name (see
+    `noodl.refs.drivers_from`), e.g. by outfall and species name:
+
+        initial_drivers(model, values={"water_quality.x_boundary": {"O1": {"sulfide": 0.0}}})
+    """
+    return refs_initial_drivers(model, values=values)
 
 
 def sewer_steady(

@@ -14,6 +14,7 @@ loss) and `fcv` (a `FixedFlow`).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import torch
@@ -34,6 +35,8 @@ from noodl.elements.fixed import FixedFlow
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.transport import TransportLayer
 from noodl.model import Model
+from noodl.refs import initial_drivers as refs_initial_drivers
+from noodl.refs import state_from
 from noodl.topology import Network
 
 Tensor = torch.Tensor
@@ -653,6 +656,7 @@ def build_model(
     model.tank_closure = tank_closure
     model.head_scale = scale
     model.water_network = net
+    model.driver_template = dict(drivers)
     return model, state, drivers
 
 
@@ -682,8 +686,11 @@ def _fit_three_points(points, name: str) -> tuple[Tensor, Tensor]:
     return h0, r
 
 
-def initial_state(model: Model) -> State:
-    """All-zero state, dispatching on each layer's `quantity` (the app convention)."""
+def initial_state(model: Model, *, values: Mapping | None = None) -> State:
+    """All-zero state, dispatching on each layer's `quantity` (the app convention), tank
+    levels from the network file; then `values` by node, tank or pump name (see
+    `noodl.refs.state_from`): `initial_state(model, values={"water.tank_level": {"T1": 4.0}})`.
+    """
     state: State = {}
     for name, layer in model.potential.items():
         if layer.quantity not in ("head", "pressure"):
@@ -707,7 +714,18 @@ def initial_state(model: Model) -> State:
         state["water.link_status"] = torch.ones(
             len(model.tank_closure.pump_names), dtype=F64
         )
+    if values:
+        state = state_from(model, values, base=state)
     return state
+
+
+def initial_drivers(model: Model, *, values: Mapping | None = None) -> Drivers:
+    """`build_model`'s driver template (copied), then `values` by name (see
+    `noodl.refs.drivers_from`), e.g. a junction demand (a negative source) by name:
+
+        initial_drivers(model, values={"water.sources": {"J1": -0.005}})
+    """
+    return refs_initial_drivers(model, values=values)
 
 
 def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -> State:

@@ -1,11 +1,12 @@
-# Capacitated allocation
+# Flow allocation
 
 Rule-based allocation of water between stores. Nodes are stores (reservoirs, treatment works,
 demand points) with a storage ceiling; edges are arcs with a capacity. Each arc carries the flow
 that is requested of it, clipped to the arc's capacity and to the free storage at the receiving
 node, and storage is conserved exactly at every node. Requests and flows are in m³/s, storage in
-m³. In noodl physics this is implemented by `CapacitatedTransferLayer`, and it is the framework's
-**fourth flow-determination mode**.
+m³. In noodl physics this is implemented by `AllocatedFlowLayer`, and it is the framework's
+**fourth flow-determination mode**. The earlier name `CapacitatedTransferLayer` (and module
+`noodl.layers.capacitated`) still imports, as an alias of the same class.
 
 Every other application on this site determines a flow from physics: a potential difference, a
 closure, or continuity. This one does not. Each edge carries a *requested* flow, typically
@@ -26,16 +27,16 @@ networks — abstraction licences, reservoir operating rules, treatment-works th
 governed by *rules*, and the rule is the physics.
 
 ```python
-from noodl.layers.capacitated import CapacitatedTransferLayer
+from noodl.layers.allocation import AllocatedFlowLayer
 ```
 
-![A request clipped by arc capacity and receiver headroom, and several edges sharing one node's headroom](../assets/app-capacitated.svg)
+![A request clipped by arc capacity and receiver headroom, and several edges sharing one node's headroom](../assets/app-allocation.svg)
 
 ## A worked example
 
 ```python
 import torch
-from noodl.layers.capacitated import CapacitatedTransferLayer
+from noodl.layers.allocation import AllocatedFlowLayer
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -46,7 +47,7 @@ for n in ("A", "B", "C"):
 net.add_edge("A", "B", kind="link")
 net.add_edge("B", "C", kind="link")
 
-layer = CapacitatedTransferLayer(
+layer = AllocatedFlowLayer(
     net, "cap", "link",
     s_max=torch.full((net.n,), 100.0, dtype=F64),
     c_arc=torch.full((2,), 10.0, dtype=F64),
@@ -61,12 +62,30 @@ s1, f = layer.step(s0, drivers, dt=1.0)
 #   A is only a source and loses 2; B gains 2 and loses 2; C gains 2.
 ```
 
-*(From `tests/layers/test_capacitated.py`.)* Two adjacent tests show the clip branches: with
+*(From `tests/layers/test_allocation.py`.)* Two adjacent tests show the clip branches: with
 `c_arc = 1.5`, requests of `[5.0, 5.0]` give `f = [1.5, 1.5]`; with node C already full,
 requests of `[2.0, 2.0]` give `f = [2.0, 0.0]`.
 
 Note that `s1[0]` is negative. `step` bounds storage from **above** only — a source node may be
 drawn below zero, which is a modelling choice belonging upstream of this layer.
+
+## From a WSIMOD topology
+
+`noodl.apps.wsimod.build_model(topology)` builds the layer and a `Model` from a WSIMOD-style
+topology (`{"nodes": [{"name"}], "arcs": [{"name", "source", "target", "capacity"}]}`,
+or a JSON file of it) and returns `(model, state, drivers)` like the other applications.
+Requests and storage are then given by arc and node name:
+
+```python
+from noodl.apps import wsimod
+
+model, state, drivers = wsimod.build_model("quickstart_topology.json")
+state = wsimod.initial_state(model, values={"wsimod": {"my_groundwater": 5.0}})
+drivers = wsimod.initial_drivers(model, values={"wsimod.requests": {"baseflow": 0.3}})
+state = model.step(state, drivers, dt=86400.0)
+```
+
+See [Setting up a model](../concepts/setup.md).
 
 ## The API
 
@@ -76,10 +95,10 @@ Sharing between arcs competing for one node's headroom does not: WSIMOD serves s
 first come, first served, and this layer shares preference-proportionally (see
 [where the layer differs from WSIMOD](#where-the-layer-differs-from-wsimod)).
 
-`CapacitatedTransferLayer` has exactly two public methods.
+`AllocatedFlowLayer` has exactly two public methods.
 
 ```python
-CapacitatedTransferLayer(
+AllocatedFlowLayer(
     net, name, kind, *,
     s_max,            # per-node storage ceiling, trailing shape (net.n,); inf for unbounded
     c_arc,            # per-edge arc capacity, in this kind's edge order
@@ -103,7 +122,7 @@ regression-tested at $\Delta t = 2$ and $\Delta t = 86400$.
 `preference` must be strictly positive. Projection mode divides by it live, and a non-positive
 weight would give a clean forward value with a silent NaN gradient.
 
-In a `Model`, a capacitated layer steps between the potential solves and the transport steps, so
+In a `Model`, an allocation layer steps between the potential solves and the transport steps, so
 a transport layer reading `"<layer>.q"` sees a freshly written flow whichever kind of layer wrote
 it. A model owning one **refuses a steady pass and refuses `residuals()`** — a clip-and-allocate
 rule is inherently discrete-time and has no steady meaning to report.
@@ -296,7 +315,7 @@ branch never runs, and every pass after the first is a no-op. It measures the ch
   `push_set`/`pull_set` — is deferred.
 - **The other nine WSIMOD pollutants.** The layer is species-count-agnostic, so this is a matter
   of widening a transport layer's species list and the fixture capture, not a change here.
-- **Species and quality transport riding on a capacitated layer** is not wired up.
+- **Species and quality transport riding on an allocation layer** is not wired up.
 - **Time-varying arc capacities and storage bounds** — construction-time buffers only, since
   WSIMOD's own capacities are static within a run.
 

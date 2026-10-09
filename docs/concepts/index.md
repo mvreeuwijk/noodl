@@ -8,6 +8,7 @@ first time.
 | [Networks](networks.md) | `Network`: the typed multigraph, its incidence and cycle operators, boundary and interior, batching. |
 | [Elements and drives](elements.md) | The constitutive laws on edges, and the driving terms added to potential differences. |
 | [Layers and models](layers.md) | The four ways a flow is determined, the layer types that implement them, and `Model`, which steps several together. |
+| [Setting up a model](setup.md) | The one way every model is initialised: configure, initialise by name, check, run. Node orders, typed layer references, the setup report. |
 | [Solvers](solvers.md) | The matvec-free linear-operator contract, Newton, and how `method="auto"` chooses a backend. |
 | [Differentiability](differentiability.md) | What gradients flow through, the adjoint, and the contract your elements must satisfy. |
 
@@ -22,7 +23,7 @@ Network            a typed multigraph: nodes hold storage, edges carry flow
   +-- Drives       terms added to the potential difference (stack, wind, drag)
   +-- Closures     arbitrary functions of state that produce driver values
   |
-Layers             potential flow, transport, reaction, capacitated transfer
+Layers             potential flow, transport, reaction, flow allocation
   |
 Model              several layers on one network, stepped together
 ```

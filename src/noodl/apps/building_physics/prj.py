@@ -914,6 +914,7 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         layers["species"] = species_layer(
             net, ambient=project.ambient, flow_kinds=tuple(project.kinds),
             n_species=len(project.species), scheme=scheme, rho=rho,
+            species_names=project.species,
         )
     closures = [ZonePressureDensity(amb["Pb"])] if project.density_uses_zone_pressure else []
     model = Model(net, layers, closures=closures)
@@ -929,6 +930,7 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         K = len(project.species)
         drivers["species.x_boundary"] = torch.zeros(1, K, dtype=F64)
         state["species.x"] = project.x0.clone()
+    model.driver_template = dict(drivers)
     return model, state, drivers
 
 

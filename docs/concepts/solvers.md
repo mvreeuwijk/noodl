@@ -162,7 +162,7 @@ is provable:
   $h/D = 0.938$, so the ascending branch is the entire invertible domain.
 - The sewer's implicit-Euler storage sweep.
 - The water application's Hazen-Williams inversion with a minor-loss term.
-- `CapacitatedTransferLayer`'s projection-mode QP, whose KKT stationarity reduces to one scalar
+- `AllocatedFlowLayer`'s projection-mode QP, whose KKT stationarity reduces to one scalar
   monotone equation per node.
 
 Monotonicity is what makes bracketing safe, and each caller documents why it holds.

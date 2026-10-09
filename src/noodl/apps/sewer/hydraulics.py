@@ -124,6 +124,10 @@ class SewerHydraulics:
 
         self.pipe_names = [p.name for p in pipes]
         self.manhole_names = [m.name for m in manholes]
+        # The labels of the closure-carried state, in its order (`noodl.refs`).
+        self.key_labels = {"sewer.H": list(self.manhole_names)} if self.storage else {}
+        # The edge kind this closure routes the water on itself (`noodl.validation`).
+        self.edge_kinds = ("pipe",)
         self.length = torch.tensor([p.length for p in pipes], dtype=F64)
         self.diameter = torch.tensor([p.diameter for p in pipes], dtype=F64)
         self.roughness = torch.tensor([p.n for p in pipes], dtype=F64)

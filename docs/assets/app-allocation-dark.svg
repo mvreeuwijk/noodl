@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 312" width="820" height="312" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
-  <title id="t">Capacitated transfer</title>
+  <title id="t">Flow allocation</title>
   <desc id="d">A request clipped by arc capacity and receiver headroom, then shared.</desc>
   <rect width="820" height="312" rx="10" fill="#262A33"/>
   <defs>
