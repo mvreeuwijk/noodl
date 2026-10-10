@@ -57,7 +57,7 @@ Start from a different state by naming it — here, sulfide already present in m
 from noodl.apps.sewer import initial_state
 
 wq = model.refs.water_quality                  # species ("bod", "sulfide"), kg/m3
-start = initial_state(model, drivers, values={wq.concentration: {"J1": {"sulfide": 1e-3}}})
+start = initial_state(model, drivers=drivers, values={wq.concentration: {"J1": {"sulfide": 1e-3}}})
 model.check(start, drivers).raise_for_errors(strict=True)
 after = model.step(start, drivers, 60.0)
 print(sorted(wq.concentration.named(after[wq.concentration])))
@@ -67,7 +67,7 @@ print(sorted(wq.concentration.named(after[wq.concentration])))
 ['J1', 'J2', 'J3', 'J4', 'J5']
 ```
 
-The sewer's `initial_state` takes the drivers as well, because the storage it starts from
+The sewer's `initial_state` takes the drivers as well (`drivers=`), because the storage it starts from
 depends on the inflows. In the dictionaries the concentrations are
 `"water_quality.x"` and `"air_quality.x"` (manhole order, species last); see
 [Using noodl](../usage.md).

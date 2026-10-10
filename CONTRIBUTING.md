@@ -7,7 +7,8 @@ documentation** are complete; the test suite enforces all three.
 
 - **Docstrings.** Every public class, function and option has a docstring whose first
   paragraph says what it does. The [catalogue](docs/catalogue/core.md) is generated from
-  them: run `python scripts/gen_catalogue.py` and commit the result.
+  them: run `python scripts/gen_catalogue.py` and commit the result. A parameter with a
+  physical unit states it in the docstring; the catalogue is where users look it up.
 - **Pages.** Update the application page (`docs/applications/`), and
   [Using noodl](docs/usage.md) if the common workflow changes. Examples are executed by
   `tests/test_docs_usage.py`; mark a snippet that is not meant to run on its own as `py`.
