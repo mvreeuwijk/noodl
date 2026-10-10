@@ -368,7 +368,134 @@ def full_flow(diameter: Tensor, roughness: Tensor, slope: Tensor) -> Tensor:
     return s_full * beta * QCF
 
 
+#: `xsect.dat` W_Circ: top width / max width against depth / full depth (51 points).
+W_CIRC = (
+    0.0, .2800, .3919, .4750, .5426, .6000, .6499, .6940, .7332,
+    .7684, .8000, .8285, .8542, .8773, .8980, .9165, .9330,
+    .9474, .9600, .9708, .9798, .9871, .9928, .9968, .9992,
+    1.000, .9992, .9968, .9928, .9871, .9798, .9708, .9600,
+    .9474, .9330, .9165, .8980, .8773, .8542, .8285, .8000,
+    .7684, .7332, .6940, .6499, .6000, .5426, .4750, .3919,
+    .2800, .0,
+)
+#: `xsect.dat` R_Circ: hydraulic radius / full radius against depth / full depth.
+R_CIRC = (
+    .0100, .0528, .1048, .1556, .2052, .254, .3016, .3484, .3944, .4388,
+    .4824, .5248, .5664, .6064, .6456, .6836, .7204, .7564, .7912, .8244,
+    .8568, .888, .9176, .9464, .9736, 1.00, 1.024, 1.048, 1.070, 1.0912, 1.110, 1.1272,
+    1.144, 1.1596, 1.174, 1.1848, 1.194, 1.2024, 1.210, 1.2148,
+    1.217, 1.2172, 1.215, 1.2104, 1.203, 1.192, 1.178, 1.1584, 1.132, 1.094, 1.000,
+)
+_W = _table(W_CIRC)
+_R = _table(R_CIRC)
+
+#: SWMM's gravity in ft/s2 (`consts.h:37`).
+GRAVITY_FT = 32.2
+
+
+def area_of_depth(y: Tensor, y_full: Tensor, a_full: Tensor) -> Tensor:
+    """`xsect.c::xsect_getAofY` (xsect.c:857) for CIRCULAR: flow area (ft2) at depth ``y`` (ft)."""
+    y_safe = torch.clamp(y, min=0.0)
+    return torch.where(y <= 0.0, torch.zeros_like(y_safe),
+                       a_full * lookup(y_safe / y_full, _A))
+
+
+def width_of_depth(y: Tensor, y_full: Tensor) -> Tensor:
+    """`xsect.c::xsect_getWofY` (xsect.c:943) for CIRCULAR (``wMax = yFull``): top width (ft)."""
+    y_safe = torch.clamp(y, min=0.0)
+    return torch.where(y <= 0.0, torch.zeros_like(y_safe), y_full * lookup(y_safe / y_full, _W))
+
+
+def radius_of_depth(y: Tensor, y_full: Tensor) -> Tensor:
+    """`xsect.c::xsect_getRofY` (xsect.c:1031) for CIRCULAR (``rFull = yFull/4``):
+    hydraulic radius (ft)."""
+    y_safe = torch.clamp(y, min=0.0)
+    return torch.where(y <= 0.0, torch.zeros_like(y_safe),
+                       0.25 * y_full * lookup(y_safe / y_full, _R))
+
+
+_FUDGE = 1.0e-4   # consts.h:72
+
+
+def froude_number(v: Tensor, y: Tensor, y_full: Tensor, a_full: Tensor) -> Tensor:
+    """`link.c::link_getFroude` (link.c:847-871): |v| / sqrt(g A/W) at depth y (ft, ft/s); 0 when
+    ``y <= FUDGE`` or within FUDGE of the crown (closed conduit)."""
+    # link.c:861-863: empty, or closed conduit within FUDGE of the crown
+    dead = (y <= _FUDGE) | (y_full - y <= _FUDGE)
+    y_safe = torch.where(dead, 0.5 * y_full, y)
+    # link.c:866-869: hydraulic depth A/W, Fr = |v| / sqrt(g A/W)
+    hd = area_of_depth(y_safe, y_full, a_full) / width_of_depth(y_safe, y_full)
+    return torch.where(dead, torch.zeros_like(v), torch.abs(v) / torch.sqrt(GRAVITY_FT * hd))
+
+
+def _critical_flow(y: Tensor, y_full: Tensor, a_full: Tensor) -> Tensor:
+    """`xsect.c::getQcritical` (xsect.c:1612-1630): A sqrt(g A / W), 0 where W <= 0."""
+    a = area_of_depth(y, y_full, a_full)
+    w = width_of_depth(y, y_full)
+    w_safe = torch.where(w > 0.0, w, torch.ones_like(w))
+    return torch.where(w > 0.0, a * torch.sqrt(GRAVITY_FT * a / w_safe), torch.zeros_like(a))
+
+
+def critical_depth(q: Tensor, y_full: Tensor, a_full: Tensor) -> Tensor:
+    """`xsect.c::xsect_getYcrit` (xsect.c:1257-1319) -> `getYcritEnum` (xsect.c:1634-1696)
+    for CIRCULAR: SWMM's 25-interval enumeration with linear interpolation (ft, from
+    ``q >= 0`` in cfs)."""
+    q, y_full, a_full = torch.broadcast_tensors(q, y_full, a_full)
+    q2g = q * q / GRAVITY_FT                                # xsect.c:1267
+    zero = q2g == 0.0
+    # xsect.c:1305-1306 (CIRCULAR is the equivalent circle: r = 1, enumeration path)
+    y0 = 1.01 * torch.pow(torch.where(zero, torch.ones_like(q2g), q2g) / y_full, 0.25)
+    y0 = torch.where(y0 >= y_full, 0.97 * y_full, y0)
+    dy = y_full / 25.0                                      # xsect.c:1660
+    i1 = torch.floor(y0 / dy)                               # (int)(y0/dy)
+    stations = torch.arange(26, dtype=q.dtype)              # i = 0..25
+    qc = _critical_flow(stations * dy.unsqueeze(-1), y_full.unsqueeze(-1),
+                        a_full.unsqueeze(-1))               # (..., 26)
+    q_i1 = torch.gather(qc, -1, i1.long().unsqueeze(-1)).squeeze(-1)
+    # xsect.c:1670-1686: scan UP from i1+1 when Qc(i1) < q, first i with qc[i] >= q;
+    # SWMM's q0 is the previous station's Qc, i.e. qc[i-1]; none found -> yFull
+    up = q_i1 < q
+    yc_up = y_full.clone()
+    found = torch.zeros_like(up)
+    for i in range(1, 26):
+        hit = up & ~found & (stations[i] > i1) & (qc[..., i] >= q)
+        q_prev = qc[..., i - 1]
+        frac = (q - q_prev) / torch.where(hit, qc[..., i] - q_prev, torch.ones_like(q))
+        yc_up = torch.where(hit, (frac + (i - 1)) * dy, yc_up)
+        found = found | hit
+    # xsect.c:1690-1707 scan DOWN from i1-1 otherwise: first i with qc[i] < q;
+    # SWMM's q0 is the previous (upper) station's Qc, i.e. qc[i+1]; none found -> 0
+    yc_dn = torch.zeros_like(q)
+    found_dn = torch.zeros_like(up)
+    for i in range(24, -1, -1):
+        hit = ~up & ~found_dn & (stations[i] < i1) & (qc[..., i] < q)
+        q_next = qc[..., i + 1]
+        frac = (q - qc[..., i]) / torch.where(hit, q_next - qc[..., i], torch.ones_like(q))
+        yc_dn = torch.where(hit, (frac + i) * dy, yc_dn)
+        found_dn = found_dn | hit
+    yc = torch.where(up, yc_up, yc_dn)
+    # xsect.c:1318 MIN(y, yFull); xsect.c:1268 q2g == 0 -> 0
+    return torch.where(zero, torch.zeros_like(yc), torch.minimum(yc, y_full))
+
+
+def normal_depth_ft(q: Tensor, y_full: Tensor, a_full: Tensor, s_full: Tensor,
+                    beta: Tensor) -> Tensor:
+    """`link.c::link_getYnorm` (link.c:783-804) for CIRCULAR: q clamped to
+    ``qMax = 1.08 sFull beta``, ``A(S)`` by `circ_getAofS` (``aFull`` for ``psi >= 1``),
+    ``Y(A)`` by `circ_getYofA`."""
+    # link.c:797-798 (qMax = sMax beta, sMax = 1.08 sFull: xsect.c:248, link.c:1136)
+    q = torch.minimum(torch.abs(q), 1.08 * s_full * beta)
+    # link.c:800-802 (circ_getAofS: aFull for psi >= 1)
+    psi = q / beta / s_full
+    alpha = torch.where(psi >= 1.0, torch.ones_like(psi),
+                        a_of_s(torch.clamp(psi, max=1.0)))
+    y = y_full * y_of_a(alpha)
+    return torch.where(q <= 0.0, torch.zeros_like(y), y)
+
+
 __all__ = [
-    "A_CIRC", "LCF", "PHI", "QCF", "S_CIRC", "Y_CIRC", "a_of_s", "a_of_y", "full_flow",
-    "inv_lookup", "kinwave_steady", "lookup", "psi_of_flow", "s_of_a", "y_of_a",
+    "A_CIRC", "GRAVITY_FT", "LCF", "PHI", "QCF", "R_CIRC", "S_CIRC", "W_CIRC", "Y_CIRC",
+    "a_of_s", "a_of_y", "area_of_depth", "conduit_constants", "critical_depth", "froude_number",
+    "full_flow", "inv_lookup", "kinwave_steady", "lookup", "normal_depth_ft", "psi_of_flow",
+    "radius_of_depth", "s_of_a", "width_of_depth", "y_of_a",
 ]
