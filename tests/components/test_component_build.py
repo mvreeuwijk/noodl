@@ -279,3 +279,42 @@ def test_unknown_node_that_is_an_inner_hints_at_outer():
     c.add_terminal("a")
     with pytest.raises(ComponentError, match=r"reached with outer\('ambient'\)"):
         c.add_edge("a", "ambient", kind="airpath")
+
+
+def test_name_template_and_ports_are_read_only():
+    c = Component("c", template="t")
+    c.add_node("a")
+    for attr in ("name", "template", "ports"):
+        with pytest.raises(AttributeError, match="fixed once created"):
+            setattr(c, attr, "x")
+    assert (c.name, c.template) == ("c", "t")
+
+
+def test_a_failing_expose_adds_no_port():
+    c = Component("c")
+    c.add_node("a")
+    with pytest.raises(ComponentError):
+        c.expose("a", "missing")
+    assert list(c.ports) == []
+    with pytest.raises(ComponentError, match="already exists"):
+        c.expose("a", "a")
+    assert list(c.ports) == []
+    c.expose("a")
+    c.add_node("b")
+    with pytest.raises(ComponentError, match="already exists"):
+        c.expose("b", a="b")
+    assert list(c.ports) == ["a"]
+
+
+def test_at_accepts_zero_d_real_tensors_and_rejects_the_rest():
+    import torch
+
+    f = Component("f")
+    r = f.add(zone("r"), at=(torch.tensor(3.0), torch.tensor(1), 0.0))
+    assert f._children["r"][1] == (3.0, 1.0, 0.0)
+    assert all(type(v) is float for v in f._children["r"][1])
+    for bad in (torch.tensor(float("nan")), torch.tensor(True), torch.tensor(1 + 1j),
+                torch.tensor([1.0])):
+        with pytest.raises(ComponentError, match=r"\(x, y, z\)"):
+            Component("g").add(zone("s"), at=(bad, 0, 0))
+    assert r.name == "r"

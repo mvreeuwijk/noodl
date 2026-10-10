@@ -251,7 +251,7 @@ def project_measured(
 
     Solved as the KKT system ``[[I, C^T], [C, 0]] @ [q; mu] == [target; rhs]`` with
     ``C = [A_reduced; E_mask]``: ``A_reduced`` drops one row per island
-    (the rows of ``A`` sum to zero within a component, so one is redundant) and
+    (the rows of ``A`` sum to zero within an island, so one is redundant) and
     ``E_mask`` selects the measured columns. Raises ``RuntimeError`` if the
     measurements and conservation cannot be satisfied simultaneously within ``atol``.
     """

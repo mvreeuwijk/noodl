@@ -97,6 +97,12 @@ class Ports:
         return name in self._component._ports
 
 
+def _is_scalar_tensor(v) -> bool:
+    """A 0-d real (not bool, not complex) torch tensor."""
+    return (isinstance(v, torch.Tensor) and v.ndim == 0 and not v.is_complex()
+            and v.dtype != torch.bool)
+
+
 class Component:
     """A named piece of network with ports. Build it with `add_node`/`add_terminal`/
     `add_edge`, declare its boundary with `expose`, nest children with `add` and join their
@@ -104,8 +110,8 @@ class Component:
 
     def __init__(self, name: str, *, template: str | None = None) -> None:
         _check_name("component", name)
-        self.name = name
-        self.template = template
+        self._name = name
+        self._template = template
         self._local: dict[str, _Local] = {}
         self._edges: list[_Edge] = []
         self._ports: dict[str, Any] = {}
@@ -114,10 +120,44 @@ class Component:
         self._inners: dict[str, dict[str, Any]] = {}
         self._tables: dict[str, dict[str, Any]] = {}
         self._parent: Component | None = None
-        self.ports = Ports(self)
+        self._ports_ns = Ports(self)
 
     def __repr__(self) -> str:
         return f"<Component {self.name!r} template={self.template!r}>"
+
+    # ------------------------------------------------------------------ identity
+    # Read-only: the parent keys its children by name, so renaming after `add` would
+    # desynchronise it.
+    def _fixed(self, what: str) -> AttributeError:
+        return AttributeError(
+            f"a component's {what} is fixed once created (renaming a component after `add` "
+            f"would desynchronise its parent); make a new component instead"
+        )
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @name.setter
+    def name(self, value) -> None:
+        raise self._fixed("name")
+
+    @property
+    def template(self) -> str | None:
+        return self._template
+
+    @template.setter
+    def template(self, value) -> None:
+        raise self._fixed("template")
+
+    @property
+    def ports(self) -> Ports:
+        """`c.ports.air`, `c.ports["levels[0]"]`, `list(c.ports)`: this component's ports."""
+        return self._ports_ns
+
+    @ports.setter
+    def ports(self, value) -> None:
+        raise self._fixed("ports")
 
     # ------------------------------------------------------------------ views
     @property
@@ -206,6 +246,7 @@ class Component:
     def expose(self, *names: str, **renamed) -> None:
         """Declare ports: `expose("air")` exposes an own node; `expose(corridor=r.ports.air)`
         re-exports a child's port under a new name."""
+        pending: list[tuple[str, Any]] = []
         for name in names:
             if not isinstance(name, str):
                 raise ComponentError(
@@ -213,11 +254,20 @@ class Component:
                     f"as expose(new_name=child.ports.x)"
                 )
             self._check_endpoint(name, allow_outer=False)
-            self._add_port(name, name)
+            pending.append((name, name))
         for new, end in renamed.items():
             if not isinstance(end, str | PortRef):
                 raise ComponentError(f"{self.name}: port {new!r} must name a node or a port")
             self._check_endpoint(end, allow_outer=False)
+            pending.append((new, end))
+        # Validate every name before adding any port, so a failing call changes nothing.
+        seen = set(self._ports)
+        for new, _ in pending:
+            _check_name("port", new)
+            if new in seen:
+                raise ComponentError(f"{self.name}: port {new!r} already exists")
+            seen.add(new)
+        for new, end in pending:
             self._add_port(new, end)
 
     def _add_port(self, name: str, end) -> None:
@@ -249,6 +299,7 @@ class Component:
             parts = tuple(at) if not isinstance(at, str) else ()
         except TypeError:
             parts = ()
+        parts = tuple(float(v) if _is_scalar_tensor(v) else v for v in parts)
         if (len(parts) != 3
                 or not all(isinstance(v, numbers.Real) and not isinstance(v, bool)
                            and math.isfinite(float(v)) for v in parts)):
