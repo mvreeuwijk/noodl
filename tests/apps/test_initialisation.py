@@ -209,3 +209,15 @@ def test_the_building_builder_can_return_the_same_triple_as_the_others():
     assert set(drivers) == set(bp.initial_drivers(model))
     assert model.check(state, drivers).ok
     assert not isinstance(bp.build_model(network(), **kw), tuple)   # default unchanged
+
+
+def test_water_demand_by_name_is_a_negative_source():
+    model, state, drivers = water.build_model(water.twoloop())
+    src = model.refs.water.sources
+    by_demand = water.initial_drivers(model, demand={"J2": 0.012})
+    by_source = water.initial_drivers(model, values={src: {"J2": -0.012}})
+    assert torch.equal(by_demand[src], by_source[src])
+    with pytest.raises(KeyError, match="J22"):
+        water.initial_drivers(model, demand={"J22": 0.012})
+    with pytest.raises(ValueError, match="R1"):
+        water.initial_drivers(model, demand={"R1": 0.012})

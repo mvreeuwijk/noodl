@@ -35,8 +35,8 @@ from noodl.elements.fixed import FixedFlow
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.transport import TransportLayer
 from noodl.model import Model
+from noodl.refs import drivers_from, state_from
 from noodl.refs import initial_drivers as refs_initial_drivers
-from noodl.refs import state_from
 from noodl.topology import Network
 
 Tensor = torch.Tensor
@@ -736,13 +736,22 @@ def initial_state(model: Model, *, values: Mapping | None = None) -> State:
     return state
 
 
-def initial_drivers(model: Model, *, values: Mapping | None = None) -> Drivers:
+def initial_drivers(
+    model: Model, *, values: Mapping | None = None, demand: Mapping | None = None,
+) -> Drivers:
     """`build_model`'s driver template (copied), then `values` by name (see
-    `noodl.refs.drivers_from`), e.g. a junction demand (a negative source) by name:
+    `noodl.refs.drivers_from`), then `demand`: `{junction: m3/s withdrawn}`, positive,
+    stored as the negative nodal source the head solve takes.
 
-        initial_drivers(model, values={"water.sources": {"J1": -0.005}})
+        initial_drivers(model, demand={"J1": 0.005})
+        initial_drivers(model, values={"water.sources": {"J1": -0.005}})   # the same
     """
-    return refs_initial_drivers(model, values=values)
+    drivers = refs_initial_drivers(model, values=values)
+    if demand:
+        (name,) = model.potential   # the one head layer
+        key = f"{name}.sources"
+        drivers = drivers_from(model, {key: {n: -q for n, q in demand.items()}}, base=drivers)
+    return drivers
 
 
 def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -> State:

@@ -221,7 +221,8 @@ reports:
   silently), a state key put in the drivers, a closure output of the wrong shape.
 - **Warnings**: a key with a layer's prefix but no such input (`"thermal.source"` — *did
   you mean `"thermal.sources"`?*), a near-miss of a layer name (`"therml.sources"`), an
-  edge kind no layer uses that is a near-miss of one a layer does use (`"airpth"`).
+  edge kind no layer uses that is a near-miss of one a layer does use (`"airpth"`), a
+  temperature below 150 K (a Celsius value where kelvin is expected).
 - A table of every key the model knows: role, required or optional, order, expected
   shape, unit, and what was given.
 
