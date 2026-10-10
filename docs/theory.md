@@ -556,7 +556,7 @@ and reverse flow, "a genuinely dynamic (not quasi-steady) network". SWMM's KINWA
 shares the continuity-first assumption, is the comparison target for the kinematic-wave path and
 its live dynamic-wave runs for the dynamic-wave path.
 
-**The manhole-level storage idealisation, and what it is not.** For the kinematic-wave path, with `storage=True`,
+**The manhole-level storage idealisation, and what it is not.** On the kinematic-wave path, with `storage=True`,
 each manhole gets a surface area and a level advanced by implicit Euler,
 $A_s\, dH/dt = \sum \text{inflow} - Q_{\text{out}}(H)$, where $Q_{\text{out}}$ is read off the SAME Manning law as the
 quasi-steady case at depth $H$. This is a lumped storage-node approximation -- "the

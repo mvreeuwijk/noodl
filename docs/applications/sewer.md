@@ -325,9 +325,11 @@ Circular conduits, one barrel, SWMM's tabulated geometry; a fixed routing step
 (`VARIABLE_STEP 0`); a cold dry start (zero `InitDepth` and `InitFlow`); constant or
 driver-supplied lateral inflows; `FREE`, `NORMAL` and `FIXED` outfalls without flap gates;
 `INERTIAL_DAMPING` `NONE`/`PARTIAL`/`FULL` and every `NORMAL_FLOW_LIMITED` option.
-`SURCHARGE_METHOD` `EXTRAN` or `SLOT` is accepted by the options, but any conduit end that
-reaches the crown stops the run with an error naming the conduit and the time. `build_model`
-with `air=True`, `quality=True` or `storage=True` is refused by name. Surcharge, variable step,
+`SURCHARGE_METHOD EXTRAN` only; `SLOT` is refused by name. Any conduit end that reaches the
+crown stops the run with an error naming the conduit and the time. The reader refuses by name,
+with the line number, `VARIABLE_STEP > 0`, `LENGTHENING_STEP > 0`, `ALLOW_PONDING YES`, nonzero
+`InitDepth`/`InitFlow`/`MaxFlow`, flap gates, barrels other than 1 and TIDAL/TIMESERIES outfalls.
+`build_model` with `air=True`, `quality=True` or `storage=True` is refused by name. Surcharge, variable step,
 ponding, headspace air and quality on the dynamic wave are planned.
 
 ```python
