@@ -133,25 +133,40 @@ class Network:
             raise KeyError(f"unknown node {node!r}")
         return index[node]
 
-    def interior_index(self, boundary: Sequence[Node]) -> torch.Tensor:
-        """Positions, in node order, of all nodes not listed in `boundary`."""
-        boundary = [self._resolve(n) for n in boundary]
+    def canonical(self, nodes: Sequence[Node]) -> list[Node]:
+        """The node names `nodes` refer to, aliases resolved, in the order given.
+
+        `KeyError` for an unknown name and `ValueError` when two names refer to the same node.
+        """
+        nodes = list(nodes)
+        resolved = [self._resolve(n) for n in nodes]
         index = self._node_index()
-        missing = [n for n in boundary if n not in index]
+        missing = [n for n in resolved if n not in index]
         if missing:
             raise KeyError(f"unknown boundary nodes {missing}")
-        boundary_set = set(boundary)
+        seen: dict[Node, Node] = {}
+        for label, node in zip(nodes, resolved, strict=True):
+            if node in seen:
+                raise ValueError(
+                    f"{seen[node]!r} and {label!r} are two names of the same node {node!r}; "
+                    "give each node once"
+                )
+            seen[node] = label
+        return resolved
+
+    def interior_index(self, boundary: Sequence[Node]) -> torch.Tensor:
+        """Positions, in node order, of all nodes not listed in `boundary`."""
+        boundary_set = set(self.canonical(boundary))
+        index = self._node_index()
         idx = [index[n] for n in self.graph.nodes if n not in boundary_set]
         return torch.tensor(idx, dtype=torch.long, device=self.device)
 
     def boundary_index(self, boundary: Sequence[Node]) -> torch.Tensor:
         """Positions of `boundary` nodes, in the order given."""
-        boundary = [self._resolve(n) for n in boundary]
         index = self._node_index()
-        missing = [n for n in boundary if n not in index]
-        if missing:
-            raise KeyError(f"unknown boundary nodes {missing}")
-        return torch.tensor([index[n] for n in boundary], dtype=torch.long, device=self.device)
+        return torch.tensor(
+            [index[n] for n in self.canonical(boundary)], dtype=torch.long, device=self.device
+        )
 
     def node_attr(self, name: str, default: float | None = None) -> torch.Tensor:
         """Node attribute values in node order, as a (n,) tensor.

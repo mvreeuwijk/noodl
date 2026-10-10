@@ -112,6 +112,9 @@ alias. Aliases are accepted wherever a node name is: in `drivers_from`, in `init
 values, in `refs` selectors and in `node_index`. `named()` always returns the canonical
 names, so `th.sources: {"door.a": 1000.0}` heats `A.air`, and the result prints as `A.air`.
 
+Layers store canonical names too: `thermal_layer(net, fixed_temperature=["door.a"])` has `A.air` as
+a boundary node. Giving one node twice under two names (`["door.a", "A.air"]`) is an error.
+
 ## Heights and placement
 
 `parent.add(child, at=(x, y, z))` places a child at `(x, y, z)` metres relative to its

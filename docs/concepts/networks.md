@@ -80,6 +80,10 @@ interior = net.interior_index(["ambient"])   # solved nodes
 boundary = net.boundary_index(["ambient"])   # prescribed nodes
 ```
 
+Boundary names may be aliases of nodes merged by [components](components.md#names);
+`net.canonical(names)` returns the node names they refer to, and both index methods raise
+`ValueError` when two of the names are the same node.
+
 `n`, `b`, `n_islands` and `n_cycles` report the sizes. `island_labels(kind)` and
 `n_islands_of(kind)` do the same restricted to a kind, which is how a layer discovers whether
 its subgraph is connected — a disconnected potential problem needs one grounded node per
