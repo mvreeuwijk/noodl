@@ -16,7 +16,7 @@ Build the model and its starting state and inputs.
 | `drivers_from`<br><small>`noodl.refs`</small> | A drivers dictionary from `{key: {label: value}}` and/or `{key: tensor}`. | `drivers_from(model, values, *, base=None)` |
 | `state_from`<br><small>`noodl.refs`</small> | A state dictionary, as `drivers_from` builds drivers. | `state_from(model, values, *, base=None)` |
 | `initial_drivers`<br><small>`noodl.refs`</small> | A copy of the model's driver template (`model.driver_template`, which an application's `build_model` records), then `values` (see `drivers_from`). | `initial_drivers(model, *, values=None)` |
-| `check_setup`<br><small>`noodl.validation`</small> | Check `model` and, when given, `state` and `drivers`; return a `SetupReport`. | `check_setup(model, state=None, drivers=None, *, dt=None, probe=False, steady=False)` |
+| `check_setup`<br><small>`noodl.validation`</small> | Check `model` and, when given, `state` and `drivers`; return a `SetupReport`. | `check_setup(model, state=None, drivers=None, *, dt=None, probe=False, steady=False, names=None)` |
 
 ## Layers and model
 

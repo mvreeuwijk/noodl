@@ -30,15 +30,20 @@ def mass_orifice(Cd, A, *, rho: float = RHO_0, dp_transition: float = 1e-3,
 
 
 def add_large_opening(net: Network, a, b, *, H: float, W: float, z_mid: float,
-                      Cd: float = 0.78, kind: str = "airpath"):
+                      Cd: float = 0.78, kind: str = "airpath",
+                      names: tuple[str, str] | None = None):
     """CONTAM's two-opening doorway (DR_PL2, TN 1887r1 eq. 69-70): two orifices of area
     W H / 2 at z_mid -/+ 2H/9, both oriented a -> b. Exact for a mid-height neutral plane.
-    Returns the two edge keys (low, high). Edge attributes: z_path, area, Cd, opening=1."""
+    Returns the two edge keys (low, high). Edge attributes: z_path, area, Cd, opening=1.
+    `names` gives the two edges a `name` (as component factories do). `net` may be a
+    `Network` or a `noodl.components.Component`."""
     if not H > 0 or not W > 0:
         raise ValueError(f"large opening {a!r}->{b!r}: H and W must be positive, got H={H}, W={W}")
     area = W * H / 2.0
-    lo = net.add_edge(a, b, kind=kind, z_path=z_mid - 2.0 * H / 9.0, area=area, Cd=Cd, opening=1.0)
-    hi = net.add_edge(a, b, kind=kind, z_path=z_mid + 2.0 * H / 9.0, area=area, Cd=Cd, opening=1.0)
+    lo = net.add_edge(a, b, kind=kind, z_path=z_mid - 2.0 * H / 9.0, area=area, Cd=Cd, opening=1.0,
+                      **({"name": names[0]} if names else {}))
+    hi = net.add_edge(a, b, kind=kind, z_path=z_mid + 2.0 * H / 9.0, area=area, Cd=Cd, opening=1.0,
+                       **({"name": names[1]} if names else {}))
     return lo, hi
 
 

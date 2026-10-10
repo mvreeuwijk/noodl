@@ -217,9 +217,10 @@ class _Flattener:
         if raised:
             warnings.warn(
                 f"{self.where(raised[0])} is placed at z = {raised[0].offset[2]} m but no "
-                f"height attributes are registered, so no height is shifted; call "
-                f"noodl.components.register_elevations(...) or pass node_elevations= / "
-                f"edge_elevations= to flatten()",
+                f"height attributes are registered, so no height is shifted; import "
+                f"the application that defines the height attributes (noodl.apps.building_physics "
+                f"registers z_ref and z_path), call noodl.components.register_elevations(...), "
+                f"or pass node_elevations= / edge_elevations= to flatten()",
                 UserWarning, stacklevel=5,
             )
 

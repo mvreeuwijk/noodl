@@ -11,6 +11,7 @@ here.
 # installed without the `contam` extra still imports this package cleanly and only a call
 # to `run_steady`/`run_transient` raises the ImportError that names the missing package.
 from noodl.apps.building_physics.attributes import EDGE_ATTRIBUTES, NODE_ATTRIBUTES
+from noodl.apps.building_physics.components import crack, door, room, shaft, window
 from noodl.apps.building_physics.contamx import (
     run_steady,
     run_transient,
@@ -66,6 +67,8 @@ __all__ = [
     "add_zone",
     "assemble_sources",
     "build_model",
+    "crack",
+    "door",
     "initial_drivers",
     "initial_state",
     "mass_orifice",
@@ -75,10 +78,13 @@ __all__ = [
     "read_modelica",
     "read_prj",
     "read_wth",
+    "room",
     "run_steady",
     "run_transient",
+    "shaft",
     "species_layer",
     "sources_from_project",
     "thermal_layer",
+    "window",
     "write_wth",
 ]
