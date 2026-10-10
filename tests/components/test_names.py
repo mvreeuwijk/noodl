@@ -152,3 +152,31 @@ def test_boundary_flows_rejects_a_wrong_length():
     _, names = floor_plan()
     with pytest.raises(ValueError, match=r"edge order of kind 'airpath'"):
         names.boundary_flows("f", "airpath", torch.zeros(2, 4, dtype=F64))
+
+
+def test_nodes_and_edges_of_follow_the_network_order_in_a_nested_tree():
+    net, names = floor_plan()
+    node_pos = {n: i for i, n in enumerate(net.nodes)}
+    edge_label = lambda e: net.graph.edges[e]["name"]  # noqa: E731
+    edge_pos = {edge_label(e): i for i, e in enumerate(net.edges)}
+    for path in names.paths:
+        nodes, edges = names.nodes_of(path), names.edges_of(path)
+        assert nodes == sorted(nodes, key=node_pos.__getitem__)
+        assert edges == sorted(edges, key=edge_pos.__getitem__)
+    assert names.nodes_of("") == net.nodes
+    assert names.edges_of("") == [edge_label(e) for e in net.edges]
+
+
+def test_select_then_nodes_of_is_fast_on_a_large_tree():
+    import time
+
+    b = Component("tower")
+    for f in range(20):
+        floor = b.add(Component(f"f{f}", template="floor"))
+        for r in range(50):
+            floor.add(zone(f"r{r}", volume=1.0))
+    _, names = b.flatten(dtype=F64)
+    t0 = time.perf_counter()
+    nodes = [n for p in names.select(template="zone") for n in names.nodes_of(p)]
+    assert time.perf_counter() - t0 < 0.5
+    assert len(nodes) == 1000

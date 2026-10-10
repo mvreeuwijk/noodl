@@ -38,6 +38,24 @@ class NameMap:
         self._edge_owner: dict[str, str] = dict(edge_owner)
         self._components: dict[str, ComponentInfo] = dict(components)
         self.unconnected_ports: list[str] = list(unconnected_ports)
+        # Built once: what each component owns directly, and the paths of its subtree
+        # (itself first, then descendants), so a query costs its answer, not the whole tree.
+        self._own_nodes: dict[str, list[str]] = {p: [] for p in self._components}
+        self._own_edges: dict[str, list[str]] = {p: [] for p in self._components}
+        self._node_pos = {n: i for i, n in enumerate(self._node_owner)}
+        self._edge_pos = {e: i for i, e in enumerate(self._edge_owner)}
+        for n, o in self._node_owner.items():
+            self._own_nodes[o].append(n)
+        for e, o in self._edge_owner.items():
+            self._own_edges[o].append(e)
+        self._subtree: dict[str, list[str]] = {}
+        for root in self._components:
+            order, stack = [], [root]
+            while stack:
+                p = stack.pop()
+                order.append(p)
+                stack.extend(reversed(self._components[p].children))
+            self._subtree[root] = order
 
     @property
     def paths(self) -> list[str]:
@@ -52,19 +70,23 @@ class NameMap:
                 + (f"; did you mean {', '.join(map(repr, hint))}?" if hint else "")
             )
 
-    @staticmethod
-    def _within(owner: str, path: str) -> bool:
-        return path == "" or owner == path or owner.startswith(path + ".")
+    def _collect(self, path: str, own: dict[str, list[str]], pos: dict[str, int]) -> list[str]:
+        paths = self._subtree[path]
+        if len(paths) == 1:
+            return list(own[path])
+        items = [x for p in paths for x in own[p]]
+        items.sort(key=pos.__getitem__)
+        return items
 
     def nodes_of(self, path: str) -> list[str]:
         """Nodes owned by the component at `path` or below it, in node order."""
         self._check(path)
-        return [n for n, o in self._node_owner.items() if self._within(o, path)]
+        return self._collect(path, self._own_nodes, self._node_pos)
 
     def edges_of(self, path: str) -> list[str]:
         """Edges added by the component at `path` or below it, in edge order."""
         self._check(path)
-        return [e for e, o in self._edge_owner.items() if self._within(o, path)]
+        return self._collect(path, self._own_edges, self._edge_pos)
 
     def select(self, *, template: str) -> list[str]:
         """Paths of every component made by `template`, in tree order."""
@@ -75,11 +97,11 @@ class NameMap:
         self._check(path)
         net = self.net
         edges = net.edges
+        inside = set(self.nodes_of(path))
         labels, positions, sign = [], [], []
         for pos, col in enumerate(net.edge_index(kind).tolist()):
             u, v, k = edges[col]
-            inside_u = self._within(self._node_owner[u], path)
-            inside_v = self._within(self._node_owner[v], path)
+            inside_u, inside_v = u in inside, v in inside
             if inside_u != inside_v:
                 labels.append(net.graph.edges[u, v, k]["name"])
                 positions.append(pos)
@@ -110,8 +132,8 @@ class NameMap:
             return {
                 "path": path, "name": c.name, "template": c.template,
                 "position": c.position, "ports": dict(c.ports),
-                "nodes": [n for n, o in self._node_owner.items() if o == path],
-                "edges": [e for e, o in self._edge_owner.items() if o == path],
+                "nodes": list(self._own_nodes[path]),
+                "edges": list(self._own_edges[path]),
                 "children": [build(child) for child in c.children],
             }
         return build("")
