@@ -326,3 +326,19 @@ def test_random_buildings_flatten_consistently(plan):
         assert names.resolve(alias) in net.nodes
     again, _ = b.flatten(node_elevations=("z_ref",))
     assert again.nodes == net.nodes and again.edges == net.edges
+
+
+def test_representative_prefers_the_shallower_terminal_over_an_earlier_deeper_one():
+    b = Component("b")
+    f = b.add(Component("f"))                 # first child: l1's terminal b is depth 2
+    l1 = f.add(link("l1"))
+    r = f.add(zone("r", volume=1.0))
+    f.connect(r.ports.air, l1.ports.a)        # keeps the edge: l1.a is a real room
+    f.expose(x=l1.ports.b)
+    g = b.add(Component("g"))                 # later child: its terminal t is depth 1
+    g.add_terminal("t")
+    g.expose("t")
+    b.connect(f.ports.x, g.ports.t)
+    net, _ = b.flatten(dtype=F64)
+    assert net.aliases["f.l1.b"] == "g.t"
+    assert "g.t" in net.nodes and "f.l1.b" not in net.nodes
