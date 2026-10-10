@@ -288,7 +288,8 @@ class DynamicWaveHydraulics:
 
     def set_roughness(self, i: int, value) -> None:
         """Set Manning's n (s m^(-1/3)) of pipe `i` to `value`, which may be a tensor that
-        requires grad; the geometry is rebuilt so the gradient reaches it."""
+        requires grad; the geometry is rebuilt so the gradient reaches it. The other pipes'
+        n are detached, so only the latest call's `value` carries a gradient."""
         value = torch.as_tensor(value, dtype=F64).reshape(1)
         self.roughness = torch.cat([self.roughness[:i].detach(), value,
                                     self.roughness[i + 1:].detach()])
@@ -416,18 +417,22 @@ class DynamicWaveHydraulics:
         })
         return out
 
-    def carried(self, state: Mapping, drivers: Mapping) -> State:
+    def carried(self, state: Mapping, drivers: Mapping, *, dt: float | None = None) -> State:
         """The four carried keys evaluated AT `state` (``water.phi``, ``water.q``), for
-        re-synchronising after a step: the pass's own copy is its input's, which equals its
-        output only to the iteration tolerance."""
-        terms = self._terms(state, self.options.routing_step)
+        re-synchronising after a step of `dt` s (default: the routing step): the pass's own
+        copy is its input's, which equals its output only to the iteration tolerance."""
+        terms = self._terms(state, self.options.routing_step if dt is None else dt)
         return self._carried(state, terms, self._inflow(drivers))
 
-    def initial_state(self, drivers: Mapping) -> State:
+    def initial_state(self, drivers: Mapping | None = None) -> State:
         """SWMM's cold, dry start (flowrout.c:337-507): heads at the node inverts (outfalls
-        too), no flow, every conduit's stored area ``A(FUDGE)`` and the junction net inflow
-        equal to the lateral inflow in `drivers`."""
-        inflow = self._inflow(drivers)
+        too), no flow, every conduit's stored area ``A(FUDGE)`` and a zero junction net
+        inflow. SWMM zeroes the lateral inflow before routing starts (node.c:264,
+        flowrout.c:437), so the first step's ``oldNetInflow`` is 0 (routing.c:236-242,
+        node.c:303) and its trapezoid sees only the end-of-step inflow. `drivers`, when
+        given, has its ``"inflow"`` validated."""
+        if drivers is not None:
+            self._inflow(drivers)
         fudge = torch.full_like(self.geo.y_full, FUDGE)
         return {
             f"{self.layer}.phi": self.node_invert.clone(),
@@ -436,7 +441,7 @@ class DynamicWaveHydraulics:
             "sewer.pipe_flow": torch.zeros(len(self.pipe_names), dtype=F64),
             "sewer.mid_area": area_of_depth(fudge, self.geo.y_full, self.geo.a_full)
             * _AREA_SI,                                                       # flowrout.c:497
-            "sewer.net_inflow": inflow[..., self.junction_idx].clone(),
+            "sewer.net_inflow": torch.zeros(len(self.junction_names), dtype=F64),
         }
 
     def check_free_surface(self, state: Mapping, drivers: Mapping, t: float) -> None:
@@ -464,7 +469,7 @@ class DynamicWaveHydraulics:
         dt = self.options.routing_step if dt is None else float(dt)
         drv = self(after | {k: before[k] for k in self.state_keys}, drivers,
                    StepContext(dt=dt))
-        now = self.carried(after, drivers)
+        now = self.carried(after, drivers, dt=dt)
         return (drv["water.storage_area"]
                 * (now["sewer.junction_depth"] - before["sewer.junction_depth"])
                 - 0.5 * dt * (before["sewer.net_inflow"] + now["sewer.net_inflow"]))
@@ -552,16 +557,17 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *, steps
     """Run `steps` routing steps of `dt` s (default: the model's routing step) from `state`.
 
     `inflow` (m3/s, full-node) overrides ``drivers["inflow"]``: ``(n,)`` is one constant
-    inflow; ``(B, n)`` a batch of B constant inflows; ``(steps, B, n)`` an inflow per step
-    for a batch of B (``B = 1`` for a single series), the lateral inflow at the END of each
-    step. Any other rank is refused. A batched inflow expands an unbatched `state` to the
-    batch. After every step the carried keys are re-evaluated at the returned state, and a
-    conduit end reaching its crown is refused by name. `diagnostics`, when a list, receives
-    each step's `Model.step` diagnostics. `solve_kwargs` reach the head solve (Newton);
-    `atol` defaults to `SOLVE_ATOL` (m3/s) and `rtol` to 0, because Newton's own default
-    (sqrt(eps), 1.5e-8 m3/s) would stop a warm-started pass before it moves and leave the
-    junction balance off by that much. Returns the final state and the recorded `record`
-    keys stacked over steps (leading dimension `steps`).
+    inflow; ``(B, n)`` a batch of B constant inflows -- a 2-D inflow is ALWAYS a batch,
+    never a series; ``(steps, B, n)`` an inflow per step for a batch of B, the lateral
+    inflow at the END of each step (one network's series is ``(steps, 1, n)``). Any other
+    rank is refused. A batched inflow expands an unbatched `state` to the batch. After every
+    step the carried keys are re-evaluated at the returned state, and a conduit end reaching
+    its crown is refused by name. `diagnostics`, when a list, receives each step's
+    `Model.step` diagnostics. `solve_kwargs` reach the head solve (Newton); `atol` defaults
+    to `SOLVE_ATOL` (m3/s) and `rtol` to 0, because Newton's own default (sqrt(eps), 1.5e-8
+    m3/s) would stop a warm-started pass before it moves and leave the junction balance off
+    by that much. Returns the final state and the recorded `record` keys stacked over steps
+    (leading dimension `steps`).
     """
     solve_kwargs.setdefault("atol", SOLVE_ATOL)
     solve_kwargs.setdefault("rtol", 0.0)
@@ -590,7 +596,7 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *, steps
             drivers = dict(drivers, inflow=inflow[k] if inflow.dim() == 3 else inflow)
         diag: dict = {}
         state = model.step(state, drivers, dt, t=t, diagnostics=diag, **solve_kwargs)
-        state.update(hyd.carried(state, drivers))       # resync, as modelica/run.py does
+        state.update(hyd.carried(state, drivers, dt=dt))   # resync, as modelica/run.py does
         t += dt
         hyd.check_free_surface(state, drivers, t)
         if diagnostics is not None:

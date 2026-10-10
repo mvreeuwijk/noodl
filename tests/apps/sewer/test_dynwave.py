@@ -70,6 +70,55 @@ def test_cold_start_is_dry_at_the_inverts(tmp_path):
     junction = model.junction_idx
     torch.testing.assert_close(state["water.phi"][junction], model.junction_invert)
     assert torch.all(state["sewer.junction_depth"] == 0)
+    # SWMM zeroes the lateral inflow before routing (node.c:264, flowrout.c:437), so the
+    # first step's oldNetInflow is 0
+    assert torch.all(state["sewer.net_inflow"] == 0)
+
+
+def test_first_step_fills_a_dry_junction_by_half_the_inflow(tmp_path):
+    """J1 drains through C1 with a 1 m inlet offset, which the first step's water does not
+    reach (C1 stays DRY, q = 0), and J1's area is the floor: A_s y = 0.5 dt (0 + Q)."""
+    text = (DATA / "tree_kinwave.inp").read_text()
+    text = text.replace("FLOW_ROUTING         KINWAVE", "FLOW_ROUTING         DYNWAVE")
+    text = text.replace("VARIABLE_STEP        0.75", "VARIABLE_STEP        0")
+    old = "C1               J1               J3               200        0.013      0 "
+    assert old in text
+    text = text.replace(old, "C1               J1               J3               200        "
+                             "0.013      1.0 ")
+    path = tmp_path / "offset.inp"
+    path.write_text(text)
+    net, _, _ = read_swmm_inp(path)
+    model, state, drivers = build_model(net)
+    hyd = model.dynamic_wave
+    state, _ = simulate_dynamic_wave(model, state, drivers, steps=1)
+    j1 = hyd.junction_names.index("J1")
+    q_in = drivers["inflow"][model.junction_idx[j1]].item()
+    from noodl.apps.sewer.xsect_tables import LCF, QCF
+    floor = hyd.min_area_ft2 * QCF / LCF                            # SI area, design D2
+    expected = 0.5 * model.routing_step * q_in / floor
+    assert state["water.q"][hyd.pipe_names.index("C1")].item() == 0.0
+    assert state["sewer.junction_depth"][j1].item() == pytest.approx(expected, rel=1e-12)
+
+
+def test_gradient_over_a_few_steps_from_the_cold_start(tmp_path):
+    """Fast gradient check: d(sum of junction depths after 4 steps)/d(Manning n of C1),
+    against central differences. C1 is wet from the first step (J1 carries inflow)."""
+    model, state0, drivers = build_model(_tree(tmp_path))
+    hyd = model.dynamic_wave
+    i = hyd.pipe_names.index("C1")
+
+    def loss(n1):
+        hyd.set_roughness(i, n1)
+        s, _ = simulate_dynamic_wave(model, state0, drivers, steps=4)
+        return (s["water.phi"][model.junction_idx] - model.junction_invert).sum()
+
+    n = torch.tensor(0.013, dtype=F64, requires_grad=True)
+    loss(n).backward()
+    h = 1e-7
+    with torch.no_grad():
+        fd = (loss(n.detach() + h) - loss(n.detach() - h)) / (2 * h)
+    assert n.grad.item() != 0.0
+    assert n.grad.item() == pytest.approx(fd.item(), rel=1e-5)
 
 
 @pytest.mark.slow
@@ -86,6 +135,7 @@ def test_steady_state_passes_the_total_inflow(tmp_path):
     assert hist["water.q"][-1, out].sum().item() == pytest.approx(total, rel=1e-6)
 
 
+@pytest.mark.slow
 def test_outfall_flow_rises_monotonically_towards_the_total(tmp_path):
     """The fast variant of the steady-state test: 10 minutes at half the inflows."""
     net = _tree(tmp_path, scale=0.5)
@@ -94,7 +144,7 @@ def test_outfall_flow_rises_monotonically_towards_the_total(tmp_path):
     q = hist["water.q"][:, model.outfall_pipe_idx].sum(-1)
     total = sum(m.inflow for m in net.manholes)
     assert bool((q[1:] >= q[:-1]).all())
-    assert 0.0 < q[-1].item() <= total
+    assert 0.6 * total < q[-1].item() <= total       # 0.736 of the total, measured
 
 
 def test_each_step_satisfies_the_discrete_junction_equation(tmp_path):
@@ -128,6 +178,7 @@ def test_non_convergence_is_named(tmp_path):
         simulate_dynamic_wave(model, state, drivers, steps=3)
 
 
+@pytest.mark.slow
 def test_batched_equals_single(tmp_path):
     net = _tree(tmp_path)
     model, state, drivers = build_model(net)
@@ -140,6 +191,7 @@ def test_batched_equals_single(tmp_path):
                                    rtol=1e-9, atol=1e-10)
 
 
+@pytest.mark.slow
 def test_gradient_through_the_steps_matches_central_differences(tmp_path):
     """d(sum of junction depths after 60 steps)/d(Manning n of C3): wet, subcritical regime
     from 300 s on (no flow-class switch inside the difference stencil)."""
@@ -168,8 +220,7 @@ def test_initial_state_and_pipe_table_serve_a_dynamic_wave_model(tmp_path):
     model, state, drivers = build_model(_tree(tmp_path))
     fresh = initial_state(model, drivers)
     assert set(fresh) == set(state)
-    with pytest.raises(ValueError, match="drivers are required"):
-        initial_state(model)
+    assert set(initial_state(model)) == set(state)
     state, _ = simulate_dynamic_wave(model, state, drivers, steps=2)
     rows = pipe_table(model, state, drivers)
     assert [r["pipe"] for r in rows] == model.pipe_names

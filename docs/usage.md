@@ -42,7 +42,7 @@ for t in times:
 Every application exports `build_model`, `initial_state` and `initial_drivers`, and
 `initial_state(model)`/`initial_drivers(model)` without `values` return its defaults.
 (The sewer's `initial_state` also takes the drivers, `initial_state(model, drivers=drivers,
-values=...)`, because its storage, and the dynamic wave's junction net inflow, depend on them.)
+values=...)`, because its storage depends on them.)
 
 ## A complete example
 

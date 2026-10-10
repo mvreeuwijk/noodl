@@ -698,8 +698,8 @@ def initial_state(
     """All-zero state, dispatching on each layer's `quantity` (the app convention).
 
     A dynamic-wave model (a ``"head"`` layer and a `DynamicWaveHydraulics` closure) gets
-    SWMM's cold, dry start instead (`DynamicWaveHydraulics.initial_state`), which needs
-    `drivers`.
+    SWMM's cold, dry start instead (`DynamicWaveHydraulics.initial_state`; `drivers` is
+    optional there and only validated).
 
     Also builds every closure-carried state key this application knows --
     `"sewer.H"`, the `SewerHydraulics` closure's manhole levels, when it is running with
@@ -723,12 +723,6 @@ def initial_state(
     """
     dynamic = [c for c in model.closures if isinstance(c, DynamicWaveHydraulics)]
     if dynamic and any(layer.quantity == "head" for layer in model.potential.values()):
-        if drivers is None:
-            raise ValueError(
-                "apps.sewer.initial_state: drivers are required for a dynamic-wave model "
-                "(the junction net inflow of the cold start is the lateral 'inflow'); call "
-                "initial_state(model, drivers)"
-            )
         state = dynamic[0].initial_state(drivers)
         return state_from(model, values, base=state) if values else state
     state: State = {}
