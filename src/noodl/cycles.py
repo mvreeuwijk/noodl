@@ -98,7 +98,7 @@ def _tree_elimination_levels(net: Network, kind: str | None):
     LongTensors/the edge dtype's signs tensor, describing every node at that BFS depth
     simultaneously: `signs[i]` is `+1` if `child_nodes[i]` is the SOURCE of
     `edge_cols[i]` and `-1` if it is the TARGET (i.e. exactly `incidence(kind)[child, edge]`).
-    One root per component (the first node index touched in that component, matching
+    One root per island (the first node index touched in that island, matching
     particular_flow's existing "drop one reference node" convention) never appears as a
     child and so never receives a level entry. Cached on `net._cache`, exactly like
     `spanning_forest`/`island_labels`; this is the one Python-level (per-node) loop in
@@ -170,10 +170,10 @@ def _tree_elimination_levels(net: Network, kind: str | None):
 def _tree_solve(net: Network, kind: str | None, rhs: torch.Tensor) -> torch.Tensor:
     """Solve `A_tree @ q_tree = rhs` over `net`'s spanning forest of edges of `kind`, zero
     on chord edges. `rhs` is `(..., n)` and must already sum to (near) zero within every
-    connected component (the caller's responsibility -- particular_flow checks this
+    island (the caller's responsibility -- particular_flow checks this
     explicitly against its own external sources; branch_flows's chord-source construction
     guarantees it by build, since it only ever moves +m/-m between two nodes already in the
-    same tree component). Returns `(..., b_kind)`.
+    same island). Returns `(..., b_kind)`.
 
     Algorithm: level-synchronous elimination, deepest level first. At each level, every child's
     excess demand is read off (gather), its parent tree edge is solved for directly (`A[child,
@@ -216,8 +216,8 @@ def particular_flow(
     """Tree solution ``A @ q == sources`` on the spanning forest; zero on chord edges.
 
     ``sources`` has shape ``(..., n)`` and must sum to (near) zero within every
-    connected component; ``q`` has shape ``(..., b_kind)``. Raises ``RuntimeError``
-    naming the offending components if any component's sources do not sum to zero
+    island; ``q`` has shape ``(..., b_kind)``. Raises ``RuntimeError``
+    naming the offending islands if any island's sources do not sum to zero
     within ``atol``.
     """
     labels = net.island_labels(kind)
@@ -231,8 +231,8 @@ def particular_flow(
             bad.append(c)
     if bad:
         raise RuntimeError(
-            f"sources do not sum to zero within atol={atol} on components {bad}; "
-            "particular_flow requires a zero net source per connected component"
+            f"sources do not sum to zero within atol={atol} on islands {bad}; "
+            "particular_flow requires a zero net source per island"
         )
     return _tree_solve(net, kind, sources)
 
@@ -250,7 +250,7 @@ def project_measured(
     ``A @ q == sources`` and ``q[mask] == target[mask]``.
 
     Solved as the KKT system ``[[I, C^T], [C, 0]] @ [q; mu] == [target; rhs]`` with
-    ``C = [A_reduced; E_mask]``: ``A_reduced`` drops one row per connected component
+    ``C = [A_reduced; E_mask]``: ``A_reduced`` drops one row per island
     (the rows of ``A`` sum to zero within a component, so one is redundant) and
     ``E_mask`` selects the measured columns. Raises ``RuntimeError`` if the
     measurements and conservation cannot be satisfied simultaneously within ``atol``.

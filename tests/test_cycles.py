@@ -49,7 +49,7 @@ def test_particular_flow_raises_when_sources_do_not_sum_to_zero():
         net.add_node(name)
     net.add_edge("a", "b", kind="airpath")
     net.add_edge("b", "c", kind="airpath")
-    with pytest.raises(RuntimeError, match="component"):
+    with pytest.raises(RuntimeError, match="island"):
         particular_flow(net, torch.tensor([1.0, 0.0, 0.0], dtype=torch.float64))
 
 
