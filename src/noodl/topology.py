@@ -55,6 +55,9 @@ class Network:
         # Branch order is insertion order (networkx iterates edges by adjacency).
         self._edges: list[EdgeKey] = []
         self._cache: dict[tuple, torch.Tensor] = {}
+        # Alternative names of nodes (alias -> node name), set by `Component.flatten` for
+        # the ports merged into each node; every name-based lookup accepts them.
+        self.aliases: dict[Hashable, Hashable] = {}
 
     # ------------------------------------------------------------------ building
     def add_node(self, name: Node, **attrs) -> None:
@@ -78,6 +81,7 @@ class Network:
         other.device = self.device
         other.graph = self.graph.copy()
         other._edges = list(self._edges)
+        other.aliases = dict(self.aliases)
         other.add_node(name)
         for node in self.nodes:
             other.add_edge(node, name, kind=kind)
@@ -115,8 +119,15 @@ class Network:
     def _node_index(self) -> dict[Node, int]:
         return {node: i for i, node in enumerate(self.graph.nodes)}
 
+    def _resolve(self, node: Node) -> Node:
+        try:
+            return self.aliases.get(node, node)
+        except TypeError:          # an unhashable label is simply not an alias
+            return node
+
     def node_index(self, node: Node) -> int:
-        """Position of `node` in node order."""
+        """Position of `node` in node order (its name or an alias)."""
+        node = self._resolve(node)
         index = self._node_index()
         if node not in index:
             raise KeyError(f"unknown node {node!r}")
@@ -124,6 +135,7 @@ class Network:
 
     def interior_index(self, boundary: Sequence[Node]) -> torch.Tensor:
         """Positions, in node order, of all nodes not listed in `boundary`."""
+        boundary = [self._resolve(n) for n in boundary]
         index = self._node_index()
         missing = [n for n in boundary if n not in index]
         if missing:
@@ -134,6 +146,7 @@ class Network:
 
     def boundary_index(self, boundary: Sequence[Node]) -> torch.Tensor:
         """Positions of `boundary` nodes, in the order given."""
+        boundary = [self._resolve(n) for n in boundary]
         index = self._node_index()
         missing = [n for n in boundary if n not in index]
         if missing:
