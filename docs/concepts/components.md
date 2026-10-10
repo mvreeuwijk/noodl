@@ -70,7 +70,7 @@ of doors.
 
 Two real nodes cannot be merged, because each carries its own attributes (a volume, an
 initial temperature) and there is no right way to combine them. Connecting `A.air` straight
-to `B.air` fails at `flatten()` with
+to `B.air` fails at `flatten()`; the error includes
 
 ```text
 connecting merges 'A.air' and 'B.air' into one node, but each carries its own attributes:
@@ -84,6 +84,9 @@ drops it together with its edges, so a door whose side `b` is never connected ca
 flow. `model.check(state, drivers, names=names)` lists such ports as information lines, so
 a forgotten `connect` does not go unnoticed (see
 [Reading results](#reading-results-by-component)).
+
+A terminal that is not a port cannot be connected by anyone, so `flatten` reports it as an error:
+use `add_node(...)` for an internal junction, or expose the terminal.
 
 Only the ports of a direct child can be connected. Reaching into a grandchild is an error;
 re-export the port from its parent under a new name instead:
@@ -243,7 +246,7 @@ A path that does not exist raises a `KeyError` with the closest matches, for exa
 | `connect(p, q)` | a connection set | no counterpart |
 | `inner` / `outer` | `inner` / `outer` | the ambient, implicit |
 | a component placed at `z` with relative heights | a position in the parent | a level and a height relative to it |
-| wind attributes on each exterior path, `inner_table("facades", ...)` | an `outer` weather bus | wind pressure on each path, by wall azimuth |
+| wind attributes on each exterior path, `inner_table("facades", ...)` | no direct counterpart (MBL connects a weather bus `weaBus` to each `Outside`) | wind pressure on each path, by wall azimuth |
 
 CONTAM has no components. A building is one flat list of zones and paths, and its levels map
 to the placement of a component here. Reading a CONTAM file therefore yields a flat network;

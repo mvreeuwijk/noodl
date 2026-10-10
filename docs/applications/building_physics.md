@@ -98,16 +98,19 @@ hand, ready for `build_model`.
 | `room(name, ...)` | `volume` (m3), `T0` (K), `z_ref` (m), `wall` (a `WallMass`, optional) | `air` |
 | `door(name, ...)` | `H`, `W` (m), `z_mid` (m, relative to the placement), `Cd` | `a`, `b` |
 | `crack(name, ...)` | `area` (m2), `z_path` (m), `Cd`, `exterior` (default `False`), wind: `azimuth` or `facade`, `Cp`, `Ch`, `profile` | `a`, `b`; only `a` if exterior |
-| `window(name, ...)` | as `crack`, but `exterior` defaults to `True` | `a` |
+| `window(name, ...)` | as `crack`, but `exterior` defaults to `True` | `a` (and `b` with `exterior=False`) |
 | `shaft(name, ...)` | `levels`, `level_height` (m), `volume` (m3 per level), `area` (m2 of each slab opening), `T0`, `Cd` | `levels[0]`, `levels[1]`, ... |
 
 A `door` has two edges, `low` and `high`, as `add_large_opening` does. An exterior `crack` or
 `window` has one edge, `path`, from the shared `ambient` node, so the building must declare
 `inner("ambient", ...)`. A `shaft` is a stack of zones, one per level, joined by openings
-`slab[i]`, the way CONTAM and Modelica both model a stairwell. A door's or window's height is
+`slab[i]` (how stairwells are usually represented in multizone models). A door's or window's height is
 relative to the component's placement, so the same factory call serves every floor.
 
-A stairwell serving two flats, one per floor. The shaft joins each flat through a door:
+A stairwell serving two flats, one per floor. A door joins each shaft level to its flat:
+connecting `stair.levels[i]` straight to `flat.air` would merge two real nodes, which
+`flatten` refuses (see [Ports and connect](../concepts/components.md#ports-and-connect)).
+
 
 ```python
 from noodl.apps.building_physics import door, room, shaft, window

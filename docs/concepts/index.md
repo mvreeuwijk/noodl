@@ -1,6 +1,6 @@
 # Concepts
 
-noodl physics is built from five ideas that stack. Each section below is a page; read them in order the
+noodl physics is built from seven ideas that stack. Each section below is a page; read them in order the
 first time.
 
 | Page | What it covers |
