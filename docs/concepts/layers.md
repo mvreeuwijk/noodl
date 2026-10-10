@@ -252,7 +252,7 @@ model = Model(
     closures=[density],
     reactions=[("species", decay)],
     coupling="pingpong",            # or "iterate"
-    iterate_tol={"thermal": 0.01},  # REQUIRED when coupling="iterate"
+    iterate_tol={"thermal": 0.01},  # REQUIRED when coupling="iterate"; transport or potential layers
     iterate_max=20,
     substeps={"species": 4},
 )
@@ -260,6 +260,14 @@ model = Model(
 state = model.step(state, drivers, dt=60.0)
 state = model.steady(state, drivers)
 ```
+
+`iterate_tol` may name a transport layer (converged on its state `.x`) or a potential layer
+(converged on the largest change of its interior potential `.phi`, in the potential's units, per
+instance). A potential layer is named when a closure computes that layer's element coefficients
+from its own previous solution, as the sewer dynamic wave does: for example
+`iterate_tol={"head": 1e-6}` repeats the pass until no interior head moves by more than 1 micrometre.
+Its `.phi` and `.q` are relaxed with `iterate_relaxation` like a transport `.x`. Potential layers not
+named in `iterate_tol` are not iterated.
 
 ### Key conventions
 

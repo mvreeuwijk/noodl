@@ -9,6 +9,7 @@ import torch
 
 from noodl.drives import ConstantDrive
 from noodl.elements import PowerLaw
+from noodl.elements.base import Element
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.reaction import FirstOrderDecay
 from noodl.layers.transport import TransportLayer
@@ -1374,3 +1375,92 @@ def test_a_non_converged_iteration_refuses_to_return_when_a_gradient_is_wanted()
         out = model.steady(state, drv, diagnostics=diag, differentiable=False,
                             on_failure="return")
     assert "species.x" in out and not bool(diag["converged"].all())
+
+
+class _DriverConductance(Element):
+    """q = k * dp with k per edge from the driver "toy.k" (test-local)."""
+
+    def __init__(self, kind):
+        super().__init__(kind)
+
+    def flow(self, dp, drivers=None):
+        return drivers["toy.k"] * dp
+
+    def dflow(self, dp, drivers=None):
+        return drivers["toy.k"].expand_as(dp)
+
+
+class _HeadDependentConductance:
+    """Closure: k = k0 * (1 + phi_upstream / 10), read from the FED state -- a Picard
+    coupling between a potential layer and its own coefficients."""
+
+    def __init__(self, src, k0):
+        self.src, self.k0 = src, k0
+
+    def __call__(self, state, drivers):
+        phi = state["toy.phi"]
+        return {"toy.k": self.k0 * (1.0 + phi[..., self.src] / 10.0)}
+
+
+def _toy(k0=1.0, **model_kwargs):
+    net = Network(dtype=torch.float64)
+    for n in ("a", "b", "c"):
+        net.add_node(n)
+    net.add_edge("a", "b", kind="link")
+    net.add_edge("b", "c", kind="link")
+    layer = PotentialFlowLayer(net, "toy", [_DriverConductance("link")], boundary=["c"])
+    src, _ = net.endpoints("link")
+    k0 = torch.as_tensor(k0, dtype=torch.float64)
+    closure = _HeadDependentConductance(src, k0)
+    model = Model(net, {"toy": layer}, closures=[closure], **model_kwargs)
+    state = {"toy.phi": torch.zeros(3, dtype=torch.float64),
+             "toy.q": torch.zeros(2, dtype=torch.float64)}
+    drivers = {"toy.phi_boundary": torch.zeros(1, dtype=torch.float64),
+               "toy.sources": torch.tensor([2.0, 0.0, 0.0], dtype=torch.float64)}
+    return model, state, drivers, closure
+
+
+def test_iterate_tol_may_name_a_potential_layer():
+    model, state, drivers, closure = _toy(
+        coupling="iterate", iterate_tol={"toy": 1e-12}, iterate_max=200)
+    diag: dict = {}
+    # tighten the inner Newton solve below its default floor so the 1e-10 checks are fair
+    out = model.steady(state, drivers, diagnostics=diag, atol=1e-14, rtol=1e-14)
+    assert bool(diag["converged"].all()) and diag["passes"] > 2
+    # the returned state satisfies the NONLINEAR law q = k(phi) * dp
+    k = closure(out, drivers)["toy.k"]
+    phi = out["toy.phi"]
+    src, tgt = model.net.endpoints("link")
+    torch.testing.assert_close(out["toy.q"], k * (phi[src] - phi[tgt]),
+                               rtol=1e-10, atol=1e-12)
+    torch.testing.assert_close(out["toy.q"], torch.full((2,), 2.0, dtype=torch.float64),
+                               rtol=1e-10, atol=1e-12)
+
+
+def test_iterate_tol_naming_an_unknown_layer_lists_both_kinds():
+    with pytest.raises(KeyError, match="potential"):
+        _toy(coupling="iterate", iterate_tol={"nope": 1e-9})
+
+
+def test_iterate_on_a_potential_layer_differentiates_the_fixed_point():
+    k0 = torch.tensor(1.0, dtype=torch.float64, requires_grad=True)
+    model, state, drivers, _ = _toy(k0=k0, coupling="iterate",
+                                    iterate_tol={"toy": 1e-13}, iterate_max=300)
+
+    def loss(k):
+        model.closures[0].k0 = k
+        return model.steady(state, drivers)["toy.phi"][0]
+
+    loss(k0).backward()
+    h = 1e-6
+    with torch.no_grad():
+        fd = (loss(k0 + h) - loss(k0 - h)) / (2 * h)
+    assert k0.grad.item() == pytest.approx(fd.item(), rel=1e-6)
+
+
+def test_unnamed_potential_layers_are_not_relaxed():
+    """A model naming only a transport layer must behave exactly as before."""
+    _, it, state, drivers, _, _ = _build(coupling="iterate", iterate_tol={"species": 1e-11})
+    diag: dict = {}
+    it.step(state, drivers, 600.0, diagnostics=diag)
+    assert set(diag["max_change"]) == {"species"}
