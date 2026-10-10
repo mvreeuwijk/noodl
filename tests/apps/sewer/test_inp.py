@@ -232,3 +232,48 @@ def test_barrels_above_one_are_refused_for_kinwave_too(tmp_path):
     path.write_text(text)
     with pytest.raises(ValueError, match="barrels"):
         read_swmm_inp(path)
+
+
+def _elevation_variant(tmp_path, dynwave):
+    """The tree fixture with C1 offsets 0.1/0.2 m, as DEPTH and as ELEVATION files."""
+    old = ("C1               J1               J3               200        0.013      0"
+           "          0")
+    depth = (DATA / "tree_kinwave.inp").read_text().replace(
+        old, old.replace("0          0", "0.1        0.2"))
+    elev = depth.replace("LINK_OFFSETS         DEPTH", "LINK_OFFSETS         ELEVATION")
+    for pipe, (z1, z2) in {"C1": (12.1, 10.2), "C2": (12.0, 10.0), "C3": (10.0, 9.0),
+                           "C4": (11.0, 9.0), "C5": (9.0, 8.0)}.items():
+        lines = elev.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith(pipe + " ") and "0.013" in ln)
+        head = lines[i].split("0.013")[0] + "0.013"
+        lines[i] = f"{head}      {z1}       {z2}       0          0"
+        elev = chr(10).join(lines)
+    if dynwave:
+        depth, elev = (t.replace("FLOW_ROUTING         KINWAVE", "FLOW_ROUTING         DYNWAVE")
+                       .replace("VARIABLE_STEP        0.75", "VARIABLE_STEP        0")
+                       for t in (depth, elev))
+    out = []
+    for name, text in (("d.inp", depth), ("e.inp", elev)):
+        (tmp_path / name).write_text(text)
+        out.append(read_swmm_inp(tmp_path / name)[0])
+    return out
+
+
+@pytest.mark.parametrize("dynwave", [False, True])
+def test_elevation_offsets_are_stored_above_the_node_invert(tmp_path, dynwave):
+    depth, elev = _elevation_variant(tmp_path, dynwave)
+    c1d = next(p for p in depth.pipes if p.name == "C1")
+    c1e = next(p for p in elev.pipes if p.name == "C1")
+    assert (c1e.inlet_offset, c1e.outlet_offset) == pytest.approx((0.1, 0.2), abs=1e-12)
+    assert (c1e.inlet_offset, c1e.outlet_offset) == pytest.approx(
+        (c1d.inlet_offset, c1d.outlet_offset), abs=1e-12)
+    assert c1e.slope == pytest.approx(c1d.slope, rel=1e-12)
+
+
+def test_dynwave_only_options_do_not_raise_for_kinwave(tmp_path):
+    text = (DATA / "tree_kinwave.inp").read_text().replace(
+        "ROUTING_STEP         5", "ROUTING_STEP         bad:time:x")
+    path = tmp_path / "k.inp"
+    path.write_text(text)
+    net, _, _ = read_swmm_inp(path)
+    assert net.routing == "kinematic_wave"

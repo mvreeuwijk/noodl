@@ -44,6 +44,11 @@ from noodl.apps.sewer.network import Manhole, Outfall, Pipe, SewerNetwork
 
 #: link.c `MIN_DELTA_Z`: the smallest fall SWMM uses for a conduit slope, 0.001 ft in m.
 MIN_DELTA_Z = 0.001 * 0.3048
+_DYNWAVE_KEYS = (
+    "ROUTING_STEP", "VARIABLE_STEP", "LENGTHENING_STEP", "MIN_SURFAREA", "HEAD_TOLERANCE",
+    "MAX_TRIALS", "MIN_SLOPE", "INERTIAL_DAMPING", "NORMAL_FLOW_LIMITED", "SURCHARGE_METHOD",
+    "ALLOW_PONDING",
+)
 _DAMPING = {"NO": "none", "NONE": "none", "PARTIAL": "partial", "FULL": "full"}
 _NORMAL_FLOW = {"NO": "none", "NONE": "none", "NEITHER": "none", "SLOPE": "slope",
                 "FROUDE": "froude", "BOTH": "both"}
@@ -96,19 +101,12 @@ def read_swmm_inp(
 
     routing = "KINWAVE"
     offsets = "DEPTH"
+    raw: dict[str, object] = {}
     opts: dict[str, tuple] = {}
     for line in sections.get("OPTIONS", []):
         key = line.fields[0].upper()
-        if key in ("ROUTING_STEP", "VARIABLE_STEP", "LENGTHENING_STEP"):
-            require_fields(line, 2, key, path)
-            opts[key] = (line, _seconds(line, path))
-        elif key in ("MIN_SURFAREA", "HEAD_TOLERANCE", "MAX_TRIALS", "MIN_SLOPE"):
-            require_fields(line, 2, key, path)
-            opts[key] = (line, as_float(line, 1, key, path))
-        elif key in ("INERTIAL_DAMPING", "NORMAL_FLOW_LIMITED", "SURCHARGE_METHOD",
-                     "ALLOW_PONDING"):
-            require_fields(line, 2, key, path)
-            opts[key] = (line, line.fields[1].upper())
+        if key in _DYNWAVE_KEYS:
+            raw[key] = line        # parsed below, and only under DYNWAVE
         if key == "FLOW_UNITS":
             require_fields(line, 2, "FLOW_UNITS", path)
             if line.fields[1].upper() != "CMS":
@@ -132,6 +130,14 @@ def read_swmm_inp(
     dynamic_wave = DynamicWaveOptions()
     min_slope = 0.0
     if dynamic:
+        for key, line in raw.items():
+            require_fields(line, 2, key, path)
+            if key in ("ROUTING_STEP", "VARIABLE_STEP", "LENGTHENING_STEP"):
+                opts[key] = (line, _seconds(line, path))
+            elif key in ("MIN_SURFAREA", "HEAD_TOLERANCE", "MAX_TRIALS", "MIN_SLOPE"):
+                opts[key] = (line, as_float(line, 1, key, path))
+            else:
+                opts[key] = (line, line.fields[1].upper())
         dynamic_wave = _dynamic_wave_options(opts, path)
         min_slope = opts["MIN_SLOPE"][1] / 100.0 if "MIN_SLOPE" in opts else 0.0
 
@@ -211,6 +217,8 @@ def read_swmm_inp(
             z1, z2 = invert[node1] + in_offset, invert[node2] + out_offset
         else:
             z1, z2 = in_offset, out_offset
+            # `Pipe` offsets are heights above the end node's invert in either mode.
+            in_offset, out_offset = z1 - invert[node1], z2 - invert[node2]
         if name not in shapes:
             raise ValueError(
                 f"{path}: line {line.number}: conduit {name!r} has no [XSECTIONS] entry"
