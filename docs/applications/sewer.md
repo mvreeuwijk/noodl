@@ -10,9 +10,11 @@ Three physical subsystems share the network, each conserving its own quantity at
 water volume, headspace air, and BOD and sulfide mass — and each uses a different part of the
 framework:
 
-- **Water hydraulics** — partially full circular pipes under gravity, Manning's equation. On a
-  dendritic network the cycle space is empty, so continuity alone fixes every discharge in
-  closed form. No potential solve at all.
+- **Water hydraulics** — partially full circular pipes under gravity. Under kinematic-wave
+  routing, Manning's equation on a dendritic network: the cycle space is empty, so continuity
+  alone fixes every discharge in closed form, with no potential solve at all. Under
+  dynamic-wave routing, SWMM's momentum equation as a potential layer on head (see
+  [Dynamic wave](#dynamic-wave)), which admits backwater, flat conduits and loops.
 - **Headspace air** — the air above the water surface is its own flow network, a full
   `PotentialFlowLayer` driven by wall friction, the drag of the moving water surface, and
   buoyancy from the sewer-to-ambient temperature difference, vented through manhole leaks and
@@ -125,6 +127,13 @@ model, state, drivers = build_model(
 `air=False` gives the water-only model the SWMM parity rows use. `fans` names manholes carrying
 a prescribed extraction (m³/s, positive out).
 
+`build_model` dispatches on `net.routing`. A `"dynamic_wave"` network is built by
+`build_dynamic_wave_model`: water only, with `iterate_tol` (m, default 1e-11) and
+`iterate_max` (default 2000 passes) controlling the head iteration. For it, `air`, `quality`
+and `storage` default to `False` and `True` is refused, naming the option; `iterate_tol` and
+`iterate_max` are refused for the other routings. Run it with `simulate_dynamic_wave` (see
+[Dynamic wave](#dynamic-wave)), not `sewer_steady`.
+
 `dt_storage` (optional) declares the interval the manhole storage sweep integrates over. When given,
 a step at any other interval is refused by name. Omit it (the default) to follow the model's own
 step interval via the `StepContext` the closure receives.
@@ -216,6 +225,127 @@ committed fixture), never over individual pipes. Each level is one gather and on
 When `storage=True` the normal-depth inversion is skipped entirely — the sweep has already solved
 each manhole's own level, which *is* its outgoing pipe's entrance depth, bit-for-bit and with no
 root-find.
+
+### Dynamic wave
+
+With `routing="dynamic_wave"` (SWMM's `DYNWAVE`) the network is a potential layer on **head**.
+Where a conduit's flow follows from continuity alone, as on a dendritic kinematic-wave
+network, nothing else is needed; where backwater, a flat conduit or a loop makes the flow depend
+on the heads at both ends, the heads are the unknowns and the flows follow from the head
+differences. The water side then has one `PotentialFlowLayer` named `"water"` (quantity `head`
+in m, flow in m³/s) over the conduits, with the outfalls as its boundary, and a
+`JunctionStorage` node source at every junction.
+
+#### Equations
+
+SWMM 5.2.4's conduit and junction updates (`dwflow.c`, `dynwave.c`) are solved at their fixed
+point rather than replayed trial by trial. For one barrel of conduit length $L$ (m) between
+heads $h_1$ and $h_2$ (m), after a step $\Delta t$ (s):
+
+$$
+q = \frac{q_{\text{old}} + \Delta q_3 + \Delta q_4}{1 + \Delta q_1}
+  + \frac{g\,\Delta t\,A_w}{L\,(1 + \Delta q_1)}\,(h_1 - h_2)
+$$
+
+where $q_{\text{old}}$ is the flow at the step start (m³/s), $\Delta q_1$ the friction and
+$\Delta q_3$, $\Delta q_4$ the convective and area-change momentum terms, and $A_w$ the
+weighted flow area (m²) that SWMM forms from the end and mid-conduit areas. The coefficients
+are evaluated at the converged depths and flow. SWMM's two post-conditions are applied
+afterwards: the normal-flow limit (`NORMAL_FLOW_LIMITED`, `SLOPE`/`FROUDE`/`BOTH`/`NO`), and the
+dry-node clamps, which zero a flow that would draw from a junction with no water. At a junction
+that is not an outfall, with surface area $A_s$ (m², the sum of the surface areas of the
+conduits meeting there, floored at `MIN_SURFAREA`) and depth $y$ (m):
+
+$$
+A_s\,(y - y_{\text{old}}) = \tfrac12\,\Delta t\,(N_{\text{old}} + N)
+$$
+
+with $N$ the net inflow (m³/s: lateral inflow plus the conduit flows into the junction).
+Outfalls are boundary heads: `FREE` takes the lesser of normal and critical depth in the
+outfall conduit, `NORMAL` its normal depth, `FIXED` the stage with SWMM's stage logic, each
+from the flow in that conduit.
+
+#### What is solved
+
+For frozen coefficients the conduit and junction equations are linear in the heads apart from
+the min-clamps, so one pass is a single `PotentialFlowLayer` solve. The model then refreshes the
+coefficients and repeats until the heads change by less than `iterate_tol` (m, default 1e-11)
+or `iterate_max` passes (default 2000) are used (`Model(coupling="iterate")`, converging on the
+layer's own interior head). The result is the head and flow field at which a SWMM trial
+reproduces its own input.
+
+**SWMM's iteration artefacts are not modelled**: trial relaxation, the 0.001 cfs flow-reversal
+rule, link bypassing, `MAX_TRIALS` and `HEAD_TOLERANCE`. Each is a device for reaching the fixed
+point and none moves it. The reader records `HEAD_TOLERANCE` and `MAX_TRIALS` in
+`DynamicWaveOptions`, but noodl does not use them. This has a visible consequence. SWMM stops a
+step when two successive relaxed trials differ by less than `HEAD_TOLERANCE`, which at SWMM's
+defaults (0.0015 m, 8 trials) leaves its answer short of its own fixed point (see
+[Verification](#verification)). SWMM still reports 0 % of steps not converging, because its
+criterion is the change between trials, not the distance to the fixed point.
+
+#### Units
+
+SWMM computes in feet with $g = 32.2$ ft/s² and Manning's 1.486, and the conduit coefficients
+here are evaluated exactly that way (reusing `xsect_tables.LCF`, `QCF`, `PHI`). Outputs are
+converted with SWMM's own factors: head in m is ft × `LCF`, flow in m³/s is cfs × `QCF`,
+conveyance in m²/s is ft²/s × `QCF/LCF`, and an area in m² is ft² × `QCF/LCF`, which is the
+area `kinwave_steady` reports and makes $A_s\,\Delta y = \tfrac12\Delta t\,N$ exact in m and
+m³/s.
+
+#### Bed stiffening and lagged pieces
+
+SWMM clamps a junction depth at 0 after the update. `JunctionStorage` stands in for that with a
+stiff bed term, $K_{\text{bed}} = 10^{6}$ times the storage slope applied to
+$\min(H - z_{\text{bed}}, 0)$, built on `MIN_SURFAREA` rather than on the pass's $A_s$. The
+slope of a junction's balance is therefore positive everywhere, so each junction is grounded
+by itself and the Jacobian stays symmetric positive definite. The default Newton tolerance
+`solve_atol` (m³/s) is scaled per model to the round-off floor of that term (about
+2.5e-9 m³/s, or about 5e-9 m of head, on the committed fixtures; it grows with invert
+elevation).
+
+Some quantities are taken from the previous pass, as SWMM takes them from the previous trial,
+and are consistent at the fixed point: the flow class and the weighting $f_{\text{asnh}}$, the
+surface areas $A_s$, the normal-flow-limit flag (its Froude test uses the momentum flow at the
+fed heads), the normal flow, the dry-node flags, the outfall heads, and the head at any
+conduit end SWMM pins (the head is raised to the invert plus offset when it lies below it, and
+set to critical depth in `UP_CRITICAL`/`DN_CRITICAL`). A conduit with a pinned end has no head
+dependence there: its conveyance is zero and the pinned head enters the constant term.
+
+#### Starting state and zero fall
+
+The cold start follows SWMM's `flowrout.c`: junction depth 0, each outfall at its outfall depth
+for zero flow (the stage for `FIXED`), each conduit's depth the mean of its two clamped end
+depths, and a previous net inflow of 0 at the first step. SWMM orients a conduit with exactly
+zero fall by round-off under `DYNWAVE`, so noodl can legitimately differ on an exactly flat
+conduit; the backwater fixture avoids an exact tie for that reason.
+
+#### Scope
+
+Circular conduits, one barrel, SWMM's tabulated geometry; a fixed routing step
+(`VARIABLE_STEP 0`); a cold dry start (zero `InitDepth` and `InitFlow`); constant or
+driver-supplied lateral inflows; `FREE`, `NORMAL` and `FIXED` outfalls without flap gates;
+`INERTIAL_DAMPING` `NONE`/`PARTIAL`/`FULL` and every `NORMAL_FLOW_LIMITED` option.
+`SURCHARGE_METHOD` `EXTRAN` or `SLOT` is accepted by the options, but any conduit end that
+reaches the crown stops the run with an error naming the conduit and the time. `build_model`
+with `air=True`, `quality=True` or `storage=True` is refused by name. Surcharge, variable step,
+ponding, headspace air and quality on the dynamic wave are planned.
+
+```python
+from noodl.apps.sewer import read_swmm_inp, build_model, simulate_dynamic_wave
+
+net, _, _ = read_swmm_inp("tree_dynwave.inp")
+model, state, drivers = build_model(net)
+state, hist = simulate_dynamic_wave(model, state, drivers, steps=24)    # 24 x 5 s
+print([round(float(q), 4) for q in hist["water.q"][-1]])                # m3/s, C1..C5
+```
+
+```text
+[0.0184, 0.031, 0.0032, 0.0092, 0.0004]
+```
+
+`hist` holds `"water.phi"` (head at every node, m) and `"water.q"` (flow in every conduit,
+m³/s), stacked over steps. `simulate_dynamic_wave` also takes an `inflow=` override (`(n,)`
+constant, `(B, n)` a batch, `(steps, B, n)` a series) and `record=` for other state keys.
 
 ### Headspace air
 
@@ -310,6 +440,40 @@ manhole storage), not a kinematic wave. SWMM also mixes over the step-start volu
 $(cV_1 + c_{in} q_{in}\Delta t)/(V_1 + q_{in}\Delta t)$, where the model's amount form divides by
 $V_2 + q_{out}\Delta t$; the two agree when $V_2 - V_1 = (q_{in} - q_{out})\Delta t$.
 
+### Dynamic wave against SWMM
+
+`tests/verification/test_sewer_dynwave_parity.py` runs live SWMM 5.2.4 through `pyswmm` with a
+fixed 5 s routing step for 30 min and compares every step's node depths and link flows
+(files `tests/data/sewer/{tree,backwater,loop}_dynwave.inp`):
+
+- a 5-conduit tree, filling from dry;
+- a backwater line, with a drop at J2, a flat conduit C2 and a `FIXED` outfall stage above the outfall invert;
+- a loop with an adverse conduit.
+
+SWMM is run with `HEAD_TOLERANCE` 1e-12 m and `MAX_TRIALS` 500; noodl with `iterate_tol` 1e-13 m
+and `iterate_max` 2000. Each test asserts that SWMM's report says 0 % of steps not converging.
+The two sides compare the same fixed point only if SWMM has reached it, and SWMM's trials are
+relaxed, so a loose `HEAD_TOLERANCE` stops it short (second table). Tightening it to 1e-12 m
+brought the differences below the targets without changing either code's equations.
+
+| Check | Target | Measured worst (tree / backwater / loop) |
+|---|---|---|
+| Node depths, every 5 s step | abs 1e-7 m | 1.2e-9 / 4.5e-9 / 3.4e-9 m |
+| Link flows, every 5 s step | rel 1e-6 + abs 1e-9 m³/s | within the target at every step |
+
+The same networks with SWMM at its **default** tolerance (`HEAD_TOLERANCE` 0.0015 m,
+`MAX_TRIALS` 8), against noodl's converged answer:
+
+| SWMM at default tolerance | Worst depth difference (m) | Worst flow difference (% of the network's maximum flow) |
+|---|---|---|
+| tree | 2.3e-3 | 0.8 |
+| backwater | 1.3e-2 | 7.4 |
+| loop | 3.6e-3 | 3.6 |
+
+SWMM reports 0 % of steps not converging at those defaults too. Its stopping rule bounds the
+change between relaxed trials, not the distance to the fixed point, so a result that SWMM
+calls converged can sit centimetres away from the equations' solution on a backwater.
+
 Non-SWMM checks, for the physics SWMM does not model:
 
 | Check | Result |
@@ -340,9 +504,15 @@ publish numbers from this application.
 
 ## Limitations
 
-- **No surcharge or backwater.** Networks that would surcharge or need backwater are refused by
-  name; they are not modelled.
-- **Dendritic networks only:** one outgoing pipe per manhole, no loops.
+- **Kinematic-wave and steady routing have no surcharge or backwater.** A network that would
+  surcharge or need backwater is refused by name there; use `routing="dynamic_wave"` for
+  backwater.
+- **Kinematic-wave and steady routing: dendritic networks only**, one outgoing pipe per
+  manhole, no loops. Dynamic-wave routing allows loops and flat or adverse conduits.
+- **Dynamic wave: no surcharge, variable step, ponding, headspace air or quality yet**
+  (planned). A conduit end reaching the crown stops the run with the conduit's name and the
+  time; the Preissmann slot is refused; `build_model(..., air=True)` or `quality=True` is
+  refused. Circular conduits only, one barrel, cold dry start.
 - **No gas-phase sulfide sink.** H₂S leaves the headspace by ventilation, at the outfall, and
   by re-absorption into the water (the two-film flux is signed); no wall uptake or gas-phase
   oxidation is modelled.
