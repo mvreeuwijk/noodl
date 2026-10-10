@@ -122,7 +122,7 @@ def test_terminal_junction_is_named_by_the_outermost_terminal():
     b.connect(f2.ports.z, A.ports.air)
     net, _ = b.flatten()
     assert "j" in net.nodes                 # depth 0 beats f.l1.b and f2.l2.a
-    assert net.graph.nodes["j"] == {}       # a junction carries no attributes
+    assert net.graph.nodes["j"] == {"position": (0.0, 0.0, 0.0)}  # no attributes
 
 
 def test_reexport_through_two_levels():

@@ -8,6 +8,7 @@ in tree order, and edges in the same order."""
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import torch
@@ -164,14 +165,68 @@ class _Flattener:
 
     # ------------------------------------------------------------------ attributes
     def node_attrs(self, slot: _Slot) -> dict:
-        return {} if slot.attrs is None else dict(slot.attrs)
+        attrs = {} if slot.attrs is None else dict(slot.attrs)
+        z = slot.offset[2]
+        for name in self.node_elev:
+            if name in attrs:
+                attrs[name] = float(attrs[name]) + z
+            elif z != 0.0:
+                # A missing height is 0 relative to the placement (Stack.from_network reads
+                # a missing z_ref as 0), so the node sits at its component's height.
+                attrs[name] = z
+        attrs["position"] = slot.offset
+        return attrs
 
     def edge_attrs(self, v: _Visit, edge) -> dict:
-        return dict(edge.attrs)
+        attrs = dict(edge.attrs)
+        for name in self.edge_elev & attrs.keys():
+            attrs[name] = float(attrs[name]) + v.offset[2]
+        where = _join(v.path, edge.name)
+        for attr, (table, target) in self.lookups.items():
+            if attr not in attrs:
+                continue
+            if target in attrs:
+                self.errors.append(f"{where}: both {attr}= and {target}= are set; give one")
+                continue
+            value = self.table_value(v, where, attr, table, attrs[attr])
+            if value is not None:
+                attrs[target] = value
+        return attrs
+
+    def table_value(self, v: _Visit, where: str, attr: str, table: str, key):
+        for comp in reversed(v.scope):
+            if table in comp._tables:
+                entries = comp._tables[table]
+                if key not in entries:
+                    self.errors.append(
+                        f"{where}: {attr}={key!r} is not in the {table!r} table of "
+                        f"{comp.name!r}, which has {', '.join(map(repr, sorted(entries)))}"
+                    )
+                    return None
+                return float(entries[key])
+        self.errors.append(
+            f"{where}: {attr}={key!r} but no enclosing component declares "
+            f"inner_table({table!r}, ...)"
+        )
+        return None
+
+    def warn_unshifted(self) -> None:
+        if self.node_elev or self.edge_elev:
+            return
+        raised = [v for v in self.visits if v.offset[2] != 0.0]
+        if raised:
+            warnings.warn(
+                f"{self.where(raised[0])} is placed at z = {raised[0].offset[2]} m but no "
+                f"height attributes are registered, so no height is shifted; call "
+                f"noodl.components.register_elevations(...) or pass node_elevations= / "
+                f"edge_elevations= to flatten()",
+                UserWarning, stacklevel=5,
+            )
 
     # ------------------------------------------------------------------ run
     def run(self, dtype) -> tuple[Network, NameMap]:
         self.allocate()
+        self.warn_unshifted()
         for v in self.visits:
             for a, b in v.comp._connects:
                 self.union(self.resolve(v, a), self.resolve(v, b))
