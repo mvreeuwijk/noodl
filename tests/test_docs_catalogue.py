@@ -59,3 +59,22 @@ def test_components_elements_and_drives_state_their_units():
     assert "(m)" in first(Duct)
     assert inspect.getdoc(Stack.from_network) and "z_path" in inspect.getdoc(Stack.from_network)
     assert "m/s" in first(Wind)
+
+
+def test_every_documented_building_attribute_is_read_by_the_code():
+    import re
+
+    from noodl.apps.building_physics import EDGE_ATTRIBUTES, NODE_ATTRIBUTES
+
+    src = ROOT / "src" / "noodl"
+    code = "".join(p.read_text(encoding="utf-8") for p in [
+        src / "drives.py", src / "refs.py", src / "apps" / "building_physics" / "thermal.py",
+        src / "apps" / "building_physics" / "elements.py",
+        src / "apps" / "building_physics" / "prj.py",
+    ])
+    names = list(NODE_ATTRIBUTES) + [a for kind in EDGE_ATTRIBUTES.values() for a in kind]
+    unread = [n for n in names if not re.search(rf"[\"']{re.escape(n)}[\"']", code)]
+    assert unread == []
+    page = gen.render(*[p for p in gen.PAGES if p[0] == "building_physics"][0])
+    assert "## Network attributes" in page and "`z_path`" in page and "`heat_capacity`" in page
+    assert "NODE_ATTRIBUTES" not in page

@@ -7,6 +7,43 @@ Every application is set up the same way; see [Using noodl](../usage.md).
 
 Import from `noodl.apps.building_physics` and the modules named in each table. The full reference, with every parameter, is in the [API reference](../api.md).
 
+## Network attributes
+
+What the builders, elements and drives read off `net.add_node(...)` and `net.add_edge(...)`, by name. Defined in `noodl.apps.building_physics.attributes`.
+
+**Nodes**
+
+| Attribute | Meaning | Read by |
+|---|---|---|
+| `volume` | air volume of the zone (m3); 0 for a wall node | `thermal_layer, species_layer` |
+| `T0` | initial temperature (K), also the boundary temperature of a boundary node | `initial_state, initial_drivers` |
+| `z_ref` | height of the node's reference pressure (m) | `Stack.from_network` |
+| `heat_capacity` | extra lumped heat capacity of the node (J/K); a wall node's capacity | `thermal_layer` |
+
+**Edges of kind `airpath`**
+
+| Attribute | Meaning | Read by |
+|---|---|---|
+| `z_path` | height of the opening (m) | `Stack.from_network` |
+| `Cd` | discharge coefficient (dimensionless) | `orifice_elements_from_edges` |
+| `area` | opening area (m2) | `orifice_elements_from_edges` |
+| `name` | label of the edge in model.refs and in named results (optional) | `noodl.refs` |
+
+**Edges of kind `airpath, to or from the ambient node`**
+
+| Attribute | Meaning | Read by |
+|---|---|---|
+| `azimuth` | facade direction, in the unit of the theta_w driver (degrees from CONTAM) | `Wind.from_network` |
+| `Cp` | constant wind pressure coefficient when the edge has no profile | `Wind.from_network` |
+| `Ch` | wind speed modifier (dimensionless, 1 by default) | `Wind.from_network` |
+| `profile` | number of the WindProfile to use; 0 means the constant Cp | `Wind.from_network` |
+
+**Edges of kind `wall`**
+
+| Attribute | Meaning | Read by |
+|---|---|---|
+| `ua` | conductance zone -> wall or wall -> ambient (W/K) | `thermal_layer` |
+
 ## Set-up
 
 Build the model and its starting state and inputs.

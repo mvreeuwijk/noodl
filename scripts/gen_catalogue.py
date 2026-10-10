@@ -69,6 +69,10 @@ ROLES = [
     ("constant", "Constants and tables", "Named values and option tables."),
 ]
 OPTION_MODULES = {"street_aq": "noodl.apps.street_aq.closures"}
+ATTRIBUTE_MODULES = {"building_physics": "noodl.apps.building_physics.attributes"}
+"""Pages whose application reads node and edge attributes off the network: the module
+defining `NODE_ATTRIBUTES` and `EDGE_ATTRIBUTES`."""
+ATTRIBUTE_TABLE_NAMES = {"NODE_ATTRIBUTES", "EDGE_ATTRIBUTES"}
 """Pages whose application has named model options: the module defining `OPTIONS` (option
 -> allowed values), `PRESETS` (preset -> its choices) and, in the docstring under
 `OPTIONS`, one `- `option`: meaning` bullet per option."""
@@ -235,6 +239,24 @@ def _options_section(modname: str) -> list[str]:
     return lines + [""]
 
 
+def _attributes_section(modname: str) -> list[str]:
+    mod = importlib.import_module(modname)
+    lines = [
+        "## Network attributes", "",
+        "What the builders, elements and drives read off `net.add_node(...)` and "
+        "`net.add_edge(...)`, by name. Defined in `" + modname + "`.", "",
+        "**Nodes**", "", "| Attribute | Meaning | Read by |", "|---|---|---|",
+    ]
+    for attr, (meaning, reader) in mod.NODE_ATTRIBUTES.items():
+        lines.append(f"| `{attr}` | {_esc(meaning)} | `{reader}` |")
+    for kind, attrs in mod.EDGE_ATTRIBUTES.items():
+        lines += ["", f"**Edges of kind `{kind}`**", "", "| Attribute | Meaning | Read by |",
+                  "|---|---|---|"]
+        for attr, (meaning, reader) in attrs.items():
+            lines.append(f"| `{attr}` | {_esc(meaning)} | `{reader}` |")
+    return lines + [""]
+
+
 def render(stem: str, title: str, link: str | None, modules: list[str], intro: str) -> str:
     entries = _entries(modules)
     by_role: dict[str, list[dict]] = {r: [] for r, _, _ in ROLES}
@@ -255,8 +277,12 @@ def render(stem: str, title: str, link: str | None, modules: list[str], intro: s
     ]
     if stem in OPTION_MODULES:
         lines += _options_section(OPTION_MODULES[stem])
+    if stem in ATTRIBUTE_MODULES:
+        lines += _attributes_section(ATTRIBUTE_MODULES[stem])
     for role, heading, blurb in ROLES:
         group = by_role[role]
+        if role == "constant":
+            group = [e for e in group if e["name"] not in ATTRIBUTE_TABLE_NAMES]
         if not group:
             continue
         lines += [f"## {heading}", "", blurb, ""]
