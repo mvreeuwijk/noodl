@@ -186,6 +186,13 @@ class IdealGasDensity(_DensityClosure):
         P = drivers.get("P_ref", self.P_ref)
         return P / (self.R * T)
 
+    @property
+    def input_specs(self) -> dict[str, dict]:
+        """The reference pressure this closure reads when given (`model.refs.inputs`)."""
+        return {"P_ref": dict(description=f"reference pressure of the ideal-gas density "
+                                          f"(default {self.P_ref:g} Pa)",
+                              unit="Pa", required=False)}
+
 
 class LinearDensity(_DensityClosure):
     """Boussinesq: rho = rho_0 (1 - (T - T_0) / T_0), the form the analytical natural-
@@ -204,8 +211,12 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
                 density_kwargs=None,
                 coupling: str = "pingpong", iterate_tol=None, iterate_max: int = 20,
                 thermal_scheme: str = "exact", species_scheme: str = "implicit",
-                flow_kinds=None) -> Model:
+                flow_kinds=None, return_inputs: bool = False):
     """Layers "air" (+ "thermal", + "species"), the density closure, one Model.
+
+    Returns the `Model`; with `return_inputs=True`, `(model, state, drivers)` -- its
+    `initial_state(model)` and `initial_drivers(model)` -- like every other application's
+    `build_model`.
 
     TWO COUPLING TRAPS, both inherited from `Model` (see `noodl.model.Model`, the class
     docstring's "Two couplings"), because this builder chooses the coupling but never calls
@@ -272,8 +283,11 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
             net, ambient=ambient, flow_kinds=kinds, scheme=species_scheme,
             n_species=int(species) if names is None else len(names), species_names=names,
         )
-    return Model(net, layers, closures=closures, coupling=coupling, iterate_tol=iterate_tol,
-                 iterate_max=iterate_max)
+    model = Model(net, layers, closures=closures, coupling=coupling, iterate_tol=iterate_tol,
+                  iterate_max=iterate_max)
+    if return_inputs:
+        return model, initial_state(model), initial_drivers(model)
+    return model
 
 
 def initial_state(model: Model, *, values: Mapping | None = None) -> State:

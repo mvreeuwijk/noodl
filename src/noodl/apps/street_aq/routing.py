@@ -926,6 +926,44 @@ class StreetFlows:
                                                  n_theta=self.n_theta)
         return theta_j, offsets, weights
 
+    @property
+    def input_specs(self) -> dict[str, dict]:
+        """The meteorology this closure reads, declared for `model.refs.inputs` and
+        `Model.check`: one value per instance, or under `meteo="per_street"` one per street
+        (street order) with optional per-junction overrides (junction order)."""
+        streets = list(self.geometry.names)
+        junctions: list[str] = []
+        for u, v in zip(self.geometry.u, self.geometry.v, strict=True):
+            for node in (u, v):
+                if node not in junctions:
+                    junctions.append(node)
+        over = streets if self.meteo == "per_street" else None
+        needs = ("required unless u_star is given, and always for "
+                 "direction_spread='turbulence_intensity'" if self._spread_from_turbulence()
+                 else "required unless u_star is given")
+        specs = {
+            "U_ref": dict(description=f"wind speed at z_ref = {self.z_ref:g} m ({needs})",
+                          unit="m/s", over=over, required=False),
+            "theta_w": dict(description="wind direction the wind blows TOWARD, "
+                                        "counter-clockwise from east", unit="rad", over=over),
+            "h_abl": dict(description="atmospheric boundary-layer depth", unit="m", over=over),
+            "u_star": dict(description="friction velocity, replacing the log law from U_ref",
+                           unit="m/s", over=over, required=False),
+            "lmo": dict(description="Obukhov length (stability='monin_obukhov'; neutral "
+                                    "without it)", unit="m", over=over, required=False),
+        }
+        if self.meteo == "per_street":
+            for key in ("theta_w", "U_ref", "u_star", "h_abl", "lmo"):
+                specs[f"{key}_junction"] = dict(
+                    description=f"{key} at each junction, overriding the mean of the "
+                                f"streets meeting there", unit=specs[key]["unit"],
+                    over=junctions, required=False)
+        if not self._spread_from_turbulence():
+            specs["sigma_theta"] = dict(
+                description="wind-direction spread (direction_spread='driver')", unit="rad",
+                over=junctions if self.meteo == "per_street" else None, required=False)
+        return specs
+
     def __call__(self, state, drivers) -> dict[str, Tensor]:
         g = self.geometry
         _bl, u_street, u_d = self.velocities(drivers)

@@ -936,6 +936,17 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         K = len(project.species)
         drivers["species.x_boundary"] = torch.zeros(1, K, dtype=F64)
         state["species.x"] = project.x0.clone()
+    # The inputs the airflow elements and drives read themselves, declared for
+    # `model.refs.inputs` and `Model.check`.
+    model.input_specs = {
+        "rho": dict(description="air density at every node (Pb / (R T))",
+                    unit="kg/m3", over="nodes"),
+        "rho_amb": dict(description="ambient air density", unit="kg/m3"),
+        "V_met": dict(description="wind speed at the meteorological station",
+                      unit="m/s"),
+        "theta_w": dict(description="wind direction, as CONTAM's weather file gives it",
+                        unit="deg"),
+    }
     model.driver_template = dict(drivers)
     return model, state, drivers
 

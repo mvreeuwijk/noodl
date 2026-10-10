@@ -484,6 +484,24 @@ def build_model(
     model.out_pipe = out_pipe
     model.manhole_idx = manhole_idx
     model.pipe_names = [p.name for p in net.pipes]
+    # The inputs the hydraulics, lateral-load and H2S closures read themselves, declared
+    # for `model.refs.inputs` and `Model.check` (only those this model was built with).
+    specs = {
+        "inflow": dict(description="lateral inflow at each manhole", unit="m3/s",
+                       over="nodes"),
+        "bod_in": dict(description="BOD concentration of the lateral inflow",
+                       unit="kg/m3", over="nodes"),
+        "sulfide_in": dict(description="sulfide concentration of the lateral inflow",
+                           unit="kg/m3", over="nodes"),
+        "T_water": dict(description="wastewater temperature", unit="degC"),
+        "T_head": dict(description="headspace air temperature", unit="K"),
+        "T_amb": dict(description="ambient air temperature", unit="K"),
+        "pH": dict(description="wastewater pH", unit="-"),
+        "sewer.q_slope": dict(description="slope of each manhole's outgoing pipe",
+                              unit="m/m", over=manhole_names,
+                              ordering="manhole order"),
+    }
+    model.input_specs = {k: v for k, v in specs.items() if k in drivers}
     model.driver_template = dict(drivers)
     return model, state, drivers
 

@@ -190,6 +190,11 @@ def test_state_from_accepts_a_layer_name_and_reports_what_is_missing():
 def test_a_mapping_for_a_key_of_unknown_layout_is_refused_but_a_tensor_passes():
     _, model = _two_zone_with_wall()
     with pytest.raises(KeyError, match="does not know this key's layout"):
+        model.drivers_from({"my_gain": {"A": 1.0}})
+    d = model.drivers_from({"my_gain": torch.tensor(5.0, dtype=F64)})
+    assert float(d["my_gain"]) == 5.0
+    # `P_ref` is declared by the density closure: one value per instance, never by label.
+    with pytest.raises(TypeError, match="one value per instance"):
         model.drivers_from({"P_ref": {"A": 1.0}})
     d = model.drivers_from({"P_ref": torch.tensor(101000.0, dtype=F64)})
     assert float(d["P_ref"]) == 101000.0

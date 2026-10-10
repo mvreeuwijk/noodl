@@ -125,6 +125,7 @@ Calculations and helpers.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `input_field`<br><small>`noodl.refs`</small> | A `Field` for an input a closure, reaction, element or drive reads itself (a wind speed, an inflow), as a closure's `input_specs` or a builder's `model.input_specs` declares it. | `input_field(model, key, *, description, unit='', over=None, required=True, ordering=None)` |
 | `required_state_keys`<br><small>`noodl.refs`</small> | The state keys `Model.step` reads from the step-start state. | `required_state_keys(model)` |
 | `active_interior`<br><small>`noodl.layers`</small> | Split the non-boundary nodes of `net` into the ones `kinds` touch and the ones it does not: `(interior_idx, inactive_idx)`, both in NODE order, both excluding `boundary`. | `active_interior(net, kinds, boundary)` |
 | `Orifice`<br><small>`noodl.elements`</small> | PowerLaw(C = Cd * A * sqrt(2 / rho), n = 0.5): the sharp-edged orifice equation. | `Orifice(Cd, A, *, rho=1.2, dp_transition=0.001, regularised=None, kind='airpath', learnable=False)` |
