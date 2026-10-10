@@ -17,8 +17,6 @@ from noodl.components import (
 register_elevations(nodes=("z_ref",), edges=("z_path",))
 register_table_lookup("facade", table="facades", target="azimuth")
 
-_WIND = ("azimuth", "facade", "Cp", "Ch", "profile")
-
 
 def room(name: str, *, volume: float, T0: float = T_REF, z_ref: float = 0.0,
          wall: WallMass | None = None) -> Component:
@@ -41,7 +39,11 @@ def door(name: str, *, H: float, W: float, z_mid: float, Cd: float = 0.78) -> Co
     return c
 
 
-def _orifice(template: str, name: str, *, area, z_path, Cd, exterior, wind) -> Component:
+def _orifice(template: str, name: str, *, area: float, z_path: float, Cd: float,
+             exterior: bool, azimuth: float | None = None, facade: str | None = None,
+             Cp: float | None = None, Ch: float | None = None,
+             profile: int | None = None) -> Component:
+    wind = dict(azimuth=azimuth, facade=facade, Cp=Cp, Ch=Ch, profile=profile)
     given = {k: v for k, v in wind.items() if v is not None}
     c = Component(name, template=template)
     c.add_terminal("a")
@@ -62,30 +64,30 @@ def _orifice(template: str, name: str, *, area, z_path, Cd, exterior, wind) -> C
 
 
 def crack(name: str, *, area: float, z_path: float, Cd: float = 0.6, exterior: bool = False,
-          azimuth=None, facade=None, Cp=None, Ch=None, profile=None) -> Component:
+          azimuth: float | None = None, facade: str | None = None, Cp: float | None = None,
+          Ch: float | None = None, profile: int | None = None) -> Component:
     """A small orifice (m2, m). Interior: between terminals `a` and `b`. Exterior: from the
     shared ambient to `a`, carrying the wind attributes `Wind.from_network` reads; give the
     facade direction as `azimuth` (degrees from north) or as `facade`, a key of the
     building's `inner_table("facades", ...)`. Edge: `path`."""
-    wind = dict(azimuth=azimuth, facade=facade, Cp=Cp, Ch=Ch, profile=profile)
     return _orifice("crack", name, area=area, z_path=z_path, Cd=Cd, exterior=exterior,
-                    wind=wind)
+                    azimuth=azimuth, facade=facade, Cp=Cp, Ch=Ch, profile=profile)
 
 
 def window(name: str, *, area: float, z_path: float, Cd: float = 0.6, exterior: bool = True,
-           azimuth=None, facade=None, Cp=None, Ch=None, profile=None) -> Component:
+           azimuth: float | None = None, facade: str | None = None, Cp: float | None = None,
+           Ch: float | None = None, profile: int | None = None) -> Component:
     """An opening in the envelope: a `crack` that is exterior unless told otherwise."""
-    wind = dict(azimuth=azimuth, facade=facade, Cp=Cp, Ch=Ch, profile=profile)
     return _orifice("window", name, area=area, z_path=z_path, Cd=Cd, exterior=exterior,
-                    wind=wind)
+                    azimuth=azimuth, facade=facade, Cp=Cp, Ch=Ch, profile=profile)
 
 
 def shaft(name: str, *, levels: int, level_height: float, volume: float, area: float,
           T0: float = T_REF, Cd: float = 0.6) -> Component:
-    """A tall space (stairwell, atrium, lift shaft) as a stack of zones, one per level, as
-    CONTAM and Modelica both model it: node `levels[i]` at z_ref = i * level_height, joined
-    by an opening `slab[i]` (area m2) at the slab between levels i and i+1. Ports:
-    `levels[0]`, `levels[1]`, ..."""
+    """A tall space (stairwell, atrium, lift shaft) as a stack of zones, one per level,
+    joined by openings (how stairwells are usually represented in multizone models): node
+    `levels[i]` at z_ref = i * level_height, joined by an opening `slab[i]` (area m2) at the
+    slab between levels i and i+1. Ports: `levels[0]`, `levels[1]`, ..."""
     if levels < 2:
         raise ComponentError(f"{name}: a shaft needs at least 2 levels, got {levels}")
     c = Component(name, template="shaft")
