@@ -846,14 +846,17 @@ class Model:
         return state_from(self, values, base=base)
 
     def check(self, state: Mapping | None = None, drivers: Mapping | None = None, *,
-              dt: float | None = None, probe: bool = False, steady: bool = False):
+              dt: float | None = None, probe: bool = False, steady: bool = False,
+              names=None):
         """A `noodl.validation.SetupReport` on this model and, when given, its state and
         drivers: required inputs, orders and shapes, units, unused edge kinds and suspicious
         keys. `probe=True` runs one step of `dt` (or a steady solve) to learn which custom
-        keys are read. Nothing is raised; call `.raise_for_errors()` on the report."""
+        keys are read. `names=` (from `Component.flatten`) also lists unconnected ports.
+        Nothing is raised; call `.raise_for_errors()` on the report."""
         from noodl.validation import check_setup
 
-        return check_setup(self, state, drivers, dt=dt, probe=probe, steady=steady)
+        return check_setup(self, state, drivers, dt=dt, probe=probe, steady=steady,
+                           names=names)
 
     # ------------------------------------------------------------------ public
     def initial_capacities(self, state: State, drivers: Drivers) -> dict[str, Tensor]:
