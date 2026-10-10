@@ -1,0 +1,347 @@
+"""SWMM 5.2.4's dynamic-wave conduit update, `dwflow.c::dwflow_findConduitFlow`, as a pure
+function of one pass's state, in SWMM's own feet units (ft, ft2, cfs, s; g = 32.2).
+
+The update is linear in the end-head difference once the depth-dependent coefficients are
+frozen, q = c0 + k (H1 - H2): that is the form `DynamicWaveConduit` solves. What SWMM applies
+AFTER the momentum update -- the normal-flow limit and the dry-node clamps -- is returned as
+flags and limits for the element to apply. Trial relaxation, the 0.001 cfs reversal rule and
+link bypassing are artefacts of SWMM's Picard iteration that do not move its fixed point and
+are not modelled (see docs/applications/sewer.md, "Dynamic wave").
+
+Scope of the transcription (circular conduits, one barrel, as the dynamic-wave reader admits):
+no local losses (``dq5``), no evaporation/seepage (``dq6``), no culvert inlet control, no flap
+gate, no user flow limit, no Courant lengthening (``modLength == length``) and the EXTRAN
+surcharge geometry (no Preissmann slot: ``getSlotWidth == 0``, end depths capped at the
+crown, widths cut off at ``0.96 yFull``).
+
+Every source reference is to SWMM 5.2.4 ``src/solver``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import NamedTuple
+
+import torch
+
+from noodl.apps.sewer.xsect_tables import (
+    GRAVITY_FT,
+    LCF,
+    PHI,
+    area_of_depth,
+    conduit_constants,
+    critical_depth,
+    froude_number,
+    normal_depth_ft,
+    radius_of_depth,
+    width_of_depth,
+)
+
+Tensor = torch.Tensor
+F64 = torch.float64
+
+#: SWMM's flow classes (`enums.h` ``FlowClassType``), in SWMM's order.
+DRY, UP_DRY, DN_DRY, SUBCRITICAL, SUPCRITICAL, UP_CRITICAL, DN_CRITICAL = range(7)
+#: SWMM's ``FUDGE`` (`consts.h:72`): minimum depth (ft), area (ft2) and flow (cfs).
+FUDGE = 1.0e-4
+#: SWMM's ``MAXVELOCITY`` (`dwflow.c:37`), ft/s.
+MAX_VELOCITY = 50.0
+#: SWMM's ``EXTRAN_CROWN_CUTOFF`` (`dynwave.c:64`): fraction of full depth above which a
+#: closed conduit's top width is frozen.
+EXTRAN_CROWN_CUTOFF = 0.96
+#: ``INERTIAL_DAMPING`` options (`NO_DAMPING`, `PARTIAL_DAMPING`, `FULL_DAMPING`).
+DAMPING = ("none", "partial", "full")
+#: ``NORMAL_FLOW_LIMITED`` options (`SLOPE`, `FROUDE`, `BOTH`, `NEITHER`).
+NORMAL_FLOW_LIMITED = ("slope", "froude", "both", "none")
+
+
+@dataclass(frozen=True)
+class ConduitGeometry:
+    """Per-conduit constants of the dynamic-wave update, in SWMM's internal feet units.
+
+    ``y_full`` full depth (ft), ``a_full`` full area (ft2), ``s_full`` section factor
+    ``A R^(2/3)`` at full depth (ft^(8/3)), ``beta = PHI sqrt(slope)/n`` (ft^(1/3)/s),
+    ``rough_factor = g (n/PHI)^2`` (ft^(1/3)/s2, `link.c:1130`), ``length`` (ft),
+    ``invert1``/``invert2`` end-node invert elevations (ft), ``offset1``/``offset2``
+    conduit inverts above those (ft), ``outfall1``/``outfall2`` whether the end node is an
+    outfall (bool).
+    """
+
+    y_full: Tensor
+    a_full: Tensor
+    s_full: Tensor
+    beta: Tensor
+    rough_factor: Tensor
+    length: Tensor
+    invert1: Tensor
+    invert2: Tensor
+    offset1: Tensor
+    offset2: Tensor
+    outfall1: Tensor
+    outfall2: Tensor
+
+    @classmethod
+    def from_si(cls, diameter: Tensor, roughness: Tensor, slope: Tensor, length: Tensor,
+                invert1: Tensor, invert2: Tensor, offset1: Tensor, offset2: Tensor,
+                outfall1: Tensor, outfall2: Tensor) -> ConduitGeometry:
+        """From SI inputs: ``diameter`` (m), Manning ``roughness`` (s m^(-1/3), numerically
+        SWMM's n), ``slope`` (m/m), ``length`` (m), node inverts and conduit offsets (m),
+        outfall flags (bool)."""
+        y_full, a_full, s_full, beta = conduit_constants(diameter, roughness, slope)
+        n_phi = roughness / PHI
+        return cls(
+            y_full=y_full, a_full=a_full, s_full=s_full, beta=beta,
+            rough_factor=GRAVITY_FT * (n_phi * n_phi),           # link.c:1130
+            length=length / LCF,
+            invert1=invert1 / LCF, invert2=invert2 / LCF,
+            offset1=offset1 / LCF, offset2=offset2 / LCF,
+            outfall1=torch.as_tensor(outfall1).bool(),
+            outfall2=torch.as_tensor(outfall2).bool(),
+        )
+
+
+class ConduitTerms(NamedTuple):
+    """One pass's dynamic-wave terms per conduit, in SWMM ft units.
+
+    ``flow_class`` (long, one of the seven classes); ``flow_offset`` c0 (cfs) and
+    ``conveyance`` k = dq/d(H1 - H2) (ft2/s, 0 where an end head is pinned, the pinned
+    head then folded into c0); ``momentum_flow`` SWMM's trial q before any limit (cfs, at the
+    given heads, 0 on the dry exit); ``limited`` the normal-flow check passed (bool) with
+    ``normal_flow`` its q_norm (cfs, +inf where not limited); ``dry_upstream`` /
+    ``dry_downstream`` node depth <= FUDGE (bool); ``surface_area1/2`` (ft2) contributed to
+    the end nodes; ``mid_area`` the stored ``Conduit.a1`` (ft2, next step's ``a_old``);
+    ``volume`` (ft3); ``depth`` ``Link.newDepth`` (ft); ``end_depth1/2`` the end flow
+    depths after classification (ft).
+    """
+
+    flow_class: Tensor
+    flow_offset: Tensor
+    conveyance: Tensor
+    momentum_flow: Tensor
+    limited: Tensor
+    normal_flow: Tensor
+    dry_upstream: Tensor
+    dry_downstream: Tensor
+    surface_area1: Tensor
+    surface_area2: Tensor
+    mid_area: Tensor
+    volume: Tensor
+    depth: Tensor
+    end_depth1: Tensor
+    end_depth2: Tensor
+
+
+def _top_width(y: Tensor, y_full: Tensor) -> Tensor:
+    """`dwflow.c::getWidth` (dwflow.c:592-605) for a closed conduit under EXTRAN
+    (``getSlotWidth`` is 0, dwflow.c:580-581): top width (ft) at depth ``y`` (ft), with the
+    depth frozen at ``CrownCutoff * yFull`` above the crown cutoff."""
+    y = torch.where(y / y_full >= EXTRAN_CROWN_CUTOFF, EXTRAN_CROWN_CUTOFF * y_full, y)
+    return width_of_depth(y, y_full)
+
+
+def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: Tensor,
+                  q_old: Tensor, a_old: Tensor, dt: float, *, damping: str = "partial",
+                  normal_flow_limited: str = "both") -> ConduitTerms:
+    """SWMM's conduit update (`dwflow.c:57-293`) for one pass, vectorised over conduits.
+
+    ``depth1``, ``depth2`` are the end NODE depths above the node inverts (ft) from the
+    previous pass; ``q_last`` the previous pass's flow (cfs, SWMM's ``qLast``), which sets
+    the flow class, surface areas, velocity and damping; ``q_old`` and ``a_old`` the
+    step-start flow (cfs) and stored mid area (ft2); ``dt`` the routing step (s).
+    ``damping`` is ``INERTIAL_DAMPING`` and ``normal_flow_limited`` ``NORMAL_FLOW_LIMITED``.
+    """
+    if damping not in DAMPING:
+        raise ValueError(f"conduit_terms: damping must be one of {DAMPING}, got {damping!r}")
+    if normal_flow_limited not in NORMAL_FLOW_LIMITED:
+        raise ValueError("conduit_terms: normal_flow_limited must be one of "
+                         f"{NORMAL_FLOW_LIMITED}, got {normal_flow_limited!r}")
+    yf, af = geo.y_full, geo.a_full
+    shape = torch.broadcast_shapes(depth1.shape, depth2.shape, q_last.shape, q_old.shape,
+                                   a_old.shape, yf.shape)
+    depth1, depth2, q_last, q_old, a_old = (
+        x.to(F64).expand(shape) for x in (depth1, depth2, q_last, q_old, a_old))
+    zero = torch.zeros(shape, dtype=F64)
+    one = torch.ones(shape, dtype=F64)
+    fudge = torch.full(shape, FUDGE, dtype=F64)
+    length = geo.length
+
+    # dwflow.c:110-115 -- end heads, raised to the conduit inverts
+    z1 = geo.invert1 + geo.offset1
+    z2 = geo.invert2 + geo.offset2
+    head1 = depth1 + geo.invert1
+    head2 = depth2 + geo.invert2
+    h1 = torch.maximum(head1, z1)
+    h2 = torch.maximum(head2, z2)
+    pinned1 = head1 < z1          # h1 no longer follows the node head (design D4)
+    pinned2 = head2 < z2
+    # dwflow.c:119-129 -- end flow depths, at least FUDGE, at most yFull (no slot)
+    y1 = torch.minimum(torch.clamp(h1 - z1, min=FUDGE), yf)
+    y2 = torch.minimum(torch.clamp(h2 - z2, min=FUDGE), yf)
+
+    # dwflow.c:297-413 getFlowClass, on q = qLast (dwflow.c:140)
+    zr1 = torch.where(geo.outfall1, torch.clamp(geo.offset1 - depth1, min=0.0),
+                      geo.offset1)                                        # dwflow.c:327
+    zr2 = torch.where(geo.outfall2, torch.clamp(geo.offset2 - depth2, min=0.0),
+                      geo.offset2)                                        # dwflow.c:328
+    q_abs = q_last.abs()
+    y_norm = normal_depth_ft(q_abs, yf, af, geo.s_full, geo.beta).expand(shape)
+    y_crit = critical_depth(q_abs, yf, af).expand(shape)
+    yc_min = torch.minimum(y_norm, y_crit)
+    yc_max = torch.maximum(y_norm, y_crit)
+    wet1 = y1 > FUDGE
+    wet2 = y2 > FUDGE
+    reverse = q_last < 0.0
+    # dwflow.c:335-371 -- both ends wet
+    both_wet = wet1 & wet2
+    up_crit = both_wet & reverse & (zr1 > 0.0) & (y1 < yc_min)          # dwflow.c:342-347
+    drop2 = both_wet & ~reverse & (zr2 > 0.0)
+    dn_crit = drop2 & (y2 < yc_min)                                      # dwflow.c:363
+    in_band = drop2 & ~(y2 < yc_min) & (y2 < yc_max)                     # dwflow.c:364-368
+    span = yc_max - yc_min
+    span_safe = torch.where(span < FUDGE, one, span)
+    fasnh = torch.where(in_band, torch.where(span < FUDGE, zero, (yc_max - y2) / span_safe),
+                        one)
+    # dwflow.c:374 -- both ends dry
+    dry = ~wet1 & ~wet2
+    # dwflow.c:377-393 -- downstream wet, upstream dry
+    only2 = ~wet1 & wet2
+    up_dry = only2 & (h2 < z1)
+    up_crit = up_crit | (only2 & ~(h2 < z1) & (zr1 > 0.0))
+    # dwflow.c:396-411 -- upstream wet, downstream dry
+    only1 = wet1 & ~wet2
+    dn_dry = only1 & (h1 < z2)
+    dn_crit = dn_crit | (only1 & ~(h1 < z2) & (zr2 > 0.0))
+    cls = torch.full(shape, SUBCRITICAL, dtype=torch.long)
+    for mask, code in ((up_crit, UP_CRITICAL), (dn_crit, DN_CRITICAL), (dry, DRY),
+                       (up_dry, UP_DRY), (dn_dry, DN_DRY)):
+        cls = torch.where(mask, torch.full_like(cls, code), cls)
+    # dwflow.c:457-460 -- both ends full: SUBCRITICAL (fasnh stays 1)
+    both_full = (y1 >= yf) & (y2 >= yf)
+    cls = torch.where(both_full, torch.full_like(cls, SUBCRITICAL), cls)
+    fasnh = torch.where(both_full, one, fasnh)
+    is_up_crit = cls == UP_CRITICAL
+    is_dn_crit = cls == DN_CRITICAL
+    is_up_dry = cls == UP_DRY
+    is_dn_dry = cls == DN_DRY
+    is_dry = cls == DRY
+
+    # dwflow.c:465-549 findSurfArea -- end depths and heads per class
+    y_cn = torch.clamp(torch.where(y_norm < y_crit, y_norm, y_crit), min=FUDGE)  # :478-480
+    y1 = torch.where(is_up_crit, y_cn, torch.where(is_up_dry, fudge, y1))     # :478, :502
+    y2 = torch.where(is_dn_crit, y_cn, torch.where(is_dn_dry, fudge, y2))     # :490, :522
+    h1 = torch.where(is_up_crit, z1 + y1, h1)                                  # :481
+    h2 = torch.where(is_dn_crit, z2 + y2, h2)                                  # :493
+    pinned1 = pinned1 | is_up_crit
+    pinned2 = pinned2 | is_dn_crit
+    y_mid_s = torch.clamp(0.5 * (y1 + y2), min=FUDGE)                          # :468-469
+    w1 = _top_width(y1, yf)
+    w2 = _top_width(y2, yf)
+    wm = _top_width(y_mid_s, yf)
+    quarter1 = (w1 + wm) * length / 4.0
+    quarter2 = (wm + w2) * length / 4.0
+    dry_area = FUDGE * length / 2.0                                            # :542
+    surf1 = torch.where(cls == SUBCRITICAL, quarter1, zero)                    # :473
+    surf1 = torch.where(is_dn_crit, (w1 + wm) * length * 0.5, surf1)           # :498
+    surf1 = torch.where(is_up_dry & (geo.offset1 <= 0.0), quarter1, surf1)     # :515-518
+    surf1 = torch.where(is_dn_dry, quarter1, surf1)                            # :531
+    surf1 = torch.where(is_dry, dry_area.expand(shape), surf1)
+    surf2 = torch.where(cls == SUBCRITICAL, quarter2 * fasnh, zero)            # :474
+    surf2 = torch.where(is_up_crit, (wm + w2) * length * 0.5, surf2)           # :486
+    surf2 = torch.where(is_up_dry, quarter2, surf2)                            # :511
+    surf2 = torch.where(is_dn_dry & (geo.offset2 <= 0.0), quarter2, surf2)     # :535-538
+    surf2 = torch.where(is_dry, dry_area.expand(shape), surf2)
+
+    # dwflow.c:142-162 -- areas and radii at the ends and the midpoint (no slot)
+    a1 = area_of_depth(y1, yf, af)
+    r1 = radius_of_depth(y1, yf)
+    a2 = area_of_depth(y2, yf, af)
+    y_mid = 0.5 * (y1 + y2)
+    a_mid = area_of_depth(y_mid, yf, af)
+    r_mid = radius_of_depth(y_mid, yf)
+    is_full = (y1 >= yf) & (y2 >= yf)
+    # dwflow.c:165-180 -- dry exit (no flap gate, no control setting here)
+    dry_exit = is_dry | is_up_dry | is_dn_dry | (a_mid <= FUDGE)
+
+    # dwflow.c:182-189 -- velocity from the last flow, Froude number, SUPCRITICAL
+    a_mid_safe = torch.where(dry_exit, one, a_mid)
+    v = q_last / a_mid_safe
+    v = torch.where(v.abs() > MAX_VELOCITY,
+                    torch.where(q_last < 0.0, -one, one) * MAX_VELOCITY, v)
+    fr = froude_number(v, y_mid, yf, af)
+    cls = torch.where(~dry_exit & (cls == SUBCRITICAL) & (fr > 1.0),
+                      torch.full_like(cls, SUPCRITICAL), cls)
+    # dwflow.c:192-194 -- damping factor
+    sigma_fr = torch.where(fr <= 0.5, one, torch.where(fr >= 1.0, zero, 2.0 * (1.0 - fr)))
+    # dwflow.c:198-201 -- upstream weighting
+    rho = torch.where(~is_full & (q_last > 0.0) & (h1 >= h2), sigma_fr, one)
+    a_wtd = a1 + (a_mid - a1) * rho
+    r_wtd = r1 + (r_mid - r1) * rho
+    # dwflow.c:204-208 -- damping option; full closed conduit gets full damping
+    sigma = {"none": one, "full": zero, "partial": sigma_fr}[damping]
+    sigma = torch.where(is_full, zero, sigma)
+
+    # dwflow.c:213-240 -- momentum terms (dq5 = dq6 = 0, see module docstring)
+    r_wtd_safe = torch.where(dry_exit | (r_wtd <= 0.0), one, r_wtd)
+    dq1 = dt * geo.rough_factor / torch.pow(r_wtd_safe, 1.33333) * v.abs()     # :214
+    dq2 = dt * GRAVITY_FT * a_wtd * (h2 - h1) / length                         # :217
+    a_old = torch.clamp(a_old, min=FUDGE)                                      # :132-133
+    dq3 = 2.0 * v * (a_mid - a_old) * sigma                                    # :224
+    dq4 = dt * v * v * (a2 - a1) / length * sigma                              # :225
+    denom = 1.0 + dq1                                                          # :239
+    momentum = (q_old - dq2 + dq3 + dq4) / denom                               # :240
+    k = GRAVITY_FT * dt * a_wtd / (length * denom)                             # :243
+    c0 = (q_old + dq3 + dq4) / denom
+    # an end head that does not follow its node is folded into c0 (design D4)
+    pinned = pinned1 | pinned2
+    flow_offset = torch.where(pinned, momentum, c0)
+    conveyance = torch.where(pinned, zero, k)
+
+    # dwflow.c:248-258 + checkNormalFlow (dwflow.c:637-686), on the momentum flow
+    has_outfall = geo.outfall1 | geo.outfall2                                  # :654
+    checked = ((momentum > 0.0) & (y1 < yf) & ~dry_exit
+               & ((cls == SUBCRITICAL) | (cls == SUPCRITICAL)))
+    if normal_flow_limited == "none":
+        checked = torch.zeros_like(checked)                                    # :255
+    slope_on = normal_flow_limited in ("slope", "both")
+    froude_on = normal_flow_limited in ("froude", "both")
+    slope_check = (has_outfall | slope_on) & (y1 < y2)                         # :659-662
+    a1_safe = torch.where(a1 > 0.0, a1, one)
+    f1 = froude_number(momentum / a1_safe, y1, yf, af)                         # :670
+    froude_check = (~slope_check & ~has_outfall & (y1 > FUDGE) & (y2 > FUDGE)
+                    & (f1 >= 1.0))                                             # :665-672
+    if not froude_on:
+        froude_check = torch.zeros_like(froude_check)
+    limited = checked & (slope_check | froude_check)
+    q_norm = geo.beta * a1 * torch.pow(r1, 2.0 / 3.0)                          # :678
+    normal_flow = torch.where(limited, q_norm, torch.full_like(q_norm, torch.inf))
+
+    # dwflow.c:165-180 -- dry exit: no flow, stored area is the end mean
+    a_end = (a1 + a2) / 2.0                                                    # :171, :288
+    flow_offset = torch.where(dry_exit, zero, flow_offset)
+    conveyance = torch.where(dry_exit, zero, conveyance)
+    momentum = torch.where(dry_exit, zero, momentum)
+
+    return ConduitTerms(
+        flow_class=cls,
+        flow_offset=flow_offset,
+        conveyance=conveyance,
+        momentum_flow=momentum,
+        limited=limited,
+        normal_flow=normal_flow,
+        dry_upstream=depth1 <= FUDGE,                                          # :280
+        dry_downstream=depth2 <= FUDGE,                                        # :281
+        surface_area1=surf1,
+        surface_area2=surf2,
+        mid_area=torch.where(dry_exit, a_end, a_mid),                          # :171, :284
+        volume=a_end * length,                                                 # :177, :291
+        depth=torch.minimum(y_mid, yf),                                        # :176, :287
+        end_depth1=y1,
+        end_depth2=y2,
+    )
+
+
+__all__ = [
+    "DAMPING", "DN_CRITICAL", "DN_DRY", "DRY", "EXTRAN_CROWN_CUTOFF", "FUDGE", "MAX_VELOCITY",
+    "NORMAL_FLOW_LIMITED", "SUBCRITICAL", "SUPCRITICAL", "UP_CRITICAL", "UP_DRY",
+    "ConduitGeometry", "ConduitTerms", "conduit_terms",
+]
