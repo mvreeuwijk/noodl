@@ -78,6 +78,15 @@ def test_a_junction_on_its_bed_converges_at_the_default_min_surface_area():
     assert solve_atol(model) > SOLVE_ATOL
 
 
+def test_default_pass_budget_covers_a_slow_outfall_head():
+    """The loop fixture's outfall head contracts by ~0.92 per pass at low flow and needs 327
+    passes at t = 500 s (tests/verification/test_sewer_dynwave_parity.py); the default
+    budget must cover that, so a plain build_model + simulate_dynamic_wave does not fail."""
+    net, _, _ = read_swmm_inp(DATA / "loop_dynwave.inp")
+    model, _, _ = build_model(net)
+    assert model.iterate_max == 2000
+
+
 def test_build_model_dispatches_and_refuses_air_and_quality(tmp_path):
     net = _tree(tmp_path)
     model, state, drivers = build_model(net)

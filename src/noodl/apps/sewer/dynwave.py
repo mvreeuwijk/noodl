@@ -172,7 +172,9 @@ class JunctionStorage(NodeSource):
     (`dynwave.c:743`); the slope is at least ``2 A_s/dt > 0``, so every junction grounds
     itself. The bed stiffness uses the fixed `bed_area` A_bed (m2; the model passes SWMM's
     surface-area floor, which no A_s is below), not A_s, so that the head solve's round-off
-    floor on the bed is known before the step (`solve_atol`). Reads the per-junction drivers
+    floor on the bed is known before the step (`solve_atol`). Relative to the junction's own
+    storage slope the bed is ``K_BED A_bed / A_s`` stiffer: 1e6 at the floor, but only ~1e3
+    where A_s is a thousand times a tiny user MIN_SURFAREA. Reads the per-junction drivers
     ``"water.storage_area"`` A_s (m2, design D2's SI area), ``"water.head_start"`` (m),
     ``"water.net_inflow_start"`` (m3/s) and ``"water.storage_rate"`` 1/dt (1/s). `bed`
     holds the junction inverts (m).
@@ -490,7 +492,7 @@ class DynamicWaveHydraulics:
 
 
 def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
-                             iterate_max: int = 200, relaxation: float = 0.5
+                             iterate_max: int = 2000, relaxation: float = 0.5
                              ) -> tuple[Model, State, Drivers]:
     """Assemble a dynamic-wave sewer and return ``(model, state, drivers)``.
 

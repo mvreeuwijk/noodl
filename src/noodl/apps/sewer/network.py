@@ -324,7 +324,8 @@ def build_model(
     A ``routing="dynamic_wave"`` network is built by `build_dynamic_wave_model`: water only
     (`air` and `quality` default to ``False`` there, and ``True`` is refused, as is
     `storage`; headspace air and quality on the dynamic wave are phase D), converged to
-    `iterate_tol` (m, default 1e-11) within `iterate_max` passes (default 200). Those two
+    `iterate_tol` (m, default 1e-11) within `iterate_max` passes (default 2000; a slowly
+    contracting outfall head at low flow can need several hundred). Those two
     apply to dynamic wave only and are refused for the other routings.
     """
     if net.routing == "dynamic_wave":

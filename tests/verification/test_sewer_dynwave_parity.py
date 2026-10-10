@@ -23,6 +23,13 @@ backwater line 6e-9 m from SWMM and C2's flow 2e-9 m3/s off (q ~ 2e-4 m3/s); at 
 fall to 8e-11 m and below the flow floor. The loop's outfall head contracts by only ~0.92 per
 pass near t = 500 s, so the pass budget is raised as well (327 passes needed at 1e-11 m).
 
+Newton tolerance. The head solve keeps `simulate_dynamic_wave`'s default atol, `solve_atol`
+(2.5e-9 m3/s here), which exceeds `TOL_FLOW_ABS`. The flow target is still met because a
+pass is linear in the heads between its kinks: one Newton step lands at round-off, far below
+atol, and only a pass whose starting residual is already below atol stops without a step,
+which bounds a wet junction's head error by atol dt / (2 A_s) ~ 5e-9 m and the conduit
+flows correspondingly; every full run below meets the flow target with it.
+
 Flow sign. SWMM reverses an adverse conduit under DYNWAVE (`link.c::conduit_reverse` swaps
 node1/node2 and sets ``direction = -1``), and noodl's reader orients it the same way. The
 toolkit reports BOTH quantities in the FILE's orientation: `swmm_getLinkResult(SM_LINKFLOW)`
@@ -42,6 +49,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+import torch
 
 from noodl.apps.sewer import build_model, read_swmm_inp, simulate_dynamic_wave
 
@@ -49,8 +57,9 @@ pyswmm = pytest.importorskip("pyswmm")
 
 DATA = Path(__file__).resolve().parents[1] / "data" / "sewer"
 NETWORKS = ["tree_dynwave.inp", "backwater_dynwave.inp", "loop_dynwave.inp"]
-#: Depth target (m): one decade above the ~1e-8 m fixed-point error SWMM's own stopping rule
-#: leaves at HEAD_TOLERANCE 1e-9 m (it is 1e-12 m here, see the module docstring).
+#: Depth target (m): over twenty times the worst agreement measured against the 1e-12 m
+#: reference over all three full runs (4.5e-9 m, backwater J2), so a miss is a real
+#: discrepancy, not round-off or the iteration tolerances on either side.
 TOL_DEPTH = 1e-7
 #: Flow target: relative, plus an absolute floor at the scale of SWMM's FUDGE flow.
 TOL_FLOW_REL, TOL_FLOW_ABS = 1e-6, 1e-9
@@ -83,17 +92,22 @@ def _swmm(tmp_path, name):
 
 
 def _worst_errors(name, rows, conn, steps):
-    """noodl over `steps` steps against SWMM's first `steps` rows: the largest junction depth
-    difference (m) and the largest flow excess over the flow target (m3/s, <= 0 passes)."""
+    """noodl over `steps` steps against SWMM's first `steps` rows: the largest junction or
+    outfall depth difference (m) and the largest flow excess over the flow target (m3/s,
+    <= 0 passes)."""
     net, _, _ = read_swmm_inp(DATA / name)
     model, state, drivers = build_model(net, iterate_tol=ITERATE_TOL, iterate_max=ITERATE_MAX)
     _, hist = simulate_dynamic_wave(model, state, drivers, steps=steps)
-    junctions = [m.name for m in net.manholes]
+    hyd = model.dynamic_wave
+    # junctions from the solved heads; outfalls from the closure-written boundary heads
+    nodes = [m.name for m in net.manholes] + list(hyd.outfall_names)
+    idx = torch.cat([model.junction_idx, hyd.outfall_idx])
+    invert = hyd.node_invert[idx]
     sign = {p.name: (1.0 if tuple(conn[p.name]) == (p.u, p.v) else -1.0) for p in net.pipes}
     worst_depth = worst_flow = 0.0
     for k, (flows, depths) in enumerate(rows[:steps]):
-        y = hist["water.phi"][k, model.junction_idx] - model.junction_invert
-        for j, name_j in enumerate(junctions):
+        y = hist["water.phi"][k, idx] - invert
+        for j, name_j in enumerate(nodes):
             worst_depth = max(worst_depth, abs(y[j].item() - depths[name_j]))
         for i, pipe in enumerate(net.pipes):
             q_s = sign[pipe.name] * flows[pipe.name]
@@ -104,9 +118,20 @@ def _worst_errors(name, rows, conn, steps):
 
 
 def _converged_swmm(tmp_path, name):
+    """SWMM's rows, after checking the engine, that it converged on every step and that no
+    conduit end reached its crown (phase A refuses surcharge, so a fixture edited into it
+    would compare nothing meaningful)."""
     rows, conn, engine, not_converging = _swmm(tmp_path, name)
     assert engine == "5.2.4"
     assert not_converging == 0.0, f"SWMM did not converge on every step ({not_converging} %)"
+    net, _, _ = read_swmm_inp(DATA / name)
+    for k, (_, depths) in enumerate(rows):
+        for p in net.pipes:
+            for node, offset in ((p.u, p.inlet_offset), (p.v, p.outlet_offset)):
+                fill = (depths[node] - offset) / p.diameter
+                assert fill < 1.0, (
+                    f"{name}: SWMM surcharges conduit {p.name} at {node} at step {k + 1} "
+                    f"(end depth {fill:.3f} of its diameter); reduce the fixture's inflows")
     return rows, conn
 
 
