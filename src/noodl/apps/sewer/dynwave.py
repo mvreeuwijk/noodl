@@ -595,7 +595,10 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *, steps
         if inflow is not None:
             drivers = dict(drivers, inflow=inflow[k] if inflow.dim() == 3 else inflow)
         diag: dict = {}
-        state = model.step(state, drivers, dt, t=t, diagnostics=diag, **solve_kwargs)
+        try:
+            state = model.step(state, drivers, dt, t=t, diagnostics=diag, **solve_kwargs)
+        except RuntimeError as err:
+            raise RuntimeError(f"dynamic wave step at t={t} s: {err}") from err
         state.update(hyd.carried(state, drivers, dt=dt))   # resync, as modelica/run.py does
         t += dt
         hyd.check_free_surface(state, drivers, t)

@@ -174,8 +174,14 @@ def test_surcharge_is_refused_by_name(tmp_path):
 def test_non_convergence_is_named(tmp_path):
     net = _tree(tmp_path)
     model, state, drivers = build_model(net, iterate_max=2, iterate_tol=1e-15)
-    with pytest.raises(RuntimeError, match="did not converge"):
+    with pytest.raises(RuntimeError, match=r"^dynamic wave step at t=0\.0 s: .*did not converge"):
         simulate_dynamic_wave(model, state, drivers, steps=3)
+
+
+def test_first_step_of_a_dry_network_moves_nothing(tmp_path):
+    model, state, drivers = build_model(_tree(tmp_path, scale=0.0))
+    state, _ = simulate_dynamic_wave(model, state, drivers, steps=1)
+    assert torch.all(state["water.q"] == 0)
 
 
 @pytest.mark.slow
