@@ -80,8 +80,8 @@ the layer's boundary order for `boundary_temperature`, its active interior order
 in the wrong shape. [Using noodl](../usage.md) covers the details.
 
 The node and edge attributes this example sets (`volume`, `T0`, `z_ref`, `z_path`, `Cd`,
-`area`, and the wind attributes `azimuth`, `Cp`, `Ch`, `profile`) are listed with their
-units under [Network attributes](../catalogue/building_physics.md#network-attributes).
+`area`), and the wind attributes a `Wind` drive reads (`azimuth`, `Cp`, `Ch`, `profile`),
+are listed with their units under [Network attributes](../catalogue/building_physics.md#network-attributes).
 
 Models can also be read from CONTAM `.prj`/`.wth` files or from a Modelica Buildings Library
 export — see [File formats](../formats/index.md).

@@ -335,7 +335,9 @@ class TransportLayer:
     NOT by every non-boundary node -- a caller sizing it must use ``active_interior`` too.
 
     ``quantity``/``unit`` are metadata a ``Model`` reports ("temperature"/"K",
-    "concentration"/"ppm"); nothing in the numerics reads them.
+    "concentration"/"ppm"); nothing in the numerics reads them. ``source_unit``,
+    ``capacity_unit`` and ``flow_unit`` are metadata ``model.refs`` reports and nothing
+    numerical reads.
 
     ``linear_solver`` names one of ``_TRANSPORT_SOLVERS``, refused by name at
     construction otherwise, and is resolved PER SOLVE by ``_resolve_solver`` into the kwargs

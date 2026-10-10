@@ -289,8 +289,9 @@ def _attributes_section(modname: str) -> list[str]:
     for attr, (meaning, reader) in mod.NODE_ATTRIBUTES.items():
         lines.append(f"| `{attr}` | {_esc(meaning)} | {_readers(reader)} |")
     for kind, attrs in mod.EDGE_ATTRIBUTES.items():
-        lines += ["", f"**Edges of kind `{kind}`**", "", "| Attribute | Meaning | Read by |",
-                  "|---|---|---|"]
+        first, comma, rest = kind.partition(",")
+        lines += ["", f"**Edges of kind `{first}`{comma}{rest}**", "",
+                  "| Attribute | Meaning | Read by |", "|---|---|---|"]
         for attr, (meaning, reader) in attrs.items():
             lines.append(f"| `{attr}` | {_esc(meaning)} | {_readers(reader)} |")
     return lines + [""]

@@ -10,7 +10,7 @@ Each value is `(meaning with unit, who reads it)`.
 NODE_ATTRIBUTES: dict[str, tuple[str, str]] = {
     "volume": ("air volume of the zone (m3); 0 for a wall node", "thermal_layer, species_layer"),
     "T0": ("initial temperature (K), also the boundary temperature of a boundary node",
-           "initial_state, initial_drivers"),
+           "initial_state, initial_drivers, project_to_model"),
     "z_ref": ("height of the node's reference pressure (m)", "Stack.from_network"),
     "heat_capacity": ("extra lumped heat capacity of the node (J/K); a wall node's capacity",
                       "thermal_layer"),

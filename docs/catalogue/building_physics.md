@@ -16,7 +16,7 @@ What the builders, elements and drives read off `net.add_node(...)` and `net.add
 | Attribute | Meaning | Read by |
 |---|---|---|
 | `volume` | air volume of the zone (m3); 0 for a wall node | `thermal_layer`, `species_layer` |
-| `T0` | initial temperature (K), also the boundary temperature of a boundary node | `initial_state`, `initial_drivers` |
+| `T0` | initial temperature (K), also the boundary temperature of a boundary node | `initial_state`, `initial_drivers`, `project_to_model` |
 | `z_ref` | height of the node's reference pressure (m) | `Stack.from_network` |
 | `heat_capacity` | extra lumped heat capacity of the node (J/K); a wall node's capacity | `thermal_layer` |
 
@@ -29,7 +29,7 @@ What the builders, elements and drives read off `net.add_node(...)` and `net.add
 | `area` | opening area (m2) | `orifice_elements_from_edges` |
 | `name` | label of the edge in model.refs and in named results (optional) | `noodl.refs` |
 
-**Edges of kind `airpath, to or from the ambient node`**
+**Edges of kind `airpath`, to or from the ambient node**
 
 | Attribute | Meaning | Read by |
 |---|---|---|
