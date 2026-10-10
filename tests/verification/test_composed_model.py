@@ -35,7 +35,7 @@ def test_build_composed_produces_expected_node_and_edge_counts():
 
 def test_build_composed_graph_is_connected():
     model = build_composed()
-    assert model.net.n_components == 1
+    assert model.net.n_islands == 1
 
 
 def test_build_composed_every_interface_node_exists_in_the_network():

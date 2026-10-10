@@ -101,7 +101,7 @@ def _tree_elimination_levels(net: Network, kind: str | None):
     One root per component (the first node index touched in that component, matching
     particular_flow's existing "drop one reference node" convention) never appears as a
     child and so never receives a level entry. Cached on `net._cache`, exactly like
-    `spanning_forest`/`component_labels`; this is the one Python-level (per-node) loop in
+    `spanning_forest`/`island_labels`; this is the one Python-level (per-node) loop in
     this module, and it runs once per (net, kind), not once per solve.
     """
     key = ("tree_elimination_levels", kind)
@@ -110,7 +110,7 @@ def _tree_elimination_levels(net: Network, kind: str | None):
     tree_cols, _chord_cols = net.spanning_forest(kind)
     cols = net.edge_index(kind).tolist()  # local (kind-filtered) index -> global edge index
     edges = net.edges
-    labels = net.component_labels(kind)
+    labels = net.island_labels(kind)
     n = net.n
     adjacency: dict[int, list[tuple[int, int, float]]] = {i: [] for i in range(n)}
     for col in tree_cols.tolist():
@@ -118,13 +118,13 @@ def _tree_elimination_levels(net: Network, kind: str | None):
         ui, vi = net.node_index(u), net.node_index(v)
         adjacency[ui].append((vi, col, -1.0))  # if we move u -> v, child=v is the TARGET
         adjacency[vi].append((ui, col, 1.0))  # if we move v -> u, child=u is the SOURCE
-    n_components = net.n_components_of(kind)
+    n_islands = net.n_islands_of(kind)
     depth = [-1] * n
     parent_of = [-1] * n
     parent_edge = [-1] * n
     parent_sign = [0.0] * n
     order: list[int] = []
-    for c in range(n_components):
+    for c in range(n_islands):
         node_idx = torch.nonzero(labels == c, as_tuple=False).flatten().tolist()
         if not node_idx:
             continue
@@ -220,11 +220,11 @@ def particular_flow(
     naming the offending components if any component's sources do not sum to zero
     within ``atol``.
     """
-    labels = net.component_labels(kind)
-    n_components = net.n_components_of(kind)
+    labels = net.island_labels(kind)
+    n_islands = net.n_islands_of(kind)
 
     bad = []
-    for c in range(n_components):
+    for c in range(n_islands):
         node_idx = torch.nonzero(labels == c, as_tuple=False).flatten()
         total = sources[..., node_idx].sum(dim=-1)
         if torch.any(total.abs() > atol):
@@ -258,11 +258,11 @@ def project_measured(
     A = net.incidence(kind)
     n, b = A.shape
     dtype = target.dtype
-    labels = net.component_labels(kind)
-    n_components = net.n_components_of(kind)
+    labels = net.island_labels(kind)
+    n_islands = net.n_islands_of(kind)
 
     keep_rows: list[int] = []
-    for c in range(n_components):
+    for c in range(n_islands):
         node_idx = torch.nonzero(labels == c, as_tuple=False).flatten()
         keep_rows.extend(node_idx[1:].tolist())
     keep_rows_t = torch.tensor(sorted(keep_rows), dtype=torch.long)

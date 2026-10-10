@@ -102,13 +102,14 @@ class Network:
         return self.graph.number_of_edges()
 
     @property
-    def n_components(self) -> int:
+    def n_islands(self) -> int:
+        """Number of islands: parts of the network with no path between them."""
         return nx.number_connected_components(self.graph.to_undirected(as_view=True))
 
     @property
     def n_cycles(self) -> int:
-        """Dimension of the cycle space: b - n + number of components."""
-        return self.b - self.n + self.n_components
+        """Dimension of the cycle space: b - n + number of islands."""
+        return self.b - self.n + self.n_islands
 
     # ------------------------------------------------------------------ indexing
     def _node_index(self) -> dict[Node, int]:
@@ -159,15 +160,15 @@ class Network:
             raise KeyError(f"node attribute {name!r} missing for nodes {missing}")
         return torch.tensor(values, dtype=self.dtype, device=self.device)
 
-    def component_labels(self, kind: str | None = None) -> torch.Tensor:
-        """Connected-component label (0..components-1) of every node, in node order.
+    def island_labels(self, kind: str | None = None) -> torch.Tensor:
+        """Island label (0..islands-1) of every node, in node order.
 
         With `kind` given, connectivity is restricted to edges of that kind: a node
-        touched by no edge of `kind` gets its own singleton component. Raises
+        touched by no edge of `kind` gets its own singleton island. Raises
         `KeyError` (via `edge_index`) naming the unknown kind if `kind` matches no
         edge.
         """
-        key = ("component_labels", kind)
+        key = ("island_labels", kind)
         if key in self._cache:
             return self._cache[key]
         cols = self.edge_index(kind)
@@ -187,12 +188,12 @@ class Network:
         self._cache[key] = result
         return result
 
-    def n_components_of(self, kind: str | None = None) -> int:
-        """Number of connected components among edges of one kind (or the whole graph).
+    def n_islands_of(self, kind: str | None = None) -> int:
+        """Number of islands among edges of one kind (or the whole graph).
 
-        Does not affect `n_components`, which always describes the whole graph.
+        Does not affect `n_islands`, which always describes the whole graph.
         """
-        labels = self.component_labels(kind)
+        labels = self.island_labels(kind)
         if labels.numel() == 0:
             return 0
         return int(labels.max().item()) + 1

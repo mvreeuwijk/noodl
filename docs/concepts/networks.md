@@ -58,7 +58,7 @@ These are the graph-theoretic core. All are cached, all take a `kind`, and all m
 | `incidence(kind=None)` | $A$, the $n \times b$ signed node-edge incidence matrix. |
 | `gradient(kind=None)` | $A^\top$, mapping nodal potentials to potential differences along edges. |
 | `difference(kind=None)` | The same difference operator in the form layers consume. |
-| `cycle_basis(kind=None)` | A basis for the cycle space: $n_{\text{cycles}} = b - n + n_{\text{components}}$. |
+| `cycle_basis(kind=None)` | A basis for the cycle space: $n_{\text{cycles}} = b - n + n_{\text{islands}}$. |
 | `spanning_forest(kind=None)` | Tree and chord edge indices — a tree has an empty cycle space, which is what makes the sewer's flow solve closed-form. |
 | `endpoints(kind=None)` | `(source_idx, target_idx)` per edge, for matvec-free assembly. |
 | `accumulate(w, kind=None)` | Scatter-adds an edge quantity to its endpoints with sign — nodal balance, without ever forming $A$. |
@@ -80,11 +80,14 @@ interior = net.interior_index(["ambient"])   # solved nodes
 boundary = net.boundary_index(["ambient"])   # prescribed nodes
 ```
 
-`n`, `b`, `n_components` and `n_cycles` report the sizes. `component_labels(kind)` and
-`n_components_of(kind)` do the same restricted to a kind, which is how a layer discovers whether
+`n`, `b`, `n_islands` and `n_cycles` report the sizes. `island_labels(kind)` and
+`n_islands_of(kind)` do the same restricted to a kind, which is how a layer discovers whether
 its subgraph is connected — a disconnected potential problem needs one grounded node per
-component, and the solver will tell you so rather than silently returning a singular result. See
+island, and the solver will tell you so rather than silently returning a singular result. See
 [Solvers](solvers.md#grounding).
+
+An *island* is a part of the network with no path to the rest; a building whose airflow network
+has two islands has two air systems that never exchange air.
 
 ## Ambient
 

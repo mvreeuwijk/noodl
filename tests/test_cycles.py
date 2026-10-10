@@ -142,10 +142,10 @@ def _two_disjoint_airpath_pairs_bridged_by_hydronic() -> Network:
     return net
 
 
-def test_component_labels_kind_restricted_differs_from_whole_graph_on_bridged_network():
+def test_island_labels_kind_restricted_differs_from_whole_graph_on_bridged_network():
     net = _two_disjoint_airpath_pairs_bridged_by_hydronic()
-    assert len(set(net.component_labels().tolist())) == 1
-    labels_air = net.component_labels(kind="airpath")
+    assert len(set(net.island_labels().tolist())) == 1
+    labels_air = net.island_labels(kind="airpath")
     assert len(set(labels_air.tolist())) == 2
     assert labels_air[0] == labels_air[1]
     assert labels_air[2] == labels_air[3]
@@ -184,8 +184,8 @@ def _two_rings_bridged_by_hydronic() -> Network:
 
 def test_project_measured_is_kind_aware_and_does_not_raise_false_infeasible():
     net = _two_rings_bridged_by_hydronic()
-    assert net.n_components == 1  # bridged into one whole-graph component
-    assert net.n_components_of("airpath") == 2  # but two independent airpath rings
+    assert net.n_islands == 1  # bridged into one whole-graph component
+    assert net.n_islands_of("airpath") == 2  # but two independent airpath rings
     mask = torch.tensor([True, False, False, True, False, False])
     # only indices 0 and 3 are real measurements; the rest are unused filler values
     target = torch.tensor([0.5, 3.0, -7.0, 0.9, 3.0, -7.0], dtype=torch.float64)

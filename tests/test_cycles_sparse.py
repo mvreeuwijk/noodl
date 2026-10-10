@@ -22,12 +22,12 @@ def _dense_particular_flow_reference(net, sources, kind=None):
     production code, purely as this test file's independent reference."""
     A = net.incidence(kind)
     tree_cols, chord_cols = net.spanning_forest(kind)
-    labels = net.component_labels(kind)
-    n_components = net.n_components_of(kind)
+    labels = net.island_labels(kind)
+    n_islands = net.n_islands_of(kind)
     col_component = (net.source_selector(kind) @ labels.to(A.dtype)).round().long()
     batch_shape = sources.shape[:-1]
     q = torch.zeros(*batch_shape, A.shape[1], dtype=sources.dtype)
-    for c in range(n_components):
+    for c in range(n_islands):
         node_idx = torch.nonzero(labels == c, as_tuple=False).flatten()
         if node_idx.numel() <= 1:
             continue
@@ -47,7 +47,7 @@ def _multi_kind_multi_component_network() -> Network:
 
     The star also carries one extra airpath chord (h1 -> h2) so the
     airpath sub-network has a nonzero cycle-space dimension (l = 1); b_air becomes 6 and
-    n_air_components stays 2.
+    n_air_islands stays 2.
     """
     net = Network(dtype=torch.float64)
     for name in ("h0", "h1", "h2", "h3", "c0", "c1", "c2"):
@@ -124,10 +124,10 @@ def _dense_branch_flows_reference(net, amplitudes, kind=None):
 
 def test_branch_flows_matches_dense_reference_on_multi_kind_network():
     net = _multi_kind_multi_component_network()
-    # airpath sub-network here has two components (star + chain): l = b - n + n_components.
+    # airpath sub-network here has two components (star + chain): l = b - n + n_islands.
     b_air = net.edge_index("airpath").numel()
-    n_air_components = net.n_components_of("airpath")
-    l_dim = b_air - 7 + n_air_components  # 7 airpath-touching nodes across both components
+    n_air_islands = net.n_islands_of("airpath")
+    l_dim = b_air - 7 + n_air_islands  # 7 airpath-touching nodes across both components
     torch.manual_seed(1)
     amplitudes = torch.tensor([0.7], dtype=torch.float64)
     assert amplitudes.shape[-1] == l_dim  # non-vacuous: l_dim must be 1 with the extra chord
