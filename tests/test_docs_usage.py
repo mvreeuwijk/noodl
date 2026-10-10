@@ -21,6 +21,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 PAGES = [
     "usage.md",
+    "concepts/components.md",
     "applications/building_physics.md",
     "applications/street_aq.md",
     "applications/sewer.md",

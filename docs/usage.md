@@ -111,6 +111,12 @@ print({room: round(float(value), 2) for room, value in T.items()})
 - **Two dictionaries.** `state` (what the model carries from step to step) and `drivers`
   (what you prescribe), each `{key: tensor}`. Every key is `"<layer>.<suffix>"`.
 
+Large networks are easier to assemble from components: pieces of network with ports
+(a room, a door, a stairwell) that you place, connect and nest in plain Python, and that
+`flatten()` turns into the one network above, with a map from every node and edge back to
+its component. The model is built and run exactly as before; see
+[Components](concepts/components.md).
+
 `model.refs` names those keys for you. Each layer's reference has one attribute per key,
 named for the physics it carries:
 

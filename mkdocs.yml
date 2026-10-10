@@ -52,6 +52,7 @@ nav:
   - Concepts:
       - concepts/index.md
       - Networks: concepts/networks.md
+      - Components: concepts/components.md
       - Elements and drives: concepts/elements.md
       - Layers and models: concepts/layers.md
       - Solvers: concepts/solvers.md
