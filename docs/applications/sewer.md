@@ -93,14 +93,16 @@ residuals = model.residuals(new, drivers)     # per-layer nodal balance
 | Object | Fields |
 |---|---|
 | `Manhole(name, invert, ground=None, inflow=0.0, surface_area=None)` | A junction. `surface_area` defaults to SWMM's `MIN_SURFAREA`, 1.167 m² — a 4 ft shaft. |
-| `Pipe(name, u, v, length, diameter, n, slope)` | A circular gravity conduit. |
-| `Outfall(name, invert)` | The root of a tree. |
-| `SewerNetwork(manholes, pipes, outfalls, routing="KINWAVE", notes={})` | The whole network. |
+| `Pipe(name, u, v, length, diameter, n, slope, inlet_offset=0.0, outlet_offset=0.0)` | A circular gravity conduit; offsets (m) are the invert heights above the end nodes' inverts. |
+| `Outfall(name, invert, kind="free", stage=None)` | The root of a tree. `kind` is `"free"`, `"normal"` or `"fixed"` (`stage`, m, required for `"fixed"`); only dynamic-wave routing reads them. |
+| `SewerNetwork(manholes, pipes, outfalls, routing="kinematic_wave", notes={}, dynamic_wave=DynamicWaveOptions())` | The whole network. `routing` is `"steady"`, `"kinematic_wave"` or `"dynamic_wave"`; SWMM's `STEADY`/`KINWAVE`/`DYNWAVE` are accepted and normalised. |
 
 `validate()` refuses, by name: duplicate node or pipe names; a pipe naming an unknown node;
 non-positive slope, diameter, length or roughness; **a manhole with anything other than exactly
 one outgoing pipe**; an outfall with an outgoing pipe; and a manhole whose component never
-reaches an outfall — which also catches cycles.
+reaches an outfall — which also catches cycles. With `routing="dynamic_wave"` these tree
+rules are replaced: loops and flat pipes are allowed, every connected component needs an
+outfall, and each outfall ends exactly one conduit.
 
 That one-outgoing-pipe rule is the dendritic constraint, and it is what makes the closed-form
 flow solve valid.

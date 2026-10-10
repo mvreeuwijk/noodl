@@ -24,9 +24,9 @@ Descriptions of the physical objects a network is built from.
 | Name | What it does | How to call it |
 |---|---|---|
 | `Manhole` | A manhole: `invert` and `ground` elevations (m), a constant lateral `inflow` (m3/s) and, for storage, its `surface_area` (m2). | `Manhole(name, invert, ground=None, inflow=0.0, surface_area=None)` |
-| `Outfall` | An outfall, where the network discharges: its `invert` elevation (m). | `Outfall(name, invert)` |
-| `Pipe` | A conduit from manhole `u` to `v`: `length` and `diameter` (m), Manning's `n` and bed `slope` (m/m). | `Pipe(name, u, v, length, diameter, n, slope)` |
-| `SewerNetwork` | A dendritic gravity sewer: manholes, one outgoing pipe each, outfalls. | `SewerNetwork(manholes, pipes, outfalls, routing='KINWAVE', notes=<factory>, geometry='analytic')` |
+| `Outfall` | An outfall, where the network discharges: its `invert` elevation (m). | `Outfall(name, invert, kind='free', stage=None)` |
+| `Pipe` | A conduit from manhole `u` to `v`: `length` and `diameter` (m), Manning's `n` and bed `slope` (m/m). `inlet_offset` and `outlet_offset` (m) are the heights of the pipe invert above the invert of its `u` and `v` node (SWMM's link offsets). | `Pipe(name, u, v, length, diameter, n, slope, inlet_offset=0.0, outlet_offset=0.0)` |
+| `SewerNetwork` | A gravity sewer: manholes, pipes, outfalls. Kinematic-wave and steady routing need a dendritic network (one outgoing pipe per manhole); dynamic-wave routing allows loops and flat pipes. | `SewerNetwork(manholes, pipes, outfalls, routing='kinematic_wave', notes=<factory>, geometry='analytic', dynamic_wave=DynamicWaveOptions(routing_step=20.0, inertial_damping='partial', normal_flow_limited='both', surcharge_method='extran', min_surface_area=None, head_tolerance=None, max_trials=None))` |
 
 ## Elements (branch laws)
 

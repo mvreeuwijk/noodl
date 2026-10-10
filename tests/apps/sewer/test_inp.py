@@ -1,5 +1,6 @@
 """The documented SWMM .inp subset."""
 
+import math
 from pathlib import Path
 
 import pytest
@@ -124,4 +125,110 @@ def test_a_dwf_section_is_refused(tmp_path):
 
 def test_the_kinwave_variant_records_its_routing():
     net, _, _ = read_swmm_inp(DATA / "tree_kinwave.inp")
-    assert net.routing == "KINWAVE"
+    assert net.routing == "kinematic_wave"
+
+
+def _dyn(tmp_path, edits=()):
+    text = (DATA / "tree_kinwave.inp").read_text()
+    text = text.replace("FLOW_ROUTING         KINWAVE", "FLOW_ROUTING         DYNWAVE")
+    text = text.replace("VARIABLE_STEP        0.75", "VARIABLE_STEP        0")
+    for old, new in edits:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    path = tmp_path / "dyn.inp"
+    path.write_text(text)
+    return path
+
+
+def test_dynwave_options_are_read(tmp_path):
+    net, _, _ = read_swmm_inp(_dyn(tmp_path))
+    assert net.routing == "dynamic_wave"
+    o = net.dynamic_wave
+    assert o.routing_step == 5.0 and o.inertial_damping == "partial"
+    assert o.normal_flow_limited == "both" and o.min_surface_area == 12.566
+    assert o.head_tolerance == 0.0015 and o.max_trials == 8
+
+
+def test_dynwave_routing_step_accepts_a_clock_time(tmp_path):
+    net, _, _ = read_swmm_inp(_dyn(tmp_path, [("ROUTING_STEP         5",
+                                               "ROUTING_STEP         00:00:30")]))
+    assert net.dynamic_wave.routing_step == 30.0
+
+
+def test_dynwave_refuses_variable_step(tmp_path):
+    path = _dyn(tmp_path, [("VARIABLE_STEP        0", "VARIABLE_STEP        0.75")])
+    with pytest.raises(ValueError, match="VARIABLE_STEP"):
+        read_swmm_inp(path)
+
+
+@pytest.mark.parametrize("old,new,match", [
+    ("LENGTHENING_STEP     0", "LENGTHENING_STEP     10", "LENGTHENING_STEP"),
+    ("ALLOW_PONDING        NO", "ALLOW_PONDING        YES", "ALLOW_PONDING"),
+    ("SKIP_STEADY_STATE    NO", "SURCHARGE_METHOD    SLOT", "SURCHARGE_METHOD SLOT"),
+    ("J1               12.0       5          0", "J1               12.0       5          0.2",
+     "initial depth"),
+    ("C1               J1               J3               200        0.013      0          0"
+     "          0", "C1               J1               J3               200        0.013"
+     "      0          0          0.01", "initial flow"),
+    ("C1               CIRCULAR     0.30             0          0          0          1",
+     "C1               CIRCULAR     0.30             0          0          0          2",
+     "barrels"),
+    ("Outfall          8.0        FREE                        NO",
+     "Outfall          8.0        FREE                        YES", "flap gate"),
+    ("Outfall          8.0        FREE                        NO",
+     "Outfall          8.0        TIDAL      Tide1            NO", "TIDAL"),
+])
+def test_dynwave_phase_a_refusals(tmp_path, old, new, match):
+    with pytest.raises(ValueError, match=match):
+        read_swmm_inp(_dyn(tmp_path, [(old, new)]))
+
+
+def test_dynwave_keeps_offsets_and_floors_a_flat_fall(tmp_path):
+    path = _dyn(tmp_path, [
+        ("J5               11.0", "J5               9.0"),          # C4 J5 -> J4 flat
+        ("C1               J1               J3               200        0.013      0          0",
+         "C1               J1               J3               200        0.013      0.1        0.2"),
+    ])
+    net, _, _ = read_swmm_inp(path)
+    c1 = next(p for p in net.pipes if p.name == "C1")
+    assert (c1.inlet_offset, c1.outlet_offset) == (0.1, 0.2)
+    c4 = next(p for p in net.pipes if p.name == "C4")
+    assert (c4.u, c4.v) == ("J5", "J4")                 # flat: file orientation kept
+    dz = 0.001 * 0.3048                                 # link.c MIN_DELTA_Z, ft -> m
+    assert c4.slope == pytest.approx(dz / math.sqrt(200.0**2 - dz**2), rel=1e-12)
+
+
+def test_dynwave_reverses_only_an_adverse_conduit_and_swaps_offsets(tmp_path):
+    path = _dyn(tmp_path, [
+        ("J5               11.0", "J5               8.0"),          # C4 J5 -> J4 adverse
+        ("C4               J5               J4               200        0.013      0          0",
+         "C4               J5               J4               200        0.013      0.1        0.2"),
+    ])
+    net, _, _ = read_swmm_inp(path)
+    c4 = next(p for p in net.pipes if p.name == "C4")
+    assert (c4.u, c4.v) == ("J4", "J5")
+    assert (c4.inlet_offset, c4.outlet_offset) == (0.2, 0.1)
+    assert c4.slope > 0
+
+
+def test_dynwave_min_slope_floors_the_slope(tmp_path):
+    path = _dyn(tmp_path, [("MIN_SLOPE            0", "MIN_SLOPE            5")])
+    net, _, _ = read_swmm_inp(path)
+    assert all(p.slope >= 0.05 for p in net.pipes)
+
+
+def test_fixed_outfall_stage_is_read(tmp_path):
+    path = _dyn(tmp_path, [("Outfall          8.0        FREE                        NO",
+                            "Outfall          8.0        FIXED      8.2              NO")])
+    net, _, _ = read_swmm_inp(path)
+    assert net.outfalls[0].kind == "fixed" and net.outfalls[0].stage == 8.2
+
+
+def test_barrels_above_one_are_refused_for_kinwave_too(tmp_path):
+    text = (DATA / "tree_kinwave.inp").read_text().replace(
+        "C1               CIRCULAR     0.30             0          0          0          1",
+        "C1               CIRCULAR     0.30             0          0          0          2")
+    path = tmp_path / "k.inp"
+    path.write_text(text)
+    with pytest.raises(ValueError, match="barrels"):
+        read_swmm_inp(path)

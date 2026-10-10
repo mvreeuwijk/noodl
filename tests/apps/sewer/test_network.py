@@ -1,9 +1,13 @@
 """SewerNetwork validation, the builder and the steady driver."""
 
+import dataclasses
+
 import pytest
 import torch
 
+from noodl.apps.sewer.dynwave import DynamicWaveOptions
 from noodl.apps.sewer.network import (
+    ROUTING_ALIASES,
     Manhole,
     Outfall,
     Pipe,
@@ -431,3 +435,74 @@ def test_initial_state_builds_sewer_h_and_a_storage_step_runs():
     assert "sewer.H" in state
     new = model.step(state, drivers, 60.0)
     assert torch.isfinite(new["sewer.H"]).all()
+
+
+def test_routing_aliases_normalise_swmm_keywords():
+    net = tree_steady()
+    for swmm, physical in ROUTING_ALIASES.items():
+        assert dataclasses.replace(net, routing=swmm).routing == physical
+
+
+def test_unknown_routing_is_refused_by_name():
+    with pytest.raises(ValueError, match="routing"):
+        dataclasses.replace(tree_steady(), routing="muskingum").validate()
+
+
+def test_dynamic_wave_allows_loops_and_flat_pipes():
+    m = [Manhole("A", 1.0), Manhole("B", 1.0), Manhole("C", 0.9)]
+    p = [Pipe("AB", "A", "B", 100.0, 0.3, 0.013, 1e-6),
+         Pipe("AC", "A", "C", 100.0, 0.3, 0.013, 0.001),
+         Pipe("BC", "B", "C", 100.0, 0.3, 0.013, 0.001),
+         Pipe("CO", "C", "O", 100.0, 0.3, 0.013, 0.001)]
+    net = SewerNetwork(tuple(m), tuple(p), (Outfall("O", 0.8),), routing="dynamic_wave")
+    net.validate()                                     # A has two outgoing pipes: allowed
+    with pytest.raises(ValueError, match="outgoing"):
+        dataclasses.replace(net, routing="kinematic_wave").validate()
+
+
+def test_dynamic_wave_refuses_a_component_without_an_outfall():
+    net = SewerNetwork(
+        (Manhole("A", 1.0), Manhole("B", 1.0), Manhole("X", 1.0), Manhole("Y", 1.0)),
+        (Pipe("AB", "A", "B", 100.0, 0.3, 0.013, 0.001),
+         Pipe("BO", "B", "O", 100.0, 0.3, 0.013, 0.001),
+         Pipe("XY", "X", "Y", 100.0, 0.3, 0.013, 0.001)),
+        (Outfall("O", 0.8),), routing="dynamic_wave")
+    with pytest.raises(ValueError, match="reach no outfall"):
+        net.validate()
+
+
+def test_dynamic_wave_refuses_an_outfall_with_two_conduits():
+    net = SewerNetwork(
+        (Manhole("A", 1.0), Manhole("B", 1.0)),
+        (Pipe("AO", "A", "O", 100.0, 0.3, 0.013, 0.001),
+         Pipe("BO", "B", "O", 100.0, 0.3, 0.013, 0.001)),
+        (Outfall("O", 0.8),), routing="dynamic_wave")
+    with pytest.raises(ValueError, match="outfall 'O'"):
+        net.validate()
+
+
+def test_fixed_outfall_needs_a_stage():
+    with pytest.raises(ValueError, match="stage"):
+        dataclasses.replace(tree_steady(), outfalls=(Outfall("Outfall", 8.0, kind="fixed"),),
+                            routing="dynamic_wave").validate()
+
+
+def test_unknown_outfall_kind_and_negative_offset_are_refused_by_name():
+    net = tree_steady()
+    with pytest.raises(ValueError, match="kind"):
+        dataclasses.replace(net, outfalls=(Outfall("Outfall", 8.0, kind="tidal"),)).validate()
+    bad = (dataclasses.replace(net.pipes[0], inlet_offset=-0.1), *net.pipes[1:])
+    with pytest.raises(ValueError, match="C1.*offset"):
+        dataclasses.replace(net, pipes=bad).validate()
+
+
+@pytest.mark.parametrize("kwargs,match", [
+    ({"routing_step": 0.0}, "routing_step"),
+    ({"inertial_damping": "most"}, "inertial_damping"),
+    ({"normal_flow_limited": "x"}, "normal_flow_limited"),
+    ({"surcharge_method": "slot"}, "slot"),
+    ({"min_surface_area": -1.0}, "min_surface_area"),
+])
+def test_dynamic_wave_options_are_validated(kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        DynamicWaveOptions(**kwargs).validate()

@@ -21,6 +21,7 @@ from noodl.apps.sewer.air import (
     Drag,
     Headspace,
 )
+from noodl.apps.sewer.dynwave import DynamicWaveOptions
 from noodl.apps.sewer.hydraulics import GEOMETRY_ALIASES, SewerHydraulics
 from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
 from noodl.drives import Stack
@@ -32,6 +33,11 @@ from noodl.model import Model
 from noodl.refs import initial_drivers as refs_initial_drivers
 from noodl.refs import state_from
 from noodl.topology import Network
+
+#: SWMM `FLOW_ROUTING` keywords -> the physical routing names.
+ROUTING_ALIASES = {"STEADY": "steady", "KINWAVE": "kinematic_wave", "DYNWAVE": "dynamic_wave"}
+ROUTINGS = ("steady", "kinematic_wave", "dynamic_wave")
+OUTFALL_KINDS = ("free", "normal", "fixed")
 
 Tensor = torch.Tensor
 F64 = torch.float64
@@ -53,16 +59,23 @@ class Manhole:
 
 @dataclass(frozen=True)
 class Outfall:
-    """An outfall, where the network discharges: its `invert` elevation (m)."""
+    """An outfall, where the network discharges: its `invert` elevation (m).
+
+    `kind` is ``"free"``, ``"normal"`` or ``"fixed"`` (SWMM FREE/NORMAL/FIXED); ``"fixed"``
+    needs `stage`, the water-surface elevation (m). Only dynamic-wave routing reads them.
+    """
 
     name: str
     invert: float
+    kind: str = "free"
+    stage: float | None = None
 
 
 @dataclass(frozen=True)
 class Pipe:
     """A conduit from manhole `u` to `v`: `length` and `diameter` (m), Manning's `n`
-    and bed `slope` (m/m)."""
+    and bed `slope` (m/m). `inlet_offset` and `outlet_offset` (m) are the heights of the
+    pipe invert above the invert of its `u` and `v` node (SWMM's link offsets)."""
 
     name: str
     u: str
@@ -71,13 +84,19 @@ class Pipe:
     diameter: float
     n: float
     slope: float
+    inlet_offset: float = 0.0
+    outlet_offset: float = 0.0
 
 
 @dataclass(frozen=True)
 class SewerNetwork:
-    """A dendritic gravity sewer: manholes, one outgoing pipe each, outfalls.
+    """A gravity sewer: manholes, pipes, outfalls. Kinematic-wave and steady routing need a
+    dendritic network (one outgoing pipe per manhole); dynamic-wave routing allows loops
+    and flat pipes.
 
-    `geometry` selects the circular cross-section: ``"analytic"`` (the exact circle,
+    `routing` is ``"steady"``, ``"kinematic_wave"`` or ``"dynamic_wave"`` (SWMM's STEADY,
+    KINWAVE and DYNWAVE are accepted and normalised); `dynamic_wave` holds the options of
+    the last one. `geometry` selects the circular cross-section: ``"analytic"`` (the exact circle,
     `geometry.py`; the default for networks built in code) or ``"tabulated"`` (SWMM 5.2's own
     tables, lookup rules and unit constants, `xsect_tables.py`; the default of
     `read_swmm_inp`, whose purpose is to reproduce SWMM). ``"tabulated"`` is a steady
@@ -87,11 +106,13 @@ class SewerNetwork:
     manholes: tuple[Manhole, ...]
     pipes: tuple[Pipe, ...]
     outfalls: tuple[Outfall, ...]
-    routing: str = "KINWAVE"
+    routing: str = "kinematic_wave"
     notes: dict[str, str] = field(default_factory=dict)
     geometry: str = "analytic"
+    dynamic_wave: DynamicWaveOptions = DynamicWaveOptions()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "routing", ROUTING_ALIASES.get(self.routing, self.routing))
         object.__setattr__(
             self, "geometry", GEOMETRY_ALIASES.get(self.geometry, self.geometry)
         )
@@ -103,11 +124,30 @@ class SewerNetwork:
                 f"SewerNetwork: geometry must be 'analytic' or 'tabulated', got "
                 f"{self.geometry!r}"
             )
+        if self.routing not in ROUTINGS:
+            raise ValueError(
+                f"SewerNetwork: routing must be one of {ROUTINGS} (or the SWMM keywords "
+                f"{tuple(ROUTING_ALIASES)}), got {self.routing!r}"
+            )
+        dynamic = self.routing == "dynamic_wave"
         names: set[str] = set()
         for node in (*self.manholes, *self.outfalls):
             if node.name in names:
                 raise ValueError(f"SewerNetwork: duplicate node name {node.name!r}")
             names.add(node.name)
+        for outfall in self.outfalls:
+            if outfall.kind not in OUTFALL_KINDS:
+                raise ValueError(
+                    f"SewerNetwork: outfall {outfall.name!r} kind must be one of "
+                    f"{OUTFALL_KINDS}, got {outfall.kind!r}"
+                )
+            if outfall.kind == "fixed" and not (
+                outfall.stage is not None and math.isfinite(outfall.stage)
+            ):
+                raise ValueError(
+                    f"SewerNetwork: fixed outfall {outfall.name!r} needs a finite stage "
+                    f"(m elevation), got {outfall.stage!r}"
+                )
         pipe_names: set[str] = set()
         outgoing: dict[str, list[str]] = {}
         for pipe in self.pipes:
@@ -131,8 +171,18 @@ class SewerNetwork:
                     f"SewerNetwork: pipe {pipe.name!r} must have positive length, diameter "
                     f"and Manning n, got {pipe.length!r}, {pipe.diameter!r}, {pipe.n!r}"
                 )
+            for label, offset in (("inlet", pipe.inlet_offset), ("outlet", pipe.outlet_offset)):
+                if not offset >= 0:
+                    raise ValueError(
+                        f"SewerNetwork: pipe {pipe.name!r} has {label} offset {offset!r} m; "
+                        f"an offset is the invert height above its node's invert and must "
+                        f"be >= 0"
+                    )
             outgoing.setdefault(pipe.u, []).append(pipe.name)
         outfall_names = {o.name for o in self.outfalls}
+        if dynamic:
+            self._validate_dynamic(outfall_names)
+            return
         for manhole in self.manholes:
             found = outgoing.get(manhole.name, [])
             if len(found) != 1:
@@ -166,6 +216,42 @@ class SewerNetwork:
                 f"SewerNetwork: manhole(s) {stranded} -- their component does not reach an "
                 f"outfall (a cycle in the pipe subgraph shows up here too)"
             )
+
+    def _validate_dynamic(self, outfall_names: set[str]) -> None:
+        """Dynamic-wave topology: loops and any flow direction are allowed, but every
+        connected component needs an outfall and each outfall ends exactly one conduit."""
+        self.dynamic_wave.validate()
+        neighbours: dict[str, list[str]] = {}
+        touching: dict[str, list[str]] = {name: [] for name in outfall_names}
+        for pipe in self.pipes:
+            neighbours.setdefault(pipe.u, []).append(pipe.v)
+            neighbours.setdefault(pipe.v, []).append(pipe.u)
+            for end in (pipe.u, pipe.v):
+                if end in outfall_names:
+                    touching[end].append(pipe.name)
+        for name, found in touching.items():
+            if len(found) != 1:
+                raise ValueError(
+                    f"SewerNetwork: outfall {name!r} is attached to {len(found)} pipes "
+                    f"({found}); dynamic-wave routing takes exactly one conduit per outfall"
+                )
+        seen: set[str] = set()
+        for manhole in self.manholes:
+            if manhole.name in seen:
+                continue
+            component = {manhole.name}
+            frontier = [manhole.name]
+            while frontier:
+                for other in neighbours.get(frontier.pop(), ()):
+                    if other not in component:
+                        component.add(other)
+                        frontier.append(other)
+            seen |= component
+            if not component & outfall_names:
+                raise ValueError(
+                    f"SewerNetwork: manhole {manhole.name!r} and its connected pipes "
+                    f"({sorted(component)}) reach no outfall"
+                )
 
     def outgoing(self) -> dict[str, int]:
         """Manhole name -> the position of its outgoing pipe in `self.pipes`."""

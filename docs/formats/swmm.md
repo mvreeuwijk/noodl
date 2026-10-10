@@ -7,6 +7,23 @@ column layouts and units are read by `apps/sewer/inp.py`.
 **Read:** `[TITLE]`, `[OPTIONS]`, `[JUNCTIONS]`, `[OUTFALLS]`, `[CONDUITS]`, `[XSECTIONS]`,
 `[INFLOWS]`, `[POLLUTANTS]`.
 
+**Routing.** `FLOW_ROUTING` is `STEADY`, `KINWAVE` or `DYNWAVE`, read as the physical names
+`steady`, `kinematic_wave` and `dynamic_wave` (`SewerNetwork.routing`). `DYNWAVE` also reads
+`ROUTING_STEP` (seconds or `HH:MM:SS`), `INERTIAL_DAMPING` (`NO`/`PARTIAL`/`FULL`),
+`NORMAL_FLOW_LIMITED` (`SLOPE`/`FROUDE`/`BOTH`/`NO`), `SURCHARGE_METHOD`, `MIN_SURFAREA`,
+`HEAD_TOLERANCE`, `MAX_TRIALS` and `MIN_SLOPE` into `DynamicWaveOptions`; `HEAD_TOLERANCE`
+and `MAX_TRIALS` are SWMM's own iteration controls, recorded but not used.
+
+**Dynamic wave, what is refused for now.** With `DYNWAVE` the reader refuses, with the line
+number: `VARIABLE_STEP` above 0 (set it to 0), `LENGTHENING_STEP` above 0, `ALLOW_PONDING YES`,
+`SURCHARGE_METHOD SLOT`, a junction `InitDepth` other than 0, a conduit `InitFlow` or `MaxFlow`
+other than 0, flap-gated outfalls and `TIDAL`/`TIMESERIES` outfalls.
+
+**Outfalls.** `FREE`, `NORMAL` and `FIXED` (with its stage, m) are read.
+
+**Barrels.** A conduit with more than one barrel, or a culvert code, is refused for every
+routing; it used to be ignored silently.
+
 **Constraints:** `FLOW_UNITS` must be `CMS` — the reader is SI-native and does not convert.
 `LINK_OFFSETS` must be `DEPTH` or `ELEVATION`. Only `CIRCULAR` cross-sections. Only constant
 `FLOW` baselines and constant `CONCENTRATION` pollutant baselines; a time-series inflow is
@@ -36,11 +53,15 @@ conduits differ by SWMM's one-step junction lag, which is first order in the ste
 - runoff (`[SUBCATCHMENTS]` and everything that feeds them) and dry-weather patterns;
 - non-circular shapes;
 - storage units, pumps, weirs, orifices and outlets;
-- dynamic-wave routing as such. `FLOW_ROUTING` is recorded, but the application's hydraulics are
-  steady kinematic wave or level-pool manhole storage.
+- dynamic wave with surcharge, variable time step or ponding.
 
 **Slope** follows SWMM's own definition $S_0 = dy/dx$ with $dx = \sqrt{L^2 - dy^2}$ — the 3-D
-chord, not the naive $dy/L$. Zero or adverse fall is refused, as is a fall $\ge$ length.
+chord, not the naive $dy/L$. Under `STEADY` and `KINWAVE`, zero or adverse fall is refused, as
+is a fall $\ge$ length. Under `DYNWAVE` the reader follows SWMM's `conduit_getSlope`: the fall is
+floored at SWMM's `MIN_DELTA_Z` (0.001 ft, 0.0003048 m), `MIN_SLOPE` floors the slope, and a
+conduit is reversed only when it is adverse, so a flat conduit keeps the orientation of the
+file. Conduit offsets are kept (`Pipe.inlet_offset`, `Pipe.outlet_offset`, m above the end
+node's invert) and swap with the ends on a reversal.
 
 ```python
 from noodl.apps.sewer import read_swmm_inp, build_model
