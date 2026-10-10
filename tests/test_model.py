@@ -14,6 +14,7 @@ from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.reaction import FirstOrderDecay
 from noodl.layers.transport import TransportLayer
 from noodl.model import Model, Ports
+from noodl.nodesources import NodeSource
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -1464,3 +1465,49 @@ def test_unnamed_potential_layers_are_not_relaxed():
     diag: dict = {}
     it.step(state, drivers, 600.0, diagnostics=diag)
     assert set(diag["max_change"]) == {"species"}
+
+
+class _Ground(NodeSource):
+    """w = g * phi at the given nodes (test-local): a stiff tie of a node to zero."""
+
+    def __init__(self, nodes, g):
+        super().__init__(nodes)
+        self.g = g
+
+    def flow(self, phi_nodes, drivers=None):
+        return self.g * phi_nodes
+
+    def dflow(self, phi_nodes, drivers=None):
+        return torch.full_like(phi_nodes, self.g)
+
+
+class _BoundaryFromState:
+    """Closure: the boundary potential is 1 + phi_b / 2 of the FED state (fixed point 2)."""
+
+    def __init__(self, b):
+        self.b = b
+
+    def __call__(self, state, drivers):
+        return {"toy.phi_boundary": 1.0 + 0.5 * state["toy.phi"][..., self.b:self.b + 1]}
+
+
+def test_iterate_on_a_potential_layer_converges_its_boundary_too():
+    """A closure may write the boundary potentials from the previous pass (the sewer's
+    outfall heads). The interior here barely sees the boundary (a stiff tie to zero), so a
+    test on the interior alone would stop with the boundary still ~1e-6 from its fixed
+    point."""
+    net = Network(dtype=torch.float64)
+    net.add_node("a")
+    net.add_node("b")
+    net.add_edge("a", "b", kind="link")
+    layer = PotentialFlowLayer(net, "toy", [PowerLaw(C=torch.tensor(1.0, dtype=torch.float64),
+                                                     n=torch.tensor(1.0, dtype=torch.float64),
+                                                     kind="link")],
+                               boundary=["b"], node_sources=[_Ground([0], 1e6)])
+    model = Model(net, {"toy": layer}, closures=[_BoundaryFromState(1)], coupling="iterate",
+                  iterate_tol={"toy": 1e-12}, iterate_max=500)
+    state = {"toy.phi": torch.zeros(2, dtype=torch.float64),
+             "toy.q": torch.zeros(1, dtype=torch.float64)}
+    drivers = {"toy.sources": torch.tensor([1.0, 0.0], dtype=torch.float64)}
+    out = model.steady(state, drivers, atol=1e-14, rtol=1e-14)
+    assert abs(out["toy.phi"][1].item() - 2.0) < 1e-10

@@ -1,6 +1,13 @@
 """A differentiable gravity sewer: water, headspace air and sulfide, coupled."""
 
 from noodl.apps.sewer.air import F_AIR_DEFAULT, F_I_DEFAULT, Drag, Headspace
+from noodl.apps.sewer.dynwave import (
+    DynamicWaveConduit,
+    DynamicWaveHydraulics,
+    DynamicWaveOptions,
+    JunctionStorage,
+    simulate_dynamic_wave,
+)
 from noodl.apps.sewer.geometry import (
     H_MAX_RATIO,
     air_geometry,
@@ -11,6 +18,7 @@ from noodl.apps.sewer.geometry import (
 from noodl.apps.sewer.hydraulics import SewerHydraulics
 from noodl.apps.sewer.inp import read_swmm_inp
 from noodl.apps.sewer.network import (
+    ROUTING_ALIASES,
     Manhole,
     Outfall,
     Pipe,
@@ -30,6 +38,8 @@ from noodl.apps.sewer.quality import (
 from noodl.apps.sewer.report import pipe_table, to_mg_per_litre, to_ppm
 
 __all__ = [
+    "ROUTING_ALIASES", "DynamicWaveConduit", "DynamicWaveHydraulics", "DynamicWaveOptions",
+    "JunctionStorage", "simulate_dynamic_wave",
     "Drag", "F_AIR_DEFAULT", "F_I_DEFAULT", "H2STransfer", "H_MAX_RATIO", "Headspace",
     "Manhole", "Outfall", "Pipe", "SewerHydraulics", "SewerNetwork", "SulfideGeneration",
     "air_geometry", "build_model", "capacity_flow", "henry_h2s", "initial_drivers", "initial_state",

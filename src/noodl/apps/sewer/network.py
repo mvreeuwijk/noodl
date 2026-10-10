@@ -21,7 +21,11 @@ from noodl.apps.sewer.air import (
     Drag,
     Headspace,
 )
-from noodl.apps.sewer.dynwave import DynamicWaveOptions
+from noodl.apps.sewer.dynwave import (
+    DynamicWaveHydraulics,
+    DynamicWaveOptions,
+    build_dynamic_wave_model,
+)
 from noodl.apps.sewer.hydraulics import GEOMETRY_ALIASES, SewerHydraulics
 from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
 from noodl.drives import Stack
@@ -295,8 +299,8 @@ def build_model(
     net: SewerNetwork,
     *,
     storage: bool = False,
-    air: bool = True,
-    quality: bool = True,
+    air: bool | None = None,
+    quality: bool | None = None,
     species: tuple[str, ...] = ("bod", "sulfide"),
     f_air: float = F_AIR_DEFAULT,
     f_i: float = F_I_DEFAULT,
@@ -307,13 +311,40 @@ def build_model(
     coupling: str = "pingpong",
     scheme: str = "implicit",
     dt_storage: float | None = None,
+    iterate_tol: float | None = None,
+    iterate_max: int | None = None,
 ) -> tuple[Model, State, Drivers]:
     """Assemble the sewer model and return `(model, state, drivers)`.
 
     `air=False` builds the water-only model the SWMM comparison tests use; `quality=False`
     drops both quality layers. `fans` names the manholes carrying a prescribed extraction
-    (m3/s, positive OUT through the `fan` kind).
+    (m3/s, positive OUT through the `fan` kind). `air` and `quality` default to ``True``
+    for steady and kinematic-wave routing.
+
+    A ``routing="dynamic_wave"`` network is built by `build_dynamic_wave_model`: water only
+    (`air` and `quality` default to ``False`` there, and ``True`` is refused, as is
+    `storage`; headspace air and quality on the dynamic wave are phase D), converged to
+    `iterate_tol` (m, default 1e-11) within `iterate_max` passes (default 200). Those two
+    apply to dynamic wave only and are refused for the other routings.
     """
+    if net.routing == "dynamic_wave":
+        for name, value in (("air", air), ("quality", quality), ("storage", storage)):
+            if value:
+                raise ValueError(
+                    f"build_model: {name}=True is not available with dynamic-wave routing "
+                    f"yet (phase D); build it with {name}=False"
+                )
+        kwargs = {k: v for k, v in (("iterate_tol", iterate_tol),
+                                    ("iterate_max", iterate_max)) if v is not None}
+        return build_dynamic_wave_model(net, **kwargs)
+    for name, value in (("iterate_tol", iterate_tol), ("iterate_max", iterate_max)):
+        if value is not None:
+            raise ValueError(
+                f"build_model: {name} applies to dynamic-wave routing only; this network's "
+                f"routing is {net.routing!r}"
+            )
+    air = True if air is None else air
+    quality = True if quality is None else quality
     net.validate()
     graph = Network(dtype=F64)
     for manhole in net.manholes:
@@ -666,6 +697,10 @@ def initial_state(
 ) -> State:
     """All-zero state, dispatching on each layer's `quantity` (the app convention).
 
+    A dynamic-wave model (a ``"head"`` layer and a `DynamicWaveHydraulics` closure) gets
+    SWMM's cold, dry start instead (`DynamicWaveHydraulics.initial_state`), which needs
+    `drivers`.
+
     Also builds every closure-carried state key this application knows --
     `"sewer.H"`, the `SewerHydraulics` closure's manhole levels, when it is running with
     `storage=True` -- so that `step(initial_state(model, drivers))` works exactly as
@@ -686,6 +721,16 @@ def initial_state(
     exists and some closure is a `SewerHydraulics`), rather than only once the missing key is
     discovered deep inside `Model.step`.
     """
+    dynamic = [c for c in model.closures if isinstance(c, DynamicWaveHydraulics)]
+    if dynamic and any(layer.quantity == "head" for layer in model.potential.values()):
+        if drivers is None:
+            raise ValueError(
+                "apps.sewer.initial_state: drivers are required for a dynamic-wave model "
+                "(the junction net inflow of the cold start is the lateral 'inflow'); call "
+                "initial_state(model, drivers)"
+            )
+        state = dynamic[0].initial_state(drivers)
+        return state_from(model, values, base=state) if values else state
     state: State = {}
     for closure in model.closures:
         if "sewer.H" in getattr(closure, "state_keys", ()):

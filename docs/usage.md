@@ -35,14 +35,14 @@ for t in times:
 | [Building physics](applications/building_physics.md) | `model, state, drivers = build_model(net, ..., return_inputs=True)` (or just `model = build_model(net, ...)`) | `air`: `pressure`, `flow`; `thermal`: `temperature`; `species`: `mass_fraction` | nothing else (`P_ref` optional) |
 | CONTAM `.prj` | `model, state, drivers = project_to_model(read_prj(path))` | `air`: `pressure`, `flow`; `species`: `mass_fraction` | wind and densities are in the returned drivers |
 | [Street air quality](applications/street_aq.md) | `model, state, drivers = build_model(streets, ...)` | `street`: `concentration`, `flow` | the meteorology: `U_ref`, `theta_w`, `h_abl` (and `lmo`) |
-| [Sewers (SWMM)](applications/sewer.md) | `model, state, drivers = build_model(sewer_net, ...)` | `air`: `pressure`; `water_quality`, `air_quality`: `concentration` | inflows and temperatures are in the returned drivers |
+| [Sewers (SWMM)](applications/sewer.md) | `model, state, drivers = build_model(sewer_net, ...)`; a `routing="dynamic_wave"` network is run with `simulate_dynamic_wave(model, state, drivers, steps=...)` | `air`: `pressure`; `water_quality`, `air_quality`: `concentration`; dynamic wave: `water`: `head`, `flow` | inflows and temperatures are in the returned drivers |
 | [Water (EPANET)](applications/water.md) | `model, state, drivers = build_model(water_net, ...)` | `water`: `head`, `flow`; `quality`: `concentration` | tank levels and pump status are state, by tank and pump name |
 | [Allocation (WSIMOD)](applications/allocation.md) | `model, state, drivers = build_model(topology)` | `wsimod`: `storage`, `requests`, `flow` | nothing else |
 
 Every application exports `build_model`, `initial_state` and `initial_drivers`, and
 `initial_state(model)`/`initial_drivers(model)` without `values` return its defaults.
 (The sewer's `initial_state` also takes the drivers, `initial_state(model, drivers=drivers,
-values=...)`, because its storage depends on them.)
+values=...)`, because its storage, and the dynamic wave's junction net inflow, depend on them.)
 
 ## A complete example
 

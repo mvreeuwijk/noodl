@@ -974,9 +974,10 @@ class Model:
         Convergence is judged per instance on detached copies.
 
         A potential layer named in `iterate_tol` is iterated on its own potential: it
-        converges when the largest change of `phi` over its interior nodes is within the
-        tolerance (in `phi` units). This is for closures that compute a layer's element
-        coefficients from that layer's previous solution (the sewer dynamic wave). Its
+        converges when the largest change of `phi` over its interior and boundary nodes is
+        within the tolerance (in `phi` units). This is for closures that compute a layer's
+        element coefficients, or its boundary potentials, from that layer's previous
+        solution (the sewer dynamic wave: conduit coefficients and outfall heads). Its
         `.phi` and `.q` are relaxed like a transport `.x`, and relaxation does not move
         the fixed point.
 
@@ -1093,7 +1094,10 @@ class Model:
                         else:
                             layer = self.potential[name]
                             d = (new[f"{name}.phi"] - prev[f"{name}.phi"]).abs()
-                            change[name] = d[..., layer.interior].amax(-1)
+                            # Boundary entries too: a closure may write `phi_boundary`
+                            # from the previous pass (the sewer's outfall heads).
+                            nodes = torch.cat((layer.interior, layer.bound))
+                            change[name] = d[..., nodes].amax(-1)
                         this = change[name] <= tol
                         ok = this if ok is None else (ok & this)
                     converged = ok

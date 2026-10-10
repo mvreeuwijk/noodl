@@ -13,7 +13,7 @@ Build the model and its starting state and inputs.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `build_model` | Assemble the sewer model and return `(model, state, drivers)`. | `build_model(net, *, storage=False, air=True, quality=True, species=('bod', 'sulfide'), f_air=0.02, f_i=0.000749, c_s=1.0, leak_area=0.0008, leak_cd=0.6, fans=(), coupling='pingpong', scheme='implicit', dt_storage=None)` |
+| `build_model` | Assemble the sewer model and return `(model, state, drivers)`. | `build_model(net, *, storage=False, air=None, quality=None, species=('bod', 'sulfide'), f_air=0.02, f_i=0.000749, c_s=1.0, leak_area=0.0008, leak_cd=0.6, fans=(), coupling='pingpong', scheme='implicit', dt_storage=None, iterate_tol=None, iterate_max=None)` |
 | `initial_drivers` | `build_model`'s driver template (copied), then `values` by name (see `noodl.refs.drivers_from`), e.g. by outfall and species name. | `initial_drivers(model, *, values=None)` |
 | `initial_state` | All-zero state, dispatching on each layer's `quantity` (the app convention). | `initial_state(model, drivers=None, *, values=None)` |
 
@@ -23,6 +23,7 @@ Descriptions of the physical objects a network is built from.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `DynamicWaveOptions` | SWMM 5.2.4's dynamic-wave [OPTIONS] that change the physics, with SWMM's defaults (`project.c:841-880`). `head_tolerance` and `max_trials` are SWMM's own iteration controls: recorded so a file round-trips, never used -- noodl solves the same equations to `build_model`'s own `iterate_tol` (docs: "Dynamic wave"). | `DynamicWaveOptions(routing_step=20.0, inertial_damping='partial', normal_flow_limited='both', surcharge_method='extran', min_surface_area=None, head_tolerance=None, max_trials=None)` |
 | `Manhole` | A manhole: `invert` and `ground` elevations (m), a constant lateral `inflow` (m3/s) and, for storage, its `surface_area` (m2). | `Manhole(name, invert, ground=None, inflow=0.0, surface_area=None)` |
 | `Outfall` | An outfall, where the network discharges: its `invert` elevation (m). | `Outfall(name, invert, kind='free', stage=None)` |
 | `Pipe` | A conduit from manhole `u` to `v`: `length` and `diameter` (m), Manning's `n` and bed `slope` (m/m). `inlet_offset` and `outlet_offset` (m) are the heights of the pipe invert above the invert of its `u` and `v` node (SWMM's link offsets). | `Pipe(name, u, v, length, diameter, n, slope, inlet_offset=0.0, outlet_offset=0.0)` |
@@ -34,6 +35,7 @@ Flow through an edge as a function of the potential difference across it.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `DynamicWaveConduit` | SWMM's dynamic-wave conduit (`dwflow.c`) with its coefficients frozen for one pass. | `DynamicWaveConduit(kind='pipe')` |
 | `Headspace` | ``dp = R \|Q\| Q`` on a headspace edge, with ``R`` read from per-edge drivers. | `Headspace(length, pipe_positions, *, f_air=0.02, rho_air=1.2041, area_key='sewer.A_air', dh_key='sewer.D_h', dp_transition=1e-08, kind='headspace', learnable=False)` |
 
 ## Drives
@@ -50,6 +52,7 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `DynamicWaveHydraulics` | The dynamic-wave closure: the conduit coefficients, junction surface areas and outfall heads of one pass, from the previous pass's heads and flows. | `DynamicWaveHydraulics(graph, net, *, layer='water')` |
 | `H2STransfer` | Two-film water-to-air H2S transfer, as a `Model` closure. | `H2STransfer(n_nodes, manhole_idx, *, sulfide=1, water_layer='water_quality', air_layer='air_quality', out_pipe=None)` |
 | `SewerHydraulics` | The water side of a sewer, as a `Model` closure. | `SewerHydraulics(net, pipes, manholes, *, storage=False, dt=None, quality_layer='water_quality', air_quality_layer='air_quality', shaft_depth=None, surface_area=None, geometry='analytic', name='sewer')` |
 
@@ -60,6 +63,14 @@ Transformations applied to transported species each step.
 | Name | What it does | How to call it |
 |---|---|---|
 | `SulfideGeneration` | Operator-split Pomeroy-Parkhurst sulfide generation and bulk BOD decay. | `SulfideGeneration(*, bod=0, sulfide=1, m_prime=0.00032, m_loss=0.64, k_bod=0.2, out_pipe=None, manhole_idx=None, n_nodes=None)` |
+
+## Sources
+
+Nodal sources and withdrawals.
+
+| Name | What it does | How to call it |
+|---|---|---|
+| `JunctionStorage` | SWMM's junction continuity as a node withdrawal: trapezoidal storage over the step, with a stiff bed below the invert (design D3). | `JunctionStorage(nodes, bed)` |
 
 ## Files
 
@@ -75,13 +86,14 @@ Calculations and helpers.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `simulate_dynamic_wave` | Run `steps` routing steps of `dt` s (default: the model's routing step) from `state`. | `simulate_dynamic_wave(model, state, drivers, *, steps, dt=None, inflow=None, record=('water.phi', 'water.q'), diagnostics=None, **solve_kwargs)` |
 | `air_geometry` | ``(A_air, P_air, D_h)`` for the headspace above the water surface. | `air_geometry(h, diameter)` |
 | `capacity_flow` | ``Q_max = Q(H_MAX_RATIO D)``: the largest discharge the ascending Manning branch carries, and the surcharge threshold. | `capacity_flow(diameter, roughness, slope)` |
 | `henry_h2s` | Dimensionless Henry constant ``H = C_gas / C_liquid`` at absolute temperature (K). | `henry_h2s(temperature)` |
 | `kla_h2s` | ``K_L a`` in 1/s from the per-hour correlation ``a (1 + b Fr^2)(S0 V)^(3/8)/d_m``. | `kla_h2s(slope, velocity, depth, *, a=0.86, b=0.2)` |
 | `manning_flow` | Manning discharge ``Q = (1/n) A R^(2/3) sqrt(S0)`` (m^3/s), SI constant 1.0. | `manning_flow(h, diameter, roughness, slope)` |
 | `normal_depth` | Manning normal depth (m) for discharge ``q``, batched over pipes and instances. | `normal_depth(q, diameter, roughness, slope, *, names=None, tol=1e-14)` |
-| `pipe_table` | One row per pipe of every quantity `SewerHydraulics` publishes; optionally to CSV. | `pipe_table(model, state, drivers, *, path=None)` |
+| `pipe_table` | One row per pipe of every quantity the hydraulics closure publishes (the model's `pipe_columns` when it declares them, as a dynamic-wave model does); optionally to CSV. | `pipe_table(model, state, drivers, *, path=None)` |
 | `sewer_steady` | The explicit fixed point of transport PLUS reactions (the `street_steady` pattern). | `sewer_steady(model, state, drivers, *, reaction=None, dt=60.0, max_iter=500, tol=1e-12)` |
 | `to_mg_per_litre` | kg/m3 -> mg/L (the factor is exactly 1e3). | `to_mg_per_litre(x)` |
 | `to_ppm` | kg/m3 of headspace H2S -> ppm by volume at the headspace temperature (K). | `to_ppm(concentration, temperature)` |
@@ -93,6 +105,7 @@ Named values and option tables.
 
 | Name | Value |
 |---|---|
+| `ROUTING_ALIASES` | table of 3 entries: `STEADY`, `KINWAVE`, `DYNWAVE` |
 | `F_AIR_DEFAULT` | `0.02` |
 | `F_I_DEFAULT` | `0.000749` |
 | `H_MAX_RATIO` | `0.938` |

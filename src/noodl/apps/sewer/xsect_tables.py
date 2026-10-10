@@ -453,26 +453,27 @@ def critical_depth(q: Tensor, y_full: Tensor, a_full: Tensor) -> Tensor:
                         a_full.unsqueeze(-1))               # (..., 26)
     q_i1 = torch.gather(qc, -1, i1.long().unsqueeze(-1)).squeeze(-1)
     # xsect.c:1670-1686: scan UP from i1+1 when Qc(i1) < q, first i with qc[i] >= q;
-    # SWMM's q0 is the previous station's Qc, i.e. qc[i-1]; none found -> yFull
+    # SWMM's q0 is the previous station's Qc, i.e. qc[i-1]; none found -> yFull.
+    # Vectorised: the first True of the hit mask along the stations (argmax of a bool).
     up = q_i1 < q
-    yc_up = y_full.clone()
-    found = torch.zeros_like(up)
-    for i in range(1, 26):
-        hit = up & ~found & (stations[i] > i1) & (qc[..., i] >= q)
-        q_prev = qc[..., i - 1]
-        frac = (q - q_prev) / torch.where(hit, qc[..., i] - q_prev, torch.ones_like(q))
-        yc_up = torch.where(hit, (frac + (i - 1)) * dy, yc_up)
-        found = found | hit
+    qv = q.unsqueeze(-1)
+    hit_up = (stations > i1.unsqueeze(-1)) & (qc >= qv)
+    found_up = up & hit_up.any(-1)
+    i_up = torch.clamp(hit_up.to(torch.uint8).argmax(-1), min=1)
+    q_hi = torch.gather(qc, -1, i_up.unsqueeze(-1)).squeeze(-1)
+    q_lo = torch.gather(qc, -1, (i_up - 1).unsqueeze(-1)).squeeze(-1)
+    frac = (q - q_lo) / torch.where(found_up, q_hi - q_lo, torch.ones_like(q))
+    yc_up = torch.where(found_up, (frac + (i_up - 1).to(q.dtype)) * dy, y_full)
     # xsect.c:1690-1707 scan DOWN from i1-1 otherwise: first i with qc[i] < q;
-    # SWMM's q0 is the previous (upper) station's Qc, i.e. qc[i+1]; none found -> 0
-    yc_dn = torch.zeros_like(q)
-    found_dn = torch.zeros_like(up)
-    for i in range(24, -1, -1):
-        hit = ~up & ~found_dn & (stations[i] < i1) & (qc[..., i] < q)
-        q_next = qc[..., i + 1]
-        frac = (q - qc[..., i]) / torch.where(hit, q_next - qc[..., i], torch.ones_like(q))
-        yc_dn = torch.where(hit, (frac + i) * dy, yc_dn)
-        found_dn = found_dn | hit
+    # SWMM's q0 is the previous (upper) station's Qc, i.e. qc[i+1]; none found -> 0.
+    # Vectorised: the LAST True among stations 0..24.
+    hit_dn = (stations[:25] < i1.unsqueeze(-1)) & (qc[..., :25] < qv)
+    found_dn = ~up & hit_dn.any(-1)
+    i_dn = 24 - hit_dn.flip(-1).to(torch.uint8).argmax(-1)
+    q_lo = torch.gather(qc, -1, i_dn.unsqueeze(-1)).squeeze(-1)
+    q_hi = torch.gather(qc, -1, (i_dn + 1).unsqueeze(-1)).squeeze(-1)
+    frac = (q - q_lo) / torch.where(found_dn, q_hi - q_lo, torch.ones_like(q))
+    yc_dn = torch.where(found_dn, (frac + i_dn.to(q.dtype)) * dy, torch.zeros_like(q))
     yc = torch.where(up, yc_up, yc_dn)
     # xsect.c:1318 MIN(y, yFull); xsect.c:1268 q2g == 0 -> 0
     return torch.where(zero, torch.zeros_like(yc), torch.minimum(yc, y_full))
