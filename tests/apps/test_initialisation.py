@@ -227,3 +227,13 @@ def test_water_demand_is_refused_on_a_pressure_driven_model():
     model, state, drivers = water.build_model(water.twoloop(), pda=True, p_min=0.0, p_req=10.0)
     with pytest.raises(ValueError, match="pressure-driven"):
         water.initial_drivers(model, demand={"J2": 0.012})
+
+
+def test_water_sources_by_value_are_refused_on_a_pressure_driven_model():
+    model, state, drivers = water.build_model(water.twoloop(), pda=True, p_min=0.0, p_req=10.0)
+    src = model.refs.water.sources
+    with pytest.raises(ValueError, match="pressure-driven"):
+        water.initial_drivers(model, values={src: {"J2": -0.012}})
+    with pytest.raises(ValueError, match="pressure-driven"):
+        water.initial_drivers(model, values={"water.sources": {"J2": -0.012}})
+    assert water.initial_drivers(model, values={src.layer + ".phi_boundary": {"R1": 50.0}})

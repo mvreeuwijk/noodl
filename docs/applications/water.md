@@ -45,7 +45,9 @@ print(round(float(heads["J1"]), 6), round(float(flows["P1"]), 6))
 To change an input, give it by name over the builder's own values. A demand is a
 negative source (m³/s withdrawn; `demand=` does the sign for you), and junctions not named
 keep their demand. A model built with `quality=` keeps the removal rate of its
-build-time demands; rebuild the model to change both:
+build-time demands; rebuild the model to change both. A pressure-driven model (`pda=True`)
+refuses both `demand=` and a `water.sources` value, since its demands are node sources set
+at build time:
 
 ```python
 from noodl.apps.water import initial_drivers

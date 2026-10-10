@@ -746,19 +746,21 @@ def initial_drivers(
         initial_drivers(model, demand={"J1": 0.005})
         initial_drivers(model, values={"water.sources": {"J1": -0.005}})   # the same
 
-    A pressure-driven model (`pda=True`) refuses `demand=`: its demands are node sources
-    the network set at build time. A model built with `quality=` keeps the removal rate of
-    its build-time demands, so `demand=` (like `values=`) changes the hydraulics but not
-    the quality sink; rebuild the model to change both.
+    A pressure-driven model (`pda=True`) refuses `demand=` and a `water.sources` value: its
+    demands are node sources the network set at build time. A model built with `quality=`
+    keeps the removal rate of its build-time demands, so `demand=` (like `values=`) changes
+    the hydraulics but not the quality sink; rebuild the model to change both.
     """
     drivers = refs_initial_drivers(model, values=values)
-    if demand:
+    if demand or (values and "water.sources" in values):
         layer = model.potential["water"]
-        if any(isinstance(s, PressureDrivenDemand) for s in layer._node_sources):
+        if any(isinstance(s, PressureDrivenDemand) for s in layer.node_sources):
             raise ValueError(
                 "initial_drivers: the demands of this model are pressure-driven and were "
-                "set by the network at build time, so demand= cannot change them"
+                "set by the network at build time, so demand= or a water.sources value "
+                "cannot change them"
             )
+    if demand:
         key = "water.sources"
         drivers = drivers_from(model, {key: {n: -q for n, q in demand.items()}}, base=drivers)
     return drivers
