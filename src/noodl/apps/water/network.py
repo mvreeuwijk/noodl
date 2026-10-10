@@ -587,7 +587,7 @@ def build_model(
     layer = PotentialFlowLayer(
         graph, "water", elements, boundary=boundary, node_sources=node_sources,
         quantity="head" if headloss == "H-W" else "pressure",
-        unit="m" if headloss == "H-W" else "Pa",
+        unit="m" if headloss == "H-W" else "Pa", flow_unit="m3/s",
     )
 
     layers: dict = {"water": layer}
@@ -661,6 +661,7 @@ def build_model(
             graph, "quality", capacity=cap_i, flow_kind="pipe",
             boundary=boundary, n_species=1, removal=removal, scheme="implicit",
             quantity="concentration", unit="kg/m3",
+            source_unit="kg/s", capacity_unit="m3", flow_unit="m3/s",
         )
         drivers["quality.x_boundary"] = torch.zeros(len(boundary), dtype=F64)
         state["quality.x"] = torch.zeros(len(interior), dtype=F64)

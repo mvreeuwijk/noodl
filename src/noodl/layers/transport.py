@@ -392,6 +392,9 @@ class TransportLayer:
         quantity: str = "scalar",
         unit: str = "",
         species_names: Sequence[str] | None = None,
+        source_unit: str = "",
+        capacity_unit: str = "",
+        flow_unit: str = "",
     ) -> None:
         if linear_solver not in _TRANSPORT_SOLVERS:
             raise ValueError(
@@ -411,6 +414,9 @@ class TransportLayer:
         self.flow_kinds = (flow_kind,) if isinstance(flow_kind, str) else tuple(flow_kind)
         # Metadata only: what this layer's state IS and what it is measured in.
         self.quantity, self.unit = quantity, unit
+        # Metadata only: the units of this layer's nodal sources (W for heat, kg/s for
+        # species), of its capacity (J/K, kg, m3) and of the flows it advects on.
+        self.source_unit, self.capacity_unit, self.flow_unit = source_unit, capacity_unit, flow_unit
         self.boundary = list(boundary)
         self.n_species = n_species
         # Metadata only, like `quantity`/`unit`: the names of the species columns, which

@@ -510,7 +510,8 @@ class LayerRef:
             state["q"] = Field(
                 f"{name}.q", role="state", axis="edge", labels=q_labels, aliases=q_alias,
                 ordering=f"edge order of kinds {tuple(layer.kinds)}", required="optional",
-                default=0.0, description="solved branch flows", **common,
+                default=0.0, description="solved branch flows",
+                unit=getattr(layer, "flow_unit", ""), **common,
             )
             inputs["phi_boundary"] = Field(
                 f"{name}.phi_boundary", role="driver", axis="node", labels=self.boundary_nodes,
@@ -521,7 +522,8 @@ class LayerRef:
                 f"{name}.sources", role="driver", axis="node", labels=nodes,
                 settable=self.interior_nodes, ordering="full node order",
                 required="optional", default=0.0,
-                description="nodal injection (zero on boundary and inactive nodes)", **common,
+                description="nodal injection (zero on boundary and inactive nodes)",
+                unit=getattr(layer, "flow_unit", ""), **common,
             )
         elif kind == "transport":
             K = int(layer.n_species)
@@ -547,13 +549,13 @@ class LayerRef:
                 settable=self.interior_nodes, ordering="full node order",
                 required="optional", default=0.0, n_species=K, species=species,
                 description="nodal source (zero on boundary and inactive nodes)", column=True,
-                **common,
+                unit=getattr(layer, "source_unit", ""), **common,
             )
             inputs["capacity"] = Field(
                 f"{name}.capacity", role="driver", axis="node", labels=self.interior_nodes,
                 ordering="active interior order", required="optional", default=None,
                 description="per-step storage capacity overriding the construction-time one",
-                **common,
+                unit=getattr(layer, "capacity_unit", ""), **common,
             )
             if flow_owner is None:
                 cols: list[int] = []
@@ -565,7 +567,7 @@ class LayerRef:
                     ordering=f"edge order of kinds {tuple(layer.flow_kinds)}",
                     required="always", default=0.0,
                     description="prescribed branch flows (no potential layer provides them)",
-                    **common,
+                    unit=getattr(layer, "flow_unit", ""), **common,
                 )
         elif kind == "allocation":
             self.interior_nodes = list(nodes)
@@ -575,18 +577,20 @@ class LayerRef:
             state["s"] = Field(
                 f"{name}.s", role="state", axis="node", labels=nodes,
                 ordering="full node order", required="step", default=None,
-                description="storage at every node", **common,
+                description="storage at every node", quantity=self.quantity, unit=self.unit,
+                **common,
             )
             state["q"] = Field(
                 f"{name}.q", role="state", axis="edge", labels=e_labels, aliases=e_alias,
                 ordering=f"edge order of kind {layer.kind!r}", required="optional",
-                default=0.0, description="realised transfers (written by the step)", **common,
+                default=0.0, description="realised transfers (written by the step)",
+                unit=getattr(layer, "flow_unit", ""), **common,
             )
             inputs["requests"] = Field(
                 f"{name}.requests", role="driver", axis="edge", labels=e_labels,
                 aliases=e_alias, ordering=f"edge order of kind {layer.kind!r}",
                 required="step", default=0.0, description="requested transfer per edge",
-                **common,
+                unit=getattr(layer, "flow_unit", ""), **common,
             )
         else:
             raise ValueError(f"LayerRef: unknown layer kind {kind!r}")

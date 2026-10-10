@@ -40,7 +40,8 @@ _OVERSUBSCRIBED_FLOOR = 1e-9
 class AllocatedFlowLayer:
     """Flows allocated by rule, not by a potential: each edge's requested flow is clipped
     to the arc's capacity and the receiving node's free storage, one explicit step at a
-    time, conserving storage exactly (WSIMOD's push/pull semantics)."""
+    time, conserving storage exactly (WSIMOD's push/pull semantics). `quantity`, `unit` and
+    `flow_unit` are reported by `model.refs`, never used numerically."""
 
     def __init__(
         self,
@@ -54,6 +55,9 @@ class AllocatedFlowLayer:
         mode: str = "hard",
         tau: float | None = None,
         n_passes: int = 5,
+        quantity: str = "storage",
+        unit: str = "",
+        flow_unit: str = "",
     ) -> None:
         if mode not in _MODES:
             raise ValueError(
@@ -128,6 +132,9 @@ class AllocatedFlowLayer:
         self.mode = mode
         self.tau = tau
         self.n_passes = int(n_passes)
+        # Metadata only, as on the other layers: what the storage is and its unit (m3 for
+        # water), and the unit of requests and realised flows (m3/s).
+        self.quantity, self.unit, self.flow_unit = quantity, unit, flow_unit
         self._src = src
         self._tgt = tgt
         self.s_max = s_max

@@ -416,7 +416,7 @@ def build_model(
     layer = TransportLayer(
         graph, layer_name, capacity=capacity, flow_kind=kinds, boundary=boundary,
         n_species=n_species, scheme=scheme, quantity="concentration", unit="kg/m3",
-        species_names=tuple(species),
+        species_names=tuple(species), source_unit="kg/s", capacity_unit="m3", flow_unit="m3/s",
     )
     closure = StreetFlows(
         graph, layer, street_geometry(net), preset=preset, n_theta=n_theta,

@@ -72,6 +72,7 @@ def build_model(
     pref = None if preference is None else by_name(preference, arc_names, 1.0, "arc(s)")
     layer = AllocatedFlowLayer(
         net, layer_name, kind, s_max=s_max, c_arc=c_arc, preference=pref, mode=mode, tau=tau,
+        quantity="storage", unit="m3", flow_unit="m3/s",
     )
     model = Model(net, [layer])
     state: State = {

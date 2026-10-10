@@ -119,6 +119,7 @@ def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
         conduction_kind=conduction_kind if has_walls else None,
         conductance=net.edge_attr("ua", conduction_kind) if has_walls else None,
         scheme=scheme, quantity="temperature", unit="K",
+        source_unit="W", capacity_unit="J/K", flow_unit="kg/s",
     )
 
 
@@ -144,6 +145,7 @@ def species_layer(net: Network, *, ambient="ambient", name: str = "species",
     return TransportLayer(
         net, name, capacity=capacity, flow_kind=kinds, boundary=[ambient], n_species=n_species,
         scheme=scheme, quantity="mass_fraction", unit="kg/kg", species_names=species_names,
+        source_unit="kg/s", capacity_unit="kg", flow_unit="kg/s",
     )
 
 
@@ -255,7 +257,8 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
             f"not solve carries no flow, so heat and species would silently not advect on it"
         )
     air = PotentialFlowLayer(net, "air", list(air_elements), drives=list(drives),
-                             boundary=[ambient], quantity="pressure", unit="Pa")
+                             boundary=[ambient], quantity="pressure", unit="Pa",
+                             flow_unit="kg/s")
     layers: dict = {"air": air}
     closures: list = []
     if thermal:

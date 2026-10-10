@@ -109,7 +109,8 @@ class PotentialFlowLayer:
     """Flows driven by a potential (pressure, head): solves nodal conservation
     `A_I g(A^T phi) = s_I` for the interior potentials by Newton's method, with the element
     laws on its edge kinds, drives added to the potential differences, and prescribed
-    potentials at its boundary nodes; differentiable through the converged solution."""
+    potentials at its boundary nodes; differentiable through the converged solution.
+    `flow_unit` is reported by `model.refs`, never used numerically."""
 
     def __init__(
         self,
@@ -123,6 +124,7 @@ class PotentialFlowLayer:
         node_sources: Sequence[NodeSource] = (),
         quantity: str = "potential",
         unit: str = "",
+        flow_unit: str = "",
     ) -> None:
         if linear_solver not in _LINEAR_SOLVERS:
             raise ValueError(
@@ -136,6 +138,9 @@ class PotentialFlowLayer:
         # temperature one without matching on layer names.
         self.quantity = quantity
         self.unit = unit
+        # Metadata only, like `quantity`/`unit`: the unit of the branch flows and nodal
+        # sources this layer solves (kg/s for air, m3/s for water). `noodl.refs` reports it.
+        self.flow_unit = flow_unit
 
         seen_kinds: set[str] = set()
         for el in elements:
