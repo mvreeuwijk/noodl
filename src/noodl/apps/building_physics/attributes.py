@@ -12,6 +12,8 @@ NODE_ATTRIBUTES: dict[str, tuple[str, str]] = {
     "T0": ("initial temperature (K), also the boundary temperature of a boundary node",
            "initial_state, initial_drivers, project_to_model"),
     "z_ref": ("height of the node's reference pressure (m)", "Stack.from_network"),
+    "position": ("absolute (x, y, z) of the node's component (m), set by Component.flatten; "
+                 "for drawing only", "noodl.components"),
     "heat_capacity": ("extra lumped heat capacity of the node (J/K); a wall node's capacity",
                       "thermal_layer"),
 }
@@ -29,6 +31,8 @@ EDGE_ATTRIBUTES: dict[str, dict[str, tuple[str, str]]] = {
                     "Wind.from_network"),
         "Cp": ("constant wind pressure coefficient when the edge has no profile",
                "Wind.from_network"),
+        "facade": ("key of the building's inner_table('facades', ...); flatten writes the "
+                   "facade's azimuth", "Component.flatten"),
         "Ch": ("wind speed modifier (dimensionless, 1 by default)", "Wind.from_network"),
         "profile": ("number of the WindProfile to use; 0 means the constant Cp",
                     "Wind.from_network"),

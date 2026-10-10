@@ -55,6 +55,9 @@ class Network:
         # Branch order is insertion order (networkx iterates edges by adjacency).
         self._edges: list[EdgeKey] = []
         self._cache: dict[tuple, torch.Tensor] = {}
+        # Alternative names of nodes (alias -> node name), set by `Component.flatten` for
+        # the ports merged into each node; every name-based lookup accepts them.
+        self.aliases: dict[Hashable, Hashable] = {}
 
     # ------------------------------------------------------------------ building
     def add_node(self, name: Node, **attrs) -> None:
@@ -78,6 +81,7 @@ class Network:
         other.device = self.device
         other.graph = self.graph.copy()
         other._edges = list(self._edges)
+        other.aliases = dict(self.aliases)
         other.add_node(name)
         for node in self.nodes:
             other.add_edge(node, name, kind=kind)
@@ -102,42 +106,67 @@ class Network:
         return self.graph.number_of_edges()
 
     @property
-    def n_components(self) -> int:
+    def n_islands(self) -> int:
+        """Number of islands: parts of the network with no path between them."""
         return nx.number_connected_components(self.graph.to_undirected(as_view=True))
 
     @property
     def n_cycles(self) -> int:
-        """Dimension of the cycle space: b - n + number of components."""
-        return self.b - self.n + self.n_components
+        """Dimension of the cycle space: b - n + number of islands."""
+        return self.b - self.n + self.n_islands
 
     # ------------------------------------------------------------------ indexing
     def _node_index(self) -> dict[Node, int]:
         return {node: i for i, node in enumerate(self.graph.nodes)}
 
+    def _resolve(self, node: Node) -> Node:
+        try:
+            return self.aliases.get(node, node)
+        except TypeError:          # an unhashable label is simply not an alias
+            return node
+
     def node_index(self, node: Node) -> int:
-        """Position of `node` in node order."""
+        """Position of `node` in node order (its name or an alias)."""
+        node = self._resolve(node)
         index = self._node_index()
         if node not in index:
             raise KeyError(f"unknown node {node!r}")
         return index[node]
 
-    def interior_index(self, boundary: Sequence[Node]) -> torch.Tensor:
-        """Positions, in node order, of all nodes not listed in `boundary`."""
+    def canonical(self, nodes: Sequence[Node]) -> list[Node]:
+        """The node names `nodes` refer to, aliases resolved, in the order given.
+
+        `KeyError` for an unknown name and `ValueError` when two names refer to the same node.
+        """
+        nodes = list(nodes)
+        resolved = [self._resolve(n) for n in nodes]
         index = self._node_index()
-        missing = [n for n in boundary if n not in index]
+        missing = [n for n in resolved if n not in index]
         if missing:
             raise KeyError(f"unknown boundary nodes {missing}")
-        boundary_set = set(boundary)
+        seen: dict[Node, Node] = {}
+        for label, node in zip(nodes, resolved, strict=True):
+            if node in seen:
+                raise ValueError(
+                    f"{seen[node]!r} and {label!r} are two names of the same node {node!r}; "
+                    "give each node once"
+                )
+            seen[node] = label
+        return resolved
+
+    def interior_index(self, boundary: Sequence[Node]) -> torch.Tensor:
+        """Positions, in node order, of all nodes not listed in `boundary`."""
+        boundary_set = set(self.canonical(boundary))
+        index = self._node_index()
         idx = [index[n] for n in self.graph.nodes if n not in boundary_set]
         return torch.tensor(idx, dtype=torch.long, device=self.device)
 
     def boundary_index(self, boundary: Sequence[Node]) -> torch.Tensor:
         """Positions of `boundary` nodes, in the order given."""
         index = self._node_index()
-        missing = [n for n in boundary if n not in index]
-        if missing:
-            raise KeyError(f"unknown boundary nodes {missing}")
-        return torch.tensor([index[n] for n in boundary], dtype=torch.long, device=self.device)
+        return torch.tensor(
+            [index[n] for n in self.canonical(boundary)], dtype=torch.long, device=self.device
+        )
 
     def node_attr(self, name: str, default: float | None = None) -> torch.Tensor:
         """Node attribute values in node order, as a (n,) tensor.
@@ -159,15 +188,15 @@ class Network:
             raise KeyError(f"node attribute {name!r} missing for nodes {missing}")
         return torch.tensor(values, dtype=self.dtype, device=self.device)
 
-    def component_labels(self, kind: str | None = None) -> torch.Tensor:
-        """Connected-component label (0..components-1) of every node, in node order.
+    def island_labels(self, kind: str | None = None) -> torch.Tensor:
+        """Island label (0..islands-1) of every node, in node order.
 
         With `kind` given, connectivity is restricted to edges of that kind: a node
-        touched by no edge of `kind` gets its own singleton component. Raises
+        touched by no edge of `kind` gets its own singleton island. Raises
         `KeyError` (via `edge_index`) naming the unknown kind if `kind` matches no
         edge.
         """
-        key = ("component_labels", kind)
+        key = ("island_labels", kind)
         if key in self._cache:
             return self._cache[key]
         cols = self.edge_index(kind)
@@ -187,12 +216,12 @@ class Network:
         self._cache[key] = result
         return result
 
-    def n_components_of(self, kind: str | None = None) -> int:
-        """Number of connected components among edges of one kind (or the whole graph).
+    def n_islands_of(self, kind: str | None = None) -> int:
+        """Number of islands among edges of one kind (or the whole graph).
 
-        Does not affect `n_components`, which always describes the whole graph.
+        Does not affect `n_islands`, which always describes the whole graph.
         """
-        labels = self.component_labels(kind)
+        labels = self.island_labels(kind)
         if labels.numel() == 0:
             return 0
         return int(labels.max().item()) + 1

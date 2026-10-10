@@ -419,7 +419,7 @@ class TransportLayer:
         # Metadata only: the units of this layer's nodal sources (W for heat, kg/s for
         # species), of its capacity (J/K, kg, m3) and of the flows it advects on.
         self.source_unit, self.capacity_unit, self.flow_unit = source_unit, capacity_unit, flow_unit
-        self.boundary = list(boundary)
+        self.boundary = net.canonical(boundary)
         self.n_species = n_species
         # Metadata only, like `quantity`/`unit`: the names of the species columns, which
         # `noodl.refs` uses to build and read multi-species tensors by name.

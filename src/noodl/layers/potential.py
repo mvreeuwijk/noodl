@@ -205,8 +205,9 @@ class PotentialFlowLayer:
 
         node_index = {node: i for i, node in enumerate(net.nodes)}
         for b in boundary:
-            if b not in node_index:
+            if net._resolve(b) not in node_index:
                 raise KeyError(f"unknown boundary node {b!r} in layer {name!r}")
+        boundary = net.canonical(boundary)
 
         touched = torch.zeros(net.n, dtype=torch.bool)
         touched[self._src] = True

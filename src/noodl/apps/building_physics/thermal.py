@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import torch
 
 from noodl._broadcast import broadcast_shapes
+from noodl.components import Component
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Drivers, Model, State
@@ -71,19 +72,25 @@ class Zone:
     wall: WallMass | None = None
 
 
-def add_zone(net: Network, zone: Zone, *, ambient="ambient") -> None:
+def add_zone(net: Network | Component, zone: Zone, *, ambient="ambient") -> None:
     """Add the zone's air node (attributes volume, T0, z_ref, heat_capacity=0) and, if it has
     a wall, the wall node (heat_capacity) with 'wall' edges zone -> wall -> ambient (ua).
 
-    The wall's conductances are validated by `WallMass` itself, at construction."""
-    if ambient not in net.nodes:
-        net.add_node(ambient, z_ref=0.0)
+    The wall's conductances are validated by `WallMass` itself, at construction.
+    `net` may be a `Network` or a `noodl.components.Component`; in a component the wall
+    reaches the shared ambient through `outer(ambient)`."""
+    if isinstance(net, Component):
+        amb = net.outer(ambient)  # the building's shared ambient (inner/outer)
+    else:
+        if ambient not in net.nodes:
+            net.add_node(ambient, z_ref=0.0)
+        amb = ambient
     net.add_node(zone.name, volume=zone.volume, T0=zone.T0, z_ref=zone.z_ref, heat_capacity=0.0)
     if zone.wall is not None:
         w = zone.wall
         net.add_node(w.name, volume=0.0, T0=zone.T0, z_ref=zone.z_ref, heat_capacity=w.capacity)
         net.add_edge(zone.name, w.name, kind="wall", ua=w.ua_zone)
-        net.add_edge(w.name, ambient, kind="wall", ua=w.ua_ambient)
+        net.add_edge(w.name, amb, kind="wall", ua=w.ua_ambient)
 
 
 def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",

@@ -1,11 +1,12 @@
 # Concepts
 
-noodl physics is built from five ideas that stack. Each section below is a page; read them in order the
+noodl physics is built from seven ideas that stack. Each section below is a page; read them in order the
 first time.
 
 | Page | What it covers |
 |---|---|
 | [Networks](networks.md) | `Network`: the typed multigraph, its incidence and cycle operators, boundary and interior, batching. |
+| [Components](components.md) | Subnetworks with ports, `connect`, `flatten()` to one network, dotted names, placement, shared nodes, and reading results by component. |
 | [Elements and drives](elements.md) | The constitutive laws on edges, and the driving terms added to potential differences. |
 | [Layers and models](layers.md) | The four ways a flow is determined, the layer types that implement them, and `Model`, which steps several together. |
 | [Using noodl](../usage.md) | The one way every model is used: configure, initialise by name, check, run; the parts every model shares; node orders and the setup report. |

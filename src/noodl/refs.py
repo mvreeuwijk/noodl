@@ -51,6 +51,15 @@ def _closest(label: Hashable, candidates: Sequence[Hashable]) -> list[str]:
     return [repr(by_text[m]) for m in difflib.get_close_matches(str(label), list(by_text), 3, 0.6)]
 
 
+def _node_aliases(net, labels: Sequence[Hashable]) -> dict[Hashable, int]:
+    """`{alias: position}` for the network's node aliases whose node is one of `labels`."""
+    aliases = getattr(net, "aliases", None) or {}
+    if not aliases:
+        return {}
+    position = {label: i for i, label in enumerate(labels)}
+    return {a: position[c] for a, c in aliases.items() if c in position}
+
+
 class Field(str):
     """A state or driver key that also knows the layout of the tensor stored under it.
 
@@ -419,7 +428,7 @@ def input_field(
         return Field(key, axis="instance", labels=(), scalar=True,
                      ordering=ordering or "one value per instance", **common)
     if over == "nodes":
-        return Field(key, axis="node", labels=net.nodes,
+        return Field(key, axis="node", labels=net.nodes, aliases=_node_aliases(net, net.nodes),
                      ordering=ordering or "full node order", **common)
     if isinstance(over, tuple) and len(over) == 2 and over[0] == "edges":
         labels, aliases = _edge_labels(net, net.edge_index(over[1]).tolist())
@@ -504,6 +513,7 @@ class LayerRef:
             meta = dict(quantity=self.quantity, unit=self.unit)
             state["phi"] = Field(
                 f"{name}.phi", role="state", axis="node", labels=nodes,
+                aliases=_node_aliases(net, nodes),
                 ordering="full node order", required="optional", default=None,
                 description="solved potential (a warm start when given)", **meta, **common,
             )
@@ -515,11 +525,13 @@ class LayerRef:
             )
             inputs["phi_boundary"] = Field(
                 f"{name}.phi_boundary", role="driver", axis="node", labels=self.boundary_nodes,
+                aliases=_node_aliases(net, self.boundary_nodes),
                 ordering="boundary order", required="always", default=None,
                 description="prescribed potential at the boundary nodes", **meta, **common,
             )
             inputs["sources"] = Field(
                 f"{name}.sources", role="driver", axis="node", labels=nodes,
+                aliases=_node_aliases(net, nodes),
                 settable=self.interior_nodes, ordering="full node order",
                 required="optional", default=0.0,
                 description="nodal injection (zero on boundary and inactive nodes)",
@@ -534,18 +546,21 @@ class LayerRef:
             meta = dict(quantity=self.quantity, unit=self.unit, n_species=K, species=species)
             state["x"] = Field(
                 f"{name}.x", role="state", axis="node", labels=self.interior_nodes,
+                aliases=_node_aliases(net, self.interior_nodes),
                 ordering="active interior order", required="step", default=None,
                 description="transported state at the active interior nodes", column=True,
                 **meta, **common,
             )
             inputs["x_boundary"] = Field(
                 f"{name}.x_boundary", role="driver", axis="node", labels=self.boundary_nodes,
+                aliases=_node_aliases(net, self.boundary_nodes),
                 ordering="boundary order", required="always", default=None,
                 description="prescribed value at the boundary nodes", column=True,
                 **meta, **common,
             )
             inputs["sources"] = Field(
                 f"{name}.sources", role="driver", axis="node", labels=nodes,
+                aliases=_node_aliases(net, nodes),
                 settable=self.interior_nodes, ordering="full node order",
                 required="optional", default=0.0, n_species=K, species=species,
                 description="nodal source (zero on boundary and inactive nodes)", column=True,
@@ -553,6 +568,7 @@ class LayerRef:
             )
             inputs["capacity"] = Field(
                 f"{name}.capacity", role="driver", axis="node", labels=self.interior_nodes,
+                aliases=_node_aliases(net, self.interior_nodes),
                 ordering="active interior order", required="optional", default=None,
                 description="per-step storage capacity overriding the construction-time one",
                 unit=getattr(layer, "capacity_unit", ""), **common,
@@ -576,6 +592,7 @@ class LayerRef:
             e_labels, e_alias = _edge_labels(net, net.edge_index(layer.kind).tolist())
             state["s"] = Field(
                 f"{name}.s", role="state", axis="node", labels=nodes,
+                aliases=_node_aliases(net, nodes),
                 ordering="full node order", required="step", default=None,
                 description="storage at every node", quantity=self.quantity, unit=self.unit,
                 **common,

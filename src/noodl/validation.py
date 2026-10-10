@@ -180,6 +180,7 @@ def _near_layer(model, prefix: str) -> list[str]:
 def check_setup(
     model, state: Mapping | None = None, drivers: Mapping | None = None, *,
     dt: float | None = None, probe: bool = False, steady: bool = False,
+    names=None,
 ) -> SetupReport:
     """Check `model` and, when given, `state` and `drivers`; return a `SetupReport`.
 
@@ -187,9 +188,19 @@ def check_setup(
     state a time step needs is required. `probe=True` additionally runs one `step` of `dt`
     (or `steady` when `dt` is None) to learn which keys are read; it needs both
     dictionaries, does not modify them, and costs one model step.
+    `names` (a `noodl.components.NameMap`) adds one information line per port no component
+    connected.
     """
     report = SetupReport()
     add = report.issues.append
+    if names is not None:
+        if names.net is not model.net:
+            add(Issue("warning", "names-mismatch",
+                      "names= was flattened into a different Network than this model's"))
+        for port in names.unconnected_ports:
+            add(Issue("info", "unconnected-port",
+                      f"port {port!r} is connected to nothing; it is closed "
+                      f"(no net flow through it)"))
     refs = model.refs
     known = refs.fields()
 

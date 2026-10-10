@@ -79,16 +79,16 @@ class ConstitutiveLayer:
         self.law = law
 
         try:
-            n_components = net.n_components_of(kind)
+            n_islands = net.n_islands_of(kind)
         except KeyError as exc:
             raise ValueError(
                 f"ConstitutiveLayer {name!r}: unknown kind {kind!r}; the network has no "
                 f"edges of that kind"
             ) from exc
-        if n_components != 1:
+        if n_islands != 1:
             raise ValueError(
                 f"ConstitutiveLayer {name!r}: disconnected network under kind {kind!r} "
-                f"({n_components} components); the loop formulation needs every node "
+                f"({n_islands} islands); the loop formulation needs every node "
                 f"reachable from a single ground, so cycle amplitudes and reduced nodal "
                 f"potentials together account for every branch"
             )

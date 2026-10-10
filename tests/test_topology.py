@@ -24,8 +24,8 @@ def test_counts_on_triangle():
     net = triangle()
     assert net.n == 3
     assert net.b == 3
-    assert net.n_components == 1
-    assert net.n_cycles == 1  # b - n + components
+    assert net.n_islands == 1
+    assert net.n_cycles == 1  # b - n + islands
 
 
 def test_incidence_has_plus_one_at_source_and_minus_one_at_target():
@@ -177,7 +177,7 @@ def test_disconnected_graph_has_cycle_count_per_component():
     net.add_edge("c", "a", kind="x")  # component 1: one cycle
     net.add_edge("d", "e", kind="x")
     net.add_edge("e", "f", kind="x")  # component 2: a tree
-    assert net.n_components == 2
+    assert net.n_islands == 2
     assert net.n_cycles == 1
     J = net.cycle_basis()
     assert J.shape == (1, 5)
@@ -303,14 +303,14 @@ def test_boundary_index_raises_for_unknown_node():
         net.boundary_index(["z"])
 
 
-def test_component_labels_same_label_within_a_component():
+def test_island_labels_same_label_within_a_component():
     net = triangle()
-    labels = net.component_labels()
+    labels = net.island_labels()
     assert labels.shape == (3,)
     assert labels[0] == labels[1] == labels[2]
 
 
-def test_component_labels_different_labels_across_components():
+def test_island_labels_different_labels_across_components():
     net = Network()
     for name in "abcdef":
         net.add_node(name)
@@ -319,14 +319,14 @@ def test_component_labels_different_labels_across_components():
     net.add_edge("c", "a", kind="x")
     net.add_edge("d", "e", kind="x")
     net.add_edge("e", "f", kind="x")
-    labels = net.component_labels()
+    labels = net.island_labels()
     assert labels[0] == labels[1] == labels[2]
     assert labels[3] == labels[4] == labels[5]
     assert labels[0] != labels[3]
     assert set(labels.tolist()) == {0, 1}
 
 
-def test_component_labels_kind_restricted_can_have_more_components_than_whole_graph():
+def test_island_labels_kind_restricted_can_have_more_islands_than_whole_graph():
     """a-b and c-d are disconnected in the airpath subgraph but bridged by hydronic."""
     net = Network(dtype=torch.float64)
     for name in ("a", "b", "c", "d"):
@@ -334,30 +334,30 @@ def test_component_labels_kind_restricted_can_have_more_components_than_whole_gr
     net.add_edge("a", "b", kind="airpath")
     net.add_edge("c", "d", kind="airpath")
     net.add_edge("b", "c", kind="hydronic")
-    labels_air = net.component_labels(kind="airpath")
-    labels_all = net.component_labels()
+    labels_air = net.island_labels(kind="airpath")
+    labels_all = net.island_labels()
     assert labels_all[0] == labels_all[1] == labels_all[2] == labels_all[3]
     assert labels_air[0] == labels_air[1]
     assert labels_air[2] == labels_air[3]
     assert labels_air[0] != labels_air[2]
 
 
-def test_n_components_of_is_kind_aware_and_leaves_n_components_property_unchanged():
+def test_n_islands_of_is_kind_aware_and_leaves_n_islands_property_unchanged():
     net = Network(dtype=torch.float64)
     for name in ("a", "b", "c", "d"):
         net.add_node(name)
     net.add_edge("a", "b", kind="airpath")
     net.add_edge("c", "d", kind="airpath")
     net.add_edge("b", "c", kind="hydronic")
-    assert net.n_components_of("airpath") == 2
-    assert net.n_components_of() == 1
-    assert net.n_components == 1
+    assert net.n_islands_of("airpath") == 2
+    assert net.n_islands_of() == 1
+    assert net.n_islands == 1
 
 
-def test_component_labels_raises_keyerror_for_unknown_kind():
+def test_island_labels_raises_keyerror_for_unknown_kind():
     net = triangle()
     with pytest.raises(KeyError, match="airpaths"):
-        net.component_labels("airpaths")
+        net.island_labels("airpaths")
 
 
 def test_source_and_target_selector_are_onehot_and_kind_filtered():
@@ -461,12 +461,12 @@ def test_cycle_basis_matches_spanning_forest_tree_edges():
     extra=st.integers(min_value=0, max_value=10),
     seed=st.integers(min_value=0, max_value=10_000),
 )
-def test_incidence_tree_columns_has_rank_n_minus_components(n, extra, seed):
+def test_incidence_tree_columns_has_rank_n_minus_islands(n, extra, seed):
     net = _random_connected_multigraph(n, extra, seed)
     tree_cols, chord_cols = net.spanning_forest()
     A = net.incidence()
     assert tree_cols.numel() + chord_cols.numel() == net.b
-    assert torch.linalg.matrix_rank(A[:, tree_cols]) == net.n - net.n_components
+    assert torch.linalg.matrix_rank(A[:, tree_cols]) == net.n - net.n_islands
 
 
 @settings(max_examples=30, deadline=None)
@@ -559,3 +559,13 @@ def test_with_ambient_preserves_dtype_and_device():
     amb = net.with_ambient()
     assert amb.dtype == torch.float64
     assert amb.device == torch.device("meta")
+
+
+def test_island_names_replace_component_names():
+    net = triangle()
+    assert net.n_islands == 1
+    assert net.n_islands_of("airpath") == 1
+    assert net.island_labels().tolist() == [0, 0, 0]
+    old_names = ("component" + "_labels", "n_" + "components", "n_" + "components_of")
+    for old in old_names:
+        assert not hasattr(Network, old), old

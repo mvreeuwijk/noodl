@@ -86,6 +86,58 @@ are listed with their units under [Network attributes](../catalogue/building_phy
 Models can also be read from CONTAM `.prj`/`.wth` files or from a Modelica Buildings Library
 export — see [File formats](../formats/index.md).
 
+## Building from components
+
+A larger building is easier to assemble from parts than to write out node by node. The
+functions below return components (see [Components](../concepts/components.md)): you place
+them, connect their ports, and `flatten()` gives the same `Network` you would have built by
+hand, ready for `build_model`.
+
+| Factory | Parameters | Ports |
+|---|---|---|
+| `room(name, ...)` | `volume` (m3), `T0` (K), `z_ref` (m), `wall` (a `WallMass`, optional) | `air` |
+| `door(name, ...)` | `H`, `W` (m), `z_mid` (m, relative to the placement), `Cd` | `a`, `b` |
+| `crack(name, ...)` | `area` (m2), `z_path` (m), `Cd`, `exterior` (default `False`), wind: `azimuth` or `facade`, `Cp`, `Ch`, `profile` | `a`, `b`; only `a` if exterior |
+| `window(name, ...)` | as `crack`, but `exterior` defaults to `True` | `a` (and `b` with `exterior=False`) |
+| `shaft(name, ...)` | `levels`, `level_height` (m), `volume` (m3 per level), `area` (m2 of each slab opening), `T0`, `Cd` | `levels[0]`, `levels[1]`, ... |
+
+A `door` has two edges, `low` and `high`, as `add_large_opening` does. An exterior `crack` or
+`window` has one edge, `path`, from the shared `ambient` node, so the building must declare
+`inner("ambient", ...)`. A `shaft` is a stack of zones, one per level, joined by openings
+`slab[i]` (how stairwells are usually represented in multizone models). A door's or window's height is
+relative to the component's placement, so the same factory call serves every floor.
+
+A stairwell serving two flats, one per floor. A door joins each shaft level to its flat:
+connecting `stair.levels[i]` straight to `flat.air` would merge two real nodes, which
+`flatten` refuses (see [Ports and connect](../concepts/components.md#ports-and-connect)).
+
+
+```python
+from noodl.apps.building_physics import door, room, shaft, window
+from noodl.components import Component
+
+block = Component("block")
+block.inner("ambient", z_ref=0.0, T0=283.15)
+stair = block.add(shaft("stair", levels=2, level_height=3.0, volume=30.0, area=0.5))
+for i in range(2):
+    at = (0.0, 0.0, 3.0 * i)
+    flat = block.add(room(f"flat{i}", volume=60.0), at=at)
+    d = block.add(door(f"door{i}", H=2.0, W=0.9, z_mid=1.0), at=at)
+    win = block.add(window(f"win{i}", area=0.02, z_path=1.5, azimuth=180.0), at=at)
+    block.connect(stair.ports[f"levels[{i}]"], d.ports.a)
+    block.connect(d.ports.b, flat.ports.air)
+    block.connect(win.ports.a, flat.ports.air)
+block_net, block_names = block.flatten(dtype=F64)
+print(block_net.nodes)
+```
+
+```text
+['ambient', 'stair.levels[0]', 'stair.levels[1]', 'flat0.air', 'flat1.air']
+```
+
+The second flat, its door and its window are placed at `z = 3`, so their heights come out
+right without being repeated in the factory calls.
+
 ## The API
 
 ### Zones and walls
