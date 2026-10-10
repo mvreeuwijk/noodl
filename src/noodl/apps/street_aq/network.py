@@ -32,7 +32,11 @@ in this repository, so no tensor here may be built without an explicit dtype."""
 
 @dataclass(frozen=True)
 class Street:
-    """One street segment. `u` and `v` are junction names; the azimuth points `u -> v`."""
+    """One street segment between junctions `u` and `v` (the azimuth points `u -> v`): its
+    `length`, `width` and building `height` (m), the roughness length of its building walls
+    `z0_b` (m, 0.15 by default) and `emission_scale`, a dimensionless factor applied to its
+    emissions.
+    """
 
     name: str
     u: str

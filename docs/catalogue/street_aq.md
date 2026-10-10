@@ -51,7 +51,7 @@ Descriptions of the physical objects a network is built from.
 | Name | What it does | How to call it |
 |---|---|---|
 | `PlumeTable` | One plume trajectory per hour, resampled onto a distance grid (`plume_table`). | `PlumeTable(batch, sigma_y, p_z, u, step, x_max)` |
-| `Street` | One street segment. `u` and `v` are junction names; the azimuth points `u -> v`. | `Street(name, u, v, length, width, height, z0_b=0.15, emission_scale=1.0)` |
+| `Street` | One street segment between junctions `u` and `v` (the azimuth points `u -> v`): its `length`, `width` and building `height` (m), the roughness length of its building walls `z0_b` (m, 0.15 by default) and `emission_scale`, a dimensionless factor applied to its emissions. | `Street(name, u, v, length, width, height, z0_b=0.15, emission_scale=1.0)` |
 | `StreetCase` | One street-network case: the network plus every array a `Model` built on it needs to run, independent of which source model (`source`) it came from. | `StreetCase(source, network, times, street_ids, junction_ids, species, meteo, meteo_junction, emissions, background, native, start=None)` |
 | `StreetResults` | One street model's own results, read format-neutral by `read_results` from a SIRANE result directory or a MUNICH `results/` directory. | `StreetResults(source, times, street_ids, species, c_in, c_above, u_canyon, sigma_w_roof, u_exchange, meteo)` |
 | `StreetGeometry` | Everything `StreetFlows` needs about the streets, as plain tensors. | `StreetGeometry(names, u, v, length, width, height, z0_b, azimuth)` |

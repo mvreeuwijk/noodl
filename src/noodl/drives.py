@@ -112,6 +112,11 @@ class Stack:
         rho_key: str = "rho",
         g: float = 9.80665,
     ) -> Stack:
+        """Build from the network: `z_path` is the edge attribute holding each opening's height
+        (m) and `z_ref` the node attribute holding each node's reference height (m, 0 where
+        absent); densities are read at run time from `drivers[rho_key]` (kg/m3, full node
+        order).
+        """
         src, tgt = net.endpoints(kind)
         return cls(
             kind,
@@ -179,7 +184,9 @@ class WindProfile:
 
 
 class Wind:
-    """Wind pressure on envelope paths (CONTAM TN 1887r1 section 3.15):
+    """Wind pressure on envelope paths (CONTAM TN 1887r1 section 3.15). Drivers: `rho_amb` in
+    kg/m3, `V_met` in m/s and `theta_w` in the unit the `azimuth` edge attribute uses
+    (degrees for networks read from CONTAM):
 
         value_e = sign_e * envelope_e * 0.5 * rho_amb * V_met^2 * Ch_e * Cp_e(theta_w - az_e)
 

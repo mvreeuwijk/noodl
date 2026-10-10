@@ -38,3 +38,24 @@ def test_every_catalogue_page_is_in_the_navigation():
     nav = (ROOT / "mkdocs.yml").read_text(encoding="utf-8")
     missing = [p.name for p in gen.generate() if f"catalogue/{p.name}" not in nav]
     assert missing == []
+
+
+def test_components_elements_and_drives_state_their_units():
+    """A user must learn the unit of every coefficient from help()/the catalogue."""
+    import inspect
+
+    from noodl.apps.street_aq import Street
+    from noodl.drives import Stack, Wind
+    from noodl.elements import Conductance, Damper, Duct, FanCurve, Orifice, PowerLaw, Quadratic
+
+    first = lambda o: (inspect.getdoc(o) or "").split("\n\n")[0]  # noqa: E731
+    assert "(m)" in first(Street) and "z0_b" in first(Street)
+    assert "Pa" in first(PowerLaw) and "flow unit" in first(PowerLaw)
+    assert "m2" in first(Orifice)
+    assert "per Pa" in first(Conductance)
+    assert "Pa" in first(FanCurve) and "q_max" in first(FanCurve)
+    assert "Pa" in first(Quadratic)
+    assert "Pa" in first(Damper)
+    assert "(m)" in first(Duct)
+    assert inspect.getdoc(Stack.from_network) and "z_path" in inspect.getdoc(Stack.from_network)
+    assert "m/s" in first(Wind)

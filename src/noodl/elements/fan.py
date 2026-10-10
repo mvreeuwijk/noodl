@@ -48,7 +48,10 @@ def _fan_residual(q: Tensor, dp: Tensor, coeffs: Tensor) -> Tensor:
 
 
 class FanCurve(Element):
-    """Cubic pressure-flow curve inverted for q given dp on [0, q_max]."""
+    """Cubic pressure-flow curve inverted for q given dp on [0, q_max]: `coeffs` are
+    (a0, a1, a2, a3) of P(q) = a0 + a1 q + a2 q^2 + a3 q^3 in Pa for q in the flow unit, and
+    `q_max` is the largest flow the curve covers, in that unit.
+    """
 
     def __init__(self, coeffs, q_max, *, kind: str = "airpath", learnable: bool = False) -> None:
         super().__init__(kind)

@@ -45,6 +45,9 @@ _C = 2.0 * math.log10(math.e)
 
 class Duct(Element):
     """Colebrook duct: F(dp) with friction from the Colebrook equation, laminar below Re_t.
+    Length `L`, diameter `D` and roughness `eps` (m); `sum_C` the dimensionless sum of dynamic
+    loss coefficients; `A` (m2) defaults to the circular area; `rho` (kg/m3) and `mu` (Pa s);
+    the flow is a mass flow in kg/s.
 
     KNOWN DISCONTINUITY at |dp| = dp_t, of size ~1e-6 to ~1e-4 RELATIVE at the default
     `n_iter=4`. `flow()` is not continuous there, and this is a property of the flow law

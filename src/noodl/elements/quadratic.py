@@ -10,9 +10,8 @@ Tensor = torch.Tensor
 
 
 class Quadratic(Element):
-    """q = sign(dp) * 2|dp| / (sqrt(a^2 + 4 b |dp|) + a).
-
-    Inverts the quadratic-drag law dp = a q + b |q| q.
+    """q = sign(dp) * 2|dp| / (sqrt(a^2 + 4 b |dp|) + a): the inverse of dp = a q + b |q| q, with
+    `dp` in Pa, `a` in Pa per flow unit and `b` in Pa per flow unit squared.
 
     Precondition: a > 0 and b > 0. Violations produce nan in both forward and backward:
     with a = 0 and dp = 0, the conjugate form evaluates to 0 / 0 = nan in the forward pass.

@@ -38,7 +38,11 @@ Tensor = torch.Tensor
 
 
 class PowerLaw(Element):
-    """q = C sign(dp) |dp|^n, laminar-blended or smoothly regularised near dp = 0."""
+    """q = C sign(dp) |dp|^n, laminar-blended or smoothly regularised near dp = 0. `dp` is in
+    Pa; `C` is in the flow unit per Pa^n (kg/s for a mass-flow coefficient, m3/s for a
+    volume-flow one), so the flow comes out in whatever unit `C` carries; `n` is
+    dimensionless (0.5 for an orifice, towards 1 for a laminar crack).
+    """
 
     def __init__(
         self,
@@ -110,7 +114,9 @@ def Orifice(
     kind: str = "airpath",
     learnable: bool = False,
 ) -> PowerLaw:
-    """PowerLaw(C = Cd * A * sqrt(2 / rho), n = 0.5): the sharp-edged orifice equation.
+    """PowerLaw(C = Cd * A * sqrt(2 / rho), n = 0.5): the sharp-edged orifice equation, as a
+    VOLUME flow in m3/s from `Cd` (dimensionless discharge coefficient), `A` (m2) and
+    `rho` (kg/m3).
 
     `Cd`/`A` given as a `torch.Tensor` keep THEIR OWN dtype -- a caller building a
     float64 network is not silently downcast to `torch.get_default_dtype()` (float32 in
