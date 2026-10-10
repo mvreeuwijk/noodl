@@ -316,7 +316,7 @@ Non-SWMM checks, for the physics SWMM does not model:
 | Pescod & Price Tyneside ventilation band (105–315 m³/h) | bracketed; open-both-ends gives 1253.78 m³/h, a 17.27% velocity ratio, inside their 5–30% envelope |
 | Fan draws exactly through the leaks | balance 1.234e-14, nodal residual 6.3e-15, power residual 8.1e-13 |
 | Transfer-dominated state reaches Henry equilibrium | rel 1e-10, **measured 1.4e-16** |
-| Air-layer nodal residual, and Tellegen power balance | 4.518e-13 kg/s, 6.141e-12 W |
+| Air-layer nodal residual, and Tellegen power balance | 4.518e-13 m3/s, 6.141e-12 W |
 | Cross-phase sulfide conservation | rtol 1e-12 |
 | Adjoint gradients vs Richardson-extrapolated central differences | rel 1e-6, holds |
 | Storage sweep vs the closed-form steady state | **5.7e-15** on flows, **4.4e-15** on depths |

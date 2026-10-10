@@ -270,6 +270,12 @@ class PotentialFlowLayer:
                 )
             self._source_positions.append(pos)
 
+    @property
+    def node_sources(self) -> tuple:
+        """The `NodeSource` objects this layer evaluates at its interior nodes, in the order
+        given at construction (read-only)."""
+        return tuple(self._node_sources)
+
     # ------------------------------------------------------- dense references (lazy)
     @functools.cached_property
     def A(self) -> torch.Tensor:

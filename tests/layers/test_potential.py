@@ -1054,3 +1054,11 @@ def test_node_sources_default_to_empty_and_change_nothing():
         atol=1e-13, rtol=1e-13,
     )
     assert float(phi[0]) == pytest.approx(10.0 - (0.01 / 0.05) ** (1.0 / 0.54), rel=1e-9)
+
+
+def test_node_sources_are_exposed_read_only_as_a_tuple():
+    net, layer, source = _emitter_layer()
+    assert layer.node_sources == (source,)
+    assert isinstance(layer.node_sources, tuple)
+    bare = PotentialFlowLayer(net, "bare", [_pipe_law()], boundary=["R"], linear_solver="direct")
+    assert bare.node_sources == ()

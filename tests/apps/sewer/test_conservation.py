@@ -13,12 +13,12 @@ def test_the_air_layer_balances_at_its_solution():
     Measured 6.3e-15 / 8.1e-13 with the headspace stack
     path at the mean invert; with the path at the pipe CROWN the stack head
     is larger and, with the leak's `Orifice`-built `C` in float32 (the repository's
-    default dtype), the measured residual was 1.352e-12 kg/s / power 1.855e-11 W -- an
+    default dtype), the measured residual was 1.352e-12 m3/s / power 1.855e-11 W -- an
     ARITHMETIC floor, not a stopping criterion (Newton asked for atol = 1e-14 stalls at
     exactly that value). That floor is MOSTLY the float32 leak coefficient: with
     the leak's `PowerLaw` built directly in float64 (never through `Orifice`, which casts
     with `torch.get_default_dtype()` regardless of its inputs' own dtype), the measured
-    figures drop by almost three orders of magnitude to residual 4.518e-13 kg/s / power
+    figures drop by almost three orders of magnitude to residual 4.518e-13 m3/s / power
     6.141e-12 W. The tolerances (1e-11 on the residual, 1e-10 on the power
     identity) clear both float64 figures comfortably, with considerably more margin than
     the float32 ones."""
