@@ -179,6 +179,22 @@ class Photostationary(Reaction):
                 )
         return t
 
+    @property
+    def input_specs(self) -> dict[str, dict]:
+        """The drivers this reaction reads, declared for `model.refs.inputs` and
+        `Model.check` (each broadcasts against the state's batch dimensions)."""
+        return {
+            self.j_key: dict(description="NO2 photolysis rate", unit="1/s"),
+            self.temperature_key: dict(
+                description="air temperature (absolute)" + (
+                    "" if self.k_molar is None else
+                    "; needed only without the molar-volume driver"),
+                unit="K", required=self.k_molar is None),
+            self.molar_volume_key: dict(description="molar volume of air (default: "
+                                                    "from the temperature at 101325 Pa)",
+                                        unit="m3/mol", required=False),
+        }
+
     def apply(
         self,
         x: torch.Tensor,

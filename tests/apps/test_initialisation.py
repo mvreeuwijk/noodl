@@ -185,3 +185,27 @@ def test_the_static_check_is_clean_on_a_stock_street_model():
     report = model.check(state, drivers)
     assert report.ok and not report.warnings, str(report)
     assert "street.q" in report.closure_outputs
+
+
+def test_the_building_builder_can_return_the_same_triple_as_the_others():
+    from noodl.apps import building_physics as bp
+    from noodl.apps.building_physics.elements import orifice_elements_from_edges
+    from noodl.drives import Stack
+    from noodl.topology import Network
+
+    def network():
+        net = Network(dtype=F64)
+        net.add_node("ambient", z_ref=0.0)
+        bp.add_zone(net, bp.Zone("A", volume=60.0, T0=290.0))
+        net.add_edge("ambient", "A", kind="airpath", z_path=0.5, Cd=0.6, area=0.05)
+        net.add_edge("A", "ambient", kind="airpath", z_path=2.0, Cd=0.6, area=0.05)
+        return net
+
+    net = network()
+    kw = dict(air_elements=[orifice_elements_from_edges(net, "airpath")],
+              drives=[Stack.from_network(net, "airpath")])
+    model, state, drivers = bp.build_model(net, return_inputs=True, **kw)
+    assert set(state) == set(bp.initial_state(model))
+    assert set(drivers) == set(bp.initial_drivers(model))
+    assert model.check(state, drivers).ok
+    assert not isinstance(bp.build_model(network(), **kw), tuple)   # default unchanged

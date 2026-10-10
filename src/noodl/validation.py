@@ -285,7 +285,10 @@ def check_setup(
                 if key in produced:
                     status = "from closure"
                 elif (f.role == "driver" and model.closures and not report.probed
-                      and not all_declared):
+                      and not all_declared and key not in refs.inputs):
+                    # (A declared input is read by the very closure, reaction, element or
+                    # drive that declares it: nothing else will write it, so its absence is
+                    # an error without a probe.)
                     status = "missing?"
                     add(Issue("warning", "missing-input",
                               f"{key!r} ({f.description}, {f.ordering}) is required and "

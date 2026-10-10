@@ -32,7 +32,7 @@ for t in times:
 
 | Application | Configure | Layers (`model.refs.<name>`) and their keys | Also give |
 |---|---|---|---|
-| [Building physics](applications/building_physics.md) | `model = build_model(net, ...)` | `air`: `pressure`, `flow`; `thermal`: `temperature`; `species`: `mass_fraction` | nothing else (`P_ref` optional) |
+| [Building physics](applications/building_physics.md) | `model, state, drivers = build_model(net, ..., return_inputs=True)` (or just `model = build_model(net, ...)`) | `air`: `pressure`, `flow`; `thermal`: `temperature`; `species`: `mass_fraction` | nothing else (`P_ref` optional) |
 | CONTAM `.prj` | `model, state, drivers = project_to_model(read_prj(path))` | `air`: `pressure`, `flow`; `species`: `mass_fraction` | wind and densities are in the returned drivers |
 | [Street air quality](applications/street_aq.md) | `model, state, drivers = build_model(streets, ...)` | `street`: `concentration`, `flow` | the meteorology: `U_ref`, `theta_w`, `h_abl` (and `lmo`) |
 | [Sewers (SWMM)](applications/sewer.md) | `model, state, drivers = build_model(sewer_net, ...)` | `air`: `pressure`; `water_quality`, `air_quality`: `concentration` | inflows and temperatures are in the returned drivers |
@@ -225,12 +225,30 @@ reports:
 - A table of every key the model knows: role, required or optional, order, expected
   shape, unit, and what was given.
 
-Keys the model does not know the layout of — a closure's own inputs, such as a wind speed
--- are **not** rejected. `model.check(state, drivers, dt=600.0, probe=True)` runs one step
-on copies, recording which keys the closures, layers, elements and drives read, and reports
-any key nothing read. Without a probe the check evaluates the closures once (no solve, no
-time step) to learn what they write, so an input a closure provides is not reported
-missing.
+The inputs the closures, reactions, elements and drives read themselves are declared too,
+in `model.refs.inputs`: the street model's wind speed, direction and boundary-layer depth
+(one value per instance, or one per street with `meteo="per_street"`), the sewer's inflow
+per manhole and its temperatures, CONTAM's node densities and wind, the chemistry's
+photolysis rate. Each knows its unit and layout, so the check reports a missing required
+one, or one of the wrong shape, before the run, and `model.refs.describe()` lists them:
+
+```python
+print(model.refs.inputs["P_ref"].describe())
+```
+
+```text
+'P_ref' (driver, optional): reference pressure of the ideal-gas density (default 101325 Pa)
+  one value per instance
+  quantity: ? [Pa]
+```
+
+A key the model knows nothing about — a custom closure's own input — is **not** rejected.
+`model.check(state, drivers, dt=600.0, probe=True)` runs one step on copies, recording
+which keys the closures, layers, elements and drives read, and reports any key nothing
+read. Without a probe the check evaluates the closures once (no solve, no time step) to
+learn what they write, so an input a closure provides is not reported missing. A custom
+closure can declare its own inputs with an `input_specs` attribute,
+`{key: {"description", "unit", "over", "required"}}` (see `noodl.refs.input_field`).
 
 ```python
 drivers_typo = dict(drivers)

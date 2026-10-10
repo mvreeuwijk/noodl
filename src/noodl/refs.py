@@ -84,9 +84,12 @@ class Field(str):
         unit: str = "", required: str = "optional", default: float | None = 0.0,
         description: str = "", dtype: torch.dtype = torch.float64,
         device: torch.device | str = "cpu", aliases: Mapping[Hashable, int] | None = None,
-        column: bool = False,
+        column: bool = False, scalar: bool = False,
     ) -> Field:
         self = super().__new__(cls, key)
+        # One value per instance (a wind speed, a water temperature): no indexed axis, so
+        # the whole tensor is batch shape. Built as a plain tensor, never by label.
+        self.scalar = bool(scalar)
         # Whether the layer also accepts a single-species tensor as an `(n, 1)` column
         # (`TransportLayer._to_stacked`); `build` still returns the `(n,)` layout.
         self.column = bool(column) and int(n_species) == 1
@@ -136,7 +139,10 @@ class Field(str):
 
     @property
     def trailing(self) -> tuple[int, ...]:
-        """The trailing shape after any batch dimensions: `(n,)` or `(n, K)`."""
+        """The trailing shape after any batch dimensions: `(n,)`, `(n, K)`, or `()` for a
+        per-instance value."""
+        if self.scalar:
+            return ()
         n = len(self.labels)
         return (n,) if self.n_species == 1 else (n, self.n_species)
 
@@ -152,6 +158,7 @@ class Field(str):
         name = f"{self.layer}.{self.attribute} = " if self.attribute and self.layer else ""
         lines = [
             f"{name}{str(self)!r} ({self.role}, {self.required}): {self.description}",
+            f"  {self.ordering}" if self.scalar else
             f"  {self.ordering}, trailing shape {self.trailing}: [{shown}]",
         ]
         if self.species:
@@ -212,6 +219,11 @@ class Field(str):
         there is neither a base nor a default, and `ValueError` for a label that may not
         carry a value here.
         """
+        if self.scalar:
+            raise TypeError(
+                f"{str(self)!r} is one value per instance ({self.description}); give it as a "
+                f"number or a batch-shaped tensor, not a mapping of labels"
+            )
         if not isinstance(values, Mapping):
             raise TypeError(
                 f"{str(self)!r}: build() takes a mapping {{label: value}}, got "
@@ -350,7 +362,10 @@ class Field(str):
         """How many trailing dimensions of `tensor` are this field's layout; the rest are
         batch. 1 for `(n,)`, 2 for `(n, K)`, and 2 for a single-species `(n, 1)` column
         where the layer accepts one -- tested first, in the order
-        `TransportLayer._to_stacked` tests them. Raises `ValueError` otherwise."""
+        `TransportLayer._to_stacked` tests them; 0 for a per-instance value, whose whole
+        shape is batch. Raises `ValueError` otherwise."""
+        if self.scalar and isinstance(tensor, Tensor):
+            return 0
         n = len(self.labels)
         if isinstance(tensor, Tensor):
             shape = tuple(tensor.shape)
@@ -377,8 +392,57 @@ class Field(str):
 
     def named(self, tensor: Tensor) -> dict[Hashable, Tensor]:
         """`{label: tensor[..., i]}` (or `[..., i, :]` for several species), in field order."""
+        if self.scalar:
+            raise TypeError(f"{str(self)!r} is one value per instance; it has no labels")
         self.check(tensor)
         return {label: self._column(tensor, i) for i, label in enumerate(self.labels)}
+
+
+def input_field(
+    model: Model, key: str, *, description: str, unit: str = "", over=None,
+    required: bool = True, ordering: str | None = None,
+) -> Field:
+    """A `Field` for an input a closure, reaction, element or drive reads itself (a wind
+    speed, an inflow), as a closure's `input_specs` or a builder's `model.input_specs`
+    declares it.
+
+    `over` is the layout: `None` for one value per instance; `"nodes"` for one per node
+    in full node order; `("edges", kind)` for one per edge of `kind`; or a sequence of
+    labels, in tensor order, for anything else (streets, junctions, manholes). `required`
+    says whether a run needs it.
+    """
+    net = model.net
+    common = dict(role="driver", layer=None, description=description, unit=unit,
+                  required="always" if required else "optional", default=None,
+                  dtype=net.dtype, device=net.device)
+    if over is None:
+        return Field(key, axis="instance", labels=(), scalar=True,
+                     ordering=ordering or "one value per instance", **common)
+    if over == "nodes":
+        return Field(key, axis="node", labels=net.nodes,
+                     ordering=ordering or "full node order", **common)
+    if isinstance(over, tuple) and len(over) == 2 and over[0] == "edges":
+        labels, aliases = _edge_labels(net, net.edge_index(over[1]).tolist())
+        return Field(key, axis="edge", labels=labels, aliases=aliases,
+                     ordering=ordering or f"edge order of kind {over[1]!r}", **common)
+    labels = list(over)
+    return Field(key, axis="label", labels=labels,
+                 ordering=ordering or f"order of its {len(labels)} labels", **common)
+
+
+def _declared_inputs(model: Model) -> dict[str, Field]:
+    """The inputs `model.input_specs` and its closures' and reactions' `input_specs`
+    declare, as Fields. A spec is `{key: {"description", "unit", "over", "required",
+    "ordering"}}` (all but `description` optional), or `{key: Field}` already built."""
+    sources = [getattr(model, "input_specs", None) or {}]
+    sources += [getattr(c, "input_specs", None) or {} for c in model.closures]
+    sources += [getattr(r, "input_specs", None) or {} for _, r in model.reactions]
+    out: dict[str, Field] = {}
+    for specs in sources:
+        for key, spec in dict(specs).items():
+            out[str(key)] = spec if isinstance(spec, Field) else input_field(
+                model, str(key), **dict(spec))
+    return out
 
 
 def _edge_labels(net, cols: Sequence[int]) -> tuple[list[Hashable], dict[Hashable, int]]:
@@ -597,6 +661,9 @@ class LayerRefs(Mapping[str, LayerRef]):
     Item access works for every name; attribute access for names that are identifiers.
     `closure_state` maps each closure-carried state key to a `Field` when its closure
     declares the labels (a `key_labels` attribute, `{key: labels}`), else to the plain key.
+    `inputs` maps each input a closure, reaction, element or drive reads itself -- a wind
+    speed, an inflow, a photolysis rate -- to its `Field`, as the closure's or reaction's
+    `input_specs`, or the builder's `model.input_specs`, declares it (`input_field`).
     """
 
     def __init__(self, model: Model) -> None:
@@ -623,6 +690,7 @@ class LayerRefs(Mapping[str, LayerRef]):
                     dtype=net.dtype, device=net.device,
                 )
         self.closure_state = closure_state
+        self.inputs = _declared_inputs(model)
 
     def __getitem__(self, name: str) -> LayerRef:
         try:
@@ -656,12 +724,15 @@ class LayerRefs(Mapping[str, LayerRef]):
         return "LayerRefs(" + ", ".join(repr(r) for r in self._refs.values()) + ")"
 
     def fields(self) -> dict[str, Field | str]:
-        """Every key this model knows the layout of: layer keys and closure-carried keys."""
+        """Every key this model knows the layout of: layer keys, closure-carried keys and
+        the declared inputs of its closures, reactions, elements and drives."""
         out: dict[str, Field | str] = {}
         for ref in self._refs.values():
             for f in ref.fields.values():
                 out[str(f)] = f
         out.update(self.closure_state)
+        for key, f in self.inputs.items():
+            out.setdefault(key, f)
         return out
 
     def field(self, key: str) -> Field | None:
@@ -674,6 +745,9 @@ class LayerRefs(Mapping[str, LayerRef]):
         parts = [r.describe() for r in self._refs.values()]
         for key, f in self.closure_state.items():
             parts.append(f.describe() if isinstance(f, Field) else f"{key!r} (closure state)")
+        if self.inputs:
+            parts.append("Inputs read by the closures, reactions, elements and drives:\n"
+                         + "\n".join(f.describe() for f in self.inputs.values()))
         return "\n\n".join(parts)
 
 
