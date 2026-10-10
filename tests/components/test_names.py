@@ -146,3 +146,9 @@ def test_port_used_as_edge_endpoint_counts_as_connected():
     b.add_edge(r.ports.air, "n", kind="airpath")
     _, names = b.flatten()
     assert names.unconnected_ports == []
+
+
+def test_boundary_flows_rejects_a_wrong_length():
+    _, names = floor_plan()
+    with pytest.raises(ValueError, match=r"edge order of kind 'airpath'"):
+        names.boundary_flows("f", "airpath", torch.zeros(2, 4, dtype=F64))

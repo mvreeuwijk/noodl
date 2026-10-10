@@ -342,3 +342,35 @@ def test_representative_prefers_the_shallower_terminal_over_an_earlier_deeper_on
     net, _ = b.flatten(dtype=F64)
     assert net.aliases["f.l1.b"] == "g.t"
     assert "g.t" in net.nodes and "f.l1.b" not in net.nodes
+
+
+def test_terminal_that_is_not_a_port_is_an_error():
+    b = Component("b")
+    b.add_terminal("u")
+    b.add_terminal("j")
+    A = b.add(zone("A", volume=1.0))
+    B = b.add(zone("B", volume=1.0))
+    b.connect("u", A.ports.air)
+    b.add_terminal("v")
+    b.connect("v", B.ports.air)
+    b.add_edge("u", "j", kind="airpath", name="e0")
+    b.add_edge("j", "v", kind="airpath", name="e1")
+    with pytest.raises(ComponentError, match=r"terminal 'j' is not a port.*add_node"):
+        b.flatten()
+
+
+def test_closed_door_stays_silent_and_is_listed():
+    b = Component("b")
+    A = b.add(zone("A", volume=1.0))
+    d = b.add(link("d"))
+    b.connect(A.ports.air, d.ports.a)
+    net, names = b.flatten()
+    assert net.nodes == ["A.air"]
+    assert names.unconnected_ports == ["d.b"]
+
+
+def test_user_position_attribute_is_an_error():
+    b = Component("b")
+    b.add_node("n", position=(1, 2, 3))
+    with pytest.raises(ComponentError, match=r"'position' is set by flatten.*'n'"):
+        b.flatten()

@@ -93,6 +93,13 @@ class NameMap:
         The flows a surrogate of the subtree would have to reproduce."""
         b = self.boundary_edges(path, kind)
         flows = torch.as_tensor(flows)
+        n = len(self.net.edge_index(kind))
+        if flows.ndim == 0 or flows.shape[-1] != n:
+            raise ValueError(
+                f"flows has shape {tuple(flows.shape)}, but the network has {n} edges of kind "
+                f"{kind!r}; the last dimension must run over them in the edge order of kind "
+                f"{kind!r}"
+            )
         return (flows[..., b.positions] * b.sign.to(flows.dtype)).sum(-1)
 
     def tree(self) -> dict:

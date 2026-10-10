@@ -173,9 +173,13 @@ def test_add_returns_the_child_and_lists_it():
     r = zone("r")
     assert f.add(r, at=(1, 2, 3)) is r
     assert f.children == {"r": r}
+    assert f._children["r"][1] == (1.0, 2.0, 3.0)
 
 
-@pytest.mark.parametrize("at", [(1.0, 2.0), (1, 2, 3, 4), "abc"])
+@pytest.mark.parametrize("at", [
+    (1.0, 2.0), (1, 2, 3, 4), "abc", ("1", "2", "3"), (float("nan"), 0, 0),
+    (0, float("inf"), 0), (True, 0, 0), 5,
+])
 def test_at_must_be_three_numbers(at):
     with pytest.raises(ComponentError, match=r"\(x, y, z\)"):
         Component("f").add(zone("r"), at=at)
@@ -267,3 +271,11 @@ def test_registry_refuses_a_conflicting_lookup():
     _registry.register_table_lookup("facade", table="facades", target="azimuth")
     with pytest.raises(ValueError, match="already"):
         _registry.register_table_lookup("facade", table="other", target="azimuth")
+
+
+def test_unknown_node_that_is_an_inner_hints_at_outer():
+    c = Component("c")
+    c.inner("ambient")
+    c.add_terminal("a")
+    with pytest.raises(ComponentError, match=r"reached with outer\('ambient'\)"):
+        c.add_edge("a", "ambient", kind="airpath")

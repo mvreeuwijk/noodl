@@ -163,6 +163,28 @@ class _Flattener:
                 ms, key=lambda m: (self.slots[m].depth, self.slots[m].order))
         return members, rep
 
+    def reject_hidden_terminals(self, dropped: set[int]) -> None:
+        """A dropped terminal that is not a port can never be connected by anyone."""
+        for v in self.visits:
+            exposed = {end for end in v.comp._ports.values() if isinstance(end, str)}
+            for name, local in v.comp._local.items():
+                if local.attrs is not None or name in exposed:
+                    continue
+                if self.find(self.index[("local", id(v.comp), name)]) in dropped:
+                    self.errors.append(
+                        f"{_join(v.path, name)}: terminal {name!r} is not a port, so nothing "
+                        f"can connect it; use add_node(...) for an internal junction, or "
+                        f"expose it"
+                    )
+
+    def reject_user_positions(self) -> None:
+        for slot in self.slots:
+            if slot.attrs is not None and "position" in slot.attrs:
+                self.errors.append(
+                    f"'position' is set by flatten from the placement; do not set it on node "
+                    f"{slot.path!r}"
+                )
+
     # ------------------------------------------------------------------ attributes
     def node_attrs(self, slot: _Slot) -> dict:
         attrs = {} if slot.attrs is None else dict(slot.attrs)
@@ -239,6 +261,8 @@ class _Flattener:
         dropped = {r for r, ms in members.items()
                    if len(ms) == 1 and self.slots[ms[0]].attrs is None
                    and ms[0] not in self.external}
+        self.reject_hidden_terminals(dropped)
+        self.reject_user_positions()
 
         kept = []
         for v, e, s, t in raw:

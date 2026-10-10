@@ -5,6 +5,8 @@ docs/concepts/components.md."""
 
 from __future__ import annotations
 
+import math
+import numbers
 from dataclasses import dataclass
 from typing import Any
 
@@ -190,9 +192,11 @@ class Component:
             return
         if isinstance(end, str):
             if end not in self._local:
+                hint = (f" (a shared node is reached with outer({end!r}))"
+                        if end in self._inners else "")
                 raise ComponentError(
                     f"{self.name}: unknown node {end!r}; this component's nodes are "
-                    f"{list(self._local)}"
+                    f"{list(self._local)}{hint}"
                 )
             return
         raise ComponentError(
@@ -242,11 +246,14 @@ class Component:
         if self._taken(child.name):
             raise ComponentError(f"{self.name}: {child.name!r} already exists in this component")
         try:
-            position = tuple(float(v) for v in at)
-        except (TypeError, ValueError):
-            position = ()
-        if len(position) != 3 or isinstance(at, str):
+            parts = tuple(at) if not isinstance(at, str) else ()
+        except TypeError:
+            parts = ()
+        if (len(parts) != 3
+                or not all(isinstance(v, numbers.Real) and not isinstance(v, bool)
+                           and math.isfinite(float(v)) for v in parts)):
             raise ComponentError(f"{self.name}: at= must be (x, y, z) in m, got {at!r}")
+        position = tuple(float(v) for v in parts)
         self._children[child.name] = (child, position)
         child._parent = self
         return child
