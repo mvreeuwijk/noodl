@@ -7,10 +7,13 @@ import torch
 from noodl.apps.sewer import build_model, read_swmm_inp
 from noodl.apps.sewer.dynwave import (
     FUDGE_FLOW,
+    SOLVE_ATOL,
     DynamicWaveConduit,
     JunctionStorage,
     simulate_dynamic_wave,
+    solve_atol,
 )
+from noodl.apps.sewer.xsect_tables import LCF, QCF, area_of_depth
 
 F64 = torch.float64
 DATA = Path(__file__).resolve().parents[2] / "data" / "sewer"
@@ -44,15 +47,35 @@ def test_conduit_element_is_linear_then_limited_then_capped():
 
 
 def test_junction_storage_is_trapezoidal_continuity_with_a_stiff_bed():
-    ns = JunctionStorage(torch.tensor([0, 1]), bed=torch.tensor([1.0, 1.0], dtype=F64))
+    """The bed stiffness uses the fixed `bed_area` (SWMM's surface-area floor), not the
+    pass's surface area, so its round-off floor is known before the step."""
+    ns = JunctionStorage(torch.tensor([0, 1]), bed=torch.tensor([1.0, 1.0], dtype=F64),
+                         bed_area=0.5)
     drv = {"water.storage_area": torch.tensor([2.0, 2.0], dtype=F64),
            "water.head_start": torch.tensor([1.5, 1.0], dtype=F64),
            "water.net_inflow_start": torch.tensor([0.3, 0.0], dtype=F64),
            "water.storage_rate": torch.tensor(0.2, dtype=F64)}       # dt = 5 s
-    w = ns.flow(torch.tensor([1.6, 0.999], dtype=F64), drv)
+    phi = torch.tensor([1.6, 0.999], dtype=F64)
+    w = ns.flow(phi, drv)
     assert w[0].item() == pytest.approx(2 * 2.0 * 0.2 * 0.1 - 0.3)
-    assert w[1].item() == pytest.approx(2 * 2.0 * 0.2 * (-0.001) * (1 + 1e6))
-    assert torch.all(ns.dflow(torch.tensor([1.6, 0.999], dtype=F64), drv) > 0)
+    assert w[1].item() == pytest.approx(2 * 0.2 * (2.0 + 0.5 * 1e6) * (-0.001))
+    torch.testing.assert_close(
+        ns.dflow(phi, drv),
+        torch.tensor([2 * 0.2 * 2.0, 2 * 0.2 * (2.0 + 0.5 * 1e6)], dtype=F64))
+
+
+def test_a_junction_on_its_bed_converges_at_the_default_min_surface_area():
+    """Regression: with SWMM's default MIN_SURFAREA (12.566 ft2) J3 of the tree sits a few
+    ulp below its invert on the first step, where the bed slope (2 A_s/dt)(1 + K_BED) times
+    half an ulp of the head (1.9e-9 m3/s, A_s = 5.5 m2) exceeded the fixed 1e-12 m3/s Newton
+    tolerance, and the first step failed. The bed slope now uses the fixed surface-area
+    floor and the default tolerance sits above its round-off floor."""
+    net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
+    assert net.dynamic_wave.min_surface_area is None
+    model, state, drivers = build_model(net)
+    state, hist = simulate_dynamic_wave(model, state, drivers, steps=2)
+    assert torch.isfinite(hist["water.phi"]).all()
+    assert solve_atol(model) > SOLVE_ATOL
 
 
 def test_build_model_dispatches_and_refuses_air_and_quality(tmp_path):
@@ -73,6 +96,28 @@ def test_cold_start_is_dry_at_the_inverts(tmp_path):
     # SWMM zeroes the lateral inflow before routing (node.c:264, flowrout.c:437), so the
     # first step's oldNetInflow is 0
     assert torch.all(state["sewer.net_inflow"] == 0)
+
+
+def test_cold_start_sets_fixed_outfall_stage_and_its_conduit_depth():
+    """SWMM's cold start (flowrout.c:336-420): outfall depths from the zero flow
+    (link_setOutfallDepth), so a FIXED outfall starts at its stage; then each conduit's depth
+    is the mean of its end-node depths above its offsets, which sets the stored area that the
+    first step's inertial term dq3 = 2 v (a_mid - a_old) sees. Backwater: Out 9.60 m, stage
+    9.85 m, so C3 (J3 9.80 m dry -> Out, 0.45 m) starts at (0 + 0.25)/2 = 0.125 m."""
+    net, _, _ = read_swmm_inp(DATA / "backwater_dynwave.inp")
+    model, state, drivers = build_model(net)
+    hyd = model.dynamic_wave
+    out = hyd.outfall_idx
+    torch.testing.assert_close(state["water.phi"][out], torch.tensor([9.85], dtype=F64))
+    torch.testing.assert_close(drivers["water.phi_boundary"], torch.tensor([9.85], dtype=F64))
+    c3 = model.pipe_names.index("C3")
+    y_ft = torch.tensor([0.125 / LCF], dtype=F64)
+    a_si = area_of_depth(y_ft, hyd.geo.y_full[c3:c3 + 1], hyd.geo.a_full[c3:c3 + 1]) * QCF / LCF
+    torch.testing.assert_close(state["sewer.mid_area"][c3:c3 + 1], a_si)
+    c1 = model.pipe_names.index("C1")
+    fudge = area_of_depth(torch.tensor([1e-4], dtype=F64), hyd.geo.y_full[c1:c1 + 1],
+                          hyd.geo.a_full[c1:c1 + 1]) * QCF / LCF
+    torch.testing.assert_close(state["sewer.mid_area"][c1:c1 + 1], fudge)
 
 
 def test_first_step_fills_a_dry_junction_by_half_the_inflow(tmp_path):
@@ -148,11 +193,16 @@ def test_outfall_flow_rises_monotonically_towards_the_total(tmp_path):
 
 
 def test_each_step_satisfies_the_discrete_junction_equation(tmp_path):
-    """A_s (y - y_start) = 0.5 dt (N_start + N) at every junction, on the returned state."""
+    """A_s (y - y_start) = 0.5 dt (N_start + N) at every junction, on the returned state.
+
+    The head solve is held to `SOLVE_ATOL` here: this fixture's MIN_SURFAREA is 12.566 m2
+    (not ft2), so the default `solve_atol` -- raised to the stiff bed's round-off floor,
+    which scales with that area -- would be 2.7e-8 m3/s, i.e. a residual up to 7e-8 m3. No
+    junction of this run sits on its bed, so the tight tolerance is reachable."""
     model, state, drivers = build_model(_tree(tmp_path))
     for _ in range(40):
         before = dict(state)
-        state, _ = simulate_dynamic_wave(model, state, drivers, steps=1)
+        state, _ = simulate_dynamic_wave(model, state, drivers, steps=1, atol=SOLVE_ATOL)
         res = model.dynamic_wave.junction_residual(before, state, drivers)
         assert res.abs().max().item() < 1e-9
 

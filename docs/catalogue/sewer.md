@@ -70,7 +70,7 @@ Nodal sources and withdrawals.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `JunctionStorage` | SWMM's junction continuity as a node withdrawal: trapezoidal storage over the step, with a stiff bed below the invert (design D3). | `JunctionStorage(nodes, bed)` |
+| `JunctionStorage` | SWMM's junction continuity as a node withdrawal: trapezoidal storage over the step, with a stiff bed below the invert (design D3). | `JunctionStorage(nodes, bed, bed_area)` |
 
 ## Files
 

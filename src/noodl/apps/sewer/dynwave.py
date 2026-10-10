@@ -54,11 +54,14 @@ Drivers = dict[str, Tensor]
 #: SWMM's dry-node flow cap (`dwflow.c:273-276`): 1e-4 cfs, in m3/s.
 FUDGE_FLOW = 1.0e-4 * QCF
 #: Bed stiffening factor of `JunctionStorage` (design D3): below its invert a junction's
-#: storage slope is multiplied by ``1 + K_BED``, standing in for SWMM's ``yNew < 0 -> 0``.
+#: storage slope gains ``(2 A_bed/dt) K_BED``, standing in for SWMM's ``yNew < 0 -> 0``.
 K_BED = 1.0e6
 #: Newton's absolute residual tolerance for the head solve (m3/s): a junction balance error
-#: of `SOLVE_ATOL` dt m3 at most, far below the head tolerance times any surface area.
+#: of `SOLVE_ATOL` dt m3 at most, far below the head tolerance times any surface area. It is
+#: raised to the bed's round-off floor where that is larger (`solve_atol`).
 SOLVE_ATOL = 1.0e-12
+#: `solve_atol`'s margin over the bed's round-off floor (see there).
+_BED_FLOOR_MARGIN = 4.0
 #: SWMM's default junction surface-area floor (`dynwave.c:62`), ft2.
 DEFAULT_MIN_SURFACE_AREA_FT2 = 12.566
 #: SI area per SWMM ft2 (design D2): makes ``A_s dy = 0.5 dt N`` exact in m, m3/s.
@@ -162,35 +165,36 @@ class JunctionStorage(NodeSource):
     """SWMM's junction continuity as a node withdrawal: trapezoidal storage over the step,
     with a stiff bed below the invert (design D3).
 
-    ``w(H) = (2 A_s/dt)(H - H_start) - N_start + (2 A_s/dt) K_BED min(H - z_bed, 0)``
+    ``w(H) = (2 A_s/dt)(H - H_start) - N_start + (2 A_bed/dt) K_BED min(H - z_bed, 0)``
     (m3/s, positive out of the network), so that with the conduit flows and the lateral
     inflow the node balance reads ``A_s (H - H_start) = 0.5 dt (N_start + N)``
     (`dynwave.c:694-711`). The bed term stands in for SWMM's ``yNew < 0 -> 0``
     (`dynwave.c:743`); the slope is at least ``2 A_s/dt > 0``, so every junction grounds
-    itself. Reads the per-junction drivers ``"water.storage_area"`` A_s (m2, design D2's SI
-    area), ``"water.head_start"`` (m), ``"water.net_inflow_start"`` (m3/s) and
-    ``"water.storage_rate"`` 1/dt (1/s). `bed` holds the junction inverts (m).
+    itself. The bed stiffness uses the fixed `bed_area` A_bed (m2; the model passes SWMM's
+    surface-area floor, which no A_s is below), not A_s, so that the head solve's round-off
+    floor on the bed is known before the step (`solve_atol`). Reads the per-junction drivers
+    ``"water.storage_area"`` A_s (m2, design D2's SI area), ``"water.head_start"`` (m),
+    ``"water.net_inflow_start"`` (m3/s) and ``"water.storage_rate"`` 1/dt (1/s). `bed`
+    holds the junction inverts (m).
     """
 
-    def __init__(self, nodes: Tensor, bed: Tensor) -> None:
+    def __init__(self, nodes: Tensor, bed: Tensor, bed_area: float) -> None:
         super().__init__(nodes)
         self.register_buffer("bed", torch.as_tensor(bed, dtype=F64))
-
-    @staticmethod
-    def _rate2a(drivers: Mapping) -> Tensor:
-        return 2.0 * drivers["water.storage_rate"] * drivers["water.storage_area"]
+        self.bed_area = float(bed_area)
 
     def flow(self, phi_nodes: Tensor, drivers: Mapping | None = None) -> Tensor:
         """Withdrawal (m3/s) at junction heads `phi_nodes` (m)."""
-        rate2a = self._rate2a(drivers)
+        rate2 = 2.0 * drivers["water.storage_rate"]
         dry = torch.clamp(phi_nodes - self.bed, max=0.0)
-        return (rate2a * (phi_nodes - drivers["water.head_start"])
-                - drivers["water.net_inflow_start"] + rate2a * K_BED * dry)
+        return (rate2 * drivers["water.storage_area"] * (phi_nodes - drivers["water.head_start"])
+                - drivers["water.net_inflow_start"] + rate2 * self.bed_area * K_BED * dry)
 
     def dflow(self, phi_nodes: Tensor, drivers: Mapping | None = None) -> Tensor:
         """d(withdrawal)/dH (m2/s), analytic and strictly positive."""
         below = (phi_nodes < self.bed).to(phi_nodes.dtype)
-        slope = self._rate2a(drivers) * (1.0 + K_BED * below)
+        rate2 = 2.0 * drivers["water.storage_rate"]
+        slope = rate2 * (drivers["water.storage_area"] + self.bed_area * K_BED * below)
         return slope.expand(torch.broadcast_shapes(slope.shape, phi_nodes.shape))
 
 
@@ -425,22 +429,32 @@ class DynamicWaveHydraulics:
         return self._carried(state, terms, self._inflow(drivers))
 
     def initial_state(self, drivers: Mapping | None = None) -> State:
-        """SWMM's cold, dry start (flowrout.c:337-507): heads at the node inverts (outfalls
-        too), no flow, every conduit's stored area ``A(FUDGE)`` and a zero junction net
-        inflow. SWMM zeroes the lateral inflow before routing starts (node.c:264,
-        flowrout.c:437), so the first step's ``oldNetInflow`` is 0 (routing.c:236-242,
-        node.c:303) and its trapezoid sees only the end-of-step inflow. `drivers`, when
-        given, has its ``"inflow"`` validated."""
+        """SWMM's cold, dry start (flowrout.c:75-102, 336-507): no flow, junctions at their
+        inverts, outfalls at the depth `link_setOutfallDepth` gives at zero flow (a FIXED
+        outfall at its stage, the others at their invert; flowrout.c:383), every conduit at
+        the mean of its end-node depths above its offsets, clamped to [0, yFull] and at
+        least FUDGE (flowrout.c:389-420), which sets its stored area (flowrout.c:497), and a
+        zero junction net inflow. SWMM zeroes the lateral inflow before routing starts
+        (node.c:264, flowrout.c:437), so the first step's ``oldNetInflow`` is 0
+        (routing.c:236-242, node.c:303) and its trapezoid sees only the end-of-step inflow.
+        `drivers`, when given, has its ``"inflow"`` validated."""
         if drivers is not None:
             self._inflow(drivers)
-        fudge = torch.full_like(self.geo.y_full, FUDGE)
+        q0 = torch.zeros(len(self.pipe_names), dtype=F64)
+        phi = self.node_invert.clone()
+        phi[self.outfall_idx] = self._outfall_heads(q0)
+        geo = self.geo
+        depth_ft = (phi - self.node_invert) / LCF
+        y1 = torch.clamp(depth_ft[self.u] - geo.offset1, min=0.0)
+        y2 = torch.clamp(depth_ft[self.v] - geo.offset2, min=0.0)
+        y = torch.clamp(0.5 * (torch.minimum(y1, geo.y_full) + torch.minimum(y2, geo.y_full)),
+                        min=FUDGE)                                            # :402-416
         return {
-            f"{self.layer}.phi": self.node_invert.clone(),
-            f"{self.layer}.q": torch.zeros(len(self.pipe_names), dtype=F64),
+            f"{self.layer}.phi": phi,
+            f"{self.layer}.q": q0,
             "sewer.junction_depth": torch.zeros(len(self.junction_names), dtype=F64),
             "sewer.pipe_flow": torch.zeros(len(self.pipe_names), dtype=F64),
-            "sewer.mid_area": area_of_depth(fudge, self.geo.y_full, self.geo.a_full)
-            * _AREA_SI,                                                       # flowrout.c:497
+            "sewer.mid_area": area_of_depth(y, geo.y_full, geo.a_full) * _AREA_SI,  # :497
             "sewer.net_inflow": torch.zeros(len(self.junction_names), dtype=F64),
         }
 
@@ -515,7 +529,8 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
         raise ValueError(f"build_dynamic_wave_model: junction(s) {stranded} touch no conduit")
     layer = PotentialFlowLayer(
         graph, "water", [DynamicWaveConduit()], boundary=boundary,
-        node_sources=[JunctionStorage(junction_idx, junction_invert)],
+        node_sources=[JunctionStorage(junction_idx, junction_invert,
+                                      bed_area=closure.min_area_ft2 * _AREA_SI)],
         quantity="head", unit="m", flow_unit="m3/s")
     if layer.bound.tolist() != closure.outfall_idx.tolist():
         raise ValueError("build_dynamic_wave_model: the layer's boundary order differs from "
@@ -525,11 +540,11 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
                   iterate_relaxation=relaxation)
     inflow = torch.zeros(graph.n, dtype=F64)
     inflow[junction_idx] = torch.tensor([m.inflow for m in net.manholes], dtype=F64)
+    state = closure.initial_state({"inflow": inflow})
     drivers: Drivers = {
         "inflow": inflow,
-        "water.phi_boundary": closure.node_invert[closure.outfall_idx].clone(),
+        "water.phi_boundary": state["water.phi"][closure.outfall_idx].clone(),
     }
-    state = closure.initial_state(drivers)
     closure.notes["routing"] = (
         f"dynamic wave (SWMM 5.2.4 fixed point): heads converged to {iterate_tol} m within "
         f"{iterate_max} passes; SWMM's HEAD_TOLERANCE and MAX_TRIALS are not used")
@@ -549,6 +564,24 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     return model, state, drivers
 
 
+def solve_atol(model: Model, dt: float | None = None) -> float:
+    """The head solve's default absolute tolerance (m3/s) for steps of `dt` s (default: the
+    routing step): `SOLVE_ATOL`, raised to 4x the round-off floor of a junction on its stiff
+    bed where that is larger. There the Jacobian slope is ``(2/dt)(A_s + K_BED A_bed)``,
+    S ~ (2/dt) K_BED A_bed, and Newton cannot move the head by less than half an ulp,
+    ``<= eps |H| / 2``, so the residual cannot go below about ``S eps |H| / 2`` -- 6e-10 m3/s
+    on a 12 m invert at SWMM's default 12.566 ft2 floor and a 5 s step, giving an atol of
+    2.5e-9 m3/s. A wet junction's head is then solved to within ``atol dt / (2 A_s)`` m, at
+    most 5e-9 m in that case."""
+    dt = model.routing_step if dt is None else float(dt)
+    storage = next(ns for ns in model.layers["water"].node_sources
+                   if isinstance(ns, JunctionStorage))
+    slope = 2.0 * storage.bed_area * (1.0 + K_BED) / dt
+    height = float(storage.bed.abs().max())
+    floor = slope * torch.finfo(F64).eps * height / 2.0
+    return max(SOLVE_ATOL, _BED_FLOOR_MARGIN * floor)
+
+
 def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *, steps: int,
                           dt: float | None = None, inflow: Tensor | None = None,
                           record: tuple[str, ...] = ("water.phi", "water.q"),
@@ -564,15 +597,16 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *, steps
     step the carried keys are re-evaluated at the returned state, and a conduit end reaching
     its crown is refused by name. `diagnostics`, when a list, receives each step's
     `Model.step` diagnostics. `solve_kwargs` reach the head solve (Newton); `atol` defaults
-    to `SOLVE_ATOL` (m3/s) and `rtol` to 0, because Newton's own default (sqrt(eps), 1.5e-8
-    m3/s) would stop a warm-started pass before it moves and leave the junction balance off
-    by that much. Returns the final state and the recorded `record` keys stacked over steps
-    (leading dimension `steps`).
+    to `solve_atol` (m3/s: `SOLVE_ATOL`, or the bed's round-off floor where larger) and
+    `rtol` to 0, because Newton's own default (sqrt(eps), 1.5e-8 m3/s) would stop a
+    warm-started pass before it moves and leave the junction balance off by that much.
+    Returns the final state and the recorded `record` keys stacked over steps (leading
+    dimension `steps`).
     """
-    solve_kwargs.setdefault("atol", SOLVE_ATOL)
-    solve_kwargs.setdefault("rtol", 0.0)
     hyd = model.dynamic_wave
     dt = model.routing_step if dt is None else float(dt)
+    solve_kwargs.setdefault("atol", solve_atol(model, dt))
+    solve_kwargs.setdefault("rtol", 0.0)
     n = model.net.n
     batch: tuple[int, ...] = ()
     if inflow is not None:
