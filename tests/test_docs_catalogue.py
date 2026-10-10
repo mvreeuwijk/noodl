@@ -78,3 +78,31 @@ def test_every_documented_building_attribute_is_read_by_the_code():
     page = gen.render(*[p for p in gen.PAGES if p[0] == "building_physics"][0])
     assert "## Network attributes" in page and "`z_path`" in page and "`heat_capacity`" in page
     assert "NODE_ATTRIBUTES" not in page
+
+
+def test_generator_signatures_roles_and_summaries():
+    from noodl.apps import building_physics as bp
+    from noodl.drives import Drive
+    from noodl.elements.base import Element
+    from noodl.model import Closure, StepContext
+    from noodl.refs import Field
+    from noodl.validation import SetupReport
+
+    assert "*args" not in gen._signature("Field", Field)
+    assert gen._signature("Drive", Drive) == "Drive(...)"
+    assert gen._role("SetupReport", SetupReport) == "class"
+    assert gen._role("StepContext", StepContext) == "class"
+    assert gen._role("Element", Element) == "base"
+    assert gen._role("Closure", Closure) == "base"
+    assert gen._summary(bp.initial_drivers).endswith(".")
+
+
+def test_alias_constants_are_the_same_object_and_listed_once():
+    import importlib
+
+    for old, new in gen.CONSTANT_ALIASES.items():
+        mod = importlib.import_module("noodl.apps.street_aq")
+        assert getattr(mod, old) is getattr(mod, new), (old, new)
+    page = gen.render(*[p for p in gen.PAGES if p[0] == "street_aq"][0])
+    assert page.count("| `KAPPA_040`") == 1 and "| `KAPPA` |" not in page
+    assert "also `KAPPA`" in page

@@ -18,20 +18,6 @@ Build the model and its starting state and inputs.
 | `initial_drivers`<br><small>`noodl.refs`</small> | A copy of the model's driver template (`model.driver_template`, which an application's `build_model` records), then `values` (see `drivers_from`). | `initial_drivers(model, *, values=None)` |
 | `check_setup`<br><small>`noodl.validation`</small> | Check `model` and, when given, `state` and `drivers`; return a `SetupReport`. | `check_setup(model, state=None, drivers=None, *, dt=None, probe=False, steady=False)` |
 
-## Network components
-
-Descriptions of the physical objects a network is built from.
-
-| Name | What it does | How to call it |
-|---|---|---|
-| `StepContext`<br><small>`noodl.model`</small> | What a state transition needs from the model: the interval it must integrate over (`None` under `steady()`, which an integrating closure refuses) and, when the caller tracks it, the time at the start of the step. | `StepContext(dt, t=None)` |
-| `Issue`<br><small>`noodl.validation`</small> | One finding: `level` is `"error"`, `"warning"` or `"info"`; `key` the key concerned, if any. | `Issue(level, code, message, key=None)` |
-| `InputRow`<br><small>`noodl.validation`</small> | One known key: what is expected and what was given. | `InputRow(key, role, layer, required, ordering, expected, unit, given, status)` |
-| `SetupReport`<br><small>`noodl.validation`</small> | The result of `check_setup`. `ok` is true when there are no errors. | `SetupReport(issues=<factory>, rows=<factory>, probed=False, driver_reads=frozenset(), state_reads=frozenset(), closure_outputs=frozenset())` |
-| `AirMedium`<br><small>also `MBLMedium`</small><br><small>`noodl.elements`</small> | An air medium's default state and the two densities its flow elements need. | `AirMedium(name, p_default, T_default, X_default, rho_default, has_moisture, _buoyancy, _density=None, _cp=None)` |
-| `ValueLink`<br><small>`noodl.couple`</small> | One shared-node value relationship. | `ValueLink(from_model, from_key, from_index, to_model, to_key, to_index=0, convert=None, two_way=False, convert_back=None, sources_key=None)` |
-| `DriverAlias`<br><small>`noodl.couple`</small> | One driver value shared across models: `source` is authoritative; every target is overwritten from it through that target's own registered conversion (or none). | `DriverAlias(source, targets)` |
-
 ## Layers and model
 
 The conservation layers and the model that steps them.
@@ -58,7 +44,6 @@ Flow through an edge as a function of the potential difference across it.
 | `DoorCompartment`<br><small>also `MBLDoorCompartment`</small><br><small>`noodl.elements`</small> | One compartment of ``Buildings.Airflow.Multizone.DoorDiscretizedOpen`` per edge. | `DoorCompartment(*, src, tgt, medium, dA, CD=0.65, m=0.5, dp_turbulent=0.01, vZer=0.001, T_key='T', Xw_key='X_w', p_key='p_abs', kind='door', learnable=False)` |
 | `DoorPortStream`<br><small>also `MBLDoorPortStream`</small><br><small>`noodl.elements`</small> | One of the two port streams of a whole discretised door, as ONE edge from side A to side B: ``direction="ab"`` returns ``port_a1.m_flow = mAB_flow``, ``"ba"`` returns ``port_b2.m_flow = -port_a2.m_flow = -mBA_flow`` (kg/s, both positive from A to B), from the compartment law ``comp`` (:class:`DoorCompartment` or :class:`OperableDoorCompartment`, one door) at the compartment pressure differences ``dp + head(drivers)`` (:class:`DoorCompartmentHead`). The edge's own ``dp`` is the zones' potential difference ``phi_A - phi_B``. | `DoorPortStream(comp, head, direction, kind)` |
 | `Duct`<br><small>`noodl.elements`</small> | Colebrook duct: F(dp) with friction from the Colebrook equation, laminar below Re_t. Length `L`, diameter `D` and roughness `eps` (m); `sum_C` the dimensionless sum of dynamic loss coefficients; `A` (m2) defaults to the circular area; `rho` (kg/m3) and `mu` (Pa s); the flow is a mass flow in kg/s. | `Duct(L, D, eps, sum_C=0.0, *, A=None, Re_t=2000.0, rho=1.2041, mu=1.81625e-05, n_iter=4, kind='duct', learnable=False)` |
-| `Element`<br><small>`noodl.elements`</small> | Abstract branch law: flow as a function of potential difference. | `Element(kind)` |
 | `FanCurve`<br><small>`noodl.elements`</small> | Cubic pressure-flow curve inverted for q given dp on [0, q_max]: `coeffs` are (a0, a1, a2, a3) of P(q) = a0 + a1 q + a2 q^2 + a3 q^3 in Pa for q in the flow unit, and `q_max` is the largest flow the curve covers, in that unit. | `FanCurve(coeffs, q_max, *, kind='airpath', learnable=False)` |
 | `FixedFlow`<br><small>`noodl.elements`</small> | q = q0 regardless of dp (`q0` in the flow unit); dflow = 0; linear_init = (q0, 0). | `FixedFlow(q0, *, kind='airpath', learnable=False)` |
 | `OpenDoor`<br><small>also `MBLDoorOpen`</small><br><small>`noodl.elements`</small> | ``Buildings.Airflow.Multizone.DoorOpen``: one direction of the always-open door. | `OpenDoor(*, direction, src, tgt, medium, wOpe=0.9, hOpe=2.1, CD=0.65, m=0.5, dp_turbulent=0.01, T_key='T', kind='door', learnable=False)` |
@@ -77,19 +62,10 @@ Terms added to an edge's potential difference (stack, wind, fans).
 | Name | What it does | How to call it |
 |---|---|---|
 | `DoorCompartmentHead`<br><small>`noodl.elements`</small> | The hydrostatic part of ``DoorDiscretized.mo:64-66``, as a noodl drive: ``rho_A hAg[i] - rho_B hBg[i]`` per compartment edge, shape ``(..., n_edges)``. | `DoorCompartmentHead(kind, *, src, tgt, hAg, hBg, medium, T_key='T', Xw_key='X_w', p_key='p_abs')` |
-| `Drive`<br><small>`noodl.drives`</small> | A drive must read every differentiable quantity from `drivers`, never own one. | `Drive(*args, **kwargs)` |
 | `ConstantDrive`<br><small>`noodl.drives`</small> | A drive that reads a pre-computed, already batched value from `drivers`. | `ConstantDrive(kind, key)` |
 | `Stack`<br><small>`noodl.drives`</small> | Hydrostatic stack term (CONTAM TN 1887r1 eq. 17 with eq. 64-65 at the path elevation). | `Stack(kind, *, src, tgt, z_path, z_ref, rho_key='rho', g=9.80665)` |
 | `WindProfile`<br><small>`noodl.drives`</small> | CONTAM wind pressure profile: Cp versus relative wind angle, periodic piecewise-linear. | `WindProfile(angles_deg, cp)` |
-| `Wind`<br><small>`noodl.drives`</small> | Wind pressure on envelope paths (CONTAM TN 1887r1 section 3.15). Drivers: `rho_amb` in kg/m3, `V_met` in m/s and `theta_w` in the unit the `azimuth` edge attribute uses (degrees for networks read from CONTAM): | `Wind(kind, *, sign, envelope, azimuth, ch, cp_const, profile_index, profiles=(), rho_key='rho_amb', speed_key='V_met', direction_key='theta_w')` |
-
-## Closures
-
-Functions of the state that compute drivers each step (densities, flows, levels).
-
-| Name | What it does | How to call it |
-|---|---|---|
-| `Closure`<br><small>`noodl.model`</small> | state, drivers -> driver updates (a mapping of NEW driver values, merged in order). | `Closure(*args, **kwargs)` |
+| `Wind`<br><small>`noodl.drives`</small> | Wind pressure on envelope paths (CONTAM TN 1887r1 section 3.15). Drivers: `rho_amb` in kg/m3, `V_met` in m/s and `theta_w` in the unit the `azimuth` edge attribute uses (degrees for networks read from CONTAM). | `Wind(kind, *, sign, envelope, azimuth, ch, cp_const, profile_index, profiles=(), rho_key='rho_amb', speed_key='V_met', direction_key='theta_w')` |
 
 ## Reactions
 
@@ -98,15 +74,6 @@ Transformations applied to transported species each step.
 | Name | What it does | How to call it |
 |---|---|---|
 | `FirstOrderDecay`<br><small>`noodl.layers`</small> | ``x <- x * exp(-rate * dt)``; ``rate`` broadcasts against ``x``. | `FirstOrderDecay(rate)` |
-| `Reaction`<br><small>`noodl.layers`</small> | A local, per-node nonlinear map applied to the state after a transport step (or before it, under `Model(reaction_order="before_transport")`). | `Reaction(*args, **kwargs)` |
-
-## Sources
-
-Nodal sources and withdrawals.
-
-| Name | What it does | How to call it |
-|---|---|---|
-| `NodeSource`<br><small>`noodl.nodesources`</small> | Base class: a potential-dependent withdrawal at a fixed set of nodes. | `NodeSource(nodes)` |
 
 ## Other classes
 
@@ -114,10 +81,17 @@ Supporting types.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `Field`<br><small>`noodl.refs`</small> | A state or driver key that also knows the layout of the tensor stored under it. | `Field(*args, **kwargs)` |
+| `StepContext`<br><small>`noodl.model`</small> | What a state transition needs from the model: the interval it must integrate over (`None` under `steady()`, which an integrating closure refuses) and, when the caller tracks it, the time at the start of the step. | `StepContext(dt, t=None)` |
+| `Field`<br><small>`noodl.refs`</small> | A state or driver key that also knows the layout of the tensor stored under it. | `Field(key, *, role, layer, axis, labels, ordering, settable=None, n_species=1, species=None, quantity='', unit='', required='optional', default=0.0, description='', dtype=torch.float64, device='cpu', aliases=None, column=False, scalar=False)` |
 | `LayerRef`<br><small>`noodl.refs`</small> | One registered layer of a model, with its keys as discoverable `Field` attributes. | `LayerRef(name, layer, kind, *, flow_owner=None)` |
 | `LayerRefs`<br><small>`noodl.refs`</small> | Registered layer name -> `LayerRef`, plus the model's closure-carried keys. | `LayerRefs(model)` |
-| `Conversion`<br><small>`noodl.couple`</small> | One registered conversion and the UNITS it maps between, `(from_unit, to_unit, fn)`. | `Conversion(*args, **kwargs)` |
+| `Issue`<br><small>`noodl.validation`</small> | One finding: `level` is `"error"`, `"warning"` or `"info"`; `key` the key concerned, if any. | `Issue(level, code, message, key=None)` |
+| `InputRow`<br><small>`noodl.validation`</small> | One known key: what is expected and what was given. | `InputRow(key, role, layer, required, ordering, expected, unit, given, status)` |
+| `SetupReport`<br><small>`noodl.validation`</small> | The result of `check_setup`. `ok` is true when there are no errors. | `SetupReport(issues=<factory>, rows=<factory>, probed=False, driver_reads=frozenset(), state_reads=frozenset(), closure_outputs=frozenset())` |
+| `AirMedium`<br><small>also `MBLMedium`</small><br><small>`noodl.elements`</small> | An air medium's default state and the two densities its flow elements need. | `AirMedium(name, p_default, T_default, X_default, rho_default, has_moisture, _buoyancy, _density=None, _cp=None)` |
+| `Conversion`<br><small>`noodl.couple`</small> | One registered conversion and the UNITS it maps between, `(from_unit, to_unit, fn)`. | `Conversion(from_unit, to_unit, fn)` |
+| `ValueLink`<br><small>`noodl.couple`</small> | One shared-node value relationship. | `ValueLink(from_model, from_key, from_index, to_model, to_key, to_index=0, convert=None, two_way=False, convert_back=None, sources_key=None)` |
+| `DriverAlias`<br><small>`noodl.couple`</small> | One driver value shared across models: `source` is authoritative; every target is overwritten from it through that target's own registered conversion (or none). | `DriverAlias(source, targets)` |
 
 ## Functions
 
@@ -143,3 +117,15 @@ Calculations and helpers.
 | `apply_conversion`<br><small>`noodl.couple`</small> | `value` unchanged if `name` is None; the registered conversion otherwise. | `apply_conversion(name, value, drivers)` |
 | `transport_boundary_inflow`<br><small>`noodl.couple`</small> | Net mass INFLOW, `(...,)`, at the boundary node `boundary_idx[node_position]`, in a transport layer's own units, for a SINGLE-SPECIES layer (`x_interior`/`x_boundary` are `(..., n_i)`/`(..., n_b)`, never `(..., n_i, K)`). | `transport_boundary_inflow(net, q, flow_kinds, x_interior, x_boundary, interior_idx, boundary_idx, node_position)` |
 | `union`<br><small>`noodl.couple`</small> | Couple `models` by exchanging the driver/state values `shared` names, WITHOUT merging any model's `Network`, layers, or closures. Never modifies the `Model`/`State`/`Drivers` objects passed in -- returns fresh dict copies. | `union(models, shared, *, substeps=None, relaxation=0.5, iterate_rtol=1e-08, iterate_atol=0.0, iterate_max=50, adjoint_rtol=1e-10)` |
+
+## Base classes (for extending)
+
+Subclass these to add an element, drive, closure, reaction or node source; see [Extending noodl](../development/extending.md).
+
+| Name | What it does | How to call it |
+|---|---|---|
+| `Closure`<br><small>`noodl.model`</small> | state, drivers -> driver updates (a mapping of NEW driver values, merged in order). | `Closure(...)` |
+| `Reaction`<br><small>`noodl.layers`</small> | A local, per-node nonlinear map applied to the state after a transport step (or before it, under `Model(reaction_order="before_transport")`). | `Reaction(...)` |
+| `Element`<br><small>`noodl.elements`</small> | Abstract branch law: flow as a function of potential difference. | `Element(kind)` |
+| `Drive`<br><small>`noodl.drives`</small> | A drive must read every differentiable quantity from `drivers`, never own one. | `Drive(...)` |
+| `NodeSource`<br><small>`noodl.nodesources`</small> | Base class: a potential-dependent withdrawal at a fixed set of nodes. | `NodeSource(nodes)` |
