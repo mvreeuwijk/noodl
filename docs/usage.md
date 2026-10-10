@@ -41,7 +41,7 @@ for t in times:
 
 Every application exports `build_model`, `initial_state` and `initial_drivers`, and
 `initial_state(model)`/`initial_drivers(model)` without `values` return its defaults.
-(The sewer's `initial_state` also takes the drivers, `initial_state(model, drivers,
+(The sewer's `initial_state` also takes the drivers, `initial_state(model, drivers=drivers,
 values=...)`, because its storage depends on them.)
 
 ## A complete example
@@ -125,6 +125,10 @@ named for the physics it carries:
 | `.capacity` | `"<layer>.capacity"` | driver | the layer's active interior order |
 | `.storage` (allocation layers) | `"<layer>.s"` | state | full node order |
 | `.requests` (allocation layers) | `"<layer>.requests"` | driver | edge order of the layer's kind |
+
+Every key reports its unit: the layer's own for state and boundary values, and the
+application's `flow_unit`, `source_unit` and `capacity_unit` for flows, sources and
+capacity, so `describe()` shows `thermal.sources` in W and `air.q` in kg/s.
 
 The names come from each layer's `quantity`, so every application has them without code
 of its own; the solver's short spellings (`.x`, `.phi`, `.s`, `.q`) work too. Each
@@ -221,7 +225,8 @@ reports:
   silently), a state key put in the drivers, a closure output of the wrong shape.
 - **Warnings**: a key with a layer's prefix but no such input (`"thermal.source"` — *did
   you mean `"thermal.sources"`?*), a near-miss of a layer name (`"therml.sources"`), an
-  edge kind no layer uses that is a near-miss of one a layer does use (`"airpth"`).
+  edge kind no layer uses that is a near-miss of one a layer does use (`"airpth"`), a
+  temperature below 150 K (a Celsius value where kelvin is expected).
 - A table of every key the model knows: role, required or optional, order, expected
   shape, unit, and what was given.
 

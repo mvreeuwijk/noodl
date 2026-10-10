@@ -10,7 +10,8 @@ expected, and what was given; plus the problems found, as errors and warnings:
   order, batch shapes that do not broadcast, nonzero sources on boundary or inactive nodes
   (which a potential layer would silently drop), a state key put in the drivers;
 * suspicious keys -- a key with a layer's prefix but no such input (`"thermal.source"`),
-  a key whose prefix is a near-miss of a layer name (`"therml.sources"`).
+  a key whose prefix is a near-miss of a layer name (`"therml.sources"`);
+* value range -- a temperature below 150 K (`value-range`: a Celsius value given as kelvin).
 
 Keys the model does not know the layout of -- a custom closure's inputs such as a density
 or a weather variable -- are NOT rejected. With `probe=True` the check runs one step (under
@@ -143,6 +144,10 @@ def _check_value(f: Field, key: str, value, origin: str, add, batches) -> str:
         add(Issue("error", "shape", f"{exc} ({origin})", key))
         return "BAD SHAPE"
     batches.append((key, tuple(value.shape[: value.dim() - k])))
+    if f.unit == "K" and bool((value.detach() < 150.0).any()):
+        add(Issue("warning", "value-range",
+                  f"{key!r} ({origin}) has a value below 150 K; the layer takes absolute "
+                  f"temperatures in kelvin, so a Celsius value here is a mistake", key))
     if f.settable is not None and len(f.settable) < len(f.labels):
         bad = [
             lab for lab, col in f.named(value.detach()).items()

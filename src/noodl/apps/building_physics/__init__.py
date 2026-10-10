@@ -10,6 +10,7 @@ here.
 # here is safe: the module imports `contamxpy` lazily, inside the call, so a noodl
 # installed without the `contam` extra still imports this package cleanly and only a call
 # to `run_steady`/`run_transient` raises the ImportError that names the missing package.
+from noodl.apps.building_physics.attributes import EDGE_ATTRIBUTES, NODE_ATTRIBUTES
 from noodl.apps.building_physics.contamx import (
     run_steady,
     run_transient,
@@ -49,12 +50,14 @@ from noodl.apps.building_physics.thermal import (
 from noodl.apps.building_physics.wth import Weather, read_wth
 
 __all__ = [
+    "EDGE_ATTRIBUTES",
     "BurstSource",
     "ConstantSource",
     "CutoffSource",
     "DecayingSource",
     "IdealGasDensity",
     "LinearDensity",
+    "NODE_ATTRIBUTES",
     "Project",
     "WallMass",
     "Weather",

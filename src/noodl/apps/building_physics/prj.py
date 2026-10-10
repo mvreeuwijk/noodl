@@ -914,7 +914,8 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     T[net.node_index(project.ambient)] = amb["Ta"]
     rho = amb["Pb"] / (R_AIR * T)
     air = PotentialFlowLayer(net, "air", project.elements, drives=project.drives,
-                             boundary=[project.ambient], quantity="pressure", unit="Pa")
+                             boundary=[project.ambient], quantity="pressure", unit="Pa",
+                             flow_unit="kg/s")
     layers: dict = {"air": air}
     if species and project.species:
         layers["species"] = species_layer(

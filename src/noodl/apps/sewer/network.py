@@ -364,7 +364,7 @@ def build_model(
         ]
         layers["air"] = PotentialFlowLayer(
             graph, "air", elements, drives=drives, boundary=["ambient"],
-            quantity="pressure", unit="Pa",
+            quantity="pressure", unit="Pa", flow_unit="m3/s",
         )
         drivers["air.phi_boundary"] = torch.zeros(1, dtype=F64)
 
@@ -374,6 +374,7 @@ def build_model(
             graph, "water_quality", capacity=water_cap, flow_kind="pipe",
             boundary=[o.name for o in net.outfalls], n_species=len(species),
             scheme=scheme, quantity="concentration", unit="kg/m3", species_names=species,
+            source_unit="kg/s", capacity_unit="m3", flow_unit="m3/s",
         )
         # `out_pipe` above indexes the per-pipe driver vectors by POSITION in `manhole_names`,
         # so the map is correct only if `TransportLayer`'s own active-interior order agrees
@@ -425,6 +426,7 @@ def build_model(
                 flow_kind=air_kinds,
                 boundary=air_boundary, n_species=1, scheme=scheme,
                 quantity="concentration", unit="kg/m3", species_names=("h2s",),
+                source_unit="kg/s", capacity_unit="m3", flow_unit="m3/s",
             )
             ordered = [graph.nodes[i] for i in layers["air_quality"].interior_idx.tolist()]
             if ordered != manhole_names:

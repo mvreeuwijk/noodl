@@ -43,12 +43,14 @@ print(round(float(heads["J1"]), 6), round(float(flows["P1"]), 6))
 ```
 
 To change an input, give it by name over the builder's own values. A demand is a
-negative source (m³/s withdrawn), and junctions not named keep their demand:
+negative source (m³/s withdrawn; `demand=` does the sign for you), and junctions not named
+keep their demand. A model built with `quality=` keeps the removal rate of its
+build-time demands; rebuild the model to change both:
 
 ```python
 from noodl.apps.water import initial_drivers
 
-more = initial_drivers(model, values={water.sources: {"J2": -0.012}})
+more = initial_drivers(model, demand={"J2": 0.012})      # m3/s withdrawn at J2
 final = water_steady(model, state, more)
 print(round(float(water.head.named(final[water.head])["J2"]), 6))
 ```

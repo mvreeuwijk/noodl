@@ -41,7 +41,7 @@ Build the model and its starting state and inputs.
 | Name | What it does | How to call it |
 |---|---|---|
 | `build_model` | `(Model, initial state, driver template)` for one street network. | `build_model(net, *, preset='sirane', canyon_wind=None, roof_wind=None, roof_exchange=None, junction_routing=None, direction_averaging=None, direction_spread=None, stability=None, shape_constant=None, n_theta=None, sigma_theta=None, species=('nox',), chemistry=None, scheme='implicit', kappa=None, canyon_wind_min=None, u_d_min=None, sigma_w_min=None, sigma_v_min=None, sigma_w_height=None, h_canopy=None, z0_s=0.01, z_ref=30.0, pblh_floor=True, meteo='uniform', background='uniform', atmosphere='atmosphere', layer_name='street', **deprecated)` |
-| `initial_drivers` | `build_model`'s driver template (copied), then `values` by name (see `noodl.refs.drivers_from`), e.g. by street and species name: | `initial_drivers(model, *, values=None)` |
+| `initial_drivers` | `build_model`'s driver template (copied), then `values` by name (see `noodl.refs.drivers_from`), e.g. by street and species name. | `initial_drivers(model, *, values=None)` |
 | `initial_state` | Zero concentration everywhere, in each transport layer's own shape; then `values` by street and species name (see `noodl.refs.state_from`): `initial_state(model, values={"street": {"s1": {"nox": 1e-7}}})`. | `initial_state(model, *, values=None)` |
 
 ## Network components
@@ -51,7 +51,7 @@ Descriptions of the physical objects a network is built from.
 | Name | What it does | How to call it |
 |---|---|---|
 | `PlumeTable` | One plume trajectory per hour, resampled onto a distance grid (`plume_table`). | `PlumeTable(batch, sigma_y, p_z, u, step, x_max)` |
-| `Street` | One street segment. `u` and `v` are junction names; the azimuth points `u -> v`. | `Street(name, u, v, length, width, height, z0_b=0.15, emission_scale=1.0)` |
+| `Street` | One street segment between junctions `u` and `v` (the azimuth points `u -> v`): its `length`, `width` and building `height` (m), the roughness length of its building walls `z0_b` (m, 0.15 by default) and `emission_scale`, a dimensionless factor applied to its emissions. | `Street(name, u, v, length, width, height, z0_b=0.15, emission_scale=1.0)` |
 | `StreetCase` | One street-network case: the network plus every array a `Model` built on it needs to run, independent of which source model (`source`) it came from. | `StreetCase(source, network, times, street_ids, junction_ids, species, meteo, meteo_junction, emissions, background, native, start=None)` |
 | `StreetResults` | One street model's own results, read format-neutral by `read_results` from a SIRANE result directory or a MUNICH `results/` directory. | `StreetResults(source, times, street_ids, species, c_in, c_above, u_canyon, sigma_w_roof, u_exchange, meteo)` |
 | `StreetGeometry` | Everything `StreetFlows` needs about the streets, as plain tensors. | `StreetGeometry(names, u, v, length, width, height, z0_b, azimuth)` |
@@ -91,7 +91,7 @@ Supporting types.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `StreetSources` | Every street's roof flux as sub-sources (`source_points`). | `StreetSources(*args, **kwargs)` |
+| `StreetSources` | Every street's roof flux as sub-sources (`source_points`). | `StreetSources(xy, owner, weight, width, clamp)` |
 
 ## Functions
 
@@ -146,20 +146,14 @@ Named values and option tables.
 
 | Name | Value |
 |---|---|
-| `ASPECT_RATIO_EXCHANGE_BETA` | `0.45015815807855303` |
-| `EULER_GAMMA_TRUNCATED` | `0.577` |
-| `EXCHANGE_SIGMA_W_RATIO` | `0.22507907903927651` |
-| `GAMMA_E` | `0.577` |
-| `GAUSS_CUTOFF_SIGMAS` | `4.0` |
-| `KAPPA` | `0.4` |
-| `KAPPA_040` | `0.4` |
-| `KAPPA_041` | `0.41` |
-| `KAPPA_MUNICH` | `0.41` |
+| `ASPECT_RATIO_EXCHANGE_BETA`<br><small>also `SCHULTE_BETA`</small> | `0.45015815807855303` |
+| `EULER_GAMMA_TRUNCATED`<br><small>also `GAMMA_E`</small> | `0.577` |
+| `EXCHANGE_SIGMA_W_RATIO`<br><small>also `SIRANE_EXCHANGE`</small> | `0.22507907903927651` |
+| `GAUSS_CUTOFF_SIGMAS`<br><small>also `SEUIL_GAUSS`</small> | `4.0` |
+| `KAPPA_040`<br><small>also `KAPPA`</small> | `0.4` |
+| `KAPPA_041`<br><small>also `KAPPA_MUNICH`</small> | `0.41` |
 | `OPTIONS` | table of 9 entries: `canyon_wind`, `roof_wind`, `roof_exchange`, `junction_routing`, `direction_averaging`, `direction_spread`, `stability`, `sigma_w_height`, ... |
 | `PRESETS` | table of 2 entries: `sirane`, `munich` |
 | `Q_INHALATION` | `0.0001586111111111111` |
-| `SCHULTE_BETA` | `0.45015815807855303` |
-| `SEUIL_GAUSS` | `4.0` |
-| `SIRANE_EXCHANGE` | `0.22507907903927651` |
 | `Z0_B_DEFAULT` | `0.15` |
 | `Z0_S_DEFAULT` | `0.01` |

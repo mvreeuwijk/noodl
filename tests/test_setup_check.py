@@ -186,3 +186,14 @@ def test_the_unused_edge_kind_report_counts_edges():
         net.add_edge("A", "ambient", kind="airpth", z_path=1.0, Cd=0.6, area=0.01)
     (issue,) = [i for i in model.check(state, drivers).issues if i.code == "unused-edge-kind"]
     assert "has 3 edge(s)" in issue.message
+
+
+def test_a_temperature_that_looks_like_celsius_is_a_warning():
+    _, model, state, drivers = _setup()
+    th = model.refs.thermal
+    cold = {**drivers, th.x_boundary: th.x_boundary.build({"ambient": 10.0})}
+    report = model.check(state, cold)
+    assert report.ok
+    (issue,) = [i for i in report.issues if i.code == "value-range"]
+    assert issue.key == "thermal.x_boundary" and "kelvin" in issue.message
+    assert not [i for i in model.check(state, drivers).issues if i.code == "value-range"]

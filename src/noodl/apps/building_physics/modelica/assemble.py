@@ -1105,7 +1105,7 @@ class _Builder:
             p_ref = zones[g.zones[0]].p_start if g.zones else med.p_default
 
         air = PotentialFlowLayer(net, "air", elements, drives=drives, boundary=air_boundary,
-                                 quantity="pressure", unit="Pa")
+                                 quantity="pressure", unit="Pa", flow_unit="kg/s")
         th_store = storage.thermo(med) if use_storage else None
         storage_air: list[int] = []
         if use_storage:
@@ -1117,7 +1117,7 @@ class _Builder:
                 air = PotentialFlowLayer(
                     net, "air", elements, drives=drives, boundary=air_boundary,
                     node_sources=[storage.ZoneStorage(storage_air, vols, p_ref, th_store)],
-                    quantity="pressure", unit="Pa")
+                    quantity="pressure", unit="Pa", flow_unit="kg/s")
         layers: dict = {"air": air}
         flow_kinds = tuple(air.kinds)
 
@@ -1152,7 +1152,7 @@ class _Builder:
             layers["thermal"] = TransportLayer(
                 net, "thermal", capacity=cap, flow_kind=flow_kinds, boundary=th_boundary,
                 carrier=float(cp), scheme="exact", quantity="temperature", unit="K",
-                dilution=lam_T,
+                dilution=lam_T, source_unit="W", capacity_unit="J/K", flow_unit="kg/s",
             )
         sp_boundary = list(g.boundaries)
         sp_interior = None
@@ -1168,7 +1168,7 @@ class _Builder:
                 layers["species"] = TransportLayer(
                     net, "species", capacity=cap, flow_kind=flow_kinds, boundary=sp_boundary,
                     n_species=K, scheme="exact", quantity="mass_fraction", unit="kg/kg",
-                    dilution=sp_dilution,
+                    dilution=sp_dilution, source_unit="kg/s", capacity_unit="kg", flow_unit="kg/s",
                 )
 
         # ---------------------------------------------------------- drivers
@@ -1363,7 +1363,7 @@ class _Builder:
             fixed = [node_names[i] for i in storage_air if i not in free]
             init_layer = PotentialFlowLayer(net, "air", elements, drives=drives,
                                             boundary=list(air_boundary) + fixed,
-                                            quantity="pressure", unit="Pa")
+                                            quantity="pressure", unit="Pa", flow_unit="kg/s")
         return storage.StorageClosure(
             mbl=mbl, th=th, p_ref=p_ref, volumes=V, storage=stores, m_fixed=m_fixed,
             air_nodes=torch.tensor(storage_air, dtype=torch.long),

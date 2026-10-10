@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pickle
+from pathlib import Path
 
 import pytest
 import torch
@@ -25,6 +26,7 @@ from noodl.model import Model
 from noodl.refs import Field
 from noodl.topology import Network
 
+DATA = Path(__file__).resolve().parent / "data"
 F64 = torch.float64
 
 
@@ -296,3 +298,33 @@ def test_keys_are_named_for_the_physics_the_layer_carries():
     with pytest.raises(AttributeError, match="did you mean 'temperature'"):
         th.temprature  # noqa: B018
     assert "temperature" in dir(th)
+
+
+def test_every_key_of_every_application_reports_a_unit():
+    """Sources, flows, capacity, requests and storage carry units like state does."""
+    from noodl.apps import sewer, street_aq, water, wsimod
+
+    _, model = _two_zone_with_wall()
+    r = model.refs
+    assert r.air.flow.unit == "kg/s" and r.air.sources.unit == "kg/s"
+    assert r.thermal.sources.unit == "W" and r.thermal.capacity.unit == "J/K"
+    assert r.species.sources.unit == "kg/s" and r.species.capacity.unit == "kg"
+
+    model, state, drivers = street_aq.build_model(street_aq.from_test_network())
+    st = model.refs.street
+    assert st.sources.unit == "kg/s" and st.flow.unit == "m3/s" and st.capacity.unit == "m3"
+
+    model, state, drivers = sewer.build_model(sewer.tree_steady())
+    r = model.refs
+    assert r.air.flow.unit == "m3/s" and r.water_quality.flow.unit == "m3/s"
+    assert r.water_quality.sources.unit == "kg/s" and r.air_quality.sources.unit == "kg/s"
+
+    model, state, drivers = water.build_model(water.twoloop())
+    assert model.refs.water.flow.unit == "m3/s" and model.refs.water.sources.unit == "m3/s"
+
+    model, state, drivers = wsimod.build_model(DATA / "wsimod" / "quickstart_topology.json")
+    w = model.refs.wsimod
+    assert w.storage.unit == "m3" and w.requests.unit == "m3/s" and w.flow.unit == "m3/s"
+    assert w.quantity == "storage"
+    # The check table shows them.
+    assert "m3/s" in str(model.check(state, drivers))

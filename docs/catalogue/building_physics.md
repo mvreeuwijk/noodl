@@ -7,6 +7,43 @@ Every application is set up the same way; see [Using noodl](../usage.md).
 
 Import from `noodl.apps.building_physics` and the modules named in each table. The full reference, with every parameter, is in the [API reference](../api.md).
 
+## Network attributes
+
+What the builders, elements and drives read off `net.add_node(...)` and `net.add_edge(...)`, by name. Defined in `noodl.apps.building_physics.attributes`.
+
+**Nodes**
+
+| Attribute | Meaning | Read by |
+|---|---|---|
+| `volume` | air volume of the zone (m3); 0 for a wall node | `thermal_layer`, `species_layer` |
+| `T0` | initial temperature (K), also the boundary temperature of a boundary node | `initial_state`, `initial_drivers`, `project_to_model` |
+| `z_ref` | height of the node's reference pressure (m) | `Stack.from_network` |
+| `heat_capacity` | extra lumped heat capacity of the node (J/K); a wall node's capacity | `thermal_layer` |
+
+**Edges of kind `airpath`**
+
+| Attribute | Meaning | Read by |
+|---|---|---|
+| `z_path` | height of the opening (m) | `Stack.from_network` |
+| `Cd` | discharge coefficient (dimensionless) | `orifice_elements_from_edges` |
+| `area` | opening area (m2) | `orifice_elements_from_edges` |
+| `name` | label of the edge in model.refs and in named results (optional) | `noodl.refs` |
+
+**Edges of kind `airpath`, to or from the ambient node**
+
+| Attribute | Meaning | Read by |
+|---|---|---|
+| `azimuth` | facade direction, in the unit of the theta_w driver (degrees from CONTAM) | `Wind.from_network` |
+| `Cp` | constant wind pressure coefficient when the edge has no profile | `Wind.from_network` |
+| `Ch` | wind speed modifier (dimensionless, 1 by default) | `Wind.from_network` |
+| `profile` | number of the WindProfile to use; 0 means the constant Cp | `Wind.from_network` |
+
+**Edges of kind `wall`**
+
+| Attribute | Meaning | Read by |
+|---|---|---|
+| `ua` | conductance zone -> wall or wall -> ambient (W/K) | `thermal_layer` |
+
 ## Set-up
 
 Build the model and its starting state and inputs.
@@ -14,7 +51,7 @@ Build the model and its starting state and inputs.
 | Name | What it does | How to call it |
 |---|---|---|
 | `build_model`<br><small>`noodl.apps.building_physics`</small> | Layers "air" (+ "thermal", + "species"), the density closure, one Model. | `build_model(net, *, air_elements, drives, ambient='ambient', thermal=True, species=0, density='ideal_gas', density_kwargs=None, coupling='pingpong', iterate_tol=None, iterate_max=20, thermal_scheme='exact', species_scheme='implicit', flow_kinds=None, return_inputs=False)` |
-| `initial_drivers`<br><small>`noodl.apps.building_physics`</small> | A complete driver set: zero boundary pressures, boundary temperatures from each boundary node's `T0` attribute (`T_REF` where it has none), zero boundary mass fractions; then `values`, by name (see `noodl.refs.drivers_from`): | `initial_drivers(model, *, values=None)` |
+| `initial_drivers`<br><small>`noodl.apps.building_physics`</small> | A complete driver set: zero boundary pressures, boundary temperatures from each boundary node's `T0` attribute (`T_REF` where it has none), zero boundary mass fractions; then `values`, by name (see `noodl.refs.drivers_from`). | `initial_drivers(model, *, values=None)` |
 | `initial_state`<br><small>`noodl.apps.building_physics`</small> | `"<layer>.x"` for every transport layer: temperatures from the node attribute `T0` (interior order), mass fractions zero; then `values`. | `initial_state(model, *, values=None)` |
 | `project_to_model`<br><small>`noodl.apps.building_physics`</small> | Air layer + species layer (no thermal layer: a .prj carries no thermal data), the initial state and the drivers for the project's ambient conditions (or `ambient`). | `project_to_model(project, *, ambient=None, species=True, scheme='implicit')` |
 
@@ -28,7 +65,6 @@ Descriptions of the physical objects a network is built from.
 | `WallMass`<br><small>`noodl.apps.building_physics`</small> | A lumped wall node: capacity [J/K], conductances to the zone and to ambient [W/K]. | `WallMass(name, capacity, ua_zone, ua_ambient)` |
 | `Weather`<br><small>`noodl.apps.building_physics`</small> | A weather series: time `t` (s from the file's start date), ambient temperature `Ta` (K), barometric pressure `Pb` (Pa), wind speed `Ws` (m/s) and direction `Wd` (degrees); `at(t)` interpolates. | `Weather(t, Ta, Pb, Ws, Wd)` |
 | `Zone`<br><small>`noodl.apps.building_physics`</small> | A room: its air `volume` (m3), initial temperature `T0` (K), reference height `z_ref` (m) and an optional lumped `wall` (`WallMass`). Add it with `add_zone`. | `Zone(name, volume, T0=293.15, z_ref=0.0, wall=None)` |
-| `AirMedium`<br><small>also `MBLMedium`</small><br><small>`noodl.elements`</small> | An air medium's default state and the two densities its flow elements need. | `AirMedium(name, p_default, T_default, X_default, rho_default, has_moisture, _buoyancy, _density=None, _cp=None)` |
 
 ## Elements (branch laws)
 
@@ -36,19 +72,18 @@ Flow through an edge as a function of the potential difference across it.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `Conductance`<br><small>`noodl.elements`</small> | q = g dp, the linear branch law used for thermal conduction and passive exchange. | `Conductance(g, *, kind='conduction', learnable=False)` |
-| `Damper`<br><small>`noodl.elements`</small> | Separate power-law coefficient and exponent for each flow direction. | `Damper(C_pos, n_pos, C_neg, n_neg, *, dp_transition=0.001, kind='damper', learnable=False)` |
+| `Conductance`<br><small>`noodl.elements`</small> | q = g dp, the linear branch law used for thermal conduction and passive exchange; `g` is in the flow unit per unit of potential (W/K for heat, kg/s per Pa for air). | `Conductance(g, *, kind='conduction', learnable=False)` |
+| `Damper`<br><small>`noodl.elements`</small> | Separate power-law coefficient and exponent for each flow direction: `C_pos`/`n_pos` for dp > 0 and `C_neg`/`n_neg` for dp < 0, each as in `PowerLaw` (`C` in the flow unit per Pa^n, `n` dimensionless). | `Damper(C_pos, n_pos, C_neg, n_neg, *, dp_transition=0.001, kind='damper', learnable=False)` |
 | `DoorCompartment`<br><small>also `MBLDoorCompartment`</small><br><small>`noodl.elements`</small> | One compartment of ``Buildings.Airflow.Multizone.DoorDiscretizedOpen`` per edge. | `DoorCompartment(*, src, tgt, medium, dA, CD=0.65, m=0.5, dp_turbulent=0.01, vZer=0.001, T_key='T', Xw_key='X_w', p_key='p_abs', kind='door', learnable=False)` |
 | `DoorPortStream`<br><small>also `MBLDoorPortStream`</small><br><small>`noodl.elements`</small> | One of the two port streams of a whole discretised door, as ONE edge from side A to side B: ``direction="ab"`` returns ``port_a1.m_flow = mAB_flow``, ``"ba"`` returns ``port_b2.m_flow = -port_a2.m_flow = -mBA_flow`` (kg/s, both positive from A to B), from the compartment law ``comp`` (:class:`DoorCompartment` or :class:`OperableDoorCompartment`, one door) at the compartment pressure differences ``dp + head(drivers)`` (:class:`DoorCompartmentHead`). The edge's own ``dp`` is the zones' potential difference ``phi_A - phi_B``. | `DoorPortStream(comp, head, direction, kind)` |
-| `Duct`<br><small>`noodl.elements`</small> | Colebrook duct: F(dp) with friction from the Colebrook equation, laminar below Re_t. | `Duct(L, D, eps, sum_C=0.0, *, A=None, Re_t=2000.0, rho=1.2041, mu=1.81625e-05, n_iter=4, kind='duct', learnable=False)` |
-| `Element`<br><small>`noodl.elements`</small> | Abstract branch law: flow as a function of potential difference. | `Element(kind)` |
-| `FanCurve`<br><small>`noodl.elements`</small> | Cubic pressure-flow curve inverted for q given dp on [0, q_max]. | `FanCurve(coeffs, q_max, *, kind='airpath', learnable=False)` |
-| `FixedFlow`<br><small>`noodl.elements`</small> | q = q0 regardless of dp; dflow = 0; linear_init = (q0, 0). | `FixedFlow(q0, *, kind='airpath', learnable=False)` |
+| `Duct`<br><small>`noodl.elements`</small> | Colebrook duct: F(dp) with friction from the Colebrook equation, laminar below Re_t. Length `L`, diameter `D` and roughness `eps` (m); `sum_C` the dimensionless sum of dynamic loss coefficients; `A` (m2) defaults to the circular area; `rho` (kg/m3) and `mu` (Pa s); the flow is a mass flow in kg/s. | `Duct(L, D, eps, sum_C=0.0, *, A=None, Re_t=2000.0, rho=1.2041, mu=1.81625e-05, n_iter=4, kind='duct', learnable=False)` |
+| `FanCurve`<br><small>`noodl.elements`</small> | Cubic pressure-flow curve inverted for q given dp on [0, q_max]: `coeffs` are (a0, a1, a2, a3) of P(q) = a0 + a1 q + a2 q^2 + a3 q^3 in Pa for q in the flow unit, and `q_max` is the largest flow the curve covers, in that unit. | `FanCurve(coeffs, q_max, *, kind='airpath', learnable=False)` |
+| `FixedFlow`<br><small>`noodl.elements`</small> | q = q0 regardless of dp (`q0` in the flow unit); dflow = 0; linear_init = (q0, 0). | `FixedFlow(q0, *, kind='airpath', learnable=False)` |
 | `OpenDoor`<br><small>also `MBLDoorOpen`</small><br><small>`noodl.elements`</small> | ``Buildings.Airflow.Multizone.DoorOpen``: one direction of the always-open door. | `OpenDoor(*, direction, src, tgt, medium, wOpe=0.9, hOpe=2.1, CD=0.65, m=0.5, dp_turbulent=0.01, T_key='T', kind='door', learnable=False)` |
 | `OperableDoor`<br><small>also `MBLDoorOperable`</small><br><small>`noodl.elements`</small> | ``Buildings.Airflow.Multizone.DoorOperable``: the door blended between open and closed by the opening signal ``y`` read from ``drivers[y_key]``. | `OperableDoor(*, direction, src, tgt, medium, y_key, LClo, wOpe=0.9, hOpe=2.1, CDOpe=0.65, mOpe=0.5, mClo=0.65, dpCloRat=4.0, CDCloRat=1.0, dp_turbulent=0.01, T_key='T', kind='door', learnable=False)` |
 | `OperableDoorCompartment`<br><small>also `MBLDoorCompartmentOperable`</small><br><small>`noodl.elements`</small> | One compartment of ``Buildings.Airflow.Multizone.DoorDiscretizedOperable`` per edge, blended between the open door and the closed crack by ``y = drivers[y_key]``. | `OperableDoorCompartment(*, src, tgt, medium, y_key, AOpe, LClo, nCom, CDOpe=0.65, CDClo=0.65, CDCloRat=1.0, dpCloRat=4.0, mOpe=0.5, mClo=0.65, dp_turbulent=0.01, vZer=0.001, T_key='T', Xw_key='X_w', p_key='p_abs', kind='door', learnable=False)` |
-| `PowerLaw`<br><small>`noodl.elements`</small> | q = C sign(dp) \|dp\|^n, laminar-blended or smoothly regularised near dp = 0. | `PowerLaw(C, n, *, dp_transition=0.001, regularised=None, kind='airpath', learnable=False)` |
-| `Quadratic`<br><small>`noodl.elements`</small> | q = sign(dp) * 2\|dp\| / (sqrt(a^2 + 4 b \|dp\|) + a). | `Quadratic(a, b, *, kind='airpath', learnable=False)` |
+| `PowerLaw`<br><small>`noodl.elements`</small> | q = C sign(dp) \|dp\|^n, laminar-blended or smoothly regularised near dp = 0. `dp` is in Pa; `C` is in the flow unit per Pa^n (kg/s for a mass-flow coefficient, m3/s for a volume-flow one), so the flow comes out in whatever unit `C` carries; `n` is dimensionless (0.5 for an orifice, towards 1 for a laminar crack). | `PowerLaw(C, n, *, dp_transition=0.001, regularised=None, kind='airpath', learnable=False)` |
+| `Quadratic`<br><small>`noodl.elements`</small> | q = sign(dp) * 2\|dp\| / (sqrt(a^2 + 4 b \|dp\|) + a): the inverse of dp = a q + b \|q\| q, with `dp` in Pa, `a` in Pa per flow unit and `b` in Pa per flow unit squared. | `Quadratic(a, b, *, kind='airpath', learnable=False)` |
 | `RegularizedPowerLaw`<br><small>also `MBLPowerLaw`</small><br><small>`noodl.elements`</small> | MBL's regularised power law, ``q = C sign(dp) \|dp\|^m``, volume or mass form. | `RegularizedPowerLaw(C, m, *, dp_turbulent=0.1, form, rho_default, kind='airpath', learnable=False)` |
 | `SplineFlowTable`<br><small>also `MBLTable`</small><br><small>`noodl.elements`</small> | MBL's tabulated flow law: a monotone cubic Hermite spline through ``(dp, flow)`` knots, linearly extrapolated outside them; ``flow(dp)`` always returns MASS flow in kg/s. | `SplineFlowTable(dp_points, flow_points, *, form, rho_default=None, kind='airpath')` |
 | `UpstreamDensityPowerLaw`<br><small>`noodl.elements`</small> | `PowerLaw` with `C` scaled by `(rho_upstream / rho_ref) ** m`, upstream by `sign(dp)`. | `UpstreamDensityPowerLaw(C, n, *, src, tgt, m, rho_ref=1.2041, rho_key='rho', dp_transition=0.001, regularised=None, kind='airpath', learnable=False)` |
@@ -60,11 +95,10 @@ Terms added to an edge's potential difference (stack, wind, fans).
 | Name | What it does | How to call it |
 |---|---|---|
 | `DoorCompartmentHead`<br><small>`noodl.elements`</small> | The hydrostatic part of ``DoorDiscretized.mo:64-66``, as a noodl drive: ``rho_A hAg[i] - rho_B hBg[i]`` per compartment edge, shape ``(..., n_edges)``. | `DoorCompartmentHead(kind, *, src, tgt, hAg, hBg, medium, T_key='T', Xw_key='X_w', p_key='p_abs')` |
-| `Drive`<br><small>`noodl.drives`</small> | A drive must read every differentiable quantity from `drivers`, never own one. | `Drive(*args, **kwargs)` |
 | `ConstantDrive`<br><small>`noodl.drives`</small> | A drive that reads a pre-computed, already batched value from `drivers`. | `ConstantDrive(kind, key)` |
 | `Stack`<br><small>`noodl.drives`</small> | Hydrostatic stack term (CONTAM TN 1887r1 eq. 17 with eq. 64-65 at the path elevation). | `Stack(kind, *, src, tgt, z_path, z_ref, rho_key='rho', g=9.80665)` |
 | `WindProfile`<br><small>`noodl.drives`</small> | CONTAM wind pressure profile: Cp versus relative wind angle, periodic piecewise-linear. | `WindProfile(angles_deg, cp)` |
-| `Wind`<br><small>`noodl.drives`</small> | Wind pressure on envelope paths (CONTAM TN 1887r1 section 3.15): | `Wind(kind, *, sign, envelope, azimuth, ch, cp_const, profile_index, profiles=(), rho_key='rho_amb', speed_key='V_met', direction_key='theta_w')` |
+| `Wind`<br><small>`noodl.drives`</small> | Wind pressure on envelope paths (CONTAM TN 1887r1 section 3.15). Drivers: `rho_amb` in kg/m3, `V_met` in m/s and `theta_w` in the unit the `azimuth` edge attribute uses (degrees for networks read from CONTAM). | `Wind(kind, *, sign, envelope, azimuth, ch, cp_const, profile_index, profiles=(), rho_key='rho_amb', speed_key='V_met', direction_key='theta_w')` |
 
 ## Closures
 
@@ -98,6 +132,14 @@ Readers and writers of other tools' file formats.
 | `read_wth`<br><small>`noodl.apps.building_physics`</small> | A CONTAM `.wth` weather file as a `Weather` series (ambient temperature, pressure, wind speed and direction). | `read_wth(path)` |
 | `write_wth`<br><small>`noodl.apps.building_physics`</small> | `WeatherFile ContamW 2.0`, one row per sample, the columns `read_wth` reads. | `write_wth(weather, path, *, start_date='1/1')` |
 
+## Other classes
+
+Supporting types.
+
+| Name | What it does | How to call it |
+|---|---|---|
+| `AirMedium`<br><small>also `MBLMedium`</small><br><small>`noodl.elements`</small> | An air medium's default state and the two densities its flow elements need. | `AirMedium(name, p_default, T_default, X_default, rho_default, has_moisture, _buoyancy, _density=None, _cp=None)` |
+
 ## Functions
 
 Calculations and helpers.
@@ -114,7 +156,7 @@ Calculations and helpers.
 | `species_layer`<br><small>`noodl.apps.building_physics`</small> | Species as mass fractions with zone air mass rho V as capacity (CONTAM convention). | `species_layer(net, *, ambient='ambient', name='species', flow_kinds=('airpath',), rho=1.2041, n_species=1, scheme='implicit', species_names=None)` |
 | `sources_from_project`<br><small>`noodl.apps.building_physics`</small> | The project's `PrjSource` records (from `read_prj`) -> source objects. | `sources_from_project(project, *, dt=60.0)` |
 | `thermal_layer`<br><small>`noodl.apps.building_physics`</small> | The heat layer: capacity rho c_p V + heat_capacity per active interior node, carrier c_p on the flow kinds, conduction UA on `conduction_kind` edges (if any exist). | `thermal_layer(net, *, ambient='ambient', name='thermal', flow_kinds=('airpath',), conduction_kind='wall', c_p=1005.0, rho=1.2041, scheme='exact', fixed_temperature=())` |
-| `Orifice`<br><small>`noodl.elements`</small> | PowerLaw(C = Cd * A * sqrt(2 / rho), n = 0.5): the sharp-edged orifice equation. | `Orifice(Cd, A, *, rho=1.2, dp_transition=0.001, regularised=None, kind='airpath', learnable=False)` |
+| `Orifice`<br><small>`noodl.elements`</small> | PowerLaw(C = Cd * A * sqrt(2 / rho), n = 0.5): the sharp-edged orifice equation, as a VOLUME flow in m3/s from `Cd` (dimensionless discharge coefficient), `A` (m2) and `rho` (kg/m3). | `Orifice(Cd, A, *, rho=1.2, dp_transition=0.001, regularised=None, kind='airpath', learnable=False)` |
 | `discretized_door`<br><small>also `mbl_discretized_door`</small><br><small>`noodl.elements`</small> | One ``DoorDiscretizedOpen`` as ``nCom`` edges of ``kind``: the compartment element and its head drive. Defaults are MBL's (``DoorDiscretized.mo:6-11``, ``TwoWayFlowElementBuoyancy.mo:6-14``, ``DoorDiscretizedOpen.mo:6``, ``TwoWayFlowElement.mo:19``). ``dA = wOpe hOpe / nCom`` on every edge (``DoorDiscretizedOpen.mo:23``, ``DoorDiscretized.mo:60``). | `discretized_door(*, src, tgt, medium, nCom=10, wOpe=0.9, hOpe=2.1, hA=1.35, hB=1.35, CD=0.65, m=0.5, dp_turbulent=0.01, vZer=0.001, kind='door', T_key='T', Xw_key='X_w', p_key='p_abs')` |
 | `discretized_operable_door`<br><small>also `mbl_discretized_operable_door`</small><br><small>`noodl.elements`</small> | One ``DoorDiscretizedOperable`` as ``nCom`` edges of ``kind``; see :func:`discretized_door`. ``AOpe = wOpe hOpe`` (``DoorDiscretizedOperable.mo:35``); ``LClo`` has no MBL default. | `discretized_operable_door(*, src, tgt, medium, y_key, LClo, nCom=10, wOpe=0.9, hOpe=2.1, hA=1.35, hB=1.35, CDOpe=0.65, CDClo=0.65, CDCloRat=1.0, dpCloRat=4.0, mOpe=0.5, mClo=0.65, dp_turbulent=0.01, vZer=0.001, kind='door', T_key='T', Xw_key='X_w', p_key='p_abs')` |
 | `effective_leakage_area`<br><small>also `mbl_ela`</small><br><small>`noodl.elements`</small> | ``EffectiveAirLeakageArea.mo:3-5,7-14,16``: ``C = L * CDRat * sqrt(2 / rho_default) * dpRat ** (0.5 - m)``, ``m = 0.65`` by default (``:4``), ``dpRat = 4`` Pa (``:7-9``), ``CDRat = 1`` (``:11-14``). | `effective_leakage_area(L, dpRat=4.0, CDRat=1.0, m=0.65, dp_turbulent=0.1, *, rho_default, kind='airpath', learnable=False)` |
@@ -126,3 +168,12 @@ Calculations and helpers.
 | `power_law_from_points`<br><small>also `mbl_points`</small><br><small>`noodl.elements`</small> | ``Points_m_flow.mo:4-6,15-16``: the flow exponent itself is derived from two measured (dp, m_flow) pairs, ``m = (ln(mMea[0]) - ln(mMea[1])) / (ln(dpMea[0]) - ln(dpMea[1]))``, then ``k = mMea[0] / dpMea[0] ** m``. ``dpMea``/``mMea_flow`` are each a 2-element sequence. | `power_law_from_points(dpMea, mMea_flow, dp_turbulent=0.1, *, rho_default, kind='airpath', learnable=False)` |
 | `regularized_orifice`<br><small>also `mbl_orifice`</small><br><small>`noodl.elements`</small> | ``Orifice.mo:3-5,9``: ``C = CD * A * sqrt(2 / rho_default)``, ``m = 0.5`` by default (overridable, per ``Orifice.mo:3``'s non-``final`` ``m=0.5`` modifier); ``C`` itself is ``final`` in MBL (does not depend on ``m``). ``CD`` defaults to 0.65 (``Orifice.mo:9``, the sharp-edged-orifice discharge coefficient). | `regularized_orifice(A, CD=0.65, m=0.5, dp_turbulent=0.1, *, rho_default, kind='airpath', learnable=False)` |
 | `check_drive_signature`<br><small>`noodl.drives`</small> | Raise `TypeError` unless `drive` is callable as `drive(drivers)`. | `check_drive_signature(drive, *, where)` |
+
+## Base classes (for extending)
+
+Subclass these to add an element, drive, closure, reaction or node source; see [Extending noodl](../development/extending.md).
+
+| Name | What it does | How to call it |
+|---|---|---|
+| `Element`<br><small>`noodl.elements`</small> | Abstract branch law: flow as a function of potential difference. | `Element(kind)` |
+| `Drive`<br><small>`noodl.drives`</small> | A drive must read every differentiable quantity from `drivers`, never own one. | `Drive(...)` |

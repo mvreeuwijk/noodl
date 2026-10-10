@@ -35,8 +35,8 @@ from noodl.elements.fixed import FixedFlow
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.transport import TransportLayer
 from noodl.model import Model
+from noodl.refs import drivers_from, state_from
 from noodl.refs import initial_drivers as refs_initial_drivers
-from noodl.refs import state_from
 from noodl.topology import Network
 
 Tensor = torch.Tensor
@@ -587,7 +587,7 @@ def build_model(
     layer = PotentialFlowLayer(
         graph, "water", elements, boundary=boundary, node_sources=node_sources,
         quantity="head" if headloss == "H-W" else "pressure",
-        unit="m" if headloss == "H-W" else "Pa",
+        unit="m" if headloss == "H-W" else "Pa", flow_unit="m3/s",
     )
 
     layers: dict = {"water": layer}
@@ -661,6 +661,7 @@ def build_model(
             graph, "quality", capacity=cap_i, flow_kind="pipe",
             boundary=boundary, n_species=1, removal=removal, scheme="implicit",
             quantity="concentration", unit="kg/m3",
+            source_unit="kg/s", capacity_unit="m3", flow_unit="m3/s",
         )
         drivers["quality.x_boundary"] = torch.zeros(len(boundary), dtype=F64)
         state["quality.x"] = torch.zeros(len(interior), dtype=F64)
@@ -735,13 +736,32 @@ def initial_state(model: Model, *, values: Mapping | None = None) -> State:
     return state
 
 
-def initial_drivers(model: Model, *, values: Mapping | None = None) -> Drivers:
+def initial_drivers(
+    model: Model, *, values: Mapping | None = None, demand: Mapping | None = None,
+) -> Drivers:
     """`build_model`'s driver template (copied), then `values` by name (see
-    `noodl.refs.drivers_from`), e.g. a junction demand (a negative source) by name:
+    `noodl.refs.drivers_from`), then `demand`: `{junction: m3/s withdrawn}`, positive,
+    stored as the negative nodal source the head solve takes.
 
-        initial_drivers(model, values={"water.sources": {"J1": -0.005}})
+        initial_drivers(model, demand={"J1": 0.005})
+        initial_drivers(model, values={"water.sources": {"J1": -0.005}})   # the same
+
+    A pressure-driven model (`pda=True`) refuses `demand=`: its demands are node sources
+    the network set at build time. A model built with `quality=` keeps the removal rate of
+    its build-time demands, so `demand=` (like `values=`) changes the hydraulics but not
+    the quality sink; rebuild the model to change both.
     """
-    return refs_initial_drivers(model, values=values)
+    drivers = refs_initial_drivers(model, values=values)
+    if demand:
+        layer = model.potential["water"]
+        if any(isinstance(s, PressureDrivenDemand) for s in layer._node_sources):
+            raise ValueError(
+                "initial_drivers: the demands of this model are pressure-driven and were "
+                "set by the network at build time, so demand= cannot change them"
+            )
+        key = "water.sources"
+        drivers = drivers_from(model, {key: {n: -q for n, q in demand.items()}}, base=drivers)
+    return drivers
 
 
 def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -> State:

@@ -10,7 +10,9 @@ Tensor = torch.Tensor
 
 
 class Conductance(Element):
-    """q = g dp, the linear branch law used for thermal conduction and passive exchange."""
+    """q = g dp, the linear branch law used for thermal conduction and passive exchange; `g` is
+    in the flow unit per unit of potential (W/K for heat, kg/s per Pa for air).
+    """
 
     def __init__(self, g, *, kind: str = "conduction", learnable: bool = False) -> None:
         super().__init__(kind)

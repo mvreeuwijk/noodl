@@ -16,7 +16,7 @@ Tensor = torch.Tensor
 
 
 class FixedFlow(Element):
-    """q = q0 regardless of dp; dflow = 0; linear_init = (q0, 0).
+    """q = q0 regardless of dp (`q0` in the flow unit); dflow = 0; linear_init = (q0, 0).
 
     Declares ``dp_independent = True`` (see ``Element``): the differentiable solve path
     trusts this declaration to take the exact-zero Jacobian column shortcut for this

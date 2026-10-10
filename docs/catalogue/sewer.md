@@ -14,7 +14,7 @@ Build the model and its starting state and inputs.
 | Name | What it does | How to call it |
 |---|---|---|
 | `build_model` | Assemble the sewer model and return `(model, state, drivers)`. | `build_model(net, *, storage=False, air=True, quality=True, species=('bod', 'sulfide'), f_air=0.02, f_i=0.000749, c_s=1.0, leak_area=0.0008, leak_cd=0.6, fans=(), coupling='pingpong', scheme='implicit', dt_storage=None)` |
-| `initial_drivers` | `build_model`'s driver template (copied), then `values` by name (see `noodl.refs.drivers_from`), e.g. by outfall and species name: | `initial_drivers(model, *, values=None)` |
+| `initial_drivers` | `build_model`'s driver template (copied), then `values` by name (see `noodl.refs.drivers_from`), e.g. by outfall and species name. | `initial_drivers(model, *, values=None)` |
 | `initial_state` | All-zero state, dispatching on each layer's `quantity` (the app convention). | `initial_state(model, drivers=None, *, values=None)` |
 
 ## Network components

@@ -14,7 +14,7 @@ Build the model and its starting state and inputs.
 | Name | What it does | How to call it |
 |---|---|---|
 | `build_model` | Assemble the water model and return `(model, state, drivers)`. | `build_model(net, *, headloss=None, pda=None, p_min=None, p_req=None, exponent=None, quality=None, coupling='pingpong', dt=None, friction='composite')` |
-| `initial_drivers` | `build_model`'s driver template (copied), then `values` by name (see `noodl.refs.drivers_from`), e.g. a junction demand (a negative source) by name: | `initial_drivers(model, *, values=None)` |
+| `initial_drivers` | `build_model`'s driver template (copied), then `values` by name (see `noodl.refs.drivers_from`), then `demand`: `{junction: m3/s withdrawn}`, positive, stored as the negative nodal source the head solve takes. | `initial_drivers(model, *, values=None, demand=None)` |
 | `initial_state` | All-zero state, dispatching on each layer's `quantity` (the app convention), tank levels from the network file; then `values` by node, tank or pump name (see `noodl.refs.state_from`): `initial_state(model, values={"water.tank_level": {"T1": 4.0}})`. | `initial_state(model, *, values=None)` |
 
 ## Network components

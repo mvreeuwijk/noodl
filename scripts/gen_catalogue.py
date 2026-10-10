@@ -67,11 +67,27 @@ ROLES = [
     ("class", "Other classes", "Supporting types."),
     ("function", "Functions", "Calculations and helpers."),
     ("constant", "Constants and tables", "Named values and option tables."),
+    ("base", "Base classes (for extending)",
+     "Subclass these to add an element, drive, closure, reaction or node source; see "
+     "[Extending noodl](../development/extending.md)."),
 ]
+BASE_CLASSES = {"Element", "Drive", "Closure", "Reaction", "NodeSource"}
+CONSTANT_ALIASES = {
+    "KAPPA": "KAPPA_040", "KAPPA_MUNICH": "KAPPA_041",
+    "GAMMA_E": "EULER_GAMMA_TRUNCATED", "SIRANE_EXCHANGE": "EXCHANGE_SIGMA_W_RATIO",
+    "SCHULTE_BETA": "ASPECT_RATIO_EXCHANGE_BETA", "SEUIL_GAUSS": "GAUSS_CUTOFF_SIGMAS",
+}
+"""Pre-rename constant names kept as aliases (`tests/test_docs_catalogue.py` checks each
+pair is one object). Constants cannot be deduplicated by identity: two equal float literals
+in one module are one object to the compiler."""
 OPTION_MODULES = {"street_aq": "noodl.apps.street_aq.closures"}
 """Pages whose application has named model options: the module defining `OPTIONS` (option
 -> allowed values), `PRESETS` (preset -> its choices) and, in the docstring under
 `OPTIONS`, one `- `option`: meaning` bullet per option."""
+ATTRIBUTE_MODULES = {"building_physics": "noodl.apps.building_physics.attributes"}
+"""Pages whose application reads node and edge attributes off the network: the module
+defining `NODE_ATTRIBUTES` and `EDGE_ATTRIBUTES`."""
+ATTRIBUTE_TABLE_NAMES = {"NODE_ATTRIBUTES", "EDGE_ATTRIBUTES"}
 
 SETUP_NAMES = {"build_model", "initial_state", "initial_drivers", "project_to_model",
                "drivers_from", "state_from", "check_setup"}
@@ -83,7 +99,10 @@ def _summary(obj) -> str:
     doc = inspect.getdoc(obj) or ""
     if inspect.isclass(obj) and doc.startswith(f"{obj.__name__}("):
         return ""
-    return doc.strip().split("\n\n")[0].replace("\n", " ").strip()
+    text = doc.strip().split("\n\n")[0].replace("\n", " ").strip()
+    if text.endswith(":"):
+        text = text[:-1].rstrip() + "."
+    return text
 
 
 def _signature(name: str, obj) -> str:
@@ -101,6 +120,17 @@ def _signature(name: str, obj) -> str:
         for p in sig.parameters.values() if p.name != "self"
     ]
     text = str(sig.replace(parameters=params, return_annotation=inspect.Signature.empty))
+    if text == "(*args, **kwargs)" and inspect.isclass(obj):
+        try:
+            new = inspect.signature(obj.__new__)
+            params = [p.replace(annotation=inspect.Parameter.empty)
+                      for p in list(new.parameters.values())[1:]]
+            text = str(new.replace(parameters=params,
+                                   return_annotation=inspect.Signature.empty))
+        except (TypeError, ValueError):
+            text = "(...)"
+        if text in {"(*args, **kwargs)", "(**kwargs)"}:
+            text = "(...)"
     return f"{name}{text}"
 
 
@@ -115,6 +145,8 @@ def _role(name: str, obj) -> str:
     if not (inspect.isclass(obj) or inspect.isfunction(obj) or inspect.isbuiltin(obj)):
         return "constant"
     if inspect.isclass(obj):
+        if name in BASE_CLASSES:
+            return "base"
         if issubclass(obj, Element):
             return "element"
         if issubclass(obj, Reaction):
@@ -123,7 +155,7 @@ def _role(name: str, obj) -> str:
             return "source"
         if obj is Model or name.endswith("Layer") or name in {"Network", "Ports", "CoupledModel"}:
             return "layer"
-        if dataclasses.is_dataclass(obj):
+        if dataclasses.is_dataclass(obj) and obj.__module__.startswith("noodl.apps"):
             return "component"
         # The instances' own `__call__`, defined by the class or a base (not `object`'s).
         call = next((k.__dict__["__call__"] for k in obj.__mro__[:-1]
@@ -148,6 +180,7 @@ def _role(name: str, obj) -> str:
 def _entries(modules: list[str]) -> list[dict]:
     seen: dict[int, dict] = {}
     order: list[dict] = []
+    pending_alias: dict[str, list[str]] = {}
     for modname in modules:
         mod = importlib.import_module(modname)
         names = getattr(mod, "__all__", None)
@@ -156,6 +189,9 @@ def _entries(modules: list[str]) -> list[dict]:
                 inspect.isclass(o) or inspect.isfunction(o)) and o.__module__ == modname]
         for name in names:
             obj = getattr(mod, name)
+            if name in CONSTANT_ALIASES and not (inspect.isclass(obj) or inspect.isfunction(obj)):
+                pending_alias.setdefault(CONSTANT_ALIASES[name], []).append(name)
+                continue
             key = id(obj) if (inspect.isclass(obj) or inspect.isfunction(obj)) else (modname, name)
             if key in seen:
                 entry = seen[key]
@@ -175,6 +211,9 @@ def _entries(modules: list[str]) -> list[dict]:
             entry["aliases"].remove(primary)
             entry["aliases"].append(entry["name"])
             entry["name"] = primary
+    for entry in order:
+        if entry["name"] in pending_alias:
+            entry["aliases"] += pending_alias[entry["name"]]
     return order
 
 
@@ -235,6 +274,29 @@ def _options_section(modname: str) -> list[str]:
     return lines + [""]
 
 
+def _readers(text: str) -> str:
+    return ", ".join(f"`{r}`" for r in text.split(", "))
+
+
+def _attributes_section(modname: str) -> list[str]:
+    mod = importlib.import_module(modname)
+    lines = [
+        "## Network attributes", "",
+        "What the builders, elements and drives read off `net.add_node(...)` and "
+        "`net.add_edge(...)`, by name. Defined in `" + modname + "`.", "",
+        "**Nodes**", "", "| Attribute | Meaning | Read by |", "|---|---|---|",
+    ]
+    for attr, (meaning, reader) in mod.NODE_ATTRIBUTES.items():
+        lines.append(f"| `{attr}` | {_esc(meaning)} | {_readers(reader)} |")
+    for kind, attrs in mod.EDGE_ATTRIBUTES.items():
+        first, comma, rest = kind.partition(",")
+        lines += ["", f"**Edges of kind `{first}`{comma}{rest}**", "",
+                  "| Attribute | Meaning | Read by |", "|---|---|---|"]
+        for attr, (meaning, reader) in attrs.items():
+            lines.append(f"| `{attr}` | {_esc(meaning)} | {_readers(reader)} |")
+    return lines + [""]
+
+
 def render(stem: str, title: str, link: str | None, modules: list[str], intro: str) -> str:
     entries = _entries(modules)
     by_role: dict[str, list[dict]] = {r: [] for r, _, _ in ROLES}
@@ -255,15 +317,23 @@ def render(stem: str, title: str, link: str | None, modules: list[str], intro: s
     ]
     if stem in OPTION_MODULES:
         lines += _options_section(OPTION_MODULES[stem])
+    if stem in ATTRIBUTE_MODULES:
+        lines += _attributes_section(ATTRIBUTE_MODULES[stem])
     for role, heading, blurb in ROLES:
         group = by_role[role]
+        if role == "constant":
+            group = [e for e in group if e["name"] not in ATTRIBUTE_TABLE_NAMES]
         if not group:
             continue
         lines += [f"## {heading}", "", blurb, ""]
         if role == "constant":
             lines += ["| Name | Value |", "|---|---|"]
             for e in group:
-                lines.append(f"| `{e['name']}` | {_esc(_constant_text(e['obj']))} |")
+                name = f"`{e['name']}`"
+                if e["aliases"]:
+                    name += "<br><small>also " + ", ".join(
+                        f"`{a}`" for a in sorted(e["aliases"])) + "</small>"
+                lines.append(f"| {name} | {_esc(_constant_text(e['obj']))} |")
         else:
             lines += ["| Name | What it does | How to call it |", "|---|---|---|"]
             for e in group:

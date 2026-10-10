@@ -32,7 +32,11 @@ in this repository, so no tensor here may be built without an explicit dtype."""
 
 @dataclass(frozen=True)
 class Street:
-    """One street segment. `u` and `v` are junction names; the azimuth points `u -> v`."""
+    """One street segment between junctions `u` and `v` (the azimuth points `u -> v`): its
+    `length`, `width` and building `height` (m), the roughness length of its building walls
+    `z0_b` (m, 0.15 by default) and `emission_scale`, a dimensionless factor applied to its
+    emissions.
+    """
 
     name: str
     u: str
@@ -416,7 +420,7 @@ def build_model(
     layer = TransportLayer(
         graph, layer_name, capacity=capacity, flow_kind=kinds, boundary=boundary,
         n_species=n_species, scheme=scheme, quantity="concentration", unit="kg/m3",
-        species_names=tuple(species),
+        species_names=tuple(species), source_unit="kg/s", capacity_unit="m3", flow_unit="m3/s",
     )
     closure = StreetFlows(
         graph, layer, street_geometry(net), preset=preset, n_theta=n_theta,
