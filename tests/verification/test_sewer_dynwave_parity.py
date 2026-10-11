@@ -606,6 +606,23 @@ def test_variable_step_sequence_and_state_match_swmm_over_the_first_steps(tmp_pa
     _assert_parity(_worst(_differences(VARIABLE_NAME, rows, conn, 5, run=run)))
 
 
+def test_routing_step_above_the_wet_step_is_lowered_as_swmm_does(tmp_path):
+    """`ROUTING_STEP 120` with `WET_STEP 00:01:00`: SWMM runs at 60 s (project.c:246-250) and
+    so does the reader, so the first five steps equal the 60 s fixture's, to the ms."""
+    text = (DATA / VARIABLE_NAME).read_text().replace("ROUTING_STEP         60",
+                                                      "ROUTING_STEP         120")
+    assert "ROUTING_STEP         120" in text
+    inp = tmp_path / "wet_clip.inp"
+    inp.write_text(text)
+    assert read_swmm_inp(inp)[0].dynamic_wave.routing_step == 60.0
+    rows, times, _, engine, not_converging = _swmm_timed(inp)
+    assert engine == "5.2.4" and not_converging == 0.0
+    _, _, hist, _ = _variable_run(inp, steps_limit=len(times))
+    assert [round(x) for x in (hist["t"] * 1000.0).tolist()] == times
+    assert [b - a for a, b in zip([0, *times[:5]], times[:5], strict=False)] == (
+        VARIABLE_FIRST_STEPS_MS)
+
+
 @pytest.mark.slow
 def test_variable_step_parity_at_every_step(tmp_path):
     """The variable-step tree over its 30 min: the step sequence equals SWMM's to the

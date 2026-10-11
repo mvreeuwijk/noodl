@@ -11,6 +11,7 @@ from noodl.apps.sewer.dynwave import (
     SOLVE_ATOL,
     DynamicWaveConduit,
     JunctionStorage,
+    routing_step_size,
     simulate_dynamic_wave,
     solve_atol,
 )
@@ -1109,3 +1110,75 @@ def test_inflow_callable_is_called_once_per_step_with_the_start_time(tmp_path):
     _, batched = simulate_dynamic_wave(model, state, drivers, steps=2,
                                        inflow=lambda t: torch.stack([inflow, 0.5 * inflow]))
     assert batched["water.q"].shape == (2, 2, len(net.pipes))
+
+
+def _step_size_case(options=None, depths=None, q=None, before=None, dt=10.0):
+    """`routing_step_size` on a hand-built state of the variable-step tree: junction depths
+    `depths` (m, by name, others dry), conduit flows `q` (m3/s, by name), against the start
+    junction depths `before` (default dry), after a step of `dt` s."""
+    net, _, _ = read_swmm_inp(VARIABLE_TREE)
+    if options:
+        net = dataclasses.replace(net, dynamic_wave=dataclasses.replace(
+            net.dynamic_wave, **options))
+    model, state, _ = build_model(net)
+    hyd = model.dynamic_wave
+    names = list(hyd.net.nodes)
+    phi = hyd.node_invert.clone()
+    for name, y in (depths or {}).items():
+        phi[names.index(name)] += y
+    flows = torch.zeros(len(hyd.pipe_names), dtype=F64)
+    for name, value in (q or {}).items():
+        flows[hyd.pipe_names.index(name)] = value
+
+    def jdepth(d):
+        return torch.tensor([(d or {}).get(n, 0.0) for n in hyd.junction_names], dtype=F64)
+
+    after = dict(state, **{"water.phi": phi, "water.q": flows, "sewer.pipe_flow": flows,
+                           "sewer.junction_depth": jdepth(depths)})
+    start = dict(state, **{"sewer.junction_depth": jdepth(before)})
+    return routing_step_size(hyd, start, after, dt)
+
+
+def test_routing_step_size_pins_each_branch_of_swmm_get_variable_step():
+    # nothing moving: the routing step caps it (dynwave.c:799-806, tMin starts at maxStep)
+    assert _step_size_case() == 60.0
+    # a filling junction: 0.25 crown / (dy/dt) = 0.075 m / 0.005 m/s = 15 s (J1's crown 0.3 m)
+    t = _step_size_case(depths={"J1": 0.05})
+    assert 14.99 <= t <= 15.0
+    # floored at MinRouteStep (0.5 s) however fast it rises
+    assert _step_size_case(depths={"J1": 0.05}, dt=0.01) == 0.5
+    # a junction at or above its crown is skipped (dynwave.c:898-899), as a dry one
+    assert _step_size_case(depths={"J1": 0.35}) == 60.0
+    assert _step_size_case(depths={"J1": 0.3 - 0.5e-4 * LCF}) == 60.0
+    # a flowing conduit: Courant step V/|q| Fr/(1+Fr) 0.75 (dynwave.c:859-862)
+    flowing = dict(depths={"J1": 0.05, "J3": 0.05}, q={"C1": 0.05}, before={"J1": 0.05,
+                                                                              "J3": 0.05})
+    net, _, _ = read_swmm_inp(VARIABLE_TREE)
+    model, state, _ = build_model(net)
+    hyd = model.dynamic_wave
+    terms = hyd._terms({"water.phi": hyd.node_invert + torch.tensor(
+        [0.05 if n in ("J1", "J3") else 0.0 for n in hyd.net.nodes], dtype=F64),
+        "water.q": torch.tensor([0.05, 0, 0, 0, 0], dtype=F64),
+        "sewer.pipe_flow": torch.zeros(5, dtype=F64), "sewer.mid_area": state["sewer.mid_area"]},
+        10.0)
+    fr = terms.froude[0].item()
+    expected = terms.volume[0].item() / (0.05 / QCF) * fr / (1 + fr) * 0.75
+    assert fr > 0.01 and expected < 60.0
+    assert _step_size_case(**flowing) == pytest.approx(expected, abs=2e-3)
+    # Fr <= 0.01 is skipped (dynwave.c:855): a full closed conduit has Fr = 0 whatever its flow
+    assert _step_size_case(depths={"J1": 0.6, "J3": 0.6}, q={"C1": 0.05},
+                           before={"J1": 0.6, "J3": 0.6}) == 60.0
+    # a dry conduit (area <= FUDGE, Fr = 0) with a stale flow never limits the step
+    assert _step_size_case(q={"C1": 0.05}) == 60.0
+
+
+def test_routing_step_size_is_the_fixed_step_without_a_variable_step():
+    assert _step_size_case(options={"variable_step": 0.0}, depths={"J1": 0.05}) == 60.0
+    # below MINTIMESTEP (1 ms) the routing step is returned as it is (dynwave.c:205)
+    assert _step_size_case(options={"routing_step": 0.0005}, depths={"J1": 0.05}) == 0.0005
+
+
+def test_routing_step_size_first_step_is_the_minimum_step():
+    net, _, _ = read_swmm_inp(VARIABLE_TREE)
+    model, state, _ = build_model(net)
+    assert routing_step_size(model.dynamic_wave, None, state, None) == 0.5

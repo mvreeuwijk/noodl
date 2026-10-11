@@ -19,8 +19,9 @@ REFUSED BY NAME, because skipping them would silently change the physics: `[DWF]
 time variation belongs in the drivers. A conduit with more than one barrel or a culvert
 code is refused for every routing.
 
-DYNWAVE reads `VARIABLE_STEP` (the Courant factor; absent means 0 here, not SWMM's 0.75)
-and `MINIMUM_STEP`. It refuses, with the line number: `LENGTHENING_STEP` > 0,
+DYNWAVE reads `VARIABLE_STEP` (the Courant factor; absent means SWMM's default 0.75,
+project.c:854) and `MINIMUM_STEP`, and clips `ROUTING_STEP` to `WET_STEP` (default 300 s)
+as SWMM does (project.c:246-250). It refuses, with the line number: `LENGTHENING_STEP` > 0,
 `ALLOW_PONDING YES`, a junction `InitDepth`, a conduit `InitFlow` or
 `MaxFlow`, a gated outfall and TIDAL/TIMESERIES outfalls (phase A: cold dry start, fixed step,
 no ponding).
@@ -47,8 +48,10 @@ from noodl.apps.sewer.network import Manhole, Outfall, Pipe, SewerNetwork
 
 #: link.c `MIN_DELTA_Z`: the smallest fall SWMM uses for a conduit slope, 0.001 ft in m.
 MIN_DELTA_Z = 0.001 * 0.3048
+#: SWMM's default `WET_STEP`, s (project.c:864).
+DEFAULT_WET_STEP = 300.0
 _DYNWAVE_KEYS = (
-    "ROUTING_STEP", "VARIABLE_STEP", "MINIMUM_STEP", "LENGTHENING_STEP", "MIN_SURFAREA",
+    "ROUTING_STEP", "WET_STEP", "VARIABLE_STEP", "MINIMUM_STEP", "LENGTHENING_STEP", "MIN_SURFAREA",
     "HEAD_TOLERANCE", "MAX_TRIALS", "MIN_SLOPE", "INERTIAL_DAMPING", "NORMAL_FLOW_LIMITED",
     "SURCHARGE_METHOD",
     "ALLOW_PONDING",
@@ -136,7 +139,7 @@ def read_swmm_inp(
     if dynamic:
         for key, line in raw.items():
             require_fields(line, 2, key, path)
-            if key in ("ROUTING_STEP", "MINIMUM_STEP", "LENGTHENING_STEP"):
+            if key in ("ROUTING_STEP", "WET_STEP", "MINIMUM_STEP", "LENGTHENING_STEP"):
                 opts[key] = (line, _seconds(line, path))
             elif key in ("VARIABLE_STEP", "MIN_SURFAREA", "HEAD_TOLERANCE", "MAX_TRIALS",
                          "MIN_SLOPE"):
@@ -349,8 +352,11 @@ def _dynamic_wave_options(opts: dict, path) -> DynamicWaveOptions:
     if opts.get("ALLOW_PONDING", (None, "NO"))[1] not in ("NO", "FALSE"):
         refuse("ALLOW_PONDING", "-- ponding is not modelled yet; set ALLOW_PONDING NO")
     kwargs: dict[str, object] = {}
-    if "ROUTING_STEP" in opts:
-        kwargs["routing_step"] = opts["ROUTING_STEP"][1]
+    # SWMM lowers the routing step to the wet step when larger (project.c:246-250)
+    routing_step = opts["ROUTING_STEP"][1] if "ROUTING_STEP" in opts else (
+        DynamicWaveOptions().routing_step)
+    kwargs["routing_step"] = min(routing_step, opts["WET_STEP"][1] if "WET_STEP" in opts
+                                 else DEFAULT_WET_STEP)
     for key, table, field_name in (
         ("INERTIAL_DAMPING", _DAMPING, "inertial_damping"),
         ("NORMAL_FLOW_LIMITED", _NORMAL_FLOW, "normal_flow_limited"),
@@ -360,8 +366,8 @@ def _dynamic_wave_options(opts: dict, path) -> DynamicWaveOptions:
             if opts[key][1] not in table:
                 refuse(key, f"-- must be one of {sorted(table)}")
             kwargs[field_name] = table[opts[key][1]]
-    if "VARIABLE_STEP" in opts:
-        kwargs["variable_step"] = opts["VARIABLE_STEP"][1]
+    # an absent VARIABLE_STEP is SWMM's 0.75 (project.c:854), not the dataclass's 0
+    kwargs["variable_step"] = opts["VARIABLE_STEP"][1] if "VARIABLE_STEP" in opts else 0.75
     if "MINIMUM_STEP" in opts:
         kwargs["minimum_step"] = opts["MINIMUM_STEP"][1]
     for key, field_name in (("MIN_SURFAREA", "min_surface_area"),

@@ -472,9 +472,13 @@ each later one is the smallest of
   rate it rose over the last step (a dry junction, one at or above its crown, and a quasi-steady
   one do not limit it);
 
-floored at the minimum step and truncated to a millisecond. The last step is cut to the time
+floored at the minimum step and truncated to a millisecond. The reader takes an absent
+`VARIABLE_STEP` as SWMM's 0.75 and lowers `ROUTING_STEP` to `WET_STEP` (default 300 s) when
+larger, as SWMM does; `DynamicWaveOptions()` built in code defaults to the fixed step (0). The last step is cut to the time
 that remains (at least 1 ms), so the run ends at `duration`; this clipping applies to a fixed
-step too. A variable step needs a single network (no batched `inflow`), and `dt=` is refused
+step too. One call is one run: under a variable step a second call restarts with the minimum step and
+with `t` from 0, as a new SWMM run does (continuing needs the previous step's state, which
+the call does not carry). A variable step needs a single network (no batched `inflow`), and `dt=` is refused
 with it, since the step is then chosen by the options.
 
 An inflow function `inflow(t)` returns the `(n,)` lateral inflow of the step that starts at

@@ -9,12 +9,14 @@ column layouts and units are read by `apps/sewer/inp.py`.
 
 **Routing.** `FLOW_ROUTING` is `STEADY`, `KINWAVE` or `DYNWAVE`, read as the physical names
 `steady`, `kinematic_wave` and `dynamic_wave` (`SewerNetwork.routing`). `DYNWAVE` also reads
-`ROUTING_STEP` and `MINIMUM_STEP` (seconds or `HH:MM:SS`), `VARIABLE_STEP` (the Courant
-factor, 0 to 2; absent means 0 here, where SWMM's own default is 0.75, so write it
-explicitly to match SWMM), `INERTIAL_DAMPING` (`NO`/`PARTIAL`/`FULL`),
+`ROUTING_STEP`, `WET_STEP` (default 300 s) and `MINIMUM_STEP` (seconds or `HH:MM:SS`),
+`VARIABLE_STEP` (the Courant factor, 0 to 2; absent means SWMM's default 0.75), `INERTIAL_DAMPING` (`NO`/`PARTIAL`/`FULL`),
 `NORMAL_FLOW_LIMITED` (`SLOPE`/`FROUDE`/`BOTH`/`NO`), `SURCHARGE_METHOD` (`EXTRAN` or `SLOT`), `MIN_SURFAREA`,
 `HEAD_TOLERANCE`, `MAX_TRIALS` and `MIN_SLOPE` into `DynamicWaveOptions`; `HEAD_TOLERANCE`
-and `MAX_TRIALS` are SWMM's own iteration controls, recorded but not used.
+and `MAX_TRIALS` are SWMM's own iteration controls, recorded but not used. As SWMM does,
+the reader lowers `ROUTING_STEP` to `WET_STEP` when it is larger (a file that omits
+`VARIABLE_STEP` runs the 0.75 variable step, so give `duration=` rather than `dt=` to
+`simulate_dynamic_wave`; `DynamicWaveOptions()` built in code defaults to the fixed step).
 
 **Dynamic wave, what is refused for now.** With `DYNWAVE` the reader refuses, with the line
 number: `LENGTHENING_STEP` above 0, `ALLOW_PONDING YES`,

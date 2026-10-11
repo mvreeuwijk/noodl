@@ -1040,8 +1040,11 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
                           ) -> tuple[State, dict[str, Tensor]]:
     """Run the dynamic wave from `state` for `steps` steps, or for `duration` s.
 
-    Exactly one of `steps` and `duration` is required. The step is `dt` s (default: the
-    model's routing step) when ``options.variable_step == 0``; under ``variable_step > 0``
+    Exactly one of `steps` and `duration` is required. Under a variable step one call is one
+    run: the first step is the minimum step and `t` starts at 0, so a continuation call
+    restarts as a new SWMM run would (the step rule needs the previous step's start state).
+    The step is `dt` s (default: the model's routing step) when
+    ``options.variable_step == 0``; under ``variable_step > 0``
     each step is SWMM's variable step (`routing_step_size`: the first is the minimum step)
     and `dt` is refused, since it would be a second step rule. `duration` (s) is SWMM's
     run length: steps are taken until the elapsed time (kept in milliseconds, as SWMM does,
@@ -1122,7 +1125,7 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
                 f"n = {n} nodes, got shape {tuple(value.shape)}")
         return value
 
-    first = inflow_at(0, 0.0)
+    first = inflow_at(0, 0.0)    # step 0's inflow, reused in the loop; it also sets the batch
     batch: tuple[int, ...] = ()
     if first is not None and first.dim() > 1:
         batch = tuple(first.shape[:-1])

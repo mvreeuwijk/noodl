@@ -162,12 +162,27 @@ def test_dynwave_reads_the_variable_step_options(tmp_path):
     net, _, _ = read_swmm_inp(path)
     assert net.dynamic_wave.variable_step == 0.75
     assert net.dynamic_wave.minimum_step == 0.25
-    # absent, the option is 0 here (SWMM's own default is 0.75)
+    # absent, the option is SWMM's default 0.75 (project.c:854), whatever the dataclass says
     lines = _dyn(tmp_path).read_text().splitlines(keepends=True)
     absent = "".join(x for x in lines if not x.startswith("VARIABLE_STEP"))
     (tmp_path / "absent.inp").write_text(absent)
     net, _, _ = read_swmm_inp(tmp_path / "absent.inp")
-    assert net.dynamic_wave.variable_step == 0.0
+    assert net.dynamic_wave.variable_step == 0.75
+
+
+def test_dynwave_routing_step_is_lowered_to_the_wet_step(tmp_path):
+    """project.c:246-250: ROUTING_STEP above WET_STEP becomes WET_STEP (default 300 s)."""
+    net, _, _ = read_swmm_inp(_dyn(tmp_path, [("ROUTING_STEP         5",
+                                               "ROUTING_STEP         90")]))
+    assert net.dynamic_wave.routing_step == 60.0           # the fixture's WET_STEP 00:01:00
+    lines = _dyn(tmp_path, [("ROUTING_STEP         5", "ROUTING_STEP         400")]
+                 ).read_text().splitlines(keepends=True)
+    (tmp_path / "nowet.inp").write_text("".join(x for x in lines
+                                                if not x.startswith("WET_STEP")))
+    net, _, _ = read_swmm_inp(tmp_path / "nowet.inp")
+    assert net.dynamic_wave.routing_step == 300.0           # SWMM's default WET_STEP
+    net, _, _ = read_swmm_inp(_dyn(tmp_path))
+    assert net.dynamic_wave.routing_step == 5.0
 
 
 @pytest.mark.parametrize("old,new,key", [
