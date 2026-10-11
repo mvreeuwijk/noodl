@@ -19,7 +19,8 @@ reason `graph.build` reports against every offending instance.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,20 @@ ZONES = frozenset({
     "Buildings.Fluid.MixingVolumes.MixingVolume",
     "Buildings.Fluid.Delays.DelayFirstOrder",
 })
+# Weather and wind (`weather.py`, `outside.py`). The outside boundaries that read a weather bus
+# (`Fluid/Sources/BaseClasses/Outside.mo`), the three of them that add a wind pressure, and the
+# one weather reader. `WEATHER_BUS_OUTPUTS` are the weather-bus variables those boundaries read
+# (`Outside.mo:6-7`, `Outside_Cp.mo:42-45`, `Outside_CpLowRise.mo:44-48`,
+# `Outside_CpData.mo:70-74`, `BaseClasses/Outside.mo:51`): the only reader outputs evaluated.
+WEATHER_READERS = frozenset({"Buildings.BoundaryConditions.WeatherData.ReaderTMY3"})
+WEATHER_BUS_OUTPUTS = ("TDryBul", "pAtm", "relHum", "winSpe", "winDir")
+OUTSIDE_WIND = frozenset({
+    "Buildings.Fluid.Sources.Outside_Cp",
+    "Buildings.Fluid.Sources.Outside_CpLowRise",
+    "Buildings.Fluid.Sources.Outside_CpData",
+})
+OUTSIDE_FAMILY = frozenset({"Buildings.Fluid.Sources.Outside"}) | OUTSIDE_WIND
+
 BOUNDARIES = frozenset({
     "Buildings.Fluid.Sources.Boundary_pT",
     "Buildings.Fluid.Sources.Outside",
@@ -174,12 +189,15 @@ def refusal_reason(cls: str) -> str | None:
 
 @dataclass(frozen=True)
 class Component:
-    """One instance from the JSON's `components` array."""
+    """One instance from the JSON's `components` array. `files` names the files that travel
+    with the export (`scripts/modelica_export.py`): parameter -> `{"path": <bare file name
+    next to the JSON>, "sha256": <hex digest>}` (a weather reader's `filNam`)."""
 
     name: str
     cls: str
     parameters: dict
     role: str | None = None
+    files: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -199,7 +217,8 @@ class Signal:
 
 @dataclass(frozen=True)
 class ModelicaDoc:
-    """The parsed, structurally validated contents of one `noodl-modelica/1` JSON file."""
+    """The parsed, structurally validated contents of one `noodl-modelica/1` JSON file;
+    `source` is the file it was read from (files named in `Component.files` sit next to it)."""
 
     model: str
     mbl_commit: str
@@ -209,6 +228,7 @@ class ModelicaDoc:
     components: tuple[Component, ...]
     connections: tuple[tuple[str, str], ...]
     signals: tuple[Signal, ...]
+    source: Path | None = None
 
 
 def _require_dict(value: Any, where: str) -> dict:
@@ -230,6 +250,26 @@ def _parameters_of(obj: dict, where: str) -> dict:
     return dict(parameters)
 
 
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _files_of(obj: dict, where: str) -> dict:
+    raw = obj.get("files", {})
+    if not isinstance(raw, dict):
+        raise ModelicaImportError(f"modelica: {where}.files must be an object")
+    out = {}
+    for key, entry in raw.items():
+        e = _require_dict(entry, f"{where}.files.{key}")
+        path = _require_str(e.get("path"), f"{where}.files.{key}.path")
+        digest = _require_str(e.get("sha256"), f"{where}.files.{key}.sha256")
+        if not _SHA256.fullmatch(digest):
+            raise ModelicaImportError(
+                f"modelica: {where}.files.{key}.sha256 must be 64 lowercase hex digits"
+            )
+        out[key] = {"path": path, "sha256": digest}
+    return out
+
+
 def _component_from(raw: Any, index: int) -> Component:
     where = f"components[{index}]"
     obj = _require_dict(raw, where)
@@ -239,7 +279,8 @@ def _component_from(raw: Any, index: int) -> Component:
     role = obj.get("role")
     if role is not None and not isinstance(role, str):
         raise ModelicaImportError(f"modelica: {where} ({name}).role must be a string")
-    return Component(name=name, cls=cls, parameters=parameters, role=role)
+    files = _files_of(obj, f"{where} ({name})")
+    return Component(name=name, cls=cls, parameters=parameters, role=role, files=files)
 
 
 def _connection_from(raw: Any, index: int) -> tuple[str, str]:
@@ -318,4 +359,5 @@ def load(path: str | Path) -> ModelicaDoc:
     return ModelicaDoc(
         model=model, mbl_commit=mbl_commit, openmodelica=openmodelica, experiment=experiment,
         medium=medium, components=components, connections=connections, signals=signals,
+        source=Path(path),
     )
