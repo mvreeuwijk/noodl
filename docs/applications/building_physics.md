@@ -418,7 +418,7 @@ since `contamxpy`'s own documentation does not pin the sign of `getPathFlow`.
 
 ### Against OpenModelica (Modelica Buildings Library)
 
-**Algebraic models (6, no volumes).** Every CSV row and column against OpenModelica's own
+**Algebraic models (7, no volumes).** Every CSV row and column against OpenModelica's own
 simulation, `|noodl - omc| <= 1e-6 |omc| + 1e-9` kg/s:
 
 | Model | Worst relative error | Rows compared |
@@ -429,6 +429,7 @@ simulation, `|noodl - omc| <= 1e-6 |omc| + 1e-9` kg/s:
 | OpenDoorTemperature | 1.8e-11 | 49 |
 | Orifice | 4.0e-16 | 501 |
 | PowerLaw | 6.1e-16 | 501 |
+| Outside_Cp | 5.0e-16 | 501 |
 
 All at round-off except `OpenDoorTemperature`, whose discretised-door port flows sit at 1.8e-11
 relative — still five orders of magnitude inside the 1e-6 bound, and attributed to an
@@ -441,6 +442,25 @@ most 0.74 % relative (7.68e-4 kg/s absolute) — exactly the amount MBL itself d
 The assertion is `|noodl - contam| <= |omc - contam| + 1e-6 |omc| + 1e-9` at every entry: noodl physics
 adds nothing to MBL's own departure from the table (41 of 104 entries miss the table's 3
 significant figures, in MBL as much as in noodl physics).
+
+**Weather and wind pressure.** The weather a `ReaderTMY3` puts on the bus (dry-bulb temperature,
+pressure, relative humidity, wind speed) and every wind boundary's `pWin` are compared at every
+row, separately from any time integration (`assemble.weather_columns`), on MBL's
+`Buildings.Fluid.Sources` examples (four orientations of `Outside_CpLowRise` and of
+`Outside_CpData` over a week from day 200, a full sweep of the wind direction over symmetric,
+asymmetric and narrow profiles) and on `Outside_Cp`. Being the same arithmetic as MBL's, they
+are held to round-off, `|noodl - omc| <= 1e-12 |omc|` with no absolute floor; the weather comes
+out identical to the last bit, the calendar time included (MBL's `t - k lenWea + lenWea`
+rounds the model time to the spacing of doubles near a year, 3.7e-9 s, and noodl rounds it the
+same way):
+
+| Model | Worst relative error (weather) | Worst relative error (pWin) | Rows |
+|---|---|---|---|
+| Outside_Cp | 0.0e+00 | 3.4e-16 | 501 |
+| Outside_CpLowRise | 0.0e+00 | 5.4e-16 | 501 |
+| Outside_CpData | 0.0e+00 | 6.0e-16 | 501 |
+| Outside_CpData_Angles | 0.0e+00 | 4.6e-16 | 501 |
+| Outside_CpData_Directions | 0.0e+00 | 4.3e-16 | 501 |
 
 **Dynamic models (13, with volumes).** Every volume stores its air compressibly, as MBL's
 `MixingVolume` does (see "Volume mass storage" below), and every model is compared at the

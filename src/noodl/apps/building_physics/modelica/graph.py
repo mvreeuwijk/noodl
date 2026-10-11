@@ -120,7 +120,9 @@ A `ReaderTMY3` ("weather") is no node. A `connect()` of its `weaBus` to the `wea
 to it (`ComponentGraph.weather`; `assemble` evaluates the reader's outputs for it). Every other
 connection touching a `weaBus` is refused by name: a bus wired to anything but an Outside
 boundary, a bus VARIABLE (`weaDat.weaBus.HDirNor`) wired anywhere (the exporter keeps such a
-connection into a signal block's input for this), and a boundary wired to two readers. One whose
+connection into a signal block's input for this), and a boundary wired to two readers. So is a
+connection reaching a reader through any port but its `weaBus` and the `<output>_in` inputs of
+the outputs the boundaries read (`TDryBul`, `pAtm`, `relHum`, `winSpe`, `winDir`). One whose
 other end is an unsupported class (named already) or an observer is left alone. A boundary with
 no reader takes its weather-bus inputs from the signals driving `"<boundary>.weaBus.<output>"`.
 """
@@ -751,12 +753,33 @@ def _bus_end(ref: str) -> tuple[str, str | None] | None:
     return parts[0], ".".join(parts[2:]) or None
 
 
+# The reader's inputs a connection may reach: `<output>_in` of an output the Outside boundaries
+# read (ReaderTMY3.mo, `<output>Sou = Input`).
+_READER_INPUTS = frozenset(f"{q}_in" for q in schema.WEATHER_BUS_OUTPUTS)
+
+
+def _check_reader_port(a: str, b: str, ctx: _Ctx) -> None:
+    """Refuse a connection reaching a ReaderTMY3 through a port that is neither its `weaBus`
+    nor one of `_READER_INPUTS` (module docstring, "Weather bus")."""
+    for ref, other in ((a, b), (b, a)):
+        inst, _, port = ref.partition(".")
+        if ctx.kind_of.get(inst) != "weather" or port in _READER_INPUTS:
+            continue
+        if ctx.kind_of.get(other.split(".", 1)[0]) in ("unknown", "observer"):
+            continue  # an unsupported class is named already; an observer is ignored
+        ctx.errors.append(
+            f"{inst} ({ctx.by_name[inst].cls}): port {port}, wired to {other}, is not supported "
+            f"(only its weaBus and the inputs {', '.join(sorted(_READER_INPUTS))} are read)"
+        )
+
+
 def _resolve_weather(doc: ModelicaDoc, ctx: _Ctx) -> list[tuple[str, Component]]:
     """Weather-bus wiring (module docstring, "Weather bus")."""
     readers_of: dict[str, list[str]] = {}
     for a, b in doc.connections:
         ends = {a: _bus_end(a), b: _bus_end(b)}
         if all(e is None for e in ends.values()):
+            _check_reader_port(a, b, ctx)
             continue
         named = [(ref, e) for ref, e in ends.items() if e is not None and e[0] in ctx.by_name]
         if not named:

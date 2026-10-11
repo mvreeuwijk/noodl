@@ -20,6 +20,10 @@ JSON by `test_the_algebraic_set_has_no_volumes`): between two or more pressure b
 flows are algebraic in the boundary signals, so noodl's steady solve at each grid time is the
 same problem the DAE solver solves, and parity is to round-off, not to the solver tolerance.
 `OneEffectiveAirLeakageArea` has two volumes and a mass source, so it is a dynamic model.
+`Outside_Cp` (MBL's `Buildings.Fluid.Sources.Examples`) joins them: two wind boundaries and an
+`Outside` driven by a `ReaderTMY3`, each through an orifice; its weather-bus and `pWin` columns
+are compared too (here at the same tolerance, and to round-off in
+`test_weather_and_wind_pressure_parity`).
 
 At an output time exactly on a signal event (`DoorOpenClosed`: the `Step` at 0.5 s;
 `OpenDoorPressure`/`OpenDoorTemperature`: the `TimeTable` knots every 3600 s) OpenModelica's
@@ -55,8 +59,9 @@ import pytest
 import torch
 
 from noodl.apps.building_physics import read_modelica
+from noodl.apps.building_physics.modelica.assemble import weather_columns
 from noodl.apps.building_physics.modelica.run import extrapolate, simulate
-from noodl.apps.building_physics.modelica.schema import ModelicaImportError
+from noodl.apps.building_physics.modelica.schema import ModelicaImportError, load
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / "tests" / "data" / "modelica"
@@ -64,7 +69,7 @@ RECORD = DATA / "parity-algebraic.json"
 
 RTOL, ATOL = 1e-6, 1e-9  # never loosened
 ALGEBRAIC = ("OneWayFlow", "DoorOpenClosed", "OpenDoorPressure", "OpenDoorTemperature",
-             "Orifice", "PowerLaw")
+             "Orifice", "PowerLaw", "Outside_Cp")
 VOLUME_CLASSES = ("Buildings.Fluid.MixingVolumes.MixingVolume",
                   "Buildings.Fluid.Delays.DelayFirstOrder")
 
@@ -109,6 +114,14 @@ def _record(model: str, stats: dict, record: Path = RECORD) -> None:
 _NODE_VARS = {"T": "T", "p": "p", "Xi[1]": "X_w"}
 
 
+def _weather_column(names, h: str, n: int) -> np.ndarray | None:
+    """The first `n` output rows of column `h` when it is a weather-bus output or a wind
+    pressure (`ModelicaNames.weather`), else `None`."""
+    if h not in names.weather:
+        return None
+    return names.weather[h][:n].numpy()
+
+
 def _noodl_columns(model: str, head: list[str], data: np.ndarray,
                    run: dict | None = None) -> dict[str, np.ndarray]:
     """noodl's value of every CSV column; `run`, when given, receives the `simulate` history
@@ -123,6 +136,9 @@ def _noodl_columns(model: str, head: list[str], data: np.ndarray,
     q = out["air.q"].numpy()
     cols: dict[str, np.ndarray] = {}
     for h in head[1:]:
+        if (col := _weather_column(names, h, data.shape[0])) is not None:
+            cols[h] = col
+            continue
         inst, var = h.rsplit(".", 1)
         if inst in names.nodes and (var in _NODE_VARS or var.startswith("C[")):
             # A volume's or boundary's T (K), p (Pa), Xi[1] (water, kg/kg) and C[k] (trace
@@ -163,7 +179,8 @@ def test_parity_on_the_algebraic_models(model):
         rel = float((err[nonzero] / np.abs(omc[nonzero])).max()) if nonzero.any() else 0.0
         stats[h] = {"max_rel": rel, "max_abs": float(err.max()),
                     "max_err_over_tol": float((err / tol).max()), "rows": int(omc.size)}
-        print(f"{model} {h}: max rel {rel:.3e}, max abs {err.max():.3e} kg/s "
+        unit = " kg/s" if h.endswith("_flow") else ""
+        print(f"{model} {h}: max rel {rel:.3e}, max abs {err.max():.3e}{unit} "
               f"({omc.size} rows)")
         bad = np.nonzero(err > tol)[0]
         if bad.size:
@@ -249,6 +266,49 @@ def test_refused_models_name_their_offending_instances(model):
     assert f"refused {len(REFUSED[model])} item" in message
 
 
+# ------------------------------------------------------- weather and wind pressure
+# The weather a model's Outside boundaries read and their wind pressure are algebraic in time
+# (`assemble.weather_columns`): every row of OpenModelica's `<reader>.weaBus.<output>` and
+# `<boundary>.pWin` columns is compared. They are the same arithmetic as MBL's, so they are held
+# to round-off, WEATHER_RTOL relative with no absolute floor (an exact zero, a calm hour's wind
+# speed and wind pressure, must come out exactly zero), well inside the algebraic tolerance.
+# WEATHER_ONLY are MBL's Fluid.Sources examples, boundaries with no flow element (which
+# `read_modelica` refuses).
+WEATHER_RTOL = 1e-12
+WEATHER_ONLY = ("Outside_CpData", "Outside_CpData_Angles", "Outside_CpData_Directions",
+                "Outside_CpLowRise")
+WEATHER = (*WEATHER_ONLY, "Outside_Cp")
+
+
+@pytest.mark.parametrize("model", WEATHER)
+def test_weather_and_wind_pressure_parity(model):
+    head, data = _csv(model)
+    got = weather_columns(load(DATA / f"{model}.json"),
+                          torch.tensor(data[:, 0], dtype=torch.float64))
+    columns = [h for h in head[1:] if ".weaBus." in h or h.endswith(".pWin")]
+    assert columns, f"{model}: no weather or wind-pressure column"
+    if model in WEATHER_ONLY:
+        assert columns == head[1:]
+    stats, failures = {}, []
+    for h in columns:
+        assert h in got, f"{model}: CSV column {h!r} maps to no noodl variable"
+        omc, val = data[:, head.index(h)], got[h].numpy()
+        err = np.abs(val - omc)
+        tol = WEATHER_RTOL * np.abs(omc)
+        nonzero = omc != 0.0
+        rel = float((err[nonzero] / np.abs(omc[nonzero])).max()) if nonzero.any() else 0.0
+        stats[h] = {"max_rel": rel, "max_abs": float(err.max()), "rows": int(omc.size)}
+        print(f"{model} {h}: max rel {rel:.3e}, max abs {err.max():.3e} ({omc.size} rows)")
+        bad = np.nonzero(err > tol)[0]
+        if bad.size:
+            k = int(bad[0])
+            failures.append(f"{h}: {bad.size} rows, first t = {data[k, 0]!r}: noodl "
+                            f"{val[k]!r} vs omc {omc[k]!r}")
+    _record(f"{model}:weather", stats)
+    assert not failures, (f"{model} outside |d| <= {WEATHER_RTOL:g} |omc|:\n"
+                          + "\n".join(failures))
+
+
 # ===================================================================== dynamic models
 RECORD_DYNAMIC = DATA / "parity-dynamic.json"
 # Relative errors are |noodl - omc| / max(|omc|, floor). The floor for a flow is FLOOR_FRAC
@@ -312,7 +372,7 @@ def test_every_fixture_is_parity_checked_or_refused():
     # "parity-algebraic"/"parity-dynamic" are the committed recorded-error files this
     # module writes (see RECORD/RECORD_DYNAMIC, NOODL_RECORD_PARITY), not model fixtures.
     fixtures = {p.stem for p in DATA.glob("*.json")} - {"parity-algebraic", "parity-dynamic"}
-    sets = (set(ALGEBRAIC), set(DYNAMIC), set(REFUSED))
+    sets = (set(ALGEBRAIC), set(DYNAMIC), set(REFUSED), set(WEATHER_ONLY))
     assert set().union(*sets) == fixtures
     assert sum(len(s) for s in sets) == len(fixtures)  # disjoint
     assert set(PARITY_ROWS) == set(DYNAMIC) == set(REFERENCE_RESOLUTION) == set(WINDOW_COST)
@@ -400,6 +460,9 @@ def _columns_of(out: dict, names, head: list[str]) -> dict[str, np.ndarray]:
     q = out["air.q"].numpy()
     cols: dict[str, np.ndarray] = {}
     for h in head[1:]:
+        if (col := _weather_column(names, h, q.shape[0])) is not None:
+            cols[h] = col
+            continue
         inst, var = h.rsplit(".", 1)
         if inst in names.nodes and (var in _NODE_VARS or var.startswith("C[")):
             i = names.nodes[inst]

@@ -1,0 +1,236 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "Buildings.Fluid.Sources.Validation.Outside_CpData_Directions",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 86400.0,
+    "Interval": 172.8,
+    "Tolerance": 1e-06
+  },
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "X_default": [
+      0.01,
+      0.99
+    ],
+    "nXi": 1,
+    "extraPropertiesNames": [],
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "nor",
+      "class": "Buildings.Fluid.Sources.Outside_CpData",
+      "parameters": {
+        "nPorts": 0,
+        "verifyInputs": true,
+        "use_C_in": false,
+        "C": [],
+        "azi": 3.141592653589793,
+        "incAngSurNor": [
+          0.0,
+          0.017453292519943295,
+          0.08726646259971647,
+          1.5707963267948966,
+          3.141592653589793,
+          5.497787143782138,
+          6.19591884457987,
+          6.265732014659642
+        ],
+        "Cp": [
+          1.0,
+          0.01,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.01
+        ],
+        "Cs": 1.0
+      }
+    },
+    {
+      "name": "eas",
+      "class": "Buildings.Fluid.Sources.Outside_CpData",
+      "parameters": {
+        "nPorts": 0,
+        "verifyInputs": true,
+        "use_C_in": false,
+        "C": [],
+        "azi": -1.5707963267948966,
+        "incAngSurNor": [
+          0.0,
+          0.017453292519943295,
+          0.08726646259971647,
+          1.5707963267948966,
+          3.141592653589793,
+          5.497787143782138,
+          6.19591884457987,
+          6.265732014659642
+        ],
+        "Cp": [
+          1.0,
+          0.01,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.01
+        ],
+        "Cs": 1.0
+      }
+    },
+    {
+      "name": "sou",
+      "class": "Buildings.Fluid.Sources.Outside_CpData",
+      "parameters": {
+        "nPorts": 0,
+        "verifyInputs": true,
+        "use_C_in": false,
+        "C": [],
+        "azi": 0.0,
+        "incAngSurNor": [
+          0.0,
+          0.017453292519943295,
+          0.08726646259971647,
+          1.5707963267948966,
+          3.141592653589793,
+          5.497787143782138,
+          6.19591884457987,
+          6.265732014659642
+        ],
+        "Cp": [
+          1.0,
+          0.01,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.01
+        ],
+        "Cs": 1.0
+      }
+    },
+    {
+      "name": "wes",
+      "class": "Buildings.Fluid.Sources.Outside_CpData",
+      "parameters": {
+        "nPorts": 0,
+        "verifyInputs": true,
+        "use_C_in": false,
+        "C": [],
+        "azi": 1.5707963267948966,
+        "incAngSurNor": [
+          0.0,
+          0.017453292519943295,
+          0.08726646259971647,
+          1.5707963267948966,
+          3.141592653589793,
+          5.497787143782138,
+          6.19591884457987,
+          6.265732014659642
+        ],
+        "Cp": [
+          1.0,
+          0.01,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.01
+        ],
+        "Cs": 1.0
+      }
+    },
+    {
+      "name": "weaDat",
+      "class": "Buildings.BoundaryConditions.WeatherData.ReaderTMY3",
+      "parameters": {
+        "filNam": "modelica://Buildings/Resources/weatherdata/USA_CA_San.Francisco.Intl.AP.724940_TMY3.mos",
+        "computeWetBulbTemperature": true,
+        "pAtmSou": "Buildings.BoundaryConditions.Types.DataSource.Parameter",
+        "pAtm": 101325.0,
+        "TDryBulSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "TDryBul": 293.15,
+        "TDewPoiSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "TDewPoi": 283.15,
+        "TBlaSkySou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "TBlaSky": 273.15,
+        "relHumSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "relHum": 0.5,
+        "winSpeSou": "Buildings.BoundaryConditions.Types.DataSource.Parameter",
+        "winSpe": 1.0,
+        "winDirSou": "Buildings.BoundaryConditions.Types.DataSource.Input",
+        "winDir": 1.0,
+        "HInfHorSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "HInfHor": 0.0,
+        "HSou": "Buildings.BoundaryConditions.Types.RadiationDataSource.File",
+        "ceiHeiSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "ceiHei": 20000.0,
+        "totSkyCovSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "totSkyCov": 0.5,
+        "opaSkyCovSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "opaSkyCov": 0.5,
+        "calTSky": "Buildings.BoundaryConditions.Types.SkyTemperatureCalculation.TemperaturesAndSkyCover"
+      },
+      "unevaluated": [
+        "lon",
+        "lat",
+        "timZon",
+        "alt"
+      ],
+      "files": {
+        "filNam": {
+          "path": "USA_CA_San.Francisco.Intl.AP.724940_TMY3.mos",
+          "sha256": "a6333b8202e6563460b2afdaf726315337b4058adf8dc16a365879693850ec4f"
+        }
+      }
+    }
+  ],
+  "connections": [
+    [
+      "weaDat.weaBus",
+      "nor.weaBus"
+    ],
+    [
+      "weaDat.weaBus",
+      "eas.weaBus"
+    ],
+    [
+      "weaDat.weaBus",
+      "sou.weaBus"
+    ],
+    [
+      "weaDat.weaBus",
+      "wes.weaBus"
+    ]
+  ],
+  "signals": [
+    {
+      "name": "winDir",
+      "class": "Modelica.Blocks.Sources.Ramp",
+      "parameters": {
+        "height": 6.283185307179586,
+        "duration": 86400.0,
+        "offset": 0.0,
+        "startTime": 0.0
+      },
+      "drives": "weaDat.winDir_in"
+    }
+  ],
+  "modelica_standard_library": "4.1.0",
+  "experiment_declared": [
+    "StopTime",
+    "Tolerance"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

@@ -104,6 +104,18 @@ def test_calendar_time_of_a_one_year_file_wraps_after_each_year():
     assert weather.calendar_time(t, 0.0, span).tolist() == [0.0, 10.0, YEAR, 10.0, 5.0]
 
 
+def test_calendar_time_rounds_as_mbl_evaluates_it():
+    """PartialConvertTime.mo:36: `calTim = modTim - tNext + lenWea`, evaluated left to right.
+    In the first year `(t - lenWea) + lenWea` is `t` rounded to the spacing of doubles near
+    lenWea (3.7e-9 s for a year), which OpenModelica's weather columns carry: 55814.4 s comes
+    back 1.49e-9 s early, not as 55814.4."""
+    t = torch.tensor([55814.4, 3628.8, YEAR + 55814.4], dtype=F64)
+    expected = [(55814.4 - YEAR) + YEAR, (3628.8 - YEAR) + YEAR,
+                ((YEAR + 55814.4) - 2 * YEAR) + YEAR]
+    assert expected[0] != 55814.4
+    assert weather.calendar_time(t, 0.0, (0.0, YEAR)).tolist() == expected
+
+
 def test_calendar_time_starting_on_a_year_boundary_starts_at_zero():
     t = torch.tensor([YEAR, YEAR + 5.0], dtype=F64)
     assert weather.calendar_time(t, YEAR, (0.0, YEAR)).tolist() == [0.0, 5.0]

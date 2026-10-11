@@ -202,7 +202,7 @@ end time. `run.simulate` steps over every driver-grid time between the times it 
 from __future__ import annotations
 
 import bisect
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 
 import torch
@@ -594,11 +594,15 @@ class _Signals:
             return y[0].clone()
         return y
 
-    def check_unused(self) -> None:
+    def check_unused(self, instances: Collection[str] | None = None) -> None:
+        """Refuse every signal driving an input nothing read; only the inputs of `instances`
+        when given."""
         for target, s in self.by_target.items():
             if target in self.used:
                 continue
             inst = target.split(".", 1)[0]
+            if instances is not None and inst not in instances:
+                continue
             if self.kind_of.get(inst) == "observer":
                 continue  # feeds a block the reader ignores
             if inst in self.signal_names:
@@ -1021,23 +1025,22 @@ class _Weather:
                                                wind_speed=bus["winSpe"],
                                                density_at_boundary=False)
             else:
-                azi = _param(comp, "azi", self.errors, required=True)
-                if azi is None:
+                # Every required parameter is looked up before refusing, so that all the
+                # missing ones are named together.
+                keys = ("azi", "s") if cls == "Outside_CpLowRise" else ("azi", "incAngSurNor",
+                                                                       "Cp")
+                req = {k: _param(comp, k, self.errors, required=True) for k in keys}
+                if any(v is None for v in req.values()):
                     return None
-                incidence = outside.incidence_angle(bus["winDir"], float(azi))
+                incidence = outside.incidence_angle(bus["winDir"], float(req["azi"]))
                 if cls == "Outside_CpLowRise":
-                    s = _param(comp, "s", self.errors, required=True)
-                    if s is None:
-                        return None
                     cp = outside.low_rise_pressure_coefficient(
-                        incidence, float(par.get("Cp0", 0.6)), float(s))  # Outside_CpLowRise.mo:6
+                        incidence, float(par.get("Cp0", 0.6)),
+                        float(req["s"]))  # Outside_CpLowRise.mo:6
                     modifier = 1.0
                 else:  # Outside_CpData
-                    inc = _param(comp, "incAngSurNor", self.errors, required=True)
-                    values = _param(comp, "Cp", self.errors, required=True)
-                    if inc is None or values is None:
-                        return None
-                    cp = outside.PressureCoefficientProfile(inc, values)(incidence)
+                    cp = outside.PressureCoefficientProfile(req["incAngSurNor"],
+                                                            req["Cp"])(incidence)
                     modifier = float(par.get("Cs", 1.0))  # Outside_CpData.mo:16-19
                 air = outside.wind_exposed_air(p_atm, T, phi, self.med, pressure_coefficient=cp,
                                                wind_speed=bus["winSpe"],
@@ -1939,7 +1942,8 @@ def weather_columns(doc: ModelicaDoc, times) -> dict[str, Tensor]:
     Pa, `relHum` 1, `winSpe` m/s, `winDir` rad) and `"<boundary>.pWin"` (Pa) for an
     `Outside_Cp`, `Outside_CpLowRise` or `Outside_CpData`. Needs no flow element (MBL's
     `Fluid.Sources` examples have none, and `read_modelica` refuses them). Raises
-    `ModelicaImportError` naming every instance it cannot evaluate."""
+    `ModelicaImportError` naming every instance it cannot evaluate, and every signal driving
+    an input of a reader or an Outside boundary that is not read (as `read_modelica` does)."""
     g = build_graph(doc)
     times = torch.as_tensor(times, dtype=F64)
     errors: list[str] = []
@@ -1953,5 +1957,7 @@ def weather_columns(doc: ModelicaDoc, times) -> dict[str, Tensor]:
         if w.by_name[name].cls in schema.OUTSIDE_FAMILY:
             w.outside_air(w.by_name[name])
     w.evaluate_readers()
+    w.sig.check_unused({*(r.name for r in w.readers),
+                        *(c.name for c in doc.components if c.cls in schema.OUTSIDE_FAMILY)})
     _refuse(errors)
     return w.columns(torch.arange(times.numel()))

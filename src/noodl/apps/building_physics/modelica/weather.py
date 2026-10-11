@@ -300,7 +300,9 @@ def _repeats(length: float) -> bool:
 
 def calendar_time(t, t_start: float, span: tuple[float, float]) -> Tensor:
     """`conTim.calTim` (PartialConvertTime.mo) at model times `t` (s) of a run starting at
-    `t_start` (s), for a file covering `span` (`WeatherTable.span`)."""
+    `t_start` (s), for a file covering `span` (`WeatherTable.span`): `t - tNext + lenWea`,
+    `tNext = k lenWea`, evaluated in MBL's order (PartialConvertTime.mo:25-36), so that it
+    rounds as MBL's does (to the spacing of doubles near `tNext`)."""
     t = torch.as_tensor(t, dtype=F64)
     first, end = span
     length = end - first
@@ -308,7 +310,7 @@ def calendar_time(t, t_start: float, span: tuple[float, float]) -> Tensor:
         return t.clone()
     k0 = math.floor(t_start / length) + 1
     k = torch.clamp(torch.ceil(t / length), min=k0)
-    return t - (k - 1) * length
+    return (t - k * length) + length
 
 
 def _short(value, default: str) -> str:

@@ -23,7 +23,8 @@ print(result["T"][-1])       # zone temperatures (K) at the last grid time, node
 print(result["air.q"][-1])   # edge flows (kg/s); names.edges maps an MBL instance to its columns
 ```
 
-**Supported (19 models: 8 `Validation` + 11 `Examples`).** `Buildings.Airflow.Multizone`
+**Supported (20 models: 8 `Validation` + 11 `Examples` of `Buildings.Airflow.Multizone`, and
+`Buildings.Fluid.Sources.Examples.Outside_Cp`).** `Buildings.Airflow.Multizone`
 elements, `MixingVolume` zones, pressure/temperature boundaries, trace substances, the outside
 boundaries `Outside`, `Outside_Cp`, `Outside_CpLowRise` and `Outside_CpData` and the weather
 reader `ReaderTMY3` (see "Weather and wind" below) — not `Buildings.ThermalZones`, HVAC or
@@ -32,7 +33,10 @@ district networks. `Validation`: `OneWayFlow`,
 `ThreeRoomsContamDiscretizedDoor`, `OpenDoorBuoyancyDynamic`, `OpenDoorBuoyancyPressureDynamic`.
 `Examples`: `CO2TransportStep`, `ClosedDoors`, `NaturalVentilation`, `OneEffectiveAirLeakageArea`,
 `OneOpenDoor`, `OneRoom`, `Orifice`, `PowerLaw`, `ReverseBuoyancy`, `ReverseBuoyancy3Zones`,
-`ZonalFlow`.
+`ZonalFlow`. The weather and wind pressure of the `Buildings.Fluid.Sources` examples
+`Outside_CpLowRise`, `Outside_CpData`, `Outside_CpData_Angles` and
+`Validation.Outside_CpData_Directions` (boundaries with no flow element, so not importable as
+models) are compared with `assemble.weather_columns`.
 
 **Refused, each with a named error** (`ModelicaImportError` lists every offending instance and
 its class):
@@ -44,7 +48,10 @@ its class):
   JSON, so its `ReaderTMY3` is refused until the model is re-exported.
 - Every `Buildings.BoundaryConditions.WeatherData` class but `ReaderTMY3`; a weather bus wired
   to anything but an `Outside` boundary's `weaBus`, or any weather-bus output other than
-  `TDryBul`, `pAtm`, `relHum`, `winSpe` and `winDir` read by anything.
+  `TDryBul`, `pAtm`, `relHum`, `winSpe` and `winDir` read by anything; a `ReaderTMY3` wired
+  through any port but its `weaBus` and the `<output>_in` inputs of those five; a signal
+  driving one of its inputs that it does not read (an output taken from the file, or an
+  input of another output).
 
 For example, reading `TrickleVent` raises:
 

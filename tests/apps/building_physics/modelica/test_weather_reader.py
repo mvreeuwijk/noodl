@@ -285,3 +285,67 @@ def test_outside_cp_data_with_a_table_mbl_rejects_is_refused_by_name(tmp_path):
                        match=r"refused 1 item:\n  - east \(.*Outside_CpData\): the first "
                              r"incidence angle must be 0"):
         read_modelica(_two_walls(rows, tmp_path, walls=walls))
+
+
+# ------------------------------------------------------------- refusals, by name
+def test_a_reader_port_other_than_its_bus_or_a_weather_input_is_refused_by_name(tmp_path):
+    """A ReaderTMY3 is read through its weaBus and the `<output>_in` inputs of the outputs the
+    Outside boundaries read; any other port wired to a component is refused, naming the
+    reader and the port."""
+    rows = [tmy3_row(k * H) for k in range(4)]
+    bou = {"name": "bou", "class": "Buildings.Fluid.Sources.Boundary_pT",
+           "parameters": {"p": P_ATM, "T": 293.15, "nPorts": 1}}
+    doc = document([reader(), _wall("west", PI / 2), bou, ORIFICE],
+                   [("weaDat.weaBus", "west.weaBus"), ("west.ports[1]", "ori.port_a"),
+                    ("ori.port_b", "bou.ports[1]"), ("weaDat.ceiHei_in", "bou.T_in")])
+    with pytest.raises(ModelicaImportError,
+                       match=r"weaDat \(.*ReaderTMY3\): port ceiHei_in, wired to bou.T_in, "
+                             r"is not supported"):
+        read_modelica(write_model(tmp_path, doc, rows))
+
+
+def test_weather_columns_refuses_a_signal_into_a_weather_input_it_does_not_read(tmp_path):
+    """As `read_modelica` does (`_Signals.check_unused`), for the signals that drive a reader
+    or an Outside boundary."""
+    rows = [tmy3_row(k * H) for k in range(4)]
+    cei = {"name": "cei", "class": "Modelica.Blocks.Sources.Constant",
+           "parameters": {"k": 100.0}, "drives": "weaDat.ceiHei_in"}
+    doc = document([reader(), _wall("west", PI / 2)], [("weaDat.weaBus", "west.weaBus")],
+                   [cei])
+    path = write_model(tmp_path, doc, rows)
+    with pytest.raises(ModelicaImportError,
+                       match=r"cei \(.*Constant\): drives weaDat.ceiHei_in, which this "
+                             r"reader does not read"):
+        assemble.weather_columns(load(path), torch.tensor([0.0, 600.0], dtype=F64))
+
+
+@pytest.mark.parametrize(("wall", "missing"), [
+    ({"name": "west", "class": LOW_RISE, "parameters": {"Cp0": 0.6, "nPorts": 1}},
+     ("azi", "s")),
+    ({"name": "west", "class": "Buildings.Fluid.Sources.Outside_CpData",
+      "parameters": {"nPorts": 1}}, ("azi", "incAngSurNor", "Cp")),
+])
+def test_a_wind_boundary_names_every_missing_parameter(tmp_path, wall, missing):
+    rows = [tmy3_row(k * H) for k in range(4)]
+    doc = document([reader(), wall], [("weaDat.weaBus", "west.weaBus")])
+    with pytest.raises(ModelicaImportError) as exc:
+        assemble.weather_columns(load(write_model(tmp_path, doc, rows)),
+                                 torch.tensor([0.0], dtype=F64))
+    message = str(exc.value)
+    for key in missing:
+        assert f"west ({wall['class']}): parameter {key!r} is required" in message, message
+    assert f"refused {len(missing)} items" in message, message
+
+
+def test_a_repeating_file_wraps_its_year_on_a_grid_jump(tmp_path):
+    """PartialConvertTime.mo:31-34: the year wrap is a time event, so `grid_events` puts it
+    among the jumps (a knot of the file and a limiter crossing are not)."""
+    year = 365 * 24 * H
+    rows = [tmy3_row(0.0), tmy3_row(year / 2)]  # span (0, year): repeats
+    doc = load(_two_walls(rows, tmp_path,
+                          experiment={"StartTime": year - H, "StopTime": year + H,
+                                      "Interval": 1800.0}))
+    grid = assemble.driver_grid(doc)
+    jumps, kinks = assemble.grid_events(doc, grid)
+    assert jumps.tolist() == [year]
+    assert kinks.numel() == 0
