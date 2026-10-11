@@ -39,7 +39,7 @@ Flow through an edge as a function of the potential difference across it.
 | Name | What it does | How to call it |
 |---|---|---|
 | `DynamicWaveConduit` | SWMM's dynamic-wave conduit (`dwflow.c`) with its coefficients frozen for one pass. | `DynamicWaveConduit(kind='pipe')` |
-| `StructureLink` | A flow regulator (orifice, weir or outlet; design E5) with its flow linearised about the previous pass: ``q = c0 + g (dp - dp_fed)`` (m3/s, dp = H1 - H2 in m), then the flap gate's clamp. | `StructureLink(kind)` |
+| `StructureLink` | A flow regulator (orifice, weir or outlet) with its flow linearised about the previous pass: ``q = c0 + g (dp - dp_fed)`` (m3/s, dp = H1 - H2 in m), then the flap gate's clamp. | `StructureLink(kind)` |
 | `Headspace` | ``dp = R \|Q\| Q`` on a headspace edge, with ``R`` read from per-edge drivers. | `Headspace(length, pipe_positions, *, f_air=0.02, rho_air=1.2041, area_key='sewer.A_air', dh_key='sewer.D_h', dp_transition=1e-08, kind='headspace', learnable=False)` |
 
 ## Drives
@@ -75,7 +75,7 @@ Nodal sources and withdrawals.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `JunctionStorage` | SWMM's junction continuity as a node withdrawal: trapezoidal storage over the step, with a stiff bed below the invert (design D3), or no storage at all where the junction is EXTRAN-surcharged (design E1), capped by flooding at the junction's top (design E3). | `JunctionStorage(nodes, bed, bed_area, crown=None, top=None, surchargeable=None)` |
+| `JunctionStorage` | SWMM's junction continuity as a node withdrawal: trapezoidal storage over the step, with a stiff bed below the invert, or no storage at all where the junction is EXTRAN-surcharged, capped by flooding at the junction's top. | `JunctionStorage(nodes, bed, bed_area, crown=None, top=None, surchargeable=None)` |
 
 ## Files
 
@@ -99,6 +99,7 @@ Calculations and helpers.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `build_dynamic_wave_model` | Assemble a dynamic-wave sewer and return ``(model, state, drivers)``. | `build_dynamic_wave_model(net, *, iterate_tol=1e-11, iterate_max=2000, relaxation=0.5, acceleration='anderson', memory=5, iterate_flow_tol=1e-10, outfall_stage=None, quality=False, species=('bod', 'sulfide'), scheme='implicit', air=False, f_air=0.02, f_i=0.000749, c_s=1.0, leak_area=0.0008, leak_cd=0.6, fans=())` |
 | `simulate_dynamic_wave` | Run the dynamic wave from `state` for `steps` steps, or for `duration` s. | `simulate_dynamic_wave(model, state, drivers, *, steps=None, duration=None, dt=None, inflow=None, outfall_stage=None, record=('water.phi', 'water.q'), diagnostics=None, **solve_kwargs)` |
 | `tidal_stage` | A TIDAL outfall's stage elevation (m) `t` s into the run (`node.c:: outfall_setOutletDepth`, node.c:1445-1452): the curve `tide` of ``(hour, stage)`` pairs is read at ``x = x_first + 24 frac(t / 1 day)`` (the elapsed time, not the clock time: the simulation's start is not added, so the tide begins at the curve's first hour and repeats every 24 h), by `table.c::table_lookup`: the first stage at or below the first hour, linear between entries, the last stage beyond the last hour (the curve is not wrapped, so one that stops short of 24 h holds its last stage). | `tidal_stage(tide, t)` |
 | `storage_unit` | A SWMM storage unit (`[STORAGE]`) as a `Manhole` with a `storage` curve: `invert` (m), `max_depth` (SWMM's MaxDepth, m >= 0: the manhole's ground is ``invert + max_depth``), the surface-area `curve` (`Manhole.storage`), SWMM's SurDepth `surcharge_depth` (m) and InitDepth `initial_depth` (m), and a constant lateral `inflow` (m3/s). Tabular depths and areas are stored as tuples (the manhole is hashable). | `storage_unit(name, invert, max_depth, curve, *, surcharge_depth=0.0, initial_depth=0.0, inflow=0.0)` |

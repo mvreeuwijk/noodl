@@ -2877,3 +2877,13 @@ def test_air_with_quality_couples_the_h2s_transfer(tmp_path):
     torch.testing.assert_close(water / M_S + air / M_H2S, torch.zeros_like(water),
                                rtol=0.0, atol=1e-18)
     assert float(air.abs().max()) > 0.0
+
+
+def test_build_dynamic_wave_model_is_exported():
+    """The docs point at `build_dynamic_wave_model`'s `acceleration`, `memory` and
+    `iterate_flow_tol`: it is part of the sewer app's public names."""
+    import noodl.apps.sewer as sewer
+    from noodl.apps.sewer.dynwave import build_dynamic_wave_model
+
+    assert sewer.build_dynamic_wave_model is build_dynamic_wave_model
+    assert "build_dynamic_wave_model" in sewer.__all__

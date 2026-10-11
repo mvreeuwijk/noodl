@@ -146,7 +146,10 @@ headspace air on the solved conduits (see
 on its routing step) and a `geometry="analytic"` network (it always routes on SWMM's tabulated
 circle) are refused, naming the option; `iterate_tol` and
 `iterate_max` are refused for the other routings. Run it with `simulate_dynamic_wave` (see
-[Dynamic wave](#dynamic-wave)), not `sewer_steady`.
+[Dynamic wave](#dynamic-wave)), not `sewer_steady`. To tune the iteration itself
+(`relaxation`, `acceleration`, `memory`, `iterate_flow_tol`), call
+`build_dynamic_wave_model(net, ...)` from `noodl.apps.sewer` directly; it takes the same
+dynamic-wave arguments as `build_model`.
 
 `dt_storage` (optional) declares the interval the manhole storage sweep integrates over. When given,
 a step at any other interval is refused by name. Omit it (the default) to follow the model's own
@@ -304,7 +307,7 @@ or `iterate_max` passes (default 2000) are used (`Model(coupling="iterate")`, co
 layer's own interior head). The result is the head and flow field at which a SWMM trial
 reproduces its own input.
 
-The passes are Anderson-accelerated by default (`build_dynamic_wave_model(...,
+The passes are Anderson-accelerated by default (`noodl.apps.sewer.build_dynamic_wave_model(net,
 acceleration="anderson", memory=5, iterate_flow_tol=1e-10)`; `Model`'s `iterate_acceleration`,
 see [Layers and models](../concepts/layers.md)). Each pass's flows must then also reproduce the
 flows it was fed to within `iterate_flow_tol` (m³/s): the head solve stops on its warm start once

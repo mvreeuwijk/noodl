@@ -382,9 +382,8 @@ class DynamicWaveConduit(Element):
 
 
 class StructureLink(Element):
-    """A flow regulator (orifice, weir or outlet; docs: "Orifices, weirs and outlets") with its flow
-    linearised about the previous pass: ``q = c0 + g (dp - dp_fed)`` (m3/s, dp = H1 - H2 in m), then
-    the flap gate's clamp.
+    """A flow regulator (orifice, weir or outlet) with its flow linearised about the previous
+    pass: ``q = c0 + g (dp - dp_fed)`` (m3/s, dp = H1 - H2 in m), then the flap gate's clamp.
 
     ``c0`` is SWMM's own regulator flow at the previous pass's heads (`link.c`
     ``orifice_getInflow`` / ``weir_getInflow`` / ``outlet_getInflow``,
