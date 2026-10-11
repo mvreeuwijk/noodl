@@ -531,3 +531,116 @@ def test_lengthening_changes_mod_length_not_the_true_length_or_normal_flow():
     # the normal-flow limit is unchanged by lengthening
     assert rl.limited.item() is rp.limited.item()
     torch.testing.assert_close(rl.normal_flow, rp.normal_flow)
+
+
+def _ycs(g, q):
+    yn = xt.normal_depth_ft(t([q]), g.y_full, g.a_full, g.s_full, g.beta).item()
+    yc = xt.critical_depth(t([q]), g.y_full, g.a_full).item()
+    return min(yn, yc), max(yn, yc)
+
+
+def _at_end2(g, y2, q, y1=0.6, **kw):
+    """`conduit_terms` with the downstream END depth `y2` (ft above the offset invert)."""
+    a_old = xt.area_of_depth(t([0.5]), g.y_full, g.a_full)
+    d2 = g.offset2.item() + y2
+    return dt_.conduit_terms(g, t([y1]), t([d2]), t([q]), t([q]), a_old, 5.0, **kw)
+
+
+def test_a_drop_end_reports_the_thresholds_where_its_node_area_jumps_up():
+    """An outlet offset receiving forward flow (dwflow.c:357-368, 472-499): below min(yN,
+    yC) the end is DN_CRITICAL and gives its node no area, between min and max the area is
+    a quarter of the conduit scaled by fasnh (1 falling to 0), above max the full quarter.
+    So the node's area jumps UP at both thresholds; `drop_depth2` is the one nearest the
+    end depth and `drop_area2` the size of its jump, `drop_above2` the side."""
+    g = geo(offset2=0.1)
+    q = 2.0
+    lo, hi = _ycs(g, q)
+    eps = 1e-9 * (hi - lo)                      # fasnh moves by eps / (hi - lo)
+    for thr, probe in ((lo, lo + 0.1 * (hi - lo)), (hi, hi + 0.1 * (hi - lo))):
+        r = _at_end2(g, probe, q)
+        assert r.drop_depth2.item() == pytest.approx(thr, rel=1e-12)
+        assert r.drop_above2.item()
+        below = _at_end2(g, thr - eps, q)
+        above = _at_end2(g, thr + eps, q)
+        assert not below.drop_above2.item() and above.drop_above2.item()
+        jump = above.surface_area2.item() - below.surface_area2.item()
+        assert jump == pytest.approx(r.drop_area2.item(), rel=1e-4)
+        assert jump > 0.0
+    assert _at_end2(g, lo - eps, q).flow_class.item() == dt_.DN_CRITICAL
+    # end 1 has no offset: no threshold there
+    assert math.isinf(_at_end2(g, lo, q).drop_depth1.item())
+
+
+def test_a_drop_end_below_fudge_is_its_lower_threshold():
+    """With no flow min(yN, yC) is 0, and the lower threshold is SWMM's wet test, y > FUDGE:
+    a dry end below a wet one is DN_CRITICAL (h1 above the offset invert, dwflow.c:396-411),
+    no area; just above FUDGE both ends are wet, a full quarter (fasnh 1)."""
+    g = geo(offset2=0.1)
+    r = _at_end2(g, 0.0, 0.0)
+    assert r.drop_depth2.item() == pytest.approx(dt_.FUDGE)
+    assert r.flow_class.item() == dt_.DN_CRITICAL and r.surface_area2.item() == 0.0
+    assert not r.drop_above2.item()
+    wet = _at_end2(g, dt_.FUDGE * (1 + 1e-9), 0.0)
+    assert wet.drop_above2.item() and wet.surface_area2.item() > 0.0
+    assert wet.drop_area2.item() == pytest.approx(wet.surface_area2.item(), rel=1e-6)
+
+
+def test_an_upstream_drop_end_switches_on_reverse_flow_only_at_min_yn_yc():
+    """An inlet offset (dwflow.c:337-348): on reverse flow the UPSTREAM end is UP_CRITICAL
+    below min(yN, yC) (no area at node 1) -- its threshold; no max threshold there (fasnh is
+    the downstream end's only)."""
+    g = geo(offset1=0.2)
+    lo, _ = _ycs(g, 1.0)
+    a_old = xt.area_of_depth(t([0.3]), g.y_full, g.a_full)
+    r = dt_.conduit_terms(g, t([0.2 / xt.LCF + 0.5 * lo]), t([1.0 + 3.3]), t([-1.0]),
+                          t([-1.0]), a_old, 5.0)
+    assert r.flow_class.item() == dt_.UP_CRITICAL
+    assert r.drop_depth1.item() == pytest.approx(lo, rel=1e-12)
+    assert not r.drop_above1.item() and r.drop_area1.item() > 0.0
+
+
+def test_no_drop_threshold_without_an_offset_a_wet_other_end_or_below_the_crown():
+    g0 = geo()
+    r = _at_end2(g0, 0.3, 2.0)
+    assert math.isinf(r.drop_depth1.item()) and math.isinf(r.drop_depth2.item())
+    g = geo(offset2=0.1)
+    dry_up = _at_end2(g, 0.3, 2.0, y1=0.0)                  # the other end dry
+    assert math.isinf(dry_up.drop_depth2.item())
+    yf = g.y_full.item()
+    full = _at_end2(g, yf + 0.5, 2.0, y1=yf + 1.0)          # both ends full
+    assert math.isinf(full.drop_depth2.item())
+
+
+def test_a_held_drop_end_takes_swmms_class_at_its_threshold_and_slides_the_other_end():
+    """`hold2` (the closure's tie rule) classifies the end on the UPPER side of its
+    threshold whatever its depth: SWMM's class AT the threshold (its tests are strict). At
+    min(yN, yC) the other end's area is the sliding blend ``(2 - theta)`` quarters: half
+    the conduit (DN_CRITICAL's) at theta 0, a quarter (the upper side's) at theta 1. At
+    max(yN, yC) the class is the same on both sides, and only fasnh is 1."""
+    g = geo(offset2=0.1)
+    q = 2.0
+    lo, hi = _ycs(g, q)
+    eps = 1e-9 * (hi - lo)
+    y2 = lo - eps
+    free = _at_end2(g, y2, q)
+    assert free.flow_class.item() == dt_.DN_CRITICAL
+    up = _at_end2(g, lo + eps, q)
+    for theta in (0.0, 0.25, 1.0):
+        held = _at_end2(g, y2, q, hold2=t([theta]))
+        assert held.flow_class.item() in (dt_.SUBCRITICAL, dt_.SUPCRITICAL)
+        assert held.drop_above2.item()
+        assert held.surface_area2.item() == pytest.approx(up.surface_area2.item(), rel=1e-5)
+        assert held.surface_area1.item() == pytest.approx(
+            (2.0 - theta) * up.surface_area1.item(), rel=1e-5)
+    assert free.surface_area1.item() == pytest.approx(2.0 * up.surface_area1.item(), rel=1e-5)
+    no = _at_end2(g, y2, q, hold2=t([-1.0]))               # < 0: no hold
+    assert no.flow_class.item() == dt_.DN_CRITICAL
+    # the upper threshold: fasnh 1 when held, the other end untouched
+    below_hi = _at_end2(g, hi - eps, q)
+    held_hi = _at_end2(g, hi - eps, q, hold2=t([0.5]))
+    above_hi = _at_end2(g, hi + eps, q)
+    assert held_hi.surface_area2.item() == pytest.approx(above_hi.surface_area2.item(),
+                                                         rel=1e-5)
+    assert below_hi.surface_area2.item() < 1e-3 * above_hi.surface_area2.item()
+    assert held_hi.surface_area1.item() == pytest.approx(below_hi.surface_area1.item(),
+                                                         rel=1e-5)

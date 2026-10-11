@@ -542,6 +542,51 @@ def test_junction_storage_holds_continuity_without_storage_where_surcharged():
     assert flag([1.3 + 1.0e-6, 1.3014]) == [1.0, 1.0]
 
 
+def _area_switch_drivers(n_last, h_star=1.1):
+    """One junction whose storage area jumps from 2 to 3 m2 at the threshold head `h_star`
+    (m) while it fills (head 1 m at the step start, net inflow 0.1 m3/s then, dt 5 s): the
+    storage lines are lo = 0.8 (H - 1) - 0.1 and hi = 1.2 (H - 1) - 0.1 (m3/s), -0.02 and
+    +0.02 at 1.1 m; wall slope 10 m2/s, fed net inflow `n_last` (m3/s)."""
+    one = torch.ones(1, dtype=F64)
+    return {"water.storage_area": 2.0 * one, "water.head_start": one,
+            "water.net_inflow_start": 0.1 * one, "water.storage_rate": torch.tensor(0.2, dtype=F64),
+            "water.area_switch_head": h_star * one, "water.area_below": 2.0 * one,
+            "water.area_above": 3.0 * one, "water.area_switch_slope": 10.0 * one,
+            "water.net_inflow_last": n_last * one}
+
+
+def test_junction_storage_holds_a_filling_junction_on_its_area_threshold():
+    """The drop-end area switch in `JunctionStorage` (the tie rule, `DynamicWaveHydraulics`):
+    ``max(lo, min(hi, N_last + S (H - H*)))``, continuous and non-decreasing in H. Its
+    fixed points (withdrawal = fed net inflow) are SWMM's own on either side of the
+    threshold, unchanged, plus the threshold itself, H = H*, for any net inflow inside the
+    jump -- where SWMM has none (the storage equation lands above H* with the lower area and
+    below it with the upper one)."""
+    ns = JunctionStorage(torch.tensor([0]), bed=torch.zeros(1, dtype=F64), bed_area=0.5)
+
+    def w(h, n_last, **kw):
+        return ns.flow(torch.tensor([h], dtype=F64), _area_switch_drivers(n_last, **kw)).item()
+
+    # on the threshold for any net inflow inside the jump [-0.02, 0.02]
+    for n_last in (-0.019, 0.0, 0.019):
+        assert w(1.1, n_last) == pytest.approx(n_last, abs=1e-15)
+    # SWMM's fixed points below and above it, unchanged
+    assert w(1.05, 0.8 * 0.05 - 0.1) == pytest.approx(0.8 * 0.05 - 0.1)
+    assert w(1.2, 1.2 * 0.2 - 0.1) == pytest.approx(1.2 * 0.2 - 0.1)
+    # continuous, non-decreasing, with the slope of the active piece
+    grid = torch.linspace(0.9, 1.3, 4001, dtype=F64)
+    drv = {k: v.expand(4001) if v.dim() else v for k, v in _area_switch_drivers(0.0).items()}
+    ws = ns.flow(grid, drv)
+    assert bool((ws[1:] - ws[:-1] >= 0.0).all())
+    assert float((ws[1:] - ws[:-1]).abs().max()) < 10.0 * 1e-4 + 1e-12
+    slopes = ns.dflow(torch.tensor([1.0, 1.1, 1.2], dtype=F64),
+                      {k: v.expand(3) if v.dim() else v
+                       for k, v in _area_switch_drivers(0.0).items()})
+    assert slopes.tolist() == pytest.approx([0.8, 10.0, 1.2])
+    # no threshold (+inf): the lagged storage form
+    assert w(1.2, 0.0, h_star=float("inf")) == pytest.approx(0.8 * 0.2 - 0.1)
+
+
 def test_extran_surcharge_is_instantaneous_continuity():
     """Design E1 on the tree at 3x tree_dynwave.inp's inflows (the brief's "1.5x" is
     tree_kinwave.inp's scale; tree_dynwave.inp is half of that). In SWMM J2 passes its
@@ -1509,3 +1554,174 @@ def test_variable_step_scales_the_courant_step_by_mod_length_over_length():
                             20.0).item()                      # min(routing 60 s, lengthening 20 s)
     assert lf > 1.0 and plain * lf < 60.0
     assert long == pytest.approx(plain * lf, abs=2e-3)
+
+
+# ------------------------------------------------------------- the drop-end area switch
+OPTIONS = DATA / "options_dynwave.inp"
+#: Variants of options_dynwave.inp on which a junction below a drop fills through its
+#: area threshold: (the fixture line, its replacement, SWMM 5.2.4's non-converging steps at
+#: HEAD_TOLERANCE 1e-12 m and 500 trials (1-based; tests/verification/
+#: test_sewer_dynwave_parity.py measures them), the junction).
+DROP_VARIANTS = {
+    # C3 (J3 -> J4, two barrels) gets a 0.03 m outlet offset: J4 fills behind the closed
+    # outfall gate, through C3's DN_CRITICAL threshold min(yN, yC)
+    "c3_offset_0.03": ("C3               J3               J4               200        0.013"
+                       "      0          0  ",
+                       "C3               J3               J4               200        0.013"
+                       "      0          0.03",
+                       (60, 62), "J4"),
+    # the same at 0.1 m: J4 fills through C3's fasnh threshold max(yN, yC)
+    "c3_offset_0.1": ("C3               J3               J4               200        0.013"
+                      "      0          0  ",
+                      "C3               J3               J4               200        0.013"
+                      "      0          0.1",
+                      (107,), "J4"),
+    # C6 (J3 -> J5 once reversed, 0.05 m drop at J5) without its flap gate: J5 fills
+    # through C6's DN_CRITICAL threshold
+    "c6_gate_off": ("C6               0          0          0          YES        0",
+                    "C6               0          0          0          NO         0",
+                    (106, 129), "J5"),
+}
+
+
+def _drop_variant(name):
+    old, new, _, _ = DROP_VARIANTS[name]
+    text = OPTIONS.read_text()
+    assert text.count(old) == 1, name
+    return text.replace(old, new)
+
+
+def _drop_sides(tmp_path, name, steps, **build_kwargs):
+    """The variant `name` over `steps` steps: the diagnostics and, per step, the junctions
+    held on a drop-end area threshold, ``{junction: (H - H*, theta)}`` (m, -), each other
+    junction with a threshold checked to be on SWMM's own fixed point -- below it with the
+    net inflow at most the lower storage line there, or above it with at least the upper
+    one -- from the drivers of a pass fed the step's result."""
+    from noodl.apps.sewer.dynwave import build_dynamic_wave_model
+    from noodl.model import StepContext
+
+    path = tmp_path / f"{name}.inp"
+    path.write_text(_drop_variant(name))
+    net, _, _ = read_swmm_inp(path)
+    model, state, drivers = build_dynamic_wave_model(net, **build_kwargs)
+    hyd = model.dynamic_wave
+    diags: list = []
+    _, hist = simulate_dynamic_wave(model, state, drivers, steps=steps, diagnostics=diags,
+                                    record=("water.phi", "water.q") + hyd.state_keys)
+    held = []
+    for k in range(steps):
+        before = {key: (hist[key][k - 1] if k else state[key]) for key in hyd.state_keys}
+        after = {key: hist[key][k] for key in ("water.phi", "water.q")}
+        drv = hyd(after | before, drivers, StepContext(dt=hyd.options.routing_step))
+        h_star = drv["water.area_switch_head"]
+        rate2 = 2.0 * drv["water.storage_rate"]
+        rise = h_star - drv["water.head_start"]
+        lo = rate2 * drv["water.area_below"] * rise - drv["water.net_inflow_start"]
+        hi = rate2 * drv["water.area_above"] * rise - drv["water.net_inflow_start"]
+        n = drv["water.net_inflow_last"]
+        heads = after["water.phi"][model.junction_idx]
+        step = {}
+        for j, junction in enumerate(hyd.junction_names):
+            if not bool(torch.isfinite(h_star[j])):
+                continue
+            if lo[j] < n[j] < hi[j]:
+                step[junction] = ((heads[j] - h_star[j]).item(),
+                                  ((n[j] - lo[j]) / (hi[j] - lo[j])).item())
+            else:
+                assert (heads[j] < h_star[j] and n[j] <= lo[j]) or \
+                    (heads[j] > h_star[j] and n[j] >= hi[j]), (name, k + 1, junction)
+        held.append(step)
+    return diags, held
+
+
+def test_a_junction_filling_below_a_drop_is_held_on_its_area_threshold(tmp_path):
+    """Below an outlet offset a junction's surface area jumps UP with its own depth: the
+    conduit end gives it no area while DN_CRITICAL (end depth below min(yN, yC), or below
+    FUDGE) and a quarter of the conduit above (dwflow.c:357-411, 472-499). While the
+    junction FILLS, the storage equation can then land above the threshold with the lower
+    area and below it with the upper one: no fixed point. SWMM 5.2.4 itself does not
+    converge there (steps 60 and 62 of this variant, `DROP_VARIANTS`), and a lagged class
+    chattered until the pass budget ran out (step 60, t = 295 s; at the parity tests'
+    iterate_tol 1e-13 m the head solve failed first, C3's class also moving J3's area).
+    With the tie rule (`DynamicWaveHydraulics`, held
+    junctions in `JunctionStorage`) every step converges, J4 is held exactly on its
+    threshold on SWMM's two failing steps and on SWMM's own fixed point on every other."""
+    diags, held = _drop_sides(tmp_path, "c3_offset_0.03", 62)
+    assert all(bool(d["converged"]) for d in diags)
+    assert max(d["passes"] for d in diags) <= 30, max(d["passes"] for d in diags)
+    on = {k + 1: step for k, step in enumerate(held) if step}
+    assert set(on) == {60, 62} and all(set(s) == {"J4"} for s in on.values()), on
+    for step in on.values():
+        gap, theta = step["J4"]
+        assert abs(gap) <= 1e-9 and 0.0 < theta < 1.0, step
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("name", sorted(DROP_VARIANTS))
+@pytest.mark.parametrize("acceleration", ["anderson", None])
+def test_every_drop_variant_converges_held_exactly_where_swmm_fails(tmp_path, name,
+                                                                    acceleration):
+    """Each variant through one step past SWMM's last non-converging one, Anderson and
+    plain relaxation: every step converges, and the junction is held on its threshold on
+    SWMM's failing steps and nowhere else (on SWMM's own fixed point elsewhere)."""
+    _, _, fails, junction = DROP_VARIANTS[name]
+    diags, held = _drop_sides(tmp_path, name, max(fails) + 1, acceleration=acceleration)
+    assert all(bool(d["converged"]) for d in diags)
+    on = {k + 1: step for k, step in enumerate(held) if step}
+    assert set(on) == set(fails) and all(set(s) == {junction} for s in on.values()), on
+    for step in on.values():
+        gap, theta = step[junction]
+        assert abs(gap) <= 1e-9 and 0.0 < theta < 1.0, step
+
+
+def test_gradient_on_a_held_threshold_does_not_depend_on_the_wall_slope(tmp_path,
+                                                                        monkeypatch):
+    """At a step that holds a junction on its drop-end area threshold (J4 at step 107 of the
+    0.1 m offset variant, where SWMM has no fixed point) the returned gradient is the tie
+    rule's: the sensitivity of a solution held at H = H*, with the withdrawal inside the
+    jump. The wall slope S drops out of it, as the fixed point does not move with S:
+    d(J4 head + 10 C3 flow)/d(n of C3) over that step is the same for S scaled by 0.2, 1
+    and 5 (to 1e-10 relative; 5e-13 measured) and matches central differences (1.6e-8
+    relative measured)."""
+    from noodl.apps.sewer.dynwave import build_dynamic_wave_model
+    from noodl.model import StepContext
+
+    path = tmp_path / "c3_offset_0.1.inp"
+    path.write_text(_drop_variant("c3_offset_0.1"))
+    net, _, _ = read_swmm_inp(path)
+    model, state0, drivers = build_dynamic_wave_model(net)
+    state0, _ = simulate_dynamic_wave(model, state0, drivers, steps=106, atol=1e-12)
+    state0 = {k: v.detach() for k, v in state0.items()}
+    hyd = model.dynamic_wave
+    c3 = hyd.pipe_names.index("C3")
+    j4 = list(model.net.nodes).index("J4")
+    j4_junction = hyd.junction_names.index("J4")
+
+    def loss(n3):
+        hyd.set_roughness(c3, n3)
+        s, _ = simulate_dynamic_wave(model, state0, drivers, steps=1, atol=1e-12)
+        with torch.no_grad():
+            drv = hyd(s | {k: state0[k] for k in hyd.state_keys}, drivers,
+                      StepContext(dt=hyd.options.routing_step))
+            gap = s["water.phi"][j4] - drv["water.area_switch_head"][j4_junction]
+            assert abs(gap.item()) < 1e-9                       # held on the threshold
+        return s["water.phi"][j4] + 10.0 * s["water.q"][c3]
+
+    original = JunctionStorage._area_switch
+    grads = []
+    for scale in (1.0, 0.2, 5.0):
+        def scaled(phi, rise, storage, slope, drv, scale=scale):
+            drv = dict(drv, **{"water.area_switch_slope": scale * drv["water.area_switch_slope"]})
+            return original(phi, rise, storage, slope, drv)
+        monkeypatch.setattr(JunctionStorage, "_area_switch", staticmethod(scaled))
+        n = torch.tensor(0.013, dtype=F64, requires_grad=True)
+        loss(n).backward()
+        grads.append(n.grad.item())
+    monkeypatch.setattr(JunctionStorage, "_area_switch", staticmethod(original))
+    assert grads[1] == pytest.approx(grads[0], rel=1e-10)
+    assert grads[2] == pytest.approx(grads[0], rel=1e-10)
+    h = 1e-6
+    with torch.no_grad():
+        fd = (loss(torch.tensor(0.013 + h, dtype=F64))
+              - loss(torch.tensor(0.013 - h, dtype=F64))) / (2 * h)
+    assert grads[0] == pytest.approx(fd.item(), rel=1e-6)

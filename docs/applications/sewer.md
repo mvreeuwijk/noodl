@@ -325,7 +325,9 @@ Some quantities are taken from the previous pass, as SWMM takes them from the pr
 and are consistent at the fixed point: the flow class and the weighting $f_{\text{asnh}}$, the
 surface areas $A_s$, the normal-flow-limit flag (its Froude test uses the momentum flow at the
 fed heads; its slope test is applied within the pass where it can be, see the next section),
-the normal flow, the dry-node flags, the outfall heads, and the head at any
+the normal flow, the dry-node flags, the outfall heads (the surface areas' jump at a drop
+end is applied within the pass where it can have no fixed point, see "Drop-end area
+switch"), and the head at any
 conduit end SWMM pins (the head is raised to the invert plus offset when it lies below it, and
 set to critical depth in `UP_CRITICAL`/`DN_CRITICAL`). A conduit with a pinned end has no head
 dependence there: its conveyance is zero and the pinned head enters the constant term.
@@ -374,6 +376,52 @@ plus its conduits' conveyance; `K_SWITCH` = 1). A steeper wall would turn the fl
 S-curve in the head that the damped Newton head solve cycles on. The Froude test
 ($\mathrm{Fr} \ge 1$ on the momentum flow) and a slope test at a clamped end depth stay
 lagged flags.
+
+#### Drop-end area switch
+
+A conduit end with an offset gives its junction no surface area while that end is
+`DN_CRITICAL` (downstream, end depth below $\min(y_N, y_C)$ on forward flow) or `UP_CRITICAL`
+(upstream, on reverse flow), and none while the end is dry below a wet other end. Above that
+lower threshold the end gives the junction a quarter of the conduit, scaled downstream by
+$f_{\text{asnh}}$, which falls from 1 to 0 up to $\max(y_N, y_C)$ and jumps back to 1 there
+(`dwflow.c:357-411, 472-499`). The lower threshold is $\max(\mathrm{FUDGE}, \min(y_N, y_C))$
+where the flow leaves the conduit at that end, and FUDGE elsewhere. So the junction's area
+jumps up with its own depth at both thresholds. While the junction **fills**, its storage
+equation $A_s (H - H_{\text{start}}) = \tfrac12 \Delta t (N_{\text{start}} + N)$ can then
+land above the threshold with the lower area and below it with the upper one: there is no
+fixed point. SWMM 5.2.4 does not converge on such steps (its trials cycle around the
+threshold), and an area lagged by one pass chattered until the pass budget ran out, or until
+the head solve failed when the class also moved the other end's area. While the junction
+drains the jump runs the other way, a solution always exists, and the lagged area settles as
+SWMM's does.
+
+`DynamicWaveHydraulics` finds, for each junction, the threshold of its attached drop ends
+nearest its head, and where it lies above the step-start head gives `JunctionStorage` the
+storage lines with the area just below ($A_{\text{lo}}$) and just above ($A_{\text{hi}}$) it.
+The junction then withdraws, within the head solve,
+
+$$
+w = \max\!\big(w_{\text{lo}}(H),\ \min(w_{\text{hi}}(H),\ N_{\text{last}} + S\,(H - H^*))\big)
+$$
+
+with $N_{\text{last}}$ the previous pass's net inflow and $S$ a wall slope (`K_SWITCH` times
+the junction's grounding above the threshold). At a fixed point ($w = N = N_{\text{last}}$)
+this is SWMM's storage with the lower area below $H^*$ and with the upper area above it, so
+every SWMM fixed point is unchanged; where neither side holds, the junction sits exactly on
+the threshold, $H = H^*$, with its withdrawal inside the jump. That is the tie rule. A
+junction held there (its fed net inflow inside the jump, at the fraction $\theta$ of it) has
+the threshold's conduit end classified as SWMM classifies it at the threshold (SWMM's tests
+are strict, so the upper side: not critical, wet, $f_{\text{asnh}} = 1$ at the upper
+threshold), and, at the lower threshold, the conduit's other end gets the sliding area
+$(2 - \theta)$ quarters of the conduit: half (the critical side's) at $\theta = 0$, a quarter
+(the upper side's) at $\theta = 1$. Holding only the junction's own area was not enough: on
+`options_dynwave.inp` with a 0.03 m outlet offset on C3, C3's class also moves J3's area,
+J3's head moves C3's flow and with it the threshold, and the passes cycled.
+
+On three variants of `options_dynwave.inp` (a 0.03 m or 0.1 m outlet offset on C3, or C6
+without its flap gate) the rule holds the junction on its threshold exactly on SWMM's
+non-converging steps and nowhere else, and every step converges, with Anderson and with
+plain relaxation (see "Dynamic wave against SWMM").
 
 #### Starting state and zero fall
 
@@ -663,9 +711,21 @@ free-surface throughout. SWMM converges on every step, and noodl meets the targe
 worst depth 6.4e-9 m over the 359 steps. Under `VARIABLE_STEP 0.75` the same fixture's 304
 steps match SWMM's step sequence to the millisecond (the Courant step reads one barrel's flow
 and volume and the lengthened conduit's `modLength / length`) and its states to the same
-targets. A 0.1 m outlet offset on the two-barrel C3 puts its drop outlet at the boundary
-between subcritical and critical flow, where SWMM itself fails to converge on a few steps, so
-the offset sits on C1.
+targets.
+
+Three variants of that fixture take a junction through a drop end's area threshold while it
+fills (see "Drop-end area switch"): a 0.03 m or 0.1 m outlet offset on C3 (J4 fills behind
+the closed outfall gate) and C6 without its flap gate (J5 fills). SWMM fails to converge on
+steps 60, 62 and 167, on step 107, and on steps 106 and 129 respectively, found by cutting
+the run after each step (SWMM floors a run's duration, so each cut run ends at 5n + 1 to
+3 s). noodl converges on every step. Its own run meets the targets on every step before
+SWMM's first failure; after it the two histories differ by what each did on that step
+(SWMM's last trial against noodl's held solution), up to 3e-4 m stored behind the gate. Each
+step is therefore also run from SWMM's own state before it: on every step SWMM converged
+from a converged start the targets hold (worst 2.0e-9 m), and on SWMM's failing steps and
+the steps after them noodl is within SWMM's own oscillation (at most 3.1e-4 m and
+2.5e-5 m³/s; bounded at 1e-3 m and 5e-5 m³/s). The fixture itself keeps C1's offset, where
+nothing fills through a threshold.
 
 Surcharge is compared on the same tree at higher inflows. `tree_slot_dynwave.inp` (2.5x,
 `SURCHARGE_METHOD SLOT`) pressurises C4 from step 95. `tree_extran_dynwave.inp` (3x,
@@ -764,7 +824,12 @@ publish numbers from this application.
   to y1 = y2, where SWMM has no fixed point to differentiate. It does not depend on the
   wall slope S, which only shapes the passes (the fixed point does not move with S; on the
   tree's drain-down the gradient is the same to 11 digits for S scaled by 0.2 and 5, and
-  matches central differences to 2e-8 relative).
+  matches central differences to 2e-8 relative). Likewise a junction filling through a
+  drop end's area threshold, where SWMM's storage equation has no fixed point, is held on
+  the threshold (see "Drop-end area switch"); SWMM does not converge on such steps, and the
+  histories then differ by up to SWMM's oscillation (3e-4 m on the options fixture with a
+  0.03 m offset on C3). The rule picks one threshold per junction, the nearest to its
+  head; two drop ends switching at one junction in the same step are not covered.
 - **No gas-phase sulfide sink.** H₂S leaves the headspace by ventilation, at the outfall, and
   by re-absorption into the water (the two-film flux is signed); no wall uptake or gas-phase
   oxidation is modelled.

@@ -163,6 +163,20 @@ class ConduitTerms(NamedTuple):
     surcharged junction (`JunctionStorage`); ``froude`` SWMM's `Link.froude` (-), which the
     variable routing step reads: 0 on the dry exit (`dwflow.c:175`), else from the flow
     of the given state at mid depth (`dwflow.c:189`, 0 for a full closed conduit; per barrel).
+
+    The drop-end area switch (`dynwave.DynamicWaveHydraulics`, the tie rule there). An end
+    with an offset whose other end is wet gives its node no surface area below its LOWER
+    threshold -- UP_/DN_CRITICAL, or dry (dwflow.c:357-411, 472-499) -- and a quarter of the
+    conduit above it; the threshold is ``max(FUDGE, min(yN, yC))`` where the flow leaves the
+    conduit at that end (``q_last >= 0`` downstream, ``< 0`` upstream) and FUDGE (SWMM's wet
+    test) otherwise. A downstream end on forward flow has an UPPER threshold too, ``max(yN,
+    yC)``, where ``fasnh`` jumps from 0 back to 1. So the node's area jumps UP at each.
+    ``drop_depth1/2`` (ft, end depth above the conduit invert) is the threshold nearest the
+    end's depth, +inf where there is none (no offset, the other end dry, both ends full, or
+    out of reach of the EXTRAN end depth capped at yFull); ``drop_area1/2`` (ft2, total over
+    the barrels) the jump there, the quarter area at the threshold times ``fasnh`` just
+    above it; ``drop_above1/2`` (bool) whether this pass classified the end on the upper
+    side (above the threshold, or held there by `hold1/2`).
     """
 
     flow_class: Tensor
@@ -186,6 +200,12 @@ class ConduitTerms(NamedTuple):
     lagged_conveyance1: Tensor
     lagged_conveyance2: Tensor
     froude: Tensor
+    drop_depth1: Tensor
+    drop_depth2: Tensor
+    drop_area1: Tensor
+    drop_area2: Tensor
+    drop_above1: Tensor
+    drop_above2: Tensor
 
 
 def _slot_width(y: Tensor, y_full: Tensor, slot: bool) -> Tensor:
@@ -228,7 +248,8 @@ def _hyd_rad(y: Tensor, y_full: Tensor) -> Tensor:
 def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: Tensor,
                   q_old: Tensor, a_old: Tensor, dt: float, *, damping: str = "partial",
                   normal_flow_limited: str = "both",
-                  surcharge_method: str = "extran") -> ConduitTerms:
+                  surcharge_method: str = "extran", hold1: Tensor | None = None,
+                  hold2: Tensor | None = None) -> ConduitTerms:
     """SWMM's conduit update (`dwflow.c:57-293`) for one pass, vectorised over conduits.
 
     ``depth1``, ``depth2`` are the end NODE depths above the node inverts (ft) from the
@@ -241,6 +262,13 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     ``surcharge_method`` ``SURCHARGE_METHOD`` (``"extran"`` or ``"slot"``). Under ``"slot"``
     the end depths ``end_depth1/2`` may exceed ``y_full``, ``volume`` and ``mid_area`` use the
     slot-extended areas and ``depth`` stays ``min(y_mid, y_full)``.
+    ``hold1``/``hold2`` (-, per conduit, default none) hold a drop end ON its area switch
+    (the closure's tie rule): where ``>= 0`` the end is classified on the UPPER side whatever
+    its depth -- not UP_/DN_CRITICAL, ``fasnh`` 1, SWMM's own class AT the threshold (its
+    tests are strict, ``y < ycMin``) -- and the value is the weight ``theta`` (0 to 1) of
+    the upper side in the sliding solution: at a ``min(yN, yC)`` threshold the OTHER end's
+    surface area, a quarter of the conduit on the upper side and half of it on the
+    critical side (dwflow.c:472-499), is ``(2 - theta)`` quarters; ``< 0`` is no hold.
     """
     if damping not in DAMPING:
         raise ValueError(f"conduit_terms: damping must be one of {DAMPING}, got {damping!r}")
@@ -293,12 +321,39 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     wet1 = y1 > FUDGE
     wet2 = y2 > FUDGE
     reverse = q_last < 0.0
+    # The drop-end area switch (class docstring). An end with an offset gives its node no
+    # area below its LOWER threshold (UP_/DN_CRITICAL, or UP_/DN_DRY there): FUDGE, raised
+    # to min(yN, yC) where the flow leaves the conduit at that end; a downstream end that
+    # receives forward flow has an UPPER one too, max(yN, yC), where fasnh jumps from 0 to 1.
+    inf = torch.full(shape, torch.inf, dtype=F64)
+    lower2 = torch.where(reverse, fudge, torch.maximum(yc_min, fudge))
+    upper2 = torch.where(~reverse & (yc_max > lower2), yc_max, inf)
+    is_upper2 = (y2 - upper2).abs() < (y2 - lower2).abs()
+    thr2 = torch.where(is_upper2, upper2, lower2)
+    lower1 = torch.where(reverse, torch.maximum(yc_min, fudge), fudge)
+    cand1 = (zr1 > 0.0) & wet2
+    cand2 = (zr2 > 0.0) & wet1
+    no_hold = torch.full(shape, -1.0, dtype=F64)
+    theta1 = no_hold if hold1 is None else hold1.to(F64).expand(shape)
+    theta2 = no_hold if hold2 is None else hold2.to(F64).expand(shape)
+    held1 = (theta1 >= 0.0) & cand1
+    held2 = (theta2 >= 0.0) & cand2
+    hold_low2 = held2 & ~is_upper2
+    hold_up2 = held2 & is_upper2
+    # a held end is classified just above its threshold: wet, not critical, fasnh 1 at the
+    # upper threshold; the other end's area then slides between the two classes where the
+    # side below is critical (UP_/DN_CRITICAL give it half the conduit, the side above a
+    # quarter; dwflow.c:472-499)
+    wet1 = wet1 | held1
+    wet2 = wet2 | hold_low2
+    blend1 = held1 & ((lower1 > FUDGE) | ~(h2 < z1))
+    blend2 = hold_low2 & ((thr2 > FUDGE) | ~(h1 < z2))
     # dwflow.c:335-371 -- both ends wet
     both_wet = wet1 & wet2
-    up_crit = both_wet & reverse & (zr1 > 0.0) & (y1 < yc_min)          # dwflow.c:342-347
+    up_crit = both_wet & reverse & (zr1 > 0.0) & (y1 < yc_min) & ~held1   # dwflow.c:342-347
     drop2 = both_wet & ~reverse & (zr2 > 0.0)
-    dn_crit = drop2 & (y2 < yc_min)                                      # dwflow.c:363
-    in_band = drop2 & ~(y2 < yc_min) & (y2 < yc_max)                     # dwflow.c:364-368
+    dn_crit = drop2 & (y2 < yc_min) & ~hold_low2                          # dwflow.c:363
+    in_band = drop2 & ~(y2 < yc_min) & (y2 < yc_max) & ~hold_up2          # dwflow.c:364-368
     span = yc_max - yc_min
     span_safe = torch.where(span < FUDGE, one, span)
     fasnh = torch.where(in_band, torch.where(span < FUDGE, zero, (yc_max - y2) / span_safe),
@@ -326,6 +381,31 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     is_up_dry = cls == UP_DRY
     is_dn_dry = cls == DN_DRY
     is_dry = cls == DRY
+    # the drop ends' thresholds (none where both ends are full, or where the EXTRAN end
+    # depth, capped at yFull, cannot reach it), the area jump at each -- the quarter area
+    # at the threshold (dwflow.c:472-474), times the fasnh just above a downstream lower
+    # one -- and the side this pass is on
+    reach1 = cand1 & ~both_full
+    reach2 = cand2 & ~both_full
+    if not slot:
+        reach1 = reach1 & (lower1 < yf)
+        reach2 = reach2 & (thr2 < yf)
+    drop_depth1 = torch.where(reach1, lower1, inf)
+    drop_depth2 = torch.where(reach2, thr2, inf)
+    at1 = torch.where(reach1, lower1, y1)
+    at2 = torch.where(reach2, thr2, y2)
+    mid1 = torch.clamp(0.5 * (at1 + y2), min=FUDGE)
+    mid2 = torch.clamp(0.5 * (y1 + at2), min=FUDGE)
+    banded = ~reverse & ~is_upper2 & (thr2 < yc_max)
+    fasnh_above = torch.where(banded, torch.where(span < FUDGE, zero,
+                                                  (yc_max - thr2) / span_safe), one)
+    drop_area1 = (_top_width(at1, yf, slot) + _top_width(mid1, yf, slot)) * length / 4.0
+    drop_area2 = ((_top_width(mid2, yf, slot) + _top_width(at2, yf, slot)) * length / 4.0
+                  * fasnh_above)
+    drop_area1 = torch.where(reach1, drop_area1, zero)
+    drop_area2 = torch.where(reach2, drop_area2, zero)
+    drop_above1 = held1 | ((y1 >= lower1) & (y1 > FUDGE))
+    drop_above2 = held2 | ((y2 >= thr2) & (y2 > FUDGE))
 
     # dwflow.c:465-549 findSurfArea -- end depths and heads per class
     y_cn = torch.clamp(torch.where(y_norm < y_crit, y_norm, y_crit), min=FUDGE)  # :478-480
@@ -352,6 +432,9 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     surf2 = torch.where(is_up_dry, quarter2, surf2)                            # :511
     surf2 = torch.where(is_dn_dry & (geo.offset2 <= 0.0), quarter2, surf2)     # :535-538
     surf2 = torch.where(is_dry, dry_area.expand(shape), surf2)
+    # a held drop end (tie rule): the other end's area slides between the two classes
+    surf1 = torch.where(blend2, quarter1 * (2.0 - theta2.clamp(0.0, 1.0)), surf1)
+    surf2 = torch.where(blend1, quarter2 * (2.0 - theta1.clamp(0.0, 1.0)), surf2)
 
     # dwflow.c:143-153 -- areas and radii at the ends and the midpoint (slot-extended)
     a1 = _slot_area(y1, yf, af, slot)
@@ -463,6 +546,12 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
         froude=torch.where(dry_exit, zero, fr),                                # :175, :189
         lagged_conveyance1=lagged1,
         lagged_conveyance2=lagged2,
+        drop_depth1=drop_depth1,
+        drop_depth2=drop_depth2,
+        drop_area1=drop_area1 * barrels,
+        drop_area2=drop_area2 * barrels,
+        drop_above1=drop_above1,
+        drop_above2=drop_above2,
     )
 
 

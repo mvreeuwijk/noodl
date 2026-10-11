@@ -94,7 +94,8 @@ K_ANCHOR = 1.0e-6
 #: = 520 s); at 1 x the slopes a Newton step sees differ by at most 2, which its 0.75
 #: damping contracts, and a conduit between two junctions settles on its switch by about
 #: half per pass. Its round-off floor, ``S eps |H| / 2``, is then that of the junction's own
-#: storage slope.
+#: storage slope. The drop-end area switch's wall (`JunctionStorage`) uses the same factor on
+#: its own junction's grounding above the threshold, for the same reason.
 K_SWITCH = 1.0
 #: Newton's absolute residual tolerance for the head solve (m3/s): a junction balance error
 #: of `SOLVE_ATOL` dt m3 at most, far below the head tolerance times any surface area. It is
@@ -367,6 +368,17 @@ class JunctionStorage(NodeSource):
       Below the top the wall reaches down only by ``E/(S - slope)``, a transient within the
       passes.
 
+    The drop-end area switch (the tie rule of `DynamicWaveHydraulics`; drivers
+    ``"water.area_switch_head"`` H* (m, +inf where none applies), ``"water.area_below"`` and
+    ``"water.area_above"`` (m2), ``"water.area_switch_slope"`` S (m2/s) and the fed net
+    inflow ``"water.net_inflow_last"`` N_last, all optional). Where H* is finite the
+    storage term is, within the pass, ``max(lo(H), min(hi(H), N_last + S (H - H*)))`` with
+    lo/hi the storage lines with the area below/above the threshold: continuous and
+    non-decreasing. At a fixed point (withdrawal = N = N_last) it is the lower-area storage
+    below H* and the upper-area storage above it -- SWMM's own fixed points, unchanged --
+    or the threshold itself, H = H*, with the withdrawal inside the jump: the solution where
+    SWMM has none.
+
     Reads the per-junction drivers ``"water.storage_area"`` A_s (m2, design D2's SI area),
     ``"water.head_start"`` (m), ``"water.net_inflow_start"`` (m3/s) and
     ``"water.storage_rate"`` 1/dt (1/s); with `crown` also ``"water.surcharged"`` (0/1)
@@ -395,10 +407,38 @@ class JunctionStorage(NodeSource):
         area = drivers["water.storage_area"]
         bed = rate2 * self.bed_area * K_BED
         dry = torch.clamp(phi - self.bed, max=0.0)
-        storage = (rate2 * area * (phi - drivers["water.head_start"])
-                   - drivers["water.net_inflow_start"] + bed * dry)          # dynwave.c:694-711
-        slope = rate2 * area + bed * (phi < self.bed).to(phi.dtype)
+        rise = phi - drivers["water.head_start"]
+        n_start = drivers["water.net_inflow_start"]
+        storage = rate2 * area * rise - n_start                              # dynwave.c:694-711
+        slope = (rate2 * area).expand_as(storage)
+        if "water.area_switch_head" in drivers:
+            storage, slope = self._area_switch(phi, rise, storage, slope, drivers)
+        storage = storage + bed * dry
+        slope = slope + bed * (phi < self.bed).to(phi.dtype)
         return storage, slope, self._stiff(drivers)
+
+    @staticmethod
+    def _area_switch(phi: Tensor, rise: Tensor, storage: Tensor, slope: Tensor,
+                     drivers: Mapping) -> tuple[Tensor, Tensor]:
+        """The drop-end area switch within the pass (class docstring): ``max(lo, min(hi,
+        N_last + S (H - H*)))`` where a threshold applies (finite ``H*``), the lagged storage
+        and slope elsewhere."""
+        rate2 = 2.0 * drivers["water.storage_rate"]
+        h_star = drivers["water.area_switch_head"]
+        on = torch.isfinite(h_star)
+        h_safe = torch.where(on, h_star, phi)
+        n_start = drivers["water.net_inflow_start"]
+        lo = rate2 * drivers["water.area_below"] * rise - n_start
+        hi = rate2 * drivers["water.area_above"] * rise - n_start
+        s = drivers["water.area_switch_slope"]
+        wall = drivers["water.net_inflow_last"] + s * (phi - h_safe)
+        capped = torch.minimum(hi, wall)
+        switched = torch.maximum(lo, capped)
+        slope_sw = torch.where(
+            switched == lo, (rate2 * drivers["water.area_below"]).expand_as(lo),
+            torch.where(capped == hi, (rate2 * drivers["water.area_above"]).expand_as(hi),
+                        s.expand_as(wall)))
+        return torch.where(on, switched, storage), torch.where(on, slope_sw, slope)
 
     def _stiff(self, drivers: Mapping) -> Tensor:
         """The band's slope (m2/s, per junction): ``(2/dt) max(K_HOLD A_bed,
@@ -496,7 +536,7 @@ class DynamicWaveHydraulics:
     ``"sewer.pipe_flow"`` (m3/s), ``"sewer.mid_area"`` (SWMM's stored mid-depth area, SI
     area m2 per design D2) and ``"sewer.net_inflow"`` (m3/s, per junction). With a
     `StepContext` it writes ``"water.sources"``, ``"water.phi_boundary"`` (outfall heads, m),
-    the ten `DynamicWaveConduit` drivers and the `JunctionStorage` drivers, and the
+    the `DynamicWaveConduit` drivers and the `JunctionStorage` drivers, and the
     reporting key ``"sewer.overflow"`` (below); always the carried keys and the reporting
     keys ``"sewer.q"`` (m3/s), ``"sewer.h"`` (link depth, m), ``"sewer.v"`` (m/s),
     ``"sewer.V_wet"`` (m3), ``"sewer.junction_depth"`` (m) and ``"sewer.surcharged"``
@@ -522,6 +562,26 @@ class DynamicWaveHydraulics:
     SWMM's FUDGE flow (1e-4 cfs) and elsewhere. It is lost from the system and is not part
     of the carried ``"sewer.net_inflow"``, which, like SWMM's ``oldNetInflow``
     (`node.c:303`), is the conduit and lateral net inflow alone.
+
+    The drop-end area switch (the tie rule; docs: "Drop-end area switch"). A conduit end
+    with an offset gives its junction no surface area while UP_/DN_CRITICAL or dry, and a
+    quarter of the conduit above that LOWER threshold (FUDGE, or min(yN, yC) where the flow
+    leaves the conduit there); downstream, fasnh takes it back to 0 at max(yN, yC), the
+    UPPER threshold, above which it is a quarter again (dwflow.c:357-411, 472-499;
+    `conduit_terms` reports each end's threshold nearest its depth). A junction FILLING
+    through such a jump can have no fixed point (lower area: the storage equation lands
+    above the threshold; upper area: below it), and SWMM's trials do not converge there.
+    Per junction the closure takes the attached drop end whose threshold head H* is nearest
+    the fed head and, where H* is above the step-start head (the jump in the withdrawal is
+    then upward), writes H* and the storage area just below and just above it; the
+    junction's storage then switches within the pass (`JunctionStorage`). Where the fed net
+    inflow lies inside the jump at H*, at the fraction theta of it, the junction is HELD on
+    the threshold: that end is classified as SWMM classifies it AT the threshold (the upper
+    side, its tests being strict), and at a lower threshold the conduit's other end gets
+    ``(2 - theta)`` quarters of the conduit, sliding between the critical side's half and
+    the upper side's quarter (`conduit_terms`' ``hold1/2``), so that its class does not
+    chatter through the other end's area either. Only the nearest threshold of each
+    junction is switched within the pass.
 
     The arithmetic is SWMM's own, in feet (design D2); `layer` names the head layer.
     """
@@ -695,7 +755,8 @@ class DynamicWaveHydraulics:
                 f"head is set by its conduit, not by a node balance")
         return inflow
 
-    def _terms(self, state: Mapping, dt: float) -> ConduitTerms:
+    def _terms(self, state: Mapping, dt: float,
+               hold: tuple[Tensor, Tensor] | None = None) -> ConduitTerms:
         heads = state[f"{self.layer}.phi"]
         q = state[f"{self.layer}.q"]
         # SWMM's node depth is never negative (dynwave.c:743); the stiff bed lets a dry
@@ -706,7 +767,71 @@ class DynamicWaveHydraulics:
             state["sewer.pipe_flow"] / QCF, state["sewer.mid_area"] / _AREA_SI, dt,
             damping=self.options.inertial_damping,
             normal_flow_limited=self.options.normal_flow_limited,
-            surcharge_method=self.options.surcharge_method)
+            surcharge_method=self.options.surcharge_method,
+            hold1=None if hold is None else hold[0], hold2=None if hold is None else hold[1])
+
+    def _drop_switch(self, state: Mapping, terms: ConduitTerms, net_inflow: Tensor,
+                     dt: float) -> dict[str, Tensor]:
+        """The drop-end area switch at each junction (`JunctionStorage`, the tie rule), from
+        the fed state and one pass's `terms`. Per junction: the threshold head ``"head"`` H*
+        (m) of the attached drop end whose threshold is nearest the fed head; the storage
+        areas just ``"below"`` and just ``"above"`` it (m2, SWMM's area floor applied);
+        ``"applies"``, the threshold lies above the step-start head (the jump in the
+        withdrawal is then upward); ``"held"``, the fed net inflow `net_inflow` (m3/s) lies
+        inside that jump at H*, the junction being on the threshold. Per pipe end:
+        ``"hold1"``/``"hold2"``, at the chosen end of a held junction the fraction theta of
+        the jump at which the net inflow lies (0 at its bottom, 1 at its top), -1 elsewhere
+        (`conduit_terms`)."""
+        geo = self.geo
+        nodes = torch.cat([self.u, self.v])
+        n = self.node_invert.shape[-1]
+        heads = state[f"{self.layer}.phi"]
+        z = torch.cat([geo.invert1 + geo.offset1, geo.invert2 + geo.offset2])
+        depth = torch.cat([terms.drop_depth1, terms.drop_depth2], -1)
+        finite = torch.isfinite(depth) & ~self.is_outfall[nodes]
+        head_thr = torch.where(finite, (z + torch.where(finite, depth, torch.zeros_like(depth)))
+                               * LCF, torch.zeros_like(depth))
+        batch = head_thr.shape[:-1]
+        index = nodes.expand(batch + nodes.shape)
+        inf = torch.full(batch + (n,), torch.inf, dtype=F64)
+        dist = torch.where(finite, (heads[..., nodes] - head_thr).abs(),
+                           torch.full_like(head_thr, torch.inf))
+        nearest = inf.scatter_reduce(-1, index, dist, "amin")
+        chosen = finite & (dist == nearest[..., nodes])
+
+        def pick(values: Tensor, empty: float) -> Tensor:
+            base = torch.full(batch + (n,), empty, dtype=F64)
+            masked = torch.where(chosen, values, torch.full_like(values, empty))
+            return base.scatter_reduce(-1, index, masked, "amax")
+
+        jidx = self.junction_idx
+        h_star = pick(head_thr, -torch.inf)[..., jidx]
+        jump = pick(torch.cat([terms.drop_area1, terms.drop_area2], -1), 0.0)[..., jidx]
+        own = pick(torch.cat([terms.surface_area1, terms.surface_area2], -1), 0.0)[..., jidx]
+        above = pick(torch.cat([terms.drop_above1, terms.drop_above2], -1).to(F64),
+                     0.0)[..., jidx] > 0.5
+        surf = torch.zeros(batch + (n,), dtype=F64)
+        surf = surf.index_add(-1, self.u, terms.surface_area1)
+        surf = surf.index_add(-1, self.v, terms.surface_area2)[..., jidx]
+        rest = surf - own
+        lo = torch.clamp(torch.where(above, rest, surf), min=self.min_area_ft2) * _AREA_SI
+        hi = torch.clamp(torch.where(above, surf, rest + jump), min=self.min_area_ft2) * _AREA_SI
+        has = torch.isfinite(h_star)
+        head_start = self.node_invert[jidx] + state["sewer.junction_depth"]
+        safe_star = torch.where(has, h_star, head_start)
+        applies = has & (safe_star > head_start) & (hi > lo)
+        rate2 = 2.0 / dt
+        st_lo = rate2 * lo * (safe_star - head_start) - state["sewer.net_inflow"]
+        st_hi = rate2 * hi * (safe_star - head_start) - state["sewer.net_inflow"]
+        held = applies & (st_lo < net_inflow) & (net_inflow < st_hi)
+        gap = torch.where(held, st_hi - st_lo, torch.ones_like(st_hi))
+        theta = torch.where(held, (net_inflow - st_lo) / gap, torch.full_like(gap, -1.0))
+        theta_node = torch.full(batch + (n,), -1.0, dtype=F64)
+        theta_node[..., jidx] = theta
+        hold = torch.where(chosen, theta_node[..., nodes], torch.full_like(head_thr, -1.0))
+        p = self.u.shape[-1]
+        return {"head": safe_star, "below": lo, "above": hi, "applies": applies,
+                "held": held, "hold1": hold[..., :p], "hold2": hold[..., p:]}
 
     def _surcharged(self, heads: Tensor) -> Tensor:
         """EXTRAN's surcharge test on the junction heads `heads` (m, full-node): depth above
@@ -801,6 +926,15 @@ class DynamicWaveHydraulics:
         inflow = self._inflow(drivers)
         terms = self._terms(state, self.options.routing_step if dt is None else dt)
         out = self._carried(state, terms, inflow)
+        drop = None
+        if dt is not None:
+            # the drop-end area switch (JunctionStorage): a junction held on its threshold
+            # has its chosen drop end classified on the upper side, SWMM's class AT it
+            drop = self._drop_switch(state, terms, out["sewer.net_inflow"], dt)
+            if bool(drop["held"].any()):
+                terms = self._terms(state, dt, (drop["hold1"], drop["hold2"]))
+                out = self._carried(state, terms, inflow)
+                drop = self._drop_switch(state, terms, out["sewer.net_inflow"], dt)
         q = state[f"{self.layer}.q"]
         depth_ft = terms.depth
         a_link = area_of_depth(depth_ft, self.geo.y_full, self.geo.a_full)
@@ -827,6 +961,12 @@ class DynamicWaveHydraulics:
         anchor = lagged * (QCF / LCF) + K_ANCHOR * 2.0 / dt * area_ft2 * _AREA_SI
         switch = terms.slope_switch
         switch_slope = self._switch_slope(q, terms, area_ft2, surf, dt)
+        # the drop switch's wall slope: K_SWITCH times the junction's grounding above it
+        k_si = terms.conveyance * (QCF / LCF)
+        sum_k = torch.zeros_like(surf).index_add(-1, self.u, k_si).index_add(-1, self.v, k_si)
+        drop_slope = K_SWITCH * (2.0 / dt * drop["above"] + sum_k[..., jidx])
+        drop_head = torch.where(drop["applies"], drop["head"],
+                                torch.full_like(drop["head"], torch.inf))
         out.update({
             f"{self.layer}.sources": inflow,
             f"{self.layer}.phi_boundary": self._outfall_heads(q),
@@ -853,6 +993,10 @@ class DynamicWaveHydraulics:
             "water.surcharge_slope": anchor,
             "water.head_last": state[f"{self.layer}.phi"][..., jidx],
             "water.net_inflow_last": out["sewer.net_inflow"],
+            "water.area_switch_head": drop_head,
+            "water.area_below": drop["below"],
+            "water.area_above": drop["above"],
+            "water.area_switch_slope": drop_slope,
         })
         out["water.surcharged"] = self.storage.surcharged(out)
         excess = self.storage.flood_excess(out)
