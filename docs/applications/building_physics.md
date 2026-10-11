@@ -169,6 +169,36 @@ print([week.value(t, calendar).item() for t in times])
 `TimeSeries(times, values, interpolation="linear" | "step")` is the same kind of input built
 from data (seconds since the start, never extrapolated); its values may carry gradients.
 
+### Running over time
+
+An `Input(signal, key, at=... | index=...)` writes a signal's value into a driver: the whole
+driver, the entries named by `at` (node names for the node temperatures `"T"`, source names,
+edge labels), or positions `index`. `simulate(model, state, drivers, times, inputs=...)`
+evaluates every input at the **end** of each step, sets `drivers["time"]`, and steps the model.
+It returns the time histories at `times`. Steps are split at every jump or kink of an input
+unless `land_on_breakpoints=False`.
+
+```python
+import torch
+from noodl.apps.building_physics import (
+    Input, TimeSeries, project_to_model, read_prj, simulate,
+)
+
+project = read_prj("valThreeZonesWthCtm-UseApi.prj")
+model, state, drivers = project_to_model(project)
+cold_snap = TimeSeries([0.0, 1800.0, 3600.0], [293.15, 273.15, 273.15])
+out = simulate(model, state, drivers, torch.arange(13, dtype=torch.float64) * 300.0,
+               inputs=[Input(cold_snap, "T", at="ambient")])
+print(out["air.q"].shape, out["species.x"].shape)
+```
+
+```text
+torch.Size([13, 4]) torch.Size([13, 3, 1])
+```
+
+`air_mass_change=True` adds each zone's air-mass change to its airflow balance (CONTAM's
+`dodMdt`): a zone whose temperature rises pushes out the air it no longer holds.
+
 ## The API
 
 ### Zones and walls

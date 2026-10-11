@@ -28,7 +28,7 @@ PAGES = [
     "applications/water.md",
     "applications/allocation.md",
 ]
-FIXTURES = ["sewer/*.inp", "water/*.inp", "wsimod/*.json"]
+FIXTURES = ["sewer/*.inp", "water/*.inp", "wsimod/*.json", "contam/*"]
 BLOCK = re.compile(r"```(python|text)\n(.*?)```", re.S)
 
 

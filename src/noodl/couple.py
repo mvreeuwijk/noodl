@@ -463,6 +463,28 @@ class CoupledModel:
             for model, key, name in alias.targets:
                 drivers[model][key] = apply_conversion(name, value, drivers[model])
 
+    def _refresh_ambient_density(self, tag: str, state: State, drivers: dict) -> None:
+        """Set `drivers["rho_amb"]` to what model `tag`'s own closures compute at the start of
+        this step, when a closure declares it among its `outputs`.
+
+        The mass-fraction conversions read `"rho_amb"` outside `Model.step`, so a model whose
+        density follows a driver that changes between steps (the node temperatures of a
+        schedule or a weather file) would otherwise convert at the density its drivers were
+        BUILT with. Only the declaring closures run, in model order, with the step's start
+        state: the same value the step's own closures then compute.
+        """
+        drv = None
+        for closure in self.models[tag].closures:
+            if "rho_amb" not in getattr(closure, "outputs", ()):
+                continue
+            drv = dict(drivers) if drv is None else drv
+            if getattr(closure, "integrates", False):
+                drv.update(closure(state, drv, None))
+            else:
+                drv.update(closure(state, drv))
+        if drv is not None:
+            drivers["rho_amb"] = drv["rho_amb"]
+
     def _forward_value(
         self, link: ValueLink, latest: Mapping[str, State], drivers: dict[str, Drivers],
     ) -> Tensor:
@@ -516,6 +538,8 @@ class CoupledModel:
         start = {tag: dict(s) for tag, s in state.items()}
         drivers = {tag: dict(d) for tag, d in drivers.items()}
         self._apply_aliases(drivers)
+        for tag in self.models:
+            self._refresh_ambient_density(tag, start[tag], drivers[tag])
         if not self._two_way:
             pass_drivers = {tag: dict(d) for tag, d in drivers.items()}
             for link in self._one_way:

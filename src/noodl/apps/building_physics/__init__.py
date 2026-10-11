@@ -22,6 +22,7 @@ from noodl.apps.building_physics.elements import (
     orifice_elements_from_edges,
 )
 from noodl.apps.building_physics.epw import read_epw, write_wth
+from noodl.apps.building_physics.inputs import Input, apply_inputs, bind_inputs, scatter
 from noodl.apps.building_physics.modelica import read_modelica
 from noodl.apps.building_physics.prj import (
     Project,
@@ -35,6 +36,7 @@ from noodl.apps.building_physics.schedules import (
     TimeSeries,
     WeekSchedule,
 )
+from noodl.apps.building_physics.simulation import simulate
 from noodl.apps.building_physics.sources import (
     BurstSource,
     ConstantSource,
@@ -67,6 +69,7 @@ __all__ = [
     "DaySchedule",
     "DecayingSource",
     "IdealGasDensity",
+    "Input",
     "LinearDensity",
     "Project",
     "Signal",
@@ -77,7 +80,9 @@ __all__ = [
     "Zone",
     "add_large_opening",
     "add_zone",
+    "apply_inputs",
     "assemble_sources",
+    "bind_inputs",
     "build_model",
     "crack",
     "door",
@@ -93,7 +98,9 @@ __all__ = [
     "room",
     "run_steady",
     "run_transient",
+    "scatter",
     "shaft",
+    "simulate",
     "sources_from_project",
     "species_layer",
     "thermal_layer",
