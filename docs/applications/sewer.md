@@ -346,12 +346,33 @@ area above the crown is `a_full + (y - y_full) w_slot`, the friction radius stay
 full conduit takes no inertial terms, and the reported link depth stays `min(y_mid, y_full)`
 while the stored volume may exceed the full volume. The junction equation is unchanged (SWMM
 never takes its node-surcharge branch under SLOT; the junction surface-area floor governs a
-pressurised junction). Under `SURCHARGE_METHOD EXTRAN` (the default) any conduit end that
-reaches the crown stops the run with an error naming the conduit and the time. The reader refuses by name,
+pressurised junction).
+
+`SURCHARGE_METHOD EXTRAN` (the default) caps each conduit's end depths at its crown while the
+end heads keep driving a full conduit, which takes no inertial terms. A junction whose depth
+exceeds its crown -- the highest `offset + y_full` over the conduit ends it carries -- is
+surcharged: SWMM's update `y_new = y_last + corr dQ/denom` (`dynwave.c:716-741`) is converged
+exactly when the junction's net inflow `dQ` is zero, so a surcharged junction stores nothing
+and holds instantaneous continuity (`corr` and SWMM's `exp(-15 f)` blend only shape SWMM's
+iteration). The surcharge flag is evaluated from the previous pass's depth, as SWMM evaluates
+it from its previous trial, and it drops when the solution falls below the crown. Where SWMM
+has no fixed point -- the storage equation would end above the crown while at the crown the
+junction already loses water, so SWMM's trials alternate between its two branches and do not
+converge -- noodl holds the junction at its crown (within a band below a millimetre) and
+releases the water the balance needs; every step then converges. `sewer.surcharged` reports
+the junctions above their crowns. A surcharged junction's head is resolved to
+`atol / sum(k)` with `sum(k)` its conduits' conveyance (~0.01 m2/s for a 0.3 m pipe), so the
+default head-solve tolerance (`solve_atol`, a few 1e-9 m3/s) leaves it a few 1e-7 m from the
+fixed point; pass `atol=1e-12` to `simulate_dynamic_wave` for tighter heads where no junction
+sits on its bed. Flooding is not modelled yet: a junction above its full depth (MaxDepth,
+extended to its crown; SWMM's `SurDepth` is not read) stops the run with an error naming the
+junction and the time.
+
+The reader refuses by name,
 with the line number, `VARIABLE_STEP > 0`, `LENGTHENING_STEP > 0`, `ALLOW_PONDING YES`, nonzero
 `InitDepth`/`InitFlow`/`MaxFlow`, flap gates, barrels other than 1 and TIDAL/TIMESERIES outfalls.
 `build_model` with `air=True`, `quality=True` or `storage=True` is refused by name. Variable step,
-ponding, EXTRAN surcharge, headspace air and quality on the dynamic wave are planned.
+flooding, ponding, headspace air and quality on the dynamic wave are planned.
 
 ```python
 from noodl.apps.sewer import read_swmm_inp, build_model, simulate_dynamic_wave
@@ -484,6 +505,16 @@ brought the differences below the targets without changing either code's equatio
 | Node depths, every 5 s step | abs 1e-7 m | 1.2e-9 / 4.5e-9 / 3.4e-9 m |
 | Link flows, every 5 s step | rel 1e-6 + abs 1e-9 m³/s | within the target at every step |
 
+Surcharge is compared on the same tree at higher inflows. `tree_slot_dynwave.inp` (2.5x,
+`SURCHARGE_METHOD SLOT`) pressurises C4 from step 95. `tree_extran_dynwave.inp` (3x,
+`SURCHARGE_METHOD EXTRAN`) surcharges J2, J4 and J3 above their crowns at steps 21, 139 and
+270; there noodl's head solve runs at `atol=1e-12` m3/s, because a surcharged junction has no
+storage to damp a balance residual. SWMM converges on every step of both runs. Every step meets
+the targets above: the worst depth difference is 8.3e-10 m (SLOT) and 1.6e-10 m (EXTRAN).
+SWMM's EXTRAN iteration has no fixed point when a junction would fall back through its crown
+while the storage equation keeps it above (see "Dynamic wave"). Such steps have no SWMM
+reference, and none occurs in this fixture.
+
 The same networks with SWMM at its **default** tolerance (`HEAD_TOLERANCE` 0.0015 m,
 `MAX_TRIALS` 8), against noodl's converged answer:
 
@@ -532,10 +563,12 @@ publish numbers from this application.
   backwater.
 - **Kinematic-wave and steady routing: dendritic networks only**, one outgoing pipe per
   manhole, no loops. Dynamic-wave routing allows loops and flat or adverse conduits.
-- **Dynamic wave: no EXTRAN surcharge, variable step, ponding, headspace air or quality yet**
-  (planned). Under `SURCHARGE_METHOD EXTRAN` a conduit end reaching the crown stops the run
-  with the conduit's name and the time; use `SLOT` for surcharged networks; `build_model(..., air=True)` or `quality=True` is
-  refused. Circular conduits only, one barrel, cold dry start.
+- **Dynamic wave: no flooding, variable step, ponding, headspace air or quality yet**
+  (planned). A junction above its full depth (MaxDepth extended to its crown) stops the run
+  with the junction's name and the time; `build_model(..., air=True)` or `quality=True` is
+  refused. Circular conduits only, one barrel, cold dry start. Under EXTRAN, where SWMM's own
+  surcharge iteration has no fixed point, noodl holds the junction at its crown (see
+  "Dynamic wave"), so such steps have no SWMM reference.
 - **No gas-phase sulfide sink.** H₂S leaves the headspace by ventilation, at the outfall, and
   by re-absorption into the water (the two-film flux is signed); no wall uptake or gas-phase
   oxidation is modelled.

@@ -116,7 +116,11 @@ class ConduitTerms(NamedTuple):
     ``dry_downstream`` node depth <= FUDGE (bool); ``surface_area1/2`` (ft2) contributed to
     the end nodes; ``mid_area`` the stored ``Conduit.a1`` (ft2, next step's ``a_old``);
     ``volume`` (ft3); ``depth`` ``Link.newDepth`` (ft); ``end_depth1/2`` the end flow
-    depths after classification (ft).
+    depths after classification (ft); ``lagged_conveyance1/2`` (ft2/s) the conveyance k a
+    wet conduit whose OTHER end is pinned still has in this end's head -- the pass lags it
+    into c0 (``conveyance`` is 0 there), 0 elsewhere. SWMM keeps it in the node's
+    ``sumdqdh`` (`dwflow.c:243`, `dynwave.c:578-588`); the closure uses it to anchor a
+    surcharged junction (`JunctionStorage`).
     """
 
     flow_class: Tensor
@@ -134,6 +138,8 @@ class ConduitTerms(NamedTuple):
     depth: Tensor
     end_depth1: Tensor
     end_depth2: Tensor
+    lagged_conveyance1: Tensor
+    lagged_conveyance2: Tensor
 
 
 def _slot_width(y: Tensor, y_full: Tensor, slot: bool) -> Tensor:
@@ -338,6 +344,8 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     c0 = (q_old + dq3 + dq4) / denom
     # an end head that does not follow its node is folded into c0 (design D4)
     pinned = pinned1 | pinned2
+    lagged1 = torch.where(pinned2 & ~pinned1 & ~dry_exit, k, zero)
+    lagged2 = torch.where(pinned1 & ~pinned2 & ~dry_exit, k, zero)
     flow_offset = torch.where(pinned, momentum, c0)
     conveyance = torch.where(pinned, zero, k)
 
@@ -382,6 +390,8 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
         depth=torch.minimum(y_mid, yf),                                        # :176, :287
         end_depth1=y1,
         end_depth2=y2,
+        lagged_conveyance1=lagged1,
+        lagged_conveyance2=lagged2,
     )
 
 

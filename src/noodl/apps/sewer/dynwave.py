@@ -57,6 +57,19 @@ FUDGE_FLOW = 1.0e-4 * QCF
 #: Bed stiffening factor of `JunctionStorage` (design D3): below its invert a junction's
 #: storage slope gains ``(2 A_bed/dt) K_BED``, standing in for SWMM's ``yNew < 0 -> 0``.
 K_BED = 1.0e6
+#: Stiffness factor of an EXTRAN junction's hold band at its crown (design E1, the tie rule
+#: in `JunctionStorage`): the band rises with ``(2 A_bed/dt) K_HOLD``. It trades the band's
+#: width ``|w_c| dt / (2 A_bed K_HOLD)`` (0.6 mm at w_c = 0.26 m3/s, SWMM's default surface
+#: area floor and a 5 s step) against the head solve's round-off floor on it, ``(2 A_bed/dt)
+#: K_HOLD eps |H| / 2`` (3e-13 m3/s at 12 m), which must stay below the 1e-12 m3/s a
+#: surcharged run's parity needs; the bed's K_BED would put that floor at 6e-10 m3/s.
+K_HOLD = 1.0e3
+#: A surcharged junction's anchor slope floor (design E1): ``K_ANCHOR (2 A_s/dt)`` (m2/s) is
+#: added to the conduit conveyance its pass lags (`JunctionStorage`), so the junction's row
+#: of the head solve stays nonsingular even where every attached conduit's dependence on its
+#: head is lagged or limited. The anchor vanishes at the fixed point, so its size only
+#: shapes the iteration: 1e-6 of the storage slope is far below any full conduit's k.
+K_ANCHOR = 1.0e-6
 #: Newton's absolute residual tolerance for the head solve (m3/s): a junction balance error
 #: of `SOLVE_ATOL` dt m3 at most, far below the head tolerance times any surface area. It is
 #: raised to the bed's round-off floor where that is larger (`solve_atol`).
@@ -82,7 +95,8 @@ class DynamicWaveOptions:
     `routing_step` is the fixed routing step (s); `inertial_damping` is ``"none"``,
     ``"partial"`` or ``"full"``; `normal_flow_limited` is ``"slope"``, ``"froude"``,
     ``"both"`` or ``"none"``; `surcharge_method` is ``"extran"`` (end depths capped at the
-    crown, a surcharged network is refused) or ``"slot"`` (Preissmann slot);
+    crown, a junction above its crown holds continuity without storage) or ``"slot"``
+    (Preissmann slot);
     `min_surface_area` is the junction surface-area floor (m2), ``None`` for SWMM's
     12.566 ft2; `head_tolerance` is SWMM's head convergence tolerance (m); `max_trials` is
     SWMM's trial limit (-).
@@ -156,7 +170,8 @@ class DynamicWaveConduit(Element):
 
 class JunctionStorage(NodeSource):
     """SWMM's junction continuity as a node withdrawal: trapezoidal storage over the step,
-    with a stiff bed below the invert (design D3).
+    with a stiff bed below the invert (design D3), or no storage at all where the junction
+    is EXTRAN-surcharged (design E1).
 
     ``w(H) = (2 A_s/dt)(H - H_start) - N_start + (2 A_bed/dt) K_BED min(H - z_bed, 0)``
     (m3/s, positive out of the network), so that with the conduit flows and the lateral
@@ -167,29 +182,101 @@ class JunctionStorage(NodeSource):
     surface-area floor, which no A_s is below), not A_s, so that the head solve's round-off
     floor on the bed is known before the step (`solve_atol`). Relative to the junction's own
     storage slope the bed is ``K_BED A_bed / A_s`` stiffer: 1e6 at the floor, but only ~1e3
-    where A_s is a thousand times a tiny user MIN_SURFAREA. Reads the per-junction drivers
-    ``"water.storage_area"`` A_s (m2, design D2's SI area), ``"water.head_start"`` (m),
-    ``"water.net_inflow_start"`` (m3/s) and ``"water.storage_rate"`` 1/dt (1/s). `bed`
-    holds the junction inverts (m).
+    where A_s is a thousand times a tiny user MIN_SURFAREA.
+
+    EXTRAN surcharge (design E1; `crown` given, the junction crown heads in m). Above its
+    crown a junction stores nothing: SWMM's surcharged update ``y_new = y_last + corr
+    dQ/denom`` (`dynwave.c:716-741`) is at its fixed point exactly when the net inflow dQ is
+    0. With ``w_c = (2 A_s/dt)(H_crown - H_start) - N_start`` the storage withdrawal at the
+    crown, ``stiff = (2 A_bed/dt) K_HOLD`` and the band ``b(H) = w_c + stiff (H -
+    H_crown)``:
+
+    - a SURCHARGED junction (driver ``"water.surcharged"`` 1, set by `surcharged` from the
+      fed head ``H_last``: above the crown and ``b(H_last) > 0``, i.e. above the band where
+      ``w_c < 0``) withdraws the anchor ``s (H - H_last)``, zero at the
+      fixed point, with ``s`` the driver ``"water.surcharge_slope"`` (m2/s): the
+      conveyance of the attached conduits that the pass lags into their c0 (a conduit whose
+      other end is pinned), so that the pass is a Newton step in this junction's head, plus
+      a floor `K_ANCHOR` (2 A_s/dt) that keeps the head solve nonsingular;
+    - any other junction withdraws ``max(storage(H), b(H))``: the storage equation below
+      its crown, then the stiff band, a convex curve (one Newton-safe solution per pass).
+
+    The fixed points are SWMM's: a free-surface solution below the crown; a surcharged one
+    (net inflow 0) above it -- the flag is lagged on the fed head as SWMM's test
+    ``y_last > y_crown`` (`dynwave.c:688`) is on the previous trial, and a surcharged
+    solution below the crown drops it on the next pass, as SWMM's floor ``y_new < y_crown ->
+    y_crown - FUDGE`` (`dynwave.c:735-736`) does. Where SWMM has NO fixed point (the storage
+    equation ends above the crown, but at the crown the junction already loses water, so the
+    surcharged solution lies below it) SWMM's trials alternate between its two branches and
+    a flag lagged on the depth alone chatters forever. Here the band takes that case: the
+    junction is held at its crown (within the band, ``|w_c|/stiff``, below a millimetre),
+    releasing what the balance needs, ``w`` between ``w_c`` and 0 -- the deterministic tie
+    rule. The band also moves a surcharged solution that lies within ``|w_c|/stiff`` above
+    the crown onto the band; SWMM's surcharged depth lies ``N(crown)/sum(k)`` above it, so
+    that needs a net inflow at the crown below ``|w_c| sum(k)/stiff``, a thin sliver.
+
+    Reads the per-junction drivers ``"water.storage_area"`` A_s (m2, design D2's SI area),
+    ``"water.head_start"`` (m), ``"water.net_inflow_start"`` (m3/s) and
+    ``"water.storage_rate"`` 1/dt (1/s); with `crown` also ``"water.surcharged"`` (0/1)
+    and ``"water.surcharge_slope"`` (m2/s), and `surcharged` reads ``"water.head_last"``
+    (m). `bed` holds the junction inverts (m); without `crown` (SLOT) no junction
+    surcharges.
     """
 
-    def __init__(self, nodes: Tensor, bed: Tensor, bed_area: float) -> None:
+    def __init__(self, nodes: Tensor, bed: Tensor, bed_area: float,
+                 crown: Tensor | None = None) -> None:
         super().__init__(nodes)
         self.register_buffer("bed", torch.as_tensor(bed, dtype=F64))
         self.bed_area = float(bed_area)
+        self.extran = crown is not None
+        if self.extran:
+            self.register_buffer("crown", torch.as_tensor(crown, dtype=F64))
+
+    def _storage(self, phi: Tensor, drivers: Mapping) -> tuple[Tensor, Tensor, Tensor]:
+        """Phase A's storage withdrawal (m3/s) and slope (m2/s) at `phi`, and the band's
+        stiffness (m2/s)."""
+        rate2 = 2.0 * drivers["water.storage_rate"]
+        area = drivers["water.storage_area"]
+        bed = rate2 * self.bed_area * K_BED
+        dry = torch.clamp(phi - self.bed, max=0.0)
+        storage = (rate2 * area * (phi - drivers["water.head_start"])
+                   - drivers["water.net_inflow_start"] + bed * dry)          # dynwave.c:694-711
+        slope = rate2 * area + bed * (phi < self.bed).to(phi.dtype)
+        return storage, slope, rate2 * self.bed_area * K_HOLD
+
+    def _band(self, phi: Tensor, drivers: Mapping) -> Tensor:
+        """The band ``w_c + stiff (H - H_crown)`` (m3/s) at `phi` (m)."""
+        rate2 = 2.0 * drivers["water.storage_rate"]
+        w_c = (rate2 * drivers["water.storage_area"] * (self.crown - drivers["water.head_start"])
+               - drivers["water.net_inflow_start"])
+        return w_c + rate2 * self.bed_area * K_HOLD * (phi - self.crown)
+
+    def surcharged(self, drivers: Mapping) -> Tensor:
+        """The EXTRAN surcharge flag (0/1, float64) from the fed heads
+        ``drivers["water.head_last"]`` (m): the band positive there (class docstring)."""
+        head_last = drivers["water.head_last"]
+        if not self.extran:
+            return torch.zeros_like(head_last)
+        return ((head_last > self.crown)
+                & (self._band(head_last, drivers) > 0.0)).to(F64)        # dynwave.c:688
 
     def flow(self, phi_nodes: Tensor, drivers: Mapping | None = None) -> Tensor:
         """Withdrawal (m3/s) at junction heads `phi_nodes` (m)."""
-        rate2 = 2.0 * drivers["water.storage_rate"]
-        dry = torch.clamp(phi_nodes - self.bed, max=0.0)
-        return (rate2 * drivers["water.storage_area"] * (phi_nodes - drivers["water.head_start"])
-                - drivers["water.net_inflow_start"] + rate2 * self.bed_area * K_BED * dry)
+        storage, _, _ = self._storage(phi_nodes, drivers)
+        if not self.extran:
+            return storage
+        free = torch.maximum(storage, self._band(phi_nodes, drivers))
+        anchor = drivers["water.surcharge_slope"] * (phi_nodes - drivers["water.head_last"])
+        return torch.where(drivers["water.surcharged"] > 0.5, anchor, free)  # dynwave.c:716
 
     def dflow(self, phi_nodes: Tensor, drivers: Mapping | None = None) -> Tensor:
         """d(withdrawal)/dH (m2/s), analytic and strictly positive."""
-        below = (phi_nodes < self.bed).to(phi_nodes.dtype)
-        rate2 = 2.0 * drivers["water.storage_rate"]
-        slope = rate2 * (drivers["water.storage_area"] + self.bed_area * K_BED * below)
+        storage, slope, stiff = self._storage(phi_nodes, drivers)
+        if self.extran:
+            band = self._band(phi_nodes, drivers)
+            slope = torch.where(band > storage, stiff.expand_as(band), slope)
+            slope = torch.where(drivers["water.surcharged"] > 0.5,
+                                drivers["water.surcharge_slope"].expand_as(slope), slope)
         return slope.expand(torch.broadcast_shapes(slope.shape, phi_nodes.shape))
 
 
@@ -203,9 +290,18 @@ class DynamicWaveHydraulics:
     ``"sewer.pipe_flow"`` (m3/s), ``"sewer.mid_area"`` (SWMM's stored mid-depth area, SI
     area m2 per design D2) and ``"sewer.net_inflow"`` (m3/s, per junction). With a
     `StepContext` it writes ``"water.sources"``, ``"water.phi_boundary"`` (outfall heads, m),
-    the six `DynamicWaveConduit` drivers and the four `JunctionStorage` drivers; always the
+    the six `DynamicWaveConduit` drivers and the seven `JunctionStorage` drivers; always the
     carried keys and the reporting keys ``"sewer.q"`` (m3/s), ``"sewer.h"`` (link depth, m),
-    ``"sewer.v"`` (m/s), ``"sewer.V_wet"`` (m3) and ``"sewer.junction_depth"`` (m).
+    ``"sewer.v"`` (m/s), ``"sewer.V_wet"`` (m3), ``"sewer.junction_depth"`` (m) and
+    ``"sewer.surcharged"`` (per junction, 0/1).
+
+    EXTRAN surcharge (design E1): `crown_depth` is each junction's highest attached conduit
+    top (`dynwave.c:137-153`). The closure writes the drivers ``"water.surcharged"`` (0/1,
+    from the fed heads: `JunctionStorage.surcharged`), ``"water.surcharge_slope"`` (m2/s)
+    and ``"water.head_last"`` (the fed junction heads, m); a surcharged junction holds
+    instantaneous continuity, net inflow 0 (see `JunctionStorage` for the tie rule at the
+    crown). ``"sewer.surcharged"`` reports SWMM's own test, depth above the crown
+    (`dynwave.c:688`). Under SLOT no junction is ever surcharged (`dynwave.c:677`).
 
     The arithmetic is SWMM's own, in feet (design D2); `layer` names the head layer.
     """
@@ -277,6 +373,27 @@ class DynamicWaveHydraulics:
         self.min_area_ft2 = (
             DEFAULT_MIN_SURFACE_AREA_FT2 if self.options.min_surface_area is None
             else self.options.min_surface_area / LCF**2)            # dynwave.c:186-187
+        # Each junction's crown: the highest conduit top over the conduit ends it carries,
+        # crownElev - invertElev (dynwave.c:137-153); 0 for a junction with none.
+        geo = self.geo
+        crown = torch.zeros(len(nodes), dtype=F64)
+        crown = crown.scatter_reduce(0, self.u, (geo.offset1 + geo.y_full).detach(), "amax")
+        crown = crown.scatter_reduce(0, self.v, (geo.offset2 + geo.y_full).detach(), "amax")
+        self.crown_ft = crown[self.junction_idx]
+        #: per-junction crown depth (m), in junction order
+        self.crown_depth = self.crown_ft * LCF
+        # The full depth SWMM floods at: MaxDepth, extended to every attached conduit's
+        # top (link.c:440-463, the same conduit ends as the crown); SurDepth is not read.
+        max_depth = torch.tensor([0.0 if m.ground is None else m.ground - m.invert
+                                  for m in net.manholes], dtype=F64)
+        #: per-junction full depth (m): MaxDepth extended to the crown
+        self.full_depth = torch.maximum(max_depth, self.crown_depth)
+        jinv = self.node_invert[self.junction_idx]
+        #: the junctions' `JunctionStorage` (the model's node source; `junction_residual`)
+        self.storage = JunctionStorage(
+            self.junction_idx, jinv, bed_area=self.min_area_ft2 * _AREA_SI,
+            crown=jinv + self.crown_depth if self.options.surcharge_method == "extran"
+            else None)
 
     # ------------------------------------------------------------------ geometry
     def _rebuild_geometry(self) -> None:
@@ -326,6 +443,15 @@ class DynamicWaveHydraulics:
             damping=self.options.inertial_damping,
             normal_flow_limited=self.options.normal_flow_limited,
             surcharge_method=self.options.surcharge_method)
+
+    def _surcharged(self, heads: Tensor) -> Tensor:
+        """EXTRAN's surcharge test on the junction heads `heads` (m, full-node): depth above
+        a positive crown (`dynwave.c:688`), as a bool per junction."""
+        jidx = self.junction_idx
+        depth_ft = torch.clamp(heads[..., jidx] - self.node_invert[jidx], min=0.0) / LCF
+        if self.options.surcharge_method != "extran":
+            return torch.zeros_like(depth_ft, dtype=torch.bool)
+        return (self.crown_ft > 0.0) & (depth_ft > self.crown_ft)
 
     def _carried(self, state: Mapping, terms: ConduitTerms, inflow: Tensor) -> State:
         heads = state[f"{self.layer}.phi"]
@@ -392,6 +518,7 @@ class DynamicWaveHydraulics:
             "sewer.h": depth_ft * LCF,
             "sewer.v": torch.where(moving, v_ft, torch.zeros_like(v_ft)) * LCF,
             "sewer.V_wet": terms.volume * QCF,
+            "sewer.surcharged": self._surcharged(state[f"{self.layer}.phi"]).to(F64),
         })
         if dt is None:
             return out
@@ -401,6 +528,10 @@ class DynamicWaveHydraulics:
         surf = surf.index_add(-1, self.u, terms.surface_area1)                # dynwave.c:582-583
         surf = surf.index_add(-1, self.v, terms.surface_area2)
         area_ft2 = torch.clamp(surf[..., jidx], min=self.min_area_ft2)        # dynwave.c:670
+        # conveyance the pass lags into c0 (other end pinned), per junction (dynwave.c:578)
+        lagged = torch.zeros_like(surf).index_add(-1, self.u, terms.lagged_conveyance1)
+        lagged = lagged.index_add(-1, self.v, terms.lagged_conveyance2)[..., jidx]
+        anchor = lagged * (QCF / LCF) + K_ANCHOR * 2.0 / dt * area_ft2 * _AREA_SI
         out.update({
             f"{self.layer}.sources": inflow,
             f"{self.layer}.phi_boundary": self._outfall_heads(q),
@@ -414,7 +545,10 @@ class DynamicWaveHydraulics:
             "water.storage_rate": torch.tensor(1.0 / dt, dtype=F64),
             "water.head_start": self.node_invert[jidx] + state["sewer.junction_depth"],
             "water.net_inflow_start": state["sewer.net_inflow"],
+            "water.surcharge_slope": anchor,
+            "water.head_last": state[f"{self.layer}.phi"][..., jidx],
         })
+        out["water.surcharged"] = self.storage.surcharged(out)
         return out
 
     def carried(self, state: Mapping, drivers: Mapping, *, dt: float | None = None) -> State:
@@ -454,38 +588,37 @@ class DynamicWaveHydraulics:
             "sewer.net_inflow": torch.zeros(len(self.junction_names), dtype=F64),
         }
 
-    def check_free_surface(self, state: Mapping, drivers: Mapping, t: float) -> None:
-        """Refuse, naming the time and conduits, any conduit end whose depth reached the
-        crown under EXTRAN (surcharge is not modelled there yet). Under SLOT surcharge is
-        modelled and nothing is refused."""
-        if self.options.surcharge_method == "slot":
-            return
-        heads = state[f"{self.layer}.phi"].detach() / LCF
-        geo = self.geo
-        z1 = geo.invert1 + geo.offset1
-        z2 = geo.invert2 + geo.offset2
-        y1 = torch.maximum(heads[..., self.u], z1) - z1                       # dwflow.c:110-120
-        y2 = torch.maximum(heads[..., self.v], z2) - z2
-        full = (y1 >= geo.y_full.detach() - 1e-12) | (y2 >= geo.y_full.detach() - 1e-12)
-        if bool(full.any()):
-            hit = full.reshape(-1, full.shape[-1]).any(0)
-            names = [self.pipe_names[i] for i in hit.nonzero().flatten().tolist()]
+    def check_full_depth(self, state: Mapping, t: float) -> None:
+        """Refuse, naming the time and junctions, any junction deeper than its full depth
+        `full_depth` (MaxDepth extended to its crown): there SWMM floods it
+        (`dynwave.c:743-795`), which is not modelled yet, so the run would go on raising a
+        junction SWMM holds at its full depth. SWMM's SurDepth is not read either, so the
+        refusal comes no later than SWMM's flooding."""
+        jidx = self.junction_idx
+        depth = state[f"{self.layer}.phi"].detach()[..., jidx] - self.node_invert[jidx]
+        over = depth > self.full_depth
+        if bool(over.any()):
+            hit = over.reshape(-1, over.shape[-1]).any(0)
+            names = [self.junction_names[i] for i in hit.nonzero().flatten().tolist()]
             raise RuntimeError(
-                f"dynamic wave: surcharge at t={t} s in conduit(s) {names} (end depth "
-                f"reached the crown); surcharge is not modelled yet (phase B)")
+                f"dynamic wave: junction(s) {names} above their full depth at t={t} s; "
+                f"flooding is not modelled yet (phase B)")
 
     def junction_residual(self, before: Mapping, after: Mapping, drivers: Mapping, *,
                           dt: float | None = None) -> Tensor:
-        """``A_s (y_after - y_before) - 0.5 dt (N_before + N_after)`` per junction (m3), with
-        ``A_s`` (m2) and ``N_after`` (m3/s) evaluated at `after`; ``dt`` (s) defaults to the
-        routing step. Zero to the iteration tolerance wherever the junction is wet."""
+        """``0.5 dt (w(H_after) - N_after)`` per junction (m3): the `JunctionStorage`
+        withdrawal w (m3/s) against the net inflow N_after (m3/s), both at `after`, with
+        the drivers of a pass fed `after` from the step start `before`; ``dt`` (s) defaults
+        to the routing step. For a free-surface junction that is ``A_s (y_after -
+        y_before) - 0.5 dt (N_before + N_after)``, for an EXTRAN-surcharged one
+        ``-0.5 dt N_after``. Zero to the iteration tolerance wherever the junction is wet."""
         dt = self.options.routing_step if dt is None else float(dt)
         drv = self(after | {k: before[k] for k in self.state_keys}, drivers,
                    StepContext(dt=dt))
         now = self.carried(after, drivers, dt=dt)
-        return (drv["water.storage_area"]
-                * (now["sewer.junction_depth"] - before["sewer.junction_depth"])
-                - 0.5 * dt * (before["sewer.net_inflow"] + now["sewer.net_inflow"]))
+        heads = after[f"{self.layer}.phi"][..., self.junction_idx]
+        withdrawal = self.storage.flow(heads, drv)
+        return 0.5 * dt * (withdrawal - now["sewer.net_inflow"])
 
 
 def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
@@ -537,8 +670,7 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
         raise ValueError(f"build_dynamic_wave_model: junction(s) {stranded} touch no conduit")
     layer = PotentialFlowLayer(
         graph, "water", [DynamicWaveConduit()], boundary=boundary,
-        node_sources=[JunctionStorage(junction_idx, junction_invert,
-                                      bed_area=closure.min_area_ft2 * _AREA_SI)],
+        node_sources=[closure.storage],
         quantity="head", unit="m", flow_unit="m3/s")
     if layer.bound.tolist() != closure.outfall_idx.tolist():
         raise ValueError("build_dynamic_wave_model: the layer's boundary order differs from "
@@ -608,14 +740,14 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *, steps
     never a series; ``(steps, B, n)`` an inflow per step for a batch of B, the lateral
     inflow at the END of each step (one network's series is ``(steps, 1, n)``). Any other
     rank is refused. A batched inflow expands an unbatched `state` to the batch. After every
-    step the carried keys are re-evaluated at the returned state, and a conduit end reaching
-    its crown is refused by name. `diagnostics`, when a list, receives each step's
-    `Model.step` diagnostics. `solve_kwargs` reach the head solve (Newton); `atol` defaults
-    to `solve_atol` (m3/s: `SOLVE_ATOL`, or the bed's round-off floor where larger) and
-    `rtol` to 0, because Newton's own default (sqrt(eps), 1.5e-8 m3/s) would stop a
-    warm-started pass before it moves and leave the junction balance off by that much.
-    Returns the final state and the recorded `record` keys stacked over steps (leading
-    dimension `steps`).
+    step the carried keys are re-evaluated at the returned state, and a junction above its
+    full depth is refused by name (`DynamicWaveHydraulics.check_full_depth`).
+    `diagnostics`, when a list, receives each step's `Model.step` diagnostics.
+    `solve_kwargs` reach the head solve (Newton); `atol` defaults to `solve_atol` (m3/s:
+    `SOLVE_ATOL`, or the bed's round-off floor where larger) and `rtol` to 0, because
+    Newton's own default (sqrt(eps), 1.5e-8 m3/s) would stop a warm-started pass before
+    it moves and leave the junction balance off by that much. Returns the final state and
+    the recorded `record` keys stacked over steps (leading dimension `steps`).
     """
     hyd = model.dynamic_wave
     dt = model.routing_step if dt is None else float(dt)
@@ -649,7 +781,7 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *, steps
             raise RuntimeError(f"dynamic wave step at t={t} s: {err}") from err
         state.update(hyd.carried(state, drivers, dt=dt))   # resync, as modelica/run.py does
         t += dt
-        hyd.check_free_surface(state, drivers, t)
+        hyd.check_full_depth(state, t)
         if diagnostics is not None:
             diagnostics.append(diag)
         for key in record:

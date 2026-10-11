@@ -1,4 +1,5 @@
 import dataclasses
+import re
 from pathlib import Path
 
 import pytest
@@ -188,10 +189,9 @@ def test_gradient_over_a_few_steps_from_the_cold_start(tmp_path):
 
 @pytest.mark.slow
 def test_steady_state_passes_the_total_inflow(tmp_path):
-    """1 h at 5 s, at HALF the fixture's inflows: at full inflow (0.16 m3/s in C5, normal
-    depth 0.303 m) the water at J4 reaches the 0.30 m crown of C4, which joins J4 with a
-    zero offset, and the run is refused as surcharge at t = 780 s -- the physics, not a
-    defect. Half the inflow (normal depth 0.197 m in C5) stays free-surface."""
+    """1 h at 5 s, at HALF the fixture's inflows (normal depth 0.197 m in C5), which stays
+    free-surface throughout: at full inflow (0.16 m3/s in C5, normal depth 0.303 m) the
+    water at J4 reaches the 0.30 m crown of C4, which joins J4 with a zero offset."""
     net = _tree(tmp_path, scale=0.5)
     model, state, drivers = build_model(net)
     state, hist = simulate_dynamic_wave(model, state, drivers, steps=720)
@@ -235,10 +235,17 @@ def test_dry_network_stays_finite(tmp_path):
     assert depth.min().item() > -1e-9
 
 
-def test_surcharge_is_refused_by_name(tmp_path):
-    model, state, drivers = build_model(_tree(tmp_path, scale=4.0))
-    with pytest.raises(RuntimeError, match=r"surcharge.*C\d"):
-        simulate_dynamic_wave(model, state, drivers, steps=720)
+def test_a_junction_above_its_full_depth_is_refused_by_name():
+    """Flooding is not modelled yet (phase B, Task 4): with MaxDepth 0.5 m everywhere J2's
+    surcharge (4.3 m at step 21) passes its full depth, max(0.5 m, crown 0.30 m)."""
+    net = _extran_tree()
+    net = dataclasses.replace(net, manholes=tuple(
+        dataclasses.replace(m, ground=m.invert + 0.5) for m in net.manholes))
+    model, state, drivers = build_model(net)
+    assert model.dynamic_wave.full_depth.tolist() == pytest.approx([0.5] * 5)
+    with pytest.raises(RuntimeError, match=r"junction\(s\) \['J2'\] above their full depth "
+                                           r"at t=105\.0 s; flooding is not modelled"):
+        simulate_dynamic_wave(model, state, drivers, steps=30)
 
 
 def test_non_convergence_is_named(tmp_path):
@@ -385,11 +392,12 @@ def _slot_tree(tmp_path, scale):
 
 
 def test_slot_surcharges_the_tree_past_the_crown_without_refusal(tmp_path):
-    """At 2.5x the fixture's inflows (1.25x tree_kinwave.inp, which surcharges J4/C4 at
-    ~780 s under EXTRAN) the water at J4 passes the 0.30 m crown of C4 at step 95 (475 s)
-    of 120. The brief's 1.5x only reaches 0.25 m at J4 over 30 min, so it never surcharges;
-    EXTRAN refuses the same run. Under SLOT the pipes stay pressurised without refusal, the
-    junction equation holds and link depths stay at or below the crown."""
+    """At 2.5x the fixture's inflows (1.25x tree_kinwave.inp) the water at J4 passes the
+    0.30 m crown of C4 at step 95 (475 s) of 120. The brief's 1.5x only reaches 0.25 m at
+    J4 over 30 min, so it never surcharges. Under SLOT the pipes stay pressurised, the
+    junction equation holds and link depths stay at or below the crown. Under EXTRAN the
+    same run fills C4's end at J4 but no junction passes its own crown (J4's is C3's and
+    C5's 0.45 m), so nothing is surcharged."""
     net = _slot_tree(tmp_path, 2.5)
     assert net.dynamic_wave.surcharge_method == "slot"
     model, state, drivers = build_model(net)
@@ -403,12 +411,13 @@ def test_slot_surcharges_the_tree_past_the_crown_without_refusal(tmp_path):
     diam = torch.tensor([p.diameter for p in net.pipes], dtype=F64) / LCF
     assert bool((terms.depth <= diam + 1e-12).all())
     assert bool((torch.maximum(terms.end_depth1, terms.end_depth2) > diam).any())
-    # the same run is refused under EXTRAN
+    # the same run under EXTRAN: C4 full at J4, no junction above its crown
     extran = dataclasses.replace(net, dynamic_wave=dataclasses.replace(
         net.dynamic_wave, surcharge_method="extran"))
     m2, s2, d2 = build_model(extran)
-    with pytest.raises(RuntimeError, match=r"surcharge.*C\d"):
-        simulate_dynamic_wave(m2, s2, d2, steps=120)
+    s2, h2 = simulate_dynamic_wave(m2, s2, d2, steps=120)
+    assert _depths(m2, h2)[:, j4].max().item() > 0.30
+    assert not bool((_depths(m2, h2) > m2.dynamic_wave.crown_depth).any())
 
 
 def test_slot_leaves_a_free_surface_run_unchanged(tmp_path):
@@ -422,3 +431,200 @@ def test_slot_leaves_a_free_surface_run_unchanged(tmp_path):
         runs.append(simulate_dynamic_wave(model, state, drivers, steps=20)[1])
     torch.testing.assert_close(runs[0]["water.phi"], runs[1]["water.phi"], rtol=0, atol=1e-10)
     torch.testing.assert_close(runs[0]["water.q"], runs[1]["water.q"], rtol=0, atol=1e-10)
+
+
+# ---------------------------------------------------------------- EXTRAN surcharge (E1)
+EXTRAN_NAME = "tree_extran_dynwave.inp"
+
+
+def _extran_tree(scale=1.0, **manhole_changes):
+    """tree_extran_dynwave.inp (3x tree_dynwave.inp's inflows, 1.5x tree_kinwave.inp's;
+    SURCHARGE_METHOD EXTRAN), the inflows scaled by `scale`, manholes replaced field-wise."""
+    net, _, _ = read_swmm_inp(DATA / EXTRAN_NAME)
+    return dataclasses.replace(net, manholes=tuple(
+        dataclasses.replace(m, inflow=m.inflow * scale, **manhole_changes)
+        for m in net.manholes))
+
+
+def _depths(model, hist):
+    return hist["water.phi"][..., model.junction_idx] - model.junction_invert
+
+
+def test_junction_crown_is_the_highest_attached_conduit_top():
+    """dynwave.c:137-153: a junction's crown depth is the largest offset + y_full over the
+    conduit ends it carries (both ends of every conduit); J4 carries C3 and C5 (0.45 m) and
+    C4 (0.30 m). An outlet offset of 0.25 m on C4 lifts J4's crown to 0.55 m."""
+    model, _, _ = build_model(_extran_tree())
+    hyd = model.dynamic_wave
+    crown = dict(zip(hyd.junction_names, hyd.crown_depth.tolist(), strict=True))
+    assert crown == pytest.approx({"J1": 0.30, "J2": 0.30, "J5": 0.30, "J3": 0.45,
+                                   "J4": 0.45}, abs=1e-12)
+    net = _extran_tree()
+    net = dataclasses.replace(net, pipes=tuple(
+        dataclasses.replace(p, outlet_offset=0.25) if p.name == "C4" else p
+        for p in net.pipes))
+    hyd = build_model(net)[0].dynamic_wave
+    assert hyd.crown_depth[hyd.junction_names.index("J4")].item() == pytest.approx(0.55)
+
+
+def test_junction_storage_holds_continuity_without_storage_where_surcharged():
+    """Design E1 in `JunctionStorage` (crown head 1.3 m, A_s 2 m2, dt 5 s, so 2 A_s/dt =
+    0.8 m2/s; the band's stiffness (2/dt) A_bed K_HOLD = 200 m2/s). Junction 0 drains at
+    its crown (w_c = 0.8 * 0.3 = 0.24 m3/s), junction 1 would still fill there (w_c = 0.8 *
+    0.05 - 0.3 = -0.26 m3/s). The flag comes from the fed head H_last through the band
+    b = w_c + 200 (H - 1.3) (above the crown): surcharged junctions withdraw the anchor
+    s (H - H_last), 0 at the fed head; the others max(storage, b)."""
+    ns = JunctionStorage(torch.tensor([0, 1]), bed=torch.ones(2, dtype=F64), bed_area=0.5,
+                         crown=torch.full((2,), 1.3, dtype=F64))
+    drv = {"water.storage_area": torch.full((2,), 2.0, dtype=F64),
+           "water.head_start": torch.tensor([1.0, 1.25], dtype=F64),
+           "water.net_inflow_start": torch.tensor([0.0, 0.3], dtype=F64),
+           "water.storage_rate": torch.tensor(0.2, dtype=F64),
+           "water.surcharge_slope": torch.full((2,), 0.7, dtype=F64)}
+
+    def flag(h_last):
+        drv["water.head_last"] = torch.tensor(h_last, dtype=F64)
+        drv["water.surcharged"] = ns.surcharged(drv)
+        return drv["water.surcharged"].tolist()
+
+    def at(h):
+        phi = torch.full((2,), h, dtype=F64)
+        return ns.flow(phi, drv).tolist(), ns.dflow(phi, drv).tolist()
+
+    # fed above the crown: both surcharged (b > 0); 0 withdrawal at the fed head
+    assert flag([1.6, 1.6]) == [1.0, 1.0]
+    w, dw = at(1.5)
+    assert w == pytest.approx([0.7 * -0.1, 0.7 * -0.1]) and dw == pytest.approx([0.7, 0.7])
+    assert at(1.6)[0] == [0.0, 0.0]
+    # fed at or below the crown: free
+    assert flag([1.2, 1.3]) == [0.0, 0.0]
+    w, dw = at(1.2)                                              # storage below the crown
+    assert w == pytest.approx([0.8 * 0.2, 0.8 * -0.05 - 0.3]) and dw == pytest.approx([0.8, 0.8])
+    w, dw = at(1.3 + 1e-6)                                       # the band above it
+    assert w == pytest.approx([0.24 + 2e-4, -0.26 + 2e-4])
+    assert dw == pytest.approx([200.0, 200.0])
+    # fed just above the crown: junction 0 surcharged, junction 1 on its band (b < 0 up to
+    # 1.3 m + 0.26/200 = 1.3013 m)
+    assert flag([1.3 + 1.0e-6, 1.3 + 1.0e-6]) == [1.0, 0.0]
+    assert flag([1.3 + 1.0e-6, 1.3014]) == [1.0, 1.0]
+
+
+def test_extran_surcharge_is_instantaneous_continuity():
+    """Design E1 on the tree at 3x tree_dynwave.inp's inflows (the brief's "1.5x" is
+    tree_kinwave.inp's scale; tree_dynwave.inp is half of that). In SWMM J2 passes its
+    0.30 m crown at step 21 and J4 its 0.45 m crown at step 139. At every step, each
+    junction above its crown has no storage: its net inflow is zero (1e-9 m3/s), while the
+    junctions below their crowns keep the trapezoidal storage equation (1e-8 m3). The head
+    solve is held to `SOLVE_ATOL`: a surcharged junction has no storage to turn the default
+    `solve_atol` (2.5e-9 m3/s here, the stiff bed's round-off floor) into a small head
+    error, so its net inflow is resolved only to that atol (1.6e-9 m3/s measured at J4)."""
+    net = _extran_tree()
+    model, state, drivers = build_model(net)
+    hyd = model.dynamic_wave
+    crown = hyd.crown_depth
+    j2, j4 = hyd.junction_names.index("J2"), hyd.junction_names.index("J4")
+    first = {}
+    for k in range(150):
+        before = dict(state)
+        state, _ = simulate_dynamic_wave(model, state, drivers, steps=1, atol=SOLVE_ATOL)
+        depth = state["water.phi"][model.junction_idx] - model.junction_invert
+        surcharged = depth > crown
+        reported = hyd(state, drivers)["sewer.surcharged"]
+        assert torch.equal(reported, surcharged.to(F64))
+        for j in surcharged.nonzero().flatten().tolist():
+            first.setdefault(j, k + 1)
+        net_in = state["sewer.net_inflow"]
+        assert bool((net_in[surcharged].abs() < 1e-9).all()), (k, net_in[surcharged])
+        res = hyd.junction_residual(before, state, drivers, dt=model.routing_step)
+        assert res[~surcharged].abs().max().item() < 1e-8, k
+    assert first.get(j2) == 21 and first.get(j4) == 139, first
+
+
+def _ramp(steps_up=40, hold=20, steps_down=10, low=0.8):
+    """Inflow factors: up from 0 to 1 over `steps_up` steps, `hold` steps at 1, then down
+    to `low` over `steps_down` steps (the lateral inflow at the end of each step)."""
+    return ([(k + 1) / steps_up for k in range(steps_up)] + [1.0] * hold
+            + [1.0 - (1.0 - low) * (k + 1) / steps_down for k in range(steps_down)])
+
+
+def test_crown_crossing_converges_or_is_named():
+    """A ramp of inflow up through J2's crown and back down (tree_extran_dynwave.inp's
+    inflows times 0..1, then down to 0.8). J2 jumps above its 0.30 m crown at step 47 and
+    falls back through it at step 66: there the storage equation from the step start
+    (0.389 m) ends above the crown, while at the crown J2 already loses water, so SWMM's
+    surcharged solution lies below the crown. SWMM has no fixed point there (its trials
+    alternate; 48 % of this ramp's steps do not converge in SWMM 5.2.4 at 500 trials),
+    and a flag lagged on the depth alone chatters until the pass budget runs out. The tie
+    rule (`JunctionStorage`) holds J2 at its crown, within the band (< 1 mm), releasing
+    water: every step converges, in at most 26 passes (steps 66-68; 11-19 elsewhere). A
+    budget of 21 passes is too small for the crossing, and the refusal names its time."""
+    net = _extran_tree()
+    model, state0, drivers = build_model(net)
+    hyd = model.dynamic_wave
+    factors = _ramp()
+    inflow = torch.stack([f * drivers["inflow"] for f in factors]).unsqueeze(1)
+    diags: list = []
+    state, hist = simulate_dynamic_wave(model, state0, drivers, steps=len(factors),
+                                        inflow=inflow, diagnostics=diags)
+    assert all(bool(d["converged"]) for d in diags)
+    j2 = hyd.junction_names.index("J2")
+    above = _depths(model, hist)[:, 0, j2] - hyd.crown_depth[j2]
+    assert above[46].item() > 1.0 and above[45].item() < 0.0       # the jump at step 47
+    held = ((above > 0.0) & (above < 1e-3)).nonzero().flatten().tolist()
+    assert held and held[0] == 65, held                            # step 66: held
+    assert above[-1].item() < 0.0                                  # free again
+    assert max(d["passes"] for d in diags) <= 30
+    # a budget too small for the crossing steps: refused, naming the step's time
+    small, s0, d0 = build_model(net, iterate_max=21)
+    with pytest.raises(RuntimeError, match=r"^dynamic wave step at t=(\d+)\.0 s: .*converge"
+                       ) as err:
+        simulate_dynamic_wave(small, s0, d0, steps=len(factors), inflow=inflow)
+    t = float(re.match(r"^dynamic wave step at t=(\d+\.0) s", str(err.value)).group(1))
+    assert 325.0 <= t <= 335.0, t                                  # steps 66-68 start
+
+
+@pytest.mark.slow
+def test_extran_batched_equals_single():
+    """A batch of the surcharging tree (J2 and J4 surcharge) and half its inflow (free
+    surface throughout): each instance carries its own surcharge flags."""
+    model, state, drivers = build_model(_extran_tree())
+    base = drivers["inflow"]
+    _, hb = simulate_dynamic_wave(model, state, drivers, steps=150,
+                                  inflow=torch.stack([base, 0.5 * base]))
+    crown = model.dynamic_wave.crown_depth
+    assert bool((_depths(model, hb)[:, 0] > crown).any())
+    assert not bool((_depths(model, hb)[:, 1] > crown).any())
+    for i, scale in enumerate((1.0, 0.5)):
+        _, hs = simulate_dynamic_wave(model, state, drivers, steps=150, inflow=scale * base)
+        torch.testing.assert_close(hb["water.phi"][:, i], hs["water.phi"],
+                                   rtol=1e-9, atol=1e-10)
+
+
+def test_gradient_through_a_surcharged_junction():
+    """d(sum of junction depths 4 steps on)/d(Manning n of C2) from step 25 of the EXTRAN
+    tree, where J2 (C2's upstream end) is surcharged and holds instantaneous continuity: the
+    adjoint against central differences on plain relaxation (564.8027017 both, 1e-10 rel
+    measured)."""
+    from noodl.apps.sewer.dynwave import build_dynamic_wave_model
+
+    net = _extran_tree()
+    model, state0, drivers = build_model(net)
+    state0, _ = simulate_dynamic_wave(model, state0, drivers, steps=25)
+    state0 = {k: v.detach() for k, v in state0.items()}
+    j2 = model.dynamic_wave.junction_names.index("J2")
+    depth = state0["water.phi"][model.junction_idx] - model.junction_invert
+    assert depth[j2].item() > model.dynamic_wave.crown_depth[j2].item()
+    plain = build_dynamic_wave_model(net, acceleration=None, iterate_flow_tol=None)[0]
+
+    def loss(m, n2):
+        hyd = m.dynamic_wave
+        hyd.set_roughness(hyd.pipe_names.index("C2"), n2)
+        s, _ = simulate_dynamic_wave(m, state0, drivers, steps=4)
+        return (s["water.phi"][m.junction_idx] - m.junction_invert).sum()
+
+    n = torch.tensor(0.013, dtype=F64, requires_grad=True)
+    loss(model, n).backward()
+    h = 1e-6
+    with torch.no_grad():
+        fd = (loss(plain, n.detach() + h) - loss(plain, n.detach() - h)) / (2 * h)
+    assert n.grad.item() == pytest.approx(fd.item(), rel=1e-6)

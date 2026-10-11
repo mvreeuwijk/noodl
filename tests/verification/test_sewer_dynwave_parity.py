@@ -91,13 +91,13 @@ def _swmm(tmp_path, name):
     return rows, conn, engine, (float(m.group(1)) if m else None)
 
 
-def _worst_errors(name, rows, conn, steps):
+def _worst_errors(name, rows, conn, steps, **solve_kwargs):
     """noodl over `steps` steps against SWMM's first `steps` rows: the largest junction or
     outfall depth difference (m) and the largest flow excess over the flow target (m3/s,
-    <= 0 passes)."""
+    <= 0 passes). `solve_kwargs` reach the head solve."""
     net, _, _ = read_swmm_inp(DATA / name)
     model, state, drivers = build_model(net, iterate_tol=ITERATE_TOL, iterate_max=ITERATE_MAX)
-    _, hist = simulate_dynamic_wave(model, state, drivers, steps=steps)
+    _, hist = simulate_dynamic_wave(model, state, drivers, steps=steps, **solve_kwargs)
     hyd = model.dynamic_wave
     # junctions from the solved heads; outfalls from the closure-written boundary heads
     nodes = [m.name for m in net.manholes] + list(hyd.outfall_names)
@@ -118,9 +118,9 @@ def _worst_errors(name, rows, conn, steps):
 
 
 def _converged_swmm(tmp_path, name, surcharged=False):
-    """SWMM's rows, after checking the engine and that it converged on every step. Under
-    EXTRAN no conduit end may reach its crown (noodl refuses surcharge there, so a fixture
-    edited into it would compare nothing meaningful); with `surcharged` (SLOT) some end must."""
+    """SWMM's rows, after checking the engine and that it converged on every step. Without
+    `surcharged` no conduit end may reach its crown (the free-surface fixtures must stay
+    free-surface, or they would test something else); with it some end must."""
     rows, conn, engine, not_converging = _swmm(tmp_path, name)
     assert engine == "5.2.4"
     assert not_converging == 0.0, f"SWMM did not converge on every step ({not_converging} %)"
@@ -190,5 +190,39 @@ def test_slot_surcharge_matches_swmm_after_the_crown(tmp_path):
 def test_slot_surcharge_matches_swmm_at_every_step(tmp_path):
     rows, conn = _converged_swmm(tmp_path, SLOT_NAME, surcharged=True)
     worst_depth, worst_flow = _worst_errors(SLOT_NAME, rows, conn, len(rows))
+    assert worst_depth <= TOL_DEPTH, worst_depth
+    assert worst_flow <= 0.0, worst_flow
+
+
+EXTRAN_NAME = "tree_extran_dynwave.inp"
+#: SWMM's surcharged junctions (depth above the highest attached crown) first appear at
+#: steps 21 (J2), 139 (J4) and 270 (J3); 150 steps cover the first two crossings.
+EXTRAN_FAST_STEPS = 150
+#: The head solve's tolerance (m3/s) for the EXTRAN runs. A surcharged junction stores
+#: nothing, so a balance residual r moves its head by r / sum(k), with sum(k) ~ 0.01 m2/s
+#: of full-conduit conveyance: at the default `solve_atol` (2.5e-9 m3/s here, the stiff
+#: bed's round-off floor) that is up to 2.5e-7 m (2.45e-7 m measured at J4, step 352). No
+#: junction of this run sits on its bed after the first steps, so 1e-12 m3/s is reachable.
+EXTRAN_ATOL = 1e-12
+
+
+def test_extran_surcharge_matches_swmm_through_two_crossings(tmp_path):
+    """`SURCHARGE_METHOD EXTRAN` on the tree at 3x the dynwave inflows: J2 and J4 jump
+    above their crowns (steps 21 and 139) and hold instantaneous continuity there. SWMM
+    converges on every step of this run (EXTRAN surcharge need not: see
+    tests/apps/sewer/test_dynwave.py::test_crown_crossing_converges_or_is_named), so all
+    steps are compared at the free-surface targets."""
+    rows, conn = _converged_swmm(tmp_path, EXTRAN_NAME, surcharged=True)
+    worst_depth, worst_flow = _worst_errors(EXTRAN_NAME, rows, conn, EXTRAN_FAST_STEPS,
+                                            atol=EXTRAN_ATOL)
+    assert worst_depth <= TOL_DEPTH, worst_depth
+    assert worst_flow <= 0.0, worst_flow
+
+
+@pytest.mark.slow
+def test_extran_surcharge_matches_swmm_at_every_step(tmp_path):
+    rows, conn = _converged_swmm(tmp_path, EXTRAN_NAME, surcharged=True)
+    worst_depth, worst_flow = _worst_errors(EXTRAN_NAME, rows, conn, len(rows),
+                                            atol=EXTRAN_ATOL)
     assert worst_depth <= TOL_DEPTH, worst_depth
     assert worst_flow <= 0.0, worst_flow

@@ -53,8 +53,9 @@ conduits differ by SWMM's one-step junction lag, which is first order in the ste
 - runoff (`[SUBCATCHMENTS]` and everything that feeds them) and dry-weather patterns;
 - non-circular shapes;
 - storage units, pumps, weirs, orifices and outlets;
-- dynamic wave with `SURCHARGE_METHOD EXTRAN` surcharge, variable time step or ponding
-  (`SLOT` models surcharge).
+- dynamic wave with a variable time step or ponding; a junction filling past its full depth
+  (MaxDepth, extended to its crown) stops the run, as flooding is not modelled yet, and
+  `SurDepth` is not read. Both `SURCHARGE_METHOD`s model surcharge.
 
 **Slope** follows SWMM's own definition $S_0 = dy/dx$ with $dx = \sqrt{L^2 - dy^2}$ — the 3-D
 chord, not the naive $dy/L$. Under `STEADY` and `KINWAVE`, zero or adverse fall is refused, as
