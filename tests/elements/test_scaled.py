@@ -86,3 +86,50 @@ def test_in_a_layer_a_multiplier_is_a_coefficient_scale_and_differentiable():
 def test_a_zero_multiplier_on_the_only_path_names_the_floating_zone():
     with pytest.raises(RuntimeError, match=r"ungrounded interior nodes \['z'\]"):
         _one_zone(torch.tensor(0.0, dtype=F64))
+
+
+def test_a_misshapen_multiplier_is_named_in_linear_init_too():
+    with pytest.raises(ValueError, match="3 values.*2 edges"):
+        Scaled(_law(), KEY).linear_init({KEY: torch.ones(3, dtype=F64)})
+
+
+def test_a_gradient_carrying_inner_tensor_that_is_not_a_parameter_is_refused():
+    net = Network(dtype=F64)
+    net.add_node("ambient")
+    net.add_node("z")
+    net.add_edge("ambient", "z", kind="leak")
+    C = torch.tensor(0.02, dtype=F64, requires_grad=True)
+    inner = PowerLaw(C, torch.tensor(0.5, dtype=F64), kind="leak", learnable=False)
+    layer = PotentialFlowLayer(net, "air", [Scaled(inner, "m")], boundary=["ambient"])
+    with pytest.raises(ValueError, match="not a registered nn.Parameter"):
+        layer.solve(torch.zeros(1, dtype=F64), {"m": torch.tensor(1.0, dtype=F64)},
+                    torch.tensor([0.0, 0.01], dtype=F64), differentiable=True)
+
+
+def test_a_scaled_fixed_flow_has_the_analytic_gradient_in_a_differentiable_solve():
+    net = Network(dtype=F64)
+    net.add_node("ambient")
+    net.add_node("z")
+    net.add_edge("ambient", "z", kind="leak")
+    net.add_edge("z", "ambient", kind="fan")
+    layer = PotentialFlowLayer(
+        net, "air",
+        [PowerLaw(torch.tensor(0.02, dtype=F64), torch.tensor(0.5, dtype=F64), kind="leak"),
+         Scaled(FixedFlow(torch.tensor(0.01, dtype=F64), kind="fan"), "m")],
+        boundary=["ambient"],
+    )
+    s = torch.tensor(0.5, dtype=F64, requires_grad=True)
+    phi, _ = layer.solve(torch.zeros(1, dtype=F64), {"m": s}, atol=1e-14, rtol=1e-14,
+                         differentiable=True)
+    # s 0.01 = 0.02 sqrt(-phi_z)  ->  phi_z = -(s 0.01 / 0.02)^2, d phi_z / ds = -2 s (0.5)^2
+    assert phi[1].item() == pytest.approx(-((0.5 * 0.01 / 0.02) ** 2), rel=1e-10)
+    (g,) = torch.autograd.grad(phi[1], s)
+    assert g.item() == pytest.approx(-2 * 0.5 * 0.25, rel=1e-8)
+
+
+def test_a_batched_column_multiplier_broadcasts_through_a_layer_solve():
+    s = torch.tensor([[1.0], [0.5]], dtype=F64)
+    phi, q = _one_zone(s)
+    assert phi.shape == (2, 2)
+    expected = -((0.01 / (s.squeeze(-1) * 0.02)) ** 2)
+    torch.testing.assert_close(phi[:, 1], expected, rtol=1e-9, atol=0)

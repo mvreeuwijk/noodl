@@ -384,10 +384,9 @@ only one the airflow Jacobian sees, is exact and each edge's slope stays nonnega
 
 `Scaled(element, key)` multiplies any element's flow (and slope) by a per-edge driver,
 `drivers[key]`: one value per edge of the element's kind, dimensionless. It is how a
-schedule or a control acts on a path. CONTAM's path schedule multiplies the path's flow, and
-a `.prj` path with a schedule is read as its element wrapped in `Scaled` with the key
-`"flow_multiplier.<kind>"`. A multiplier of zero closes the edge; a zone left with no open
-path raises an error naming it.
+schedule or a control acts on a path, in the way CONTAM's path schedule multiplies the path's
+flow. The inner element's parameters are named `inner.<name>`, and a multiplier of zero closes
+the edge: a zone left with no open path raises an error naming it.
 
 ```python
 import torch

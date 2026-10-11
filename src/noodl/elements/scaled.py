@@ -39,14 +39,14 @@ class Scaled(Element):
         self.key = str(key)
         self.dp_independent = bool(element.dp_independent)
 
-    def _s(self, dp: Tensor | None, drivers: Mapping[str, Tensor] | None) -> Tensor:
+    def _s(self, width: int | None, drivers: Mapping[str, Tensor] | None) -> Tensor:
+        """The multiplier; `width` is the number of edges of the kind, when known."""
         if drivers is None or self.key not in drivers:
             raise KeyError(
                 f"Scaled (kind {self.kind!r}): driver {self.key!r} not found; it carries "
                 f"this kind's per-edge flow multiplier"
             )
         s = torch.as_tensor(drivers[self.key])
-        width = dp.shape[-1] if (dp is not None and dp.ndim) else None
         if s.ndim and width is not None and s.shape[-1] not in (1, width):
             raise ValueError(
                 f"Scaled (kind {self.kind!r}): driver {self.key!r} has {s.shape[-1]} values "
@@ -54,15 +54,19 @@ class Scaled(Element):
             )
         return s
 
+    @staticmethod
+    def _width(dp: Tensor) -> int | None:
+        return dp.shape[-1] if dp.ndim else None
+
     def flow(self, dp: Tensor, drivers: Mapping[str, Tensor] | None = None) -> Tensor:
-        return self._s(dp, drivers) * self.inner.flow(dp, drivers)
+        return self._s(self._width(dp), drivers) * self.inner.flow(dp, drivers)
 
     def dflow(self, dp: Tensor, drivers: Mapping[str, Tensor] | None = None) -> Tensor:
-        return self._s(dp, drivers) * self.inner.dflow(dp, drivers)
+        return self._s(self._width(dp), drivers) * self.inner.dflow(dp, drivers)
 
     def linear_init(self, drivers: Mapping[str, Tensor] | None = None) -> tuple[Tensor, Tensor]:
         c, k = self.inner.linear_init(drivers)
-        s = self._s(None, drivers)
+        s = self._s(c.shape[-1] if c.ndim else None, drivers)
         return s * c, s * k
 
     def switching(self, dp: Tensor, drivers: Mapping[str, Tensor] | None = None):

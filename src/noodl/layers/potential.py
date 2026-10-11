@@ -715,7 +715,9 @@ class PotentialFlowLayer:
         the same value) or silently `None` (if it doesn't).
         """
         for el in (*self._elements, *self._node_sources):
-            for name, value in vars(el).items():
+            # An element may wrap another (`Scaled`): scan every submodule's own attributes.
+            holders = el.modules() if isinstance(el, torch.nn.Module) else (el,)
+            for name, value in (kv for h in holders for kv in vars(h).items()):
                 if isinstance(value, torch.Tensor) and value.requires_grad:
                     if isinstance(el, NodeSource):
                         # A NodeSource has no `learnable=` constructor kwarg (unlike
