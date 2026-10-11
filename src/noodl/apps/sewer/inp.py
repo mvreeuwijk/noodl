@@ -194,8 +194,14 @@ def read_swmm_inp(
     shapes: dict[str, float] = {}
     barrel_count: dict[str, int] = {}
     gated: set[str] = set()
+    conduit_names = {line.fields[0] for line in sections.get("CONDUITS", [])}
     for line in sections.get("LOSSES", []):
         require_fields(line, 4, "a loss entry", path)
+        if line.fields[0] not in conduit_names:
+            raise ValueError(
+                f"{path}: line {line.number}: [LOSSES] names link {line.fields[0]!r}, "
+                f"which is not a conduit in [CONDUITS]"
+            )
         for i, what in ((1, "entry loss coefficient"), (2, "exit loss coefficient"),
                         (3, "average loss coefficient")):
             if as_float(line, i, f"the {what}", path) != 0.0:
@@ -312,7 +318,7 @@ def read_swmm_inp(
                  inlet_offset=in_offset, outlet_offset=out_offset,
                  barrels=barrel_count[name], max_flow=max_flow or None,
                  initial_flow=init_flow if z1 > z2 else -init_flow,
-                 flap_gate=name in gated, flap_gate_reversed=z1 <= z2)
+                 flap_gate=name in gated)
         )
 
     pollutants: dict[str, dict] = {}

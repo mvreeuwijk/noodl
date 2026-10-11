@@ -678,7 +678,7 @@ def _options_evidence(rows):
     the options must act in the reference. Returns the 1-based steps at which each option
     acts (empty lists are asserted against by the callers)."""
     acts = {"max_flow": [], "outfall_gate": [], "conduit_gate": [], "init_flow": [],
-            "init_depth": []}
+            "init_depth": [], "reversed_gate": []}
     for k, (flows, depths, _) in enumerate(rows):
         step = k + 1
         if abs(abs(flows["C1"]) - 0.012) < 1e-9:
@@ -690,6 +690,10 @@ def _options_evidence(rows):
         # C4's reverse flow (J4 higher than J5) is closed by its gate: exactly 0, not tiny
         if 9.0 + depths["J4"] > 9.1 + depths["J5"] + 1e-3 and flows["C4"] == 0.0:
             acts["conduit_gate"].append(step)
+        # C6 is adverse (J5 9.1 m under J3 10.0 m) and reversed; its gate passes only the
+        # file's J5 -> J3 direction, so the downhill J3 -> J5 flow is closed: exactly 0
+        if 10.0 + depths["J3"] > 9.1 + depths["J5"] + 1e-3 and flows["C6"] == 0.0:
+            acts["reversed_gate"].append(step)
     flows, depths, _ = rows[0]
     if flows["C3"] > 0.0:
         acts["init_flow"].append(1)             # C3 starts from its InitFlow, not rest
@@ -699,22 +703,25 @@ def _options_evidence(rows):
 
 
 def test_options_match_swmm_over_the_first_minutes(tmp_path):
-    """InitDepth (J1 0.25 m), InitFlow (C3 0.03 m3/s), MaxFlow (C1 0.012), two barrels (C3),
-    a conduit flap gate (C4), a gated FIXED outfall (stage 9.3 m, above J4's invert) and
-    conduit lengthening (C2, 10 m, `LENGTHENING_STEP 5`) together, in SWMM and noodl: depths,
-    flows and overflow at the free-surface targets, SWMM converging on every step (the fast
-    case). The reference rows show that each option acts."""
+    """InitDepth (J1 0.25 m), InitFlow (C3 0.03 m3/s; C6 0.003 m3/s, adverse and reversed),
+    MaxFlow (C1 0.012), two barrels (C3), a 0.05 m outlet offset (C1), flap gates (C4, and
+    the reversed C6), a gated FIXED outfall (stage 9.3 m, above J4's invert) and conduit
+    lengthening (C2, 10 m, `LENGTHENING_STEP 5`) together, in SWMM and noodl: depths, flows
+    and overflow at the depth and flow targets of the other comparisons, SWMM converging on
+    every step (the fast case). The fixture is not free-surface throughout: the stage puts
+    C5's outfall end above its 0.45 m crown. The reference rows show that each option acts."""
     rows, conn = _converged_swmm(tmp_path, OPTIONS_NAME, surcharged=None)
     acts = _options_evidence(rows[:OPTIONS_FAST_STEPS])
-    for option in ("max_flow", "outfall_gate", "init_flow", "init_depth"):
+    for option in ("max_flow", "outfall_gate", "init_flow", "init_depth", "reversed_gate"):
         assert acts[option], f"SWMM's rows show no {option} acting in the first minutes"
     _assert_parity(_worst_errors(OPTIONS_NAME, rows, conn, OPTIONS_FAST_STEPS))
 
 
 @pytest.mark.slow
 def test_options_match_swmm_at_every_step(tmp_path):
-    """All 359 steps of the options fixture at the free-surface targets; the flap gate on C4
-    closes reverse flow in the reference (water backs up from J4)."""
+    """All 359 steps of the options fixture at the depth and flow targets (not free-surface
+    throughout: C5's outfall end is above its crown); the flap gates on C4 and on the reversed
+    C6 close reverse flow in the reference (water backs up from J4 and J3)."""
     rows, conn = _converged_swmm(tmp_path, OPTIONS_NAME, surcharged=None)
     acts = _options_evidence(rows)
     assert all(acts.values()), acts
@@ -739,6 +746,10 @@ def _ablated(net, option):
     if option == "outfall_gate":
         return dataclasses.replace(net, outfalls=tuple(
             dataclasses.replace(o, flap_gate=False) for o in net.outfalls))
+    if option == "c6_init_flow":
+        return pipe("C6", initial_flow=0.0)
+    if option == "outlet_offset":
+        return pipe("C1", outlet_offset=0.0)
     if option == "barrels":
         return pipe("C3", barrels=1)
     if option == "lengthening":
@@ -758,13 +769,16 @@ def test_each_option_changes_the_options_fixture_beyond_the_targets(tmp_path):
     the first `ABLATION_STEPS` steps depart from SWMM's by far more than the targets, so each
     option is exercised by the reference and by noodl's port of it. (Over all 359 steps a run
     without the gates is several times slower to converge, which is why the window is
-    short.) SWMM is run once."""
+    short.) SWMM is run once. The reversed gate on C6 is shown to act by SWMM's own rows
+    (`_options_evidence`), not by an ablation: with the gate switched off noodl alone does
+    not converge from step 106, where the ungated adverse conduit's drop outlet chatters
+    (not investigated: that run has no SWMM reference here)."""
     rows, conn = _converged_swmm(tmp_path, OPTIONS_NAME, surcharged=None)
     net, _, _ = read_swmm_inp(DATA / OPTIONS_NAME)
     record = ("water.phi", "water.q", "sewer.overflow")
     missed = {}
     for option in ("init_depth", "init_flow", "max_flow", "conduit_gate", "outfall_gate",
-                   "barrels", "lengthening"):
+                   "barrels", "lengthening", "c6_init_flow", "outlet_offset"):
         model, state, drivers = build_model(_ablated(net, option), iterate_tol=ITERATE_TOL,
                                             iterate_max=ITERATE_MAX)
         _, hist = simulate_dynamic_wave(model, state, drivers, steps=ABLATION_STEPS,
@@ -793,7 +807,7 @@ def _options_variable_inp(tmp_path):
 def test_options_variable_step_sequence_matches_swmm(tmp_path):
     """SWMM's variable routing step on the options fixture (two barrels, a lengthened
     conduit, initial conditions): noodl's step sequence equals SWMM's to the millisecond over
-    the first 12 steps, and the state at those steps meets the free-surface targets."""
+    the first 12 steps, and the state at those steps meets the depth and flow targets."""
     inp = _options_variable_inp(tmp_path)
     rows, times, conn, engine, not_converging = _swmm_timed(inp)
     assert engine == "5.2.4" and not_converging == 0.0

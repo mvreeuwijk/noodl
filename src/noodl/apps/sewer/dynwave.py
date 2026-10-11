@@ -880,7 +880,7 @@ class DynamicWaveHydraulics:
 
         - Each conduit with an InitFlow ``q0`` (a total, positive from `u` to `v`) starts at
           the normal depth of one barrel's ``q0 / barrels``, capped at the depth of ``qMax``
-          (`link.c::link_getYnorm`, link.c:783-804; `conduit_initState`, link.c:1311).
+          (`link.c::link_getYnorm`, link.c:783-804; `conduit_initState`, link.c:1312).
         - A junction with no InitDepth starts at the mean over its attached conduits of that
           depth plus the conduit's FIRST-end offset (zero for a conduit without InitFlow,
           which still counts in the mean): `initNodeDepths`, flowrout.c:337-385 (the first
@@ -926,7 +926,7 @@ class DynamicWaveHydraulics:
         y2 = torch.clamp(depth_ft[self.v] - geo.offset2, min=0.0)
         y_mean = torch.clamp(0.5 * (torch.minimum(y1, geo.y_full)
                                     + torch.minimum(y2, geo.y_full)), min=FUDGE)  # :402-416
-        y = torch.where(q0 == 0.0, y_mean, y_link)                            # :398
+        y = torch.where(q0 == 0.0, y_mean, y_link)                            # flowrout.c:407, :418
         through = torch.zeros_like(total).index_add(0, self.v, q0).index_add(0, self.u, -q0)
         return {
             f"{self.layer}.phi": phi,

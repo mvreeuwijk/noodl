@@ -282,6 +282,7 @@ def test_dynwave_reads_lengthening_with_the_files_own_routing_step(tmp_path):
     ("an average loss", "C1  0  0  0.5", "average loss"),
     ("seepage", "C1  0  0  0  NO  0.5", "seepage"),
     ("a bad flap word", "C1  0  0  0  MAYBE", "YES or NO"),
+    ("an unknown link", "Cx  0  0  0  YES", "Cx.*not a conduit"),
 ])
 def test_losses_beyond_the_flap_gate_are_refused(tmp_path, what, edit, match):
     path = _dyn(tmp_path, [("[INFLOWS]", f"[LOSSES]\n{edit}\n\n[INFLOWS]")])
@@ -439,3 +440,16 @@ def test_junction_surcharge_depth_is_read(tmp_path):
         dataclasses.replace(net.manholes[0], surcharge_depth=-1.0), *net.manholes[1:]))
     with pytest.raises(ValueError, match=r"manhole 'J1' surcharge_depth must be >= 0 m"):
         bad.validate()
+
+
+def test_a_reoriented_kinwave_pipe_does_not_record_a_reversed_gate(tmp_path):
+    """Only dynamic wave models gates; the kinematic reader reorients a pipe written against
+    the fall (C1 here, J3 -> J1) but leaves `flap_gate_reversed` at its default."""
+    text = (DATA / "tree_kinwave.inp").read_text().replace(
+        "C1               J1               J3", "C1               J3               J1")
+    path = tmp_path / "k.inp"
+    path.write_text(text)
+    net, _, _ = read_swmm_inp(path)
+    c1 = next(p for p in net.pipes if p.name == "C1")
+    assert (c1.u, c1.v) == ("J1", "J3")
+    assert not any(p.flap_gate_reversed for p in net.pipes)

@@ -652,13 +652,20 @@ brought the differences below the targets without changing either code's equatio
 | Link flows, every 5 s step | rel 1e-6 + abs 1e-9 m³/s | within the target at every step |
 
 The options are compared together on `options_dynwave.inp`: J1 starts at 0.25 m (`InitDepth`)
-and C3 at 0.03 m³/s (`InitFlow`); C1 is limited to 0.012 m³/s (`MaxFlow`); C3 has two
-barrels; C4 has a flap gate that closes on the water backing up from J4; the `FIXED` outfall
-(stage 9.3 m, above J4's invert) is gated, so C5 carries nothing until J4 rises over the
-stage; C2 is 10 m long and `LENGTHENING_STEP 5` lengthens it. SWMM converges on every step,
-and noodl meets the targets above: worst depth 2.5e-9 m over the 359 steps. Under `VARIABLE_STEP 0.75` the same fixture's 304 steps match SWMM's step
-sequence to the millisecond (the Courant step reads the two barrels' per-barrel flow and volume,
-and the lengthened conduit's `modLength / length`) and its states to the same targets.
+and C3 at 0.03 m³/s (`InitFlow`); C1 is limited to 0.012 m³/s (`MaxFlow`) and has a 0.05 m
+outlet offset; C3 has two barrels; C4 has a flap gate that closes on the water backing up from
+J4; C6 is adverse in the file (it is reversed, with its `InitFlow` negated, and the offsets
+swap), has 0.003 m³/s of `InitFlow` and a flap gate that, being reversed, passes only the
+file's J5-to-J3 direction, so the downhill flow is closed; the `FIXED` outfall (stage 9.3 m,
+above J4's invert and C5's crown) is gated, so C5 carries nothing until J4 rises over the
+stage; C2 is 10 m long and `LENGTHENING_STEP 5` lengthens it. The fixture is therefore not
+free-surface throughout. SWMM converges on every step, and noodl meets the targets above:
+worst depth 6.4e-9 m over the 359 steps. Under `VARIABLE_STEP 0.75` the same fixture's 304
+steps match SWMM's step sequence to the millisecond (the Courant step reads one barrel's flow
+and volume and the lengthened conduit's `modLength / length`) and its states to the same
+targets. A 0.1 m outlet offset on the two-barrel C3 puts its drop outlet at the boundary
+between subcritical and critical flow, where SWMM itself fails to converge on a few steps, so
+the offset sits on C1.
 
 Surcharge is compared on the same tree at higher inflows. `tree_slot_dynwave.inp` (2.5x,
 `SURCHARGE_METHOD SLOT`) pressurises C4 from step 95. `tree_extran_dynwave.inp` (3x,

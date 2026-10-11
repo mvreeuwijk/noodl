@@ -1263,7 +1263,7 @@ def test_limits_keep_the_element_monotone_and_continuous_in_dp():
 def _chain_net(*, barrels=1, max_flow=None, initial_flow=0.0, flap=False, flap_reversed=False,
                outfall_gate=False, outfall_kind="free", stage=None, inflow=0.02,
                initial_depth=0.0, routing_step=5.0, lengthening_step=0.0, length=200.0,
-               min_surface_area=None, variable_step=0.0):
+               min_surface_area=None, variable_step=0.0, diameter=0.45):
     """One conduit J1 -> Out (0.45 m, n 0.013, 0.5 % fall over `length`) with an inflow at
     J1: the smallest network that exercises a conduit feature."""
     from noodl.apps.sewer import SewerNetwork
@@ -1273,7 +1273,7 @@ def _chain_net(*, barrels=1, max_flow=None, initial_flow=0.0, flap=False, flap_r
     return SewerNetwork(
         manholes=(Manhole("J1", 10.0 + fall, ground=15.0, inflow=inflow,
                           initial_depth=initial_depth),),
-        pipes=(Pipe("C1", "J1", "Out", length, 0.45, 0.013, 0.005, barrels=barrels,
+        pipes=(Pipe("C1", "J1", "Out", length, diameter, 0.013, 0.005, barrels=barrels,
                     max_flow=max_flow, initial_flow=initial_flow, flap_gate=flap,
                     flap_gate_reversed=flap_reversed),),
         outfalls=(Outfall("Out", 10.0, kind=outfall_kind, stage=stage,
@@ -1461,28 +1461,51 @@ def test_dynamic_wave_validates_barrels_and_limits():
             dataclasses.replace(net, pipes=(pipe,)).validate()
 
 
-def test_variable_step_uses_per_barrel_flow_and_volume_and_the_lengthening_ratio():
-    """getLinkStep (dynwave.c:857-865): the Courant step uses one barrel's flow and volume,
-    so n barrels at n times the flow give the one-barrel step; a lengthened conduit's step is
-    scaled by modLength / length."""
-    steps = {}
-    for key, kwargs in (("one", {}), ("two", {"barrels": 2}),
-                        ("long", {"lengthening_step": 20.0, "length": 8.0}),
-                        ("short", {"length": 8.0})):
-        net = _chain_net(variable_step=0.75, routing_step=60.0, **kwargs)
-        model, state, _ = build_model(net)
-        hyd = model.dynamic_wave
-        k = float(kwargs.get("barrels", 1))
-        state = dict(state)
-        state["water.q"] = state["sewer.pipe_flow"] = torch.tensor([0.03 * k], dtype=F64)
-        state["sewer.mid_area"] = area_of_depth(
-            torch.tensor([0.2 / LCF], dtype=F64), hyd.geo.y_full, hyd.geo.a_full) * QCF / LCF
-        phi = hyd.node_invert.clone()
-        phi[hyd.junction_idx] += 0.2
-        phi[hyd.outfall_idx] += 0.1
-        state["water.phi"] = phi
-        state["sewer.junction_depth"] = torch.tensor([0.2], dtype=F64)
-        steps[key] = routing_step_size(hyd, dict(state), state, 5.0)
-    assert steps["two"] == pytest.approx(steps["one"], abs=1e-3)
-    # modLength / length > 1 lengthens the Courant step
-    assert steps["long"] > steps["short"]
+def _courant_step(*, total_q_cfs, jdepth=0.012, **net_kwargs):
+    """`routing_step_size` on a one-conduit network (J1 `jdepth` m deep, a dry outfall) whose
+    conduit carries `total_q_cfs` (cfs, total over its barrels), routing step 60 s,
+    VARIABLE_STEP 0.75, junction not moving (so only the conduit's Courant step can bind)."""
+    net = _chain_net(variable_step=0.75, routing_step=60.0, length=8.0, diameter=0.1,
+                     **net_kwargs)
+    model, state, _ = build_model(net)
+    hyd = model.dynamic_wave
+    state = dict(state)
+    q = torch.tensor([total_q_cfs * QCF], dtype=F64)
+    state["water.q"] = state["sewer.pipe_flow"] = q
+    phi = hyd.node_invert.clone()
+    phi[hyd.junction_idx] += jdepth
+    state["water.phi"] = phi
+    state["sewer.junction_depth"] = torch.tensor([jdepth], dtype=F64)
+    y_mid = torch.tensor([0.5 * jdepth / LCF], dtype=F64)
+    state["sewer.mid_area"] = area_of_depth(y_mid, hyd.geo.y_full, hyd.geo.a_full) * QCF / LCF
+    return routing_step_size(hyd, dict(state), state, 5.0)
+
+
+def test_variable_step_uses_per_barrel_flow_and_volume():
+    """getLinkStep (dynwave.c:857-863): q and volume are one barrel's. (a) the Courant step
+    binds (well under the 60 s routing step) and equals the one-barrel step for n barrels at
+    n times the flow, because V/q cancels the barrel count; (b) the skip ``|q| <= FUDGE``
+    (dynwave.c:857) tests the PER-BARREL flow: a total of 1.2e-4 cfs is live for one barrel
+    (1.2e-4 > FUDGE) but each of two barrels carries 6e-5 <= FUDGE, so the conduit does not
+    limit the step and it is the 60 s routing step."""
+    one = _courant_step(total_q_cfs=1.5e-3)
+    two = _courant_step(total_q_cfs=3e-3, barrels=2)
+    assert one < 30.0                                  # the Courant step binds
+    assert two == pytest.approx(one, abs=1e-3)
+    live = _courant_step(total_q_cfs=1.2e-4)
+    skipped = _courant_step(total_q_cfs=1.2e-4, barrels=2)
+    assert live < 60.0                                 # one barrel: 1.2e-4 cfs counts
+    assert skipped == 60.0                             # two barrels: 6e-5 cfs each is skipped
+
+
+def test_variable_step_scales_the_courant_step_by_mod_length_over_length():
+    """dynwave.c:865: t *= modLength / length, so a lengthened conduit's step is the plain
+    one times its lengthening factor (the plain step stays below the 60 s routing step)."""
+    from noodl.apps.sewer.dynwave_terms import lengthening_factor
+    plain = _courant_step(total_q_cfs=6e-3)
+    long = _courant_step(total_q_cfs=6e-3, lengthening_step=20.0)
+    lf = lengthening_factor(torch.tensor([0.1], dtype=F64), torch.tensor([0.013], dtype=F64),
+                            torch.tensor([0.005], dtype=F64), torch.tensor([8.0], dtype=F64),
+                            20.0).item()                      # min(routing 60 s, lengthening 20 s)
+    assert lf > 1.0 and plain * lf < 60.0
+    assert long == pytest.approx(plain * lf, abs=2e-3)

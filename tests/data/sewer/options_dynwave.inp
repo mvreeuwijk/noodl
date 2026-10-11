@@ -1,6 +1,6 @@
 [TITLE]
 ;;Project Title/Notes
-SWMM 5.2.4 dynamic-wave options together - noodl test fixture: InitDepth (J1), InitFlow (C3), MaxFlow (C1), a flap gate on C4 and on the FIXED outfall, two barrels (C3), conduit lengthening (C2, LENGTHENING_STEP)
+SWMM 5.2.4 dynamic-wave options together - noodl test fixture: InitDepth (J1), InitFlow (C3, and C6 which is adverse and is reversed), MaxFlow (C1), flap gates on C4, C6 (reversed, so it passes the file direction J5 to J3 only) and the FIXED outfall, two barrels (C3), a 0.05 m outlet offset (C1), conduit lengthening (C2, LENGTHENING_STEP)
 
 [OPTIONS]
 ;;Option             Value
@@ -62,11 +62,12 @@ Outfall          8.0        FIXED      9.3              YES
 [CONDUITS]
 ;;Name           From Node        To Node          Length     Roughness  InOffset   OutOffset  InitFlow   MaxFlow
 ;;-------------- ---------------- ---------------- ---------- ---------- ---------- ---------- ---------- ----------
-C1               J1               J3               200        0.013      0          0          0          0.012
+C1               J1               J3               200        0.013      0          0.05       0          0.012
 C2               J2               J3               10         0.013      0          0          0          0
 C3               J3               J4               200        0.013      0          0          0.03       0
 C4               J5               J4               200        0.013      0          0          0          0
 C5               J4               Outfall          200        0.013      0          0          0          0
+C6               J5               J3               100        0.013      0.05       0.02       0.003      0
 
 [XSECTIONS]
 ;;Link           Shape        Geom1            Geom2      Geom3      Geom4      Barrels    Culvert
@@ -76,10 +77,12 @@ C2               CIRCULAR     0.30             0          0          0          
 C3               CIRCULAR     0.45             0          0          0          2
 C4               CIRCULAR     0.30             0          0          0          1
 C5               CIRCULAR     0.45             0          0          0          1
+C6               CIRCULAR     0.30             0          0          0          1
 
 [LOSSES]
 ;;Link           Kentry     Kexit      Kavg       Flap Gate  Seepage
 C4               0          0          0          YES        0
+C6               0          0          0          YES        0
 
 [INFLOWS]
 ;;Node           Constituent      Time Series      Type     Mfactor  Sfactor  Baseline Pattern
