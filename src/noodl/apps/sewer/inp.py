@@ -721,7 +721,7 @@ def _dynamic_wave_options(opts: dict, path) -> DynamicWaveOptions:
     if "LENGTHENING_STEP" in opts and opts["LENGTHENING_STEP"][1] < 0.0:
         refuse("LENGTHENING_STEP", "-- must not be negative")
     if opts.get("ALLOW_PONDING", (None, "NO"))[1] not in ("NO", "FALSE"):
-        refuse("ALLOW_PONDING", "-- ponding is not modelled yet; set ALLOW_PONDING NO")
+        refuse("ALLOW_PONDING", "-- ponding is not modelled; set ALLOW_PONDING NO")
     kwargs: dict[str, object] = {}
     # SWMM lowers the routing step to the wet step when larger (project.c:246-250)
     routing_step = opts["ROUTING_STEP"][1] if "ROUTING_STEP" in opts else (

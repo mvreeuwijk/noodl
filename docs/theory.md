@@ -542,8 +542,37 @@ average its iterates, and noodl's iterated implicit head solve share one fixed p
 that reproduces its own coefficients and satisfies the conduit and junction equations. noodl
 converges to that fixed point and does not replay the trials (see the
 [sewer page](applications/sewer.md#dynamic-wave)). Conduits may form loops and may be flat or
-adverse, which the continuity-first path cannot represent. Surcharge, which makes the junction
-storage term and the conduit width non-smooth at the crown, is not yet modelled.
+adverse, which the continuity-first path cannot represent.
+
+**Surcharge as instantaneous continuity.** Above its crown a junction is pressurised: SWMM's
+EXTRAN update $y = y_{\text{last}} + \text{corr}\,\Delta Q/\text{denom}$ is converged exactly
+when the junction's net inflow $\Delta Q$ is zero, so a surcharged junction stores nothing and
+its balance is $\sum Q = 0$, an algebraic constraint in place of the storage term
+$A_s\,\Delta H/\Delta t$ (the correction factor and SWMM's blend only shape its trials). The
+conduits meanwhile cap their end depths at the crown and keep the heads driving a full
+conduit. The storage term is therefore non-smooth at the crown, switching from
+$A_s\,\Delta H/\Delta t$ to zero, but monotone in the head on each side, which is all the
+head solve needs. Flooding is the same device at $y_{\max}$: a wall in the head solve holds the
+junction at $y_{\max}$ and the excess leaves the network. The Preissmann slot (`SLOT`) is the
+smooth alternative: above $0.985\,y_{\text{full}}$ a conduit's top width follows Sjoberg's slot
+width, so the area above the crown grows as $a_{\text{full}} + (y - y_{\text{full}})\,w_{\text{slot}}$
+and the storage term stays smooth and positive, which is why SLOT needs no junction branch.
+
+**Tie rules.** Three of SWMM's switches have no fixed point on a band of states, because
+they test a quantity that the switched branch itself moves: SWMM's trials then alternate between
+the branches and it reports non-convergence. Each is replaced by a stiff in-pass switch that
+agrees with SWMM wherever SWMM has a fixed point and holds the state on the switching surface
+where it has none. (1) A junction at its crown, where the depth-only surcharge flag would
+chatter: a hold band keeps it at the crown while the net inflow needed lies inside the
+jump. (2) The normal-flow slope limit of a conduit, $q = \min(q_{\text{lin}}, \max(q_{\text{norm}},
+q_{\text{last}} + S\,(\Delta h - \Delta z)))$, which has a fixed point on the surface
+$y_1 = y_2$ between the two flows when a draining outfall conduit ties its end depths. (3) A
+junction filling through a drop end's surface-area threshold, where the area jumps with the
+junction's own depth: its withdrawal is $\max(w_{\text{lo}}, \min(w_{\text{hi}}, N_{\text{last}}
++ S\,(H - H^*)))$, so the junction sits on the threshold $H^*$ inside the jump. In each the
+wall slope $S$ shapes only the passes, and the fixed point does not depend on it. A gradient
+at such a state is that of the constrained solution; see the [sewer page](applications/sewer.md#intentional-differences-from-swmm)
+for the costs against SWMM.
 
 A pressurised water-distribution network is the opposite case to the kinematic-wave sewer, and
 exactly the framework's own: every pipe runs full, and head loss is a monotone function of the

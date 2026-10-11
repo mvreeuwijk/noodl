@@ -248,6 +248,19 @@ differences. The water side then has one `PotentialFlowLayer` named `"water"` (q
 in m, flow in m³/s) over the conduits, with the outfalls as its boundary, and a
 `JunctionStorage` node source at every junction.
 
+The rest of this section follows the physics in the order it enters the solve: the
+[equations](#equations) and how they are [solved](#what-is-solved) (iteration, Anderson
+acceleration and the flow tolerance it needs); the three places where SWMM's own iteration has
+no fixed point and noodl takes a documented tie rule (the [crown hold band](#surcharge-slot-and-extran) of EXTRAN, the
+[normal-flow slope switch](#normal-flow-slope-switch) and the [drop-end area switch](#drop-end-area-switch));
+the [starting state](#starting-state-and-zero-fall); [surcharge](#surcharge-slot-and-extran), [flooding](#flooding),
+[storage units](#storage-units), [orifices, weirs and outlets](#orifices-weirs-and-outlets) and
+the [conduit options](#conduit-options); the [variable step and time-varying inflow](#variable-step-and-time-varying-inflow),
+[tidal and time-series outfalls](#tidal-and-time-series-outfalls); [water quality](#quality-on-the-dynamic-wave) and
+[headspace air](#headspace-air-on-the-dynamic-wave); and last the
+[intentional differences from SWMM](#intentional-differences-from-swmm). What is not supported is
+listed once, under [Limitations](#limitations).
+
 #### Equations
 
 SWMM 5.2.4's conduit and junction updates (`dwflow.c`, `dynwave.c`) are solved at their fixed
@@ -293,7 +306,7 @@ acceleration="anderson", memory=5, iterate_flow_tol=1e-10)`; `Model`'s `iterate_
 see [Layers and models](../concepts/layers.md)). Each pass's flows must then also reproduce the
 flows it was fed to within `iterate_flow_tol` (m³/s): the head solve stops on its warm start once
 every junction balance is within its `atol` (`solve_atol`), so near convergence the heads stand
-still while the flows of a flat or nearly dry conduit still drift. Against phase A's plain relaxation (heads judged alone) the
+still while the flows of a flat or nearly dry conduit still drift. Against plain relaxation judged on the heads alone the
 mean passes per step fall from 34.8 to 14.1 (tree), 30.2 to 10.4 (backwater line) and 20.8 to 9.7
 (loop) over the first 60 steps, and from 42.8 to 11.3 over the loop's first 120, whose worst step
 drops from 327 passes to 22. The two iterations land on the same fixed point: with a tight head
@@ -302,7 +315,7 @@ solve's own resolution, `atol dt / (2 A_s)` (a few 1e-9 m). The mixing keeps to 
 plain relaxation (and SWMM's relaxed trials) can reach: a flat, near-dry conduit's flow can have
 a second, repelling fixed point, and a mixed step heading for it is replaced by the relaxed step.
 `acceleration=None` is plain relaxation. A flow tolerance is required either way:
-`iterate_flow_tol=None` (the heads judged alone, as in phase A) is refused by name, because on
+`iterate_flow_tol=None` (the heads judged alone) is refused by name, because on
 the normal-flow slope switch (below) the heads bound the flows' residual only weakly, and a
 heads-only test was measured stopping 3e-5 m³/s short of the fixed point.
 
@@ -477,6 +490,8 @@ units with `FUNCTIONAL`, `TABULAR` and the closed-shape area curves (below); ori
 (side and bottom, circular and rectangular), transverse, sideflow, V-notch and trapezoidal
 weirs, and outlets with a functional or tabular rating, with their flap gates (below);
 `INERTIAL_DAMPING` `NONE`/`PARTIAL`/`FULL` and every `NORMAL_FLOW_LIMITED` option.
+#### Surcharge: SLOT and EXTRAN
+
 `SURCHARGE_METHOD SLOT` is SWMM's Preissmann slot: above `0.985257 y_full` the top width is the
 Sjoberg slot width `0.5423 w_max exp(-(y/y_full)^2.4)` (`0.01 w_max` above `1.78 y_full`), the
 area above the crown is `a_full + (y - y_full) w_slot`, the friction radius stays `r_full`, a
@@ -504,6 +519,8 @@ default head-solve tolerance (`solve_atol`, a few 1e-9 m3/s) leaves it a few 1e-
 fixed point; pass `atol=1e-12` to `simulate_dynamic_wave` for tighter heads where no junction
 sits on its bed.
 
+#### Flooding
+
 Flooding follows SWMM without ponding (`ALLOW_PONDING NO`, `dynwave.c:743-795`). A junction's
 full depth is its `MaxDepth`, raised to the top of every conduit end it carries (so a
 `MaxDepth` of 0 means the crown, `link.c:440-463`), and it floods above
@@ -518,7 +535,9 @@ take there; at the fixed point that offset is the solved excess, so a flooded ju
 exactly at `y_max` (not at a penalty's offset above it), and the excess falling to zero
 releases it on the next pass, without a flag to chatter.
 
-**Storage units** (`[STORAGE]`, `storage_unit`, `Manhole.storage`) follow SWMM's storage
+#### Storage units
+
+A storage unit (`[STORAGE]`, `storage_unit`, `Manhole.storage`) follows SWMM's storage
 node (`node.c`, `dynwave.c`). A unit is a junction whose surface area adds its curve's area
 at the previous pass's depth (`node_getSurfArea`) to the attached conduit ends' (SWMM does
 not zero a conduit's end area at a storage node, only a regulator's), so it enters the same
@@ -544,7 +563,9 @@ junction's in three places:
 Evaporation (`Fevap`) and exfiltration are refused by name, so a unit loses no water but
 through its links and its overflow.
 
-**Orifices, weirs and outlets** (`[ORIFICES]`, `[WEIRS]`, `[OUTLETS]`; `Orifice`, `Weir`,
+#### Orifices, weirs and outlets
+
+Orifices, weirs and outlets (`[ORIFICES]`, `[WEIRS]`, `[OUTLETS]`; `Orifice`, `Weir`,
 `Outlet`) are flow regulators between two nodes, each an edge of its own kind (`"orifice"`,
 `"weir"`, `"outlet"`) in the `"water"` layer, whose flows follow the pipes' in `"water.q"`
 (`model.link_names`). Their flow is SWMM's `link_getInflow` (`link.c`, transcribed in
@@ -579,7 +600,9 @@ A regulator also enters the junctions as SWMM's does:
 Roadway weirs, weir coefficient curves, pumps and dividers are refused by name, and so are
 control rules (a regulator is always fully open).
 
-Conduit options, each a SWMM `[CONDUITS]`, `[XSECTIONS]`, `[LOSSES]` or `[OUTFALLS]` entry
+#### Conduit options
+
+Each of these is a SWMM `[CONDUITS]`, `[XSECTIONS]`, `[LOSSES]` or `[OUTFALLS]` entry
 and a `Pipe` or `Outfall` field:
 
 - **Barrels** (`Pipe.barrels`, `[XSECTIONS]` 7th field, 1 to 127). A conduit's `length`,
@@ -613,8 +636,8 @@ ELEVATION` (see [SWMM `.inp`](../formats/swmm.md)).
 `build_model` with `storage=True` is refused by name; `quality=True` builds
 the water-quality layer on the solved flows (see
 [Quality on the dynamic wave](#quality-on-the-dynamic-wave)) and `air=True` the headspace air
-(see [Headspace air on the dynamic wave](#headspace-air-on-the-dynamic-wave)). Ponding on
-the dynamic wave is planned.
+(see [Headspace air on the dynamic wave](#headspace-air-on-the-dynamic-wave)). Ponding
+(`ALLOW_PONDING YES`) is refused; see [Limitations](#limitations).
 
 ```python
 from noodl.apps.sewer import read_swmm_inp, build_model, simulate_dynamic_wave
@@ -759,6 +782,45 @@ noodl's is the shorter: a junction's control volume holds roughly the upstream p
 conduits, where SWMM's reactor is the whole conduit; see
 [Dynamic wave against SWMM](#dynamic-wave-against-swmm)).
 
+#### Intentional differences from SWMM
+
+Everywhere else the dynamic wave reproduces SWMM's fixed point (the parity numbers are under
+[Dynamic wave against SWMM](#dynamic-wave-against-swmm)). These differences are deliberate, and
+each is confined to the cases named.
+
+- **Tie rules where SWMM has no fixed point.** SWMM's trials alternate between two branches
+  on these steps, so SWMM does not converge (it reports it) and has no answer to compare with.
+  noodl converges on every step, and its answer lies on the switch between the branches:
+    - the EXTRAN crown hold band: a junction whose storage equation would end above its crown
+      while it loses water at the crown is held within a millimetre of the crown
+      ([Surcharge](#surcharge-slot-and-extran), ruling R26);
+    - the normal-flow slope switch: a draining outfall conduit sits on $y_1 = y_2$
+      ([Normal-flow slope switch](#normal-flow-slope-switch), R33). Cost: 1e-5 m of SWMM's
+      table mismatch at the switch, and steps after SWMM's first unconverged one differ by
+      SWMM's own oscillation (about 6e-4 m on the tree);
+    - the drop-end area switch: a junction filling through a drop end's area threshold is held on
+      the threshold ([Drop-end area switch](#drop-end-area-switch), R43), with histories then
+      differing by SWMM's oscillation (3e-4 m on the options fixture).
+
+  At a gradient the tie rule is what is differentiated: the sensitivity of the constrained
+  solution, where SWMM has no fixed point.
+- **A surcharged junction drained only by outlets (R47).** SWMM's surcharged update divides by
+  the attached links' `dqdh`, which an outlet leaves 0, so above 1.25 crowns SWMM freezes the
+  junction's depth and loses the inflow it cannot pass. noodl keeps instantaneous continuity: the
+  outlet passes what arrives. Such a junction has no SWMM reference; drain an outlet from a
+  storage unit, as SWMM's own examples do.
+- **Water-quality transients.** noodl's reactors are the junctions' control volumes and SWMM's
+  the conduits, so in transit the tracer arrives shifted by the difference of the mean delays;
+  steady concentrations agree (see [Quality on the dynamic wave](#quality-on-the-dynamic-wave)).
+- **Iteration artefacts.** `HEAD_TOLERANCE`, `MAX_TRIALS`, trial relaxation, link bypassing and
+  the 0.001 cfs reversal rule are not modelled, and SWMM at its default tolerance is off its own
+  fixed point by centimetres (see [What is solved](#what-is-solved)).
+- **Refused where SWMM accepts.** A `FUNCTIONAL` storage exponent below 0 (infinite area at zero
+  depth), a negative storage `MaxDepth`, `InitDepth` or `SurDepth`, a nonzero pollutant
+  `Cinit`, and the sections listed under [Limitations](#limitations).
+- **One call is one run under a variable step.** A second call to `simulate_dynamic_wave`
+  restarts the variable step as a new SWMM run does.
+
 ### Headspace air
 
 `Headspace` is an `Element` with $\Delta p = R(h)\,\lvert Q \rvert Q$ and
@@ -797,8 +859,10 @@ dynamic-wave model, with or without the air.
 
 A conduit flowing full has no headspace ($A_{\text{air}} = 0$, infinite resistance). The air
 side reads the depth capped at 0.999 D, which leaves a finite area of about $6\times10^{-5}D^2$
-and a resistance so large the conduit is a closed path to a part in 10⁹, with finite
-derivatives on both ends of the circle; a surcharged tree keeps solving.
+and a resistance so large that the conduit is nearly closed, with finite derivatives on both
+ends of the circle; a surcharged tree keeps solving. It is not closed: the interfacial drag does
+not depend on the headspace's area, and still moves about 2×10⁻⁶ m³/s of air through a capped
+full conduit.
 
 The closure also writes `rho_air_nodes` (from `T_head` and `T_amb`) and `air_quality.capacity`
 (m³, per junction): the headspace volume of the junction's outgoing conduit plus the air of its
@@ -1006,11 +1070,7 @@ orifice's crest while the orifice flows: the orifice's end area there jumps from
 converges on every step, and noodl converges without an in-pass switch for it and meets
 the targets (worst depth 4.8e-9 m).
 
-Not yet compared live (each is transcribed from `link.c` and checked against SWMM's closed
-forms in `tests/apps/sewer/test_structures.py`): a surcharged weir (above its opening, with
-`CanSurcharge` YES or NO), bottom orifices, regulator flap gates and the ARMCO head loss,
-sideflow and trapezoidal weirs, functional and `/HEAD` outlets, and an orifice ending at a
-storage unit, where SWMM zeroes its end area.
+What is implemented but has no live SWMM comparison yet is listed under [Limitations](#limitations).
 
 Water quality is compared with a conservative tracer (a `[POLLUTANTS]` entry without
 decay, written into copies of the fixtures; noodl takes the tracer as a driver):
@@ -1091,36 +1151,48 @@ publish numbers from this application.
   backwater.
 - **Kinematic-wave and steady routing: dendritic networks only**, one outgoing pipe per
   manhole, no loops. Dynamic-wave routing allows loops and flat or adverse conduits.
-- **Dynamic wave: no ponding yet** (planned); headspace air needs a dendritic network (one
-  outgoing conduit per junction; loops, branches and regulator-only drains are refused by name
-  with `air=True`); storage units
-  without evaporation or exfiltration; no pumps, dividers, roadway weirs or control rules.
-  A junction drained only by outlets (whose crown is then the outlet's crest plus SWMM's
-  1e-6 ft DUMMY height) surcharges under EXTRAN as soon as it is wet above that crest, and
-  SWMM's surcharged update then divides by the attached links' `dqdh`, which an outlet
-  leaves 0: above 1.25 crowns every depth is SWMM's fixed point and SWMM freezes the
-  junction's depth, losing the inflow it cannot pass. noodl holds instantaneous continuity
-  there (the outlet passes what arrives), so such a junction has no SWMM reference; drain
-  an outlet from a storage unit, as SWMM's own examples do.
-  Flooded water is lost, as in SWMM without ponding; with no ground (`MaxDepth` 0) and no
-  `SurDepth` a junction floods as soon as it fills to its crown. `build_model(...,
-  air=True)` is refused. Circular conduits only. Under EXTRAN, where SWMM's own
-  surcharge iteration has no fixed point, noodl holds the junction at its crown (see
-  "Dynamic wave"), so such steps have no SWMM reference. Likewise where SWMM's normal-flow
-  slope test has no consistent side (a draining outfall conduit), noodl puts the solution
-  on its switch, y1 = y2 (see "Normal-flow slope switch"); SWMM does not converge on such
-  steps, and its unconverged trials differ by up to its own oscillation (~6e-4 m on the
-  tree). The Froude test of the normal-flow limit stays a lagged flag. At a step that lands
-  on the switch the gradient is the tie rule's: the sensitivity of a solution constrained
-  to y1 = y2, where SWMM has no fixed point to differentiate. It does not depend on the
-  wall slope S, which only shapes the passes (the fixed point does not move with S; on the
-  tree's drain-down the gradient is the same to 11 digits for S scaled by 0.2 and 5, and
-  matches central differences to 2e-8 relative). Likewise a junction filling through a
-  drop end's area threshold, where SWMM's storage equation has no fixed point, is held on
-  the threshold (see "Drop-end area switch"); SWMM does not converge on such steps, and the
-  histories then differ by up to SWMM's oscillation (3e-4 m on the options fixture with a
-  0.03 m offset on C3). The rule picks one threshold per junction, the nearest to its
-  head; two drop ends switching at one junction in the same step are not covered.
+- **Dynamic wave, not supported.** Each is refused by name, with the line number when it comes
+  from a file (see [SWMM `.inp`](../formats/swmm.md)), unless it says otherwise:
+    - pumps (`[PUMPS]`), flow dividers (`[DIVIDERS]`), control rules (`[CONTROLS]`: a regulator
+      is always fully open), culvert inlet control (a conduit's culvert code), roadway weirs and
+      weir coefficient curves;
+    - ponding (`ALLOW_PONDING YES`): flooded water is lost, as in SWMM without ponding. A junction
+      with no ground (`MaxDepth` 0) and no `SurDepth` floods as soon as it fills to its crown;
+    - runoff, groundwater and LID (`[SUBCATCHMENTS]`, `[RAINGAGES]`, `[LID_USAGE]`), dry-weather
+      flow (`[DWF]`), time-series inflows (supply them as drivers) and `[TIMESERIES]` data
+      (a `TIMESERIES` outfall's stage is a driver);
+    - the `[LOSSES]` entry, exit and average coefficients and seepage (the flap gate is read),
+      storage evaporation (`Fevap`) and exfiltration, and a nonzero pollutant `Cinit`;
+    - non-circular conduit shapes, flow units other than CMS, and regulators with
+      `LINK_OFFSETS ELEVATION`;
+    - headspace air on networks that are not dendritic: loops, junctions with several outgoing
+      conduits or none, and an outfall at a conduit's upstream end are refused with
+      `air=True` (see [Headspace air on the dynamic wave](#headspace-air-on-the-dynamic-wave));
+    - a variable step on a batched network, and `dt=` with a variable step (the step is the
+      options'); a variable-step run is not differentiable through its step sizes.
+- **Dynamic wave, implemented but not compared with SWMM live.** Each is transcribed from
+  SWMM's source and checked against its closed forms or in unit tests, with no live reference
+  run yet: a surcharged weir (above its opening, `CanSurcharge` YES or NO), bottom orifices,
+  regulator flap gates and the ARMCO head loss, sideflow and trapezoidal weirs, functional and
+  `/HEAD` outlets, and an orifice ending at a storage unit; the cylindrical, paraboloid and
+  pyramidal storage shapes and a `TABULAR` curve beyond its last point; a storage unit falling
+  back through its full depth under EXTRAN; a tide with a nonzero `START_TIME` or beyond 24 h of
+  elapsed time, and batched `TIDAL` or `TIMESERIES` outfalls (a batched stage only via the
+  driver); and a fully submerged weir whose flow reverses through zero, where SWMM itself
+  fails to converge on a few steps (R48).
+- **Dynamic wave, where SWMM has no fixed point** (the three tie rules above): the EXTRAN
+  crown hold, the normal-flow slope switch and the drop-end area switch. The Froude test of the
+  normal-flow limit stays a lagged flag. The area switch picks one threshold per junction (the
+  nearest to its head), so two drop ends of one junction switching in the same step are not
+  covered. At a step that lands on the slope switch the gradient is the tie rule's, the
+  sensitivity of a solution constrained to $y_1 = y_2$; it does not depend on the wall slope $S$,
+  which only shapes the passes (on the tree's drain-down the gradient is the same to 11 digits
+  for $S$ scaled by 0.2 and 5, and matches central differences to 2e-8 relative).
+- **Dynamic wave, resolution.** The default head solve (`solve_atol`) leaves a surcharged
+  junction up to about 2.5e-7 m from the fixed point (pass `atol=1e-12` for tight heads where no
+  junction sits on its bed). Plain relaxation (`acceleration=None`) does not converge on some
+  steps where the default Anderson iteration does (the flooding tree's EXTRAN ramp-down at
+  t = 175 s), and `iterate_flow_tol` is required either way.
 - **Dynamic-wave quality: junction reactors, not SWMM's conduit reactors.** Steady
   concentrations agree with SWMM; in transit the tracer arrives shifted by the difference of
   the residence times (on the tree's ramp up to 25 % of the plateau at the head conduit,

@@ -6,22 +6,32 @@ column layouts and units are read by `apps/sewer/inp.py`.
 
 **Read:** `[TITLE]`, `[OPTIONS]`, `[JUNCTIONS]`, `[OUTFALLS]`, `[CONDUITS]`, `[XSECTIONS]`,
 `[LOSSES]` (the flap gate only), `[INFLOWS]`, `[POLLUTANTS]`, and under `DYNWAVE`
-`[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` with the `[CURVES]` of type `STORAGE`
-and `RATING`.
+`[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` with the `[CURVES]` of type `STORAGE`,
+`RATING` and `TIDAL`. A `[TIMESERIES]` section is accepted only for the series that
+`TIMESERIES` outfalls name, and is not read.
+
+**Ignored** because no conduit or node ever references them: `[EVAPORATION]`, `[REPORT]`,
+`[TAGS]`, `[MAP]`, `[COORDINATES]`, `[VERTICES]`, `[POLYGONS]`, `[SYMBOLS]`, `[LABELS]`,
+`[BACKDROP]`, `[PROFILES]`, `[FILES]`. Any other section that carries content is refused, and
+so are the options and fields listed below.
 
 **Routing.** `FLOW_ROUTING` is `STEADY`, `KINWAVE` or `DYNWAVE`, read as the physical names
 `steady`, `kinematic_wave` and `dynamic_wave` (`SewerNetwork.routing`). `DYNWAVE` also reads
 `ROUTING_STEP`, `WET_STEP` (default 300 s) and `MINIMUM_STEP` (seconds or `HH:MM:SS`),
-`VARIABLE_STEP` (the Courant factor, 0 to 2; absent means SWMM's default 0.75), `INERTIAL_DAMPING` (`NO`/`PARTIAL`/`FULL`),
-`NORMAL_FLOW_LIMITED` (`SLOPE`/`FROUDE`/`BOTH`/`NO`), `SURCHARGE_METHOD` (`EXTRAN` or `SLOT`), `MIN_SURFAREA`,
-`HEAD_TOLERANCE`, `MAX_TRIALS`, `MIN_SLOPE` and `LENGTHENING_STEP` into `DynamicWaveOptions`; `HEAD_TOLERANCE`
-and `MAX_TRIALS` are SWMM's own iteration controls, recorded but not used. As SWMM does,
+`VARIABLE_STEP` (the Courant factor, 0 to 2; absent means SWMM's default 0.75), `INERTIAL_DAMPING`
+(`NO` or `NONE`, `PARTIAL`, `FULL`), `NORMAL_FLOW_LIMITED` (`SLOPE`, `FROUDE`, `BOTH`, `NO`, `NONE` or
+`NEITHER`), `SURCHARGE_METHOD` (`EXTRAN` or `SLOT`), `MIN_SURFAREA` (m²), `HEAD_TOLERANCE`,
+`MAX_TRIALS`, `MIN_SLOPE` (percent, as in SWMM) and `LENGTHENING_STEP` (seconds or `HH:MM:SS`) into
+`DynamicWaveOptions`; `HEAD_TOLERANCE` and `MAX_TRIALS` are SWMM's own iteration controls,
+recorded but not used. Any other `[OPTIONS]` key is not read; the options above are read only
+under `DYNWAVE`, and an unrecognised value of a keyword option is refused with the line number. As SWMM does,
 the reader lowers `ROUTING_STEP` to `WET_STEP` when it is larger (a file that omits
 `VARIABLE_STEP` runs the 0.75 variable step, so give `duration=` rather than `dt=` to
 `simulate_dynamic_wave`; `DynamicWaveOptions()` built in code defaults to the fixed step).
 
-**Dynamic wave, what is refused for now.** With `DYNWAVE` the reader refuses, with the line
-number: `ALLOW_PONDING YES` and a negative `LENGTHENING_STEP`.
+**Dynamic wave, options refused.** With `DYNWAVE` the reader refuses, with the line number:
+`ALLOW_PONDING YES` (ponding is not modelled), a negative `LENGTHENING_STEP` or
+`MINIMUM_STEP`, and a `VARIABLE_STEP` outside 0 to 2.
 The conduit lengthening uses the file's own `ROUTING_STEP`, as SWMM validates its conduits
 before it lowers the step to `WET_STEP`.
 
@@ -137,9 +147,12 @@ dry-weather inflow, which are refused or absent.
 - pumps, dividers, roadway weirs, weir coefficient curves and control rules (regulator
   settings); orifices, weirs, outlets and storage units under `STEADY` or `KINWAVE`, and
   storage evaporation or exfiltration;
-- dynamic wave with ponding. Both `SURCHARGE_METHOD`s model
+- ponding (`ALLOW_PONDING YES`) and culvert inlet control. Both `SURCHARGE_METHOD`s model
   surcharge, and a junction floods (without ponding) above `MaxDepth` (extended to its
-  crown) plus `SurDepth`.
+  crown) plus `SurDepth`; the water that cannot enter is lost, as in SWMM without ponding.
+
+The complete list of what the dynamic wave does not support, and of what it implements without
+a live SWMM comparison, is under [Limitations](../applications/sewer.md#limitations).
 
 **Slope** follows SWMM's own definition $S_0 = dy/dx$ with $dx = \sqrt{L^2 - dy^2}$ — the 3-D
 chord, not the naive $dy/L$. Under `STEADY` and `KINWAVE`, zero or adverse fall is refused, as

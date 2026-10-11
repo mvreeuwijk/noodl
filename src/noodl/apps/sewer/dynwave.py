@@ -609,7 +609,7 @@ class JunctionStorage(NodeSource):
             self.register_buffer("top", torch.as_tensor(top, dtype=F64))
 
     def _storage(self, phi: Tensor, drivers: Mapping) -> tuple[Tensor, Tensor, Tensor]:
-        """Phase A's storage withdrawal (m3/s) and slope (m2/s) at `phi`, and the band's
+        """The free-surface storage withdrawal (m3/s) and slope (m2/s) at `phi`, and the band's
         stiffness (m2/s)."""
         rate2 = 2.0 * drivers["water.storage_rate"]
         area = drivers["water.storage_area"]
@@ -1778,7 +1778,7 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     t = 0) and is the default of `simulate_dynamic_wave`'s own `outfall_stage`.
     `iterate_flow_tol` (m3/s) is the tolerance on the conduit
     flows' own fixed-point residual, judged alongside the heads (`Model`'s
-    `iterate_flow_tol`), and is required: ``None`` (heads judged alone, as phase A did) is
+    `iterate_flow_tol`), and is required: ``None`` (heads judged alone) is
     refused by name. On the normal-flow slope switch (`DynamicWaveConduit`) the heads
     bound the flow residual only through the wall slope S over the junction's grounding,
     so a heads-only test can stop a pass short of the fixed point (a flow residual of
