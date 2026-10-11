@@ -1436,31 +1436,14 @@ class DynamicWaveHydraulics:
         ``ctx.dt is None``) returns the carried and reporting keys only."""
         dt = None if ctx is None else ctx.dt
         inflow = self._inflow(drivers)
-        terms = self._terms(state, self.options.routing_step if dt is None else dt)
-        out = self._carried(state, terms, inflow)
         heads = state[f"{self.layer}.phi"]
-        # a storage unit's own area at the previous pass's depth (dynwave.c:315)
-        storage_ft2 = self._storage_area_ft2(heads)
         drop = None
         regulators: dict = {}
-        if dt is not None and self.structures:
-            # the regulators at the previous pass's heads (dynwave.c:423-454): their flows,
-            # slopes and end areas, which join the storage units' own (dynwave.c:503-524)
-            regulators, reg_ft2 = self._structure_terms(heads)
-            storage_ft2 = storage_ft2 + reg_ft2[..., self.junction_idx]
-        if dt is not None:
-            # the drop-end area switch (JunctionStorage): a junction held on its threshold
-            # has its chosen drop end classified on the upper side, SWMM's class AT it. The
-            # hold set is decided once per pass, from the first evaluation's areas and the
-            # fed net inflow (which does not depend on the class), and fixed for the pass:
-            # the re-evaluation only supplies the held class's areas, so re-deciding on it
-            # would let the class it sets feed back into its own decision within one pass.
-            drop = self._drop_switch(state, terms, out["sewer.net_inflow"], dt, storage_ft2)
-            if bool(drop["held"].any()):
-                terms = self._terms(state, dt, (drop["hold1"], drop["hold2"]))
-                out = self._carried(state, terms, inflow)
-                drop = self._drop_switch(state, terms, out["sewer.net_inflow"], dt,
-                                         storage_ft2)
+        if dt is None:
+            terms = self._terms(state, self.options.routing_step)
+            out = self._carried(state, terms, inflow)
+        else:
+            terms, out, drop, regulators, storage_ft2 = self._pass_terms(state, inflow, dt)
         q_all = state[f"{self.layer}.q"]
         q = q_all[..., :self.n_pipes]
         depth_ft = terms.depth
@@ -1492,7 +1475,7 @@ class DynamicWaveHydraulics:
         surf = surf.index_add(-1, self.v, terms.surface_area2)
         # the storage unit's own area plus its conduit ends' (not zeroed at a storage node,
         # dwflow.c:546-547; only a regulator's are, dynwave.c:520-523) and its regulators'
-        # ends' (in `storage_ft2` above), then the floor
+        # ends' (in `storage_ft2`, `_pass_terms`), then the floor
         area_ft2 = torch.clamp(surf[..., jidx] + storage_ft2,
                                min=self.min_area_ft2)                         # dynwave.c:670
         # conveyance the pass lags into c0 (other end pinned), per junction (dynwave.c:578)
@@ -1626,12 +1609,55 @@ class DynamicWaveHydraulics:
         nodes = nodes.index_add(-1, self.u, half).index_add(-1, self.v, half)
         return torch.clamp(nodes[..., self.junction_idx] + stored, min=CAPACITY_FLOOR)
 
-    def carried(self, state: Mapping, drivers: Mapping, *, dt: float | None = None) -> State:
+    def carried(self, state: Mapping, drivers: Mapping, *, dt: float | None = None,
+                start: Mapping | None = None) -> State:
         """The four carried keys evaluated AT `state` (``water.phi``, ``water.q``), for
         re-synchronising after a step of `dt` s (default: the routing step): the pass's own
-        copy is its input's, which equals its output only to the iteration tolerance."""
-        terms = self._terms(state, self.options.routing_step if dt is None else dt)
-        return self._carried(state, terms, self._inflow(drivers))
+        copy is its input's, which equals its output only to the iteration tolerance.
+
+        With `start` (the step-start state) the conduit terms are a pass's, the drop-end
+        area switch's hold included: the hold is decided against the step-start depths and
+        net inflows, as within the step, so that the carried ``"sewer.mid_area"`` is the
+        held class's at a junction held on its threshold. Without it, the terms take no
+        hold."""
+        dt = self.options.routing_step if dt is None else dt
+        inflow = self._inflow(drivers)
+        if start is None:
+            return self._carried(state, self._terms(state, dt), inflow)
+        pinned = dict(state, **{k: start[k] for k in self.state_keys})
+        terms = self._pass_terms(pinned, inflow, dt)[0]
+        return self._carried(state, terms, inflow)
+
+    def _pass_terms(self, state: Mapping, inflow: Tensor, dt: float
+                    ) -> tuple[ConduitTerms, State, dict, dict, Tensor]:
+        """One pass's conduit terms at `state` (its carried keys the step start's), with
+        the drop-end area switch's hold: ``(terms, carried, drop, regulators,
+        storage_ft2)``, `drop` from `_drop_switch`, the regulators from
+        `_structure_terms` and each junction's own storage area (ft2, its regulators' ends
+        included)."""
+        terms = self._terms(state, dt)
+        out = self._carried(state, terms, inflow)
+        heads = state[f"{self.layer}.phi"]
+        # a storage unit's own area at the previous pass's depth (dynwave.c:315)
+        storage_ft2 = self._storage_area_ft2(heads)
+        regulators: dict = {}
+        if self.structures:
+            # the regulators at the previous pass's heads (dynwave.c:423-454): their flows,
+            # slopes and end areas, which join the storage units' own (dynwave.c:503-524)
+            regulators, reg_ft2 = self._structure_terms(heads)
+            storage_ft2 = storage_ft2 + reg_ft2[..., self.junction_idx]
+        # the drop-end area switch (JunctionStorage): a junction held on its threshold
+        # has its chosen drop end classified on the upper side, SWMM's class AT it. The
+        # hold set is decided once per pass, from the first evaluation's areas and the
+        # fed net inflow (which does not depend on the class), and fixed for the pass:
+        # the re-evaluation only supplies the held class's areas, so re-deciding on it
+        # would let the class it sets feed back into its own decision within one pass.
+        drop = self._drop_switch(state, terms, out["sewer.net_inflow"], dt, storage_ft2)
+        if bool(drop["held"].any()):
+            terms = self._terms(state, dt, (drop["hold1"], drop["hold2"]))
+            out = self._carried(state, terms, inflow)
+            drop = self._drop_switch(state, terms, out["sewer.net_inflow"], dt, storage_ft2)
+        return terms, out, drop, regulators, storage_ft2
 
     def _initial_stage_ft(self, drivers: Mapping | None) -> Tensor:
         """The outfalls' stages (ft) at t = 0 for the initial heads: the driver's if it is
@@ -2362,7 +2388,8 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
             state = model.step(state, drivers, step, t=t, diagnostics=diag, **kwargs)
         except RuntimeError as err:
             raise RuntimeError(f"dynamic wave step at t={t} s: {err}") from err
-        state.update(hyd.carried(state, drivers, dt=step))  # resync, as modelica/run.py does
+        # resync, as modelica/run.py does, with the step's drop-end hold
+        state.update(hyd.carried(state, drivers, dt=step, start=before))
         previous = (before, step)
         now_ms = next_ms
         k += 1

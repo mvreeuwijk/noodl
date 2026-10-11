@@ -1722,6 +1722,35 @@ def test_a_junction_filling_below_a_drop_is_held_on_its_area_threshold(tmp_path)
         assert abs(gap) <= 1e-9 and 0.0 < theta < 1.0, step
 
 
+def test_carried_keys_after_a_held_step_are_the_held_passes(tmp_path):
+    """At a step that holds J4 on its drop-end area threshold (step 60 of the 0.03 m offset
+    variant) `simulate_dynamic_wave`'s resync (`carried` with the step start) gives the
+    carried keys of `model.step` alone, whose last pass took the hold: the hold is decided
+    against the step-start depths and net inflows, as within the step. (The held class's
+    mid area differs from the unheld one only by round-off at the threshold, 4e-15 m2
+    measured, but the resync takes the same terms as the pass.)"""
+    from noodl.apps.sewer.dynwave import build_dynamic_wave_model
+
+    path = tmp_path / "c3_offset_0.03.inp"
+    path.write_text(_drop_variant("c3_offset_0.03"))
+    net, _, _ = read_swmm_inp(path)
+    model, state, drivers = build_dynamic_wave_model(net)
+    hyd = model.dynamic_wave
+    dt = hyd.options.routing_step
+    state, _ = simulate_dynamic_wave(model, state, drivers, steps=59)
+    alone = model.step(dict(state), drivers, dt, t=59 * dt, atol=solve_atol(model, dt))
+    pinned = alone | {k: state[k] for k in hyd.state_keys}
+    terms = hyd._terms(pinned, dt)
+    drop = hyd._drop_switch(pinned, terms, hyd._carried(pinned, terms, hyd._inflow(drivers))
+                            ["sewer.net_inflow"], dt, hyd._storage_area_ft2(pinned["water.phi"]))
+    assert drop["held"].tolist() == [j == "J4" for j in hyd.junction_names]
+    resynced = hyd.carried(alone, drivers, dt=dt, start=state)
+    simulated, _ = simulate_dynamic_wave(model, dict(state), drivers, steps=1)
+    for key in hyd.state_keys:
+        assert torch.allclose(resynced[key], alone[key], rtol=0.0, atol=1e-12), key
+        assert torch.allclose(simulated[key], alone[key], rtol=0.0, atol=1e-12), key
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("name", sorted(DROP_VARIANTS))
 @pytest.mark.parametrize("acceleration", ["anderson", None])
