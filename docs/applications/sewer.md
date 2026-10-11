@@ -870,6 +870,17 @@ With the downstream stage above the crest from the start, water flows back over 
 and its flow passes through zero under full submergence, where the flow's slope in the
 heads is infinite: SWMM does not converge on 3 of those steps (0.84 %), so that variant is
 not compared.
+A third variant raises the orifice's downstream junction so that it fills through the
+orifice's crest while the orifice flows: the orifice's end area there jumps from 0
+(DN_CRITICAL) to half its equivalent area (~9 m²), a threshold like a drop end's. SWMM
+converges on every step, and noodl converges without an in-pass switch for it and meets
+the targets (worst depth 4.8e-9 m).
+
+Not yet compared live (each is transcribed from `link.c` and checked against SWMM's closed
+forms in `tests/apps/sewer/test_structures.py`): a surcharged weir (above its opening, with
+`CanSurcharge` YES or NO), bottom orifices, regulator flap gates and the ARMCO head loss,
+sideflow and trapezoidal weirs, functional and `/HEAD` outlets, and an orifice ending at a
+storage unit, where SWMM zeroes its end area.
 
 The same networks with SWMM at its **default** tolerance (`HEAD_TOLERANCE` 0.0015 m,
 `MAX_TRIALS` 8), against noodl's converged answer:

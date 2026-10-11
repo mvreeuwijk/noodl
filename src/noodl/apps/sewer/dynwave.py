@@ -832,7 +832,7 @@ class DynamicWaveHydraulics:
         # Each outfall's own link and the end it sits at (link.c:740-751: node2 first): a
         # conduit, or a regulator, whose outfall depth SWMM sets from yNorm = yCrit = 0
         # (link.c:753-765: only a conduit computes them).
-        pipe_of, at_v, via, reg_offset = [], [], [], []
+        pipe_of, at_v, via, reg_offset, link_of = [], [], [], [], []
         for name in self.outfall_names:
             ends = [(i, p.v == name) for i, p in enumerate(net.pipes) if name in (p.u, p.v)]
             regs = [(s, j) for s in self.structures.values() for j in range(len(s.names))
@@ -849,6 +849,7 @@ class DynamicWaveHydraulics:
                         f"SWMM sets the depth of only one of them")
                 downstream = nodes[int(s.v[j])] == name
                 pipe_of.append(0)                    # a placeholder, masked by `via`
+                link_of.append(self.link_names.index(s.names[j]))
                 at_v.append(downstream)
                 via.append(True)
                 reg_offset.append(float(s.offset2[j] if downstream else s.offset1[j]))
@@ -860,10 +861,16 @@ class DynamicWaveHydraulics:
                     f"DynamicWaveHydraulics: conduit {pipe.name!r} joins two outfalls "
                     f"({pipe.u!r}, {pipe.v!r}); SWMM sets the depth of only one of them")
             pipe_of.append(i)
+            link_of.append(i)
             at_v.append(downstream)
             via.append(False)
             reg_offset.append(0.0)
-        self.outfall_pipe = torch.tensor(pipe_of, dtype=torch.long)
+        # per outfall: its conduit's pipe index, internal only (0, a placeholder masked by
+        # `outfall_on_structure`, for an outfall on a regulator)
+        self._outfall_pipe = torch.tensor(pipe_of, dtype=torch.long)
+        #: per outfall: its link's column in ``"water.q"`` (a conduit's, or a regulator's
+        #: after the pipes'), positive away from the link's first node
+        self.outfall_link = torch.tensor(link_of, dtype=torch.long)
         at_v_t = torch.tensor(at_v, dtype=torch.bool)
         #: per outfall: whether it is its link's downstream (second) node
         self.outfall_at_v = at_v_t
@@ -871,8 +878,8 @@ class DynamicWaveHydraulics:
         self.outfall_on_structure = torch.tensor(via, dtype=torch.bool)
         self.outfall_offset_ft = torch.where(
             self.outfall_on_structure, torch.tensor(reg_offset, dtype=F64),
-            torch.where(at_v_t, self.offset2[self.outfall_pipe],
-                        self.offset1[self.outfall_pipe]) / LCF)
+            torch.where(at_v_t, self.offset2[self._outfall_pipe],
+                        self.offset1[self._outfall_pipe]) / LCF)
         self.outfall_kind = torch.tensor(
             [_OUTFALL_CODES[o.kind] for o in net.outfalls], dtype=torch.long)
         self.outfall_stage_ft = torch.tensor(
@@ -1166,7 +1173,7 @@ class DynamicWaveHydraulics:
         """`link.c::link_setOutfallDepth` + `node.c::outfall_setOutletDepth` (link.c:728-766,
         node.c:1413-1492), from each outfall conduit's flow `q` (m3/s, the pipes' columns):
         heads (m). An outfall on a regulator takes yN = yC = 0."""
-        op = self.outfall_pipe
+        op = self._outfall_pipe
         geo = self.geo
         q_ft = (q[..., op] / QCF / self.barrels[op]).abs()                # link.c:759
         yf, af = geo.y_full[op], geo.a_full[op]
@@ -1212,7 +1219,7 @@ class DynamicWaveHydraulics:
         ground = ground.index_add(-1, self.junction_idx, 2.0 / dt * area_ft2 * _AREA_SI)
         ground = torch.where(self.is_outfall, torch.full_like(ground, torch.inf), ground)
         s_max = K_SWITCH * torch.minimum(ground[..., self.u], ground[..., self.v])
-        op = self.outfall_pipe
+        op = self._outfall_pipe
         q_abs = q.abs()
         step = 1e-6 * torch.clamp(q_abs[..., op], min=1e-3)
         bumped = q_abs.clone()
@@ -1474,7 +1481,8 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     3e-5 m3/s was measured on the tree's drain-down). The state is
     SWMM's initial state (`DynamicWaveHydraulics.initial_state`: cold and dry, or its
     InitDepth and InitFlow). Attached to the model: `junction_idx`, `junction_invert` (m),
-    `outfall_pipe_idx`, `dynamic_wave` (the closure), `routing_step` (s), `pipe_names`,
+    `outfall_link_idx` (each outfall's link's ``"water.q"`` column), `dynamic_wave` (the
+    closure), `routing_step` (s), `pipe_names`,
     `link_names` (every ``"water.q"`` column: the pipes, then the orifices, weirs and
     outlets, each a `StructureLink` edge of its own kind), `pipe_columns`, `notes`,
     `input_specs`, `driver_template`.
@@ -1545,7 +1553,7 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     model.notes = closure.notes
     model.junction_idx = junction_idx
     model.junction_invert = junction_invert
-    model.outfall_pipe_idx = closure.outfall_pipe
+    model.outfall_link_idx = closure.outfall_link
     model.dynamic_wave = closure
     model.routing_step = float(net.dynamic_wave.routing_step)
     model.pipe_names = list(closure.pipe_names)

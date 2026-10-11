@@ -1231,6 +1231,11 @@ def test_storage_units_match_swmm_at_every_step(tmp_path, variant):
 #:   falls below the crest and W1 closes; once J4 spills forward, J5 backs up above the
 #:   crest: Villemonte submergence on W1 for over 200 steps (ratio ~0.46 at the end), with C5
 #:   full at J5. W1's flow never passes through zero with both heads above the crest.
+#: - ``outlet_through_crest``: J3 at 10.95 m (OR1's crest 11.1 m is 0.15 m above it) and C3
+#:   0.30 m, so J3 fills through OR1's crest while OR1 flows (step 97): OR1's end area at J3
+#:   jumps from 0 (DN_CRITICAL) to ``W L / 2`` (~9 m2, SUBCRITICAL), a threshold like a drop
+#:   end's (ruling R49). SWMM converges on every step and noodl converges and matches without
+#:   an in-pass switch for it, so none is added.
 #:   (Out1 FIXED at 10.0 m instead fills J5 from the outfall and reverses W1 through zero
 #:   flow under full submergence, where the flow's slope in the heads is infinite: SWMM
 #:   fails to converge on 3 of 359 steps there (0.84 %; its 0.001 cfs reversal flow shows
@@ -1242,10 +1247,17 @@ STRUCTURE_VARIANTS = {
          "Out1             8.0        FIXED      9.75             NO"),
         ("C5               CIRCULAR     0.60", "C5               CIRCULAR     0.45"),
     ],
+    "outlet_through_crest": [
+        ("J3               10.5       5", "J3               10.95      5"),
+        ("C3               CIRCULAR     0.60", "C3               CIRCULAR     0.30"),
+    ],
 }
+#: J3's invert per variant (m)
+STRUCTURE_J3_INVERT = {"free": 10.5, "submerged": 10.5, "outlet_through_crest": 10.95}
 #: The fast comparison: the free fixture from its dry start through the outlet nearing its
-#: rating, the orifice opening (step 32) and the V-notch weir starting to flow (step 48).
-STRUCTURE_FAST_STEPS = 60
+#: rating, the orifice opening (step 32), the V-notch weir starting to flow (step 48) and
+#: the transverse weir opening (step 126).
+STRUCTURE_FAST_STEPS = 132
 
 
 def _structures_inp(tmp_path, variant):
@@ -1281,7 +1293,7 @@ def test_regulators_match_swmm_while_they_open(tmp_path):
     worst, rows = _structure_parity(tmp_path, "free", STRUCTURE_FAST_STEPS)
     _assert_parity(worst)
     flows = rows[-1][0]
-    assert min(flows["OR1"], flows["W2"], flows["OL1"]) > 0.0       # each one is flowing
+    assert min(flows["OR1"], flows["W1"], flows["W2"], flows["OL1"]) > 0.0   # all flowing
 
 
 @pytest.mark.slow
@@ -1289,13 +1301,20 @@ def test_regulators_match_swmm_while_they_open(tmp_path):
 def test_regulators_match_swmm_at_every_step(tmp_path, variant):
     """Every variant over all 359 steps at the free-surface targets, with the regime it
     exists for: the orifice reaching its orifice regime (J2 above the opening's crown,
-    11.3 m) with J3 below its crest; and in ``submerged`` W1 first reversed (J5 above its
-    9.8 m crest, J4 below it), then submerged (J5 above the crest while it flows forward)
-    for much of the run."""
+    11.3 m) with J3 below its crest, except in ``outlet_through_crest``, where J3 fills
+    through OR1's crest while OR1 flows (its end area at J3 jumping, R49); in
+    ``submerged`` W1 first reversed (J5 above its 9.8 m crest, J4 below it), then
+    submerged (J5 above the crest while it flows forward) for much of the run."""
     worst, rows = _structure_parity(tmp_path, variant)
     _assert_parity(worst)
     final = rows[-1]
-    assert 11.0 + final[1]["J2"] > 11.3 and 10.5 + final[1]["J3"] < 11.1
+    j3 = [STRUCTURE_J3_INVERT[variant] + r[1]["J3"] for r in rows]
+    assert 11.0 + final[1]["J2"] > 11.3
+    # OR1's outlet J3 stays below its 11.1 m crest, or fills through it while OR1 flows
+    crossed = any(a < 11.1 <= b and r[0]["OR1"] > 0.0
+                  for a, b, r in zip(j3, j3[1:], rows[1:], strict=False))
+    assert crossed == (variant == "outlet_through_crest")
+    assert (j3[-1] < 11.1) == (variant != "outlet_through_crest")
     reversed_ = sum(r[0]["W1"] < 0.0 for r in rows)
     submerged = sum(9.4 + r[1]["J5"] > 9.8 and r[0]["W1"] > 0.0 for r in rows)
     assert (reversed_ > 10 and submerged > 100) == (variant == "submerged")

@@ -240,7 +240,7 @@ def test_steady_state_passes_the_total_inflow(tmp_path):
     net = _tree(tmp_path, scale=0.5)
     model, state, drivers = build_model(net)
     state, hist = simulate_dynamic_wave(model, state, drivers, steps=720)
-    out = model.outfall_pipe_idx
+    out = model.outfall_link_idx
     total = sum(m.inflow for m in net.manholes)
     assert hist["water.q"][-1, out].sum().item() == pytest.approx(total, rel=1e-6)
 
@@ -251,7 +251,7 @@ def test_outfall_flow_rises_monotonically_towards_the_total(tmp_path):
     net = _tree(tmp_path, scale=0.5)
     model, state, drivers = build_model(net)
     state, hist = simulate_dynamic_wave(model, state, drivers, steps=120)
-    q = hist["water.q"][:, model.outfall_pipe_idx].sum(-1)
+    q = hist["water.q"][:, model.outfall_link_idx].sum(-1)
     total = sum(m.inflow for m in net.manholes)
     assert bool((q[1:] >= q[:-1]).all())
     assert 0.6 * total < q[-1].item() <= total       # 0.736 of the total, measured
@@ -2169,3 +2169,16 @@ def test_regulators_are_refused_by_name_outside_their_scope():
     with pytest.raises(ValueError, match="attached to 2 links"):
         dataclasses.replace(two, pipes=(*two.pipes, dataclasses.replace(
             two.pipes[0], name="C9", u="J2", v="Out"))).validate()
+
+
+def test_each_outfall_names_its_own_links_flow_column():
+    """`model.outfall_link_idx` is each outfall's link's ``"water.q"`` column: a conduit's,
+    or a regulator's after the pipes' (structures fixture: Out1 on C5, Out2 on the outlet
+    OL1), so the outfall flows sum to the system's outflow."""
+    net, _, _ = read_swmm_inp(DATA / "structures_dynwave.inp")
+    model, state, drivers = build_model(net)
+    names = [model.link_names[i] for i in model.outfall_link_idx.tolist()]
+    assert names == ["C5", "OL1"]
+    state, hist = simulate_dynamic_wave(model, state, drivers, steps=6)
+    q = hist["water.q"][-1]
+    assert q[model.outfall_link_idx[1]].item() == q[model.link_names.index("OL1")].item() > 0
