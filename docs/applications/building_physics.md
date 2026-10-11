@@ -264,8 +264,15 @@ CONTAM's four source types, all in `noodl.apps.building_physics.sources`:
 | `DecayingSource(node, G0, tau, t0=0.0)` | $S = G_0 e^{-(t-t_0)/\tau}$ for $t \ge t_0$ |
 | `BurstSource(node, mass, t_burst, dt)` | `mass` delivered uniformly over $[t_{\text{burst}}, t_{\text{burst}} + dt)$ |
 
-`assemble_sources(sources, t, x_full)` sums them; `sources_from_project(project, dt=60.0)` builds
-them from a `.prj`'s own source records.
+`SpeciesSources(sources, species=..., layer=...)` is the closure that sums the sources into the
+species layer's `"species.sources"` each step, each on its own species. It evaluates them at
+`drivers["time"]` (set by `simulate` to the step's end) and multiplies each by its entry of
+`"species.source_multiplier"`, one per source, which is where a schedule or a control acts. A
+`BurstSource` releases its mass over the steps that overlap its burst (it reads the step length
+from `drivers["time_step"]`, which `simulate` sets), so no step length misses it.
+`sources_from_project(project, dt=60.0)` builds the source objects from a `.prj`'s own source
+records, and `project_to_model` attaches them with `SpeciesSources` automatically, with the
+multipliers at one. `assemble_sources(sources, t, x_full)` sums plain sources outside a model.
 
 ## Airflow elements
 

@@ -101,7 +101,7 @@ MU_0 = 1.81625e-5
 #                   is the contaminant mode (0 none, 1 steady, 2 transient, 3 cyclic), and the
 #                   line labelled `! (trace)` carries the integration weight `gamma` at field 6
 #                   (1 = implicit Euler). `!mf_solver` field 0 is the integration method
-#                   (0 default, 1 short time step, 2 CVODE). `!dens grav` heads `rho g`.
+#                   (0 trapezoid, 1 short time step, 2 CVODE). `!dens grav` heads `rho g`.
 #                   `!tsdens relax tsmaxi cnvgSS densZP stackD dodMdt` heads the density
 #                   options; `densZP` (field 4), `stackD` (field 5) and `dodMdt` (field 6) are
 #                   read, see `_read_density_options`. `!date_st` heads
@@ -179,9 +179,10 @@ _FAN_CONST = {"fan_cmf", "fan_cvf"}
 _SOURCE_TYPES = {"ccf", "cut", "eds", "brs"}
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 _CONTAMINANT_MODES = {0: "none", 1: "steady", 2: "transient", 3: "cyclic"}
-_INTEGRATION = {0: "default", 1: "short_time_step", 2: "cvode"}
+_INTEGRATION = {0: "trapezoid", 1: "short_time_step", 2: "cvode"}
 _SHAPES = {0: "rectangular", 1: "trapezoidal"}
 _VARIABLE_PRESSURE = 1                  # the zone-flags bit of a zone whose pressure is solved
+_VARIABLE_CONTAMINANTS = 2              # ... and of a zone whose concentrations are solved
 
 # Sections whose records would silently change the physics if ignored. Ducts and the simple
 # air-handling system are networks in their own right, not attributes of a zone or a path, so
@@ -222,6 +223,8 @@ class PrjSource:
     source_type: str                 # ccf | cut | eds | brs
     params: list[float]
     mult: float
+    species: int = 0                 # 0-based index of the source element's species
+    schedule_nr: int = 0             # week schedule multiplying the rate; 0 = none
 
 
 @dataclass(frozen=True)
@@ -626,13 +629,13 @@ def _read_profiles(lines: _Lines, count: int, profiles: dict[int, WindProfile]) 
 
 
 def _read_source_elements(
-    lines: _Lines, count: int, source_elements: dict[int, tuple[str, list[float]]]
+    lines: _Lines, count: int, source_elements: dict[int, tuple[str, str, list[float]]]
 ) -> None:
     for _ in range(count):
         tok = lines.record()
-        nr, dtype = int(tok[0]), tok[2]
+        nr, species_name, dtype = int(tok[0]), tok[1], tok[2]
         lines.raw()                                 # description (may be blank)
-        source_elements[nr] = (dtype, [float(v) for v in lines.record()])
+        source_elements[nr] = (species_name, dtype, [float(v) for v in lines.record()])
     lines.expect_end("source/sink elements")
 
 
@@ -727,17 +730,16 @@ def _read_sources(
     lines: _Lines,
     count: int,
     sources: list[PrjSource],
-    source_elements: dict[int, tuple[str, list[float]]],
+    source_elements: dict[int, tuple[str, str, list[float]]],
+    species: list[str],
 ) -> None:
     for _ in range(count):
         tok = lines.record()
         nr, pz, pe, ps, pc = (int(v) for v in tok[:5])
-        if ps or pc:
-            raise ValueError(
-                f"prj: source {nr} references schedule {ps} / control node {pc} (unsupported)"
-            )
+        if pc:
+            raise ValueError(f"prj: source {nr} references control node {pc} (unsupported)")
         try:
-            dtype, params = source_elements[pe]
+            sname, dtype, params = source_elements[pe]
         except KeyError as exc:
             raise KeyError(
                 f"prj: source {nr} references source/sink element {pe}, which the "
@@ -746,7 +748,17 @@ def _read_sources(
         stype = dtype.split("_")[-1] if "_" in dtype else dtype
         if stype not in _SOURCE_TYPES:
             raise ValueError(f"prj: source {nr} uses element type {dtype!r} (unsupported)")
-        sources.append(PrjSource(nr, pz, pe, stype, params, float(tok[5])))
+        if ps and stype in ("eds", "brs"):
+            raise ValueError(
+                f"prj: source {nr} is a {stype} source on schedule {ps}; schedule-triggered "
+                f"decaying and burst sources are unsupported")
+        try:
+            k = species.index(sname)
+        except ValueError as exc:
+            raise KeyError(
+                f"prj: source {nr}'s element {pe} names species {sname!r}, which the project "
+                f"does not define") from exc
+        sources.append(PrjSource(nr, pz, pe, stype, params, float(tok[5]), k, ps))
     lines.expect_end("source/sinks")
 
 
@@ -784,7 +796,7 @@ def read_prj(path) -> Project:
     levels: dict[int, float] = {}
     profiles: dict[int, WindProfile] = {}
     elements: dict[int, PrjElement] = {}
-    source_elements: dict[int, tuple[str, list[float]]] = {}
+    source_elements: dict[int, tuple[str, str, list[float]]] = {}
     # nr, name, relHt, vol, T0, level, week schedule, flags
     zones: list[tuple[int, str, float, float, float, int, int, int]] = []
     x0_rows: dict[int, list[float]] = {}
@@ -822,7 +834,7 @@ def read_prj(path) -> Project:
         elif name == "flow paths":
             _read_paths(lines, count, paths, levels)
         elif name == "source/sinks":
-            _read_sources(lines, count, sources, source_elements)
+            _read_sources(lines, count, sources, source_elements, species)
         elif name in _REFUSED_SECTIONS and count:
             raise ValueError(
                 f"prj: section {name!r} has {count} records; duct networks and air-handling "
@@ -852,6 +864,11 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     zone_flags: dict[str, int] = {}
     for nr, zname, rel_ht, vol, T0, pl, _ps, flags in zones:
         zone_flags[zname] = flags
+        if species and not flags & _VARIABLE_CONTAMINANTS:
+            raise ValueError(
+                f"prj: zone {nr} ({zname!r}) has flags {flags}, without the "
+                f"variable-contaminants bit (2): ContamX holds such a zone at its initial "
+                f"concentrations and ignores its sources (unsupported)")
         if pl not in levels:
             raise KeyError(f"prj: zone {nr} sits on level {pl}, which the file never defines")
         net.add_node(zname, z_ref=levels[pl] + rel_ht, volume=vol, T0=T0, heat_capacity=0.0)
@@ -893,6 +910,12 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
                 f"section does not define"
             ) from exc
         kind_of[nr] = _kind_of(nr, el.dtype)
+
+    for j, src in enumerate(sources):
+        if src.schedule_nr:
+            inputs.append(Input(week(src.schedule_nr, f"source {src.nr}"),
+                                "species.source_multiplier", index=j,
+                                name=f"source {src.nr} schedule {src.schedule_nr}"))
 
     built: list = []
     per_kind_C: dict[str, list[float]] = {}
@@ -1250,13 +1273,20 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         )
     volumes = net.node_attr("volume", default=0.0)
     cap_nodes = layers["species"].interior_idx if "species" in layers else None
-    closures: list = [PrescribedTemperatureDensity(
+    density = PrescribedTemperatureDensity(
         ambient_index=net.node_index(project.ambient), volumes=volumes,
-        capacity_nodes=cap_nodes)]
+        capacity_nodes=cap_nodes)
+    closures: list = [density]
     if project.density_uses_zone_pressure:
         closures.append(ZonePressureDensity(
             amb["Pb"], capacity_key="species.capacity" if cap_nodes is not None else None,
             capacity_nodes=cap_nodes))
+    if "species" in layers and project.sources:
+        from noodl.apps.building_physics.sources import SpeciesSources, sources_from_project
+        dt = project.run_control.time_step if project.run_control else 60.0
+        closures.append(SpeciesSources(
+            sources_from_project(project, dt=dt), species=[s.species for s in project.sources],
+            layer=layers["species"], names=[f"source {s.nr}" for s in project.sources]))
     model = Model(net, layers, closures=closures)
     drivers = {
         "air.phi_boundary": torch.zeros(1, dtype=F64),
@@ -1268,7 +1298,10 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         "rho_amb": rho[net.node_index(project.ambient)],
         "V_met": torch.tensor(amb["Ws"], dtype=F64),
         "theta_w": torch.tensor(amb["Wd"], dtype=F64),
+        "time": torch.tensor(0.0, dtype=F64),
     }
+    if "species" in layers and project.sources:
+        drivers["species.source_multiplier"] = torch.ones(len(project.sources), dtype=F64)
     state: dict = {}
     if "species" in layers:
         K = len(project.species)
@@ -1299,8 +1332,8 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     if project.inputs and project.run_control is not None:
         drivers = apply_inputs(drivers, bind_inputs(model, project.inputs), 0.0,
                                project.run_control.steady_calendar())
-        density = closures[0](state, drivers)
-        drivers["rho"], drivers["rho_amb"] = density["rho"], density["rho_amb"]
+        rho_now = density(state, drivers)
+        drivers["rho"], drivers["rho_amb"] = rho_now["rho"], rho_now["rho_amb"]
     state.update(model.initial_capacities(state, drivers))
     return model, state, drivers
 

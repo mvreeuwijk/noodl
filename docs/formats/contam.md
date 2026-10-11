@@ -17,7 +17,8 @@ date and time, the transient run's start and end date and time, time step and ou
 type, the weather and contaminant file names, and `dodMdt`) and ambient conditions; species and
 each species' default ambient concentration (`Project.ambient_mass_fractions`); day and week
 schedules referenced by zones (the zone temperature, on `"T"`) and by paths (a flow multiplier,
-through `Scaled` on `"flow_multiplier.<kind>"`); wind pressure profiles, and a constant wind
+through `Scaled` on `"flow_multiplier.<kind>"`) and by sources (a rate multiplier, on
+`"species.source_multiplier"`; for `ccf` and `cut` sources); wind pressure profiles, and a constant wind
 pressure on an envelope path (`"wind_pressure.<kind>"`, positive pushing air from ambient into
 the zone, as ContamX); zones and initial concentrations; airflow paths; the power-law element
 family
@@ -28,8 +29,11 @@ family
 
 **Refused by name**, rather than silently dropped: control nodes, filters, kinetic reactions
 and air-handling systems referenced by nonzero index; a schedule number that no week schedule
-carries; a schedule on a `fan_fan` path; a zone without the variable-pressure flag (which ContamX
-holds at constant pressure); CFD and 1-D convection/diffusion zones; continuous-values-file
+carries; a schedule on a `fan_fan` path; a schedule on an `eds` or `brs` source; a source whose element
+names a species the project does not define; a zone without the variable-pressure flag (which
+ContamX holds at constant pressure) or, in a project with species, without the
+variable-contaminants flag (ContamX then holds the zone's concentrations at their initial values
+and ignores its sources); CFD and 1-D convection/diffusion zones; continuous-values-file
 zones and paths; duct networks; a constant wind pressure on an interior path; a fan curve on a
 path with `mult != 1`; `csf_*` and `sup_afe` elements; `stackD = 1` (densities varying with
 height inside a zone).

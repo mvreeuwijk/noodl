@@ -79,15 +79,93 @@ class DecayingSource(_NodeSource):
 
 
 class BurstSource(_NodeSource):
-    """`mass` delivered uniformly over the step [t_burst, t_burst + dt)."""
+    """`mass` delivered uniformly over `[t_burst, t_burst + duration)`.
+
+    Called with the length of the step that ends at `t` (`step`, as `SpeciesSources` passes
+    it from `drivers["time_step"]`), it returns the step-averaged rate: the mass released over
+    the part of the step that overlaps the burst, divided by the step length, so the mass is
+    delivered in full whatever the step length and is never missed by sampling the step's end.
+    Without `step` it returns the instantaneous rate at `t`.
+    """
+
+    step_integrated = True
 
     def __init__(self, node: int, mass: float, t_burst: float, dt: float) -> None:
         super().__init__(node)
         self.mass, self.t_burst, self.dt = float(mass), float(t_burst), float(dt)
 
-    def __call__(self, t: float, x: torch.Tensor) -> torch.Tensor:
-        active = self.t_burst <= t < self.t_burst + self.dt
-        return self._vector(x, self.mass / self.dt if active else 0.0)
+    def __call__(self, t: float, x: torch.Tensor, step: float | None = None) -> torch.Tensor:
+        if step is None:
+            active = self.t_burst <= t < self.t_burst + self.dt
+            return self._vector(x, self.mass / self.dt if active else 0.0)
+        overlap = min(t, self.t_burst + self.dt) - max(t - step, self.t_burst)
+        rate = self.mass / self.dt * max(overlap, 0.0) / step
+        return self._vector(x, rate)
+
+
+class SpeciesSources:
+    """Closure: every source's rate (kg/s) summed into `"<layer>.sources"`, each one times
+    its entry of `"<layer>.source_multiplier"` and placed on its own species.
+
+    `sources` are callables `source(t, x_full) -> full-node vector` (the classes above), with
+    `species[i]` the 0-based species of source i and `names[i]` its label (default "source
+    1", ...). They are evaluated at `drivers["time"]` (s since the simulation start, set by
+    `simulate` to the step's end, which is when ContamX evaluates them) on the start-of-step
+    mass fractions. A `BurstSource` also gets the step length, `drivers["time_step"]` (s, set
+    by `simulate`), and releases its mass over the steps that overlap its burst. The multiplier
+    (dimensionless, one per source, batched like any driver) is where a schedule or a control
+    acts: CONTAM's S = mult ctrl (G - R C).
+    """
+
+    def __init__(self, sources, *, species, layer, names=None) -> None:
+        self.sources, self.species = list(sources), [int(k) for k in species]
+        if len(self.species) != len(self.sources):
+            raise ValueError("SpeciesSources: one species index per source")
+        self.layer = layer
+        self.names = list(names) if names is not None else [
+            f"source {i + 1}" for i in range(len(self.sources))]
+        self.key = f"{layer.name}.source_multiplier"
+        self.inputs = ("time", self.key)
+        self.outputs = (f"{layer.name}.sources",)
+
+    @property
+    def input_specs(self) -> dict[str, dict]:
+        """The time and the per-source multipliers this closure reads."""
+        return {
+            "time": dict(description="time since the simulation start (end of the step)",
+                         unit="s"),
+            "time_step": dict(description="length of the step that ends at `time` (read by "
+                                          "burst sources; `simulate` sets it)", unit="s"),
+            self.key: dict(description="multiplier of each source (a schedule or control)",
+                           unit="-", over=self.names),
+        }
+
+    def __call__(self, state, drivers):
+        lay, name = self.layer, self.layer.name
+        try:
+            t = float(drivers["time"])
+        except KeyError as exc:
+            raise KeyError("SpeciesSources: driver 'time' (s since the start) is required; "
+                           "simulate sets it, a hand-driven model.step must too") from exc
+        step = drivers.get("time_step")
+        step = None if step is None else float(step)
+        K, n = lay.n_species, lay.net.n
+        x_i = state[f"{name}.x"]
+        axis = x_i.dim() >= 2 and x_i.shape[-2] == lay.n_i and x_i.shape[-1] == K
+        x_i = x_i if axis else x_i.unsqueeze(-1)
+        xb = torch.as_tensor(drivers[f"{name}.x_boundary"], dtype=x_i.dtype)
+        xb = xb if xb.dim() >= 2 and xb.shape[-1] == K else xb.unsqueeze(-1)
+        mult = torch.as_tensor(drivers[self.key], dtype=x_i.dtype)
+        batch = torch.broadcast_shapes(x_i.shape[:-2], xb.shape[:-2], mult.shape[:-1])
+        full = torch.zeros(batch + (n, K), dtype=x_i.dtype)
+        full = full.index_copy(-2, lay.interior_idx, x_i.expand(batch + x_i.shape[-2:]))
+        full = full.index_copy(-2, lay.boundary_idx, xb.expand(batch + xb.shape[-2:]))
+        cols = [torch.zeros(batch + (n,), dtype=x_i.dtype) for _ in range(K)]
+        for j, (src, k) in enumerate(zip(self.sources, self.species, strict=True)):
+            kw = {"step": step} if getattr(src, "step_integrated", False) else {}
+            cols[k] = cols[k] + mult[..., j:j + 1] * src(t, full[..., k], **kw)
+        out = torch.stack(cols, dim=-1)
+        return {f"{name}.sources": out if axis else out[..., 0]}
 
 
 def assemble_sources(sources, t: float, x_full: torch.Tensor) -> torch.Tensor:

@@ -113,6 +113,7 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 |---|---|---|
 | `IdealGasDensity`<br><small>`noodl.apps.building_physics`</small> | rho = P_ref / (R T); P_ref from drivers["P_ref"] if present (CONTAM section 3.18). | `IdealGasDensity(thermal, *, ambient_index, P_ref=101325.0, R=287.055)` |
 | `LinearDensity`<br><small>`noodl.apps.building_physics`</small> | Boussinesq: rho = rho_0 (1 - (T - T_0) / T_0), the form the analytical natural- ventilation solutions (Li and Delsante 2001) assume. | `LinearDensity(thermal, *, ambient_index, rho_0=1.2041, T_0=293.15)` |
+| `SpeciesSources`<br><small>`noodl.apps.building_physics`</small> | Closure: every source's rate (kg/s) summed into `"<layer>.sources"`, each one times its entry of `"<layer>.source_multiplier"` and placed on its own species. | `SpeciesSources(sources, *, species, layer, names=None)` |
 
 ## Sources
 
@@ -120,7 +121,7 @@ Nodal sources and withdrawals.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `BurstSource`<br><small>`noodl.apps.building_physics`</small> | `mass` delivered uniformly over the step [t_burst, t_burst + dt). | `BurstSource(node, mass, t_burst, dt)` |
+| `BurstSource`<br><small>`noodl.apps.building_physics`</small> | `mass` delivered uniformly over `[t_burst, t_burst + duration)`. | `BurstSource(node, mass, t_burst, dt)` |
 | `ConstantSource`<br><small>`noodl.apps.building_physics`</small> | S = G - R x  (constant coefficient model, eq. 15). | `ConstantSource(node, G, R=0.0)` |
 | `CutoffSource`<br><small>`noodl.apps.building_physics`</small> | S = max(G (1 - x / x_cut), 0)  (eq. 17), clamped at the cutoff concentration. | `CutoffSource(node, G, x_cut)` |
 | `DecayingSource`<br><small>`noodl.apps.building_physics`</small> | S = G0 exp(-(t - t0) / tau) for t >= t0, else 0. | `DecayingSource(node, G0, tau, t0=0.0)` |

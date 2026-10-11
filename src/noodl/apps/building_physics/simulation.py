@@ -1,7 +1,8 @@
 """Run a building model over time: `simulate`, the run loop for both routes' models.
 
 Per step from t0 to t1: every input is evaluated at t1, the END of the step (as ContamX does,
-measured), and `drivers["time"]` is set to t1; then `model.step`.
+measured), and `drivers["time"]` is set to t1 and `drivers["time_step"]` to the step's length;
+then `model.step`.
 The first row is the initial state with its quasi-steady airflow at the start time (as
 ContamX's steady initialisation). Two CONTAM terms are handled here, because they couple one
 step to the next:
@@ -153,6 +154,7 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
                 if c - t > cal.round_off(c) and t_out - c > cal.round_off(c)]
         for t1 in [*cuts, t_out]:
             d, dt, t0 = drivers_at(t1), t1 - t, t
+            d["time_step"] = torch.tensor(dt, dtype=F64)
 
             def run(s, d=d, dt=dt, t0=t0, start=state, m0=mass):
                 # Every pass advances the SAME step from its start state; only the zone

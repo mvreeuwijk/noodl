@@ -580,7 +580,7 @@ def test_the_run_control_is_read():
     rc = read_prj(STACK_OWN).run_control
     assert isinstance(rc, RunControl)
     assert rc.transient_airflow and rc.contaminants == "transient"
-    assert (rc.integration, rc.integration_weight) == ("default", 1.0)
+    assert (rc.integration, rc.integration_weight) == ("trapezoid", 1.0)
     assert (rc.start_day, rc.start_time, rc.end_day, rc.end_time) == (1, 0.0, 1, 86400.0)
     assert (rc.time_step, rc.output_step, rc.day_type) == (300.0, 300.0, 1)
     assert rc.duration == 86400.0
@@ -755,3 +755,48 @@ def test_a_constant_wind_pressure_on_an_interior_path_is_refused(tmp_path):
     text = THREE.read_text()
     with pytest.raises(ValueError, match=r"path 2.*constant wind pressure.*envelope"):
         read_prj(_variant(text, path2, path2[:-2] + "4 ", tmp_path))
+
+
+def _scheduled_source_text(shape_npts, rows):
+    text = (DATA / "doorway_damper_fan.prj").read_text()
+    return text.replace(
+        "0 ! day-schedules:\n-999\n0 ! week-schedules:\n-999\n",
+        "1 ! day-schedules:\n! # npts shap utyp ucnv name\n"
+        f"  1    {shape_npts}    0    1    0 On\n\n{rows}-999\n"
+        "1 ! week-schedules:\n! # utyp ucnv name\n  1    1    0 OnWeek\n\n"
+        " 1 1 1 1 1 1 1 1 1 1 1 1\n-999\n", 1)
+
+
+_SRC_OFF = "  1   1   1   0   0     1     0"
+_SRC_ON = "  1   1   1   1   0     1     0"
+
+
+def test_a_source_schedule_becomes_an_input_on_the_source_multiplier(tmp_path):
+    text = _scheduled_source_text(3, " 00:00:00 0\n 09:00:00 1\n 24:00:00 1\n")
+    p = read_prj(_variant(text, _SRC_OFF, _SRC_ON, tmp_path))
+    (inp,) = p.inputs
+    assert inp.key == "species.source_multiplier" and inp.index == (0,)
+    _, _, drivers = project_to_model(p)
+    assert drivers["species.source_multiplier"].tolist() == [0.0]       # off at 00:00
+
+
+def test_decaying_and_burst_sources_with_a_schedule_are_refused(tmp_path):
+    text = _scheduled_source_text(2, " 00:00:00 1\n 24:00:00 1\n")
+    text = text.replace("1 sarin ccf ccm\n\n 0.0001 0 5 0", "1 sarin brs burst\n\n 0.0001 0", 1)
+    with pytest.raises(ValueError, match=r"source 1.*brs.*schedule"):
+        read_prj(_variant(text, _SRC_OFF, _SRC_ON, tmp_path))
+
+
+def test_a_source_naming_an_undefined_species_is_refused(tmp_path):
+    text = (DATA / "doorway_damper_fan.prj").read_text()
+    variant = _variant(text, "1 sarin ccf ccm", "1 nosuch ccf ccm", tmp_path)
+    with pytest.raises(KeyError, match=r"source 1.*element 1.*'nosuch'"):
+        read_prj(variant)
+
+
+def test_a_zone_without_the_variable_contaminants_bit_is_refused_by_name(tmp_path):
+    text = (DATA / "doorway_damper_fan.prj").read_text()
+    variant = _variant(text, "   1  3   0   0   0   1   0.000   600",
+                       "   1  1   0   0   0   1   0.000   600", tmp_path)
+    with pytest.raises(ValueError, match=r"zone 1 \('singleZone'\).*variable-contaminants"):
+        read_prj(variant)

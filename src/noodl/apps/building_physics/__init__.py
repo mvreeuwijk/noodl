@@ -44,6 +44,7 @@ from noodl.apps.building_physics.sources import (
     ConstantSource,
     CutoffSource,
     DecayingSource,
+    SpeciesSources,
     assemble_sources,
     sources_from_project,
 )
@@ -77,6 +78,7 @@ __all__ = [
     "Project",
     "RunControl",
     "Signal",
+    "SpeciesSources",
     "TimeSeries",
     "WallMass",
     "Weather",
