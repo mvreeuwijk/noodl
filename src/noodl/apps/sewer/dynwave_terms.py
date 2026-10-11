@@ -299,7 +299,7 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     head2 = depth2 + geo.invert2
     h1 = torch.maximum(head1, z1)
     h2 = torch.maximum(head2, z2)
-    pinned1 = head1 < z1          # h1 no longer follows the node head (design D4)
+    pinned1 = head1 < z1          # h1 no longer follows the node head (lagged)
     pinned2 = head2 < z2
     # dwflow.c:119-129 -- end flow depths, at least FUDGE, at most yFull unless SLOT
     y1 = torch.clamp(h1 - z1, min=FUDGE)
@@ -476,7 +476,7 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     momentum = (q_old - dq2 + dq3 + dq4) / denom                               # :240
     k = GRAVITY_FT * dt * a_wtd / (length * denom)                             # :243
     c0 = (q_old + dq3 + dq4) / denom
-    # an end head that does not follow its node is folded into c0 (design D4)
+    # an end head that does not follow its node is folded into c0 (lagged)
     pinned = pinned1 | pinned2
     k_total = k * barrels                                                      # dwflow.c:243
     lagged1 = torch.where(pinned2 & ~pinned1 & ~dry_exit, k_total, zero)

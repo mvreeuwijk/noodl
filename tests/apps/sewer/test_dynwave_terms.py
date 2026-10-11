@@ -114,7 +114,7 @@ def test_drop_inlet_downstream_critical():
                           xt.area_of_depth(t([0.4]), g.y_full, g.a_full), 5.0)
     assert r.flow_class.item() == dt_.DN_CRITICAL
     assert r.surface_area2.item() == 0.0
-    assert r.conveyance.item() == 0.0               # pinned end: k folded into c0 (D4)
+    assert r.conveyance.item() == 0.0               # pinned end: k folded into c0
     assert r.flow_offset.item() == pytest.approx(r.momentum_flow.item())
     # dwflow.c:490-493 -- end depth 2 is min(yN, yC) at |q_last|
     yn = xt.normal_depth_ft(t([1.0]), g.y_full, g.a_full, g.s_full, g.beta)

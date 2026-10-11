@@ -89,14 +89,15 @@ Drivers = dict[str, Tensor]
 
 #: SWMM's dry-node flow cap (`dwflow.c:273-276`): 1e-4 cfs, in m3/s.
 FUDGE_FLOW = 1.0e-4 * QCF
-#: Bed stiffening factor of `JunctionStorage` (design D3): below its invert a junction's
-#: storage slope gains ``(2 A_bed/dt) K_BED``, standing in for SWMM's ``yNew < 0 -> 0``.
+#: Bed stiffening factor of `JunctionStorage` (docs: "Bed stiffening and lagged pieces"): below
+#: its invert a junction's storage slope gains ``(2 A_bed/dt) K_BED``, standing in for SWMM's
+#: ``yNew < 0 -> 0``.
 K_BED = 1.0e6
-#: Stiffness factor of an EXTRAN junction's hold band at its crown (design E1, the tie rule
-#: in `JunctionStorage`): the band rises with ``(2 A_bed/dt) K_HOLD``. It trades the band's
-#: width ``|w_c| dt / (2 A_bed K_HOLD)`` (0.6 mm at w_c = 0.26 m3/s, SWMM's default surface
-#: area floor and a 5 s step) against the head solve's round-off floor on it, ``(2 A_bed/dt)
-#: K_HOLD eps |H| / 2`` (3e-13 m3/s at 12 m), which must stay below the 1e-12 m3/s a
+#: Stiffness factor of an EXTRAN junction's hold band at its crown (the tie rule in
+#: `JunctionStorage`; docs: "Surcharge: SLOT and EXTRAN"): the band rises with ``(2 A_bed/dt)
+#: K_HOLD``. It trades the band's width ``|w_c| dt / (2 A_bed K_HOLD)`` (0.6 mm at w_c = 0.26 m3/s,
+#: SWMM's default surface area floor and a 5 s step) against the head solve's round-off floor on it,
+#: ``(2 A_bed/dt) K_HOLD eps |H| / 2`` (3e-13 m3/s at 12 m), which must stay below the 1e-12 m3/s a
 #: surcharged run's parity needs; the bed's K_BED would put that floor at 6e-10 m3/s.
 K_HOLD = 1.0e3
 #: The band is also at least `K_HOLD_STORAGE` times the junction's own storage slope
@@ -105,7 +106,7 @@ K_HOLD = 1.0e3
 #: otherwise outgrow ``K_HOLD A_bed``). Its round-off floor then scales with A_s: 6e-12
 #: m3/s at A_s = 1200 m2, 5 s and 12 m, above a 1e-12 m3/s head-solve atol there.
 K_HOLD_STORAGE = 10.0
-#: A surcharged junction's anchor slope floor (design E1): ``K_ANCHOR (2 A_s/dt)`` (m2/s) is
+#: A surcharged junction's anchor slope floor (EXTRAN surcharge): ``K_ANCHOR (2 A_s/dt)`` (m2/s) is
 #: added to the conduit conveyance its pass lags (`JunctionStorage`), so the junction's row
 #: of the head solve stays nonsingular even where every attached conduit's dependence on its
 #: head is lagged or limited. The anchor vanishes at the fixed point, so its size only
@@ -138,14 +139,17 @@ SOLVE_ATOL = 1.0e-12
 _BED_FLOOR_MARGIN = 4.0
 #: SWMM's default junction surface-area floor (`dynwave.c:62`), ft2.
 DEFAULT_MIN_SURFACE_AREA_FT2 = 12.566
-#: SI area per SWMM ft2 (design D2): makes ``A_s dy = 0.5 dt N`` exact in m, m3/s.
+#: SI area per SWMM ft2 (docs: "Units"): makes ``A_s dy = 0.5 dt N`` exact in m, m3/s.
 _AREA_SI = QCF / LCF
 
 #: The deepest fill (depth over diameter) the headspace geometry sees. A conduit flowing full
 #: has no headspace (A_air = 0) and the headspace law's resistance is infinite there; the air
 #: side reads the depth capped at this fraction of the diameter instead, so a full or
-#: surcharged conduit keeps a finite, very small air area (about 6e-5 D2) and is, to a
-#: part in 1e9, a closed path (`DynamicWaveHydraulics`, "Air").
+#: surcharged conduit keeps a finite, very small air area (about 6e-5 D**2) and a very large
+#: resistance, with finite derivatives. It is nearly, not exactly, a closed path: the
+#: interfacial drag does not depend on the headspace's area, so a small, nonzero flow of air
+#: still moves through a capped full conduit (`DynamicWaveHydraulics`, "Air"; docs:
+#: "Headspace air on the dynamic wave").
 AIR_DEPTH_RATIO_MAX = 0.999
 
 #: A manhole's shaft surface area (m2) when `Manhole.surface_area` is not set: SWMM's
@@ -290,11 +294,12 @@ class DynamicWaveConduit(Element):
     out of a dry upstream node, at least -`FUDGE_FLOW` out of a dry downstream node (each
     times the conduit's barrels).
 
-    The normal-flow slope switch (the tie rule). The check's flag is lagged (design D4):
-    evaluated by the closure on the fed heads and flow. Where it is SWMM's slope test ``y1 <
-    y2`` alone, with both end depths inside their clamps, the test is ``dp < dz`` (dz = z1 -
-    z2, the conduit-end inverts), a switch on this element's own argument, and it is applied
-    within the pass instead, as a continuous, non-decreasing curve::
+    The normal-flow slope switch (the tie rule). The check's flag is lagged (docs: "Bed
+    stiffening and lagged pieces"): evaluated by the closure on the fed heads and flow. Where
+    it is SWMM's slope test ``y1 < y2`` alone, with both end depths inside their clamps, the
+    test is ``dp < dz`` (dz = z1 - z2, the conduit-end inverts), a switch on this element's
+    own argument, and it is applied within the pass instead, as a continuous, non-decreasing
+    curve::
 
         q = min(lin, max(q_norm, q_last + S (dp - dz)))
 
@@ -377,9 +382,9 @@ class DynamicWaveConduit(Element):
 
 
 class StructureLink(Element):
-    """A flow regulator (orifice, weir or outlet; design E5) with its flow linearised about
-    the previous pass: ``q = c0 + g (dp - dp_fed)`` (m3/s, dp = H1 - H2 in m), then the flap
-    gate's clamp.
+    """A flow regulator (orifice, weir or outlet; docs: "Orifices, weirs and outlets") with its flow
+    linearised about the previous pass: ``q = c0 + g (dp - dp_fed)`` (m3/s, dp = H1 - H2 in m), then
+    the flap gate's clamp.
 
     ``c0`` is SWMM's own regulator flow at the previous pass's heads (`link.c`
     ``orifice_getInflow`` / ``weir_getInflow`` / ``outlet_getInflow``,
@@ -496,8 +501,8 @@ def _build_structures(kind: str, devices, nodes: list, invert: Tensor, gated_out
 
 class JunctionStorage(NodeSource):
     """SWMM's junction continuity as a node withdrawal: trapezoidal storage over the step,
-    with a stiff bed below the invert (design D3), or no storage at all where the junction
-    is EXTRAN-surcharged (design E1), capped by flooding at the junction's top (design E3).
+    with a stiff bed below the invert, or no storage at all where the junction is
+    EXTRAN-surcharged, capped by flooding at the junction's top.
 
     ``w(H) = (2 A_s/dt)(H - H_start) - N_start + (2 A_bed/dt) K_BED min(H - z_bed, 0)``
     (m3/s, positive out of the network), so that with the conduit flows and the lateral
@@ -510,7 +515,7 @@ class JunctionStorage(NodeSource):
     storage slope the bed is ``K_BED A_bed / A_s`` stiffer: 1e6 at the floor, but only ~1e3
     where A_s is a thousand times a tiny user MIN_SURFAREA.
 
-    EXTRAN surcharge (design E1; `crown` given, the junction crown heads in m). Above its
+    EXTRAN surcharge (`crown` given, the junction crown heads in m). Above its
     crown a junction stores nothing: SWMM's surcharged update ``y_new = y_last + corr
     dQ/denom`` (`dynwave.c:716-741`) is at its fixed point exactly when the net inflow dQ is
     0. With ``w_c`` the free storage withdrawal at the crown (``(2 A_s/dt)(H_crown - H_start)
@@ -543,7 +548,7 @@ class JunctionStorage(NodeSource):
     the crown onto the band; SWMM's surcharged depth lies ``N(crown)/sum(k)`` above it, so
     that needs a net inflow at the crown below ``|w_c| sum(k)/stiff``, a thin sliver.
 
-    Flooding (design E3; `top` given, the junction heads at y_max = full depth + SurDepth,
+    Flooding (`top` given, the junction heads at y_max = full depth + SurDepth,
     m). SWMM holds a junction whose update would end above y_max at y_max and lets the
     excess leave the system (`dynwave.c:743-795`, no ponding). With ``w`` the withdrawal
     above, ``S`` the wall slope (the band's ``stiff``, at least the anchor's ``s`` where
@@ -579,7 +584,7 @@ class JunctionStorage(NodeSource):
     or the threshold itself, H = H*, with the withdrawal inside the jump: the solution where
     SWMM has none.
 
-    Reads the per-junction drivers ``"water.storage_area"`` A_s (m2, design D2's SI area),
+    Reads the per-junction drivers ``"water.storage_area"`` A_s (m2, `_AREA_SI`),
     ``"water.head_start"`` (m), ``"water.net_inflow_start"`` (m3/s) and
     ``"water.storage_rate"`` 1/dt (1/s); with `crown` also ``"water.surcharged"`` (0/1)
     and ``"water.surcharge_slope"`` (m2/s), and `surcharged` reads ``"water.head_last"``
@@ -744,7 +749,7 @@ class DynamicWaveHydraulics:
     full-node driver ``"inflow"`` (m3/s, lateral inflow, zero at outfalls) and its own
     carried state, pinned by `Model` to the step start: ``"sewer.junction_depth"`` (m),
     ``"sewer.pipe_flow"`` (m3/s), ``"sewer.mid_area"`` (SWMM's stored mid-depth area, SI
-    area m2 per design D2) and ``"sewer.net_inflow"`` (m3/s, per junction). With a
+    area m2, `_AREA_SI`) and ``"sewer.net_inflow"`` (m3/s, per junction). With a
     `StepContext` it writes ``"water.sources"``, ``"water.phi_boundary"`` (outfall heads, m),
     the `DynamicWaveConduit` drivers and the `JunctionStorage` drivers, and the
     reporting key ``"sewer.overflow"`` (below); always the carried keys and the reporting
@@ -752,7 +757,7 @@ class DynamicWaveHydraulics:
     ``"sewer.V_wet"`` (m3), ``"sewer.junction_depth"`` (m) and ``"sewer.surcharged"``
     (per junction, 0/1).
 
-    EXTRAN surcharge (design E1): `crown_depth` is each junction's highest attached conduit
+    EXTRAN surcharge: `crown_depth` is each junction's highest attached conduit
     top (`dynwave.c:137-153`). The closure writes the drivers ``"water.surcharged"`` (0/1,
     from the fed heads: `JunctionStorage.surcharged`), ``"water.surcharge_slope"`` (m2/s)
     and ``"water.head_last"`` (the fed junction heads, m); a surcharged junction holds
@@ -762,7 +767,7 @@ class DynamicWaveHydraulics:
     although it is not holding dQ = 0 -- the solve's own flag is the driver
     ``"water.surcharged"``. Under SLOT no junction is ever surcharged (`dynwave.c:677`).
 
-    Flooding (design E3, no ponding): `flood_depth` is SWMM's y_max, the full depth
+    Flooding (no ponding): `flood_depth` is SWMM's y_max, the full depth
     `full_depth` (MaxDepth extended to the crown, `link.c:440-463`) plus the junction's
     SurDepth (`Manhole.surcharge_depth`). The closure writes ``"water.net_inflow_last"``
     (the fed net inflow, m3/s), ``"water.flood_excess"`` (m3/s, `JunctionStorage`) and the
@@ -793,7 +798,7 @@ class DynamicWaveHydraulics:
     chatter through the other end's area either. Only the nearest threshold of each
     junction is switched within the pass.
 
-    Orifices, weirs and outlets (design E5; `net.orifices`, `.weirs`, `.outlets`): each
+    Orifices, weirs and outlets (`net.orifices`, `.weirs`, `.outlets`): each
     kind present is a `StructureLink` edge kind whose ``"water.q"`` columns follow the
     pipes' (`link_names`, `edge_kinds`). The closure writes, per kind, SWMM's regulator flow
     at the fed heads ``"water.<kind>.flow_offset"`` (m3/s), its slope
@@ -810,9 +815,9 @@ class DynamicWaveHydraulics:
     END of the step (`outfall_stage` builds it; `simulate_dynamic_wave` sets it each step).
     The initial heads use its value at t = 0.
 
-    Quality (design E7; docs: "Quality on the dynamic wave"): with `quality_layer` set, the
+    Quality (docs: "Quality on the dynamic wave"): with `quality_layer` set, the
     closure carries one more key, ``"sewer.quality_volume"`` (m3, per junction): the water
-    the junction's transport control volume holds. It starts at E7's half the summed wetted
+    the junction's transport control volume holds. It starts at half the summed wetted
     volume of the attached conduits plus a storage unit's own volume (`quality_capacity`)
     and then follows the junction's own continuity on the flows the transport sees,
     ``V_end = V_start + dt (N - overflow)`` with N the net inflow of the pass
@@ -832,7 +837,7 @@ class DynamicWaveHydraulics:
     depth), which sulfide generation reads. It never writes the quality layer's flows:
     those are the head layer's ``"water.q"``.
 
-    Air (design E7; docs: "Headspace air on the dynamic wave"): the closure always writes the
+    Air (docs: "Headspace air on the dynamic wave"): the closure always writes the
     headspace reporting keys of each conduit at its link depth y (`Link.newDepth =
     min(y_mid, y_full)`, one barrel's, capped at `AIR_DEPTH_RATIO_MAX` of the diameter D):
     ``"sewer.A_air"`` (m2, the TOTAL over the barrels, ``barrels (pi D2/4 - A(y))``),
@@ -850,7 +855,7 @@ class DynamicWaveHydraulics:
     storage curve's volume between the water and the full depth for a storage unit; the shaft
     term needs `ground` on every manhole, as on the kinematic path.
 
-    The arithmetic is SWMM's own, in feet (design D2); `layer` names the head layer.
+    The arithmetic is SWMM's own, in feet (docs: "Units"); `layer` names the head layer.
     """
 
     integrates = True
@@ -1597,7 +1602,7 @@ class DynamicWaveHydraulics:
                 f"{self.quality_layer}.overflow_loss": lost}
 
     def quality_capacity(self, wetted: Tensor, stored: Tensor) -> Tensor:
-        """Design E7's geometric quality capacity (m3, per junction) from the conduits'
+        """The geometric quality capacity (m3, per junction) from the conduits'
         wetted volumes `wetted` (m3, totals over barrels) and the junctions' own stored
         volumes `stored` (m3, 0 but at a storage unit): half of every attached conduit's
         volume plus its own, floored at `CAPACITY_FLOOR` so a dry junction keeps a
@@ -1739,7 +1744,7 @@ class DynamicWaveHydraulics:
             "sewer.net_inflow": through[jidx],                                # flowrout.c:458
         }
         if self.quality_layer is not None:
-            # E7's half-volumes at the initial depths: the conduit volumes SWMM starts
+            # the half-volumes at the initial depths: the conduit volumes SWMM starts
             # from (as "sewer.V_wet" at this state) and a storage unit's own
             terms = self._terms(state, self.options.routing_step)
             state["sewer.quality_volume"] = self.quality_capacity(
@@ -1819,13 +1824,13 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     outlets, each a `StructureLink` edge of its own kind), `pipe_columns`, `notes`,
     `input_specs`, `driver_template`.
 
-    ``quality=True`` adds the `TransportLayer` ``"water_quality"`` of `species` (design E7,
-    `_quality_parts`; `scheme` is its time scheme), judged by the iteration alongside the
-    heads, and attaches `manhole_idx` (the junctions' node indices) and, with sulfide,
-    `out_pipe` (each junction's outgoing conduit).
+    ``quality=True`` adds the `TransportLayer` ``"water_quality"`` of `species` (`_quality_parts`;
+    `scheme` is its time scheme), judged by the iteration alongside the heads, and attaches
+    `manhole_idx` (the junctions' node indices) and, with sulfide, `out_pipe` (each junction's
+    outgoing conduit).
 
-    ``air=True`` adds the headspace air of the kinematic path on the solved conduits (design
-    E7; docs: "Headspace air on the dynamic wave"): the ``"air"`` layer (`f_air`, `f_i`,
+    ``air=True`` adds the headspace air of the kinematic path on the solved conduits (docs:
+    "Headspace air on the dynamic wave"): the ``"air"`` layer (`f_air`, `f_i`,
     `c_s`, `leak_area` (m2), `leak_cd`, `fans` as in `build_model`) reading the conduits'
     headspace drivers from their link depth, and, with quality and sulfide, the
     ``"air_quality"`` layer of H2S and the two-film transfer `H2STransfer`. It needs a
@@ -1978,7 +1983,7 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
 #: ones the closure publishes, as on the kinematic path).
 PIPE_COLUMNS = ("q", "h", "v", "R_h", "d_m", "T", "A_air", "D_h", "V_wet", "V_air")
 
-#: The quality layer's iteration tolerance (kg/m3), judged alongside the heads (design E7).
+#: The quality layer's iteration tolerance (kg/m3), judged alongside the heads.
 #: Its concentrations follow the flows of the pass, so it binds only where the heads have
 #: converged and the concentrations they carry have not. It is ABSOLUTE: 1e-12 kg/m3 is
 #: 1e-9 mg/L, about 1e-11 relative at typical BOD (0.1-0.3 kg/m3) but only ~1e-3 relative
@@ -2014,7 +2019,7 @@ class OverflowLoss(Reaction):
 
 def _quality_parts(net: SewerNetwork, graph: Network, closure: DynamicWaveHydraulics,
                    species: tuple[str, ...], scheme: str) -> dict:
-    """The quality pieces of a dynamic-wave model (design E7): the layer, the lateral-load
+    """The quality pieces of a dynamic-wave model: the layer, the lateral-load
     closure, the reactions, their drivers and input specs.
 
     ``"water_quality"`` is a `TransportLayer` over the junctions (the outfalls its boundary)
@@ -2093,7 +2098,7 @@ def _quality_parts(net: SewerNetwork, graph: Network, closure: DynamicWaveHydrau
 
 def _air_parts(graph: Network, closure: DynamicWaveHydraulics, scheme: str, fans: tuple,
                *, sulfide: bool) -> dict:
-    """The air pieces of a dynamic-wave model (design E7), as the kinematic builder's: the
+    """The air pieces of a dynamic-wave model, as the kinematic builder's: the
     drivers (``"air.phi_boundary"``, the temperatures ``"T_head"`` and ``"T_amb"`` (K) and,
     with `sulfide`, the pH ``"pH"`` and the ``"air_quality.x_boundary"`` of H2S), their input
     specs and, with `sulfide`, the ``"air_quality"`` layer. The air layer carries H2S only, so

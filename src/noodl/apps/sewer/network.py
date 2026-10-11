@@ -659,7 +659,7 @@ def build_model(
     `quality` default to ``False`` there, `coupling` and `dt_storage` (kinematic-wave
     options) are refused by name, and so is a ``geometry="analytic"`` network (dynamic
     wave always uses SWMM's tabulated circle); ``quality=True`` adds the water-quality layer of
-    `species` on the solved flows (design E7, `scheme` its time scheme); ``air=True`` builds
+    `species` on the solved flows (`scheme` its time scheme); ``air=True`` builds
     the headspace air on the solved conduits (`f_air`, `f_i`, `c_s`, `leak_area`, `leak_cd`
     and `fans` as below; dendritic networks only, loops refused by name), `storage` is
     refused; converged to

@@ -217,7 +217,7 @@ def test_first_step_fills_a_dry_junction_by_half_the_inflow(tmp_path):
     j1 = hyd.junction_names.index("J1")
     q_in = drivers["inflow"][model.junction_idx[j1]].item()
     from noodl.apps.sewer.xsect_tables import LCF, QCF
-    floor = hyd.min_area_ft2 * QCF / LCF                            # SI area, design D2
+    floor = hyd.min_area_ft2 * QCF / LCF                            # SI area, `_AREA_SI`
     expected = 0.5 * model.routing_step * q_in / floor
     assert state["water.q"][hyd.pipe_names.index("C1")].item() == 0.0
     assert state["sewer.junction_depth"][j1].item() == pytest.approx(expected, rel=1e-12)
@@ -389,7 +389,7 @@ _PLAIN = {"acceleration": None}
 
 
 def test_anderson_is_the_default_and_halves_the_passes_on_the_tree():
-    """Design E8: Anderson mixing of the head iteration at least halves the mean passes per
+    """Anderson mixing of the head iteration at least halves the mean passes per
     step (measured over 60 steps: 35.2 -> 14.1, plain relaxation judging heads and flows;
     34.8 when it judged the heads alone, which is now refused).
 
@@ -412,7 +412,7 @@ def test_anderson_is_the_default_and_halves_the_passes_on_the_tree():
 
 
 def test_anderson_lands_on_the_relaxed_fixed_point_with_a_tight_head_solve():
-    """Design E8: Anderson mixing moves no fixed point. With the head solve tight (atol
+    """Anderson mixing moves no fixed point. With the head solve tight (atol
     1e-12 m3/s, so no pass stops on its warm start) and both iterations judging heads to
     1e-13 m and flows to 1e-12 m3/s, the looped network's two runs agree to 1e-10 m (1.9e-12
     m measured over 60 steps). The tree cannot be run this way: a junction sitting on its
@@ -450,7 +450,7 @@ def _slot_tree(tmp_path, scale):
 
 def test_slot_surcharges_the_tree_past_the_crown_without_refusal(tmp_path):
     """At 2.5x the fixture's inflows (1.25x tree_kinwave.inp) the water at J4 passes the
-    0.30 m crown of C4 at step 95 (475 s) of 120. The brief's 1.5x only reaches 0.25 m at
+    0.30 m crown of C4 at step 95 (475 s) of 120. A 1.5x scale only reaches 0.25 m at
     J4 over 30 min, so it never surcharges. Under SLOT the pipes stay pressurised, the
     junction equation holds and link depths stay at or below the crown. Under EXTRAN the
     same run fills C4's end at J4 but no junction passes its own crown (J4's is C3's and
@@ -490,7 +490,7 @@ def test_slot_leaves_a_free_surface_run_unchanged(tmp_path):
     torch.testing.assert_close(runs[0]["water.q"], runs[1]["water.q"], rtol=0, atol=1e-10)
 
 
-# ---------------------------------------------------------------- EXTRAN surcharge (E1)
+# ---------------------------------------------------------------- EXTRAN surcharge
 EXTRAN_NAME = "tree_extran_dynwave.inp"
 
 
@@ -525,7 +525,7 @@ def test_junction_crown_is_the_highest_attached_conduit_top():
 
 
 def test_junction_storage_holds_continuity_without_storage_where_surcharged():
-    """Design E1 in `JunctionStorage` (crown head 1.3 m, A_s 2 m2, dt 5 s, so 2 A_s/dt =
+    """EXTRAN surcharge in `JunctionStorage` (crown head 1.3 m, A_s 2 m2, dt 5 s, so 2 A_s/dt =
     0.8 m2/s; the band's stiffness (2/dt) A_bed K_HOLD = 200 m2/s). Junction 0 drains at
     its crown (w_c = 0.8 * 0.3 = 0.24 m3/s), junction 1 would still fill there (w_c = 0.8 *
     0.05 - 0.3 = -0.26 m3/s). The flag comes from the fed head H_last through the band
@@ -612,8 +612,8 @@ def test_junction_storage_holds_a_filling_junction_on_its_area_threshold():
 
 
 def test_extran_surcharge_is_instantaneous_continuity():
-    """Design E1 on the tree at 3x tree_dynwave.inp's inflows (the brief's "1.5x" is
-    tree_kinwave.inp's scale; tree_dynwave.inp is half of that). In SWMM J2 passes its
+    """EXTRAN surcharge on the tree at 3x tree_dynwave.inp's inflows (1.5x
+    tree_kinwave.inp's; tree_dynwave.inp is half of that). In SWMM J2 passes its
     0.30 m crown at step 21 and J4 its 0.45 m crown at step 139. At every step, each
     junction above its crown has no storage: its net inflow is zero (1e-9 m3/s), while the
     junctions below their crowns keep the trapezoidal storage equation (1e-8 m3). The head
@@ -690,7 +690,7 @@ def test_extran_batched_equals_single():
     """A batch of the surcharging tree (J2 and J4 surcharge) and half its inflow (free
     surface throughout): each instance carries its own surcharge flags. The head solve runs
     at atol 1e-12 m3/s: at the default `solve_atol` a surcharged junction's head is resolved
-    only to atol / sum(k) (up to ~2.5e-7 m, ruling R28), and the batch and the single run
+    only to atol / sum(k) (up to ~2.5e-7 m), and the batch and the single run
     took different, equally valid landings within that (2.7e-8 m at J4's crossing, step
     139, once the normal-flow slope switch changed the passes); at 1e-12 they agree to
     1e-12 m."""
@@ -807,7 +807,7 @@ def test_hold_band_is_continuous_at_the_crown_with_the_area_switch_active():
     assert ns.surcharged(drv).item() == 1.0
 
 
-# ------------------------------------------------------------------- flooding (E3)
+# ------------------------------------------------------------------- flooding
 def _flooding_tree(max_depth=0.5, method="extran"):
     """The EXTRAN tree with every junction's MaxDepth `max_depth` (m) and the surcharge
     method `method`: J2's surcharge (4.3 m at step 21 with MaxDepth 5) passes it."""
@@ -838,7 +838,7 @@ def test_full_depth_extends_a_zero_max_depth_to_the_attached_crowns():
 
 
 def test_junction_storage_floods_at_its_top_through_a_lagged_excess():
-    """Design E3 in `JunctionStorage` (top head 1.5 m, A_s 2 m2, dt 5 s: storage slope 0.8
+    """Flooding in `JunctionStorage` (top head 1.5 m, A_s 2 m2, dt 5 s: storage slope 0.8
     m2/s; wall slope (2/dt) max(K_HOLD A_bed, K_HOLD_STORAGE A_s) = 200 m2/s). The wall is
     ``w(top) + E + 200 (H - top)``, E the lagged excess of the fed net inflow over the
     non-flooded withdrawal at the top: junction 0 (w(top) = 0.4, fed N 0.5) floods with E
@@ -1855,7 +1855,7 @@ def test_a_storage_units_area_adds_to_its_conduit_areas_at_the_fed_depth():
     """node.c:383-396 and dynwave.c:315, 582-583: a storage node's surface area is its
     curve's at the previous trial's depth plus the attached conduit ends' (which SWMM does
     NOT zero at a storage node: only regulator ends are, dynwave.c:520-523), before the
-    MIN_SURFAREA floor; in design D2's SI area (ft2 x QCF/LCF)."""
+    MIN_SURFAREA floor; in SI area (ft2 x QCF/LCF, `_AREA_SI`)."""
     from noodl.model import StepContext
     curve = ("functional", 20.0, 1.5, 5.0)
     plain, s0, _ = build_model(_chain_net())
@@ -2060,7 +2060,7 @@ def _fed_heads(model, state, depths):
 
 
 def test_structure_element_is_swmms_flow_linearised_about_the_fed_heads():
-    """Design E5: ``q = c0 + g (dp - dp_fed)``, so at dp = dp_fed it is c0 (SWMM's flow)
+    """Regulator flow: ``q = c0 + g (dp - dp_fed)``, so at dp = dp_fed it is c0 (SWMM's flow)
     whatever g; a flap gate clamps it at 0 (dflow 0 there); dflow is g elsewhere."""
     from noodl.apps.sewer.dynwave import StructureLink
     el = StructureLink("weir")
@@ -2129,7 +2129,7 @@ def test_orifice_end_areas_join_their_junctions_zeroed_at_a_critical_end():
 
 
 def test_regulator_end_areas_are_zeroed_at_a_storage_unit():
-    """R44 (dynwave.c:520-523): at a storage node SWMM zeroes a regulator's end area
+    """dynwave.c:520-523: at a storage node SWMM zeroes a regulator's end area
     (never a conduit's): J2 a storage unit, its orifice end gives it nothing."""
     from noodl.model import StepContext
     model, state, drivers = build_model(_regulated("orifice", storage_at="J2"))
@@ -2178,7 +2178,7 @@ def test_an_outfall_on_a_regulator_takes_zero_normal_and_critical_depth():
 
 @pytest.mark.parametrize("kind", ["orifice", "weir", "outlet"])
 def test_a_run_ends_on_swmms_regulator_flow_at_its_own_heads(kind):
-    """The fixed point is SWMM's (design E5): after each step the regulator's solved flow is
+    """The fixed point is SWMM's: after each step the regulator's solved flow is
     `link_getInflow` at that step's own converged heads, and every junction holds SWMM's
     trapezoidal continuity with it (to the head solve's default atol, `solve_atol`: a
     junction balance within ``0.5 dt atol`` ~ 6e-9 m3 at these 12 m inverts)."""
@@ -2217,7 +2217,7 @@ def test_a_junction_drained_by_an_outlet_alone_holds_continuity():
     ``sumdqdh`` (dynwave.c:716-741), which an outlet leaves 0, so above 1.25 crowns its
     denominator is 0, every depth is a fixed point and SWMM freezes the depth, losing the
     inflow (seen live: a 0.015 m3/s inflow, an outlet passing 0.0023 m3/s for 30 min).
-    noodl holds design E1's instantaneous continuity: the outlet passes the inflow. A
+    noodl holds EXTRAN's instantaneous continuity: the outlet passes the inflow. A
     junction drained only by outlets is therefore listed in the docs' Limitations. The
     outlet carries exactly what its inflow conduit brings (no storage term)."""
     net = _regulated("outlet_to_outfall", crest=0.3, inflow=0.03)
@@ -2391,7 +2391,7 @@ def test_simulate_takes_its_own_stage_function_over_the_models():
                                torch.full((2, 1), 8.7, dtype=F64))
 
 
-# ---------------------------------------------------------------- quality (design E7)
+# ---------------------------------------------------------------- quality
 def _tracer_run(net, steps, loads, *, species=("tracer",), loaded=None, **build):
     """`net` with a quality layer of `species`, the lateral inflow at the junctions of
     `loads` ({junction: kg/m3}) carrying the species `loaded` (default the first) and no
@@ -2436,7 +2436,7 @@ def _outfall_flux(model, state):
 
 
 def test_build_model_builds_quality_on_the_solved_flows(tmp_path):
-    """Design E7: ``water_quality`` advects on every link of the head layer (its flows are
+    """``water_quality`` advects on every link of the head layer (its flows are
     ``"water.q"``, `Model.flow_layer_of`), its interior is the junctions in junction order,
     and the iteration judges it alongside the heads."""
     model, state, drivers = build_model(_tree(tmp_path), quality=True)
@@ -2453,7 +2453,7 @@ def test_build_model_builds_quality_on_the_solved_flows(tmp_path):
 
 def test_quality_volume_starts_at_half_the_attached_conduits_and_follows_continuity(
         tmp_path):
-    """Design E7 as built: a junction's transport control volume starts at half the summed
+    """A junction's transport control volume starts at half the summed
     wetted volume (`sewer.V_wet`, a total over barrels) of its attached conduits, floored at
     `CAPACITY_FLOOR` (half of the outfall conduit belongs to no junction), and then follows
     the junction's own continuity on the solved flows, ``V_end = V_start + dt N`` (no
@@ -2512,7 +2512,7 @@ def test_a_uniform_concentration_stays_uniform_while_the_tree_fills(tmp_path):
     every step, while the tree fills from dry: the transport control volume holds the
     water the junction's continuity says arrived, so the amount form mixes like with like
     (to the flow tolerance of the iteration). Splitting each conduit's volume in half
-    instead (E7's geometric capacity) put the tree between 0 and 5 times the load while it
+    instead (the geometric capacity) put the tree between 0 and 5 times the load while it
     filled: a conduit filling from its upstream end holds that junction's water."""
     model, _, states = _uniform_run(_tree(tmp_path, scale=0.5), 24)
     for state in states[1:]:
@@ -2680,7 +2680,7 @@ def test_quality_runs_batched(tmp_path):
                                rtol=1e-9, atol=1e-15)
 
 
-# ---------------------------------------------------------------- headspace air (design E7)
+# ---------------------------------------------------------------- headspace air
 def _air_run(net, steps, **build):
     """`net` with the headspace air, run `steps` steps: the model, the final state and the
     drivers."""

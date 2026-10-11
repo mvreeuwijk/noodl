@@ -581,7 +581,7 @@ def outlet_dqdh(out: OutletSet, h1: Tensor, h2: Tensor, z1: Tensor, z2: Tensor, 
     """The outlet flow's central-difference slope in its upstream head (cfs/ft, >= 0):
     ``(Q(h_up + step) - Q(h_up - step)) / (2 step)``, the upstream node being node 1 where
     ``h1 >= h2`` and node 2 otherwise (`step` in ft, default SWMM's FUDGE). SWMM computes
-    no slope for an outlet; this one only shapes noodl's passes (design E5)."""
+    no slope for an outlet; this one only shapes noodl's passes."""
     forward = h1 >= h2
     d1 = torch.where(forward, torch.full_like(h1, step), torch.zeros_like(h1))
     d2 = torch.where(forward, torch.zeros_like(h2), torch.full_like(h2, step))

@@ -326,19 +326,18 @@ def test_ramp_down_matches_swmm_until_swmm_stops_converging(tmp_path):
     """Every inflow of the tree ramps down to nothing (`RAMP_FACTORS`), in SWMM (pyswmm's
     `generated_inflow`) and in noodl (a per-step inflow series).
 
-    Compared steps (E9): SWMM converges on every step up to 144, which covers the fill, the
-    whole ramp and the drain until J4 meets the outfall's depth; those are asserted at the
-    free-surface targets. From step 145 on SWMM fails to converge on 82 of the remaining 108
-    steps (found by ending the run after each step; its report says 32.5 % of all 252), as
-    C5 (J4 -> free outfall) reaches the switch of its normal-flow slope test: its limited
-    flow is Manning's normal flow at J4's depth, at which the outfall's own depth (set from
-    that flow) is J4's depth again, up to the ~1e-5 m interpolation mismatch of SWMM's
-    tables, so neither side of the test need be consistent (docs/applications/sewer.md,
-    "Dynamic wave": the normal-flow slope switch). SWMM's last trial is then wherever its
-    alternating trials stopped, J4 within ~6e-4 m of the outfall depth on either side, and
-    later steps start from that state, so no later step is a fixed-point comparison: steps
-    145 onwards are excluded from the targets. They are asserted only to the scale of
-    SWMM's own oscillation (1e-3 m, 5e-4 m3/s), with noodl converging on every one of them,
+    Compared steps (SWMM converged): SWMM converges on every step up to 144, which covers the fill,
+    the whole ramp and the drain until J4 meets the outfall's depth; those are asserted at the
+    free-surface targets. From step 145 on SWMM fails to converge on 82 of the remaining 108 steps
+    (found by ending the run after each step; its report says 32.5 % of all 252), as C5 (J4 -> free
+    outfall) reaches the switch of its normal-flow slope test: its limited flow is Manning's normal
+    flow at J4's depth, at which the outfall's own depth (set from that flow) is J4's depth again,
+    up to the ~1e-5 m interpolation mismatch of SWMM's tables, so neither side of the test need be
+    consistent (docs/applications/sewer.md, "Dynamic wave": the normal-flow slope switch). SWMM's
+    last trial is then wherever its alternating trials stopped, J4 within ~6e-4 m of the outfall
+    depth on either side, and later steps start from that state, so no later step is a fixed-point
+    comparison: steps 145 onwards are excluded from the targets. They are asserted only to the scale
+    of SWMM's own oscillation (1e-3 m, 5e-4 m3/s), with noodl converging on every one of them,
     on SWMM's fixed point where one exists and on the switching surface where none does."""
     steps = len(RAMP_FACTORS)
     before = RAMP_SWMM_FIRST_FAILURE - 1
@@ -438,7 +437,7 @@ def test_flooding_into_an_outfall_conduit_matches_swmm_where_swmm_converged(tmp_
     """Every MaxDepth 0.5 m: J2 floods from step 21 and J4 from step 236, and J4's only
     outflow conduit C5 ends at the free outfall.
 
-    Excluded (E9): C5's flow, the outfall's depth and J4's overflow on steps 236-258,
+    Excluded (SWMM unconverged): C5's flow, the outfall's depth and J4's overflow on steps 236-258,
     where SWMM stops before C5's flow has converged. SWMM's stopping rule tests node depths
     only, and only those of non-outfall nodes (`dynwave.c:615-631`). A flooded junction is
     clamped at y_max on every trial, so it passes the test as soon as it is clamped twice
@@ -1048,8 +1047,9 @@ def test_drop_switch_matches_swmm_one_step_from_its_state_around_its_failure(tmp
 @pytest.mark.slow
 @pytest.mark.parametrize("name", sorted(DROP_VARIANTS))
 def test_drop_switch_matches_swmm_wherever_swmm_converges(tmp_path, name):
-    """Each drop variant over all 359 steps. E9: SWMM converges on all but the steps listed
-    in `DROP_SWMM_FAILS` (measured here); those and the steps after them are excluded.
+    """Each drop variant over all 359 steps, compared where SWMM converges: on all but
+    the steps listed in `DROP_SWMM_FAILS` (measured here); those and the steps after them
+    are excluded.
 
     - noodl's own run converges on every step and meets the targets on every step before
       SWMM's first failure. From that step on the two histories differ by what each did
@@ -1098,11 +1098,11 @@ def test_drop_switch_matches_swmm_wherever_swmm_converges(tmp_path, name):
 #:   held at the full volume (link.c:450-458, dynwave.c:683-687, node.c:943-945);
 #: - ``slot``: the same under SURCHARGE_METHOD SLOT (no storage surcharge branch: J4 rises
 #:   on its storage curve's area above its full depth);
-#: - ``extran_high``: ``extran`` with J4's MaxDepth 0.55 m ABOVE its 0.45 m crown (ruling
-#:   R46): its full depth stays 0.55 m, and J4 surcharges only above that (to 0.84 m), where
-#:   a plain junction would at its crown. SWMM's surcharged branch still uses the crown for
-#:   its blend and its floor (dynwave.c:724-736); noodl holds the band at the full depth.
-#:   J4 never falls back below 0.55 m in this run (it ends at 0.66 m).
+#: - ``extran_high``: ``extran`` with J4's MaxDepth 0.55 m ABOVE its 0.45 m crown
+#:   (link.c:440-463): its full depth stays 0.55 m, and J4 surcharges only above that (to
+#:   0.84 m), where a plain junction would at its crown. SWMM's surcharged branch still
+#:   uses the crown for its blend and its floor (dynwave.c:724-736); noodl holds the band
+#:   at the full depth. J4 never falls back below 0.55 m in this run (it ends at 0.66 m).
 STORAGE_VARIANTS = {
     "free_surface": ("storage_dynwave.inp", []),
     "extran": ("storage_extran_dynwave.inp", []),
@@ -1234,7 +1234,7 @@ def test_storage_units_match_swmm_at_every_step(tmp_path, variant):
 #: - ``outlet_through_crest``: J3 at 10.95 m (OR1's crest 11.1 m is 0.15 m above it) and C3
 #:   0.30 m, so J3 fills through OR1's crest while OR1 flows (step 97): OR1's end area at J3
 #:   jumps from 0 (DN_CRITICAL) to ``W L / 2`` (~9 m2, SUBCRITICAL), a threshold like a drop
-#:   end's (ruling R49). SWMM converges on every step and noodl converges and matches without
+#:   end's. SWMM converges on every step and noodl converges and matches without
 #:   an in-pass switch for it, so none is added.
 #:   (Out1 FIXED at 10.0 m instead fills J5 from the outfall and reverses W1 through zero
 #:   flow under full submergence, where the flow's slope in the heads is infinite: SWMM
@@ -1302,7 +1302,7 @@ def test_regulators_match_swmm_at_every_step(tmp_path, variant):
     """Every variant over all 359 steps at the free-surface targets, with the regime it
     exists for: the orifice reaching its orifice regime (J2 above the opening's crown,
     11.3 m) with J3 below its crest, except in ``outlet_through_crest``, where J3 fills
-    through OR1's crest while OR1 flows (its end area at J3 jumping, R49); in
+    through OR1's crest while OR1 flows (its end area at J3 jumping); in
     ``submerged`` W1 first reversed (J5 above its 9.8 m crest, J4 below it), then
     submerged (J5 above the crest while it flows forward) for much of the run."""
     worst, rows = _structure_parity(tmp_path, variant)
@@ -1452,7 +1452,7 @@ def test_a_tidal_outfall_matches_swmm_under_the_variable_step(tmp_path):
     _assert_parity(_worst(_differences(None, rows, conn, len(rows), run=run)))
 
 
-# ------------------------------------------------------------------- quality (design E7)
+# ------------------------------------------------------------------- quality
 #: A conservative tracer (`[POLLUTANTS]`, Kdecay 0) for the quality comparisons, written into
 #: tmp_path variants of the committed fixtures (the reader takes only constant pollutant
 #: baselines; a time series belongs in the drivers).
@@ -1527,7 +1527,7 @@ def _noodl_tracer(name, loads):
             c_in[model.net.nodes.index(node)] = fn(k)
         drivers = dict(drivers, tracer_in=c_in)
         # the head solve at atol 1e-12: at the default solve_atol a junction can stop with
-        # a balance residual of ~1e-9 m3/s (R28), 1e-8 of these flows, which a steady
+        # a balance residual of ~1e-9 m3/s (its atol), 1e-8 of these flows, which a steady
         # tracer reads directly as a mixing ratio
         state, _ = simulate_dynamic_wave(model, state, drivers, steps=1, atol=1e-12)
         full = torch.zeros(model.net.n, dtype=torch.float64)
@@ -1638,7 +1638,7 @@ def test_tracer_on_the_tree_in_transit_follows_each_codes_scheme(tree_tracer):
       zero-volume junctions that mix the upstream links' START-of-step concentrations (a lag
       of one step each) and conduit reactors of the conduit volume. Asserted at 1e-12
       relative to the plateau, so the scheme is the one ported there.
-    * noodl's reactors are the junctions (design E7: half of each attached conduit's volume,
+    * noodl's reactors are the junctions (half of each attached conduit's volume,
       then the junction's own continuity), solved implicitly over the network. At steady
       flow both are linear time-invariant chains with the same gain g, so the area between
       each output and its final value is ``g u_final T``, T the chain's mean delay: SWMM's
