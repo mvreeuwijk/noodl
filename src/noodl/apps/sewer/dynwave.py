@@ -26,6 +26,13 @@ from typing import TYPE_CHECKING
 import torch
 
 from noodl.apps.sewer import geometry as geom
+from noodl.apps.sewer.air import (
+    F_AIR_DEFAULT,
+    F_I_DEFAULT,
+    add_air_edges,
+    air_layer,
+    check_air_topology,
+)
 from noodl.apps.sewer.dynwave_terms import (
     DAMPING,
     FUDGE,
@@ -36,8 +43,8 @@ from noodl.apps.sewer.dynwave_terms import (
     conduit_terms,
     lengthening_factor,
 )
-from noodl.apps.sewer.hydraulics import CAPACITY_FLOOR
-from noodl.apps.sewer.quality import LateralLoads, SulfideGeneration
+from noodl.apps.sewer.hydraulics import CAPACITY_FLOOR, air_density_nodes
+from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
 from noodl.apps.sewer.storage import StorageCurves
 from noodl.apps.sewer.structures import (
     CIRCULAR,
@@ -67,7 +74,7 @@ from noodl.apps.sewer.xsect_tables import (
 from noodl.elements.base import Element
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.reaction import Reaction
-from noodl.layers.transport import TransportLayer
+from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Model, StepContext
 from noodl.nodesources import NodeSource
 from noodl.topology import Network
@@ -133,6 +140,17 @@ _BED_FLOOR_MARGIN = 4.0
 DEFAULT_MIN_SURFACE_AREA_FT2 = 12.566
 #: SI area per SWMM ft2 (design D2): makes ``A_s dy = 0.5 dt N`` exact in m, m3/s.
 _AREA_SI = QCF / LCF
+
+#: The deepest fill (depth over diameter) the headspace geometry sees. A conduit flowing full
+#: has no headspace (A_air = 0) and the headspace law's resistance is infinite there; the air
+#: side reads the depth capped at this fraction of the diameter instead, so a full or
+#: surcharged conduit keeps a finite, very small air area (about 6e-5 D2) and is, to a
+#: part in 1e9, a closed path (`DynamicWaveHydraulics`, "Air").
+AIR_DEPTH_RATIO_MAX = 0.999
+
+#: A manhole's shaft surface area (m2) when `Manhole.surface_area` is not set: SWMM's
+#: MIN_SURFAREA of 12.566 ft2 (the 4 ft shaft), as the kinematic path's air capacity uses.
+SHAFT_AREA_DEFAULT = 1.167
 #: SWMM's link velocity is 0 at or below this link depth (`link.c:834`), ft.
 _VELOCITY_MIN_DEPTH = 0.01
 #: SWMM's shortest time step, MINTIMESTEP (`dynwave.c:60`), s.
@@ -813,6 +831,24 @@ class DynamicWaveHydraulics:
     depth), which sulfide generation reads. It never writes the quality layer's flows:
     those are the head layer's ``"water.q"``.
 
+    Air (design E7; docs: "Headspace air on the dynamic wave"): the closure always writes the
+    headspace reporting keys of each conduit at its link depth y (`Link.newDepth =
+    min(y_mid, y_full)`, one barrel's, capped at `AIR_DEPTH_RATIO_MAX` of the diameter D):
+    ``"sewer.A_air"`` (m2, the TOTAL over the barrels, ``barrels (pi D2/4 - A(y))``),
+    ``"sewer.D_h"`` (m, one barrel's air hydraulic diameter), ``"sewer.T"`` (m, the total free-
+    surface width over the barrels, so that ``T / A_air``, which the drag reads, is one
+    barrel's) and ``"sewer.V_air"`` (m3, total, ``A_air L``). They are the exact circle
+    (`geometry.air_geometry`) at the link depth, on any `net.geometry`, as the kinematic path
+    evaluates the circle at SWMM's depth with ``geometry="tabulated"``: the tabulated section
+    is the water side's, the air has no SWMM reference. With `air` (the headspace layer
+    ``"air"`` built on the conduits, `air.add_air_edges`) it also writes ``"rho_air_nodes"``
+    (kg/m3, from the drivers ``"T_head"``, ``"T_amb"``) and
+    ``"air_quality.capacity"`` (m3, per junction): the headspace volume of the junction's
+    outgoing conduit plus the air of its shaft above the water, ``A_s (full depth - junction
+    depth)`` for a junction (A_s `Manhole.surface_area` or `SHAFT_AREA_DEFAULT`) and the
+    storage curve's volume between the water and the full depth for a storage unit; the shaft
+    term needs `ground` on every manhole, as on the kinematic path.
+
     The arithmetic is SWMM's own, in feet (design D2); `layer` names the head layer.
     """
 
@@ -821,10 +857,13 @@ class DynamicWaveHydraulics:
                   "sewer.net_inflow")
 
     def __init__(self, graph: Network, net: SewerNetwork, *, layer: str = "water",
-                 quality_layer: str | None = None) -> None:
+                 quality_layer: str | None = None, air: bool = False,
+                 air_quality_layer: str = "air_quality") -> None:
         self.net = graph
         self.layer = layer
         self.quality_layer = quality_layer
+        self.air = air
+        self.air_quality_layer = air_quality_layer
         if quality_layer is not None:
             self.state_keys = (*type(self).state_keys, "sewer.quality_volume")
         self.options = net.dynamic_wave
@@ -840,8 +879,9 @@ class DynamicWaveHydraulics:
             "sewer.net_inflow": list(self.junction_names),
             "sewer.quality_volume": list(self.junction_names),
         }
+        # the headspace air's node ``"ambient"`` carries no invert (it is on no conduit)
         self.node_invert = torch.tensor(
-            [float(graph.graph.nodes[n]["invert"]) for n in nodes], dtype=F64)
+            [float(graph.graph.nodes[n].get("invert", 0.0)) for n in nodes], dtype=F64)
         self.junction_idx = torch.tensor(
             [nodes.index(n) for n in self.junction_names], dtype=torch.long)
         self.outfall_idx = torch.tensor(
@@ -1010,6 +1050,17 @@ class DynamicWaveHydraulics:
             StorageCurves([m.storage for m in net.manholes], self.full_depth,
                           names=self.junction_names)
             if bool(self.is_storage.any()) else None)
+        if air:
+            outgoing = {p.u: i for i, p in enumerate(net.pipes)}
+            #: per junction: its outgoing conduit's position among the pipes (air.py has
+            #: refused every other topology)
+            self.out_pipe = torch.tensor([outgoing[n] for n in self.junction_names],
+                                         dtype=torch.long)
+            has_ground = all(m.ground is not None for m in net.manholes)
+            #: per junction: the shaft's plan area (m2), 0 where no shaft air is counted
+            self.shaft_area = torch.tensor(
+                [SHAFT_AREA_DEFAULT if m.surface_area is None else m.surface_area
+                 for m in net.manholes], dtype=F64) if has_ground else None
         #: per-junction InitDepth (m)
         self.initial_junction_depth = torch.tensor(
             [m.initial_depth for m in net.manholes], dtype=F64)
@@ -1425,6 +1476,7 @@ class DynamicWaveHydraulics:
             "sewer.R_h": geom.hydraulic_radius(depth_ft * LCF, self.diameter),
             "sewer.d_m": geom.hydraulic_mean_depth(depth_ft * LCF, self.diameter),
         })
+        out.update(self._headspace(depth_ft * LCF, heads, drivers))
         if self.quality_layer is not None and dt is None:
             # a query: the transport control volumes at the state's own time
             volume = state["sewer.quality_volume"]
@@ -1509,6 +1561,41 @@ class DynamicWaveHydraulics:
         if self.quality_layer is not None:
             out.update(self._quality_volume(state, out["sewer.net_inflow"], overflow, dt))
         return out
+
+    def _headspace(self, depth: Tensor, heads: Tensor, drivers: Mapping) -> dict[str, Tensor]:
+        """The headspace keys at the link depths `depth` (m, one barrel's, per pipe) and the
+        full-node `heads` (m): the class docstring's "Air". Every key is finite at a full
+        conduit (the depth is capped at `AIR_DEPTH_RATIO_MAX` of the diameter) and the
+        derivatives are safe at both ends of the circle (`geometry.air_geometry`)."""
+        capped = torch.minimum(depth, AIR_DEPTH_RATIO_MAX * self.diameter)
+        a_air, _p_air, d_h = geom.air_geometry(capped, self.diameter)
+        a_total = self.barrels * a_air
+        volume = a_total * self.length
+        out = {"sewer.A_air": a_total, "sewer.D_h": d_h,
+               "sewer.T": self.barrels * geom.top_width(capped, self.diameter),
+               "sewer.V_air": volume}
+        if not self.air:
+            return out
+        out["rho_air_nodes"] = air_density_nodes(
+            drivers, self.junction_idx, self.node_invert.shape[-1], name="DynamicWaveHydraulics")
+        capacity = volume.index_select(-1, self.out_pipe) + self._shaft_air(heads)
+        out[f"{self.air_quality_layer}.capacity"] = capacity
+        return out
+
+    def _shaft_air(self, heads: Tensor) -> Tensor:
+        """The air of each junction above its water (m3): ``A_s (full depth - depth)`` for
+        a junction, the storage curve's volume between the depth and the full depth for a
+        storage unit; 0 without `ground` on every manhole (as the kinematic path)."""
+        zero = torch.zeros_like(self._junction_depth_ft(heads))
+        if self.shaft_area is None:
+            return zero
+        depth = self._junction_depth_ft(heads) * LCF
+        plain = self.shaft_area * torch.clamp(self.full_depth - depth, min=0.0)
+        if self.storage_curves is None:
+            return plain
+        stored = torch.clamp(self.storage_curves.full_volume - self.storage_curves.volume(depth),
+                             min=0.0)
+        return torch.where(self.is_storage, stored, plain)
 
     def _quality_volume(self, state: Mapping, net_inflow: Tensor, overflow: Tensor,
                         dt: float) -> dict[str, Tensor]:
@@ -1670,6 +1757,10 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
                              quality: bool = False,
                              species: tuple[str, ...] = ("bod", "sulfide"),
                              scheme: str = "implicit",
+                             air: bool = False, f_air: float = F_AIR_DEFAULT,
+                             f_i: float = F_I_DEFAULT, c_s: float = 1.0,
+                             leak_area: float = 8e-4, leak_cd: float = 0.6,
+                             fans: tuple = (),
                              ) -> tuple[Model, State, Drivers]:
     """Assemble a dynamic-wave sewer and return ``(model, state, drivers)``.
 
@@ -1705,6 +1796,15 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     `_quality_parts`; `scheme` is its time scheme), judged by the iteration alongside the
     heads, and attaches `manhole_idx` (the junctions' node indices) and, with sulfide,
     `out_pipe` (each junction's outgoing conduit).
+
+    ``air=True`` adds the headspace air of the kinematic path on the solved conduits (design
+    E7; docs: "Headspace air on the dynamic wave"): the ``"air"`` layer (`f_air`, `f_i`,
+    `c_s`, `leak_area` (m2), `leak_cd`, `fans` as in `build_model`) reading the conduits'
+    headspace drivers from their link depth, and, with quality and sulfide, the
+    ``"air_quality"`` layer of H2S and the two-film transfer `H2STransfer`. It needs a
+    dendritic network: a loop, a junction with several outgoing conduits or none (an adverse
+    conduit, a junction drained by a regulator) is refused by name
+    (`air.check_air_topology`).
     """
     net.validate()
     if net.routing != "dynamic_wave":
@@ -1716,20 +1816,27 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
             "build_dynamic_wave_model: iterate_flow_tol (m3/s) is required, got None: on the "
             "normal-flow slope switch a heads-only convergence test can stop short of the "
             "fixed point; plain relaxation is acceleration=None with a flow tolerance")
+    if air:
+        check_air_topology(net)
     graph = Network(dtype=F64)
     for manhole in net.manholes:
         graph.add_node(manhole.name, invert=manhole.invert, ground=manhole.ground)
     for outfall in net.outfalls:
         graph.add_node(outfall.name, invert=outfall.invert)
+    if air:
+        graph.add_node("ambient")
     for pipe in net.pipes:
         graph.add_edge(pipe.u, pipe.v, kind="pipe", name=pipe.name)
     # the regulators after the pipes, kind by kind: the layer's column order
     for kind in STRUCTURE_KINDS:
         for device in net.structures[kind]:
             graph.add_edge(device.u, device.v, kind=kind, name=device.name)
+    plan = add_air_edges(graph, net, fans) if air else None
     boundary = [o.name for o in net.outfalls]
+    sulfide_air = air and quality and "sulfide" in species
     closure = DynamicWaveHydraulics(graph, net,
-                                    quality_layer="water_quality" if quality else None)
+                                    quality_layer="water_quality" if quality else None,
+                                    air=air)
     junction_idx = closure.junction_idx
     junction_invert = closure.node_invert[junction_idx]
 
@@ -1761,6 +1868,18 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
         layers["water_quality"] = parts["layer"]
         closures.append(parts["loads"])
         tolerances["water_quality"] = QUALITY_ITERATE_TOL
+    if air:
+        layers["air"] = air_layer(graph, net, plan, f_air=f_air, f_i=f_i, c_s=c_s,
+                                  leak_area=leak_area, leak_cd=leak_cd, fans=fans)
+        air_parts = _air_parts(graph, closure, scheme, fans, sulfide=sulfide_air)
+        parts["drivers"].update(air_parts["drivers"])
+        parts["specs"].update(air_parts["specs"])
+        if "layer" in air_parts:
+            layers["air_quality"] = air_parts["layer"]
+            tolerances["air_quality"] = QUALITY_ITERATE_TOL
+            closures.append(H2STransfer(graph.n, closure.junction_idx,
+                                        sulfide=tuple(species).index("sulfide"),
+                                        out_pipe=parts["out_pipe"]))
     # "before_transport": SWMM reacts a conduit's step-start concentration, then mixes it
     # with the inflow (qualrout.c:337-341), as the kinematic path does
     model = Model(graph, layers, closures=closures, reactions=parts["reactions"],
@@ -1782,8 +1901,10 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     }
     if "outfall_stage" in initial:
         drivers["outfall_stage"] = initial["outfall_stage"]
+    drivers.update(parts["drivers"])
+    if air:
+        state.update(air_state(model))
     if quality:
-        drivers.update(parts["drivers"])
         state.update(quality_state(model, state, drivers))
     closure.notes["routing"] = (
         f"dynamic wave (SWMM 5.2.4 fixed point): heads converged to {iterate_tol} m"
@@ -1800,14 +1921,15 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     model.routing_step = float(net.dynamic_wave.routing_step)
     model.pipe_names = list(closure.pipe_names)
     model.link_names = list(closure.link_names)
-    model.pipe_columns = ("q", "h", "v", "V_wet")
+    model.pipe_columns = PIPE_COLUMNS
     model.input_specs = {
         "inflow": dict(description="lateral inflow at each manhole", unit="m3/s",
                        over="nodes"),
     }
     model.input_specs.update(parts["specs"])
-    if quality:
+    if quality or air:
         model.manhole_idx = junction_idx
+    if quality:
         if "out_pipe" in parts:
             model.out_pipe = parts["out_pipe"]
     if "outfall_stage" in drivers:
@@ -1819,6 +1941,10 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     model.driver_template = dict(drivers)
     return model, state, drivers
 
+
+#: The per-pipe reporting columns of `report.pipe_table` for a dynamic-wave model (all the
+#: ones the closure publishes, as on the kinematic path).
+PIPE_COLUMNS = ("q", "h", "v", "R_h", "d_m", "T", "A_air", "D_h", "V_wet", "V_air")
 
 #: The quality layer's iteration tolerance (kg/m3), judged alongside the heads (design E7).
 #: Its concentrations follow the flows of the pass, so it binds only where the heads have
@@ -1933,13 +2059,58 @@ def _quality_parts(net: SewerNetwork, graph: Network, closure: DynamicWaveHydrau
     return parts
 
 
+def _air_parts(graph: Network, closure: DynamicWaveHydraulics, scheme: str, fans: tuple,
+               *, sulfide: bool) -> dict:
+    """The air pieces of a dynamic-wave model (design E7), as the kinematic builder's: the
+    drivers (``"air.phi_boundary"``, the temperatures ``"T_head"`` and ``"T_amb"`` (K) and,
+    with `sulfide`, the pH ``"pH"`` and the ``"air_quality.x_boundary"`` of H2S), their input
+    specs and, with `sulfide`, the ``"air_quality"`` layer. The air layer carries H2S only, so
+    it is built where the water carries sulfide (`H2STransfer` couples them)."""
+    drivers: Drivers = {"air.phi_boundary": torch.zeros(1, dtype=F64),
+                        "T_head": torch.tensor(293.15, dtype=F64),
+                        "T_amb": torch.tensor(283.15, dtype=F64)}
+    specs = {"T_head": dict(description="headspace air temperature", unit="K"),
+             "T_amb": dict(description="ambient air temperature", unit="K")}
+    parts: dict = {"drivers": drivers, "specs": specs}
+    if not sulfide:
+        return parts
+    junctions = list(closure.junction_names)
+    kinds = ("headspace", "leak", "fan") if fans else ("headspace", "leak")
+    boundary = ["ambient"] + list(closure.outfall_names)
+    interior, _ = active_interior(graph, kinds, boundary)
+    layer = TransportLayer(
+        graph, "air_quality", capacity=torch.ones(interior.numel(), dtype=F64),
+        flow_kind=kinds, boundary=boundary, n_species=1, scheme=scheme,
+        quantity="concentration", unit="kg/m3", species_names=("h2s",),
+        source_unit="kg/s", capacity_unit="m3", flow_unit="m3/s")
+    ordered = [graph.nodes[i] for i in layer.interior_idx.tolist()]
+    if ordered != junctions:
+        raise ValueError(
+            f"build_model: the air_quality layer's active interior came out as {ordered}, "
+            f"not the junction order {junctions}; H2STransfer reads 'air_quality.x' as a "
+            f"per-junction array")
+    drivers["air_quality.x_boundary"] = torch.zeros(len(boundary), dtype=F64)
+    drivers["pH"] = torch.tensor(7.0, dtype=F64)
+    specs["pH"] = dict(description="wastewater pH", unit="-")
+    parts["layer"] = layer
+    return parts
+
+
+def air_state(model: Model) -> State:
+    """The air layer's initial state: zero pressures and flows (the quiescent headspace)."""
+    layer = model.potential["air"]
+    return {"air.phi": torch.zeros(model.net.n, dtype=F64),
+            "air.q": torch.zeros(len(layer.cols), dtype=F64)}
+
+
 def quality_state(model: Model, state: State, drivers: Drivers) -> State:
-    """The quality layer's initial state at the hydraulic `state`: clean water
-    (``"water_quality.x"`` zero, SWMM's default initial concentration) and the capacity at
+    """The transport layers' initial state at the hydraulic `state`: clean water and clean
+    air (``"<layer>.x"`` zero, SWMM's default initial concentration) and the capacities at
     `state` (`Model.initial_capacities`), which the amount form of the first step needs."""
-    layer = model.transport["water_quality"]
-    shape = (layer.n_i,) if layer.n_species == 1 else (layer.n_i, layer.n_species)
-    out = {"water_quality.x": torch.zeros(shape, dtype=F64)}
+    out = {}
+    for name, layer in model.transport.items():
+        shape = (layer.n_i,) if layer.n_species == 1 else (layer.n_i, layer.n_species)
+        out[f"{name}.x"] = torch.zeros(shape, dtype=F64)
     out.update(model.initial_capacities(dict(state, **out), drivers))
     return out
 

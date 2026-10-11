@@ -138,8 +138,11 @@ a prescribed extraction (m³/s, positive out).
 `build_dynamic_wave_model`, with `iterate_tol` (m, default 1e-11) and
 `iterate_max` (default 2000 passes) controlling the head iteration. For it, `air`, `quality`
 and `storage` default to `False`; `quality=True` adds the water-quality layer of `species`
-(see [Quality on the dynamic wave](#quality-on-the-dynamic-wave)), and `air=True` and
-`storage=True` are refused, naming the option; `iterate_tol` and
+(see [Quality on the dynamic wave](#quality-on-the-dynamic-wave)); `air=True` builds the
+headspace air on the solved conduits (see
+[Headspace air on the dynamic wave](#headspace-air-on-the-dynamic-wave)) and takes `f_air`,
+`f_i`, `c_s`, `leak_area`, `leak_cd` and `fans` as above; `storage=True` is refused, naming the
+option; `iterate_tol` and
 `iterate_max` are refused for the other routings. Run it with `simulate_dynamic_wave` (see
 [Dynamic wave](#dynamic-wave)), not `sewer_steady`.
 
@@ -607,10 +610,11 @@ head difference, as the head solve's Newton step needs. A set `InitDepth`, `Init
 The reader refuses by name, with the line number, `ALLOW_PONDING YES`, loss coefficients
 and seepage in `[LOSSES]`, storage evaporation and exfiltration, roadway weirs, weir coefficient curves and regulators with `LINK_OFFSETS
 ELEVATION` (see [SWMM `.inp`](../formats/swmm.md)).
-`build_model` with `air=True` or `storage=True` is refused by name; `quality=True` builds
+`build_model` with `storage=True` is refused by name; `quality=True` builds
 the water-quality layer on the solved flows (see
-[Quality on the dynamic wave](#quality-on-the-dynamic-wave)). Ponding and headspace air on
-the dynamic wave are planned.
+[Quality on the dynamic wave](#quality-on-the-dynamic-wave)) and `air=True` the headspace air
+(see [Headspace air on the dynamic wave](#headspace-air-on-the-dynamic-wave)). Ponding on
+the dynamic wave is planned.
 
 ```python
 from noodl.apps.sewer import read_swmm_inp, build_model, simulate_dynamic_wave
@@ -775,6 +779,40 @@ The drag sign convention is documented and was verified rather than assumed: the
 $+D$ so that with both ends at ambient the air moves from the upstream manhole toward the
 downstream one, the direction the wastewater drags it. The opposite sign was tried and caught by
 the measurement.
+
+#### Headspace air on the dynamic wave
+
+`build_model(net, air=True)` on a `"dynamic_wave"` network reuses the kinematic path's air layer
+unchanged (`Headspace`, `Drag`, `Stack`, the leaks and fans, built by the same `air_layer`) and
+feeds it from the solved conduits. Each conduit's air geometry is read at its **link depth**
+$y = \min(y_{\text{mid}}, y_{\text{full}})$ (SWMM's `Link.newDepth`, one barrel's) on the exact
+circle (`air_geometry`), whatever `net.geometry` is: the tabulated section is the water side's,
+and the air has no SWMM reference, as with the kinematic path at `geometry="tabulated"`.
+With $n_b$ barrels the closure writes `sewer.A_air` (m², total, $n_b A_{\text{air}}$),
+`sewer.D_h` (m, one barrel's), `sewer.T` (m, total free-surface width, so $T/A_{\text{air}}$,
+which the drag reads, is one barrel's) and `sewer.V_air` (m³, total): $n_b$ parallel headspaces
+have $1/n_b^2$ of one barrel's resistance. These four keys, with `sewer.R_h`, `sewer.d_m`,
+`sewer.q`, `sewer.h`, `sewer.v` and `sewer.V_wet`, are the columns of `pipe_table` for every
+dynamic-wave model, with or without the air.
+
+A conduit flowing full has no headspace ($A_{\text{air}} = 0$, infinite resistance). The air
+side reads the depth capped at 0.999 D, which leaves a finite area of about $6\times10^{-5}D^2$
+and a resistance so large the conduit is a closed path to a part in 10⁹, with finite
+derivatives on both ends of the circle; a surcharged tree keeps solving.
+
+The closure also writes `rho_air_nodes` (from `T_head` and `T_amb`) and `air_quality.capacity`
+(m³, per junction): the headspace volume of the junction's outgoing conduit plus the air of its
+shaft above the water, $A_s(y_{\text{full}} - y_j)$ for a junction ($A_s$ the manhole's
+`surface_area`, else 1.167 m²; $y_j$ the junction's depth) and the storage curve's volume
+between the water and the full depth for a storage unit. As on the kinematic path the shaft term
+needs `ground` on every manhole. With quality and sulfide the `air_quality` layer of H₂S and
+`H2STransfer` are built and judged by the iteration beside the water quality (the air layer is
+not built without sulfide, its only species).
+
+The air side assumes every junction has exactly one outgoing conduit (its capacity, leak and
+sulfide transfer are that conduit's). A loop, a junction with several outgoing conduits or none
+(an adverse conduit, or one drained only by a regulator) and an outfall that is a conduit's
+upstream end are refused by name with `air=True`.
 
 ### Quality
 
@@ -1053,7 +1091,9 @@ publish numbers from this application.
   backwater.
 - **Kinematic-wave and steady routing: dendritic networks only**, one outgoing pipe per
   manhole, no loops. Dynamic-wave routing allows loops and flat or adverse conduits.
-- **Dynamic wave: no ponding or headspace air yet** (planned); storage units
+- **Dynamic wave: no ponding yet** (planned); headspace air needs a dendritic network (one
+  outgoing conduit per junction; loops, branches and regulator-only drains are refused by name
+  with `air=True`); storage units
   without evaporation or exfiltration; no pumps, dividers, roadway weirs or control rules.
   A junction drained only by outlets (whose crown is then the outlet's crest plus SWMM's
   1e-6 ft DUMMY height) surcharges under EXTRAN as soon as it is wet above that crest, and
@@ -1090,8 +1130,8 @@ publish numbers from this application.
   1e-9 m³ floor, where the water balance is no longer exact. Sulfide needs a single
   outgoing conduit at every junction (refused by name on loops, adverse conduits and
   junctions drained by a regulator); BOD and tracers do not. Water starts clean: a nonzero
-  SWMM `Cinit` is refused by name. Headspace air (and so H₂S transfer) is not yet built on the dynamic
-  wave.
+  SWMM `Cinit` is refused by name. Headspace air and the H₂S transfer are built on dendritic
+  networks only (see [Headspace air on the dynamic wave](#headspace-air-on-the-dynamic-wave)).
 - **No gas-phase sulfide sink.** H₂S leaves the headspace by ventilation, at the outfall, and
   by re-absorption into the water (the two-film flux is signed); no wall uptake or gas-phase
   oxidation is modelled.

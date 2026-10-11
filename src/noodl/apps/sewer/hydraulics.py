@@ -542,36 +542,36 @@ class SewerHydraulics:
         return q.clone().index_copy(-1, self.out_pipe, q_out)
 
     def _densities(self, drivers: Mapping) -> Tensor:
-        """Full-node ideal-gas air density from `T_head` at the manholes and `T_amb` at
-        `ambient` -- the driver the existing `Stack` drive reads (the building app's
-        `_DensityClosure` pattern).
+        """Full-node air density (`air_density_nodes`) at this closure's manholes."""
+        return air_density_nodes(drivers, self.manhole_idx, self.net.n, name=self.name)
 
-        Both drivers are resolved through `resolve_nodal_driver`: a 0-d scalar, a
-        full-node vector, or a `(..., 1)` trailing singleton all step; a batched leading
-        dimension is preserved throughout.
-        """
-        t_head = _require(drivers, "T_head", self.name)
-        t_amb = _require(drivers, "T_amb", self.name)
-        _validate_temperature(t_head, "T_head", self.name)
-        _validate_temperature(t_amb, "T_amb", self.name)
-        # The AMBIENT density fills the whole vector first, so an outfall node (which carries
-        # no headspace edge and is inactive for the air layer) still holds a physical value
-        # rather than a zero that would silently give a `Stack` drive an infinite buoyancy
-        # if the topology ever changed.
-        rho = air_density(
-            resolve_nodal_driver(
-                t_amb, self._node_idx, self.net.n, key="T_amb", name=self.name
-            )
-        )
-        head = air_density(
-            resolve_nodal_driver(
-                t_head, self.manhole_idx, self.net.n, key="T_head", name=self.name
-            )
-        )
-        batch = broadcast_shapes(rho.shape[:-1], head.shape[:-1])
-        rho = rho.expand(batch + (self.net.n,)).clone()
-        head = head.expand(batch + (len(self.manhole_names),))
-        return rho.index_copy(-1, self.manhole_idx, head)
+
+def air_density_nodes(drivers: Mapping, manhole_idx: Tensor, n_nodes: int, *,
+                      name: str) -> Tensor:
+    """Full-node ideal-gas air density (kg/m3) from `T_head` at the manholes `manhole_idx`
+    and `T_amb` everywhere else (`ambient`, the outfalls) -- the driver the existing `Stack`
+    drive reads (the building app's `_DensityClosure` pattern). `name` labels refusals.
+
+    Both drivers are resolved through `resolve_nodal_driver`: a 0-d scalar, a
+    full-node vector, or a `(..., 1)` trailing singleton all step; a batched leading
+    dimension is preserved throughout.
+    """
+    t_head = _require(drivers, "T_head", name)
+    t_amb = _require(drivers, "T_amb", name)
+    _validate_temperature(t_head, "T_head", name)
+    _validate_temperature(t_amb, "T_amb", name)
+    # The AMBIENT density fills the whole vector first, so an outfall node (which carries
+    # no headspace edge and is inactive for the air layer) still holds a physical value
+    # rather than a zero that would silently give a `Stack` drive an infinite buoyancy
+    # if the topology ever changed.
+    rho = air_density(resolve_nodal_driver(
+        t_amb, torch.arange(n_nodes, dtype=torch.long), n_nodes, key="T_amb", name=name))
+    head = air_density(resolve_nodal_driver(
+        t_head, manhole_idx, n_nodes, key="T_head", name=name))
+    batch = broadcast_shapes(rho.shape[:-1], head.shape[:-1])
+    rho = rho.expand(batch + (n_nodes,)).clone()
+    head = head.expand(batch + (manhole_idx.numel(),))
+    return rho.index_copy(-1, manhole_idx, head)
 
 
 def resolve_nodal_driver(

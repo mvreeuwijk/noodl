@@ -17,23 +17,19 @@ import torch
 from noodl.apps.sewer.air import (
     F_AIR_DEFAULT,
     F_I_DEFAULT,
-    RHO_AIR_REF,
-    Drag,
-    Headspace,
+    add_air_edges,
+    air_layer,
 )
 from noodl.apps.sewer.dynwave import (
     DynamicWaveHydraulics,
     DynamicWaveOptions,
+    air_state,
     build_dynamic_wave_model,
     quality_state,
 )
 from noodl.apps.sewer.hydraulics import GEOMETRY_ALIASES, SewerHydraulics
 from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
 from noodl.apps.sewer.storage import validate_storage_curve
-from noodl.drives import Stack
-from noodl.elements.fixed import FixedFlow
-from noodl.elements.powerlaw import PowerLaw
-from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Model
 from noodl.refs import initial_drivers as refs_initial_drivers
@@ -660,8 +656,10 @@ def build_model(
 
     A ``routing="dynamic_wave"`` network is built by `build_dynamic_wave_model`: `air` and
     `quality` default to ``False`` there; ``quality=True`` adds the water-quality layer of
-    `species` on the solved flows (design E7, `scheme` its time scheme); ``air=True`` is
-    refused (headspace air on the dynamic wave is phase D), as is `storage`; converged to
+    `species` on the solved flows (design E7, `scheme` its time scheme); ``air=True`` builds
+    the headspace air on the solved conduits (`f_air`, `f_i`, `c_s`, `leak_area`, `leak_cd`
+    and `fans` as below; dendritic networks only, loops refused by name), `storage` is
+    refused; converged to
     `iterate_tol` (m, default 1e-11) within `iterate_max` passes (default 2000; a slowly
     contracting outfall head at low flow can need several hundred). Those two
     apply to dynamic wave only and are refused for the other routings. So is `outfall_stage`,
@@ -669,18 +667,17 @@ def build_model(
     `build_dynamic_wave_model`).
     """
     if net.routing == "dynamic_wave":
-        for name, value, why in (
-                ("air", air, "is not available with dynamic-wave routing yet (phase D)"),
-                ("storage", storage, "is the kinematic path's storage sweep; dynamic-wave "
-                                     "junctions always store")):
-            if value:
-                raise ValueError(f"build_model: {name}=True {why}; build it with "
-                                 f"{name}=False")
+        if storage:
+            raise ValueError("build_model: storage=True is the kinematic path's storage "
+                             "sweep; dynamic-wave junctions always store; build it with "
+                             "storage=False")
         kwargs = {k: v for k, v in (("iterate_tol", iterate_tol),
                                     ("iterate_max", iterate_max)) if v is not None}
         return build_dynamic_wave_model(net, outfall_stage=outfall_stage,
                                         quality=bool(quality), species=species,
-                                        scheme=scheme, **kwargs)
+                                        scheme=scheme, air=bool(air), f_air=f_air, f_i=f_i,
+                                        c_s=c_s, leak_area=leak_area, leak_cd=leak_cd,
+                                        fans=fans, **kwargs)
     for name, value in (("iterate_tol", iterate_tol), ("iterate_max", iterate_max),
                         ("outfall_stage", outfall_stage)):
         if value is not None:
@@ -701,7 +698,6 @@ def build_model(
     for pipe in net.pipes:
         graph.add_edge(pipe.u, pipe.v, kind="pipe", name=pipe.name)
 
-    n_pipes = len(net.pipes)
     outgoing = net.outgoing()
     manhole_names = [m.name for m in net.manholes]
     manhole_idx = torch.tensor(
@@ -712,8 +708,6 @@ def build_model(
     # its own file order, which need not match `[JUNCTIONS]` order at all -- the committed
     # `tree_steady.inp` gives `out_pipe = [0, 1, 3, 2, 4]`.
     out_pipe = torch.tensor([outgoing[name] for name in manhole_names], dtype=torch.long)
-    length = torch.tensor([p.length for p in net.pipes], dtype=F64)
-    diameter = torch.tensor([p.diameter for p in net.pipes], dtype=F64)
     slope_per_manhole = torch.tensor(
         [net.pipes[outgoing[name]].slope for name in manhole_names], dtype=F64
     )
@@ -745,88 +739,10 @@ def build_model(
     state: State = {}
 
     if air:
-        # Kind order: `headspace` (one per pipe, then one outfall edge PER outfall pipe),
-        # `leak`, `fan`. Each outfall pipe is the one that DRAINS TO an outfall
-        # (`p.v in outfall_names`), found by where it drains rather than assumed to be
-        # `net.pipes[-1]` (otherwise a network whose outfall conduit is listed
-        # first would silently attach the outfall-flagged headspace edge, and its geometry, to
-        # the wrong manhole). `SewerNetwork.validate()` guarantees every manhole has exactly
-        # one outgoing pipe and every outfall has none, but does not itself forbid two
-        # different manholes both draining directly into the same outfall; this builder
-        # wires exactly ONE outfall-to-ambient headspace edge per OUTFALL NODE, so that case
-        # is refused here by name instead of silently wiring only one of the two. A forest
-        # has one outfall pipe per component -- each gets its
-        # own appended headspace edge, borrowing its own pipe's own length and diameter.
-        outfall_names = {o.name for o in net.outfalls}
-        outfall_pipe_candidates = [
-            i for i, p in enumerate(net.pipes) if p.v in outfall_names
-        ]
-        if not outfall_pipe_candidates:
-            raise ValueError(
-                f"build_model: no pipe drains to an outfall; outfalls are "
-                f"{sorted(outfall_names)}"
-            )
-        drained = [net.pipes[i].v for i in outfall_pipe_candidates]
-        if len(drained) != len(set(drained)):
-            dupes = sorted({v for v in drained if drained.count(v) > 1})
-            raise ValueError(
-                f"build_model: outfall(s) {dupes} each have more than one pipe "
-                f"draining into them; a dendritic sewer (or forest) gives each outfall "
-                f"exactly one"
-            )
-        pipe_positions = list(range(n_pipes)) + outfall_pipe_candidates
-        outfall_pipe_idx = torch.tensor(outfall_pipe_candidates, dtype=torch.long)
-        n_outfall_edges = len(outfall_pipe_candidates)
-        for pipe in net.pipes:
-            graph.add_edge(pipe.u, pipe.v, kind="headspace", name=f"{pipe.name}.air")
-        for outfall_pipe in outfall_pipe_candidates:
-            graph.add_edge(
-                net.pipes[outfall_pipe].u, "ambient", kind="headspace", outfall=True
-            )
-        for manhole in net.manholes:
-            graph.add_edge(manhole.name, "ambient", kind="leak", name=f"{manhole.name}.leak")
-        for name in fans:
-            graph.add_edge(name, "ambient", kind="fan", name=f"{name}.fan")
-        air_lengths = torch.cat([length, length.index_select(-1, outfall_pipe_idx)])
-        positions = torch.tensor(pipe_positions, dtype=torch.long)
-        # Leak law: `PowerLaw(C = Cd A sqrt(2/rho), n = 0.5, kind="leak")` built DIRECTLY,
-        # never through `Orifice`: `Orifice` casts with `torch.get_default_dtype()`
-        # (float32 in this repository) regardless of its inputs' own dtype, which would
-        # downcast the leak's `C` and floor check C1's residual on the float32 arithmetic of
-        # the leak branch alone (measured 1.352e-12 / 1.855e-11 in float32; 4.518e-13 /
-        # 6.141e-12 in float64). `leak_cd`/`leak_area` are ordinary floats by
-        # default but may also be tensors carrying a leading batch (instance) dimension
-        # (`benchmarks/sewer_diurnal.py` varies them per instance without any core or element
-        # change, since `PowerLaw._param`'s pass-through rule and ordinary broadcasting
-        # do the rest).
-        leak_c = (
-            torch.as_tensor(leak_cd, dtype=F64)
-            * torch.as_tensor(leak_area, dtype=F64)
-            * math.sqrt(2.0 / RHO_AIR_REF)
-            * torch.ones(len(net.manholes), dtype=F64)
-        )
-        leak_n = torch.full((len(net.manholes),), 0.5, dtype=F64)
-        elements = [
-            Headspace(air_lengths, positions, f_air=f_air, kind="headspace"),
-            PowerLaw(C=leak_c, n=leak_n, kind="leak", dp_transition=1e-8),
-        ]
-        if fans:
-            elements.append(FixedFlow(torch.zeros(len(fans), dtype=F64), kind="fan"))
-        drives = [
-            Drag(
-                air_lengths, positions, f_i=f_i, c_s=c_s,
-                zero_positions=tuple(range(n_pipes, n_pipes + n_outfall_edges)),
-                kind="headspace",
-            ),
-            _stack_for(
-                "headspace", graph, net,
-                crown=torch.cat([diameter, diameter.index_select(-1, outfall_pipe_idx)]),
-            ),
-            _stack_for("leak", graph, net),
-        ]
-        layers["air"] = PotentialFlowLayer(
-            graph, "air", elements, drives=drives, boundary=["ambient"],
-            quantity="pressure", unit="Pa", flow_unit="m3/s",
+        plan = add_air_edges(graph, net, fans)
+        layers["air"] = air_layer(
+            graph, net, plan, f_air=f_air, f_i=f_i, c_s=c_s, leak_area=leak_area,
+            leak_cd=leak_cd, fans=fans,
         )
         drivers["air.phi_boundary"] = torch.zeros(1, dtype=F64)
 
@@ -970,73 +886,6 @@ def build_model(
     return model, state, drivers
 
 
-def _ground_of(node_attrs) -> float:
-    """A node's ground level: its own `ground`, else its `invert`, else `0.0` (`ambient`'s
-    case, carrying neither). `is None` throughout, not an `or`-chain -- `or` treats an
-    explicitly given `0.0` ground (or invert) as falsy and falls through to the next
-    fallback, silently dropping a real ground-level-zero manhole to whatever its invert (or
-    the hard-coded `0.0`) happens to be instead."""
-    ground = node_attrs.get("ground")
-    if ground is not None:
-        return float(ground)
-    invert = node_attrs.get("invert")
-    return 0.0 if invert is None else float(invert)
-
-
-def _stack_for(
-    kind: str, graph: Network, net: SewerNetwork, *, crown: Tensor | None = None
-) -> Stack:
-    """The existing buoyancy drive on one air kind.
-
-    On `headspace` edges `z_path` is the pipe CROWN elevation: the mean of the two end
-    inverts plus the pipe's own diameter (the mean invert alone is
-    the pipe's INVERT at its midpoint, not its crown; `crown` is the per-headspace-edge
-    diameter, in the same order as `graph.endpoints("headspace")`, i.e. `net.pipes` order
-    then the outfall pipe's diameter again for the extra outfall-to-ambient edge, exactly
-    like `air_lengths` at the call site). `z_ref` is the node's ground level, so a warm
-    headspace column in a manhole shaft is lighter than the outside column of the same
-    height -- the building application's stack effect, unchanged.
-
-    DATUM CONVENTION (a leak DOES carry a stack term). `ground` falls back to the node's own
-    `invert` when no `ground` was given, and to `0.0` when neither was given -- which is exactly
-    `ambient`'s case, since `ambient` is added as a bare node with no `invert` or `ground` attribute
-    at all. On a `leak` edge `z_path` is the manhole's own ground level (`ground[src]`), so the
-    MANHOLE term of the Stack law cancels (`z_ref[src] - z_path = 0`), but the AMBIENT term does
-    not: `z_ref` at `ambient` is `0.0`, not the manhole's ground level, so every leak in fact
-    carries a `g * rho_ambient * ground[manhole]` term, not zero. This is self-consistent rather
-    than a bug: `ambient`'s `0.0` datum is used identically at every leak and at the outfall's
-    open-air `headspace` edge, and `ambient` is itself a fixed boundary node
-    (`air.phi_boundary = 0`), so the datum choice only ever shifts every air pressure by the
-    same constant -- `air.phi` is DATUM-REFERENCED to this convention, not to a physical
-    zero, and differences between manholes (what every drive and refusal actually reads)
-    are unaffected. `crown` is unused (and must be `None`) for `kind='leak'`.
-    """
-    if kind != "headspace" and crown is not None:
-        raise ValueError(
-            f"_stack_for: crown is only meaningful for kind='headspace', got kind={kind!r}"
-        )
-    src, tgt = graph.endpoints(kind)
-    invert = torch.tensor(
-        [
-            0.0 if (v := graph.graph.nodes[n].get("invert")) is None else v
-            for n in graph.nodes
-        ],
-        dtype=F64,
-    )
-    ground = torch.tensor(
-        [_ground_of(graph.graph.nodes[n]) for n in graph.nodes],
-        dtype=F64,
-    )
-    if kind == "headspace":
-        if crown is None:
-            raise ValueError("_stack_for: kind='headspace' requires the crown diameters")
-        z_path = 0.5 * (invert[src] + invert[tgt]) + crown
-    else:
-        z_path = ground[src]
-    return Stack(kind, src=src, tgt=tgt, z_path=z_path, z_ref=ground,
-                 rho_key="rho_air_nodes", g=9.80665)
-
-
 def initial_state(
     model: Model, drivers: Drivers | None = None, *, values: Mapping | None = None
 ) -> State:
@@ -1071,6 +920,8 @@ def initial_state(
     dynamic = [c for c in model.closures if isinstance(c, DynamicWaveHydraulics)]
     if dynamic and any(layer.quantity == "head" for layer in model.potential.values()):
         state = dynamic[0].initial_state(drivers)
+        if "air" in model.potential:
+            state.update(air_state(model))
         if model.transport:
             if drivers is None:
                 raise ValueError(

@@ -133,13 +133,13 @@ def test_default_pass_budget_covers_a_slow_outfall_head():
     assert model.iterate_max == 2000
 
 
-def test_build_model_dispatches_and_refuses_air(tmp_path):
+def test_build_model_dispatches_and_refuses_storage(tmp_path):
     net = _tree(tmp_path)
     model, state, drivers = build_model(net)
     assert "water" in model.potential and model.potential["water"].quantity == "head"
-    assert not model.transport
-    with pytest.raises(ValueError, match="air"):
-        build_model(net, air=True)
+    assert not model.transport and "air" not in model.potential
+    with pytest.raises(ValueError, match="storage"):
+        build_model(net, storage=True)
 
 
 def test_cold_start_is_dry_at_the_inverts(tmp_path):
@@ -338,7 +338,8 @@ def test_initial_state_and_pipe_table_serve_a_dynamic_wave_model(tmp_path):
     state, _ = simulate_dynamic_wave(model, state, drivers, steps=2)
     rows = pipe_table(model, state, drivers)
     assert [r["pipe"] for r in rows] == model.pipe_names
-    assert set(rows[0]) == {"pipe", "q", "h", "v", "V_wet"}
+    assert set(rows[0]) == {"pipe", "q", "h", "v", "R_h", "d_m", "T", "A_air", "D_h", "V_wet",
+                            "V_air"}
 
 
 def test_kinematic_routing_refuses_the_dynamic_wave_iteration_controls():
@@ -2586,3 +2587,202 @@ def test_quality_runs_batched(tmp_path):
     assert final["water_quality.x"].shape == (2, 5, 2)
     torch.testing.assert_close(final["water_quality.x"][1], single["water_quality.x"],
                                rtol=1e-9, atol=1e-15)
+
+
+# ---------------------------------------------------------------- headspace air (design E7)
+def _air_run(net, steps, **build):
+    """`net` with the headspace air, run `steps` steps: the model, the final state and the
+    drivers."""
+    model, state, drivers = build_model(net, air=True, quality=False, **build)
+    state, _ = simulate_dynamic_wave(model, state, drivers, steps=steps)
+    return model, state, drivers
+
+
+def test_air_is_built_on_the_dynamic_wave_tree_and_balances(tmp_path):
+    """The headspace air of a dynamic-wave tree: the ``air`` layer beside ``water``, its
+    initial state (quiescent) in `initial_state`, and its flows balance at every manhole to
+    the Newton tolerance (the leak edges carry the rest to ambient)."""
+    net = _tree(tmp_path)
+    model, state, drivers = build_model(net, air=True, quality=False)
+    assert set(model.potential) == {"water", "air"} and not model.transport
+    assert state["air.phi"].shape == (model.net.n,) and float(state["air.q"].abs().max()) == 0.0
+    state, _ = simulate_dynamic_wave(model, state, drivers, steps=30)
+    assert float(state["air.q"].abs().max()) > 1e-6          # the water drags the air
+    resolved = model._apply_closures(state, drivers)
+    layer = model.potential["air"]
+    # the air at the final state's drivers (the stored pass lags them by the head tolerance,
+    # which the headspace law's square root amplifies where a flow is near zero)
+    phi, q = layer.solve(drivers["air.phi_boundary"], resolved, differentiable=False,
+                          atol=1e-13)
+    residual = layer.residual(phi[..., layer.interior], drivers["air.phi_boundary"], resolved,
+                              None)
+    assert float(residual.abs().max()) < 1e-11
+    power = layer.power_residual(phi, q, resolved)
+    # Tellegen: the power is the residuals weighted by the pressures, which sit on the datum of
+    # the ground elevations (~1e2 Pa), so its bound is the residual bound times that scale
+    assert float(power.abs().max()) < 1e-11 * float(phi.abs().max())
+    assert torch.isfinite(resolved["air_quality.capacity"]).all()
+
+
+def test_air_flows_equal_the_kinematic_model_at_the_same_depths(tmp_path):
+    """Same air-side physics: the dynamic model's air layer and the kinematic model's (the
+    same `air_layer`, built from the kinematic reading of the same pipes), solved on the SAME
+    headspace drivers (``sewer.A_air``, ``D_h``, ``T``, ``v`` at the dynamic wave's link
+    depths, and the air densities), give the same flows to 1e-9 m3/s. The kinematic
+    closure is bypassed because the two routings' depths differ (the dynamic tree is still
+    filling); comparing the stored ``air.q`` instead would compare a pass lagged by the head
+    tolerance through the headspace law's square root, which amplifies a driver change
+    wherever the flow is near zero."""
+    net = _tree(tmp_path)
+    model, state, drivers = _air_run(net, 40)
+    resolved = model._apply_closures(state, drivers)
+    kin_net, _, _ = read_swmm_inp(DATA / "tree_kinwave.inp")
+    kin, _, kin_drivers = build_model(kin_net, air=True, quality=False)
+    assert [p.name for p in net.pipes] == [p.name for p in kin_net.pipes]
+    boundary = drivers["air.phi_boundary"]
+    _, q_dyn = model.potential["air"].solve(boundary, resolved, differentiable=False)
+    _, q_kin = kin.potential["air"].solve(boundary, resolved, differentiable=False)
+    torch.testing.assert_close(q_dyn, q_kin, rtol=0.0, atol=1e-9)
+    assert float(q_kin.abs().max()) > 1e-6
+    # the stored flows are those at the pass's own drivers: equal to the head tolerance
+    torch.testing.assert_close(state["air.q"], q_dyn, rtol=0.0, atol=1e-6)
+
+
+def test_air_geometry_is_the_circle_at_the_link_depth_per_barrel():
+    """``A_air``, ``D_h``, ``T``, ``V_air`` at the link depth are `geometry.air_geometry`
+    (the kinematic path's own call), totals over the barrels for the areas, volume and top
+    width and one barrel's for the diameter: two barrels have twice the area and volume and
+    a quarter of the resistance of one at the same depth."""
+    from noodl.apps.sewer import geometry as geom
+    from noodl.apps.sewer.air import Headspace
+    from noodl.model import StepContext
+    published = {}
+    diameter = torch.tensor([0.45], dtype=F64)
+    for barrels in (1, 2):
+        model, state, drivers = build_model(_chain_net(barrels=barrels), air=True,
+                                            quality=False)
+        state["water.phi"] = torch.tensor([11.0 + 0.2, 10.0, 0.0], dtype=F64)   # J1, Out, ambient
+        state["sewer.junction_depth"] = torch.tensor([0.2], dtype=F64)
+        d = model.dynamic_wave(state, drivers, StepContext(dt=5.0))
+        published[barrels] = d
+        a_air, _, d_h = geom.air_geometry(d["sewer.h"], diameter)
+        torch.testing.assert_close(d["sewer.A_air"], barrels * a_air, rtol=1e-14, atol=0)
+        torch.testing.assert_close(d["sewer.D_h"], d_h, rtol=1e-14, atol=0)
+        torch.testing.assert_close(d["sewer.V_air"], barrels * a_air * 200.0, rtol=1e-14,
+                                   atol=0)
+        torch.testing.assert_close(d["sewer.T"], barrels * geom.top_width(d["sewer.h"], diameter),
+                                   rtol=1e-14, atol=0)
+    head = Headspace(torch.tensor([200.0], dtype=F64), torch.tensor([0]))
+    r1 = head.resistance(published[1])
+    r2 = head.resistance(published[2])
+    torch.testing.assert_close(r2, r1 / 4.0, rtol=1e-12, atol=0)
+
+
+def test_air_capacity_is_the_outgoing_headspace_plus_the_shaft(tmp_path):
+    """``air_quality.capacity`` of a junction is its outgoing conduit's headspace volume plus
+    the air of its shaft, ``A_s (full depth - depth)`` (A_s the 1.167 m2 default)."""
+    net = _tree(tmp_path)
+    model, state, drivers = build_model(net, air=True, quality=False)
+    hyd = model.dynamic_wave
+    state, _ = simulate_dynamic_wave(model, state, drivers, steps=10)
+    resolved = model._apply_closures(state, drivers)
+    depth = state["water.phi"][model.junction_idx] - model.junction_invert
+    shaft = 1.167 * (hyd.full_depth - depth)
+    expected = resolved["sewer.V_air"][hyd.out_pipe] + shaft
+    torch.testing.assert_close(resolved["air_quality.capacity"], expected, rtol=1e-13, atol=0)
+    assert float(shaft.min()) > 0.0
+
+
+def test_a_full_conduit_keeps_the_air_finite():
+    """A conduit under a high outfall stage flows full: its headspace is closed, the capped
+    depth keeps ``A_air`` and the resistance finite, and the air layer still solves (the
+    manhole breathes through its leak)."""
+    net = _chain_net(outfall_kind="fixed", stage=10.0 + 2.5, inflow=0.02, initial_depth=1.0)
+    model, state, drivers = build_model(net, air=True, quality=False)
+    state, hist = simulate_dynamic_wave(model, state, drivers, steps=10,
+                                        record=("sewer.h", "air.q"))
+    resolved = model._apply_closures(state, drivers)
+    assert float(resolved["sewer.h"][0]) == pytest.approx(0.45, abs=1e-9)   # full
+    for key in ("sewer.A_air", "sewer.D_h", "sewer.T", "sewer.V_air", "air_quality.capacity"):
+        assert torch.isfinite(resolved[key]).all() and float(resolved[key].min()) >= 0.0, key
+    assert 0.0 < float(resolved["sewer.A_air"][0]) < 1e-2
+    assert torch.isfinite(state["air.q"]).all() and torch.isfinite(state["air.phi"]).all()
+    assert torch.isfinite(hist["air.q"]).all()
+
+
+def test_a_surcharged_tree_with_air_stays_finite():
+    """The EXTRAN tree surcharges J2 (3x the inflows): with the air on, every air flow and
+    pressure along the run is finite."""
+    model, state, drivers = build_model(_extran_tree(), air=True, quality=False)
+    _, hist = simulate_dynamic_wave(model, state, drivers, steps=60,
+                                    record=("air.q", "air.phi", "sewer.h"))
+    assert torch.isfinite(hist["air.q"]).all() and torch.isfinite(hist["air.phi"]).all()
+    full = model.dynamic_wave.diameter
+    assert bool((hist["sewer.h"] >= full - 1e-6).any())                      # a full conduit
+
+
+def test_pipe_table_has_every_column_on_the_dynamic_wave(tmp_path):
+    """`pipe_table` returns all of the kinematic path's columns for a dynamic-wave model,
+    with or without the air."""
+    from noodl.apps.sewer.report import _COLUMNS, pipe_table
+    for air in (False, True):
+        model, state, drivers = build_model(_tree(tmp_path), air=air, quality=False)
+        state, _ = simulate_dynamic_wave(model, state, drivers, steps=5)
+        rows = pipe_table(model, state, drivers, path=tmp_path / "pipes.csv")
+        assert [r["pipe"] for r in rows] == model.pipe_names
+        assert set(rows[0]) == set(_COLUMNS)
+        assert all(abs(v) < float("inf") for r in rows for k, v in r.items() if k != "pipe")
+
+
+def test_air_refuses_loops_branches_and_regulator_drains_by_name():
+    """The air side needs exactly one outgoing conduit per junction: the loop fixture (J1 and
+    J4 have two, J3 none) and a junction drained only by a regulator are refused naming the
+    junctions."""
+    loop, _, _ = read_swmm_inp(DATA / "loop_dynwave.inp")
+    with pytest.raises(ValueError, match=r"air=True.*\['J1', 'J3', 'J4'\]"):
+        build_model(loop, air=True)
+    with pytest.raises(ValueError, match=r"air=True.*\['J2'\]"):
+        build_model(_regulated("weir"), air=True)
+
+
+def test_air_refuses_a_cycle_that_never_reaches_an_outfall():
+    """Every junction with one outgoing conduit is not enough: J1 -> J2 -> J1 is a loop with
+    no outfall (`SewerNetwork.validate` refuses it before the air builder sees it)."""
+    from noodl.apps.sewer import SewerNetwork
+    from noodl.apps.sewer.network import Manhole, Outfall, Pipe
+    net = SewerNetwork(
+        manholes=(Manhole("J1", 12.0, ground=15.0, inflow=0.01),
+                  Manhole("J2", 11.0, ground=15.0), Manhole("J3", 10.5, ground=15.0)),
+        pipes=(Pipe("C1", "J1", "J2", 100.0, 0.3, 0.013, 0.01),
+               Pipe("C2", "J2", "J1", 100.0, 0.3, 0.013, 0.01),
+               Pipe("C3", "J3", "Out", 100.0, 0.3, 0.013, 0.005)),
+        outfalls=(Outfall("Out", 10.0),), routing="dynamic_wave")
+    with pytest.raises(ValueError, match="reach no outfall"):
+        build_model(net, air=True)
+
+
+def test_air_with_quality_couples_the_h2s_transfer(tmp_path):
+    """With sulfide the air_quality layer and the two-film transfer join: sulfide loaded at
+    J1 appears as headspace H2S, the transfer's sources are opposite in moles of sulfur at
+    every junction, and the iteration judges the air layer's concentrations too."""
+    from noodl.apps.sewer.quality import M_H2S, M_S
+    net = _tree(tmp_path, scale=0.5)
+    model, state, drivers = build_model(net, air=True, quality=True)
+    assert set(model.transport) == {"water_quality", "air_quality"}
+    assert set(model.iterate_tol) == {"water", "water_quality", "air_quality"}
+    load = torch.zeros(model.net.n, dtype=F64)
+    load[model.net.nodes.index("J1")] = 5e-3
+    drivers = dict(drivers, sulfide_in=load, bod_in=load * 20.0)
+    for _ in range(40):
+        state, _ = simulate_dynamic_wave(model, state, drivers, steps=1)
+    assert float(state["air_quality.x"].max()) > 0.0
+    for key in ("water_quality.x", "air_quality.x", "air.q"):
+        assert torch.isfinite(state[key]).all(), key
+    resolved = model._apply_closures(state, drivers)
+    jidx = model.junction_idx
+    lateral = drivers["inflow"] * drivers["sulfide_in"]
+    water = (resolved["water_quality.sources"][..., 1] - lateral)[jidx]
+    air = resolved["air_quality.sources"][jidx]
+    torch.testing.assert_close(water / M_S + air / M_H2S, torch.zeros_like(water),
+                               rtol=0.0, atol=1e-18)
+    assert float(air.abs().max()) > 0.0

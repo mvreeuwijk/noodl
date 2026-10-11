@@ -56,7 +56,7 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `DynamicWaveHydraulics` | The dynamic-wave closure: the conduit coefficients, junction surface areas and outfall heads of one pass, from the previous pass's heads and flows. | `DynamicWaveHydraulics(graph, net, *, layer='water', quality_layer=None)` |
+| `DynamicWaveHydraulics` | The dynamic-wave closure: the conduit coefficients, junction surface areas and outfall heads of one pass, from the previous pass's heads and flows. | `DynamicWaveHydraulics(graph, net, *, layer='water', quality_layer=None, air=False, air_quality_layer='air_quality')` |
 | `H2STransfer` | Two-film water-to-air H2S transfer, as a `Model` closure. | `H2STransfer(n_nodes, manhole_idx, *, sulfide=1, water_layer='water_quality', air_layer='air_quality', out_pipe=None)` |
 | `SewerHydraulics` | The water side of a sewer, as a `Model` closure. | `SewerHydraulics(net, pipes, manholes, *, storage=False, dt=None, quality_layer='water_quality', air_quality_layer='air_quality', shaft_depth=None, surface_area=None, geometry='analytic', name='sewer')` |
 
