@@ -498,3 +498,148 @@ def test_flooding_into_an_outfall_conduit_matches_swmm_where_swmm_converged(tmp_
     assert abs(trial_flow(q_noodl) - q_noodl[c5].item()) <= 1e-12
     miss = trial_flow(q_swmm) - q_swmm[c5].item()
     assert gap > 1e-5 and miss > 0.5 * gap, (gap, miss)
+
+
+# ---------------------------------------------------------------- variable routing step
+VARIABLE_NAME = "tree_variable_dynwave.inp"
+#: SWMM's first four steps on the variable-step tree (ms): MINIMUM_STEP, then the junction
+#: depth-change limit (the filling junctions) and the Courant limit, up to ROUTING_STEP.
+VARIABLE_FIRST_STEPS_MS = [500, 13236, 31624, 51592, 60000]
+#: A ramp of J1's inflow (m3/s) from 0.025 to 0.06 between 600 s and 660 s, as a SWMM
+#: [TIMESERIES] (linearly interpolated between its points) and as the callable noodl takes.
+J1_RAMP = ((0.0, 0.025), (600.0, 0.025), (660.0, 0.06), (3600.0, 0.06))
+
+
+def _j1_ramp(t):
+    t += 0.001    # SWMM's date for a step is its start plus 1 ms (swmm5.c:1551)
+    (t0, q0), (t1, q1) = next((a, b) for a, b in zip(J1_RAMP, J1_RAMP[1:], strict=False)
+                              if a[0] <= t <= b[0])
+    return q0 + (q1 - q0) * (t - t0) / (t1 - t0)
+
+
+def _ramp_inflow(net, hyd):
+    """noodl's inflow callable for the ramp: the fixture's baseline inflows with J1's
+    replaced by `_j1_ramp`."""
+    base = torch.zeros(len(hyd.node_invert), dtype=torch.float64)
+    names = list(hyd.net.nodes)
+    for m in net.manholes:
+        base[names.index(m.name)] = m.inflow
+    j1 = names.index("J1")
+
+    def inflow(t):
+        q = base.clone()
+        q[j1] = _j1_ramp(t)
+        return q
+    return inflow
+
+
+def _ramp_inp(tmp_path):
+    """The variable-step tree with J1's inflow from a [TIMESERIES] (`J1_RAMP`)."""
+    text = (DATA / VARIABLE_NAME).read_text()
+    text = text.replace('J1               FLOW             ""               FLOW     1.0   '
+                        '   1.0      0.025',
+                        'J1               FLOW             J1ramp           FLOW     1.0   '
+                        '   1.0      0')
+    assert "J1ramp" in text
+    points = "".join(f"J1ramp           {int(t) // 3600}:{int(t) % 3600 // 60:02d}:"
+                     f"{int(t) % 60:02d} {q}\n" for t, q in J1_RAMP)
+    text = text.replace("[REPORT]", f"[TIMESERIES]\n{points}\n[REPORT]")
+    path = tmp_path / "tree_variable_ramp.inp"
+    path.write_text(text)
+    return path
+
+
+def _swmm_timed(inp):
+    """SWMM on `inp` stepped through its own `swmm_step`: rows as `_swmm` (flows in the
+    file's orientation, node depths, node flooding), the elapsed time after each step in
+    ms (from the toolkit's exact elapsed days: pyswmm's `current_time` is whole seconds),
+    the connections, the engine version and the report's percentage of non-converging
+    steps. As `_swmm`, no row follows the last step, which `swmm_step` ends with 0."""
+    rpt = inp.with_suffix(".rpt")
+    rows, times = [], []
+    with pyswmm.Simulation(str(inp), str(rpt), str(inp.with_suffix(".out"))) as sim:
+        conn = {link.linkid: link.connections for link in pyswmm.Links(sim)}
+        sim.start()
+        while (elapsed := sim._model.swmm_step()) > 0:
+            times.append(round(elapsed * 86400.0 * 1000.0))
+            nodes = list(pyswmm.Nodes(sim))
+            rows.append((
+                {link.linkid: link.flow for link in pyswmm.Links(sim)},
+                {node.nodeid: node.depth for node in nodes},
+                {node.nodeid: node.flooding for node in nodes},
+            ))
+        engine = str(sim.engine_version)
+    m = re.search(r"% of Steps Not Converging\s*:\s*([0-9.]+)", rpt.read_text())
+    return rows, times, conn, engine, (float(m.group(1)) if m else None)
+
+
+def _variable_run(inp, steps_limit=None, inflow=None):
+    """noodl on `inp` for its whole duration (SWMM's 30 min), the variable step and its
+    inflow callable if any; `(net, model, hist, None)` as `_run_noodl`. With
+    `steps_limit` the run stops after that many steps (`hist` as `_run_noodl`'s)."""
+    net, _, _ = read_swmm_inp(inp)
+    model, state, drivers = build_model(net, iterate_tol=ITERATE_TOL, iterate_max=ITERATE_MAX)
+    record = ("water.phi", "water.q", "sewer.overflow")
+    if inflow is not None:
+        inflow = inflow(net, model.dynamic_wave)
+    kwargs = {"steps": steps_limit} if steps_limit else {"duration": 1800.0}
+    _, hist = simulate_dynamic_wave(model, state, drivers, record=record, inflow=inflow,
+                                    **kwargs)
+    return net, model, hist, None
+
+
+def test_variable_step_sequence_and_state_match_swmm_over_the_first_steps(tmp_path):
+    """The first five steps of the variable-step tree (`VARIABLE_STEP 0.75`, `ROUTING_STEP`
+    60 s: the minimum step, two depth-change-limited steps, one Courant-limited and the
+    routing step) in SWMM and noodl: the step sequence to the millisecond, and depths,
+    flows and overflow at the free-surface targets (the fast case). pyswmm's `current_time`
+    is whole seconds, so the exact elapsed time is read from `swmm_step`."""
+    inp = tmp_path / VARIABLE_NAME
+    shutil.copy(DATA / VARIABLE_NAME, inp)
+    rows, times, conn, engine, not_converging = _swmm_timed(inp)
+    assert engine == "5.2.4" and not_converging == 0.0
+    run = _variable_run(inp, steps_limit=5)
+    _, _, hist, _ = run
+    assert [round(x) for x in (hist["t"] * 1000.0).tolist()] == times[:5]
+    assert [b - a for a, b in zip([0, *times[:5]], times[:5], strict=False)] == (
+        VARIABLE_FIRST_STEPS_MS)
+    _assert_parity(_worst(_differences(VARIABLE_NAME, rows, conn, 5, run=run)))
+
+
+@pytest.mark.slow
+def test_variable_step_parity_at_every_step(tmp_path):
+    """The variable-step tree over its 30 min: the step sequence equals SWMM's to the
+    millisecond at every step (the last, clipped step, which `swmm_step` does not
+    report, ends the run at 1800 s), and depths, flows and overflow agree at every step
+    at the free-surface targets, SWMM converging on every step."""
+    inp = tmp_path / VARIABLE_NAME
+    shutil.copy(DATA / VARIABLE_NAME, inp)
+    rows, times, conn, engine, not_converging = _swmm_timed(inp)
+    assert engine == "5.2.4" and not_converging == 0.0
+    run = _variable_run(inp)
+    _, _, hist, _ = run
+    ends = [round(x) for x in (hist["t"] * 1000.0).tolist()]
+    assert ends[:len(times)] == times and ends[-1] == 1_800_000
+    assert len(ends) == len(times) + 1
+    _assert_parity(_worst(_differences(VARIABLE_NAME, rows, conn, len(rows), run=run)))
+
+
+@pytest.mark.slow
+def test_time_varying_inflow_matches_swmm_with_a_timeseries(tmp_path):
+    """J1's inflow ramps from 0.025 to 0.06 m3/s between 600 and 660 s: SWMM reads it from
+    a [TIMESERIES] and noodl from a callable of the same piecewise-linear function. SWMM
+    evaluates it at each step's START (routing.c:223) plus 1 ms (`getDateTime`, swmm5.c:1551;
+    `_j1_ramp` adds it), so the match to the millisecond of
+    the step sequence (which the ramp changes: later steps are no longer 60 s) and to
+    the free-surface targets in depths and flows at every step also shows the callable is
+    called with the start time."""
+    inp = _ramp_inp(tmp_path)
+    rows, times, conn, engine, not_converging = _swmm_timed(inp)
+    assert engine == "5.2.4" and not_converging == 0.0
+    run = _variable_run(DATA / VARIABLE_NAME, inflow=_ramp_inflow)
+    _, _, hist, _ = run
+    ends = [round(x) for x in (hist["t"] * 1000.0).tolist()]
+    assert ends[:len(times)] == times
+    assert any(t != 60000 for t in
+               [b - a for a, b in zip(times[20:], times[21:], strict=False)])
+    _assert_parity(_worst(_differences(VARIABLE_NAME, rows, conn, len(rows), run=run)))

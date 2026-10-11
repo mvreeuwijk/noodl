@@ -16,7 +16,8 @@ This module must not import `network.py` at module level: `network.py` imports
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import math
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -106,6 +107,8 @@ DEFAULT_MIN_SURFACE_AREA_FT2 = 12.566
 _AREA_SI = QCF / LCF
 #: SWMM's link velocity is 0 at or below this link depth (`link.c:834`), ft.
 _VELOCITY_MIN_DEPTH = 0.01
+#: SWMM's shortest time step, MINTIMESTEP (`dynwave.c:60`), s.
+MIN_TIME_STEP = 0.001
 _OUTFALL_CODES = {"free": 0, "normal": 1, "fixed": 2}
 
 
@@ -124,6 +127,13 @@ class DynamicWaveOptions:
     `min_surface_area` is the junction surface-area floor (m2), ``None`` for SWMM's
     12.566 ft2; `head_tolerance` is SWMM's head convergence tolerance (m); `max_trials` is
     SWMM's trial limit (-).
+
+    `variable_step` is SWMM's VARIABLE_STEP, the Courant factor of the variable routing step
+    (-, 0 to 2): 0 routes with the fixed `routing_step`, above 0 each step is the smallest
+    of `routing_step`, the conduit Courant step and the junction depth-change step
+    (`routing_step_size`; SWMM's own default is 0.75, this dataclass's is 0, so a fixed
+    step is the default). `minimum_step` is SWMM's MINIMUM_STEP (s), the shortest variable
+    step and the very first one.
     """
 
     routing_step: float = 20.0
@@ -133,6 +143,15 @@ class DynamicWaveOptions:
     min_surface_area: float | None = None
     head_tolerance: float | None = None
     max_trials: int | None = None
+    variable_step: float = 0.0
+    minimum_step: float = 0.5
+
+    @property
+    def min_route_step(self) -> float:
+        """SWMM's `MinRouteStep` (s): `minimum_step` clipped to [MINTIMESTEP, routing_step]
+        (`dynwave.c:184-185`)."""
+        step = min(self.minimum_step, self.routing_step)                      # dynwave.c:184
+        return max(step, MIN_TIME_STEP)                                       # dynwave.c:185
 
     def validate(self) -> None:
         """Refuse an unknown keyword or a non-positive step or area, BY NAME."""
@@ -150,6 +169,13 @@ class DynamicWaveOptions:
                     f"DynamicWaveOptions: {name} must be one of {allowed}, got "
                     f"{getattr(self, name)!r}"
                 )
+        if not 0.0 <= self.variable_step <= 2.0:                              # project.c:698-703
+            raise ValueError(
+                f"DynamicWaveOptions: variable_step must be in [0, 2], got "
+                f"{self.variable_step!r}")
+        if not self.minimum_step >= 0.0:
+            raise ValueError(
+                f"DynamicWaveOptions: minimum_step must be >= 0 s, got {self.minimum_step!r}")
         if self.min_surface_area is not None and not self.min_surface_area > 0:
             raise ValueError("DynamicWaveOptions: min_surface_area must be > 0 m2")
 
@@ -941,64 +967,213 @@ def solve_atol(model: Model, dt: float | None = None) -> float:
     return max(SOLVE_ATOL, _BED_FLOOR_MARGIN * floor)
 
 
-def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *, steps: int,
-                          dt: float | None = None, inflow: Tensor | None = None,
+def routing_step_size(hyd: DynamicWaveHydraulics, before: Mapping | None, after: Mapping,
+                      previous_dt: float | None) -> float:
+    """SWMM's next routing step (s): `dynwave.c::dynwave_getRoutingStep` (dynwave.c:195-220).
+
+    `after` is the state at the end of the step just taken (``previous_dt`` s) and `before`
+    the state at its start; ``before=None`` asks for the very first step of the run. With
+    ``options.variable_step == 0`` (or a routing step under MINTIMESTEP) the step is the
+    fixed ``options.routing_step``; otherwise the first step is ``min_route_step``, and the
+    others the smallest of
+
+    - the routing step;
+    - each conduit's Courant step ``V / |q| * Fr / (1 + Fr) * variable_step``
+      (`getLinkStep`, dynwave.c:836-878), skipped where ``|q|`` or the mid-depth area is
+      within FUDGE or ``Fr <= 0.01`` -- a dry, still or full closed conduit never limits
+      the step. The ratio of a lengthened conduit's modified length to its own is 1 (no
+      lengthening is modelled);
+    - each junction's depth-change step ``0.25 (crown - invert) / (|dy|/dt)``
+      (`getNodeStep`, dynwave.c:881-921), skipped at outfalls, dry junctions, junctions
+      within FUDGE of their crown or above it, and where ``|dy|/dt`` is within FUDGE;
+
+    floored at `min_route_step` (dynwave.c:828) and truncated to a millisecond
+    (dynwave.c:218). The Froude number, flow, volume and mid-depth area are those of the
+    converged state `after` -- SWMM's last trial of the step, equal to it at its
+    convergence; ``|dy|`` is ``|y_after - y_before|`` with the depths in `before` and
+    `after` (``sewer.junction_depth``), SWMM's ``Xnode.dYdT`` (dynwave.c:758).
+    Not differentiable (the step is a switch of the state). Single network only (the
+    state's tensors are 1-D).
+    """
+    opts = hyd.options
+    fixed = opts.routing_step
+    if opts.variable_step == 0.0 or fixed < MIN_TIME_STEP:                   # dynwave.c:204-205
+        return fixed
+    if before is None:                                                       # dynwave.c:209-212
+        step = opts.min_route_step
+    else:
+        step = _variable_step(hyd, before, after, float(previous_dt), fixed)
+    return math.floor(1000.0 * step) / 1000.0                                # dynwave.c:218
+
+
+def _variable_step(hyd: DynamicWaveHydraulics, before: Mapping, after: Mapping,
+                   dt: float, max_step: float) -> float:
+    """`dynwave.c::getVariableStep` (dynwave.c:799-833), `max_step` s, `dt` the last step."""
+    with torch.no_grad():
+        terms = hyd._terms(after, dt)
+        q = after[f"{hyd.layer}.q"].abs() / QCF                              # dynwave.c:852
+        fr = terms.froude
+        live = (q > FUDGE) & (terms.mid_area > FUDGE) & (fr > 0.01)          # dynwave.c:853-856
+        residence = terms.volume / torch.where(live, q, torch.ones_like(q))  # dynwave.c:859
+        courant = residence * fr / (1.0 + fr) * hyd.options.variable_step    # dynwave.c:861-862
+        t_link = torch.where(live, courant, torch.full_like(courant, max_step))
+        t_min = min(max_step, float(t_link.min())) if t_link.numel() else max_step
+        depth = after["sewer.junction_depth"] / LCF
+        rate = (depth - before["sewer.junction_depth"] / LCF).abs() / dt     # dynwave.c:758
+        crown = hyd.crown_ft
+        allowed = 0.25 * crown                                               # dynwave.c:904
+        live = ((depth > FUDGE) & (depth + FUDGE < crown) & (allowed >= FUDGE)
+                & (rate >= FUDGE))                                           # dynwave.c:897-910
+        t_node = allowed / torch.where(live, rate, torch.ones_like(rate))    # dynwave.c:913
+        t_node = torch.where(live, t_node, torch.full_like(t_node, t_min))
+        if t_node.numel():
+            t_min = min(t_min, float(t_node.min()))
+    return max(t_min, hyd.options.min_route_step)                            # dynwave.c:828
+
+
+def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
+                          steps: int | None = None, duration: float | None = None,
+                          dt: float | None = None,
+                          inflow: Tensor | Callable[[float], Tensor] | None = None,
                           record: tuple[str, ...] = ("water.phi", "water.q"),
                           diagnostics: list | None = None, **solve_kwargs
                           ) -> tuple[State, dict[str, Tensor]]:
-    """Run `steps` routing steps of `dt` s (default: the model's routing step) from `state`.
+    """Run the dynamic wave from `state` for `steps` steps, or for `duration` s.
+
+    Exactly one of `steps` and `duration` is required. The step is `dt` s (default: the
+    model's routing step) when ``options.variable_step == 0``; under ``variable_step > 0``
+    each step is SWMM's variable step (`routing_step_size`: the first is the minimum step)
+    and `dt` is refused, since it would be a second step rule. `duration` (s) is SWMM's
+    run length: steps are taken until the elapsed time (kept in milliseconds, as SWMM does,
+    `swmm5.c:530-545`) reaches it, and the last step is cut to the time that remains (at
+    least 1 ms), so the run ends exactly at `duration` whatever the step rule.
 
     `inflow` (m3/s, full-node) overrides ``drivers["inflow"]``: ``(n,)`` is one constant
     inflow; ``(B, n)`` a batch of B constant inflows -- a 2-D inflow is ALWAYS a batch,
-    never a series; ``(steps, B, n)`` an inflow per step for a batch of B, the lateral
-    inflow at the END of each step (one network's series is ``(steps, 1, n)``). Any other
-    rank is refused. A batched inflow expands an unbatched `state` to the batch. After every
+    never a series; ``(steps, B, n)`` the inflow of each step for a batch of B (one
+    network's series is ``(steps, 1, n)``; needs `steps`); or a callable ``inflow(t)``
+    returning ``(n,)`` or ``(B, n)`` for the step that starts at `t` s (a float). SWMM
+    takes a step's lateral inflow from its time series at the START of the step
+    (`routing.c:223, 368`: the date is read before the routing clock advances; the inflow
+    enters the trapezoid with the step's end state, and the previous step's final net
+    inflow is its start), so ``inflow(t)`` is called once per step, with the step's start
+    time. (SWMM's own clock reads 1 ms late, ``getDateTime`` adds 1 ms: `swmm5.c:1551`, so
+    a [TIMESERIES] is sampled at ``t + 0.001`` s; a function standing in for one must add
+    that, as the verification test does.) A batched inflow expands an unbatched `state` to
+    the batch (a batch cannot be combined with a variable step: each member would need its
+    own). After every
     step the carried keys are re-evaluated at the returned state. `record` may also name
     ``"sewer.overflow"`` (m3/s per junction, SWMM's flooding loss over each step:
     `DynamicWaveHydraulics.overflow`), which is not a state key.
     `diagnostics`, when a list, receives each step's `Model.step` diagnostics.
-    `solve_kwargs` reach the head solve (Newton); `atol` defaults to `solve_atol` (m3/s:
-    `SOLVE_ATOL`, or the bed's round-off floor where larger) and `rtol` to 0, because
-    Newton's own default (sqrt(eps), 1.5e-8 m3/s) would stop a warm-started pass before
-    it moves and leave the junction balance off by that much. Returns the final state and
-    the recorded `record` keys stacked over steps (leading dimension `steps`).
+    `solve_kwargs` reach the head solve (Newton); `atol` defaults to `solve_atol` for each
+    step's length (m3/s: `SOLVE_ATOL`, or the bed's round-off floor where larger) and
+    `rtol` to 0, because Newton's own default (sqrt(eps), 1.5e-8 m3/s) would stop a
+    warm-started pass before it moves and leave the junction balance off by that much.
+    Returns the final state and the recorded `record` keys stacked over steps (leading
+    dimension: the steps), plus ``"t"`` (s, the END time of each step) and ``"dt"`` (s, each
+    step's length).
     """
     hyd = model.dynamic_wave
-    dt = model.routing_step if dt is None else float(dt)
-    solve_kwargs.setdefault("atol", solve_atol(model, dt))
+    if (steps is None) == (duration is None):
+        raise ValueError("simulate_dynamic_wave: give exactly one of steps and duration "
+                         f"(got steps={steps!r}, duration={duration!r})")
+    if duration is not None and not duration > 0:
+        raise ValueError(f"simulate_dynamic_wave: duration must be > 0 s, got {duration!r}")
+    variable = hyd.options.variable_step > 0
+    if variable and dt is not None:
+        raise ValueError(
+            f"simulate_dynamic_wave: dt={dt!r} s given, but options.variable_step = "
+            f"{hyd.options.variable_step} chooses every step (SWMM's variable routing step); "
+            f"set variable_step to 0 for a fixed dt")
+    fixed_dt = model.routing_step if dt is None else float(dt)
+    atol_given = "atol" in solve_kwargs
     solve_kwargs.setdefault("rtol", 0.0)
     n = model.net.n
-    batch: tuple[int, ...] = ()
-    if inflow is not None:
-        inflow = torch.as_tensor(inflow, dtype=F64)
-        if inflow.dim() not in (1, 2, 3) or inflow.shape[-1] != n:
+    series = None
+    if callable(inflow):
+        step_inflow = inflow
+    elif inflow is None:
+        step_inflow = None
+    else:
+        series = torch.as_tensor(inflow, dtype=F64)
+        if series.dim() not in (1, 2, 3) or series.shape[-1] != n:
             raise ValueError(
                 f"simulate_dynamic_wave: inflow must be (n,), (B, n) or (steps, B, n) with "
-                f"n = {n} nodes, got shape {tuple(inflow.shape)}")
-        if inflow.dim() == 3 and inflow.shape[0] < steps:
+                f"n = {n} nodes, got shape {tuple(series.shape)}")
+        if series.dim() == 3:
+            if steps is None:
+                raise ValueError("simulate_dynamic_wave: an inflow series (steps, B, n) "
+                                 "needs steps=, not duration=")
+            if series.shape[0] < steps:
+                raise ValueError(f"simulate_dynamic_wave: inflow has {series.shape[0]} "
+                                 f"steps, {steps} asked")
+        step_inflow = None
+
+    def inflow_at(k: int, t: float) -> Tensor | None:
+        if series is not None:
+            return series[k] if series.dim() == 3 else series
+        if step_inflow is None:
+            return None
+        value = torch.as_tensor(step_inflow(t), dtype=F64)
+        if value.dim() not in (1, 2) or value.shape[-1] != n:
             raise ValueError(
-                f"simulate_dynamic_wave: inflow has {inflow.shape[0]} steps, {steps} asked")
-        batch = tuple(inflow.shape[:-1]) if inflow.dim() == 2 else tuple(inflow.shape[1:-1])
+                f"simulate_dynamic_wave: inflow(t={t}) must return (n,) or (B, n) with "
+                f"n = {n} nodes, got shape {tuple(value.shape)}")
+        return value
+
+    first = inflow_at(0, 0.0)
+    batch: tuple[int, ...] = ()
+    if first is not None and first.dim() > 1:
+        batch = tuple(first.shape[:-1])
+    if variable and batch:
+        raise ValueError("simulate_dynamic_wave: a batched inflow cannot be combined with "
+                         "options.variable_step > 0 (one step for every member)")
     state = dict(state)
     if batch:
         state = {k: (v.expand(batch + v.shape[-1:]).clone() if v.dim() == 1 else v)
                  for k, v in state.items()}
     rows: dict[str, list[Tensor]] = {key: [] for key in record}
-    t = 0.0
-    for k in range(steps):
+    ends: list[float] = []
+    lengths: list[float] = []
+    now_ms = 0.0                                          # swmm5.c: NewRoutingTime, ms
+    end_ms = None if duration is None else 1000.0 * float(duration)
+    previous: tuple[State, float] | None = None
+    k = 0
+    while (k < steps) if steps is not None else (now_ms < end_ms):
+        if variable:
+            step = routing_step_size(hyd, None if previous is None else previous[0], state,
+                                     None if previous is None else previous[1])
+        else:
+            step = fixed_dt
+        next_ms = now_ms + 1000.0 * step                                    # swmm5.c:530
+        if end_ms is not None and next_ms > end_ms:                         # swmm5.c:531-536
+            step = max((end_ms - now_ms) / 1000.0, 1.0 / 1000.0)
+            next_ms = end_ms
+        t = now_ms / 1000.0
         if inflow is not None:
-            drivers = dict(drivers, inflow=inflow[k] if inflow.dim() == 3 else inflow)
+            drivers = dict(drivers, inflow=first if k == 0 else inflow_at(k, t))
+        kwargs = dict(solve_kwargs)
+        if not atol_given:
+            kwargs["atol"] = solve_atol(model, step)
         diag: dict = {}
         before = state
         try:
-            state = model.step(state, drivers, dt, t=t, diagnostics=diag, **solve_kwargs)
+            state = model.step(state, drivers, step, t=t, diagnostics=diag, **kwargs)
         except RuntimeError as err:
             raise RuntimeError(f"dynamic wave step at t={t} s: {err}") from err
-        state.update(hyd.carried(state, drivers, dt=dt))   # resync, as modelica/run.py does
-        t += dt
+        state.update(hyd.carried(state, drivers, dt=step))  # resync, as modelica/run.py does
+        previous = (before, step)
+        now_ms = next_ms
+        k += 1
+        ends.append(now_ms / 1000.0)
+        lengths.append(step)
         if diagnostics is not None:
             diagnostics.append(diag)
         for key in record:
-            rows[key].append(hyd.overflow(before, state, drivers, dt=dt)
+            rows[key].append(hyd.overflow(before, state, drivers, dt=step)
                              if key == "sewer.overflow" else state[key])
-    return state, {key: torch.stack(v) for key, v in rows.items()}
+    out = {key: torch.stack(v) for key, v in rows.items()}
+    out["t"] = torch.tensor(ends, dtype=F64)
+    out["dt"] = torch.tensor(lengths, dtype=F64)
+    return state, out

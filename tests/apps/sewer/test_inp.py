@@ -156,10 +156,27 @@ def test_dynwave_routing_step_accepts_a_clock_time(tmp_path):
     assert net.dynamic_wave.routing_step == 30.0
 
 
-def test_dynwave_refuses_variable_step(tmp_path):
-    path = _dyn(tmp_path, [("VARIABLE_STEP        0", "VARIABLE_STEP        0.75")])
-    with pytest.raises(ValueError, match="VARIABLE_STEP"):
-        read_swmm_inp(path)
+def test_dynwave_reads_the_variable_step_options(tmp_path):
+    path = _dyn(tmp_path, [("VARIABLE_STEP        0", "VARIABLE_STEP        0.75"),
+                           ("MINIMUM_STEP         0.5", "MINIMUM_STEP         0.25")])
+    net, _, _ = read_swmm_inp(path)
+    assert net.dynamic_wave.variable_step == 0.75
+    assert net.dynamic_wave.minimum_step == 0.25
+    # absent, the option is 0 here (SWMM's own default is 0.75)
+    lines = _dyn(tmp_path).read_text().splitlines(keepends=True)
+    absent = "".join(x for x in lines if not x.startswith("VARIABLE_STEP"))
+    (tmp_path / "absent.inp").write_text(absent)
+    net, _, _ = read_swmm_inp(tmp_path / "absent.inp")
+    assert net.dynamic_wave.variable_step == 0.0
+
+
+@pytest.mark.parametrize("old,new,key", [
+    ("VARIABLE_STEP        0", "VARIABLE_STEP        2.5", "VARIABLE_STEP"),
+    ("MINIMUM_STEP         0.5", "MINIMUM_STEP         -1", "MINIMUM_STEP"),
+])
+def test_dynwave_refuses_a_bad_variable_step_option_with_its_line(tmp_path, old, new, key):
+    with pytest.raises(ValueError, match=rf"line \d+: {key}"):
+        read_swmm_inp(_dyn(tmp_path, [(old, new)]))
 
 
 @pytest.mark.parametrize("old,new,match", [

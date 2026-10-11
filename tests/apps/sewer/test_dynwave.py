@@ -1021,3 +1021,91 @@ def test_gradient_on_the_slope_switch_does_not_depend_on_the_wall_slope(monkeypa
         fd = (loss(torch.tensor(0.013 + h, dtype=F64))
               - loss(torch.tensor(0.013 - h, dtype=F64))) / (2 * h)
     assert grads[0] == pytest.approx(fd.item(), rel=1e-6)
+
+
+# ------------------------------------------------------------------ variable step, inflow
+VARIABLE_TREE = DATA / "tree_variable_dynwave.inp"
+
+
+def _variable_model():
+    net, _, _ = read_swmm_inp(VARIABLE_TREE)
+    return net, *build_model(net)
+
+
+def test_variable_step_options_are_read_and_validated(tmp_path):
+    net, _, _ = read_swmm_inp(VARIABLE_TREE)
+    opts = net.dynamic_wave
+    assert (opts.variable_step, opts.minimum_step, opts.routing_step) == (0.75, 0.5, 60.0)
+    assert opts.min_route_step == 0.5
+    # MinRouteStep is capped by the routing step and floored at 1 ms (dynwave.c:184-185)
+    assert dataclasses.replace(opts, minimum_step=500.0).min_route_step == 60.0
+    assert dataclasses.replace(opts, minimum_step=0.0).min_route_step == 0.001
+    for bad in (dict(variable_step=-0.1), dict(variable_step=2.5), dict(minimum_step=-1.0)):
+        with pytest.raises(ValueError, match="variable_step|minimum_step"):
+            dataclasses.replace(opts, **bad).validate()
+
+
+def test_variable_step_on_a_dry_network_is_the_routing_step():
+    """No flow, no depth change: the first step is MINIMUM_STEP, every later one the
+    routing step, and the last is cut to the time that remains."""
+    net, model, state, drivers = _variable_model()
+    _, hist = simulate_dynamic_wave(model, state, drivers, duration=200.0,
+                                    inflow=torch.zeros(model.net.n, dtype=F64))
+    assert hist["dt"].tolist() == [0.5, 60.0, 60.0, 60.0, 19.5]
+    assert hist["t"].tolist() == [0.5, 60.5, 120.5, 180.5, 200.0]
+    assert hist["water.phi"].shape[0] == 5
+
+
+def test_fixed_step_duration_clips_the_last_step_to_the_time_that_remains(tmp_path):
+    net = _tree(tmp_path)                     # ROUTING_STEP 5 s, VARIABLE_STEP 0
+    model, state, drivers = build_model(net)
+    _, hist = simulate_dynamic_wave(model, state, drivers, duration=12.0)
+    assert hist["dt"].tolist() == [5.0, 5.0, 2.0] and hist["t"][-1].item() == 12.0
+    # less than a millisecond remaining: SWMM takes 1 ms (swmm5.c:533-535)
+    _, hist = simulate_dynamic_wave(model, state, drivers, duration=5.0004)
+    assert hist["dt"].tolist() == [5.0, 0.001] and hist["t"][-1].item() == 5.0004
+
+
+def test_steps_and_duration_are_exclusive_and_validated(tmp_path):
+    net = _tree(tmp_path)
+    model, state, drivers = build_model(net)
+    with pytest.raises(ValueError, match="exactly one of steps and duration"):
+        simulate_dynamic_wave(model, state, drivers)
+    with pytest.raises(ValueError, match="exactly one of steps and duration"):
+        simulate_dynamic_wave(model, state, drivers, steps=2, duration=10.0)
+    with pytest.raises(ValueError, match="duration must be > 0"):
+        simulate_dynamic_wave(model, state, drivers, duration=0.0)
+    series = torch.zeros(3, 1, model.net.n, dtype=F64)
+    with pytest.raises(ValueError, match="needs steps"):
+        simulate_dynamic_wave(model, state, drivers, duration=10.0, inflow=series)
+
+
+def test_variable_step_refuses_dt_and_a_batch_by_name():
+    net, model, state, drivers = _variable_model()
+    with pytest.raises(ValueError, match="variable_step = 0.75 chooses every step"):
+        simulate_dynamic_wave(model, state, drivers, steps=2, dt=5.0)
+    batch = torch.zeros(2, model.net.n, dtype=F64)
+    with pytest.raises(ValueError, match="batched inflow cannot be combined"):
+        simulate_dynamic_wave(model, state, drivers, steps=2, inflow=batch)
+    with pytest.raises(ValueError, match=r"inflow\(t=0.0\) must return"):
+        simulate_dynamic_wave(model, state, drivers, steps=2, inflow=lambda t: torch.zeros(3))
+
+
+def test_inflow_callable_is_called_once_per_step_with_the_start_time(tmp_path):
+    net = _tree(tmp_path)
+    model, state, drivers = build_model(net)
+    inflow = drivers["inflow"].clone()
+    times = []
+
+    def series(t):
+        times.append(t)
+        return inflow
+
+    _, hist = simulate_dynamic_wave(model, state, drivers, steps=3, inflow=series)
+    assert times == [0.0, 5.0, 10.0]
+    _, const = simulate_dynamic_wave(model, state, drivers, steps=3, inflow=inflow)
+    torch.testing.assert_close(hist["water.q"], const["water.q"], rtol=0, atol=0)
+    # a batched callable expands the state like a batched array
+    _, batched = simulate_dynamic_wave(model, state, drivers, steps=2,
+                                       inflow=lambda t: torch.stack([inflow, 0.5 * inflow]))
+    assert batched["water.q"].shape == (2, 2, len(net.pipes))

@@ -19,7 +19,8 @@ REFUSED BY NAME, because skipping them would silently change the physics: `[DWF]
 time variation belongs in the drivers. A conduit with more than one barrel or a culvert
 code is refused for every routing.
 
-DYNWAVE refuses, with the line number: `VARIABLE_STEP` > 0, `LENGTHENING_STEP` > 0,
+DYNWAVE reads `VARIABLE_STEP` (the Courant factor; absent means 0 here, not SWMM's 0.75)
+and `MINIMUM_STEP`. It refuses, with the line number: `LENGTHENING_STEP` > 0,
 `ALLOW_PONDING YES`, a junction `InitDepth`, a conduit `InitFlow` or
 `MaxFlow`, a gated outfall and TIDAL/TIMESERIES outfalls (phase A: cold dry start, fixed step,
 no ponding).
@@ -47,8 +48,9 @@ from noodl.apps.sewer.network import Manhole, Outfall, Pipe, SewerNetwork
 #: link.c `MIN_DELTA_Z`: the smallest fall SWMM uses for a conduit slope, 0.001 ft in m.
 MIN_DELTA_Z = 0.001 * 0.3048
 _DYNWAVE_KEYS = (
-    "ROUTING_STEP", "VARIABLE_STEP", "LENGTHENING_STEP", "MIN_SURFAREA", "HEAD_TOLERANCE",
-    "MAX_TRIALS", "MIN_SLOPE", "INERTIAL_DAMPING", "NORMAL_FLOW_LIMITED", "SURCHARGE_METHOD",
+    "ROUTING_STEP", "VARIABLE_STEP", "MINIMUM_STEP", "LENGTHENING_STEP", "MIN_SURFAREA",
+    "HEAD_TOLERANCE", "MAX_TRIALS", "MIN_SLOPE", "INERTIAL_DAMPING", "NORMAL_FLOW_LIMITED",
+    "SURCHARGE_METHOD",
     "ALLOW_PONDING",
 )
 _DAMPING = {"NO": "none", "NONE": "none", "PARTIAL": "partial", "FULL": "full"}
@@ -134,9 +136,10 @@ def read_swmm_inp(
     if dynamic:
         for key, line in raw.items():
             require_fields(line, 2, key, path)
-            if key in ("ROUTING_STEP", "VARIABLE_STEP", "LENGTHENING_STEP"):
+            if key in ("ROUTING_STEP", "MINIMUM_STEP", "LENGTHENING_STEP"):
                 opts[key] = (line, _seconds(line, path))
-            elif key in ("MIN_SURFAREA", "HEAD_TOLERANCE", "MAX_TRIALS", "MIN_SLOPE"):
+            elif key in ("VARIABLE_STEP", "MIN_SURFAREA", "HEAD_TOLERANCE", "MAX_TRIALS",
+                         "MIN_SLOPE"):
                 opts[key] = (line, as_float(line, 1, key, path))
             else:
                 opts[key] = (line, line.fields[1].upper())
@@ -336,9 +339,10 @@ def _dynamic_wave_options(opts: dict, path) -> DynamicWaveOptions:
         line = opts[key][0]
         raise ValueError(f"{path}: line {line.number}: {key} {line.fields[1]} {why}")
 
-    if opts.get("VARIABLE_STEP", (None, 0.0))[1] > 0:
-        refuse("VARIABLE_STEP", "-- variable time stepping is not modelled yet; set "
-                                "VARIABLE_STEP 0")
+    if "VARIABLE_STEP" in opts and not 0.0 <= opts["VARIABLE_STEP"][1] <= 2.0:
+        refuse("VARIABLE_STEP", "-- the Courant factor must be between 0 and 2")
+    if "MINIMUM_STEP" in opts and opts["MINIMUM_STEP"][1] < 0.0:
+        refuse("MINIMUM_STEP", "-- must not be negative")
     if opts.get("LENGTHENING_STEP", (None, 0.0))[1] > 0:
         refuse("LENGTHENING_STEP", "-- conduit lengthening is not modelled yet; set "
                                    "LENGTHENING_STEP 0")
@@ -356,6 +360,10 @@ def _dynamic_wave_options(opts: dict, path) -> DynamicWaveOptions:
             if opts[key][1] not in table:
                 refuse(key, f"-- must be one of {sorted(table)}")
             kwargs[field_name] = table[opts[key][1]]
+    if "VARIABLE_STEP" in opts:
+        kwargs["variable_step"] = opts["VARIABLE_STEP"][1]
+    if "MINIMUM_STEP" in opts:
+        kwargs["minimum_step"] = opts["MINIMUM_STEP"][1]
     for key, field_name in (("MIN_SURFAREA", "min_surface_area"),
                             ("HEAD_TOLERANCE", "head_tolerance")):
         if key in opts and opts[key][1] != 0.0:

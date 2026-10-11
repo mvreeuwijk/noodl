@@ -9,13 +9,15 @@ column layouts and units are read by `apps/sewer/inp.py`.
 
 **Routing.** `FLOW_ROUTING` is `STEADY`, `KINWAVE` or `DYNWAVE`, read as the physical names
 `steady`, `kinematic_wave` and `dynamic_wave` (`SewerNetwork.routing`). `DYNWAVE` also reads
-`ROUTING_STEP` (seconds or `HH:MM:SS`), `INERTIAL_DAMPING` (`NO`/`PARTIAL`/`FULL`),
+`ROUTING_STEP` and `MINIMUM_STEP` (seconds or `HH:MM:SS`), `VARIABLE_STEP` (the Courant
+factor, 0 to 2; absent means 0 here, where SWMM's own default is 0.75, so write it
+explicitly to match SWMM), `INERTIAL_DAMPING` (`NO`/`PARTIAL`/`FULL`),
 `NORMAL_FLOW_LIMITED` (`SLOPE`/`FROUDE`/`BOTH`/`NO`), `SURCHARGE_METHOD` (`EXTRAN` or `SLOT`), `MIN_SURFAREA`,
 `HEAD_TOLERANCE`, `MAX_TRIALS` and `MIN_SLOPE` into `DynamicWaveOptions`; `HEAD_TOLERANCE`
 and `MAX_TRIALS` are SWMM's own iteration controls, recorded but not used.
 
 **Dynamic wave, what is refused for now.** With `DYNWAVE` the reader refuses, with the line
-number: `VARIABLE_STEP` above 0 (set it to 0), `LENGTHENING_STEP` above 0, `ALLOW_PONDING YES`,
+number: `LENGTHENING_STEP` above 0, `ALLOW_PONDING YES`,
 a junction `InitDepth` other than 0, a conduit `InitFlow` or `MaxFlow`
 other than 0, flap-gated outfalls and `TIDAL`/`TIMESERIES` outfalls.
 
@@ -58,7 +60,7 @@ conduits differ by SWMM's one-step junction lag, which is first order in the ste
 - runoff (`[SUBCATCHMENTS]` and everything that feeds them) and dry-weather patterns;
 - non-circular shapes;
 - storage units, pumps, weirs, orifices and outlets;
-- dynamic wave with a variable time step or ponding. Both `SURCHARGE_METHOD`s model
+- dynamic wave with ponding. Both `SURCHARGE_METHOD`s model
   surcharge, and a junction floods (without ponding) above `MaxDepth` (extended to its
   crown) plus `SurDepth`.
 

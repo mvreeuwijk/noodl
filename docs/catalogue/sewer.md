@@ -23,11 +23,11 @@ Descriptions of the physical objects a network is built from.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `DynamicWaveOptions` | SWMM 5.2.4's dynamic-wave [OPTIONS] that change the physics, with SWMM's defaults (`project.c:841-880`). `head_tolerance` and `max_trials` are SWMM's own iteration controls: recorded so a file round-trips, never used -- noodl solves the same equations to `build_model`'s own `iterate_tol` (docs: "Dynamic wave"). | `DynamicWaveOptions(routing_step=20.0, inertial_damping='partial', normal_flow_limited='both', surcharge_method='extran', min_surface_area=None, head_tolerance=None, max_trials=None)` |
+| `DynamicWaveOptions` | SWMM 5.2.4's dynamic-wave [OPTIONS] that change the physics, with SWMM's defaults (`project.c:841-880`). `head_tolerance` and `max_trials` are SWMM's own iteration controls: recorded so a file round-trips, never used -- noodl solves the same equations to `build_model`'s own `iterate_tol` (docs: "Dynamic wave"). | `DynamicWaveOptions(routing_step=20.0, inertial_damping='partial', normal_flow_limited='both', surcharge_method='extran', min_surface_area=None, head_tolerance=None, max_trials=None, variable_step=0.0, minimum_step=0.5)` |
 | `Manhole` | A manhole: `invert` and `ground` elevations (m), a constant lateral `inflow` (m3/s), for storage its `surface_area` (m2), and SWMM's `surcharge_depth` (SurDepth, m >= 0): how far dynamic-wave routing lets the water rise above the full depth before the manhole floods (kinematic and steady routing ignore it). | `Manhole(name, invert, ground=None, inflow=0.0, surface_area=None, surcharge_depth=0.0)` |
 | `Outfall` | An outfall, where the network discharges: its `invert` elevation (m). | `Outfall(name, invert, kind='free', stage=None)` |
 | `Pipe` | A conduit from manhole `u` to `v`: `length` and `diameter` (m), Manning's `n` and bed `slope` (m/m). `inlet_offset` and `outlet_offset` (m) are the heights of the pipe invert above the invert of its `u` and `v` node (SWMM's link offsets). | `Pipe(name, u, v, length, diameter, n, slope, inlet_offset=0.0, outlet_offset=0.0)` |
-| `SewerNetwork` | A gravity sewer: manholes, pipes, outfalls. Kinematic-wave and steady routing need a dendritic network (one outgoing pipe per manhole); dynamic-wave routing allows loops and flat pipes. | `SewerNetwork(manholes, pipes, outfalls, routing='kinematic_wave', notes=<factory>, geometry='analytic', dynamic_wave=DynamicWaveOptions(routing_step=20.0, inertial_damping='partial', normal_flow_limited='both', surcharge_method='extran', min_surface_area=None, head_tolerance=None, max_trials=None))` |
+| `SewerNetwork` | A gravity sewer: manholes, pipes, outfalls. Kinematic-wave and steady routing need a dendritic network (one outgoing pipe per manhole); dynamic-wave routing allows loops and flat pipes. | `SewerNetwork(manholes, pipes, outfalls, routing='kinematic_wave', notes=<factory>, geometry='analytic', dynamic_wave=DynamicWaveOptions(routing_step=20.0, inertial_damping='partial', normal_flow_limited='both', surcharge_method='extran', min_surface_area=None, head_tolerance=None, max_trials=None, variable_step=0.0, minimum_step=0.5))` |
 
 ## Elements (branch laws)
 
@@ -86,7 +86,7 @@ Calculations and helpers.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `simulate_dynamic_wave` | Run `steps` routing steps of `dt` s (default: the model's routing step) from `state`. | `simulate_dynamic_wave(model, state, drivers, *, steps, dt=None, inflow=None, record=('water.phi', 'water.q'), diagnostics=None, **solve_kwargs)` |
+| `simulate_dynamic_wave` | Run the dynamic wave from `state` for `steps` steps, or for `duration` s. | `simulate_dynamic_wave(model, state, drivers, *, steps=None, duration=None, dt=None, inflow=None, record=('water.phi', 'water.q'), diagnostics=None, **solve_kwargs)` |
 | `air_geometry` | ``(A_air, P_air, D_h)`` for the headspace above the water surface. | `air_geometry(h, diameter)` |
 | `capacity_flow` | ``Q_max = Q(H_MAX_RATIO D)``: the largest discharge the ascending Manning branch carries, and the surcharge threshold. | `capacity_flow(diameter, roughness, slope)` |
 | `henry_h2s` | Dimensionless Henry constant ``H = C_gas / C_liquid`` at absolute temperature (K). | `henry_h2s(temperature)` |

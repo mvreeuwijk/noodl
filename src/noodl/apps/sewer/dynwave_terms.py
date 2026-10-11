@@ -125,7 +125,9 @@ class ConduitTerms(NamedTuple):
     wet conduit whose OTHER end is pinned still has in this end's head -- the pass lags it
     into c0 (``conveyance`` is 0 there), 0 elsewhere. SWMM keeps it in the node's
     ``sumdqdh`` (`dwflow.c:243`, `dynwave.c:578-588`); the closure uses it to anchor a
-    surcharged junction (`JunctionStorage`).
+    surcharged junction (`JunctionStorage`); ``froude`` SWMM's `Link.froude` (-), which the
+    variable routing step reads: 0 on the dry exit (`dwflow.c:175`), else from the flow
+    of the given state at mid depth (`dwflow.c:189`, 0 for a full closed conduit).
     """
 
     flow_class: Tensor
@@ -148,6 +150,7 @@ class ConduitTerms(NamedTuple):
     end_depth2: Tensor
     lagged_conveyance1: Tensor
     lagged_conveyance2: Tensor
+    froude: Tensor
 
 
 def _slot_width(y: Tensor, y_full: Tensor, slot: bool) -> Tensor:
@@ -414,6 +417,7 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
         depth=torch.minimum(y_mid, yf),                                        # :176, :287
         end_depth1=y1,
         end_depth2=y2,
+        froude=torch.where(dry_exit, zero, fr),                                # :175, :189
         lagged_conveyance1=lagged1,
         lagged_conveyance2=lagged2,
     )

@@ -385,8 +385,8 @@ conduit; the backwater fixture avoids an exact tie for that reason.
 
 #### Scope
 
-Circular conduits, one barrel, SWMM's tabulated geometry; a fixed routing step
-(`VARIABLE_STEP 0`); a cold dry start (zero `InitDepth` and `InitFlow`); constant or
+Circular conduits, one barrel, SWMM's tabulated geometry; the fixed routing step or
+SWMM's variable step (`VARIABLE_STEP > 0`, below); a cold dry start (zero `InitDepth` and `InitFlow`); constant or
 driver-supplied lateral inflows; `FREE`, `NORMAL` and `FIXED` outfalls without flap gates;
 `INERTIAL_DAMPING` `NONE`/`PARTIAL`/`FULL` and every `NORMAL_FLOW_LIMITED` option.
 `SURCHARGE_METHOD SLOT` is SWMM's Preissmann slot: above `0.985257 y_full` the top width is the
@@ -431,10 +431,10 @@ exactly at `y_max` (not at a penalty's offset above it), and the excess falling 
 releases it on the next pass, without a flag to chatter.
 
 The reader refuses by name,
-with the line number, `VARIABLE_STEP > 0`, `LENGTHENING_STEP > 0`, `ALLOW_PONDING YES`, nonzero
+with the line number, `LENGTHENING_STEP > 0`, `ALLOW_PONDING YES`, nonzero
 `InitDepth`/`InitFlow`/`MaxFlow`, flap gates, barrels other than 1 and TIDAL/TIMESERIES outfalls.
-`build_model` with `air=True`, `quality=True` or `storage=True` is refused by name. Variable step,
-ponding, headspace air and quality on the dynamic wave are planned.
+`build_model` with `air=True`, `quality=True` or `storage=True` is refused by name. Ponding,
+headspace air and quality on the dynamic wave are planned.
 
 ```python
 from noodl.apps.sewer import read_swmm_inp, build_model, simulate_dynamic_wave
@@ -450,9 +450,43 @@ print([round(float(q), 4) for q in hist["water.q"][-1]])                # m3/s, 
 ```
 
 `hist` holds `"water.phi"` (head at every node, m) and `"water.q"` (flow in every conduit,
-m³/s), stacked over steps. `simulate_dynamic_wave` also takes an `inflow=` override (`(n,)`
-constant, `(B, n)` a batch, `(steps, B, n)` a series) and `record=` for other state keys
-and for `"sewer.overflow"` (m³/s per junction).
+m³/s), stacked over steps, with `"t"` (s, the end time of each step) and `"dt"` (s, each
+step's length). `simulate_dynamic_wave` also takes an `inflow=` override (`(n,)`
+constant, `(B, n)` a batch, `(steps, B, n)` a series, or a function `inflow(t)` of the
+start time `t` in s) and `record=` for other state keys and for `"sewer.overflow"` (m³/s
+per junction).
+
+#### Variable step and time-varying inflow
+
+Give `duration=` (s) instead of `steps=` to run a stretch of simulated time. With
+`VARIABLE_STEP > 0` (a `DynamicWaveOptions.variable_step`, the Courant factor, 0 to 2) every
+step is chosen as SWMM does (`dynwave_getRoutingStep`): the first step is `MINIMUM_STEP`
+(`minimum_step`, 0.5 s by default, capped at the routing step and floored at 1 ms), and
+each later one is the smallest of
+
+- the routing step;
+- each conduit's Courant step, `V / |q| * Fr / (1 + Fr) * VARIABLE_STEP` with `V` the
+  conduit's volume, `q` its flow and `Fr` its Froude number (a dry, still or full closed
+  conduit, `Fr <= 0.01`, does not limit it);
+- each junction's depth-change step, the time to rise a quarter of its crown depth at the
+  rate it rose over the last step (a dry junction, one at or above its crown, and a quasi-steady
+  one do not limit it);
+
+floored at the minimum step and truncated to a millisecond. The last step is cut to the time
+that remains (at least 1 ms), so the run ends at `duration`; this clipping applies to a fixed
+step too. A variable step needs a single network (no batched `inflow`), and `dt=` is refused
+with it, since the step is then chosen by the options.
+
+An inflow function `inflow(t)` returns the `(n,)` lateral inflow of the step that starts at
+`t` s. SWMM reads a time series at the start of the step (its own clock is 1 ms ahead,
+`swmm5.c`'s `getDateTime`: a function that stands for a SWMM `[TIMESERIES]` should add
+0.001 s), and the inflow enters the step's trapezoid with the end state, as a constant
+inflow does. A function (or an `(steps, B, n)` series) in `simulate_dynamic_wave` is how
+time variation enters: the reader still refuses `[TIMESERIES]`. The step sequence and every
+state of the variable-step tree, with and without a ramping inflow, match SWMM 5.2.4 to the
+millisecond and to the targets of the other dynamic-wave comparisons
+(`tests/verification/test_sewer_dynwave_parity.py`). Because the step depends on the state
+through switches, a variable-step run is not differentiable through its step sizes.
 
 ### Headspace air
 
@@ -651,7 +685,7 @@ publish numbers from this application.
   backwater.
 - **Kinematic-wave and steady routing: dendritic networks only**, one outgoing pipe per
   manhole, no loops. Dynamic-wave routing allows loops and flat or adverse conduits.
-- **Dynamic wave: no variable step, ponding, headspace air or quality yet** (planned).
+- **Dynamic wave: no ponding, headspace air or quality yet** (planned).
   Flooded water is lost, as in SWMM without ponding; with no ground (`MaxDepth` 0) and no
   `SurDepth` a junction floods as soon as it fills to its crown. `build_model(...,
   air=True)` or `quality=True` is refused. Circular conduits only, one barrel, cold dry start. Under EXTRAN, where SWMM's own
