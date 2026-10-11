@@ -42,7 +42,7 @@ from noodl.topology import Network
 #: SWMM `FLOW_ROUTING` keywords -> the physical routing names.
 ROUTING_ALIASES = {"STEADY": "steady", "KINWAVE": "kinematic_wave", "DYNWAVE": "dynamic_wave"}
 ROUTINGS = ("steady", "kinematic_wave", "dynamic_wave")
-OUTFALL_KINDS = ("free", "normal", "fixed")
+OUTFALL_KINDS = ("free", "normal", "fixed", "tidal", "timeseries")
 
 Tensor = torch.Tensor
 F64 = torch.float64
@@ -102,8 +102,15 @@ def storage_unit(name: str, invert: float, max_depth: float, curve: tuple, *,
 class Outfall:
     """An outfall, where the network discharges: its `invert` elevation (m).
 
-    `kind` is ``"free"``, ``"normal"`` or ``"fixed"`` (SWMM FREE/NORMAL/FIXED); ``"fixed"``
-    needs `stage`, the water-surface elevation (m). Only dynamic-wave routing reads them.
+    `kind` is ``"free"``, ``"normal"``, ``"fixed"``, ``"tidal"`` or ``"timeseries"`` (SWMM
+    FREE/NORMAL/FIXED/TIDAL/TIMESERIES); ``"fixed"`` needs `stage`, the water-surface
+    elevation (m). ``"tidal"`` needs `tide`, SWMM's TIDAL curve as ``(hour, stage)`` pairs
+    (hour of the day, stage elevation in m, strictly increasing hours): the stage is read
+    from it at the elapsed time of the run, repeating every 24 h
+    (`DynamicWaveHydraulics`, `tidal_stage`). ``"timeseries"`` takes its stage elevation
+    from a driver, the `outfall_stage` function of `build_model` / `simulate_dynamic_wave`;
+    `series` is only the SWMM series' name, for messages. Only dynamic-wave routing reads
+    them.
     `flap_gate` (SWMM's Gated) blocks any flow from the outfall into its conduit
     (`link.c::link_setFlapGate`, dynamic wave only).
     """
@@ -113,6 +120,8 @@ class Outfall:
     kind: str = "free"
     stage: float | None = None
     flap_gate: bool = False
+    tide: tuple[tuple[float, float], ...] | None = None
+    series: str | None = None
 
 
 @dataclass(frozen=True)
@@ -328,6 +337,8 @@ class SewerNetwork:
                     f"SewerNetwork: fixed outfall {outfall.name!r} needs a finite stage "
                     f"(m elevation), got {outfall.stage!r}"
                 )
+            if outfall.kind == "tidal":
+                self._validate_tide(outfall)
         pipe_names: set[str] = set()
         outgoing: dict[str, list[str]] = {}
         for pipe in self.pipes:
@@ -496,6 +507,27 @@ class SewerNetwork:
                         f"SewerNetwork: pipe {pipe.name!r} has {what} {value!r}; only "
                         f"dynamic-wave routing models it (routing is {self.routing!r})")
 
+    @staticmethod
+    def _validate_tide(outfall: Outfall) -> None:
+        """A tidal outfall needs a TIDAL curve: finite (hour, stage) pairs with strictly
+        increasing hours (SWMM's ERR_CURVE_SEQUENCE, table.c:313)."""
+        tide = outfall.tide
+        if not tide:
+            raise ValueError(
+                f"SewerNetwork: tidal outfall {outfall.name!r} needs a tide curve of "
+                f"(hour, stage m) pairs, got {tide!r}"
+            )
+        if not all(math.isfinite(x) and math.isfinite(y) for x, y in tide):
+            raise ValueError(
+                f"SewerNetwork: tidal outfall {outfall.name!r} tide curve must be finite, "
+                f"got {tide!r}"
+            )
+        if any(b[0] <= a[0] for a, b in zip(tide, tide[1:], strict=False)):
+            raise ValueError(
+                f"SewerNetwork: tidal outfall {outfall.name!r} tide curve hours must be "
+                f"strictly increasing, got {[x for x, _ in tide]}"
+            )
+
     def _validate_dynamic(self, outfall_names: set[str]) -> None:
         """Dynamic-wave topology: loops and any flow direction are allowed, but every
         connected component needs an outfall and each outfall ends exactly one conduit."""
@@ -616,6 +648,7 @@ def build_model(
     dt_storage: float | None = None,
     iterate_tol: float | None = None,
     iterate_max: int | None = None,
+    outfall_stage: Mapping | None = None,
 ) -> tuple[Model, State, Drivers]:
     """Assemble the sewer model and return `(model, state, drivers)`.
 
@@ -629,7 +662,9 @@ def build_model(
     `storage`; headspace air and quality on the dynamic wave are phase D), converged to
     `iterate_tol` (m, default 1e-11) within `iterate_max` passes (default 2000; a slowly
     contracting outfall head at low flow can need several hundred). Those two
-    apply to dynamic wave only and are refused for the other routings.
+    apply to dynamic wave only and are refused for the other routings. So is `outfall_stage`,
+    the stage elevation of each TIMESERIES outfall (``{name: m, or a function of t in s}``;
+    `build_dynamic_wave_model`).
     """
     if net.routing == "dynamic_wave":
         for name, value in (("air", air), ("quality", quality), ("storage", storage)):
@@ -640,8 +675,9 @@ def build_model(
                 )
         kwargs = {k: v for k, v in (("iterate_tol", iterate_tol),
                                     ("iterate_max", iterate_max)) if v is not None}
-        return build_dynamic_wave_model(net, **kwargs)
-    for name, value in (("iterate_tol", iterate_tol), ("iterate_max", iterate_max)):
+        return build_dynamic_wave_model(net, outfall_stage=outfall_stage, **kwargs)
+    for name, value in (("iterate_tol", iterate_tol), ("iterate_max", iterate_max),
+                        ("outfall_stage", outfall_stage)):
         if value is not None:
             raise ValueError(
                 f"build_model: {name} applies to dynamic-wave routing only; this network's "

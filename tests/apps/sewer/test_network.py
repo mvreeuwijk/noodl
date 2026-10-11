@@ -487,10 +487,29 @@ def test_fixed_outfall_needs_a_stage():
                             routing="dynamic_wave").validate()
 
 
+@pytest.mark.parametrize("tide,match", [
+    (None, "tide"),
+    ((), "tide"),
+    (((0.0, 8.1), (0.0, 8.2)), "increasing"),
+    (((0.0, 8.1), (6.0, float("nan"))), "finite"),
+])
+def test_tidal_outfall_needs_a_valid_tide_curve(tide, match):
+    net = dataclasses.replace(tree_steady(), routing="dynamic_wave", outfalls=(
+        Outfall("Outfall", 8.0, kind="tidal", tide=tide),))
+    with pytest.raises(ValueError, match=f"Outfall.*{match}"):
+        net.validate()
+
+
+def test_tidal_and_timeseries_outfalls_validate():
+    for outfall in (Outfall("Outfall", 8.0, kind="tidal", tide=((0.0, 8.1), (12.0, 8.4))),
+                    Outfall("Outfall", 8.0, kind="timeseries", series="Tide1")):
+        dataclasses.replace(tree_steady(), routing="dynamic_wave", outfalls=(outfall,)).validate()
+
+
 def test_unknown_outfall_kind_and_negative_offset_are_refused_by_name():
     net = tree_steady()
     with pytest.raises(ValueError, match="kind"):
-        dataclasses.replace(net, outfalls=(Outfall("Outfall", 8.0, kind="tidal"),)).validate()
+        dataclasses.replace(net, outfalls=(Outfall("Outfall", 8.0, kind="bogus"),)).validate()
     bad = (dataclasses.replace(net.pipes[0], inlet_offset=-0.1), *net.pipes[1:])
     with pytest.raises(ValueError, match="C1.*offset"):
         dataclasses.replace(net, pipes=bad).validate()

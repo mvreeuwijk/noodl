@@ -132,7 +132,38 @@ _AREA_SI = QCF / LCF
 _VELOCITY_MIN_DEPTH = 0.01
 #: SWMM's shortest time step, MINTIMESTEP (`dynwave.c:60`), s.
 MIN_TIME_STEP = 0.001
-_OUTFALL_CODES = {"free": 0, "normal": 1, "fixed": 2}
+_OUTFALL_CODES = {"free": 0, "normal": 1, "fixed": 2, "tidal": 3, "timeseries": 4}
+#: Outfall kinds whose stage varies in time: it is the ``"outfall_stage"`` driver's.
+_STAGED_KINDS = ("tidal", "timeseries")
+MSEC_PER_DAY = 86400.0 * 1000.0                                          # consts.h MSECperDAY
+
+
+def tidal_stage(tide: tuple[tuple[float, float], ...], t: float) -> float:
+    """A TIDAL outfall's stage elevation (m) `t` s into the run (`node.c::
+    outfall_setOutletDepth`, node.c:1445-1452): the curve `tide` of ``(hour, stage)`` pairs
+    is read at ``x = x_first + 24 frac(t / 1 day)`` (the elapsed time, not the clock time:
+    the simulation's start is not added, so the tide begins at the curve's first hour and
+    repeats every 24 h), by `table.c::table_lookup`: the first stage at or below the first
+    hour, linear between entries, the last stage beyond the last hour (the curve is not
+    wrapped, so one that stops short of 24 h holds its last stage)."""
+    days = 1000.0 * t / MSEC_PER_DAY                                     # node.c:1449
+    x = tide[0][0] + (days - math.floor(days)) * 24.0                    # node.c:1450
+    x1, y1 = tide[0]
+    if x <= x1:                                                          # table.c:420
+        return y1
+    for x2, y2 in tide[1:]:
+        if x <= x2:                                                      # table.c:421
+            return _table_interpolate(x, x1, y1, x2, y2)
+        x1, y1 = x2, y2
+    return y1                                                            # table.c:426
+
+
+def _table_interpolate(x: float, x1: float, y1: float, x2: float, y2: float) -> float:
+    """`table.c::table_interpolate` (table.c:51-63)."""
+    dx = x2 - x1
+    if abs(dx) < 1.0e-20:
+        return (y1 + y2) / 2.0
+    return y1 + (x - x1) * (y2 - y1) / dx
 #: The flow regulators' edge kinds in the ``"water"`` layer, in the order their columns
 #: follow the pipes' in ``"water.q"`` (only the kinds a network has are present).
 STRUCTURE_KINDS = ("orifice", "weir", "outlet")
@@ -749,6 +780,12 @@ class DynamicWaveHydraulics:
     link.c:425-463), an outfall on a regulator takes yN = yC = 0 (link.c:753-765), and every
     link's flow enters the junction net inflows.
 
+    Tidal and time-varying outfalls (design C5): a TIDAL or TIMESERIES outfall follows the
+    FIXED outfall's stage rule with the stage of the full-outfall driver ``"outfall_stage"``
+    (m, one per outfall; only the TIDAL and TIMESERIES entries are read), the stage of the
+    END of the step (`outfall_stage` builds it; `simulate_dynamic_wave` sets it each step).
+    The initial heads use its value at t = 0.
+
     The arithmetic is SWMM's own, in feet (design D2); `layer` names the head layer.
     """
 
@@ -885,6 +922,11 @@ class DynamicWaveHydraulics:
         self.outfall_stage_ft = torch.tensor(
             [(o.stage if o.stage is not None else o.invert) / LCF for o in net.outfalls],
             dtype=F64)
+        #: per outfall: whether its stage is the ``"outfall_stage"`` driver's (TIDAL and
+        #: TIMESERIES)
+        self.outfall_staged = torch.tensor(
+            [o.kind in _STAGED_KINDS for o in net.outfalls], dtype=torch.bool)
+        self._outfalls = tuple(net.outfalls)
         self.min_area_ft2 = (
             DEFAULT_MIN_SURFACE_AREA_FT2 if self.options.min_surface_area is None
             else self.options.min_surface_area / LCF**2)            # dynwave.c:186-187
@@ -1169,10 +1211,80 @@ class DynamicWaveHydraulics:
             "sewer.net_inflow": net_inflow[..., jidx],
         }
 
-    def _outfall_heads(self, q: Tensor) -> Tensor:
+    def outfall_stage(self, t: float, series: Mapping | None = None) -> Tensor:
+        """Every outfall's stage elevation (m, shape ``(n_outfalls,)``) `t` s into the run:
+        a TIDAL one's from its curve (`tidal_stage`), a TIMESERIES one's from `series[name]`
+        (a stage in m, or a function of `t` returning one), a FIXED one's its own stage, the
+        others' their invert (unused). This is the ``"outfall_stage"`` driver of a step
+        whose END is at `t` (SWMM sets the outfall depth with the routing clock already
+        advanced: `routing.c:301-302` before `routeFlow`, node.c:1449, 1456)."""
+        series = {} if series is None else series
+        stage = []
+        for o in self._outfalls:
+            if o.kind == "tidal":
+                value = tidal_stage(o.tide, t)
+            elif o.kind == "timeseries":
+                source = series[o.name]
+                value = float(source(t) if callable(source) else source)
+                if not math.isfinite(value):
+                    raise ValueError(
+                        f"DynamicWaveHydraulics: outfall_stage of timeseries outfall "
+                        f"{o.name!r} is {value!r} at t={t} s; it must be finite (m elevation)")
+            else:
+                value = o.stage if o.stage is not None else o.invert
+            stage.append(value)
+        return torch.tensor(stage, dtype=F64)
+
+    def check_outfall_stage(self, series: Mapping | None) -> dict:
+        """`series` as `outfall_stage` takes it: ``{timeseries outfall name: stage in m or
+        function of t}``, covering every TIMESERIES outfall and nothing else (a tidal
+        outfall reads its curve, the others their own stage). Returns it as a dict."""
+        series = {} if series is None else dict(series)
+        wanted = {o.name for o in self._outfalls if o.kind == "timeseries"}
+        kinds = {o.name: o.kind for o in self._outfalls}
+        for name in series:
+            if name not in wanted:
+                what = ("is not an outfall" if name not in kinds else
+                        f"is a {kinds[name]} outfall, whose stage is "
+                        + ("its tide curve's" if kinds[name] == "tidal" else "not time-varying"))
+                raise ValueError(
+                    f"DynamicWaveHydraulics: outfall_stage names {name!r}, which {what}; it "
+                    f"takes the timeseries outfalls {sorted(wanted)}")
+        missing = sorted(wanted - set(series))
+        if missing:
+            raise ValueError(
+                f"DynamicWaveHydraulics: timeseries outfall(s) {missing} need an "
+                f"outfall_stage (m elevation, or a function of t in s) each")
+        return series
+
+    def _stage_ft(self, drivers: Mapping | None) -> Tensor:
+        """Each outfall's stage (ft): its own stage, a TIDAL or TIMESERIES outfall's the
+        ``"outfall_stage"`` driver's (m, ``(..., n_outfalls)``)."""
+        if not bool(self.outfall_staged.any()):
+            return self.outfall_stage_ft
+        if drivers is None or "outfall_stage" not in drivers:
+            raise KeyError(
+                f"DynamicWaveHydraulics: driver 'outfall_stage' (m elevation, one per "
+                f"outfall) is required by outfall(s) "
+                f"{[o.name for o in self._outfalls if o.kind in _STAGED_KINDS]}; "
+                f"simulate_dynamic_wave and build_model set it")
+        given = torch.as_tensor(drivers["outfall_stage"], dtype=F64)
+        if given.shape[-1] != len(self._outfalls):
+            raise ValueError(
+                f"DynamicWaveHydraulics: outfall_stage must have one value per outfall "
+                f"({len(self._outfalls)}), got shape {tuple(given.shape)}")
+        if not bool(torch.isfinite(given[..., self.outfall_staged]).all()):
+            bad = [o.name for o, k in zip(self._outfalls, self.outfall_staged.tolist(),
+                                           strict=True) if k]
+            raise ValueError(f"DynamicWaveHydraulics: non-finite outfall_stage at {bad}")
+        return torch.where(self.outfall_staged, given / LCF, self.outfall_stage_ft)
+
+    def _outfall_heads(self, q: Tensor, stage_ft: Tensor | None = None) -> Tensor:
         """`link.c::link_setOutfallDepth` + `node.c::outfall_setOutletDepth` (link.c:728-766,
-        node.c:1413-1492), from each outfall conduit's flow `q` (m3/s, the pipes' columns):
-        heads (m). An outfall on a regulator takes yN = yC = 0."""
+        node.c:1413-1492), from each outfall conduit's flow `q` (m3/s, the pipes' columns)
+        and the outfalls' stages `stage_ft` (ft, `_stage_ft`; default the static ones):
+        heads (m). An outfall on a regulator takes yN = yC = 0. FIXED, TIDAL and TIMESERIES
+        outfalls share the stage rule (node.c:1469-1490); they differ only in the stage."""
         op = self._outfall_pipe
         geo = self.geo
         q_ft = (q[..., op] / QCF / self.barrels[op]).abs()                # link.c:759
@@ -1188,7 +1300,7 @@ class DynamicWaveHydraulics:
         free = torch.where(z > 0.0, zero, torch.minimum(y_norm, y_crit))      # node.c:1431
         normal = torch.where(z > 0.0, zero, y_norm)                           # node.c:1436
         invert = self.node_invert[self.outfall_idx] / LCF
-        stage = self.outfall_stage_ft
+        stage = self.outfall_stage_ft if stage_ft is None else stage_ft
         yc = torch.minimum(y_crit, y_norm)                                    # node.c:1469
         fixed = torch.where(
             yc + z + invert < stage, (stage - invert).expand_as(yc),         # node.c:1473
@@ -1199,11 +1311,12 @@ class DynamicWaveHydraulics:
                             z + yc),                                          # node.c:1481-1485
                 yc))                                                          # node.c:1490
         kind = self.outfall_kind
-        depth = torch.where(kind == 0, free, torch.where(kind == 1, normal, fixed))
+        depth = torch.where(kind == 0, free,
+                            torch.where(kind == 1, normal, fixed))    # kinds >= 2 are staged
         return self.node_invert[self.outfall_idx] + depth * LCF
 
     def _switch_slope(self, q: Tensor, terms: ConduitTerms, area_ft2: Tensor, surf: Tensor,
-                      dt: float) -> Tensor:
+                      dt: float, stage_ft: Tensor) -> Tensor:
         """The slope switch's wall slope S (m2/s, per pipe; `DynamicWaveConduit`): the
         linearised switching surface ``1/(c + 1/S_max)``. ``c`` (m per m3/s) is how far the
         lagged outfall depth at the conduit's downstream end moves per unit of its flow
@@ -1224,7 +1337,8 @@ class DynamicWaveHydraulics:
         step = 1e-6 * torch.clamp(q_abs[..., op], min=1e-3)
         bumped = q_abs.clone()
         bumped[..., op] = q_abs[..., op] + step
-        rise = (self._outfall_heads(bumped) - self._outfall_heads(q_abs)) / step
+        rise = (self._outfall_heads(bumped, stage_ft)
+                - self._outfall_heads(q_abs, stage_ft)) / step
         rise = torch.where(self.outfall_at_v & ~self.outfall_on_structure,
                            torch.clamp(rise, min=0.0), torch.zeros_like(rise))
         compliance = torch.zeros_like(s_max).index_add(-1, op, rise.expand(
@@ -1294,7 +1408,8 @@ class DynamicWaveHydraulics:
         lagged = lagged.index_add(-1, self.v, terms.lagged_conveyance2)[..., jidx]
         anchor = lagged * (QCF / LCF) + K_ANCHOR * 2.0 / dt * area_ft2 * _AREA_SI
         switch = terms.slope_switch
-        switch_slope = self._switch_slope(q, terms, area_ft2, surf, dt)
+        stage_ft = self._stage_ft(drivers)
+        switch_slope = self._switch_slope(q, terms, area_ft2, surf, dt, stage_ft)
         # the drop switch's wall slope: K_SWITCH times the junction's grounding above it
         k_si = terms.conveyance * (QCF / LCF)
         sum_k = torch.zeros_like(surf).index_add(-1, self.u, k_si).index_add(-1, self.v, k_si)
@@ -1303,7 +1418,7 @@ class DynamicWaveHydraulics:
                                 torch.full_like(drop["head"], torch.inf))
         out.update({
             f"{self.layer}.sources": inflow,
-            f"{self.layer}.phi_boundary": self._outfall_heads(q),
+            f"{self.layer}.phi_boundary": self._outfall_heads(q, stage_ft),
             "water.flow_offset": terms.flow_offset * QCF,
             "water.conveyance": terms.conveyance * (QCF / LCF),
             "water.normal_flow": torch.where(switch, terms.switch_normal_flow,
@@ -1361,6 +1476,17 @@ class DynamicWaveHydraulics:
         terms = self._terms(state, self.options.routing_step if dt is None else dt)
         return self._carried(state, terms, self._inflow(drivers))
 
+    def _initial_stage_ft(self, drivers: Mapping | None) -> Tensor:
+        """The outfalls' stages (ft) at t = 0 for the initial heads: the driver's if it is
+        given, else the tide curves' at t = 0 (a TIMESERIES outfall has no stage without
+        its driver)."""
+        if drivers is not None and "outfall_stage" in drivers:
+            return self._stage_ft(drivers)
+        if any(o.kind == "timeseries" for o in self._outfalls):
+            raise KeyError("DynamicWaveHydraulics: the initial state needs the "
+                           "'outfall_stage' driver for a timeseries outfall")
+        return self._stage_ft({"outfall_stage": self.outfall_stage(0.0)})
+
     def initial_state(self, drivers: Mapping | None = None) -> State:
         """SWMM's initial state (flowrout.c:75-102, 336-507), cold and dry unless the network
         sets InitDepth (`Manhole.initial_depth`) or InitFlow (`Pipe.initial_flow`).
@@ -1375,8 +1501,8 @@ class DynamicWaveHydraulics:
           it, and so does a storage unit, whose InitDepth of 0 is not averaged either
           (flowrout.c:375).
         - Outfalls start at the depth `link_setOutfallDepth` gives from the conduit's initial
-          flow (a FIXED outfall at its stage, the others at their invert at zero flow;
-          flowrout.c:383).
+          flow (a FIXED outfall at its stage, a TIDAL or TIMESERIES one at its stage at
+          t = 0, the others at their invert at zero flow; flowrout.c:383).
         - A conduit with no InitFlow starts at the mean of its end-node depths above its
           offsets, clamped to [0, yFull] and at least FUDGE (`initLinkDepths`,
           flowrout.c:389-420); the area at that depth is its stored area (`initLinks`,
@@ -1386,7 +1512,8 @@ class DynamicWaveHydraulics:
           inflow before routing starts (node.c:264, flowrout.c:437), so the first step's
           ``oldNetInflow`` has no lateral part (routing.c:236-242).
 
-        `drivers`, when given, has its ``"inflow"`` validated."""
+        `drivers`, when given, has its ``"inflow"`` validated and supplies the
+        ``"outfall_stage"`` at t = 0."""
         if drivers is not None:
             self._inflow(drivers)
         geo = self.geo
@@ -1410,7 +1537,8 @@ class DynamicWaveHydraulics:
         depth_j = torch.where((given > 0.0) | self.is_storage, given, average)
         phi = self.node_invert.clone()
         phi[jidx] = self.node_invert[jidx] + depth_j * LCF
-        phi[self.outfall_idx] = self._outfall_heads(q0)                       # flowrout.c:383
+        phi[self.outfall_idx] = self._outfall_heads(
+            q0, self._initial_stage_ft(drivers))                              # flowrout.c:383
         depth_ft = (phi - self.node_invert) / LCF
         y1 = torch.clamp(depth_ft[self.u] - geo.offset1, min=0.0)
         y2 = torch.clamp(depth_ft[self.v] - geo.offset2, min=0.0)
@@ -1461,7 +1589,8 @@ class DynamicWaveHydraulics:
 def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
                              iterate_max: int = 2000, relaxation: float = 0.5,
                              acceleration: str | None = "anderson", memory: int = 5,
-                             iterate_flow_tol: float | None = 1e-10
+                             iterate_flow_tol: float | None = 1e-10,
+                             outfall_stage: Mapping | None = None
                              ) -> tuple[Model, State, Drivers]:
     """Assemble a dynamic-wave sewer and return ``(model, state, drivers)``.
 
@@ -1472,7 +1601,12 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     over the last `memory` of them by default (``acceleration="anderson"``, `Model`'s
     `iterate_acceleration`), with `relaxation` the damping of the steps it falls back to;
     ``acceleration=None`` is plain relaxation, which reaches the same fixed point in two to
-    three times the passes. `iterate_flow_tol` (m3/s) is the tolerance on the conduit
+    three times the passes. `outfall_stage` gives each TIMESERIES outfall its stage
+    elevation: ``{outfall name: stage (m) or a function of the elapsed time t (s) returning
+    it}``, required for every such outfall and refused for any other (a TIDAL outfall reads
+    its tide curve; `DynamicWaveHydraulics.outfall_stage`); it sets the initial heads (at
+    t = 0) and is the default of `simulate_dynamic_wave`'s own `outfall_stage`.
+    `iterate_flow_tol` (m3/s) is the tolerance on the conduit
     flows' own fixed-point residual, judged alongside the heads (`Model`'s
     `iterate_flow_tol`), and is required: ``None`` (heads judged alone, as phase A did) is
     refused by name. On the normal-flow slope switch (`DynamicWaveConduit`) the heads
@@ -1481,7 +1615,8 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     3e-5 m3/s was measured on the tree's drain-down). The state is
     SWMM's initial state (`DynamicWaveHydraulics.initial_state`: cold and dry, or its
     InitDepth and InitFlow). Attached to the model: `junction_idx`, `junction_invert` (m),
-    `outfall_link_idx` (each outfall's link's ``"water.q"`` column), `dynamic_wave` (the
+    `outfall_link_idx` (each outfall's link's ``"water.q"`` column), `outfall_stage` (the
+    TIMESERIES outfalls' stage functions), `dynamic_wave` (the
     closure), `routing_step` (s), `pipe_names`,
     `link_names` (every ``"water.q"`` column: the pipes, then the orifices, weirs and
     outlets, each a `StructureLink` edge of its own kind), `pipe_columns`, `notes`,
@@ -1539,11 +1674,17 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
                   iterate_flow_tol={"water": iterate_flow_tol})
     inflow = torch.zeros(graph.n, dtype=F64)
     inflow[junction_idx] = torch.tensor([m.inflow for m in net.manholes], dtype=F64)
-    state = closure.initial_state({"inflow": inflow})
+    stage_functions = closure.check_outfall_stage(outfall_stage)
+    initial = {"inflow": inflow}
+    if bool(closure.outfall_staged.any()):
+        initial["outfall_stage"] = closure.outfall_stage(0.0, stage_functions)
+    state = closure.initial_state(initial)
     drivers: Drivers = {
         "inflow": inflow,
         "water.phi_boundary": state["water.phi"][closure.outfall_idx].clone(),
     }
+    if "outfall_stage" in initial:
+        drivers["outfall_stage"] = initial["outfall_stage"]
     closure.notes["routing"] = (
         f"dynamic wave (SWMM 5.2.4 fixed point): heads converged to {iterate_tol} m"
         + f" and flows to {iterate_flow_tol} m3/s"
@@ -1555,6 +1696,7 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     model.junction_invert = junction_invert
     model.outfall_link_idx = closure.outfall_link
     model.dynamic_wave = closure
+    model.outfall_stage = stage_functions
     model.routing_step = float(net.dynamic_wave.routing_step)
     model.pipe_names = list(closure.pipe_names)
     model.link_names = list(closure.link_names)
@@ -1563,6 +1705,12 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
         "inflow": dict(description="lateral inflow at each manhole", unit="m3/s",
                        over="nodes"),
     }
+    if "outfall_stage" in drivers:
+        model.input_specs["outfall_stage"] = dict(
+            description="stage elevation of each outfall (TIDAL and TIMESERIES outfalls "
+                        "read it; simulate_dynamic_wave sets it each step from the tide "
+                        "curve or the outfall_stage functions)",
+            unit="m", over=list(closure.outfall_names))
     model.driver_template = dict(drivers)
     return model, state, drivers
 
@@ -1656,6 +1804,7 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
                           steps: int | None = None, duration: float | None = None,
                           dt: float | None = None,
                           inflow: Tensor | Callable[[float], Tensor] | None = None,
+                          outfall_stage: Mapping | None = None,
                           record: tuple[str, ...] = ("water.phi", "water.q"),
                           diagnostics: list | None = None, **solve_kwargs
                           ) -> tuple[State, dict[str, Tensor]]:
@@ -1691,6 +1840,15 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
     `DynamicWaveHydraulics.overflow`), which is not a state key, and the closure's
     reporting keys (``"sewer.storage_volume"``, ``"sewer.V_wet"``, ``"sewer.h"``, ...), from
     its query at each step's end state.
+    `outfall_stage` ``{outfall name: stage (m) or a function of t (s) returning it}`` gives
+    the TIMESERIES outfalls their stage elevation (default: the model's own, the
+    `build_model` argument); a TIDAL outfall reads its tide curve (`tidal_stage`). Both
+    become the driver ``"outfall_stage"`` (m, per outfall) of each step, and share the
+    FIXED outfall's stage rule. SWMM sets the outfall depth with the routing clock already
+    advanced (`routing.c:301-302`; node.c:1449, 1456), so the stage is that at the END of
+    the step: a function is called once per step with the step's end time in s -- not the
+    start time `inflow` gets, and with no 1 ms offset (`NewRoutingTime`, not `getDateTime`).
+    It works under fixed and variable steps alike.
     `diagnostics`, when a list, receives each step's `Model.step` diagnostics.
     `solve_kwargs` reach the head solve (Newton); `atol` defaults to `solve_atol` for each
     step's length (m3/s: `SOLVE_ATOL`, or the bed's round-off floor where larger) and
@@ -1713,6 +1871,9 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
             f"{hyd.options.variable_step} chooses every step (SWMM's variable routing step); "
             f"set variable_step to 0 for a fixed dt")
     fixed_dt = model.routing_step if dt is None else float(dt)
+    staged = bool(hyd.outfall_staged.any())
+    stage_functions = hyd.check_outfall_stage(
+        model.outfall_stage if outfall_stage is None else outfall_stage)
     atol_given = "atol" in solve_kwargs
     solve_kwargs.setdefault("rtol", 0.0)
     n = model.net.n
@@ -1779,6 +1940,9 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
         t = now_ms / 1000.0
         if inflow is not None:
             drivers = dict(drivers, inflow=first if k == 0 else inflow_at(k, t))
+        if staged:                                    # node.c:1449, 1456: the step's END
+            drivers = dict(drivers,
+                           outfall_stage=hyd.outfall_stage(next_ms / 1000.0, stage_functions))
         kwargs = dict(solve_kwargs)
         if not atol_given:
             kwargs["atol"] = solve_atol(model, step)

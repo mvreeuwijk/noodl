@@ -206,11 +206,56 @@ def test_dynwave_refuses_a_bad_variable_step_option_with_its_line(tmp_path, old,
      "C1               CIRCULAR     0.30             0          0          0          128",
      "from 1 to 127"),
     ("Outfall          8.0        FREE                        NO",
-     "Outfall          8.0        TIDAL      Tide1            NO", "TIDAL"),
+     "Outfall          8.0        TIDAL      Tide1            NO", "Tide1"),
+    ("Outfall          8.0        FREE                        NO",
+     "Outfall          8.0        TIDAL", "needs a tide curve"),
+    ("Outfall          8.0        FREE                        NO",
+     "Outfall          8.0        TIMESERIES", "needs a time series"),
 ])
 def test_dynwave_refusals(tmp_path, old, new, match):
     with pytest.raises(ValueError, match=match):
         read_swmm_inp(_dyn(tmp_path, [(old, new)]))
+
+
+TIDE = ("[CURVES]\n;;Name Type x y\nTide1 TIDAL 0 8.1 6 8.4\nTide1 12 8.2 24 8.1\n\n"
+        "[OUTFALLS]\n")
+
+
+def test_a_tidal_outfall_is_read_with_its_curve_and_gate(tmp_path):
+    """TIDAL (node.c:1357-1380): field 3 names a [CURVES] TIDAL curve of (hour, stage
+    elevation) pairs over any number of lines; the gate flag follows it."""
+    path = _dyn(tmp_path, [
+        ("Outfall          8.0        FREE                        NO",
+         "Outfall          8.0        TIDAL      Tide1            YES"),
+        ("[OUTFALLS]\n", TIDE)])
+    net, _, _ = read_swmm_inp(path)
+    (outfall,) = net.outfalls
+    assert outfall.kind == "tidal" and outfall.flap_gate
+    assert outfall.tide == ((0.0, 8.1), (6.0, 8.4), (12.0, 8.2), (24.0, 8.1))
+
+
+def test_a_timeseries_outfall_takes_its_stage_from_a_driver(tmp_path):
+    """TIMESERIES: the reader records the series name and requires the driver; a
+    [TIMESERIES] section is accepted only for series that outfalls name (their data is the
+    driver's), any other is refused as before."""
+    edits = [("Outfall          8.0        FREE                        NO",
+              "Outfall          8.0        TIMESERIES Tide1            NO"),
+             ("[REPORT]", "[TIMESERIES]\nTide1 0:00 8.1\nTide1 6:00 8.4\n\n[REPORT]")]
+    net, _, _ = read_swmm_inp(_dyn(tmp_path, edits))
+    (outfall,) = net.outfalls
+    assert (outfall.kind, outfall.series, outfall.stage) == ("timeseries", "Tide1", None)
+    edits[1] = ("[REPORT]", "[TIMESERIES]\nOther 0:00 8.1\n\n[REPORT]")
+    with pytest.raises(ValueError, match=r"\[TIMESERIES\].*'Other'"):
+        read_swmm_inp(_dyn(tmp_path, edits))
+
+
+def test_a_tide_curve_must_be_a_tidal_curve(tmp_path):
+    path = _dyn(tmp_path, [
+        ("Outfall          8.0        FREE                        NO",
+         "Outfall          8.0        TIDAL      Tide1            NO"),
+        ("[OUTFALLS]\n", TIDE.replace("TIDAL", "RATING"))])
+    with pytest.raises(ValueError, match="Tide1.*RATING"):
+        read_swmm_inp(path)
 
 
 C1_LINE = ("C1               J1               J3               200        0.013      0"

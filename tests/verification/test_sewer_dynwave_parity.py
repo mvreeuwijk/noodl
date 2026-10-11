@@ -1319,3 +1319,134 @@ def test_regulators_match_swmm_at_every_step(tmp_path, variant):
     submerged = sum(9.4 + r[1]["J5"] > 9.8 and r[0]["W1"] > 0.0 for r in rows)
     assert (reversed_ > 10 and submerged > 100) == (variant == "submerged")
     assert reversed_ == 0 or variant == "submerged"
+
+
+# ------------------------------------------------------- tidal and time-series outfalls (C5)
+TIDAL_NAME = "tidal_dynwave.inp"
+#: The fixture's TIDAL curve (hour, stage elevation m), and the same stage as a SWMM
+#: [TIMESERIES] ((h:mm:ss, m): the time is the elapsed run time on the start date, so the
+#: two are one function of the elapsed time over the 30 min) and as the callable noodl takes.
+TIDE_POINTS = ((0.0, 8.05), (0.1, 8.20), (0.2, 8.38), (0.3, 8.38), (0.5, 8.15),
+               (1.0, 8.15), (2.0, 8.05))
+#: The fast comparison: the first 6 min, the stage rising from 8.05 m (below the outfall
+#: conduit's critical elevation while it is dry) through the first kink at 6 min.
+TIDAL_FAST_STEPS = 72
+
+
+def _tide_seconds(t):
+    """The `TIDE_POINTS` stage (m) at elapsed `t` s: linear between points, the first or
+    last stage outside them (SWMM's `table_tseriesLookup` with extend, table.c:745-804)."""
+    pts = [(3600.0 * h, y) for h, y in TIDE_POINTS]
+    if t <= pts[0][0]:
+        return pts[0][1]
+    for (t0, y0), (t1, y1) in zip(pts, pts[1:], strict=False):
+        if t <= t1:
+            return y0 + (y1 - y0) * (t - t0) / (t1 - t0)
+    return pts[-1][1]
+
+
+def _timeseries_inp(tmp_path, source=TIDAL_NAME):
+    """`source` with its TIDAL outfall turned into a TIMESERIES outfall on `TIDE_POINTS`."""
+    text = (DATA / source).read_text()
+    a, b = text.index("[CURVES]"), text.index("[REPORT]")
+    points = "".join(
+        f"Tide1            {int(h * 3600) // 3600}:{int(h * 3600) % 3600 // 60:02d}:"
+        f"{int(round(h * 3600)) % 60:02d} {y}\n" for h, y in TIDE_POINTS)
+    text = text[:a] + f"[TIMESERIES]\n{points}\n" + text[b:]
+    old = "Outfall          8.0        TIDAL      Tide1            NO"
+    assert old in text
+    text = text.replace(old, "Outfall          8.0        TIMESERIES Tide1            NO")
+    path = tmp_path / ("timeseries_" + source)
+    path.write_text(text)
+    return path
+
+
+def _tidal_inp_variable(tmp_path):
+    """The variable-step tree (60 s routing step) with the same tide."""
+    tidal = (DATA / TIDAL_NAME).read_text()
+    text = (DATA / VARIABLE_NAME).read_text()
+    a, b = tidal.index("[CURVES]"), tidal.index("[REPORT]")
+    text = text.replace("[REPORT]", tidal[a:b] + "[REPORT]", 1)
+    old = "Outfall          8.0        FREE                        NO"
+    assert old in text
+    text = text.replace(old, "Outfall          8.0        TIDAL      Tide1            NO")
+    path = tmp_path / "tidal_variable.inp"
+    path.write_text(text)
+    return path
+
+
+def _tide_run(inp, steps_limit=None, outfall_stage=None):
+    """noodl on `inp` as `_variable_run` (the reader's network, 1800 s), with the TIMESERIES
+    outfalls' stage functions `outfall_stage` if any."""
+    net, _, _ = read_swmm_inp(inp)
+    model, state, drivers = build_model(net, iterate_tol=ITERATE_TOL, iterate_max=ITERATE_MAX,
+                                        outfall_stage=outfall_stage)
+    kwargs = {"steps": steps_limit} if steps_limit else {"duration": 1800.0}
+    _, hist = simulate_dynamic_wave(model, state, drivers, record=(
+        "water.phi", "water.q", "sewer.overflow"), **kwargs)
+    return net, model, hist, None
+
+
+def _tide_parity(tmp_path, kind, steps=None):
+    """noodl against SWMM (5.2.4, converged on every step) on the fixed-step tide fixture
+    (`kind` ``"tidal"``, or ``"timeseries"``: the same stage as a [TIMESERIES] driven by
+    `_tide_seconds`) over `steps` steps (all by default): `_worst`, SWMM's rows and the
+    outfall's depth in noodl's history."""
+    if kind == "tidal":
+        inp, stage = tmp_path / TIDAL_NAME, None
+        shutil.copy(DATA / TIDAL_NAME, inp)
+    else:
+        inp, stage = _timeseries_inp(tmp_path), {"Outfall": _tide_seconds}
+    rows, conn, engine, not_converging = _swmm_rows(inp)
+    assert engine == "5.2.4"
+    assert not_converging == 0.0, f"SWMM did not converge on every step ({not_converging} %)"
+    rows = rows[:steps]
+    run = _tide_run(inp, steps_limit=len(rows), outfall_stage=stage)
+    return _worst(_differences(None, rows, conn, len(rows), run=run)), rows, run
+
+
+@pytest.mark.parametrize("kind", ["tidal", "timeseries"])
+def test_a_tidal_outfall_matches_swmm_while_the_tide_rises(tmp_path, kind):
+    """The tide fixture's first `TIDAL_FAST_STEPS` steps at the free-surface targets, for the
+    TIDAL outfall and for the same stage given as a TIMESERIES outfall (the series driven
+    identically on both sides): the outfall depth follows the stage at each step's END
+    (5 s into the run at step 1: a stage at the step start would be 0.05 m, not 0.0521 m)."""
+    worst, rows, (_, model, hist, _) = _tide_parity(tmp_path, kind, TIDAL_FAST_STEPS)
+    _assert_parity(worst)
+    out = model.dynamic_wave.outfall_idx
+    stage = torch.tensor([_tide_seconds(5.0 * (k + 1)) for k in range(TIDAL_FAST_STEPS)],
+                         dtype=torch.float64)
+    assert abs(rows[0][1]["Outfall"] - (_tide_seconds(5.0) - 8.0)) < 1e-9     # SWMM: step end
+    assert abs(rows[0][1]["Outfall"] - (_tide_seconds(0.0) - 8.0)) > 1e-3
+    # the outfall head is the stage while the stage is above the critical elevation
+    assert (hist["water.phi"][:, out].flatten() - stage).abs().max() < 1e-9
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("kind", ["tidal", "timeseries"])
+def test_a_tidal_outfall_matches_swmm_at_every_step(tmp_path, kind):
+    """All 359 steps: the tide rises from 8.05 m to 8.38 m (the outfall conduit backed up to
+    0.38 m of its 0.45 m), holds, and falls to 8.15 m; depths and flows agree at the
+    free-surface targets, SWMM converging on every step, for the TIDAL outfall and for the
+    equivalent TIMESERIES outfall."""
+    worst, rows, _ = _tide_parity(tmp_path, kind)
+    _assert_parity(worst)
+    assert max(r[1]["Outfall"] for r in rows) > 0.37 and rows[-1][1]["Outfall"] < 0.2
+    # the tide is felt upstream: the outfall conduit's flow is not the free outfall's
+    assert max(r[1]["J4"] for r in rows) > 0.19
+
+
+@pytest.mark.slow
+def test_a_tidal_outfall_matches_swmm_under_the_variable_step(tmp_path):
+    """The variable-step tree with the same tide: the step sequence equals SWMM's to the
+    millisecond (the stage is that at the END of each, however long), and depths and flows
+    agree at every step."""
+    inp = _tidal_inp_variable(tmp_path)
+    rows, times, conn, engine, not_converging = _swmm_timed(inp)
+    assert engine == "5.2.4" and not_converging == 0.0
+    run = _tide_run(inp)
+    _, _, hist, _ = run
+    ends = [round(x) for x in (hist["t"] * 1000.0).tolist()]
+    assert ends[:len(times)] == times
+    assert len({b - a for a, b in zip(times, times[1:], strict=False)}) > 2   # steps vary
+    _assert_parity(_worst(_differences(None, rows, conn, len(rows), run=run)))

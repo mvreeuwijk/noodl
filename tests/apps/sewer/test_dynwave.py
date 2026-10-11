@@ -2182,3 +2182,119 @@ def test_each_outfall_names_its_own_links_flow_column():
     state, hist = simulate_dynamic_wave(model, state, drivers, steps=6)
     q = hist["water.q"][-1]
     assert q[model.outfall_link_idx[1]].item() == q[model.link_names.index("OL1")].item() > 0
+
+
+# ------------------------------------------------------------------ tidal and time-varying outfalls
+TIDE = ((0.0, 8.10), (6.0, 8.40), (18.0, 8.00))
+
+
+@pytest.mark.parametrize("seconds,stage", [
+    (0.0, 8.10),                     # the first entry
+    (3 * 3600.0, 8.25),              # linear between entries (table.c:51-63)
+    (6 * 3600.0, 8.40),              # on an entry: x <= x2 interpolates to y2 (table.c:421)
+    (12 * 3600.0, 8.20),
+    (20 * 3600.0, 8.00),             # beyond the last entry: its value, no wrap (table.c:424)
+    (24 * 3600.0, 8.10),             # the tide repeats every 24 h of elapsed time (node.c:1449)
+    (27 * 3600.0, 8.25),
+    (48 * 3600.0 + 1.5, 8.10 + 1.5 / 3600.0 * 0.05),
+])
+def test_tidal_stage_is_swmms_table_lookup_of_the_hour_of_day(seconds, stage):
+    """`node.c:1445-1452`: x = first x + 24 frac(elapsed days), then `table_lookup`:
+    clamped below the first entry, linear between, the last y beyond the last x."""
+    from noodl.apps.sewer.dynwave import tidal_stage
+    assert tidal_stage(TIDE, seconds) == pytest.approx(stage, abs=1e-12)
+
+
+def test_tidal_stage_starts_at_the_curves_first_hour_not_at_zero():
+    """The abscissa is the first entry's x plus the elapsed hours (not the clock time, and
+    the simulation's start time is not added): a curve starting at hour 2 begins there."""
+    from noodl.apps.sewer.dynwave import tidal_stage
+    tide = ((2.0, 5.0), (4.0, 7.0))
+    assert tidal_stage(tide, 0.0) == 5.0
+    assert tidal_stage(tide, 3600.0) == pytest.approx(6.0)
+    assert tidal_stage(tide, 5 * 3600.0) == 7.0       # x = 7 h is past the last entry
+
+
+def _outfall_net(**outfall):
+    net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
+    old = net.outfalls[0]
+    return dataclasses.replace(net, outfalls=(dataclasses.replace(old, **outfall),))
+
+
+def test_a_stage_driven_outfall_is_a_fixed_outfall_at_that_stage():
+    """A tidal outfall at an instant is SWMM's FIXED outfall at the tide's stage: the same
+    head solve, step for step, as a FIXED outfall of that stage."""
+    fixed_model, fixed_state, fixed_drivers = build_model(_outfall_net(kind="fixed", stage=8.3))
+    tidal = _outfall_net(kind="tidal", tide=((0.0, 8.3), (24.0, 8.3)))
+    model, state, drivers = build_model(tidal)
+    _, a = simulate_dynamic_wave(fixed_model, fixed_state, fixed_drivers, steps=12)
+    _, b = simulate_dynamic_wave(model, state, drivers, steps=12)
+    torch.testing.assert_close(b["water.phi"], a["water.phi"], rtol=0, atol=1e-12)
+    torch.testing.assert_close(b["water.q"], a["water.q"], rtol=0, atol=1e-12)
+
+
+def test_a_timeseries_outfall_follows_its_stage_function_at_each_step_end():
+    """The stage function is called once per step with the END time of the step (SWMM's
+    NewRoutingTime when the outfall depth is set, routing.c:301-302 before routeFlow), and
+    the outfall head of each step is the stage the function gave."""
+    net = _outfall_net(kind="timeseries", series="Tide")
+    times = []
+
+    def stage(t):
+        times.append(t)
+        return 8.6 + 0.001 * t        # far above the outfall conduit's own depth
+
+    model, state, drivers = build_model(net, outfall_stage={"Outfall": stage})
+    assert times == [0.0]                                     # the initial heads, at t = 0
+    torch.testing.assert_close(state["water.phi"][model.dynamic_wave.outfall_idx],
+                               torch.tensor([8.6], dtype=F64))
+    times.clear()
+    _, hist = simulate_dynamic_wave(model, state, drivers, steps=3)
+    assert times == [5.0, 10.0, 15.0]
+    heads = hist["water.phi"][:, model.dynamic_wave.outfall_idx].flatten()
+    torch.testing.assert_close(heads, torch.tensor([8.605, 8.61, 8.615], dtype=F64),
+                               rtol=0, atol=1e-12)
+
+
+def test_the_outfall_stage_is_taken_at_the_end_of_a_variable_step():
+    net = _outfall_net(kind="timeseries", series="Tide")
+    model, state, drivers = build_model(net, outfall_stage={"Outfall": lambda t: 8.5 + t / 1e4})
+    # SWMM's variable step: the minimum step first, then the junction depth-change limit
+    hyd = model.dynamic_wave
+    hyd.options = dataclasses.replace(hyd.options, variable_step=0.75)
+    _, hist = simulate_dynamic_wave(model, state, drivers, steps=4)
+    heads = hist["water.phi"][:, hyd.outfall_idx].flatten()
+    torch.testing.assert_close(heads, 8.5 + hist["t"] / 1e4, rtol=0, atol=1e-12)
+    assert hist["dt"].unique().numel() > 1                    # the steps really varied
+
+
+def test_the_outfall_stage_driver_is_required_and_validated_by_name():
+    net = _outfall_net(kind="timeseries", series="Tide")
+    with pytest.raises(ValueError, match="timeseries outfall.*Outfall.*outfall_stage"):
+        build_model(net)
+    with pytest.raises(ValueError, match="Nowhere"):
+        build_model(net, outfall_stage={"Outfall": 8.5, "Nowhere": 8.0})
+    tidal = _outfall_net(kind="tidal", tide=TIDE)
+    with pytest.raises(ValueError, match="Outfall.*tidal.*curve"):
+        build_model(tidal, outfall_stage={"Outfall": 8.5})
+    free = read_swmm_inp(DATA / "tree_dynwave.inp")[0]
+    with pytest.raises(ValueError, match="Outfall.*free"):
+        build_model(free, outfall_stage={"Outfall": 8.5})
+    model, state, drivers = build_model(net, outfall_stage={"Outfall": 8.5})
+    with pytest.raises(KeyError, match="outfall_stage.*Outfall"):      # a step needs the driver
+        model.step(state, {k: v for k, v in drivers.items() if k != "outfall_stage"}, 5.0)
+    with pytest.raises(ValueError, match="Outfall.*finite"):
+        build_model(net, outfall_stage={"Outfall": lambda t: float("nan")})
+    # a constant is a stage function that never changes
+    _, hist = simulate_dynamic_wave(model, state, drivers, steps=2)
+    torch.testing.assert_close(hist["water.phi"][:, model.dynamic_wave.outfall_idx],
+                               torch.full((2, 1), 8.5, dtype=F64))
+
+
+def test_simulate_takes_its_own_stage_function_over_the_models():
+    net = _outfall_net(kind="timeseries", series="Tide")
+    model, state, drivers = build_model(net, outfall_stage={"Outfall": 8.5})
+    _, hist = simulate_dynamic_wave(model, state, drivers, steps=2,
+                                    outfall_stage={"Outfall": 8.7})
+    torch.testing.assert_close(hist["water.phi"][:, model.dynamic_wave.outfall_idx],
+                               torch.full((2, 1), 8.7, dtype=F64))

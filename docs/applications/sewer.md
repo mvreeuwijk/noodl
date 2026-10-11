@@ -97,7 +97,7 @@ residuals = model.residuals(new, drivers)     # per-layer nodal balance
 | `Manhole(name, invert, ground=None, inflow=0.0, surface_area=None, surcharge_depth=0.0, initial_depth=0.0, storage=None)` | A junction. `surface_area` defaults to SWMM's `MIN_SURFAREA`, 1.167 m² — a 4 ft shaft. `surcharge_depth`, `initial_depth` and `storage` are dynamic-wave physics (see "Dynamic wave"). |
 | `storage_unit(name, invert, max_depth, curve, *, surcharge_depth=0.0, initial_depth=0.0, inflow=0.0)` | A SWMM storage unit: a `Manhole` whose `storage` is the surface-area `curve` (`("functional", a, b, c)` for `A = a y^b + c`, `("tabular", depths, areas)`, or `("cylindrical", L, W)`, `("conical", L, W, Z)`, `("paraboloid", L, W, H)`, `("pyramidal", L, W, Z)`; m and m²) and whose ground is `invert + max_depth`. Dynamic wave only. |
 | `Pipe(name, u, v, length, diameter, n, slope, inlet_offset=0.0, outlet_offset=0.0)` | A circular gravity conduit; offsets (m) are the invert heights above the end nodes' inverts. |
-| `Outfall(name, invert, kind="free", stage=None)` | The root of a tree. `kind` is `"free"`, `"normal"` or `"fixed"` (`stage`, m, required for `"fixed"`); only dynamic-wave routing reads them. |
+| `Outfall(name, invert, kind="free", stage=None, flap_gate=False, tide=None, series=None)` | The root of a tree. `kind` is `"free"`, `"normal"`, `"fixed"` (`stage`, m, required), `"tidal"` (`tide`, a SWMM TIDAL curve as `(hour, stage m)` pairs, required) or `"timeseries"` (its stage comes from the `outfall_stage` driver; `series` is the SWMM series' name, for messages); only dynamic-wave routing reads them. |
 | `Orifice(name, u, v, orientation, shape, height, crest_height, discharge_coefficient, width=None, flap_gate=False)` | A SWMM orifice from `u` to `v`: `orientation` `"side"` or `"bottom"`, `shape` `"circular"` (`height` its diameter, m) or `"rectangular"` (`height`, `width`, m), its crest `crest_height` m above `u`'s invert, Cd (-). Dynamic wave only. |
 | `Weir(name, u, v, kind, height, width, crest_height, discharge_coefficient, side_slopes=(0, 0), end_contractions=0, end_discharge_coefficient=0, can_surcharge=True, flap_gate=False)` | A SWMM weir: `kind` `"transverse"`, `"sideflow"` (opening `width` m long), `"v_notch"` (`width` the top width) or `"trapezoidal"` (`width` the bottom width, `side_slopes` horizontal per vertical); Cd in SWMM's SI units (m^0.5/s). Dynamic wave only. |
 | `Outlet(name, u, v, crest_height, rating, head_difference=False, flap_gate=False)` | A SWMM outlet: `rating` `("functional", a, b)` for `q = a h^b` or `("tabular", heads, flows)` (m, m³/s); `h` the depth above the crest, or the head across it with `head_difference`. Dynamic wave only. |
@@ -271,7 +271,8 @@ $$
 with $N$ the net inflow (m³/s: lateral inflow plus the conduit flows into the junction).
 Outfalls are boundary heads: `FREE` takes the lesser of normal and critical depth in the
 outfall conduit, `NORMAL` its normal depth, `FIXED` the stage with SWMM's stage logic, each
-from the flow in that conduit.
+from the flow in that conduit. `TIDAL` and `TIMESERIES` outfalls use the same stage logic with
+a stage that varies in time (see "Tidal and time-series outfalls").
 
 #### What is solved
 
@@ -437,7 +438,8 @@ J5 on its threshold there too (see "Dynamic wave against SWMM").
 #### Starting state and zero fall
 
 The start follows SWMM's `flowrout.c`. A cold, dry network: junction depth 0, each outfall at its
-outfall depth for zero flow (the stage for `FIXED`), each conduit's depth the mean of its two
+outfall depth for zero flow (the stage for `FIXED`, and its stage at t = 0 for `TIDAL` and
+`TIMESERIES`), each conduit's depth the mean of its two
 clamped end depths, and a previous net inflow of 0 at the first step. Initial conditions change
 that exactly as SWMM does (`initNodeDepths`, `initLinkDepths`, `initNodes`):
 
@@ -463,7 +465,8 @@ conduit; the backwater fixture avoids an exact tie for that reason.
 Circular conduits, SWMM's tabulated geometry; the fixed routing step or
 SWMM's variable step (`VARIABLE_STEP > 0`, below); a cold start or SWMM's `InitDepth` and
 `InitFlow` (above); constant or
-driver-supplied lateral inflows; `FREE`, `NORMAL` and `FIXED` outfalls, with flap gates;
+driver-supplied lateral inflows; `FREE`, `NORMAL`, `FIXED`, `TIDAL` and `TIMESERIES` outfalls,
+with flap gates;
 parallel barrels, `MaxFlow`, conduit flap gates and conduit lengthening (below); storage
 units with `FUNCTIONAL`, `TABULAR` and the closed-shape area curves (below); orifices
 (side and bottom, circular and rectangular), transverse, sideflow, V-notch and trapezoidal
@@ -600,8 +603,7 @@ head difference, as the head solve's Newton step needs. A set `InitDepth`, `Init
 `MaxFlow`, flap gate or barrel count is refused by name under STEADY or KINWAVE routing.
 
 The reader refuses by name, with the line number, `ALLOW_PONDING YES`, loss coefficients
-and seepage in `[LOSSES]`, storage evaporation and exfiltration, TIDAL/TIMESERIES
-outfalls, roadway weirs, weir coefficient curves and regulators with `LINK_OFFSETS
+and seepage in `[LOSSES]`, storage evaporation and exfiltration, roadway weirs, weir coefficient curves and regulators with `LINK_OFFSETS
 ELEVATION` (see [SWMM `.inp`](../formats/swmm.md)).
 `build_model` with `air=True`, `quality=True` or `storage=True` is refused by name. Ponding,
 headspace air and quality on the dynamic wave are planned.
@@ -657,11 +659,42 @@ An inflow function `inflow(t)` returns the `(n,)` lateral inflow of the step tha
 `swmm5.c`'s `getDateTime`: a function that stands for a SWMM `[TIMESERIES]` should add
 0.001 s), and the inflow enters the step's trapezoid with the end state, as a constant
 inflow does. A function (or an `(steps, B, n)` series) in `simulate_dynamic_wave` is how
-time variation enters: the reader still refuses `[TIMESERIES]`. The step sequence and every
+time variation enters: the reader still refuses a `[TIMESERIES]` other than a `TIMESERIES`
+outfall's, whose stage is a driver (below). The step sequence and every
 state of the variable-step tree, with and without a ramping inflow, match SWMM 5.2.4 to the
 millisecond and to the targets of the other dynamic-wave comparisons
 (`tests/verification/test_sewer_dynwave_parity.py`). Because the step depends on the state
 through switches, a variable-step run is not differentiable through its step sizes.
+
+#### Tidal and time-series outfalls
+
+A `TIDAL` outfall (`Outfall(kind="tidal", tide=...)`, the `.inp`'s `[CURVES]` TIDAL curve of
+`(hour of day, stage elevation)` pairs) and a `TIMESERIES` outfall are `FIXED` outfalls whose
+stage changes in time: noodl applies the same stage rule as for `FIXED` (the stage above the
+conduit's critical-depth elevation sets the outfall depth, otherwise the critical or normal
+depth) to the stage of the step's end, because SWMM sets the outfall depth with its routing
+clock already advanced (`routing.c:301-302`, `node.c:1445-1456`). That is later than
+the step start at which a lateral inflow is read. A tidal stage is `tidal_stage(tide, t)`: the
+curve is read at its first hour plus the elapsed hours of the run (the start time of day is
+not added), repeats every 24 h of elapsed time, holds its first stage below and its last
+stage above the curve, and interpolates linearly (`table_lookup`).
+
+A `TIMESERIES` outfall takes its stage elevation (m, relative to datum, not to the invert)
+from a driver, as time variation belongs in the drivers. Give `outfall_stage={"Outfall":
+stage}` to `build_model` (it sets the initial heads at t = 0 and becomes the model's default)
+or to `simulate_dynamic_wave`: `stage` is a number, or a function of the elapsed time `t` in s
+that is called once per step with the step's END time (no 1 ms offset, unlike the inflow
+function). The two share one code path: `simulate_dynamic_wave` fills the per-outfall driver
+`"outfall_stage"` (m) each step, from the tide curves and the functions, and the closure
+reads it for every `TIDAL` and `TIMESERIES` outfall; a user stepping `Model.step` directly
+supplies that driver. Both work under the fixed and the variable step. A `.inp` with a
+`TIMESERIES` outfall is read (its `[TIMESERIES]` section may hold only the series that
+outfalls name, and is not read: the driver is required, and `build_model` refuses a network
+without one by name). `tests/verification/test_sewer_dynwave_parity.py` runs the tide fixture
+`tidal_dynwave.inp` (a tide that backs the outfall conduit up to 0.38 m of its 0.45 m and
+lets it fall) against SWMM 5.2.4 at every step for the `TIDAL` outfall and for the same stage
+as a `TIMESERIES` outfall, and the variable-step tree with the tide, with SWMM converging on
+every step: the worst depth difference is 8.4e-10 m.
 
 ### Headspace air
 

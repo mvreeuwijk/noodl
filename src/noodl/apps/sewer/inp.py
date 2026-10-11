@@ -1,8 +1,8 @@
 """A documented SWMM 5 `.inp` subset.
 
 READ: `[TITLE]`, `[OPTIONS]` (`FLOW_UNITS` must be `CMS`),
-`[JUNCTIONS]` (invert, MaxDepth, InitDepth, SurDepth), `[OUTFALLS]` (FREE, NORMAL and FIXED,
-with their flap gate), `[CONDUITS]` (with InitFlow and MaxFlow), `[XSECTIONS]` (only
+`[JUNCTIONS]` (invert, MaxDepth, InitDepth, SurDepth), `[OUTFALLS]` (FREE, NORMAL, FIXED, TIDAL and
+TIMESERIES, with their flap gate), `[CONDUITS]` (with InitFlow and MaxFlow), `[XSECTIONS]` (only
 `CIRCULAR`; barrels), `[LOSSES]` (the flap gate; the loss coefficients and seepage must be
 0), `[INFLOWS]` (constant `FLOW`
 baselines and constant `CONCENTRATION` pollutant baselines), `[POLLUTANTS]`, and under
@@ -24,7 +24,8 @@ IGNORED because no conduit or node ever references them: `[EVAPORATION]`, `[REPO
 REFUSED BY NAME, because skipping them would silently change the physics: `[DWF]`,
 `[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` under STEADY or KINWAVE, `[PUMPS]`,
 `[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[CURVES]` of any type but
-STORAGE and RATING, `[TIMESERIES]`, `[LID_USAGE]`, roadway weirs, weir coefficient curves,
+STORAGE, RATING and TIDAL, `[TIMESERIES]` (but see below), `[LID_USAGE]`, roadway weirs,
+weir coefficient curves,
 and any other section carrying content. A
 time-series inflow is refused; time variation belongs in the drivers. A conduit with a
 culvert code, a non-zero entry, exit or average loss coefficient or seepage rate is refused
@@ -34,7 +35,12 @@ DYNWAVE reads `VARIABLE_STEP` (the Courant factor; absent means SWMM's default 0
 project.c:854) and `MINIMUM_STEP`, and clips `ROUTING_STEP` to `WET_STEP` (default 300 s)
 as SWMM does (project.c:246-250) and `LENGTHENING_STEP` (conduit lengthening, with the file's own
 ROUTING_STEP, as SWMM validates conduits before it lowers the step to WET_STEP). It
-refuses, with the line number: `ALLOW_PONDING YES` and TIDAL/TIMESERIES outfalls.
+refuses, with the line number: `ALLOW_PONDING YES`. A TIDAL outfall reads its `[CURVES]` TIDAL
+curve (`Outfall.tide`, hours and stage elevations). A TIMESERIES outfall takes its stage from
+the `outfall_stage` driver (time variation belongs in the drivers): the reader records the
+series name (`Outfall.series`) and accepts a `[TIMESERIES]` section holding only the series
+that outfalls name, which it does not read; the model builder then refuses a network
+whose TIMESERIES outfall has no driver.
 
 A conduit the reader reverses (adverse, below) has its `InitFlow` sign flipped and its flap
 gate recorded as reversed (`Pipe.flap_gate_reversed`), as SWMM does (`conduit_reverse`,
@@ -135,8 +141,8 @@ def read_swmm_inp(
     path = Path(path)
     sections = read_sections(path)
     for name, lines in sections.items():
-        if name in _READ or name in _IGNORED or not lines:
-            continue
+        if name in _READ or name in _IGNORED or not lines or name == "TIMESERIES":
+            continue                  # [TIMESERIES] is checked against the outfalls below
         raise ValueError(
             f"{path}: section [{name}] (line {lines[0].number}) is not part of the "
             f"documented subset and carries content; this reader models gravity conduits, "
@@ -213,6 +219,7 @@ def read_swmm_inp(
                     surcharge_depth=surcharge, initial_depth=initial)
         )
     all_curves = _curves(sections.get("CURVES", []), path)
+    tides = {name: pts for name, (kind, pts) in all_curves.items() if kind == "TIDAL"}
     curves = {name: pts for name, (kind, pts) in all_curves.items() if kind == "STORAGE"}
     ratings = {name: pts for name, (kind, pts) in all_curves.items() if kind == "RATING"}
     if sections.get("STORAGE") and not dynamic:
@@ -230,7 +237,8 @@ def read_swmm_inp(
         name = line.fields[0]
         elevation = as_float(line, 1, "the invert elevation", path)
         invert[name] = elevation
-        outfalls.append(_outfall(line, name, elevation, dynamic, path))
+        outfalls.append(_outfall(line, name, elevation, dynamic, tides, all_curves, path))
+    _check_timeseries(sections.get("TIMESERIES", []), outfalls, path)
 
     shapes: dict[str, float] = {}
     barrel_count: dict[str, int] = {}
@@ -435,7 +443,7 @@ def read_swmm_inp(
 
 
 def _curves(lines, path) -> dict[str, tuple[str, tuple[tuple, tuple]]]:
-    """`[CURVES]`: ``{name: (type, (xs, ys))}`` of the STORAGE and RATING curves, each
+    """`[CURVES]`: ``{name: (type, (xs, ys))}`` of the STORAGE, RATING and TIDAL curves, each
     curve's points in file order over any number of lines, its type on its first line
     (`table.c:67-108`). A curve of another type is refused (no object that uses one is
     read), as are an unpaired value and x values that do not strictly increase
@@ -451,11 +459,11 @@ def _curves(lines, path) -> dict[str, tuple[str, tuple[tuple, tuple]]]:
                 raise ValueError(
                     f"{path}: line {line.number}: curve {name!r} needs its type (one of "
                     f"{_CURVE_TYPES}) on its first line")
-            if kind not in ("STORAGE", "RATING"):
+            if kind not in ("STORAGE", "RATING", "TIDAL"):
                 raise ValueError(
                     f"{path}: line {line.number}: curve {name!r} is of type {kind}; only "
-                    f"STORAGE and RATING curves are read (no object that uses another type "
-                    f"is modelled)")
+                    f"STORAGE, RATING and TIDAL curves are read (no object that uses "
+                    f"another type is modelled)")
             points[name] = []
             kinds[name] = kind
             start = 2
@@ -740,18 +748,20 @@ def _dynamic_wave_options(opts: dict, path) -> DynamicWaveOptions:
     return options
 
 
-def _outfall(line, name: str, elevation: float, dynamic: bool, path) -> Outfall:
-    """An `[OUTFALLS]` line: type (field 2, default FREE), FIXED stage (field 3) and the gate
-    flag, which follows the type data."""
+def _outfall(line, name: str, elevation: float, dynamic: bool, tides: dict,
+             all_curves: dict, path) -> Outfall:
+    """An `[OUTFALLS]` line: type (field 2, default FREE), the type's data (field 3: a FIXED
+    stage, a TIDAL curve name or a TIMESERIES name; node.c:1333-1380) and the gate flag,
+    which follows the type data."""
     kind = line.fields[2].upper() if len(line.fields) > 2 else "FREE"
-    if kind not in ("FREE", "NORMAL", "FIXED"):
+    if kind not in ("FREE", "NORMAL", "FIXED", "TIDAL", "TIMESERIES"):
         if dynamic:
             raise ValueError(
                 f"{path}: line {line.number}: outfall {name!r} is of type {kind}; only FREE, "
-                f"NORMAL and FIXED outfalls are modelled"
+                f"NORMAL, FIXED, TIDAL and TIMESERIES outfalls are modelled"
             )
         return Outfall(name, elevation)
-    stage = None
+    stage = tide = series = None
     gated_at = 3
     if kind == "FIXED":
         if len(line.fields) < 4:
@@ -760,5 +770,42 @@ def _outfall(line, name: str, elevation: float, dynamic: bool, path) -> Outfall:
             )
         stage = as_float(line, 3, "the fixed stage", path)
         gated_at = 4
+    elif kind in ("TIDAL", "TIMESERIES") and dynamic:
+        what = "a tide curve" if kind == "TIDAL" else "a time series"
+        if len(line.fields) < 4:
+            raise ValueError(
+                f"{path}: line {line.number}: {kind} outfall {name!r} needs {what} name"
+            )
+        label = line.fields[3]
+        gated_at = 4
+        if kind == "TIDAL":
+            if label not in tides:
+                found = all_curves[label][0] if label in all_curves else None
+                raise ValueError(
+                    f"{path}: line {line.number}: TIDAL outfall {name!r} names curve "
+                    f"{label!r}, which "
+                    + (f"is of type {found}, not TIDAL" if found
+                       else "has no [CURVES] entry of type TIDAL")
+                )
+            tide = tuple(zip(*tides[label], strict=True))
+        else:
+            series = label
+    elif kind in ("TIDAL", "TIMESERIES"):
+        return Outfall(name, elevation)
     flap = len(line.fields) > gated_at and line.fields[gated_at].upper() == "YES"
-    return Outfall(name, elevation, kind=kind.lower(), stage=stage, flap_gate=flap)
+    return Outfall(name, elevation, kind=kind.lower(), stage=stage, flap_gate=flap,
+                   tide=tide, series=series)
+
+
+def _check_timeseries(lines, outfalls: list, path) -> None:
+    """A `[TIMESERIES]` section holds only series that TIMESERIES outfalls name (their data
+    is the `outfall_stage` driver's, not read here); any other series is refused."""
+    named = {o.series for o in outfalls if o.series is not None}
+    for line in lines:
+        if line.fields[0] not in named:
+            raise ValueError(
+                f"{path}: section [TIMESERIES] (line {line.number}) names series "
+                f"{line.fields[0]!r}, which no TIMESERIES outfall uses; this reader models "
+                f"gravity conduits, junctions, outfalls and constant inflows only (time "
+                f"variation belongs in the drivers)"
+            )

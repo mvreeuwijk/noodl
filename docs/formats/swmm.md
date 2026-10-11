@@ -21,7 +21,7 @@ the reader lowers `ROUTING_STEP` to `WET_STEP` when it is larger (a file that om
 `simulate_dynamic_wave`; `DynamicWaveOptions()` built in code defaults to the fixed step).
 
 **Dynamic wave, what is refused for now.** With `DYNWAVE` the reader refuses, with the line
-number: `ALLOW_PONDING YES`, a negative `LENGTHENING_STEP` and `TIDAL`/`TIMESERIES` outfalls.
+number: `ALLOW_PONDING YES` and a negative `LENGTHENING_STEP`.
 The conduit lengthening uses the file's own `ROUTING_STEP`, as SWMM validates its conduits
 before it lowers the step to `WET_STEP`.
 
@@ -78,11 +78,15 @@ Refused with the line number: a `ROADWAY` weir, a weir coefficient curve (the th
 field), an opening of the wrong shape (SWMM's ERR_REGULATOR_SHAPE), a regulator without an
 `[XSECTIONS]` entry, an outlet with one, a negative orifice or weir crest height (SWMM
 raises it to 0 at the inlet end only), a negative coefficient, unknown nodes and keywords,
-`[CURVES]` of a type other than `STORAGE` and `RATING`, the regulator sections under
+`[CURVES]` of a type other than `STORAGE`, `RATING` and `TIDAL`, the regulator sections under
 `STEADY` or `KINWAVE` (SWMM routes them by the inflow alone there), and regulators with
 `LINK_OFFSETS ELEVATION` (SWMM then sets each end's offset from its own node).
 
-**Outfalls.** `FREE`, `NORMAL` and `FIXED` (with its stage, m) are read. An outfall may sit
+**Outfalls.** `FREE`, `NORMAL`, `FIXED` (with its stage, m), `TIDAL` (with the name of its
+`[CURVES]` TIDAL curve, read as hours and stage elevations) and `TIMESERIES` (with the name of
+its series) are read. A `TIMESERIES` outfall takes its stage from the `outfall_stage` driver
+of `build_model` / `simulate_dynamic_wave` (time variation belongs in the drivers): the
+`[TIMESERIES]` section is accepted only for series that outfalls name, and is not read. An outfall may sit
 at the end of a conduit or of a regulator (exactly one link, SWMM's ERR_OUTFALL).
 
 **Barrels.** A conduit with more than one barrel is read under `DYNWAVE` (1 to 127; the
@@ -99,7 +103,8 @@ refused, because time variation belongs in the drivers.
 **Refused by name**, because skipping them would silently change the physics: `[DWF]`,
 `[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` under `STEADY` or `KINWAVE`, `[PUMPS]`,
 `[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[CURVES]` of any type but
-`STORAGE` and `RATING`, `[TIMESERIES]`, `[LID_USAGE]`, and any other section carrying
+`STORAGE`, `RATING` and `TIDAL`, `[TIMESERIES]` except the series a `TIMESERIES` outfall names,
+`[LID_USAGE]`, and any other section carrying
 content.
 
 **Geometry.** `read_swmm_inp` builds its network with `geometry="tabulated"`: SWMM 5.2's own
