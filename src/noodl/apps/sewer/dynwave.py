@@ -667,8 +667,11 @@ class DynamicWaveHydraulics:
         lagged outfall depth at the conduit's downstream end moves per unit of its flow
         (`_outfall_heads`, a forward difference; 0 for other conduits): on the surface
         ``y1 = y2(q)`` the pass then sees the outfall depth follow the flow, as it does at
-        the fixed point. ``S_max`` is `K_SWITCH` times the smaller end junction's grounding
-        (storage slope ``2 A_s/dt`` plus its conduits' conveyance)."""
+        the fixed point. An outfall at the conduit's UPSTREAM end gets no such term (there
+        the surface would fall with the flow), so that conduit's S is ``S_max``: its
+        switch stays exact at the fixed point but may take more passes to settle. ``S_max``
+        is `K_SWITCH` times the smaller end junction's grounding (storage slope ``2 A_s/dt``
+        plus its conduits' conveyance)."""
         k_si = terms.conveyance * (QCF / LCF)
         ground = torch.zeros_like(surf).index_add(-1, self.u, k_si).index_add(-1, self.v, k_si)
         ground = ground.index_add(-1, self.junction_idx, 2.0 / dt * area_ft2 * _AREA_SI)
@@ -840,8 +843,11 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     ``acceleration=None`` is plain relaxation, which reaches the same fixed point in two to
     three times the passes. `iterate_flow_tol` (m3/s) is the tolerance on the conduit
     flows' own fixed-point residual, judged alongside the heads (`Model`'s
-    `iterate_flow_tol`; required by the acceleration, which also minimises it); ``None``
-    with ``acceleration=None`` judges the heads alone, as phase A did. The state is
+    `iterate_flow_tol`), and is required: ``None`` (heads judged alone, as phase A did) is
+    refused by name. On the normal-flow slope switch (`DynamicWaveConduit`) the heads
+    bound the flow residual only through the wall slope S over the junction's grounding,
+    so a heads-only test can stop a pass short of the fixed point (a flow residual of
+    3e-5 m3/s was measured on the tree's drain-down). The state is
     SWMM's cold, dry start. Attached to the model: `junction_idx`, `junction_invert` (m),
     `outfall_pipe_idx`, `dynamic_wave` (the closure), `routing_step` (s), `pipe_names`,
     `pipe_columns`, `notes`, `input_specs`, `driver_template`.
@@ -851,6 +857,11 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
         raise ValueError(
             f"build_dynamic_wave_model: network routing is {net.routing!r}, not "
             f"'dynamic_wave'")
+    if iterate_flow_tol is None:
+        raise ValueError(
+            "build_dynamic_wave_model: iterate_flow_tol (m3/s) is required, got None: on the "
+            "normal-flow slope switch a heads-only convergence test can stop short of the "
+            "fixed point; plain relaxation is acceleration=None with a flow tolerance")
     graph = Network(dtype=F64)
     for manhole in net.manholes:
         graph.add_node(manhole.name, invert=manhole.invert, ground=manhole.ground)
@@ -882,8 +893,7 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
                   iterate_tol={"water": iterate_tol}, iterate_max=iterate_max,
                   iterate_relaxation=relaxation, iterate_acceleration=acceleration,
                   iterate_memory=memory,
-                  iterate_flow_tol=None if iterate_flow_tol is None
-                  else {"water": iterate_flow_tol})
+                  iterate_flow_tol={"water": iterate_flow_tol})
     inflow = torch.zeros(graph.n, dtype=F64)
     inflow[junction_idx] = torch.tensor([m.inflow for m in net.manholes], dtype=F64)
     state = closure.initial_state({"inflow": inflow})
@@ -893,7 +903,7 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     }
     closure.notes["routing"] = (
         f"dynamic wave (SWMM 5.2.4 fixed point): heads converged to {iterate_tol} m"
-        + ("" if iterate_flow_tol is None else f" and flows to {iterate_flow_tol} m3/s")
+        + f" and flows to {iterate_flow_tol} m3/s"
         + f" within {iterate_max} passes"
         + ("" if acceleration is None else f" ({acceleration}-accelerated)")
         + "; SWMM's HEAD_TOLERANCE and MAX_TRIALS are not used")

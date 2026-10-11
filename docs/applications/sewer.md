@@ -279,7 +279,7 @@ acceleration="anderson", memory=5, iterate_flow_tol=1e-10)`; `Model`'s `iterate_
 see [Layers and models](../concepts/layers.md)). Each pass's flows must then also reproduce the
 flows it was fed to within `iterate_flow_tol` (m³/s): the head solve stops on its warm start once
 every junction balance is within its `atol` (`solve_atol`), so near convergence the heads stand
-still while the flows of a flat or nearly dry conduit still drift. Against plain relaxation the
+still while the flows of a flat or nearly dry conduit still drift. Against phase A's plain relaxation (heads judged alone) the
 mean passes per step fall from 34.8 to 14.1 (tree), 30.2 to 10.4 (backwater line) and 20.8 to 9.7
 (loop) over the first 60 steps, and from 42.8 to 11.3 over the loop's first 120, whose worst step
 drops from 327 passes to 22. The two iterations land on the same fixed point: with a tight head
@@ -287,7 +287,10 @@ solve (`atol=1e-12`) they agree to 2e-12 m; at the default `solve_atol` each lan
 solve's own resolution, `atol dt / (2 A_s)` (a few 1e-9 m). The mixing keeps to the fixed points
 plain relaxation (and SWMM's relaxed trials) can reach: a flat, near-dry conduit's flow can have
 a second, repelling fixed point, and a mixed step heading for it is replaced by the relaxed step.
-`acceleration=None, iterate_flow_tol=None` restores plain relaxation on the heads alone.
+`acceleration=None` is plain relaxation. A flow tolerance is required either way:
+`iterate_flow_tol=None` (the heads judged alone, as in phase A) is refused by name, because on
+the normal-flow slope switch (below) the heads bound the flows' residual only weakly, and a
+heads-only test was measured stopping 3e-5 m³/s short of the fixed point.
 
 **SWMM's iteration artefacts are not modelled**: trial relaxation, the 0.001 cfs flow-reversal
 rule, link bypassing, `MAX_TRIALS` and `HEAD_TOLERANCE`. Each is a device for reaching the fixed
@@ -632,7 +635,12 @@ publish numbers from this application.
   slope test has no consistent side (a draining outfall conduit), noodl puts the solution
   on its switch, y1 = y2 (see "Normal-flow slope switch"); SWMM does not converge on such
   steps, and its unconverged trials differ by up to its own oscillation (~6e-4 m on the
-  tree). The Froude test of the normal-flow limit stays a lagged flag.
+  tree). The Froude test of the normal-flow limit stays a lagged flag. At a step that lands
+  on the switch the gradient is the tie rule's: the sensitivity of a solution constrained
+  to y1 = y2, where SWMM has no fixed point to differentiate. It does not depend on the
+  wall slope S, which only shapes the passes (the fixed point does not move with S; on the
+  tree's drain-down the gradient is the same to 11 digits for S scaled by 0.2 and 5, and
+  matches central differences to 2e-8 relative).
 - **No gas-phase sulfide sink.** H₂S leaves the headspace by ventilation, at the outfall, and
   by re-absorption into the water (the two-film flux is signed); no wall uptake or gas-phase
   oxidation is modelled.

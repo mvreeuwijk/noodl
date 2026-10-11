@@ -214,7 +214,7 @@ def test_gradient_over_a_few_steps_from_the_cold_start(tmp_path):
 
     net = _tree(tmp_path)
     model, state0, drivers = build_model(net)
-    plain = build_dynamic_wave_model(net, acceleration=None, iterate_flow_tol=None)[0]
+    plain = build_dynamic_wave_model(net, acceleration=None)[0]
 
     def loss(m, n1):
         hyd = m.dynamic_wave
@@ -359,21 +359,22 @@ def _passes_and_history(name, steps, solve_kwargs=None, **kwargs):
     return sum(d["passes"] for d in diags) / steps, hist
 
 
-#: Phase A's iteration: plain relaxation, heads judged alone.
-_PLAIN = {"acceleration": None, "iterate_flow_tol": None}
+#: Plain relaxation (heads and flows judged, as required since the slope switch).
+_PLAIN = {"acceleration": None}
 
 
 def test_anderson_is_the_default_and_halves_the_passes_on_the_tree():
     """Design E8: Anderson mixing of the head iteration at least halves the mean passes per
-    step (measured over 60 steps: 34.8 -> 14.1).
+    step (measured over 60 steps: 35.2 -> 14.1, plain relaxation judging heads and flows;
+    34.8 when it judged the heads alone, which is now refused).
 
     The two runs agree to the head solve's own resolution, not to 1e-10 m: Newton stops
     once a junction's balance is within `solve_atol` (2.5e-9 m3/s here), so a pass whose
     fed heads already meet it hands them back unchanged, and EACH iteration lands
-    somewhere within ``atol dt / (2 A_s)`` (~5e-9 m) of the exact pass solution -- the
-    plain one with its flows not yet settled (it judges the heads alone). Measured 2.9e-9 m
-    over 60 steps; `test_anderson_lands_on_the_relaxed_fixed_point_with_a_tight_head_solve`
-    shows the two fixed points agree to 2e-12 m once the head solve is tight."""
+    somewhere within ``atol dt / (2 A_s)`` (~5e-9 m) of the exact pass solution. Measured
+    2.0e-9 m and 4.9e-10 m3/s over 60 steps;
+    `test_anderson_lands_on_the_relaxed_fixed_point_with_a_tight_head_solve` shows the
+    two fixed points agree to 2e-12 m once the head solve is tight."""
     from noodl.apps.sewer.dynwave import build_dynamic_wave_model
 
     net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
@@ -651,7 +652,7 @@ def test_gradient_through_a_surcharged_junction():
     j2 = model.dynamic_wave.junction_names.index("J2")
     depth = state0["water.phi"][model.junction_idx] - model.junction_invert
     assert depth[j2].item() > model.dynamic_wave.crown_depth[j2].item()
-    plain = build_dynamic_wave_model(net, acceleration=None, iterate_flow_tol=None)[0]
+    plain = build_dynamic_wave_model(net, acceleration=None)[0]
 
     def loss(m, n2):
         hyd = m.dynamic_wave
@@ -845,7 +846,7 @@ def test_gradient_through_a_flooded_junction():
     j2 = model.dynamic_wave.junction_names.index("J2")
     depth = state0["water.phi"][model.junction_idx] - model.junction_invert
     assert abs(depth[j2].item() - 0.5) < 1e-9
-    plain = build_dynamic_wave_model(net, acceleration=None, iterate_flow_tol=None)[0]
+    plain = build_dynamic_wave_model(net, acceleration=None)[0]
     c5 = model.dynamic_wave.pipe_names.index("C5")
 
     def loss(m, n2):
@@ -863,14 +864,20 @@ def test_gradient_through_a_flooded_junction():
     assert n.grad.item() == pytest.approx(fd.item(), rel=1e-6)
 
 
-def _drain(factors):
+def _drain(factors, conduits=("C5",)):
     """tree_dynwave.inp under every lateral inflow times `factors` (one per step, the
-    inflow at the END of the step). Returns the diagnostics and, per step, C5's side of its
-    slope test (None before it applies, while the tree fills): -1 limited (J4 below the
-    outfall depth, q = min(lin, q_norm)), +1 unlimited (above it, q = lin), 0 on the
-    switching surface (J4 AT the outfall depth, q between q_norm and lin), each checked
-    against the drivers of a pass fed the step's result: every step is SWMM's own fixed
-    point on one side of the test, or sits on the switch."""
+    inflow at the END of the step). Returns the diagnostics and, per conduit in `conduits`
+    and per step, its side of the normal-flow limit, each checked against the drivers of
+    a pass fed the step's result:
+
+    - -1: the slope switch's limited side (y1 < y2), q = min(lin, q_norm);
+    - +1: its unlimited side (y1 > y2), q = lin;
+    - 0: on the switching surface (y1 = y2), q between q_norm and lin;
+    - ``"lagged"``: limited by a lagged flag (the Froude test), q = min(lin, q_norm);
+    - None: no limit and no switch (e.g. while the tree fills).
+
+    So every step is SWMM's own fixed point, or sits on the switch. y1 - y2 is ``h1 - h2 -
+    dz``, dz the drop between the conduit-end inverts; C5 joins J4 to the outfall."""
     from noodl.model import StepContext
 
     net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
@@ -881,29 +888,32 @@ def _drain(factors):
     _, hist = simulate_dynamic_wave(model, state, drivers, steps=len(factors), inflow=inflow,
                                     diagnostics=diags, record=("water.phi", "water.q")
                                     + hyd.state_keys)
-    c5 = hyd.pipe_names.index("C5")
-    u, v = int(hyd.u[c5]), int(hyd.v[c5])
-    sides = []
+    sides: dict[str, list] = {name: [] for name in conduits}
     for k in range(len(factors)):
         before = {key: (hist[key][k - 1] if k else state[key]) for key in hyd.state_keys}
         after = {key: hist[key][k] for key in ("water.phi", "water.q")}
         drv = hyd(after | before, {"inflow": inflow[k]}, StepContext(dt=hyd.options.routing_step))
-        phi, q = after["water.phi"][0], after["water.q"][0, c5].item()
-        # C5 (J4 -> Outfall, no offsets): its slope test y1 < y2 compares the node depths
-        gap = ((phi[u] - hyd.node_invert[u]) - (phi[v] - hyd.node_invert[v])).item()
-        lin = (drv["water.flow_offset"][0, c5]
-               + drv["water.conveyance"][0, c5] * (phi[u] - phi[v])).item()
-        q_norm = drv["water.normal_flow"][0, c5].item()
-        if drv["water.slope_switch"][0, c5].item() != 1.0:
-            side = None                         # filling: no normal-flow check yet
-        elif abs(gap) <= 1e-9:
-            side = 0
-            assert min(q_norm, lin) - 1e-9 <= q <= lin + 1e-9, (k, q, q_norm, lin)
-        else:
-            side = -1 if gap < 0.0 else 1
-            expected = min(lin, q_norm) if side < 0 else lin
-            assert abs(q - expected) <= 1e-9, (k, side, q, q_norm, lin)
-        sides.append(side)
+        phi = after["water.phi"][0]
+        for name in conduits:
+            i = hyd.pipe_names.index(name)
+            dp = phi[int(hyd.u[i])] - phi[int(hyd.v[i])]
+            q = after["water.q"][0, i].item()
+            gap = (dp - drv["water.switch_drop"][0, i]).item()
+            lin = (drv["water.flow_offset"][0, i] + drv["water.conveyance"][0, i] * dp).item()
+            q_norm = drv["water.normal_flow"][0, i].item()
+            if drv["water.limited"][0, i].item() == 1.0:
+                side = "lagged"                 # limited by a lagged flag (Froude test)
+                assert abs(q - min(lin, q_norm)) <= 1e-9, (name, k, q, q_norm, lin)
+            elif drv["water.slope_switch"][0, i].item() != 1.0:
+                side = None
+            elif abs(gap) <= 1e-9:
+                side = 0
+                assert min(q_norm, lin) - 1e-9 <= q <= lin + 1e-9, (name, k, q, q_norm, lin)
+            else:
+                side = -1 if gap < 0.0 else 1
+                expected = min(lin, q_norm) if side < 0 else lin
+                assert abs(q - expected) <= 1e-9, (name, k, side, q, q_norm, lin)
+            sides[name].append(side)
     return diags, sides
 
 
@@ -915,14 +925,20 @@ def test_ramp_down_converges():
     flow at J4's depth, at which the outfall's normal depth IS J4's depth, up to the
     interpolation mismatch of SWMM's tables (~1e-5 m). The limited side is consistent
     only where that mismatch puts the outfall above J4; elsewhere neither side is (SWMM
-    5.2.4 itself then stops converging, on about half of such steps at HEAD_TOLERANCE 1e-12
-    m and 500 trials). The lagged flag chattered until the pass budget ran out (step 120, t
+    5.2.4 itself then stops converging: on 82 of the 108 steps after J4 first meets the
+    outfall depth of the 120-step-fill version of this ramp, at HEAD_TOLERANCE 1e-12 m and
+    500 trials). The lagged flag chattered until the pass budget ran out (step 120, t
     = 595 s). With the in-pass slope switch (`DynamicWaveConduit`) every step converges --
     a failure would name its time -- each on SWMM's own fixed point where there is one
     (steps 106-119 limited), and on the switching surface where there is none (step
     120)."""
     factors = [1.0] * 60 + [1.0 - (k + 1) / 12 for k in range(12)] + [0.0] * 48
-    diags, sides = _drain(factors)
+    diags, both = _drain(factors, ("C5", "C3"))
+    # C3 (J3 -> J4) is an interior conduit (no outfall compliance: its wall slope is the
+    # cap S_max): on its switch's unlimited side from step 2 to 90, then limited by its
+    # Froude test (a lagged flag) as the drain-down steepens it; consistent on every step.
+    assert set(both["C3"][1:90]) == {1} and set(both["C3"][90:]) == {"lagged"}, both["C3"]
+    sides = both["C5"]
     assert all(bool(d["converged"]) for d in diags)
     assert max(d["passes"] for d in diags) <= 30, max(d["passes"] for d in diags)
     assert set(sides[60:105]) == {1} and set(sides[105:119]) == {-1}, sides
@@ -936,7 +952,72 @@ def test_inflow_stop_converges():
     switching surface (steps 105-120)."""
     factors = [1.0] * 60 + [0.0] * 60
     diags, sides = _drain(factors)
+    sides = sides["C5"]
     assert all(bool(d["converged"]) for d in diags)
     assert max(d["passes"] for d in diags) <= 30, max(d["passes"] for d in diags)
     assert set(sides[60:104]) == {1}, sides
     assert set(sides[104:]) == {0}, sides
+
+
+def test_a_heads_only_convergence_test_is_refused():
+    """`iterate_flow_tol=None` (the heads judged alone) is refused by name by
+    `build_dynamic_wave_model` (`build_model` exposes no flow tolerance and always passes
+    the builder's default): on the normal-flow slope switch the heads bound the flows'
+    residual only through the wall slope over the junction's grounding, and a heads-only
+    plain run was measured stopping 2.9e-5 m3/s short of the fixed point (the tree's
+    drain-down, step 105). Plain relaxation with a flow tolerance stays allowed."""
+    from noodl.apps.sewer.dynwave import build_dynamic_wave_model
+
+    net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
+    with pytest.raises(ValueError, match=r"iterate_flow_tol \(m3/s\) is required"):
+        build_dynamic_wave_model(net, acceleration=None, iterate_flow_tol=None)
+    model = build_dynamic_wave_model(net, acceleration=None)[0]
+    assert model.iterate_acceleration is None and model.iterate_flow_tol == {"water": 1e-10}
+    assert build_model(net)[0].iterate_flow_tol == {"water": 1e-10}
+
+
+def test_gradient_on_the_slope_switch_does_not_depend_on_the_wall_slope(monkeypatch):
+    """At a step that lands on C5's switching surface (the tree's drain-down after all
+    inflows stop, step 108) the returned gradient is the tie rule's -- the sensitivity of a
+    solution held at y1 = y2 -- and the wall slope S drops out of it: the fixed point does
+    not move with S, so neither does its implicit derivative. d(C5 flow over 2 steps)/d(n
+    of C3) is the same for S scaled by 0.2, 1 and 5 (to 1e-10 relative; 11 digits
+    measured) and matches central differences (2e-8 relative measured)."""
+    from noodl.apps.sewer.dynwave import DynamicWaveHydraulics
+
+    net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
+    model, state0, drivers = build_model(net)
+    factors = [1.0] * 60 + [0.0] * 50
+    inflow = torch.stack([f * drivers["inflow"] for f in factors]).unsqueeze(1)
+    state0, _ = simulate_dynamic_wave(model, state0, drivers, steps=107, inflow=inflow,
+                                      atol=1e-12)
+    state0 = {k: v.detach() for k, v in state0.items()}
+    hyd = model.dynamic_wave
+    c5, c3 = hyd.pipe_names.index("C5"), hyd.pipe_names.index("C3")
+    u, v = int(hyd.u[c5]), int(hyd.v[c5])
+
+    def loss(n3):
+        hyd.set_roughness(c3, n3)
+        s, _ = simulate_dynamic_wave(model, state0, drivers, steps=2, inflow=inflow[107:109],
+                                     atol=1e-12)
+        gap = (s["water.phi"][..., u] - hyd.node_invert[u]) - (
+            s["water.phi"][..., v] - hyd.node_invert[v])
+        assert gap.abs().max().item() < 1e-12                   # on the switch
+        return s["water.q"][..., c5].sum()
+
+    original = DynamicWaveHydraulics._switch_slope
+    grads = []
+    for scale in (1.0, 0.2, 5.0):
+        monkeypatch.setattr(DynamicWaveHydraulics, "_switch_slope",
+                            lambda self, *a, scale=scale: scale * original(self, *a))
+        n = torch.tensor(0.013, dtype=F64, requires_grad=True)
+        loss(n).backward()
+        grads.append(n.grad.item())
+    monkeypatch.setattr(DynamicWaveHydraulics, "_switch_slope", original)
+    assert grads[1] == pytest.approx(grads[0], rel=1e-10)
+    assert grads[2] == pytest.approx(grads[0], rel=1e-10)
+    h = 1e-6
+    with torch.no_grad():
+        fd = (loss(torch.tensor(0.013 + h, dtype=F64))
+              - loss(torch.tensor(0.013 - h, dtype=F64))) / (2 * h)
+    assert grads[0] == pytest.approx(fd.item(), rel=1e-6)
