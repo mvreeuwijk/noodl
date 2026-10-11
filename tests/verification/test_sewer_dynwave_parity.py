@@ -117,21 +117,24 @@ def _worst_errors(name, rows, conn, steps):
     return worst_depth, worst_flow
 
 
-def _converged_swmm(tmp_path, name):
-    """SWMM's rows, after checking the engine, that it converged on every step and that no
-    conduit end reached its crown (phase A refuses surcharge, so a fixture edited into it
-    would compare nothing meaningful)."""
+def _converged_swmm(tmp_path, name, surcharged=False):
+    """SWMM's rows, after checking the engine and that it converged on every step. Under
+    EXTRAN no conduit end may reach its crown (noodl refuses surcharge there, so a fixture
+    edited into it would compare nothing meaningful); with `surcharged` (SLOT) some end must."""
     rows, conn, engine, not_converging = _swmm(tmp_path, name)
     assert engine == "5.2.4"
     assert not_converging == 0.0, f"SWMM did not converge on every step ({not_converging} %)"
     net, _, _ = read_swmm_inp(DATA / name)
+    reached = False
     for k, (_, depths) in enumerate(rows):
         for p in net.pipes:
             for node, offset in ((p.u, p.inlet_offset), (p.v, p.outlet_offset)):
                 fill = (depths[node] - offset) / p.diameter
-                assert fill < 1.0, (
+                reached |= fill >= 1.0
+                assert surcharged or fill < 1.0, (
                     f"{name}: SWMM surcharges conduit {p.name} at {node} at step {k + 1} "
                     f"(end depth {fill:.3f} of its diameter); reduce the fixture's inflows")
+    assert reached == surcharged, f"{name}: surcharge expected={surcharged}, reached={reached}"
     return rows, conn
 
 
@@ -165,3 +168,27 @@ def test_loop_sign_convention(tmp_path):
     assert (cd.u, cd.v) == ("J4", "J3")
     assert tuple(conn["Cd"]) == ("J3", "J4")
     assert rows[-1][0]["Cd"] > 1e-3
+
+
+SLOT_NAME = "tree_slot_dynwave.inp"
+#: The first step at which J4's depth passes C4's crown (0.30 m) in SWMM is 95; 110 steps
+#: cover the approach, the crossing and 15 steps of slot-pressurised flow.
+SLOT_FAST_STEPS = 110
+
+
+def test_slot_surcharge_matches_swmm_after_the_crown(tmp_path):
+    """`SURCHARGE_METHOD SLOT` on the tree at 2.5x the dynwave inflows (J4 passes C4's crown
+    in step 95): noodl against SWMM at the same targets as the free-surface runs, SWMM
+    converging on every step."""
+    rows, conn = _converged_swmm(tmp_path, SLOT_NAME, surcharged=True)
+    worst_depth, worst_flow = _worst_errors(SLOT_NAME, rows, conn, SLOT_FAST_STEPS)
+    assert worst_depth <= TOL_DEPTH, worst_depth
+    assert worst_flow <= 0.0, worst_flow
+
+
+@pytest.mark.slow
+def test_slot_surcharge_matches_swmm_at_every_step(tmp_path):
+    rows, conn = _converged_swmm(tmp_path, SLOT_NAME, surcharged=True)
+    worst_depth, worst_flow = _worst_errors(SLOT_NAME, rows, conn, len(rows))
+    assert worst_depth <= TOL_DEPTH, worst_depth
+    assert worst_flow <= 0.0, worst_flow

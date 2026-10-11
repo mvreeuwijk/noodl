@@ -19,9 +19,9 @@ time variation belongs in the drivers. A conduit with more than one barrel or a 
 code is refused for every routing.
 
 DYNWAVE refuses, with the line number: `VARIABLE_STEP` > 0, `LENGTHENING_STEP` > 0,
-`ALLOW_PONDING YES`, `SURCHARGE_METHOD SLOT`, a junction `InitDepth`, a conduit `InitFlow` or
+`ALLOW_PONDING YES`, a junction `InitDepth`, a conduit `InitFlow` or
 `MaxFlow`, a gated outfall and TIDAL/TIMESERIES outfalls (phase A: cold dry start, fixed step,
-no ponding, no surcharge slot).
+no ponding).
 
 Slope. SWMM defines `S0 = dy / dx` with `dx = sqrt(L^2 - dy^2)` (Ref. Man. Vol. II
 Eq. 2-1/2-2), so the reader uses the 3-D chord, not `dy / L`. A conduit is normalised
@@ -334,16 +334,13 @@ def _dynamic_wave_options(opts: dict, path) -> DynamicWaveOptions:
                                    "LENGTHENING_STEP 0")
     if opts.get("ALLOW_PONDING", (None, "NO"))[1] not in ("NO", "FALSE"):
         refuse("ALLOW_PONDING", "-- ponding is not modelled yet; set ALLOW_PONDING NO")
-    if opts.get("SURCHARGE_METHOD", (None, ""))[1] == "SLOT":
-        refuse("SURCHARGE_METHOD", "-- SURCHARGE_METHOD SLOT is not modelled yet: SWMM's "
-                                   "Preissmann slot changes surface areas below the crown")
     kwargs: dict[str, object] = {}
     if "ROUTING_STEP" in opts:
         kwargs["routing_step"] = opts["ROUTING_STEP"][1]
     for key, table, field_name in (
         ("INERTIAL_DAMPING", _DAMPING, "inertial_damping"),
         ("NORMAL_FLOW_LIMITED", _NORMAL_FLOW, "normal_flow_limited"),
-        ("SURCHARGE_METHOD", {"EXTRAN": "extran"}, "surcharge_method"),
+        ("SURCHARGE_METHOD", {"EXTRAN": "extran", "SLOT": "slot"}, "surcharge_method"),
     ):
         if key in opts:
             if opts[key][1] not in table:

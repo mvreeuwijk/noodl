@@ -500,7 +500,7 @@ def test_unknown_outfall_kind_and_negative_offset_are_refused_by_name():
     ({"routing_step": 0.0}, "routing_step"),
     ({"inertial_damping": "most"}, "inertial_damping"),
     ({"normal_flow_limited": "x"}, "normal_flow_limited"),
-    ({"surcharge_method": "slot"}, "slot"),
+    ({"surcharge_method": "preissmann"}, "surcharge_method"),
     ({"min_surface_area": -1.0}, "min_surface_area"),
 ])
 def test_dynamic_wave_options_are_validated(kwargs, match):

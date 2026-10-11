@@ -10,9 +10,10 @@ are not modelled (see docs/applications/sewer.md, "Dynamic wave").
 
 Scope of the transcription (circular conduits, one barrel, as the dynamic-wave reader admits):
 no local losses (``dq5``), no evaporation/seepage (``dq6``), no culvert inlet control, no flap
-gate, no user flow limit, no Courant lengthening (``modLength == length``) and the EXTRAN
-surcharge geometry (no Preissmann slot: ``getSlotWidth == 0``, end depths capped at the
-crown, widths cut off at ``0.96 yFull``).
+gate, no user flow limit and no Courant lengthening (``modLength == length``). Both
+``SURCHARGE_METHOD`` values are transcribed: EXTRAN (no Preissmann slot: ``getSlotWidth ==
+0``, end depths capped at the crown, widths cut off at ``0.96 yFull``) and SLOT (end depths
+uncapped, the Sjoberg slot width above ``0.985257 yFull``, areas extended above the crown).
 
 Every source reference is to SWMM 5.2.4 ``src/solver``.
 """
@@ -49,6 +50,10 @@ MAX_VELOCITY = 50.0
 #: SWMM's ``EXTRAN_CROWN_CUTOFF`` (`dynwave.c:64`): fraction of full depth above which a
 #: closed conduit's top width is frozen.
 EXTRAN_CROWN_CUTOFF = 0.96
+#: SWMM's ``SLOT_CROWN_CUTOFF`` (`dynwave.c:65`): the same cutoff under the Preissmann slot.
+SLOT_CROWN_CUTOFF = 0.985257
+#: ``SURCHARGE_METHOD`` options (`EXTRAN`, `SLOT`; `keywords.c:148`).
+SURCHARGE_METHODS = ("extran", "slot")
 #: ``INERTIAL_DAMPING`` options (`NO_DAMPING`, `PARTIAL_DAMPING`, `FULL_DAMPING`).
 DAMPING = ("none", "partial", "full")
 #: ``NORMAL_FLOW_LIMITED`` options (`SLOPE`, `FROUDE`, `BOTH`, `NEITHER`).
@@ -131,30 +136,67 @@ class ConduitTerms(NamedTuple):
     end_depth2: Tensor
 
 
-def _top_width(y: Tensor, y_full: Tensor) -> Tensor:
-    """`dwflow.c::getWidth` (dwflow.c:592-605) for a closed conduit under EXTRAN
-    (``getSlotWidth`` is 0, dwflow.c:580-581): top width (ft) at depth ``y`` (ft), with the
-    depth frozen at ``CrownCutoff * yFull`` above the crown cutoff."""
-    y = torch.where(y / y_full >= EXTRAN_CROWN_CUTOFF, EXTRAN_CROWN_CUTOFF * y_full, y)
-    return width_of_depth(y, y_full)
+def _slot_width(y: Tensor, y_full: Tensor, slot: bool) -> Tensor:
+    """`dwflow.c::getSlotWidth` (dwflow.c:575-588) for a closed circular conduit: Preissmann
+    slot width (ft) at depth ``y`` (ft); 0 under EXTRAN or below ``0.985257 yFull``
+    (``wMax = yFull``)."""
+    if not slot:
+        return torch.zeros_like(y)                                             # dwflow.c:580
+    y_norm = y / y_full
+    sjoberg = y_full * 0.5423 * torch.exp(-torch.pow(y_norm, 2.4))             # dwflow.c:587
+    wide = torch.where(y_norm > 1.78, 0.01 * y_full, sjoberg)                  # dwflow.c:584
+    return torch.where(y_norm < SLOT_CROWN_CUTOFF, torch.zeros_like(y), wide)  # dwflow.c:580
+
+
+def _top_width(y: Tensor, y_full: Tensor, slot: bool = False) -> Tensor:
+    """`dwflow.c::getWidth` (dwflow.c:592-605) for a closed conduit: top width (ft) at depth
+    ``y`` (ft). The slot width where it is positive; otherwise the depth frozen at
+    ``CrownCutoff * yFull`` above the crown cutoff (0.96 EXTRAN, 0.985257 SLOT)."""
+    cutoff = SLOT_CROWN_CUTOFF if slot else EXTRAN_CROWN_CUTOFF               # dynwave.c:159
+    w_slot = _slot_width(y, y_full, slot)                                      # dwflow.c:596
+    y = torch.where(y / y_full >= cutoff, cutoff * y_full, y)                  # dwflow.c:599-600
+    return torch.where(w_slot > 0.0, w_slot, width_of_depth(y, y_full))
+
+
+def _slot_area(y: Tensor, y_full: Tensor, a_full: Tensor, slot: bool) -> Tensor:
+    """`dwflow.c::getArea` (dwflow.c:609-619): flow area (ft2) at depth ``y`` (ft), extended
+    above the crown by ``(y - yFull) * wSlot(y)`` (0 under EXTRAN)."""
+    w_slot = _slot_width(y, y_full, slot)                                      # dwflow.c:144
+    above = a_full + (y - y_full) * w_slot                                     # dwflow.c:616
+    return torch.where(y >= y_full, above, area_of_depth(torch.minimum(y, y_full), y_full,
+                                                         a_full))
+
+
+def _hyd_rad(y: Tensor, y_full: Tensor) -> Tensor:
+    """`dwflow.c::getHydRad` (dwflow.c:623-633): hydraulic radius (ft), ``rFull`` at and
+    above the crown under both surcharge methods."""
+    return radius_of_depth(torch.minimum(y, y_full), y_full)                   # dwflow.c:631
 
 
 def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: Tensor,
                   q_old: Tensor, a_old: Tensor, dt: float, *, damping: str = "partial",
-                  normal_flow_limited: str = "both") -> ConduitTerms:
+                  normal_flow_limited: str = "both",
+                  surcharge_method: str = "extran") -> ConduitTerms:
     """SWMM's conduit update (`dwflow.c:57-293`) for one pass, vectorised over conduits.
 
     ``depth1``, ``depth2`` are the end NODE depths above the node inverts (ft) from the
     previous pass; ``q_last`` the previous pass's flow (cfs, SWMM's ``qLast``), which sets
     the flow class, surface areas, velocity and damping; ``q_old`` and ``a_old`` the
     step-start flow (cfs) and stored mid area (ft2); ``dt`` the routing step (s).
-    ``damping`` is ``INERTIAL_DAMPING`` and ``normal_flow_limited`` ``NORMAL_FLOW_LIMITED``.
+    ``damping`` is ``INERTIAL_DAMPING``, ``normal_flow_limited`` ``NORMAL_FLOW_LIMITED`` and
+    ``surcharge_method`` ``SURCHARGE_METHOD`` (``"extran"`` or ``"slot"``). Under ``"slot"``
+    the end depths ``end_depth1/2`` may exceed ``y_full``, ``volume`` and ``mid_area`` use the
+    slot-extended areas and ``depth`` stays ``min(y_mid, y_full)``.
     """
     if damping not in DAMPING:
         raise ValueError(f"conduit_terms: damping must be one of {DAMPING}, got {damping!r}")
     if normal_flow_limited not in NORMAL_FLOW_LIMITED:
         raise ValueError("conduit_terms: normal_flow_limited must be one of "
                          f"{NORMAL_FLOW_LIMITED}, got {normal_flow_limited!r}")
+    if surcharge_method not in SURCHARGE_METHODS:
+        raise ValueError("conduit_terms: surcharge_method must be one of "
+                         f"{SURCHARGE_METHODS}, got {surcharge_method!r}")
+    slot = surcharge_method == "slot"
     yf, af = geo.y_full, geo.a_full
     shape = torch.broadcast_shapes(depth1.shape, depth2.shape, q_last.shape, q_old.shape,
                                    a_old.shape, yf.shape)
@@ -174,9 +216,12 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     h2 = torch.maximum(head2, z2)
     pinned1 = head1 < z1          # h1 no longer follows the node head (design D4)
     pinned2 = head2 < z2
-    # dwflow.c:119-129 -- end flow depths, at least FUDGE, at most yFull (no slot)
-    y1 = torch.minimum(torch.clamp(h1 - z1, min=FUDGE), yf)
-    y2 = torch.minimum(torch.clamp(h2 - z2, min=FUDGE), yf)
+    # dwflow.c:119-129 -- end flow depths, at least FUDGE, at most yFull unless SLOT
+    y1 = torch.clamp(h1 - z1, min=FUDGE)
+    y2 = torch.clamp(h2 - z2, min=FUDGE)
+    if not slot:
+        y1 = torch.minimum(y1, yf)                                             # dwflow.c:125
+        y2 = torch.minimum(y2, yf)
 
     # dwflow.c:297-413 getFlowClass, on q = qLast (dwflow.c:140)
     zr1 = torch.where(geo.outfall1, torch.clamp(geo.offset1 - depth1, min=0.0),
@@ -234,9 +279,9 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     pinned1 = pinned1 | is_up_crit
     pinned2 = pinned2 | is_dn_crit
     y_mid_s = torch.clamp(0.5 * (y1 + y2), min=FUDGE)                          # :468-469
-    w1 = _top_width(y1, yf)
-    w2 = _top_width(y2, yf)
-    wm = _top_width(y_mid_s, yf)
+    w1 = _top_width(y1, yf, slot)
+    w2 = _top_width(y2, yf, slot)
+    wm = _top_width(y_mid_s, yf, slot)
     quarter1 = (w1 + wm) * length / 4.0
     quarter2 = (wm + w2) * length / 4.0
     dry_area = FUDGE * length / 2.0                                            # :542
@@ -251,13 +296,13 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     surf2 = torch.where(is_dn_dry & (geo.offset2 <= 0.0), quarter2, surf2)     # :535-538
     surf2 = torch.where(is_dry, dry_area.expand(shape), surf2)
 
-    # dwflow.c:142-162 -- areas and radii at the ends and the midpoint (no slot)
-    a1 = area_of_depth(y1, yf, af)
-    r1 = radius_of_depth(y1, yf)
-    a2 = area_of_depth(y2, yf, af)
+    # dwflow.c:143-153 -- areas and radii at the ends and the midpoint (slot-extended)
+    a1 = _slot_area(y1, yf, af, slot)
+    r1 = _hyd_rad(y1, yf)
+    a2 = _slot_area(y2, yf, af, slot)
     y_mid = 0.5 * (y1 + y2)
-    a_mid = area_of_depth(y_mid, yf, af)
-    r_mid = radius_of_depth(y_mid, yf)
+    a_mid = _slot_area(y_mid, yf, af, slot)
+    r_mid = _hyd_rad(y_mid, yf)
     is_full = (y1 >= yf) & (y2 >= yf)
     # dwflow.c:165-180 -- dry exit (no flap gate, no control setting here)
     dry_exit = is_dry | is_up_dry | is_dn_dry | (a_mid <= FUDGE)
@@ -342,6 +387,7 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
 
 __all__ = [
     "DAMPING", "DN_CRITICAL", "DN_DRY", "DRY", "EXTRAN_CROWN_CUTOFF", "FUDGE", "MAX_VELOCITY",
-    "NORMAL_FLOW_LIMITED", "SUBCRITICAL", "SUPCRITICAL", "UP_CRITICAL", "UP_DRY",
+    "NORMAL_FLOW_LIMITED", "SLOT_CROWN_CUTOFF", "SUBCRITICAL", "SUPCRITICAL",
+    "SURCHARGE_METHODS", "UP_CRITICAL", "UP_DRY",
     "ConduitGeometry", "ConduitTerms", "conduit_terms",
 ]

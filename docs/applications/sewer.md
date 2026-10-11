@@ -340,12 +340,18 @@ Circular conduits, one barrel, SWMM's tabulated geometry; a fixed routing step
 (`VARIABLE_STEP 0`); a cold dry start (zero `InitDepth` and `InitFlow`); constant or
 driver-supplied lateral inflows; `FREE`, `NORMAL` and `FIXED` outfalls without flap gates;
 `INERTIAL_DAMPING` `NONE`/`PARTIAL`/`FULL` and every `NORMAL_FLOW_LIMITED` option.
-`SURCHARGE_METHOD EXTRAN` only; `SLOT` is refused by name. Any conduit end that reaches the
-crown stops the run with an error naming the conduit and the time. The reader refuses by name,
+`SURCHARGE_METHOD SLOT` is SWMM's Preissmann slot: above `0.985257 y_full` the top width is the
+Sjoberg slot width `0.5423 w_max exp(-(y/y_full)^2.4)` (`0.01 w_max` above `1.78 y_full`), the
+area above the crown is `a_full + (y - y_full) w_slot`, the friction radius stays `r_full`, a
+full conduit takes no inertial terms, and the reported link depth stays `min(y_mid, y_full)`
+while the stored volume may exceed the full volume. The junction equation is unchanged (SWMM
+never takes its node-surcharge branch under SLOT; the junction surface-area floor governs a
+pressurised junction). Under `SURCHARGE_METHOD EXTRAN` (the default) any conduit end that
+reaches the crown stops the run with an error naming the conduit and the time. The reader refuses by name,
 with the line number, `VARIABLE_STEP > 0`, `LENGTHENING_STEP > 0`, `ALLOW_PONDING YES`, nonzero
 `InitDepth`/`InitFlow`/`MaxFlow`, flap gates, barrels other than 1 and TIDAL/TIMESERIES outfalls.
-`build_model` with `air=True`, `quality=True` or `storage=True` is refused by name. Surcharge, variable step,
-ponding, headspace air and quality on the dynamic wave are planned.
+`build_model` with `air=True`, `quality=True` or `storage=True` is refused by name. Variable step,
+ponding, EXTRAN surcharge, headspace air and quality on the dynamic wave are planned.
 
 ```python
 from noodl.apps.sewer import read_swmm_inp, build_model, simulate_dynamic_wave
@@ -526,9 +532,9 @@ publish numbers from this application.
   backwater.
 - **Kinematic-wave and steady routing: dendritic networks only**, one outgoing pipe per
   manhole, no loops. Dynamic-wave routing allows loops and flat or adverse conduits.
-- **Dynamic wave: no surcharge, variable step, ponding, headspace air or quality yet**
-  (planned). A conduit end reaching the crown stops the run with the conduit's name and the
-  time; the Preissmann slot is refused; `build_model(..., air=True)` or `quality=True` is
+- **Dynamic wave: no EXTRAN surcharge, variable step, ponding, headspace air or quality yet**
+  (planned). Under `SURCHARGE_METHOD EXTRAN` a conduit end reaching the crown stops the run
+  with the conduit's name and the time; use `SLOT` for surcharged networks; `build_model(..., air=True)` or `quality=True` is
   refused. Circular conduits only, one barrel, cold dry start.
 - **No gas-phase sulfide sink.** H₂S leaves the headspace by ventilation, at the outfall, and
   by re-absorption into the water (the two-film flux is signed); no wall uptake or gas-phase

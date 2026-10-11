@@ -164,7 +164,6 @@ def test_dynwave_refuses_variable_step(tmp_path):
 @pytest.mark.parametrize("old,new,match", [
     ("LENGTHENING_STEP     0", "LENGTHENING_STEP     10", "LENGTHENING_STEP"),
     ("ALLOW_PONDING        NO", "ALLOW_PONDING        YES", "ALLOW_PONDING"),
-    ("SKIP_STEADY_STATE    NO", "SURCHARGE_METHOD    SLOT", "SURCHARGE_METHOD SLOT"),
     ("J1               12.0       5          0", "J1               12.0       5          0.2",
      "initial depth"),
     ("C1               J1               J3               200        0.013      0          0"
@@ -277,3 +276,11 @@ def test_dynwave_only_options_do_not_raise_for_kinwave(tmp_path):
     path.write_text(text)
     net, _, _ = read_swmm_inp(path)
     assert net.routing == "kinematic_wave"
+
+
+def test_dynwave_surcharge_method_slot_is_read(tmp_path):
+    path = _dyn(tmp_path, [("SKIP_STEADY_STATE    NO",
+                            "SKIP_STEADY_STATE    NO\nSURCHARGE_METHOD    SLOT")])
+    net, _, _ = read_swmm_inp(path)
+    assert net.dynamic_wave.surcharge_method == "slot"
+    assert read_swmm_inp(_dyn(tmp_path))[0].dynamic_wave.surcharge_method == "extran"

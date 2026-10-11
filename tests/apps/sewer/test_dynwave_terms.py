@@ -265,3 +265,129 @@ def test_gradients_are_finite_on_every_branch():
     (r.momentum_flow.sum() + r.flow_offset.sum() + r.conveyance.sum()
      + r.surface_area1.sum() + r.surface_area2.sum()).backward()
     assert torch.isfinite(d1.grad).all() and torch.isfinite(d2.grad).all()
+
+
+# ---- Preissmann slot (SURCHARGE_METHOD SLOT, dwflow.c:575-633) ----------------------------
+
+
+def _slot_w(y_norm, w_max):
+    """The closed-form slot width of dwflow.c:575-588 for a closed conduit."""
+    if y_norm < 0.985257:
+        return 0.0
+    if y_norm > 1.78:
+        return 0.01 * w_max
+    return w_max * 0.5423 * math.exp(-(y_norm ** 2.4))
+
+
+@pytest.mark.parametrize("y_norm", [0.98, 0.985257, 1.0, 1.5, 1.78, 2.0])
+def test_slot_width_follows_the_sjoberg_formula(y_norm):
+    y_full = t([1.5])
+    w = dt_._slot_width(y_norm * y_full, y_full, True)
+    assert w.item() == pytest.approx(_slot_w(y_norm, 1.5), rel=1e-12, abs=0.0)
+    assert dt_._slot_width(y_norm * y_full, y_full, False).item() == 0.0   # EXTRAN: none
+
+
+def test_slot_width_values_at_the_landmarks():
+    y_full = t([1.0])
+    for y_norm, expect in ((0.98, 0.0), (1.0, 0.5423 * math.exp(-1.0)), (2.0, 0.01)):
+        assert dt_._slot_width(t([y_norm]), y_full, True).item() == pytest.approx(
+            expect, rel=1e-12, abs=1e-15)
+    # near-continuity with the 1 % plateau at 1.78 y_full (dwflow.c:584): the formula gives
+    # 0.010029 there
+    assert dt_._slot_width(t([1.78]), y_full, True).item() == pytest.approx(0.01, abs=1e-4)
+
+
+def test_area_above_the_crown_extends_by_the_slot_width():
+    g = geo()
+    y = g.y_full * 1.3
+    a = dt_._slot_area(y, g.y_full, g.a_full, True)
+    w = _slot_w(1.3, g.y_full.item())
+    assert a.item() == pytest.approx(g.a_full.item() + 0.3 * g.y_full.item() * w, rel=1e-12)
+    # EXTRAN: the area is capped at a_full; below the crown the section area is unchanged
+    assert dt_._slot_area(y, g.y_full, g.a_full, False).item() == pytest.approx(
+        g.a_full.item())
+    y_low = g.y_full * 0.7
+    torch.testing.assert_close(dt_._slot_area(y_low, g.y_full, g.a_full, True),
+                               xt.area_of_depth(y_low, g.y_full, g.a_full))
+    # the friction radius stays r_full above the crown (dwflow.c:631)
+    assert dt_._hyd_rad(y, g.y_full).item() == pytest.approx(0.25 * g.y_full.item())
+
+
+def test_top_width_uses_the_slot_above_the_cutoff_and_the_section_below():
+    g = geo()
+    y_full = g.y_full
+    below = 0.9 * y_full
+    torch.testing.assert_close(dt_._top_width(below, y_full, True),
+                               xt.width_of_depth(below, y_full))
+    above = 1.2 * y_full
+    assert dt_._top_width(above, y_full, True).item() == pytest.approx(
+        _slot_w(1.2, y_full.item()), rel=1e-12)
+    # EXTRAN: frozen at W(0.96 yFull) instead
+    frozen = xt.width_of_depth(0.96 * y_full, y_full)
+    torch.testing.assert_close(dt_._top_width(above, y_full, False), frozen)
+
+
+def test_slot_keeps_end_depths_above_the_crown_and_extends_the_volume():
+    g = geo()
+    yf = g.y_full.item()
+    # 0.45 m diameter, node depths 0.55 m and 0.65 m above the inverts
+    d_ft1, d_ft2 = 0.55 / xt.LCF, 0.65 / xt.LCF
+    a_old = t([g.a_full.item()])
+    args = (g, t([d_ft1]), t([d_ft2]), t([0.0]), t([0.0]), a_old, 5.0)
+    extran = dt_.conduit_terms(*args)
+    slot = dt_.conduit_terms(*args, surcharge_method="slot")
+    assert (extran.end_depth1.item(), extran.end_depth2.item()) == (yf, yf)
+    assert slot.end_depth1.item() == pytest.approx(d_ft1)
+    assert slot.end_depth2.item() == pytest.approx(d_ft2)
+    assert slot.end_depth1.item() > yf
+    # link depth stays at the crown; stored volume exceeds the full volume
+    assert slot.depth.item() == pytest.approx(yf)
+    a1 = dt_._slot_area(t([d_ft1]), g.y_full, g.a_full, True)
+    a2 = dt_._slot_area(t([d_ft2]), g.y_full, g.a_full, True)
+    assert slot.volume.item() == pytest.approx(((a1 + a2) / 2 * g.length).item())
+    assert slot.volume.item() > (g.a_full * g.length).item()
+    assert extran.volume.item() == pytest.approx((g.a_full * g.length).item())
+
+
+def test_a_full_conduit_under_slot_has_no_inertial_terms():
+    """Both ends above the crown: sigma = 0 (dwflow.c:208), so q = (q_old - dq2)/(1 + dq1)
+    with the slot-extended mid area and the full-pipe radius."""
+    g = geo()
+    yf = g.y_full.item()
+    d1, d2 = 0.6 / xt.LCF, 0.5 / xt.LCF
+    q_last, q_old, dt = 0.01 / xt.QCF, 0.012 / xt.QCF, 5.0
+    a_old = t([0.8 * g.a_full.item()])         # a_mid != a_old: dq3 would be nonzero
+    r = dt_.conduit_terms(g, t([d1]), t([d2]), t([q_last]), t([q_old]), a_old, dt,
+                          surcharge_method="slot")
+    y_mid = 0.5 * (d1 + d2)
+    a_mid = g.a_full.item() + (y_mid - yf) * _slot_w(y_mid / yf, yf)
+    v = q_last / a_mid
+    dq1 = dt * g.rough_factor.item() / (0.25 * yf) ** 1.33333 * abs(v)
+    h1 = d1 + g.invert1.item()
+    h2 = d2 + g.invert2.item()
+    dq2 = dt * xt.GRAVITY_FT * a_mid * (h2 - h1) / g.length.item()
+    expected = (q_old - dq2) / (1.0 + dq1)
+    assert r.momentum_flow.item() == pytest.approx(expected, rel=1e-12)
+    assert r.flow_class.item() == dt_.SUBCRITICAL
+
+
+def test_surface_area_uses_the_slot_width_above_the_cutoff():
+    g = geo()
+    yf = g.y_full.item()
+    d1, d2 = 1.2 * yf, 1.4 * yf
+    args = (g, t([d1]), t([d2]), t([0.0]), t([0.0]), t([g.a_full.item()]), 5.0)
+    r = dt_.conduit_terms(*args, surcharge_method="slot")
+    w1, w2, wm = _slot_w(1.2, yf), _slot_w(1.4, yf), _slot_w(1.3, yf)
+    length = g.length.item()
+    assert r.surface_area1.item() == pytest.approx((w1 + wm) * length / 4, rel=1e-12)
+    assert r.surface_area2.item() == pytest.approx((wm + w2) * length / 4, rel=1e-12)
+    # EXTRAN: the frozen W(0.96 yFull) is much wider than the slot
+    e = dt_.conduit_terms(*args)
+    assert e.surface_area1.item() > 3 * r.surface_area1.item()
+
+
+def test_conduit_terms_refuses_an_unknown_surcharge_method():
+    g = geo()
+    with pytest.raises(ValueError, match="surcharge_method"):
+        dt_.conduit_terms(g, t([0.1]), t([0.1]), t([0.0]), t([0.0]), t([0.01]), 5.0,
+                          surcharge_method="preissmann")

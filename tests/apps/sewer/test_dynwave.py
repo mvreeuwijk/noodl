@@ -371,3 +371,54 @@ def test_anderson_halves_the_passes_on_the_loop():
     assert fast <= plain / 2.0, (fast, plain)
     # the head solve's resolution, as in the tree test above
     torch.testing.assert_close(h_fast["water.phi"], h_plain["water.phi"], rtol=0.0, atol=1e-8)
+
+
+def _slot_tree(tmp_path, scale):
+    """tree_dynwave.inp with SURCHARGE_METHOD SLOT and the inflows scaled by `scale`."""
+    text = (DATA / "tree_dynwave.inp").read_text().replace(
+        "ALLOW_PONDING        NO", "ALLOW_PONDING        NO\nSURCHARGE_METHOD     SLOT")
+    path = tmp_path / "tree_slot.inp"
+    path.write_text(text)
+    net, _, _ = read_swmm_inp(path)
+    return dataclasses.replace(net, manholes=tuple(
+        dataclasses.replace(m, inflow=m.inflow * scale) for m in net.manholes))
+
+
+def test_slot_surcharges_the_tree_past_the_crown_without_refusal(tmp_path):
+    """At 2.5x the fixture's inflows (1.25x tree_kinwave.inp, which surcharges J4/C4 at
+    ~780 s under EXTRAN) the water at J4 passes the 0.30 m crown of C4 at step 95 (475 s)
+    of 120. The brief's 1.5x only reaches 0.25 m at J4 over 30 min, so it never surcharges;
+    EXTRAN refuses the same run. Under SLOT the pipes stay pressurised without refusal, the
+    junction equation holds and link depths stay at or below the crown."""
+    net = _slot_tree(tmp_path, 2.5)
+    assert net.dynamic_wave.surcharge_method == "slot"
+    model, state, drivers = build_model(net)
+    state, hist = simulate_dynamic_wave(model, state, drivers, steps=120)
+    depth = hist["water.phi"][:, model.junction_idx] - model.junction_invert
+    j4 = net.manholes.index(next(m for m in net.manholes if m.name == "J4"))
+    assert depth[:, j4].max().item() > 0.30                  # C4's 0.30 m crown
+    assert torch.isfinite(hist["water.phi"]).all() and torch.isfinite(hist["water.q"]).all()
+    # link depth stays min(y_mid, y_full); full pipes hold more than their full volume
+    terms = model.dynamic_wave._terms(state, net.dynamic_wave.routing_step)
+    diam = torch.tensor([p.diameter for p in net.pipes], dtype=F64) / LCF
+    assert bool((terms.depth <= diam + 1e-12).all())
+    assert bool((torch.maximum(terms.end_depth1, terms.end_depth2) > diam).any())
+    # the same run is refused under EXTRAN
+    extran = dataclasses.replace(net, dynamic_wave=dataclasses.replace(
+        net.dynamic_wave, surcharge_method="extran"))
+    m2, s2, d2 = build_model(extran)
+    with pytest.raises(RuntimeError, match=r"surcharge.*C\d"):
+        simulate_dynamic_wave(m2, s2, d2, steps=120)
+
+
+def test_slot_leaves_a_free_surface_run_unchanged(tmp_path):
+    """Below the crown cutoff the slot adds nothing: half the fixture's inflows, 20 steps."""
+    net = _slot_tree(tmp_path, 0.5)
+    extran = dataclasses.replace(net, dynamic_wave=dataclasses.replace(
+        net.dynamic_wave, surcharge_method="extran"))
+    runs = []
+    for n in (net, extran):
+        model, state, drivers = build_model(n)
+        runs.append(simulate_dynamic_wave(model, state, drivers, steps=20)[1])
+    torch.testing.assert_close(runs[0]["water.phi"], runs[1]["water.phi"], rtol=0, atol=1e-10)
+    torch.testing.assert_close(runs[0]["water.q"], runs[1]["water.q"], rtol=0, atol=1e-10)

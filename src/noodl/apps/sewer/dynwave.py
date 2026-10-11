@@ -26,6 +26,7 @@ from noodl.apps.sewer.dynwave_terms import (
     DAMPING,
     FUDGE,
     NORMAL_FLOW_LIMITED,
+    SURCHARGE_METHODS,
     ConduitGeometry,
     ConduitTerms,
     conduit_terms,
@@ -70,10 +71,6 @@ _AREA_SI = QCF / LCF
 _VELOCITY_MIN_DEPTH = 0.01
 _OUTFALL_CODES = {"free": 0, "normal": 1, "fixed": 2}
 
-#: ``SURCHARGE_METHOD`` values accepted now. SWMM also has ``SLOT`` (Preissmann slot), which
-#: changes surface areas below the crown and is not modelled yet.
-SURCHARGE_METHODS = ("extran",)
-
 
 @dataclass(frozen=True)
 class DynamicWaveOptions:
@@ -84,8 +81,9 @@ class DynamicWaveOptions:
 
     `routing_step` is the fixed routing step (s); `inertial_damping` is ``"none"``,
     ``"partial"`` or ``"full"``; `normal_flow_limited` is ``"slope"``, ``"froude"``,
-    ``"both"`` or ``"none"``; `surcharge_method` is ``"extran"`` (``"slot"`` is refused for
-    now); `min_surface_area` is the junction surface-area floor (m2), ``None`` for SWMM's
+    ``"both"`` or ``"none"``; `surcharge_method` is ``"extran"`` (end depths capped at the
+    crown, a surcharged network is refused) or ``"slot"`` (Preissmann slot);
+    `min_surface_area` is the junction surface-area floor (m2), ``None`` for SWMM's
     12.566 ft2; `head_tolerance` is SWMM's head convergence tolerance (m); `max_trials` is
     SWMM's trial limit (-).
     """
@@ -103,11 +101,6 @@ class DynamicWaveOptions:
         if not self.routing_step > 0:
             raise ValueError(
                 f"DynamicWaveOptions: routing_step must be > 0 s, got {self.routing_step!r}"
-            )
-        if self.surcharge_method == "slot":
-            raise ValueError(
-                "DynamicWaveOptions: surcharge_method 'slot' is not modelled yet: SWMM's "
-                "Preissmann slot changes surface areas below the crown"
             )
         for name, allowed in (
             ("inertial_damping", DAMPING),
@@ -331,7 +324,8 @@ class DynamicWaveHydraulics:
             self.geo, depth_ft[..., self.u], depth_ft[..., self.v], q / QCF,
             state["sewer.pipe_flow"] / QCF, state["sewer.mid_area"] / _AREA_SI, dt,
             damping=self.options.inertial_damping,
-            normal_flow_limited=self.options.normal_flow_limited)
+            normal_flow_limited=self.options.normal_flow_limited,
+            surcharge_method=self.options.surcharge_method)
 
     def _carried(self, state: Mapping, terms: ConduitTerms, inflow: Tensor) -> State:
         heads = state[f"{self.layer}.phi"]
@@ -462,7 +456,10 @@ class DynamicWaveHydraulics:
 
     def check_free_surface(self, state: Mapping, drivers: Mapping, t: float) -> None:
         """Refuse, naming the time and conduits, any conduit end whose depth reached the
-        crown: surcharge is not modelled yet (phase B)."""
+        crown under EXTRAN (surcharge is not modelled there yet). Under SLOT surcharge is
+        modelled and nothing is refused."""
+        if self.options.surcharge_method == "slot":
+            return
         heads = state[f"{self.layer}.phi"].detach() / LCF
         geo = self.geo
         z1 = geo.invert1 + geo.offset1
