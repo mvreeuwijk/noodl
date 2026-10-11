@@ -1812,6 +1812,11 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
         raise ValueError(
             f"build_dynamic_wave_model: network routing is {net.routing!r}, not "
             f"'dynamic_wave'")
+    if net.geometry != "tabulated":
+        raise ValueError(
+            f"build_dynamic_wave_model: network geometry is {net.geometry!r}; dynamic wave "
+            f"always routes on SWMM's tabulated circle (xsect_tables.py), so build the "
+            f"network with geometry='tabulated' (read_swmm_inp's default)")
     if iterate_flow_tol is None:
         raise ValueError(
             "build_dynamic_wave_model: iterate_flow_tol (m3/s) is required, got None: on the "

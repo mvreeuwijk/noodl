@@ -142,6 +142,30 @@ def test_build_model_dispatches_and_refuses_storage(tmp_path):
         build_model(net, storage=True)
 
 
+@pytest.mark.parametrize("kwargs,name", [
+    ({"coupling": "iterate"}, "coupling"),
+    ({"dt_storage": 60.0}, "dt_storage"),
+])
+def test_build_model_refuses_kinematic_options_on_a_dynamic_wave_net(tmp_path, kwargs, name):
+    """The kinematic path's coupling and storage step have no meaning for dynamic wave
+    (its passes always iterate, its storage step is the routing step): a non-default value
+    is refused by name, not ignored."""
+    with pytest.raises(ValueError, match=name):
+        build_model(_tree(tmp_path), **kwargs)
+
+
+def test_dynamic_wave_refuses_the_analytic_geometry(tmp_path):
+    """Dynamic wave always uses SWMM's tabulated circle: a network asking for the exact
+    circle is refused by name rather than routed on the tables silently."""
+    from noodl.apps.sewer.dynwave import build_dynamic_wave_model
+
+    net = dataclasses.replace(_tree(tmp_path), geometry="analytic")
+    with pytest.raises(ValueError, match="geometry.*analytic"):
+        build_model(net)
+    with pytest.raises(ValueError, match="geometry.*analytic"):
+        build_dynamic_wave_model(net)
+
+
 def test_cold_start_is_dry_at_the_inverts(tmp_path):
     model, state, drivers = build_model(_tree(tmp_path))
     junction = model.junction_idx

@@ -141,8 +141,10 @@ and `storage` default to `False`; `quality=True` adds the water-quality layer of
 (see [Quality on the dynamic wave](#quality-on-the-dynamic-wave)); `air=True` builds the
 headspace air on the solved conduits (see
 [Headspace air on the dynamic wave](#headspace-air-on-the-dynamic-wave)) and takes `f_air`,
-`f_i`, `c_s`, `leak_area`, `leak_cd` and `fans` as above; `storage=True` is refused, naming the
-option; `iterate_tol` and
+`f_i`, `c_s`, `leak_area`, `leak_cd` and `fans` as above; `storage=True`, a non-default
+`coupling` or `dt_storage` (kinematic-wave options: the dynamic wave always iterates its passes
+on its routing step) and a `geometry="analytic"` network (it always routes on SWMM's tabulated
+circle) are refused, naming the option; `iterate_tol` and
 `iterate_max` are refused for the other routings. Run it with `simulate_dynamic_wave` (see
 [Dynamic wave](#dynamic-wave)), not `sewer_steady`.
 
@@ -201,8 +203,9 @@ converts CMS flows and volumes with 0.02832 m³/ft³ rather than $0.3048^3$. Tha
 1.6e-4 on the Manning coefficient and 1.2e-4 on reported volumes. Everything is differentiable:
 piecewise-linear tables, unrolled Newton loops, and one implicit-function root.
 
-Scope: `geometry="tabulated"` covers the steady kinematic-wave path only, and is refused by name with
-`storage=True`. The discharge limit is SWMM's `Qfull` rather than the analytic 0.938 D capacity.
+Scope: on the kinematic path `geometry="tabulated"` covers the steady case only, and is refused
+by name with `storage=True`. Dynamic-wave routing always uses the tables and refuses
+`geometry="analytic"` by name. The discharge limit is SWMM's `Qfull` rather than the analytic 0.938 D capacity.
 The headspace, top width, hydraulic radius and mean depth (air side, sulfide) remain the exact
 circle, evaluated at SWMM's depth. SWMM has no headspace to compare them with.
 

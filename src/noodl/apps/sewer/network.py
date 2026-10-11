@@ -267,7 +267,8 @@ class SewerNetwork:
     `geometry.py`; the default for networks built in code) or ``"tabulated"`` (SWMM 5.2's own
     tables, lookup rules and unit constants, `xsect_tables.py`; the default of
     `read_swmm_inp`, whose purpose is to reproduce SWMM). ``"tabulated"`` is a steady
-    kinematic-wave geometry and is refused with ``storage=True`` by `SewerHydraulics`.
+    kinematic-wave geometry and is refused with ``storage=True`` by `SewerHydraulics`;
+    dynamic-wave routing always uses it and refuses ``"analytic"`` by name.
     `orifices`, `weirs` and `outlets` are flow regulators between two nodes (dynamic wave
     only; SWMM's `[ORIFICES]`, `[WEIRS]`, `[OUTLETS]`).
     """
@@ -655,7 +656,9 @@ def build_model(
     for steady and kinematic-wave routing.
 
     A ``routing="dynamic_wave"`` network is built by `build_dynamic_wave_model`: `air` and
-    `quality` default to ``False`` there; ``quality=True`` adds the water-quality layer of
+    `quality` default to ``False`` there, `coupling` and `dt_storage` (kinematic-wave
+    options) are refused by name, and so is a ``geometry="analytic"`` network (dynamic
+    wave always uses SWMM's tabulated circle); ``quality=True`` adds the water-quality layer of
     `species` on the solved flows (design E7, `scheme` its time scheme); ``air=True`` builds
     the headspace air on the solved conduits (`f_air`, `f_i`, `c_s`, `leak_area`, `leak_cd`
     and `fans` as below; dendritic networks only, loops refused by name), `storage` is
@@ -671,6 +674,13 @@ def build_model(
             raise ValueError("build_model: storage=True is the kinematic path's storage "
                              "sweep; dynamic-wave junctions always store; build it with "
                              "storage=False")
+        for name, value, default in (("coupling", coupling, "pingpong"),
+                                     ("dt_storage", dt_storage, None)):
+            if value != default:
+                raise ValueError(
+                    f"build_model: {name}={value!r} is a kinematic-wave option; a "
+                    f"dynamic-wave network always iterates its passes on the routing step "
+                    f"(net.dynamic_wave); leave {name} at its default")
         kwargs = {k: v for k, v in (("iterate_tol", iterate_tol),
                                     ("iterate_max", iterate_max)) if v is not None}
         return build_dynamic_wave_model(net, outfall_stage=outfall_stage,
