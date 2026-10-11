@@ -52,13 +52,16 @@ Drivers = dict[str, Tensor]
 @dataclass(frozen=True)
 class Manhole:
     """A manhole: `invert` and `ground` elevations (m), a constant lateral `inflow`
-    (m3/s) and, for storage, its `surface_area` (m2)."""
+    (m3/s), for storage its `surface_area` (m2), and SWMM's `surcharge_depth` (SurDepth,
+    m >= 0): how far dynamic-wave routing lets the water rise above the full depth before
+    the manhole floods (kinematic and steady routing ignore it)."""
 
     name: str
     invert: float
     ground: float | None = None
     inflow: float = 0.0
     surface_area: float | None = None
+    surcharge_depth: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -134,6 +137,12 @@ class SewerNetwork:
                 f"{tuple(ROUTING_ALIASES)}), got {self.routing!r}"
             )
         dynamic = self.routing == "dynamic_wave"
+        for manhole in self.manholes:
+            if not manhole.surcharge_depth >= 0.0:
+                raise ValueError(
+                    f"SewerNetwork: manhole {manhole.name!r} surcharge_depth must be >= 0 m, "
+                    f"got {manhole.surcharge_depth!r}"
+                )
         names: set[str] = set()
         for node in (*self.manholes, *self.outfalls):
             if node.name in names:

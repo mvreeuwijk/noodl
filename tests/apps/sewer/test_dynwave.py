@@ -235,19 +235,6 @@ def test_dry_network_stays_finite(tmp_path):
     assert depth.min().item() > -1e-9
 
 
-def test_a_junction_above_its_full_depth_is_refused_by_name():
-    """Flooding is not modelled yet (phase B, Task 4): with MaxDepth 0.5 m everywhere J2's
-    surcharge (4.3 m at step 21) passes its full depth, max(0.5 m, crown 0.30 m)."""
-    net = _extran_tree()
-    net = dataclasses.replace(net, manholes=tuple(
-        dataclasses.replace(m, ground=m.invert + 0.5) for m in net.manholes))
-    model, state, drivers = build_model(net)
-    assert model.dynamic_wave.full_depth.tolist() == pytest.approx([0.5] * 5)
-    with pytest.raises(RuntimeError, match=r"junction\(s\) \['J2'\] above their full depth "
-                                           r"at t=105\.0 s; flooding is not modelled"):
-        simulate_dynamic_wave(model, state, drivers, steps=30)
-
-
 def test_non_convergence_is_named(tmp_path):
     net = _tree(tmp_path)
     model, state, drivers = build_model(net, iterate_max=2, iterate_tol=1e-15)
@@ -659,3 +646,169 @@ def test_hold_band_never_acts_below_the_crown_at_a_large_storage_area():
     w, dw = at(1.31)                                           # band above the crown
     assert w == pytest.approx(0.8 * 0.3 + stiff * 0.01) and dw == pytest.approx(stiff)
     assert at(1.3 + 1e-12)[0] == pytest.approx(0.24)           # continuous at the crown
+
+
+# ------------------------------------------------------------------- flooding (E3)
+def _flooding_tree(max_depth=0.5, method="extran"):
+    """The EXTRAN tree with every junction's MaxDepth `max_depth` (m) and the surcharge
+    method `method`: J2's surcharge (4.3 m at step 21 with MaxDepth 5) passes it."""
+    net = _extran_tree()
+    net = dataclasses.replace(net, manholes=tuple(
+        dataclasses.replace(m, ground=m.invert + max_depth) for m in net.manholes))
+    return dataclasses.replace(net, dynamic_wave=dataclasses.replace(
+        net.dynamic_wave, surcharge_method=method))
+
+
+def test_full_depth_extends_a_zero_max_depth_to_the_attached_crowns():
+    """link.c:440-463: a junction's full depth is its MaxDepth, raised to every attached
+    conduit's top; with MaxDepth 0 that is its crown. It floods above y_max = full depth +
+    SurDepth (dynwave.c:746-748)."""
+    net = _extran_tree()
+    net = dataclasses.replace(net, manholes=tuple(
+        dataclasses.replace(m, ground=m.invert,
+                            surcharge_depth=0.2 if m.name == "J3" else 0.0)
+        for m in net.manholes))
+    hyd = build_model(net)[0].dynamic_wave
+    torch.testing.assert_close(hyd.full_depth, hyd.crown_depth)
+    flood = dict(zip(hyd.junction_names, hyd.flood_depth.tolist(), strict=True))
+    assert flood == pytest.approx({"J1": 0.30, "J2": 0.30, "J5": 0.30, "J3": 0.65,
+                                   "J4": 0.45}, abs=1e-12)
+    hyd = build_model(_extran_tree())[0].dynamic_wave              # MaxDepth 5 stands
+    assert hyd.full_depth.tolist() == pytest.approx([5.0] * 5)
+    assert hyd.flood_depth.tolist() == pytest.approx([5.0] * 5)
+
+
+def test_junction_storage_floods_at_its_top_through_a_lagged_excess():
+    """Design E3 in `JunctionStorage` (top head 1.5 m, A_s 2 m2, dt 5 s: storage slope 0.8
+    m2/s; wall slope (2/dt) max(K_HOLD A_bed, K_HOLD_STORAGE A_s) = 200 m2/s). The wall is
+    ``w(top) + E + 200 (H - top)``, E the lagged excess of the fed net inflow over the
+    non-flooded withdrawal at the top: junction 0 (w(top) = 0.4, fed N 0.5) floods with E
+    = 0.1, junction 1 (w(top) = -0.22, fed N -0.3) does not (E = 0), but its wall still
+    caps it at the top within the pass."""
+    ns = JunctionStorage(torch.tensor([0, 1]), bed=torch.ones(2, dtype=F64), bed_area=0.5,
+                         top=torch.full((2,), 1.5, dtype=F64))
+    drv = {"water.storage_area": torch.full((2,), 2.0, dtype=F64),
+           "water.head_start": torch.tensor([1.0, 1.4], dtype=F64),
+           "water.net_inflow_start": torch.tensor([0.0, 0.3], dtype=F64),
+           "water.storage_rate": torch.tensor(0.2, dtype=F64),
+           "water.net_inflow_last": torch.tensor([0.5, -0.3], dtype=F64)}
+    drv["water.flood_excess"] = ns.flood_excess(drv)
+    assert drv["water.flood_excess"].tolist() == pytest.approx([0.1, 0.0])
+
+    def at(h):
+        phi = torch.full((2,), h, dtype=F64)
+        return ns.flow(phi, drv).tolist(), ns.dflow(phi, drv).tolist()
+
+    w, dw = at(1.5)                                            # on the wall at the top
+    assert w == pytest.approx([0.5, -0.22]) and dw == pytest.approx([200.0, 200.0])
+    w, dw = at(1.4)                                            # storage well below it
+    assert w == pytest.approx([0.32, -0.3]) and dw == pytest.approx([0.8, 0.8])
+    w, dw = at(1.4999)            # junction 0's wall reaches below the top by E/(200-0.8)
+    assert w == pytest.approx([0.5 - 0.02, 0.8 * 0.0999 - 0.3])
+    assert dw == pytest.approx([200.0, 0.8])
+    w, dw = at(1.51)                                           # above the top: the wall
+    assert w == pytest.approx([0.5 + 2.0, -0.22 + 2.0]) and dw == pytest.approx([200.0] * 2)
+
+
+@pytest.mark.parametrize("method", ["extran", "slot"])
+def test_a_junction_driven_past_its_maximum_depth_floods_at_it(method):
+    """MaxDepth 0.5 m everywhere: J2 (crown 0.30 m) passes 0.5 m and floods
+    (dynwave.c:743-795, no ponding). It is held at y_max (1e-9 m) while the excess leaves
+    as `sewer.overflow`, SWMM's ``0.5 (N_start + N)`` (m3/s), which settles to J2's net
+    inflow, its lateral inflow less C2's flow (1e-6 m3/s by step 120). It first floods at
+    step 21 under EXTRAN and 36 under SLOT (the slot's storage fills it more slowly). No
+    other junction floods in the 120 steps (J4 does at step ~231 under EXTRAN); every step
+    converges."""
+    net = _flooding_tree(method=method)
+    model, state, drivers = build_model(net)
+    hyd = model.dynamic_wave
+    j2 = hyd.junction_names.index("J2")
+    diags: list = []
+    state, hist = simulate_dynamic_wave(
+        model, state, drivers, steps=120, diagnostics=diags,
+        record=("water.phi", "water.q", "sewer.net_inflow", "sewer.overflow"))
+    assert all(bool(d["converged"]) for d in diags)
+    depth = _depths(model, hist)
+    over = hist["sewer.overflow"]
+    flooded = over[:, j2] > 0.0
+    first = int(flooded.nonzero()[0])
+    assert first + 1 == {"extran": 21, "slot": 36}[method], first
+    assert bool(flooded[first:].all())
+    assert (depth[first:, j2] - 0.5).abs().max().item() < 1e-9
+    assert depth.max().item() < 0.5 + 1e-9
+    others = [j for j in range(len(hyd.junction_names)) if j != j2]
+    assert bool((over[:, others] == 0.0).all())
+    net_in = hist["sewer.net_inflow"]
+    trapezoid = 0.5 * (net_in[first - 1:-1, j2] + net_in[first:, j2])
+    torch.testing.assert_close(over[first:, j2], trapezoid, rtol=0.0, atol=1e-12)
+    assert over[-1, j2].item() > 0.01
+    lateral = drivers["inflow"][model.junction_idx[j2]].item()
+    c2 = hist["water.q"][-1, hyd.pipe_names.index("C2")].item()
+    assert abs(over[-1, j2].item() - (lateral - c2)) < 1e-6                  # settled
+
+
+def test_flood_releases_when_inflow_stops():
+    """J2 floods (MaxDepth 0.5 m, from step 21), then its lateral inflow ramps down to
+    nothing over steps 31-50 (the others stay). The lagged flood excess falls with J2's net
+    inflow; once it would be negative J2 leaves y_max (step 34), its overflow is 0
+    thereafter, it passes back down through its crown and drains, and no step chatters
+    (at most 30 passes). (Stopping EVERY inflow instead runs into a phase-A limit: C5's
+    lagged normal-flow-limit flag alternates on the drain-down near step 109 and that step
+    does not converge; it involves no flooded junction.)"""
+    model, state, drivers = build_model(_flooding_tree())
+    hyd = model.dynamic_wave
+    j2 = hyd.junction_names.index("J2")
+    node = int(model.junction_idx[j2])
+    factors = [1.0] * 30 + [1.0 - (k + 1) / 20 for k in range(20)] + [0.0] * 20
+    rows = []
+    for f in factors:
+        row = drivers["inflow"].clone()
+        row[node] = f * drivers["inflow"][node]
+        rows.append(row)
+    inflow = torch.stack(rows).unsqueeze(1)
+    diags: list = []
+    _, hist = simulate_dynamic_wave(model, state, drivers, steps=len(factors), inflow=inflow,
+                                    diagnostics=diags,
+                                    record=("water.phi", "sewer.overflow"))
+    assert all(bool(d["converged"]) for d in diags)
+    assert max(d["passes"] for d in diags) <= 30, max(d["passes"] for d in diags)
+    depth = _depths(model, hist)[:, 0, j2]
+    over = hist["sewer.overflow"][:, 0, j2]
+    assert (depth[20:30] - 0.5).abs().max().item() < 1e-9
+    assert bool((over[20:30] > 0.0).all())
+    released = int((over == 0.0)[30:].nonzero()[0]) + 30
+    assert released + 1 == 34, released
+    assert bool((over[released:] == 0.0).all())
+    assert bool((depth[released:] < 0.5 - 1e-6).all())
+    assert depth[-1].item() < hyd.crown_depth[j2].item()
+
+
+def test_gradient_through_a_flooded_junction():
+    """d(sum of the outfall conduit's flow 4 steps on)/d(Manning n of C2) from step 40 of
+    the flooding tree, where J2 (C2's upstream end) is held at y_max: the adjoint against
+    central differences on plain relaxation."""
+    from noodl.apps.sewer.dynwave import build_dynamic_wave_model
+
+    net = _flooding_tree()
+    model, state0, drivers = build_model(net)
+    state0, _ = simulate_dynamic_wave(model, state0, drivers, steps=40)
+    state0 = {k: v.detach() for k, v in state0.items()}
+    j2 = model.dynamic_wave.junction_names.index("J2")
+    depth = state0["water.phi"][model.junction_idx] - model.junction_invert
+    assert abs(depth[j2].item() - 0.5) < 1e-9
+    plain = build_dynamic_wave_model(net, acceleration=None, iterate_flow_tol=None)[0]
+    c5 = model.dynamic_wave.pipe_names.index("C5")
+
+    def loss(m, n2):
+        hyd = m.dynamic_wave
+        hyd.set_roughness(hyd.pipe_names.index("C2"), n2)
+        s, _ = simulate_dynamic_wave(m, state0, drivers, steps=4, atol=1e-12)
+        return s["water.q"][..., c5].sum()
+
+    n = torch.tensor(0.013, dtype=F64, requires_grad=True)
+    loss(model, n).backward()
+    h = 1e-6
+    with torch.no_grad():
+        fd = (loss(plain, n.detach() + h) - loss(plain, n.detach() - h)) / (2 * h)
+    assert abs(n.grad.item()) > 0.0
+    assert n.grad.item() == pytest.approx(fd.item(), rel=1e-6)

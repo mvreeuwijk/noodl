@@ -365,15 +365,27 @@ reports 1 without holding zero net inflow. A surcharged junction's head is resol
 `atol / sum(k)` with `sum(k)` its conduits' conveyance (~0.01 m2/s for a 0.3 m pipe), so the
 default head-solve tolerance (`solve_atol`, a few 1e-9 m3/s) leaves it a few 1e-7 m from the
 fixed point; pass `atol=1e-12` to `simulate_dynamic_wave` for tighter heads where no junction
-sits on its bed. Flooding is not modelled yet: a junction above its full depth (MaxDepth,
-extended to its crown; SWMM's `SurDepth` is not read) stops the run with an error naming the
-junction and the time.
+sits on its bed.
+
+Flooding follows SWMM without ponding (`ALLOW_PONDING NO`, `dynwave.c:743-795`). A junction's
+full depth is its `MaxDepth`, raised to the top of every conduit end it carries (so a
+`MaxDepth` of 0 means the crown, `link.c:440-463`), and it floods above
+`y_max = full depth + SurDepth` (`Manhole.surcharge_depth`). A flooded junction is held at
+`y_max`, and the water that cannot enter it leaves the system: `sewer.overflow` (m³/s per
+junction, `record=("sewer.overflow",)` in `simulate_dynamic_wave`) is SWMM's flooding loss,
+the step's trapezoidal net inflow `0.5 (N_start + N)`, set to 0 below SWMM's 1e-4 cfs. It does
+not return to the network and is not part of the net inflow carried to the next step, as in
+SWMM. In the head solve every junction's withdrawal is capped by a steep "wall" at `y_max`
+offset by the previous pass's excess of net inflow over what the junction would otherwise
+take there; at the fixed point that offset is the solved excess, so a flooded junction sits
+exactly at `y_max` (not at a penalty's offset above it), and the excess falling to zero
+releases it on the next pass, without a flag to chatter.
 
 The reader refuses by name,
 with the line number, `VARIABLE_STEP > 0`, `LENGTHENING_STEP > 0`, `ALLOW_PONDING YES`, nonzero
 `InitDepth`/`InitFlow`/`MaxFlow`, flap gates, barrels other than 1 and TIDAL/TIMESERIES outfalls.
 `build_model` with `air=True`, `quality=True` or `storage=True` is refused by name. Variable step,
-flooding, ponding, headspace air and quality on the dynamic wave are planned.
+ponding, headspace air and quality on the dynamic wave are planned.
 
 ```python
 from noodl.apps.sewer import read_swmm_inp, build_model, simulate_dynamic_wave
@@ -390,7 +402,8 @@ print([round(float(q), 4) for q in hist["water.q"][-1]])                # m3/s, 
 
 `hist` holds `"water.phi"` (head at every node, m) and `"water.q"` (flow in every conduit,
 m³/s), stacked over steps. `simulate_dynamic_wave` also takes an `inflow=` override (`(n,)`
-constant, `(B, n)` a batch, `(steps, B, n)` a series) and `record=` for other state keys.
+constant, `(B, n)` a batch, `(steps, B, n)` a series) and `record=` for other state keys
+and for `"sewer.overflow"` (m³/s per junction).
 
 ### Headspace air
 
@@ -564,11 +577,10 @@ publish numbers from this application.
   backwater.
 - **Kinematic-wave and steady routing: dendritic networks only**, one outgoing pipe per
   manhole, no loops. Dynamic-wave routing allows loops and flat or adverse conduits.
-- **Dynamic wave: no flooding, variable step, ponding, headspace air or quality yet**
-  (planned). A junction above its full depth (MaxDepth extended to its crown) stops the run
-  with the junction's name and the time, under either surcharge method; with no ground
-  (MaxDepth 0) that is the junction's crown, so it stops as soon as the junction surcharges; `build_model(..., air=True)` or `quality=True` is
-  refused. Circular conduits only, one barrel, cold dry start. Under EXTRAN, where SWMM's own
+- **Dynamic wave: no variable step, ponding, headspace air or quality yet** (planned).
+  Flooded water is lost, as in SWMM without ponding; with no ground (`MaxDepth` 0) and no
+  `SurDepth` a junction floods as soon as it fills to its crown. `build_model(...,
+  air=True)` or `quality=True` is refused. Circular conduits only, one barrel, cold dry start. Under EXTRAN, where SWMM's own
   surcharge iteration has no fixed point, noodl holds the junction at its crown (see
   "Dynamic wave"), so such steps have no SWMM reference.
 - **No gas-phase sulfide sink.** H₂S leaves the headspace by ventilation, at the outfall, and

@@ -1,11 +1,12 @@
 """A documented SWMM 5 `.inp` subset.
 
 READ: `[TITLE]`, `[OPTIONS]` (`FLOW_UNITS` must be `CMS`),
-`[JUNCTIONS]`, `[OUTFALLS]` (FREE, NORMAL and FIXED), `[CONDUITS]`, `[XSECTIONS]` (only
-`CIRCULAR`, one barrel), `[INFLOWS]` (constant `FLOW` baselines and constant `CONCENTRATION`
-pollutant baselines), `[POLLUTANTS]`. `FLOW_ROUTING` is STEADY, KINWAVE or DYNWAVE; DYNWAVE
-also reads `ROUTING_STEP`, `INERTIAL_DAMPING`, `NORMAL_FLOW_LIMITED`, `SURCHARGE_METHOD`,
-`MIN_SURFAREA`, `HEAD_TOLERANCE`, `MAX_TRIALS` and `MIN_SLOPE` into `DynamicWaveOptions`.
+`[JUNCTIONS]` (invert, MaxDepth, SurDepth), `[OUTFALLS]` (FREE, NORMAL and FIXED),
+`[CONDUITS]`, `[XSECTIONS]` (only `CIRCULAR`, one barrel), `[INFLOWS]` (constant `FLOW`
+baselines and constant `CONCENTRATION` pollutant baselines), `[POLLUTANTS]`.
+`FLOW_ROUTING` is STEADY, KINWAVE or DYNWAVE; DYNWAVE also reads `ROUTING_STEP`,
+`INERTIAL_DAMPING`, `NORMAL_FLOW_LIMITED`, `SURCHARGE_METHOD`, `MIN_SURFAREA`,
+`HEAD_TOLERANCE`, `MAX_TRIALS` and `MIN_SLOPE` into `DynamicWaveOptions`.
 The network uses SWMM's own tabulated circular section
 (``geometry="tabulated"``, `xsect_tables.py`) unless ``geometry="analytic"`` is passed.
 IGNORED because no conduit or node ever references them: `[EVAPORATION]`, `[REPORT]`,
@@ -35,6 +36,7 @@ m above the end node's invert) and swap with the ends on a reversal.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from pathlib import Path
 
@@ -156,9 +158,17 @@ def read_swmm_inp(
                 f"{path}: line {line.number}: junction {name!r} has a non-zero initial depth "
                 f"{line.fields[3]}; dynamic wave starts from a dry network (phase A)"
             )
+        surcharge = (as_float(line, 4, "the surcharge depth", path)
+                     if len(line.fields) > 4 else 0.0)
+        if surcharge < 0.0:
+            raise ValueError(
+                f"{path}: line {line.number}: junction {name!r} has a negative surcharge depth "
+                f"{line.fields[4]} m (SWMM's SurDepth must be >= 0)"
+            )
         invert[name] = elevation
         manholes.append(
-            Manhole(name, elevation, ground=None if depth is None else elevation + depth)
+            Manhole(name, elevation, ground=None if depth is None else elevation + depth,
+                    surcharge_depth=surcharge)
         )
     outfalls: list[Outfall] = []
     for line in sections.get("OUTFALLS", []):
@@ -308,7 +318,7 @@ def read_swmm_inp(
             )
 
     manholes = [
-        Manhole(m.name, m.invert, ground=m.ground, inflow=inflow[m.name])
+        dataclasses.replace(m, inflow=inflow[m.name])
         for m in manholes
     ]
     network = SewerNetwork(

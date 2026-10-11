@@ -19,6 +19,11 @@ number: `VARIABLE_STEP` above 0 (set it to 0), `LENGTHENING_STEP` above 0, `ALLO
 a junction `InitDepth` other than 0, a conduit `InitFlow` or `MaxFlow`
 other than 0, flap-gated outfalls and `TIDAL`/`TIMESERIES` outfalls.
 
+**Junctions.** `Elevation` is the invert, `MaxDepth` sets `Manhole.ground` (invert plus
+depth) and `SurDepth` is `Manhole.surcharge_depth` (m, at least 0; 0 when absent): the depth
+a junction may pressurise above its full depth before it floods under `DYNWAVE`. `Aponded`
+is not read, since ponding is refused.
+
 **Outfalls.** `FREE`, `NORMAL` and `FIXED` (with its stage, m) are read.
 
 **Barrels.** A conduit with more than one barrel, or a culvert code, is refused for every
@@ -53,9 +58,9 @@ conduits differ by SWMM's one-step junction lag, which is first order in the ste
 - runoff (`[SUBCATCHMENTS]` and everything that feeds them) and dry-weather patterns;
 - non-circular shapes;
 - storage units, pumps, weirs, orifices and outlets;
-- dynamic wave with a variable time step or ponding; a junction filling past its full depth
-  (MaxDepth, extended to its crown) stops the run, as flooding is not modelled yet, and
-  `SurDepth` is not read. Both `SURCHARGE_METHOD`s model surcharge.
+- dynamic wave with a variable time step or ponding. Both `SURCHARGE_METHOD`s model
+  surcharge, and a junction floods (without ponding) above `MaxDepth` (extended to its
+  crown) plus `SurDepth`.
 
 **Slope** follows SWMM's own definition $S_0 = dy/dx$ with $dx = \sqrt{L^2 - dy^2}$ — the 3-D
 chord, not the naive $dy/L$. Under `STEADY` and `KINWAVE`, zero or adverse fall is refused, as

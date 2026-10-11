@@ -24,7 +24,7 @@ Descriptions of the physical objects a network is built from.
 | Name | What it does | How to call it |
 |---|---|---|
 | `DynamicWaveOptions` | SWMM 5.2.4's dynamic-wave [OPTIONS] that change the physics, with SWMM's defaults (`project.c:841-880`). `head_tolerance` and `max_trials` are SWMM's own iteration controls: recorded so a file round-trips, never used -- noodl solves the same equations to `build_model`'s own `iterate_tol` (docs: "Dynamic wave"). | `DynamicWaveOptions(routing_step=20.0, inertial_damping='partial', normal_flow_limited='both', surcharge_method='extran', min_surface_area=None, head_tolerance=None, max_trials=None)` |
-| `Manhole` | A manhole: `invert` and `ground` elevations (m), a constant lateral `inflow` (m3/s) and, for storage, its `surface_area` (m2). | `Manhole(name, invert, ground=None, inflow=0.0, surface_area=None)` |
+| `Manhole` | A manhole: `invert` and `ground` elevations (m), a constant lateral `inflow` (m3/s), for storage its `surface_area` (m2), and SWMM's `surcharge_depth` (SurDepth, m >= 0): how far dynamic-wave routing lets the water rise above the full depth before the manhole floods (kinematic and steady routing ignore it). | `Manhole(name, invert, ground=None, inflow=0.0, surface_area=None, surcharge_depth=0.0)` |
 | `Outfall` | An outfall, where the network discharges: its `invert` elevation (m). | `Outfall(name, invert, kind='free', stage=None)` |
 | `Pipe` | A conduit from manhole `u` to `v`: `length` and `diameter` (m), Manning's `n` and bed `slope` (m/m). `inlet_offset` and `outlet_offset` (m) are the heights of the pipe invert above the invert of its `u` and `v` node (SWMM's link offsets). | `Pipe(name, u, v, length, diameter, n, slope, inlet_offset=0.0, outlet_offset=0.0)` |
 | `SewerNetwork` | A gravity sewer: manholes, pipes, outfalls. Kinematic-wave and steady routing need a dendritic network (one outgoing pipe per manhole); dynamic-wave routing allows loops and flat pipes. | `SewerNetwork(manholes, pipes, outfalls, routing='kinematic_wave', notes=<factory>, geometry='analytic', dynamic_wave=DynamicWaveOptions(routing_step=20.0, inertial_damping='partial', normal_flow_limited='both', surcharge_method='extran', min_surface_area=None, head_tolerance=None, max_trials=None))` |
@@ -70,7 +70,7 @@ Nodal sources and withdrawals.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `JunctionStorage` | SWMM's junction continuity as a node withdrawal: trapezoidal storage over the step, with a stiff bed below the invert (design D3), or no storage at all where the junction is EXTRAN-surcharged (design E1). | `JunctionStorage(nodes, bed, bed_area, crown=None)` |
+| `JunctionStorage` | SWMM's junction continuity as a node withdrawal: trapezoidal storage over the step, with a stiff bed below the invert (design D3), or no storage at all where the junction is EXTRAN-surcharged (design E1), capped by flooding at the junction's top (design E3). | `JunctionStorage(nodes, bed, bed_area, crown=None, top=None)` |
 
 ## Files
 

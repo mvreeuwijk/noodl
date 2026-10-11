@@ -1,5 +1,6 @@
 """The documented SWMM .inp subset."""
 
+import dataclasses
 import math
 from pathlib import Path
 
@@ -284,3 +285,22 @@ def test_dynwave_surcharge_method_slot_is_read(tmp_path):
     net, _, _ = read_swmm_inp(path)
     assert net.dynamic_wave.surcharge_method == "slot"
     assert read_swmm_inp(_dyn(tmp_path))[0].dynamic_wave.surcharge_method == "extran"
+
+
+def test_junction_surcharge_depth_is_read(tmp_path):
+    """SWMM's junction field 4, SurDepth (m): the depth a junction may pressurise above its
+    MaxDepth before it floods (node.c:149-154). Absent, it is 0; a negative one is refused
+    by name, as SWMM refuses it (node.c:638-642)."""
+    path = _dyn(tmp_path, [("J2               12.0       5          0          0",
+                            "J2               12.0       5          0          1.5")])
+    net, _, _ = read_swmm_inp(path)
+    sur = {m.name: m.surcharge_depth for m in net.manholes}
+    assert sur == {"J1": 0.0, "J2": 1.5, "J5": 0.0, "J3": 0.0, "J4": 0.0}
+    path = _dyn(tmp_path, [("J2               12.0       5          0          0",
+                            "J2               12.0       5          0          -0.1")])
+    with pytest.raises(ValueError, match=r"junction 'J2' has a negative surcharge depth"):
+        read_swmm_inp(path)
+    bad = dataclasses.replace(net, manholes=(
+        dataclasses.replace(net.manholes[0], surcharge_depth=-1.0), *net.manholes[1:]))
+    with pytest.raises(ValueError, match=r"manhole 'J1' surcharge_depth must be >= 0 m"):
+        bad.validate()
