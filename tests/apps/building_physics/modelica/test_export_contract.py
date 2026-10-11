@@ -9,6 +9,7 @@ the `noodl` package (the package never imports it).
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import sys
 from pathlib import Path
@@ -326,3 +327,81 @@ def test_main_exits_zero_with_no_simulate_even_without_a_csv(exporter, monkeypat
         exporter, "export",
         lambda model, out, mbl, **_kw: {"model": model, "json": "x.json"})
     assert exporter.main(["test.Whatever", "--no-simulate"]) == 0
+
+
+READER_CLASS = "Buildings.BoundaryConditions.WeatherData.ReaderTMY3"
+WEATHER_READER = _cls(READER_CLASS, [
+    _param("filNam", binding="/opt/mbl/Buildings/Resources/weatherdata/w.mos", type_="String"),
+])
+LOW_RISE = _cls("Buildings.Fluid.Sources.Outside_CpLowRise", [
+    _param("Cp0", binding=0.6), _param("s", binding=5), _param("azi", binding=1.5707963267948966),
+    _param("nPorts", binding=1, type_="Integer"), _var("pWin"),
+])
+WIND_MODEL = _cls("test.Wind", [
+    _comp("weaDat", WEATHER_READER), _comp("west", LOW_RISE), _comp("volA", VOLUME),
+    _comp("oriA", ORIFICE), _comp("gai", GAIN), _comp("ramp", RAMP),
+])
+WIND_MODEL["connections"] = [
+    _connect("weaDat.weaBus", "west.weaBus"),
+    _connect("west.ports[1]", "oriA.port_a"),
+    _connect("oriA.port_b", "volA.ports[1]"),
+    _connect("weaDat.weaBus.HDirNor", "gai.u"),     # a signal block READS the bus: kept
+    _connect("gai.y", "west.Cp_in"),
+    _connect("ramp.y", "west.weaBus.pAtm"),         # a signal WRITES a bus variable: drives
+]
+
+
+def _wind_document(exporter):
+    return exporter.build_document(
+        WIND_MODEL, model="test.Wind", medium=MEDIUM, experiment=EXPERIMENT,
+        mbl_commit="55abf579598ca81cae0a82f337350375958e6722",
+        openmodelica="OpenModelica 1.27.1~2-g6db4671",
+    )
+
+
+def test_weather_and_wind_columns_follow_the_volume_states(exporter) -> None:
+    variables = exporter.compared_variables(WIND_MODEL, _wind_document(exporter))
+    assert variables == [
+        "oriA.m_flow", "volA.T", "volA.p", "volA.Xi[1]", "volA.C[1]",
+        "weaDat.weaBus.TDryBul", "weaDat.weaBus.pAtm", "weaDat.weaBus.relHum",
+        "weaDat.weaBus.winSpe", "west.pWin",
+    ]
+
+
+def test_a_signal_reading_the_weather_bus_keeps_its_connection(exporter) -> None:
+    doc = _wind_document(exporter)
+    assert ["weaDat.weaBus.HDirNor", "gai.u"] in doc["connections"]
+    assert ["ramp.y", "west.weaBus.pAtm"] not in doc["connections"]
+    drives = {s["name"]: s["drives"] for s in doc["signals"]}
+    assert drives["ramp"] == "west.weaBus.pAtm"
+
+
+def test_weather_files_travel_with_the_export(exporter, tmp_path: Path) -> None:
+    src = tmp_path / "mbl" / "w.mos"
+    src.parent.mkdir()
+    src.write_bytes(b"#1\ndouble tab1(2,30)\n")
+    out = tmp_path / "out"
+    out.mkdir()
+    doc = {"components": [
+        {"name": "weaDat", "class": READER_CLASS, "parameters": {"filNam": str(src)}},
+        {"name": "west", "class": "Buildings.Fluid.Sources.Outside_CpLowRise",
+         "parameters": {}},
+    ]}
+    assert exporter.attach_weather_files(doc, out) == [out / "w.mos"]
+    assert (out / "w.mos").read_bytes() == src.read_bytes()
+    digest = hashlib.sha256(src.read_bytes()).hexdigest()
+    assert doc["components"][0]["files"] == {"filNam": {"path": "w.mos", "sha256": digest}}
+    assert "files" not in doc["components"][1]
+
+
+def test_a_missing_weather_file_stops_the_export(exporter, tmp_path: Path) -> None:
+    doc = {"components": [{"name": "weaDat", "class": READER_CLASS,
+                           "parameters": {"filNam": str(tmp_path / "none.mos")}}]}
+    with pytest.raises(exporter.ExportError, match="weaDat"):
+        exporter.attach_weather_files(doc, tmp_path)
+
+
+def test_weather_class_sets_match_the_reader(exporter) -> None:
+    assert exporter.WIND_BOUNDARIES == schema.OUTSIDE_WIND
+    assert exporter.WEATHER_READERS == schema.WEATHER_READERS
+    assert set(exporter.WEATHER_COLUMNS) < set(schema.WEATHER_BUS_OUTPUTS)

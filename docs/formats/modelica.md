@@ -134,6 +134,13 @@ declared one; the thirteen dynamic parity references were regenerated with
 `--tolerance 1e-13` (`tests/data/modelica/NOTICE.md`). At 1e-14 OpenModelica's DASSL returns
 no trajectory for these models, so 1e-13 is the finest reference available.
 
+A model with a `ReaderTMY3` also gets its weather file: the exporter copies the `.mos` file
+`filNam` names (from the MBL checkout) next to the JSON and records its name and sha256 in the
+reader's `"files"` entry. The reader opens that copy and refuses the model, naming the reader,
+if the file is missing or its sha256 differs. The CSV of such a model also holds the reader's
+`weaBus.TDryBul`, `weaBus.pAtm`, `weaBus.relHum` and `weaBus.winSpe` and every wind boundary's
+`pWin`, which the parity tests compare at round-off.
+
 Regenerating the committed parity records (`tests/data/modelica/parity-{algebraic,dynamic}.json`,
 in [the building physics parity tables](../applications/building_physics.md#against-openmodelica-modelica-buildings-library))
 needs no OpenModelica — they are written by `tests/verification/test_modelica_parity.py`
