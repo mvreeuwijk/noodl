@@ -513,9 +513,10 @@ class JunctionStorage(NodeSource):
     EXTRAN surcharge (design E1; `crown` given, the junction crown heads in m). Above its
     crown a junction stores nothing: SWMM's surcharged update ``y_new = y_last + corr
     dQ/denom`` (`dynwave.c:716-741`) is at its fixed point exactly when the net inflow dQ is
-    0. With ``w_c = (2 A_s/dt)(H_crown - H_start) - N_start`` the storage withdrawal at the
-    crown, ``stiff = (2/dt) max(K_HOLD A_bed, K_HOLD_STORAGE A_s)`` and the band
-    ``b(H) = w_c + stiff (H - H_crown)``:
+    0. With ``w_c`` the free storage withdrawal at the crown (``(2 A_s/dt)(H_crown - H_start)
+    - N_start``, or the drop-end area switch's value there where one applies), ``stiff =
+    (2/dt) max(K_HOLD A_bed, K_HOLD_STORAGE A_s)`` and the band ``b(H) = w_c + stiff (H -
+    H_crown)``:
 
     - a SURCHARGED junction (driver ``"water.surcharged"`` 1, set by `surcharged` from the
       fed head ``H_last``: above the crown and ``b(H_last) > 0``, i.e. above the band where
@@ -656,11 +657,11 @@ class JunctionStorage(NodeSource):
                                    min=K_HOLD * self.bed_area)
 
     def _band(self, phi: Tensor, drivers: Mapping) -> Tensor:
-        """The band ``w_c + stiff (H - H_crown)`` (m3/s) at `phi` (m)."""
-        rate2 = 2.0 * drivers["water.storage_rate"]
-        w_c = (rate2 * drivers["water.storage_area"] * (self.crown - drivers["water.head_start"])
-               - drivers["water.net_inflow_start"])
-        return w_c + self._stiff(drivers) * (phi - self.crown)
+        """The band ``w_c + stiff (H - H_crown)`` (m3/s) at `phi` (m), with ``w_c`` the free
+        storage withdrawal at the crown, the drop-end area switch included (so that the
+        withdrawal is continuous there)."""
+        w_c, _, stiff = self._storage(self.crown, drivers)
+        return w_c + stiff * (phi - self.crown)
 
     def surcharged(self, drivers: Mapping) -> Tensor:
         """The EXTRAN surcharge flag (0/1, float64) from the fed heads

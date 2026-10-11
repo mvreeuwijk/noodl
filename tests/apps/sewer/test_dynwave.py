@@ -745,6 +745,44 @@ def test_hold_band_never_acts_below_the_crown_at_a_large_storage_area():
     assert at(1.3 + 1e-12)[0] == pytest.approx(0.24)           # continuous at the crown
 
 
+def test_hold_band_is_continuous_at_the_crown_with_the_area_switch_active():
+    """Review fix: the band starts at the free storage evaluated AT the crown, area switch
+    included. Crown 10 m, threshold H* 9.98 m below it, storage areas 20 (lagged) / 10
+    (below) / 20 m2 (above), switch slope 5 m2/s, head 9.9 m and net inflow 0 at the step
+    start, dt 2 s, fed net inflow 0: at the crown the switched storage is
+    max(10 (0.1), min(20 (0.1), 5 (0.02))) = 1 m3/s, while the lagged-area line gives 2 m3/s.
+    The withdrawal is continuous through the crown (no 1 m3/s jump), non-decreasing, with a
+    positive slope, and the surcharge flag reads the same band."""
+    from noodl.apps.sewer.dynwave import K_HOLD_STORAGE
+
+    ns = JunctionStorage(torch.tensor([0]), bed=torch.zeros(1, dtype=F64), bed_area=0.01,
+                         crown=torch.full((1,), 10.0, dtype=F64))
+    one = torch.ones(1, dtype=F64)
+    drv = {"water.storage_area": 20.0 * one, "water.head_start": 9.9 * one,
+           "water.net_inflow_start": 0.0 * one, "water.storage_rate": torch.tensor(0.5, dtype=F64),
+           "water.area_switch_head": 9.98 * one, "water.area_below": 10.0 * one,
+           "water.area_above": 20.0 * one, "water.area_switch_slope": 5.0 * one,
+           "water.net_inflow_last": 0.0 * one, "water.surcharge_slope": 0.7 * one,
+           "water.head_last": 9.95 * one}
+    drv["water.surcharged"] = ns.surcharged(drv)
+    assert drv["water.surcharged"].item() == 0.0
+    w_crown = ns.flow(torch.full((1,), 10.0, dtype=F64), drv).item()
+    assert w_crown == pytest.approx(1.0)
+    above = ns.flow(torch.full((1,), 10.0 + 1e-9, dtype=F64), drv).item()
+    assert above == pytest.approx(w_crown, abs=1e-6)
+    grid = torch.linspace(9.99, 10.01, 2001, dtype=F64)
+    big = {k: v.expand(2001) if v.dim() else v for k, v in drv.items()}
+    ws = ns.flow(grid, big)
+    steps = ws[1:] - ws[:-1]
+    stiff = 1.0 * K_HOLD_STORAGE * 20.0
+    assert bool((steps >= 0.0).all())
+    assert float(steps.max()) < stiff * 1e-5 + 1e-12
+    assert bool((ns.dflow(grid, big) > 0.0).all())
+    # the flag uses the same band: fed above the crown, the band is positive there
+    drv["water.head_last"] = 10.0 + 1e-6 * one
+    assert ns.surcharged(drv).item() == 1.0
+
+
 # ------------------------------------------------------------------- flooding (E3)
 def _flooding_tree(max_depth=0.5, method="extran"):
     """The EXTRAN tree with every junction's MaxDepth `max_depth` (m) and the surcharge
