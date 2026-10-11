@@ -270,6 +270,23 @@ sewer dynamic wave does with its conduit coefficients and outfall heads: for exa
 Its `.phi` and `.q` are relaxed with `iterate_relaxation` like a transport `.x`. Potential layers not
 named in `iterate_tol` are not iterated.
 
+`iterate_flow_tol={"head": 1e-9}` (optional, flow units) also judges such a layer's flows: a pass
+converges only when its returned `.q` is within that of the `.q` it was fed. It matters when the
+potential solve stops on its warm start (its residual already within `atol`), which hands the fed
+potential back unchanged while the flows the closures read are still moving.
+
+`iterate_acceleration="anderson"` (opt-in; default `None`) replaces the relaxation of those
+potential layers' `.phi` and `.q` by Anderson mixing (type II, Walker & Ni 2011) over the last
+`iterate_memory` passes (default 5), and needs an `iterate_flow_tol` for each of them: the mixing
+minimises the fixed-point residual of `.phi` and `.q`, each divided by its tolerance, and the
+convergence test then also asks that residual of `.phi` to be within `iterate_tol`. Transport
+states stay relaxed. Mixing changes only the sequence of fed states, never the fixed point, and the
+fixed-point adjoint is unchanged. Two safeguards: an ill-conditioned history drops its oldest
+passes, and a mixed step that would move any entry against its own residual is replaced by the
+relaxed step, because the relaxed iteration only reaches fixed points that attract it and a secant
+step can head for one that repels it (a closure may have both; the sewer's flat, near-dry conduits
+do). The sewer dynamic wave builds with it and needs two to four times fewer passes.
+
 ### Key conventions
 
 State and driver keys are namespaced by layer name:

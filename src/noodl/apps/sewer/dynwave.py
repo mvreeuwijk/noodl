@@ -492,14 +492,23 @@ class DynamicWaveHydraulics:
 
 
 def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
-                             iterate_max: int = 2000, relaxation: float = 0.5
+                             iterate_max: int = 2000, relaxation: float = 0.5,
+                             acceleration: str | None = "anderson", memory: int = 5,
+                             iterate_flow_tol: float | None = 1e-10
                              ) -> tuple[Model, State, Drivers]:
     """Assemble a dynamic-wave sewer and return ``(model, state, drivers)``.
 
     One `PotentialFlowLayer` ``"water"`` (quantity ``"head"``, m; flows m3/s) over the pipes,
     with the outfalls as its boundary and a `JunctionStorage` at every junction, and the
     `DynamicWaveHydraulics` closure; ``coupling="iterate"`` converges on the junction heads
-    to `iterate_tol` (m) within `iterate_max` passes, relaxed by `relaxation`. The state is
+    to `iterate_tol` (m) within `iterate_max` passes. The passes are Anderson-accelerated
+    over the last `memory` of them by default (``acceleration="anderson"``, `Model`'s
+    `iterate_acceleration`), with `relaxation` the damping of the steps it falls back to;
+    ``acceleration=None`` is plain relaxation, which reaches the same fixed point in two to
+    three times the passes. `iterate_flow_tol` (m3/s) is the tolerance on the conduit
+    flows' own fixed-point residual, judged alongside the heads (`Model`'s
+    `iterate_flow_tol`; required by the acceleration, which also minimises it); ``None``
+    with ``acceleration=None`` judges the heads alone, as phase A did. The state is
     SWMM's cold, dry start. Attached to the model: `junction_idx`, `junction_invert` (m),
     `outfall_pipe_idx`, `dynamic_wave` (the closure), `routing_step` (s), `pipe_names`,
     `pipe_columns`, `notes`, `input_specs`, `driver_template`.
@@ -539,7 +548,10 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
                          "the outfall order the closure writes 'water.phi_boundary' in")
     model = Model(graph, {"water": layer}, closures=[closure], coupling="iterate",
                   iterate_tol={"water": iterate_tol}, iterate_max=iterate_max,
-                  iterate_relaxation=relaxation)
+                  iterate_relaxation=relaxation, iterate_acceleration=acceleration,
+                  iterate_memory=memory,
+                  iterate_flow_tol=None if iterate_flow_tol is None
+                  else {"water": iterate_flow_tol})
     inflow = torch.zeros(graph.n, dtype=F64)
     inflow[junction_idx] = torch.tensor([m.inflow for m in net.manholes], dtype=F64)
     state = closure.initial_state({"inflow": inflow})
@@ -548,8 +560,11 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
         "water.phi_boundary": state["water.phi"][closure.outfall_idx].clone(),
     }
     closure.notes["routing"] = (
-        f"dynamic wave (SWMM 5.2.4 fixed point): heads converged to {iterate_tol} m within "
-        f"{iterate_max} passes; SWMM's HEAD_TOLERANCE and MAX_TRIALS are not used")
+        f"dynamic wave (SWMM 5.2.4 fixed point): heads converged to {iterate_tol} m"
+        + ("" if iterate_flow_tol is None else f" and flows to {iterate_flow_tol} m3/s")
+        + f" within {iterate_max} passes"
+        + ("" if acceleration is None else f" ({acceleration}-accelerated)")
+        + "; SWMM's HEAD_TOLERANCE and MAX_TRIALS are not used")
     model.notes = closure.notes
     model.junction_idx = junction_idx
     model.junction_invert = junction_invert

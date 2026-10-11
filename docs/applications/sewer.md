@@ -274,6 +274,21 @@ or `iterate_max` passes (default 2000) are used (`Model(coupling="iterate")`, co
 layer's own interior head). The result is the head and flow field at which a SWMM trial
 reproduces its own input.
 
+The passes are Anderson-accelerated by default (`build_dynamic_wave_model(...,
+acceleration="anderson", memory=5, iterate_flow_tol=1e-10)`; `Model`'s `iterate_acceleration`,
+see [Layers and models](../concepts/layers.md)). Each pass's flows must then also reproduce the
+flows it was fed to within `iterate_flow_tol` (m³/s): the head solve stops on its warm start once
+every junction balance is within its `atol` (`solve_atol`), so near convergence the heads stand
+still while the flows of a flat or nearly dry conduit still drift. Against plain relaxation the
+mean passes per step fall from 34.8 to 14.1 (tree), 30.2 to 10.4 (backwater line) and 20.8 to 9.7
+(loop) over the first 60 steps, and from 42.8 to 11.3 over the loop's first 120, whose worst step
+drops from 327 passes to 22. The two iterations land on the same fixed point: with a tight head
+solve (`atol=1e-12`) they agree to 2e-12 m; at the default `solve_atol` each lands within the head
+solve's own resolution, `atol dt / (2 A_s)` (a few 1e-9 m). The mixing keeps to the fixed points
+plain relaxation (and SWMM's relaxed trials) can reach: a flat, near-dry conduit's flow can have
+a second, repelling fixed point, and a mixed step heading for it is replaced by the relaxed step.
+`acceleration=None, iterate_flow_tol=None` restores plain relaxation on the heads alone.
+
 **SWMM's iteration artefacts are not modelled**: trial relaxation, the 0.001 cfs flow-reversal
 rule, link bypassing, `MAX_TRIALS` and `HEAD_TOLERANCE`. Each is a device for reaching the fixed
 point and none moves it. The reader records `HEAD_TOLERANCE` and `MAX_TRIALS` in

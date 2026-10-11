@@ -156,21 +156,32 @@ def test_first_step_fills_a_dry_junction_by_half_the_inflow(tmp_path):
 
 def test_gradient_over_a_few_steps_from_the_cold_start(tmp_path):
     """Fast gradient check: d(sum of junction depths after 4 steps)/d(Manning n of C1),
-    against central differences. C1 is wet from the first step (J1 carries inflow)."""
-    model, state0, drivers = build_model(_tree(tmp_path))
-    hyd = model.dynamic_wave
-    i = hyd.pipe_names.index("C1")
+    against central differences. C1 is wet from the first step (J1 carries inflow).
 
-    def loss(n1):
-        hyd.set_roughness(i, n1)
-        s, _ = simulate_dynamic_wave(model, state0, drivers, steps=4)
-        return (s["water.phi"][model.junction_idx] - model.junction_invert).sum()
+    The gradient is the default (Anderson-accelerated) model's; the central differences
+    are taken on plain relaxation. The adjoint is the fixed point's own, the same either
+    way (1.88181489e-2 vs 1.88181502e-2), but the primal is resolved only to the head
+    solve's band (a pass whose fed heads already meet `solve_atol` returns them unchanged,
+    ~5e-9 m): where in that band an iteration lands drifts smoothly with n, and along the
+    Anderson path that drift biases the differences by 1.4e-5 relative at every h from
+    1e-7 to 1e-5, against 2.6e-6 along the relaxed path."""
+    from noodl.apps.sewer.dynwave import build_dynamic_wave_model
+
+    net = _tree(tmp_path)
+    model, state0, drivers = build_model(net)
+    plain = build_dynamic_wave_model(net, acceleration=None, iterate_flow_tol=None)[0]
+
+    def loss(m, n1):
+        hyd = m.dynamic_wave
+        hyd.set_roughness(hyd.pipe_names.index("C1"), n1)
+        s, _ = simulate_dynamic_wave(m, state0, drivers, steps=4)
+        return (s["water.phi"][m.junction_idx] - m.junction_invert).sum()
 
     n = torch.tensor(0.013, dtype=F64, requires_grad=True)
-    loss(n).backward()
+    loss(model, n).backward()
     h = 1e-7
     with torch.no_grad():
-        fd = (loss(n.detach() + h) - loss(n.detach() - h)) / (2 * h)
+        fd = (loss(plain, n.detach() + h) - loss(plain, n.detach() - h)) / (2 * h)
     assert n.grad.item() != 0.0
     assert n.grad.item() == pytest.approx(fd.item(), rel=1e-5)
 
@@ -297,3 +308,66 @@ def test_kinematic_routing_refuses_the_dynamic_wave_iteration_controls():
 
     with pytest.raises(ValueError, match="iterate_tol"):
         build_model(tree_steady(), iterate_tol=1e-9)
+
+
+def _passes_and_history(name, steps, solve_kwargs=None, **kwargs):
+    from noodl.apps.sewer.dynwave import build_dynamic_wave_model
+
+    net, _, _ = read_swmm_inp(DATA / name)
+    model, state, drivers = build_dynamic_wave_model(net, **kwargs)
+    diags: list = []
+    _, hist = simulate_dynamic_wave(model, state, drivers, steps=steps, diagnostics=diags,
+                                    **(solve_kwargs or {}))
+    return sum(d["passes"] for d in diags) / steps, hist
+
+
+#: Phase A's iteration: plain relaxation, heads judged alone.
+_PLAIN = {"acceleration": None, "iterate_flow_tol": None}
+
+
+def test_anderson_is_the_default_and_halves_the_passes_on_the_tree():
+    """Design E8: Anderson mixing of the head iteration at least halves the mean passes per
+    step (measured over 60 steps: 34.8 -> 14.1).
+
+    The two runs agree to the head solve's own resolution, not to 1e-10 m: Newton stops
+    once a junction's balance is within `solve_atol` (2.5e-9 m3/s here), so a pass whose
+    fed heads already meet it hands them back unchanged, and EACH iteration lands
+    somewhere within ``atol dt / (2 A_s)`` (~5e-9 m) of the exact pass solution -- the
+    plain one with its flows not yet settled (it judges the heads alone). Measured 2.9e-9 m
+    over 60 steps; `test_anderson_lands_on_the_relaxed_fixed_point_with_a_tight_head_solve`
+    shows the two fixed points agree to 2e-12 m once the head solve is tight."""
+    from noodl.apps.sewer.dynwave import build_dynamic_wave_model
+
+    net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
+    assert build_dynamic_wave_model(net)[0].iterate_acceleration == "anderson"
+    fast, h_fast = _passes_and_history("tree_dynwave.inp", 30)
+    plain, h_plain = _passes_and_history("tree_dynwave.inp", 30, **_PLAIN)
+    assert fast <= plain / 2.0, (fast, plain)
+    torch.testing.assert_close(h_fast["water.phi"], h_plain["water.phi"], rtol=0.0, atol=1e-8)
+    torch.testing.assert_close(h_fast["water.q"], h_plain["water.q"], rtol=0.0, atol=2e-9)
+
+
+def test_anderson_lands_on_the_relaxed_fixed_point_with_a_tight_head_solve():
+    """Design E8: Anderson mixing moves no fixed point. With the head solve tight (atol
+    1e-12 m3/s, so no pass stops on its warm start) and both iterations judging heads to
+    1e-13 m and flows to 1e-12 m3/s, the looped network's two runs agree to 1e-10 m (1.9e-12
+    m measured over 60 steps). The tree cannot be run this way: a junction sitting on its
+    stiff bed has a residual floor above 1e-12 m3/s (`solve_atol`)."""
+    tight = {"iterate_tol": 1e-13, "iterate_flow_tol": 1e-12, "iterate_max": 5000}
+    fast, h_fast = _passes_and_history("loop_dynwave.inp", 20, {"atol": 1e-12}, **tight)
+    plain, h_plain = _passes_and_history("loop_dynwave.inp", 20, {"atol": 1e-12},
+                                         acceleration=None, **tight)
+    assert fast <= plain / 2.0, (fast, plain)
+    torch.testing.assert_close(h_fast["water.phi"], h_plain["water.phi"], rtol=0.0,
+                               atol=1e-10)
+
+
+@pytest.mark.slow
+def test_anderson_halves_the_passes_on_the_loop():
+    """Over the first 120 steps, through the slowly contracting outfall head near t = 500 s
+    (plain relaxation's worst case, 327 passes at 1e-11 m)."""
+    fast, h_fast = _passes_and_history("loop_dynwave.inp", 120)
+    plain, h_plain = _passes_and_history("loop_dynwave.inp", 120, **_PLAIN)
+    assert fast <= plain / 2.0, (fast, plain)
+    # the head solve's resolution, as in the tree test above
+    torch.testing.assert_close(h_fast["water.phi"], h_plain["water.phi"], rtol=0.0, atol=1e-8)

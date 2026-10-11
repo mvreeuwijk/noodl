@@ -1511,3 +1511,147 @@ def test_iterate_on_a_potential_layer_converges_its_boundary_too():
     drivers = {"toy.sources": torch.tensor([1.0, 0.0], dtype=torch.float64)}
     out = model.steady(state, drivers, atol=1e-14, rtol=1e-14)
     assert abs(out["toy.phi"][1].item() - 2.0) < 1e-10
+
+
+# --- Anderson acceleration of the iterated coupling -------------------------------------
+
+
+def _toy_steady(acceleration, sources=(2.0, 0.0, 0.0), **kwargs):
+    model, state, drivers, closure = _toy(
+        coupling="iterate", iterate_tol={"toy": 1e-13}, iterate_max=400,
+        iterate_acceleration=acceleration, iterate_flow_tol={"toy": 1e-12}, **kwargs)
+    drivers["toy.sources"] = torch.tensor(sources, dtype=F64)
+    if drivers["toy.sources"].dim() == 2:
+        batch = drivers["toy.sources"].shape[:1]
+        state = {k: v.expand(batch + v.shape).clone() for k, v in state.items()}
+    diag: dict = {}
+    out = model.steady(state, drivers, diagnostics=diag, atol=1e-14, rtol=1e-14)
+    return out, diag
+
+
+def test_iterate_acceleration_arguments_are_refused_by_name():
+    with pytest.raises(ValueError, match="iterate_acceleration"):
+        _toy(coupling="iterate", iterate_tol={"toy": 1e-12}, iterate_acceleration="broyden")
+    with pytest.raises(ValueError, match="iterate_memory"):
+        _toy(coupling="iterate", iterate_tol={"toy": 1e-12}, iterate_acceleration="anderson",
+             iterate_memory=0)
+    # acceleration belongs to the iterated coupling only
+    with pytest.raises(ValueError, match="coupling='iterate'"):
+        _toy(iterate_acceleration="anderson")
+    # ... and to a potential layer named in iterate_tol
+    with pytest.raises(ValueError, match="potential layer"):
+        _build(coupling="iterate", iterate_tol={"species": 1e-11},
+               iterate_acceleration="anderson")
+    # ... whose flow tolerance it needs
+    with pytest.raises(ValueError, match=r"iterate_flow_tol for the .* \['toy'\]"):
+        _toy(coupling="iterate", iterate_tol={"toy": 1e-12}, iterate_acceleration="anderson")
+    with pytest.raises(KeyError, match="iterate_flow_tol names"):
+        _toy(coupling="iterate", iterate_tol={"toy": 1e-12}, iterate_flow_tol={"nope": 1e-9})
+    with pytest.raises(ValueError, match="iterate_flow_tol must be positive"):
+        _toy(coupling="iterate", iterate_tol={"toy": 1e-12}, iterate_flow_tol={"toy": 0.0})
+
+
+def test_iterate_flow_tol_judges_the_flows_without_acceleration():
+    """A flow tolerance alone (plain relaxation) adds the flows' fixed-point residual to the
+    convergence test and reports it under "<layer>.q"."""
+    model, state, drivers, _ = _toy(coupling="iterate", iterate_tol={"toy": 1e-13},
+                                    iterate_max=400, iterate_flow_tol={"toy": 1e-12})
+    diag: dict = {}
+    model.steady(state, drivers, diagnostics=diag, atol=1e-14, rtol=1e-14)
+    assert set(diag["max_change"]) == {"toy", "toy.q"}
+    assert float(diag["max_change"]["toy.q"]) <= 1e-12
+
+
+def test_anderson_reaches_the_relaxed_fixed_point_in_fewer_passes():
+    """Anderson mixing changes only the sequence of fed states, not the fixed point."""
+    plain, d_plain = _toy_steady(None, sources=(20.0, 0.0, 0.0))
+    fast, d_fast = _toy_steady("anderson", sources=(20.0, 0.0, 0.0))
+    assert bool(d_fast["converged"].all())
+    assert d_fast["passes"] < d_plain["passes"]
+    for key in ("toy.phi", "toy.q"):
+        torch.testing.assert_close(fast[key], plain[key], rtol=0.0, atol=1e-12)
+
+
+def test_anderson_leaves_the_fixed_point_gradient_unchanged():
+    """The adjoint stays on the unrelaxed certified pass: same gradient either way."""
+    grads = []
+    for acceleration in (None, "anderson"):
+        k0 = torch.tensor(1.0, dtype=F64, requires_grad=True)
+        model, state, drivers, _ = _toy(k0=k0, coupling="iterate", iterate_tol={"toy": 1e-13},
+                                        iterate_max=300, iterate_acceleration=acceleration,
+                                        iterate_flow_tol={"toy": 1e-12})
+        drivers["toy.sources"] = torch.tensor([20.0, 0.0, 0.0], dtype=F64)
+        model.steady(state, drivers, atol=1e-14, rtol=1e-14)["toy.phi"][0].backward()
+        grads.append(k0.grad.item())
+    assert grads[1] == pytest.approx(grads[0], rel=1e-9)
+
+
+def test_anderson_is_per_instance_under_batching():
+    """Each instance lands where it lands alone, including one that converges passes before
+    the other (it is held at its certified fed state, not mixed further)."""
+    sources = [[0.5, 0.0, 0.0], [40.0, 0.0, 0.0]]
+    batched, d_b = _toy_steady("anderson", sources=sources)
+    passes = []
+    for i, s in enumerate(sources):
+        single, d_s = _toy_steady("anderson", sources=s)
+        passes.append(d_s["passes"])
+        for key in ("toy.phi", "toy.q"):
+            torch.testing.assert_close(batched[key][i], single[key], rtol=0.0, atol=1e-12)
+    assert passes[0] < passes[1]
+    assert d_b["passes"] == max(passes)
+
+
+def test_anderson_mix_drops_a_collinear_history_and_solves_a_linear_map():
+    """An ill-conditioned least-squares problem (here: identical residual differences)
+    keeps no column and says so, leaving the fallback to the caller; a well-conditioned
+    history of a linear map is solved exactly once it spans the map."""
+    from noodl.model import _anderson_mix
+
+    x = [torch.tensor([0.0, 0.0], dtype=F64), torch.tensor([1.0, 1.0], dtype=F64)]
+    g = [torch.tensor([1.0, 1.0], dtype=F64), torch.tensor([1.0, 1.0], dtype=F64)]
+    r = [torch.tensor([1.0], dtype=F64), torch.tensor([1.0], dtype=F64)]   # dR = 0
+    _, kept = _anderson_mix(x, g, r)
+    assert not bool(kept)
+    # G(x) = A x + b
+    a = torch.tensor([[0.5, 0.2], [0.1, 0.3]], dtype=F64)
+    b = torch.tensor([1.0, -1.0], dtype=F64)
+    xs = [torch.zeros(2, dtype=F64)]
+    gs, rs = [], []
+    for _ in range(3):
+        gs.append(a @ xs[-1] + b)
+        rs.append(gs[-1] - xs[-1])
+        xs.append(_anderson_mix(xs, gs, rs)[0])
+    exact = torch.linalg.solve(torch.eye(2, dtype=F64) - a, b)
+    torch.testing.assert_close(xs[-1], exact, rtol=0.0, atol=1e-12)
+
+
+class _RootPair:
+    """Closure: k = 1 / (0.2 + phi_a^2), so with a unit source at `a` and the boundary at 0
+    the pass maps phi_a -> 0.2 + phi_a^2. Fixed points 0.276 (attracting: slope 0.55) and
+    0.724 (repelling: slope 1.45)."""
+
+    def __call__(self, state, drivers):
+        phi_a = state["toy.phi"][..., :1]
+        return {"toy.k": 1.0 / (0.2 + phi_a * phi_a)}
+
+
+def test_anderson_keeps_the_fixed_point_the_relaxed_iteration_is_attracted_to():
+    """From phi_a = 0.6 the relaxed iteration falls to the attracting root; an unguarded
+    secant step overshoots past the repelling one. The safeguard (no step against an
+    entry's own residual) keeps Anderson on the relaxed iteration's root."""
+    net = Network(dtype=F64)
+    net.add_node("a")
+    net.add_node("c")
+    net.add_edge("a", "c", kind="link")
+    root = (1.0 - 0.2 ** 0.5) / 2.0
+    for acceleration in (None, "anderson"):
+        layer = PotentialFlowLayer(net, "toy", [_DriverConductance("link")], boundary=["c"])
+        model = Model(net, {"toy": layer}, closures=[_RootPair()], coupling="iterate",
+                      iterate_tol={"toy": 1e-13}, iterate_max=400,
+                      iterate_acceleration=acceleration, iterate_flow_tol={"toy": 1e-12})
+        state = {"toy.phi": torch.tensor([0.6, 0.0], dtype=F64),
+                 "toy.q": torch.zeros(1, dtype=F64)}
+        drivers = {"toy.phi_boundary": torch.zeros(1, dtype=F64),
+                   "toy.sources": torch.tensor([1.0, 0.0], dtype=F64)}
+        out = model.steady(state, drivers, atol=1e-14, rtol=1e-14)
+        assert abs(out["toy.phi"][0].item() - root) < 1e-10, acceleration
