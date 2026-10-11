@@ -389,7 +389,9 @@ class JunctionStorage(NodeSource):
     `crown` (SLOT) no junction surcharges, without `top` none floods. `surchargeable`
     (bool per junction, default all) marks the junctions that can surcharge at all: a SWMM
     storage unit only with a SurDepth, and then above its full depth, which is its `crown`
-    here (`dynwave.c:683-687`); elsewhere the band and the flag never act.
+    here (`dynwave.c:683-687`); a plain junction only with a positive crown depth
+    (`dynwave.c:690`, ``yCrown > 0``; `DynamicWaveHydraulics` passes both rules). Where it is
+    False the band and the flag never act.
     """
 
     def __init__(self, nodes: Tensor, bed: Tensor, bed_area: float,

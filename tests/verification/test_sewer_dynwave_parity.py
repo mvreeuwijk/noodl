@@ -1093,13 +1093,26 @@ def test_drop_switch_matches_swmm_wherever_swmm_converges(tmp_path, name):
 #:   extended to its 0.45 m crown and it surcharges above that (to 0.92 m) with its volume
 #:   held at the full volume (link.c:450-458, dynwave.c:683-687, node.c:943-945);
 #: - ``slot``: the same under SURCHARGE_METHOD SLOT (no storage surcharge branch: J4 rises
-#:   on its storage curve's area above its full depth).
+#:   on its storage curve's area above its full depth);
+#: - ``extran_high``: ``extran`` with J4's MaxDepth 0.55 m ABOVE its 0.45 m crown (ruling
+#:   R46): its full depth stays 0.55 m, and J4 surcharges only above that (to 0.84 m), where
+#:   a plain junction would at its crown. SWMM's surcharged branch still uses the crown for
+#:   its blend and its floor (dynwave.c:724-736); noodl holds the band at the full depth.
+#:   J4 never falls back below 0.55 m in this run (it ends at 0.66 m).
 STORAGE_VARIANTS = {
     "free_surface": ("storage_dynwave.inp", []),
     "extran": ("storage_extran_dynwave.inp", []),
     "slot": ("storage_extran_dynwave.inp",
              [("SURCHARGE_METHOD     EXTRAN", "SURCHARGE_METHOD     SLOT")]),
+    "extran_high": ("storage_extran_dynwave.inp",
+                    [("J4               9.0      0.3        0",
+                      "J4               9.0      0.55       0")]),
 }
+#: J4's full depth (m) and full volume (m3, curve Small: area 1 + 2 y up to 0.5 m, then
+#: 2 + 2 (y - 0.5)) per surcharging variant
+STORAGE_J4_FULL = {"extran": (0.45, 0.5 * (1.0 + 1.9) * 0.45),
+                   "slot": (0.45, 0.5 * (1.0 + 1.9) * 0.45),
+                   "extran_high": (0.55, 0.75 + 0.5 * (2.0 + 2.1) * 0.05)}
 #: The fast comparison: the free-surface fixture from its dry start through the filling of
 #: all three units and the first flow out of the outfall conduit.
 STORAGE_FAST_STEPS = 40
@@ -1195,6 +1208,6 @@ def test_storage_units_match_swmm_at_every_step(tmp_path, variant):
     assert set(flooded) == {"J3"}
     assert peak["J3"] == pytest.approx(0.4, abs=1e-12)
     assert peak["J4"] > 0.6
-    full = 0.5 * (1.0 + 1.9) * 0.45                       # Small: area 1 + 2 y up to 0.5 m
-    above = [v["J4"] for r, v in zip(rows, volumes, strict=True) if r[1]["J4"] > 0.45]
+    full_depth, full = STORAGE_J4_FULL[variant]
+    above = [v["J4"] for r, v in zip(rows, volumes, strict=True) if r[1]["J4"] > full_depth]
     assert above and max(abs(v - full) for v in above) < 1e-12

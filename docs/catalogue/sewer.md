@@ -115,7 +115,7 @@ Named values and option tables.
 | Name | Value |
 |---|---|
 | `ROUTING_ALIASES` | table of 3 entries: `STEADY`, `KINWAVE`, `DYNWAVE` |
-| `STORAGE_SHAPES` | `tuple` |
+| `STORAGE_SHAPES` | 6 names: `functional`, `tabular`, `cylindrical`, `conical`, `paraboloid`, `pyramidal` |
 | `F_AIR_DEFAULT` | `0.02` |
 | `F_I_DEFAULT` | `0.000749` |
 | `H_MAX_RATIO` | `0.938` |

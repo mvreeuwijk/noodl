@@ -142,6 +142,11 @@ class StorageCurves:
                 kind[i], a0[i], a1[i], a2[i] = _coefficients(curve)
         self.kind = torch.tensor(kind, dtype=torch.long)
         self.a0, self.a1, self.a2 = (torch.tensor(c, dtype=F64) for c in (a0, a1, a2))
+        #: the FUNCTIONAL exponent, 0 on every other row: `area` and `_raw_volume` evaluate
+        #: the power law on all rows, and a closed shape's a2 (a quadratic coefficient, e.g.
+        #: 4 Z^2) as an exponent would overflow d^a2 there, whose discarded branch still
+        #: gives 0 * inf = NaN in the backward pass
+        self.exponent = torch.where(self.kind == _FUNCTIONAL, self.a2, torch.zeros_like(self.a2))
         self._tables(n, tables)
         self.full_depth = torch.as_tensor(full_depth, dtype=F64).detach()
         #: per-junction full volume (m3): the uncapped volume at the full depth (node.c:251)
@@ -247,7 +252,8 @@ class StorageCurves:
         d = depth
         pos = d > 0.0
         d_safe = torch.where(pos, d, torch.ones_like(d))
-        power = torch.where(pos, d_safe ** self.a2, (self.a2 == 0.0).to(F64))   # C pow(0, b)
+        b = self.exponent
+        power = torch.where(pos, d_safe ** b, (b == 0.0).to(F64))            # C pow(0, b)
         functional = self.a0 + self.a1 * power                               # node.c:1001-1003
         quadratic = self.a0 + d * (self.a1 + d * self.a2)                    # node.c:1012
         tabular = self._table_area(d)                                        # node.c:997
@@ -260,7 +266,7 @@ class StorageCurves:
         """The curve's volume (m3) at `d` (m) without the full-volume cap."""
         pos = d > 0.0
         d_safe = torch.where(pos, d, torch.ones_like(d))
-        n = self.a2 + 1.0
+        n = self.exponent + 1.0
         functional = torch.where(pos, self.a0 * d_safe + self.a1 / n * d_safe ** n,
                                  torch.zeros_like(d))                         # node.c:959-962
         quadratic = d * (self.a0 + d * (self.a1 / 2.0 + d * self.a2 / 3.0))  # node.c:970

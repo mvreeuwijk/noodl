@@ -164,3 +164,26 @@ def test_a_negative_full_volume_is_refused_by_name():
     with pytest.raises(ValueError, match="SU1.*negative volume"):
         StorageCurves([("functional", -5.0, 1.0, 1.0)], torch.tensor([2.0], dtype=F64),
                       names=["SU1"])
+
+
+@pytest.mark.parametrize("curve", [("pyramidal", 20.0, 10.0, 10.0), ("conical", 20.0, 10.0, 8.0),
+                                   ("functional", 3.0, 2.5, 1.0), ("tabular", (0.0, 2.0),
+                                                                   (5.0, 9.0))])
+def test_the_depth_gradient_is_the_curves_own_at_any_depth(curve):
+    """Every branch is both-branches safe: a closed shape's quadratic coefficient (4 Z^2 =
+    400 for a pyramid of side slope 10) is never used as an exponent, so at 7 m (area
+    24000 m2) and at 0 m the gradients are finite: dV/dy = A(y) (above 0), and dA/dy the
+    curve's slope."""
+    sc = _curves(curve, full=(100.0,))
+    for d in (0.0, 0.3, 7.0):
+        depth = torch.tensor([d], dtype=F64, requires_grad=True)
+        area = sc.area(depth)
+        (g_area,) = torch.autograd.grad(area.sum(), depth)
+        depth = torch.tensor([d], dtype=F64, requires_grad=True)
+        (g_vol,) = torch.autograd.grad(sc.volume(depth).sum(), depth)
+        assert torch.isfinite(g_area).all() and torch.isfinite(g_vol).all(), (curve, d)
+        if d > 0.0:
+            assert g_vol.item() == pytest.approx(area.item(), rel=1e-12)
+    pyramid = _curves(("pyramidal", 20.0, 10.0, 10.0), full=(100.0,))
+    seven = torch.tensor([7.0], dtype=F64)
+    assert pyramid.area(seven).item() == pytest.approx(24000.0, rel=1e-14)

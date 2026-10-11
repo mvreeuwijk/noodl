@@ -482,9 +482,17 @@ def _storage_unit(line, curves: dict, path) -> Manhole:
                                              path) != 0.0:
         raise ValueError(f"{where} has evaporation factor {line.fields[n + 1]}; storage "
                          f"evaporation is not modelled (set Fevap to 0)")
-    if len(line.fields) > n + 2:
-        raise ValueError(f"{where} has exfiltration parameters {list(line.fields[n + 2:])}; "
-                         f"storage seepage (exfiltration) is not modelled")
+    extra = len(line.fields) - (n + 2)
+    if extra > 0:
+        # exfil.c:48-66: one value is Ksat, else suction head, Ksat, IMDmax; Ksat 0 means
+        # no exfiltration object at all
+        if extra == 2 or extra > 3:
+            raise ValueError(f"{where} has {extra} exfiltration values; SWMM takes Ksat "
+                             f"alone or suction head, Ksat and IMDmax")
+        at = n + 2 if extra == 1 else n + 3
+        if as_float(line, at, "the exfiltration Ksat", path) != 0.0:
+            raise ValueError(f"{where} has exfiltration Ksat {line.fields[at]}; storage "
+                             f"seepage (exfiltration) is not modelled")
     try:
         validate_storage_curve(name, curve)
     except ValueError as err:

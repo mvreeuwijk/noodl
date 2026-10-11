@@ -542,3 +542,17 @@ def test_a_curve_section_without_storage_units_is_refused_unless_storage(tmp_pat
     path = _dyn(tmp_path, [("[OUTFALLS]\n", "[CURVES]\nP1 PUMP1 0 0 1 1\n\n[OUTFALLS]\n")])
     with pytest.raises(ValueError, match="P1.*type PUMP1"):
         read_swmm_inp(path)
+
+
+def test_storage_exfiltration_with_zero_ksat_is_no_exfiltration(tmp_path):
+    """exfil.c:48-66: after Fevap come Ksat alone, or suction head, Ksat and IMDmax; a Ksat
+    of 0 creates no exfiltration, so it is read; a non-zero Ksat in either form is refused,
+    and two values are SWMM's own input error."""
+    for params in ("0 0 0", "0", "1.5 0 0.3"):
+        path = _storage(tmp_path, [("FUNCTIONAL 20 1.5 5", f"FUNCTIONAL 20 1.5 5 0 0 {params}")])
+        read_swmm_inp(path)
+    for params, match in (("0.2", "Ksat 0.2"), ("1.5 0.2 0.3", "Ksat 0.2"),
+                          ("1.5 0.2", "2 exfiltration values")):
+        path = _storage(tmp_path, [("FUNCTIONAL 20 1.5 5", f"FUNCTIONAL 20 1.5 5 0 0 {params}")])
+        with pytest.raises(ValueError, match=rf"line \d+: storage unit 'J3'.*{match}"):
+            read_swmm_inp(path)

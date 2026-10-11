@@ -804,9 +804,12 @@ pyswmm's `Node.volume`, at the depth target times the unit's area):
   `SurDepth`) floods at 0.4 m, its full depth not extended; J4 (`MaxDepth` 0.3 m, `SurDepth`
   1.0 m) has its full depth extended to its 0.45 m crown and surcharges above it, its volume
   held at the full volume;
-- the same under SLOT.
+- the same under SLOT;
+- the same under EXTRAN with J4's `MaxDepth` 0.55 m, above its crown: its full depth stays
+  0.55 m and it surcharges only above that (to 0.84 m), where SWMM's surcharged update still
+  uses the crown for its blend and its floor.
 
-SWMM converges on every step of all three, and every step meets the targets (worst depth
+SWMM converges on every step of all four, and every step meets the targets (worst depth
 7.6e-10 m). Without the storage area the first fixture misses by 1.2e-2 m within 40 steps,
 and with the conduit end areas zeroed at the storage units by 0.17 m.
 

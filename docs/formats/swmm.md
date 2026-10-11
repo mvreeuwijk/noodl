@@ -46,9 +46,12 @@ SWMM 5.2.4's: `FUNCTIONAL a1 a2 a0` (area `a1 y^a2 + a0`, m², read as `("functi
 a0)`; `a0 >= 0` and `a2 >= 0`), `TABULAR Curve` (a `[CURVES]` curve of type `STORAGE`, depth in
 m against area in m², its points over any number of lines, depths strictly increasing) and the
 closed shapes `CYLINDRICAL L W -`, `CONICAL L W Z`, `PARABOLOID L W H` and `PYRAMIDAL L W Z`
-(m; `Z` a side slope, run over rise). A non-zero evaporation factor `Fevap` and the
-exfiltration parameters after it are refused with the line number, as are a `[CURVES]` curve
-of any other type, a curve name that is not in `[CURVES]` and negative depths. `[STORAGE]` under
+(m; `Z` a side slope, run over rise). A non-zero evaporation factor `Fevap` and a non-zero
+exfiltration `Ksat` (the value after `Fevap`, or the second of suction head, `Ksat`,
+`IMDmax`; a `Ksat` of 0 is no exfiltration, as in SWMM) are refused with the line number, as
+are a `[CURVES]` curve of any other type and a curve name that is not in `[CURVES]`. A
+negative `MaxDepth`, `InitDepth` or `SurDepth` on a storage line is refused too, which goes
+beyond SWMM's own input checks for storage units. `[STORAGE]` under
 `STEADY` or `KINWAVE` is refused by name: SWMM routes a storage unit by its volume there,
 which is not modelled.
 
