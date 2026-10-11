@@ -391,3 +391,50 @@ def test_conduit_terms_refuses_an_unknown_surcharge_method():
     with pytest.raises(ValueError, match="surcharge_method"):
         dt_.conduit_terms(g, t([0.1]), t([0.1]), t([0.0]), t([0.0]), t([0.01]), 5.0,
                           surcharge_method="preissmann")
+
+
+def test_slope_test_in_range_becomes_a_switch_on_the_head_difference():
+    """The slope test ``y1 < y2`` (dwflow.c:659-662) with both end depths strictly inside
+    (FUDGE, yFull) is ``h1 - h2 < z1 - z2``: a switch on the conduit's own head difference,
+    so `slope_switch` is set and `switch_drop` is ``z1 - z2`` (ft), whichever side of it the
+    fed heads are on; ``limited`` stays SWMM's verdict on the fed heads."""
+    g = geo()
+    a_old = xt.area_of_depth(t([0.5]), g.y_full, g.a_full)
+    for y2, verdict in ((0.6, True), (0.3, False)):
+        r = dt_.conduit_terms(g, t([0.4]), t([y2]), t([3.0]), t([3.0]), a_old, 5.0,
+                              normal_flow_limited="slope")
+        assert r.limited.item() is verdict
+        assert r.slope_switch.item()
+        torch.testing.assert_close(r.switch_drop, g.invert1 - g.invert2)
+        a1 = xt.area_of_depth(t([0.4]), g.y_full, g.a_full)
+        r1 = xt.radius_of_depth(t([0.4]), g.y_full)
+        assert r.switch_normal_flow.item() == pytest.approx(
+            (g.beta * a1 * r1 ** (2 / 3)).item())
+
+
+def test_slope_switch_is_off_where_the_test_is_not_a_head_switch():
+    """No switch: NORMAL_FLOW_LIMITED NONE or FROUDE without an outfall (no slope test); a
+    downstream end at the crown under EXTRAN (y2 clamped to yFull, so ``y1 < y2`` is
+    ``y1 < yFull``, already a condition of the check); a dry downstream end (y2 clamped to
+    FUDGE); and where the Froude test fires, which limits whatever the slope test says."""
+    g = geo()
+    a_old = xt.area_of_depth(t([0.5]), g.y_full, g.a_full)
+    yf = g.y_full.item()
+    for mode in ("none", "froude"):
+        r = dt_.conduit_terms(g, t([0.4]), t([0.6]), t([3.0]), t([3.0]), a_old, 5.0,
+                              normal_flow_limited=mode)
+        assert not r.slope_switch.item()
+        assert math.isinf(r.switch_normal_flow.item())
+    full = dt_.conduit_terms(g, t([0.4]), t([yf + 0.1]), t([3.0]), t([3.0]), a_old, 5.0)
+    assert full.limited.item() and not full.slope_switch.item()
+    dry = dt_.conduit_terms(g, t([0.4]), t([0.0]), t([3.0]), t([3.0]), a_old, 5.0,
+                            normal_flow_limited="slope")
+    assert not dry.limited.item() and not dry.slope_switch.item()
+    # FROUDE fires (steep, shallow, y1 > y2): limited outright, no switch
+    a_s = xt.area_of_depth(t([0.3]), g.y_full, g.a_full)
+    fr = dt_.conduit_terms(g, t([0.3]), t([0.2]), t([2.0]), t([2.0]), a_s, 5.0)
+    assert fr.limited.item() and not fr.slope_switch.item()
+    # outfall end, y2 still in range: the slope test is a switch even in FROUDE mode
+    out = dt_.conduit_terms(geo(outfall2=True), t([0.4]), t([0.6]), t([3.0]), t([3.0]),
+                            a_old, 5.0, normal_flow_limited="froude")
+    assert out.limited.item() and out.slope_switch.item()

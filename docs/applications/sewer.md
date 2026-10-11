@@ -321,10 +321,56 @@ elevation).
 Some quantities are taken from the previous pass, as SWMM takes them from the previous trial,
 and are consistent at the fixed point: the flow class and the weighting $f_{\text{asnh}}$, the
 surface areas $A_s$, the normal-flow-limit flag (its Froude test uses the momentum flow at the
-fed heads), the normal flow, the dry-node flags, the outfall heads, and the head at any
+fed heads; its slope test is applied within the pass where it can be, see the next section),
+the normal flow, the dry-node flags, the outfall heads, and the head at any
 conduit end SWMM pins (the head is raised to the invert plus offset when it lies below it, and
 set to critical depth in `UP_CRITICAL`/`DN_CRITICAL`). A conduit with a pinned end has no head
 dependence there: its conveyance is zero and the pinned head enters the constant term.
+
+#### Normal-flow slope switch
+
+SWMM limits a conduit's flow to the normal flow $q_{\text{norm}}$ at its upstream depth when its
+slope test $y_1 < y_2$ passes (`dwflow.c:637-686`; always on for a conduit at an outfall, and
+under `NORMAL_FLOW_LIMITED SLOPE` or `BOTH`). With both end depths inside their clamps that
+test is $h_1 - h_2 < z_1 - z_2$ (the conduit-end inverts), a switch on the conduit's own head
+difference, so `DynamicWaveConduit` applies it within the head solve instead of from the
+previous pass:
+
+$$
+q = \min\!\big(q_{\text{lin}},\ \max(q_{\text{norm}},\ q_{\text{last}} + S\,(h_1 - h_2 - z_1 + z_2))\big)
+$$
+
+with $q_{\text{lin}}$ the momentum flow above, $q_{\text{last}}$ the previous pass's flow and
+$S$ (m²/s) a wall slope. At a fixed point ($q = q_{\text{last}}$) this is SWMM's unlimited flow
+above the switch and its limited flow below it, so every SWMM fixed point is unchanged. It has
+one more kind of fixed point: on the switching surface $y_1 = y_2$, with the flow between
+$q_{\text{norm}}$ and $q_{\text{lin}}$. That is the tie rule for the case where SWMM has no
+fixed point, which a draining network reaches at its outfall conduit. A `FREE` or `NORMAL`
+outfall's depth is set from its conduit's flow, and the limited flow is Manning's normal flow
+at the upstream depth $y_1$, at which the outfall's normal depth is $y_1$ again, up to the
+interpolation mismatch of SWMM's tables (about 1e-5 m). Once the junction upstream has fallen
+to the outfall's depth, the limited side is consistent only where that mismatch happens to
+put the outfall above the junction, and the unlimited side's larger flow raises the outfall
+above it. SWMM's trials then alternate around the surface: on the tree fixture with every
+inflow ramped down, SWMM 5.2.4 at `HEAD_TOLERANCE 1e-12` m and 500 trials fails to converge on
+82 of the 108 steps after the junction meets the outfall depth, its last trial within about
+6e-4 m of the surface on either side. A flag lagged by one pass chattered there until the pass
+budget ran out. noodl converges on every step: on SWMM's fixed point where one exists (it
+found the limited ones the lagged flag missed), and exactly on the surface where none does.
+The cost against SWMM is confined to those steps, and it is bounded by SWMM's own oscillation,
+since SWMM has no converged answer there; from SWMM's first such step on its history is that
+of an unconverged trial, so later steps differ by that much too (asserted to 1e-3 m and
+5e-4 m³/s in `test_ramp_down_matches_swmm_until_swmm_stops_converging`; before that step the
+targets hold, 7e-10 m).
+
+The wall slope does not move a fixed point; it shapes the passes. Where the outfall depth
+follows the conduit's flow, $S = 1/(c + 1/S_{\max})$ with $c$ the outfall depth's rise per
+unit flow, so the head solve sees the switching surface move with the flow as it does at the
+fixed point. $S_{\max}$ is the smaller end junction's grounding (storage slope $2A_s/\Delta t$
+plus its conduits' conveyance; `K_SWITCH` = 1). A steeper wall would turn the flow into an
+S-curve in the head that the damped Newton head solve cycles on. The Froude test
+($\mathrm{Fr} \ge 1$ on the momentum flow) and a slope test at a clamped end depth stay
+lagged flags.
 
 #### Starting state and zero fall
 
@@ -582,7 +628,11 @@ publish numbers from this application.
   `SurDepth` a junction floods as soon as it fills to its crown. `build_model(...,
   air=True)` or `quality=True` is refused. Circular conduits only, one barrel, cold dry start. Under EXTRAN, where SWMM's own
   surcharge iteration has no fixed point, noodl holds the junction at its crown (see
-  "Dynamic wave"), so such steps have no SWMM reference.
+  "Dynamic wave"), so such steps have no SWMM reference. Likewise where SWMM's normal-flow
+  slope test has no consistent side (a draining outfall conduit), noodl puts the solution
+  on its switch, y1 = y2 (see "Normal-flow slope switch"); SWMM does not converge on such
+  steps, and its unconverged trials differ by up to its own oscillation (~6e-4 m on the
+  tree). The Froude test of the normal-flow limit stays a lagged flag.
 - **No gas-phase sulfide sink.** H₂S leaves the headspace by ventilation, at the outfall, and
   by re-absorption into the water (the two-film flux is signed); no wall uptake or gas-phase
   oxidation is modelled.

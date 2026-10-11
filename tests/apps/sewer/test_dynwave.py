@@ -40,11 +40,55 @@ def test_conduit_element_is_linear_then_limited_then_capped():
            "water.normal_flow": torch.tensor([float("inf"), 0.15, float("inf")], dtype=F64),
            "water.limited": torch.tensor([0.0, 1.0, 0.0], dtype=F64),
            "water.dry_upstream": torch.tensor([0.0, 0.0, 1.0], dtype=F64),
-           "water.dry_downstream": torch.zeros(3, dtype=F64)}
+           "water.dry_downstream": torch.zeros(3, dtype=F64),
+           "water.slope_switch": torch.zeros(3, dtype=F64),
+           "water.switch_drop": torch.zeros(3, dtype=F64),
+           "water.switch_slope": torch.zeros(3, dtype=F64),
+           "water.flow_last": torch.zeros(3, dtype=F64)}
     dp = torch.tensor([0.05, 0.05, 0.05], dtype=F64)
     q = el.flow(dp, drv)
     torch.testing.assert_close(q, torch.tensor([0.2, 0.15, FUDGE_FLOW], dtype=F64))
     torch.testing.assert_close(el.dflow(dp, drv), torch.tensor([2.0, 0.0, 0.0], dtype=F64))
+
+
+def _switch_drivers(q_last):
+    """One conduit on the in-pass slope switch: lin = 0.1 + 2 dp, q_norm = 0.15, switch at
+    dp = 0.05 (lin there 0.2), wall slope 100, fed flow `q_last` (m3/s)."""
+    one = torch.ones(1, dtype=F64)
+    return {"water.flow_offset": 0.1 * one, "water.conveyance": 2.0 * one,
+            "water.normal_flow": 0.15 * one, "water.limited": 0.0 * one,
+            "water.slope_switch": one, "water.switch_drop": 0.05 * one,
+            "water.switch_slope": 100.0 * one, "water.flow_last": q_last * one,
+            "water.dry_upstream": 0.0 * one, "water.dry_downstream": 0.0 * one}
+
+
+def test_conduit_element_slides_on_the_slope_switch():
+    """The in-pass slope switch ``min(lin, max(q_norm, q_last + S (dp - dz)))``: SWMM's
+    unlimited flow above the switch and its normal-flow limit well below it, a steep wall
+    between; continuous and non-decreasing in dp. Its fixed points (q = q_last) are SWMM's
+    own on either side, plus the switching surface dp = dz with q between q_norm and lin."""
+    el = DynamicWaveConduit()
+    drv = _switch_drivers(0.17)
+    dp = torch.tensor([0.06, 0.05, 0.0499, 0.04], dtype=F64)
+    drv4 = {k: v.expand(4) for k, v in drv.items()}
+    q = el.flow(dp, drv4)
+    torch.testing.assert_close(q, torch.tensor([0.22, 0.17, 0.16, 0.15], dtype=F64))
+    torch.testing.assert_close(el.dflow(dp, drv4),
+                               torch.tensor([2.0, 100.0, 100.0, 0.0], dtype=F64))
+    grid = torch.linspace(0.0, 0.1, 2001, dtype=F64)
+    qs = el.flow(grid, {k: v.expand(2001) for k, v in drv.items()})
+    assert bool((qs[1:] - qs[:-1] >= 0.0).all())
+    # fixed points: on the surface for any q_last in [q_norm, lin(dz)] ...
+    for q_last in (0.15, 0.17, 0.2):
+        assert el.flow(torch.tensor([0.05], dtype=F64), _switch_drivers(q_last)).item() == \
+            pytest.approx(q_last, abs=1e-15)
+    # ... SWMM's unlimited one above it, and its limited one below it, unchanged
+    assert el.flow(torch.tensor([0.07], dtype=F64), _switch_drivers(0.24)).item() == \
+        pytest.approx(0.24)
+    assert el.flow(torch.tensor([0.02], dtype=F64), _switch_drivers(0.14)).item() == \
+        pytest.approx(0.14)                     # lin below q_norm: lin
+    assert el.flow(torch.tensor([0.04], dtype=F64), _switch_drivers(0.15)).item() == \
+        pytest.approx(0.15)                     # the limit
 
 
 def test_junction_storage_is_trapezoidal_continuity_with_a_stiff_bed():
@@ -573,16 +617,22 @@ def test_crown_crossing_converges_or_is_named():
 @pytest.mark.slow
 def test_extran_batched_equals_single():
     """A batch of the surcharging tree (J2 and J4 surcharge) and half its inflow (free
-    surface throughout): each instance carries its own surcharge flags."""
+    surface throughout): each instance carries its own surcharge flags. The head solve runs
+    at atol 1e-12 m3/s: at the default `solve_atol` a surcharged junction's head is resolved
+    only to atol / sum(k) (up to ~2.5e-7 m, ruling R28), and the batch and the single run
+    took different, equally valid landings within that (2.7e-8 m at J4's crossing, step
+    139, once the normal-flow slope switch changed the passes); at 1e-12 they agree to
+    1e-12 m."""
     model, state, drivers = build_model(_extran_tree())
     base = drivers["inflow"]
     _, hb = simulate_dynamic_wave(model, state, drivers, steps=150,
-                                  inflow=torch.stack([base, 0.5 * base]))
+                                  inflow=torch.stack([base, 0.5 * base]), atol=1e-12)
     crown = model.dynamic_wave.crown_depth
     assert bool((_depths(model, hb)[:, 0] > crown).any())
     assert not bool((_depths(model, hb)[:, 1] > crown).any())
     for i, scale in enumerate((1.0, 0.5)):
-        _, hs = simulate_dynamic_wave(model, state, drivers, steps=150, inflow=scale * base)
+        _, hs = simulate_dynamic_wave(model, state, drivers, steps=150, inflow=scale * base,
+                                      atol=1e-12)
         torch.testing.assert_close(hb["water.phi"][:, i], hs["water.phi"],
                                    rtol=1e-9, atol=1e-10)
 
@@ -752,9 +802,8 @@ def test_flood_releases_when_inflow_stops():
     nothing over steps 31-50 (the others stay). The lagged flood excess falls with J2's net
     inflow; once it would be negative J2 leaves y_max (step 34), its overflow is 0
     thereafter, it passes back down through its crown and drains, and no step chatters
-    (at most 30 passes). (Stopping EVERY inflow instead runs into a phase-A limit: C5's
-    lagged normal-flow-limit flag alternates on the drain-down near step 109 and that step
-    does not converge; it involves no flooded junction.)"""
+    (at most 30 passes). (Stopping EVERY inflow drains the tree onto C5's normal-flow
+    slope switch: `test_inflow_stop_converges`.)"""
     model, state, drivers = build_model(_flooding_tree())
     hyd = model.dynamic_wave
     j2 = hyd.junction_names.index("J2")
@@ -812,3 +861,82 @@ def test_gradient_through_a_flooded_junction():
         fd = (loss(plain, n.detach() + h) - loss(plain, n.detach() - h)) / (2 * h)
     assert abs(n.grad.item()) > 0.0
     assert n.grad.item() == pytest.approx(fd.item(), rel=1e-6)
+
+
+def _drain(factors):
+    """tree_dynwave.inp under every lateral inflow times `factors` (one per step, the
+    inflow at the END of the step). Returns the diagnostics and, per step, C5's side of its
+    slope test (None before it applies, while the tree fills): -1 limited (J4 below the
+    outfall depth, q = min(lin, q_norm)), +1 unlimited (above it, q = lin), 0 on the
+    switching surface (J4 AT the outfall depth, q between q_norm and lin), each checked
+    against the drivers of a pass fed the step's result: every step is SWMM's own fixed
+    point on one side of the test, or sits on the switch."""
+    from noodl.model import StepContext
+
+    net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
+    model, state, drivers = build_model(net)
+    hyd = model.dynamic_wave
+    inflow = torch.stack([f * drivers["inflow"] for f in factors]).unsqueeze(1)
+    diags: list = []
+    _, hist = simulate_dynamic_wave(model, state, drivers, steps=len(factors), inflow=inflow,
+                                    diagnostics=diags, record=("water.phi", "water.q")
+                                    + hyd.state_keys)
+    c5 = hyd.pipe_names.index("C5")
+    u, v = int(hyd.u[c5]), int(hyd.v[c5])
+    sides = []
+    for k in range(len(factors)):
+        before = {key: (hist[key][k - 1] if k else state[key]) for key in hyd.state_keys}
+        after = {key: hist[key][k] for key in ("water.phi", "water.q")}
+        drv = hyd(after | before, {"inflow": inflow[k]}, StepContext(dt=hyd.options.routing_step))
+        phi, q = after["water.phi"][0], after["water.q"][0, c5].item()
+        # C5 (J4 -> Outfall, no offsets): its slope test y1 < y2 compares the node depths
+        gap = ((phi[u] - hyd.node_invert[u]) - (phi[v] - hyd.node_invert[v])).item()
+        lin = (drv["water.flow_offset"][0, c5]
+               + drv["water.conveyance"][0, c5] * (phi[u] - phi[v])).item()
+        q_norm = drv["water.normal_flow"][0, c5].item()
+        if drv["water.slope_switch"][0, c5].item() != 1.0:
+            side = None                         # filling: no normal-flow check yet
+        elif abs(gap) <= 1e-9:
+            side = 0
+            assert min(q_norm, lin) - 1e-9 <= q <= lin + 1e-9, (k, q, q_norm, lin)
+        else:
+            side = -1 if gap < 0.0 else 1
+            expected = min(lin, q_norm) if side < 0 else lin
+            assert abs(q - expected) <= 1e-9, (k, side, q, q_norm, lin)
+        sides.append(side)
+    return diags, sides
+
+
+def test_ramp_down_converges():
+    """Every inflow of the tree ramps from its full value to nothing over steps 61-72 and
+    stays off. As the network drains, J4 falls to the depth of the free outfall, which C5
+    (J4 -> outfall) sets from its own flow, and C5's slope test y1 < y2 (always on for an
+    outfall conduit) becomes degenerate: its limited flow q_norm(y1) is Manning's normal
+    flow at J4's depth, at which the outfall's normal depth IS J4's depth, up to the
+    interpolation mismatch of SWMM's tables (~1e-5 m). The limited side is consistent
+    only where that mismatch puts the outfall above J4; elsewhere neither side is (SWMM
+    5.2.4 itself then stops converging, on about half of such steps at HEAD_TOLERANCE 1e-12
+    m and 500 trials). The lagged flag chattered until the pass budget ran out (step 120, t
+    = 595 s). With the in-pass slope switch (`DynamicWaveConduit`) every step converges --
+    a failure would name its time -- each on SWMM's own fixed point where there is one
+    (steps 106-119 limited), and on the switching surface where there is none (step
+    120)."""
+    factors = [1.0] * 60 + [1.0 - (k + 1) / 12 for k in range(12)] + [0.0] * 48
+    diags, sides = _drain(factors)
+    assert all(bool(d["converged"]) for d in diags)
+    assert max(d["passes"] for d in diags) <= 30, max(d["passes"] for d in diags)
+    assert set(sides[60:105]) == {1} and set(sides[105:119]) == {-1}, sides
+    assert sides[119] == 0, sides
+
+
+def test_inflow_stop_converges():
+    """Every inflow of the tree stops at step 61 (all zero from its end on). The same
+    degenerate slope test as `test_ramp_down_converges`, reached sooner (the lagged flag
+    chattered from step 105, t = 520 s): every step converges, from there on on the
+    switching surface (steps 105-120)."""
+    factors = [1.0] * 60 + [0.0] * 60
+    diags, sides = _drain(factors)
+    assert all(bool(d["converged"]) for d in diags)
+    assert max(d["passes"] for d in diags) <= 30, max(d["passes"] for d in diags)
+    assert set(sides[60:104]) == {1}, sides
+    assert set(sides[104:]) == {0}, sides

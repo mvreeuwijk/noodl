@@ -83,6 +83,17 @@ K_HOLD_STORAGE = 10.0
 #: common pinned case (an outflow conduit dropping to a DN_CRITICAL end) keeps its lagged k
 #: in the anchor, so the step is a Newton step, not the floor's.
 K_ANCHOR = 1.0e-6
+#: Cap on the slope of the normal-flow slope switch's wall (`DynamicWaveConduit`), as a
+#: multiple of the smaller end junction's grounding (its storage slope ``2 A_s/dt`` plus its
+#: conduits' conveyance, m2/s). The wall's fixed points do not depend on its slope. A wall
+#: steeper than the junction it acts on makes the conduit's flow an S-curve in the head
+#: (flat at q_norm, the wall, the momentum line) that the damped Newton head solve cycles
+#: on: at 10 x the grounding the tree's drain-down failed the head solve (50 iterations at t
+#: = 520 s); at 1 x the slopes a Newton step sees differ by at most 2, which its 0.75
+#: damping contracts, and a conduit between two junctions settles on its switch by about
+#: half per pass. Its round-off floor, ``S eps |H| / 2``, is then that of the junction's own
+#: storage slope.
+K_SWITCH = 1.0
 #: Newton's absolute residual tolerance for the head solve (m3/s): a junction balance error
 #: of `SOLVE_ATOL` dt m3 at most, far below the head tolerance times any surface area. It is
 #: raised to the bed's round-off floor where that is larger (`solve_atol`).
@@ -149,36 +160,73 @@ class DynamicWaveConduit(Element):
     ``q = c0 + k dp`` (m3/s, dp = H1 - H2 in m), then ``min(q, q_norm)`` where SWMM's
     normal-flow check passed (`dwflow.c:255-258`), then the dry-node caps in SWMM's order
     (`dwflow.c:273-276`): at most +`FUDGE_FLOW` out of a dry upstream node, at least
-    -`FUDGE_FLOW` out of a dry downstream node. Reads the per-pipe drivers
-    ``"water.flow_offset"`` c0 (m3/s), ``"water.conveyance"`` k (m2/s),
-    ``"water.normal_flow"`` q_norm (m3/s, +inf where not limited), and the 0/1 flags
-    ``"water.limited"``, ``"water.dry_upstream"``, ``"water.dry_downstream"``, all written by
-    `DynamicWaveHydraulics`.
+    -`FUDGE_FLOW` out of a dry downstream node.
+
+    The normal-flow slope switch (the tie rule). The check's flag is lagged (design D4):
+    evaluated by the closure on the fed heads and flow. Where it is SWMM's slope test ``y1 <
+    y2`` alone, with both end depths inside their clamps, the test is ``dp < dz`` (dz = z1 -
+    z2, the conduit-end inverts), a switch on this element's own argument, and it is applied
+    within the pass instead, as a continuous, non-decreasing curve::
+
+        q = min(lin, max(q_norm, q_last + S (dp - dz)))
+
+    with ``lin = c0 + k dp``, ``q_last`` the fed flow and ``S > 0`` a wall slope. At a
+    fixed point (``q = q_last``) this is SWMM's unlimited flow ``lin`` where ``dp > dz``,
+    its limited ``min(lin, q_norm)`` where ``dp < dz`` -- every SWMM fixed point is one of
+    this curve, unchanged, whatever S -- or a point ON the switching surface ``dp = dz``
+    (y1 = y2) with q between q_norm and lin, which is a fixed point here only. That last
+    case is where SWMM has none: limited, the solution lies above the switch; unlimited,
+    below it. A lagged flag then chatters forever, and SWMM's own trials alternate around
+    the surface without converging (`tests/apps/sewer/test_dynwave.py::
+    test_ramp_down_converges`). The surface is where SWMM's relaxed trials straddle; noodl
+    puts the solution exactly on it, deterministically. The cost against SWMM is confined
+    to those steps, where SWMM has no converged answer to compare with: its last trial
+    lies within its own oscillation of the surface (~6e-4 m of J4's depth on the tree's
+    drain-down). S only shapes the passes (`DynamicWaveHydraulics._switch_slope`).
+
+    Reads the per-pipe drivers ``"water.flow_offset"`` c0 (m3/s), ``"water.conveyance"`` k
+    (m2/s), ``"water.normal_flow"`` q_norm (m3/s, +inf where neither the limit nor the
+    switch applies), the 0/1 flags ``"water.limited"`` (the lagged limit, where no switch
+    applies), ``"water.slope_switch"``, ``"water.dry_upstream"``,
+    ``"water.dry_downstream"``, and the switch's ``"water.switch_drop"`` dz (m),
+    ``"water.switch_slope"`` S (m2/s) and ``"water.flow_last"`` q_last (m3/s), all written
+    by `DynamicWaveHydraulics`.
     """
 
     def __init__(self, kind: str = "pipe") -> None:
         super().__init__(kind)
 
-    def _parts(self, dp: Tensor, drivers: Mapping) -> tuple[Tensor, Tensor]:
+    def _parts(self, dp: Tensor, drivers: Mapping) -> tuple[Tensor, Tensor, Tensor]:
+        """The momentum line, the flow and the switch's wall (NaN where no wall acts)."""
         lin = drivers["water.flow_offset"] + drivers["water.conveyance"] * dp
+        q_norm = drivers["water.normal_flow"]
         limited = drivers["water.limited"] > 0.5
-        q = torch.where(limited, torch.minimum(lin, drivers["water.normal_flow"]), lin)
+        switch = drivers["water.slope_switch"] > 0.5
+        wall = (drivers["water.flow_last"]
+                + drivers["water.switch_slope"] * (dp - drivers["water.switch_drop"]))
+        slid = torch.minimum(lin, torch.maximum(q_norm, wall))
+        q = torch.where(limited, torch.minimum(lin, q_norm),
+                        torch.where(switch, slid, lin))                    # dwflow.c:255-258
         up = drivers["water.dry_upstream"] > 0.5
         dn = drivers["water.dry_downstream"] > 0.5
         q = torch.where(up, torch.clamp(q, max=FUDGE_FLOW), q)      # dwflow.c:273-274
         q = torch.where(dn, torch.clamp(q, min=-FUDGE_FLOW), q)     # dwflow.c:275-276
-        return lin, q
+        on_wall = switch & ~limited
+        return lin, q, torch.where(on_wall, wall, torch.full_like(wall, torch.nan))
 
     def flow(self, dp: Tensor, drivers: Mapping | None = None) -> Tensor:
         """Conduit flow (m3/s, positive from the pipe's first node to its second)."""
         return self._parts(dp, drivers)[1]
 
     def dflow(self, dp: Tensor, drivers: Mapping | None = None) -> Tensor:
-        """dq/d(dp) (m2/s): k where no limit is active, else 0 (every limit is a constant,
-        so ``q == lin`` is an exact test)."""
-        lin, q = self._parts(dp, drivers)
+        """dq/d(dp) (m2/s): k where the flow is the momentum line, the wall slope S where it
+        is on the switch's wall, else 0 (every other limit is a constant, so ``q == lin``
+        and ``q == wall`` are exact tests)."""
+        lin, q, wall = self._parts(dp, drivers)
         k = drivers["water.conveyance"].expand_as(q)
-        return torch.where(q == lin, k, torch.zeros_like(k))
+        s = drivers["water.switch_slope"].expand_as(q)
+        zero = torch.zeros_like(k)
+        return torch.where(q == lin, k, torch.where(q == wall, s, zero))
 
 
 class JunctionStorage(NodeSource):
@@ -383,7 +431,7 @@ class DynamicWaveHydraulics:
     ``"sewer.pipe_flow"`` (m3/s), ``"sewer.mid_area"`` (SWMM's stored mid-depth area, SI
     area m2 per design D2) and ``"sewer.net_inflow"`` (m3/s, per junction). With a
     `StepContext` it writes ``"water.sources"``, ``"water.phi_boundary"`` (outfall heads, m),
-    the six `DynamicWaveConduit` drivers and the `JunctionStorage` drivers, and the
+    the ten `DynamicWaveConduit` drivers and the `JunctionStorage` drivers, and the
     reporting key ``"sewer.overflow"`` (below); always the carried keys and the reporting
     keys ``"sewer.q"`` (m3/s), ``"sewer.h"`` (link depth, m), ``"sewer.v"`` (m/s),
     ``"sewer.V_wet"`` (m3), ``"sewer.junction_depth"`` (m) and ``"sewer.surcharged"``
@@ -470,6 +518,8 @@ class DynamicWaveHydraulics:
             at_v.append(downstream)
         self.outfall_pipe = torch.tensor(pipe_of, dtype=torch.long)
         at_v_t = torch.tensor(at_v, dtype=torch.bool)
+        #: per outfall: whether it is its conduit's downstream (second) node
+        self.outfall_at_v = at_v_t
         self.outfall_offset_ft = torch.where(
             at_v_t, self.offset2[self.outfall_pipe], self.offset1[self.outfall_pipe]) / LCF
         self.outfall_kind = torch.tensor(
@@ -610,6 +660,32 @@ class DynamicWaveHydraulics:
         depth = torch.where(kind == 0, free, torch.where(kind == 1, normal, fixed))
         return self.node_invert[self.outfall_idx] + depth * LCF
 
+    def _switch_slope(self, q: Tensor, terms: ConduitTerms, area_ft2: Tensor, surf: Tensor,
+                      dt: float) -> Tensor:
+        """The slope switch's wall slope S (m2/s, per pipe; `DynamicWaveConduit`): the
+        linearised switching surface ``1/(c + 1/S_max)``. ``c`` (m per m3/s) is how far the
+        lagged outfall depth at the conduit's downstream end moves per unit of its flow
+        (`_outfall_heads`, a forward difference; 0 for other conduits): on the surface
+        ``y1 = y2(q)`` the pass then sees the outfall depth follow the flow, as it does at
+        the fixed point. ``S_max`` is `K_SWITCH` times the smaller end junction's grounding
+        (storage slope ``2 A_s/dt`` plus its conduits' conveyance)."""
+        k_si = terms.conveyance * (QCF / LCF)
+        ground = torch.zeros_like(surf).index_add(-1, self.u, k_si).index_add(-1, self.v, k_si)
+        ground = ground.index_add(-1, self.junction_idx, 2.0 / dt * area_ft2 * _AREA_SI)
+        ground = torch.where(self.is_outfall, torch.full_like(ground, torch.inf), ground)
+        s_max = K_SWITCH * torch.minimum(ground[..., self.u], ground[..., self.v])
+        op = self.outfall_pipe
+        q_abs = q.abs()
+        step = 1e-6 * torch.clamp(q_abs[..., op], min=1e-3)
+        bumped = q_abs.clone()
+        bumped[..., op] = q_abs[..., op] + step
+        rise = (self._outfall_heads(bumped) - self._outfall_heads(q_abs)) / step
+        rise = torch.where(self.outfall_at_v, torch.clamp(rise, min=0.0),
+                           torch.zeros_like(rise))
+        compliance = torch.zeros_like(s_max).index_add(-1, op, rise.expand(
+            s_max.shape[:-1] + rise.shape[-1:]))
+        return 1.0 / (compliance + 1.0 / s_max)
+
     # ------------------------------------------------------------------ protocol
     def __call__(self, state: Mapping, drivers: Mapping,
                  ctx: StepContext | None = None) -> dict[str, Tensor]:
@@ -643,13 +719,21 @@ class DynamicWaveHydraulics:
         lagged = torch.zeros_like(surf).index_add(-1, self.u, terms.lagged_conveyance1)
         lagged = lagged.index_add(-1, self.v, terms.lagged_conveyance2)[..., jidx]
         anchor = lagged * (QCF / LCF) + K_ANCHOR * 2.0 / dt * area_ft2 * _AREA_SI
+        switch = terms.slope_switch
+        switch_slope = self._switch_slope(q, terms, area_ft2, surf, dt)
         out.update({
             f"{self.layer}.sources": inflow,
             f"{self.layer}.phi_boundary": self._outfall_heads(q),
             "water.flow_offset": terms.flow_offset * QCF,
             "water.conveyance": terms.conveyance * (QCF / LCF),
-            "water.normal_flow": terms.normal_flow * QCF,
-            "water.limited": terms.limited.to(F64),
+            "water.normal_flow": torch.where(switch, terms.switch_normal_flow,
+                                             terms.normal_flow) * QCF,
+            "water.limited": (terms.limited & ~switch).to(F64),
+            "water.slope_switch": switch.to(F64),
+            "water.switch_drop": terms.switch_drop * LCF,
+            "water.switch_slope": torch.where(switch, switch_slope,
+                                              torch.zeros_like(switch_slope)),
+            "water.flow_last": q,
             "water.dry_upstream": terms.dry_upstream.to(F64),
             "water.dry_downstream": terms.dry_downstream.to(F64),
             "water.storage_area": area_ft2 * _AREA_SI,

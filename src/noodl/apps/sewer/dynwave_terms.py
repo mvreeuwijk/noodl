@@ -112,7 +112,12 @@ class ConduitTerms(NamedTuple):
     ``conveyance`` k = dq/d(H1 - H2) (ft2/s, 0 where an end head is pinned, the pinned
     head then folded into c0); ``momentum_flow`` SWMM's trial q before any limit (cfs, at the
     given heads, 0 on the dry exit); ``limited`` the normal-flow check passed (bool) with
-    ``normal_flow`` its q_norm (cfs, +inf where not limited); ``dry_upstream`` /
+    ``normal_flow`` its q_norm (cfs, +inf where not limited), both SWMM's verdict at the
+    given heads; ``slope_switch`` (bool) where that verdict is the slope test ``y1 < y2``
+    alone with both end depths inside their clamps, so that it is the switch ``h1 - h2 <
+    switch_drop`` on the conduit's own head difference (``switch_drop`` = z1 - z2, ft) and
+    ``switch_normal_flow`` its q_norm (cfs, +inf where no switch) -- the closure applies it
+    within the pass (`dynwave.DynamicWaveConduit`); ``dry_upstream`` /
     ``dry_downstream`` node depth <= FUDGE (bool); ``surface_area1/2`` (ft2) contributed to
     the end nodes; ``mid_area`` the stored ``Conduit.a1`` (ft2, next step's ``a_old``);
     ``volume`` (ft3); ``depth`` ``Link.newDepth`` (ft); ``end_depth1/2`` the end flow
@@ -129,6 +134,9 @@ class ConduitTerms(NamedTuple):
     momentum_flow: Tensor
     limited: Tensor
     normal_flow: Tensor
+    slope_switch: Tensor
+    switch_drop: Tensor
+    switch_normal_flow: Tensor
     dry_upstream: Tensor
     dry_downstream: Tensor
     surface_area1: Tensor
@@ -366,7 +374,20 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
         froude_check = torch.zeros_like(froude_check)
     limited = checked & (slope_check | froude_check)
     q_norm = geo.beta * a1 * torch.pow(r1, 2.0 / 3.0)                          # :678
-    normal_flow = torch.where(limited, q_norm, torch.full_like(q_norm, torch.inf))
+    inf = torch.full_like(q_norm, torch.inf)
+    normal_flow = torch.where(limited, q_norm, inf)
+    # The slope test as a switch on the pass's own head difference: with both end depths
+    # strictly inside (FUDGE, yFull) (above FUDGE under SLOT) ``y1 < y2`` is ``h1 - h2 <
+    # z1 - z2`` -- unless the Froude test fires, which limits the flow whatever the slope
+    # test says (`limited` is ``checked & (slope | froude)``).
+    froude_fires = (~has_outfall & (y1 > FUDGE) & (y2 > FUDGE) & (f1 >= 1.0)
+                    if froude_on else torch.zeros_like(checked))               # :665-672
+    in_range = (y1 > FUDGE) & (y2 > FUDGE)
+    if not slot:
+        in_range = in_range & (y2 < yf)
+    slope_switch = checked & (has_outfall | slope_on) & in_range & ~froude_fires
+    if normal_flow_limited == "none":
+        slope_switch = torch.zeros_like(slope_switch)
 
     # dwflow.c:165-180 -- dry exit: no flow, stored area is the end mean
     a_end = (a1 + a2) / 2.0                                                    # :171, :288
@@ -381,6 +402,9 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
         momentum_flow=momentum,
         limited=limited,
         normal_flow=normal_flow,
+        slope_switch=slope_switch,
+        switch_drop=(z1 - z2).expand(shape),
+        switch_normal_flow=torch.where(slope_switch, q_norm, inf),
         dry_upstream=depth1 <= FUDGE,                                          # :280
         dry_downstream=depth2 <= FUDGE,                                        # :281
         surface_area1=surf1,

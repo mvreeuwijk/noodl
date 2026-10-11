@@ -226,3 +226,102 @@ def test_extran_surcharge_matches_swmm_at_every_step(tmp_path):
                                             atol=EXTRAN_ATOL)
     assert worst_depth <= TOL_DEPTH, worst_depth
     assert worst_flow <= 0.0, worst_flow
+
+
+#: The ramp-down: the tree's inflows held 120 steps (10 min), ramped to nothing over 12
+#: steps, then off for 120 steps (21 min in all).
+RAMP_FACTORS = [1.0] * 120 + [1.0 - (k + 1) / 12 for k in range(12)] + [0.0] * 120
+#: SWMM's first non-converging step of the ramp-down (1-based; see the test).
+RAMP_SWMM_FIRST_FAILURE = 145
+
+
+def _swmm_scripted(tmp_path, name, factors, steps):
+    """`name` in SWMM with its [INFLOWS] removed and each junction's baseline inflow times
+    ``factors[k]`` fed through pyswmm's `generated_inflow` before step k + 1 (the lateral
+    inflow at the END of the step, as noodl's per-step series), run for `steps` steps:
+    rows as `_swmm` (row k after step k + 1, none after the last), the connections and
+    the report's percentage of steps not converging."""
+    net, _, _ = read_swmm_inp(DATA / name)
+    base = {m.name: m.inflow for m in net.manholes if m.inflow != 0.0}
+    text = (DATA / name).read_text()
+    text = re.sub(r"\[INFLOWS\].*?\n\n", "[INFLOWS]\n\n", text, flags=re.S)
+    secs = steps * int(net.dynamic_wave.routing_step)
+    text = re.sub(r"END_TIME\s+\S+",
+                  f"END_TIME             {secs // 3600:02d}:{secs % 3600 // 60:02d}:"
+                  f"{secs % 60:02d}", text)
+    inp = tmp_path / f"scripted_{steps}.inp"
+    inp.write_text(text)
+    rpt = inp.with_suffix(".rpt")
+    rows = []
+    with pyswmm.Simulation(str(inp), str(rpt), str(inp.with_suffix(".out"))) as sim:
+        nodes = {node.nodeid: node for node in pyswmm.Nodes(sim)}
+        links = list(pyswmm.Links(sim))
+        conn = {link.linkid: link.connections for link in links}
+        iterator = iter(sim)
+        for k in range(steps):
+            for junction, q in base.items():
+                nodes[junction].generated_inflow(factors[k] * q)
+            if next(iterator, None) is None:
+                break
+            rows.append(({link.linkid: link.flow for link in links},
+                         {n: node.depth for n, node in nodes.items()}))
+    m = re.search(r"% of Steps Not Converging\s*:\s*([0-9.]+)", rpt.read_text())
+    return rows, conn, (float(m.group(1)) if m else None)
+
+
+@pytest.mark.slow
+def test_ramp_down_matches_swmm_until_swmm_stops_converging(tmp_path):
+    """Every inflow of the tree ramps down to nothing (`RAMP_FACTORS`), in SWMM (pyswmm's
+    `generated_inflow`) and in noodl (a per-step inflow series).
+
+    Compared steps (E9): SWMM converges on every step up to 144, which covers the fill, the
+    whole ramp and the drain until J4 meets the outfall's depth; those are asserted at the
+    free-surface targets. From step 145 on SWMM fails to converge on 82 of the remaining 108
+    steps (found by ending the run after each step; its report says 32.5 % of all 252), as
+    C5 (J4 -> free outfall) reaches the switch of its normal-flow slope test: its limited
+    flow is Manning's normal flow at J4's depth, at which the outfall's own depth (set from
+    that flow) is J4's depth again, up to the ~1e-5 m interpolation mismatch of SWMM's
+    tables, so neither side of the test need be consistent (docs/applications/sewer.md,
+    "Dynamic wave": the normal-flow slope switch). SWMM's last trial is then wherever its
+    alternating trials stopped, J4 within ~6e-4 m of the outfall depth on either side, and
+    later steps start from that state, so no later step is a fixed-point comparison: steps
+    145 onwards are excluded from the targets. They are asserted only to the scale of
+    SWMM's own oscillation (1e-3 m, 5e-4 m3/s), with noodl converging on every one of them,
+    on SWMM's fixed point where one exists and on the switching surface where none does."""
+    steps = len(RAMP_FACTORS)
+    before = RAMP_SWMM_FIRST_FAILURE - 1
+    _, _, until = _swmm_scripted(tmp_path, "tree_dynwave.inp", RAMP_FACTORS, before)
+    assert until == 0.0, f"SWMM did not converge on every step up to {before} ({until} %)"
+    _, _, through = _swmm_scripted(tmp_path, "tree_dynwave.inp", RAMP_FACTORS, before + 1)
+    assert through > 0.0                       # step 145 is SWMM's first failure
+    rows, conn, _ = _swmm_scripted(tmp_path, "tree_dynwave.inp", RAMP_FACTORS, steps)
+    assert len(rows) == steps - 1              # the last step yields no row (module docstring)
+
+    net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
+    model, state, drivers = build_model(net, iterate_tol=ITERATE_TOL, iterate_max=ITERATE_MAX)
+    inflow = torch.stack([f * drivers["inflow"] for f in RAMP_FACTORS]).unsqueeze(1)
+    diags: list = []
+    _, hist = simulate_dynamic_wave(model, state, drivers, steps=steps, inflow=inflow,
+                                    diagnostics=diags)
+    assert all(bool(d["converged"]) for d in diags)
+    hyd = model.dynamic_wave
+    nodes = [m.name for m in net.manholes] + list(hyd.outfall_names)
+    idx = torch.cat([model.junction_idx, hyd.outfall_idx])
+    sign = {p.name: (1.0 if tuple(conn[p.name]) == (p.u, p.v) else -1.0) for p in net.pipes}
+    worst = {"compared": [0.0, 0.0], "excluded": [0.0, 0.0]}
+    for k, (flows, depths) in enumerate(rows):
+        y = hist["water.phi"][k, 0, idx] - hyd.node_invert[idx]
+        part = worst["compared" if k < before else "excluded"]
+        for j, name_j in enumerate(nodes):
+            part[0] = max(part[0], abs(y[j].item() - depths[name_j]))
+        for i, pipe in enumerate(net.pipes):
+            q_s = sign[pipe.name] * flows[pipe.name]
+            q_n = hist["water.q"][k, 0, i].item()
+            if k < before:
+                excess = abs(q_n - q_s) - (TOL_FLOW_REL * abs(q_s) + TOL_FLOW_ABS)
+            else:
+                excess = abs(q_n - q_s)
+            part[1] = max(part[1], excess)
+    assert worst["compared"][0] <= TOL_DEPTH, worst
+    assert worst["compared"][1] <= 0.0, worst
+    assert worst["excluded"][0] <= 1e-3 and worst["excluded"][1] <= 5e-4, worst
