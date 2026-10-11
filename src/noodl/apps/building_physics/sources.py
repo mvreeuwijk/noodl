@@ -79,13 +79,15 @@ class DecayingSource(_NodeSource):
 
 
 class BurstSource(_NodeSource):
-    """`mass` delivered uniformly over `[t_burst, t_burst + duration)`.
+    """`mass` delivered uniformly over `[t_burst, t_burst + dt)`.
 
-    Called with the length of the step that ends at `t` (`step`, as `SpeciesSources` passes
-    it from `drivers["time_step"]`), it returns the step-averaged rate: the mass released over
-    the part of the step that overlaps the burst, divided by the step length, so the mass is
-    delivered in full whatever the step length and is never missed by sampling the step's end.
-    Without `step` it returns the instantaneous rate at `t`.
+    `dt` is the burst's duration; `sources_from_project` sets it to the run control's time
+    step. Called with the length of the step that ends at `t` (`step`, as `SpeciesSources`
+    passes it from `drivers["time_step"]`), it returns the step-averaged rate: the mass
+    released over the part of the step that overlaps the burst, divided by the step length, so
+    the mass is delivered in full whatever the step length (a coarser `simulate` step spreads
+    the same mass over its own length) and is never missed by sampling the step's end. Without
+    `step` it returns the instantaneous rate at `t`.
     """
 
     step_integrated = True
@@ -98,6 +100,8 @@ class BurstSource(_NodeSource):
         if step is None:
             active = self.t_burst <= t < self.t_burst + self.dt
             return self._vector(x, self.mass / self.dt if active else 0.0)
+        if not step > 0.0:
+            raise ValueError(f"BurstSource: the step length must be positive, got {step!r} s")
         overlap = min(t, self.t_burst + self.dt) - max(t - step, self.t_burst)
         rate = self.mass / self.dt * max(overlap, 0.0) / step
         return self._vector(x, rate)
@@ -135,7 +139,9 @@ class SpeciesSources:
             "time": dict(description="time since the simulation start (end of the step)",
                          unit="s"),
             "time_step": dict(description="length of the step that ends at `time` (read by "
-                                          "burst sources; `simulate` sets it)", unit="s"),
+                                          "burst sources, which without it sample the step's "
+                                          "end; `simulate` sets it)", unit="s",
+                              required=False),
             self.key: dict(description="multiplier of each source (a schedule or control)",
                            unit="-", over=self.names),
         }

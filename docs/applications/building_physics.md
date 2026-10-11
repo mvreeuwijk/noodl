@@ -269,7 +269,8 @@ species layer's `"species.sources"` each step, each on its own species. It evalu
 `drivers["time"]` (set by `simulate` to the step's end) and multiplies each by its entry of
 `"species.source_multiplier"`, one per source, which is where a schedule or a control acts. A
 `BurstSource` releases its mass over the steps that overlap its burst (it reads the step length
-from `drivers["time_step"]`, which `simulate` sets), so no step length misses it.
+from `drivers["time_step"]`, which `simulate` sets), so no step length misses it. The burst's duration, `dt`, is the run control's time step for a
+project's sources; a coarser `simulate` step spreads the same mass over its own length.
 `sources_from_project(project, dt=60.0)` builds the source objects from a `.prj`'s own source
 records, and `project_to_model` attaches them with `SpeciesSources` automatically, with the
 multipliers at one. `assemble_sources(sources, t, x_full)` sums plain sources outside a model.

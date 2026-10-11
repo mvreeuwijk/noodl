@@ -121,7 +121,7 @@ Nodal sources and withdrawals.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `BurstSource`<br><small>`noodl.apps.building_physics`</small> | `mass` delivered uniformly over `[t_burst, t_burst + duration)`. | `BurstSource(node, mass, t_burst, dt)` |
+| `BurstSource`<br><small>`noodl.apps.building_physics`</small> | `mass` delivered uniformly over `[t_burst, t_burst + dt)`. | `BurstSource(node, mass, t_burst, dt)` |
 | `ConstantSource`<br><small>`noodl.apps.building_physics`</small> | S = G - R x  (constant coefficient model, eq. 15). | `ConstantSource(node, G, R=0.0)` |
 | `CutoffSource`<br><small>`noodl.apps.building_physics`</small> | S = max(G (1 - x / x_cut), 0)  (eq. 17), clamped at the cutoff concentration. | `CutoffSource(node, G, x_cut)` |
 | `DecayingSource`<br><small>`noodl.apps.building_physics`</small> | S = G0 exp(-(t - t0) / tau) for t >= t0, else 0. | `DecayingSource(node, G0, tau, t0=0.0)` |

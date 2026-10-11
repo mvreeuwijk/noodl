@@ -243,16 +243,42 @@ def test_a_burst_delivers_its_mass_over_the_steps_that_overlap_it():
     assert b(150.0, x, step=150.0)[1].item() == pytest.approx(0.01)
 
 
+def test_burst_rate_times_step_sums_to_the_mass_over_any_contiguous_grid():
+    b = BurstSource(1, mass=3.0, t_burst=100.0, dt=300.0)          # burst on [100, 400)
+    x = torch.zeros(3, dtype=F64)
+    for edges in ([0.0, 50.0, 250.0, 500.0], [0.0, 400.0, 1000.0], [0.0, 100.0, 400.0, 450.0],
+                  [90.0, 130.0, 399.0, 401.0, 600.0]):
+        total = sum(b(t1, x, step=t1 - t0)[1].item() * (t1 - t0)
+                    for t0, t1 in zip(edges, edges[1:], strict=False))
+        assert total == pytest.approx(3.0, rel=1e-14)
+
+
+def test_burst_step_must_be_positive():
+    with pytest.raises(ValueError, match="step length must be positive"):
+        BurstSource(1, 1.0, 0.0, 60.0)(0.0, torch.zeros(3, dtype=F64), step=0.0)
+
+
 def test_an_unscheduled_burst_at_t0_releases_its_full_mass_under_simulate():
+    mass = 2.5e-3
     p = read_prj(DATA / "doorway_damper_fan.prj")
-    p.sources[0].source_type, p.sources[0].params = "brs", [2.5e-3, 0.0]
+    p.sources[0].source_type, p.sources[0].params = "brs", [mass, 0.0]
     model, state, drivers = project_to_model(p)
-    times = [0.0, 300.0, 600.0, 900.0]
-    out = simulate(model, state, drivers, times)
-    # The burst shows in the first step's concentration and nowhere else is it added: the
-    # mass in the zone at the end of step 1 is the burst's, less what the flows removed.
-    x = out["species.x"][:, 0, 0]
+    dt = 300.0
+    out = simulate(model, state, drivers, [0.0, dt, 2 * dt])
+    x, q = out["species.x"][:, 0, 0], out["air.q"]
     assert x[0].item() == 0.0 and x[1].item() > 0.0
-    M = 101325.0 * 600.0 / (287.055 * 293.15)
-    assert x[1].item() * M == pytest.approx(2.5e-3, rel=0.2)
-    assert p.sources[0].mult == 1.0
+    # Implicit Euler on the single zone, with the layer's own advection operator A (per unit
+    # capacity, dx/dt = A x + N x_ambient, the ambient's sarin being zero): the mass released
+    # in a step is M (x1 - x0) - dt M A x1, the same expression as the layer's update.
+    A, _ = model.transport["species"].operator(q[1])
+    zone = model.net.node_index(p.zone_nr_to_name[p.sources[0].zone_nr])
+    M = (drivers["rho"] * model.closures[0].volumes)[zone].item()
+    a0 = A[0, 0].item()                                          # sarin on the only zone
+    released = [M * (x[k + 1] - x[k]).item() - dt * M * a0 * x[k + 1].item() for k in (0, 1)]
+    assert released[0] == pytest.approx(mass, rel=1e-12)
+    assert released[1] == pytest.approx(0.0, abs=1e-12 * mass)    # nothing in step 2
+
+
+def test_a_project_with_sources_passes_the_setup_check():
+    model, state, drivers = project_to_model(read_prj(DATA / "doorway_damper_fan.prj"))
+    assert not model.check(state, drivers).errors
