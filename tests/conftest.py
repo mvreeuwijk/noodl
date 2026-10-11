@@ -76,3 +76,20 @@ def contamx():
     return pytest.importorskip(
         "contamxpy", reason="contamxpy not installed: pip install .[contam] (Windows only)"
     )
+
+
+def _builtin(value):
+    """A recorded property as a builtin type: numpy and torch scalars (and arrays, as lists)
+    cannot cross pytest-xdist's execnet channel, which crashes the worker that recorded them."""
+    if isinstance(value, (list, tuple)):
+        return [_builtin(v) for v in value]
+    if isinstance(value, torch.Tensor) or hasattr(value, "tolist"):
+        return value.tolist()
+    return value
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item, call):
+    report = yield
+    report.user_properties = [(k, _builtin(v)) for k, v in report.user_properties]
+    return report
