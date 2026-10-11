@@ -5,7 +5,8 @@ lexical tokenizer (`noodl.apps.inpfile`) with the EPANET reader; each format's o
 column layouts and units are read by `apps/sewer/inp.py`.
 
 **Read:** `[TITLE]`, `[OPTIONS]`, `[JUNCTIONS]`, `[OUTFALLS]`, `[CONDUITS]`, `[XSECTIONS]`,
-`[LOSSES]` (the flap gate only), `[INFLOWS]`, `[POLLUTANTS]`.
+`[LOSSES]` (the flap gate only), `[INFLOWS]`, `[POLLUTANTS]`, and under `DYNWAVE`
+`[STORAGE]` with the `[CURVES]` of type `STORAGE`.
 
 **Routing.** `FLOW_ROUTING` is `STEADY`, `KINWAVE` or `DYNWAVE`, read as the physical names
 `steady`, `kinematic_wave` and `dynamic_wave` (`SewerNetwork.routing`). `DYNWAVE` also reads
@@ -38,6 +39,19 @@ depth) and `SurDepth` is `Manhole.surcharge_depth` (m, at least 0; 0 when absent
 a junction may pressurise above its full depth before it floods under `DYNWAVE`. `Aponded`
 is not read, since ponding is refused.
 
+**Storage units (dynamic wave).** A `[STORAGE]` line `Name Elev MaxDepth InitDepth Shape
+... [SurDepth [Fevap]]` becomes a `Manhole` with a `storage` curve (`storage_unit`): the
+invert, `ground` = invert + `MaxDepth`, `initial_depth` and `surcharge_depth`. The shapes are
+SWMM 5.2.4's: `FUNCTIONAL a1 a2 a0` (area `a1 y^a2 + a0`, m², read as `("functional", a1, a2,
+a0)`; `a0 >= 0` and `a2 >= 0`), `TABULAR Curve` (a `[CURVES]` curve of type `STORAGE`, depth in
+m against area in m², its points over any number of lines, depths strictly increasing) and the
+closed shapes `CYLINDRICAL L W -`, `CONICAL L W Z`, `PARABOLOID L W H` and `PYRAMIDAL L W Z`
+(m; `Z` a side slope, run over rise). A non-zero evaporation factor `Fevap` and the
+exfiltration parameters after it are refused with the line number, as are a `[CURVES]` curve
+of any other type, a curve name that is not in `[CURVES]` and negative depths. `[STORAGE]` under
+`STEADY` or `KINWAVE` is refused by name: SWMM routes a storage unit by its volume there,
+which is not modelled.
+
 **Outfalls.** `FREE`, `NORMAL` and `FIXED` (with its stage, m) are read.
 
 **Barrels.** A conduit with more than one barrel is read under `DYNWAVE` (1 to 127; the
@@ -51,9 +65,9 @@ silently.
 refused, because time variation belongs in the drivers.
 
 **Refused by name**, because skipping them would silently change the physics: `[DWF]`,
-`[STORAGE]` with non-constant area, `[PUMPS]`, `[WEIRS]`, `[ORIFICES]`, `[OUTLETS]`,
-`[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[CURVES]`, `[TIMESERIES]`,
-`[LID_USAGE]`, and any other section carrying content.
+`[STORAGE]` under `STEADY` or `KINWAVE`, `[PUMPS]`, `[WEIRS]`, `[ORIFICES]`, `[OUTLETS]`,
+`[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[CURVES]` of any type but
+`STORAGE`, `[TIMESERIES]`, `[LID_USAGE]`, and any other section carrying content.
 
 **Geometry.** `read_swmm_inp` builds its network with `geometry="tabulated"`: SWMM 5.2's own
 tabulated circular section, lookup rules and unit constants. Depths, volumes and velocities
@@ -73,7 +87,8 @@ conduits differ by SWMM's one-step junction lag, which is first order in the ste
 - flow units other than CMS;
 - runoff (`[SUBCATCHMENTS]` and everything that feeds them) and dry-weather patterns;
 - non-circular shapes;
-- storage units, pumps, weirs, orifices and outlets;
+- pumps, weirs, orifices and outlets; storage units under `STEADY` or `KINWAVE`, and
+  storage evaporation or exfiltration;
 - dynamic wave with ponding. Both `SURCHARGE_METHOD`s model
   surcharge, and a junction floods (without ponding) above `MaxDepth` (extended to its
   crown) plus `SurDepth`.

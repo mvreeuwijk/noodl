@@ -28,6 +28,7 @@ from noodl.apps.sewer.dynwave import (
 )
 from noodl.apps.sewer.hydraulics import GEOMETRY_ALIASES, SewerHydraulics
 from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
+from noodl.apps.sewer.storage import validate_storage_curve
 from noodl.drives import Stack
 from noodl.elements.fixed import FixedFlow
 from noodl.elements.powerlaw import PowerLaw
@@ -56,7 +57,18 @@ class Manhole:
     m >= 0): how far dynamic-wave routing lets the water rise above the full depth before
     the manhole floods (kinematic and steady routing ignore it). `initial_depth` is SWMM's
     InitDepth (m >= 0), the water depth the dynamic wave starts from (0 lets SWMM average
-    the depths of the attached conduits, `DynamicWaveHydraulics.initial_state`)."""
+    the depths of the attached conduits, `DynamicWaveHydraulics.initial_state`). A
+    `storage` curve makes it a SWMM storage unit (dynamic wave only).
+
+    The `storage` curve (`storage_unit` builds such a manhole) is its surface area,
+    ``("functional", a, b, c)`` for ``A = a y^b + c``
+    (m2, y the depth in m), ``("tabular", depths, areas)`` (m, m2) or one of SWMM's closed
+    shapes (`noodl.apps.sewer.storage`). Its area adds to the conduits' at the junction, its
+    volume is reported (``"sewer.storage_volume"``, m3), its `ground` is the invert plus
+    SWMM's MaxDepth, and SWMM's storage rules apply: its full depth is extended to the
+    attached conduit crowns only with a `surcharge_depth`, it surcharges (EXTRAN) only above
+    its full depth and only with a `surcharge_depth`, and it keeps its own `initial_depth`
+    (0 included) at the start."""
 
     name: str
     invert: float
@@ -65,6 +77,25 @@ class Manhole:
     surface_area: float | None = None
     surcharge_depth: float = 0.0
     initial_depth: float = 0.0
+    storage: tuple | None = None
+
+
+def storage_unit(name: str, invert: float, max_depth: float, curve: tuple, *,
+                 surcharge_depth: float = 0.0, initial_depth: float = 0.0,
+                 inflow: float = 0.0) -> Manhole:
+    """A SWMM storage unit (`[STORAGE]`) as a `Manhole` with a `storage` curve: `invert`
+    (m), `max_depth` (SWMM's MaxDepth, m >= 0: the manhole's ground is ``invert +
+    max_depth``), the surface-area `curve` (`Manhole.storage`), SWMM's SurDepth
+    `surcharge_depth` (m) and InitDepth `initial_depth` (m), and a constant lateral `inflow`
+    (m3/s). Tabular depths and areas are stored as tuples (the manhole is hashable)."""
+    if curve and curve[0] == "tabular" and len(curve) == 3:
+        curve = ("tabular", tuple(float(v) for v in curve[1]),
+                 tuple(float(v) for v in curve[2]))
+    validate_storage_curve(name, curve)
+    if not max_depth >= 0.0:
+        raise ValueError(f"storage unit {name!r}: max_depth must be >= 0 m, got {max_depth!r}")
+    return Manhole(name, invert, ground=invert + max_depth, inflow=inflow,
+                   surcharge_depth=surcharge_depth, initial_depth=initial_depth, storage=curve)
 
 
 @dataclass(frozen=True)
@@ -259,6 +290,11 @@ class SewerNetwork:
         """Steady and kinematic-wave routing do not model initial conditions, MaxFlow, flap
         gates or barrels; a set value would be skipped silently, so it is refused by name."""
         for manhole in self.manholes:
+            if manhole.storage is not None:
+                raise ValueError(
+                    f"SewerNetwork: manhole {manhole.name!r} is a storage unit; only "
+                    f"dynamic-wave routing models storage units (routing is "
+                    f"{self.routing!r})")
             if manhole.initial_depth != 0.0:
                 raise ValueError(
                     f"SewerNetwork: manhole {manhole.name!r} has initial_depth "
@@ -288,6 +324,12 @@ class SewerNetwork:
                 raise ValueError(
                     f"SewerNetwork: manhole {manhole.name!r} initial_depth must be >= 0 m, "
                     f"got {manhole.initial_depth!r}")
+            if manhole.storage is not None:
+                validate_storage_curve(manhole.name, manhole.storage)
+                if manhole.surface_area is not None:
+                    raise ValueError(
+                        f"SewerNetwork: storage unit {manhole.name!r} sets surface_area; its "
+                        f"area is its storage curve")
         for pipe in self.pipes:
             if (not isinstance(pipe.barrels, int) or isinstance(pipe.barrels, bool)
                     or not 1 <= pipe.barrels <= 127):

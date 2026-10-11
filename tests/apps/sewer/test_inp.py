@@ -453,3 +453,92 @@ def test_a_reoriented_kinwave_pipe_does_not_record_a_reversed_gate(tmp_path):
     c1 = next(p for p in net.pipes if p.name == "C1")
     assert (c1.u, c1.v) == ("J1", "J3")
     assert not any(p.flap_gate_reversed for p in net.pipes)
+
+
+J4_LINE = "J4               9.0        5          0          0          0\n"
+STORAGE_SECTIONS = (
+    "[STORAGE]\n"
+    ";;Name Elev MaxDepth InitDepth Shape Curve/Params SurDepth Fevap\n"
+    "J4      9.0  3.0      0.2       TABULAR  Bowl  0.5  0\n"
+    "J3      10.0 2.0      0         FUNCTIONAL 20 1.5 5\n"
+    "\n[CURVES]\n"
+    ";;Name Type x y\n"
+    "Bowl    STORAGE  0 10  0.5 30\n"
+    "Bowl             1.0 60\n"
+    "Bowl             2.0 80\n"
+    "\n[OUTFALLS]\n"
+)
+J3_LINE = "J3               10.0       5          0          0          0\n"
+
+
+def _storage(tmp_path, edits=()):
+    return _dyn(tmp_path, [(J4_LINE, ""), (J3_LINE, ""), ("[OUTFALLS]\n", STORAGE_SECTIONS),
+                           *edits])
+
+
+def test_storage_units_are_read_with_their_curves(tmp_path):
+    """[STORAGE] TABULAR (a [CURVES] STORAGE curve, its points over several lines) and
+    FUNCTIONAL (``a1 a2 a0`` in the file, ``A = a1 y^a2 + a0``, i.e. noodl's ("functional",
+    a, b, c) = (a1, a2, a0)); MaxDepth sets the ground, InitDepth and SurDepth are read
+    (node.c:654-809); absent SurDepth and Fevap are 0. Storage units are manholes, so
+    [INFLOWS] reaches them."""
+    net, _, _ = read_swmm_inp(_storage(tmp_path))
+    units = {m.name: m for m in net.manholes if m.storage is not None}
+    assert set(units) == {"J4", "J3"}
+    j4, j3 = units["J4"], units["J3"]
+    assert j4.storage == ("tabular", (0.0, 0.5, 1.0, 2.0), (10.0, 30.0, 60.0, 80.0))
+    assert (j4.invert, j4.ground, j4.initial_depth, j4.surcharge_depth) == (9.0, 12.0, 0.2,
+                                                                           0.5)
+    assert j3.storage == ("functional", 20.0, 1.5, 5.0)
+    assert (j3.ground, j3.initial_depth, j3.surcharge_depth) == (12.0, 0.0, 0.0)
+    assert {m.name for m in net.manholes if m.storage is None} == {"J1", "J2", "J5"}
+
+
+@pytest.mark.parametrize("shape,params,expected", [
+    ("CYLINDRICAL", "4 2 0", ("cylindrical", 4.0, 2.0)),
+    ("CONICAL", "4 2 0.5", ("conical", 4.0, 2.0, 0.5)),
+    ("PARABOLOID", "4 2 3", ("paraboloid", 4.0, 2.0, 3.0)),
+    ("PYRAMIDAL", "4 2 0.5", ("pyramidal", 4.0, 2.0, 0.5)),
+])
+def test_closed_storage_shapes_are_read(tmp_path, shape, params, expected):
+    """SWMM 5.2's CYLINDRICAL (L W, a third, unused value), CONICAL (L W Z), PARABOLOID
+    (L W H) and PYRAMIDAL (L W Z) (node.c:727-783)."""
+    path = _storage(tmp_path, [("FUNCTIONAL 20 1.5 5", f"{shape} {params}")])
+    net, _, _ = read_swmm_inp(path)
+    assert next(m for m in net.manholes if m.name == "J3").storage == expected
+
+
+@pytest.mark.parametrize("edit,match", [
+    (("FUNCTIONAL 20 1.5 5", "FUNCTIONAL 20 1.5 5 0 0.5"), "evaporation factor"),
+    (("FUNCTIONAL 20 1.5 5", "FUNCTIONAL 20 1.5 5 0 0 1.0 0.1 0.2"), "exfiltration"),
+    (("FUNCTIONAL 20 1.5 5", "FUNCTIONAL 20 1.5"), "FUNCTIONAL needs"),
+    (("FUNCTIONAL 20 1.5 5", "FUNCTIONAL 20 1.5 -5"), r"c \(area at zero depth"),
+    (("FUNCTIONAL 20 1.5 5", "BOWL 1 2 3"), "shape"),
+    (("TABULAR  Bowl", "TABULAR  Cup"), "curve 'Cup'"),
+    (("Bowl    STORAGE", "Bowl    SHAPE"), "type SHAPE"),
+    (("Bowl             1.0 60", "Bowl             0.4 60"), "strictly increasing"),
+    (("J3      10.0 2.0      0", "J3      10.0 -2.0     0"), "negative maximum depth"),
+    (("J3      10.0 2.0      0", "J3      10.0 2.0      -1"), "negative initial depth"),
+    (("0.5  0\n", "-0.5  0\n"), "negative surcharge depth"),
+])
+def test_storage_refusals_name_the_unit_and_the_line(tmp_path, edit, match):
+    """Evaporation (Fevap != 0) and exfiltration (the Green-Ampt fields after Fevap) are
+    refused; so are SWMM's own input errors (node.c:705-738, table.c:285-329) and a curve
+    of another type (no other object that uses one is read)."""
+    with pytest.raises(ValueError, match=rf"line \d+: .*{match}"):
+        read_swmm_inp(_storage(tmp_path, [edit]))
+
+
+def test_storage_and_curves_are_dynamic_wave_only(tmp_path):
+    """Under KINWAVE a storage unit is a different model (its outflow from its volume,
+    flowrout.c `storage_getOutflow`), so it is refused by name, not read as a junction."""
+    path = _storage(tmp_path, [("FLOW_ROUTING         DYNWAVE", "FLOW_ROUTING         KINWAVE")])
+    with pytest.raises(ValueError, match=r"\[STORAGE\].*dynamic-wave"):
+        read_swmm_inp(path)
+
+
+def test_a_curve_section_without_storage_units_is_refused_unless_storage(tmp_path):
+    """[CURVES] is read for STORAGE curves only: a PUMP1 curve has nothing to drive."""
+    path = _dyn(tmp_path, [("[OUTFALLS]\n", "[CURVES]\nP1 PUMP1 0 0 1 1\n\n[OUTFALLS]\n")])
+    with pytest.raises(ValueError, match="P1.*type PUMP1"):
+        read_swmm_inp(path)

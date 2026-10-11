@@ -94,7 +94,8 @@ residuals = model.residuals(new, drivers)     # per-layer nodal balance
 
 | Object | Fields |
 |---|---|
-| `Manhole(name, invert, ground=None, inflow=0.0, surface_area=None)` | A junction. `surface_area` defaults to SWMM's `MIN_SURFAREA`, 1.167 m² — a 4 ft shaft. |
+| `Manhole(name, invert, ground=None, inflow=0.0, surface_area=None, surcharge_depth=0.0, initial_depth=0.0, storage=None)` | A junction. `surface_area` defaults to SWMM's `MIN_SURFAREA`, 1.167 m² — a 4 ft shaft. `surcharge_depth`, `initial_depth` and `storage` are dynamic-wave physics (see "Dynamic wave"). |
+| `storage_unit(name, invert, max_depth, curve, *, surcharge_depth=0.0, initial_depth=0.0, inflow=0.0)` | A SWMM storage unit: a `Manhole` whose `storage` is the surface-area `curve` (`("functional", a, b, c)` for `A = a y^b + c`, `("tabular", depths, areas)`, or `("cylindrical", L, W)`, `("conical", L, W, Z)`, `("paraboloid", L, W, H)`, `("pyramidal", L, W, Z)`; m and m²) and whose ground is `invert + max_depth`. Dynamic wave only. |
 | `Pipe(name, u, v, length, diameter, n, slope, inlet_offset=0.0, outlet_offset=0.0)` | A circular gravity conduit; offsets (m) are the invert heights above the end nodes' inverts. |
 | `Outfall(name, invert, kind="free", stage=None)` | The root of a tree. `kind` is `"free"`, `"normal"` or `"fixed"` (`stage`, m, required for `"fixed"`); only dynamic-wave routing reads them. |
 | `SewerNetwork(manholes, pipes, outfalls, routing="kinematic_wave", notes={}, dynamic_wave=DynamicWaveOptions())` | The whole network. `routing` is `"steady"`, `"kinematic_wave"` or `"dynamic_wave"`; SWMM's `STEADY`/`KINWAVE`/`DYNWAVE` are accepted and normalised. |
@@ -254,7 +255,8 @@ are evaluated at the converged depths and flow. SWMM's two post-conditions are a
 afterwards: the normal-flow limit (`NORMAL_FLOW_LIMITED`, `SLOPE`/`FROUDE`/`BOTH`/`NO`), and the
 dry-node clamps, which zero a flow that would draw from a junction with no water. At a junction
 that is not an outfall, with surface area $A_s$ (m², the sum of the surface areas of the
-conduits meeting there, floored at `MIN_SURFAREA`) and depth $y$ (m):
+conduits meeting there, plus a storage unit's own area, floored at `MIN_SURFAREA`) and depth
+$y$ (m):
 
 $$
 A_s\,(y - y_{\text{old}}) = \tfrac12\,\Delta t\,(N_{\text{old}} + N)
@@ -456,7 +458,8 @@ Circular conduits, SWMM's tabulated geometry; the fixed routing step or
 SWMM's variable step (`VARIABLE_STEP > 0`, below); a cold start or SWMM's `InitDepth` and
 `InitFlow` (above); constant or
 driver-supplied lateral inflows; `FREE`, `NORMAL` and `FIXED` outfalls, with flap gates;
-parallel barrels, `MaxFlow`, conduit flap gates and conduit lengthening (below);
+parallel barrels, `MaxFlow`, conduit flap gates and conduit lengthening (below); storage
+units with `FUNCTIONAL`, `TABULAR` and the closed-shape area curves (below);
 `INERTIAL_DAMPING` `NONE`/`PARTIAL`/`FULL` and every `NORMAL_FLOW_LIMITED` option.
 `SURCHARGE_METHOD SLOT` is SWMM's Preissmann slot: above `0.985257 y_full` the top width is the
 Sjoberg slot width `0.5423 w_max exp(-(y/y_full)^2.4)` (`0.01 w_max` above `1.78 y_full`), the
@@ -499,6 +502,32 @@ take there; at the fixed point that offset is the solved excess, so a flooded ju
 exactly at `y_max` (not at a penalty's offset above it), and the excess falling to zero
 releases it on the next pass, without a flag to chatter.
 
+**Storage units** (`[STORAGE]`, `storage_unit`, `Manhole.storage`) follow SWMM's storage
+node (`node.c`, `dynwave.c`). A unit is a junction whose surface area adds its curve's area
+at the previous pass's depth (`node_getSurfArea`) to the attached conduit ends' (SWMM does
+not zero a conduit's end area at a storage node, only a regulator's), so it enters the same
+trapezoidal equation. Its area curve is `FUNCTIONAL` `A = a y^b + c`, `TABULAR` (linear
+between the curve's points, linear from zero below the first, the last segment's slope,
+floored at 0, beyond the last; `table_lookupEx`) or one of SWMM's closed shapes (cylinder,
+cone frustum, paraboloid, pyramid frustum, each a quadratic in depth). Its volume, reported as
+`"sewer.storage_volume"` (m³ per junction, 0 at a plain junction; `record=` in
+`simulate_dynamic_wave`), is SWMM's `storage_getVolume`: the integral of the area (the
+end-area method for `TABULAR`, as `table_getStorageVolume`), held at the full volume at and
+above the full depth, so `SurDepth` stores nothing. SWMM's storage rules differ from a
+junction's in three places:
+
+- its full depth is extended to the attached conduit crowns only when it has a `SurDepth`
+  (`link.c:450-458`), so a unit with no `SurDepth` floods at its own `MaxDepth`, below its
+  crown if that is lower;
+- under EXTRAN it surcharges only with a `SurDepth`, and then above its full depth rather
+  than its crown (`dynwave.c:683-687`); the surcharged form, the hold band and the flood
+  wall are those of a junction with the full depth as its crown;
+- it keeps its own `InitDepth`, 0 included, instead of the average of its conduits
+  (`flowrout.c:375`).
+
+Evaporation (`Fevap`) and exfiltration are refused by name, so a unit loses no water but
+through its conduits and its overflow.
+
 Conduit options, each a SWMM `[CONDUITS]`, `[XSECTIONS]`, `[LOSSES]` or `[OUTFALLS]` entry
 and a `Pipe` or `Outfall` field:
 
@@ -528,7 +557,8 @@ head difference, as the head solve's Newton step needs. A set `InitDepth`, `Init
 `MaxFlow`, flap gate or barrel count is refused by name under STEADY or KINWAVE routing.
 
 The reader refuses by name, with the line number, `ALLOW_PONDING YES`, loss coefficients
-and seepage in `[LOSSES]` and TIDAL/TIMESERIES outfalls.
+and seepage in `[LOSSES]`, storage evaporation and exfiltration, and TIDAL/TIMESERIES
+outfalls.
 `build_model` with `air=True`, `quality=True` or `storage=True` is refused by name. Ponding,
 headspace air and quality on the dynamic wave are planned.
 
@@ -765,6 +795,21 @@ The test therefore leaves out C5's flow, the outfall depth and J4's overflow on 
 236-258, where they are held only to the onset error's scale. Every other quantity on every
 step meets the targets.
 
+Storage units are compared on depths, flows, overflow and each unit's volume (against
+pyswmm's `Node.volume`, at the depth target times the unit's area):
+
+- `storage_dynwave.inp`: the tree with J5 `CONICAL`, J3 `FUNCTIONAL` and J4 `TABULAR`,
+  filling from dry below every crown;
+- `storage_extran_dynwave.inp` (EXTRAN, 3x): J3 (`MaxDepth` 0.4 m below its 0.45 m crown, no
+  `SurDepth`) floods at 0.4 m, its full depth not extended; J4 (`MaxDepth` 0.3 m, `SurDepth`
+  1.0 m) has its full depth extended to its 0.45 m crown and surcharges above it, its volume
+  held at the full volume;
+- the same under SLOT.
+
+SWMM converges on every step of all three, and every step meets the targets (worst depth
+7.6e-10 m). Without the storage area the first fixture misses by 1.2e-2 m within 40 steps,
+and with the conduit end areas zeroed at the storage units by 0.17 m.
+
 The same networks with SWMM at its **default** tolerance (`HEAD_TOLERANCE` 0.0015 m,
 `MAX_TRIALS` 8), against noodl's converged answer:
 
@@ -813,7 +858,8 @@ publish numbers from this application.
   backwater.
 - **Kinematic-wave and steady routing: dendritic networks only**, one outgoing pipe per
   manhole, no loops. Dynamic-wave routing allows loops and flat or adverse conduits.
-- **Dynamic wave: no ponding, headspace air or quality yet** (planned).
+- **Dynamic wave: no ponding, headspace air or quality yet** (planned); storage units
+  without evaporation or exfiltration.
   Flooded water is lost, as in SWMM without ponding; with no ground (`MaxDepth` 0) and no
   `SurDepth` a junction floods as soon as it fills to its crown. `build_model(...,
   air=True)` or `quality=True` is refused. Circular conduits only. Under EXTRAN, where SWMM's own

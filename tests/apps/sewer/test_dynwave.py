@@ -1731,3 +1731,174 @@ def test_gradient_on_a_held_threshold_does_not_depend_on_the_wall_slope(tmp_path
         fd = (loss(torch.tensor(0.013 + h, dtype=F64))
               - loss(torch.tensor(0.013 - h, dtype=F64))) / (2 * h)
     assert grads[0] == pytest.approx(fd.item(), rel=1e-6)
+
+
+# ------------------------------------------------------------------------- storage units
+def _storage_chain(curve=("functional", 0.0, 0.0, 50.0), *, max_depth=2.0, surcharge=0.0,
+                   initial_depth=0.0, inflow=0.05, method="extran", **chain):
+    """`_chain_net` with J1 a storage unit (`storage_unit`) of area curve `curve` (default a
+    50 m2 prism), MaxDepth `max_depth`, SurDepth `surcharge` and InitDepth `initial_depth`;
+    C1 is 0.45 m, so J1's crown is 0.45 m."""
+    from noodl.apps.sewer.network import storage_unit
+    net = _chain_net(inflow=inflow, **chain)
+    j1 = net.manholes[0]
+    unit = storage_unit("J1", j1.invert, max_depth, curve, surcharge_depth=surcharge,
+                        initial_depth=initial_depth, inflow=inflow)
+    return dataclasses.replace(net, manholes=(unit,), dynamic_wave=dataclasses.replace(
+        net.dynamic_wave, surcharge_method=method))
+
+
+def _fed(model, state, depth, q=0.0):
+    """`state` fed with J1 at `depth` (m) and C1 at `q` (m3/s), the step start equal."""
+    hyd = model.dynamic_wave
+    state = dict(state)
+    phi = state["water.phi"].clone()
+    phi[model.junction_idx] = model.junction_invert + depth
+    state["water.phi"] = phi
+    state["sewer.junction_depth"] = torch.tensor([depth], dtype=F64)
+    state["water.q"] = state["sewer.pipe_flow"] = torch.tensor([q], dtype=F64)
+    return hyd, state
+
+
+def test_a_storage_units_area_adds_to_its_conduit_areas_at_the_fed_depth():
+    """node.c:383-396 and dynwave.c:315, 582-583: a storage node's surface area is its
+    curve's at the previous trial's depth plus the attached conduit ends' (which SWMM does
+    NOT zero at a storage node: only regulator ends are, dynwave.c:520-523), before the
+    MIN_SURFAREA floor; in design D2's SI area (ft2 x QCF/LCF)."""
+    from noodl.model import StepContext
+    curve = ("functional", 20.0, 1.5, 5.0)
+    plain, s0, _ = build_model(_chain_net())
+    unit, s1, d1 = build_model(_storage_chain(curve))
+    for depth in (0.0, 0.2, 0.6):
+        hyd0, st0 = _fed(plain, s0, depth, 0.01)
+        hyd1, st1 = _fed(unit, s1, depth, 0.01)
+        a1 = hyd1(st1, d1, StepContext(dt=5.0))["water.storage_area"]
+        links_ft2 = hyd0._terms(st0, 5.0).surface_area1.item()      # C1's end at J1, ft2
+        stor_ft2 = (5.0 + 20.0 * depth**1.5) / LCF**2                       # node.c:1017
+        expected = max(links_ft2 + stor_ft2, hyd0.min_area_ft2) * QCF / LCF
+        assert a1.item() == pytest.approx(expected, rel=1e-12)
+    assert links_ft2 > 1.0                       # the conduit's share is really added
+
+
+def test_storage_full_depth_extends_to_the_crown_only_with_a_surcharge_depth():
+    """link.c:450, 458: a storage node's full depth is raised to the attached crowns only
+    when its SurDepth is positive; it floods above full depth + SurDepth."""
+    hyd = build_model(_storage_chain(max_depth=0.2))[0].dynamic_wave
+    assert hyd.full_depth.item() == pytest.approx(0.2)            # not the 0.45 m crown
+    assert hyd.flood_depth.item() == pytest.approx(0.2)
+    hyd = build_model(_storage_chain(max_depth=0.2, surcharge=0.5))[0].dynamic_wave
+    assert hyd.full_depth.item() == pytest.approx(0.45)
+    assert hyd.flood_depth.item() == pytest.approx(0.95)
+
+
+def test_storage_surcharges_above_its_full_depth_and_only_with_a_surcharge_depth():
+    """dynwave.c:683-687 (EXTRAN): a storage node is surcharged when SurDepth > 0 and the
+    previous trial's depth exceeds its FULL depth -- not its crown, which a plain junction
+    uses (dynwave.c:690). The solve's flag (``water.surcharged``) and the reported SWMM test
+    (``sewer.surcharged``) agree on fed depths clear of the hold band. A unit draining at
+    its full depth (net inflow -0.2 m3/s at the step start, at rest) is used, so that the
+    band is positive wherever the depth is above the full depth."""
+    from noodl.model import StepContext
+
+    def flags(net, depth):
+        model, state, drivers = build_model(net)
+        hyd, state = _fed(model, state, depth, 0.2)
+        state["sewer.net_inflow"] = torch.tensor([-0.2], dtype=F64)
+        out = hyd(state, dict(drivers, inflow=torch.zeros(2, dtype=F64)),
+                  StepContext(dt=5.0))
+        return out["water.surcharged"].item(), out["sewer.surcharged"].item()
+
+    # no SurDepth: never surcharged, even above the crown (0.45 m) and the full depth
+    assert flags(_storage_chain(max_depth=1.0), 0.8) == (0.0, 0.0)
+    # SurDepth: above the crown but below the full depth (1.0 m) is not surcharged ...
+    assert flags(_storage_chain(max_depth=1.0, surcharge=1.0), 0.8) == (0.0, 0.0)
+    # ... above the full depth it is
+    assert flags(_storage_chain(max_depth=1.0, surcharge=1.0), 1.2) == (1.0, 1.0)
+    # a plain junction at 0.8 m is above its 0.45 m crown
+    assert flags(_chain_net(), 0.8)[1] == 1.0
+
+
+def test_a_storage_unit_keeps_its_own_initial_depth():
+    """flowrout.c:375: SWMM does not average a storage node's initial depth from its
+    conduits; an InitFlow on C1 would lift a plain junction's, the storage unit stays at its
+    InitDepth (0 or not) and its initial volume is the curve's."""
+    plain = build_model(_chain_net(initial_flow=0.04))[1]
+    assert plain["sewer.junction_depth"].item() > 0.05
+    for depth in (0.0, 0.3):
+        model, state, drivers = build_model(_storage_chain(initial_flow=0.04,
+                                                           initial_depth=depth))
+        assert state["sewer.junction_depth"].item() == depth
+        out = model.dynamic_wave(state, drivers)
+        assert out["sewer.storage_volume"].item() == pytest.approx(50.0 * depth, rel=1e-14)
+
+
+def test_a_storage_unit_attenuates_a_step_inflow():
+    """A 200 m2 prism at J1 under a 0.05 m3/s step inflow: a plain junction passes nearly
+    all of it to C1 within 200 s, the storage unit far less while it fills, never more than
+    the plain junction; its reported volume is the prism's 200 y and rises every step."""
+    prism = ("functional", 0.0, 0.0, 200.0)
+    runs = {}
+    for name, net in (("plain", _chain_net(inflow=0.05)), ("unit", _storage_chain(prism))):
+        model, state, drivers = build_model(net)
+        _, hist = simulate_dynamic_wave(model, state, drivers, steps=40,
+                                        record=("water.q", "water.phi", "sewer.storage_volume"))
+        runs[name] = hist
+    q_plain, q_unit = runs["plain"]["water.q"][:, 0], runs["unit"]["water.q"][:, 0]
+    assert float(q_plain[-1]) > 0.045
+    assert float(q_unit[-1]) < 0.5 * float(q_plain[-1])
+    assert bool((q_unit <= q_plain + 1e-12).all())
+    hist = runs["unit"]
+    depth = hist["water.phi"][:, 0] - 11.0
+    volume = hist["sewer.storage_volume"][:, 0]
+    torch.testing.assert_close(volume, 200.0 * depth, rtol=1e-12, atol=1e-12)
+    assert bool((volume[1:] > volume[:-1]).all())
+    assert float(runs["plain"]["sewer.storage_volume"].abs().max()) == 0.0
+
+
+def test_each_step_satisfies_the_discrete_junction_equation_at_a_storage_unit():
+    model, state, drivers = build_model(_storage_chain(("tabular", (0.0, 0.5, 1.0),
+                                                        (5.0, 30.0, 40.0))))
+    for _ in range(30):
+        before = dict(state)
+        state, _ = simulate_dynamic_wave(model, state, drivers, steps=1, atol=SOLVE_ATOL)
+        res = model.dynamic_wave.junction_residual(before, state, drivers)
+        assert res.abs().max().item() < 1e-9
+
+
+def test_a_storage_unit_without_surcharge_depth_floods_at_its_max_depth():
+    """MaxDepth 0.3 m below C1's 0.45 m crown and no SurDepth: the full depth is not
+    extended (link.c:450), so the unit floods at 0.3 m and the excess leaves as overflow;
+    its volume stays the full volume (dynwave.c:785-786)."""
+    net = _storage_chain(("functional", 0.0, 0.0, 2.0), max_depth=0.3, inflow=0.2)
+    model, state, drivers = build_model(net)
+    state, hist = simulate_dynamic_wave(model, state, drivers, steps=20,
+                                        record=("water.phi", "sewer.overflow",
+                                                "sewer.storage_volume"))
+    depth = hist["water.phi"][:, 0] - 11.0
+    assert float(depth.max()) == pytest.approx(0.3, abs=1e-9)
+    flooded = hist["sewer.overflow"][:, 0] > 0.0
+    assert bool(flooded[-1])
+    torch.testing.assert_close(hist["sewer.storage_volume"][flooded, 0],
+                               torch.full((int(flooded.sum()),), 0.6, dtype=F64))
+
+
+def test_storage_units_are_refused_by_name_outside_their_scope():
+    """A storage unit under kinematic routing, a storage unit that also sets the kinematic
+    shaft `surface_area`, a bad curve and a negative MaxDepth are each refused naming J1."""
+    from noodl.apps.sewer.network import storage_unit
+    net = _storage_chain()
+    with pytest.raises(ValueError, match="J1.*storage unit.*dynamic-wave"):
+        dataclasses.replace(net, routing="kinematic_wave").validate()
+    bad = dataclasses.replace(net, manholes=(dataclasses.replace(net.manholes[0],
+                                                                 surface_area=2.0),))
+    with pytest.raises(ValueError, match="J1.*surface_area"):
+        bad.validate()
+    bad = dataclasses.replace(net, manholes=(dataclasses.replace(
+        net.manholes[0], storage=("tabular", (1.0, 0.5), (2.0, 3.0))),))
+    with pytest.raises(ValueError, match="J1.*strictly increasing"):
+        bad.validate()
+    with pytest.raises(ValueError, match="J1.*max_depth"):
+        storage_unit("J1", 11.0, -1.0, ("functional", 0.0, 0.0, 5.0))
+    # a tabular curve given as lists is stored as tuples (the manhole stays hashable)
+    unit = storage_unit("J1", 11.0, 2.0, ("tabular", [0.0, 1.0], [5.0, 6.0]))
+    assert unit.storage == ("tabular", (0.0, 1.0), (5.0, 6.0)) and hash(unit)

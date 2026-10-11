@@ -27,6 +27,7 @@ from noodl.apps.sewer.network import (
     initial_drivers,
     initial_state,
     sewer_steady,
+    storage_unit,
     tree_steady,
 )
 from noodl.apps.sewer.quality import (
@@ -36,10 +37,12 @@ from noodl.apps.sewer.quality import (
     kla_h2s,
 )
 from noodl.apps.sewer.report import pipe_table, to_mg_per_litre, to_ppm
+from noodl.apps.sewer.storage import STORAGE_SHAPES, StorageCurves
 
 __all__ = [
     "ROUTING_ALIASES", "DynamicWaveConduit", "DynamicWaveHydraulics", "DynamicWaveOptions",
-    "JunctionStorage", "simulate_dynamic_wave",
+    "JunctionStorage", "simulate_dynamic_wave", "STORAGE_SHAPES", "StorageCurves",
+    "storage_unit",
     "Drag", "F_AIR_DEFAULT", "F_I_DEFAULT", "H2STransfer", "H_MAX_RATIO", "Headspace",
     "Manhole", "Outfall", "Pipe", "SewerHydraulics", "SewerNetwork", "SulfideGeneration",
     "air_geometry", "build_model", "capacity_flow", "henry_h2s", "initial_drivers", "initial_state",

@@ -5,7 +5,10 @@ READ: `[TITLE]`, `[OPTIONS]` (`FLOW_UNITS` must be `CMS`),
 with their flap gate), `[CONDUITS]` (with InitFlow and MaxFlow), `[XSECTIONS]` (only
 `CIRCULAR`; barrels), `[LOSSES]` (the flap gate; the loss coefficients and seepage must be
 0), `[INFLOWS]` (constant `FLOW`
-baselines and constant `CONCENTRATION` pollutant baselines), `[POLLUTANTS]`. InitDepth,
+baselines and constant `CONCENTRATION` pollutant baselines), `[POLLUTANTS]`, and under
+DYNWAVE `[STORAGE]` (FUNCTIONAL, TABULAR and the closed shapes CYLINDRICAL, CONICAL,
+PARABOLOID, PYRAMIDAL, with SurDepth; a non-zero evaporation factor and exfiltration are
+refused) with the `[CURVES]` of type STORAGE that its TABULAR units name. InitDepth,
 InitFlow, MaxFlow, flap gates and barrels are dynamic-wave physics: under STEADY or KINWAVE
 routing a non-zero or gated value is refused by name rather than skipped.
 `FLOW_ROUTING` is STEADY, KINWAVE or DYNWAVE; DYNWAVE also reads `ROUTING_STEP`,
@@ -17,12 +20,12 @@ IGNORED because no conduit or node ever references them: `[EVAPORATION]`, `[REPO
 `[TAGS]`, `[MAP]`, `[COORDINATES]`.
 
 REFUSED BY NAME, because skipping them would silently change the physics: `[DWF]`,
-`[STORAGE]` with a non-constant area, `[PUMPS]`, `[WEIRS]`, `[ORIFICES]`, `[OUTLETS]`,
-`[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[CURVES]`, `[TIMESERIES]`,
-`[LID_USAGE]`, and any other section carrying content. A time-series inflow is refused;
-time variation belongs in the drivers. A conduit with a culvert code, a non-zero entry, exit
-or average loss coefficient or seepage rate is refused for every routing; one with more than
-one barrel under STEADY or KINWAVE.
+`[STORAGE]` under STEADY or KINWAVE, `[PUMPS]`, `[WEIRS]`, `[ORIFICES]`, `[OUTLETS]`,
+`[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[CURVES]` of any type but
+STORAGE, `[TIMESERIES]`, `[LID_USAGE]`, and any other section carrying content. A
+time-series inflow is refused; time variation belongs in the drivers. A conduit with a
+culvert code, a non-zero entry, exit or average loss coefficient or seepage rate is refused
+for every routing; one with more than one barrel under STEADY or KINWAVE.
 
 DYNWAVE reads `VARIABLE_STEP` (the Courant factor; absent means SWMM's default 0.75,
 project.c:854) and `MINIMUM_STEP`, and clips `ROUTING_STEP` to `WET_STEP` (default 300 s)
@@ -53,6 +56,7 @@ from pathlib import Path
 from noodl.apps.inpfile import as_float, read_sections, require_fields
 from noodl.apps.sewer.dynwave import DynamicWaveOptions
 from noodl.apps.sewer.network import Manhole, Outfall, Pipe, SewerNetwork
+from noodl.apps.sewer.storage import validate_storage_curve
 
 #: link.c `MIN_DELTA_Z`: the smallest fall SWMM uses for a conduit slope, 0.001 ft in m.
 MIN_DELTA_Z = 0.001 * 0.3048
@@ -91,7 +95,13 @@ _IGNORED = {
     "POLYGONS", "SYMBOLS", "LABELS", "BACKDROP", "PROFILES", "FILES", "END",
 }
 _READ = {"OPTIONS", "JUNCTIONS", "OUTFALLS", "CONDUITS", "XSECTIONS", "LOSSES", "INFLOWS",
-         "POLLUTANTS"}
+         "POLLUTANTS", "STORAGE", "CURVES"}
+#: SWMM's [STORAGE] shape keywords (keywords.c:108 `RelationWords`)
+_STORAGE_SHAPES = ("TABULAR", "FUNCTIONAL", "CYLINDRICAL", "CONICAL", "PARABOLOID",
+                   "PYRAMIDAL")
+#: SWMM's curve types (keywords.c `CurveTypeWords`)
+_CURVE_TYPES = ("STORAGE", "DIVERSION", "TIDAL", "RATING", "CONTROL", "SHAPE", "WEIR",
+                "PUMP1", "PUMP2", "PUMP3", "PUMP4", "PUMP5")
 
 
 def read_swmm_inp(
@@ -183,6 +193,16 @@ def read_swmm_inp(
             Manhole(name, elevation, ground=None if depth is None else elevation + depth,
                     surcharge_depth=surcharge, initial_depth=initial)
         )
+    curves = _storage_curves(sections.get("CURVES", []), path)
+    if sections.get("STORAGE") and not dynamic:
+        raise ValueError(
+            f"{path}: section [STORAGE] (line {sections['STORAGE'][0].number}): storage units "
+            f"are read under dynamic-wave routing only (FLOW_ROUTING DYNWAVE); under "
+            f"{routing} SWMM routes them by their volume, which is not modelled")
+    for line in sections.get("STORAGE", []):
+        manhole = _storage_unit(line, curves, path)
+        invert[manhole.name] = manhole.invert
+        manholes.append(manhole)
     outfalls: list[Outfall] = []
     for line in sections.get("OUTFALLS", []):
         require_fields(line, 2, "an outfall", path)
@@ -381,6 +401,96 @@ def read_swmm_inp(
     )
     network.validate()
     return network, loads, pollutants
+
+
+def _storage_curves(lines, path) -> dict[str, tuple[tuple, tuple]]:
+    """`[CURVES]`: ``{name: (depths, areas)}`` of the STORAGE curves, each curve's points in
+    file order over any number of lines, its type on its first line (`table.c:67-108`). A
+    curve of another type is refused (no object that uses one is read), as are an unpaired
+    value and depths that do not strictly increase (`table.c:313`)."""
+    points: dict[str, list[tuple[float, float]]] = {}
+    for line in lines:
+        name = line.fields[0]
+        start = 1
+        if name not in points:
+            kind = line.fields[1].upper() if len(line.fields) > 1 else ""
+            if kind not in _CURVE_TYPES:
+                raise ValueError(
+                    f"{path}: line {line.number}: curve {name!r} needs its type (one of "
+                    f"{_CURVE_TYPES}) on its first line")
+            if kind != "STORAGE":
+                raise ValueError(
+                    f"{path}: line {line.number}: curve {name!r} is of type {kind}; only "
+                    f"STORAGE curves are read (no object that uses another type is "
+                    f"modelled)")
+            points[name] = []
+            start = 2
+        if (len(line.fields) - start) % 2:
+            raise ValueError(f"{path}: line {line.number}: curve {name!r} has an unpaired "
+                             f"value; give depth-area pairs")
+        for i in range(start, len(line.fields), 2):
+            x = as_float(line, i, "a curve depth", path)
+            y = as_float(line, i + 1, "a curve area", path)
+            if points[name] and x <= points[name][-1][0]:
+                raise ValueError(
+                    f"{path}: line {line.number}: curve {name!r} depths must be strictly "
+                    f"increasing (SWMM's ERR_CURVE_SEQUENCE), got {x} after "
+                    f"{points[name][-1][0]}")
+            points[name].append((x, y))
+    return {name: (tuple(p[0] for p in pts), tuple(p[1] for p in pts))
+            for name, pts in points.items()}
+
+
+def _storage_unit(line, curves: dict, path) -> Manhole:
+    """A `[STORAGE]` line, ``Name Elev MaxDepth InitDepth Shape ... [SurDepth [Fevap
+    [exfiltration]]]`` (node.c:654-809): TABULAR names a curve, the other shapes take three
+    values (FUNCTIONAL a1 a2 a0; CYLINDRICAL L W -; CONICAL L W Z; PARABOLOID L W H;
+    PYRAMIDAL L W Z). Evaporation and exfiltration are refused by name."""
+    require_fields(line, 6, "a storage unit", path)
+    name = line.fields[0]
+    where = f"{path}: line {line.number}: storage unit {name!r}"
+    elevation = as_float(line, 1, "the invert elevation", path)
+    max_depth = as_float(line, 2, "the maximum depth", path)
+    initial = as_float(line, 3, "the initial depth", path)
+    for what, value in (("maximum", max_depth), ("initial", initial)):
+        if value < 0.0:
+            raise ValueError(f"{where} has a negative {what} depth {value} m")
+    shape = line.fields[4].upper()
+    if shape not in _STORAGE_SHAPES:
+        raise ValueError(f"{where} has shape {line.fields[4]!r}; SWMM's shapes are "
+                         f"{_STORAGE_SHAPES}")
+    if shape == "TABULAR":
+        label = line.fields[5]
+        if label not in curves:
+            raise ValueError(f"{where} names curve {label!r}, which is not a STORAGE curve "
+                             f"in [CURVES]")
+        curve: tuple = ("tabular", *curves[label])
+        n = 6
+    else:
+        if len(line.fields) < 8:                                              # node.c:710
+            raise ValueError(f"{where}: {shape} needs three values after it")
+        a, b, c = (as_float(line, i, f"a {shape} value", path) for i in (5, 6, 7))
+        if shape == "CYLINDRICAL" and c < 0.0:                                # node.c:734
+            raise ValueError(f"{where}: CYLINDRICAL third value must be >= 0, got {c}")
+        curve = {"FUNCTIONAL": ("functional", a, b, c),
+                 "CYLINDRICAL": ("cylindrical", a, b)}.get(shape, (shape.lower(), a, b, c))
+        n = 8
+    surcharge = as_float(line, n, "the surcharge depth", path) if len(line.fields) > n else 0.0
+    if surcharge < 0.0:
+        raise ValueError(f"{where} has a negative surcharge depth {surcharge} m")
+    if len(line.fields) > n + 1 and as_float(line, n + 1, "the evaporation factor",
+                                             path) != 0.0:
+        raise ValueError(f"{where} has evaporation factor {line.fields[n + 1]}; storage "
+                         f"evaporation is not modelled (set Fevap to 0)")
+    if len(line.fields) > n + 2:
+        raise ValueError(f"{where} has exfiltration parameters {list(line.fields[n + 2:])}; "
+                         f"storage seepage (exfiltration) is not modelled")
+    try:
+        validate_storage_curve(name, curve)
+    except ValueError as err:
+        raise ValueError(f"{path}: line {line.number}: {err}") from err
+    return Manhole(name, elevation, ground=elevation + max_depth, surcharge_depth=surcharge,
+                   initial_depth=initial, storage=curve)
 
 
 def _dynamic_wave_options(opts: dict, path) -> DynamicWaveOptions:

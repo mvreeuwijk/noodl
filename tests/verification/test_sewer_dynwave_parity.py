@@ -1081,3 +1081,120 @@ def test_drop_switch_matches_swmm_wherever_swmm_converges(tmp_path, name):
     on = {k: h for k, h in held.items() if h}
     assert set(on) == set(fails), on
     assert all(abs(gap) <= 1e-9 for h in on.values() for gap in h.values()), on
+
+
+# ------------------------------------------------------------------------- storage units
+#: Storage-unit fixtures (`[STORAGE]`): the file and its edits.
+#: - ``free_surface``: the tree with J5 CONICAL, J3 FUNCTIONAL and J4 TABULAR (all SurDepth
+#:   0, MaxDepth 3 m), filling below every crown;
+#: - ``extran``: the 3x EXTRAN tree with J3 FUNCTIONAL, MaxDepth 0.4 m below its 0.45 m
+#:   crown and no SurDepth, so its full depth is NOT extended and it floods at 0.4 m from
+#:   step 33, and J4 TABULAR, MaxDepth 0.3 m with SurDepth 1.0 m, so its full depth IS
+#:   extended to its 0.45 m crown and it surcharges above that (to 0.92 m) with its volume
+#:   held at the full volume (link.c:450-458, dynwave.c:683-687, node.c:943-945);
+#: - ``slot``: the same under SURCHARGE_METHOD SLOT (no storage surcharge branch: J4 rises
+#:   on its storage curve's area above its full depth).
+STORAGE_VARIANTS = {
+    "free_surface": ("storage_dynwave.inp", []),
+    "extran": ("storage_extran_dynwave.inp", []),
+    "slot": ("storage_extran_dynwave.inp",
+             [("SURCHARGE_METHOD     EXTRAN", "SURCHARGE_METHOD     SLOT")]),
+}
+#: The fast comparison: the free-surface fixture from its dry start through the filling of
+#: all three units and the first flow out of the outfall conduit.
+STORAGE_FAST_STEPS = 40
+
+
+def _storage_inp(tmp_path, variant):
+    name, edits = STORAGE_VARIANTS[variant]
+    text = (DATA / name).read_text()
+    for old, new in edits:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    path = tmp_path / f"storage_{variant}.inp"
+    path.write_text(text)
+    return path
+
+
+def _swmm_storage(inp, steps=None):
+    """SWMM on `inp` (asserting 5.2.4 and 0 % of steps not converging): per step the link
+    flows, node depths and node flooding as `_swmm`, and each node's volume (pyswmm's
+    `Node.volume`, ``newVolume * UCF(VOLUME)``, m3; 0 at a junction, node.c:362-379)."""
+    rpt = inp.with_suffix(".rpt")
+    rows, volumes = [], []
+    with pyswmm.Simulation(str(inp), str(rpt), str(inp.with_suffix(".out"))) as sim:
+        conn = {link.linkid: link.connections for link in pyswmm.Links(sim)}
+        for _ in sim:
+            nodes = list(pyswmm.Nodes(sim))
+            rows.append(({link.linkid: link.flow for link in pyswmm.Links(sim)},
+                         {node.nodeid: node.depth for node in nodes},
+                         {node.nodeid: node.flooding for node in nodes}))
+            volumes.append({node.nodeid: node.volume for node in nodes})
+        assert str(sim.engine_version) == "5.2.4"
+    m = re.search(r"% of Steps Not Converging\s*:\s*([0-9.]+)", rpt.read_text())
+    assert m is not None and float(m.group(1)) == 0.0, "SWMM did not converge on every step"
+    return rows[:steps], volumes[:steps], conn
+
+
+def _storage_parity(tmp_path, variant, steps=None):
+    """noodl against SWMM on a storage variant over `steps` steps (all by default): the
+    worst depth difference, flow and overflow excess (`_worst`) and the worst storage
+    volume excess over ``TOL_DEPTH * A(y)`` (m3, <= 0 passes: the depth target times the
+    unit's area at SWMM's depth); and SWMM's rows."""
+    inp = _storage_inp(tmp_path, variant)
+    rows, volumes, conn = _swmm_storage(inp, steps)
+    net, _, _ = read_swmm_inp(inp)
+    model, state, drivers = build_model(net, iterate_tol=ITERATE_TOL, iterate_max=ITERATE_MAX)
+    record = ("water.phi", "water.q", "sewer.overflow", "sewer.storage_volume")
+    # the surcharged and flooded variants need the tight head solve of the EXTRAN runs
+    # (EXTRAN_ATOL); the free-surface one keeps the default, as the other free-surface runs
+    solve = {} if variant == "free_surface" else {"atol": EXTRAN_ATOL}
+    _, hist = simulate_dynamic_wave(model, state, drivers, steps=len(rows), record=record,
+                                    **solve)
+    worst = _worst(_differences(None, rows, conn, len(rows), run=(net, model, hist, None)))
+    hyd = model.dynamic_wave
+    units = [j for j, m in enumerate(net.manholes) if m.storage is not None]
+    worst_volume = -float("inf")
+    for k, vol in enumerate(volumes):
+        depth = torch.tensor([rows[k][1][n] for n in hyd.junction_names], dtype=torch.float64)
+        area = hyd.storage_curves.area(depth)
+        for j in units:
+            name = hyd.junction_names[j]
+            excess = (abs(hist["sewer.storage_volume"][k, j].item() - vol[name])
+                      - TOL_DEPTH * area[j].item())
+            worst_volume = max(worst_volume, excess)
+    return worst, worst_volume, rows, volumes
+
+
+def test_storage_units_match_swmm_while_they_fill(tmp_path):
+    """FUNCTIONAL, TABULAR and CONICAL storage units (`storage_dynwave.inp`) from the dry
+    start: depths, flows and the units' volumes against SWMM at the free-surface targets
+    over the first `STORAGE_FAST_STEPS` steps (3e-10 m measured)."""
+    worst, worst_volume, rows, _ = _storage_parity(tmp_path, "free_surface",
+                                                   STORAGE_FAST_STEPS)
+    _assert_parity(worst)
+    assert worst_volume <= 0.0
+    assert min(rows[-1][1][n] for n in ("J3", "J4", "J5")) > 0.02     # every unit is wet
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("variant", sorted(STORAGE_VARIANTS))
+def test_storage_units_match_swmm_at_every_step(tmp_path, variant):
+    """Every variant over all 359 steps at the free-surface targets, with the regime it
+    exists for: free surface (no unit floods), or J3 flooding at its own MaxDepth 0.4 m (not
+    its crown) and J4 rising above its extended full depth 0.45 m with SWMM's volume capped
+    at the full volume there."""
+    worst, worst_volume, rows, volumes = _storage_parity(tmp_path, variant)
+    _assert_parity(worst)
+    assert worst_volume <= 0.0
+    flooded = _flooded_steps(rows)
+    peak = {n: max(r[1][n] for r in rows) for n in ("J3", "J4")}
+    if variant == "free_surface":
+        assert flooded == {}
+        return
+    assert set(flooded) == {"J3"}
+    assert peak["J3"] == pytest.approx(0.4, abs=1e-12)
+    assert peak["J4"] > 0.6
+    full = 0.5 * (1.0 + 1.9) * 0.45                       # Small: area 1 + 2 y up to 0.5 m
+    above = [v["J4"] for r, v in zip(rows, volumes, strict=True) if r[1]["J4"] > 0.45]
+    assert above and max(abs(v - full) for v in above) < 1e-12

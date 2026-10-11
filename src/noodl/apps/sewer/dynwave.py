@@ -33,6 +33,7 @@ from noodl.apps.sewer.dynwave_terms import (
     conduit_terms,
     lengthening_factor,
 )
+from noodl.apps.sewer.storage import StorageCurves
 from noodl.apps.sewer.xsect_tables import (
     LCF,
     QCF,
@@ -385,17 +386,24 @@ class JunctionStorage(NodeSource):
     and ``"water.surcharge_slope"`` (m2/s), and `surcharged` reads ``"water.head_last"``
     (m); with `top` also ``"water.flood_excess"`` (m3/s), and `flood_excess` reads
     ``"water.net_inflow_last"`` (m3/s). `bed` holds the junction inverts (m); without
-    `crown` (SLOT) no junction surcharges, without `top` none floods.
+    `crown` (SLOT) no junction surcharges, without `top` none floods. `surchargeable`
+    (bool per junction, default all) marks the junctions that can surcharge at all: a SWMM
+    storage unit only with a SurDepth, and then above its full depth, which is its `crown`
+    here (`dynwave.c:683-687`); elsewhere the band and the flag never act.
     """
 
     def __init__(self, nodes: Tensor, bed: Tensor, bed_area: float,
-                 crown: Tensor | None = None, top: Tensor | None = None) -> None:
+                 crown: Tensor | None = None, top: Tensor | None = None,
+                 surchargeable: Tensor | None = None) -> None:
         super().__init__(nodes)
         self.register_buffer("bed", torch.as_tensor(bed, dtype=F64))
         self.bed_area = float(bed_area)
         self.extran = crown is not None
         if self.extran:
             self.register_buffer("crown", torch.as_tensor(crown, dtype=F64))
+            mask = (torch.ones_like(self.crown, dtype=torch.bool) if surchargeable is None
+                    else torch.as_tensor(surchargeable, dtype=torch.bool))
+            self.register_buffer("surchargeable", mask)
         self.floods = top is not None
         if self.floods:
             self.register_buffer("top", torch.as_tensor(top, dtype=F64))
@@ -465,8 +473,8 @@ class JunctionStorage(NodeSource):
             return torch.zeros_like(head_last)
         if self.floods:
             head_last = torch.minimum(head_last, self.top)
-        return ((head_last > self.crown)
-                & (self._band(head_last, drivers) > 0.0)).to(F64)        # dynwave.c:688
+        return ((head_last > self.crown) & self.surchargeable
+                & (self._band(head_last, drivers) > 0.0)).to(F64)        # dynwave.c:683-691
 
     def _free(self, phi: Tensor, drivers: Mapping) -> tuple[Tensor, Tensor]:
         """The non-flooded withdrawal (m3/s) and its slope (m2/s) at `phi` (m): storage,
@@ -475,7 +483,7 @@ class JunctionStorage(NodeSource):
         if not self.extran:
             return storage, slope
         band = self._band(phi, drivers)
-        above = phi > self.crown
+        above = (phi > self.crown) & self.surchargeable
         free = torch.where(above, torch.maximum(storage, band), storage)
         slope = torch.where(above & (band > storage), stiff.expand_as(band), slope)
         surcharged = drivers["water.surcharged"] > 0.5
@@ -684,15 +692,32 @@ class DynamicWaveHydraulics:
         #: per-junction crown depth (m), in junction order
         self.crown_depth = self.crown_ft * LCF
         # The full depth: MaxDepth, extended to every attached conduit's top
-        # (link.c:440-463, the same conduit ends as the crown).
+        # (link.c:440-463, the same conduit ends as the crown) -- at a storage unit only
+        # when it has a SurDepth (link.c:450, 458).
         max_depth = torch.tensor([0.0 if m.ground is None else m.ground - m.invert
                                   for m in net.manholes], dtype=F64)
+        sur_depth = torch.tensor([m.surcharge_depth for m in net.manholes], dtype=F64)
+        #: per junction: a SWMM storage unit (`Manhole.storage`)
+        self.is_storage = torch.tensor([m.storage is not None for m in net.manholes],
+                                       dtype=torch.bool)
+        extend = ~self.is_storage | (sur_depth > 0.0)                         # link.c:450
         #: per-junction full depth (m): MaxDepth extended to the crown
-        self.full_depth = torch.maximum(max_depth, self.crown_depth)
+        self.full_depth = torch.where(extend, torch.maximum(max_depth, self.crown_depth),
+                                      max_depth)
         #: per-junction flood depth y_max (m): the full depth plus SurDepth, above which
         #: the junction floods (no ponding, dynwave.c:746-748)
-        self.flood_depth = self.full_depth + torch.tensor(
-            [m.surcharge_depth for m in net.manholes], dtype=F64)
+        self.flood_depth = self.full_depth + sur_depth
+        #: per-junction EXTRAN surcharge depth (m): the crown of a junction, the full depth
+        #: of a storage unit (dynwave.c:683-690); `surchargeable` is False where SWMM never
+        #: surcharges (a storage unit without SurDepth, a junction with no crown)
+        self.surcharge_at = torch.where(self.is_storage, self.full_depth, self.crown_depth)
+        self.surchargeable = torch.where(self.is_storage, sur_depth > 0.0,
+                                         self.crown_depth > 0.0)
+        #: the storage units' area and volume curves (`storage.StorageCurves`), per junction
+        self.storage_curves = (
+            StorageCurves([m.storage for m in net.manholes], self.full_depth,
+                          names=self.junction_names)
+            if bool(self.is_storage.any()) else None)
         #: per-junction InitDepth (m)
         self.initial_junction_depth = torch.tensor(
             [m.initial_depth for m in net.manholes], dtype=F64)
@@ -707,8 +732,8 @@ class DynamicWaveHydraulics:
         #: the junctions' `JunctionStorage` (the model's node source; `junction_residual`)
         self.storage = JunctionStorage(
             self.junction_idx, jinv, bed_area=self.min_area_ft2 * _AREA_SI,
-            crown=jinv + self.crown_depth if self.options.surcharge_method == "extran"
-            else None, top=jinv + self.flood_depth)
+            crown=jinv + self.surcharge_at if self.options.surcharge_method == "extran"
+            else None, top=jinv + self.flood_depth, surchargeable=self.surchargeable)
 
     # ------------------------------------------------------------------ geometry
     def _rebuild_geometry(self) -> None:
@@ -770,14 +795,37 @@ class DynamicWaveHydraulics:
             surcharge_method=self.options.surcharge_method,
             hold1=None if hold is None else hold[0], hold2=None if hold is None else hold[1])
 
+    def _junction_depth_ft(self, heads: Tensor) -> Tensor:
+        """The junction depths (ft, >= 0) at full-node `heads` (m), SWMM's (dynwave.c:743)."""
+        jidx = self.junction_idx
+        return torch.clamp(heads[..., jidx] - self.node_invert[jidx], min=0.0) / LCF
+
+    def _storage_area_ft2(self, heads: Tensor) -> Tensor:
+        """Each junction's own storage area (ft2; 0 at a plain junction) at `heads` (m):
+        `node_getSurfArea` (node.c:383-396), the curve in m and m2 (node.c:997-1017)."""
+        depth_ft = self._junction_depth_ft(heads)
+        if self.storage_curves is None:
+            return torch.zeros_like(depth_ft)
+        return self.storage_curves.area(depth_ft * LCF) / LCF**2              # node.c:1017
+
+    def _storage_volume(self, heads: Tensor) -> Tensor:
+        """Each junction's stored volume (m3; 0 at a plain junction, as SWMM's junction
+        volume, node.c:362-379) at `heads` (m): `node_getVolume`, capped at the full volume
+        at or above the full depth (node.c:943-945)."""
+        depth_ft = self._junction_depth_ft(heads)
+        if self.storage_curves is None:
+            return torch.zeros_like(depth_ft)
+        return self.storage_curves.volume(depth_ft * LCF)
+
     def _drop_switch(self, state: Mapping, terms: ConduitTerms, net_inflow: Tensor,
-                     dt: float) -> dict[str, Tensor]:
+                     dt: float, storage_ft2: Tensor) -> dict[str, Tensor]:
         """The drop-end area switch at each junction (`JunctionStorage`, the tie rule), from
         the fed state and one pass's `terms`. Per junction: the threshold head ``"head"`` H*
         (m) of the attached drop end whose threshold is nearest the fed head; the storage
         areas just ``"below"`` and just ``"above"`` it (m2, SWMM's area floor applied);
         ``"applies"``, the threshold lies above the step-start head (the jump in the
-        withdrawal is then upward); ``"held"``, the fed net inflow `net_inflow` (m3/s) lies
+        withdrawal is then upward), a storage unit's own area `storage_ft2` (ft2) being on
+        both sides; ``"held"``, the fed net inflow `net_inflow` (m3/s) lies
         inside that jump at H*, the junction being on the threshold. Per pipe end:
         ``"hold1"``/``"hold2"``, at the chosen end of a held junction the fraction theta of
         the jump at which the net inflow lies (0 at its bottom, 1 at its top), -1 elsewhere
@@ -818,7 +866,7 @@ class DynamicWaveHydraulics:
                      0.0)[..., jidx] > 0.5
         surf = torch.zeros(batch + (n,), dtype=F64)
         surf = surf.index_add(-1, self.u, terms.surface_area1)
-        surf = surf.index_add(-1, self.v, terms.surface_area2)[..., jidx]
+        surf = surf.index_add(-1, self.v, terms.surface_area2)[..., jidx] + storage_ft2
         rest = surf - own
         lo = torch.clamp(torch.where(above, rest, surf), min=self.min_area_ft2) * _AREA_SI
         hi = torch.clamp(torch.where(above, surf, rest + jump), min=self.min_area_ft2) * _AREA_SI
@@ -841,12 +889,13 @@ class DynamicWaveHydraulics:
 
     def _surcharged(self, heads: Tensor) -> Tensor:
         """EXTRAN's surcharge test on the junction heads `heads` (m, full-node): depth above
-        a positive crown (`dynwave.c:688`), as a bool per junction."""
-        jidx = self.junction_idx
-        depth_ft = torch.clamp(heads[..., jidx] - self.node_invert[jidx], min=0.0) / LCF
+        a positive crown (`dynwave.c:690`), at a storage unit with a SurDepth depth above its
+        full depth (`dynwave.c:683-687`), as a bool per junction."""
+        depth_ft = self._junction_depth_ft(heads)
         if self.options.surcharge_method != "extran":
             return torch.zeros_like(depth_ft, dtype=torch.bool)
-        return (self.crown_ft > 0.0) & (depth_ft > self.crown_ft)
+        at_ft = torch.where(self.is_storage, self.full_depth / LCF, self.crown_ft)
+        return self.surchargeable & (depth_ft > at_ft)
 
     def _carried(self, state: Mapping, terms: ConduitTerms, inflow: Tensor) -> State:
         heads = state[f"{self.layer}.phi"]
@@ -932,6 +981,9 @@ class DynamicWaveHydraulics:
         inflow = self._inflow(drivers)
         terms = self._terms(state, self.options.routing_step if dt is None else dt)
         out = self._carried(state, terms, inflow)
+        heads = state[f"{self.layer}.phi"]
+        # a storage unit's own area at the previous pass's depth (dynwave.c:315)
+        storage_ft2 = self._storage_area_ft2(heads)
         drop = None
         if dt is not None:
             # the drop-end area switch (JunctionStorage): a junction held on its threshold
@@ -940,11 +992,12 @@ class DynamicWaveHydraulics:
             # fed net inflow (which does not depend on the class), and fixed for the pass:
             # the re-evaluation only supplies the held class's areas, so re-deciding on it
             # would let the class it sets feed back into its own decision within one pass.
-            drop = self._drop_switch(state, terms, out["sewer.net_inflow"], dt)
+            drop = self._drop_switch(state, terms, out["sewer.net_inflow"], dt, storage_ft2)
             if bool(drop["held"].any()):
                 terms = self._terms(state, dt, (drop["hold1"], drop["hold2"]))
                 out = self._carried(state, terms, inflow)
-                drop = self._drop_switch(state, terms, out["sewer.net_inflow"], dt)
+                drop = self._drop_switch(state, terms, out["sewer.net_inflow"], dt,
+                                         storage_ft2)
         q = state[f"{self.layer}.q"]
         depth_ft = terms.depth
         a_link = area_of_depth(depth_ft, self.geo.y_full, self.geo.a_full)
@@ -955,7 +1008,8 @@ class DynamicWaveHydraulics:
             "sewer.h": depth_ft * LCF,
             "sewer.v": torch.where(moving, v_ft, torch.zeros_like(v_ft)) * LCF,
             "sewer.V_wet": terms.volume * QCF,
-            "sewer.surcharged": self._surcharged(state[f"{self.layer}.phi"]).to(F64),
+            "sewer.surcharged": self._surcharged(heads).to(F64),
+            "sewer.storage_volume": self._storage_volume(heads),
         })
         if dt is None:
             return out
@@ -964,7 +1018,10 @@ class DynamicWaveHydraulics:
         surf = torch.zeros(terms.surface_area1.shape[:-1] + (n,), dtype=F64)
         surf = surf.index_add(-1, self.u, terms.surface_area1)                # dynwave.c:582-583
         surf = surf.index_add(-1, self.v, terms.surface_area2)
-        area_ft2 = torch.clamp(surf[..., jidx], min=self.min_area_ft2)        # dynwave.c:670
+        # the storage unit's own area plus its conduit ends' (not zeroed at a storage node,
+        # dwflow.c:546-547; only a regulator's are, dynwave.c:520-523), then the floor
+        area_ft2 = torch.clamp(surf[..., jidx] + storage_ft2,
+                               min=self.min_area_ft2)                         # dynwave.c:670
         # conveyance the pass lags into c0 (other end pinned), per junction (dynwave.c:578)
         lagged = torch.zeros_like(surf).index_add(-1, self.u, terms.lagged_conveyance1)
         lagged = lagged.index_add(-1, self.v, terms.lagged_conveyance2)[..., jidx]
@@ -1039,7 +1096,8 @@ class DynamicWaveHydraulics:
           depth plus the conduit's FIRST-end offset (zero for a conduit without InitFlow,
           which still counts in the mean): `initNodeDepths`, flowrout.c:337-385 (the first
           offset is used at both ends there, as in SWMM). A junction with an InitDepth keeps
-          it. (Storage units are excluded by SWMM; none are modelled yet.)
+          it, and so does a storage unit, whose InitDepth of 0 is not averaged either
+          (flowrout.c:375).
         - Outfalls start at the depth `link_setOutfallDepth` gives from the conduit's initial
           flow (a FIXED outfall at its stage, the others at their invert at zero flow;
           flowrout.c:383).
@@ -1071,7 +1129,8 @@ class DynamicWaveHydraulics:
         given = self.initial_junction_depth / LCF
         average = torch.where(count[jidx] > 0.0, total[jidx] / count[jidx].clamp(min=1.0),
                               torch.zeros_like(given))                        # flowrout.c:378
-        depth_j = torch.where(given > 0.0, given, average)                    # flowrout.c:376
+        # a storage unit keeps its own InitDepth, 0 included (flowrout.c:375-376)
+        depth_j = torch.where((given > 0.0) | self.is_storage, given, average)
         phi = self.node_invert.clone()
         phi[jidx] = self.node_invert[jidx] + depth_j * LCF
         phi[self.outfall_idx] = self._outfall_heads(q0)                       # flowrout.c:383
@@ -1339,7 +1398,9 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
     own). After every
     step the carried keys are re-evaluated at the returned state. `record` may also name
     ``"sewer.overflow"`` (m3/s per junction, SWMM's flooding loss over each step:
-    `DynamicWaveHydraulics.overflow`), which is not a state key.
+    `DynamicWaveHydraulics.overflow`), which is not a state key, and the closure's
+    reporting keys (``"sewer.storage_volume"``, ``"sewer.V_wet"``, ``"sewer.h"``, ...), from
+    its query at each step's end state.
     `diagnostics`, when a list, receives each step's `Model.step` diagnostics.
     `solve_kwargs` reach the head solve (Newton); `atol` defaults to `solve_atol` for each
     step's length (m3/s: `SOLVE_ATOL`, or the bed's round-off floor where larger) and
@@ -1445,9 +1506,19 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
         lengths.append(step)
         if diagnostics is not None:
             diagnostics.append(diag)
+        report = None
         for key in record:
-            rows[key].append(hyd.overflow(before, state, drivers, dt=step)
-                             if key == "sewer.overflow" else state[key])
+            if key == "sewer.overflow":
+                rows[key].append(hyd.overflow(before, state, drivers, dt=step))
+            elif key in state:
+                rows[key].append(state[key])
+            else:
+                if report is None:
+                    report = hyd(state, drivers)
+                if key not in report:
+                    raise KeyError(f"simulate_dynamic_wave: record names {key!r}, which is "
+                                   f"neither a state key nor a closure reporting key")
+                rows[key].append(report[key])
     out = {key: torch.stack(v) for key, v in rows.items()}
     out["t"] = torch.tensor(ends, dtype=F64)
     out["dt"] = torch.tensor(lengths, dtype=F64)
