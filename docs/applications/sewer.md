@@ -578,6 +578,31 @@ SWMM's EXTRAN iteration has no fixed point when a junction would fall back throu
 while the storage equation keeps it above (see "Dynamic wave"). Such steps have no SWMM
 reference, and none occurs in this fixture.
 
+Flooding is compared on depths, flows and `sewer.overflow` against pyswmm's `Node.flooding`
+(SWMM's overflow rate of the step), at the same targets (the overflow at the flow target):
+
+- `flooding_dynwave.inp` (EXTRAN, 3x): J2, with `SurDepth` 1.7 m, floods at 2.0 m on steps
+  21-27 and is then released; J3 floods from step 270.
+- `flooding_slot_dynwave.inp` (the same junctions under SLOT): J3 floods from step 307.
+
+SWMM converges on every step of both, and the worst differences are 1.2e-10 m and
+1.4e-11 m³/s of overflow.
+
+`flooding_outfall_dynwave.inp` floods J4, whose only outflow conduit C5 ends at the free
+outfall, from step 236. There SWMM's answer is not converged for one quantity, although
+SWMM reports 0 % of steps not converging:
+
+- SWMM's stopping rule tests only non-outfall depths. J4 is clamped at `y_max`, so once J4
+  is clamped on two trials in a row nothing tested depends on C5's flow.
+- SWMM therefore stops while C5's relaxed flow is still 3.2e-5 m³/s from its fixed point.
+  A reproduction of SWMM's trials at that step lands on SWMM's value to 1e-10 m³/s and
+  converges to noodl's.
+- That error decays over the next 22 steps.
+
+The test therefore leaves out C5's flow, the outfall depth and J4's overflow on steps
+236-258, where they are held only to the onset error's scale. Every other quantity on every
+step meets the targets.
+
 The same networks with SWMM at its **default** tolerance (`HEAD_TOLERANCE` 0.0015 m,
 `MAX_TRIALS` 8), against noodl's converged answer:
 
