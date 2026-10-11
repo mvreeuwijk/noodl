@@ -216,12 +216,16 @@ def test_signal_drives_must_be_a_string_or_a_list_of_strings(tmp_path: Path, dri
 def test_refusal_reason_for_known_and_unknown_classes() -> None:
     from noodl.apps.building_physics.modelica import schema
 
-    assert schema.refusal_reason("Buildings.Fluid.Sources.Outside_CpLowRise") == (
-        "wind pressure is not supported"
-    )
+    assert schema.refusal_reason("Buildings.Fluid.Sources.Outside_CpLowRise") is None
     assert schema.refusal_reason(
         "Buildings.BoundaryConditions.WeatherData.ReaderTMY3"
-    ) == "weather data is not supported"
+    ) is None
+    assert schema.refusal_reason(
+        "Buildings.BoundaryConditions.WeatherData.Examples.ReaderTMY3"
+    ) == "weather data other than a ReaderTMY3 is not supported"
+    assert schema.refusal_reason("Modelica.Blocks.Continuous.LimPID") == (
+        "feedback controllers are not supported"
+    )
     assert schema.refusal_reason("Buildings.Airflow.Multizone.Orifice") is None
 
 

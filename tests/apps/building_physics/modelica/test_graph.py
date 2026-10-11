@@ -97,7 +97,7 @@ def test_refused_classes_are_named_together() -> None:
         _graph("refused.json")
     message = str(excinfo.value)
     assert "bouOut" in message
-    assert "wind pressure is not supported" in message
+    assert "component class is not supported" in message
     assert "ctrl" in message
     assert "feedback controllers are not supported" in message
 
@@ -105,7 +105,7 @@ def test_refused_classes_are_named_together() -> None:
 def test_malformed_connection_ref_is_gathered_not_raised_immediately() -> None:
     """`graph._split` must append a malformed (no '.') connection reference to the error list
     rather than raising immediately, so gather-all keeps running and names the OTHER error
-    (`bouOut`'s wind-pressure refusal, found in an earlier phase) in the same
+    (`bouOut`'s refusal as an unsupported class, found in an earlier phase) in the same
     `ModelicaImportError`. `schema.load` does not itself check the
     '<instance>.<port>' format, so this is reachable from a malformed document even though the
     exporter itself never writes one."""
@@ -115,7 +115,7 @@ def test_malformed_connection_ref_is_gathered_not_raised_immediately() -> None:
     assert "not_a_dotted_reference" in message
     assert "is not an '<instance>.<port>' reference" in message
     assert "bouOut" in message
-    assert "wind pressure is not supported" in message
+    assert "component class is not supported" in message
 
 
 def _head(path, rho: float, g: float) -> float:
@@ -186,7 +186,7 @@ def test_refusals_are_gathered_across_every_phase_into_one_error() -> None:
         _graph("refused_and_bad_door.json")
     message = str(excinfo.value)
     assert "bouOut" in message
-    assert "wind pressure is not supported" in message
+    assert "component class is not supported" in message
     assert "dooOpeClo" in message
 
 
@@ -330,16 +330,17 @@ def test_attached_boundary_with_further_connected_ports_is_refused(tmp_path) -> 
 
 
 def test_ports_beside_a_refused_component_add_no_follow_on_message(tmp_path) -> None:
-    """An orifice wired to a refused `Outside_CpLowRise` is not also
+    """An orifice wired to a refused `FlowControlled_m_flow` (a mover) is not also
     reported as "not connected"; the refusal names the root cause once."""
     import json
 
     doc = json.loads((FIXTURES / "two_zones_orifice.json").read_text())
-    doc["components"][0]["class"] = "Buildings.Fluid.Sources.Outside_CpLowRise"
+    doc["components"][0]["class"] = "Buildings.Fluid.Movers.FlowControlled_m_flow"
     path = tmp_path / "m.json"
     path.write_text(json.dumps(doc))
     with pytest.raises(ModelicaImportError) as exc:
         build(load(path))
     msg = str(exc.value)
-    assert "refused 1 item" in msg and "bouA (Buildings.Fluid.Sources.Outside_CpLowRise)" in msg
+    assert "refused 1 item" in msg
+    assert "bouA (Buildings.Fluid.Movers.FlowControlled_m_flow)" in msg
     assert "not connected" not in msg

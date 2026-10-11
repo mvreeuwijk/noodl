@@ -227,10 +227,11 @@ def test_one_way_flow_against_the_embedded_contam_table():
 
 
 REFUSED = {
-    # Wind pressure and weather data (Outside_CpLowRise, ReaderTMY3).
-    "PressurizationData": {"east", "weaDat", "west"},
-    # A feedback controller and its temperature sensor, besides the wind boundaries.
-    "TrickleVent": {"con", "east", "temSen", "weaDat", "west"},
+    # The committed export predates weather files travelling with the JSON: its reader is
+    # refused until the model is re-exported with its weather file.
+    "PressurizationData": {"weaDat"},
+    # A feedback controller and the temperature sensor wired as a component.
+    "TrickleVent": {"con", "temSen"},
     # Two orifices in one column chain (no junction node), plus the controller.
     "ChimneyShaftNoVolume": {"con", "oriChiBot", "oriChiTop", "temSen"},
     # A mass- and heat-storing MediumColumnDynamic, plus the controller.

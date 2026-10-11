@@ -24,8 +24,10 @@ print(result["air.q"][-1])   # edge flows (kg/s); names.edges maps an MBL instan
 ```
 
 **Supported (19 models: 8 `Validation` + 11 `Examples`).** `Buildings.Airflow.Multizone`
-elements, `MixingVolume` zones, pressure/temperature boundaries and trace substances — not
-`Buildings.ThermalZones`, HVAC, wind, weather or district networks. `Validation`: `OneWayFlow`,
+elements, `MixingVolume` zones, pressure/temperature boundaries, trace substances, the outside
+boundaries `Outside`, `Outside_Cp`, `Outside_CpLowRise` and `Outside_CpData` and the weather
+reader `ReaderTMY3` (see "Weather and wind" below) — not `Buildings.ThermalZones`, HVAC or
+district networks. `Validation`: `OneWayFlow`,
 `DoorOpenClosed`, `OpenDoorPressure`, `OpenDoorTemperature`, `ThreeRoomsContam`,
 `ThreeRoomsContamDiscretizedDoor`, `OpenDoorBuoyancyDynamic`, `OpenDoorBuoyancyPressureDynamic`.
 `Examples`: `CO2TransportStep`, `ClosedDoors`, `NaturalVentilation`, `OneEffectiveAirLeakageArea`,
@@ -35,17 +37,21 @@ elements, `MixingVolume` zones, pressure/temperature boundaries and trace substa
 **Refused, each with a named error** (`ModelicaImportError` lists every offending instance and
 its class):
 
-- `PressurizationData`, `TrickleVent`, `ChimneyShaftNoVolume`, `ChimneyShaftWithVolume` — wind
-  pressure, weather data, feedback controllers, or a dynamic (mass- and heat-storing) hydrostatic
-  medium column, none of which is in scope.
+- `TrickleVent`, `ChimneyShaftNoVolume`, `ChimneyShaftWithVolume` — feedback controllers, a
+  chain of two flow elements, or a dynamic (mass- and heat-storing) hydrostatic medium column,
+  none of which is in scope.
+- `PressurizationData` — its committed export predates the weather file travelling with the
+  JSON, so its `ReaderTMY3` is refused until the model is re-exported.
+- Every `Buildings.BoundaryConditions.WeatherData` class but `ReaderTMY3`; a weather bus wired
+  to anything but an `Outside` boundary's `weaBus`, or any weather-bus output other than
+  `TDryBul`, `pAtm`, `relHum`, `winSpe` and `winDir` read by anything.
 
-For example, reading `PressurizationData` raises:
+For example, reading `TrickleVent` raises:
 
-```
-ModelicaImportError: modelica: refused 3 items:
-  - east (Buildings.Fluid.Sources.Outside_CpLowRise): wind pressure is not supported
-  - weaDat (Buildings.BoundaryConditions.WeatherData.ReaderTMY3): weather data is not supported
-  - west (Buildings.Fluid.Sources.Outside_CpLowRise): wind pressure is not supported
+```text
+ModelicaImportError: modelica: refused 2 items:
+  - con (Modelica.Blocks.Continuous.LimPID): feedback controllers are not supported
+  - temSen (Modelica.Thermal.HeatTransfer.Sensors.TemperatureSensor): component class is not supported
 ```
 
 **Conventions:**
@@ -77,8 +83,44 @@ ModelicaImportError: modelica: refused 3 items:
   is `SteadyState`), a closed group of zones (joined only by pressure-dependent
   edges or zonal flows, no boundary among them) with a net flow imbalance — an unequal
   `ZonalFlow_m_flow` pair or a mass source into it; `MediumColumn.densitySelection = "actual"`;
-  and `Outside` without a weather-bus signal driving it. With storage, none of the 19 supported models needs
-  any of the three.
+  and an outside boundary whose weather-bus inputs come from no `ReaderTMY3` and no signal. With
+  storage, none of the 19 supported models needs any of the three.
+
+**Weather and wind.** A `ReaderTMY3` supplies the outside boundaries wired to it with the dry-bulb
+temperature, the atmospheric pressure, the relative humidity, the wind speed and the wind
+direction, as MBL computes them: the TMY3 table interpolated by MSL's Akima spline on the
+calendar time (which repeats a one-year file), converted to K, Pa, 1, m/s and rad, and limited
+(humidity to 0..1, wind speed to at least 0, direction modulo 2 pi). Each output may come from
+the file, a parameter or an input signal (`<output>Sou`); `pAtm` defaults to a 101325 Pa
+parameter, as in MBL. Solar and sky outputs are not read. The `.mos` file travels with the
+JSON (see "Reproducing the export"); a model whose file is missing or altered is refused.
+
+An outside boundary is at the atmospheric pressure, the dry-bulb temperature and the water
+mass fraction of the relative humidity (`X = phi k / (k phi + p/pSat - phi)`). The wind
+boundaries add `pWin = Cs 0.5 Cp d v^2`:
+
+- `Outside_Cp`: a fixed `Cp` (or the `Cp_in` signal), `d` at the atmospheric pressure and the
+  default composition;
+- `Outside_CpLowRise`: Swami and Chandra's low-rise correlation, `Cp = Cp0 ln(1.248 - 0.703
+  sin(a/2) - 1.175 sin^2 a + 0.131 sin^3(2 a G) + 0.769 cos(a/2) + 0.071 G^2 sin^2(a/2) + 0.717
+  cos^2(a/2))`, `G = ln s`, blended to `Cp0` below 5 degrees and to its 180-degree value above
+  175;
+- `Outside_CpData`: a periodic cubic Hermite spline through the `(incAngSurNor, Cp)` table,
+  scaled by `Cs`.
+
+The last two take `d` at the boundary's own pressure, an implicit equation solved by
+iteration. Angles follow MBL: the wind direction is where the wind comes from (north 0, east
+pi/2), a surface azimuth where the surface faces (south 0, west pi/2), and the incidence is
+`winDir - (azi - pi)`. These differ from CONTAM's, whose wind pressure acts on the envelope
+path rather than on the boundary node.
+
+The boundaries' values are point values at each driver-grid time, like any boundary signal.
+The table's knots and the points where a limiter starts cutting are added to the driver grid as
+step boundaries (the outputs are once continuously differentiable there); a repeating file's
+year wrap is an event. `names.weather` (from `read_modelica(..., return_names=True)`) holds the
+reader's outputs, keyed `"<reader>.weaBus.<output>"`, and every wind boundary's `"<boundary>.pWin"`
+on the output grid; `assemble.weather_columns(doc, times)` evaluates the same for a model with
+no flow element, which `read_modelica` refuses.
 
 **Volume mass storage.** Like MBL, the reader stores each volume's air compressibly unless its
 `massDynamics` is `SteadyState`: zone pressures are states, the t = StartTime row holds MBL's

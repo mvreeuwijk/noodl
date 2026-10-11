@@ -11,9 +11,9 @@ and signal's required fields. It raises `ModelicaImportError` naming the first m
 that is `graph.build`'s job (`noodl.apps.building_physics.modelica.graph`), once every
 connection has been resolved to a port and a node. This module only supplies the vocabulary
 `graph.build` checks classes against: `SUPPORTED` groups the fully qualified MBL/MSL class
-names the reader recognises, and `REFUSED` (plus `REFUSED_PREFIXES` for the
-weather-data package) maps a class this importer explicitly declines to convert to the short
-reason `graph.build` reports against every offending instance.
+names the reader recognises, and `REFUSED` maps a class this importer explicitly declines to
+convert to the short reason `graph.build` reports against every offending instance;
+`REFUSED_PREFIXES` refuses every class of the weather-data package but `ReaderTMY3`.
 """
 
 from __future__ import annotations
@@ -50,8 +50,8 @@ ZONES = frozenset({
 # Weather and wind (`weather.py`, `outside.py`). The outside boundaries that read a weather bus
 # (`Fluid/Sources/BaseClasses/Outside.mo`), the three of them that add a wind pressure, and the
 # one weather reader. `WEATHER_BUS_OUTPUTS` are the weather-bus variables those boundaries read
-# (`Outside.mo:6-7`, `Outside_Cp.mo:42-45`, `Outside_CpLowRise.mo:44-48`,
-# `Outside_CpData.mo:70-74`, `BaseClasses/Outside.mo:51`): the only reader outputs evaluated.
+# (`Outside.mo:7-8`, `Outside_Cp.mo:39-42`, `Outside_CpLowRise.mo:47-51`,
+# `Outside_CpData.mo:85-89`, `BaseClasses/Outside.mo:51`): the only reader outputs evaluated.
 WEATHER_READERS = frozenset({"Buildings.BoundaryConditions.WeatherData.ReaderTMY3"})
 WEATHER_BUS_OUTPUTS = ("TDryBul", "pAtm", "relHum", "winSpe", "winDir")
 OUTSIDE_WIND = frozenset({
@@ -61,10 +61,7 @@ OUTSIDE_WIND = frozenset({
 })
 OUTSIDE_FAMILY = frozenset({"Buildings.Fluid.Sources.Outside"}) | OUTSIDE_WIND
 
-BOUNDARIES = frozenset({
-    "Buildings.Fluid.Sources.Boundary_pT",
-    "Buildings.Fluid.Sources.Outside",
-})
+BOUNDARIES = frozenset({"Buildings.Fluid.Sources.Boundary_pT"}) | OUTSIDE_FAMILY
 ONE_WAY = frozenset({
     "Buildings.Airflow.Multizone.Orifice",
     "Buildings.Airflow.Multizone.EffectiveAirLeakageArea",
@@ -158,27 +155,31 @@ OBSERVERS = frozenset({
 
 SUPPORTED = (
     ZONES | BOUNDARIES | ONE_WAY | TWO_WAY | COLUMNS | ZONAL | THERMAL_PIN | HEAT_SOURCES
-    | SOURCES | SIGNALS | MATH | INLINE_SENSORS | OBSERVERS
+    | SOURCES | SIGNALS | MATH | INLINE_SENSORS | OBSERVERS | WEATHER_READERS
 )
 
 # Refused classes, each with the short reason `graph.build` reports
 # against every instance of it.
 REFUSED: dict[str, str] = {
-    "Buildings.Fluid.Sources.Outside_CpLowRise": "wind pressure is not supported",
     "Modelica.Blocks.Continuous.LimPID": "feedback controllers are not supported",
     "Buildings.Airflow.Multizone.MediumColumnDynamic": (
         "a dynamic (mass- and heat-storing) hydrostatic column is not supported"
     ),
 }
-# `BoundaryConditions.WeatherData.*`: any class under this package, whichever
-# reader the model uses (`ReaderTMY3` and friends), not just one named class.
+# `BoundaryConditions.WeatherData.*`: every class under this package but the supported
+# `ReaderTMY3` (`WEATHER_READERS`).
 REFUSED_PREFIXES: dict[str, str] = {
-    "Buildings.BoundaryConditions.WeatherData.": "weather data is not supported",
+    "Buildings.BoundaryConditions.WeatherData.": (
+        "weather data other than a ReaderTMY3 is not supported"
+    ),
 }
 
 
 def refusal_reason(cls: str) -> str | None:
-    """The reason `cls` is refused, or `None` if this module does not (yet) know it is."""
+    """The reason `cls` is refused, or `None` if this module does not (yet) know it is. A
+    supported class is never refused, also when it matches a refused prefix."""
+    if cls in SUPPORTED:
+        return None
     if cls in REFUSED:
         return REFUSED[cls]
     for prefix, reason in REFUSED_PREFIXES.items():

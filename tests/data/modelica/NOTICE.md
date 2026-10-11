@@ -86,10 +86,11 @@ such enhancements or derivative works thereof, in binary and source code form.
 Four of the 23 models are refused by `read_modelica` (`ModelicaImportError`, naming the
 offending instances); their JSON is exported and kept here for the refusal tests:
 
-- `PressurizationData.json` — wind-pressure boundaries (`Outside_CpLowRise`) and weather data
-  (`ReaderTMY3`) are not supported.
-- `TrickleVent.json` — the same wind-pressure/weather-data boundaries, plus a feedback
-  controller (`LimPID`) and a temperature sensor wired as a component.
+- `PressurizationData.json` — exported before weather files travelled with the JSON, so its
+  `ReaderTMY3` has no weather file next to it (the wind-pressure boundaries themselves are
+  supported).
+- `TrickleVent.json` — a feedback controller (`LimPID`) and a temperature sensor wired as a
+  component.
 - `ChimneyShaftNoVolume.json` — a chain of more than one flow element between two nodes and a
   feedback controller are not supported.
 - `ChimneyShaftWithVolume.json` — a dynamic (mass- and heat-storing) hydrostatic column

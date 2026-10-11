@@ -15,7 +15,7 @@
   "components": [
     {
       "name": "bouOut",
-      "class": "Buildings.Fluid.Sources.Outside_CpLowRise",
+      "class": "Buildings.Fluid.Movers.FlowControlled_m_flow",
       "parameters": {"lat": 0.7, "til": 1.5707963267948966, "azi": 0.0}
     },
     {

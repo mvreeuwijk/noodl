@@ -571,8 +571,9 @@ regression at rtol 1e-8.
 - **Doorway laminar transition is approximated.** Doorway openings use the generic laminar
   transition of `PowerLaw` (1e-3 Pa) rather than one derived from the door's own record. The
   effect is confined to pressure differences below $10^{-3}$ Pa across the doorway.
-- **The Modelica import accepts a stated subset.** Wind pressure, weather data, controllers,
-  and dynamic medium columns are refused with a named error; see [the Modelica import's refused content](../formats/modelica.md).
+- **The Modelica import accepts a stated subset.** Controllers and dynamic medium columns are
+  refused with a named error, and only the weather reader's airflow outputs are read; see [the
+  Modelica import's refused content](../formats/modelica.md).
 
 ## Install
 
