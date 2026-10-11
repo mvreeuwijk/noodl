@@ -44,6 +44,7 @@ Steps. pyswmm's iterator yields after every routing step except the last: the fi
 the state after step k + 1, the same indexing as noodl's history.
 """
 
+import dataclasses
 import re
 import shutil
 from pathlib import Path
@@ -175,7 +176,8 @@ def _assert_parity(worst):
 def _converged_swmm(tmp_path, name, surcharged=False):
     """SWMM's rows, after checking the engine and that it converged on every step. Without
     `surcharged` no conduit end may reach its crown (the free-surface fixtures must stay
-    free-surface, or they would test something else); with it some end must."""
+    free-surface, or they would test something else); with it some end must; with
+    ``surcharged=None`` the regime is not checked."""
     rows, conn, engine, not_converging = _swmm(tmp_path, name)
     assert engine == "5.2.4"
     assert not_converging == 0.0, f"SWMM did not converge on every step ({not_converging} %)"
@@ -186,10 +188,12 @@ def _converged_swmm(tmp_path, name, surcharged=False):
             for node, offset in ((p.u, p.inlet_offset), (p.v, p.outlet_offset)):
                 fill = (depths[node] - offset) / p.diameter
                 reached |= fill >= 1.0
-                assert surcharged or fill < 1.0, (
+                assert surcharged is not False or fill < 1.0, (
                     f"{name}: SWMM surcharges conduit {p.name} at {node} at step {k + 1} "
                     f"(end depth {fill:.3f} of its diameter); reduce the fixture's inflows")
-    assert reached == surcharged, f"{name}: surcharge expected={surcharged}, reached={reached}"
+    if surcharged is not None:
+        assert reached == surcharged, (
+            f"{name}: surcharge expected={surcharged}, reached={reached}")
     return rows, conn
 
 
@@ -660,3 +664,155 @@ def test_time_varying_inflow_matches_swmm_with_a_timeseries(tmp_path):
     assert any(t != 60000 for t in
                [b - a for a, b in zip(times[20:], times[21:], strict=False)])
     _assert_parity(_worst(_differences(VARIABLE_NAME, rows, conn, len(rows), run=run)))
+
+
+# ----------------------------------------------------------------------------- options (C2)
+OPTIONS_NAME = "options_dynwave.inp"
+#: The fast comparison: the first 60 steps (5 min) of the options fixture, which cover C1's
+#: MaxFlow cap, C5 closed by its gated outfall and the start of C4's reverse flow.
+OPTIONS_FAST_STEPS = 60
+
+
+def _options_evidence(rows):
+    """What SWMM's own rows say about the options fixture, so that a match is not trivial:
+    the options must act in the reference. Returns the 1-based steps at which each option
+    acts (empty lists are asserted against by the callers)."""
+    acts = {"max_flow": [], "outfall_gate": [], "conduit_gate": [], "init_flow": [],
+            "init_depth": []}
+    for k, (flows, depths, _) in enumerate(rows):
+        step = k + 1
+        if abs(abs(flows["C1"]) - 0.012) < 1e-9:
+            acts["max_flow"].append(step)
+        # J4's head against the FIXED stage: a gated outfall passes nothing in, so C5 is 0
+        # exactly until J4 rises over 9.3 m (and can flow only forward afterwards)
+        if 9.0 + depths["J4"] < 9.3 and flows["C5"] == 0.0:
+            acts["outfall_gate"].append(step)
+        # C4's reverse flow (J4 higher than J5) is closed by its gate: exactly 0, not tiny
+        if 9.0 + depths["J4"] > 9.1 + depths["J5"] + 1e-3 and flows["C4"] == 0.0:
+            acts["conduit_gate"].append(step)
+    flows, depths, _ = rows[0]
+    if flows["C3"] > 0.0:
+        acts["init_flow"].append(1)             # C3 starts from its InitFlow, not rest
+    if depths["J1"] > 0.2:
+        acts["init_depth"].append(1)            # J1 starts at 0.25 m
+    return acts
+
+
+def test_options_match_swmm_over_the_first_minutes(tmp_path):
+    """InitDepth (J1 0.25 m), InitFlow (C3 0.03 m3/s), MaxFlow (C1 0.012), two barrels (C3),
+    a conduit flap gate (C4), a gated FIXED outfall (stage 9.3 m, above J4's invert) and
+    conduit lengthening (C2, 10 m, `LENGTHENING_STEP 5`) together, in SWMM and noodl: depths,
+    flows and overflow at the free-surface targets, SWMM converging on every step (the fast
+    case). The reference rows show that each option acts."""
+    rows, conn = _converged_swmm(tmp_path, OPTIONS_NAME, surcharged=None)
+    acts = _options_evidence(rows[:OPTIONS_FAST_STEPS])
+    for option in ("max_flow", "outfall_gate", "init_flow", "init_depth"):
+        assert acts[option], f"SWMM's rows show no {option} acting in the first minutes"
+    _assert_parity(_worst_errors(OPTIONS_NAME, rows, conn, OPTIONS_FAST_STEPS))
+
+
+@pytest.mark.slow
+def test_options_match_swmm_at_every_step(tmp_path):
+    """All 359 steps of the options fixture at the free-surface targets; the flap gate on C4
+    closes reverse flow in the reference (water backs up from J4)."""
+    rows, conn = _converged_swmm(tmp_path, OPTIONS_NAME, surcharged=None)
+    acts = _options_evidence(rows)
+    assert all(acts.values()), acts
+    _assert_parity(_worst_errors(OPTIONS_NAME, rows, conn, len(rows)))
+
+
+def _ablated(net, option):
+    """The options network with one option switched off."""
+    def pipe(name, **kw):
+        return dataclasses.replace(net, pipes=tuple(
+            dataclasses.replace(p, **kw) if p.name == name else p for p in net.pipes))
+
+    if option == "init_depth":
+        return dataclasses.replace(net, manholes=tuple(
+            dataclasses.replace(m, initial_depth=0.0) for m in net.manholes))
+    if option == "init_flow":
+        return pipe("C3", initial_flow=0.0)
+    if option == "max_flow":
+        return pipe("C1", max_flow=None)
+    if option == "conduit_gate":
+        return pipe("C4", flap_gate=False)
+    if option == "outfall_gate":
+        return dataclasses.replace(net, outfalls=tuple(
+            dataclasses.replace(o, flap_gate=False) for o in net.outfalls))
+    if option == "barrels":
+        return pipe("C3", barrels=1)
+    if option == "lengthening":
+        return dataclasses.replace(net, dynamic_wave=dataclasses.replace(
+            net.dynamic_wave, lengthening_step=0.0))
+    raise ValueError(option)
+
+
+#: Steps over which each option is switched off in `test_each_option_...`: by step 150
+#: every option has moved the state (the conduit gate's backwater first shows at ~step 100).
+ABLATION_STEPS = 150
+
+
+@pytest.mark.slow
+def test_each_option_changes_the_options_fixture_beyond_the_targets(tmp_path):
+    """The comparison above is not trivial: with any one option switched off in noodl alone,
+    the first `ABLATION_STEPS` steps depart from SWMM's by far more than the targets, so each
+    option is exercised by the reference and by noodl's port of it. (Over all 359 steps a run
+    without the gates is several times slower to converge, which is why the window is
+    short.) SWMM is run once."""
+    rows, conn = _converged_swmm(tmp_path, OPTIONS_NAME, surcharged=None)
+    net, _, _ = read_swmm_inp(DATA / OPTIONS_NAME)
+    record = ("water.phi", "water.q", "sewer.overflow")
+    missed = {}
+    for option in ("init_depth", "init_flow", "max_flow", "conduit_gate", "outfall_gate",
+                   "barrels", "lengthening"):
+        model, state, drivers = build_model(_ablated(net, option), iterate_tol=ITERATE_TOL,
+                                            iterate_max=ITERATE_MAX)
+        _, hist = simulate_dynamic_wave(model, state, drivers, steps=ABLATION_STEPS,
+                                        record=record)
+        diffs = _differences(OPTIONS_NAME, rows, conn, ABLATION_STEPS,
+                             run=(net, model, hist, None))
+        worst_depth, worst_flow, _ = _worst(diffs)
+        if not (worst_depth > 100 * TOL_DEPTH or worst_flow > 1e-5):
+            missed[option] = (worst_depth, worst_flow)
+    assert not missed, f"options with no visible effect against SWMM: {missed}"
+
+
+def _options_variable_inp(tmp_path):
+    """The options fixture under SWMM's variable step: ROUTING_STEP 30 s, VARIABLE_STEP 0.75
+    (the Courant step uses C3's per-barrel flow and volume and C2's modLength / length)."""
+    text = (DATA / OPTIONS_NAME).read_text()
+    for old, new in (("ROUTING_STEP         5", "ROUTING_STEP         30"),
+                     ("VARIABLE_STEP        0", "VARIABLE_STEP        0.75")):
+        assert text.count(old) == 1
+        text = text.replace(old, new)
+    path = tmp_path / "options_variable.inp"
+    path.write_text(text)
+    return path
+
+
+def test_options_variable_step_sequence_matches_swmm(tmp_path):
+    """SWMM's variable routing step on the options fixture (two barrels, a lengthened
+    conduit, initial conditions): noodl's step sequence equals SWMM's to the millisecond over
+    the first 12 steps, and the state at those steps meets the free-surface targets."""
+    inp = _options_variable_inp(tmp_path)
+    rows, times, conn, engine, not_converging = _swmm_timed(inp)
+    assert engine == "5.2.4" and not_converging == 0.0
+    n = 12
+    run = _variable_run(inp, steps_limit=n)
+    _, _, hist, _ = run
+    ends = [round(x) for x in (hist["t"] * 1000.0).tolist()]
+    assert ends == times[:n]
+    assert len(set(b - a for a, b in zip(times[:n], times[1:n], strict=False))) > 2
+    _assert_parity(_worst(_differences(OPTIONS_NAME, rows, conn, n, run=run)))
+
+
+@pytest.mark.slow
+def test_options_variable_step_matches_swmm_at_every_step(tmp_path):
+    inp = _options_variable_inp(tmp_path)
+    rows, times, conn, engine, not_converging = _swmm_timed(inp)
+    assert engine == "5.2.4" and not_converging == 0.0
+    run = _variable_run(inp)
+    _, _, hist, _ = run
+    ends = [round(x) for x in (hist["t"] * 1000.0).tolist()]
+    assert ends[:len(times)] == times and ends[-1] == 1_800_000
+    _assert_parity(_worst(_differences(OPTIONS_NAME, rows, conn, len(rows), run=run)))

@@ -377,17 +377,35 @@ lagged flags.
 
 #### Starting state and zero fall
 
-The cold start follows SWMM's `flowrout.c`: junction depth 0, each outfall at its outfall depth
-for zero flow (the stage for `FIXED`), each conduit's depth the mean of its two clamped end
-depths, and a previous net inflow of 0 at the first step. SWMM orients a conduit with exactly
+The start follows SWMM's `flowrout.c`. A cold, dry network: junction depth 0, each outfall at its
+outfall depth for zero flow (the stage for `FIXED`), each conduit's depth the mean of its two
+clamped end depths, and a previous net inflow of 0 at the first step. Initial conditions change
+that exactly as SWMM does (`initNodeDepths`, `initLinkDepths`, `initNodes`):
+
+- A conduit with an `InitFlow` (`Pipe.initial_flow`, m³/s, a total over its barrels, positive
+  from the pipe's first node to its second) starts at the normal depth of one barrel's flow,
+  capped at the depth of SWMM's `qMax`, and keeps that flow as its previous flow. The reader
+  flips the sign of the `InitFlow` of a conduit it reverses, as SWMM does.
+- A junction with an `InitDepth` (`Manhole.initial_depth`, m) starts there. One without it
+  starts at the mean, over its attached conduits, of each conduit's initial depth plus that
+  conduit's first-end offset (a conduit without `InitFlow` counts as depth 0 in the mean).
+  An `InitDepth` above the full depth plus `SurDepth` is refused by name, as SWMM's own check.
+- The outfalls start at the depth SWMM gives for their conduit's initial flow, a conduit
+  without `InitFlow` at the mean of its end-node depths above its offsets, and each junction's
+  previous net inflow is that of the initial flows through it (minus an outflowing `InitFlow`),
+  so the first step's trapezoid sees them.
+
+SWMM orients a conduit with exactly
 zero fall by round-off under `DYNWAVE`, so noodl can legitimately differ on an exactly flat
 conduit; the backwater fixture avoids an exact tie for that reason.
 
 #### Scope
 
-Circular conduits, one barrel, SWMM's tabulated geometry; the fixed routing step or
-SWMM's variable step (`VARIABLE_STEP > 0`, below); a cold dry start (zero `InitDepth` and `InitFlow`); constant or
-driver-supplied lateral inflows; `FREE`, `NORMAL` and `FIXED` outfalls without flap gates;
+Circular conduits, SWMM's tabulated geometry; the fixed routing step or
+SWMM's variable step (`VARIABLE_STEP > 0`, below); a cold start or SWMM's `InitDepth` and
+`InitFlow` (above); constant or
+driver-supplied lateral inflows; `FREE`, `NORMAL` and `FIXED` outfalls, with flap gates;
+parallel barrels, `MaxFlow`, conduit flap gates and conduit lengthening (below);
 `INERTIAL_DAMPING` `NONE`/`PARTIAL`/`FULL` and every `NORMAL_FLOW_LIMITED` option.
 `SURCHARGE_METHOD SLOT` is SWMM's Preissmann slot: above `0.985257 y_full` the top width is the
 Sjoberg slot width `0.5423 w_max exp(-(y/y_full)^2.4)` (`0.01 w_max` above `1.78 y_full`), the
@@ -430,9 +448,36 @@ take there; at the fixed point that offset is the solved excess, so a flooded ju
 exactly at `y_max` (not at a penalty's offset above it), and the excess falling to zero
 releases it on the next pass, without a flag to chatter.
 
-The reader refuses by name,
-with the line number, `LENGTHENING_STEP > 0`, `ALLOW_PONDING YES`, nonzero
-`InitDepth`/`InitFlow`/`MaxFlow`, flap gates, barrels other than 1 and TIDAL/TIMESERIES outfalls.
+Conduit options, each a SWMM `[CONDUITS]`, `[XSECTIONS]`, `[LOSSES]` or `[OUTFALLS]` entry
+and a `Pipe` or `Outfall` field:
+
+- **Barrels** (`Pipe.barrels`, `[XSECTIONS]` 7th field, 1 to 127). A conduit's `length`,
+  `diameter`, `n` and slope are one barrel's. Its momentum update is one barrel's, and its
+  flow, conveyance, surface areas and volume are totals (`n` times a barrel's, `dwflow.c:243,
+  292`; `dynwave.c:575`), so `n` barrels at equal heads carry exactly `n` times one barrel's
+  flow. The reported velocity is one barrel's.
+- **`MaxFlow`** (`Pipe.max_flow`, m³/s, a limit on each barrel, `dwflow.c:270-273`) clamps the
+  flow after the normal-flow limit.
+- **Flap gates** (`[LOSSES]` flap gate YES for a conduit, `Gated` for an outfall,
+  `link_setFlapGate`): flow against a conduit gate's direction is zeroed, and so is flow
+  that would enter the conduit from a gated outfall. A conduit the reader reversed (adverse)
+  keeps the direction of its file's From to To, `Pipe.flap_gate_reversed`.
+- **Lengthening** (`LENGTHENING_STEP`, `DynamicWaveOptions.lengthening_step`, s):
+  a conduit shorter than `(sqrt(g y_full) + v_full) t` is lengthened by the factor
+  `lf = (sqrt(g y_full) + v_full) t / L`, `t` the smaller of `LENGTHENING_STEP` and the file's
+  routing step, to `modLength = lf L` in the momentum terms and the surface areas, with its
+  roughness divided by `sqrt(lf)` (the friction coefficient by `lf`), so its normal flow is
+  unchanged and its volume keeps the true length. The variable step's Courant limit is scaled
+  by `modLength / L`.
+
+These limits apply in SWMM's order (`dwflow.c:255-281`): the normal-flow limit, `MaxFlow`,
+the flap gate, then the dry-node caps (at `FUDGE` times the barrels). Each is a clamp of
+the element's flow against a constant, so the flow stays continuous and non-decreasing in the
+head difference, as the head solve's Newton step needs. A set `InitDepth`, `InitFlow`,
+`MaxFlow`, flap gate or barrel count is refused by name under STEADY or KINWAVE routing.
+
+The reader refuses by name, with the line number, `ALLOW_PONDING YES`, loss coefficients
+and seepage in `[LOSSES]` and TIDAL/TIMESERIES outfalls.
 `build_model` with `air=True`, `quality=True` or `storage=True` is refused by name. Ponding,
 headspace air and quality on the dynamic wave are planned.
 
@@ -606,6 +651,15 @@ brought the differences below the targets without changing either code's equatio
 | Node depths, every 5 s step | abs 1e-7 m | 1.2e-9 / 4.5e-9 / 3.4e-9 m |
 | Link flows, every 5 s step | rel 1e-6 + abs 1e-9 m³/s | within the target at every step |
 
+The options are compared together on `options_dynwave.inp`: J1 starts at 0.25 m (`InitDepth`)
+and C3 at 0.03 m³/s (`InitFlow`); C1 is limited to 0.012 m³/s (`MaxFlow`); C3 has two
+barrels; C4 has a flap gate that closes on the water backing up from J4; the `FIXED` outfall
+(stage 9.3 m, above J4's invert) is gated, so C5 carries nothing until J4 rises over the
+stage; C2 is 10 m long and `LENGTHENING_STEP 5` lengthens it. SWMM converges on every step,
+and noodl meets the targets above: worst depth 2.5e-9 m over the 359 steps. Under `VARIABLE_STEP 0.75` the same fixture's 304 steps match SWMM's step
+sequence to the millisecond (the Courant step reads the two barrels' per-barrel flow and volume,
+and the lengthened conduit's `modLength / length`) and its states to the same targets.
+
 Surcharge is compared on the same tree at higher inflows. `tree_slot_dynwave.inp` (2.5x,
 `SURCHARGE_METHOD SLOT`) pressurises C4 from step 95. `tree_extran_dynwave.inp` (3x,
 `SURCHARGE_METHOD EXTRAN`) surcharges J2, J4 and J3 above their crowns at steps 21, 139 and
@@ -692,7 +746,7 @@ publish numbers from this application.
 - **Dynamic wave: no ponding, headspace air or quality yet** (planned).
   Flooded water is lost, as in SWMM without ponding; with no ground (`MaxDepth` 0) and no
   `SurDepth` a junction floods as soon as it fills to its crown. `build_model(...,
-  air=True)` or `quality=True` is refused. Circular conduits only, one barrel, cold dry start. Under EXTRAN, where SWMM's own
+  air=True)` or `quality=True` is refused. Circular conduits only. Under EXTRAN, where SWMM's own
   surcharge iteration has no fixed point, noodl holds the junction at its crown (see
   "Dynamic wave"), so such steps have no SWMM reference. Likewise where SWMM's normal-flow
   slope test has no consistent side (a draining outfall conduit), noodl puts the solution

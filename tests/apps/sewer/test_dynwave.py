@@ -1182,3 +1182,307 @@ def test_routing_step_size_first_step_is_the_minimum_step():
     net, _, _ = read_swmm_inp(VARIABLE_TREE)
     model, state, _ = build_model(net)
     assert routing_step_size(model.dynamic_wave, None, state, None) == 0.5
+
+
+# --- C2: initial conditions, MaxFlow, flap gates, barrels, lengthening -------------------
+
+
+def _limit_drivers(n, **over):
+    """`n` identical conduits on the momentum line ``q = 0.1 + 2 dp`` with no limit, no gate
+    and no dry node; `over` replaces driver entries (scalars broadcast)."""
+    drv = {"water.flow_offset": 0.1, "water.conveyance": 2.0, "water.normal_flow": float("inf"),
+           "water.limited": 0.0, "water.slope_switch": 0.0, "water.switch_drop": 0.0,
+           "water.switch_slope": 0.0, "water.flow_last": 0.0, "water.dry_upstream": 0.0,
+           "water.dry_downstream": 0.0, "water.max_flow": float("inf"),
+           "water.flap_block_reverse": 0.0, "water.flap_block_forward": 0.0,
+           "water.dry_flow_cap": FUDGE_FLOW}
+    drv.update(over)
+    return {k: torch.as_tensor(v, dtype=F64).expand(n).clone() for k, v in drv.items()}
+
+
+def test_max_flow_caps_the_flow_in_both_directions_and_zeroes_its_slope():
+    """`dwflow.c:270-273`: |q| <= MaxFlow, the sign kept; dflow is 0 where the cap acts."""
+    el = DynamicWaveConduit()
+    drv = _limit_drivers(4, **{"water.max_flow": 0.25})
+    dp = torch.tensor([0.05, 0.2, -0.5, -0.1], dtype=F64)
+    q = el.flow(dp, drv)
+    torch.testing.assert_close(q, torch.tensor([0.2, 0.25, -0.25, -0.1], dtype=F64))
+    torch.testing.assert_close(el.dflow(dp, drv), torch.tensor([2.0, 0.0, 0.0, 2.0], dtype=F64))
+
+
+def test_max_flow_follows_the_normal_flow_limit_and_precedes_the_dry_cap():
+    """SWMM's order (dwflow.c:255-281): the normal-flow limit, MaxFlow, the flap gate, then
+    the dry-node caps, so a dry upstream node still caps at FUDGE below a large MaxFlow."""
+    el = DynamicWaveConduit()
+    drv = _limit_drivers(2, **{"water.max_flow": 1.0, "water.normal_flow": 0.15,
+                               "water.limited": torch.tensor([1.0, 0.0], dtype=F64),
+                               "water.dry_upstream": torch.tensor([0.0, 1.0], dtype=F64)})
+    q = el.flow(torch.full((2,), 0.05, dtype=F64), drv)
+    torch.testing.assert_close(q, torch.tensor([0.15, FUDGE_FLOW], dtype=F64))
+
+
+def test_a_flap_gate_blocks_reverse_flow_and_passes_forward_flow():
+    """`link_setFlapGate` (link.c:658): a gate closes on flow against its direction (here the
+    u -> v direction, so q < 0 gives q = 0); the pass sees flow zero, slope zero there."""
+    el = DynamicWaveConduit()
+    drv = _limit_drivers(3, **{"water.flap_block_reverse": 1.0})
+    dp = torch.tensor([0.05, -0.04, -0.2], dtype=F64)        # q = 0.2, 0.02, -0.3 ungated
+    q = el.flow(dp, drv)
+    torch.testing.assert_close(q, torch.tensor([0.2, 0.02, 0.0], dtype=F64))
+    torch.testing.assert_close(el.dflow(dp, drv), torch.tensor([2.0, 2.0, 0.0], dtype=F64))
+    # the reversed gate (SWMM direction -1) closes on forward flow instead; an outfall's gate
+    # is the same clamp on whichever side the flow would enter the conduit
+    rev = _limit_drivers(3, **{"water.flap_block_forward": 1.0})
+    torch.testing.assert_close(el.flow(dp, rev), torch.tensor([0.0, 0.0, -0.3], dtype=F64))
+    both = _limit_drivers(3, **{"water.flap_block_forward": 1.0,
+                                "water.flap_block_reverse": 1.0})
+    torch.testing.assert_close(el.flow(dp, both), torch.zeros(3, dtype=F64))
+
+
+def test_limits_keep_the_element_monotone_and_continuous_in_dp():
+    """The head layer's Newton step needs a continuous flow that is non-decreasing in dp
+    with a consistent dflow, whatever limits act (MaxFlow, flap gate, dry caps)."""
+    el = DynamicWaveConduit()
+    grid = torch.linspace(-1.0, 1.0, 4001, dtype=F64)
+    for over in ({"water.max_flow": 0.3},
+                 {"water.flap_block_reverse": 1.0},
+                 {"water.flap_block_forward": 1.0, "water.max_flow": 0.3},
+                 {"water.dry_upstream": 1.0, "water.flap_block_reverse": 1.0}):
+        drv = _limit_drivers(grid.numel(), **over)
+        q = el.flow(grid, drv)
+        assert bool((q[1:] - q[:-1] >= 0.0).all()), over
+        assert float((q[1:] - q[:-1]).max()) <= 2.0 * float(grid[1] - grid[0]) + 1e-12, over
+        d = el.dflow(grid, drv)
+        assert bool((d >= 0.0).all())
+        # the analytic slope agrees with the finite difference away from the kinks
+        fd = (q[1:] - q[:-1]) / (grid[1] - grid[0])
+        mid = 0.5 * (d[1:] + d[:-1])
+        assert float((fd - mid).abs().sum() / fd.numel()) < 1e-2, over
+
+
+def _chain_net(*, barrels=1, max_flow=None, initial_flow=0.0, flap=False, flap_reversed=False,
+               outfall_gate=False, outfall_kind="free", stage=None, inflow=0.02,
+               initial_depth=0.0, routing_step=5.0, lengthening_step=0.0, length=200.0,
+               min_surface_area=None, variable_step=0.0):
+    """One conduit J1 -> Out (0.45 m, n 0.013, 0.5 % fall over `length`) with an inflow at
+    J1: the smallest network that exercises a conduit feature."""
+    from noodl.apps.sewer import SewerNetwork
+    from noodl.apps.sewer.dynwave import DynamicWaveOptions
+    from noodl.apps.sewer.network import Manhole, Outfall, Pipe
+    fall = 0.005 * length
+    return SewerNetwork(
+        manholes=(Manhole("J1", 10.0 + fall, ground=15.0, inflow=inflow,
+                          initial_depth=initial_depth),),
+        pipes=(Pipe("C1", "J1", "Out", length, 0.45, 0.013, 0.005, barrels=barrels,
+                    max_flow=max_flow, initial_flow=initial_flow, flap_gate=flap,
+                    flap_gate_reversed=flap_reversed),),
+        outfalls=(Outfall("Out", 10.0, kind=outfall_kind, stage=stage,
+                          flap_gate=outfall_gate),),
+        routing="dynamic_wave", geometry="tabulated",
+        dynamic_wave=DynamicWaveOptions(
+            routing_step=routing_step, variable_step=variable_step,
+            lengthening_step=lengthening_step, min_surface_area=min_surface_area))
+
+
+def test_two_barrels_carry_twice_one_barrels_flow_at_equal_heads():
+    """One barrel and two barrels of the same conduit at the same heads and the same fed
+    state: the pass's flow of the pair is exactly twice (offset, conveyance and flow all
+    total over the barrels), the per-barrel stored area is the same, and the limits and
+    surface areas the closure writes are the barrel-scaled ones."""
+    from noodl.model import StepContext
+    one, state1, drivers1 = build_model(_chain_net(barrels=1))
+    two, state2, drivers2 = build_model(_chain_net(barrels=2))
+    # fed state: junction 0.2 m, per-barrel flow 0.01 m3/s (so 0.02 for two barrels)
+    for state, k in ((state1, 1.0), (state2, 2.0)):
+        state["water.phi"] = torch.tensor([11.0 + 0.2, 10.0], dtype=F64)
+        state["sewer.junction_depth"] = torch.tensor([0.2], dtype=F64)
+        state["water.q"] = torch.tensor([0.01 * k], dtype=F64)
+        state["sewer.pipe_flow"] = torch.tensor([0.01 * k], dtype=F64)
+    d1 = one.dynamic_wave(state1, drivers1, StepContext(dt=5.0))
+    d2 = two.dynamic_wave(state2, drivers2, StepContext(dt=5.0))
+    for key in ("water.flow_offset", "water.conveyance"):
+        torch.testing.assert_close(d2[key], 2.0 * d1[key], rtol=1e-12, atol=0)
+    dp = torch.tensor([1.2], dtype=F64)
+    q1 = d1["water.flow_offset"] + d1["water.conveyance"] * dp
+    q2 = d2["water.flow_offset"] + d2["water.conveyance"] * dp
+    torch.testing.assert_close(q2, 2.0 * q1, rtol=1e-12, atol=0)
+    torch.testing.assert_close(d2["water.dry_flow_cap"], 2.0 * d1["water.dry_flow_cap"])
+    # reporting: the pipe's volume is a total, its velocity one barrel's
+    torch.testing.assert_close(d2["sewer.V_wet"], 2.0 * d1["sewer.V_wet"], rtol=1e-12, atol=0)
+    torch.testing.assert_close(d2["sewer.v"], d1["sewer.v"], rtol=1e-12, atol=0)
+
+
+def test_two_barrels_at_twice_the_inflow_run_as_one_barrel_per_barrel():
+    """Scaling invariance of the whole run: two barrels fed twice the lateral inflow carry
+    twice the flow with the junction at the same depth in every step (the junction's surface
+    area doubles with the barrels; its floor is made negligible so that it does not break
+    the scaling)."""
+    runs = {}
+    for barrels in (1, 2):
+        net = _chain_net(barrels=barrels, inflow=0.02 * barrels, min_surface_area=1e-3)
+        model, state, drivers = build_model(net)
+        _, hist = simulate_dynamic_wave(model, state, drivers, steps=40,
+                                        record=("water.phi", "water.q"))
+        runs[barrels] = hist
+    torch.testing.assert_close(runs[2]["water.q"], 2.0 * runs[1]["water.q"], rtol=1e-6,
+                               atol=1e-9)
+    torch.testing.assert_close(runs[2]["water.phi"], runs[1]["water.phi"], rtol=0, atol=1e-7)
+
+
+def test_a_max_flow_caps_each_barrel_in_a_run():
+    """SWMM limits one barrel's flow to MaxFlow (dwflow.c:270-273): two barrels of 0.015
+    carry at most 0.03 in total, however hard the junction drives them."""
+    net = _chain_net(barrels=2, max_flow=0.015, inflow=0.06, min_surface_area=5.0)
+    model, state, drivers = build_model(net)
+    _, hist = simulate_dynamic_wave(model, state, drivers, steps=60, record=("water.q",))
+    q = hist["water.q"][:, 0]
+    assert float(q.max()) == pytest.approx(0.03, rel=1e-12)
+    assert float(q.min()) >= 0.0
+
+
+def test_a_flap_gate_blocks_reverse_flow_in_a_run():
+    """A FIXED outfall stage above the junction drives water back up the conduit; an ungated
+    conduit carries it, a gated outfall (and a gated conduit) carries none."""
+    q_end = {}
+    for name, kwargs in (("open", {}), ("outfall_gate", {"outfall_gate": True}),
+                         ("conduit_gate", {"flap": True})):
+        net = _chain_net(outfall_kind="fixed", stage=10.0 + 1.3, inflow=0.0, **kwargs)
+        model, state, drivers = build_model(net)
+        _, hist = simulate_dynamic_wave(model, state, drivers, steps=40, record=("water.q",))
+        q_end[name] = hist["water.q"][:, 0]
+    assert float(q_end["open"].min()) < -1e-3
+    assert float(q_end["outfall_gate"].abs().max()) == 0.0
+    assert float(q_end["conduit_gate"].abs().max()) == 0.0
+    # a conduit gate that passes the other way (a reversed conduit) lets this flow through
+    net = _chain_net(outfall_kind="fixed", stage=10.0 + 1.3, inflow=0.0, flap=True,
+                     flap_reversed=True)
+    model, state, drivers = build_model(net)
+    _, hist = simulate_dynamic_wave(model, state, drivers, steps=40, record=("water.q",))
+    torch.testing.assert_close(hist["water.q"][:, 0], q_end["open"])
+
+
+def test_initial_depth_and_flow_set_the_initial_state_as_swmm_does():
+    """flowrout.c:337-420 on one conduit J1 -> Out: with an InitFlow the conduit starts at the
+    normal depth of one barrel's flow (link_getYnorm) and J1 at the mean of the attached links'
+    depths plus the first offset; with an InitDepth J1 keeps it; the conduit with neither
+    starts at the mean of its end depths; the junction's net inflow is minus the initial flow
+    through it."""
+    from noodl.apps.sewer.xsect_tables import normal_depth_ft
+    net = _chain_net(barrels=2, initial_flow=0.04)
+    model, state, _ = build_model(net)
+    hyd = model.dynamic_wave
+    y_norm = normal_depth_ft(torch.tensor([0.02 / QCF], dtype=F64), hyd.geo.y_full,
+                             hyd.geo.a_full, hyd.geo.s_full, hyd.geo.beta)
+    # J1: its one link's depth counts at both ends, so the mean is that depth (flowrout.c:358)
+    torch.testing.assert_close(state["sewer.junction_depth"], y_norm * LCF, rtol=1e-12,
+                               atol=0)
+    torch.testing.assert_close(state["sewer.mid_area"],
+                               area_of_depth(y_norm, hyd.geo.y_full, hyd.geo.a_full)
+                               * QCF / LCF, rtol=1e-12, atol=0)
+    torch.testing.assert_close(state["water.q"], torch.tensor([0.04], dtype=F64))
+    torch.testing.assert_close(state["sewer.pipe_flow"], torch.tensor([0.04], dtype=F64))
+    torch.testing.assert_close(state["sewer.net_inflow"], torch.tensor([-0.04], dtype=F64))
+    # an InitDepth wins over the average
+    net = _chain_net(initial_depth=0.15, initial_flow=0.04)
+    _, state, _ = build_model(net)
+    assert state["sewer.junction_depth"].item() == pytest.approx(0.15)
+    # InitDepth alone: the conduit starts at the mean of its end depths above its offsets
+    net = _chain_net(initial_depth=0.15)
+    model, state, _ = build_model(net)
+    hyd = model.dynamic_wave
+    y = torch.tensor([0.5 * 0.15 / LCF], dtype=F64)
+    torch.testing.assert_close(state["sewer.mid_area"],
+                               area_of_depth(y, hyd.geo.y_full, hyd.geo.a_full) * QCF / LCF)
+
+
+def test_initial_depth_deeper_than_the_full_depth_is_refused_by_name():
+    with pytest.raises(ValueError, match=r"J1.*initial_depth"):
+        build_model(_chain_net(initial_depth=7.0))     # ground 15 m, invert 11 m: 4 m deep
+
+
+def test_an_initial_flow_starts_the_run_from_that_flow():
+    """A conduit carrying its InitFlow with the same lateral inflow at J1 starts near steady:
+    the first step's flow stays near the initial flow instead of rising from zero."""
+    net = _chain_net(initial_flow=0.04, inflow=0.04, min_surface_area=5.0)
+    model, state, drivers = build_model(net)
+    _, hist = simulate_dynamic_wave(model, state, drivers, steps=2, record=("water.q",))
+    assert float(hist["water.q"][0, 0]) == pytest.approx(0.04, rel=0.05)
+
+
+def test_lengthening_makes_a_short_conduit_numerically_longer():
+    """LENGTHENING_STEP lengthens a conduit shorter than the Courant length: modLength =
+    lf L with lf = (sqrt(g yFull) + vFull) t / L (link.c:1217-1254), the volume stays at the
+    true length, a longer conduit is untouched."""
+    from noodl.apps.sewer.dynwave_terms import lengthening_factor
+    net = _chain_net(length=8.0, lengthening_step=20.0, routing_step=5.0)
+    model, _, _ = build_model(net)
+    geo = model.dynamic_wave.geo
+    lf = lengthening_factor(torch.tensor([0.45], dtype=F64), torch.tensor([0.013], dtype=F64),
+                            torch.tensor([0.005], dtype=F64), torch.tensor([8.0], dtype=F64),
+                            5.0)                              # min(routing 5, lengthening 20)
+    assert lf.item() > 1.0
+    torch.testing.assert_close(geo.mod_length, lf * geo.length)
+    assert geo.length.item() == pytest.approx(8.0 / LCF)
+    # the file's ROUTING_STEP governs, not the WET_STEP-lowered one
+    net2 = dataclasses.replace(net, dynamic_wave=dataclasses.replace(
+        net.dynamic_wave, lengthening_routing_step=10.0))
+    geo2 = build_model(net2)[0].dynamic_wave.geo
+    assert geo2.mod_length.item() > geo.mod_length.item()
+    # a long conduit and LENGTHENING_STEP 0 are unchanged
+    for n in (_chain_net(length=200.0, lengthening_step=20.0), _chain_net(length=8.0)):
+        g = build_model(n)[0].dynamic_wave.geo
+        torch.testing.assert_close(g.mod_length, g.length)
+
+
+def test_network_refuses_dynamic_wave_features_for_other_routing():
+    from noodl.apps.sewer import tree_steady
+    from noodl.apps.sewer.network import Manhole, Outfall
+    base = tree_steady()
+    for field, value in (("barrels", 2), ("max_flow", 0.1), ("initial_flow", 0.1),
+                         ("flap_gate", True)):
+        pipes = (dataclasses.replace(base.pipes[0], **{field: value}),) + base.pipes[1:]
+        with pytest.raises(ValueError, match=rf"{base.pipes[0].name}.*{field}"):
+            dataclasses.replace(base, pipes=pipes).validate()
+    with pytest.raises(ValueError, match="J1.*initial_depth"):
+        dataclasses.replace(base, manholes=(Manhole("J1", 12.0, initial_depth=0.1),)
+                            + base.manholes[1:]).validate()
+    with pytest.raises(ValueError, match="Outfall.*flap gate"):
+        dataclasses.replace(base, outfalls=(Outfall("Outfall", 8.0, flap_gate=True),)
+                            ).validate()
+
+
+def test_dynamic_wave_validates_barrels_and_limits():
+    for kwargs, match in (({"barrels": 0}, "barrels"), ({"barrels": 128}, "barrels"),
+                          ({"barrels": 1.5}, "barrels"), ({"max_flow": -1.0}, "max_flow"),
+                          ({"initial_flow": float("nan")}, "initial_flow")):
+        net = _chain_net()
+        pipe = dataclasses.replace(net.pipes[0], **kwargs)
+        with pytest.raises(ValueError, match=rf"C1.*{match}"):
+            dataclasses.replace(net, pipes=(pipe,)).validate()
+
+
+def test_variable_step_uses_per_barrel_flow_and_volume_and_the_lengthening_ratio():
+    """getLinkStep (dynwave.c:857-865): the Courant step uses one barrel's flow and volume,
+    so n barrels at n times the flow give the one-barrel step; a lengthened conduit's step is
+    scaled by modLength / length."""
+    steps = {}
+    for key, kwargs in (("one", {}), ("two", {"barrels": 2}),
+                        ("long", {"lengthening_step": 20.0, "length": 8.0}),
+                        ("short", {"length": 8.0})):
+        net = _chain_net(variable_step=0.75, routing_step=60.0, **kwargs)
+        model, state, _ = build_model(net)
+        hyd = model.dynamic_wave
+        k = float(kwargs.get("barrels", 1))
+        state = dict(state)
+        state["water.q"] = state["sewer.pipe_flow"] = torch.tensor([0.03 * k], dtype=F64)
+        state["sewer.mid_area"] = area_of_depth(
+            torch.tensor([0.2 / LCF], dtype=F64), hyd.geo.y_full, hyd.geo.a_full) * QCF / LCF
+        phi = hyd.node_invert.clone()
+        phi[hyd.junction_idx] += 0.2
+        phi[hyd.outfall_idx] += 0.1
+        state["water.phi"] = phi
+        state["sewer.junction_depth"] = torch.tensor([0.2], dtype=F64)
+        steps[key] = routing_step_size(hyd, dict(state), state, 5.0)
+    assert steps["two"] == pytest.approx(steps["one"], abs=1e-3)
+    # modLength / length > 1 lengthens the Courant step
+    assert steps["long"] > steps["short"]

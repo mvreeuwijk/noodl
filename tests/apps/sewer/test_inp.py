@@ -195,24 +195,127 @@ def test_dynwave_refuses_a_bad_variable_step_option_with_its_line(tmp_path, old,
 
 
 @pytest.mark.parametrize("old,new,match", [
-    ("LENGTHENING_STEP     0", "LENGTHENING_STEP     10", "LENGTHENING_STEP"),
     ("ALLOW_PONDING        NO", "ALLOW_PONDING        YES", "ALLOW_PONDING"),
-    ("J1               12.0       5          0", "J1               12.0       5          0.2",
-     "initial depth"),
-    ("C1               J1               J3               200        0.013      0          0"
-     "          0", "C1               J1               J3               200        0.013"
-     "      0          0          0.01", "initial flow"),
+    ("LENGTHENING_STEP     0", "LENGTHENING_STEP     -5", r"line \d+: LENGTHENING_STEP"),
+    ("J1               12.0       5          0", "J1               12.0       5          -0.2",
+     "negative initial depth"),
     ("C1               CIRCULAR     0.30             0          0          0          1",
-     "C1               CIRCULAR     0.30             0          0          0          2",
-     "barrels"),
-    ("Outfall          8.0        FREE                        NO",
-     "Outfall          8.0        FREE                        YES", "flap gate"),
+     "C1               CIRCULAR     0.30             0          0          0          2.5",
+     "whole number"),
+    ("C1               CIRCULAR     0.30             0          0          0          1",
+     "C1               CIRCULAR     0.30             0          0          0          128",
+     "from 1 to 127"),
     ("Outfall          8.0        FREE                        NO",
      "Outfall          8.0        TIDAL      Tide1            NO", "TIDAL"),
 ])
-def test_dynwave_phase_a_refusals(tmp_path, old, new, match):
+def test_dynwave_refusals(tmp_path, old, new, match):
     with pytest.raises(ValueError, match=match):
         read_swmm_inp(_dyn(tmp_path, [(old, new)]))
+
+
+C1_LINE = ("C1               J1               J3               200        0.013      0"
+           "          0          0")
+
+
+def _c1(init_flow, max_flow):
+    """The tree's C1 line with an InitFlow and a MaxFlow (m3/s)."""
+    return ("C1               J1               J3               200        0.013      0"
+            f"          0          {init_flow}       {max_flow}")
+
+
+def test_dynwave_reads_initial_conditions_limits_barrels_and_gates(tmp_path):
+    """InitDepth (junction), InitFlow and MaxFlow (conduit), barrels, [LOSSES] flap gate and
+    the outfall's Gated flag are physics under DYNWAVE and are read, not refused."""
+    path = _dyn(tmp_path, [
+        ("J1               12.0       5          0", "J1               12.0       5          0.2"),
+        (C1_LINE, _c1(0.01, 0.05)),
+        ("C2               CIRCULAR     0.30             0          0          0          1",
+         "C2               CIRCULAR     0.30             0          0          0          3"),
+        ("Outfall          8.0        FREE                        NO",
+         "Outfall          8.0        FREE                        YES"),
+        ("[INFLOWS]", "[LOSSES]\nC3  0  0  0  YES  0\nC4  0  0  0  NO\n\n[INFLOWS]"),
+    ])
+    net, _, _ = read_swmm_inp(path)
+    assert next(m for m in net.manholes if m.name == "J1").initial_depth == 0.2
+    c1, c2, c3, c4 = (next(p for p in net.pipes if p.name == n) for n in
+                      ("C1", "C2", "C3", "C4"))
+    assert (c1.initial_flow, c1.max_flow, c1.barrels) == (0.01, 0.05, 1)
+    assert c2.barrels == 3 and c2.max_flow is None and c2.initial_flow == 0.0
+    assert c3.flap_gate and not c3.flap_gate_reversed and not c4.flap_gate
+    assert net.outfalls[0].flap_gate
+
+
+def test_a_reversed_conduit_flips_its_initial_flow_and_gate_direction(tmp_path):
+    """SWMM's conduit_reverse negates q0 and the link direction (link.c:1189-1190): C4 is
+    adverse (J5 8 m under J4 9 m) and written J5 -> J4, so it is J4 -> J5 for noodl; an
+    InitFlow of 0.01 from J5 to J4 is -0.01 along J4 -> J5, and its gate, which passes the
+    file's J5 -> J4 direction, passes v -> u."""
+    path = _dyn(tmp_path, [
+        ("J5               11.0", "J5               8.0"),
+        ("C4               J5               J4               200        0.013      0"
+         "          0", "C4               J5               J4               200        0.013"
+         "      0          0          0.01"),
+        ("[INFLOWS]", "[LOSSES]\nC4  0  0  0  YES\n\n[INFLOWS]"),
+    ])
+    net, _, _ = read_swmm_inp(path)
+    c4 = next(p for p in net.pipes if p.name == "C4")
+    assert (c4.u, c4.v) == ("J4", "J5")
+    assert c4.initial_flow == -0.01
+    assert c4.flap_gate and c4.flap_gate_reversed
+
+
+def test_dynwave_reads_lengthening_with_the_files_own_routing_step(tmp_path):
+    """LENGTHENING_STEP is read, and conduits are lengthened with the file's ROUTING_STEP
+    even when WET_STEP lowers the routing step afterwards (SWMM validates the conduits first,
+    project.c:238-250)."""
+    net, _, _ = read_swmm_inp(_dyn(tmp_path, [
+        ("LENGTHENING_STEP     0", "LENGTHENING_STEP     10"),
+        ("ROUTING_STEP         5", "ROUTING_STEP         90")]))
+    opts = net.dynamic_wave
+    assert (opts.lengthening_step, opts.routing_step, opts.lengthening_routing_step) == (
+        10.0, 60.0, 90.0)
+
+
+@pytest.mark.parametrize("what,edit,match", [
+    ("an entry loss", "C1  0.5  0  0", "entry loss"),
+    ("an exit loss", "C1  0  0.5  0", "exit loss"),
+    ("an average loss", "C1  0  0  0.5", "average loss"),
+    ("seepage", "C1  0  0  0  NO  0.5", "seepage"),
+    ("a bad flap word", "C1  0  0  0  MAYBE", "YES or NO"),
+])
+def test_losses_beyond_the_flap_gate_are_refused(tmp_path, what, edit, match):
+    path = _dyn(tmp_path, [("[INFLOWS]", f"[LOSSES]\n{edit}\n\n[INFLOWS]")])
+    with pytest.raises(ValueError, match=match):
+        read_swmm_inp(path)
+
+
+@pytest.mark.parametrize("edits,match", [
+    ([("J1               12.0       5          0", "J1               12.0       5          0.2")],
+     "initial_depth"),
+    ([(C1_LINE, _c1(0.01, 0))],
+     "initial_flow"),
+    ([(C1_LINE, _c1(0, 0.05))],
+     None),
+    ([("[INFLOWS]", "[LOSSES]\nC1  0  0  0  YES\n\n[INFLOWS]")], "flap_gate"),
+    ([("Outfall          8.0        FREE                        NO",
+       "Outfall          8.0        FREE                        YES")], "flap gate"),
+])
+def test_kinwave_refuses_dynamic_wave_physics_by_name(tmp_path, edits, match):
+    """STEADY and KINWAVE do not model InitDepth, InitFlow, flap gates; a set value is refused
+    by name rather than skipped (MaxFlow is a kinematic-wave limit too and is read, but
+    only dynamic wave applies it here: it is accepted without effect only when 0 = none)."""
+    text = (DATA / "tree_kinwave.inp").read_text()
+    for old, new in edits:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    path = tmp_path / "k.inp"
+    path.write_text(text)
+    if match is None:
+        with pytest.raises(ValueError, match="max_flow"):
+            read_swmm_inp(path)
+    else:
+        with pytest.raises(ValueError, match=match):
+            read_swmm_inp(path)
 
 
 def test_dynwave_keeps_offsets_and_floors_a_flat_fall(tmp_path):

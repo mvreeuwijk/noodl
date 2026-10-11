@@ -54,7 +54,9 @@ class Manhole:
     """A manhole: `invert` and `ground` elevations (m), a constant lateral `inflow`
     (m3/s), for storage its `surface_area` (m2), and SWMM's `surcharge_depth` (SurDepth,
     m >= 0): how far dynamic-wave routing lets the water rise above the full depth before
-    the manhole floods (kinematic and steady routing ignore it)."""
+    the manhole floods (kinematic and steady routing ignore it). `initial_depth` is SWMM's
+    InitDepth (m >= 0), the water depth the dynamic wave starts from (0 lets SWMM average
+    the depths of the attached conduits, `DynamicWaveHydraulics.initial_state`)."""
 
     name: str
     invert: float
@@ -62,6 +64,7 @@ class Manhole:
     inflow: float = 0.0
     surface_area: float | None = None
     surcharge_depth: float = 0.0
+    initial_depth: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -70,19 +73,34 @@ class Outfall:
 
     `kind` is ``"free"``, ``"normal"`` or ``"fixed"`` (SWMM FREE/NORMAL/FIXED); ``"fixed"``
     needs `stage`, the water-surface elevation (m). Only dynamic-wave routing reads them.
+    `flap_gate` (SWMM's Gated) blocks any flow from the outfall into its conduit
+    (`link.c::link_setFlapGate`, dynamic wave only).
     """
 
     name: str
     invert: float
     kind: str = "free"
     stage: float | None = None
+    flap_gate: bool = False
 
 
 @dataclass(frozen=True)
 class Pipe:
     """A conduit from manhole `u` to `v`: `length` and `diameter` (m), Manning's `n`
     and bed `slope` (m/m). `inlet_offset` and `outlet_offset` (m) are the heights of the
-    pipe invert above the invert of its `u` and `v` node (SWMM's link offsets)."""
+    pipe invert above the invert of its `u` and `v` node (SWMM's link offsets).
+
+    Dynamic wave only (every other routing refuses them when set): `barrels` identical
+    parallel conduits (SWMM's Barrels, 1 to 127; `length`, `diameter`, `n` and `slope` are
+    one barrel's, and the flows, volumes and surface areas of the pipe are totals);
+    `max_flow` (m3/s, SWMM's MaxFlow: each barrel carries at most this, `dwflow.c:270-273`;
+    ``None`` for none);
+    `initial_flow` (m3/s, SWMM's InitFlow, a total, positive from `u` to `v`);
+    `flap_gate` closes the conduit on reverse flow (SWMM's FlapGate), reverse being from
+    `v` to `u` unless `flap_gate_reversed`, where the gate passes `v` to `u` flow instead
+    (a conduit the SWMM reader turned round because it was adverse: its file orientation is
+    `v` to `u`, and SWMM's ``Link.direction`` is -1).
+    """
 
     name: str
     u: str
@@ -93,6 +111,11 @@ class Pipe:
     slope: float
     inlet_offset: float = 0.0
     outlet_offset: float = 0.0
+    barrels: int = 1
+    max_flow: float | None = None
+    initial_flow: float = 0.0
+    flap_gate: bool = False
+    flap_gate_reversed: bool = False
 
 
 @dataclass(frozen=True)
@@ -137,6 +160,8 @@ class SewerNetwork:
                 f"{tuple(ROUTING_ALIASES)}), got {self.routing!r}"
             )
         dynamic = self.routing == "dynamic_wave"
+        if not dynamic:
+            self._refuse_dynamic_wave_only()
         for manhole in self.manholes:
             if not manhole.surcharge_depth >= 0.0:
                 raise ValueError(
@@ -230,10 +255,54 @@ class SewerNetwork:
                 f"outfall (a cycle in the pipe subgraph shows up here too)"
             )
 
+    def _refuse_dynamic_wave_only(self) -> None:
+        """Steady and kinematic-wave routing do not model initial conditions, MaxFlow, flap
+        gates or barrels; a set value would be skipped silently, so it is refused by name."""
+        for manhole in self.manholes:
+            if manhole.initial_depth != 0.0:
+                raise ValueError(
+                    f"SewerNetwork: manhole {manhole.name!r} has initial_depth "
+                    f"{manhole.initial_depth!r} m; only dynamic-wave routing models it "
+                    f"(routing is {self.routing!r})")
+        for outfall in self.outfalls:
+            if outfall.flap_gate:
+                raise ValueError(
+                    f"SewerNetwork: outfall {outfall.name!r} has a flap gate; only "
+                    f"dynamic-wave routing models it (routing is {self.routing!r})")
+        for pipe in self.pipes:
+            for what, value, default in (
+                ("barrels", pipe.barrels, 1), ("max_flow", pipe.max_flow, None),
+                ("initial_flow", pipe.initial_flow, 0.0), ("flap_gate", pipe.flap_gate, False),
+            ):
+                if value != default:
+                    raise ValueError(
+                        f"SewerNetwork: pipe {pipe.name!r} has {what} {value!r}; only "
+                        f"dynamic-wave routing models it (routing is {self.routing!r})")
+
     def _validate_dynamic(self, outfall_names: set[str]) -> None:
         """Dynamic-wave topology: loops and any flow direction are allowed, but every
         connected component needs an outfall and each outfall ends exactly one conduit."""
         self.dynamic_wave.validate()
+        for manhole in self.manholes:
+            if not manhole.initial_depth >= 0.0:
+                raise ValueError(
+                    f"SewerNetwork: manhole {manhole.name!r} initial_depth must be >= 0 m, "
+                    f"got {manhole.initial_depth!r}")
+        for pipe in self.pipes:
+            if (not isinstance(pipe.barrels, int) or isinstance(pipe.barrels, bool)
+                    or not 1 <= pipe.barrels <= 127):
+                raise ValueError(
+                    f"SewerNetwork: pipe {pipe.name!r} barrels must be an integer from 1 to "
+                    f"127 (SWMM stores it in a char), got {pipe.barrels!r}")
+            if pipe.max_flow is not None and not (
+                    math.isfinite(pipe.max_flow) and pipe.max_flow > 0.0):
+                raise ValueError(
+                    f"SewerNetwork: pipe {pipe.name!r} max_flow must be a positive finite "
+                    f"flow (m3/s) or None, got {pipe.max_flow!r}")
+            if not math.isfinite(pipe.initial_flow):
+                raise ValueError(
+                    f"SewerNetwork: pipe {pipe.name!r} initial_flow must be finite, got "
+                    f"{pipe.initial_flow!r} m3/s")
         neighbours: dict[str, list[str]] = {}
         touching: dict[str, list[str]] = {name: [] for name in outfall_names}
         for pipe in self.pipes:
@@ -708,8 +777,8 @@ def initial_state(
     """All-zero state, dispatching on each layer's `quantity` (the app convention).
 
     A dynamic-wave model (a ``"head"`` layer and a `DynamicWaveHydraulics` closure) gets
-    SWMM's cold, dry start instead (`DynamicWaveHydraulics.initial_state`; `drivers` is
-    optional there and only validated).
+    SWMM's initial state instead (cold and dry, or its InitDepth and InitFlow:
+    `DynamicWaveHydraulics.initial_state`; `drivers` is optional there and only validated).
 
     Also builds every closure-carried state key this application knows --
     `"sewer.H"`, the `SewerHydraulics` closure's manhole levels, when it is running with

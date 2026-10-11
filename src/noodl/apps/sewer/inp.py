@@ -1,9 +1,13 @@
 """A documented SWMM 5 `.inp` subset.
 
 READ: `[TITLE]`, `[OPTIONS]` (`FLOW_UNITS` must be `CMS`),
-`[JUNCTIONS]` (invert, MaxDepth, SurDepth), `[OUTFALLS]` (FREE, NORMAL and FIXED),
-`[CONDUITS]`, `[XSECTIONS]` (only `CIRCULAR`, one barrel), `[INFLOWS]` (constant `FLOW`
-baselines and constant `CONCENTRATION` pollutant baselines), `[POLLUTANTS]`.
+`[JUNCTIONS]` (invert, MaxDepth, InitDepth, SurDepth), `[OUTFALLS]` (FREE, NORMAL and FIXED,
+with their flap gate), `[CONDUITS]` (with InitFlow and MaxFlow), `[XSECTIONS]` (only
+`CIRCULAR`; barrels), `[LOSSES]` (the flap gate; the loss coefficients and seepage must be
+0), `[INFLOWS]` (constant `FLOW`
+baselines and constant `CONCENTRATION` pollutant baselines), `[POLLUTANTS]`. InitDepth,
+InitFlow, MaxFlow, flap gates and barrels are dynamic-wave physics: under STEADY or KINWAVE
+routing a non-zero or gated value is refused by name rather than skipped.
 `FLOW_ROUTING` is STEADY, KINWAVE or DYNWAVE; DYNWAVE also reads `ROUTING_STEP`,
 `INERTIAL_DAMPING`, `NORMAL_FLOW_LIMITED`, `SURCHARGE_METHOD`, `MIN_SURFAREA`,
 `HEAD_TOLERANCE`, `MAX_TRIALS` and `MIN_SLOPE` into `DynamicWaveOptions`.
@@ -16,15 +20,19 @@ REFUSED BY NAME, because skipping them would silently change the physics: `[DWF]
 `[STORAGE]` with a non-constant area, `[PUMPS]`, `[WEIRS]`, `[ORIFICES]`, `[OUTLETS]`,
 `[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[CURVES]`, `[TIMESERIES]`,
 `[LID_USAGE]`, and any other section carrying content. A time-series inflow is refused;
-time variation belongs in the drivers. A conduit with more than one barrel or a culvert
-code is refused for every routing.
+time variation belongs in the drivers. A conduit with a culvert code, a non-zero entry, exit
+or average loss coefficient or seepage rate is refused for every routing; one with more than
+one barrel under STEADY or KINWAVE.
 
 DYNWAVE reads `VARIABLE_STEP` (the Courant factor; absent means SWMM's default 0.75,
 project.c:854) and `MINIMUM_STEP`, and clips `ROUTING_STEP` to `WET_STEP` (default 300 s)
-as SWMM does (project.c:246-250). It refuses, with the line number: `LENGTHENING_STEP` > 0,
-`ALLOW_PONDING YES`, a junction `InitDepth`, a conduit `InitFlow` or
-`MaxFlow`, a gated outfall and TIDAL/TIMESERIES outfalls (phase A: cold dry start, fixed step,
-no ponding).
+as SWMM does (project.c:246-250) and `LENGTHENING_STEP` (conduit lengthening, with the file's own
+ROUTING_STEP, as SWMM validates conduits before it lowers the step to WET_STEP). It
+refuses, with the line number: `ALLOW_PONDING YES` and TIDAL/TIMESERIES outfalls.
+
+A conduit the reader reverses (adverse, below) has its `InitFlow` sign flipped and its flap
+gate recorded as reversed (`Pipe.flap_gate_reversed`), as SWMM does (`conduit_reverse`,
+link.c:1189-1190 and `Link.direction`).
 
 Slope. SWMM defines `S0 = dy / dx` with `dx = sqrt(L^2 - dy^2)` (Ref. Man. Vol. II
 Eq. 2-1/2-2), so the reader uses the 3-D chord, not `dy / L`. A conduit is normalised
@@ -82,7 +90,7 @@ _IGNORED = {
     "TITLE", "EVAPORATION", "REPORT", "TAGS", "MAP", "COORDINATES", "VERTICES",
     "POLYGONS", "SYMBOLS", "LABELS", "BACKDROP", "PROFILES", "FILES", "END",
 }
-_READ = {"OPTIONS", "JUNCTIONS", "OUTFALLS", "CONDUITS", "XSECTIONS", "INFLOWS",
+_READ = {"OPTIONS", "JUNCTIONS", "OUTFALLS", "CONDUITS", "XSECTIONS", "LOSSES", "INFLOWS",
          "POLLUTANTS"}
 
 
@@ -156,13 +164,12 @@ def read_swmm_inp(
         name = line.fields[0]
         elevation = as_float(line, 1, "the invert elevation", path)
         depth = as_float(line, 2, "the maximum depth", path) if len(line.fields) > 2 else None
-        if (
-            dynamic and len(line.fields) > 3
-            and as_float(line, 3, "the initial depth", path) != 0.0
-        ):
+        initial = (as_float(line, 3, "the initial depth", path)
+                   if len(line.fields) > 3 else 0.0)
+        if initial < 0.0:
             raise ValueError(
-                f"{path}: line {line.number}: junction {name!r} has a non-zero initial depth "
-                f"{line.fields[3]}; dynamic wave starts from a dry network (phase A)"
+                f"{path}: line {line.number}: junction {name!r} has a negative initial depth "
+                f"{line.fields[3]} m"
             )
         surcharge = (as_float(line, 4, "the surcharge depth", path)
                      if len(line.fields) > 4 else 0.0)
@@ -174,7 +181,7 @@ def read_swmm_inp(
         invert[name] = elevation
         manholes.append(
             Manhole(name, elevation, ground=None if depth is None else elevation + depth,
-                    surcharge_depth=surcharge)
+                    surcharge_depth=surcharge, initial_depth=initial)
         )
     outfalls: list[Outfall] = []
     for line in sections.get("OUTFALLS", []):
@@ -185,6 +192,31 @@ def read_swmm_inp(
         outfalls.append(_outfall(line, name, elevation, dynamic, path))
 
     shapes: dict[str, float] = {}
+    barrel_count: dict[str, int] = {}
+    gated: set[str] = set()
+    for line in sections.get("LOSSES", []):
+        require_fields(line, 4, "a loss entry", path)
+        for i, what in ((1, "entry loss coefficient"), (2, "exit loss coefficient"),
+                        (3, "average loss coefficient")):
+            if as_float(line, i, f"the {what}", path) != 0.0:
+                raise ValueError(
+                    f"{path}: line {line.number}: link {line.fields[0]!r} has a non-zero "
+                    f"{what} {line.fields[i]}; local losses are not modelled"
+                )
+        if len(line.fields) > 5 and as_float(line, 5, "the seepage rate", path) != 0.0:
+            raise ValueError(
+                f"{path}: line {line.number}: link {line.fields[0]!r} has seepage rate "
+                f"{line.fields[5]}; seepage is not modelled"
+            )
+        if len(line.fields) > 4:
+            flap = line.fields[4].upper()
+            if flap not in ("YES", "NO"):
+                raise ValueError(
+                    f"{path}: line {line.number}: link {line.fields[0]!r} flap gate must be "
+                    f"YES or NO, got {line.fields[4]!r}"
+                )
+            if flap == "YES":
+                gated.add(line.fields[0])
     for line in sections.get("XSECTIONS", []):
         require_fields(line, 3, "a cross-section", path)
         if line.fields[1].upper() != "CIRCULAR":
@@ -194,11 +226,17 @@ def read_swmm_inp(
             )
         shapes[line.fields[0]] = as_float(line, 2, "the diameter", path)
         barrels = as_float(line, 6, "the barrels", path) if len(line.fields) > 6 else 1.0
-        if barrels != 1.0:
+        if barrels != int(barrels) or not 1 <= barrels <= 127:             # link.c:250-256
             raise ValueError(
                 f"{path}: line {line.number}: link {line.fields[0]!r} has {line.fields[6]} "
-                f"barrels; only single-barrel conduits are modelled"
+                f"barrels; SWMM takes a whole number from 1 to 127"
             )
+        if barrels != 1.0 and not dynamic:
+            raise ValueError(
+                f"{path}: line {line.number}: link {line.fields[0]!r} has {line.fields[6]} "
+                f"barrels; only dynamic-wave routing models more than one"
+            )
+        barrel_count[line.fields[0]] = int(barrels)
         if len(line.fields) > 7 and as_float(line, 7, "the culvert code", path) != 0.0:
             raise ValueError(
                 f"{path}: line {line.number}: link {line.fields[0]!r} has culvert code "
@@ -215,14 +253,10 @@ def read_swmm_inp(
         out_offset = (
             as_float(line, 6, "the outlet offset", path) if len(line.fields) > 6 else 0.0
         )
-        if dynamic:
-            for i, what in ((7, "initial flow"), (8, "maximum flow")):
-                if len(line.fields) > i and as_float(line, i, f"the {what}", path) != 0.0:
-                    raise ValueError(
-                        f"{path}: line {line.number}: conduit {name!r} has a non-zero {what} "
-                        f"{line.fields[i]}; dynamic wave starts from rest and does not cap "
-                        f"flows (phase A)"
-                    )
+        init_flow = as_float(line, 7, "the initial flow", path) if len(line.fields) > 7 else 0.0
+        max_flow = as_float(line, 8, "the maximum flow", path) if len(line.fields) > 8 else 0.0
+        if max_flow < 0.0:
+            max_flow = 0.0              # dwflow.c:270 only acts on a positive limit
         for end in (node1, node2):
             if end not in invert:
                 raise ValueError(
@@ -245,11 +279,16 @@ def read_swmm_inp(
             delta = max(abs(z1 - z2), MIN_DELTA_Z)
             slope = delta / length if delta >= length else delta / math.sqrt(length**2 - delta**2)
             slope = max(slope, min_slope)
-            if z1 < z2:
+            reverse = z1 < z2
+            if reverse:
                 node1, node2 = node2, node1
                 in_offset, out_offset = out_offset, in_offset
-            pipes.append(Pipe(name, node1, node2, length, shapes[name], roughness, slope,
-                              inlet_offset=in_offset, outlet_offset=out_offset))
+            pipes.append(Pipe(
+                name, node1, node2, length, shapes[name], roughness, slope,
+                inlet_offset=in_offset, outlet_offset=out_offset,
+                barrels=barrel_count[name], max_flow=max_flow or None,
+                initial_flow=-init_flow if reverse else init_flow,         # link.c:1190
+                flap_gate=name in gated, flap_gate_reversed=reverse))
             continue
         upstream, downstream, high, low = (
             (node1, node2, z1, z2) if z1 > z2 else (node2, node1, z2, z1)
@@ -270,7 +309,10 @@ def read_swmm_inp(
         slope = fall / (length**2 - fall**2) ** 0.5
         pipes.append(
             Pipe(name, upstream, downstream, length, shapes[name], roughness, slope,
-                 inlet_offset=in_offset, outlet_offset=out_offset)
+                 inlet_offset=in_offset, outlet_offset=out_offset,
+                 barrels=barrel_count[name], max_flow=max_flow or None,
+                 initial_flow=init_flow if z1 > z2 else -init_flow,
+                 flap_gate=name in gated, flap_gate_reversed=z1 <= z2)
         )
 
     pollutants: dict[str, dict] = {}
@@ -336,7 +378,7 @@ def read_swmm_inp(
 
 
 def _dynamic_wave_options(opts: dict, path) -> DynamicWaveOptions:
-    """The DYNWAVE `[OPTIONS]`, with the phase-A refusals (each names its line)."""
+    """The DYNWAVE `[OPTIONS]`, with their refusals (each names its line)."""
 
     def refuse(key: str, why: str) -> None:
         line = opts[key][0]
@@ -346,9 +388,8 @@ def _dynamic_wave_options(opts: dict, path) -> DynamicWaveOptions:
         refuse("VARIABLE_STEP", "-- the Courant factor must be between 0 and 2")
     if "MINIMUM_STEP" in opts and opts["MINIMUM_STEP"][1] < 0.0:
         refuse("MINIMUM_STEP", "-- must not be negative")
-    if opts.get("LENGTHENING_STEP", (None, 0.0))[1] > 0:
-        refuse("LENGTHENING_STEP", "-- conduit lengthening is not modelled yet; set "
-                                   "LENGTHENING_STEP 0")
+    if "LENGTHENING_STEP" in opts and opts["LENGTHENING_STEP"][1] < 0.0:
+        refuse("LENGTHENING_STEP", "-- must not be negative")
     if opts.get("ALLOW_PONDING", (None, "NO"))[1] not in ("NO", "FALSE"):
         refuse("ALLOW_PONDING", "-- ponding is not modelled yet; set ALLOW_PONDING NO")
     kwargs: dict[str, object] = {}
@@ -357,6 +398,11 @@ def _dynamic_wave_options(opts: dict, path) -> DynamicWaveOptions:
         DynamicWaveOptions().routing_step)
     kwargs["routing_step"] = min(routing_step, opts["WET_STEP"][1] if "WET_STEP" in opts
                                  else DEFAULT_WET_STEP)
+    # conduits are validated (and lengthened) with the file's ROUTING_STEP, before SWMM
+    # lowers it to WET_STEP (project.c:238-250)
+    kwargs["lengthening_routing_step"] = routing_step
+    if "LENGTHENING_STEP" in opts:
+        kwargs["lengthening_step"] = opts["LENGTHENING_STEP"][1]
     for key, table, field_name in (
         ("INERTIAL_DAMPING", _DAMPING, "inertial_damping"),
         ("NORMAL_FLOW_LIMITED", _NORMAL_FLOW, "normal_flow_limited"),
@@ -401,9 +447,5 @@ def _outfall(line, name: str, elevation: float, dynamic: bool, path) -> Outfall:
             )
         stage = as_float(line, 3, "the fixed stage", path)
         gated_at = 4
-    if dynamic and len(line.fields) > gated_at and line.fields[gated_at].upper() == "YES":
-        raise ValueError(
-            f"{path}: line {line.number}: outfall {name!r} has a flap gate; gated outfalls "
-            f"are not modelled yet"
-        )
-    return Outfall(name, elevation, kind=kind.lower(), stage=stage)
+    flap = len(line.fields) > gated_at and line.fields[gated_at].upper() == "YES"
+    return Outfall(name, elevation, kind=kind.lower(), stage=stage, flap_gate=flap)

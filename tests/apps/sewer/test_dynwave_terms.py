@@ -438,3 +438,96 @@ def test_slope_switch_is_off_where_the_test_is_not_a_head_switch():
     out = dt_.conduit_terms(geo(outfall2=True), t([0.4]), t([0.6]), t([3.0]), t([3.0]),
                             a_old, 5.0, normal_flow_limited="froude")
     assert out.limited.item() and out.slope_switch.item()
+
+
+def _geo_with(barrels=1.0, length_factor=1.0, **kwargs):
+    base = geo(**kwargs)
+    return dt_.ConduitGeometry.from_si(
+        diameter=t([0.45]), roughness=t([0.013]), slope=t([0.005]), length=t([200.0]),
+        invert1=t([10.0]), invert2=t([9.0]), offset1=base.offset1 * xt.LCF,
+        offset2=base.offset2 * xt.LCF, outfall1=t([False]).bool(), outfall2=t([False]).bool(),
+        barrels=t([barrels]), length_factor=t([length_factor]))
+
+
+def test_barrels_multiply_flow_conveyance_areas_and_volume_not_the_per_barrel_state():
+    """`Conduit.barrels` (dwflow.c:101-102, 243, 291-292; dynwave.c:575-576): the momentum
+    update is one barrel's, so n barrels fed n times the flow return n times the flow offset,
+    conveyance, normal flow, surface areas and volume of one barrel, and the per-barrel
+    mid area and Froude number unchanged."""
+    y1, y2, q_last, q_old = 0.6, 0.5, 2.0, 1.8                      # ft, cfs (one barrel)
+    one, three = _geo_with(1.0), _geo_with(3.0)
+    a_old = xt.area_of_depth(t([0.55]), one.y_full, one.a_full)
+    r1 = dt_.conduit_terms(one, t([y1]), t([y2]), t([q_last]), t([q_old]), a_old, 5.0)
+    r3 = dt_.conduit_terms(three, t([y1]), t([y2]), t([3 * q_last]), t([3 * q_old]), a_old,
+                           5.0)
+    for name in ("flow_offset", "conveyance", "momentum_flow", "surface_area1",
+                 "surface_area2", "volume", "normal_flow", "lagged_conveyance1"):
+        a, b = getattr(r1, name), getattr(r3, name)
+        torch.testing.assert_close(b[torch.isfinite(b)], 3 * a[torch.isfinite(a)], rtol=1e-13,
+                                   atol=0)
+    for name in ("mid_area", "froude", "depth", "end_depth1", "end_depth2"):
+        torch.testing.assert_close(getattr(r3, name), getattr(r1, name), rtol=1e-13, atol=0)
+    assert r3.flow_class.item() == r1.flow_class.item()
+    assert r3.limited.item() is r1.limited.item()
+    # equal heads give exactly n times the flow: c0 + k dp is linear in the total
+    dp = 0.37
+    q1 = r1.flow_offset + r1.conveyance * dp
+    q3 = r3.flow_offset + r3.conveyance * dp
+    torch.testing.assert_close(q3, 3 * q1, rtol=1e-13, atol=0)
+
+
+def test_dry_barrels_multiply_the_fudge_area_too():
+    g = _geo_with(2.0)
+    r = dt_.conduit_terms(g, t([0.0]), t([0.0]), t([0.0]), t([0.0]),
+                          xt.area_of_depth(t([dt_.FUDGE]), g.y_full, g.a_full), 5.0)
+    assert r.surface_area1.item() == pytest.approx(2 * dt_.FUDGE * g.length.item() / 2)
+
+
+def test_lengthening_factor_follows_conduit_get_length_factor():
+    """link.c:1217-1254: ratio = (sqrt(g yFull) + vFull) t / L, at least 1. A 0.3 m conduit
+    8 m long at slope 0.01 and n 0.013 with t = 5 s, by hand in feet."""
+    diameter, n, slope, length, step = 0.30, 0.013, 0.01, 8.0, 5.0
+    y_full = diameter / xt.LCF
+    a_full = math.pi / 4 * y_full**2
+    s_full = a_full * (y_full / 4) ** (2 / 3)
+    v_full = xt.PHI / n * s_full * math.sqrt(slope) / a_full
+    expect = (math.sqrt(32.2 * y_full) + v_full) * step / (length / xt.LCF)
+    assert expect > 1.0
+    got = dt_.lengthening_factor(t([diameter]), t([n]), t([slope]), t([length]), step)
+    assert got.item() == pytest.approx(expect, rel=1e-6)
+    # a long conduit is never shortened: the factor is 1
+    assert dt_.lengthening_factor(t([diameter]), t([n]), t([slope]), t([200.0]),
+                                  step).item() == 1.0
+
+
+def test_lengthening_changes_mod_length_not_the_true_length_or_normal_flow():
+    """link.c:1104-1118: modLength = lf L, roughness n/sqrt(lf), slope/lf, so beta is
+    unchanged (normal flow unchanged) and the friction coefficient g n^2/(PHI^2 lf) is
+    divided by lf. The conveyance g dt A/(modLength denom) falls with the longer length, the
+    surface areas grow with it, the volume keeps the true length (dwflow.c:177, 291)."""
+    lf = 1.7
+    plain, long = _geo_with(1.0, 1.0), _geo_with(1.0, lf)
+    torch.testing.assert_close(long.mod_length, lf * plain.length)
+    torch.testing.assert_close(long.length, plain.length)
+    torch.testing.assert_close(long.beta, plain.beta)
+    torch.testing.assert_close(long.rough_factor, plain.rough_factor / lf)
+    y1, y2, q_last, q_old = 0.6, 0.5, 2.0, 1.8
+    a_old = xt.area_of_depth(t([0.55]), plain.y_full, plain.a_full)
+    rp = dt_.conduit_terms(plain, t([y1]), t([y2]), t([q_last]), t([q_old]), a_old, 5.0)
+    rl = dt_.conduit_terms(long, t([y1]), t([y2]), t([q_last]), t([q_old]), a_old, 5.0)
+    torch.testing.assert_close(rl.volume, rp.volume)
+    torch.testing.assert_close(rl.surface_area1, lf * rp.surface_area1)
+    torch.testing.assert_close(rl.surface_area2, lf * rp.surface_area2)
+    # the momentum update itself, by hand: dq1 uses the divided friction coefficient, dq2 and
+    # dq4 the modified length
+    a1, a2, am, r1, rm, v, sigma = _weights(long, y1, y2, q_last)
+    aw, rw = a1 + (am - a1) * sigma, r1 + (rm - r1) * sigma
+    dq1 = 5.0 * long.rough_factor / rw**1.33333 * abs(v)
+    dq3 = 2 * v * (am - a_old) * sigma
+    dq4 = 5.0 * v * v * (a2 - a1) / long.mod_length * sigma
+    denom = 1 + dq1
+    torch.testing.assert_close(rl.conveyance, 32.2 * 5.0 * aw / (long.mod_length * denom))
+    torch.testing.assert_close(rl.flow_offset, (q_old + dq3 + dq4) / denom)
+    # the normal-flow limit is unchanged by lengthening
+    assert rl.limited.item() is rp.limited.item()
+    torch.testing.assert_close(rl.normal_flow, rp.normal_flow)

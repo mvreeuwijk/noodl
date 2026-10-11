@@ -5,23 +5,33 @@ lexical tokenizer (`noodl.apps.inpfile`) with the EPANET reader; each format's o
 column layouts and units are read by `apps/sewer/inp.py`.
 
 **Read:** `[TITLE]`, `[OPTIONS]`, `[JUNCTIONS]`, `[OUTFALLS]`, `[CONDUITS]`, `[XSECTIONS]`,
-`[INFLOWS]`, `[POLLUTANTS]`.
+`[LOSSES]` (the flap gate only), `[INFLOWS]`, `[POLLUTANTS]`.
 
 **Routing.** `FLOW_ROUTING` is `STEADY`, `KINWAVE` or `DYNWAVE`, read as the physical names
 `steady`, `kinematic_wave` and `dynamic_wave` (`SewerNetwork.routing`). `DYNWAVE` also reads
 `ROUTING_STEP`, `WET_STEP` (default 300 s) and `MINIMUM_STEP` (seconds or `HH:MM:SS`),
 `VARIABLE_STEP` (the Courant factor, 0 to 2; absent means SWMM's default 0.75), `INERTIAL_DAMPING` (`NO`/`PARTIAL`/`FULL`),
 `NORMAL_FLOW_LIMITED` (`SLOPE`/`FROUDE`/`BOTH`/`NO`), `SURCHARGE_METHOD` (`EXTRAN` or `SLOT`), `MIN_SURFAREA`,
-`HEAD_TOLERANCE`, `MAX_TRIALS` and `MIN_SLOPE` into `DynamicWaveOptions`; `HEAD_TOLERANCE`
+`HEAD_TOLERANCE`, `MAX_TRIALS`, `MIN_SLOPE` and `LENGTHENING_STEP` into `DynamicWaveOptions`; `HEAD_TOLERANCE`
 and `MAX_TRIALS` are SWMM's own iteration controls, recorded but not used. As SWMM does,
 the reader lowers `ROUTING_STEP` to `WET_STEP` when it is larger (a file that omits
 `VARIABLE_STEP` runs the 0.75 variable step, so give `duration=` rather than `dt=` to
 `simulate_dynamic_wave`; `DynamicWaveOptions()` built in code defaults to the fixed step).
 
 **Dynamic wave, what is refused for now.** With `DYNWAVE` the reader refuses, with the line
-number: `LENGTHENING_STEP` above 0, `ALLOW_PONDING YES`,
-a junction `InitDepth` other than 0, a conduit `InitFlow` or `MaxFlow`
-other than 0, flap-gated outfalls and `TIDAL`/`TIMESERIES` outfalls.
+number: `ALLOW_PONDING YES`, a negative `LENGTHENING_STEP` and `TIDAL`/`TIMESERIES` outfalls.
+The conduit lengthening uses the file's own `ROUTING_STEP`, as SWMM validates its conduits
+before it lowers the step to `WET_STEP`.
+
+**Initial conditions and limits (dynamic wave).** The junction `InitDepth` (the fourth
+`[JUNCTIONS]` field) is `Manhole.initial_depth`; the conduit `InitFlow` and `MaxFlow` (the
+eighth and ninth `[CONDUITS]` fields) are `Pipe.initial_flow` (a total over the barrels) and
+`Pipe.max_flow` (a limit on each barrel); a conduit flap gate (`[LOSSES]` fifth field YES) is
+`Pipe.flap_gate`, and an outfall's `Gated` YES is `Outfall.flap_gate`. A conduit the reader
+reverses (adverse, as SWMM does) has its `InitFlow` negated and its gate recorded as
+reversed. The loss coefficients and the seepage rate of `[LOSSES]` must be 0 (refused with
+the line number otherwise). Under `STEADY` or `KINWAVE` a non-zero `InitDepth`, `InitFlow` or
+`MaxFlow`, a flap gate and a gated outfall are refused by name.
 
 **Junctions.** `Elevation` is the invert, `MaxDepth` sets `Manhole.ground` (invert plus
 depth) and `SurDepth` is `Manhole.surcharge_depth` (m, at least 0; 0 when absent): the depth
@@ -30,8 +40,10 @@ is not read, since ponding is refused.
 
 **Outfalls.** `FREE`, `NORMAL` and `FIXED` (with its stage, m) are read.
 
-**Barrels.** A conduit with more than one barrel, or a culvert code, is refused for every
-routing; it used to be ignored silently.
+**Barrels.** A conduit with more than one barrel is read under `DYNWAVE` (1 to 127; the
+flows, volumes and surface areas of the pipe are totals) and refused with the line number under
+`STEADY` and `KINWAVE`; a culvert code is refused for every routing. Both used to be ignored
+silently.
 
 **Constraints:** `FLOW_UNITS` must be `CMS` — the reader is SI-native and does not convert.
 `LINK_OFFSETS` must be `DEPTH` or `ELEVATION`. Only `CIRCULAR` cross-sections. Only constant

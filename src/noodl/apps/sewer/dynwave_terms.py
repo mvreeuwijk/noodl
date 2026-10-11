@@ -8,12 +8,16 @@ flags and limits for the element to apply. Trial relaxation, the 0.001 cfs rever
 link bypassing are artefacts of SWMM's Picard iteration that do not move its fixed point and
 are not modelled (see docs/applications/sewer.md, "Dynamic wave").
 
-Scope of the transcription (circular conduits, one barrel, as the dynamic-wave reader admits):
-no local losses (``dq5``), no evaporation/seepage (``dq6``), no culvert inlet control, no flap
-gate, no user flow limit and no Courant lengthening (``modLength == length``). Both
-``SURCHARGE_METHOD`` values are transcribed: EXTRAN (no Preissmann slot: ``getSlotWidth ==
-0``, end depths capped at the crown, widths cut off at ``0.96 yFull``) and SLOT (end depths
-uncapped, the Sjoberg slot width above ``0.985257 yFull``, areas extended above the crown).
+Scope of the transcription (circular conduits): no local losses (``dq5``), no
+evaporation/seepage (``dq6``) and no culvert inlet control. Parallel barrels (``Conduit.barrels``)
+and Courant lengthening (``modLength``) are modelled: the momentum update is one barrel's, and
+the flow offset, conveyance, normal flow, surface areas and volume it returns are totals over the
+barrels, as SWMM's ``newFlow``, ``dqdh``, ``surfArea`` and ``newVolume`` are. The user flow limit
+and the flap gate act on the flow after these terms and are the element's
+(`DynamicWaveConduit`). Both ``SURCHARGE_METHOD`` values are transcribed: EXTRAN (no
+Preissmann slot: ``getSlotWidth == 0``, end depths capped at the crown, widths cut off at
+``0.96 yFull``) and SLOT (end depths uncapped, the Sjoberg slot width above
+``0.985257 yFull``, areas extended above the crown).
 
 Every source reference is to SWMM 5.2.4 ``src/solver``.
 """
@@ -66,7 +70,11 @@ class ConduitGeometry:
 
     ``y_full`` full depth (ft), ``a_full`` full area (ft2), ``s_full`` section factor
     ``A R^(2/3)`` at full depth (ft^(8/3)), ``beta = PHI sqrt(slope)/n`` (ft^(1/3)/s),
-    ``rough_factor = g (n/PHI)^2`` (ft^(1/3)/s2, `link.c:1130`), ``length`` (ft),
+    ``rough_factor = g (n/PHI)^2 / lengthFactor`` (ft^(1/3)/s2, `link.c:1130`, with the
+    roughness reduced by ``sqrt(lengthFactor)``, `link.c:1117`), ``length`` the true length
+    (ft), ``mod_length`` SWMM's ``modLength`` = ``lengthFactor * length`` (ft, `link.c:1115`;
+    the momentum terms and surface areas use it, the volume the true length),
+    ``barrels`` (-, SWMM's ``Conduit.barrels``),
     ``invert1``/``invert2`` end-node invert elevations (ft), ``offset1``/``offset2``
     conduit inverts above those (ft), ``outfall1``/``outfall2`` whether the end node is an
     outfall (bool).
@@ -78,6 +86,8 @@ class ConduitGeometry:
     beta: Tensor
     rough_factor: Tensor
     length: Tensor
+    mod_length: Tensor
+    barrels: Tensor
     invert1: Tensor
     invert2: Tensor
     offset1: Tensor
@@ -88,16 +98,24 @@ class ConduitGeometry:
     @classmethod
     def from_si(cls, diameter: Tensor, roughness: Tensor, slope: Tensor, length: Tensor,
                 invert1: Tensor, invert2: Tensor, offset1: Tensor, offset2: Tensor,
-                outfall1: Tensor, outfall2: Tensor) -> ConduitGeometry:
+                outfall1: Tensor, outfall2: Tensor, *, barrels: Tensor | None = None,
+                length_factor: Tensor | None = None) -> ConduitGeometry:
         """From SI inputs: ``diameter`` (m), Manning ``roughness`` (s m^(-1/3), numerically
         SWMM's n), ``slope`` (m/m), ``length`` (m), node inverts and conduit offsets (m),
-        outfall flags (bool)."""
+        outfall flags (bool), the ``barrels`` count (default 1) and the Courant
+        ``length_factor`` (-, >= 1, default 1; `lengthening_factor`)."""
         y_full, a_full, s_full, beta = conduit_constants(diameter, roughness, slope)
-        n_phi = roughness / PHI
+        factor = torch.ones_like(y_full) if length_factor is None else length_factor
+        # link.c:1117 -- roughness / sqrt(lengthFactor); beta is unchanged (link.c:1116 divides
+        # the slope by the same factor)
+        n_phi = roughness / torch.sqrt(factor) / PHI
         return cls(
             y_full=y_full, a_full=a_full, s_full=s_full, beta=beta,
             rough_factor=GRAVITY_FT * (n_phi * n_phi),           # link.c:1130
             length=length / LCF,
+            mod_length=factor * length / LCF,                    # link.c:1115
+            barrels=(torch.ones_like(y_full) if barrels is None
+                     else torch.as_tensor(barrels, dtype=F64)),
             invert1=invert1 / LCF, invert2=invert2 / LCF,
             offset1=offset1 / LCF, offset2=offset2 / LCF,
             outfall1=torch.as_tensor(outfall1).bool(),
@@ -105,10 +123,26 @@ class ConduitGeometry:
         )
 
 
+def lengthening_factor(diameter: Tensor, roughness: Tensor, slope: Tensor, length: Tensor,
+                       step: float) -> Tensor:
+    """`link.c::conduit_getLengthFactor` (link.c:1217-1254) for circular conduits: the factor
+    (>= 1, -) by which SWMM lengthens a conduit to the Courant length ``(sqrt(g yFull) +
+    vFull) t`` of the shorter of the routing step and ``LENGTHENING_STEP`` (``step``, s; the
+    caller passes that minimum). ``diameter`` (m), ``roughness`` (s m^(-1/3)), ``slope``
+    (m/m, the conduit's real slope), ``length`` (m)."""
+    y_full, a_full, s_full, _ = conduit_constants(diameter, roughness, slope)
+    v_full = PHI / roughness * s_full * torch.sqrt(torch.abs(slope)) / a_full  # link.c:1241
+    ratio = (torch.sqrt(GRAVITY_FT * y_full) + v_full) * step / (length / LCF)  # link.c:1249
+    return torch.where(ratio > 1.0, ratio, torch.ones_like(ratio))             # link.c:1252
+
+
 class ConduitTerms(NamedTuple):
     """One pass's dynamic-wave terms per conduit, in SWMM ft units.
 
-    ``flow_class`` (long, one of the seven classes); ``flow_offset`` c0 (cfs) and
+    Per-barrel quantities are marked; the flows, conveyances and surface areas are TOTALS over
+    the conduit's ``barrels`` (SWMM's ``newFlow``, ``dqdh`` and ``surfArea * barrels``,
+    `dwflow.c:243, 292`, `dynwave.c:575-576`). ``flow_class`` (long, one of the seven
+    classes); ``flow_offset`` c0 (cfs) and
     ``conveyance`` k = dq/d(H1 - H2) (ft2/s, 0 where an end head is pinned, the pinned
     head then folded into c0); ``momentum_flow`` SWMM's trial q before any limit (cfs, at the
     given heads, 0 on the dry exit); ``limited`` the normal-flow check passed (bool) with
@@ -119,15 +153,16 @@ class ConduitTerms(NamedTuple):
     ``switch_normal_flow`` its q_norm (cfs, +inf where no switch) -- the closure applies it
     within the pass (`dynwave.DynamicWaveConduit`); ``dry_upstream`` /
     ``dry_downstream`` node depth <= FUDGE (bool); ``surface_area1/2`` (ft2) contributed to
-    the end nodes; ``mid_area`` the stored ``Conduit.a1`` (ft2, next step's ``a_old``);
-    ``volume`` (ft3); ``depth`` ``Link.newDepth`` (ft); ``end_depth1/2`` the end flow
-    depths after classification (ft); ``lagged_conveyance1/2`` (ft2/s) the conveyance k a
-    wet conduit whose OTHER end is pinned still has in this end's head -- the pass lags it
+    the end nodes; ``mid_area`` the stored ``Conduit.a1`` (ft2, PER BARREL, next step's
+    ``a_old``); ``volume`` (ft3, true length); ``depth`` ``Link.newDepth`` (ft);
+    ``end_depth1/2`` the end flow depths after classification (ft);
+    ``lagged_conveyance1/2`` (ft2/s) the conveyance k a wet conduit whose OTHER end is pinned
+    still has in this end's head -- the pass lags it
     into c0 (``conveyance`` is 0 there), 0 elsewhere. SWMM keeps it in the node's
     ``sumdqdh`` (`dwflow.c:243`, `dynwave.c:578-588`); the closure uses it to anchor a
     surcharged junction (`JunctionStorage`); ``froude`` SWMM's `Link.froude` (-), which the
     variable routing step reads: 0 on the dry exit (`dwflow.c:175`), else from the flow
-    of the given state at mid depth (`dwflow.c:189`, 0 for a full closed conduit).
+    of the given state at mid depth (`dwflow.c:189`, 0 for a full closed conduit; per barrel).
     """
 
     flow_class: Tensor
@@ -197,9 +232,11 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     """SWMM's conduit update (`dwflow.c:57-293`) for one pass, vectorised over conduits.
 
     ``depth1``, ``depth2`` are the end NODE depths above the node inverts (ft) from the
-    previous pass; ``q_last`` the previous pass's flow (cfs, SWMM's ``qLast``), which sets
+    previous pass; ``q_last`` the previous pass's flow (cfs, total over the barrels; SWMM's
+    ``qLast`` is one barrel's, `dwflow.c:100-102`), which sets
     the flow class, surface areas, velocity and damping; ``q_old`` and ``a_old`` the
-    step-start flow (cfs) and stored mid area (ft2); ``dt`` the routing step (s).
+    step-start flow (cfs, total) and stored mid area (ft2, per barrel); ``dt`` the routing
+    step (s).
     ``damping`` is ``INERTIAL_DAMPING``, ``normal_flow_limited`` ``NORMAL_FLOW_LIMITED`` and
     ``surcharge_method`` ``SURCHARGE_METHOD`` (``"extran"`` or ``"slot"``). Under ``"slot"``
     the end depths ``end_depth1/2`` may exceed ``y_full``, ``volume`` and ``mid_area`` use the
@@ -219,10 +256,13 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
                                    a_old.shape, yf.shape)
     depth1, depth2, q_last, q_old, a_old = (
         x.to(F64).expand(shape) for x in (depth1, depth2, q_last, q_old, a_old))
+    barrels = geo.barrels
+    q_last = q_last / barrels                                                  # dwflow.c:102
+    q_old = q_old / barrels
     zero = torch.zeros(shape, dtype=F64)
     one = torch.ones(shape, dtype=F64)
     fudge = torch.full(shape, FUDGE, dtype=F64)
-    length = geo.length
+    length = geo.mod_length                                                    # dwflow.c:136
 
     # dwflow.c:110-115 -- end heads, raised to the conduit inverts
     z1 = geo.invert1 + geo.offset1
@@ -355,10 +395,11 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     c0 = (q_old + dq3 + dq4) / denom
     # an end head that does not follow its node is folded into c0 (design D4)
     pinned = pinned1 | pinned2
-    lagged1 = torch.where(pinned2 & ~pinned1 & ~dry_exit, k, zero)
-    lagged2 = torch.where(pinned1 & ~pinned2 & ~dry_exit, k, zero)
+    k_total = k * barrels                                                      # dwflow.c:243
+    lagged1 = torch.where(pinned2 & ~pinned1 & ~dry_exit, k_total, zero)
+    lagged2 = torch.where(pinned1 & ~pinned2 & ~dry_exit, k_total, zero)
     flow_offset = torch.where(pinned, momentum, c0)
-    conveyance = torch.where(pinned, zero, k)
+    conveyance = torch.where(pinned, zero, k_total)
 
     # dwflow.c:248-258 + checkNormalFlow (dwflow.c:637-686), on the momentum flow
     has_outfall = geo.outfall1 | geo.outfall2                                  # :654
@@ -398,22 +439,24 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     conveyance = torch.where(dry_exit, zero, conveyance)
     momentum = torch.where(dry_exit, zero, momentum)
 
+    # per-barrel q is limited, and the pass solves the total: min(q, q_norm) * barrels is
+    # min(q * barrels, q_norm * barrels) (dwflow.c:292 newFlow = q * barrels)
     return ConduitTerms(
         flow_class=cls,
-        flow_offset=flow_offset,
+        flow_offset=flow_offset * barrels,
         conveyance=conveyance,
-        momentum_flow=momentum,
+        momentum_flow=momentum * barrels,
         limited=limited,
-        normal_flow=normal_flow,
+        normal_flow=normal_flow * barrels,
         slope_switch=slope_switch,
         switch_drop=(z1 - z2).expand(shape),
-        switch_normal_flow=torch.where(slope_switch, q_norm, inf),
+        switch_normal_flow=torch.where(slope_switch, q_norm, inf) * barrels,
         dry_upstream=depth1 <= FUDGE,                                          # :280
         dry_downstream=depth2 <= FUDGE,                                        # :281
-        surface_area1=surf1,
-        surface_area2=surf2,
+        surface_area1=surf1 * barrels,                                         # dynwave.c:575
+        surface_area2=surf2 * barrels,
         mid_area=torch.where(dry_exit, a_end, a_mid),                          # :171, :284
-        volume=a_end * length,                                                 # :177, :291
+        volume=a_end * geo.length * barrels,                                   # :177, :291
         depth=torch.minimum(y_mid, yf),                                        # :176, :287
         end_depth1=y1,
         end_depth2=y2,
@@ -427,5 +470,5 @@ __all__ = [
     "DAMPING", "DN_CRITICAL", "DN_DRY", "DRY", "EXTRAN_CROWN_CUTOFF", "FUDGE", "MAX_VELOCITY",
     "NORMAL_FLOW_LIMITED", "SLOT_CROWN_CUTOFF", "SUBCRITICAL", "SUPCRITICAL",
     "SURCHARGE_METHODS", "UP_CRITICAL", "UP_DRY",
-    "ConduitGeometry", "ConduitTerms", "conduit_terms",
+    "ConduitGeometry", "ConduitTerms", "conduit_terms", "lengthening_factor",
 ]

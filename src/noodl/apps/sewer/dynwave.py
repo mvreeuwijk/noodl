@@ -31,6 +31,7 @@ from noodl.apps.sewer.dynwave_terms import (
     ConduitGeometry,
     ConduitTerms,
     conduit_terms,
+    lengthening_factor,
 )
 from noodl.apps.sewer.xsect_tables import (
     LCF,
@@ -134,6 +135,14 @@ class DynamicWaveOptions:
     (`routing_step_size`; SWMM's own default is 0.75, this dataclass's is 0, so a fixed
     step is the default). `minimum_step` is SWMM's MINIMUM_STEP (s), the shortest variable
     step and the very first one.
+
+    `lengthening_step` is SWMM's LENGTHENING_STEP (s, >= 0, 0 for none): a conduit shorter
+    than the Courant length ``(sqrt(g yFull) + vFull) t`` is lengthened to it for the
+    momentum terms, with ``t`` the smaller of `lengthening_step` and the routing step
+    (`conduit_getLengthFactor`, link.c:1217-1254; the volume keeps the true length).
+    SWMM takes the routing step before it is lowered to WET_STEP (`project.c:238-250`
+    validates the conduits first), so `lengthening_routing_step` (s) is the ROUTING_STEP of
+    the file where that differs from `routing_step`; ``None`` means `routing_step`.
     """
 
     routing_step: float = 20.0
@@ -145,6 +154,8 @@ class DynamicWaveOptions:
     max_trials: int | None = None
     variable_step: float = 0.0
     minimum_step: float = 0.5
+    lengthening_step: float = 0.0
+    lengthening_routing_step: float | None = None
 
     @property
     def min_route_step(self) -> float:
@@ -173,6 +184,14 @@ class DynamicWaveOptions:
             raise ValueError(
                 f"DynamicWaveOptions: variable_step must be in [0, 2], got "
                 f"{self.variable_step!r}")
+        if not self.lengthening_step >= 0.0:
+            raise ValueError(
+                f"DynamicWaveOptions: lengthening_step must be >= 0 s, got "
+                f"{self.lengthening_step!r}")
+        if self.lengthening_routing_step is not None and not self.lengthening_routing_step > 0:
+            raise ValueError(
+                f"DynamicWaveOptions: lengthening_routing_step must be > 0 s or None, got "
+                f"{self.lengthening_routing_step!r}")
         if not self.minimum_step >= 0.0:
             raise ValueError(
                 f"DynamicWaveOptions: minimum_step must be >= 0 s, got {self.minimum_step!r}")
@@ -184,9 +203,10 @@ class DynamicWaveConduit(Element):
     """SWMM's dynamic-wave conduit (`dwflow.c`) with its coefficients frozen for one pass.
 
     ``q = c0 + k dp`` (m3/s, dp = H1 - H2 in m), then ``min(q, q_norm)`` where SWMM's
-    normal-flow check passed (`dwflow.c:255-258`), then the dry-node caps in SWMM's order
-    (`dwflow.c:273-276`): at most +`FUDGE_FLOW` out of a dry upstream node, at least
-    -`FUDGE_FLOW` out of a dry downstream node.
+    normal-flow check passed (`dwflow.c:255-258`), then the user flow limit, the flap gate and
+    the dry-node caps in SWMM's order (below; `dwflow.c:270-281`): at most +`FUDGE_FLOW`
+    out of a dry upstream node, at least -`FUDGE_FLOW` out of a dry downstream node (each
+    times the conduit's barrels).
 
     The normal-flow slope switch (the tie rule). The check's flag is lagged (design D4):
     evaluated by the closure on the fed heads and flow. Where it is SWMM's slope test ``y1 <
@@ -217,6 +237,16 @@ class DynamicWaveConduit(Element):
     ``"water.dry_downstream"``, and the switch's ``"water.switch_drop"`` dz (m),
     ``"water.switch_slope"`` S (m2/s) and ``"water.flow_last"`` q_last (m3/s), all written
     by `DynamicWaveHydraulics`.
+
+    The element limits that follow the normal-flow limit, in SWMM's order (`dwflow.c:269-281`;
+    SWMM's under-relaxation, :259-267, is not modelled): the user flow limit ``|q| <=``
+    ``"water.max_flow"`` (m3/s, +inf for none, the default; `dwflow.c:269-273`), the flap gate
+    zeroing flow against it (`link.c::link_setFlapGate`: ``"water.flap_block_reverse"`` 1 zeroes
+    ``q < 0``, ``"water.flap_block_forward"`` 1 zeroes ``q > 0``; `dwflow.c:276`), then the
+    dry-node caps at ``"water.dry_flow_cap"`` (m3/s, `FUDGE_FLOW` times the barrels;
+    `dwflow.c:280-281`). Each is a
+    clamp of ``q`` against a constant, so the flow stays continuous and non-decreasing in ``dp``
+    (the head solve's Newton step needs both) with ``dflow`` 0 wherever one acts.
     """
 
     def __init__(self, kind: str = "pipe") -> None:
@@ -233,10 +263,19 @@ class DynamicWaveConduit(Element):
         slid = torch.minimum(lin, torch.maximum(q_norm, wall))
         q = torch.where(limited, torch.minimum(lin, q_norm),
                         torch.where(switch, slid, lin))                    # dwflow.c:255-258
+        inf = torch.full_like(q, torch.inf)
+        zero = torch.zeros_like(q)
+        limit = drivers.get("water.max_flow", inf)
+        q = torch.minimum(torch.maximum(q, -limit), limit)                 # dwflow.c:269-273
+        block_reverse = drivers.get("water.flap_block_reverse", zero) > 0.5
+        block_forward = drivers.get("water.flap_block_forward", zero) > 0.5
+        q = torch.minimum(torch.maximum(q, torch.where(block_reverse, zero, -inf)),
+                          torch.where(block_forward, zero, inf))          # dwflow.c:276
+        cap = drivers.get("water.dry_flow_cap", torch.full_like(q, FUDGE_FLOW))
         up = drivers["water.dry_upstream"] > 0.5
         dn = drivers["water.dry_downstream"] > 0.5
-        q = torch.where(up, torch.clamp(q, max=FUDGE_FLOW), q)      # dwflow.c:273-274
-        q = torch.where(dn, torch.clamp(q, min=-FUDGE_FLOW), q)     # dwflow.c:275-276
+        q = torch.where(up, torch.minimum(q, cap), q)                      # dwflow.c:280
+        q = torch.where(dn, torch.maximum(q, -cap), q)                     # dwflow.c:281
         on_wall = switch & ~limited
         return lin, q, torch.where(on_wall, wall, torch.full_like(wall, torch.nan))
 
@@ -524,6 +563,25 @@ class DynamicWaveHydraulics:
         self.length = torch.tensor([p.length for p in net.pipes], dtype=F64)
         self.offset1 = torch.tensor([p.inlet_offset for p in net.pipes], dtype=F64)
         self.offset2 = torch.tensor([p.outlet_offset for p in net.pipes], dtype=F64)
+        self.barrels = torch.tensor([float(p.barrels) for p in net.pipes], dtype=F64)
+        #: per-pipe flow limit (m3/s, total over the barrels: SWMM limits one barrel's flow
+        #: to MaxFlow, dwflow.c:270-273; +inf for none)
+        self.max_flow = self.barrels * torch.tensor(
+            [torch.inf if p.max_flow is None else p.max_flow for p in net.pipes], dtype=F64)
+        #: per-pipe InitFlow (m3/s, total, positive from u to v)
+        self.initial_flow = torch.tensor([p.initial_flow for p in net.pipes], dtype=F64)
+        # link_setFlapGate (link.c:658-667): a conduit's own gate closes on flow against its
+        # direction (``q * direction < 0``); an outfall's gate closes on flow that would
+        # enter the conduit at the outfall's end.
+        outfall_gated = {o.name for o in net.outfalls if o.flap_gate}
+        own = [p.flap_gate for p in net.pipes]
+        rev = [p.flap_gate_reversed for p in net.pipes]
+        self.flap_block_reverse = torch.tensor(
+            [(g and not r) or p.v in outfall_gated
+             for p, g, r in zip(net.pipes, own, rev, strict=True)], dtype=torch.bool)
+        self.flap_block_forward = torch.tensor(
+            [(g and r) or p.u in outfall_gated
+             for p, g, r in zip(net.pipes, own, rev, strict=True)], dtype=torch.bool)
         self._rebuild_geometry()
 
         # Each outfall's own conduit and the end it sits at (link.c:740-751: node2 first).
@@ -575,6 +633,16 @@ class DynamicWaveHydraulics:
         #: the junction floods (no ponding, dynwave.c:746-748)
         self.flood_depth = self.full_depth + torch.tensor(
             [m.surcharge_depth for m in net.manholes], dtype=F64)
+        #: per-junction InitDepth (m)
+        self.initial_junction_depth = torch.tensor(
+            [m.initial_depth for m in net.manholes], dtype=F64)
+        too_deep = self.initial_junction_depth > self.flood_depth                 # node.c:216
+        if bool(too_deep.any()):
+            bad = [self.junction_names[i] for i in too_deep.nonzero().flatten().tolist()]
+            raise ValueError(
+                f"DynamicWaveHydraulics: junction(s) {bad} start deeper (initial_depth) than "
+                f"their full depth plus surcharge depth (SWMM: initial depth exceeds max. "
+                f"depth)")
         jinv = self.node_invert[self.junction_idx]
         #: the junctions' `JunctionStorage` (the model's node source; `junction_residual`)
         self.storage = JunctionStorage(
@@ -584,10 +652,19 @@ class DynamicWaveHydraulics:
 
     # ------------------------------------------------------------------ geometry
     def _rebuild_geometry(self) -> None:
+        opts = self.options
+        factor = None
+        if opts.lengthening_step > 0.0:                                       # link.c:1105-1108
+            route = (opts.routing_step if opts.lengthening_routing_step is None
+                     else opts.lengthening_routing_step)
+            step = min(route, opts.lengthening_step)                          # link.c:1248
+            factor = lengthening_factor(self.diameter, self.roughness, self.slope,
+                                        self.length, step)
         self.geo = ConduitGeometry.from_si(
             self.diameter, self.roughness, self.slope, self.length,
             self.node_invert[self.u], self.node_invert[self.v], self.offset1, self.offset2,
-            self.is_outfall[self.u], self.is_outfall[self.v])
+            self.is_outfall[self.u], self.is_outfall[self.v], barrels=self.barrels,
+            length_factor=factor)
 
     def set_roughness(self, i: int, value) -> None:
         """Set Manning's n (s m^(-1/3)) of pipe `i` to `value`, which may be a tensor that
@@ -663,7 +740,7 @@ class DynamicWaveHydraulics:
         node.c:1413-1492), from each outfall conduit's flow `q` (m3/s): heads (m)."""
         op = self.outfall_pipe
         geo = self.geo
-        q_ft = (q[..., op] / QCF).abs()
+        q_ft = (q[..., op] / QCF / self.barrels[op]).abs()                # link.c:759
         yf, af = geo.y_full[op], geo.a_full[op]
         y_norm = normal_depth_ft(q_ft, yf, af, geo.s_full[op], geo.beta[op])
         y_crit = critical_depth(q_ft, yf, af)
@@ -728,7 +805,7 @@ class DynamicWaveHydraulics:
         depth_ft = terms.depth
         a_link = area_of_depth(depth_ft, self.geo.y_full, self.geo.a_full)
         moving = (depth_ft > _VELOCITY_MIN_DEPTH) & (a_link > FUDGE)          # link.c:834-840
-        v_ft = (q / QCF) / torch.where(moving, a_link, torch.ones_like(a_link))
+        v_ft = (q / QCF / self.barrels) / torch.where(moving, a_link, torch.ones_like(a_link))
         out.update({
             "sewer.q": q,
             "sewer.h": depth_ft * LCF,
@@ -763,6 +840,10 @@ class DynamicWaveHydraulics:
             "water.switch_slope": torch.where(switch, switch_slope,
                                               torch.zeros_like(switch_slope)),
             "water.flow_last": q,
+            "water.max_flow": self.max_flow,
+            "water.flap_block_reverse": self.flap_block_reverse.to(F64),
+            "water.flap_block_forward": self.flap_block_forward.to(F64),
+            "water.dry_flow_cap": FUDGE_FLOW * self.barrels,
             "water.dry_upstream": terms.dry_upstream.to(F64),
             "water.dry_downstream": terms.dry_downstream.to(F64),
             "water.storage_area": area_ft2 * _AREA_SI,
@@ -794,33 +875,66 @@ class DynamicWaveHydraulics:
         return self._carried(state, terms, self._inflow(drivers))
 
     def initial_state(self, drivers: Mapping | None = None) -> State:
-        """SWMM's cold, dry start (flowrout.c:75-102, 336-507): no flow, junctions at their
-        inverts, outfalls at the depth `link_setOutfallDepth` gives at zero flow (a FIXED
-        outfall at its stage, the others at their invert; flowrout.c:383), every conduit at
-        the mean of its end-node depths above its offsets, clamped to [0, yFull] and at
-        least FUDGE (flowrout.c:389-420), which sets its stored area (flowrout.c:497), and a
-        zero junction net inflow. SWMM zeroes the lateral inflow before routing starts
-        (node.c:264, flowrout.c:437), so the first step's ``oldNetInflow`` is 0
-        (routing.c:236-242, node.c:303) and its trapezoid sees only the end-of-step inflow.
+        """SWMM's initial state (flowrout.c:75-102, 336-507), cold and dry unless the network
+        sets InitDepth (`Manhole.initial_depth`) or InitFlow (`Pipe.initial_flow`).
+
+        - Each conduit with an InitFlow ``q0`` (a total, positive from `u` to `v`) starts at
+          the normal depth of one barrel's ``q0 / barrels``, capped at the depth of ``qMax``
+          (`link.c::link_getYnorm`, link.c:783-804; `conduit_initState`, link.c:1311).
+        - A junction with no InitDepth starts at the mean over its attached conduits of that
+          depth plus the conduit's FIRST-end offset (zero for a conduit without InitFlow,
+          which still counts in the mean): `initNodeDepths`, flowrout.c:337-385 (the first
+          offset is used at both ends there, as in SWMM). A junction with an InitDepth keeps
+          it. (Storage units are excluded by SWMM; none are modelled yet.)
+        - Outfalls start at the depth `link_setOutfallDepth` gives from the conduit's initial
+          flow (a FIXED outfall at its stage, the others at their invert at zero flow;
+          flowrout.c:383).
+        - A conduit with no InitFlow starts at the mean of its end-node depths above its
+          offsets, clamped to [0, yFull] and at least FUDGE (`initLinkDepths`,
+          flowrout.c:389-420); the area at that depth is its stored area (`initLinks`,
+          flowrout.c:497).
+        - A junction's net inflow is that of the initial flows through it (`initNodes`,
+          flowrout.c:458-466 and node.c:303): 0 with no InitFlow. SWMM zeroes the lateral
+          inflow before routing starts (node.c:264, flowrout.c:437), so the first step's
+          ``oldNetInflow`` has no lateral part (routing.c:236-242).
+
         `drivers`, when given, has its ``"inflow"`` validated."""
         if drivers is not None:
             self._inflow(drivers)
-        q0 = torch.zeros(len(self.pipe_names), dtype=F64)
-        phi = self.node_invert.clone()
-        phi[self.outfall_idx] = self._outfall_heads(q0)
         geo = self.geo
+        q0 = self.initial_flow.clone()
+        # link.c:783-804 / 1311: normal depth of one barrel's initial flow (0 where none)
+        y_link = normal_depth_ft(q0.abs() / QCF / self.barrels, geo.y_full, geo.a_full,
+                                 geo.s_full, geo.beta)
+        # flowrout.c:353-363: depth + the first offset, at both ends, where depth > FUDGE
+        y_end = torch.where(y_link > FUDGE, y_link + geo.offset1, torch.zeros_like(y_link))
+        total = torch.zeros(self.node_invert.shape, dtype=F64)
+        count = torch.zeros_like(total)
+        total = total.index_add(0, self.u, y_end).index_add(0, self.v, y_end)
+        count = count.index_add(0, self.u, torch.ones_like(y_end))
+        count = count.index_add(0, self.v, torch.ones_like(y_end))
+        jidx = self.junction_idx
+        given = self.initial_junction_depth / LCF
+        average = torch.where(count[jidx] > 0.0, total[jidx] / count[jidx].clamp(min=1.0),
+                              torch.zeros_like(given))                        # flowrout.c:378
+        depth_j = torch.where(given > 0.0, given, average)                    # flowrout.c:376
+        phi = self.node_invert.clone()
+        phi[jidx] = self.node_invert[jidx] + depth_j * LCF
+        phi[self.outfall_idx] = self._outfall_heads(q0)                       # flowrout.c:383
         depth_ft = (phi - self.node_invert) / LCF
         y1 = torch.clamp(depth_ft[self.u] - geo.offset1, min=0.0)
         y2 = torch.clamp(depth_ft[self.v] - geo.offset2, min=0.0)
-        y = torch.clamp(0.5 * (torch.minimum(y1, geo.y_full) + torch.minimum(y2, geo.y_full)),
-                        min=FUDGE)                                            # :402-416
+        y_mean = torch.clamp(0.5 * (torch.minimum(y1, geo.y_full)
+                                    + torch.minimum(y2, geo.y_full)), min=FUDGE)  # :402-416
+        y = torch.where(q0 == 0.0, y_mean, y_link)                            # :398
+        through = torch.zeros_like(total).index_add(0, self.v, q0).index_add(0, self.u, -q0)
         return {
             f"{self.layer}.phi": phi,
             f"{self.layer}.q": q0,
-            "sewer.junction_depth": torch.zeros(len(self.junction_names), dtype=F64),
-            "sewer.pipe_flow": torch.zeros(len(self.pipe_names), dtype=F64),
+            "sewer.junction_depth": depth_j * LCF,
+            "sewer.pipe_flow": q0.clone(),
             "sewer.mid_area": area_of_depth(y, geo.y_full, geo.a_full) * _AREA_SI,  # :497
-            "sewer.net_inflow": torch.zeros(len(self.junction_names), dtype=F64),
+            "sewer.net_inflow": through[jidx],                                # flowrout.c:458
         }
 
     def overflow(self, before: Mapping, after: Mapping, drivers: Mapping, *,
@@ -874,7 +988,8 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     bound the flow residual only through the wall slope S over the junction's grounding,
     so a heads-only test can stop a pass short of the fixed point (a flow residual of
     3e-5 m3/s was measured on the tree's drain-down). The state is
-    SWMM's cold, dry start. Attached to the model: `junction_idx`, `junction_invert` (m),
+    SWMM's initial state (`DynamicWaveHydraulics.initial_state`: cold and dry, or its
+    InitDepth and InitFlow). Attached to the model: `junction_idx`, `junction_invert` (m),
     `outfall_pipe_idx`, `dynamic_wave` (the closure), `routing_step` (s), `pipe_names`,
     `pipe_columns`, `notes`, `input_specs`, `driver_template`.
     """
@@ -981,8 +1096,8 @@ def routing_step_size(hyd: DynamicWaveHydraulics, before: Mapping | None, after:
     - each conduit's Courant step ``V / |q| * Fr / (1 + Fr) * variable_step``
       (`getLinkStep`, dynwave.c:836-878), skipped where ``|q|`` or the mid-depth area is
       within FUDGE or ``Fr <= 0.01`` -- a dry, still or full closed conduit never limits
-      the step. The ratio of a lengthened conduit's modified length to its own is 1 (no
-      lengthening is modelled);
+      the step. Flow and volume are one barrel's, and a lengthened conduit's step is
+      scaled by its modified length over its own, ``modLength / length``;
     - each junction's depth-change step ``0.25 (crown - invert) / (|dy|/dt)``
       (`getNodeStep`, dynwave.c:881-921), skipped at outfalls, dry junctions, junctions
       within FUDGE of their crown or above it, and where ``|dy|/dt`` is within FUDGE;
@@ -1011,10 +1126,13 @@ def _variable_step(hyd: DynamicWaveHydraulics, before: Mapping, after: Mapping,
     """`dynwave.c::getVariableStep` (dynwave.c:799-833), `max_step` s, `dt` the last step."""
     with torch.no_grad():
         terms = hyd._terms(after, dt)
-        q = after[f"{hyd.layer}.q"].abs() / QCF                              # dynwave.c:852
+        barrels = hyd.geo.barrels
+        q = after[f"{hyd.layer}.q"].abs() / QCF / barrels                    # dynwave.c:852
         fr = terms.froude
         live = (q > FUDGE) & (terms.mid_area > FUDGE) & (fr > 0.01)          # dynwave.c:853-856
-        residence = terms.volume / torch.where(live, q, torch.ones_like(q))  # dynwave.c:859
+        residence = (terms.volume / barrels
+                     / torch.where(live, q, torch.ones_like(q)))             # dynwave.c:859
+        residence = residence * hyd.geo.mod_length / hyd.geo.length          # dynwave.c:865
         courant = residence * fr / (1.0 + fr) * hyd.options.variable_step    # dynwave.c:861-862
         t_link = torch.where(live, courant, torch.full_like(courant, max_step))
         t_min = min(max_step, float(t_link.min())) if t_link.numel() else max_step
