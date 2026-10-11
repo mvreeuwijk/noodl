@@ -184,3 +184,52 @@ def test_air_mass_change_needs_prescribed_temperatures():
         return_inputs=True)
     with pytest.raises(ValueError, match="air_mass_change"):
         simulate(model, state, drivers, [0.0, 60.0], air_mass_change=True)
+
+
+def test_no_round_off_sub_steps_appear_next_to_a_breakpoint():
+    """A breakpoint a few ulps from an output time (or from the step's start) is that time:
+    the step is not split into a ~1e-11 s sliver."""
+    import math
+
+    from noodl.apps.building_physics.schedules import DAY, DaySchedule, WeekSchedule
+
+    model, state, drivers = project_to_model(read_prj(THREE))
+    cal = Calendar(start_time=1234.567)
+    week = WeekSchedule([DaySchedule([0.0, 46800.1, DAY], [5.23, 1.0, 1.0])])
+    bp = week.breakpoints(0.0, DAY, cal)[0]
+    after = math.nextafter(math.nextafter(bp, math.inf), math.inf)
+    before = math.nextafter(math.nextafter(bp, -math.inf), -math.inf)
+    steps: list[float] = []
+    plain = model.step
+
+    def recording(s, d, dt, **kw):
+        steps.append(dt)
+        return plain(s, d, dt, **kw)
+
+    model.step = recording
+    inp = [Input(week, "V_met")]
+    simulate(model, state, drivers, [0.0, after], inputs=inp, calendar=cal, **TIGHT)
+    simulate(model, state, drivers, [0.0, before, before + 600.0], inputs=inp, calendar=cal,
+             **TIGHT)
+    assert min(steps) >= 1.0, steps
+
+
+def test_zone_pressure_max_iter_must_be_at_least_one():
+    model, state, drivers = project_to_model(read_prj(THREE))
+    with pytest.raises(ValueError, match="zone_pressure_max_iter"):
+        simulate(model, state, drivers, [0.0, 300.0], zone_pressure_max_iter=0)
+
+
+def test_a_run_must_start_at_time_zero():
+    model, state, drivers = project_to_model(read_prj(THREE))
+    with pytest.raises(ValueError, match=r"times\[0\]"):
+        simulate(model, state, drivers, [300.0, 600.0])
+
+
+def test_input_positions_accept_numpy_and_torch_integers():
+    import numpy as np
+
+    signal = TimeSeries([0.0, 1.0], [1.0, 1.0])
+    assert Input(signal, "T", index=np.int64(3)).index == (3,)
+    assert Input(signal, "T", index=torch.tensor(2)).index == (2,)
+    assert Input(signal, "T", index=[np.int64(1), 4]).index == (1, 4)

@@ -175,8 +175,9 @@ An `Input(signal, key, at=... | index=...)` writes a signal's value into a drive
 driver, the entries named by `at` (node names for the node temperatures `"T"`, source names,
 edge labels), or positions `index`. `simulate(model, state, drivers, times, inputs=...)`
 evaluates every input at the **end** of each step, sets `drivers["time"]`, and steps the model.
-It returns the time histories at `times`. Steps are split at every jump or kink of an input
-unless `land_on_breakpoints=False`.
+It returns the time histories at `times`, which start at 0 (a `Calendar` places that start
+in the year). Steps are split at every jump or kink of an input unless
+`land_on_breakpoints=False`.
 
 ```python
 import torch

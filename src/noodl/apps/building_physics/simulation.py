@@ -9,7 +9,9 @@ step to the next:
 * `air_mass_change=True` (CONTAM's `dodMdt = 1`): each zone's air-mass change over the step,
   -(M(t1) - M(t0)) / dt, is added to the airflow balance's sources (`"air.sources"`), so the net
   inflow into a zone whose temperature changes is dM/dt (measured on ContamX). M is rho V from the
-  model's density closures, at the zone pressures of the step.
+  model's density closures, at the zone pressures of the step. The term is added to the
+  drivers before the step, so a closure that later writes `"air.sources"` itself (rather
+  than adding to it) replaces it, as does one that changes `"T"` inside the step.
 * a model with a `ZonePressureDensity` closure (`densZP = 1`): every step (and the initial
   airflow) is repeated with the latest pressures until the zone pressures move by no more than
   `zone_pressure_rtol * P_ref` -- the fixed point ContamX iterates to (`prj.steady` does the
@@ -50,7 +52,8 @@ def _stack(rows: list[Tensor]) -> Tensor:
 
 
 def _zone_air_mass(model: Model, state: State, drivers: Drivers) -> Tensor:
-    """rho V at every node (kg; zero where the volume is), from the model's density closures."""
+    """The air mass rho V (kg) at every node, from the model's density closures; zero at a
+    node of zero volume (the ambient)."""
     drv = dict(drivers)
     for c in model.closures:
         if isinstance(c, (PrescribedTemperatureDensity, ZonePressureDensity)):
@@ -90,7 +93,8 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
              air_mass_change: bool = False, land_on_breakpoints: bool = True,
              zone_pressure_rtol: float = 1e-12, zone_pressure_max_iter: int = 10,
              **step_kwargs) -> dict[str, Tensor]:
-    """Time histories at `times` (s since the start, increasing; `times[0]` is the start).
+    """Time histories at `times` (s since the start, increasing, `times[0] == 0`; the
+    calendar places that start in the year).
 
     `inputs` are evaluated at the end of every step (`calendar` places t = 0 in the year;
     default 1 January 00:00, day type 1). `land_on_breakpoints` splits a step at every jump or
@@ -104,6 +108,15 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     ts = [float(v) for v in torch.as_tensor(times, dtype=F64).reshape(-1).tolist()]
     if not ts or any(b <= a for a, b in zip(ts, ts[1:], strict=False)):
         raise ValueError(f"simulate: times must be non-empty and increasing, got {ts}")
+    if ts[0] != 0.0:
+        raise ValueError(
+            f"simulate: times[0] must be 0 (the start the calendar places in the year), got "
+            f"{ts[0]}; shift the run with Calendar(start_day=..., start_time=...)"
+        )
+    if int(zone_pressure_max_iter) < 1:
+        raise ValueError(
+            f"simulate: zone_pressure_max_iter must be >= 1, got {zone_pressure_max_iter}"
+        )
     cal = calendar or Calendar()
     bound = bind_inputs(model, inputs)
     zp = _closure(model, ZonePressureDensity)
@@ -134,6 +147,10 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     t = ts[0]
     for t_out in ts[1:]:
         cuts = input_breakpoints(bound, t, t_out, cal) if land_on_breakpoints else []
+        # A breakpoint within round-off of the step's start or end is that instant: no
+        # sliver sub-steps (a breakpoint is midnight + knot, which need not be exact).
+        cuts = [c for c in cuts
+                if c - t > cal.round_off(c) and t_out - c > cal.round_off(c)]
         for t1 in [*cuts, t_out]:
             d, dt, t0 = drivers_at(t1), t1 - t, t
 

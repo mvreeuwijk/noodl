@@ -144,3 +144,24 @@ def test_every_schedule_is_a_signal():
     d = DaySchedule([0.0, DAY], [1.0, 1.0])
     assert isinstance(WeekSchedule([d]), Signal)
     assert isinstance(TimeSeries([0.0, 1.0], [0.0, 1.0]), Signal)
+
+
+@pytest.mark.parametrize("calendar", [
+    Calendar(start_day=40),
+    Calendar(start_time=1234.567),
+    Calendar(start_day=200, start_time=1234.567),
+], ids=["start_day_40", "start_time_fractional", "both"])
+def test_a_breakpoint_evaluates_to_the_left_limit_despite_round_off(calendar):
+    """A breakpoint is simulation time = midnight + knot, which need not round-trip exactly
+    through the seconds-from-new-year sum; the value AT it must still be the old one."""
+    week = WeekSchedule([DaySchedule([0.0, 46800.1, DAY], [0.0, 1.0, 1.0])])
+    jumps = [p for p in week.breakpoints(0.0, 2 * DAY, calendar)
+             if week.value(p + 1e-3, calendar).item() == 1.0
+             and week.value(p - 1e-3, calendar).item() == 0.0]
+    assert jumps, "no 0 -> 1 jump found"
+    for p in jumps:
+        assert week.value(p, calendar).item() == 0.0       # left limit, the old value
+        assert week.value(p + 1e-3, calendar).item() == 1.0
+    for p in week.breakpoints(0.0, 2 * DAY, calendar):     # midnights: previous day's value
+        if week.value(p - 1e-3, calendar).item() == 1.0:
+            assert week.value(p, calendar).item() == 1.0

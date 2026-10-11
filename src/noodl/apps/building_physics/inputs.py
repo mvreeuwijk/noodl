@@ -12,6 +12,8 @@ inside the step, so it overrides a schedule, which is CONTAM's precedence rule.
 
 from __future__ import annotations
 
+import numbers
+import operator
 from collections.abc import Hashable, Mapping, Sequence
 
 import torch
@@ -43,8 +45,10 @@ class Input:
         if index is not None and at is not None:
             raise ValueError(f"Input {name or key!r}: give index and at, not both")
         self.signal, self.key, self.name = signal, str(key), str(name)
-        self.index = None if index is None else tuple(
-            int(i) for i in ((index,) if isinstance(index, int) else index))
+        if index is not None and (isinstance(index, numbers.Integral)
+                                  or (isinstance(index, Tensor) and index.ndim == 0)):
+            index = (index,)                # one position: a Python, numpy or torch integer
+        self.index = None if index is None else tuple(operator.index(i) for i in index)
         self.at = _labels(at)
 
     def __repr__(self) -> str:

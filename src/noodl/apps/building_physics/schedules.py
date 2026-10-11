@@ -30,6 +30,9 @@ DAY = 86400.0
 N_DAY_TYPES = 12
 _WEEK = 7
 _SHAPES = ("rectangular", "trapezoidal")
+#: A time of day within this many ulps (of the seconds since new year) of a midnight or a
+#: schedule knot is taken as that instant.
+_ROUND_OFF_ULPS = 8
 
 
 def _as_f64(values) -> Tensor:
@@ -111,12 +114,25 @@ class Calendar:
         """Seconds from 00:00 on 1 January to simulation time `t`."""
         return (self.start_day - 1) * DAY + self.start_time + float(t)
 
+    def round_off(self, t: float) -> float:
+        """The round-off (s) of a time of day computed at `t`: a time of day this close to a
+        midnight or a schedule knot IS that instant. A breakpoint is simulation time
+        midnight + knot, which need not survive the sum `seconds_from_new_year` exactly; within
+        this tolerance it still evaluates to its left limit."""
+        return _ROUND_OFF_ULPS * math.ulp(max(abs(self.seconds_from_new_year(t)), DAY))
+
     def day_and_time(self, t: float, *, left: bool) -> tuple[int, float]:
         """(day of year, seconds after midnight) at `t`. With `left`, an exact midnight is the
-        END of the previous day, (day - 1, 86400.0): a left limit sees the old day."""
+        END of the previous day, (day - 1, 86400.0): a left limit sees the old day. A time
+        within `round_off(t)` of a midnight is that midnight."""
         s = self.seconds_from_new_year(t)
         day = math.floor(s / DAY) + 1
         tod = s - (day - 1) * DAY
+        tol = self.round_off(t)
+        if tod <= tol:
+            tod = 0.0
+        elif DAY - tod <= tol:
+            day, tod = day + 1, 0.0
         if left and tod == 0.0 and day > 1:
             day, tod = day - 1, DAY
         if day > 365:
@@ -222,7 +238,12 @@ class WeekSchedule:
     def value(self, t: float, calendar: Calendar) -> Tensor:
         left = float(t) > 0.0
         day, tod = calendar.day_and_time(t, left=left)
-        return self.day(calendar.day_type(day)).at(tod, left=left)
+        schedule = self.day(calendar.day_type(day))
+        tol = calendar.round_off(t)
+        knot = min(schedule.knots(), key=lambda k: abs(k - tod), default=None)
+        if knot is not None and abs(knot - tod) <= tol:
+            tod = knot                      # a breakpoint, up to round-off: the knot itself
+        return schedule.at(tod, left=left)
 
     def breakpoints(self, lo: float, hi: float, calendar: Calendar) -> list[float]:
         first = calendar.day_and_time(lo, left=False)[0]
