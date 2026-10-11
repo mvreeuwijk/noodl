@@ -793,18 +793,18 @@ each is confined to the cases named.
   noodl converges on every step, and its answer lies on the switch between the branches:
     - the EXTRAN crown hold band: a junction whose storage equation would end above its crown
       while it loses water at the crown is held within a millimetre of the crown
-      ([Surcharge](#surcharge-slot-and-extran), ruling R26);
+      ([Surcharge](#surcharge-slot-and-extran));
     - the normal-flow slope switch: a draining outfall conduit sits on $y_1 = y_2$
-      ([Normal-flow slope switch](#normal-flow-slope-switch), R33). Cost: 1e-5 m of SWMM's
+      ([Normal-flow slope switch](#normal-flow-slope-switch)). Cost: 1e-5 m of SWMM's
       table mismatch at the switch, and steps after SWMM's first unconverged one differ by
       SWMM's own oscillation (about 6e-4 m on the tree);
     - the drop-end area switch: a junction filling through a drop end's area threshold is held on
-      the threshold ([Drop-end area switch](#drop-end-area-switch), R43), with histories then
+      the threshold ([Drop-end area switch](#drop-end-area-switch)), with histories then
       differing by SWMM's oscillation (3e-4 m on the options fixture).
 
   At a gradient the tie rule is what is differentiated: the sensitivity of the constrained
   solution, where SWMM has no fixed point.
-- **A surcharged junction drained only by outlets (R47).** SWMM's surcharged update divides by
+- **A surcharged junction drained only by outlets.** SWMM's surcharged update divides by
   the attached links' `dqdh`, which an outlet leaves 0, so above 1.25 crowns SWMM freezes the
   junction's depth and loses the inflow it cannot pass. noodl keeps instantaneous continuity: the
   outlet passes what arrives. Such a junction has no SWMM reference; drain an outlet from a
@@ -861,7 +861,7 @@ A conduit flowing full has no headspace ($A_{\text{air}} = 0$, infinite resistan
 side reads the depth capped at 0.999 D, which leaves a finite area of about $6\times10^{-5}D^2$
 and a resistance so large that the conduit is nearly closed, with finite derivatives on both
 ends of the circle; a surcharged tree keeps solving. It is not closed: the interfacial drag does
-not depend on the headspace's area, and still moves about 2×10⁻⁶ m³/s of air through a capped
+not depend on the headspace's area, and still moves a small, nonzero flow of air through a capped
 full conduit.
 
 The closure also writes `rho_air_nodes` (from `T_head` and `T_amb`) and `air_quality.capacity`
@@ -1166,8 +1166,9 @@ publish numbers from this application.
     - non-circular conduit shapes, flow units other than CMS, and regulators with
       `LINK_OFFSETS ELEVATION`;
     - headspace air on networks that are not dendritic: loops, junctions with several outgoing
-      conduits or none, and an outfall at a conduit's upstream end are refused with
-      `air=True` (see [Headspace air on the dynamic wave](#headspace-air-on-the-dynamic-wave));
+      conduits or none, a junction drained only by a regulator (orifice, weir or outlet), a cycle
+      that reaches no outfall (refused by network validation), and an outfall at a conduit's
+      upstream end are refused with `air=True` (see [Headspace air on the dynamic wave](#headspace-air-on-the-dynamic-wave));
     - a variable step on a batched network, and `dt=` with a variable step (the step is the
       options'); a variable-step run is not differentiable through its step sizes.
 - **Dynamic wave, implemented but not compared with SWMM live.** Each is transcribed from
@@ -1179,7 +1180,7 @@ publish numbers from this application.
   back through its full depth under EXTRAN; a tide with a nonzero `START_TIME` or beyond 24 h of
   elapsed time, and batched `TIDAL` or `TIMESERIES` outfalls (a batched stage only via the
   driver); and a fully submerged weir whose flow reverses through zero, where SWMM itself
-  fails to converge on a few steps (R48).
+  fails to converge on a few steps.
 - **Dynamic wave, where SWMM has no fixed point** (the three tie rules above): the EXTRAN
   crown hold, the normal-flow slope switch and the drop-end area switch. The Froude test of the
   normal-flow limit stays a lagged flag. The area switch picks one threshold per junction (the
