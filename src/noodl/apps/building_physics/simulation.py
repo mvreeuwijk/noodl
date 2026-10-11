@@ -22,6 +22,7 @@ step to the next:
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 
 import torch
 
@@ -179,4 +180,63 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
             rows[k].append(state[k])
     out = {k: _stack(v) for k, v in rows.items()}
     out["time"] = torch.tensor(ts, dtype=F64)
+    return out
+
+
+def simulate_project(project, *, inputs: Sequence[Input] = (), **step_kwargs) -> dict[str, Tensor]:
+    """Run a `.prj` project the way ContamX does: its run control (start, end, time step), its
+    schedules, its weather and ambient-concentration files (resolved next to the `.prj`), with
+    the time step fixed (no step split at a schedule's jump, as in ContamX) and the zone
+    air-mass change when the run control asks for it. `inputs` are extra inputs of your own.
+    Returns `simulate`'s histories plus `"path_flow"` (N, n_paths) in path-number order.
+
+    A steady airflow run (with no or steady contaminants) returns the one steady state at the
+    run control's steady day, time and day type. Refused by name: cyclic contaminant runs,
+    integration other than the default implicit method (short time step, CVODE, or a weight
+    other than 1), and steady airflow with transient contaminants.
+    """
+    from noodl.apps.building_physics.ctm import read_ctm
+    from noodl.apps.building_physics.prj import project_to_model, steady
+    from noodl.apps.building_physics.wth import read_wth
+
+    rc = project.run_control
+    if rc is None:
+        raise ValueError("simulate_project: the project carries no run control")
+    if rc.contaminants == "cyclic":
+        raise ValueError("simulate_project: cyclic contaminant simulation is unsupported")
+    if rc.integration != "trapezoid" or rc.integration_weight != 1.0:
+        raise ValueError(
+            f"simulate_project: integration {rc.integration!r} with weight "
+            f"{rc.integration_weight} is unsupported (only the trapezoid method with weight "
+            f"1, which is implicit Euler)"
+        )
+    if not rc.transient_airflow and rc.contaminants == "transient":
+        raise ValueError("simulate_project: steady airflow with transient contaminants is "
+                         "unsupported")
+    model, state, drivers = project_to_model(project)
+    base = project.source_path.parent if project.source_path else Path.cwd()
+    if not rc.transient_airflow:
+        d = apply_inputs(drivers, bind_inputs(model, inputs), 0.0, rc.steady_calendar())
+        out_state = steady(model, state, d, **step_kwargs)
+        out = {f"{n}.{s}": out_state[f"{n}.{s}"].unsqueeze(0)
+               for n in model.potential for s in ("q", "phi")}
+        out.update({f"{n}.x": out_state[f"{n}.x"].unsqueeze(0) for n in model.transport})
+        out["time"] = torch.zeros(1, dtype=F64)
+        out["path_flow"] = project.path_flows(out["air.q"])
+        return out
+    weather = read_wth(base / rc.weather_file) if rc.weather_file else None
+    ambient = read_ctm(base / rc.ambient_file) if rc.ambient_file else None
+    all_inputs = [*project.inputs,
+                  *(weather.inputs(model, ambient=project.ambient) if weather else ()),
+                  *(ambient.inputs(model) if ambient and "species" in model.transport else ()),
+                  *inputs]
+    calendar = Calendar(start_day=rc.start_day, start_time=rc.start_time,
+                        start_day_type=rc.day_type,
+                        day_types=weather.day_types if weather and weather.day_types else None)
+    n = round(rc.duration / rc.time_step)
+    times = torch.arange(n + 1, dtype=F64) * rc.time_step
+    out = simulate(model, state, drivers, times, inputs=all_inputs, calendar=calendar,
+                   air_mass_change=rc.zone_mass_change, land_on_breakpoints=False,
+                   **step_kwargs)
+    out["path_flow"] = project.path_flows(out["air.q"])
     return out

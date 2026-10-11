@@ -35,7 +35,10 @@ against NIST's own `contamxpy` 0.0.9 sample weather files, one day to a year lon
     changes -- and interpolates linearly between the times it does list (this is also
     what makes the day boundary in a multi-day file carry the SAME instant twice: a
     day's own `24:00:00` row and the next day's `00:00:00` row are both the midnight
-    between them, and CONTAM's own sample files write both).
+    between them, and CONTAM's own sample files write both). A file need not write the
+    00:00 row: ContamX interpolates linearly across midnight from a day's 24:00 row to the
+    next row listed (measured on `test_OneZoneWthCtmStack.wth`, 24:00 to 05:00 of its
+    second day), and so does this reader.
 """
 
 from __future__ import annotations

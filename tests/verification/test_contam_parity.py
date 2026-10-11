@@ -316,3 +316,139 @@ def test_a_constant_wind_pressure_matches_contamx(contamx, tmp_path, record_prop
     record_property("check", "Three-zone project, constant wind pressure 5 Pa on path 1")
     record_property("tolerance", f"rel {tol:.2e}")
     record_property("measured_rel", ((ours - ref["flow"]) / ref["flow"]).abs().max().item())
+
+
+WTH_CTM = DATA / "test_OneZoneWthCtm.prj"
+STACK_SCHEDULED = DATA / "test_OneZoneWthCtmStack.prj"
+# ContamX's airflow tolerances for the whole-project runs. At `TIGHT_AIRFLOW` the engine
+# stops the step in which the 12:05 ambient jump collapses the stack of
+# `test_OneZoneWthCtmStack.prj` (0.127 kg/s -> 1.5e-5 kg/s net) with 7.6e-7 kg/s of its
+# exchange flow unresolved; at these it agrees with its own later steps, and with noodl
+# physics, to 1e-11 kg/s (measured; 1e-5 / 1e-6 leaves 1.1e-3 kg/s).
+PROJECT_AIRFLOW = (1e-13, 1e-16)
+
+
+def _schedules_as_contamx_holds(prj: Path, dest: Path) -> Path:
+    """A copy of `prj` in `dest`, with every day-schedule value rounded to float32, plus the
+    project's weather and contaminant files.
+
+    ContamX holds a day schedule's values in single precision but not the weather file's
+    temperatures: with the zone scheduled at 293.15 K and the weather at 293.15 K, the engine
+    drives a steady 2.9078e-5 kg/s exchange through the two openings of
+    `test_OneZoneWthCtmStack.prj` (12:05-13:00), which is exactly the stack flow of a zone at
+    float32(293.15) = 293.15 - 6.1e-6 K in a 293.15 K ambient, and it vanishes when both are
+    293.125 K, which float32 represents exactly (measured, ContamX 3.4.1.7). At zero
+    temperature difference that roundoff sets the whole flow, so no relative budget can cover
+    it; noodl physics is given the value ContamX holds instead.
+    """
+    import numpy as np
+
+    dest.mkdir(parents=True, exist_ok=True)
+    lines = prj.read_text().splitlines(keepends=True)
+    in_schedules = False
+    for i, line in enumerate(lines):
+        if "! day-schedules:" in line:
+            in_schedules = True
+        elif line.strip() == "-999":
+            in_schedules = False
+        elif in_schedules:
+            tok = line.split()
+            if len(tok) == 2 and tok[0].count(":") == 2:
+                value = float(np.float32(float(tok[1])))
+                lines[i] = f" {tok[0]} {value!r}\n"
+    (dest / prj.name).write_text("".join(lines))
+    for suffix in (".wth", ".ctm"):
+        if prj.with_suffix(suffix).is_file():
+            (dest / prj.with_suffix(suffix).name).write_text(prj.with_suffix(suffix).read_text())
+    return dest / prj.name
+
+
+def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf, record_property, label):
+    from noodl.apps.building_physics.contamx import run_project
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    ref = run_project(prj, airflow_convergence=PROJECT_AIRFLOW)
+    ours = _schedules_as_contamx_holds(prj, tmp_path / "noodl")
+    out = simulate_project(read_prj(ours), atol=NOODL_ATOL, rtol=1e-14)
+    torch.testing.assert_close(out["time"], ref["time"], rtol=0, atol=1e-9)
+    scale = ref["flow"].abs().max()
+    torch.testing.assert_close(out["path_flow"], ref["flow"], rtol=rtol_flow,
+                               atol=(64 * F32_U * scale).item())
+    mf_scale = ref["mf"].abs().max()
+    torch.testing.assert_close(out["species.x"], ref["mf"], rtol=rtol_mf,
+                               atol=(64 * F32_U * mf_scale).item())
+    record_property("check", label)
+    record_property("tolerance", f"flow rel {rtol_flow:.2e}, mf rel {rtol_mf:.2e}, "
+                                 f"atol 64 u x max")
+    for name, ours, theirs, top, rtol in (("flow", out["path_flow"], ref["flow"], scale,
+                                           rtol_flow),
+                                          ("mf", out["species.x"], ref["mf"], mf_scale, rtol_mf)):
+        # The relative error of the entries carrying at least 0.1 % of the largest (below
+        # that the floor governs: the isothermal hours' exchange flow is a float32 roundoff
+        # of the zone temperature), and the largest error of any entry as a fraction of what
+        # the tolerance allows it.
+        floor = 64 * F32_U * top
+        err = (ours - theirs).abs()
+        big = theirs.abs() > 1e-3 * top
+        record_property(f"measured_rel_{name}", (err[big] / theirs[big].abs()).max().item())
+        record_property(f"measured_{name}_of_allowed",
+                        (err / (floor + rtol * theirs.abs())).max().item())
+    return ref, out
+
+
+@pytest.mark.external
+def test_a_run_with_its_own_weather_and_ambient_files_matches_contamx(
+        contamx, tmp_path, record_property):
+    """`test_OneZoneWthCtm.prj` for one day at 300 s: stack-driven while the weather holds the
+    ambient 20 K below the zone (00:00-06:00), then wind-driven from 270 and 90 degrees, with
+    the ambient sarin from the `.ctm` switching off at 14:05 and on at 05:05 the next day.
+    Budget: flows 33 u (the stack budget at 20 K, 17.2 u, and the wind budget, 16 u, are both
+    below it), plus an absolute floor of 64 u times the largest flow for the near-zero
+    flows of the calm hours; mass fractions 64 u (three-zone transient budget) with the same
+    kind of floor."""
+    _project_parity(WTH_CTM, tmp_path, rtol_flow=33 * F32_U, rtol_mf=64 * F32_U,
+                    record_property=record_property,
+                    label="One-zone project with its own .wth and .ctm, 288 steps")
+
+
+@pytest.mark.external
+def test_a_scheduled_zone_temperature_run_matches_contamx(contamx, tmp_path,
+                                                          record_property):
+    """`test_OneZoneWthCtmStack.prj`: zone on a temperature schedule (293.15 -> 303.15 K at
+    13:00), weather 273.15 / 293.15 / 263.15 K, `densZP = 1`, `dodMdt = 1`. The flows in the
+    step after the jump are set by the zone's air-mass change (ContamX puts dM/dt into the
+    balance); its budget is the mass difference's: M = Pb V / (R T) at two temperatures
+    3.4 % apart amplifies a float32 roundoff of R and the two T by about 30, so 64 u;
+    elsewhere the stack budget at the smallest nonzero temperature difference (10 K:
+    32.8 u), and 64 u on the mass fractions. From 12:05 to 13:00 zone and weather are both
+    293.15 K and the only flow is the exchange set by ContamX's float32 schedule value (see
+    `_schedules_as_contamx_holds`); without that value given to noodl physics the mass
+    fractions drift 1.4e-4 apart over the hour."""
+    ref, out = _project_parity(STACK_SCHEDULED, tmp_path, rtol_flow=64 * F32_U,
+                               rtol_mf=64 * F32_U,
+                               record_property=record_property,
+                               label="One-zone stack with a scheduled zone temperature")
+    jump = 157                                         # the step ending 13:05
+    torch.testing.assert_close(out["path_flow"][jump].sum(), ref["flow"][jump].sum(),
+                               rtol=64 * F32_U, atol=0)
+
+
+@pytest.mark.external
+def test_a_two_day_run_across_midnight_matches_contamx(contamx, tmp_path, record_property):
+    """The scheduled stack project run to the end of 1/2 (its `.wth`/`.ctm` cover both days):
+    the calendar, the weather's day 2 and the left limit at midnight (the previous day's
+    value until the first step after it). The weather file has no 00:00 row on 1/2: its
+    1/1 24:00 row (263.15 K) is followed by 1/2 05:00 (293.15 K), and ContamX interpolates
+    linearly across midnight between the two, as the reader does (measured: every step from
+    00:05 to 05:00 of 1/2 inside the stack budget)."""
+    for suffix in (".prj", ".wth", ".ctm"):
+        src = STACK_SCHEDULED.with_suffix(suffix)
+        text = src.read_text()
+        if suffix == ".prj":
+            one_day = "Jan01 00:00:00  Jan01 00:00:00  Jan01 24:00:00"
+            assert one_day in text
+            text = text.replace(one_day, "Jan01 00:00:00  Jan01 00:00:00  Jan02 24:00:00", 1)
+        (tmp_path / src.name).write_text(text)
+    _project_parity(tmp_path / STACK_SCHEDULED.name, tmp_path, rtol_flow=64 * F32_U,
+                    rtol_mf=64 * F32_U, record_property=record_property,
+                    label="Scheduled stack project over two days")

@@ -233,3 +233,61 @@ def test_input_positions_accept_numpy_and_torch_integers():
     assert Input(signal, "T", index=np.int64(3)).index == (3,)
     assert Input(signal, "T", index=torch.tensor(2)).index == (2,)
     assert Input(signal, "T", index=[np.int64(1), 4]).index == (1, 4)
+
+
+# ------------------------------------------------------------------------- simulate_project
+def test_simulate_project_runs_the_projects_own_run_control_and_files():
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    p = read_prj(DATA / "test_OneZoneWthCtmStack.prj")
+    out = simulate_project(p, atol=1e-14, rtol=1e-14)
+    assert out["time"].shape == (289,) and out["time"][-1].item() == 86400.0
+    assert out["path_flow"].shape == (289, 2)
+    # 13:05 (row 157): the zone has just jumped to 303.15 K (inputs take their left limit at
+    # the end of a step) and its air-mass change sets the imbalance (dM/dt in the balance):
+    # net inflow = Pb V / R (1/303.15 - 1/293.15) / 300 < 0.
+    net = out["path_flow"][157].sum().item()
+    assert net == pytest.approx(101325.0 * 600 / R_AIR * (1 / 303.15 - 1 / 293.15) / 300.0,
+                                rel=2e-3)
+
+
+def test_simulate_project_refuses_what_it_cannot_reproduce(tmp_path):
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    text = (DATA / "test_OneZoneWthCtm.prj").read_text()
+    head = "!sim_mf slae rs maxi   relcnvg   abscnvg relax gamma ucc\n    "
+    assert head + "2" in text
+    cyclic = tmp_path / "cyclic.prj"
+    cyclic.write_text(text.replace(head + "2", head + "3", 1))
+    with pytest.raises(ValueError, match="cyclic"):
+        simulate_project(read_prj(cyclic))
+
+
+def test_simulate_project_refuses_an_integration_weight_other_than_one(tmp_path):
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    text = (DATA / "test_OneZoneWthCtm.prj").read_text()
+    trace = "1.00e-15 1.100 1.000   0 ! (trace)"
+    assert trace in text
+    variant = tmp_path / "gamma.prj"
+    variant.write_text(text.replace(trace, "1.00e-15 1.100 0.500   0 ! (trace)", 1))
+    with pytest.raises(ValueError, match=r"weight 0\.5"):
+        simulate_project(read_prj(variant))
+
+
+def test_simulate_project_on_a_steady_run_control_is_the_steady_solve(tmp_path):
+    from noodl.apps.building_physics.prj import steady
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    text = THREE.read_text()
+    af = "!sim_af afcalc afmaxi afrcnvg afacnvg afrelax uac Pbldg uPb\n     1"
+    mf = "!sim_mf slae rs maxi   relcnvg   abscnvg relax gamma ucc\n    2"
+    assert af in text and mf in text
+    variant = tmp_path / "steady.prj"
+    variant.write_text(text.replace(af, af[:-1] + "0", 1).replace(mf, mf[:-1] + "1", 1))
+    p = read_prj(variant)
+    out = simulate_project(p, **TIGHT)
+    model, state, drivers = project_to_model(p)
+    expected = p.path_flows(steady(model, state, drivers, **TIGHT)["air.q"])
+    assert out["time"].tolist() == [0.0] and out["path_flow"].shape == (1, len(p.paths))
+    torch.testing.assert_close(out["path_flow"][0], expected, rtol=1e-12, atol=1e-15)

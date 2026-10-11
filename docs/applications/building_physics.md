@@ -490,16 +490,21 @@ medium's `name` reports. Each carries:
 
 The reference is NIST's ContamX 3.4.1.7, driven through `contamxpy` (the `contam` extra, Windows
 x86-64 only — the wheel bundles the engine). `noodl.apps.building_physics.contamx` provides `run_steady`
-and `run_transient`, which run the engine on a scratch copy of the project and never mutate your
+and `run_transient`, which run the engine on a scratch copy of the project with the ambient
+conditions set through the API, and `run_project`, which runs a project as written: its own run
+control, schedules, and weather and ambient-concentration files. None of them mutates your
 fixture directory; `airflow_convergence=(rcnvg, acnvg)` tightens ContamX's airflow tolerances in
-that copy.
+the copy. `simulate_project(project)` is the noodl physics side of `run_project`.
 
 ContamX holds project input data in single precision (the fan rated 0.200683 kg/s comes back as
 float32(0.200683) exactly), so the reference is only as precise as a float32 roundoff,
 $u = 2^{-24} \approx 6\times10^{-8}$, in each input. Every tolerance below is a first-order budget
 of such roundoffs through the compared quantity, not a fit to the measured error; ContamX's
-airflow iteration is run at `(1e-10, 1e-12)` and noodl physics' Newton at 1e-14 kg/s so that neither
-solver contributes.
+airflow iteration is run at `(1e-10, 1e-12)` (`(1e-13, 1e-16)` for the whole-project runs) and
+noodl physics' Newton at 1e-14 kg/s so that neither solver contributes. The whole-project rows also
+allow an absolute floor of 64 $u$ times the largest flow (or mass fraction), for the near-zero
+values of calm and isothermal hours; their measured column gives the relative error of every entry
+above 0.1 % of the largest.
 
 | Check | Tolerance | Measured |
 |---|---|---|
@@ -509,6 +514,10 @@ solver contributes.
 | Constant-mass-flow fan delivers its rating (0.200683 kg/s) | engine rel $u$, noodl physics rel 1e-12 | holds |
 | Three-zone project, steady flows | rel 16 $u$ (9.5e-7) | **9.1e-8** |
 | Three-zone project, transient concentrations, 24 steps at 300 s | rel 64 $u$ (3.8e-6) | **2.0e-7** |
+| Three-zone project, constant wind pressure 5 Pa on path 1 | rel 16 $u$ (9.5e-7) | **9.9e-8** |
+| One-zone project with its own `.wth` and `.ctm`, 288 steps | flow rel 33 $u$, mf rel 64 $u$, floor 64 $u$ × max | **1.3e-8** flow, **1.1e-7** mf |
+| One-zone stack with a scheduled zone temperature (`densZP`, `dodMdt`), 288 steps | rel 64 $u$, floor 64 $u$ × max | **4.5e-8** flow, **1.9e-7** mf |
+| Scheduled stack project over two days, across midnight | rel 64 $u$, floor 64 $u$ × max | **7.8e-8** flow, **1.9e-7** mf |
 
 The stack rows rely on two density effects matching ContamX's. Orifice coefficients are
 corrected for the density of the air entering the path (freezing them at reference density
@@ -518,6 +527,23 @@ because the stack pressure is a density difference that amplifies the |P_zone| /
 density change about fourteenfold. The three-zone transient was 6.5e-6 while zone air mass was
 held at the reference density 1.2041 kg/m³ rather than ContamX's `Pb / (R T)` (2.2e-6 apart at
 293.15 K). What remains everywhere is one or two float32 roundoffs.
+
+The whole-project rows pin how ContamX runs a project over time, each convention measured on
+the engine before it was implemented. Every input (schedule, weather, ambient file) is evaluated
+at the **end** of each step, and at a jump the step ending on it still sees the old value (the
+left limit): the zone schedule's switch to 303.15 K at 13:00 first acts in the step ending at
+13:05, and so does a switch moved to 13:02:30. At midnight the left limit is the previous day's
+value, and the new day's schedule acts from the first step after it, with the day type from the
+weather file's per-day record. With `dodMdt = 1` each zone's air-mass change enters its airflow
+balance: in the step after the 10 K jump the 600 m³ zone's net inflow is
+$P_b V / R \,(1/303.15 - 1/293.15) / 300\,\mathrm{s} = -0.0795$ kg/s, and `simulate` adds the
+same $-(M_1 - M_0)/\Delta t$ term; noodl physics matches ContamX's imbalance in that step to 0.4 $u$. A
+weather file without a 00:00 row on its second day is interpolated linearly from the first day's
+24:00 row, as ContamX does. ContamX holds a day schedule's values in single precision but the
+weather's temperatures more precisely: with zone and weather both at 293.15 K, it drives a
+2.9e-5 kg/s exchange flow, exactly the stack flow of a zone at float32(293.15), 6.1e-6 K colder
+(it vanishes at 293.125 K, which float32 represents exactly). The comparison gives noodl physics
+the schedule values ContamX holds; otherwise the mass fractions drift 1.4e-4 apart over that hour.
 
 The path-flow sign convention was verified independently against two cases rather than assumed,
 since `contamxpy`'s own documentation does not pin the sign of `getPathFlow`.

@@ -48,6 +48,17 @@ def _set_airflow_convergence(prj: Path, rcnvg: float, acnvg: float) -> None:
     raise ValueError(f"contamx: {prj.name} has no '!sim_af' record with 9 fields to edit")
 
 
+def _named_files(prj: Path) -> list[str]:
+    """The weather and contaminant file names the project's run control gives (not `null`)."""
+    names = []
+    for line in prj.read_text().splitlines():
+        body, _, comment = line.partition("!")
+        if ("weather file" in comment or "contaminant file" in comment) and body.strip():
+            if body.strip().lower() != "null":
+                names.append(body.strip())
+    return names
+
+
 @contextlib.contextmanager
 def _isolated(prj_path, airflow_convergence=None):
     """Yield a path to a COPY of the project inside a scratch directory.
@@ -60,7 +71,10 @@ def _isolated(prj_path, airflow_convergence=None):
     name `null` for the weather, contaminant and values files and take ambient conditions
     from the API instead. A project whose auxiliary files are named differently will not be
     found by the engine, which then refuses the setup and is reported by `_open` -- it is
-    never silently simulated without them.
+    never silently simulated without them. The weather and contaminant files the project's
+    run control names are copied too, whatever their stem. ContamX opens them relative to
+    the process WORKING DIRECTORY, not the project's directory, so `run_project` runs
+    inside the scratch directory.
     """
     src = Path(prj_path).resolve()
     if not src.is_file():
@@ -68,6 +82,9 @@ def _isolated(prj_path, airflow_convergence=None):
     with tempfile.TemporaryDirectory(prefix="noodl-contamx-") as tmp:
         for sibling in sorted(src.parent.glob(f"{src.stem}.*")):
             shutil.copy2(sibling, Path(tmp) / sibling.name)
+        for name in _named_files(src):
+            if (src.parent / name).is_file() and not (Path(tmp) / name).exists():
+                shutil.copy2(src.parent / name, Path(tmp) / name)
         if airflow_convergence is not None:
             _set_airflow_convergence(Path(tmp) / src.name, *airflow_convergence)
         yield Path(tmp) / src.name
@@ -181,5 +198,48 @@ def run_transient(prj_path, *, steps: int, ambient: dict, airflow_convergence=No
                 flows.append(f)
                 mfs.append(m)
             return _result(cx, flows, mfs, dt)
+        finally:
+            cx.endSimulation()
+
+
+def run_project(prj_path, *, airflow_convergence=None) -> dict:
+    """Run the project AS WRITTEN: its own run control (start, end, time step), weather and
+    ambient-concentration files and schedules; no ambient value is set through the API.
+    Returns the initial state and every step: `time` (N,) s since the start, `flow`
+    (N, n_paths) kg/s, `mf` (N, n_zones, K), `dt`, and the path and zone numbering of
+    `run_transient`. `airflow_convergence` as in `run_steady`.
+
+    ContamX (3.4.1.7) opens the project's weather and contaminant files relative to the
+    process's WORKING DIRECTORY, so the run changes into the scratch copy's directory for its
+    duration (not thread-safe; nothing in this package runs ContamX concurrently). The
+    project-data callback is registered (with nothing to do) because `contamxpy` fills
+    `cx.paths`/`cx.zones` only through it.
+    """
+    cxLib = _cxlib()
+    with _isolated(prj_path, airflow_convergence) as prj, contextlib.chdir(prj.parent):
+        cx = cxLib(str(prj), 0, True, lambda _cx: None)
+        cx.setVerbosity(0)
+        if cx.setupSimulation(1):
+            cx.endSimulation()
+            raise RuntimeError(f"contamx: ContamX refused {prj_path} (setupSimulation != 0)")
+        try:
+            dt = float(cx.getSimTimeStep())
+            d0, t0 = cx.getSimStartDate(), cx.getSimStartTime()
+            d1, t1 = cx.getSimEndDate(), cx.getSimEndTime()
+            n = round(((d1 - d0) * 86400 + t1 - t0) / dt)
+            f, m = _snapshot(cx)
+            flows, mfs, times = [f], [m], [0.0]
+            for k in range(1, n + 1):
+                cx.doSimStep(1)
+                t = (cx.getCurrentDayOfYear() - d0) * 86400.0 + cx.getCurrentTimeInSec() - t0
+                if abs(t - k * dt) > 1e-6:
+                    raise RuntimeError(f"contamx: step {k} reports t = {t} s, not {k * dt} s")
+                f, m = _snapshot(cx)
+                flows.append(f)
+                mfs.append(m)
+                times.append(t)
+            out = _result(cx, flows, mfs, dt)
+            out["time"] = torch.tensor(times, dtype=torch.float64)
+            return out
         finally:
             cx.endSimulation()

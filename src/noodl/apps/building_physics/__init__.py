@@ -9,10 +9,12 @@ here.
 # `contamx` drives NIST's ContamX through the OPTIONAL `contamxpy` package. Importing it
 # here is safe: the module imports `contamxpy` lazily, inside the call, so a noodl
 # installed without the `contam` extra still imports this package cleanly and only a call
-# to `run_steady`/`run_transient` raises the ImportError that names the missing package.
+# to `run_steady`/`run_transient`/`run_project` raises the ImportError that names the
+# missing package.
 from noodl.apps.building_physics.attributes import EDGE_ATTRIBUTES, NODE_ATTRIBUTES
 from noodl.apps.building_physics.components import crack, door, room, shaft, window
 from noodl.apps.building_physics.contamx import (
+    run_project,
     run_steady,
     run_transient,
 )
@@ -38,7 +40,7 @@ from noodl.apps.building_physics.schedules import (
     TimeSeries,
     WeekSchedule,
 )
-from noodl.apps.building_physics.simulation import simulate
+from noodl.apps.building_physics.simulation import simulate, simulate_project
 from noodl.apps.building_physics.sources import (
     BurstSource,
     ConstantSource,
@@ -103,11 +105,13 @@ __all__ = [
     "read_prj",
     "read_wth",
     "room",
+    "run_project",
     "run_steady",
     "run_transient",
     "scatter",
     "shaft",
     "simulate",
+    "simulate_project",
     "sources_from_project",
     "species_layer",
     "thermal_layer",

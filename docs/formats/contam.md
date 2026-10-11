@@ -80,6 +80,21 @@ solved = steady(model, state, drivers)
 flows = project.path_flows(solved["air.q"])   # in CONTAM path-number order
 ```
 
+`simulate_project(project)` runs the project the way ContamX does: its run control (start, end
+and time step), its schedules, and the weather and ambient-concentration files it names
+(resolved next to the `.prj`). Every input is evaluated at the end of each step, with no step
+split at a schedule's jump, and the zone air-mass change enters the airflow balance when the
+run control sets `dodMdt = 1`. A steady-airflow run returns the one steady state at the run
+control's steady instant. Cyclic contaminant runs, integration other than the trapezoid
+method with weight 1 (implicit Euler), and steady airflow with transient contaminants are
+refused by name.
+
+```py
+project = read_prj("test_OneZoneWthCtmStack.prj")
+out = simulate_project(project)          # the project's run control, schedules, .wth and .ctm
+out["path_flow"]                         # (289, 2) kg/s, path-number order
+```
+
 ## CONTAM `.wth`
 
 `read_wth(path) -> Weather` reads the `WeatherFile ContamW 2.0` format. `Date, Time, Ta, Pb, Ws,
