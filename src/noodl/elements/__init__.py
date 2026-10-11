@@ -53,6 +53,7 @@ from noodl.elements.powerlaw_regularized import (
     regularized_orifice,
 )
 from noodl.elements.quadratic import Quadratic
+from noodl.elements.scaled import Scaled
 from noodl.elements.table import MBLTable, SplineFlowTable
 from noodl.elements.upstream import UpstreamDensityPowerLaw
 
@@ -74,6 +75,7 @@ __all__ = [
     "PowerLaw",
     "Quadratic",
     "RegularizedPowerLaw",
+    "Scaled",
     "SplineFlowTable",
     "UpstreamDensityPowerLaw",
     "discretized_door",

@@ -382,6 +382,27 @@ only one the airflow Jacobian sees, is exact and each edge's slope stays nonnega
 | `FixedFlow(q0)` | A prescribed supply or exhaust, $F = q_0$ whatever $\Delta p$. A zone connected to the rest of the network only through fixed flows makes the Jacobian singular; `solvers.grounding.spd_certificate` reports that case. **Source:** CONTAM's constant-flow fans. |
 | `Conductance(g)` | The linear law $F = g\,\Delta p$, used for thermal conduction and passive exchange. |
 
+`Scaled(element, key)` multiplies any element's flow (and slope) by a per-edge driver,
+`drivers[key]`: one value per edge of the element's kind, dimensionless. It is how a
+schedule or a control acts on a path. CONTAM's path schedule multiplies the path's flow, and
+a `.prj` path with a schedule is read as its element wrapped in `Scaled` with the key
+`"flow_multiplier.<kind>"`. A multiplier of zero closes the edge; a zone left with no open
+path raises an error naming it.
+
+```python
+import torch
+from noodl.elements import FixedFlow, Scaled
+
+fan = Scaled(FixedFlow(torch.tensor([0.1], dtype=torch.float64), kind="fan"),
+             "flow_multiplier.fan")
+print(fan.flow(torch.zeros(1, dtype=torch.float64),
+               {"flow_multiplier.fan": torch.tensor([0.5], dtype=torch.float64)}))
+```
+
+```text
+tensor([0.0500], dtype=torch.float64)
+```
+
 ### Air properties
 
 The CONTAM-form elements carry one fixed reference density in their coefficients:
