@@ -346,9 +346,11 @@ def _schedules_as_contamx_holds(prj: Path, dest: Path) -> Path:
     dest.mkdir(parents=True, exist_ok=True)
     lines = prj.read_text().splitlines(keepends=True)
     in_schedules = False
+    n_schedules = rewritten = 0
     for i, line in enumerate(lines):
         if "! day-schedules:" in line:
             in_schedules = True
+            n_schedules = int(line.split()[0])
         elif line.strip() == "-999":
             in_schedules = False
         elif in_schedules:
@@ -356,6 +358,9 @@ def _schedules_as_contamx_holds(prj: Path, dest: Path) -> Path:
             if len(tok) == 2 and tok[0].count(":") == 2:
                 value = float(np.float32(float(tok[1])))
                 lines[i] = f" {tok[0]} {value!r}\n"
+                rewritten += 1
+    assert rewritten >= n_schedules, (
+        f"{prj.name}: {n_schedules} day schedules but {rewritten} values rewritten")
     (dest / prj.name).write_text("".join(lines))
     for suffix in (".wth", ".ctm"):
         if prj.with_suffix(suffix).is_file():
@@ -364,12 +369,15 @@ def _schedules_as_contamx_holds(prj: Path, dest: Path) -> Path:
 
 
 def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf, record_property, label):
+    """ContamX's `run_project` (at `PROJECT_AIRFLOW`, its airflow tolerances tightened so its
+    own iteration stays below the budgets) against `simulate_project` on the same project,
+    with the schedule values ContamX holds (`_schedules_as_contamx_holds`)."""
     from noodl.apps.building_physics.contamx import run_project
     from noodl.apps.building_physics.simulation import simulate_project
 
     ref = run_project(prj, airflow_convergence=PROJECT_AIRFLOW)
-    ours = _schedules_as_contamx_holds(prj, tmp_path / "noodl")
-    out = simulate_project(read_prj(ours), atol=NOODL_ATOL, rtol=1e-14)
+    noodl_prj = _schedules_as_contamx_holds(prj, tmp_path / "noodl")
+    out = simulate_project(read_prj(noodl_prj), atol=NOODL_ATOL, rtol=1e-14)
     torch.testing.assert_close(out["time"], ref["time"], rtol=0, atol=1e-9)
     scale = ref["flow"].abs().max()
     torch.testing.assert_close(out["path_flow"], ref["flow"], rtol=rtol_flow,
@@ -402,10 +410,19 @@ def test_a_run_with_its_own_weather_and_ambient_files_matches_contamx(
     """`test_OneZoneWthCtm.prj` for one day at 300 s: stack-driven while the weather holds the
     ambient 20 K below the zone (00:00-06:00), then wind-driven from 270 and 90 degrees, with
     the ambient sarin from the `.ctm` switching off at 14:05 and on at 05:05 the next day.
-    Budget: flows 33 u (the stack budget at 20 K, 17.2 u, and the wind budget, 16 u, are both
-    below it), plus an absolute floor of 64 u times the largest flow for the near-zero
-    flows of the calm hours; mass fractions 64 u (three-zone transient budget) with the same
-    kind of floor."""
+    Budget, flows: 33 u is the SUM of the two drives' first-order budgets, the stack's at
+    20 K (`_stack_budget(273.15)` = 17.2 u: C, rho_up, g, R and the two temperatures
+    through their difference) and the wind's (16 u, the three-zone steady budget: C, wind
+    speed, Cp, R, T as a product of powers <= 1). It bounds a flow driven by either alone
+    and by both together.
+    Mass fractions: the one zone's rate is flow / (rho V), so the flows' 33 u plus 2 u for
+    rho V (R, T; V and dt exact), plus 1 u for the ambient mass fraction from the `.ctm`:
+    36 u, with no series amplification (one zone); budgeted at 64 u.
+    Absolute floor: where the flow is near zero (calm, isothermal hours) a relative budget
+    has nothing to scale; a float32 roundoff of an input moves the flow by at most its
+    relative budget (<= 64 u) times the flow the same openings carry under the run's
+    largest drive, so 64 u times the largest flow; likewise 64 u times the largest mass
+    fraction."""
     _project_parity(WTH_CTM, tmp_path, rtol_flow=33 * F32_U, rtol_mf=64 * F32_U,
                     record_property=record_property,
                     label="One-zone project with its own .wth and .ctm, 288 steps")
@@ -452,3 +469,32 @@ def test_a_two_day_run_across_midnight_matches_contamx(contamx, tmp_path, record
     _project_parity(tmp_path / STACK_SCHEDULED.name, tmp_path, rtol_flow=64 * F32_U,
                     rtol_mf=64 * F32_U, record_property=record_property,
                     label="Scheduled stack project over two days")
+
+
+def test_a_project_naming_its_weather_file_with_a_directory_is_refused(tmp_path):
+    from noodl.apps.building_physics.contamx import _named_files
+
+    text = STACK_SCHEDULED.read_text()
+    assert "test_OneZoneWthCtmStack.wth ! weather file" in text
+    variant = tmp_path / "subdir.prj"
+    variant.write_text(text.replace("test_OneZoneWthCtmStack.wth ! weather file",
+                                    "weather/test_OneZoneWthCtmStack.wth ! weather file", 1))
+    assert _named_files(STACK_SCHEDULED) == ["test_OneZoneWthCtmStack.wth",
+                                             "test_OneZoneWthCtmStack.ctm"]
+    with pytest.raises(ValueError, match=r"weather/test_OneZoneWthCtmStack\.wth.*bare file"):
+        _named_files(variant)
+
+
+@pytest.mark.external
+def test_run_project_refuses_a_run_that_is_not_whole_time_steps(contamx, tmp_path):
+    from noodl.apps.building_physics.contamx import run_project
+
+    for suffix in (".prj", ".wth", ".ctm"):
+        src = STACK_SCHEDULED.with_suffix(suffix)
+        text = src.read_text()
+        if suffix == ".prj":
+            assert "Jan01 24:00:00  00:05:00" in text
+            text = text.replace("Jan01 24:00:00  00:05:00", "Jan01 23:58:00  00:05:00", 1)
+        (tmp_path / src.name).write_text(text)
+    with pytest.raises(ValueError, match="not a whole number"):
+        run_project(tmp_path / STACK_SCHEDULED.name)

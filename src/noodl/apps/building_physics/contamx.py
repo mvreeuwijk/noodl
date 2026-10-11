@@ -49,13 +49,23 @@ def _set_airflow_convergence(prj: Path, rcnvg: float, acnvg: float) -> None:
 
 
 def _named_files(prj: Path) -> list[str]:
-    """The weather and contaminant file names the project's run control gives (not `null`)."""
+    """The weather and contaminant file names the project's run control gives (not `null`).
+
+    Only bare file names are accepted: a name with a directory part would be opened by
+    ContamX relative to the scratch directory (or outside it), not beside the project."""
     names = []
     for line in prj.read_text().splitlines():
         body, _, comment = line.partition("!")
         if ("weather file" in comment or "contaminant file" in comment) and body.strip():
-            if body.strip().lower() != "null":
-                names.append(body.strip())
+            name = body.strip()
+            if name.lower() == "null":
+                continue
+            if Path(name).name != name or "/" in name or "\\" in name or name in (".", ".."):
+                raise ValueError(
+                    f"contamx: {prj.name} names the {comment.strip()} {name!r}; only a bare "
+                    f"file name beside the project is supported"
+                )
+            names.append(name)
     return names
 
 
@@ -226,7 +236,13 @@ def run_project(prj_path, *, airflow_convergence=None) -> dict:
             dt = float(cx.getSimTimeStep())
             d0, t0 = cx.getSimStartDate(), cx.getSimStartTime()
             d1, t1 = cx.getSimEndDate(), cx.getSimEndTime()
-            n = round(((d1 - d0) * 86400 + t1 - t0) / dt)
+            duration = (d1 - d0) * 86400.0 + t1 - t0
+            n = round(duration / dt)
+            if n < 1 or n * dt != duration:
+                raise ValueError(
+                    f"contamx: {prj_path} runs {duration} s, not a whole number (>= 1) of "
+                    f"{dt} s time steps"
+                )
             f, m = _snapshot(cx)
             flows, mfs, times = [f], [m], [0.0]
             for k in range(1, n + 1):

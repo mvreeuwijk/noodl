@@ -192,8 +192,10 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), **step_kwargs) ->
 
     A steady airflow run (with no or steady contaminants) returns the one steady state at the
     run control's steady day, time and day type. Refused by name: cyclic contaminant runs,
-    integration other than the default implicit method (short time step, CVODE, or a weight
-    other than 1), and steady airflow with transient contaminants.
+    integration other than the trapezoid method with weight 1 (short time step, CVODE, or a
+    weight other than 1), steady airflow with transient contaminants, transient airflow with
+    steady contaminants (ContamX solves the concentrations to steady state at every step;
+    this integrates them), and a run whose duration is not a whole number of time steps.
     """
     from noodl.apps.building_physics.ctm import read_ctm
     from noodl.apps.building_physics.prj import project_to_model, steady
@@ -213,6 +215,17 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), **step_kwargs) ->
     if not rc.transient_airflow and rc.contaminants == "transient":
         raise ValueError("simulate_project: steady airflow with transient contaminants is "
                          "unsupported")
+    if rc.transient_airflow and rc.contaminants == "steady":
+        raise ValueError(
+            "simulate_project: transient airflow with steady contaminants is unsupported "
+            "(ContamX solves the concentrations to steady state at every step)"
+        )
+    n = round(rc.duration / rc.time_step)
+    if rc.transient_airflow and (n < 1 or n * rc.time_step != rc.duration):
+        raise ValueError(
+            f"simulate_project: the run lasts {rc.duration} s, not a whole number (>= 1) of "
+            f"{rc.time_step} s time steps"
+        )
     model, state, drivers = project_to_model(project)
     base = project.source_path.parent if project.source_path else Path.cwd()
     if not rc.transient_airflow:
@@ -233,7 +246,6 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), **step_kwargs) ->
     calendar = Calendar(start_day=rc.start_day, start_time=rc.start_time,
                         start_day_type=rc.day_type,
                         day_types=weather.day_types if weather and weather.day_types else None)
-    n = round(rc.duration / rc.time_step)
     times = torch.arange(n + 1, dtype=F64) * rc.time_step
     out = simulate(model, state, drivers, times, inputs=all_inputs, calendar=calendar,
                    air_mass_change=rc.zone_mass_change, land_on_breakpoints=False,

@@ -86,8 +86,9 @@ and time step), its schedules, and the weather and ambient-concentration files i
 split at a schedule's jump, and the zone air-mass change enters the airflow balance when the
 run control sets `dodMdt = 1`. A steady-airflow run returns the one steady state at the run
 control's steady instant. Cyclic contaminant runs, integration other than the trapezoid
-method with weight 1 (implicit Euler), and steady airflow with transient contaminants are
-refused by name.
+method with weight 1 (implicit Euler), steady airflow with transient contaminants, transient
+airflow with steady contaminants (ContamX solves those to steady state at every step), and a run
+that is not a whole number of time steps are refused by name.
 
 ```py
 project = read_prj("test_OneZoneWthCtmStack.prj")

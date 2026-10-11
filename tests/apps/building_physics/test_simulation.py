@@ -291,3 +291,40 @@ def test_simulate_project_on_a_steady_run_control_is_the_steady_solve(tmp_path):
     expected = p.path_flows(steady(model, state, drivers, **TIGHT)["air.q"])
     assert out["time"].tolist() == [0.0] and out["path_flow"].shape == (1, len(p.paths))
     torch.testing.assert_close(out["path_flow"][0], expected, rtol=1e-12, atol=1e-15)
+
+
+def _run_control_variant(tmp_path, name, *edits):
+    text = (DATA / "test_OneZoneWthCtm.prj").read_text()
+    for old, new in edits:
+        assert old in text, old
+        text = text.replace(old, new, 1)
+    variant = tmp_path / name
+    variant.write_text(text)
+    return read_prj(variant)
+
+
+def test_simulate_project_refuses_a_method_other_than_trapezoid(tmp_path):
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    head = "!mf_solver sim_1dz sim_1dd   celldx  sim_vjt udx\n     "
+    p = _run_control_variant(tmp_path, "cvode.prj", (head + "0", head + "2"))
+    with pytest.raises(ValueError, match="'cvode'"):
+        simulate_project(p)
+
+
+def test_simulate_project_refuses_transient_airflow_with_steady_contaminants(tmp_path):
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    head = "!sim_mf slae rs maxi   relcnvg   abscnvg relax gamma ucc\n    "
+    p = _run_control_variant(tmp_path, "steady_mf.prj", (head + "2", head + "1"))
+    with pytest.raises(ValueError, match="transient airflow with steady contaminants"):
+        simulate_project(p)
+
+
+def test_simulate_project_refuses_a_run_that_is_not_whole_time_steps(tmp_path):
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    p = _run_control_variant(tmp_path, "ragged.prj",
+                             ("Jan01 24:00:00  00:05:00", "Jan01 23:58:00  00:05:00"))
+    with pytest.raises(ValueError, match="not a whole number"):
+        simulate_project(p)
