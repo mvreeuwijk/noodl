@@ -12,18 +12,27 @@ models in `noodl.apps.building_physics.sources`.
 building a float64 `Network`, its elements and its drives. `project_to_model(project, *,
 ambient=None, species=True, scheme="implicit")` returns `(model, state, drivers)`.
 
-**Supported:** run control and ambient conditions; species; wind pressure profiles; zones and
-initial concentrations; airflow paths; the power-law element family
+**Supported:** run control (`Project.run_control`, a `RunControl`: the steady simulation's
+date and time, the transient run's start and end date and time, time step and output step, day
+type, the weather and contaminant file names, and `dodMdt`) and ambient conditions; species and
+each species' default ambient concentration (`Project.ambient_mass_fractions`); day and week
+schedules referenced by zones (the zone temperature, on `"T"`) and by paths (a flow multiplier,
+through `Scaled` on `"flow_multiplier.<kind>"`); wind pressure profiles, and a constant wind
+pressure on an envelope path (`"wind_pressure.<kind>"`, positive pushing air from ambient into
+the zone, as ContamX); zones and initial concentrations; airflow paths; the power-law element
+family
 (`plr_orfc/leak1/leak2/leak3/crack/fcn/test1/test2/conn/stair/shaft/qcn`), the quadratic family
 (`qfr_*`), doorways (`dor_door`, `dor_pl2`), dampers (`plr_bdq`, `plr_bdf`), constant-flow fans
 (`fan_cmf`, `fan_cvf`) and the cubic fan curve (`fan_fan`); source elements `ccf`, `cut`, `eds`,
 `brs`.
 
-**Refused by name**, rather than silently dropped: schedules, control nodes, filters, kinetic
-reactions and air-handling systems referenced by nonzero index; CFD and 1-D convection/diffusion
-zones; continuous-values-file zones and paths; duct networks; a constant wind pressure with no
-profile; a fan curve on a path with `mult != 1`; `csf_*` and `sup_afe` elements; `stackD = 1`
-(densities varying with height inside a zone).
+**Refused by name**, rather than silently dropped: control nodes, filters, kinetic reactions
+and air-handling systems referenced by nonzero index; a schedule number that no week schedule
+carries; a schedule on a `fan_fan` path; a zone without the variable-pressure flag (which ContamX
+holds at constant pressure); CFD and 1-D convection/diffusion zones; continuous-values-file
+zones and paths; duct networks; a constant wind pressure on an interior path; a fan curve on a
+path with `mult != 1`; `csf_*` and `sup_afe` elements; `stackD = 1` (densities varying with
+height inside a zone).
 
 A **filter** is refused emphatically, because a filter is invisible to airflow but *not* to the
 species layer — loading one would silently corrupt contaminant results while the airflow looked
@@ -34,6 +43,10 @@ own sample projects carry dozens of unreferenced sensor and logger nodes, and th
 load.
 
 **`project_to_model` never builds a thermal layer**, because a `.prj` carries no thermal data.
+
+`project_to_model` returns drivers at the **steady-simulation instant** of the run control (its
+day, time and day type), so a `steady()` on them is CONTAM's steady simulation, schedules
+included. `Project.inputs` holds the schedules as `Input`s for `simulate`.
 
 Every power-law element is built as `UpstreamDensityPowerLaw` — re-evaluating the density of the
 air *entering* the path, per direction, matching ContamX section 3.2. The quadratic, damper and

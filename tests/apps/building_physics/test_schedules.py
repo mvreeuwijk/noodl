@@ -165,3 +165,18 @@ def test_a_breakpoint_evaluates_to_the_left_limit_despite_round_off(calendar):
     for p in week.breakpoints(0.0, 2 * DAY, calendar):     # midnights: previous day's value
         if week.value(p - 1e-3, calendar).item() == 1.0:
             assert week.value(p, calendar).item() == 1.0
+
+
+def test_a_repeated_time_takes_the_later_row_never_a_zero_width_interval():
+    """A file's `24:00:00` row and the next day's `00:00:00` row are the same instant; at that
+    instant the later row is used, including when the pair ends the file."""
+    from noodl.apps.building_physics.schedules import _piecewise
+
+    times = [0.0, DAY, DAY]
+    values = torch.tensor([280.0, 290.0, 295.0], dtype=F64)
+    assert _piecewise(times, values, DAY, linear=True, left=False).item() == 295.0
+    assert _piecewise(times, values, DAY / 2, linear=True, left=False).item() == 285.0
+    inner = [0.0, DAY, DAY, 2 * DAY]
+    v4 = torch.tensor([280.0, 290.0, 295.0, 305.0], dtype=F64)
+    assert _piecewise(inner, v4, DAY, linear=True, left=False).item() == 295.0
+    assert _piecewise(inner, v4, 1.5 * DAY, linear=True, left=False).item() == 300.0

@@ -51,10 +51,16 @@ def _piecewise(
     row is held until the next time, and at a jump `left` takes the earlier row and `not left`
     the later one. Differentiable in `values`. Shared by `DaySchedule` and `TimeSeries`, and by
     any other signal built from tabulated values.
+
+    `times` may repeat an instant (a file's `24:00:00` row and the next day's `00:00:00` row):
+    at that instant the later row is used, and the zero-width interval between the two is never
+    interpolated across.
     """
     n = len(times)
     if linear:
         i = min(max(bisect.bisect_right(times, s) - 1, 0), n - 2)
+        if times[i + 1] == times[i]:
+            return values[i + 1]
         w = (s - times[i]) / (times[i + 1] - times[i])
         return values[i] * (1.0 - w) + values[i + 1] * w
     i = (bisect.bisect_left(times, s) if left else bisect.bisect_right(times, s)) - 1

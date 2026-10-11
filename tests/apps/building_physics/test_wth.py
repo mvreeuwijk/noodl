@@ -201,3 +201,26 @@ def test_write_wth_round_trips_the_day_types_and_humidity(tmp_path):
     assert back.day_types == {1: 4, 2: 5}
     torch.testing.assert_close(back.Ta, w.Ta)
     torch.testing.assert_close(back.humidity_ratio, w.humidity_ratio)
+
+
+def test_weather_inputs_write_the_thermal_boundary_when_the_model_has_no_node_temperatures(
+        tmp_path):
+    from noodl.apps.building_physics.inputs import apply_inputs, bind_inputs
+    from noodl.apps.building_physics.schedules import Calendar
+
+    f = tmp_path / "s.wth"
+    f.write_text(SYNTHETIC)
+    w = read_wth(f)
+    net = Network(dtype=torch.float64)
+    net.add_node("ambient", z_ref=0.0)
+    add_zone(net, Zone("z", volume=50.0, T0=293.15))
+    net.add_edge("ambient", "z", kind="airpath", z_path=0.0, Cd=0.6, area=0.01)
+    el = orifice_elements_from_edges(net, "airpath")
+    model = build_model(net, air_elements=[el], drives=[Stack.from_network(net, "airpath")])
+    assert "T" not in model.refs.inputs
+    inputs = w.inputs(model)
+    assert inputs[0].key == "thermal.x_boundary" and inputs[0].index is None
+    base = {"thermal.x_boundary": torch.tensor([300.0], dtype=torch.float64)}
+    d = apply_inputs(base, bind_inputs(model, inputs), 6 * 3600.0, Calendar())
+    assert d["thermal.x_boundary"].shape == (1,)
+    assert d["thermal.x_boundary"].item() == pytest.approx(285.0)

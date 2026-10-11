@@ -1,13 +1,18 @@
 """CONTAM 3.4 project (.prj) reader -- the documented subset of TN 1887r1 Appendix A.
 
-What is read: run control (ambient conditions, g), species, levels, wind pressure profiles,
-airflow elements (power-law family, quadratic family, doorways, dampers, constant-flow fans
-and the cubic fan), zones, initial zone concentrations, airflow paths, source/sink elements
-and source/sinks of the constant, cutoff, decaying and burst types. Everything else is
-skipped to its -999 terminator; a RECORD that references a skipped section by a nonzero
-index (schedule, control, filter, kinetic reaction, AHS) raises ValueError naming it, as does
-a CFD or 1-D zone, a duct network, an unsupported element type, a constant wind pressure
-(wPset with no profile) and a fan curve on a path with mult != 1.
+What is read: run control (ambient conditions, g, the steady simulation's day and time, the
+transient run's dates, time step and day type, the weather and ambient-concentration file
+names, the density options), species and their default ambient concentrations, levels, day
+and week schedules, wind pressure profiles, airflow elements (power-law family, quadratic
+family, doorways, dampers, constant-flow fans and the cubic fan), zones and their temperature
+schedules, initial zone concentrations, airflow paths with their schedules (flow multipliers)
+and constant wind pressures, source/sink elements and source/sinks of the constant, cutoff,
+decaying and burst types. Everything else is skipped to its -999 terminator; a RECORD that
+references a skipped section by a nonzero index (control, filter, kinetic reaction, AHS)
+raises ValueError naming it, as does a CFD or 1-D zone, a zone held at constant pressure, a
+duct network, an unsupported element type, a constant wind pressure on an interior path, a
+schedule on a fan curve and a fan curve on a path with mult != 1. A schedule number that no
+week schedule carries raises KeyError naming the zone or path.
 
 The control-node section is the motivating case for "skipped, not refused": NIST's own sample
 projects carry dozens of sensor and logger control nodes that no zone and no path points at,
@@ -51,6 +56,7 @@ Python float fall through to the default.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -58,13 +64,17 @@ from pathlib import Path
 import torch
 from torch import Tensor
 
+from noodl.apps.building_physics.inputs import Input, apply_inputs, bind_inputs
+from noodl.apps.building_physics.schedules import Calendar, DaySchedule, WeekSchedule
 from noodl.apps.building_physics.thermal import R_AIR, RHO_0, species_layer
-from noodl.drives import Stack, Wind, WindProfile
+from noodl.apps.building_physics.wth import _DAYS_BEFORE_MONTH
+from noodl.drives import ConstantDrive, Stack, Wind, WindProfile
 from noodl.elements import (
     Damper,
     FanCurve,
     FixedFlow,
     Quadratic,
+    Scaled,
     UpstreamDensityPowerLaw,
 )
 from noodl.layers.potential import PotentialFlowLayer
@@ -83,13 +93,31 @@ MU_0 = 1.81625e-5
 #   run control     labelled comment lines each followed by one or more data lines, to -999.
 #                   `! Ta Pb Ws Wd rh day u..` heads SEVERAL data lines, one per simulation
 #                   case, each labelled by its OWN trailing comment; the ambient state is
-#                   the one labelled `steady simulation`. `!dens grav` heads
-#                   `rho g`. `!tsdens relax tsmaxi cnvgSS densZP stackD dodMdt` heads the
-#                   density options; `densZP` (field 4) and `stackD` (field 5) are read,
-#                   see `_read_density_options`.
+#                   the one labelled `steady simulation`, and its field 5 (`daytyp`) is the
+#                   steady simulation's day type. The lines `<name> ! weather file` and
+#                   `<name> ! contaminant file` name the weather and ambient-concentration
+#                   files, `null` meaning none. `!sim_af` heads one line whose field 0 is 1
+#                   for a transient airflow. `!sim_mf` heads four lines: field 0 of the first
+#                   is the contaminant mode (0 none, 1 steady, 2 transient, 3 cyclic), and the
+#                   line labelled `! (trace)` carries the integration weight `gamma` at field 6
+#                   (1 = implicit Euler). `!mf_solver` field 0 is the integration method
+#                   (0 default, 1 short time step, 2 CVODE). `!dens grav` heads `rho g`.
+#                   `!tsdens relax tsmaxi cnvgSS densZP stackD dodMdt` heads the density
+#                   options; `densZP` (field 4), `stackD` (field 5) and `dodMdt` (field 6) are
+#                   read, see `_read_density_options`. `!date_st` heads
+#                   `date_st time_st date_0 time_0 date_1 time_1 t_step t_list t_scrn`: the
+#                   steady simulation's date and time, the transient run's start and end, its
+#                   time step and output step; dates are `MmmDD` (`Jan01`), times `hh:mm:ss`.
 #   section header  `N ! <name>:`; the section's N records then run to a `-999` line.
 #                   `! contaminants:` is the exception: N index lines and NO terminator.
 #   species         `# s t molwt mdiam edens decay Dm CCdef Cp Kuv u[5] name` + description.
+#                   `CCdef` (field 8) is the default ambient mass fraction (kg/kg).
+#   day schedule    `# npts shap utyp ucnv name`, a description line (may be blank), then
+#                   `npts` rows `hh:mm:ss value` from 00:00:00 to 24:00:00. `shap` 0 is
+#                   rectangular, 1 trapezoidal; values are SI (K for a temperature schedule),
+#                   `ucnv` is the display unit only.
+#   week schedule   `# utyp ucnv name`, a description line, then one line of 12 day-schedule
+#                   NUMBERS, one per day type (`j1 .. j12`).
 #   levels          `# refHt delHt ni u name`, then `ni` icon lines (comments interleaved).
 #   wind profile    `# npts type name`, one description line (may be blank), `npts` rows
 #                   `angle cp`; the last angle is 360 and repeats the Cp at 0.
@@ -118,13 +146,21 @@ MU_0 = 1.81625e-5
 #     plr_bdq/bdf   `lam Cp xp Cn xn ...`
 #   zone            19 fields: `# f s# c# k# l# relHt Vol T0 P0 name clr uH uT uP uV axs
 #                   cdvf cfd`. `clr` is not in ContamW's own header comment but IS written.
+#                   `s#` is a week schedule of the zone's temperature (K). `f` is a bit set;
+#                   value 1 is the variable-pressure bit: without it ContamX holds the zone at
+#                   constant pressure (measured on ContamX 3.4.1.7: flags 0 and 2 give no flow
+#                   through the zone, 1 and 3 the same flows).
 #   path            30 fields: `# f n# m# e# f# w# a# s# c# l# X Y relHt mult wPset wPmod
 #                   wazm Fahs Xmax Xmin icn dir clr u[4] cdvf cfd`. Same story: the header
 #                   comment omits `clr` (always -1 in every sample), so the trailing
 #                   `cdvf cfd` sit at 28 and 29, not at 27 and 28. A nonzero cdvf or cfd
 #                   appends a name / four data fields, which is why the field COUNT is
 #                   checked. `n# == -1` is ambient; `wPmod` is Ch; `w#` is the 1-based wind
-#                   pressure profile NUMBER.
+#                   pressure profile NUMBER. `s#` is a week schedule multiplying the path's
+#                   flow. With `w# == 0`, a nonzero `wPset` is a constant wind pressure (Pa)
+#                   on the path's ambient side: positive pushes air from ambient into the zone
+#                   (measured on ContamX 3.4.1.7: wPset +5 / -5 Pa on the three-zone sample's
+#                   ambient -> zone path 1 gives +0.1812 / -0.1654 kg/s through it).
 #   source/sink     `# z# e# s# c# mult CC0 (X,Y,H)min (X,Y,H)max clr u[1] cdvf cfd`.
 # --------------------------------------------------------------------------------------
 
@@ -141,6 +177,11 @@ _DOOR = {"dor_door", "dor_pl2"}
 _DAMPER = {"plr_bdq", "plr_bdf"}
 _FAN_CONST = {"fan_cmf", "fan_cvf"}
 _SOURCE_TYPES = {"ccf", "cut", "eds", "brs"}
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+_CONTAMINANT_MODES = {0: "none", 1: "steady", 2: "transient", 3: "cyclic"}
+_INTEGRATION = {0: "default", 1: "short_time_step", 2: "cvode"}
+_SHAPES = {0: "rectangular", 1: "trapezoidal"}
+_VARIABLE_PRESSURE = 1                  # the zone-flags bit of a zone whose pressure is solved
 
 # Sections whose records would silently change the physics if ignored. Ducts and the simple
 # air-handling system are networks in their own right, not attributes of a zone or a path, so
@@ -170,6 +211,7 @@ class PrjPath:
     azimuth: float
     profile_nr: int
     edge_columns: list[int] = field(default_factory=list)   # columns of q for this path
+    schedule_nr: int = 0             # week schedule multiplying the flow; 0 = none
 
 
 @dataclass
@@ -182,11 +224,73 @@ class PrjSource:
     mult: float
 
 
+@dataclass(frozen=True)
+class RunControl:
+    """A project's run control: what to simulate and when.
+
+    Airflow transient or steady; contaminants none/steady/transient/cyclic; the integration
+    method and its weight (1 = implicit Euler); the steady simulation's day of the year and
+    time of day (s); the transient run's start and end day of the year and time of day (s);
+    time step and output step (s); the steady weather's day type (1-12); the weather and
+    ambient-concentration file names (None when the project names none); whether a zone's
+    air-mass change enters its airflow balance (CONTAM's dodMdt option).
+    """
+
+    transient_airflow: bool
+    contaminants: str
+    integration: str
+    integration_weight: float
+    steady_day: int
+    steady_time: float
+    start_day: int
+    start_time: float
+    end_day: int
+    end_time: float
+    time_step: float
+    output_step: float
+    day_type: int
+    weather_file: str | None
+    ambient_file: str | None
+    zone_mass_change: bool
+
+    @property
+    def duration(self) -> float:
+        """Length of the transient run (s)."""
+        return (self.end_day - self.start_day) * 86400.0 + self.end_time - self.start_time
+
+    def steady_calendar(self) -> Calendar:
+        """The calendar of the steady simulation: its day, time and day type."""
+        return Calendar(start_day=self.steady_day, start_time=self.steady_time % 86400.0,
+                        start_day_type=self.day_type)
+
+
+def _clock(hms: str) -> float:
+    h, m, s = (int(v) for v in hms.split(":"))
+    return 3600.0 * h + 60.0 * m + s
+
+
+def _code(table: dict[int, str], token: str, what: str) -> str:
+    try:
+        return table[int(token)]
+    except KeyError as exc:
+        raise ValueError(f"prj: {what} {token} is not one of {sorted(table)}") from exc
+
+
+def _date(token: str) -> int:
+    try:
+        month = _MONTHS.index(token[:3]) + 1
+        day = int(token[3:])
+    except ValueError as exc:
+        raise ValueError(f"prj: {token!r} is not a CONTAM date (MmmDD)") from exc
+    return _DAYS_BEFORE_MONTH[month - 1] + day
+
+
 @dataclass
 class Project:
     """A CONTAM project as read by `read_prj`: the network, its airflow elements and
     drives, zones and their temperatures and volumes, species, initial mass fractions,
-    sources and ambient conditions. `project_to_model` builds the model from it."""
+    sources and ambient conditions, the run control, and the schedules as `inputs`.
+    `project_to_model` builds the model from it."""
 
     net: Network
     elements: list
@@ -209,6 +313,20 @@ class Project:
     zone_nr_to_name: dict[int, str]
     # The file's `densZP` run-control flag (see `_read_density_options`).
     density_uses_zone_pressure: bool = False
+    run_control: RunControl | None = None
+    # Week schedules by CONTAM number, and the zone and path schedules as inputs: zone
+    # temperatures on "T", path flow multipliers on "flow_multiplier.<kind>".
+    schedules: dict[int, WeekSchedule] = field(default_factory=dict)
+    inputs: list[Input] = field(default_factory=list)
+    # Each species' default ambient mass fraction (K,), kg/kg.
+    ambient_mass_fractions: Tensor | None = None
+    # Element kinds wrapped in `Scaled` (a scheduled path among their edges): kind -> edges.
+    multiplier_edges: dict[str, int] = field(default_factory=dict)
+    # Constant wind pressure per edge of a kind (Pa, on the ambient side), kind -> (n_edges,).
+    constant_wind_pressure: dict[str, Tensor] = field(default_factory=dict)
+    # Each zone's flag bits as the file gives them, by zone name.
+    zone_flags: dict[str, int] = field(default_factory=dict)
+    source_path: Path | None = None
 
     def path_flows(self, q: torch.Tensor) -> torch.Tensor:
         """Net mass flow per path in path-number order (a doorway sums its two edges).
@@ -271,14 +389,15 @@ def _section_header(lines: _Lines) -> tuple[int, str]:
     return int(count.split()[0]), name.strip().rstrip(":").strip()
 
 
-def _read_ambient_block(lines: _Lines) -> dict[str, float] | None:
-    """Consume the data lines under one `! Ta Pb Ws Wd` header; return the steady one.
+def _read_ambient_block(lines: _Lines) -> tuple[dict[str, float], int] | None:
+    """Consume the data lines under one `! Ta Pb Ws Wd` header; return the steady one and
+    its day type.
 
     CONTAM writes one such line per simulation case (steady, wind pressure test, ...), each
     labelled by its own trailing comment. Only the `steady simulation` line is the project's
     ambient state -- taking the first or the last of them is wrong.
     """
-    found: dict[str, float] | None = None
+    found: tuple[dict[str, float], int] | None = None
     while lines.i < len(lines.lines):
         body, _, comment = lines.lines[lines.i].partition("!")
         tok = body.split()
@@ -286,15 +405,21 @@ def _read_ambient_block(lines: _Lines) -> dict[str, float] | None:
             break                                   # a comment line, or the next block
         lines.i += 1
         if _STEADY_LABEL in comment:
-            found = {
+            if len(tok) < 6:
+                raise ValueError(
+                    f"prj: the {_STEADY_LABEL!r} line has no day type (field 5): "
+                    f"{lines.lines[lines.i - 1].strip()!r}"
+                )
+            found = ({
                 "Ta": float(tok[0]), "Pb": float(tok[1]),
                 "Ws": float(tok[2]), "Wd": float(tok[3]),
-            }
+            }, int(tok[5]))
     return found
 
 
-def _read_density_options(line: str) -> bool:
-    """`densZP` from the `!tsdens relax tsmaxi cnvgSS densZP stackD dodMdt` data line.
+def _read_density_options(line: str) -> tuple[bool, bool]:
+    """`densZP` and `dodMdt` from the `!tsdens relax tsmaxi cnvgSS densZP stackD dodMdt`
+    data line.
 
     `densZP = 1` makes ContamX evaluate each zone's air density at the zone's ABSOLUTE
     pressure, `Pb + P_zone`, instead of at the barometric pressure `Pb` alone. The
@@ -307,43 +432,74 @@ def _read_density_options(line: str) -> bool:
     `stackD = 1` asks ContamX for a variable-density stack-pressure calculation (density
     varying with height rather than one value per zone); noodl physics' `Stack` holds one density
     per node, so a project asking for it is REFUSED rather than silently simulated with
-    uniform densities. `tsdens`, `relax`, `tsmaxi`, `cnvgSS` and
-    `dodMdt` govern ContamX's own iteration and its dM/dt term, which is zero while zone
-    temperatures are constant -- and a `.prj` gives noodl physics no thermal layer to change them.
+    uniform densities. `tsdens`, `relax`, `tsmaxi` and `cnvgSS` govern ContamX's own
+    iteration. `dodMdt = 1` puts each zone's air-mass change dM/dt into its airflow balance,
+    which matters when a zone temperature changes (a schedule); it is returned for the run
+    control, and `simulate`'s `air_mass_change` implements it.
     """
     tok = line.split()
-    if len(tok) < 6:
+    if len(tok) < 7:
         raise ValueError(
             f"prj: the '!tsdens ... densZP stackD dodMdt' data line has {len(tok)} fields, "
-            f"expected at least 6: {line.strip()!r}"
+            f"expected at least 7: {line.strip()!r}"
         )
     dens_zp, stack_d = int(tok[4]), int(tok[5])
     if stack_d != 0:
         raise ValueError(
             f"prj: stackD = {stack_d} asks for a variable-density stack calculation "
-            f"(density varying with height); noodl physics holds one density per node, so this is "
-            f"unsupported"
+            f"(density varying with height); noodl physics holds one density per node, so "
+            f"this is unsupported"
         )
-    return dens_zp != 0
+    return dens_zp != 0, int(tok[6]) != 0
 
 
-def _read_run_control(lines: _Lines) -> tuple[dict[str, float], float, bool]:
+def _read_run_control(lines: _Lines) -> tuple[dict[str, float], float, bool, RunControl]:
     ambient: dict[str, float] | None = None
+    day_type: int | None = None
     g: float | None = None
     dens_zp = False
+    fields: dict = {}
+    files: dict[str, str | None] = {}
     while True:
         line = lines.raw()
         stripped = line.strip()
         if stripped == "-999":
             break
+        body, _, comment = line.partition("!")
+        if not stripped.startswith("!") and ("weather file" in comment
+                                             or "contaminant file" in comment):
+            name = body.strip()
+            files["weather" if "weather file" in comment else "ambient"] = (
+                None if name.lower() == "null" else name)
+            continue
         if not stripped.startswith("!"):
             continue
         if stripped[1:].split()[:1] == ["Ta"]:
-            ambient = _read_ambient_block(lines) or ambient
+            block = _read_ambient_block(lines)
+            if block is not None:
+                ambient, day_type = block
         elif stripped.startswith("!tsdens"):
-            dens_zp = _read_density_options(lines.raw())
+            dens_zp, fields["zone_mass_change"] = _read_density_options(lines.raw())
         elif stripped.startswith("!dens"):
             g = float(lines.raw().split()[1])
+        elif stripped.startswith("!sim_af"):
+            fields["transient_airflow"] = int(lines.raw().split()[0]) == 1
+        elif stripped.startswith("!sim_mf"):
+            fields["contaminants"] = _code(_CONTAMINANT_MODES, lines.raw().split()[0],
+                                           "the contaminant simulation mode (sim_mf)")
+            for _ in range(3):
+                row = lines.raw()
+                if "(trace)" in row:
+                    fields["integration_weight"] = float(row.split()[6])
+        elif stripped.startswith("!mf_solver"):
+            fields["integration"] = _code(_INTEGRATION, lines.raw().split()[0],
+                                          "the contaminant integration method (mf_solver)")
+        elif stripped.startswith("!date_st"):
+            d = lines.raw().split()
+            fields.update(steady_day=_date(d[0]), steady_time=_clock(d[1]),
+                          start_day=_date(d[2]), start_time=_clock(d[3]),
+                          end_day=_date(d[4]), end_time=_clock(d[5]),
+                          time_step=_clock(d[6]), output_step=_clock(d[7]))
     if ambient is None:
         raise ValueError(
             "prj: the run-control section has no 'Ta Pb Ws Wd' data line labelled "
@@ -352,7 +508,14 @@ def _read_run_control(lines: _Lines) -> tuple[dict[str, float], float, bool]:
         )
     if g is None:
         raise ValueError("prj: the run-control section lacks the '!dens grav' line")
-    return ambient, g, dens_zp
+    fields["day_type"] = day_type
+    for key in ("weather", "ambient"):
+        if key in files:
+            fields[f"{key}_file"] = files[key]
+    for f in dataclasses.fields(RunControl):
+        if f.name not in fields:
+            raise ValueError(f"prj: the run-control section lacks {f.name}")
+    return ambient, g, dens_zp, RunControl(**fields)
 
 
 def _read_contaminants(lines: _Lines, count: int) -> None:
@@ -375,12 +538,44 @@ def _read_contaminants(lines: _Lines, count: int) -> None:
         )
 
 
-def _read_species(lines: _Lines, count: int, species: list[str]) -> None:
+def _read_species(lines: _Lines, count: int, species: list[str],
+                  ambient_mf: list[float]) -> None:
     for _ in range(count):
         tok = lines.record()
         species.append(tok[-1])                     # name is the last field of the line
+        ambient_mf.append(float(tok[8]))            # CCdef, the default ambient kg/kg
         lines.raw()                                 # the species' description line
     lines.expect_end("species")
+
+
+def _read_day_schedules(lines: _Lines, count: int, out: dict[int, DaySchedule]) -> None:
+    for _ in range(count):
+        tok = lines.record()
+        nr, npts, shape = int(tok[0]), int(tok[1]), int(tok[2])
+        if shape not in _SHAPES:
+            raise ValueError(f"prj: day schedule {nr} has shape {shape}; 0 or 1 expected")
+        lines.raw()                                 # description (may be blank)
+        pts = [lines.record() for _ in range(npts)]
+        out[nr] = DaySchedule([_clock(p[0]) for p in pts], [float(p[1]) for p in pts],
+                              shape=_SHAPES[shape], name=tok[5] if len(tok) > 5 else "")
+    lines.expect_end("day-schedules")
+
+
+def _read_week_schedules(lines: _Lines, count: int, days: dict[int, DaySchedule],
+                         out: dict[int, WeekSchedule]) -> None:
+    order = sorted(days)
+    for _ in range(count):
+        tok = lines.record()
+        nr = int(tok[0])
+        lines.raw()                                 # description (may be blank)
+        js = [int(v) for v in lines.record()]
+        missing = sorted({j for j in js if j not in days})
+        if missing:
+            raise KeyError(f"prj: week schedule {nr} names day schedule(s) {missing}, which "
+                           f"the 'day-schedules' section does not define")
+        out[nr] = WeekSchedule([days[k] for k in order], [order.index(j) + 1 for j in js],
+                               name=tok[3] if len(tok) > 3 else "")
+    lines.expect_end("week-schedules")
 
 
 def _read_initial_concentrations(
@@ -471,9 +666,13 @@ def _read_zones(lines: _Lines, count: int, zones: list[tuple]) -> None:
                 f"plain zone; zone names with spaces, and the extra fields a value file or "
                 f"a CFD zone writes, are unsupported: {' '.join(tok)}"
             )
-        ps, pc, pk, pl = int(tok[2]), int(tok[3]), int(tok[4]), int(tok[5])
-        if ps:
-            raise ValueError(f"prj: zone {nr} references schedule {ps} (unsupported)")
+        flags, ps, pc, pk, pl = (int(v) for v in tok[1:6])
+        if not flags & _VARIABLE_PRESSURE:
+            raise ValueError(
+                f"prj: zone {nr} ({tok[10]!r}) has flags {flags}, without the "
+                f"variable-pressure bit (1): ContamX holds such a zone at constant pressure "
+                f"(unsupported)"
+            )
         if pc:
             raise ValueError(f"prj: zone {nr} references control node {pc} (unsupported)")
         if pk:
@@ -488,7 +687,7 @@ def _read_zones(lines: _Lines, count: int, zones: list[tuple]) -> None:
             raise ValueError(f"prj: zone {nr} is a CFD zone (unsupported)")
         if cdvf:
             raise ValueError(f"prj: zone {nr} reads a continuous values file (unsupported)")
-        zones.append((nr, zname, rel_ht, vol, T0, pl))
+        zones.append((nr, zname, rel_ht, vol, T0, pl, ps, flags))
     lines.expect_end("zones")
 
 
@@ -505,7 +704,7 @@ def _read_paths(
                 f"data fields, and neither is supported: {' '.join(tok)}"
             )
         pzn, pzm, pe, pf, pw, pa, ps, pc, pld = (int(v) for v in tok[2:11])
-        for label, val in (("filter", pf), ("AHS", pa), ("schedule", ps), ("control node", pc)):
+        for label, val in (("filter", pf), ("AHS", pa), ("control node", pc)):
             if val:
                 raise ValueError(f"prj: path {nr} references {label} {val} (unsupported)")
         rel_ht, mult, wPset, wPmod, wazm = (float(v) for v in tok[13:18])
@@ -515,15 +714,11 @@ def _read_paths(
                 f"prj: path {nr} uses a values file (cdvf {cdvf}) or CFD (cfd {cfd}) "
                 f"(unsupported)"
             )
-        if pw == 0 and wPset != 0.0:
-            raise ValueError(
-                f"prj: path {nr} has a constant wind pressure {wPset} (unsupported; use a "
-                f"profile)"
-            )
         if pld not in levels:
             raise KeyError(f"prj: path {nr} sits on level {pld}, which the file never defines")
         paths.append(
-            PrjPath(nr, pzn, pzm, pe, levels[pld] + rel_ht, mult, wPset, wPmod, wazm, pw)
+            PrjPath(nr, pzn, pzm, pe, levels[pld] + rel_ht, mult, wPset, wPmod, wazm, pw,
+                    schedule_nr=ps)
         )
     lines.expect_end("flow paths")
 
@@ -573,20 +768,25 @@ def _kind_of(nr: int, dtype: str) -> str:
 def read_prj(path) -> Project:
     """A CONTAM `.prj` project as a `Project`: zones, airflow paths and their elements,
     species and sources; `project_to_model` turns it into a model."""
-    text = Path(path).read_text()
+    source_path = Path(path).resolve()
+    text = source_path.read_text()
     lines = _Lines(text)
     header = lines.raw().split()
     if not header or header[0] != "ContamW":
         raise ValueError(f"prj: not a ContamW project file (first line {header!r})")
     lines.raw()                                   # the project's own file name line
-    ambient_conditions, g, dens_zp = _read_run_control(lines)
+    ambient_conditions, g, dens_zp, run_control = _read_run_control(lines)
 
     species: list[str] = []
+    ambient_mf: list[float] = []
+    day_schedules: dict[int, DaySchedule] = {}
+    schedules: dict[int, WeekSchedule] = {}
     levels: dict[int, float] = {}
     profiles: dict[int, WindProfile] = {}
     elements: dict[int, PrjElement] = {}
     source_elements: dict[int, tuple[str, list[float]]] = {}
-    zones: list[tuple[int, str, float, float, float, int]] = []   # nr, name, relHt, vol, T0, level
+    # nr, name, relHt, vol, T0, level, week schedule, flags
+    zones: list[tuple[int, str, float, float, float, int, int, int]] = []
     x0_rows: dict[int, list[float]] = {}
     paths: list[PrjPath] = []
     sources: list[PrjSource] = []
@@ -602,7 +802,11 @@ def read_prj(path) -> Project:
         if name == "contaminants":
             _read_contaminants(lines, count)
         elif name == "species":
-            _read_species(lines, count, species)
+            _read_species(lines, count, species, ambient_mf)
+        elif name == "day-schedules":
+            _read_day_schedules(lines, count, day_schedules)
+        elif name == "week-schedules":
+            _read_week_schedules(lines, count, day_schedules, schedules)
         elif name == "levels plus icon data":
             _read_levels(lines, count, levels)
         elif name == "wind pressure profiles":
@@ -630,12 +834,14 @@ def read_prj(path) -> Project:
     return _build(
         ambient_conditions=ambient_conditions, g=g, species=species, levels=levels,
         profiles=profiles, elements=elements, zones=zones, x0_rows=x0_rows, paths=paths,
-        sources=sources, dens_zp=dens_zp,
+        sources=sources, dens_zp=dens_zp, schedules=schedules, ambient_mf=ambient_mf,
+        run_control=run_control, source_path=source_path,
     )
 
 
 def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones, x0_rows,
-           paths, sources, dens_zp=False) -> Project:
+           paths, sources, dens_zp, schedules, ambient_mf, run_control,
+           source_path) -> Project:
     """Turn the parsed records into a `Network`, elements, drives and a `Project`."""
     net = Network(dtype=F64)
     ambient = "ambient"
@@ -643,7 +849,9 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     zone_names: list[str] = []
     zone_nr_to_name: dict[int, str] = {}
     T_list, V_list = [], []
-    for nr, zname, rel_ht, vol, T0, pl in zones:
+    zone_flags: dict[str, int] = {}
+    for nr, zname, rel_ht, vol, T0, pl, _ps, flags in zones:
+        zone_flags[zname] = flags
         if pl not in levels:
             raise KeyError(f"prj: zone {nr} sits on level {pl}, which the file never defines")
         net.add_node(zname, z_ref=levels[pl] + rel_ht, volume=vol, T0=T0, heat_capacity=0.0)
@@ -661,6 +869,19 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
             raise KeyError(
                 f"prj: a path references zone {z}, which the file never defines"
             ) from exc
+
+    def week(nr: int, what: str) -> WeekSchedule:
+        try:
+            return schedules[nr]
+        except KeyError as exc:
+            raise KeyError(f"prj: {what} references schedule {nr}, which the "
+                           f"'week-schedules' section does not define") from exc
+
+    inputs: list[Input] = []
+    for nr, zname, *_rest, ps, _flags in zones:
+        if ps:
+            inputs.append(Input(week(ps, f"zone {nr}"), "T", index=net.node_index(zname),
+                                name=f"zone {nr} temperature schedule {ps}"))
 
     kind_of: dict[int, str] = {}
     for nr in sorted({p.element_nr for p in paths}):
@@ -833,9 +1054,24 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     for p, cols in zip(paths, path_edges, strict=True):
         p.edge_columns = [layout[c] for c in cols]
 
+    # A constant wind pressure (`wPset` on a path with no profile) acts on the path's ambient
+    # side: +wPset on an edge from ambient, -wPset on one into it (dp = phi_src - phi_tgt +
+    # drive). A positive value pushes air from ambient into the zone.
+    wind_pressure: dict[str, list[float]] = {}
+    for p, cols in zip(paths, path_edges, strict=True):
+        if p.profile_nr == 0 and p.wPset != 0.0:
+            if -1 not in (p.from_zone, p.to_zone):
+                raise ValueError(f"prj: path {p.nr} has a constant wind pressure {p.wPset} Pa "
+                                 f"but is not an envelope path (unsupported)")
+            kind = kind_of[p.element_nr]
+            kind_cols = net.edge_index(kind).tolist()
+            values = wind_pressure.setdefault(kind, [0.0] * len(kind_cols))
+            for c in cols:
+                values[kind_cols.index(c)] = p.wPset if p.from_zone == -1 else -p.wPset
+
     drives: list = []
     for el in built:
-        if isinstance(el, FixedFlow):
+        if el.dp_independent:
             continue                              # a fixed flow ignores dp; a drive is moot
         drives.append(Stack.from_network(net, el.kind, g=g))
         # Profiles are keyed by CONTAM's own profile NUMBER, and the lookup is
@@ -845,6 +1081,31 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         # profiles section must be loud, not a silently vanishing wind pressure.
         if bool((net.edge_attr("profile", el.kind, default=0.0) > 0).any()):
             drives.append(Wind.from_network(net, el.kind, ambient=ambient, profiles=profiles))
+    for kind in wind_pressure:
+        drives.append(ConstantDrive(kind, f"wind_pressure.{kind}"))
+
+    # A path schedule multiplies the path's flow: its kind is wrapped in `Scaled`, which reads
+    # one multiplier per edge of the kind from "flow_multiplier.<kind>", and the schedule
+    # becomes an input on the path's own edges. Wrapping comes after the layout and drives
+    # above, which read only `el.kind` and `el.dp_independent`, both of which `Scaled` keeps.
+    multiplier_edges: dict[str, int] = {}
+    for p, cols in zip(paths, path_edges, strict=True):
+        if not p.schedule_nr:
+            continue
+        kind = kind_of[p.element_nr]
+        kind_cols = net.edge_index(kind).tolist()
+        if elements[p.element_nr].dtype == "fan_fan":
+            raise ValueError(
+                f"prj: path {p.nr} puts schedule {p.schedule_nr} on fan curve element "
+                f"{p.element_nr} (unsupported: a fan curve's schedule scales its speed, not "
+                f"its flow)"
+            )
+        multiplier_edges[kind] = len(kind_cols)
+        inputs.append(Input(week(p.schedule_nr, f"path {p.nr}"), f"flow_multiplier.{kind}",
+                            index=[kind_cols.index(c) for c in cols],
+                            name=f"path {p.nr} schedule {p.schedule_nr}"))
+    built = [Scaled(el, f"flow_multiplier.{el.kind}") if el.kind in multiplier_edges else el
+             for el in built]
 
     K = max(1, len(species))
     x0 = torch.zeros(len(zone_names), K, dtype=F64)
@@ -859,6 +1120,11 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         zone_volumes=torch.tensor(V_list, dtype=F64), g=g,
         ambient_conditions=ambient_conditions, profiles=profiles, x0=x0, sources=sources,
         kinds=kinds, zone_nr_to_name=zone_nr_to_name, density_uses_zone_pressure=dens_zp,
+        run_control=run_control, schedules=schedules, inputs=inputs,
+        ambient_mass_fractions=torch.tensor(ambient_mf, dtype=F64),
+        multiplier_edges=multiplier_edges,
+        constant_wind_pressure={k: torch.tensor(v, dtype=F64) for k, v in wind_pressure.items()},
+        zone_flags=zone_flags, source_path=source_path,
     )
 
 
@@ -958,6 +1224,12 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     alone put 6.5e-6 into the three-zone transient concentrations against ContamX), and about
     3.4 % off per 10 K away from it. The returned drivers carry the initial `"rho"` and
     `"rho_amb"` for code that reads them outside a step; every step recomputes them.
+
+    The drivers are at the run control's STEADY-SIMULATION instant (its day, time and day
+    type): the project's schedules (`project.inputs`) are applied there, so a `steady()` on
+    them is CONTAM's steady simulation. Each species' boundary value is its default ambient
+    mass fraction; a scheduled kind gets `"flow_multiplier.<kind>"` (ones before the
+    schedules apply) and a constant wind pressure `"wind_pressure.<kind>"`.
     """
     amb = dict(project.ambient_conditions)
     if ambient:
@@ -1000,7 +1272,11 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     state: dict = {}
     if "species" in layers:
         K = len(project.species)
-        drivers["species.x_boundary"] = torch.zeros(1, K, dtype=F64)
+        if project.ambient_mass_fractions is not None:
+            drivers["species.x_boundary"] = (
+                project.ambient_mass_fractions.reshape(1, -1).clone())
+        else:
+            drivers["species.x_boundary"] = torch.zeros(1, K, dtype=F64)
         state["species.x"] = project.x0.clone()
     # The inputs the airflow elements and drives read themselves, declared for
     # `model.refs.inputs` and `Model.check`.
@@ -1010,6 +1286,21 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         "theta_w": dict(description="wind direction, as CONTAM's weather file gives it",
                         unit="deg"),
     }
+    for kind, n_e in project.multiplier_edges.items():
+        drivers[f"flow_multiplier.{kind}"] = torch.ones(n_e, dtype=F64)
+        model.input_specs[f"flow_multiplier.{kind}"] = dict(
+            description="flow multiplier of each edge (a schedule or control)", unit="-",
+            over=("edges", kind))
+    for kind, value in project.constant_wind_pressure.items():
+        drivers[f"wind_pressure.{kind}"] = value.clone()
+        model.input_specs[f"wind_pressure.{kind}"] = dict(
+            description="constant wind pressure on each edge, on its ambient side", unit="Pa",
+            over=("edges", kind))
+    if project.inputs and project.run_control is not None:
+        drivers = apply_inputs(drivers, bind_inputs(model, project.inputs), 0.0,
+                               project.run_control.steady_calendar())
+        density = closures[0](state, drivers)
+        drivers["rho"], drivers["rho_amb"] = density["rho"], density["rho_amb"]
     state.update(model.initial_capacities(state, drivers))
     return model, state, drivers
 

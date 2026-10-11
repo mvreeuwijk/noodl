@@ -12,12 +12,15 @@ from noodl.apps.building_physics.prj import (
     _PATH_FIELDS,
     PrescribedTemperatureDensity,
     Project,
+    RunControl,
     ZonePressureDensity,
     project_to_model,
     read_prj,
 )
+from noodl.apps.building_physics.prj import steady as prj_steady
+from noodl.apps.building_physics.schedules import Calendar, WeekSchedule
 from noodl.apps.building_physics.thermal import R_AIR
-from noodl.elements import Damper, FixedFlow, UpstreamDensityPowerLaw
+from noodl.elements import Damper, FanCurve, FixedFlow, Scaled, UpstreamDensityPowerLaw
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "contam"
 THREE = DATA / "valThreeZonesWthCtm-UseApi.prj"
@@ -306,10 +309,6 @@ def test_the_filtered_one_zone_stack_project_is_refused_naming_the_filter():
 def test_unsupported_records_raise_naming_the_offender(tmp_path):
     text = THREE.read_text()
     path2 = "   2    0   1   2   3   0   0   0   0   0   1"
-    with pytest.raises(ValueError, match=r"path 2.*schedule"):
-        read_prj(
-            _variant(text, path2, "   2    0   1   2   3   0   0   0   1   0   1", tmp_path)
-        )
     with pytest.raises(ValueError, match=r"path 2.*filter"):
         read_prj(
             _variant(text, path2, "   2    0   1   2   3   1   0   0   0   0   1", tmp_path)
@@ -321,15 +320,6 @@ def test_unsupported_records_raise_naming_the_offender(tmp_path):
                 text,
                 zone1,
                 "   1  3   0   0   0   1   0.000   300 293.15 0 one -1 0 2 0 0 1 0 0",
-                tmp_path,
-            )
-        )
-    with pytest.raises(ValueError, match=r"zone 1.*schedule"):
-        read_prj(
-            _variant(
-                text,
-                zone1,
-                "   1  3   2   0   0   1   0.000   300 293.15 0 one -1 0 2 0 0 0 0 0",
                 tmp_path,
             )
         )
@@ -573,3 +563,195 @@ def test_zone_pressure_density_broadcasts_a_batched_reference_pressure():
     out = zp({"air.phi": phi}, {"rho": rho, "P_ref": P})
     assert out["rho"][1, 1].item() == pytest.approx(1.1 * (1 + 20.0 / 90000.0), rel=1e-15)
     assert out["rho"][0, 1].item() == pytest.approx(1.1 * (1 + 10.0 / 101325.0), rel=1e-15)
+
+
+STACK_OWN = DATA / "test_OneZoneWthCtmStack.prj"
+_NO_SCHEDULES = "0 ! day-schedules:\n-999\n0 ! week-schedules:\n-999\n"
+_HALF_SCHEDULE = (
+    "1 ! day-schedules:\n! # npts shap utyp ucnv name\n  1    3    0    1    0 Half\n\n"
+    " 00:00:00 1\n 12:00:00 0.5\n 24:00:00 0.5\n-999\n"
+    "1 ! week-schedules:\n! # utyp ucnv name\n  1    1    0 HalfWeek\n\n"
+    " 1 1 1 1 1 1 1 1 1 1 1 1\n-999\n"
+)
+_STACK_DATES = "  Jan01 00:00:00  Jan01 00:00:00  Jan01 24:00:00"
+
+
+def test_the_run_control_is_read():
+    rc = read_prj(STACK_OWN).run_control
+    assert isinstance(rc, RunControl)
+    assert rc.transient_airflow and rc.contaminants == "transient"
+    assert (rc.integration, rc.integration_weight) == ("default", 1.0)
+    assert (rc.start_day, rc.start_time, rc.end_day, rc.end_time) == (1, 0.0, 1, 86400.0)
+    assert (rc.time_step, rc.output_step, rc.day_type) == (300.0, 300.0, 1)
+    assert rc.duration == 86400.0
+    assert (rc.weather_file, rc.ambient_file) == (
+        "test_OneZoneWthCtmStack.wth", "test_OneZoneWthCtmStack.ctm")
+    assert rc.zone_mass_change
+    assert read_prj(THREE).run_control.weather_file is None        # `null`
+    assert not read_prj(THREE).run_control.zone_mass_change
+
+
+def test_the_steady_day_type_stays_off_the_ambient_conditions():
+    p = read_prj(STACK_OWN)
+    assert set(p.ambient_conditions) == {"Ta", "Pb", "Ws", "Wd"}
+    cal = p.run_control.steady_calendar()
+    assert (cal.start_day, cal.start_time, cal.start_day_type) == (1, 0.0, 1)
+
+
+def test_run_control_dates_are_days_of_the_year(tmp_path):
+    p = read_prj(_variant(STACK_OWN.read_text(), _STACK_DATES,
+                          "  Mar02 06:00:00  Feb28 12:00:00  Mar01 18:00:00", tmp_path))
+    rc = p.run_control
+    assert (rc.steady_day, rc.steady_time) == (61, 6 * 3600.0)
+    assert (rc.start_day, rc.start_time, rc.end_day, rc.end_time) == (
+        59, 12 * 3600.0, 60, 18 * 3600.0)
+    assert rc.duration == 30 * 3600.0
+
+
+def test_a_run_control_without_its_dates_or_with_a_bad_date_is_refused(tmp_path):
+    text = STACK_OWN.read_text()
+    with pytest.raises(ValueError, match=r"run-control section lacks steady_day"):
+        read_prj(_variant(text, "!date_st time_st", "!dates_removed", tmp_path))
+    with pytest.raises(ValueError, match=r"run-control section lacks weather_file"):
+        read_prj(_variant(text, "! weather file", "! no such line", tmp_path))
+    with pytest.raises(ValueError, match=r"contaminant simulation mode \(sim_mf\) 7"):
+        read_prj(_variant(text, "    2             30", "    7             30", tmp_path))
+    with pytest.raises(ValueError, match=r"'Xyz01' is not a CONTAM date"):
+        read_prj(_variant(text, _STACK_DATES, "  Jan01 00:00:00  Xyz01 00:00:00  Jan01 24:00:00",
+                          tmp_path))
+
+
+def test_a_zone_temperature_schedule_becomes_an_input_on_T():
+    p = read_prj(STACK_OWN)
+    assert isinstance(p.schedules[1], WeekSchedule)
+    (inp,) = p.inputs
+    assert inp.key == "T" and inp.index == (p.net.node_index("singleZone"),)
+    cal = Calendar()
+    # Values at the END of a step; a jump's own instant keeps the value before it.
+    assert inp.signal.value(13 * 3600.0, cal).item() == pytest.approx(293.15)
+    assert inp.signal.value(13 * 3600.0 + 300.0, cal).item() == pytest.approx(303.15)
+    assert p.ambient_mass_fractions.tolist() == pytest.approx([5.8135e-4])
+    assert p.source_path == STACK_OWN.resolve()
+    model, state, drivers = project_to_model(p)
+    xb = drivers["species.x_boundary"]
+    assert xb.shape == (1, 1) and xb.item() == pytest.approx(5.8135e-4)
+
+
+def test_the_returned_drivers_are_at_the_steady_simulation_instant(tmp_path):
+    text = STACK_OWN.read_text()
+    # steady time 13:30 -> the zone is at 303.15 K in the returned drivers
+    shifted = _variant(text, "  Jan01 00:00:00  Jan01 00:00:00", "  Jan01 13:30:00  Jan01 00:00:00",
+                       tmp_path)
+    p = read_prj(shifted)
+    assert p.run_control.steady_time == 13.5 * 3600.0
+    _, _, drivers = project_to_model(p)
+    zone = p.net.node_index("singleZone")
+    assert drivers["T"][zone].item() == pytest.approx(303.15)
+    # the initial densities kept for code outside a step follow the scheduled temperature
+    assert drivers["rho"][zone].item() == pytest.approx(101325.0 / (R_AIR * 303.15), rel=1e-15)
+
+
+def _three_with_path_schedule(tmp_path) -> Path:
+    text = THREE.read_text().replace(_NO_SCHEDULES, _HALF_SCHEDULE, 1)
+    path2 = "   2    0   1   2   3   0   0   0   0   0   1"
+    return _variant(text, path2, "   2    0   1   2   3   0   0   0   1   0   1", tmp_path)
+
+
+def test_a_path_schedule_wraps_the_kind_in_scaled_and_writes_its_edge(tmp_path):
+    p = read_prj(_three_with_path_schedule(tmp_path))
+    (el,) = [e for e in p.elements if e.kind == "pl_3"]
+    assert isinstance(el, Scaled) and el.key == "flow_multiplier.pl_3"
+    assert p.multiplier_edges == {"pl_3": 4}
+    (inp,) = p.inputs
+    assert inp.key == "flow_multiplier.pl_3" and inp.index == (1,)   # path 2 is pl_3's 2nd edge
+    model, state, drivers = project_to_model(p)
+    assert drivers["flow_multiplier.pl_3"].tolist() == [1.0, 1.0, 1.0, 1.0]   # 00:00 steady
+    assert model.refs.inputs["flow_multiplier.pl_3"].ordering == "edge order of kind 'pl_3'"
+
+
+def test_a_scheduled_path_scales_its_flow_batched_and_unbatched(tmp_path):
+    p = read_prj(_three_with_path_schedule(tmp_path))
+    model, state, drivers = project_to_model(p)
+    plain = read_prj(THREE)
+    m0, s0, d0 = project_to_model(plain)
+    q_ref = plain.path_flows(prj_steady(m0, s0, d0, atol=1e-14)["air.q"])
+    q_one = p.path_flows(prj_steady(model, state, drivers, atol=1e-14)["air.q"])
+    torch.testing.assert_close(q_one, q_ref, rtol=1e-12, atol=1e-15)
+    s = torch.tensor([[1.0, 1.0, 1.0, 1.0], [1.0, 0.5, 1.0, 1.0]], dtype=F64)
+    q_two = p.path_flows(prj_steady(model, state, {**drivers, "flow_multiplier.pl_3": s},
+                                    atol=1e-14)["air.q"])
+    assert q_two.shape == (2, 4)
+    torch.testing.assert_close(q_two[0], q_ref, rtol=1e-12, atol=1e-15)
+    assert not torch.allclose(q_two[1], q_ref)
+
+
+def test_a_scheduled_fixed_flow_fan_gets_no_stack_drive(tmp_path):
+    text = MIXED.read_text().replace(_NO_SCHEDULES, _HALF_SCHEDULE, 1)
+    path5 = "   5    0   1  -1   1   0   0   0   0   0   1"
+    p = read_prj(_variant(text, path5, "   5    0   1  -1   1   0   0   0   1   0   1", tmp_path))
+    (fan,) = [e for e in p.elements if e.kind == "fan_1"]
+    assert isinstance(fan, Scaled) and isinstance(fan.inner, FixedFlow)
+    assert "fan_1" not in [d.kind for d in p.drives]
+
+
+def test_a_schedule_on_a_fan_curve_is_refused_naming_path_and_schedule(tmp_path):
+    text = MIXED.read_text().replace(_NO_SCHEDULES, _HALF_SCHEDULE, 1)
+    fan_cmf = "1 28 fan_cmf fan\n\n 0.200683 4\n"
+    assert fan_cmf in text
+    text = text.replace(fan_cmf, "1 22 fan_fan fan\n\n 0 0 0.5 1.2041 0.5 100 0\n"
+                                 " 100 -200 0 0 2\n 0 100\n 0.5 0\n", 1)
+    path5 = "   5    0   1  -1   1   0   0   0   0   0   1"
+    assert isinstance(next(e for e in read_prj(_variant(text, path5, path5, tmp_path)).elements
+                           if e.kind == "fan_1"), FanCurve)         # unscheduled, it loads
+    variant = _variant(text, path5, "   5    0   1  -1   1   0   0   0   1   0   1", tmp_path)
+    with pytest.raises(ValueError, match=r"path 5.*schedule 1.*fan curve"):
+        read_prj(variant)
+
+
+def test_schedule_references_that_name_nothing_are_refused(tmp_path):
+    text = THREE.read_text()
+    path2 = "   2    0   1   2   3   0   0   0   0   0   1"
+    with pytest.raises(KeyError, match=r"path 2.*schedule 1"):
+        read_prj(_variant(text, path2, "   2    0   1   2   3   0   0   0   1   0   1", tmp_path))
+    zone1 = "   1  3   0   0   0   1   0.000   300 293.15 0 one -1 0 2 0 0 0 0 0"
+    with pytest.raises(KeyError, match=r"zone 1.*schedule 2"):
+        read_prj(_variant(text, zone1,
+                          "   1  3   2   0   0   1   0.000   300 293.15 0 one -1 0 2 0 0 0 0 0",
+                          tmp_path))
+    bad_week = _HALF_SCHEDULE.replace(" 1 1 1 1 1 1 1 1 1 1 1 1", " 1 1 1 1 1 1 1 1 1 1 1 4")
+    with pytest.raises(KeyError, match=r"week schedule 1.*day schedule\(s\) \[4\]"):
+        read_prj(_variant(text, _NO_SCHEDULES, bad_week, tmp_path))
+    bad_shape = _HALF_SCHEDULE.replace("  1    3    0    1    0 Half",
+                                       "  1    3    2    1    0 Half")
+    with pytest.raises(ValueError, match=r"day schedule 1 has shape 2"):
+        read_prj(_variant(text, _NO_SCHEDULES, bad_shape, tmp_path))
+
+
+def test_a_zone_held_at_constant_pressure_is_refused_by_name(tmp_path):
+    zone1 = "   1  3   0   0   0   1   0.000   300 293.15 0 one -1 0 2 0 0 0 0 0"
+    text = THREE.read_text()
+    with pytest.raises(ValueError, match=r"zone 1 \('one'\).*flags 2.*variable-pressure"):
+        read_prj(_variant(text, zone1, zone1.replace("   1  3", "   1  2", 1), tmp_path))
+    p = read_prj(_variant(text, zone1, zone1.replace("   1  3", "   1  19", 1), tmp_path))
+    assert p.zone_flags == {"one": 19, "two": 3, "three": 3}
+
+
+def test_a_constant_wind_pressure_is_a_constant_drive_on_the_ambient_side(tmp_path):
+    text = THREE.read_text()
+    p1 = "   1    1  -1   1   3   0   3   0   0   0   1  30.000   0.000   1.500 1 0 0.1225 270"
+    p = read_prj(_variant(
+        text, p1,
+        "   1    1  -1   1   3   0   0   0   0   0   1  30.000   0.000   1.500 1 5 0.1225 270",
+        tmp_path))
+    torch.testing.assert_close(p.constant_wind_pressure["pl_3"],
+                               torch.tensor([5.0, 0.0, 0.0, 0.0], dtype=F64))
+    model, state, drivers = project_to_model(p)
+    assert torch.equal(drivers["wind_pressure.pl_3"], p.constant_wind_pressure["pl_3"])
+    assert model.refs.inputs["wind_pressure.pl_3"].unit == "Pa"
+
+
+def test_a_constant_wind_pressure_on_an_interior_path_is_refused(tmp_path):
+    path2 = "   2    0   1   2   3   0   0   0   0   0   1  10.000   0.000   1.500 1 0 "
+    text = THREE.read_text()
+    with pytest.raises(ValueError, match=r"path 2.*constant wind pressure.*envelope"):
+        read_prj(_variant(text, path2, path2[:-2] + "4 ", tmp_path))

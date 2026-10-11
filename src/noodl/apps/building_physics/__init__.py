@@ -27,6 +27,7 @@ from noodl.apps.building_physics.inputs import Input, apply_inputs, bind_inputs,
 from noodl.apps.building_physics.modelica import read_modelica
 from noodl.apps.building_physics.prj import (
     Project,
+    RunControl,
     project_to_model,
     read_prj,
 )
@@ -74,6 +75,7 @@ __all__ = [
     "Input",
     "LinearDensity",
     "Project",
+    "RunControl",
     "Signal",
     "TimeSeries",
     "WallMass",

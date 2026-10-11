@@ -291,3 +291,28 @@ def test_three_zone_transient_concentrations_match_contamx(contamx, record_prope
     record_property("check", "Three-zone project, transient concentrations, 24 steps at 300 s")
     record_property("tolerance", f"rel {tol:.2e} (64 float32 roundoffs)")
     record_property("measured_rel", worst_rel)
+
+
+@pytest.mark.external
+def test_a_constant_wind_pressure_matches_contamx(contamx, tmp_path, record_property):
+    """Path 1 of the three-zone project with no wind profile and wPset = 5 Pa (TN 1887
+    section 16). Budget as the three-zone steady flows: 16 F32_U (5 Pa is exact in float32)."""
+    from noodl.apps.building_physics.contamx import run_steady
+
+    text = THREE.read_text()
+    p1 = "   1    1  -1   1   3   0   3   0   0   0   1  30.000   0.000   1.500 1 0 0.1225 270"
+    assert p1 in text
+    variant = tmp_path / "wpset.prj"
+    variant.write_text(text.replace(
+        p1, "   1    1  -1   1   3   0   0   0   0   0   1  30.000   0.000   1.500 1 5 0.1225 270",
+        1))
+    p = read_prj(variant)
+    amb = dict(p.ambient_conditions, mf={0: THREE_AMBIENT_MF})
+    ref = run_steady(variant, ambient=amb, airflow_convergence=TIGHT_AIRFLOW)
+    model, state, drivers = project_to_model(p, ambient=amb)
+    ours = p.path_flows(steady(model, state, drivers, atol=NOODL_ATOL)["air.q"])
+    tol = 16 * F32_U
+    torch.testing.assert_close(ours, ref["flow"], rtol=tol, atol=1e-12)
+    record_property("check", "Three-zone project, constant wind pressure 5 Pa on path 1")
+    record_property("tolerance", f"rel {tol:.2e}")
+    record_property("measured_rel", ((ours - ref["flow"]) / ref["flow"]).abs().max().item())
