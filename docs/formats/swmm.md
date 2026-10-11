@@ -125,7 +125,9 @@ on the solved flows, where SWMM's are the conduits (see
 conservative pollutant matches SWMM's link quality at steady state (to 1e-8 relative on the
 tree and the loop), and in transit the two differ by their residence times. A pollutant's
 `Kdecay` is read (`pollutants[name]["decay"]`, 1/s); the model's own reactions are BOD decay
-and sulfide generation, and a tracer of any other name is conservative.
+and sulfide generation, and a tracer of any other name is conservative. A nonzero `Cinit` is refused (the model starts
+with clean water); the other pollutant fields feed only runoff, groundwater, RDII and
+dry-weather inflow, which are refused or absent.
 
 **Not supported**, which rules out most published SWMM examples as they stand:
 

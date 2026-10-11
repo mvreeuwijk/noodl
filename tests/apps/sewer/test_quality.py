@@ -358,14 +358,16 @@ def test_sulfide_generation_continues_in_a_full_conduit():
     ``(S0 V)^(3/8) / d_m`` is the free-surface exchange, vanishes (its limit as the top width
     closes, ``d_m -> inf``)."""
     theta = 1.07 ** (18.0 - 20.0)
+    depth = torch.zeros(1, dtype=F64, requires_grad=True)
     value = q.sulfide_rate(
         torch.tensor([0.3], dtype=F64), torch.tensor([2.0e-3], dtype=F64),
         torch.tensor([18.0], dtype=F64), torch.tensor([0.1125], dtype=F64),
-        torch.tensor([0.01], dtype=F64), torch.tensor([1.2], dtype=F64),
-        torch.zeros(1, dtype=F64, requires_grad=True),
+        torch.tensor([0.01], dtype=F64), torch.tensor([1.2], dtype=F64), depth,
     )
     assert float(value.detach()) == pytest.approx(0.32e-3 * 0.3 * theta / 0.1125 / 3600.0,
                                                   rel=1e-12)
+    value.sum().backward()                      # both branches of the where stay finite
+    assert torch.isfinite(depth.grad).all()
 
 
 def test_sulfide_loss_reads_the_speed_on_a_reversed_conduit():

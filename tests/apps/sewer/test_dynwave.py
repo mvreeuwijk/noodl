@@ -2474,6 +2474,12 @@ def test_tracer_follows_reversed_flow():
     stored = float(_amount(after)[j4] - _amount(before)[j4])
     moved = dt * (-q["Cd"] * x["J3"] + q["Cc"] * x["J2"] - q["Ce"] * x["J4"])
     assert stored == pytest.approx(moved, rel=1e-12)
+    # and the whole loop's tracer, every step: the load at J3 less the outfall flux
+    load = 0.1 * float(drivers["inflow"][model.net.nodes.index("J3")])
+    for one, two in zip(states[:-1], states[1:], strict=True):
+        change = float(_amount(two).sum() - _amount(one).sum())
+        assert change == pytest.approx(dt * (load - _outfall_flux(model, two)),
+                                       rel=1e-12, abs=1e-18)
 
 
 def test_quality_conserves_the_tracer_while_the_tree_fills(tmp_path):
@@ -2505,6 +2511,27 @@ def test_tracer_crosses_a_regulator_without_storage():
         stored = float(_amount(after).sum() - _amount(before).sum())
         assert stored == pytest.approx(
             model.routing_step * (load - _outfall_flux(model, after)), rel=1e-12, abs=1e-18)
+
+
+def test_the_overflow_loss_takes_at_most_the_whole_contents():
+    """One step's overflow larger than a junction's step-start contents: the lost fraction
+    is capped at 1 (all of them leave) and the control volume stays at the floor or
+    above; below the cap the fraction is ``dt overflow / V_start``."""
+    from noodl.apps.sewer.dynwave import OverflowLoss
+    from noodl.apps.sewer.hydraulics import CAPACITY_FLOOR
+
+    model, state, _ = build_model(_flooding_tree(), quality=True, species=("tracer",))
+    hyd = model.dynamic_wave
+    start = torch.tensor([1.0, 2.0, 1.0, 1.0, 1.0], dtype=F64)
+    out = hyd._quality_volume({"sewer.quality_volume": start},
+                              torch.tensor([0.1, 0.0, 0.0, 0.0, 0.0], dtype=F64),
+                              torch.tensor([1.0, 0.1, 0.0, 0.0, 0.0], dtype=F64), 5.0)
+    torch.testing.assert_close(out["water_quality.overflow_loss"],
+                               torch.tensor([1.0, 0.25, 0.0, 0.0, 0.0], dtype=F64))
+    assert float(out["sewer.quality_volume"][0]) == CAPACITY_FLOOR
+    x = torch.full((5,), 0.1, dtype=F64)
+    kept = OverflowLoss(1).apply(x, 5.0, out)
+    torch.testing.assert_close(kept, torch.tensor([0.0, 0.075, 0.1, 0.1, 0.1], dtype=F64))
 
 
 def test_sulfide_needs_each_junctions_unique_outgoing_conduit():

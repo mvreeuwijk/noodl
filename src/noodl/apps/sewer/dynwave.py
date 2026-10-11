@@ -1515,7 +1515,10 @@ class DynamicWaveHydraulics:
         """The transport control volumes at the end of the step and the flooded fraction
         (class docstring, "Quality"): ``V_end = max(V_start + dt (N - overflow),
         CAPACITY_FLOOR)`` from the pinned step-start ``"sewer.quality_volume"``, and
-        ``dt overflow / V_start`` capped at 1."""
+        ``dt overflow / V_start`` capped at 1. The cap binds only where one step's overflow
+        exceeds the junction's whole step-start contents: all of them leave, and the excess
+        overflow is taken from the step's inflow without its mass, so the water balance (and
+        a uniform concentration) holds there only to that excess."""
         start = state["sewer.quality_volume"]
         end = torch.clamp(start + dt * (net_inflow - overflow), min=CAPACITY_FLOOR)
         lost = torch.clamp(dt * overflow / start, max=1.0)
@@ -1819,7 +1822,9 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
 
 #: The quality layer's iteration tolerance (kg/m3), judged alongside the heads (design E7).
 #: Its concentrations follow the flows of the pass, so it binds only where the heads have
-#: converged and the concentrations they carry have not.
+#: converged and the concentrations they carry have not. It is ABSOLUTE: 1e-12 kg/m3 is
+#: 1e-9 mg/L, about 1e-11 relative at typical BOD (0.1-0.3 kg/m3) but only ~1e-3 relative
+#: for a species at 1 ug/L (1e-9 kg/m3); scale such a species' units up to resolve it.
 QUALITY_ITERATE_TOL = 1e-12
 
 

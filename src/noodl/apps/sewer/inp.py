@@ -387,6 +387,15 @@ def read_swmm_inp(
                 f"{path}: line {line.number}: pollutant units must be MG/L or UG/L, got "
                 f"{units!r}"
             )
+        # Cinit (field 10) is the concentration of the water a run starts with; the model
+        # starts clean, so a nonzero one is refused. The other skipped fields only feed what
+        # the reader refuses anyway: Crain (rain), Cgw (groundwater), Crdii ([RDII]), SnowOnly,
+        # CoPollutant/CoFraction (runoff washoff) and Cdwf ([DWF]).
+        if len(line.fields) > 10 and as_float(line, 10, "the initial concentration",
+                                              path) != 0.0:
+            raise ValueError(
+                f"{path}: line {line.number}: pollutant {line.fields[0]!r} has a nonzero "
+                f"Cinit; the model starts with clean water, set it to 0")
         pollutants[line.fields[0]] = {
             "units": units,
             "scale": 1e-3 if units == "MG/L" else 1e-6,

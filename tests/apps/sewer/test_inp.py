@@ -39,6 +39,23 @@ def test_the_pollutant_variant_carries_the_tracer():
     assert inflows == {"J1": {"Tracer": pytest.approx(0.1, rel=1e-14)}}
 
 
+def test_a_nonzero_initial_pollutant_concentration_is_refused_by_name(tmp_path):
+    """Cinit sets the concentration of the water a run starts with; the model starts clean,
+    so a nonzero Cinit is refused naming the pollutant and the line. The fields only runoff,
+    groundwater, RDII or dry-weather flow would read (refused sections) are not checked."""
+    text = (DATA / "tree_kinwave_pollut.inp").read_text()
+    old = ("Tracer           MG/L   0.0        0.0        0.0        5.0        NO         *"
+           "                0.0        0.0        0.0")
+    assert text.count(old) == 1
+    path = tmp_path / "cinit.inp"
+    path.write_text(text.replace(old, old[:-3] + "2.5"))
+    with pytest.raises(ValueError, match=r"line 51: pollutant 'Tracer' has a nonzero Cinit"):
+        read_swmm_inp(path)
+    cdwf = old[:-14] + "7.0        0.0"                  # Cdwf 7: only [DWF] reads it
+    path.write_text(text.replace(old, cdwf))
+    read_swmm_inp(path)
+
+
 def test_conduit_offsets_shift_the_effective_invert_under_link_offsets_depth(tmp_path):
     """Under `LINK_OFFSETS DEPTH` (the fixture's own default), a conduit's
     InOffset/OutOffset add to the NODE invert at each end before the slope is computed --

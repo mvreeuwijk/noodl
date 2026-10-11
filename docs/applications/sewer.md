@@ -1089,8 +1089,8 @@ publish numbers from this application.
   tree's steady state J1 holds 2.0 m³ against C1's 6.5 m³). A junction drained dry keeps the
   1e-9 m³ floor, where the water balance is no longer exact. Sulfide needs a single
   outgoing conduit at every junction (refused by name on loops, adverse conduits and
-  junctions drained by a regulator); BOD and tracers do not. Water starts clean: SWMM's
-  `Cinit` is not read. Headspace air (and so H₂S transfer) is not yet built on the dynamic
+  junctions drained by a regulator); BOD and tracers do not. Water starts clean: a nonzero
+  SWMM `Cinit` is refused by name. Headspace air (and so H₂S transfer) is not yet built on the dynamic
   wave.
 - **No gas-phase sulfide sink.** H₂S leaves the headspace by ventilation, at the outfall, and
   by re-absorption into the water (the two-film flux is signed); no wall uptake or gas-phase
