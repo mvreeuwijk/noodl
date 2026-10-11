@@ -28,6 +28,13 @@ from noodl.apps.building_physics.prj import (
     project_to_model,
     read_prj,
 )
+from noodl.apps.building_physics.schedules import (
+    Calendar,
+    DaySchedule,
+    Signal,
+    TimeSeries,
+    WeekSchedule,
+)
 from noodl.apps.building_physics.sources import (
     BurstSource,
     ConstantSource,
@@ -52,16 +59,21 @@ from noodl.apps.building_physics.wth import Weather, read_wth
 
 __all__ = [
     "EDGE_ATTRIBUTES",
+    "NODE_ATTRIBUTES",
     "BurstSource",
+    "Calendar",
     "ConstantSource",
     "CutoffSource",
+    "DaySchedule",
     "DecayingSource",
     "IdealGasDensity",
     "LinearDensity",
-    "NODE_ATTRIBUTES",
     "Project",
+    "Signal",
+    "TimeSeries",
     "WallMass",
     "Weather",
+    "WeekSchedule",
     "Zone",
     "add_large_opening",
     "add_zone",
@@ -82,8 +94,8 @@ __all__ = [
     "run_steady",
     "run_transient",
     "shaft",
-    "species_layer",
     "sources_from_project",
+    "species_layer",
     "thermal_layer",
     "window",
     "write_wth",

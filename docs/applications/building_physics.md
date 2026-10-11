@@ -138,6 +138,37 @@ print(block_net.nodes)
 The second flat, its door and its window are placed at `z = 3`, so their heights come out
 right without being repeated in the factory calls.
 
+## Time, schedules and inputs
+
+Time in a building run is seconds since the start. A `Calendar` says where that start sits:
+day of the year, time of day, and the CONTAM *day type* (1–12) of each day, which picks one
+of a week schedule's twelve day schedules. Day types come from the weather file when there
+is one. Otherwise they start at a given type and cycle through 1–7, as ContamX does.
+
+A schedule's value is taken at the **end** of each step, and where it jumps, the value *at*
+the jump is the one before it. A fan switched on at 08:00 is therefore off over the step
+ending 08:00 and on over the next one. This matches ContamX 3.4 (measured); at the start
+time itself the value at that instant is used.
+
+```python
+from noodl.apps.building_physics import Calendar, DaySchedule, WeekSchedule
+
+office = DaySchedule([0.0, 8 * 3600.0, 18 * 3600.0, 86400.0], [0.0, 1.0, 0.0, 0.0])
+closed = DaySchedule([0.0, 86400.0], [0.0, 0.0])
+# day type 1 Sunday, 2-6 weekdays, 7 Saturday, 8-12 holidays
+week = WeekSchedule([office, closed], day_types=[2, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2])
+calendar = Calendar(start_day=1, start_day_type=2)        # 1 January is a Monday
+times = (8 * 3600.0, 9 * 3600.0, 6 * 86400 + 9 * 3600.0)
+print([week.value(t, calendar).item() for t in times])
+```
+
+```text
+[0.0, 1.0, 0.0]
+```
+
+`TimeSeries(times, values, interpolation="linear" | "step")` is the same kind of input built
+from data (seconds since the start, never extrapolated); its values may carry gradients.
+
 ## The API
 
 ### Zones and walls
