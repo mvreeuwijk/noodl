@@ -1368,7 +1368,7 @@ class Model:
             worst = {name: float(c.max()) for name, c in change.items()}
             message = (
                 f"Model: coupling='iterate' did not converge within {self.iterate_max} "
-                f"passes for instances {failing}; largest change per layer {worst}, "
+                f"passes for instances {failing}; largest change per key {worst}, "
                 f"tolerances {self.iterate_tol}"
                 + (f", flow tolerances {self.iterate_flow_tol}" if self.iterate_flow_tol else "")
             )

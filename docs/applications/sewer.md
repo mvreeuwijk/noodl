@@ -1218,6 +1218,10 @@ publish numbers from this application.
   $U_s$ rather than the relative velocity $U_s - U_{\text{air}}$, which would need the air
   layer's own solved state. The drag is overestimated where the headspace air already moves
   with the water.
+- **Headspace buoyancy ignores conduit offsets.** The stack term takes a conduit's crown
+  elevation as the mean of its end nodes' inverts plus its diameter, as the kinematic path does;
+  a dynamic-wave conduit raised on an inlet or outlet offset has its crown that much higher than
+  the stack term sees.
 - **`f_i` is not differentiable.** It is a `Drive` attribute, and the differentiable solve
   refuses `requires_grad=True` on it; you cannot fit it by gradient descent.
 - **Without a ground elevation, manhole shafts add no headspace volume**, so the air-quality

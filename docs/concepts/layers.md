@@ -266,11 +266,12 @@ state = model.steady(state, drivers)
 the potential's units, per instance). A potential layer is named when a closure computes that
 layer's element coefficients, or its boundary potentials, from its own previous solution, as the
 sewer dynamic wave does with its conduit coefficients and outfall heads: for example
-`iterate_tol={"head": 1e-6}` repeats the pass until no head moves by more than 1 micrometre.
+`iterate_tol={"water": 1e-6}` (the sewer's head layer) repeats the pass until no head moves by
+more than 1 micrometre.
 Its `.phi` and `.q` are relaxed with `iterate_relaxation` like a transport `.x`. Potential layers not
 named in `iterate_tol` are not iterated.
 
-`iterate_flow_tol={"head": 1e-9}` (optional, flow units) also judges such a layer's flows: a pass
+`iterate_flow_tol={"water": 1e-9}` (optional, flow units) also judges such a layer's flows: a pass
 converges only when its returned `.q` is within that of the `.q` it was fed. It matters when the
 potential solve stops on its warm start (its residual already within `atol`), which hands the fed
 potential back unchanged while the flows the closures read are still moving.

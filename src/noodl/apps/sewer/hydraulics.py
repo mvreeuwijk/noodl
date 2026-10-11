@@ -140,7 +140,6 @@ class SewerHydraulics:
         self.ambient_idx = (
             node_index["ambient"] if "ambient" in node_index else None
         )
-        self._node_idx = torch.arange(net.n, dtype=torch.long)
         # Each manhole's OUTGOING pipe: a tree guarantees exactly one, and `SewerNetwork`
         # has already refused anything else by name. The map is a position into the per-pipe
         # order, so every per-manhole quantity is a single gather.
