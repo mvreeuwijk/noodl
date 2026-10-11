@@ -123,8 +123,9 @@ def _differences(name, rows, conn, steps, run=None, **solve_kwargs):
     """noodl over `steps` steps (`run`, a `_run_noodl` result, or a new run with
     `solve_kwargs`) against SWMM's first `steps` rows, per step: a dict from ``("depth",
     node)`` to the junction or outfall depth difference (m), and from ``("flow",
-    conduit)`` and ``("overflow", junction)`` to the excess (m3/s) of the flow or overflow
-    difference over the flow target (<= 0 passes)."""
+    link)`` (every conduit and regulator, `model.link_names`) and ``("overflow",
+    junction)`` to the excess (m3/s) of the flow or overflow difference over the flow
+    target (<= 0 passes)."""
     net, model, hist, _ = run or _run_noodl(name, steps, **solve_kwargs)
     hyd = model.dynamic_wave
     # junctions from the solved heads; outfalls from the closure-written boundary heads
@@ -132,7 +133,11 @@ def _differences(name, rows, conn, steps, run=None, **solve_kwargs):
     nodes = junctions + list(hyd.outfall_names)
     idx = torch.cat([model.junction_idx, hyd.outfall_idx])
     invert = hyd.node_invert[idx]
-    sign = {p.name: (1.0 if tuple(conn[p.name]) == (p.u, p.v) else -1.0) for p in net.pipes}
+    # every link: the pipes, then the orifices, weirs and outlets (never reversed)
+    names = list(model.net.nodes)
+    ends = {name: (names[int(u)], names[int(v)]) for name, u, v in
+            zip(model.link_names, hyd.edge_u, hyd.edge_v, strict=True)}
+    sign = {name: (1.0 if tuple(conn[name]) == pair else -1.0) for name, pair in ends.items()}
 
     def excess(noodl, swmm):
         return abs(noodl - swmm) - (TOL_FLOW_REL * abs(swmm) + TOL_FLOW_ABS)
@@ -141,9 +146,8 @@ def _differences(name, rows, conn, steps, run=None, **solve_kwargs):
     for k, (flows, depths, flooding) in enumerate(rows[:steps]):
         y = hist["water.phi"][k, idx] - invert
         diff = {("depth", n): abs(y[j].item() - depths[n]) for j, n in enumerate(nodes)}
-        for i, pipe in enumerate(net.pipes):
-            diff["flow", pipe.name] = excess(hist["water.q"][k, i].item(),
-                                             sign[pipe.name] * flows[pipe.name])
+        for i, name in enumerate(model.link_names):
+            diff["flow", name] = excess(hist["water.q"][k, i].item(), sign[name] * flows[name])
         for j, n in enumerate(junctions):
             diff["overflow", n] = excess(hist["sewer.overflow"][k, j].item(), flooding[n])
         out.append(diff)
@@ -1211,3 +1215,88 @@ def test_storage_units_match_swmm_at_every_step(tmp_path, variant):
     full_depth, full = STORAGE_J4_FULL[variant]
     above = [v["J4"] for r, v in zip(rows, volumes, strict=True) if r[1]["J4"] > full_depth]
     assert above and max(abs(v - full) for v in above) < 1e-12
+
+
+# ------------------------------------------------------------- orifices, weirs, outlets
+#: Regulator fixtures (`structures_dynwave.inp`): a side orifice OR1 (J2 -> J3, 0.2 x 0.3 m,
+#: crest 0.1 m), a transverse weir W1 with two end contractions (J4 -> J5, crest 0.3 m), a
+#: V-notch weir W2 (J7 -> J4, crest 0.1 m) and an outlet OL1 with a RATING curve from the
+#: 3 m2 storage unit J8 into the outfall Out2 (an outfall on a regulator: yN = yC = 0).
+#: - ``free``: the file. Every regulator opens from dry; OR1 passes from its weir regime
+#:   (f < 1) to its orifice regime (J2 above the 0.3 m crown) with J3 below its crest, so
+#:   SWMM's switch is continuous there; no regulator is submerged.
+#: - ``submerged``: Out1 FIXED at 9.75 m (between J5's invert and W1's 9.8 m crest) and C5
+#:   0.45 m. The outfall first fills J5 backwards through C5, overshooting W1's crest, so
+#:   W1 flows in reverse into the dry J4 (steps 51-72, its crest still node 1's) until J5
+#:   falls below the crest and W1 closes; once J4 spills forward, J5 backs up above the
+#:   crest: Villemonte submergence on W1 for over 200 steps (ratio ~0.46 at the end), with C5
+#:   full at J5. W1's flow never passes through zero with both heads above the crest.
+#:   (Out1 FIXED at 10.0 m instead fills J5 from the outfall and reverses W1 through zero
+#:   flow under full submergence, where the flow's slope in the heads is infinite: SWMM
+#:   fails to converge on 3 of 359 steps there (0.84 %; its 0.001 cfs reversal flow shows
+#:   on W1 at step 99), so that variant is not compared.)
+STRUCTURE_VARIANTS = {
+    "free": [],
+    "submerged": [
+        ("Out1             8.0        FREE                        NO",
+         "Out1             8.0        FIXED      9.75             NO"),
+        ("C5               CIRCULAR     0.60", "C5               CIRCULAR     0.45"),
+    ],
+}
+#: The fast comparison: the free fixture from its dry start through the outlet nearing its
+#: rating, the orifice opening (step 32) and the V-notch weir starting to flow (step 48).
+STRUCTURE_FAST_STEPS = 60
+
+
+def _structures_inp(tmp_path, variant):
+    text = (DATA / "structures_dynwave.inp").read_text()
+    for old, new in STRUCTURE_VARIANTS[variant]:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    path = tmp_path / f"structures_{variant}.inp"
+    path.write_text(text)
+    return path
+
+
+def _structure_parity(tmp_path, variant, steps=None):
+    """noodl against SWMM (5.2.4, converged on every step) on a regulator variant over
+    `steps` steps (all by default): `_worst` over every node depth and every link flow,
+    conduits and regulators; and SWMM's rows."""
+    inp = _structures_inp(tmp_path, variant)
+    rows, conn, engine, not_converging = _swmm_rows(inp)
+    assert engine == "5.2.4"
+    assert not_converging == 0.0, f"SWMM did not converge on every step ({not_converging} %)"
+    rows = rows[:steps]
+    net, _, _ = read_swmm_inp(inp)
+    model, state, drivers = build_model(net, iterate_tol=ITERATE_TOL, iterate_max=ITERATE_MAX)
+    _, hist = simulate_dynamic_wave(model, state, drivers, steps=len(rows),
+                                    record=("water.phi", "water.q", "sewer.overflow"))
+    worst = _worst(_differences(None, rows, conn, len(rows), run=(net, model, hist, None)))
+    return worst, rows
+
+
+def test_regulators_match_swmm_while_they_open(tmp_path):
+    """The side orifice, both weirs and the rating-curve outlet from the dry start, at the
+    free-surface targets over the first `STRUCTURE_FAST_STEPS` steps."""
+    worst, rows = _structure_parity(tmp_path, "free", STRUCTURE_FAST_STEPS)
+    _assert_parity(worst)
+    flows = rows[-1][0]
+    assert min(flows["OR1"], flows["W2"], flows["OL1"]) > 0.0       # each one is flowing
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("variant", sorted(STRUCTURE_VARIANTS))
+def test_regulators_match_swmm_at_every_step(tmp_path, variant):
+    """Every variant over all 359 steps at the free-surface targets, with the regime it
+    exists for: the orifice reaching its orifice regime (J2 above the opening's crown,
+    11.3 m) with J3 below its crest; and in ``submerged`` W1 first reversed (J5 above its
+    9.8 m crest, J4 below it), then submerged (J5 above the crest while it flows forward)
+    for much of the run."""
+    worst, rows = _structure_parity(tmp_path, variant)
+    _assert_parity(worst)
+    final = rows[-1]
+    assert 11.0 + final[1]["J2"] > 11.3 and 10.5 + final[1]["J3"] < 11.1
+    reversed_ = sum(r[0]["W1"] < 0.0 for r in rows)
+    submerged = sum(9.4 + r[1]["J5"] > 9.8 and r[0]["W1"] > 0.0 for r in rows)
+    assert (reversed_ > 10 and submerged > 100) == (variant == "submerged")
+    assert reversed_ == 0 or variant == "submerged"

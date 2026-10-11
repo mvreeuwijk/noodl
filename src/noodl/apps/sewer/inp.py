@@ -8,7 +8,9 @@ with their flap gate), `[CONDUITS]` (with InitFlow and MaxFlow), `[XSECTIONS]` (
 baselines and constant `CONCENTRATION` pollutant baselines), `[POLLUTANTS]`, and under
 DYNWAVE `[STORAGE]` (FUNCTIONAL, TABULAR and the closed shapes CYLINDRICAL, CONICAL,
 PARABOLOID, PYRAMIDAL, with SurDepth; a non-zero evaporation factor and exfiltration are
-refused) with the `[CURVES]` of type STORAGE that its TABULAR units name. InitDepth,
+refused) with the `[CURVES]` of type STORAGE that its TABULAR units name, and `[ORIFICES]`,
+`[WEIRS]` and `[OUTLETS]` (their `[XSECTIONS]` openings and RATING curves; `_regulators`).
+InitDepth,
 InitFlow, MaxFlow, flap gates and barrels are dynamic-wave physics: under STEADY or KINWAVE
 routing a non-zero or gated value is refused by name rather than skipped.
 `FLOW_ROUTING` is STEADY, KINWAVE or DYNWAVE; DYNWAVE also reads `ROUTING_STEP`,
@@ -20,9 +22,10 @@ IGNORED because no conduit or node ever references them: `[EVAPORATION]`, `[REPO
 `[TAGS]`, `[MAP]`, `[COORDINATES]`.
 
 REFUSED BY NAME, because skipping them would silently change the physics: `[DWF]`,
-`[STORAGE]` under STEADY or KINWAVE, `[PUMPS]`, `[WEIRS]`, `[ORIFICES]`, `[OUTLETS]`,
+`[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` under STEADY or KINWAVE, `[PUMPS]`,
 `[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[CURVES]` of any type but
-STORAGE, `[TIMESERIES]`, `[LID_USAGE]`, and any other section carrying content. A
+STORAGE and RATING, `[TIMESERIES]`, `[LID_USAGE]`, roadway weirs, weir coefficient curves,
+and any other section carrying content. A
 time-series inflow is refused; time variation belongs in the drivers. A conduit with a
 culvert code, a non-zero entry, exit or average loss coefficient or seepage rate is refused
 for every routing; one with more than one barrel under STEADY or KINWAVE.
@@ -55,7 +58,15 @@ from pathlib import Path
 
 from noodl.apps.inpfile import as_float, read_sections, require_fields
 from noodl.apps.sewer.dynwave import DynamicWaveOptions
-from noodl.apps.sewer.network import Manhole, Outfall, Pipe, SewerNetwork
+from noodl.apps.sewer.network import (
+    Manhole,
+    Orifice,
+    Outfall,
+    Outlet,
+    Pipe,
+    SewerNetwork,
+    Weir,
+)
 from noodl.apps.sewer.storage import validate_storage_curve
 
 #: link.c `MIN_DELTA_Z`: the smallest fall SWMM uses for a conduit slope, 0.001 ft in m.
@@ -95,7 +106,15 @@ _IGNORED = {
     "POLYGONS", "SYMBOLS", "LABELS", "BACKDROP", "PROFILES", "FILES", "END",
 }
 _READ = {"OPTIONS", "JUNCTIONS", "OUTFALLS", "CONDUITS", "XSECTIONS", "LOSSES", "INFLOWS",
-         "POLLUTANTS", "STORAGE", "CURVES"}
+         "POLLUTANTS", "STORAGE", "CURVES", "ORIFICES", "WEIRS", "OUTLETS"}
+#: The regulator sections, read under DYNWAVE only.
+_REGULATORS = ("ORIFICES", "WEIRS", "OUTLETS")
+#: SWMM's [WEIRS] types (keywords.c:157 `WeirTypeWords`) -> `Weir.kind`; ROADWAY is refused.
+_WEIR_KINDS = {"TRANSVERSE": "transverse", "SIDEFLOW": "sideflow", "V-NOTCH": "v_notch",
+               "TRAPEZOIDAL": "trapezoidal"}
+#: The opening shape each weir kind takes (link.c:2111-2133).
+_WEIR_XSECT = {"transverse": "RECT_OPEN", "sideflow": "RECT_OPEN", "v_notch": "TRIANGULAR",
+               "trapezoidal": "TRAPEZOIDAL"}
 #: SWMM's [STORAGE] shape keywords (keywords.c:108 `RelationWords`)
 _STORAGE_SHAPES = ("TABULAR", "FUNCTIONAL", "CYLINDRICAL", "CONICAL", "PARABOLOID",
                    "PYRAMIDAL")
@@ -193,7 +212,9 @@ def read_swmm_inp(
             Manhole(name, elevation, ground=None if depth is None else elevation + depth,
                     surcharge_depth=surcharge, initial_depth=initial)
         )
-    curves = _storage_curves(sections.get("CURVES", []), path)
+    all_curves = _curves(sections.get("CURVES", []), path)
+    curves = {name: pts for name, (kind, pts) in all_curves.items() if kind == "STORAGE"}
+    ratings = {name: pts for name, (kind, pts) in all_curves.items() if kind == "RATING"}
     if sections.get("STORAGE") and not dynamic:
         raise ValueError(
             f"{path}: section [STORAGE] (line {sections['STORAGE'][0].number}): storage units "
@@ -243,8 +264,13 @@ def read_swmm_inp(
                 )
             if flap == "YES":
                 gated.add(line.fields[0])
+    regulator_names = {line.fields[0] for key in _REGULATORS for line in sections.get(key, [])}
+    regulator_xsect: dict[str, object] = {}
     for line in sections.get("XSECTIONS", []):
         require_fields(line, 3, "a cross-section", path)
+        if line.fields[0] in regulator_names:
+            regulator_xsect[line.fields[0]] = line
+            continue
         if line.fields[1].upper() != "CIRCULAR":
             raise ValueError(
                 f"{path}: line {line.number}: only CIRCULAR cross-sections are modelled, "
@@ -341,6 +367,9 @@ def read_swmm_inp(
                  flap_gate=name in gated)
         )
 
+    regulators = _regulators(sections, regulator_xsect, ratings, invert, dynamic, offsets,
+                             routing, path)
+
     pollutants: dict[str, dict] = {}
     for line in sections.get("POLLUTANTS", []):
         require_fields(line, 6, "a pollutant", path)
@@ -398,17 +427,21 @@ def read_swmm_inp(
     network = SewerNetwork(
         manholes=tuple(manholes), pipes=tuple(pipes), outfalls=tuple(outfalls),
         routing=routing, geometry=geometry, dynamic_wave=dynamic_wave,
+        orifices=regulators["ORIFICES"], weirs=regulators["WEIRS"],
+        outlets=regulators["OUTLETS"],
     )
     network.validate()
     return network, loads, pollutants
 
 
-def _storage_curves(lines, path) -> dict[str, tuple[tuple, tuple]]:
-    """`[CURVES]`: ``{name: (depths, areas)}`` of the STORAGE curves, each curve's points in
-    file order over any number of lines, its type on its first line (`table.c:67-108`). A
-    curve of another type is refused (no object that uses one is read), as are an unpaired
-    value and depths that do not strictly increase (`table.c:313`)."""
+def _curves(lines, path) -> dict[str, tuple[str, tuple[tuple, tuple]]]:
+    """`[CURVES]`: ``{name: (type, (xs, ys))}`` of the STORAGE and RATING curves, each
+    curve's points in file order over any number of lines, its type on its first line
+    (`table.c:67-108`). A curve of another type is refused (no object that uses one is
+    read), as are an unpaired value and x values that do not strictly increase
+    (`table.c:313`)."""
     points: dict[str, list[tuple[float, float]]] = {}
+    kinds: dict[str, str] = {}
     for line in lines:
         name = line.fields[0]
         start = 1
@@ -418,27 +451,183 @@ def _storage_curves(lines, path) -> dict[str, tuple[tuple, tuple]]:
                 raise ValueError(
                     f"{path}: line {line.number}: curve {name!r} needs its type (one of "
                     f"{_CURVE_TYPES}) on its first line")
-            if kind != "STORAGE":
+            if kind not in ("STORAGE", "RATING"):
                 raise ValueError(
                     f"{path}: line {line.number}: curve {name!r} is of type {kind}; only "
-                    f"STORAGE curves are read (no object that uses another type is "
-                    f"modelled)")
+                    f"STORAGE and RATING curves are read (no object that uses another type "
+                    f"is modelled)")
             points[name] = []
+            kinds[name] = kind
             start = 2
         if (len(line.fields) - start) % 2:
             raise ValueError(f"{path}: line {line.number}: curve {name!r} has an unpaired "
                              f"value; give depth-area pairs")
         for i in range(start, len(line.fields), 2):
-            x = as_float(line, i, "a curve depth", path)
-            y = as_float(line, i + 1, "a curve area", path)
+            x = as_float(line, i, "a curve x value", path)
+            y = as_float(line, i + 1, "a curve y value", path)
             if points[name] and x <= points[name][-1][0]:
                 raise ValueError(
-                    f"{path}: line {line.number}: curve {name!r} depths must be strictly "
-                    f"increasing (SWMM's ERR_CURVE_SEQUENCE), got {x} after "
-                    f"{points[name][-1][0]}")
+                    f"{path}: line {line.number}: curve {name!r} x values (depths, heads) "
+                    f"must be strictly increasing (SWMM's ERR_CURVE_SEQUENCE), got {x} "
+                    f"after {points[name][-1][0]}")
             points[name].append((x, y))
-    return {name: (tuple(p[0] for p in pts), tuple(p[1] for p in pts))
+    return {name: (kinds[name], (tuple(p[0] for p in pts), tuple(p[1] for p in pts)))
             for name, pts in points.items()}
+
+
+def _yes_no(line, i: int, what: str, path) -> bool:
+    """A YES/NO field (SWMM's `NoYesWords`)."""
+    word = line.fields[i].upper()
+    if word not in ("YES", "NO"):
+        raise ValueError(f"{path}: line {line.number}: {what} must be YES or NO, got "
+                         f"{line.fields[i]!r}")
+    return word == "YES"
+
+
+def _given(line, i: int) -> bool:
+    """Field `i` is present and not SWMM's ``*`` (keep the default)."""
+    return len(line.fields) > i and line.fields[i] != "*"
+
+
+def _opening(line, name: str, shapes: tuple[str, ...], path) -> tuple[str, list[float]]:
+    """A regulator's `[XSECTIONS]` line: its shape (one of `shapes`, SWMM's
+    ERR_REGULATOR_SHAPE otherwise) and Geom1..Geom4 (m; absent values 0)."""
+    if line is None:
+        raise ValueError(f"{path}: regulator {name!r} has no [XSECTIONS] entry (its opening)")
+    shape = line.fields[1].upper()
+    if shape not in shapes:
+        raise ValueError(f"{path}: line {line.number}: regulator {name!r} has opening shape "
+                         f"{line.fields[1]!r}; it takes {' or '.join(shapes)} "
+                         f"(SWMM's ERR_REGULATOR_SHAPE)")
+    geoms = [as_float(line, i, f"Geom{i - 1}", path) if len(line.fields) > i else 0.0
+             for i in (2, 3, 4, 5)]
+    return shape, geoms
+
+
+def _regulators(sections, xsect: dict, ratings: dict, invert: dict, dynamic: bool,
+                offsets: str, routing: str, path) -> dict[str, tuple]:
+    """`[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` (link.c:1641-1692, 2010-2099, 2524-2604), read
+    under DYNWAVE only, with their `[XSECTIONS]` openings and the RATING curves of tabular
+    outlets. Refused by name, with the line: a roadway weir, a weir coefficient curve, an
+    [XSECTIONS] entry for an outlet, a negative orifice or weir crest height, unknown nodes
+    and keywords, and LINK_OFFSETS ELEVATION (SWMM then sets each end's offset from its own
+    node, which is not read)."""
+    found: dict[str, list] = {key: [] for key in _REGULATORS}
+    for key in _REGULATORS:
+        lines = sections.get(key, [])
+        if not lines:
+            continue
+        if not dynamic:
+            raise ValueError(
+                f"{path}: section [{key}] (line {lines[0].number}): flow regulators are read "
+                f"under dynamic-wave routing only (FLOW_ROUTING DYNWAVE), not {routing}")
+        if offsets != "DEPTH":
+            raise ValueError(
+                f"{path}: section [{key}] (line {lines[0].number}): regulators are read with "
+                f"LINK_OFFSETS DEPTH only")
+        for line in lines:
+            require_fields(line, 6, f"a {key[:-1].lower()} entry", path)
+            name, u, v = line.fields[0], line.fields[1], line.fields[2]
+            where = f"{path}: line {line.number}: {key[:-1].lower()} {name!r}"
+            for end in (u, v):
+                if end not in invert:
+                    raise ValueError(f"{where} names node {end!r}, which is not a junction, "
+                                     f"storage unit or outfall")
+            found[key].append(_REGULATOR_READERS[key](line, name, u, v, where, xsect,
+                                                      ratings, path))
+    stray = sorted(set(xsect) - {line.fields[0] for key in ("ORIFICES", "WEIRS")
+                                 for line in sections.get(key, [])})
+    if stray:
+        line = xsect[stray[0]]
+        raise ValueError(f"{path}: line {line.number}: outlet {stray[0]!r} has an [XSECTIONS] "
+                         f"entry; an outlet has no opening (SWMM's DUMMY section)")
+    return {key: tuple(devices) for key, devices in found.items()}
+
+
+def _orifice(line, name, u, v, where, xsect, ratings, path) -> Orifice:
+    """``Name N1 N2 SIDE|BOTTOM CrestHt Cd [Gated] [CloseTime]`` (link.c:1641-1692); the
+    opening is CIRCULAR or RECT_CLOSED. CloseTime only shapes control actions, which are
+    not read, so it is accepted and has no effect."""
+    orientation = line.fields[3].upper()
+    if orientation not in ("SIDE", "BOTTOM"):
+        raise ValueError(f"{where}: type must be SIDE or BOTTOM, got {line.fields[3]!r}")
+    crest = as_float(line, 4, "the crest height", path)
+    if crest < 0.0:
+        raise ValueError(f"{where}: negative crest height {crest} m (SWMM raises it to 0 at "
+                         f"the inlet only; not modelled)")
+    cd = as_float(line, 5, "the discharge coefficient", path)
+    if cd < 0.0:                                                             # link.c:1675
+        raise ValueError(f"{where}: negative discharge coefficient {cd}")
+    gated = _yes_no(line, 6, "the flap gate", path) if len(line.fields) > 6 else False
+    if len(line.fields) > 7 and as_float(line, 7, "the close time", path) < 0.0:
+        raise ValueError(f"{where}: negative close time {line.fields[7]}")    # link.c:1688
+    shape, geoms = _opening(xsect.get(name), name, ("CIRCULAR", "RECT_CLOSED"), path)
+    return Orifice(name, u, v, orientation.lower(),
+                   "circular" if shape == "CIRCULAR" else "rectangular", geoms[0], crest, cd,
+                   width=None if shape == "CIRCULAR" else geoms[1], flap_gate=gated)
+
+
+def _weir(line, name, u, v, where, xsect, ratings, path) -> Weir:
+    """``Name N1 N2 Type CrestHt Cd [Gated] [EndCon] [Cd2] [CanSurcharge] [RoadWidth
+    RoadSurf] [CdCurve]`` (link.c:2010-2099; ``*`` keeps a default). ROADWAY weirs and a
+    coefficient curve are refused by name; the opening is RECT_OPEN, TRIANGULAR or
+    TRAPEZOIDAL by type (link.c:2111-2133)."""
+    if line.fields[3].upper() == "ROADWAY":
+        raise ValueError(f"{where}: ROADWAY weirs are not modelled")
+    kind = _WEIR_KINDS.get(line.fields[3].upper())
+    if kind is None:
+        raise ValueError(f"{where}: type must be one of {sorted(_WEIR_KINDS)}, got "
+                         f"{line.fields[3]!r}")
+    crest = as_float(line, 4, "the crest height", path)
+    if crest < 0.0:
+        raise ValueError(f"{where}: negative crest height {crest} m (SWMM raises it to 0 at "
+                         f"the inlet only; not modelled)")
+    cd = as_float(line, 5, "the discharge coefficient", path)
+    gated = _yes_no(line, 6, "the flap gate", path) if _given(line, 6) else False
+    end_con = as_float(line, 7, "the end contractions", path) if _given(line, 7) else 0.0
+    cd2 = as_float(line, 8, "the end discharge coefficient", path) if _given(line, 8) else 0.0
+    surcharge = _yes_no(line, 9, "CanSurcharge", path) if _given(line, 9) else True
+    for what, value in (("discharge coefficient", cd), ("end contractions", end_con),
+                        ("end discharge coefficient", cd2)):
+        if value < 0.0:                                                      # link.c:2040-2062
+            raise ValueError(f"{where}: negative {what} {value}")
+    if _given(line, 12):
+        raise ValueError(f"{where}: names the coefficient curve {line.fields[12]!r}; weir "
+                         f"coefficient curves are not modelled")
+    shape, geoms = _opening(xsect.get(name), name, (_WEIR_XSECT[kind],), path)
+    return Weir(name, u, v, kind, geoms[0], geoms[1], crest, cd,
+                side_slopes=(geoms[2], geoms[3]) if shape == "TRAPEZOIDAL" else (0.0, 0.0),
+                end_contractions=end_con, end_discharge_coefficient=cd2,
+                can_surcharge=surcharge, flap_gate=gated)
+
+
+def _outlet(line, name, u, v, where, xsect, ratings, path) -> Outlet:
+    """``Name N1 N2 Offset TABULAR/DEPTH|TABULAR/HEAD Curve [Gated]`` or ``... FUNCTIONAL/DEPTH
+    |FUNCTIONAL/HEAD C1 C2 [Gated]`` (link.c:2524-2604): a negative offset is 0 (link.c:2556),
+    the curve a RATING curve of [CURVES]."""
+    crest = max(as_float(line, 3, "the crest height", path), 0.0)           # link.c:2556
+    relation, _, qualifier = line.fields[4].upper().partition("/")
+    if relation not in ("TABULAR", "FUNCTIONAL") or qualifier not in ("", "DEPTH", "HEAD"):
+        raise ValueError(f"{where}: type must be TABULAR/DEPTH, TABULAR/HEAD, "
+                         f"FUNCTIONAL/DEPTH or FUNCTIONAL/HEAD, got {line.fields[4]!r}")
+    if relation == "FUNCTIONAL":
+        require_fields(line, 7, "a functional outlet", path)
+        rating: tuple = ("functional", as_float(line, 5, "the coefficient", path),
+                         as_float(line, 6, "the exponent", path))
+        n = 7
+    else:
+        label = line.fields[5]
+        if label not in ratings:
+            raise ValueError(f"{where}: names curve {label!r}, which is not a RATING curve in "
+                             f"[CURVES]")
+        rating = ("tabular", *ratings[label])
+        n = 6
+    gated = _yes_no(line, n, "the flap gate", path) if len(line.fields) > n else False
+    return Outlet(name, u, v, crest, rating, head_difference=qualifier == "HEAD",
+                  flap_gate=gated)
+
+
+_REGULATOR_READERS = {"ORIFICES": _orifice, "WEIRS": _weir, "OUTLETS": _outlet}
 
 
 def _storage_unit(line, curves: dict, path) -> Manhole:

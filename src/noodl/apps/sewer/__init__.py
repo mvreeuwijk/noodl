@@ -6,6 +6,7 @@ from noodl.apps.sewer.dynwave import (
     DynamicWaveHydraulics,
     DynamicWaveOptions,
     JunctionStorage,
+    StructureLink,
     simulate_dynamic_wave,
 )
 from noodl.apps.sewer.geometry import (
@@ -20,9 +21,12 @@ from noodl.apps.sewer.inp import read_swmm_inp
 from noodl.apps.sewer.network import (
     ROUTING_ALIASES,
     Manhole,
+    Orifice,
     Outfall,
+    Outlet,
     Pipe,
     SewerNetwork,
+    Weir,
     build_model,
     initial_drivers,
     initial_state,
@@ -42,7 +46,7 @@ from noodl.apps.sewer.storage import STORAGE_SHAPES, StorageCurves
 __all__ = [
     "ROUTING_ALIASES", "DynamicWaveConduit", "DynamicWaveHydraulics", "DynamicWaveOptions",
     "JunctionStorage", "simulate_dynamic_wave", "STORAGE_SHAPES", "StorageCurves",
-    "storage_unit",
+    "storage_unit", "StructureLink", "Orifice", "Weir", "Outlet",
     "Drag", "F_AIR_DEFAULT", "F_I_DEFAULT", "H2STransfer", "H_MAX_RATIO", "Headspace",
     "Manhole", "Outfall", "Pipe", "SewerHydraulics", "SewerNetwork", "SulfideGeneration",
     "air_geometry", "build_model", "capacity_flow", "henry_h2s", "initial_drivers", "initial_state",

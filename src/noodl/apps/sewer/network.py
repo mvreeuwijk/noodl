@@ -149,6 +149,106 @@ class Pipe:
     flap_gate_reversed: bool = False
 
 
+#: Orifice orientations (SWMM's SIDE, BOTTOM) and opening shapes (CIRCULAR, RECT_CLOSED).
+ORIFICE_ORIENTATIONS = ("side", "bottom")
+ORIFICE_SHAPES = ("circular", "rectangular")
+#: Weir kinds (SWMM's TRANSVERSE, SIDEFLOW, V-NOTCH, TRAPEZOIDAL; ROADWAY is not modelled).
+WEIR_KINDS = ("transverse", "sideflow", "v_notch", "trapezoidal")
+
+
+@dataclass(frozen=True)
+class Orifice:
+    """An orifice (SWMM `[ORIFICES]`, dynamic wave only) from node `u` to node `v`: a
+    ``"side"`` (vertical) or ``"bottom"`` (horizontal) opening of `shape` ``"circular"``
+    (`height` its diameter, m) or ``"rectangular"`` (`height` and `width`, m), its crest
+    `crest_height` (m above `u`'s invert, SWMM's CrestHt), discharge coefficient
+    `discharge_coefficient` (-, SWMM's Cd) and a `flap_gate` (closes on flow from `v` to
+    `u`, with SWMM's ARMCO head loss on forward flow). Always fully open (no control
+    rules). Flow follows `link.c::orifice_getInflow` (`noodl.apps.sewer.structures`)."""
+
+    name: str
+    u: str
+    v: str
+    orientation: str
+    shape: str
+    height: float
+    crest_height: float
+    discharge_coefficient: float
+    width: float | None = None
+    flap_gate: bool = False
+
+
+@dataclass(frozen=True)
+class Weir:
+    """A weir (SWMM `[WEIRS]`, dynamic wave only) from node `u` to node `v`. `kind` is
+    ``"transverse"`` or ``"sideflow"`` (a rectangular opening `width` m wide),
+    ``"v_notch"`` (a triangle `width` m wide at the top) or ``"trapezoidal"`` (bottom
+    `width` m, `side_slopes` the left and right side slopes, horizontal per vertical); its
+    opening is `height` m tall above the crest `crest_height` (m above `u`'s invert).
+    `discharge_coefficient` is SWMM's Cd in SI units (m^0.5/s, the flow ``Cd L h^1.5``,
+    ``Cd L^0.83 h^1.67`` sideflow, ``Cd s h^2.5`` V-notch, in m and m3/s),
+    `end_discharge_coefficient` a trapezoid's end triangles' Cd (SWMM's Cd2),
+    `end_contractions` the number of end contractions (SWMM's EndCon), `can_surcharge` SWMM's
+    CanSurcharge (above the opening the weir flows as an orifice; else its head is capped at
+    the opening height) and `flap_gate` as for `Orifice`. Always fully open. Flow follows
+    `link.c::weir_getInflow` (`noodl.apps.sewer.structures`)."""
+
+    name: str
+    u: str
+    v: str
+    kind: str
+    height: float
+    width: float
+    crest_height: float
+    discharge_coefficient: float
+    side_slopes: tuple[float, float] = (0.0, 0.0)
+    end_contractions: float = 0.0
+    end_discharge_coefficient: float = 0.0
+    can_surcharge: bool = True
+    flap_gate: bool = False
+
+
+@dataclass(frozen=True)
+class Outlet:
+    """An outlet (SWMM `[OUTLETS]`, dynamic wave only) from node `u` to node `v`, its crest
+    `crest_height` m above `u`'s invert, with a rating ``("functional", a, b)`` for
+    ``q = a h^b`` (m3/s, h in m) or ``("tabular", heads, flows)`` (m, m3/s; SWMM's RATING
+    curve, heads strictly increasing, held at the end flows outside them). `h` is the
+    upstream depth above the crest (SWMM's /DEPTH, the default) or, with `head_difference`,
+    the head across the outlet (/HEAD). `flap_gate` closes it on flow from `v` to `u`. Flow
+    follows `link.c::outlet_getInflow` (`noodl.apps.sewer.structures`)."""
+
+    name: str
+    u: str
+    v: str
+    crest_height: float
+    rating: tuple
+    head_difference: bool = False
+    flap_gate: bool = False
+
+
+def _validate_rating(where: str, rating) -> None:
+    """Refuse a malformed outlet rating, BY NAME (`Outlet.rating`)."""
+    if not isinstance(rating, tuple) or not rating or rating[0] not in ("functional",
+                                                                       "tabular"):
+        raise ValueError(f"{where}: rating must be ('functional', a, b) or ('tabular', "
+                         f"heads, flows), got {rating!r}")
+    if rating[0] == "functional":
+        if len(rating) != 3 or not all(math.isfinite(float(x)) for x in rating[1:]):
+            raise ValueError(f"{where}: a functional rating takes two finite values (a, b) "
+                             f"for q = a h^b, got {rating!r}")
+        return
+    if len(rating) != 3 or len(rating[1]) != len(rating[2]) or not rating[1]:
+        raise ValueError(f"{where}: a tabular rating needs as many flows as heads, at least "
+                         f"one, got {rating!r}")
+    heads = [float(x) for x in rating[1]]
+    if not all(math.isfinite(x) for x in (*heads, *(float(y) for y in rating[2]))):
+        raise ValueError(f"{where}: a tabular rating must be finite, got {rating!r}")
+    if any(b <= a for a, b in zip(heads, heads[1:], strict=False)):
+        raise ValueError(f"{where}: tabular rating heads must be strictly increasing (SWMM's "
+                         f"ERR_CURVE_SEQUENCE), got {rating[1]!r}")
+
+
 @dataclass(frozen=True)
 class SewerNetwork:
     """A gravity sewer: manholes, pipes, outfalls. Kinematic-wave and steady routing need a
@@ -162,6 +262,8 @@ class SewerNetwork:
     tables, lookup rules and unit constants, `xsect_tables.py`; the default of
     `read_swmm_inp`, whose purpose is to reproduce SWMM). ``"tabulated"`` is a steady
     kinematic-wave geometry and is refused with ``storage=True`` by `SewerHydraulics`.
+    `orifices`, `weirs` and `outlets` are flow regulators between two nodes (dynamic wave
+    only; SWMM's `[ORIFICES]`, `[WEIRS]`, `[OUTLETS]`).
     """
 
     manholes: tuple[Manhole, ...]
@@ -171,6 +273,15 @@ class SewerNetwork:
     notes: dict[str, str] = field(default_factory=dict)
     geometry: str = "analytic"
     dynamic_wave: DynamicWaveOptions = DynamicWaveOptions()
+    orifices: tuple[Orifice, ...] = ()
+    weirs: tuple[Weir, ...] = ()
+    outlets: tuple[Outlet, ...] = ()
+
+    @property
+    def structures(self) -> dict[str, tuple]:
+        """The flow regulators by edge kind: ``{"orifice": ..., "weir": ..., "outlet":
+        ...}``."""
+        return {"orifice": self.orifices, "weir": self.weirs, "outlet": self.outlets}
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "routing", ROUTING_ALIASES.get(self.routing, self.routing))
@@ -248,6 +359,7 @@ class SewerNetwork:
                         f"be >= 0"
                     )
             outgoing.setdefault(pipe.u, []).append(pipe.name)
+        self._validate_structures(names, pipe_names)
         outfall_names = {o.name for o in self.outfalls}
         if dynamic:
             self._validate_dynamic(outfall_names)
@@ -286,9 +398,78 @@ class SewerNetwork:
                 f"outfall (a cycle in the pipe subgraph shows up here too)"
             )
 
+    def _validate_structures(self, node_names: set[str], pipe_names: set[str]) -> None:
+        """Refuse, BY NAME, a malformed orifice, weir or outlet: a link name used twice, an
+        unknown or repeated end node, an unknown kind or shape, a non-positive opening, a
+        negative crest height or coefficient, or a malformed rating."""
+        link_names = set(pipe_names)
+        for kind, devices in self.structures.items():
+            for s in devices:
+                where = f"SewerNetwork: {kind} {s.name!r}"
+                if s.name in link_names:
+                    raise ValueError(f"{where}: duplicate link name (pipes, orifices, weirs "
+                                     f"and outlets share one name space)")
+                link_names.add(s.name)
+                for end in (s.u, s.v):
+                    if end not in node_names:
+                        raise ValueError(f"{where} names node {end!r}, which is neither a "
+                                         f"manhole nor an outfall")
+                if s.u == s.v:
+                    raise ValueError(f"{where} joins node {s.u!r} to itself")
+                if not (math.isfinite(s.crest_height) and s.crest_height >= 0.0):
+                    raise ValueError(f"{where}: crest_height must be >= 0 m (above its first "
+                                     f"node's invert), got {s.crest_height!r}")
+                if kind == "outlet":
+                    _validate_rating(where, s.rating)
+                    continue
+                if not (math.isfinite(s.discharge_coefficient)
+                        and s.discharge_coefficient >= 0.0):                 # link.c:1675, 2040
+                    raise ValueError(f"{where}: discharge_coefficient must be >= 0, got "
+                                     f"{s.discharge_coefficient!r}")
+                if not (math.isfinite(s.height) and s.height > 0.0):          # xsect.c:229
+                    raise ValueError(f"{where}: height must be > 0 m, got {s.height!r}")
+                if kind == "orifice":
+                    if s.orientation not in ORIFICE_ORIENTATIONS:
+                        raise ValueError(f"{where}: orientation must be one of "
+                                         f"{ORIFICE_ORIENTATIONS}, got {s.orientation!r}")
+                    if s.shape not in ORIFICE_SHAPES:
+                        raise ValueError(f"{where}: shape must be one of {ORIFICE_SHAPES} "
+                                         f"(SWMM: CIRCULAR or RECT_CLOSED), got {s.shape!r}")
+                    if s.shape == "rectangular" and not (
+                            s.width is not None and math.isfinite(s.width) and s.width > 0.0):
+                        raise ValueError(f"{where}: a rectangular opening needs a width > 0 m, "
+                                         f"got {s.width!r}")
+                    continue
+                if s.kind not in WEIR_KINDS:
+                    raise ValueError(f"{where}: kind must be one of {WEIR_KINDS} (roadway "
+                                     f"weirs are not modelled), got {s.kind!r}")
+                slopes = tuple(s.side_slopes)
+                if len(slopes) != 2 or not all(math.isfinite(x) and x >= 0.0 for x in slopes):
+                    raise ValueError(f"{where}: side_slopes must be two values >= 0, got "
+                                     f"{s.side_slopes!r}")
+                if s.kind == "trapezoidal":
+                    if not (math.isfinite(s.width) and s.width >= 0.0) or (
+                            s.width == 0.0 and sum(slopes) == 0.0):           # xsect.c:482, 492
+                        raise ValueError(f"{where}: a trapezoid needs a bottom width >= 0 m "
+                                         f"and not both it and its side slopes 0, got "
+                                         f"{s.width!r}, {s.side_slopes!r}")
+                elif not (math.isfinite(s.width) and s.width > 0.0):         # xsect.c:366, 506
+                    raise ValueError(f"{where}: width must be > 0 m, got {s.width!r}")
+                for what, value in (("end_contractions", s.end_contractions),
+                                    ("end_discharge_coefficient", s.end_discharge_coefficient)):
+                    if not (math.isfinite(value) and value >= 0.0):          # link.c:2055-2062
+                        raise ValueError(f"{where}: {what} must be >= 0, got {value!r}")
+
     def _refuse_dynamic_wave_only(self) -> None:
         """Steady and kinematic-wave routing do not model initial conditions, MaxFlow, flap
-        gates or barrels; a set value would be skipped silently, so it is refused by name."""
+        gates, barrels, storage units or flow regulators; a set value would be skipped
+        silently, so it is refused by name."""
+        for kind, devices in self.structures.items():
+            if devices:
+                raise ValueError(
+                    f"SewerNetwork: {kind} {devices[0].name!r}: orifices, weirs and outlets "
+                    f"are modelled with dynamic-wave routing only (routing is "
+                    f"{self.routing!r})")
         for manhole in self.manholes:
             if manhole.storage is not None:
                 raise ValueError(
@@ -347,17 +528,19 @@ class SewerNetwork:
                     f"{pipe.initial_flow!r} m3/s")
         neighbours: dict[str, list[str]] = {}
         touching: dict[str, list[str]] = {name: [] for name in outfall_names}
-        for pipe in self.pipes:
-            neighbours.setdefault(pipe.u, []).append(pipe.v)
-            neighbours.setdefault(pipe.v, []).append(pipe.u)
-            for end in (pipe.u, pipe.v):
+        links = (*self.pipes, *self.orifices, *self.weirs, *self.outlets)
+        for link in links:
+            neighbours.setdefault(link.u, []).append(link.v)
+            neighbours.setdefault(link.v, []).append(link.u)
+            for end in (link.u, link.v):
                 if end in outfall_names:
-                    touching[end].append(pipe.name)
+                    touching[end].append(link.name)
         for name, found in touching.items():
             if len(found) != 1:
                 raise ValueError(
-                    f"SewerNetwork: outfall {name!r} is attached to {len(found)} pipes "
-                    f"({found}); dynamic-wave routing takes exactly one conduit per outfall"
+                    f"SewerNetwork: outfall {name!r} is attached to {len(found)} links "
+                    f"({found}); dynamic-wave routing takes exactly one link (a pipe, "
+                    f"orifice, weir or outlet) per outfall (SWMM's ERR_OUTFALL)"
                 )
         seen: set[str] = set()
         for manhole in self.manholes:

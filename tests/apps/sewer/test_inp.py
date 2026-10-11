@@ -556,3 +556,110 @@ def test_storage_exfiltration_with_zero_ksat_is_no_exfiltration(tmp_path):
         path = _storage(tmp_path, [("FUNCTIONAL 20 1.5 5", f"FUNCTIONAL 20 1.5 5 0 0 {params}")])
         with pytest.raises(ValueError, match=rf"line \d+: storage unit 'J3'.*{match}"):
             read_swmm_inp(path)
+
+
+STRUCTURES = "structures_dynwave.inp"
+
+
+def _structures(tmp_path, edits=()):
+    text = (DATA / STRUCTURES).read_text()
+    for old, new in edits:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    path = tmp_path / "regulators.inp"
+    path.write_text(text)
+    return path
+
+
+def test_orifices_weirs_and_outlets_are_read():
+    """[ORIFICES], [WEIRS] and [OUTLETS] (link.c:1641-1692, 2010-2099, 2524-2604) with
+    their [XSECTIONS] openings and the [CURVES] RATING curve of a tabular outlet."""
+    from noodl.apps.sewer.network import Orifice, Outlet, Weir
+    net, _, _ = read_swmm_inp(DATA / STRUCTURES)
+    assert net.orifices == (Orifice("OR1", "J2", "J3", "side", "rectangular", 0.2, 0.1, 0.65,
+                                    width=0.3),)
+    assert net.weirs == (
+        Weir("W1", "J4", "J5", "transverse", 1.0, 0.5, 0.3, 1.84, end_contractions=2.0),
+        Weir("W2", "J7", "J4", "v_notch", 0.6, 1.2, 0.1, 1.38))
+    assert net.outlets == (Outlet("OL1", "J8", "Out2", 0.05,
+                                  ("tabular", (0.0, 0.2, 0.5, 1.0), (0.0, 0.01, 0.03, 0.05))),)
+
+
+def test_regulator_options_and_defaults_are_read(tmp_path):
+    """A weir's ``*`` keeps a default (link.c:2043-2066); a gated orifice, a weir that cannot
+    surcharge, a trapezoidal weir's side slopes, a circular bottom orifice, FUNCTIONAL/HEAD
+    outlets with a gate, and a negative outlet offset read as 0 (link.c:2556)."""
+    path = _structures(tmp_path, [
+        ("OR1              J2               J3               SIDE         0.1        0.65"
+         "       NO       0",
+         "OR1 J2 J3 BOTTOM 0.1 0.65 YES 0.5"),
+        ("OR1              RECT_CLOSED  0.2              0.3        0          0",
+         "OR1 CIRCULAR 0.25 0 0 0"),
+        ("W1               J4               J5               TRANSVERSE   0.3        1.84"
+         "       NO       2        0          YES",
+         "W1 J4 J5 TRAPEZOIDAL 0.3 1.84 * * 1.2 NO"),
+        ("W1               RECT_OPEN    1.0              0.5        0          0",
+         "W1 TRAPEZOIDAL 1.0 0.5 0.5 1.5"),
+        ("OL1              J8               Out2             0.05       TABULAR/DEPTH"
+         "   Rate1                       NO",
+         "OL1 J8 Out2 -0.2 FUNCTIONAL/HEAD 0.3 0.6 YES"),
+    ])
+    net, _, _ = read_swmm_inp(path)
+    orifice = net.orifices[0]
+    assert (orifice.orientation, orifice.shape, orifice.height, orifice.width,
+            orifice.flap_gate) == ("bottom", "circular", 0.25, None, True)
+    w1 = net.weirs[0]
+    assert (w1.kind, w1.side_slopes, w1.end_contractions, w1.end_discharge_coefficient,
+            w1.can_surcharge, w1.flap_gate) == ("trapezoidal", (0.5, 1.5), 0.0, 1.2, False,
+                                                False)
+    outlet = net.outlets[0]
+    assert (outlet.crest_height, outlet.rating, outlet.head_difference, outlet.flap_gate) == (
+        0.0, ("functional", 0.3, 0.6), True, True)
+
+
+ORIFICE_LINE = ("OR1              J2               J3               SIDE         0.1        0.65"
+                "       NO       0")
+W1_LINE = ("W1               J4               J5               TRANSVERSE   0.3        1.84"
+           "       NO       2        0          YES")
+OL1_LINE = ("OL1              J8               Out2             0.05       TABULAR/DEPTH"
+            "   Rate1                       NO")
+
+
+@pytest.mark.parametrize("edit,match", [
+    ((W1_LINE, "W1 J4 J5 ROADWAY 0.3 1.84"), "ROADWAY weirs are not modelled"),
+    ((W1_LINE, W1_LINE + " 0 PAVED WeirCd"), "coefficient curve 'WeirCd'"),
+    ((W1_LINE, "W1 J4 J5 LATERAL 0.3 1.84"), "type must be one of"),
+    ((W1_LINE, "W1 J4 J5 TRANSVERSE -0.3 1.84"), "negative crest height"),
+    ((W1_LINE, "W1 J4 J5 TRANSVERSE 0.3 -1.84"), "negative discharge coefficient"),
+    ((ORIFICE_LINE, "OR1 J2 J3 TOP 0.1 0.65"), "SIDE or BOTTOM"),
+    ((ORIFICE_LINE, "OR1 J2 J3 SIDE 0.1 0.65 MAYBE"), "flap gate must be YES or NO"),
+    ((ORIFICE_LINE, "OR1 J2 J9 SIDE 0.1 0.65"), "names node 'J9'"),
+    (("OR1              RECT_CLOSED", "OR1              RECT_OPEN  "), "ERR_REGULATOR_SHAPE"),
+    (("W2               TRIANGULAR ", "W2               RECT_OPEN  "), "ERR_REGULATOR_SHAPE"),
+    (("W2               TRIANGULAR   0.6              1.2        0          0\n", ""),
+     "'W2' has no \\[XSECTIONS\\]"),
+    (("W2               TRIANGULAR   0.6              1.2        0          0\n",
+      "W2 TRIANGULAR 0.6 1.2 0 0\nOL1 CIRCULAR 0.3 0 0 0\n"), "outlet 'OL1' has an"),
+    ((OL1_LINE, "OL1 J8 Out2 0.05 TABULAR/DEPTH Missing"), "not a RATING curve"),
+    ((OL1_LINE, "OL1 J8 Out2 0.05 CONICAL Rate1"), "TABULAR/DEPTH"),
+    (("Rate1            Rating", "Rate1            Weir  "), "type WEIR"),
+    (("LINK_OFFSETS         DEPTH", "LINK_OFFSETS         ELEVATION"),
+     "LINK_OFFSETS DEPTH only"),
+])
+def test_regulator_refusals_name_the_device(tmp_path, edit, match):
+    """Roadway weirs, weir coefficient curves, culvert-like extras and anything SWMM itself
+    rejects (ERR_REGULATOR_SHAPE, ERR_KEYWORD, ERR_NAME) are refused by name with the
+    line; so are regulators under STEADY/KINWAVE and with LINK_OFFSETS ELEVATION."""
+    with pytest.raises(ValueError, match=match):
+        read_swmm_inp(_structures(tmp_path, [edit]))
+
+
+def test_regulators_are_dynamic_wave_only(tmp_path):
+    """Under KINWAVE SWMM routes regulators by their inflow alone (link.c: ``h2 =
+    node1's invert``), a different model, so the sections are refused by name."""
+    text = (DATA / "tree_kinwave.inp").read_text() + "\n[ORIFICES]\nOR1 J1 J3 SIDE 0.1 0.65\n"
+    path = tmp_path / "k.inp"
+    path.write_text(text)
+    with pytest.raises(ValueError, match=r"\[ORIFICES\].*flow regulators are read under "
+                                         r"dynamic-wave routing only"):
+        read_swmm_inp(path)

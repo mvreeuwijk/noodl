@@ -98,14 +98,20 @@ residuals = model.residuals(new, drivers)     # per-layer nodal balance
 | `storage_unit(name, invert, max_depth, curve, *, surcharge_depth=0.0, initial_depth=0.0, inflow=0.0)` | A SWMM storage unit: a `Manhole` whose `storage` is the surface-area `curve` (`("functional", a, b, c)` for `A = a y^b + c`, `("tabular", depths, areas)`, or `("cylindrical", L, W)`, `("conical", L, W, Z)`, `("paraboloid", L, W, H)`, `("pyramidal", L, W, Z)`; m and m²) and whose ground is `invert + max_depth`. Dynamic wave only. |
 | `Pipe(name, u, v, length, diameter, n, slope, inlet_offset=0.0, outlet_offset=0.0)` | A circular gravity conduit; offsets (m) are the invert heights above the end nodes' inverts. |
 | `Outfall(name, invert, kind="free", stage=None)` | The root of a tree. `kind` is `"free"`, `"normal"` or `"fixed"` (`stage`, m, required for `"fixed"`); only dynamic-wave routing reads them. |
-| `SewerNetwork(manholes, pipes, outfalls, routing="kinematic_wave", notes={}, dynamic_wave=DynamicWaveOptions())` | The whole network. `routing` is `"steady"`, `"kinematic_wave"` or `"dynamic_wave"`; SWMM's `STEADY`/`KINWAVE`/`DYNWAVE` are accepted and normalised. |
+| `Orifice(name, u, v, orientation, shape, height, crest_height, discharge_coefficient, width=None, flap_gate=False)` | A SWMM orifice from `u` to `v`: `orientation` `"side"` or `"bottom"`, `shape` `"circular"` (`height` its diameter, m) or `"rectangular"` (`height`, `width`, m), its crest `crest_height` m above `u`'s invert, Cd (-). Dynamic wave only. |
+| `Weir(name, u, v, kind, height, width, crest_height, discharge_coefficient, side_slopes=(0, 0), end_contractions=0, end_discharge_coefficient=0, can_surcharge=True, flap_gate=False)` | A SWMM weir: `kind` `"transverse"`, `"sideflow"` (opening `width` m long), `"v_notch"` (`width` the top width) or `"trapezoidal"` (`width` the bottom width, `side_slopes` horizontal per vertical); Cd in SWMM's SI units (m^0.5/s). Dynamic wave only. |
+| `Outlet(name, u, v, crest_height, rating, head_difference=False, flap_gate=False)` | A SWMM outlet: `rating` `("functional", a, b)` for `q = a h^b` or `("tabular", heads, flows)` (m, m³/s); `h` the depth above the crest, or the head across it with `head_difference`. Dynamic wave only. |
+| `SewerNetwork(manholes, pipes, outfalls, routing="kinematic_wave", notes={}, dynamic_wave=DynamicWaveOptions(), orifices=(), weirs=(), outlets=())` | The whole network. `routing` is `"steady"`, `"kinematic_wave"` or `"dynamic_wave"`; SWMM's `STEADY`/`KINWAVE`/`DYNWAVE` are accepted and normalised. |
 
 `validate()` refuses, by name: duplicate node or pipe names; a pipe naming an unknown node;
 non-positive slope, diameter, length or roughness; **a manhole with anything other than exactly
 one outgoing pipe**; an outfall with an outgoing pipe; and a manhole whose component never
 reaches an outfall — which also catches cycles. With `routing="dynamic_wave"` these tree
 rules are replaced: loops and flat pipes are allowed, every connected component needs an
-outfall, and each outfall ends exactly one conduit.
+outfall, and each outfall ends exactly one link (a conduit or a regulator). Orifices, weirs
+and outlets are refused by name for the other routings, and malformed ones (an unknown
+node, a duplicate link name, a bad shape, a negative crest or coefficient, an unsorted
+rating) for every routing.
 
 That one-outgoing-pipe rule is the dendritic constraint, and it is what makes the closed-form
 flow solve valid.
@@ -459,7 +465,9 @@ SWMM's variable step (`VARIABLE_STEP > 0`, below); a cold start or SWMM's `InitD
 `InitFlow` (above); constant or
 driver-supplied lateral inflows; `FREE`, `NORMAL` and `FIXED` outfalls, with flap gates;
 parallel barrels, `MaxFlow`, conduit flap gates and conduit lengthening (below); storage
-units with `FUNCTIONAL`, `TABULAR` and the closed-shape area curves (below);
+units with `FUNCTIONAL`, `TABULAR` and the closed-shape area curves (below); orifices
+(side and bottom, circular and rectangular), transverse, sideflow, V-notch and trapezoidal
+weirs, and outlets with a functional or tabular rating, with their flap gates (below);
 `INERTIAL_DAMPING` `NONE`/`PARTIAL`/`FULL` and every `NORMAL_FLOW_LIMITED` option.
 `SURCHARGE_METHOD SLOT` is SWMM's Preissmann slot: above `0.985257 y_full` the top width is the
 Sjoberg slot width `0.5423 w_max exp(-(y/y_full)^2.4)` (`0.01 w_max` above `1.78 y_full`), the
@@ -526,7 +534,42 @@ junction's in three places:
   (`flowrout.c:375`).
 
 Evaporation (`Fevap`) and exfiltration are refused by name, so a unit loses no water but
-through its conduits and its overflow.
+through its links and its overflow.
+
+**Orifices, weirs and outlets** (`[ORIFICES]`, `[WEIRS]`, `[OUTLETS]`; `Orifice`, `Weir`,
+`Outlet`) are flow regulators between two nodes, each an edge of its own kind (`"orifice"`,
+`"weir"`, `"outlet"`) in the `"water"` layer, whose flows follow the pipes' in `"water.q"`
+(`model.link_names`). Their flow is SWMM's `link_getInflow` (`link.c`, transcribed in
+`noodl.apps.sewer.structures`, in feet as SWMM computes it): the orifice equation with its
+weir regime below the opening's critical height and Villemonte's submergence factor there,
+the four weir formulas with end contractions, Villemonte's factor and, above the opening,
+the equivalent orifice (`CanSurcharge`) or a head capped at the opening, the outlet's rating
+on the depth above the crest (`/DEPTH`) or the head across it (`/HEAD`), each closed (no
+flow) below its crest, with no water upstream, or against a flap gate; gated orifices and
+weirs take SWMM's ARMCO head loss. A regulator never reverses: flow from its second node to
+its first takes the first node's crest, as in SWMM. Within a pass a regulator is the
+element `StructureLink`, ``q = c0 + g (dp - dp_fed)``: ``c0`` is SWMM's flow at the previous
+pass's heads, ``dp_fed`` that pass's head difference, ``g >= 0`` SWMM's `dqdh` (an outlet,
+which has none, a central difference in its upstream head). At the fixed point ``dp =
+dp_fed``, so the flow is SWMM's own whatever ``g``, which only makes each pass a Newton-like
+step. SWMM's under-relaxation of these flows is iteration only and is not modelled.
+A regulator also enters the junctions as SWMM's does:
+
+- an orifice gives each end half its equivalent surface area (`dynwave.c:503-524`; a side
+  orifice ``W(depth) L``, a bottom one its opening's area, ``L`` an equivalent length of at
+  least 200 ft), none at its downstream end while DN_CRITICAL (or upstream, UP_CRITICAL) and
+  none at a storage unit; weirs and outlets give none;
+- its two ends raise both nodes' crowns (node 1 by the crest plus the opening height, node 2
+  by the crest height as given plus the opening height; an outlet's opening is SWMM's DUMMY
+  height of 1e-6 ft), and it extends its first node's full depth to that crown (a bottom
+  orifice does not), as `link_validate` does; a crest below the downstream invert is raised
+  to it at the first node only;
+- an outfall at the end of a regulator takes normal and critical depth 0, then its `FREE`,
+  `NORMAL` or `FIXED` rule with the regulator's crest height as its offset;
+- a regulator starts dry and counts, with depth 0, in its nodes' initial average depth.
+
+Roadway weirs, weir coefficient curves, pumps and dividers are refused by name, and so are
+control rules (a regulator is always fully open).
 
 Conduit options, each a SWMM `[CONDUITS]`, `[XSECTIONS]`, `[LOSSES]` or `[OUTFALLS]` entry
 and a `Pipe` or `Outfall` field:
@@ -557,8 +600,9 @@ head difference, as the head solve's Newton step needs. A set `InitDepth`, `Init
 `MaxFlow`, flap gate or barrel count is refused by name under STEADY or KINWAVE routing.
 
 The reader refuses by name, with the line number, `ALLOW_PONDING YES`, loss coefficients
-and seepage in `[LOSSES]`, storage evaporation and exfiltration, and TIDAL/TIMESERIES
-outfalls.
+and seepage in `[LOSSES]`, storage evaporation and exfiltration, TIDAL/TIMESERIES
+outfalls, roadway weirs, weir coefficient curves and regulators with `LINK_OFFSETS
+ELEVATION` (see [SWMM `.inp`](../formats/swmm.md)).
 `build_model` with `air=True`, `quality=True` or `storage=True` is refused by name. Ponding,
 headspace air and quality on the dynamic wave are planned.
 
@@ -575,8 +619,9 @@ print([round(float(q), 4) for q in hist["water.q"][-1]])                # m3/s, 
 [0.0184, 0.031, 0.0032, 0.0092, 0.0004]
 ```
 
-`hist` holds `"water.phi"` (head at every node, m) and `"water.q"` (flow in every conduit,
-m³/s), stacked over steps, with `"t"` (s, the end time of each step) and `"dt"` (s, each
+`hist` holds `"water.phi"` (head at every node, m) and `"water.q"` (flow in every link,
+m³/s: the conduits, then any orifices, weirs and outlets, as `model.link_names`), stacked
+over steps, with `"t"` (s, the end time of each step) and `"dt"` (s, each
 step's length). `simulate_dynamic_wave` also takes an `inflow=` override (`(n,)`
 constant, `(B, n)` a batch, `(steps, B, n)` a series, or a function `inflow(t)` of the
 start time `t` in s) and `record=` for other state keys and for `"sewer.overflow"` (m³/s
@@ -813,6 +858,19 @@ SWMM converges on every step of all four, and every step meets the targets (wors
 7.6e-10 m). Without the storage area the first fixture misses by 1.2e-2 m within 40 steps,
 and with the conduit end areas zeroed at the storage units by 0.17 m.
 
+Regulators are compared on every node depth and every link flow, conduits and regulators
+(`structures_dynwave.inp`): a side orifice that opens from dry and passes from its weir
+regime to its orifice regime, a transverse weir with two end contractions, a V-notch weir,
+and an outlet with a `RATING` curve from a storage unit into an outfall. A second variant
+fixes the outfall stage between the junction's invert and the transverse weir's crest: the
+outfall's backflow first overshoots the crest and the weir flows in reverse into its dry
+upstream junction, then closes, and later runs submerged (Villemonte) for over 200 steps. SWMM converges on every step of
+both, and every step meets the targets (worst depth 2.9e-9 m and 3.4e-9 m over 359 steps).
+With the downstream stage above the crest from the start, water flows back over that weir
+and its flow passes through zero under full submergence, where the flow's slope in the
+heads is infinite: SWMM does not converge on 3 of those steps (0.84 %), so that variant is
+not compared.
+
 The same networks with SWMM at its **default** tolerance (`HEAD_TOLERANCE` 0.0015 m,
 `MAX_TRIALS` 8), against noodl's converged answer:
 
@@ -862,7 +920,14 @@ publish numbers from this application.
 - **Kinematic-wave and steady routing: dendritic networks only**, one outgoing pipe per
   manhole, no loops. Dynamic-wave routing allows loops and flat or adverse conduits.
 - **Dynamic wave: no ponding, headspace air or quality yet** (planned); storage units
-  without evaporation or exfiltration.
+  without evaporation or exfiltration; no pumps, dividers, roadway weirs or control rules.
+  A junction drained only by outlets (whose crown is then the outlet's crest plus SWMM's
+  1e-6 ft DUMMY height) surcharges under EXTRAN as soon as it is wet above that crest, and
+  SWMM's surcharged update then divides by the attached links' `dqdh`, which an outlet
+  leaves 0: above 1.25 crowns every depth is SWMM's fixed point and SWMM freezes the
+  junction's depth, losing the inflow it cannot pass. noodl holds instantaneous continuity
+  there (the outlet passes what arrives), so such a junction has no SWMM reference; drain
+  an outlet from a storage unit, as SWMM's own examples do.
   Flooded water is lost, as in SWMM without ponding; with no ground (`MaxDepth` 0) and no
   `SurDepth` a junction floods as soon as it fills to its crown. `build_model(...,
   air=True)` or `quality=True` is refused. Circular conduits only. Under EXTRAN, where SWMM's own

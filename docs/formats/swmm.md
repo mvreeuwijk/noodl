@@ -6,7 +6,8 @@ column layouts and units are read by `apps/sewer/inp.py`.
 
 **Read:** `[TITLE]`, `[OPTIONS]`, `[JUNCTIONS]`, `[OUTFALLS]`, `[CONDUITS]`, `[XSECTIONS]`,
 `[LOSSES]` (the flap gate only), `[INFLOWS]`, `[POLLUTANTS]`, and under `DYNWAVE`
-`[STORAGE]` with the `[CURVES]` of type `STORAGE`.
+`[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` with the `[CURVES]` of type `STORAGE`
+and `RATING`.
 
 **Routing.** `FLOW_ROUTING` is `STEADY`, `KINWAVE` or `DYNWAVE`, read as the physical names
 `steady`, `kinematic_wave` and `dynamic_wave` (`SewerNetwork.routing`). `DYNWAVE` also reads
@@ -55,7 +56,34 @@ beyond SWMM's own input checks for storage units. `[STORAGE]` under
 `STEADY` or `KINWAVE` is refused by name: SWMM routes a storage unit by its volume there,
 which is not modelled.
 
-**Outfalls.** `FREE`, `NORMAL` and `FIXED` (with its stage, m) are read.
+**Orifices, weirs and outlets (dynamic wave).** Each becomes an `Orifice`, `Weir` or
+`Outlet` of `SewerNetwork.orifices`, `.weirs` or `.outlets`, between two nodes:
+
+- `[ORIFICES] Name N1 N2 SIDE|BOTTOM CrestHt Cd [Gated] [CloseTime]` with an `[XSECTIONS]`
+  opening `CIRCULAR` (diameter) or `RECT_CLOSED` (height, width). `CloseTime` only shapes
+  control actions, which are not read, so it is accepted and has no effect.
+- `[WEIRS] Name N1 N2 Type CrestHt Cd [Gated] [EndCon] [Cd2] [CanSurcharge]` (a `*` keeps
+  SWMM's default: no gate, no end contractions, `Cd2` 0, `CanSurcharge` YES), `Type`
+  `TRANSVERSE` or `SIDEFLOW` (opening `RECT_OPEN`: height, length), `V-NOTCH` (`TRIANGULAR`:
+  height, top width) or `TRAPEZOIDAL` (`TRAPEZOIDAL`: height, bottom width, the two side
+  slopes). `Cd` is SWMM's SI coefficient (m^0.5/s). The road width and surface fields, read
+  by SWMM for roadway weirs only, are ignored.
+- `[OUTLETS] Name N1 N2 Offset TABULAR/DEPTH|TABULAR/HEAD Curve [Gated]` or `...
+  FUNCTIONAL/DEPTH|FUNCTIONAL/HEAD C1 C2 [Gated]` (`q = C1 h^C2`, m and m3/s); the curve is a
+  `[CURVES]` curve of type `RATING` (head or depth in m against flow in m3/s, x values
+  strictly increasing). A negative offset reads as 0, as in SWMM.
+
+`CrestHt`/`Offset` is the height above the first node's invert (`crest_height`, m).
+Refused with the line number: a `ROADWAY` weir, a weir coefficient curve (the thirteenth
+field), an opening of the wrong shape (SWMM's ERR_REGULATOR_SHAPE), a regulator without an
+`[XSECTIONS]` entry, an outlet with one, a negative orifice or weir crest height (SWMM
+raises it to 0 at the inlet end only), a negative coefficient, unknown nodes and keywords,
+`[CURVES]` of a type other than `STORAGE` and `RATING`, the regulator sections under
+`STEADY` or `KINWAVE` (SWMM routes them by the inflow alone there), and regulators with
+`LINK_OFFSETS ELEVATION` (SWMM then sets each end's offset from its own node).
+
+**Outfalls.** `FREE`, `NORMAL` and `FIXED` (with its stage, m) are read. An outfall may sit
+at the end of a conduit or of a regulator (exactly one link, SWMM's ERR_OUTFALL).
 
 **Barrels.** A conduit with more than one barrel is read under `DYNWAVE` (1 to 127; the
 flows, volumes and surface areas of the pipe are totals) and refused with the line number under
@@ -63,14 +91,16 @@ flows, volumes and surface areas of the pipe are totals) and refused with the li
 silently.
 
 **Constraints:** `FLOW_UNITS` must be `CMS` — the reader is SI-native and does not convert.
-`LINK_OFFSETS` must be `DEPTH` or `ELEVATION`. Only `CIRCULAR` cross-sections. Only constant
+`LINK_OFFSETS` must be `DEPTH` or `ELEVATION` (`DEPTH` with regulators). Only `CIRCULAR`
+conduit cross-sections (regulator openings above). Only constant
 `FLOW` baselines and constant `CONCENTRATION` pollutant baselines; a time-series inflow is
 refused, because time variation belongs in the drivers.
 
 **Refused by name**, because skipping them would silently change the physics: `[DWF]`,
-`[STORAGE]` under `STEADY` or `KINWAVE`, `[PUMPS]`, `[WEIRS]`, `[ORIFICES]`, `[OUTLETS]`,
+`[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` under `STEADY` or `KINWAVE`, `[PUMPS]`,
 `[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[CURVES]` of any type but
-`STORAGE`, `[TIMESERIES]`, `[LID_USAGE]`, and any other section carrying content.
+`STORAGE` and `RATING`, `[TIMESERIES]`, `[LID_USAGE]`, and any other section carrying
+content.
 
 **Geometry.** `read_swmm_inp` builds its network with `geometry="tabulated"`: SWMM 5.2's own
 tabulated circular section, lookup rules and unit constants. Depths, volumes and velocities
@@ -90,7 +120,8 @@ conduits differ by SWMM's one-step junction lag, which is first order in the ste
 - flow units other than CMS;
 - runoff (`[SUBCATCHMENTS]` and everything that feeds them) and dry-weather patterns;
 - non-circular shapes;
-- pumps, weirs, orifices and outlets; storage units under `STEADY` or `KINWAVE`, and
+- pumps, dividers, roadway weirs, weir coefficient curves and control rules (regulator
+  settings); orifices, weirs, outlets and storage units under `STEADY` or `KINWAVE`, and
   storage evaporation or exfiltration;
 - dynamic wave with ponding. Both `SURCHARGE_METHOD`s model
   surcharge, and a junction floods (without ponding) above `MaxDepth` (extended to its

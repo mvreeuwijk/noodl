@@ -5,7 +5,9 @@
 heads: every conduit is a `DynamicWaveConduit`, q = c0 + k (H1 - H2) with the coefficients of
 SWMM's momentum update (`dynwave_terms.conduit_terms`) frozen for one pass, and every junction
 carries a `JunctionStorage`, SWMM's trapezoidal continuity
-``A_s (y - y_start) = 0.5 dt (N_start + N)``. `DynamicWaveHydraulics` (a closure) refreshes
+``A_s (y - y_start) = 0.5 dt (N_start + N)``. Orifices, weirs and outlets are edges of their
+own kinds, `StructureLink`, their flow SWMM's (`structures`) linearised about the previous
+pass. `DynamicWaveHydraulics` (a closure) refreshes
 the coefficients, surface areas and outfall heads from the previous pass, and
 ``Model(coupling="iterate")`` repeats the pass until the heads stop changing: the fixed point
 is SWMM's own converged trial.
@@ -34,6 +36,24 @@ from noodl.apps.sewer.dynwave_terms import (
     lengthening_factor,
 )
 from noodl.apps.sewer.storage import StorageCurves
+from noodl.apps.sewer.structures import (
+    CIRCULAR,
+    DN_CRITICAL,
+    RECT_CLOSED,
+    RECT_OPEN,
+    TINY,
+    TRAPEZOIDAL,
+    TRIANGULAR,
+    UP_CRITICAL,
+    Opening,
+    OrificeSet,
+    OutletSet,
+    WeirSet,
+    orifice_flow,
+    outlet_dqdh,
+    outlet_flow,
+    weir_flow,
+)
 from noodl.apps.sewer.xsect_tables import (
     LCF,
     QCF,
@@ -113,6 +133,12 @@ _VELOCITY_MIN_DEPTH = 0.01
 #: SWMM's shortest time step, MINTIMESTEP (`dynwave.c:60`), s.
 MIN_TIME_STEP = 0.001
 _OUTFALL_CODES = {"free": 0, "normal": 1, "fixed": 2}
+#: The flow regulators' edge kinds in the ``"water"`` layer, in the order their columns
+#: follow the pipes' in ``"water.q"`` (only the kinds a network has are present).
+STRUCTURE_KINDS = ("orifice", "weir", "outlet")
+_WEIR_TYPES = {"transverse": 0, "sideflow": 1, "v_notch": 2, "trapezoidal": 3}
+_WEIR_SHAPES = {"transverse": RECT_OPEN, "sideflow": RECT_OPEN, "v_notch": TRIANGULAR,
+                "trapezoidal": TRAPEZOIDAL}
 
 
 @dataclass(frozen=True)
@@ -294,6 +320,124 @@ class DynamicWaveConduit(Element):
         s = drivers["water.switch_slope"].expand_as(q)
         zero = torch.zeros_like(k)
         return torch.where(q == lin, k, torch.where(q == wall, s, zero))
+
+
+class StructureLink(Element):
+    """A flow regulator (orifice, weir or outlet; design E5) with its flow linearised about
+    the previous pass: ``q = c0 + g (dp - dp_fed)`` (m3/s, dp = H1 - H2 in m), then the flap
+    gate's clamp.
+
+    ``c0`` is SWMM's own regulator flow at the previous pass's heads (`link.c`
+    ``orifice_getInflow`` / ``weir_getInflow`` / ``outlet_getInflow``,
+    `noodl.apps.sewer.structures`), ``dp_fed`` that pass's head difference, so at a fixed
+    point (dp = dp_fed) the flow is SWMM's exactly, whatever ``g``. ``g >= 0`` (m2/s) is
+    SWMM's ``dqdh`` for orifices and weirs, a central difference in the upstream head for
+    outlets: it only makes each pass a Newton-like step in the device's heads. The flow is
+    non-decreasing in dp (``g >= 0``, the clamps are constants), as the head solve needs.
+
+    Reads the per-device drivers ``"water.<kind>.flow_offset"`` c0 (m3/s),
+    ``"water.<kind>.slope"`` g (m2/s), ``"water.<kind>.dp_fed"`` (m) and the 0/1 flags
+    ``"water.<kind>.flap_block_reverse"`` (its own flap gate, or a gated outfall at its
+    second node: ``q >= 0``) and ``"water.<kind>.flap_block_forward"`` (a gated outfall at
+    its first node: ``q <= 0``; `link.c::link_setFlapGate`), all written by
+    `DynamicWaveHydraulics`. At a fixed point the clamps never act: SWMM's flow already
+    respects the gate."""
+
+    def __init__(self, kind: str) -> None:
+        if kind not in STRUCTURE_KINDS:
+            raise ValueError(f"StructureLink: kind must be one of {STRUCTURE_KINDS}, got "
+                             f"{kind!r}")
+        super().__init__(kind)
+        self.prefix = f"water.{kind}."
+
+    def _parts(self, dp: Tensor, drivers: Mapping) -> tuple[Tensor, Tensor]:
+        p = self.prefix
+        lin = drivers[p + "flow_offset"] + drivers[p + "slope"] * (dp - drivers[p + "dp_fed"])
+        zero = torch.zeros_like(lin)
+        inf = torch.full_like(lin, torch.inf)
+        reverse = drivers.get(p + "flap_block_reverse", zero) > 0.5
+        forward = drivers.get(p + "flap_block_forward", zero) > 0.5
+        q = torch.minimum(torch.maximum(lin, torch.where(reverse, zero, -inf)),
+                          torch.where(forward, zero, inf))                  # link.c:643-670
+        return lin, q
+
+    def flow(self, dp: Tensor, drivers: Mapping | None = None) -> Tensor:
+        """Regulator flow (m3/s, positive from its first node to its second)."""
+        return self._parts(dp, drivers)[1]
+
+    def dflow(self, dp: Tensor, drivers: Mapping | None = None) -> Tensor:
+        """dq/d(dp) (m2/s): g where the gate's clamp does not act, else 0."""
+        lin, q = self._parts(dp, drivers)
+        g = drivers[self.prefix + "slope"].expand_as(q)
+        return torch.where(q == lin, g, torch.zeros_like(g))
+
+
+@dataclass(frozen=True)
+class _Structures:
+    """One kind of flow regulator in the closure: ``names``; end node indices ``u``, ``v``;
+    ``offset1`` (ft, the crest above node 1's invert after SWMM raises a crest below node
+    2's invert to it, link.c:425-433) and ``offset2`` (ft, the crest height as given, which
+    SWMM keeps at node 2, link.c:366-388); ``y_full`` (ft, the opening height; an outlet's
+    is SWMM's DUMMY ``TINY``); ``params`` (`OrificeSet` / `WeirSet` / `OutletSet`);
+    ``block_forward``/``block_reverse`` (bool, `structures._gate`); ``extends`` (bool: the
+    device extends node 1's full depth to its crown, all but bottom orifices,
+    link.c:448-455)."""
+
+    kind: str
+    names: list
+    u: Tensor
+    v: Tensor
+    offset1: Tensor
+    offset2: Tensor
+    y_full: Tensor
+    params: object
+    block_forward: Tensor
+    block_reverse: Tensor
+    extends: Tensor
+
+
+def _build_structures(kind: str, devices, nodes: list, invert: Tensor, gated_outfalls: set,
+                      route_step: float) -> _Structures:
+    """The closure's view of `devices` of one `kind` (`_Structures`); `route_step` (s) sets
+    the orifice and weir equivalent lengths."""
+    u = torch.tensor([nodes.index(s.u) for s in devices], dtype=torch.long)
+    v = torch.tensor([nodes.index(s.v) for s in devices], dtype=torch.long)
+    crest = torch.tensor([s.crest_height for s in devices], dtype=F64)
+    inv1, inv2 = invert[u], invert[v]
+    # link.c:425-433: under DW a crest below node 2's invert is raised to it (offset1 only)
+    offset1 = torch.where(inv1 + crest < inv2, inv2 - inv1, crest) / LCF
+    own_gate = torch.tensor([s.flap_gate for s in devices], dtype=torch.bool)
+    block_reverse = own_gate | torch.tensor([s.v in gated_outfalls for s in devices],
+                                            dtype=torch.bool)
+    block_forward = torch.tensor([s.u in gated_outfalls for s in devices], dtype=torch.bool)
+    extends = torch.ones(len(devices), dtype=torch.bool)
+    if kind == "orifice":
+        opening = Opening.from_si(
+            [CIRCULAR if s.shape == "circular" else RECT_CLOSED for s in devices],
+            [s.height for s in devices],
+            [s.height if s.width is None else s.width for s in devices])
+        bottom = torch.tensor([s.orientation == "bottom" for s in devices], dtype=torch.bool)
+        params = OrificeSet.build(opening, bottom,
+                                  [s.discharge_coefficient for s in devices], own_gate,
+                                  route_step)
+        extends = ~bottom                                                    # link.c:442-444
+        y_full = opening.y_full
+    elif kind == "weir":
+        opening = Opening.from_si([_WEIR_SHAPES[s.kind] for s in devices],
+                                  [s.height for s in devices], [s.width for s in devices],
+                                  [tuple(s.side_slopes) for s in devices])
+        params = WeirSet.build(opening, [_WEIR_TYPES[s.kind] for s in devices],
+                               [s.discharge_coefficient for s in devices],
+                               [s.end_discharge_coefficient for s in devices],
+                               [s.end_contractions for s in devices],
+                               [s.can_surcharge for s in devices], own_gate)
+        y_full = opening.y_full
+    else:
+        params = OutletSet.build([s.rating for s in devices],
+                                 [s.head_difference for s in devices], own_gate)
+        y_full = torch.full((len(devices),), TINY, dtype=F64)                # xsect.c:233
+    return _Structures(kind, [s.name for s in devices], u, v, offset1, crest / LCF, y_full,
+                       params, block_forward, block_reverse, extends)
 
 
 class JunctionStorage(NodeSource):
@@ -540,7 +684,8 @@ class DynamicWaveHydraulics:
     """The dynamic-wave closure: the conduit coefficients, junction surface areas and
     outfall heads of one pass, from the previous pass's heads and flows.
 
-    Reads the fed ``"water.phi"`` (m, full-node) and ``"water.q"`` (m3/s, per pipe), the
+    Reads the fed ``"water.phi"`` (m, full-node) and ``"water.q"`` (m3/s, per link: the
+    pipes, then the regulators), the
     full-node driver ``"inflow"`` (m3/s, lateral inflow, zero at outfalls) and its own
     carried state, pinned by `Model` to the step start: ``"sewer.junction_depth"`` (m),
     ``"sewer.pipe_flow"`` (m3/s), ``"sewer.mid_area"`` (SWMM's stored mid-depth area, SI
@@ -593,13 +738,23 @@ class DynamicWaveHydraulics:
     chatter through the other end's area either. Only the nearest threshold of each
     junction is switched within the pass.
 
+    Orifices, weirs and outlets (design E5; `net.orifices`, `.weirs`, `.outlets`): each
+    kind present is a `StructureLink` edge kind whose ``"water.q"`` columns follow the
+    pipes' (`link_names`, `edge_kinds`). The closure writes, per kind, SWMM's regulator flow
+    at the fed heads ``"water.<kind>.flow_offset"`` (m3/s), its slope
+    ``"water.<kind>.slope"`` (m2/s: SWMM's ``dqdh``, an outlet's a central difference),
+    the fed head difference ``"water.<kind>.dp_fed"`` (m) and the flap-gate flags; an
+    orifice's end areas join its junctions' storage areas (`_structure_terms`,
+    dynwave.c:503-524), the regulators raise crowns and full depths (dynwave.c:137-153,
+    link.c:425-463), an outfall on a regulator takes yN = yC = 0 (link.c:753-765), and every
+    link's flow enters the junction net inflows.
+
     The arithmetic is SWMM's own, in feet (design D2); `layer` names the head layer.
     """
 
     integrates = True
     state_keys = ("sewer.junction_depth", "sewer.pipe_flow", "sewer.mid_area",
                   "sewer.net_inflow")
-    edge_kinds = ("pipe",)
 
     def __init__(self, graph: Network, net: SewerNetwork, *, layer: str = "water") -> None:
         self.net = graph
@@ -652,16 +807,52 @@ class DynamicWaveHydraulics:
         self.flap_block_forward = torch.tensor(
             [(g and r) or p.u in outfall_gated
              for p, g, r in zip(net.pipes, own, rev, strict=True)], dtype=torch.bool)
+        if not net.pipes:
+            raise ValueError("DynamicWaveHydraulics: the network has no conduit; dynamic-wave "
+                             "routing needs at least one")
         self._rebuild_geometry()
+        #: the number of pipes: the first columns of ``"water.q"``
+        self.n_pipes = len(net.pipes)
+        # The flow regulators, one `_Structures` per kind present, their columns after the
+        # pipes' in STRUCTURE_KINDS order (the layer's element order).
+        route = (self.options.routing_step if self.options.lengthening_routing_step is None
+                 else self.options.lengthening_routing_step)                # link.c:1721, 2149
+        self.structures: dict[str, _Structures] = {
+            kind: _build_structures(kind, net.structures[kind], nodes, self.node_invert,
+                                    outfall_gated, route)
+            for kind in STRUCTURE_KINDS if net.structures[kind]}
+        #: the edge kinds of the ``"water"`` layer, in column order
+        self.edge_kinds = ("pipe", *self.structures)
+        #: every ``"water.q"`` column's link name: the pipes, then the regulators by kind
+        self.link_names = list(self.pipe_names) + [
+            name for s in self.structures.values() for name in s.names]
+        self.edge_u = torch.cat([self.u, *(s.u for s in self.structures.values())])
+        self.edge_v = torch.cat([self.v, *(s.v for s in self.structures.values())])
 
-        # Each outfall's own conduit and the end it sits at (link.c:740-751: node2 first).
-        pipe_of, at_v = [], []
+        # Each outfall's own link and the end it sits at (link.c:740-751: node2 first): a
+        # conduit, or a regulator, whose outfall depth SWMM sets from yNorm = yCrit = 0
+        # (link.c:753-765: only a conduit computes them).
+        pipe_of, at_v, via, reg_offset = [], [], [], []
         for name in self.outfall_names:
             ends = [(i, p.v == name) for i, p in enumerate(net.pipes) if name in (p.u, p.v)]
-            if len(ends) != 1:
+            regs = [(s, j) for s in self.structures.values() for j in range(len(s.names))
+                    if name in (nodes[int(s.u[j])], nodes[int(s.v[j])])]
+            if len(ends) + len(regs) != 1:
                 raise ValueError(
-                    f"DynamicWaveHydraulics: outfall {name!r} is attached to {len(ends)} "
-                    f"conduits; dynamic-wave routing takes exactly one")
+                    f"DynamicWaveHydraulics: outfall {name!r} is attached to "
+                    f"{len(ends) + len(regs)} links; dynamic-wave routing takes exactly one")
+            if regs:
+                s, j = regs[0]
+                if {nodes[int(s.u[j])], nodes[int(s.v[j])]} <= set(self.outfall_names):
+                    raise ValueError(
+                        f"DynamicWaveHydraulics: {s.kind} {s.names[j]!r} joins two outfalls; "
+                        f"SWMM sets the depth of only one of them")
+                downstream = nodes[int(s.v[j])] == name
+                pipe_of.append(0)                    # a placeholder, masked by `via`
+                at_v.append(downstream)
+                via.append(True)
+                reg_offset.append(float(s.offset2[j] if downstream else s.offset1[j]))
+                continue
             i, downstream = ends[0]
             pipe = net.pipes[i]
             if pipe.u in self.outfall_names and pipe.v in self.outfall_names:
@@ -670,12 +861,18 @@ class DynamicWaveHydraulics:
                     f"({pipe.u!r}, {pipe.v!r}); SWMM sets the depth of only one of them")
             pipe_of.append(i)
             at_v.append(downstream)
+            via.append(False)
+            reg_offset.append(0.0)
         self.outfall_pipe = torch.tensor(pipe_of, dtype=torch.long)
         at_v_t = torch.tensor(at_v, dtype=torch.bool)
-        #: per outfall: whether it is its conduit's downstream (second) node
+        #: per outfall: whether it is its link's downstream (second) node
         self.outfall_at_v = at_v_t
+        #: per outfall: whether its link is a regulator (its depth then has yN = yC = 0)
+        self.outfall_on_structure = torch.tensor(via, dtype=torch.bool)
         self.outfall_offset_ft = torch.where(
-            at_v_t, self.offset2[self.outfall_pipe], self.offset1[self.outfall_pipe]) / LCF
+            self.outfall_on_structure, torch.tensor(reg_offset, dtype=F64),
+            torch.where(at_v_t, self.offset2[self.outfall_pipe],
+                        self.offset1[self.outfall_pipe]) / LCF)
         self.outfall_kind = torch.tensor(
             [_OUTFALL_CODES[o.kind] for o in net.outfalls], dtype=torch.long)
         self.outfall_stage_ft = torch.tensor(
@@ -690,22 +887,34 @@ class DynamicWaveHydraulics:
         crown = torch.zeros(len(nodes), dtype=F64)
         crown = crown.scatter_reduce(0, self.u, (geo.offset1 + geo.y_full).detach(), "amax")
         crown = crown.scatter_reduce(0, self.v, (geo.offset2 + geo.y_full).detach(), "amax")
+        # the full-depth extension (link.c:440-463): both ends of a conduit, node 1 only of
+        # a regulator other than a bottom orifice
+        reach = crown.clone()
+        for s in self.structures.values():
+            crown = crown.scatter_reduce(0, s.u, s.offset1 + s.y_full, "amax")  # dynwave.c:148
+            crown = crown.scatter_reduce(0, s.v, s.offset2 + s.y_full, "amax")  # dynwave.c:152
+            top = torch.where(s.extends, s.offset1 + s.y_full, torch.zeros_like(s.y_full))
+            reach = reach.scatter_reduce(0, s.u, top, "amax")                 # link.c:452
         self.crown_ft = crown[self.junction_idx]
         #: per-junction crown depth (m), in junction order
         self.crown_depth = self.crown_ft * LCF
-        # The full depth: MaxDepth, extended to every attached conduit's top
-        # (link.c:440-463, the same conduit ends as the crown) -- at a storage unit only
-        # when it has a SurDepth (link.c:450, 458).
+        # The full depth: MaxDepth, extended to every attached conduit's top and to the
+        # crown of a regulator leaving it (link.c:440-463) -- at a storage unit only when it
+        # has a SurDepth (link.c:450, 458).
         max_depth = torch.tensor([0.0 if m.ground is None else m.ground - m.invert
                                   for m in net.manholes], dtype=F64)
         sur_depth = torch.tensor([m.surcharge_depth for m in net.manholes], dtype=F64)
         #: per junction: a SWMM storage unit (`Manhole.storage`)
         self.is_storage = torch.tensor([m.storage is not None for m in net.manholes],
                                        dtype=torch.bool)
+        node_storage = torch.zeros(len(nodes), dtype=torch.bool)
+        node_storage[self.junction_idx] = self.is_storage
+        #: per node: a storage unit (a regulator's end area is zeroed there, dynwave.c:520)
+        self.node_storage = node_storage
         extend = ~self.is_storage | (sur_depth > 0.0)                         # link.c:450
         #: per-junction full depth (m): MaxDepth extended to the crown
-        self.full_depth = torch.where(extend, torch.maximum(max_depth, self.crown_depth),
-                                      max_depth)
+        self.full_depth = torch.where(
+            extend, torch.maximum(max_depth, reach[self.junction_idx] * LCF), max_depth)
         #: per-junction flood depth y_max (m): the full depth plus SurDepth, above which
         #: the junction floods (no ponding, dynwave.c:746-748)
         self.flood_depth = self.full_depth + sur_depth
@@ -785,7 +994,7 @@ class DynamicWaveHydraulics:
     def _terms(self, state: Mapping, dt: float,
                hold: tuple[Tensor, Tensor] | None = None) -> ConduitTerms:
         heads = state[f"{self.layer}.phi"]
-        q = state[f"{self.layer}.q"]
+        q = state[f"{self.layer}.q"][..., :self.n_pipes]
         # SWMM's node depth is never negative (dynwave.c:743); the stiff bed lets a dry
         # junction's head sit a hair below its invert.
         depth_ft = torch.clamp(heads - self.node_invert, min=0.0) / LCF
@@ -889,6 +1098,41 @@ class DynamicWaveHydraulics:
         return {"head": safe_star, "below": lo, "above": hi, "applies": applies,
                 "held": held, "hold1": hold[..., :p], "hold2": hold[..., p:]}
 
+    def _structure_terms(self, heads: Tensor) -> tuple[dict, Tensor]:
+        """The regulators at full-node `heads` (m): per kind ``(StructureFlow, slope)`` (ft
+        units: SWMM's flow and its ``dqdh``, an outlet's a central difference,
+        `structures.outlet_dqdh`), and every node's regulator surface area (ft2):
+        `findNonConduitSurfArea` (dynwave.c:503-524), an orifice's ``surfArea / 2`` at each
+        end (weirs and outlets none), zeroed at an UP_CRITICAL first end, a DN_CRITICAL
+        second end and at a storage unit."""
+        inv = self.node_invert
+        h_ft = (inv + torch.clamp(heads - inv, min=0.0)) / LCF               # dynwave.c:743
+        z_ft = inv / LCF
+        area = torch.zeros(heads.shape[:-1] + inv.shape[-1:], dtype=F64)
+        found: dict = {}
+        for kind, s in self.structures.items():
+            h1, h2 = h_ft[..., s.u], h_ft[..., s.v]
+            z1, z2 = z_ft[s.u], z_ft[s.v]
+            crest = z1 + s.offset1                                            # link.c:1865
+            gates = (s.block_forward, s.block_reverse)
+            if kind == "orifice":
+                flow = orifice_flow(s.params, h1, h2, z1, z2, crest, *gates)
+                slope = flow.dqdh
+                half = flow.surf_area / 2.0                                   # dynwave.c:511
+                end1 = torch.where((flow.flow_class == UP_CRITICAL) | self.node_storage[s.u],
+                                   torch.zeros_like(half), half)              # dynwave.c:518-520
+                end2 = torch.where((flow.flow_class == DN_CRITICAL) | self.node_storage[s.v],
+                                   torch.zeros_like(half), half)              # dynwave.c:521-523
+                area = area.index_add(-1, s.u, end1).index_add(-1, s.v, end2)
+            elif kind == "weir":
+                flow = weir_flow(s.params, h1, h2, z1, z2, crest, *gates)
+                slope = flow.dqdh
+            else:
+                flow = outlet_flow(s.params, h1, h2, z1, z2, crest, *gates)
+                slope = outlet_dqdh(s.params, h1, h2, z1, z2, crest, *gates)
+            found[kind] = (flow, slope)
+        return found, area
+
     def _surcharged(self, heads: Tensor) -> Tensor:
         """EXTRAN's surcharge test on the junction heads `heads` (m, full-node): depth above
         a positive crown (`dynwave.c:690`), at a storage unit with a SurDepth depth above its
@@ -907,25 +1151,31 @@ class DynamicWaveHydraulics:
         batch = torch.broadcast_shapes(q.shape[:-1], inflow.shape[:-1])
         through = torch.zeros(batch + (n,), dtype=F64)
         q_b = q.expand(batch + q.shape[-1:])
-        through = through.index_add(-1, self.v, q_b).index_add(-1, self.u, -q_b)
+        # every link's flow, conduits and regulators (dynwave.c:528-541, 382-412)
+        through = through.index_add(-1, self.edge_v, q_b).index_add(-1, self.edge_u, -q_b)
         net_inflow = inflow + through                                  # dynwave.c:528-541
         return {
             "sewer.junction_depth": torch.clamp(heads[..., jidx] - self.node_invert[jidx],
                                                 min=0.0),
-            "sewer.pipe_flow": q,
+            "sewer.pipe_flow": q[..., :self.n_pipes],
             "sewer.mid_area": terms.mid_area * _AREA_SI,
             "sewer.net_inflow": net_inflow[..., jidx],
         }
 
     def _outfall_heads(self, q: Tensor) -> Tensor:
         """`link.c::link_setOutfallDepth` + `node.c::outfall_setOutletDepth` (link.c:728-766,
-        node.c:1413-1492), from each outfall conduit's flow `q` (m3/s): heads (m)."""
+        node.c:1413-1492), from each outfall conduit's flow `q` (m3/s, the pipes' columns):
+        heads (m). An outfall on a regulator takes yN = yC = 0."""
         op = self.outfall_pipe
         geo = self.geo
         q_ft = (q[..., op] / QCF / self.barrels[op]).abs()                # link.c:759
         yf, af = geo.y_full[op], geo.a_full[op]
         y_norm = normal_depth_ft(q_ft, yf, af, geo.s_full[op], geo.beta[op])
         y_crit = critical_depth(q_ft, yf, af)
+        # a regulator's outfall: yNorm = yCrit = 0 (link.c:753-765)
+        reg = self.outfall_on_structure
+        y_norm = torch.where(reg, torch.zeros_like(y_norm), y_norm)
+        y_crit = torch.where(reg, torch.zeros_like(y_crit), y_crit)
         z = self.outfall_offset_ft
         zero = torch.zeros_like(y_norm)
         free = torch.where(z > 0.0, zero, torch.minimum(y_norm, y_crit))      # node.c:1431
@@ -968,8 +1218,8 @@ class DynamicWaveHydraulics:
         bumped = q_abs.clone()
         bumped[..., op] = q_abs[..., op] + step
         rise = (self._outfall_heads(bumped) - self._outfall_heads(q_abs)) / step
-        rise = torch.where(self.outfall_at_v, torch.clamp(rise, min=0.0),
-                           torch.zeros_like(rise))
+        rise = torch.where(self.outfall_at_v & ~self.outfall_on_structure,
+                           torch.clamp(rise, min=0.0), torch.zeros_like(rise))
         compliance = torch.zeros_like(s_max).index_add(-1, op, rise.expand(
             s_max.shape[:-1] + rise.shape[-1:]))
         return 1.0 / (compliance + 1.0 / s_max)
@@ -987,6 +1237,12 @@ class DynamicWaveHydraulics:
         # a storage unit's own area at the previous pass's depth (dynwave.c:315)
         storage_ft2 = self._storage_area_ft2(heads)
         drop = None
+        regulators: dict = {}
+        if dt is not None and self.structures:
+            # the regulators at the previous pass's heads (dynwave.c:423-454): their flows,
+            # slopes and end areas, which join the storage units' own (dynwave.c:503-524)
+            regulators, reg_ft2 = self._structure_terms(heads)
+            storage_ft2 = storage_ft2 + reg_ft2[..., self.junction_idx]
         if dt is not None:
             # the drop-end area switch (JunctionStorage): a junction held on its threshold
             # has its chosen drop end classified on the upper side, SWMM's class AT it. The
@@ -1000,7 +1256,8 @@ class DynamicWaveHydraulics:
                 out = self._carried(state, terms, inflow)
                 drop = self._drop_switch(state, terms, out["sewer.net_inflow"], dt,
                                          storage_ft2)
-        q = state[f"{self.layer}.q"]
+        q_all = state[f"{self.layer}.q"]
+        q = q_all[..., :self.n_pipes]
         depth_ft = terms.depth
         a_link = area_of_depth(depth_ft, self.geo.y_full, self.geo.a_full)
         moving = (depth_ft > _VELOCITY_MIN_DEPTH) & (a_link > FUDGE)          # link.c:834-840
@@ -1021,7 +1278,8 @@ class DynamicWaveHydraulics:
         surf = surf.index_add(-1, self.u, terms.surface_area1)                # dynwave.c:582-583
         surf = surf.index_add(-1, self.v, terms.surface_area2)
         # the storage unit's own area plus its conduit ends' (not zeroed at a storage node,
-        # dwflow.c:546-547; only a regulator's are, dynwave.c:520-523), then the floor
+        # dwflow.c:546-547; only a regulator's are, dynwave.c:520-523) and its regulators'
+        # ends' (in `storage_ft2` above), then the floor
         area_ft2 = torch.clamp(surf[..., jidx] + storage_ft2,
                                min=self.min_area_ft2)                         # dynwave.c:670
         # conveyance the pass lags into c0 (other end pinned), per junction (dynwave.c:578)
@@ -1067,6 +1325,15 @@ class DynamicWaveHydraulics:
             "water.area_above": drop["above"],
             "water.area_switch_slope": drop_slope,
         })
+        for kind, (flow, slope) in regulators.items():
+            s = self.structures[kind]
+            out.update({
+                f"water.{kind}.flow_offset": flow.flow * QCF,
+                f"water.{kind}.slope": slope * (QCF / LCF),
+                f"water.{kind}.dp_fed": heads[..., s.u] - heads[..., s.v],
+                f"water.{kind}.flap_block_reverse": s.block_reverse.to(F64),
+                f"water.{kind}.flap_block_forward": s.block_forward.to(F64),
+            })
         out["water.surcharged"] = self.storage.surcharged(out)
         excess = self.storage.flood_excess(out)
         flooded = excess > 0.0
@@ -1125,8 +1392,9 @@ class DynamicWaveHydraulics:
         total = torch.zeros(self.node_invert.shape, dtype=F64)
         count = torch.zeros_like(total)
         total = total.index_add(0, self.u, y_end).index_add(0, self.v, y_end)
-        count = count.index_add(0, self.u, torch.ones_like(y_end))
-        count = count.index_add(0, self.v, torch.ones_like(y_end))
+        # every link counts, a regulator with depth 0 (link.c:518, flowrout.c:353-363)
+        count = count.index_add(0, self.edge_u, torch.ones(self.edge_u.shape, dtype=F64))
+        count = count.index_add(0, self.edge_v, torch.ones(self.edge_v.shape, dtype=F64))
         jidx = self.junction_idx
         given = self.initial_junction_depth / LCF
         average = torch.where(count[jidx] > 0.0, total[jidx] / count[jidx].clamp(min=1.0),
@@ -1143,9 +1411,10 @@ class DynamicWaveHydraulics:
                                     + torch.minimum(y2, geo.y_full)), min=FUDGE)  # :402-416
         y = torch.where(q0 == 0.0, y_mean, y_link)                            # flowrout.c:407, :418
         through = torch.zeros_like(total).index_add(0, self.v, q0).index_add(0, self.u, -q0)
+        n_reg = self.edge_u.shape[0] - self.n_pipes
         return {
             f"{self.layer}.phi": phi,
-            f"{self.layer}.q": q0,
+            f"{self.layer}.q": torch.cat([q0, torch.zeros(n_reg, dtype=F64)]),  # link.c:518
             "sewer.junction_depth": depth_j * LCF,
             "sewer.pipe_flow": q0.clone(),
             "sewer.mid_area": area_of_depth(y, geo.y_full, geo.a_full) * _AREA_SI,  # :497
@@ -1206,7 +1475,9 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     SWMM's initial state (`DynamicWaveHydraulics.initial_state`: cold and dry, or its
     InitDepth and InitFlow). Attached to the model: `junction_idx`, `junction_invert` (m),
     `outfall_pipe_idx`, `dynamic_wave` (the closure), `routing_step` (s), `pipe_names`,
-    `pipe_columns`, `notes`, `input_specs`, `driver_template`.
+    `link_names` (every ``"water.q"`` column: the pipes, then the orifices, weirs and
+    outlets, each a `StructureLink` edge of its own kind), `pipe_columns`, `notes`,
+    `input_specs`, `driver_template`.
     """
     net.validate()
     if net.routing != "dynamic_wave":
@@ -1225,21 +1496,29 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
         graph.add_node(outfall.name, invert=outfall.invert)
     for pipe in net.pipes:
         graph.add_edge(pipe.u, pipe.v, kind="pipe", name=pipe.name)
+    # the regulators after the pipes, kind by kind: the layer's column order
+    for kind in STRUCTURE_KINDS:
+        for device in net.structures[kind]:
+            graph.add_edge(device.u, device.v, kind=kind, name=device.name)
     boundary = [o.name for o in net.outfalls]
     closure = DynamicWaveHydraulics(graph, net)
     junction_idx = closure.junction_idx
     junction_invert = closure.node_invert[junction_idx]
+
+    def elements():
+        return [DynamicWaveConduit(), *(StructureLink(k) for k in closure.structures)]
+
     # Built once without the node source to learn the interior (a NodeSource must sit on
     # interior nodes), as the Modelica assembly does.
-    probe = PotentialFlowLayer(graph, "water", [DynamicWaveConduit()], boundary=boundary,
+    probe = PotentialFlowLayer(graph, "water", elements(), boundary=boundary,
                                quantity="head", unit="m", flow_unit="m3/s")
     interior = set(probe.interior.tolist())
     stranded = [m.name for m, i in zip(net.manholes, junction_idx.tolist(), strict=True)
                 if i not in interior]
     if stranded:
-        raise ValueError(f"build_dynamic_wave_model: junction(s) {stranded} touch no conduit")
+        raise ValueError(f"build_dynamic_wave_model: junction(s) {stranded} touch no link")
     layer = PotentialFlowLayer(
-        graph, "water", [DynamicWaveConduit()], boundary=boundary,
+        graph, "water", elements(), boundary=boundary,
         node_sources=[closure.storage],
         quantity="head", unit="m", flow_unit="m3/s")
     if layer.bound.tolist() != closure.outfall_idx.tolist():
@@ -1270,6 +1549,7 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     model.dynamic_wave = closure
     model.routing_step = float(net.dynamic_wave.routing_step)
     model.pipe_names = list(closure.pipe_names)
+    model.link_names = list(closure.link_names)
     model.pipe_columns = ("q", "h", "v", "V_wet")
     model.input_specs = {
         "inflow": dict(description="lateral inflow at each manhole", unit="m3/s",
@@ -1342,7 +1622,7 @@ def _variable_step(hyd: DynamicWaveHydraulics, before: Mapping, after: Mapping,
     with torch.no_grad():
         terms = hyd._terms(after, dt)
         barrels = hyd.geo.barrels
-        q = after[f"{hyd.layer}.q"].abs() / QCF / barrels                    # dynwave.c:852
+        q = after[f"{hyd.layer}.q"][..., :hyd.n_pipes].abs() / QCF / barrels  # dynwave.c:852
         fr = terms.froude
         live = (q > FUDGE) & (terms.mid_area > FUDGE) & (fr > 0.01)          # dynwave.c:853-856
         residence = (terms.volume / barrels

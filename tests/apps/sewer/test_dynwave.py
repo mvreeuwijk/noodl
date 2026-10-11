@@ -1902,3 +1902,270 @@ def test_storage_units_are_refused_by_name_outside_their_scope():
     # a tabular curve given as lists is stored as tuples (the manhole stays hashable)
     unit = storage_unit("J1", 11.0, 2.0, ("tabular", [0.0, 1.0], [5.0, 6.0]))
     assert unit.storage == ("tabular", (0.0, 1.0), (5.0, 6.0)) and hash(unit)
+
+
+# ------------------------------------------------------------------- orifices, weirs, outlets
+def _regulated(kind="orifice", *, storage_at=None, outfall_kind="free", stage=None,
+               inflow=0.04, crest=0.1, j3_invert=10.5, **device):
+    """J1 --C1 (0.6 m)--> J2 --[a regulator `kind`]--> J3 --C3 (0.6 m)--> Out, an inflow at
+    J1; with ``kind="outlet_to_outfall"`` the outlet runs J2 -> Out directly (no J3, C3).
+    The orifice is a 0.2 x 0.3 m side opening (Cd 0.65), the weir a 1.0 x 0.5 m
+    transverse weir (Cd 1.84), the outlet ``q = 0.08 h^0.5``; each `crest` m above J2's
+    invert (11.0 m). `storage_at` makes that junction a 3 m2 storage unit."""
+    from noodl.apps.sewer import SewerNetwork
+    from noodl.apps.sewer.dynwave import DynamicWaveOptions
+    from noodl.apps.sewer.network import (
+        Manhole,
+        Orifice,
+        Outfall,
+        Outlet,
+        Pipe,
+        Weir,
+        storage_unit,
+    )
+    manholes = [Manhole("J1", 12.0, ground=17.0, inflow=inflow),
+                Manhole("J2", 11.0, ground=16.0), Manhole("J3", j3_invert, ground=15.0)]
+    pipes = [Pipe("C1", "J1", "J2", 200.0, 0.6, 0.013, 0.005),
+             Pipe("C3", "J3", "Out", 200.0, 0.6, 0.013, (j3_invert - 9.5) / 200.0)]
+    orifices, weirs, outlets = (), (), ()
+    v = "J3"
+    if kind == "outlet_to_outfall":
+        manholes, pipes, kind, v = manholes[:2], pipes[:1], "outlet", "Out"
+    if kind == "orifice":
+        args = dict(orientation="side", shape="rectangular", height=0.2, width=0.3,
+                    discharge_coefficient=0.65) | device
+        orifices = (Orifice("R1", "J2", v, crest_height=crest, **args),)
+    elif kind == "weir":
+        args = dict(kind="transverse", height=1.0, width=0.5,
+                    discharge_coefficient=1.84) | device
+        weirs = (Weir("R1", "J2", v, crest_height=crest, **args),)
+    else:
+        args = dict(rating=("functional", 0.08, 0.5)) | device
+        outlets = (Outlet("R1", "J2", v, crest_height=crest, **args),)
+    if storage_at is not None:
+        manholes = [storage_unit(m.name, m.invert, 5.0, ("functional", 0.0, 0.0, 3.0),
+                                 inflow=m.inflow) if m.name == storage_at else m
+                    for m in manholes]
+    return SewerNetwork(
+        manholes=tuple(manholes), pipes=tuple(pipes),
+        outfalls=(Outfall("Out", 9.5 if v == "J3" else 10.0, kind=outfall_kind,
+                          stage=stage),),
+        routing="dynamic_wave", geometry="tabulated",
+        dynamic_wave=DynamicWaveOptions(routing_step=5.0),
+        orifices=orifices, weirs=weirs, outlets=outlets)
+
+
+def _fed_heads(model, state, depths):
+    """`state` fed with the junctions at `depths` (m, junction order), the step start equal,
+    no flow."""
+    state = dict(state)
+    phi = state["water.phi"].clone()
+    phi[model.junction_idx] = model.junction_invert + torch.tensor(depths, dtype=F64)
+    state["water.phi"] = phi
+    state["sewer.junction_depth"] = torch.tensor(depths, dtype=F64)
+    state["water.q"] = torch.zeros_like(state["water.q"])
+    state["sewer.pipe_flow"] = torch.zeros_like(state["sewer.pipe_flow"])
+    return state
+
+
+def test_structure_element_is_swmms_flow_linearised_about_the_fed_heads():
+    """Design E5: ``q = c0 + g (dp - dp_fed)``, so at dp = dp_fed it is c0 (SWMM's flow)
+    whatever g; a flap gate clamps it at 0 (dflow 0 there); dflow is g elsewhere."""
+    from noodl.apps.sewer.dynwave import StructureLink
+    el = StructureLink("weir")
+    one = torch.ones(3, dtype=F64)
+    drv = {"water.weir.flow_offset": 0.05 * one, "water.weir.slope": 0.4 * one,
+           "water.weir.dp_fed": torch.tensor([0.3, 0.3, 0.3], dtype=F64),
+           "water.weir.flap_block_reverse": torch.tensor([0.0, 1.0, 0.0], dtype=F64),
+           "water.weir.flap_block_forward": torch.tensor([0.0, 0.0, 1.0], dtype=F64)}
+    dp = torch.tensor([0.3, 0.1, 0.4], dtype=F64)
+    torch.testing.assert_close(el.flow(dp, drv), torch.tensor([0.05, 0.0, 0.0], dtype=F64))
+    torch.testing.assert_close(el.dflow(dp, drv), torch.tensor([0.4, 0.0, 0.0], dtype=F64))
+    assert el.flow(torch.tensor([0.5, 0.5, -1.0], dtype=F64), drv)[1].item() == (
+        pytest.approx(0.13))
+    with pytest.raises(ValueError, match="kind must be one of"):
+        StructureLink("pump")
+
+
+@pytest.mark.parametrize("kind", ["orifice", "weir", "outlet"])
+def test_the_closure_feeds_swmms_regulator_flow_at_the_fed_heads(kind):
+    """dynwave.c:423-454: each regulator's c0 is `link_getInflow` at the previous pass's
+    node heads (m3/s = cfs x QCF), its slope SWMM's dqdh (an outlet's a central
+    difference; m2/s = cfs/ft x QCF/LCF), its dp_fed the fed head difference."""
+    from noodl.apps.sewer import structures as st
+    from noodl.model import StepContext
+    model, state, drivers = build_model(_regulated(kind))
+    hyd = model.dynamic_wave
+    s = hyd.structures[kind]
+    fed = _fed_heads(model, state, [0.1, 0.25, 0.05])
+    out = hyd(fed, drivers, StepContext(dt=5.0))
+    h = fed["water.phi"] / LCF
+    z = hyd.node_invert / LCF
+    args = (s.params, h[s.u], h[s.v], z[s.u], z[s.v], z[s.u] + s.offset1)
+    fn = {"orifice": st.orifice_flow, "weir": st.weir_flow, "outlet": st.outlet_flow}[kind]
+    ref = fn(*args)
+    slope = st.outlet_dqdh(*args) if kind == "outlet" else ref.dqdh
+    assert ref.flow.item() > 0.0
+    torch.testing.assert_close(out[f"water.{kind}.flow_offset"], ref.flow * QCF)
+    torch.testing.assert_close(out[f"water.{kind}.slope"], slope * QCF / LCF)
+    assert out[f"water.{kind}.dp_fed"].item() == pytest.approx(0.25 + 11.0 - 10.55)
+    assert model.link_names == ["C1", "C3", "R1"]
+    assert hyd.edge_kinds == ("pipe", kind)
+
+
+def test_orifice_end_areas_join_their_junctions_zeroed_at_a_critical_end():
+    """dynwave.c:503-524: an orifice gives each end node half its surfArea (a side
+    orifice's ``W(f yFull) L``, L >= 200 ft), but none to its downstream end while it is
+    DN_CRITICAL (crest above the downstream head); weirs give none."""
+    from noodl.model import StepContext
+    plain, s0, d0 = build_model(_regulated("weir"))
+    model, state, drivers = build_model(_regulated("orifice"))
+    hyd = model.dynamic_wave
+    for depths, critical in (([0.1, 0.2, 0.05], True), ([0.1, 0.2, 0.65], False)):
+        fed = _fed_heads(model, state, depths)
+        out = hyd(fed, drivers, StepContext(dt=5.0))
+        flow, _ = hyd._structure_terms(fed["water.phi"])[0]["orifice"]
+        half = flow.surf_area.item() / 2.0 * QCF / LCF
+        ref = plain.dynamic_wave(_fed_heads(plain, s0, depths), d0,
+                                 StepContext(dt=5.0))["water.storage_area"]
+        got = out["water.storage_area"]
+        assert half > 1.0                                    # W(y) x 200 ft / 2, in m2
+        assert got[1].item() == pytest.approx(ref[1].item() + half, rel=1e-12)
+        if critical:
+            assert got[2].item() == pytest.approx(ref[2].item(), rel=1e-12)
+        else:
+            assert got[2].item() == pytest.approx(ref[2].item() + half, rel=1e-12)
+
+
+def test_regulator_end_areas_are_zeroed_at_a_storage_unit():
+    """R44 (dynwave.c:520-523): at a storage node SWMM zeroes a regulator's end area
+    (never a conduit's): J2 a storage unit, its orifice end gives it nothing."""
+    from noodl.model import StepContext
+    model, state, drivers = build_model(_regulated("orifice", storage_at="J2"))
+    hyd = model.dynamic_wave
+    fed = _fed_heads(model, state, [0.1, 0.2, 0.65])
+    area = hyd(fed, drivers, StepContext(dt=5.0))["water.storage_area"][1].item()
+    links_ft2 = hyd._terms(fed, 5.0).surface_area2[0].item()          # C1's end at J2
+    assert area == pytest.approx((links_ft2 + 3.0 / LCF**2) * QCF / LCF, rel=1e-12)
+
+
+def test_regulators_set_crowns_and_full_depths_as_swmm_does():
+    """dynwave.c:137-153: a regulator's ends raise both nodes' crowns (node 1 offset1 +
+    yFull, node 2 the crest height as given + yFull); link.c:440-463: it extends only its
+    first node's full depth, and a bottom orifice none; link.c:425-433: a crest below the
+    downstream invert is raised to it (offset1 only)."""
+    hyd = build_model(_regulated("weir", crest=0.3))[0].dynamic_wave
+    assert hyd.crown_depth.tolist() == pytest.approx([0.6, 1.3, 1.3])
+    hyd = build_model(_regulated("weir", crest=0.3, j3_invert=11.5))[0].dynamic_wave
+    s = hyd.structures["weir"]
+    assert (s.offset1 * LCF).item() == pytest.approx(0.5)          # raised to J3's invert
+    assert (s.offset2 * LCF).item() == pytest.approx(0.3)
+    assert hyd.crown_depth.tolist() == pytest.approx([0.6, 1.5, 1.3])
+    net = _regulated("orifice", crest=0.5)
+    net = dataclasses.replace(net, manholes=tuple(
+        dataclasses.replace(m, ground=m.invert + 0.2) for m in net.manholes))
+    hyd = build_model(net)[0].dynamic_wave
+    assert hyd.full_depth.tolist() == pytest.approx([0.6, 0.7, 0.6])
+    hyd = build_model(dataclasses.replace(net, orifices=(dataclasses.replace(
+        net.orifices[0], orientation="bottom"),)))[0].dynamic_wave
+    assert hyd.full_depth.tolist() == pytest.approx([0.6, 0.6, 0.6])
+
+
+def test_an_outfall_on_a_regulator_takes_zero_normal_and_critical_depth():
+    """link.c:753-765: only a conduit computes yNorm and yCrit for its outfall; a regulator's
+    outfall gets 0 for both, then node.c's FREE/FIXED rules with z its offset (the crest
+    height at node 2)."""
+    q = torch.tensor([0.03, 0.0, 0.0], dtype=F64)
+    hyd = build_model(_regulated("outlet_to_outfall", crest=0.2))[0].dynamic_wave
+    assert hyd.outfall_on_structure.tolist() == [True]
+    assert hyd._outfall_heads(q[:1]).item() == 10.0
+    for stage, head in ((10.5, 10.5), (10.1, 10.1)):     # node.c:1473, 1481-1483
+        net = _regulated("outlet_to_outfall", crest=0.2, outfall_kind="fixed", stage=stage)
+        assert build_model(net)[0].dynamic_wave._outfall_heads(q[:1]).item() == (
+            pytest.approx(head))
+
+
+@pytest.mark.parametrize("kind", ["orifice", "weir", "outlet"])
+def test_a_run_ends_on_swmms_regulator_flow_at_its_own_heads(kind):
+    """The fixed point is SWMM's (design E5): after each step the regulator's solved flow is
+    `link_getInflow` at that step's own converged heads, and every junction holds SWMM's
+    trapezoidal continuity with it (to the head solve's default atol, `solve_atol`: a
+    junction balance within ``0.5 dt atol`` ~ 6e-9 m3 at these 12 m inverts)."""
+    from noodl.apps.sewer import structures as st
+    model, state, drivers = build_model(_regulated(kind), iterate_tol=1e-13)
+    hyd = model.dynamic_wave
+    s = hyd.structures[kind]
+    fn = {"orifice": st.orifice_flow, "weir": st.weir_flow, "outlet": st.outlet_flow}[kind]
+    seen = 0.0
+    for _ in range(60):
+        before = dict(state)
+        state, _ = simulate_dynamic_wave(model, state, drivers, steps=1)
+        h = state["water.phi"]
+        hf = (hyd.node_invert + torch.clamp(h - hyd.node_invert, min=0.0)) / LCF
+        z = hyd.node_invert / LCF
+        ref = fn(s.params, hf[s.u], hf[s.v], z[s.u], z[s.v], z[s.u] + s.offset1).flow * QCF
+        assert state["water.q"][2].item() == pytest.approx(ref.item(), rel=1e-7, abs=1e-10)
+        res = hyd.junction_residual(before, state, drivers)
+        assert res.abs().max().item() < 0.5 * 5.0 * solve_atol(model)
+        seen = max(seen, ref.item())
+    assert seen > 0.01
+
+
+def test_regulator_columns_start_dry():
+    """link.c:518 (link_initState): a regulator starts with no flow; its columns follow
+    the pipes' in ``water.q``."""
+    model, state, _ = build_model(_regulated("weir"))
+    assert state["water.q"].tolist() == [0.0, 0.0, 0.0]
+    assert model.dynamic_wave.edge_u.tolist()[-1] == list(model.net.nodes).index("J2")
+
+
+def test_a_junction_drained_by_an_outlet_alone_holds_continuity():
+    """An EXTRAN junction whose only outflow is an outlet (its crown the outlet's crest
+    plus SWMM's TINY DUMMY height, above that of its inflow conduit's end only if the
+    crest is high) surcharges once above that crown. SWMM's surcharged update divides by
+    ``sumdqdh`` (dynwave.c:716-741), which an outlet leaves 0, so above 1.25 crowns its
+    denominator is 0, every depth is a fixed point and SWMM freezes the depth, losing the
+    inflow (seen live: a 0.015 m3/s inflow, an outlet passing 0.0023 m3/s for 30 min).
+    noodl holds design E1's instantaneous continuity: the outlet passes the inflow. A
+    junction drained only by outlets is therefore listed in the docs' Limitations. The
+    outlet carries exactly what its inflow conduit brings (no storage term)."""
+    net = _regulated("outlet_to_outfall", crest=0.3, inflow=0.03)
+    net = dataclasses.replace(net, pipes=(dataclasses.replace(net.pipes[0], diameter=0.25),))
+    model, state, drivers = build_model(net)
+    assert model.dynamic_wave.crown_depth[1].item() == pytest.approx(0.3, abs=1e-6)
+    state, _ = simulate_dynamic_wave(model, state, drivers, steps=120)
+    assert model.dynamic_wave(state, drivers)["sewer.surcharged"][1].item() == 1.0
+    q_in, q_out = state["water.q"].tolist()
+    assert q_out == pytest.approx(q_in, abs=1e-9) and q_out > 0.029
+
+
+def test_regulators_are_refused_by_name_outside_their_scope():
+    """Kinematic/steady routing refuses regulators; malformed ones are refused by name."""
+    net = _regulated("orifice")
+    with pytest.raises(ValueError, match="orifice 'R1'.*dynamic-wave routing only"):
+        dataclasses.replace(net, routing="kinematic_wave", geometry="analytic").validate()
+    bad = [
+        (dict(orifices=(dataclasses.replace(net.orifices[0], name="C1"),)),
+         "duplicate link name"),
+        (dict(orifices=(dataclasses.replace(net.orifices[0], v="J9"),)), "names node 'J9'"),
+        (dict(orifices=(dataclasses.replace(net.orifices[0], shape="oval"),)), "shape"),
+        (dict(orifices=(dataclasses.replace(net.orifices[0], width=None),)), "width > 0"),
+        (dict(orifices=(dataclasses.replace(net.orifices[0], crest_height=-0.1),)),
+         "crest_height"),
+        (dict(orifices=(dataclasses.replace(net.orifices[0], v="J2"),)), "to itself"),
+    ]
+    for change, match in bad:
+        with pytest.raises(ValueError, match=match):
+            dataclasses.replace(net, **change).validate()
+    weir = _regulated("weir")
+    with pytest.raises(ValueError, match="roadway"):
+        dataclasses.replace(weir, weirs=(dataclasses.replace(weir.weirs[0], kind="roadway"),)
+                            ).validate()
+    outlet = _regulated("outlet")
+    with pytest.raises(ValueError, match="strictly increasing"):
+        dataclasses.replace(outlet, outlets=(dataclasses.replace(
+            outlet.outlets[0], rating=("tabular", (0.0, 0.0), (0.0, 1.0))),)).validate()
+    two = _regulated("outlet_to_outfall")
+    with pytest.raises(ValueError, match="attached to 2 links"):
+        dataclasses.replace(two, pipes=(*two.pipes, dataclasses.replace(
+            two.pipes[0], name="C9", u="J2", v="Out"))).validate()
