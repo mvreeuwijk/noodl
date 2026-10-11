@@ -360,7 +360,8 @@ has no fixed point -- the storage equation would end above the crown while at th
 junction already loses water, so SWMM's trials alternate between its two branches and do not
 converge -- noodl holds the junction at its crown (within a band below a millimetre) and
 releases the water the balance needs; every step then converges. `sewer.surcharged` reports
-the junctions above their crowns. A surcharged junction's head is resolved to
+the junctions above their crowns (SWMM's test): a junction held at its crown by that rule
+reports 1 without holding zero net inflow. A surcharged junction's head is resolved to
 `atol / sum(k)` with `sum(k)` its conduits' conveyance (~0.01 m2/s for a 0.3 m pipe), so the
 default head-solve tolerance (`solve_atol`, a few 1e-9 m3/s) leaves it a few 1e-7 m from the
 fixed point; pass `atol=1e-12` to `simulate_dynamic_wave` for tighter heads where no junction
@@ -565,7 +566,8 @@ publish numbers from this application.
   manhole, no loops. Dynamic-wave routing allows loops and flat or adverse conduits.
 - **Dynamic wave: no flooding, variable step, ponding, headspace air or quality yet**
   (planned). A junction above its full depth (MaxDepth extended to its crown) stops the run
-  with the junction's name and the time; `build_model(..., air=True)` or `quality=True` is
+  with the junction's name and the time, under either surcharge method; with no ground
+  (MaxDepth 0) that is the junction's crown, so it stops as soon as the junction surcharges; `build_model(..., air=True)` or `quality=True` is
   refused. Circular conduits only, one barrel, cold dry start. Under EXTRAN, where SWMM's own
   surcharge iteration has no fixed point, noodl holds the junction at its crown (see
   "Dynamic wave"), so such steps have no SWMM reference.

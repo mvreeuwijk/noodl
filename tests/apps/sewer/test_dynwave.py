@@ -628,3 +628,34 @@ def test_gradient_through_a_surcharged_junction():
     with torch.no_grad():
         fd = (loss(plain, n.detach() + h) - loss(plain, n.detach() - h)) / (2 * h)
     assert n.grad.item() == pytest.approx(fd.item(), rel=1e-6)
+
+
+def test_hold_band_never_acts_below_the_crown_at_a_large_storage_area():
+    """Review fix: with A_s = 2000 A_bed (2 m2 against a 0.001 m2 floor) a band of slope
+    (2/dt) K_HOLD A_bed would lie above the storage line everywhere below the crown. Below
+    the crown a free junction's withdrawal and slope are the storage form exactly; above
+    it the band is (2/dt) K_HOLD_STORAGE A_s = 8 m2/s, steeper than the storage's 0.8."""
+    from noodl.apps.sewer.dynwave import K_HOLD_STORAGE
+
+    ns = JunctionStorage(torch.tensor([0]), bed=torch.ones(1, dtype=F64), bed_area=0.001,
+                         crown=torch.full((1,), 1.3, dtype=F64))
+    drv = {"water.storage_area": torch.full((1,), 2.0, dtype=F64),
+           "water.head_start": torch.full((1,), 1.0, dtype=F64),
+           "water.net_inflow_start": torch.full((1,), 0.0, dtype=F64),
+           "water.storage_rate": torch.tensor(0.2, dtype=F64),
+           "water.surcharge_slope": torch.full((1,), 0.7, dtype=F64),
+           "water.head_last": torch.full((1,), 1.1, dtype=F64)}
+    drv["water.surcharged"] = ns.surcharged(drv)
+    assert drv["water.surcharged"].item() == 0.0
+
+    def at(h):
+        phi = torch.full((1,), h, dtype=F64)
+        return ns.flow(phi, drv).item(), ns.dflow(phi, drv).item()
+
+    for h in (1.05, 1.1, 1.3):                                 # storage form, exactly
+        w, dw = at(h)
+        assert w == pytest.approx(0.8 * (h - 1.0)) and dw == pytest.approx(0.8)
+    stiff = 0.4 * K_HOLD_STORAGE * 2.0
+    w, dw = at(1.31)                                           # band above the crown
+    assert w == pytest.approx(0.8 * 0.3 + stiff * 0.01) and dw == pytest.approx(stiff)
+    assert at(1.3 + 1e-12)[0] == pytest.approx(0.24)           # continuous at the crown

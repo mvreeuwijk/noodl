@@ -64,11 +64,24 @@ K_BED = 1.0e6
 #: K_HOLD eps |H| / 2`` (3e-13 m3/s at 12 m), which must stay below the 1e-12 m3/s a
 #: surcharged run's parity needs; the bed's K_BED would put that floor at 6e-10 m3/s.
 K_HOLD = 1.0e3
+#: The band is also at least `K_HOLD_STORAGE` times the junction's own storage slope
+#: ``2 A_s/dt``, so that above the crown it always rises faster than the storage line it
+#: starts from (a large A_s, e.g. a trunk junction or a large user MIN_SURFAREA, would
+#: otherwise outgrow ``K_HOLD A_bed``). Its round-off floor then scales with A_s: 6e-12
+#: m3/s at A_s = 1200 m2, 5 s and 12 m, above a 1e-12 m3/s head-solve atol there.
+K_HOLD_STORAGE = 10.0
 #: A surcharged junction's anchor slope floor (design E1): ``K_ANCHOR (2 A_s/dt)`` (m2/s) is
 #: added to the conduit conveyance its pass lags (`JunctionStorage`), so the junction's row
 #: of the head solve stays nonsingular even where every attached conduit's dependence on its
 #: head is lagged or limited. The anchor vanishes at the fixed point, so its size only
-#: shapes the iteration: 1e-6 of the storage slope is far below any full conduit's k.
+#: shapes the iteration: 1e-6 of the storage slope is far below any full conduit's k. Where
+#: the floor ALONE grounds the junction (every attached conduit pinned at the far end with
+#: no k left, dry or normal-flow limited) nothing bounds the pass's step but the floor:
+#: ``dH = dQ / (K_ANCHOR 2 A_s/dt)``, a large jump. Such a pass is still a valid iterate (the
+#: fixed point is unchanged), and if the jumps do not settle the step is refused by name
+#: for non-convergence, or the junction passes its full depth and is refused there. The
+#: common pinned case (an outflow conduit dropping to a DN_CRITICAL end) keeps its lagged k
+#: in the anchor, so the step is a Newton step, not the floor's.
 K_ANCHOR = 1.0e-6
 #: Newton's absolute residual tolerance for the head solve (m3/s): a junction balance error
 #: of `SOLVE_ATOL` dt m3 at most, far below the head tolerance times any surface area. It is
@@ -188,8 +201,8 @@ class JunctionStorage(NodeSource):
     crown a junction stores nothing: SWMM's surcharged update ``y_new = y_last + corr
     dQ/denom`` (`dynwave.c:716-741`) is at its fixed point exactly when the net inflow dQ is
     0. With ``w_c = (2 A_s/dt)(H_crown - H_start) - N_start`` the storage withdrawal at the
-    crown, ``stiff = (2 A_bed/dt) K_HOLD`` and the band ``b(H) = w_c + stiff (H -
-    H_crown)``:
+    crown, ``stiff = (2/dt) max(K_HOLD A_bed, K_HOLD_STORAGE A_s)`` and the band
+    ``b(H) = w_c + stiff (H - H_crown)``:
 
     - a SURCHARGED junction (driver ``"water.surcharged"`` 1, set by `surcharged` from the
       fed head ``H_last``: above the crown and ``b(H_last) > 0``, i.e. above the band where
@@ -198,8 +211,9 @@ class JunctionStorage(NodeSource):
       conveyance of the attached conduits that the pass lags into their c0 (a conduit whose
       other end is pinned), so that the pass is a Newton step in this junction's head, plus
       a floor `K_ANCHOR` (2 A_s/dt) that keeps the head solve nonsingular;
-    - any other junction withdraws ``max(storage(H), b(H))``: the storage equation below
-      its crown, then the stiff band, a convex curve (one Newton-safe solution per pass).
+    - any other junction withdraws ``storage(H)`` at and below its crown and ``max(storage(H),
+      b(H))`` above it (the band, which is steeper): continuous at the crown, a convex curve
+      (one Newton-safe solution per pass). The band never acts below the crown.
 
     The fixed points are SWMM's: a free-surface solution below the crown; a surcharged one
     (net inflow 0) above it -- the flag is lagged on the fed head as SWMM's test
@@ -242,14 +256,21 @@ class JunctionStorage(NodeSource):
         storage = (rate2 * area * (phi - drivers["water.head_start"])
                    - drivers["water.net_inflow_start"] + bed * dry)          # dynwave.c:694-711
         slope = rate2 * area + bed * (phi < self.bed).to(phi.dtype)
-        return storage, slope, rate2 * self.bed_area * K_HOLD
+        return storage, slope, self._stiff(drivers)
+
+    def _stiff(self, drivers: Mapping) -> Tensor:
+        """The band's slope (m2/s, per junction): ``(2/dt) max(K_HOLD A_bed,
+        K_HOLD_STORAGE A_s)``."""
+        rate2 = 2.0 * drivers["water.storage_rate"]
+        return rate2 * torch.clamp(K_HOLD_STORAGE * drivers["water.storage_area"],
+                                   min=K_HOLD * self.bed_area)
 
     def _band(self, phi: Tensor, drivers: Mapping) -> Tensor:
         """The band ``w_c + stiff (H - H_crown)`` (m3/s) at `phi` (m)."""
         rate2 = 2.0 * drivers["water.storage_rate"]
         w_c = (rate2 * drivers["water.storage_area"] * (self.crown - drivers["water.head_start"])
                - drivers["water.net_inflow_start"])
-        return w_c + rate2 * self.bed_area * K_HOLD * (phi - self.crown)
+        return w_c + self._stiff(drivers) * (phi - self.crown)
 
     def surcharged(self, drivers: Mapping) -> Tensor:
         """The EXTRAN surcharge flag (0/1, float64) from the fed heads
@@ -265,7 +286,8 @@ class JunctionStorage(NodeSource):
         storage, _, _ = self._storage(phi_nodes, drivers)
         if not self.extran:
             return storage
-        free = torch.maximum(storage, self._band(phi_nodes, drivers))
+        free = torch.where(phi_nodes > self.crown,
+                           torch.maximum(storage, self._band(phi_nodes, drivers)), storage)
         anchor = drivers["water.surcharge_slope"] * (phi_nodes - drivers["water.head_last"])
         return torch.where(drivers["water.surcharged"] > 0.5, anchor, free)  # dynwave.c:716
 
@@ -274,7 +296,8 @@ class JunctionStorage(NodeSource):
         storage, slope, stiff = self._storage(phi_nodes, drivers)
         if self.extran:
             band = self._band(phi_nodes, drivers)
-            slope = torch.where(band > storage, stiff.expand_as(band), slope)
+            on_band = (phi_nodes > self.crown) & (band > storage)
+            slope = torch.where(on_band, stiff.expand_as(band), slope)
             slope = torch.where(drivers["water.surcharged"] > 0.5,
                                 drivers["water.surcharge_slope"].expand_as(slope), slope)
         return slope.expand(torch.broadcast_shapes(slope.shape, phi_nodes.shape))
@@ -301,7 +324,9 @@ class DynamicWaveHydraulics:
     and ``"water.head_last"`` (the fed junction heads, m); a surcharged junction holds
     instantaneous continuity, net inflow 0 (see `JunctionStorage` for the tie rule at the
     crown). ``"sewer.surcharged"`` reports SWMM's own test, depth above the crown
-    (`dynwave.c:688`). Under SLOT no junction is ever surcharged (`dynwave.c:677`).
+    (`dynwave.c:688`): a junction held on the band at its crown (the tie rule) reports 1
+    although it is not holding dQ = 0 -- the solve's own flag is the driver
+    ``"water.surcharged"``. Under SLOT no junction is ever surcharged (`dynwave.c:677`).
 
     The arithmetic is SWMM's own, in feet (design D2); `layer` names the head layer.
     """
