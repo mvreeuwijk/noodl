@@ -798,6 +798,12 @@ class DynamicWaveHydraulics:
                            torch.full_like(head_thr, torch.inf))
         nearest = inf.scatter_reduce(-1, index, dist, "amin")
         chosen = finite & (dist == nearest[..., nodes])
+        # an exact distance tie (two ends with one threshold head) takes the lowest end index
+        order = torch.arange(nodes.shape[-1]).expand(index.shape)
+        ranked = torch.where(chosen, order, torch.full_like(order, nodes.shape[-1]))
+        first = torch.full(batch + (n,), nodes.shape[-1], dtype=torch.long)
+        first = first.scatter_reduce(-1, index, ranked, "amin")
+        chosen = chosen & (order == first[..., nodes])
 
         def pick(values: Tensor, empty: float) -> Tensor:
             base = torch.full(batch + (n,), empty, dtype=F64)
@@ -929,7 +935,11 @@ class DynamicWaveHydraulics:
         drop = None
         if dt is not None:
             # the drop-end area switch (JunctionStorage): a junction held on its threshold
-            # has its chosen drop end classified on the upper side, SWMM's class AT it
+            # has its chosen drop end classified on the upper side, SWMM's class AT it. The
+            # hold set is decided once per pass, from the first evaluation's areas and the
+            # fed net inflow (which does not depend on the class), and fixed for the pass:
+            # the re-evaluation only supplies the held class's areas, so re-deciding on it
+            # would let the class it sets feed back into its own decision within one pass.
             drop = self._drop_switch(state, terms, out["sewer.net_inflow"], dt)
             if bool(drop["held"].any()):
                 terms = self._terms(state, dt, (drop["hold1"], drop["hold2"]))

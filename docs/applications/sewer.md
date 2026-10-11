@@ -419,9 +419,12 @@ $(2 - \theta)$ quarters of the conduit: half (the critical side's) at $\theta = 
 J3's head moves C3's flow and with it the threshold, and the passes cycled.
 
 On three variants of `options_dynwave.inp` (a 0.03 m or 0.1 m outlet offset on C3, or C6
-without its flap gate) the rule holds the junction on its threshold exactly on SWMM's
-non-converging steps and nowhere else, and every step converges, with Anderson and with
-plain relaxation (see "Dynamic wave against SWMM").
+without its flap gate) every step converges, with Anderson and with plain relaxation. In
+noodl's own runs the rule holds a junction only on the steps where SWMM's run first fails
+(0.03 m: 60 and 62; 0.1 m: 107; gate off: 106 and 129), nowhere else over the 359 steps.
+SWMM also fails on step 167 of the 0.03 m variant; that step lies in SWMM's own history,
+which differs from noodl's after step 60. Started from SWMM's state before it, noodl holds
+J5 on its threshold there too (see "Dynamic wave against SWMM").
 
 #### Starting state and zero fall
 

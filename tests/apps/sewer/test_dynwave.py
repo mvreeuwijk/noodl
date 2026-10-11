@@ -1559,9 +1559,13 @@ def test_variable_step_scales_the_courant_step_by_mod_length_over_length():
 # ------------------------------------------------------------- the drop-end area switch
 OPTIONS = DATA / "options_dynwave.inp"
 #: Variants of options_dynwave.inp on which a junction below a drop fills through its
-#: area threshold: (the fixture line, its replacement, SWMM 5.2.4's non-converging steps at
-#: HEAD_TOLERANCE 1e-12 m and 500 trials (1-based; tests/verification/
-#: test_sewer_dynwave_parity.py measures them), the junction).
+#: area threshold: (the fixture line, its replacement, the steps (1-based) on which NOODL'S
+#: OWN RUN holds the junction on its threshold over all 359 steps, the junction). Those are
+#: the steps on which SWMM's own run first fails to converge; SWMM's full list of
+#: non-converging steps is in tests/verification/test_sewer_dynwave_parity.py
+#: (``DROP_SWMM_FAILS``): it adds step 167 of the 0.03 m variant, which lies in SWMM's own
+#: history (noodl's differs after step 60) and where noodl, started from SWMM's state,
+#: holds J5 (asserted there).
 DROP_VARIANTS = {
     # C3 (J3 -> J4, two barrels) gets a 0.03 m outlet offset: J4 fills behind the closed
     # outfall gate, through C3's DN_CRITICAL threshold min(yN, yC)
@@ -1659,16 +1663,18 @@ def test_a_junction_filling_below_a_drop_is_held_on_its_area_threshold(tmp_path)
 @pytest.mark.slow
 @pytest.mark.parametrize("name", sorted(DROP_VARIANTS))
 @pytest.mark.parametrize("acceleration", ["anderson", None])
-def test_every_drop_variant_converges_held_exactly_where_swmm_fails(tmp_path, name,
-                                                                    acceleration):
-    """Each variant through one step past SWMM's last non-converging one, Anderson and
-    plain relaxation: every step converges, and the junction is held on its threshold on
-    SWMM's failing steps and nowhere else (on SWMM's own fixed point elsewhere)."""
-    _, _, fails, junction = DROP_VARIANTS[name]
-    diags, held = _drop_sides(tmp_path, name, max(fails) + 1, acceleration=acceleration)
+def test_every_drop_variant_converges_held_only_where_swmm_first_fails(tmp_path, name,
+                                                                       acceleration):
+    """Each variant, Anderson over all 359 steps and plain relaxation through one step past
+    the last held one: every step converges, and the junction is held on its threshold on
+    the listed steps (those where SWMM's own run fails, `DROP_VARIANTS`) and nowhere else --
+    on SWMM's own fixed point on every other step."""
+    _, _, held_steps, junction = DROP_VARIANTS[name]
+    steps = 359 if acceleration == "anderson" else max(held_steps) + 1
+    diags, held = _drop_sides(tmp_path, name, steps, acceleration=acceleration)
     assert all(bool(d["converged"]) for d in diags)
     on = {k + 1: step for k, step in enumerate(held) if step}
-    assert set(on) == set(fails) and all(set(s) == {junction} for s in on.values()), on
+    assert set(on) == set(held_steps) and all(set(s) == {junction} for s in on.values()), on
     for step in on.values():
         gap, theta = step[junction]
         assert abs(gap) <= 1e-9 and 0.0 < theta < 1.0, step

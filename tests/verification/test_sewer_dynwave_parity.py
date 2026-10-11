@@ -54,6 +54,7 @@ import torch
 
 from noodl.apps.sewer import build_model, read_swmm_inp, simulate_dynamic_wave
 from noodl.apps.sewer.xsect_tables import QCF
+from noodl.model import StepContext
 
 pyswmm = pytest.importorskip("pyswmm")
 
@@ -835,22 +836,26 @@ def test_options_variable_step_matches_swmm_at_every_step(tmp_path):
 # ------------------------------------------------------ the drop-end area switch (C2b)
 #: Variants of the options fixture on which a junction below an outlet offset fills
 #: through the offset end's area threshold (`DynamicWaveHydraulics`, the drop-end area
-#: switch; tests/apps/sewer/test_dynwave.py::DROP_VARIANTS holds the same edits): the
-#: fixture line, its replacement and SWMM 5.2.4's non-converging steps (1-based) over the
-#: 359 steps, each a step on which a junction's storage equation has no fixed point.
+#: switch; tests/apps/sewer/test_dynwave.py::DROP_VARIANTS holds the same edits with the
+#: steps noodl's own run holds): the fixture line and its replacement.
 DROP_VARIANTS = {
     "c3_offset_0.03": ("C3               J3               J4               200        0.013"
                        "      0          0  ",
                        "C3               J3               J4               200        0.013"
-                       "      0          0.03", [60, 62, 167]),
+                       "      0          0.03"),
     "c3_offset_0.1": ("C3               J3               J4               200        0.013"
                       "      0          0  ",
                       "C3               J3               J4               200        0.013"
-                      "      0          0.1", [107]),
+                      "      0          0.1"),
     "c6_gate_off": ("C6               0          0          0          YES        0",
-                    "C6               0          0          0          NO         0",
-                    [106, 129]),
+                    "C6               0          0          0          NO         0"),
 }
+#: SWMM 5.2.4's non-converging steps (1-based) over the 359 steps of its own run of each
+#: variant (HEAD_TOLERANCE 1e-12 m, 500 trials), each a step on which a junction's storage
+#: equation has no fixed point. Step 167 of the 0.03 m variant lies in SWMM's own history:
+#: noodl's run differs from it after step 60 and does not reach that threshold there.
+DROP_SWMM_FAILS = {"c3_offset_0.03": [60, 62, 167], "c3_offset_0.1": [107],
+                   "c6_gate_off": [106, 129]}
 #: The scale of SWMM's own oscillation on its non-converging steps of these variants (m,
 #: m3/s): its trials cycle between the two sides of the threshold and its last trial is
 #: wherever they stopped (on step 167 of the 0.03 m variant, emulating dynwave.c's trials
@@ -861,7 +866,7 @@ DROP_FAIL_DEPTH, DROP_FAIL_FLOW = 1e-3, 5e-5
 
 
 def _drop_inp(tmp_path, name):
-    old, new, _ = DROP_VARIANTS[name]
+    old, new = DROP_VARIANTS[name]
     text = (DATA / OPTIONS_NAME).read_text()
     assert text.count(old) == 1, name
     path = tmp_path / f"{name}.inp"
@@ -969,14 +974,36 @@ def _restart_differences(inp, rows, conn, steps):
                                    inflow=drivers["inflow"].expand(len(steps), -1),
                                    diagnostics=diags)
     idx = torch.cat([model.junction_idx, hyd.outfall_idx])
-    result = {}
+    # the drop-end switch's drivers of a pass fed each instance's result (`_held`)
+    drv = hyd({"water.phi": out["water.phi"], "water.q": out["water.q"]}
+              | {key: start[key] for key in hyd.state_keys},
+              dict(drivers, inflow=drivers["inflow"].expand(len(steps), -1)),
+              StepContext(dt=hyd.options.routing_step))
+    result, held = {}, {}
     for b, k in enumerate(steps):
         phi, q = heads_flows(k)
         depth = (out["water.phi"][b] - phi)[idx].abs().max().item()
         excess = ((out["water.q"][b] - q).abs()
                   - (TOL_FLOW_REL * q.abs() + TOL_FLOW_ABS)).max().item()
         result[k] = (depth, excess)
-    return bool(diags[0]["converged"].all()), result
+        held[k] = _held(hyd, out["water.phi"][b][model.junction_idx],
+                        {key: value[b] if value.dim() > 1 else value for key, value in drv.items()})
+    return bool(diags[0]["converged"].all()), result, held
+
+
+def _held(hyd, heads, drv):
+    """The junctions held on a drop-end area threshold by one solution's drivers `drv`
+    (those of a pass fed it): ``{junction: H - H*}`` (m) where the net inflow lies inside
+    the jump at the threshold head H*."""
+    h_star = drv["water.area_switch_head"]
+    rate2 = 2.0 * drv["water.storage_rate"]
+    rise = h_star - drv["water.head_start"]
+    lo = rate2 * drv["water.area_below"] * rise - drv["water.net_inflow_start"]
+    hi = rate2 * drv["water.area_above"] * rise - drv["water.net_inflow_start"]
+    n = drv["water.net_inflow_last"]
+    return {name: (heads[j] - h_star[j]).item()
+            for j, name in enumerate(hyd.junction_names)
+            if bool(torch.isfinite(h_star[j])) and lo[j] < n[j] < hi[j]}
 
 
 def _check_restarts(result, fails):
@@ -1000,23 +1027,25 @@ def test_drop_switch_matches_swmm_one_step_from_its_state_around_its_failure(tmp
     max(yN, yC) and its storage equation has no fixed point. noodl converges on all of
     them: at the targets wherever SWMM converged from a converged start (100-106 and
     109-115), within SWMM's own oscillation on 107 and 108 (`DROP_FAIL_DEPTH`,
-    `DROP_FAIL_FLOW`)."""
+    `DROP_FAIL_FLOW`), holding J4 on its threshold on 107 only."""
     inp = _drop_inp(tmp_path, "c3_offset_0.1")
     rows, conn, engine, _ = _swmm_rows(inp)
     assert engine == "5.2.4"
     assert _swmm_not_converged_within(inp, 106) == 0
     assert _swmm_not_converged_within(inp, 107) == 1
     assert _swmm_not_converged_within(inp, 115) == 1
-    converged, result = _restart_differences(inp, rows, conn, list(range(100, 116)))
+    converged, result, held = _restart_differences(inp, rows, conn, list(range(100, 116)))
     assert converged
     _check_restarts(result, [107])
+    assert {k for k, h in held.items() if h} == {107}, held
+    assert abs(held[107]["J4"]) <= 1e-9, held
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize("name", sorted(DROP_VARIANTS))
 def test_drop_switch_matches_swmm_wherever_swmm_converges(tmp_path, name):
     """Each drop variant over all 359 steps. E9: SWMM converges on all but the steps listed
-    in `DROP_VARIANTS` (measured here); those and the steps after them are excluded.
+    in `DROP_SWMM_FAILS` (measured here); those and the steps after them are excluded.
 
     - noodl's own run converges on every step and meets the targets on every step before
       SWMM's first failure. From that step on the two histories differ by what each did
@@ -1024,12 +1053,14 @@ def test_drop_switch_matches_swmm_wherever_swmm_converges(tmp_path, name):
       persists as stored volume behind the closed outfall gate (up to 3e-4 m), so later
       steps of the two runs are not a fixed-point comparison.
     - Started from SWMM's own state before each step (`_restart_differences`), noodl meets
-      the targets on every step SWMM converged from a converged start, and is within
-      SWMM's oscillation on its failing steps and the steps after them."""
+      the targets on every step SWMM converged from a converged start, is within SWMM's
+      oscillation on its failing steps and the steps after them, and holds a junction on
+      its threshold (to 1e-9 m) on exactly SWMM's failing steps (measured: J4 at 60 and 62
+      and J5 at 167 of the 0.03 m variant, J4 at 107, J5 at 106 and 129)."""
     inp = _drop_inp(tmp_path, name)
     rows, conn, engine, _ = _swmm_rows(inp)
     assert engine == "5.2.4"
-    fails = DROP_VARIANTS[name][2]
+    fails = DROP_SWMM_FAILS[name]
     assert _swmm_failing_steps(inp, len(rows)) == fails
     net, _, _ = read_swmm_inp(inp)
     model, state, drivers = build_model(net, iterate_tol=ITERATE_TOL, iterate_max=ITERATE_MAX)
@@ -1040,6 +1071,13 @@ def test_drop_switch_matches_swmm_wherever_swmm_converges(tmp_path, name):
     assert all(bool(d["converged"]) for d in diags)
     diffs = _differences(name, rows, conn, fails[0] - 1, run=(net, model, hist, None))
     _assert_parity(_worst(diffs))
-    converged, result = _restart_differences(inp, rows, conn, list(range(2, len(rows) + 1)))
+    converged, result, held = _restart_differences(inp, rows, conn,
+                                                   list(range(2, len(rows) + 1)))
     assert converged
     _check_restarts(result, fails)
+    # started from SWMM's state, noodl holds a junction on its threshold exactly on
+    # SWMM's failing steps -- including step 167 of the 0.03 m variant, which lies in
+    # SWMM's own history only (J5) -- and on no other step
+    on = {k: h for k, h in held.items() if h}
+    assert set(on) == set(fails), on
+    assert all(abs(gap) <= 1e-9 for h in on.values() for gap in h.values()), on
