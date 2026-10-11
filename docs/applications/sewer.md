@@ -135,9 +135,11 @@ model, state, drivers = build_model(
 a prescribed extraction (m³/s, positive out).
 
 `build_model` dispatches on `net.routing`. A `"dynamic_wave"` network is built by
-`build_dynamic_wave_model`: water only, with `iterate_tol` (m, default 1e-11) and
+`build_dynamic_wave_model`, with `iterate_tol` (m, default 1e-11) and
 `iterate_max` (default 2000 passes) controlling the head iteration. For it, `air`, `quality`
-and `storage` default to `False` and `True` is refused, naming the option; `iterate_tol` and
+and `storage` default to `False`; `quality=True` adds the water-quality layer of `species`
+(see [Quality on the dynamic wave](#quality-on-the-dynamic-wave)), and `air=True` and
+`storage=True` are refused, naming the option; `iterate_tol` and
 `iterate_max` are refused for the other routings. Run it with `simulate_dynamic_wave` (see
 [Dynamic wave](#dynamic-wave)), not `sewer_steady`.
 
@@ -605,8 +607,10 @@ head difference, as the head solve's Newton step needs. A set `InitDepth`, `Init
 The reader refuses by name, with the line number, `ALLOW_PONDING YES`, loss coefficients
 and seepage in `[LOSSES]`, storage evaporation and exfiltration, roadway weirs, weir coefficient curves and regulators with `LINK_OFFSETS
 ELEVATION` (see [SWMM `.inp`](../formats/swmm.md)).
-`build_model` with `air=True`, `quality=True` or `storage=True` is refused by name. Ponding,
-headspace air and quality on the dynamic wave are planned.
+`build_model` with `air=True` or `storage=True` is refused by name; `quality=True` builds
+the water-quality layer on the solved flows (see
+[Quality on the dynamic wave](#quality-on-the-dynamic-wave)). Ponding and headspace air on
+the dynamic wave are planned.
 
 ```python
 from noodl.apps.sewer import read_swmm_inp, build_model, simulate_dynamic_wave
@@ -695,6 +699,61 @@ without one by name). `tests/verification/test_sewer_dynwave_parity.py` runs the
 lets it fall) against SWMM 5.2.4 at every step for the `TIDAL` outfall and for the same stage
 as a `TIMESERIES` outfall, and the variable-step tree with the tide, with SWMM converging on
 every step: the worst depth difference is 8.4e-10 m.
+
+#### Quality on the dynamic wave
+
+`build_model(net, quality=True, species=...)` on a dynamic-wave network adds the transport
+layer `"water_quality"` (kg/m³, one row per junction, the outfalls its boundary) on the
+solved flows. Every edge kind of the `"water"` layer (conduits, orifices, weirs, outlets) is
+one of its flow kinds, so it reads `"water.q"` and is upwind by the sign of each flow: a
+conduit carrying its water against its own orientation (the loop's adverse conduit) carries
+the tracer from its `v` end. An orifice, weir or outlet carries water between junctions but
+holds none, as in SWMM, which gives a non-conduit link its upstream node's quality
+(`qualrout.c:282-288`). The head iteration judges the layer too (`iterate_tol` 1e-12 kg/m³);
+its concentrations follow the flows of each pass, which costs 1-5 % more passes.
+
+Each species `s` enters with the lateral inflow at the concentration of the driver
+`"<s>_in"` (kg/m³, one per node). `"bod"` decays and `"sulfide"` is generated
+(Pomeroy–Parkhurst, see [Quality](#quality)); a species of any other name is a conservative
+tracer. Sulfide needs `"bod"`, and it needs a single outgoing conduit at every junction,
+whose hydraulic radius `sewer.R_h`, speed `sewer.v` and mean depth `sewer.d_m` (exact circle
+at the link depth, one barrel) it reads. A loop, an adverse conduit or a junction drained
+only by a regulator therefore refuses sulfide, naming the junctions; BOD and tracers need no
+conduit and build on any network. In a conduit flowing full (`d_m = 0`, no free surface)
+sulfide is still generated, without the loss term, and the loss term reads the speed $|v|$.
+
+**Control volumes.** Each junction's capacity is the water its transport control volume
+holds, carried as `"sewer.quality_volume"` (m³). It starts at half the summed wetted volume
+of the attached conduits (`sewer.V_wet`, totals over barrels) plus a storage unit's own
+volume, floored at 1e-9 m³; half of an outfall conduit belongs to no junction. From there it
+follows the junction's continuity on the flows the transport sees,
+
+$$
+V_{\text{end}} = \max\big(V_{\text{start}} + \Delta t\,(N - Q_{\text{overflow}}),\ 10^{-9}\ \text{m}^3\big),
+$$
+
+with $N$ the junction's net inflow (its lateral inflow and every link's flow) and
+$Q_{\text{overflow}}$ SWMM's flooding loss. The transport step's amount form,
+$V_{\text{end}} x_{\text{end}} - V_{\text{start}} x_{\text{start}} = \Delta t\,F(x_{\text{end}})$,
+then balances water as exactly as it balances mass, so water that starts and enters at one
+concentration keeps it while the network fills and drains. Half-volumes alone do not: a
+conduit filling from its upstream end gives its surface area, and so its water, to that
+junction (`dwflow.c:357-411`), while the halves split it, and on the tree's filling a uniform
+inflow concentration of 1 came out anywhere between 0 and 5. A flooded junction's overflow
+leaves at the junction's concentration (`OverflowLoss`, applied before the transport step,
+with the same water taken out of the control volume).
+
+**Against SWMM's scheme.** A conduit's concentration is its upwind junction's. SWMM's
+reactors are the conduits: each mixes its upstream node's concentration over its own volume,
+with the inflow raised by the volume change so that the conduit's water balances
+(`qualrout.c:315-341`). Its junctions hold no volume and mix the upstream links'
+start-of-step concentrations (`qualrout.c:210`, a lag of one step each). At steady flow
+both give every conduit the flow-weighted mixture of what enters upstream. In transit the
+two differ by their residence times, by design: the tracer arrives shifted by the
+difference of the chains' mean delays, $T_{\text{noodl}} - T_{\text{SWMM}}$ (on the tree
+noodl's is the shorter: a junction's control volume holds roughly the upstream part of its
+conduits, where SWMM's reactor is the whole conduit; see
+[Dynamic wave against SWMM](#dynamic-wave-against-swmm)).
 
 ### Headspace air
 
@@ -915,6 +974,37 @@ forms in `tests/apps/sewer/test_structures.py`): a surcharged weir (above its op
 sideflow and trapezoidal weirs, functional and `/HEAD` outlets, and an orifice ending at a
 storage unit, where SWMM zeroes its end area.
 
+Water quality is compared with a conservative tracer (a `[POLLUTANTS]` entry without
+decay, written into copies of the fixtures; noodl takes the tracer as a driver):
+
+- the tree, J1's lateral inflow carrying none for an hour while the hydraulics settle, then
+  ramping to 100 mg/L over 10 min and holding it to 3 h; noodl is driven step by step with
+  SWMM's own J1 concentration (J1 has only its lateral inflow, so that is the inflow
+  concentration SWMM applied over the step);
+- the loop, 100 mg/L entering at J1 and 40 mg/L at J3 from the start, for 3.5 h (its
+  hydraulics settle slowly: at 2 h both codes are still 1e-6 from steady state). J3's water
+  reaches J4 through the reversed conduit Cd.
+
+SWMM converges on every step of both. In transit the codes differ by design (see
+[Quality on the dynamic wave](#quality-on-the-dynamic-wave)), so the transit checks test
+SWMM against its own scheme and the difference against what the two schemes predict. At
+steady flow both are linear chains with the same gain $g$, so the area between a conduit's
+concentration and its final value is $g\,u\,T$, $T$ the chain's mean delay: SWMM's
+$\sum V_{\text{conduit}}/q$ plus one step per junction passed, noodl's
+$\sum V_j/q_{\text{out}}$. For step responses rising monotonically to $g$, the pointwise
+difference is at most $\max|\Delta u|\,g\,(T_{\text{noodl}} + T_{\text{SWMM}})/\Delta t$.
+
+| Check | Target | Measured worst |
+|---|---|---|
+| Tracer at steady state, every conduit (tree / loop) | rel 1e-8 | 4.2e-11 / 2.5e-10 |
+| SWMM's tree concentrations against `qualrout.c` ported on SWMM's own flows and volumes, every step | abs 1e-12 of the plateau | 4.7e-16 kg/m³ |
+| Area between SWMM's and noodl's concentration in transit (C1 / C3 / C5) against $g\,u\,(T_{\text{noodl}} - T_{\text{SWMM}})$ | rel 1e-6 | 1.5e-11 / 5.7e-11 / 2.6e-10 |
+| Pointwise difference in transit (C1 / C3 / C5), of each conduit's plateau | the bound above: 57 % / 49 % / 61 % | 25 % / 18 % / 9 % |
+
+The mean delays to C1 / C3 / C5 are $T_{\text{SWMM}}$ = 259 / 456 / 628 s and
+$T_{\text{noodl}}$ = 82 / 306 / 542 s. The quality runs are slow tests (the loop's takes
+about 11 min).
+
 The same networks with SWMM at its **default** tolerance (`HEAD_TOLERANCE` 0.0015 m,
 `MAX_TRIALS` 8), against noodl's converged answer:
 
@@ -963,7 +1053,7 @@ publish numbers from this application.
   backwater.
 - **Kinematic-wave and steady routing: dendritic networks only**, one outgoing pipe per
   manhole, no loops. Dynamic-wave routing allows loops and flat or adverse conduits.
-- **Dynamic wave: no ponding, headspace air or quality yet** (planned); storage units
+- **Dynamic wave: no ponding or headspace air yet** (planned); storage units
   without evaporation or exfiltration; no pumps, dividers, roadway weirs or control rules.
   A junction drained only by outlets (whose crown is then the outlet's crest plus SWMM's
   1e-6 ft DUMMY height) surcharges under EXTRAN as soon as it is wet above that crest, and
@@ -974,7 +1064,7 @@ publish numbers from this application.
   an outlet from a storage unit, as SWMM's own examples do.
   Flooded water is lost, as in SWMM without ponding; with no ground (`MaxDepth` 0) and no
   `SurDepth` a junction floods as soon as it fills to its crown. `build_model(...,
-  air=True)` or `quality=True` is refused. Circular conduits only. Under EXTRAN, where SWMM's own
+  air=True)` is refused. Circular conduits only. Under EXTRAN, where SWMM's own
   surcharge iteration has no fixed point, noodl holds the junction at its crown (see
   "Dynamic wave"), so such steps have no SWMM reference. Likewise where SWMM's normal-flow
   slope test has no consistent side (a draining outfall conduit), noodl puts the solution
@@ -991,6 +1081,17 @@ publish numbers from this application.
   histories then differ by up to SWMM's oscillation (3e-4 m on the options fixture with a
   0.03 m offset on C3). The rule picks one threshold per junction, the nearest to its
   head; two drop ends switching at one junction in the same step are not covered.
+- **Dynamic-wave quality: junction reactors, not SWMM's conduit reactors.** Steady
+  concentrations agree with SWMM; in transit the tracer arrives shifted by the difference of
+  the residence times (on the tree's ramp up to 25 % of the plateau at the head conduit,
+  9 % at the outfall conduit). The transport control volume follows the junction's
+  continuity, not its geometry, so it drifts from the half-volumes it starts at (at the
+  tree's steady state J1 holds 2.0 m³ against C1's 6.5 m³). A junction drained dry keeps the
+  1e-9 m³ floor, where the water balance is no longer exact. Sulfide needs a single
+  outgoing conduit at every junction (refused by name on loops, adverse conduits and
+  junctions drained by a regulator); BOD and tracers do not. Water starts clean: SWMM's
+  `Cinit` is not read. Headspace air (and so H₂S transfer) is not yet built on the dynamic
+  wave.
 - **No gas-phase sulfide sink.** H₂S leaves the headspace by ventilation, at the outfall, and
   by re-absorption into the water (the two-film flux is signed); no wall uptake or gas-phase
   oxidation is modelled.

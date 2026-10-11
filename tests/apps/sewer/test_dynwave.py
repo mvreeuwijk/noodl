@@ -133,14 +133,13 @@ def test_default_pass_budget_covers_a_slow_outfall_head():
     assert model.iterate_max == 2000
 
 
-def test_build_model_dispatches_and_refuses_air_and_quality(tmp_path):
+def test_build_model_dispatches_and_refuses_air(tmp_path):
     net = _tree(tmp_path)
     model, state, drivers = build_model(net)
     assert "water" in model.potential and model.potential["water"].quantity == "head"
+    assert not model.transport
     with pytest.raises(ValueError, match="air"):
         build_model(net, air=True)
-    with pytest.raises(ValueError, match="quality"):
-        build_model(net, air=False, quality=True)
 
 
 def test_cold_start_is_dry_at_the_inverts(tmp_path):
@@ -2298,3 +2297,265 @@ def test_simulate_takes_its_own_stage_function_over_the_models():
                                     outfall_stage={"Outfall": 8.7})
     torch.testing.assert_close(hist["water.phi"][:, model.dynamic_wave.outfall_idx],
                                torch.full((2, 1), 8.7, dtype=F64))
+
+
+# ---------------------------------------------------------------- quality (design E7)
+def _tracer_run(net, steps, loads, *, species=("tracer",), loaded=None, **build):
+    """`net` with a quality layer of `species`, the lateral inflow at the junctions of
+    `loads` ({junction: kg/m3}) carrying the species `loaded` (default the first) and no
+    other, run `steps` steps one at a time: the model, the drivers and the states (the
+    initial one first)."""
+    model, state, drivers = build_model(net, quality=True, species=species, **build)
+    load = torch.zeros(model.net.n, dtype=F64)
+    for name, value in loads.items():
+        load[model.net.nodes.index(name)] = value
+    drivers = dict(drivers, **{f"{s}_in": load for s in (loaded or species[:1])})
+    states = [state]
+    for _ in range(steps):
+        state, _ = simulate_dynamic_wave(model, state, drivers, steps=1)
+        states.append(state)
+    return model, drivers, states
+
+
+def _amount(state):
+    """The stored amount of the first species per junction (kg): capacity times
+    concentration."""
+    x = state["water_quality.x"]
+    return state["water_quality.capacity"] * (x if x.dim() == 1 else x[..., 0])
+
+
+def _outfall_flux(model, state):
+    """The first species' flux into the outfalls at `state` (kg/s): each outfall link's
+    flow away from the network times its upwind junction's concentration (an outfall's own
+    concentration, the boundary value, is 0)."""
+    hyd = model.dynamic_wave
+    x = state["water_quality.x"]
+    x = x if x.dim() == 1 else x[..., 0]
+    full = torch.zeros(model.net.n, dtype=F64)
+    full[model.junction_idx] = x
+    flux = 0.0
+    for col, at_v in zip(model.outfall_link_idx.tolist(), hyd.outfall_at_v.tolist(),
+                         strict=True):
+        q = float(state["water.q"][col])
+        out = q if at_v else -q                   # positive into the outfall
+        inner = int(hyd.edge_u[col] if at_v else hyd.edge_v[col])
+        flux += max(out, 0.0) * float(full[inner])
+    return flux
+
+
+def test_build_model_builds_quality_on_the_solved_flows(tmp_path):
+    """Design E7: ``water_quality`` advects on every link of the head layer (its flows are
+    ``"water.q"``, `Model.flow_layer_of`), its interior is the junctions in junction order,
+    and the iteration judges it alongside the heads."""
+    model, state, drivers = build_model(_tree(tmp_path), quality=True)
+    layer = model.transport["water_quality"]
+    assert model.flow_layer_of["water_quality"] == "water"
+    assert layer.flow_kinds == model.dynamic_wave.edge_kinds
+    assert layer.interior_idx.tolist() == model.junction_idx.tolist()
+    assert layer.species_names == ("bod", "sulfide")
+    assert set(model.iterate_tol) == {"water", "water_quality"}
+    assert model.reaction_order == "before_transport"
+    assert state["water_quality.x"].shape == (5, 2)
+    assert "water_quality.capacity" in state
+
+
+def test_quality_volume_starts_at_half_the_attached_conduits_and_follows_continuity(
+        tmp_path):
+    """Design E7 as built: a junction's transport control volume starts at half the summed
+    wetted volume (`sewer.V_wet`, a total over barrels) of its attached conduits, floored at
+    `CAPACITY_FLOOR` (half of the outfall conduit belongs to no junction), and then follows
+    the junction's own continuity on the solved flows, ``V_end = V_start + dt N`` (no
+    flooding here); the returned capacity is that volume."""
+    from noodl.apps.sewer.hydraulics import CAPACITY_FLOOR
+
+    net = _tree(tmp_path, scale=0.5)
+    model, drivers, states = _tracer_run(net, 12, {"J1": 0.1})
+    hyd = model.dynamic_wave
+    first = states[0]
+    half = 0.5 * hyd(first, drivers)["sewer.V_wet"]
+    nodes = torch.zeros(model.net.n, dtype=F64)
+    nodes = nodes.index_add(0, hyd.u, half).index_add(0, hyd.v, half)
+    torch.testing.assert_close(first["sewer.quality_volume"],
+                               torch.clamp(nodes[model.junction_idx], min=CAPACITY_FLOOR),
+                               rtol=1e-15, atol=0.0)
+    dt = model.routing_step
+    for before, after in zip(states[:-1], states[1:], strict=True):
+        net_inflow = hyd(after, drivers)["sewer.net_inflow"]
+        torch.testing.assert_close(after["sewer.quality_volume"],
+                                   before["sewer.quality_volume"] + dt * net_inflow,
+                                   rtol=1e-9, atol=1e-12)
+        torch.testing.assert_close(after["water_quality.capacity"],
+                                   after["sewer.quality_volume"], rtol=0.0, atol=0.0)
+
+
+def test_a_storage_units_volume_is_in_its_initial_quality_volume():
+    """A storage unit's own stored volume (InitDepth 0.4 m of a 50 m2 prism) joins its
+    half-conduit volume in the initial transport control volume."""
+    net = _storage_chain(initial_depth=0.4)
+    model, state, drivers = build_model(net, quality=True, species=("tracer",))
+    out = model.dynamic_wave(state, drivers)
+    assert float(out["sewer.storage_volume"][0]) == pytest.approx(50.0 * 0.4, rel=1e-12)
+    expected = 0.5 * out["sewer.V_wet"] + out["sewer.storage_volume"]
+    torch.testing.assert_close(state["sewer.quality_volume"], expected, rtol=1e-15,
+                               atol=0.0)
+    torch.testing.assert_close(state["water_quality.capacity"], expected, rtol=1e-15,
+                               atol=0.0)
+
+
+def _uniform_run(net, steps, c=0.1):
+    """`net` started at the uniform concentration `c` (kg/m3) of a conservative tracer,
+    every lateral inflow at `c` too, run `steps` steps: the model, drivers and states."""
+    model, state, drivers = build_model(net, quality=True, species=("tracer",))
+    state = dict(state, **{"water_quality.x": torch.full_like(state["water_quality.x"], c)})
+    drivers = dict(drivers, tracer_in=torch.full((model.net.n,), c, dtype=F64))
+    states = [state]
+    for _ in range(steps):
+        state, _ = simulate_dynamic_wave(model, state, drivers, steps=1)
+        states.append(state)
+    return model, drivers, states
+
+
+def test_a_uniform_concentration_stays_uniform_while_the_tree_fills(tmp_path):
+    """Water started and entering at one concentration stays at it, at every junction and
+    every step, while the tree fills from dry: the transport control volume holds the
+    water the junction's continuity says arrived, so the amount form mixes like with like
+    (to the flow tolerance of the iteration). Splitting each conduit's volume in half
+    instead (E7's geometric capacity) put the tree between 0 and 5 times the load while it
+    filled: a conduit filling from its upstream end holds that junction's water."""
+    model, _, states = _uniform_run(_tree(tmp_path, scale=0.5), 24)
+    for state in states[1:]:
+        torch.testing.assert_close(state["water_quality.x"],
+                                   torch.full_like(state["water_quality.x"], 0.1),
+                                   rtol=1e-8, atol=0.0)
+
+
+def test_a_flooded_junction_loses_its_contents_with_the_overflow():
+    """The flooding tree (J2 held at y_max from step 21, its overflow lost, no ponding): a
+    uniform concentration stays uniform through the flood, and the tracer amount changes by
+    the load less the outfall flux less what the overflow carries away (`OverflowLoss`: the
+    step-start contents times ``dt overflow / V_start``)."""
+    model, drivers, states = _uniform_run(_flooding_tree(), 30)
+    hyd = model.dynamic_wave
+    j2 = hyd.junction_names.index("J2")
+    dt = model.routing_step
+    load = 0.1 * float(drivers["inflow"].sum())
+    flooded = 0
+    for before, after in zip(states[:-1], states[1:], strict=True):
+        torch.testing.assert_close(after["water_quality.x"],
+                                   torch.full_like(after["water_quality.x"], 0.1),
+                                   rtol=1e-8, atol=0.0)
+        overflow = hyd.overflow(before, after, drivers)
+        flooded += int(overflow[j2] > 0.0)
+        lost = float((dt * overflow * before["water_quality.x"]).sum())
+        stored = float(_amount(after).sum() - _amount(before).sum())
+        assert stored == pytest.approx(dt * (load - _outfall_flux(model, after)) - lost,
+                                       rel=1e-9, abs=1e-15)
+    assert flooded == 10
+
+
+def test_tracer_follows_reversed_flow():
+    """The loop's adverse conduit Cd is oriented J4 -> J3 (the reader reverses it, as SWMM
+    does) but carries J3's water to J4, so its solved flow is negative. A tracer entering
+    at J3 must reach J4 through Cd, upwind by the SIGN of the flow, and never J1 or J2,
+    which lie upstream of it; J4's amount balance over the last step is the implicit
+    upwind balance on the solved flows (`Cd`'s |q| from J3, `Cc` from J2, `Ce` out)."""
+    net, _, _ = read_swmm_inp(DATA / "loop_dynwave.inp")
+    model, drivers, states = _tracer_run(net, 60, {"J3": 0.1})
+    names = list(model.link_names)
+    before, after = states[-2], states[-1]
+    q = {name: float(after["water.q"][i]) for i, name in enumerate(names)}
+    assert q["Cd"] < -1e-4                       # reversed against its orientation
+    junctions = list(model.dynamic_wave.junction_names)
+    x = {n: float(after["water_quality.x"][j]) for j, n in enumerate(junctions)}
+    assert x["J1"] == 0.0 and x["J2"] == 0.0
+    assert x["J4"] > 1e-4
+    j4 = junctions.index("J4")
+    dt = model.routing_step
+    stored = float(_amount(after)[j4] - _amount(before)[j4])
+    moved = dt * (-q["Cd"] * x["J3"] + q["Cc"] * x["J2"] - q["Ce"] * x["J4"])
+    assert stored == pytest.approx(moved, rel=1e-12)
+
+
+def test_quality_conserves_the_tracer_while_the_tree_fills(tmp_path):
+    """The amount form of the transport step (``V_new x_new - V_old x_old = dt F``):
+    while the tree fills from dry, so that every capacity changes, the stored tracer
+    changes by the lateral load minus the flux into the outfall, to round-off, every step."""
+    net = _tree(tmp_path, scale=0.5)
+    model, drivers, states = _tracer_run(net, 24, {"J1": 0.1})
+    load = 0.1 * float(drivers["inflow"][model.net.nodes.index("J1")])
+    dt = model.routing_step
+    for before, after in zip(states[:-1], states[1:], strict=True):
+        stored = float(_amount(after).sum() - _amount(before).sum())
+        assert stored == pytest.approx(dt * (load - _outfall_flux(model, after)),
+                                       rel=1e-12, abs=1e-18)
+    assert _outfall_flux(model, states[-1]) > 0.0          # it reached the outfall
+
+
+def test_tracer_crosses_a_regulator_without_storage():
+    """An orifice (as a weir or an outlet: every edge kind of the head layer is a flow kind
+    of the quality layer) carries flow but no volume (SWMM gives a non-conduit link its
+    upstream node's quality, qualrout.c:282-288): the tracer crosses it upwind on its solved
+    flow, J2 -> J3, and the tracer amount is conserved."""
+    model, drivers, states = _tracer_run(_regulated("orifice"), 60, {"J1": 0.1})
+    assert model.transport["water_quality"].flow_kinds == ("pipe", "orifice")
+    x = states[-1]["water_quality.x"]
+    assert float(x[2]) > 0.0                                # J3, below the regulator
+    load = 0.1 * float(drivers["inflow"][model.net.nodes.index("J1")])
+    for before, after in zip(states[:-1], states[1:], strict=True):
+        stored = float(_amount(after).sum() - _amount(before).sum())
+        assert stored == pytest.approx(
+            model.routing_step * (load - _outfall_flux(model, after)), rel=1e-12, abs=1e-18)
+
+
+def test_sulfide_needs_each_junctions_unique_outgoing_conduit():
+    """Sulfide generation reads each junction's outgoing conduit (its hydraulic radius,
+    speed and mean depth). On the loop J1 and J4 have two and J3 none (Cd is oriented
+    J4 -> J3), and above a regulator J2 has none: refused naming them. BOD decay and a
+    conservative tracer need no conduit and build."""
+    net, _, _ = read_swmm_inp(DATA / "loop_dynwave.inp")
+    with pytest.raises(ValueError, match=r"\['J1', 'J3', 'J4'\]"):
+        build_model(net, quality=True)
+    with pytest.raises(ValueError, match=r"\['J2'\]"):
+        build_model(_regulated("weir"), quality=True)
+    with pytest.raises(ValueError, match="'sulfide' needs 'bod'"):
+        build_model(net, quality=True, species=("sulfide",))
+    model, state, drivers = build_model(net, quality=True, species=("bod", "tracer"))
+    state, _ = simulate_dynamic_wave(model, state, drivers, steps=2)
+    assert state["water_quality.x"].shape == (4, 2)
+
+
+def test_sulfide_is_generated_on_the_dynamic_wave_tree(tmp_path):
+    """BOD entering at J1 generates sulfide in the conduit below it (Pomeroy-Parkhurst on
+    each junction's outgoing conduit: `sewer.R_h`, `sewer.v`, `sewer.d_m`), and BOD decays
+    against a conservative tracer entering with it; J2, which nothing loaded reaches, stays
+    clean."""
+    net = _tree(tmp_path, scale=0.5)
+    model, drivers, states = _tracer_run(net, 24, {"J1": 0.3},
+                                         species=("bod", "sulfide", "tracer"),
+                                         loaded=("bod", "tracer"))
+    out = model.dynamic_wave(states[-1], drivers)
+    for key in ("sewer.R_h", "sewer.d_m"):
+        assert out[key].shape == (5,) and bool((out[key] > 0).all())
+    junctions = list(model.dynamic_wave.junction_names)
+    x = states[-1]["water_quality.x"]
+    assert float(x[junctions.index("J1"), 1]) > 0.0
+    assert float(x[junctions.index("J2"), 0]) == 0.0
+    j1 = junctions.index("J1")
+    assert 0.0 < float(x[j1, 0]) < float(x[j1, 2])
+
+
+def test_quality_runs_batched(tmp_path):
+    """A batched inflow expands the multi-species state ``(junctions, species)`` too, and
+    each member is its own run."""
+    net = _tree(tmp_path, scale=0.5)
+    model, state, drivers = build_model(net, quality=True)
+    bod_in = torch.zeros(model.net.n, dtype=F64)
+    bod_in[model.net.nodes.index("J1")] = 0.3
+    drivers = dict(drivers, bod_in=bod_in)
+    inflow = torch.stack([drivers["inflow"], 0.5 * drivers["inflow"]])
+    final, _ = simulate_dynamic_wave(model, state, drivers, steps=6, inflow=inflow)
+    single, _ = simulate_dynamic_wave(model, state, drivers, steps=6,
+                                      inflow=0.5 * drivers["inflow"])
+    assert final["water_quality.x"].shape == (2, 5, 2)
+    torch.testing.assert_close(final["water_quality.x"][1], single["water_quality.x"],
+                               rtol=1e-9, atol=1e-15)

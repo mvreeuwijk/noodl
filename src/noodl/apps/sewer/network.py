@@ -25,6 +25,7 @@ from noodl.apps.sewer.dynwave import (
     DynamicWaveHydraulics,
     DynamicWaveOptions,
     build_dynamic_wave_model,
+    quality_state,
 )
 from noodl.apps.sewer.hydraulics import GEOMETRY_ALIASES, SewerHydraulics
 from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
@@ -657,9 +658,10 @@ def build_model(
     (m3/s, positive OUT through the `fan` kind). `air` and `quality` default to ``True``
     for steady and kinematic-wave routing.
 
-    A ``routing="dynamic_wave"`` network is built by `build_dynamic_wave_model`: water only
-    (`air` and `quality` default to ``False`` there, and ``True`` is refused, as is
-    `storage`; headspace air and quality on the dynamic wave are phase D), converged to
+    A ``routing="dynamic_wave"`` network is built by `build_dynamic_wave_model`: `air` and
+    `quality` default to ``False`` there; ``quality=True`` adds the water-quality layer of
+    `species` on the solved flows (design E7, `scheme` its time scheme); ``air=True`` is
+    refused (headspace air on the dynamic wave is phase D), as is `storage`; converged to
     `iterate_tol` (m, default 1e-11) within `iterate_max` passes (default 2000; a slowly
     contracting outfall head at low flow can need several hundred). Those two
     apply to dynamic wave only and are refused for the other routings. So is `outfall_stage`,
@@ -667,15 +669,18 @@ def build_model(
     `build_dynamic_wave_model`).
     """
     if net.routing == "dynamic_wave":
-        for name, value in (("air", air), ("quality", quality), ("storage", storage)):
+        for name, value, why in (
+                ("air", air, "is not available with dynamic-wave routing yet (phase D)"),
+                ("storage", storage, "is the kinematic path's storage sweep; dynamic-wave "
+                                     "junctions always store")):
             if value:
-                raise ValueError(
-                    f"build_model: {name}=True is not available with dynamic-wave routing "
-                    f"yet (phase D); build it with {name}=False"
-                )
+                raise ValueError(f"build_model: {name}=True {why}; build it with "
+                                 f"{name}=False")
         kwargs = {k: v for k, v in (("iterate_tol", iterate_tol),
                                     ("iterate_max", iterate_max)) if v is not None}
-        return build_dynamic_wave_model(net, outfall_stage=outfall_stage, **kwargs)
+        return build_dynamic_wave_model(net, outfall_stage=outfall_stage,
+                                        quality=bool(quality), species=species,
+                                        scheme=scheme, **kwargs)
     for name, value in (("iterate_tol", iterate_tol), ("iterate_max", iterate_max),
                         ("outfall_stage", outfall_stage)):
         if value is not None:
@@ -1039,7 +1044,9 @@ def initial_state(
 
     A dynamic-wave model (a ``"head"`` layer and a `DynamicWaveHydraulics` closure) gets
     SWMM's initial state instead (cold and dry, or its InitDepth and InitFlow:
-    `DynamicWaveHydraulics.initial_state`; `drivers` is optional there and only validated).
+    `DynamicWaveHydraulics.initial_state`; `drivers` is optional there and only validated,
+    unless the model has a quality layer, whose clean initial state and capacity
+    `dynwave.quality_state` adds and which needs them).
 
     Also builds every closure-carried state key this application knows --
     `"sewer.H"`, the `SewerHydraulics` closure's manhole levels, when it is running with
@@ -1064,6 +1071,12 @@ def initial_state(
     dynamic = [c for c in model.closures if isinstance(c, DynamicWaveHydraulics)]
     if dynamic and any(layer.quantity == "head" for layer in model.potential.values()):
         state = dynamic[0].initial_state(drivers)
+        if model.transport:
+            if drivers is None:
+                raise ValueError(
+                    "apps.sewer.initial_state: drivers are required to evaluate the initial "
+                    "quality capacity; call initial_state(model, drivers)")
+            state.update(quality_state(model, state, drivers))
         return state_from(model, values, base=state) if values else state
     state: State = {}
     for closure in model.closures:

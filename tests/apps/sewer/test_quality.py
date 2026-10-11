@@ -350,3 +350,41 @@ def test_h2stransfer_refuses_a_wrong_length_ph_naming_the_driver():
     }
     with pytest.raises(ValueError, match=r"'pH'.*trailing shape 3"):
         closure(state, drivers)
+
+
+def test_sulfide_generation_continues_in_a_full_conduit():
+    """A conduit flowing full (dynamic wave) has a hydraulic radius but no free surface:
+    its mean depth ``A/T`` is 0. Generation ``M' EBOD / R_h`` goes on; the loss term, whose
+    ``(S0 V)^(3/8) / d_m`` is the free-surface exchange, vanishes (its limit as the top width
+    closes, ``d_m -> inf``)."""
+    theta = 1.07 ** (18.0 - 20.0)
+    value = q.sulfide_rate(
+        torch.tensor([0.3], dtype=F64), torch.tensor([2.0e-3], dtype=F64),
+        torch.tensor([18.0], dtype=F64), torch.tensor([0.1125], dtype=F64),
+        torch.tensor([0.01], dtype=F64), torch.tensor([1.2], dtype=F64),
+        torch.zeros(1, dtype=F64, requires_grad=True),
+    )
+    assert float(value.detach()) == pytest.approx(0.32e-3 * 0.3 * theta / 0.1125 / 3600.0,
+                                                  rel=1e-12)
+
+
+def test_sulfide_loss_reads_the_speed_on_a_reversed_conduit():
+    """A dynamic-wave conduit can carry its flow against its own direction (q < 0): the
+    loss term's ``S0 V`` uses the speed, so the rate does not depend on the sign of V."""
+    args = [torch.tensor([v], dtype=F64) for v in (0.3, 2.0e-3, 18.0, 0.0764, 0.01)]
+    forward = q.sulfide_rate(*args, torch.tensor([1.3795], dtype=F64),
+                             torch.tensor([0.1085], dtype=F64))
+    reverse = q.sulfide_rate(*args, torch.tensor([-1.3795], dtype=F64),
+                             torch.tensor([0.1085], dtype=F64))
+    assert float(reverse) == float(forward)
+
+
+def test_bod_decay_alone_reads_no_hydraulic_driver():
+    """``SulfideGeneration(sulfide=None)``: BOD decay only, so it needs neither a conduit
+    nor its hydraulics (`T_water` alone): a dynamic-wave junction without a unique outgoing
+    conduit can still carry BOD."""
+    reaction = q.SulfideGeneration(bod=0, sulfide=None)
+    x = torch.tensor([[0.3], [0.1]], dtype=F64)
+    out = reaction.apply(x, 60.0, {"T_water": torch.tensor(18.0, dtype=F64)})
+    rate = q.bod_rate(x[:, 0], torch.tensor(18.0, dtype=F64))
+    torch.testing.assert_close(out[:, 0], x[:, 0] + 60.0 * rate, rtol=1e-14, atol=0.0)

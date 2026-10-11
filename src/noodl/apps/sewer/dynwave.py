@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from noodl.apps.sewer import geometry as geom
 from noodl.apps.sewer.dynwave_terms import (
     DAMPING,
     FUDGE,
@@ -35,6 +36,8 @@ from noodl.apps.sewer.dynwave_terms import (
     conduit_terms,
     lengthening_factor,
 )
+from noodl.apps.sewer.hydraulics import CAPACITY_FLOOR
+from noodl.apps.sewer.quality import LateralLoads, SulfideGeneration
 from noodl.apps.sewer.storage import StorageCurves
 from noodl.apps.sewer.structures import (
     CIRCULAR,
@@ -63,6 +66,8 @@ from noodl.apps.sewer.xsect_tables import (
 )
 from noodl.elements.base import Element
 from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.reaction import Reaction
+from noodl.layers.transport import TransportLayer
 from noodl.model import Model, StepContext
 from noodl.nodesources import NodeSource
 from noodl.topology import Network
@@ -786,6 +791,28 @@ class DynamicWaveHydraulics:
     END of the step (`outfall_stage` builds it; `simulate_dynamic_wave` sets it each step).
     The initial heads use its value at t = 0.
 
+    Quality (design E7; docs: "Quality on the dynamic wave"): with `quality_layer` set, the
+    closure carries one more key, ``"sewer.quality_volume"`` (m3, per junction): the water
+    the junction's transport control volume holds. It starts at E7's half the summed wetted
+    volume of the attached conduits plus a storage unit's own volume (`quality_capacity`)
+    and then follows the junction's own continuity on the flows the transport sees,
+    ``V_end = V_start + dt (N - overflow)`` with N the net inflow of the pass
+    (``"sewer.net_inflow"``: lateral inflow and every link's flow) and the overflow SWMM's
+    flooding loss (``"sewer.overflow"``), floored at `CAPACITY_FLOOR`. The driver
+    ``"<quality_layer>.capacity"`` is V_end, so the amount form of the transport step,
+    ``V_end x_end - V_start x_start = dt F``, holds the water balance exactly: a uniform
+    inflow concentration stays uniform while the junctions fill and drain. (The geometric
+    half-volumes do not: a conduit filling from its upstream end gives SWMM's surface area,
+    and its water, to the upstream junction, dwflow.c:357-411, while the halves split it;
+    on the tree's filling a uniform load of 1 came out between 0 and 5.) The driver
+    ``"<quality_layer>.overflow_loss"`` (per junction, 0..1) is the fraction
+    ``dt overflow / V_start`` of the step-start contents that floods out (`OverflowLoss`).
+    The closure also writes the reporting keys ``"sewer.R_h"`` (hydraulic radius, m) and
+    ``"sewer.d_m"`` (hydraulic mean depth A/T, m; 0 for a conduit flowing full) of one
+    barrel at the link depth, on the exact circle (as the kinematic path does at SWMM's
+    depth), which sulfide generation reads. It never writes the quality layer's flows:
+    those are the head layer's ``"water.q"``.
+
     The arithmetic is SWMM's own, in feet (design D2); `layer` names the head layer.
     """
 
@@ -793,9 +820,13 @@ class DynamicWaveHydraulics:
     state_keys = ("sewer.junction_depth", "sewer.pipe_flow", "sewer.mid_area",
                   "sewer.net_inflow")
 
-    def __init__(self, graph: Network, net: SewerNetwork, *, layer: str = "water") -> None:
+    def __init__(self, graph: Network, net: SewerNetwork, *, layer: str = "water",
+                 quality_layer: str | None = None) -> None:
         self.net = graph
         self.layer = layer
+        self.quality_layer = quality_layer
+        if quality_layer is not None:
+            self.state_keys = (*type(self).state_keys, "sewer.quality_volume")
         self.options = net.dynamic_wave
         self.notes: dict[str, str] = {}
         nodes = list(graph.nodes)
@@ -807,6 +838,7 @@ class DynamicWaveHydraulics:
             "sewer.pipe_flow": list(self.pipe_names),
             "sewer.mid_area": list(self.pipe_names),
             "sewer.net_inflow": list(self.junction_names),
+            "sewer.quality_volume": list(self.junction_names),
         }
         self.node_invert = torch.tensor(
             [float(graph.graph.nodes[n]["invert"]) for n in nodes], dtype=F64)
@@ -1390,7 +1422,14 @@ class DynamicWaveHydraulics:
             "sewer.V_wet": terms.volume * QCF,
             "sewer.surcharged": self._surcharged(heads).to(F64),
             "sewer.storage_volume": self._storage_volume(heads),
+            "sewer.R_h": geom.hydraulic_radius(depth_ft * LCF, self.diameter),
+            "sewer.d_m": geom.hydraulic_mean_depth(depth_ft * LCF, self.diameter),
         })
+        if self.quality_layer is not None and dt is None:
+            # a query: the transport control volumes at the state's own time
+            volume = state["sewer.quality_volume"]
+            out.update({"sewer.quality_volume": volume,
+                        f"{self.quality_layer}.capacity": volume})
         if dt is None:
             return out
         jidx = self.junction_idx
@@ -1467,7 +1506,34 @@ class DynamicWaveHydraulics:
                                torch.zeros_like(overflow))
         out.update({"water.flood_excess": excess, "water.flooded": flooded.to(F64),
                     "sewer.overflow": overflow})
+        if self.quality_layer is not None:
+            out.update(self._quality_volume(state, out["sewer.net_inflow"], overflow, dt))
         return out
+
+    def _quality_volume(self, state: Mapping, net_inflow: Tensor, overflow: Tensor,
+                        dt: float) -> dict[str, Tensor]:
+        """The transport control volumes at the end of the step and the flooded fraction
+        (class docstring, "Quality"): ``V_end = max(V_start + dt (N - overflow),
+        CAPACITY_FLOOR)`` from the pinned step-start ``"sewer.quality_volume"``, and
+        ``dt overflow / V_start`` capped at 1."""
+        start = state["sewer.quality_volume"]
+        end = torch.clamp(start + dt * (net_inflow - overflow), min=CAPACITY_FLOOR)
+        lost = torch.clamp(dt * overflow / start, max=1.0)
+        return {"sewer.quality_volume": end, f"{self.quality_layer}.capacity": end,
+                f"{self.quality_layer}.overflow_loss": lost}
+
+    def quality_capacity(self, wetted: Tensor, stored: Tensor) -> Tensor:
+        """Design E7's geometric quality capacity (m3, per junction) from the conduits'
+        wetted volumes `wetted` (m3, totals over barrels) and the junctions' own stored
+        volumes `stored` (m3, 0 but at a storage unit): half of every attached conduit's
+        volume plus its own, floored at `CAPACITY_FLOOR` so a dry junction keeps a
+        well-posed transport row. Half of an outfall conduit's volume belongs to no
+        junction. It is the initial ``"sewer.quality_volume"`` (`initial_state`)."""
+        half = 0.5 * wetted
+        batch = half.shape[:-1]
+        nodes = torch.zeros(batch + self.node_invert.shape, dtype=F64)
+        nodes = nodes.index_add(-1, self.u, half).index_add(-1, self.v, half)
+        return torch.clamp(nodes[..., self.junction_idx] + stored, min=CAPACITY_FLOOR)
 
     def carried(self, state: Mapping, drivers: Mapping, *, dt: float | None = None) -> State:
         """The four carried keys evaluated AT `state` (``water.phi``, ``water.q``), for
@@ -1547,7 +1613,7 @@ class DynamicWaveHydraulics:
         y = torch.where(q0 == 0.0, y_mean, y_link)                            # flowrout.c:407, :418
         through = torch.zeros_like(total).index_add(0, self.v, q0).index_add(0, self.u, -q0)
         n_reg = self.edge_u.shape[0] - self.n_pipes
-        return {
+        state = {
             f"{self.layer}.phi": phi,
             f"{self.layer}.q": torch.cat([q0, torch.zeros(n_reg, dtype=F64)]),  # link.c:518
             "sewer.junction_depth": depth_j * LCF,
@@ -1555,6 +1621,13 @@ class DynamicWaveHydraulics:
             "sewer.mid_area": area_of_depth(y, geo.y_full, geo.a_full) * _AREA_SI,  # :497
             "sewer.net_inflow": through[jidx],                                # flowrout.c:458
         }
+        if self.quality_layer is not None:
+            # E7's half-volumes at the initial depths: the conduit volumes SWMM starts
+            # from (as "sewer.V_wet" at this state) and a storage unit's own
+            terms = self._terms(state, self.options.routing_step)
+            state["sewer.quality_volume"] = self.quality_capacity(
+                terms.volume * QCF, self._storage_volume(phi))
+        return state
 
     def overflow(self, before: Mapping, after: Mapping, drivers: Mapping, *,
                  dt: float | None = None) -> Tensor:
@@ -1590,7 +1663,10 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
                              iterate_max: int = 2000, relaxation: float = 0.5,
                              acceleration: str | None = "anderson", memory: int = 5,
                              iterate_flow_tol: float | None = 1e-10,
-                             outfall_stage: Mapping | None = None
+                             outfall_stage: Mapping | None = None,
+                             quality: bool = False,
+                             species: tuple[str, ...] = ("bod", "sulfide"),
+                             scheme: str = "implicit",
                              ) -> tuple[Model, State, Drivers]:
     """Assemble a dynamic-wave sewer and return ``(model, state, drivers)``.
 
@@ -1621,6 +1697,11 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     `link_names` (every ``"water.q"`` column: the pipes, then the orifices, weirs and
     outlets, each a `StructureLink` edge of its own kind), `pipe_columns`, `notes`,
     `input_specs`, `driver_template`.
+
+    ``quality=True`` adds the `TransportLayer` ``"water_quality"`` of `species` (design E7,
+    `_quality_parts`; `scheme` is its time scheme), judged by the iteration alongside the
+    heads, and attaches `manhole_idx` (the junctions' node indices) and, with sulfide,
+    `out_pipe` (each junction's outgoing conduit).
     """
     net.validate()
     if net.routing != "dynamic_wave":
@@ -1644,7 +1725,8 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
         for device in net.structures[kind]:
             graph.add_edge(device.u, device.v, kind=kind, name=device.name)
     boundary = [o.name for o in net.outfalls]
-    closure = DynamicWaveHydraulics(graph, net)
+    closure = DynamicWaveHydraulics(graph, net,
+                                    quality_layer="water_quality" if quality else None)
     junction_idx = closure.junction_idx
     junction_invert = closure.node_invert[junction_idx]
 
@@ -1667,8 +1749,20 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     if layer.bound.tolist() != closure.outfall_idx.tolist():
         raise ValueError("build_dynamic_wave_model: the layer's boundary order differs from "
                          "the outfall order the closure writes 'water.phi_boundary' in")
-    model = Model(graph, {"water": layer}, closures=[closure], coupling="iterate",
-                  iterate_tol={"water": iterate_tol}, iterate_max=iterate_max,
+    layers: dict = {"water": layer}
+    closures: list = [closure]
+    tolerances = {"water": iterate_tol}
+    parts: dict = {"reactions": [], "drivers": {}, "specs": {}}
+    if quality:
+        parts = _quality_parts(net, graph, closure, tuple(species), scheme)
+        layers["water_quality"] = parts["layer"]
+        closures.append(parts["loads"])
+        tolerances["water_quality"] = QUALITY_ITERATE_TOL
+    # "before_transport": SWMM reacts a conduit's step-start concentration, then mixes it
+    # with the inflow (qualrout.c:337-341), as the kinematic path does
+    model = Model(graph, layers, closures=closures, reactions=parts["reactions"],
+                  coupling="iterate", reaction_order="before_transport",
+                  iterate_tol=tolerances, iterate_max=iterate_max,
                   iterate_relaxation=relaxation, iterate_acceleration=acceleration,
                   iterate_memory=memory,
                   iterate_flow_tol={"water": iterate_flow_tol})
@@ -1685,6 +1779,9 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     }
     if "outfall_stage" in initial:
         drivers["outfall_stage"] = initial["outfall_stage"]
+    if quality:
+        drivers.update(parts["drivers"])
+        state.update(quality_state(model, state, drivers))
     closure.notes["routing"] = (
         f"dynamic wave (SWMM 5.2.4 fixed point): heads converged to {iterate_tol} m"
         + f" and flows to {iterate_flow_tol} m3/s"
@@ -1705,6 +1802,11 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
         "inflow": dict(description="lateral inflow at each manhole", unit="m3/s",
                        over="nodes"),
     }
+    model.input_specs.update(parts["specs"])
+    if quality:
+        model.manhole_idx = junction_idx
+        if "out_pipe" in parts:
+            model.out_pipe = parts["out_pipe"]
     if "outfall_stage" in drivers:
         model.input_specs["outfall_stage"] = dict(
             description="stage elevation of each outfall (TIDAL and TIMESERIES outfalls "
@@ -1713,6 +1815,128 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
             unit="m", over=list(closure.outfall_names))
     model.driver_template = dict(drivers)
     return model, state, drivers
+
+
+#: The quality layer's iteration tolerance (kg/m3), judged alongside the heads (design E7).
+#: Its concentrations follow the flows of the pass, so it binds only where the heads have
+#: converged and the concentrations they carry have not.
+QUALITY_ITERATE_TOL = 1e-12
+
+
+class OverflowLoss(Reaction):
+    """The contents a flooded junction loses with its overflow (a dynamic-wave quality
+    reaction).
+
+    Applied to the quality layer `layer` before the transport step: ``x <- x (1 - f)`` with
+    ``f`` the driver ``"<layer>.overflow_loss"`` (per junction, 0..1,
+    `DynamicWaveHydraulics`: the overflow over the step, ``dt overflow``, over the
+    step-start volume). The transport control volume loses the same water
+    (``"sewer.quality_volume"``), so the overflow leaves at the junction's concentration and
+    a uniform concentration stays uniform. It is 0 wherever nothing floods. `n_species` is
+    the layer's: above 1 its state is (junctions, species)."""
+
+    def __init__(self, n_species: int, layer: str = "water_quality") -> None:
+        self.n_species = int(n_species)
+        self.layer = layer
+
+    def apply(self, x: Tensor, dt: float | None, drivers: Mapping | None = None) -> Tensor:
+        if dt is None:
+            return x
+        lost = (drivers or {}).get(f"{self.layer}.overflow_loss")
+        if lost is None:
+            return x
+        keep = 1.0 - torch.as_tensor(lost, dtype=F64)
+        return x * (keep.unsqueeze(-1) if self.n_species > 1 else keep)
+
+
+def _quality_parts(net: SewerNetwork, graph: Network, closure: DynamicWaveHydraulics,
+                   species: tuple[str, ...], scheme: str) -> dict:
+    """The quality pieces of a dynamic-wave model (design E7): the layer, the lateral-load
+    closure, the reactions, their drivers and input specs.
+
+    ``"water_quality"`` is a `TransportLayer` over the junctions (the outfalls its boundary)
+    on every edge kind of the head layer, so its flows are the solved ``"water.q"``
+    (`Model.flow_layer_of`), upwind by their sign; an orifice, weir or outlet carries water
+    between junctions with no volume of its own (SWMM gives a non-conduit link its upstream
+    node's quality, qualrout.c:282-288). The closure writes its capacity, each junction's
+    transport control volume (`DynamicWaveHydraulics`, "Quality"), and `OverflowLoss` takes
+    a flooded junction's overflow out of it. Each species ``s`` gets the lateral load
+    ``inflow * <s>_in`` (`LateralLoads`, driver ``"<s>_in"``, kg/m3). ``"bod"`` decays and
+    ``"sulfide"`` is generated (`SulfideGeneration`); any other species is conservative.
+    Sulfide needs ``"bod"`` and each junction's unique outgoing conduit (its hydraulic radius,
+    speed and mean depth), and is refused by name at the junctions with none or several (a
+    loop, an adverse conduit, a junction drained by a regulator)."""
+    if not species or len(set(species)) != len(species):
+        raise ValueError(f"build_model: species must be distinct names, got {species!r}")
+    if "sulfide" in species and "bod" not in species:
+        raise ValueError(
+            f"build_model: species 'sulfide' needs 'bod' (Pomeroy-Parkhurst generation reads "
+            f"the BOD), got {species!r}")
+    junctions = list(closure.junction_names)
+    k = len(species)
+    layer = TransportLayer(
+        graph, "water_quality", capacity=torch.ones(len(junctions), dtype=F64),
+        flow_kind=closure.edge_kinds, boundary=list(closure.outfall_names),
+        n_species=k, scheme=scheme, quantity="concentration", unit="kg/m3",
+        species_names=species, source_unit="kg/s", capacity_unit="m3", flow_unit="m3/s")
+    ordered = [graph.nodes[i] for i in layer.interior_idx.tolist()]
+    if ordered != junctions:
+        raise ValueError(
+            f"build_model: the water_quality layer's active interior came out as {ordered}, "
+            f"not the junction order {junctions}; the capacity is written in junction order")
+    n_out = len(closure.outfall_names)
+    drivers: Drivers = {
+        "water_quality.x_boundary": torch.zeros((n_out,) if k == 1 else (n_out, k),
+                                                dtype=F64),
+        **{f"{name}_in": torch.zeros(graph.n, dtype=F64) for name in species},
+    }
+    specs = {f"{name}_in": dict(description=f"{name} concentration of the lateral inflow",
+                                unit="kg/m3", over="nodes") for name in species}
+    parts: dict = {
+        "layer": layer, "reactions": [("water_quality", OverflowLoss(k))], "drivers": drivers,
+        "specs": specs,
+        "loads": LateralLoads(graph.n, columns={i: f"{name}_in"
+                                                for i, name in enumerate(species)},
+                              n_species=k)}
+    if "bod" not in species:
+        return parts
+    sulfide = species.index("sulfide") if "sulfide" in species else None
+    out_pipe = None
+    if sulfide is not None:
+        outgoing: dict[str, list[int]] = {name: [] for name in junctions}
+        for i, pipe in enumerate(net.pipes):
+            if pipe.u in outgoing:
+                outgoing[pipe.u].append(i)
+        bad = [name for name in junctions if len(outgoing[name]) != 1]
+        if bad:
+            raise ValueError(
+                f"build_model: sulfide generation reads each junction's outgoing conduit, "
+                f"and junction(s) {bad} have none or several (a loop, an adverse conduit or "
+                f"a regulator); build quality without 'sulfide', e.g. species=('bod',)")
+        out_pipe = torch.tensor([outgoing[name][0] for name in junctions], dtype=torch.long)
+        drivers["sewer.q_slope"] = torch.tensor(
+            [net.pipes[i].slope for i in out_pipe.tolist()], dtype=F64)
+        specs["sewer.q_slope"] = dict(
+            description="slope of each junction's outgoing conduit", unit="m/m",
+            over=junctions, ordering="junction order")
+        parts["out_pipe"] = out_pipe
+    drivers["T_water"] = torch.tensor(18.0, dtype=F64)
+    specs["T_water"] = dict(description="wastewater temperature", unit="degC")
+    parts["reactions"].insert(0, ("water_quality", SulfideGeneration(
+        bod=species.index("bod"), sulfide=sulfide, out_pipe=out_pipe,
+        manhole_idx=closure.junction_idx, n_nodes=graph.n)))
+    return parts
+
+
+def quality_state(model: Model, state: State, drivers: Drivers) -> State:
+    """The quality layer's initial state at the hydraulic `state`: clean water
+    (``"water_quality.x"`` zero, SWMM's default initial concentration) and the capacity at
+    `state` (`Model.initial_capacities`), which the amount form of the first step needs."""
+    layer = model.transport["water_quality"]
+    shape = (layer.n_i,) if layer.n_species == 1 else (layer.n_i, layer.n_species)
+    out = {"water_quality.x": torch.zeros(shape, dtype=F64)}
+    out.update(model.initial_capacities(dict(state, **out), drivers))
+    return out
 
 
 def solve_atol(model: Model, dt: float | None = None) -> float:
@@ -1918,7 +2142,11 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
                          "options.variable_step > 0 (one step for every member)")
     state = dict(state)
     if batch:
-        state = {k: (v.expand(batch + v.shape[-1:]).clone() if v.dim() == 1 else v)
+        # an unbatched key is 1-D, but a multi-species concentration (junctions, species)
+        unbatched = {f"{name}.x": 2 for name, layer in model.transport.items()
+                     if layer.n_species > 1}
+        state = {k: (v.expand(batch + v.shape).clone() if v.dim() == unbatched.get(k, 1)
+                     else v)
                  for k, v in state.items()}
     rows: dict[str, list[Tensor]] = {key: [] for key in record}
     ends: list[float] = []

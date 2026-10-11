@@ -56,7 +56,7 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `DynamicWaveHydraulics` | The dynamic-wave closure: the conduit coefficients, junction surface areas and outfall heads of one pass, from the previous pass's heads and flows. | `DynamicWaveHydraulics(graph, net, *, layer='water')` |
+| `DynamicWaveHydraulics` | The dynamic-wave closure: the conduit coefficients, junction surface areas and outfall heads of one pass, from the previous pass's heads and flows. | `DynamicWaveHydraulics(graph, net, *, layer='water', quality_layer=None)` |
 | `H2STransfer` | Two-film water-to-air H2S transfer, as a `Model` closure. | `H2STransfer(n_nodes, manhole_idx, *, sulfide=1, water_layer='water_quality', air_layer='air_quality', out_pipe=None)` |
 | `SewerHydraulics` | The water side of a sewer, as a `Model` closure. | `SewerHydraulics(net, pipes, manholes, *, storage=False, dt=None, quality_layer='water_quality', air_quality_layer='air_quality', shaft_depth=None, surface_area=None, geometry='analytic', name='sewer')` |
 
@@ -66,6 +66,7 @@ Transformations applied to transported species each step.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `OverflowLoss` | The contents a flooded junction loses with its overflow (a dynamic-wave quality reaction). | `OverflowLoss(n_species, layer='water_quality')` |
 | `SulfideGeneration` | Operator-split Pomeroy-Parkhurst sulfide generation and bulk BOD decay. | `SulfideGeneration(*, bod=0, sulfide=1, m_prime=0.00032, m_loss=0.64, k_bod=0.2, out_pipe=None, manhole_idx=None, n_nodes=None)` |
 
 ## Sources

@@ -1450,3 +1450,250 @@ def test_a_tidal_outfall_matches_swmm_under_the_variable_step(tmp_path):
     assert ends[:len(times)] == times
     assert len({b - a for a, b in zip(times, times[1:], strict=False)}) > 2   # steps vary
     _assert_parity(_worst(_differences(None, rows, conn, len(rows), run=run)))
+
+
+# ------------------------------------------------------------------- quality (design E7)
+#: A conservative tracer (`[POLLUTANTS]`, Kdecay 0) for the quality comparisons, written into
+#: tmp_path variants of the committed fixtures (the reader takes only constant pollutant
+#: baselines; a time series belongs in the drivers).
+_TRACER = (
+    "[POLLUTANTS]\n"
+    ";;Name  Units  Crain  Cgw  Crdii  Kdecay  SnowOnly  Co-Pollutant  Co-Frac  Cdwf  Cinit\n"
+    "Tracer  MG/L   0.0    0.0  0.0    0.0     NO        *             0.0      0.0   0.0\n\n"
+    "[JUNCTIONS]")
+#: Concentration target for the steady tracer: relative. At steady state both codes mix a
+#: conservative tracer by the flows alone (SWMM: a junction is a zero-volume node mixing its
+#: inflows, qualrout.c:221-249, and a conduit at steady volume passes its upstream node's
+#: concentration, :315-341; noodl: the implicit upwind balance of each junction), so what
+#: remains is the hydraulic parity of the flow ratios and each run's distance from steady
+#: state.
+TOL_TRACER = 1e-8
+
+
+def _tracer_inp(tmp_path, name, end, loads, series=""):
+    """A tmp_path copy of the fixture `name` running to `end` (HH:MM:SS), with the tracer
+    entering at the junctions of `loads` ({junction: (time series name or '""', baseline
+    mg/L)}) and the `[TIMESERIES]` text `series`."""
+    text = (DATA / name).read_text()
+    for old, new in (("END_TIME             00:30:00", f"END_TIME             {end}"),
+                     ("[JUNCTIONS]", _TRACER), ("[REPORT]", series + "[REPORT]")):
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    lines = text.splitlines()
+    at = lines.index("[INFLOWS]")
+    end_of_section = next(i for i in range(at, len(lines)) if not lines[i].strip())
+    lines[end_of_section:end_of_section] = [
+        f"{node}  Tracer  {ts}  CONCENTRATION  1.0  1.0  {base}"
+        for node, (ts, base) in loads.items()]
+    inp = tmp_path / f"{Path(name).stem}_tracer.inp"
+    inp.write_text("".join(line + "\n" for line in lines))
+    return inp
+
+
+def _swmm_tracer(inp):
+    """SWMM on the tracer variant `inp`: per step the link and node concentrations (kg/m3),
+    the link flows (m3/s, file orientation) and volumes (m3); and the report's percentage of
+    steps not converging."""
+    rows = []
+    with pyswmm.Simulation(str(inp), str(inp.with_suffix(".rpt")),
+                           str(inp.with_suffix(".out"))) as sim:
+        for _ in sim:
+            links, nodes = list(pyswmm.Links(sim)), list(pyswmm.Nodes(sim))
+            rows.append({
+                "link": {lk.linkid: lk.pollut_quality["Tracer"] * 1e-3 for lk in links},
+                "node": {nd.nodeid: nd.pollut_quality["Tracer"] * 1e-3 for nd in nodes},
+                "flow": {lk.linkid: lk.flow for lk in links},
+                "volume": {lk.linkid: lk.volume for lk in links}})
+        assert str(sim.engine_version) == "5.2.4"
+    text = inp.with_suffix(".rpt").read_text()
+    m = re.search(r"% of Steps Not Converging\s*:\s*([0-9.]+)", text)
+    return rows, float(m.group(1))
+
+
+def _noodl_tracer(name, loads):
+    """noodl on the committed fixture `name` (the tracer is a driver here) with a
+    conservative tracer, its lateral concentration at step k ``loads["at"][junction](k)``
+    (kg/m3), over ``loads["steps"]`` steps at the parity tolerances:
+    the model and, per step, the link concentrations (each link's upwind junction's, by the
+    sign of its flow; 0 from an outfall), the flows and the transport capacities."""
+    net, _, _ = read_swmm_inp(DATA / name)
+    model, state, drivers = build_model(net, quality=True, species=("tracer",),
+                                        iterate_tol=ITERATE_TOL, iterate_max=ITERATE_MAX)
+    hyd = model.dynamic_wave
+    rows = []
+    for k in range(loads["steps"]):
+        c_in = torch.zeros(model.net.n, dtype=torch.float64)
+        for node, fn in loads["at"].items():
+            c_in[model.net.nodes.index(node)] = fn(k)
+        drivers = dict(drivers, tracer_in=c_in)
+        # the head solve at atol 1e-12: at the default solve_atol a junction can stop with
+        # a balance residual of ~1e-9 m3/s (R28), 1e-8 of these flows, which a steady
+        # tracer reads directly as a mixing ratio
+        state, _ = simulate_dynamic_wave(model, state, drivers, steps=1, atol=1e-12)
+        full = torch.zeros(model.net.n, dtype=torch.float64)
+        full[model.junction_idx] = state["water_quality.x"]
+        q = state["water.q"]
+        up = torch.where(q >= 0, full[hyd.edge_u], full[hyd.edge_v])
+        rows.append({"link": dict(zip(model.link_names, up.tolist(), strict=True)),
+                     "flow": dict(zip(model.link_names, q.tolist(), strict=True)),
+                     "capacity": dict(zip(hyd.junction_names,
+                                          state["water_quality.capacity"].tolist(),
+                                          strict=True))})
+    return model, rows
+
+
+def _steady_tracer_error(model, mine, theirs):
+    """The largest relative difference of the link concentrations (0 must be exactly 0)."""
+    worst = 0.0
+    for name in model.link_names:
+        if theirs[name] == 0.0:
+            assert mine[name] == 0.0, name
+            continue
+        worst = max(worst, abs(mine[name] - theirs[name]) / theirs[name])
+    return worst
+
+
+#: The tree's tracer: J1's lateral inflow carries none for an hour, while the hydraulics
+#: settle (to 1e-9 relative), then its concentration ramps to 100 mg/L over ten minutes and
+#: holds to the end at 3 h.
+_TREE_TRACER_SERIES = ("[TIMESERIES]\n"
+                       "TRC  01/01/2026 00:00 0.0\n"
+                       "TRC  01/01/2026 01:00 0.0\n"
+                       "TRC  01/01/2026 01:10 100.0\n"
+                       "TRC  01/01/2026 03:00 100.0\n\n")
+
+
+@pytest.fixture(scope="module")
+def tree_tracer(tmp_path_factory):
+    """The tree with the ramped tracer at J1, run in SWMM and in noodl (noodl driven, step by
+    step, by SWMM's own J1 node concentration: J1 has only its lateral inflow, so that is
+    the inflow concentration SWMM applied over the step, sampled at its start plus 1 ms)."""
+    inp = _tracer_inp(tmp_path_factory.mktemp("tree_tracer"), "tree_dynwave.inp",
+                      "03:00:00", {"J1": ("TRC", 0.0)}, _TREE_TRACER_SERIES)
+    swmm, not_converging = _swmm_tracer(inp)
+    assert not_converging == 0.0
+    j1 = [row["node"]["J1"] for row in swmm]
+    model, mine = _noodl_tracer("tree_dynwave.inp",
+                                {"steps": len(swmm), "at": {"J1": lambda k: j1[k]}})
+    return model, swmm, mine
+
+
+def _swmm_quality_recursion(model, swmm, dt):
+    """SWMM's dynamic-wave quality step (qualrout.c) on SWMM's own per-step flows and link
+    volumes, for the tree (no conduit reversed, nothing loaded but J1): a junction mixes its
+    inflowing links' START-of-step concentrations with its lateral load over its inflow, with
+    no volume (`findNodeQual`, :221-249: `findLinkMassFlow` reads `Link.oldQual`, :210); a
+    conduit mixes its upstream node's new concentration over its step-start volume with the
+    inflow raised by its volume change, ``|q| + (v2 - v1)/dt`` (`findLinkQual`, :315-341,
+    `getMixedQual`, :146-174). Returns the link concentrations per step."""
+    net = model.dynamic_wave
+    names = list(model.link_names)
+    ends = {name: (model.net.nodes[int(u)], model.net.nodes[int(v)])
+            for name, u, v in zip(names, net.edge_u, net.edge_v, strict=True)}
+    lateral = {n: float(model.driver_template["inflow"][model.net.nodes.index(n)])
+               for n in net.junction_names}
+    c = dict.fromkeys(names, 0.0)
+    v_old = {name: 0.0 for name in names}
+    out = []
+    for k, row in enumerate(swmm):
+        q, v_new = row["flow"], row["volume"]
+        if k == 0:
+            v_old = dict(v_new)
+        node = {}
+        for n in net.junction_names:
+            inflow = lateral[n] + sum(abs(q[name]) for name in names if ends[name][1] == n)
+            load = (row["node"]["J1"] * lateral[n] if n == "J1" else 0.0) + sum(
+                abs(q[name]) * c[name] for name in names if ends[name][1] == n)
+            node[n] = load / inflow if inflow > 0.0 else 0.0
+        new = {}
+        for name in names:
+            q_in = max(abs(q[name]) + (v_new[name] - v_old[name]) / dt, 0.0)
+            c_in = node[ends[name][0]]
+            if q_in <= 0.0:
+                new[name] = c[name]
+                continue
+            mixed = (c[name] * v_old[name] + c_in * q_in * dt) / (v_old[name] + q_in * dt)
+            new[name] = max(min(mixed, max(c[name], c_in)), 0.0)
+        c, v_old = new, dict(v_new)
+        out.append(dict(c))
+    return out
+
+
+@pytest.mark.slow
+def test_tracer_on_the_tree_matches_swmm_at_steady_state(tree_tracer):
+    """Two hours after J1's tracer ramps to 100 mg/L both codes hold the flow-weighted
+    mixture on every conduit (C1 0.1, C3 0.1 x 0.025/0.065, C5 0.1 x 0.025/0.08 kg/m3;
+    C2, C4 exactly 0), within `TOL_TRACER` relative."""
+    model, swmm, mine = tree_tracer
+    worst = _steady_tracer_error(model, mine[-1]["link"], swmm[-1]["link"])
+    assert worst < TOL_TRACER, worst
+
+
+@pytest.mark.slow
+def test_tracer_on_the_tree_in_transit_follows_each_codes_scheme(tree_tracer):
+    """While the tracer ramps up the two codes differ by design, and by exactly what their
+    schemes predict.
+
+    * SWMM is its own recursion (`_swmm_quality_recursion`, on its own flows and volumes):
+      zero-volume junctions that mix the upstream links' START-of-step concentrations (a lag
+      of one step each) and conduit reactors of the conduit volume. Asserted at 1e-12
+      relative to the plateau, so the scheme is the one ported there.
+    * noodl's reactors are the junctions (design E7: half of each attached conduit's volume,
+      then the junction's own continuity), solved implicitly over the network. At steady
+      flow both are linear time-invariant chains with the same gain g, so the area between
+      each output and its final value is ``g u_final T``, T the chain's mean delay: SWMM's
+      ``sum V_link / q + dt`` per junction passed, noodl's ``sum V_j / q_out``. Hence the
+      time integral of (SWMM - noodl) on each conduit is ``g u_final (T_noodl - T_swmm)``,
+      with no tolerance of its own: asserted at 1e-6 of it, the hydraulics' residual drift.
+    * Pointwise, for step responses rising monotonically from 0 to g, the difference is at
+      most ``max |du| g (T_noodl + T_swmm) / dt``, |du| the largest input change per step.
+    """
+    model, swmm, mine = tree_tracer
+    dt = model.routing_step
+    plateau = 0.1                                           # kg/m3, the 100 mg/L plateau
+    ported = _swmm_quality_recursion(model, swmm, dt)
+    worst_port = max(abs(p[name] - row["link"][name]) for p, row in zip(ported, swmm,
+                                                                        strict=True)
+                     for name in model.link_names)
+    assert worst_port < 1e-12 * plateau, worst_port
+
+    names = list(model.link_names)
+    last = swmm[-1]
+    q = {name: abs(last["flow"][name]) for name in names}
+    cap = mine[-1]["capacity"]
+    # each conduit's chain from J1, as (conduit, the junction that feeds it)
+    chains = {"C1": [("C1", "J1")], "C3": [("C1", "J1"), ("C3", "J3")],
+              "C5": [("C1", "J1"), ("C3", "J3"), ("C5", "J4")]}
+    du = max(abs(swmm[k]["node"]["J1"] - swmm[k - 1]["node"]["J1"])
+             for k in range(1, len(swmm)))
+    for name, chain in chains.items():
+        gain = q["C1"] / q[name]
+        t_swmm = sum(last["volume"][c] / q[c] for c, _ in chain) + dt * (len(chain) - 1)
+        t_noodl = sum(cap[j] / q[c] for c, j in chain)
+        area = dt * sum(row["link"][name] - m["link"][name]
+                        for row, m in zip(swmm, mine, strict=True))
+        expected = gain * plateau * (t_noodl - t_swmm)
+        assert area == pytest.approx(expected, rel=1e-6), (name, area, expected)
+        bound = du * gain * (t_noodl + t_swmm) / dt
+        worst = max(abs(row["link"][name] - m["link"][name])
+                    for row, m in zip(swmm, mine, strict=True))
+        assert worst <= bound, (name, worst, bound)
+
+
+@pytest.mark.slow
+def test_tracer_on_the_loop_matches_swmm_at_steady_state(tmp_path):
+    """The loop with 100 mg/L entering at J1 and 40 mg/L at J3, after 3.5 h: J3 mixes Cb's
+    water with its lateral inflow and sends it through the reversed conduit Cd (oriented
+    J4 -> J3, its flow negative) to J4, which mixes it with Cc's. Every conduit within
+    `TOL_TRACER` relative of SWMM. (The loop's hydraulics settle slowly, its outfall head
+    contracting by ~0.92 per pass near t = 500 s: at 2 h both codes are still 1e-6 from
+    steady state.)"""
+    inp = _tracer_inp(tmp_path, "loop_dynwave.inp", "03:30:00",
+                      {"J1": ('""', 100.0), "J3": ('""', 40.0)})
+    swmm, not_converging = _swmm_tracer(inp)
+    assert not_converging == 0.0
+    model, mine = _noodl_tracer("loop_dynwave.inp", {"steps": len(swmm),
+                                      "at": {"J1": lambda k: 0.1, "J3": lambda k: 0.04}})
+    assert mine[-1]["flow"]["Cd"] < 0.0
+    worst = _steady_tracer_error(model, mine[-1]["link"], swmm[-1]["link"])
+    assert worst < TOL_TRACER, worst
