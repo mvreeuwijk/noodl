@@ -7,7 +7,7 @@ building the network directly, shown on each application page.
 
 | Format | Reader | What it describes | Produces a model for |
 |---|---|---|---|
-| [CONTAM](contam.md) `.prj` / `.wth` | `read_prj`, `project_to_model`, `read_wth` | Multi-zone building airflow and contaminants; weather | [Building physics](../applications/building_physics.md) |
+| [CONTAM](contam.md) `.prj` / `.wth` / `.ctm` | `read_prj`, `project_to_model`, `read_wth`, `read_ctm` | Multi-zone building airflow and contaminants; weather; ambient concentrations | [Building physics](../applications/building_physics.md) |
 | [Modelica Buildings Library](modelica.md) (JSON + CSV export) | `read_modelica` | Multi-zone airflow models built from MBL components | [Building physics](../applications/building_physics.md) |
 | [SWMM](swmm.md) `.inp` | `read_swmm_inp` | Gravity sewer and drainage networks | [Sewers](../applications/sewer.md) |
 | [EPANET](epanet.md) `.inp` | `read_epanet_inp` | Pressurised water distribution | [Water distribution](../applications/water.md) |

@@ -9,12 +9,13 @@ against NIST's own `contamxpy` 0.0.9 sample weather files, one day to a year lon
                 turn every later `M/D` into a day-of-year offset from it.
     day header  ONE `!Date DofW Dtype DST Tgrnd` comment line, followed by one data row
                 PER CALENDAR DAY in the file's date range (`Date DofW Dtype DST Tgrnd`).
-                This block is NOT read for its contents -- `DofW`/`Dtype`/`DST`/`Tgrnd`
-                play no part in `Ta`/`Pb`/`Ws`/`Wd` -- so no count or per-day line ever
-                needs to be checked; it is simply skipped in full.
+                `Dtype`, the day's CONTAM day type (1-12), is read into `Weather.day_types`
+                ({day of year: day type}); `DofW`, `DST` and `Tgrnd` play no part.
     time header ONE `!Date Time Ta Pb Ws Wd Hr Ith Idn Ts Rn Sn` comment line, followed by
                 ALL the file's per-time data rows for EVERY day, to end of file. This is
-                the section actually read: `Date Time Ta Pb Ws Wd` (the rest ignored).
+                the section actually read: `Date Time Ta Pb Ws Wd Hr`. `Hr` (g/kg) is kept
+                as `humidity_ratio` in kg/kg for water-vapour modelling; the solar columns
+                are ignored.
 
     Verified structural fact, checked directly rather than assumed (the two counted
     sections of the .prj format that are easy to miscount -- one all on a single line, one
@@ -39,11 +40,19 @@ against NIST's own `contamxpy` 0.0.9 sample weather files, one day to a year lon
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import torch
+
+from noodl.apps.building_physics.inputs import Input
+from noodl.apps.building_physics.schedules import (
+    Calendar,
+    _file_breakpoints,
+    _piecewise,
+    _seconds_into_file,
+)
 
 _DAYS_BEFORE_MONTH = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
 
@@ -60,15 +69,21 @@ def _seconds(hms: str) -> float:
 
 @dataclass
 class Weather:
-    """A weather series: time `t` (s from the file's start date), ambient temperature
-    `Ta` (K), barometric pressure `Pb` (Pa), wind speed `Ws` (m/s) and direction `Wd`
-    (degrees); `at(t)` interpolates."""
+    """A weather series: time `t` (s from 00:00 of the file's start day `start_day`, a day of
+    the year), ambient temperature `Ta` (K), barometric pressure `Pb` (Pa), wind speed `Ws`
+    (m/s) and direction `Wd` (degrees from north, blowing from), and optionally the humidity
+    ratio `humidity_ratio` (kg water / kg dry air) and each day's CONTAM day type
+    `day_types` {day of year: 1-12}. `at(t)` interpolates; `signal(name)` and
+    `inputs(model)` feed `simulate`."""
 
-    t: torch.Tensor      # seconds from 00:00 of the file's start date
+    t: torch.Tensor      # seconds from 00:00 of day `start_day`
     Ta: torch.Tensor     # K
     Pb: torch.Tensor     # Pa
     Ws: torch.Tensor     # m/s
     Wd: torch.Tensor     # deg
+    start_day: int = 1
+    day_types: dict[int, int] = field(default_factory=dict)
+    humidity_ratio: torch.Tensor | None = None    # kg/kg
 
     def at(self, t: float) -> dict[str, float]:
         """Linear interpolation between listed times (CONTAM interpolates the same way);
@@ -110,10 +125,64 @@ class Weather:
             "V_met": f(a["Ws"]), "theta_w": f(a["Wd"]),
         }
 
+    def signal(self, name: str) -> _WeatherSignal:
+        """`name` ("Ta", "Pb", "Ws" or "Wd") as a `Signal` on the simulation's calendar."""
+        if name not in ("Ta", "Pb", "Ws", "Wd"):
+            raise ValueError(f"Weather.signal: unknown column {name!r}; Ta, Pb, Ws or Wd")
+        return _WeatherSignal(self, name)
+
+    def inputs(self, model, *, ambient: str = "ambient") -> list[Input]:
+        """Inputs writing this weather into `model`'s drivers: the ambient temperature into
+        `"T"` at `ambient` when the model declares node temperatures, else into the boundary
+        of the model's one temperature layer (`"<layer>.x_boundary"`); `"P_ref"`, `"V_met"`
+        and `"theta_w"` from Pb, Ws and Wd."""
+        if "T" in model.refs.inputs:
+            temperature = Input(self.signal("Ta"), "T", at=ambient, name="weather Ta")
+        else:
+            thermal = [n for n, lay in model.transport.items() if lay.quantity == "temperature"]
+            if len(thermal) != 1:
+                raise ValueError(
+                    f"Weather.inputs: the model declares no node temperatures 'T' and has "
+                    f"{len(thermal)} temperature layers {thermal}; write the ambient "
+                    f"temperature with an Input of your own"
+                )
+            temperature = Input(self.signal("Ta"), f"{thermal[0]}.x_boundary", name="weather Ta")
+        return [temperature,
+                Input(self.signal("Pb"), "P_ref", name="weather Pb"),
+                Input(self.signal("Ws"), "V_met", name="weather Ws"),
+                Input(self.signal("Wd"), "theta_w", name="weather Wd")]
+
+
+class _WeatherSignal:
+    """One weather column as a `Signal`: the file's time axis placed on the calendar, linear
+    between rows (wind direction on its shorter arc), never extrapolated."""
+
+    def __init__(self, weather: Weather, name: str) -> None:
+        self.weather, self.name = weather, name
+        self._t = weather.t.tolist()
+        column = getattr(weather, name)
+        self._column = (
+            torch.as_tensor(np.unwrap(np.deg2rad(column.numpy())), dtype=torch.float64)
+            if name == "Wd" else column
+        )
+
+    def __repr__(self) -> str:
+        return f"weather {self.name}"
+
+    def value(self, t: float, calendar: Calendar) -> torch.Tensor:
+        s = _seconds_into_file(
+            f"weather {self.name}", t, calendar, self.weather.start_day, self._t
+        )
+        v = _piecewise(self._t, self._column, s, linear=True, left=False)
+        return torch.rad2deg(v) % 360.0 if self.name == "Wd" else v
+
+    def breakpoints(self, lo: float, hi: float, calendar: Calendar) -> list[float]:
+        return _file_breakpoints(self._t, self.weather.start_day, lo, hi, calendar)
+
 
 def read_wth(path) -> Weather:
-    """A CONTAM `.wth` weather file as a `Weather` series (ambient temperature,
-    pressure, wind speed and direction)."""
+    """A CONTAM `.wth` weather file as a `Weather` series (ambient temperature, pressure,
+    wind speed and direction, humidity ratio, and each day's day type)."""
     lines = [ln.strip() for ln in Path(path).read_text().splitlines()]
     if not lines or not lines[0].startswith("WeatherFile ContamW"):
         raise ValueError(
@@ -122,14 +191,19 @@ def read_wth(path) -> Weather:
     start_date = lines[2].split()[0]
     day0 = _day_of_year(start_date)
     rows = []
+    day_types: dict[int, int] = {}
     in_data = False
     for ln in lines[3:]:
         if ln.startswith("!Date") and "Time" in ln:
             in_data = True
             continue
-        if not in_data or not ln or ln.startswith("!"):
+        if not ln or ln.startswith("!"):
             continue
         tok = ln.split()
+        if not in_data:
+            if len(tok) >= 3:
+                day_types[_day_of_year(tok[0])] = int(tok[2])
+            continue
         if len(tok) < 6:
             continue
         t = (_day_of_year(tok[0]) - day0) * 86400.0 + _seconds(tok[1])
@@ -146,9 +220,11 @@ def read_wth(path) -> Weather:
                 f"{t}s follows {rows[-1][0]}s) -- a window crossing 31 December, or rows out "
                 f"of order? this reader has no year field to disambiguate"
             )
-        rows.append((t, float(tok[2]), float(tok[3]), float(tok[4]), float(tok[5])))
+        hr = float(tok[6]) / 1000.0 if len(tok) > 6 else 0.0
+        rows.append((t, float(tok[2]), float(tok[3]), float(tok[4]), float(tok[5]), hr))
     if not rows:
         raise ValueError(f"wth: {path} has no weather rows")
     cols = list(zip(*rows, strict=True))
     f = lambda c: torch.tensor(c, dtype=torch.float64)  # noqa: E731
-    return Weather(t=f(cols[0]), Ta=f(cols[1]), Pb=f(cols[2]), Ws=f(cols[3]), Wd=f(cols[4]))
+    return Weather(t=f(cols[0]), Ta=f(cols[1]), Pb=f(cols[2]), Ws=f(cols[3]), Wd=f(cols[4]),
+                   start_day=day0, day_types=day_types, humidity_ratio=f(cols[5]))

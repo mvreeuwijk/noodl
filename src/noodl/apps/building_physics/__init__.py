@@ -16,6 +16,7 @@ from noodl.apps.building_physics.contamx import (
     run_steady,
     run_transient,
 )
+from noodl.apps.building_physics.ctm import AmbientConcentrations, read_ctm
 from noodl.apps.building_physics.elements import (
     add_large_opening,
     mass_orifice,
@@ -60,6 +61,7 @@ from noodl.apps.building_physics.thermal import (
 from noodl.apps.building_physics.wth import Weather, read_wth
 
 __all__ = [
+    "AmbientConcentrations",
     "EDGE_ATTRIBUTES",
     "NODE_ATTRIBUTES",
     "BurstSource",
@@ -91,6 +93,7 @@ __all__ = [
     "mass_orifice",
     "orifice_elements_from_edges",
     "project_to_model",
+    "read_ctm",
     "read_epw",
     "read_modelica",
     "read_prj",

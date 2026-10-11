@@ -63,9 +63,10 @@ Descriptions of the physical objects a network is built from.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `AmbientConcentrations`<br><small>`noodl.apps.building_physics`</small> | Ambient (outdoor) mass fractions over time: `t` (s from 00:00 of `start_day`, a day of the year), `x` `(len(t), K)` (kg/kg) for the `species` named, in file order. | `AmbientConcentrations(t, x, species, start_day=1)` |
 | `Project`<br><small>`noodl.apps.building_physics`</small> | A CONTAM project as read by `read_prj`: the network, its airflow elements and drives, zones and their temperatures and volumes, species, initial mass fractions, sources and ambient conditions. `project_to_model` builds the model from it. | `Project(net, elements, drives, zones, ambient, paths, species, T_zone, zone_volumes, g, ambient_conditions, profiles, x0, sources, kinds, zone_nr_to_name, density_uses_zone_pressure=False)` |
 | `WallMass`<br><small>`noodl.apps.building_physics`</small> | A lumped wall node: capacity [J/K], conductances to the zone and to ambient [W/K]. | `WallMass(name, capacity, ua_zone, ua_ambient)` |
-| `Weather`<br><small>`noodl.apps.building_physics`</small> | A weather series: time `t` (s from the file's start date), ambient temperature `Ta` (K), barometric pressure `Pb` (Pa), wind speed `Ws` (m/s) and direction `Wd` (degrees); `at(t)` interpolates. | `Weather(t, Ta, Pb, Ws, Wd)` |
+| `Weather`<br><small>`noodl.apps.building_physics`</small> | A weather series: time `t` (s from 00:00 of the file's start day `start_day`, a day of the year), ambient temperature `Ta` (K), barometric pressure `Pb` (Pa), wind speed `Ws` (m/s) and direction `Wd` (degrees from north, blowing from), and optionally the humidity ratio `humidity_ratio` (kg water / kg dry air) and each day's CONTAM day type `day_types` {day of year: 1-12}. `at(t)` interpolates; `signal(name)` and `inputs(model)` feed `simulate`. | `Weather(t, Ta, Pb, Ws, Wd, start_day=1, day_types=<factory>, humidity_ratio=None)` |
 | `Zone`<br><small>`noodl.apps.building_physics`</small> | A room: its air `volume` (m3), initial temperature `T0` (K), reference height `z_ref` (m) and an optional lumped `wall` (`WallMass`). Add it with `add_zone`. | `Zone(name, volume, T0=293.15, z_ref=0.0, wall=None)` |
 
 ## Elements (branch laws)
@@ -129,10 +130,11 @@ Readers and writers of other tools' file formats.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `read_ctm`<br><small>`noodl.apps.building_physics`</small> | A CONTAM `.ctm` ambient-concentration file as `AmbientConcentrations`. | `read_ctm(path)` |
 | `read_epw`<br><small>`noodl.apps.building_physics`</small> | An EnergyPlus `.epw` weather file as a `Weather` series (ambient temperature, pressure, wind speed and direction), from `start_day` for `n_hours` hours. | `read_epw(path, *, start_day=1, n_hours=None)` |
 | `read_modelica`<br><small>`noodl.apps.building_physics`</small> | Read one `noodl-modelica/1` JSON file into `(model, state, drivers)`. | `read_modelica(path, *, return_names=False, substeps=1, mass_storage=None)` |
 | `read_prj`<br><small>`noodl.apps.building_physics`</small> | A CONTAM `.prj` project as a `Project`: zones, airflow paths and their elements, species and sources; `project_to_model` turns it into a model. | `read_prj(path)` |
-| `read_wth`<br><small>`noodl.apps.building_physics`</small> | A CONTAM `.wth` weather file as a `Weather` series (ambient temperature, pressure, wind speed and direction). | `read_wth(path)` |
+| `read_wth`<br><small>`noodl.apps.building_physics`</small> | A CONTAM `.wth` weather file as a `Weather` series (ambient temperature, pressure, wind speed and direction, humidity ratio, and each day's day type). | `read_wth(path)` |
 | `write_wth`<br><small>`noodl.apps.building_physics`</small> | `WeatherFile ContamW 2.0`, one row per sample, the columns `read_wth` reads. | `write_wth(weather, path, *, start_date='1/1')` |
 
 ## Other classes

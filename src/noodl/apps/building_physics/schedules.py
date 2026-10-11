@@ -61,6 +61,30 @@ def _piecewise(
     return values[min(max(i, 0), n - 1)]
 
 
+def _seconds_into_file(
+    label: str, t: float, calendar: Calendar, start_day: int, times: list[float]
+) -> float:
+    """Seconds from 00:00 of a file's `start_day` to simulation time `t`, which must lie within
+    the file's rows `times`; a run outside them raises rather than extrapolating. Shared by the
+    weather and ambient-concentration signals."""
+    s = calendar.seconds_from_new_year(t) - (start_day - 1) * DAY
+    lo, hi = times[0], times[-1]
+    if not lo - 1e-9 <= s <= hi + 1e-9:
+        raise ValueError(
+            f"{label}: simulation time {float(t)} s is {s} s from the file's start (day "
+            f"{start_day}), outside its rows [{lo}, {hi}] s"
+        )
+    return min(max(s, lo), hi)
+
+
+def _file_breakpoints(
+    times: list[float], start_day: int, lo: float, hi: float, calendar: Calendar
+) -> list[float]:
+    """The rows of a file starting on `start_day`, as simulation times within (lo, hi)."""
+    shift = (start_day - 1) * DAY - calendar.seconds_from_new_year(0.0)
+    return [p + shift for p in times if lo < p + shift < hi]
+
+
 @runtime_checkable
 class Signal(Protocol):
     """A time-varying input: `value(t, calendar)`, a float64 tensor at `t` s since the

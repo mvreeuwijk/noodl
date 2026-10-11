@@ -1,6 +1,6 @@
-# CONTAM (`.prj`, `.wth`)
+# CONTAM (`.prj`, `.wth`, `.ctm`)
 
-Reading a CONTAM project and weather file produces a model for [building
+Reading a CONTAM project, weather file and ambient-concentration file produces a model for [building
 physics](../applications/building_physics.md). Each `.prj` airflow-path component becomes one of
 the [`noodl.elements`](../applications/building_physics.md#airflow-elements) objects the building
 application assembles into a network by hand; a source record becomes one of the four source
@@ -65,9 +65,11 @@ flows = project.path_flows(solved["air.q"])   # in CONTAM path-number order
 
 ## CONTAM `.wth`
 
-`read_wth(path) -> Weather` reads the `WeatherFile ContamW 2.0` format. Only `Date, Time, Ta, Pb,
-Ws, Wd` are used; humidity, radiation and ground-temperature columns are ignored, as is the
-per-day header block.
+`read_wth(path) -> Weather` reads the `WeatherFile ContamW 2.0` format. `Date, Time, Ta, Pb, Ws,
+Wd` drive the model, and `Hr` (g/kg) is stored as `humidity_ratio` in kg/kg. The per-day rows
+give each day's **day type**, which selects the day schedules of the week schedules;
+`Weather.day_types` maps the day of the year to it, and a `Calendar(day_types=...)` uses it.
+Radiation and ground-temperature columns are ignored.
 
 ```python
 weather = read_wth("year.wth")
@@ -78,3 +80,33 @@ drivers.update(weather.drivers_at(t, thermal="thermal"))
 shortest arc. `drivers_at(t)` returns the driver keys a `build_model`-built model reads:
 `"<thermal>.x_boundary"`, `"P_ref"`, `"V_met"`, `"theta_w"`. It handles the single-boundary-node
 case; a model with several prescribed temperatures must build its own boundary vector.
+
+`Weather.inputs(model)` writes the weather into a model's drivers at every step of `simulate`:
+the ambient entry of `"T"` on the CONTAM route, or every boundary temperature of a thermal
+model, plus `P_ref`, `V_met` and `theta_w`. `Weather.signal("Ta")` is one column as a signal.
+A run outside the file's rows raises.
+
+## CONTAM `.ctm`
+
+`read_ctm(path) -> AmbientConcentrations` reads the `SpeciesFile ContamW 2.0` ambient
+(outdoor) concentration file:
+
+```text
+SpeciesFile ContamW 2.0
+free-text description
+1/1<TAB>1/2<TAB>1                 start date, end date, number of species
+sarin                             one species name per line
+!Date<TAB>Time<TAB>sarin
+1/1<TAB> 0:00:00<TAB>0.0023254    rows: date, time, one mass fraction (kg/kg) per species
+1/1<TAB>24:00:00<TAB>0.0
+```
+
+Values are interpolated linearly between rows, and a day's `24:00:00` is the next day's
+`00:00:00`. ContamX uses the file only when its species match the project's; this reader
+refuses a mismatch and names both lists.
+
+```py
+outdoor = read_ctm("outdoor.ctm")
+inputs = outdoor.inputs(model)      # writes "species.x_boundary" at every step of simulate
+```
+

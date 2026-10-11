@@ -200,6 +200,22 @@ torch.Size([13, 4]) torch.Size([13, 3, 1])
 `air_mass_change=True` adds each zone's air-mass change to its airflow balance (CONTAM's
 `dodMdt`): a zone whose temperature rises pushes out the air it no longer holds.
 
+A weather file and an ambient-concentration file become inputs the same way:
+
+```python
+from noodl.apps.building_physics import Calendar, read_ctm, read_wth
+
+weather = read_wth("test_OneZoneWthCtm.wth")
+print(weather.day_types, weather.signal("Ta").value(6 * 3600.0 + 300.0, Calendar()).item())
+outdoor = read_ctm("test_OneZoneWthCtm.ctm")
+print(outdoor.species, outdoor.signal(["sarin"]).value(15 * 3600.0, Calendar()).tolist())
+```
+
+```text
+{1: 4, 2: 5} 293.15
+('sarin',) [0.0]
+```
+
 ## The API
 
 ### Zones and walls

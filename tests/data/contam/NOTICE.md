@@ -19,3 +19,10 @@ Two of NIST's one-zone stack projects are present, and only one of them is usabl
   filter is invisible to the airflow solution but not to the species layer, so loading the
   project while silently dropping the filter would corrupt every contaminant result it
   produced. That refusal is deliberate and is expected to stay.
+- `test_OneZoneWthCtm.{prj,wth,ctm}`: NIST's one-zone project run with its own weather and
+  ambient-concentration files (two 1.5 m openings, wind from the `.wth`), unchanged. The
+  weather/ambient-file parity fixture (`test_contam_parity.py`).
+- `test_OneZoneWthCtmStack.{prj,wth,ctm}`: the non-`UseApi` sibling of the stack fixture, unchanged:
+  zone 1 on temperature schedule 1, `densZP = 1`, `dodMdt = 1`, with its own weather and
+  ambient-concentration files. The scheduled-zone-temperature parity fixture. Note that its second
+  header line names `test_OneZoneWthCtmStack-UseApi.prj`; ContamX ignores that line.

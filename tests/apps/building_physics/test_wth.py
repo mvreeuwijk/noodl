@@ -134,3 +134,70 @@ def test_wind_direction_interpolates_on_the_shorter_arc_across_the_0_360_wrap():
         Wd=torch.tensor([350.0, 10.0], dtype=torch.float64),
     )
     assert w.at(50.0)["Wd"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_the_day_rows_give_each_days_type_and_humidity_is_kept():
+    from noodl.apps.building_physics.schedules import Calendar
+
+    w = read_wth(DATA / "test_OneZoneWthCtmStack.wth")
+    assert w.start_day == 1 and w.day_types == {1: 4, 2: 5}
+    assert w.humidity_ratio is not None and w.humidity_ratio.shape == w.t.shape
+    cal = Calendar(start_day=w.start_day, day_types=w.day_types)
+    assert (cal.day_type(1), cal.day_type(2)) == (4, 5)
+
+
+def test_humidity_ratio_is_in_kg_per_kg(tmp_path):
+    p = tmp_path / "h.wth"
+    p.write_text(SYNTHETIC.replace("\t0\t0\t0\t0\t0\t0", "\t7.5\t0\t0\t0\t0\t0", 1))
+    w = read_wth(p)
+    assert w.humidity_ratio[0].item() == pytest.approx(0.0075)
+
+
+def test_weather_signals_follow_the_calendar_and_the_files_own_start():
+    from noodl.apps.building_physics.schedules import Calendar
+
+    w = read_wth(DATA / "test_OneZoneWthCtmStack.wth")
+    ta = w.signal("Ta")
+    assert ta.value(12 * 3600.0 + 300.0, Calendar()).item() == 293.15
+    assert ta.value(0.0, Calendar(start_day=1, start_time=12 * 3600.0 + 150.0)).item() == 283.15
+    assert ta.breakpoints(0.0, 2 * 3600.0, Calendar(start_day=1, start_time=12 * 3600.0)) == [
+        300.0, 3600.0, 3900.0]
+
+
+def test_wind_direction_signal_takes_the_shorter_arc():
+    from noodl.apps.building_physics.schedules import Calendar
+
+    w = Weather(t=torch.tensor([0.0, 100.0], dtype=torch.float64),
+                Ta=torch.zeros(2, dtype=torch.float64), Pb=torch.zeros(2, dtype=torch.float64),
+                Ws=torch.zeros(2, dtype=torch.float64),
+                Wd=torch.tensor([350.0, 10.0], dtype=torch.float64))
+    assert w.signal("Wd").value(50.0, Calendar()).item() == pytest.approx(0.0, abs=1e-9)
+    with pytest.raises(ValueError, match="unknown column"):
+        w.signal("Hr")
+
+
+def test_weather_signal_outside_the_file_raises():
+    from noodl.apps.building_physics.schedules import Calendar
+
+    w = read_wth(DATA / "valThreeZonesWthCtm.wth")          # one day, 1/1
+    with pytest.raises(ValueError, match="outside"):
+        w.signal("Ta").value(86400.0 + 300.0, Calendar())
+
+
+def test_weather_inputs_target_the_models_own_temperature_key():
+    from noodl.apps.building_physics.prj import project_to_model, read_prj
+
+    w = read_wth(DATA / "test_OneZoneWthCtmStack.wth")
+    model, _, _ = project_to_model(read_prj(DATA / "test_OneZoneWthCtmStack-UseApi.prj"))
+    keys = [(i.key, i.at) for i in w.inputs(model)]
+    assert keys == [("T", ("ambient",)), ("P_ref", None), ("V_met", None), ("theta_w", None)]
+
+
+def test_write_wth_round_trips_the_day_types_and_humidity(tmp_path):
+    from noodl.apps.building_physics import write_wth
+
+    w = read_wth(DATA / "test_OneZoneWthCtmStack.wth")
+    back = read_wth(write_wth(w, tmp_path / "rt.wth"))
+    assert back.day_types == {1: 4, 2: 5}
+    torch.testing.assert_close(back.Ta, w.Ta)
+    torch.testing.assert_close(back.humidity_ratio, w.humidity_ratio)
