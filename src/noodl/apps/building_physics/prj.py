@@ -56,6 +56,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
+from torch import Tensor
 
 from noodl.apps.building_physics.thermal import R_AIR, RHO_0, species_layer
 from noodl.drives import Stack, Wind, WindProfile
@@ -861,37 +862,87 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     )
 
 
+class PrescribedTemperatureDensity:
+    """Air density at every node from prescribed node temperatures, the CONTAM route's
+    density closure: rho = P_ref / (R T) (ideal gas, TN 1887r1 section 3.18).
+
+    Reads `"T"` (K, full node order: every zone's temperature and the ambient's) and
+    `"P_ref"` (Pa, the barometric pressure; scalar or batched). Writes `"rho"` (full node
+    order), `"rho_amb"` and, when the model has a species layer, `"<layer>.capacity"`: each
+    zone's air mass rho V (kg) on that layer's interior, as ContamX holds it. A scheduled zone
+    temperature therefore changes the zone's air mass, and the species step's amount form
+    (`TransportLayer.step(capacity_prev=...)`) conserves the contaminant across that change.
+    """
+
+    inputs = ("T", "P_ref")
+
+    def __init__(self, *, ambient_index: int, volumes: Tensor, capacity_nodes: Tensor | None,
+                 R: float = R_AIR, layer: str = "species") -> None:
+        self.ambient_index = int(ambient_index)
+        self.volumes = torch.as_tensor(volumes, dtype=F64)
+        self.capacity_nodes = capacity_nodes
+        self.R = float(R)
+        self.capacity_key = f"{layer}.capacity"
+        self.outputs = ("rho", "rho_amb") + (
+            (self.capacity_key,) if capacity_nodes is not None else ())
+
+    @property
+    def input_specs(self) -> dict[str, dict]:
+        """The node temperatures and barometric pressure this closure reads."""
+        return {
+            "T": dict(description="air temperature at every node (zones and ambient)",
+                      unit="K", over="nodes"),
+            "P_ref": dict(description="barometric pressure (not corrected to sea level)",
+                          unit="Pa"),
+        }
+
+    def __call__(self, state, drivers):
+        T = drivers["T"]
+        P = torch.as_tensor(drivers["P_ref"], dtype=T.dtype)
+        rho = P.unsqueeze(-1) / (self.R * T)
+        out = {"rho": rho, "rho_amb": rho[..., self.ambient_index]}
+        if self.capacity_nodes is not None:
+            out[self.capacity_key] = (rho * self.volumes)[..., self.capacity_nodes]
+        return out
+
+
 class ZonePressureDensity:
     """ContamX's `densZP = 1`: zone densities at the zone's absolute pressure.
 
-    Writes `rho = rho_Pb * (1 + phi / Pb)` over the full-node `drivers["rho"]`, which
-    `project_to_model` evaluates at the barometric pressure alone (`Pb / (R T)`), so the
-    result is `(Pb + phi) / (R T)`. `phi` is the air layer's gauge pressure at each node's
-    reference height, read from `state["air.phi"]` -- the PREVIOUS solve's, because a
-    closure runs before the solve it feeds. The ambient node is the zero-gauge boundary, so
-    `rho_amb` is unchanged. With no `"air.phi"` in the state (the initial state
-    `project_to_model` returns) the correction is zero.
+    Writes `rho = rho_Pb * (1 + phi / P_ref)` over the full-node `drivers["rho"]`, which
+    `PrescribedTemperatureDensity` evaluates at the barometric pressure alone
+    (`P_ref / (R T)`), so the result is `(P_ref + phi) / (R T)`. `phi` is the air layer's
+    gauge pressure at each node's reference height, read from `state["air.phi"]` -- the
+    PREVIOUS solve's, because a closure runs before the solve it feeds. The ambient node is
+    the zero-gauge boundary, so `rho_amb` is unchanged. With no `"air.phi"` in the state (the
+    initial state `project_to_model` returns) the correction is zero. `P_ref` is read from the
+    drivers when present (a weather file's pressure is then used), else `Pb` stands.
+
+    The zone air mass (the species layer's capacity, when `capacity_key` is given) carries the
+    same `(1 + phi / P_ref)` factor, as ContamX's zone mass does under `densZP`.
 
     Consequently a single `model.steady` is one fixed-point pass; `steady` below repeats it
     to convergence. A transient `model.step` uses the pressures of the step before, a lag of
     one step on a term of relative size |P_zone| / Pb.
-
-    NOT corrected: the species layer's capacity, `rho V`, is fixed when the layer is built
-    and stays at `Pb / (R T)`; under `densZP` ContamX's zone air mass carries the same
-    |P_zone| / Pb factor, which is NOT amplified there (no density difference is involved),
-    i.e. ~6e-6 on the stack project's zone masses. No transient ContamX comparison runs on a
-    `densZP` project.
     """
 
-    def __init__(self, Pb: float, *, layer: str = "air") -> None:
+    def __init__(self, Pb: float, *, layer: str = "air", capacity_key: str | None = None,
+                 capacity_nodes: Tensor | None = None) -> None:
         self.Pb = float(Pb)
         self.key = f"{layer}.phi"
+        self.capacity_key = capacity_key
+        self.capacity_nodes = capacity_nodes
 
     def __call__(self, state, drivers):
         phi = state.get(self.key)
         if phi is None:
             return {}
-        return {"rho": drivers["rho"] * (1.0 + phi / self.Pb)}
+        P = torch.as_tensor(drivers.get("P_ref", self.Pb), dtype=phi.dtype)
+        factor = 1.0 + phi / P.unsqueeze(-1)
+        out = {"rho": drivers["rho"] * factor}
+        if self.capacity_key is not None and self.capacity_key in drivers:
+            out[self.capacity_key] = drivers[self.capacity_key] * factor[..., self.capacity_nodes]
+        return out
 
 
 def project_to_model(project: Project, *, ambient: dict | None = None, species: bool = True,
@@ -899,12 +950,14 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     """Air layer + species layer (no thermal layer: a .prj carries no thermal data), the
     initial state and the drivers for the project's ambient conditions (or `ambient`).
 
-    Node densities are `Pb / (R_AIR T)` (plus the zone-pressure term of
-    `ZonePressureDensity` when the file sets `densZP`), and the species layer's capacity is
-    each zone's air mass at THAT density, `rho_zone V` -- as ContamX holds it -- not at the
-    reference RHO_0: 1.2041 is `Pb / (R T)` only at 293.15 K and 101325 Pa to five figures
-    (2.2e-6 off even there, which alone put 6.5e-6 into the three-zone transient
-    concentrations against ContamX), and about 3.4 % off per 10 K away from it.
+    Node densities are computed every step from `"T"` and `"P_ref"` by
+    `PrescribedTemperatureDensity` (plus the zone-pressure term of `ZonePressureDensity` when
+    the file sets `densZP`), and the species layer's capacity is each zone's air mass at THAT
+    density, `rho_zone V` -- as ContamX holds it -- not at the reference RHO_0: 1.2041 is
+    `Pb / (R T)` only at 293.15 K and 101325 Pa to five figures (2.2e-6 off even there, which
+    alone put 6.5e-6 into the three-zone transient concentrations against ContamX), and about
+    3.4 % off per 10 K away from it. The returned drivers carry the initial `"rho"` and
+    `"rho_amb"` for code that reads them outside a step; every step recomputes them.
     """
     amb = dict(project.ambient_conditions)
     if ambient:
@@ -923,10 +976,22 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
             n_species=len(project.species), scheme=scheme, rho=rho,
             species_names=project.species,
         )
-    closures = [ZonePressureDensity(amb["Pb"])] if project.density_uses_zone_pressure else []
+    volumes = net.node_attr("volume", default=0.0)
+    cap_nodes = layers["species"].interior_idx if "species" in layers else None
+    closures: list = [PrescribedTemperatureDensity(
+        ambient_index=net.node_index(project.ambient), volumes=volumes,
+        capacity_nodes=cap_nodes)]
+    if project.density_uses_zone_pressure:
+        closures.append(ZonePressureDensity(
+            amb["Pb"], capacity_key="species.capacity" if cap_nodes is not None else None,
+            capacity_nodes=cap_nodes))
     model = Model(net, layers, closures=closures)
     drivers = {
         "air.phi_boundary": torch.zeros(1, dtype=F64),
+        "T": T.clone(),
+        "P_ref": torch.tensor(amb["Pb"], dtype=F64),
+        # Initial values, for code that reads them outside a step (`noodl.couple`'s
+        # mass-fraction conversions); every step recomputes them from "T" and "P_ref".
         "rho": rho,
         "rho_amb": rho[net.node_index(project.ambient)],
         "V_met": torch.tensor(amb["Ws"], dtype=F64),
@@ -940,15 +1005,12 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     # The inputs the airflow elements and drives read themselves, declared for
     # `model.refs.inputs` and `Model.check`.
     model.input_specs = {
-        "rho": dict(description="air density at every node (Pb / (R T))",
-                    unit="kg/m3", over="nodes"),
-        "rho_amb": dict(description="ambient air density", unit="kg/m3"),
         "V_met": dict(description="wind speed at the meteorological station",
                       unit="m/s"),
         "theta_w": dict(description="wind direction, as CONTAM's weather file gives it",
                         unit="deg"),
     }
-    model.driver_template = dict(drivers)
+    state.update(model.initial_capacities(state, drivers))
     return model, state, drivers
 
 

@@ -40,13 +40,17 @@ air *entering* the path, per direction, matching ContamX section 3.2. The quadra
 fan families keep reference-density coefficients, because they are not part of this application's
 parity evidence.
 
-Node densities are `Pb / (R T)`, and the species layer's capacity is each zone's air mass at that
-density, `rho V`, as ContamX holds it. When the run control sets **`densZP = 1`**, ContamX
-evaluates each zone's density at its absolute pressure `Pb + P_zone`; `project_to_model` then
-adds a `ZonePressureDensity` closure that does the same from the previous solve's pressures,
-and `prj.steady(model, state, drivers)` repeats `model.steady` to that fixed point (a single call
-when `densZP = 0`). The term is small in the density (|P_zone| / Pb, ~1e-5) but a stack flow is
-driven by a density *difference*, which amplifies it: on a 20 K stack it is 4e-5 of the flow.
+Node densities are computed every step by the `PrescribedTemperatureDensity` closure from two
+drivers: `"T"` (K, every node's temperature, the ambient's included) and `"P_ref"` (Pa, the
+barometric pressure). The species layer's capacity is each zone's air mass at that density,
+`rho V`, as ContamX holds it. A scheduled zone temperature or a weather file therefore changes
+both from step to step. When the run control sets **`densZP = 1`**, ContamX evaluates each zone's
+density at its absolute pressure `Pb + P_zone`. `project_to_model` then adds a
+`ZonePressureDensity` closure that does the same from the previous solve's pressures, zone air
+masses included, and `prj.steady(model, state, drivers)` repeats `model.steady` to that fixed
+point (a single call when `densZP = 0`). The term is small in the density (|P_zone| / Pb,
+~1e-5) but a stack flow is driven by a density *difference*, which amplifies it: on a 20 K stack
+it is 4e-5 of the flow.
 
 ```python
 from noodl.apps.building_physics import read_prj, project_to_model

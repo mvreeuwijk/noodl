@@ -10,10 +10,13 @@ import torch
 
 from noodl.apps.building_physics.prj import (
     _PATH_FIELDS,
+    PrescribedTemperatureDensity,
     Project,
+    ZonePressureDensity,
     project_to_model,
     read_prj,
 )
+from noodl.apps.building_physics.thermal import R_AIR
 from noodl.elements import Damper, FixedFlow, UpstreamDensityPowerLaw
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "contam"
@@ -448,14 +451,12 @@ _TSDENS_WTH_STACK = "   1    0.75    20     1      1      0      1"
 
 
 def test_dens_zp_is_read_and_stack_d_is_refused(tmp_path):
-    from noodl.apps.building_physics.prj import ZonePressureDensity
-
     assert read_prj(WTH_STACK).density_uses_zone_pressure is True
     assert read_prj(THREE).density_uses_zone_pressure is False
     model, _s, _d = project_to_model(read_prj(WTH_STACK))
     assert any(isinstance(c, ZonePressureDensity) for c in model.closures)
     model, _s, _d = project_to_model(read_prj(THREE))
-    assert model.closures == []
+    assert [type(c) for c in model.closures] == [PrescribedTemperatureDensity]
     text = WTH_STACK.read_text()
     with pytest.raises(ValueError, match=r"stackD = 1.*unsupported"):
         read_prj(_variant(text, _TSDENS_WTH_STACK, "   1    0.75    20     1      1      1      1",
@@ -518,3 +519,57 @@ def test_species_capacity_is_the_zone_air_mass_at_its_own_density(tmp_path):
         torch.tensor([300.0, 600.0, 900.0], dtype=F64)
     )
     torch.testing.assert_close(model.layers["species"].capacity, expected, rtol=1e-14, atol=0)
+
+
+def test_densities_and_zone_air_masses_follow_the_prescribed_temperatures():
+    model, state, drivers = project_to_model(read_prj(THREE))
+    dens = model.closures[0]
+    assert isinstance(dens, PrescribedTemperatureDensity)
+    assert drivers["T"].shape == (4,) and drivers["P_ref"].item() == 101325.0
+    T = drivers["T"].clone()
+    two = model.net.node_index("two")
+    T[two] = 303.15
+    out = dens(state, {**drivers, "T": T})
+    torch.testing.assert_close(out["rho"], 101325.0 / (R_AIR * T), rtol=1e-15, atol=0)
+    assert out["rho_amb"].item() == pytest.approx(101325.0 / (R_AIR * 293.15), rel=1e-15)
+    layer = model.transport["species"]
+    expected = (101325.0 / (R_AIR * T) * model.net.node_attr("volume"))[layer.interior_idx]
+    torch.testing.assert_close(out["species.capacity"], expected, rtol=1e-15, atol=0)
+
+
+def test_the_initial_state_carries_the_zone_air_masses():
+    model, state, drivers = project_to_model(read_prj(THREE))
+    assert state["species.capacity"].shape == (3,)
+    torch.testing.assert_close(
+        state["species.capacity"], model.closures[0](state, drivers)["species.capacity"])
+
+
+def test_a_batched_barometric_pressure_gives_batched_densities():
+    model, state, drivers = project_to_model(read_prj(THREE))
+    P = torch.tensor([101325.0, 90000.0], dtype=F64)
+    out = model.closures[0](state, {**drivers, "P_ref": P})
+    assert out["rho"].shape == (2, 4) and out["species.capacity"].shape == (2, 3)
+    assert out["rho"][1, 1].item() == pytest.approx(90000.0 / (R_AIR * 293.15), rel=1e-15)
+
+
+def test_zone_pressure_density_rescales_the_zone_air_mass_too():
+    zp = ZonePressureDensity(101325.0, capacity_key="species.capacity",
+                             capacity_nodes=torch.tensor([1], dtype=torch.long))
+    phi = torch.tensor([0.0, 10.0], dtype=F64)
+    rho = torch.tensor([1.2, 1.1], dtype=F64)
+    cap = torch.tensor([660.0], dtype=F64)
+    out = zp({"air.phi": phi},
+             {"rho": rho, "species.capacity": cap, "P_ref": torch.tensor(101325.0, dtype=F64)})
+    assert out["species.capacity"].item() == pytest.approx(660.0 * (1 + 10.0 / 101325.0), rel=1e-15)
+    assert out["rho"][1].item() == pytest.approx(1.1 * (1 + 10.0 / 101325.0), rel=1e-15)
+
+
+def test_zone_pressure_density_broadcasts_a_batched_reference_pressure():
+    # B == n: a (B,) P_ref must align with the batch axis, not the node axis.
+    zp = ZonePressureDensity(101325.0)
+    phi = torch.tensor([[0.0, 10.0], [0.0, 20.0]], dtype=F64)
+    rho = torch.tensor([[1.2, 1.1], [1.2, 1.1]], dtype=F64)
+    P = torch.tensor([101325.0, 90000.0], dtype=F64)
+    out = zp({"air.phi": phi}, {"rho": rho, "P_ref": P})
+    assert out["rho"][1, 1].item() == pytest.approx(1.1 * (1 + 20.0 / 90000.0), rel=1e-15)
+    assert out["rho"][0, 1].item() == pytest.approx(1.1 * (1 + 10.0 / 101325.0), rel=1e-15)
