@@ -201,7 +201,9 @@ torch.Size([13, 4]) torch.Size([13, 3, 1])
 `dodMdt`): a zone whose temperature rises pushes out the air it no longer holds. The mass is
 taken at the zone's absolute pressure, (P_b + P_zone) V / (R T), as ContamX's is, so a zone
 depressurised by an exhaust fan switching on also gives up a little air. For a project that
-sets `dodMdt`, `project_to_model` gives the contaminants that same zone air mass.
+sets `dodMdt`, `project_to_model` gives the contaminants that same zone air mass. The term is
+part of the airflow solve itself (the `ZoneAirMassChange` node source `project_to_model`
+attaches), so a step of any length converges.
 
 `simulate_project(project)` runs a `.prj` the way ContamX does: its run control, its
 schedules, and its weather and ambient files, read from next to the project.
@@ -537,7 +539,7 @@ above 0.1 % of the largest.
 | One-zone project with its own `.wth` and `.ctm`, 288 steps | flow rel 33 $u$, mf rel 64 $u$, floor 64 $u$ × max | **1.3e-8** flow, **1.1e-7** mf |
 | One-zone stack with a scheduled zone temperature (`densZP`, `dodMdt`), 288 steps | rel 64 $u$, floor 64 $u$ × max | **4.5e-8** flow, **1.9e-7** mf |
 | Scheduled stack project over two days, across midnight | rel 64 $u$, floor 64 $u$ × max | **7.8e-8** flow, **1.9e-7** mf |
-| Scheduled three-zone project (fan, source, zone temperature, window, weather, ambient file), 24 h | rel 64 $u$, floor 64 $u$ × max | **3.6e-5** flow (1.6e-8 kg/s, path 4 at its flow reversal; 2 % of the allowed), **1.4e-7** mf |
+| Scheduled three-zone project (fan, source, zone temperature, window, weather, ambient file), 24 h | rel 64 $u$, floor 64 $u$ × max | **1.6e-8 kg/s** flow (the floor governs: 2 % of 64 $u$ × max; 3.6e-5 relative on path 4 at its flow reversal), **1.4e-7** mf |
 
 The stack rows rely on two density effects matching ContamX's. Orifice coefficients are
 corrected for the density of the air entering the path (freezing them at reference density

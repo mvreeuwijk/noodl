@@ -294,7 +294,6 @@ def test_a_path_naming_an_absent_wind_profile_raises_naming_edge_and_number(tmp_
         read_prj(_variant(text, path1, "   1    1  -1   1   3   0   7   0", tmp_path))
 
 
-
 def test_wind_profiles_keep_their_curve_fit_and_a_trigonometric_one_is_refused(tmp_path):
     """The profile record's type field: 1 linear, 2 cubic spline (NIST's samples), 3
     trigonometric (Walker and Wilson), which is refused naming the profile."""
@@ -305,6 +304,7 @@ def test_wind_profiles_keep_their_curve_fit_and_a_trigonometric_one_is_refused(t
         read_prj(_variant(text, "3 13 2 S&C_2_Short", "3 13 3 S&C_2_Short", tmp_path))
     with pytest.raises(ValueError, match=r"wind pressure profile 2 .*type 7"):
         read_prj(_variant(text, "2 13 2 S&C_2_Long", "2 13 7 S&C_2_Long", tmp_path))
+
 
 def test_the_filtered_one_zone_stack_project_is_refused_naming_the_filter():
     """The filter refusal, on NIST's own file rather than on a hand-edited variant.

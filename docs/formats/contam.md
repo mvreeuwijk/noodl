@@ -66,8 +66,16 @@ barometric pressure). The species layer's capacity is each zone's air mass at th
 both from step to step. When the run control sets **`densZP = 1`**, ContamX evaluates each zone's
 density at its absolute pressure `Pb + P_zone`. `project_to_model` then adds a
 `ZonePressureDensity` closure that does the same from the previous solve's pressures, zone air
-masses included, and `prj.steady(model, state, drivers)` repeats `model.steady` to that fixed
-point (a single call when `densZP = 0`). The term is small in the density (|P_zone| / Pb,
+masses included. When the run control sets **`dodMdt = 1`**, each zone's air-mass change over a
+step enters its airflow balance (`simulate_project` passes `air_mass_change=True`), and ContamX
+takes that mass at the zone's absolute pressure even with `densZP = 0`. `project_to_model`
+therefore always attaches a `ZoneAirMassChange` node source to the air layer, which acts only
+when `simulate` supplies the step's start mass. For a `dodMdt` project with species it also adds
+a `ZonePressureDensity(densities=False)` closure, which scales the species layer's capacity (the
+zone air mass) and leaves the densities at `Pb`. Whenever the model carries a
+`ZonePressureDensity` closure, `prj.steady(model, state, drivers)` repeats `model.steady` to the
+pressure fixed point, and so does each step of `simulate`; otherwise it is a single call. The
+zone-pressure density term is small in the density (|P_zone| / Pb,
 ~1e-5) but a stack flow is driven by a density *difference*, which amplifies it: on a 20 K stack
 it is 4e-5 of the flow.
 

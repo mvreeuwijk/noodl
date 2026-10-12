@@ -214,7 +214,6 @@ def test_wind_profile_accepts_a_contam_style_closing_360_row_and_refuses_bad_tab
         WindProfile([0.0, 180.0, 90.0], [0.6, -0.4, 0.1])
 
 
-
 def test_a_spline_wind_profile_is_the_periodic_cubic_spline_through_its_points():
     """CONTAM's curve fit 2. ContamX 3.4.1.7 (measured): the NIST Swami-Chandra profiles
     through scipy's periodic CubicSpline reproduce its flows to 1.6e-8 kg/s over a day of
@@ -240,6 +239,7 @@ def test_a_spline_wind_profile_is_the_periodic_cubic_spline_through_its_points()
     assert one(theta).eq(1.0).all()
     with pytest.raises(ValueError, match="WindProfile.*curve.*'linear' or 'spline'"):
         WindProfile([0.0], [1.0], curve="cubic")
+
 
 def _wind_net():
     """ambient -> z1 (envelope, azimuth 0, Ch 0.5), z1 -> z2 (interior), z2 -> ambient

@@ -185,6 +185,40 @@ def test_the_air_mass_change_follows_the_zone_pressure_without_zone_pressure_den
         assert net_in[zone].item() == pytest.approx(expected.item(), rel=1e-6)
 
 
+@pytest.mark.parametrize("dt", [1e-3, 0.1, 300.0])
+def test_the_air_mass_change_is_implicit_in_the_airflow_solve_at_any_step_length(dt):
+    """The mass term's slope V / (R T dt) outgrows the envelope's conductance for short steps;
+    it sits in the solve's Jacobian, so a 1 ms step converges like a 300 s one, and the mass
+    each zone gains is what flowed in."""
+    project = read_prj(THREE)
+    model, state, drivers = project_to_model(project)
+    gust = [Input(TimeSeries([0.0, dt, 2 * dt], [5.23, 10.0, 10.0], interpolation="step"),
+                  "V_met")]
+    # The withdrawal is a difference of masses of order 1e3 kg: the solve resolves it to
+    # about 1e-16 x 1e3 kg / dt.
+    atol = max(1e-14, 1e-12 / dt)
+    out = simulate(model, state, drivers, [0.0, dt, 2 * dt], inputs=gust,
+                   air_mass_change=True, atol=atol, rtol=1e-14)
+    f = project.path_flows(out["air.q"][-1])
+    net_in = {"one": f[0] - f[1], "two": f[1] + f[2], "three": f[3] - f[2]}
+    for zone, volume in (("one", 300.0), ("two", 600.0), ("three", 900.0)):
+        i = project.net.node_index(zone)
+        dp = out["air.phi"][-1, i] - out["air.phi"][-2, i]
+        gained = dp * volume / (R_AIR * 293.15)
+        assert abs(gained.item()) > 1e-6
+        assert (net_in[zone] * dt).item() == pytest.approx(gained.item(), rel=1e-6,
+                                                           abs=10 * atol * dt)
+
+
+def test_air_mass_change_needs_the_zone_air_mass_term_on_the_airflow_layer():
+    """A model whose airflow layer carries no `ZoneAirMassChange` is refused by name."""
+    project = read_prj(THREE)
+    model, state, drivers = project_to_model(project)
+    model.potential["air"]._node_sources = []
+    with pytest.raises(ValueError, match="ZoneAirMassChange"):
+        simulate(model, state, drivers, [0.0, 60.0], air_mass_change=True)
+
+
 def test_zone_pressure_density_steps_are_iterated_to_their_fixed_point():
     model, state, drivers = project_to_model(read_prj(STACK), ambient={"Ta": 273.15})
     step_up = [Input(TimeSeries([0.0, 300.0], [293.15, 303.15]), "T", at="singleZone")]

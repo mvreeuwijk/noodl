@@ -79,6 +79,7 @@ from noodl.elements import (
 )
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.model import Model
+from noodl.nodesources import NodeSource
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -1253,6 +1254,50 @@ class ZonePressureDensity:
         return out
 
 
+class ZoneAirMassChange(NodeSource):
+    """The zone air-mass change of a step as a withdrawal from the airflow network (CONTAM's
+    dodMdt option; `simulate(air_mass_change=True)` switches it on):
+
+        w = ((P_ref + phi) V / (R T) - M_start) / dt,
+
+    the air mass at the zone's ABSOLUTE pressure at the step's end, minus the mass at its
+    start, over the step. ContamX takes the mass at the absolute pressure whether or not the
+    densities the flows see include the zone pressure (measured: a zone depressurised by an
+    exhaust switching on loses M dP_zone / (Pb dt) in that step). The withdrawal depends on
+    the zone's own pressure with slope V / (R T dt), which the airflow solve's Jacobian
+    carries, so the step converges at any length (the slope outgrows the envelope's
+    conductance for short steps).
+
+    Reads `"T"` and `"P_ref"`, `"time_step"` (s) and `"<layer>.mass_start"` (kg, at this
+    source's nodes, in their order: `mass` at the step's start). Without
+    `"<layer>.mass_start"` it withdraws nothing and adds nothing to the Jacobian: the steady
+    and quasi-steady solves are unchanged. The withdrawal is a difference of masses of order
+    M, so the solve cannot resolve it below about 1e-16 M / dt (kg/s).
+    """
+
+    def __init__(self, nodes, volumes: Tensor, *, layer: str = "air", R: float = R_AIR) -> None:
+        super().__init__(nodes)
+        self.register_buffer("V", torch.as_tensor(volumes, dtype=F64))
+        self.R = float(R)
+        self.mass_key = f"{layer}.mass_start"
+
+    def mass(self, phi_nodes: Tensor, drivers) -> Tensor:
+        """(P_ref + phi) V / (R T) at this source's nodes (kg)."""
+        P = torch.as_tensor(drivers["P_ref"], dtype=phi_nodes.dtype).unsqueeze(-1)
+        return (P + phi_nodes) * self.V / (self.R * drivers["T"][..., self.nodes])
+
+    def flow(self, phi_nodes: Tensor, drivers=None) -> Tensor:
+        if drivers is None or self.mass_key not in drivers:
+            return phi_nodes * 0.0
+        return (self.mass(phi_nodes, drivers) - drivers[self.mass_key]) / drivers["time_step"]
+
+    def dflow(self, phi_nodes: Tensor, drivers=None) -> Tensor:
+        if drivers is None or self.mass_key not in drivers:
+            return torch.zeros_like(phi_nodes)
+        slope = self.V / (self.R * drivers["T"][..., self.nodes] * drivers["time_step"])
+        return slope.expand(torch.broadcast_shapes(slope.shape, phi_nodes.shape))
+
+
 def project_to_model(project: Project, *, ambient: dict | None = None, species: bool = True,
                      scheme: str = "implicit"):
     """Air layer + species layer (no thermal layer: a .prj carries no thermal data), the
@@ -1280,9 +1325,13 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     T = net.node_attr("T0")
     T[net.node_index(project.ambient)] = amb["Ta"]
     rho = amb["Pb"] / (R_AIR * T)
+    volumes = net.node_attr("volume", default=0.0)
+    zone_nodes = [i for i, name in enumerate(net.nodes)
+                  if name != project.ambient and volumes[i].item() > 0.0]
     air = PotentialFlowLayer(net, "air", project.elements, drives=project.drives,
                              boundary=[project.ambient], quantity="pressure", unit="Pa",
-                             flow_unit="kg/s")
+                             flow_unit="kg/s",
+                             node_sources=[ZoneAirMassChange(zone_nodes, volumes[zone_nodes])])
     layers: dict = {"air": air}
     if species and project.species:
         layers["species"] = species_layer(
@@ -1290,16 +1339,15 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
             n_species=len(project.species), scheme=scheme, rho=rho,
             species_names=project.species,
         )
-    volumes = net.node_attr("volume", default=0.0)
     cap_nodes = layers["species"].interior_idx if "species" in layers else None
     density = PrescribedTemperatureDensity(
         ambient_index=net.node_index(project.ambient), volumes=volumes,
         capacity_nodes=cap_nodes)
     closures: list = [density]
     zone_mass_change = project.run_control is not None and project.run_control.zone_mass_change
-    if project.density_uses_zone_pressure or zone_mass_change:
-        # With `dodMdt` alone ContamX holds the zone air MASS at the zone's absolute pressure
-        # but the densities the flows see at Pb.
+    if project.density_uses_zone_pressure or (zone_mass_change and cap_nodes is not None):
+        # With `dodMdt` alone ContamX holds the contaminants' zone air MASS at the zone's
+        # absolute pressure but the densities the flows see at Pb.
         closures.append(ZonePressureDensity(
             amb["Pb"], capacity_key="species.capacity" if cap_nodes is not None else None,
             capacity_nodes=cap_nodes, densities=project.density_uses_zone_pressure))
