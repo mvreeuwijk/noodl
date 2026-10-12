@@ -596,6 +596,44 @@ def test_differentiable_solve_refuses_on_failure_return_outright():
         )
 
 
+def test_on_failure_return_primal_returns_on_the_primal_path():
+    """``"return_primal"`` is ``"return"`` where the solve is not differentiated."""
+    layer, drivers, phi_b = _series_layer()
+    diagnostics: dict = {}
+    phi, _ = layer.solve(phi_b, drivers, None, differentiable=False,
+                         diagnostics=diagnostics, max_iter=1, on_failure="return_primal")
+    assert torch.isfinite(phi).all()
+    assert not bool(diagnostics["converged"].any())
+
+
+def test_on_failure_return_primal_raises_where_the_solve_is_differentiated():
+    """...and ``"raise"`` where it is: a non-converged forward has no adjoint."""
+    layer, drivers, phi_b = _series_layer()
+    wind = drivers["wind"].clone().requires_grad_(True)
+    with pytest.raises(RuntimeError, match="failed to converge"):
+        layer.solve(phi_b, {"wind": wind}, None, differentiable=True, diagnostics={},
+                    max_iter=1, on_failure="return_primal")
+
+
+def test_on_failure_return_primal_needs_a_diagnostics_dict():
+    layer, drivers, phi_b = _series_layer()
+    with pytest.raises(ValueError, match="requires diagnostics="):
+        layer.solve(phi_b, drivers, None, differentiable=False, max_iter=1,
+                    on_failure="return_primal")
+
+
+def test_newton_defaults_apply_unless_the_call_overrides_them():
+    layer, drivers, phi_b = _series_layer()
+    layer.newton_defaults = {"max_iter": 1}
+    diagnostics: dict = {}
+    layer.solve(phi_b, drivers, None, differentiable=False, diagnostics=diagnostics,
+                on_failure="return")
+    assert diagnostics["newton_iterations"] == 1
+    layer.solve(phi_b, drivers, None, differentiable=False, diagnostics=diagnostics,
+                on_failure="return", max_iter=50)
+    assert bool(diagnostics["converged"].all())
+
+
 def test_an_inner_solve_refusal_inside_newton_names_the_layer():
     """Grounding is certified at `phi0`, but slopes change between Newton
     iterates, so an instance can lose it mid-iteration -- here instance 1's fan is driven

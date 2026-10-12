@@ -359,6 +359,24 @@ converging", `NonConvergeCount`): the step is taken with its last pass, its diag
 refused by name, as before, and a step that has to be differentiated is always refused when it
 does not converge (there is no fixed point to differentiate).
 
+**The head solve within a pass.** Every law of a pass is non-decreasing in its own head
+difference (conduits, regulators) or head (junction withdrawals), so the head solve's residual is
+the gradient of a convex function, and the layer's Newton runs with `line_search="convex"` and
+`step_floor=16` (`dynwave.HEAD_SOLVE_NEWTON`; see [Solvers](../concepts/solvers.md#newton)). The
+first cuts back a step that overshoots across a kink: the stiff bed below a dry junction's
+invert met by a fast inflow, the normal-flow switch's flat-steep-flat flow, the hold band and
+flood wall. A damped Newton step there could fall into a 2-cycle it never left, and the run
+stopped with "failed to converge after 50 iterations" (13 files of the SWMM corpus did, among
+them a junction fed down a 20 m drop and a looped siphon). The second ends a solve whose residual
+sits at the round-off of its own terms above `solve_atol` (a junction flooding 17 m above its
+outfall behind a 0.1 m³/s cap, or a large storage area at a high head), which failed every step
+before. A pass whose head solve still stops short is one iterate of the pass iteration, not the
+end of the step: it hands back its last Newton iterate, is never judged converged, and the
+iteration goes on from it (`Model`, ``on_failure="return_primal"``); a differentiated solve
+still raises. `tests/verification/test_sewer_dynwave_parity.py` runs both kinds against SWMM
+(`robust_orifice_dynwave.inp` at every step, `robust_drop_dynwave.inp` until SWMM's own first
+non-converging step).
+
 Measured at SWMM's defaults (the fixtures with `HEAD_TOLERANCE` and `MAX_TRIALS` removed, 30
 min), against SWMM 5.2.4's own 2.02 trials per step on the tree:
 

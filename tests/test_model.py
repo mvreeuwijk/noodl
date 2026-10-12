@@ -483,6 +483,37 @@ def test_iterate_reaches_a_fixed_point_of_the_coupled_pass():
     assert (again["air.q"] - ss["air.q"]).abs().max().item() < 1e-9
 
 
+def test_iterate_carries_on_past_a_pass_whose_potential_solve_stops_short():
+    """A primal pass is one iterate: with one Newton iteration per pass the head solve
+    stops short on the first passes, the iteration carries on from each pass's last Newton
+    iterate (warm-starting the next), and lands on the same fixed point as a full solve."""
+    _, model, state, drivers, _, _ = _build(
+        closures=[_Feedback(2e3)], coupling="iterate", iterate_tol={"species": 1e-12},
+        iterate_max=200,
+    )
+    full = model.step(state, drivers, 600.0)
+    diag: dict = {}
+    short = model.step(state, drivers, 600.0, max_iter=1, diagnostics=diag)
+    assert bool(diag["converged"].all())
+    assert bool(diag["layers"]["air"]["converged"].all())
+    # the same fixed point, to the iteration's own resolution
+    torch.testing.assert_close(short["species.x"], full["species.x"], rtol=1e-6, atol=0.0)
+
+
+def test_iterate_never_accepts_a_pass_whose_potential_solve_stopped_short():
+    """A pass whose head solve did not converge is not converged, whatever its change; the
+    iteration's own failure then names it."""
+    _, model, state, drivers, _, _ = _build(
+        closures=[_Feedback(2e3)], coupling="iterate", iterate_tol={"species": 1.0},
+        iterate_max=3,
+    )
+    with pytest.raises(RuntimeError, match="potential solve did not converge"):
+        model.step(state, drivers, 600.0, max_iter=0)
+    # a caller's own on_failure is passed through unchanged
+    with pytest.raises(RuntimeError, match="failed to converge"):
+        model.step(state, drivers, 600.0, max_iter=0, on_failure="raise")
+
+
 def test_iterate_equals_pingpong_when_there_is_no_feedback():
     """The second pass warm-starts Newton from the first pass's phi, so the two passes can
     differ at solver tolerance; the tolerance here is above that and the step count is 2."""

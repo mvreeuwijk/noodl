@@ -77,6 +77,59 @@ def inner_solve_rtol(dtype: torch.dtype) -> float:
     return max(_INNER_RTOL, _INNER_RTOL_ULPS * float(torch.finfo(dtype).eps))
 
 
+#: ``line_search="convex"``: a step whose directional derivative ``phi'(t)`` exceeds this
+#: fraction of ``|phi'(0)|`` overshot the minimum along the Newton direction and is cut back.
+#: A full Newton step on a smooth law ends near ``phi' = 0`` and a damped one below it, so
+#: neither is touched.
+LINE_SEARCH_OVERSHOOT = 0.1
+#: The cut-back search stops once ``|phi'(t)| <= LINE_SEARCH_TOL |phi'(0)|``...
+LINE_SEARCH_TOL = 1e-3
+#: ...or after this many residual evaluations.
+LINE_SEARCH_MAX = 30
+
+
+def _convex_line_search(residual, x0, r0, dx, t_trial, x1, r1, norm1, norm0, done):
+    """The cut-back of `newton`'s ``line_search="convex"``: along ``d = -dx`` from `x0`
+    (residual `r0`), the trial point `x1 = x0 + t_trial d` (residual `r1`, norm `norm1`;
+    `norm0` the start's) is replaced, per instance, by the minimum of ``E`` along ``d``
+    where it overshot it (see `newton`). Returns ``(x, r, norm)``."""
+    g0 = -(r0 * dx).sum(-1)                      # phi'(0) = F(x0) . d, < 0 for a descent d
+    g1 = -(r1 * dx).sum(-1)                      # phi'(t_trial)
+    over = (~done) & (g0 < 0) & ((g1 > LINE_SEARCH_OVERSHOOT * (-g0))
+                                 | ((g1 > 0) & (norm1 >= norm0)))
+    if not bool(over.any()):
+        return x1, r1, norm1
+    t_lo, g_lo = torch.zeros_like(g0), g0
+    t_hi, g_hi = t_trial.clone(), g1
+    t, x, r = t_trial.clone(), x1, r1
+    side = torch.zeros_like(g0)                  # Illinois: which end was kept last
+    active = over.clone()
+    for _ in range(LINE_SEARCH_MAX):
+        denom = (g_hi - g_lo).clamp_min(torch.finfo(g0.dtype).tiny)
+        t_new = t_lo - g_lo * (t_hi - t_lo) / denom
+        t_new = torch.where(torch.isfinite(t_new), t_new, 0.5 * (t_lo + t_hi))
+        t = torch.where(active, t_new, t)
+        x = torch.where(over.unsqueeze(-1), x0 - t.unsqueeze(-1) * dx, x1)
+        r = residual(x)
+        g = -(r * dx).sum(-1)
+        right = g > 0
+        # Illinois: halve the slope value of the end kept twice in a row
+        keep_lo = right & (side > 0)
+        keep_hi = ~right & (side < 0)
+        g_lo = torch.where(active & keep_lo, 0.5 * g_lo, g_lo)
+        g_hi = torch.where(active & keep_hi, 0.5 * g_hi, g_hi)
+        t_hi = torch.where(active & right, t, t_hi)
+        g_hi = torch.where(active & right, g, g_hi)
+        t_lo = torch.where(active & ~right, t, t_lo)
+        g_lo = torch.where(active & ~right, g, g_lo)
+        side = torch.where(active, torch.where(right, torch.ones_like(side),
+                                               -torch.ones_like(side)), side)
+        active = active & (g.abs() > LINE_SEARCH_TOL * (-g0))
+        if not bool(active.any()):
+            break
+    return x, r, r.abs().amax(dim=-1)
+
+
 @dataclass
 class NewtonResult:
     """Newton's own per-instance outcome, plus the inner solver's cost.
@@ -118,6 +171,8 @@ def newton(
     method: str = "auto",
     on_failure: str = "raise",
     where: str = "newton",
+    line_search: str | None = None,
+    step_floor: float | None = None,
 ) -> NewtonResult:
     """Solve ``residual(x) = 0`` by damped, batched Newton iteration.
 
@@ -156,6 +211,27 @@ def newton(
     passes ``on_failure`` through) that would rather inspect or down-weight a failed
     instance than abort. It is never silent: ``converged`` and ``residual_norm`` still carry
     the true state either way.
+
+    ``line_search="convex"`` declares that ``residual`` is the gradient of a convex function
+    ``E`` (its Jacobian is symmetric positive semidefinite everywhere, e.g. a network whose
+    branch flows are each non-decreasing in their own potential difference and whose nodal
+    withdrawals are each non-decreasing in their own potential). The Newton direction ``d``
+    is then a descent direction of ``E``, and along it ``phi'(t) = residual(x + t d) . d``
+    is non-decreasing. A step that overshoots the minimum of ``E`` along ``d`` -- ``phi'``
+    at the step above `LINE_SEARCH_OVERSHOOT` times ``|phi'(0)|``, or positive with a
+    residual that did not shrink -- is cut back to that minimum by a safeguarded regula
+    falsi (Illinois) on ``phi'``, at one residual evaluation per trial. Without it Newton
+    can cycle for ever on a law with kinks (an S-shaped flow, or a stiff bed meeting a soft
+    storage line), which a damped step does not cure; with it every accepted step lowers
+    ``E``. A step that does not overshoot is taken unchanged, so a smooth problem iterates
+    exactly as without the search. ``None`` (default) is the plain damped iteration.
+
+    ``step_floor`` (ULPs, default ``None``: off) ends an instance's iteration as converged
+    when its Newton step is within ``step_floor`` units in the last place of its iterate in
+    every component (``|dx_i| <= step_floor eps max(|x_i|, 1)``): the residual is then at
+    the round-off floor of its own terms, below which no representable step can take it,
+    and an ``atol`` under that floor (a stiff law at a large potential) would otherwise
+    spend every iteration standing still and fail.
     """
     x = x0
     r = residual(x)
@@ -211,10 +287,21 @@ def newton(
         step = torch.where(
             converged.unsqueeze(-1), torch.zeros_like(dx), omega_i.unsqueeze(-1) * dx
         )
+        x_start, r_start = x, r
         x = x - step
         r = residual(x)
         prev_norm = norm
         norm = r.abs().amax(dim=-1)
+        if line_search == "convex":
+            x, r, norm = _convex_line_search(
+                residual, x_start, r_start, dx, omega_i, x, r, norm, prev_norm, converged
+            )
+        if step_floor is not None:
+            # A step at the round-off of the iterate: no representable step improves it.
+            floor = step_floor * torch.finfo(x.dtype).eps * x_start.abs().clamp_min(1.0)
+            at_floor = (dx.abs() <= floor).all(dim=-1) & ~converged
+        else:
+            at_floor = None
         ratio = norm / prev_norm.clamp_min(tiny)
         omega_i = torch.where(ratio < switch_ratio, torch.ones_like(omega_i), omega_i)
         # A step that did not shrink an instance's residual means that instance is
@@ -224,6 +311,8 @@ def newton(
         # the relaxed step; the switch above re-arms once its residual shrinks again.
         omega_i = torch.where(ratio >= 1.0, torch.full_like(omega_i, omega), omega_i)
         converged = norm < tol
+        if at_floor is not None:
+            converged = converged | at_floor
         iterations += 1
 
     if not bool(torch.all(converged)):
