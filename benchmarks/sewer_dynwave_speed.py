@@ -17,19 +17,42 @@ costs about the same for a batch of B scenarios (`simulate_dynamic_wave` with a 
 inflow), which amortises it across an ensemble.
 
 MEASURED (one core pinned, `--core 2`; Windows 11, PyTorch 2.14 CPU, SWMM 5.2.4 via
-pyswmm 2.2; the machine was shared, so wall times vary ~10 %):
+pyswmm 2.2; the machine was shared, the after run alongside the test suite, so wall times vary
+~10-20 %; on a quiet core the tree's tight run is ~10 ms/pass):
 
-before (commit 26fa6b4: tolerances 1e-11 m / 1e-10 m3/s / 2000 passes whatever the file)
+before (commit 26fa6b4: 1e-11 m / 1e-10 m3/s / 2000 passes whatever the file, so ``file`` and
+``swmm`` ran alike)
 
 | case | SWMM s | noodl s | passes/step | ms/pass | ratio |
 |---|---|---|---|---|---|
-BEFORE_ROWS
+| tree_dynwave.inp | 0.013 | 123.46 | 9.23 | 37.16 | 9,516x |
+| backwater_dynwave.inp | 0.017 | 100.88 | 7.67 | 36.55 | 6,012x |
+| loop_dynwave.inp | 0.018 | 148.61 | 11.31 | 36.49 | 8,280x |
+| structures_dynwave.inp | 0.015 | 154.92 | 8.71 | 49.43 | 10,013x |
+| storage_dynwave.inp | 0.017 | 124.02 | 9.26 | 37.19 | 7,216x |
+| binary tree, 7 conduits | 0.013 | 27.05 | 12.05 | 37.41 | 2,012x |
+| binary tree, 63 conduits | 0.017 | 25.49 | 11.10 | 38.27 | 1,517x |
+| binary tree, 511 conduits | 0.034 | 27.13 | 10.75 | 42.05 | 806x |
+| binary tree, 2047 conduits | 0.100 | 35.51 | 10.68 | 55.40 | 356x |
 
 after (this benchmark's defaults: the file's HEAD_TOLERANCE / MAX_TRIALS)
 
 | case | SWMM s | noodl s | passes/step | ms/pass | non-conv. steps | ratio |
 |---|---|---|---|---|---|---|
-AFTER_ROWS
+| tree_dynwave.inp (file) | 0.017 | 43.02 | 9.95 | 12.01 | 0/360 | 2,526x |
+| tree_dynwave.inp (swmm) | 0.013 | 11.49 | 2.06 | 15.48 | 1/360 | 856x |
+| backwater_dynwave.inp (file) | 0.024 | 41.25 | 8.24 | 13.91 | 0/360 | 1,693x |
+| backwater_dynwave.inp (swmm) | 0.017 | 12.98 | 2.22 | 16.23 | 1/360 | 767x |
+| loop_dynwave.inp (file) | 0.035 | 55.71 | 11.99 | 12.91 | 0/360 | 1,571x |
+| loop_dynwave.inp (swmm) | 0.031 | 11.67 | 2.01 | 16.09 | 0/360 | 376x |
+| structures_dynwave.inp (file) | 0.029 | 79.27 | 9.81 | 22.45 | 0/360 | 2,723x |
+| structures_dynwave.inp (swmm) | 0.017 | 23.46 | 2.39 | 27.21 | 0/360 | 1,382x |
+| storage_dynwave.inp (file) | 0.023 | 53.41 | 10.03 | 14.80 | 0/360 | 2,279x |
+| storage_dynwave.inp (swmm) | 0.016 | 13.15 | 2.06 | 17.77 | 1/360 | 832x |
+| binary tree, 7 conduits | 0.013 | 2.31 | 2.17 | 17.78 | 0/60 | 173x |
+| binary tree, 63 conduits | 0.006 | 2.65 | 2.08 | 21.16 | 0/60 | 458x |
+| binary tree, 511 conduits | 0.041 | 3.79 | 2.08 | 30.32 | 0/60 | 93x |
+| binary tree, 2047 conduits | 0.116 | 4.81 | 2.08 | 38.51 | 0/60 | 41x |
 
 Run: `.venv/Scripts/python benchmarks/sewer_dynwave_speed.py [--core N] [--trees 5 7 9]
 [--fixtures tree_dynwave.inp ...] [--modes file swmm]`

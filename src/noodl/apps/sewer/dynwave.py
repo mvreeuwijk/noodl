@@ -141,8 +141,10 @@ _BED_FLOOR_MARGIN = 4.0
 #: The head solve's inner linear solver is the dense LU (``linear_solver="direct"``) up to
 #: this many junctions, and the layer's ``"auto"`` (SciPy's sparse LU) above it: on a small
 #: network the dense factorisation costs a handful of tensor operations against SuperLU's
-#: per-call conversion (measured: `benchmarks/sewer_dynwave_speed.py`).
-DENSE_SOLVE_MAX_JUNCTIONS = 64
+#: per-call conversion (measured on `benchmarks/sewer_dynwave_speed.py`'s binary trees, ms
+#: per pass dense / sparse: 17.6 / 18.3 at 63 junctions, 18.5 / 19.3 at 127, 21.4 / 20.2 at
+#: 255).
+DENSE_SOLVE_MAX_JUNCTIONS = 128
 #: SWMM's default HEAD_TOLERANCE, 0.005 ft (`dynwave.c:63`, ``DEFAULT_HEADTOL``), in m.
 DEFAULT_HEAD_TOLERANCE = 0.005 * LCF
 #: SWMM's default MAX_TRIALS (`dynwave.c:66`, ``DEFAULT_MAXTRIALS``).

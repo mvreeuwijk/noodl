@@ -372,8 +372,10 @@ tree for a 7.8e-5 m answer; the parity tests pass their own tight tolerances (1e
 passes) and the fixtures set `HEAD_TOLERANCE` 1e-12 and `MAX_TRIALS` 500.
 
 **Speed.** One pass costs a nearly fixed few thousand small tensor operations, whatever the
-network's size: about 10 ms on the 6-node tree, from 36 ms (`benchmarks/sewer_dynwave_speed.py`,
-which also times SWMM). Most of it is the conduit update (`dynwave_terms.conduit_terms`), SWMM's
+network's size: 10-15 ms on the 6-node tree, from 37 ms, and 38 ms on a 2,047-conduit tree,
+from 55 ms (`benchmarks/sewer_dynwave_speed.py`, which also times SWMM). With SWMM's own
+tolerances the tree's 30 minutes take 11.5 s (123 s before), about 850 times SWMM; the
+2,047-conduit tree is about 40 times SWMM. Most of it is the conduit update (`dynwave_terms.conduit_terms`), SWMM's
 normal and critical depths, and the head solve, whose Newton Jacobian is the elements' own
 analytic `dflow` on the primal passes (`PotentialFlowLayer(analytic_primal=True)`; the implicit
 adjoint still differentiates the converged pass). A batch of B scenarios (`simulate_dynamic_wave`
