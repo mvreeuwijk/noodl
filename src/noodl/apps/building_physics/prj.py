@@ -1647,12 +1647,39 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     return model, state, drivers
 
 
+def _pressure_coupling(model: Model, where: str) -> tuple[str | None, str]:
+    """The potential a closure needs at the solve's own value, and the couplings that need
+    it: `ZonePressureDensity` (its `key`) and every closure with `reads_solved_pressure`
+    (its `pressure_key`, default "air.phi"). (None, "") when there is none. Closures that
+    read different potentials are refused by name: one fixed point feeds back one key."""
+    keys: dict[str, list[str]] = {}
+    for c in model.closures:
+        if isinstance(c, ZonePressureDensity):
+            what = "the zone densities" if c.densities else "the contaminants' zone air mass"
+            keys.setdefault(c.key, []).append(what)
+        elif getattr(c, "reads_solved_pressure", False):
+            key = getattr(c, "pressure_key", "air.phi")
+            keys.setdefault(key, []).append(f"the pressure reader {type(c).__name__}")
+    if not keys:
+        return None, ""
+    if len(keys) > 1:
+        raise ValueError(
+            f"{where}: the closures that need the solved pressure read different potentials: "
+            + "; ".join(f"{', '.join(v)} read {k!r}" for k, v in keys.items())
+            + "; one fixed point feeds back one potential"
+        )
+    ((key, couplings),) = keys.items()
+    return key, " and ".join(couplings)
+
+
 def steady(model: Model, state, drivers, *, rtol: float = 1e-12, max_iter: int = 10,
            **solve_kwargs):
     """`model.steady`, repeated to a fixed point when the model carries a
     `ZonePressureDensity` closure (a `.prj` with `densZP = 1`, or with `dodMdt = 1`, whose
     zone air mass alone carries the zone pressure) or a closure that reads the solved
-    pressure (`reads_solved_pressure`, e.g. a pressure-driven source); one call otherwise.
+    pressure (`reads_solved_pressure`, e.g. a pressure-driven source, on the potential its
+    `pressure_key` names; closures reading different potentials are refused); one call
+    otherwise.
     Such a reader does not feed back into the airflow, so without `ZonePressureDensity` one
     extra pass suffices.
 
@@ -1666,14 +1693,11 @@ def steady(model: Model, state, drivers, *, rtol: float = 1e-12, max_iter: int =
     if max_iter < 1:
         raise ValueError(f"prj.steady: max_iter must be at least 1, got {max_iter!r}")
     zp = [c for c in model.closures if isinstance(c, ZonePressureDensity)]
-    readers = [type(c).__name__ for c in model.closures
-               if getattr(c, "reads_solved_pressure", False)]
+    key, cause = _pressure_coupling(model, "prj.steady")
     out = model.steady(state, drivers, **solve_kwargs)
-    if not zp and not readers:
+    if key is None:
         return out
-    key, Pb = (zp[0].key, zp[0].Pb) if zp else ("air.phi", 101325.0)
-    cause = " and ".join((["the zone-pressure density"] if zp else [])
-                         + [f"the pressure reader {r}" for r in readers])
+    Pb = zp[0].Pb if zp else 101325.0
     for _ in range(max_iter):
         new = model.steady({**state, key: out[key]}, drivers, **solve_kwargs)
         change = (new[key] - out[key]).abs().max().item()

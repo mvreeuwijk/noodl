@@ -543,3 +543,36 @@ def test_the_pressure_driven_source_runs_batched_and_carries_gradients():
     assert gphi[1].abs().sum().item() == 0.0
     before = srcs({"species.x": torch.zeros(2, dtype=F64)}, drivers)["species.sources"]
     assert before.abs().sum().item() == 0.0
+
+
+def test_the_pressure_driven_source_has_a_zero_gradient_at_zero_pressure_difference():
+    """With n < 1 the slope n G dP^(n-1) is unbounded as dP -> 0+; at dP = 0 exactly (and
+    below) the source is off and its gradient is zero, never inf or nan."""
+    s = PressureDrivenSource(1, 1e-5, 0.5)
+    dp = torch.tensor([0.0, 0.0, 0.0], dtype=F64, requires_grad=True)
+    (g,) = torch.autograd.grad(s.generation(0.0, torch.zeros(3, dtype=F64), dp).sum(), dp)
+    assert torch.equal(g, torch.zeros(3, dtype=F64))
+
+
+def test_a_pressure_driven_source_needs_rho_amb_one_ambient_and_a_height_per_node():
+    layer = _layer(1)
+    srcs = SpeciesSources([PressureDrivenSource(1, 1e-5, 1.0)], species=[0], layer=layer,
+                          heights=[0.0, 0.0, 0.0])
+    assert "rho_amb" in srcs.inputs
+    state = {"species.x": torch.zeros(2, dtype=F64), "air.phi": torch.zeros(3, dtype=F64)}
+    with pytest.raises(KeyError, match="rho_amb"):
+        srcs(state, _drivers([1.0], 1))
+    with pytest.raises(ValueError, match=r"one reference height \(m\) per node, 3"):
+        SpeciesSources([PressureDrivenSource(1, 1e-5, 1.0)], species=[0], layer=layer,
+                       heights=[0.0, 0.0])
+    net = Network(dtype=F64)
+    net.add_node("ambient", volume=0.0)
+    net.add_node("a", volume=10.0)
+    net.add_node("shaft top", volume=0.0)
+    net.add_edge("ambient", "a", kind="airpath")
+    net.add_edge("a", "shaft top", kind="airpath")
+    two = TransportLayer(net, "species", capacity=torch.tensor([12.0], dtype=F64),
+                         flow_kind="airpath", boundary=["ambient", "shaft top"])
+    with pytest.raises(ValueError, match=r"one boundary node.*'ambient', 'shaft top'"):
+        SpeciesSources([PressureDrivenSource(1, 1e-5, 1.0)], species=[0], layer=two,
+                       heights=[0.0, 0.0, 3.0])

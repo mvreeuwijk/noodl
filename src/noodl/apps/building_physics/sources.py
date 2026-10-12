@@ -260,7 +260,9 @@ class SpeciesSources:
 
     A source with `needs_pressure_difference = True` (the pressure-driven source) gets
     P_ambient - P at each node's reference height (Pa), from `state[pressure_key]` with
-    `heights` (m) and `g` (m/s2), and zero before the first airflow solve. Such a closure
+    `heights` (m, one per node), `g` (m/s2) and `drivers["rho_amb"]` (kg/m3), the ambient
+    being the layer's one boundary node (refused otherwise), and zero before the first
+    airflow solve. Such a closure
     reports `reads_solved_pressure`, and `simulate` and `prj.steady` repeat a step until the
     pressure it read is the step's own.
     """
@@ -284,11 +286,26 @@ class SpeciesSources:
                              "its zone")
         self.heights = None if heights is None else torch.as_tensor(heights, dtype=F64)
         self.g, self.pressure_key = float(g), pressure_key
+        if self.reads_solved_pressure:
+            self._check_pressure_reading()
         self.volumes = torch.as_tensor(layer.net.node_attr("volume", default=0.0), dtype=F64)
         self._check_sources()
-        self.inputs = ("time", self.key)
+        self.inputs = ("time", self.key) + (("rho_amb",) if self.reads_solved_pressure else ())
         self.outputs = (f"{layer.name}.sources",) + (
             (f"{layer.name}.removal",) if self.removes else ())
+
+    def _check_pressure_reading(self) -> None:
+        """The ambient is the layer's one boundary node, and `heights` has one entry per
+        node: the pressure difference is measured from that node's static pressure."""
+        lay = self.layer
+        if int(lay.boundary_idx.numel()) != 1:
+            names = [lay.net.nodes[int(i)] for i in lay.boundary_idx.tolist()]
+            raise ValueError(f"SpeciesSources: a pressure-driven source measures its pressure "
+                             f"difference from the ambient, the layer {lay.name!r}'s one "
+                             f"boundary node; the layer has the boundary nodes {names}")
+        if tuple(self.heights.shape) != (lay.net.n,):
+            raise ValueError(f"SpeciesSources: `heights` needs one reference height (m) per "
+                             f"node, {lay.net.n}, got shape {tuple(self.heights.shape)}")
 
     def _check_sources(self) -> None:
         lay = self.layer
@@ -344,6 +361,10 @@ class SpeciesSources:
         phi = state.get(self.pressure_key)
         if phi is None:
             return None
+        if "rho_amb" not in drivers:
+            raise KeyError("SpeciesSources: driver 'rho_amb' (the ambient air density, kg/m3) "
+                           "is required by a pressure-driven source, to place the ambient's "
+                           "static pressure at each zone's height; a density closure writes it")
         amb = int(self.layer.boundary_idx[0])
         rho_amb = torch.as_tensor(drivers["rho_amb"], dtype=F64).unsqueeze(-1)
         z = self.heights

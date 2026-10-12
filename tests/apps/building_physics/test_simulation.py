@@ -18,6 +18,10 @@ from noodl.apps.building_physics.prj import project_to_model, read_prj, steady
 from noodl.apps.building_physics.schedules import Calendar, TimeSeries
 from noodl.apps.building_physics.simulation import simulate
 from noodl.apps.building_physics.thermal import R_AIR
+from noodl.elements import Conductance
+from noodl.layers.potential import PotentialFlowLayer
+from noodl.model import Model
+from noodl.topology import Network
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "contam"
 THREE = DATA / "valThreeZonesWthCtm-UseApi.prj"
@@ -650,6 +654,58 @@ def test_an_unconverged_pressure_fixed_point_names_every_coupling():
     p = read_prj(STACK)                                      # a stack at 273.15 K outside
     model, state, drivers = project_to_model(p, ambient=dict(p.ambient_conditions, Ta=273.15))
     model.closures.append(_PressureSpy())
-    with pytest.raises(RuntimeError, match=r"zone-pressure density and the pressure reader "
+    with pytest.raises(RuntimeError, match=r"the zone densities and the pressure reader "
                                            r"_PressureSpy did not converge in 1 passes"):
         steady(model, state, drivers, max_iter=1, atol=1e-14)
+
+
+class _VentSpy(_PressureSpy):
+    """A pressure reader on a potential layer named "vent"."""
+
+    pressure_key = "vent.phi"
+
+    def __call__(self, state, drivers):
+        phi = state.get(self.pressure_key)
+        self.seen.append(None if phi is None else phi.clone())
+        return {}
+
+
+def _vent_model(spy):
+    """A zone `z` behind a linear conductance to `out`, on a layer "vent", with a fan
+    (`"vent.sources"` at z) ramping up over the run."""
+    net = Network(dtype=F64)
+    net.add_node("out")
+    net.add_node("z")
+    net.add_edge("out", "z", kind="c")
+    layer = PotentialFlowLayer(net, "vent", [Conductance(_f(1e-3), kind="c")],
+                               boundary=["out"])
+    model = Model(net, {"vent": layer}, closures=[spy])
+    drivers = {"vent.phi_boundary": _f(0.0), "vent.sources": _f(0.0, 0.0)}
+    fan = Input(TimeSeries([0.0, 600.0], [0.0, 0.02]), "vent.sources", index=1)
+    return model, drivers, fan
+
+
+def test_the_pressure_fixed_point_feeds_back_the_readers_own_potential():
+    """A reader whose `pressure_key` names another layer's potential sees that potential at
+    the step's own value, in `simulate` and in `prj.steady`."""
+    spy = _VentSpy()
+    model, drivers, fan = _vent_model(spy)
+    out = simulate(model, {}, drivers, [0.0, 300.0, 600.0], inputs=[fan], **TIGHT)
+    assert out["vent.phi"][-1, 1].item() == pytest.approx(20.0, rel=1e-12)
+    assert out["vent.phi"][-2, 1].item() == pytest.approx(10.0, rel=1e-12)
+    torch.testing.assert_close(spy.seen[-1], out["vent.phi"][-1], rtol=0, atol=1e-12)
+    spy = _VentSpy()
+    model, drivers, _ = _vent_model(spy)
+    solved = steady(model, {}, {**drivers, "vent.sources": _f(0.0, 0.01)}, **TIGHT)
+    assert spy.seen[0] is None
+    torch.testing.assert_close(spy.seen[-1], solved["vent.phi"], rtol=0, atol=1e-12)
+
+
+def test_pressure_readers_of_different_potentials_are_refused_by_name():
+    model, state, drivers = project_to_model(read_prj(STACK))      # densZP: "air.phi"
+    model.closures.append(_VentSpy())
+    with pytest.raises(ValueError, match=r"simulate: .*the zone densities read 'air\.phi'; "
+                                         r"the pressure reader _VentSpy read 'vent\.phi'"):
+        simulate(model, state, drivers, [0.0, 300.0])
+    with pytest.raises(ValueError, match=r"prj\.steady: .*_VentSpy read 'vent\.phi'"):
+        steady(model, state, drivers)
