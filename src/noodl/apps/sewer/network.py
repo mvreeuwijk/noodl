@@ -20,6 +20,7 @@ from noodl.apps.sewer.air import (
     add_air_edges,
     air_layer,
 )
+from noodl.apps.sewer.controls import ControlSet
 from noodl.apps.sewer.dynwave import (
     DynamicWaveHydraulics,
     DynamicWaveOptions,
@@ -29,6 +30,7 @@ from noodl.apps.sewer.dynwave import (
 )
 from noodl.apps.sewer.hydraulics import GEOMETRY_ALIASES, SewerHydraulics
 from noodl.apps.sewer.inflows import InflowSchedule
+from noodl.apps.sewer.pumps import PUMP_KINDS
 from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
 from noodl.apps.sewer.storage import validate_storage_curve
 from noodl.apps.sewer.xsect_spec import UNMODELLED_KINDS, Xsect
@@ -203,6 +205,8 @@ class Orifice:
     discharge_coefficient: float
     width: float | None = None
     flap_gate: bool = False
+    close_time: float = 0.0
+    order: int = 0
 
 
 @dataclass(frozen=True)
@@ -233,6 +237,7 @@ class Weir:
     end_discharge_coefficient: float = 0.0
     can_surcharge: bool = True
     flap_gate: bool = False
+    order: int = 0
 
 
 @dataclass(frozen=True)
@@ -252,6 +257,42 @@ class Outlet:
     rating: tuple
     head_difference: bool = False
     flap_gate: bool = False
+    order: int = 0
+
+
+@dataclass(frozen=True)
+class Pump:
+    """A pump (SWMM `[PUMPS]`, dynamic wave only) from node `u` (its inlet, a manhole) to node
+    `v`. `kind` is SWMM's pump type: ``"type1"`` (PUMP1 curve: flow steps with the inlet
+    node's volume), ``"type2"`` (PUMP2: steps with the inlet depth), ``"type3"`` (PUMP3:
+    flow against the head delivered, `v` minus `u`), ``"type4"`` (PUMP4: continuous in the
+    inlet depth), ``"type5"`` (PUMP5: the variable-speed PUMP3, head divided by the squared
+    speed `setting`) or ``"ideal"`` (no curve: the pump takes its inlet node's inflow).
+    `curve` is ``(x values, flows)`` in SI (x in m3 for type1, m otherwise; flows m3/s;
+    x strictly increasing); an ideal pump has none. The pump starts ON (`initial_on`, SWMM's
+    Status), switches OFF when its inlet depth falls below `shutoff_depth` (m) and back ON
+    above `startup_depth` (m); 0 disables either. Control rules can switch it and set its
+    speed (`ControlSet`). `order` is the line of the input file (SWMM's link index order)."""
+
+    name: str
+    u: str
+    v: str
+    kind: str = "ideal"
+    curve: tuple = ()
+    initial_on: bool = True
+    startup_depth: float = 0.0
+    shutoff_depth: float = 0.0
+    order: int = 0
+
+    @property
+    def crest_height(self) -> float:
+        """A pump has no crest (0, for the shared regulator checks)."""
+        return 0.0
+
+    @property
+    def flap_gate(self) -> bool:
+        """A pump has no flap gate (SWMM, link.c:1469)."""
+        return False
 
 
 def _validate_rating(where: str, rating) -> None:
@@ -290,8 +331,10 @@ class SewerNetwork:
     `read_swmm_inp`, whose purpose is to reproduce SWMM). ``"tabulated"`` is a steady
     kinematic-wave geometry and is refused with ``storage=True`` by `SewerHydraulics`;
     dynamic-wave routing always uses it and refuses ``"analytic"`` by name.
-    `orifices`, `weirs` and `outlets` are flow regulators between two nodes (dynamic wave
-    only; SWMM's `[ORIFICES]`, `[WEIRS]`, `[OUTLETS]`).
+    `orifices`, `weirs` and `outlets` are flow regulators between two nodes and `pumps` pumps
+    (dynamic wave only; SWMM's `[ORIFICES]`, `[WEIRS]`, `[OUTLETS]`, `[PUMPS]`); `controls`
+    is the file's `[CONTROLS]` rule set (`ControlSet`) that switches pumps and sets the
+    openings of regulators (dynamic wave only).
     `inflows` is the time-varying lateral inflow of a SWMM file (`InflowSchedule`: its
     `[TIMESERIES]`, `[PATTERNS]`, `[INFLOWS]` and `[DWF]`), ``None`` for constant
     `Manhole.inflow` only. When given, each scheduled manhole's `Manhole.inflow` is the value
@@ -310,12 +353,15 @@ class SewerNetwork:
     weirs: tuple[Weir, ...] = ()
     outlets: tuple[Outlet, ...] = ()
     inflows: InflowSchedule | None = None
+    pumps: tuple[Pump, ...] = ()
+    controls: ControlSet | None = None
 
     @property
     def structures(self) -> dict[str, tuple]:
-        """The flow regulators by edge kind: ``{"orifice": ..., "weir": ..., "outlet":
-        ...}``."""
-        return {"orifice": self.orifices, "weir": self.weirs, "outlet": self.outlets}
+        """The flow regulators and pumps by edge kind: ``{"orifice": ..., "weir": ...,
+        "outlet": ..., "pump": ...}``."""
+        return {"orifice": self.orifices, "weir": self.weirs, "outlet": self.outlets,
+                "pump": self.pumps}
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "routing", ROUTING_ALIASES.get(self.routing, self.routing))
@@ -396,6 +442,8 @@ class SewerNetwork:
                     )
             outgoing.setdefault(pipe.u, []).append(pipe.name)
         self._validate_structures(names, pipe_names)
+        if self.controls is not None:
+            self.controls.validate(self)
         if self.inflows is not None:
             manhole_names = {m.name for m in self.manholes}
             stray = sorted(set(self.inflows.nodes) - manhole_names)
@@ -446,12 +494,13 @@ class SewerNetwork:
         unknown or repeated end node, an unknown kind or shape, a non-positive opening, a
         negative crest height or coefficient, or a malformed rating."""
         link_names = set(pipe_names)
+        outfall_names = {o.name for o in self.outfalls}
         for kind, devices in self.structures.items():
             for s in devices:
                 where = f"SewerNetwork: {kind} {s.name!r}"
                 if s.name in link_names:
-                    raise ValueError(f"{where}: duplicate link name (pipes, orifices, weirs "
-                                     f"and outlets share one name space)")
+                    raise ValueError(f"{where}: duplicate link name (pipes, orifices, weirs, "
+                                     f"outlets and pumps share one name space)")
                 link_names.add(s.name)
                 for end in (s.u, s.v):
                     if end not in node_names:
@@ -459,6 +508,9 @@ class SewerNetwork:
                                          f"manhole nor an outfall")
                 if s.u == s.v:
                     raise ValueError(f"{where} joins node {s.u!r} to itself")
+                if kind == "pump":
+                    self._validate_pump(where, s, outfall_names)
+                    continue
                 if not (math.isfinite(s.crest_height) and s.crest_height >= 0.0):
                     raise ValueError(f"{where}: crest_height must be >= 0 m (above its first "
                                      f"node's invert), got {s.crest_height!r}")
@@ -503,6 +555,38 @@ class SewerNetwork:
                     if not (math.isfinite(value) and value >= 0.0):          # link.c:2055-2062
                         raise ValueError(f"{where}: {what} must be >= 0, got {value!r}")
 
+    @staticmethod
+    def _validate_pump(where: str, pump: Pump, outfall_names: set[str]) -> None:
+        """Refuse, BY NAME, a malformed pump: an unknown kind, a curve that does not fit the
+        kind, an outfall as its inlet, or startup and shutoff depths out of order (SWMM's
+        ERR_PUMP_LIMITS, link.c:1518-1519)."""
+        if pump.kind not in PUMP_KINDS:
+            raise ValueError(f"{where}: kind must be one of {PUMP_KINDS}, got {pump.kind!r}")
+        if pump.u in outfall_names:
+            raise ValueError(f"{where}: its inlet {pump.u!r} is an outfall; a pump draws from "
+                             f"a junction or storage unit")
+        if pump.kind == "ideal":
+            if pump.curve:
+                raise ValueError(f"{where}: an ideal pump has no curve")
+        else:
+            curve = pump.curve
+            if (len(curve) != 2 or len(curve[0]) != len(curve[1]) or not curve[0]
+                    or not all(math.isfinite(float(x)) for x in (*curve[0], *curve[1]))):
+                raise ValueError(f"{where}: a {pump.kind} pump needs a curve (x values, flows) "
+                                 f"of equal, non-zero length and finite values, got {curve!r}")
+            xs = [float(x) for x in curve[0]]
+            if any(b <= a for a, b in zip(xs, xs[1:], strict=False)):
+                raise ValueError(f"{where}: pump curve x values must be strictly increasing "
+                                 f"(SWMM's ERR_CURVE_SEQUENCE), got {curve[0]!r}")
+        for what, value in (("startup_depth", pump.startup_depth),
+                            ("shutoff_depth", pump.shutoff_depth)):
+            if not (math.isfinite(value) and value >= 0.0):
+                raise ValueError(f"{where}: {what} must be >= 0 m, got {value!r}")
+        if pump.startup_depth > 0.0 and pump.startup_depth <= pump.shutoff_depth:
+            raise ValueError(f"{where}: startup depth {pump.startup_depth} m must exceed "
+                             f"the shutoff depth {pump.shutoff_depth} m (SWMM's "
+                             f"ERR_PUMP_LIMITS)")
+
     def _refuse_dynamic_wave_only(self) -> None:
         """Steady and kinematic-wave routing do not model initial conditions, MaxFlow, flap
         gates, barrels, storage units or flow regulators; a set value would be skipped
@@ -510,9 +594,13 @@ class SewerNetwork:
         for kind, devices in self.structures.items():
             if devices:
                 raise ValueError(
-                    f"SewerNetwork: {kind} {devices[0].name!r}: orifices, weirs and outlets "
-                    f"are modelled with dynamic-wave routing only (routing is "
+                    f"SewerNetwork: {kind} {devices[0].name!r}: orifices, weirs, outlets and "
+                    f"pumps are modelled with dynamic-wave routing only (routing is "
                     f"{self.routing!r})")
+        if self.controls is not None:
+            raise ValueError(
+                f"SewerNetwork: control rules are modelled with dynamic-wave routing only "
+                f"(routing is {self.routing!r})")
         for manhole in self.manholes:
             if manhole.storage is not None:
                 raise ValueError(
@@ -635,7 +723,7 @@ class SewerNetwork:
                 self._validate_xsect(pipe)
         neighbours: dict[str, list[str]] = {}
         touching: dict[str, list[str]] = {name: [] for name in outfall_names}
-        links = (*self.pipes, *self.orifices, *self.weirs, *self.outlets)
+        links = (*self.pipes, *self.orifices, *self.weirs, *self.outlets, *self.pumps)
         for link in links:
             neighbours.setdefault(link.u, []).append(link.v)
             neighbours.setdefault(link.v, []).append(link.u)
