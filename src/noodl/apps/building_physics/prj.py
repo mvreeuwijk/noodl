@@ -197,8 +197,8 @@ MU_0 = 1.81625e-5
 #                   the data line(s) by type (TN 1887r1 Appendix A section 9):
 #     ccf           `G R u_G u_R` (kg/s; kg/s per unit mass fraction)
 #     cut           `G x_cut u_G u_C` (kg/s; kg/kg)
-#     eds           `G0 k ...` (kg/s; 1/s, the decay rate)
-#     brs           `M ...` (kg)
+#     eds           `G0 k u_G u_k` (kg/s; 1/s, the decay rate)
+#     brs           `M u_M` (kg)
 #     prs           `G x u_G` (kg/(s Pa^x); -)
 #     dvs           `v_d A u_V u_A` (m/s; m2)
 #     drs           `k_d u_k` (1/s)

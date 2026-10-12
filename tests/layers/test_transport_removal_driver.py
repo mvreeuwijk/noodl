@@ -35,9 +35,10 @@ SRC = _t([0.0, 0.1, 0.0])
 XB = _t([0.2])
 X0 = _t([0.3, 0.1])
 R = _t([[0.05], [0.2]])
+SCHEMES = ["exact", "implicit", "trapezoidal"]
 
 
-@pytest.mark.parametrize("scheme", ["exact", "implicit", "trapezoidal"])
+@pytest.mark.parametrize("scheme", SCHEMES)
 def test_a_per_call_removal_matches_the_construction_time_one(scheme):
     built = _layer(scheme, removal=R)
     bare = _layer(scheme)
@@ -51,23 +52,26 @@ def test_a_per_call_removal_matches_the_construction_time_one(scheme):
                                rtol=1e-14, atol=0)
 
 
-def test_steady_and_rate_take_it_too():
-    built, bare = _layer(removal=R), _layer()
+@pytest.mark.parametrize("scheme", SCHEMES)
+def test_steady_and_rate_take_it_too(scheme):
+    built, bare = _layer(scheme, removal=R), _layer(scheme)
     torch.testing.assert_close(bare.steady(Q, SRC, XB, removal=R), built.steady(Q, SRC, XB),
                                rtol=1e-14, atol=0)
     torch.testing.assert_close(bare.rate(X0, Q, SRC, XB, removal=R),
                                built.rate(X0, Q, SRC, XB), rtol=1e-14, atol=0)
 
 
-def test_the_per_call_removal_replaces_the_layers_own_and_accepts_a_species_free_shape():
-    built = _layer(removal=_t([[5.0], [5.0]]))
-    reference = _layer(removal=R)
+@pytest.mark.parametrize("scheme", SCHEMES)
+def test_the_per_call_removal_replaces_the_layers_own_and_accepts_a_species_free_shape(scheme):
+    built = _layer(scheme, removal=_t([[5.0], [5.0]]))
+    reference = _layer(scheme, removal=R)
     torch.testing.assert_close(built.step(X0, Q, SRC, XB, 10.0, removal=R[:, 0]),
                                reference.step(X0, Q, SRC, XB, 10.0), rtol=1e-14, atol=0)
 
 
-def test_a_batched_removal_steps_each_instance_with_its_own():
-    bare = _layer()
+@pytest.mark.parametrize("scheme", SCHEMES)
+def test_a_batched_removal_steps_each_instance_with_its_own(scheme):
+    bare = _layer(scheme)
     batch = torch.stack([R, 2 * R])                                   # (2, n_i, 1)
     out = bare.step(X0, Q, SRC, XB, 10.0, removal=batch)
     assert out.shape == (2, 2)
@@ -76,16 +80,40 @@ def test_a_batched_removal_steps_each_instance_with_its_own():
                                    rtol=1e-13, atol=0)
 
 
-def test_the_step_is_differentiable_in_the_removal_rate():
-    """A sealed zone (q = 0, no source): implicit x1 = x0 / (1 + k dt), so
-    dx1/dk = -x0 dt / (1 + k dt)**2."""
-    bare = _layer()
+@pytest.mark.parametrize("scheme", SCHEMES)
+def test_the_step_is_differentiable_in_the_removal_rate(scheme):
+    """A sealed zone (q = 0, no source) has x1 = x0 g(k dt), with g = exp(-k dt) (exact),
+    1 / (1 + k dt) (implicit) or (1 - k dt / 2) / (1 + k dt / 2) (trapezoidal); the
+    gradient is x0 dt g'(k dt)."""
+    bare = _layer(scheme)
     k = _t([[0.05], [0.2]]).requires_grad_()
     x1 = bare.step(X0, torch.zeros(3, dtype=F64), torch.zeros(3, dtype=F64), XB, 10.0,
                    removal=k)
     (g,) = torch.autograd.grad(x1.sum(), k)
-    expected = -X0 * 10.0 / (1 + k.detach()[:, 0] * 10.0) ** 2
-    torch.testing.assert_close(g[:, 0], expected, rtol=1e-12, atol=0)
+    z = k.detach()[:, 0] * 10.0
+    dg = {"exact": -torch.exp(-z),
+          "implicit": -1 / (1 + z) ** 2,
+          "trapezoidal": -1 / (1 + z / 2) ** 2}[scheme]
+    # the exact scheme differentiates through a matrix exponential: a few 1e-12 of roundoff
+    rtol = 1e-10 if scheme == "exact" else 1e-12
+    torch.testing.assert_close(g[:, 0], X0 * 10.0 * dg, rtol=rtol, atol=0)
+
+
+@pytest.mark.parametrize("scheme", SCHEMES)
+def test_each_species_takes_its_own_removal_rate(scheme):
+    """Two species with no flow-coupled difference: species one removed at the rate of a
+    one-species layer, species two untouched, and the cast to float64 of a float32 rate."""
+    two = _layer(scheme, K=2)
+    one = _layer(scheme)
+    x0 = torch.stack([X0, X0], dim=-1)                                # (n_i, 2)
+    sources = torch.stack([SRC, SRC], dim=-1)                         # (n, 2)
+    xb = torch.stack([XB, XB], dim=-1)                                # (n_b, 2)
+    rate = torch.cat([R, torch.zeros_like(R)], dim=-1)                # (n_i, 2)
+    out = two.step(x0, Q, sources, xb, 10.0, removal=rate.to(torch.float32))
+    assert out.dtype == F64
+    torch.testing.assert_close(out[:, 0], one.step(X0, Q, SRC, XB, 10.0, removal=R),
+                               rtol=1e-6, atol=0)
+    torch.testing.assert_close(out[:, 1], one.step(X0, Q, SRC, XB, 10.0), rtol=1e-14, atol=0)
 
 
 def test_a_misshapen_removal_is_refused_naming_the_layer():

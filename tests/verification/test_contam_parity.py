@@ -625,6 +625,26 @@ def test_sinks_and_emission_models_match_contamx(contamx, tmp_path, record_prope
 
 
 @pytest.mark.external
+def test_a_constant_coefficient_source_scales_with_its_multiplier(contamx, tmp_path,
+                                                                  record_property):
+    """`sinks_three_zone.prj` with its constant-coefficient source's multiplier set to 2
+    (measured on ContamX: the multiplier scales the generation and the removal term alike,
+    the removal one implicitly, as for a multiplier of 1).
+
+    Budget: as for the sinks fixture, the removal term's 0.33 u unchanged, a multiplier of 2
+    being exact in float32: 80 u."""
+    text = SINKS.read_text()
+    old = "  3   3   3   0   0     1     0"
+    assert old in text
+    doubled = tmp_path / SINKS.name
+    doubled.write_text(text.replace(old, "  3   3   3   0   0     2     0", 1))
+    _project_parity(doubled, tmp_path, rtol_flow=16 * F32_U, rtol_mf=80 * F32_U,
+                    record_property=record_property, species_floor=True,
+                    label="Three-zone project with a constant-coefficient source at "
+                          "multiplier 2, 24 steps")
+
+
+@pytest.mark.external
 def test_a_pressure_driven_source_matches_contamx(contamx, tmp_path, record_property):
     """`pressure_source_stack.prj`: NIST's scheduled one-zone stack (weather and ambient
     files, zone schedule, densZP, dodMdt) with a pressure-driven source, 288 steps; the

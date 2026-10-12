@@ -1086,3 +1086,14 @@ def test_unsupported_sources_are_refused_by_name(tmp_path):
     plm = "  5   2   5   0   0     1     0"
     with pytest.raises(ValueError, match=r"source 5.*plm.*schedule 1"):
         read_prj(_variant(text, plm, "  5   2   5   1   0     1     0", tmp_path))
+
+
+def test_an_unreferenced_super_element_ahead_of_a_used_one_is_read_and_ignored(tmp_path):
+    """Only a source that references a super element is refused; the element's own data
+    (a count, then that many sub-element numbers on the next line) is read past."""
+    text = SINKS.read_text()
+    head = "6 ! source/sink elements:\n1 sarin dvs deposit"
+    p = read_prj(_variant(text, head,
+                          "7 ! source/sink elements:\n7 sarin sup group\n\n 2\n 3 4\n"
+                          "1 sarin dvs deposit", tmp_path))
+    assert [s.source_type for s in p.sources] == ["dvs", "drs", "ccf", "cut", "plm", "pkm"]

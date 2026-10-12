@@ -30,8 +30,8 @@ family
 (`plr_orfc/leak1/leak2/leak3/crack/fcn/test1/test2/conn/stair/shaft/qcn`), the quadratic family
 (`qfr_*`), doorways (`dor_door`, `dor_pl2`), dampers (`plr_bdq`, `plr_bdf`), constant-flow fans
 (`fan_cmf`, `fan_cvf`) and the cubic fan curve (`fan_fan`); source/sink elements `ccf`, `cut`, `eds`,
-`brs`, `prs`, `dvs`, `drs`, `plm` and `pkm`, attached by `project_to_model` (the record's
-multiplier folded into the element's first coefficient); filters on airflow paths (`Project.edge_filters`, the species layer's `transmission`):
+`brs`, `prs`, `dvs`, `drs`, `plm` and `pkm`, attached by `project_to_model` (scaled by the record's multiplier,
+which enters the element's first coefficient, and a `ccf` record's removal coefficient too); filters on airflow paths (`Project.edge_filters`, the species layer's `transmission`):
 constant-efficiency (`cef`), particle (`pf0`, interpolated at each species' mean diameter as
 ContamX does) and super (`spf`) filter elements; a filter acts on the air crossing its path in
 either direction.
@@ -41,8 +41,8 @@ systems referenced by nonzero index; boundary-layer diffusion (`bls`), resuspens
 and super (`sup`) source/sink elements, when a source/sink record references one; a source/sink
 record whose element or zone the file does not define; gaseous (`gf0`) and UVGI (`uv1`) filter elements,
 referenced or not; a filter that names a species the project does not simulate (when a path
-references it: an unreferenced filter element is read and unused), and a path
-whose filter number the file does not define; non-trace species; a contaminant list that is not the
+references it: an unreferenced filter element is read and unused), a super filter
+that contains itself, and a path whose filter number the file does not define; non-trace species; a contaminant list that is not the
 simulated species in file order; a source or kinetic reaction that names a species the project
 does not simulate (a species the file defines but marks as not simulated included), a kinetic
 reaction that gives one product-reactant pair twice, and a zone whose kinetic reaction number the

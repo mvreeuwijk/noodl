@@ -393,7 +393,7 @@ class TransportLayer:
         """
         if removal is None:
             return self.removal
-        r = torch.as_tensor(removal)
+        r = torch.as_tensor(removal, dtype=self.net.dtype)
         K = self.n_species
         if not (r.dim() >= 2 and tuple(r.shape[-2:]) == (self.n_i, K)):
             if K == 1 and r.dim() >= 1 and r.shape[-1] == self.n_i:
@@ -892,6 +892,11 @@ class TransportLayer:
     def operator(
         self, q: torch.Tensor, capacity: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The dense generator `(M, N)` of the layer at flows `q` (and optionally a per-call
+        `capacity`): the interior block and the boundary coupling. It carries the layer's
+        own construction-time `removal` (plus its dilution); a per-step removal rate (the
+        `"<layer>.removal"` driver) is not part of it, because `step`, `steady`, `rate` and
+        the other entry points that take `removal=` apply that themselves."""
         net, K, n_i, n_b = self.net, self.n_species, self.n_i, self.n_b
         dtype = q.dtype
         # `cap_t` names the resolved per-step capacity, as in `rate`, `step`, `steady`,
