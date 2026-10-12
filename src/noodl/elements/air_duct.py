@@ -183,6 +183,11 @@ class AirDuct(_UpstreamAir):
                 raise ValueError(f"{where}: {label} must be strictly positive, got {value!r}")
         if not bool((torch.as_tensor(loss, dtype=torch.float64) >= 0).all()):
             raise ValueError(f"{where}: loss must be non-negative, got {loss!r}")
+        if not bool((torch.as_tensor(roughness, dtype=torch.float64)
+                     < 3.7 * torch.as_tensor(diameter, dtype=torch.float64)).all()):
+            raise ValueError(f"{where}: roughness must be below 3.7 diameters (the Colebrook "
+                             f"equation has no solution beyond), got roughness {roughness!r} "
+                             f"and diameter {diameter!r}")
         if area is not None and not bool((torch.as_tensor(area, dtype=torch.float64) > 0)
                                          .all()):
             raise ValueError(f"{where}: area must be strictly positive, got {area!r}")
@@ -214,12 +219,15 @@ class AirDuct(_UpstreamAir):
         target = torch.where(forward, dp, -dp)
         parts = torch.broadcast_tensors(target, rho, mu, *self._geometry(dp.dtype))
         target, rho, mu, L, D, eps, C, A = parts
-        bound = 2.0 * torch.minimum(target / _laminar_resistance(rho, mu, L, D, A),
-                                    torch.sqrt(target / _least_quadratic_loss(rho, L, D,
-                                                                              eps, C, A)))
-        positive = bound > 0
-        # At dp = 0 the bracket is [0, 0], so F = 0 exactly; the unit scale there only keeps
-        # the implicit derivative finite (it multiplies x = 0).
+        positive = target > 0
+        # The bound is built from a safe target: sqrt(target) at 0 has an infinite derivative,
+        # which `where` would turn into NaN in the backward. At dp = 0 the bracket is [0, 0],
+        # so F = 0 exactly; the unit scale there only keeps the implicit derivative finite
+        # (it multiplies x = 0, and dF/ddp comes out as 1 / a).
+        safe = torch.where(positive, target, torch.ones_like(target))
+        bound = 2.0 * torch.minimum(safe / _laminar_resistance(rho, mu, L, D, A),
+                                    torch.sqrt(safe / _least_quadratic_loss(rho, L, D,
+                                                                            eps, C, A)))
         scale = torch.where(positive, bound, torch.ones_like(bound))
         hi = positive.to(dp.dtype)
         x = solve_monotone(_scaled_residual, torch.zeros_like(hi), hi, scale, target, rho, mu,
@@ -285,21 +293,24 @@ class DuctTerminal(_UpstreamAir):
             Ce = Ce + (1.0 - S) / S
         return Ce / (2.0 * rho * A * A), TERMINAL_RE * mu * torch.sqrt(A)
 
-    def flow(self, dp: Tensor, drivers: Mapping[str, Tensor] | None = None) -> Tensor:
+    def _regime(self, dp: Tensor, drivers) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """(c, F_t, above, safe): `above` where |dp| is past the laminar switch, and `safe`
+        the |dp| there, or the switch pressure elsewhere, so that the square roots of the
+        quadratic branch stay finite (value and gradient) where it is not selected."""
         c, F_t = self._law(dp >= 0, drivers, dp.dtype)
         dp_t = c * F_t * F_t
         size = torch.where(dp >= 0, dp, -dp)
         above = size > dp_t
-        quadratic = torch.sqrt(torch.where(above, size, dp_t) / c)
+        return c, F_t, above, torch.where(above, size, dp_t)
+
+    def flow(self, dp: Tensor, drivers: Mapping[str, Tensor] | None = None) -> Tensor:
+        c, F_t, above, safe = self._regime(dp, drivers)
+        quadratic = torch.sqrt(safe / c)
         return torch.where(above, torch.where(dp >= 0, quadratic, -quadratic),
                            dp / (c * F_t))
 
     def dflow(self, dp: Tensor, drivers: Mapping[str, Tensor] | None = None) -> Tensor:
-        c, F_t = self._law(dp >= 0, drivers, dp.dtype)
-        dp_t = c * F_t * F_t
-        size = torch.where(dp >= 0, dp, -dp)
-        above = size > dp_t
-        safe = torch.where(above, size, dp_t)
+        c, F_t, above, safe = self._regime(dp, drivers)
         return torch.where(above, 0.5 / torch.sqrt(c * safe), 1.0 / (c * F_t))
 
     def linear_init(self, drivers: Mapping[str, Tensor] | None = None) -> tuple[Tensor, Tensor]:

@@ -267,6 +267,8 @@ def test_gradcheck_of_the_duct_and_terminal_in_their_parameters_and_drivers():
 def test_the_duct_and_terminal_refuse_bad_geometry_and_missing_drivers():
     with pytest.raises(ValueError, match="diameter must be strictly positive"):
         _duct(diameter=0.0)
+    with pytest.raises(ValueError, match="roughness must be below 3.7 diameters"):
+        _duct(roughness=0.75)
     with pytest.raises(ValueError, match="loss must be non-negative"):
         _duct(loss=-1.0)
     with pytest.raises(ValueError, match="area must be strictly positive"):
@@ -314,3 +316,24 @@ def test_the_differentiable_layer_solve_reaches_a_learnable_duct_diameter():
     with torch.no_grad():
         fd = (room_pressure(0.2 + eps, False)[0] - room_pressure(0.2 - eps, False)[0]).item()
     assert duct.diameter.grad.item() == pytest.approx(fd / (2 * eps), rel=1e-6)
+
+
+def test_autograd_at_zero_pressure_difference_is_finite_and_correct():
+    """At dp = 0: dF/ddp = 1 / a (the laminar slope) and dF/dD = 0 (no flow for any D);
+    the terminal's dF/ddp is its laminar slope and dF/dA = 0."""
+    d = _drivers()
+    dp = torch.zeros(1, dtype=F64, requires_grad=True)
+    D = torch.tensor([0.2], dtype=F64, requires_grad=True)
+    duct = AirDuct(torch.tensor([10.0], dtype=F64), D, torch.tensor([9e-5], dtype=F64),
+                   src=[0], tgt=[1], learnable=True)
+    g_dp, g_D = torch.autograd.grad(duct.flow(dp, d).sum(), (dp, duct.diameter))
+    A = math.pi * 0.04 / 4
+    a = 32 * air_viscosity(293.15).item() * 10.0 / (rho(293.15) * A * 0.04)
+    assert g_dp.item() == pytest.approx(1 / a, rel=1e-12)
+    assert g_D.item() == 0.0
+    term = DuctTerminal(torch.tensor([0.0314159], dtype=F64), torch.tensor([0.125], dtype=F64),
+                        src=[0], tgt=[1], learnable=True)
+    g_dp, g_A = torch.autograd.grad(term.flow(dp, d).sum(), (dp, term.area))
+    assert torch.isfinite(g_dp).all() and g_A.item() == 0.0
+    assert g_dp.item() == pytest.approx(term.dflow(torch.zeros(1, dtype=F64), d).item(),
+                                        rel=1e-14)
