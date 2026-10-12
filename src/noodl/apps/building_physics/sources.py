@@ -65,6 +65,8 @@ class CutoffSource(_GenerationRemoval):
 
     def __init__(self, node: int, G: float, x_cut: float) -> None:
         super().__init__(node)
+        if not float(x_cut) > 0.0:
+            raise ValueError(f"CutoffSource: x_cut must be positive (kg/kg), got {x_cut}")
         self.G, self.x_cut = float(G), float(x_cut)
 
     def generation(self, t: float, x: torch.Tensor, pressure_difference=None) -> torch.Tensor:
@@ -89,7 +91,7 @@ class DecayingSource(_NodeSource):
 
 
 class BurstSource(_NodeSource):
-    """`mass` delivered uniformly over `[t_burst, t_burst + dt)`.
+    """`mass` delivered over the step(s) covering `[t_burst, t_burst + dt)`.
 
     `dt` is the burst's duration; `sources_from_project` sets it to the run control's time
     step. Called with the length of the step that ends at `t` (`step`, as `SpeciesSources`
@@ -120,7 +122,10 @@ class BurstSource(_NodeSource):
 class DepositionVelocitySink(_NodeSource):
     """Deposition onto a surface at a deposition velocity (CONTAM's deposition velocity
     sink): R = v_d A rho, a first-order rate v_d A / V on the zone's mass fraction.
-    `velocity` v_d in m/s, `area` A in m2 (floats or tensors)."""
+    `velocity` v_d in m/s, `area` A in m2 (floats or tensors). Its node needs a positive
+    volume: the density is the zone's air mass over it."""
+
+    needs_volume = True
 
     def __init__(self, node: int, velocity, area) -> None:
         super().__init__(node)
@@ -188,6 +193,11 @@ class PeakEmissionSource(_NodeSource):
         self.peak = torch.as_tensor(peak, dtype=F64)
         self.width = torch.as_tensor(width, dtype=F64)
         self.t_peak = float(t_peak)
+        if not self.t_peak > 0.0:
+            raise ValueError(f"PeakEmissionSource: t_peak must be positive (s), got {t_peak}")
+        if not bool((self.width.detach() > 0.0).all()):
+            raise ValueError(f"PeakEmissionSource: width must be positive, got "
+                             f"{self.width.detach().tolist()}")
 
     def generation(self, t: float, x: torch.Tensor, pressure_difference=None) -> torch.Tensor:
         """The peak curve at t, at the node (kg/s)."""
@@ -217,6 +227,12 @@ class SpeciesSources:
     implicitly; the density a source sees is that air mass over the node's volume. The
     multiplier (one per source, batched like any driver) is where a schedule or a control
     acts: CONTAM's S = mult ctrl (G - R C), a sink included.
+
+    The per-step `"<layer>.removal"` replaces the layer's construction-time `removal`, so a
+    layer with a nonzero one is refused when a source has a removal part. Refused by name
+    at construction too: an object that is neither a plain callable nor has `generation`;
+    a source on a boundary node (the ambient holds no zone air) or on a node no flow edge
+    of the layer touches; a deposition velocity sink on a node without a positive volume.
     """
 
     def __init__(self, sources, *, species, layer, names=None) -> None:
@@ -230,9 +246,43 @@ class SpeciesSources:
         self.capacity_key = f"{layer.name}.capacity"
         self.removes = any(hasattr(s, "removal") for s in self.sources)
         self.volumes = torch.as_tensor(layer.net.node_attr("volume", default=0.0), dtype=F64)
+        self._check_sources()
         self.inputs = ("time", self.key)
         self.outputs = (f"{layer.name}.sources",) + (
             (f"{layer.name}.removal",) if self.removes else ())
+
+    def _check_sources(self) -> None:
+        lay = self.layer
+        nodes = lay.net.nodes
+        boundary = set(lay.boundary_idx.tolist())
+        inactive = set(lay.inactive_idx.tolist())
+        for label, src in zip(self.names, self.sources, strict=True):
+            what = f"SpeciesSources: {label} ({type(src).__name__})"
+            if not (hasattr(src, "generation") or callable(src)):
+                raise TypeError(f"{what} is neither a callable source(t, x_full) nor an object "
+                                f"with generation(t, x, pressure_difference)")
+            if not hasattr(src, "node"):
+                continue
+            node = int(src.node)
+            if not 0 <= node < len(nodes):
+                raise ValueError(f"{what}: node {node} is not in the network")
+            name = nodes[node]
+            if node in boundary:
+                raise ValueError(f"{what} is on the boundary node {name!r}: a boundary (the "
+                                 f"ambient) holds no zone air to emit into or remove from")
+            if node in inactive:
+                raise ValueError(f"{what} is on node {name!r}, which no flow edge of the "
+                                 f"layer {lay.name!r} touches: the layer holds no "
+                                 f"concentration there")
+            if getattr(src, "needs_volume", False) and not self.volumes[node] > 0:
+                raise ValueError(f"{what} is on node {name!r}, which has no positive volume: "
+                                 f"the density the sink needs is the air mass over it")
+        own = lay.removal
+        if self.removes and own is not None and bool((own != 0).any()):
+            raise ValueError(f"SpeciesSources: the layer {lay.name!r} has a nonzero "
+                             f"construction-time removal, which the per-step "
+                             f"'{lay.name}.removal' the sources write would replace; put that "
+                             f"removal in a DepositionRateSink instead")
 
     @property
     def input_specs(self) -> dict[str, dict]:
@@ -272,6 +322,8 @@ class SpeciesSources:
         full = full.index_copy(-2, lay.boundary_idx, xb.expand(batch + xb.shape[-2:]))
         cap = cap.expand(batch + (lay.n_i,))
         mass = torch.zeros(batch + (n,), dtype=x_i.dtype).index_copy(-1, lay.interior_idx, cap)
+        # Every node a density-reading sink sits on has a positive volume (checked at
+        # construction); the 1 elsewhere only keeps 0 / 0 out of the unread entries.
         volume = torch.where(self.volumes > 0, self.volumes, torch.ones_like(self.volumes))
         density = mass / volume
         gen = [torch.zeros(batch + (n,), dtype=x_i.dtype) for _ in range(K)]

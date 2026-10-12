@@ -25,6 +25,7 @@ from noodl.apps.building_physics.sources import (
     sources_from_project,
 )
 from noodl.apps.building_physics.thermal import RHO_0, species_layer
+from noodl.layers.transport import TransportLayer
 from noodl.model import Model
 from noodl.topology import Network
 
@@ -403,3 +404,74 @@ def test_a_source_without_removal_writes_no_removal_driver():
     out = plain({"species.x": torch.zeros(2, dtype=F64)}, d)
     assert set(out) == {"species.sources"}
     assert out["species.sources"][2].item() == pytest.approx(1.0 / 120.0)  # step-integrated
+
+
+def _layer_with_a_loose_zone():
+    """`_layer(1)` plus a zone `c` (node 3) that no airflow path touches."""
+    net = Network(dtype=F64)
+    net.add_node("ambient", volume=0.0)
+    net.add_node("a", volume=10.0)
+    net.add_node("b", volume=20.0)
+    net.add_node("c", volume=30.0)
+    net.add_edge("ambient", "a", kind="airpath")
+    net.add_edge("a", "b", kind="airpath")
+    return species_layer(net, n_species=1)
+
+
+@pytest.mark.parametrize("src", [DepositionRateSink(0, 1e-3), ConstantSource(0, 1e-6, 0.1),
+                                 PowerLawDecaySource(0, 1e-6, 0.5, 600.0)])
+def test_a_source_on_the_ambient_is_refused_by_name(src):
+    with pytest.raises(ValueError, match=r"sink 1 .*boundary node 'ambient'"):
+        SpeciesSources([src], species=[0], layer=_layer(1), names=["sink 1"])
+
+
+@pytest.mark.parametrize("src", [DepositionRateSink(3, 1e-3), ConstantSource(3, 1e-6)])
+def test_a_source_on_a_zone_no_flow_edge_touches_is_refused_by_name(src):
+    with pytest.raises(ValueError, match=r"source 1 .*node 'c'.*no flow edge"):
+        SpeciesSources([src], species=[0], layer=_layer_with_a_loose_zone())
+
+
+def test_an_object_outside_the_source_protocol_is_refused_by_name():
+    class Removal:
+        node = 1
+
+        def removal(self, t, x, air_mass, density):
+            return torch.zeros_like(x)
+
+    with pytest.raises(TypeError, match=r"odd \(Removal\).*generation"):
+        SpeciesSources([Removal()], species=[0], layer=_layer(1), names=["odd"])
+
+
+def test_a_velocity_sink_needs_a_positive_volume():
+    net = Network(dtype=F64)
+    net.add_node("ambient", volume=0.0)
+    net.add_node("z")                                   # no volume attribute
+    net.add_edge("ambient", "z", kind="airpath")
+    layer = TransportLayer(net, "species", capacity=torch.tensor([360.0], dtype=F64),
+                           flow_kind="airpath", boundary=["ambient"])
+    with pytest.raises(ValueError, match=r"node 'z'.*positive volume"):
+        SpeciesSources([DepositionVelocitySink(1, 1e-3, 10.0)], species=[0], layer=layer)
+    SpeciesSources([DepositionRateSink(1, 1e-3)], species=[0], layer=layer)   # no density
+
+
+def test_a_layer_with_its_own_removal_is_refused_when_sources_would_replace_it():
+    net = Network(dtype=F64)
+    net.add_node("ambient", volume=0.0)
+    net.add_node("z", volume=300.0)
+    net.add_edge("ambient", "z", kind="airpath")
+    layer = TransportLayer(net, "species", capacity=torch.tensor([360.0], dtype=F64),
+                           flow_kind="airpath", boundary=["ambient"],
+                           removal=torch.tensor([1e-4], dtype=F64))
+    with pytest.raises(ValueError, match=r"construction-time removal.*DepositionRateSink"):
+        SpeciesSources([DepositionRateSink(1, 1e-3)], species=[0], layer=layer)
+    SpeciesSources([PowerLawDecaySource(1, 1e-6, 0.5, 600.0)], species=[0], layer=layer)
+
+
+def test_peak_and_cutoff_parameters_are_checked():
+    with pytest.raises(ValueError, match="t_peak must be positive"):
+        PeakEmissionSource(1, 1e-6, 1.0, 0.0)
+    with pytest.raises(ValueError, match="width must be positive"):
+        PeakEmissionSource(1, 1e-6, -1.0, 900.0)
+    with pytest.raises(ValueError, match="x_cut must be positive"):
+        CutoffSource(1, 1e-6, 0.0)
+
