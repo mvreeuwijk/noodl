@@ -26,3 +26,9 @@ Two of NIST's one-zone stack projects are present, and only one of them is usabl
   zone 1 on temperature schedule 1, `densZP = 1`, `dodMdt = 1`, with its own weather and
   ambient-concentration files. The scheduled-zone-temperature parity fixture. Note that its second
   header line names `test_OneZoneWthCtmStack-UseApi.prj`; ContamX ignores that line.
+- `scheduled_three_zone.{prj,wth,ctm}` is written for this repository from NIST's
+  `valThreeZonesWthCtm.prj`, not an official sample. It adds five day schedules and four week
+  schedules: a constant-mass-flow exhaust (path 5) on day type 4 08:00-18:00, a 2e-6 kg/s sarin
+  source in zone 1 09:00-12:00 (half from 11:00), zone 2 on a trapezoidal temperature
+  schedule, and path 1 half open 10:00-14:00. Its `.wth` has diurnal Ta/Pb/Ws/Wd and its `.ctm`
+  an ambient sarin pulse; `dodMdt = 1`. Verified to load and run in ContamX 3.4.1.7.

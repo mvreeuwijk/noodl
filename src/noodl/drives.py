@@ -143,14 +143,22 @@ class Stack:
 
 
 class WindProfile:
-    """CONTAM wind pressure profile: Cp versus relative wind angle, periodic piecewise-linear.
+    """CONTAM wind pressure profile: Cp versus relative wind angle, periodic in the angle.
 
     `angles_deg` starts at 0, is strictly increasing and stays below 360; a trailing 360 row
-    (as CONTAM writes) is accepted if its Cp equals the first. Differentiable in theta away
-    from the knots, which is what a calibration of wind direction needs.
+    (as CONTAM writes) is accepted if its Cp equals the first. `curve` is CONTAM's curve fit:
+    `"linear"` connects the points by straight lines, `"spline"` is the periodic cubic
+    spline through them (equal slope and curvature at 0 and 360 degrees), which is what
+    ContamX evaluates for a spline profile (measured against ContamX 3.4.1.7). Differentiable
+    in theta (away from the knots, for `"linear"`), which is what a calibration of wind
+    direction needs.
     """
 
-    def __init__(self, angles_deg, cp) -> None:
+    def __init__(self, angles_deg, cp, *, curve: str = "linear") -> None:
+        if curve not in ("linear", "spline"):
+            raise ValueError(
+                f"WindProfile: curve must be 'linear' or 'spline', got {curve!r}")
+        self.curve = curve
         ang = torch.as_tensor([float(a) for a in angles_deg], dtype=torch.float64)
         val = torch.as_tensor([float(c) for c in cp], dtype=torch.float64)
         if ang.numel() != val.numel() or ang.numel() < 1:
@@ -170,6 +178,9 @@ class WindProfile:
             raise ValueError("WindProfile: angles must be below 360 (the table is periodic)")
         self.angles = torch.cat([ang, ang.new_tensor([360.0])])
         self.cp = torch.cat([val, val[:1]])
+        # Second derivatives at the knots (periodic: the last repeats the first).
+        self.curvature = (_periodic_spline_curvature(self.angles, self.cp)
+                          if curve == "spline" else None)
 
     def __call__(self, theta_deg: torch.Tensor) -> torch.Tensor:
         t = torch.remainder(torch.as_tensor(theta_deg), 360.0)
@@ -180,7 +191,30 @@ class WindProfile:
         )
         a0, a1 = ang[idx], ang[idx + 1]
         c0, c1 = cp[idx], cp[idx + 1]
-        return c0 + (c1 - c0) * (t - a0) / (a1 - a0)
+        if self.curvature is None:
+            return c0 + (c1 - c0) * (t - a0) / (a1 - a0)
+        m = self.curvature.to(t.dtype)
+        m0, m1, h = m[idx], m[idx + 1], a1 - a0
+        left, right = a1 - t, t - a0
+        return ((m0 * left**3 + m1 * right**3) / (6.0 * h)
+                + (c0 / h - m0 * h / 6.0) * left + (c1 / h - m1 * h / 6.0) * right)
+
+
+def _periodic_spline_curvature(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Second derivatives at the knots `x` (`x[-1]` closes the period, `y[-1] == y[0]`) of the
+    periodic cubic spline through `(x, y)`: the cyclic system
+    h[i-1] M[i-1] + 2 (h[i-1] + h[i]) M[i] + h[i] M[i+1] = 6 (d[i] - d[i-1]), d the secant
+    slopes, indices modulo the n distinct knots. Returned with the closing knot (n + 1)."""
+    n = x.numel() - 1
+    h = x[1:] - x[:-1]
+    d = (y[1:] - y[:-1]) / h
+    A = torch.zeros(n, n, dtype=x.dtype)
+    for i in range(n):
+        A[i, (i - 1) % n] += h[i - 1]
+        A[i, i] += 2.0 * (h[i - 1] + h[i])
+        A[i, (i + 1) % n] += h[i]
+    m = torch.linalg.solve(A, 6.0 * (d - torch.roll(d, 1)))
+    return torch.cat([m, m[:1]])
 
 
 class Wind:

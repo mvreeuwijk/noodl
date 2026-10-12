@@ -9,14 +9,20 @@ step to the next:
 
 * `air_mass_change=True` (CONTAM's `dodMdt = 1`): each zone's air-mass change over the step,
   -(M(t1) - M(t0)) / dt, is added to the airflow balance's sources (`"air.sources"`), so the net
-  inflow into a zone whose temperature changes is dM/dt (measured on ContamX). M is rho V from the
-  model's density closures, at the zone pressures of the step. The term is added to the
-  drivers before the step, so a closure that later writes `"air.sources"` itself (rather
-  than adding to it) replaces it, as does one that changes `"T"` inside the step.
-* a model with a `ZonePressureDensity` closure (`densZP = 1`): every step (and the initial
-  airflow) is repeated with the latest pressures until the zone pressures move by no more than
-  `zone_pressure_rtol * P_ref` -- the fixed point ContamX iterates to (`prj.steady` does the
-  same for a steady solve).
+  inflow into a zone whose temperature changes is dM/dt (measured on ContamX). M is the air
+  mass at the zone's ABSOLUTE pressure, (P_ref + P_zone) V / (R T), whether or not the
+  densities the flows use include the zone pressure (`ZonePressureDensity`): ContamX's mass
+  term does (measured: a zone depressurised by an exhaust switching on loses
+  M dP_zone / (Pb dt) in that step with CONTAM's `densZP = 0`; `project_to_model` gives such
+  a project's contaminants the same mass, see `ZonePressureDensity`). The mass at the step's end
+  depends on the pressures the step solves for, so every step is repeated with the latest
+  pressures to the fixed point below. The term is added to the drivers before the step, so a
+  closure that later writes `"air.sources"` itself (rather than adding to it) replaces it, as
+  does one that changes `"T"` inside the step.
+* a model with a `ZonePressureDensity` closure (`densZP = 1`), or `air_mass_change`: every
+  step (and, for the closure, the initial airflow) is repeated with the latest pressures until
+  the zone pressures move by no more than `zone_pressure_rtol * P_ref` -- the fixed point
+  ContamX iterates to (`prj.steady` does the same for a steady solve).
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ from noodl.model import Drivers, Model, State
 
 Tensor = torch.Tensor
 F64 = torch.float64
+AIR = "air"  # the airflow layer `project_to_model` and `build_model` name
 
 
 def _closure(model: Model, cls):
@@ -54,13 +61,13 @@ def _stack(rows: list[Tensor]) -> Tensor:
 
 
 def _zone_air_mass(model: Model, state: State, drivers: Drivers) -> Tensor:
-    """The air mass rho V (kg) at every node, from the model's density closures; zero at a
-    node of zero volume (the ambient)."""
-    drv = dict(drivers)
-    for c in model.closures:
-        if isinstance(c, (PrescribedTemperatureDensity, ZonePressureDensity)):
-            drv.update(c(state, drv))
-    return drv["rho"] * _closure(model, PrescribedTemperatureDensity).volumes
+    """The air mass (kg) at every node at its absolute pressure, (P_ref + P_zone) V / (R T),
+    whether or not the densities the flows see include the zone pressure; zero at a node of
+    zero volume (the ambient)."""
+    density = _closure(model, PrescribedTemperatureDensity)
+    drv = {**drivers, **density(state, drivers)}
+    drv.update(ZonePressureDensity(0.0, layer=AIR)(state, drv))
+    return drv["rho"] * density.volumes
 
 
 def _airflow(model: Model, state: State, drivers: Drivers, **kw) -> State:
@@ -74,13 +81,16 @@ def _airflow(model: Model, state: State, drivers: Drivers, **kw) -> State:
     return new
 
 
-def _fixed_point(run, state: State, zp, rtol: float, max_iter: int, P: float, where: str) -> State:
+def _fixed_point(run, state: State, key: str | None, rtol: float, max_iter: int, P: float,
+                 where: str) -> State:
+    """`run(state)` repeated with the latest zone pressures (`state[key]`) until they move by
+    no more than `rtol * P`; one call when `key` is None."""
     out = run(state)
-    if zp is None:
+    if key is None:
         return out
     for _ in range(max_iter):
-        nxt = run({**state, zp.key: out[zp.key]})
-        change = (nxt[zp.key] - out[zp.key]).abs().max().item()
+        nxt = run({**state, key: out[key]})
+        change = (nxt[key] - out[key]).abs().max().item()
         out = nxt
         if change <= rtol * P:
             return out
@@ -137,8 +147,13 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     def P_of(d: Drivers) -> float:
         return float(torch.as_tensor(d.get("P_ref", zp.Pb if zp else 0.0)).max())
 
+    # The zone pressures a step iterates on: the density closure reads them, and so does the
+    # air-mass change's mass at the step's end.
+    step_key = zp.key if zp is not None else (f"{AIR}.phi" if air_mass_change else None)
+
     d = drivers_at(ts[0])
-    state = _fixed_point(lambda s: _airflow(model, s, d, **step_kwargs), state, zp,
+    state = _fixed_point(lambda s: _airflow(model, s, d, **step_kwargs), state,
+                         zp.key if zp is not None else None,
                          zone_pressure_rtol, zone_pressure_max_iter, P_of(d), "initial airflow")
     state = {**state, **model.initial_capacities(state, d)}
     mass = _zone_air_mass(model, state, d) if air_mass_change else None
@@ -161,8 +176,8 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
                 # Every pass advances the SAME step from its start state; only the zone
                 # pressures the density closure reads are updated between passes.
                 step_from = dict(start)
-                if zp is not None and zp.key in s:
-                    step_from[zp.key] = s[zp.key]
+                if step_key is not None and step_key in s:
+                    step_from[step_key] = s[step_key]
                 drv = d
                 if m0 is not None:
                     m1 = _zone_air_mass(model, step_from, d)
@@ -171,7 +186,7 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
                     drv = {**d, "air.sources": dM if own is None else own + dM}
                 return model.step(step_from, drv, dt, t=t0, **step_kwargs)
 
-            state = _fixed_point(run, state, zp, zone_pressure_rtol, zone_pressure_max_iter,
+            state = _fixed_point(run, state, step_key, zone_pressure_rtol, zone_pressure_max_iter,
                                  P_of(d), f"step ending at t = {t1} s")
             if mass is not None:
                 mass = _zone_air_mass(model, state, d)

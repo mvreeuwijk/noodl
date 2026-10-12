@@ -294,6 +294,18 @@ def test_a_path_naming_an_absent_wind_profile_raises_naming_edge_and_number(tmp_
         read_prj(_variant(text, path1, "   1    1  -1   1   3   0   7   0", tmp_path))
 
 
+
+def test_wind_profiles_keep_their_curve_fit_and_a_trigonometric_one_is_refused(tmp_path):
+    """The profile record's type field: 1 linear, 2 cubic spline (NIST's samples), 3
+    trigonometric (Walker and Wilson), which is refused naming the profile."""
+    p = read_prj(THREE)
+    assert [p.profiles[n].curve for n in (1, 2, 3)] == ["linear", "spline", "spline"]
+    text = THREE.read_text()
+    with pytest.raises(ValueError, match=r"wind pressure profile 3 .*trigonometric"):
+        read_prj(_variant(text, "3 13 2 S&C_2_Short", "3 13 3 S&C_2_Short", tmp_path))
+    with pytest.raises(ValueError, match=r"wind pressure profile 2 .*type 7"):
+        read_prj(_variant(text, "2 13 2 S&C_2_Long", "2 13 7 S&C_2_Long", tmp_path))
+
 def test_the_filtered_one_zone_stack_project_is_refused_naming_the_filter():
     """The filter refusal, on NIST's own file rather than on a hand-edited variant.
 
@@ -800,3 +812,35 @@ def test_a_zone_without_the_variable_contaminants_bit_is_refused_by_name(tmp_pat
                        "   1  1   0   0   0   1   0.000   600", tmp_path)
     with pytest.raises(ValueError, match=r"zone 1 \('singleZone'\).*variable-contaminants"):
         read_prj(variant)
+
+
+def test_the_scheduled_three_zone_project_reads_its_four_inputs():
+    p = read_prj(DATA / "scheduled_three_zone.prj")
+    keys = sorted((i.key, i.index) for i in p.inputs)
+    assert keys == sorted([
+        ("T", (p.net.node_index("two"),)),
+        ("flow_multiplier.pl_3", (0,)),                       # path 1, pl_3's first edge
+        ("flow_multiplier.fan_2", (0,)),                      # path 5
+        ("species.source_multiplier", (0,)),
+    ])
+    assert p.run_control.weather_file == "scheduled_three_zone.wth"
+
+
+def test_a_zone_mass_change_project_holds_its_zone_air_mass_at_the_absolute_pressure():
+    """ContamX with dodMdt = 1 and densZP = 0 (measured on the scheduled three-zone project):
+    the densities the flows use stay at Pb, while the zone air mass the contaminants see is
+    (Pb + P_zone) V / (R T) (its mass fractions then agree to 2.5e-11, against 4.4e-9 with the
+    mass at Pb)."""
+    p = read_prj(DATA / "scheduled_three_zone.prj")
+    assert p.run_control.zone_mass_change and not p.density_uses_zone_pressure
+    model, state, drivers = project_to_model(p)
+    phi = torch.tensor([0.0, -1.0, -2.0, -3.0], dtype=torch.float64)
+    amb = p.net.node_index(p.ambient)
+    phi = torch.roll(phi, amb)                       # zero gauge pressure at the ambient
+    out = model._apply_closures({**state, "air.phi": phi}, drivers)
+    T, Pb = drivers["T"], drivers["P_ref"]
+    torch.testing.assert_close(out["rho"], Pb / (R_AIR * T), rtol=1e-15, atol=0)
+    nodes = model.transport["species"].interior_idx
+    V = p.net.node_attr("volume", default=0.0)
+    expected = ((Pb + phi) * V / (R_AIR * T))[nodes]
+    torch.testing.assert_close(out["species.capacity"], expected, rtol=1e-15, atol=0)

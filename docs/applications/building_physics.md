@@ -198,7 +198,26 @@ torch.Size([13, 4]) torch.Size([13, 3, 1])
 ```
 
 `air_mass_change=True` adds each zone's air-mass change to its airflow balance (CONTAM's
-`dodMdt`): a zone whose temperature rises pushes out the air it no longer holds.
+`dodMdt`): a zone whose temperature rises pushes out the air it no longer holds. The mass is
+taken at the zone's absolute pressure, (P_b + P_zone) V / (R T), as ContamX's is, so a zone
+depressurised by an exhaust fan switching on also gives up a little air. For a project that
+sets `dodMdt`, `project_to_model` gives the contaminants that same zone air mass.
+
+`simulate_project(project)` runs a `.prj` the way ContamX does: its run control, its
+schedules, and its weather and ambient files, read from next to the project.
+
+```python
+from noodl.apps.building_physics import simulate_project
+
+project = read_prj("scheduled_three_zone.prj")
+out = simulate_project(project)
+fan = out["path_flow"][:, 4]
+print(out["time"].shape, f"fan at 07:55 {fan[95].item():.6f} kg/s, at 08:05 {fan[97].item():.6f} kg/s")
+```
+
+```text
+torch.Size([289]) fan at 07:55 0.000000 kg/s, at 08:05 0.100342 kg/s
+```
 
 A weather file and an ambient-concentration file become inputs the same way:
 
@@ -518,6 +537,7 @@ above 0.1 % of the largest.
 | One-zone project with its own `.wth` and `.ctm`, 288 steps | flow rel 33 $u$, mf rel 64 $u$, floor 64 $u$ × max | **1.3e-8** flow, **1.1e-7** mf |
 | One-zone stack with a scheduled zone temperature (`densZP`, `dodMdt`), 288 steps | rel 64 $u$, floor 64 $u$ × max | **4.5e-8** flow, **1.9e-7** mf |
 | Scheduled stack project over two days, across midnight | rel 64 $u$, floor 64 $u$ × max | **7.8e-8** flow, **1.9e-7** mf |
+| Scheduled three-zone project (fan, source, zone temperature, window, weather, ambient file), 24 h | rel 64 $u$, floor 64 $u$ × max | **3.6e-5** flow (1.6e-8 kg/s, path 4 at its flow reversal; 2 % of the allowed), **1.4e-7** mf |
 
 The stack rows rely on two density effects matching ContamX's. Orifice coefficients are
 corrected for the density of the air entering the path (freezing them at reference density
@@ -526,7 +546,12 @@ zone's absolute pressure: ignoring it left a residual of 4.1e-5 – 4.4e-5, flat
 because the stack pressure is a density difference that amplifies the |P_zone| / Pb ≈ 6e-6
 density change about fourteenfold. The three-zone transient was 6.5e-6 while zone air mass was
 held at the reference density 1.2041 kg/m³ rather than ContamX's `Pb / (R T)` (2.2e-6 apart at
-293.15 K). What remains everywhere is one or two float32 roundoffs.
+293.15 K). The scheduled three-zone project was 1e-3 off until two more ContamX rules were
+matched: its wind pressure profiles are cubic splines, periodic in the wind angle (linear
+interpolation left 7.3e-5 kg/s once the wind turned away from a tabulated angle), and with
+`dodMdt` the zone air mass is taken at the zone's absolute pressure even when the densities are
+not (5.9e-6 kg/s when the fan switches on, 4.4e-9 in the mass fractions when the window
+reopens). What remains everywhere is one or two float32 roundoffs.
 
 The whole-project rows pin how ContamX runs a project over time, each convention measured on
 the engine before it was implemented. Every input (schedule, weather, ambient file) is evaluated

@@ -102,7 +102,7 @@ Terms added to an edge's potential difference (stack, wind, fans).
 | `DoorCompartmentHead`<br><small>`noodl.elements`</small> | The hydrostatic part of ``DoorDiscretized.mo:64-66``, as a noodl drive: ``rho_A hAg[i] - rho_B hBg[i]`` per compartment edge, shape ``(..., n_edges)``. | `DoorCompartmentHead(kind, *, src, tgt, hAg, hBg, medium, T_key='T', Xw_key='X_w', p_key='p_abs')` |
 | `ConstantDrive`<br><small>`noodl.drives`</small> | A drive that reads a pre-computed, already batched value from `drivers`. | `ConstantDrive(kind, key)` |
 | `Stack`<br><small>`noodl.drives`</small> | Hydrostatic stack term (CONTAM TN 1887r1 eq. 17 with eq. 64-65 at the path elevation). | `Stack(kind, *, src, tgt, z_path, z_ref, rho_key='rho', g=9.80665)` |
-| `WindProfile`<br><small>`noodl.drives`</small> | CONTAM wind pressure profile: Cp versus relative wind angle, periodic piecewise-linear. | `WindProfile(angles_deg, cp)` |
+| `WindProfile`<br><small>`noodl.drives`</small> | CONTAM wind pressure profile: Cp versus relative wind angle, periodic in the angle. | `WindProfile(angles_deg, cp, *, curve='linear')` |
 | `Wind`<br><small>`noodl.drives`</small> | Wind pressure on envelope paths (CONTAM TN 1887r1 section 3.15). Drivers: `rho_amb` in kg/m3, `V_met` in m/s and `theta_w` in the unit the `azimuth` edge attribute uses (degrees for networks read from CONTAM). | `Wind(kind, *, sign, envelope, azimuth, ch, cp_const, profile_index, profiles=(), rho_key='rho_amb', speed_key='V_met', direction_key='theta_w')` |
 
 ## Closures

@@ -141,7 +141,8 @@ def test_gradients_reach_a_time_series():
 
 
 def test_the_zone_air_mass_change_enters_the_airflow_balance():
-    """With `air_mass_change`, net inflow into a heated zone = (M_new - M_old) / dt."""
+    """With `air_mass_change`, net inflow into a heated zone = (M_new - M_old) / dt, with M at
+    the zone's absolute pressure (Pb + P_zone) V / (R T)."""
     project = read_prj(THREE)
     model, state, drivers = project_to_model(project)
     # "step" series: 293.15 over (0, 300], 303.15 over (300, 600] -- the jump lands in the
@@ -152,12 +153,36 @@ def test_the_zone_air_mass_change_enters_the_airflow_balance():
                    air_mass_change=True, **TIGHT)
     flows = project.path_flows(out["air.q"][-1])
     net_in = flows[0] - flows[1]                       # path 1 ambient->one, path 2 one->two
-    V = 300.0
-    dM = 101325.0 * V / R_AIR * (1 / 303.15 - 1 / 293.15)
+    V, i = 300.0, project.net.node_index("one")
+    p_old, p_new = 101325.0 + out["air.phi"][-2, i], 101325.0 + out["air.phi"][-1, i]
+    dM = V / R_AIR * (p_new / 303.15 - p_old / 293.15)
     assert net_in.item() == pytest.approx(dM / 300.0, rel=1e-9)
     without = simulate(model, state, drivers, [0.0, 300.0, 600.0], inputs=step_up, **TIGHT)
     f0 = project.path_flows(without["air.q"][-1])
     assert (f0[0] - f0[1]).abs().item() < 1e-12
+
+
+def test_the_air_mass_change_follows_the_zone_pressure_without_zone_pressure_density():
+    """ContamX's dodMdt mass is (Pb + P_zone) V / (R T) even with densZP = 0 (measured: when
+    a 0.1 kg/s exhaust switches on, each zone of the scheduled three-zone project loses
+    M dP_zone / (Pb dt), -6.5e-7 / -2.7e-6 / -5.7e-6 kg/s). A wind-speed jump moves the zone
+    pressures with the temperatures fixed: net inflow = (P_zone change) V / (R T dt), at the
+    pressures the step itself solves to."""
+    project = read_prj(THREE)
+    assert not project.density_uses_zone_pressure
+    model, state, drivers = project_to_model(project)
+    gust = [Input(TimeSeries([0.0, 300.0, 600.0], [5.23, 10.0, 10.0], interpolation="step"),
+                  "V_met")]
+    out = simulate(model, state, drivers, [0.0, 300.0, 600.0], inputs=gust,
+                   air_mass_change=True, **TIGHT)
+    f = project.path_flows(out["air.q"][-1])
+    net_in = {"one": f[0] - f[1], "two": f[1] + f[2], "three": f[3] - f[2]}
+    for zone, volume in (("one", 300.0), ("two", 600.0), ("three", 900.0)):
+        i = project.net.node_index(zone)
+        dp = out["air.phi"][-1, i] - out["air.phi"][-2, i]
+        assert abs(dp.item()) > 1e-2
+        expected = dp * volume / (R_AIR * 293.15) / 300.0
+        assert net_in[zone].item() == pytest.approx(expected.item(), rel=1e-6)
 
 
 def test_zone_pressure_density_steps_are_iterated_to_their_fixed_point():

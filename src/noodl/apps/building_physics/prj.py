@@ -618,13 +618,28 @@ def _read_levels(lines: _Lines, count: int, levels: dict[int, float]) -> None:
     lines.expect_end("levels")
 
 
+_PROFILE_CURVES = {1: "linear", 2: "spline"}
+
+
 def _read_profiles(lines: _Lines, count: int, profiles: dict[int, WindProfile]) -> None:
     for _ in range(count):
         tok = lines.record()
-        nr, npts = int(tok[0]), int(tok[1])
+        nr, npts, fit = int(tok[0]), int(tok[1]), int(tok[2])
         lines.raw()                                 # description (may be blank)
         pts = [lines.record() for _ in range(npts)]
-        profiles[nr] = WindProfile([float(p[0]) for p in pts], [float(p[1]) for p in pts])
+        # `type`: 1 linear, 2 cubic spline, 3 trigonometric (Walker and Wilson's fit to the
+        # 0/90/180/270 points).
+        if fit == 3:
+            raise ValueError(
+                f"prj: wind pressure profile {nr} ({tok[3] if len(tok) > 3 else 'unnamed'}) "
+                f"uses the trigonometric curve fit, which is unsupported; use the linear or "
+                f"cubic-spline fit")
+        if fit not in _PROFILE_CURVES:
+            raise ValueError(
+                f"prj: wind pressure profile {nr} has curve-fit type {fit}; CONTAM defines "
+                f"1 (linear), 2 (cubic spline) and 3 (trigonometric)")
+        profiles[nr] = WindProfile([float(p[0]) for p in pts], [float(p[1]) for p in pts],
+                                   curve=_PROFILE_CURVES[fit])
     lines.expect_end("wind pressure profiles")
 
 
@@ -1209,6 +1224,9 @@ class ZonePressureDensity:
 
     The zone air mass (the species layer's capacity, when `capacity_key` is given) carries the
     same `(1 + phi / P_ref)` factor, as ContamX's zone mass does under `densZP`.
+    `densities=False` applies the factor to that zone air mass ONLY and leaves `rho` at the
+    barometric pressure: ContamX's zone mass under `dodMdt = 1` with `densZP = 0` (measured;
+    `project_to_model` adds it for such a project).
 
     Consequently a single `model.steady` is one fixed-point pass; `steady` below repeats it
     to convergence. A transient `model.step` uses the pressures of the step before, a lag of
@@ -1216,8 +1234,9 @@ class ZonePressureDensity:
     """
 
     def __init__(self, Pb: float, *, layer: str = "air", capacity_key: str | None = None,
-                 capacity_nodes: Tensor | None = None) -> None:
+                 capacity_nodes: Tensor | None = None, densities: bool = True) -> None:
         self.Pb = float(Pb)
+        self.densities = bool(densities)
         self.key = f"{layer}.phi"
         self.capacity_key = capacity_key
         self.capacity_nodes = capacity_nodes
@@ -1228,7 +1247,7 @@ class ZonePressureDensity:
             return {}
         P = torch.as_tensor(drivers.get("P_ref", self.Pb), dtype=phi.dtype)
         factor = 1.0 + phi / P.unsqueeze(-1)
-        out = {"rho": drivers["rho"] * factor}
+        out = {"rho": drivers["rho"] * factor} if self.densities else {}
         if self.capacity_key is not None and self.capacity_key in drivers:
             out[self.capacity_key] = drivers[self.capacity_key] * factor[..., self.capacity_nodes]
         return out
@@ -1277,10 +1296,13 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         ambient_index=net.node_index(project.ambient), volumes=volumes,
         capacity_nodes=cap_nodes)
     closures: list = [density]
-    if project.density_uses_zone_pressure:
+    zone_mass_change = project.run_control is not None and project.run_control.zone_mass_change
+    if project.density_uses_zone_pressure or zone_mass_change:
+        # With `dodMdt` alone ContamX holds the zone air MASS at the zone's absolute pressure
+        # but the densities the flows see at Pb.
         closures.append(ZonePressureDensity(
             amb["Pb"], capacity_key="species.capacity" if cap_nodes is not None else None,
-            capacity_nodes=cap_nodes))
+            capacity_nodes=cap_nodes, densities=project.density_uses_zone_pressure))
     if "species" in layers and project.sources:
         from noodl.apps.building_physics.sources import SpeciesSources, sources_from_project
         dt = project.run_control.time_step if project.run_control else 60.0
@@ -1341,7 +1363,8 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
 def steady(model: Model, state, drivers, *, rtol: float = 1e-12, max_iter: int = 10,
            **solve_kwargs):
     """`model.steady`, repeated to a fixed point when the model carries a
-    `ZonePressureDensity` closure (a `.prj` with `densZP = 1`); one call otherwise.
+    `ZonePressureDensity` closure (a `.prj` with `densZP = 1`, or with `dodMdt = 1`, whose
+    zone air mass alone carries the zone pressure); one call otherwise.
 
     Each pass feeds the previous pass's `"air.phi"` back to the closure. The loop stops when
     no node pressure moves by more than `rtol * Pb` -- a relative change in density of

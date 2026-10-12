@@ -214,6 +214,33 @@ def test_wind_profile_accepts_a_contam_style_closing_360_row_and_refuses_bad_tab
         WindProfile([0.0, 180.0, 90.0], [0.6, -0.4, 0.1])
 
 
+
+def test_a_spline_wind_profile_is_the_periodic_cubic_spline_through_its_points():
+    """CONTAM's curve fit 2. ContamX 3.4.1.7 (measured): the NIST Swami-Chandra profiles
+    through scipy's periodic CubicSpline reproduce its flows to 1.6e-8 kg/s over a day of
+    wind directions between 250 and 300 degrees; linear interpolation is 7.3e-5 off and a
+    not-a-knot spline 1.9e-4."""
+    from scipy.interpolate import CubicSpline
+
+    ang = [0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0, 210.0, 240.0, 270.0, 300.0, 330.0, 360.0]
+    cp = [0.603, 0.459, 0.057, -0.517, -0.638, -0.34, -0.226, -0.34, -0.638, -0.517, 0.057,
+          0.459, 0.603]
+    prof = WindProfile(ang, cp, curve="spline")
+    theta = torch.tensor([-30.0, 0.0, 7.5, 45.0, 135.0, 263.0, 359.0, 400.0], dtype=F64)
+    expected = CubicSpline(ang, cp, bc_type="periodic")(np.mod(theta.numpy(), 360.0))
+    torch.testing.assert_close(prof(theta), torch.tensor(expected, dtype=F64),
+                               rtol=1e-13, atol=1e-15)
+    # Differentiable in the wind direction, with the spline's slope.
+    t = torch.tensor(263.0, dtype=F64, requires_grad=True)
+    (g,) = torch.autograd.grad(prof(t), t)
+    slope = CubicSpline(ang, cp, bc_type="periodic")(263.0, 1)
+    assert g.item() == pytest.approx(float(slope), rel=1e-12)
+    # A one-point table is a constant, as with linear interpolation.
+    one = WindProfile([0.0, 360.0], [1.0, 1.0], curve="spline")
+    assert one(theta).eq(1.0).all()
+    with pytest.raises(ValueError, match="WindProfile.*curve.*'linear' or 'spline'"):
+        WindProfile([0.0], [1.0], curve="cubic")
+
 def _wind_net():
     """ambient -> z1 (envelope, azimuth 0, Ch 0.5), z1 -> z2 (interior), z2 -> ambient
     (envelope, azimuth 180, Ch 0.5); node order ambient, z1, z2."""

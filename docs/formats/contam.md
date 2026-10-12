@@ -18,9 +18,11 @@ type, the weather and contaminant file names, and `dodMdt`) and ambient conditio
 each species' default ambient concentration (`Project.ambient_mass_fractions`); day and week
 schedules referenced by zones (the zone temperature, on `"T"`) and by paths (a flow multiplier,
 through `Scaled` on `"flow_multiplier.<kind>"`) and by sources (a rate multiplier, on
-`"species.source_multiplier"`; for `ccf` and `cut` sources); wind pressure profiles, and a constant wind
-pressure on an envelope path (`"wind_pressure.<kind>"`, positive pushing air from ambient into
-the zone, as ContamX); zones and initial concentrations; airflow paths; the power-law element
+`"species.source_multiplier"`; for `ccf` and `cut` sources); wind pressure profiles with the
+linear or cubic-spline curve fit (`WindProfile(..., curve="linear" | "spline")`; the spline is
+periodic in the wind angle, as ContamX evaluates it), and a constant wind pressure on an
+envelope path (`"wind_pressure.<kind>"`, positive pushing air from ambient into the zone, as
+ContamX); zones and initial concentrations; airflow paths; the power-law element
 family
 (`plr_orfc/leak1/leak2/leak3/crack/fcn/test1/test2/conn/stair/shaft/qcn`), the quadratic family
 (`qfr_*`), doorways (`dor_door`, `dor_pl2`), dampers (`plr_bdq`, `plr_bdf`), constant-flow fans
@@ -36,7 +38,7 @@ variable-contaminants flag (ContamX then holds the zone's concentrations at thei
 and ignores its sources); CFD and 1-D convection/diffusion zones; continuous-values-file
 zones and paths; duct networks; a constant wind pressure on an interior path; a fan curve on a
 path with `mult != 1`; `csf_*` and `sup_afe` elements; `stackD = 1` (densities varying with
-height inside a zone).
+height inside a zone); a wind pressure profile with the trigonometric curve fit.
 
 A **filter** is refused emphatically, because a filter is invisible to airflow but *not* to the
 species layer — loading one would silently corrupt contaminant results while the airflow looked

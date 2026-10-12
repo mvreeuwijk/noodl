@@ -498,3 +498,29 @@ def test_run_project_refuses_a_run_that_is_not_whole_time_steps(contamx, tmp_pat
         (tmp_path / src.name).write_text(text)
     with pytest.raises(ValueError, match="not a whole number"):
         run_project(tmp_path / STACK_SCHEDULED.name)
+
+
+SCHEDULED = DATA / "scheduled_three_zone.prj"
+
+
+@pytest.mark.external
+def test_the_scheduled_three_zone_project_matches_contamx(contamx, tmp_path, record_property):
+    """`scheduled_three_zone.prj`: a scheduled exhaust fan, sarin source, zone-2 temperature
+    and window over 24 h, with diurnal weather (Ta, Pb, Ws, Wd) and an ambient sarin pulse,
+    `dodMdt = 1`, `densZP = 0`. Budgets: flows 64 u (wind- and stack-driven flows, 16-33 u
+    as in the rows above, and the mass-change steps of the zone-2 temperature ramps, 64 u as
+    in the scheduled-zone-temperature test); mass fractions 64 u (the flows' budget, plus 2 u
+    for rho V and 1 u for the ambient mass fraction, inside 64 u), each with the 64 u x max
+    floor of `_project_parity`. The fan's flow is its rating times the schedule, exact in
+    float64 (float32(0.100342) in ContamX).
+    Two ContamX rules this run measured, without which it failed by 1e-3 relative: the wind
+    pressure profiles of NIST's sample are curve fit 2, a periodic cubic spline in the wind
+    angle (linear interpolation was 7.3e-5 kg/s off once the wind left 270 degrees), and the
+    zone air mass of `dodMdt` is (Pb + P_zone) V / (R T) even with `densZP = 0`, in the
+    airflow balance (5.9e-6 kg/s when the fan switches on) and for the contaminants (4.4e-9
+    in the mass fractions when the window reopens)."""
+    ref, out = _project_parity(SCHEDULED, tmp_path, rtol_flow=64 * F32_U, rtol_mf=64 * F32_U,
+                               record_property=record_property,
+                               label="Scheduled three-zone project, 24 h")
+    assert out["path_flow"][95, 4].item() == 0.0                       # 07:55, fan off
+    assert out["path_flow"][97, 4].item() == pytest.approx(0.100342, rel=1e-12)   # 08:05
