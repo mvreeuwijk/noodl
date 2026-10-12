@@ -144,3 +144,34 @@ def test_a_batched_differentiable_transmission_steps_through_a_transport_layer()
     unfiltered = x_amb * (1.0 - math.exp(-q * dt / capacity))
     torch.testing.assert_close(x[:, 0, :], passed * unfiltered, rtol=1e-12, atol=0)
     assert gradcheck(step, (designs,), eps=1e-6, atol=1e-10, rtol=1e-6)
+
+
+def test_a_filter_acts_on_air_flowing_against_its_edges_declared_direction():
+    """The edge is declared zone -> ambient, the air flows ambient -> zone (q < 0): the
+    filter still passes only its pass fraction of the incoming ambient air."""
+    net = Network(dtype=F64)
+    net.add_node("ambient")
+    net.add_node("Z")
+    exhaust = net.add_edge("Z", "ambient", kind="airpath")      # declared outward
+    net.add_edge("ambient", "Z", kind="airpath")
+    capacity, q, dt = 360.0, 0.1, 300.0
+    x_amb = torch.tensor([[1e-3]], dtype=F64)
+    t = filter_transmission(net, ("airpath",), [SARIN],
+                            {exhaust: ConstantEfficiencyFilter({"sarin": 0.3})})
+    layer = TransportLayer(net, "species", capacity=torch.tensor([capacity], dtype=F64),
+                           flow_kind="airpath", boundary=["ambient"], transmission=t)
+    # In through the filtered edge (against its direction), out through the other one.
+    x = layer.step(torch.zeros(1, 1, dtype=F64), torch.tensor([-q, -q], dtype=F64),
+                   torch.zeros(2, 1, dtype=F64), x_amb, dt)
+    unfiltered = 1e-3 * (1.0 - math.exp(-q * dt / capacity))
+    assert x.reshape(-1).item() == pytest.approx(0.7 * unfiltered, rel=1e-12)
+
+
+def test_a_particle_curve_given_as_tensors_keeps_their_gradients():
+    lo = torch.tensor(0.1, dtype=F64, requires_grad=True)
+    hi = torch.tensor(0.8, dtype=F64, requires_grad=True)
+    f = ParticleFilter([0.5e-6, 1e-6, 3e-6, 5e-6], [lo, lo, hi, hi])
+    g_lo, g_hi = torch.autograd.grad(f.at(1e-7) + f.at(1e-5), (lo, hi))
+    assert g_lo.item() == pytest.approx(1.0) and g_hi.item() == pytest.approx(1.0)
+    with pytest.raises(ValueError, match="must hold scalars"):
+        ParticleFilter([1e-6, 2e-6], [lo, torch.tensor([0.1, 0.1], dtype=F64)])

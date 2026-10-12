@@ -61,6 +61,18 @@ def _clamped_slopes(x: Tensor, y: Tensor) -> Tensor:
     return torch.cat([zero, torch.linalg.solve(A, b), zero])
 
 
+def _points(values, label: str) -> Tensor:
+    """A curve's values as one float64 vector; a list of tensors is stacked, so their
+    gradients survive (`torch.as_tensor` would copy them out of the graph)."""
+    if isinstance(values, (list, tuple)) and any(isinstance(v, Tensor) for v in values):
+        parts = [torch.as_tensor(v, dtype=F64) for v in values]
+        if any(p.dim() != 0 for p in parts):
+            raise ValueError(f"{label}: a list of curve values must hold scalars, got shapes "
+                             f"{[tuple(p.shape) for p in parts]}")
+        return torch.stack(parts)
+    return torch.as_tensor(values, dtype=F64).reshape(-1)
+
+
 class ParticleFilter:
     """Efficiency as a function of particle diameter (CONTAM's simple particle filter, e.g.
     a MERV curve); zero for a gas.
@@ -74,9 +86,8 @@ class ParticleFilter:
     """
 
     def __init__(self, diameters, efficiencies, *, name: str = "") -> None:
-        d = torch.as_tensor(diameters, dtype=F64).reshape(-1)
-        e = torch.as_tensor(efficiencies, dtype=F64).reshape(-1)
         label = f"ParticleFilter {name!r}"
+        d, e = _points(diameters, label), _points(efficiencies, label)
         if d.shape != e.shape or d.numel() < 2:
             raise ValueError(f"{label}: diameters and efficiencies must be two lists of "
                              f"equal length, at least 2 points")

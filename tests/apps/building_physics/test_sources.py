@@ -16,11 +16,16 @@ from noodl.apps.building_physics.sources import (
     ConstantSource,
     CutoffSource,
     DecayingSource,
+    DepositionRateSink,
+    DepositionVelocitySink,
+    PeakEmissionSource,
+    PowerLawDecaySource,
     SpeciesSources,
     assemble_sources,
     sources_from_project,
 )
-from noodl.apps.building_physics.thermal import species_layer
+from noodl.apps.building_physics.thermal import RHO_0, species_layer
+from noodl.model import Model
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -44,31 +49,11 @@ def test_cutoff_source_vanishes_at_the_cutoff_concentration():
     assert s(0.0, x)[2].item() == pytest.approx(5e-6)
 
 
-def test_cutoff_source_clamps_at_zero_above_the_cutoff_instead_of_reversing_sign():
-    # CONTAM's cutoff source shuts generation off past x_cut; the
-    # bare eq. 17 formula would go negative (a sink) there, which is not the model.
-    s = CutoffSource(node=2, G=1e-5, x_cut=1e-3)
-    x = torch.tensor([0.0, 0.0, 2e-3], dtype=F64)  # 2x the cutoff
-    assert s(0.0, x)[2].item() == 0.0
-
-
 def test_cutoff_source_below_cutoff_still_matches_the_unclamped_formula():
     s = CutoffSource(node=2, G=1e-5, x_cut=1e-3)
     x = torch.tensor([0.0, 0.0, 9e-4], dtype=F64)  # just below x_cut
     expected = 1e-5 * (1.0 - 9e-4 / 1e-3)
     assert s(0.0, x)[2].item() == pytest.approx(expected)
-
-
-def test_cutoff_source_gradient_is_unchanged_below_cutoff_and_zero_above():
-    s = CutoffSource(node=0, G=1e-5, x_cut=1e-3)
-
-    x_below = torch.tensor([9e-4], dtype=F64, requires_grad=True)
-    s(0.0, x_below)[0].backward()
-    assert x_below.grad.item() == pytest.approx(-1e-5 / 1e-3)
-
-    x_above = torch.tensor([2e-3], dtype=F64, requires_grad=True)
-    s(0.0, x_above)[0].backward()
-    assert x_above.grad.item() == 0.0
 
 
 def test_decaying_source_follows_the_exponential_from_its_start():
@@ -196,12 +181,17 @@ def test_each_source_lands_on_its_node_and_species_times_its_multiplier():
     srcs = SpeciesSources([ConstantSource(a, 1e-6), CutoffSource(b, 2e-6, 0.01)],
                           species=[1, 0], layer=layer, names=["gen", "cut"])
     x = torch.tensor([[0.0, 0.0], [0.005, 0.0]], dtype=F64)       # interior (a, b), K = 2
-    out = srcs({"species.x": x}, _drivers([0.5, 1.0], 2))["species.sources"]
+    got = srcs({"species.x": x}, _drivers([0.5, 1.0], 2))
+    out = got["species.sources"]
     assert out.shape == (3, 2)
     expected = torch.zeros(3, 2, dtype=F64)
     expected[a, 1] = 0.5e-6
-    expected[b, 0] = 2e-6 * (1 - 0.005 / 0.01)
+    expected[b, 0] = 2e-6                                   # generation only
     torch.testing.assert_close(out, expected, rtol=1e-15, atol=0)
+    removal = got["species.removal"]                        # (n_i, K) = interior (a, b)
+    assert removal.shape == (2, 2)
+    assert removal[1, 0].item() == pytest.approx(2e-6 / 0.01 / (RHO_0 * 20.0), rel=1e-14)
+    assert removal[0].abs().sum().item() == 0.0 and removal[1, 1].item() == 0.0
 
 
 def test_a_single_species_state_without_a_species_axis_and_a_batched_multiplier():
@@ -282,3 +272,134 @@ def test_an_unscheduled_burst_at_t0_releases_its_full_mass_under_simulate():
 def test_a_project_with_sources_passes_the_setup_check():
     model, state, drivers = project_to_model(read_prj(DATA / "doorway_damper_fan.prj"))
     assert not model.check(state, drivers).errors
+
+
+def _sealed(sources, volume=300.0):
+    """One zone `z` (node 1), no airflow: what a sink or source alone does to it."""
+    net = Network(dtype=F64)
+    net.add_node("ambient", volume=0.0)
+    net.add_node("z", volume=volume)
+    net.add_edge("ambient", "z", kind="airpath")
+    layer = species_layer(net, n_species=1)
+    srcs = SpeciesSources(sources, species=[0] * len(sources), layer=layer)
+
+    def still(state, drivers):
+        return {"species.q": torch.zeros(1, dtype=F64)}
+
+    return Model(net, {"species": layer}, closures=[still, srcs]), srcs
+
+
+def test_a_deposition_velocity_sink_removes_at_v_a_over_v():
+    srcs = SpeciesSources([DepositionVelocitySink(1, 1e-3, 10.0)], species=[0],
+                          layer=_layer(1))
+    out = srcs({"species.x": torch.zeros(2, dtype=F64)}, _drivers([1.0], 1))
+    assert out["species.sources"].abs().sum().item() == 0.0
+    torch.testing.assert_close(out["species.removal"],
+                               torch.tensor([[1e-3 * 10.0 / 10.0], [0.0]], dtype=F64),
+                               rtol=1e-14, atol=0)
+
+
+def test_a_deposition_rate_sink_removes_at_its_rate_times_its_multiplier():
+    srcs = SpeciesSources([DepositionRateSink(2, 5e-4)], species=[0], layer=_layer(1))
+    out = srcs({"species.x": torch.zeros(2, dtype=F64)}, _drivers([0.5], 1))
+    torch.testing.assert_close(out["species.removal"],
+                               torch.tensor([[0.0], [2.5e-4]], dtype=F64), rtol=1e-14, atol=0)
+
+
+def test_constant_and_cutoff_sources_split_into_generation_and_removal():
+    srcs = SpeciesSources([ConstantSource(1, 2e-6, 0.05), CutoffSource(2, 1e-6, 2e-4)],
+                          species=[0, 0], layer=_layer(1))
+    out = srcs({"species.x": torch.tensor([1e-4, 5e-4], dtype=F64)}, _drivers([1.0, 1.0], 1))
+    torch.testing.assert_close(out["species.sources"],
+                               torch.tensor([0.0, 2e-6, 1e-6], dtype=F64))
+    M = RHO_0 * torch.tensor([10.0, 20.0], dtype=F64)
+    torch.testing.assert_close(out["species.removal"][:, 0],
+                               torch.tensor([0.05, 1e-6 / 2e-4], dtype=F64) / M,
+                               rtol=1e-14, atol=0)
+
+
+def test_a_sink_is_implicit_in_the_species_step():
+    """ContamX holds a deposition sink implicitly (measured): x1 = x0 / (1 + v A / V dt)."""
+    model, _ = _sealed([DepositionVelocitySink(1, 2e-3, 10.0)])
+    x1 = model.step({"species.x": torch.tensor([1e-3], dtype=F64)}, _drivers([1.0], 1),
+                    300.0)["species.x"]
+    assert x1.item() == pytest.approx(1e-3 / (1 + 2e-3 * 10.0 / 300.0 * 300.0), rel=1e-13)
+
+
+def test_a_cutoff_source_above_its_cutoff_removes_as_contamx_does():
+    """ContamX 3.4.1.7: a sealed 300 m3 zone at 2e-4 kg/kg with a cutoff source G = 1e-5
+    kg/s, C_cut = 1e-4 falls to 1.9233185583e-4 in one 300 s step: the implicit, unclamped
+    G (1 - C / C_cut)."""
+    s = CutoffSource(node=1, G=1e-5, x_cut=1e-4)
+    assert s(0.0, torch.tensor([0.0, 2e-4], dtype=F64))[1].item() == pytest.approx(-1e-5)
+    model, _ = _sealed([s])
+    x1 = model.step({"species.x": torch.tensor([2e-4], dtype=F64)}, _drivers([1.0], 1),
+                    300.0)["species.x"].item()
+    M = RHO_0 * 300.0
+    assert x1 == pytest.approx((M * 2e-4 + 1e-5 * 300.0) / (M + 1e-5 * 300.0 / 1e-4),
+                               rel=1e-13)
+    assert x1 == pytest.approx(1.9233185583e-4, rel=1e-6)
+
+
+def test_a_batched_multiplier_gives_a_batched_removal_and_a_batched_step():
+    model, srcs = _sealed([DepositionRateSink(1, 1e-3)])
+    d = _drivers([[1.0], [0.5]], 1)
+    x0 = {"species.x": torch.tensor([1e-3], dtype=F64)}
+    assert srcs(x0, d)["species.removal"].shape == (2, 1, 1)
+    x1 = model.step(x0, d, 300.0)["species.x"]
+    assert x1.shape == (2, 1)
+    torch.testing.assert_close(x1[:, 0], 1e-3 / (1 + torch.tensor([1e-3, 0.5e-3],
+                                                                  dtype=F64) * 300.0))
+
+
+def test_the_power_law_source_counts_hours_and_holds_until_t_p():
+    """ContamX: a = 1e-6 kg/s, b = 0.5, t_p = 600 s emits 2.449490e-6 kg/s over the steps
+    ending 300 and 600 s and 2.0e-6 over the one ending 900 s: the power is taken of the
+    time in hours."""
+    s = PowerLawDecaySource(1, 1e-6, 0.5, 600.0)
+    x = torch.zeros(3, dtype=F64)
+    assert s.generation(300.0, x, None)[1].item() == pytest.approx(1e-6 * 6.0 ** 0.5,
+                                                                   rel=1e-14)
+    assert s.generation(900.0, x, None)[1].item() == pytest.approx(2e-6, rel=1e-14)
+    assert s(1200.0, x)[1].item() == pytest.approx(1e-6 * 3.0 ** 0.5, rel=1e-14)
+    with pytest.raises(ValueError, match="t_p must be positive"):
+        PowerLawDecaySource(1, 1e-6, 0.5, 0.0)
+
+
+def test_the_peak_source_peaks_at_its_peak_time():
+    """ContamX: a = 1e-6 kg/s, b = 1, t_p = 900 s emits 5.469081e-7, 9.210868e-7 and
+    1.0e-6 kg/s over the steps ending 300, 600 and 900 s."""
+    s = PeakEmissionSource(1, 1e-6, 1.0, 900.0)
+    x = torch.zeros(3, dtype=F64)
+    for t, ref in ((300.0, 5.469081e-7), (600.0, 9.210868e-7), (900.0, 1e-6)):
+        assert s.generation(t, x, None)[1].item() == pytest.approx(ref, rel=1e-6)
+    assert s.generation(0.0, x, None).abs().sum().item() == 0.0
+
+
+def test_sink_parameters_carry_gradients():
+    v = torch.tensor(1e-3, dtype=F64, requires_grad=True)
+    srcs = SpeciesSources([DepositionVelocitySink(1, v, 10.0)], species=[0], layer=_layer(1))
+    r = srcs({"species.x": torch.zeros(2, dtype=F64)}, _drivers([1.0], 1))["species.removal"]
+    (g,) = torch.autograd.grad(r.sum(), v)
+    assert g.item() == pytest.approx(10.0 / 10.0, rel=1e-12)
+
+
+def test_assemble_sources_refuses_a_sink_by_name():
+    """A sink's removal needs the zone's air mass, which `assemble_sources` does not have."""
+    x = torch.zeros(3, dtype=F64)
+    out = assemble_sources([PowerLawDecaySource(1, 1e-6, 0.5, 600.0)], 300.0, x)
+    assert out[1].item() == pytest.approx(1e-6 * 6.0 ** 0.5, rel=1e-14)
+    with pytest.raises(TypeError, match=r"source 2 \(DepositionRateSink\).*SpeciesSources"):
+        assemble_sources([ConstantSource(1, 1e-6), DepositionRateSink(1, 1e-3)], 0.0, x)
+
+
+def test_a_source_without_removal_writes_no_removal_driver():
+    srcs = SpeciesSources([ConstantSource(1, 1e-6), BurstSource(2, 1.0, 0.0, 60.0)],
+                          species=[0, 0], layer=_layer(1))
+    assert srcs.outputs == ("species.sources", "species.removal")   # ConstantSource has R
+    plain = SpeciesSources([BurstSource(2, 1.0, 0.0, 60.0)], species=[0], layer=_layer(1))
+    assert plain.outputs == ("species.sources",)
+    d = _drivers([1.0], 1) | {"time": torch.tensor(60.0, dtype=F64), "time_step": 120.0}
+    out = plain({"species.x": torch.zeros(2, dtype=F64)}, d)
+    assert set(out) == {"species.sources"}
+    assert out["species.sources"][2].item() == pytest.approx(1.0 / 120.0)  # step-integrated

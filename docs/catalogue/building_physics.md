@@ -114,7 +114,7 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 |---|---|---|
 | `IdealGasDensity`<br><small>`noodl.apps.building_physics`</small> | rho = P_ref / (R T); P_ref from drivers["P_ref"] if present (CONTAM section 3.18). | `IdealGasDensity(thermal, *, ambient_index, P_ref=101325.0, R=287.055)` |
 | `LinearDensity`<br><small>`noodl.apps.building_physics`</small> | Boussinesq: rho = rho_0 (1 - (T - T_0) / T_0), the form the analytical natural- ventilation solutions (Li and Delsante 2001) assume. | `LinearDensity(thermal, *, ambient_index, rho_0=1.2041, T_0=293.15)` |
-| `SpeciesSources`<br><small>`noodl.apps.building_physics`</small> | Closure: every source's rate (kg/s) summed into `"<layer>.sources"`, each one times its entry of `"<layer>.source_multiplier"` and placed on its own species. | `SpeciesSources(sources, *, species, layer, names=None)` |
+| `SpeciesSources`<br><small>`noodl.apps.building_physics`</small> | Closure: every source's generation summed into `"<layer>.sources"` (kg/s, full node order) and every removal coefficient into `"<layer>.removal"` (1/s, active interior order), each times its entry of `"<layer>.source_multiplier"`, on its own species. | `SpeciesSources(sources, *, species, layer, names=None)` |
 
 ## Sources
 
@@ -123,9 +123,13 @@ Nodal sources and withdrawals.
 | Name | What it does | How to call it |
 |---|---|---|
 | `BurstSource`<br><small>`noodl.apps.building_physics`</small> | `mass` delivered uniformly over `[t_burst, t_burst + dt)`. | `BurstSource(node, mass, t_burst, dt)` |
-| `ConstantSource`<br><small>`noodl.apps.building_physics`</small> | S = G - R x  (constant coefficient model, eq. 15). | `ConstantSource(node, G, R=0.0)` |
-| `CutoffSource`<br><small>`noodl.apps.building_physics`</small> | S = max(G (1 - x / x_cut), 0)  (eq. 17), clamped at the cutoff concentration. | `CutoffSource(node, G, x_cut)` |
+| `ConstantSource`<br><small>`noodl.apps.building_physics`</small> | S = G - R x (constant coefficient model): G kg/s, R kg/s per unit mass fraction (CONTAM's kg_air/s). Under `SpeciesSources` the term R x is implicit in the species step, as ContamX holds it; called directly the source is evaluated at the x given. | `ConstantSource(node, G, R=0.0)` |
+| `CutoffSource`<br><small>`noodl.apps.building_physics`</small> | S = G (1 - x / x_cut) (cutoff concentration model): G kg/s, x_cut kg/kg. | `CutoffSource(node, G, x_cut)` |
 | `DecayingSource`<br><small>`noodl.apps.building_physics`</small> | S = G0 exp(-(t - t0) / tau) for t >= t0, else 0. | `DecayingSource(node, G0, tau, t0=0.0)` |
+| `DepositionRateSink`<br><small>`noodl.apps.building_physics`</small> | First-order removal at a deposition rate (CONTAM's deposition rate sink): R = k_d rho V, the rate k_d (1/s) on the zone's mass fraction; `rate` a float or tensor. It is also how to give a species a first-order decay in a zone. | `DepositionRateSink(node, rate)` |
+| `DepositionVelocitySink`<br><small>`noodl.apps.building_physics`</small> | Deposition onto a surface at a deposition velocity (CONTAM's deposition velocity sink): R = v_d A rho, a first-order rate v_d A / V on the zone's mass fraction. `velocity` v_d in m/s, `area` A in m2 (floats or tensors). | `DepositionVelocitySink(node, velocity, area)` |
+| `PeakEmissionSource`<br><small>`noodl.apps.building_physics`</small> | Emission rising to a peak and decaying (the NRCC peak model): S = a exp(-(ln(t / t_p) / b)^2 / 2), t the time since the start (s), nothing at t <= 0. `peak` a kg/s, `width` b, `t_peak` t_p s. | `PeakEmissionSource(node, peak, width, t_peak)` |
+| `PowerLawDecaySource`<br><small>`noodl.apps.building_physics`</small> | Emission decaying as a power of time (the NRCC power-law model): S = a t_h^(-b) after t_p and a t_ph^(-b) before it, t_h being the time since the start in HOURS (measured: ContamX takes the power of the time in hours, although its file stores t_p in s). `coefficient` a kg/s, `exponent` b, `t_p` s (> 0: the power has no value at t = 0). | `PowerLawDecaySource(node, coefficient, exponent, t_p)` |
 
 ## Files
 
@@ -167,7 +171,7 @@ Calculations and helpers.
 | `add_large_opening`<br><small>`noodl.apps.building_physics`</small> | CONTAM's two-opening doorway (DR_PL2, TN 1887r1 eq. 69-70): two orifices of area W H / 2 at z_mid -/+ 2H/9, both oriented a -> b. Exact for a mid-height neutral plane. Returns the two edge keys (low, high). Edge attributes: z_path, area, Cd, opening=1. `names` gives the two edges a `name` (as component factories do). `net` may be a `Network` or a `noodl.components.Component`. | `add_large_opening(net, a, b, *, H, W, z_mid, Cd=0.78, kind='airpath', names=None)` |
 | `add_zone`<br><small>`noodl.apps.building_physics`</small> | Add the zone's air node (attributes volume, T0, z_ref, heat_capacity=0) and, if it has a wall, the wall node (heat_capacity) with 'wall' edges zone -> wall -> ambient (ua). | `add_zone(net, zone, *, ambient='ambient')` |
 | `apply_inputs`<br><small>`noodl.apps.building_physics`</small> | New drivers with every input's value at `t` written in (inputs bound first). | `apply_inputs(drivers, inputs, t, calendar)` |
-| `assemble_sources`<br><small>`noodl.apps.building_physics`</small> | Sum of every source's contribution, full-node order, shape like `x_full`. | `assemble_sources(sources, t, x_full)` |
+| `assemble_sources`<br><small>`noodl.apps.building_physics`</small> | Sum of every source's explicit rate `source(t, x_full)` (kg/s), full-node order, shape like `x_full`; there is no separate node-count argument. | `assemble_sources(sources, t, x_full)` |
 | `bind_inputs`<br><small>`noodl.apps.building_physics`</small> | `inputs` with every `at` resolved to positions through `model.refs`, checked for overlap: two inputs may not write the same entry of the same driver (raises naming both). A key given with `at` must be one the model declares (`model.refs.field(key)`). | `bind_inputs(model, inputs)` |
 | `crack`<br><small>`noodl.apps.building_physics`</small> | A small orifice (m2, m). Interior: between terminals `a` and `b`. Exterior: from the shared ambient to `a`, carrying the wind attributes `Wind.from_network` reads; give the facade direction as `azimuth` (degrees from north) or as `facade`, a key of the building's `inner_table("facades", ...)`. Edge: `path`. | `crack(name, *, area, z_path, Cd=0.6, exterior=False, azimuth=None, facade=None, Cp=None, Ch=None, profile=None)` |
 | `door`<br><small>`noodl.apps.building_physics`</small> | A doorway between two zones (CONTAM's two-opening DR_PL2): terminals `a`, `b` and edges `low`, `high`. `z_mid` (m) is relative to the door's placement. Ports: `a`, `b`. | `door(name, *, H, W, z_mid, Cd=0.78)` |

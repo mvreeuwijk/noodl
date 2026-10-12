@@ -3,7 +3,7 @@
 Reading a CONTAM project, weather file and ambient-concentration file produces a model for [building
 physics](../applications/building_physics.md). Each `.prj` airflow-path component becomes one of
 the [`noodl.elements`](../applications/building_physics.md#airflow-elements) objects the building
-application assembles into a network by hand; a source record becomes one of the four source
+application assembles into a network by hand; a source record becomes one of the source
 models in `noodl.apps.building_physics.sources`.
 
 ## CONTAM `.prj`
@@ -37,7 +37,8 @@ either direction.
 
 **Refused by name**, rather than silently dropped: control nodes and air-handling
 systems referenced by nonzero index; gaseous (`gf0`) and UVGI (`uv1`) filter elements,
-referenced or not; a filter that names a species the project does not simulate, and a path
+referenced or not; a filter that names a species the project does not simulate (when a path
+references it: an unreferenced filter element is read and unused), and a path
 whose filter number the file does not define; non-trace species; a contaminant list that is not the
 simulated species in file order; a source or kinetic reaction that names a species the project
 does not simulate (a species the file defines but marks as not simulated included), a kinetic

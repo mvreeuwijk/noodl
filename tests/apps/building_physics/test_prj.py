@@ -1013,3 +1013,12 @@ def test_filters_naming_what_the_project_lacks_are_refused(tmp_path):
     with pytest.raises(KeyError, match=r"path 2.*filter 1"):
         read_prj(_variant(THREE.read_text(), "   2    0   1   2   3   0   0",
                           "   2    0   1   2   3   1   0", tmp_path))
+
+
+def test_an_unknown_filter_type_and_a_super_filter_containing_itself_are_refused(tmp_path):
+    text = FILTERS.read_text()
+    with pytest.raises(ValueError, match=r"filter element 1.*'xyz'.*unknown filter type"):
+        read_prj(_variant(text, "1 cef 1 0.1 100 0 0 sarin30", "1 xyz 1 0.1 100 0 0 sarin30",
+                          tmp_path))
+    with pytest.raises(ValueError, match=r"filter element 3 \('both'\) contains itself"):
+        read_prj(_variant(text, "  2\n  1 2\n", "  2\n  1 3\n", tmp_path))

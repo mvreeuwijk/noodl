@@ -151,7 +151,7 @@ def _role(name: str, obj) -> str:
             return "element"
         if issubclass(obj, Reaction):
             return "reaction"
-        if issubclass(obj, NodeSource) or name.endswith("Source"):
+        if issubclass(obj, NodeSource) or name.endswith(("Source", "Sink")):
             return "source"
         if obj is Model or name.endswith("Layer") or name in {"Network", "Ports", "CoupledModel"}:
             return "layer"

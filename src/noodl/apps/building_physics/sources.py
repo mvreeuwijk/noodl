@@ -1,8 +1,12 @@
-"""CONTAM contaminant source/sink models (TN 1887r1 section 8.2.4) as (t, x) -> kg/s per node.
+"""CONTAM's contaminant source/sink models as source objects for `SpeciesSources`.
 
-Each source returns a FULL-node vector with its contribution at its node; `assemble_sources`
-sums them into the "species.sources" driver. Units: kg/s (mass fraction transport with zone
-air mass as capacity).
+A source is either a plain callable `source(t, x_full) -> kg/s per node` (evaluated on the
+step-start mass fractions), or an object with `generation(t, x_full, pressure_difference)
+-> kg/s` and, optionally, `removal(t, x_full, air_mass, density) -> kg/s per unit mass
+fraction`. The second form is CONTAM's S = G - R C: `SpeciesSources` divides R by each
+zone's air mass and hands it to the species step as the driver `"<layer>.removal"`, where
+it is implicit, as ContamX holds it (measured against ContamX 3.4.1.7). Every vector is
+in full node order. Units: kg/s, mass fractions kg/kg, air mass kg, density kg/m3.
 """
 
 from __future__ import annotations
@@ -10,6 +14,8 @@ from __future__ import annotations
 import math
 
 import torch
+
+F64 = torch.float64
 
 
 class _NodeSource:
@@ -22,48 +28,52 @@ class _NodeSource:
         return out
 
 
-class ConstantSource(_NodeSource):
-    """S = G - R x  (constant coefficient model, eq. 15)."""
+class _GenerationRemoval(_NodeSource):
+    """A source whose removal does not depend on the zone's air mass. Called directly it is
+    S = G - R x at the x given, derived from its `generation` and `removal`."""
+
+    def __call__(self, t: float, x: torch.Tensor) -> torch.Tensor:
+        return self.generation(t, x) - self.removal(t, x, None, None) * x
+
+
+class ConstantSource(_GenerationRemoval):
+    """S = G - R x (constant coefficient model): G kg/s, R kg/s per unit mass fraction
+    (CONTAM's kg_air/s). Under `SpeciesSources` the term R x is implicit in the species
+    step, as ContamX holds it; called directly the source is evaluated at the x given."""
 
     def __init__(self, node: int, G: float, R: float = 0.0) -> None:
         super().__init__(node)
         self.G, self.R = float(G), float(R)
 
-    def __call__(self, t: float, x: torch.Tensor) -> torch.Tensor:
-        return self._vector(x, self.G - self.R * x[..., self.node])
+    def generation(self, t: float, x: torch.Tensor, pressure_difference=None) -> torch.Tensor:
+        """G at the node (kg/s)."""
+        return self._vector(x, self.G)
+
+    def removal(self, t: float, x: torch.Tensor, air_mass, density) -> torch.Tensor:
+        """R at the node (kg/s per unit mass fraction)."""
+        return self._vector(x, self.R)
 
 
-class CutoffSource(_NodeSource):
-    """S = max(G (1 - x / x_cut), 0)  (eq. 17), clamped at the cutoff concentration.
+class CutoffSource(_GenerationRemoval):
+    """S = G (1 - x / x_cut) (cutoff concentration model): G kg/s, x_cut kg/kg.
 
-    CONTAM's cutoff-concentration source models generation that shuts OFF once the zone
-    concentration reaches ``x_cut``; it does not model a sink. The bare eq. 17 formula
-    turns negative for ``x > x_cut``, which would silently remove mass never generated --
-    wrong physics for anything that runs a cutoff source past its threshold -- so the rate
-    is clamped at zero above the cutoff.
-
-    The clamp uses this project's guarded ``torch.where`` idiom (see
-    ``elements/powerlaw.py``'s kink): the branch that is *not* selected still gets
-    evaluated by ``torch.where``, so it is fed a substituted, safe input (the cutoff value
-    itself) rather than the true above-cutoff concentration. That keeps the discarded
-    branch's contribution to the backward pass exactly zero everywhere, so no stray
-    gradient (let alone a ``nan``) crosses from the clamped region, and the gradient
-    below the cutoff -- ``-G / x_cut`` -- is exactly unchanged from the unclamped formula.
+    Above the cutoff the source removes: ContamX keeps the linear law there (measured: a
+    sealed zone at twice the cutoff loses the contaminant to it), and so does this class.
+    Under `SpeciesSources` the term (G / x_cut) x is implicit in the species step, as in
+    ContamX.
     """
 
     def __init__(self, node: int, G: float, x_cut: float) -> None:
         super().__init__(node)
         self.G, self.x_cut = float(G), float(x_cut)
 
-    def __call__(self, t: float, x: torch.Tensor) -> torch.Tensor:
-        xn = x[..., self.node]
-        below = xn <= self.x_cut
-        # xn is only trusted where the formula is actually selected; above the cutoff it
-        # is replaced by the constant x_cut, so torch.where's unselected branch there
-        # carries no gradient dependence on xn at all (see class docstring).
-        x_safe = torch.where(below, xn, torch.full_like(xn, self.x_cut))
-        rate = self.G * (1.0 - x_safe / self.x_cut)
-        return self._vector(x, torch.where(below, rate, torch.zeros_like(xn)))
+    def generation(self, t: float, x: torch.Tensor, pressure_difference=None) -> torch.Tensor:
+        """G at the node (kg/s)."""
+        return self._vector(x, self.G)
+
+    def removal(self, t: float, x: torch.Tensor, air_mass, density) -> torch.Tensor:
+        """G / x_cut at the node (kg/s per unit mass fraction)."""
+        return self._vector(x, self.G / self.x_cut)
 
 
 class DecayingSource(_NodeSource):
@@ -107,18 +117,106 @@ class BurstSource(_NodeSource):
         return self._vector(x, rate)
 
 
-class SpeciesSources:
-    """Closure: every source's rate (kg/s) summed into `"<layer>.sources"`, each one times
-    its entry of `"<layer>.source_multiplier"` and placed on its own species.
+class DepositionVelocitySink(_NodeSource):
+    """Deposition onto a surface at a deposition velocity (CONTAM's deposition velocity
+    sink): R = v_d A rho, a first-order rate v_d A / V on the zone's mass fraction.
+    `velocity` v_d in m/s, `area` A in m2 (floats or tensors)."""
 
-    `sources` are callables `source(t, x_full) -> full-node vector` (the classes above), with
-    `species[i]` the 0-based species of source i and `names[i]` its label (default "source
-    1", ...). They are evaluated at `drivers["time"]` (s since the simulation start, set by
-    `simulate` to the step's end, which is when ContamX evaluates them) on the start-of-step
-    mass fractions. A `BurstSource` also gets the step length, `drivers["time_step"]` (s, set
-    by `simulate`), and releases its mass over the steps that overlap its burst. The multiplier
-    (dimensionless, one per source, batched like any driver) is where a schedule or a control
-    acts: CONTAM's S = mult ctrl (G - R C).
+    def __init__(self, node: int, velocity, area) -> None:
+        super().__init__(node)
+        self.velocity = torch.as_tensor(velocity, dtype=F64)
+        self.area = torch.as_tensor(area, dtype=F64)
+
+    def generation(self, t: float, x: torch.Tensor, pressure_difference=None) -> torch.Tensor:
+        """Nothing (kg/s)."""
+        return torch.zeros_like(x)
+
+    def removal(self, t: float, x: torch.Tensor, air_mass, density) -> torch.Tensor:
+        """v_d A rho at the node (kg/s per unit mass fraction)."""
+        return self._vector(x, self.velocity * self.area * density[..., self.node])
+
+
+class DepositionRateSink(_NodeSource):
+    """First-order removal at a deposition rate (CONTAM's deposition rate sink): R = k_d
+    rho V, the rate k_d (1/s) on the zone's mass fraction; `rate` a float or tensor. It is
+    also how to give a species a first-order decay in a zone."""
+
+    def __init__(self, node: int, rate) -> None:
+        super().__init__(node)
+        self.rate = torch.as_tensor(rate, dtype=F64)
+
+    def generation(self, t: float, x: torch.Tensor, pressure_difference=None) -> torch.Tensor:
+        """Nothing (kg/s)."""
+        return torch.zeros_like(x)
+
+    def removal(self, t: float, x: torch.Tensor, air_mass, density) -> torch.Tensor:
+        """k_d times the zone's air mass (kg/s per unit mass fraction)."""
+        return self._vector(x, self.rate * air_mass[..., self.node])
+
+
+class PowerLawDecaySource(_NodeSource):
+    """Emission decaying as a power of time (the NRCC power-law model): S = a t_h^(-b) after
+    t_p and a t_ph^(-b) before it, t_h being the time since the start in HOURS (measured:
+    ContamX takes the power of the time in hours, although its file stores t_p in s).
+    `coefficient` a kg/s, `exponent` b, `t_p` s (> 0: the power has no value at t = 0)."""
+
+    def __init__(self, node: int, coefficient, exponent, t_p: float) -> None:
+        super().__init__(node)
+        if not float(t_p) > 0.0:
+            raise ValueError(f"PowerLawDecaySource: t_p must be positive (the power law has "
+                             f"no value at t = 0), got {t_p}")
+        self.coefficient = torch.as_tensor(coefficient, dtype=F64)
+        self.exponent = torch.as_tensor(exponent, dtype=F64)
+        self.t_p = float(t_p)
+
+    def generation(self, t: float, x: torch.Tensor, pressure_difference=None) -> torch.Tensor:
+        """a (max(t, t_p) / 3600 s)^(-b) at the node (kg/s)."""
+        hours = max(float(t), self.t_p) / 3600.0
+        return self._vector(x, self.coefficient * hours ** (-self.exponent))
+
+    def __call__(self, t: float, x: torch.Tensor) -> torch.Tensor:
+        return self.generation(t, x)
+
+
+class PeakEmissionSource(_NodeSource):
+    """Emission rising to a peak and decaying (the NRCC peak model): S = a exp(-(ln(t /
+    t_p) / b)^2 / 2), t the time since the start (s), nothing at t <= 0. `peak` a kg/s,
+    `width` b, `t_peak` t_p s."""
+
+    def __init__(self, node: int, peak, width, t_peak: float) -> None:
+        super().__init__(node)
+        self.peak = torch.as_tensor(peak, dtype=F64)
+        self.width = torch.as_tensor(width, dtype=F64)
+        self.t_peak = float(t_peak)
+
+    def generation(self, t: float, x: torch.Tensor, pressure_difference=None) -> torch.Tensor:
+        """The peak curve at t, at the node (kg/s)."""
+        if t <= 0.0:
+            return torch.zeros_like(x)
+        z = math.log(t / self.t_peak) / self.width
+        return self._vector(x, self.peak * torch.exp(-0.5 * z * z))
+
+    def __call__(self, t: float, x: torch.Tensor) -> torch.Tensor:
+        return self.generation(t, x)
+
+
+class SpeciesSources:
+    """Closure: every source's generation summed into `"<layer>.sources"` (kg/s, full node
+    order) and every removal coefficient into `"<layer>.removal"` (1/s, active interior
+    order), each times its entry of `"<layer>.source_multiplier"`, on its own species.
+
+    `sources` follow the protocol of this module: plain callables `source(t, x_full)`, or
+    objects with `generation` and optionally `removal`. `species[i]` is source i's 0-based
+    species, `names[i]` its label (default "source 1", ...). They are evaluated at
+    `drivers["time"]` (s since the start; `simulate` sets the step's end, which is when
+    ContamX evaluates them) on the step-start mass fractions. A `BurstSource` also gets the
+    step length, `drivers["time_step"]` (s, set by `simulate`), and releases its mass over
+    the steps that overlap its burst. A removal coefficient R (kg/s per unit mass fraction)
+    is divided by the zone's air mass, the layer's capacity for the step
+    (`"<layer>.capacity"` when a closure writes it), and the species step holds it
+    implicitly; the density a source sees is that air mass over the node's volume. The
+    multiplier (one per source, batched like any driver) is where a schedule or a control
+    acts: CONTAM's S = mult ctrl (G - R C), a sink included.
     """
 
     def __init__(self, sources, *, species, layer, names=None) -> None:
@@ -129,8 +227,12 @@ class SpeciesSources:
         self.names = list(names) if names is not None else [
             f"source {i + 1}" for i in range(len(self.sources))]
         self.key = f"{layer.name}.source_multiplier"
+        self.capacity_key = f"{layer.name}.capacity"
+        self.removes = any(hasattr(s, "removal") for s in self.sources)
+        self.volumes = torch.as_tensor(layer.net.node_attr("volume", default=0.0), dtype=F64)
         self.inputs = ("time", self.key)
-        self.outputs = (f"{layer.name}.sources",)
+        self.outputs = (f"{layer.name}.sources",) + (
+            (f"{layer.name}.removal",) if self.removes else ())
 
     @property
     def input_specs(self) -> dict[str, dict]:
@@ -162,25 +264,49 @@ class SpeciesSources:
         xb = torch.as_tensor(drivers[f"{name}.x_boundary"], dtype=x_i.dtype)
         xb = xb if xb.dim() >= 2 and xb.shape[-1] == K else xb.unsqueeze(-1)
         mult = torch.as_tensor(drivers[self.key], dtype=x_i.dtype)
-        batch = torch.broadcast_shapes(x_i.shape[:-2], xb.shape[:-2], mult.shape[:-1])
+        cap = torch.as_tensor(drivers.get(self.capacity_key, lay.capacity), dtype=x_i.dtype)
+        batch = torch.broadcast_shapes(x_i.shape[:-2], xb.shape[:-2], mult.shape[:-1],
+                                       cap.shape[:-1])
         full = torch.zeros(batch + (n, K), dtype=x_i.dtype)
         full = full.index_copy(-2, lay.interior_idx, x_i.expand(batch + x_i.shape[-2:]))
         full = full.index_copy(-2, lay.boundary_idx, xb.expand(batch + xb.shape[-2:]))
-        cols = [torch.zeros(batch + (n,), dtype=x_i.dtype) for _ in range(K)]
+        cap = cap.expand(batch + (lay.n_i,))
+        mass = torch.zeros(batch + (n,), dtype=x_i.dtype).index_copy(-1, lay.interior_idx, cap)
+        volume = torch.where(self.volumes > 0, self.volumes, torch.ones_like(self.volumes))
+        density = mass / volume
+        gen = [torch.zeros(batch + (n,), dtype=x_i.dtype) for _ in range(K)]
+        rem = [torch.zeros(batch + (n,), dtype=x_i.dtype) for _ in range(K)]
         for j, (src, k) in enumerate(zip(self.sources, self.species, strict=True)):
-            kw = {"step": step} if getattr(src, "step_integrated", False) else {}
-            cols[k] = cols[k] + mult[..., j:j + 1] * src(t, full[..., k], **kw)
-        out = torch.stack(cols, dim=-1)
-        return {f"{name}.sources": out if axis else out[..., 0]}
+            m, xk = mult[..., j:j + 1], full[..., k]
+            if hasattr(src, "generation"):
+                gen[k] = gen[k] + m * src.generation(t, xk, None)
+            else:
+                kw = {"step": step} if getattr(src, "step_integrated", False) else {}
+                gen[k] = gen[k] + m * src(t, xk, **kw)
+            if hasattr(src, "removal"):
+                rem[k] = rem[k] + m * src.removal(t, xk, mass, density)
+        sources = torch.stack(gen, dim=-1)
+        out = {f"{name}.sources": sources if axis else sources[..., 0]}
+        if self.removes:
+            R = torch.stack(rem, dim=-1).index_select(-2, lay.interior_idx)
+            out[f"{name}.removal"] = R / cap.unsqueeze(-1)
+        return out
 
 
 def assemble_sources(sources, t: float, x_full: torch.Tensor) -> torch.Tensor:
-    """Sum of every source's contribution, full-node order, shape like `x_full`.
+    """Sum of every source's explicit rate `source(t, x_full)` (kg/s), full-node order,
+    shape like `x_full`; there is no separate node-count argument.
 
-    The output shape comes from `x_full`; there is no separate node-count argument.
+    A source with a concentration-proportional part (`ConstantSource`, `CutoffSource`) is
+    evaluated at `x_full`. A sink, whose removal needs the zone's air mass, has no such rate
+    and is refused by name: use `SpeciesSources` in a model.
     """
     out = torch.zeros_like(x_full)
-    for s in sources:
+    for i, s in enumerate(sources):
+        if not callable(s):
+            raise TypeError(f"assemble_sources: source {i + 1} ({type(s).__name__}) has no "
+                            f"explicit rate source(t, x): its removal needs the zone's air "
+                            f"mass; use SpeciesSources in a model")
         out = out + s(t, x_full)
     return out
 
