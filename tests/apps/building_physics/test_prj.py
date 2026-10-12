@@ -939,3 +939,31 @@ def test_a_reaction_naming_a_species_the_project_lacks_is_refused(tmp_path):
     text = REACTION.read_text()
     with pytest.raises(KeyError, match=r"kinetic reaction 2.*\['ozone'\]"):
         read_prj(_variant(text, "product sarin 0.0001", "ozone sarin 0.0001", tmp_path))
+
+
+def test_a_reaction_naming_an_unsimulated_species_is_refused(tmp_path):
+    """Species 2 exists in the file but is not simulated (`s` = 0): a reaction on it has no
+    concentration to act on."""
+    text = REACTION.read_text()
+    out = _variants(text, [("2 ! contaminants:\n   1 2", "1 ! contaminants:\n   1"),
+                           ("  2 1 0  44.0100", "  2 0 0  44.0100")], tmp_path)
+    with pytest.raises(KeyError, match=r"kinetic reaction 1.*\['product'\]"):
+        read_prj(out)
+
+
+def test_a_source_naming_an_unsimulated_species_is_refused(tmp_path):
+    text = (DATA / "doorway_damper_fan.prj").read_text()
+    out = _variants(text, [("3 ! contaminants:\n   1 2 3", "2 ! contaminants:\n   1 3"),
+                           ("  2 1 0  28.0000", "  2 0 0  28.0000"),
+                           ("1 sarin ccf ccm", "1 CO ccf ccm")], tmp_path)
+    with pytest.raises(KeyError, match=r"source 1.*element 1.*'CO'.*does not simulate"):
+        read_prj(out)
+
+
+def test_a_reaction_pair_given_twice_is_refused_by_name(tmp_path):
+    text = REACTION.read_text()
+    out = _variant(text, "1 3 fast\n\nsarin sarin -0.001\n",
+                   "1 4 fast\n\nsarin sarin -0.001\nsarin sarin -0.002\n", tmp_path)
+    with pytest.raises(ValueError,
+                       match=r"kinetic reaction 1 \('fast'\).*'sarin'.*'sarin'.*twice"):
+        read_prj(out)

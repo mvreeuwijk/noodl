@@ -608,17 +608,23 @@ def _simulated_species(rows: list[tuple[int, bool, Species]],
 
 def _read_reactions(lines: _Lines, count: int, out: dict[int, KineticReaction]) -> None:
     """`nr nkrd name`, a description line, then `nkrd` lines `product reactant k`; a pair
-    given twice adds its coefficients."""
+    given twice is refused."""
     for _ in range(count):
         tok = lines.record()
         nr, n_pairs = int(tok[0]), int(tok[1])
+        name = tok[2] if len(tok) > 2 else ""
         lines.raw()                                 # description (may be blank)
         coefficients: dict[tuple[str, str], float] = {}
         for _ in range(n_pairs):
             product, reactant, coef = lines.record()[:3]
             pair = (product, reactant)
-            coefficients[pair] = coefficients.get(pair, 0.0) + float(coef)
-        out[nr] = KineticReaction(coefficients, name=tok[2] if len(tok) > 2 else "")
+            if pair in coefficients:
+                raise ValueError(
+                    f"prj: kinetic reaction {nr} ({name!r}) gives the pair (product "
+                    f"{product!r}, reactant {reactant!r}) twice; a repeated pair is "
+                    f"unsupported")
+            coefficients[pair] = float(coef)
+        out[nr] = KineticReaction(coefficients, name=name)
     lines.expect_end("kinetic reactions")
 
 

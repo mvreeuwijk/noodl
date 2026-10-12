@@ -1,0 +1,98 @@
+"""Filters on airflow paths: constant efficiency, particle size, filters in series."""
+
+from __future__ import annotations
+
+import pytest
+import torch
+
+from noodl.apps.building_physics.filters import (
+    ConstantEfficiencyFilter,
+    FilterSeries,
+    ParticleFilter,
+    filter_transmission,
+)
+from noodl.apps.building_physics.species import Species
+from noodl.topology import Network
+
+F64 = torch.float64
+SARIN = Species("sarin", molar_mass=140.09)
+PM = Species("pm", mean_diameter=2e-6, effective_density=1000.0)
+# The curve measured against ContamX 3.4.1.7 (efficiencies at 0.7, 1.5 and 2.5 um below).
+MERV = ParticleFilter([0.3e-6, 0.5e-6, 1e-6, 2e-6, 3e-6, 5e-6],
+                      [0.1, 0.1, 0.4, 0.65, 0.8, 0.8], name="merv")
+
+
+def test_a_constant_efficiency_filter_acts_on_the_species_it_lists_only():
+    f = ConstantEfficiencyFilter({"sarin": 0.3})
+    torch.testing.assert_close(f.efficiency([SARIN, PM]), torch.tensor([0.3, 0.0], dtype=F64))
+
+
+def test_a_constant_efficiency_filter_naming_an_unknown_species_is_refused():
+    with pytest.raises(KeyError, match=r"\['ozone'\]"):
+        ConstantEfficiencyFilter({"sarin": 0.3, "ozone": 0.1}).efficiency([SARIN])
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        ConstantEfficiencyFilter({"sarin": 1.5})
+
+
+def test_the_particle_curve_is_contamx_s_clamped_spline_in_log_diameter():
+    """ContamX: 0.203118324, 0.544660687, 0.757098794 (float32). The float64 references are
+    scipy's CubicSpline(log10 d[1:-1], e[1:-1], bc_type='clamped')."""
+    for d, ref64, contamx in ((0.7e-6, 0.20311833998640128, 0.203118324),
+                              (1.5e-6, 0.5446606796932887, 0.544660687),
+                              (2.5e-6, 0.7570988051763687, 0.757098794)):
+        assert MERV.at(d).item() == pytest.approx(ref64, rel=1e-12)
+        assert MERV.at(d).item() == pytest.approx(contamx, rel=2e-7)
+
+
+def test_the_particle_curve_passes_its_points_and_is_flat_beyond_them():
+    assert MERV.at(1e-6).item() == pytest.approx(0.4, rel=1e-14)
+    assert MERV.at(2e-6).item() == pytest.approx(0.65, rel=1e-14)
+    assert MERV.at(0.4e-6).item() == pytest.approx(0.1, rel=1e-14)      # flat first segment
+    assert MERV.at(0.1e-6).item() == pytest.approx(0.1, rel=1e-14)      # below the curve
+    assert MERV.at(1e-5).item() == pytest.approx(0.8, rel=1e-14)        # above it
+    torch.testing.assert_close(MERV.efficiency([SARIN, PM]),
+                               torch.tensor([0.0, 0.65], dtype=F64))   # a gas passes
+
+
+def test_a_particle_curve_without_flat_ends_is_refused():
+    with pytest.raises(ValueError, match=r"'steep'.*first two and the last two"):
+        ParticleFilter([1e-6, 2e-6, 3e-6, 4e-6], [0.2, 0.4, 0.6, 0.8], name="steep")
+    with pytest.raises(ValueError, match="increasing"):
+        ParticleFilter([2e-6, 1e-6, 3e-6], [0.1, 0.1, 0.1])
+
+
+def test_short_flat_curves_are_constant():
+    assert ParticleFilter([1e-6, 2e-6], [0.3, 0.3]).at(5e-6).item() == 0.3
+    assert ParticleFilter([1e-6, 2e-6, 3e-6], [0.3, 0.3, 0.3]).at(1.5e-6).item() == 0.3
+
+
+def test_the_particle_curve_carries_gradients_to_its_efficiencies():
+    e = torch.tensor([0.1, 0.1, 0.4, 0.65, 0.8, 0.8], dtype=F64, requires_grad=True)
+    f = ParticleFilter([0.3e-6, 0.5e-6, 1e-6, 2e-6, 3e-6, 5e-6], e)
+    (g,) = torch.autograd.grad(f.at(1.5e-6), e)
+    assert torch.isfinite(g).all() and g[2:5].abs().sum().item() > 0
+
+
+def test_filters_in_series_pass_the_product_of_their_stages():
+    """ContamX: two constant-efficiency stages of 0.1 and 0.2 remove 0.2800000310."""
+    two = FilterSeries([ConstantEfficiencyFilter({"sarin": 0.1}),
+                        ConstantEfficiencyFilter({"sarin": 0.2})])
+    assert two.efficiency([SARIN]).item() == pytest.approx(0.28, rel=1e-14)
+    both = FilterSeries([ConstantEfficiencyFilter({"sarin": 0.3}), MERV])
+    torch.testing.assert_close(both.efficiency([SARIN, PM]),
+                               torch.tensor([0.3, 0.65], dtype=F64))
+
+
+def test_filter_transmission_is_one_minus_the_efficiency_in_flow_order():
+    net = Network(dtype=F64)
+    for node in ("ambient", "a", "b"):
+        net.add_node(node)
+    door = net.add_edge("a", "b", kind="door")
+    leak = net.add_edge("ambient", "a", kind="airpath")
+    net.add_edge("b", "ambient", kind="airpath")
+    t = filter_transmission(net, ("airpath", "door"), [SARIN, PM],
+                            {door: MERV, leak: ConstantEfficiencyFilter({"sarin": 0.3})})
+    expected = torch.tensor([[0.7, 1.0], [1.0, 1.0], [1.0, 0.35]], dtype=F64)
+    torch.testing.assert_close(t, expected)
+    with pytest.raises(KeyError, match=r"kind 'door'.*\('airpath',\)"):
+        filter_transmission(net, ("airpath",), [SARIN], {door: MERV})

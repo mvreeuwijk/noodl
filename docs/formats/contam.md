@@ -14,8 +14,8 @@ ambient=None, species=True, scheme="implicit")` returns `(model, state, drivers)
 
 **Supported:** run control (`Project.run_control`, a `RunControl`: the steady simulation's
 date and time, the transient run's start and end date and time, time step and output step, day
-type, the weather and contaminant file names, and `dodMdt`) and ambient conditions; the full
-species record (`Project.species_records`: molar mass, mean diameter, effective density,
+type, the weather and contaminant file names, and `dodMdt`) and ambient conditions; the simulated species'
+records (`Project.species_records`: molar mass, mean diameter, effective density,
 diffusivity, default concentration; the decay constant is read but, as in ContamX, not applied)
 and each species' default ambient concentration (`Project.ambient_mass_fractions`); kinetic
 reactions on zones (`Project.zone_reactions`, the species layer's `kinetics`); day and week
@@ -35,7 +35,9 @@ family
 **Refused by name**, rather than silently dropped: control nodes, filters and air-handling
 systems referenced by nonzero index; non-trace species; a contaminant list that is not the
 simulated species in file order; a source or kinetic reaction that names a species the project
-does not simulate, and a zone whose kinetic reaction number the file does not define; a schedule
+does not simulate (a species the file defines but marks as not simulated included), a kinetic
+reaction that gives one product-reactant pair twice, and a zone whose kinetic reaction number the
+file does not define; a schedule
 number that no week schedule carries; a schedule on a `fan_fan` path; a schedule on an `eds` or
 `brs` source; a zone without the variable-pressure flag (which
 ContamX holds at constant pressure) or, in a project with species, without the

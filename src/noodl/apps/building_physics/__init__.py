@@ -25,6 +25,12 @@ from noodl.apps.building_physics.elements import (
     orifice_elements_from_edges,
 )
 from noodl.apps.building_physics.epw import read_epw, write_wth
+from noodl.apps.building_physics.filters import (
+    ConstantEfficiencyFilter,
+    FilterSeries,
+    ParticleFilter,
+    filter_transmission,
+)
 from noodl.apps.building_physics.inputs import Input, apply_inputs, bind_inputs, scatter
 from noodl.apps.building_physics.modelica import read_modelica
 from noodl.apps.building_physics.prj import (
@@ -71,14 +77,17 @@ __all__ = [
     "NODE_ATTRIBUTES",
     "BurstSource",
     "Calendar",
+    "ConstantEfficiencyFilter",
     "ConstantSource",
     "CutoffSource",
     "DaySchedule",
     "DecayingSource",
+    "FilterSeries",
     "IdealGasDensity",
     "Input",
     "KineticReaction",
     "LinearDensity",
+    "ParticleFilter",
     "Project",
     "RunControl",
     "Signal",
@@ -97,6 +106,7 @@ __all__ = [
     "build_model",
     "crack",
     "door",
+    "filter_transmission",
     "initial_drivers",
     "initial_state",
     "mass_orifice",

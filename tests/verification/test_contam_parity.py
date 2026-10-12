@@ -391,9 +391,10 @@ def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf, record_property, label
     mf_scale = ref["mf"].abs().max()
     if species_floor:
         mf_scale = ref["mf"].abs().flatten(0, -2).amax(0)              # (K,)
+    assert out["species.x"].dtype == ref["mf"].dtype == F64
+    assert out["species.x"].shape == ref["mf"].shape
     mf_err = (out["species.x"] - ref["mf"]).abs()
     mf_allowed = 64 * F32_U * mf_scale + rtol_mf * ref["mf"].abs()
-    assert out["species.x"].shape == ref["mf"].shape
     assert bool((mf_err <= mf_allowed).all()), (
         f"mass fractions: worst error {(mf_err / mf_allowed).max().item():.3g} of allowed")
     record_property("check", label)

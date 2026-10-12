@@ -328,6 +328,34 @@ print(fast.matrix(["sarin", "product"]).tolist())
 order of `Project.species`) and each zone's kinetic reaction into `Project.zone_reactions`;
 `project_to_model` builds the species layer's `kinetics` from them.
 
+### Filters
+
+A filter on an edge removes the fraction *efficiency* of each species from the air passing
+through it, in whichever direction the air flows, as in ContamX. `ConstantEfficiencyFilter`
+removes a fixed fraction of each species it lists; `ParticleFilter(diameters, efficiencies)`
+removes by particle size, interpolating its curve at each species' mean diameter the way
+ContamX does (a cubic spline in log-diameter, flat at both ends; a gas passes);
+`FilterSeries(stages)` chains filters. `filter_transmission(net, flow_kinds, species,
+{edge: filter})` gives the species layer's `transmission` (1 − efficiency per edge and
+species).
+
+```python
+from noodl.apps.building_physics import (
+    ConstantEfficiencyFilter, FilterSeries, ParticleFilter, Species,
+)
+
+merv = ParticleFilter([0.3e-6, 0.5e-6, 1e-6, 2e-6, 3e-6, 5e-6],
+                      [0.1, 0.1, 0.4, 0.65, 0.8, 0.8])
+gas = Species("sarin", molar_mass=140.09)
+pm = Species("pm", mean_diameter=1.5e-6, effective_density=1000.0)
+both = FilterSeries([ConstantEfficiencyFilter({"sarin": 0.3}), merv])
+print([round(v, 4) for v in both.efficiency([gas, pm]).tolist()])
+```
+
+```text
+[0.3, 0.5447]
+```
+
 ## Airflow elements
 
 Every edge of the air layer carries an element: a law giving the flow $F$ through the edge from
