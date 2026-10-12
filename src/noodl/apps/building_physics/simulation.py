@@ -25,6 +25,8 @@ step to the next:
   latest pressures until the zone pressures move by no more than `zone_pressure_rtol * P_ref`
   -- the fixed point ContamX iterates to (`prj.steady` does the same for a steady solve). The
   closure reads the previous pass's pressures, a coupling of relative size |P_zone| / Pb.
+  The same repetition runs for a closure that reads the solved pressure (a pressure-driven
+  source), so it sees the step's own pressures, as ContamX evaluates them.
 """
 
 from __future__ import annotations
@@ -67,6 +69,18 @@ def _air_mass_source(model: Model) -> tuple[str, ZoneAirMassChange] | None:
         for ns in layer.node_sources:
             if isinstance(ns, ZoneAirMassChange):
                 return name, ns
+    return None
+
+
+def _pressure_key(model: Model) -> str | None:
+    """The potential a closure needs at the step's own value, or None: the zone pressures
+    under `densZP` (`ZonePressureDensity`) or for a closure that reads the solved pressure
+    (`reads_solved_pressure`, e.g. a pressure-driven source)."""
+    zp = _closure(model, ZonePressureDensity)
+    if zp is not None:
+        return zp.key
+    if any(getattr(c, "reads_solved_pressure", False) for c in model.closures):
+        return "air.phi"
     return None
 
 
@@ -154,8 +168,12 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
             "layer (project_to_model attaches one); this model has none"
         )
     mass_layer, mass_source = found if found else (None, None)
-    cause = ("" if zp is None else "the zone densities" if zp.densities
-             else "the contaminants' zone air mass")
+    readers = [type(c).__name__ for c in model.closures
+               if getattr(c, "reads_solved_pressure", False)]
+    couplings = ([] if zp is None else ["the zone densities" if zp.densities
+                                        else "the contaminants' zone air mass"])
+    couplings += [f"the pressure reader {r}" for r in readers]
+    cause = " and ".join(couplings)
 
     def start_mass(state: State, d: Drivers) -> Tensor:
         # At the drivers the closures leave (a closure may write "T" or "P_ref"), as the
@@ -171,8 +189,9 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     def P_of(d: Drivers) -> float:
         return float(torch.as_tensor(d.get("P_ref", zp.Pb if zp else 0.0)).max())
 
-    # The zone pressures the density closure reads, fed back between passes of a step.
-    step_key = zp.key if zp is not None else None
+    # The zone pressures the density closure or a pressure reader reads, fed back between
+    # passes of a step.
+    step_key = _pressure_key(model)
 
     d = drivers_at(ts[0])
     state = _fixed_point(lambda s: _airflow(model, s, d, **step_kwargs), state, step_key,
@@ -200,7 +219,7 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
 
             def run(s, d=d, dt=dt, t0=t0, start=state):
                 # Every pass advances the SAME step from its start state; only the zone
-                # pressures the density closure reads are updated between passes.
+                # pressures the closures read are updated between passes.
                 step_from = dict(start)
                 if step_key is not None and step_key in s:
                     step_from[step_key] = s[step_key]

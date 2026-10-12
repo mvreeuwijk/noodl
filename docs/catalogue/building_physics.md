@@ -114,7 +114,7 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 |---|---|---|
 | `IdealGasDensity`<br><small>`noodl.apps.building_physics`</small> | rho = P_ref / (R T); P_ref from drivers["P_ref"] if present (CONTAM section 3.18). | `IdealGasDensity(thermal, *, ambient_index, P_ref=101325.0, R=287.055)` |
 | `LinearDensity`<br><small>`noodl.apps.building_physics`</small> | Boussinesq: rho = rho_0 (1 - (T - T_0) / T_0), the form the analytical natural- ventilation solutions (Li and Delsante 2001) assume. | `LinearDensity(thermal, *, ambient_index, rho_0=1.2041, T_0=293.15)` |
-| `SpeciesSources`<br><small>`noodl.apps.building_physics`</small> | Closure: every source's generation summed into `"<layer>.sources"` (kg/s, full node order) and every removal coefficient into `"<layer>.removal"` (1/s, active interior order), each times its entry of `"<layer>.source_multiplier"`, on its own species. | `SpeciesSources(sources, *, species, layer, names=None)` |
+| `SpeciesSources`<br><small>`noodl.apps.building_physics`</small> | Closure: every source's generation summed into `"<layer>.sources"` (kg/s, full node order) and every removal coefficient into `"<layer>.removal"` (1/s, active interior order), each times its entry of `"<layer>.source_multiplier"`, on its own species. | `SpeciesSources(sources, *, species, layer, names=None, heights=None, g=9.80665, pressure_key='air.phi')` |
 
 ## Sources
 
@@ -130,6 +130,7 @@ Nodal sources and withdrawals.
 | `DepositionVelocitySink`<br><small>`noodl.apps.building_physics`</small> | Deposition onto a surface at a deposition velocity (CONTAM's deposition velocity sink): R = v_d A rho, a first-order rate v_d A / V on the zone's mass fraction. `velocity` v_d in m/s, `area` A in m2 (floats or tensors). Its node needs a positive volume: the density is the zone's air mass over it. | `DepositionVelocitySink(node, velocity, area)` |
 | `PeakEmissionSource`<br><small>`noodl.apps.building_physics`</small> | Emission rising to a peak and decaying (the NRCC peak model): S = a exp(-(ln(t / t_p) / b)^2 / 2), t the time since the start (s), nothing at t <= 0. `peak` a kg/s, `width` b, `t_peak` t_p s. | `PeakEmissionSource(node, peak, width, t_peak)` |
 | `PowerLawDecaySource`<br><small>`noodl.apps.building_physics`</small> | Emission decaying as a power of time (the NRCC power-law model): S = a t_h^(-b) after t_p and a t_ph^(-b) before it, t_h being the time since the start in HOURS (measured: ContamX takes the power of the time in hours, although its file stores t_p in s). `coefficient` a kg/s, `exponent` b, `t_p` s (> 0: the power has no value at t = 0). | `PowerLawDecaySource(node, coefficient, exponent, t_p)` |
+| `PressureDrivenSource`<br><small>`noodl.apps.building_physics`</small> | Entry driven by the pressure difference across the zone's envelope (CONTAM's pressure-driven model: radon, soil gas): S = G max(dP, 0)^n, dP = P_ambient - P_zone at the zone's reference height (Pa). `coefficient` G in kg/(s Pa^n), `exponent` n. Nothing enters while the zone is at or above the ambient pressure (measured against ContamX 3.4.1.7, which evaluates it at the step's own pressures). | `PressureDrivenSource(node, coefficient, exponent)` |
 
 ## Files
 

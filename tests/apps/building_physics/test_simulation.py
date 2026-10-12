@@ -14,7 +14,7 @@ from noodl.apps.building_physics.inputs import (
     bind_inputs,
     scatter,
 )
-from noodl.apps.building_physics.prj import project_to_model, read_prj
+from noodl.apps.building_physics.prj import project_to_model, read_prj, steady
 from noodl.apps.building_physics.schedules import Calendar, TimeSeries
 from noodl.apps.building_physics.simulation import simulate
 from noodl.apps.building_physics.thermal import R_AIR
@@ -542,3 +542,114 @@ def test_the_start_mass_of_a_step_sees_the_temperatures_a_closure_writes():
     for row in (1, 2):
         f = project.path_flows(out["air.q"][row])
         assert (f[0] - f[1]).abs().item() < 1e-12
+
+
+class _PressureSpy:
+    """A closure that only records the zone pressures it is shown."""
+
+    reads_solved_pressure = True
+    inputs = ()
+    outputs = ()
+
+    def __init__(self):
+        self.seen = []
+
+    def __call__(self, state, drivers):
+        phi = state.get("air.phi")
+        self.seen.append(None if phi is None else phi.clone())
+        return {}
+
+
+def test_simulate_repeats_a_step_until_a_pressure_reader_sees_the_steps_own_pressure():
+    """ContamX evaluates a pressure-driven source at the step's own pressures. Without
+    `densZP` a step is otherwise one pass, whose closures see the previous step's."""
+    p = read_prj(THREE)        # densZP = 0
+    model, state, drivers = project_to_model(p)
+    spy = _PressureSpy()
+    model.closures.append(spy)
+    cooling = Input(TimeSeries([0.0, 600.0], [293.15, 273.15]), "T",
+                    index=model.net.node_index("ambient"))
+    out = simulate(model, state, drivers, [0.0, 300.0, 600.0], inputs=[cooling], atol=1e-14)
+    assert (out["air.phi"][-1] - out["air.phi"][-2]).abs().max().item() > 1e-3
+    torch.testing.assert_close(spy.seen[-1], out["air.phi"][-1], rtol=0, atol=1e-6)
+
+
+def test_prj_steady_repeats_until_a_pressure_reader_sees_the_solved_pressure():
+    model, state, drivers = project_to_model(read_prj(THREE))
+    spy = _PressureSpy()
+    model.closures.append(spy)
+    out = steady(model, state, drivers, atol=1e-14)
+    assert spy.seen[0] is None                       # the first pass has no pressure yet
+    torch.testing.assert_close(spy.seen[-1], out["air.phi"], rtol=0, atol=1e-9)
+
+
+class _PressureCounter(_PressureSpy):
+    """The same closure, not declaring that it reads the solved pressure."""
+
+    reads_solved_pressure = False
+
+
+def _coupled(case):
+    """A model whose step already carries a pressure coupling: `densZP` with the zone
+    air-mass term (the stack), the air-mass term with the contaminants' zone mass (the
+    three-zone project under dodMdt), or the air-mass term alone (its density closure
+    removed)."""
+    from noodl.apps.building_physics.prj import ZonePressureDensity
+    from noodl.apps.building_physics.simulation import _air_mass_source
+
+    if case == "densZP and dodMdt":
+        model, state, drivers = project_to_model(read_prj(STACK))
+    else:
+        project = read_prj(THREE)
+        _set_dod_mdt(project, True)
+        model, state, drivers = project_to_model(project)
+    if case == "air-mass term alone":
+        model.closures[:] = [c for c in model.closures
+                             if not isinstance(c, ZonePressureDensity)]
+    assert _air_mass_source(model) is not None
+    has_zp = any(isinstance(c, ZonePressureDensity) for c in model.closures)
+    assert has_zp == (case != "air-mass term alone")
+    return model, state, drivers, has_zp
+
+
+@pytest.mark.parametrize("case", ["densZP and dodMdt", "dodMdt", "air-mass term alone"])
+def test_a_pressure_reader_composes_with_the_zone_pressure_couplings(case):
+    """A pressure reader joins the step's existing pressure fixed point rather than adding a
+    second one: with `ZonePressureDensity` present the passes are the same as without the
+    reader, and in every case the solution is unchanged (the air-mass term is counted once)
+    while the reader sees the step's own pressures."""
+    times = [0.0, 300.0, 600.0]
+    runs = {}
+    for spy in (_PressureCounter(), _PressureSpy()):
+        model, state, drivers, has_zp = _coupled(case)
+        cooling = Input(TimeSeries([0.0, 600.0], [293.15, 273.15]), "T",
+                        index=model.net.node_index("ambient"))
+        model.closures.append(spy)
+        runs[spy.reads_solved_pressure] = (
+            spy, simulate(model, state, drivers, times, inputs=[cooling], **TIGHT))
+    (counter, plain), (reader, out) = runs[False], runs[True]
+    assert (out["air.phi"][-1] - out["air.phi"][-2]).abs().max().item() > 1e-3
+    for key in ("air.q", "air.phi", "species.x"):
+        torch.testing.assert_close(out[key], plain[key], rtol=0, atol=1e-10)
+    torch.testing.assert_close(reader.seen[-1], out["air.phi"][-1], rtol=0, atol=1e-9)
+    if has_zp:
+        assert len(reader.seen) == len(counter.seen)
+    else:
+        assert len(reader.seen) > len(counter.seen)
+
+
+def test_an_unconverged_pressure_fixed_point_names_every_coupling():
+    model, state, drivers = project_to_model(read_prj(STACK))      # densZP = 1
+    model.closures.append(_PressureSpy())
+    cooling = Input(TimeSeries([0.0, 600.0], [293.15, 273.15]), "T",
+                    index=model.net.node_index("ambient"))
+    both = r"the zone densities and the pressure reader _PressureSpy did not converge in 1"
+    with pytest.raises(RuntimeError, match=both):
+        simulate(model, state, drivers, [0.0, 300.0], inputs=[cooling],
+                 zone_pressure_max_iter=1, **TIGHT)
+    p = read_prj(STACK)                                      # a stack at 273.15 K outside
+    model, state, drivers = project_to_model(p, ambient=dict(p.ambient_conditions, Ta=273.15))
+    model.closures.append(_PressureSpy())
+    with pytest.raises(RuntimeError, match=r"zone-pressure density and the pressure reader "
+                                           r"_PressureSpy did not converge in 1 passes"):
+        steady(model, state, drivers, max_iter=1, atol=1e-14)

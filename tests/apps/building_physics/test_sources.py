@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from noodl.apps.building_physics.prj import PrjSource, project_to_model, read_prj
+from noodl.apps.building_physics.prj import PrjSource, project_to_model, read_prj, steady
 from noodl.apps.building_physics.simulation import simulate
 from noodl.apps.building_physics.sources import (
     BurstSource,
@@ -20,6 +20,7 @@ from noodl.apps.building_physics.sources import (
     DepositionVelocitySink,
     PeakEmissionSource,
     PowerLawDecaySource,
+    PressureDrivenSource,
     SpeciesSources,
     assemble_sources,
     sources_from_project,
@@ -475,3 +476,70 @@ def test_peak_and_cutoff_parameters_are_checked():
     with pytest.raises(ValueError, match="x_cut must be positive"):
         CutoffSource(1, 1e-6, 0.0)
 
+
+
+def test_the_pressure_driven_source_enters_only_while_the_zone_is_below_ambient():
+    s = PressureDrivenSource(1, 2e-6, 0.65)
+    assert s.needs_pressure_difference
+    x = torch.zeros(3, dtype=F64)
+    dp = torch.tensor([0.0, 2.0, 0.0], dtype=F64)
+    assert s.generation(0.0, x, dp)[1].item() == pytest.approx(2e-6 * 2.0 ** 0.65, rel=1e-14)
+    assert s.generation(0.0, x, -dp).abs().sum().item() == 0.0
+
+
+def _stack(tmp_path=None, level=None):
+    path = DATA / "test_OneZoneWthCtmStack-UseApi.prj"
+    if level is not None:
+        text = path.read_text().replace("  1   0.000   3.000 10 0 0 <1>", level, 1)
+        path = tmp_path / "raised.prj"
+        path.write_text(text)
+    p = read_prj(path)
+    model, state, drivers = project_to_model(p, ambient=dict(p.ambient_conditions, Ta=273.15))
+    solved = steady(model, state, drivers, atol=1e-14)
+    zone = model.net.node_index("singleZone")
+    srcs = SpeciesSources([PressureDrivenSource(zone, 1e-5, 1.0)], species=[0],
+                          layer=model.transport["species"],
+                          heights=model.net.node_attr("z_ref"), g=p.g)
+    drivers = {**drivers, "species.source_multiplier": torch.ones(1, dtype=F64)}
+    return srcs(solved, drivers)["species.sources"][zone].item() / 1e-5, solved, zone, drivers
+
+
+def test_the_pressure_difference_is_ambient_at_the_zone_height_minus_the_zone(tmp_path):
+    """ContamX 3.4.1.7, the one-zone stack at 273.15 K outside: S / G = 0.62552 with the zone
+    on the ground, 0.62963 with the level raised 4 m (ambient static pressure at the zone's
+    reference height minus the zone's)."""
+    dp, solved, zone, _ = _stack()
+    assert dp == pytest.approx(-solved["air.phi"][zone].item(), rel=1e-14)
+    assert dp == pytest.approx(0.62552, rel=1e-4)
+    dp4, solved4, zone4, drivers4 = _stack(tmp_path, "  1   4.000   3.000 10 0 0 <1>")
+    rho_g_z = drivers4["rho_amb"].item() * 9.8055 * 4.0
+    assert dp4 == pytest.approx(-rho_g_z - solved4["air.phi"][zone4].item(), rel=1e-12)
+    assert dp4 == pytest.approx(0.62963, rel=1e-4)
+
+
+def test_a_pressure_driven_source_needs_the_heights():
+    with pytest.raises(ValueError, match="heights"):
+        SpeciesSources([PressureDrivenSource(1, 1e-5, 1.0)], species=[0], layer=_layer(1))
+
+
+def test_the_pressure_driven_source_runs_batched_and_carries_gradients():
+    """Two pressure fields (one zone below ambient, one above) give a (2, n) source; the
+    rate is differentiable in the coefficient and the zone pressure; before any airflow
+    solve (no pressure in the state) nothing enters."""
+    G = torch.tensor(1e-5, dtype=F64, requires_grad=True)
+    srcs = SpeciesSources([PressureDrivenSource(1, G, 0.5)], species=[0], layer=_layer(1),
+                          heights=[0.0, 2.0, 0.0], g=9.8)
+    phi = torch.tensor([[0.0, -30.0, 0.0], [0.0, 1.0, 0.0]], dtype=F64, requires_grad=True)
+    drivers = {**_drivers([1.0], 1), "rho_amb": torch.tensor(1.2, dtype=F64)}
+    state = {"species.x": torch.zeros(2, dtype=F64), "air.phi": phi}
+    S = srcs(state, drivers)["species.sources"]
+    assert srcs.reads_solved_pressure and S.shape == (2, 3)
+    dp = 30.0 - 1.2 * 9.8 * 2.0                      # the zone sits 2 m above the ambient
+    assert S[0, 1].item() == pytest.approx(1e-5 * dp ** 0.5, rel=1e-14)
+    assert S[1].abs().sum().item() == 0.0
+    gG, gphi = torch.autograd.grad(S.sum(), (G, phi))
+    assert gG.item() == pytest.approx(dp ** 0.5, rel=1e-14)
+    assert gphi[0, 1].item() == pytest.approx(-0.5e-5 * dp ** -0.5, rel=1e-12)
+    assert gphi[1].abs().sum().item() == 0.0
+    before = srcs({"species.x": torch.zeros(2, dtype=F64)}, drivers)["species.sources"]
+    assert before.abs().sum().item() == 0.0

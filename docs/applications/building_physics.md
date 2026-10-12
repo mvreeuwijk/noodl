@@ -206,7 +206,10 @@ taken at the zone's absolute pressure, (P_b + P_zone) V / (R T), as ContamX's is
 depressurised by an exhaust fan switching on also gives up a little air. For a project that
 sets `dodMdt`, `project_to_model` gives the contaminants that same zone air mass. The term is
 part of the airflow solve itself (the `ZoneAirMassChange` node source `project_to_model`
-attaches), so a step of any length converges.
+attaches), so a step of any length converges. When the model carries a `ZonePressureDensity`
+closure (CONTAM's `densZP`), `simulate` repeats each step with the latest zone pressures until
+they no longer move; the same repetition runs when a pressure-driven source is present, so the
+source sees the step's own pressures.
 
 `simulate_project(project)` runs a `.prj` the way ContamX does: its run control, its
 schedules, and its weather and ambient files, read from next to the project.
@@ -291,6 +294,7 @@ CONTAM's source and sink models, all in `noodl.apps.building_physics.sources`:
 | `DepositionRateSink(node, rate)` | removal at the rate $k_d$ (1/s) |
 | `PowerLawDecaySource(node, coefficient, exponent, t_p)` | $S = a\,(\max(t, t_p)/1\,\text{h})^{-b}$, $t$ since the start |
 | `PeakEmissionSource(node, peak, width, t_peak)` | $S = a \exp(-\tfrac12 (\ln(t/t_p)/b)^2)$ |
+| `PressureDrivenSource(node, coefficient, exponent)` | $S = G \max(\Delta P, 0)^n$, $\Delta P$ = ambient static pressure at the zone's height minus the zone's |
 
 A source's concentration-proportional part (the $R$ of `ConstantSource`, $G/x_{\text{cut}}$ of
 `CutoffSource`, the two sinks) is handed to the species step as the per-step removal rate
@@ -300,6 +304,9 @@ nonzero one is refused). A source on the ambient or on a zone no airflow path to
 by name. A source's schedule multiplies the whole source, sinks included. A
 source of your own is a callable `source(t, x_full) -> kg/s per node`, or an object with
 `generation(t, x, pressure_difference)` and `removal(t, x, air_mass, density)` methods.
+`SpeciesSources(..., heights=net.node_attr("z_ref"), g=...)` supplies the pressure difference;
+`simulate` and `prj.steady` repeat a step until the source has seen the step's own pressures,
+as ContamX evaluates it.
 
 `SpeciesSources(sources, species=..., layer=...)` is the closure that sums the sources into the
 species layer's `"species.sources"` each step, each on its own species. It evaluates them at

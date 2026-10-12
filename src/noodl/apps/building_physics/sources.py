@@ -159,6 +159,30 @@ class DepositionRateSink(_NodeSource):
         return self._vector(x, self.rate * air_mass[..., self.node])
 
 
+class PressureDrivenSource(_NodeSource):
+    """Entry driven by the pressure difference across the zone's envelope (CONTAM's
+    pressure-driven model: radon, soil gas): S = G max(dP, 0)^n, dP = P_ambient - P_zone at
+    the zone's reference height (Pa). `coefficient` G in kg/(s Pa^n), `exponent` n. Nothing
+    enters while the zone is at or above the ambient pressure (measured against ContamX
+    3.4.1.7, which evaluates it at the step's own pressures)."""
+
+    needs_pressure_difference = True
+
+    def __init__(self, node: int, coefficient, exponent) -> None:
+        super().__init__(node)
+        self.coefficient = torch.as_tensor(coefficient, dtype=F64)
+        self.exponent = torch.as_tensor(exponent, dtype=F64)
+
+    def generation(self, t: float, x: torch.Tensor, pressure_difference) -> torch.Tensor:
+        """G max(dP, 0)^n at the node (kg/s)."""
+        dp = pressure_difference[..., self.node]
+        entering = dp > 0
+        safe = torch.where(entering, dp, torch.ones_like(dp))
+        rate = torch.where(entering, self.coefficient * safe ** self.exponent,
+                           torch.zeros_like(dp))
+        return self._vector(x, rate)
+
+
 class PowerLawDecaySource(_NodeSource):
     """Emission decaying as a power of time (the NRCC power-law model): S = a t_h^(-b) after
     t_p and a t_ph^(-b) before it, t_h being the time since the start in HOURS (measured:
@@ -233,9 +257,16 @@ class SpeciesSources:
     at construction too: an object that is neither a plain callable nor has `generation`;
     a source on a boundary node (the ambient holds no zone air) or on a node no flow edge
     of the layer touches; a deposition velocity sink on a node without a positive volume.
+
+    A source with `needs_pressure_difference = True` (the pressure-driven source) gets
+    P_ambient - P at each node's reference height (Pa), from `state[pressure_key]` with
+    `heights` (m) and `g` (m/s2), and zero before the first airflow solve. Such a closure
+    reports `reads_solved_pressure`, and `simulate` and `prj.steady` repeat a step until the
+    pressure it read is the step's own.
     """
 
-    def __init__(self, sources, *, species, layer, names=None) -> None:
+    def __init__(self, sources, *, species, layer, names=None, heights=None,
+                 g: float = 9.80665, pressure_key: str = "air.phi") -> None:
         self.sources, self.species = list(sources), [int(k) for k in species]
         if len(self.species) != len(self.sources):
             raise ValueError("SpeciesSources: one species index per source")
@@ -245,6 +276,14 @@ class SpeciesSources:
         self.key = f"{layer.name}.source_multiplier"
         self.capacity_key = f"{layer.name}.capacity"
         self.removes = any(hasattr(s, "removal") for s in self.sources)
+        self.reads_solved_pressure = any(
+            getattr(s, "needs_pressure_difference", False) for s in self.sources)
+        if self.reads_solved_pressure and heights is None:
+            raise ValueError("SpeciesSources: a pressure-driven source needs `heights`, every "
+                             "node's reference height (m), to place the ambient pressure at "
+                             "its zone")
+        self.heights = None if heights is None else torch.as_tensor(heights, dtype=F64)
+        self.g, self.pressure_key = float(g), pressure_key
         self.volumes = torch.as_tensor(layer.net.node_attr("volume", default=0.0), dtype=F64)
         self._check_sources()
         self.inputs = ("time", self.key)
@@ -298,6 +337,18 @@ class SpeciesSources:
                            unit="-", over=self.names),
         }
 
+    def _pressure_difference(self, state, drivers) -> torch.Tensor | None:
+        """P_ambient(z) - P(z) at every node (Pa): the ambient's static pressure at the
+        node's reference height minus the node's own, from `state[pressure_key]` (the
+        potential at each node's reference height). None before the first airflow solve."""
+        phi = state.get(self.pressure_key)
+        if phi is None:
+            return None
+        amb = int(self.layer.boundary_idx[0])
+        rho_amb = torch.as_tensor(drivers["rho_amb"], dtype=F64).unsqueeze(-1)
+        z = self.heights
+        return phi[..., amb:amb + 1] - rho_amb * self.g * (z - z[amb]) - phi
+
     def __call__(self, state, drivers):
         lay, name = self.layer, self.layer.name
         try:
@@ -315,8 +366,11 @@ class SpeciesSources:
         xb = xb if xb.dim() >= 2 and xb.shape[-1] == K else xb.unsqueeze(-1)
         mult = torch.as_tensor(drivers[self.key], dtype=x_i.dtype)
         cap = torch.as_tensor(drivers.get(self.capacity_key, lay.capacity), dtype=x_i.dtype)
+        dp = self._pressure_difference(state, drivers) if self.reads_solved_pressure else None
         batch = torch.broadcast_shapes(x_i.shape[:-2], xb.shape[:-2], mult.shape[:-1],
-                                       cap.shape[:-1])
+                                       cap.shape[:-1], *(() if dp is None else (dp.shape[:-1],)))
+        if self.reads_solved_pressure and dp is None:
+            dp = torch.zeros(batch + (n,), dtype=x_i.dtype)   # no entry before the first solve
         full = torch.zeros(batch + (n, K), dtype=x_i.dtype)
         full = full.index_copy(-2, lay.interior_idx, x_i.expand(batch + x_i.shape[-2:]))
         full = full.index_copy(-2, lay.boundary_idx, xb.expand(batch + xb.shape[-2:]))
@@ -331,7 +385,7 @@ class SpeciesSources:
         for j, (src, k) in enumerate(zip(self.sources, self.species, strict=True)):
             m, xk = mult[..., j:j + 1], full[..., k]
             if hasattr(src, "generation"):
-                gen[k] = gen[k] + m * src.generation(t, xk, None)
+                gen[k] = gen[k] + m * src.generation(t, xk, dp)
             else:
                 kw = {"step": step} if getattr(src, "step_integrated", False) else {}
                 gen[k] = gen[k] + m * src(t, xk, **kw)

@@ -1651,7 +1651,10 @@ def steady(model: Model, state, drivers, *, rtol: float = 1e-12, max_iter: int =
            **solve_kwargs):
     """`model.steady`, repeated to a fixed point when the model carries a
     `ZonePressureDensity` closure (a `.prj` with `densZP = 1`, or with `dodMdt = 1`, whose
-    zone air mass alone carries the zone pressure); one call otherwise.
+    zone air mass alone carries the zone pressure) or a closure that reads the solved
+    pressure (`reads_solved_pressure`, e.g. a pressure-driven source); one call otherwise.
+    Such a reader does not feed back into the airflow, so without `ZonePressureDensity` one
+    extra pass suffices.
 
     Each pass feeds the previous pass's `"air.phi"` back to the closure. The loop stops when
     no node pressure moves by more than `rtol * Pb` -- a relative change in density of
@@ -1663,10 +1666,14 @@ def steady(model: Model, state, drivers, *, rtol: float = 1e-12, max_iter: int =
     if max_iter < 1:
         raise ValueError(f"prj.steady: max_iter must be at least 1, got {max_iter!r}")
     zp = [c for c in model.closures if isinstance(c, ZonePressureDensity)]
+    readers = [type(c).__name__ for c in model.closures
+               if getattr(c, "reads_solved_pressure", False)]
     out = model.steady(state, drivers, **solve_kwargs)
-    if not zp:
+    if not zp and not readers:
         return out
-    key, Pb = zp[0].key, zp[0].Pb
+    key, Pb = (zp[0].key, zp[0].Pb) if zp else ("air.phi", 101325.0)
+    cause = " and ".join((["the zone-pressure density"] if zp else [])
+                         + [f"the pressure reader {r}" for r in readers])
     for _ in range(max_iter):
         new = model.steady({**state, key: out[key]}, drivers, **solve_kwargs)
         change = (new[key] - out[key]).abs().max().item()
@@ -1674,6 +1681,7 @@ def steady(model: Model, state, drivers, *, rtol: float = 1e-12, max_iter: int =
         if change <= rtol * Pb:
             return out
     raise RuntimeError(
-        f"prj.steady: the zone-pressure density did not converge in {max_iter} passes "
+        f"prj.steady: the zone pressures fed back to {cause} did not converge in "
+        f"{max_iter} passes "
         f"(last pressure change {change:.3e} Pa > rtol * Pb = {rtol * Pb:.3e} Pa)"
     )

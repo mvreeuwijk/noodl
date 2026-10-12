@@ -86,7 +86,8 @@ step's start mass. For a `dodMdt` project with species it also adds
 a `ZonePressureDensity(densities=False)` closure, which scales the species layer's capacity (the
 zone air mass) and leaves the densities at `Pb`. Whenever the model carries a
 `ZonePressureDensity` closure, `prj.steady(model, state, drivers)` repeats `model.steady` to the
-pressure fixed point, and so does each step of `simulate`; otherwise it is a single call. The
+pressure fixed point, and so does each step of `simulate`; they do the same for a closure that
+reads the solved pressure (a pressure-driven source); otherwise it is a single call. The
 zone-pressure density term is small in the density (|P_zone| / Pb,
 ~1e-5) but a stack flow is driven by a density *difference*, which amplifies it: on a 20 K stack
 it is 4e-5 of the flow.
