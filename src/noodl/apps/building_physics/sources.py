@@ -256,8 +256,9 @@ class SpeciesSources:
     The per-step `"<layer>.removal"` replaces the layer's construction-time `removal`, so a
     layer with a nonzero one is refused when a source has a removal part. Refused by name
     at construction too: an object that is neither a plain callable nor has `generation`;
-    a source on a boundary node (the ambient holds no zone air) or on a node no flow edge
-    of the layer touches; a deposition velocity sink on a node without a positive volume.
+    a source on a boundary node (the ambient holds no zone air), on a node no flow edge
+    of the layer touches, or on a storage-free node of the layer (a zero-volume plenum holds
+    no air); a deposition velocity sink on a node without a positive volume.
 
     A source with `needs_pressure_difference = True` (the pressure-driven source) gets
     P_ambient - P at each node's reference height (Pa), from `state[pressure_key]` with
@@ -326,6 +327,7 @@ class SpeciesSources:
         nodes = lay.net.nodes
         boundary = set(lay.boundary_idx.tolist())
         inactive = set(lay.inactive_idx.tolist())
+        storage_free = set(lay.interior_idx[lay.storage_free_mask].tolist())
         for label, src in zip(self.names, self.sources, strict=True):
             what = f"SpeciesSources: {label} ({type(src).__name__})"
             if not (hasattr(src, "generation") or callable(src)):
@@ -344,6 +346,10 @@ class SpeciesSources:
                 raise ValueError(f"{what} is on node {name!r}, which no flow edge of the "
                                  f"layer {lay.name!r} touches: the layer holds no "
                                  f"concentration there")
+            if node in storage_free:
+                raise ValueError(f"{what} is on the storage-free node {name!r} of the layer "
+                                 f"{lay.name!r}: it holds no air to emit into or remove from, "
+                                 f"so put the source in a zone that stores air")
             if getattr(src, "needs_volume", False) and not self.volumes[node] > 0:
                 raise ValueError(f"{what} is on node {name!r}, which has no positive volume: "
                                  f"the density the sink needs is the air mass over it")
@@ -435,7 +441,10 @@ class SpeciesSources:
         out = {f"{name}.sources": sources if axis else sources[..., 0]}
         if self.removes:
             R = torch.stack(rem, dim=-1).index_select(-2, lay.interior_idx)
-            out[f"{name}.removal"] = R / cap.unsqueeze(-1)
+            # A storage-free node may have zero capacity, and no source sits on one (refused
+            # at construction): the 1 there only keeps 0 / 0 out of its removal rate.
+            held = torch.where(cap > 0, cap, torch.ones_like(cap))
+            out[f"{name}.removal"] = R / held.unsqueeze(-1)
         return out
 
 

@@ -133,6 +133,18 @@ the storage at the state's own time, which `Model.initial_capacities(state, driv
 querying the closures. The `"exact"` scheme has no changing-capacity form and raises by name if
 `capacity_prev` differs from `capacity`.
 
+**Storage-free nodes.** `storage_free=[...]` names interior nodes that hold no amount, such as a
+zero-volume air-handler plenum. Their balance is algebraic in every step: what flows in flows out
+within the step, so their value is the flow-weighted mix of what enters. A storage-free node with
+nothing passing through it (no flow and no conduction) keeps its value, as ContamX holds the
+plenum of a switched-off air handler. A source at such a node (a heating coil in a plenum) is
+carried on by the flow through it within the step. Their capacity, at construction or per step, may be 0
+(a negative one is refused everywhere, and a zero one at any other node). Removal and kinetics act
+on a stored amount, so they do not act on these nodes. Only `scheme="implicit"` and `steady` can
+hold them: the exponential and trapezoidal steps have no algebraic form, so a layer with either
+scheme refuses storage-free nodes at construction. A `steady` solve with nothing passing through
+such a node is singular. `layer.storage_free_mask` is the `(n_i,)` boolean mask of these nodes.
+
 **Linear solver.** The `"implicit"` and `"trapezoidal"` schemes each need one linear solve per
 step (`"exact"` has none). `linear_solver` names it: `"auto"` (the default), `"gmres"`,
 `"gmres_jacobi"`, `"gmres_ilu"`, `"sparse_direct"` or `"direct"`, resolved fresh on every solve

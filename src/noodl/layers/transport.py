@@ -259,20 +259,28 @@ def _linear_solve(
 
 
 class _AffineSystemOperator:
-    """(I - alpha * M): built from an AdvectionOperator, satisfying the LinearOperator
+    """(S - alpha * M): built from an AdvectionOperator, satisfying the LinearOperator
     duck type solvers.select.solve reads (matvec, rmatvec, diagonal, shape, dtype,
     device, symmetric, assemble, spd_certificate). Used for both the implicit scheme
     (alpha = dt) and the trapezoidal scheme (alpha = dt / 2), and passed to
     _linear_solve exactly like a bare AdvectionOperator is for steady() -- the adjoint
     derivation does not care what concrete operator "A" is, only that it exposes
     matvec/rmatvec/diagonal/assemble/spd_certificate.
+
+    `S` is the diagonal of per-row storage weights: the identity unless the layer has
+    storage-free nodes, whose rows are algebraic balances (weight 0) while flow passes
+    through them (see `TransportLayer._storage_stacked`).
     """
 
     symmetric = False
 
-    def __init__(self, M: AdvectionOperator, alpha: float) -> None:
+    def __init__(self, M: AdvectionOperator, alpha: float,
+                 storage: torch.Tensor | None = None) -> None:
         self.M = M
         self.alpha = alpha
+        # (..., m) weights of the identity: 1 where a row stores, 0 on a storage-free
+        # node's algebraic row. None is the plain identity.
+        self.storage = storage
         self.shape = M.shape
         self.dtype = M.dtype
         self.device = M.device
@@ -283,23 +291,30 @@ class _AffineSystemOperator:
         self._eye_idx: torch.Tensor | None = None
 
     def matvec(self, x: torch.Tensor) -> torch.Tensor:
-        return x - self.alpha * self.M.matvec(x)
+        own = x if self.storage is None else self.storage * x
+        return own - self.alpha * self.M.matvec(x)
 
     def rmatvec(self, y: torch.Tensor) -> torch.Tensor:
-        return y - self.alpha * self.M.rmatvec(y)
+        own = y if self.storage is None else self.storage * y
+        return own - self.alpha * self.M.rmatvec(y)
 
     def diagonal(self) -> torch.Tensor:
-        return 1.0 - self.alpha * self.M.diagonal()
+        own = 1.0 if self.storage is None else self.storage
+        return own - self.alpha * self.M.diagonal()
 
     def assemble(self):
         dense = self.M.assemble()
         m = dense.shape[-1]
-        eye = torch.eye(m, dtype=dense.dtype, device=dense.device)
+        if self.storage is None:
+            eye = torch.eye(m, dtype=dense.dtype, device=dense.device)
+        else:
+            eye = torch.diag_embed(torch.broadcast_to(self.storage, dense.shape[:-1]))
         return eye - self.alpha * dense
 
     def assemble_sparse(self):
-        """COO `(row, col, values)` for `I - alpha * M`: `M`'s own sparse form with
-        an identity diagonal added, `None` propagating unchanged if `M` has none to give.
+        """COO `(row, col, values)` for `S - alpha * M`: `M`'s own sparse form with
+        the storage diagonal (the identity unless the layer has storage-free nodes) added,
+        `None` propagating unchanged if `M` has none to give.
 
         DUPLICATES are how the identity and `M`'s diagonal entries combine: `M`'s own COO
         form already carries duplicate (row, col) pairs at a diagonal position (e.g. an Out
@@ -315,7 +330,12 @@ class _AffineSystemOperator:
         if self._eye_idx is None or self._eye_idx.device != row.device:
             self._eye_idx = torch.arange(m, dtype=torch.int64, device=row.device)
         eye_idx = self._eye_idx
-        ones = torch.ones(*values.shape[:-1], m, dtype=values.dtype, device=values.device)
+        if self.storage is None:
+            ones = torch.ones(*values.shape[:-1], m, dtype=values.dtype, device=values.device)
+        else:
+            batch = torch.broadcast_shapes(values.shape[:-1], self.storage.shape[:-1])
+            ones = torch.broadcast_to(self.storage, batch + (m,)).to(values.dtype)
+            values = values.expand(batch + values.shape[-1:])
         return (
             torch.cat([eye_idx, row]),
             torch.cat([eye_idx, col]),
@@ -349,6 +369,14 @@ class TransportLayer:
     ``method="gmres"`` above it, falling back to ``gmres`` (never raising) when SciPy is
     absent or when a grad-requiring ``on_failure="return"`` solve would otherwise refuse; see
     ``_resolve_solver`` for the full rule and both hazards.
+
+    STORAGE-FREE NODES (``storage_free``): interior nodes that hold no amount, e.g. a
+    zero-volume air-handler plenum. Their balance is algebraic in every step (inflow equals
+    outflow, so their value is the flow-weighted mix of what enters), and a storage-free
+    node with nothing passing through it (no flow, no conduction) keeps its value. Their
+    capacity may be 0; removal and kinetics do not act on them. Only ``scheme="implicit"``
+    (and ``steady``) can hold them; a ``steady`` with nothing passing through such a node
+    is singular. ``storage_free_mask`` is ``(n_i,)`` bool, True at those nodes.
     """
 
     #: The differentiable operator coefficients a layer owns, in the fixed order the
@@ -422,6 +450,7 @@ class TransportLayer:
         conduction_kind: str | None = None,
         conductance: torch.Tensor | None = None,
         dilution: torch.Tensor | float | None = None,
+        storage_free: Sequence[Node] = (),
         scheme: Literal["exact", "implicit", "trapezoidal"] = "exact",
         linear_solver: str = "auto",
         quantity: str = "scalar",
@@ -480,14 +509,16 @@ class TransportLayer:
         self.n_i = int(self.interior_idx.shape[0])
         self.n_b = int(self.boundary_idx.shape[0])
         self._inactive_names = [net.nodes[i] for i in self.inactive_idx.tolist()]
+        self.storage_free_mask = self._storage_free_mask(net, name, storage_free, scheme)
 
-        self.capacity = torch.as_tensor(capacity, dtype=net.dtype)
-        if self.capacity.dim() == 0 or self.capacity.shape[-1] != self.n_i:
-            cap_len = self.capacity.shape[-1] if self.capacity.dim() >= 1 else 0
+        capacity = torch.as_tensor(capacity, dtype=net.dtype)
+        if capacity.dim() == 0 or capacity.shape[-1] != self.n_i:
+            cap_len = capacity.shape[-1] if capacity.dim() >= 1 else 0
             raise ValueError(
                 f"TransportLayer '{name}': capacity has {cap_len} entries, "
                 f"expected {self.n_i} active interior nodes"
             )
+        self.capacity = self._effective(capacity)
         self.carrier = torch.as_tensor(carrier, dtype=net.dtype)
 
         b_flow = 0
@@ -616,6 +647,77 @@ class TransportLayer:
             )
         self._interior_of_node = torch.full((net.n,), -1, dtype=torch.long)
         self._interior_of_node[self.interior_idx] = torch.arange(self.n_i, dtype=torch.long)
+
+    def _storage_free_mask(self, net: Network, name: str, storage_free: Sequence[Node],
+                           scheme: str) -> torch.Tensor:
+        """`(n_i,)` bool: True at the interior nodes that hold no amount."""
+        mask = torch.zeros(self.n_i, dtype=torch.bool, device=self.interior_idx.device)
+        nodes = net.canonical(list(storage_free)) if storage_free else []
+        if not nodes:
+            return mask
+        position = {int(i): k for k, i in enumerate(self.interior_idx.tolist())}
+        outside = [n for n in nodes if net.node_index(n) not in position]
+        if outside:
+            raise ValueError(
+                f"TransportLayer '{name}': storage_free nodes {outside} are not active "
+                f"interior nodes of this layer"
+            )
+        if scheme != "implicit":
+            raise ValueError(
+                f"TransportLayer '{name}': storage-free nodes {nodes} hold no amount, so "
+                f"their balance is algebraic in every step; that needs scheme='implicit', "
+                f"got {scheme!r}"
+            )
+        for n in nodes:
+            mask[position[net.node_index(n)]] = True
+        return mask
+
+    def _effective(self, cap: torch.Tensor) -> torch.Tensor:
+        """`cap` with 1 at the storage-free nodes: their rows are balances of amount rates,
+        which a unit capacity leaves unchanged."""
+        if not bool(self.storage_free_mask.any()):
+            return cap
+        free = self.storage_free_mask.to(cap.device)
+        return torch.where(free, torch.ones_like(cap), cap)
+
+    def _stored_only(self, rates: torch.Tensor | None, trailing: int) -> torch.Tensor | None:
+        """`rates` (node rows, then `trailing` species axes) with the storage-free rows set
+        to 0: removal and reactions act on a stored amount, and these nodes hold none.
+        Replaced with `torch.where`, not multiplied by a mask, so that a rate a caller
+        computed as 0 / 0 at a zero capacity never reaches the solve as NaN."""
+        if rates is None or not bool(self.storage_free_mask.any()):
+            return rates
+        free = self.storage_free_mask.to(rates.device).reshape((-1,) + (1,) * trailing)
+        return torch.where(free, torch.zeros_like(rates), rates)
+
+    def _storage_stacked(
+        self, q: torch.Tensor, dtype: torch.dtype, conductance: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
+        """`(..., K * n_i)`, stacked like the state: 0 on the row of a storage-free node
+        that flow or conduction passes through this step (its algebraic balance), 1
+        elsewhere. A storage-free node with nothing passing through it keeps its value: its
+        row is `x_new = x_old`. `None` when the layer has no storage-free nodes. A 0/1
+        switch on the flows, so it carries no gradient."""
+        if not bool(self.storage_free_mask.any()):
+            return None
+        with torch.no_grad():
+            a = q.abs().to(dtype)
+            full = torch.zeros(a.shape[:-1] + (self.net.n,), dtype=dtype, device=a.device)
+            full = full.index_add(-1, self._flow_tgt, a).index_add(-1, self._flow_src, a)
+            if conductance is not None:
+                csrc, ctgt, _ = self._conduction_edges
+                g = conductance.abs().to(dtype)
+                cond = torch.zeros(g.shape[:-1] + (self.net.n,), dtype=dtype, device=g.device)
+                full = full + cond.index_add(-1, ctgt, g).index_add(-1, csrc, g)
+            through = full.index_select(-1, self.interior_idx)
+            algebraic = self.storage_free_mask.to(through.device) & (through > 0)
+            s = torch.where(algebraic, torch.zeros_like(through), torch.ones_like(through))
+        s = s.unsqueeze(-2).expand(*s.shape[:-1], self.n_species, self.n_i)
+        return s.reshape(*s.shape[:-2], self.n_species * self.n_i)
+
+    def _storage_free_stacked(self, device: torch.device) -> torch.Tensor:
+        """`storage_free_mask` stacked like the state, `(K * n_i,)`."""
+        return self.storage_free_mask.to(device).repeat(self.n_species)
 
     def _resolve_solver(
         self, batch_size: int, *, op=None, rhs: torch.Tensor | None = None,
@@ -783,7 +885,10 @@ class TransportLayer:
         passed in by `Model._pass` from the driver `"<layer>.capacity"`. It must be strictly
         POSITIVE on every active interior node: a node with zero capacity cannot hold a
         concentration at all (its `dx/dt = .../V` is infinite), which is a modelling error
-        to name, not a division to let through.
+        to name, not a division to let through. The one exception is a storage-free node
+        (`storage_free`), which holds nothing and may have zero capacity; it is given the
+        unit stand-in capacity its algebraic row is written with. A negative capacity is
+        refused everywhere.
         """
         if capacity is None:
             return self.capacity
@@ -794,7 +899,8 @@ class TransportLayer:
                 f"TransportLayer '{self.name}': capacity has {got} entries "
                 f"(shape {tuple(cap.shape)}), expected {self.n_i} active interior nodes"
             )
-        nonpositive = cap <= 0
+        free = self.storage_free_mask.to(cap.device)
+        nonpositive = (cap < 0) | ((cap <= 0) & ~free)
         if bool(nonpositive.any()):
             flat = nonpositive.reshape(-1, nonpositive.shape[-1]).any(0)
             names = [
@@ -805,7 +911,7 @@ class TransportLayer:
                 f"TransportLayer '{self.name}': capacity must be strictly positive on "
                 f"every active interior node; non-positive at {names}"
             )
-        return cap
+        return self._effective(cap)
 
     def _advection_operator(
         self,
@@ -827,9 +933,14 @@ class TransportLayer:
             csrc, ctgt, _ = self._conduction_edges
             conduction = (csrc, ctgt, coefficients["conductance"].to(dtype))
         cap = self.capacity if capacity is None else capacity
-        kinetics = coefficients.get("kinetics")
-        removal = self._with_dilution(
-            coefficients.get("removal"), coefficients.get("dilution"), q, cap.to(dtype)
+        # Removal, kinetics and the dilution rate act on a stored amount; a storage-free
+        # node holds none, so its rows carry none of them.
+        kinetics = self._stored_only(coefficients.get("kinetics"), 2)
+        removal = self._stored_only(
+            self._with_dilution(
+                coefficients.get("removal"), coefficients.get("dilution"), q, cap.to(dtype)
+            ),
+            1,
         )
         return AdvectionOperator(
             src, tgt,
@@ -902,7 +1013,7 @@ class TransportLayer:
         dtype = q.dtype
         # `cap_t` names the resolved per-step capacity, as in `rate`, `step`, `steady`,
         # `_implicit_step_sparse` and `_trapezoidal_step_sparse`.
-        cap_t = self.capacity if capacity is None else capacity
+        cap_t = self._effective(self.capacity if capacity is None else capacity)
         Up = self._selectors(net.upwind, q).to(dtype)    # (..., b_flow, n)
         Dn = self._selectors(net.downwind, q).to(dtype)  # (..., b_flow, n)
         w = self.carrier.to(dtype) * q.abs()            # (..., b_flow)
@@ -932,7 +1043,9 @@ class TransportLayer:
         Gii = Gii / cap
         Gib = Gib / cap
 
-        removal = self._with_dilution(self.removal, self.dilution, q, cap_t.to(dtype))
+        removal = self._stored_only(
+            self._with_dilution(self.removal, self.dilution, q, cap_t.to(dtype)), 1
+        )
         if removal is not None:
             Gii = Gii - torch.diag_embed(removal.transpose(-1, -2))
 
@@ -940,9 +1053,10 @@ class TransportLayer:
         M_block = torch.einsum("kl,...kij->...kilj", eyeK, Gii)   # (..., K, n_i, K, n_i)
         N_block = torch.einsum("kl,...kij->...kilj", eyeK, Gib)   # (..., K, n_i, K, n_b)
 
-        if self.kinetics is not None:
+        kinetics = self._stored_only(self.kinetics, 2)
+        if kinetics is not None:
             eye_i = torch.eye(n_i, dtype=dtype)
-            M_block = M_block + torch.einsum("ikl,ij->kilj", self.kinetics.to(dtype), eye_i)
+            M_block = M_block + torch.einsum("ikl,ij->kilj", kinetics.to(dtype), eye_i)
 
         batch = M_block.shape[:-4]
         M = M_block.reshape(*batch, K * n_i, K * n_i)
@@ -1370,7 +1484,13 @@ class TransportLayer:
         because `F(x_n) / V_new = M_new x_n + N_new x_b + s / V_new` already IS `b0` plus the
         capacity-divided `M_new x_n` -- there is no separate old-capacity operator to build.
         `capacity_prev` defaults to `capacity` (fixed storage), which recovers the classic
-        `x_{n+1} - x_n = dt b0` step bit for bit (ratio == 1)."""
+        `x_{n+1} - x_n = dt b0` step bit for bit (ratio == 1).
+
+        Storage-free nodes weight the identity and the old state by `S`
+        (`_storage_stacked`): `(S - dt M_new) x_{n+1} = S (V_old / V_new) x_n + dt b0`, so a
+        row that flow passes through is the algebraic balance `0 = M x + b0`, and a row
+        nothing passes through stays `x_{n+1} = x_n`. Without such nodes `S` is `None` and
+        the code path is the one above."""
         dtype = torch.float64
         x = x.to(dtype)
         q = q.to(dtype)
@@ -1389,8 +1509,16 @@ class TransportLayer:
             cap = self._capacity_stacked(dtype, cap_)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
             ratio = self._capacity_stacked(dtype, cap_prev_) / cap        # V_old / V_new
-            rhs = ratio * x_s + dt * b0
-            system = _AffineSystemOperator(op, dt)
+            coef_map = dict(zip(names, coef_, strict=True))
+            storage = self._storage_stacked(q_, dtype, coef_map.get("conductance"))
+            if storage is None:
+                rhs = ratio * x_s + dt * b0
+            else:
+                # A storage-free row nothing passes through is `x_new = x_old` exactly: its
+                # operator row is empty, and a source there has nowhere to go.
+                held = self._storage_free_stacked(storage.device) & (storage > 0)
+                rhs = torch.where(held, x_s, storage * ratio * x_s + dt * b0)
+            system = _AffineSystemOperator(op, dt, storage=storage)
             return system, rhs
 
         if on_failure == "return":

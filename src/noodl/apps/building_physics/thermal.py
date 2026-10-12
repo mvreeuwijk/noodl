@@ -95,10 +95,18 @@ def add_zone(net: Network | Component, zone: Zone, *, ambient="ambient") -> None
 
 def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
                   flow_kinds=("airpath",), conduction_kind: str = "wall", c_p: float = CP_AIR,
-                  rho: float = RHO_0, scheme: str = "exact",
-                  fixed_temperature=()) -> TransportLayer:
+                  rho: float = RHO_0, scheme: str | None = None,
+                  fixed_temperature=(), storage_free: Sequence = ()) -> TransportLayer:
     """The heat layer: capacity rho c_p V + heat_capacity per active interior node, carrier
-    c_p on the flow kinds, conduction UA on `conduction_kind` edges (if any exist)."""
+    c_p on the flow kinds, conduction UA on `conduction_kind` edges (if any exist).
+
+    `storage_free` names nodes that hold no heat (a zero-volume air-handler plenum): their
+    capacity may be zero, and they need the implicit scheme. `scheme` defaults to "exact",
+    or to "implicit" when `storage_free` names any node; an explicit other scheme with
+    storage-free nodes is refused by name.
+    """
+    if scheme is None:
+        scheme = "implicit" if storage_free else "exact"
     boundary = [ambient, *fixed_temperature]
     kinds = tuple(flow_kinds)
     has_walls = conduction_kind in net.edge_kinds()
@@ -111,10 +119,11 @@ def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
     )
     capacity = (rho * c_p * net.node_attr("volume", default=0.0)
                 + net.node_attr("heat_capacity", default=0.0))[interior]
+    free = set(net.canonical(list(storage_free))) if storage_free else set()
     bad = [
         net.nodes[i]
         for i, c in zip(interior.tolist(), capacity.tolist(), strict=True)
-        if c <= 0
+        if c <= 0 and net.nodes[i] not in free
     ]
     if bad:
         raise ValueError(
@@ -127,13 +136,15 @@ def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
         conductance=net.edge_attr("ua", conduction_kind) if has_walls else None,
         scheme=scheme, quantity="temperature", unit="K",
         source_unit="W", capacity_unit="J/K", flow_unit="kg/s",
+        storage_free=tuple(storage_free),
     )
 
 
 def species_layer(net: Network, *, ambient="ambient", name: str = "species",
                   flow_kinds=("airpath",), rho: float | torch.Tensor = RHO_0,
                   n_species: int = 1, scheme: str = "implicit",
-                  species_names=None, transmission=None, kinetics=None) -> TransportLayer:
+                  species_names=None, transmission=None, kinetics=None,
+                  storage_free: Sequence = ()) -> TransportLayer:
     """Species as mass fractions with zone air mass rho V as capacity (CONTAM convention).
 
     `rho` is one density for every node or a full-node `(n,)` tensor of per-node densities
@@ -141,15 +152,17 @@ def species_layer(net: Network, *, ambient="ambient", name: str = "species",
     `transmission` (`(b_flow, K)`, the pass fraction 1 - efficiency of each flow edge's
     filter; `filter_transmission` builds it) and `kinetics` (`(n_i, K, K)`, each zone's
     first-order reactions; `reaction_kinetics` builds it) go to the `TransportLayer`
-    unchanged.
+    unchanged. `storage_free` names nodes that hold no air (a zero-volume air-handler
+    plenum): their volume may be zero, and the layer must use `scheme="implicit"`.
     """
     kinds = tuple(flow_kinds)
     interior, _ = active_interior(net, kinds, [ambient])
     capacity = (rho * net.node_attr("volume", default=0.0))[interior]
+    free = set(net.canonical(list(storage_free))) if storage_free else set()
     bad = [
         net.nodes[i]
         for i, c in zip(interior.tolist(), capacity.tolist(), strict=True)
-        if c <= 0
+        if c <= 0 and net.nodes[i] not in free
     ]
     if bad:
         raise ValueError(f"species layer {name!r}: nodes {bad} have zero volume")
@@ -157,7 +170,7 @@ def species_layer(net: Network, *, ambient="ambient", name: str = "species",
         net, name, capacity=capacity, flow_kind=kinds, boundary=[ambient], n_species=n_species,
         scheme=scheme, quantity="mass_fraction", unit="kg/kg", species_names=species_names,
         source_unit="kg/s", capacity_unit="kg", flow_unit="kg/s",
-        transmission=transmission, kinetics=kinetics,
+        transmission=transmission, kinetics=kinetics, storage_free=tuple(storage_free),
     )
 
 
@@ -224,7 +237,7 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
                 species: int | Sequence[str] = 0, density: str = "ideal_gas",
                 density_kwargs=None,
                 coupling: str = "pingpong", iterate_tol=None, iterate_max: int = 20,
-                thermal_scheme: str = "exact", species_scheme: str = "implicit",
+                thermal_scheme: str | None = None, species_scheme: str = "implicit",
                 flow_kinds=None, return_inputs: bool = False):
     """Layers "air" (+ "thermal", + "species"), the density closure, one Model.
 
@@ -258,6 +271,9 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
     but every kind named must be one the air layer actually provides, or the narrowing is a
     typo that silently drops advection. Unknown kinds raise `KeyError` naming them. The same
     value governs BOTH the thermal and the species layer.
+
+    `thermal_scheme` defaults to `thermal_layer`'s own default ("exact", or "implicit" when
+    the layer has storage-free nodes).
     """
     element_kinds = tuple(el.kind for el in air_elements)
     kinds = tuple(flow_kinds) if flow_kinds else element_kinds
