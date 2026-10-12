@@ -2,14 +2,15 @@
 
 What is read: run control (ambient conditions, g, the steady simulation's day and time, the
 transient run's dates, time step and day type, the weather and ambient-concentration file
-names, the density options), species and their default ambient concentrations, levels, day
-and week schedules, wind pressure profiles, airflow elements (power-law family, quadratic
-family, doorways, dampers, constant-flow fans and the cubic fan), zones and their temperature
-schedules, initial zone concentrations, airflow paths with their schedules (flow multipliers)
+names, the density options), the contaminants list and the species records, kinetic
+reactions and the zones that carry them, levels, day and week schedules, wind pressure
+profiles, airflow elements (power-law family, quadratic family, doorways, dampers,
+constant-flow fans and the cubic fan), zones and their temperature schedules, initial zone
+concentrations, airflow paths with their schedules (flow multipliers)
 and constant wind pressures, source/sink elements and source/sinks of the constant, cutoff,
 decaying and burst types. Everything else is skipped to its -999 terminator; a RECORD that
-references a skipped section by a nonzero index (control, filter, kinetic reaction, AHS)
-raises ValueError naming it, as does a CFD or 1-D zone, a zone held at constant pressure, a
+references a skipped section by a nonzero index (control, filter, AHS) raises ValueError
+naming it, as does a non-trace species, a CFD or 1-D zone, a zone held at constant pressure, a
 duct network, an unsupported element type, a constant wind pressure on an interior path, a
 schedule on a fan curve and a fan curve on a path with mult != 1. A schedule number that no
 week schedule carries raises KeyError naming the zone or path.
@@ -66,6 +67,7 @@ from torch import Tensor
 
 from noodl.apps.building_physics.inputs import Input, apply_inputs, bind_inputs
 from noodl.apps.building_physics.schedules import Calendar, DaySchedule, WeekSchedule
+from noodl.apps.building_physics.species import KineticReaction, Species, reaction_kinetics
 from noodl.apps.building_physics.thermal import R_AIR, RHO_0, species_layer
 from noodl.apps.building_physics.wth import _DAYS_BEFORE_MONTH
 from noodl.drives import ConstantDrive, Stack, Wind, WindProfile
@@ -111,8 +113,15 @@ MU_0 = 1.81625e-5
 #                   time step and output step; dates are `MmmDD` (`Jan01`), times `hh:mm:ss`.
 #   section header  `N ! <name>:`; the section's N records then run to a `-999` line.
 #                   `! contaminants:` is the exception: N index lines and NO terminator.
-#   species         `# s t molwt mdiam edens decay Dm CCdef Cp Kuv u[5] name` + description.
-#                   `CCdef` (field 8) is the default ambient mass fraction (kg/kg).
+#   contaminants    `N ! contaminants:` then the N species NUMBERS that are simulated, in the
+#                   order ContamX reports them (one line, no -999).
+#   species         `# s t molwt mdiam edens decay Dm CCdef Cp Kuv u[5] name`, then a
+#                   description line: `s` 1 simulated / 0 not, `t` 1 non-trace / 0 trace;
+#                   `CCdef` (field 8) is the default ambient mass fraction (kg/kg); `decay`
+#                   is ContamW-only data that ContamX does not apply (measured).
+#   kinetic reaction `nr nkrd name`, a description line, then `nkrd` lines
+#                   `product reactant coefficient` (1/s); dx_product/dt += coefficient
+#                   x_reactant (measured).
 #   day schedule    `# npts shap utyp ucnv name`, a description line (may be blank), then
 #                   `npts` rows `hh:mm:ss value` from 00:00:00 to 24:00:00. `shap` 0 is
 #                   rectangular, 1 trapezoidal; values are SI (K for a temperature schedule),
@@ -147,6 +156,7 @@ MU_0 = 1.81625e-5
 #     plr_bdq/bdf   `lam Cp xp Cn xn ...`
 #   zone            19 fields: `# f s# c# k# l# relHt Vol T0 P0 name clr uH uT uP uV axs
 #                   cdvf cfd`. `clr` is not in ContamW's own header comment but IS written.
+#                   `k#` (field 4) is the zone's kinetic reaction number, 0 for none.
 #                   `s#` is a week schedule of the zone's temperature (K). `f` is a bit set;
 #                   value 1 is the variable-pressure bit: without it ContamX holds the zone at
 #                   constant pressure (measured on ContamX 3.4.1.7: flags 0 and 2 give no flow
@@ -339,6 +349,10 @@ class Project:
     # Each zone's flag bits as the file gives them, by zone name.
     zone_flags: dict[str, int] = field(default_factory=dict)
     source_path: Path | None = None
+    # The simulated species' records, in the order of `species`.
+    species_records: list[Species] = field(default_factory=list)
+    # Each zone's kinetic reaction, by zone name.
+    zone_reactions: dict[str, KineticReaction] = field(default_factory=dict)
 
     def inputs_for(self, model) -> list[Input]:
         """The project's inputs that `model` can take: a model without a species layer (a run
@@ -537,8 +551,8 @@ def _read_run_control(lines: _Lines) -> tuple[dict[str, float], float, bool, Run
     return ambient, g, dens_zp, RunControl(**fields)
 
 
-def _read_contaminants(lines: _Lines, count: int) -> None:
-    """Consume the `N ! contaminants:` section: N species INDICES, then no terminator.
+def _read_contaminants(lines: _Lines, count: int) -> list[int]:
+    """The `N ! contaminants:` section: N species NUMBERS, then no terminator.
 
     The indices are whitespace-separated and CONTAM writes them all on ONE line (`   1 2 3`),
     so this counts TOKENS, not lines. A per-line loop happens to work for a single-species
@@ -547,24 +561,65 @@ def _read_contaminants(lines: _Lines, count: int) -> None:
     `test_OneFloorWpcAddMf.prj` (3, `   1 2 3`). The section has no -999 of its own: the
     species section follows it directly.
     """
-    seen = 0
-    while seen < count:
-        seen += len(lines.record())
-    if seen != count:
+    numbers: list[int] = []
+    while len(numbers) < count:
+        numbers += [int(v) for v in lines.record()]
+    if len(numbers) != count:
         raise ValueError(
             f"prj: the 'contaminants' section promises {count} species indices but its "
-            f"lines carry {seen}"
+            f"lines carry {len(numbers)}"
         )
+    return numbers
 
 
-def _read_species(lines: _Lines, count: int, species: list[str],
-                  ambient_mf: list[float]) -> None:
+def _read_species(lines: _Lines, count: int, out: list[tuple[int, bool, Species]]) -> None:
+    """`(number, simulated, Species)` per record; the name is the last field."""
     for _ in range(count):
         tok = lines.record()
-        species.append(tok[-1])                     # name is the last field of the line
-        ambient_mf.append(float(tok[8]))            # CCdef, the default ambient kg/kg
-        lines.raw()                                 # the species' description line
+        description = lines.raw().strip()           # the species' description line
+        out.append((int(tok[0]), tok[1] == "1", Species(
+            tok[-1], molar_mass=float(tok[3]), mean_diameter=float(tok[4]),
+            effective_density=float(tok[5]), decay=float(tok[6]),
+            diffusivity=float(tok[7]), default_mass_fraction=float(tok[8]),
+            non_trace=tok[2] == "1", uv_susceptibility=float(tok[10]),
+            description=description)))
     lines.expect_end("species")
+
+
+def _simulated_species(rows: list[tuple[int, bool, Species]],
+                       contaminants: list[int]) -> list[Species]:
+    """The simulated species in file order, which must be the contaminants list."""
+    simulated = [nr for nr, sim, _ in rows if sim]
+    if contaminants != simulated:
+        raise ValueError(
+            f"prj: the 'contaminants' section lists species {contaminants} but the species "
+            f"section marks {simulated} as simulated; a contaminant list that differs from "
+            f"the simulated species in file order is unsupported")
+    out = []
+    for nr, sim, sp in rows:
+        if sim and sp.non_trace:
+            raise ValueError(
+                f"prj: species {nr} ({sp.name!r}) is non-trace: it changes the air density, "
+                f"which noodl physics does not model (unsupported)")
+        if sim:
+            out.append(sp)
+    return out
+
+
+def _read_reactions(lines: _Lines, count: int, out: dict[int, KineticReaction]) -> None:
+    """`nr nkrd name`, a description line, then `nkrd` lines `product reactant k`; a pair
+    given twice adds its coefficients."""
+    for _ in range(count):
+        tok = lines.record()
+        nr, n_pairs = int(tok[0]), int(tok[1])
+        lines.raw()                                 # description (may be blank)
+        coefficients: dict[tuple[str, str], float] = {}
+        for _ in range(n_pairs):
+            product, reactant, coef = lines.record()[:3]
+            pair = (product, reactant)
+            coefficients[pair] = coefficients.get(pair, 0.0) + float(coef)
+        out[nr] = KineticReaction(coefficients, name=tok[2] if len(tok) > 2 else "")
+    lines.expect_end("kinetic reactions")
 
 
 def _read_day_schedules(lines: _Lines, count: int, out: dict[int, DaySchedule]) -> None:
@@ -690,7 +745,8 @@ def _read_flow_elements(lines: _Lines, count: int, elements: dict[int, PrjElemen
     lines.expect_end("flow elements")
 
 
-def _read_zones(lines: _Lines, count: int, zones: list[tuple]) -> None:
+def _read_zones(lines: _Lines, count: int, zones: list[tuple],
+                zone_reactions: dict[int, int]) -> None:
     for _ in range(count):
         tok = lines.record()
         nr = int(tok[0])
@@ -710,7 +766,7 @@ def _read_zones(lines: _Lines, count: int, zones: list[tuple]) -> None:
         if pc:
             raise ValueError(f"prj: zone {nr} references control node {pc} (unsupported)")
         if pk:
-            raise ValueError(f"prj: zone {nr} references kinetic reaction {pk} (unsupported)")
+            zone_reactions[nr] = pk
         rel_ht, vol, T0 = float(tok[6]), float(tok[7]), float(tok[8])
         zname = tok[10]
         rest = tok[11:]
@@ -788,7 +844,7 @@ def _read_sources(
         except ValueError as exc:
             raise KeyError(
                 f"prj: source {nr}'s element {pe} names species {sname!r}, which the project "
-                f"does not define") from exc
+                f"does not simulate") from exc
         sources.append(PrjSource(nr, pz, pe, stype, params, float(tok[5]), k, ps))
     lines.expect_end("source/sinks")
 
@@ -821,7 +877,11 @@ def read_prj(path) -> Project:
     ambient_conditions, g, dens_zp, run_control = _read_run_control(lines)
 
     species: list[str] = []
-    ambient_mf: list[float] = []
+    contaminants: list[int] = []
+    species_rows: list[tuple[int, bool, Species]] = []
+    species_records: list[Species] = []
+    reactions: dict[int, KineticReaction] = {}
+    zone_reactions: dict[int, int] = {}
     day_schedules: dict[int, DaySchedule] = {}
     schedules: dict[int, WeekSchedule] = {}
     levels: dict[int, float] = {}
@@ -843,9 +903,15 @@ def read_prj(path) -> Project:
             continue
         count, name = _section_header(lines)
         if name == "contaminants":
-            _read_contaminants(lines, count)
+            contaminants = _read_contaminants(lines, count)
         elif name == "species":
-            _read_species(lines, count, species, ambient_mf)
+            # Resolved at once: the source/sinks section later in the file looks its species
+            # names up in `species`. The contaminants section always precedes this one.
+            _read_species(lines, count, species_rows)
+            species_records = _simulated_species(species_rows, contaminants)
+            species[:] = [s.name for s in species_records]
+        elif name == "kinetic reactions":
+            _read_reactions(lines, count, reactions)
         elif name == "day-schedules":
             _read_day_schedules(lines, count, day_schedules)
         elif name == "week-schedules":
@@ -859,7 +925,7 @@ def read_prj(path) -> Project:
         elif name == "flow elements":
             _read_flow_elements(lines, count, elements)
         elif name == "zones":
-            _read_zones(lines, count, zones)
+            _read_zones(lines, count, zones, zone_reactions)
         elif name == "initial zone concentrations":
             _read_initial_concentrations(lines, count, x0_rows)
         elif name == "flow paths":
@@ -877,14 +943,15 @@ def read_prj(path) -> Project:
     return _build(
         ambient_conditions=ambient_conditions, g=g, species=species, levels=levels,
         profiles=profiles, elements=elements, zones=zones, x0_rows=x0_rows, paths=paths,
-        sources=sources, dens_zp=dens_zp, schedules=schedules, ambient_mf=ambient_mf,
+        sources=sources, dens_zp=dens_zp, schedules=schedules,
+        species_records=species_records, reactions=reactions, zone_reactions=zone_reactions,
         run_control=run_control, source_path=source_path,
     )
 
 
 def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones, x0_rows,
-           paths, sources, dens_zp, schedules, ambient_mf, run_control,
-           source_path) -> Project:
+           paths, sources, dens_zp, schedules, species_records, reactions, zone_reactions,
+           run_control, source_path) -> Project:
     """Turn the parsed records into a `Network`, elements, drives and a `Project`."""
     net = Network(dtype=F64)
     ambient = "ambient"
@@ -907,6 +974,19 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         zone_nr_to_name[nr] = zname
         T_list.append(T0)
         V_list.append(vol)
+
+    by_zone: dict[str, KineticReaction] = {}
+    for znr, k in zone_reactions.items():
+        try:
+            reaction = reactions[k]
+        except KeyError as exc:
+            raise KeyError(f"prj: zone {znr} references kinetic reaction {k}, which the "
+                           f"'kinetic reactions' section does not define") from exc
+        try:
+            reaction.matrix(species)
+        except KeyError as exc:
+            raise KeyError(f"prj: kinetic reaction {k} (zone {znr}): {exc.args[0]}") from exc
+        by_zone[zone_nr_to_name[znr]] = reaction
 
     def node_of(z: int) -> str:
         if z == -1:
@@ -1175,10 +1255,12 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         ambient_conditions=ambient_conditions, profiles=profiles, x0=x0, sources=sources,
         kinds=kinds, zone_nr_to_name=zone_nr_to_name, density_uses_zone_pressure=dens_zp,
         run_control=run_control, schedules=schedules, inputs=inputs,
-        ambient_mass_fractions=torch.tensor(ambient_mf, dtype=F64),
+        ambient_mass_fractions=torch.tensor(
+            [s.default_mass_fraction for s in species_records], dtype=F64),
         multiplier_edges=multiplier_edges,
         constant_wind_pressure={k: torch.tensor(v, dtype=F64) for k, v in wind_pressure.items()},
-        zone_flags=zone_flags, source_path=source_path,
+        zone_flags=zone_flags, source_path=source_path, species_records=species_records,
+        zone_reactions=by_zone,
     )
 
 
@@ -1363,10 +1445,15 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     layers: dict = {"air": air}
     no_contaminants = project.run_control is not None and project.run_control.contaminants == "none"
     if species and project.species and not no_contaminants:
+        kinetics = None
+        if project.zone_reactions:
+            kinetics = reaction_kinetics(net, species=project.species,
+                                         reactions=project.zone_reactions,
+                                         ambient=project.ambient, flow_kinds=project.kinds)
         layers["species"] = species_layer(
             net, ambient=project.ambient, flow_kinds=tuple(project.kinds),
             n_species=len(project.species), scheme=scheme, rho=rho,
-            species_names=project.species,
+            species_names=project.species, kinetics=kinetics,
         )
     cap_nodes = layers["species"].interior_idx if "species" in layers else None
     density = PrescribedTemperatureDensity(

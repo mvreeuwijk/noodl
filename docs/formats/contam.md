@@ -14,8 +14,11 @@ ambient=None, species=True, scheme="implicit")` returns `(model, state, drivers)
 
 **Supported:** run control (`Project.run_control`, a `RunControl`: the steady simulation's
 date and time, the transient run's start and end date and time, time step and output step, day
-type, the weather and contaminant file names, and `dodMdt`) and ambient conditions; species and
-each species' default ambient concentration (`Project.ambient_mass_fractions`); day and week
+type, the weather and contaminant file names, and `dodMdt`) and ambient conditions; the full
+species record (`Project.species_records`: molar mass, mean diameter, effective density,
+diffusivity, default concentration; the decay constant is read but, as in ContamX, not applied)
+and each species' default ambient concentration (`Project.ambient_mass_fractions`); kinetic
+reactions on zones (`Project.zone_reactions`, the species layer's `kinetics`); day and week
 schedules referenced by zones (the zone temperature, on `"T"`) and by paths (a flow multiplier,
 through `Scaled` on `"flow_multiplier.<kind>"`) and by sources (a rate multiplier, on
 `"species.source_multiplier"`; for `ccf` and `cut` sources); wind pressure profiles with the
@@ -29,10 +32,12 @@ family
 (`fan_cmf`, `fan_cvf`) and the cubic fan curve (`fan_fan`); source elements `ccf`, `cut`, `eds`,
 `brs`.
 
-**Refused by name**, rather than silently dropped: control nodes, filters, kinetic reactions
-and air-handling systems referenced by nonzero index; a schedule number that no week schedule
-carries; a schedule on a `fan_fan` path; a schedule on an `eds` or `brs` source; a source whose element
-names a species the project does not define; a zone without the variable-pressure flag (which
+**Refused by name**, rather than silently dropped: control nodes, filters and air-handling
+systems referenced by nonzero index; non-trace species; a contaminant list that is not the
+simulated species in file order; a source or kinetic reaction that names a species the project
+does not simulate, and a zone whose kinetic reaction number the file does not define; a schedule
+number that no week schedule carries; a schedule on a `fan_fan` path; a schedule on an `eds` or
+`brs` source; a zone without the variable-pressure flag (which
 ContamX holds at constant pressure) or, in a project with species, without the
 variable-contaminants flag (ContamX then holds the zone's concentrations at their initial values
 and ignores its sources); CFD and 1-D convection/diffusion zones; continuous-values-file

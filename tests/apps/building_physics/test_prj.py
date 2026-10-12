@@ -19,6 +19,7 @@ from noodl.apps.building_physics.prj import (
 )
 from noodl.apps.building_physics.prj import steady as prj_steady
 from noodl.apps.building_physics.schedules import Calendar, WeekSchedule
+from noodl.apps.building_physics.species import KineticReaction, Species
 from noodl.apps.building_physics.thermal import R_AIR
 from noodl.elements import Damper, FanCurve, FixedFlow, Scaled, UpstreamDensityPowerLaw
 
@@ -346,7 +347,7 @@ def test_unsupported_records_raise_naming_the_offender(tmp_path):
 def test_the_refusal_messages_name_the_section_and_the_record(tmp_path):
     text = THREE.read_text()
     zone1 = "   1  3   0   0   0   1   0.000   300 293.15 0 one -1 0 2 0 0 0 0 0"
-    with pytest.raises(ValueError) as exc:
+    with pytest.raises(KeyError) as exc:
         read_prj(
             _variant(
                 text,
@@ -872,3 +873,69 @@ def test_a_date_with_an_impossible_day_is_refused():
     for bad in ("Feb29", "Jan00", "Apr31", "Jan32"):
         with pytest.raises(ValueError, match="not a CONTAM date"):
             _date(bad)
+
+
+REACTION = DATA / "reaction_three_zone.prj"
+
+
+def _variants(text: str, pairs, tmp_path: Path) -> Path:
+    """`_variant` applied once per `(old, new)` pair, each on the previous one's output."""
+    for old, new in pairs:
+        out = _variant(text, old, new, tmp_path)
+        text = out.read_text()
+    return out
+
+
+def test_the_species_record_is_read_whole():
+    p = read_prj(REACTION)
+    assert p.species == ["sarin", "product"]
+    sarin, product = p.species_records
+    assert isinstance(sarin, Species) and sarin.name == "sarin"
+    assert sarin.molar_mass == pytest.approx(140.09) and sarin.diffusivity == 2e-5
+    assert product.molar_mass == pytest.approx(44.01) and product.description == (
+        "reaction product")
+    assert p.ambient_mass_fractions.tolist() == [0.0, 0.0]
+
+
+def test_zone_reactions_become_the_species_layers_kinetics():
+    p = read_prj(REACTION)
+    assert set(p.zone_reactions) == {"one", "three"}
+    assert isinstance(p.zone_reactions["one"], KineticReaction)
+    model, _, _ = project_to_model(p)
+    kin = model.transport["species"].kinetics                    # (n_i, K, K)
+    torch.testing.assert_close(kin[0], torch.tensor([[-1e-3, 0.0], [1e-3, -5e-4]],
+                                                    dtype=F64))
+    assert kin[1].abs().sum().item() == 0.0
+    torch.testing.assert_close(kin[2], torch.tensor([[-2e-4, 0.0], [1e-4, 0.0]], dtype=F64))
+
+
+def test_a_species_decay_constant_is_kept_but_not_applied(tmp_path):
+    text = THREE.read_text()
+    p = read_prj(_variant(text, "140.0900  0.0000e+00  0.0000e+00  0.0000e+00",
+                          "140.0900  0.0000e+00  0.0000e+00  1.0000e-03", tmp_path))
+    assert p.species_records[0].decay == 1e-3
+    model, _, _ = project_to_model(p)
+    assert model.transport["species"].kinetics is None          # ContamX ignores it
+
+
+def test_unsimulated_and_non_trace_species(tmp_path):
+    text = THREE.read_text()
+    extra = ("0.0023254 kg/kg = 2800 mg/m3\n"
+             "  2 0 0  28.0000  0.0000e+00  0.0000e+00  0.0000e+00  2.0000e-05  0.0000e+00"
+             "  1.0000e+03  0.0000e+00 0 0 0 0 0 CO\n\n")
+    p = read_prj(_variants(text, [("1 ! species:", "2 ! species:"),
+                                  ("0.0023254 kg/kg = 2800 mg/m3\n", extra)], tmp_path))
+    assert p.species == ["sarin"]                       # CO is not simulated
+    with pytest.raises(ValueError, match=r"contaminants.*\[1\].*\[1, 2\]"):
+        read_prj(_variants(text, [("1 ! species:", "2 ! species:"),
+                                  ("0.0023254 kg/kg = 2800 mg/m3\n",
+                                   extra.replace("  2 0 0  28.0000", "  2 1 0  28.0000"))],
+                           tmp_path))
+    with pytest.raises(ValueError, match=r"species 1 \('sarin'\) is non-trace"):
+        read_prj(_variant(text, "  1 1 0 140.0900", "  1 1 1 140.0900", tmp_path))
+
+
+def test_a_reaction_naming_a_species_the_project_lacks_is_refused(tmp_path):
+    text = REACTION.read_text()
+    with pytest.raises(KeyError, match=r"kinetic reaction 2.*\['ozone'\]"):
+        read_prj(_variant(text, "product sarin 0.0001", "ozone sarin 0.0001", tmp_path))

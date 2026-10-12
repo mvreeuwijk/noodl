@@ -330,7 +330,7 @@ PROJECT_AIRFLOW = (1e-13, 1e-16)
 
 def _schedules_as_contamx_holds(prj: Path, dest: Path) -> Path:
     """A copy of `prj` in `dest`, with every day-schedule value rounded to float32, plus the
-    project's weather and contaminant files.
+    weather and contaminant files its run control names.
 
     ContamX holds a day schedule's values in single precision but not the weather file's
     temperatures: with the zone scheduled at 293.15 K and the weather at 293.15 K, the engine
@@ -362,16 +362,22 @@ def _schedules_as_contamx_holds(prj: Path, dest: Path) -> Path:
     assert rewritten >= n_schedules, (
         f"{prj.name}: {n_schedules} day schedules but {rewritten} values rewritten")
     (dest / prj.name).write_text("".join(lines))
-    for suffix in (".wth", ".ctm"):
-        if prj.with_suffix(suffix).is_file():
-            (dest / prj.with_suffix(suffix).name).write_text(prj.with_suffix(suffix).read_text())
+    from noodl.apps.building_physics.contamx import _named_files
+
+    for name in _named_files(prj):
+        (dest / name).write_text((prj.parent / name).read_text())
     return dest / prj.name
 
 
-def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf, record_property, label):
+def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf, record_property, label,
+                    species_floor=False):
     """ContamX's `run_project` (at `PROJECT_AIRFLOW`, its airflow tolerances tightened so its
     own iteration stays below the budgets) against `simulate_project` on the same project,
-    with the schedule values ContamX holds (`_schedules_as_contamx_holds`)."""
+    with the schedule values ContamX holds (`_schedules_as_contamx_holds`).
+
+    The absolute floor of the mass fractions is 64 u times the largest mass fraction; with
+    `species_floor` it is 64 u times each species' own largest (a column floor), so a
+    species far smaller than another is still checked relative to its own size."""
     from noodl.apps.building_physics.contamx import run_project
     from noodl.apps.building_physics.simulation import simulate_project
 
@@ -383,11 +389,16 @@ def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf, record_property, label
     torch.testing.assert_close(out["path_flow"], ref["flow"], rtol=rtol_flow,
                                atol=(64 * F32_U * scale).item())
     mf_scale = ref["mf"].abs().max()
-    torch.testing.assert_close(out["species.x"], ref["mf"], rtol=rtol_mf,
-                               atol=(64 * F32_U * mf_scale).item())
+    if species_floor:
+        mf_scale = ref["mf"].abs().flatten(0, -2).amax(0)              # (K,)
+    mf_err = (out["species.x"] - ref["mf"]).abs()
+    mf_allowed = 64 * F32_U * mf_scale + rtol_mf * ref["mf"].abs()
+    assert out["species.x"].shape == ref["mf"].shape
+    assert bool((mf_err <= mf_allowed).all()), (
+        f"mass fractions: worst error {(mf_err / mf_allowed).max().item():.3g} of allowed")
     record_property("check", label)
     record_property("tolerance", f"flow rel {rtol_flow:.2e}, mf rel {rtol_mf:.2e}, "
-                                 f"atol 64 u x max")
+                                 f"atol 64 u x max" + (" per species" if species_floor else ""))
     for name, ours, theirs, top, rtol in (("flow", out["path_flow"], ref["flow"], scale,
                                            rtol_flow),
                                           ("mf", out["species.x"], ref["mf"], mf_scale, rtol_mf)):
@@ -524,3 +535,22 @@ def test_the_scheduled_three_zone_project_matches_contamx(contamx, tmp_path, rec
                                label="Scheduled three-zone project, 24 h")
     assert out["path_flow"][95, 4].item() == 0.0                       # 07:55, fan off
     assert out["path_flow"][97, 4].item() == pytest.approx(0.100342, rel=1e-12)   # 08:05
+
+
+REACTION = DATA / "reaction_three_zone.prj"
+
+
+@pytest.mark.external
+def test_kinetic_reactions_match_contamx(contamx, tmp_path, record_property):
+    """`reaction_three_zone.prj`: two species, a three-coefficient reaction in zone one and a
+    two-coefficient one in zone three, wind-driven flows, 24 steps of 300 s.
+
+    Budget: the three-zone transient's 64 u (flows through three zones in series) plus the
+    reaction coefficients, each a float32 input: an implicit decay over n steps responds to
+    a relative error u in k as n k dt / (1 + k dt) u, at most 24 * 0.3 / 1.3 = 5.5 u for the
+    fastest coefficient (1e-3/s); the product depends on three such coefficients, 5.5 + 5.5
+    + 3.1 = 14 u. Total 80 u. The absolute floor is per species (64 u times the species'
+    own largest mass fraction)."""
+    _project_parity(REACTION, tmp_path, rtol_flow=16 * F32_U, rtol_mf=80 * F32_U,
+                    record_property=record_property, species_floor=True,
+                    label="Three-zone project with kinetic reactions in two zones, 24 steps")

@@ -32,3 +32,9 @@ Two of NIST's one-zone stack projects are present, and only one of them is usabl
   source in zone 1 09:00-12:00 (half from 11:00), zone 2 on a trapezoidal temperature
   schedule, and path 1 half open 10:00-14:00. Its `.wth` has diurnal Ta/Pb/Ws/Wd and its `.ctm`
   an ambient sarin pulse; `dodMdt = 1`. Verified to load and run in ContamX 3.4.1.7.
+- `reaction_three_zone.prj` is written for this repository from NIST's
+  `valThreeZonesWthCtm-UseApi.prj`, not an official sample. It adds a second species
+  (`product`) and two kinetic reactions: zone one reacts sarin to product (1e-3/s) with the
+  product decaying (5e-4/s), zone three decays sarin (2e-4/s), half of it to product. All
+  zones start at 1e-3 kg/kg sarin; the run is two hours at 300 s. Verified to load and run
+  in ContamX 3.4.1.7.

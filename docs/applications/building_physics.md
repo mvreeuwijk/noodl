@@ -260,7 +260,7 @@ conducts nothing".
 | Function | Returns |
 |---|---|
 | `thermal_layer(net, *, ambient, name="thermal", flow_kinds=("airpath",), conduction_kind="wall", c_p=1005.0, rho=1.2041, scheme="exact", fixed_temperature=())` | The heat `TransportLayer`. Capacity is $\rho c_p V + C_{\text{node}}$ per active interior node. Raises naming any node with zero heat capacity. |
-| `species_layer(net, *, ambient, name="species", flow_kinds=("airpath",), rho=1.2041, n_species=1, scheme="implicit", species_names=None)` | The contaminant layer, as mass fractions, capacity = zone air mass $\rho V$ (CONTAM's convention). |
+| `species_layer(net, *, ambient, name="species", flow_kinds=("airpath",), rho=1.2041, n_species=1, scheme="implicit", species_names=None, transmission=None, kinetics=None)` | The contaminant layer, as mass fractions, capacity = zone air mass $\rho V$ (CONTAM's convention). `transmission` `(b_flow, K)` is each flow edge's filter pass fraction; `kinetics` `(n_i, K, K)` each zone's first-order reactions (`reaction_kinetics` builds it). |
 | `build_model(net, *, air_elements, drives, ambient="ambient", thermal=True, species=0 (a count or a list of names), density="ideal_gas", density_kwargs=None, coupling="pingpong", iterate_tol=None, iterate_max=20, thermal_scheme="exact", species_scheme="implicit", flow_kinds=None, return_inputs=False)` | The assembled `Model`; with `return_inputs=True`, `(model, state, drivers)` like the other applications. |
 | `initial_state(model, *, values=None)` | Temperatures from each node's `T0`, zeros for species; then `values` by node name. |
 | `initial_drivers(model, *, values=None)` | Zero boundary pressures, boundary temperatures from `T0`, zero boundary species; then `values` by node name. See [Using noodl](../usage.md). |
@@ -298,6 +298,35 @@ project's sources; a coarser `simulate` step spreads the same mass over its own 
 `sources_from_project(project, dt=60.0)` builds the source objects from a `.prj`'s own source
 records, and `project_to_model` attaches them with `SpeciesSources` automatically, with the
 multipliers at one. `assemble_sources(sources, t, x_full)` sums plain sources outside a model.
+
+### Species and reactions
+
+A `Species` holds CONTAM's species record: name, molar mass, mean diameter (0 for a gas),
+effective density, decay constant, diffusivity, default (ambient) mass fraction. The decay
+constant is kept as data and not applied, as in ContamX; a decay is a kinetic reaction, a
+negative coefficient of the species on itself.
+
+A `KineticReaction` holds first-order reactions between species, `(product, reactant) ->
+k` in 1/s, on mass fractions: $\dot x_p \mathrel{+}= k_{pr}\,x_r$. A negative `(s, s)`
+coefficient is a decay of `s`. `reaction_kinetics(net, species=..., reactions={zone:
+reaction}, ambient=..., flow_kinds=...)` gives the species layer's `kinetics`, which the
+transport step integrates implicitly, as ContamX does. A reaction on a zone that no airflow
+edge touches is refused by name: the species layer holds no concentration there.
+
+```python
+from noodl.apps.building_physics import KineticReaction
+
+fast = KineticReaction({("sarin", "sarin"): -1e-3, ("product", "sarin"): 1e-3})
+print(fast.matrix(["sarin", "product"]).tolist())
+```
+
+```text
+[[-0.001, 0.0], [0.001, 0.0]]
+```
+
+`read_prj` reads every species record into `Project.species_records` (the simulated ones, in the
+order of `Project.species`) and each zone's kinetic reaction into `Project.zone_reactions`;
+`project_to_model` builds the species layer's `kinetics` from them.
 
 ## Airflow elements
 
@@ -543,6 +572,7 @@ above 0.1 % of the largest.
 | One-zone stack with a scheduled zone temperature (`densZP`, `dodMdt`), 288 steps | rel 64 $u$, floor 64 $u$ × max | **4.5e-8** flow, **1.9e-7** mf |
 | Scheduled stack project over two days, across midnight | rel 64 $u$, floor 64 $u$ × max | **7.8e-8** flow, **1.9e-7** mf |
 | Scheduled three-zone project (fan, source, zone temperature, window, weather, ambient file), 24 h | rel 64 $u$, floor 64 $u$ × max | **1.6e-8 kg/s** flow (the floor governs: 2 % of 64 $u$ × max; 3.6e-5 relative on path 4 at its flow reversal), **1.4e-7** mf |
+| Three-zone project with kinetic reactions in two zones, 24 steps | flow rel 16 $u$, mf rel 80 $u$, floor 64 $u$ × each species' max | **9.1e-8** flow, **2.6e-7** mf |
 
 The stack rows rely on two density effects matching ContamX's. Orifice coefficients are
 corrected for the density of the air entering the path (freezing them at reference density

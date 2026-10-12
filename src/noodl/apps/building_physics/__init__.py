@@ -50,6 +50,7 @@ from noodl.apps.building_physics.sources import (
     assemble_sources,
     sources_from_project,
 )
+from noodl.apps.building_physics.species import KineticReaction, Species, reaction_kinetics
 from noodl.apps.building_physics.thermal import (
     IdealGasDensity,
     LinearDensity,
@@ -76,10 +77,12 @@ __all__ = [
     "DecayingSource",
     "IdealGasDensity",
     "Input",
+    "KineticReaction",
     "LinearDensity",
     "Project",
     "RunControl",
     "Signal",
+    "Species",
     "SpeciesSources",
     "TimeSeries",
     "WallMass",
@@ -103,6 +106,7 @@ __all__ = [
     "read_epw",
     "read_modelica",
     "read_prj",
+    "reaction_kinetics",
     "read_wth",
     "room",
     "run_project",
