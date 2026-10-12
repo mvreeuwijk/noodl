@@ -143,6 +143,14 @@ _BED_FLOOR_MARGIN = 4.0
 #: network the dense factorisation costs a handful of tensor operations against SuperLU's
 #: per-call conversion (measured: `benchmarks/sewer_dynwave_speed.py`).
 DENSE_SOLVE_MAX_JUNCTIONS = 64
+#: SWMM's default HEAD_TOLERANCE, 0.005 ft (`dynwave.c:63`, ``DEFAULT_HEADTOL``), in m.
+DEFAULT_HEAD_TOLERANCE = 0.005 * LCF
+#: SWMM's default MAX_TRIALS (`dynwave.c:66`, ``DEFAULT_MAXTRIALS``).
+DEFAULT_MAX_TRIALS = 8
+#: The floor of the derived flow tolerance (m3/s, `iterate_tolerances`): the flow residual
+#: the head solve resolves at its `SOLVE_ATOL` with margin, and the tolerance the parity
+#: tests' 1e-13 m heads always ran with.
+FLOW_TOL_FLOOR = 1.0e-10
 #: SWMM's default junction surface-area floor (`dynwave.c:62`), ft2.
 DEFAULT_MIN_SURFACE_AREA_FT2 = 12.566
 #: SI area per SWMM ft2 (docs: "Units"): makes ``A_s dy = 0.5 dt N`` exact in m, m3/s.
@@ -209,8 +217,8 @@ _WEIR_SHAPES = {"transverse": RECT_OPEN, "sideflow": RECT_OPEN, "v_notch": TRIAN
 class DynamicWaveOptions:
     """SWMM 5.2.4's dynamic-wave [OPTIONS] that change the physics, with SWMM's defaults
     (`project.c:841-880`). `head_tolerance` and `max_trials` are SWMM's own iteration
-    controls: recorded so a file round-trips, never used -- noodl solves the same
-    equations to `build_model`'s own `iterate_tol` (docs: "Dynamic wave").
+    controls, and the defaults of `build_dynamic_wave_model`'s (`iterate_tolerances`; docs:
+    "Iteration and convergence").
 
     `routing_step` is the fixed routing step (s); `inertial_damping` is ``"none"``,
     ``"partial"`` or ``"full"``; `normal_flow_limited` is ``"slope"``, ``"froude"``,
@@ -218,8 +226,10 @@ class DynamicWaveOptions:
     crown, a junction above its crown holds continuity without storage) or ``"slot"``
     (Preissmann slot);
     `min_surface_area` is the junction surface-area floor (m2), ``None`` for SWMM's
-    12.566 ft2; `head_tolerance` is SWMM's head convergence tolerance (m); `max_trials` is
-    SWMM's trial limit (-).
+    12.566 ft2; `head_tolerance` is SWMM's head convergence tolerance (the file's length
+    unit, m for the CMS files read today; ``None`` for SWMM's 0.005 ft,
+    `DEFAULT_HEAD_TOLERANCE`); `max_trials` is SWMM's trial limit (-, ``None`` for SWMM's 8,
+    `DEFAULT_MAX_TRIALS`).
 
     `variable_step` is SWMM's VARIABLE_STEP, the Courant factor of the variable routing step
     (-, 0 to 2): 0 routes with the fixed `routing_step`, above 0 each step is the smallest
@@ -248,6 +258,18 @@ class DynamicWaveOptions:
     minimum_step: float = 0.5
     lengthening_step: float = 0.0
     lengthening_routing_step: float | None = None
+
+    @property
+    def head_tol(self) -> float:
+        """SWMM's ``HeadTol`` (m): `head_tolerance`, or SWMM's default 0.005 ft
+        (`DEFAULT_HEAD_TOLERANCE`, dynwave.c:63) where the file sets none."""
+        return DEFAULT_HEAD_TOLERANCE if self.head_tolerance is None else self.head_tolerance
+
+    @property
+    def trials(self) -> int:
+        """SWMM's ``MaxTrials`` (-): `max_trials`, or SWMM's default 8
+        (`DEFAULT_MAX_TRIALS`, dynwave.c:66) where the file sets none."""
+        return DEFAULT_MAX_TRIALS if self.max_trials is None else int(self.max_trials)
 
     @property
     def min_route_step(self) -> float:
@@ -289,6 +311,13 @@ class DynamicWaveOptions:
                 f"DynamicWaveOptions: minimum_step must be >= 0 s, got {self.minimum_step!r}")
         if self.min_surface_area is not None and not self.min_surface_area > 0:
             raise ValueError("DynamicWaveOptions: min_surface_area must be > 0 m2")
+        if self.head_tolerance is not None and not self.head_tolerance > 0:
+            raise ValueError(
+                f"DynamicWaveOptions: head_tolerance must be > 0 or None, got "
+                f"{self.head_tolerance!r}")
+        if self.max_trials is not None and not self.max_trials >= 1:
+            raise ValueError(
+                f"DynamicWaveOptions: max_trials must be >= 1 or None, got {self.max_trials!r}")
 
 
 class DynamicWaveConduit(Element):
@@ -333,8 +362,9 @@ class DynamicWaveConduit(Element):
 
     The element limits that follow the normal-flow limit, in SWMM's order (`dwflow.c:269-281`;
     SWMM's under-relaxation, :259-267, is not modelled): the user flow limit ``|q| <=``
-    ``"water.max_flow"`` (m3/s, absent or +inf for none, the default; `dwflow.c:269-273`), the flap gate
-    zeroing flow against it (`link.c::link_setFlapGate`: ``"water.flap_block_reverse"`` 1 zeroes
+    ``"water.max_flow"`` (m3/s, absent or +inf for none, the default; `dwflow.c:269-273`),
+    the flap gate zeroing flow against it (`link.c::link_setFlapGate`:
+    ``"water.flap_block_reverse"`` 1 zeroes
     ``q < 0``, ``"water.flap_block_forward"`` 1 zeroes ``q > 0``; `dwflow.c:276`), then the
     dry-node caps at ``"water.dry_flow_cap"`` (m3/s, `FUDGE_FLOW` times the barrels;
     `dwflow.c:280-281`). Each is a
@@ -1884,10 +1914,46 @@ class DynamicWaveHydraulics:
         return 0.5 * dt * (withdrawal - now["sewer.net_inflow"])
 
 
-def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
-                             iterate_max: int = 2000, relaxation: float = 0.5,
+def iterate_tolerances(options: DynamicWaveOptions, *, iterate_tol: float | None = None,
+                       iterate_max: int | None = None,
+                       iterate_flow_tol: float | None = None) -> dict:
+    """The iteration controls `build_dynamic_wave_model` builds with: ``{"iterate_tol",
+    "iterate_flow_tol", "iterate_max", "on_limit"}``. Each argument given is used as is;
+    each left ``None`` follows the file (`options`) as SWMM does:
+
+    - `iterate_tol` (m) is SWMM's ``HeadTol`` (`DynamicWaveOptions.head_tol`: HEAD_TOLERANCE,
+      or 0.005 ft). SWMM's trial test is the depth change of every node between trials
+      (`dynwave.c::findNodeDepths`, ``|yNew - yOld| > HeadTol``); noodl's is the head
+      change between passes, the same test.
+    - `iterate_flow_tol` (m3/s): SWMM judges the heads alone, but on noodl's normal-flow
+      slope switch the heads can stop moving while the flows the closure reads still do
+      (`build_dynamic_wave_model`), so noodl judges the flows too, to the flow residual that
+      matches the head tolerance at the smallest junction: a flow residual ``dQ`` changes a
+      junction's next depth by ``dt dQ / (2 A_s)`` (SWMM's trapezoid, dynwave.c:694-711),
+      so ``dQ = 2 A_min iterate_tol / dt`` moves the head by `iterate_tol` at the
+      surface-area floor A_min (MIN_SURFAREA, dynwave.c:186-187), the largest move any
+      junction makes for it, ``dt`` the routing step (the longest). It is floored at
+      `FLOW_TOL_FLOOR`.
+    - `iterate_max` is SWMM's ``MaxTrials`` (`DynamicWaveOptions.trials`: MAX_TRIALS, or 8;
+      at least 2, `Model`'s minimum). Then ``"on_limit"`` is ``"accept"``: as SWMM, a step
+      that uses up its trials is taken with its last pass and counted as not converging
+      (`dynwave.c::dynwave_execute`, ``NonConvergeCount``; `simulate_dynamic_wave`'s
+      ``"converged"``), not refused. An explicit `iterate_max` keeps ``"raise"``, `Model`'s default.
+    """
+    tol = options.head_tol if iterate_tol is None else float(iterate_tol)
+    if iterate_flow_tol is None:
+        min_area = (DEFAULT_MIN_SURFACE_AREA_FT2 * _AREA_SI if options.min_surface_area is None
+                    else options.min_surface_area)
+        iterate_flow_tol = max(FLOW_TOL_FLOOR, 2.0 * min_area * tol / options.routing_step)
+    return {"iterate_tol": tol, "iterate_flow_tol": float(iterate_flow_tol),
+            "iterate_max": max(2, options.trials) if iterate_max is None else int(iterate_max),
+            "on_limit": "accept" if iterate_max is None else "raise"}
+
+
+def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = None,
+                             iterate_max: int | None = None, relaxation: float = 0.5,
                              acceleration: str | None = "anderson", memory: int = 5,
-                             iterate_flow_tol: float | None = 1e-10,
+                             iterate_flow_tol: float | None = None,
                              outfall_stage: Mapping | None = None,
                              quality: bool = False,
                              species: tuple[str, ...] = ("bod", "sulfide"),
@@ -1902,7 +1968,10 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     One `PotentialFlowLayer` ``"water"`` (quantity ``"head"``, m; flows m3/s) over the pipes,
     with the outfalls as its boundary and a `JunctionStorage` at every junction, and the
     `DynamicWaveHydraulics` closure; ``coupling="iterate"`` converges on the junction heads
-    to `iterate_tol` (m) within `iterate_max` passes. The passes are Anderson-accelerated
+    to `iterate_tol` (m) and the conduit flows to `iterate_flow_tol` (m3/s) within
+    `iterate_max` passes, by default the file's own HEAD_TOLERANCE and MAX_TRIALS and the
+    flow tolerance matching them (`iterate_tolerances`; as SWMM, a step that uses up the
+    file's trials is then accepted and reported, not refused). The passes are Anderson-accelerated
     over the last `memory` of them by default (``acceleration="anderson"``, `Model`'s
     `iterate_acceleration`), with `relaxation` the damping of the steps it falls back to;
     ``acceleration=None`` is plain relaxation, which reaches the same fixed point in two to
@@ -1913,8 +1982,8 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     t = 0) and is the default of `simulate_dynamic_wave`'s own `outfall_stage`.
     `iterate_flow_tol` (m3/s) is the tolerance on the conduit
     flows' own fixed-point residual, judged alongside the heads (`Model`'s
-    `iterate_flow_tol`), and is required: ``None`` (heads judged alone) is
-    refused by name. On the normal-flow slope switch (`DynamicWaveConduit`) the heads
+    `iterate_flow_tol`); the heads are never judged alone. On the normal-flow slope switch
+    (`DynamicWaveConduit`) the heads
     bound the flow residual only through the wall slope S over the junction's grounding,
     so a heads-only test can stop a pass short of the fixed point (a flow residual of
     3e-5 m3/s was measured on the tree's drain-down). The state is
@@ -1951,11 +2020,10 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
             f"build_dynamic_wave_model: network geometry is {net.geometry!r}; dynamic wave "
             f"always routes on SWMM's tabulated circle (xsect_tables.py), so build the "
             f"network with geometry='tabulated' (read_swmm_inp's default)")
-    if iterate_flow_tol is None:
-        raise ValueError(
-            "build_dynamic_wave_model: iterate_flow_tol (m3/s) is required, got None: on the "
-            "normal-flow slope switch a heads-only convergence test can stop short of the "
-            "fixed point; plain relaxation is acceleration=None with a flow tolerance")
+    controls = iterate_tolerances(net.dynamic_wave, iterate_tol=iterate_tol,
+                                  iterate_max=iterate_max, iterate_flow_tol=iterate_flow_tol)
+    iterate_tol, iterate_max = controls["iterate_tol"], controls["iterate_max"]
+    iterate_flow_tol = controls["iterate_flow_tol"]
     if air:
         check_air_topology(net)
     graph = Network(dtype=F64)
@@ -2028,7 +2096,8 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
                   iterate_tol=tolerances, iterate_max=iterate_max,
                   iterate_relaxation=relaxation, iterate_acceleration=acceleration,
                   iterate_memory=memory,
-                  iterate_flow_tol={"water": iterate_flow_tol})
+                  iterate_flow_tol={"water": iterate_flow_tol},
+                  iterate_on_limit=controls["on_limit"])
     inflow = torch.zeros(graph.n, dtype=F64)
     inflow[junction_idx] = torch.tensor([m.inflow for m in net.manholes], dtype=F64)
     stage_functions = closure.check_outfall_stage(outfall_stage)
@@ -2052,7 +2121,8 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
         + f" and flows to {iterate_flow_tol} m3/s"
         + f" within {iterate_max} passes"
         + ("" if acceleration is None else f" ({acceleration}-accelerated)")
-        + "; SWMM's HEAD_TOLERANCE and MAX_TRIALS are not used")
+        + ("; a step that uses them up is accepted, as SWMM does"
+           if controls["on_limit"] == "accept" else ""))
     model.notes = closure.notes
     model.junction_idx = junction_idx
     model.junction_invert = junction_invert
@@ -2396,8 +2466,11 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
     `rtol` to 0, because Newton's own default (sqrt(eps), 1.5e-8 m3/s) would stop a
     warm-started pass before it moves and leave the junction balance off by that much.
     Returns the final state and the recorded `record` keys stacked over steps (leading
-    dimension: the steps), plus ``"t"`` (s, the END time of each step) and ``"dt"`` (s, each
-    step's length).
+    dimension: the steps), plus ``"t"`` (s, the END time of each step), ``"dt"`` (s, each
+    step's length) and ``"converged"`` (bool per step, every batch instance's passes
+    converged): under the file's own MAX_TRIALS (`iterate_tolerances`) a step that uses
+    them up is taken, as SWMM takes it, and is False here; ``(~out["converged"]).sum()``
+    is SWMM's count of non-converging steps.
     """
     hyd = model.dynamic_wave
     if (steps is None) == (duration is None):
@@ -2468,6 +2541,7 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
     rows: dict[str, list[Tensor]] = {key: [] for key in record}
     ends: list[float] = []
     lengths: list[float] = []
+    converged: list[Tensor] = []
     now_ms = 0.0                                          # swmm5.c: NewRoutingTime, ms
     end_ms = None if duration is None else 1000.0 * float(duration)
     previous: tuple[State, float] | None = None
@@ -2504,6 +2578,7 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
         k += 1
         ends.append(now_ms / 1000.0)
         lengths.append(step)
+        converged.append(torch.as_tensor(diag["converged"]).all())
         if diagnostics is not None:
             diagnostics.append(diag)
         report = None
@@ -2522,4 +2597,5 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
     out = {key: torch.stack(v) for key, v in rows.items()}
     out["t"] = torch.tensor(ends, dtype=F64)
     out["dt"] = torch.tensor(lengths, dtype=F64)
+    out["converged"] = torch.stack(converged)
     return state, out

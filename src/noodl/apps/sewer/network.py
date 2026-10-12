@@ -647,6 +647,7 @@ def build_model(
     iterate_tol: float | None = None,
     iterate_max: int | None = None,
     outfall_stage: Mapping | None = None,
+    iterate_flow_tol: float | None = None,
 ) -> tuple[Model, State, Drivers]:
     """Assemble the sewer model and return `(model, state, drivers)`.
 
@@ -663,8 +664,9 @@ def build_model(
     the headspace air on the solved conduits (`f_air`, `f_i`, `c_s`, `leak_area`, `leak_cd`
     and `fans` as below; dendritic networks only, loops refused by name), `storage` is
     refused; converged to
-    `iterate_tol` (m, default 1e-11) within `iterate_max` passes (default 2000; a slowly
-    contracting outfall head at low flow can need several hundred). Those two
+    `iterate_tol` (m) and `iterate_flow_tol` (m3/s) within `iterate_max` passes, by default
+    the file's HEAD_TOLERANCE and MAX_TRIALS (SWMM's 0.005 ft and 8 where it sets none) and
+    the flow tolerance matching them (`dynwave.iterate_tolerances`). Those three
     apply to dynamic wave only and are refused for the other routings. So is `outfall_stage`,
     the stage elevation of each TIMESERIES outfall (``{name: m, or a function of t in s}``;
     `build_dynamic_wave_model`).
@@ -682,13 +684,15 @@ def build_model(
                     f"dynamic-wave network always iterates its passes on the routing step "
                     f"(net.dynamic_wave); leave {name} at its default")
         kwargs = {k: v for k, v in (("iterate_tol", iterate_tol),
-                                    ("iterate_max", iterate_max)) if v is not None}
+                                    ("iterate_max", iterate_max),
+                                    ("iterate_flow_tol", iterate_flow_tol)) if v is not None}
         return build_dynamic_wave_model(net, outfall_stage=outfall_stage,
                                         quality=bool(quality), species=species,
                                         scheme=scheme, air=bool(air), f_air=f_air, f_i=f_i,
                                         c_s=c_s, leak_area=leak_area, leak_cd=leak_cd,
                                         fans=fans, **kwargs)
     for name, value in (("iterate_tol", iterate_tol), ("iterate_max", iterate_max),
+                        ("iterate_flow_tol", iterate_flow_tol),
                         ("outfall_stage", outfall_stage)):
         if value is not None:
             raise ValueError(

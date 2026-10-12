@@ -303,6 +303,12 @@ class Model:
     point to differentiate, so `on_failure="return"` still raises, naming that reason, when a
     gradient was wanted).
 
+    `iterate_on_limit="accept"` (default ``"raise"``) makes a batch that does not converge
+    within `iterate_max` return its last pass instead of raising, as SWMM accepts a step
+    that used up its MAX_TRIALS (`dynwave.c`, counted as non-converging), with
+    ``diagnostics["converged"]`` False for those instances. A gradient is still refused
+    there: there is no fixed point to differentiate.
+
     `iterate_flow_tol` (optional; per potential layer named in `iterate_tol`, absolute, in
     flow units) also judges that layer's flows: a pass converges only when its returned
     `.q` is within it of the `.q` it was fed. `iterate_acceleration="anderson"` (opt-in)
@@ -346,6 +352,7 @@ class Model:
         iterate_acceleration: str | None = None,
         iterate_memory: int = 5,
         iterate_flow_tol: Mapping[str, float] | None = None,
+        iterate_on_limit: str = "raise",
     ) -> None:
         if coupling not in ("pingpong", "iterate"):
             raise ValueError(
@@ -565,6 +572,11 @@ class Model:
                 f"passes Anderson mixing combines), got {iterate_memory!r}"
             )
         self.iterate_memory = iterate_memory
+        if iterate_on_limit not in ("raise", "accept"):
+            raise ValueError(
+                f"Model: iterate_on_limit must be 'raise' or 'accept', got {iterate_on_limit!r}"
+            )
+        self.iterate_on_limit = iterate_on_limit
         # The tolerance of the ONE implicit-adjoint GMRES solve at the converged interface
         # deliberately independent of the primal `iterate_tol`: that independence is
         # the whole point of differentiating the fixed point instead of the iteration.
@@ -1383,7 +1395,9 @@ class Model:
                     "state here (it returns the primal state only when nothing requires a "
                     "gradient, e.g. under torch.no_grad() or with differentiable=False)"
                 )
-            if not (solve_kwargs.get("on_failure") == "return" and diagnostics is not None):
+            if self.iterate_on_limit != "accept" and not (
+                solve_kwargs.get("on_failure") == "return" and diagnostics is not None
+            ):
                 raise RuntimeError(message)
         # A key `_pass` does not write is carried through it verbatim, pass after pass, so
         # its value in the returned state is the caller's own -- and so is its graph, which
