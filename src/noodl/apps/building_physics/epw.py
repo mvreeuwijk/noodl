@@ -172,9 +172,9 @@ def write_wth(weather: Weather, path, *, start_date: str = "1/1") -> Path:
     day_rows = []
     for k in range(max(math.ceil(float(weather.t[-1]) / 86400.0), 1) if n else 1):
         stamp = base + _dt.timedelta(days=k)
-        dtype = weather.day_types.get(first_day + k, cal.day_type(first_day + k))
+        dtype = weather.day_types.get(weather.start_day + k, cal.day_type(first_day + k))
         day_rows.append(
-            f"{stamp.month}/{stamp.day}	{dtype if dtype <= 7 else 1}	{dtype}	0	273.15"
+            f"{stamp.month}/{stamp.day}\t{dtype if dtype <= 7 else 1}\t{dtype}\t0\t273.15"
         )
     lines = [
         "WeatherFile ContamW 2.0",

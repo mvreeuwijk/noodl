@@ -30,7 +30,7 @@ from noodl.apps.building_physics.schedules import (
     _piecewise,
     _seconds_into_file,
 )
-from noodl.apps.building_physics.wth import _day_of_year, _seconds
+from noodl.apps.building_physics.wth import _day_of_year, _seconds, _strip_comment
 
 F64 = torch.float64
 
@@ -86,7 +86,7 @@ class _AmbientSignal:
 
 def read_ctm(path) -> AmbientConcentrations:
     """A CONTAM `.ctm` ambient-concentration file as `AmbientConcentrations`."""
-    lines = [ln.strip() for ln in Path(path).read_text().splitlines()]
+    lines = [_strip_comment(ln) for ln in Path(path).read_text().splitlines()]
     if not lines or not lines[0].startswith("SpeciesFile ContamW"):
         raise ValueError(
             f"ctm: {path} is not a CONTAM contaminant file (expected 'SpeciesFile ContamW 2.0')"

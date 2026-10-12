@@ -253,7 +253,7 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), **step_kwargs) ->
         return out
     weather = read_wth(base / rc.weather_file) if rc.weather_file else None
     ambient = read_ctm(base / rc.ambient_file) if rc.ambient_file else None
-    all_inputs = [*project.inputs,
+    all_inputs = [*project.inputs_for(model),
                   *(weather.inputs(model, ambient=project.ambient) if weather else ()),
                   *(ambient.inputs(model) if ambient and "species" in model.transport else ()),
                   *inputs]
@@ -262,7 +262,8 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), **step_kwargs) ->
                         day_types=weather.day_types if weather and weather.day_types else None)
     times = torch.arange(n + 1, dtype=F64) * rc.time_step
     out = simulate(model, state, drivers, times, inputs=all_inputs, calendar=calendar,
-                   air_mass_change=rc.zone_mass_change, land_on_breakpoints=False,
+                   air_mass_change=rc.zone_mass_change and _air_mass_source(model) is not None,
+                   land_on_breakpoints=False,
                    **step_kwargs)
     out["path_flow"] = project.path_flows(out["air.q"])
     return out

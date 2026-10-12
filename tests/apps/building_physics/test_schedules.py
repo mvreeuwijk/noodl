@@ -180,3 +180,29 @@ def test_a_repeated_time_takes_the_later_row_never_a_zero_width_interval():
     v4 = torch.tensor([280.0, 290.0, 295.0, 305.0], dtype=F64)
     assert _piecewise(inner, v4, DAY, linear=True, left=False).item() == 295.0
     assert _piecewise(inner, v4, 1.5 * DAY, linear=True, left=False).item() == 300.0
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"start_day": 1.5}, {"start_day": "3"}, {"start_day_type": 2.5},
+    {"day_types": {1.5: 2}}, {"day_types": {1: 2.5}},
+])
+def test_calendar_refuses_a_non_integral_day_or_day_type(kwargs):
+    with pytest.raises(ValueError, match="whole number"):
+        Calendar(**kwargs)
+
+
+def test_calendar_accepts_integral_floats_and_numpy_style_ints():
+    cal = Calendar(start_day=3.0, day_types={4.0: 2})
+    assert cal.start_day == 3 and cal.day_types == {4: 2}
+
+
+def test_calendar_refuses_empty_day_types_rather_than_cycling():
+    with pytest.raises(ValueError, match="day_types is empty"):
+        Calendar(day_types={})
+    assert Calendar(day_types=None).day_type(1) == 1
+
+
+def test_schedule_messages_name_no_file_keywords():
+    with pytest.raises(ValueError) as info:
+        WeekSchedule([_tzone()], (1,) * 11)
+    assert "j1" not in str(info.value)

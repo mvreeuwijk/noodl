@@ -140,10 +140,18 @@ def test_gradients_reach_a_time_series():
     assert bool(torch.isfinite(g).all()) and g.abs().sum().item() > 0.0
 
 
+def _set_dod_mdt(project, on):
+    """The project as if its run control set (or cleared) dodMdt."""
+    import dataclasses
+
+    project.run_control = dataclasses.replace(project.run_control, zone_mass_change=on)
+
+
 def test_the_zone_air_mass_change_enters_the_airflow_balance():
     """With `air_mass_change`, net inflow into a heated zone = (M_new - M_old) / dt, with M at
     the zone's absolute pressure (Pb + P_zone) V / (R T)."""
     project = read_prj(THREE)
+    _set_dod_mdt(project, True)
     model, state, drivers = project_to_model(project)
     # "step" series: 293.15 over (0, 300], 303.15 over (300, 600] -- the jump lands in the
     # step ending 600 s (left limit at 300 s).
@@ -169,6 +177,7 @@ def test_the_air_mass_change_follows_the_zone_pressure_without_zone_pressure_den
     pressures with the temperatures fixed: net inflow = (P_zone change) V / (R T dt), at the
     pressures the step itself solves to."""
     project = read_prj(THREE)
+    _set_dod_mdt(project, True)
     assert not project.density_uses_zone_pressure
     model, state, drivers = project_to_model(project)
     gust = [Input(TimeSeries([0.0, 300.0, 600.0], [5.23, 10.0, 10.0], interpolation="step"),
@@ -191,6 +200,7 @@ def test_the_air_mass_change_is_implicit_in_the_airflow_solve_at_any_step_length
     it sits in the solve's Jacobian, so a 1 ms step converges like a 300 s one, and the mass
     each zone gains is what flowed in."""
     project = read_prj(THREE)
+    _set_dod_mdt(project, True)
     model, state, drivers = project_to_model(project)
     gust = [Input(TimeSeries([0.0, dt, 2 * dt], [5.23, 10.0, 10.0], interpolation="step"),
                   "V_met")]
@@ -213,6 +223,7 @@ def test_the_air_mass_change_is_implicit_in_the_airflow_solve_at_any_step_length
 def test_air_mass_change_needs_the_zone_air_mass_term_on_the_airflow_layer():
     """A model whose airflow layer carries no `ZoneAirMassChange` is refused by name."""
     project = read_prj(THREE)
+    _set_dod_mdt(project, True)
     model, state, drivers = project_to_model(project)
     model.potential["air"]._node_sources = []
     with pytest.raises(ValueError, match="ZoneAirMassChange"):
@@ -387,3 +398,43 @@ def test_simulate_project_refuses_a_run_that_is_not_whole_time_steps(tmp_path):
                              ("Jan01 24:00:00  00:05:00", "Jan01 23:58:00  00:05:00"))
     with pytest.raises(ValueError, match="not a whole number"):
         simulate_project(p)
+
+
+def test_a_run_control_without_contaminants_builds_no_species_layer(tmp_path):
+    import shutil
+
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    for suffix in ("wth", "ctm"):
+        shutil.copy(DATA / f"scheduled_three_zone.{suffix}", tmp_path)
+    text = (DATA / "scheduled_three_zone.prj").read_text()
+    head = "!sim_mf slae rs maxi   relcnvg   abscnvg relax gamma ucc\n    "
+    assert head + "2" in text
+    variant = tmp_path / "scheduled_three_zone.prj"
+    variant.write_text(text.replace(head + "2", head + "0", 1))
+    p = read_prj(variant)
+    assert p.run_control.contaminants == "none" and p.sources and p.species
+    model, _state, drivers = project_to_model(p)
+    assert "species" not in model.transport
+    assert not any(k.startswith("species.") for k in drivers)
+    assert not any(i.key.startswith("species.") for i in p.inputs_for(model))
+    assert any(i.key.startswith("species.") for i in p.inputs)
+    out = simulate_project(p, **TIGHT)
+    assert "air.q" in out and not any(k.startswith("species.") for k in out)
+
+
+def test_the_zone_air_mass_source_needs_dodmdt_and_a_zone_with_volume():
+    from noodl.apps.building_physics.simulation import _air_mass_source
+
+    stack = DATA / "test_OneZoneWthCtmStack.prj"
+    p = read_prj(stack)
+    assert p.run_control.zone_mass_change
+    assert _air_mass_source(project_to_model(p)[0]) is not None
+    _set_dod_mdt(p, False)
+    assert _air_mass_source(project_to_model(p)[0]) is None
+    # dodMdt with no zone of positive volume: no source (an empty node set would fail).
+    p = read_prj(stack)
+    for node in p.net.graph.nodes:
+        p.net.graph.nodes[node]["volume"] = 0.0
+    p.net._cache.clear()
+    assert _air_mass_source(project_to_model(p, species=False)[0]) is None

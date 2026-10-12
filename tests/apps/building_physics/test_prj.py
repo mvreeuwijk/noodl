@@ -844,3 +844,20 @@ def test_a_zone_mass_change_project_holds_its_zone_air_mass_at_the_absolute_pres
     V = p.net.node_attr("volume", default=0.0)
     expected = ((Pb + phi) * V / (R_AIR * T))[nodes]
     torch.testing.assert_close(out["species.capacity"], expected, rtol=1e-15, atol=0)
+
+
+def test_a_non_integer_option_code_names_the_option():
+    from noodl.apps.building_physics.prj import _CONTAMINANT_MODES, _code
+
+    with pytest.raises(ValueError, match=r"mode 'x' is not an integer"):
+        _code(_CONTAMINANT_MODES, "x", "the mode")
+    assert _code(_CONTAMINANT_MODES, "2", "the mode") == "transient"
+
+
+def test_a_date_with_an_impossible_day_is_refused():
+    from noodl.apps.building_physics.prj import _date
+
+    assert _date("Feb28") == 59 and _date("Dec31") == 365
+    for bad in ("Feb29", "Jan00", "Apr31", "Jan32"):
+        with pytest.raises(ValueError, match="not a CONTAM date"):
+            _date(bad)

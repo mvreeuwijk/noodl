@@ -3,7 +3,7 @@
 Time `t` is seconds since the simulation start. A `Calendar` places t = 0 on a day of the year
 (1-365; CONTAM's weather and ambient files carry no year and no 29 February) at a time of day,
 and gives every day a CONTAM day type (1-12), which selects one of a week schedule's twelve
-day schedules. With a weather file, the day type comes from the file's per-day `Dtype` column.
+day schedules. With a weather file, the day type comes from the file's per-day day-type column.
 Without one, it starts at the steady weather's day type and cycles through types 1-7: the day
 after a day of type d has type (d mod 7) + 1. This was measured on ContamX 3.4.1.7 (start 6
 gives 6, 7, 1, ...; start 9 gives 9, 3, 4, ...).
@@ -33,6 +33,17 @@ _SHAPES = ("rectangular", "trapezoidal")
 #: A time of day within this many ulps (of the seconds since new year) of a midnight or a
 #: schedule knot is taken as that instant.
 _ROUND_OFF_ULPS = 8
+
+
+def _integral(label: str, name: str, value) -> int:
+    """`value` as an int, refusing a non-integral number (a day is a whole number)."""
+    try:
+        whole = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{label}: {name} must be a whole number, got {value!r}") from exc
+    if whole != value:
+        raise ValueError(f"{label}: {name} must be a whole number, got {value!r}")
+    return whole
 
 
 def _as_f64(values) -> Tensor:
@@ -119,20 +130,31 @@ class Calendar:
         start_day_type: int = 1,
         day_types: Mapping[int, int] | None = None,
     ) -> None:
-        if not 1 <= int(start_day) <= 365:
+        start_day = _integral("Calendar", "start_day", start_day)
+        start_day_type = _integral("Calendar", "start_day_type", start_day_type)
+        if not 1 <= start_day <= 365:
             raise ValueError(
                 f"Calendar: start_day must be a day of the year 1-365, got {start_day}"
             )
         if not 0.0 <= float(start_time) < DAY:
             raise ValueError(f"Calendar: start_time must be in [0, 86400) s, got {start_time}")
-        if not 1 <= int(start_day_type) <= N_DAY_TYPES:
+        if not 1 <= start_day_type <= N_DAY_TYPES:
             raise ValueError(f"Calendar: start_day_type must be 1-12, got {start_day_type}")
-        types = {int(d): int(k) for d, k in (day_types or {}).items()}
+        if day_types is not None and not day_types:
+            raise ValueError(
+                "Calendar: day_types is empty; pass None to cycle the types from start_day_type"
+            )
+        types = {
+            _integral("Calendar", "a day of the year", d): _integral(
+                "Calendar", f"the day type of day {d}", k
+            )
+            for d, k in (day_types or {}).items()
+        }
         bad = {d: k for d, k in types.items() if not 1 <= k <= N_DAY_TYPES}
         if bad:
             raise ValueError(f"Calendar: day types must be 1-12; got {bad}")
-        self.start_day, self.start_time = int(start_day), float(start_time)
-        self.start_day_type, self.day_types = int(start_day_type), types
+        self.start_day, self.start_time = start_day, float(start_time)
+        self.start_day_type, self.day_types = start_day_type, types
 
     def __repr__(self) -> str:
         return (
@@ -235,7 +257,7 @@ class WeekSchedule:
     """CONTAM's week schedule: one `DaySchedule` per day type (1-12).
 
     `day_schedules` are the distinct day schedules. `day_types` has 12 entries; entry k is
-    the 1-based position in `day_schedules` used on day type k + 1 (CONTAM's `j1 ... j12`).
+    the 1-based position in `day_schedules` used on day type k + 1.
     The default uses the first day schedule every day.
     """
 
@@ -250,7 +272,7 @@ class WeekSchedule:
         js = [int(j) for j in day_types]
         label = f"WeekSchedule {name!r}" if name else "WeekSchedule"
         if len(js) != N_DAY_TYPES:
-            raise ValueError(f"{label}: needs 12 day types (CONTAM's j1..j12), got {len(js)}")
+            raise ValueError(f"{label}: needs 12 day types, one per CONTAM day type, got {len(js)}")
         for k, j in enumerate(js, start=1):
             if not 1 <= j <= len(days):
                 raise ValueError(

@@ -56,3 +56,12 @@ def test_a_non_ctm_file_is_refused(tmp_path):
     p.write_text("WeatherFile ContamW 2.0\n")
     with pytest.raises(ValueError, match="SpeciesFile"):
         read_ctm(p)
+
+
+def test_inline_comments_are_stripped(tmp_path):
+    lines = (DATA / "test_OneZoneWthCtmStack.ctm").read_text().splitlines()
+    commented = [ln + " ! note" if ln and not ln.startswith("!") else ln for ln in lines]
+    f = tmp_path / "c.ctm"
+    f.write_text("\n".join(commented) + "\n")
+    a, b = read_ctm(f), read_ctm(DATA / "test_OneZoneWthCtmStack.ctm")
+    assert a.species == b.species and torch.equal(a.x, b.x) and torch.equal(a.t, b.t)

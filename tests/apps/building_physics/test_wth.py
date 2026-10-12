@@ -224,3 +224,14 @@ def test_weather_inputs_write_the_thermal_boundary_when_the_model_has_no_node_te
     d = apply_inputs(base, bind_inputs(model, inputs), 6 * 3600.0, Calendar())
     assert d["thermal.x_boundary"].shape == (1,)
     assert d["thermal.x_boundary"].item() == pytest.approx(285.0)
+
+
+def test_inline_comments_are_stripped(tmp_path):
+    lines = SYNTHETIC.splitlines()
+    commented = [ln if ln.startswith("!") or ln[0].isalpha() else ln + " ! note" for ln in lines]
+    f = tmp_path / "c.wth"
+    f.write_text(chr(10).join(commented) + chr(10))
+    ref = tmp_path / "r.wth"
+    ref.write_text(SYNTHETIC)
+    w, expected = read_wth(f), read_wth(ref)
+    assert torch.equal(w.Ta, expected.Ta) and w.day_types == expected.day_types

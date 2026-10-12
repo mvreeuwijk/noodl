@@ -38,7 +38,8 @@ variable-contaminants flag (ContamX then holds the zone's concentrations at thei
 and ignores its sources); CFD and 1-D convection/diffusion zones; continuous-values-file
 zones and paths; duct networks; a constant wind pressure on an interior path; a fan curve on a
 path with `mult != 1`; `csf_*` and `sup_afe` elements; `stackD = 1` (densities varying with
-height inside a zone); a wind pressure profile with the trigonometric curve fit.
+height inside a zone); a wind pressure profile with the trigonometric curve fit; a day schedule whose shape is
+neither rectangular nor trapezoidal; zone names with spaces.
 
 A **filter** is refused emphatically, because a filter is invisible to airflow but *not* to the
 species layer — loading one would silently corrupt contaminant results while the airflow looked
@@ -48,7 +49,7 @@ Control nodes that no zone and no path references are silently skipped rather th
 own sample projects carry dozens of unreferenced sensor and logger nodes, and those projects must
 load.
 
-**`project_to_model` never builds a thermal layer**, because a `.prj` carries no thermal data.
+**`project_to_model` never builds a thermal layer**, because a `.prj` carries no thermal data. A run control that simulates no contaminants (`none`) builds no species layer and binds no source inputs.
 
 `project_to_model` returns drivers at the **steady-simulation instant** of the run control (its
 day, time and day type), so a `steady()` on them is CONTAM's steady simulation, schedules
@@ -69,8 +70,9 @@ density at its absolute pressure `Pb + P_zone`. `project_to_model` then adds a
 masses included. When the run control sets **`dodMdt = 1`**, each zone's air-mass change over a
 step enters its airflow balance (`simulate_project` passes `air_mass_change=True`), and ContamX
 takes that mass at the zone's absolute pressure even with `densZP = 0`. `project_to_model`
-therefore always attaches a `ZoneAirMassChange` node source to the air layer, which acts only
-when `simulate` supplies the step's start mass. For a `dodMdt` project with species it also adds
+therefore attaches a `ZoneAirMassChange` node source to the air layer (only when the run
+control sets `dodMdt` and a zone has volume), which acts only when `simulate` supplies the
+step's start mass. For a `dodMdt` project with species it also adds
 a `ZonePressureDensity(densities=False)` closure, which scales the species layer's capacity (the
 zone air mass) and leaves the densities at `Pb`. Whenever the model carries a
 `ZonePressureDensity` closure, `prj.steady(model, state, drivers)` repeats `model.steady` to the

@@ -60,6 +60,13 @@ from noodl.apps.building_physics.schedules import (
 _DAYS_BEFORE_MONTH = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
 
 
+def _strip_comment(line: str) -> str:
+    """`line` without surrounding blanks and without a trailing `!` comment; a line that is
+    itself a comment (starts with `!`) is kept whole, since the headers are comments."""
+    line = line.strip()
+    return line if line.startswith("!") else line.split("!", 1)[0].strip()
+
+
 def _day_of_year(date: str) -> int:
     m, d = (int(v) for v in date.split("/"))
     return _DAYS_BEFORE_MONTH[m - 1] + d
@@ -186,7 +193,7 @@ class _WeatherSignal:
 def read_wth(path) -> Weather:
     """A CONTAM `.wth` weather file as a `Weather` series (ambient temperature, pressure,
     wind speed and direction, humidity ratio, and each day's day type)."""
-    lines = [ln.strip() for ln in Path(path).read_text().splitlines()]
+    lines = [_strip_comment(ln) for ln in Path(path).read_text().splitlines()]
     if not lines or not lines[0].startswith("WeatherFile ContamW"):
         raise ValueError(
             f"wth: {path} is not a CONTAM weather file (expected 'WeatherFile ContamW 2.0')"

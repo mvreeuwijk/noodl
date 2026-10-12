@@ -178,6 +178,7 @@ _DOOR = {"dor_door", "dor_pl2"}
 _DAMPER = {"plr_bdq", "plr_bdf"}
 _FAN_CONST = {"fan_cmf", "fan_cvf"}
 _SOURCE_TYPES = {"ccf", "cut", "eds", "brs"}
+_DAYS_IN_MONTH = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 _CONTAMINANT_MODES = {0: "none", 1: "steady", 2: "transient", 3: "cyclic"}
 _INTEGRATION = {0: "trapezoid", 1: "short_time_step", 2: "cvode"}
@@ -276,6 +277,8 @@ def _clock(hms: str) -> float:
 def _code(table: dict[int, str], token: str, what: str) -> str:
     try:
         return table[int(token)]
+    except ValueError as exc:
+        raise ValueError(f"prj: {what} {token!r} is not an integer code") from exc
     except KeyError as exc:
         raise ValueError(f"prj: {what} {token} is not one of {sorted(table)}") from exc
 
@@ -286,6 +289,11 @@ def _date(token: str) -> int:
         day = int(token[3:])
     except ValueError as exc:
         raise ValueError(f"prj: {token!r} is not a CONTAM date (MmmDD)") from exc
+    if not 1 <= day <= _DAYS_IN_MONTH[month - 1]:
+        raise ValueError(
+            f"prj: {token!r} is not a CONTAM date: {_MONTHS[month - 1]} has days "
+            f"1-{_DAYS_IN_MONTH[month - 1]}"
+        )
     return _DAYS_BEFORE_MONTH[month - 1] + day
 
 
@@ -331,6 +339,13 @@ class Project:
     # Each zone's flag bits as the file gives them, by zone name.
     zone_flags: dict[str, int] = field(default_factory=dict)
     source_path: Path | None = None
+
+    def inputs_for(self, model) -> list[Input]:
+        """The project's inputs that `model` can take: a model without a species layer (a run
+        control that simulates no contaminants) has no source multipliers to write."""
+        if "species" in model.transport:
+            return list(self.inputs)
+        return [i for i in self.inputs if not i.key.startswith("species.")]
 
     def path_flows(self, q: torch.Tensor) -> torch.Tensor:
         """Net mass flow per path in path-number order (a doorway sums its two edges).
@@ -1328,12 +1343,19 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     volumes = net.node_attr("volume", default=0.0)
     zone_nodes = [i for i, name in enumerate(net.nodes)
                   if name != project.ambient and volumes[i].item() > 0.0]
+    zone_mass_change = project.run_control is not None and project.run_control.zone_mass_change
+    # The zone air-mass change source exists only when the project asks for it and there is a
+    # zone to carry it (an empty node set has no air mass to change).
+    node_sources = (
+        [ZoneAirMassChange(zone_nodes, volumes[zone_nodes])]
+        if zone_mass_change and zone_nodes else []
+    )
     air = PotentialFlowLayer(net, "air", project.elements, drives=project.drives,
                              boundary=[project.ambient], quantity="pressure", unit="Pa",
-                             flow_unit="kg/s",
-                             node_sources=[ZoneAirMassChange(zone_nodes, volumes[zone_nodes])])
+                             flow_unit="kg/s", node_sources=node_sources)
     layers: dict = {"air": air}
-    if species and project.species:
+    no_contaminants = project.run_control is not None and project.run_control.contaminants == "none"
+    if species and project.species and not no_contaminants:
         layers["species"] = species_layer(
             net, ambient=project.ambient, flow_kinds=tuple(project.kinds),
             n_species=len(project.species), scheme=scheme, rho=rho,
@@ -1344,7 +1366,6 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         ambient_index=net.node_index(project.ambient), volumes=volumes,
         capacity_nodes=cap_nodes)
     closures: list = [density]
-    zone_mass_change = project.run_control is not None and project.run_control.zone_mass_change
     if project.density_uses_zone_pressure or (zone_mass_change and cap_nodes is not None):
         # With `dodMdt` alone ContamX holds the contaminants' zone air MASS at the zone's
         # absolute pressure but the densities the flows see at Pb.
@@ -1400,7 +1421,7 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
             description="constant wind pressure on each edge, on its ambient side", unit="Pa",
             over=("edges", kind))
     if project.inputs and project.run_control is not None:
-        drivers = apply_inputs(drivers, bind_inputs(model, project.inputs), 0.0,
+        drivers = apply_inputs(drivers, bind_inputs(model, project.inputs_for(model)), 0.0,
                                project.run_control.steady_calendar())
         rho_now = density(state, drivers)
         drivers["rho"], drivers["rho_amb"] = rho_now["rho"], rho_now["rho_amb"]
