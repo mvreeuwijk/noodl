@@ -259,3 +259,71 @@ def test_a_source_or_sink_on_a_storage_free_node_is_refused_by_name(source):
     layer = species_layer(net, storage_free=["plenum"])
     with pytest.raises(ValueError, match=r"source 1 .*'plenum'.*holds no air"):
         SpeciesSources([source(net.node_index("plenum"))], species=[0], layer=layer)
+
+
+# ---------------------------------------------------------------- filters, batches, species
+
+
+def _plenum_layer(**kw):
+    net = Network(dtype=F64)
+    for node in ("ambient", "plenum", "room"):
+        net.add_node(node)
+    net.add_edge("ambient", "plenum", kind="air")
+    net.add_edge("room", "plenum", kind="air")
+    net.add_edge("plenum", "room", kind="air")
+    net.add_edge("room", "ambient", kind="air")
+    return TransportLayer(net, "c", capacity=torch.tensor([0.0, M_ROOM], dtype=F64),
+                          flow_kind="air", boundary=["ambient"], scheme="implicit",
+                          storage_free=["plenum"], **kw)
+
+
+def test_a_filter_on_the_edge_into_a_storage_free_node_acts_on_what_it_passes_on():
+    """A pass fraction of 0.7 on the outdoor-air edge: the plenum mixes 0.7 q_o x_amb with
+    q_r x_room, and the room receives what the filter passed."""
+    layer = _plenum_layer(transmission=torch.tensor([0.7, 1.0, 1.0, 1.0], dtype=F64))
+    x = _step(layer, torch.tensor([0.0, 2e-4], dtype=F64), _q(0.03, 0.07))
+    room = (M_ROOM / DT * 2e-4 + 0.7 * 0.03 * 1e-3) / (M_ROOM / DT + 0.03)
+    plenum = (0.7 * 0.03 * 1e-3 + 0.07 * room) / 0.1
+    torch.testing.assert_close(x, torch.tensor([plenum, room], dtype=F64), rtol=1e-13, atol=0)
+
+
+def test_a_batched_step_with_a_storage_free_node_passes_gradcheck():
+    """Two members with different flows through the plenum, differentiated in the flows and
+    the start state together (a held member's switch is a 0/1 choice and is not probed)."""
+    _, layer = _plenum()
+    q = torch.stack([_q(0.03, 0.07), _q(0.05, 0.02)]).requires_grad_(True)
+    x0 = torch.tensor([[0.0, 2e-4], [1e-4, 5e-4]], dtype=F64, requires_grad=True)
+    assert torch.autograd.gradcheck(lambda q_, x_: _step(layer, x_, q_), (q, x0),
+                                    eps=1e-7, atol=1e-9, rtol=1e-6)
+
+
+def test_several_species_each_mix_through_a_storage_free_node_and_are_held_together():
+    layer = _plenum_layer(n_species=2)
+    x0 = torch.tensor([[0.0, 5.0], [2e-4, 3e-4]], dtype=F64)      # (n_i, K)
+    xb = torch.tensor([[1e-3, 2e-3]], dtype=F64)
+    zero = torch.zeros(3, 2, dtype=F64)
+    x = layer.step(x0, _q(0.03, 0.07), zero, xb, DT)
+    assert x.shape == (2, 2)
+    for k in range(2):
+        room = (M_ROOM / DT * x0[1, k] + 0.03 * xb[0, k]) / (M_ROOM / DT + 0.03)
+        plenum = (0.03 * xb[0, k] + 0.07 * room) / 0.1
+        torch.testing.assert_close(x[:, k], torch.stack([plenum, room]), rtol=1e-13, atol=0)
+    held = layer.step(x0, _q(0.0, 0.0), zero, xb, DT)
+    torch.testing.assert_close(held, x0, rtol=1e-15, atol=0)
+
+
+def test_a_negative_construction_capacity_at_a_storage_free_node_is_refused():
+    net, _ = _plenum()
+    with pytest.raises(ValueError, match=r"capacity.*negative.*\['plenum'\]"):
+        TransportLayer(net, "c", capacity=torch.tensor([-1.0, M_ROOM], dtype=F64),
+                       flow_kind="air", boundary=["ambient"], scheme="implicit",
+                       storage_free=["plenum"])
+
+
+def test_the_building_layers_take_storage_free_nodes_from_any_iterable():
+    net = _building_net()
+    layer = thermal_layer(net, storage_free=(n for n in ["plenum"]))
+    assert layer.scheme == "implicit"
+    assert layer.storage_free_mask.tolist() == [True, False]
+    layer = species_layer(net, storage_free=(n for n in ["plenum"]))
+    assert layer.storage_free_mask.tolist() == [True, False]

@@ -7,6 +7,7 @@ tool's equations, the class docstring says so (for example ``RegularizedPowerLaw
 pre-rename ``MBL*``/``mbl_*`` names remain importable as aliases.
 """
 
+from noodl.elements.air_duct import AirDuct, DuctTerminal, air_viscosity
 from noodl.elements.base import Element
 from noodl.elements.conductance import Conductance
 from noodl.elements.damper import Damper
@@ -35,7 +36,7 @@ from noodl.elements.door_discretized import (
 )
 from noodl.elements.duct import Duct
 from noodl.elements.fan import FanCurve
-from noodl.elements.fixed import FixedFlow
+from noodl.elements.fixed import FixedFlow, FixedVolumeFlow
 from noodl.elements.media import AirMedium, MBLMedium, medium
 from noodl.elements.powerlaw import Orifice, PowerLaw
 from noodl.elements.powerlaw_regularized import (
@@ -58,6 +59,7 @@ from noodl.elements.table import MBLTable, SplineFlowTable
 from noodl.elements.upstream import UpstreamDensityPowerLaw
 
 __all__ = [
+    "AirDuct",
     "AirMedium",
     "Conductance",
     "Damper",
@@ -65,9 +67,11 @@ __all__ = [
     "DoorCompartmentHead",
     "DoorPortStream",
     "Duct",
+    "DuctTerminal",
     "Element",
     "FanCurve",
     "FixedFlow",
+    "FixedVolumeFlow",
     "OpenDoor",
     "OperableDoor",
     "OperableDoorCompartment",
@@ -78,6 +82,7 @@ __all__ = [
     "Scaled",
     "SplineFlowTable",
     "UpstreamDensityPowerLaw",
+    "air_viscosity",
     "discretized_door",
     "discretized_operable_door",
     "effective_leakage_area",

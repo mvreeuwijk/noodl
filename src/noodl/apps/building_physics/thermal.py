@@ -105,8 +105,9 @@ def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
     or to "implicit" when `storage_free` names any node; an explicit other scheme with
     storage-free nodes is refused by name.
     """
+    storage_free = tuple(storage_free)
     if scheme is None:
-        scheme = "implicit" if storage_free else "exact"
+        scheme = "implicit" if len(storage_free) else "exact"
     boundary = [ambient, *fixed_temperature]
     kinds = tuple(flow_kinds)
     has_walls = conduction_kind in net.edge_kinds()
@@ -155,6 +156,7 @@ def species_layer(net: Network, *, ambient="ambient", name: str = "species",
     unchanged. `storage_free` names nodes that hold no air (a zero-volume air-handler
     plenum): their volume may be zero, and the layer must use `scheme="implicit"`.
     """
+    storage_free = tuple(storage_free)
     kinds = tuple(flow_kinds)
     interior, _ = active_interior(net, kinds, [ambient])
     capacity = (rho * net.node_attr("volume", default=0.0))[interior]

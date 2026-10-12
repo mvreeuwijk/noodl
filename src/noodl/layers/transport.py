@@ -510,6 +510,9 @@ class TransportLayer:
         self.n_b = int(self.boundary_idx.shape[0])
         self._inactive_names = [net.nodes[i] for i in self.inactive_idx.tolist()]
         self.storage_free_mask = self._storage_free_mask(net, name, storage_free, scheme)
+        # Fixed at construction; read on every step, so kept as a Python bool rather than a
+        # device-synchronising `.any()` each time.
+        self._has_storage_free = bool(self.storage_free_mask.any())
 
         capacity = torch.as_tensor(capacity, dtype=net.dtype)
         if capacity.dim() == 0 or capacity.shape[-1] != self.n_i:
@@ -517,6 +520,14 @@ class TransportLayer:
             raise ValueError(
                 f"TransportLayer '{name}': capacity has {cap_len} entries, "
                 f"expected {self.n_i} active interior nodes"
+            )
+        negative = capacity < 0
+        if bool(negative.any()):
+            flat = negative.reshape(-1, self.n_i).any(0)
+            names = [net.nodes[int(self.interior_idx[i])]
+                     for i in flat.nonzero().flatten().tolist()]
+            raise ValueError(
+                f"TransportLayer '{name}': capacity must not be negative; negative at {names}"
             )
         self.capacity = self._effective(capacity)
         self.carrier = torch.as_tensor(carrier, dtype=net.dtype)
@@ -675,7 +686,7 @@ class TransportLayer:
     def _effective(self, cap: torch.Tensor) -> torch.Tensor:
         """`cap` with 1 at the storage-free nodes: their rows are balances of amount rates,
         which a unit capacity leaves unchanged."""
-        if not bool(self.storage_free_mask.any()):
+        if not self._has_storage_free:
             return cap
         free = self.storage_free_mask.to(cap.device)
         return torch.where(free, torch.ones_like(cap), cap)
@@ -685,7 +696,7 @@ class TransportLayer:
         to 0: removal and reactions act on a stored amount, and these nodes hold none.
         Replaced with `torch.where`, not multiplied by a mask, so that a rate a caller
         computed as 0 / 0 at a zero capacity never reaches the solve as NaN."""
-        if rates is None or not bool(self.storage_free_mask.any()):
+        if rates is None or not self._has_storage_free:
             return rates
         free = self.storage_free_mask.to(rates.device).reshape((-1,) + (1,) * trailing)
         return torch.where(free, torch.zeros_like(rates), rates)
@@ -698,7 +709,7 @@ class TransportLayer:
         elsewhere. A storage-free node with nothing passing through it keeps its value: its
         row is `x_new = x_old`. `None` when the layer has no storage-free nodes. A 0/1
         switch on the flows, so it carries no gradient."""
-        if not bool(self.storage_free_mask.any()):
+        if not self._has_storage_free:
             return None
         with torch.no_grad():
             a = q.abs().to(dtype)

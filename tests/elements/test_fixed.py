@@ -2,6 +2,7 @@
 
 import torch
 
+from noodl.elements import FixedVolumeFlow
 from noodl.elements.fixed import FixedFlow
 
 
@@ -41,3 +42,30 @@ def test_gradcheck_flow_wrt_learnable_q0():
         return FixedFlow(q0=q0_).flow(dp)
 
     assert torch.autograd.gradcheck(f, (q0,), eps=1e-6, atol=1e-6)
+
+
+def test_a_fixed_volume_flow_is_delivered_at_the_upstream_density():
+    """ContamX's duct cvf fan: 0.04 m3/s -> 0.0481639 kg/s at 293.15 K, 0.0450878 at
+    313.15 K, the density of the junction it draws from."""
+    rho = torch.tensor([101325 / (287.055 * 313.15), 101325 / (287.055 * 293.15)],
+                       dtype=torch.float64)
+    fan = FixedVolumeFlow(torch.tensor([0.04, -0.04], dtype=torch.float64),
+                          src=[0, 0], tgt=[1, 1])
+    q = fan.flow(torch.zeros(2, dtype=torch.float64), {"rho": rho})
+    torch.testing.assert_close(q, torch.tensor([0.04 * rho[0], -0.04 * rho[1]],
+                                               dtype=torch.float64))
+    assert fan.dp_independent
+    assert fan.dflow(torch.zeros(2, dtype=torch.float64), {"rho": rho}).eq(0).all()
+
+
+def test_a_fixed_volume_flow_matches_contamx_and_works_batched():
+    """The cvf numbers ContamX printed (7 digits) at 293.15 and 313.15 K, one batch row each."""
+    T = torch.tensor([[293.15, 293.15], [313.15, 313.15]], dtype=torch.float64)
+    fan = FixedVolumeFlow(torch.tensor([0.04], dtype=torch.float64), src=[0], tgt=[1])
+    q = fan.flow(torch.zeros(2, 1, dtype=torch.float64), {"rho": 101325 / (287.055 * T)})
+    assert q.shape == (2, 1)
+    torch.testing.assert_close(q[:, 0], torch.tensor([0.0481639, 0.0450878],
+                                                     dtype=torch.float64), rtol=1e-6, atol=0)
+    c, k = fan.linear_init({"rho": 101325 / (287.055 * T)})
+    torch.testing.assert_close(c, q)
+    assert k.eq(0).all()

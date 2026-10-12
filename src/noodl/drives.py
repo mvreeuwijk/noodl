@@ -142,6 +142,53 @@ class Stack:
         return self.g * (head_src - head_tgt)
 
 
+class DuctStack:
+    """Hydrostatic term of a duct segment between two junctions: the air column at the
+    density of the junctions' MEAN TEMPERATURE (ContamX 3.4.1.7, measured), which at one
+    pressure is the harmonic mean of the two node densities:
+
+        value_e = g * rho_e * (z_src - z_tgt),   rho_e = 2 / (1 / rho_src + 1 / rho_tgt)
+
+    so that dp_e = phi_src - phi_tgt + value_e, each potential being its junction's static
+    pressure at its own reference height. `Stack` instead takes each side's own density up
+    to an opening's height; for junctions at one temperature the two agree.
+    """
+
+    def __init__(self, kind: str, *, src, tgt, z_ref, rho_key: str = "rho",
+                 g: float = 9.80665) -> None:
+        self.kind = kind
+        self.src = torch.as_tensor(src, dtype=torch.long)
+        self.tgt = torch.as_tensor(tgt, dtype=torch.long)
+        self.z_ref = torch.as_tensor(z_ref)
+        if self.src.shape != self.tgt.shape:
+            raise ValueError(
+                f"DuctStack (kind {kind!r}): src has shape {tuple(self.src.shape)} but tgt "
+                f"has shape {tuple(self.tgt.shape)}; both carry one node position per edge"
+            )
+        self.rho_key = rho_key
+        self.g = float(g)
+
+    @classmethod
+    def from_network(cls, net, kind: str, *, z_ref: str = "z_ref", rho_key: str = "rho",
+                     g: float = 9.80665) -> DuctStack:
+        """Build from the network: node attribute `z_ref` (m, 0 where absent) is each
+        junction's height; densities are read at run time from `drivers[rho_key]`."""
+        src, tgt = net.endpoints(kind)
+        return cls(kind, src=src, tgt=tgt, z_ref=net.node_attr(z_ref, default=0.0),
+                   rho_key=rho_key, g=g)
+
+    def __call__(self, drivers: Mapping[str, torch.Tensor]) -> torch.Tensor:
+        try:
+            rho = drivers[self.rho_key]
+        except KeyError as exc:
+            raise KeyError(
+                f"DuctStack drive (kind {self.kind!r}): driver {self.rho_key!r} not found"
+            ) from exc
+        z = self.z_ref.to(rho.dtype)
+        mean = 2.0 / (1.0 / rho[..., self.src] + 1.0 / rho[..., self.tgt])
+        return self.g * mean * (z[self.src] - z[self.tgt])
+
+
 class WindProfile:
     """CONTAM wind pressure profile: Cp versus relative wind angle, periodic in the angle.
 
