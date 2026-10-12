@@ -539,8 +539,8 @@ conduit; the backwater fixture avoids an exact tie for that reason.
 
 Circular conduits, SWMM's tabulated geometry; the fixed routing step or
 SWMM's variable step (`VARIABLE_STEP > 0`, below); a cold start or SWMM's `InitDepth` and
-`InitFlow` (above); constant or
-driver-supplied lateral inflows; `FREE`, `NORMAL`, `FIXED`, `TIDAL` and `TIMESERIES` outfalls,
+`InitFlow` (above); constant, file-defined (time series, dry-weather flow and patterns, see
+[Lateral inflows from a file](#lateral-inflows-from-a-swmm-file)) or driver-supplied lateral inflows; `FREE`, `NORMAL`, `FIXED`, `TIDAL` and `TIMESERIES` outfalls,
 with flap gates;
 parallel barrels, `MaxFlow`, conduit flap gates and conduit lengthening (below); storage
 units with `FUNCTIONAL`, `TABULAR` and the closed-shape area curves (below); orifices
@@ -747,12 +747,41 @@ An inflow function `inflow(t)` returns the `(n,)` lateral inflow of the step tha
 `swmm5.c`'s `getDateTime`: a function that stands for a SWMM `[TIMESERIES]` should add
 0.001 s), and the inflow enters the step's trapezoid with the end state, as a constant
 inflow does. A function (or an `(steps, B, n)` series) in `simulate_dynamic_wave` is how
-time variation enters: the reader still refuses a `[TIMESERIES]` other than a `TIMESERIES`
-outfall's, whose stage is a driver (below). The step sequence and every
+time variation enters; a SWMM file's own `[TIMESERIES]`, `[PATTERNS]`, `[INFLOWS]` and
+`[DWF]` become such a function ([below](#lateral-inflows-from-a-swmm-file)). The step sequence and every
 state of the variable-step tree, with and without a ramping inflow, match SWMM 5.2.4 to the
 millisecond and to the targets of the other dynamic-wave comparisons
 (`tests/verification/test_sewer_dynwave_parity.py`). Because the step depends on the state
 through switches, a variable-step run is not differentiable through its step sizes.
+
+#### Lateral inflows from a SWMM file
+
+`read_swmm_inp` reads SWMM's `[INFLOWS]` (`FLOW` from a time series, with `Sfactor`, a baseline
+and a baseline pattern), `[DWF]` with `[PATTERNS]` (monthly, daily, hourly and weekend, one pattern
+per kind, as SWMM keeps them) and `[TIMESERIES]` (inline, or `name FILE path` beside the
+`.inp`), on the calendar of `START_DATE` and `START_TIME`, with SWMM 5.2.4's own rules for
+interpolation (linear; zero outside the series; a series with no dates counts hours since the
+start), the sampling time (step start + 1 ms), `Mfactor` (ignored for a flow) and the `FLOW_TOL`
+of 1e-5 cfs ([SWMM `.inp`](../formats/swmm.md) lists them with their sources).
+A file whose flows vary gets `SewerNetwork.inflows`, an `InflowSchedule`; the model keeps it as
+`model.inflow_schedule`, and
+
+```python
+net, _, _ = read_swmm_inp("inflow_dwf_dynwave.inp")
+model, state, drivers = build_model(net)
+state, hist = simulate_dynamic_wave(model, state, drivers, duration=60.0)     # uses the schedule
+inflow = net.inflows.driver(list(model.net.nodes))                          # inflow(t) -> (n,) m3/s
+```
+
+`simulate_dynamic_wave` takes the schedule when it is given no `inflow`; the function above is
+the same thing as an explicit `inflow=`, and a caller's own `inflow` overrides it. Under
+`STEADY` and `KINWAVE` the model is quasi-steady, so the caller sets
+`dict(drivers, inflow=inflow(t))` for the time it wants. `tests/verification/test_sewer_inflows_parity.py`
+compares the lateral inflow of every node at every step with SWMM's own, over inline dated and
+hour-based series, a `FILE` series, dry-weather flow with all four pattern kinds across a
+midnight, month and weekend change, and an MGD file with `Mfactor`, `Sfactor` and a baseline
+pattern, and routes three of them against SWMM at the depth (1e-7 m) and flow (1e-6 relative)
+targets of the other dynamic-wave comparisons.
 
 #### Tidal and time-series outfalls
 
@@ -776,9 +805,8 @@ function). The two share one code path: `simulate_dynamic_wave` fills the per-ou
 `"outfall_stage"` (m) each step, from the tide curves and the functions, and the closure
 reads it for every `TIDAL` and `TIMESERIES` outfall; a user stepping `Model.step` directly
 supplies that driver. Both work under the fixed and the variable step. A `.inp` with a
-`TIMESERIES` outfall is read (its `[TIMESERIES]` section may hold only the series that
-outfalls name, and is not read: the driver is required, and `build_model` refuses a network
-without one by name). `tests/verification/test_sewer_dynwave_parity.py` runs the tide fixture
+`TIMESERIES` outfall is read (its series is not read: the driver is required, and
+`build_model` refuses a network without one by name). `tests/verification/test_sewer_dynwave_parity.py` runs the tide fixture
 `tidal_dynwave.inp` (a tide that backs the outfall conduit up to 0.38 m of its 0.45 m and
 lets it fall) against SWMM 5.2.4 at every step for the `TIDAL` outfall and for the same stage
 as a `TIMESERIES` outfall, and the variable-step tree with the tide, with SWMM converging on
@@ -1216,9 +1244,9 @@ publish numbers from this application.
       weir coefficient curves;
     - ponding (`ALLOW_PONDING YES`): flooded water is lost, as in SWMM without ponding. A junction
       with no ground (`MaxDepth` 0) and no `SurDepth` floods as soon as it fills to its crown;
-    - runoff, groundwater and LID (`[SUBCATCHMENTS]`, `[RAINGAGES]`, `[LID_USAGE]`), dry-weather
-      flow (`[DWF]`), time-series inflows (supply them as drivers) and `[TIMESERIES]` data
-      (a `TIMESERIES` outfall's stage is a driver);
+    - runoff, groundwater and LID (`[SUBCATCHMENTS]`, `[RAINGAGES]`, `[LID_USAGE]`), RDII,
+      pollutant time-series, mass and dry-weather inflows, and the `[FILES]` `USE HOTSTART`,
+      `USE INFLOWS`, `USE RDII` and `USE RUNOFF` (a `TIMESERIES` outfall's stage is a driver);
     - the `[LOSSES]` entry, exit and average coefficients and seepage (the flap gate is read),
       storage evaporation (`Fevap`) and exfiltration, and a nonzero pollutant `Cinit`;
     - non-circular conduit shapes and regulators with

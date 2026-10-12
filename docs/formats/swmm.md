@@ -7,12 +7,12 @@ column layouts and units are read by `apps/sewer/inp.py`.
 **Read:** `[TITLE]`, `[OPTIONS]`, `[JUNCTIONS]`, `[OUTFALLS]`, `[CONDUITS]`, `[XSECTIONS]`,
 `[LOSSES]` (the flap gate only), `[INFLOWS]`, `[POLLUTANTS]`, and under `DYNWAVE`
 `[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` with the `[CURVES]` of type `STORAGE`,
-`RATING` and `TIDAL`. A `[TIMESERIES]` section is accepted only for the series that
-`TIMESERIES` outfalls name, and is not read.
+`RATING` and `TIDAL`, and the lateral inflows `[TIMESERIES]` (inline and `FILE`), `[PATTERNS]`,
+`[DWF]` and `[INFLOWS]` (see Lateral inflows below).
 
 **Ignored** because no conduit or node ever references them: `[EVAPORATION]`, `[REPORT]`,
 `[TAGS]`, `[MAP]`, `[COORDINATES]`, `[VERTICES]`, `[POLYGONS]`, `[SYMBOLS]`, `[LABELS]`,
-`[BACKDROP]`, `[PROFILES]`, `[FILES]`. Any other section that carries content is refused, and
+`[BACKDROP]`, `[PROFILES]`; `[FILES]` is read for its `USE` lines (below). Any other section that carries content is refused, and
 so are the options and fields listed below.
 
 **Routing.** `FLOW_ROUTING` is `STEADY`, `KINWAVE` or `DYNWAVE`, read as the physical names
@@ -97,8 +97,8 @@ raises it to 0 at the inlet end only), a negative coefficient, unknown nodes and
 **Outfalls.** `FREE`, `NORMAL`, `FIXED` (with its stage, m), `TIDAL` (with the name of its
 `[CURVES]` TIDAL curve, read as hours and stage elevations) and `TIMESERIES` (with the name of
 its series) are read. A `TIMESERIES` outfall takes its stage from the `outfall_stage` driver
-of `build_model` / `simulate_dynamic_wave` (time variation belongs in the drivers): the
-`[TIMESERIES]` section is accepted only for series that outfalls name, and is not read. An outfall may sit
+of `build_model` / `simulate_dynamic_wave` (time variation belongs in the drivers): that
+series is not read. An outfall may sit
 at the end of a conduit or of a regulator (exactly one link, SWMM's ERR_OUTFALL).
 
 **Barrels.** A conduit with more than one barrel is read under `DYNWAVE` (1 to 127; the
@@ -139,15 +139,63 @@ rewrites each CMS fixture into the other five systems and requires the same netw
 runs the rewritten files through SWMM itself.
 
 **Constraints:** `LINK_OFFSETS` must be `DEPTH` or `ELEVATION` (`DEPTH` with regulators). Only `CIRCULAR`
-conduit cross-sections (regulator openings above). Only constant
-`FLOW` baselines and constant `CONCENTRATION` pollutant baselines; a time-series inflow is
-refused, because time variation belongs in the drivers.
+conduit cross-sections (regulator openings above). A pollutant inflow must be a constant
+`CONCEN` (or `CONCENTRATION`) baseline with Mfactor 1.
 
-**Refused by name**, because skipping them would silently change the physics: `[DWF]`,
+**Lateral inflows.** `[INFLOWS]`, `[DWF]`, `[PATTERNS]` and `[TIMESERIES]` are read with
+SWMM 5.2.4's rules (`apps/sewer/inflows.py`; every statement below was checked against the
+engine through pyswmm, step by step, in
+`tests/verification/test_sewer_inflows_parity.py`):
+
+- `[INFLOWS] Node FLOW Series Type Mfactor Sfactor Baseline Pattern`: the flow is
+  `Sfactor * series(t) + Baseline * pattern(t)` in the file's flow units (converted with
+  `unit_factors`). `Sfactor` scales the series only and `Pattern` multiplies the baseline only.
+  SWMM **ignores `Mfactor` for a `FLOW` inflow** (it converts pollutant mass flows), so it is
+  read and has no effect. A repeated line for a node replaces the earlier one. `Series` is `""`
+  or `*` for none.
+- `[DWF] Node FLOW Average Pat1..Pat4`: the average times the monthly, daily and hourly
+  factors; on Saturday and Sunday the weekend pattern takes the place of the hourly one (and
+  is 1 on other days). SWMM reads the first four pattern fields only and keeps one pattern per
+  kind, the last of its kind; `""` skips a field; an unknown name (and `*`) is refused. A
+  repeated line replaces the earlier one. Only `FLOW` is read: a `[DWF]` line for a pollutant,
+  or a non-zero `Cdwf` in `[POLLUTANTS]` while a `[DWF]` flow exists, is refused.
+- `[PATTERNS]`: `MONTHLY` (12 factors), `DAILY` (7, Sunday first), `HOURLY` (24), `WEEKEND`
+  (24); a pattern may continue on later lines, a missing factor is 1 and an extra one is
+  ignored, as in SWMM. A pattern name defined in quotes is not accepted by SWMM itself; a
+  reference in quotes (`"PATN-1"`) is.
+- `[TIMESERIES]`: entries `[date] time value` repeated on a line, a date applying to the later
+  entries including on later lines; `time` is decimal hours or `H:M[:S]`; dates are `M/D/Y`,
+  `Y-M-D` or `D-MON-Y`. A series with no dates counts hours **since the start of the
+  simulation** (`START_TIME` included); a dated one uses the calendar. Times must strictly
+  increase. The series is linearly interpolated and is **0 before its first and after its last
+  entry**. `name FILE path` reads `[date] time value` lines (`;` comments) from a file resolved
+  against the `.inp`'s folder; a missing file is refused naming it. A series that no inflow
+  names (a `TIMESERIES` outfall's stage series included) is not read.
+- Sampling: the inflow of the step that starts `t` s into the run is evaluated at
+  `START_DATE + START_TIME + t + 0.001 s` (SWMM's clock reads 1 ms late); the month, day of
+  week and hour of the patterns are those of that clock. `START_DATE` defaults to SWMM's
+  01/01/2004.
+- A flow smaller in magnitude than SWMM's `FLOW_TOL` of 1e-5 cfs is dropped, separately for the
+  external inflow of a node (series plus baseline) and for its dry-weather flow.
+
+A file whose flows vary in time (a series, a pattern, patterned dry-weather flow) gets
+`SewerNetwork.inflows`, an `InflowSchedule`; `read_swmm_inp` still returns its three values.
+`schedule.driver(list(model.net.nodes))` is the `inflow(t)` callable of
+`simulate_dynamic_wave`, which uses the model's schedule when it is given no `inflow`;
+`Manhole.inflow` is each node's value at the start. Under `STEADY` and `KINWAVE` the model is
+quasi-steady, so a time-varying inflow reaches it as the driver
+`dict(drivers, inflow=schedule.driver(names)(t))` the caller sets at the time of interest
+(`model.inflow_schedule`). Time series for pollutants, `MASS` pollutant inflows and an
+`Mfactor` other than 1 on a pollutant inflow are refused with the line number.
+
+**`[FILES]`.** `SAVE` lines (hot starts, outflows, rainfall, runoff, RDII) write files and are
+ignored. `USE HOTSTART`, `USE INFLOWS`, `USE RDII` and `USE RUNOFF` change the physics and are
+refused by name; `USE RAINFALL` only feeds rain gauges, which are refused anyway.
+
+**Refused by name**, because skipping them would silently change the physics:
 `[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` under `STEADY` or `KINWAVE`, `[PUMPS]`,
 `[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[CURVES]` of any type but
-`STORAGE`, `RATING` and `TIDAL`, `[TIMESERIES]` except the series a `TIMESERIES` outfall names,
-`[LID_USAGE]`, and any other section carrying
+`STORAGE`, `RATING` and `TIDAL`, `[LID_USAGE]`, and any other section carrying
 content.
 
 **Geometry.** `read_swmm_inp` builds its network with `geometry="tabulated"`: SWMM 5.2's own

@@ -28,6 +28,7 @@ from noodl.apps.sewer.dynwave import (
     quality_state,
 )
 from noodl.apps.sewer.hydraulics import GEOMETRY_ALIASES, SewerHydraulics
+from noodl.apps.sewer.inflows import InflowSchedule
 from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
 from noodl.apps.sewer.storage import validate_storage_curve
 from noodl.layers.transport import TransportLayer, active_interior
@@ -271,6 +272,11 @@ class SewerNetwork:
     dynamic-wave routing always uses it and refuses ``"analytic"`` by name.
     `orifices`, `weirs` and `outlets` are flow regulators between two nodes (dynamic wave
     only; SWMM's `[ORIFICES]`, `[WEIRS]`, `[OUTLETS]`).
+    `inflows` is the time-varying lateral inflow of a SWMM file (`InflowSchedule`: its
+    `[TIMESERIES]`, `[PATTERNS]`, `[INFLOWS]` and `[DWF]`), ``None`` for constant
+    `Manhole.inflow` only. When given, each scheduled manhole's `Manhole.inflow` is the value
+    at the start of the run, and the model carries the schedule as ``model.inflow_schedule``;
+    `simulate_dynamic_wave` uses it when it is given no ``inflow``.
     """
 
     manholes: tuple[Manhole, ...]
@@ -283,6 +289,7 @@ class SewerNetwork:
     orifices: tuple[Orifice, ...] = ()
     weirs: tuple[Weir, ...] = ()
     outlets: tuple[Outlet, ...] = ()
+    inflows: InflowSchedule | None = None
 
     @property
     def structures(self) -> dict[str, tuple]:
@@ -369,6 +376,13 @@ class SewerNetwork:
                     )
             outgoing.setdefault(pipe.u, []).append(pipe.name)
         self._validate_structures(names, pipe_names)
+        if self.inflows is not None:
+            manhole_names = {m.name for m in self.manholes}
+            stray = sorted(set(self.inflows.nodes) - manhole_names)
+            if stray:
+                raise ValueError(f"SewerNetwork: inflow schedule names node(s) {stray}, "
+                                 f"which are not manholes (an outfall takes no lateral "
+                                 f"inflow)")
         outfall_names = {o.name for o in self.outfalls}
         if dynamic:
             self._validate_dynamic(outfall_names)
@@ -900,6 +914,7 @@ def build_model(
     }
     model.input_specs = {k: v for k, v in specs.items() if k in drivers}
     model.driver_template = dict(drivers)
+    model.inflow_schedule = net.inflows
     return model, state, drivers
 
 
