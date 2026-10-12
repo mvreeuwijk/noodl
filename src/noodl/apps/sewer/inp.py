@@ -198,7 +198,7 @@ _IGNORED = {
 }
 _READ = {"OPTIONS", "JUNCTIONS", "OUTFALLS", "CONDUITS", "XSECTIONS", "LOSSES", "INFLOWS",
          "POLLUTANTS", "STORAGE", "CURVES", "ORIFICES", "WEIRS", "OUTLETS", "TIMESERIES",
-         "PATTERNS", "DWF", "FILES", "TRANSECTS"}
+         "PATTERNS", "DWF", "FILES", "TRANSECTS", "DIVIDERS"}
 #: `[FILES]` ``USE`` kinds that change the physics (a hot-start state, interface inflows, RDII
 #: or runoff flows): refused. ``USE RAINFALL`` only feeds rain gauges, which are refused anyway.
 _REFUSED_FILES = {"HOTSTART": "the initial state", "INFLOWS": "interface inflows",
@@ -231,7 +231,8 @@ def read_swmm_inp(
     (`noodl.apps.sewer.xsect_tables`). Pass ``geometry="analytic"`` for the exact circle.
     """
     path = Path(path)
-    sections = read_sections(path)
+    sections = read_sections(path, leading="TITLE")      # input.c:174: the pass starts in TITLE
+    _check_conflict_markers(sections, path)
     for name, lines in sections.items():
         if name in _READ or name in _IGNORED or not lines:
             continue
@@ -295,29 +296,23 @@ def read_swmm_inp(
     manholes: list[Manhole] = []
     for line in sections.get("JUNCTIONS", []):
         require_fields(line, 2, "a junction", path)
-        name = line.fields[0]
-        elevation = as_float(line, 1, "the invert elevation", path) * lf
-        depth = (as_float(line, 2, "the maximum depth", path) * lf
-                 if len(line.fields) > 2 else None)
-        initial = (as_float(line, 3, "the initial depth", path) * lf
-                   if len(line.fields) > 3 else 0.0)
-        if initial < 0.0:
+        manhole = _junction(line, 2, path, lf)
+        invert[manhole.name] = manhole.invert
+        manholes.append(manhole)
+    if sections.get("DIVIDERS"):
+        if not dynamic:
             raise ValueError(
-                f"{path}: line {line.number}: junction {name!r} has a negative initial depth "
-                f"{line.fields[3]}"
-            )
-        surcharge = (as_float(line, 4, "the surcharge depth", path) * lf
-                     if len(line.fields) > 4 else 0.0)
-        if surcharge < 0.0:
-            raise ValueError(
-                f"{path}: line {line.number}: junction {name!r} has a negative surcharge depth "
-                f"{line.fields[4]} (SWMM's SurDepth must be >= 0)"
-            )
-        invert[name] = elevation
-        manholes.append(
-            Manhole(name, elevation, ground=None if depth is None else elevation + depth,
-                    surcharge_depth=surcharge, initial_depth=initial)
-        )
+                f"{path}: section [DIVIDERS] (line {sections['DIVIDERS'][0].number}): flow "
+                f"dividers are read under dynamic-wave routing only (FLOW_ROUTING DYNWAVE), "
+                f"where SWMM routes them as plain junctions; under {routing} SWMM diverts "
+                f"flow (node.c divider_getOutflow), which is not modelled")
+        link_ends = {line.fields[0]: line.fields[1:3] for key in _LINK_SECTIONS
+                     for line in sections.get(key, []) if len(line.fields) > 2}
+        curve_names = {line.fields[0] for line in sections.get("CURVES", [])}
+        for line in sections["DIVIDERS"]:
+            manhole = _divider(line, link_ends, curve_names, path, lf)
+            invert[manhole.name] = manhole.invert
+            manholes.append(manhole)
     all_curves = _curves(sections.get("CURVES", []), path, lf, qf)
     tides = {name: pts for name, (kind, pts) in all_curves.items() if kind == "TIDAL"}
     curves = {name: pts for name, (kind, pts) in all_curves.items() if kind == "STORAGE"}
@@ -578,13 +573,105 @@ def read_swmm_inp(
     return network, loads, pollutants
 
 
+#: The sections whose first three fields are ``Name Node1 Node2`` (SWMM's links).
+_LINK_SECTIONS = ("CONDUITS", "ORIFICES", "WEIRS", "OUTLETS", "PUMPS")
+#: SWMM's `DividerTypeWords` (keywords.c:50) and the number of type-specific fields each takes
+#: after the type (node.c:1157-1194); the optional MaxDepth, InitDepth, SurDepth and Aponded
+#: follow them.
+_DIVIDER_FIELDS = {"CUTOFF": 1, "TABULAR": 1, "WEIR": 3, "OVERFLOW": 0}
+
+
+def _junction(line, first: int, path, lf: float) -> Manhole:
+    """A junction (`[JUNCTIONS]`, or a divider read as one) from `line`: ``Name Invert`` and
+    from field `first` MaxDepth, InitDepth, SurDepth and Aponded (node.c:620-640,
+    1196-1208). An absent MaxDepth leaves the ground to the attached conduits."""
+    name = line.fields[0]
+    elevation = as_float(line, 1, "the invert elevation", path) * lf
+
+    def given(k: int, what: str, default):
+        i = first + k
+        return as_float(line, i, what, path) if len(line.fields) > i else default
+
+    depth = given(0, "the maximum depth", None)
+    initial = given(1, "the initial depth", 0.0) * lf
+    surcharge = given(2, "the surcharge depth", 0.0) * lf
+    if initial < 0.0:
+        raise ValueError(
+            f"{path}: line {line.number}: junction {name!r} has a negative initial depth "
+            f"{line.fields[first + 1]}"
+        )
+    if surcharge < 0.0:
+        raise ValueError(
+            f"{path}: line {line.number}: junction {name!r} has a negative surcharge depth "
+            f"{line.fields[first + 2]} (SWMM's SurDepth must be >= 0)"
+        )
+    given(3, "the ponded area", 0.0)           # parsed (SWMM refuses a non-number); unused
+    return Manhole(name, elevation,
+                   ground=None if depth is None else elevation + depth * lf,
+                   surcharge_depth=surcharge, initial_depth=initial)
+
+
+def _divider(line, link_ends: dict, curve_names: set, path, lf: float) -> Manhole:
+    """A `[DIVIDERS]` line as a junction, which is all a flow divider is under dynamic-wave
+    routing. SWMM's diversion (`divider_getOutflow`) is reached only through `link_getInflow`'s
+    default case (link.c:543-558) and `conduit_getInflow` (link.c:1327), which dynamic-wave
+    routing never calls for a conduit (dynwave.c:440 calls it for non-conduit links, whose own
+    inflow functions do not use the node's), and the tree-layout check (`validateTreeLayout`,
+    flowrout.c:216) is for STEADY and KINWAVE only. What `node_validate` -> `divider_validate`
+    (node.c:1216-1247) checks regardless of routing is refused here as SWMM does: a missing or
+    unattached diverted link, and a WEIR divider with non-positive ``dhMax`` or ``cWeir`` or a
+    ``qMin`` above ``cWeir dhMax^1.5``. The fields after the type-specific ones are MaxDepth,
+    InitDepth, SurDepth and Aponded (node.c:1196-1208), as for a junction."""
+    require_fields(line, 4, "a divider", path)
+    name, link, kind = line.fields[0], line.fields[2], line.fields[3].upper()
+    if kind not in _DIVIDER_FIELDS:
+        raise ValueError(f"{path}: line {line.number}: divider {name!r} has the type "
+                         f"{line.fields[3]!r}; SWMM takes one of {sorted(_DIVIDER_FIELDS)}")
+    if link not in link_ends or name not in link_ends[link]:
+        why = ("names no diverted link" if link == "*" else
+               f"names link {link!r}, which is not a link" if link not in link_ends else
+               f"names link {link!r}, which is not attached to it")
+        raise ValueError(f"{path}: line {line.number}: divider {name!r} {why} "
+                         f"(SWMM's ERR_DIVIDER_LINK, node.c:1227)")
+    n = 4 + _DIVIDER_FIELDS[kind]
+    require_fields(line, n, f"a {kind} divider", path)
+    if kind == "TABULAR" and line.fields[4] not in curve_names:
+        raise ValueError(f"{path}: line {line.number}: divider {name!r} names the diversion "
+                         f"curve {line.fields[4]!r}, which is not in [CURVES]")
+    values = ([] if kind == "TABULAR" else
+              [as_float(line, i, "a divider parameter", path) for i in range(4, n)])
+    if kind == "WEIR":
+        q_min, dh_max, c_weir = values
+        if dh_max <= 0.0 or c_weir <= 0.0 or q_min > c_weir * dh_max**1.5:
+            raise ValueError(
+                f"{path}: line {line.number}: weir divider {name!r} needs a positive dhMax "
+                f"and cWeir and a qMin not above cWeir * dhMax^1.5 (SWMM's ERR_WEIR_DIVIDER, "
+                f"node.c:1236-1244)")
+    return _junction(line, n, path, lf)
+
+
+def _check_conflict_markers(sections, path) -> None:
+    """Refuse a version-control merge-conflict marker (``<<<<<<<``, ``=======``,
+    ``>>>>>>>``). SWMM would take one before the first section as title text, but a file
+    carrying them holds both sides of a merge, so its sections are duplicated: whichever
+    SWMM does with it, the model it builds is not the one the author meant."""
+    for lines in sections.values():
+        for line in lines:
+            word = line.fields[0]
+            if len(word) >= 7 and word[:7] in ("<<<<<<<", "=======", ">>>>>>>"):
+                raise ValueError(
+                    f"{path}: line {line.number}: version-control merge-conflict marker "
+                    f"{word[:7]!r}; the file holds both sides of an unresolved merge")
+
+
 def _curves(lines, path, lf: float = 1.0, qf: float = 1.0
             ) -> dict[str, tuple[str, tuple[tuple, tuple]]]:
-    """`[CURVES]`: ``{name: (type, (xs, ys))}`` of the STORAGE, RATING and TIDAL curves, each
+    """`[CURVES]`: ``{name: (type, (xs, ys))}`` of the STORAGE, RATING, TIDAL, SHAPE and DIVERSION curves
+    (the last is only a divider's diversion table, unused under DYNWAVE), each
     curve's points in file order over any number of lines, its type on its first line
     (`table.c:67-108`), in SI: `lf` m per length unit and `qf` m3/s per flow unit convert a
-    STORAGE curve (depth, area), a RATING curve (depth or head, flow) and a TIDAL curve (hours,
-    stage). A curve of another type is refused (no object that uses one is read), as are an
+    STORAGE curve (depth, area), a RATING curve (depth or head, flow), a TIDAL curve (hours,
+    stage) and a DIVERSION curve (flow, flow). A curve of another type is refused (no object that uses one is read), as are an
     unpaired value and x values that do not strictly increase (`table.c:313`)."""
     points: dict[str, list[tuple[float, float]]] = {}
     kinds: dict[str, str] = {}
@@ -597,10 +684,10 @@ def _curves(lines, path, lf: float = 1.0, qf: float = 1.0
                 raise ValueError(
                     f"{path}: line {line.number}: curve {name!r} needs its type (one of "
                     f"{_CURVE_TYPES}) on its first line")
-            if kind not in ("STORAGE", "RATING", "TIDAL", "SHAPE"):
+            if kind not in ("STORAGE", "RATING", "TIDAL", "SHAPE", "DIVERSION"):
                 raise ValueError(
                     f"{path}: line {line.number}: curve {name!r} is of type {kind}; only "
-                    f"STORAGE, RATING, TIDAL and SHAPE curves are read (no object that uses "
+                    f"STORAGE, RATING, TIDAL, SHAPE and DIVERSION curves are read (no object that uses "
                     f"another type is modelled)")
             points[name] = []
             kinds[name] = kind
@@ -618,7 +705,8 @@ def _curves(lines, path, lf: float = 1.0, qf: float = 1.0
                     f"after {points[name][-1][0]}")
             points[name].append((x, y))
     scales = {"STORAGE": (lf, lf * lf), "RATING": (lf, qf), "TIDAL": (1.0, lf),
-              "SHAPE": (1.0, 1.0)}
+              "SHAPE": (1.0, 1.0),
+              "DIVERSION": (qf, qf)}
     return {name: (kinds[name], (tuple(p[0] * scales[kinds[name]][0] for p in pts),
                                  tuple(p[1] * scales[kinds[name]][1] for p in pts)))
             for name, pts in points.items()}

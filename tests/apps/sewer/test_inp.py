@@ -717,3 +717,86 @@ def test_regulators_are_dynamic_wave_only(tmp_path):
     with pytest.raises(ValueError, match=r"\[ORIFICES\].*flow regulators are read under "
                                          r"dynamic-wave routing only"):
         read_swmm_inp(path)
+
+
+# ----------------------------------------------------------------------------- dividers
+def _divider_inp(tmp_path, row, dynwave=True, extra=()):
+    """The DYNWAVE tree with J3 moved from [JUNCTIONS] to [DIVIDERS] as `row`."""
+    path = _dyn(tmp_path) if dynwave else DATA / "tree_kinwave.inp"
+    text = path.read_text()
+    j3 = next(line for line in text.splitlines() if line.startswith("J3 "))
+    text = text.replace(j3 + "\n", "").replace(
+        "[OUTFALLS]", f"[DIVIDERS]\n{row}\n\n[OUTFALLS]", 1)
+    for old, new in extra:
+        assert old in text, old
+        text = text.replace(old, new)
+    out = tmp_path / "divider.inp"
+    out.write_text(text)
+    return out
+
+
+@pytest.mark.parametrize("row,kind", [
+    ("J3 10.0 C3 OVERFLOW 0.7 0.1 0.2 5", "overflow"),
+    ("J3 10.0 C3 CUTOFF 0.05 0.7 0.1 0.2 5", "cutoff"),
+    ("J3 10.0 C3 TABULAR D1 0.7 0.1 0.2 5", "tabular"),
+    ("J3 10.0 C3 WEIR 0.01 0.5 3.0 0.7 0.1 0.2 5", "weir"),
+])
+def test_a_divider_is_read_as_a_junction_with_its_depths(tmp_path, row, kind):
+    """node.c:1157-1208: the MaxDepth, InitDepth, SurDepth and Aponded follow the fields
+    of the divider type (none for OVERFLOW, one for CUTOFF and TABULAR, three for WEIR);
+    under DYNWAVE the divider is a plain junction (the diversion is never called)."""
+    text = _divider_inp(tmp_path, row).read_text()
+    path = tmp_path / "read.inp"
+    path.write_text(text + "\n[CURVES]\nD1 DIVERSION 0 0 1 1\n")
+    net, _, _ = read_swmm_inp(path)
+    j3 = next(m for m in net.manholes if m.name == "J3")
+    assert (j3.invert, j3.ground, j3.initial_depth, j3.surcharge_depth) == (
+        10.0, pytest.approx(10.7), 0.1, 0.2)
+
+
+@pytest.mark.parametrize("row,match", [
+    ("J3 10.0 C9 OVERFLOW", "'C9', which is not a link"),
+    ("J3 10.0 C4 OVERFLOW", "'C4', which is not attached"),
+    ("J3 10.0 * OVERFLOW", "no diverted link"),
+    ("J3 10.0 C3 SPILL", "'SPILL'"),
+    ("J3 10.0 C3 CUTOFF", "needs 5 fields"),
+    ("J3 10.0 C3 TABULAR NoCurve", "'NoCurve', which is not in"),
+    ("J3 10.0 C3 CUTOFF abc", "must be a number"),
+    ("J3 10.0 C3 WEIR 0.01 0 3.0", "ERR_WEIR_DIVIDER"),
+    ("J3 10.0 C3 WEIR 0.01 0.5 0", "ERR_WEIR_DIVIDER"),
+    ("J3 10.0 C3 WEIR 9 0.5 3.0", "ERR_WEIR_DIVIDER"),
+    ("J3 10.0 C3 OVERFLOW 5 0 -1", "negative surcharge depth"),
+])
+def test_divider_refusals_are_swmms_own(tmp_path, row, match):
+    """What `node_validate`/`divider_readParams` reject whatever the routing."""
+    with pytest.raises(ValueError, match=match):
+        read_swmm_inp(_divider_inp(tmp_path, row))
+
+
+def test_dividers_are_refused_by_name_under_kinwave_and_steady(tmp_path):
+    """Outside DYNWAVE SWMM diverts flow at a divider (node.c `divider_getOutflow`), which
+    is not modelled."""
+    with pytest.raises(ValueError, match=r"\[DIVIDERS\].*dynamic-wave routing only"):
+        read_swmm_inp(_divider_inp(tmp_path, "J3 10.0 C3 OVERFLOW", dynwave=False))
+
+
+# ------------------------------------------------------------- content before a section
+def test_lines_before_the_first_section_are_title_text_as_in_swmm(tmp_path):
+    """SWMM's second pass over the file starts in `[TITLE]` (input.c:174), so text before
+    the first header is title text; the model is the file's own."""
+    path = tmp_path / "title.inp"
+    path.write_text("A stray title line\n; a comment\nJ1 12.0 not a record\n"
+                    + _dyn(tmp_path).read_text())
+    assert read_swmm_inp(path)[0].routing == "dynamic_wave"
+
+
+def test_a_merge_conflict_marker_is_refused(tmp_path):
+    """A file with both sides of a merge holds its sections twice: refused, naming the
+    marker and its line, wherever it sits."""
+    path = tmp_path / "merge.inp"
+    path.write_text("<<<<<<< HEAD\n" + _dyn(tmp_path).read_text())
+    with pytest.raises(ValueError, match=r"line 1: version-control merge-conflict marker"):
+        read_swmm_inp(path)
+    path.write_text(_dyn(tmp_path).read_text() + "\n[MAP]\n=======\n")
+    with pytest.raises(ValueError, match="merge-conflict marker '======='"):
+        read_swmm_inp(path)

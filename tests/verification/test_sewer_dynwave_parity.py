@@ -423,6 +423,29 @@ def test_flooding_matches_swmm_at_every_step(tmp_path, name):
     _assert_parity(_worst_errors(name, rows, conn, len(rows), atol=EXTRAN_ATOL))
 
 
+DIVIDER_NAME = "divider_dynwave.inp"
+
+
+def test_a_divider_is_a_junction_under_dynamic_wave_routing(tmp_path):
+    """`flooding_dynwave.inp` with J3 a WEIR flow divider of C3 (MaxDepth 0.6 m after its
+    qMin, dhMax and cWeir): SWMM routes it as a plain junction under DYNWAVE (the diversion
+    is `link_getInflow`'s, which dynwave.c does not use for a conduit), so J2's flood onset
+    and release agree with SWMM exactly as in the junction fixture. J3 floods only from step
+    270 (`test_a_divider_floods_like_a_junction_at_every_step`)."""
+    rows, conn = _converged_swmm(tmp_path, DIVIDER_NAME, surcharged=True)
+    _assert_parity(_worst_errors(DIVIDER_NAME, rows, conn, FLOOD_FAST_STEPS, atol=EXTRAN_ATOL))
+
+
+@pytest.mark.slow
+def test_a_divider_floods_like_a_junction_at_every_step(tmp_path):
+    """The divider fixture over all 359 steps: its MaxDepth (the first field after the weir
+    parameters) is the flood depth, J3 floods from step 270 as the junction does, and
+    depths, flows and ``sewer.overflow`` agree with SWMM at the free-surface targets."""
+    rows, conn = _converged_swmm(tmp_path, DIVIDER_NAME, surcharged=True)
+    assert _flooded_steps(rows) == FLOODED_STEPS[FLOOD_NAME]
+    _assert_parity(_worst_errors(DIVIDER_NAME, rows, conn, len(rows), atol=EXTRAN_ATOL))
+
+
 OUTFALL_FLOOD_NAME = "flooding_outfall_dynwave.inp"
 #: The step (1-based) at which J4 floods in SWMM, and the last step at which SWMM's
 #: unconverged C5 flow at that onset still shows above the targets (see the test).
