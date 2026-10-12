@@ -1062,3 +1062,29 @@ def test_node_sources_are_exposed_read_only_as_a_tuple():
     assert isinstance(layer.node_sources, tuple)
     bare = PotentialFlowLayer(net, "bare", [_pipe_law()], boundary=["R"], linear_solver="direct")
     assert bare.node_sources == ()
+
+
+def test_a_batched_drive_on_one_kind_broadcasts_a_drive_free_fixed_flow_kind():
+    """A batched drive on one kind and a drive-free, dp-independent kind (a constant-flow fan)
+    on the same layer: the fan's unbatched dp block is broadcast to the batch before the
+    blocks are joined, and every instance equals its own unbatched solve."""
+    f64 = torch.float64
+    net = Network(dtype=f64)
+    for name in ("amb", "a", "b"):
+        net.add_node(name)
+    net.add_edge("amb", "a", kind="airpath")
+    net.add_edge("a", "b", kind="airpath")
+    net.add_edge("b", "amb", kind="airpath")
+    net.add_edge("amb", "b", kind="fan")
+    elements = [PowerLaw(torch.full((3,), 0.02, dtype=f64), 0.6, kind="airpath"),
+                FixedFlow(torch.tensor([0.05], dtype=f64), kind="fan")]
+    layer = PotentialFlowLayer(net, "air", elements, drives=[ConstantDrive("airpath", "wind")],
+                               boundary=["amb"])
+    wind = torch.tensor([[3.0, 0.0, -1.0], [8.0, 0.0, -2.0]], dtype=f64)
+    phi_b = torch.zeros(1, dtype=f64)
+    assert layer.dp(torch.zeros(3, dtype=f64), {"wind": wind}).shape == (2, 4)
+    _, q = layer.solve(phi_b, {"wind": wind}, None, differentiable=False, atol=1e-14)
+    assert q.shape == (2, 4)
+    for i in range(2):
+        _, qi = layer.solve(phi_b, {"wind": wind[i]}, None, differentiable=False, atol=1e-14)
+        torch.testing.assert_close(q[i], qi, rtol=1e-10, atol=1e-14)

@@ -426,7 +426,10 @@ class PotentialFlowLayer:
                     block = block + value
             parts.append((start, block))
         parts.sort(key=lambda p: p[0])
-        return torch.cat([p[1] for p in parts], dim=-1)
+        # A batched drive on one kind batches that kind's block only; every block is
+        # broadcast to the common batch shape before they are joined.
+        batch = broadcast_shapes(*(b.shape[:-1] for _, b in parts))
+        return torch.cat([b.expand(batch + b.shape[-1:]) for _, b in parts], dim=-1)
 
     def flows(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
         drivers = drivers or {}

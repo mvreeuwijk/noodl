@@ -39,6 +39,8 @@ class Input:
     `index` (positions on the driver's last axis) or `at` (labels the model declares for
     `key`, resolved by `bind_inputs`) selects the entries written. With neither, the whole
     driver is replaced (broadcast to its shape). `name` labels the input in error messages.
+    The last axis of the signal's value is positions, any axes before it batch: a batched
+    value at one position has shape `(B, 1)` (a `TimeSeries` of it, `(N, B, 1)`).
     """
 
     def __init__(self, signal: Signal, key: str, *, index=None, at=None, name: str = "") -> None:

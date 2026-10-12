@@ -566,6 +566,17 @@ def test_zone_pressure_density_rescales_the_zone_air_mass_too():
     assert out["rho"][1].item() == pytest.approx(1.1 * (1 + 10.0 / 101325.0), rel=1e-15)
 
 
+def test_zone_pressure_density_refuses_a_missing_zone_air_mass():
+    """A configured `capacity_key` absent from the drivers is an error, not a skipped
+    rescale (the species layer would otherwise see the zone air mass at Pb alone)."""
+    zp = ZonePressureDensity(101325.0, capacity_key="species.capacity",
+                             capacity_nodes=torch.tensor([1], dtype=torch.long))
+    phi = torch.tensor([0.0, 10.0], dtype=F64)
+    rho = torch.tensor([1.2, 1.1], dtype=F64)
+    with pytest.raises(KeyError, match="species.capacity"):
+        zp({"air.phi": phi}, {"rho": rho})
+
+
 def test_zone_pressure_density_broadcasts_a_batched_reference_pressure():
     # B == n: a (B,) P_ref must align with the batch axis, not the node axis.
     zp = ZonePressureDensity(101325.0)

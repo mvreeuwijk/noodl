@@ -46,7 +46,9 @@ class Scaled(Element):
                 f"Scaled (kind {self.kind!r}): driver {self.key!r} not found; it carries "
                 f"this kind's per-edge flow multiplier"
             )
-        s = torch.as_tensor(drivers[self.key])
+        s = drivers[self.key]
+        # A list or Python scalar would otherwise become the float32 default dtype.
+        s = s if isinstance(s, Tensor) else torch.as_tensor(s, dtype=torch.float64)
         if s.ndim and width is not None and s.shape[-1] not in (1, width):
             raise ValueError(
                 f"Scaled (kind {self.kind!r}): driver {self.key!r} has {s.shape[-1]} values "

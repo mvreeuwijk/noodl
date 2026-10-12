@@ -1264,14 +1264,21 @@ class ZonePressureDensity:
         P = torch.as_tensor(drivers.get("P_ref", self.Pb), dtype=phi.dtype)
         factor = 1.0 + phi / P.unsqueeze(-1)
         out = {"rho": drivers["rho"] * factor} if self.densities else {}
-        if self.capacity_key is not None and self.capacity_key in drivers:
+        if self.capacity_key is not None:
+            if self.capacity_key not in drivers:
+                raise KeyError(
+                    f"ZonePressureDensity: driver {self.capacity_key!r} (the zone air mass "
+                    f"this closure rescales to the zone's absolute pressure) is missing; a "
+                    f"density closure that writes it must run first"
+                )
             out[self.capacity_key] = drivers[self.capacity_key] * factor[..., self.capacity_nodes]
         return out
 
 
 class ZoneAirMassChange(NodeSource):
     """The zone air-mass change of a step as a withdrawal from the airflow network (CONTAM's
-    dodMdt option; `simulate(air_mass_change=True)` switches it on):
+    dodMdt option; `simulate` switches it on for a model that carries it, unless
+    `air_mass_change=False`):
 
         w = ((P_ref + phi) V / (R T) - M_start) / dt,
 

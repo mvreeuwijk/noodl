@@ -7,7 +7,7 @@ The first row is the initial state with its quasi-steady airflow at the start ti
 ContamX's steady initialisation). Two CONTAM terms are handled here, because they couple one
 step to the next:
 
-* `air_mass_change=True` (CONTAM's `dodMdt = 1`): each zone's air-mass change over the step,
+* `air_mass_change` (CONTAM's `dodMdt = 1`): each zone's air-mass change over the step,
   (M(t1) - M(t0)) / dt, is withdrawn from the airflow balance, so the net inflow into a zone
   whose temperature changes is dM/dt (measured on ContamX). M is the air mass at the zone's
   ABSOLUTE pressure, (P_ref + P_zone) V / (R T), whether or not the densities the flows see
@@ -15,7 +15,11 @@ step to the next:
   M dP_zone / (Pb dt) in that step with CONTAM's `densZP = 0`). The end-of-step mass depends
   on the pressures the step solves for, so the term is the airflow layer's
   `ZoneAirMassChange` node source, inside the solve and its Jacobian: a step of any length
-  converges. `simulate` supplies the start-of-step mass (`"<layer>.mass_start"`).
+  converges. `simulate` supplies the start-of-step mass (`"<layer>.mass_start"`), at the
+  temperatures and pressures the closures leave in the drivers. The default (None) switches
+  the term on exactly when the model carries a `ZoneAirMassChange` source, which
+  `project_to_model` attaches for a `dodMdt` project; False opts out; True on a model
+  without the source is refused.
 * a model with a `ZonePressureDensity` closure (CONTAM's `densZP = 1`, or the contaminants'
   zone air mass under `dodMdt`): every step (and the initial airflow) is repeated with the
   latest pressures until the zone pressures move by no more than `zone_pressure_rtol * P_ref`
@@ -96,9 +100,23 @@ def _fixed_point(run, state: State, key: str | None, rtol: float, max_iter: int,
     )
 
 
+def _refuse_unread_inputs(model: Model, drivers: Drivers, inputs: Sequence[Input],
+                          where: str) -> None:
+    """Refuse an input whose key is neither a driver nor an input the model declares: it
+    would be written where nothing reads it (a misspelt key)."""
+    declared = model.refs.inputs
+    for inp in inputs:
+        if inp.key not in drivers and inp.key not in declared:
+            raise KeyError(
+                f"{where}: input {inp._label()!r} writes driver {inp.key!r}, which is neither "
+                f"in the drivers nor an input the model declares, so nothing would read it; "
+                f"the declared inputs are {sorted(declared)}"
+            )
+
+
 def simulate(model: Model, state: State, drivers: Drivers, times, *,
              inputs: Sequence[Input] = (), calendar: Calendar | None = None,
-             air_mass_change: bool = False, land_on_breakpoints: bool = True,
+             air_mass_change: bool | None = None, land_on_breakpoints: bool = True,
              zone_pressure_rtol: float = 1e-12, zone_pressure_max_iter: int = 10,
              **step_kwargs) -> dict[str, Tensor]:
     """Time histories at `times` (s since the start, increasing, `times[0] == 0`; the
@@ -126,9 +144,10 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
             f"simulate: zone_pressure_max_iter must be >= 1, got {zone_pressure_max_iter}"
         )
     cal = calendar or Calendar()
+    _refuse_unread_inputs(model, drivers, inputs, "simulate")
     bound = bind_inputs(model, inputs)
     zp = _closure(model, ZonePressureDensity)
-    found = _air_mass_source(model) if air_mass_change else None
+    found = _air_mass_source(model) if air_mass_change is not False else None
     if air_mass_change and found is None:
         raise ValueError(
             "simulate: air_mass_change needs a ZoneAirMassChange node source on the airflow "
@@ -139,8 +158,10 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
              else "the contaminants' zone air mass")
 
     def start_mass(state: State, d: Drivers) -> Tensor:
+        # At the drivers the closures leave (a closure may write "T" or "P_ref"), as the
+        # end-of-step mass inside the solve sees them.
         phi = state[f"{mass_layer}.phi"][..., mass_source.nodes]
-        return mass_source.mass(phi, d)
+        return mass_source.mass(phi, model._apply_closures(state, d))
 
     def drivers_at(t: float) -> Drivers:
         d = apply_inputs(drivers, bound, t, cal)
@@ -158,7 +179,7 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
                          zone_pressure_rtol, zone_pressure_max_iter, P_of(d), "initial airflow",
                          cause)
     state = {**state, **model.initial_capacities(state, d)}
-    mass = start_mass(state, d) if air_mass_change else None
+    mass = start_mass(state, d) if found else None
 
     keys = [f"{n}.{s}" for n in model.potential for s in ("q", "phi")]
     keys += [f"{n}.x" for n in model.transport]
@@ -243,7 +264,9 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), **step_kwargs) ->
     model, state, drivers = project_to_model(project)
     base = project.source_path.parent if project.source_path else Path.cwd()
     if not rc.transient_airflow:
-        d = apply_inputs(drivers, bind_inputs(model, inputs), 0.0, rc.steady_calendar())
+        _refuse_unread_inputs(model, drivers, inputs, "simulate_project")
+        bound = bind_inputs(model, [*project.inputs_for(model), *inputs])
+        d = apply_inputs(drivers, bound, 0.0, rc.steady_calendar())
         out_state = steady(model, state, d, **step_kwargs)
         out = {f"{n}.{s}": out_state[f"{n}.{s}"].unsqueeze(0)
                for n in model.potential for s in ("q", "phi")}
@@ -262,7 +285,6 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), **step_kwargs) ->
                         day_types=weather.day_types if weather and weather.day_types else None)
     times = torch.arange(n + 1, dtype=F64) * rc.time_step
     out = simulate(model, state, drivers, times, inputs=all_inputs, calendar=calendar,
-                   air_mass_change=rc.zone_mass_change and _air_mass_source(model) is not None,
                    land_on_breakpoints=False,
                    **step_kwargs)
     out["path_flow"] = project.path_flows(out["air.q"])

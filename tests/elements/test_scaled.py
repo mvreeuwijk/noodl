@@ -133,3 +133,12 @@ def test_a_batched_column_multiplier_broadcasts_through_a_layer_solve():
     assert phi.shape == (2, 2)
     expected = -((0.01 / (s.squeeze(-1) * 0.02)) ** 2)
     torch.testing.assert_close(phi[:, 1], expected, rtol=1e-9, atol=0)
+
+
+@pytest.mark.parametrize("multiplier", [[0.5, 2.0], 0.5, (1.0, 3.0)])
+def test_a_list_or_scalar_multiplier_is_float64(multiplier):
+    """A Python list or scalar multiplier never falls through to the float32 default."""
+    el = Scaled(_law(), KEY)
+    q = el.flow(torch.tensor([4.0, -9.0], dtype=F64), {KEY: multiplier})
+    assert q.dtype == F64
+    assert el._s(2, {KEY: multiplier}).dtype == F64

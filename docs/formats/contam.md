@@ -68,7 +68,8 @@ both from step to step. When the run control sets **`densZP = 1`**, ContamX eval
 density at its absolute pressure `Pb + P_zone`. `project_to_model` then adds a
 `ZonePressureDensity` closure that does the same from the previous solve's pressures, zone air
 masses included. When the run control sets **`dodMdt = 1`**, each zone's air-mass change over a
-step enters its airflow balance (`simulate_project` passes `air_mass_change=True`), and ContamX
+step enters its airflow balance (`simulate` switches the term on by default for such a model),
+and ContamX
 takes that mass at the zone's absolute pressure even with `densZP = 0`. `project_to_model`
 therefore attaches a `ZoneAirMassChange` node source to the air layer (only when the run
 control sets `dodMdt` and a zone has volume), which acts only when `simulate` supplies the

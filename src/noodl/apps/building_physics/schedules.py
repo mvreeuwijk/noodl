@@ -313,6 +313,8 @@ class TimeSeries:
     """Values at times since the simulation start (s): a measured or computed input.
 
     `values` has shape `(len(times), *trailing)` and may carry gradients (a calibrated input).
+    The last trailing axis is the driver's positions (an `Input`'s `index` or `at`), any axes
+    before it are batch: a batched series at one position is `(N, B, 1)`, not `(N, B)`.
     `interpolation="linear"` interpolates; `"step"` holds each value until the next time (the
     left limit at a jump, as for a rectangular schedule). Never extrapolated: a time outside
     `times` raises.

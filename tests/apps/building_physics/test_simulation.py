@@ -165,7 +165,8 @@ def test_the_zone_air_mass_change_enters_the_airflow_balance():
     p_old, p_new = 101325.0 + out["air.phi"][-2, i], 101325.0 + out["air.phi"][-1, i]
     dM = V / R_AIR * (p_new / 303.15 - p_old / 293.15)
     assert net_in.item() == pytest.approx(dM / 300.0, rel=1e-9)
-    without = simulate(model, state, drivers, [0.0, 300.0, 600.0], inputs=step_up, **TIGHT)
+    without = simulate(model, state, drivers, [0.0, 300.0, 600.0], inputs=step_up,
+                       air_mass_change=False, **TIGHT)
     f0 = project.path_flows(without["air.q"][-1])
     assert (f0[0] - f0[1]).abs().item() < 1e-12
 
@@ -233,7 +234,10 @@ def test_air_mass_change_needs_the_zone_air_mass_term_on_the_airflow_layer():
 def test_zone_pressure_density_steps_are_iterated_to_their_fixed_point():
     model, state, drivers = project_to_model(read_prj(STACK), ambient={"Ta": 273.15})
     step_up = [Input(TimeSeries([0.0, 300.0], [293.15, 303.15]), "T", at="singleZone")]
-    out = simulate(model, state, drivers, [0.0, 300.0], inputs=step_up, **TIGHT)
+    # The fixed point alone: the re-step below carries no start-of-step air mass, so the
+    # project's dM/dt term (tested on its own above) is switched off here.
+    out = simulate(model, state, drivers, [0.0, 300.0], inputs=step_up, air_mass_change=False,
+                   **TIGHT)
     d = apply_inputs(drivers, bind_inputs(model, step_up), 300.0, Calendar())
     start = {**state, "species.x": out["species.x"][0], "air.phi": out["air.phi"][-1]}
     again = model.step(start, {**d, "time": _f(300.0)[0]}, 300.0, t=0.0, **TIGHT)
@@ -438,3 +442,103 @@ def test_the_zone_air_mass_source_needs_dodmdt_and_a_zone_with_volume():
         p.net.graph.nodes[node]["volume"] = 0.0
     p.net._cache.clear()
     assert _air_mass_source(project_to_model(p, species=False)[0]) is None
+
+
+# ------------------------------------------------------------- final-review regressions
+def test_air_mass_change_defaults_to_on_exactly_when_the_model_carries_the_source():
+    """The default `air_mass_change=None` keeps dM/dt in the balance of a model that carries
+    a `ZoneAirMassChange` source (a dodMdt project) and is off for one without; an explicit
+    False opts out."""
+    project = read_prj(THREE)
+    _set_dod_mdt(project, True)
+    model, state, drivers = project_to_model(project)
+    step_up = [Input(TimeSeries([0.0, 300.0, 600.0], [293.15, 303.15, 303.15],
+                                interpolation="step"), "T", at="one")]
+    times = [0.0, 300.0, 600.0]
+    default = simulate(model, state, drivers, times, inputs=step_up, **TIGHT)
+    on = simulate(model, state, drivers, times, inputs=step_up, air_mass_change=True, **TIGHT)
+    off = simulate(model, state, drivers, times, inputs=step_up, air_mass_change=False, **TIGHT)
+    assert torch.equal(default["air.q"], on["air.q"])
+    assert (default["air.q"][-1] - off["air.q"][-1]).abs().max().item() > 1e-4
+    _set_dod_mdt(project, False)
+    model, state, drivers = project_to_model(project)
+    plain = simulate(model, state, drivers, times, inputs=step_up, **TIGHT)
+    f = project.path_flows(plain["air.q"][-1])
+    assert (f[0] - f[1]).abs().item() < 1e-12
+
+
+@pytest.mark.parametrize("key", ["V_mett", "Tamb"])
+def test_a_whole_driver_input_on_a_key_nobody_reads_is_refused(key):
+    model, state, drivers = project_to_model(read_prj(THREE))
+    typo = [Input(TimeSeries([0.0, 600.0], [1.0, 2.0]), key, name="wind typo")]
+    with pytest.raises(KeyError, match=rf"wind typo.*{key}"):
+        simulate(model, state, drivers, [0.0, 300.0], inputs=typo)
+
+
+def _steady_variant(tmp_path, source):
+    text = source.read_text()
+    af = "!sim_af afcalc afmaxi afrcnvg afacnvg afrelax uac Pbldg uPb\n     1"
+    mf = "!sim_mf slae rs maxi   relcnvg   abscnvg relax gamma ucc\n    2"
+    assert af in text and mf in text
+    variant = tmp_path / source.name
+    variant.write_text(text.replace(af, af[:-1] + "0", 1).replace(mf, mf[:-1] + "1", 1))
+    for extra in (".wth", ".ctm"):
+        if source.with_suffix(extra).exists():
+            variant.with_suffix(extra).write_text(source.with_suffix(extra).read_text())
+    return read_prj(variant)
+
+
+def test_simulate_project_steady_refuses_unread_and_overlapping_inputs(tmp_path):
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    p = _steady_variant(tmp_path, DATA / "scheduled_three_zone.prj")
+    with pytest.raises(KeyError, match="V_mett"):
+        simulate_project(p, inputs=[Input(TimeSeries([0.0, 1.0], [1.0, 1.0]), "V_mett")])
+    clash = Input(TimeSeries([0.0, 1.0], [300.0, 300.0]), "T", index=2, name="mine")
+    with pytest.raises(ValueError, match="both write driver 'T'"):
+        simulate_project(p, inputs=[clash])
+
+
+@pytest.mark.parametrize("key, values", [("T", None), ("P_ref", (101325.0, 95000.0)),
+                                         ("V_met", (5.23, 1.0))])
+def test_a_batched_scheduled_project_with_a_constant_flow_fan_matches_its_instances(key, values):
+    """scheduled_three_zone carries a scheduled constant-flow fan, a drive-free kind: a batch
+    on `T`, `P_ref` or `V_met` runs, and every instance equals its own unbatched run."""
+    p = read_prj(DATA / "scheduled_three_zone.prj")
+    model, state, drivers = project_to_model(p)
+    if values is None:
+        batched = torch.stack([drivers["T"], drivers["T"] + 5.0])
+    else:
+        batched = torch.tensor(values, dtype=F64)
+    times = [0.0, 300.0, 600.0]
+    inputs = p.inputs_for(model)
+    both = simulate(model, state, {**drivers, key: batched}, times, inputs=inputs, **TIGHT)
+    assert both["air.q"].shape[1] == 2
+    for i in range(2):
+        one = simulate(model, state, {**drivers, key: batched[i]}, times, inputs=inputs, **TIGHT)
+        torch.testing.assert_close(both["air.q"][:, i], one["air.q"], rtol=1e-10, atol=1e-15)
+        torch.testing.assert_close(both["species.x"][:, i], one["species.x"],
+                                   rtol=1e-10, atol=1e-18)
+
+
+def test_the_start_mass_of_a_step_sees_the_temperatures_a_closure_writes():
+    """A closure that writes `"T"` (here: zone one held at 303.15 K while the drivers say
+    293.15 K) sets the temperature of both masses of dM/dt, so with nothing changing the
+    zone's net inflow is zero in every step."""
+    project = read_prj(THREE)
+    _set_dod_mdt(project, True)
+    model, state, drivers = project_to_model(project)
+    i = project.net.node_index("one")
+
+    class HoldZoneOne:
+        outputs = ("T",)
+
+        def __call__(self, state, drivers):
+            return {"T": scatter(drivers["T"], (i,), torch.tensor(303.15, dtype=F64))}
+
+    model.closures.insert(0, HoldZoneOne())
+    out = simulate(model, state, drivers, [0.0, 300.0, 600.0], air_mass_change=True,
+                   **TIGHT)
+    for row in (1, 2):
+        f = project.path_flows(out["air.q"][row])
+        assert (f[0] - f[1]).abs().item() < 1e-12

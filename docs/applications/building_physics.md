@@ -198,8 +198,10 @@ print(out["air.q"].shape, out["species.x"].shape)
 torch.Size([13, 4]) torch.Size([13, 3, 1])
 ```
 
-`air_mass_change=True` adds each zone's air-mass change to its airflow balance (CONTAM's
-`dodMdt`): a zone whose temperature rises pushes out the air it no longer holds. The mass is
+`simulate` adds each zone's air-mass change to its airflow balance (CONTAM's `dodMdt`)
+exactly when the model carries a `ZoneAirMassChange` node source, which `project_to_model`
+attaches for a project that sets `dodMdt` (the default `air_mass_change=None`;
+`air_mass_change=False` opts out, and `True` on a model without the source is refused): a zone whose temperature rises pushes out the air it no longer holds. The mass is
 taken at the zone's absolute pressure, (P_b + P_zone) V / (R T), as ContamX's is, so a zone
 depressurised by an exhaust fan switching on also gives up a little air. For a project that
 sets `dodMdt`, `project_to_model` gives the contaminants that same zone air mass. The term is
@@ -554,7 +556,9 @@ matched: its wind pressure profiles are cubic splines, periodic in the wind angl
 interpolation left 7.3e-5 kg/s once the wind turned away from a tabulated angle), and with
 `dodMdt` the zone air mass is taken at the zone's absolute pressure even when the densities are
 not (5.9e-6 kg/s when the fan switches on, 4.4e-9 in the mass fractions when the window
-reopens). What remains everywhere is one or two float32 roundoffs.
+reopens). What remains on these rows is one or two float32 roundoffs. One gap is known and not
+yet diagnosed: a variant of the scheduled three-zone project with `dodMdt = 0` differs from
+ContamX by 4.4e-9 in mass fraction when the window reopens, 2.3 times the floor.
 
 The whole-project rows pin how ContamX runs a project over time, each convention measured on
 the engine before it was implemented. Every input (schedule, weather, ambient file) is evaluated
