@@ -2,15 +2,17 @@
 
 READ: `[TITLE]`, `[OPTIONS]` (`FLOW_UNITS` CFS, GPM, MGD, CMS, LPS or MLD; see Units below),
 `[JUNCTIONS]` (invert, MaxDepth, InitDepth, SurDepth), `[OUTFALLS]` (FREE, NORMAL, FIXED, TIDAL and
-TIMESERIES, with their flap gate), `[CONDUITS]` (with InitFlow and MaxFlow), `[XSECTIONS]` (only
-`CIRCULAR`; barrels), `[LOSSES]` (the flap gate; the loss coefficients and seepage must be
-0), `[INFLOWS]` (constant `FLOW`
+TIMESERIES, with their flap gate), `[CONDUITS]` (with InitFlow and MaxFlow), `[XSECTIONS]`
+(`CIRCULAR`, and under DYNWAVE every other SWMM shape but `DUMMY` and `STREET`, with `inp_xsect`;
+barrels and the culvert code), `[TRANSECTS]` (DYNWAVE; the `IRREGULAR` sections), `[LOSSES]` (the
+flap gate and, under DYNWAVE, the entry, exit and average loss coefficients; seepage must be 0),
+`[INFLOWS]` (constant `FLOW`
 baselines and constant `CONCENTRATION` pollutant baselines), `[POLLUTANTS]`, and under
 DYNWAVE `[STORAGE]` (FUNCTIONAL, TABULAR and the closed shapes CYLINDRICAL, CONICAL,
 PARABOLIC (also spelled PARABOLOID), PYRAMIDAL, with SurDepth; a non-zero evaporation factor and
 exfiltration are refused) with the `[CURVES]` of type STORAGE that its TABULAR units name, and
 `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` (their `[XSECTIONS]` openings and RATING curves;
-`_regulators`).
+`_regulators`). The `[CURVES]` of type SHAPE give the `CUSTOM` sections their width curves.
 InitDepth,
 InitFlow, MaxFlow, flap gates and barrels are dynamic-wave physics: under STEADY or KINWAVE
 routing a non-zero or gated value is refused by name rather than skipped.
@@ -18,7 +20,8 @@ routing a non-zero or gated value is refused by name rather than skipped.
 `INERTIAL_DAMPING`, `NORMAL_FLOW_LIMITED`, `SURCHARGE_METHOD`, `MIN_SURFAREA`,
 `HEAD_TOLERANCE`, `MAX_TRIALS` and `MIN_SLOPE` into `DynamicWaveOptions`.
 The network uses SWMM's own tabulated circular section
-(``geometry="tabulated"``, `xsect_tables.py`) unless ``geometry="analytic"`` is passed.
+(``geometry="tabulated"``, `xsect_tables.py`; the other shapes `xsect_shapes.py`) unless
+``geometry="analytic"`` is passed (circles only).
 IGNORED because no conduit or node ever references them: `[EVAPORATION]`, `[REPORT]`,
 `[TAGS]`, `[MAP]`, `[COORDINATES]`.
 
@@ -29,8 +32,9 @@ STORAGE, RATING and TIDAL, `[TIMESERIES]` (but see below), `[LID_USAGE]`, roadwa
 weir coefficient curves,
 and any other section carrying content. A
 time-series inflow is refused; time variation belongs in the drivers. A conduit with a
-culvert code, a non-zero entry, exit or average loss coefficient or seepage rate is refused
-for every routing; one with more than one barrel under STEADY or KINWAVE.
+seepage rate is refused for every routing; one with a non-circular section, a culvert code, a
+non-zero entry, exit or average loss coefficient or more than one barrel under STEADY or
+KINWAVE.
 
 DYNWAVE reads `VARIABLE_STEP` (the Courant factor; absent means SWMM's default 0.75,
 project.c:854) and `MINIMUM_STEP`, and clips `ROUTING_STEP` to `WET_STEP` (default 300 s)
@@ -62,7 +66,9 @@ cfs; `FLOW_UNITS` absent means SWMM's default, CFS). CFS, GPM and MGD are the US
 system (lengths in ft), CMS, LPS and MLD the SI system (lengths in m); a length is converted by
 the system (0.3048 m per ft), a flow by the flow unit, an area by the length squared.
 Converted: the junction, storage and outfall elevations and depths, the fixed and the tidal
-stage, conduit lengths, offsets and diameters, regulator openings (Geom1, Geom2), the orifice,
+stage, conduit lengths, offsets and diameters (the lengths among a section's Geom1..Geom4,
+`xsect_spec.LENGTH_FIELDS`, and a transect's stations and elevations), regulator openings
+(Geom1, Geom2), the orifice,
 weir and outlet crest heights, STORAGE curves (depth m, area m2), RATING curves (depth or head
 m, flow m3/s), TIDAL curves (stage m), FUNCTIONAL storage (``A = a1 y^a2 + a0``: ``a1`` goes
 with length^(2 - a2), ``a0`` with length^2), the CYLINDRICAL, CONICAL, PARABOLOID and PYRAMIDAL

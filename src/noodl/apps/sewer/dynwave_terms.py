@@ -11,8 +11,9 @@ are not modelled (see docs/applications/sewer.md, "Dynamic wave").
 Scope of the transcription: every cross-section shape (`xsect_shapes.XsectSet`: a circular-only
 network keeps the tabulated circle's own path of `xsect_tables`, bit for bit), the local losses
 (``dq5``, `[LOSSES]` entry, exit and average coefficients) and the force-main friction slope of a
-full ``FORCE_MAIN`` (`forcmain.c`); no evaporation/seepage (``dq6``) and no culvert inlet
-control. Parallel barrels (``Conduit.barrels``)
+full ``FORCE_MAIN`` (`forcmain.c`); a culvert's inlet-control limit is returned as a cap
+(``cap_flow``, `culvert.py`); no evaporation/seepage (``dq6``). Parallel barrels
+(``Conduit.barrels``)
 and Courant lengthening (``modLength``) are modelled: the momentum update is one barrel's, and
 the flow offset, conveyance, normal flow, surface areas and volume it returns are totals over the
 barrels, as SWMM's ``newFlow``, ``dqdh``, ``surfArea`` and ``newVolume`` are. The user flow limit

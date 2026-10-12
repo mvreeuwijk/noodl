@@ -215,8 +215,9 @@ piecewise-linear tables, unrolled Newton loops, and one implicit-function root.
 Scope: on the kinematic path `geometry="tabulated"` covers the steady case only, and is refused
 by name with `storage=True`. Dynamic-wave routing always uses the tables and refuses
 `geometry="analytic"` by name. The discharge limit is SWMM's `Qfull` rather than the analytic 0.938 D capacity.
-The headspace, top width, hydraulic radius and mean depth (air side, sulfide) remain the exact
-circle, evaluated at SWMM's depth. SWMM has no headspace to compare them with.
+The headspace, top width, hydraulic radius and mean depth (air side, sulfide) of a circular conduit remain the exact
+circle, evaluated at SWMM's depth. SWMM has no headspace to compare them with. Other shapes are
+dynamic-wave only (below); the kinematic and steady paths refuse them by name.
 
 Numerical care worth noting: the `arccos` argument is clamped to the *exact* domain $[-1, 1]$,
 not an epsilon-shrunk one — that was tried and rejected because it shifts the boundary value by
@@ -537,7 +538,8 @@ conduit; the backwater fixture avoids an exact tie for that reason.
 
 #### Scope
 
-Circular conduits, SWMM's tabulated geometry; the fixed routing step or
+Conduits of every SWMM cross section (the circle's tabulated geometry or any other shape, below)
+with local losses, force mains, transects and culverts; the fixed routing step or
 SWMM's variable step (`VARIABLE_STEP > 0`, below); a cold start or SWMM's `InitDepth` and
 `InitFlow` (above); constant or
 driver-supplied lateral inflows; `FREE`, `NORMAL`, `FIXED`, `TIDAL` and `TIMESERIES` outfalls,
@@ -687,8 +689,8 @@ the element's flow against a constant, so the flow stays continuous and non-decr
 head difference, as the head solve's Newton step needs. A set `InitDepth`, `InitFlow`,
 `MaxFlow`, flap gate or barrel count is refused by name under STEADY or KINWAVE routing.
 
-The reader refuses by name, with the line number, `ALLOW_PONDING YES`, loss coefficients
-and seepage in `[LOSSES]`, storage evaporation and exfiltration, roadway weirs, weir coefficient curves and regulators with `LINK_OFFSETS
+The reader refuses by name, with the line number, `ALLOW_PONDING YES`, seepage
+in `[LOSSES]`, the `DUMMY` and `STREET` sections, storage evaporation and exfiltration, roadway weirs, weir coefficient curves and regulators with `LINK_OFFSETS
 ELEVATION` (see [SWMM `.inp`](../formats/swmm.md)).
 `build_model` with `storage=True` is refused by name; `quality=True` builds
 the water-quality layer on the solved flows (see
@@ -716,6 +718,99 @@ step's length). `simulate_dynamic_wave` also takes an `inflow=` override (`(n,)`
 constant, `(B, n)` a batch, `(steps, B, n)` a series, or a function `inflow(t)` of the
 start time `t` in s) and `record=` for other state keys and for `"sewer.overflow"` (m³/s
 per junction).
+
+#### Cross sections, losses, transects and culverts
+
+A conduit's section is SWMM's, whatever its shape (`Pipe.xsect`, an `Xsect` of
+`noodl.apps.sewer.xsect_spec`; a `Pipe` without one is the tabulated circle of
+[SWMM's own circular geometry](#swmms-own-circular-geometry), whose code path is unchanged).
+SWMM evaluates every section through the same few functions -- area, top width and hydraulic
+radius from the depth, depth from the area, and, for the normal depth that classifies the flow
+and sets a free outfall, the area from the section factor -- and the dynamic wave reads them
+through the surface areas, the momentum update, the Froude number and the critical and normal
+depth. `noodl.apps.sewer.xsect_shapes` reproduces each, operation for operation:
+
+- the **tabulated shapes** of `xsect.dat` (`EGG`, `HORSESHOE`, `GOTHIC`, `CATENARY`,
+  `SEMIELLIPTICAL`, `BASKETHANDLE`, `SEMICIRCULAR`, `HORIZ_ELLIPSE`, `VERT_ELLIPSE`, `ARCH`, with
+  the standard elliptical and arch sizes by code), through SWMM's `lookup` / `invLookup`; which
+  tables each shape reads forwards and which it inverts is SWMM's (a `GOTHIC` area is the
+  inverse of its depth table, an `EGG` area a direct lookup);
+- the **closed forms**: `RECT_CLOSED` (with its 0.97 sloped section-factor limit), `RECT_OPEN`,
+  `TRAPEZOIDAL`, `TRIANGULAR`, `PARABOLIC`, `POWER` (its perimeter by numerical arc length),
+  `RECT_TRIANGULAR`, `RECT_ROUND` and `MODBASKETHANDLE`, `FILLED_CIRCULAR` (the circle's tables
+  shifted by the fill, with the fill added to both offsets) and `FORCE_MAIN` (the circle's
+  tables with its own section factor);
+- the **per-conduit tables**: `IRREGULAR`, from the 51-point tables SWMM builds from a
+  `[TRANSECTS]` entry (`xsect_spec.transect_tables`: each depth slice's area, width and
+  conveyance with the overbank and channel Manning n, the hydraulic radius from the Manning
+  flow), and `CUSTOM`, from the tables of a SHAPE curve (`custom_tables`);
+- the **area from the section factor**, `generic_getAofS`: a bracketed Newton iteration on the
+  shape's own `S(A)` and `dS/dA` (`findroot_Newton`, 60 iterations, tolerance `1e-4 A_full`),
+  not the exact root; and the **critical depth**, `xsect_getYcrit`: a closed form for the
+  rectangular, triangular, parabolic and power sections, the 25-interval enumeration where the
+  section's area is within a factor of two of the equivalent circle's, Ridder's method
+  (`findroot_Ridder`, tolerance 0.001 ft, and `-1e20` where it does not bracket, as SWMM) where
+  it is not.
+
+SWMM's own quirks are reproduced because the engine is the reference: the hydraulic radius of the
+circular bottom of `RECT_ROUND` is `0.5 r (1 - sin t) / t` (`xsect.c:2062`), which falls to zero at
+the springing line; a `FILLED_CIRCULAR` reads the width of its fill at `(2 y_fill) / (D + y_fill)`
+(`xsect.c:281`); the transect `Yfactor` is divided by the unit factor twice.
+
+All of it is batched: the conduits are grouped by shape (`XsectSet`) and each query is a few
+vectorised calls per shape present, not one per conduit, so a mixed network costs a few
+more tensor operations per pass, and a network of circles none (the circle path is
+`xsect_tables`, bit for bit). The normal and critical depths are evaluated only for the
+conduits that read them: those with an offset (the flow class) and the outfall conduits. An
+open shape (`xsect_isOpen`: `RECT_OPEN`, `TRAPEZOIDAL`, `TRIANGULAR`, `PARABOLIC`, `POWER`,
+`IRREGULAR`) has no crown: its top width is not frozen near the top, it has no slot, and
+`yFull` of its Courant length is `A_full / W(y_full)`. Reporting keys: `"sewer.R_h"`, `"sewer.d_m"`,
+`"sewer.T"`, `"sewer.A_air"`, `"sewer.D_h"` and `"sewer.V_air"` come from the section for a
+non-circular conduit (the headspace perimeter is `P_full - A/R + W`); the quality and air models are the
+circular-pipe correlations and are refused by name for a network with a non-circular conduit.
+
+**Local losses.** The `[LOSSES]` entry, exit and average coefficients enter the momentum
+update's denominator as `dq5 = (c_in q/a_1 + c_out q/a_2 + c_avg q/a_mid)/2/L dt`
+(`dwflow.c:228-239`, each term where its area exceeds `FUDGE`), with the coefficients
+swapped for a conduit the reader reverses. Seepage (the sixth field) and evaporation are refused.
+
+**Force mains.** A `FORCE_MAIN` flows partly full as a circular conduit with the Manning n that
+gives the same full normal flow as its Hazen-Williams C or Darcy-Weisbach roughness
+(`forcmain.c::forcemain_getEquivN`, from `FORCE_MAIN_EQUATION`; the file's n is ignored), and
+full by the force-main friction slope instead of Manning's: `sBot v^0.852 / R^1.1667`
+(Hazen-Williams) or `f sBot v / R` (Darcy-Weisbach, the Swamee-Jain friction factor of the
+Reynolds number `4 R v / 1.1e-5`).
+
+**Culverts.** A culvert code (1 to 57, `culvert.c`, FHWA HEC-5) replaces the normal-flow limit of a
+conduit that is not full by its inlet-control flow for the head `y` above its upstream invert:
+unsubmerged (`y <= 0.95 y_full`) the form-1 implicit critical-depth equation (Ridder's method,
+whose flow is SWMM's value at the iteration's LAST evaluation) or the form-2 power law,
+submerged (`y >= y_full (16 C + Y - scf)`) an orifice equation, and linear between. Like the
+normal-flow limit it is a cap on the conduit's flow; because the cap follows the upstream head
+within a pass, it is applied as the line `q_inlet + (dQ/dH)(dH_1 - dH_1,fed)` (SWMM's own `dQ/dH`,
+capped by the junction's grounding as the slope switch's wall is), which has the same fixed
+points and converges where a lagged flag does not.
+
+**Verification.** `tests/verification/test_sewer_shapes_parity.py` runs the fixtures of
+`tests/data/sewer/make_shape_fixtures.py` through live SWMM 5.2.4 and noodl (one independent
+chain per section, subcritical so that SWMM's own iteration converges on every step, asserted):
+
+| Fixture | Chains | Worst depth (m) | Flows |
+|---|---|---|---|
+| `shapes_dynwave.inp` | every modelled shape, free surface | 3.0e-9 | within rel 1e-6 + 1e-9 at every step |
+| `shapes_drop_dynwave.inp` | the same with offsets at both ends (flow classes DN_CRITICAL) | 1.2e-9 | idem |
+| `shapes_surcharge_dynwave.inp` / `shapes_slot_dynwave.inp` | closed shapes under a FIXED stage past the crown | 7.2e-8 / 2.1e-8 | idem |
+| `shapes_us_dynwave.inp` | CFS: standard ellipse and arch sizes by code, channels | 1.6e-9 | idem |
+| `force_main_hw_dynwave.inp` / `force_main_dw_dynwave.inp` | full force mains | 1.8e-8 / 2.7e-8 | idem |
+| `losses_dynwave.inp` | entry, exit and average losses | 5.6e-9 | idem |
+| `irregular_dynwave.inp` | compound and meandering transects | 5.8e-10 | idem |
+| `culvert_dynwave.inp` | six inlet types, unsubmerged to submerged | 1.1e-8 | idem |
+
+Where a fixture sat in a regime in which SWMM itself does not converge (a dry start, a
+supercritical slope) there is no answer to compare with and it was changed, not the tolerance.
+The `RECT_ROUND` chain is omitted from the offset fixture: with a free fall at the outfall its end depth sits in the
+circular bottom, whose radius is SWMM's `(1 - sin t)/t` above, and the lagged equations then
+have two fixed points that SWMM and noodl may pick between in the same step.
 
 #### Variable step and time-varying inflow
 
@@ -1212,17 +1307,19 @@ publish numbers from this application.
 - **Dynamic wave, not supported.** Each is refused by name, with the line number when it comes
   from a file (see [SWMM `.inp`](../formats/swmm.md)), unless it says otherwise:
     - pumps (`[PUMPS]`), flow dividers (`[DIVIDERS]`), control rules (`[CONTROLS]`: a regulator
-      is always fully open), culvert inlet control (a conduit's culvert code), roadway weirs and
-      weir coefficient curves;
+      is always fully open), roadway weirs and weir coefficient curves;
     - ponding (`ALLOW_PONDING YES`): flooded water is lost, as in SWMM without ponding. A junction
       with no ground (`MaxDepth` 0) and no `SurDepth` floods as soon as it fills to its crown;
     - runoff, groundwater and LID (`[SUBCATCHMENTS]`, `[RAINGAGES]`, `[LID_USAGE]`), dry-weather
       flow (`[DWF]`), time-series inflows (supply them as drivers) and `[TIMESERIES]` data
       (a `TIMESERIES` outfall's stage is a driver);
-    - the `[LOSSES]` entry, exit and average coefficients and seepage (the flap gate is read),
-      storage evaporation (`Fevap`) and exfiltration, and a nonzero pollutant `Cinit`;
-    - non-circular conduit shapes and regulators with
-      `LINK_OFFSETS ELEVATION`;
+    - conduit seepage (the `[LOSSES]` sixth field), storage evaporation (`Fevap`) and
+      exfiltration, and a nonzero pollutant `Cinit`;
+    - the `DUMMY` section (a link that routes its node's outflow without a section) and the
+      `STREET` section, and non-circular conduits under steady or kinematic-wave routing;
+    - water quality and headspace air for a network with a non-circular conduit (their
+      correlations are the circular pipe's);
+    - regulators with `LINK_OFFSETS ELEVATION`;
     - headspace air on networks that are not dendritic: loops, junctions with several outgoing
       conduits or none, a junction drained only by a regulator (orifice, weir or outlet), a cycle
       that reaches no outfall (refused by network validation), and an outfall at a conduit's
@@ -1239,6 +1336,14 @@ publish numbers from this application.
   elapsed time, and batched `TIDAL` or `TIMESERIES` outfalls (a batched stage only via the
   driver); and a fully submerged weir whose flow reverses through zero, where SWMM itself
   fails to converge on a few steps.
+- **Dynamic wave, shapes: where SWMM's trials limit-cycle.** A section or outfall regime in which
+  SWMM's own iteration does not converge (a dry start, a supercritical slope, culverts running
+  from unsubmerged to submerged in a few steps) has no converged answer to compare with, and
+  noodl's lagged flags can fail to settle there too (`ValueError`: the step did not converge). The
+  culvert cap is applied as a line in the head difference, not the upstream head alone, so the
+  iteration of a culvert whose downstream end moves is slower (about 30 passes per step on the
+  parity fixture) though its fixed point is SWMM's. A free outfall below the springing line of a
+  `RECT_ROUND` conduit is such a regime (the section above).
 - **Dynamic wave, where SWMM has no fixed point** (the three tie rules above): the EXTRAN
   crown hold, the normal-flow slope switch and the drop-end area switch. The Froude test of the
   normal-flow limit stays a lagged flag. The area switch picks one threshold per junction (the

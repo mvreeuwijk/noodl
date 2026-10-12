@@ -5,9 +5,10 @@ lexical tokenizer (`noodl.apps.inpfile`) with the EPANET reader; each format's o
 column layouts and units are read by `apps/sewer/inp.py`.
 
 **Read:** `[TITLE]`, `[OPTIONS]`, `[JUNCTIONS]`, `[OUTFALLS]`, `[CONDUITS]`, `[XSECTIONS]`,
-`[LOSSES]` (the flap gate only), `[INFLOWS]`, `[POLLUTANTS]`, and under `DYNWAVE`
-`[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` with the `[CURVES]` of type `STORAGE`,
-`RATING` and `TIDAL`. A `[TIMESERIES]` section is accepted only for the series that
+`[LOSSES]` (the flap gate, and under `DYNWAVE` the entry, exit and average loss coefficients),
+`[INFLOWS]`, `[POLLUTANTS]`, and under `DYNWAVE` `[STORAGE]`, `[ORIFICES]`, `[WEIRS]`,
+`[OUTLETS]` and `[TRANSECTS]` with the `[CURVES]` of type `STORAGE`, `RATING`, `TIDAL` and
+`SHAPE`. A `[TIMESERIES]` section is accepted only for the series that
 `TIMESERIES` outfalls name, and is not read.
 
 **Ignored** because no conduit or node ever references them: `[EVAPORATION]`, `[REPORT]`,
@@ -23,7 +24,8 @@ so are the options and fields listed below.
 `NEITHER`), `SURCHARGE_METHOD` (`EXTRAN` or `SLOT`), `MIN_SURFAREA` (m²), `HEAD_TOLERANCE`,
 `MAX_TRIALS`, `MIN_SLOPE` (percent, as in SWMM) and `LENGTHENING_STEP` (seconds or `HH:MM:SS`) into
 `DynamicWaveOptions`; `HEAD_TOLERANCE` (in the file's length unit) and `MAX_TRIALS` are SWMM's
-own iteration controls and the defaults of noodl's (see
+own iteration controls and the defaults of noodl's, and `FORCE_MAIN_EQUATION` (`H-W` or `D-W`: the
+friction law of a full `FORCE_MAIN`) (see
 [Iteration and convergence](../applications/sewer.md#iteration-and-convergence)). Any other `[OPTIONS]` key is not read; the options above are read only
 under `DYNWAVE`, and an unrecognised value of a keyword option is refused with the line number. As SWMM does,
 the reader lowers `ROUTING_STEP` to `WET_STEP` when it is larger (a file that omits
@@ -42,9 +44,49 @@ eighth and ninth `[CONDUITS]` fields) are `Pipe.initial_flow` (a total over the 
 `Pipe.max_flow` (a limit on each barrel); a conduit flap gate (`[LOSSES]` fifth field YES) is
 `Pipe.flap_gate`, and an outfall's `Gated` YES is `Outfall.flap_gate`. A conduit the reader
 reverses (adverse, as SWMM does) has its `InitFlow` negated and its gate recorded as
-reversed. The loss coefficients and the seepage rate of `[LOSSES]` must be 0 (refused with
-the line number otherwise). Under `STEADY` or `KINWAVE` a non-zero `InitDepth`, `InitFlow` or
-`MaxFlow`, a flap gate and a gated outfall are refused by name.
+reversed. The entry, exit and average loss coefficients of `[LOSSES]` are
+`Pipe.loss_inlet`, `loss_outlet` and `loss_average` (swapped, as SWMM does, for a conduit the
+reader reverses); the seepage rate must be 0 (refused with the line number otherwise: seepage
+takes volume from the nodes at a rate set by the conduit's wetted width and volume, which is
+not modelled). Under `STEADY` or `KINWAVE` a non-zero `InitDepth`, `InitFlow` or
+`MaxFlow`, a flap gate, a gated outfall and a loss coefficient are refused by name.
+
+**Cross sections (dynamic wave).** `[XSECTIONS] Link Shape Geom1 Geom2 Geom3 Geom4 [Barrels
+[Culvert]]` is read for every SWMM shape but `DUMMY` and `STREET` (refused by name):
+`CIRCULAR`, `FILLED_CIRCULAR`, `RECT_CLOSED`, `RECT_OPEN`, `TRAPEZOIDAL`, `TRIANGULAR`,
+`PARABOLIC`, `POWER`, `RECT_TRIANGULAR`, `RECT_ROUND`, `MODBASKETHANDLE`, `HORIZ_ELLIPSE`,
+`VERT_ELLIPSE`, `ARCH`, `EGG`, `HORSESHOE`, `GOTHIC`, `CATENARY`, `SEMIELLIPTICAL`,
+`BASKETHANDLE`, `SEMICIRCULAR`, `IRREGULAR` (a transect), `CUSTOM` (`Geom1` the depth, `Geom2`
+the name of a `[CURVES]` SHAPE curve of width against height) and `FORCE_MAIN` (`Geom2` the
+Hazen-Williams C, or the Darcy-Weisbach roughness height in inches or mm, which the reader
+converts to m). The lengths among `Geom1..Geom4` are converted (`LENGTH_FIELDS`); side slopes,
+exponents, size codes and the C factor are not. For `HORIZ_ELLIPSE`, `VERT_ELLIPSE` and `ARCH`
+a zero `Geom2` makes `Geom1` the standard size code, as in SWMM (`xsect.c`); with a positive
+`Geom3` the standard size of that code is used whatever `Geom1` and `Geom2` say. Each conduit
+becomes a `Pipe` with an `Xsect` (`xsect_spec.py`) and the full height as its `diameter`; the
+section's constants are computed exactly as `xsect.c::xsect_setParams` does, from the file's
+numbers (the unit factor applied as SWMM applies it). Under `STEADY` or `KINWAVE` any shape
+but `CIRCULAR` is refused with the line number, as is `[TRANSECTS]`.
+
+**Transects (dynamic wave).** `[TRANSECTS]` `NC nLeft nRight nChannel`, `X1 Name nSta
+xLeftBank xRightBank 0 0 Lfactor Xfactor Yfactor` and `GR Elevation Station ...` lines are read
+with SWMM's reader state (`transect.c`): a zero Manning n on an `NC` line keeps the value
+of the previous transect (the main channel's, as SWMM leaves it after scaling it by
+`sqrt(Lfactor)`), an overbank n of 0 takes the channel's, the station multiplier `Xfactor` and
+the elevation offset `Yfactor` apply to every station (SWMM divides `Yfactor` by the unit
+factor twice, `transect.c:353, 377`, and so does the reader). A conduit that uses a transect
+takes its roughness from it (the file's Manning n is ignored) times `sqrt(Lfactor)`, and its length is the
+file's over `Lfactor` (`Pipe.transect_length_factor`). Refused with the line number: fewer
+than two stations or 1500 or more, stations that run backwards, no depth, no main-channel n,
+a left bank right of the right bank, and a `GR` line before an `X1` line.
+SWMM validates a transect when the next `NC` line or the next section begins; a transect that
+is the last thing in the file is therefore never validated by SWMM, which then refuses the
+link that uses it (its error 119) -- end a file's `[TRANSECTS]` with another section.
+
+**Culverts.** The culvert code (the eighth `[XSECTIONS]` field, 1 to 57) is `Pipe.culvert`:
+under `DYNWAVE` the conduit is limited, while it is not full, to the inlet-control flow of
+FHWA HEC-5 (`culvert.py`); a code above 57 is ignored, as SWMM does; under `STEADY` or
+`KINWAVE` a non-zero code is refused.
 
 **Junctions.** `Elevation` is the invert, `MaxDepth` sets `Manhole.ground` (invert plus
 depth) and `SurDepth` is `Manhole.surcharge_depth` (m, at least 0; 0 when absent): the depth
@@ -103,8 +145,7 @@ at the end of a conduit or of a regulator (exactly one link, SWMM's ERR_OUTFALL)
 
 **Barrels.** A conduit with more than one barrel is read under `DYNWAVE` (1 to 127; the
 flows, volumes and surface areas of the pipe are totals) and refused with the line number under
-`STEADY` and `KINWAVE`; a culvert code is refused for every routing. Both used to be ignored
-silently.
+`STEADY` and `KINWAVE`.
 
 **Units.** `FLOW_UNITS` may be `CFS`, `GPM`, `MGD` (the US system: lengths in ft) or `CMS`,
 `LPS`, `MLD` (the SI system: lengths in m); an absent `FLOW_UNITS` is SWMM's default, `CFS`. The
@@ -127,7 +168,8 @@ $0.0283168$ would disagree with SWMM by 1e-4.
 Converted: node invert elevations, maximum, initial and surcharge depths, fixed and tidal
 outfall stages, conduit lengths, offsets and diameters, regulator openings (`Geom1`, `Geom2`),
 orifice, weir and outlet crest heights, `[CURVES]` (STORAGE: depth and area; RATING: depth or
-head and flow; TIDAL: stage), `FUNCTIONAL` storage (`A = a1 y^a2 + a0`: `a1` scales with
+head and flow; TIDAL: stage; SHAPE: none, the curve is relative to the section's height),
+`FUNCTIONAL` storage (`A = a1 y^a2 + a0`: `a1` scales with
 length^(2 - a2), `a0` with length^2), the `CYLINDRICAL`, `CONICAL`, `PARABOLOID` and
 `PYRAMIDAL` lengths, `InitFlow`, `MaxFlow`, constant `FLOW` baselines, `MIN_SURFAREA` (an
 area) and `HEAD_TOLERANCE` (a length). A `FUNCTIONAL` outlet `q = a h^b` converts as
@@ -138,15 +180,15 @@ orifice Cd, end contractions, `MIN_SLOPE` (percent), times and concentrations. T
 rewrites each CMS fixture into the other five systems and requires the same network back, and
 runs the rewritten files through SWMM itself.
 
-**Constraints:** `LINK_OFFSETS` must be `DEPTH` or `ELEVATION` (`DEPTH` with regulators). Only `CIRCULAR`
-conduit cross-sections (regulator openings above). Only constant
+**Constraints:** `LINK_OFFSETS` must be `DEPTH` or `ELEVATION` (`DEPTH` with regulators). Under
+`STEADY` and `KINWAVE` only `CIRCULAR` conduit cross-sections. Only constant
 `FLOW` baselines and constant `CONCENTRATION` pollutant baselines; a time-series inflow is
 refused, because time variation belongs in the drivers.
 
 **Refused by name**, because skipping them would silently change the physics: `[DWF]`,
 `[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` under `STEADY` or `KINWAVE`, `[PUMPS]`,
-`[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[CURVES]` of any type but
-`STORAGE`, `RATING` and `TIDAL`, `[TIMESERIES]` except the series a `TIMESERIES` outfall names,
+`[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[STREETS]`, `[CURVES]` of any
+type but `STORAGE`, `RATING`, `TIDAL` and `SHAPE`, `[TIMESERIES]` except the series a `TIMESERIES` outfall names,
 `[LID_USAGE]`, and any other section carrying
 content.
 
@@ -175,11 +217,11 @@ dry-weather inflow, which are refused or absent.
 **Not supported**, which rules out most published SWMM examples as they stand:
 
 - runoff (`[SUBCATCHMENTS]` and everything that feeds them) and dry-weather patterns;
-- non-circular shapes;
+- the `DUMMY` and `STREET` cross sections, conduit seepage and evaporation losses;
 - pumps, dividers, roadway weirs, weir coefficient curves and control rules (regulator
   settings); orifices, weirs, outlets and storage units under `STEADY` or `KINWAVE`, and
   storage evaporation or exfiltration;
-- ponding (`ALLOW_PONDING YES`) and culvert inlet control. Both `SURCHARGE_METHOD`s model
+- ponding (`ALLOW_PONDING YES`). Both `SURCHARGE_METHOD`s model
   surcharge, and a junction floods (without ponding) above `MaxDepth` (extended to its
   crown) plus `SurDepth`; the water that cannot enter is lost, as in SWMM without ponding.
 
