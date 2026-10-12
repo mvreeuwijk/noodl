@@ -6,11 +6,13 @@ names, the density options), the contaminants list and the species records, kine
 reactions and the zones that carry them, levels, day and week schedules, wind pressure
 profiles, airflow elements (power-law family, quadratic family, doorways, dampers,
 constant-flow fans and the cubic fan), zones and their temperature schedules, initial zone
-concentrations, airflow paths with their schedules (flow multipliers)
+concentrations, filter elements (constant-efficiency, particle and super filters) and the
+filters on airflow paths, airflow paths with their schedules (flow multipliers)
 and constant wind pressures, source/sink elements and source/sinks of the constant, cutoff,
 decaying and burst types. Everything else is skipped to its -999 terminator; a RECORD that
-references a skipped section by a nonzero index (control, filter, AHS) raises ValueError
-naming it, as does a non-trace species, a CFD or 1-D zone, a zone held at constant pressure, a
+references a skipped section by a nonzero index (control, AHS) raises ValueError
+naming it, as does a non-trace species, a gaseous (loading-dependent) or UVGI filter
+element (referenced or not), a CFD or 1-D zone, a zone held at constant pressure, a
 duct network, an unsupported element type, a constant wind pressure on an interior path, a
 schedule on a fan curve and a fan curve on a path with mult != 1. A schedule number that no
 week schedule carries raises KeyError naming the zone or path.
@@ -65,6 +67,12 @@ from pathlib import Path
 import torch
 from torch import Tensor
 
+from noodl.apps.building_physics.filters import (
+    ConstantEfficiencyFilter,
+    FilterSeries,
+    ParticleFilter,
+    filter_transmission,
+)
 from noodl.apps.building_physics.inputs import Input, apply_inputs, bind_inputs
 from noodl.apps.building_physics.schedules import Calendar, DaySchedule, WeekSchedule
 from noodl.apps.building_physics.species import KineticReaction, Species, reaction_kinetics
@@ -122,6 +130,17 @@ MU_0 = 1.81625e-5
 #   kinetic reaction `nr nkrd name`, a description line, then `nkrd` lines
 #                   `product reactant coefficient` (1/s); dx_product/dt += coefficient
 #                   x_reactant (measured).
+#   filter element  `nr type area depth dens u_A u_D name`, a description line (may be
+#                   blank), then by type: `cef` a line `nspcs`, then `nspcs` lines
+#                   `species efficiency`; `pf0` a line `npts u_size`, then `npts` lines
+#                   `diameter(m) efficiency`; `spf` a line `nsub`, then the `nsub` element
+#                   numbers in flow order. ContamX's type table is `cef pf0 gf0 uv1 spf`;
+#                   `gf0` (gaseous, loading-dependent) and `uv1` (UVGI, layout undocumented)
+#                   are refused when read.
+#   filter          `nr element nsub`, then per sub-element a line `load nsload` and `nsload`
+#                   species-loading lines (measured: for two sub-elements ContamX refuses the
+#                   lines `0`, `0` and loads `0 0`, `0 0`). Loadings matter only to gaseous
+#                   filters and are skipped.
 #   day schedule    `# npts shap utyp ucnv name`, a description line (may be blank), then
 #                   `npts` rows `hh:mm:ss value` from 00:00:00 to 24:00:00. `shap` 0 is
 #                   rectangular, 1 trapezoidal; values are SI (K for a temperature schedule),
@@ -162,7 +181,9 @@ MU_0 = 1.81625e-5
 #                   constant pressure (measured on ContamX 3.4.1.7: flags 0 and 2 give no flow
 #                   through the zone, 1 and 3 the same flows).
 #   path            30 fields: `# f n# m# e# f# w# a# s# c# l# X Y relHt mult wPset wPmod
-#                   wazm Fahs Xmax Xmin icn dir clr u[4] cdvf cfd`. Same story: the header
+#                   wazm Fahs Xmax Xmin icn dir clr u[4] cdvf cfd`. `f#` (field 5) is the
+#                   path's filter number, 0 for none; the filter acts on the air crossing the
+#                   path in either direction (measured). Same story: the header
 #                   comment omits `clr` (always -1 in every sample), so the trailing
 #                   `cdvf cfd` sit at 28 and 29, not at 27 and 28. A nonzero cdvf or cfd
 #                   appends a name / four data fields, which is why the field COUNT is
@@ -225,6 +246,7 @@ class PrjPath:
     profile_nr: int
     edge_columns: list[int] = field(default_factory=list)   # columns of q for this path
     schedule_nr: int = 0             # week schedule multiplying the flow; 0 = none
+    filter_nr: int = 0               # filter on the path (either flow direction); 0 = none
 
 
 @dataclass
@@ -353,6 +375,8 @@ class Project:
     species_records: list[Species] = field(default_factory=list)
     # Each zone's kinetic reaction, by zone name.
     zone_reactions: dict[str, KineticReaction] = field(default_factory=dict)
+    # The filter on each filtered edge, by the edge's `(source, target, key)`.
+    edge_filters: dict = field(default_factory=dict)
 
     def inputs_for(self, model) -> list[Input]:
         """The project's inputs that `model` can take: a model without a species layer (a run
@@ -628,6 +652,76 @@ def _read_reactions(lines: _Lines, count: int, out: dict[int, KineticReaction]) 
     lines.expect_end("kinetic reactions")
 
 
+_REFUSED_FILTERS = {
+    "gf0": "a gaseous filter whose efficiency depends on its loading",
+    "uv1": "an ultraviolet germicidal irradiation (UVGI) filter",
+}
+
+
+def _read_filter_elements(lines: _Lines, count: int,
+                          out: dict[int, tuple[str, str, list]]) -> None:
+    for _ in range(count):
+        tok = lines.record()
+        nr, ftype = int(tok[0]), tok[1]
+        name = tok[7] if len(tok) > 7 else ""
+        lines.raw()                                 # description (may be blank)
+        if ftype in ("cef", "pf0"):
+            rows = [lines.record() for _ in range(int(lines.record()[0]))]
+            data = ([(r[0], float(r[1])) for r in rows] if ftype == "cef"
+                    else [(float(r[0]), float(r[1])) for r in rows])
+            out[nr] = (ftype, name, data)
+        elif ftype == "spf":
+            n = int(lines.record()[0])
+            subs: list[int] = []
+            while len(subs) < n:
+                subs += [int(v) for v in lines.record()]
+            out[nr] = (ftype, name, subs)
+        else:
+            why = _REFUSED_FILTERS.get(ftype, "an unknown filter type")
+            raise ValueError(f"prj: filter element {nr} ({name!r}) has type {ftype!r}, {why} "
+                             f"(unsupported)")
+    lines.expect_end("filter elements")
+
+
+def _read_filters(lines: _Lines, count: int, out: dict[int, int]) -> None:
+    """Filter number -> filter element number; initial loadings are skipped."""
+    for _ in range(count):
+        tok = lines.record()
+        nr, element, n_sub = int(tok[0]), int(tok[1]), int(tok[2])
+        for _ in range(n_sub):
+            row = lines.record()                    # `load nsload`
+            n_loads = int(row[1]) if len(row) > 1 else int(lines.record()[0])
+            for _ in range(n_loads):
+                lines.record()
+        out[nr] = element
+    lines.expect_end("filters")
+
+
+def _filter_object(nr: int, elements: dict[int, tuple[str, str, list]],
+                   species: list[str], chain: tuple[int, ...] = ()):
+    """Filter element `nr` as a filter object (a super filter's stages recursively)."""
+    try:
+        ftype, name, data = elements[nr]
+    except KeyError as exc:
+        raise KeyError(f"prj: filter element {nr} is not defined in the 'filter elements' "
+                       f"section") from exc
+    if ftype == "cef":
+        unknown = sorted(s for s, _ in data if s not in species)
+        if unknown:
+            raise KeyError(f"prj: filter element {nr} ({name!r}) names species {unknown}, "
+                           f"which the project does not simulate")
+        return ConstantEfficiencyFilter(dict(data), name=name)
+    if ftype == "pf0":
+        try:
+            return ParticleFilter([d for d, _ in data], [e for _, e in data], name=name)
+        except ValueError as exc:
+            raise ValueError(f"prj: filter element {nr}: {exc}") from exc
+    if nr in chain:
+        raise ValueError(f"prj: filter element {nr} ({name!r}) contains itself")
+    return FilterSeries([_filter_object(k, elements, species, (*chain, nr)) for k in data],
+                        name=name)
+
+
 def _read_day_schedules(lines: _Lines, count: int, out: dict[int, DaySchedule]) -> None:
     for _ in range(count):
         tok = lines.record()
@@ -800,7 +894,7 @@ def _read_paths(
                 f"data fields, and neither is supported: {' '.join(tok)}"
             )
         pzn, pzm, pe, pf, pw, pa, ps, pc, pld = (int(v) for v in tok[2:11])
-        for label, val in (("filter", pf), ("AHS", pa), ("control node", pc)):
+        for label, val in (("AHS", pa), ("control node", pc)):
             if val:
                 raise ValueError(f"prj: path {nr} references {label} {val} (unsupported)")
         rel_ht, mult, wPset, wPmod, wazm = (float(v) for v in tok[13:18])
@@ -814,7 +908,7 @@ def _read_paths(
             raise KeyError(f"prj: path {nr} sits on level {pld}, which the file never defines")
         paths.append(
             PrjPath(nr, pzn, pzm, pe, levels[pld] + rel_ht, mult, wPset, wPmod, wazm, pw,
-                    schedule_nr=ps)
+                    schedule_nr=ps, filter_nr=pf)
         )
     lines.expect_end("flow paths")
 
@@ -894,6 +988,8 @@ def read_prj(path) -> Project:
     profiles: dict[int, WindProfile] = {}
     elements: dict[int, PrjElement] = {}
     source_elements: dict[int, tuple[str, str, list[float]]] = {}
+    filter_elements: dict[int, tuple[str, str, list]] = {}
+    filters: dict[int, int] = {}
     # nr, name, relHt, vol, T0, level, week schedule, flags
     zones: list[tuple[int, str, float, float, float, int, int, int]] = []
     x0_rows: dict[int, list[float]] = {}
@@ -928,6 +1024,10 @@ def read_prj(path) -> Project:
             _read_profiles(lines, count, profiles)
         elif name == "source/sink elements":
             _read_source_elements(lines, count, source_elements)
+        elif name == "filter elements":
+            _read_filter_elements(lines, count, filter_elements)
+        elif name == "filters":
+            _read_filters(lines, count, filters)
         elif name == "flow elements":
             _read_flow_elements(lines, count, elements)
         elif name == "zones":
@@ -952,12 +1052,13 @@ def read_prj(path) -> Project:
         sources=sources, dens_zp=dens_zp, schedules=schedules,
         species_records=species_records, reactions=reactions, zone_reactions=zone_reactions,
         run_control=run_control, source_path=source_path,
+        filter_elements=filter_elements, filters=filters,
     )
 
 
 def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones, x0_rows,
            paths, sources, dens_zp, schedules, species_records, reactions, zone_reactions,
-           run_control, source_path) -> Project:
+           run_control, source_path, filter_elements, filters) -> Project:
     """Turn the parsed records into a `Network`, elements, drives and a `Project`."""
     net = Network(dtype=F64)
     ambient = "ambient"
@@ -1194,6 +1295,19 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     for p, cols in zip(paths, path_edges, strict=True):
         p.edge_columns = [layout[c] for c in cols]
 
+    edge_filters: dict = {}
+    for p, cols in zip(paths, path_edges, strict=True):
+        if not p.filter_nr:
+            continue
+        try:
+            element = filters[p.filter_nr]
+        except KeyError as exc:
+            raise KeyError(f"prj: path {p.nr} references filter {p.filter_nr}, which the "
+                           f"'filters' section does not define") from exc
+        flt = _filter_object(element, filter_elements, species)
+        for c in cols:
+            edge_filters[net.edges[c]] = flt
+
     # A constant wind pressure (`wPset` on a path with no profile) acts on the path's ambient
     # side: +wPset on an edge from ambient, -wPset on one into it (dp = phi_src - phi_tgt +
     # drive). A positive value pushes air from ambient into the zone.
@@ -1266,7 +1380,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         multiplier_edges=multiplier_edges,
         constant_wind_pressure={k: torch.tensor(v, dtype=F64) for k, v in wind_pressure.items()},
         zone_flags=zone_flags, source_path=source_path, species_records=species_records,
-        zone_reactions=by_zone,
+        zone_reactions=by_zone, edge_filters=edge_filters,
     )
 
 
@@ -1456,10 +1570,14 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
             kinetics = reaction_kinetics(net, species=project.species,
                                          reactions=project.zone_reactions,
                                          ambient=project.ambient, flow_kinds=project.kinds)
+        transmission = None
+        if project.edge_filters:
+            transmission = filter_transmission(net, project.kinds, project.species_records,
+                                               project.edge_filters)
         layers["species"] = species_layer(
             net, ambient=project.ambient, flow_kinds=tuple(project.kinds),
             n_species=len(project.species), scheme=scheme, rho=rho,
-            species_names=project.species, kinetics=kinetics,
+            species_names=project.species, kinetics=kinetics, transmission=transmission,
         )
     cap_nodes = layers["species"].interior_idx if "species" in layers else None
     density = PrescribedTemperatureDensity(

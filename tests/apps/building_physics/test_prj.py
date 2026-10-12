@@ -8,6 +8,11 @@ from pathlib import Path
 import pytest
 import torch
 
+from noodl.apps.building_physics.filters import (
+    ConstantEfficiencyFilter,
+    FilterSeries,
+    ParticleFilter,
+)
 from noodl.apps.building_physics.prj import (
     _PATH_FIELDS,
     PrescribedTemperatureDensity,
@@ -26,11 +31,9 @@ from noodl.elements import Damper, FanCurve, FixedFlow, Scaled, UpstreamDensityP
 DATA = Path(__file__).resolve().parents[2] / "data" / "contam"
 THREE = DATA / "valThreeZonesWthCtm-UseApi.prj"
 MIXED = DATA / "doorway_damper_fan.prj"
-# NIST's own one-zone stack demo. The ContamX parity comparison uses the unfiltered
-# `test_OneZoneWthCtmStack-UseApi.prj` instead, because this one attaches
-# a constant-efficiency filter to path 1; it stays in the fixture set as the project that
-# pins the refusal.
+# NIST's own one-zone stack demo with a constant-efficiency filter on path 1.
 SS_STACK = DATA / "test_OneZoneSsStack-UseApi.prj"
+FILTERS = DATA / "filters_three_zone.prj"
 F64 = torch.float64
 
 
@@ -307,25 +310,8 @@ def test_wind_profiles_keep_their_curve_fit_and_a_trigonometric_one_is_refused(t
         read_prj(_variant(text, "2 13 2 S&C_2_Long", "2 13 7 S&C_2_Long", tmp_path))
 
 
-def test_the_filtered_one_zone_stack_project_is_refused_naming_the_filter():
-    """The filter refusal, on NIST's own file rather than on a hand-edited variant.
-
-    A filter is invisible to the airflow solve but not to the species layer, so loading this
-    project would silently drop a 10% sarin sink on path 1 and return contaminant results
-    that are wrong with nothing saying so. This is also the only test that references this
-    fixture at all; without it the file sat in `tests/data/contam/` unused.
-    """
-    with pytest.raises(ValueError, match=r"path 1.*filter 1"):
-        read_prj(SS_STACK)
-
-
 def test_unsupported_records_raise_naming_the_offender(tmp_path):
     text = THREE.read_text()
-    path2 = "   2    0   1   2   3   0   0   0   0   0   1"
-    with pytest.raises(ValueError, match=r"path 2.*filter"):
-        read_prj(
-            _variant(text, path2, "   2    0   1   2   3   1   0   0   0   0   1", tmp_path)
-        )
     zone1 = "   1  3   0   0   0   1   0.000   300 293.15 0 one -1 0 2 0 0 0 0 0"
     with pytest.raises(ValueError, match=r"zone 1.*1-D"):
         read_prj(
@@ -967,3 +953,63 @@ def test_a_reaction_pair_given_twice_is_refused_by_name(tmp_path):
     with pytest.raises(ValueError,
                        match=r"kinetic reaction 1 \('fast'\).*'sarin'.*'sarin'.*twice"):
         read_prj(out)
+
+
+def _transmission_of(p, layer, path_nr):
+    path = next(q for q in p.paths if q.nr == path_nr)
+    return layer.transmission[:, path.edge_columns[0]]
+
+
+def test_the_filtered_one_zone_stack_project_loads_its_filter():
+    p = read_prj(SS_STACK)
+    assert [q.filter_nr for q in p.paths] == [1, 0]
+    (flt,) = set(p.edge_filters.values())
+    assert isinstance(flt, ConstantEfficiencyFilter)
+    model, _, _ = project_to_model(p)
+    layer = model.transport["species"]
+    torch.testing.assert_close(_transmission_of(p, layer, 1), torch.tensor([0.9], dtype=F64))
+    torch.testing.assert_close(_transmission_of(p, layer, 2), torch.tensor([1.0], dtype=F64))
+
+
+def test_three_filters_become_the_species_layers_transmission():
+    p = read_prj(FILTERS)
+    by_path = {q.nr: q.filter_nr for q in p.paths}
+    assert by_path == {1: 1, 2: 3, 3: 2, 4: 0}
+    kinds = {type(f) for f in p.edge_filters.values()}
+    assert kinds == {ConstantEfficiencyFilter, FilterSeries, ParticleFilter}
+    layer = project_to_model(p)[0].transport["species"]
+    expected = {1: [0.7, 1.0], 2: [0.7, 0.35], 3: [1.0, 0.35], 4: [1.0, 1.0]}
+    for nr, values in expected.items():
+        torch.testing.assert_close(_transmission_of(p, layer, nr),
+                                   torch.tensor(values, dtype=F64), rtol=1e-14, atol=1e-15)
+
+
+def test_an_unreferenced_filter_element_is_read_and_unused():
+    p = read_prj(MIXED)                     # one cef element and filter, on no path
+    assert p.edge_filters == {}
+    assert project_to_model(p)[0].transport["species"].transmission.eq(1.0).all()
+
+
+def test_gaseous_and_uvgi_filter_elements_are_refused(tmp_path):
+    text = SS_STACK.read_text()
+    with pytest.raises(ValueError, match=r"filter element 1.*'gf0'.*loading"):
+        read_prj(_variant(text, "1 cef 1 0.1 100 0 0 filt", "1 gf0 1 0.1 100 0 0 filt",
+                          tmp_path))
+    with pytest.raises(ValueError, match=r"filter element 1.*'uv1'.*UVGI"):
+        read_prj(_variant(text, "1 cef 1 0.1 100 0 0 filt", "1 uv1 1 0.1 100 0 0 filt",
+                          tmp_path))
+
+
+def test_a_particle_filter_element_without_flat_ends_is_refused_by_number(tmp_path):
+    text = FILTERS.read_text()
+    with pytest.raises(ValueError, match=r"filter element 2.*first two and the last two"):
+        read_prj(_variant(text, "  3e-07 0.1\n", "  3e-07 0.05\n", tmp_path))
+
+
+def test_filters_naming_what_the_project_lacks_are_refused(tmp_path):
+    text = FILTERS.read_text()
+    with pytest.raises(KeyError, match=r"filter element 1.*\['ozone'\]"):
+        read_prj(_variant(text, "  sarin 0.3\n", "  ozone 0.3\n", tmp_path))
+    with pytest.raises(KeyError, match=r"path 2.*filter 1"):
+        read_prj(_variant(THREE.read_text(), "   2    0   1   2   3   0   0",
+                          "   2    0   1   2   3   1   0", tmp_path))

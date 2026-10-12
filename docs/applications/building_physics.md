@@ -337,7 +337,10 @@ removes by particle size, interpolating its curve at each species' mean diameter
 ContamX does (a cubic spline in log-diameter, flat at both ends; a gas passes);
 `FilterSeries(stages)` chains filters. `filter_transmission(net, flow_kinds, species,
 {edge: filter})` gives the species layer's `transmission` (1 − efficiency per edge and
-species).
+species). `read_prj` reads a project's constant-efficiency, particle and super filters and
+the filter on each path (`Project.edge_filters`), and `project_to_model` builds the
+`transmission` from them; gaseous filters whose efficiency depends on their loading, and UVGI
+filters, are refused by name.
 
 ```python
 from noodl.apps.building_physics import (
@@ -601,6 +604,8 @@ above 0.1 % of the largest.
 | Scheduled stack project over two days, across midnight | rel 64 $u$, floor 64 $u$ × max | **7.8e-8** flow, **1.9e-7** mf |
 | Scheduled three-zone project (fan, source, zone temperature, window, weather, ambient file), 24 h | rel 64 $u$, floor 64 $u$ × max | **1.6e-8 kg/s** flow (the floor governs: 2 % of 64 $u$ × max; 3.6e-5 relative on path 4 at its flow reversal), **1.4e-7** mf |
 | Three-zone project with kinetic reactions in two zones, 24 steps | flow rel 16 $u$, mf rel 80 $u$, floor 64 $u$ × each species' max | **9.1e-8** flow, **2.6e-7** mf |
+| One-zone stack with a filtered path, steady, Ta = 273.15 / 313.15 K | rel stack budget + 3 $u$ (20.2 / 21.2 $u$) | **6.6e-8 / 5.6e-8** |
+| Three-zone project with constant-efficiency, particle and series filters, 24 steps | flow rel 16 $u$, mf rel 72 $u$, floor 64 $u$ × each species' max | **9.1e-8** flow, **3.7e-7** mf |
 
 The stack rows rely on two density effects matching ContamX's. Orifice coefficients are
 corrected for the density of the air entering the path (freezing them at reference density

@@ -26,14 +26,10 @@ from noodl.apps.building_physics.prj import project_to_model, read_prj, steady
 
 DATA = Path(__file__).resolve().parents[1] / "data" / "contam"
 THREE = DATA / "valThreeZonesWthCtm-UseApi.prj"
-# NOT NIST's `test_OneZoneSsStack-UseApi.prj`. That project attaches a
-# constant-efficiency filter (`f# = 1`) removing 10% of sarin on path 1, which the `.prj`
-# reader refuses -- a filter is invisible to airflow but not to the species layer, so
-# loading it would silently corrupt contaminant results. `test_OneZoneWthCtmStack-UseApi`
-# below is the same one-zone stack geometry from the same demo set with no filter on any
-# path. That the filtered project is genuinely REFUSED, rather than merely unused, is
-# asserted by `tests/apps/building_physics/test_prj.py::
-# test_the_filtered_one_zone_stack_project_is_refused_naming_the_filter`.
+# The one-zone stack geometry with no filter on any path. NIST's
+# `test_OneZoneSsStack-UseApi.prj`, which attaches a constant-efficiency filter (`f# = 1`)
+# removing 10% of sarin on path 1, is a parity fixture of its own
+# (`test_a_filtered_path_matches_contamx` below).
 STACK = DATA / "test_OneZoneWthCtmStack-UseApi.prj"
 MIXED = DATA / "doorway_damper_fan.prj"
 # The stack project's own ambient is 293.15 K, exactly its zone temperature, so under its
@@ -555,3 +551,51 @@ def test_kinetic_reactions_match_contamx(contamx, tmp_path, record_property):
     _project_parity(REACTION, tmp_path, rtol_flow=16 * F32_U, rtol_mf=80 * F32_U,
                     record_property=record_property, species_floor=True,
                     label="Three-zone project with kinetic reactions in two zones, 24 steps")
+
+
+SS_STACK = DATA / "test_OneZoneSsStack-UseApi.prj"
+SS_STACK_AMBIENT_MF = 1e-3
+FILTERS = DATA / "filters_three_zone.prj"
+
+
+@pytest.mark.external
+@pytest.mark.parametrize("Ta", (273.15, 313.15))
+def test_a_filtered_path_matches_contamx(contamx, Ta, record_property):
+    """NIST's `test_OneZoneSsStack-UseApi.prj`: steady airflow and contaminants, a 1e-4 kg/s
+    sarin source, and a filter removing 10 % of the sarin crossing path 1 (the low opening,
+    declared ambient -> zone), with 1e-3 kg/kg sarin outside. At 273.15 K the air enters
+    through the filter; at 313.15 K it leaves through it and enters through path 2.
+
+    Budget: x = ((1 - eta) F x_amb + G) / F. A relative roundoff reaches x through F (the
+    stack budget at this ambient, `_stack_budget(Ta)`), through x_amb and G (1 u each) and
+    through 1 - eta (u eta / (1 - eta) = 0.11 u): `_stack_budget(Ta) + 3 u`."""
+    from noodl.apps.building_physics.contamx import run_steady
+
+    p = read_prj(SS_STACK)
+    amb = dict(p.ambient_conditions, Ta=Ta, mf={0: SS_STACK_AMBIENT_MF})
+    ref = run_steady(SS_STACK, ambient=amb, airflow_convergence=TIGHT_AIRFLOW)
+    model, state, drivers = project_to_model(p, ambient=amb)
+    drivers["species.x_boundary"] = torch.tensor([[SS_STACK_AMBIENT_MF]], dtype=F64)
+    ours = steady(model, state, drivers, atol=NOODL_ATOL)["species.x"]
+    tol = _stack_budget(Ta) + 3 * F32_U
+    torch.testing.assert_close(ours, ref["mf"], rtol=tol, atol=0)
+    record_property("check", f"One-zone stack with a filtered path, steady, Ta = {Ta} K")
+    record_property("tolerance", f"rel {tol:.2e}")
+    record_property("measured_rel", ((ours - ref["mf"]) / ref["mf"]).abs().max().item())
+
+
+@pytest.mark.external
+def test_three_filters_match_contamx(contamx, tmp_path, record_property):
+    """`filters_three_zone.prj`: sarin and 2 um particles entering a wind-driven three-zone
+    building through a constant-efficiency filter, a particle filter crossed against its
+    path's direction, and both in series; 24 steps of 300 s.
+
+    Budget: the three-zone transient's 64 u, plus each pass fraction 1 - eta, which a
+    roundoff in eta reaches as u eta / (1 - eta): 0.43 u (0.3), 1.9 u (0.65, a point of the
+    particle curve), 2.3 u (both); along the chain to zone three at most 4.6 u, and 1 u for
+    each ambient value: 72 u. The absolute floor is per species (64 u times the species'
+    own largest mass fraction)."""
+    _project_parity(FILTERS, tmp_path, rtol_flow=16 * F32_U, rtol_mf=72 * F32_U,
+                    record_property=record_property, species_floor=True,
+                    label="Three-zone project with constant-efficiency, particle and "
+                          "series filters, 24 steps")

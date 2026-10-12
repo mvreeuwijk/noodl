@@ -30,10 +30,15 @@ family
 (`plr_orfc/leak1/leak2/leak3/crack/fcn/test1/test2/conn/stair/shaft/qcn`), the quadratic family
 (`qfr_*`), doorways (`dor_door`, `dor_pl2`), dampers (`plr_bdq`, `plr_bdf`), constant-flow fans
 (`fan_cmf`, `fan_cvf`) and the cubic fan curve (`fan_fan`); source elements `ccf`, `cut`, `eds`,
-`brs`.
+`brs`; filters on airflow paths (`Project.edge_filters`, the species layer's `transmission`):
+constant-efficiency (`cef`), particle (`pf0`, interpolated at each species' mean diameter as
+ContamX does) and super (`spf`) filter elements; a filter acts on the air crossing its path in
+either direction.
 
-**Refused by name**, rather than silently dropped: control nodes, filters and air-handling
-systems referenced by nonzero index; non-trace species; a contaminant list that is not the
+**Refused by name**, rather than silently dropped: control nodes and air-handling
+systems referenced by nonzero index; gaseous (`gf0`) and UVGI (`uv1`) filter elements,
+referenced or not; a filter that names a species the project does not simulate, and a path
+whose filter number the file does not define; non-trace species; a contaminant list that is not the
 simulated species in file order; a source or kinetic reaction that names a species the project
 does not simulate (a species the file defines but marks as not simulated included), a kinetic
 reaction that gives one product-reactant pair twice, and a zone whose kinetic reaction number the
@@ -47,10 +52,6 @@ zones and paths; duct networks; a constant wind pressure on an interior path; a 
 path with `mult != 1`; `csf_*` and `sup_afe` elements; `stackD = 1` (densities varying with
 height inside a zone); a wind pressure profile with the trigonometric curve fit; a day schedule whose shape is
 neither rectangular nor trapezoidal; zone names with spaces.
-
-A **filter** is refused emphatically, because a filter is invisible to airflow but *not* to the
-species layer — loading one would silently corrupt contaminant results while the airflow looked
-perfect.
 
 Control nodes that no zone and no path references are silently skipped rather than refused: NIST's
 own sample projects carry dozens of unreferenced sensor and logger nodes, and those projects must
