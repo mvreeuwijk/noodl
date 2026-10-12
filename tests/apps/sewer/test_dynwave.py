@@ -22,9 +22,13 @@ DATA = Path(__file__).resolve().parents[2] / "data" / "sewer"
 
 
 def _tree(tmp_path, scale=1.0):
+    """The kinematic tree routed by dynamic wave, converged tightly as the dynwave fixtures
+    are (HEAD_TOLERANCE 1e-12 m, 2000 trials: the iteration's defaults follow the file)."""
     text = (DATA / "tree_kinwave.inp").read_text()
     text = text.replace("FLOW_ROUTING         KINWAVE", "FLOW_ROUTING         DYNWAVE")
     text = text.replace("VARIABLE_STEP        0.75", "VARIABLE_STEP        0")
+    text = text.replace("MAX_TRIALS           8", "MAX_TRIALS           2000")
+    text = text.replace("HEAD_TOLERANCE       0.0015", "HEAD_TOLERANCE       1e-12")
     path = tmp_path / "tree_dyn.inp"
     path.write_text(text)
     net, _, _ = read_swmm_inp(path)
@@ -127,10 +131,11 @@ def test_a_junction_on_its_bed_converges_at_the_default_min_surface_area():
 def test_default_pass_budget_covers_a_slow_outfall_head():
     """The loop fixture's outfall head contracts by ~0.92 per pass at low flow and needs 327
     passes at t = 500 s (tests/verification/test_sewer_dynwave_parity.py); the default
-    budget must cover that, so a plain build_model + simulate_dynamic_wave does not fail."""
+    budget, the file's MAX_TRIALS 500, covers that, so a plain build_model +
+    simulate_dynamic_wave does not run out of passes there."""
     net, _, _ = read_swmm_inp(DATA / "loop_dynwave.inp")
     model, _, _ = build_model(net)
-    assert model.iterate_max == 2000
+    assert model.iterate_max == 500
 
 
 def test_build_model_dispatches_and_refuses_storage(tmp_path):
@@ -913,7 +918,8 @@ def test_flood_releases_when_inflow_stops():
     thereafter, it passes back down through its crown and drains, and no step chatters
     (at most 30 passes). (Stopping EVERY inflow drains the tree onto C5's normal-flow
     slope switch: `test_inflow_stop_converges`.)"""
-    model, state, drivers = build_model(_flooding_tree())
+    # the pass budget below was measured at a 1e-11 m head tolerance (the file's is 1e-12)
+    model, state, drivers = build_model(_flooding_tree(), iterate_tol=1e-11)
     hyd = model.dynamic_wave
     j2 = hyd.junction_names.index("J2")
     node = int(model.junction_idx[j2])
@@ -1067,21 +1073,58 @@ def test_inflow_stop_converges():
     assert set(sides[104:]) == {0}, sides
 
 
-def test_a_heads_only_convergence_test_is_refused():
-    """`iterate_flow_tol=None` (the heads judged alone) is refused by name by
-    `build_dynamic_wave_model` (`build_model` exposes no flow tolerance and always passes
-    the builder's default): on the normal-flow slope switch the heads bound the flows'
-    residual only through the wall slope over the junction's grounding, and a heads-only
-    plain run was measured stopping 2.9e-5 m3/s short of the fixed point (the tree's
-    drain-down, step 105). Plain relaxation with a flow tolerance stays allowed."""
-    from noodl.apps.sewer.dynwave import build_dynamic_wave_model
+def test_iteration_controls_follow_the_file():
+    """`build_dynamic_wave_model`'s iteration controls follow [OPTIONS]
+    (`iterate_tolerances`): HEAD_TOLERANCE is the head tolerance, MAX_TRIALS the pass limit
+    (a step that uses it up is accepted, as SWMM's), and the flow tolerance is the flow
+    residual that moves the smallest junction's head by the head tolerance over a routing
+    step, ``2 A_min tol / dt``, floored at `FLOW_TOL_FLOOR`. SWMM's own defaults (0.005 ft,
+    8) where the file sets none; an explicit argument wins, and an explicit `iterate_max`
+    keeps the refusal of a step that does not converge. The heads are never judged alone:
+    on the normal-flow slope switch they bound the flows' residual only through the wall
+    slope over the junction's grounding (a heads-only plain run was measured stopping
+    2.9e-5 m3/s short of the fixed point on the tree's drain-down)."""
+    from noodl.apps.sewer.dynwave import (
+        DEFAULT_HEAD_TOLERANCE,
+        FLOW_TOL_FLOOR,
+        build_dynamic_wave_model,
+        iterate_tolerances,
+    )
 
-    net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
-    with pytest.raises(ValueError, match=r"iterate_flow_tol \(m3/s\) is required"):
-        build_dynamic_wave_model(net, acceleration=None, iterate_flow_tol=None)
+    net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")   # HEAD_TOLERANCE 1e-12, 500 trials
     model = build_dynamic_wave_model(net, acceleration=None)[0]
-    assert model.iterate_acceleration is None and model.iterate_flow_tol == {"water": 1e-10}
-    assert build_model(net)[0].iterate_flow_tol == {"water": 1e-10}
+    assert model.iterate_tol == {"water": 1e-12} and model.iterate_max == 500
+    assert model.iterate_flow_tol == {"water": FLOW_TOL_FLOOR}
+    assert model.iterate_on_limit == "accept" and model.iterate_acceleration is None
+    assert build_model(net)[0].iterate_flow_tol == {"water": FLOW_TOL_FLOOR}
+    explicit = build_model(net, iterate_tol=1e-11, iterate_max=2000, iterate_flow_tol=3e-9)[0]
+    assert explicit.iterate_tol == {"water": 1e-11} and explicit.iterate_max == 2000
+    assert explicit.iterate_flow_tol == {"water": 3e-9}
+    assert explicit.iterate_on_limit == "raise"
+    swmm = dataclasses.replace(net.dynamic_wave, head_tolerance=None, max_trials=None)
+    controls = iterate_tolerances(swmm)
+    assert DEFAULT_HEAD_TOLERANCE == pytest.approx(0.005 * 0.3048, rel=1e-15)
+    assert controls["iterate_tol"] == DEFAULT_HEAD_TOLERANCE
+    assert controls["iterate_max"] == 8 and controls["on_limit"] == "accept"
+    a_min = 12.566 * QCF / LCF                                  # MIN_SURFAREA, m2
+    assert controls["iterate_flow_tol"] == pytest.approx(
+        2.0 * a_min * DEFAULT_HEAD_TOLERANCE / 5.0, rel=1e-12)
+
+
+def test_a_step_that_uses_up_the_files_trials_is_accepted():
+    """As SWMM (`dynwave.c::dynwave_execute`), a step that uses up MAX_TRIALS is taken with
+    its last pass and counted (`simulate_dynamic_wave`'s ``"converged"``); with an explicit
+    `iterate_max` it is refused by name, as before."""
+    net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
+    net = dataclasses.replace(net, dynamic_wave=dataclasses.replace(net.dynamic_wave,
+                                                                    max_trials=2))
+    model, state, drivers = build_model(net)
+    _, out = simulate_dynamic_wave(model, state, drivers, steps=6)
+    assert out["converged"].dtype == torch.bool and out["converged"].shape == (6,)
+    assert not bool(out["converged"].all())
+    model, state, drivers = build_model(net, iterate_max=2)
+    with pytest.raises(RuntimeError, match="did not converge within 2 passes"):
+        simulate_dynamic_wave(model, state, drivers, steps=6)
 
 
 def test_gradient_on_the_slope_switch_does_not_depend_on_the_wall_slope(monkeypatch):
@@ -1117,7 +1160,8 @@ def test_gradient_on_the_slope_switch_does_not_depend_on_the_wall_slope(monkeypa
     grads = []
     for scale in (1.0, 0.2, 5.0):
         monkeypatch.setattr(DynamicWaveHydraulics, "_switch_slope",
-                            lambda self, *a, scale=scale: scale * original(self, *a))
+                            lambda self, *a, scale=scale: (scale * original(self, *a)[0],
+                                                           original(self, *a)[1]))
         n = torch.tensor(0.013, dtype=F64, requires_grad=True)
         loss(n).backward()
         grads.append(n.grad.item())
@@ -1388,7 +1432,8 @@ def _chain_net(*, barrels=1, max_flow=None, initial_flow=0.0, flap=False, flap_r
         routing="dynamic_wave", geometry="tabulated",
         dynamic_wave=DynamicWaveOptions(
             routing_step=routing_step, variable_step=variable_step,
-            lengthening_step=lengthening_step, min_surface_area=min_surface_area))
+            lengthening_step=lengthening_step, min_surface_area=min_surface_area,
+            head_tolerance=1e-12, max_trials=2000))
 
 
 def test_two_barrels_carry_twice_one_barrels_flow_at_equal_heads():
@@ -2042,7 +2087,8 @@ def _regulated(kind="orifice", *, storage_at=None, outfall_kind="free", stage=No
         outfalls=(Outfall("Out", 9.5 if v == "J3" else 10.0, kind=outfall_kind,
                           stage=stage),),
         routing="dynamic_wave", geometry="tabulated",
-        dynamic_wave=DynamicWaveOptions(routing_step=5.0),
+        dynamic_wave=DynamicWaveOptions(routing_step=5.0, head_tolerance=1e-12,
+                                        max_trials=2000),
         orifices=orifices, weirs=weirs, outlets=outlets)
 
 

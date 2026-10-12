@@ -22,8 +22,9 @@ so are the options and fields listed below.
 (`NO` or `NONE`, `PARTIAL`, `FULL`), `NORMAL_FLOW_LIMITED` (`SLOPE`, `FROUDE`, `BOTH`, `NO`, `NONE` or
 `NEITHER`), `SURCHARGE_METHOD` (`EXTRAN` or `SLOT`), `MIN_SURFAREA` (m²), `HEAD_TOLERANCE`,
 `MAX_TRIALS`, `MIN_SLOPE` (percent, as in SWMM) and `LENGTHENING_STEP` (seconds or `HH:MM:SS`) into
-`DynamicWaveOptions`; `HEAD_TOLERANCE` and `MAX_TRIALS` are SWMM's own iteration controls,
-recorded but not used. Any other `[OPTIONS]` key is not read; the options above are read only
+`DynamicWaveOptions`; `HEAD_TOLERANCE` (in the file's length unit) and `MAX_TRIALS` are SWMM's
+own iteration controls and the defaults of noodl's (see
+[Iteration and convergence](../applications/sewer.md#iteration-and-convergence)). Any other `[OPTIONS]` key is not read; the options above are read only
 under `DYNWAVE`, and an unrecognised value of a keyword option is refused with the line number. As SWMM does,
 the reader lowers `ROUTING_STEP` to `WET_STEP` when it is larger (a file that omits
 `VARIABLE_STEP` runs the 0.75 variable step, so give `duration=` rather than `dt=` to

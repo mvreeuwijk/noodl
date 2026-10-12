@@ -139,8 +139,10 @@ model, state, drivers = build_model(
 a prescribed extraction (m³/s, positive out).
 
 `build_model` dispatches on `net.routing`. A `"dynamic_wave"` network is built by
-`build_dynamic_wave_model`, with `iterate_tol` (m, default 1e-11) and
-`iterate_max` (default 2000 passes) controlling the head iteration. For it, `air`, `quality`
+`build_dynamic_wave_model`, with `iterate_tol` (m), `iterate_flow_tol` (m³/s) and
+`iterate_max` (passes) controlling the iteration; left out, they follow the file's
+`HEAD_TOLERANCE` and `MAX_TRIALS` (see [Iteration and convergence](#iteration-and-convergence)).
+For it, `air`, `quality`
 and `storage` default to `False`; `quality=True` adds the water-quality layer of `species`
 (see [Quality on the dynamic wave](#quality-on-the-dynamic-wave)); `air=True` builds the
 headspace air on the solved conduits (see
@@ -148,10 +150,10 @@ headspace air on the solved conduits (see
 `f_i`, `c_s`, `leak_area`, `leak_cd` and `fans` as above; `storage=True`, a non-default
 `coupling` or `dt_storage` (kinematic-wave options: the dynamic wave always iterates its passes
 on its routing step) and a `geometry="analytic"` network (it always routes on SWMM's tabulated
-circle) are refused, naming the option; `iterate_tol` and
+circle) are refused, naming the option; `iterate_tol`, `iterate_flow_tol` and
 `iterate_max` are refused for the other routings. Run it with `simulate_dynamic_wave` (see
 [Dynamic wave](#dynamic-wave)), not `sewer_steady`. To tune the iteration itself
-(`relaxation`, `acceleration`, `memory`, `iterate_flow_tol`), call
+(`relaxation`, `acceleration`, `memory`), call
 `build_dynamic_wave_model(net, ...)` from `noodl.apps.sewer` directly; it takes the same
 dynamic-wave arguments as `build_model`.
 
@@ -306,13 +308,14 @@ a stage that varies in time (see "Tidal and time-series outfalls").
 
 For frozen coefficients the conduit and junction equations are linear in the heads apart from
 the min-clamps, so one pass is a single `PotentialFlowLayer` solve. The model then refreshes the
-coefficients and repeats until the heads change by less than `iterate_tol` (m, default 1e-11)
-or `iterate_max` passes (default 2000) are used (`Model(coupling="iterate")`, converging on the
-layer's own interior head). The result is the head and flow field at which a SWMM trial
-reproduces its own input.
+coefficients and repeats until the heads change by less than `iterate_tol` (m) and the flows
+by less than `iterate_flow_tol` (m³/s), or `iterate_max` passes are used
+(`Model(coupling="iterate")`, converging on the layer's own interior head; the defaults follow
+the file, see [Iteration and convergence](#iteration-and-convergence)). The result is the head
+and flow field at which a SWMM trial reproduces its own input.
 
 The passes are Anderson-accelerated by default (`noodl.apps.sewer.build_dynamic_wave_model(net,
-acceleration="anderson", memory=5, iterate_flow_tol=1e-10)`; `Model`'s `iterate_acceleration`,
+acceleration="anderson", memory=5)`; `Model`'s `iterate_acceleration`,
 see [Layers and models](../concepts/layers.md)). Each pass's flows must then also reproduce the
 flows it was fed to within `iterate_flow_tol` (m³/s): the head solve stops on its warm start once
 every junction balance is within its `atol` (`solve_atol`), so near convergence the heads stand
@@ -324,19 +327,63 @@ solve (`atol=1e-12`) they agree to 2e-12 m; at the default `solve_atol` each lan
 solve's own resolution, `atol dt / (2 A_s)` (a few 1e-9 m). The mixing keeps to the fixed points
 plain relaxation (and SWMM's relaxed trials) can reach: a flat, near-dry conduit's flow can have
 a second, repelling fixed point, and a mixed step heading for it is replaced by the relaxed step.
-`acceleration=None` is plain relaxation. A flow tolerance is required either way:
-`iterate_flow_tol=None` (the heads judged alone) is refused by name, because on
-the normal-flow slope switch (below) the heads bound the flows' residual only weakly, and a
-heads-only test was measured stopping 3e-5 m³/s short of the fixed point.
+`acceleration=None` is plain relaxation. The flows are judged either way, never the heads
+alone, because on the normal-flow slope switch (below) the heads bound the flows' residual only
+weakly, and a heads-only test was measured stopping 3e-5 m³/s short of the fixed point.
 
 **SWMM's iteration artefacts are not modelled**: trial relaxation, the 0.001 cfs flow-reversal
-rule, link bypassing, `MAX_TRIALS` and `HEAD_TOLERANCE`. Each is a device for reaching the fixed
-point and none moves it. The reader records `HEAD_TOLERANCE` and `MAX_TRIALS` in
-`DynamicWaveOptions`, but noodl does not use them. This has a visible consequence. SWMM stops a
-step when two successive relaxed trials differ by less than `HEAD_TOLERANCE`, which at SWMM's
-defaults (0.0015 m, 8 trials) leaves its answer short of its own fixed point (see
-[Verification](#verification)). SWMM still reports 0 % of steps not converging, because its
-criterion is the change between trials, not the distance to the fixed point.
+rule and link bypassing. Each is a device for reaching the fixed point and none moves it.
+
+#### Iteration and convergence
+
+`HEAD_TOLERANCE` and `MAX_TRIALS` are read into `DynamicWaveOptions` and are the defaults of
+the iteration (`noodl.apps.sewer.dynwave.iterate_tolerances`); an explicit `iterate_tol`,
+`iterate_flow_tol` or `iterate_max` overrides each:
+
+| control | default | SWMM |
+|---|---|---|
+| `iterate_tol` (m) | `HEAD_TOLERANCE` (the file's length unit), else 0.005 ft = 0.001524 m | the same test: every node's depth change between trials (`dynwave.c::findNodeDepths`) |
+| `iterate_flow_tol` (m³/s) | $2 A_{\min} \epsilon_H / \Delta t$ ($\epsilon_H$ = `iterate_tol`), at least 1e-10 | none: SWMM judges the heads alone |
+| `iterate_max` (passes) | `MAX_TRIALS`, else 8 (at least 2) | the same limit |
+
+The flow tolerance is the flow residual that matches the head tolerance: a flow error $dQ$
+moves a junction's next depth by $\Delta t\, dQ / (2 A_s)$ (the trapezoid), so at the
+surface-area floor $A_{\min}$ (`MIN_SURFAREA`, 12.566 ft² by default) and the routing step
+$\Delta t$ it is a move of exactly `iterate_tol`, and less at every larger junction. At SWMM's
+defaults on a 5 s step that is 7.1e-4 m³/s.
+
+A step that uses up the file's trials is **accepted**, as SWMM accepts it (it counts it as "not
+converging", `NonConvergeCount`): the step is taken with its last pass, its diagnostics say
+`converged` False, and `simulate_dynamic_wave` returns `out["converged"]` per step, so
+`(~out["converged"]).sum()` is SWMM's count. With an explicit `iterate_max` such a step is
+refused by name, as before, and a step that has to be differentiated is always refused when it
+does not converge (there is no fixed point to differentiate).
+
+Measured at SWMM's defaults (the fixtures with `HEAD_TOLERANCE` and `MAX_TRIALS` removed, 30
+min), against SWMM 5.2.4's own 2.02 trials per step on the tree:
+
+| network | passes per step | steps at the limit | worst depth against the tight fixed point (m) | SWMM at its defaults, same measure (m) |
+|---|---|---|---|---|
+| tree | 2.06 | 1 / 360 | 1.6e-3 | 2.3e-3 |
+| backwater | 2.22 | 1 / 360 | 6.9e-3 | 1.3e-2 |
+| loop | 2.01 | 0 / 360 | 7.0e-4 | 3.6e-3 |
+| structures | 2.39 | 0 / 360 | 4.4e-4 | 5.9e-3 |
+| storage | 2.06 | 1 / 360 | 1.0e-3 | 2.3e-3 |
+
+So noodl at SWMM's tolerances is at least as close to the converged answer as SWMM is, in about
+SWMM's number of trials. A judgement on the flows at 1e-4 m³/s instead takes 2.54 passes on the
+tree for a 7.8e-5 m answer; the parity tests pass their own tight tolerances (1e-13 m, 2000
+passes) and the fixtures set `HEAD_TOLERANCE` 1e-12 and `MAX_TRIALS` 500.
+
+**Speed.** One pass costs a nearly fixed few thousand small tensor operations, whatever the
+network's size: 10-15 ms on the 6-node tree, from 37 ms, and 38 ms on a 2,047-conduit tree,
+from 55 ms (`benchmarks/sewer_dynwave_speed.py`, which also times SWMM). With SWMM's own
+tolerances the tree's 30 minutes take 11.5 s (123 s before), about 850 times SWMM; the
+2,047-conduit tree is about 40 times SWMM. Most of it is the conduit update (`dynwave_terms.conduit_terms`), SWMM's
+normal and critical depths, and the head solve, whose Newton Jacobian is the elements' own
+analytic `dflow` on the primal passes (`PotentialFlowLayer(analytic_primal=True)`; the implicit
+adjoint still differentiates the converged pass). A batch of B scenarios (`simulate_dynamic_wave`
+with a `(B, n)` inflow) costs about the same per pass, so an ensemble amortises it.
 
 #### Units
 
@@ -822,9 +869,10 @@ each is confined to the cases named.
 - **Water-quality transients.** noodl's reactors are the junctions' control volumes and SWMM's
   the conduits, so in transit the tracer arrives shifted by the difference of the mean delays;
   steady concentrations agree (see [Quality on the dynamic wave](#quality-on-the-dynamic-wave)).
-- **Iteration artefacts.** `HEAD_TOLERANCE`, `MAX_TRIALS`, trial relaxation, link bypassing and
-  the 0.001 cfs reversal rule are not modelled, and SWMM at its default tolerance is off its own
-  fixed point by centimetres (see [What is solved](#what-is-solved)).
+- **Iteration artefacts.** Trial relaxation, link bypassing and the 0.001 cfs reversal rule are
+  not modelled; `HEAD_TOLERANCE` and `MAX_TRIALS` are the iteration's defaults, with a flow
+  tolerance SWMM does not have (see [Iteration and convergence](#iteration-and-convergence)).
+  SWMM at its default tolerance is off its own fixed point by centimetres on a backwater.
 - **Refused where SWMM accepts.** A `FUNCTIONAL` storage exponent below 0 (infinite area at zero
   depth), a negative storage `MaxDepth`, `InitDepth` or `SurDepth`, a nonzero pollutant
   `Cinit`, and the sections listed under [Limitations](#limitations).
