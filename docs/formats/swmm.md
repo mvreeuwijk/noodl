@@ -5,17 +5,117 @@ lexical tokenizer (`noodl.apps.inpfile`) with the EPANET reader; each format's o
 column layouts and units are read by `apps/sewer/inp.py`.
 
 **Read:** `[TITLE]`, `[OPTIONS]`, `[JUNCTIONS]`, `[OUTFALLS]`, `[CONDUITS]`, `[XSECTIONS]`,
-`[INFLOWS]`, `[POLLUTANTS]`.
+`[LOSSES]` (the flap gate only), `[INFLOWS]`, `[POLLUTANTS]`, and under `DYNWAVE`
+`[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` with the `[CURVES]` of type `STORAGE`,
+`RATING` and `TIDAL`. A `[TIMESERIES]` section is accepted only for the series that
+`TIMESERIES` outfalls name, and is not read.
+
+**Ignored** because no conduit or node ever references them: `[EVAPORATION]`, `[REPORT]`,
+`[TAGS]`, `[MAP]`, `[COORDINATES]`, `[VERTICES]`, `[POLYGONS]`, `[SYMBOLS]`, `[LABELS]`,
+`[BACKDROP]`, `[PROFILES]`, `[FILES]`. Any other section that carries content is refused, and
+so are the options and fields listed below.
+
+**Routing.** `FLOW_ROUTING` is `STEADY`, `KINWAVE` or `DYNWAVE`, read as the physical names
+`steady`, `kinematic_wave` and `dynamic_wave` (`SewerNetwork.routing`). `DYNWAVE` also reads
+`ROUTING_STEP`, `WET_STEP` (default 300 s) and `MINIMUM_STEP` (seconds or `HH:MM:SS`),
+`VARIABLE_STEP` (the Courant factor, 0 to 2; absent means SWMM's default 0.75), `INERTIAL_DAMPING`
+(`NO` or `NONE`, `PARTIAL`, `FULL`), `NORMAL_FLOW_LIMITED` (`SLOPE`, `FROUDE`, `BOTH`, `NO`, `NONE` or
+`NEITHER`), `SURCHARGE_METHOD` (`EXTRAN` or `SLOT`), `MIN_SURFAREA` (m²), `HEAD_TOLERANCE`,
+`MAX_TRIALS`, `MIN_SLOPE` (percent, as in SWMM) and `LENGTHENING_STEP` (seconds or `HH:MM:SS`) into
+`DynamicWaveOptions`; `HEAD_TOLERANCE` and `MAX_TRIALS` are SWMM's own iteration controls,
+recorded but not used. Any other `[OPTIONS]` key is not read; the options above are read only
+under `DYNWAVE`, and an unrecognised value of a keyword option is refused with the line number. As SWMM does,
+the reader lowers `ROUTING_STEP` to `WET_STEP` when it is larger (a file that omits
+`VARIABLE_STEP` runs the 0.75 variable step, so give `duration=` rather than `dt=` to
+`simulate_dynamic_wave`; `DynamicWaveOptions()` built in code defaults to the fixed step).
+
+**Dynamic wave, options refused.** With `DYNWAVE` the reader refuses, with the line number:
+`ALLOW_PONDING YES` (ponding is not modelled), a negative `LENGTHENING_STEP` or
+`MINIMUM_STEP`, and a `VARIABLE_STEP` outside 0 to 2.
+The conduit lengthening uses the file's own `ROUTING_STEP`, as SWMM validates its conduits
+before it lowers the step to `WET_STEP`.
+
+**Initial conditions and limits (dynamic wave).** The junction `InitDepth` (the fourth
+`[JUNCTIONS]` field) is `Manhole.initial_depth`; the conduit `InitFlow` and `MaxFlow` (the
+eighth and ninth `[CONDUITS]` fields) are `Pipe.initial_flow` (a total over the barrels) and
+`Pipe.max_flow` (a limit on each barrel); a conduit flap gate (`[LOSSES]` fifth field YES) is
+`Pipe.flap_gate`, and an outfall's `Gated` YES is `Outfall.flap_gate`. A conduit the reader
+reverses (adverse, as SWMM does) has its `InitFlow` negated and its gate recorded as
+reversed. The loss coefficients and the seepage rate of `[LOSSES]` must be 0 (refused with
+the line number otherwise). Under `STEADY` or `KINWAVE` a non-zero `InitDepth`, `InitFlow` or
+`MaxFlow`, a flap gate and a gated outfall are refused by name.
+
+**Junctions.** `Elevation` is the invert, `MaxDepth` sets `Manhole.ground` (invert plus
+depth) and `SurDepth` is `Manhole.surcharge_depth` (m, at least 0; 0 when absent): the depth
+a junction may pressurise above its full depth before it floods under `DYNWAVE`. `Aponded`
+is not read, since ponding is refused.
+
+**Storage units (dynamic wave).** A `[STORAGE]` line `Name Elev MaxDepth InitDepth Shape
+... [SurDepth [Fevap]]` becomes a `Manhole` with a `storage` curve (`storage_unit`): the
+invert, `ground` = invert + `MaxDepth`, `initial_depth` and `surcharge_depth`. The shapes are
+SWMM 5.2.4's: `FUNCTIONAL a1 a2 a0` (area `a1 y^a2 + a0`, m², read as `("functional", a1, a2,
+a0)`; `a0 >= 0` and `a2 >= 0`), `TABULAR Curve` (a `[CURVES]` curve of type `STORAGE`, depth in
+m against area in m², its points over any number of lines, depths strictly increasing) and the
+closed shapes `CYLINDRICAL L W -`, `CONICAL L W Z`, `PARABOLOID L W H` and `PYRAMIDAL L W Z`
+(m; `Z` a side slope, run over rise). A non-zero evaporation factor `Fevap` and a non-zero
+exfiltration `Ksat` (the value after `Fevap`, or the second of suction head, `Ksat`,
+`IMDmax`; a `Ksat` of 0 is no exfiltration, as in SWMM) are refused with the line number, as
+are a `[CURVES]` curve of any other type and a curve name that is not in `[CURVES]`. A
+negative `MaxDepth`, `InitDepth` or `SurDepth` on a storage line is refused too, which goes
+beyond SWMM's own input checks for storage units. `[STORAGE]` under
+`STEADY` or `KINWAVE` is refused by name: SWMM routes a storage unit by its volume there,
+which is not modelled.
+
+**Orifices, weirs and outlets (dynamic wave).** Each becomes an `Orifice`, `Weir` or
+`Outlet` of `SewerNetwork.orifices`, `.weirs` or `.outlets`, between two nodes:
+
+- `[ORIFICES] Name N1 N2 SIDE|BOTTOM CrestHt Cd [Gated] [CloseTime]` with an `[XSECTIONS]`
+  opening `CIRCULAR` (diameter) or `RECT_CLOSED` (height, width). `CloseTime` only shapes
+  control actions, which are not read, so it is accepted and has no effect.
+- `[WEIRS] Name N1 N2 Type CrestHt Cd [Gated] [EndCon] [Cd2] [CanSurcharge]` (a `*` keeps
+  SWMM's default: no gate, no end contractions, `Cd2` 0, `CanSurcharge` YES), `Type`
+  `TRANSVERSE` or `SIDEFLOW` (opening `RECT_OPEN`: height, length), `V-NOTCH` (`TRIANGULAR`:
+  height, top width) or `TRAPEZOIDAL` (`TRAPEZOIDAL`: height, bottom width, the two side
+  slopes). `Cd` is SWMM's SI coefficient (m^0.5/s). The road width and surface fields, read
+  by SWMM for roadway weirs only, are ignored.
+- `[OUTLETS] Name N1 N2 Offset TABULAR/DEPTH|TABULAR/HEAD Curve [Gated]` or `...
+  FUNCTIONAL/DEPTH|FUNCTIONAL/HEAD C1 C2 [Gated]` (`q = C1 h^C2`, m and m3/s); the curve is a
+  `[CURVES]` curve of type `RATING` (head or depth in m against flow in m3/s, x values
+  strictly increasing). A negative offset reads as 0, as in SWMM.
+
+`CrestHt`/`Offset` is the height above the first node's invert (`crest_height`, m).
+Refused with the line number: a `ROADWAY` weir, a weir coefficient curve (the thirteenth
+field), an opening of the wrong shape (SWMM's ERR_REGULATOR_SHAPE), a regulator without an
+`[XSECTIONS]` entry, an outlet with one, a negative orifice or weir crest height (SWMM
+raises it to 0 at the inlet end only), a negative coefficient, unknown nodes and keywords,
+`[CURVES]` of a type other than `STORAGE`, `RATING` and `TIDAL`, the regulator sections under
+`STEADY` or `KINWAVE` (SWMM routes them by the inflow alone there), and regulators with
+`LINK_OFFSETS ELEVATION` (SWMM then sets each end's offset from its own node).
+
+**Outfalls.** `FREE`, `NORMAL`, `FIXED` (with its stage, m), `TIDAL` (with the name of its
+`[CURVES]` TIDAL curve, read as hours and stage elevations) and `TIMESERIES` (with the name of
+its series) are read. A `TIMESERIES` outfall takes its stage from the `outfall_stage` driver
+of `build_model` / `simulate_dynamic_wave` (time variation belongs in the drivers): the
+`[TIMESERIES]` section is accepted only for series that outfalls name, and is not read. An outfall may sit
+at the end of a conduit or of a regulator (exactly one link, SWMM's ERR_OUTFALL).
+
+**Barrels.** A conduit with more than one barrel is read under `DYNWAVE` (1 to 127; the
+flows, volumes and surface areas of the pipe are totals) and refused with the line number under
+`STEADY` and `KINWAVE`; a culvert code is refused for every routing. Both used to be ignored
+silently.
 
 **Constraints:** `FLOW_UNITS` must be `CMS` — the reader is SI-native and does not convert.
-`LINK_OFFSETS` must be `DEPTH` or `ELEVATION`. Only `CIRCULAR` cross-sections. Only constant
+`LINK_OFFSETS` must be `DEPTH` or `ELEVATION` (`DEPTH` with regulators). Only `CIRCULAR`
+conduit cross-sections (regulator openings above). Only constant
 `FLOW` baselines and constant `CONCENTRATION` pollutant baselines; a time-series inflow is
 refused, because time variation belongs in the drivers.
 
 **Refused by name**, because skipping them would silently change the physics: `[DWF]`,
-`[STORAGE]` with non-constant area, `[PUMPS]`, `[WEIRS]`, `[ORIFICES]`, `[OUTLETS]`,
-`[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[CURVES]`, `[TIMESERIES]`,
-`[LID_USAGE]`, and any other section carrying content.
+`[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` under `STEADY` or `KINWAVE`, `[PUMPS]`,
+`[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[CURVES]` of any type but
+`STORAGE`, `RATING` and `TIDAL`, `[TIMESERIES]` except the series a `TIMESERIES` outfall names,
+`[LID_USAGE]`, and any other section carrying
+content.
 
 **Geometry.** `read_swmm_inp` builds its network with `geometry="tabulated"`: SWMM 5.2's own
 tabulated circular section, lookup rules and unit constants. Depths, volumes and velocities
@@ -29,18 +129,38 @@ concentration after mixing, which is where SWMM's `qualrout.c` samples it. A ste
 therefore matches SWMM's link quality to round-off at any step (see
 [the SWMM comparison](../applications/sewer.md#verification)). In a transient, conduits fed by upstream
 conduits differ by SWMM's one-step junction lag, which is first order in the step.
+Under `DYNWAVE`, `build_model(net, quality=True)` puts the quality reactors at the junctions
+on the solved flows, where SWMM's are the conduits (see
+[Quality on the dynamic wave](../applications/sewer.md#quality-on-the-dynamic-wave)): a
+conservative pollutant matches SWMM's link quality at steady state (to 1e-8 relative on the
+tree and the loop), and in transit the two differ by their residence times. A pollutant's
+`Kdecay` is read (`pollutants[name]["decay"]`, 1/s); the model's own reactions are BOD decay
+and sulfide generation, and a tracer of any other name is conservative. A nonzero `Cinit` is refused (the model starts
+with clean water); the other pollutant fields feed only runoff, groundwater, RDII and
+dry-weather inflow, which are refused or absent.
 
 **Not supported**, which rules out most published SWMM examples as they stand:
 
 - flow units other than CMS;
 - runoff (`[SUBCATCHMENTS]` and everything that feeds them) and dry-weather patterns;
 - non-circular shapes;
-- storage units, pumps, weirs, orifices and outlets;
-- dynamic-wave routing as such. `FLOW_ROUTING` is recorded, but the application's hydraulics are
-  steady kinematic wave or level-pool manhole storage.
+- pumps, dividers, roadway weirs, weir coefficient curves and control rules (regulator
+  settings); orifices, weirs, outlets and storage units under `STEADY` or `KINWAVE`, and
+  storage evaporation or exfiltration;
+- ponding (`ALLOW_PONDING YES`) and culvert inlet control. Both `SURCHARGE_METHOD`s model
+  surcharge, and a junction floods (without ponding) above `MaxDepth` (extended to its
+  crown) plus `SurDepth`; the water that cannot enter is lost, as in SWMM without ponding.
+
+The complete list of what the dynamic wave does not support, and of what it implements without
+a live SWMM comparison, is under [Limitations](../applications/sewer.md#limitations).
 
 **Slope** follows SWMM's own definition $S_0 = dy/dx$ with $dx = \sqrt{L^2 - dy^2}$ — the 3-D
-chord, not the naive $dy/L$. Zero or adverse fall is refused, as is a fall $\ge$ length.
+chord, not the naive $dy/L$. Under `STEADY` and `KINWAVE`, zero or adverse fall is refused, as
+is a fall $\ge$ length. Under `DYNWAVE` the reader follows SWMM's `conduit_getSlope`: the fall is
+floored at SWMM's `MIN_DELTA_Z` (0.001 ft, 0.0003048 m), `MIN_SLOPE` floors the slope, and a
+conduit is reversed only when it is adverse, so a flat conduit keeps the orientation of the
+file. Conduit offsets are kept (`Pipe.inlet_offset`, `Pipe.outlet_offset`, m above the end
+node's invert) and swap with the ends on a reversal.
 
 ```python
 from noodl.apps.sewer import read_swmm_inp, build_model

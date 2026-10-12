@@ -223,6 +223,9 @@ def _constant_text(obj) -> str:
     if isinstance(obj, dict):
         return f"table of {len(obj)} entries: " + ", ".join(f"`{k}`" for k in list(obj)[:8]) + (
             ", ..." if len(obj) > 8 else "")
+    if isinstance(obj, tuple) and obj and all(isinstance(v, str) for v in obj):
+        return f"{len(obj)} names: " + ", ".join(f"`{v}`" for v in obj[:8]) + (
+            ", ..." if len(obj) > 8 else "")
     return f"`{type(obj).__name__}`"
 
 
