@@ -42,3 +42,14 @@ Two of NIST's one-zone stack projects are present:
   a constant-efficiency filter (sarin 0.3) on path 1, a particle filter (a six-point curve)
   on path 3, which the air crosses against the path's declared direction, and both in
   series on path 2. Two hours at 300 s. Verified to load and run in ContamX 3.4.1.7.
+- `sinks_three_zone.prj` is written for this repository from NIST's
+  `valThreeZonesWthCtm-UseApi.prj`, not an official sample. Zones start at 1e-4 kg/kg sarin
+  with clean outside air; zone one has a deposition velocity sink (1e-3 m/s on 10 m2,
+  multiplier 2) and a cutoff source, zone two a deposition rate sink (5e-4/s) on a schedule
+  from 00:30 and an NRCC power-law source, zone three a constant-coefficient source with a
+  removal term and an NRCC peak source. The sarin record carries a decay constant, which
+  ContamX does not apply. Two hours at 300 s. Verified to load and run in ContamX 3.4.1.7.
+- `pressure_source_stack.prj` is written for this repository from NIST's
+  `test_OneZoneWthCtmStack.prj` (it uses that sample's `.wth` and `.ctm`, which it names),
+  not an official sample. It adds a pressure-driven sarin source (2e-6 kg/(s Pa^0.65)) to
+  the zone. Verified to load and run in ContamX 3.4.1.7.

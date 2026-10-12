@@ -193,6 +193,20 @@ MU_0 = 1.81625e-5
 #                   on the path's ambient side: positive pushes air from ambient into the zone
 #                   (measured on ContamX 3.4.1.7: wPset +5 / -5 Pa on the three-zone sample's
 #                   ambient -> zone path 1 gives +0.1812 / -0.1654 kg/s through it).
+#   source/sink element `nr species type name`, a description line (may be blank), then
+#                   the data line(s) by type (TN 1887r1 Appendix A section 9):
+#     ccf           `G R u_G u_R` (kg/s; kg/s per unit mass fraction)
+#     cut           `G x_cut u_G u_C` (kg/s; kg/kg)
+#     eds           `G0 k ...` (kg/s; 1/s, the decay rate)
+#     brs           `M ...` (kg)
+#     prs           `G x u_G` (kg/(s Pa^x); -)
+#     dvs           `v_d A u_V u_A` (m/s; m2)
+#     drs           `k_d u_k` (1/s)
+#     plm           `a b t_p u_a u_tp` (kg/s; -; s); ContamX raises the time to the power
+#                   in HOURS (measured)
+#     pkm           `a b t_p u_a u_tp` (kg/s; -; s)
+#     sup           `n`, then a line of the n sub-element numbers
+#     bls, dvr      one data line each; refused when referenced
 #   source/sink     `# z# e# s# c# mult CC0 (X,Y,H)min (X,Y,H)max clr u[1] cdvf cfd`.
 # --------------------------------------------------------------------------------------
 
@@ -208,7 +222,14 @@ _QUADRATIC = {"qfr_qab", "qfr_fab", "qfr_crack", "qfr_test2"}
 _DOOR = {"dor_door", "dor_pl2"}
 _DAMPER = {"plr_bdq", "plr_bdf"}
 _FAN_CONST = {"fan_cmf", "fan_cvf"}
-_SOURCE_TYPES = {"ccf", "cut", "eds", "brs"}
+_SOURCE_TYPES = {"ccf", "cut", "eds", "brs", "prs", "dvs", "drs", "plm", "pkm"}
+_REFUSED_SOURCES = {
+    "bls": "a boundary-layer diffusion sink, which needs the adsorbent's own storage state",
+    "dvr": "deposition with resuspension, which needs the surface loading as state",
+    "sup": "a super source/sink element (several elements as one)",
+}
+# A schedule TRIGGERS these (once, at its first nonzero value); it is not a multiplier.
+_TRIGGERED_SOURCES = {"eds", "brs", "plm", "pkm"}
 _DAYS_IN_MONTH = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 _CONTAMINANT_MODES = {0: "none", 1: "steady", 2: "transient", 3: "cyclic"}
@@ -254,7 +275,7 @@ class PrjSource:
     nr: int
     zone_nr: int
     element_nr: int
-    source_type: str                 # ccf | cut | eds | brs
+    source_type: str                 # ccf | cut | eds | brs | prs | dvs | drs | plm | pkm
     params: list[float]
     mult: float
     species: int = 0                 # 0-based index of the source element's species
@@ -821,7 +842,12 @@ def _read_source_elements(
         tok = lines.record()
         nr, species_name, dtype = int(tok[0]), tok[1], tok[2]
         lines.raw()                                 # description (may be blank)
-        source_elements[nr] = (species_name, dtype, [float(v) for v in lines.record()])
+        data = [float(v) for v in lines.record()]
+        if dtype == "sup":                          # `n`, then n sub-element numbers
+            subs: list[str] = []
+            while len(subs) < int(data[0]):
+                subs += lines.record()
+        source_elements[nr] = (species_name, dtype, data)
     lines.expect_end("source/sink elements")
 
 
@@ -933,12 +959,15 @@ def _read_sources(
                 f"'source/sink elements' section does not define"
             ) from exc
         stype = dtype.split("_")[-1] if "_" in dtype else dtype
+        if stype in _REFUSED_SOURCES:
+            raise ValueError(f"prj: source {nr} uses element {pe} of type {stype!r}, "
+                             f"{_REFUSED_SOURCES[stype]} (unsupported)")
         if stype not in _SOURCE_TYPES:
             raise ValueError(f"prj: source {nr} uses element type {dtype!r} (unsupported)")
-        if ps and stype in ("eds", "brs"):
+        if ps and stype in _TRIGGERED_SOURCES:
             raise ValueError(
                 f"prj: source {nr} is a {stype} source on schedule {ps}; schedule-triggered "
-                f"decaying and burst sources are unsupported")
+                f"decaying, burst, power-law and peak sources are unsupported")
         try:
             k = species.index(sname)
         except ValueError as exc:
@@ -1595,7 +1624,8 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         dt = project.run_control.time_step if project.run_control else 60.0
         closures.append(SpeciesSources(
             sources_from_project(project, dt=dt), species=[s.species for s in project.sources],
-            layer=layers["species"], names=[f"source {s.nr}" for s in project.sources]))
+            layer=layers["species"], names=[f"source {s.nr}" for s in project.sources],
+            heights=net.node_attr("z_ref"), g=project.g))
     model = Model(net, layers, closures=closures)
     drivers = {
         "air.phi_boundary": torch.zeros(1, dtype=F64),

@@ -441,9 +441,11 @@ def assemble_sources(sources, t: float, x_full: torch.Tensor) -> torch.Tensor:
 def sources_from_project(project, *, dt: float = 60.0) -> list:
     """The project's `PrjSource` records (from `read_prj`) -> source objects.
 
-    CONTAM source element data lines: ccf: G R ...; cut: G x_cut ...; eds: G0 k ... (k the
-    decay rate, tau = 1/k); brs: M ... (verify against TN 1887r1 Appendix A section 9 when
-    a project with sources is loaded).
+    CONTAM source/sink element data lines (TN 1887r1 Appendix A section 9): ccf: G R;
+    cut: G x_cut; eds: G0 k (tau = 1/k); brs: M; prs: G n; dvs: v_d A; drs: k_d; plm:
+    a b t_p; pkm: a b t_p. The record's multiplier scales the first coefficient (G, G0, M,
+    v_d, k_d, a), and a constant-coefficient source's removal R too, which scales the source
+    or the sink as CONTAM's `mult` does.
 
     A source's `z#` is resolved through `Project.zone_nr_to_name` -- NOT an unchecked
     `project.zones[s.zone_nr - 1]` -- raising `KeyError` naming
@@ -472,6 +474,16 @@ def sources_from_project(project, *, dt: float = 60.0) -> list:
             out.append(DecayingSource(node, s.mult * p[0], 1.0 / p[1] if p[1] > 0 else math.inf))
         elif s.source_type == "brs":
             out.append(BurstSource(node, s.mult * p[0], 0.0, dt))
+        elif s.source_type == "prs":
+            out.append(PressureDrivenSource(node, s.mult * p[0], p[1]))
+        elif s.source_type == "dvs":
+            out.append(DepositionVelocitySink(node, s.mult * p[0], p[1]))
+        elif s.source_type == "drs":
+            out.append(DepositionRateSink(node, s.mult * p[0]))
+        elif s.source_type == "plm":
+            out.append(PowerLawDecaySource(node, s.mult * p[0], p[1], p[2]))
+        elif s.source_type == "pkm":
+            out.append(PeakEmissionSource(node, s.mult * p[0], p[1], p[2]))
         else:
             raise ValueError(
                 f"sources: source {s.nr} uses unsupported source type {s.source_type!r}"

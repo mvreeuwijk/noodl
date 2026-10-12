@@ -3,8 +3,8 @@
 Reading a CONTAM project, weather file and ambient-concentration file produces a model for [building
 physics](../applications/building_physics.md). Each `.prj` airflow-path component becomes one of
 the [`noodl.elements`](../applications/building_physics.md#airflow-elements) objects the building
-application assembles into a network by hand; a source record becomes one of the source
-models in `noodl.apps.building_physics.sources`.
+application assembles into a network by hand; a source/sink record becomes one of the source
+and sink models in `noodl.apps.building_physics.sources`.
 
 ## CONTAM `.prj`
 
@@ -20,8 +20,8 @@ diffusivity, default concentration; the decay constant is read but, as in Contam
 and each species' default ambient concentration (`Project.ambient_mass_fractions`); kinetic
 reactions on zones (`Project.zone_reactions`, the species layer's `kinetics`); day and week
 schedules referenced by zones (the zone temperature, on `"T"`) and by paths (a flow multiplier,
-through `Scaled` on `"flow_multiplier.<kind>"`) and by sources (a rate multiplier, on
-`"species.source_multiplier"`; for `ccf` and `cut` sources); wind pressure profiles with the
+through `Scaled` on `"flow_multiplier.<kind>"`) and by sources and sinks (a multiplier of the whole source or sink, on
+`"species.source_multiplier"`; for `ccf`, `cut`, `prs`, `dvs` and `drs` records); wind pressure profiles with the
 linear or cubic-spline curve fit (`WindProfile(..., curve="linear" | "spline")`; the spline is
 periodic in the wind angle, as ContamX evaluates it), and a constant wind pressure on an
 envelope path (`"wind_pressure.<kind>"`, positive pushing air from ambient into the zone, as
@@ -29,14 +29,17 @@ ContamX); zones and initial concentrations; airflow paths; the power-law element
 family
 (`plr_orfc/leak1/leak2/leak3/crack/fcn/test1/test2/conn/stair/shaft/qcn`), the quadratic family
 (`qfr_*`), doorways (`dor_door`, `dor_pl2`), dampers (`plr_bdq`, `plr_bdf`), constant-flow fans
-(`fan_cmf`, `fan_cvf`) and the cubic fan curve (`fan_fan`); source elements `ccf`, `cut`, `eds`,
-`brs`; filters on airflow paths (`Project.edge_filters`, the species layer's `transmission`):
+(`fan_cmf`, `fan_cvf`) and the cubic fan curve (`fan_fan`); source/sink elements `ccf`, `cut`, `eds`,
+`brs`, `prs`, `dvs`, `drs`, `plm` and `pkm`, attached by `project_to_model` (the record's
+multiplier folded into the element's first coefficient); filters on airflow paths (`Project.edge_filters`, the species layer's `transmission`):
 constant-efficiency (`cef`), particle (`pf0`, interpolated at each species' mean diameter as
 ContamX does) and super (`spf`) filter elements; a filter acts on the air crossing its path in
 either direction.
 
 **Refused by name**, rather than silently dropped: control nodes and air-handling
-systems referenced by nonzero index; gaseous (`gf0`) and UVGI (`uv1`) filter elements,
+systems referenced by nonzero index; boundary-layer diffusion (`bls`), resuspension (`dvr`)
+and super (`sup`) source/sink elements, when a source/sink record references one; a source/sink
+record whose element or zone the file does not define; gaseous (`gf0`) and UVGI (`uv1`) filter elements,
 referenced or not; a filter that names a species the project does not simulate (when a path
 references it: an unreferenced filter element is read and unused), and a path
 whose filter number the file does not define; non-trace species; a contaminant list that is not the
@@ -44,8 +47,9 @@ simulated species in file order; a source or kinetic reaction that names a speci
 does not simulate (a species the file defines but marks as not simulated included), a kinetic
 reaction that gives one product-reactant pair twice, and a zone whose kinetic reaction number the
 file does not define; a schedule
-number that no week schedule carries; a schedule on a `fan_fan` path; a schedule on an `eds` or
-`brs` source; a zone without the variable-pressure flag (which
+number that no week schedule carries; a schedule on a `fan_fan` path; a schedule on an `eds`,
+`brs`, `plm` or `pkm` source (CONTAM triggers these once, at the schedule's first nonzero
+value); a zone without the variable-pressure flag (which
 ContamX holds at constant pressure) or, in a project with species, without the
 variable-contaminants flag (ContamX then holds the zone's concentrations at their initial values
 and ignores its sources); CFD and 1-D convection/diffusion zones; continuous-values-file

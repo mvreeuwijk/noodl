@@ -321,6 +321,24 @@ records, and `project_to_model` attaches them with `SpeciesSources` automaticall
 multipliers at one. `assemble_sources(sources, t, x_full)` sums the callable sources outside a
 model (a `ConstantSource` or `CutoffSource` at the `x_full` given) and refuses a sink by name.
 
+A `.prj` project's sources and sinks are attached by `project_to_model`. The three-zone
+project `sinks_three_zone.prj` has a deposition velocity sink, a scheduled deposition rate
+sink, a constant-coefficient source with a removal term, a cutoff source and the two NRCC
+emission models:
+
+```python
+from noodl.apps.building_physics import read_prj, simulate_project
+
+out = simulate_project(read_prj("sinks_three_zone.prj"))
+print([f"{v:.4e}" for v in out["species.x"][-1, :, 0].tolist()])
+```
+
+```text
+['1.5688e-05', '1.0336e-05', '6.4669e-05']
+```
+
+ContamX gives 1.568757e-05, 1.033583e-05 and 6.466919e-05.
+
 ### Species and reactions
 
 A `Species` holds CONTAM's species record: name, molar mass, mean diameter (0 for a gas),
@@ -629,6 +647,15 @@ above 0.1 % of the largest.
 | Three-zone project with kinetic reactions in two zones, 24 steps | flow rel 16 $u$, mf rel 80 $u$, floor 64 $u$ × each species' max | **9.1e-8** flow, **2.6e-7** mf |
 | One-zone stack with a filtered path, steady, Ta = 273.15 / 313.15 K | rel stack budget + 3 $u$ (20.2 / 21.2 $u$) | **6.6e-8 / 5.6e-8** |
 | Three-zone project with constant-efficiency, particle and series filters, 24 steps | flow rel 16 $u$, mf rel 72 $u$, floor 64 $u$ × each species' max | **9.1e-8** flow, **3.7e-7** mf |
+| Three-zone project with deposition sinks, removal terms and NRCC emissions, 24 steps | flow rel 16 $u$, mf rel 80 $u$, floor 64 $u$ × each species' max | **9.1e-8** flow, **1.3e-7** mf |
+| One-zone stack with a pressure-driven source, 288 steps | flow rel 64 $u$, mf rel 88 $u$, floor 64 $u$ × each species' max | **4.5e-8** flow, **7.4e-8** mf |
+
+Sinks and the concentration-proportional parts of sources are implicit in ContamX's species
+step, as are kinetic reactions and filters; noodl's implicit step reproduces it to float32
+roundoff. ContamX evaluates the NRCC power law with time in hours, does not clamp a cutoff
+source above its cutoff, and does not apply a species' decay constant; noodl follows all three
+(measured). A pressure-driven source sees the pressure difference of the step's own airflow
+solution, so the step is repeated until the zone pressure it read is the solved one.
 
 The stack rows rely on two density effects matching ContamX's. Orifice coefficients are
 corrected for the density of the air entering the path (freezing them at reference density
@@ -806,7 +833,9 @@ regression at rtol 1e-8.
 - **Schedule-triggered sources and schedules on fan curves are refused by name.** CONTAM starts
   a decaying, burst, power-law or peak source at its schedule's first nonzero value, a trigger
   rather than a multiplier; `PowerLawDecaySource` and `PeakEmissionSource` count their time from
-  the simulation start. A weather or ambient file must cover the whole run; nothing is
+  the simulation start. CONTAM's boundary-layer diffusion and resuspension sinks, which carry
+  storage state of their own, and its super source/sink elements are refused by name too. A
+  weather or ambient file must cover the whole run; nothing is
   extrapolated.
 - **The default coupling is a single pass.** `build_model`'s `coupling` defaults to
   `"pingpong"`: a `.steady()` call then solves the airflow at the *initial* temperatures and does

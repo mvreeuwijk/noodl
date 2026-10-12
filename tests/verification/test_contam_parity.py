@@ -599,3 +599,41 @@ def test_three_filters_match_contamx(contamx, tmp_path, record_property):
                     record_property=record_property, species_floor=True,
                     label="Three-zone project with constant-efficiency, particle and "
                           "series filters, 24 steps")
+
+
+SINKS = DATA / "sinks_three_zone.prj"
+PRESSURE_SOURCE = DATA / "pressure_source_stack.prj"
+
+
+@pytest.mark.external
+def test_sinks_and_emission_models_match_contamx(contamx, tmp_path, record_property):
+    """`sinks_three_zone.prj`: a deposition velocity sink, a deposition rate sink on a
+    schedule, a constant-coefficient source with a removal term, a cutoff source, NRCC
+    power-law and peak sources, and a species decay constant ContamX does not apply; wind-
+    driven, 24 steps of 300 s.
+
+    Budget: the three-zone transient's 64 u, plus the sink rates, which a relative
+    roundoff reaches over the run as k t u: at most 0.48 (deposition velocity, 2 inputs),
+    2.7 (deposition rate) and 0.33 (removal term, R and the air mass): 4.6 u; plus the
+    emissions, 1 u each in a, 0.35 u in the power law's exponent, and 2.1 u (t_p) and
+    4.3 u (b) in the peak model: 80 u. The absolute floor is per species (64 u times the
+    species' own largest mass fraction)."""
+    _project_parity(SINKS, tmp_path, rtol_flow=16 * F32_U, rtol_mf=80 * F32_U,
+                    record_property=record_property, species_floor=True,
+                    label="Three-zone project with deposition sinks, removal terms and "
+                          "NRCC emissions, 24 steps")
+
+
+@pytest.mark.external
+def test_a_pressure_driven_source_matches_contamx(contamx, tmp_path, record_property):
+    """`pressure_source_stack.prj`: NIST's scheduled one-zone stack (weather and ambient
+    files, zone schedule, densZP, dodMdt) with a pressure-driven source, 288 steps; the
+    zone-to-ambient pressure difference changes with every weather and schedule jump.
+
+    Budget: the scheduled stack's 64 u (`test_a_scheduled_zone_temperature_run_matches_
+    contamx`), plus the source: S = G dP^n, and dP is a stack pressure, a density difference
+    whose budget at the smallest nonzero temperature difference (10 K) is 32.8 u, so
+    n 32.8 u = 21.3 u, and 1 u in G: 88 u. The absolute floor is per species."""
+    _project_parity(PRESSURE_SOURCE, tmp_path, rtol_flow=64 * F32_U, rtol_mf=88 * F32_U,
+                    record_property=record_property, species_floor=True,
+                    label="One-zone stack with a pressure-driven source, 288 steps")

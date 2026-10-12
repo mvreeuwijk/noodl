@@ -24,6 +24,17 @@ from noodl.apps.building_physics.prj import (
 )
 from noodl.apps.building_physics.prj import steady as prj_steady
 from noodl.apps.building_physics.schedules import Calendar, WeekSchedule
+from noodl.apps.building_physics.sources import (
+    ConstantSource,
+    CutoffSource,
+    DepositionRateSink,
+    DepositionVelocitySink,
+    PeakEmissionSource,
+    PowerLawDecaySource,
+    PressureDrivenSource,
+    SpeciesSources,
+    sources_from_project,
+)
 from noodl.apps.building_physics.species import KineticReaction, Species
 from noodl.apps.building_physics.thermal import R_AIR
 from noodl.elements import Damper, FanCurve, FixedFlow, Scaled, UpstreamDensityPowerLaw
@@ -34,6 +45,8 @@ MIXED = DATA / "doorway_damper_fan.prj"
 # NIST's own one-zone stack demo with a constant-efficiency filter on path 1.
 SS_STACK = DATA / "test_OneZoneSsStack-UseApi.prj"
 FILTERS = DATA / "filters_three_zone.prj"
+SINKS = DATA / "sinks_three_zone.prj"
+PRESSURE = DATA / "pressure_source_stack.prj"
 F64 = torch.float64
 
 
@@ -1022,3 +1035,54 @@ def test_an_unknown_filter_type_and_a_super_filter_containing_itself_are_refused
                           tmp_path))
     with pytest.raises(ValueError, match=r"filter element 3 \('both'\) contains itself"):
         read_prj(_variant(text, "  2\n  1 2\n", "  2\n  1 3\n", tmp_path))
+
+
+def test_the_sink_and_emission_source_types_are_read():
+    p = read_prj(SINKS)
+    assert [s.source_type for s in p.sources] == ["dvs", "drs", "ccf", "cut", "plm", "pkm"]
+    srcs = sources_from_project(p)
+    assert [type(s) for s in srcs] == [DepositionVelocitySink, DepositionRateSink,
+                                       ConstantSource, CutoffSource, PowerLawDecaySource,
+                                       PeakEmissionSource]
+    assert srcs[0].velocity.item() == pytest.approx(2e-3) and srcs[0].area.item() == 10.0
+    assert srcs[1].rate.item() == pytest.approx(5e-4)
+    assert srcs[4].t_p == 600.0 and srcs[5].t_peak == 900.0
+    (inp,) = p.inputs
+    assert inp.key == "species.source_multiplier" and inp.index == (1,)
+    model, state, drivers = project_to_model(p)
+    assert drivers["species.source_multiplier"].tolist() == [1.0, 0.0, 1.0, 1.0, 1.0, 1.0]
+    assert model.transport["species"].kinetics is None        # the decay is data only
+    (closure,) = [c for c in model.closures if isinstance(c, SpeciesSources)]
+    assert closure(state, drivers)["species.removal"].shape == (3, 1)
+
+
+def test_a_pressure_driven_source_is_read_with_the_node_heights(tmp_path):
+    """The closure places the ambient pressure at each zone's own reference height: the
+    zone's level raised to 4 m reaches it as that node's height, with the project's g."""
+    p = read_prj(PRESSURE)
+    (src,) = sources_from_project(p)
+    assert isinstance(src, PressureDrivenSource)
+    assert src.coefficient.item() == pytest.approx(2e-6) and src.exponent.item() == 0.65
+    level = "  1   0.000   3.000 10 0 0 <1>"
+    p = read_prj(_variant(PRESSURE.read_text(), level, level.replace("0.000", "4.000"),
+                          tmp_path))
+    model, _, _ = project_to_model(p)
+    (closure,) = [c for c in model.closures if isinstance(c, SpeciesSources)]
+    assert closure.reads_solved_pressure
+    assert closure.heights.dtype == F64
+    assert closure.heights.tolist() == [0.0, 4.0]                     # ambient, singleZone
+    assert p.net.nodes == ["ambient", "singleZone"]
+    assert closure.g == p.g == pytest.approx(9.8055)
+
+
+def test_unsupported_sources_are_refused_by_name(tmp_path):
+    text = SINKS.read_text()
+    dvs = "1 sarin dvs deposit\n\n 0.001 10 0 0"
+    for stype, why in (("bls", "boundary-layer"), ("dvr", "resuspension")):
+        with pytest.raises(ValueError, match=rf"source 1.*'{stype}'.*{why}"):
+            read_prj(_variant(text, dvs, dvs.replace("dvs", stype), tmp_path))
+    with pytest.raises(ValueError, match=r"source 1.*'sup'.*super"):
+        read_prj(_variant(text, dvs, "1 sarin sup deposit\n\n 2\n 3 4", tmp_path))
+    plm = "  5   2   5   0   0     1     0"
+    with pytest.raises(ValueError, match=r"source 5.*plm.*schedule 1"):
+        read_prj(_variant(text, plm, "  5   2   5   1   0     1     0", tmp_path))
