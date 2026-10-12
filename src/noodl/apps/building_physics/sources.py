@@ -240,7 +240,8 @@ class SpeciesSources:
     order), each times its entry of `"<layer>.source_multiplier"`, on its own species.
 
     `sources` follow the protocol of this module: plain callables `source(t, x_full)`, or
-    objects with `generation` and optionally `removal`. `species[i]` is source i's 0-based
+    objects with `generation` and optionally `removal`; a source with `step_integrated = True`
+    also receives `step=` (its callable, or its `generation`). `species[i]` is source i's 0-based
     species, `names[i]` its label (default "source 1", ...). They are evaluated at
     `drivers["time"]` (s since the start; `simulate` sets the step's end, which is when
     ContamX evaluates them) on the step-start mass fractions. A `BurstSource` also gets the
@@ -265,6 +266,10 @@ class SpeciesSources:
     airflow solve. Such a closure
     reports `reads_solved_pressure`, and `simulate` and `prj.steady` repeat a step until the
     pressure it read is the step's own.
+
+    The closure reads `"<layer>.capacity"` and `"rho_amb"`, which the density closures
+    write: place it after the closures that write density and capacity, or it uses the
+    construction-time capacity and a stale density.
     """
 
     def __init__(self, sources, *, species, layer, names=None, heights=None,
@@ -277,7 +282,7 @@ class SpeciesSources:
             f"source {i + 1}" for i in range(len(self.sources))]
         self.key = f"{layer.name}.source_multiplier"
         self.capacity_key = f"{layer.name}.capacity"
-        self.removes = any(hasattr(s, "removal") for s in self.sources)
+        self.removes = any(self._can_remove(s) for s in self.sources)
         self.reads_solved_pressure = any(
             getattr(s, "needs_pressure_difference", False) for s in self.sources)
         if self.reads_solved_pressure and heights is None:
@@ -290,9 +295,18 @@ class SpeciesSources:
             self._check_pressure_reading()
         self.volumes = torch.as_tensor(layer.net.node_attr("volume", default=0.0), dtype=F64)
         self._check_sources()
-        self.inputs = ("time", self.key) + (("rho_amb",) if self.reads_solved_pressure else ())
+        self.inputs = ("time", self.key, self.capacity_key) + (
+            ("rho_amb",) if self.reads_solved_pressure else ())
         self.outputs = (f"{layer.name}.sources",) + (
             (f"{layer.name}.removal",) if self.removes else ())
+
+    @staticmethod
+    def _can_remove(src) -> bool:
+        """Whether the source has a removal part that can act: a sink, or a constant
+        coefficient that is not zero."""
+        if not hasattr(src, "removal"):
+            return False
+        return not (isinstance(src, ConstantSource) and src.R == 0.0)
 
     def _check_pressure_reading(self) -> None:
         """The ambient is the layer's one boundary node, and `heights` has one entry per
@@ -343,7 +357,12 @@ class SpeciesSources:
     @property
     def input_specs(self) -> dict[str, dict]:
         """The time and the per-source multipliers this closure reads."""
+        extra = {} if not self.reads_solved_pressure else {
+            "rho_amb": dict(description="ambient air density, written by a density closure "
+                                        "(places the ambient pressure at each zone's height)",
+                            unit="kg/m3", required=False)}
         return {
+            **extra,
             "time": dict(description="time since the simulation start (end of the step)",
                          unit="s"),
             "time_step": dict(description="length of the step that ends at `time` (read by "
@@ -405,10 +424,10 @@ class SpeciesSources:
         rem = [torch.zeros(batch + (n,), dtype=x_i.dtype) for _ in range(K)]
         for j, (src, k) in enumerate(zip(self.sources, self.species, strict=True)):
             m, xk = mult[..., j:j + 1], full[..., k]
+            kw = {"step": step} if getattr(src, "step_integrated", False) else {}
             if hasattr(src, "generation"):
-                gen[k] = gen[k] + m * src.generation(t, xk, dp)
+                gen[k] = gen[k] + m * src.generation(t, xk, dp, **kw)
             else:
-                kw = {"step": step} if getattr(src, "step_integrated", False) else {}
                 gen[k] = gen[k] + m * src(t, xk, **kw)
             if hasattr(src, "removal"):
                 rem[k] = rem[k] + m * src.removal(t, xk, mass, density)
@@ -425,15 +444,15 @@ def assemble_sources(sources, t: float, x_full: torch.Tensor) -> torch.Tensor:
     shape like `x_full`; there is no separate node-count argument.
 
     A source with a concentration-proportional part (`ConstantSource`, `CutoffSource`) is
-    evaluated at `x_full`. A sink, whose removal needs the zone's air mass, has no such rate
-    and is refused by name: use `SpeciesSources` in a model.
+    evaluated at `x_full`. A sink or a pressure-driven source has no such rate and is
+    refused by name: use `SpeciesSources` in a model.
     """
     out = torch.zeros_like(x_full)
     for i, s in enumerate(sources):
         if not callable(s):
             raise TypeError(f"assemble_sources: source {i + 1} ({type(s).__name__}) has no "
-                            f"explicit rate source(t, x): its removal needs the zone's air "
-                            f"mass; use SpeciesSources in a model")
+                            f"explicit rate source(t, x) (a sink or a pressure-driven "
+                            f"source); use SpeciesSources in a model")
         out = out + s(t, x_full)
     return out
 

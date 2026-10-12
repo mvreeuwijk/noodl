@@ -396,7 +396,7 @@ def test_assemble_sources_refuses_a_sink_by_name():
 
 
 def test_a_source_without_removal_writes_no_removal_driver():
-    srcs = SpeciesSources([ConstantSource(1, 1e-6), BurstSource(2, 1.0, 0.0, 60.0)],
+    srcs = SpeciesSources([ConstantSource(1, 1e-6, 1e-3), BurstSource(2, 1.0, 0.0, 60.0)],
                           species=[0, 0], layer=_layer(1))
     assert srcs.outputs == ("species.sources", "species.removal")   # ConstantSource has R
     plain = SpeciesSources([BurstSource(2, 1.0, 0.0, 60.0)], species=[0], layer=_layer(1))
@@ -576,3 +576,48 @@ def test_a_pressure_driven_source_needs_rho_amb_one_ambient_and_a_height_per_nod
     with pytest.raises(ValueError, match=r"one boundary node.*'ambient', 'shaft top'"):
         SpeciesSources([PressureDrivenSource(1, 1e-5, 1.0)], species=[0], layer=two,
                        heights=[0.0, 0.0, 3.0])
+
+
+def test_species_sources_declares_the_capacity_and_ambient_density_it_reads():
+    plain = SpeciesSources([ConstantSource(1, 1e-6)], species=[0], layer=_layer(1))
+    assert "species.capacity" in plain.inputs and "rho_amb" not in plain.inputs
+    driven = SpeciesSources([PressureDrivenSource(1, 1e-5, 1.0)], species=[0],
+                            layer=_layer(1), heights=[0.0, 0.0, 0.0])
+    assert {"species.capacity", "rho_amb"} <= set(driven.inputs)
+    assert "rho_amb" in driven.input_specs and "rho_amb" not in plain.input_specs
+
+
+def test_a_constant_source_without_removal_does_not_replace_the_layers_removal():
+    net = Network(dtype=F64)
+    net.add_node("ambient", volume=0.0)
+    net.add_node("z", volume=300.0)
+    net.add_edge("ambient", "z", kind="airpath")
+    layer = TransportLayer(net, "species", capacity=torch.tensor([360.0], dtype=F64),
+                           flow_kind="airpath", boundary=["ambient"],
+                           removal=torch.tensor([1e-4], dtype=F64))
+    srcs = SpeciesSources([ConstantSource(1, 1e-6, 0.0)], species=[0], layer=layer)
+    assert not srcs.removes
+    with pytest.raises(ValueError, match="construction-time removal"):
+        SpeciesSources([ConstantSource(1, 1e-6, 1e-3)], species=[0], layer=layer)
+
+
+def test_assemble_sources_refusal_names_the_missing_rate_not_the_air_mass():
+    with pytest.raises(TypeError, match=r"no explicit rate.*sink or a pressure-driven"):
+        assemble_sources([PressureDrivenSource(1, 1e-5, 1.0)], 0.0, torch.zeros(3, dtype=F64))
+
+
+def test_a_step_integrated_generation_object_receives_the_step():
+    class Stepped:
+        node, step_integrated = 1, True
+        seen = None
+
+        def generation(self, t, x, pressure_difference=None, step=None):
+            Stepped.seen = step
+            out = torch.zeros_like(x)
+            out[..., 1] = 1.0 if step is None else step
+            return out
+
+    srcs = SpeciesSources([Stepped()], species=[0], layer=_layer(1))
+    drivers = _drivers([1.0], 1) | {"time_step": torch.tensor(30.0, dtype=F64)}
+    got = srcs({"species.x": torch.zeros(2, dtype=F64)}, drivers)
+    assert Stepped.seen == 30.0 and got["species.sources"][1].item() == 30.0

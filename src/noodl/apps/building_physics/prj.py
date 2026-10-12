@@ -139,8 +139,8 @@ MU_0 = 1.81625e-5
 #                   are refused when read.
 #   filter          `nr element nsub`, then per sub-element a line `load nsload` and `nsload`
 #                   species-loading lines (measured: for two sub-elements ContamX refuses the
-#                   lines `0`, `0` and loads `0 0`, `0 0`). Loadings matter only to gaseous
-#                   filters and are skipped.
+#                   lines `0`, `0` and loads `0 0`, `0 0`; the split layout is refused). Loadings
+#                   matter only to gaseous filters and are skipped.
 #   day schedule    `# npts shap utyp ucnv name`, a description line (may be blank), then
 #                   `npts` rows `hh:mm:ss value` from 00:00:00 to 24:00:00. `shap` 0 is
 #                   rectangular, 1 trapezoidal; values are SI (K for a temperature schedule),
@@ -711,7 +711,11 @@ def _read_filters(lines: _Lines, count: int, out: dict[int, int]) -> None:
         nr, element, n_sub = int(tok[0]), int(tok[1]), int(tok[2])
         for _ in range(n_sub):
             row = lines.record()                    # `load nsload`
-            n_loads = int(row[1]) if len(row) > 1 else int(lines.record()[0])
+            if len(row) < 2:
+                raise ValueError(f"prj: filter {nr} needs the pair `load nsload` on one line "
+                                 f"for each sub-element, got {' '.join(row)!r} (ContamX "
+                                 f"refuses the split layout)")
+            n_loads = int(row[1])
             for _ in range(n_loads):
                 lines.record()
         out[nr] = element

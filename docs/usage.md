@@ -139,7 +139,8 @@ capacity, so `describe()` shows `thermal.sources` in W and `air.q` in kg/s.
 `"<layer>.removal"` is a per-step first-order removal rate (1/s, active interior order,
 `(n_i, K)`), replacing the layer's construction-time `removal`; it is written by a closure
 that owns sinks. It matters for species layers, where it removes a species from the air (a
-deposition); the layer's `dilution`, if it has one, adds its own rate to it.
+deposition); the layer's `dilution`, if it has one, adds its own rate to it. The driver is
+not carried in the state: a closure that sets it must write it every step.
 
 The names come from each layer's `quantity`, so every application has them without code
 of its own; the solver's short spellings (`.x`, `.phi`, `.s`, `.q`) work too. Each

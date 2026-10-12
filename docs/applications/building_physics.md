@@ -308,6 +308,10 @@ source of your own is a callable `source(t, x_full) -> kg/s per node`, or an obj
 `simulate` and `prj.steady` repeat a step until the source has seen the step's own pressures,
 as ContamX evaluates it.
 
+Place `SpeciesSources` after the closures that write the density and the capacity: it reads
+`"species.capacity"` and `"rho_amb"` as they stand when it runs, and a hand-built model that
+lists it earlier uses stale values.
+
 `SpeciesSources(sources, species=..., layer=...)` is the closure that sums the sources into the
 species layer's `"species.sources"` each step, each on its own species. It evaluates them at
 `drivers["time"]` (set by `simulate` to the step's end) and multiplies each by its entry of

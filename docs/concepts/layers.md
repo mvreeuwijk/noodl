@@ -302,7 +302,7 @@ State and driver keys are namespaced by layer name:
 | `"<layer>.x_boundary"` | Prescribed boundary transport state (driver) |
 | `"<layer>.sources"` | Nodal sources, **full node order** (driver, optional) |
 | `"<layer>.capacity"` | Per-step capacity override (driver, optional) |
-| `"<layer>.removal"` | Per-step first-order removal rate, 1/s, `(n_i, K)`, replacing the layer's construction-time `removal` (driver, optional) |
+| `"<layer>.removal"` | Per-step first-order removal rate, 1/s, `(n_i, K)`, replacing the layer's construction-time `removal` (driver, optional; not carried in the state, so a closure that sets it must write it every step) |
 | `"<layer>.requests"` | An allocation layer's per-edge request (driver, required) |
 
 ### The order within a pass

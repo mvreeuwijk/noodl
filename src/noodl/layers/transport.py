@@ -389,7 +389,8 @@ class TransportLayer:
         `Model._pass` the way `"<layer>.capacity"` is. Trailing shape `(n_i, K)` in active
         interior order, or `(n_i,)` for a one-species layer; leading batch dimensions are
         allowed. It REPLACES the construction-time `removal` for this call, it is not added
-        to it, and like it it acts on the state itself (it is not divided by capacity).
+        to it, and like it it acts on the state itself (it is not divided by capacity). The
+        trapezoidal step uses this one per-step rate at both the old and the new time level.
         """
         if removal is None:
             return self.removal

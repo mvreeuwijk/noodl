@@ -1097,3 +1097,10 @@ def test_an_unreferenced_super_element_ahead_of_a_used_one_is_read_and_ignored(t
                           "7 ! source/sink elements:\n7 sarin sup group\n\n 2\n 3 4\n"
                           "1 sarin dvs deposit", tmp_path))
     assert [s.source_type for s in p.sources] == ["dvs", "drs", "ccf", "cut", "plm", "pkm"]
+
+
+def test_a_filter_with_its_load_pair_split_over_two_lines_is_refused_by_number(tmp_path):
+    text = FILTERS.read_text()
+    with pytest.raises(ValueError, match=r"filter 1 needs the pair `load nsload` on one line"):
+        read_prj(_variant(text, "  1   1   1\n   0 0\n", "  1   1   1\n   0\n   0\n",
+                          tmp_path))
