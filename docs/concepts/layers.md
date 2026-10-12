@@ -120,6 +120,16 @@ forcing) costs the exact scheme thousands of matvecs per step by nature; `scheme
 the documented choice there, not a larger budget. All coefficients the layer owns—carrier,
 transmission, kinetics, removal, and conductance—are differentiable under every scheme.
 
+**Boundary values linear in time.** By default, the boundary values stay constant over a step.
+In the exact scheme, `step(..., x_boundary_end=...)` instead makes them vary linearly over the
+step, from `x_boundary` at its start to `x_boundary_end` at its end (a first-order hold). The
+step is then exact for a boundary value that ramps linearly while the flows are held fixed. This
+matters for a zone that flushes much faster than the step. With a boundary value held at the
+step mean of a ramp, such a zone relaxes to that mean and ends about half a step behind the
+boundary. With the linear boundary, it ends behind by its own flushing time, as it should. The
+Modelica importer's `scheme="midpoint"` runner uses this. The implicit and trapezoidal schemes
+do not accept the argument and raise `ValueError` if it is given.
+
 **Changing storage.** A transport layer's capacity may change over a step: a sewer pipe's wetted
 volume, or a headspace volume as the water level changes. The step conserves the stored amount
 `V x` in amount form: `V_new x_new - V_old x_old = dt F(x_new)` (implicit) or `= dt/2 (F(x_new) + F(x_old))`

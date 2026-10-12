@@ -486,6 +486,48 @@ def test_exact_scheme_rejects_on_failure_return_before_doing_any_work():
         )
 
 
+def test_exact_step_with_a_boundary_linear_in_time_matches_the_analytic_ramp():
+    """`x_boundary_end`: the boundary ramps linearly from `x_boundary` to it over the step.
+    A zone of flushing time tau = V/Q fed by c_b(t) = c0 + b t from c(0) = c0 is
+    c(t) = c_b(t) - b tau (1 - exp(-t/tau)): exact over steps 30 times tau, from the zone's
+    first-order hold, where the step mean of the ramp held constant is half a step off."""
+    net = flow_through_zone()
+    V, Q, b, dt = 10.0, 1.0, 0.5, 300.0
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([V]), flow_kind="airpath", boundary=["ambient"],
+        scheme="exact",
+    )
+    q = torch.tensor([Q, Q], dtype=torch.float64)
+    zero = _full(layer, torch.zeros(1, dtype=torch.float64))
+    c0 = 400.0
+    c = torch.tensor([c0], dtype=torch.float64)
+    held = c.clone()
+    tau = V / Q
+    for k in range(4):
+        cb0 = torch.tensor([c0 + b * k * dt], dtype=torch.float64)
+        cb1 = torch.tensor([c0 + b * (k + 1) * dt], dtype=torch.float64)
+        c = layer.step(c, q, zero, cb0, dt, x_boundary_end=cb1)
+        held = layer.step(held, q, zero, 0.5 * (cb0 + cb1), dt)
+        t = (k + 1) * dt
+        exact = c0 + b * t - b * tau * (1.0 - math.exp(-t / tau))
+        assert float(c[0]) == pytest.approx(exact, rel=1e-12, abs=0.0)
+        assert abs(float(held[0]) - exact) > 0.4 * b * dt / 2
+
+
+def test_a_boundary_linear_in_time_is_refused_by_the_other_schemes():
+    net = flow_through_zone()
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    c = torch.tensor([100.0], dtype=torch.float64)
+    for scheme in ("implicit", "trapezoidal"):
+        layer = TransportLayer(
+            net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
+            boundary=["ambient"], scheme=scheme,
+        )
+        with pytest.raises(ValueError, match="x_boundary_end"):
+            layer.step(c, q, _full(layer, torch.zeros(1, dtype=torch.float64)),
+                       torch.tensor([420.0]), 300.0, x_boundary_end=torch.tensor([430.0]))
+
+
 def test_transpose_view_is_the_shared_transpose_operator():
     """`_TransposeView` is a thin alias for `solvers.implicit.TransposeOperator`, not a
     separately-maintained duplicate -- see the consolidation note in `layers/transport.py`.

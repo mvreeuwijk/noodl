@@ -365,7 +365,8 @@ DYNAMIC = ("OpenDoorBuoyancyDynamic", "OpenDoorBuoyancyPressureDynamic", "ThreeR
 # asserts that noodl reproduces the storage mechanism (`_check_storage_mechanism`).
 STORAGE_DOMINATED = ("ClosedDoors", "OneOpenDoor", "ReverseBuoyancy",
                      "OneEffectiveAirLeakageArea")
-UNITS = {"flow": "kg/s", "T": "K", "p": "Pa", "Xi": "kg/kg", "C": "kg/kg"}
+UNITS = {"flow": "kg/s", "T": "K", "p": "Pa", "Xi": "kg/kg", "C": "kg/kg", "pWin": "Pa",
+         "TDryBul": "K", "pAtm": "Pa", "relHum": "1", "winSpe": "m/s"}
 
 
 def test_every_fixture_is_parity_checked_or_refused():
@@ -514,13 +515,26 @@ def _run_in_worker(model: str, rows: int | None, r: int, threads: int) -> tuple:
     Windows (0xc000070a in `rebuild_storage_filename`)."""
     out, names, seconds = _run(model, rows, r, threads)
     return ({k: v.numpy() for k, v in out.items()},
-            dataclasses.replace(names, times=names.times.numpy()), seconds)
+            dataclasses.replace(names, times=names.times.numpy(),
+                                weather={k: v.numpy() for k, v in names.weather.items()}),
+            seconds)
 
 
 def _from_worker(run: tuple) -> tuple:
     out, names, seconds = run
     return ({k: torch.from_numpy(v) for k, v in out.items()},
-            dataclasses.replace(names, times=torch.from_numpy(names.times)), seconds)
+            dataclasses.replace(names, times=torch.from_numpy(names.times),
+                                weather={k: torch.from_numpy(v)
+                                         for k, v in names.weather.items()}),
+            seconds)
+
+
+def _reference_tolerance(model: str) -> float:
+    """The DASSL tolerance the reference CSV was simulated at (its `# tolerance:` line)."""
+    for line in (DATA / f"{model}.csv").read_text().splitlines():
+        if line.startswith("# tolerance:"):
+            return float(line.split(":", 1)[1])
+    raise AssertionError(f"{model}.csv has no '# tolerance:' header line")
 
 
 def _check_parity(model: str, rows: int | None, substeps: tuple[int, int] | None = None,
@@ -560,7 +574,8 @@ def _check_parity(model: str, rows: int | None, substeps: tuple[int, int] | None
                         "floor_frac": FLOOR_FRAC, "mechanism": mechanism,
                         "reference_resolution": REFERENCE_RESOLUTION[model],
                         "substeps": list(substeps),
-                        "reference_tolerance": 1e-13, "seconds": seconds}, RECORD_DYNAMIC)
+                        "reference_tolerance": _reference_tolerance(model),
+                        "seconds": seconds}, RECORD_DYNAMIC)
     bound = {kind: PARITY_STORAGE.get(model, {}).get(kind, PARITY_RTOL) for kind in worst}
     failures = [f"{kind}: max rel beyond the reference's resolution {w['beyond']:.3e} "
                 f"({w['beyond_column']} at t = {w['beyond_t']:g}; max rel {w['max_rel']:.3e}) > "

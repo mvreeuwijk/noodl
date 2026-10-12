@@ -24,8 +24,9 @@ Time
 The table's abscissa is the calendar time `conTim.calTim` (`ReaderTMY3.mo:370-372, 581`;
 `BaseClasses/PartialConvertTime.mo:16-36`). With `lenWea` = last time stamp + the mean increment -
 first time stamp (`Resources/C-Sources/getTimeSpan.c:135-142`), a file whose length is a whole
-number of 365-day years repeats: `calTim = time - (k - 1) lenWea`, `k = integer(t0/lenWea) + 1`
-at the start, incremented each time `time` passes `k lenWea` (a time event, where the outputs
+number of 365-day years repeats: `calTim = time - tNext + lenWea`, `tNext = k lenWea`, evaluated
+in that order (`PartialConvertTime.mo:25-36`), `k = integer(t0/lenWea) + 1` at the start,
+incremented each time `time` passes `tNext` (a time event, where the outputs
 jump: `reader_events`). Any other file is read at `calTim = time` and must cover the run, from
 its first time stamp to 1800 s past its end (`ConvertTime.mo:22-32`). The 30-minute shift of
 `datRea30Min` applies to the solar columns only and is not used here.

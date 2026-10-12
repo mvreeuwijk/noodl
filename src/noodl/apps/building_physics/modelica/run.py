@@ -732,9 +732,15 @@ class _Midpoint:
 
     Over a step of length `h` from state 0 to state 1, each transport layer advances with
     its own exact scheme (`TransportLayer.step`, the flows held constant over the step) at
-    the MEAN flows `(q0 + q1)/2`, the mean boundary values `(x_b0 + x_b1)/2` and its step-mean
-    source driver plus the mean of the closure's state-dependent sources (the moist-air heat
-    carrier, `_ZoneStateClosure.cp_correction`). State 1 is the fixed point of that map together
+    the MEAN flows `(q0 + q1)/2`, the boundary values linear in time from `x_b0` to `x_b1`
+    (`TransportLayer.step`'s `x_boundary_end`; their mean `(x_b0 + x_b1)/2` for a layer whose
+    scheme is not exact) and its step-mean source driver plus the mean of the closure's
+    state-dependent sources (the moist-air heat carrier, `_ZoneStateClosure.cp_correction`).
+    A zone that flushes much faster than the step (PressurizationData's room: about 10 s
+    against steps of minutes) follows a ramping boundary value at its own lag only so: held
+    at the step mean, it relaxed to the mid-step value, half a step behind, an error first
+    order in the step that `extrapolate` cannot remove (0.035 K of a 0.07 K-per-step
+    outdoor-air ramp at 396 s steps, measured). State 1 is the fixed point of that map together
     with the airflow solve at state 1 (and the interior pressures `p_abs`, which the closure
     feeds back): an Anderson-accelerated fixed-point iteration (depth `_ANDERSON_DEPTH`) on
     the transport states and the air layer's interior potentials, started from the linear
@@ -938,9 +944,14 @@ class _Midpoint:
                     src = self._zero_sources(n, x0)
                 if n in extra0 or n in extra1:
                     src = src + 0.5 * (extra0.get(n, 0.0) + extra1.get(n, 0.0))
-                xb = 0.5 * (d0[f"{n}.x_boundary"] + d1[f"{n}.x_boundary"])
-                s[f"{n}.x"] = layer.step(x0, air.flows_of_kind(qm, layer.flow_kinds), src, xb,
-                                         h, capacity=cap.get(n))
+                qn = air.flows_of_kind(qm, layer.flow_kinds)
+                xb0, xb1 = d0[f"{n}.x_boundary"], d1[f"{n}.x_boundary"]
+                if layer.scheme == "exact":  # the boundary linear in time over the step
+                    s[f"{n}.x"] = layer.step(x0, qn, src, xb0, h, capacity=cap.get(n),
+                                             x_boundary_end=xb1)
+                else:
+                    s[f"{n}.x"] = layer.step(x0, qn, src, 0.5 * (xb0 + xb1), h,
+                                             capacity=cap.get(n))
             return self._pack(s), s
 
         z = z0.clone()

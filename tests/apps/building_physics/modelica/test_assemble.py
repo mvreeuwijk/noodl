@@ -461,6 +461,39 @@ def test_boundary_temperature_and_concentration_inputs_reach_the_zone(tmp_path):
     assert torch.allclose(hist["C"][:, i, 0], 4e-4 * (1.0 - decay), rtol=0.0, atol=1e-13)
 
 
+def test_a_stiff_zone_follows_a_ramping_boundary_with_its_own_lag(tmp_path):
+    # zone_two_orifices with a 0.1 m3 zone (flushing time tau = rho V/F, about 7 s) and 60 s
+    # steps: bouA's T_in and C_in[1] ramp linearly over the run, so the zone, on frozen flows,
+    # is x(t) = x_in(t) - b tau (1 - exp(-t/tau)) for the ramp's slope b: it lags the boundary
+    # by tau, not by the step. The midpoint scheme's exact step takes the boundary values
+    # linear in time over the step (`run._Midpoint`), which is exact for a ramp; held at its
+    # step mean the zone would relax to the mid-step value, a lag of about h/2 (0.4 K here).
+    doc = _doc("zone_two_orifices.json")
+    doc["medium"]["extraPropertiesNames"] = ["CO2"]
+    doc["experiment"].update({"StopTime": 600.0, "Interval": 60.0})
+    doc["components"][0]["parameters"].update({"use_T_in": True, "use_C_in": True})
+    doc["components"][2]["parameters"]["V"] = 0.1
+    ramp = "Modelica.Blocks.Sources.Ramp"
+    doc["signals"] = [
+        {"name": "TIn", "class": ramp, "drives": "bouA.T_in",
+         "parameters": {"height": 10.0, "duration": 600.0, "offset": 293.15}},
+        {"name": "CIn", "class": ramp, "drives": "bouA.C_in[1]",
+         "parameters": {"height": 4e-4, "duration": 600.0, "offset": 0.0}},
+    ]
+    model, state, drivers, names = read_modelica(_write(tmp_path, doc), return_names=True)
+    t = names.times
+    hist = simulate(model, state, drivers, t, scheme="midpoint")
+    ((col, sign),) = names.edges["oriA"]
+    F = float(sign * hist["air.q"][0, col])
+    i = names.nodes["vol"]
+    tau = 1.2 * float(hist["p"][0, i]) / 101325.0 * 0.1 / F
+    assert 5.0 < tau < 10.0
+    lag = tau * (1.0 - torch.exp(-t / tau))
+    assert torch.allclose(hist["T"][:, i], 293.15 + 10.0 / 600.0 * (t - lag), rtol=0.0,
+                          atol=1e-7)
+    assert torch.allclose(hist["C"][:, i, 0], 4e-4 / 600.0 * (t - lag), rtol=0.0, atol=1e-13)
+
+
 # ------------------------------------------------ transport time course
 def test_heat_and_moisture_relax_with_the_moist_air_heat_carrier():
     # Two rooms exchanging F = V ACS rho + m_flow each way (balanced), no boundary. The
