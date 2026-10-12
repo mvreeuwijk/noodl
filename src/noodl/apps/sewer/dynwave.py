@@ -1975,6 +1975,7 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
                         "curve or the outfall_stage functions)",
             unit="m", over=list(closure.outfall_names))
     model.driver_template = dict(drivers)
+    model.inflow_schedule = net.inflows
     return model, state, drivers
 
 
@@ -2257,7 +2258,10 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
     `swmm5.c:530-545`) reaches it, and the last step is cut to the time that remains (at
     least 1 ms), so the run ends exactly at `duration` whatever the step rule.
 
-    `inflow` (m3/s, full-node) overrides ``drivers["inflow"]``: ``(n,)`` is one constant
+    `inflow` (m3/s, full-node) overrides ``drivers["inflow"]``; without it a model built from
+    a SWMM file with time series, patterns or dry-weather flow (``model.inflow_schedule``,
+    `noodl.apps.sewer.inflows`) uses that schedule, and any other model the constant
+    ``drivers["inflow"]``. ``(n,)`` is one constant
     inflow; ``(B, n)`` a batch of B constant inflows -- a 2-D inflow is ALWAYS a batch,
     never a series; ``(steps, B, n)`` the inflow of each step for a batch of B (one
     network's series is ``(steps, 1, n)``; needs `steps`); or a callable ``inflow(t)``
@@ -2314,6 +2318,9 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
     solve_kwargs.setdefault("rtol", 0.0)
     n = model.net.n
     series = None
+    schedule = getattr(model, "inflow_schedule", None)
+    if inflow is None and schedule is not None:      # the file's [INFLOWS] and [DWF]
+        inflow = schedule.driver(list(model.net.nodes))
     if callable(inflow):
         step_inflow = inflow
     elif inflow is None:

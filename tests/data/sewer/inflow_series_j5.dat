@@ -1,0 +1,6 @@
+; J5 inflow, m3/s: date, time, value (a date applies to the lines after it)
+01/01/2026 06:02:00 0.0
+06:04:00 0.03
+
+06:07:00 0.015
+06:09:30 0.0

@@ -92,14 +92,14 @@ def test_an_unknown_section_with_content_is_refused(tmp_path):
         read_swmm_inp(path)
 
 
-def test_a_time_series_inflow_is_refused(tmp_path):
+def test_an_inflow_naming_an_undefined_time_series_is_refused(tmp_path):
     text = (DATA / "tree_steady.inp").read_text().replace(
         'J1               FLOW             ""               FLOW     1.0      1.0      0.05',
         "J1               FLOW             TS1              FLOW     1.0      1.0      0.05",
     )
     path = tmp_path / "ts.inp"
     path.write_text(text)
-    with pytest.raises(ValueError, match="time series"):
+    with pytest.raises(ValueError, match=r"time series 'TS1', which has no \[TIMESERIES\]"):
         read_swmm_inp(path)
 
 
@@ -123,11 +123,14 @@ def test_a_conduit_with_zero_fall_is_refused(tmp_path):
         read_swmm_inp(path)
 
 
-def test_a_dwf_section_is_refused(tmp_path):
-    text = (DATA / "tree_steady.inp").read_text() + "\n[DWF]\nJ1 FLOW 0.01\n"
+def test_a_dwf_flow_is_read_and_a_pollutant_dwf_line_is_refused(tmp_path):
+    text = (DATA / "tree_steady.inp").read_text() + "\n[DWF]\nJ3 FLOW 0.01\n"
     path = tmp_path / "dwf.inp"
     path.write_text(text)
-    with pytest.raises(ValueError, match=r"\[DWF\]"):
+    net, _, _ = read_swmm_inp(path)
+    assert next(m for m in net.manholes if m.name == "J3").inflow == 0.01
+    path.write_text(text + "J3 BOD 5\n")
+    with pytest.raises(ValueError, match="only the dry-weather FLOW"):
         read_swmm_inp(path)
 
 
@@ -242,9 +245,8 @@ def test_a_tidal_outfall_is_read_with_its_curve_and_gate(tmp_path):
 
 
 def test_a_timeseries_outfall_takes_its_stage_from_a_driver(tmp_path):
-    """TIMESERIES: the reader records the series name and requires the driver; a
-    [TIMESERIES] section is accepted only for series that outfalls name (their data is the
-    driver's), any other is refused as before."""
+    """TIMESERIES: the reader records the series name and requires the driver; the series is
+    the driver's data, so it is not read, and neither is any series no inflow names."""
     edits = [("Outfall          8.0        FREE                        NO",
               "Outfall          8.0        TIMESERIES Tide1            NO"),
              ("[REPORT]", "[TIMESERIES]\nTide1 0:00 8.1\nTide1 6:00 8.4\n\n[REPORT]")]
@@ -252,8 +254,7 @@ def test_a_timeseries_outfall_takes_its_stage_from_a_driver(tmp_path):
     (outfall,) = net.outfalls
     assert (outfall.kind, outfall.series, outfall.stage) == ("timeseries", "Tide1", None)
     edits[1] = ("[REPORT]", "[TIMESERIES]\nOther 0:00 8.1\n\n[REPORT]")
-    with pytest.raises(ValueError, match=r"\[TIMESERIES\].*'Other'"):
-        read_swmm_inp(_dyn(tmp_path, edits))
+    assert read_swmm_inp(_dyn(tmp_path, edits))[0].inflows is None
 
 
 def test_a_tide_curve_must_be_a_tidal_curve(tmp_path):

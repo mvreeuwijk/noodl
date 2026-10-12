@@ -4,8 +4,9 @@ READ: `[TITLE]`, `[OPTIONS]` (`FLOW_UNITS` CFS, GPM, MGD, CMS, LPS or MLD; see U
 `[JUNCTIONS]` (invert, MaxDepth, InitDepth, SurDepth), `[OUTFALLS]` (FREE, NORMAL, FIXED, TIDAL and
 TIMESERIES, with their flap gate), `[CONDUITS]` (with InitFlow and MaxFlow), `[XSECTIONS]` (only
 `CIRCULAR`; barrels), `[LOSSES]` (the flap gate; the loss coefficients and seepage must be
-0), `[INFLOWS]` (constant `FLOW`
-baselines and constant `CONCENTRATION` pollutant baselines), `[POLLUTANTS]`, and under
+0), `[INFLOWS]` (`FLOW` inflows from a time series, a baseline and a baseline pattern;
+constant `CONCEN` pollutant baselines), `[TIMESERIES]` (inline and `FILE`), `[PATTERNS]`,
+`[DWF]` (flow; see Inflows below), `[POLLUTANTS]`, and under
 DYNWAVE `[STORAGE]` (FUNCTIONAL, TABULAR and the closed shapes CYLINDRICAL, CONICAL,
 PARABOLIC (also spelled PARABOLOID), PYRAMIDAL, with SurDepth; a non-zero evaporation factor and
 exfiltration are refused) with the `[CURVES]` of type STORAGE that its TABULAR units name, and
@@ -22,15 +23,27 @@ The network uses SWMM's own tabulated circular section
 IGNORED because no conduit or node ever references them: `[EVAPORATION]`, `[REPORT]`,
 `[TAGS]`, `[MAP]`, `[COORDINATES]`.
 
-REFUSED BY NAME, because skipping them would silently change the physics: `[DWF]`,
+REFUSED BY NAME, because skipping them would silently change the physics:
 `[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` under STEADY or KINWAVE, `[PUMPS]`,
 `[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[CURVES]` of any type but
-STORAGE, RATING and TIDAL, `[TIMESERIES]` (but see below), `[LID_USAGE]`, roadway weirs,
-weir coefficient curves,
-and any other section carrying content. A
-time-series inflow is refused; time variation belongs in the drivers. A conduit with a
+STORAGE, RATING and TIDAL, `[LID_USAGE]`, roadway weirs, weir coefficient curves, `[FILES]`
+`USE HOTSTART`, `USE INFLOWS`, `USE RDII` and `USE RUNOFF` (`SAVE` lines are harmless and
+ignored), and any other section carrying content. A conduit with a
 culvert code, a non-zero entry, exit or average loss coefficient or seepage rate is refused
 for every routing; one with more than one barrel under STEADY or KINWAVE.
+
+Inflows (`inflows.py` has SWMM's rules): `[INFLOWS]` ``Node FLOW Series Type Mfactor Sfactor
+Baseline Pattern`` is ``Sfactor * series(t) + Baseline * pattern(t)`` (SWMM ignores Mfactor
+for a flow), `[DWF]` ``Node FLOW Average Pat1..Pat4`` the average times the monthly, daily and
+hourly or weekend factors, on the calendar of `START_DATE` and `START_TIME`. A file with
+a time series, a pattern or patterned dry-weather flow gets ``SewerNetwork.inflows`` (an
+`InflowSchedule`; ``schedule.driver(list(model.net.nodes))`` is the ``inflow(t)`` of
+`simulate_dynamic_wave`, which uses it when given no ``inflow``); each node's
+`Manhole.inflow` is then its value at the start of the run. A pollutant inflow must be a
+constant `CONCEN` (or `CONCENTRATION`) baseline with Mfactor 1; a pollutant with a time series
+or pattern, a `MASS` inflow, a pollutant `[DWF]` line and a non-zero Cdwf with a `[DWF]`
+flow are refused. A `[TIMESERIES]` no inflow names is not read. A `TIMESERIES` outfall takes
+its stage from the `outfall_stage` driver.
 
 DYNWAVE reads `VARIABLE_STEP` (the Courant factor; absent means SWMM's default 0.75,
 project.c:854) and `MINIMUM_STEP`, and clips `ROUTING_STEP` to `WET_STEP` (default 300 s)
@@ -39,9 +52,8 @@ ROUTING_STEP, as SWMM validates conduits before it lowers the step to WET_STEP).
 refuses, with the line number: `ALLOW_PONDING YES`. A TIDAL outfall reads its `[CURVES]` TIDAL
 curve (`Outfall.tide`, hours and stage elevations). A TIMESERIES outfall takes its stage from
 the `outfall_stage` driver (time variation belongs in the drivers): the reader records the
-series name (`Outfall.series`) and accepts a `[TIMESERIES]` section holding only the series
-that outfalls name, which it does not read; the model builder then refuses a network
-whose TIMESERIES outfall has no driver.
+series name (`Outfall.series`) and does not read that series; the model builder then refuses
+a network whose TIMESERIES outfall has no driver.
 
 A conduit the reader reverses (adverse, below) has its `InitFlow` sign flipped and its flap
 gate recorded as reversed (`Pipe.flap_gate_reversed`), as SWMM does (`conduit_reverse`,
@@ -67,8 +79,9 @@ weir and outlet crest heights, STORAGE curves (depth m, area m2), RATING curves 
 m, flow m3/s), TIDAL curves (stage m), FUNCTIONAL storage (``A = a1 y^a2 + a0``: ``a1`` goes
 with length^(2 - a2), ``a0`` with length^2), the CYLINDRICAL, CONICAL, PARABOLOID and PYRAMIDAL
 lengths, initial and maximum conduit flows, constant `FLOW` baselines, `MIN_SURFAREA` (an area)
-and `HEAD_TOLERANCE` (a length). A FUNCTIONAL outlet ``q = a h^b`` converts as ``a * flow /
-length^b``, and a weir's discharge coefficients (``Q = Cd L h^1.5``, ``Cd2 h^2.5``) of a US
+and `HEAD_TOLERANCE` (a length), the `[INFLOWS]` and `[DWF]` flows. A FUNCTIONAL outlet
+``q = a h^b`` converts as ``a * flow / length^b``, and a weir's discharge coefficients
+(``Q = Cd L h^1.5``, ``Cd2 h^2.5``) of a US
 file from ft^0.5/s to the m^0.5/s of the SI system by SWMM's own ``M3perFT3 / ft^2.5`` (the
 SI system, whatever its flow unit, takes them as they are). Not converted:
 Manning n, slopes, side slopes, orifice discharge coefficients, end contractions, `MIN_SLOPE`
@@ -78,11 +91,27 @@ Manning n, slopes, side slopes, orifice discharge coefficients, end contractions
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import math
 from pathlib import Path
 
 from noodl.apps.inpfile import as_float, read_sections, require_fields
 from noodl.apps.sewer.dynwave import DynamicWaveOptions
+from noodl.apps.sewer.inflows import (
+    DryWeatherInflow,
+    ExternalInflow,
+    InflowSchedule,
+    TimePattern,
+    TimeSeries,
+    parse_clock,
+    parse_date,
+    patterns_from_lines,
+    read_series_file,
+    series_from_entries,
+    start_datetime,
+    timeseries_entries,
+    tokens,
+)
 from noodl.apps.sewer.network import (
     Manhole,
     Orifice,
@@ -157,10 +186,17 @@ def _seconds(line, path) -> float:
 
 _IGNORED = {
     "TITLE", "EVAPORATION", "REPORT", "TAGS", "MAP", "COORDINATES", "VERTICES",
-    "POLYGONS", "SYMBOLS", "LABELS", "BACKDROP", "PROFILES", "FILES", "END",
+    "POLYGONS", "SYMBOLS", "LABELS", "BACKDROP", "PROFILES", "END",
 }
 _READ = {"OPTIONS", "JUNCTIONS", "OUTFALLS", "CONDUITS", "XSECTIONS", "LOSSES", "INFLOWS",
-         "POLLUTANTS", "STORAGE", "CURVES", "ORIFICES", "WEIRS", "OUTLETS"}
+         "POLLUTANTS", "STORAGE", "CURVES", "ORIFICES", "WEIRS", "OUTLETS", "TIMESERIES",
+         "PATTERNS", "DWF", "FILES"}
+#: `[FILES]` ``USE`` kinds that change the physics (a hot-start state, interface inflows, RDII
+#: or runoff flows): refused. ``USE RAINFALL`` only feeds rain gauges, which are refused anyway.
+_REFUSED_FILES = {"HOTSTART": "the initial state", "INFLOWS": "interface inflows",
+                  "RDII": "RDII flows", "RUNOFF": "runoff flows"}
+#: SWMM's default start of the simulation clock (project.c)
+DEFAULT_START = start_datetime(datetime.date(2004, 1, 1), 0.0)
 #: The regulator sections, read under DYNWAVE only.
 _REGULATORS = ("ORIFICES", "WEIRS", "OUTLETS")
 #: SWMM's [WEIRS] types (keywords.c:157 `WeirTypeWords`) -> `Weir.kind`; ROADWAY is refused.
@@ -189,12 +225,12 @@ def read_swmm_inp(
     path = Path(path)
     sections = read_sections(path)
     for name, lines in sections.items():
-        if name in _READ or name in _IGNORED or not lines or name == "TIMESERIES":
-            continue                  # [TIMESERIES] is checked against the outfalls below
+        if name in _READ or name in _IGNORED or not lines:
+            continue
         raise ValueError(
             f"{path}: section [{name}] (line {lines[0].number}) is not part of the "
             f"documented subset and carries content; this reader models gravity conduits, "
-            f"junctions, outfalls and constant inflows only"
+            f"junctions, outfalls, regulators, storage and lateral inflows only"
         )
 
     routing = "KINWAVE"
@@ -227,6 +263,8 @@ def read_swmm_inp(
 
     dynamic = routing == "DYNWAVE"
     lf, qf = unit_factors(flow_units)           # m per length unit, m3/s per flow unit
+    start = _start_datetime(sections.get("OPTIONS", []), path)
+    _check_files(sections.get("FILES", []), path)
     dynamic_wave = DynamicWaveOptions()
     min_slope = 0.0
     if dynamic:
@@ -292,7 +330,6 @@ def read_swmm_inp(
         elevation = as_float(line, 1, "the invert elevation", path) * lf
         invert[name] = elevation
         outfalls.append(_outfall(line, name, elevation, dynamic, tides, all_curves, path, lf))
-    _check_timeseries(sections.get("TIMESERIES", []), outfalls, path)
 
     shapes: dict[str, float] = {}
     barrel_count: dict[str, int] = {}
@@ -436,6 +473,7 @@ def read_swmm_inp(
                              routing, path, lf, qf)
 
     pollutants: dict[str, dict] = {}
+    cdwf: list[str] = []                          # pollutants with a dry-weather concentration
     for line in sections.get("POLLUTANTS", []):
         require_fields(line, 6, "a pollutant", path)
         units = line.fields[1].upper()
@@ -453,47 +491,16 @@ def read_swmm_inp(
             raise ValueError(
                 f"{path}: line {line.number}: pollutant {line.fields[0]!r} has a nonzero "
                 f"Cinit; the model starts with clean water, set it to 0")
+        if len(line.fields) > 9 and as_float(line, 9, "Cdwf", path) != 0.0:
+            cdwf.append(line.fields[0])
         pollutants[line.fields[0]] = {
             "units": units,
             "scale": 1e-3 if units == "MG/L" else 1e-6,
             "decay": as_float(line, 5, "the decay coefficient", path) / 86400.0,
         }
 
-    inflow = {m.name: 0.0 for m in manholes}
-    loads: dict[str, dict[str, float]] = {}
-    for line in sections.get("INFLOWS", []):
-        require_fields(line, 4, "an inflow", path)
-        node, constituent, series = line.fields[0], line.fields[1], line.fields[2]
-        if series not in ('""', "''", "*"):
-            raise ValueError(
-                f"{path}: line {line.number}: inflow at {node!r} names the time series "
-                f"{series!r}; only constant baselines are read, time variation belongs in "
-                f"the drivers"
-            )
-        kind = line.fields[3].upper()
-        baseline = as_float(line, 6, "the baseline", path) if len(line.fields) > 6 else 0.0
-        if constituent.upper() == "FLOW":
-            baseline *= qf
-            if node not in inflow:
-                raise ValueError(
-                    f"{path}: line {line.number}: inflow at {node!r}, which is not a "
-                    f"junction"
-                )
-            inflow[node] = baseline
-        else:
-            if constituent not in pollutants:
-                raise ValueError(
-                    f"{path}: line {line.number}: inflow names pollutant "
-                    f"{constituent!r}, which has no [POLLUTANTS] entry"
-                )
-            if kind != "CONCENTRATION":
-                raise ValueError(
-                    f"{path}: line {line.number}: a pollutant inflow must be of type "
-                    f"CONCENTRATION, got {kind!r}"
-                )
-            loads.setdefault(node, {})[constituent] = (
-                baseline * pollutants[constituent]["scale"]
-            )
+    inflow, loads, schedule = _lateral_inflows(
+        sections, {m.name for m in manholes}, pollutants, cdwf, start, qf, path)
 
     manholes = [
         dataclasses.replace(m, inflow=inflow[m.name])
@@ -503,7 +510,7 @@ def read_swmm_inp(
         manholes=tuple(manholes), pipes=tuple(pipes), outfalls=tuple(outfalls),
         routing=routing, geometry=geometry, dynamic_wave=dynamic_wave,
         orifices=regulators["ORIFICES"], weirs=regulators["WEIRS"],
-        outlets=regulators["OUTLETS"],
+        outlets=regulators["OUTLETS"], inflows=schedule,
     )
     network.validate()
     return network, loads, pollutants
@@ -889,15 +896,193 @@ def _outfall(line, name: str, elevation: float, dynamic: bool, tides: dict,
                    tide=tide, series=series)
 
 
-def _check_timeseries(lines, outfalls: list, path) -> None:
-    """A `[TIMESERIES]` section holds only series that TIMESERIES outfalls name (their data
-    is the `outfall_stage` driver's, not read here); any other series is refused."""
-    named = {o.series for o in outfalls if o.series is not None}
+def _start_datetime(lines, path):
+    """The simulation clock's start from `[OPTIONS]` `START_DATE` (``M/D/Y``, default
+    SWMM's 01/01/2004) and `START_TIME` (``H:M[:S]``, default 0), which dates and
+    time-of-day patterns of the inflows refer to."""
+    date, seconds = DEFAULT_START.date(), 0.0
     for line in lines:
-        if line.fields[0] not in named:
+        key = line.fields[0].upper()
+        if key not in ("START_DATE", "START_TIME"):
+            continue
+        require_fields(line, 2, key, path)
+        if key == "START_DATE":
+            try:
+                parsed = parse_date(line.fields[1])
+            except ValueError as err:
+                raise ValueError(f"{path}: line {line.number}: START_DATE: {err}") from None
+            if parsed is None:
+                raise ValueError(f"{path}: line {line.number}: START_DATE must be a date, "
+                                 f"got {line.fields[1]!r}")
+            date = parsed
+        else:
+            parsed = parse_clock(line.fields[1])
+            if parsed is None or parsed >= 86400.0:
+                raise ValueError(f"{path}: line {line.number}: START_TIME must be a time of "
+                                 f"day (H:M[:S]), got {line.fields[1]!r}")
+            seconds = parsed
+    return start_datetime(date, seconds)
+
+
+def _check_files(lines, path) -> None:
+    """`[FILES]`: ``SAVE`` lines only write a file and are ignored; a ``USE`` of a hot start,
+    interface inflows, RDII or runoff changes the physics and is refused by name."""
+    for line in lines:
+        toks = tokens(line.raw)
+        if len(toks) >= 2 and toks[0].upper() == "USE" and toks[1].upper() in _REFUSED_FILES:
             raise ValueError(
-                f"{path}: section [TIMESERIES] (line {line.number}) names series "
-                f"{line.fields[0]!r}, which no TIMESERIES outfall uses; this reader models "
-                f"gravity conduits, junctions, outfalls and constant inflows only (time "
-                f"variation belongs in the drivers)"
-            )
+                f"{path}: line {line.number}: [FILES] USE {toks[1].upper()} supplies "
+                f"{_REFUSED_FILES[toks[1].upper()]} from a file, which is not modelled")
+
+
+def _tseries(sections, path) -> dict[str, list[tuple[int, list[str]]]]:
+    """The `[TIMESERIES]` lines by series name: `(line number, fields after the name)`."""
+    out: dict[str, list[tuple[int, list[str]]]] = {}
+    for line in sections.get("TIMESERIES", []):
+        toks = tokens(line.raw)
+        if not toks:
+            continue
+        if len(toks) < 3:
+            raise ValueError(f"{path}: line {line.number} of [TIMESERIES]: a series line "
+                             f"needs a name and a time and value, or FILE and a path")
+        out.setdefault(toks[0], []).append((line.number, toks[1:]))
+    return out
+
+
+def _read_series(name, rows, start, path) -> TimeSeries:
+    """The series `name` from its `[TIMESERIES]` `rows` (inline entries, or ``FILE path``
+    resolved against the `.inp`'s folder)."""
+    if rows[0][1][0].upper() == "FILE":
+        if len(rows) > 1:
+            raise ValueError(f"{path}: line {rows[1][0]}: time series {name!r} reads a file "
+                             f"and has more lines")
+        number, toks = rows[0]
+        file = Path(path).parent / toks[1]
+        return read_series_file(name, file, path, start)
+    entries: list = []
+    last = None
+    for number, toks in rows:
+        if toks[0].upper() == "FILE":
+            raise ValueError(f"{path}: line {number}: time series {name!r} mixes a file "
+                             f"and entries")
+        found, last = timeseries_entries(toks, number, path, last)
+        entries += found
+    try:
+        return series_from_entries(name, entries, start)
+    except ValueError as err:
+        raise ValueError(f"{path}: line {rows[0][0]}: {err}") from None
+
+
+def _lateral_inflows(sections, junctions: set, pollutants: dict, cdwf: list, start, qf: float,
+                     path):
+    """`(inflow, loads, schedule)` from `[INFLOWS]`, `[DWF]`, `[PATTERNS]` and `[TIMESERIES]`:
+    `inflow` the m3/s of each junction at the start of the run, `loads` the constant
+    pollutant concentrations (kg/m3) and `schedule` the `InflowSchedule` when any flow
+    varies in time (a series, a pattern, patterned dry-weather flow), else ``None``. `qf` is
+    the m3/s per flow unit of the file. SWMM's rules are in `inflows.py`; what it does not
+    take is refused by name, with the line."""
+    patterns = patterns_from_lines(
+        [(line.number, tokens(line.raw)) for line in sections.get("PATTERNS", [])
+         if tokens(line.raw)], path)
+    rows = _tseries(sections, path)
+    series: dict[str, TimeSeries] = {}
+
+    def pattern(line, label: str) -> TimePattern:
+        if label not in patterns:
+            raise ValueError(f"{path}: line {line.number}: names the pattern {label!r}, "
+                             f"which has no [PATTERNS] entry")
+        return patterns[label]
+
+    external: dict[str, ExternalInflow] = {}
+    loads: dict[str, dict[str, float]] = {}
+    for line in sections.get("INFLOWS", []):
+        toks = tokens(line.raw)
+        if len(toks) < 3:
+            raise ValueError(f"{path}: line {line.number} of [INFLOWS]: an inflow needs a "
+                             f"node, a constituent and a time series (\"\" for none)")
+        node, constituent, label = toks[0], toks[1], toks[2]
+        has_series = label not in ("", "*")
+
+        def number(i: int, what: str, default: float, line=line, toks=toks) -> float:
+            if len(toks) <= i or toks[i] in ("", "*"):
+                return default
+            try:
+                return float(toks[i])
+            except ValueError:
+                raise ValueError(f"{path}: line {line.number} of [INFLOWS]: {what} must be "
+                                 f"a number, got {toks[i]!r}") from None
+
+        mfactor, sfactor, baseline = (number(4, "Mfactor", 1.0), number(5, "Sfactor", 1.0),
+                                      number(6, "the baseline", 0.0))
+        label_pattern = toks[7] if len(toks) > 7 and toks[7] not in ("", "*") else None
+        if constituent.upper() == "FLOW":
+            if node not in junctions:
+                raise ValueError(
+                    f"{path}: line {line.number}: inflow at {node!r}, which is not a "
+                    f"junction")
+            if has_series and label not in series:
+                if label not in rows:
+                    raise ValueError(
+                        f"{path}: line {line.number}: inflow at {node!r} names the time "
+                        f"series {label!r}, which has no [TIMESERIES] entry")
+                series[label] = _read_series(label, rows[label], start, path)
+            external[node] = ExternalInflow(
+                node, series[label] if has_series else None, sfactor * qf, baseline * qf,
+                pattern(line, label_pattern) if label_pattern else None)
+            continue
+        if constituent not in pollutants:
+            raise ValueError(
+                f"{path}: line {line.number}: inflow names pollutant "
+                f"{constituent!r}, which has no [POLLUTANTS] entry")
+        kind = toks[3].upper() if len(toks) > 3 else "CONCEN"
+        if kind not in ("CONCEN", "CONCENTRATION"):
+            raise ValueError(
+                f"{path}: line {line.number}: a pollutant inflow must be of type CONCEN, got "
+                f"{kind!r} (mass inflows are not modelled)")
+        if has_series or label_pattern:
+            raise ValueError(
+                f"{path}: line {line.number}: the inflow of pollutant {constituent!r} at "
+                f"{node!r} has a time series or a pattern; only constant concentrations are "
+                f"modelled")
+        if mfactor != 1.0:
+            raise ValueError(
+                f"{path}: line {line.number}: the inflow of pollutant {constituent!r} at "
+                f"{node!r} has Mfactor {toks[4]}; only 1 is modelled")
+        loads.setdefault(node, {})[constituent] = baseline * pollutants[constituent]["scale"]
+
+    dry: dict[str, DryWeatherInflow] = {}
+    for line in sections.get("DWF", []):
+        toks = tokens(line.raw)
+        if len(toks) < 3:
+            raise ValueError(f"{path}: line {line.number} of [DWF]: a dry-weather flow needs "
+                             f"a node, FLOW and an average value")
+        node, constituent = toks[0], toks[1]
+        if constituent.upper() != "FLOW":
+            raise ValueError(
+                f"{path}: line {line.number}: [DWF] of {constituent!r} at {node!r}: only "
+                f"the dry-weather FLOW is modelled, not a pollutant concentration")
+        if node not in junctions:
+            raise ValueError(f"{path}: line {line.number}: dry-weather flow at {node!r}, "
+                             f"which is not a junction")
+        try:
+            average = float(toks[2]) * qf
+        except ValueError:
+            raise ValueError(f"{path}: line {line.number} of [DWF]: the average flow must be "
+                             f"a number, got {toks[2]!r}") from None
+        by_kind: dict[str, TimePattern] = {}
+        for label in toks[3:7]:               # SWMM reads four pattern fields (inflow.c)
+            if label:
+                found = pattern(line, label)
+                by_kind[found.kind] = found   # one per kind: the last wins
+        dry[node] = DryWeatherInflow(node, average, tuple(by_kind.values()))
+    if dry and cdwf:
+        raise ValueError(f"{path}: section [DWF] with pollutant {cdwf[0]!r}, whose Cdwf (the "
+                         f"dry-weather concentration) is not 0; the dry-weather pollutant "
+                         f"load is not modelled")
+
+    schedule = InflowSchedule(start, tuple(external.values()), tuple(dry.values()))
+    varying = (any(e.series is not None or e.pattern is not None for e in external.values())
+               or any(d.patterns for d in dry.values()))
+    initial = schedule.flows(0.0)
+    inflow = {name: initial.get(name, 0.0) for name in junctions}
+    return inflow, loads, schedule if varying else None

@@ -10,10 +10,13 @@ For every `.inp` under CORPUS_DIR (the corpus is an argument, never part of the 
    refusal BY NAME and is counted as ``refused:<normalised reason>`` (paths, line numbers,
    names and numbers removed so the same reason groups across files); any other exception is
    ``build_error``.
-2. simulate `--window` seconds: ``simulate_dynamic_wave`` under DYNWAVE; under KINWAVE and
-   STEADY the model's resolved state (the existing quasi-steady path) -- ``sim_error`` on an
-   exception.
-3. run pyswmm on a temporary COPY of the file with its dates cut to the same window, and
+2. simulate `--window` seconds: ``simulate_dynamic_wave`` under DYNWAVE (the file's time
+   series, patterns and dry-weather flow reach it as ``model.inflow_schedule``, which the run
+   uses by default); under KINWAVE and STEADY the model's resolved state (the existing
+   quasi-steady path) at the inflows the schedule gives at the END of the window --
+   ``sim_error`` on an exception.
+3. run pyswmm on a temporary COPY of the file with its dates cut to the same window (the
+   ``FILE`` paths of its time series made absolute, as the copy lives elsewhere), and
    compare node depths and link flows at the end of the window (both in SI): ``ok`` carries
    the maximum depth and flow differences and both wall times; ``swmm_error`` when SWMM
    itself fails.
@@ -103,6 +106,9 @@ def _noodl_worker(path: str, window: float) -> dict:
                 for i, n in enumerate(model.link_names)}
             out["steps"] = int(hist["water.q"].shape[0])
         else:
+            if net.inflows is not None:        # the schedule at the end of the window
+                drivers = dict(drivers, inflow=model.inflow_schedule.driver(
+                    list(model.net.nodes))(window))
             resolved = model._apply_closures(state, drivers)
             out["flows"] = {p.name: [float(resolved["sewer.q"][i]), p.u, p.v]
                             for i, p in enumerate(net.pipes)}
@@ -177,9 +183,32 @@ def _parse_time(text: str) -> datetime.timedelta:
     return datetime.timedelta(hours=parts[0], minutes=parts[1], seconds=parts[2])
 
 
-def cut_to_window(text: str, window: float) -> tuple[str, str]:
+_FILE_LINE = re.compile(r'^(\s*\S+\s+FILE\s+)(?:"([^"]*)"|(\S+))', re.I)
+
+
+def absolutise_files(lines: list[str], base: Path | None) -> list[str]:
+    """`lines` of an `.inp` with the path of each `[TIMESERIES]` ``name FILE path`` made
+    absolute against `base`, the original file's folder (SWMM reads a copy that lives
+    elsewhere)."""
+    if base is None:
+        return lines
+    out, section = [], None
+    for raw in lines:
+        body = raw.split(";", 1)[0]
+        if body.strip().startswith("["):
+            section = body.strip().strip("[]").upper()
+        match = _FILE_LINE.match(body) if section == "TIMESERIES" else None
+        if match:
+            path = Path(match.group(2) or match.group(3))
+            raw = f'{match.group(1)}"{path if path.is_absolute() else base / path}"'
+        out.append(raw)
+    return out
+
+
+def cut_to_window(text: str, window: float, base: Path | None = None) -> tuple[str, str]:
     """`(text, flow_units)` of an `.inp` whose START/END (and REPORT_START) are set so the
-    run lasts `window` s from the file's own start."""
+    run lasts `window` s from the file's own start; `base`, the original file's folder, makes
+    the time series ``FILE`` paths absolute."""
     lines = text.splitlines()
     section, found, options_at = None, {}, None
     for i, raw in enumerate(lines):
@@ -210,6 +239,7 @@ def cut_to_window(text: str, window: float) -> tuple[str, str]:
         else:
             lines.insert(options_at + 1, f"{key} {value}")
             found = {k: (i + (i > options_at), v) for k, (i, v) in found.items()}
+    lines = absolutise_files(lines, base)
     return "\n".join(lines) + "\n", found.get("FLOW_UNITS", (0, "CFS"))[1].upper()
 
 
@@ -228,7 +258,7 @@ def run_file(path: Path, root: Path, window: float, timeout: float) -> dict:
     sys.path.insert(0, str(SRC))
     from noodl.apps.sewer.inp import unit_factors
     try:
-        text, units = cut_to_window(path.read_text(errors="replace"), window)
+        text, units = cut_to_window(path.read_text(errors="replace"), window, path.parent)
         lf, qf = unit_factors(units)
     except Exception as err:
         row.update(category="swmm_error", reason=normalise_reason(err))
