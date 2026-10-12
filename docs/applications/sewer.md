@@ -720,9 +720,9 @@ A file whose flows vary gets `SewerNetwork.inflows`, an `InflowSchedule`; the mo
 `model.inflow_schedule`, and
 
 ```python
-net, _, _ = read_swmm_inp("model.inp")
+net, _, _ = read_swmm_inp("inflow_dwf_dynwave.inp")
 model, state, drivers = build_model(net)
-state, hist = simulate_dynamic_wave(model, state, drivers, duration=3600.0)   # uses the schedule
+state, hist = simulate_dynamic_wave(model, state, drivers, duration=60.0)     # uses the schedule
 inflow = net.inflows.driver(list(model.net.nodes))                          # inflow(t) -> (n,) m3/s
 ```
 
