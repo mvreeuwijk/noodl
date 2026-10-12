@@ -129,12 +129,16 @@ named for the physics it carries:
 | `.boundary_temperature`, ... | `"<layer>.x_boundary"` | driver | the layer's boundary order |
 | `.sources` | `"<layer>.sources"` | driver | full node order |
 | `.capacity` | `"<layer>.capacity"` | driver | the layer's active interior order |
+| `.removal` | `"<layer>.removal"` | driver | the layer's active interior order, `(n_i, K)` |
 | `.storage` (allocation layers) | `"<layer>.s"` | state | full node order |
 | `.requests` (allocation layers) | `"<layer>.requests"` | driver | edge order of the layer's kind |
 
 Every key reports its unit: the layer's own for state and boundary values, and the
 application's `flow_unit`, `source_unit` and `capacity_unit` for flows, sources and
 capacity, so `describe()` shows `thermal.sources` in W and `air.q` in kg/s.
+`"<layer>.removal"` is a per-step first-order removal rate (1/s, active interior order,
+`(n_i, K)`), replacing the layer's construction-time `removal`; it is written by a closure
+that owns sinks.
 
 The names come from each layer's `quantity`, so every application has them without code
 of its own; the solver's short spellings (`.x`, `.phi`, `.s`, `.q`) work too. Each
@@ -269,7 +273,7 @@ for issue in model.check(state, drivers_typo).issues:
 ```
 
 ```text
-[warning] unknown-layer-key: 'thermal.source' is not a driver key of layer 'thermal' (its driver keys: ['thermal.capacity', 'thermal.sources', 'thermal.x_boundary']); did you mean 'thermal.sources'?
+[warning] unknown-layer-key: 'thermal.source' is not a driver key of layer 'thermal' (its driver keys: ['thermal.capacity', 'thermal.removal', 'thermal.sources', 'thermal.x_boundary']); did you mean 'thermal.sources'?
 ```
 
 ## Finding what is available

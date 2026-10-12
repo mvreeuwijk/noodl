@@ -15,7 +15,9 @@ per-node storage, full-node order; that layer also writes its realised flows to
 "<layer>.q"). Drivers: "<layer>.phi_boundary", "<layer>.x_boundary", optional
 "<layer>.sources" (FULL-node order, zeros on boundary and inactive nodes), optional
 "<layer>.capacity" (a transport layer's per-step capacity override; absent, the
-layer's construction-time capacity stands), "<layer>.requests" (an allocation layer's
+layer's construction-time capacity stands), optional "<layer>.removal" (a transport layer's
+per-step first-order removal rate, 1/s, (..., n_i, K); absent, the layer's
+construction-time removal stands), "<layer>.requests" (an allocation layer's
 per-edge requested flow, required every step). Closures return driver updates; they may
 not write state keys. A transport layer whose kinds no
 potential layer provides reads its branch flows from the driver "<layer>.q", in the layer's
@@ -926,6 +928,9 @@ class Model:
             # construction-time capacity stands, so nothing changes for a fixed-storage
             # layer. Shape and positivity are checked by the layer, naming the nodes.
             cap = drv.get(f"{name}.capacity")
+            # A per-step first-order removal rate (1/s), written by a closure that owns the
+            # sinks (deposition, a scheduled removal). Absent, the layer's own stands.
+            removal = drv.get(f"{name}.removal")
             transfer_total = None
             # A fresh dict per layer, threaded into `steady`/`step`/
             # `step_with_transfer` as an out-parameter and read back below into
@@ -944,7 +949,9 @@ class Model:
                         if like is None
                         else self._zero_sources(layer, like, layer.n_i)
                     )
-                x = layer.steady(q_kind, sources, xb, capacity=cap, diagnostics=layer_diag)
+                x = layer.steady(
+                    q_kind, sources, xb, capacity=cap, removal=removal, diagnostics=layer_diag
+                )
             else:
                 x = base.get(f"{name}.x")
                 if x is None:
@@ -981,7 +988,7 @@ class Model:
                     if want_transfer:
                         stepped = layer.step_with_transfer(
                             x, q_kind, sources, xb, dt / k,
-                            capacity=cap_j, capacity_prev=cap_prev_j,
+                            capacity=cap_j, capacity_prev=cap_prev_j, removal=removal,
                             diagnostics=layer_diag,
                         )
                         x = stepped.x
@@ -991,7 +998,8 @@ class Model:
                         )
                     else:
                         x = layer.step(x, q_kind, sources, xb, dt / k, capacity=cap_j,
-                                       capacity_prev=cap_prev_j, diagnostics=layer_diag)
+                                       capacity_prev=cap_prev_j, removal=removal,
+                                       diagnostics=layer_diag)
                 if cap is not None:
                     new[f"{name}.capacity"] = cap
                     made.append(f"{name}.capacity")
@@ -1513,6 +1521,7 @@ class Model:
             out[name] = layer.rate(
                 x, self._kind_flows(name, state, drv), sources, xb,
                 capacity=drv.get(f"{name}.capacity"),
+                removal=drv.get(f"{name}.removal"),
             )
         return out
 

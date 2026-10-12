@@ -573,6 +573,15 @@ class LayerRef:
                 description="per-step storage capacity overriding the construction-time one",
                 unit=getattr(layer, "capacity_unit", ""), **common,
             )
+            inputs["removal"] = Field(
+                f"{name}.removal", role="driver", axis="node", labels=self.interior_nodes,
+                aliases=_node_aliases(net, self.interior_nodes),
+                ordering="active interior order", required="optional", default=None,
+                n_species=K, species=species, column=True,
+                description="per-step first-order removal rate overriding the "
+                            "construction-time one",
+                unit="1/s", **common,
+            )
             if flow_owner is None:
                 cols: list[int] = []
                 for k in layer.flow_kinds:
