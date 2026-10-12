@@ -114,6 +114,7 @@ Calculations and helpers.
 | `to_mg_per_litre` | kg/m3 -> mg/L (the factor is exactly 1e3). | `to_mg_per_litre(x)` |
 | `to_ppm` | kg/m3 of headspace H2S -> ppm by volume at the headspace temperature (K). | `to_ppm(concentration, temperature)` |
 | `tree_steady` | The committed 5-conduit, 6-node fixture (`tests/data/sewer/tree_steady.inp`). | `tree_steady()` |
+| `unit_factors` | `(length, flow)` for the SWMM `FLOW_UNITS` keyword `flow_units`: the metres per length unit (0.3048 for the US system CFS, GPM and MGD, 1 for CMS, LPS and MLD) and the m3/s per flow unit, SWMM's own conversion (units.c). An area converts with ``length**2``. Raises ValueError for an unknown keyword. | `unit_factors(flow_units)` |
 
 ## Constants and tables
 

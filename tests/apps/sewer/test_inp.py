@@ -84,16 +84,6 @@ def test_conduits_are_normalised_upstream_to_downstream():
     assert pipe.slope == pytest.approx(2.0 / (200.0**2 - 2.0**2) ** 0.5, rel=1e-12)
 
 
-def test_non_cms_flow_units_are_refused(tmp_path):
-    text = (DATA / "tree_steady.inp").read_text().replace(
-        "FLOW_UNITS           CMS", "FLOW_UNITS           CFS"
-    )
-    path = tmp_path / "cfs.inp"
-    path.write_text(text)
-    with pytest.raises(ValueError, match="FLOW_UNITS must be CMS"):
-        read_swmm_inp(path)
-
-
 def test_an_unknown_section_with_content_is_refused(tmp_path):
     text = (DATA / "tree_steady.inp").read_text() + "\n[PUMPS]\nP1 J1 J3 HEAD C1\n"
     path = tmp_path / "pumps.inp"
@@ -560,6 +550,7 @@ def test_storage_units_are_read_with_their_curves(tmp_path):
     ("CYLINDRICAL", "4 2 0", ("cylindrical", 4.0, 2.0)),
     ("CONICAL", "4 2 0.5", ("conical", 4.0, 2.0, 0.5)),
     ("PARABOLOID", "4 2 3", ("paraboloid", 4.0, 2.0, 3.0)),
+    ("PARABOLIC", "4 2 3", ("paraboloid", 4.0, 2.0, 3.0)),      # SWMM 5.2.4's own keyword
     ("PYRAMIDAL", "4 2 0.5", ("pyramidal", 4.0, 2.0, 0.5)),
 ])
 def test_closed_storage_shapes_are_read(tmp_path, shape, params, expected):

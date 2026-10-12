@@ -669,6 +669,9 @@ def build_model(
     the stage elevation of each TIMESERIES outfall (``{name: m, or a function of t in s}``;
     `build_dynamic_wave_model`).
     """
+    if not (net.pipes or net.orifices or net.weirs or net.outlets):
+        raise ValueError("build_model: the network has no links (no conduits, orifices, "
+                         "weirs or outlets), so there is nothing to route; add at least one")
     if net.routing == "dynamic_wave":
         if storage:
             raise ValueError("build_model: storage=True is the kinematic path's storage "

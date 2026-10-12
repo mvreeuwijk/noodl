@@ -56,7 +56,8 @@ invert, `ground` = invert + `MaxDepth`, `initial_depth` and `surcharge_depth`. T
 SWMM 5.2.4's: `FUNCTIONAL a1 a2 a0` (area `a1 y^a2 + a0`, m², read as `("functional", a1, a2,
 a0)`; `a0 >= 0` and `a2 >= 0`), `TABULAR Curve` (a `[CURVES]` curve of type `STORAGE`, depth in
 m against area in m², its points over any number of lines, depths strictly increasing) and the
-closed shapes `CYLINDRICAL L W -`, `CONICAL L W Z`, `PARABOLOID L W H` and `PYRAMIDAL L W Z`
+closed shapes `CYLINDRICAL L W -`, `CONICAL L W Z`, `PARABOLIC L W H` (SWMM 5.2.4's keyword; `PARABOLOID` is accepted too) and
+`PYRAMIDAL L W Z`
 (m; `Z` a side slope, run over rise). A non-zero evaporation factor `Fevap` and a non-zero
 exfiltration `Ksat` (the value after `Fevap`, or the second of suction head, `Ksat`,
 `IMDmax`; a `Ksat` of 0 is no exfiltration, as in SWMM) are refused with the line number, as
@@ -104,8 +105,39 @@ flows, volumes and surface areas of the pipe are totals) and refused with the li
 `STEADY` and `KINWAVE`; a culvert code is refused for every routing. Both used to be ignored
 silently.
 
-**Constraints:** `FLOW_UNITS` must be `CMS` — the reader is SI-native and does not convert.
-`LINK_OFFSETS` must be `DEPTH` or `ELEVATION` (`DEPTH` with regulators). Only `CIRCULAR`
+**Units.** `FLOW_UNITS` may be `CFS`, `GPM`, `MGD` (the US system: lengths in ft) or `CMS`,
+`LPS`, `MLD` (the SI system: lengths in m); an absent `FLOW_UNITS` is SWMM's default, `CFS`. The
+reader converts everything to SI (m, m3/s, s) as it reads, with SWMM's own constants
+(`unit_factors`). Lengths multiply by 0.3048 (US) or 1 (SI), areas by its square, flows by
+`0.02832 / Qcf`, where `Qcf` is SWMM's number of user flow units per cfs. SWMM 5.2.4 rounds
+these (`units.c`: 448.831 gpm, 0.64632 mgd, 0.02832 cms, 28.317 lps, 2.4466 mld per cfs), so
+1 LPS is 1.00011e-3 of noodl's m3/s and a CMS file converts by exactly 1; using the exact
+$0.0283168$ would disagree with SWMM by 1e-4.
+
+| `FLOW_UNITS` | system | length unit | m3/s per flow unit |
+|---|---|---|---|
+| `CFS` | US | ft = 0.3048 m | 0.02832 |
+| `GPM` | US | ft | 0.02832 / 448.831 = 6.3101e-5 |
+| `MGD` | US | ft | 0.02832 / 0.64632 = 0.043816 |
+| `CMS` | SI | m | 1 |
+| `LPS` | SI | m | 0.02832 / 28.317 = 1.00011e-3 |
+| `MLD` | SI | m | 0.02832 / 2.4466 = 0.011575 |
+
+Converted: node invert elevations, maximum, initial and surcharge depths, fixed and tidal
+outfall stages, conduit lengths, offsets and diameters, regulator openings (`Geom1`, `Geom2`),
+orifice, weir and outlet crest heights, `[CURVES]` (STORAGE: depth and area; RATING: depth or
+head and flow; TIDAL: stage), `FUNCTIONAL` storage (`A = a1 y^a2 + a0`: `a1` scales with
+length^(2 - a2), `a0` with length^2), the `CYLINDRICAL`, `CONICAL`, `PARABOLOID` and
+`PYRAMIDAL` lengths, `InitFlow`, `MaxFlow`, constant `FLOW` baselines, `MIN_SURFAREA` (an
+area) and `HEAD_TOLERANCE` (a length). A `FUNCTIONAL` outlet `q = a h^b` converts as
+`a * flow / length^b`. A weir's Cd (`Q = Cd L h^1.5`) in a US file, in ft^0.5/s, becomes
+the SI one by SWMM's own `M3perFT3 / ft^2.5` (0.028317 / 0.3048^2.5); an SI file, whatever its
+flow unit, gives it in m^0.5/s as it is. Not converted: Manning's n, slopes, side slopes,
+orifice Cd, end contractions, `MIN_SLOPE` (percent), times and concentrations. The test suite
+rewrites each CMS fixture into the other five systems and requires the same network back, and
+runs the rewritten files through SWMM itself.
+
+**Constraints:** `LINK_OFFSETS` must be `DEPTH` or `ELEVATION` (`DEPTH` with regulators). Only `CIRCULAR`
 conduit cross-sections (regulator openings above). Only constant
 `FLOW` baselines and constant `CONCENTRATION` pollutant baselines; a time-series inflow is
 refused, because time variation belongs in the drivers.
@@ -141,7 +173,6 @@ dry-weather inflow, which are refused or absent.
 
 **Not supported**, which rules out most published SWMM examples as they stand:
 
-- flow units other than CMS;
 - runoff (`[SUBCATCHMENTS]` and everything that feeds them) and dry-weather patterns;
 - non-circular shapes;
 - pumps, dividers, roadway weirs, weir coefficient curves and control rules (regulator

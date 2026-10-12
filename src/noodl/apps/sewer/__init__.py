@@ -20,7 +20,7 @@ from noodl.apps.sewer.geometry import (
     normal_depth,
 )
 from noodl.apps.sewer.hydraulics import SewerHydraulics
-from noodl.apps.sewer.inp import read_swmm_inp
+from noodl.apps.sewer.inp import read_swmm_inp, unit_factors
 from noodl.apps.sewer.network import (
     ROUTING_ALIASES,
     Manhole,
@@ -56,5 +56,5 @@ __all__ = [
     "Manhole", "Outfall", "Pipe", "SewerHydraulics", "SewerNetwork", "SulfideGeneration",
     "air_geometry", "build_model", "capacity_flow", "henry_h2s", "initial_drivers", "initial_state",
     "kla_h2s", "manning_flow", "normal_depth", "pipe_table", "read_swmm_inp", "sewer_steady",
-    "to_mg_per_litre", "to_ppm", "tree_steady",
+    "to_mg_per_litre", "to_ppm", "tree_steady", "unit_factors",
 ]

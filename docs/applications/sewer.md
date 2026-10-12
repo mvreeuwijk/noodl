@@ -83,6 +83,10 @@ net, inflows, pollutants = read_swmm_inp("tree_steady.inp")
 model, state, drivers = build_model(net)
 ```
 
+The file's `FLOW_UNITS` (CFS, GPM, MGD, CMS, LPS or MLD) are converted to noodl's SI as it is
+read; see the Units paragraph of [File formats](../formats/swmm.md). A network with no links (no conduits, orifices, weirs or
+outlets) is refused by `build_model` by name.
+
 For a single step rather than a steady state:
 
 ```python
@@ -913,7 +917,7 @@ of circular conduits:
 - `tree_kinwave.inp`, the hand-built 5-conduit tree.
 - `example1_kinwave.inp`, the 13-conduit network of EPA SWMM's published *Example 1*. It is
   converted to metres, and its runoff is replaced by rational-method constant inflows, because
-  runoff and CFS units are outside this reader.
+  runoff is outside this reader.
 - `tree_kinwave_large.inp`, a synthetic 32-conduit tree with fills from 8e-5 to 0.81 of `Qfull`.
 
 `tests/data/sewer/make_kinwave_fixtures.py` regenerates the last two. The engine identity is
@@ -1169,7 +1173,7 @@ publish numbers from this application.
       (a `TIMESERIES` outfall's stage is a driver);
     - the `[LOSSES]` entry, exit and average coefficients and seepage (the flap gate is read),
       storage evaporation (`Fevap`) and exfiltration, and a nonzero pollutant `Cinit`;
-    - non-circular conduit shapes, flow units other than CMS, and regulators with
+    - non-circular conduit shapes and regulators with
       `LINK_OFFSETS ELEVATION`;
     - headspace air on networks that are not dendritic: loops, junctions with several outgoing
       conduits or none, a junction drained only by a regulator (orifice, weir or outlet), a cycle

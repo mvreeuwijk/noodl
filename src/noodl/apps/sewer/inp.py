@@ -1,15 +1,16 @@
 """A documented SWMM 5 `.inp` subset.
 
-READ: `[TITLE]`, `[OPTIONS]` (`FLOW_UNITS` must be `CMS`),
+READ: `[TITLE]`, `[OPTIONS]` (`FLOW_UNITS` CFS, GPM, MGD, CMS, LPS or MLD; see Units below),
 `[JUNCTIONS]` (invert, MaxDepth, InitDepth, SurDepth), `[OUTFALLS]` (FREE, NORMAL, FIXED, TIDAL and
 TIMESERIES, with their flap gate), `[CONDUITS]` (with InitFlow and MaxFlow), `[XSECTIONS]` (only
 `CIRCULAR`; barrels), `[LOSSES]` (the flap gate; the loss coefficients and seepage must be
 0), `[INFLOWS]` (constant `FLOW`
 baselines and constant `CONCENTRATION` pollutant baselines), `[POLLUTANTS]`, and under
 DYNWAVE `[STORAGE]` (FUNCTIONAL, TABULAR and the closed shapes CYLINDRICAL, CONICAL,
-PARABOLOID, PYRAMIDAL, with SurDepth; a non-zero evaporation factor and exfiltration are
-refused) with the `[CURVES]` of type STORAGE that its TABULAR units name, and `[ORIFICES]`,
-`[WEIRS]` and `[OUTLETS]` (their `[XSECTIONS]` openings and RATING curves; `_regulators`).
+PARABOLIC (also spelled PARABOLOID), PYRAMIDAL, with SurDepth; a non-zero evaporation factor and
+exfiltration are refused) with the `[CURVES]` of type STORAGE that its TABULAR units name, and
+`[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` (their `[XSECTIONS]` openings and RATING curves;
+`_regulators`).
 InitDepth,
 InitFlow, MaxFlow, flap gates and barrels are dynamic-wave physics: under STEADY or KINWAVE
 routing a non-zero or gated value is refused by name rather than skipped.
@@ -54,6 +55,24 @@ and one with zero or adverse fall is refused by name. Under DYNWAVE the slope fo
 floors the slope, and a conduit is reversed only when it is adverse (`z1 < z2`), so a flat one
 keeps the file's orientation. Offsets are kept on the pipe (`inlet_offset`, `outlet_offset`,
 m above the end node's invert) and swap with the ends on a reversal.
+
+Units. Everything is converted to SI (m, m3/s, s) at read time, with SWMM's own factors
+(`unit_factors`: its constants, rounded as its units.c has them, e.g. 0.02832 m3/s per
+cfs; `FLOW_UNITS` absent means SWMM's default, CFS). CFS, GPM and MGD are the US
+system (lengths in ft), CMS, LPS and MLD the SI system (lengths in m); a length is converted by
+the system (0.3048 m per ft), a flow by the flow unit, an area by the length squared.
+Converted: the junction, storage and outfall elevations and depths, the fixed and the tidal
+stage, conduit lengths, offsets and diameters, regulator openings (Geom1, Geom2), the orifice,
+weir and outlet crest heights, STORAGE curves (depth m, area m2), RATING curves (depth or head
+m, flow m3/s), TIDAL curves (stage m), FUNCTIONAL storage (``A = a1 y^a2 + a0``: ``a1`` goes
+with length^(2 - a2), ``a0`` with length^2), the CYLINDRICAL, CONICAL, PARABOLOID and PYRAMIDAL
+lengths, initial and maximum conduit flows, constant `FLOW` baselines, `MIN_SURFAREA` (an area)
+and `HEAD_TOLERANCE` (a length). A FUNCTIONAL outlet ``q = a h^b`` converts as ``a * flow /
+length^b``, and a weir's discharge coefficients (``Q = Cd L h^1.5``, ``Cd2 h^2.5``) of a US
+file from ft^0.5/s to the m^0.5/s of the SI system by SWMM's own ``M3perFT3 / ft^2.5`` (the
+SI system, whatever its flow unit, takes them as they are). Not converted:
+Manning n, slopes, side slopes, orifice discharge coefficients, end contractions, `MIN_SLOPE`
+(percent), times and concentrations.
 """
 
 from __future__ import annotations
@@ -74,6 +93,8 @@ from noodl.apps.sewer.network import (
     Weir,
 )
 from noodl.apps.sewer.storage import validate_storage_curve
+from noodl.apps.sewer.structures import M3_PER_FT3
+from noodl.apps.sewer.xsect_tables import LCF, QCF
 
 #: link.c `MIN_DELTA_Z`: the smallest fall SWMM uses for a conduit slope, 0.001 ft in m.
 MIN_DELTA_Z = 0.001 * 0.3048
@@ -88,6 +109,33 @@ _DYNWAVE_KEYS = (
 _DAMPING = {"NO": "none", "NONE": "none", "PARTIAL": "partial", "FULL": "full"}
 _NORMAL_FLOW = {"NO": "none", "NONE": "none", "NEITHER": "none", "SLOPE": "slope",
                 "FROUDE": "froude", "BOTH": "both"}
+
+
+#: SWMM 5.2.4's own constants (units.c, read from the engine): user flow units per cfs (`Qcf`)
+#: by `FLOW_UNITS` keyword. They are SWMM's rounded values, not the exact ones: its CMS is
+#: 0.02832 m3 per cfs (exact: 0.028316847), so an exact LPS or MLD conversion would disagree
+#: with SWMM by 1e-4. noodl's SI flow is SWMM's CMS (`xsect_tables.QCF`), so a flow in
+#: `FLOW_UNITS` converts by ``QCF / Qcf``, which is 1 for CMS.
+_QCF_PER_CFS = {"CFS": 1.0, "GPM": 448.831, "MGD": 0.64632, "CMS": 0.02832, "LPS": 28.317,
+                "MLD": 2.4466}
+#: The US system (CFS, GPM, MGD) measures lengths in ft (`LCF` m), the SI system (CMS, LPS,
+#: MLD) in m.
+_US_UNITS = ("CFS", "GPM", "MGD")
+#: `FLOW_UNITS` keyword -> (m per length unit, m3/s per flow unit).
+_FLOW_UNITS = {name: (LCF if name in _US_UNITS else 1.0, QCF / per_cfs)
+               for name, per_cfs in _QCF_PER_CFS.items()}
+
+
+def unit_factors(flow_units: str) -> tuple[float, float]:
+    """`(length, flow)` for the SWMM `FLOW_UNITS` keyword `flow_units`: the metres per length
+    unit (0.3048 for the US system CFS, GPM and MGD, 1 for CMS, LPS and MLD) and the m3/s per
+    flow unit, SWMM's own conversion (units.c). An area converts with ``length**2``. Raises
+    ValueError for an unknown keyword."""
+    try:
+        return _FLOW_UNITS[flow_units.upper()]
+    except KeyError:
+        raise ValueError(f"FLOW_UNITS must be one of {sorted(_FLOW_UNITS)}, got "
+                         f"{flow_units!r}") from None
 
 
 def _seconds(line, path) -> float:
@@ -122,8 +170,8 @@ _WEIR_KINDS = {"TRANSVERSE": "transverse", "SIDEFLOW": "sideflow", "V-NOTCH": "v
 _WEIR_XSECT = {"transverse": "RECT_OPEN", "sideflow": "RECT_OPEN", "v_notch": "TRIANGULAR",
                "trapezoidal": "TRAPEZOIDAL"}
 #: SWMM's [STORAGE] shape keywords (keywords.c:108 `RelationWords`)
-_STORAGE_SHAPES = ("TABULAR", "FUNCTIONAL", "CYLINDRICAL", "CONICAL", "PARABOLOID",
-                   "PYRAMIDAL")
+_STORAGE_SHAPES = ("TABULAR", "FUNCTIONAL", "CYLINDRICAL", "CONICAL", "PARABOLIC",
+                   "PARABOLOID", "PYRAMIDAL")
 #: SWMM's curve types (keywords.c `CurveTypeWords`)
 _CURVE_TYPES = ("STORAGE", "DIVERSION", "TIDAL", "RATING", "CONTROL", "SHAPE", "WEIR",
                 "PUMP1", "PUMP2", "PUMP3", "PUMP4", "PUMP5")
@@ -151,6 +199,7 @@ def read_swmm_inp(
 
     routing = "KINWAVE"
     offsets = "DEPTH"
+    flow_units = "CFS"                  # SWMM's default (project.c)
     raw: dict[str, object] = {}
     opts: dict[str, tuple] = {}
     for line in sections.get("OPTIONS", []):
@@ -159,11 +208,11 @@ def read_swmm_inp(
             raw[key] = line        # parsed below, and only under DYNWAVE
         if key == "FLOW_UNITS":
             require_fields(line, 2, "FLOW_UNITS", path)
-            if line.fields[1].upper() != "CMS":
+            flow_units = line.fields[1].upper()
+            if flow_units not in _FLOW_UNITS:
                 raise ValueError(
-                    f"{path}: line {line.number}: FLOW_UNITS must be CMS -- this "
-                    f"application is SI-native and does not convert, got "
-                    f"{line.fields[1]!r}"
+                    f"{path}: line {line.number}: FLOW_UNITS must be one of "
+                    f"{sorted(_FLOW_UNITS)}, got {line.fields[1]!r}"
                 )
         elif key == "FLOW_ROUTING":
             require_fields(line, 2, "FLOW_ROUTING", path)
@@ -177,6 +226,7 @@ def read_swmm_inp(
                 )
 
     dynamic = routing == "DYNWAVE"
+    lf, qf = unit_factors(flow_units)           # m per length unit, m3/s per flow unit
     dynamic_wave = DynamicWaveOptions()
     min_slope = 0.0
     if dynamic:
@@ -189,6 +239,9 @@ def read_swmm_inp(
                 opts[key] = (line, as_float(line, 1, key, path))
             else:
                 opts[key] = (line, line.fields[1].upper())
+        for key, scale in (("HEAD_TOLERANCE", lf), ("MIN_SURFAREA", lf * lf)):
+            if key in opts:
+                opts[key] = (opts[key][0], opts[key][1] * scale)
         dynamic_wave = _dynamic_wave_options(opts, path)
         min_slope = opts["MIN_SLOPE"][1] / 100.0 if "MIN_SLOPE" in opts else 0.0
 
@@ -197,28 +250,29 @@ def read_swmm_inp(
     for line in sections.get("JUNCTIONS", []):
         require_fields(line, 2, "a junction", path)
         name = line.fields[0]
-        elevation = as_float(line, 1, "the invert elevation", path)
-        depth = as_float(line, 2, "the maximum depth", path) if len(line.fields) > 2 else None
-        initial = (as_float(line, 3, "the initial depth", path)
+        elevation = as_float(line, 1, "the invert elevation", path) * lf
+        depth = (as_float(line, 2, "the maximum depth", path) * lf
+                 if len(line.fields) > 2 else None)
+        initial = (as_float(line, 3, "the initial depth", path) * lf
                    if len(line.fields) > 3 else 0.0)
         if initial < 0.0:
             raise ValueError(
                 f"{path}: line {line.number}: junction {name!r} has a negative initial depth "
-                f"{line.fields[3]} m"
+                f"{line.fields[3]}"
             )
-        surcharge = (as_float(line, 4, "the surcharge depth", path)
+        surcharge = (as_float(line, 4, "the surcharge depth", path) * lf
                      if len(line.fields) > 4 else 0.0)
         if surcharge < 0.0:
             raise ValueError(
                 f"{path}: line {line.number}: junction {name!r} has a negative surcharge depth "
-                f"{line.fields[4]} m (SWMM's SurDepth must be >= 0)"
+                f"{line.fields[4]} (SWMM's SurDepth must be >= 0)"
             )
         invert[name] = elevation
         manholes.append(
             Manhole(name, elevation, ground=None if depth is None else elevation + depth,
                     surcharge_depth=surcharge, initial_depth=initial)
         )
-    all_curves = _curves(sections.get("CURVES", []), path)
+    all_curves = _curves(sections.get("CURVES", []), path, lf, qf)
     tides = {name: pts for name, (kind, pts) in all_curves.items() if kind == "TIDAL"}
     curves = {name: pts for name, (kind, pts) in all_curves.items() if kind == "STORAGE"}
     ratings = {name: pts for name, (kind, pts) in all_curves.items() if kind == "RATING"}
@@ -228,16 +282,16 @@ def read_swmm_inp(
             f"are read under dynamic-wave routing only (FLOW_ROUTING DYNWAVE); under "
             f"{routing} SWMM routes them by their volume, which is not modelled")
     for line in sections.get("STORAGE", []):
-        manhole = _storage_unit(line, curves, path)
+        manhole = _storage_unit(line, curves, path, lf)
         invert[manhole.name] = manhole.invert
         manholes.append(manhole)
     outfalls: list[Outfall] = []
     for line in sections.get("OUTFALLS", []):
         require_fields(line, 2, "an outfall", path)
         name = line.fields[0]
-        elevation = as_float(line, 1, "the invert elevation", path)
+        elevation = as_float(line, 1, "the invert elevation", path) * lf
         invert[name] = elevation
-        outfalls.append(_outfall(line, name, elevation, dynamic, tides, all_curves, path))
+        outfalls.append(_outfall(line, name, elevation, dynamic, tides, all_curves, path, lf))
     _check_timeseries(sections.get("TIMESERIES", []), outfalls, path)
 
     shapes: dict[str, float] = {}
@@ -284,7 +338,7 @@ def read_swmm_inp(
                 f"{path}: line {line.number}: only CIRCULAR cross-sections are modelled, "
                 f"got {line.fields[1]!r} for link {line.fields[0]!r}"
             )
-        shapes[line.fields[0]] = as_float(line, 2, "the diameter", path)
+        shapes[line.fields[0]] = as_float(line, 2, "the diameter", path) * lf
         barrels = as_float(line, 6, "the barrels", path) if len(line.fields) > 6 else 1.0
         if barrels != int(barrels) or not 1 <= barrels <= 127:             # link.c:250-256
             raise ValueError(
@@ -307,14 +361,17 @@ def read_swmm_inp(
     for line in sections.get("CONDUITS", []):
         require_fields(line, 5, "a conduit", path)
         name, node1, node2 = line.fields[0], line.fields[1], line.fields[2]
-        length = as_float(line, 3, "the length", path)
-        roughness = as_float(line, 4, "the Manning n", path)
-        in_offset = as_float(line, 5, "the inlet offset", path) if len(line.fields) > 5 else 0.0
+        length = as_float(line, 3, "the length", path) * lf
+        roughness = as_float(line, 4, "the Manning n", path)        # not converted
+        in_offset = (as_float(line, 5, "the inlet offset", path) * lf
+                     if len(line.fields) > 5 else 0.0)
         out_offset = (
-            as_float(line, 6, "the outlet offset", path) if len(line.fields) > 6 else 0.0
+            as_float(line, 6, "the outlet offset", path) * lf if len(line.fields) > 6 else 0.0
         )
-        init_flow = as_float(line, 7, "the initial flow", path) if len(line.fields) > 7 else 0.0
-        max_flow = as_float(line, 8, "the maximum flow", path) if len(line.fields) > 8 else 0.0
+        init_flow = (as_float(line, 7, "the initial flow", path) * qf
+                     if len(line.fields) > 7 else 0.0)
+        max_flow = (as_float(line, 8, "the maximum flow", path) * qf
+                    if len(line.fields) > 8 else 0.0)
         if max_flow < 0.0:
             max_flow = 0.0              # dwflow.c:270 only acts on a positive limit
         for end in (node1, node2):
@@ -376,7 +433,7 @@ def read_swmm_inp(
         )
 
     regulators = _regulators(sections, regulator_xsect, ratings, invert, dynamic, offsets,
-                             routing, path)
+                             routing, path, lf, qf)
 
     pollutants: dict[str, dict] = {}
     for line in sections.get("POLLUTANTS", []):
@@ -416,6 +473,7 @@ def read_swmm_inp(
         kind = line.fields[3].upper()
         baseline = as_float(line, 6, "the baseline", path) if len(line.fields) > 6 else 0.0
         if constituent.upper() == "FLOW":
+            baseline *= qf
             if node not in inflow:
                 raise ValueError(
                     f"{path}: line {line.number}: inflow at {node!r}, which is not a "
@@ -451,12 +509,14 @@ def read_swmm_inp(
     return network, loads, pollutants
 
 
-def _curves(lines, path) -> dict[str, tuple[str, tuple[tuple, tuple]]]:
+def _curves(lines, path, lf: float = 1.0, qf: float = 1.0
+            ) -> dict[str, tuple[str, tuple[tuple, tuple]]]:
     """`[CURVES]`: ``{name: (type, (xs, ys))}`` of the STORAGE, RATING and TIDAL curves, each
     curve's points in file order over any number of lines, its type on its first line
-    (`table.c:67-108`). A curve of another type is refused (no object that uses one is
-    read), as are an unpaired value and x values that do not strictly increase
-    (`table.c:313`)."""
+    (`table.c:67-108`), in SI: `lf` m per length unit and `qf` m3/s per flow unit convert a
+    STORAGE curve (depth, area), a RATING curve (depth or head, flow) and a TIDAL curve (hours,
+    stage). A curve of another type is refused (no object that uses one is read), as are an
+    unpaired value and x values that do not strictly increase (`table.c:313`)."""
     points: dict[str, list[tuple[float, float]]] = {}
     kinds: dict[str, str] = {}
     for line in lines:
@@ -488,7 +548,9 @@ def _curves(lines, path) -> dict[str, tuple[str, tuple[tuple, tuple]]]:
                     f"must be strictly increasing (SWMM's ERR_CURVE_SEQUENCE), got {x} "
                     f"after {points[name][-1][0]}")
             points[name].append((x, y))
-    return {name: (kinds[name], (tuple(p[0] for p in pts), tuple(p[1] for p in pts)))
+    scales = {"STORAGE": (lf, lf * lf), "RATING": (lf, qf), "TIDAL": (1.0, lf)}
+    return {name: (kinds[name], (tuple(p[0] * scales[kinds[name]][0] for p in pts),
+                                 tuple(p[1] * scales[kinds[name]][1] for p in pts)))
             for name, pts in points.items()}
 
 
@@ -506,9 +568,11 @@ def _given(line, i: int) -> bool:
     return len(line.fields) > i and line.fields[i] != "*"
 
 
-def _opening(line, name: str, shapes: tuple[str, ...], path) -> tuple[str, list[float]]:
+def _opening(line, name: str, shapes: tuple[str, ...], path, lf: float
+             ) -> tuple[str, list[float]]:
     """A regulator's `[XSECTIONS]` line: its shape (one of `shapes`, SWMM's
-    ERR_REGULATOR_SHAPE otherwise) and Geom1..Geom4 (m; absent values 0)."""
+    ERR_REGULATOR_SHAPE otherwise) and Geom1..Geom4 (absent values 0): Geom1 and Geom2 in m
+    (`lf` m per length unit), Geom3 and Geom4 the side slopes, unitless."""
     if line is None:
         raise ValueError(f"{path}: regulator {name!r} has no [XSECTIONS] entry (its opening)")
     shape = line.fields[1].upper()
@@ -518,17 +582,21 @@ def _opening(line, name: str, shapes: tuple[str, ...], path) -> tuple[str, list[
                          f"(SWMM's ERR_REGULATOR_SHAPE)")
     geoms = [as_float(line, i, f"Geom{i - 1}", path) if len(line.fields) > i else 0.0
              for i in (2, 3, 4, 5)]
+    geoms[0] *= lf
+    geoms[1] *= lf
     return shape, geoms
 
 
 def _regulators(sections, xsect: dict, ratings: dict, invert: dict, dynamic: bool,
-                offsets: str, routing: str, path) -> dict[str, tuple]:
+                offsets: str, routing: str, path, lf: float = 1.0, qf: float = 1.0
+                ) -> dict[str, tuple]:
     """`[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` (link.c:1641-1692, 2010-2099, 2524-2604), read
     under DYNWAVE only, with their `[XSECTIONS]` openings and the RATING curves of tabular
     outlets. Refused by name, with the line: a roadway weir, a weir coefficient curve, an
     [XSECTIONS] entry for an outlet, a negative orifice or weir crest height, unknown nodes
     and keywords, and LINK_OFFSETS ELEVATION (SWMM then sets each end's offset from its own
-    node, which is not read)."""
+    node, which is not read). `lf` is the metres per length unit and `qf` the m3/s per flow
+    unit of the file."""
     found: dict[str, list] = {key: [] for key in _REGULATORS}
     for key in _REGULATORS:
         lines = sections.get(key, [])
@@ -551,7 +619,7 @@ def _regulators(sections, xsect: dict, ratings: dict, invert: dict, dynamic: boo
                     raise ValueError(f"{where} names node {end!r}, which is not a junction, "
                                      f"storage unit or outfall")
             found[key].append(_REGULATOR_READERS[key](line, name, u, v, where, xsect,
-                                                      ratings, path))
+                                                      ratings, path, lf, qf))
     stray = sorted(set(xsect) - {line.fields[0] for key in ("ORIFICES", "WEIRS")
                                  for line in sections.get(key, [])})
     if stray:
@@ -561,14 +629,14 @@ def _regulators(sections, xsect: dict, ratings: dict, invert: dict, dynamic: boo
     return {key: tuple(devices) for key, devices in found.items()}
 
 
-def _orifice(line, name, u, v, where, xsect, ratings, path) -> Orifice:
+def _orifice(line, name, u, v, where, xsect, ratings, path, lf, qf) -> Orifice:
     """``Name N1 N2 SIDE|BOTTOM CrestHt Cd [Gated] [CloseTime]`` (link.c:1641-1692); the
     opening is CIRCULAR or RECT_CLOSED. CloseTime only shapes control actions, which are
     not read, so it is accepted and has no effect."""
     orientation = line.fields[3].upper()
     if orientation not in ("SIDE", "BOTTOM"):
         raise ValueError(f"{where}: type must be SIDE or BOTTOM, got {line.fields[3]!r}")
-    crest = as_float(line, 4, "the crest height", path)
+    crest = as_float(line, 4, "the crest height", path) * lf
     if crest < 0.0:
         raise ValueError(f"{where}: negative crest height {crest} m (SWMM raises it to 0 at "
                          f"the inlet only; not modelled)")
@@ -578,13 +646,13 @@ def _orifice(line, name, u, v, where, xsect, ratings, path) -> Orifice:
     gated = _yes_no(line, 6, "the flap gate", path) if len(line.fields) > 6 else False
     if len(line.fields) > 7 and as_float(line, 7, "the close time", path) < 0.0:
         raise ValueError(f"{where}: negative close time {line.fields[7]}")    # link.c:1688
-    shape, geoms = _opening(xsect.get(name), name, ("CIRCULAR", "RECT_CLOSED"), path)
+    shape, geoms = _opening(xsect.get(name), name, ("CIRCULAR", "RECT_CLOSED"), path, lf)
     return Orifice(name, u, v, orientation.lower(),
                    "circular" if shape == "CIRCULAR" else "rectangular", geoms[0], crest, cd,
                    width=None if shape == "CIRCULAR" else geoms[1], flap_gate=gated)
 
 
-def _weir(line, name, u, v, where, xsect, ratings, path) -> Weir:
+def _weir(line, name, u, v, where, xsect, ratings, path, lf, qf) -> Weir:
     """``Name N1 N2 Type CrestHt Cd [Gated] [EndCon] [Cd2] [CanSurcharge] [RoadWidth
     RoadSurf] [CdCurve]`` (link.c:2010-2099; ``*`` keeps a default). ROADWAY weirs and a
     coefficient curve are refused by name; the opening is RECT_OPEN, TRIANGULAR or
@@ -595,7 +663,7 @@ def _weir(line, name, u, v, where, xsect, ratings, path) -> Weir:
     if kind is None:
         raise ValueError(f"{where}: type must be one of {sorted(_WEIR_KINDS)}, got "
                          f"{line.fields[3]!r}")
-    crest = as_float(line, 4, "the crest height", path)
+    crest = as_float(line, 4, "the crest height", path) * lf
     if crest < 0.0:
         raise ValueError(f"{where}: negative crest height {crest} m (SWMM raises it to 0 at "
                          f"the inlet only; not modelled)")
@@ -603,6 +671,9 @@ def _weir(line, name, u, v, where, xsect, ratings, path) -> Weir:
     gated = _yes_no(line, 6, "the flap gate", path) if _given(line, 6) else False
     end_con = as_float(line, 7, "the end contractions", path) if _given(line, 7) else 0.0
     cd2 = as_float(line, 8, "the end discharge coefficient", path) if _given(line, 8) else 0.0
+    if lf != 1.0:                  # a US file: Cd in ft^0.5/s -> m^0.5/s as SWMM's SI path does
+        cd *= M3_PER_FT3 / lf**2.5  # (link.c:2409-2413: m3/s over M3perFT3, lengths in m)
+        cd2 *= M3_PER_FT3 / lf**2.5
     surcharge = _yes_no(line, 9, "CanSurcharge", path) if _given(line, 9) else True
     for what, value in (("discharge coefficient", cd), ("end contractions", end_con),
                         ("end discharge coefficient", cd2)):
@@ -611,26 +682,28 @@ def _weir(line, name, u, v, where, xsect, ratings, path) -> Weir:
     if _given(line, 12):
         raise ValueError(f"{where}: names the coefficient curve {line.fields[12]!r}; weir "
                          f"coefficient curves are not modelled")
-    shape, geoms = _opening(xsect.get(name), name, (_WEIR_XSECT[kind],), path)
+    shape, geoms = _opening(xsect.get(name), name, (_WEIR_XSECT[kind],), path, lf)
     return Weir(name, u, v, kind, geoms[0], geoms[1], crest, cd,
                 side_slopes=(geoms[2], geoms[3]) if shape == "TRAPEZOIDAL" else (0.0, 0.0),
                 end_contractions=end_con, end_discharge_coefficient=cd2,
                 can_surcharge=surcharge, flap_gate=gated)
 
 
-def _outlet(line, name, u, v, where, xsect, ratings, path) -> Outlet:
+def _outlet(line, name, u, v, where, xsect, ratings, path, lf, qf) -> Outlet:
     """``Name N1 N2 Offset TABULAR/DEPTH|TABULAR/HEAD Curve [Gated]`` or ``... FUNCTIONAL/DEPTH
     |FUNCTIONAL/HEAD C1 C2 [Gated]`` (link.c:2524-2604): a negative offset is 0 (link.c:2556),
     the curve a RATING curve of [CURVES]."""
-    crest = max(as_float(line, 3, "the crest height", path), 0.0)           # link.c:2556
+    crest = max(as_float(line, 3, "the crest height", path), 0.0) * lf      # link.c:2556
     relation, _, qualifier = line.fields[4].upper().partition("/")
     if relation not in ("TABULAR", "FUNCTIONAL") or qualifier not in ("", "DEPTH", "HEAD"):
         raise ValueError(f"{where}: type must be TABULAR/DEPTH, TABULAR/HEAD, "
                          f"FUNCTIONAL/DEPTH or FUNCTIONAL/HEAD, got {line.fields[4]!r}")
     if relation == "FUNCTIONAL":
         require_fields(line, 7, "a functional outlet", path)
-        rating: tuple = ("functional", as_float(line, 5, "the coefficient", path),
-                         as_float(line, 6, "the exponent", path))
+        exponent = as_float(line, 6, "the exponent", path)
+        # q = a h^b in the file's flow and length units
+        rating: tuple = ("functional", as_float(line, 5, "the coefficient", path) * qf
+                         / lf**exponent, exponent)
         n = 7
     else:
         label = line.fields[5]
@@ -647,17 +720,18 @@ def _outlet(line, name, u, v, where, xsect, ratings, path) -> Outlet:
 _REGULATOR_READERS = {"ORIFICES": _orifice, "WEIRS": _weir, "OUTLETS": _outlet}
 
 
-def _storage_unit(line, curves: dict, path) -> Manhole:
+def _storage_unit(line, curves: dict, path, lf: float = 1.0) -> Manhole:
     """A `[STORAGE]` line, ``Name Elev MaxDepth InitDepth Shape ... [SurDepth [Fevap
     [exfiltration]]]`` (node.c:654-809): TABULAR names a curve, the other shapes take three
     values (FUNCTIONAL a1 a2 a0; CYLINDRICAL L W -; CONICAL L W Z; PARABOLOID L W H;
-    PYRAMIDAL L W Z). Evaporation and exfiltration are refused by name."""
+    PYRAMIDAL L W Z). Evaporation and exfiltration are refused by name. `lf` is the metres per
+    length unit of the file (`curves` are already in SI)."""
     require_fields(line, 6, "a storage unit", path)
     name = line.fields[0]
     where = f"{path}: line {line.number}: storage unit {name!r}"
-    elevation = as_float(line, 1, "the invert elevation", path)
-    max_depth = as_float(line, 2, "the maximum depth", path)
-    initial = as_float(line, 3, "the initial depth", path)
+    elevation = as_float(line, 1, "the invert elevation", path) * lf
+    max_depth = as_float(line, 2, "the maximum depth", path) * lf
+    initial = as_float(line, 3, "the initial depth", path) * lf
     for what, value in (("maximum", max_depth), ("initial", initial)):
         if value < 0.0:
             raise ValueError(f"{where} has a negative {what} depth {value} m")
@@ -665,6 +739,8 @@ def _storage_unit(line, curves: dict, path) -> Manhole:
     if shape not in _STORAGE_SHAPES:
         raise ValueError(f"{where} has shape {line.fields[4]!r}; SWMM's shapes are "
                          f"{_STORAGE_SHAPES}")
+    if shape == "PARABOLIC":        # SWMM 5.2.4's keyword; PARABOLOID is kept as an alias
+        shape = "PARABOLOID"
     if shape == "TABULAR":
         label = line.fields[5]
         if label not in curves:
@@ -678,10 +754,17 @@ def _storage_unit(line, curves: dict, path) -> Manhole:
         a, b, c = (as_float(line, i, f"a {shape} value", path) for i in (5, 6, 7))
         if shape == "CYLINDRICAL" and c < 0.0:                                # node.c:734
             raise ValueError(f"{where}: CYLINDRICAL third value must be >= 0, got {c}")
-        curve = {"FUNCTIONAL": ("functional", a, b, c),
-                 "CYLINDRICAL": ("cylindrical", a, b)}.get(shape, (shape.lower(), a, b, c))
+        curve = {   # lengths scale by lf, the slope Z of CONICAL and PYRAMIDAL does not;
+                    # FUNCTIONAL is A = a1 y^a2 + a0 with y and A in the file's units
+            "FUNCTIONAL": ("functional", a * lf ** (2.0 - b), b, c * lf * lf),
+            "CYLINDRICAL": ("cylindrical", a * lf, b * lf),
+            "CONICAL": ("conical", a * lf, b * lf, c),
+            "PYRAMIDAL": ("pyramidal", a * lf, b * lf, c),
+            "PARABOLOID": ("paraboloid", a * lf, b * lf, c * lf),
+        }[shape]
         n = 8
-    surcharge = as_float(line, n, "the surcharge depth", path) if len(line.fields) > n else 0.0
+    surcharge = (as_float(line, n, "the surcharge depth", path) * lf
+                 if len(line.fields) > n else 0.0)
     if surcharge < 0.0:
         raise ValueError(f"{where} has a negative surcharge depth {surcharge} m")
     if len(line.fields) > n + 1 and as_float(line, n + 1, "the evaporation factor",
@@ -758,10 +841,10 @@ def _dynamic_wave_options(opts: dict, path) -> DynamicWaveOptions:
 
 
 def _outfall(line, name: str, elevation: float, dynamic: bool, tides: dict,
-             all_curves: dict, path) -> Outfall:
-    """An `[OUTFALLS]` line: type (field 2, default FREE), the type's data (field 3: a FIXED
-    stage, a TIDAL curve name or a TIMESERIES name; node.c:1333-1380) and the gate flag,
-    which follows the type data."""
+             all_curves: dict, path, lf: float = 1.0) -> Outfall:
+    """An `[OUTFALLS]` line (`elevation` and `tides` in m, `lf` m per length unit): type
+    (field 2, default FREE), the type's data (field 3: a FIXED stage, a TIDAL curve name or a
+    TIMESERIES name; node.c:1333-1380) and the gate flag, which follows the type data."""
     kind = line.fields[2].upper() if len(line.fields) > 2 else "FREE"
     if kind not in ("FREE", "NORMAL", "FIXED", "TIDAL", "TIMESERIES"):
         if dynamic:
@@ -777,7 +860,7 @@ def _outfall(line, name: str, elevation: float, dynamic: bool, tides: dict,
             raise ValueError(
                 f"{path}: line {line.number}: FIXED outfall {name!r} needs a stage"
             )
-        stage = as_float(line, 3, "the fixed stage", path)
+        stage = as_float(line, 3, "the fixed stage", path) * lf
         gated_at = 4
     elif kind in ("TIDAL", "TIMESERIES") and dynamic:
         what = "a tide curve" if kind == "TIDAL" else "a time series"
