@@ -29,16 +29,17 @@ from typing import NamedTuple
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
 from noodl.apps.sewer.xsect_tables import (
     GRAVITY_FT,
     LCF,
     PHI,
-    area_of_depth,
+    area_radius_of_depth,
     conduit_constants,
     critical_depth,
+    critical_flow_stations,
     froude_number,
     normal_depth_ft,
-    radius_of_depth,
     width_of_depth,
 )
 
@@ -77,7 +78,9 @@ class ConduitGeometry:
     ``barrels`` (-, SWMM's ``Conduit.barrels``),
     ``invert1``/``invert2`` end-node invert elevations (ft), ``offset1``/``offset2``
     conduit inverts above those (ft), ``outfall1``/``outfall2`` whether the end node is an
-    outfall (bool).
+    outfall (bool); ``critical_flows`` the section's critical-depth enumeration stations
+    (cfs, ``(..., 26)``, `xsect_tables.critical_flow_stations`; ``None`` computes them at
+    each call).
     """
 
     y_full: Tensor
@@ -94,6 +97,7 @@ class ConduitGeometry:
     offset2: Tensor
     outfall1: Tensor
     outfall2: Tensor
+    critical_flows: Tensor | None = None
 
     @classmethod
     def from_si(cls, diameter: Tensor, roughness: Tensor, slope: Tensor, length: Tensor,
@@ -120,6 +124,7 @@ class ConduitGeometry:
             offset1=offset1 / LCF, offset2=offset2 / LCF,
             outfall1=torch.as_tensor(outfall1).bool(),
             outfall2=torch.as_tensor(outfall2).bool(),
+            critical_flows=critical_flow_stations(y_full, a_full),
         )
 
 
@@ -225,31 +230,62 @@ def _top_width(y: Tensor, y_full: Tensor, slot: bool = False) -> Tensor:
     ``y`` (ft). The slot width where it is positive; otherwise the depth frozen at
     ``CrownCutoff * yFull`` above the crown cutoff (0.96 EXTRAN, 0.985257 SLOT)."""
     cutoff = SLOT_CROWN_CUTOFF if slot else EXTRAN_CROWN_CUTOFF               # dynwave.c:159
+    y_cut = torch.where(y / y_full >= cutoff, cutoff * y_full, y)              # dwflow.c:599-600
+    if not slot:                          # no slot: wSlot = 0 (dwflow.c:580, 596)
+        return width_of_depth(y_cut, y_full)
     w_slot = _slot_width(y, y_full, slot)                                      # dwflow.c:596
-    y = torch.where(y / y_full >= cutoff, cutoff * y_full, y)                  # dwflow.c:599-600
-    return torch.where(w_slot > 0.0, w_slot, width_of_depth(y, y_full))
+    return torch.where(w_slot > 0.0, w_slot, width_of_depth(y_cut, y_full))
 
 
 def _slot_area(y: Tensor, y_full: Tensor, a_full: Tensor, slot: bool) -> Tensor:
     """`dwflow.c::getArea` (dwflow.c:609-619): flow area (ft2) at depth ``y`` (ft), extended
-    above the crown by ``(y - yFull) * wSlot(y)`` (0 under EXTRAN)."""
-    w_slot = _slot_width(y, y_full, slot)                                      # dwflow.c:144
-    above = a_full + (y - y_full) * w_slot                                     # dwflow.c:616
-    return torch.where(y >= y_full, above, area_of_depth(torch.minimum(y, y_full), y_full,
-                                                         a_full))
+    above the crown by ``(y - yFull) * wSlot(y)`` (0 under EXTRAN; `_areas_radii`)."""
+    y, y_full, a_full = torch.broadcast_tensors(y, y_full, a_full)
+    return _areas_radii((y,), y_full, a_full, slot)[0][0]
 
 
 def _hyd_rad(y: Tensor, y_full: Tensor) -> Tensor:
     """`dwflow.c::getHydRad` (dwflow.c:623-633): hydraulic radius (ft), ``rFull`` at and
-    above the crown under both surcharge methods."""
-    return radius_of_depth(torch.minimum(y, y_full), y_full)                   # dwflow.c:631
+    above the crown under both surcharge methods (`_areas_radii`)."""
+    y, y_full = torch.broadcast_tensors(y, y_full)
+    return _areas_radii((y,), y_full, y_full, False)[1][0]
+
+
+def _tile(x: Tensor, shape: torch.Size, m: int) -> Tensor:
+    """`x` broadcast to `shape`, repeated `m` times along the last dimension (the per-
+    conduit constants of a batched evaluation of `m` depths)."""
+    return torch.cat([x.expand(shape)] * m, -1)
+
+
+def _top_widths(ys: tuple[Tensor, ...], y_full: Tensor, slot: bool) -> tuple[Tensor, ...]:
+    """`_top_width` at each of the depths `ys` (one shape), in one evaluation."""
+    shape = ys[0].shape
+    width = _top_width(torch.cat(ys, -1), _tile(y_full, shape, len(ys)), slot)
+    return width.split(shape[-1], -1)
+
+
+def _areas_radii(ys: tuple[Tensor, ...], y_full: Tensor, a_full: Tensor, slot: bool
+                 ) -> tuple[tuple[Tensor, ...], tuple[Tensor, ...]]:
+    """`dwflow.c::getArea` and `getHydRad` (dwflow.c:609-633) at each of the depths `ys`
+    (ft, one shape), in one evaluation: the flow areas (ft2), extended above the crown by
+    ``(y - yFull) wSlot(y)`` (0 under EXTRAN), and the hydraulic radii (ft), ``rFull`` at
+    and above the crown under both surcharge methods."""
+    shape = ys[0].shape
+    y = torch.cat(ys, -1)
+    yf, af = _tile(y_full, shape, len(ys)), _tile(a_full, shape, len(ys))
+    area, radius = area_radius_of_depth(torch.minimum(y, yf), yf, af)        # dwflow.c:631
+    # dwflow.c:616 -- extended by (y - yFull) wSlot above the crown; wSlot = 0 without a slot
+    above = af + (y - yf) * _slot_width(y, yf, slot) if slot else af
+    area = torch.where(y >= yf, above, area)
+    return area.split(shape[-1], -1), radius.split(shape[-1], -1)
 
 
 def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: Tensor,
                   q_old: Tensor, a_old: Tensor, dt: float, *, damping: str = "partial",
                   normal_flow_limited: str = "both",
                   surcharge_method: str = "extran", hold1: Tensor | None = None,
-                  hold2: Tensor | None = None) -> ConduitTerms:
+                  hold2: Tensor | None = None,
+                  flow_depths: tuple[Tensor, Tensor] | None = None) -> ConduitTerms:
     """SWMM's conduit update (`dwflow.c:57-293`) for one pass, vectorised over conduits.
 
     ``depth1``, ``depth2`` are the end NODE depths above the node inverts (ft) from the
@@ -269,6 +305,9 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     the upper side in the sliding solution: at a ``min(yN, yC)`` threshold the OTHER end's
     surface area, a quarter of the conduit on the upper side and half of it on the
     critical side (dwflow.c:472-499), is ``(2 - theta)`` quarters; ``< 0`` is no hold.
+    ``flow_depths`` (optional) is ``(yN, yC)`` (ft) at one barrel's ``|q_last|``, the
+    normal and critical depths the flow class reads, when the caller has them already
+    (`xsect_tables.normal_depth_ft`, `critical_depth`); they are computed here otherwise.
     """
     if damping not in DAMPING:
         raise ValueError(f"conduit_terms: damping must be one of {DAMPING}, got {damping!r}")
@@ -280,7 +319,7 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
                          f"{SURCHARGE_METHODS}, got {surcharge_method!r}")
     slot = surcharge_method == "slot"
     yf, af = geo.y_full, geo.a_full
-    shape = torch.broadcast_shapes(depth1.shape, depth2.shape, q_last.shape, q_old.shape,
+    shape = broadcast_shapes(depth1.shape, depth2.shape, q_last.shape, q_old.shape,
                                    a_old.shape, yf.shape)
     depth1, depth2, q_last, q_old, a_old = (
         x.to(F64).expand(shape) for x in (depth1, depth2, q_last, q_old, a_old))
@@ -313,9 +352,12 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
                       geo.offset1)                                        # dwflow.c:327
     zr2 = torch.where(geo.outfall2, torch.clamp(geo.offset2 - depth2, min=0.0),
                       geo.offset2)                                        # dwflow.c:328
-    q_abs = q_last.abs()
-    y_norm = normal_depth_ft(q_abs, yf, af, geo.s_full, geo.beta).expand(shape)
-    y_crit = critical_depth(q_abs, yf, af).expand(shape)
+    if flow_depths is None:
+        q_abs = q_last.abs()
+        flow_depths = (normal_depth_ft(q_abs, yf, af, geo.s_full, geo.beta),
+                       critical_depth(q_abs, yf, af, geo.critical_flows))
+    y_norm = flow_depths[0].expand(shape)
+    y_crit = flow_depths[1].expand(shape)
     yc_min = torch.minimum(y_norm, y_crit)
     yc_max = torch.maximum(y_norm, y_crit)
     wet1 = y1 > FUDGE
@@ -371,10 +413,10 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     cls = torch.full(shape, SUBCRITICAL, dtype=torch.long)
     for mask, code in ((up_crit, UP_CRITICAL), (dn_crit, DN_CRITICAL), (dry, DRY),
                        (up_dry, UP_DRY), (dn_dry, DN_DRY)):
-        cls = torch.where(mask, torch.full_like(cls, code), cls)
+        cls = torch.where(mask, code, cls)
     # dwflow.c:457-460 -- both ends full: SUBCRITICAL (fasnh stays 1)
     both_full = (y1 >= yf) & (y2 >= yf)
-    cls = torch.where(both_full, torch.full_like(cls, SUBCRITICAL), cls)
+    cls = torch.where(both_full, SUBCRITICAL, cls)
     fasnh = torch.where(both_full, one, fasnh)
     is_up_crit = cls == UP_CRITICAL
     is_dn_crit = cls == DN_CRITICAL
@@ -399,11 +441,6 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     banded = ~reverse & ~is_upper2 & (thr2 < yc_max)
     fasnh_above = torch.where(banded, torch.where(span < FUDGE, zero,
                                                   (yc_max - thr2) / span_safe), one)
-    drop_area1 = (_top_width(at1, yf, slot) + _top_width(mid1, yf, slot)) * length / 4.0
-    drop_area2 = ((_top_width(mid2, yf, slot) + _top_width(at2, yf, slot)) * length / 4.0
-                  * fasnh_above)
-    drop_area1 = torch.where(reach1, drop_area1, zero)
-    drop_area2 = torch.where(reach2, drop_area2, zero)
     drop_above1 = held1 | ((y1 >= lower1) & (y1 > FUDGE))
     drop_above2 = held2 | ((y2 >= thr2) & (y2 > FUDGE))
 
@@ -416,9 +453,10 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     pinned1 = pinned1 | is_up_crit
     pinned2 = pinned2 | is_dn_crit
     y_mid_s = torch.clamp(0.5 * (y1 + y2), min=FUDGE)                          # :468-469
-    w1 = _top_width(y1, yf, slot)
-    w2 = _top_width(y2, yf, slot)
-    wm = _top_width(y_mid_s, yf, slot)
+    w_at1, w_mid1, w_mid2, w_at2, w1, w2, wm = _top_widths(
+        (at1, mid1, mid2, at2, y1, y2, y_mid_s), yf, slot)
+    drop_area1 = torch.where(reach1, (w_at1 + w_mid1) * length / 4.0, zero)
+    drop_area2 = torch.where(reach2, (w_mid2 + w_at2) * length / 4.0 * fasnh_above, zero)
     quarter1 = (w1 + wm) * length / 4.0
     quarter2 = (wm + w2) * length / 4.0
     dry_area = FUDGE * length / 2.0                                            # :542
@@ -437,12 +475,8 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     surf2 = torch.where(blend1, quarter2 * (2.0 - theta1.clamp(0.0, 1.0)), surf2)
 
     # dwflow.c:143-153 -- areas and radii at the ends and the midpoint (slot-extended)
-    a1 = _slot_area(y1, yf, af, slot)
-    r1 = _hyd_rad(y1, yf)
-    a2 = _slot_area(y2, yf, af, slot)
     y_mid = 0.5 * (y1 + y2)
-    a_mid = _slot_area(y_mid, yf, af, slot)
-    r_mid = _hyd_rad(y_mid, yf)
+    (a1, a2, a_mid), (r1, _, r_mid) = _areas_radii((y1, y2, y_mid), yf, af, slot)
     is_full = (y1 >= yf) & (y2 >= yf)
     # dwflow.c:165-180 -- dry exit (no flap gate, no control setting here)
     dry_exit = is_dry | is_up_dry | is_dn_dry | (a_mid <= FUDGE)
@@ -453,8 +487,7 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     v = torch.where(v.abs() > MAX_VELOCITY,
                     torch.where(q_last < 0.0, -one, one) * MAX_VELOCITY, v)
     fr = froude_number(v, y_mid, yf, af)
-    cls = torch.where(~dry_exit & (cls == SUBCRITICAL) & (fr > 1.0),
-                      torch.full_like(cls, SUPCRITICAL), cls)
+    cls = torch.where(~dry_exit & (cls == SUBCRITICAL) & (fr > 1.0), SUPCRITICAL, cls)
     # dwflow.c:192-194 -- damping factor
     sigma_fr = torch.where(fr <= 0.5, one, torch.where(fr >= 1.0, zero, 2.0 * (1.0 - fr)))
     # dwflow.c:198-201 -- upstream weighting

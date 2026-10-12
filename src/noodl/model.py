@@ -48,6 +48,7 @@ from typing import Protocol, runtime_checkable
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
 from noodl._tracking import TrackedDict
 from noodl.layers.allocation import AllocatedFlowLayer
 from noodl.layers.potential import PotentialFlowLayer
@@ -105,7 +106,7 @@ def _anderson_mix(xs: Sequence[Tensor], gs: Sequence[Tensor],
     state is `g` itself and the caller decides what to feed instead.
     """
     g, r = gs[-1], rs[-1]
-    batch = torch.broadcast_shapes(*(t.shape[:-1] for t in (*xs, *gs, *rs)))
+    batch = broadcast_shapes(*(t.shape[:-1] for t in (*xs, *gs, *rs)))
     m = min(len(xs) - 1, r.shape[-1])
     keep = torch.full(batch, m > 0, dtype=torch.bool, device=r.device)
     # Gram-Schmidt and back substitution are written out over the (at most `M`, in practice
@@ -193,7 +194,7 @@ class _AndersonHistory:
         mixed keys. `w` is the relaxation of the fallback step; `converged` (batch-shaped,
         or None before any verdict) marks the instances to hold at `fed`."""
         fed = {k: fed.get(k, out[k]) for k in self.keys}
-        batch = torch.broadcast_shapes(
+        batch = broadcast_shapes(
             *(t.shape[:-1] for k in self.keys for t in (fed[k], out[k])))
         sizes = [out[k].shape[-1] for k in self.keys]
 

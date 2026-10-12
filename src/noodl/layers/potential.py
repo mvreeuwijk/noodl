@@ -110,7 +110,16 @@ class PotentialFlowLayer:
     `A_I g(A^T phi) = s_I` for the interior potentials by Newton's method, with the element
     laws on its edge kinds, drives added to the potential differences, and prescribed
     potentials at its boundary nodes; differentiable through the converged solution.
-    `flow_unit` is reported by `model.refs`, never used numerically."""
+    `flow_unit` is reported by `model.refs`, never used numerically.
+
+    `analytic_primal` (default ``False``): a ``differentiable=True`` solve that nothing
+    differentiable reaches (grad mode off, or no input requiring grad) runs the
+    ``differentiable=False`` branch, whose Newton Jacobian is the elements' and node
+    sources' own analytic ``dflow`` rather than autograd through ``functional_call``. The
+    result is the same root to the Newton tolerance (not bitwise: the two Jacobians may
+    differ at a kink), returned detached as it would be anyway. It is opt-in because it
+    trusts every ``dflow`` to be the derivative of its ``flow`` (the sewer dynamic wave sets
+    it: its laws' ``dflow`` are exact)."""
 
     def __init__(
         self,
@@ -125,7 +134,9 @@ class PotentialFlowLayer:
         quantity: str = "potential",
         unit: str = "",
         flow_unit: str = "",
+        analytic_primal: bool = False,
     ) -> None:
+        self.analytic_primal = bool(analytic_primal)
         if linear_solver not in _LINEAR_SOLVERS:
             raise ValueError(
                 f"unknown linear_solver {linear_solver!r} in layer {name!r}; expected one "
@@ -754,6 +765,18 @@ class PotentialFlowLayer:
                     )
 
     # ------------------------------------------------------------------ solve
+    def _reaches_grad(self, drivers: Mapping, sources, phi_boundary) -> bool:
+        """Whether anything a differentiable solve threads through `Function.apply` requires
+        grad under the current grad mode: a driver, `sources`, `phi_boundary`, or an element
+        or node source's parameter."""
+        if not torch.is_grad_enabled():
+            return False
+        values = bulk_values(drivers, list(drivers.keys()))
+        values += [sources, phi_boundary]
+        for owner in (*self._elements, *self._node_sources):
+            values += list(owner.parameters())
+        return any(isinstance(v, torch.Tensor) and v.requires_grad for v in values)
+
     def solve(
         self,
         phi_boundary,
@@ -894,6 +917,12 @@ class PotentialFlowLayer:
             node_slopes0 = self._node_source_slopes(phi0_full, drivers)
             self._grounding_check(dq0, where="solve", node_slopes=node_slopes0)
 
+        if differentiable and self.analytic_primal and not self._reaches_grad(
+            drivers, sources, phi_boundary
+        ):
+            # Nothing differentiable reaches this solve, so the implicit path would return
+            # the same detached root through an autograd Jacobian (`analytic_primal`).
+            differentiable = False
         if not differentiable:
             # The WHOLE non-differentiable solve runs under no_grad -- the Newton iteration,
             # every inner linear solve inside it, and the final assemble/flows. Two reasons,
