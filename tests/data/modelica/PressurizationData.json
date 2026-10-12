@@ -59,7 +59,13 @@
         "lat",
         "timZon",
         "alt"
-      ]
+      ],
+      "files": {
+        "filNam": {
+          "path": "USA_CA_San.Francisco.Intl.AP.724940_TMY3.mos",
+          "sha256": "a6333b8202e6563460b2afdaf726315337b4058adf8dc16a365879693850ec4f"
+        }
+      }
     },
     {
       "name": "west",

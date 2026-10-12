@@ -44,8 +44,17 @@ its class):
 - `TrickleVent`, `ChimneyShaftNoVolume`, `ChimneyShaftWithVolume` — feedback controllers, a
   chain of two flow elements, or a dynamic (mass- and heat-storing) hydrostatic medium column,
   none of which is in scope.
-- `PressurizationData` — its committed export predates the weather file travelling with the
-  JSON, so its `ReaderTMY3` is refused until the model is re-exported.
+- `PressurizationData` imports (`read_modelica` builds it, and its weather and wind pressures
+  match MBL's to round-off), but it is not yet compared as a dynamic model. It is a 62.5 m3
+  room between two `Outside_CpLowRise` walls over 30 days of San Francisco weather. The room
+  flushes in about 10 s, against steps of 50 to 3000 s. Where the flow fades, in a calm or with
+  the wind parallel to both walls, the room freezes at the state it had when its flushing
+  stopped. The midpoint scheme holds the flows fixed over each half step, and in this stiff
+  regime that gives an error first order in the step, which the extrapolation cannot remove.
+  Over every row at 1 and 2 substeps, the room temperature is 1.6e-4 relative from the
+  reference and its humidity 2.0e-3 (flows and pressure within 1e-6). Comparing it needs a
+  transport integrator that treats the change of the flows over a step implicitly. The wind
+  boundaries are verified on the `Buildings.Fluid.Sources` models and `Outside_Cp`.
 - Every `Buildings.BoundaryConditions.WeatherData` class but `ReaderTMY3`; a weather bus wired
   to anything but an `Outside` boundary's `weaBus`, or any weather-bus output other than
   `TDryBul`, `pAtm`, `relHum`, `winSpe` and `winDir` read by anything; a `ReaderTMY3` wired
@@ -129,6 +138,20 @@ reader's outputs, keyed `"<reader>.weaBus.<output>"`, and every wind boundary's 
 on the output grid; `assemble.weather_columns(doc, times)` evaluates the same for a model with
 no flow element, which `read_modelica` refuses.
 
+```python
+from noodl.apps.building_physics import read_modelica
+
+model, state, drivers, names = read_modelica("tests/data/modelica/PressurizationData.json",
+                                             return_names=True)
+print(names.times[2].item(), names.weather["weaDat.weaBus.winSpe"][2].item())
+print(names.weather["west.pWin"][2].item(), names.weather["east.pWin"][2].item())
+```
+
+```text
+10368.0 2.133143665116279
+0.3241156179122303 -1.2724675933675318
+```
+
 **Volume mass storage.** Like MBL, the reader stores each volume's air compressibly unless its
 `massDynamics` is `SteadyState`: zone pressures are states, the t = StartTime row holds MBL's
 `p_start` initialisation, a closed zone group needs no pressure reference, and a mass source
@@ -179,7 +202,7 @@ export can be inspected); a batch script over every model should check the exit 
 than assume success. The dynamic parity tests compare a window of rows of every dynamic model
 in the repository's default `pytest` run; every row of every model runs under
 `@pytest.mark.slow` (`pytest -m slow`). `--tolerance` simulates at a solver tolerance other than the model's
-declared one; the thirteen dynamic parity references were regenerated with
+declared one; the thirteen dynamic parity references (and `PressurizationData`'s) were regenerated with
 `--tolerance 1e-13` (`tests/data/modelica/NOTICE.md`). At 1e-14 OpenModelica's DASSL returns
 no trajectory for these models, so 1e-13 is the finest reference available.
 

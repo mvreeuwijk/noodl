@@ -448,7 +448,7 @@ pressure, relative humidity, wind speed) and every wind boundary's `pWin` are co
 row, separately from any time integration (`assemble.weather_columns`), on MBL's
 `Buildings.Fluid.Sources` examples (four orientations of `Outside_CpLowRise` and of
 `Outside_CpData` over a week from day 200, a full sweep of the wind direction over symmetric,
-asymmetric and narrow profiles) and on `Outside_Cp`. Being the same arithmetic as MBL's, they
+asymmetric and narrow profiles), on `Outside_Cp` and on `PressurizationData`. Being the same arithmetic as MBL's, they
 are held to round-off, `|noodl - omc| <= 1e-12 |omc|` with no absolute floor; the weather comes
 out identical to the last bit, the calendar time included (MBL's `t - k lenWea + lenWea`
 rounds the model time to the spacing of doubles near a year, 3.7e-9 s, and noodl rounds it the
@@ -461,6 +461,10 @@ same way):
 | Outside_CpData | 0.0e+00 | 6.0e-16 | 501 |
 | Outside_CpData_Angles | 0.0e+00 | 4.6e-16 | 501 |
 | Outside_CpData_Directions | 0.0e+00 | 4.3e-16 | 501 |
+| PressurizationData | 0.0e+00 | 9.1e-16 | 501 |
+
+`PressurizationData` imports, but it is not compared as a dynamic model (see Limitations). Its
+weather and wind pressures are compared, in the last row above.
 
 **Dynamic models (13, with volumes).** Every volume stores its air compressibly, as MBL's
 `MixingVolume` does (see "Volume mass storage" below), and every model is compared at the
@@ -591,6 +595,17 @@ regression at rtol 1e-8.
 - **Doorway laminar transition is approximated.** Doorway openings use the generic laminar
   transition of `PowerLaw` (1e-3 Pa) rather than one derived from the door's own record. The
   effect is confined to pressure differences below $10^{-3}$ Pa across the doorway.
+- **`PressurizationData` is imported but not compared.** It is MBL's 62.5 m3 room between two
+  `Outside_CpLowRise` walls over 30 days of San Francisco weather. The room flushes in about
+  10 s, against steps of 50 to 3000 s. Where the flow fades, in a calm or with the wind parallel
+  to both walls, the room freezes at the state it had when its flushing stopped. The midpoint
+  scheme's transport step holds the flows fixed over each half step, so in this stiff regime
+  it misses how the flows change. The error is about $	au^2 (q'/q)$ times the boundary's rate
+  of change, first order in the step, and the extrapolation cannot remove it. At 1 and 2
+  substeps, over every row, the room temperature is 1.6e-4 relative from the reference and its
+  humidity 2.0e-3; the flows and pressure are within 1e-6. Comparing it needs a transport
+  integrator that treats the change of the flows over the step implicitly. The wind boundaries
+  themselves are verified on the `Buildings.Fluid.Sources` models (above).
 - **The Modelica import accepts a stated subset.** Controllers and dynamic medium columns are
   refused with a named error, and only the weather reader's airflow outputs are read; see [the
   Modelica import's refused content](../formats/modelica.md).

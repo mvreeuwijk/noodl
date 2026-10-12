@@ -447,5 +447,37 @@
       "max_rel": 4.054718241272876e-16,
       "rows": 501
     }
+  },
+  "PressurizationData:weather": {
+    "east.pWin": {
+      "max_abs": 1.4210854715202004e-14,
+      "max_rel": 6.185273490115879e-16,
+      "rows": 501
+    },
+    "weaDat.weaBus.TDryBul": {
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "rows": 501
+    },
+    "weaDat.weaBus.pAtm": {
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "rows": 501
+    },
+    "weaDat.weaBus.relHum": {
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "rows": 501
+    },
+    "weaDat.weaBus.winSpe": {
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "rows": 501
+    },
+    "west.pWin": {
+      "max_abs": 7.105427357601002e-15,
+      "max_rel": 9.08829905985056e-16,
+      "rows": 501
+    }
   }
 }

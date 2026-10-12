@@ -244,9 +244,6 @@ def test_one_way_flow_against_the_embedded_contam_table():
 
 
 REFUSED = {
-    # The committed export predates weather files travelling with the JSON: its reader is
-    # refused until the model is re-exported with its weather file.
-    "PressurizationData": {"weaDat"},
     # A feedback controller and the temperature sensor wired as a component.
     "TrickleVent": {"con", "temSen"},
     # Two orifices in one column chain (no junction node), plus the controller.
@@ -254,6 +251,28 @@ REFUSED = {
     # A mass- and heat-storing MediumColumnDynamic, plus the controller.
     "ChimneyShaftWithVolume": {"con", "sha", "temSen"},
 }
+
+
+# Models `read_modelica` imports but the dynamic parity set refuses, each with the reason.
+DEFERRED = {
+    # A 62.5 m3 room between two Outside_CpLowRise walls over 30 days of San Francisco
+    # weather. Its flushing time (about 10 s) is far below the steps (50-3000 s), and where
+    # the flow fades (a calm, or the wind parallel to both walls) the room freezes at the
+    # state it held when its flushing stopped. The midpoint scheme's transport step holds the
+    # flows constant over each half step, which misses the flows' change in that stiff regime:
+    # a first-order error that the extrapolation cannot remove. Measured at (1, 2) substeps
+    # over every row, after the stiff-accurate halves: T 1.6e-4 and Xi 2.0e-3 relative (flows
+    # and p within 1e-6). Comparing it needs a transport integrator that treats the
+    # coefficients' change over the step implicitly. Its weather and wind pressure are
+    # compared (WEATHER).
+    "PressurizationData": "stiff calm-onset error of the step-frozen flows (T 1.6e-4, "
+                          "Xi 2.0e-3 at (1, 2) substeps)",
+}
+
+
+def test_deferred_models_import():
+    for model in DEFERRED:
+        read_modelica(DATA / f"{model}.json")
 
 
 @pytest.mark.parametrize("model", sorted(REFUSED))
@@ -277,7 +296,7 @@ def test_refused_models_name_their_offending_instances(model):
 WEATHER_RTOL = 1e-12
 WEATHER_ONLY = ("Outside_CpData", "Outside_CpData_Angles", "Outside_CpData_Directions",
                 "Outside_CpLowRise")
-WEATHER = (*WEATHER_ONLY, "Outside_Cp")
+WEATHER = (*WEATHER_ONLY, "Outside_Cp", "PressurizationData")
 
 
 @pytest.mark.parametrize("model", WEATHER)
@@ -373,7 +392,7 @@ def test_every_fixture_is_parity_checked_or_refused():
     # "parity-algebraic"/"parity-dynamic" are the committed recorded-error files this
     # module writes (see RECORD/RECORD_DYNAMIC, NOODL_RECORD_PARITY), not model fixtures.
     fixtures = {p.stem for p in DATA.glob("*.json")} - {"parity-algebraic", "parity-dynamic"}
-    sets = (set(ALGEBRAIC), set(DYNAMIC), set(REFUSED), set(WEATHER_ONLY))
+    sets = (set(ALGEBRAIC), set(DYNAMIC), set(REFUSED), set(WEATHER_ONLY), set(DEFERRED))
     assert set().union(*sets) == fixtures
     assert sum(len(s) for s in sets) == len(fixtures)  # disjoint
     assert set(PARITY_ROWS) == set(DYNAMIC) == set(REFERENCE_RESOLUTION) == set(WINDOW_COST)

@@ -14,10 +14,11 @@ The reference CSVs of the 13 dynamic models (`ClosedDoors`, `CO2TransportStep`,
 `NaturalVentilation`, `OneEffectiveAirLeakageArea`, `OneOpenDoor`, `OneRoom`,
 `OpenDoorBuoyancyDynamic`, `OpenDoorBuoyancyPressureDynamic`, `ReverseBuoyancy`,
 `ReverseBuoyancy3Zones`, `ThreeRoomsContam`, `ThreeRoomsContamDiscretizedDoor`, `ZonalFlow`)
-were regenerated with `scripts/modelica_export.py --tolerance 1e-13` (DASSL at a relative
-tolerance of 1e-13 instead of each model's declared 1e-6 or 1e-8; the CSV header's
-`tolerance` line records it; the JSON, which keeps the declared experiment, came out
-byte-identical). At the declared tolerance the references' own integration error was
+and of `PressurizationData` were regenerated with `scripts/modelica_export.py --tolerance 1e-13`
+(DASSL at a relative tolerance of 1e-13 instead of each model's declared 1e-6 or 1e-8; the CSV
+header's `tolerance` line records it; the JSON, which keeps the declared experiment, came out
+byte-identical, except that `PressurizationData.json` gained its weather file's entry). At the
+declared tolerance the references' own integration error was
 comparable to the parity tolerance (ZonalFlow: 5.6e-5 K, 2.8e-8 kg/kg; CO2TransportStep's
 door flow 5e-5 relative after its source pulse, still visible at 1e-10). From 1e-12 to 1e-13
 the references still moved by up to 1.1e-4 of the flow floor (`ClosedDoors`' crack flows,
@@ -102,13 +103,14 @@ naming the offending instances); their JSON is exported and kept here for the re
 - `ChimneyShaftWithVolume.json` — a dynamic (mass- and heat-storing) hydrostatic column
   (`MediumColumnDynamic`) and a feedback controller are not supported.
 
-`PressurizationData.json` is refused as well until it is re-exported: it was exported before
-weather files travelled with the JSON, so its `ReaderTMY3` has no weather file next to it (the
-wind-pressure boundaries themselves are supported).
+`PressurizationData.json` imports, but the dynamic parity tests do not yet compare it (a stiff
+error of the transport step where its flow fades; `docs/formats/modelica.md`). Its CSV, at
+1e-13, is the reference for that comparison, and its weather and wind-pressure columns are
+compared now.
 
-All four still simulate cleanly in OpenModelica, so their `.csv` was exported too (this
-export script does not know which models `noodl`'s reader refuses); they are kept here for
-completeness even though noodl's tests only read the JSON of these four.
+All three refused models still simulate cleanly in OpenModelica, so their `.csv` was exported
+too (this export script does not know which models `noodl`'s reader refuses); they are kept
+here for completeness even though noodl's tests only read the JSON of these three.
 
 The four `Buildings.Fluid.Sources` models other than `Outside_Cp` are boundaries with no flow
 element, which `read_modelica` refuses; their weather and wind-pressure columns are compared
