@@ -6,15 +6,52 @@ column layouts and units are read by `apps/sewer/inp.py`.
 
 **Read:** `[TITLE]`, `[OPTIONS]`, `[JUNCTIONS]`, `[OUTFALLS]`, `[CONDUITS]`, `[XSECTIONS]`,
 `[LOSSES]` (the flap gate, and under `DYNWAVE` the entry, exit and average loss coefficients),
-`[INFLOWS]`, `[POLLUTANTS]`, and under `DYNWAVE` `[STORAGE]`, `[ORIFICES]`, `[WEIRS]`,
-`[OUTLETS]` and `[TRANSECTS]` with the `[CURVES]` of type `STORAGE`, `RATING`, `TIDAL` and
+`[INFLOWS]` (a flow into an outfall is checked and dropped: dynamic-wave routing never solves an
+outfall's depth from its inflow), `[POLLUTANTS]`, and under `DYNWAVE` `[DIVIDERS]` (as junctions, below), `[STORAGE]`,
+`[ORIFICES]`, `[WEIRS]`, `[OUTLETS]` and `[TRANSECTS]` with the `[CURVES]` of type `STORAGE`, `RATING`, `TIDAL` and
 `SHAPE`, and the lateral inflows `[TIMESERIES]` (inline and `FILE`), `[PATTERNS]`,
 `[DWF]` and `[INFLOWS]` (see Lateral inflows below).
 
-**Ignored** because no conduit or node ever references them: `[EVAPORATION]`, `[REPORT]`,
+**Before the first section.** SWMM reads a line before the first `[SECTION]` header as `[TITLE]`
+text (`input.c:174`: the second pass over the file starts in section 0, the title), so the reader
+does the same. A version-control merge-conflict marker (`<<<<<<<`, `=======`, `>>>>>>>`) anywhere
+is refused with its line: such a file holds both sides of a merge, and SWMM itself rejects what
+that leaves (duplicate names).
+
+**`[DIVIDERS]` (dynamic wave).** `Name Elevation DivertedLink Type [parameters] [MaxDepth
+InitDepth SurDepth Aponded]`, where `Type` is `OVERFLOW` (no parameters), `CUTOFF` (the cutoff
+flow), `TABULAR` (a diversion curve of `[CURVES]`, type `DIVERSION`, which is accepted and not
+used) or `WEIR` (`Qmin`, `dhMax`, `Cweir`); the four optional depth fields follow the
+type-specific ones (`node.c:1113-1210`). Under `DYNWAVE` SWMM routes a divider as an ordinary
+junction: the diversion (`divider_getOutflow`) is reached through `link_getInflow` and
+`conduit_getInflow`, which dynamic-wave routing calls only for links that are not conduits
+(`dynwave.c:440`) and then through the link's own inflow rule, and the divider-degree check is
+`validateTreeLayout`'s, for `STEADY` and `KINWAVE` only. The reader makes it a junction with the
+same `MaxDepth`, `InitDepth`, `SurDepth` and `Aponded` rules. What SWMM's `divider_validate`
+(`node.c:1216-1247`) rejects under any routing is refused with the line: a diverted link that is
+missing (`*`), unknown or not attached to the divider, and a `WEIR` divider with a non-positive
+`dhMax` or `Cweir` or a `Qmin` above `Cweir dhMax^1.5`. Under `STEADY` or `KINWAVE`, where SWMM
+diverts flow, `[DIVIDERS]` stays refused by name.
+
+**Ignored** because no conduit or node ever references them: `[REPORT]`,
 `[TAGS]`, `[MAP]`, `[COORDINATES]`, `[VERTICES]`, `[POLYGONS]`, `[SYMBOLS]`, `[LABELS]`,
 `[BACKDROP]`, `[PROFILES]`; `[FILES]` is read for its `USE` lines (below). Any other section that carries content is refused, and
-so are the options and fields listed below.
+so are the options and fields listed below. Two are ignored only when nothing uses them:
+
+- `[RAINGAGES]`, when the file has no `[SUBCATCHMENTS]` (a gage feeds subcatchments, and RDII,
+  whose sections are refused on their own);
+- `[EVAPORATION]`, unless it can be positive while a conduit is open. SWMM takes
+  `topWidth * length * rate` from an open conduit (`link.c:1359-1362`, from the climate state of
+  every routing step, `swmm5.c:556`) and dynamic-wave routing subtracts it from the end nodes
+  (`dynwave.c:560-572`); that is not modelled, so a `TIMESERIES`, `TEMPERATURE` or `FILE` source,
+  or a non-zero `CONSTANT` or `MONTHLY` value, is refused naming the first open conduit. With
+  only closed conduits, or a zero rate, nothing is lost and the section changes nothing.
+
+**Options that change what is routed.** `IGNORE_ROUTING YES` and `FLOW_ROUTING NONE` (SWMM does
+not route at all) and `SKIP_STEADY_STATE YES` (a step whose flows are within `SYS_FLOW_TOL` and
+`LAT_FLOW_TOL` of the last is skipped, `routing.c:386-392`, which stops a slow transient early)
+are refused with the line number under every routing; `NO` is SWMM's default and changes
+nothing. The other `IGNORE_*` options and `SLOPE_WEIGHTING` do not reach the routed flows.
 
 **Routing.** `FLOW_ROUTING` is `STEADY`, `KINWAVE` or `DYNWAVE`, read as the physical names
 `steady`, `kinematic_wave` and `dynamic_wave` (`SewerNetwork.routing`). `DYNWAVE` also reads
@@ -32,9 +69,15 @@ the reader lowers `ROUTING_STEP` to `WET_STEP` when it is larger (a file that om
 `VARIABLE_STEP` runs the 0.75 variable step, so give `duration=` rather than `dt=` to
 `simulate_dynamic_wave`; `DynamicWaveOptions()` built in code defaults to the fixed step).
 
-**Dynamic wave, options refused.** With `DYNWAVE` the reader refuses, with the line number:
-`ALLOW_PONDING YES` (ponding is not modelled), a negative `LENGTHENING_STEP` or
-`MINIMUM_STEP`, and a `VARIABLE_STEP` outside 0 to 2.
+**Ponding.** `ALLOW_PONDING` takes `YES` or `NO` (SWMM's keyword test; anything else is refused
+with the line) under every routing. With `YES` under `DYNWAVE`, a junction or divider with a
+positive `Aponded` (the sixth `[JUNCTIONS]` field, `Manhole.ponded_area`) ponds instead of
+flooding (see [Ponding](../applications/sewer.md#ponding)); under `STEADY` or `KINWAVE` SWMM
+re-releases the ponded water into the next step's flow, so `ALLOW_PONDING YES` with any positive
+`Aponded` is refused by name there. An `Aponded` is otherwise read and unused.
+
+**Dynamic wave, options refused.** With `DYNWAVE` the reader refuses, with the line number: a
+negative `LENGTHENING_STEP` or `MINIMUM_STEP`, and a `VARIABLE_STEP` outside 0 to 2.
 The conduit lengthening uses the file's own `ROUTING_STEP`, as SWMM validates its conduits
 before it lowers the step to `WET_STEP`.
 
@@ -236,7 +279,7 @@ refused by name; `USE RAINFALL` only feeds rain gauges, which are refused anyway
 
 **Refused by name**, because skipping them would silently change the physics:
 `[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` under `STEADY` or `KINWAVE`, `[PUMPS]`,
-`[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[STREETS]`, `[CURVES]` of any
+`[DIVIDERS]` under `STEADY` or `KINWAVE`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[STREETS]`, `[CURVES]` of any
 type but `STORAGE`, `RATING`, `TIDAL` and `SHAPE`, `[LID_USAGE]`, and any other section carrying
 content.
 
@@ -266,12 +309,13 @@ dry-weather inflow, which are refused or absent.
 
 - runoff (`[SUBCATCHMENTS]` and everything that feeds them) and dry-weather patterns;
 - the `DUMMY` and `STREET` cross sections, conduit seepage and evaporation losses;
-- pumps, dividers, roadway weirs, weir coefficient curves and control rules (regulator
-  settings); orifices, weirs, outlets and storage units under `STEADY` or `KINWAVE`, and
+- pumps, dividers under `STEADY` or `KINWAVE`, roadway weirs, weir coefficient curves and
+  control rules (regulator settings); orifices, weirs, outlets and storage units under `STEADY` or `KINWAVE`, and
   storage evaporation or exfiltration;
-- ponding (`ALLOW_PONDING YES`). Both `SURCHARGE_METHOD`s model
-  surcharge, and a junction floods (without ponding) above `MaxDepth` (extended to its
-  crown) plus `SurDepth`; the water that cannot enter is lost, as in SWMM without ponding.
+- ponding together with water quality or headspace air, and ponding under `STEADY` or `KINWAVE`.
+  Both `SURCHARGE_METHOD`s model surcharge, and a junction without a ponded area floods above
+  `MaxDepth` (extended to its crown) plus `SurDepth`; the water that cannot enter is lost, as in
+  SWMM without ponding.
 
 The complete list of what the dynamic wave does not support, and of what it implements without
 a live SWMM comparison, is under [Limitations](../applications/sewer.md#limitations).

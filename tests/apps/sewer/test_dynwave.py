@@ -2933,3 +2933,94 @@ def test_build_dynamic_wave_model_is_exported():
 
     assert sewer.build_dynamic_wave_model is build_dynamic_wave_model
     assert "build_dynamic_wave_model" in sewer.__all__
+
+
+# ------------------------------------------------------------------------------- ponding
+def _pond_run(net, steps=30):
+    model, state, drivers = build_model(net, iterate_tol=1e-12, iterate_max=500)
+    _, hist = simulate_dynamic_wave(model, state, drivers, steps=steps, atol=1e-12,
+                                    record=("water.phi", "sewer.overflow"))
+    return model, hist
+
+
+def test_ponding_keeps_the_water_a_flooding_junction_would_lose():
+    """J2 (MaxDepth 0.3 m, its crown, Aponded 0.5 m2) of `ponding_dynwave.inp` rises barely
+    above its rim, over the ponded area plus its conduits', and its overflow is the ponded
+    volume's growth; SurDepth plays no part. With `allow_ponding` off the same network is the
+    one that has the junction surcharge on (EXTRAN) up to rim + SurDepth = 2 m before it
+    floods, so it is far deeper."""
+    net, _, _ = read_swmm_inp(DATA / "ponding_dynwave.inp")
+    assert net.dynamic_wave.allow_ponding
+    model, hist = _pond_run(net)
+    hyd = model.dynamic_wave
+    j2 = list(hyd.junction_names).index("J2")
+    node = model.junction_idx[j2]
+    depth = hist["water.phi"][:, node] - hyd.node_invert[node]
+    rim = float(hyd.full_depth[j2])
+    assert rim == pytest.approx(0.3) and bool(hyd.can_pond[j2])
+    assert rim + 0.05 < depth[-1] < rim + 0.2 and depth.max() == depth[-1]
+    assert hist["sewer.overflow"][-1, j2] > 0.0
+    off = dataclasses.replace(
+        net, dynamic_wave=dataclasses.replace(net.dynamic_wave, allow_ponding=False))
+    model_off, hist_off = _pond_run(off)
+    assert not bool(model_off.dynamic_wave.can_pond.any())
+    depth_off = hist_off["water.phi"][:, node] - hyd.node_invert[node]
+    assert depth_off[-1] > 1.0 > depth[-1]
+
+
+def test_ponding_is_refused_with_quality_and_for_bad_areas():
+    net, _, _ = read_swmm_inp(DATA / "ponding_dynwave.inp")
+    with pytest.raises(ValueError, match="not modelled together with water quality"):
+        build_model(net, quality=True)
+    manholes = tuple(
+        dataclasses.replace(m, ponded_area=-1.0) if m.name == "J2" else m for m in net.manholes)
+    with pytest.raises(ValueError, match="ponded_area must be >= 0"):
+        dataclasses.replace(net, manholes=manholes).validate()
+    stor, _, _ = read_swmm_inp(DATA / "storage_dynwave.inp")
+    manholes = tuple(
+        dataclasses.replace(m, ponded_area=1.0) if m.storage is not None else m
+        for m in stor.manholes)
+    with pytest.raises(ValueError, match="storage unit .* ponded_area"):
+        dataclasses.replace(stor, manholes=manholes).validate()
+
+
+def _one(value, n=2):
+    return torch.full((n,), value, dtype=F64)
+
+
+def _pond_drivers(n_start, n_last, head_start):
+    return {"water.storage_area": _one(4.0), "water.pond_area": _one(4.5),
+            "water.storage_rate": torch.tensor(1.0 / 5.0, dtype=F64),
+            "water.head_start": _one(head_start), "water.net_inflow_start": _one(n_start),
+            "water.net_inflow_last": _one(n_last), "water.head_last": _one(head_start),
+            "water.pond_switch_slope": _one(40.0), "water.ponded": _one(0.0),
+            "water.surcharged": _one(0.0), "water.surcharge_slope": _one(0.01),
+            "water.flood_excess": _one(0.0)}
+
+
+@pytest.mark.parametrize("n_start,n_last,head_start", [
+    (0.02, 0.03, 0.46), (0.02, 0.03, 0.2), (0.0, 0.0, 0.1)])
+def test_a_ponding_junction_rising_through_its_full_head_is_monotone_and_unwalled(
+        n_start, n_last, head_start):
+    """`JunctionStorage` with a `pond_head` H* = 0.5 m beside a plain junction with the same top:
+    from a step start below H* the ponding junction's withdrawal never decreases (the lower line,
+    the hold at H*, then the larger-area line) with a positive slope throughout, and it has no
+    flood wall above H* while the plain junction's wall is far steeper than its storage."""
+    heads = torch.linspace(0.0, 1.0, 2001, dtype=F64)
+    store = JunctionStorage(torch.arange(2), torch.zeros(2, dtype=F64),
+                            bed_area=12.566 * 0.0929, crown=_one(0.3), top=_one(0.5),
+                            surchargeable=torch.tensor([False, False]),
+                            pond_head=torch.tensor([0.5, torch.inf], dtype=F64))
+    assert store.ponds
+    drv = _pond_drivers(n_start, n_last, head_start)
+    flow = torch.stack([store.flow(h.expand(2), drv) for h in heads])
+    slope = torch.stack([store.dflow(h.expand(2), drv) for h in heads])
+    assert bool((slope > 0.0).all())
+    pond, plain = flow[:, 0], flow[:, 1]
+    assert bool((pond[1:] >= pond[:-1] - 1e-12).all())
+    top = int(torch.searchsorted(heads, torch.tensor(0.5, dtype=F64)))
+    wall = float((plain[-1] - plain[top]) / (heads[-1] - heads[top]))
+    storage = float((plain[top - 1] - plain[top - 100]) / (heads[top - 1] - heads[top - 100]))
+    assert wall > 5.0 * storage
+    # the ponded line above H* carries the larger area: slope 2 A_hi / dt = 2 * 4.5 / 5
+    assert float(slope[-1, 0]) == pytest.approx(2.0 * 4.5 / 5.0)

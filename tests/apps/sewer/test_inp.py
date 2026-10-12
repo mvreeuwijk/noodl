@@ -205,7 +205,6 @@ def test_dynwave_refuses_a_bad_variable_step_option_with_its_line(tmp_path, old,
 
 
 @pytest.mark.parametrize("old,new,match", [
-    ("ALLOW_PONDING        NO", "ALLOW_PONDING        YES", "ALLOW_PONDING"),
     ("LENGTHENING_STEP     0", "LENGTHENING_STEP     -5", r"line \d+: LENGTHENING_STEP"),
     ("J1               12.0       5          0", "J1               12.0       5          -0.2",
      "negative initial depth"),
@@ -799,4 +798,121 @@ def test_a_merge_conflict_marker_is_refused(tmp_path):
         read_swmm_inp(path)
     path.write_text(_dyn(tmp_path).read_text() + "\n[MAP]\n=======\n")
     with pytest.raises(ValueError, match="merge-conflict marker '======='"):
+        read_swmm_inp(path)
+
+
+# --------------------------------------------------------------------------- ponding
+def test_allow_ponding_yes_is_read_with_the_junction_ponded_areas(tmp_path):
+    """`ALLOW_PONDING YES` (project.c:603-616, NoYesWords) is `allow_ponding`; Aponded (the
+    sixth [JUNCTIONS] field, or the one after SurDepth of a divider) is `ponded_area`, m2."""
+    j1 = "J1               12.0       5          0          0          0"
+    net, _, _ = read_swmm_inp(_dyn(tmp_path, [
+        ("ALLOW_PONDING        NO", "ALLOW_PONDING        YES"),
+        (j1, "J1               12.0       5          0          0          2.5")]))
+    assert net.dynamic_wave.allow_ponding
+    assert {m.name: m.ponded_area for m in net.manholes}["J1"] == 2.5
+    net, _, _ = read_swmm_inp(_dyn(tmp_path, [(j1, j1[:-1] + "2.5")]))
+    assert not net.dynamic_wave.allow_ponding            # the default is NO
+    assert {m.name: m.ponded_area for m in net.manholes}["J1"] == 2.5   # read, unused
+    row = "J3 10.0 C3 CUTOFF 0.05 0.7 0.1 0.2 5"
+    assert next(m for m in read_swmm_inp(_divider_inp(tmp_path, row))[0].manholes
+                if m.name == "J3").ponded_area == 5.0
+
+
+@pytest.mark.parametrize("old,new,match", [
+    ("ALLOW_PONDING        NO", "ALLOW_PONDING        MAYBE", r"line \d+: ALLOW_PONDING must be"),
+    ("J1               12.0       5          0          0          0",
+     "J1               12.0       5          0          0          -1", "negative ponded area"),
+])
+def test_ponding_refusals(tmp_path, old, new, match):
+    with pytest.raises(ValueError, match=match):
+        read_swmm_inp(_dyn(tmp_path, [(old, new)]))
+
+
+def test_ponding_with_a_ponded_area_is_dynamic_wave_only(tmp_path):
+    """Under STEADY or KINWAVE SWMM re-releases ponded water into the next step's flow
+    (flowrout.c:151-156), which is not modelled; without an Aponded it changes nothing."""
+    text = (DATA / "tree_kinwave.inp").read_text().replace(
+        "ALLOW_PONDING        NO", "ALLOW_PONDING        YES")
+    path = tmp_path / "k.inp"
+    path.write_text(text)
+    read_swmm_inp(path)
+    j1 = "J1               12.0       5          0          0          0"
+    assert j1 in text
+    path.write_text(text.replace(j1, j1[:-1] + "2"))
+    with pytest.raises(ValueError, match=r"line \d+: ALLOW_PONDING YES with node 'J1'"):
+        read_swmm_inp(path)
+
+
+# ------------------------------------------------------- options and sections that matter
+@pytest.mark.parametrize("old,new,match", [
+    ("SKIP_STEADY_STATE    NO", "SKIP_STEADY_STATE    YES", "SKIP_STEADY_STATE YES"),
+    ("SKIP_STEADY_STATE    NO", "SKIP_STEADY_STATE    MAYBE", "must be YES or NO"),
+    ("SKIP_STEADY_STATE    NO", "SKIP_STEADY_STATE    NO\nIGNORE_ROUTING YES",
+     "IGNORE_ROUTING YES"),
+    ("FLOW_ROUTING         DYNWAVE", "FLOW_ROUTING         NONE", "FLOW_ROUTING NONE"),
+])
+@pytest.mark.parametrize("dynwave", [True, False])
+def test_options_that_change_what_is_routed_are_refused_by_name(tmp_path, old, new, match,
+                                                                dynwave):
+    """IGNORE_ROUTING, FLOW_ROUTING NONE and SKIP_STEADY_STATE YES change the routed result
+    (swmm5.c:375, routing.c:386-392), under every routing; NO is SWMM's default."""
+    if dynwave:
+        path = _dyn(tmp_path, [(old, new)] if old != "FLOW_ROUTING         DYNWAVE" else [])
+        if old.startswith("FLOW_ROUTING"):
+            path.write_text(path.read_text().replace(old, new))
+    else:
+        old = old.replace("DYNWAVE", "KINWAVE")
+        path = tmp_path / "k.inp"
+        text = (DATA / "tree_kinwave.inp").read_text()
+        assert old in text
+        path.write_text(text.replace(old, new.replace("DYNWAVE", "KINWAVE")))
+    with pytest.raises(ValueError, match=match):
+        read_swmm_inp(path)
+
+
+OPEN_C1 = [("C1               CIRCULAR     0.30             0          0          0          1",
+            "C1               RECT_OPEN    0.30             1.0        0          0          1")]
+
+
+def test_evaporation_that_can_be_positive_is_refused_with_an_open_conduit(tmp_path):
+    """An open conduit loses ``topWidth * length * Evap.rate`` (link.c:1359-1362); that is
+    not modelled, so a rate that is not zero is refused naming the conduit, while a zero
+    rate, or only closed conduits, leave the section ignored."""
+    zero = _dyn(tmp_path, OPEN_C1)
+    read_swmm_inp(zero)
+    for row in ("CONSTANT         0.1", "MONTHLY 0 0 0 0 0 0 0 0 0 0 0 0.2",
+                "TIMESERIES       Evap", "TEMPERATURE"):
+        path = _dyn(tmp_path, [*OPEN_C1, ("CONSTANT         0.0", row)])
+        with pytest.raises(ValueError, match=r"line \d+: \[EVAPORATION\] .*conduit 'C1' is open"):
+            read_swmm_inp(path)
+    read_swmm_inp(_dyn(tmp_path, [("CONSTANT         0.0", "CONSTANT         0.1")]))
+    read_swmm_inp(_dyn(tmp_path, [*OPEN_C1, ("CONSTANT         0.0",
+                                             "MONTHLY 0 0 0 0 0 0 0 0 0 0 0 0")]))
+
+
+def test_an_inflow_at_an_outfall_reaches_no_link_and_is_dropped(tmp_path):
+    """A lateral inflow into an outfall (a node dynamic-wave routing never solves) is read and
+    dropped; an unknown node is still refused."""
+    inflows = "J1               FLOW             \"\"               FLOW     1.0      1.0      0.05"
+    edit = [(inflows, inflows + "\nOutfall          FLOW             \"\"               FLOW"
+             "     1.0      1.0      0.07")]
+    net, _, _ = read_swmm_inp(_dyn(tmp_path, edit))
+    base, _, _ = read_swmm_inp(_dyn(tmp_path))
+    assert net.manholes == base.manholes and net.outfalls == base.outfalls
+    edit = [(inflows, inflows + "\nNowhere          FLOW             \"\"               FLOW"
+             "     1.0      1.0      0.07")]
+    with pytest.raises(ValueError, match="inflow at 'Nowhere', which is not a junction"):
+        read_swmm_inp(_dyn(tmp_path, edit))
+
+
+def test_raingages_without_subcatchments_are_ignored(tmp_path):
+    """A gage only feeds subcatchments (and RDII, a refused section of its own)."""
+    gages = ("\n[RAINGAGES]\n;;Name Format Interval SCF Source\nG1 VOLUME 0:05 1.0 "
+             "TIMESERIES R1\n")
+    path = tmp_path / "gage.inp"
+    path.write_text(_dyn(tmp_path).read_text() + gages)
+    read_swmm_inp(path)
+    path.write_text(path.read_text() + "\n[SUBCATCHMENTS]\nS1 G1 J1 1 50 100 0.5 0\n")
+    with pytest.raises(ValueError, match=r"\[RAINGAGES\]|\[SUBCATCHMENTS\]"):
         read_swmm_inp(path)
