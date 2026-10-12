@@ -109,7 +109,7 @@ def test_a_non_circular_cross_section_is_refused(tmp_path):
     )
     path = tmp_path / "rect.inp"
     path.write_text(text)
-    with pytest.raises(ValueError, match="only CIRCULAR"):
+    with pytest.raises(ValueError, match="shape other than CIRCULAR"):
         read_swmm_inp(path)
 
 
@@ -330,9 +330,9 @@ def test_dynwave_reads_lengthening_with_the_files_own_routing_step(tmp_path):
 
 
 @pytest.mark.parametrize("what,edit,match", [
-    ("an entry loss", "C1  0.5  0  0", "entry loss"),
-    ("an exit loss", "C1  0  0.5  0", "exit loss"),
-    ("an average loss", "C1  0  0  0.5", "average loss"),
+    ("a negative entry loss", "C1  -0.5  0  0", "negative entry loss"),
+    ("a negative exit loss", "C1  0  -0.5  0", "negative exit loss"),
+    ("a negative average loss", "C1  0  0  -0.5", "negative average loss"),
     ("seepage", "C1  0  0  0  NO  0.5", "seepage"),
     ("a bad flap word", "C1  0  0  0  MAYBE", "YES or NO"),
     ("an unknown link", "Cx  0  0  0  YES", "Cx.*not a conduit"),
@@ -569,7 +569,7 @@ def test_closed_storage_shapes_are_read(tmp_path, shape, params, expected):
     (("FUNCTIONAL 20 1.5 5", "FUNCTIONAL 20 1.5 -5"), r"c \(area at zero depth"),
     (("FUNCTIONAL 20 1.5 5", "BOWL 1 2 3"), "shape"),
     (("TABULAR  Bowl", "TABULAR  Cup"), "curve 'Cup'"),
-    (("Bowl    STORAGE", "Bowl    SHAPE"), "type SHAPE"),
+    (("Bowl    STORAGE", "Bowl    PUMP1"), "type PUMP1"),
     (("Bowl             1.0 60", "Bowl             0.4 60"), "strictly increasing"),
     (("J3      10.0 2.0      0", "J3      10.0 -2.0     0"), "negative maximum depth"),
     (("J3      10.0 2.0      0", "J3      10.0 2.0      -1"), "negative initial depth"),
