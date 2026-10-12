@@ -109,7 +109,7 @@ def test_a_non_circular_cross_section_is_refused(tmp_path):
     )
     path = tmp_path / "rect.inp"
     path.write_text(text)
-    with pytest.raises(ValueError, match="only CIRCULAR"):
+    with pytest.raises(ValueError, match="shape other than CIRCULAR"):
         read_swmm_inp(path)
 
 

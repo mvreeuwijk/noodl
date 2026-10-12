@@ -30,6 +30,7 @@ from noodl.apps.sewer.dynwave import (
 from noodl.apps.sewer.hydraulics import GEOMETRY_ALIASES, SewerHydraulics
 from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
 from noodl.apps.sewer.storage import validate_storage_curve
+from noodl.apps.sewer.xsect_spec import UNMODELLED_KINDS, Xsect
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Model
 from noodl.refs import initial_drivers as refs_initial_drivers
@@ -137,6 +138,19 @@ class Pipe:
     `v` to `u` unless `flap_gate_reversed`, where the gate passes `v` to `u` flow instead
     (a conduit the SWMM reader turned round because it was adverse: its file orientation is
     `v` to `u`, and SWMM's ``Link.direction`` is -1).
+
+    `xsect` (dynamic wave only; ``None`` for the circle of `diameter`) is the conduit's SWMM
+    cross section (`xsect_spec.Xsect`: a shape keyword and its geometry fields, or an
+    IRREGULAR transect, a CUSTOM shape curve); `diameter` is then its full height (m), which
+    must equal `Xsect.height`. `loss_inlet`, `loss_outlet` and `loss_average` are SWMM's
+    entry, exit and average local loss coefficients (`[LOSSES]`, -, dynamic wave only;
+    `dwflow.c::findLocalLosses`). For an IRREGULAR conduit `length` is SWMM's
+    ``conduit_getLength`` (the file's length over the transect's length factor) and `n` the
+    roughness SWMM then uses (the transect's main-channel n times the root of that factor,
+    `link.c::conduit_validate`); `transect_length_factor` is that factor (-, 1 for every other
+    conduit): it sets the momentum length when the conduit is not lengthened
+    (`link.c:1105-1118`). `culvert` is SWMM's culvert code (`[XSECTIONS]` field 8; 0 for none,
+    1 to 57 for the inlet types of FHWA HEC-5, dynamic wave only; `culvert.py`).
     """
 
     name: str
@@ -153,6 +167,12 @@ class Pipe:
     initial_flow: float = 0.0
     flap_gate: bool = False
     flap_gate_reversed: bool = False
+    xsect: Xsect | None = None
+    loss_inlet: float = 0.0
+    loss_outlet: float = 0.0
+    loss_average: float = 0.0
+    transect_length_factor: float = 1.0
+    culvert: int = 0
 
 
 #: Orifice orientations (SWMM's SIDE, BOTTOM) and opening shapes (CIRCULAR, RECT_CLOSED).
@@ -499,6 +519,10 @@ class SewerNetwork:
             for what, value, default in (
                 ("barrels", pipe.barrels, 1), ("max_flow", pipe.max_flow, None),
                 ("initial_flow", pipe.initial_flow, 0.0), ("flap_gate", pipe.flap_gate, False),
+                ("xsect", pipe.xsect, None), ("culvert", pipe.culvert, 0),
+                ("loss_inlet", pipe.loss_inlet, 0.0),
+                ("loss_outlet", pipe.loss_outlet, 0.0),
+                ("loss_average", pipe.loss_average, 0.0),
             ):
                 if value != default:
                     raise ValueError(
@@ -525,6 +549,27 @@ class SewerNetwork:
                 f"SewerNetwork: tidal outfall {outfall.name!r} tide curve hours must be "
                 f"strictly increasing, got {[x for x, _ in tide]}"
             )
+
+    def _validate_xsect(self, pipe: Pipe) -> None:
+        """Refuse, BY NAME, a cross section this package does not model, one that SWMM
+        rejects, or one that disagrees with the pipe's `diameter`."""
+        x = pipe.xsect
+        if x.kind in UNMODELLED_KINDS:
+            raise ValueError(f"SewerNetwork: pipe {pipe.name!r}: cross section {x.kind}: "
+                             f"{UNMODELLED_KINDS[x.kind]}")
+        if self.geometry != "tabulated":
+            raise ValueError(
+                f"SewerNetwork: pipe {pipe.name!r} has a {x.kind} cross section, which only "
+                f"SWMM's tabulated geometry (geometry='tabulated') models, not "
+                f"{self.geometry!r}")
+        try:
+            height = x.height
+        except ValueError as exc:
+            raise ValueError(f"SewerNetwork: pipe {pipe.name!r}: {exc}") from None
+        if not math.isclose(pipe.diameter, height, rel_tol=1e-9, abs_tol=1e-12):
+            raise ValueError(
+                f"SewerNetwork: pipe {pipe.name!r} diameter {pipe.diameter!r} m is not its "
+                f"{x.kind} cross section's full height {height!r} m")
 
     def _validate_dynamic(self, outfall_names: set[str]) -> None:
         """Dynamic-wave topology: loops and any flow direction are allowed, but every
@@ -556,6 +601,24 @@ class SewerNetwork:
                 raise ValueError(
                     f"SewerNetwork: pipe {pipe.name!r} initial_flow must be finite, got "
                     f"{pipe.initial_flow!r} m3/s")
+            if not (isinstance(pipe.culvert, int) and not isinstance(pipe.culvert, bool)
+                    and pipe.culvert >= 0):
+                raise ValueError(
+                    f"SewerNetwork: pipe {pipe.name!r} culvert code must be an integer >= 0, "
+                    f"got {pipe.culvert!r}")
+            for what in ("loss_inlet", "loss_outlet", "loss_average"):
+                value = getattr(pipe, what)
+                if not (math.isfinite(value) and value >= 0.0):
+                    raise ValueError(
+                        f"SewerNetwork: pipe {pipe.name!r} {what} must be a finite "
+                        f"coefficient >= 0, got {value!r}")
+            if not (math.isfinite(pipe.transect_length_factor)
+                    and pipe.transect_length_factor > 0.0):
+                raise ValueError(
+                    f"SewerNetwork: pipe {pipe.name!r} transect_length_factor must be > 0, "
+                    f"got {pipe.transect_length_factor!r}")
+            if pipe.xsect is not None:
+                self._validate_xsect(pipe)
         neighbours: dict[str, list[str]] = {}
         touching: dict[str, list[str]] = {name: [] for name in outfall_names}
         links = (*self.pipes, *self.orifices, *self.weirs, *self.outlets)

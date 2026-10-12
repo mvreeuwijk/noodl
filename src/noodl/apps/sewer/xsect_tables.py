@@ -164,14 +164,15 @@ def lookup(x: Tensor, table: Tensor) -> Tensor:
 
 
 def inv_lookup(y: Tensor, table: Tensor) -> Tensor:
-    """`xsect.c::invLookup` restricted to a table's INCREASING part (every call here has
-    ``y <= 1`` on ``S_Circ``, whose maximum sits third from last, so SWMM's
-    decreasing-tail branch is never taken): ``locate`` by bisection, then linear inverse."""
+    """`xsect.c::invLookup`: ``locate`` by bisection in the table's increasing part, then
+    linear inverse. A table whose last two entries decrease (every section-factor table: its
+    maximum sits third from last) is searched only up to that maximum, and a `y` above its
+    last entry -- ambiguous between the two sides of the maximum -- returns the maximum's
+    position, as SWMM's decreasing-tail branch does (every path of it ends there,
+    xsect.c:1546-1555)."""
     n_items = table.shape[0]
     dx = 1.0 / (float(n_items) - 1.0)
     n = n_items - 2 if float(table[n_items - 3]) > float(table[n_items - 1]) else n_items
-    if bool(torch.any(y > table[n_items - 1])) and n < n_items:
-        raise ValueError("xsect_tables.inv_lookup: the decreasing table tail is not modelled")
     inc = table[:n]
     # `locate(y, table, n-1)`: the highest j with table[j] <= y, clamped to [0, n-1].
     i = torch.searchsorted(inc, y.contiguous(), right=True) - 1
@@ -184,6 +185,8 @@ def inv_lookup(y: Tensor, table: Tensor) -> Tensor:
     x0 = i_safe.to(F64) * dx
     x = torch.where(dy == 0.0, x0, x0 + (y - t0) * dx / dy_safe)
     x = torch.clamp(x, 0.0, 1.0)
+    if n < n_items:                          # xsect.c:1546-1548 (and 1549-1555, same result)
+        top = top | (y > table[n_items - 1])
     return torch.where(top, torch.full_like(x, (n - 1) * dx), x)
 
 
@@ -558,12 +561,13 @@ def critical_depth(q: Tensor, y_full: Tensor, a_full: Tensor,
 
 
 def normal_depth_ft(q: Tensor, y_full: Tensor, a_full: Tensor, s_full: Tensor,
-                    beta: Tensor) -> Tensor:
+                    beta: Tensor, s_max_ratio: float | Tensor = 1.08) -> Tensor:
     """`link.c::link_getYnorm` (link.c:783-804) for CIRCULAR: q clamped to
     ``qMax = 1.08 sFull beta``, ``A(S)`` by `circ_getAofS` (``aFull`` for ``psi >= 1``),
-    ``Y(A)`` by `circ_getYofA`."""
+    ``Y(A)`` by `circ_getYofA`. `s_max_ratio` is ``sMax / sFull`` (1.08 for the circle,
+    1.06949 for a FORCE_MAIN, which routes on the circle's tables)."""
     # link.c:797-798 (qMax = sMax beta, sMax = 1.08 sFull: xsect.c:248, link.c:1136)
-    q = torch.minimum(torch.abs(q), 1.08 * s_full * beta)
+    q = torch.minimum(torch.abs(q), s_max_ratio * s_full * beta)
     # link.c:800-802 (circ_getAofS: aFull for psi >= 1)
     psi = q / beta / s_full
     alpha = torch.where(psi >= 1.0, torch.ones_like(psi),
