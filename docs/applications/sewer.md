@@ -918,7 +918,9 @@ each is confined to the cases named.
 - **Iteration artefacts.** Trial relaxation, link bypassing and the 0.001 cfs reversal rule are
   not modelled; `HEAD_TOLERANCE` and `MAX_TRIALS` are the iteration's defaults, with a flow
   tolerance SWMM does not have (see [Iteration and convergence](#iteration-and-convergence)).
-  SWMM at its default tolerance is off its own fixed point by centimetres on a backwater.
+  SWMM at its default tolerance is off its own fixed point by centimetres on a backwater, and
+  by up to metres on some corpus files (see [the SWMM corpus](#dynamic-wave-against-swmm)),
+  which noodl, solving to the fixed point, does not reproduce.
 - **Refused where SWMM accepts.** A `FUNCTIONAL` storage exponent below 0 (infinite area at zero
   depth), a negative storage `MaxDepth`, `InitDepth` or `SurDepth`, a nonzero pollutant
   `Cinit`, and the sections listed under [Limitations](#limitations).
@@ -1219,6 +1221,38 @@ The same networks with SWMM at its **default** tolerance (`HEAD_TOLERANCE` 0.001
 SWMM reports 0 % of steps not converging at those defaults too. Its stopping rule bounds the
 change between relaxed trials, not the distance to the fixed point, so a result that SWMM
 calls converged can sit centimetres away from the equations' solution on a backwater.
+
+**The SWMM corpus.** `benchmarks/swmm_corpus.py` runs every file of a folder of SWMM models
+through both engines for a short window and compares the node depths at its end (the corpus
+is an argument, never part of the repository). On the 1,646 files of the SWMMEnablement
+collection, 107 run in noodl (the others are refused by name, mostly for hydrology, pumps and
+non-circular shapes), with a 600 s window. At each file's own `HEAD_TOLERANCE` and
+`MAX_TRIALS` the largest depth difference per file is under 1 mm on 12 files, 1-10 mm on 22,
+1-5 cm on 34, 5-20 cm on 29, 0.2-1 m on 8 and over 1 m on 2. That spread is SWMM's own
+iteration error, not a difference of model: run four ways (each engine at the file's
+tolerances and at `HEAD_TOLERANCE` 1e-12, `MAX_TRIALS` 500) on the 87 distinct files, noodl at
+the file's tolerances is within 1 mm of its own converged answer on 58 of them and within
+1 cm on 71, while SWMM at the file's tolerances is 1 cm or more from its own converged answer
+on 57; on 54 of the 60 files that differ by 1 cm or more, SWMM's own error is at least half
+the difference (`95_Linear_H_Elements`, 3.18 m between the engines, is 3.18 m between SWMM's
+two runs and 2 mm between noodl's). With `--tight`, both engines converge each step:
+
+| Max depth difference | < 1 mm | 1-10 mm | 1-5 cm | 5-20 cm | 0.2-1 m | > 1 m |
+|---|---|---|---|---|---|---|
+| file's tolerances (107 files) | 12 | 22 | 34 | 29 | 8 | 2 |
+| `--tight` (107 files) | 79 | 9 | 7 | 5 | 6 | 1 |
+| `--tight`, SWMM converging on every step (37 files) | 37 | 0 | 0 | 0 | 0 | 0 |
+
+Every file whose tight difference exceeds 1 mm has steps on which SWMM itself does not
+converge in 500 trials (its report's "% of Steps Not Converging", which the harness records
+with noodl's own count): there SWMM's trials alternate around a switch with no fixed point
+(the tie rules under [Intentional differences](#intentional-differences-from-swmm)), and the
+histories differ from SWMM's first such step on. Up to that step, at the instants both engines
+share (a variable step is the same sequence only while the states agree), they agree to below
+0.6 mm on every file but two: `2079_Nodes`, whose 5 mm conduits let noodl's passes land on a
+second (surcharged) fixed point of the first step, and `STEEP_drop_example_2`, 2.7 cm on a
+step where noodl's own iteration does not converge either. No option the reader accepts was
+found ignored.
 
 Non-SWMM checks, for the physics SWMM does not model:
 
