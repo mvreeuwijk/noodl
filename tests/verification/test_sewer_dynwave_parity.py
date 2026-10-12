@@ -1697,3 +1697,50 @@ def test_tracer_on_the_loop_matches_swmm_at_steady_state(tmp_path):
     assert mine[-1]["flow"]["Cd"] < 0.0
     worst = _steady_tracer_error(model, mine[-1]["link"], swmm[-1]["link"])
     assert worst < TOL_TRACER, worst
+
+
+# ------------------------------------------------------------------ head-solve robustness
+#
+# Before the convex line search and the step floor of the head solve
+# (`dynwave.HEAD_SOLVE_NEWTON`), both fixtures ended the run with "PotentialFlowLayer 'water'
+# solve: ... failed to converge": the orifice fixture on its first step (a residual stuck at
+# 1.2e-12 m3/s, the round-off floor of a junction flooding 17 m above its outfall behind a
+# 0.1 m3/s cap, above the 1e-12 m3/s atol), the drop fixture at t = 65 s (a 2-cycle of the
+# damped Newton between the stiff bed of a dry junction and the fast flow arriving down a
+# 22 m drop).
+
+ROBUST_ORIFICE = "robust_orifice_dynwave.inp"
+ROBUST_DROP = "robust_drop_dynwave.inp"
+
+
+def test_orifice_flooding_at_a_high_head_matches_swmm_at_every_step(tmp_path):
+    """The head solve ends at its round-off floor (`step_floor`) instead of failing, and
+    every step matches SWMM, which converges on each."""
+    rows, conn = _converged_swmm(tmp_path, ROBUST_ORIFICE, surcharged=None)
+    _assert_parity(_worst_errors(ROBUST_ORIFICE, rows, conn, len(rows)))
+
+
+def _first_unconverged_row(tmp_path, name, rows):
+    """The first row (0-based) at which SWMM's run of `name` did not converge: its
+    MAX_TRIALS 500 and 499 runs agree exactly up to there (a step that converges within 499
+    trials is the same computation in both)."""
+    text = (DATA / name).read_text().replace("MAX_TRIALS           500",
+                                             "MAX_TRIALS           499")
+    fewer = tmp_path / "fewer.inp"
+    fewer.write_text(text)
+    other, _, _, _ = _swmm_rows(fewer)
+    for k, ((_, depths, _), (_, depths2, _)) in enumerate(zip(rows, other, strict=True)):
+        if any(depths[n] != depths2[n] for n in depths):
+            return k
+    return len(rows)
+
+
+def test_drop_into_a_dry_chain_runs_and_matches_swmm_until_swmm_stops_converging(tmp_path):
+    """Every step runs (the line search breaks the head solve's 2-cycle), and up to SWMM's
+    own first non-converging step the two agree at the full targets."""
+    rows, conn, engine, not_converging = _swmm(tmp_path, ROBUST_DROP)
+    assert engine == "5.2.4"
+    first = _first_unconverged_row(tmp_path, ROBUST_DROP, rows)
+    assert 13 < first < len(rows), first          # past the step that used to fail
+    run = _run_noodl(ROBUST_DROP, first)
+    _assert_parity(_worst(_differences(ROBUST_DROP, rows, conn, first, run=run)))

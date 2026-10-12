@@ -137,6 +137,17 @@ K_SWITCH = 1.0
 SOLVE_ATOL = 1.0e-12
 #: `solve_atol`'s margin over the bed's round-off floor (see there).
 _BED_FLOOR_MARGIN = 4.0
+#: The head solve's Newton keywords (`PotentialFlowLayer(newton_defaults=...)`; docs:
+#: "Iteration and convergence"). Every law of the pass is non-decreasing in its own head
+#: difference (conduits, regulators) or head (junction withdrawals), so the head solve's
+#: residual is the gradient of a convex function, and ``line_search="convex"`` cuts a step
+#: that overshoots its minimum back to it: the kinked laws (the stiff bed below an invert,
+#: the normal-flow switch's S-curve, the hold band and flood wall, a regulator's lagged
+#: slope) otherwise send the damped Newton into a 2-cycle it never leaves. ``step_floor``
+#: ends a solve whose Newton step is within 16 ULPs of the heads: its residual is then at the
+#: round-off of its own terms (a stiff wall or a large storage area at a high head can put
+#: that above `solve_atol`).
+HEAD_SOLVE_NEWTON = {"line_search": "convex", "step_floor": 16.0}
 #: The head solve's inner linear solver is the dense LU (``linear_solver="direct"``) up to
 #: this many junctions, and the layer's ``"auto"`` (SciPy's sparse LU) above it: on a small
 #: network the dense factorisation costs a handful of tensor operations against SuperLU's
@@ -2187,7 +2198,8 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = N
         graph, "water", elements(), boundary=boundary,
         node_sources=[closure.storage],
         quantity="head", unit="m", flow_unit="m3/s", analytic_primal=True,
-        linear_solver="direct" if len(net.manholes) <= DENSE_SOLVE_MAX_JUNCTIONS else "auto")
+        linear_solver="direct" if len(net.manholes) <= DENSE_SOLVE_MAX_JUNCTIONS else "auto",
+        newton_defaults=HEAD_SOLVE_NEWTON)
     if layer.bound.tolist() != closure.outfall_idx.tolist():
         raise ValueError("build_dynamic_wave_model: the layer's boundary order differs from "
                          "the outfall order the closure writes 'water.phi_boundary' in")

@@ -167,3 +167,122 @@ def test_sqrt_law_dead_end_does_not_cycle_once_relaxation_switches_off():
 
     assert bool(torch.all(result.converged))
     assert float(result.x.abs().max()) < 1e-15
+
+
+# ------------------------------------------------- line_search="convex" and step_floor
+
+
+def _arctan():
+    """``atan(x)``: increasing (the gradient of a convex function) and S-shaped, so a
+    damped Newton step from |x| > 1.39 overshoots further each time and diverges."""
+
+    def residual(x):
+        return torch.atan(x)
+
+    def jacobian(x):
+        return (1.0 / (1.0 + x**2)).unsqueeze(-1)
+
+    return residual, jacobian
+
+
+def test_damped_newton_diverges_on_an_s_curve_without_the_line_search():
+    residual, jacobian = _arctan()
+    x0 = torch.tensor([3.0], dtype=torch.float64)
+    result = newton(residual, jacobian, x0, max_iter=50, on_failure="return")
+    assert not bool(result.converged)
+
+
+def test_convex_line_search_converges_on_an_s_curve():
+    residual, jacobian = _arctan()
+    x0 = torch.tensor([[3.0], [-40.0], [0.1]], dtype=torch.float64)
+    result = newton(residual, jacobian, x0, max_iter=50, line_search="convex")
+    assert bool(result.converged.all())
+    torch.testing.assert_close(result.x, torch.zeros_like(x0), atol=1e-8, rtol=0)
+
+
+def _s_shaped_link():
+    """Two storage nodes joined by a link whose flow is flat at ``q_n``, then a steep wall
+    (slope 256), then a shallow momentum line (slope 0.5) -- the shape of the sewer
+    dynamic wave's normal-flow switch -- with the second node also draining to a fixed
+    head. Every law is non-decreasing, so the residual is the gradient of a convex function."""
+    a1, a2, wall_slope, line_slope, q_n, s1, s2, k2 = (
+        9.35, 15.46, 256.0, 0.5, 0.7, 1.7, 1.0, 1.03)
+
+    def flow(d):
+        wall = q_n + wall_slope * d
+        line = q_n + 0.5 + line_slope * d
+        return torch.clamp(torch.minimum(wall, line), min=q_n)
+
+    def slope(d):
+        wall = q_n + wall_slope * d
+        line = q_n + 0.5 + line_slope * d
+        on_wall = (wall < line) & (wall > q_n)
+        on_line = (line <= wall) & (line > q_n)
+        return on_wall * wall_slope + on_line * line_slope
+
+    def residual(x):
+        f = flow(x[..., 0] - x[..., 1])
+        return torch.stack([a1 * x[..., 0] + f - s1, (a2 + k2) * x[..., 1] - f - s2], -1)
+
+    def jacobian(x):
+        g = slope(x[..., 0] - x[..., 1])
+        jac = torch.zeros(x.shape[:-1] + (2, 2), dtype=x.dtype)
+        jac[..., 0, 0] = a1 + g
+        jac[..., 1, 1] = a2 + k2 + g
+        jac[..., 0, 1] = jac[..., 1, 0] = -g
+        return jac
+
+    return residual, jacobian
+
+
+def test_convex_line_search_breaks_a_cycle_on_an_s_shaped_link():
+    """The damped Newton iteration cycles across the wall's two kinks and never converges;
+    with the line search every step lowers the convex energy and it converges."""
+    residual, jacobian = _s_shaped_link()
+    x0 = torch.tensor([-0.001044, -0.035924], dtype=torch.float64)
+    plain = newton(residual, jacobian, x0, max_iter=50, atol=1e-10, rtol=0.0,
+                   on_failure="return")
+    assert not bool(plain.converged)
+    searched = newton(residual, jacobian, x0, max_iter=50, atol=1e-10, rtol=0.0,
+                      line_search="convex")
+    assert bool(searched.converged)
+    assert float(residual(searched.x).abs().max()) < 1e-10
+
+
+def test_convex_line_search_leaves_a_smooth_solve_bitwise_unchanged():
+    torch.manual_seed(3)
+    m = torch.randn(6, 6, dtype=torch.float64)
+    a = m @ m.T + 6.0 * torch.eye(6, dtype=torch.float64)
+    b = torch.randn(6, dtype=torch.float64)
+
+    def residual(x):
+        return a @ x + 0.1 * x**3 - b
+
+    def jacobian(x):
+        return a + torch.diag(0.3 * x**2)
+
+    x0 = torch.zeros(6, dtype=torch.float64)
+    plain = newton(residual, jacobian, x0)
+    searched = newton(residual, jacobian, x0, line_search="convex")
+    assert torch.equal(plain.x, searched.x)
+    assert plain.iterations == searched.iterations
+
+
+def test_step_floor_ends_a_solve_stuck_at_its_round_off_floor():
+    """A residual whose terms leave a floor (here 2e-8) above ``atol``: the Newton step is
+    then a fraction of an ULP of the iterate and no step improves it. Without `step_floor`
+    every iteration stands still and the solve fails; with it the solve ends converged."""
+    c = torch.tensor([17.3], dtype=torch.float64)
+
+    def residual(x):
+        return 1e8 * x - 1e8 * c + 0.3e-6 * torch.sin(1e9 * x)
+
+    def jacobian(x):
+        return torch.full_like(x, 1e8).unsqueeze(-1)
+
+    x0 = torch.tensor([10.0], dtype=torch.float64)
+    with pytest.raises(RuntimeError, match="failed to converge"):
+        newton(residual, jacobian, x0, atol=1e-12, rtol=0.0)
+    result = newton(residual, jacobian, x0, atol=1e-12, rtol=0.0, step_floor=16.0)
+    assert bool(result.converged)
+    torch.testing.assert_close(result.x, c, atol=1e-13, rtol=0.0)

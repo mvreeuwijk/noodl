@@ -372,6 +372,11 @@ Three more things about `iterate_tol`:
   tolerance. A tight `iterate_tol` needs a matching `atol`/`rtol` on the `step`/`steady` call.
 - Convergence is decided **per batch instance**. A batch that fails raises naming the instances;
   `on_failure="return"` with a `diagnostics` dict returns instead of raising.
+- A **pass is one iterate**. A potential solve that does not converge within a pass hands back
+  its last Newton iterate and the iteration carries on from it (that pass is never judged
+  converged); only the iteration's own verdict raises. A solve that is differentiated still
+  raises (`on_failure="return_primal"`, the passes' default), and an explicit `on_failure` is
+  passed through as given.
 
 ### Introspection
 

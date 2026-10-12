@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from benchmarks.swmm_corpus import absolutise_files, cut_to_window
+from benchmarks.swmm_corpus import (
+    TIGHT_OPTIONS,
+    absolutise_files,
+    cut_to_window,
+    depth_histogram,
+)
 
 
 def test_time_series_file_paths_become_absolute_so_swmm_finds_them_from_its_copy():
@@ -26,3 +31,16 @@ def test_cut_to_window_keeps_the_start_and_resolves_file_paths():
     assert units == "LPS"
     assert "START_TIME 11:57:00" in out and "END_TIME 12:07:00" in out
     assert "d.dat" in out and "FILE d.dat" not in out
+
+
+def test_cut_to_window_sets_the_tight_options_for_both_engines():
+    text = "[OPTIONS]\nFLOW_UNITS CFS\nHEAD_TOLERANCE 0.005\nSTART_DATE 01/01/2026\n"
+    out, _ = cut_to_window(text, 600.0, None, TIGHT_OPTIONS)
+    assert "HEAD_TOLERANCE 1e-12" in out and "HEAD_TOLERANCE 0.005" not in out
+    assert "MAX_TRIALS 500" in out
+
+
+def test_depth_histogram_bins_the_compared_files():
+    rows = [{"max_depth_diff_m": v} for v in (0.0, 5e-4, 2e-3, 0.03, 0.1, 0.5, 3.0)]
+    assert depth_histogram(rows) == {"<1 mm": 2, "1-10 mm": 1, "1-5 cm": 1, "5-20 cm": 1,
+                                     "0.2-1 m": 1, ">1 m": 1}
