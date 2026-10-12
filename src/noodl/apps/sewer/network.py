@@ -17,21 +17,29 @@ import torch
 from noodl.apps.sewer.air import (
     F_AIR_DEFAULT,
     F_I_DEFAULT,
-    RHO_AIR_REF,
-    Drag,
-    Headspace,
+    add_air_edges,
+    air_layer,
+)
+from noodl.apps.sewer.dynwave import (
+    DynamicWaveHydraulics,
+    DynamicWaveOptions,
+    air_state,
+    build_dynamic_wave_model,
+    quality_state,
 )
 from noodl.apps.sewer.hydraulics import GEOMETRY_ALIASES, SewerHydraulics
 from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
-from noodl.drives import Stack
-from noodl.elements.fixed import FixedFlow
-from noodl.elements.powerlaw import PowerLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.apps.sewer.storage import validate_storage_curve
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Model
 from noodl.refs import initial_drivers as refs_initial_drivers
 from noodl.refs import state_from
 from noodl.topology import Network
+
+#: SWMM `FLOW_ROUTING` keywords -> the physical routing names.
+ROUTING_ALIASES = {"STEADY": "steady", "KINWAVE": "kinematic_wave", "DYNWAVE": "dynamic_wave"}
+ROUTINGS = ("steady", "kinematic_wave", "dynamic_wave")
+OUTFALL_KINDS = ("free", "normal", "fixed", "tidal", "timeseries")
 
 Tensor = torch.Tensor
 F64 = torch.float64
@@ -42,27 +50,94 @@ Drivers = dict[str, Tensor]
 @dataclass(frozen=True)
 class Manhole:
     """A manhole: `invert` and `ground` elevations (m), a constant lateral `inflow`
-    (m3/s) and, for storage, its `surface_area` (m2)."""
+    (m3/s), for storage its `surface_area` (m2), and SWMM's `surcharge_depth` (SurDepth,
+    m >= 0): how far dynamic-wave routing lets the water rise above the full depth before
+    the manhole floods (kinematic and steady routing ignore it). `initial_depth` is SWMM's
+    InitDepth (m >= 0), the water depth the dynamic wave starts from (0 lets SWMM average
+    the depths of the attached conduits, `DynamicWaveHydraulics.initial_state`). A
+    `storage` curve makes it a SWMM storage unit (dynamic wave only).
+
+    The `storage` curve (`storage_unit` builds such a manhole) is its surface area,
+    ``("functional", a, b, c)`` for ``A = a y^b + c``
+    (m2, y the depth in m), ``("tabular", depths, areas)`` (m, m2) or one of SWMM's closed
+    shapes (`noodl.apps.sewer.storage`). Its area adds to the conduits' at the junction, its
+    volume is reported (``"sewer.storage_volume"``, m3), its `ground` is the invert plus
+    SWMM's MaxDepth, and SWMM's storage rules apply: its full depth is extended to the
+    attached conduit crowns only with a `surcharge_depth`, it surcharges (EXTRAN) only above
+    its full depth and only with a `surcharge_depth`, and it keeps its own `initial_depth`
+    (0 included) at the start."""
 
     name: str
     invert: float
     ground: float | None = None
     inflow: float = 0.0
     surface_area: float | None = None
+    surcharge_depth: float = 0.0
+    initial_depth: float = 0.0
+    storage: tuple | None = None
+
+
+def storage_unit(name: str, invert: float, max_depth: float, curve: tuple, *,
+                 surcharge_depth: float = 0.0, initial_depth: float = 0.0,
+                 inflow: float = 0.0) -> Manhole:
+    """A SWMM storage unit (`[STORAGE]`) as a `Manhole` with a `storage` curve: `invert`
+    (m), `max_depth` (SWMM's MaxDepth, m >= 0: the manhole's ground is ``invert +
+    max_depth``), the surface-area `curve` (`Manhole.storage`), SWMM's SurDepth
+    `surcharge_depth` (m) and InitDepth `initial_depth` (m), and a constant lateral `inflow`
+    (m3/s). Tabular depths and areas are stored as tuples (the manhole is hashable)."""
+    if curve and curve[0] == "tabular" and len(curve) == 3:
+        curve = ("tabular", tuple(float(v) for v in curve[1]),
+                 tuple(float(v) for v in curve[2]))
+    validate_storage_curve(name, curve)
+    if not max_depth >= 0.0:
+        raise ValueError(f"storage unit {name!r}: max_depth must be >= 0 m, got {max_depth!r}")
+    return Manhole(name, invert, ground=invert + max_depth, inflow=inflow,
+                   surcharge_depth=surcharge_depth, initial_depth=initial_depth, storage=curve)
 
 
 @dataclass(frozen=True)
 class Outfall:
-    """An outfall, where the network discharges: its `invert` elevation (m)."""
+    """An outfall, where the network discharges: its `invert` elevation (m).
+
+    `kind` is ``"free"``, ``"normal"``, ``"fixed"``, ``"tidal"`` or ``"timeseries"`` (SWMM
+    FREE/NORMAL/FIXED/TIDAL/TIMESERIES); ``"fixed"`` needs `stage`, the water-surface
+    elevation (m). ``"tidal"`` needs `tide`, SWMM's TIDAL curve as ``(hour, stage)`` pairs
+    (hour of the day, stage elevation in m, strictly increasing hours): the stage is read
+    from it at the elapsed time of the run, repeating every 24 h
+    (`DynamicWaveHydraulics`, `tidal_stage`). ``"timeseries"`` takes its stage elevation
+    from a driver, the `outfall_stage` function of `build_model` / `simulate_dynamic_wave`;
+    `series` is only the SWMM series' name, for messages. Only dynamic-wave routing reads
+    them.
+    `flap_gate` (SWMM's Gated) blocks any flow from the outfall into its conduit
+    (`link.c::link_setFlapGate`, dynamic wave only).
+    """
 
     name: str
     invert: float
+    kind: str = "free"
+    stage: float | None = None
+    flap_gate: bool = False
+    tide: tuple[tuple[float, float], ...] | None = None
+    series: str | None = None
 
 
 @dataclass(frozen=True)
 class Pipe:
     """A conduit from manhole `u` to `v`: `length` and `diameter` (m), Manning's `n`
-    and bed `slope` (m/m)."""
+    and bed `slope` (m/m). `inlet_offset` and `outlet_offset` (m) are the heights of the
+    pipe invert above the invert of its `u` and `v` node (SWMM's link offsets).
+
+    Dynamic wave only (every other routing refuses them when set): `barrels` identical
+    parallel conduits (SWMM's Barrels, 1 to 127; `length`, `diameter`, `n` and `slope` are
+    one barrel's, and the flows, volumes and surface areas of the pipe are totals);
+    `max_flow` (m3/s, SWMM's MaxFlow: each barrel carries at most this, `dwflow.c:270-273`;
+    ``None`` for none);
+    `initial_flow` (m3/s, SWMM's InitFlow, a total, positive from `u` to `v`);
+    `flap_gate` closes the conduit on reverse flow (SWMM's FlapGate), reverse being from
+    `v` to `u` unless `flap_gate_reversed`, where the gate passes `v` to `u` flow instead
+    (a conduit the SWMM reader turned round because it was adverse: its file orientation is
+    `v` to `u`, and SWMM's ``Link.direction`` is -1).
+    """
 
     name: str
     u: str
@@ -71,27 +146,152 @@ class Pipe:
     diameter: float
     n: float
     slope: float
+    inlet_offset: float = 0.0
+    outlet_offset: float = 0.0
+    barrels: int = 1
+    max_flow: float | None = None
+    initial_flow: float = 0.0
+    flap_gate: bool = False
+    flap_gate_reversed: bool = False
+
+
+#: Orifice orientations (SWMM's SIDE, BOTTOM) and opening shapes (CIRCULAR, RECT_CLOSED).
+ORIFICE_ORIENTATIONS = ("side", "bottom")
+ORIFICE_SHAPES = ("circular", "rectangular")
+#: Weir kinds (SWMM's TRANSVERSE, SIDEFLOW, V-NOTCH, TRAPEZOIDAL; ROADWAY is not modelled).
+WEIR_KINDS = ("transverse", "sideflow", "v_notch", "trapezoidal")
+
+
+@dataclass(frozen=True)
+class Orifice:
+    """An orifice (SWMM `[ORIFICES]`, dynamic wave only) from node `u` to node `v`: a
+    ``"side"`` (vertical) or ``"bottom"`` (horizontal) opening of `shape` ``"circular"``
+    (`height` its diameter, m) or ``"rectangular"`` (`height` and `width`, m), its crest
+    `crest_height` (m above `u`'s invert, SWMM's CrestHt), discharge coefficient
+    `discharge_coefficient` (-, SWMM's Cd) and a `flap_gate` (closes on flow from `v` to
+    `u`, with SWMM's ARMCO head loss on forward flow). Always fully open (no control
+    rules). Flow follows `link.c::orifice_getInflow` (`noodl.apps.sewer.structures`)."""
+
+    name: str
+    u: str
+    v: str
+    orientation: str
+    shape: str
+    height: float
+    crest_height: float
+    discharge_coefficient: float
+    width: float | None = None
+    flap_gate: bool = False
+
+
+@dataclass(frozen=True)
+class Weir:
+    """A weir (SWMM `[WEIRS]`, dynamic wave only) from node `u` to node `v`. `kind` is
+    ``"transverse"`` or ``"sideflow"`` (a rectangular opening `width` m wide),
+    ``"v_notch"`` (a triangle `width` m wide at the top) or ``"trapezoidal"`` (bottom
+    `width` m, `side_slopes` the left and right side slopes, horizontal per vertical); its
+    opening is `height` m tall above the crest `crest_height` (m above `u`'s invert).
+    `discharge_coefficient` is SWMM's Cd in SI units (m^0.5/s, the flow ``Cd L h^1.5``,
+    ``Cd L^0.83 h^1.67`` sideflow, ``Cd s h^2.5`` V-notch, in m and m3/s),
+    `end_discharge_coefficient` a trapezoid's end triangles' Cd (SWMM's Cd2),
+    `end_contractions` the number of end contractions (SWMM's EndCon), `can_surcharge` SWMM's
+    CanSurcharge (above the opening the weir flows as an orifice; else its head is capped at
+    the opening height) and `flap_gate` as for `Orifice`. Always fully open. Flow follows
+    `link.c::weir_getInflow` (`noodl.apps.sewer.structures`)."""
+
+    name: str
+    u: str
+    v: str
+    kind: str
+    height: float
+    width: float
+    crest_height: float
+    discharge_coefficient: float
+    side_slopes: tuple[float, float] = (0.0, 0.0)
+    end_contractions: float = 0.0
+    end_discharge_coefficient: float = 0.0
+    can_surcharge: bool = True
+    flap_gate: bool = False
+
+
+@dataclass(frozen=True)
+class Outlet:
+    """An outlet (SWMM `[OUTLETS]`, dynamic wave only) from node `u` to node `v`, its crest
+    `crest_height` m above `u`'s invert, with a rating ``("functional", a, b)`` for
+    ``q = a h^b`` (m3/s, h in m) or ``("tabular", heads, flows)`` (m, m3/s; SWMM's RATING
+    curve, heads strictly increasing, held at the end flows outside them). `h` is the
+    upstream depth above the crest (SWMM's /DEPTH, the default) or, with `head_difference`,
+    the head across the outlet (/HEAD). `flap_gate` closes it on flow from `v` to `u`. Flow
+    follows `link.c::outlet_getInflow` (`noodl.apps.sewer.structures`)."""
+
+    name: str
+    u: str
+    v: str
+    crest_height: float
+    rating: tuple
+    head_difference: bool = False
+    flap_gate: bool = False
+
+
+def _validate_rating(where: str, rating) -> None:
+    """Refuse a malformed outlet rating, BY NAME (`Outlet.rating`)."""
+    if not isinstance(rating, tuple) or not rating or rating[0] not in ("functional",
+                                                                       "tabular"):
+        raise ValueError(f"{where}: rating must be ('functional', a, b) or ('tabular', "
+                         f"heads, flows), got {rating!r}")
+    if rating[0] == "functional":
+        if len(rating) != 3 or not all(math.isfinite(float(x)) for x in rating[1:]):
+            raise ValueError(f"{where}: a functional rating takes two finite values (a, b) "
+                             f"for q = a h^b, got {rating!r}")
+        return
+    if len(rating) != 3 or len(rating[1]) != len(rating[2]) or not rating[1]:
+        raise ValueError(f"{where}: a tabular rating needs as many flows as heads, at least "
+                         f"one, got {rating!r}")
+    heads = [float(x) for x in rating[1]]
+    if not all(math.isfinite(x) for x in (*heads, *(float(y) for y in rating[2]))):
+        raise ValueError(f"{where}: a tabular rating must be finite, got {rating!r}")
+    if any(b <= a for a, b in zip(heads, heads[1:], strict=False)):
+        raise ValueError(f"{where}: tabular rating heads must be strictly increasing (SWMM's "
+                         f"ERR_CURVE_SEQUENCE), got {rating[1]!r}")
 
 
 @dataclass(frozen=True)
 class SewerNetwork:
-    """A dendritic gravity sewer: manholes, one outgoing pipe each, outfalls.
+    """A gravity sewer: manholes, pipes, outfalls. Kinematic-wave and steady routing need a
+    dendritic network (one outgoing pipe per manhole); dynamic-wave routing allows loops
+    and flat pipes.
 
-    `geometry` selects the circular cross-section: ``"analytic"`` (the exact circle,
+    `routing` is ``"steady"``, ``"kinematic_wave"`` or ``"dynamic_wave"`` (SWMM's STEADY,
+    KINWAVE and DYNWAVE are accepted and normalised); `dynamic_wave` holds the options of
+    the last one. `geometry` selects the circular cross-section: ``"analytic"`` (the exact circle,
     `geometry.py`; the default for networks built in code) or ``"tabulated"`` (SWMM 5.2's own
     tables, lookup rules and unit constants, `xsect_tables.py`; the default of
     `read_swmm_inp`, whose purpose is to reproduce SWMM). ``"tabulated"`` is a steady
-    kinematic-wave geometry and is refused with ``storage=True`` by `SewerHydraulics`.
+    kinematic-wave geometry and is refused with ``storage=True`` by `SewerHydraulics`;
+    dynamic-wave routing always uses it and refuses ``"analytic"`` by name.
+    `orifices`, `weirs` and `outlets` are flow regulators between two nodes (dynamic wave
+    only; SWMM's `[ORIFICES]`, `[WEIRS]`, `[OUTLETS]`).
     """
 
     manholes: tuple[Manhole, ...]
     pipes: tuple[Pipe, ...]
     outfalls: tuple[Outfall, ...]
-    routing: str = "KINWAVE"
+    routing: str = "kinematic_wave"
     notes: dict[str, str] = field(default_factory=dict)
     geometry: str = "analytic"
+    dynamic_wave: DynamicWaveOptions = DynamicWaveOptions()
+    orifices: tuple[Orifice, ...] = ()
+    weirs: tuple[Weir, ...] = ()
+    outlets: tuple[Outlet, ...] = ()
+
+    @property
+    def structures(self) -> dict[str, tuple]:
+        """The flow regulators by edge kind: ``{"orifice": ..., "weir": ..., "outlet":
+        ...}``."""
+        return {"orifice": self.orifices, "weir": self.weirs, "outlet": self.outlets}
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "routing", ROUTING_ALIASES.get(self.routing, self.routing))
         object.__setattr__(
             self, "geometry", GEOMETRY_ALIASES.get(self.geometry, self.geometry)
         )
@@ -103,11 +303,40 @@ class SewerNetwork:
                 f"SewerNetwork: geometry must be 'analytic' or 'tabulated', got "
                 f"{self.geometry!r}"
             )
+        if self.routing not in ROUTINGS:
+            raise ValueError(
+                f"SewerNetwork: routing must be one of {ROUTINGS} (or the SWMM keywords "
+                f"{tuple(ROUTING_ALIASES)}), got {self.routing!r}"
+            )
+        dynamic = self.routing == "dynamic_wave"
+        if not dynamic:
+            self._refuse_dynamic_wave_only()
+        for manhole in self.manholes:
+            if not manhole.surcharge_depth >= 0.0:
+                raise ValueError(
+                    f"SewerNetwork: manhole {manhole.name!r} surcharge_depth must be >= 0 m, "
+                    f"got {manhole.surcharge_depth!r}"
+                )
         names: set[str] = set()
         for node in (*self.manholes, *self.outfalls):
             if node.name in names:
                 raise ValueError(f"SewerNetwork: duplicate node name {node.name!r}")
             names.add(node.name)
+        for outfall in self.outfalls:
+            if outfall.kind not in OUTFALL_KINDS:
+                raise ValueError(
+                    f"SewerNetwork: outfall {outfall.name!r} kind must be one of "
+                    f"{OUTFALL_KINDS}, got {outfall.kind!r}"
+                )
+            if outfall.kind == "fixed" and not (
+                outfall.stage is not None and math.isfinite(outfall.stage)
+            ):
+                raise ValueError(
+                    f"SewerNetwork: fixed outfall {outfall.name!r} needs a finite stage "
+                    f"(m elevation), got {outfall.stage!r}"
+                )
+            if outfall.kind == "tidal":
+                self._validate_tide(outfall)
         pipe_names: set[str] = set()
         outgoing: dict[str, list[str]] = {}
         for pipe in self.pipes:
@@ -131,8 +360,19 @@ class SewerNetwork:
                     f"SewerNetwork: pipe {pipe.name!r} must have positive length, diameter "
                     f"and Manning n, got {pipe.length!r}, {pipe.diameter!r}, {pipe.n!r}"
                 )
+            for label, offset in (("inlet", pipe.inlet_offset), ("outlet", pipe.outlet_offset)):
+                if not offset >= 0:
+                    raise ValueError(
+                        f"SewerNetwork: pipe {pipe.name!r} has {label} offset {offset!r} m; "
+                        f"an offset is the invert height above its node's invert and must "
+                        f"be >= 0"
+                    )
             outgoing.setdefault(pipe.u, []).append(pipe.name)
+        self._validate_structures(names, pipe_names)
         outfall_names = {o.name for o in self.outfalls}
+        if dynamic:
+            self._validate_dynamic(outfall_names)
+            return
         for manhole in self.manholes:
             found = outgoing.get(manhole.name, [])
             if len(found) != 1:
@@ -166,6 +406,189 @@ class SewerNetwork:
                 f"SewerNetwork: manhole(s) {stranded} -- their component does not reach an "
                 f"outfall (a cycle in the pipe subgraph shows up here too)"
             )
+
+    def _validate_structures(self, node_names: set[str], pipe_names: set[str]) -> None:
+        """Refuse, BY NAME, a malformed orifice, weir or outlet: a link name used twice, an
+        unknown or repeated end node, an unknown kind or shape, a non-positive opening, a
+        negative crest height or coefficient, or a malformed rating."""
+        link_names = set(pipe_names)
+        for kind, devices in self.structures.items():
+            for s in devices:
+                where = f"SewerNetwork: {kind} {s.name!r}"
+                if s.name in link_names:
+                    raise ValueError(f"{where}: duplicate link name (pipes, orifices, weirs "
+                                     f"and outlets share one name space)")
+                link_names.add(s.name)
+                for end in (s.u, s.v):
+                    if end not in node_names:
+                        raise ValueError(f"{where} names node {end!r}, which is neither a "
+                                         f"manhole nor an outfall")
+                if s.u == s.v:
+                    raise ValueError(f"{where} joins node {s.u!r} to itself")
+                if not (math.isfinite(s.crest_height) and s.crest_height >= 0.0):
+                    raise ValueError(f"{where}: crest_height must be >= 0 m (above its first "
+                                     f"node's invert), got {s.crest_height!r}")
+                if kind == "outlet":
+                    _validate_rating(where, s.rating)
+                    continue
+                if not (math.isfinite(s.discharge_coefficient)
+                        and s.discharge_coefficient >= 0.0):                 # link.c:1675, 2040
+                    raise ValueError(f"{where}: discharge_coefficient must be >= 0, got "
+                                     f"{s.discharge_coefficient!r}")
+                if not (math.isfinite(s.height) and s.height > 0.0):          # xsect.c:229
+                    raise ValueError(f"{where}: height must be > 0 m, got {s.height!r}")
+                if kind == "orifice":
+                    if s.orientation not in ORIFICE_ORIENTATIONS:
+                        raise ValueError(f"{where}: orientation must be one of "
+                                         f"{ORIFICE_ORIENTATIONS}, got {s.orientation!r}")
+                    if s.shape not in ORIFICE_SHAPES:
+                        raise ValueError(f"{where}: shape must be one of {ORIFICE_SHAPES} "
+                                         f"(SWMM: CIRCULAR or RECT_CLOSED), got {s.shape!r}")
+                    if s.shape == "rectangular" and not (
+                            s.width is not None and math.isfinite(s.width) and s.width > 0.0):
+                        raise ValueError(f"{where}: a rectangular opening needs a width > 0 m, "
+                                         f"got {s.width!r}")
+                    continue
+                if s.kind not in WEIR_KINDS:
+                    raise ValueError(f"{where}: kind must be one of {WEIR_KINDS} (roadway "
+                                     f"weirs are not modelled), got {s.kind!r}")
+                slopes = tuple(s.side_slopes)
+                if len(slopes) != 2 or not all(math.isfinite(x) and x >= 0.0 for x in slopes):
+                    raise ValueError(f"{where}: side_slopes must be two values >= 0, got "
+                                     f"{s.side_slopes!r}")
+                if s.kind == "trapezoidal":
+                    if not (math.isfinite(s.width) and s.width >= 0.0) or (
+                            s.width == 0.0 and sum(slopes) == 0.0):           # xsect.c:482, 492
+                        raise ValueError(f"{where}: a trapezoid needs a bottom width >= 0 m "
+                                         f"and not both it and its side slopes 0, got "
+                                         f"{s.width!r}, {s.side_slopes!r}")
+                elif not (math.isfinite(s.width) and s.width > 0.0):         # xsect.c:366, 506
+                    raise ValueError(f"{where}: width must be > 0 m, got {s.width!r}")
+                for what, value in (("end_contractions", s.end_contractions),
+                                    ("end_discharge_coefficient", s.end_discharge_coefficient)):
+                    if not (math.isfinite(value) and value >= 0.0):          # link.c:2055-2062
+                        raise ValueError(f"{where}: {what} must be >= 0, got {value!r}")
+
+    def _refuse_dynamic_wave_only(self) -> None:
+        """Steady and kinematic-wave routing do not model initial conditions, MaxFlow, flap
+        gates, barrels, storage units or flow regulators; a set value would be skipped
+        silently, so it is refused by name."""
+        for kind, devices in self.structures.items():
+            if devices:
+                raise ValueError(
+                    f"SewerNetwork: {kind} {devices[0].name!r}: orifices, weirs and outlets "
+                    f"are modelled with dynamic-wave routing only (routing is "
+                    f"{self.routing!r})")
+        for manhole in self.manholes:
+            if manhole.storage is not None:
+                raise ValueError(
+                    f"SewerNetwork: manhole {manhole.name!r} is a storage unit; only "
+                    f"dynamic-wave routing models storage units (routing is "
+                    f"{self.routing!r})")
+            if manhole.initial_depth != 0.0:
+                raise ValueError(
+                    f"SewerNetwork: manhole {manhole.name!r} has initial_depth "
+                    f"{manhole.initial_depth!r} m; only dynamic-wave routing models it "
+                    f"(routing is {self.routing!r})")
+        for outfall in self.outfalls:
+            if outfall.flap_gate:
+                raise ValueError(
+                    f"SewerNetwork: outfall {outfall.name!r} has a flap gate; only "
+                    f"dynamic-wave routing models it (routing is {self.routing!r})")
+        for pipe in self.pipes:
+            for what, value, default in (
+                ("barrels", pipe.barrels, 1), ("max_flow", pipe.max_flow, None),
+                ("initial_flow", pipe.initial_flow, 0.0), ("flap_gate", pipe.flap_gate, False),
+            ):
+                if value != default:
+                    raise ValueError(
+                        f"SewerNetwork: pipe {pipe.name!r} has {what} {value!r}; only "
+                        f"dynamic-wave routing models it (routing is {self.routing!r})")
+
+    @staticmethod
+    def _validate_tide(outfall: Outfall) -> None:
+        """A tidal outfall needs a TIDAL curve: finite (hour, stage) pairs with strictly
+        increasing hours (SWMM's ERR_CURVE_SEQUENCE, table.c:313)."""
+        tide = outfall.tide
+        if not tide:
+            raise ValueError(
+                f"SewerNetwork: tidal outfall {outfall.name!r} needs a tide curve of "
+                f"(hour, stage m) pairs, got {tide!r}"
+            )
+        if not all(math.isfinite(x) and math.isfinite(y) for x, y in tide):
+            raise ValueError(
+                f"SewerNetwork: tidal outfall {outfall.name!r} tide curve must be finite, "
+                f"got {tide!r}"
+            )
+        if any(b[0] <= a[0] for a, b in zip(tide, tide[1:], strict=False)):
+            raise ValueError(
+                f"SewerNetwork: tidal outfall {outfall.name!r} tide curve hours must be "
+                f"strictly increasing, got {[x for x, _ in tide]}"
+            )
+
+    def _validate_dynamic(self, outfall_names: set[str]) -> None:
+        """Dynamic-wave topology: loops and any flow direction are allowed, but every
+        connected component needs an outfall and each outfall ends exactly one conduit."""
+        self.dynamic_wave.validate()
+        for manhole in self.manholes:
+            if not manhole.initial_depth >= 0.0:
+                raise ValueError(
+                    f"SewerNetwork: manhole {manhole.name!r} initial_depth must be >= 0 m, "
+                    f"got {manhole.initial_depth!r}")
+            if manhole.storage is not None:
+                validate_storage_curve(manhole.name, manhole.storage)
+                if manhole.surface_area is not None:
+                    raise ValueError(
+                        f"SewerNetwork: storage unit {manhole.name!r} sets surface_area; its "
+                        f"area is its storage curve")
+        for pipe in self.pipes:
+            if (not isinstance(pipe.barrels, int) or isinstance(pipe.barrels, bool)
+                    or not 1 <= pipe.barrels <= 127):
+                raise ValueError(
+                    f"SewerNetwork: pipe {pipe.name!r} barrels must be an integer from 1 to "
+                    f"127 (SWMM stores it in a char), got {pipe.barrels!r}")
+            if pipe.max_flow is not None and not (
+                    math.isfinite(pipe.max_flow) and pipe.max_flow > 0.0):
+                raise ValueError(
+                    f"SewerNetwork: pipe {pipe.name!r} max_flow must be a positive finite "
+                    f"flow (m3/s) or None, got {pipe.max_flow!r}")
+            if not math.isfinite(pipe.initial_flow):
+                raise ValueError(
+                    f"SewerNetwork: pipe {pipe.name!r} initial_flow must be finite, got "
+                    f"{pipe.initial_flow!r} m3/s")
+        neighbours: dict[str, list[str]] = {}
+        touching: dict[str, list[str]] = {name: [] for name in outfall_names}
+        links = (*self.pipes, *self.orifices, *self.weirs, *self.outlets)
+        for link in links:
+            neighbours.setdefault(link.u, []).append(link.v)
+            neighbours.setdefault(link.v, []).append(link.u)
+            for end in (link.u, link.v):
+                if end in outfall_names:
+                    touching[end].append(link.name)
+        for name, found in touching.items():
+            if len(found) != 1:
+                raise ValueError(
+                    f"SewerNetwork: outfall {name!r} is attached to {len(found)} links "
+                    f"({found}); dynamic-wave routing takes exactly one link (a pipe, "
+                    f"orifice, weir or outlet) per outfall (SWMM's ERR_OUTFALL)"
+                )
+        seen: set[str] = set()
+        for manhole in self.manholes:
+            if manhole.name in seen:
+                continue
+            component = {manhole.name}
+            frontier = [manhole.name]
+            while frontier:
+                for other in neighbours.get(frontier.pop(), ()):
+                    if other not in component:
+                        component.add(other)
+                        frontier.append(other)
+            seen |= component
+            if not component & outfall_names:
+                raise ValueError(
+                    f"SewerNetwork: manhole {manhole.name!r} and its connected pipes "
+                    f"({sorted(component)}) reach no outfall"
+                )
 
     def outgoing(self) -> dict[str, int]:
         """Manhole name -> the position of its outgoing pipe in `self.pipes`."""
@@ -209,8 +632,8 @@ def build_model(
     net: SewerNetwork,
     *,
     storage: bool = False,
-    air: bool = True,
-    quality: bool = True,
+    air: bool | None = None,
+    quality: bool | None = None,
     species: tuple[str, ...] = ("bod", "sulfide"),
     f_air: float = F_AIR_DEFAULT,
     f_i: float = F_I_DEFAULT,
@@ -221,13 +644,59 @@ def build_model(
     coupling: str = "pingpong",
     scheme: str = "implicit",
     dt_storage: float | None = None,
+    iterate_tol: float | None = None,
+    iterate_max: int | None = None,
+    outfall_stage: Mapping | None = None,
 ) -> tuple[Model, State, Drivers]:
     """Assemble the sewer model and return `(model, state, drivers)`.
 
     `air=False` builds the water-only model the SWMM comparison tests use; `quality=False`
     drops both quality layers. `fans` names the manholes carrying a prescribed extraction
-    (m3/s, positive OUT through the `fan` kind).
+    (m3/s, positive OUT through the `fan` kind). `air` and `quality` default to ``True``
+    for steady and kinematic-wave routing.
+
+    A ``routing="dynamic_wave"`` network is built by `build_dynamic_wave_model`: `air` and
+    `quality` default to ``False`` there, `coupling` and `dt_storage` (kinematic-wave
+    options) are refused by name, and so is a ``geometry="analytic"`` network (dynamic
+    wave always uses SWMM's tabulated circle); ``quality=True`` adds the water-quality layer of
+    `species` on the solved flows (`scheme` its time scheme); ``air=True`` builds
+    the headspace air on the solved conduits (`f_air`, `f_i`, `c_s`, `leak_area`, `leak_cd`
+    and `fans` as below; dendritic networks only, loops refused by name), `storage` is
+    refused; converged to
+    `iterate_tol` (m, default 1e-11) within `iterate_max` passes (default 2000; a slowly
+    contracting outfall head at low flow can need several hundred). Those two
+    apply to dynamic wave only and are refused for the other routings. So is `outfall_stage`,
+    the stage elevation of each TIMESERIES outfall (``{name: m, or a function of t in s}``;
+    `build_dynamic_wave_model`).
     """
+    if net.routing == "dynamic_wave":
+        if storage:
+            raise ValueError("build_model: storage=True is the kinematic path's storage "
+                             "sweep; dynamic-wave junctions always store; build it with "
+                             "storage=False")
+        for name, value, default in (("coupling", coupling, "pingpong"),
+                                     ("dt_storage", dt_storage, None)):
+            if value != default:
+                raise ValueError(
+                    f"build_model: {name}={value!r} is a kinematic-wave option; a "
+                    f"dynamic-wave network always iterates its passes on the routing step "
+                    f"(net.dynamic_wave); leave {name} at its default")
+        kwargs = {k: v for k, v in (("iterate_tol", iterate_tol),
+                                    ("iterate_max", iterate_max)) if v is not None}
+        return build_dynamic_wave_model(net, outfall_stage=outfall_stage,
+                                        quality=bool(quality), species=species,
+                                        scheme=scheme, air=bool(air), f_air=f_air, f_i=f_i,
+                                        c_s=c_s, leak_area=leak_area, leak_cd=leak_cd,
+                                        fans=fans, **kwargs)
+    for name, value in (("iterate_tol", iterate_tol), ("iterate_max", iterate_max),
+                        ("outfall_stage", outfall_stage)):
+        if value is not None:
+            raise ValueError(
+                f"build_model: {name} applies to dynamic-wave routing only; this network's "
+                f"routing is {net.routing!r}"
+            )
+    air = True if air is None else air
+    quality = True if quality is None else quality
     net.validate()
     graph = Network(dtype=F64)
     for manhole in net.manholes:
@@ -239,7 +708,6 @@ def build_model(
     for pipe in net.pipes:
         graph.add_edge(pipe.u, pipe.v, kind="pipe", name=pipe.name)
 
-    n_pipes = len(net.pipes)
     outgoing = net.outgoing()
     manhole_names = [m.name for m in net.manholes]
     manhole_idx = torch.tensor(
@@ -250,8 +718,6 @@ def build_model(
     # its own file order, which need not match `[JUNCTIONS]` order at all -- the committed
     # `tree_steady.inp` gives `out_pipe = [0, 1, 3, 2, 4]`.
     out_pipe = torch.tensor([outgoing[name] for name in manhole_names], dtype=torch.long)
-    length = torch.tensor([p.length for p in net.pipes], dtype=F64)
-    diameter = torch.tensor([p.diameter for p in net.pipes], dtype=F64)
     slope_per_manhole = torch.tensor(
         [net.pipes[outgoing[name]].slope for name in manhole_names], dtype=F64
     )
@@ -283,88 +749,10 @@ def build_model(
     state: State = {}
 
     if air:
-        # Kind order: `headspace` (one per pipe, then one outfall edge PER outfall pipe),
-        # `leak`, `fan`. Each outfall pipe is the one that DRAINS TO an outfall
-        # (`p.v in outfall_names`), found by where it drains rather than assumed to be
-        # `net.pipes[-1]` (otherwise a network whose outfall conduit is listed
-        # first would silently attach the outfall-flagged headspace edge, and its geometry, to
-        # the wrong manhole). `SewerNetwork.validate()` guarantees every manhole has exactly
-        # one outgoing pipe and every outfall has none, but does not itself forbid two
-        # different manholes both draining directly into the same outfall; this builder
-        # wires exactly ONE outfall-to-ambient headspace edge per OUTFALL NODE, so that case
-        # is refused here by name instead of silently wiring only one of the two. A forest
-        # has one outfall pipe per component -- each gets its
-        # own appended headspace edge, borrowing its own pipe's own length and diameter.
-        outfall_names = {o.name for o in net.outfalls}
-        outfall_pipe_candidates = [
-            i for i, p in enumerate(net.pipes) if p.v in outfall_names
-        ]
-        if not outfall_pipe_candidates:
-            raise ValueError(
-                f"build_model: no pipe drains to an outfall; outfalls are "
-                f"{sorted(outfall_names)}"
-            )
-        drained = [net.pipes[i].v for i in outfall_pipe_candidates]
-        if len(drained) != len(set(drained)):
-            dupes = sorted({v for v in drained if drained.count(v) > 1})
-            raise ValueError(
-                f"build_model: outfall(s) {dupes} each have more than one pipe "
-                f"draining into them; a dendritic sewer (or forest) gives each outfall "
-                f"exactly one"
-            )
-        pipe_positions = list(range(n_pipes)) + outfall_pipe_candidates
-        outfall_pipe_idx = torch.tensor(outfall_pipe_candidates, dtype=torch.long)
-        n_outfall_edges = len(outfall_pipe_candidates)
-        for pipe in net.pipes:
-            graph.add_edge(pipe.u, pipe.v, kind="headspace", name=f"{pipe.name}.air")
-        for outfall_pipe in outfall_pipe_candidates:
-            graph.add_edge(
-                net.pipes[outfall_pipe].u, "ambient", kind="headspace", outfall=True
-            )
-        for manhole in net.manholes:
-            graph.add_edge(manhole.name, "ambient", kind="leak", name=f"{manhole.name}.leak")
-        for name in fans:
-            graph.add_edge(name, "ambient", kind="fan", name=f"{name}.fan")
-        air_lengths = torch.cat([length, length.index_select(-1, outfall_pipe_idx)])
-        positions = torch.tensor(pipe_positions, dtype=torch.long)
-        # Leak law: `PowerLaw(C = Cd A sqrt(2/rho), n = 0.5, kind="leak")` built DIRECTLY,
-        # never through `Orifice`: `Orifice` casts with `torch.get_default_dtype()`
-        # (float32 in this repository) regardless of its inputs' own dtype, which would
-        # downcast the leak's `C` and floor check C1's residual on the float32 arithmetic of
-        # the leak branch alone (measured 1.352e-12 / 1.855e-11 in float32; 4.518e-13 /
-        # 6.141e-12 in float64). `leak_cd`/`leak_area` are ordinary floats by
-        # default but may also be tensors carrying a leading batch (instance) dimension
-        # (`benchmarks/sewer_diurnal.py` varies them per instance without any core or element
-        # change, since `PowerLaw._param`'s pass-through rule and ordinary broadcasting
-        # do the rest).
-        leak_c = (
-            torch.as_tensor(leak_cd, dtype=F64)
-            * torch.as_tensor(leak_area, dtype=F64)
-            * math.sqrt(2.0 / RHO_AIR_REF)
-            * torch.ones(len(net.manholes), dtype=F64)
-        )
-        leak_n = torch.full((len(net.manholes),), 0.5, dtype=F64)
-        elements = [
-            Headspace(air_lengths, positions, f_air=f_air, kind="headspace"),
-            PowerLaw(C=leak_c, n=leak_n, kind="leak", dp_transition=1e-8),
-        ]
-        if fans:
-            elements.append(FixedFlow(torch.zeros(len(fans), dtype=F64), kind="fan"))
-        drives = [
-            Drag(
-                air_lengths, positions, f_i=f_i, c_s=c_s,
-                zero_positions=tuple(range(n_pipes, n_pipes + n_outfall_edges)),
-                kind="headspace",
-            ),
-            _stack_for(
-                "headspace", graph, net,
-                crown=torch.cat([diameter, diameter.index_select(-1, outfall_pipe_idx)]),
-            ),
-            _stack_for("leak", graph, net),
-        ]
-        layers["air"] = PotentialFlowLayer(
-            graph, "air", elements, drives=drives, boundary=["ambient"],
-            quantity="pressure", unit="Pa", flow_unit="m3/s",
+        plan = add_air_edges(graph, net, fans)
+        layers["air"] = air_layer(
+            graph, net, plan, f_air=f_air, f_i=f_i, c_s=c_s, leak_area=leak_area,
+            leak_cd=leak_cd, fans=fans,
         )
         drivers["air.phi_boundary"] = torch.zeros(1, dtype=F64)
 
@@ -508,77 +896,16 @@ def build_model(
     return model, state, drivers
 
 
-def _ground_of(node_attrs) -> float:
-    """A node's ground level: its own `ground`, else its `invert`, else `0.0` (`ambient`'s
-    case, carrying neither). `is None` throughout, not an `or`-chain -- `or` treats an
-    explicitly given `0.0` ground (or invert) as falsy and falls through to the next
-    fallback, silently dropping a real ground-level-zero manhole to whatever its invert (or
-    the hard-coded `0.0`) happens to be instead."""
-    ground = node_attrs.get("ground")
-    if ground is not None:
-        return float(ground)
-    invert = node_attrs.get("invert")
-    return 0.0 if invert is None else float(invert)
-
-
-def _stack_for(
-    kind: str, graph: Network, net: SewerNetwork, *, crown: Tensor | None = None
-) -> Stack:
-    """The existing buoyancy drive on one air kind.
-
-    On `headspace` edges `z_path` is the pipe CROWN elevation: the mean of the two end
-    inverts plus the pipe's own diameter (the mean invert alone is
-    the pipe's INVERT at its midpoint, not its crown; `crown` is the per-headspace-edge
-    diameter, in the same order as `graph.endpoints("headspace")`, i.e. `net.pipes` order
-    then the outfall pipe's diameter again for the extra outfall-to-ambient edge, exactly
-    like `air_lengths` at the call site). `z_ref` is the node's ground level, so a warm
-    headspace column in a manhole shaft is lighter than the outside column of the same
-    height -- the building application's stack effect, unchanged.
-
-    DATUM CONVENTION (a leak DOES carry a stack term). `ground` falls back to the node's own
-    `invert` when no `ground` was given, and to `0.0` when neither was given -- which is exactly
-    `ambient`'s case, since `ambient` is added as a bare node with no `invert` or `ground` attribute
-    at all. On a `leak` edge `z_path` is the manhole's own ground level (`ground[src]`), so the
-    MANHOLE term of the Stack law cancels (`z_ref[src] - z_path = 0`), but the AMBIENT term does
-    not: `z_ref` at `ambient` is `0.0`, not the manhole's ground level, so every leak in fact
-    carries a `g * rho_ambient * ground[manhole]` term, not zero. This is self-consistent rather
-    than a bug: `ambient`'s `0.0` datum is used identically at every leak and at the outfall's
-    open-air `headspace` edge, and `ambient` is itself a fixed boundary node
-    (`air.phi_boundary = 0`), so the datum choice only ever shifts every air pressure by the
-    same constant -- `air.phi` is DATUM-REFERENCED to this convention, not to a physical
-    zero, and differences between manholes (what every drive and refusal actually reads)
-    are unaffected. `crown` is unused (and must be `None`) for `kind='leak'`.
-    """
-    if kind != "headspace" and crown is not None:
-        raise ValueError(
-            f"_stack_for: crown is only meaningful for kind='headspace', got kind={kind!r}"
-        )
-    src, tgt = graph.endpoints(kind)
-    invert = torch.tensor(
-        [
-            0.0 if (v := graph.graph.nodes[n].get("invert")) is None else v
-            for n in graph.nodes
-        ],
-        dtype=F64,
-    )
-    ground = torch.tensor(
-        [_ground_of(graph.graph.nodes[n]) for n in graph.nodes],
-        dtype=F64,
-    )
-    if kind == "headspace":
-        if crown is None:
-            raise ValueError("_stack_for: kind='headspace' requires the crown diameters")
-        z_path = 0.5 * (invert[src] + invert[tgt]) + crown
-    else:
-        z_path = ground[src]
-    return Stack(kind, src=src, tgt=tgt, z_path=z_path, z_ref=ground,
-                 rho_key="rho_air_nodes", g=9.80665)
-
-
 def initial_state(
     model: Model, drivers: Drivers | None = None, *, values: Mapping | None = None
 ) -> State:
     """All-zero state, dispatching on each layer's `quantity` (the app convention).
+
+    A dynamic-wave model (a ``"head"`` layer and a `DynamicWaveHydraulics` closure) gets
+    SWMM's initial state instead (cold and dry, or its InitDepth and InitFlow:
+    `DynamicWaveHydraulics.initial_state`; `drivers` is optional there and only validated,
+    unless the model has a quality layer, whose clean initial state and capacity
+    `dynwave.quality_state` adds and which needs them).
 
     Also builds every closure-carried state key this application knows --
     `"sewer.H"`, the `SewerHydraulics` closure's manhole levels, when it is running with
@@ -600,6 +927,18 @@ def initial_state(
     exists and some closure is a `SewerHydraulics`), rather than only once the missing key is
     discovered deep inside `Model.step`.
     """
+    dynamic = [c for c in model.closures if isinstance(c, DynamicWaveHydraulics)]
+    if dynamic and any(layer.quantity == "head" for layer in model.potential.values()):
+        state = dynamic[0].initial_state(drivers)
+        if "air" in model.potential:
+            state.update(air_state(model))
+        if model.transport:
+            if drivers is None:
+                raise ValueError(
+                    "apps.sewer.initial_state: drivers are required to evaluate the initial "
+                    "quality capacity; call initial_state(model, drivers)")
+            state.update(quality_state(model, state, drivers))
+        return state_from(model, values, base=state) if values else state
     state: State = {}
     for closure in model.closures:
         if "sewer.H" in getattr(closure, "state_keys", ()):

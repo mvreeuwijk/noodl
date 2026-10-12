@@ -79,6 +79,154 @@ def _detached(diag):
     return diag
 
 
+#: Largest ratio between the leading diagonal entries of the Anderson least-squares `R`
+#: (newest column first) that `_anderson_mix` keeps; a column below it is treated as
+#: linearly dependent on the newer ones and dropped together with every older one.
+_ANDERSON_COND_MAX = 1.0e8
+
+
+def _anderson_mix(xs: Sequence[Tensor], gs: Sequence[Tensor],
+                  rs: Sequence[Tensor]) -> tuple[Tensor, Tensor]:
+    """Anderson type-II mixing (Walker & Ni 2011, undamped), per batch instance.
+
+    `xs` are the fed states and `gs` the pass outputs, `(*batch, N)` each, oldest first and
+    of equal length; `rs` are the residuals the least-squares problem minimises, `(*batch,
+    M)` each -- `g - x` on whatever entries are judged, scaled to be dimensionless (the
+    caller divides by the tolerance). With the newest output `g`, residual `r` and the
+    differences `dG`, `dR` of consecutive history entries, ``gamma = argmin |r - dR gamma|``
+    and the mixed state is ``g - dG gamma``.
+
+    The least-squares problem is solved by modified Gram-Schmidt on the columns of `dR`,
+    NEWEST first. Per instance it keeps the longest run of leading columns whose
+    orthogonalised norm stays above `1 / _ANDERSON_COND_MAX` of the largest one so far (and
+    is finite and non-zero), so an ill-conditioned history loses its oldest columns rather
+    than producing a wild step. At most `M` columns are used. Returns the mixed state and a
+    batch-shaped bool, True where at least one column was kept; where none was, the mixed
+    state is `g` itself and the caller decides what to feed instead.
+    """
+    g, r = gs[-1], rs[-1]
+    batch = torch.broadcast_shapes(*(t.shape[:-1] for t in (*xs, *gs, *rs)))
+    m = min(len(xs) - 1, r.shape[-1])
+    keep = torch.full(batch, m > 0, dtype=torch.bool, device=r.device)
+    # Gram-Schmidt and back substitution are written out over the (at most `M`, in practice
+    # a handful of) history columns: elementwise torch only. A LAPACK QR or triangular
+    # solve here costs far more than its arithmetic: after one, the OpenMP worker threads
+    # it wakes slowed every later small elementwise op of the pass about threefold
+    # (measured on the sewer dynamic wave).
+    q_cols: list[Tensor] = []
+    r_cols: list[list[Tensor]] = []        # r_cols[j][i] = R[i, j], i < j
+    diags: list[Tensor] = []
+    keeps: list[Tensor] = []
+    running_max = torch.zeros(batch, dtype=r.dtype, device=r.device)
+    for j in range(m):
+        v = rs[-1 - j] - rs[-2 - j]
+        col: list[Tensor] = []
+        for q_i in q_cols:
+            r_ij = (q_i * v).sum(-1)
+            col.append(r_ij)
+            v = v - r_ij[..., None] * q_i
+        r_cols.append(col)
+        d = torch.sqrt((v * v).sum(-1))
+        running_max = torch.maximum(running_max, d)
+        keep = keep & torch.isfinite(d) & (d > 0) & (d * _ANDERSON_COND_MAX > running_max)
+        safe = torch.where(keep, d, torch.ones_like(d))
+        q_cols.append(torch.where(keep[..., None], v / safe[..., None], torch.zeros_like(v)))
+        diags.append(safe)
+        keeps.append(keep)
+    gamma: list[Tensor] = [torch.zeros(batch, dtype=r.dtype, device=r.device)] * m
+    for j in reversed(range(m)):
+        acc = (q_cols[j] * r).sum(-1)
+        for k in range(j + 1, m):
+            acc = acc - r_cols[k][j] * gamma[k]
+        gamma[j] = torch.where(keeps[j], acc / diags[j], torch.zeros_like(acc))
+    mixed = g.expand(batch + g.shape[-1:])
+    for j in range(m):
+        mixed = mixed - gamma[j][..., None] * (gs[-1 - j] - gs[-2 - j])
+    return mixed, (keeps[0] if m else keep)
+
+
+class _AndersonHistory:
+    """The pass history `Model._iterate` mixes with `_anderson_mix` (``iterate_acceleration=
+    "anderson"``), for one step.
+
+    The mixed state is ``"<layer>.phi"`` and ``"<layer>.q"`` of every potential layer named
+    in `iterate_tol`, stacked per instance. The least-squares residual is each pass's output
+    minus its fed state: `phi` over the nodes convergence is judged on (interior and
+    boundary) divided by the layer's `iterate_tol`, and `q` divided by its
+    `iterate_flow_tol`, so that one dimensionless problem weighs every entry by its own
+    tolerance. Both are needed: a head solve whose warm start already meets its residual
+    tolerance hands the fed `phi` back unchanged, and the iteration then moves only through
+    `q`.
+
+    The next fed state is, per instance:
+
+    * after the first pass, that pass's output (as the relaxed iteration's second pass);
+    * the Anderson-mixed state, when it keeps at least one history column and moves no
+      entry whose residual exceeds its tolerance AGAINST that residual;
+    * otherwise the relaxed step ``x + w (g - x)``, `w` the model's `iterate_relaxation`.
+
+    The second rule is the safeguard that keeps the fixed point the relaxed iteration's. A
+    closure's equations may have several fixed points (the sewer's flat, near-dry conduit:
+    one of its flows has two), and the relaxed iteration only reaches those it is
+    attracted to. Near a repelling one the relaxed step points away from it and a secant
+    step towards it, so an Anderson step that reverses an entry's own residual is the sign
+    of exactly that; the relaxed step is taken instead. An instance already converged is
+    held at the fed state of its certified pass, so the passes the rest of the batch still
+    needs leave its result alone.
+    """
+
+    def __init__(self, model: Model, memory: int) -> None:
+        self.layers = [
+            (name, torch.cat((model.potential[name].interior, model.potential[name].bound)),
+             float(tol), model.iterate_flow_tol[name])
+            for name, tol in model.iterate_tol.items() if name in model.potential
+        ]
+        self.keys = [f"{name}.{s}" for name, *_ in self.layers for s in ("phi", "q")]
+        self.memory = memory
+        self.xs: list[Tensor] = []
+        self.gs: list[Tensor] = []
+        self.rs: list[Tensor] = []
+
+    def mix(self, fed: Mapping[str, Tensor], out: Mapping[str, Tensor], w: float,
+            converged: Tensor | None) -> State:
+        """Record the pass that ran on `fed` and returned `out`; the next fed values of the
+        mixed keys. `w` is the relaxation of the fallback step; `converged` (batch-shaped,
+        or None before any verdict) marks the instances to hold at `fed`."""
+        fed = {k: fed.get(k, out[k]) for k in self.keys}
+        batch = torch.broadcast_shapes(
+            *(t.shape[:-1] for k in self.keys for t in (fed[k], out[k])))
+        sizes = [out[k].shape[-1] for k in self.keys]
+
+        def full(v: Tensor) -> Tensor:
+            return v.expand(batch + v.shape[-1:])
+
+        def judged(parts: Sequence[Tensor], scale: bool) -> Tensor:
+            # (phi, q) per layer -> phi on the judged nodes and q, divided by the
+            # tolerances when `scale`
+            pieces = []
+            for i, (_, nodes, tol, flow_tol) in enumerate(self.layers):
+                pieces.append(full(parts[2 * i])[..., nodes] / (tol if scale else 1.0))
+                pieces.append(full(parts[2 * i + 1]) / (flow_tol if scale else 1.0))
+            return torch.cat(pieces, -1)
+
+        x = torch.cat([full(fed[k]) for k in self.keys], -1)
+        g = torch.cat([full(out[k]) for k in self.keys], -1)
+        r = judged([out[k] - fed[k] for k in self.keys], scale=True)
+        for hist, v in ((self.xs, x), (self.gs, g), (self.rs, r)):
+            hist.append(v)
+            del hist[:-(self.memory + 1)]
+        if len(self.xs) == 1:
+            mixed = g
+        else:
+            accelerated, kept = _anderson_mix(self.xs, self.gs, self.rs)
+            step = judged(torch.split(accelerated - x, sizes, dim=-1), scale=False)
+            reverses = ((step * r < 0) & (r.abs() > 1.0)).any(-1)
+            mixed = torch.where((kept & ~reverses)[..., None], accelerated, x + w * (g - x))
+        if converged is not None:
+            mixed = torch.where(converged[..., None], x, mixed)
+        return dict(zip(self.keys, torch.split(mixed, sizes, dim=-1), strict=True))
+
+
 @runtime_checkable
 class Closure(Protocol):
     """state, drivers -> driver updates (a mapping of NEW driver values, merged in order).
@@ -154,6 +302,14 @@ class Model:
     point to differentiate, so `on_failure="return"` still raises, naming that reason, when a
     gradient was wanted).
 
+    `iterate_flow_tol` (optional; per potential layer named in `iterate_tol`, absolute, in
+    flow units) also judges that layer's flows: a pass converges only when its returned
+    `.q` is within it of the `.q` it was fed. `iterate_acceleration="anderson"` (opt-in)
+    replaces the relaxation of those layers' `.phi` and `.q` by Anderson mixing over the last
+    `iterate_memory` passes and requires `iterate_flow_tol` for each of them; it changes the
+    sequence of fed states, never the fixed point or its adjoint (`_iterate`,
+    `_AndersonHistory`).
+
     The onion's fixed point is differentiated IMPLICITLY, not by unrolling the passes: the
     primal passes carry no graph, and after convergence the certified pass runs once more on
     the graph with `solvers.fixed_point.differentiate_fixed_point` attaching the adjoint of
@@ -186,6 +342,9 @@ class Model:
         adjoint_rtol: float = 1e-10,
         iterate_relaxation: float = 0.5,
         reaction_order: str = "after_transport",
+        iterate_acceleration: str | None = None,
+        iterate_memory: int = 5,
+        iterate_flow_tol: Mapping[str, float] | None = None,
     ) -> None:
         if coupling not in ("pingpong", "iterate"):
             raise ValueError(
@@ -389,6 +548,22 @@ class Model:
             raise ValueError(
                 f"Model: iterate_relaxation must lie in (0, 1], got {iterate_relaxation!r}"
             )
+        # How the fed state of the potential layers named in `iterate_tol` is formed from
+        # the passes so far (`_iterate`): None is the relaxation above, "anderson" Anderson
+        # type-II mixing over the last `iterate_memory` passes, falling back to it.
+        if iterate_acceleration not in (None, "anderson"):
+            raise ValueError(
+                f"Model: iterate_acceleration must be None or 'anderson', got "
+                f"{iterate_acceleration!r}"
+            )
+        self.iterate_acceleration = iterate_acceleration
+        if (isinstance(iterate_memory, bool) or not isinstance(iterate_memory, int)
+                or iterate_memory < 1):
+            raise ValueError(
+                f"Model: iterate_memory must be an integer >= 1 (the number of previous "
+                f"passes Anderson mixing combines), got {iterate_memory!r}"
+            )
+        self.iterate_memory = iterate_memory
         # The tolerance of the ONE implicit-adjoint GMRES solve at the converged interface
         # deliberately independent of the primal `iterate_tol`: that independence is
         # the whole point of differentiating the fixed point instead of the iteration.
@@ -401,14 +576,16 @@ class Model:
         if coupling == "iterate":
             if not self.iterate_tol:
                 raise ValueError(
-                    "Model: coupling='iterate' requires iterate_tol={transport layer name: "
-                    "absolute tolerance on that layer's state}"
+                    "Model: coupling='iterate' requires iterate_tol={transport or potential "
+                    "layer name: absolute tolerance on that layer's state (`.x`) or "
+                    "potential (`.phi`)}"
                 )
-            unknown = sorted(set(self.iterate_tol) - set(self.transport))
+            unknown = sorted(set(self.iterate_tol) - set(self.transport) - set(self.potential))
             if unknown:
                 raise KeyError(
-                    f"Model: iterate_tol names {unknown}, not transport layers of this model "
-                    f"({sorted(self.transport)})"
+                    f"Model: iterate_tol names {unknown}, neither transport layers "
+                    f"({sorted(self.transport)}) nor potential layers "
+                    f"({sorted(self.potential)}) of this model"
                 )
             # Refused HERE rather than left to fail at the first `step`: one pass has no
             # second pass to compare against, so it can never report convergence -- a budget
@@ -421,6 +598,40 @@ class Model:
                     f"Model: coupling='iterate' requires iterate_max >= 2, got "
                     f"{iterate_max!r}; a single pass has no predecessor to compare against, "
                     f"so it can never be reported as converged"
+                )
+        # The flows' fixed-point tolerance per potential layer named in `iterate_tol`
+        # (absolute, in that layer's flow units): |q returned - q fed| of the certified pass.
+        self.iterate_flow_tol = {k: float(v) for k, v in (iterate_flow_tol or {}).items()}
+        stray = sorted(k for k in self.iterate_flow_tol
+                       if k not in self.potential or k not in self.iterate_tol)
+        if stray:
+            raise KeyError(
+                f"Model: iterate_flow_tol names {stray}, which are not potential layers named "
+                f"in iterate_tol ({sorted(k for k in self.iterate_tol if k in self.potential)})"
+            )
+        bad = {k: v for k, v in self.iterate_flow_tol.items() if not v > 0.0}
+        if bad:
+            raise ValueError(f"Model: iterate_flow_tol must be positive, got {bad}")
+        if iterate_acceleration is not None:
+            if coupling != "iterate":
+                raise ValueError(
+                    f"Model: iterate_acceleration={iterate_acceleration!r} needs "
+                    f"coupling='iterate', got coupling={coupling!r}"
+                )
+            if not any(name in self.potential for name in self.iterate_tol):
+                raise ValueError(
+                    f"Model: iterate_acceleration={iterate_acceleration!r} mixes the potential "
+                    f"of a potential layer named in iterate_tol, and iterate_tol names none "
+                    f"({sorted(self.iterate_tol)}; potential layers: {sorted(self.potential)})"
+                )
+            unset = sorted(k for k in self.iterate_tol
+                           if k in self.potential and k not in self.iterate_flow_tol)
+            if unset:
+                raise ValueError(
+                    f"Model: iterate_acceleration={iterate_acceleration!r} needs "
+                    f"iterate_flow_tol for the potential layer(s) {unset}: the tolerance on "
+                    f"their flows' fixed-point residual, which the mixing minimises and the "
+                    f"convergence test judges alongside the potential"
                 )
         self.substeps = {name: 1 for name in self.transport}
         for name, k in (substeps or {}).items():
@@ -974,6 +1185,22 @@ class Model:
         per STEP. The returned state is the LAST pass's own output, never a relaxed one.
         Convergence is judged per instance on detached copies.
 
+        A potential layer named in `iterate_tol` is iterated on its own potential: it
+        converges when the largest change of `phi` over its interior and boundary nodes is
+        within the tolerance (in `phi` units). This is for closures that compute a layer's
+        element coefficients, or its boundary potentials, from that layer's previous
+        solution (the sewer dynamic wave: conduit coefficients and outfall heads). Its
+        `.phi` and `.q` are relaxed like a transport `.x`, and relaxation does not move
+        the fixed point. With `iterate_flow_tol` its flows are judged too, on the certified
+        pass's returned `.q` against its fed `.q`.
+
+        With ``iterate_acceleration="anderson"`` those `.phi` and `.q` are Anderson-mixed
+        instead (`_AndersonHistory`: the history, the safeguards and the per-instance rules),
+        and the convergence test also asks the fixed-point residual of `.phi` (returned
+        against fed) to be within the tolerance: two passes fed nearly the same mixed state
+        can agree with each other while neither is a fixed point. Mixing chooses only the fed
+        states; the adjoint below is unchanged.
+
         Differentiation: the primal passes carry no graph. After convergence the certified
         pass runs once more on the graph at the SAME fed state and
         `solvers.fixed_point.differentiate_fixed_point` attaches the implicit adjoint of the
@@ -1056,6 +1283,10 @@ class Model:
         new: State = dict(state)
         produced: list[str] = []
         needs_adjoint = False
+        anderson = (
+            _AndersonHistory(self, self.iterate_memory)
+            if self.iterate_acceleration == "anderson" else None
+        )
         # A `while` rather than `for passes in range(...)`: the pass count is wanted AFTER
         # the loop (it goes into the diagnostics and into the failure message), which a loop
         # control variable unused inside the body is not (ruff B007).
@@ -1079,21 +1310,59 @@ class Model:
                 with torch.no_grad():
                     ok: Tensor | None = None
                     for name, tol in self.iterate_tol.items():
-                        layer = self.transport[name]
-                        d = (new[f"{name}.x"] - prev[f"{name}.x"]).abs()
-                        d_s, _ = layer._to_stacked(d, layer.n_i, "x")
-                        change[name] = d_s.amax(-1)
+                        if name in self.transport:
+                            layer = self.transport[name]
+                            d = (new[f"{name}.x"] - prev[f"{name}.x"]).abs()
+                            d_s, _ = layer._to_stacked(d, layer.n_i, "x")
+                            change[name] = d_s.amax(-1)
+                        else:
+                            layer = self.potential[name]
+                            d = (new[f"{name}.phi"] - prev[f"{name}.phi"]).abs()
+                            # Boundary entries too: a closure may write `phi_boundary`
+                            # from the previous pass (the sewer's outfall heads).
+                            nodes = torch.cat((layer.interior, layer.bound))
+                            change[name] = d[..., nodes].amax(-1)
+                            if anderson is not None:
+                                # Mixing can stall: two passes fed nearly the same mixed
+                                # state agree with each other while neither is a fixed
+                                # point. The fixed-point residual (this pass's output
+                                # against its own fed potential) must be within `tol` too.
+                                key = f"{name}.phi"
+                                res = (new[key] - certified_fed.get(key, prev[key])).abs()
+                                change[name] = torch.maximum(
+                                    change[name], res[..., nodes].amax(-1))
+                            if name in self.iterate_flow_tol:
+                                # The flows' own fixed-point residual: a head solve whose
+                                # warm start already meets its residual tolerance returns
+                                # the fed potential unchanged, so `phi` alone can stop
+                                # while the flows the closures read are still moving.
+                                key = f"{name}.q"
+                                res = (new[key] - certified_fed.get(key, prev[key])).abs()
+                                change[key] = res.amax(-1)
+                                this_q = change[key] <= self.iterate_flow_tol[name]
+                                ok = this_q if ok is None else (ok & this_q)
                         this = change[name] <= tol
                         ok = this if ok is None else (ok & this)
                     converged = ok
                 if bool(converged.all()):
                     break
             fed = dict(new)
+            w = self.iterate_relaxation
             if prev is not None:
                 for name in self.transport:
                     key = f"{name}.x"
-                    w = self.iterate_relaxation
                     fed[key] = prev[key] + w * (new[key] - prev[key])
+                if anderson is None:
+                    for name in self.potential:
+                        if name in self.iterate_tol:
+                            for key in (f"{name}.phi", f"{name}.q"):
+                                fed[key] = prev[key] + w * (new[key] - prev[key])
+            if anderson is not None:
+                # The named potential layers' `phi` and `q` are Anderson-mixed instead
+                # (`_AndersonHistory`), from pass 1 on; transport states stay relaxed.
+                with torch.no_grad():
+                    fed.update(anderson.mix(certified_fed, new, w,
+                                            converged if prev is not None else None))
             prev = new
         if not bool(converged.all()):
             failing = (
@@ -1102,8 +1371,9 @@ class Model:
             worst = {name: float(c.max()) for name, c in change.items()}
             message = (
                 f"Model: coupling='iterate' did not converge within {self.iterate_max} "
-                f"passes for instances {failing}; largest change per layer {worst}, "
+                f"passes for instances {failing}; largest change per key {worst}, "
                 f"tolerances {self.iterate_tol}"
+                + (f", flow tolerances {self.iterate_flow_tol}" if self.iterate_flow_tol else "")
             )
             if needs_adjoint:
                 raise RuntimeError(
