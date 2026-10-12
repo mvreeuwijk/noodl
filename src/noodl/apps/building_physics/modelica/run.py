@@ -985,9 +985,6 @@ class _Midpoint:
                     src = self._zero_sources(n, x0)
                 xb0, xb1 = d0[f"{n}.x_boundary"], d1[f"{n}.x_boundary"]
                 if layer.scheme == "exact":
-                    # Two halves, the first with state 0's flows, capacity and sources, the
-                    # second with state 1's, the boundary values linear in time throughout
-                    # (class docstring).
                     # Two halves, the first with state 0's flows, capacity and sources,
                     # the second with state 1's; the boundary values through both ends,
                     # with their rates where they vary (class docstring).
