@@ -258,12 +258,21 @@ class _StepDrivers:
         d0, d1, _, jump, _ = self._cell(j)
         if jump:
             return
-        a = (t - self.g[j - 1]) / (self.g[j] - self.g[j - 1])
+        h = self.g[j] - self.g[j - 1]
+        a = (t - self.g[j - 1]) / h
         for key, v1 in d1.items():
             v0 = d0.get(key)
-            if (key.endswith(".sources") or not isinstance(v1, Tensor)
-                    or not isinstance(v0, Tensor) or v0.shape != v1.shape
-                    or torch.equal(v0, v1)):
+            if (key.endswith(".sources") or key.endswith(_RATE_KEYS)
+                    or not isinstance(v1, Tensor)
+                    or not isinstance(v0, Tensor) or v0.shape != v1.shape):
+                continue
+            r0, r1 = d0.get(f"{key}_rate_right"), d1.get(f"{key}_rate_left")
+            if isinstance(r0, Tensor) and isinstance(r1, Tensor):
+                # A boundary value with its rates: the cubic Hermite through both ends.
+                out[key], rate = _hermite(v0, v1, r0, r1, h, a)
+                out[f"{key}_rate_left"] = out[f"{key}_rate_right"] = rate
+                continue
+            if torch.equal(v0, v1):
                 continue
             out[key] = v0 + (v1 - v0) * a
 
@@ -298,6 +307,24 @@ class _StepDrivers:
         for key, total in sums.items():
             du[key] = dv[key] = total / (v - u)
         return du, dv
+
+
+# Drivers holding a boundary value's rate of change on either side of a grid time
+# (`assemble._Builder.boundary_rates`), interpolated with the value itself (`_hermite`).
+_RATE_KEYS = ("_rate_left", "_rate_right")
+
+
+def _hermite(v0: Tensor, v1: Tensor, r0: Tensor, r1: Tensor, h: float,
+             a: float) -> tuple[Tensor, Tensor]:
+    """The cubic Hermite through `(0, v0)` with slope `r0` and `(h, v1)` with slope `r1`,
+    and its slope, at `a h`."""
+    h00, h10, h01, h11 = (2 * a**3 - 3 * a**2 + 1, a**3 - 2 * a**2 + a, -2 * a**3 + 3 * a**2,
+                          a**3 - a**2)
+    d00, d10, d01, d11 = (6 * a**2 - 6 * a, 3 * a**2 - 4 * a + 1, -6 * a**2 + 6 * a,
+                          3 * a**2 - 2 * a)
+    value = h00 * v0 + h10 * h * r0 + h01 * v1 + h11 * h * r1
+    rate = (d00 * v0 + d01 * v1) / h + d10 * r0 + d11 * r1
+    return value, rate
 
 
 def _event_indices(drivers: Drivers, grid: Tensor) -> tuple[set[int] | None, set[int]]:
@@ -730,17 +757,27 @@ def _bdf_weights(nodes: list[float]) -> list[float]:
 class _Midpoint:
     """The symmetric step of `simulate(scheme="midpoint")`.
 
-    Over a step of length `h` from state 0 to state 1, each transport layer advances with
-    its own exact scheme (`TransportLayer.step`, the flows held constant over the step) at
-    the MEAN flows `(q0 + q1)/2`, the boundary values linear in time from `x_b0` to `x_b1`
-    (`TransportLayer.step`'s `x_boundary_end`; their mean `(x_b0 + x_b1)/2` for a layer whose
-    scheme is not exact) and its step-mean source driver plus the mean of the closure's
-    state-dependent sources (the moist-air heat carrier, `_ZoneStateClosure.cp_correction`).
-    A zone that flushes much faster than the step (PressurizationData's room: about 10 s
-    against steps of minutes) follows a ramping boundary value at its own lag only so: held
-    at the step mean, it relaxed to the mid-step value, half a step behind, an error first
-    order in the step that `extrapolate` cannot remove (0.035 K of a 0.07 K-per-step
-    outdoor-air ramp at 396 s steps, measured). State 1 is the fixed point of that map together
+    Over a step of length `h` from state 0 to state 1, each transport layer with an exact
+    scheme advances over two halves (`TransportLayer.step`, the flows held constant over
+    each): the first with state 0's flows, storage capacity and state-dependent sources (the
+    moist-air heat carrier, `_ZoneStateClosure.cp_correction`; the storage terms), the
+    second with state 1's, and both with the step-mean source driver. The boundary values
+    run through both ends' values over the step: the cubic Hermite with their rates
+    (`x_boundary_rate_left`/`_right`, `assemble._Builder.boundary_rates`) where they vary,
+    else the straight line (`TransportLayer.step`'s `x_boundary_end`, `x_boundary_rates`).
+    Both matter for a zone that flushes much faster than the step (PressurizationData's
+    room: about 10 s against steps of minutes), which ends each step at the boundary value
+    less its lag, its flushing time times the boundary's rate there. The step-mean boundary
+    value left it half a step behind (0.035 K of a 0.07 K-per-step outdoor-air ramp at 396 s
+    steps); the straight line, behind by the chord's slope instead of the end's (2.0e-2 K on
+    a 5 K sine over 60 s steps, 2.1e-5 K with the Hermite); the mean flows, with the mean
+    flow's flushing time instead of the end's, off by about `tau h q'/(2 q)` times the
+    boundary's rate. Errors first order in the step that `extrapolate` cannot remove. With
+    state 1's flows over the second half, what is left of the flows' change is about
+    `tau^2 q'/q` times the rate, independent of the step while it is many flushing times
+    long (2e-5 K on PressurizationData, measured). A layer
+    whose scheme is not exact advances over the whole step at the mean flows, capacity,
+    sources and boundary values. State 1 is the fixed point of that map together
     with the airflow solve at state 1 (and the interior pressures `p_abs`, which the closure
     feeds back): an Anderson-accelerated fixed-point iteration (depth `_ANDERSON_DEPTH`) on
     the transport states and the air layer's interior potentials, started from the linear
@@ -922,7 +959,11 @@ class _Midpoint:
             written1 = self.closure(s, d1)  # at state 1 (the closure reads, never writes, d1)
             extra1 = self._extra_sources(s, d1, written1)
             qm = 0.5 * (q0 + q)
-            cap: dict[str, Tensor] = {}
+            # Per end of the step: the storage capacity and extra sources (`StorageClosure.terms`)
+            # and the closure's state-dependent sources.
+            cap0: dict[str, Tensor] = {}
+            cap1: dict[str, Tensor] = {}
+            ext0, ext1 = dict(extra0), dict(extra1)
             if store is not None:
                 drv1 = dict(d1)
                 drv1.update(written1)
@@ -933,25 +974,44 @@ class _Midpoint:
                 t1 = self._storage_terms(s, drv1, q, net_mean, s_air, w_mass, net_mean)
                 for n in self.layers:
                     if f"{n}.capacity" in t0:
-                        cap[n] = 0.5 * (t0[f"{n}.capacity"] + t1[f"{n}.capacity"])
-                        extra = 0.5 * (t0[f"{n}.extra"] + t1[f"{n}.extra"])
-                        extra1 = {**extra1, n: extra1.get(n, 0.0) + 2.0 * extra}
+                        cap0[n], cap1[n] = t0[f"{n}.capacity"], t1[f"{n}.capacity"]
+                        ext0[n] = ext0.get(n, 0.0) + t0[f"{n}.extra"]
+                        ext1[n] = ext1.get(n, 0.0) + t1[f"{n}.extra"]
                 s["air.storage"] = now1
             for n, layer in self.layers.items():
                 x0 = s0[f"{n}.x"]
                 src = d1.get(f"{n}.sources")
                 if src is None:
                     src = self._zero_sources(n, x0)
-                if n in extra0 or n in extra1:
-                    src = src + 0.5 * (extra0.get(n, 0.0) + extra1.get(n, 0.0))
-                qn = air.flows_of_kind(qm, layer.flow_kinds)
                 xb0, xb1 = d0[f"{n}.x_boundary"], d1[f"{n}.x_boundary"]
-                if layer.scheme == "exact":  # the boundary linear in time over the step
-                    s[f"{n}.x"] = layer.step(x0, qn, src, xb0, h, capacity=cap.get(n),
-                                             x_boundary_end=xb1)
+                if layer.scheme == "exact":
+                    # Two halves, the first with state 0's flows, capacity and sources, the
+                    # second with state 1's, the boundary values linear in time throughout
+                    # (class docstring).
+                    # Two halves, the first with state 0's flows, capacity and sources,
+                    # the second with state 1's; the boundary values through both ends,
+                    # with their rates where they vary (class docstring).
+                    r0 = d0.get(f"{n}.x_boundary_rate_right")
+                    r1 = d1.get(f"{n}.x_boundary_rate_left")
+                    if r0 is None or r1 is None:
+                        xbm, rates0, rates1 = 0.5 * (xb0 + xb1), None, None
+                    else:
+                        xbm, rm = _hermite(xb0, xb1, r0, r1, h, 0.5)
+                        rates0, rates1 = (r0, rm), (rm, r1)
+                    xm = layer.step(x0, air.flows_of_kind(q0, layer.flow_kinds),
+                                    src + ext0.get(n, 0.0), xb0, 0.5 * h,
+                                    capacity=cap0.get(n), x_boundary_end=xbm,
+                                    x_boundary_rates=rates0)
+                    s[f"{n}.x"] = layer.step(xm, air.flows_of_kind(q, layer.flow_kinds),
+                                             src + ext1.get(n, 0.0), xbm, 0.5 * h,
+                                             capacity=cap1.get(n), x_boundary_end=xb1,
+                                             x_boundary_rates=rates1)
                 else:
-                    s[f"{n}.x"] = layer.step(x0, qn, src, 0.5 * (xb0 + xb1), h,
-                                             capacity=cap.get(n))
+                    cap = (0.5 * (cap0[n] + cap1[n])) if n in cap0 else None
+                    if n in ext0 or n in ext1:
+                        src = src + 0.5 * (ext0.get(n, 0.0) + ext1.get(n, 0.0))
+                    s[f"{n}.x"] = layer.step(x0, air.flows_of_kind(qm, layer.flow_kinds), src,
+                                             0.5 * (xb0 + xb1), h, capacity=cap)
             return self._pack(s), s
 
         z = z0.clone()

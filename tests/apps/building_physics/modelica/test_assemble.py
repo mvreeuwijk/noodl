@@ -494,6 +494,43 @@ def test_a_stiff_zone_follows_a_ramping_boundary_with_its_own_lag(tmp_path):
     assert torch.allclose(hist["C"][:, i, 0], 4e-4 / 600.0 * (t - lag), rtol=0.0, atol=1e-13)
 
 
+def test_a_stiff_zone_follows_a_curved_boundary_with_its_own_lag(tmp_path):
+    # A 0.1 m3 zone exchanging a prescribed F = 0.02 kg/s each way with a boundary whose T_in
+    # is a 5 K, 20-minute sine (`ZonalFlow_m_flow`, no pressure drop: rho = 1.2 kg/m3,
+    # k = F/(rho V) = 1/6 1/s), over 60 s steps (10 flushing times). The zone is
+    # T = 293.15 + 5 k/(k^2 + w^2) (k sin wt - w cos wt + w exp(-kt)). The midpoint scheme
+    # takes the boundary as the cubic Hermite through its values and rates at the step's
+    # ends (`assemble._Builder.boundary_rates`), so the zone lags it by k^-1 times its rate
+    # at the step's end: within 5e-5 K at one substep (measured 2.1e-5 K), where the straight
+    # line between the ends was 2.0e-2 K off (its chord's slope instead of the end's).
+    doc = _doc("zonal_flow.json")
+    doc["experiment"].update({"StopTime": 1200.0, "Interval": 60.0})
+    doc["components"] = [
+        {"name": "bou", "class": "Buildings.Fluid.Sources.Boundary_pT",
+         "parameters": {"p": P_DEFAULT, "T": 293.15, "nPorts": 2, "use_T_in": True}},
+        {"name": "vol", "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+         "parameters": {"V": 0.1, "T_start": 293.15, "nPorts": 2, "m_flow_nominal": 0.001,
+                        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial"}},
+        {"name": "floExc", "class": _M + "ZonalFlow_m_flow", "parameters": {}},
+    ]
+    doc["connections"] = [["floExc.port_a1", "bou.ports[1]"], ["floExc.port_b1", "vol.ports[1]"],
+                          ["floExc.port_a2", "vol.ports[2]"], ["floExc.port_b2", "bou.ports[2]"]]
+    doc["signals"] = [
+        {"name": "TIn", "class": "Modelica.Blocks.Sources.Sine", "drives": "bou.T_in",
+         "parameters": {"amplitude": 5.0, "f": 1.0 / 1200.0, "offset": 293.15}},
+        {"name": "F", "class": "Modelica.Blocks.Sources.Constant", "parameters": {"k": 0.02},
+         "drives": ["floExc.mAB_flow", "floExc.mBA_flow"]},
+    ]
+    model, state, drivers, names = read_modelica(_write(tmp_path, doc), return_names=True)
+    t = names.times
+    hist = simulate(model, state, drivers, t, scheme="midpoint")
+    i = names.nodes["vol"]
+    k, w = 0.02 / (1.2 * 0.1), 2 * math.pi / 1200.0
+    exact = 293.15 + 5.0 * k / (k * k + w * w) * (k * torch.sin(w * t) - w * torch.cos(w * t)
+                                                  + w * torch.exp(-k * t))
+    assert float((hist["T"][:, i] - exact).abs().max()) <= 5e-5
+
+
 # ------------------------------------------------ transport time course
 def test_heat_and_moisture_relax_with_the_moist_air_heat_carrier():
     # Two rooms exchanging F = V ACS rho + m_flow each way (balanced), no boundary. The

@@ -1065,6 +1065,23 @@ class _Weather:
         return out
 
 
+# The one-sided differences of `_Builder.boundary_rates` step 1e-4 of the grid step on that
+# side: well inside it (an event is a grid time, so no stencil reaches one), and far above the
+# round-off of the times (a 2.6e6 s run's times are exact to 5e-10 s).
+RATE_STEP_FRACTION = 1e-4
+
+
+@dataclass
+class _BoundaryShadow:
+    """What `_Builder.boundary` reads, on other times (`_Builder.boundary_rates`)."""
+
+    med: AirMedium
+    sig: _Signals
+    weather: _Weather
+    species_names: list[str]
+    errors: list[str]
+
+
 class _Builder:
     def __init__(self, graph: ComponentGraph, doc: ModelicaDoc, substeps: int = 1,
                  mass_storage: bool | None = None) -> None:
@@ -1124,6 +1141,59 @@ class _Builder:
         if any(v is None for v in (pv, Tv, *C)):
             return None
         return out
+
+    def boundary_rates(self, names: list[str]) -> dict[str, dict[str, tuple]] | None:
+        """The time derivatives of boundaries `names`' values on the grid, one-sided:
+        `{name: {"T": (left, right), "X_w": (left, right), "C": [(left, right), ...]}}`, each
+        a series `(n_t,)`; `None` when every boundary value is constant in time. `left` is the
+        derivative at each grid time from the step that ends there, `right` from the step that
+        starts there (they differ at a kink: a ramp's corner, a limiter starting to cut). Each
+        is the second-order one-sided difference of the values at `t -+ d`, `t -+ 2 d`, `t -+
+        3 d`, with `d` 1e-4 of the grid step on that side (`run._Midpoint`'s boundary
+        profile: "Boundary values" in the `run` module)."""
+        g = self.times
+        if g.numel() < 2:
+            return None
+        h = g[1:] - g[:-1]
+        d_left = torch.cat([h[:1], h]) * RATE_STEP_FRACTION
+        d_right = torch.cat([h, h[-1:]]) * RATE_STEP_FRACTION
+        shadows = {}
+        for side, d in (("left", -d_left), ("right", d_right)):
+            for o in (1, 2, 3):
+                times = g + o * d
+                errors: list[str] = []
+                sig = _Signals(self.doc, times, _component_kinds(self.doc), errors)
+                shadow = _BoundaryShadow(self.med, sig, _Weather(
+                    self.doc, dict(self.graph.weather), sig, self.med, errors),
+                    self.species_names, errors)
+                shadows[side, o] = {nm: _Builder.boundary(shadow, self.by_name[nm])
+                                    for nm in names}
+        # g'(t) from g(t + d), g(t + 2 d), g(t + 3 d): (-5/2 g1 + 4 g2 - 3/2 g3) / d (and the
+        # mirror image on the left, d < 0).
+        weights = {1: -2.5, 2: 4.0, 3: -1.5}
+
+        def rate(side: str, d: Tensor, pick) -> Tensor:
+            return sum(w * pick(shadows[side, o]).expand(g.shape)
+                       for o, w in weights.items()) / d
+
+        out: dict[str, dict[str, tuple]] = {}
+        varying = False
+        for nm in names:
+            if any(shadows[k][nm] is None for k in shadows):
+                return None
+            entry: dict[str, object] = {}
+            for key in ("T", "X_w"):
+                lr = tuple(rate(side, sd, lambda b, k=key, n=nm: b[n][k])
+                           for side, sd in (("left", -d_left), ("right", d_right)))
+                entry[key] = lr
+            entry["C"] = [tuple(rate(side, sd, lambda b, k=k, n=nm: b[n]["C"][k])
+                                for side, sd in (("left", -d_left), ("right", d_right)))
+                          for k in range(len(self.species_names))]
+            varying |= any(bool((v != 0).any()) for key in ("T", "X_w")
+                           for v in entry[key])
+            varying |= any(bool((v != 0).any()) for lr in entry["C"] for v in lr)
+            out[nm] = entry
+        return out if varying else None
 
     # ------------------------------------------------------------- build
     def build(self) -> tuple[Model, State, Drivers, ModelicaNames]:
@@ -1390,6 +1460,18 @@ class _Builder:
             rows = [[bounds[b]["X_w"] if k == water else bounds[b]["C"][k] for k in range(K)]
                     for b in g.boundaries]
             put("species.x_boundary", _stack_nested(rows, K, self.n_t))
+        rates = (self.boundary_rates(list(g.boundaries))
+                 if len(bounds) == len(g.boundaries) else None)
+        if rates is not None:
+            zero = torch.zeros(self.n_t, dtype=F64)
+            for i, side in enumerate(("left", "right")):
+                put(f"thermal.x_boundary_rate_{side}",
+                    _stack([rates[b]["T"][i] for b in g.boundaries]
+                           + [zero for _ in pinned], self.n_t))
+                if "species" in layers:
+                    rows = [[rates[b]["X_w"][i] if k == water else rates[b]["C"][k][i]
+                             for k in range(K)] for b in g.boundaries]
+                    put(f"species.x_boundary_rate_{side}", _stack_nested(rows, K, self.n_t))
         for key, value in self._inputs.items():
             put(key, (value, bool(value.ndim)))
         X_const = med.X_default[0] if med.has_moisture else 0.0

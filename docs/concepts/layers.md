@@ -130,6 +130,13 @@ boundary. With the linear boundary, it ends behind by its own flushing time, as 
 Modelica importer's `scheme="midpoint"` runner uses this. The implicit and trapezoidal schemes
 do not accept the argument and raise `ValueError` if it is given.
 
+`x_boundary_rates=(start, end)`, given together with `x_boundary_end`, adds the boundary's rates
+of change at both ends of the step. The boundary then follows the cubic Hermite through both
+ends' values and rates instead of the straight line. A fast-flushing zone ends behind its
+boundary by its flushing time times the boundary's rate at the step's end. On a curved boundary
+the straight line gets that rate wrong: it uses the chord's slope, which is off by about half a
+step times the curvature. The Hermite uses the end's own rate.
+
 **Changing storage.** A transport layer's capacity may change over a step: a sewer pipe's wetted
 volume, or a headspace volume as the water level changes. The step conserves the stored amount
 `V x` in amount form: `V_new x_new - V_old x_old = dt F(x_new)` (implicit) or `= dt/2 (F(x_new) + F(x_old))`
