@@ -582,10 +582,14 @@ a fan's flow multiplier, a damper's opening, a heat input. It is built from thre
 part:
 
 - a **reading** names one value of the state or the drivers: `StateReading(key, index)`,
-  `DriverReading(key, index)` or `FunctionReading(fn)`. The sensors by name build them for
-  you: `node_mass_fraction(model, node, species)` (kg/kg), `node_temperature(model, node)`
-  (K), `node_pressure(model, node)` (gauge, Pa), `edge_flow(model, kind, position)` (kg/s)
-  and `edge_pressure_difference(model, kind, position)` (Pa);
+  `DriverReading(key, index)` or `FunctionReading(fn)`. The sensors by name name what they
+  read instead: `node_mass_fraction(node, species)` (kg/kg), `node_temperature(node)` (K),
+  `node_pressure(node)` (gauge, Pa), `edge_flow(kind, position)` (kg/s) and
+  `edge_pressure_difference(kind, position)` (Pa). `build_model(..., controls=network)`
+  resolves them against the model it builds, so they read that model's own rows and
+  columns; a name the model lacks is refused there. A temperature is the thermal layer's
+  state, a boundary node's boundary temperature, or, without a thermal layer, the
+  prescribed temperature `"T"` (a `.prj` model's);
 - a **block** computes one output from the outputs of the blocks it names by position in the
   network's list, or from a reading (`Sensor`);
 - an **actuator**, `Actuator(block, key, index=None, mode="set" | "add")`, writes a block's
@@ -619,7 +623,9 @@ is evaluated once per step, as ContamX evaluates its control nodes; the switches
 the hysteresis, the incremental PI and a lagged sensor need one. A continuous network is
 algebraic in the state at every call, and its integrators (`LimitedPID` with an
 `integral_time`) advance by one explicit Euler step of their rate per step; `LimitedPID` needs
-one.
+one. That step holds the controller's output over the whole model step, so a stiff loop
+(a large gain on a fast zone) run with long steps can overshoot or oscillate where the
+continuous controller would not: take steps short against the loop's time constant.
 
 The network is a closure of the model, the first one: `build_model(..., controls=network)`
 puts it ahead of the density closure, so its writes reach every other closure. Its block
@@ -659,16 +665,16 @@ add_zone(net, Zone("room", volume=60.0, T0=293.15))
 net.add_edge("ambient", "room", kind="airpath", z_path=1.0, Cd=0.6, area=0.05)
 net.add_edge("room", "ambient", kind="fan")
 fan = Scaled(FixedFlow(torch.tensor([0.1], dtype=F64), kind="fan"), "flow_multiplier.fan")
-parts = dict(air_elements=[orifice_elements_from_edges(net, "airpath"), fan],
-             drives=[Stack.from_network(net, "airpath")], species=("CO2",))
 
-# The sensors find the room's row in a model built from the same network.
-co2 = node_mass_fraction(build_model(net, **parts), "room", "CO2")
 network = ControlNetwork(
-    [Sensor(co2, offset=1.2e-3, scale=1e3),        # CO2 above 1.2 g/kg, in g/kg
+    [Sensor(node_mass_fraction("room", "CO2"),     # CO2 above 1.2 g/kg, in g/kg
+            offset=1.2e-3, scale=1e3),
      IncrementalPI(0, kp=2.0, ki=2e-3)],           # the fan multiplier, 0..1
     [Actuator(1, "flow_multiplier.fan")])
-model, state, drivers = build_model(net, **parts, controls=network, return_inputs=True)
+model, state, drivers = build_model(
+    net, air_elements=[orifice_elements_from_edges(net, "airpath"), fan],
+    drives=[Stack.from_network(net, "airpath")], species=("CO2",),
+    controls=network, return_inputs=True)
 state["species.x"] = torch.tensor([6e-4], dtype=F64)
 drivers["species.x_boundary"] = torch.tensor([6e-4], dtype=F64)  # outdoor CO2, kg/kg
 drivers["species.sources"] = torch.tensor([0.0, 4e-5], dtype=F64)  # kg/s in the room

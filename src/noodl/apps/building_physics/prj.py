@@ -87,6 +87,7 @@ from noodl.apps.building_physics.air_handling import (
     AirHandlerFlows,
     air_handler_from_edges,
 )
+from noodl.apps.building_physics.controls import ControlNetwork
 from noodl.apps.building_physics.filters import (
     ConstantEfficiencyFilter,
     FilterSeries,
@@ -1999,7 +2000,6 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
             layer=layers["species"], names=[f"source {s.nr}" for s in project.sources],
             heights=net.node_attr("z_ref"), g=project.g))
     closures.extend(project.closures)
-    model = Model(net, layers, closures=closures)
     drivers = {
         "air.phi_boundary": torch.zeros(1 + len(project.flow_balanced), dtype=F64),
         "T": T.clone(),
@@ -2014,6 +2014,10 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     }
     if "species" in layers and project.sources:
         drivers["species.source_multiplier"] = torch.ones(len(project.sources), dtype=F64)
+    for closure in closures:
+        if isinstance(closure, ControlNetwork):
+            closure.resolve(net, layers, tuple(drivers))
+    model = Model(net, layers, closures=closures)
     state: dict = {}
     if "species" in layers:
         K = len(project.species)

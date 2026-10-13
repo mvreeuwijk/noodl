@@ -327,8 +327,9 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
     the layer has storage-free nodes).
 
     `controls`: a `ControlNetwork`, put first among the closures (its actuators write the
-    drivers the other closures read); `return_inputs=True` then also seeds its outputs,
-    memory and `"controls.input"`.
+    drivers the other closures read). Its sensors' named readings (`node_mass_fraction`,
+    `edge_flow`, ...) are resolved against this model's layers. `return_inputs=True` then
+    also seeds its outputs, memory and `"controls.input"`.
 
     `closures` are appended after the density closure (an air handler's
     `AirHandlerFlows`). `flow_balanced` names nodes whose pressure the airflow solve does
@@ -388,6 +389,8 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
             storage_free=storage_free,
         )
     model_closures.extend(closures)
+    if controls is not None:
+        controls.resolve(net, layers)
     model = Model(net, layers, closures=model_closures, coupling=coupling, iterate_tol=iterate_tol,
                   iterate_max=iterate_max)
     if return_inputs:

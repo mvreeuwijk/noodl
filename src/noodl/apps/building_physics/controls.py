@@ -112,11 +112,14 @@ class DriverReading:
 
 
 class FunctionReading:
-    """`fn(state, drivers)`, for any other reading (the Modelica route's zone temperature)."""
+    """`fn(state, drivers)`, for any other reading (the Modelica route's zone temperature).
+    `key` names the state key it reads, when it reads one (see
+    `ControlNetwork.reads_state`)."""
 
     def __init__(self, fn: Callable[[State, Drivers], Tensor], *,
-                 previous_step: bool = False) -> None:
+                 previous_step: bool = False, key: str | None = None) -> None:
         self.fn, self.previous_step = fn, bool(previous_step)
+        self.key = None if key is None else str(key)
 
     def __call__(self, state: State, drivers: Drivers) -> Tensor:
         return _f64(self.fn(state, drivers))
@@ -205,12 +208,25 @@ class Sensor(Block):
         self.reading, self.name = reading, name
         self.offset, self.scale = float(offset), float(scale)
         self.time_constant = float(time_constant)
-        self._previous = bool(getattr(reading, "previous_step", False))
         self._lag = self.time_constant > 0.0
-        self.memory_size = int(self._previous) + int(self._lag)
         self.sampled_only = self._lag
+        self._configure()
+
+    def _configure(self) -> None:
+        self._previous = bool(getattr(self.reading, "previous_step", False))
+        self.memory_size = int(self._previous) + int(self._lag)
+
+    def resolve(self, net, layers: Mapping, drivers: Sequence[str] = ()) -> None:
+        """Resolve a `NamedReading` against the model's network and layers."""
+        if isinstance(self.reading, NamedReading):
+            self.reading.resolve(net, layers, drivers)
+            self._configure()
 
     def step(self, u, memory, ev):
+        if isinstance(self.reading, NamedReading) and self.reading.resolved is None:
+            raise ValueError(f"controls: {self.name} reads {self.reading!r}, which is not "
+                             f"resolved against a model; pass the network to "
+                             f"build_model(controls=...)")
         raw = _f64(self.reading(ev.state, ev.drivers))
         mem = list(memory.unbind(-1))
         if self._previous and ev.dt is not None:
@@ -532,6 +548,9 @@ class LimitedPID(Block):
         if not windup_ratio > 0.0:
             raise ValueError(f"LimitedPID {name!r}: windup_ratio must be > 0, got "
                              f"{windup_ratio}")
+        if not setpoint_weight >= 0.0:
+            raise ValueError(f"LimitedPID {name!r}: setpoint_weight must be >= 0, got "
+                             f"{setpoint_weight}")
         self.inputs, self.name = (int(setpoint), int(measurement)), name
         self.gain, self.y_max, self.y_min = float(gain), float(y_max), y_min
         self.integral_time = None if integral_time is None else float(integral_time)
@@ -625,20 +644,40 @@ class ControlNetwork:
                 raise ValueError(f"ControlNetwork: actuator {a.name or a.key!r} sets positions "
                                  f"{list(a.index)} of driver {a.key!r}, listing one twice; "
                                  f"'set' needs distinct positions ('add' adds each listing)")
+        self.outputs_key, self.memory_key = f"{self.name}.outputs", f"{self.name}.memory"
+        self.input_key = f"{self.name}.input"
+        self.state_keys = (self.outputs_key, self.memory_key)
+        self.outputs = tuple(sorted({a.key for a in self.actuators})) + self.state_keys
+        self._layout()
+
+    def _readings(self):
+        """Every sensor's reading, a resolved `NamedReading` replaced by what it resolved
+        to."""
+        for b in self.blocks:
+            if isinstance(b, Sensor):
+                r = b.reading
+                yield r.resolved if isinstance(r, NamedReading) else r
+
+    def _layout(self) -> None:
+        """Memory slots and the drivers read, from the blocks as they are now."""
         self._slots: list[slice] = []
         start = 0
         for block in self.blocks:
             self._slots.append(slice(start, start + block.memory_size))
             start += block.memory_size
         self.memory_size = start
-        self.outputs_key, self.memory_key = f"{self.name}.outputs", f"{self.name}.memory"
-        self.input_key = f"{self.name}.input"
-        self.state_keys = (self.outputs_key, self.memory_key)
         read = {b.key for b in self.blocks if isinstance(b, DriverValue)}
-        read |= {b.reading.key for b in self.blocks
-                 if isinstance(b, Sensor) and isinstance(b.reading, DriverReading)}
+        read |= {r.key for r in self._readings() if isinstance(r, DriverReading)}
         self.inputs = tuple(sorted(read))
-        self.outputs = tuple(sorted({a.key for a in self.actuators})) + self.state_keys
+
+    def resolve(self, net, layers: Mapping, drivers: Sequence[str] = ()) -> None:
+        """Resolve every sensor's `NamedReading` against `net`, the model's `layers` (by
+        name) and the names of the `drivers` the model declares; `build_model(controls=)`
+        and `project_to_model` call it before they build the model."""
+        for b in self.blocks:
+            if isinstance(b, Sensor):
+                b.resolve(net, layers, drivers)
+        self._layout()
 
     def __repr__(self) -> str:
         mode = "sampled" if self.sampled else "continuous"
@@ -654,9 +693,11 @@ class ControlNetwork:
                                      "each step (a schedule's value)", unit="-")}
 
     def reads_state(self, key: str) -> bool:
-        """Whether a sensor reads state `key` (`simulate` records `"air.dp"` when one does)."""
-        return any(isinstance(b, Sensor) and isinstance(b.reading, StateReading)
-                   and b.reading.key == key for b in self.blocks)
+        """Whether a sensor reads state `key`: a `StateReading`, or a `FunctionReading`
+        declaring that key, directly or resolved from a `NamedReading` (`simulate` records
+        `"air.dp"` when one does)."""
+        return any(isinstance(r, (StateReading, FunctionReading)) and r.key == key
+                   for r in self._readings())
 
     def initial_state(self) -> dict[str, Tensor]:
         """Outputs 0 and every block's initial memory."""
@@ -770,71 +811,138 @@ class ControlNetwork:
 
 
 # ------------------------------------------------------------------------ sensors by name
-def _interior_position(model, layer_name: str, node) -> int:
-    """`node`'s row in transport layer `layer_name`'s state."""
-    if layer_name not in model.transport:
-        raise KeyError(f"controls: the model has no {layer_name!r} layer (its transport "
-                       f"layers are {list(model.transport)})")
-    layer = model.transport[layer_name]
-    hit = (layer.interior_idx == model.net.node_index(node)).nonzero()
+class NamedReading:
+    """A reading named by what it reads (a node, an edge of a kind, a species), not by its
+    position in the state. `resolve(net, layers, drivers)` finds the position in the model
+    the network is built into; `build_model(controls=)` and `project_to_model` resolve every
+    sensor's reading before they build the model, so the rows and columns are those of that
+    model's own layers. Evaluating one before it is resolved raises, naming the sensor."""
+
+    def __init__(self, label: str, resolver) -> None:
+        self.label, self._resolver = str(label), resolver
+        self.resolved = None
+
+    def __repr__(self) -> str:
+        return self.label
+
+    @property
+    def previous_step(self) -> bool:
+        return bool(getattr(self.resolved, "previous_step", False))
+
+    def resolve(self, net, layers: Mapping, drivers: Sequence[str] = ()) -> None:
+        self.resolved = self._resolver(net, layers, tuple(drivers))
+
+    def __call__(self, state: State, drivers: Drivers) -> Tensor:
+        if self.resolved is None:
+            raise ValueError(f"controls: {self.label} is not resolved against a model; "
+                             f"pass the network to build_model(controls=...)")
+        return self.resolved(state, drivers)
+
+
+def _layer(layers: Mapping, name: str, label: str):
+    if name not in layers:
+        raise KeyError(f"controls: {label} needs the model's {name!r} layer; its layers "
+                       f"are {list(layers)}")
+    return layers[name]
+
+
+def _row(layer, net, node, label: str) -> int:
+    """`node`'s row in transport layer `layer`'s state."""
+    hit = (layer.interior_idx == net.node_index(node)).nonzero()
     if hit.numel() != 1:
-        raise KeyError(f"controls: {node!r} is not an interior node of layer "
-                       f"{layer_name!r} (a boundary value is a driver)")
+        raise KeyError(f"controls: {label}: {node!r} is not an interior node of layer "
+                       f"{layer.name!r} (a boundary value is a driver)")
     return int(hit[0, 0])
 
 
-def node_mass_fraction(model, node, species: int | str = 0) -> FunctionReading:
+def node_mass_fraction(node, species: int | str = 0) -> NamedReading:
     """A zone's mass fraction (kg/kg) of `species` (position or name) in the species
     layer's state, read through the layer's own layout (`(..., n_interior)` for one
     species, `(..., n_interior, K)` for more)."""
-    i = _interior_position(model, "species", node)
-    layer = model.transport["species"]
-    k = species
-    if isinstance(species, str):
-        if layer.species_names is None or species not in layer.species_names:
-            raise KeyError(f"controls: the species layer has no species {species!r} (its "
-                           f"species are {layer.species_names})")
-        k = layer.species_names.index(species)
-    k = int(k)
-    if not 0 <= k < layer.n_species:
-        raise IndexError(f"controls: the species layer has {layer.n_species} species, not "
-                         f"position {k}")
-    column = k * layer.n_i + i
+    label = f"node_mass_fraction({node!r}, {species!r})"
 
-    def read(state: State, drivers: Drivers) -> Tensor:
-        stacked, _ = layer._to_stacked(state["species.x"], layer.n_i, "species.x")
-        return stacked[..., column]
+    def resolve(net, layers, drivers):
+        layer = _layer(layers, "species", label)
+        i = _row(layer, net, node, label)
+        k = species
+        if isinstance(species, str):
+            if layer.species_names is None or species not in layer.species_names:
+                raise KeyError(f"controls: {label}: the species layer has no species "
+                               f"{species!r} (its species are {layer.species_names})")
+            k = layer.species_names.index(species)
+        k = int(k)
+        if not 0 <= k < layer.n_species:
+            raise IndexError(f"controls: {label}: the species layer has {layer.n_species} "
+                             f"species, not position {k}")
+        column = k * layer.n_i + i
 
-    return FunctionReading(read)
+        def read(state: State, drivers: Drivers) -> Tensor:
+            stacked, _ = layer._to_stacked(state["species.x"], layer.n_i, "species.x")
+            return stacked[..., column]
 
+        return FunctionReading(read, key="species.x")
 
-def node_temperature(model, node) -> StateReading | DriverReading:
-    """A node's temperature (K): the thermal layer's state when the model has one, else the
-    prescribed temperature `"T"` (a driver, read one step late in a sampled network)."""
-    if "thermal" in model.transport:
-        return StateReading("thermal.x", (_interior_position(model, "thermal", node),))
-    return DriverReading("T", (model.net.node_index(node),))
+    return NamedReading(label, resolve)
 
 
-def node_pressure(model, node) -> StateReading:
+def node_temperature(node) -> NamedReading:
+    """A node's temperature (K). With a thermal layer: its state at an interior node, its
+    boundary temperature (the driver `"thermal.x_boundary"`) at a boundary node. Without
+    one: the prescribed temperature `"T"`, which the model must declare. A driver is read
+    one step late in a sampled network."""
+    label = f"node_temperature({node!r})"
+
+    def resolve(net, layers, drivers):
+        if "thermal" in layers:
+            layer = layers["thermal"]
+            n = net.node_index(node)
+            boundary = (layer.boundary_idx == n).nonzero()
+            if boundary.numel() == 1:
+                return DriverReading("thermal.x_boundary", (int(boundary[0, 0]),))
+            return StateReading("thermal.x", (_row(layer, net, node, label),))
+        if "T" not in drivers:
+            raise ValueError(f"controls: {label}: the model has no thermal layer and "
+                             f"declares no prescribed temperature driver 'T'")
+        return DriverReading("T", (net.node_index(node),))
+
+    return NamedReading(label, resolve)
+
+
+def node_pressure(node) -> NamedReading:
     """A node's gauge pressure (Pa): the air layer's potential."""
-    return StateReading("air.phi", (model.net.node_index(node),))
+    label = f"node_pressure({node!r})"
+
+    def resolve(net, layers, drivers):
+        _layer(layers, "air", label)
+        return StateReading("air.phi", (net.node_index(node),))
+
+    return NamedReading(label, resolve)
 
 
-def _column(model, kind: str, position: int) -> int:
-    sl = model.potential["air"].kind_slice(kind)
+def _column(layers, kind: str, position: int, label: str) -> int:
+    sl = _layer(layers, "air", label).kind_slice(kind)
     if not 0 <= position < sl.stop - sl.start:
-        raise IndexError(f"controls: kind {kind!r} has {sl.stop - sl.start} edges, not "
-                         f"position {position}")
+        raise IndexError(f"controls: {label}: kind {kind!r} has {sl.stop - sl.start} edges, "
+                         f"not position {position}")
     return sl.start + int(position)
 
 
-def edge_flow(model, kind: str, position: int = 0) -> StateReading:
+def edge_flow(kind: str, position: int = 0) -> NamedReading:
     """The mass flow (kg/s) of edge `position` of `kind`, along the edge."""
-    return StateReading("air.q", (_column(model, kind, position),))
+    label = f"edge_flow({kind!r}, {position})"
+
+    def resolve(net, layers, drivers):
+        return StateReading("air.q", (_column(layers, kind, position, label),))
+
+    return NamedReading(label, resolve)
 
 
-def edge_pressure_difference(model, kind: str, position: int = 0) -> StateReading:
+def edge_pressure_difference(kind: str, position: int = 0) -> NamedReading:
     """The driving pressure difference (Pa) of an edge, from-node minus to-node with the
     edge's drives (`PotentialFlowLayer.dp`), which `simulate` records as `"air.dp"`."""
-    return StateReading(PRESSURE_DIFFERENCE, (_column(model, kind, position),))
+    label = f"edge_pressure_difference({kind!r}, {position})"
+
+    def resolve(net, layers, drivers):
+        return StateReading(PRESSURE_DIFFERENCE, (_column(layers, kind, position, label),))
+
+    return NamedReading(label, resolve)

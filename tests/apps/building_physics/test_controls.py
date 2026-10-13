@@ -608,6 +608,8 @@ def test_limited_pid_refuses_bad_parameters_and_a_sampled_network():
         LimitedPID(0, 1, gain=1.0, y_max=1.0, integral_time=0.0)
     with pytest.raises(ValueError, match="windup_ratio"):
         LimitedPID(0, 1, gain=1.0, y_max=1.0, integral_time=1.0, windup_ratio=0.0)
+    with pytest.raises(ValueError, match="setpoint_weight must be >= 0"):
+        LimitedPID(0, 1, gain=1.0, y_max=1.0, setpoint_weight=-0.5)
     with pytest.raises(ValueError, match="sampled=False"):
         ControlNetwork([Constant(0.0), Constant(0.0), LimitedPID(0, 1, gain=1.0, y_max=1.0)])
 
@@ -641,50 +643,131 @@ def _interior(model, layer, node):
     return model.transport[layer].interior_idx.tolist().index(model.net.node_index(node))
 
 
-def test_sensors_by_name_read_the_state_the_model_keeps():
+def _sensing(*readings, **kwargs):
+    """`_two_rooms` with a network of one sensor per reading."""
+    network = ControlNetwork([Sensor(r) for r in readings])
+    model, state, drivers = _two_rooms(controls=network, **kwargs)
+    return network, model, state, drivers
+
+
+def test_sensors_by_name_resolve_against_the_model_they_are_built_into():
     """One species is stored reduced, (n_interior,): the reading follows the layer's own
-    layout."""
-    model, state, drivers = _two_rooms()
-    i = _interior(model, "species", "B")
+    layout. A boundary node's temperature is its boundary driver, read one step late."""
+    network, model, state, drivers = _sensing(
+        node_mass_fraction("B", "CO2"), node_temperature("A"), node_pressure("A"),
+        edge_flow("airpath", 1), edge_pressure_difference("airpath", 1),
+        node_temperature("ambient"))
+    co2, temperature, pressure, flow, dp, outdoor = (b.reading.resolved
+                                                     for b in network.blocks)
     x = torch.zeros(2, dtype=F64)
-    x[i] = 6e-4
-    co2 = node_mass_fraction(model, "B", "CO2")
+    x[_interior(model, "species", "B")] = 6e-4
     assert float(co2({**state, "species.x": x}, drivers)) == 6e-4
-    temperature = node_temperature(model, "A")
-    assert isinstance(temperature, StateReading) and temperature.key == "thermal.x"
-    assert temperature.index == (_interior(model, "thermal", "A"),)
-    assert node_pressure(model, "A").index == (model.net.node_index("A"),)
+    assert isinstance(temperature, StateReading)
+    assert (temperature.key, temperature.index) == ("thermal.x",
+                                                    (_interior(model, "thermal", "A"),))
+    assert (pressure.key, pressure.index) == ("air.phi", (model.net.node_index("A"),))
     column = model.potential["air"].kind_slice("airpath").start + 1
-    assert edge_flow(model, "airpath", 1).index == (column,)
-    dp = edge_pressure_difference(model, "airpath", 1)
+    assert (flow.key, flow.index) == ("air.q", (column,))
     assert (dp.key, dp.index) == ("air.dp", (column,))
-    with pytest.raises(KeyError, match="no species 'H2O'"):
-        node_mass_fraction(model, "B", "H2O")
-    with pytest.raises(KeyError, match="'ambient' is not an interior node"):
-        node_mass_fraction(model, "ambient")
-    with pytest.raises(IndexError, match="3 edges, not position 3"):
-        edge_flow(model, "airpath", 3)
+    assert isinstance(outdoor, DriverReading)
+    assert (outdoor.key, outdoor.index) == ("thermal.x_boundary", (0,))
+    assert network.memory_size == 1 and network.blocks[5].memory_size == 1
+    assert "thermal.x_boundary" in network.inputs
+    assert state[network.memory_key].shape == (1,)
+    assert network.reads_state("species.x") and network.reads_state("air.dp")
+    assert not network.reads_state("thermal.x_boundary")
+
+
+@pytest.mark.parametrize(("reading", "error", "match"), [
+    (node_mass_fraction("B", "H2O"), KeyError, "no species 'H2O'"),
+    (node_mass_fraction("B", 2), IndexError, "1 species, not position 2"),
+    (node_mass_fraction("ambient"), KeyError, "'ambient' is not an interior node"),
+    (edge_flow("airpath", 3), IndexError, "3 edges, not position 3"),
+    (edge_pressure_difference("door"), KeyError, "no element of kind 'door'"),
+])
+def test_a_sensor_that_names_what_the_model_lacks_is_refused_when_the_model_is_built(
+        reading, error, match):
+    with pytest.raises(error, match=match):
+        _sensing(reading)
+
+
+def test_an_unresolved_named_reading_is_refused_naming_the_sensor():
+    net = ControlNetwork([Sensor(node_pressure("A"), name="lobby pressure")])
+    with pytest.raises(ValueError, match=r"lobby pressure reads node_pressure\('A'\), which "
+                                         r"is not resolved"):
+        net(net.initial_state(), {}, STEP)
+    with pytest.raises(ValueError, match="not resolved"):
+        node_pressure("A")({}, {})
+
+
+def test_a_sensor_finds_its_row_and_column_whatever_the_layer_order():
+    """Zone C is reached only by a kind the heat and species layers do not carry, and the
+    zones and elements are not in a naive order: the rows and the column are the model's
+    own, not node_index - 1 or the airpath's position."""
+    from noodl.apps.building_physics import (
+        Zone,
+        add_zone,
+        build_model,
+        orifice_elements_from_edges,
+    )
+    from noodl.drives import Stack
+    from noodl.topology import Network
+
+    net = Network(dtype=F64)
+    net.add_node("ambient", z_ref=0.0)
+    for name in ("C", "B", "A"):
+        add_zone(net, Zone(name, volume=60.0, T0=293.15))
+    net.add_edge("ambient", "C", kind="crack", z_path=0.5, Cd=0.6, area=0.01)
+    net.add_edge("ambient", "A", kind="airpath", z_path=0.5, Cd=0.6, area=0.05)
+    net.add_edge("A", "B", kind="airpath", z_path=1.0, Cd=0.6, area=0.05)
+    net.add_edge("B", "ambient", kind="airpath", z_path=1.5, Cd=0.6, area=0.05)
+    elements = [orifice_elements_from_edges(net, "crack"),
+                orifice_elements_from_edges(net, "airpath")]
+    drives = [Stack.from_network(net, "crack"), Stack.from_network(net, "airpath")]
+    network = ControlNetwork([Sensor(node_mass_fraction("A")), Sensor(node_temperature("A")),
+                              Sensor(edge_flow("airpath", 1))])
+    model, state, drivers = build_model(net, air_elements=elements, drives=drives,
+                                        flow_kinds=("airpath",), species=1,
+                                        controls=network, return_inputs=True)
+    assert model.transport["species"].interior_idx.tolist() == [2, 3]   # B, A; not C
+    state = {**state, "species.x": torch.tensor([1e-4, 3e-4], dtype=F64),
+             "thermal.x": torch.tensor([290.0, 300.0], dtype=F64),
+             "air.q": torch.tensor([0.0, 10.0, 20.0, 30.0], dtype=F64)}
+    got = network.evaluate(state, drivers).tolist()
+    assert got == [3e-4, 300.0, 20.0]     # A's rows (1, not 2), airpath edge 1 (column 2)
 
 
 def test_a_mass_fraction_sensor_reads_two_species_batched_or_not():
     """Two species are stored (n_interior, K); a batch goes in front."""
-    model, state, drivers = _two_rooms(species=("CO2", "H2O"))
+    network, model, state, drivers = _sensing(node_mass_fraction("B", "H2O"),
+                                              node_mass_fraction("B", 0),
+                                              species=("CO2", "H2O"))
+    water, co2 = (b.reading for b in network.blocks)
     x = torch.zeros(2, 2, dtype=F64)
     x[_interior(model, "species", "B")] = torch.tensor([6e-4, 9e-3], dtype=F64)
-    water = node_mass_fraction(model, "B", "H2O")
     assert float(water({**state, "species.x": x}, drivers)) == 9e-3
-    assert float(node_mass_fraction(model, "B", 0)({**state, "species.x": x}, drivers)) == 6e-4
+    assert float(co2({**state, "species.x": x}, drivers)) == 6e-4
     batched = torch.stack([x, 2.0 * x])
     assert water({**state, "species.x": batched}, drivers).tolist() == [9e-3, 1.8e-2]
-    with pytest.raises(IndexError, match="2 species, not position 2"):
-        node_mass_fraction(model, "B", 2)
 
 
-def test_a_temperature_sensor_without_a_thermal_layer_reads_the_prescribed_temperature():
-    model, _, _ = _two_rooms(thermal=False)
-    reading = node_temperature(model, "B")
+def test_a_temperature_sensor_needs_a_thermal_layer_or_a_prescribed_temperature():
+    """Without a thermal layer and a "T" driver the sensor is refused; a .prj model declares
+    "T", and the sensor reads it (one step late)."""
+    with pytest.raises(ValueError, match=r"no thermal layer and declares no prescribed "
+                                         r"temperature driver 'T'"):
+        _sensing(node_temperature("B"), thermal=False)
+    from noodl.apps.building_physics import project_to_model, read_prj
+
+    project = read_prj(Path(__file__).resolve().parents[2] / "data" / "contam"
+                       / "valThreeZonesWthCtm-UseApi.prj")
+    network = ControlNetwork([Sensor(node_temperature("two"))])
+    project.closures.append(network)
+    model, state, drivers = project_to_model(project)
+    reading = network.blocks[0].reading.resolved
     assert isinstance(reading, DriverReading)
-    assert (reading.key, reading.index) == ("T", (model.net.node_index("B"),))
+    assert (reading.key, reading.index) == ("T", (model.net.node_index("two"),))
+    assert network.inputs == ("T",) and network.memory_size == 1
 
 
 def test_build_model_puts_the_network_first_and_seeds_its_state():
