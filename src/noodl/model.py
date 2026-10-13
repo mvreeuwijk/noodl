@@ -1014,6 +1014,8 @@ class Model:
             diag[name] = {"substeps": self.substeps[name]}
             if "linear" in layer_diag:
                 diag[name]["linear"] = layer_diag["linear"]
+            if "held_sources_dropped" in layer_diag:
+                diag[name]["held_sources_dropped"] = layer_diag["held_sources_dropped"]
             if want_transfer:
                 diag[name]["boundary_transfer"] = transfer_total
         # Closure-carried state: a declared key is copied OUT of the closure's

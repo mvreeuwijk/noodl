@@ -363,3 +363,21 @@ def test_an_outdoor_air_fraction_of_shape_b_by_1_is_read_as_b():
                                          r"or \(B, 1\)\), got shape \(2, 3\)"):
         closure({}, {"outdoor_air_fraction.ahs": torch.full((2, 3), 0.3, dtype=F64),
                      "flow_multiplier.ahs": m})
+
+
+def test_a_plenum_source_is_dropped_while_the_air_handler_is_off_and_counted():
+    """A contaminant source in a zero-volume plenum of a switched-off handler: the step runs,
+    the plenum keeps its value, and Model.step's diagnostics count the dropped entry."""
+    net, model, state, drivers = _house()
+    state = model.step(state, drivers, DT)
+    drivers["flow_multiplier.air_handler"] = torch.zeros(5, dtype=F64)
+    sources = torch.zeros(net.n, dtype=F64)
+    supply, _ = air_handler_plenums(net, "air_handler")
+    sources[net.node_index(supply)] = 1e-6
+    drivers["species.sources"] = sources
+    diagnostics: dict = {}
+    after = model.step(state, drivers, DT, diagnostics=diagnostics)["species.x"]
+    layer = model.transport["species"]
+    row = layer.interior_idx.tolist().index(net.node_index(supply))
+    assert after[row].item() == state["species.x"][row].item()
+    assert diagnostics["layers"]["species"]["held_sources_dropped"] == 1

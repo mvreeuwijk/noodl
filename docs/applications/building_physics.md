@@ -248,7 +248,11 @@ well-mixed nodes with air mass $\rho V$. A plenum of zero volume (CONTAM's defau
 air and must also be named in `storage_free=`: its balance is then algebraic, the mix of what
 flows in, and the heat and species layers use the implicit scheme (`build_model` selects it
 for heat; the species layer's default is already implicit). A plenum left out of
-`flow_balanced=` or `storage_free=` is refused, naming it and the option.
+`flow_balanced=` or `storage_free=` is refused, naming it and the option. While an air
+handler is switched off, nothing passes through a zero-volume plenum: it keeps its value, and
+a heat or contaminant source there (a coil) is dropped for those steps, as it delivers
+nothing without airflow; `model.step(..., diagnostics=d)` counts the dropped entries at
+`d["layers"][layer]["held_sources_dropped"]`.
 `closures=[closure]` adds the air handler's closure after the density closure. In a
 `Component`, the outdoor air and the exhaust reach the shared ambient through
 `outer("ambient")`. Give each air handler of a building its own `kind` (and its own plenum

@@ -155,8 +155,10 @@ zero-volume air-handler plenum. Their balance is algebraic in every step: what f
 within the step, so their value is the flow-weighted mix of what enters. A storage-free node with
 nothing passing through it (no flow and no conduction) keeps its value, as ContamX holds the
 plenum of a switched-off air handler. A source at such a node (a heating coil in a plenum) is
-carried on by the flow through it within the step; a nonzero source at a node nothing passes
-through would have nowhere to go, so the step refuses it, naming the node. Their capacity, at construction or per step, may be 0
+carried on by the flow through it within the step. At a node nothing passes through the source
+has nowhere to go, and the step drops it (no airflow through a plenum: its coil delivers
+nothing); `step`'s `diagnostics` reports the number of nonzero source entries dropped under
+`"held_sources_dropped"` (in `Model.step`, at `diagnostics["layers"][name]`). Their capacity, at construction or per step, may be 0
 (a negative one is refused everywhere, and a zero one at any other node). Removal and kinetics act
 on a stored amount, so they do not act on these nodes. Only `scheme="implicit"` and `steady` can
 hold them: the exponential and trapezoidal steps have no algebraic form, so a layer with either

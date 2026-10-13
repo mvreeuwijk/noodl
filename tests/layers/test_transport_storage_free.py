@@ -69,22 +69,26 @@ def test_a_storage_free_node_without_through_flow_keeps_its_value():
     torch.testing.assert_close(x, x0, rtol=1e-15, atol=0)
 
 
-def test_a_source_on_a_storage_free_node_enters_the_mix_or_is_refused_without_flow():
+def test_a_source_on_a_storage_free_node_enters_the_mix_or_is_dropped_without_flow():
     """A heat input at a plenum (a heating coil) is carried on by the flow through it; with
-    no flow it would have nowhere to go, so it is refused naming the node (a zero source
-    there is fine, also in the one batch member whose flow is off)."""
+    no flow it has nowhere to go: the step drops it (no error, the node keeps its value) and
+    the diagnostics count the dropped entries (one per batch member whose flow is off)."""
     _, layer = _plenum()
     x0 = torch.tensor([3e-4, 2e-4], dtype=F64)
     src = torch.tensor([0.0, 1e-5, 0.0], dtype=F64)
     xb = torch.tensor([1e-3], dtype=F64)
-    with pytest.raises(ValueError, match=r"TransportLayer 'c': a nonzero source at "
-                                         r"storage-free node\(s\) \['plenum'\], which nothing "
-                                         r"passes through"):
-        layer.step(x0, _q(0.0, 0.0), src, xb, DT)
-    with pytest.raises(ValueError, match=r"\['plenum'\]"):
-        layer.step(x0, torch.stack([_q(0.03, 0.07), _q(0.0, 0.0)]), src.expand(2, 3), xb, DT)
-    held = layer.step(x0, _q(0.0, 0.0), torch.zeros(3, dtype=F64), xb, DT)
+    diagnostics: dict = {}
+    held = layer.step(x0, _q(0.0, 0.0), src, xb, DT, diagnostics=diagnostics)
     torch.testing.assert_close(held, x0, rtol=1e-15, atol=0)
+    assert diagnostics["held_sources_dropped"] == 1
+    batched: dict = {}
+    both = layer.step(x0, torch.stack([_q(0.03, 0.07), _q(0.0, 0.0)]), src.expand(2, 3), xb,
+                      DT, diagnostics=batched)
+    torch.testing.assert_close(both[1], x0, rtol=1e-15, atol=0)
+    assert batched["held_sources_dropped"] == 1
+    flowing: dict = {}
+    layer.step(x0, _q(0.03, 0.07), src, xb, DT, diagnostics=flowing)
+    assert flowing["held_sources_dropped"] == 0
     x = layer.step(x0, _q(0.03, 0.07), src, xb, DT)
     # room: M/dt (x - x0) = q_o x_amb + S - q_o x   (everything the plenum receives passes on)
     room = (M_ROOM / DT * 2e-4 + 0.03 * 1e-3 + 1e-5) / (M_ROOM / DT + 0.03)
