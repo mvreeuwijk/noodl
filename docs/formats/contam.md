@@ -65,7 +65,8 @@ simulated species in file order; a source or kinetic reaction that names a speci
 does not simulate (a species the file defines but marks as not simulated included), a kinetic
 reaction that gives one product-reactant pair twice, and a zone whose kinetic reaction number the
 file does not define; a schedule
-number that no week schedule carries; a schedule on an `eds`,
+number that no week schedule carries, a week schedule that names a day schedule the file
+does not define; a schedule on an `eds`,
 `brs`, `plm` or `pkm` source (CONTAM triggers these once, at the schedule's first nonzero
 value); a zone without the variable-pressure flag (which
 ContamX holds at constant pressure), unless an air-handling system names it as a plenum, or,
@@ -87,7 +88,7 @@ air-handling records (ContamX gives the k-th record the k-th recirculation, outd
 exhaust path, and mis-assigns them otherwise; this also refuses an implicit path named by two
 records), a path that is both an implicit air-handling path and a supply or return point, a
 supply or return point without an air-handling system or naming one the file does not
-define, a schedule or a flow on an outdoor-air or exhaust
+define, or whose path neither leaves that system's supply zone nor enters its return zone, a schedule or a flow on an outdoor-air or exhaust
 path or a `mult` on a supply or return point (ContamX ignores them), a flow element or a wind
 pressure on an air-handling path, a kinetic reaction in a zero-volume plenum, any other path
 or duct terminal joined to a plenum (only the air handler's own flows may touch it), an
