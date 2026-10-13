@@ -992,3 +992,31 @@ def test_a_zone_without_a_positive_volume_is_refused(tmp_path, fixture, name, ch
             comp["parameters"][key] = value
     with pytest.raises(ModelicaImportError, match=match):
         read_modelica(_write(tmp_path, doc))
+
+
+def test_a_sub_interval_takes_the_hermite_value_and_slope_of_a_boundary():
+    """On `(u, v)` inside a grid step, a boundary value is the cubic Hermite's value at each
+    end and its rate keys are the Hermite's slope there, not the grid step's end rates."""
+    from noodl.apps.building_physics.modelica.assemble import boundary_rate_key
+    from noodl.apps.building_physics.modelica.run import _StepDrivers
+
+    grid = torch.tensor([0.0, 10.0, 20.0], dtype=torch.float64)
+    f = lambda t: 3.0 + 0.5 * t - 0.02 * t**2 + 0.001 * t**3  # noqa: E731
+    df = lambda t: 0.5 - 0.04 * t + 0.003 * t**2  # noqa: E731
+    t = grid
+    drivers = {
+        "series:time": grid,
+        "series:thermal.x_boundary": f(t).reshape(-1, 1),
+        "series:" + boundary_rate_key("thermal.x_boundary", "left"): df(t).reshape(-1, 1),
+        "series:" + boundary_rate_key("thermal.x_boundary", "right"): df(t).reshape(-1, 1),
+    }
+    sd = _StepDrivers(drivers, grid, 0)
+    du, dv = sd.span(12.0, 17.0)
+    for d, time in ((du, 12.0), (dv, 17.0)):
+        # A cubic is reproduced exactly by its Hermite interpolant.
+        assert float(d["thermal.x_boundary"]) == pytest.approx(f(time), rel=1e-12)
+        for side in ("left", "right"):
+            assert float(d[boundary_rate_key("thermal.x_boundary", side)]) == pytest.approx(
+                df(time), rel=1e-12)
+        assert float(d[boundary_rate_key("thermal.x_boundary", "left")]) != pytest.approx(
+            float(df(20.0)), rel=1e-6)

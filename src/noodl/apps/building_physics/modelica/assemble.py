@@ -1071,6 +1071,21 @@ class _Weather:
 RATE_STEP_FRACTION = 1e-4
 
 
+RATE_PREFIX = "modelica."
+
+
+def boundary_rate_key(key: str, side: str) -> str:
+    """The driver holding the rate of change of the boundary value `key` (`"<layer>.x_boundary"`)
+    on `side` (`"left"`: from the step ending at the grid time, `"right"`: from the step
+    starting there): `"modelica.<layer>.x_boundary_rate_<side>"`. Outside the layers' own
+    key namespace, so `Model.check` does not take it for a layer key."""
+    return f"{RATE_PREFIX}{key}_rate_{side}"
+
+
+def is_boundary_rate_key(key: str) -> bool:
+    return key.startswith(RATE_PREFIX) and "_rate_" in key
+
+
 def _boundary_values(comp: Component, med: AirMedium, sig: _Signals, weather: _Weather,
                      species_names: list[str], errors: list[str]) -> dict | None:
     p = comp.parameters
@@ -1473,13 +1488,13 @@ class _Builder:
         if rates is not None:
             zero = torch.zeros(self.n_t, dtype=F64)
             for i, side in enumerate(("left", "right")):
-                put(f"modelica.thermal.x_boundary_rate_{side}",
+                put(boundary_rate_key("thermal.x_boundary", side),
                     _stack([rates[b]["T"][i] for b in g.boundaries]
                            + [zero for _ in pinned], self.n_t))
                 if "species" in layers:
                     rows = [[rates[b]["X_w"][i] if k == water else rates[b]["C"][k][i]
                              for k in range(K)] for b in g.boundaries]
-                    put(f"modelica.species.x_boundary_rate_{side}",
+                    put(boundary_rate_key("species.x_boundary", side),
                         _stack_nested(rows, K, self.n_t))
         for key, value in self._inputs.items():
             put(key, (value, bool(value.ndim)))

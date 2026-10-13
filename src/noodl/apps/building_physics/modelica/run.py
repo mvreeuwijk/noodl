@@ -20,7 +20,11 @@ from collections.abc import Mapping
 
 import torch
 
-from noodl.apps.building_physics.modelica.assemble import _ZoneStateClosure
+from noodl.apps.building_physics.modelica.assemble import (
+    _ZoneStateClosure,
+    boundary_rate_key,
+    is_boundary_rate_key,
+)
 from noodl.apps.building_physics.modelica.storage import StorageClosure, mass_change
 from noodl.elements import Element
 from noodl.model import Drivers, Model, State
@@ -209,7 +213,7 @@ class _StepDrivers:
     are the grid's own (`step_drivers` at its two ends). On any other interval `(u, v)` (a
     sub-step of the graded start, `_graded`, or the parts of a step split at a switch,
     `_Switches`): point values interpolated in the grid step holding each end (a boundary
-    value with its rates, `"<key>_rate_left"`/`"<key>_rate_right"`, by the cubic Hermite
+    value with its rates, `assemble.boundary_rate_key`, by the cubic Hermite
     through the step's ends, `_hermite`, which also gives its rate there; any other linearly),
     and
     every source (`"<layer>.sources"`, a step mean on the grid) the mean over `(u, v)` of its
@@ -265,15 +269,17 @@ class _StepDrivers:
         a = (t - self.g[j - 1]) / h
         for key, v1 in d1.items():
             v0 = d0.get(key)
-            if (key.endswith(".sources") or key.endswith(_RATE_KEYS)
+            if (key.endswith(".sources") or is_boundary_rate_key(key)
                     or not isinstance(v1, Tensor)
                     or not isinstance(v0, Tensor) or v0.shape != v1.shape):
                 continue
-            r0, r1 = d0.get(f"{key}_rate_right"), d1.get(f"{key}_rate_left")
+            r0 = d0.get(boundary_rate_key(key, "right"))
+            r1 = d1.get(boundary_rate_key(key, "left"))
             if isinstance(r0, Tensor) and isinstance(r1, Tensor):
                 # A boundary value with its rates: the cubic Hermite through both ends.
                 out[key], rate = _hermite(v0, v1, r0, r1, h, a)
-                out[f"{key}_rate_left"] = out[f"{key}_rate_right"] = rate
+                out[boundary_rate_key(key, "left")] = rate
+                out[boundary_rate_key(key, "right")] = rate
                 continue
             if torch.equal(v0, v1):
                 continue
@@ -312,9 +318,9 @@ class _StepDrivers:
         return du, dv
 
 
-# Drivers holding a boundary value's rate of change on either side of a grid time
-# (`assemble._Builder.boundary_rates`), interpolated with the value itself (`_hermite`).
-_RATE_KEYS = ("_rate_left", "_rate_right")
+# The drivers holding a boundary value's rate of change on either side of a grid time
+# (`assemble.boundary_rate_key`; `assemble._Builder.boundary_rates`) are interpolated with the
+# value itself (`_hermite`), not on their own (`is_boundary_rate_key`).
 
 
 def _hermite(v0: Tensor, v1: Tensor, r0: Tensor, r1: Tensor, h: float,
@@ -768,7 +774,7 @@ class _Midpoint:
     moist-air heat carrier, `_ZoneStateClosure.cp_correction`; the storage terms), the
     second with state 1's, and both with the step-mean source driver. The boundary values
     run through both ends' values over the step: the cubic Hermite with their rates
-    (`x_boundary_rate_left`/`_right`, `assemble._Builder.boundary_rates`) where they vary,
+    (`assemble.boundary_rate_key`, `assemble._Builder.boundary_rates`) where they vary,
     else the straight line (`TransportLayer.step`'s `x_boundary_end`, `x_boundary_rates`).
     Both matter for a zone that flushes much faster than the step (PressurizationData's
     room: about 10 s against steps of minutes), which ends each step at the boundary value
@@ -993,8 +999,8 @@ class _Midpoint:
                     # Two halves, the first with state 0's flows, capacity and sources,
                     # the second with state 1's; the boundary values through both ends,
                     # with their rates where they vary (class docstring).
-                    r0 = d0.get(f"modelica.{n}.x_boundary_rate_right")
-                    r1 = d1.get(f"modelica.{n}.x_boundary_rate_left")
+                    r0 = d0.get(boundary_rate_key(f"{n}.x_boundary", "right"))
+                    r1 = d1.get(boundary_rate_key(f"{n}.x_boundary", "left"))
                     if r0 is None or r1 is None:
                         xbm, rates0, rates1 = 0.5 * (xb0 + xb1), None, None
                     else:
