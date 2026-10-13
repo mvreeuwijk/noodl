@@ -103,8 +103,8 @@ naming the offending instances); their JSON is exported and kept here for the re
 - `ChimneyShaftWithVolume.json` — a dynamic (mass- and heat-storing) hydrostatic column
   (`MediumColumnDynamic`) and a feedback controller are not supported.
 
-`PressurizationData.json` imports, but the dynamic parity tests do not yet compare it (a stiff
-error of the transport step where its flow fades; `docs/formats/modelica.md`). Its CSV, at
+`PressurizationData.json` imports, but the dynamic parity tests do not yet compare it (an
+unresolved freeze of the room where its flow fades; `docs/formats/modelica.md`). Its CSV, at
 1e-13, is the reference for that comparison, and its weather and wind-pressure columns are
 compared now.
 

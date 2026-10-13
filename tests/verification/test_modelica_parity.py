@@ -256,23 +256,29 @@ REFUSED = {
 # Models `read_modelica` imports but the dynamic parity set refuses, each with the reason.
 DEFERRED = {
     # A 62.5 m3 room between two Outside_CpLowRise walls over 30 days of San Francisco
-    # weather. Its flushing time (about 10 s) is far below the steps (50-3000 s), and where
-    # the flow fades (a calm, or the wind parallel to both walls) the room freezes at the
-    # state it held when its flushing stopped. The midpoint scheme's transport step holds the
-    # flows constant over each half step, which misses the flows' change in that stiff regime:
-    # a first-order error that the extrapolation cannot remove. Measured at (1, 2) substeps
-    # over every row, after the stiff-accurate halves: T 1.6e-4 and Xi 2.0e-3 relative (flows
-    # and p within 1e-6). Comparing it needs a transport integrator that treats the
-    # coefficients' change over the step implicitly. Its weather and wind pressure are
-    # compared (WEATHER).
-    "PressurizationData": "stiff calm-onset error of the step-frozen flows (T 1.6e-4, "
-                          "Xi 2.0e-3 at (1, 2) substeps)",
+    # weather. Its flushing time (about 10 s) is far below the steps (50-3000 s). Where the flow
+    # fades (a calm, or the wind parallel to both walls) it falls by orders of magnitude within
+    # one step, and the room freezes at the state it held when its flushing stopped. The run
+    # sees the flows only at the steps' ends, so it freezes the room at the wrong state: a
+    # first-order error that stays through the calm. Measured over every row at (1, 2)
+    # substeps: T 2.9e-3 (0.82 K at 25920 s) and Xi 3.4e-2 (93312 s) relative; flows within
+    # 1e-6 beyond the resolution, p 2e-11. Refining the grid where the boundary pressures
+    # fade reduced it to T 1.6e-4 and Xi 2.0e-3 (experiment): that, with a transport step
+    # treating the flows' change within a step implicitly, is the follow-up. Its weather and
+    # wind pressure are compared (WEATHER).
+    "PressurizationData": "unresolved calm-onset freeze (T 2.9e-3, Xi 3.4e-2 at (1, 2) "
+                          "substeps over every row)",
 }
 
 
 def test_deferred_models_import():
+    """Each deferred model imports, with every weather and wind-pressure column of its
+    reference among `names.weather` (those are compared, WEATHER)."""
     for model in DEFERRED:
-        read_modelica(DATA / f"{model}.json")
+        _, _, _, names = read_modelica(DATA / f"{model}.json", return_names=True)
+        head, _ = _csv(model)
+        columns = {h for h in head[1:] if ".weaBus." in h or h.endswith(".pWin")}
+        assert columns and columns <= set(names.weather), (model, columns)
 
 
 @pytest.mark.parametrize("model", sorted(REFUSED))
