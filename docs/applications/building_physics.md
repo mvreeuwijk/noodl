@@ -587,9 +587,11 @@ part:
   `node_pressure(node)` (gauge, Pa), `edge_flow(kind, position)` (kg/s) and
   `edge_pressure_difference(kind, position)` (Pa). `build_model(..., controls=network)`
   resolves them against the model it builds, so they read that model's own rows and
-  columns; a name the model lacks is refused there. A temperature is the thermal layer's
+  columns; a name the model lacks is refused there, and so is a network already resolved
+  for another model (build one network per model). A temperature is the thermal layer's
   state, a boundary node's boundary temperature, or, without a thermal layer, the
-  prescribed temperature `"T"` (a `.prj` model's);
+  prescribed temperature driver `"T"`, which the model must then declare (a `.prj` model
+  does; `node_temperature` on a model with neither is refused);
 - a **block** computes one output from the outputs of the blocks it names by position in the
   network's list, or from a reading (`Sensor`);
 - an **actuator**, `Actuator(block, key, index=None, mode="set" | "add")`, writes a block's
@@ -630,9 +632,11 @@ continuous controller would not: take steps short against the loop's time consta
 The network is a closure of the model, the first one: `build_model(..., controls=network)`
 puts it ahead of the density closure, so its writes reach every other closure. Its block
 outputs and its blocks' memory travel in the state as `"controls.outputs"` and
-`"controls.memory"`, which `build_model(..., return_inputs=True)` seeds. Inputs are applied
-before the closures run, so a control overrides a schedule on the same driver entry, as in
-CONTAM.
+`"controls.memory"`, which `build_model(..., return_inputs=True)` and `project_to_model`
+seed. The seeded outputs are NaN: until the network is first evaluated it writes nothing, so
+a query or `Model.check` on the initial state sees the drivers as the inputs leave them.
+Inputs are applied before the closures run, so a control overrides a schedule on the same
+driver entry, as in CONTAM.
 
 Timing in a sampled network follows ContamX:
 
@@ -643,6 +647,16 @@ Timing in a sampled network follows ContamX:
   the previous step used; the first evaluation reads the current value;
 - a block that reads a block later in the list gets that block's previous output, 0 before
   the first evaluation. The network evaluates in the order given and never reorders.
+
+`simulate` evaluates a sampled network once before the initial airflow, with the first
+step's length, so a control acts in the first row already while its flow and pressure
+sensors read 0 there. It then evaluates it once at the start of every output step, with the
+inputs at the step's end, and holds it over the step's zone-pressure passes and the
+sub-steps an input breakpoint makes; a sensor of `"air.phi"` therefore reads the pressures
+that ended the previous step. The edges' pressure differences are recorded as `"air.dp"`
+after every airflow solve when a sensor reads them, a controlled zone temperature enters the
+zone air-mass change (`air_mass_change`) as a scheduled one does, and the histories carry
+the block outputs as `"controls.outputs"`.
 
 A room of 60 m³ with a CO2 source (4e-5 kg/s) takes its air through a leak and loses it
 through an exhaust fan of 0.1 kg/s, wrapped in `Scaled` so that a driver scales its flow. A PI
@@ -682,27 +696,30 @@ drivers["species.sources"] = torch.tensor([0.0, 4e-5], dtype=F64)  # kg/s in the
 times = torch.arange(13, dtype=F64) * 300.0
 out = simulate(model, state, drivers, times)
 q_fan = out["air.q"][:, model.potential["air"].kind_slice("fan")][:, 0]
+signal = out["controls.outputs"][:, 1]                            # the PI's output
 for k in range(len(times)):
     print(f"{times[k] / 60:4.0f} min  CO2 {out['species.x'][k, 0] * 1e3:.4f} g/kg  "
-          f"fan {q_fan[k]:.4f} kg/s")
+          f"PI {signal[k]:.4f}  fan {q_fan[k]:.4f} kg/s")
 ```
 
 ```text
-   0 min  CO2 0.6000 g/kg  fan 0.0000 kg/s
-   5 min  CO2 0.7661 g/kg  fan 0.0000 kg/s
-  10 min  CO2 0.9292 g/kg  fan 0.0022 kg/s
-  15 min  CO2 1.0687 g/kg  fan 0.0137 kg/s
-  20 min  CO2 1.1655 g/kg  fan 0.0295 kg/s
-  25 min  CO2 1.2188 g/kg  fan 0.0439 kg/s
-  30 min  CO2 1.2409 g/kg  fan 0.0541 kg/s
-  35 min  CO2 1.2454 g/kg  fan 0.0603 kg/s
-  40 min  CO2 1.2416 g/kg  fan 0.0638 kg/s
-  45 min  CO2 1.2347 g/kg  fan 0.0656 kg/s
-  50 min  CO2 1.2274 g/kg  fan 0.0665 kg/s
-  55 min  CO2 1.2209 g/kg  fan 0.0670 kg/s
-  60 min  CO2 1.2155 g/kg  fan 0.0671 kg/s
+   0 min  CO2 0.6000 g/kg  PI 0.0000  fan 0.0000 kg/s
+   5 min  CO2 0.7661 g/kg  PI 0.0000  fan 0.0000 kg/s
+  10 min  CO2 0.9292 g/kg  PI 0.0220  fan 0.0022 kg/s
+  15 min  CO2 1.0687 g/kg  PI 0.1368  fan 0.0137 kg/s
+  20 min  CO2 1.1655 g/kg  PI 0.2951  fan 0.0295 kg/s
+  25 min  CO2 1.2188 g/kg  PI 0.4390  fan 0.0439 kg/s
+  30 min  CO2 1.2409 g/kg  PI 0.5409  fan 0.0541 kg/s
+  35 min  CO2 1.2454 g/kg  PI 0.6031  fan 0.0603 kg/s
+  40 min  CO2 1.2416 g/kg  PI 0.6379  fan 0.0638 kg/s
+  45 min  CO2 1.2347 g/kg  PI 0.6563  fan 0.0656 kg/s
+  50 min  CO2 1.2274 g/kg  PI 0.6654  fan 0.0665 kg/s
+  55 min  CO2 1.2209 g/kg  PI 0.6695  fan 0.0670 kg/s
+  60 min  CO2 1.2155 g/kg  PI 0.6710  fan 0.0671 kg/s
 ```
 
+Each row's PI output is the one its fan flow used: at 0 min the evaluation before the
+initial airflow, later the one decided from the state the step ending there started from.
 The fan starts before the room reaches the set point: the proportional part answers the
 rising CO2 while the integral part still pulls down. It settles where it removes the source:
 4e-5 kg/s over the set point's 0.6 g/kg above the outdoor air is 0.067 kg/s.

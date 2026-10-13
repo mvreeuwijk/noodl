@@ -28,16 +28,24 @@ step to the next:
   The same repetition runs for a closure that reads the solved pressure (a pressure-driven
   source, on the potential its `pressure_key` names), so it sees the step's own pressures, as
   ContamX evaluates them. Closures reading different potentials are refused by name.
+
+A sampled control network among the closures (`ControlNetwork`) is evaluated as ContamX
+evaluates its control nodes: once before the initial airflow (its flow and pressure sensors
+read 0 there), then once at the start of every output step, from the state that step starts
+from, and held over the step's passes and sub-steps. The pressure differences its sensors
+read are recorded after every airflow solve, and its outputs are part of the histories.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
 
 from noodl._broadcast import broadcast_shapes
+from noodl.apps.building_physics.controls import PRESSURE_DIFFERENCE, ControlNetwork
 from noodl.apps.building_physics.inputs import (
     Input,
     apply_inputs,
@@ -50,7 +58,7 @@ from noodl.apps.building_physics.prj import (
     _pressure_coupling,
 )
 from noodl.apps.building_physics.schedules import Calendar
-from noodl.model import Drivers, Model, State
+from noodl.model import Drivers, Model, State, StepContext
 from noodl.solvers import ConvergenceError
 
 Tensor = torch.Tensor
@@ -67,6 +75,33 @@ def _stack(rows: list[Tensor]) -> Tensor:
     initial row is unbatched when only the drivers carry a batch."""
     shape = broadcast_shapes(*(r.shape for r in rows))
     return torch.stack([r.expand(shape) for r in rows])
+
+
+def _network(model: Model) -> ControlNetwork | None:
+    """The model's sampled control network, if it has one; more than one is refused (the
+    order in which two would read each other's writes is not defined)."""
+    found = [c for c in model.closures if isinstance(c, ControlNetwork) and c.sampled]
+    if len(found) > 1:
+        raise ValueError(f"simulate: the model has {len(found)} sampled control networks "
+                         f"({', '.join(repr(c.name) for c in found)}); combine them into one")
+    return found[0] if found else None
+
+
+def _evaluate_controls(network: ControlNetwork, state: State, drivers: Drivers, dt: float,
+                       t: float) -> State:
+    """`state` with the network evaluated once at it (its outputs and memory updated)."""
+    out = network(state, drivers, StepContext(dt=dt, t=t))
+    return {**state, **{k: out[k] for k in network.state_keys}}
+
+
+def _with_pressure_differences(model: Model, state: State, drivers: Drivers,
+                               network: ControlNetwork | None) -> State:
+    """`state` with every air-layer edge's driving pressure difference at it (Pa,
+    `PotentialFlowLayer.dp`) under `"air.dp"`, when a sensor of the network reads it."""
+    if network is None or not network.reads_state(PRESSURE_DIFFERENCE):
+        return state
+    drv = model._apply_closures(state, drivers)
+    return {**state, PRESSURE_DIFFERENCE: model.potential["air"].dp(state["air.phi"], drv)}
 
 
 def _air_mass_source(model: Model) -> tuple[str, ZoneAirMassChange] | None:
@@ -144,12 +179,27 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     `ConvergenceError`, naming the step. Only non-convergence (`ConvergenceError`) is
     retried; any other error passes through unchanged.
 
+    A sampled control network in `model.closures` (`ControlNetwork`) runs as ContamX runs
+    its controls. It is evaluated once before the initial airflow, with the drivers at
+    `times[0]` and the first step's length (`0.0` for a single time), so a control on a
+    temperature or a path acts in the first row already, while its flow and pressure sensors
+    read 0 there. It is evaluated again at the start of every output step, from the state
+    the step starts from, with the inputs at the step's end and the output step's length;
+    the step's passes (the zone-pressure fixed point, a retry) and its sub-steps (input
+    breakpoints) hold it, so a sensor of `"air.phi"` reads the pressures that ended the
+    previous step, not the latest pass. After every airflow solve the drivers' pressure
+    differences across the air layer's edges (Pa) are recorded in the state as `"air.dp"`
+    when a sensor reads them. With `air_mass_change` the zone air masses use the
+    temperatures the controls write: the start mass those of the previous step, the end mass
+    those of the step. The histories gain `"<network>.outputs"`, `(N, ..., n_blocks)`.
+
     `diagnostics`, when given, receives the RUN's diagnostics, not `Model.step`'s per-step
     `diagnostics` (layer statistics, pass counts), which `simulate` does not collect:
     `"airflow_retries"`, the end time (s) of every step that was retried, once per step.
 
     Returns `"time"` `(N,)`, and per row the state's `"<layer>.q"`, `"<layer>.phi"` of every
-    potential layer and `"<layer>.x"` of every transport layer, stacked on a leading axis.
+    potential layer, `"<layer>.x"` of every transport layer and the control network's
+    `"<network>.outputs"`, stacked on a leading axis.
     """
     ts = [float(v) for v in torch.as_tensor(times, dtype=F64).reshape(-1).tolist()]
     if not ts or any(b <= a for a, b in zip(ts, ts[1:], strict=False)):
@@ -193,14 +243,23 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
         return float(torch.as_tensor(d.get("P_ref", zp.Pb if zp else 101325.0)).max())
 
     d = drivers_at(ts[0])
+    network = _network(model)
+    if network is not None:
+        # ContamX evaluates its controls before the initial airflow (flow and pressure
+        # sensors then read 0), and a PI node's t = 0 evaluation is a full step's update.
+        state = _evaluate_controls(network, state, d, ts[1] - ts[0] if len(ts) > 1 else 0.0,
+                                   ts[0])
     state = _fixed_point(lambda s: _airflow(model, s, d, **step_kwargs), state, step_key,
                          zone_pressure_rtol, zone_pressure_max_iter, P_of(d), "initial airflow",
                          cause)
+    state = _with_pressure_differences(model, state, d, network)
     state = {**state, **model.initial_capacities(state, d)}
     mass = start_mass(state, d) if found else None
 
     keys = [f"{n}.{s}" for n in model.potential for s in ("q", "phi")]
     keys += [f"{n}.x" for n in model.transport]
+    if network is not None:
+        keys.append(network.outputs_key)
     rows: dict[str, list[Tensor]] = {k: [state[k]] for k in keys}
     retries: list[float] = []
     t = ts[0]
@@ -210,6 +269,12 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
         # sliver sub-steps (a breakpoint is midnight + knot, which need not be exact).
         cuts = [c for c in cuts
                 if c - t > cal.round_off(c) and t_out - c > cal.round_off(c)]
+        if network is not None:
+            # Once per output step, from its start state, with the inputs at its end (as
+            # inside `Model.step`); the passes and sub-steps below hold it.
+            d_out = drivers_at(t_out)
+            d_out["time_step"] = torch.tensor(t_out - t, dtype=F64)
+            state = _evaluate_controls(network, state, d_out, t_out - t, t)
         for t1 in [*cuts, t_out]:
             d, dt, t0 = drivers_at(t1), t1 - t, t
             d["time_step"] = torch.tensor(dt, dtype=F64)
@@ -241,8 +306,11 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
                         retries.append(t1)
                     return out
 
-            state = _fixed_point(run, state, step_key, zone_pressure_rtol, zone_pressure_max_iter,
-                                 P_of(d), f"step of {dt} s ending at t = {t1} s", cause)
+            with network.held() if network is not None else nullcontext():
+                state = _fixed_point(run, state, step_key, zone_pressure_rtol,
+                                     zone_pressure_max_iter, P_of(d),
+                                     f"step of {dt} s ending at t = {t1} s", cause)
+            state = _with_pressure_differences(model, state, d, network)
             if mass is not None:
                 mass = start_mass(state, d)
             t = t1

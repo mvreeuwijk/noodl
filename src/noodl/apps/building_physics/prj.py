@@ -2027,6 +2027,12 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         else:
             drivers["species.x_boundary"] = torch.zeros(1, K, dtype=F64)
         state["species.x"] = x_initial
+    for closure in closures:
+        if isinstance(closure, ControlNetwork):
+            # Not evaluated yet: it writes nothing until `simulate` evaluates it, so the
+            # capacities below are at the drivers as the schedules leave them.
+            state.update(closure.initial_state())
+            drivers.update(closure.initial_drivers())
     # The inputs the airflow elements and drives read themselves, declared for
     # `model.refs.inputs` and `Model.check`.
     model.input_specs = {

@@ -8,6 +8,15 @@ import pytest
 import torch
 
 from noodl.apps.building_physics import build_model
+from noodl.apps.building_physics.controls import (
+    Actuator,
+    Constant,
+    ControlNetwork,
+    DriverValue,
+    IncrementalPI,
+    Sensor,
+    StateReading,
+)
 from noodl.apps.building_physics.inputs import (
     Input,
     apply_inputs,
@@ -790,3 +799,134 @@ def test_an_error_other_than_non_convergence_passes_through_without_a_retry(monk
         simulate(model, state, drivers, [0.0, 300.0])
     assert type(info.value) is SolveFailure and str(info.value) == "singular transport matrix"
     assert calls == [1]
+
+
+# ----------------------------------------------------------------------------- controls
+def _controlled(network, *, dod_mdt=False):
+    """The three-zone project's model with `network` first among its closures (and the
+    project's run control asking for dodMdt when `dod_mdt`)."""
+    project = read_prj(THREE)
+    if dod_mdt:
+        _set_dod_mdt(project, True)
+    model, state, drivers = project_to_model(project)
+    controlled = Model(model.net, dict(model.layers), closures=[network, *model.closures])
+    return (project, controlled, {**state, **network.initial_state()},
+            {**drivers, **network.initial_drivers()})
+
+
+def test_simulate_evaluates_controls_before_the_initial_airflow():
+    """A control setting zone one to 303.15 K acts in the t = 0 airflow already (ContamX
+    evaluates its controls before the initial solve), exactly as a schedule at 303.15 K."""
+    network = ControlNetwork([Constant(303.15)], [Actuator(0, "T", (1,))])
+    project, model, state, drivers = _controlled(network)
+    one = model.net.node_index("one")
+    assert one == 1
+    times = [0.0, 300.0, 600.0]
+    out = simulate(model, state, drivers, times, **TIGHT)
+    plain, pstate, pdrivers = project_to_model(project)
+    hot = [Input(TimeSeries([0.0, 600.0], [303.15, 303.15]), "T", index=one)]
+    ref = simulate(plain, pstate, pdrivers, times, inputs=hot, **TIGHT)
+    torch.testing.assert_close(out["air.q"], ref["air.q"], rtol=1e-12, atol=1e-15)
+    torch.testing.assert_close(out["species.x"], ref["species.x"], rtol=1e-12, atol=1e-18)
+    assert out["controls.outputs"].shape == (3, 1)
+    assert out["controls.outputs"][:, 0].tolist() == [303.15] * 3
+
+
+def test_flow_and_pressure_difference_sensors_read_zero_first_then_the_last_solve():
+    """Row 0 is the t = 0 evaluation, before any airflow solve: 0 (measured on ContamX).
+    Row k >= 1 is the evaluation at the start of step k: the solve that ended step k - 1."""
+    project = read_prj(THREE)
+    col = project.paths[1].edge_columns[0]                     # path 2, one -> two
+    network = ControlNetwork([Sensor(StateReading("air.q", col)),
+                              Sensor(StateReading("air.dp", col))])
+    _, model, state, drivers = _controlled(network)
+    out = simulate(model, state, drivers, [0.0, 300.0, 600.0], **TIGHT)
+    sensed = out["controls.outputs"]
+    assert sensed[0].tolist() == [0.0, 0.0]
+    torch.testing.assert_close(sensed[1, 0], out["air.q"][0, col], rtol=0, atol=0)
+    torch.testing.assert_close(sensed[2, 0], out["air.q"][1, col], rtol=0, atol=0)
+    air = model.potential["air"]
+    for row in (0, 1):
+        s = {k: v[row] for k, v in out.items() if k in ("air.phi", "air.q")}
+        drv = model._apply_closures({**state, **s}, drivers)
+        torch.testing.assert_close(sensed[row + 1, 1], air.dp(out["air.phi"][row], drv)[col],
+                                   rtol=1e-12, atol=1e-15)
+    assert float(sensed[1, 1]) != 0.0
+
+
+def test_a_pi_controller_advances_once_at_the_start_and_once_per_step():
+    """Error 0.2 throughout, Kp 0.5, Ki 1e-4, dt 300 s, oldsig 0.1, olderr 0.05 (ContamX:
+    0.17875 at t = 0, then 0.006 more each step)."""
+    network = ControlNetwork([DriverValue("controls.input", 0),
+                              IncrementalPI(0, kp=0.5, ki=1e-4, initial_output=0.1,
+                                            initial_error=0.05)])
+    _, model, state, drivers = _controlled(network)
+    error = [Input(TimeSeries([0.0, 900.0], [0.2, 0.2]), "controls.input", index=0)]
+    out = simulate(model, state, drivers, [0.0, 300.0, 600.0, 900.0], inputs=error, **TIGHT)
+    assert out["controls.outputs"][:, 1].tolist() == pytest.approx(
+        [0.17875, 0.18475, 0.19075, 0.19675], abs=1e-12)
+
+
+def test_a_sampled_network_is_evaluated_once_per_output_step_however_it_is_split():
+    """An input kink inside a step splits it (`land_on_breakpoints`); the network is still
+    evaluated once per output step, with the output step's length and the inputs at its
+    end, so the controller is the same as without the split."""
+    network = ControlNetwork([DriverValue("controls.input", 0),
+                              IncrementalPI(0, kp=0.5, ki=1e-4, initial_output=0.1,
+                                            initial_error=0.05)])
+    _, model, state, drivers = _controlled(network)
+    kinked = [Input(TimeSeries([0.0, 150.0, 600.0], [0.2, 0.5, 0.1]), "controls.input",
+                    index=0)]
+    times = [0.0, 300.0, 600.0]
+    split = simulate(model, state, drivers, times, inputs=kinked, **TIGHT)
+    whole = simulate(model, state, drivers, times, inputs=kinked, land_on_breakpoints=False,
+                     **TIGHT)
+    assert split["controls.outputs"].tolist() == whole["controls.outputs"].tolist()
+    e = [0.2, 0.5 - 0.4 * 150.0 / 450.0, 0.1]          # the inputs at 0, 300 and 600 s
+    y = [0.17875]
+    for k in (1, 2):
+        y.append(y[-1] + 0.5 * (e[k] - e[k - 1]) + 1e-4 * 300.0 * (e[k] + e[k - 1]) / 2)
+    assert split["controls.outputs"][:, 1].tolist() == pytest.approx(y, abs=1e-12)
+
+
+def test_a_pressure_sensor_reads_the_step_start_inside_the_zone_pressure_fixed_point():
+    """With the zone-pressure density (dodMdt with contaminants) every step is repeated
+    with the latest zone pressures; the sensor still reads the state the step started
+    from, the pressures that ended the previous step."""
+    one = read_prj(THREE).net.node_index("one")
+    network = ControlNetwork([Sensor(StateReading("air.phi", one))])
+    _, model, state, drivers = _controlled(network, dod_mdt=True)
+    out = simulate(model, state, drivers, [0.0, 300.0, 600.0], **TIGHT)
+    sensed = out["controls.outputs"][:, 0]
+    assert float(sensed[0]) == 0.0
+    assert sensed[1:].tolist() == out["air.phi"][:-1, one].tolist()
+    assert float(sensed[1]) != 0.0
+
+
+def test_a_controlled_zone_temperature_enters_the_air_mass_change():
+    """As `test_the_zone_air_mass_change_enters_the_airflow_balance`, with zone one's
+    temperature written by a control (a value passed into the network) instead of a
+    schedule: the step where it jumps carries dM/dt in its airflow balance."""
+    network = ControlNetwork([DriverValue("controls.input", 0)], [Actuator(0, "T", (1,))])
+    project, model, state, drivers = _controlled(network, dod_mdt=True)
+    drivers = {**drivers, "controls.input": _f(293.15)}
+    step_up = [Input(TimeSeries([0.0, 300.0, 600.0], [293.15, 303.15, 303.15],
+                                interpolation="step"), "controls.input", index=0)]
+    out = simulate(model, state, drivers, [0.0, 300.0, 600.0], inputs=step_up,
+                   air_mass_change=True, **TIGHT)
+    flows = project.path_flows(out["air.q"][-1])
+    V, i = 300.0, project.net.node_index("one")
+    p_old, p_new = 101325.0 + out["air.phi"][-2, i], 101325.0 + out["air.phi"][-1, i]
+    dM = V / R_AIR * (p_new / 303.15 - p_old / 293.15)
+    assert (flows[0] - flows[1]).item() == pytest.approx(dM / 300.0, rel=1e-9)
+    assert out["controls.outputs"][:, 0].tolist() == [293.15, 293.15, 303.15]
+
+
+def test_simulate_runs_a_batched_control_network():
+    network = ControlNetwork([DriverValue("controls.input", 0)], [Actuator(0, "T", (1,))])
+    _, model, state, drivers = _controlled(network)
+    drivers = {**drivers, "controls.input": _f(293.15, 303.15).reshape(2, 1)}
+    out = simulate(model, _seeded(state), drivers, [0.0, 300.0, 600.0], **TIGHT)
+    assert out["controls.outputs"].shape == (3, 2, 1)
+    assert out["species.x"].shape == (3, 2, 3, 1)
+    assert not torch.allclose(out["air.q"][:, 0], out["air.q"][:, 1])

@@ -8,14 +8,18 @@ control overrides a schedule on the same driver entry, as in CONTAM.
 A sampled network (the default) is evaluated from the state the step starts from, as ContamX
 evaluates its control nodes, once per call that carries a step context: once per
 `Model.step`, whatever sub-steps the transport layers take inside it (a `coupling="iterate"`
-step re-evaluates it from the same step-start outputs and memory on every pass). A flow or
-pressure sensor reads the last airflow solve, and 0 before the first. A reading of a driver
-(a prescribed temperature, an ambient mass fraction) gives the value the previous step used.
-A block whose input comes later in the order reads that input's previous value, 0 before the
-first evaluation. The network carries its block outputs and its blocks' memory in the state,
-under `"<name>.outputs"` and `"<name>.memory"`. The memory holds what a block keeps between
+step re-evaluates it from the same step-start outputs and memory on every pass). `simulate`
+evaluates it itself, before the initial airflow and at the start of every output step, and
+holds it (`held`) over the step's passes and sub-steps. A flow or pressure sensor reads the
+last airflow solve, and 0 before the first. A reading of a driver (a prescribed temperature,
+an ambient mass fraction) gives the value the previous step used. A block whose input comes
+later in the order reads that input's previous value, 0 before the first evaluation. The
+network carries its block outputs and its blocks' memory in the state, under
+`"<name>.outputs"` and `"<name>.memory"`. The memory holds what a block keeps between
 evaluations: a sensor's lagged value, the previous step's driver value. Called outside a
-step (no step context: a query, or the initial airflow), it writes its stored outputs again.
+step (no step context: a query), it writes its stored outputs again; before its first
+evaluation (outputs NaN, as `initial_state` gives them) it writes nothing, so a query on the
+initial state sees the drivers as the inputs left them, never a zero temperature.
 
 A continuous network (`sampled=False`) is algebraic in the state at every call. A block that
 integrates keeps its state in `"<name>.memory"`; called with a step context, the network
@@ -29,7 +33,8 @@ or an offset says otherwise.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import torch
@@ -648,6 +653,8 @@ class ControlNetwork:
         self.input_key = f"{self.name}.input"
         self.state_keys = (self.outputs_key, self.memory_key)
         self.outputs = tuple(sorted({a.key for a in self.actuators})) + self.state_keys
+        self._held = False
+        self._resolved_for: tuple | None = None
         self._layout()
 
     def _readings(self):
@@ -673,7 +680,16 @@ class ControlNetwork:
     def resolve(self, net, layers: Mapping, drivers: Sequence[str] = ()) -> None:
         """Resolve every sensor's `NamedReading` against `net`, the model's `layers` (by
         name) and the names of the `drivers` the model declares; `build_model(controls=)`
-        and `project_to_model` call it before they build the model."""
+        and `project_to_model` call it before they build the model. One network serves one
+        model: resolving it again against another network or other layer objects is
+        refused, as the first model would silently read the second's rows."""
+        model = (net, tuple((name, id(layer)) for name, layer in layers.items()))
+        if self._resolved_for is not None and not (
+                model[0] is self._resolved_for[0] and model[1] == self._resolved_for[1]):
+            raise ValueError(f"ControlNetwork {self.name!r} is already resolved for another "
+                             f"model; one network per model (build a new network for this "
+                             f"one)")
+        self._resolved_for = (net, model[1], dict(layers))
         for b in self.blocks:
             if isinstance(b, Sensor):
                 b.resolve(net, layers, drivers)
@@ -700,9 +716,10 @@ class ControlNetwork:
                    for r in self._readings())
 
     def initial_state(self) -> dict[str, Tensor]:
-        """Outputs 0 and every block's initial memory."""
+        """Outputs NaN (not evaluated yet: the blocks read them as 0, and the actuators
+        write nothing until the first evaluation) and every block's initial memory."""
         memory = [v for b in self.blocks for v in b.initial_memory()]
-        return {self.outputs_key: torch.zeros(len(self.blocks), dtype=F64),
+        return {self.outputs_key: torch.full((len(self.blocks),), math.nan, dtype=F64),
                 self.memory_key: torch.tensor(memory, dtype=F64)}
 
     def initial_drivers(self) -> dict[str, Tensor]:
@@ -726,7 +743,8 @@ class ControlNetwork:
         """One pass over the blocks: outputs, new memory and, for `want` "rate" or
         "switching", that quantity of every block."""
         ev = Evaluation(state, drivers, dt)
-        out = list(self._stored(state)[0].unbind(-1))
+        stored = self._stored(state)[0]
+        out = list(torch.where(torch.isnan(stored), 0.0, stored).unbind(-1))
         mem, extra = [], []
         for i, block in enumerate(self.blocks):
             u = [out[j] for j in block.inputs]
@@ -791,18 +809,34 @@ class ControlNetwork:
                           else _add_at(base, a.index, v))
         return out
 
+    @contextmanager
+    def held(self) -> Iterator[None]:
+        """Within it, a sampled network called with a step context is not evaluated again:
+        it writes its stored outputs and records the drivers the step uses. `simulate`
+        evaluates the network once per output step and holds it over the step's passes and
+        sub-steps."""
+        self._held = True
+        try:
+            yield
+        finally:
+            self._held = False
+
     def __call__(self, state: State, drivers: Drivers, ctx=None) -> dict[str, Tensor]:
         outputs, memory = self._stored(state)
-        advance = ctx is not None and getattr(ctx, "dt", None) is not None
+        stepping = ctx is not None and getattr(ctx, "dt", None) is not None
+        advance = stepping and not (self.sampled and self._held)
         if self.sampled:
             if advance:
                 outputs, memory, _ = self._run(state, drivers, memory, float(ctx.dt))
+            elif bool(torch.isnan(outputs).all()):
+                # Not evaluated yet: nothing to write.
+                return {self.outputs_key: outputs, self.memory_key: memory}
         else:
             if advance:
                 memory = memory + float(ctx.dt) * self.rates(state, drivers, memory)
             outputs = self.evaluate(state, drivers, memory)
         writes = self.write(drivers, outputs)
-        if self.sampled and advance:
+        if self.sampled and stepping:
             after = {**drivers, **writes}
             memory = _concat([*(b.after(memory[..., s], state, after)
                                 for b, s in zip(self.blocks, self._slots, strict=True)),

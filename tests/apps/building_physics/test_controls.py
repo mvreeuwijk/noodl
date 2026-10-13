@@ -776,7 +776,7 @@ def test_build_model_puts_the_network_first_and_seeds_its_state():
                              [Actuator(0, "thermal.sources", (1,), mode="add")])
     model, state, drivers = _two_rooms(controls=network)
     assert model.closures[0] is network
-    assert state["controls.outputs"].tolist() == [0.0]
+    assert torch.isnan(state["controls.outputs"]).all()          # not evaluated yet
     assert drivers["controls.input"].tolist() == [0.0]
     a = model.net.node_index("A")
     assert a == 1   # node order: ambient, A, B
@@ -788,3 +788,59 @@ def test_build_model_puts_the_network_first_and_seeds_its_state():
     unheated = model.step(state, {**drivers, "thermal.sources": sources}, 60.0, t=0.0)
     i = _interior(model, "thermal", "A")
     assert float(new["thermal.x"][i]) > float(unheated["thermal.x"][i])
+
+
+def test_a_network_writes_nothing_before_its_first_evaluation():
+    """The initial state's outputs are NaN: a query writes nothing (a zone temperature
+    control never writes 0 K), and the first evaluation reads them as 0."""
+    net = ControlNetwork([Identity(1), DriverValue("controls.input", 0)],
+                         [Actuator(1, "T", (1,))])
+    drivers = {"T": torch.tensor([280.0, 293.15], dtype=F64), **values(303.15)}
+    queried = net(net.initial_state(), drivers)
+    assert "T" not in queried and torch.isnan(queried[net.outputs_key]).all()
+    out, state = advance(net, net.initial_state(), drivers)
+    assert out[net.outputs_key].tolist() == [0.0, 303.15]           # the later block: 0
+    assert out["T"].tolist() == [280.0, 303.15]
+    assert net(state, drivers)["T"].tolist() == [280.0, 303.15]
+
+
+def test_a_held_network_writes_its_outputs_and_records_the_drivers_the_step_uses():
+    """`held` stops a step from evaluating the network again; a driver sensor still
+    records the value the step used."""
+    net = ControlNetwork([Sensor(DriverReading("T", 0)), DriverValue("controls.input", 0)])
+    drivers = {"T": torch.tensor([280.0], dtype=F64), **values(0.5)}
+    _, state = advance(net, net.initial_state(), drivers)
+    later = {"T": torch.tensor([290.0], dtype=F64), **values(0.7)}
+    with net.held():
+        out, held = advance(net, state, later)
+    assert out[net.outputs_key].tolist() == [280.0, 0.5]
+    assert held[net.memory_key].tolist() == [290.0]
+    assert advance(net, held, later)[0][net.outputs_key].tolist() == [290.0, 0.7]
+
+
+def test_a_network_resolved_for_one_model_is_refused_by_another():
+    network = ControlNetwork([Sensor(node_pressure("A"))])
+    _two_rooms(controls=network)
+    with pytest.raises(ValueError, match=r"'controls' is already resolved for another model; "
+                                         r"one network per model"):
+        _two_rooms(controls=network)
+
+
+def test_a_controlled_project_is_seeded_and_checks_without_warnings():
+    """A zone temperature control in a project: the state carries the network's outputs
+    and memory, the capacities are finite, and `Model.check` warns of nothing (the network
+    writes nothing before `simulate` evaluates it)."""
+    from noodl.apps.building_physics import project_to_model, read_prj
+    from noodl.apps.building_physics.simulation import simulate
+
+    project = read_prj(Path(__file__).resolve().parents[2] / "data" / "contam"
+                       / "valThreeZonesWthCtm-UseApi.prj")
+    network = ControlNetwork([Constant(303.15)], [Actuator(0, "T", (1,))])
+    project.closures.append(network)
+    model, state, drivers = project_to_model(project)
+    assert network.state_keys[0] in state and network.state_keys[1] in state
+    assert torch.isfinite(state["species.capacity"]).all()
+    report = model.check(state, drivers)
+    assert not report.errors and not report.warnings, str(report)
+    out = simulate(model, state, drivers, [0.0, 300.0], atol=1e-14, rtol=1e-14)
+    assert out["controls.outputs"][:, 0].tolist() == [303.15, 303.15]
