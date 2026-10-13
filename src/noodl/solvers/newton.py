@@ -92,13 +92,14 @@ def _convex_line_search(residual, x0, r0, dx, t_trial, x1, r1, norm1, norm0, don
     """The cut-back of `newton`'s ``line_search="convex"``: along ``d = -dx`` from `x0`
     (residual `r0`), the trial point `x1 = x0 + t_trial d` (residual `r1`, norm `norm1`;
     `norm0` the start's) is replaced, per instance, by the minimum of ``E`` along ``d``
-    where it overshot it (see `newton`). Returns ``(x, r, norm)``."""
+    where it overshot it (see `newton`). Returns ``(x, r, norm, cut)``, `cut` marking the
+    instances that were cut back."""
     g0 = -(r0 * dx).sum(-1)                      # phi'(0) = F(x0) . d, < 0 for a descent d
     g1 = -(r1 * dx).sum(-1)                      # phi'(t_trial)
     over = (~done) & (g0 < 0) & ((g1 > LINE_SEARCH_OVERSHOOT * (-g0))
                                  | ((g1 > 0) & (norm1 >= norm0)))
     if not bool(over.any()):
-        return x1, r1, norm1
+        return x1, r1, norm1, over
     t_lo, g_lo = torch.zeros_like(g0), g0
     t_hi, g_hi = t_trial.clone(), g1
     t, x, r = t_trial.clone(), x1, r1
@@ -127,7 +128,7 @@ def _convex_line_search(residual, x0, r0, dx, t_trial, x1, r1, norm1, norm0, don
         active = active & (g.abs() > LINE_SEARCH_TOL * (-g0))
         if not bool(active.any()):
             break
-    return x, r, r.abs().amax(dim=-1)
+    return x, r, r.abs().amax(dim=-1), over
 
 
 @dataclass
@@ -224,7 +225,10 @@ def newton(
     can cycle for ever on a law with kinks (an S-shaped flow, or a stiff bed meeting a soft
     storage line), which a damped step does not cure; with it every accepted step lowers
     ``E``. A step that does not overshoot is taken unchanged, so a smooth problem iterates
-    exactly as without the search. ``None`` (default) is the plain damped iteration.
+    exactly as without the search. An instance cut back is not declared converged on that
+    iteration (its secant search stops on a slope test, leaving a residual that can sit just
+    under the tolerance); the next, full step finishes it. ``None`` (default) is the plain
+    damped iteration.
 
     ``step_floor`` (ULPs, default ``None``: off) ends an instance's iteration as converged
     when its Newton step is within ``step_floor`` units in the last place of its iterate in
@@ -288,12 +292,13 @@ def newton(
             converged.unsqueeze(-1), torch.zeros_like(dx), omega_i.unsqueeze(-1) * dx
         )
         x_start, r_start = x, r
+        cut = None
         x = x - step
         r = residual(x)
         prev_norm = norm
         norm = r.abs().amax(dim=-1)
         if line_search == "convex":
-            x, r, norm = _convex_line_search(
+            x, r, norm, cut = _convex_line_search(
                 residual, x_start, r_start, dx, omega_i, x, r, norm, prev_norm, converged
             )
         if step_floor is not None:
@@ -311,6 +316,12 @@ def newton(
         # the relaxed step; the switch above re-arms once its residual shrinks again.
         omega_i = torch.where(ratio >= 1.0, torch.full_like(omega_i, omega), omega_i)
         converged = norm < tol
+        if cut is not None:
+            # A cut-back ends where the secant search's slope test does, not where Newton's
+            # quadratic convergence would: its residual can sit just under `tol` (error
+            # ~ tol / slope, 1.5e-7 m on a flat full-pipe force main). One more, full
+            # Newton step from there costs an iteration and removes the leftover.
+            converged = converged & ~cut
         if at_floor is not None:
             converged = converged | at_floor
         iterations += 1
