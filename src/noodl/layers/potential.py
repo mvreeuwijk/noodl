@@ -949,8 +949,17 @@ class PotentialFlowLayer:
         potentials and the flows of its implicit-law edges together (`noodl.layers._mna`),
         from zeros or the warm start `phi0` (interior potentials) and `q0` (the flows of
         `implicit_edges`); the returned `q` covers every edge. `history`, `dt`, `t`,
-        `integration` and `mode` set the context its laws are evaluated in. A classic layer
-        accepts and ignores those keywords.
+        `integration` and `mode` set the context its laws are evaluated in (`LawContext`):
+        with `dt` given, one implicit step of length `dt` ending at time `t`, with the
+        `integration` rule (`"trapezoidal"` or `"backward_euler"`) from the step-start state
+        `history=(phi, q)` (full-node potentials and every edge's flow, as this method
+        returns them; required when a law is dynamic); without `dt`, the steady operating
+        point (`mode="dc"`, the default), or with `mode="initial"` the consistent initial
+        point (each storage law at its initial value). On the differentiable path gradients
+        flow to `history` too, so a chain of steps back-propagates through time. There
+        `diagnostics["method"]` is likewise the method requested and `"backend"` the one that
+        ran; `method="cg"` is refused (the system is not symmetric positive definite). A
+        classic layer accepts and ignores those keywords.
         """
         if self.mna:
             return self._mna.solve(

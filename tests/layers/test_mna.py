@@ -9,6 +9,7 @@ from noodl.layers.potential import PotentialFlowLayer
 from noodl.nodesources import NodeSource
 from noodl.solvers.implicit import TransposeOperator
 from noodl.topology import Network
+from tests._circuit_laws import DrivenSource, Source
 
 F64 = torch.float64
 
@@ -19,29 +20,6 @@ def _float64_default():
     torch.set_default_dtype(F64)
     yield
     torch.set_default_dtype(previous)
-
-
-class Source(ImplicitLaw):
-    """dp = V: an ideal potential source (V per edge)."""
-
-    phasor_capable = True
-
-    def __init__(self, V, kind="source"):
-        super().__init__(kind)
-        self.V = self._param(V, False)
-
-    def residual(self, dp, q, drivers, ctx):
-        return dp - self.V
-
-
-class DrivenSource(ImplicitLaw):
-    """dp = drivers["V"]: an ideal potential source set by a driver."""
-
-    def __init__(self, kind="source"):
-        super().__init__(kind)
-
-    def residual(self, dp, q, drivers, ctx):
-        return dp - drivers["V"]
 
 
 class Ratio(ImplicitLaw):

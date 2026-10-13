@@ -27,7 +27,7 @@ from torch.func import functional_call, jvp
 
 from noodl._broadcast import broadcast_shapes
 from noodl._tracking import bulk_values, same_tracking
-from noodl.elements.base import LawContext
+from noodl.elements.base import INTEGRATIONS, LawContext
 from noodl.operators.mna import MnaOperator
 from noodl.solvers.implicit import implicit_solve
 from noodl.solvers.newton import newton
@@ -37,6 +37,11 @@ Tensor = torch.Tensor
 #: The flat batch above which `"auto"` factorises densely instead of per instance with
 #: SuperLU (`solvers.select._SPARSE_DIRECT_MAX_BATCH`, measured for the nodal layer).
 _SPARSE_DIRECT_MAX_BATCH = 32
+
+#: The largest system whose failed solve is diagnosed by a dense rank test; above it the
+#: original solver error is re-raised unchanged (a dense SVD of a big system costs more
+#: than the diagnosis is worth).
+_RANK_TEST_MAX_UNKNOWNS = 2000
 
 
 _forward_mode_ready = False
@@ -194,9 +199,60 @@ class MnaSystem:
         return self._split(self._to_complex(x) if self.w == 2 else x)
 
     # ------------------------------------------------------------- laws
-    def _context(self, mode, dt, t, integration, history, drivers) -> LawContext:
-        """The `LawContext` the laws are evaluated in: the steady operating point."""
-        return LawContext(mode="dc", t=t)
+    def _context(self, mode, dt, t, integration, history) -> LawContext:
+        """The `LawContext` the laws are evaluated in.
+
+        `mode=None` is `"transient"` when a step `dt` is given and `"dc"` (the steady
+        operating point) otherwise; a caller may ask for `"dc"` or `"initial"` (the
+        consistent initial point, with no step) explicitly. A transient step reads the
+        step-start state `history=(phi, q)` (full-node potentials, every edge's flow in layer
+        edge order), required on a layer with a dynamic law; its potential differences are
+        taken without drives, which dynamic kinds may not carry.
+        """
+        name = self.layer.name
+        if mode is not None and mode not in ("dc", "initial"):
+            raise ValueError(
+                f"PotentialFlowLayer {name!r}: mode={mode!r}; expected 'dc', 'initial' or "
+                f"None (transient when dt is given, dc otherwise)"
+            )
+        if mode == "initial" and dt is not None:
+            raise ValueError(
+                f"PotentialFlowLayer {name!r}: mode='initial' is the consistent initial "
+                f"point, which takes no step; drop dt"
+            )
+        if mode is None:
+            mode = "transient" if dt is not None else "dc"
+        if mode != "transient":
+            return LawContext(mode=mode, t=t)
+        if not bool((torch.as_tensor(dt) > 0).all()):
+            raise ValueError(f"PotentialFlowLayer {name!r}: dt must be positive, got {dt!r}")
+        if integration not in INTEGRATIONS:
+            raise ValueError(
+                f"PotentialFlowLayer {name!r}: integration={integration!r}; expected one of "
+                f"{INTEGRATIONS}"
+            )
+        ctx = LawContext(mode="transient", dt=dt, t=t, integration=integration)
+        if history is None:
+            if self.layer.dynamic:
+                raise ValueError(
+                    f"PotentialFlowLayer {name!r}: a transient step needs history=(phi, q) "
+                    f"at the step start"
+                )
+            return ctx
+        phi_prev, q_prev = history
+        n_nodes, n_edges = self.layer._n_nodes, len(self.layer.cols)
+        if phi_prev.shape[-1] != n_nodes or q_prev.shape[-1] != n_edges:
+            raise ValueError(
+                f"PotentialFlowLayer {name!r}: history=(phi, q) must hold every node's "
+                f"potential ({n_nodes}) and every edge's flow ({n_edges}); got last "
+                f"dimensions {phi_prev.shape[-1]} and {q_prev.shape[-1]}"
+            )
+        return self._with_history(ctx, phi_prev, q_prev)
+
+    def _with_history(self, ctx: LawContext, phi_prev: Tensor, q_prev: Tensor) -> LawContext:
+        """`ctx` with the step-start values taken from `(phi_prev, q_prev)`."""
+        return dataclasses.replace(
+            ctx, dp_prev=self.layer._difference(phi_prev), q_prev=q_prev)
 
     @staticmethod
     def _law_ctx(ctx: LawContext, s: int, e: int) -> LawContext:
@@ -327,38 +383,73 @@ class MnaSystem:
         return MnaOperator(self.row, self.col, values, self.n)
 
     # ------------------------------------------------------------- solve
-    def method(self, batch_numel: int) -> str:
-        """The inner linear solver: the layer's own unless `"auto"`, which factorises
-        (SuperLU per instance up to `_SPARSE_DIRECT_MAX_BATCH` instances when SciPy is
-        importable, batched dense LU otherwise; the system is indefinite, so never CG)."""
-        if self.layer.linear_solver != "auto":
-            return self.layer.linear_solver
+    def method(self, batch_numel: int, requested: str | None = None) -> str:
+        """The inner linear solver for a request (default: the layer's `linear_solver`):
+        the request itself unless `"auto"`, which factorises (SuperLU per instance up to
+        `_SPARSE_DIRECT_MAX_BATCH` instances when SciPy is importable, batched dense LU
+        otherwise; the system is indefinite, so never CG)."""
+        requested = self.layer.linear_solver if requested is None else requested
+        if requested != "auto":
+            return requested
         if (importlib.util.find_spec("scipy") is not None
                 and batch_numel <= _SPARSE_DIRECT_MAX_BATCH):
             return "sparse_direct"
         return "direct"
 
-    def _singular(self, op: MnaOperator | None) -> bool:
-        """True when the last Jacobian is (numerically) rank deficient in some instance."""
-        if op is None or self.n == 0:
+    def _singular(self, op: MnaOperator | None, failing: int) -> bool:
+        """True when the last Jacobian is (numerically) rank deficient in the flat batch
+        instance `failing`. Only a system of at most `_RANK_TEST_MAX_UNKNOWNS` unknowns is
+        tested (a dense rank test of one instance); a larger one is reported as not
+        singular, so the caller re-raises the solver's own error."""
+        if op is None or self.n == 0 or self.n > _RANK_TEST_MAX_UNKNOWNS:
             return False
-        A = op.assemble()
+        values = op.values.reshape(-1, op.values.shape[-1])
+        A = MnaOperator(op.row, op.col, values[min(failing, len(values) - 1)], self.n)
+        A = A.assemble()
         if not bool(torch.isfinite(A).all()):
             return False
-        return bool((torch.linalg.matrix_rank(A) < self.n).any())
+        return bool(torch.linalg.matrix_rank(A) < self.n)
+
+    @staticmethod
+    def _first_failing(last: dict, newton_kwargs: dict) -> int:
+        """The first flat batch instance whose last residual is above Newton's tolerance
+        (relative to its first residual), or 0 when none is (or no residual was seen)."""
+        if "r" not in last:
+            return 0
+        r0 = last["r0"].reshape(-1, last["r0"].shape[-1])
+        r = last["r"].reshape(-1, last["r"].shape[-1])
+        if r.shape != r0.shape or r.shape[-1] == 0:
+            return 0
+        default = math.sqrt(torch.finfo(r.dtype).eps)
+        atol = newton_kwargs.get("atol")
+        rtol = newton_kwargs.get("rtol")
+        atol = default if atol is None else atol
+        rtol = default if rtol is None else rtol
+        norm0 = r0.abs().amax(dim=-1)
+        norm = r.abs().amax(dim=-1)
+        bad = torch.nonzero(~(norm < atol + rtol * norm0)).flatten()
+        return int(bad[0]) if len(bad) else 0
 
     def _singular_error(self) -> RuntimeError:
         return RuntimeError(
             f"PotentialFlowLayer {self.layer.name!r}: the Modified Nodal Analysis system is "
             f"singular; check for a loop of ideal potential sources or a cut set of flow "
-            f"sources among kinds {self.implicit_kinds}"
+            f"sources among kinds {self.implicit_kinds}, or a part connected to a boundary "
+            f"only through flow-prescribed edges"
         )
 
     def solve(self, phi_boundary, drivers, sources, phi0, *, q0, history, dt, t, integration,
               mode, differentiable, diagnostics, **newton_kwargs):
         layer = self.layer
         drivers = drivers or {}
-        ctx = self._context(mode, dt, t, integration, history, drivers)
+        ctx = self._context(mode, dt, t, integration, history)
+        requested = newton_kwargs.pop("method", layer.linear_solver)
+        if requested == "cg":
+            raise ValueError(
+                f"PotentialFlowLayer {layer.name!r}: method='cg' needs a symmetric positive "
+                f"definite Jacobian, which a Modified Nodal Analysis system is not; use "
+                f"'auto', 'sparse_direct', 'direct' or 'gmres'"
+            )
         if newton_kwargs.get("on_failure") == "return" and diagnostics is None:
             raise ValueError(
                 f"PotentialFlowLayer {layer.name!r}: on_failure='return' requires "
@@ -387,13 +478,23 @@ class MnaSystem:
             if q0 is not None:
                 x0[..., n_phi:] = self._to_real(q0.detach())
 
-        newton_kwargs.setdefault("method", self.method(math.prod(B)))
+        newton_kwargs["method"] = self.method(math.prod(B), requested)
         newton_kwargs.setdefault("where", f"PotentialFlowLayer {layer.name!r} solve")
+        # The last Jacobian and the first and last residuals, kept to diagnose a failure.
         last: dict = {}
+
+        def remember(r):
+            last.setdefault("r0", r.detach())
+            last["r"] = r.detach()
+            return r
+
+        def diagnose(exc):
+            if self._singular(last.get("op"), self._first_failing(last, newton_kwargs)):
+                raise self._singular_error() from exc
 
         if not differentiable:
             def residual_fn(x):
-                return self.residual(x, phi_boundary, drivers, sources, ctx, plain)
+                return remember(self.residual(x, phi_boundary, drivers, sources, ctx, plain))
 
             def slopes_fn(phi):
                 return self._node_slopes(phi, drivers, plain)
@@ -406,13 +507,12 @@ class MnaSystem:
                 try:
                     result = newton(residual_fn, operator_fn, x0, **newton_kwargs)
                 except RuntimeError as exc:
-                    if self._singular(last.get("op")):
-                        raise self._singular_error() from exc
+                    diagnose(exc)
                     raise
                 if diagnostics is not None:
                     diagnostics["newton_iterations"] = result.iterations
                     diagnostics["linear_iterations"] = result.linear_iterations
-                    diagnostics["method"] = newton_kwargs["method"]
+                    diagnostics["method"] = requested
                     diagnostics["backend"] = result.backend
                     diagnostics["converged"] = result.converged
                     diagnostics["residual_norm"] = result.residual_norm
@@ -421,7 +521,8 @@ class MnaSystem:
         layer._check_no_unreachable_differentiable_tensors()
         # Threaded through `Function.apply` exactly as on the classic path: every law's and
         # node source's own parameters (substituted back in with `functional_call`), every
-        # driver, the sources (zero-filled when absent) and the boundary potentials.
+        # driver, the sources (zero-filled when absent) and the boundary potentials; on a
+        # transient step also the step-start state, so gradients flow back through time.
         owners = self._owners()
         param_dicts = [dict(owner.named_parameters()) for owner in owners]
         param_names = [list(d.keys()) for d in param_dicts]
@@ -439,7 +540,9 @@ class MnaSystem:
                 device=phi_boundary.device,
             )
         )
-        all_params = (*param_tensors, *driver_tensors, sources_tensor, phi_boundary)
+        history_tensors = tuple(history) if ctx.dp_prev is not None else ()
+        all_params = (*param_tensors, *driver_tensors, sources_tensor, phi_boundary,
+                      *history_tensors)
 
         def _rebuild(params):
             offset = 0
@@ -452,27 +555,29 @@ class MnaSystem:
                 dict(zip(driver_keys, params[offset: offset + len(driver_keys)], strict=True)),
             )
             offset += len(driver_keys)
-            return self._functional_call(rebuilt), drv, params[offset], params[offset + 1]
+            step = (self._with_history(ctx, params[offset + 2], params[offset + 3])
+                    if history_tensors else ctx)
+            return (self._functional_call(rebuilt), drv, params[offset], params[offset + 1],
+                    step)
 
         def residual_fn(x, *params):
-            call, drv, src, pb = _rebuild(params)
-            return self.residual(x, pb, drv, src, ctx, call)
+            call, drv, src, pb, step = _rebuild(params)
+            return remember(self.residual(x, pb, drv, src, step, call))
 
         def operator_fn(x, *params):
-            call, drv, src, pb = _rebuild(params)
+            call, drv, src, pb, step = _rebuild(params)
             last["op"] = self.operator(
-                x, pb, drv, ctx, call, lambda phi: self._node_slopes(phi, drv, call))
+                x, pb, drv, step, call, lambda phi: self._node_slopes(phi, drv, call))
             return last["op"]
 
         try:
             x = implicit_solve(residual_fn, operator_fn, x0, all_params,
                                diagnostics=diagnostics, **newton_kwargs)
         except RuntimeError as exc:
-            if self._singular(last.get("op")):
-                raise self._singular_error() from exc
+            diagnose(exc)
             raise
         if diagnostics is not None:
-            diagnostics["method"] = newton_kwargs["method"]
+            diagnostics["method"] = requested
         return self._output(x, phi_boundary, drivers, ctx)
 
     def _output(self, x, phi_boundary, drivers, ctx) -> tuple[Tensor, Tensor]:
