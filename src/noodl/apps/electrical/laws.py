@@ -7,9 +7,11 @@ delivering power carries a negative current. Every parameter is per edge (or, fo
 laws, per device: one value per group of two consecutive edges) and a scalar broadcasts, so
 one law instance carries all devices of its kind.
 
-Phasors are peak-amplitude phasors: the complex value `X` stands for the time signal
-`x(t) = |X| sin(omega t + arg X)`, so a `Sine(frequency, phase)` source of amplitude `A` has
-the phasor `A exp(j phase)`. Each device docstring names the MSL model it transcribes.
+Phasors are peak-amplitude, sine-referenced phasors: the complex value `X` stands for the time
+signal `x(t) = |X| sin(omega t + arg X)`, so the complex power of a device is
+`S = (1/2) dp conj(q)` (W). A source has one phase, its waveform's: in phasor mode a `Sine`
+source is its steady-state phasor and a `Constant` source is its amplitude (phase 0, the
+analysis magnitude). Each device docstring names the MSL model it transcribes.
 """
 
 from __future__ import annotations
@@ -18,10 +20,18 @@ from collections.abc import Mapping
 
 import torch
 
-from noodl.apps.electrical.waveforms import Constant, Signal, _Waveform
+from noodl.apps.electrical.waveforms import Constant, Signal, Sine, _Waveform
 from noodl.elements import Element, ImplicitLaw, LawContext
 
 Tensor = torch.Tensor
+
+
+def _driver(drivers: Mapping[str, Tensor] | None, key: str, kind: str) -> Tensor:
+    """`drivers[key]`, or a `KeyError` naming the law kind and the missing key."""
+    if drivers is None or key not in drivers:
+        raise KeyError(f"law kind {kind!r} reads the driver {key!r}, which is missing from "
+                       f"drivers")
+    return torch.as_tensor(drivers[key])
 
 
 # ------------------------------------------------------------------------------- sources
@@ -39,48 +49,78 @@ def _waveform_list(waveforms, kind: str):
     return waveforms if isinstance(waveforms, _Waveform) else tuple(items)
 
 
-def _unit_value(w: _Waveform, t, drivers, dtype) -> Tensor:
-    if isinstance(w, Signal):
-        return torch.as_tensor(drivers[w.key][..., w.index], dtype=dtype)
-    return torch.tensor(w.unit(0.0 if t is None else float(t)), dtype=dtype)
+def _items(waveforms) -> tuple:
+    return (waveforms,) if isinstance(waveforms, _Waveform) else waveforms
 
 
-def _source_value(amplitude: Tensor, offset: Tensor, phase: Tensor, waveforms,
+def _per_edge(values: list[Tensor], single: bool) -> Tensor:
+    """Per-waveform values as a tensor whose last dimension broadcasts against the edges."""
+    if single:
+        return values[0].unsqueeze(-1)
+    return torch.stack(torch.broadcast_tensors(*values), dim=-1)
+
+
+def _phasor_factor(waveforms, ctx: LawContext, kind: str, dtype, device) -> Tensor:
+    """`exp(j (phase - omega start_time))` per edge for `Sine`, 1 for `Constant`."""
+    phases, starts = [], []
+    for w in _items(waveforms):
+        if isinstance(w, Sine):
+            phases.append(w.phase)
+            starts.append(w.start_time)
+        elif isinstance(w, Constant):
+            phases.append(0.0)
+            starts.append(0.0)
+        else:
+            raise ValueError(
+                f"source kind {kind!r}: a {type(w).__name__} waveform has no phasor; phasor "
+                f"sources are Sine (its steady-state phasor) or Constant (the amplitude)"
+            )
+    angle = torch.tensor(phases, dtype=dtype, device=device)
+    if any(t0 != 0.0 for t0 in starts):
+        omega = torch.as_tensor(ctx.omega, dtype=dtype, device=device)
+        angle = angle - omega * torch.tensor(starts, dtype=dtype, device=device)
+    return torch.exp(1j * angle)
+
+
+def _source_value(amplitude: Tensor, offset: Tensor, waveforms,
                   drivers: Mapping[str, Tensor] | None, ctx: LawContext | None,
-                  kind: str) -> Tensor:
+                  kind: str, dtype: torch.dtype) -> Tensor:
     """The source value per edge: `offset + amplitude * unit(t)` at the evaluation time
-    `ctx.t`, or in phasor mode the peak-amplitude phasor `amplitude * exp(j phase)` (the
-    offset is dropped: a constant has no phasor; the waveform is not evaluated)."""
+    `ctx.t`, with the waveform values computed in `dtype` (the real dtype of the layer);
+    in phasor mode the peak-amplitude phasor `amplitude * exp(j (phase - omega start_time))`
+    of a `Sine` waveform, or `amplitude` for `Constant` (the offset is dropped: a constant
+    has no phasor)."""
+    device = amplitude.device
     if ctx is not None and ctx.mode == "phasor":
-        return amplitude * torch.exp(1j * phase)
+        return amplitude * _phasor_factor(waveforms, ctx, kind, dtype, device)
     t = None if ctx is None else ctx.t
-    items = (waveforms,) if isinstance(waveforms, _Waveform) else waveforms
+    items = _items(waveforms)
     if t is None and any(w.time_dependent for w in items):
         raise ValueError(
             f"source kind {kind!r} has time-dependent waveforms; pass t (the evaluation time)"
         )
-    dtype = amplitude.dtype
-    if isinstance(waveforms, _Waveform):
-        units = _unit_value(waveforms, t, drivers, dtype).unsqueeze(-1)
-    else:
-        units = torch.stack(torch.broadcast_tensors(
-            *(_unit_value(w, t, drivers, dtype) for w in items)), dim=-1)
-    return offset + amplitude * units
+    values = []
+    for w in items:
+        if isinstance(w, Signal):
+            signal = _driver(drivers, w.key, kind)[..., w.index]
+            values.append(signal.to(dtype=dtype, device=device))
+        else:  # with t None only a time-independent waveform (Constant) gets here
+            values.append(torch.tensor(w.unit(0.0 if t is None else float(t)), dtype=dtype,
+                                       device=device))
+    return offset + amplitude * _per_edge(values, isinstance(waveforms, _Waveform))
 
 
 class _Source:
     """The parameters and value of an independent source (shared by both source laws)."""
 
-    def _setup(self, amplitude, waveforms, offset, phase, learnable) -> None:
+    def _setup(self, amplitude, waveforms, offset, learnable) -> None:
         self.amplitude = self._param(amplitude, learnable)
         self.offset = self._param(offset, False)
-        self.phase = self._param(phase, False)
         self.waveforms = _waveform_list(waveforms, self.kind)
 
     def breakpoints(self, t0: float, t1: float) -> list[float]:
         """Every waveform's breakpoints in `(t0, t1]`, sorted, without repeats."""
-        items = (self.waveforms,) if isinstance(self.waveforms, _Waveform) else self.waveforms
-        return sorted({t for w in items for t in w.breakpoints(t0, t1)})
+        return sorted({t for w in _items(self.waveforms) for t in w.breakpoints(t0, t1)})
 
     def value(self, dp: Tensor, drivers, ctx) -> Tensor:
         if not isinstance(self.waveforms, _Waveform) and len(self.waveforms) != dp.shape[-1]:
@@ -88,24 +128,27 @@ class _Source:
                 f"source kind {self.kind!r}: {len(self.waveforms)} waveforms for "
                 f"{dp.shape[-1]} edges; give one waveform per edge or a single one for all"
             )
-        return _source_value(self.amplitude, self.offset, self.phase, self.waveforms,
-                             drivers, ctx, self.kind)
+        dtype = dp.real.dtype if dp.is_complex() else dp.dtype
+        return _source_value(self.amplitude, self.offset, self.waveforms, drivers, ctx,
+                             self.kind, dtype)
 
 
 class PrescribedVoltage(_Source, ImplicitLaw):
     """An ideal voltage source: `dp = offset + amplitude * unit(t)` (V), with `unit` the
     waveform (`Constant` by default; one for all edges or one per edge) evaluated at the
-    evaluation time `t` (s). In phasor mode, `dp = amplitude * exp(j phase)` (peak-amplitude
-    phasor, `phase` in rad). MSL `Sources.ConstantVoltage`, `StepVoltage`, `SineVoltage`,
+    evaluation time `t` (s). In phasor mode a `Sine(frequency, phase, start_time)` source is
+    `dp = amplitude * exp(j (phase - omega start_time))` (peak-amplitude, sine-referenced; at
+    the layer's frequency) and a `Constant` source is `dp = amplitude`; other waveforms are
+    refused there. MSL `Sources.ConstantVoltage`, `StepVoltage`, `SineVoltage`,
     `PulseVoltage`, `SignalVoltage`. `learnable` applies to `amplitude`.
     """
 
     phasor_capable = True
 
-    def __init__(self, amplitude, *, waveforms=None, offset=0.0, phase=0.0,
+    def __init__(self, amplitude, *, waveforms=None, offset=0.0,
                  kind: str = "voltage_source", learnable: bool = False) -> None:
         super().__init__(kind)
-        self._setup(amplitude, waveforms, offset, phase, learnable)
+        self._setup(amplitude, waveforms, offset, learnable)
 
     def residual(self, dp, q, drivers, ctx):
         return dp - self.value(dp, drivers, ctx)
@@ -113,19 +156,19 @@ class PrescribedVoltage(_Source, ImplicitLaw):
 
 class PrescribedCurrent(_Source, Element):
     """An ideal current source: `q = offset + amplitude * unit(t)` (A) entering pin `p`
-    whatever the voltage, with the waveform as for `PrescribedVoltage`; in phasor mode
-    `q = amplitude * exp(j phase)`. MSL `Sources.ConstantCurrent`, `StepCurrent`,
-    `SineCurrent`, `PulseCurrent`, `SignalCurrent`. `learnable` applies to `amplitude`.
+    whatever the voltage, with the waveform and its phasor as for `PrescribedVoltage`. MSL
+    `Sources.ConstantCurrent`, `StepCurrent`, `SineCurrent`, `PulseCurrent`,
+    `SignalCurrent`. `learnable` applies to `amplitude`.
     """
 
     dp_independent = True
     contextual = True
     phasor_capable = True
 
-    def __init__(self, amplitude, *, waveforms=None, offset=0.0, phase=0.0,
+    def __init__(self, amplitude, *, waveforms=None, offset=0.0,
                  kind: str = "current_source", learnable: bool = False) -> None:
         super().__init__(kind)
-        self._setup(amplitude, waveforms, offset, phase, learnable)
+        self._setup(amplitude, waveforms, offset, learnable)
 
     def flow(self, dp, drivers=None, ctx=None):
         return self.value(dp, drivers, ctx) + 0 * dp
@@ -153,7 +196,7 @@ class Resistance(Element):
         """`R_actual` (ohm) per edge at the driver temperature."""
         if self.temperature is None:
             return self.R * torch.ones_like(self.alpha)
-        T = drivers[self.temperature]
+        T = _driver(drivers, self.temperature, self.kind)
         return self.R * (1.0 + self.alpha * (T - self.T_ref))
 
     def flow(self, dp, drivers=None):
@@ -245,40 +288,58 @@ class JunctionDiode(Element):
         return self.Ids * (z - 1.0) + dp / self.R
 
 
-def _driver_entries(spec, drivers: Mapping[str, Tensor]) -> Tensor:
+def _driver_entries(spec, drivers: Mapping[str, Tensor] | None, kind: str) -> Tensor:
     """The per-edge values a control specification reads (see `SwitchedConductance`)."""
     if isinstance(spec, str):
-        return torch.as_tensor(drivers[spec])
+        return _driver(drivers, spec, kind)
     parts = []
     for entry in spec:
         key, index = (entry, 0) if isinstance(entry, str) else entry
-        parts.append(torch.as_tensor(drivers[key])[..., index])
+        parts.append(_driver(drivers, key, kind)[..., index])
     return torch.stack(torch.broadcast_tensors(*parts), dim=-1)
+
+
+def _is_entry(control) -> bool:
+    """True for a lone `(key, index)` pair."""
+    return (isinstance(control, tuple) and len(control) == 2 and isinstance(control[0], str)
+            and isinstance(control[1], int))
 
 
 class SwitchedConductance(Element):
     """An ideal closing switch: closed `q = dp / Ron`, open `q = Goff dp` (`Ron` in ohm,
     `Goff` in S); closed where the control value exceeds 0.5 (or is True). `control` is a
-    driver key whose last dimension holds one value per switch edge, or a sequence with one
-    entry per edge, each a key (read at index 0) or a `(key, index)` pair. MSL
-    `Ideal.IdealClosingSwitch`.
+    driver key whose last dimension holds one value per switch edge (or one value for all),
+    a single `(key, index)` pair read by every switch, or a sequence with one entry per edge,
+    each a key (read at index 0) or a `(key, index)` pair. MSL `Ideal.IdealClosingSwitch`.
     """
 
     phasor_capable = True
 
     def __init__(self, control, *, Ron=1e-5, Goff=1e-5, kind: str = "switch") -> None:
         super().__init__(kind)
-        self.control = control if isinstance(control, str) else tuple(control)
+        if isinstance(control, str):
+            self.control = control
+        elif _is_entry(control):
+            self.control = (control,)
+        else:
+            self.control = tuple(control)
         self.Ron = self._param(Ron, False)
         self.Goff = self._param(Goff, False)
 
-    def closed(self, drivers: Mapping[str, Tensor]) -> Tensor:
-        """True per edge where the switch conducts."""
-        state = _driver_entries(self.control, drivers)
+    def closed(self, drivers: Mapping[str, Tensor] | None, n_edges: int | None = None
+               ) -> Tensor:
+        """True per edge where the switch conducts; with `n_edges`, the control must hold
+        one value per edge or one for all."""
+        state = _driver_entries(self.control, drivers, self.kind)
+        if n_edges is not None and state.dim() > 0 and state.shape[-1] not in (1, n_edges):
+            raise ValueError(
+                f"switch kind {self.kind!r}: the control holds {state.shape[-1]} values per "
+                f"instance for {n_edges} switch edges; give one per edge or one for all"
+            )
         return state if state.dtype == torch.bool else state > 0.5
 
     def flow(self, dp, drivers=None):
-        return torch.where(self.closed(drivers), dp / self.Ron, self.Goff * dp)
+        return torch.where(self.closed(drivers, dp.shape[-1]), dp / self.Ron, self.Goff * dp)
 
 
 # -------------------------------------------------------------------- two-port devices

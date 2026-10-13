@@ -108,6 +108,13 @@ class Pulse(_Waveform):
 
     Period `k` starts at `start_time + k * period`, computed as MSL computes its time events,
     and the pulse is on while `t < start_time + k * period + width / 100 * period`.
+
+    `k` is the largest period index with `start_time + k * period <= t`, the count MSL
+    reaches through its time events. MSL initialises its count at the simulation start `t0`
+    as `integer((t0 - startTime) / period)` instead; where that quotient and the event grid
+    disagree in floating point (`t0 = 1.7`, `period = 0.1`: the quotient floors to 17 but
+    `17 * 0.1 > 1.7`), an MSL run started at `t0` counts one period ahead until its next
+    event, and its value at `t0` can differ from `unit(t0)`.
     """
 
     width: float

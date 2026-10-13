@@ -15,6 +15,8 @@ from noodl.apps.electrical import (
     MutualInductance,
     PrescribedCurrent,
     PrescribedVoltage,
+    Pulse,
+    Ramp,
     Resistance,
     Signal,
     Sine,
@@ -147,20 +149,96 @@ def test_prescribed_current_into_a_resistor():
     _close(q, [1.0, -1.0])
 
 
-def test_sources_in_phasor_mode_are_peak_amplitude_phasors():
-    # V = 2 exp(j pi/3) across R = 4; I = 1 exp(j 0.2) into a second node across R = 1
+def test_sources_in_phasor_mode_are_their_waveform_phasors():
+    # V: 2 sin(w (t - 0.002) + pi/3) + 5 across R = 4 -> 2 exp(j (pi/3 - w 0.002));
+    # I: a Constant source of amplitude 1 -> the phasor 1 (phase 0), into b across R = 1
+    w = 2 * math.pi * 50.0
     edges = [("a", "gnd", "voltage_source"), ("a", "gnd", "resistor"),
-             ("b", "gnd", "current_source"), ("b", "gnd", "resistor")]
-    laws = [PrescribedVoltage(T([2.0]), phase=T([math.pi / 3]), offset=T([5.0]),
-                              waveforms=[Step(start_time=1.0)]),
+             ("b", "gnd", "resistor"), ("b", "gnd", "current_source")]
+    laws = [PrescribedVoltage(T([2.0]), offset=T([5.0]),
+                              waveforms=[Sine(50.0, phase=math.pi / 3, start_time=0.002)]),
             Resistance(T([4.0, 1.0])),
-            PrescribedCurrent(T([1.0]), phase=T([0.2]))]
-    edges = [edges[0], edges[1], edges[3], edges[2]]
+            PrescribedCurrent(T([1.0]))]
     net, layer = _layer(edges, laws, phasor=True)
-    phi, q = layer.solve(GROUND.to(torch.complex128), {"e.frequency": T([50.0])},
+    phi, _ = layer.solve(GROUND.to(torch.complex128), {"e.frequency": T([50.0])},
                          differentiable=False)
-    _close(_at(net, phi, "a"), 2.0 * complex(math.cos(math.pi / 3), math.sin(math.pi / 3)))
-    _close(_at(net, phi, "b"), -complex(math.cos(0.2), math.sin(0.2)))
+    angle = math.pi / 3 - w * 0.002
+    _close(_at(net, phi, "a"), [2.0 * complex(math.cos(angle), math.sin(angle))])
+    _close(_at(net, phi, "b"), [complex(-1.0, 0.0)])
+
+
+@pytest.mark.parametrize("waveform", [Step(), Ramp(1.0), Pulse(50.0, 1.0), Signal("u")],
+                         ids=lambda w: type(w).__name__)
+def test_phasor_mode_refuses_waveforms_without_a_phasor(waveform):
+    _, layer = _layer([("a", "gnd", "voltage_source"), ("a", "gnd", "resistor")],
+                      [PrescribedVoltage(T([1.0]), waveforms=waveform), Resistance(T([1.0]))],
+                      phasor=True)
+    name = type(waveform).__name__
+    with pytest.raises(ValueError, match=f"'voltage_source': a {name} waveform has no phasor"):
+        layer.solve(GROUND.to(torch.complex128), {"e.frequency": T([1.0]), "u": T([1.0])},
+                    differentiable=False)
+
+
+def test_sine_source_transient_steady_state_matches_its_phasor():
+    # 1 Hz sine (phase 0.4, starting at 0.3 s) through R = 1 into C = 0.02 (tau = 0.02 s):
+    # after 2 periods the transient has decayed by exp(-85); the last period of the
+    # trapezoidal march (100 steps per period, relative error ~ (w dt)^2 / 12 = 3e-4) must
+    # follow the phasor solution, whose phase includes -w start_time
+    f, phase, t_start, n = 1.0, 0.4, 0.3, 100
+    edges = [("a", "gnd", "voltage_source"), ("a", "b", "resistor"), ("b", "gnd", "capacitor")]
+    laws = [PrescribedVoltage(T([1.5]), waveforms=Sine(f, phase=phase, start_time=t_start)),
+            Resistance(T([1.0])), Capacitance(T([0.02]))]
+    net, layer = _layer(edges, laws)
+    _, phasor_layer = _layer(edges, laws, phasor=True)
+    phi_ac, _ = phasor_layer.solve(GROUND.to(torch.complex128), {"e.frequency": T([f])},
+                                   differentiable=False)
+    vb = complex(_at(net, phi_ac, "b"))
+    b = net.nodes.index("b")
+    dt = 1.0 / (f * n)
+    phi, q = layer.solve(GROUND, mode="initial", t=0.0, differentiable=False)
+    samples = []
+    for k in range(1, 3 * n + 1):
+        phi, q = layer.solve(GROUND, history=(phi, q), dt=dt, t=k * dt,
+                             integration="trapezoidal", differentiable=False)
+        if k > 2 * n:
+            samples.append((k * dt, phi[b].item()))
+    w = 2 * math.pi * f
+    expected = [abs(vb) * math.sin(w * t + math.atan2(vb.imag, vb.real)) for t, _ in samples]
+    errors = [abs(v - e) for (_, v), e in zip(samples, expected, strict=True)]
+    assert max(errors) < 2e-4 * abs(vb)
+    # peak and zero crossing of the last period (the sampled peak lies up to
+    # 1 - cos(pi / n) = 4.9e-4 below the true one)
+    assert abs(max(v for _, v in samples) - abs(vb)) < 1e-3 * abs(vb)
+    rising = [t for (t, v), (_, v_next) in zip(samples[:-1], samples[1:], strict=True)
+              if v <= 0.0 < v_next]
+    assert len(rising) == 1
+    t_zero = (-math.atan2(vb.imag, vb.real) / w) % (1.0 / f) + 2.0 / f
+    assert abs(rising[0] - t_zero) <= dt
+
+
+def test_waveform_units_are_computed_in_the_layer_dtype():
+    previous = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float32)
+    try:
+        source = PrescribedVoltage(1.0, waveforms=Sine(50.0))
+    finally:
+        torch.set_default_dtype(previous)
+    assert source.amplitude.dtype == torch.float32
+    t = 1.3e-3
+    r = source(torch.zeros(1, dtype=F64), torch.zeros(1, dtype=F64), {},
+               LawContext(mode="dc", t=t))
+    assert r.dtype == F64
+    assert abs(-r.item() - math.sin(2 * math.pi * 50.0 * t)) <= 1e-15
+
+
+def test_laws_name_a_missing_driver():
+    with pytest.raises(KeyError, match="'resistor' reads the driver 'T_wire'"):
+        Resistance(T([1.0]), temperature="T_wire").flow(T([1.0]), None)
+    with pytest.raises(KeyError, match="'switch' reads the driver 's'"):
+        SwitchedConductance("s").flow(T([1.0]), None)
+    source = PrescribedCurrent(T([1.0]), waveforms=Signal("u"))
+    with pytest.raises(KeyError, match="'current_source' reads the driver 'u'"):
+        source(T([1.0]), {}, LawContext(mode="dc"))
 
 
 # --------------------------------------------------------------------------- resistance
@@ -279,6 +357,20 @@ def test_switch_control_per_edge_entries():
     flow = sw.flow(T([1.0, 1.0]), {"a": T([False]), "b": T([0.0, 0.0, 0.9])})
     _close(flow, [1e-5, 1e5], tol=0, rtol=1e-15)
     assert sw.phasor_capable
+
+
+def test_switch_control_must_match_the_edges():
+    sw = SwitchedConductance("s")
+    with pytest.raises(ValueError, match="'switch'.*3 values per instance for 2 switch edges"):
+        sw.flow(T([1.0, 1.0]), {"s": T([1.0, 0.0, 1.0])})
+    # one value for all edges broadcasts
+    _close(sw.flow(T([1.0, 1.0]), {"s": T([1.0])}), [1e5, 1e5], tol=0, rtol=1e-15)
+
+
+def test_switch_control_as_a_lone_key_index_pair():
+    sw = SwitchedConductance(("s", 1), Ron=T([0.5, 0.25]), Goff=0.0)
+    _close(sw.flow(T([1.0, 1.0]), {"s": T([0.0, 1.0])}), [2.0, 4.0])
+    _close(sw.flow(T([1.0, 1.0]), {"s": T([1.0, 0.0])}), [0.0, 0.0])
 
 
 # ------------------------------------------------------------------------ two-ports
