@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from noodl.apps.building_physics.filters import (
 )
 from noodl.apps.building_physics.prj import (
     _PATH_FIELDS,
+    ContamCompatibilityWarning,
     PrescribedTemperatureDensity,
     Project,
     RunControl,
@@ -908,11 +910,41 @@ def test_zone_reactions_become_the_species_layers_kinetics():
 
 def test_a_species_decay_constant_is_kept_but_not_applied(tmp_path):
     text = THREE.read_text()
-    p = read_prj(_variant(text, "140.0900  0.0000e+00  0.0000e+00  0.0000e+00",
-                          "140.0900  0.0000e+00  0.0000e+00  1.0000e-03", tmp_path))
+    with pytest.warns(ContamCompatibilityWarning):
+        p = read_prj(_variant(text, "140.0900  0.0000e+00  0.0000e+00  0.0000e+00",
+                              "140.0900  0.0000e+00  0.0000e+00  1.0000e-03", tmp_path))
     assert p.species_records[0].decay == 1e-3
     model, _, _ = project_to_model(p)
     assert model.transport["species"].kinetics is None          # ContamX ignores it
+
+
+_DECAY_OLD = "140.0900  0.0000e+00  0.0000e+00  0.0000e+00"
+_DECAY_NEW = "140.0900  0.0000e+00  0.0000e+00  1.0000e-03"
+
+
+def test_a_nonzero_species_decay_warns_once_naming_species_and_constant(tmp_path):
+    path = _variant(THREE.read_text(), _DECAY_OLD, _DECAY_NEW, tmp_path)
+    with pytest.warns(ContamCompatibilityWarning) as record:
+        read_prj(path)
+    assert len(record) == 1
+    text = str(record[0].message)
+    assert "'sarin'" in text and "0.001 1/s" in text and "ContamX ignores" in text
+    assert "DepositionRateSink" in text and "KineticReaction" in text
+
+
+def test_no_decay_warning_when_the_decay_is_zero():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ContamCompatibilityWarning)
+        read_prj(THREE)
+
+
+def test_the_decay_warning_category_is_filterable(tmp_path):
+    path = _variant(THREE.read_text(), _DECAY_OLD, _DECAY_NEW, tmp_path)
+    assert issubclass(ContamCompatibilityWarning, UserWarning)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        warnings.filterwarnings("ignore", category=ContamCompatibilityWarning)
+        read_prj(path)
 
 
 def test_unsimulated_and_non_trace_species(tmp_path):

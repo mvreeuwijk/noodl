@@ -196,6 +196,7 @@ Supporting types.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `ContamCompatibilityWarning`<br><small>`noodl.apps.building_physics`</small> | The reader follows ContamX where ContamX ignores data the file carries. | `ContamCompatibilityWarning(...)` |
 | `Calendar`<br><small>`noodl.apps.building_physics`</small> | Where t = 0 sits in the year, and the CONTAM day type (1-12) of every day. | `Calendar(*, start_day=1, start_time=0.0, start_day_type=1, day_types=None)` |
 | `ConstantEfficiencyFilter`<br><small>`noodl.apps.building_physics`</small> | Removes a fixed fraction of each species it lists, nothing of the others. | `ConstantEfficiencyFilter(efficiencies, *, name='')` |
 | `DaySchedule`<br><small>`noodl.apps.building_physics`</small> | One day of values at times of day: CONTAM's day schedule. | `DaySchedule(times, values, *, shape='rectangular', name='')` |

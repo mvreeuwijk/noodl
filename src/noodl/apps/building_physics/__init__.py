@@ -61,6 +61,7 @@ from noodl.apps.building_physics.filters import (
 from noodl.apps.building_physics.inputs import Input, apply_inputs, bind_inputs, scatter
 from noodl.apps.building_physics.modelica import read_modelica
 from noodl.apps.building_physics.prj import (
+    ContamCompatibilityWarning,
     Project,
     RunControl,
     project_to_model,
@@ -104,6 +105,7 @@ from noodl.apps.building_physics.thermal import (
 from noodl.apps.building_physics.wth import Weather, read_wth
 
 __all__ = [
+    "ContamCompatibilityWarning",
     "AirHandlerFlows",
     "AmbientConcentrations",
     "DEFAULT_ROUGHNESS",

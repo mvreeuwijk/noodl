@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -715,6 +716,25 @@ def _read_contaminants(lines: _Lines, count: int) -> list[int]:
     return numbers
 
 
+class ContamCompatibilityWarning(UserWarning):
+    """The reader follows ContamX where ContamX ignores data the file carries.
+
+    Filter it with `warnings.filterwarnings("ignore", category=ContamCompatibilityWarning)`.
+    """
+
+
+def _warn_ignored_decay(species: list[Species]) -> None:
+    """One warning per simulated species whose record carries a nonzero decay constant."""
+    for sp in species:
+        if sp.decay != 0.0:
+            warnings.warn(
+                f"prj: species {sp.name!r} has a decay constant of {sp.decay:g} 1/s. ContamX "
+                f"ignores a species' decay, so noodl does too. To model the decay, add a "
+                f"DepositionRateSink(node, rate) in each zone, or a KineticReaction with a "
+                f"negative coefficient of the species on itself.",
+                ContamCompatibilityWarning, stacklevel=3)
+
+
 def _read_species(lines: _Lines, count: int, out: list[tuple[int, bool, Species]]) -> None:
     """`(number, simulated, Species)` per record; the name is the last field."""
     for _ in range(count):
@@ -1210,6 +1230,7 @@ def read_prj(path) -> Project:
             # names up in `species`. The contaminants section always precedes this one.
             _read_species(lines, count, species_rows)
             species_records = _simulated_species(species_rows, contaminants)
+            _warn_ignored_decay(species_records)
             species[:] = [s.name for s in species_records]
         elif name == "kinetic reactions":
             _read_reactions(lines, count, reactions)

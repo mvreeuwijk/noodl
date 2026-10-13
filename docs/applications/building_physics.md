@@ -679,9 +679,10 @@ ContamX gives 1.568757e-05, 1.033583e-05 and 6.466919e-05.
 
 A `Species` holds CONTAM's species record: name, molar mass, mean diameter (0 for a gas),
 effective density, decay constant, diffusivity, default (ambient) mass fraction. The decay
-constant is kept as data and not applied, as in ContamX; model a decay with a
-`DepositionRateSink` in each zone or with a kinetic reaction, a negative coefficient of the
-species on itself.
+constant is kept as data and not applied, as in ContamX; reading a nonzero one raises a
+`ContamCompatibilityWarning` (silence it with `warnings.filterwarnings("ignore",
+category=ContamCompatibilityWarning)`). Model a decay with a `DepositionRateSink` in each zone
+or with a kinetic reaction, a negative coefficient of the species on itself.
 
 A `KineticReaction` holds first-order reactions between species, `(product, reactant) ->
 k` in 1/s, on mass fractions: $\dot x_p \mathrel{+}= k_{pr}\,x_r$. A negative `(s, s)`
@@ -1250,8 +1251,9 @@ regression at rtol 1e-8.
 - **Contaminant physics follows ContamX's subset.** Boundary-layer diffusion and
   deposition-with-resuspension sinks, super source elements, loading-dependent gaseous filters
   and UVGI filters, and non-trace species (which change the air density) are refused by name. A
-  species' decay constant is kept as data and not applied, as in ContamX; use a kinetic
-  reaction for a decay.
+  species' decay constant is kept as data and not applied, as in ContamX, with a
+  `ContamCompatibilityWarning` (filter it by category to silence it); use a kinetic reaction
+  for a decay.
 - **Schedule-triggered sources are refused.** A decaying, burst, power-law or peak source on a
   schedule is triggered by it in CONTAM rather than multiplied; such a project is refused by
   name. `PowerLawDecaySource` and `PeakEmissionSource` count their time from the simulation

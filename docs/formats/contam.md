@@ -16,7 +16,9 @@ ambient=None, species=True, scheme="implicit")` returns `(model, state, drivers)
 date and time, the transient run's start and end date and time, time step and output step, day
 type, the weather and contaminant file names, and `dodMdt`) and ambient conditions; the simulated species'
 records (`Project.species_records`: molar mass, mean diameter, effective density,
-diffusivity, default concentration; the decay constant is read but, as in ContamX, not applied)
+diffusivity, default concentration; the decay constant is read but, as in ContamX, not applied; a nonzero one raises a
+`ContamCompatibilityWarning`, which `warnings.filterwarnings("ignore",
+category=ContamCompatibilityWarning)` silences)
 and each species' default ambient concentration (`Project.ambient_mass_fractions`); kinetic
 reactions on zones (`Project.zone_reactions`, the species layer's `kinetics`); day and week
 schedules referenced by zones (the zone temperature, on `"T"`) and by paths (a flow multiplier,
