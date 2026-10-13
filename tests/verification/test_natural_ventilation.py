@@ -116,7 +116,7 @@ def test_buoyancy_only_matches_li_delsante_closed_form(record_property):
     assert dT == pytest.approx(E / (RHO_0 * CP_AIR * q), rel=1e-8)
     record_property("check", "Buoyancy-only zone vs the Li and Delsante closed form")
     record_property("tolerance", "rel 1e-6")
-    record_property("measured_rel", abs(q / q_ref - 1.0))
+    record_property("measured_rel", float(abs(q / q_ref - 1.0)))
 
 
 def test_envelope_loss_matches_the_cubic_root(record_property):
@@ -129,7 +129,7 @@ def test_envelope_loss_matches_the_cubic_root(record_property):
     assert q == pytest.approx(root, rel=1e-6)
     record_property("check", "Envelope-loss zone vs the cubic root")
     record_property("tolerance", "rel 1e-6")
-    record_property("measured_rel", abs(q / root - 1.0))
+    record_property("measured_rel", float(abs(q / root - 1.0)))
 
 
 def test_assisting_wind_matches_the_cubic_root(record_property):
@@ -147,7 +147,7 @@ def test_assisting_wind_matches_the_cubic_root(record_property):
     assert q == pytest.approx(root, rel=1e-6)
     record_property("check", "Assisting-wind zone vs the cubic root")
     record_property("tolerance", "rel 1e-6")
-    record_property("measured_rel", abs(q / root - 1.0))
+    record_property("measured_rel", float(abs(q / root - 1.0)))
 
 
 def _opposing_wind_case(coupling: str = "iterate"):
@@ -305,7 +305,7 @@ def test_two_zone_doorway_matches_an_independent_root_finding_reference(record_p
     worst_abs = max(abs(T["A"] - TA_ref), abs(T["B"] - TB_ref))
     record_property("check", "Two-zone doorway vs an independent scipy.optimize.fsolve reference")
     record_property("tolerance", "abs 1e-5 K")
-    record_property("measured_abs_K", worst_abs)
+    record_property("measured_abs_K", float(worst_abs))
 
 
 def _three_zone_stack(coupling: str, tol: float = 0.05):
@@ -395,4 +395,4 @@ def test_golden_matches_stored_reference(record_property):
         )
     record_property("check", "Natural-ventilation demo golden regression")
     record_property("tolerance", "rel 1e-8")
-    record_property("measured_rel", worst_rel)
+    record_property("measured_rel", float(worst_rel))
