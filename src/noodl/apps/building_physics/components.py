@@ -110,19 +110,29 @@ def shaft(name: str, *, levels: int, level_height: float, volume: float, area: f
     return c
 
 
-def fan(name: str, *, flow: float, z_path: float = 0.0,
-        exterior: str | None = None) -> Component:
-    """A fan delivering the mass flow `flow` (kg/s) whatever the pressures (CONTAM's
-    constant-mass-flow fan): from terminal `a` to `b`, or with `exterior="supply"` from the
-    shared ambient into `a`, or with `exterior="exhaust"` from `a` to the ambient. Edge:
-    `fan`, kind "fan"; build it with `fan_elements_from_edges`. Ports: `a`, `b` (only `a`
-    when exterior)."""
+def _check(name: str, argument: str, value, rule: str, ok) -> float:
+    try:
+        good = bool(ok(float(value)))
+    except (TypeError, ValueError):
+        good = False
+    if not good:
+        raise ComponentError(f"{name}: {argument} must be {rule}, got {value!r}")
+    return float(value)
+
+
+def fan(name: str, *, flow: float, exterior: str | None = None) -> Component:
+    """A fan delivering the mass flow `flow` (kg/s, finite, not negative) whatever the
+    pressures and the height (CONTAM's constant-mass-flow fan): from terminal `a` to `b`, or
+    with `exterior="supply"` from the shared ambient into `a`, or with `exterior="exhaust"`
+    from `a` to the ambient. Edge: `fan`, kind "fan"; build it with
+    `fan_elements_from_edges`. Ports: `a`, `b` (only `a` when exterior)."""
     if exterior not in (None, "supply", "exhaust"):
         raise ComponentError(f"{name}: exterior must be None, 'supply' or 'exhaust', got "
                              f"{exterior!r}")
+    attrs = dict(flow=_check(name, "flow", flow, "finite and not negative (swap the ports to "
+                             "reverse a fan)", lambda v: math.isfinite(v) and v >= 0.0))
     c = Component(name, template="fan")
     c.add_terminal("a")
-    attrs = dict(flow=float(flow), z_path=float(z_path))
     if exterior is None:
         c.add_terminal("b")
         c.add_edge("a", "b", kind="fan", name="fan", **attrs)
@@ -148,13 +158,27 @@ def duct(name: str, *, length: float, diameter: float, roughness: float = DEFAUL
     `loss` its dynamic loss coefficients), with terminals `terminal_a` and `terminal_b`
     (area `terminal_area` in m2, the duct's own by default; loss coefficient
     `terminal_loss`). Interior: from port `a` to port `b`. Exterior: `terminal_a` opens to
-    the shared ambient, with a `crack`'s wind attributes. Build it with
+    the shared ambient and takes the wind from the `WindProfile` numbered `profile` (with
+    `azimuth` or `facade`, and `Ch`); `azimuth`, `facade` or `Ch` without a `profile` are
+    refused (a constant `Cp` is offered by `DuctNetwork.terminal`). Invalid lengths,
+    diameters or losses are refused naming the duct. Build it with
     `duct_elements_from_edges`. Ports: `a`, `b` (only `b` when exterior)."""
     given = {k: v for k, v in dict(azimuth=azimuth, facade=facade, Ch=Ch,
                                    profile=profile).items() if v is not None}
     if given and not exterior:
         raise ComponentError(f"{name}: wind attributes {sorted(given)} apply only to an "
                              f"exterior duct (exterior=True)")
+    try:
+        return _duct(name, length, diameter, roughness, loss, terminal_area, terminal_loss,
+                     z_a, z_b, T0, exterior, given)
+    except ComponentError:
+        raise
+    except (ValueError, KeyError) as err:
+        raise ComponentError(f"{name}: {err}") from err
+
+
+def _duct(name, length, diameter, roughness, loss, terminal_area, terminal_loss, z_a, z_b,
+          T0, exterior, given) -> Component:
     c = Component(name, template="duct")
     area = math.pi * diameter * diameter / 4.0 if terminal_area is None else terminal_area
     ducts = DuctNetwork()
@@ -192,8 +216,21 @@ def air_handler(name: str, *, supplies: Sequence[float], returns: Sequence[float
     `build_model(flow_balanced=...)`. Zero plenum volumes (CONTAM's default) also need
     `storage_free=...` and an implicit heat layer; the 1 m3 default here needs neither. Give
     each air handler of a building its own `kind`. Ports: `supplies[i]`, `returns[j]`."""
-    if not supplies:
-        raise ValueError(f"{name}: an air handler needs at least one supply point")
+    for label, noun, flows in (("supplies", "supply", supplies), ("returns", "return", returns)):
+        if len(flows) < 1:
+            raise ComponentError(f"{name}: an air handler needs at least one {noun} "
+                                 f"point, got {label}={list(flows)!r}")
+        for i, f in enumerate(flows):
+            _check(name, f"{label}[{i}]", f, "a finite design flow, not negative (kg/s)",
+                   lambda v: math.isfinite(v) and v >= 0.0)
+    _check(name, "outdoor_air_fraction", outdoor_air_fraction, "in [0, 1]",
+           lambda v: 0.0 <= v <= 1.0)
+    _check(name, "min_outdoor_air", min_outdoor_air, "finite and not negative (kg/s)",
+           lambda v: math.isfinite(v) and v >= 0.0)
+    _check(name, "supply_volume", supply_volume, "finite and not negative (m3)",
+           lambda v: math.isfinite(v) and v >= 0.0)
+    _check(name, "return_volume", return_volume, "finite and not negative (m3)",
+           lambda v: math.isfinite(v) and v >= 0.0)
     c = Component(name, template="air_handler")
     supply_ports = [f"supplies[{i}]" for i in range(len(supplies))]
     return_ports = [f"returns[{j}]" for j in range(len(returns))]

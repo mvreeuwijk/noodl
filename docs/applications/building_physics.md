@@ -340,8 +340,8 @@ hand, ready for `build_model`.
 | `crack(name, ...)` | `area` (m2), `z_path` (m), `Cd`, `exterior` (default `False`), wind: `azimuth` or `facade`, `Cp`, `Ch`, `profile` | `a`, `b`; only `a` if exterior |
 | `window(name, ...)` | as `crack`, but `exterior` defaults to `True` | `a` (and `b` with `exterior=False`) |
 | `shaft(name, ...)` | `levels`, `level_height` (m), `volume` (m3 per level), `area` (m2 of each slab opening), `T0`, `Cd` | `levels[0]`, `levels[1]`, ... |
-| `fan(name, ...)` | `flow` (kg/s), `z_path` (m), `exterior` (`None`, `"supply"` or `"exhaust"`) | `a`, `b`; only `a` if exterior |
-| `duct(name, ...)` | `length`, `diameter`, `roughness` (m), `loss`, `terminal_area` (m2), `terminal_loss`, `z_a`, `z_b` (m), `T0` (K), `exterior`, wind: `azimuth` or `facade`, `Ch`, `profile` | `a`, `b`; only `b` if exterior |
+| `fan(name, ...)` | `flow` (kg/s, not negative; swap the ports to reverse; the height does not matter to a fixed-flow fan), `exterior` (`None`, `"supply"` or `"exhaust"`) | `a`, `b`; only `a` if exterior |
+| `duct(name, ...)` | `length`, `diameter`, `roughness` (m), `loss`, `terminal_area` (m2), `terminal_loss`, `z_a`, `z_b` (m), `T0` (K), `exterior`, wind (exterior only, needs `profile`): `azimuth` or `facade`, `Ch`, `profile` | `a`, `b`; only `b` if exterior |
 | `air_handler(name, ...)` | `supplies`, `returns` (design flows, kg/s), `outdoor_air_fraction`, `min_outdoor_air` (kg/s), `supply_volume`, `return_volume` (m3), `T0` (K), `kind` | `supplies[i]`, `returns[j]` |
 
 A `door` has two edges, `low` and `high`, as `add_large_opening` does. An exterior `crack` or

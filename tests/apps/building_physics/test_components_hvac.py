@@ -117,3 +117,70 @@ def test_exterior_fan_and_duct_open_to_the_shared_ambient():
     assert ends == [("intake.ends[0]", "ambient"), ("intake.ends[1]", "hall.air")]
     wind = net.edge_attr("profile", "duct_terminal", default=0.0).tolist()
     assert sorted(wind) == [0.0, 1.0]
+    outdoor = [i for i, a in enumerate(src) if net.nodes[int(a)] == "intake.ends[0]"][0]
+    assert net.edge_attr("azimuth", "duct_terminal", default=0.0).tolist()[outdoor] == 90.0
+    assert net.edge_attr("Ch", "duct_terminal", default=1.0).tolist()[outdoor] == 0.8
+    assert net.edge_attr("profile", "duct_terminal", default=0.0).tolist()[outdoor] == 1.0
+
+
+@pytest.mark.parametrize("kwargs, text", [
+    (dict(diameter=-0.1), "diameter"),
+    (dict(diameter=0.1, roughness=0.5), "roughness"),
+    (dict(diameter=0.1, exterior=True, azimuth=90.0), "azimuth"),
+    (dict(diameter=0.1, loss=-1.0), "loss"),
+])
+def test_a_bad_duct_is_refused_naming_the_duct(kwargs, text):
+    with pytest.raises(ComponentError, match=rf"^run7: .*{text}"):
+        duct("run7", length=3.0, **kwargs)
+
+
+@pytest.mark.parametrize("make, text", [
+    (lambda: fan("f9", flow=float("nan")), "flow"),
+    (lambda: fan("f9", flow=-0.1), "flow"),
+    (lambda: air_handler("h9", supplies=[0.1], returns=[]), "return"),
+    (lambda: air_handler("h9", supplies=[0.1], returns=[-0.1]), r"returns\[0\]"),
+    (lambda: air_handler("h9", supplies=[float("inf")], returns=[0.1]), r"supplies\[0\]"),
+    (lambda: air_handler("h9", supplies=[0.1], returns=[0.1], outdoor_air_fraction=1.5),
+     "outdoor_air_fraction"),
+    (lambda: air_handler("h9", supplies=[0.1], returns=[0.1], min_outdoor_air=-1.0),
+     "min_outdoor_air"),
+    (lambda: air_handler("h9", supplies=[0.1], returns=[0.1], supply_volume=-1.0),
+     "supply_volume"),
+    (lambda: air_handler("h9", supplies=[0.1], returns=[0.1], return_volume=-1.0),
+     "return_volume"),
+])
+def test_a_bad_fan_or_air_handler_is_refused_naming_the_argument(make, text):
+    with pytest.raises(ComponentError, match=rf"^(f9|h9): .*{text}"):
+        make()
+
+
+def test_components_placed_at_a_height_carry_it_into_the_network():
+    b = Component("building")
+    b.inner("ambient", z_ref=0.0, T0=293.15)
+    at = (0.0, 0.0, 6.0)
+    flat = b.add(room("flat", volume=60.0), at=at)
+    run = b.add(duct("run", length=3.0, diameter=0.1, z_a=1.0, z_b=2.0), at=at)
+    ahu = b.add(air_handler("ahu", supplies=[0.1], returns=[0.1]), at=at)
+    b.connect(run.ports.a, flat.ports.air)
+    b.connect(ahu.ports["supplies[0]"], flat.ports.air)
+    b.connect(ahu.ports["returns[0]"], flat.ports.air)
+    other = b.add(room("other", volume=60.0), at=at)
+    b.connect(run.ports.b, other.ports.air)
+    net, _ = b.flatten(dtype=F64)
+    z = net.node_attr("z_ref", default=0.0)
+    assert z[net.node_index("run.ends[0]")].item() == pytest.approx(7.0)
+    assert z[net.node_index("run.ends[1]")].item() == pytest.approx(8.0)
+    assert z[net.node_index("ahu.supply")].item() == pytest.approx(6.0)
+    assert sorted(net.edge_attr("z_path", "duct_terminal").tolist()) == [7.0, 8.0]
+
+
+def test_a_pressure_dependent_edge_on_a_plenum_is_refused_by_name():
+    net, _ = _building().flatten(dtype=F64)
+    net.add_edge("ahu.supply", "store.air", kind="airpath", z_path=1.0, Cd=0.6, area=0.01)
+    element, closure = air_handler_from_edges(net, "air_handler")
+    plenums = air_handler_plenums(net, "air_handler")
+    with pytest.raises(ValueError, match="ahu.supply"):
+        build_model(net, air_elements=[orifice_elements_from_edges(net, "airpath"),
+                                       fan_elements_from_edges(net), element],
+                    drives=[Stack.from_network(net, "airpath")], thermal=False, species=1,
+                    closures=[closure], flow_balanced=plenums, storage_free=plenums)
