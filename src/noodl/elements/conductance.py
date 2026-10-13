@@ -14,6 +14,8 @@ class Conductance(Element):
     in the flow unit per unit of potential (W/K for heat, kg/s per Pa for air).
     """
 
+    phasor_capable = True
+
     def __init__(self, g, *, kind: str = "conduction", learnable: bool = False) -> None:
         super().__init__(kind)
         self.g = self._param(g, learnable)

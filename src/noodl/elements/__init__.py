@@ -7,7 +7,7 @@ tool's equations, the class docstring says so (for example ``RegularizedPowerLaw
 pre-rename ``MBL*``/``mbl_*`` names remain importable as aliases.
 """
 
-from noodl.elements.base import Element
+from noodl.elements.base import Element, ImplicitLaw, LawContext
 from noodl.elements.conductance import Conductance
 from noodl.elements.damper import Damper
 from noodl.elements.door import (
@@ -67,6 +67,8 @@ __all__ = [
     "Element",
     "FanCurve",
     "FixedFlow",
+    "ImplicitLaw",
+    "LawContext",
     "OpenDoor",
     "OperableDoor",
     "OperableDoorCompartment",

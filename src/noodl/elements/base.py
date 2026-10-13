@@ -20,12 +20,41 @@ through ``self.flow`` re-resolves to the most-derived override on every call.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 import torch
 
 from noodl._broadcast import broadcast_shapes
 
 Tensor = torch.Tensor
+
+#: The modes a dynamic or implicit constitutive law is evaluated in (see `LawContext`).
+MODES = ("dc", "initial", "transient", "phasor")
+#: The implicit time integrations a dynamic law implements in the transient mode.
+INTEGRATIONS = ("trapezoidal", "backward_euler")
+
+
+@dataclass(frozen=True)
+class LawContext:
+    """What a dynamic or implicit constitutive law needs besides its own edge values.
+
+    `mode` is one of `MODES`: `"dc"` the steady operating point (storage elements at rest:
+    a capacitance carries no current, an inductance no voltage); `"initial"` the consistent
+    initial point (a capacitance holds its initial voltage, an inductance its initial
+    current); `"transient"` one implicit step of length `dt` ending at time `t`, from the
+    step-start values `dp_prev` and `q_prev` of the law's own edges, with `integration` one
+    of `INTEGRATIONS`; `"phasor"` the quasi-static sinusoidal state at angular frequency
+    `omega` (a tensor broadcasting against the law's edges). `t` is the evaluation time
+    (the END of a transient step), `None` when the caller tracks no clock.
+    """
+
+    mode: str
+    dt: float | None = None
+    t: float | None = None
+    integration: str = "trapezoidal"
+    dp_prev: Tensor | None = None
+    q_prev: Tensor | None = None
+    omega: Tensor | None = None
 
 
 def memo(owner, name: str, deps: tuple, fn):
@@ -96,6 +125,22 @@ class Element(torch.nn.Module):
 
     kind: str
     dp_independent: bool = False
+    #: "potential": flow is a function of the potential difference, `q = flow(dp)`.
+    #: "implicit": the law is a relation `residual(dp, q) = 0` and the flow is an unknown
+    #: of the layer (`ImplicitLaw`); this covers flow-controlled laws and ideal sources.
+    form: str = "potential"
+    #: Edges of this law's kind form consecutive groups of `ports` edges (kind order); the
+    #: law may couple the edges within a group (a transformer's two windings), never across.
+    ports: int = 1
+    #: True for a law with storage (a capacitance, an inductance): it implements every mode
+    #: of `LawContext` and reads its step-start values from the context.
+    dynamic: bool = False
+    #: True when `flow` takes a third argument, the `LawContext` (a dynamic or
+    #: frequency-dependent law). False keeps the two-argument `flow(dp, drivers)`.
+    contextual: bool = False
+    #: True when the law accepts complex `dp` (phasor layers): a linear law with a real or
+    #: complex coefficient. Nonlinear laws stay False and are refused by a phasor layer.
+    phasor_capable: bool = False
 
     def __init__(self, kind: str) -> None:
         super().__init__()
@@ -105,12 +150,17 @@ class Element(torch.nn.Module):
         """Branch flow q(dp); elementwise in dp. Abstract in the base class."""
         raise NotImplementedError(f"{type(self).__name__} does not implement flow()")
 
-    def forward(self, dp: Tensor, drivers: Mapping[str, Tensor] | None = None) -> Tensor:
+    def forward(self, dp: Tensor, drivers: Mapping[str, Tensor] | None = None,
+                ctx: LawContext | None = None) -> Tensor:
         """Alias for :meth:`flow` so ``Module.__call__``/``torch.func.functional_call`` work.
 
         Delegates to ``self.flow`` (rather than being assigned ``forward = flow`` in the
-        class body) so that subclass overrides of ``flow`` remain reachable.
+        class body) so that subclass overrides of ``flow`` remain reachable. A contextual
+        law receives the `LawContext` as a third argument; any other law keeps the
+        two-argument call whatever `ctx` is.
         """
+        if self.contextual:
+            return self.flow(dp, drivers, ctx)
         return self.flow(dp, drivers)
 
     def dflow(self, dp: Tensor, drivers: Mapping[str, Tensor] | None = None) -> Tensor:
@@ -210,3 +260,40 @@ class Element(torch.nn.Module):
         for p in self.parameters():
             return p.dtype
         return torch.get_default_dtype()
+
+
+class ImplicitLaw(Element):
+    """A constitutive law written as a relation `residual(dp, q, drivers, ctx) = 0`.
+
+    The flow of an implicit law's edges is an unknown of the layer, alongside the nodal
+    potentials (Modified Nodal Analysis). This is the form of a flow-controlled law
+    (`dp = h(q)`), of an ideal potential source (`dp = V`), and of a law that couples flow and
+    potential through stored state (an inductance). `residual` returns one value per edge,
+    with the shape of `dp`.
+    """
+
+    form = "implicit"
+    contextual = True
+
+    def residual(self, dp: Tensor, q: Tensor, drivers: Mapping[str, Tensor] | None,
+                 ctx: LawContext | None) -> Tensor:
+        raise NotImplementedError(f"{type(self).__name__} does not implement residual()")
+
+    def forward(self, dp: Tensor, q: Tensor, drivers: Mapping[str, Tensor] | None = None,
+                ctx: LawContext | None = None) -> Tensor:
+        return self.residual(dp, q, drivers, ctx)
+
+    def _no_flow(self) -> TypeError:
+        return TypeError(
+            f"{type(self).__name__} (kind {self.kind!r}) is an implicit law: its flow is an "
+            f"unknown of the layer, not a function flow(dp); read it from the layer's solved q"
+        )
+
+    def flow(self, dp, drivers=None, ctx=None):
+        raise self._no_flow()
+
+    def dflow(self, dp, drivers=None):
+        raise self._no_flow()
+
+    def linear_init(self, drivers=None):
+        raise self._no_flow()
