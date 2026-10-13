@@ -793,76 +793,103 @@ def test_nist_s_ahs_and_duct_sample_matches_contamx(contamx, tmp_path, record_pr
 DCV = DATA / "dcv_three_zone.prj"
 PRESSURE_EXHAUST = DATA / "pressure_exhaust_three_zone.prj"
 WINDOW = DATA / "hysteresis_window_three_zone.prj"
-STEPS = 288
 
 
 def _control_outputs_match(ref, out, rtol, record_property, label, atol=0.0):
     """Every named output within `rtol` relative plus `atol` absolute (either may be per
     column), with a floor of 64 u times the column's largest value (the outputs differ in
-    scale by six orders: a CO2 reading in mg/kg and a fan signal)."""
+    scale by six orders: a CO2 reading in mg/kg and a fan signal). A column that is zero
+    throughout with nothing allowed must be matched exactly."""
     want, got = ref["control"], out["control"]
     assert got.shape == want.shape
     allowed = rtol * want.abs() + 64 * F32_U * want.abs().amax(0) + atol
     err = (got - want).abs()
-    worst = int(torch.argmax((err / allowed).amax(0)))
-    record_property("measured_control_of_allowed", (err / allowed).max().item())
+    exact = allowed == 0
+    assert bool((err[exact] == 0).all()), f"{label}: an all-zero output is not zero"
+    share = torch.where(exact, torch.zeros_like(err), err / torch.where(exact, 1.0, allowed))
+    worst = int(torch.argmax(share.amax(0)))
+    record_property("measured_control_of_allowed", share.max().item())
     assert bool((err <= allowed).all()), (
         f"{label}: control output {worst} off by {err[:, worst].max().item():.3e}")
 
 
-def _longest_unsaturated(y):
-    """The longest run of steps over which `y` stays strictly inside (0, 1)."""
-    best = run = 0
-    for inside in ((y > 0) & (y < 1)).tolist():
-        run = run + 1 if inside else 0
-        best = max(best, run)
-    return best
+def _pi_loop_response_sums(a, b, kp, ki_dt, steps):
+    """The linearised error loop of a PI controller on a well-mixed zone, in the order
+    ContamX evaluates it (the output acting over a step comes from the reading at the end of
+    the step before): y_k = y_(k-1) + kp (s_(k-1) - s_(k-2)) + ki_dt (s_(k-1) + s_(k-2))/2,
+    r_k = a r_(k-1) - b y_k, with s the reading as the controller sees it. Returns the sums
+    over `steps` of |y| and |r| after a unit error in one reading, and after a unit error in
+    one stored output: (y per reading, r per reading, y per output, r per output)."""
+    sums = []
+    for reading, output in ((1.0, 0.0), (0.0, 1.0)):
+        r = y = s_prev = 0.0
+        sum_y = sum_r = 0.0
+        for k in range(steps):
+            s = r + (reading if k == 0 else 0.0)
+            y = y + kp * (s - s_prev) + ki_dt * (s + s_prev) / 2 + (output if k == 0 else 0.0)
+            r = a * r - b * y
+            s_prev = s
+            sum_y, sum_r = sum_y + abs(y), sum_r + abs(r)
+        sums += [sum_y, sum_r]
+    return tuple(sums)
 
 
 @pytest.mark.external
 def test_demand_controlled_ventilation_matches_contamx(contamx, tmp_path, record_property):
     """`dcv_three_zone.prj`: CO2 from occupants (08:00-18:00, a schedule node on the
-    source), a PI controller (Kp 0.01, Ki 1e-5 /s) on zone one's CO2 above 650 mg/kg
-    driving the exhaust fan (`fan_cmf`, 0.100342 kg/s at signal 1), never below 0.2.
+    source), a PI controller (Kp 0.01, Ki 1e-5 /s, 300 s steps) on zone one's CO2 above
+    650 mg/kg driving the exhaust fan (`fan_cmf`, R = 0.100342 kg/s at signal 1), never
+    below 0.2, out of zone one (300 m3, M = 361.2 kg of air).
 
-    Budget. ContamX computes its control signals in float32 (0.178749993 = fl32(0.17875),
-    measured); noodl in float64. The CO2 reading r = 1e6 x is rounded twice (x to float32,
-    then the product): 2 u r. Its difference from the set point, e = r - 650, is exact
-    (Sterbenz) but carries that ABSOLUTE error, which is large against e (r ~ 660, e ~ 10).
-    The PI update y_k = y_(k-1) + Kp (e_k - e_(k-1)) + Ki dt (e_k + e_(k-1))/2 is stored in
-    float32. Since the output last saturated (a clipped 0 or 1 is exact in both), over N
-    steps: the proportional term telescopes, 2 Kp (2 u r_max); the integral term adds
-    Ki dt (2 u r_max) per step; the store u y <= u per step. Hence an absolute bound on the
-    PI output and the fan signal,
-    A = (N (1 + 2 Ki dt r_max) + 4 Kp r_max) u, with N the reference's longest unsaturated
-    stretch (119 steps) and r_max its largest reading (661 mg/kg): about 620 u. The fan flow
-    is the signal times the rating, so it is off by A x 0.100342 kg/s at most, and the zone's
-    other paths shift by no more (mass balance): an absolute flow budget on top of the
-    three-zone transient's 64 u. The CO2 responds to a relative error of the exhaust flow by
-    at most that relative error (the loop gain is below one: the controlled CO2 moves less
-    than the fan signal), and the signal is never below 0.2: A / 0.2 relative on the mass
-    fractions, plus 64 u. The control outputs: the reading carries the mass fractions' budget
-    plus 2 u; the PI output and the fan signal A; the excess (r - 600) x 0.6584 the
-    reading's absolute error times 0.6584. ContamX's airflow is solved to `PROJECT_AIRFLOW`:
-    at its own 1e-5 convergence its PI output at step 120 is 0.31324 against 0.31346 here,
-    an error of ContamX's airflow iteration (0.313458 at the tight tolerance)."""
+    Budget: first-order error propagation through the CLOSED loop. Two sources each step.
+    (i) The reading the controller sees: ContamX computes control signals in float32
+    (0.178749993 = fl32(0.17875), measured); its reading r = 1e6 x is rounded twice (x to
+    float32, then the product), 2 u r, and e = r - 650 is exact (Sterbenz) but carries that
+    absolute error; and noodl's controller reads noodl's own CO2, which differs from
+    ContamX's by the plant's transient budget, 64 u r. So a reading error of
+    n = 66 u r_max per step. (ii) The stored output: two float32 additions, each rounding at
+    most u/2 since |y| < 1, plus the increment's own rounding and the float32 gains,
+    u max|dy|: p = (1 + max|dy|) u per step.
+    The plant, linearised at its slowest, most sensitive operating point (outflow no more
+    than the fan's least, 0.2 R; CO2 excess over the 600 mg/kg ambient air replacing the
+    exhausted air at its largest, r_max - 600): one step of the implicit species update
+    gives r_k = a r_(k-1) - b y_k with a = M / (M + dt 0.2 R) = 0.984 and
+    b = dt R (r_max - 600) / (M + dt 0.2 R) = 5.03 mg/kg per unit signal. The loop's
+    error map has spectral radius 0.970 (a decaying oscillation), and the sums of its
+    response to one unit error (`_pi_loop_response_sums`) give the bounds
+    dy = 0.070 n + 21.4 p (about 3070 u, on the PI output and the fan signal) and
+    dr = 2.81 n + 886 p in mg/kg (about 206 u relative to the 600 mg/kg floor of r). A
+    clipped output (0 or 1) is exact on both sides, which only shortens these sums.
+    Hence: flows 64 u plus dy R kg/s absolute (the fan's flow is its signal times R; the
+    zone's other paths shift by no more); mass fractions 64 u plus dr / r_min relative; the
+    reading that plus 2 u; the excess (r - 600) x 0.6584 the reading's absolute error times
+    0.6584. ContamX's airflow is solved to `PROJECT_AIRFLOW`: at its own 1e-5 convergence
+    its PI output at step 120 is 0.31324 against 0.31346 here, an error of ContamX's airflow
+    iteration (0.313458 at the tight tolerance)."""
     from noodl.apps.building_physics.contamx import run_project
 
     ref = run_project(DCV, airflow_convergence=PROJECT_AIRFLOW)
-    kp, ki_dt, fan_rating = 0.01, 1e-5 * 300.0, 0.100342
-    r_max = ref["control"][:, 0].max().item()
-    n = _longest_unsaturated(ref["control"][:, 1])
-    pi_bound = (n * (1 + 2 * ki_dt * r_max) + 4 * kp * r_max) * F32_U
-    rtol_mf = 64 * F32_U + pi_bound / 0.2
+    kp, ki_dt, rating, dt, air_mass = 0.01, 1e-5 * 300.0, 0.100342, 300.0, 300 * 1.2041
+    reading, pi = ref["control"][:, 0], ref["control"][:, 1]
+    r_max, r_min = reading.max().item(), reading.min().item()
+    slowest = air_mass + dt * 0.2 * rating
+    a, b = air_mass / slowest, dt * rating * (r_max - 600.0) / slowest
+    y_n, r_n, y_p, r_p = _pi_loop_response_sums(a, b, kp, ki_dt, len(pi))
+    n = 66 * F32_U * r_max
+    p = (1 + (pi[1:] - pi[:-1]).abs().max().item()) * F32_U
+    dy, dr = y_n * n + y_p * p, r_n * n + r_p * p
+    rtol_mf = 64 * F32_U + dr / r_min
+    record_property("loop", f"a {a:.4f}, b {b:.3f}; dy {dy / F32_U:.0f} u, "
+                            f"dr/r_min {dr / r_min / F32_U:.0f} u")
     ref, out = _project_parity(DCV, tmp_path, rtol_flow=64 * F32_U, rtol_mf=rtol_mf,
-                               atol_flow=pi_bound * fan_rating, ref=ref,
+                               atol_flow=dy * rating, ref=ref,
                                record_property=record_property, species_floor=True,
                                label="Demand-controlled ventilation (PI), 288 steps")
-    reading = (rtol_mf + 2 * F32_U) * r_max
+    reading_err = (rtol_mf + 2 * F32_U) * r_max
     _control_outputs_match(
         ref, out, torch.tensor([rtol_mf + 2 * F32_U, 0.0, 0.0, 0.0], dtype=F64),
         record_property, "dcv",
-        atol=torch.tensor([0.0, pi_bound, pi_bound, 0.6584 * reading], dtype=F64))
+        atol=torch.tensor([0.0, dy, dy, 0.6584 * reading_err], dtype=F64))
 
 
 @pytest.mark.external
@@ -871,13 +898,17 @@ def test_a_pressure_controlled_exhaust_matches_contamx(contamx, tmp_path, record
     pressure above -0.5 Pa (a limit control) through a P controller (Kp 0.8) drives the
     exhaust fan; a path pressure-difference and a flow sensor reported. No state carries a
     rounding from step to step (P control), so the three-zone transient budget, 64 u. The
-    float32 gauge pressure p and set point -0.5 Pa enter the limit control p + 0.5 with an
-    absolute u (|p| + 0.5) < 2 u Pa, inside the column floor (64 u times the largest
-    pressure, 0.41 Pa)."""
+    float32 gauge pressure p (|p| <= 0.22 Pa) and set point -0.5 Pa enter the limit control
+    p + 0.5 with an absolute u (|p| + 0.5) < 0.72 u Pa, so the P output with 0.8 x that,
+    0.58 u, and the exhaust flow with 0.58 u R. Both sit inside their columns' floors as
+    long as the largest P output exceeds 0.58 / 64 = 0.009 (it is 0.40: a floor of 25.6 u)
+    and the largest flow exceeds 0.009 R (it is 0.125 kg/s)."""
     ref, out = _project_parity(PRESSURE_EXHAUST, tmp_path, rtol_flow=64 * F32_U,
                                rtol_mf=64 * F32_U, record_property=record_property,
                                species_floor=True,
                                label="Pressure-controlled exhaust (P), 288 steps")
+    assert ref["control"][:, 1].max() > 0.58 / 64
+    assert ref["flow"].abs().max() > 0.58 / 64 * 0.100342
     _control_outputs_match(ref, out, 64 * F32_U, record_property, "pressure exhaust")
 
 
