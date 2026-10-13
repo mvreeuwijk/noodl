@@ -128,7 +128,7 @@ matters for a zone that flushes much faster than the step. With a boundary value
 step mean of a ramp, such a zone relaxes to that mean and ends about half a step behind the
 boundary. With the linear boundary, it ends behind by its own flushing time, as it should. The
 Modelica importer's `scheme="midpoint"` runner uses this. The implicit and trapezoidal schemes
-do not accept the argument and raise `ValueError` if it is given.
+do not accept the argument and raise `ValueError` if it is given. So does `step_with_transfer`, which returns the boundary transfer: the transfer is defined for a boundary held constant over the step.
 
 `x_boundary_rates=(start, end)`, given together with `x_boundary_end`, adds the boundary's rates
 of change at both ends of the step. The boundary then follows the cubic Hermite through both

@@ -514,7 +514,10 @@ def attach_weather_files(doc: dict, out: Path) -> list[Path]:
         if entry["class"] not in WEATHER_READERS:
             continue
         src = entry["parameters"].get("filNam")
-        if not isinstance(src, str) or not Path(src).is_file():
+        if not isinstance(src, str):
+            raise ExportError(f"{entry['name']}: weather file name filNam was not evaluated "
+                              f"(it must evaluate to an existing file; got {src!r})")
+        if not Path(src).is_file():
             raise ExportError(f"{entry['name']}: weather file {src!r} not found (filNam must "
                               f"evaluate to an existing file)")
         path = Path(src)

@@ -1052,7 +1052,7 @@ class TransportLayer:
         `x_boundary_end` (keyword-only, `scheme="exact"` only, default `None`): the boundary
         values at the END of the step. Given, `x_boundary` is their value at the start and
         the boundary values are linear in time over the step (a first-order hold,
-        `_expm_action`'s `slope`), so the step is exact for a boundary ramping linearly on
+        `_expm_action`'s `forcing_poly`), so the step is exact for a boundary ramping linearly on
         frozen flows. Without it the boundary values are held constant over the step, and
         a zone whose flushing time is much shorter than the step relaxes to that constant:
         given the step mean of a ramp, it lags the boundary by about half the step instead

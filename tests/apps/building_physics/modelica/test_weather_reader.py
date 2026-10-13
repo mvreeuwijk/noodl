@@ -360,8 +360,8 @@ def test_boundary_rates_stay_inside_a_file_that_starts_at_the_run(tmp_path):
     experiment = {"StartTime": 0.0, "StopTime": 3 * H, "Interval": 600.0, "Tolerance": 1e-6}
     _, _, drivers, names = read_modelica(_two_walls(rows, tmp_path, experiment=experiment),
                                          return_names=True)
-    left = drivers["series:thermal.x_boundary_rate_left"]
-    right = drivers["series:thermal.x_boundary_rate_right"]
+    left = drivers["series:modelica.thermal.x_boundary_rate_left"]
+    right = drivers["series:modelica.thermal.x_boundary_rate_right"]
     assert left.shape == right.shape == (names.times.numel(), 2)
     k = int(torch.argmin((drivers["series:time"] - 1800.0).abs()))
     assert float(left[k, 0]) == pytest.approx(1.0 / H, rel=1e-6, abs=0.0)
@@ -375,13 +375,63 @@ def test_a_refusal_at_the_boundary_rates_stencil_is_raised(tmp_path, monkeypatch
     boundaries)."""
     rows = [tmy3_row(k * H, T=10.0 + k) for k in range(4)]
     path = _two_walls(rows, tmp_path)
-    boundary = assemble._Builder.boundary
+    values = assemble._boundary_values
+    grid = []
 
-    def refuse_on_the_stencil(self, comp):
-        if isinstance(self, assemble._BoundaryShadow):
-            self.errors.append(f"{comp.name}: refused at the stencil")
-        return boundary(self, comp)
+    def refuse_on_the_stencil(comp, med, sig, weather, species_names, errors):
+        grid.append(int(sig.times.numel()))
+        if sig.times.numel() > grid[0]:  # the stencil's times (six grids), not the grid
+            errors.append(f"{comp.name}: refused at the stencil")
+        return values(comp, med, sig, weather, species_names, errors)
 
-    monkeypatch.setattr(assemble._Builder, "boundary", refuse_on_the_stencil)
+    monkeypatch.setattr(assemble, "_boundary_values", refuse_on_the_stencil)
     with pytest.raises(ModelicaImportError, match="stencil times: east: refused at the stencil"):
+        read_modelica(path)
+
+
+def _warnings(report):
+    return [i for i in report.issues if i.severity == "warning"]
+
+
+def test_time_varying_boundaries_leave_model_check_clean(tmp_path):
+    """The boundary-rate drivers are not layer keys: `Model.check` has nothing to say about
+    them, for a varying boundary or a constant one."""
+    experiment = {"StartTime": 0.0, "StopTime": 3 * H, "Interval": 600.0, "Tolerance": 1e-6}
+    varying = [tmy3_row(k * H, T=10.0 + k) for k in range(4)]
+    constant = [tmy3_row(k * H) for k in range(4)]
+    for sub, rows in (("v", varying), ("c", constant)):
+        (tmp_path / sub).mkdir()
+        model, state, drivers = read_modelica(
+            _two_walls(rows, tmp_path / sub, experiment=experiment))
+        assert (sub == "v") == ("series:modelica.thermal.x_boundary_rate_left" in drivers)
+        assert _warnings(model.check(state, drivers)) == []
+
+
+def test_pressurization_data_checks_without_warnings():
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[3] / "data" / "modelica" / "PressurizationData.json"
+    model, state, drivers = read_modelica(path)
+    assert _warnings(model.check(state, drivers)) == []
+
+
+def test_a_weather_file_with_non_ascii_comments_reads(tmp_path):
+    rows = [tmy3_row(k * H) for k in range(4)]
+    path = _two_walls(rows, tmp_path)
+    mos = tmp_path / "w.mos"
+    mos.write_bytes(mos.read_bytes().replace(b"Time in seconds", b"Zeit in Sekunden \xe9\xfc"))
+    import hashlib
+
+    doc = json.loads(path.read_text())
+    for comp in doc["components"]:
+        if "files" in comp:
+            comp["files"]["filNam"]["sha256"] = hashlib.sha256(mos.read_bytes()).hexdigest()
+    path.write_text(json.dumps(doc))
+    read_modelica(path)
+
+
+def test_a_non_numeric_reader_parameter_is_refused_by_name(tmp_path):
+    rows = [tmy3_row(k * H) for k in range(4)]
+    path = _two_walls(rows, tmp_path, {"pAtm": "abc"})
+    with pytest.raises(ModelicaImportError, match=r"weaDat \(.*ReaderTMY3\): .*pAtm.*'abc'"):
         read_modelica(path)

@@ -38,27 +38,28 @@ district networks. `Validation`: `OneWayFlow`,
 `Validation.Outside_CpData_Directions` (boundaries with no flow element, so not importable as
 models) are compared with `assemble.weather_columns`.
 
+**Imported, not yet compared.** `PressurizationData` imports (`read_modelica` builds it, and its weather and
+wind pressures match MBL's to round-off), but it is not yet compared as a dynamic model. It is a
+62.5 m3 room between two `Outside_CpLowRise` walls over 30 days of San Francisco weather. The room
+flushes in about 10 s, against steps of 50 to 3000 s. Where the flow fades, in a calm or with the
+wind parallel to both walls, it can fall by orders of magnitude within one step, and the room
+freezes at the state it had when its flushing stopped. The run does not resolve that decay: the
+transport step sees the flows only at the step's two ends. It therefore freezes the room at the
+wrong state, and this error, first order in the step, stays for the whole calm. Over every row at 1
+and 2 substeps, the room temperature is 2.9e-3 relative from the reference (0.82 K, at the end of
+the first calm, 25920 s) and its humidity 3.4e-2 (at 93312 s). Flows are within 1e-6 beyond the
+reference's resolution and the pressure within 2e-11. Refining the grid where the boundary pressures
+fade reduced the temperature error to 1.6e-4 and the humidity error to 2.0e-3 in an experiment. That
+refinement, together with a transport step that treats the flows' change within a step implicitly,
+is the direction for the follow-up. The wind boundaries are verified on the
+`Buildings.Fluid.Sources` models and `Outside_Cp`.
+
 **Refused, each with a named error** (`ModelicaImportError` lists every offending instance and
 its class):
 
 - `TrickleVent`, `ChimneyShaftNoVolume`, `ChimneyShaftWithVolume` — feedback controllers, a
   chain of two flow elements, or a dynamic (mass- and heat-storing) hydrostatic medium column,
   none of which is in scope.
-- `PressurizationData` imports (`read_modelica` builds it, and its weather and wind pressures
-  match MBL's to round-off), but it is not yet compared as a dynamic model. It is a 62.5 m3
-  room between two `Outside_CpLowRise` walls over 30 days of San Francisco weather.
-  The room flushes in about 10 s, against steps of 50 to 3000 s. Where the flow fades, in a
-  calm or with the wind parallel to both walls, it can fall by orders of magnitude within one
-  step, and the room freezes at the state it had when its flushing stopped. The run does not
-  resolve that decay: the transport step sees the flows only at the step's two ends. It
-  therefore freezes the room at the wrong state, and this error, first order in the step, stays
-  for the whole calm. Over every row at 1 and 2 substeps, the room temperature is 2.9e-3 relative
-  from the reference (0.82 K, at the end of the first calm, 25920 s) and its humidity 3.4e-2 (at
-  93312 s). Flows are within 1e-6 beyond the reference's resolution and the pressure within 2e-11.
-  Refining the grid where the boundary pressures fade reduced the temperature error to 1.6e-4 and
-  the humidity error to 2.0e-3 in an experiment. That refinement, together with a transport step
-  that treats the flows' change within a step implicitly, is the direction for the follow-up.
-  The wind boundaries are verified on the `Buildings.Fluid.Sources` models and `Outside_Cp`.
 - Every `Buildings.BoundaryConditions.WeatherData` class but `ReaderTMY3`; a weather bus wired
   to anything but an `Outside` boundary's `weaBus`, or any weather-bus output other than
   `TDryBul`, `pAtm`, `relHum`, `winSpe` and `winDir` read by anything; a `ReaderTMY3` wired
@@ -104,7 +105,7 @@ ModelicaImportError: modelica: refused 2 items:
   edges or zonal flows, no boundary among them) with a net flow imbalance — an unequal
   `ZonalFlow_m_flow` pair or a mass source into it; `MediumColumn.densitySelection = "actual"`;
   and an outside boundary whose weather-bus inputs come from no `ReaderTMY3` and no signal. With
-  storage, none of the 19 supported models needs any of the three.
+  storage, none of the 20 supported models needs any of the three.
 
 **Weather and wind.** A `ReaderTMY3` supplies the outside boundaries wired to it with the dry-bulb
 temperature, the atmospheric pressure, the relative humidity, the wind speed and the wind

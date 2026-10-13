@@ -1071,15 +1071,40 @@ class _Weather:
 RATE_STEP_FRACTION = 1e-4
 
 
-@dataclass
-class _BoundaryShadow:
-    """What `_Builder.boundary` reads, on other times (`_Builder.boundary_rates`)."""
-
-    med: AirMedium
-    sig: _Signals
-    weather: _Weather
-    species_names: list[str]
-    errors: list[str]
+def _boundary_values(comp: Component, med: AirMedium, sig: _Signals, weather: _Weather,
+                     species_names: list[str], errors: list[str]) -> dict | None:
+    p = comp.parameters
+    out: dict = {}
+    if p.get("use_X_in") or p.get("use_Xi_in"):
+        errors.append(f"{comp.name} ({comp.cls}): composition inputs (use_X_in, "
+                      f"use_Xi_in) are not supported")
+    if comp.cls in schema.OUTSIDE_FAMILY:
+        # BaseClasses/Outside.mo: pressure, temperature and humidity from the weather bus
+        # (module docstring, "Weather and wind").
+        air = weather.outside_air(comp)
+        if air is None:
+            return None
+        pv, Tv, Xw = air.p, air.T, air.X_w
+    else:
+        # Boundary_pT.mo:6-16: p = p_default, T = T_default unless the inputs are used.
+        pv = (sig.require(comp, "p_in") if p.get("use_p_in")
+              else _t(float(p.get("p", med.p_default))))
+        Tv = (sig.require(comp, "T_in") if p.get("use_T_in")
+              else _t(float(p.get("T", med.T_default))))
+        X = p.get("X", list(med.X_default))  # PartialSource_Xi_C.mo:15-18
+        Xw = _t(float(X[0]) if med.has_moisture and X else 0.0)
+    out["p"], out["T"], out["X_w"] = pv, Tv, Xw
+    C = []
+    for k in range(len(species_names)):
+        if p.get("use_C_in"):
+            C.append(sig.require(comp, f"C_in[{k + 1}]"))
+        else:  # PartialSource_Xi_C.mo:19-22: C = fill(0, nC)
+            values = p.get("C", [0.0] * len(species_names))
+            C.append(_t(float(values[k]) if k < len(values) else 0.0))
+    out["C"] = C
+    if any(v is None for v in (pv, Tv, *C)):
+        return None
+    return out
 
 
 class _Builder:
@@ -1109,38 +1134,8 @@ class _Builder:
 
     # ------------------------------------------------------------- boundaries
     def boundary(self, comp: Component) -> dict | None:
-        med, p = self.med, comp.parameters
-        out: dict = {}
-        if p.get("use_X_in") or p.get("use_Xi_in"):
-            self.errors.append(f"{comp.name} ({comp.cls}): composition inputs (use_X_in, "
-                               f"use_Xi_in) are not supported")
-        if comp.cls in schema.OUTSIDE_FAMILY:
-            # BaseClasses/Outside.mo: pressure, temperature and humidity from the weather bus
-            # (module docstring, "Weather and wind").
-            air = self.weather.outside_air(comp)
-            if air is None:
-                return None
-            pv, Tv, Xw = air.p, air.T, air.X_w
-        else:
-            # Boundary_pT.mo:6-16: p = p_default, T = T_default unless the inputs are used.
-            pv = (self.sig.require(comp, "p_in") if p.get("use_p_in")
-                  else _t(float(p.get("p", med.p_default))))
-            Tv = (self.sig.require(comp, "T_in") if p.get("use_T_in")
-                  else _t(float(p.get("T", med.T_default))))
-            X = p.get("X", list(med.X_default))  # PartialSource_Xi_C.mo:15-18
-            Xw = _t(float(X[0]) if med.has_moisture and X else 0.0)
-        out["p"], out["T"], out["X_w"] = pv, Tv, Xw
-        C = []
-        for k in range(len(self.species_names)):
-            if p.get("use_C_in"):
-                C.append(self.sig.require(comp, f"C_in[{k + 1}]"))
-            else:  # PartialSource_Xi_C.mo:19-22: C = fill(0, nC)
-                values = p.get("C", [0.0] * len(self.species_names))
-                C.append(_t(float(values[k]) if k < len(values) else 0.0))
-        out["C"] = C
-        if any(v is None for v in (pv, Tv, *C)):
-            return None
-        return out
+        return _boundary_values(comp, self.med, self.sig, self.weather, self.species_names,
+                                self.errors)
 
     def boundary_rates(self, names: list[str]) -> dict[str, dict[str, tuple]] | None:
         """The time derivatives of boundaries `names`' values on the grid, one-sided:
@@ -1167,10 +1162,9 @@ class _Builder:
         times = torch.cat([g + o * sides[side] for side, o in stencil])
         errors: list[str] = []
         sig = _Signals(self.doc, times, _component_kinds(self.doc), errors)
-        shadow = _BoundaryShadow(self.med, sig, _Weather(
-            self.doc, dict(self.graph.weather), sig, self.med, errors),
-            self.species_names, errors)
-        values = {nm: _Builder.boundary(shadow, self.by_name[nm]) for nm in names}
+        weather = _Weather(self.doc, dict(self.graph.weather), sig, self.med, errors)
+        values = {nm: _boundary_values(self.by_name[nm], self.med, sig, weather,
+                                       self.species_names, errors) for nm in names}
         _refuse([f"the boundary rates' stencil times: {e}" for e in errors])
         if any(v is None for v in values.values()):
             return None
@@ -1479,13 +1473,14 @@ class _Builder:
         if rates is not None:
             zero = torch.zeros(self.n_t, dtype=F64)
             for i, side in enumerate(("left", "right")):
-                put(f"thermal.x_boundary_rate_{side}",
+                put(f"modelica.thermal.x_boundary_rate_{side}",
                     _stack([rates[b]["T"][i] for b in g.boundaries]
                            + [zero for _ in pinned], self.n_t))
                 if "species" in layers:
                     rows = [[rates[b]["X_w"][i] if k == water else rates[b]["C"][k][i]
                              for k in range(K)] for b in g.boundaries]
-                    put(f"species.x_boundary_rate_{side}", _stack_nested(rows, K, self.n_t))
+                    put(f"modelica.species.x_boundary_rate_{side}",
+                        _stack_nested(rows, K, self.n_t))
         for key, value in self._inputs.items():
             put(key, (value, bool(value.ndim)))
         X_const = med.X_default[0] if med.has_moisture else 0.0

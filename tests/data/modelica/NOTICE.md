@@ -1,14 +1,14 @@
-The JSON and CSV files in this directory are derived from the Modelica Buildings Library
-(MBL) v13.0.0, commit `55abf579598ca81cae0a82f337350375958e6722`, by OpenModelica 1.27.1
-(`OpenModelica 1.27.1~2-g6db4671`) with `scripts/modelica_export.py`. They export the 8
-`Buildings.Airflow.Multizone.Validation.*` and 15 `Buildings.Airflow.Multizone.Examples.*`
-models, and five `Buildings.Fluid.Sources` models of the wind boundaries: the examples
-`Outside_Cp`, `Outside_CpLowRise`, `Outside_CpData` and `Outside_CpData_Angles`, and
-`Validation.Outside_CpData_Directions`. Each `.json` is the model's structure and parameters (format `noodl-modelica/1`,
-defined in `src/noodl/apps/building_physics/modelica/schema.py`) and each `.csv` is a
-reference simulation trajectory (`# key: value` header lines, then `time` and one column per
-compared variable). Every JSON records the MBL commit and the
-OpenModelica version it was generated with; every CSV repeats them in its header.
+The JSON and CSV files in this directory are derived from the Modelica Buildings Library (MBL)
+v13.0.0, commit `55abf579598ca81cae0a82f337350375958e6722`, by OpenModelica 1.27.1 (`OpenModelica
+1.27.1~2-g6db4671`) with `scripts/modelica_export.py`. They export the 8
+`Buildings.Airflow.Multizone.Validation.*` and 15 `Buildings.Airflow.Multizone.Examples.*` models,
+and five `Buildings.Fluid.Sources` models of the wind boundaries: the examples `Outside_Cp`,
+`Outside_CpLowRise`, `Outside_CpData` and `Outside_CpData_Angles`, and
+`Validation.Outside_CpData_Directions`. Each `.json` is the model's structure and parameters (format
+`noodl-modelica/1`, defined in `src/noodl/apps/building_physics/modelica/schema.py`) and each `.csv`
+is a reference simulation trajectory (`# key: value` header lines, then `time` and one column per
+compared variable). Every JSON records the MBL commit and the OpenModelica version it was generated
+with; every CSV repeats them in its header.
 
 The reference CSVs of the 13 dynamic models (`ClosedDoors`, `CO2TransportStep`,
 `NaturalVentilation`, `OneEffectiveAirLeakageArea`, `OneOpenDoor`, `OneRoom`,

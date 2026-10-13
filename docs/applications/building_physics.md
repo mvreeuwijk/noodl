@@ -444,15 +444,14 @@ adds nothing to MBL's own departure from the table (41 of 104 entries miss the t
 significant figures, in MBL as much as in noodl physics).
 
 **Weather and wind pressure.** The weather a `ReaderTMY3` puts on the bus (dry-bulb temperature,
-pressure, relative humidity, wind speed) and every wind boundary's `pWin` are compared at every
-row, separately from any time integration (`assemble.weather_columns`), on MBL's
-`Buildings.Fluid.Sources` examples (four orientations of `Outside_CpLowRise` and of
-`Outside_CpData` over a week from day 200, a full sweep of the wind direction over symmetric,
-asymmetric and narrow profiles), on `Outside_Cp` and on `PressurizationData`. Being the same arithmetic as MBL's, they
-are held to round-off, `|noodl - omc| <= 1e-12 |omc|` with no absolute floor; the weather comes
-out identical to the last bit, the calendar time included (MBL's `t - k lenWea + lenWea`
-rounds the model time to the spacing of doubles near a year, 3.7e-9 s, and noodl rounds it the
-same way):
+pressure, relative humidity, wind speed) and every wind boundary's `pWin` are compared at every row,
+separately from any time integration (`assemble.weather_columns`), on MBL's
+`Buildings.Fluid.Sources` examples (four orientations of `Outside_CpLowRise` and of `Outside_CpData`
+over a week from day 200, a full sweep of the wind direction over symmetric, asymmetric and narrow
+profiles), on `Outside_Cp` and on `PressurizationData`. Being the same arithmetic as MBL's, they are
+held to round-off, `|noodl - omc| <= 1e-12 |omc|` with no absolute floor; the weather comes out
+identical to the last bit, the calendar time included (MBL's `t - k lenWea + lenWea` rounds the
+model time to the spacing of doubles near a year, 3.7e-9 s, and noodl rounds it the same way):
 
 | Model | Worst relative error (weather) | Worst relative error (pWin) | Rows |
 |---|---|---|---|
@@ -473,16 +472,16 @@ reference's own precision. The reference CSVs were regenerated with DASSL at a t
 own error was of the order of the comparison: 5.6e-5 K on `ZonalFlow`, and a 5e-5 relative
 door-flow wiggle after `CO2TransportStep`'s pulse.
 
-noodl physics runs `scheme="midpoint"` and combines two runs, with steps in ratio 2, by
-Richardson extrapolation (`run.extrapolate`). The midpoint scheme is second order. The
-transport layers advance over two halves of each step, the first with the start-of-step flows,
-capacities and sources and the second with the end-of-step ones. Over the whole step the
-boundary values follow the cubic Hermite through their values and rates at both ends (the
-straight line where they are constant). The volumes' mass advances with the L-stable BDF2 rate.
-A zone that flushes much faster than a step then ends the step behind its boundary by its own
-flushing time at the step's end. Held at the step's mean flows and boundary values, it fell half
-a step behind, an error of first order that extrapolation cannot remove. Extrapolation needs the error to expand smoothly in the step,
-so the steps are laid out with care:
+noodl physics runs `scheme="midpoint"` and combines two runs, with steps in ratio 2, by Richardson
+extrapolation (`run.extrapolate`). The midpoint scheme is second order. The transport layers advance
+over two halves of each step, the first with the start-of-step flows, capacities and sources and the
+second with the end-of-step ones. Over the whole step the boundary values follow the cubic Hermite
+through their values and rates at both ends (the straight line where they are constant). The
+volumes' mass advances with the L-stable BDF2 rate. A zone that flushes much faster than a step then
+ends the step behind its boundary by its own flushing time at the step's end. Held at the step's
+mean flows and boundary values, it fell half a step behind, an error of first order that
+extrapolation cannot remove. Extrapolation needs the error to expand smoothly in the step, so the
+steps are laid out with care:
 
 - Every signal event (a step, a pulse edge, a ramp corner) is a step boundary.
 - Every **switch** is a step boundary too. A switch is where an element's law changes piece
@@ -510,7 +509,9 @@ where noodl physics' runs at 1, 2 and 4 substeps agree to 1e-10 kg/s and the ref
 2.9e-8 kg/s over its first rows. `NaturalVentilation`'s orifices at their reversal are
 5.0e-10 kg/s from it, where it moved by up to 3.7e-9 kg/s. `ClosedDoors`' crack flows are
 at most 1.3e-12 kg/s from it (the reference moved by 1.2e-11 kg/s), and `ReverseBuoyancy`'s
-door flow at 612 s 1.7e-8 kg/s (it moved by 2.2e-8 kg/s).
+door flow at 612 s 1.7e-8 kg/s (it moved by 2.2e-8 kg/s). `ReverseBuoyancy3Zones`' door flow now passes
+through the same allowance, since the two-halves scheme: its worst difference is 1.03e-6 relative
+(4.9e-9 kg/s absolute) against a reference resolution of 1.8e-8 kg/s.
 
 The `t = StartTime` row, MBL's `p_start` initialisation, is reproduced too. Worst relative
 error per variable, with the part beyond the reference's resolution in brackets where the two

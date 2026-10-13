@@ -401,6 +401,28 @@ def test_a_missing_weather_file_stops_the_export(exporter, tmp_path: Path) -> No
         exporter.attach_weather_files(doc, tmp_path)
 
 
+def test_an_unevaluated_weather_file_name_names_the_reader(exporter, tmp_path: Path) -> None:
+    doc = {"components": [{"name": "weaDat", "class": READER_CLASS, "parameters": {}}]}
+    with pytest.raises(exporter.ExportError, match="weaDat: weather file name filNam was not "
+                                                   "evaluated"):
+        exporter.attach_weather_files(doc, tmp_path)
+
+
+def test_two_weather_files_of_one_base_name_are_refused(exporter, tmp_path: Path) -> None:
+    a, b = tmp_path / "a" / "w.mos", tmp_path / "b" / "w.mos"
+    for f, rows in ((a, 2), (b, 3)):
+        f.parent.mkdir()
+        f.write_bytes(f"#1\ndouble tab1({rows},30)\n".encode())
+    out = tmp_path / "out"
+    out.mkdir()
+    doc = {"components": [
+        {"name": "w1", "class": READER_CLASS, "parameters": {"filNam": str(a)}},
+        {"name": "w2", "class": READER_CLASS, "parameters": {"filNam": str(b)}},
+    ]}
+    with pytest.raises(exporter.ExportError, match="two weather files are named w.mos"):
+        exporter.attach_weather_files(doc, out)
+
+
 def test_weather_class_sets_match_the_reader(exporter) -> None:
     assert exporter.WIND_BOUNDARIES == schema.OUTSIDE_WIND
     assert exporter.WEATHER_READERS == schema.WEATHER_READERS

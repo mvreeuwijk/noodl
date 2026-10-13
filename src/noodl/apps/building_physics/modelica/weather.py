@@ -215,7 +215,7 @@ def read_table(path: str | Path) -> WeatherTable:
 
 @functools.lru_cache(maxsize=8)
 def _read_table(path: str, mtime_ns: int, size: int) -> WeatherTable:
-    lines = Path(path).read_text().splitlines()
+    lines = Path(path).read_text(encoding="latin-1").splitlines()
     for k, line in enumerate(lines):
         m = _HEADER.match(line)
         if m is None or m.group(1) != TABLE:
@@ -396,7 +396,13 @@ def reader_outputs(comp: Component, doc: ModelicaDoc, times,
         if s == "File":
             value = _convert(q, table.spline(FILE_COLUMN[q])(cal))
         elif s == "Parameter":
-            value = torch.full_like(times, float(comp.parameters.get(q, DEFAULT_VALUE[q])))
+            raw = comp.parameters.get(q, DEFAULT_VALUE[q])
+            try:
+                value = torch.full_like(times, float(raw))
+            except (TypeError, ValueError):
+                raise ModelicaImportError(
+                    f"{where}: {q}Sou = Parameter, but parameter {q!r} = {raw!r} is not a number"
+                ) from None
         else:
             driven = signal(f"{q}_in")
             if driven is None:

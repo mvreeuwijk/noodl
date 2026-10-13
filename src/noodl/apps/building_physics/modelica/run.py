@@ -993,8 +993,8 @@ class _Midpoint:
                     # Two halves, the first with state 0's flows, capacity and sources,
                     # the second with state 1's; the boundary values through both ends,
                     # with their rates where they vary (class docstring).
-                    r0 = d0.get(f"{n}.x_boundary_rate_right")
-                    r1 = d1.get(f"{n}.x_boundary_rate_left")
+                    r0 = d0.get(f"modelica.{n}.x_boundary_rate_right")
+                    r1 = d1.get(f"modelica.{n}.x_boundary_rate_left")
                     if r0 is None or r1 is None:
                         xbm, rates0, rates1 = 0.5 * (xb0 + xb1), None, None
                     else:
