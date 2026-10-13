@@ -49,6 +49,11 @@ PAGES = [
     ("wsimod", "Flow allocation (WSIMOD)", "../applications/allocation.md",
      ["noodl.apps.wsimod"],
      "Rule-based allocation of water between stores on capacity-limited arcs."),
+    ("electrical", "Electrical circuits", "../applications/electrical.md",
+     ["noodl.apps.electrical"],
+     "Electrical circuits by Modified Nodal Analysis: resistors, capacitors, inductors, "
+     "sources and their waveforms, diodes, switches, transformers and controlled sources "
+     "(Modelica Standard Library device laws)."),
 ]
 
 ROLES = [

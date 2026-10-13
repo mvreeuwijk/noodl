@@ -66,6 +66,7 @@ nav:
       - Sewers: applications/sewer.md
       - Water distribution: applications/water.md
       - Flow allocation: applications/allocation.md
+      - Electrical circuits: applications/electrical.md
       - Coupling: applications/coupling.md
   - Catalogue:
       - Core library: catalogue/core.md
@@ -74,6 +75,7 @@ nav:
       - Sewers: catalogue/sewer.md
       - Water distribution: catalogue/water.md
       - Flow allocation (WSIMOD): catalogue/wsimod.md
+      - Electrical circuits: catalogue/electrical.md
   - Verification: verification.md
   - File formats:
       - formats/index.md
