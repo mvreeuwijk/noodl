@@ -290,7 +290,12 @@ edge labels), or positions `index`. `simulate(model, state, drivers, times, inpu
 evaluates every input at the **end** of each step, sets `drivers["time"]`, and steps the model.
 It returns the time histories at `times`, which start at 0 (a `Calendar` places that start
 in the year). Steps are split at every jump or kink of an input unless
-`land_on_breakpoints=False`.
+`land_on_breakpoints=False`. Each step's airflow solve starts from the previous step's
+pressures; when it does not converge from there (a fan curve after a large speed change can
+swing between the ends of its curve, where its slope is zero), the step is retried once from
+the linear initial guess, and a retry that fails too raises, naming the step.
+`simulate(..., diagnostics={})` lists the retried steps' end times under
+`"airflow_retries"`.
 
 ```python
 import torch
@@ -806,6 +811,7 @@ above 0.1 % of the largest.
 | Three-zone project with deposition sinks, removal terms and NRCC emissions, 24 steps | flow rel 16 $u$, mf rel 80 $u$, floor 64 $u$ × each species' max | **9.1e-8** flow, **1.3e-7** mf |
 | One-zone stack with a pressure-driven source, 288 steps | flow rel 64 $u$, mf rel 88 $u$, floor 64 $u$ × each species' max | **4.5e-8** flow, **7.4e-8** mf |
 | Three-zone project with a fan curve (mult 1.5) on a speed schedule 1, 0.8, off (its shut-off orifice) and 1.2, 24 steps | flow rel 32 $u$, mf rel 64 $u$, floor 64 $u$ × each species' max | **1.6e-7** flow, **5.8e-8** mf |
+| Three-zone project with a duct network (wind terminal, filtered Darcy-Colebrook duct, fan curve on a speed schedule, vertical rise, split to two terminals, one half closed from 01:00, damper and constant-volume exhaust), 24 steps | flow rel 64 $u$, mf rel 72 $u$, floor 64 $u$ × each species' max | **1.4e-7** flow, **1.0e-8** terminal flow, **5.4e-8** mf |
 | Three-zone project with the four cubic-spline elements (one crossed against its declared direction, zone two at 303.15 K, a 0.02 kg/s supply), 24 steps | flow rel 32 $u$, mf rel 64 $u$, floor 64 $u$ × each species' max | **1.1e-8** flow, **2.7e-8** mf |
 
 Sinks and the concentration-proportional parts of sources are implicit in ContamX's species

@@ -38,7 +38,8 @@ either direction; duct networks: duct elements `dct_dwc` (ContamX's friction law
 field has no effect, as in ContamX), `dct_plr`, `dct_fcn`, `dct_qcn`, `dct_cmf`, `dct_cvf`,
 `dct_fan`, `dct_bdq`, `dct_bdf`, `dct_fsp`, `dct_qsp`, `dct_psf`, `dct_psq`; junctions with
 their temperatures and initial concentrations and ContamX's volumes (half the length times
-the element area of every segment that meets them); terminals with their loss and balance
+the element area of every segment that meets them; a junction without volume, whose segments
+all have zero length, holds no air and carries the mix of what flows through it); terminals with their loss and balance
 coefficients (the duct-balancing data `bal`, `Fdes` and `Cbmax` is read and, as in ContamX,
 has no effect), filters, schedules (the opening, or the junction temperature when the week
 schedule's unit type is a temperature) and wind (an ambient terminal flagged for wind, from
@@ -66,7 +67,8 @@ zones and paths; duct leakage (a duct element's leakage rate); a schedule on a
 Darcy-Colebrook segment (ContamX ignores it); control nodes, kinetic reactions or value files on
 junctions, and control nodes or value files on segments; wind data on a terminal that is not
 an ambient terminal flagged for wind; a non-temperature schedule on a junction that is not a
-terminal; a duct network with `densZP = 1`; airflow modes other than steady and transient
+terminal; a duct network with `densZP = 1` or `dodMdt = 1` (the junctions' air mass under
+either is unmeasured); airflow modes other than steady and transient
 (duct balancing, the building airflow and pressurization tests); a constant wind pressure on
 an interior path; `sup_afe` super elements (ContamX 3.4.1.7 cannot simulate them); `stackD = 1` (densities varying with
 height inside a zone); a wind pressure profile with the trigonometric curve fit; a day schedule whose shape is
@@ -126,7 +128,9 @@ flows = project.path_flows(solved["air.q"])   # in CONTAM path-number order
 and time step), its schedules, and the weather and ambient-concentration files it names
 (resolved next to the `.prj`). Every input is evaluated at the end of each step, with no step
 split at a schedule's jump, and the zone air-mass change enters the airflow balance when the
-run control sets `dodMdt = 1`. A steady-airflow run returns the one steady state at the run
+run control sets `dodMdt = 1`. A step whose airflow solve does not converge from the previous
+step's pressures is retried once from the linear initial guess (`diagnostics={}` lists such
+steps under `"airflow_retries"`). A steady-airflow run returns the one steady state at the run
 control's steady instant. Cyclic contaminant runs, integration other than the trapezoid
 method with weight 1 (implicit Euler), steady airflow with transient contaminants, transient
 airflow with steady contaminants (ContamX solves those to steady state at every step), and a run

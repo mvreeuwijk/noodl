@@ -709,3 +709,37 @@ def test_pressure_readers_of_different_potentials_are_refused_by_name():
         simulate(model, state, drivers, [0.0, 300.0])
     with pytest.raises(ValueError, match=r"prj\.steady: .*_VentSpy read 'vent\.phi'"):
         steady(model, state, drivers)
+
+
+DUCTS = DATA / "duct_three_zone.prj"
+
+
+def test_a_step_whose_airflow_fails_from_the_previous_pressures_is_retried_cold():
+    """`duct_three_zone.prj`: the supply fan slows from speed 1 to 0.7 in the step ending
+    00:35. From the previous pressures the fan's iterates swing between the ends of its curve
+    (zero slope there) and the solve does not converge; from the linear initial guess it
+    does, to ContamX's terminal flows (printed to 6 decimals)."""
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    project = read_prj(DUCTS)
+    diagnostics: dict = {}
+    out = simulate_project(project, diagnostics=diagnostics, **TIGHT)
+    assert diagnostics["airflow_retries"] == [2100.0]
+    torch.testing.assert_close(
+        out["terminal_flow"][7], _f(-0.221193, 0.145004, 0.076189, -0.048164, 0.048164),
+        rtol=0, atol=5e-7)
+
+
+def test_a_step_whose_retry_fails_too_raises_naming_the_step(monkeypatch):
+    model, state, drivers = project_to_model(read_prj(THREE))
+    calls = []
+
+    def failing(self, *args, **kwargs):
+        calls.append(args[0].keys() & {"air.phi"})
+        raise RuntimeError("did not converge")
+
+    monkeypatch.setattr(Model, "step", failing)
+    with pytest.raises(RuntimeError, match=r"ending at t = 300.0 s.*previous step's pressures"
+                                            r".*linear initial guess"):
+        simulate(model, state, drivers, [0.0, 300.0])
+    assert calls == [{"air.phi"}, set()]       # warm, then without the previous pressures

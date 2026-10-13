@@ -706,11 +706,6 @@ DUCTS = DATA / "duct_three_zone.prj"
 
 
 @pytest.mark.external
-@pytest.mark.xfail(strict=True, raises=RuntimeError, reason=(
-    "the airflow Newton started from the previous step's pressures cycles when the supply "
-    "fan's speed drops to 0.7 (step ending 00:35): its iterates alternate between the fan "
-    "curve's shut-off and free-delivery clips, where the curve's slope is zero; awaiting a "
-    "ruling (curve continuation or a cold restart)"))
 def test_a_duct_network_matches_contamx(contamx, tmp_path, record_property):
     """`duct_three_zone.prj` (fixture NOTICE): wind terminal, filtered Colebrook duct, fan
     curve on a speed schedule, vertical rise, split to two terminals (one half closed from

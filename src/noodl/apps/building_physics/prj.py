@@ -17,7 +17,7 @@ index (control, AHS) raises ValueError naming it, as does a non-trace species, a
 held at constant pressure, a simple air-handling system, an unsupported element type, a
 constant wind pressure on an interior path, duct leakage, a control node or a value file on
 a junction or segment, a schedule on a Darcy-Colebrook duct segment and a duct network with
-densZP = 1. A schedule number that no week schedule carries raises KeyError naming the
+densZP = 1 or dodMdt = 1. A schedule number that no week schedule carries raises KeyError naming the
 zone, path, junction or segment.
 
 The control-node section is the motivating case for "skipped, not refused": NIST's own sample
@@ -1555,6 +1555,9 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
             raise ValueError("prj: densZP = 1 in a project with a duct network is "
                              "unsupported (junction densities at their absolute pressure "
                              "are not modelled)")
+        if run_control.zone_mass_change:
+            raise ValueError("prj: dodMdt = 1 in a project with a duct network is "
+                             "unsupported (the junctions' air mass under it is not modelled)")
         ctx = BuildContext(net=net, ambient=ambient, zone_name=node_of, week=week,
                            schedule_units=schedule_units, filter_of=filter_of, g=g,
                            profiles=profiles, inputs=inputs, edge_filters=edge_filters,
@@ -1805,10 +1808,15 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         if project.edge_filters:
             transmission = filter_transmission(net, project.kinds, project.species_records,
                                                project.edge_filters)
+        # A duct junction without volume (its segments all of zero length, a fan's say) holds
+        # no air: a storage-free node, whose mass fraction is the mix of what flows in.
+        storage_free = [j for j in project.junctions
+                        if volumes[net.node_index(j)].item() == 0.0]
         layers["species"] = species_layer(
             net, ambient=project.ambient, flow_kinds=tuple(project.kinds),
             n_species=len(project.species), scheme=scheme, rho=rho,
             species_names=project.species, kinetics=kinetics, transmission=transmission,
+            storage_free=storage_free,
         )
     cap_nodes = layers["species"].interior_idx if "species" in layers else None
     density = PrescribedTemperatureDensity(

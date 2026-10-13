@@ -125,7 +125,7 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
              inputs: Sequence[Input] = (), calendar: Calendar | None = None,
              air_mass_change: bool | None = None, land_on_breakpoints: bool = True,
              zone_pressure_rtol: float = 1e-12, zone_pressure_max_iter: int = 10,
-             **step_kwargs) -> dict[str, Tensor]:
+             diagnostics: dict | None = None, **step_kwargs) -> dict[str, Tensor]:
     """Time histories at `times` (s since the start, increasing, `times[0] == 0`; the
     calendar places that start in the year).
 
@@ -134,6 +134,13 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     kink of an input inside it (ContamX does not: `simulate_project` passes False). See the
     module docstring for `air_mass_change` and the zone-pressure fixed point. `step_kwargs`
     reach `Model.step` and the airflow solves (`atol`, `rtol`, ...).
+
+    Each step's airflow solve starts from the previous step's pressures. When it does not
+    converge from there (a fan whose iterates swing between the ends of its curve, where its
+    slope is zero, after a large speed change), the step is retried once from the airflow
+    layers' linear initial guess, as the first solve of the run is; a retry that fails too
+    raises, naming the step. `diagnostics`, when given, receives `"airflow_retries"`: the end
+    time (s) of every step that was retried.
 
     Returns `"time"` `(N,)`, and per row the state's `"<layer>.q"`, `"<layer>.phi"` of every
     potential layer and `"<layer>.x"` of every transport layer, stacked on a leading axis.
@@ -189,6 +196,8 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     keys = [f"{n}.{s}" for n in model.potential for s in ("q", "phi")]
     keys += [f"{n}.x" for n in model.transport]
     rows: dict[str, list[Tensor]] = {k: [state[k]] for k in keys}
+    retries: list[float] = []
+    warm_keys = {f"{n}.phi" for n in model.potential}
     t = ts[0]
     for t_out in ts[1:]:
         cuts = input_breakpoints(bound, t, t_out, cal) if land_on_breakpoints else []
@@ -203,13 +212,27 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
             if mass is not None:
                 d[mass_source.mass_key] = mass
 
-            def run(s, d=d, dt=dt, t0=t0, start=state):
+            def run(s, d=d, dt=dt, t0=t0, t1=t1, start=state):
                 # Every pass advances the SAME step from its start state; only the zone
                 # pressures the closures read are updated between passes.
                 step_from = dict(start)
                 if step_key is not None and step_key in s:
                     step_from[step_key] = s[step_key]
-                return model.step(step_from, d, dt, t=t0, **step_kwargs)
+                try:
+                    return model.step(step_from, d, dt, t=t0, **step_kwargs)
+                except RuntimeError as warm:
+                    # Without the previous pressures each airflow solve starts from its
+                    # layer's linear initial guess.
+                    cold = {k: v for k, v in step_from.items() if k not in warm_keys}
+                    try:
+                        out = model.step(cold, d, dt, t=t0, **step_kwargs)
+                    except RuntimeError as again:
+                        raise RuntimeError(
+                            f"simulate: step of {dt} s ending at t = {t1} s: the airflow "
+                            f"solve failed from the previous step's pressures ({warm}) and "
+                            f"again from the linear initial guess ({again})") from again
+                    retries.append(t1)
+                    return out
 
             state = _fixed_point(run, state, step_key, zone_pressure_rtol, zone_pressure_max_iter,
                                  P_of(d), f"step of {dt} s ending at t = {t1} s", cause)
@@ -220,10 +243,13 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
             rows[k].append(state[k])
     out = {k: _stack(v) for k, v in rows.items()}
     out["time"] = torch.tensor(ts, dtype=F64)
+    if diagnostics is not None:
+        diagnostics["airflow_retries"] = retries
     return out
 
 
-def simulate_project(project, *, inputs: Sequence[Input] = (), **step_kwargs) -> dict[str, Tensor]:
+def simulate_project(project, *, inputs: Sequence[Input] = (), diagnostics: dict | None = None,
+                     **step_kwargs) -> dict[str, Tensor]:
     """Run a `.prj` project the way ContamX does: its run control (start, end, time step), its
     schedules, its weather and ambient-concentration files (resolved next to the `.prj`), with
     the time step fixed (no step split at a schedule's jump, as in ContamX) and the zone
@@ -232,7 +258,8 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), **step_kwargs) ->
     for a project with a duct network, `"terminal_flow"` (N, n_terminals): the flow out of
     each duct terminal into its zone, in junction-number order. The species histories carry
     the zones' rows first, then the junctions' (`project.zone_mass_fractions` selects the
-    zones).
+    zones). `diagnostics` is `simulate`'s (the steps whose airflow solve was retried from the
+    linear initial guess; none for a steady run).
 
     A steady airflow run (with no or steady contaminants) returns the one steady state at the
     run control's steady day, time and day type. Refused by name: cyclic contaminant runs,
@@ -281,6 +308,8 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), **step_kwargs) ->
                for n in model.potential for s in ("q", "phi")}
         out.update({f"{n}.x": out_state[f"{n}.x"].unsqueeze(0) for n in model.transport})
         out["time"] = torch.zeros(1, dtype=F64)
+        if diagnostics is not None:
+            diagnostics["airflow_retries"] = []
         out["path_flow"] = project.path_flows(out["air.q"])
         if project.terminals:
             out["terminal_flow"] = project.terminal_flows(out["air.q"])
@@ -296,7 +325,7 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), **step_kwargs) ->
                         day_types=weather.day_types if weather and weather.day_types else None)
     times = torch.arange(n + 1, dtype=F64) * rc.time_step
     out = simulate(model, state, drivers, times, inputs=all_inputs, calendar=calendar,
-                   land_on_breakpoints=False,
+                   land_on_breakpoints=False, diagnostics=diagnostics,
                    **step_kwargs)
     out["path_flow"] = project.path_flows(out["air.q"])
     if project.terminals:

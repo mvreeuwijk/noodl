@@ -1255,17 +1255,35 @@ def test_duct_records_contamx_cannot_run_or_ignores_are_refused(tmp_path):
                           "     2      1     30   1e-05", tmp_path))
 
 
-def test_the_air_mass_change_covers_the_zones_not_the_junctions(tmp_path):
-    """The zone air-mass change (`dodMdt = 1`) acts on the zones; the junctions carry none."""
-    from noodl.apps.building_physics.prj import ZoneAirMassChange
-
+def test_a_duct_network_with_the_zone_air_mass_change_is_refused(tmp_path):
+    """Under `dodMdt = 1` the junctions' air mass is unmeasured: refused like `densZP`."""
     dens = "   0    0.75    20     1      0      0      0"
-    p = read_prj(_variant(DUCTS.read_text(), dens,
+    with pytest.raises(ValueError, match=r"dodMdt = 1.*duct network"):
+        read_prj(_variant(DUCTS.read_text(), dens,
                           "   0    0.75    20     1      0      0      1", tmp_path))
+
+
+def test_a_junction_without_volume_is_a_storage_free_node(tmp_path):
+    """Zero-length damper and exhaust-fan segments leave junctions 7, 8 and 9 without volume:
+    they hold no sarin, so each carries exactly the mass fraction of the zone-three air
+    passing through them, every step."""
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    p = read_prj(_variants(DUCTS.read_text(), [
+        ("  6  0   7   8   5   0   0   0   4 1 ", "  6  0   7   8   5   0   0   0   4 0 "),
+        ("  7  0   8   9   6   0   0   0   4 6 ", "  7  0   8   9   6   0   0   0   4 0 "),
+    ], tmp_path))
+    volumes = p.net.node_attr("volume")
+    free = [f"junction {k}" for k in (7, 8, 9)]
+    assert [volumes[p.net.node_index(j)].item() for j in free] == [0.0, 0.0, 0.0]
     model, _, _ = project_to_model(p)
-    (source,) = [s for s in model.potential["air"].node_sources
-                 if isinstance(s, ZoneAirMassChange)]
-    assert source.nodes.tolist() == [p.net.node_index(z) for z in p.zones]
+    assert model.transport["species"].storage_free_mask.sum().item() == 3
+    out = simulate_project(p, atol=1e-15, rtol=0.0)     # junction inflow = outflow
+    x = out["species.x"][1:, :, 0]
+    rows = [3 + p.junctions.index(j) for j in free]
+    zone_three = x[:, 2:3].expand(-1, 3)
+    torch.testing.assert_close(x[:, rows], zone_three, rtol=1e-12, atol=0)
+    assert bool((zone_three[-1] > 1e-4).all())
 
 
 def test_simulate_project_reports_the_terminal_flows(tmp_path):
