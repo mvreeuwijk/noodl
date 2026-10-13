@@ -24,6 +24,7 @@ from noodl.apps.building_physics.air_handling import (
     SUPPLY,
 )
 from noodl.apps.building_physics.inputs import Input
+from noodl.apps.building_physics.prj_controls import Actuation
 from noodl.apps.building_physics.thermal import RHO_0
 from noodl.drives import ConstantDrive, DuctStack, Stack, Wind
 from noodl.elements import (
@@ -62,11 +63,13 @@ TEMPERATURE_UNITS = 5          # ContamW's unit type of a temperature schedule
 #                 terminal only when its flags carry the value 1 (measured); bal, Af, Fdes
 #                 and Cbmax are duct-balancing data and are not used. The junction's schedule is its
 #                 temperature when the week schedule's unit type is 5, else (a terminal) the
-#                 terminal's opening S.
+#                 terminal's opening S. A control node on a terminal is its opening, as a
+#                 schedule; on a plain junction it is refused (not measured).
 #   initial junction concentrations   rows `J# x1 .. xK`; the count is values.
 #   segment       17 fields `nr flags n# m# e# f# s# c# dir len Ain Aout sllc clr u_L u_A
 #                 vf`: from junction n# to m#, duct element e#, filter, schedule, control,
-#                 length (m), sum of dynamic loss coefficients. Ain/Aout are not used.
+#                 length (m), sum of dynamic loss coefficients. Ain/Aout are not used. A
+#                 control node acts as a schedule there (a fan's speed, else a multiplier).
 #   simple AHS    `nr zr zs pr ps px clr name`, then a description line: the return and
 #                 supply plenum zones and the recirculation, outdoor-air and exhaust path
 #                 numbers. ContamX ignores the path and zone numbers (measured): it finds the
@@ -119,6 +122,7 @@ class JunctionRecord:
     z: float                         # absolute height, m
     T0: float
     terminal: TerminalData | None
+    control_nr: int = 0              # control node (a terminal's opening); 0 = none
 
 
 @dataclass
@@ -131,6 +135,7 @@ class SegmentRecord:
     schedule_nr: int
     length: float
     loss: float
+    control_nr: int = 0              # control node acting as its schedule would; 0 = none
 
 
 @dataclass
@@ -151,6 +156,7 @@ class BuildContext:
     built: list
     drives: list
     constant_wind_pressure: dict
+    actuations: list[Actuation] = field(default_factory=list)
 
 
 @dataclass
@@ -161,6 +167,7 @@ class DuctBuild:
     multiplier_edges: dict[str, int] = field(default_factory=dict)
     speed_edges: dict[str, int] = field(default_factory=dict)
     terminal_openings: int = 0
+    junction_nr_to_name: dict[int, str] = field(default_factory=dict)
 
 
 def _record(lines, section: str, count: int, read: int) -> list[str]:
@@ -215,9 +222,6 @@ def read_junctions(lines, count: int, out: list[JunctionRecord],
         if pk:
             raise ValueError(f"prj: junction {nr} references kinetic reaction {pk} "
                              f"(unsupported in a duct)")
-        if pc:
-            raise ValueError(f"prj: junction {nr} references control node {pc} "
-                             f"(unsupported)")
         if int(base[20]):
             raise ValueError(f"prj: junction {nr} reads a value file (unsupported)")
         if pld not in levels:
@@ -233,8 +237,11 @@ def read_junctions(lines, count: int, out: list[JunctionRecord],
         elif jtype != 0:
             raise ValueError(f"prj: junction {nr} has junction type {jtype}; 0 (junction), 1 "
                              f"and 3 (terminal) are supported")
+        if pc and terminal is None:
+            raise ValueError(f"prj: junction {nr} references control node {pc}: a control on "
+                             f"a junction that is not a terminal is not supported")
         out.append(JunctionRecord(nr, flags, zone, ps, levels[pld] + float(base[11]),
-                                  float(base[12]), terminal))
+                                  float(base[12]), terminal, control_nr=pc))
     lines.expect_end("duct junctions")
 
 
@@ -247,11 +254,10 @@ def read_duct_segments(lines, count: int, out: list[SegmentRecord]) -> None:
                              f"{_SEGMENT_FIELDS}; a value file appends a name, which is "
                              f"unsupported: {' '.join(tok)}")
         n, m, e, f, s, c = (int(v) for v in tok[2:8])
-        if c:
-            raise ValueError(f"prj: segment {nr} references control node {c} (unsupported)")
         if int(tok[16]):
             raise ValueError(f"prj: segment {nr} reads a value file (unsupported)")
-        out.append(SegmentRecord(nr, n, m, e, f, s, float(tok[9]), float(tok[12])))
+        out.append(SegmentRecord(nr, n, m, e, f, s, float(tok[9]), float(tok[12]),
+                                 control_nr=c))
     lines.expect_end("duct segments")
 
 
@@ -325,7 +331,7 @@ def build_ducts(ctx: BuildContext, elements: dict[int, DuctElementRecord],
         net.add_node(names[j.nr], z_ref=j.z, volume=volumes[j.nr], T0=j.T0,
                      heat_capacity=0.0)
 
-    build = DuctBuild([names[j.nr] for j in junctions], [], [])
+    build = DuctBuild([names[j.nr] for j in junctions], [], [], junction_nr_to_name=names)
     by_kind: dict[str, list[SegmentRecord]] = {}
     columns: dict[str, list[int]] = {}
     for s in segments:
@@ -341,15 +347,22 @@ def build_ducts(ctx: BuildContext, elements: dict[int, DuctElementRecord],
         _check_edge_order(net, kind, columns[kind])
         src, tgt = net.endpoints(kind)
         scheduled = [s for s in members if s.schedule_nr]
+        controlled = [s for s in members if s.control_nr]
         if scheduled and el.dtype == "dct_dwc":
             raise ValueError(
                 f"prj: segment {scheduled[0].nr} schedules Darcy-Colebrook duct element "
                 f"{el.nr}; ContamX ignores a schedule there, so it is refused")
-        speed_key = f"fan_speed.{kind}" if scheduled and el.dtype == "dct_fan" else None
+        if controlled and el.dtype == "dct_dwc":
+            raise ValueError(
+                f"prj: segment {controlled[0].nr} references control node "
+                f"{controlled[0].control_nr} on Darcy-Colebrook duct element {el.nr}; "
+                f"ContamX ignores a schedule there, so a control is refused too")
+        driven = scheduled or controlled
+        speed_key = f"fan_speed.{kind}" if driven and el.dtype == "dct_fan" else None
         element = duct_element(el, kind=kind, src=src, tgt=tgt, members=members,
                                speed_key=speed_key)
         key = speed_key
-        if scheduled and speed_key is None:
+        if driven and speed_key is None:
             key = f"flow_multiplier.{kind}"
             element = Scaled(element, key)
             build.multiplier_edges[kind] = len(members)
@@ -359,6 +372,9 @@ def build_ducts(ctx: BuildContext, elements: dict[int, DuctElementRecord],
             ctx.inputs.append(Input(ctx.week(s.schedule_nr, f"segment {s.nr}"), key,
                                     index=members.index(s),
                                     name=f"segment {s.nr} schedule {s.schedule_nr}"))
+        for s in controlled:
+            ctx.actuations.append(Actuation(s.control_nr, key, (members.index(s),),
+                                            f"segment {s.nr}"))
         ctx.built.append(element)
         ctx.drives.append(DuctStack.from_network(net, kind, g=ctx.g))
     _build_terminals(ctx, junctions, names, build)
@@ -392,6 +408,11 @@ def _build_terminals(ctx: BuildContext, junctions: list[JunctionRecord],
         if t.filter_nr:
             ctx.edge_filters[edge] = ctx.filter_of(t.filter_nr, f"terminal {j.nr}")
     order = [j.nr for j in terminals]
+    for j in terminals:
+        if j.control_nr:
+            build.terminal_openings = len(terminals)
+            ctx.actuations.append(Actuation(j.control_nr, f"terminal_opening.{TERMINAL_KIND}",
+                                            (order.index(j.nr),), f"terminal {j.nr}"))
     for j in junctions:
         if not j.schedule_nr:
             continue

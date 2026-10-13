@@ -631,10 +631,12 @@ continuous controller would not: take steps short against the loop's time consta
 
 The network is a closure of the model, the first one: `build_model(..., controls=network)`
 puts it ahead of the density closure, so its writes reach every other closure. Its block
-outputs and its blocks' memory travel in the state as `"controls.outputs"` and
-`"controls.memory"`, which `build_model(..., return_inputs=True)` and `project_to_model`
-seed. The seeded outputs are NaN: until the network is first evaluated it writes nothing, so
-a query or `Model.check` on the initial state sees the drivers as the inputs leave them.
+outputs, its blocks' memory and whether it has been evaluated travel in the state as
+`"controls.outputs"`, `"controls.memory"` and `"controls.evaluated"`, which
+`build_model(..., return_inputs=True)` and `project_to_model` seed. The seed says "not
+evaluated" (and its outputs are NaN): until the network is first evaluated it writes nothing,
+so a query or `Model.check` on the initial state sees the drivers as the inputs leave them.
+In a batch, a member not evaluated yet keeps its drivers the same way.
 Inputs are applied before the closures run, so a control overrides a schedule on the same
 driver entry, as in CONTAM.
 
@@ -645,8 +647,9 @@ Timing in a sampled network follows ContamX:
 - a flow or pressure sensor reads the last airflow solve, and 0 before the first;
 - a sensor of a driver (a prescribed temperature, an outdoor mass fraction) reads the value
   the previous step used; the first evaluation reads the current value;
-- a block that reads a block later in the list gets that block's previous output, 0 before
-  the first evaluation. The network evaluates in the order given and never reorders.
+- a block that reads a block later in the list gets that block's previous output; before
+  the first evaluation it gets 0, or a `Constant`'s value (ContamX presets its constant
+  nodes). The network evaluates in the order given and never reorders.
 
 `simulate` evaluates a sampled network once before the initial airflow, with the first
 step's length, so a control acts in the first row already while its flow and pressure
@@ -723,6 +726,44 @@ initial airflow, later the one decided from the state the step ending there star
 The fan starts before the room reaches the set point: the proportional part answers the
 rising CO2 while the integral part still pulls down. It settles where it removes the source:
 4e-5 kg/s over the set point's 0.6 g/kg above the outdoor air is 0.067 kg/s.
+
+**From a `.prj`.** `read_prj` reads a project's control nodes (`Project.control_nodes`) and
+plans the ones that a zone's, path's, source's, duct segment's, terminal's or air-handler
+path's control reference, or a named report node, needs (`Project.control_plan`), in the
+file's sequence order; `project_to_model` builds them into a new sampled network, first among
+the closures, for every model. A control reference acts on what a schedule on the same record
+acts on (a zone's `"T"`, a path's flow multiplier or fan speed, a source's multiplier, a
+terminal's opening, an air handler's flows), and a schedule node is an `Input` on
+`"controls.input"`. `project.control_outputs(out["controls.outputs"])` picks the named report
+nodes, ContamX's control outputs, from a history; `simulate_project` returns them as
+`"control"`. `dcv_three_zone.prj` (in `tests/data/contam`) is demand-controlled ventilation:
+a PI controller on zone one's CO2 above 650 ppm (by mass) drives an exhaust fan, never below
+0.2 of its flow, while the occupants are in from 08:00 to 18:00:
+
+```python
+from noodl.apps.building_physics import read_prj, simulate_project
+
+project = read_prj("dcv_three_zone.prj")
+print([name for name, _ in project.control_plan.outputs])
+out = simulate_project(project)
+for k in (96, 108, 120, 144, 216, 240):                 # 300 s steps from midnight
+    co2, pi, fan, excess = out["control"][k].tolist()
+    print(f"{k * 5 // 60:02d}:00  CO2 {co2:6.1f} ppm  PI {pi:.3f}  fan {fan:.3f}")
+```
+
+```text
+['co2', 'pi', 'fan', 'excess']
+08:00  CO2  600.0 ppm  PI 0.000  fan 0.200
+09:00  CO2  644.1 ppm  PI 0.003  fan 0.200
+10:00  CO2  660.6 ppm  PI 0.313  fan 0.313
+12:00  CO2  653.7 ppm  PI 0.846  fan 0.846
+18:00  CO2  650.0 ppm  PI 0.898  fan 0.898
+20:00  CO2  605.2 ppm  PI 0.000  fan 0.200
+```
+
+The fan runs at its 0.2 floor until the CO2 nears the set point, around 09:00; the PI
+output then rises until the exhaust holds zone one at 650 ppm, and falls back to 0 once the
+occupants leave.
 
 ## The API
 
@@ -1476,14 +1517,17 @@ regression at rtol 1e-8.
   above); `read_modelica(..., mass_storage=False)` gives the quasi-steady airflow there too, and
   the [storage-dominated parity group](#against-openmodelica-modelica-buildings-library) shows
   what that costs.
-- **Control nodes are not yet supported.** A zone, path or source that references a control
-  node is refused by name; unreferenced control nodes are skipped.
+- **Control nodes cover ContamX's sensors, schedules, arithmetic, logic, switches,
+  hysteresis and P and PI controllers.** Integration, running-average, delay, modifier,
+  super and phantom nodes and value files are refused by name when an actuator or a named
+  report node depends on them (unused, they are ignored), as are occupancy and exposure
+  sensors, a flow or pressure-difference sensor on a doorway, a control on a plain duct
+  junction, on a triggered source or on an AHS outdoor-air or exhaust path, and controls in
+  a steady airflow run.
 - **Duct leakage, duct balancing and super airflow elements are refused by name.** Duct leakage
   (a duct element's leakage rate) and ContamX's duct-balancing run mode are not modelled;
   `sup_afe` super elements cannot be simulated by ContamX itself. A schedule on a
   Darcy-Colebrook duct segment is refused because ContamX ignores it.
-- **Controls on ducts and air handlers come with the controls work**: a junction, segment or
-  air-handler path that references a control node is refused by name.
 - **A learnable duct roughness is not re-checked.** `AirDuct` refuses a roughness of 3.7
   diameters or more (the Colebrook equation has no solution beyond) when it is built; with
   `learnable=True` an optimiser can later push the roughness past that bound unchecked, so

@@ -58,10 +58,10 @@ STEP = StepContext(dt=300.0, t=0.0)
 
 
 def advance(network, state, drivers, ctx=STEP):
-    """One evaluation; the state carries the network's outputs and memory forward."""
+    """One evaluation; the state carries the network's outputs, memory and evaluated flag
+    forward."""
     out = network(state, drivers, ctx)
-    new = {**state, network.outputs_key: out[network.outputs_key],
-           network.memory_key: out[network.memory_key]}
+    new = {**state, **{k: out[k] for k in network.state_keys}}
     return out, new
 
 
@@ -236,7 +236,7 @@ def test_the_network_is_a_model_closure_that_carries_its_state():
     net = ControlNetwork([DriverValue("controls.input", 0)],
                          [Actuator(0, "flow_multiplier.fan", (0,))])
     assert net.integrates is True
-    assert net.state_keys == ("controls.outputs", "controls.memory")
+    assert net.state_keys == ("controls.outputs", "controls.memory", "controls.evaluated")
     assert "controls.input" in net.inputs
     assert "flow_multiplier.fan" in net.outputs
     assert math.isnan(Sensor(DriverReading("T", 0)).initial_memory()[0])
@@ -844,3 +844,44 @@ def test_a_controlled_project_is_seeded_and_checks_without_warnings():
     assert not report.errors and not report.warnings, str(report)
     out = simulate(model, state, drivers, [0.0, 300.0], atol=1e-14, rtol=1e-14)
     assert out["controls.outputs"][:, 0].tolist() == [303.15, 303.15]
+
+
+def test_a_constant_later_in_the_order_is_read_before_its_first_evaluation():
+    """ContamX presets its constant nodes: a node reading a constant later in the sequence
+    sees its value at the first evaluation (measured: set 1 / later set 2 gives 0.5 from
+    t = 0), whereas any other later block reads 0 there."""
+    net = ControlNetwork([Constant(1.0), Divide(0, 2), Constant(2.0),
+                          Identity(4), DriverValue("controls.input", 0)])
+    out, state = advance(net, net.initial_state(), values(0.7))
+    assert out[net.outputs_key].tolist() == [1.0, 0.5, 2.0, 0.0, 0.7]
+    assert advance(net, state, values(0.7))[0][net.outputs_key].tolist()[3] == 0.7
+
+
+def test_the_evaluated_flag_not_the_outputs_decides_what_is_written():
+    """A state whose outputs are numbers but whose flag says "not evaluated" writes
+    nothing; a batch whose second member is not evaluated yet keeps that member's driver."""
+    net = ControlNetwork([DriverValue("controls.input", 0)], [Actuator(0, "T", (1,))])
+    drivers = {"T": torch.tensor([280.0, 293.15], dtype=F64)}
+    unevaluated = {**net.initial_state(),
+                   net.outputs_key: torch.tensor([303.15], dtype=F64)}
+    assert "T" not in net(unevaluated, drivers)
+    batch = {net.outputs_key: torch.tensor([[303.15], [math.nan]], dtype=F64),
+             net.memory_key: torch.zeros(2, 0, dtype=F64),
+             net.evaluated_key: torch.tensor([1.0, 0.0], dtype=F64)}
+    written = net(batch, drivers)["T"]
+    assert written.tolist() == [[280.0, 303.15], [280.0, 293.15]]
+    whole = ControlNetwork([DriverValue("controls.input", 0)], [Actuator(0, "P_ref")])
+    with pytest.raises(ValueError, match=r"actuator 'P_ref'.*some members are not "
+                                         r"evaluated"):
+        whole({**batch, whole.outputs_key: batch[net.outputs_key]}, {})
+
+
+def test_a_nested_hold_keeps_the_outer_one():
+    net = ControlNetwork([DriverValue("controls.input", 0)])
+    _, state = advance(net, net.initial_state(), values(0.5))
+    with net.held():
+        with net.held():
+            pass
+        out, _ = advance(net, state, values(0.9))
+    assert out[net.outputs_key].tolist() == [0.5]           # still held: not evaluated again
+    assert advance(net, state, values(0.9))[0][net.outputs_key].tolist() == [0.9]

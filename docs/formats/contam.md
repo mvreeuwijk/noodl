@@ -54,10 +54,29 @@ flows, schedules (on `"flow_multiplier.ahs_<nr>"`) and filters, the recirculatio
 outdoor-air and exhaust paths with their filters, the outdoor-air fraction schedule (on
 `"outdoor_air_fraction.ahs_<nr>"`) and the minimum outdoor-air flow (both read from the
 recirculation path, as ContamX reads them; ContamX finds the implicit paths by their flags,
-not by the numbers in the AHS record, which noodl checks against them).
+not by the numbers in the AHS record, which noodl checks against them); control nodes:
+sensors (`sns`: zone and junction mass fraction, temperature and gauge pressure; path, duct
+segment and terminal flow and pressure difference; with their offset, scale and time
+constant), schedule (`sch`), constant (`set`), pass and report (`pas`, `log`), arithmetic
+(`add`, `sub`, `mul`, `div`, `sum`, `avg`, `max`, `min`, `abs`), logic (`bin`, `inv`, `and`,
+`or`, `xor`), limit switches and limit controls (`lls`, `uls`, `lbs`, `ubs`, `llc`, `ulc`),
+hysteresis (`hys`), proportional and PI control (`pc1`, `pi1`); control references on zones
+(temperature), paths, sources, duct segments, terminals and AHS paths, acting on what a
+schedule there acts on and taking precedence over it. The nodes that an actuator or a named
+report node (a `pas` node with a name, which ContamX reports through its API) depends on
+become a sampled `ControlNetwork`, first among the model's closures; `project_to_model`
+builds a new one for every model, and `simulate_project(...)["control"]` returns the named
+report nodes' values in node order.
 
-**Refused by name**, rather than silently dropped: control nodes referenced by nonzero
-index; boundary-layer diffusion (`bls`), resuspension (`dvr`)
+**Refused by name**, rather than silently dropped: a control node of another type (`mod`,
+`int`, `rav`, `dls`, `dlx`, `sup`, `cvf`, `dvf`, phantom nodes) when an actuator or a named
+report node depends on it (unused nodes of any known type are ignored), a control node type
+the reader does not know at all (its data layout is unknown), and a reference to a node the
+file does not define; occupancy and exposure sensors, and a sensor of a species the model does
+not carry; a flow or pressure-difference sensor on a doorway (two-way path); a control on a
+duct junction that is not a terminal, on a triggered (`eds`, `brs`, `plm`, `pkm`) source, on a
+Darcy-Colebrook segment or on an AHS outdoor-air or exhaust path; controls in a steady
+airflow run (`simulate_project`); boundary-layer diffusion (`bls`), resuspension (`dvr`)
 and super (`sup`) source/sink elements, when a source/sink record references one; a source/sink
 record whose element or zone the file does not define; gaseous (`gf0`) and UVGI (`uv1`) filter elements,
 referenced or not; a filter that names a species the project does not simulate (when a path
@@ -76,8 +95,8 @@ in a project with species, without the
 variable-contaminants flag (ContamX then holds the zone's concentrations at their initial values
 and ignores its sources); CFD and 1-D convection/diffusion zones; continuous-values-file
 zones and paths; duct elements of any type not listed above; duct leakage (a duct element's
-leakage rate); a schedule on a Darcy-Colebrook segment (ContamX ignores it); control nodes,
-kinetic reactions or value files on junctions, and control nodes or value files on segments; a
+leakage rate); a schedule on a Darcy-Colebrook segment (ContamX ignores it); kinetic
+reactions or value files on junctions, and value files on segments; a
 segment, junction or terminal that references a junction, duct element, level or zone the file
 never defines; wind data on a terminal that is not
 an ambient terminal whose flags carry the value 1; a junction type other than 0 (junction),
@@ -102,9 +121,22 @@ an interior path; `sup_afe` super elements (ContamX 3.4.1.7 cannot simulate them
 height inside a zone); a wind pressure profile with the trigonometric curve fit; a day schedule whose shape is
 neither rectangular nor trapezoidal; zone names with spaces.
 
-Control nodes that no zone and no path references are silently skipped rather than refused: NIST's
-own sample projects carry dozens of unreferenced sensor and logger nodes, and those projects must
+Control nodes that nothing uses are read but not built: NIST's own sample projects carry dozens
+of unreferenced sensor and logger nodes (integrations among them), and those projects must
 load.
+
+**How ContamX evaluates controls** (measured against ContamX 3.4.1.7), and so noodl: once per
+time step, before the step's airflow, from the state the step starts from (and once before
+the initial airflow). Flow, pressure-difference and gauge-pressure sensors read 0 at that
+first evaluation, then the last airflow solve; a mass-fraction sensor reads the initial mass
+fraction. A temperature sensor sees a scheduled or controlled temperature one step late (the
+value the previous step used). The nodes are evaluated in the file's sequence order (`seq`);
+a node whose input comes later in that order reads the input's previous value, 0 before the
+first evaluation, except a constant (`set`), whose value ContamX presets. A schedule node
+takes its schedule's value at the step's end, as a schedule on a record does, so a control
+through a schedule node is the same schedule attached directly. A control value on a path is
+not clipped: 2 doubles the flow, -0.5 reverses it. A division by zero stops ContamX, and
+noodl raises naming the node.
 
 **`project_to_model` never builds a thermal layer**, because a `.prj` carries no thermal data. A run control that simulates no contaminants (`none`) builds no species layer and binds no source inputs.
 

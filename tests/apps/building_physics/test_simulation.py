@@ -889,10 +889,11 @@ def test_a_sampled_network_is_evaluated_once_per_output_step_however_it_is_split
     assert split["controls.outputs"][:, 1].tolist() == pytest.approx(y, abs=1e-12)
 
 
-def test_a_pressure_sensor_reads_the_step_start_inside_the_zone_pressure_fixed_point():
-    """With the zone-pressure density (dodMdt with contaminants) every step is repeated
-    with the latest zone pressures; the sensor still reads the state the step started
-    from, the pressures that ended the previous step."""
+def test_a_pressure_sensor_reads_the_pressures_that_ended_the_previous_step():
+    """In a model whose steps are repeated to the zone-pressure fixed point (dodMdt with
+    contaminants), a gauge-pressure sensor reads the pressures that ended the previous step
+    (0 before the first solve): the network is evaluated once per step, from its start
+    state, not on every pass."""
     one = read_prj(THREE).net.node_index("one")
     network = ControlNetwork([Sensor(StateReading("air.phi", one))])
     _, model, state, drivers = _controlled(network, dod_mdt=True)
@@ -930,3 +931,51 @@ def test_simulate_runs_a_batched_control_network():
     assert out["controls.outputs"].shape == (3, 2, 1)
     assert out["species.x"].shape == (3, 2, 3, 1)
     assert not torch.allclose(out["air.q"][:, 0], out["air.q"][:, 1])
+
+
+def test_a_retried_step_does_not_advance_a_held_controller(monkeypatch):
+    """Every warm solve of the second step fails, so the step is retried from the linear
+    initial guess; the network is held over the retry, so its PI controller advances once
+    per step, as in the run without the retry."""
+    from noodl.solvers import ConvergenceError
+
+    def run():
+        network = ControlNetwork([DriverValue("controls.input", 0),
+                                  IncrementalPI(0, kp=0.5, ki=1e-4, initial_output=0.1,
+                                                initial_error=0.05)])
+        _, model, state, drivers = _controlled(network)
+        error = [Input(TimeSeries([0.0, 900.0], [0.2, 0.2]), "controls.input", index=0)]
+        diagnostics: dict = {}
+        out = simulate(model, state, drivers, [0.0, 300.0, 600.0, 900.0], inputs=error,
+                       diagnostics=diagnostics, **TIGHT)
+        return out, diagnostics["airflow_retries"]
+
+    reference, none = run()
+    real_step = Model.step
+
+    def warm_fails_at_300(self, s, d, dt, *, t=None, warm_start=True, **kwargs):
+        if t == 300.0 and warm_start:
+            raise ConvergenceError("forced")
+        return real_step(self, s, d, dt, t=t, warm_start=warm_start, **kwargs)
+
+    monkeypatch.setattr(Model, "step", warm_fails_at_300)
+    out, retries = run()
+    assert none == [] and retries == [600.0]
+    assert out["controls.outputs"].tolist() == reference["controls.outputs"].tolist()
+    assert out["controls.outputs"][:, 1].tolist() == pytest.approx(
+        [0.17875, 0.18475, 0.19075, 0.19675], abs=1e-12)
+
+
+def test_a_pressure_difference_sensor_needs_an_air_layer():
+    net = Network(dtype=F64)
+    net.add_node("out")
+    net.add_node("z")
+    net.add_edge("out", "z", kind="c")
+    layer = PotentialFlowLayer(net, "vent", [Conductance(_f(1e-3), kind="c")],
+                               boundary=["out"])
+    network = ControlNetwork([Sensor(StateReading("air.dp", 0))])
+    model = Model(net, {"vent": layer}, closures=[network])
+    drivers = {"vent.phi_boundary": _f(0.0), "vent.sources": _f(0.0, 0.0)}
+    with pytest.raises(ValueError, match=r"control network 'controls' reads 'air.dp'.*"
+                                         r"airflow layer 'air'.*\['vent'\]"):
+        simulate(model, network.initial_state(), drivers, [0.0, 300.0])

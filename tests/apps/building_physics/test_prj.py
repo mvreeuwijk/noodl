@@ -377,9 +377,11 @@ def test_the_refusal_messages_name_the_section_and_the_record(tmp_path):
 
 
 def test_control_nodes_that_no_path_or_zone_references_load():
-    """NIST's samples carry 33 sensor/logger control nodes; skipping them is the whole point."""
+    """NIST's samples carry 33 sensor/logger control nodes (integrations among them); they
+    are read, and none is built, as nothing uses them."""
     p = read_prj(THREE)
     assert len(p.paths) == 4 and p.zones == ["one", "two", "three"]
+    assert len(p.control_nodes) == 33 and p.control_plan is None
 
 
 def test_project_to_model_takes_an_ambient_override_and_can_drop_the_species_layer():
@@ -1271,7 +1273,8 @@ def test_duct_records_contamx_cannot_run_or_ignores_are_refused(tmp_path):
     seg1 = "  1  0   1   2   1   1   0   0   4 4"
     with pytest.raises(ValueError, match=r"segment 1.*Darcy-Colebrook.*ignores"):
         read_prj(_variant(text, seg1, "  1  0   1   2   1   1   1   0   4 4", tmp_path))
-    with pytest.raises(ValueError, match=r"segment 1.*control node 3"):
+    with pytest.raises(ValueError, match=r"segment 1 references control node 3 on "
+                                         r"Darcy-Colebrook duct element 1"):
         read_prj(_variant(text, seg1, "  1  0   1   2   1   1   0   3   4 4", tmp_path))
     geo = " 0.2 0.628319 0.0314159 0.2 0.2 0 0 250\n 0 4 4 2 4 4 0 0\n2 23 dct_dwc"
     with pytest.raises(ValueError, match=r"duct element 1.*leakage"):

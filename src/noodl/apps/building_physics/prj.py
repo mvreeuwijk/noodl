@@ -11,25 +11,30 @@ filters) and the filters on airflow paths, airflow paths with their schedules (f
 multipliers) and constant wind pressures, source/sink elements and source/sinks of the
 constant, cutoff, decaying and burst types, duct networks (`prj_hvac`): duct elements,
 junctions and terminals, their initial concentrations, and segments, and simple air-handling
-systems (`prj_hvac`, `air_handling`). An air handler's plenums (its zones flagged 10) are
+systems (`prj_hvac`, `air_handling`), and control nodes (`prj_controls`): the nodes an
+actuator (a zone's, path's, source's, segment's, terminal's or AHS path's control reference)
+or a named report node needs become a sampled `ControlNetwork`, first among the model's
+closures, and a control reference acts on what a schedule on the same record acts on. An air
+handler's plenums (its zones flagged 10) are
 zero-gauge nodes of the airflow solve (`Project.flow_balanced`) and storage-free species
 nodes when their volume is 0 (`Project.storage_free`); its supply and return points carry
 their design flows, scaled by their schedules; the recirculation path carries the
 outdoor-air fraction schedule and the minimum outdoor-air flow, as ContamX reads them; the
 flows are `AirHandlerFlows` closures (`Project.closures`). Everything else is skipped to its
--999 terminator; a RECORD that references a skipped section by a nonzero index (control)
-raises ValueError naming it, as does a non-trace species, a gaseous (loading-dependent) or
-UVGI filter element (referenced or not), a CFD or 1-D zone, a zone held at constant
-pressure (other than an air handler's plenum), an unsupported element type, a constant wind
-pressure on an interior path, duct leakage, a control node or a value file on a junction or
-segment, a schedule on a Darcy-Colebrook duct segment, a duct network with densZP = 1 or
-dodMdt = 1, an air handler with densZP = 1, and the AHS paths ContamX mis-assigns or whose
-fields it ignores (see `prj_hvac`). A schedule number that no week schedule carries raises
-KeyError naming the zone, path, junction or segment.
+-999 terminator. Refused by name (ValueError): a control node of an unsupported type that an
+actuator or a named report node depends on, a control on a plain duct junction, on a
+triggered source or on an AHS outdoor-air or exhaust path, a non-trace species, a gaseous
+(loading-dependent) or UVGI filter element (referenced or not), a CFD or 1-D zone, a zone
+held at constant pressure (other than an air handler's plenum), an unsupported element type,
+a constant wind pressure on an interior path, duct leakage, a value file on a junction or
+segment, a schedule or a control on a Darcy-Colebrook duct segment, a duct network with
+densZP = 1 or dodMdt = 1, an air handler with densZP = 1, and the AHS paths ContamX
+mis-assigns or whose fields it ignores (see `prj_hvac`). A schedule number that no week
+schedule carries raises KeyError naming the zone, path, junction or segment.
 
-The control-node section is the motivating case for "skipped, not refused": NIST's own sample
-projects carry dozens of sensor and logger control nodes that no zone and no path points at,
-and those projects must load.
+Control nodes that nothing uses are not built: NIST's own sample projects carry dozens of
+sensor and report nodes (and integrations, which this reader does not build) that no zone and
+no path points at, and those projects must load.
 
 Conventions: mass flow; orifice/leak/crack turbulence coefficient
 `turb` is C_d A sqrt(2) so C = mult turb sqrt(rho); fcn/test/conn/stair/shaft C = mult turb;
@@ -87,7 +92,13 @@ from noodl.apps.building_physics.air_handling import (
     AirHandlerFlows,
     air_handler_from_edges,
 )
-from noodl.apps.building_physics.controls import ControlNetwork
+from noodl.apps.building_physics.controls import (
+    PRESSURE_DIFFERENCE,
+    ControlNetwork,
+    DriverReading,
+    StateReading,
+    node_mass_fraction,
+)
 from noodl.apps.building_physics.filters import (
     ConstantEfficiencyFilter,
     FilterSeries,
@@ -95,6 +106,15 @@ from noodl.apps.building_physics.filters import (
     filter_transmission,
 )
 from noodl.apps.building_physics.inputs import Input, apply_inputs, bind_inputs
+from noodl.apps.building_physics.prj_controls import (
+    INPUT_KEY,
+    Actuation,
+    ControlPlan,
+    PrjControlNode,
+    control_network,
+    plan_controls,
+    read_control_nodes,
+)
 from noodl.apps.building_physics.prj_hvac import (
     AirHandlerRecord,
     BuildContext,
@@ -314,6 +334,7 @@ class PrjPath:
     flags: int = 0                   # the path's flag bits (8..64: an air handler's paths)
     ahs_nr: int = 0                  # the AHS of a supply or return point; 0 = none
     design_flow: float = 0.0         # an AHS path's design flow (kg/s)
+    control_nr: int = 0              # control node acting as its schedule would; 0 = none
 
 
 @dataclass
@@ -339,6 +360,7 @@ class PrjSource:
     mult: float
     species: int = 0                 # 0-based index of the source element's species
     schedule_nr: int = 0             # week schedule multiplying the rate; 0 = none
+    control_nr: int = 0              # control node acting as its schedule would; 0 = none
 
 
 @dataclass(frozen=True)
@@ -477,6 +499,13 @@ class Project:
     storage_free: list[str] = field(default_factory=list)
     closures: list = field(default_factory=list)
     air_handler_edges: dict[str, int] = field(default_factory=dict)
+    # Duct junction node names by CONTAM junction number.
+    junction_nr_to_name: dict[int, str] = field(default_factory=dict)
+    # The control nodes as read (by number), and the plan of the ones the model builds
+    # (None: no actuator and no named report node); `project_to_model` builds a new
+    # `ControlNetwork` from the plan for every model.
+    control_nodes: dict[int, PrjControlNode] = field(default_factory=dict)
+    control_plan: ControlPlan | None = None
 
     def inputs_for(self, model) -> list[Input]:
         """The project's inputs that `model` can take: a model without a species layer (a run
@@ -510,6 +539,36 @@ class Project:
     def zone_mass_fractions(self, x: torch.Tensor) -> torch.Tensor:
         """The zones' rows of a species state (the junctions' rows follow them)."""
         return x[..., : len(self.zones), :]
+
+    def sensed_edge(self, kind: int, nr: int) -> tuple[int, float]:
+        """The `"air.q"` column and sign of what a sensor of `kind` (2 path, 4 duct segment,
+        6 terminal) `nr` measures, as `path_flows`, `segment_flows` and `terminal_flows`
+        read them; refuses a two-way path (two edges)."""
+        if kind == 2:
+            path = next((p for p in self.paths if p.nr == nr), None)
+            if path is None:
+                raise ValueError(f"prj: no path {nr}")
+            if len(path.edge_columns) != 1:
+                raise ValueError(f"prj: path {nr} is a two-way opening (two edges)")
+            return int(path.edge_columns[0]), 1.0
+        if kind == 4:
+            seg = next((s for s in self.segments if s.nr == nr), None)
+            if seg is None:
+                raise ValueError(f"prj: no duct segment {nr}")
+            return int(seg.edge_columns[0]), 1.0
+        term = next((t for t in self.terminals if t.junction_nr == nr), None)
+        if term is None:
+            raise ValueError(f"prj: no terminal at junction {nr}")
+        return int(term.edge_columns[0]), 1.0
+
+    def control_outputs(self, history: Tensor) -> Tensor:
+        """The named report nodes' values (ContamX's API outputs, in node order) from a
+        history of the network's outputs `(..., n_blocks)`."""
+        if self.control_plan is None:
+            raise ValueError("prj: the project has no control plan (no actuator and no named "
+                             "report node)")
+        positions = [pos for _, pos in self.control_plan.outputs]
+        return history[..., positions]
 
 
 class _Lines:
@@ -1015,8 +1074,6 @@ def _read_zones(lines: _Lines, count: int, zones: list[tuple],
                 f"a CFD zone writes, are unsupported: {' '.join(tok)}"
             )
         flags, ps, pc, pk, pl = (int(v) for v in tok[1:6])
-        if pc:
-            raise ValueError(f"prj: zone {nr} references control node {pc} (unsupported)")
         if pk:
             zone_reactions[nr] = pk
         rel_ht, vol, T0 = float(tok[6]), float(tok[7]), float(tok[8])
@@ -1029,7 +1086,7 @@ def _read_zones(lines: _Lines, count: int, zones: list[tuple],
             raise ValueError(f"prj: zone {nr} is a CFD zone (unsupported)")
         if cdvf:
             raise ValueError(f"prj: zone {nr} reads a continuous values file (unsupported)")
-        zones.append((nr, zname, rel_ht, vol, T0, pl, ps, flags))
+        zones.append((nr, zname, rel_ht, vol, T0, pl, ps, pc, flags))
     lines.expect_end("zones")
 
 
@@ -1046,8 +1103,6 @@ def _read_paths(
                 f"data fields, and neither is supported: {' '.join(tok)}"
             )
         pzn, pzm, pe, pf, pw, pa, ps, pc, pld = (int(v) for v in tok[2:11])
-        if pc:
-            raise ValueError(f"prj: path {nr} references control node {pc} (unsupported)")
         rel_ht, mult, wPset, wPmod, wazm, design_flow = (float(v) for v in tok[13:19])
         cdvf, cfd = int(float(tok[28])), int(float(tok[29]))
         if cdvf or cfd:
@@ -1060,7 +1115,7 @@ def _read_paths(
         paths.append(
             PrjPath(nr, pzn, pzm, pe, levels[pld] + rel_ht, mult, wPset, wPmod, wazm, pw,
                     schedule_nr=ps, filter_nr=pf, flags=int(tok[1]), ahs_nr=pa,
-                    design_flow=design_flow)
+                    design_flow=design_flow, control_nr=pc)
         )
     lines.expect_end("flow paths")
 
@@ -1075,8 +1130,6 @@ def _read_sources(
     for _ in range(count):
         tok = lines.record()
         nr, pz, pe, ps, pc = (int(v) for v in tok[:5])
-        if pc:
-            raise ValueError(f"prj: source {nr} references control node {pc} (unsupported)")
         try:
             sname, dtype, params = source_elements[pe]
         except KeyError as exc:
@@ -1094,13 +1147,16 @@ def _read_sources(
             raise ValueError(
                 f"prj: source {nr} is a {stype} source on schedule {ps}; schedule-triggered "
                 f"decaying, burst, power-law and peak sources are unsupported")
+        if pc and stype in _TRIGGERED_SOURCES:
+            raise ValueError(f"prj: source {nr} references control node {pc}: a control on a "
+                             f"triggered source is not supported")
         try:
             k = species.index(sname)
         except ValueError as exc:
             raise KeyError(
                 f"prj: source {nr}'s element {pe} names species {sname!r}, which the project "
                 f"does not simulate") from exc
-        sources.append(PrjSource(nr, pz, pe, stype, params, float(tok[5]), k, ps))
+        sources.append(PrjSource(nr, pz, pe, stype, params, float(tok[5]), k, ps, pc))
     lines.expect_end("source/sinks")
 
 
@@ -1204,8 +1260,8 @@ def read_prj(path) -> Project:
     source_elements: dict[int, tuple[str, str, list[float]]] = {}
     filter_elements: dict[int, tuple[str, str, list]] = {}
     filters: dict[int, int] = {}
-    # nr, name, relHt, vol, T0, level, week schedule, flags
-    zones: list[tuple[int, str, float, float, float, int, int, int]] = []
+    # nr, name, relHt, vol, T0, level, week schedule, control node, flags
+    zones: list[tuple[int, str, float, float, float, int, int, int, int]] = []
     x0_rows: dict[int, list[float]] = {}
     paths: list[PrjPath] = []
     sources: list[PrjSource] = []
@@ -1215,6 +1271,7 @@ def read_prj(path) -> Project:
     junction_x0_rows: dict[int, list[float]] = {}
     segments: list = []
     handlers: list[AirHandlerRecord] = []
+    control_nodes: dict[int, PrjControlNode] = {}
 
     while lines.i < len(lines.lines):
         line = lines.lines[lines.i].strip()
@@ -1270,6 +1327,8 @@ def read_prj(path) -> Project:
             read_duct_segments(lines, count, segments)
         elif name == "simple AHS":
             read_air_handlers(lines, count, handlers)
+        elif name == "control nodes":
+            control_nodes = read_control_nodes(lines, count)
         else:
             lines.skip_section()
 
@@ -1281,14 +1340,14 @@ def read_prj(path) -> Project:
         run_control=run_control, source_path=source_path,
         filter_elements=filter_elements, filters=filters, schedule_units=schedule_units,
         duct_elements=duct_elements, junctions=junctions, junction_x0_rows=junction_x0_rows,
-        segments=segments, handlers=handlers,
+        segments=segments, handlers=handlers, control_nodes=control_nodes,
     )
 
 
 def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones, x0_rows,
            paths, sources, dens_zp, schedules, species_records, reactions, zone_reactions,
            run_control, source_path, filter_elements, filters, schedule_units, duct_elements,
-           junctions, junction_x0_rows, segments, handlers) -> Project:
+           junctions, junction_x0_rows, segments, handlers, control_nodes) -> Project:
     """Turn the parsed records into a `Network`, elements, drives and a `Project`.
 
     Order: the zones, the path edges and their elements, the path filters, constant wind
@@ -1296,7 +1355,12 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     (junctions, segments, terminals, with their own elements, drives, filters and inputs).
     The air handlers' paths become one prescribed-flow kind per handler, built after the
     `Scaled` wrap (their closure applies the schedules). Only then are the element kinds and
-    the flow layout read, so both cover the ducts and the air handlers."""
+    the flow layout read, so both cover the ducts and the air handlers.
+
+    A record's control reference becomes an `Actuation` wherever its schedule becomes an
+    `Input`, with the same driver key and positions (and the same side effects: a path kind
+    wrapped in `Scaled`, a fan driven by its speed); where a schedule is refused, so is a
+    control. The control plan and its schedule nodes' inputs follow the records."""
     net = Network(dtype=F64)
     ambient = "ambient"
     net.add_node(ambient, z_ref=0.0, volume=0.0, T0=ambient_conditions["Ta"])
@@ -1309,7 +1373,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         raise ValueError("prj: densZP = 1 in a project with a simple air-handling system is "
                          "unsupported (its plenums' densities at their absolute pressure are "
                          "not modelled)")
-    for nr, zname, rel_ht, vol, T0, pl, _ps, flags in zones:
+    for nr, zname, rel_ht, vol, T0, pl, _ps, _pc, flags in zones:
         zone_flags[zname] = flags
         if not flags & _VARIABLE_PRESSURE and nr not in plenums:
             raise ValueError(
@@ -1361,10 +1425,13 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
                            f"'week-schedules' section does not define") from exc
 
     inputs: list[Input] = []
-    for nr, zname, *_rest, ps, _flags in zones:
+    actuations: list[Actuation] = []
+    for nr, zname, *_rest, ps, pc, _flags in zones:
         if ps:
             inputs.append(Input(week(ps, f"zone {nr}"), "T", index=net.node_index(zname),
                                 name=f"zone {nr} temperature schedule {ps}"))
+        if pc:
+            actuations.append(Actuation(pc, "T", (net.node_index(zname),), f"zone {nr}"))
 
     ahs_roles = (assign_air_handler_roles(handlers, paths)
                  if handlers or any(p.ahs_nr for p in paths) else {})
@@ -1384,6 +1451,11 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
                 f"prj: path {p.nr} (an AHS outdoor-air or exhaust path) has a schedule or a "
                 f"flow; ContamX ignores both there (the outdoor-air fraction and minimum are "
                 f"the recirculation path's), so they are refused")
+        if role in (OUTDOOR_AIR, EXHAUST) and p.control_nr:
+            raise ValueError(
+                f"prj: path {p.nr} (an AHS outdoor-air or exhaust path) references control "
+                f"node {p.control_nr}; ContamX ignores a schedule there (the outdoor-air "
+                f"fraction is the recirculation path's), so a control is refused too")
         if role in (SUPPLY, RETURN) and p.mult != 1.0:
             raise ValueError(f"prj: path {p.nr} (an AHS supply or return point) has mult "
                              f"{p.mult}; ContamX ignores it, so it is refused")
@@ -1404,6 +1476,9 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
             inputs.append(Input(week(src.schedule_nr, f"source {src.nr}"),
                                 "species.source_multiplier", index=j,
                                 name=f"source {src.nr} schedule {src.schedule_nr}"))
+        if src.control_nr:
+            actuations.append(Actuation(src.control_nr, "species.source_multiplier", (j,),
+                                        f"source {src.nr}"))
 
     built: list = []
     per_kind_C: dict[str, list[float]] = {}
@@ -1419,6 +1494,9 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     per_kind_quad: dict[str, list[tuple[float, float]]] = {}
     per_kind_fan: dict[str, list[PrjPath]] = {}
     per_kind_spline: dict[str, list[PrjPath]] = {}
+    # A constant-flow fan element on several paths is one `FixedFlow` kind with a flow per
+    # edge, built where its first path puts it in `built` (kind -> position, flows).
+    per_kind_fixed: dict[str, tuple[int, list[float]]] = {}
     path_edges: list[list[int]] = []          # per path, its NETWORK edge columns
     column = 0
     for p in paths:
@@ -1500,7 +1578,11 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
             )
         elif d in _FAN_CONST:
             flow = first[0] * (RHO_0 if d == "fan_cvf" else 1.0)
-            built.append(FixedFlow(torch.tensor(p.mult * flow, dtype=F64), kind=kind))
+            if kind not in per_kind_fixed:
+                per_kind_fixed[kind] = (len(built), [])
+                built.append(None)
+            per_kind_fixed[kind][1].append(p.mult * flow)
+            per_kind_cols.setdefault(kind, []).append(column - 1)
         elif d == "fan_fan":
             per_kind_fan.setdefault(kind, []).append(p)
             per_kind_cols.setdefault(kind, []).append(column - 1)
@@ -1508,6 +1590,9 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
             per_kind_spline.setdefault(kind, []).append(p)
             per_kind_cols.setdefault(kind, []).append(column - 1)
 
+    for kind, (at, flows) in per_kind_fixed.items():
+        _check_edge_order(net, kind, per_kind_cols[kind])
+        built[at] = FixedFlow(torch.tensor(flows, dtype=F64), kind=kind)
     # Power-law kinds: one `UpstreamDensityPowerLaw` per kind with per-edge C, n, m and the
     # kind's (shared) transition. The transition is the element's own, so it is the same for
     # every edge of the kind; edges only differ by `mult`.
@@ -1539,7 +1624,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         )
     # A fan curve's path schedule is its speed ratio, read from "fan_speed.<kind>".
     speed_kinds = {kind_of[p.element_nr] for p in paths
-                   if p.schedule_nr and p.nr not in ahs_roles
+                   if (p.schedule_nr or p.control_nr) and p.nr not in ahs_roles
                    and elements[p.element_nr].dtype == "fan_fan"}
     for kind, members in per_kind_fan.items():
         # Per-edge mult in path order against the network's edge order, as for power laws.
@@ -1622,20 +1707,22 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     multiplier_edges: dict[str, int] = {}
     speed_edges: dict[str, int] = {}
     for p, cols in zip(paths, path_edges, strict=True):
-        if not p.schedule_nr or p.nr in ahs_roles:
+        if not (p.schedule_nr or p.control_nr) or p.nr in ahs_roles:
             continue                  # an air handler's schedules are its closure's inputs
         kind = kind_of[p.element_nr]
         kind_cols = net.edge_index(kind).tolist()
+        index = [kind_cols.index(c) for c in cols]
         if elements[p.element_nr].dtype == "fan_fan":
             speed_edges[kind] = len(kind_cols)
-            inputs.append(Input(week(p.schedule_nr, f"path {p.nr}"), f"fan_speed.{kind}",
-                                index=[kind_cols.index(c) for c in cols],
-                                name=f"path {p.nr} fan speed schedule {p.schedule_nr}"))
-            continue
-        multiplier_edges[kind] = len(kind_cols)
-        inputs.append(Input(week(p.schedule_nr, f"path {p.nr}"), f"flow_multiplier.{kind}",
-                            index=[kind_cols.index(c) for c in cols],
-                            name=f"path {p.nr} schedule {p.schedule_nr}"))
+            key, what = f"fan_speed.{kind}", "fan speed schedule"
+        else:
+            multiplier_edges[kind] = len(kind_cols)
+            key, what = f"flow_multiplier.{kind}", "schedule"
+        if p.schedule_nr:
+            inputs.append(Input(week(p.schedule_nr, f"path {p.nr}"), key, index=index,
+                                name=f"path {p.nr} {what} {p.schedule_nr}"))
+        if p.control_nr:
+            actuations.append(Actuation(p.control_nr, key, tuple(index), f"path {p.nr}"))
     built = [Scaled(el, f"flow_multiplier.{el.kind}") if el.kind in multiplier_edges else el
              for el in built]
     wind_pressure_tensors = {k: torch.tensor(v, dtype=F64) for k, v in wind_pressure.items()}
@@ -1665,18 +1752,21 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
                                      f"react (unsupported)")
                 storage_free.append(node_of(z))
         for p, cols in zip(paths, path_edges, strict=True):
-            if ahs_roles.get(p.nr, (None,))[0] != h.nr or not p.schedule_nr:
+            if ahs_roles.get(p.nr, (None,))[0] != h.nr or not (p.schedule_nr or p.control_nr):
                 continue
             if ahs_roles[p.nr][1] == RECIRCULATION:
-                inputs.append(Input(week(p.schedule_nr, f"path {p.nr}"),
-                                    f"outdoor_air_fraction.{kind}",
-                                    name=f"AHS {h.nr} outdoor-air fraction schedule "
-                                         f"{p.schedule_nr}"))
+                key, index = f"outdoor_air_fraction.{kind}", None
+                name = f"AHS {h.nr} outdoor-air fraction schedule {p.schedule_nr}"
             else:
-                inputs.append(Input(week(p.schedule_nr, f"path {p.nr}"),
-                                    f"flow_multiplier.{kind}",
-                                    index=[kind_cols.index(c) for c in cols],
-                                    name=f"path {p.nr} schedule {p.schedule_nr}"))
+                key, index = f"flow_multiplier.{kind}", [kind_cols.index(c) for c in cols]
+                name = f"path {p.nr} schedule {p.schedule_nr}"
+            if p.schedule_nr:
+                inputs.append(Input(week(p.schedule_nr, f"path {p.nr}"), key, index=index,
+                                    name=name))
+            if p.control_nr:
+                actuations.append(Actuation(p.control_nr, key,
+                                            None if index is None else tuple(index),
+                                            f"path {p.nr}"))
 
     # The duct network adds its own kinds (already wrapped where scheduled), drives, filters
     # and inputs; the kinds and the layout below are read after it, so they cover the ducts.
@@ -1693,10 +1783,21 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
                            schedule_units=schedule_units, filter_of=filter_of, g=g,
                            profiles=profiles, inputs=inputs, edge_filters=edge_filters,
                            built=built, drives=drives,
-                           constant_wind_pressure=wind_pressure_tensors)
+                           constant_wind_pressure=wind_pressure_tensors,
+                           actuations=actuations)
         duct = build_ducts(ctx, duct_elements, junctions, segments)
         multiplier_edges.update(duct.multiplier_edges)
         speed_edges.update(duct.speed_edges)
+
+    # The control nodes the actuators and the named report nodes need; each schedule node
+    # is an input on the network's input, at its slot.
+    plan = plan_controls(control_nodes, actuations)
+    if plan is not None:
+        for nr, slot in plan.schedule_slots.items():
+            node = control_nodes[nr]
+            ps = int(node.data[0])
+            inputs.append(Input(week(ps, node.label), INPUT_KEY, index=slot,
+                                name=f"{node.label} schedule {ps}"))
 
     kinds = [el.kind for el in built]
 
@@ -1754,6 +1855,8 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         terminal_openings=duct.terminal_openings if duct else 0,
         flow_balanced=flow_balanced, storage_free=storage_free, closures=ahs_closures,
         air_handler_edges=air_handler_edges,
+        junction_nr_to_name=duct.junction_nr_to_name if duct else {},
+        control_nodes=control_nodes, control_plan=plan,
     )
 
 
@@ -1931,6 +2034,10 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     them is CONTAM's steady simulation. Each species' boundary value is its default ambient
     mass fraction; a scheduled kind gets `"flow_multiplier.<kind>"` (ones before the
     schedules apply) and a constant wind pressure `"wind_pressure.<kind>"`.
+
+    A project with a control plan gets a new sampled `ControlNetwork` (`prj_controls`),
+    first among the closures, its sensors read from this model's layers; it writes nothing
+    until `simulate` evaluates it.
     """
     amb = dict(project.ambient_conditions)
     if ambient:
@@ -2014,6 +2121,17 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     }
     if "species" in layers and project.sources:
         drivers["species.source_multiplier"] = torch.ones(len(project.sources), dtype=F64)
+    if project.control_plan is not None:
+        # A new network for every model (one network serves one model), first among the
+        # closures: what it writes ("T", multipliers) is what the others read. A model without
+        # a species layer has no source multipliers to write, as for the source schedules.
+        plan = project.control_plan
+        actuations = [a for a in plan.actuations
+                      if "species" in layers or not a.key.startswith("species.")]
+        names = tuple(drivers)
+        closures.insert(0, control_network(
+            plan, project.control_nodes, actuations=actuations,
+            reading=lambda node: _sensor_reading(project, layers, names, node)))
     for closure in closures:
         if isinstance(closure, ControlNetwork):
             closure.resolve(net, layers, tuple(drivers))
@@ -2075,6 +2193,64 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         drivers["rho"], drivers["rho_amb"] = rho_now["rho"], rho_now["rho_amb"]
     state.update(model.initial_capacities(state, drivers))
     return model, state, drivers
+
+
+_SENSED_EDGES = {2: "path", 4: "duct segment", 6: "terminal"}
+
+
+def _sensor_reading(project: Project, layers: dict, drivers: tuple[str, ...],
+                    node: PrjControlNode):
+    """A sensor node's reading (fields `offset scale tau oldsig source type measure X Y relHt
+    units species`). Type 1 zone, 3 junction: measure 0 mass fraction (kg/kg), 1 temperature
+    (K), 4 gauge pressure (Pa); type 2 path, 4 duct segment, 6 terminal: measure 2 flow
+    (kg/s), 3 pressure difference (Pa). Source -1 is the ambient."""
+    d = node.data
+    source, kind, measure, species = int(d[4]), int(d[5]), int(d[6]), d[11]
+    where = f"prj: {node.label}"
+    if kind in (1, 3):
+        what = "zone" if kind == 1 else "junction"
+        if source == -1:
+            name = project.ambient
+        elif kind == 1:
+            name = project.zone_nr_to_name.get(source)
+        else:
+            name = project.junction_nr_to_name.get(source)
+        if name is None:
+            raise ValueError(f"{where} senses {what} {source}, which the project does not "
+                             f"have")
+        idx = project.net.node_index(name)
+        if measure == 0:
+            if "species" not in layers or species not in project.species:
+                raise ValueError(f"{where} senses species {species!r}, which the model does "
+                                 f"not carry")
+            k = project.species.index(species)
+            if name == project.ambient:
+                return DriverReading("species.x_boundary", (0, k))
+            reading = node_mass_fraction(name, species)
+            try:
+                reading.resolve(project.net, layers, drivers)
+            except (KeyError, IndexError) as exc:
+                raise ValueError(f"{where} senses the mass fraction at {what} {source}: "
+                                 f"{exc.args[0]}") from exc
+            return reading.resolved
+        if measure == 1:
+            return DriverReading("T", (idx,))
+        if measure == 4:
+            return StateReading("air.phi", (idx,))
+        detail = "occupancy (it needs occupants)" if measure == 5 else f"measure {measure}"
+        raise ValueError(f"{where}: a {what} sensor of {detail} is not supported")
+    if kind in _SENSED_EDGES:
+        what = _SENSED_EDGES[kind]
+        try:
+            column, sign = project.sensed_edge(kind, source)
+        except ValueError as exc:
+            raise ValueError(f"{where} senses {what} {source}: {exc}") from exc
+        key = {2: "air.q", 3: PRESSURE_DIFFERENCE}.get(measure)
+        if key is None:
+            raise ValueError(f"{where}: a {what} sensor of measure {measure} is not supported")
+        return StateReading(key, (column,), factor=sign)
+    what = "an exposure" if kind == 5 else "unknown"
+    raise ValueError(f"{where}: sensor type {kind} ({what}) is not supported")
 
 
 def _pressure_coupling(model: Model, where: str) -> tuple[str | None, str]:

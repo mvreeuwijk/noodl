@@ -85,5 +85,9 @@ Two of NIST's one-zone stack projects are present:
   outdoors at 1e-3 kg/kg; two hours at 300 s. Verified to load and run in ContamX 3.4.1.7.
 - `test_GetPrjInfo.prj` is NIST's own sample from the `contamxpy` 0.0.9 sdist
   (`demo_files/`), unchanged: two simple AHS with zero-volume plenums and two duct systems.
-  As written it is refused (its duct elements leak, and zone 1 and segment 4 reference
-  control nodes); the parity test runs a copy with those removed.
+  As written it is refused (its duct elements leak); the parity test runs a copy with the
+  leakage, and zone 1's and segment 4's control references, removed.
+- `dcv_three_zone.prj`, `pressure_exhaust_three_zone.prj`, `hysteresis_window_three_zone.prj`:
+  written for this repository by editing NIST's `valThreeZonesWthCtm-UseApi.prj` (contamxpy
+  0.0.9 sample) with the maker script reproduced in the controls work's plan (Task 5); loaded
+  and run to their end in ContamX 3.4.1.7.

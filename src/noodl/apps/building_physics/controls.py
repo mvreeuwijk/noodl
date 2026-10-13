@@ -13,13 +13,16 @@ evaluates it itself, before the initial airflow and at the start of every output
 holds it (`held`) over the step's passes and sub-steps. A flow or pressure sensor reads the
 last airflow solve, and 0 before the first. A reading of a driver (a prescribed temperature,
 an ambient mass fraction) gives the value the previous step used. A block whose input comes
-later in the order reads that input's previous value, 0 before the first evaluation. The
-network carries its block outputs and its blocks' memory in the state, under
-`"<name>.outputs"` and `"<name>.memory"`. The memory holds what a block keeps between
-evaluations: a sensor's lagged value, the previous step's driver value. Called outside a
-step (no step context: a query), it writes its stored outputs again; before its first
-evaluation (outputs NaN, as `initial_state` gives them) it writes nothing, so a query on the
-initial state sees the drivers as the inputs left them, never a zero temperature.
+later in the order reads that input's previous value; before the first evaluation it reads
+0, or a constant's value (ContamX presets its constant nodes, measured). The network
+carries its block outputs, its blocks' memory and whether it has been evaluated in the
+state, under `"<name>.outputs"`, `"<name>.memory"` and `"<name>.evaluated"` (1 once
+evaluated, per batch member). The memory holds what a block keeps between evaluations: a
+sensor's lagged value, the previous step's driver value. Called outside a step (no step
+context: a query), it writes its stored outputs again; before its first evaluation
+(`"<name>.evaluated"` 0 and the outputs NaN, as `initial_state` gives them) it writes
+nothing, so a query on the initial state sees the drivers as the inputs left them, never a
+zero temperature. A batch member not evaluated yet keeps its drivers in the same way.
 
 A continuous network (`sampled=False`) is algebraic in the state at every call. A block that
 integrates keeps its state in `"<name>.memory"`; called with a step context, the network
@@ -142,6 +145,8 @@ class Block:
     sampled_only = False
     continuous_only = False
     name = ""
+    # What a block later in the order reads from this one before its first evaluation.
+    initial_output = 0.0
 
     def initial_memory(self) -> list[float]:
         return [math.nan] * self.memory_size
@@ -165,10 +170,12 @@ class Block:
 
 
 class Constant(Block):
-    """A constant value."""
+    """A constant value; a block earlier in the order reads it before its first evaluation
+    too (ContamX presets its constant nodes, measured)."""
 
     def __init__(self, value: float, *, name: str = "") -> None:
         self.value, self.name = float(value), name
+        self.initial_output = self.value
 
     def step(self, u, memory, ev):
         return _f64(self.value), memory
@@ -610,6 +617,21 @@ def _add_at(base: Tensor, index: Sequence[int], value: Tensor) -> Tensor:
     return out.index_add(-1, idx, value.expand(batch + (idx.numel(),)))
 
 
+def _kept(written: Tensor, base: Tensor | None, evaluated: Tensor, a: Actuator) -> Tensor:
+    """`written` where `evaluated` is 1, `base` (the driver before the write) for a batch
+    member not evaluated yet."""
+    done = evaluated > 0
+    if bool(done.all()):
+        return written
+    if base is None:
+        raise ValueError(f"controls: actuator {a.name or a.key!r} writes driver {a.key!r}, "
+                         f"which the model does not have, for a batch in which some members "
+                         f"are not evaluated yet (they have no value to keep)")
+    done = done.reshape(done.shape + (1,)) if done.ndim else done
+    shape = broadcast_shapes(written.shape, base.shape, done.shape)
+    return torch.where(done.expand(shape), written.expand(shape), base.to(F64).expand(shape))
+
+
 # ------------------------------------------------------------------------------- network
 class ControlNetwork:
     """Blocks evaluated in order and the actuators that write their outputs into drivers:
@@ -650,8 +672,9 @@ class ControlNetwork:
                                  f"{list(a.index)} of driver {a.key!r}, listing one twice; "
                                  f"'set' needs distinct positions ('add' adds each listing)")
         self.outputs_key, self.memory_key = f"{self.name}.outputs", f"{self.name}.memory"
+        self.evaluated_key = f"{self.name}.evaluated"
         self.input_key = f"{self.name}.input"
-        self.state_keys = (self.outputs_key, self.memory_key)
+        self.state_keys = (self.outputs_key, self.memory_key, self.evaluated_key)
         self.outputs = tuple(sorted({a.key for a in self.actuators})) + self.state_keys
         self._held = False
         self._resolved_for: tuple | None = None
@@ -716,11 +739,13 @@ class ControlNetwork:
                    for r in self._readings())
 
     def initial_state(self) -> dict[str, Tensor]:
-        """Outputs NaN (not evaluated yet: the blocks read them as 0, and the actuators
-        write nothing until the first evaluation) and every block's initial memory."""
+        """Not evaluated yet (`"<name>.evaluated"` 0, outputs NaN: the blocks read 0 or a
+        constant's value, and the actuators write nothing until the first evaluation) and
+        every block's initial memory."""
         memory = [v for b in self.blocks for v in b.initial_memory()]
         return {self.outputs_key: torch.full((len(self.blocks),), math.nan, dtype=F64),
-                self.memory_key: torch.tensor(memory, dtype=F64)}
+                self.memory_key: torch.tensor(memory, dtype=F64),
+                self.evaluated_key: torch.tensor(0.0, dtype=F64)}
 
     def initial_drivers(self) -> dict[str, Tensor]:
         """Zeros for `"<name>.input"` when a block reads it (the inputs write it each step)."""
@@ -730,21 +755,21 @@ class ControlNetwork:
              if isinstance(b, DriverValue) and b.key == self.input_key and b.index is not None]
         return {self.input_key: torch.zeros(max(n, default=0) + 1, dtype=F64)}
 
-    def _stored(self, state: State) -> tuple[Tensor, Tensor]:
-        outputs, memory = state.get(self.outputs_key), state.get(self.memory_key)
-        if outputs is None or memory is None:
-            init = self.initial_state()
-            outputs = init[self.outputs_key] if outputs is None else outputs
-            memory = init[self.memory_key] if memory is None else memory
-        return outputs, memory
+    def _stored(self, state: State) -> tuple[Tensor, Tensor, Tensor]:
+        """The outputs, memory and evaluated flag in `state`, the initial ones where it has
+        none."""
+        init = self.initial_state()
+        return tuple(state[k] if k in state else init[k] for k in self.state_keys)
 
     def _run(self, state: State, drivers: Drivers, memory: Tensor, dt: float | None,
              want: str = "") -> tuple[Tensor, Tensor, Tensor | None]:
         """One pass over the blocks: outputs, new memory and, for `want` "rate" or
         "switching", that quantity of every block."""
         ev = Evaluation(state, drivers, dt)
-        stored = self._stored(state)[0]
-        out = list(torch.where(torch.isnan(stored), 0.0, stored).unbind(-1))
+        stored, _, evaluated = self._stored(state)
+        preset = torch.tensor([b.initial_output for b in self.blocks], dtype=F64)
+        seen = torch.where((evaluated > 0).unsqueeze(-1), stored, preset)
+        out = list(seen.unbind(-1))
         mem, extra = [], []
         for i, block in enumerate(self.blocks):
             u = [out[j] for j in block.inputs]
@@ -779,69 +804,82 @@ class ControlNetwork:
         memory = self._stored(state)[1] if memory is None else memory
         return self._run(state, drivers, memory, None, "switching")[2]
 
-    def write(self, drivers: Drivers, outputs: Tensor) -> dict[str, Tensor]:
+    def write(self, drivers: Drivers, outputs: Tensor,
+              evaluated: Tensor | None = None) -> dict[str, Tensor]:
         """Every actuator's value written into its driver (a later actuator on the same key
-        sees the earlier ones' writes); the given drivers are not modified."""
+        sees the earlier ones' writes); the given drivers are not modified. A batch member
+        whose `evaluated` flag is 0 keeps its drivers as they are."""
         out: dict[str, Tensor] = {}
         for a in self.actuators:
             value = outputs[..., a.block]
             base = out.get(a.key, drivers.get(a.key))
-            if base is None and a.index is not None:
-                raise KeyError(f"controls: actuator {a.name or a.key!r} writes positions "
-                               f"{list(a.index)} of driver {a.key!r}, which the model does "
-                               f"not have")
-            if a.index is not None and base is not None and base.ndim == 0:
-                raise ValueError(f"controls: actuator {a.name or a.key!r} writes positions "
-                                 f"{list(a.index)} of driver {a.key!r}, which is a single "
-                                 f"value (no positions)")
-            if a.index is not None and base is not None and max(a.index) >= base.shape[-1]:
-                raise ValueError(f"controls: actuator {a.name or a.key!r} writes positions "
-                                 f"{list(a.index)} of driver {a.key!r}, which has "
-                                 f"{base.shape[-1]} entries")
-            if a.index is None:
-                # One value per batch member, the same for every entry of the driver (a
-                # driver that does not exist yet gets one entry).
-                whole = value if value.ndim == 0 else value.unsqueeze(-1)
-                out[a.key] = scatter(base, None, whole)
-                continue
-            v = value.unsqueeze(-1).expand(*value.shape, len(a.index))
-            out[a.key] = (scatter(base, a.index, v) if a.mode == "set"
-                          else _add_at(base, a.index, v))
+            written = self._write_one(a, base, value)
+            out[a.key] = written if evaluated is None else _kept(written, base, evaluated, a)
         return out
+
+    @staticmethod
+    def _write_one(a: Actuator, base: Tensor | None, value: Tensor) -> Tensor:
+        """`base` with actuator `a`'s `value` written in."""
+        if base is None and a.index is not None:
+            raise KeyError(f"controls: actuator {a.name or a.key!r} writes positions "
+                           f"{list(a.index)} of driver {a.key!r}, which the model does "
+                           f"not have")
+        if a.index is not None and base is not None and base.ndim == 0:
+            raise ValueError(f"controls: actuator {a.name or a.key!r} writes positions "
+                             f"{list(a.index)} of driver {a.key!r}, which is a single "
+                             f"value (no positions)")
+        if a.index is not None and base is not None and max(a.index) >= base.shape[-1]:
+            raise ValueError(f"controls: actuator {a.name or a.key!r} writes positions "
+                             f"{list(a.index)} of driver {a.key!r}, which has "
+                             f"{base.shape[-1]} entries")
+        if a.index is None:
+            # One value per batch member, the same for every entry of the driver (a
+            # driver that does not exist yet gets one entry).
+            whole = value if value.ndim == 0 else value.unsqueeze(-1)
+            return scatter(base, None, whole)
+        v = value.unsqueeze(-1).expand(*value.shape, len(a.index))
+        return (scatter(base, a.index, v) if a.mode == "set"
+                else _add_at(base, a.index, v))
 
     @contextmanager
     def held(self) -> Iterator[None]:
         """Within it, a sampled network called with a step context is not evaluated again:
         it writes its stored outputs and records the drivers the step uses. `simulate`
         evaluates the network once per output step and holds it over the step's passes and
-        sub-steps."""
-        self._held = True
+        sub-steps. Nesting is safe (leaving an inner hold keeps the outer one), but the hold
+        is a flag on the network, not on a run: two runs of one network must not overlap
+        (one network per model, one run of it at a time)."""
+        previous, self._held = self._held, True
         try:
             yield
         finally:
-            self._held = False
+            self._held = previous
 
     def __call__(self, state: State, drivers: Drivers, ctx=None) -> dict[str, Tensor]:
-        outputs, memory = self._stored(state)
+        outputs, memory, evaluated = self._stored(state)
         stepping = ctx is not None and getattr(ctx, "dt", None) is not None
         advance = stepping and not (self.sampled and self._held)
         if self.sampled:
             if advance:
                 outputs, memory, _ = self._run(state, drivers, memory, float(ctx.dt))
-            elif bool(torch.isnan(outputs).all()):
+                evaluated = torch.ones(outputs.shape[:-1], dtype=F64)
+            elif not bool((evaluated > 0).any()):
                 # Not evaluated yet: nothing to write.
-                return {self.outputs_key: outputs, self.memory_key: memory}
+                return {self.outputs_key: outputs, self.memory_key: memory,
+                        self.evaluated_key: evaluated}
         else:
             if advance:
                 memory = memory + float(ctx.dt) * self.rates(state, drivers, memory)
             outputs = self.evaluate(state, drivers, memory)
-        writes = self.write(drivers, outputs)
+            evaluated = torch.ones(outputs.shape[:-1], dtype=F64)
+        writes = self.write(drivers, outputs, evaluated)
         if self.sampled and stepping:
             after = {**drivers, **writes}
             memory = _concat([*(b.after(memory[..., s], state, after)
                                 for b, s in zip(self.blocks, self._slots, strict=True)),
                               memory[..., :0]])
-        return {**writes, self.outputs_key: outputs, self.memory_key: memory}
+        return {**writes, self.outputs_key: outputs, self.memory_key: memory,
+                self.evaluated_key: evaluated}
 
 
 # ------------------------------------------------------------------------ sensors by name
