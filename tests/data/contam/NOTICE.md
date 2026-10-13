@@ -59,3 +59,10 @@ Two of NIST's one-zone stack projects are present:
   from zone three, which is at 303.15 K. Its schedule sets the speed ratio to 1, 0.8 from
   00:30, 0.05 (off) from 01:00 and 1.2 from 01:30. Sarin outdoors at 1e-3 kg/kg; two hours
   at 300 s. Verified to load and run in ContamX 3.4.1.7.
+- `spline_three_zone.prj` is written for this repository from NIST's
+  `valThreeZonesWthCtm-UseApi.prj`, not an official sample. Its four paths carry the four
+  cubic-spline airflow elements (mass and volume flow against pressure, pressure against
+  mass and volume flow) on a five-point curve; path 1 is declared zone -> ambient, path 3
+  is crossed against its declared direction, zone two is at 303.15 K, and a 0.020068 kg/s
+  supply (path 5) drives the curves past their first segment. Sarin outdoors at 1e-3 kg/kg;
+  two hours at 300 s. Verified to load and run in ContamX 3.4.1.7.

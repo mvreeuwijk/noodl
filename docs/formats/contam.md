@@ -29,7 +29,7 @@ ContamX); zones and initial concentrations; airflow paths; the power-law element
 family
 (`plr_orfc/leak1/leak2/leak3/crack/fcn/test1/test2/conn/stair/shaft/qcn`), the quadratic family
 (`qfr_*`), doorways (`dor_door`, `dor_pl2`), dampers (`plr_bdq`, `plr_bdf`), constant-flow fans
-(`fan_cmf`, `fan_cvf`) and the cubic fan (`fan_fan`) with its speed schedule (the speed ratio, by the fan laws), its path `mult` (fans in parallel), the rating density and the shut-off orifice below its off ratio; source/sink elements `ccf`, `cut`, `eds`,
+(`fan_cmf`, `fan_cvf`), the cubic-spline elements (`csf_fsp`, `csf_qsp`, `csf_psf`, `csf_psq`), and the cubic fan (`fan_fan`) with its speed schedule (the speed ratio, by the fan laws), its path `mult` (fans in parallel), the rating density and the shut-off orifice below its off ratio; source/sink elements `ccf`, `cut`, `eds`,
 `brs`, `prs`, `dvs`, `drs`, `plm` and `pkm`, attached by `project_to_model` (scaled by the record's multiplier,
 which enters the element's first coefficient, and a `ccf` record's removal coefficient too); filters on airflow paths (`Project.edge_filters`, the species layer's `transmission`):
 constant-efficiency (`cef`), particle (`pf0`, interpolated at each species' mean diameter as
@@ -53,7 +53,7 @@ value); a zone without the variable-pressure flag (which
 ContamX holds at constant pressure) or, in a project with species, without the
 variable-contaminants flag (ContamX then holds the zone's concentrations at their initial values
 and ignores its sources); CFD and 1-D convection/diffusion zones; continuous-values-file
-zones and paths; duct networks; a constant wind pressure on an interior path; `csf_*` and `sup_afe` elements; `stackD = 1` (densities varying with
+zones and paths; duct networks; a constant wind pressure on an interior path; `sup_afe` super elements (ContamX 3.4.1.7 cannot simulate them); `stackD = 1` (densities varying with
 height inside a zone); a wind pressure profile with the trigonometric curve fit; a day schedule whose shape is
 neither rectangular nor trapezoidal; zone names with spaces.
 

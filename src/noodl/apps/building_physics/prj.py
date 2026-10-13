@@ -81,6 +81,7 @@ from noodl.apps.building_physics.wth import _DAYS_BEFORE_MONTH
 from noodl.drives import ConstantDrive, Stack, Wind, WindProfile
 from noodl.elements import (
     AffinityFan,
+    CubicSplineFlow,
     Damper,
     FanCurve,
     FixedFlow,
@@ -162,6 +163,8 @@ MU_0 = 1.81625e-5
 #                   flow `fdf`; below speed ratio `off` the fan is the shut-off power law
 #                   `lam turb expt`. A path schedule on it is the speed ratio and the path
 #                   `mult` is fans in parallel (both measured against ContamX 3.4.1.7).
+#     csf_*         `npts u_x u_y`, then `npts` rows `x y` (fsp: dp Pa, kg/s; qsp: dp, m3/s;
+#                   psf: kg/s, dp; psq: m3/s, dp); fitted as `noodl.elements.curve` says.
 #     dor_door      10 fields: `lam turb expt dTmin ht wd cd u u u`. VERIFIED against
 #                   `reg_solverContTrace-mz-MH-trans-3day.prj` lines 704-706, the one NIST
 #                   sample that carries a doorway:
@@ -879,8 +882,13 @@ def _read_flow_elements(lines: _Lines, count: int, elements: dict[int, PrjElemen
             data.append(second)
             for _ in range(int(second[4])):
                 data.append([float(v) for v in lines.record()])
-        elif dtype.startswith("csf_") or dtype == "sup_afe":
-            raise ValueError(f"prj: element {nr} has unsupported type {dtype!r}")
+        elif dtype.startswith("csf_"):
+            for _ in range(int(data[0][0])):        # `npts u_x u_y`, then npts `x y` rows
+                data.append([float(v) for v in lines.record()])
+        elif dtype == "sup_afe":
+            raise ValueError(
+                f"prj: element {nr} has type 'sup_afe' (a super airflow element), which "
+                f"ContamX 3.4.1.7 itself cannot simulate ('Invalid AFE type'); unsupported")
         elements[nr] = PrjElement(nr, dtype, ename, data)
     lines.expect_end("flow elements")
 
@@ -1032,6 +1040,23 @@ def fan_curve_element(data: list[list[float]], *, kind: str, src, tgt, multiplie
                        kind=kind)
 
 
+_SPLINE_FORMS = {"fsp": ("pressure", False), "qsp": ("pressure", True),
+                 "psf": ("flow", False), "psq": ("flow", True)}
+_SPLINE = {f"csf_{form}" for form in _SPLINE_FORMS}
+
+
+def spline_element(dtype: str, points: list[list[float]], *, kind: str, src, tgt,
+                   multiplier) -> CubicSplineFlow:
+    """CONTAM's cubic-spline element (`csf_*`, or the duct `dct_fsp/qsp/psf/psq`) from its
+    `x y` points: F(dp), Q(dp), dp(F) or dp(Q)."""
+    independent, volume = _SPLINE_FORMS[dtype[-3:]]
+    return CubicSplineFlow(torch.tensor([p[0] for p in points], dtype=F64),
+                           torch.tensor([p[1] for p in points], dtype=F64),
+                           independent=independent, volume=volume,
+                           multiplier=torch.tensor(multiplier, dtype=F64), src=src, tgt=tgt,
+                           kind=kind)
+
+
 def _kind_of(nr: int, dtype: str) -> str:
     """One element KIND per CONTAM element, so each keeps its own laminar transition."""
     if dtype in _POWERLAW:
@@ -1044,6 +1069,8 @@ def _kind_of(nr: int, dtype: str) -> str:
         return f"bd_{nr}"
     if dtype in _FAN_CONST or dtype == "fan_fan":
         return f"fan_{nr}"
+    if dtype in _SPLINE:
+        return f"sp_{nr}"
     raise ValueError(f"prj: element {nr} has unsupported type {dtype!r}")
 
 
@@ -1231,6 +1258,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     per_kind_cols: dict[str, list[int]] = {}
     per_kind_quad: dict[str, list[tuple[float, float]]] = {}
     per_kind_fan: dict[str, list[PrjPath]] = {}
+    per_kind_spline: dict[str, list[PrjPath]] = {}
     path_edges: list[list[int]] = []          # per path, its NETWORK edge columns
     column = 0
     for p in paths:
@@ -1305,6 +1333,9 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         elif d == "fan_fan":
             per_kind_fan.setdefault(kind, []).append(p)
             per_kind_cols.setdefault(kind, []).append(column - 1)
+        elif d in _SPLINE:
+            per_kind_spline.setdefault(kind, []).append(p)
+            per_kind_cols.setdefault(kind, []).append(column - 1)
 
     # Power-law kinds: one `UpstreamDensityPowerLaw` per kind with per-edge C, n, m and the
     # kind's (shared) transition. The transition is the element's own, so it is the same for
@@ -1346,6 +1377,15 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
             elements[members[0].element_nr].data, kind=kind, src=src, tgt=tgt,
             multiplier=[p.mult for p in members],
             speed_key=f"fan_speed.{kind}" if kind in speed_kinds else None))
+    for kind, members in per_kind_spline.items():
+        _check_edge_order(net, kind, per_kind_cols[kind])
+        el = elements[members[0].element_nr]
+        src, tgt = net.endpoints(kind)
+        try:
+            built.append(spline_element(el.dtype, el.data[1:], kind=kind, src=src, tgt=tgt,
+                                        multiplier=[p.mult for p in members]))
+        except ValueError as exc:
+            raise ValueError(f"prj: flow element {el.nr}: {exc}") from exc
     for kind, ab in per_kind_quad.items():
         built.append(
             Quadratic(

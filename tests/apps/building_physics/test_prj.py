@@ -39,6 +39,7 @@ from noodl.apps.building_physics.species import KineticReaction, Species
 from noodl.apps.building_physics.thermal import R_AIR
 from noodl.elements import (
     AffinityFan,
+    CubicSplineFlow,
     Damper,
     FixedFlow,
     Scaled,
@@ -343,8 +344,8 @@ def test_unsupported_records_raise_naming_the_offender(tmp_path):
         )
     with pytest.raises(ValueError, match=r"duct"):
         read_prj(_variant(text, "0 ! duct segments:", "1 ! duct segments:", tmp_path))
-    with pytest.raises(ValueError, match=r"element 3.*csf_fsp"):
-        read_prj(_variant(text, "3 23 plr_orfc orfcPt01", "3 23 csf_fsp orfcPt01", tmp_path))
+    with pytest.raises(ValueError, match=r"element 3.*srv_jwa"):
+        read_prj(_variant(text, "3 23 plr_orfc orfcPt01", "3 23 srv_jwa orfcPt01", tmp_path))
     with pytest.raises(ValueError, match=r"ContamW"):
         read_prj(_variant(text, "ContamW 3.4.0.4 0", "SomethingElse 1.0 0", tmp_path))
 
@@ -1140,3 +1141,21 @@ def test_a_batched_fan_speed_steps_as_per_instance_runs():
             torch.testing.assert_close(batched[key][i], one[key], rtol=1e-10, atol=1e-15)
     fan_flow = p.path_flows(batched["air.q"])[:, 4]                  # path 5
     assert len({round(v, 9) for v in fan_flow.tolist()}) == 4        # four distinct flows
+
+
+SPLINES = DATA / "spline_three_zone.prj"
+
+
+def test_the_four_spline_elements_are_read():
+    p = read_prj(SPLINES)
+    forms = {e.kind: (e.independent, e.volume) for e in p.elements
+             if isinstance(e, CubicSplineFlow)}
+    assert forms == {"sp_4": ("pressure", False), "sp_5": ("pressure", True),
+                     "sp_6": ("flow", False), "sp_7": ("flow", True)}
+
+
+def test_a_super_element_is_refused_naming_contamx_s_own_refusal(tmp_path):
+    text = SPLINES.read_text()
+    with pytest.raises(ValueError, match=r"element 4.*'sup_afe'.*ContamX"):
+        read_prj(_variant(text, "4 23 csf_fsp csf_fsp\nmeasured curve\n 5 0 0\n",
+                          "4 23 sup_afe super\n\n 2 0 0\n", tmp_path))

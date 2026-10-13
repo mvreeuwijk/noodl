@@ -490,10 +490,12 @@ switches; only its slope jumps there. `dp_transition` stays at reference conditi
 | Element | What it computes |
 |---|---|
 | `Quadratic(a, b)` | The quadratic resistance law $\Delta p = a F + b \lvert F\rvert F$, inverted in closed form: $F = \operatorname{sign}(\Delta p)\, 2\lvert\Delta p\rvert / (\sqrt{a^2 + 4 b \lvert\Delta p\rvert} + a)$. Linear, with slope $1/a$, at small $\Delta p$ and quadratic at large, so it needs no separate regularisation. Requires $a > 0$ and $b > 0$. |
+| `CubicSplineFlow(x, y, *, independent="pressure", volume=False, multiplier=1.0, src, tgt)` | An element given by measured points (at least four, every segment rising), fitted as ContamX fits them: straight first and last segments, a cubic spline clamped to them in between, extended straight beyond both ends at the signed argument. `independent="flow"` takes the points as $\Delta p$ against flow and inverts them; `volume=True` turns a volume flow into mass flow with the entering air's density. **Source:** CONTAM's cubic-spline elements, measured against ContamX 3.4.1.7. `SplineCurve(x, y)` is the fit itself. |
 | `SplineFlowTable(dp_points, flow_points, *, form, rho_default=None)` | A measured pressure-flow curve: a monotone cubic Hermite spline through the $(\Delta p, F)$ knots, linearly extrapolated outside them, returning mass flow in kg/s. `form="volume"` scales volume-flow knots by `rho_default` before fitting; `form="mass"` takes mass-flow knots as they are. |
 
 **Source:** `Quadratic`: CONTAM's quadratic element family. `SplineFlowTable`: MBL's `Table_m_flow` and
-`Table_V_flow`.
+`Table_V_flow`. `SplineFlowTable` is the Modelica Buildings Library's monotone Hermite table, a different
+fit from `CubicSplineFlow`'s.
 
 ### Large openings and doors
 
@@ -692,6 +694,7 @@ above 0.1 % of the largest.
 | Three-zone project with deposition sinks, removal terms and NRCC emissions, 24 steps | flow rel 16 $u$, mf rel 80 $u$, floor 64 $u$ × each species' max | **9.1e-8** flow, **1.3e-7** mf |
 | One-zone stack with a pressure-driven source, 288 steps | flow rel 64 $u$, mf rel 88 $u$, floor 64 $u$ × each species' max | **4.5e-8** flow, **7.4e-8** mf |
 | Three-zone project with a fan curve (mult 1.5) on a speed schedule 1, 0.8, off (its shut-off orifice) and 1.2, 24 steps | flow rel 32 $u$, mf rel 64 $u$, floor 64 $u$ × each species' max | **1.6e-7** flow, **5.8e-8** mf |
+| Three-zone project with the four cubic-spline elements (one crossed against its declared direction, zone two at 303.15 K, a 0.02 kg/s supply), 24 steps | flow rel 32 $u$, mf rel 64 $u$, floor 64 $u$ × each species' max | **1.1e-8** flow, **2.7e-8** mf |
 
 Sinks and the concentration-proportional parts of sources are implicit in ContamX's species
 step, as are kinetic reactions and filters; noodl's implicit step reproduces it to float32

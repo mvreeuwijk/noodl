@@ -16,6 +16,7 @@ from collections.abc import Mapping, Sequence
 import torch
 
 from noodl.apps.building_physics.species import Species
+from noodl.elements.curve import SplineCurve
 from noodl.topology import EdgeKey, Network
 
 Tensor = torch.Tensor
@@ -47,20 +48,6 @@ class ConstantEfficiencyFilter:
         return torch.stack([self.efficiencies.get(n, zero) for n in names])
 
 
-def _clamped_slopes(x: Tensor, y: Tensor) -> Tensor:
-    """Node slopes of the C2 cubic spline through (x, y) with zero slope at both ends."""
-    n = x.numel()
-    if n <= 2:
-        return torch.zeros(n, dtype=F64)
-    inv = 1.0 / (x[1:] - x[:-1])
-    secant = (y[1:] - y[:-1]) * inv
-    A = (torch.diag(2.0 * (inv[:-1] + inv[1:])) + torch.diag(inv[1:-1], 1)
-         + torch.diag(inv[1:-1], -1))
-    b = 3.0 * (secant[:-1] * inv[:-1] + secant[1:] * inv[1:])
-    zero = torch.zeros(1, dtype=F64)
-    return torch.cat([zero, torch.linalg.solve(A, b), zero])
-
-
 def _points(values, label: str) -> Tensor:
     """A curve's values as one float64 vector; a list of tensors is stacked, so their
     gradients survive (`torch.as_tensor` would copy them out of the graph)."""
@@ -78,11 +65,9 @@ class ParticleFilter:
     a MERV curve); zero for a gas.
 
     `diameters` (m, increasing) and `efficiencies` (0..1) are the curve's points. As in
-    ContamX 3.4.1.7 (measured): the curve is a cubic spline in log10(diameter) through the
-    points from the second to the second-last, with zero slope at both of them, joined to
-    the first and the last point by flat segments, and constant beyond the curve. ContamX
-    refuses a curve whose first two or last two efficiencies differ, and so does this
-    class. Efficiencies may be tensors that carry gradients.
+    ContamX 3.4.1.7 (measured): ContamX's curve fit (`noodl.elements.SplineCurve`) in
+    log10(diameter); ContamX refuses a curve whose first two or last two efficiencies
+    differ, and so does this class. Efficiencies may be tensors that carry gradients.
     """
 
     def __init__(self, diameters, efficiencies, *, name: str = "") -> None:
@@ -103,25 +88,13 @@ class ParticleFilter:
                              f"equal (the curve is flat at both ends; ContamX refuses this "
                              f"curve), got {ee.tolist()}")
         self.diameters, self.efficiencies, self.name = d, e, name
-        self._x, self._y = torch.log10(d[1:-1]), e[1:-1]
-        self._slopes = _clamped_slopes(self._x, self._y)
+        self._curve = SplineCurve(torch.log10(d), e, name=name)
 
     def at(self, diameter: float | Tensor) -> Tensor:
-        """The efficiency at a particle diameter (m)."""
+        """The efficiency at a particle diameter (m): ContamX's curve fit in log10 of the
+        diameter; with flat end segments it is constant beyond the curve."""
         d = torch.as_tensor(diameter, dtype=F64)
-        xs, ys, ms = self._x, self._y, self._slopes
-        if xs.numel() == 0:
-            return self.efficiencies[0] * torch.ones_like(d)
-        if xs.numel() == 1:
-            return ys[0] * torch.ones_like(d)
-        x = torch.log10(d).clamp(xs[0].item(), xs[-1].item())
-        j = torch.searchsorted(xs.detach(), x.detach().reshape(-1), right=True)
-        j = (j.reshape(x.shape) - 1).clamp(0, xs.numel() - 2)
-        h = xs[j + 1] - xs[j]
-        t = (x - xs[j]) / h
-        t2, t3 = t * t, t * t * t
-        return ((2 * t3 - 3 * t2 + 1) * ys[j] + (t3 - 2 * t2 + t) * h * ms[j]
-                + (3 * t2 - 2 * t3) * ys[j + 1] + (t3 - t2) * h * ms[j + 1])
+        return self._curve(torch.log10(d))
 
     def efficiency(self, species: Sequence[Species]) -> Tensor:
         """`(K,)`: the curve at each particle species' mean diameter, 0 for a gas."""

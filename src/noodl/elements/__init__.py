@@ -10,6 +10,7 @@ pre-rename ``MBL*``/``mbl_*`` names remain importable as aliases.
 from noodl.elements.air_duct import AirDuct, DuctTerminal, air_viscosity
 from noodl.elements.base import Element
 from noodl.elements.conductance import Conductance
+from noodl.elements.curve import CubicSplineFlow, SplineCurve
 from noodl.elements.damper import Damper
 from noodl.elements.door import (
     MBLDoorOpen,
@@ -63,6 +64,7 @@ __all__ = [
     "AirDuct",
     "AirMedium",
     "Conductance",
+    "CubicSplineFlow",
     "Damper",
     "DoorCompartment",
     "DoorCompartmentHead",
@@ -81,6 +83,7 @@ __all__ = [
     "Quadratic",
     "RegularizedPowerLaw",
     "Scaled",
+    "SplineCurve",
     "SplineFlowTable",
     "UpstreamDensityPowerLaw",
     "air_viscosity",

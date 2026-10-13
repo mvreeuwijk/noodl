@@ -674,3 +674,19 @@ def test_a_scheduled_fan_curve_matches_contamx(contamx, tmp_path, record_propert
     _project_parity(FAN_CURVE, tmp_path, rtol_flow=32 * F32_U, rtol_mf=64 * F32_U,
                     record_property=record_property, species_floor=True,
                     label="Three-zone project with a scheduled fan curve, 24 steps")
+
+
+SPLINES = DATA / "spline_three_zone.prj"
+
+
+@pytest.mark.external
+def test_the_four_spline_elements_match_contamx(contamx, tmp_path, record_property):
+    """`spline_three_zone.prj`: the four cubic-spline elements on the three-zone paths, one
+    crossed against its declared direction (the first segment extended to negative
+    pressures), zone two at 303.15 K, a 0.02 kg/s supply. Budget: a float32 roundoff in
+    each curve point moves a value inside a segment by at most 2 u, the zone densities (the
+    volume forms) 1 u, the supply 1 u, and the wind pressures as in the three-zone steady
+    test, 16 u: 32 u on the flows, 64 u on the mass fractions."""
+    _project_parity(SPLINES, tmp_path, rtol_flow=32 * F32_U, rtol_mf=64 * F32_U,
+                    record_property=record_property, species_floor=True,
+                    label="Three-zone project with the four cubic-spline elements, 24 steps")
