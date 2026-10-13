@@ -117,7 +117,15 @@ class PotentialFlowLayer:
     a flow-controlled law), a coupled multi-port law, a dynamic law or a law reading the
     `LawContext` is solved by Modified Nodal Analysis (`mna` is True): the flows of its
     implicit-law edges (`implicit_edges`) become unknowns alongside the interior potentials,
-    and every connected part of its edges must contain a boundary node (a ground)."""
+    and every connected part of its edges must contain a boundary node (a ground).
+
+    With `phasor=True` the layer solves the sinusoidal steady state: potentials and flows are
+    complex amplitudes (complex128), the frequency in Hz comes from the driver
+    `"<name>.frequency"` (one per instance) and reaches the laws as `LawContext.omega`
+    (`2 pi f`). Each complex unknown is solved as its (real, imaginary) pair, so a law that is
+    not holomorphic in `dp` (a constant-power load, `q = conj(S / dp)`) is handled exactly.
+    Every law must declare `phasor_capable`, node sources are refused (a load is an edge to
+    ground), and `power_residual` is the complex power balance."""
 
     def __init__(
         self,
@@ -134,8 +142,6 @@ class PotentialFlowLayer:
         flow_unit: str = "",
         phasor: bool = False,
     ) -> None:
-        if phasor:
-            raise NotImplementedError("phasor layers")
         if linear_solver not in _LINEAR_SOLVERS:
             raise ValueError(
                 f"unknown linear_solver {linear_solver!r} in layer {name!r}; expected one "
@@ -311,6 +317,20 @@ class PotentialFlowLayer:
                 f"definite Jacobian, which a Modified Nodal Analysis system is not; use "
                 f"'auto', 'sparse_direct', 'direct' or 'gmres'"
             )
+        if self.phasor:
+            for el in self._elements:
+                if not el.phasor_capable:
+                    raise ValueError(
+                        f"PotentialFlowLayer {name!r}: kind {el.kind!r} has law "
+                        f"{type(el).__name__}, which is not phasor-capable (a phasor layer "
+                        f"takes linear laws with real or complex coefficients and laws that "
+                        f"declare phasor_capable)"
+                    )
+            if self._node_sources:
+                raise ValueError(
+                    f"PotentialFlowLayer {name!r}: a phasor layer takes no node_sources; "
+                    f"loads are edges to ground in a phasor layer"
+                )
         dynamic_kinds = {el.kind for el in self._elements if el.dynamic}
         for drv in self._drives:
             if drv.kind in dynamic_kinds:
@@ -950,6 +970,9 @@ class PotentialFlowLayer:
         from zeros or the warm start `phi0` (interior potentials) and `q0` (the flows of
         `implicit_edges`); the returned `q` covers every edge. `history`, `dt`, `t`,
         `integration` and `mode` set the context its laws are evaluated in (`LawContext`):
+        on a phasor layer always `"phasor"` (no `dt` or `history`; the frequency driver
+        `"<name>.frequency"` is required, and `phi_boundary`, `sources`, `phi0`, `q0` may be
+        real or complex and are taken as complex128); otherwise
         with `dt` given, one implicit step of length `dt` ending at time `t`, with the
         `integration` rule (`"trapezoidal"` or `"backward_euler"`) from the step-start state
         `history=(phi, q)` (full-node potentials and every edge's flow, as this method
@@ -1327,8 +1350,11 @@ class PotentialFlowLayer:
     def power_residual(self, phi, q, drivers, sources=None):
         """Tellegen's power identity, zero at a converged solution.
 
-        (dp*q).sum() - (drive*q).sum() - (phi_bound * (A_bound @ q)).sum()
-        - (phi_interior * sources_interior).sum()
+        (dp*conj(q)).sum() - (drive*conj(q)).sum() - (phi_bound * conj(A_bound @ q)).sum()
+        - (phi_interior * conj(sources_interior)).sum()
+
+        The conjugates change nothing on a real layer; on a phasor layer the identity is the
+        complex power balance (real and imaginary parts both zero).
 
         Derivation: dp = A^T phi + drive, so dp^T q = phi^T (A q) + drive^T q. Splitting
         phi^T (A q) into interior and boundary parts and using A_I q = sources_I at a
@@ -1345,8 +1371,8 @@ class PotentialFlowLayer:
         phi_i = phi[..., self.interior]
         s_I = self._source_interior(sources, phi_i)
         return (
-            (d * q).sum(-1)
-            - (drive_only * q).sum(-1)
-            - (phi_b * boundary_flow).sum(-1)
-            - (phi_i * s_I).sum(-1)
+            (d * q.conj()).sum(-1)
+            - (drive_only * q.conj()).sum(-1)
+            - (phi_b * boundary_flow.conj()).sum(-1)
+            - (phi_i * s_I.conj()).sum(-1)
         )

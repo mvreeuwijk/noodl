@@ -162,14 +162,6 @@ def test_cg_refused_on_mna_layer():
                            boundary=["gnd"], linear_solver="cg")
 
 
-def test_phasor_layer_not_yet_available():
-    with pytest.raises(NotImplementedError, match="phasor"):
-        PotentialFlowLayer(_floating_source_net(), "e",
-                           [Conductance(torch.tensor([1.0, 0.5]), kind="r"),
-                            Source(torch.tensor([3.0]))],
-                           boundary=["gnd"], phasor=True)
-
-
 def _driven_layer(**kwargs):
     net = _floating_source_net()
     layer = PotentialFlowLayer(net, "e", [DrivenConductance(kind="r"), DrivenSource()],

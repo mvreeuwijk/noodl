@@ -20,6 +20,8 @@ class Source(ImplicitLaw):
 class DrivenSource(ImplicitLaw):
     """dp = drivers["V"]: an ideal potential source set by a driver."""
 
+    phasor_capable = True
+
     def __init__(self, kind="source"):
         super().__init__(kind)
 

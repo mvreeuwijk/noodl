@@ -76,7 +76,7 @@ def _colour_jacobian(fn, z: Tensor, m: int, w: int) -> Tensor:
             t[..., l_] = 1.0 if cl == 0 else 1j
             _, d = jvp(fn, (z,), (t.reshape(shape),))
             d = d.reshape(d.shape[:-1] + (G, m))
-            cols.append(torch.view_as_real(d) if w == 2 else d.unsqueeze(-1))
+            cols.append(torch.view_as_real(d.resolve_conj()) if w == 2 else d.unsqueeze(-1))
     J = torch.stack(cols, dim=-1).unflatten(-1, (m, w))  # (..., G, k, ck, l, cl)
     return J.transpose(-3, -2)                            # (..., G, k, l, ck, cl)
 
@@ -171,9 +171,10 @@ class MnaSystem:
             cols.append(((n_I + f) * w + c)[keep])
             srcs.append(torch.full((int(keep.sum()),), self._one_slot))
             signs.append(sgn[a][keep])
-        # node sources (real layers only): the diagonal slope per interior row
+        # node sources (real layers only; a phasor layer refuses them): the diagonal slope
+        # per interior row
         self._node_slot = offset
-        if self.layer._node_sources:
+        if self.layer._node_sources and w == 1:
             idx = ar(n_I)
             rows.append(idx)
             cols.append(idx)
@@ -186,7 +187,7 @@ class MnaSystem:
 
     # ------------------------------------------------------------- views
     def _to_real(self, z: Tensor) -> Tensor:
-        return torch.view_as_real(z).flatten(-2) if self.w == 2 else z
+        return torch.view_as_real(z.resolve_conj()).flatten(-2) if self.w == 2 else z
 
     def _to_complex(self, x: Tensor) -> Tensor:
         return torch.view_as_complex(x.unflatten(-1, (-1, 2)).contiguous())
@@ -199,8 +200,44 @@ class MnaSystem:
         return self._split(self._to_complex(x) if self.w == 2 else x)
 
     # ------------------------------------------------------------- laws
-    def _context(self, mode, dt, t, integration, history) -> LawContext:
+    @property
+    def frequency_key(self) -> str:
+        """The driver key of a phasor layer's frequency (Hz, one per instance)."""
+        return f"{self.layer.name}.frequency"
+
+    def _omega(self, drivers) -> Tensor:
+        """`2 pi f` from the frequency driver, with a trailing axis for the law's edges."""
+        key = self.frequency_key
+        if key not in drivers:
+            raise KeyError(
+                f"PotentialFlowLayer {self.layer.name!r} is a phasor layer and needs the "
+                f"driver {key!r}: the frequency in Hz, one per instance"
+            )
+        f = drivers[key]
+        if not isinstance(f, Tensor):
+            f = torch.tensor(f, dtype=torch.float64)
+        return 2.0 * math.pi * f.unsqueeze(-1)
+
+    def _phasor_context(self, mode, dt, t, history, drivers) -> LawContext:
+        """The context of a phasor layer: the sinusoidal steady state at the frequency
+        driver's angular frequency, which takes no step."""
+        name = self.layer.name
+        if mode not in (None, "phasor"):
+            raise ValueError(
+                f"PotentialFlowLayer {name!r} is a phasor layer: mode={mode!r}; expected "
+                f"'phasor' or None"
+            )
+        if dt is not None or history is not None:
+            raise ValueError(
+                f"PotentialFlowLayer {name!r} is a phasor layer, which solves the "
+                f"sinusoidal steady state and takes no step; drop dt and history"
+            )
+        return LawContext(mode="phasor", t=t, omega=self._omega(drivers))
+
+    def _context(self, mode, dt, t, integration, history, drivers) -> LawContext:
         """The `LawContext` the laws are evaluated in.
+
+        A phasor layer is always in `"phasor"` mode (see `_phasor_context`). Otherwise:
 
         `mode=None` is `"transient"` when a step `dt` is given and `"dc"` (the steady
         operating point) otherwise; a caller may ask for `"dc"` or `"initial"` (the
@@ -209,7 +246,14 @@ class MnaSystem:
         edge order), required on a layer with a dynamic law; its potential differences are
         taken without drives, which dynamic kinds may not carry.
         """
+        if self.w == 2:
+            return self._phasor_context(mode, dt, t, history, drivers)
         name = self.layer.name
+        if mode == "phasor":
+            raise ValueError(
+                f"PotentialFlowLayer {name!r}: mode='phasor' needs a layer built with "
+                f"phasor=True"
+            )
         if mode is not None and mode not in ("dc", "initial"):
             raise ValueError(
                 f"PotentialFlowLayer {name!r}: mode={mode!r}; expected 'dc', 'initial' or "
@@ -239,6 +283,11 @@ class MnaSystem:
                     f"at the step start"
                 )
             return ctx
+        if not isinstance(history, (tuple, list)) or len(history) != 2:
+            raise ValueError(
+                f"PotentialFlowLayer {name!r}: history must be the pair (phi, q) at the step "
+                f"start; got {type(history).__name__}"
+            )
         phi_prev, q_prev = history
         n_nodes, n_edges = self.layer._n_nodes, len(self.layer.cols)
         if phi_prev.shape[-1] != n_nodes or q_prev.shape[-1] != n_edges:
@@ -442,7 +491,12 @@ class MnaSystem:
               mode, differentiable, diagnostics, **newton_kwargs):
         layer = self.layer
         drivers = drivers or {}
-        ctx = self._context(mode, dt, t, integration, history)
+        if self.w == 2:
+            # Real or complex inputs; the phasor layer works in complex128.
+            phi_boundary, sources, phi0, q0 = (
+                None if v is None else torch.as_tensor(v).to(torch.complex128)
+                for v in (phi_boundary, sources, phi0, q0))
+        ctx = self._context(mode, dt, t, integration, history, drivers)
         requested = newton_kwargs.pop("method", layer.linear_solver)
         if requested == "cg":
             raise ValueError(
@@ -557,6 +611,9 @@ class MnaSystem:
             offset += len(driver_keys)
             step = (self._with_history(ctx, params[offset + 2], params[offset + 3])
                     if history_tensors else ctx)
+            if self.w == 2:
+                # the angular frequency from the threaded frequency driver
+                step = dataclasses.replace(step, omega=self._omega(drv))
             return (self._functional_call(rebuilt), drv, params[offset], params[offset + 1],
                     step)
 
