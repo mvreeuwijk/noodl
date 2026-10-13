@@ -42,15 +42,16 @@ class AirHandlerFlows:
     `drivers["flow_multiplier.<kind>"]` (per edge; the supply and return entries scale their
     design flows; ones when absent) and `drivers["outdoor_air_fraction.<kind>"]` (f_o;
     `outdoor_air_fraction` when absent). Writes `drivers["prescribed_flow.<kind>"]`, the
-    flow of every edge in its own direction (kg/s, never negative). An outdoor-air fraction
-    above 1 makes the recirculation negative, which ContamX refuses too: it raises naming
-    the handler.
+    flow of every edge in its own direction (kg/s, never negative). A negative supply or
+    return point (multiplier times design flow) is refused, naming the edges; an
+    outdoor-air fraction above 1 makes the recirculation negative, which ContamX refuses
+    too: it raises naming the handler.
     """
 
     def __init__(self, kind: str, *, roles, design_flows, outdoor_air_fraction: float = 1.0,
                  min_outdoor_air: float = 0.0, name: str = "") -> None:
         self.kind, self.name = kind, name or kind
-        self.roles = torch.as_tensor(roles).to(torch.long).reshape(-1)
+        self.roles = _role_codes(roles, f"AirHandlerFlows {self.name!r}")
         self.design_flows = torch.as_tensor(design_flows, dtype=F64).reshape(-1)
         if self.design_flows.shape != self.roles.shape:
             raise ValueError(f"AirHandlerFlows {self.name!r}: design_flows must give one "
@@ -90,6 +91,14 @@ class AirHandlerFlows:
         f_o = (torch.tensor(self.outdoor_air_fraction, dtype=design.dtype) if f_o is None
                else torch.as_tensor(f_o).to(design.dtype))
         points = design * m
+        is_point = (self.roles == SUPPLY) | (self.roles == RETURN)
+        negative = ((points.detach() < 0) & is_point).reshape(-1, points.shape[-1]).any(0)
+        if bool(negative.any()):
+            edges = negative.nonzero().reshape(-1).tolist()
+            raise ValueError(
+                f"AirHandlerFlows {self.name!r}: supply or return points {edges} (edge "
+                f"positions in kind {self.kind!r}) have a negative flow (multiplier times "
+                f"design flow); a point's flow must not be negative")
         supply = (self.roles == SUPPLY).to(design.dtype)
         ret = (self.roles == RETURN).to(design.dtype)
         Ws = (points * supply).sum(-1)
@@ -104,12 +113,29 @@ class AirHandlerFlows:
                 f"({Wrec.detach().tolist()} kg/s); it must not exceed 1")
         Wo, Wex = Ws - Wrec, Wret - Wrec
         roles = self.roles
-        out = torch.where((roles == SUPPLY) | (roles == RETURN), points,
-                          torch.zeros_like(points))
+        out = torch.where(is_point, points, torch.zeros_like(points))
         out = torch.where(roles == RECIRCULATION, Wrec.unsqueeze(-1), out)
         out = torch.where(roles == OUTDOOR_AIR, Wo.unsqueeze(-1), out)
         out = torch.where(roles == EXHAUST, Wex.unsqueeze(-1), out)
         return {self.flow_key: out}
+
+
+def _role_codes(roles, who: str) -> Tensor:
+    """`roles` as integer codes, refusing a non-integer value or a code outside 0..4."""
+    r = torch.as_tensor(roles).reshape(-1)
+    if r.is_floating_point():
+        bad = (~torch.isfinite(r)) | (r != r.round())
+        if bool(bad.any()):
+            raise ValueError(f"{who}: role codes must be integers 0..4, got "
+                             f"{r[bad].tolist()} at edge positions "
+                             f"{bad.nonzero().reshape(-1).tolist()}")
+    r = r.to(torch.long)
+    bad = (r < SUPPLY) | (r > EXHAUST)
+    if bool(bad.any()):
+        raise ValueError(f"{who}: unknown role codes {r[bad].tolist()} at edge positions "
+                         f"{bad.nonzero().reshape(-1).tolist()}; the codes are 0 supply, "
+                         f"1 return, 2 recirculation, 3 outdoor air, 4 exhaust")
+    return r
 
 
 def add_air_handler(target, *, supplies: Mapping, returns: Mapping, kind: str = "air_handler",
@@ -145,20 +171,27 @@ def add_air_handler(target, *, supplies: Mapping, returns: Mapping, kind: str = 
 def air_handler_from_edges(net, kind: str) -> tuple[PrescribedFlow, AirHandlerFlows]:
     """The element and the closure of the air handler whose edges are of `kind` (as
     `add_air_handler`, or the `.prj` reader, made them)."""
-    roles = net.edge_attr("role", kind).round().to(torch.long)
+    roles = _role_codes(net.edge_attr("role", kind), f"air handler {kind!r}")
     recirculation = roles == RECIRCULATION
+    if int(recirculation.sum()) != 1:
+        raise ValueError(f"air handler {kind!r}: needs exactly one recirculation edge "
+                         f"(role 2), got {int(recirculation.sum())}")
     fraction = net.edge_attr("outdoor_air_fraction", kind, default=1.0)[recirculation]
     minimum = net.edge_attr("min_outdoor_air", kind, default=0.0)[recirculation]
     closure = AirHandlerFlows(kind, roles=roles, design_flows=net.edge_attr("design_flow", kind),
                               outdoor_air_fraction=float(fraction.reshape(-1)[0]),
                               min_outdoor_air=float(minimum.reshape(-1)[0]), name=kind)
-    return PrescribedFlow(closure.flow_key, kind=kind), closure
+    return PrescribedFlow(closure.flow_key, kind=kind, dtype=net.dtype), closure
 
 
 def air_handler_plenums(net, kind: str) -> tuple:
     """(supply plenum, return plenum) of the air handler of `kind`: the recirculation
     edge's target and source."""
-    roles = net.edge_attr("role", kind).round().to(torch.long)
+    roles = _role_codes(net.edge_attr("role", kind), f"air handler {kind!r}")
     src, tgt = net.endpoints(kind)
-    k = int((roles == RECIRCULATION).nonzero()[0])
+    found = (roles == RECIRCULATION).nonzero().reshape(-1)
+    if found.numel() != 1:
+        raise ValueError(f"air handler {kind!r}: its plenums are the ends of its one "
+                         f"recirculation edge (role 2), but it has {found.numel()}")
+    k = int(found[0])
     return net.nodes[int(tgt[k])], net.nodes[int(src[k])]

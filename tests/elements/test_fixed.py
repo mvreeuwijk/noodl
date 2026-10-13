@@ -80,3 +80,13 @@ def test_a_prescribed_flow_reads_its_flows_from_the_drivers():
     assert el.dp_independent and el.dflow(torch.zeros(2, dtype=torch.float64), d).eq(0).all()
     with pytest.raises(KeyError, match="prescribed_flow.ahs"):
         el.flow(torch.zeros(2, dtype=torch.float64), {})
+
+
+def test_a_prescribed_flow_starts_in_the_layer_dtype():
+    el = PrescribedFlow("prescribed_flow.ahs", kind="ahs")
+    q, k = el.linear_init({"prescribed_flow.ahs": torch.tensor([0.1, 0.05])})
+    assert q.dtype == k.dtype == torch.float64
+    el32 = PrescribedFlow("prescribed_flow.ahs", kind="ahs", dtype=torch.float32)
+    q32, _ = el32.linear_init({"prescribed_flow.ahs": torch.tensor([0.1], dtype=torch.float64)})
+    assert q32.dtype == torch.float32
+

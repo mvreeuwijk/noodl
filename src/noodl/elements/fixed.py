@@ -83,13 +83,15 @@ class FixedVolumeFlow(Element):
 
 class PrescribedFlow(Element):
     """F = drivers[key] whatever dp: a flow (kg/s, one value per edge of the kind) that a
-    closure or an input prescribes every step, e.g. an air handler's supply flows."""
+    closure or an input prescribes every step, e.g. an air handler's supply flows.
+    `dtype` is the layer's: `linear_init`, which has no dp to take it from, returns it."""
 
     dp_independent = True
 
-    def __init__(self, key: str, *, kind: str) -> None:
+    def __init__(self, key: str, *, kind: str, dtype: torch.dtype = torch.float64) -> None:
         super().__init__(kind)
         self.key = str(key)
+        self.register_buffer("_like", torch.zeros((), dtype=dtype))
 
     def _q(self, drivers) -> Tensor:
         if drivers is None or self.key not in drivers:
@@ -104,5 +106,5 @@ class PrescribedFlow(Element):
         return torch.zeros_like(self.flow(dp, drivers))
 
     def linear_init(self, drivers=None) -> tuple[Tensor, Tensor]:
-        q = self._q(drivers)
+        q = self._q(drivers).to(self._like.dtype)
         return q, torch.zeros_like(q)

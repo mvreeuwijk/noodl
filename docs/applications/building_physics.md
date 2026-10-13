@@ -236,7 +236,10 @@ plenums keep their last values.
 
 Only these balanced flows touch the plenums, so the airflow solve does not need their
 pressure: `build_model(flow_balanced=plenums)` puts them on the air layer's boundary at zero
-gauge pressure, while they stay ordinary nodes of the heat and species layers. They are
+gauge pressure, while they stay ordinary nodes of the heat and species layers. An edge whose
+element depends on the pressure (a leak into a plenum, say) would let a pinned plenum absorb
+an imbalance unseen, so `build_model` refuses one on a `flow_balanced` node, naming the node
+and the edge; CONTAM, too, joins only the air handler's own paths to its plenums. They are
 well-mixed nodes with air mass $\rho V$. A plenum of zero volume (CONTAM's default) holds no
 air and must also be named in `storage_free=`: its balance is then algebraic, the mix of what
 flows in, and the heat and species layers use the implicit scheme (`build_model` selects it

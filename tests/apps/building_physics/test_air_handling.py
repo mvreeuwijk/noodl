@@ -234,3 +234,61 @@ def test_the_flows_are_differentiable_in_the_fraction_and_the_multipliers():
     fo = torch.tensor(0.3, dtype=F64, requires_grad=True)
     m = torch.tensor([0.9, 1.1, 0.8, 1, 1, 1], dtype=F64, requires_grad=True)
     assert torch.autograd.gradcheck(flows, (fo, m))
+
+
+def test_a_pressure_dependent_edge_on_a_flow_balanced_plenum_is_refused():
+    """A plenum pinned at zero gauge pressure would absorb a leak's imbalance silently."""
+    net = Network(dtype=F64)
+    net.add_node("ambient", z_ref=0.0, T0=293.15)
+    net.add_node("room", z_ref=0.0, T0=293.15, volume=300.0)
+    net.add_edge("ambient", "room", kind="airpath", z_path=1.0, Cd=0.6, area=0.01)
+    add_air_handler(net, supplies={"room": 0.1}, returns={"room": 0.05})
+    net.add_edge("room", "ahs_supply", kind="airpath", z_path=1.0, Cd=0.6, area=0.01)
+    element, closure = air_handler_from_edges(net, "air_handler")
+    plenums = air_handler_plenums(net, "air_handler")
+    with pytest.raises(ValueError, match=r"flow_balanced node 'ahs_supply' is an end of the "
+                                         r"edge 'room' -> 'ahs_supply' of kind 'airpath'"):
+        build_model(net, air_elements=[orifice_elements_from_edges(net, "airpath"), element],
+                    drives=[Stack.from_network(net, "airpath")], thermal=False, species=1,
+                    closures=[closure], flow_balanced=plenums, storage_free=plenums)
+
+
+@pytest.mark.parametrize("roles, message", [
+    ([0, 1, 2, 3, 4, 7], r"unknown role codes \[7\] at edge positions \[5\]"),
+    ([0, 1, 2.4, 3, 4], r"role codes must be integers 0..4, got \[2.4"),
+    ([0, -1, 2, 3, 4], r"unknown role codes \[-1\]"),
+])
+def test_unknown_or_fractional_role_codes_are_refused(roles, message):
+    with pytest.raises(ValueError, match=message):
+        AirHandlerFlows("ahs", roles=torch.tensor(roles, dtype=F64),
+                        design_flows=[0.1] * len(roles))
+
+
+def test_the_edge_readers_refuse_bad_roles_and_a_missing_recirculation():
+    net = Network(dtype=F64)
+    net.add_node("ambient", z_ref=0.0)
+    net.add_node("room", z_ref=0.0, volume=300.0)
+    add_air_handler(net, supplies={"room": 0.1}, returns={"room": 0.1})
+    rec = [e for e in net.edges if net.graph.edges[e]["role"] == RECIRCULATION][0]
+    net.graph.edges[rec]["role"] = 2.4
+    with pytest.raises(ValueError, match=r"'air_handler': role codes must be integers"):
+        air_handler_from_edges(net, "air_handler")
+    net.graph.edges[rec]["role"] = float(SUPPLY)
+    with pytest.raises(ValueError, match=r"'air_handler': needs exactly one recirculation"):
+        air_handler_from_edges(net, "air_handler")
+    with pytest.raises(ValueError, match=r"'air_handler': its plenums are the ends of its "
+                                         r"one recirculation edge \(role 2\), but it has 0"):
+        air_handler_plenums(net, "air_handler")
+
+
+def test_a_negative_point_is_refused_naming_it_not_the_fraction():
+    closure = AirHandlerFlows("ahs", roles=ROLES,
+                              design_flows=torch.tensor([0.1, 0.05, 0.12, 0, 0, 0], dtype=F64))
+    d = {"flow_multiplier.ahs": torch.tensor([[1, 1, 1, 1, 1, 1], [1, -1, 1, 1, 1, 1]],
+                                             dtype=F64),
+         "outdoor_air_fraction.ahs": torch.tensor(0.3, dtype=F64)}
+    with pytest.raises(ValueError, match=r"'ahs': supply or return points \[1\] .* negative"):
+        closure({}, d)
+    d["flow_multiplier.ahs"] = torch.tensor([1, 1, -1, 1, 1, 1], dtype=F64)
+    with pytest.raises(ValueError, match=r"supply or return points \[2\]"):
+        closure({}, d)
