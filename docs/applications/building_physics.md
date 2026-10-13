@@ -859,7 +859,7 @@ since `contamxpy`'s own documentation does not pin the sign of `getPathFlow`.
 
 ### Against OpenModelica (Modelica Buildings Library)
 
-**Algebraic models (6, no volumes).** Every CSV row and column against OpenModelica's own
+**Algebraic models (7, no volumes).** Every CSV row and column against OpenModelica's own
 simulation, `|noodl - omc| <= 1e-6 |omc| + 1e-9` kg/s:
 
 | Model | Worst relative error | Rows compared |
@@ -870,6 +870,7 @@ simulation, `|noodl - omc| <= 1e-6 |omc| + 1e-9` kg/s:
 | OpenDoorTemperature | 1.8e-11 | 49 |
 | Orifice | 4.0e-16 | 501 |
 | PowerLaw | 6.1e-16 | 501 |
+| Outside_Cp | 5.0e-16 | 501 |
 
 All at round-off except `OpenDoorTemperature`, whose discretised-door port flows sit at 1.8e-11
 relative — still five orders of magnitude inside the 1e-6 bound, and attributed to an
@@ -883,6 +884,28 @@ The assertion is `|noodl - contam| <= |omc - contam| + 1e-6 |omc| + 1e-9` at eve
 adds nothing to MBL's own departure from the table (41 of 104 entries miss the table's 3
 significant figures, in MBL as much as in noodl physics).
 
+**Weather and wind pressure.** The weather a `ReaderTMY3` puts on the bus (dry-bulb temperature,
+pressure, relative humidity, wind speed) and every wind boundary's `pWin` are compared at every row,
+separately from any time integration (`assemble.weather_columns`), on MBL's
+`Buildings.Fluid.Sources` examples (four orientations of `Outside_CpLowRise` and of `Outside_CpData`
+over a week from day 200, a full sweep of the wind direction over symmetric, asymmetric and narrow
+profiles), on `Outside_Cp` and on `PressurizationData`. Being the same arithmetic as MBL's, they are
+held to round-off, `|noodl - omc| <= 1e-12 |omc|` with no absolute floor; the weather comes out
+identical to the last bit, the calendar time included (MBL's `t - k lenWea + lenWea` rounds the
+model time to the spacing of doubles near a year, 3.7e-9 s, and noodl rounds it the same way):
+
+| Model | Worst relative error (weather) | Worst relative error (pWin) | Rows |
+|---|---|---|---|
+| Outside_Cp | 0.0e+00 | 3.4e-16 | 501 |
+| Outside_CpLowRise | 0.0e+00 | 5.4e-16 | 501 |
+| Outside_CpData | 0.0e+00 | 6.0e-16 | 501 |
+| Outside_CpData_Angles | 0.0e+00 | 4.6e-16 | 501 |
+| Outside_CpData_Directions | 0.0e+00 | 4.3e-16 | 501 |
+| PressurizationData | 0.0e+00 | 9.1e-16 | 501 |
+
+`PressurizationData` imports, but it is not compared as a dynamic model (see Limitations). Its
+weather and wind pressures are compared, in the last row above.
+
 **Dynamic models (13, with volumes).** Every volume stores its air compressibly, as MBL's
 `MixingVolume` does (see "Volume mass storage" below), and every model is compared at the
 reference's own precision. The reference CSVs were regenerated with DASSL at a tolerance of
@@ -890,11 +913,16 @@ reference's own precision. The reference CSVs were regenerated with DASSL at a t
 own error was of the order of the comparison: 5.6e-5 K on `ZonalFlow`, and a 5e-5 relative
 door-flow wiggle after `CO2TransportStep`'s pulse.
 
-noodl physics runs `scheme="midpoint"` and combines two runs, with steps in ratio 2, by
-Richardson extrapolation (`run.extrapolate`). The midpoint scheme is second order: the
-transport layers advance with the mean of the start- and end-of-step flows, and the volumes'
-mass with the L-stable BDF2 rate. Extrapolation needs the error to expand smoothly in the step,
-so the steps are laid out with care:
+noodl physics runs `scheme="midpoint"` and combines two runs, with steps in ratio 2, by Richardson
+extrapolation (`run.extrapolate`). The midpoint scheme is second order. The transport layers advance
+over two halves of each step, the first with the start-of-step flows, capacities and sources and the
+second with the end-of-step ones. Over the whole step the boundary values follow the cubic Hermite
+through their values and rates at both ends (the straight line where they are constant). The
+volumes' mass advances with the L-stable BDF2 rate. A zone that flushes much faster than a step then
+ends the step behind its boundary by its own flushing time at the step's end. Held at the step's
+mean flows and boundary values, it fell half a step behind, an error of first order that
+extrapolation cannot remove. Extrapolation needs the error to expand smoothly in the step, so the
+steps are laid out with care:
 
 - Every signal event (a step, a pulse edge, a ramp corner) is a step boundary.
 - Every **switch** is a step boundary too. A switch is where an element's law changes piece
@@ -922,7 +950,9 @@ where noodl physics' runs at 1, 2 and 4 substeps agree to 1e-10 kg/s and the ref
 2.9e-8 kg/s over its first rows. `NaturalVentilation`'s orifices at their reversal are
 5.0e-10 kg/s from it, where it moved by up to 3.7e-9 kg/s. `ClosedDoors`' crack flows are
 at most 1.3e-12 kg/s from it (the reference moved by 1.2e-11 kg/s), and `ReverseBuoyancy`'s
-door flow at 612 s 1.7e-8 kg/s (it moved by 2.2e-8 kg/s).
+door flow at 612 s 1.7e-8 kg/s (it moved by 2.2e-8 kg/s). `ReverseBuoyancy3Zones`' door flow now passes
+through the same allowance, since the two-halves scheme: its worst difference is 1.03e-6 relative
+(4.9e-9 kg/s absolute) against a reference resolution of 1.8e-8 kg/s.
 
 The `t = StartTime` row, MBL's `p_start` initialisation, is reproduced too. Worst relative
 error per variable, with the part beyond the reference's resolution in brackets where the two
@@ -930,19 +960,19 @@ differ and the first is above 1e-6, and the wall time of the two runs:
 
 | Model | flow | T | p | Xi | C | substeps | time |
 |---|---|---|---|---|---|---|---|
-| ThreeRoomsContam | 4.3e-07 | 7.1e-09 | 1.2e-14 | 1.1e-11 | 0 | 1, 2 | 268 s |
-| ThreeRoomsContamDiscretizedDoor | 4.1e-07 | 7.0e-09 | 6.5e-13 | 9.0e-12 | 0 | 1, 2 | 813 s |
-| OneRoom | 1.5e-11 | 2.3e-14 | 1.4e-16 | 1.1e-14 | — | 1, 2 | 75 s |
-| ZonalFlow | 0 | 2.4e-11 | 1.4e-16 | 3.3e-12 | — | 1, 2 | 135 s |
-| CO2TransportStep | 4.5e-07 | 7.1e-09 | 3.4e-14 | 3.3e-11 | 3.8e-07 | 1, 2 | 933 s |
-| OpenDoorBuoyancyDynamic | 5.8e-07 | 1.2e-10 | 1.4e-14 | 1.4e-14 | — | 1, 2 | 1059 s |
-| OpenDoorBuoyancyPressureDynamic | 1.8e-07 | 2.6e-10 | 4.2e-15 | 3.9e-12 | — | 1, 2 | 1046 s |
-| NaturalVentilation | 1.1e-06 (0) | 1.7e-13 | 1.5e-14 | 2.1e-14 | — | 1, 2 | 728 s |
-| ReverseBuoyancy3Zones | 4.9e-07 | 3.3e-10 | 6.9e-14 | 1.1e-12 | — | 1, 2 | 1484 s |
-| ClosedDoors | 1.2e-05 (4.7e-07) | 6.5e-12 | 3.5e-12 | 1.2e-11 | — | 2, 4 | 8112 s |
-| OneOpenDoor | 7.2e-05 (0) | 1.2e-10 | 2.1e-11 | — | — | 1, 2 | 3012 s |
-| ReverseBuoyancy | 8.1e-06 (0) | 1.5e-10 | 4.7e-10 | 4.7e-10 | — | 2, 4 | 3929 s |
-| OneEffectiveAirLeakageArea | 4.4e-07 | 7.2e-13 | 1.8e-13 | 2.9e-13 | — | 1, 2 | 501 s |
+| ThreeRoomsContam | 4.3e-07 | 7.1e-09 | 1.3e-14 | 1.1e-11 | 0 | 1, 2 | 75 s |
+| ThreeRoomsContamDiscretizedDoor | 4.1e-07 | 7.0e-09 | 6.6e-13 | 8.9e-12 | 0 | 1, 2 | 80 s |
+| OneRoom | 1.5e-11 | 1.3e-13 | 1.4e-16 | 1.7e-16 | — | 1, 2 | 21 s |
+| ZonalFlow | 0 | 2.3e-12 | 1.4e-16 | 3.3e-12 | — | 1, 2 | 31 s |
+| CO2TransportStep | 4.5e-07 | 7.1e-09 | 2.7e-14 | 3.3e-11 | 3.8e-07 | 1, 2 | 129 s |
+| OpenDoorBuoyancyDynamic | 5.8e-07 | 1.2e-10 | 1.4e-14 | 1.6e-14 | — | 1, 2 | 142 s |
+| OpenDoorBuoyancyPressureDynamic | 1.8e-07 | 1.6e-10 | 4.2e-15 | 4.8e-12 | — | 1, 2 | 140 s |
+| NaturalVentilation | 1.1e-06 (0) | 1.8e-13 | 1.5e-14 | 1.6e-14 | — | 1, 2 | 138 s |
+| ReverseBuoyancy3Zones | 1.0e-06 (0) | 3.3e-10 | 6.9e-14 | 1.1e-12 | — | 1, 2 | 164 s |
+| ClosedDoors | 1.2e-05 (4.9e-07) | 6.7e-12 | 3.7e-12 | 1.3e-11 | — | 2, 4 | 1180 s |
+| OneOpenDoor | 7.2e-05 (0) | 1.2e-10 | 2.1e-11 | — | — | 1, 2 | 288 s |
+| ReverseBuoyancy | 8.1e-06 (0) | 1.5e-10 | 4.7e-10 | 4.7e-10 | — | 2, 4 | 481 s |
+| OneEffectiveAirLeakageArea | 4.4e-07 | 7.4e-13 | 1.8e-13 | 3.0e-13 | — | 1, 2 | 114 s |
 
 No model needs a bound above 1e-6 (`PARITY_STORAGE` is empty). The storage-dominated models
 also assert the storage mechanism on noodl physics' own history. `ClosedDoors` and
@@ -1025,8 +1055,24 @@ regression at rtol 1e-8.
 - **Doorway laminar transition is approximated.** Doorway openings use the generic laminar
   transition of `PowerLaw` (1e-3 Pa) rather than one derived from the door's own record. The
   effect is confined to pressure differences below $10^{-3}$ Pa across the doorway.
-- **The Modelica import accepts a stated subset.** Wind pressure, weather data, controllers,
-  and dynamic medium columns are refused with a named error; see [the Modelica import's refused content](../formats/modelica.md).
+- **`PressurizationData` is imported but not compared.** It is MBL's 62.5 m3 room between two
+  `Outside_CpLowRise` walls over 30 days of San Francisco weather.
+  The room flushes in about 10 s, against steps of 50 to 3000 s. Where the flow fades, in a
+  calm or with the wind parallel to both walls, it can fall by orders of magnitude within one
+  step, and the room freezes at the state it had when its flushing stopped. The run does not
+  resolve that decay: the transport step sees the flows only at the step's two ends. It
+  therefore freezes the room at the wrong state, and this error, first order in the step, stays
+  for the whole calm. Over every row at 1 and 2 substeps, the room temperature is 2.9e-3 relative
+  from the reference (0.82 K, at the end of the first calm, 25920 s) and its humidity 3.4e-2 (at
+  93312 s). Flows are within 1e-6 beyond the reference's resolution and the pressure within 2e-11.
+  Refining the grid where the boundary pressures fade reduced the temperature error to 1.6e-4 and
+  the humidity error to 2.0e-3 in an experiment. That refinement, together with a transport step
+  that treats the flows' change within a step implicitly, is the direction for the follow-up.
+  The wind boundaries themselves are verified on the `Buildings.Fluid.Sources` models
+  (above).
+- **The Modelica import accepts a stated subset.** Controllers and dynamic medium columns are
+  refused with a named error, and only the weather reader's airflow outputs are read; see [the
+  Modelica import's refused content](../formats/modelica.md).
 
 ## Install
 

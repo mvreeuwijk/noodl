@@ -461,6 +461,76 @@ def test_boundary_temperature_and_concentration_inputs_reach_the_zone(tmp_path):
     assert torch.allclose(hist["C"][:, i, 0], 4e-4 * (1.0 - decay), rtol=0.0, atol=1e-13)
 
 
+def test_a_stiff_zone_follows_a_ramping_boundary_with_its_own_lag(tmp_path):
+    # zone_two_orifices with a 0.1 m3 zone (flushing time tau = rho V/F, about 7 s) and 60 s
+    # steps: bouA's T_in and C_in[1] ramp linearly over the run, so the zone, on frozen flows,
+    # is x(t) = x_in(t) - b tau (1 - exp(-t/tau)) for the ramp's slope b: it lags the boundary
+    # by tau, not by the step. The midpoint scheme's exact step takes the boundary values
+    # linear in time over the step (`run._Midpoint`), which is exact for a ramp; held at its
+    # step mean the zone would relax to the mid-step value, a lag of about h/2 (0.4 K here).
+    doc = _doc("zone_two_orifices.json")
+    doc["medium"]["extraPropertiesNames"] = ["CO2"]
+    doc["experiment"].update({"StopTime": 600.0, "Interval": 60.0})
+    doc["components"][0]["parameters"].update({"use_T_in": True, "use_C_in": True})
+    doc["components"][2]["parameters"]["V"] = 0.1
+    ramp = "Modelica.Blocks.Sources.Ramp"
+    doc["signals"] = [
+        {"name": "TIn", "class": ramp, "drives": "bouA.T_in",
+         "parameters": {"height": 10.0, "duration": 600.0, "offset": 293.15}},
+        {"name": "CIn", "class": ramp, "drives": "bouA.C_in[1]",
+         "parameters": {"height": 4e-4, "duration": 600.0, "offset": 0.0}},
+    ]
+    model, state, drivers, names = read_modelica(_write(tmp_path, doc), return_names=True)
+    t = names.times
+    hist = simulate(model, state, drivers, t, scheme="midpoint")
+    ((col, sign),) = names.edges["oriA"]
+    F = float(sign * hist["air.q"][0, col])
+    i = names.nodes["vol"]
+    tau = 1.2 * float(hist["p"][0, i]) / 101325.0 * 0.1 / F
+    assert 5.0 < tau < 10.0
+    lag = tau * (1.0 - torch.exp(-t / tau))
+    assert torch.allclose(hist["T"][:, i], 293.15 + 10.0 / 600.0 * (t - lag), rtol=0.0,
+                          atol=1e-7)
+    assert torch.allclose(hist["C"][:, i, 0], 4e-4 / 600.0 * (t - lag), rtol=0.0, atol=1e-13)
+
+
+def test_a_stiff_zone_follows_a_curved_boundary_with_its_own_lag(tmp_path):
+    # A 0.1 m3 zone exchanging a prescribed F = 0.02 kg/s each way with a boundary whose T_in
+    # is a 5 K, 20-minute sine (`ZonalFlow_m_flow`, no pressure drop: rho = 1.2 kg/m3,
+    # k = F/(rho V) = 1/6 1/s), over 60 s steps (10 flushing times). The zone is
+    # T = 293.15 + 5 k/(k^2 + w^2) (k sin wt - w cos wt + w exp(-kt)). The midpoint scheme
+    # takes the boundary as the cubic Hermite through its values and rates at the step's
+    # ends (`assemble._Builder.boundary_rates`), so the zone lags it by k^-1 times its rate
+    # at the step's end: within 5e-5 K at one substep (measured 2.1e-5 K), where the straight
+    # line between the ends was 2.0e-2 K off (its chord's slope instead of the end's).
+    doc = _doc("zonal_flow.json")
+    doc["experiment"].update({"StopTime": 1200.0, "Interval": 60.0})
+    doc["components"] = [
+        {"name": "bou", "class": "Buildings.Fluid.Sources.Boundary_pT",
+         "parameters": {"p": P_DEFAULT, "T": 293.15, "nPorts": 2, "use_T_in": True}},
+        {"name": "vol", "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+         "parameters": {"V": 0.1, "T_start": 293.15, "nPorts": 2, "m_flow_nominal": 0.001,
+                        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial"}},
+        {"name": "floExc", "class": _M + "ZonalFlow_m_flow", "parameters": {}},
+    ]
+    doc["connections"] = [["floExc.port_a1", "bou.ports[1]"], ["floExc.port_b1", "vol.ports[1]"],
+                          ["floExc.port_a2", "vol.ports[2]"], ["floExc.port_b2", "bou.ports[2]"]]
+    doc["signals"] = [
+        {"name": "TIn", "class": "Modelica.Blocks.Sources.Sine", "drives": "bou.T_in",
+         "parameters": {"amplitude": 5.0, "f": 1.0 / 1200.0, "offset": 293.15}},
+        {"name": "F", "class": "Modelica.Blocks.Sources.Constant", "parameters": {"k": 0.02},
+         "drives": ["floExc.mAB_flow", "floExc.mBA_flow"]},
+    ]
+    model, state, drivers, names = read_modelica(_write(tmp_path, doc), return_names=True)
+    t = names.times
+    hist = simulate(model, state, drivers, t, scheme="midpoint")
+    i = names.nodes["vol"]
+    k, w = 0.02 / (1.2 * 0.1), 2 * math.pi / 1200.0
+    exact = 293.15 + 5.0 * k / (k * k + w * w) * (k * torch.sin(w * t) - w * torch.cos(w * t)
+                                                  + w * torch.exp(-k * t))
+    assert float((hist["T"][:, i] - exact).abs().max()) <= 5e-5
+
+
 # ------------------------------------------------ transport time course
 def test_heat_and_moisture_relax_with_the_moist_air_heat_carrier():
     # Two rooms exchanging F = V ACS rho + m_flow each way (balanced), no boundary. The
@@ -922,3 +992,31 @@ def test_a_zone_without_a_positive_volume_is_refused(tmp_path, fixture, name, ch
             comp["parameters"][key] = value
     with pytest.raises(ModelicaImportError, match=match):
         read_modelica(_write(tmp_path, doc))
+
+
+def test_a_sub_interval_takes_the_hermite_value_and_slope_of_a_boundary():
+    """On `(u, v)` inside a grid step, a boundary value is the cubic Hermite's value at each
+    end and its rate keys are the Hermite's slope there, not the grid step's end rates."""
+    from noodl.apps.building_physics.modelica.assemble import boundary_rate_key
+    from noodl.apps.building_physics.modelica.run import _StepDrivers
+
+    grid = torch.tensor([0.0, 10.0, 20.0], dtype=torch.float64)
+    f = lambda t: 3.0 + 0.5 * t - 0.02 * t**2 + 0.001 * t**3  # noqa: E731
+    df = lambda t: 0.5 - 0.04 * t + 0.003 * t**2  # noqa: E731
+    t = grid
+    drivers = {
+        "series:time": grid,
+        "series:thermal.x_boundary": f(t).reshape(-1, 1),
+        "series:" + boundary_rate_key("thermal.x_boundary", "left"): df(t).reshape(-1, 1),
+        "series:" + boundary_rate_key("thermal.x_boundary", "right"): df(t).reshape(-1, 1),
+    }
+    sd = _StepDrivers(drivers, grid, 0)
+    du, dv = sd.span(12.0, 17.0)
+    for d, time in ((du, 12.0), (dv, 17.0)):
+        # A cubic is reproduced exactly by its Hermite interpolant.
+        assert float(d["thermal.x_boundary"]) == pytest.approx(f(time), rel=1e-12)
+        for side in ("left", "right"):
+            assert float(d[boundary_rate_key("thermal.x_boundary", side)]) == pytest.approx(
+                df(time), rel=1e-12)
+        assert float(d[boundary_rate_key("thermal.x_boundary", "left")]) != pytest.approx(
+            float(df(20.0)), rel=1e-6)

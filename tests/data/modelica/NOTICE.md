@@ -1,27 +1,37 @@
-The JSON and CSV files in this directory are derived from the Modelica Buildings Library
-(MBL) v13.0.0, commit `55abf579598ca81cae0a82f337350375958e6722`, by OpenModelica 1.27.1
-(`OpenModelica 1.27.1~2-g6db4671`) with `scripts/modelica_export.py`. They export the 8
-`Buildings.Airflow.Multizone.Validation.*` and 15 `Buildings.Airflow.Multizone.Examples.*`
-models: each `.json` is the model's structure and parameters (format `noodl-modelica/1`,
-defined in `src/noodl/apps/building_physics/modelica/schema.py`) and each `.csv` is a
-reference simulation trajectory (`# key: value` header lines, then `time` and one column per
-compared variable). Every JSON records the MBL commit and the
-OpenModelica version it was generated with; every CSV repeats them in its header.
+The JSON and CSV files in this directory are derived from the Modelica Buildings Library (MBL)
+v13.0.0, commit `55abf579598ca81cae0a82f337350375958e6722`, by OpenModelica 1.27.1 (`OpenModelica
+1.27.1~2-g6db4671`) with `scripts/modelica_export.py`. They export the 8
+`Buildings.Airflow.Multizone.Validation.*` and 15 `Buildings.Airflow.Multizone.Examples.*` models,
+and five `Buildings.Fluid.Sources` models of the wind boundaries: the examples `Outside_Cp`,
+`Outside_CpLowRise`, `Outside_CpData` and `Outside_CpData_Angles`, and
+`Validation.Outside_CpData_Directions`. Each `.json` is the model's structure and parameters (format
+`noodl-modelica/1`, defined in `src/noodl/apps/building_physics/modelica/schema.py`) and each `.csv`
+is a reference simulation trajectory (`# key: value` header lines, then `time` and one column per
+compared variable). Every JSON records the MBL commit and the OpenModelica version it was generated
+with; every CSV repeats them in its header.
 
 The reference CSVs of the 13 dynamic models (`ClosedDoors`, `CO2TransportStep`,
 `NaturalVentilation`, `OneEffectiveAirLeakageArea`, `OneOpenDoor`, `OneRoom`,
 `OpenDoorBuoyancyDynamic`, `OpenDoorBuoyancyPressureDynamic`, `ReverseBuoyancy`,
 `ReverseBuoyancy3Zones`, `ThreeRoomsContam`, `ThreeRoomsContamDiscretizedDoor`, `ZonalFlow`)
-were regenerated with `scripts/modelica_export.py --tolerance 1e-13` (DASSL at a relative
-tolerance of 1e-13 instead of each model's declared 1e-6 or 1e-8; the CSV header's
-`tolerance` line records it; the JSON, which keeps the declared experiment, came out
-byte-identical). At the declared tolerance the references' own integration error was
+and of `PressurizationData` were regenerated with `scripts/modelica_export.py --tolerance 1e-13`
+(DASSL at a relative tolerance of 1e-13 instead of each model's declared 1e-6 or 1e-8; the CSV
+header's `tolerance` line records it; the JSON, which keeps the declared experiment, came out
+byte-identical, except that `PressurizationData.json` gained its weather file's entry). At the
+declared tolerance the references' own integration error was
 comparable to the parity tolerance (ZonalFlow: 5.6e-5 K, 2.8e-8 kg/kg; CO2TransportStep's
 door flow 5e-5 relative after its source pulse, still visible at 1e-10). From 1e-12 to 1e-13
 the references still moved by up to 1.1e-4 of the flow floor (`ClosedDoors`' crack flows,
 1.2e-11 kg/s), 3.7e-5 (`NaturalVentilation`'s orifices at their reversal, 3.7e-9 kg/s),
 4.7e-5 (`OneOpenDoor`'s door at 28.8 s, 7.9e-9 kg/s) and 1.2e-6 in `CO2TransportStep`'s
 trace substance (6e-14 kg/kg); at 1e-14 DASSL returns no trajectory for these models.
+
+`USA_CA_San.Francisco.Intl.AP.724940_TMY3.mos` is MBL's
+`Buildings/Resources/weatherdata/USA_CA_San.Francisco.Intl.AP.724940_TMY3.mos`, copied byte for
+byte by `scripts/modelica_export.py` (sha256 recorded in every JSON that reads it; `.gitattributes`
+keeps line-ending conversion away from it). It is the NREL TMY3 data set for San Francisco
+International Airport (WMO 724940) as converted by MBL's `ConvertWeatherData` tool, and is
+redistributed under MBL's licence below.
 
 MBL is licensed under a 3-clause BSD licence (with an added paragraph on accepting
 enhancements), reproduced below from `Buildings/legal.html` in the MBL source tree:
@@ -83,21 +93,28 @@ such enhancements or derivative works thereof, in binary and source code form.
 
 ---
 
-Four of the 23 models are refused by `read_modelica` (`ModelicaImportError`, naming the
-offending instances); their JSON is exported and kept here for the refusal tests:
+Three of the 23 multizone models are refused by `read_modelica` (`ModelicaImportError`,
+naming the offending instances); their JSON is exported and kept here for the refusal tests:
 
-- `PressurizationData.json` — wind-pressure boundaries (`Outside_CpLowRise`) and weather data
-  (`ReaderTMY3`) are not supported.
-- `TrickleVent.json` — the same wind-pressure/weather-data boundaries, plus a feedback
-  controller (`LimPID`) and a temperature sensor wired as a component.
+- `TrickleVent.json` — a feedback controller (`LimPID`) and a temperature sensor wired as a
+  component (re-exported with the weather file its `ReaderTMY3` reads).
 - `ChimneyShaftNoVolume.json` — a chain of more than one flow element between two nodes and a
   feedback controller are not supported.
 - `ChimneyShaftWithVolume.json` — a dynamic (mass- and heat-storing) hydrostatic column
   (`MediumColumnDynamic`) and a feedback controller are not supported.
 
-All four still simulate cleanly in OpenModelica, so their `.csv` was exported too (this
-export script does not know which models `noodl`'s reader refuses); they are kept here for
-completeness even though noodl's tests only read the JSON of these four.
+`PressurizationData.json` imports, but the dynamic parity tests do not yet compare it (an
+unresolved freeze of the room where its flow fades; `docs/formats/modelica.md`). Its CSV, at
+1e-13, is the reference for that comparison, and its weather and wind-pressure columns are
+compared now.
+
+All three refused models still simulate cleanly in OpenModelica, so their `.csv` was exported
+too (this export script does not know which models `noodl`'s reader refuses); they are kept
+here for completeness even though noodl's tests only read the JSON of these three.
+
+The four `Buildings.Fluid.Sources` models other than `Outside_Cp` are boundaries with no flow
+element, which `read_modelica` refuses; their weather and wind-pressure columns are compared
+with `assemble.weather_columns` instead.
 
 Also derived from MBL, elsewhere in this repository: `tests/apps/building_physics/modelica/
 fixtures/three_rooms_discretized_door.json` reuses the instance names of

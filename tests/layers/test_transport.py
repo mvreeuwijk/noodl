@@ -486,6 +486,89 @@ def test_exact_scheme_rejects_on_failure_return_before_doing_any_work():
         )
 
 
+def test_exact_step_with_a_boundary_linear_in_time_matches_the_analytic_ramp():
+    """`x_boundary_end`: the boundary ramps linearly from `x_boundary` to it over the step.
+    A zone of flushing time tau = V/Q fed by c_b(t) = c0 + b t from c(0) = c0 is
+    c(t) = c_b(t) - b tau (1 - exp(-t/tau)): exact over steps 30 times tau, from the zone's
+    first-order hold, where the step mean of the ramp held constant is half a step off."""
+    net = flow_through_zone()
+    V, Q, b, dt = 10.0, 1.0, 0.5, 300.0
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([V]), flow_kind="airpath", boundary=["ambient"],
+        scheme="exact",
+    )
+    q = torch.tensor([Q, Q], dtype=torch.float64)
+    zero = _full(layer, torch.zeros(1, dtype=torch.float64))
+    c0 = 400.0
+    c = torch.tensor([c0], dtype=torch.float64)
+    held = c.clone()
+    tau = V / Q
+    for k in range(4):
+        cb0 = torch.tensor([c0 + b * k * dt], dtype=torch.float64)
+        cb1 = torch.tensor([c0 + b * (k + 1) * dt], dtype=torch.float64)
+        c = layer.step(c, q, zero, cb0, dt, x_boundary_end=cb1)
+        held = layer.step(held, q, zero, 0.5 * (cb0 + cb1), dt)
+        t = (k + 1) * dt
+        exact = c0 + b * t - b * tau * (1.0 - math.exp(-t / tau))
+        assert float(c[0]) == pytest.approx(exact, rel=1e-12, abs=0.0)
+        assert abs(float(held[0]) - exact) > 0.4 * b * dt / 2
+
+
+def test_exact_step_with_boundary_rates_follows_a_curved_boundary_at_its_own_lag():
+    """`x_boundary_rates`: the boundary is the cubic Hermite through both ends' values and
+    rates. A zone of flushing time tau = V/Q = 10 s fed by c_b(t) = A sin(w t) (one-hour
+    period) over 300 s steps (30 tau) ends every step within 1e-5 A of the analytic solution
+    (measured 5.5e-6 A); with the straight line between the ends (`x_boundary_end` alone) it
+    lags by the chord's slope instead of the end's, off by up to 4.2e-3 A (more than 7.8e-4 A
+    at every step: about tau h |c_b''| / 2, first order in the step)."""
+    net = flow_through_zone()
+    V, Q, A, w, dt = 10.0, 1.0, 100.0, 2 * math.pi / 3600.0, 300.0
+    tau = V / Q
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([V]), flow_kind="airpath", boundary=["ambient"],
+        scheme="exact",
+    )
+    q = torch.tensor([Q, Q], dtype=torch.float64)
+    zero = _full(layer, torch.zeros(1, dtype=torch.float64))
+
+    def cb(t):
+        return torch.tensor([A * math.sin(w * t)], dtype=torch.float64)
+
+    def rate(t):
+        return torch.tensor([A * w * math.cos(w * t)], dtype=torch.float64)
+
+    def exact(t):  # c' = (c_b - c)/tau from c(0) = 0
+        k = 1.0 / tau
+        amp = A * k / (k * k + w * w)
+        return amp * (k * math.sin(w * t) - w * math.cos(w * t) + w * math.exp(-k * t))
+
+    c = torch.zeros(1, dtype=torch.float64)
+    chord = c.clone()
+    for n in range(6):
+        t0, t1 = n * dt, (n + 1) * dt
+        c = layer.step(c, q, zero, cb(t0), dt, x_boundary_end=cb(t1),
+                       x_boundary_rates=(rate(t0), rate(t1)))
+        chord = layer.step(chord, q, zero, cb(t0), dt, x_boundary_end=cb(t1))
+        assert abs(float(c[0]) - exact(t1)) <= 1e-5 * A
+        assert abs(float(chord[0]) - exact(t1)) > 7e-4 * A
+    with pytest.raises(ValueError, match="x_boundary_rates needs x_boundary_end"):
+        layer.step(c, q, zero, cb(0.0), dt, x_boundary_rates=(rate(0.0), rate(dt)))
+
+
+def test_a_boundary_linear_in_time_is_refused_by_the_other_schemes():
+    net = flow_through_zone()
+    q = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    c = torch.tensor([100.0], dtype=torch.float64)
+    for scheme in ("implicit", "trapezoidal"):
+        layer = TransportLayer(
+            net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
+            boundary=["ambient"], scheme=scheme,
+        )
+        with pytest.raises(ValueError, match="x_boundary_end"):
+            layer.step(c, q, _full(layer, torch.zeros(1, dtype=torch.float64)),
+                       torch.tensor([420.0]), 300.0, x_boundary_end=torch.tensor([430.0]))
+
+
 def test_transpose_view_is_the_shared_transpose_operator():
     """`_TransposeView` is a thin alias for `solvers.implicit.TransposeOperator`, not a
     separately-maintained duplicate -- see the consolidation note in `layers/transport.py`.
@@ -679,3 +762,24 @@ def test_per_step_capacity_carries_a_gradient():
     assert volume.grad is not None
     assert torch.isfinite(volume.grad).all()
     assert float(volume.grad.abs().max()) > 0.0
+
+
+def test_a_forcing_polynomial_is_integrated_exactly_with_no_flow():
+    """With no flow the operator is zero and the Taylor schedule takes one term, where a
+    forcing polynomial of degree 3 needs four: `_expm_action` keeps them, so that
+    x(h) = x0 + b0 h + c1 h^2/2 + c2 h^3/3 + c3 h^4/4 exactly."""
+    from noodl.layers.transport import _expm_action
+
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1.0]), flow_kind="airpath", boundary=["ambient"],
+        scheme="exact",
+    )
+    op = layer._advection_operator(torch.zeros(2, dtype=torch.float64), layer._capacity_arg(None))
+    x0 = torch.tensor([1.0], dtype=torch.float64)
+    b0, c = torch.tensor([2.0], dtype=torch.float64), [torch.tensor([v], dtype=torch.float64)
+                                                       for v in (3.0, 4.0, 5.0)]
+    h = 2.0
+    out = _expm_action(op, x0, b0, h, forcing_poly=c).x
+    exact = 1.0 + 2.0 * h + 3.0 * h**2 / 2 + 4.0 * h**3 / 3 + 5.0 * h**4 / 4
+    assert float(out[0]) == pytest.approx(exact, rel=1e-14, abs=0.0)

@@ -15,7 +15,7 @@ just that one piece of work rather than crashing.
 
 Node identity
 -------------
-A `MixingVolume`/`DelayFirstOrder` ("zone") or `Boundary_pT`/`Outside` ("boundary") component
+A `MixingVolume`/`DelayFirstOrder` ("zone") or `Boundary_pT`/`Outside*` ("boundary") component
 owns exactly one node, named after the component: every one of its own fluid ports (all of
 its declared `ports[i]`) is the SAME node, because a lumped volume or boundary is a single
 pressure state that happens to expose several connection points. A `TraceSubstancesFlowSource`
@@ -112,6 +112,19 @@ heat-port wiring -- a bare `FixedTemperature` with no conductor, a conductor who
 not a zone, and so on -- is refused. A `PrescribedHeatFlow` whose `port` is wired to a zone's
 `heatPort` is recorded in `ComponentGraph.heat_sources` as `(component, zone)`; wired to
 anything else it is refused.
+
+Weather bus
+-----------
+A `ReaderTMY3` ("weather") is no node. A `connect()` of its `weaBus` to the `weaBus` of an
+`Outside`, `Outside_Cp`, `Outside_CpLowRise` or `Outside_CpData` boundary links that boundary
+to it (`ComponentGraph.weather`; `assemble` evaluates the reader's outputs for it). Every other
+connection touching a `weaBus` is refused by name: a bus wired to anything but an Outside
+boundary, a bus VARIABLE (`weaDat.weaBus.HDirNor`) wired anywhere (the exporter keeps such a
+connection into a signal block's input for this), and a boundary wired to two readers. So is a
+connection reaching a reader through any port but its `weaBus` and the `<output>_in` inputs of
+the outputs the boundaries read (`TDryBul`, `pAtm`, `relHum`, `winSpe`, `winDir`). One whose
+other end is an unsupported class (named already) or an observer is left alone. A boundary with
+no reader takes its weather-bus inputs from the signals driving `"<boundary>.weaBus.<output>"`.
 """
 
 from __future__ import annotations
@@ -191,6 +204,8 @@ class ComponentGraph:
     heat_sources: tuple[tuple[Component, str], ...] = ()
     # (zone, boundary component) for a boundary wired straight to a zone (module docstring).
     attached: tuple[tuple[str, Component], ...] = ()
+    # (Outside boundary, the ReaderTMY3 its weaBus is wired to) (module docstring).
+    weather: tuple[tuple[str, Component], ...] = ()
 
 
 class _UnionFind:
@@ -258,6 +273,8 @@ def _kind_of(cls: str, role: str | None) -> str:
         return "inline"  # before the role check: the exporter marks sensors as observers
     if role == "observer":
         return "observer"
+    if cls in schema.WEATHER_READERS:
+        return "weather"
     if cls in schema.ZONES:
         return "zone"
     if cls in schema.BOUNDARIES:
@@ -374,6 +391,8 @@ def _classify_components(doc: ModelicaDoc) -> _Ctx:
 def _process_fluid_connections(doc: ModelicaDoc, ctx: _Ctx) -> None:
     """Union every fluid `connect()` pair; note a signal-style connection's refusal, if any."""
     for a, b in doc.connections:
+        if _bus_end(a) is not None or _bus_end(b) is not None:
+            continue  # weather-bus wiring: `_resolve_weather`
         split_a, split_b = _split(a, ctx.errors), _split(b, ctx.errors)
         if split_a is None or split_b is None:
             continue
@@ -725,8 +744,88 @@ def _resolve_pins(doc: ModelicaDoc, ctx: _Ctx) -> tuple[list[Pin], list[tuple[Co
     return pins, heat_sources
 
 
+def _bus_end(ref: str) -> tuple[str, str | None] | None:
+    """`(instance, output)` of a weather-bus reference, `<inst>.weaBus` (output `None`) or
+    `<inst>.weaBus.<output>`; `None` for any other reference."""
+    parts = ref.split(".")
+    if len(parts) < 2 or parts[1] != "weaBus":
+        return None
+    return parts[0], ".".join(parts[2:]) or None
+
+
+# The reader's inputs a connection may reach: `<output>_in` of an output the Outside boundaries
+# read (ReaderTMY3.mo, `<output>Sou = Input`).
+_READER_INPUTS = frozenset(f"{q}_in" for q in schema.WEATHER_BUS_OUTPUTS)
+
+
+def _check_reader_port(a: str, b: str, ctx: _Ctx) -> None:
+    """Refuse a connection reaching a ReaderTMY3 through a port that is neither its `weaBus`
+    nor one of `_READER_INPUTS` (module docstring, "Weather bus")."""
+    for ref, other in ((a, b), (b, a)):
+        inst, _, port = ref.partition(".")
+        if ctx.kind_of.get(inst) != "weather" or port in _READER_INPUTS:
+            continue
+        if ctx.kind_of.get(other.split(".", 1)[0]) in ("unknown", "observer"):
+            continue  # an unsupported class is named already; an observer is ignored
+        ctx.errors.append(
+            f"{inst} ({ctx.by_name[inst].cls}): port {port}, wired to {other}, is not supported "
+            f"(only its weaBus and the inputs {', '.join(sorted(_READER_INPUTS))} are read)"
+        )
+
+
+def _resolve_weather(doc: ModelicaDoc, ctx: _Ctx) -> list[tuple[str, Component]]:
+    """Weather-bus wiring (module docstring, "Weather bus")."""
+    readers_of: dict[str, list[str]] = {}
+    for a, b in doc.connections:
+        ends = {a: _bus_end(a), b: _bus_end(b)}
+        if all(e is None for e in ends.values()):
+            _check_reader_port(a, b, ctx)
+            continue
+        named = [(ref, e) for ref, e in ends.items() if e is not None and e[0] in ctx.by_name]
+        if not named:
+            ctx.errors.append(f"{a}: connection references unknown instance(s) ({a}, {b})")
+            continue
+        kinds = {ref.split(".", 1)[0]: ctx.kind_of.get(ref.split(".", 1)[0])
+                 for ref in (a, b)}
+        if "unknown" in kinds.values() or "observer" in kinds.values():
+            continue  # an unsupported class is named already; an observer is ignored
+        ea, eb = ends[a], ends[b]
+        if (ea is not None and eb is not None and ea[1] is None and eb[1] is None
+                and {ctx.kind_of.get(ea[0]), ctx.kind_of.get(eb[0])} == {"weather", "boundary"}):
+            reader, bnd = ((ea[0], eb[0]) if ctx.kind_of[ea[0]] == "weather"
+                           else (eb[0], ea[0]))
+            if ctx.by_name[bnd].cls in schema.OUTSIDE_FAMILY:
+                readers_of.setdefault(bnd, []).append(reader)
+                continue
+        ref, (inst, output) = named[0]
+        other = b if ref == a else a
+        comp = ctx.by_name[inst]
+        if output is not None and output not in schema.WEATHER_BUS_OUTPUTS:
+            ctx.errors.append(
+                f"{inst} ({comp.cls}): weather-bus output {output}, wired to {other}, is not "
+                f"supported (only {', '.join(schema.WEATHER_BUS_OUTPUTS)} are read, by Outside "
+                f"boundaries)"
+            )
+        else:
+            ctx.errors.append(
+                f"{inst} ({comp.cls}): its weather bus is wired to {other}; only a ReaderTMY3's "
+                f"weaBus wired to an Outside boundary's weaBus is supported"
+            )
+    links: list[tuple[str, Component]] = []
+    for bnd, readers in readers_of.items():
+        if len(set(readers)) > 1:
+            ctx.errors.append(
+                f"{bnd} ({ctx.by_name[bnd].cls}): its weaBus is wired to more than one weather "
+                f"reader ({', '.join(sorted(set(readers)))})"
+            )
+            continue
+        links.append((bnd, ctx.by_name[readers[0]]))
+    return links
+
+
 def build(doc: ModelicaDoc) -> ComponentGraph:
     ctx = _classify_components(doc)
+    weather = tuple(_resolve_weather(doc, ctx))
     _process_fluid_connections(doc, ctx)
     _assign_nodes(ctx)
 
@@ -754,5 +853,5 @@ def build(doc: ModelicaDoc) -> ComponentGraph:
     return ComponentGraph(
         nodes=nodes, zones=zones, boundaries=boundaries, paths=paths, doors=doors,
         zonal=zonal, pins=pins, sources=sources, sensors=sensors, heat_sources=heat_sources,
-        attached=attached,
+        attached=attached, weather=weather,
     )

@@ -216,10 +216,47 @@ def test_signal_drives_must_be_a_string_or_a_list_of_strings(tmp_path: Path, dri
 def test_refusal_reason_for_known_and_unknown_classes() -> None:
     from noodl.apps.building_physics.modelica import schema
 
-    assert schema.refusal_reason("Buildings.Fluid.Sources.Outside_CpLowRise") == (
-        "wind pressure is not supported"
-    )
+    assert schema.refusal_reason("Buildings.Fluid.Sources.Outside_CpLowRise") is None
     assert schema.refusal_reason(
         "Buildings.BoundaryConditions.WeatherData.ReaderTMY3"
-    ) == "weather data is not supported"
+    ) is None
+    assert schema.refusal_reason(
+        "Buildings.BoundaryConditions.WeatherData.Examples.ReaderTMY3"
+    ) == "weather data other than a ReaderTMY3 is not supported"
+    assert schema.refusal_reason("Modelica.Blocks.Continuous.LimPID") == (
+        "feedback controllers are not supported"
+    )
     assert schema.refusal_reason("Buildings.Airflow.Multizone.Orifice") is None
+
+
+_READER_AND_BOUNDARY = [
+    {"name": "weaDat", "class": "Buildings.BoundaryConditions.WeatherData.ReaderTMY3",
+     "parameters": {}},
+    {"name": "bou", "class": "Buildings.Fluid.Sources.Boundary_pT", "parameters": {}},
+]
+
+
+def test_component_files_and_document_source_are_read(tmp_path: Path) -> None:
+    comps = [dict(c) for c in _READER_AND_BOUNDARY]
+    comps[0]["files"] = {"filNam": {"path": "w.mos", "sha256": "a" * 64}}
+    path = _write(tmp_path, _base_doc(components=comps))
+    loaded = load(path)
+    assert loaded.components[0].files == {"filNam": {"path": "w.mos", "sha256": "a" * 64}}
+    assert loaded.components[1].files == {}
+    assert loaded.source == Path(path)
+
+
+@pytest.mark.parametrize("files", [[], {"filNam": []}, {"filNam": {"path": "w.mos"}},
+                                   {"filNam": {"path": "w.mos", "sha256": "XYZ"}}])
+def test_malformed_component_files_are_refused(tmp_path: Path, files) -> None:
+    comps = [dict(_READER_AND_BOUNDARY[0], files=files)]
+    with pytest.raises(ModelicaImportError, match=r"components\[0\] \(weaDat\)\.files"):
+        load(_write(tmp_path, _base_doc(components=comps)))
+
+
+def test_weather_vocabulary() -> None:
+    from noodl.apps.building_physics.modelica import schema
+
+    assert schema.WEATHER_BUS_OUTPUTS == ("TDryBul", "pAtm", "relHum", "winSpe", "winDir")
+    assert schema.OUTSIDE_FAMILY == {"Buildings.Fluid.Sources.Outside"} | schema.OUTSIDE_WIND
+    assert len(schema.OUTSIDE_WIND) == 3

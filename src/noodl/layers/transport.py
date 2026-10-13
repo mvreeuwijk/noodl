@@ -1178,6 +1178,8 @@ class TransportLayer:
         capacity_prev: torch.Tensor | None = None,
         removal: torch.Tensor | None = None,
         diagnostics: dict | None = None,
+        x_boundary_end: torch.Tensor | None = None,
+        x_boundary_rates: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Advance one timestep under `self.scheme`.
 
@@ -1217,11 +1219,28 @@ class TransportLayer:
 
         `removal` (keyword-only) is a per-call first-order removal rate (1/s) replacing the
         construction-time one; see `_removal_arg`.
+
+        `x_boundary_end` (keyword-only, `scheme="exact"` only, default `None`): the boundary
+        values at the END of the step. Given, `x_boundary` is their value at the start and
+        the boundary values are linear in time over the step (a first-order hold,
+        `_expm_action`'s `forcing_poly`), so the step is exact for a boundary ramping linearly on
+        frozen flows. Without it the boundary values are held constant over the step, and
+        a zone whose flushing time is much shorter than the step relaxes to that constant:
+        given the step mean of a ramp, it lags the boundary by about half the step instead
+        of by its flushing time. Any other scheme refuses it (`ValueError`).
+
+        `x_boundary_rates` (keyword-only, with `x_boundary_end` only): the boundary values'
+        rates of change `(at the start, at the end)` of the step. Given, the boundary values
+        are the cubic Hermite through both ends' values and rates instead of the straight
+        line: a zone flushing much faster than the step lags its boundary by its flushing
+        time times the boundary's rate at the step's END, which the straight line's chord
+        misses by about `h/2` times its curvature.
         """
         return self._step(
             x, q, sources, x_boundary, dt,
             on_failure=on_failure, capacity=capacity, capacity_prev=capacity_prev,
             removal=removal, want_transfer=False, diagnostics=diagnostics,
+            x_boundary_end=x_boundary_end, x_boundary_rates=x_boundary_rates,
         )[0]
 
     def step_with_transfer(
@@ -1298,6 +1317,8 @@ class TransportLayer:
         removal: torch.Tensor | None = None,
         want_transfer: bool = False,
         diagnostics: dict | None = None,
+        x_boundary_end: torch.Tensor | None = None,
+        x_boundary_rates: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Shared body of `step` and `step_with_transfer`; see both for the public contract.
 
@@ -1320,6 +1341,18 @@ class TransportLayer:
                 f"a sub-stepping failure raises RuntimeError directly). Use the default "
                 f"on_failure='raise', or a scheme with a linear solve ('implicit', "
                 f"'trapezoidal')."
+            )
+        if x_boundary_end is not None and (self.scheme != "exact" or want_transfer):
+            raise ValueError(
+                f"TransportLayer '{self.name}': x_boundary_end (a boundary linear in time "
+                f"over the step) is supported by step() with scheme='exact' only, not by "
+                f"scheme={self.scheme!r}" + (" with the boundary transfer" if want_transfer
+                                             else "")
+            )
+        if x_boundary_rates is not None and x_boundary_end is None:
+            raise ValueError(
+                f"TransportLayer '{self.name}': x_boundary_rates needs x_boundary_end (the "
+                f"boundary's values at both ends of the step)"
             )
         out_dtype = x.dtype
         dtype = torch.float64
@@ -1363,6 +1396,20 @@ class TransportLayer:
                 and bool((x_boundary == 0).all())
                 and bool((sources == 0).all())
             )
+            poly: list[torch.Tensor] = []
+            if x_boundary_end is not None:
+                xb_end_s, _ = self._to_stacked(x_boundary_end.to(dtype), self.n_b,
+                                               "x_boundary_end")
+                if x_boundary_rates is None:  # linear in time
+                    poly = [op.boundary_forcing(xb_end_s - xb_s) / dt]
+                else:  # the cubic Hermite through both ends' values and rates
+                    r0, r1 = (self._to_stacked(r.to(dtype), self.n_b, "x_boundary_rates")[0]
+                              for r in x_boundary_rates)
+                    chord = (xb_end_s - xb_s) / dt
+                    poly = [op.boundary_forcing(r0),
+                            op.boundary_forcing((3 * chord - 2 * r0 - r1) / dt),
+                            op.boundary_forcing((r0 + r1 - 2 * chord) / dt ** 2)]
+                homogeneous = False
             expm = _expm_action(
                 op, x_s, b0, dt, where=f"TransportLayer '{self.name}' exact step",
                 # `step` never requests the integral, so the shift stays whatever
@@ -1372,6 +1419,7 @@ class TransportLayer:
                 # stays true by construction, not by relying on the inferred default).
                 shift=False if want_transfer else homogeneous,
                 integrate=want_transfer,
+                forcing_poly=poly,
             )
             result = expm.x
         elif self.scheme == "implicit":
@@ -1826,6 +1874,7 @@ def _expm_action(
     integrate: bool = False,
     shift: bool | None = None,
     where: str = "TransportLayer exact step",
+    forcing_poly: Sequence[torch.Tensor] = (),
 ) -> ExpmResult:
     """expm(dt [[M, b0], [0, 0]]) [x; 1] by a scaled Taylor action whose work (s substeps of m
     terms) is fixed from ||dt M||_1 before any arithmetic on x or b0.
@@ -1870,13 +1919,27 @@ def _expm_action(
       `sources` directly (constant, all-zero, and not themselves grad-tracked), which is
       unaffected by whether `q`/`capacity` require grad.
 
+    `forcing_poly` (keyword-only, default empty): the forcing's higher coefficients in time,
+    so that the forcing is `b0 + c1 tau + c2 tau^2 + ...` over the step (`tau` in [0, dt],
+    `forcing_poly = (c1, c2, ...)`): with `(c1,)` a first-order hold, `e^{dt M} x + dt
+    phi1(dt M) b0 + dt^2 phi2(dt M) c1`, exact for a forcing linear in time. The Taylor terms
+    of a substep starting at `t_k` are the derivatives of `x` there: `x' = M x + b(t_k)`, then
+    `x^(j) = M x^(j-1) + b^(j-1)(t_k)`. Not combined with `integrate` or `shift`
+    (`ValueError`).
+
     Raises `RuntimeError` naming `where`, the norm and the predicted s * m when that exceeds
     `max_matvecs`: the exact scheme is O(||dt M||) matvecs by nature; a stiff problem belongs
     to scheme='implicit'.
     """
     if shift and integrate:
         raise ValueError("_expm_action: shift=True is incompatible with integrate=True")
+    poly = list(forcing_poly)
+    if poly and (integrate or shift):
+        raise ValueError("_expm_action: a forcing polynomial is incompatible with integrate=True "
+                         "and shift=True")
     dtype = x.dtype
+    if poly:
+        shift = False
     if shift is None:
         shift = (not integrate) and (not b0.requires_grad) and (not bool(torch.any(b0 != 0)))
     with torch.no_grad():
@@ -1891,6 +1954,9 @@ def _expm_action(
     # that also covers the forcing polynomial's coefficient derivative; when shifted,
     # it selects the bound covering the state polynomial's own coefficient derivative.
     s, m = _taylor_schedule(norm, tol, forcing=not shift)
+    # A forcing polynomial of degree d enters the first d + 1 terms: keep them all, so that
+    # it is integrated exactly however small the operator (a zero operator takes m = 1).
+    m = max(m, len(poly) + 1)
     if s * m > max_matvecs:
         raise RuntimeError(
             f"{where}: the exponential action needs about {s * m} matvecs (||dt M||_1 = "
@@ -1907,13 +1973,27 @@ def _expm_action(
         return y - mu * v if shift else y
 
     integral = torch.zeros_like(x) if integrate else None
-    for _ in range(s):
+    # b^(i)(t) of the forcing polynomial b0 + sum_j poly[j-1] t^j, i >= 1, at time t.
+    def forcing_derivative(i: int, t: float):
+        out = None
+        for j in range(i, len(poly) + 1):
+            c = math.perm(j, i) * t ** (j - i)
+            piece = c * poly[j - 1]
+            out = piece if out is None else out + piece
+        return out
+
+    for k in range(s):
+        tk = k * h
         term = apply(x) + b0
+        for j, c in enumerate(poly, start=1):
+            term = term + tk ** j * c
         result = x + h * term
         piece = h * x + (0.5 * h * h) * term if integrate else None
         coef = h
         for j in range(2, m + 1):
             term = apply(term)
+            if j - 1 <= len(poly):
+                term = term + forcing_derivative(j - 1, tk)
             coef = coef * h / j
             result = result + coef * term
             if integrate:

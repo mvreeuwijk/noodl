@@ -120,6 +120,23 @@ forcing) costs the exact scheme thousands of matvecs per step by nature; `scheme
 the documented choice there, not a larger budget. All coefficients the layer owns—carrier,
 transmission, kinetics, removal, and conductance—are differentiable under every scheme.
 
+**Boundary values linear in time.** By default, the boundary values stay constant over a step.
+In the exact scheme, `step(..., x_boundary_end=...)` instead makes them vary linearly over the
+step, from `x_boundary` at its start to `x_boundary_end` at its end (a first-order hold). The
+step is then exact for a boundary value that ramps linearly while the flows are held fixed. This
+matters for a zone that flushes much faster than the step. With a boundary value held at the
+step mean of a ramp, such a zone relaxes to that mean and ends about half a step behind the
+boundary. With the linear boundary, it ends behind by its own flushing time, as it should. The
+Modelica importer's `scheme="midpoint"` runner uses this. The implicit and trapezoidal schemes
+do not accept the argument and raise `ValueError` if it is given. So does `step_with_transfer`, which returns the boundary transfer: the transfer is defined for a boundary held constant over the step.
+
+`x_boundary_rates=(start, end)`, given together with `x_boundary_end`, adds the boundary's rates
+of change at both ends of the step. The boundary then follows the cubic Hermite through both
+ends' values and rates instead of the straight line. A fast-flushing zone ends behind its
+boundary by its flushing time times the boundary's rate at the step's end. On a curved boundary
+the straight line gets that rate wrong: it uses the chord's slope, which is off by about half a
+step times the curvature. The Hermite uses the end's own rate.
+
 **Changing storage.** A transport layer's capacity may change over a step: a sewer pipe's wetted
 volume, or a headspace volume as the water level changes. The step conserves the stored amount
 `V x` in amount form: `V_new x_new - V_old x_old = dt F(x_new)` (implicit) or `= dt/2 (F(x_new) + F(x_old))`

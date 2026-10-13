@@ -9,7 +9,8 @@ required and its absence is refused. All refusals are gathered and raised as ONE
 What each MBL construct becomes
 -------------------------------
 * **Nodes.** One network node per zone (`MixingVolume`, `DelayFirstOrder`) and per boundary
-  (`Boundary_pT`, `Outside`), in the document's component order, zones first. Junction nodes
+  (`Boundary_pT`, `Outside`, `Outside_Cp`, `Outside_CpLowRise`, `Outside_CpData`), in the
+  document's component order, zones first. Junction nodes
   of fused column chains do not appear: each chain is one edge (`graph.FlowPath`).
 * **Air layer** ("air", `PotentialFlowLayer`, quantity pressure, Pa). Potentials are GAUGE
   pressures relative to `names.p_ref` (see "Gauge reference" below). One edge kind per MBL
@@ -87,7 +88,25 @@ Moisture
 For a medium with moisture, water vapour is carried as a species only when the model needs
 it: a volume's `X_start[1]` or a boundary's `X[1]` differs from `X_default[1]`, or a
 `MassFlowSource_T` injects air of another composition. Otherwise `"X_w"` is the constant
-`X_default[1]` everywhere, which is exactly MBL's value throughout such a model.
+`X_default[1]` everywhere, which is exactly MBL's value throughout such a model. A model with
+no volume carries none: the boundaries' composition then reaches no node.
+
+Weather and wind
+----------------
+An `Outside` boundary's pressure, temperature and water mass fraction come from its weather
+bus (`outside.py`): from the `ReaderTMY3` its `weaBus` is wired to (`graph.ComponentGraph.
+weather`; `weather.reader_outputs` on the driver grid), or else from the signals driving
+`"<boundary>.weaBus.<output>"`. `Outside` reads `pAtm`, `TDryBul` and, for a medium with water,
+`relHum` (`X = X_pTphi(p, T, relHum)`); `Outside_Cp` adds `winSpe` and its `Cp` or `Cp_in`;
+`Outside_CpLowRise` and `Outside_CpData` add `winDir` and their pressure-coefficient law
+(`outside.low_rise_pressure_coefficient`, `outside.PressureCoefficientProfile`). Every one of
+these is a boundary DRIVER, a point value at each grid time like any boundary signal. A missing
+weather-bus input is refused by name. The table's knots and the points where a limiter cuts a
+file output are step boundaries of the driver grid (`driver_grid`) but not signal events: the
+outputs are once continuously differentiable there (Akima), so the run neither regrades nor
+restarts its storage rate; a repeating file's year wrap is a jump (`grid_events`).
+`ModelicaNames.weather` holds the reader outputs and every wind boundary's `pWin` on the output
+grid; `weather_columns` evaluates them for a document with no flow element.
 
 Gauge reference
 ---------------
@@ -183,14 +202,16 @@ end time. `run.simulate` steps over every driver-grid time between the times it 
 from __future__ import annotations
 
 import bisect
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 
 import torch
 
 from noodl._broadcast import broadcast_shapes
-from noodl.apps.building_physics.modelica import schema, signals, storage
+from noodl.apps.building_physics.modelica import outside, schema, signals, storage, weather
 from noodl.apps.building_physics.modelica.graph import ComponentGraph, FlowPath, TwoWayEdge
+from noodl.apps.building_physics.modelica.graph import _raise as _refuse
+from noodl.apps.building_physics.modelica.graph import build as build_graph
 from noodl.apps.building_physics.modelica.schema import (
     Component,
     ModelicaDoc,
@@ -252,6 +273,8 @@ class ModelicaNames:
     `air_references` lists the zones made air-layer pressure references (module docstring,
     "Closed zone groups"); `attached` maps a boundary wired straight to a zone to that zone.
     `p_ref` is the gauge reference of `"air.phi"` (module docstring, "Gauge reference").
+    `weather` maps `"<reader>.weaBus.<output>"` (K, Pa, 1, m/s, rad) and `"<boundary>.pWin"`
+    (Pa) to their values on the output grid `times` (module docstring, "Weather and wind").
     """
 
     edges: dict[str, tuple[tuple[int, int], ...]]
@@ -262,6 +285,7 @@ class ModelicaNames:
     p_ref: float  # Pa; `"air.phi"` is `p - p_ref` (module docstring, "Gauge reference")
     attached: dict[str, str] = field(default_factory=dict)  # boundary -> zone it is wired to
     storage: tuple[str, ...] = ()  # zones with volume mass storage (storage.py)
+    weather: dict[str, Tensor] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -310,11 +334,40 @@ def _signal_events(doc: ModelicaDoc, lo: float, hi: float) -> tuple[set[float], 
     return jumps, kinks - jumps
 
 
+def _weather_events(doc: ModelicaDoc, lo: float, hi: float) -> tuple[set[float], set[float]]:
+    """`weather.reader_events` of every ReaderTMY3 of the document: `(jumps, breaks)`. A reader
+    whose file cannot be read adds none here; it is refused by name when it is evaluated."""
+    jumps: set[float] = set()
+    breaks: set[float] = set()
+    for comp in doc.components:
+        if comp.cls not in schema.WEATHER_READERS:
+            continue
+        try:
+            j, b = weather.reader_events(comp, doc, lo, hi)
+        except ModelicaImportError:
+            continue
+        jumps |= j
+        breaks |= b
+    return jumps, breaks
+
+
+def _events(doc: ModelicaDoc, lo: float, hi: float) -> tuple[set[float], set[float], set[float]]:
+    """`(jumps, kinks, breaks)` in `(lo, hi)`: the signals' jumps and a weather file's year
+    wraps, the signals' kinks, and the weather breaks (`weather.reader_events`), which are step
+    boundaries but not events (module docstring, "Weather and wind")."""
+    jumps, kinks = _signal_events(doc, lo, hi)
+    year_wraps, breaks = _weather_events(doc, lo, hi)
+    jumps |= year_wraps
+    return jumps, kinks - jumps, breaks
+
+
 def driver_grid(doc: ModelicaDoc, substeps: int = 1) -> Tensor:
     """The time grid the drivers are evaluated on and `run.simulate` steps over: the BASE
     grid, the output grid (`experiment_times`) plus every event time strictly inside the run
     (`signals.events`: where a signal's output jumps, a `Step`'s start, a `Pulse`'s edges, or
-    kinks, a `Ramp`'s corners, a table's knots), with each of its intervals split into
+    kinks, a `Ramp`'s corners, a table's knots), plus the weather breaks
+    (`weather.reader_events`: the table's knots and limiter crossings), which are step
+    boundaries but not events, with each of its intervals split into
     `substeps` equal steps. With the source drivers step means (module docstring,
     "Sources"), a step then never straddles an event: the drivers are smooth within every
     step (`Examples/CO2TransportStep.mo`'s 3.6 s pulse starts and ends on step boundaries
@@ -325,12 +378,12 @@ def driver_grid(doc: ModelicaDoc, substeps: int = 1) -> Tensor:
         raise ValueError(f"modelica: substeps must be a positive integer, got {substeps!r}")
     out = experiment_times(doc)
     lo, hi = float(out[0]), float(out[-1])
-    jumps, kinks = _signal_events(doc, lo, hi)
+    jumps, kinks, breaks = _events(doc, lo, hi)
     # An event within round-off of an output time is that time.
     tol = 1e-9 * max(1.0, abs(hi))
     outs = out.tolist()
     kept: list[float] = []
-    for t in sorted(set(outs) | jumps | kinks):
+    for t in sorted(set(outs) | jumps | kinks | breaks):
         k = bisect.bisect_left(outs, t)
         near = [outs[i] for i in (k - 1, k) if 0 <= i < len(outs)]
         if near and min(abs(o - t) for o in near) <= tol:
@@ -350,10 +403,11 @@ def driver_grid(doc: ModelicaDoc, substeps: int = 1) -> Tensor:
 def grid_events(doc: ModelicaDoc, grid: Tensor) -> tuple[Tensor, Tensor]:
     """`(jumps, kinks)`: the times of `grid` (a `driver_grid`) at which a signal's output
     jumps, and those at which it only kinks (`signals.events`), each event moved to the
-    grid time it was merged into."""
+    grid time it was merged into. A repeating weather file's year wrap is a jump; its knots
+    and limiter crossings are neither (module docstring, "Weather and wind")."""
     grid = torch.as_tensor(grid, dtype=F64)
     lo, hi = float(grid[0]), float(grid[-1])
-    jumps, kinks = _signal_events(doc, lo, hi)
+    jumps, kinks, _ = _events(doc, lo, hi)
 
     def on_grid(ts: set[float]) -> Tensor:
         if not ts:
@@ -364,6 +418,17 @@ def grid_events(doc: ModelicaDoc, grid: Tensor) -> tuple[Tensor, Tensor]:
 
     j, k = on_grid(jumps), on_grid(kinks)
     return j, k[~torch.isin(k, j)]
+
+
+def _rows(grid: Tensor, times: Tensor) -> Tensor:
+    """The position of each of `times` on `grid` (`driver_grid` holds every output time)."""
+    return (grid.unsqueeze(0) - times.unsqueeze(1)).abs().argmin(dim=1)
+
+
+def _component_kinds(doc: ModelicaDoc) -> dict[str, str]:
+    """`"observer"` or `"component"` per instance, for `_Signals.check_unused`."""
+    return {c.name: "observer" if (c.role == "observer" or c.cls in schema.OBSERVERS)
+            else "component" for c in doc.components}
 
 
 def _stack(values: list[Tensor], n_t: int) -> tuple[Tensor, bool]:
@@ -529,11 +594,15 @@ class _Signals:
             return y[0].clone()
         return y
 
-    def check_unused(self) -> None:
+    def check_unused(self, instances: Collection[str] | None = None) -> None:
+        """Refuse every signal driving an input nothing read; only the inputs of `instances`
+        when given."""
         for target, s in self.by_target.items():
             if target in self.used:
                 continue
             inst = target.split(".", 1)[0]
+            if instances is not None and inst not in instances:
+                continue
             if self.kind_of.get(inst) == "observer":
                 continue  # feeds a block the reader ignores
             if inst in self.signal_names:
@@ -857,6 +926,202 @@ def _zone(comp: Component, med: AirMedium, errors: list[str]) -> _Zone | None:
                  steady_mass=mass_dyn == "SteadyState")
 
 
+# Weather-bus inputs of each Outside class (Outside.mo:7-8, Outside_Cp.mo:39-42,
+# Outside_CpLowRise.mo:47-51, Outside_CpData.mo:85-89); `relHum` too for a medium with water
+# (BaseClasses/Outside.mo:25-26, 51).
+_OUTSIDE_INPUTS = {
+    "Outside": ("pAtm", "TDryBul"),
+    "Outside_Cp": ("pAtm", "TDryBul", "winSpe"),
+    "Outside_CpLowRise": ("pAtm", "TDryBul", "winSpe", "winDir"),
+    "Outside_CpData": ("pAtm", "TDryBul", "winSpe", "winDir"),
+}
+
+
+class _Weather:
+    """The weather the model's Outside boundaries read and the outside air they impose
+    (module docstring, "Weather and wind"). Errors go to the shared list, named."""
+
+    def __init__(self, doc: ModelicaDoc, links: Mapping[str, Component], sig: _Signals,
+                 med: AirMedium, errors: list[str]) -> None:
+        self.doc, self.links, self.sig, self.med = doc, dict(links), sig, med
+        self.errors = errors
+        self.by_name = {c.name: c for c in doc.components}
+        self.readers = [c for c in doc.components if c.cls in schema.WEATHER_READERS]
+        self.outputs: dict[str, dict[str, Tensor]] = {}
+        self.air: dict[str, outside.OutsideAir] = {}
+        self._failed: set[str] = set()
+
+    def inputs(self, comp: Component) -> tuple[str, ...]:
+        names = _OUTSIDE_INPUTS[_short(comp.cls, "")]
+        return names + (("relHum",) if self.med.has_moisture else ())
+
+    def _reader(self, reader: Component) -> dict[str, Tensor] | None:
+        """The outputs of `reader` that a linked boundary reads or that need no signal (an
+        `Input` source with a signal driving it counts), evaluated once."""
+        if reader.name in self.outputs or reader.name in self._failed:
+            return self.outputs.get(reader.name)
+        need = {q for bnd, r in self.links.items() if r.name == reader.name
+                for q in self.inputs(self.by_name[bnd])}
+        need |= {q for q in schema.WEATHER_BUS_OUTPUTS
+                 if weather.source(reader, q) != "Input"
+                 or f"{reader.name}.{q}_in" in self.sig.by_target}
+        try:
+            out = weather.reader_outputs(
+                reader, self.doc, self.sig.times,
+                lambda port: self.sig.get(f"{reader.name}.{port}"),
+                tuple(q for q in schema.WEATHER_BUS_OUTPUTS if q in need))
+        except ModelicaImportError as exc:
+            self.errors.append(str(exc).removeprefix("modelica: "))
+            self._failed.add(reader.name)
+            return None
+        self.outputs[reader.name] = out
+        return out
+
+    def evaluate_readers(self) -> None:
+        for reader in self.readers:
+            self._reader(reader)
+
+    def _bus(self, comp: Component) -> dict[str, Tensor] | None:
+        need = self.inputs(comp)
+        reader = self.links.get(comp.name)
+        if reader is not None:
+            out = self._reader(reader)
+            return None if out is None else {q: out[q] for q in need}
+        found: dict[str, Tensor] = {}
+        missing: list[str] = []
+        for q in need:
+            v = self.sig.get(f"{comp.name}.weaBus.{q}")
+            if v is None:
+                missing.append(f"weaBus.{q}")
+            else:
+                found[q] = v.expand(self.sig.times.shape)
+        if missing:
+            self.errors.append(
+                f"{comp.name} ({comp.cls}): {', '.join(missing)} come from no ReaderTMY3 wired "
+                f"to its weaBus and from no supported signal (its weather data is missing)"
+            )
+            return None
+        return found
+
+    def outside_air(self, comp: Component) -> outside.OutsideAir | None:
+        if comp.name in self.air:
+            return self.air[comp.name]
+        bus = self._bus(comp)
+        if bus is None:
+            return None
+        cls, par = _short(comp.cls, ""), comp.parameters
+        p_atm, T, phi = bus["pAtm"], bus["TDryBul"], bus.get("relHum")
+        try:
+            if cls == "Outside":
+                air = outside.outside_air(p_atm, T, phi, self.med)
+            elif cls == "Outside_Cp":
+                if par.get("use_Cp_in"):
+                    cp = self.sig.require(comp, "Cp_in")
+                    if cp is None:
+                        return None
+                else:
+                    cp = _t(float(par.get("Cp", 0.6)))  # Outside_Cp.mo:9
+                air = outside.wind_exposed_air(p_atm, T, phi, self.med, pressure_coefficient=cp,
+                                               wind_speed=bus["winSpe"],
+                                               density_at_boundary=False)
+            else:
+                # Every required parameter is looked up before refusing, so that all the
+                # missing ones are named together.
+                keys = ("azi", "s") if cls == "Outside_CpLowRise" else ("azi", "incAngSurNor",
+                                                                       "Cp")
+                req = {k: _param(comp, k, self.errors, required=True) for k in keys}
+                if any(v is None for v in req.values()):
+                    return None
+                incidence = outside.incidence_angle(bus["winDir"], float(req["azi"]))
+                if cls == "Outside_CpLowRise":
+                    cp = outside.low_rise_pressure_coefficient(
+                        incidence, float(par.get("Cp0", 0.6)),
+                        float(req["s"]))  # Outside_CpLowRise.mo:6
+                    modifier = 1.0
+                else:  # Outside_CpData
+                    cp = outside.PressureCoefficientProfile(req["incAngSurNor"],
+                                                            req["Cp"])(incidence)
+                    modifier = float(par.get("Cs", 1.0))  # Outside_CpData.mo:16-19
+                air = outside.wind_exposed_air(p_atm, T, phi, self.med, pressure_coefficient=cp,
+                                               wind_speed=bus["winSpe"],
+                                               density_at_boundary=True,
+                                               speed_modifier=modifier)
+        except ValueError as exc:
+            self.errors.append(f"{comp.name} ({comp.cls}): {exc}")
+            return None
+        self.air[comp.name] = air
+        return air
+
+    def columns(self, rows: Tensor) -> dict[str, Tensor]:
+        """`ModelicaNames.weather` at the driver-grid positions `rows`."""
+        n_t = self.sig.times.shape
+        out: dict[str, Tensor] = {}
+        for reader, values in self.outputs.items():
+            for q, v in values.items():
+                out[f"{reader}.weaBus.{q}"] = v.expand(n_t)[rows].clone()
+        for name, air in self.air.items():
+            if air.wind_pressure is not None:
+                out[f"{name}.pWin"] = air.wind_pressure.expand(n_t)[rows].clone()
+        return out
+
+
+# The one-sided differences of `_Builder.boundary_rates` step 1e-4 of the grid step on that
+# side: well inside it (an event is a grid time, so no stencil reaches one), and far above the
+# round-off of the times (a 2.6e6 s run's times are exact to 5e-10 s).
+RATE_STEP_FRACTION = 1e-4
+
+
+RATE_PREFIX = "modelica."
+
+
+def boundary_rate_key(key: str, side: str) -> str:
+    """The driver holding the rate of change of the boundary value `key` (`"<layer>.x_boundary"`)
+    on `side` (`"left"`: from the step ending at the grid time, `"right"`: from the step
+    starting there): `"modelica.<layer>.x_boundary_rate_<side>"`. Outside the layers' own
+    key namespace, so `Model.check` does not take it for a layer key."""
+    return f"{RATE_PREFIX}{key}_rate_{side}"
+
+
+def is_boundary_rate_key(key: str) -> bool:
+    return key.startswith(RATE_PREFIX) and "_rate_" in key
+
+
+def _boundary_values(comp: Component, med: AirMedium, sig: _Signals, weather: _Weather,
+                     species_names: list[str], errors: list[str]) -> dict | None:
+    p = comp.parameters
+    out: dict = {}
+    if p.get("use_X_in") or p.get("use_Xi_in"):
+        errors.append(f"{comp.name} ({comp.cls}): composition inputs (use_X_in, "
+                      f"use_Xi_in) are not supported")
+    if comp.cls in schema.OUTSIDE_FAMILY:
+        # BaseClasses/Outside.mo: pressure, temperature and humidity from the weather bus
+        # (module docstring, "Weather and wind").
+        air = weather.outside_air(comp)
+        if air is None:
+            return None
+        pv, Tv, Xw = air.p, air.T, air.X_w
+    else:
+        # Boundary_pT.mo:6-16: p = p_default, T = T_default unless the inputs are used.
+        pv = (sig.require(comp, "p_in") if p.get("use_p_in")
+              else _t(float(p.get("p", med.p_default))))
+        Tv = (sig.require(comp, "T_in") if p.get("use_T_in")
+              else _t(float(p.get("T", med.T_default))))
+        X = p.get("X", list(med.X_default))  # PartialSource_Xi_C.mo:15-18
+        Xw = _t(float(X[0]) if med.has_moisture and X else 0.0)
+    out["p"], out["T"], out["X_w"] = pv, Tv, Xw
+    C = []
+    for k in range(len(species_names)):
+        if p.get("use_C_in"):
+            C.append(sig.require(comp, f"C_in[{k + 1}]"))
+        else:  # PartialSource_Xi_C.mo:19-22: C = fill(0, nC)
+            values = p.get("C", [0.0] * len(species_names))
+            C.append(_t(float(values[k]) if k < len(values) else 0.0))
+    out["C"] = C
+    if any(v is None for v in (pv, Tv, *C)):
+        return None
+    return out
+
+
 class _Builder:
     def __init__(self, graph: ComponentGraph, doc: ModelicaDoc, substeps: int = 1,
                  mass_storage: bool | None = None) -> None:
@@ -871,13 +1136,9 @@ class _Builder:
         self.out_times = experiment_times(doc)
         self.times = driver_grid(doc, substeps)  # the drivers' grid (`driver_grid`)
         self.n_t = int(self.times.numel())
-        kind_of = {
-            c.name: "observer" if (c.role == "observer" or c.cls in schema.OBSERVERS)
-            else "component"
-            for c in doc.components
-        }
-        self.sig = _Signals(doc, self.times, kind_of, self.errors)
+        self.sig = _Signals(doc, self.times, _component_kinds(doc), self.errors)
         self.by_name = {c.name: c for c in doc.components}
+        self.weather = _Weather(doc, dict(graph.weather), self.sig, self.med, self.errors)
         # Element inputs fed by signals (door `y`, zonal `ACS`/`mAB_flow`/`mBA_flow`), keyed
         # by their driver name "<instance>.<input>"; scalars or series over the grid.
         self._inputs: dict[str, Tensor] = {}
@@ -888,43 +1149,74 @@ class _Builder:
 
     # ------------------------------------------------------------- boundaries
     def boundary(self, comp: Component) -> dict | None:
-        med, p = self.med, comp.parameters
-        cls = comp.cls.rsplit(".", 1)[-1]
-        out: dict = {}
-        if p.get("use_X_in") or p.get("use_Xi_in"):
-            self.errors.append(f"{comp.name} ({comp.cls}): composition inputs (use_X_in, "
-                               f"use_Xi_in) are not supported")
-        if cls == "Outside":
-            # Outside.mo: pressure and temperature come from the weather bus only.
-            pv = self.sig.get(f"{comp.name}.weaBus.pAtm")
-            Tv = self.sig.get(f"{comp.name}.weaBus.TDryBul")
-            if pv is None or Tv is None:
-                self.errors.append(
-                    f"{comp.name} ({comp.cls}): its pressure and temperature come from the "
-                    f"weather bus (weaBus.pAtm, weaBus.TDryBul), which no supported signal "
-                    f"drives (weather data is not supported)"
-                )
-                return None
-        else:
-            # Boundary_pT.mo:6-16: p = p_default, T = T_default unless the inputs are used.
-            pv = (self.sig.require(comp, "p_in") if p.get("use_p_in")
-                  else _t(float(p.get("p", med.p_default))))
-            Tv = (self.sig.require(comp, "T_in") if p.get("use_T_in")
-                  else _t(float(p.get("T", med.T_default))))
-        X = p.get("X", list(med.X_default))  # PartialSource_Xi_C.mo:15-18
-        out["p"], out["T"] = pv, Tv
-        out["X_w"] = _t(float(X[0]) if med.has_moisture and X else 0.0)
-        C = []
-        for k in range(len(self.species_names)):
-            if p.get("use_C_in"):
-                C.append(self.sig.require(comp, f"C_in[{k + 1}]"))
-            else:  # PartialSource_Xi_C.mo:19-22: C = fill(0, nC)
-                values = p.get("C", [0.0] * len(self.species_names))
-                C.append(_t(float(values[k]) if k < len(values) else 0.0))
-        out["C"] = C
-        if any(v is None for v in (pv, Tv, *C)):
+        return _boundary_values(comp, self.med, self.sig, self.weather, self.species_names,
+                                self.errors)
+
+    def boundary_rates(self, names: list[str]) -> dict[str, dict[str, tuple]] | None:
+        """The time derivatives of boundaries `names`' values on the grid, one-sided:
+        `{name: {"T": (left, right), "X_w": (left, right), "C": [(left, right), ...]}}`, each
+        a series `(n_t,)`; `None` when every boundary value is constant in time. `left` is the
+        derivative at each grid time from the step that ends there, `right` from the step that
+        starts there (they differ at a kink: a ramp's corner, a limiter starting to cut). Each
+        is the derivative at the grid time of the quadratic through the values at three
+        points on that side, `t -+ d`, `t -+ 2 d`, `t -+ 3 d`, with `d` RATE_STEP_FRACTION of
+        the grid step there, weighted by the offsets the times realise (`run._Midpoint`'s
+        boundary profile). The first time has no step ending at it and the last none starting
+        there: their missing side mirrors the other, so no stencil leaves the run (a weather
+        file that does not repeat need not cover any time before the start). The values at
+        all the stencil times are evaluated together, and any refusal there is raised."""
+        g = self.times
+        n = int(g.numel())
+        if n < 2:
             return None
-        return out
+        h = g[1:] - g[:-1]
+        d_right = torch.cat([h, -h[-1:]]) * RATE_STEP_FRACTION       # last: mirrored
+        d_left = -torch.cat([-h[:1], h]) * RATE_STEP_FRACTION        # first: mirrored
+        sides = {"left": d_left, "right": d_right}
+        stencil = [(side, o) for side in sides for o in (1, 2, 3)]
+        times = torch.cat([g + o * sides[side] for side, o in stencil])
+        errors: list[str] = []
+        sig = _Signals(self.doc, times, _component_kinds(self.doc), errors)
+        weather = _Weather(self.doc, dict(self.graph.weather), sig, self.med, errors)
+        values = {nm: _boundary_values(self.by_name[nm], self.med, sig, weather,
+                                       self.species_names, errors) for nm in names}
+        _refuse([f"the boundary rates' stencil times: {e}" for e in errors])
+        if any(v is None for v in values.values()):
+            return None
+        offsets = {k: times[i * n:(i + 1) * n] - g for i, k in enumerate(stencil)}
+
+        def weights(side: str) -> list[Tensor]:
+            # d/dt at 0 of the quadratic through (e_i, v_i): L_i'(0) = -(e_j + e_k) /
+            # ((e_i - e_j) (e_i - e_k)).
+            e = [offsets[side, o] for o in (1, 2, 3)]
+            return [-(e[j] + e[k]) / ((e[i] - e[j]) * (e[i] - e[k]))
+                    for i, j, k in ((0, 1, 2), (1, 0, 2), (2, 0, 1))]
+
+        w = {side: weights(side) for side in sides}
+
+        def rate(side: str, value: Tensor) -> Tensor:
+            v = torch.as_tensor(value, dtype=F64)
+            if v.ndim == 0:  # constant
+                return torch.zeros(n, dtype=F64)
+            at = [v[stencil.index((side, o)) * n:(stencil.index((side, o)) + 1) * n]
+                  for o in (1, 2, 3)]
+            # The weights sum to zero: differences from the first value keep a constant's
+            # rate exactly zero.
+            return sum(wi * (vi - at[0]) for wi, vi in zip(w[side], at, strict=True))
+
+        def both(value: Tensor) -> tuple[Tensor, Tensor]:
+            return rate("left", value), rate("right", value)
+
+        out: dict[str, dict[str, tuple]] = {}
+        varying = False
+        for nm in names:
+            b = values[nm]
+            entry: dict[str, object] = {"T": both(b["T"]), "X_w": both(b["X_w"]),
+                                        "C": [both(c) for c in b["C"]]}
+            varying |= any(bool((v != 0).any()) for key in ("T", "X_w") for v in entry[key])
+            varying |= any(bool((v != 0).any()) for lr in entry["C"] for v in lr)
+            out[nm] = entry
+        return out if varying else None
 
     # ------------------------------------------------------------- build
     def build(self) -> tuple[Model, State, Drivers, ModelicaNames]:
@@ -944,6 +1236,7 @@ class _Builder:
             b = self.boundary(bcomp)
             if b is not None:
                 attached_p[zone] = b["p"]
+        self.weather.evaluate_readers()
 
         # Pinned temperatures.
         for pin in g.pins:
@@ -1005,10 +1298,12 @@ class _Builder:
             self._zonal(zf, net, index, elements, kinds, edge_dirs, extra_ports)
 
         # Moisture (module docstring).
-        carry_water = med.has_moisture and (
+        # With no volume no node carries water: the boundaries' composition reaches none.
+        carry_water = med.has_moisture and bool(zones) and (
             use_storage  # MBL's Xi changes by X dm/m in a storing volume (storage.py)
             or any(abs(z.X_w - med.X_default[0]) > 0.0 for z in zones.values())
-            or any(abs(float(b["X_w"]) - med.X_default[0]) > 0.0 for b in bounds.values())
+            or any(bool((torch.as_tensor(b["X_w"]) != med.X_default[0]).any())
+                   for b in bounds.values())
             or any(
                 c.cls.endswith("MassFlowSource_T")
                 and float(c.parameters.get("X", list(med.X_default))[0]) != med.X_default[0]
@@ -1084,12 +1379,7 @@ class _Builder:
                     f"flow would accumulate there; not supported"
                 )
 
-        if errors:
-            unique = sorted(set(errors))
-            count = "1 item" if len(unique) == 1 else f"{len(unique)} items"
-            raise ModelicaImportError(
-                f"modelica: refused {count}:\n" + "\n".join(f"  - {e}" for e in unique)
-            )
+        _refuse(errors)
         if not elements:
             raise ModelicaImportError("modelica: the model has no flow element")
         air_boundary = list(g.boundaries) + references
@@ -1193,6 +1483,19 @@ class _Builder:
             rows = [[bounds[b]["X_w"] if k == water else bounds[b]["C"][k] for k in range(K)]
                     for b in g.boundaries]
             put("species.x_boundary", _stack_nested(rows, K, self.n_t))
+        rates = (self.boundary_rates(list(g.boundaries))
+                 if len(bounds) == len(g.boundaries) else None)
+        if rates is not None:
+            zero = torch.zeros(self.n_t, dtype=F64)
+            for i, side in enumerate(("left", "right")):
+                put(boundary_rate_key("thermal.x_boundary", side),
+                    _stack([rates[b]["T"][i] for b in g.boundaries]
+                           + [zero for _ in pinned], self.n_t))
+                if "species" in layers:
+                    rows = [[rates[b]["X_w"][i] if k == water else rates[b]["C"][k][i]
+                             for k in range(K)] for b in g.boundaries]
+                    put(boundary_rate_key("species.x_boundary", side),
+                        _stack_nested(rows, K, self.n_t))
         for key, value in self._inputs.items():
             put(key, (value, bool(value.ndim)))
         X_const = med.X_default[0] if med.has_moisture else 0.0
@@ -1338,7 +1641,8 @@ class _Builder:
                               times=self.out_times.clone(),
                               air_references=tuple(references),
                               attached={b.name: z for z, b in g.attached}, p_ref=p_ref,
-                              storage=tuple(z for z in g.zones if z in storage_zones))
+                              storage=tuple(z for z in g.zones if z in storage_zones),
+                              weather=self.weather.columns(_rows(self.times, self.out_times)))
         return model, state, drivers, names
 
     def _storage_closure(self, mbl, th, p_ref, zones, node_names, index, storage_zones,
@@ -1736,3 +2040,30 @@ def build(graph: ComponentGraph, doc: ModelicaDoc, *, substeps: int = 1,
     conversion rules and `ModelicaNames` for the name mapping.
     """
     return _Builder(graph, doc, substeps, mass_storage).build()
+
+
+def weather_columns(doc: ModelicaDoc, times) -> dict[str, Tensor]:
+    """The weather the document's Outside boundaries read and their wind pressure at `times`
+    (s), keyed like MBL's result variables: `"<reader>.weaBus.<output>"` (`TDryBul` K, `pAtm`
+    Pa, `relHum` 1, `winSpe` m/s, `winDir` rad) and `"<boundary>.pWin"` (Pa) for an
+    `Outside_Cp`, `Outside_CpLowRise` or `Outside_CpData`. Needs no flow element (MBL's
+    `Fluid.Sources` examples have none, and `read_modelica` refuses them). Raises
+    `ModelicaImportError` naming every instance it cannot evaluate, and every signal driving
+    an input of a reader or an Outside boundary that is not read (as `read_modelica` does)."""
+    g = build_graph(doc)
+    times = torch.as_tensor(times, dtype=F64)
+    errors: list[str] = []
+    try:
+        med = medium(str(doc.medium.get("class")))
+    except KeyError as exc:
+        raise ModelicaImportError(f"modelica: {exc.args[0]}") from None
+    w = _Weather(doc, dict(g.weather), _Signals(doc, times, _component_kinds(doc), errors), med,
+                 errors)
+    for name in (*g.boundaries, *(b.name for _, b in g.attached)):
+        if w.by_name[name].cls in schema.OUTSIDE_FAMILY:
+            w.outside_air(w.by_name[name])
+    w.evaluate_readers()
+    w.sig.check_unused({*(r.name for r in w.readers),
+                        *(c.name for c in doc.components if c.cls in schema.OUTSIDE_FAMILY)})
+    _refuse(errors)
+    return w.columns(torch.arange(times.numel()))

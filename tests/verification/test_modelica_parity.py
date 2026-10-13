@@ -20,6 +20,10 @@ JSON by `test_the_algebraic_set_has_no_volumes`): between two or more pressure b
 flows are algebraic in the boundary signals, so noodl's steady solve at each grid time is the
 same problem the DAE solver solves, and parity is to round-off, not to the solver tolerance.
 `OneEffectiveAirLeakageArea` has two volumes and a mass source, so it is a dynamic model.
+`Outside_Cp` (MBL's `Buildings.Fluid.Sources.Examples`) joins them: two wind boundaries and an
+`Outside` driven by a `ReaderTMY3`, each through an orifice; its weather-bus and `pWin` columns
+are compared too (here at the same tolerance, and to round-off in
+`test_weather_and_wind_pressure_parity`).
 
 At an output time exactly on a signal event (`DoorOpenClosed`: the `Step` at 0.5 s;
 `OpenDoorPressure`/`OpenDoorTemperature`: the `TimeTable` knots every 3600 s) OpenModelica's
@@ -55,8 +59,9 @@ import pytest
 import torch
 
 from noodl.apps.building_physics import read_modelica
+from noodl.apps.building_physics.modelica.assemble import weather_columns
 from noodl.apps.building_physics.modelica.run import extrapolate, simulate
-from noodl.apps.building_physics.modelica.schema import ModelicaImportError
+from noodl.apps.building_physics.modelica.schema import ModelicaImportError, load
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / "tests" / "data" / "modelica"
@@ -64,7 +69,7 @@ RECORD = DATA / "parity-algebraic.json"
 
 RTOL, ATOL = 1e-6, 1e-9  # never loosened
 ALGEBRAIC = ("OneWayFlow", "DoorOpenClosed", "OpenDoorPressure", "OpenDoorTemperature",
-             "Orifice", "PowerLaw")
+             "Orifice", "PowerLaw", "Outside_Cp")
 VOLUME_CLASSES = ("Buildings.Fluid.MixingVolumes.MixingVolume",
                   "Buildings.Fluid.Delays.DelayFirstOrder")
 
@@ -109,6 +114,14 @@ def _record(model: str, stats: dict, record: Path = RECORD) -> None:
 _NODE_VARS = {"T": "T", "p": "p", "Xi[1]": "X_w"}
 
 
+def _weather_column(names, h: str, n: int) -> np.ndarray | None:
+    """The first `n` output rows of column `h` when it is a weather-bus output or a wind
+    pressure (`ModelicaNames.weather`), else `None`."""
+    if h not in names.weather:
+        return None
+    return names.weather[h][:n].numpy()
+
+
 def _noodl_columns(model: str, head: list[str], data: np.ndarray,
                    run: dict | None = None) -> dict[str, np.ndarray]:
     """noodl's value of every CSV column; `run`, when given, receives the `simulate` history
@@ -123,6 +136,9 @@ def _noodl_columns(model: str, head: list[str], data: np.ndarray,
     q = out["air.q"].numpy()
     cols: dict[str, np.ndarray] = {}
     for h in head[1:]:
+        if (col := _weather_column(names, h, data.shape[0])) is not None:
+            cols[h] = col
+            continue
         inst, var = h.rsplit(".", 1)
         if inst in names.nodes and (var in _NODE_VARS or var.startswith("C[")):
             # A volume's or boundary's T (K), p (Pa), Xi[1] (water, kg/kg) and C[k] (trace
@@ -163,7 +179,8 @@ def test_parity_on_the_algebraic_models(model):
         rel = float((err[nonzero] / np.abs(omc[nonzero])).max()) if nonzero.any() else 0.0
         stats[h] = {"max_rel": rel, "max_abs": float(err.max()),
                     "max_err_over_tol": float((err / tol).max()), "rows": int(omc.size)}
-        print(f"{model} {h}: max rel {rel:.3e}, max abs {err.max():.3e} kg/s "
+        unit = " kg/s" if h.endswith("_flow") else ""
+        print(f"{model} {h}: max rel {rel:.3e}, max abs {err.max():.3e}{unit} "
               f"({omc.size} rows)")
         bad = np.nonzero(err > tol)[0]
         if bad.size:
@@ -227,15 +244,41 @@ def test_one_way_flow_against_the_embedded_contam_table():
 
 
 REFUSED = {
-    # Wind pressure and weather data (Outside_CpLowRise, ReaderTMY3).
-    "PressurizationData": {"east", "weaDat", "west"},
-    # A feedback controller and its temperature sensor, besides the wind boundaries.
-    "TrickleVent": {"con", "east", "temSen", "weaDat", "west"},
+    # A feedback controller and the temperature sensor wired as a component.
+    "TrickleVent": {"con", "temSen"},
     # Two orifices in one column chain (no junction node), plus the controller.
     "ChimneyShaftNoVolume": {"con", "oriChiBot", "oriChiTop", "temSen"},
     # A mass- and heat-storing MediumColumnDynamic, plus the controller.
     "ChimneyShaftWithVolume": {"con", "sha", "temSen"},
 }
+
+
+# Models `read_modelica` imports but the dynamic parity set refuses, each with the reason.
+DEFERRED = {
+    # A 62.5 m3 room between two Outside_CpLowRise walls over 30 days of San Francisco
+    # weather. Its flushing time (about 10 s) is far below the steps (50-3000 s). Where the flow
+    # fades (a calm, or the wind parallel to both walls) it falls by orders of magnitude within
+    # one step, and the room freezes at the state it held when its flushing stopped. The run
+    # sees the flows only at the steps' ends, so it freezes the room at the wrong state: a
+    # first-order error that stays through the calm. Measured over every row at (1, 2)
+    # substeps: T 2.9e-3 (0.82 K at 25920 s) and Xi 3.4e-2 (93312 s) relative; flows within
+    # 1e-6 beyond the resolution, p 2e-11. Refining the grid where the boundary pressures
+    # fade reduced it to T 1.6e-4 and Xi 2.0e-3 (experiment): that, with a transport step
+    # treating the flows' change within a step implicitly, is the follow-up. Its weather and
+    # wind pressure are compared (WEATHER).
+    "PressurizationData": "unresolved calm-onset freeze (T 2.9e-3, Xi 3.4e-2 at (1, 2) "
+                          "substeps over every row)",
+}
+
+
+def test_deferred_models_import():
+    """Each deferred model imports, with every weather and wind-pressure column of its
+    reference among `names.weather` (those are compared, WEATHER)."""
+    for model in DEFERRED:
+        _, _, _, names = read_modelica(DATA / f"{model}.json", return_names=True)
+        head, _ = _csv(model)
+        columns = {h for h in head[1:] if ".weaBus." in h or h.endswith(".pWin")}
+        assert columns and columns <= set(names.weather), (model, columns)
 
 
 @pytest.mark.parametrize("model", sorted(REFUSED))
@@ -246,6 +289,49 @@ def test_refused_models_name_their_offending_instances(model):
     named = set(re.findall(r"^\s+- (\S+) \(", message, flags=re.MULTILINE))
     assert named == REFUSED[model], message
     assert f"refused {len(REFUSED[model])} item" in message
+
+
+# ------------------------------------------------------- weather and wind pressure
+# The weather a model's Outside boundaries read and their wind pressure are algebraic in time
+# (`assemble.weather_columns`): every row of OpenModelica's `<reader>.weaBus.<output>` and
+# `<boundary>.pWin` columns is compared. They are the same arithmetic as MBL's, so they are held
+# to round-off, WEATHER_RTOL relative with no absolute floor (an exact zero, a calm hour's wind
+# speed and wind pressure, must come out exactly zero), well inside the algebraic tolerance.
+# WEATHER_ONLY are MBL's Fluid.Sources examples, boundaries with no flow element (which
+# `read_modelica` refuses).
+WEATHER_RTOL = 1e-12
+WEATHER_ONLY = ("Outside_CpData", "Outside_CpData_Angles", "Outside_CpData_Directions",
+                "Outside_CpLowRise")
+WEATHER = (*WEATHER_ONLY, "Outside_Cp", "PressurizationData")
+
+
+@pytest.mark.parametrize("model", WEATHER)
+def test_weather_and_wind_pressure_parity(model):
+    head, data = _csv(model)
+    got = weather_columns(load(DATA / f"{model}.json"),
+                          torch.tensor(data[:, 0], dtype=torch.float64))
+    columns = [h for h in head[1:] if ".weaBus." in h or h.endswith(".pWin")]
+    assert columns, f"{model}: no weather or wind-pressure column"
+    if model in WEATHER_ONLY:
+        assert columns == head[1:]
+    stats, failures = {}, []
+    for h in columns:
+        assert h in got, f"{model}: CSV column {h!r} maps to no noodl variable"
+        omc, val = data[:, head.index(h)], got[h].numpy()
+        err = np.abs(val - omc)
+        tol = WEATHER_RTOL * np.abs(omc)
+        nonzero = omc != 0.0
+        rel = float((err[nonzero] / np.abs(omc[nonzero])).max()) if nonzero.any() else 0.0
+        stats[h] = {"max_rel": rel, "max_abs": float(err.max()), "rows": int(omc.size)}
+        print(f"{model} {h}: max rel {rel:.3e}, max abs {err.max():.3e} ({omc.size} rows)")
+        bad = np.nonzero(err > tol)[0]
+        if bad.size:
+            k = int(bad[0])
+            failures.append(f"{h}: {bad.size} rows, first t = {data[k, 0]!r}: noodl "
+                            f"{val[k]!r} vs omc {omc[k]!r}")
+    _record(f"{model}:weather", stats)
+    assert not failures, (f"{model} outside |d| <= {WEATHER_RTOL:g} |omc|:\n"
+                          + "\n".join(failures))
 
 
 # ===================================================================== dynamic models
@@ -304,14 +390,15 @@ DYNAMIC = ("OpenDoorBuoyancyDynamic", "OpenDoorBuoyancyPressureDynamic", "ThreeR
 # asserts that noodl reproduces the storage mechanism (`_check_storage_mechanism`).
 STORAGE_DOMINATED = ("ClosedDoors", "OneOpenDoor", "ReverseBuoyancy",
                      "OneEffectiveAirLeakageArea")
-UNITS = {"flow": "kg/s", "T": "K", "p": "Pa", "Xi": "kg/kg", "C": "kg/kg"}
+UNITS = {"flow": "kg/s", "T": "K", "p": "Pa", "Xi": "kg/kg", "C": "kg/kg", "pWin": "Pa",
+         "TDryBul": "K", "pAtm": "Pa", "relHum": "1", "winSpe": "m/s"}
 
 
 def test_every_fixture_is_parity_checked_or_refused():
     # "parity-algebraic"/"parity-dynamic" are the committed recorded-error files this
     # module writes (see RECORD/RECORD_DYNAMIC, NOODL_RECORD_PARITY), not model fixtures.
     fixtures = {p.stem for p in DATA.glob("*.json")} - {"parity-algebraic", "parity-dynamic"}
-    sets = (set(ALGEBRAIC), set(DYNAMIC), set(REFUSED))
+    sets = (set(ALGEBRAIC), set(DYNAMIC), set(REFUSED), set(WEATHER_ONLY), set(DEFERRED))
     assert set().union(*sets) == fixtures
     assert sum(len(s) for s in sets) == len(fixtures)  # disjoint
     assert set(PARITY_ROWS) == set(DYNAMIC) == set(REFERENCE_RESOLUTION) == set(WINDOW_COST)
@@ -399,6 +486,9 @@ def _columns_of(out: dict, names, head: list[str]) -> dict[str, np.ndarray]:
     q = out["air.q"].numpy()
     cols: dict[str, np.ndarray] = {}
     for h in head[1:]:
+        if (col := _weather_column(names, h, q.shape[0])) is not None:
+            cols[h] = col
+            continue
         inst, var = h.rsplit(".", 1)
         if inst in names.nodes and (var in _NODE_VARS or var.startswith("C[")):
             i = names.nodes[inst]
@@ -450,13 +540,26 @@ def _run_in_worker(model: str, rows: int | None, r: int, threads: int) -> tuple:
     Windows (0xc000070a in `rebuild_storage_filename`)."""
     out, names, seconds = _run(model, rows, r, threads)
     return ({k: v.numpy() for k, v in out.items()},
-            dataclasses.replace(names, times=names.times.numpy()), seconds)
+            dataclasses.replace(names, times=names.times.numpy(),
+                                weather={k: v.numpy() for k, v in names.weather.items()}),
+            seconds)
 
 
 def _from_worker(run: tuple) -> tuple:
     out, names, seconds = run
     return ({k: torch.from_numpy(v) for k, v in out.items()},
-            dataclasses.replace(names, times=torch.from_numpy(names.times)), seconds)
+            dataclasses.replace(names, times=torch.from_numpy(names.times),
+                                weather={k: torch.from_numpy(v)
+                                         for k, v in names.weather.items()}),
+            seconds)
+
+
+def _reference_tolerance(model: str) -> float:
+    """The DASSL tolerance the reference CSV was simulated at (its `# tolerance:` line)."""
+    for line in (DATA / f"{model}.csv").read_text().splitlines():
+        if line.startswith("# tolerance:"):
+            return float(line.split(":", 1)[1])
+    raise AssertionError(f"{model}.csv has no '# tolerance:' header line")
 
 
 def _check_parity(model: str, rows: int | None, substeps: tuple[int, int] | None = None,
@@ -496,7 +599,8 @@ def _check_parity(model: str, rows: int | None, substeps: tuple[int, int] | None
                         "floor_frac": FLOOR_FRAC, "mechanism": mechanism,
                         "reference_resolution": REFERENCE_RESOLUTION[model],
                         "substeps": list(substeps),
-                        "reference_tolerance": 1e-13, "seconds": seconds}, RECORD_DYNAMIC)
+                        "reference_tolerance": _reference_tolerance(model),
+                        "seconds": seconds}, RECORD_DYNAMIC)
     bound = {kind: PARITY_STORAGE.get(model, {}).get(kind, PARITY_RTOL) for kind in worst}
     failures = [f"{kind}: max rel beyond the reference's resolution {w['beyond']:.3e} "
                 f"({w['beyond_column']} at t = {w['beyond_t']:g}; max rel {w['max_rel']:.3e}) > "

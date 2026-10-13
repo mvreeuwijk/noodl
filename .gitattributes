@@ -8,3 +8,7 @@ tests/data/contam/* -text
 # The street fixtures include float32 binaries (tests/data/street/*/NOTICE.md) read byte
 # for byte: keep end-of-line normalisation away from them too.
 tests/data/street/** -text
+
+# Weather files are read byte for byte and checked against the sha256 their JSON records
+# (tests/data/modelica/NOTICE.md): no end-of-line normalisation.
+tests/data/modelica/*.mos -text

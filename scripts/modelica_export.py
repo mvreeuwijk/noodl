@@ -67,6 +67,13 @@ parameters are exported, inherited ones included. Nothing is parsed out of `.mo`
 Enumerations are written as their fully qualified literal
 (`"Modelica.Fluid.Types.Dynamics.FixedInitial"`); the reader keeps only the last component.
 
+Weather files
+-------------
+A `ReaderTMY3`'s `filNam` evaluates to a file in the MBL checkout. The exporter copies it into
+`--out`, next to the JSON, and records `"files": {"filNam": {"path", "sha256"}}` on the
+component (`attach_weather_files`); `filNam` itself is then rewritten to its `modelica://` URI
+like any library path. The reader opens the copy and refuses it if its sha256 differs.
+
 Components, signals and observers
 ---------------------------------
 Every top-level element of the model (and of its base models) whose class is a `model` or
@@ -77,7 +84,8 @@ for one, a list for several). Every other block, and every
 `Buildings.Fluid.Sensors.*` instance, is an OBSERVER: listed in `components` with
 `"role": "observer"`. `connections` holds every `connect()` whose two ends are components
 (signal wiring is carried by `drives` alone, since the reader resolves connection ends
-against `components`).
+against `components`). A connection from a component's `weaBus.<variable>` to an input of a
+signal block is kept in `connections` too, so that the reader can refuse that wiring by name.
 
 CSV
 ---
@@ -92,7 +100,9 @@ dynamic parity references are regenerated tighter than declared, so that their o
 integration error is well below the tolerance the parity test asserts.
 Columns: each one-way flow element's `m_flow`, each four-port element's `m1_flow`/`m2_flow`
 (and `mAB_flow`/`mBA_flow` when the class declares them as variables), each volume's `T`,
-`p`, `Xi[1]` (when the medium has moisture) and `C[k]` (one per trace substance). If the
+`p`, `Xi[1]` (when the medium has moisture) and `C[k]` (one per trace substance); then, for a
+weather reader, `<reader>.weaBus.<output>` for `TDryBul`, `pAtm`, `relHum` and `winSpe`, and
+for a wind boundary (`Outside_Cp`, `Outside_CpLowRise`, `Outside_CpData`) its `pWin`. If the
 simulation fails (a refused model may not simulate), the JSON is still written, with Reals
 flagged approximate, and no CSV.
 """
@@ -100,6 +110,7 @@ flagged approximate, and no CSV.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -136,6 +147,18 @@ FOUR_PORT = frozenset({
     "Buildings.Airflow.Multizone.ZonalFlow_ACS",
     "Buildings.Airflow.Multizone.ZonalFlow_m_flow",
 })
+# Wind-pressure boundaries and the weather reader (the reader's `schema.OUTSIDE_WIND` and
+# `schema.WEATHER_READERS`; the contract test checks that).
+WIND_BOUNDARIES = frozenset({
+    "Buildings.Fluid.Sources.Outside_Cp",
+    "Buildings.Fluid.Sources.Outside_CpLowRise",
+    "Buildings.Fluid.Sources.Outside_CpData",
+})
+WEATHER_READERS = frozenset({"Buildings.BoundaryConditions.WeatherData.ReaderTMY3"})
+# Weather-bus outputs compared in the CSV (`<reader>.weaBus.<output>`): those the reader
+# evaluates, but `winDir`, which is periodic (a direction a round-off below 2 pi and one at 0
+# are the same) and enters only through the boundaries' `pWin`, which the CSV holds.
+WEATHER_COLUMNS = ("TDryBul", "pAtm", "relHum", "winSpe")
 OBSERVER_PREFIXES = ("Buildings.Fluid.Sensors.",)
 
 MBL_COMMIT_EXPECTED = "55abf579598ca81cae0a82f337350375958e6722"
@@ -331,8 +354,19 @@ def build_document(instance: dict, *, model: str, medium: dict, experiment: dict
         components.append(entry)
 
     signal_names = {s["name"] for s in signals}
+
+    def reads_bus(bus_end: str, other: str) -> bool:
+        """`bus_end` is a component's weather-bus variable and `other` an INPUT of a signal
+        block: the block reads the bus. Kept, so that the reader refuses it by name (a signal
+        OUTPUT driving a bus variable is carried by its `drives`)."""
+        parts = bus_end.split(".")
+        inst, port = port_base(other)
+        return (len(parts) > 2 and parts[1] == "weaBus" and parts[0] not in signal_names
+                and inst in signal_names and port not in outputs.get(inst, set()))
+
     kept = [[a, b] for a, b in connections
-            if port_base(a)[0] not in signal_names and port_base(b)[0] not in signal_names]
+            if (port_base(a)[0] not in signal_names and port_base(b)[0] not in signal_names)
+            or reads_bus(a, b) or reads_bus(b, a)]
     unknown = sorted({port_base(r)[0] for pair in kept for r in pair} - set(by_name))
     if unknown:
         raise ExportError(f"connections reference instances that are not components: {unknown}")
@@ -354,11 +388,12 @@ def build_document(instance: dict, *, model: str, medium: dict, experiment: dict
 
 
 def compared_variables(instance: dict, doc: dict) -> list[str]:
-    """CSV columns (after `time`): flow-element flows first, then volume states."""
+    """CSV columns (after `time`): flow-element flows first, then volume states, then the
+    weather readers' bus outputs and the wind boundaries' `pWin`."""
     by_name = {c["name"]: c for c in _model_components(instance)}
     n_c = len(doc["medium"].get("extraPropertiesNames", []))
     n_xi = int(doc["medium"].get("nXi", 0))
-    flows, states = [], []
+    flows, states, weather, wind = [], [], [], []
     for comp in doc["components"]:
         name, cls = comp["name"], comp["class"]
         if comp.get("role") == "observer":
@@ -374,7 +409,11 @@ def compared_variables(instance: dict, doc: dict) -> list[str]:
             states += [f"{name}.T", f"{name}.p"]
             states += [f"{name}.Xi[{k + 1}]" for k in range(min(n_xi, 1))]
             states += [f"{name}.C[{k + 1}]" for k in range(n_c)]
-    return flows + states
+        elif cls in WEATHER_READERS:
+            weather += [f"{name}.weaBus.{q}" for q in WEATHER_COLUMNS]
+        elif cls in WIND_BOUNDARIES:
+            wind.append(f"{name}.pWin")
+    return flows + states + weather + wind
 
 
 _NOT_REAL = ("Integer", "Boolean", "String")
@@ -451,7 +490,8 @@ def relative_library_paths(obj, mbl: str | Path):
 
     OpenModelica evaluates `loadResource("modelica://Buildings/...")` bindings (a weather
     file's `filNam`, say) to absolute paths on the exporting machine; a committed fixture
-    must not carry them. The reader never opens these files, so the URI is informative only.
+    must not carry them. The reader opens only the copies `attach_weather_files` makes;
+    the URI records where each came from.
     """
     root = str(mbl).rstrip("/") + "/"
     if isinstance(obj, str):
@@ -461,6 +501,36 @@ def relative_library_paths(obj, mbl: str | Path):
     if isinstance(obj, dict):
         return {k: relative_library_paths(v, mbl) for k, v in obj.items()}
     return obj
+
+
+def attach_weather_files(doc: dict, out: Path) -> list[Path]:
+    """Copy every weather reader's file (`filNam`, the absolute path OpenModelica evaluated
+    `loadResource` to) into `out`, next to the JSON, and record it on the component as
+    `"files": {"filNam": {"path": <bare name>, "sha256": <hex>}}`, which the reader resolves
+    against the JSON's own directory and checks. Two readers naming different files of the
+    same base name are refused. Returns the copied paths, each once."""
+    copied: dict[str, Path] = {}
+    for entry in doc["components"]:
+        if entry["class"] not in WEATHER_READERS:
+            continue
+        src = entry["parameters"].get("filNam")
+        if not isinstance(src, str):
+            raise ExportError(f"{entry['name']}: weather file name filNam was not evaluated "
+                              f"(it must evaluate to an existing file; got {src!r})")
+        if not Path(src).is_file():
+            raise ExportError(f"{entry['name']}: weather file {src!r} not found (filNam must "
+                              f"evaluate to an existing file)")
+        path = Path(src)
+        name = path.name
+        if name in copied and copied[name].resolve() != path.resolve():
+            raise ExportError(f"two weather files are named {name}: {copied[name]} and {path}")
+        dest = Path(out) / name
+        if name not in copied:
+            shutil.copyfile(path, dest)
+            copied[name] = path
+        entry["files"] = {"filNam": {"path": name,
+                                     "sha256": hashlib.sha256(dest.read_bytes()).hexdigest()}}
+    return [Path(out) / n for n in copied]
 
 
 def write_json(doc: dict, path: str | Path) -> None:
@@ -830,6 +900,7 @@ def export(model: str, out: Path, mbl: Path, run_simulation: bool = True,
             "Reals from the simulation result (full double precision)" if not missing else
             f"Reals from the simulation result except {len(missing)} value(s) absent from it; "
             f"those keep the instance API's six significant digits (see 'approximate')")
+        summary["weather_files"] = [str(p) for p in attach_weather_files(doc, out)]
         for root in {mbl.as_posix(), mbl.resolve().as_posix()}:
             doc = relative_library_paths(doc, root)
         write_json(doc, out / f"{short}.json")
