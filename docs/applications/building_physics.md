@@ -340,6 +340,9 @@ hand, ready for `build_model`.
 | `crack(name, ...)` | `area` (m2), `z_path` (m), `Cd`, `exterior` (default `False`), wind: `azimuth` or `facade`, `Cp`, `Ch`, `profile` | `a`, `b`; only `a` if exterior |
 | `window(name, ...)` | as `crack`, but `exterior` defaults to `True` | `a` (and `b` with `exterior=False`) |
 | `shaft(name, ...)` | `levels`, `level_height` (m), `volume` (m3 per level), `area` (m2 of each slab opening), `T0`, `Cd` | `levels[0]`, `levels[1]`, ... |
+| `fan(name, ...)` | `flow` (kg/s), `z_path` (m), `exterior` (`None`, `"supply"` or `"exhaust"`) | `a`, `b`; only `a` if exterior |
+| `duct(name, ...)` | `length`, `diameter`, `roughness` (m), `loss`, `terminal_area` (m2), `terminal_loss`, `z_a`, `z_b` (m), `T0` (K), `exterior`, wind: `azimuth` or `facade`, `Ch`, `profile` | `a`, `b`; only `b` if exterior |
+| `air_handler(name, ...)` | `supplies`, `returns` (design flows, kg/s), `outdoor_air_fraction`, `min_outdoor_air` (kg/s), `supply_volume`, `return_volume` (m3), `T0` (K), `kind` | `supplies[i]`, `returns[j]` |
 
 A `door` has two edges, `low` and `high`, as `add_large_opening` does. An exterior `crack` or
 `window` has one edge, `path`, from the shared `ambient` node, so the building must declare
@@ -379,6 +382,80 @@ print(block_net.nodes)
 
 The second flat, its door and its window are placed at `z = 3`, so their heights come out
 right without being repeated in the factory calls.
+
+A `fan` edge is built with `fan_elements_from_edges`, a `duct` with `duct_elements_from_edges`,
+and an `air_handler` with `air_handler_from_edges` and `air_handler_plenums` (see
+[Air-handling systems](#air-handling-systems)). An office is served by an air handler, joined
+to a store by a transfer duct, and the store is exhausted by a fan:
+
+```python
+import math
+
+import torch
+
+from noodl.apps.building_physics import (
+    air_handler,
+    air_handler_from_edges,
+    air_handler_plenums,
+    build_model,
+    crack,
+    duct,
+    duct_elements_from_edges,
+    fan,
+    fan_elements_from_edges,
+    initial_drivers,
+    initial_state,
+    orifice_elements_from_edges,
+    room,
+)
+from noodl.components import Component
+from noodl.drives import Stack
+
+F64 = torch.float64
+
+b = Component("building")
+b.inner("ambient", z_ref=0.0, T0=293.15)
+office = b.add(room("office", volume=300.0))
+store = b.add(room("store", volume=100.0))
+ahu = b.add(air_handler("ahu", supplies=[0.1], returns=[0.1], outdoor_air_fraction=0.3,
+                        supply_volume=0.0, return_volume=0.0))
+b.connect(ahu.ports["supplies[0]"], office.ports.air)
+b.connect(ahu.ports["returns[0]"], office.ports.air)
+transfer = b.add(duct("transfer", length=4.0, diameter=0.15, z_a=2.5, z_b=2.5))
+b.connect(transfer.ports.a, office.ports.air)
+b.connect(transfer.ports.b, store.ports.air)
+exhaust = b.add(fan("exhaust", flow=0.02, exterior="exhaust"))
+b.connect(exhaust.ports.a, store.ports.air)
+leak = b.add(crack("leak", area=0.01, z_path=1.0, exterior=True))
+b.connect(leak.ports.a, office.ports.air)
+
+net, _ = b.flatten(dtype=F64)
+element, closure = air_handler_from_edges(net, "air_handler")
+plenums = air_handler_plenums(net, "air_handler")
+ducts, drives = duct_elements_from_edges(net)
+model = build_model(
+    net,
+    air_elements=[orifice_elements_from_edges(net, "airpath"), *ducts,
+                  fan_elements_from_edges(net), element],
+    drives=[Stack.from_network(net, "airpath"), *drives],
+    thermal=False, species=1, closures=[closure],
+    flow_balanced=plenums, storage_free=plenums,
+)
+drivers = initial_drivers(model)
+drivers["rho"] = torch.full((net.n,), 1.2041, dtype=F64)
+out = model.steady(initial_state(model), drivers, atol=1e-14, rtol=1e-14)
+air = model.potential["air"]
+print([round(v, 4) for v in air.flows_of_kind(out["air.q"], "duct_terminal").tolist()])
+print([round(v, 4) for v in air.flows_of_kind(out["air.q"], "air_handler").tolist()])
+```
+
+```text
+[-0.02, 0.02]
+[0.1, 0.1, 0.07, 0.03, 0.03]
+```
+
+The transfer duct carries the fan's 0.02 kg/s from the office to the store. Of the air handler's
+0.1 kg/s supply, 0.03 kg/s is outdoor air and 0.07 kg/s recirculated.
 
 ## Time, schedules and inputs
 

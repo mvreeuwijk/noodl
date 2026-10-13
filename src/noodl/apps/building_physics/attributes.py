@@ -70,6 +70,10 @@ EDGE_ATTRIBUTES: dict[str, dict[str, tuple[str, str]]] = {
         "min_outdoor_air": ("on the recirculation edge: the minimum outdoor-air flow (kg/s, 0 "
                             "by default)", "air_handler_from_edges"),
     },
+    "fan, a constant-mass-flow fan (made by the fan component)": {
+        "flow": ("mass flow delivered from source to target whatever the pressures (kg/s)",
+                 "fan_elements_from_edges"),
+    },
     "wall": {
         "ua": ("conductance zone -> wall or wall -> ambient (W/K)", "thermal_layer"),
     },

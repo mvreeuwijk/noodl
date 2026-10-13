@@ -23,7 +23,16 @@ from noodl.apps.building_physics.air_handling import (
     air_handler_plenums,
 )
 from noodl.apps.building_physics.attributes import EDGE_ATTRIBUTES, NODE_ATTRIBUTES
-from noodl.apps.building_physics.components import crack, door, room, shaft, window
+from noodl.apps.building_physics.components import (
+    air_handler,
+    crack,
+    door,
+    duct,
+    fan,
+    room,
+    shaft,
+    window,
+)
 from noodl.apps.building_physics.contamx import (
     run_project,
     run_steady,
@@ -38,6 +47,7 @@ from noodl.apps.building_physics.ducts import (
 )
 from noodl.apps.building_physics.elements import (
     add_large_opening,
+    fan_elements_from_edges,
     mass_orifice,
     orifice_elements_from_edges,
 )
@@ -137,6 +147,7 @@ __all__ = [
     "add_air_handler",
     "add_large_opening",
     "add_zone",
+    "air_handler",
     "air_handler_from_edges",
     "air_handler_plenums",
     "apply_inputs",
@@ -146,6 +157,9 @@ __all__ = [
     "crack",
     "duct_elements_from_edges",
     "door",
+    "duct",
+    "fan",
+    "fan_elements_from_edges",
     "filter_transmission",
     "initial_drivers",
     "initial_state",
