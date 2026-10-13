@@ -453,6 +453,10 @@ class ControlNetwork:
             if a.mode not in ("set", "add") or (a.mode == "add" and a.index is None):
                 raise ValueError(f"ControlNetwork: actuator {a.name or a.key!r}: mode must be "
                                  f"'set' or 'add', and 'add' needs positions")
+            if a.mode == "set" and a.index is not None and len(set(a.index)) < len(a.index):
+                raise ValueError(f"ControlNetwork: actuator {a.name or a.key!r} sets positions "
+                                 f"{list(a.index)} of driver {a.key!r}, listing one twice; "
+                                 f"'set' needs distinct positions ('add' adds each listing)")
         self._slots: list[slice] = []
         start = 0
         for block in self.blocks:
@@ -560,8 +564,9 @@ class ControlNetwork:
                                f"{list(a.index)} of driver {a.key!r}, which the model does "
                                f"not have")
             if a.index is None:
-                # One value per batch member, the same for every entry of the driver.
-                whole = value if base is None or value.ndim == 0 else value.unsqueeze(-1)
+                # One value per batch member, the same for every entry of the driver (a
+                # driver that does not exist yet gets one entry).
+                whole = value if value.ndim == 0 else value.unsqueeze(-1)
                 out[a.key] = scatter(base, None, whole)
                 continue
             v = value.unsqueeze(-1).expand(*value.shape, len(a.index))

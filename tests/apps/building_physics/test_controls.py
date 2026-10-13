@@ -334,6 +334,8 @@ def test_a_batched_driver_sensor_keeps_each_members_previous_value():
     state = net.initial_state()
     assert state[net.memory_key].shape == (2,)
     seen = []
+    # The one-step delay is intended: the network evaluated at a step's start reads the
+    # driver value the previous step used (ContamX's sensors, measured).
     for t in ((290.0, 300.0), (291.0, 302.0), (292.0, 304.0)):
         drivers = {"T": torch.tensor([[t[0]], [t[1]]], dtype=F64)}
         out, state = advance(net, state, drivers)
@@ -345,3 +347,23 @@ def test_a_batched_driver_sensor_keeps_each_members_previous_value():
     torch.testing.assert_close(seen[1], expect + (seen[0] - expect) * decay)
     prev = torch.tensor([291.0, 302.0], dtype=F64)       # step 3 reads step 2's values
     torch.testing.assert_close(seen[2], prev + (seen[1] - prev) * decay)
+
+
+@pytest.mark.parametrize("batched", [False, True])
+def test_two_whole_driver_writes_to_a_missing_driver_keep_one_entry(batched):
+    """A driver that does not exist yet gets one entry per batch member; a second actuator
+    writing all of it keeps that shape."""
+    net = ControlNetwork([DriverValue("controls.input", 0), DriverValue("controls.input", 1)],
+                         [Actuator(0, "fan_speed.fan", None), Actuator(1, "fan_speed.fan", None)])
+    inputs = torch.tensor([[0.2, 0.4], [0.7, 0.9]] if batched else [0.2, 0.4], dtype=F64)
+    out = net(net.initial_state(), {"controls.input": inputs}, STEP)
+    if batched:
+        assert out["fan_speed.fan"].tolist() == [[0.4], [0.9]]
+    else:
+        assert out["fan_speed.fan"].shape == () and float(out["fan_speed.fan"]) == 0.4
+
+
+def test_setting_a_position_listed_twice_is_refused_by_name():
+    with pytest.raises(ValueError, match=r"actuator 'damper' sets positions \[1, 1\].*twice"):
+        ControlNetwork([Constant(0.5)],
+                       [Actuator(0, "flow_multiplier.fan", (1, 1), name="damper")])
