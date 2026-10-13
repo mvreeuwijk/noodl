@@ -27,16 +27,21 @@ from noodl.apps.building_physics.controls import (
     Excess,
     ExclusiveOr,
     FunctionReading,
+    Hysteresis,
     Identity,
+    IncrementalPI,
+    LowerBandSwitch,
     Maximum,
     Minimum,
     Or,
     Positive,
     Product,
+    ProportionalControl,
     Sensor,
     Shortfall,
     StateReading,
     Sum,
+    UpperBandSwitch,
 )
 from noodl.model import StepContext
 
@@ -358,6 +363,7 @@ def test_two_whole_driver_writes_to_a_missing_driver_keep_one_entry(batched):
     inputs = torch.tensor([[0.2, 0.4], [0.7, 0.9]] if batched else [0.2, 0.4], dtype=F64)
     out = net(net.initial_state(), {"controls.input": inputs}, STEP)
     if batched:
+        assert out["fan_speed.fan"].shape == (2, 1)
         assert out["fan_speed.fan"].tolist() == [[0.4], [0.9]]
     else:
         assert out["fan_speed.fan"].shape == () and float(out["fan_speed.fan"]) == 0.4
@@ -367,3 +373,106 @@ def test_setting_a_position_listed_twice_is_refused_by_name():
     with pytest.raises(ValueError, match=r"actuator 'damper' sets positions \[1, 1\].*twice"):
         ControlNetwork([Constant(0.5)],
                        [Actuator(0, "flow_multiplier.fan", (1, 1), name="damper")])
+
+
+@pytest.mark.parametrize("mode", ["set", "add"])
+def test_writing_past_the_end_of_a_driver_is_refused_naming_actuator_key_and_size(mode):
+    net = ControlNetwork([Constant(0.5)],
+                         [Actuator(0, "flow_multiplier.fan", (0, 2), mode=mode, name="damper")])
+    with pytest.raises(ValueError, match=r"damper.*positions \[0, 2\].*'flow_multiplier.fan'"
+                                         r".*1 entr"):
+        net(net.initial_state(), {"flow_multiplier.fan": torch.ones(1, dtype=F64)}, STEP)
+
+
+RAMP = [-1.0 + 0.25 * k for k in range(13)] + [2.0 - 0.25 * k for k in range(1, 31)]
+
+
+def _sequence(net, inputs, position):
+    state, got = net.initial_state(), []
+    for v in inputs:
+        out, state = advance(net, state, values(*v))
+        got.append(float(out[net.outputs_key][position]))
+    return got
+
+
+def test_band_switches_follow_contamx():
+    """in1 ramps -1 -> 2 -> -1 by 0.25 per step, in2 = 0.5, band 0.4. ContamX: the lower
+    band switch is on from in1 = 1.0 (> 0.9) until in1 drops below 0.5 (still on at 0.5);
+    the upper one is on until in1 rises above 0.5 and again from in1 = 0 (< 0.1)."""
+    net = ControlNetwork([DriverValue("controls.input", 0), DriverValue("controls.input", 1),
+                          LowerBandSwitch(0, 1, band=0.4), UpperBandSwitch(0, 1, band=0.4)])
+    rows = [(v, 0.5) for v in RAMP]
+    lower = _sequence(net, rows, 2)
+    upper = _sequence(net, rows, 3)
+    assert lower == [0.0] * 8 + [1.0] * 11 + [0.0] * 24
+    assert upper == [1.0] * 7 + [0.0] * 13 + [1.0] * 23
+    equal = _sequence(ControlNetwork([DriverValue("controls.input", 0),
+                                      DriverValue("controls.input", 1),
+                                      LowerBandSwitch(0, 1, band=0.0),
+                                      UpperBandSwitch(0, 1, band=0.0)]), [(0.5, 0.5)], 2)
+    assert equal == [0.0]
+
+
+HYS_IN = ([0.1 * k for k in range(11)] + [0.92, 0.84, 0.76, 0.68, 0.6, 0.52, 0.44, 0.36,
+          0.28, 0.2, 0.27, 0.34, 0.41, 0.48, 0.55, 0.62, 0.69, 0.76, 0.83, 0.9, 0.81, 0.72,
+          0.63, 0.54, 0.45, 0.36, 0.27, 0.18, 0.09, 0.0])
+HYS_OUT = [0, 0, 0, 0, 0.14286, 0.28571, 0.42857, 0.57143, 0.71429, 0.85714, 1, 1, 1, 1,
+           0.97143, 0.85714, 0.74286, 0.62857, 0.51429, 0.4, 0.28571, 0.28571, 0.28571,
+           0.28571, 0.28571, 0.35714, 0.45714, 0.55714, 0.65714, 0.75714, 0.85714, 0.85714,
+           0.85714, 0.85714, 0.77143, 0.64286, 0.51429, 0.38571, 0.25714, 0.12857, 0]
+
+
+def test_hysteresis_follows_contamx_over_a_ramp_up_down_and_up():
+    """Slack 0.3, slope 1.42857 (the file's field), initial 0.1: ContamX's 41 outputs."""
+    net = ControlNetwork([DriverValue("controls.input", 0),
+                          Hysteresis(0, slack=0.3, slope=1.42857, initial=0.1)])
+    got = _sequence(net, [(v,) for v in HYS_IN], 1)
+    assert got == pytest.approx(HYS_OUT, abs=1e-5)
+
+
+@pytest.mark.parametrize(("u", "slope", "initial", "expected"), [
+    (0.5, 1.42857, 0.4, 0.571428), (0.5, 1.42857, 0.9, 0.714285), (0.5, 2.0, 0.4, 0.8),
+    (1.8, 1.42857, 0.0, 0.999999), (-0.5, 1.42857, 0.5, 0.0),
+])
+def test_hysteresis_starts_from_the_initial_signal_times_the_slope(u, slope, initial,
+                                                                   expected):
+    """ContamX: the previous output starts at oldsig * slope; the input is clipped to
+    0..1 first; the slope is the file's field, not 1/(1 - slack)."""
+    net = ControlNetwork([Constant(u), Hysteresis(0, slack=0.3, slope=slope, initial=initial)])
+    assert _sequence(net, [()], 1) == pytest.approx([expected], abs=1e-6)
+
+
+def test_proportional_control_is_clipped_to_zero_and_one():
+    net = ControlNetwork([DriverValue("controls.input", 0), ProportionalControl(0, gain=0.5)])
+    assert _sequence(net, [(0.2,), (3.0,), (-1.0,)], 1) == pytest.approx([0.1, 1.0, 0.0])
+
+
+def test_incremental_pi_follows_contamx_from_its_initial_values():
+    """Kp 0.5, Ki 1e-4 1/s, dt 300 s, oldsig 0.1, olderr 0.05; the error ContamX sensed at
+    each step (float32). The t = 0 evaluation is itself an update."""
+    net = ControlNetwork([DriverValue("controls.input", 0),
+                          IncrementalPI(0, kp=0.5, ki=1e-4, initial_output=0.1,
+                                        initial_error=0.05)])
+    errors = [0.199999988, 0.199999988, 0.201195657, 0.201829255, 0.201929986]
+    got = _sequence(net, [(e,) for e in errors], 1)
+    expected = [0.178749993, 0.184749991, 0.191365764, 0.197727934, 0.203834683]
+    assert got == pytest.approx(expected, abs=5e-8)
+
+
+def test_incremental_pi_winds_up_no_further_than_its_clip():
+    """Kp 0.5, Ki 0.05: saturated at 1 for six steps; the stored output is the clipped one,
+    so it leaves saturation at the first negative increment (ContamX: 0.351799011)."""
+    net = ControlNetwork([DriverValue("controls.input", 0),
+                          IncrementalPI(0, kp=0.5, ki=0.05, initial_output=0.1,
+                                        initial_error=0.05)])
+    errors = [0.199999988, 0.199999988, 0.138409734, 0.081557095, 0.029077709,
+              -0.019364774, -0.064080954, -0.0689044, -0.052294433]
+    got = _sequence(net, [(e,) for e in errors], 1)
+    assert got == pytest.approx([1, 1, 1, 1, 1, 1, 0.351799011, 0, 0], abs=2e-7)
+
+
+def test_memory_blocks_need_a_sampled_network():
+    for block in (Hysteresis(0, slack=0.3), IncrementalPI(0, kp=1.0, ki=0.0),
+                  LowerBandSwitch(0, 0, band=0.1)):
+        with pytest.raises(ValueError, match="needs a sampled network"):
+            ControlNetwork([Constant(0.0), block], sampled=False)

@@ -395,6 +395,115 @@ class Excess(_Limit):
         return (_f64(u[0]) - _f64(u[1])).clamp(min=0.0), memory
 
 
+class LowerBandSwitch(Block):
+    """On (1) once `u > limit + band`, off (0) once `u < limit`, unchanged in between;
+    off at the start (CONTAM's lower band switch)."""
+
+    memory_size = 1
+    sampled_only = True
+
+    def __init__(self, a: int, limit: int, *, band: float, name: str = "") -> None:
+        self.inputs, self.band, self.name = (int(a), int(limit)), float(band), name
+
+    def initial_memory(self) -> list[float]:
+        return [0.0]
+
+    def step(self, u, memory, ev):
+        x, lim = _f64(u[0]), _f64(u[1])
+        prev = memory[..., 0]
+        y = torch.where(x > lim + self.band, torch.ones_like(prev),
+                        torch.where(x < lim, torch.zeros_like(prev), prev))
+        return y, y.unsqueeze(-1)
+
+
+class UpperBandSwitch(Block):
+    """On (1) once `u < limit - band`, off (0) once `u > limit`, unchanged in between;
+    off at the start (CONTAM's upper band switch)."""
+
+    memory_size = 1
+    sampled_only = True
+
+    def __init__(self, a: int, limit: int, *, band: float, name: str = "") -> None:
+        self.inputs, self.band, self.name = (int(a), int(limit)), float(band), name
+
+    def initial_memory(self) -> list[float]:
+        return [0.0]
+
+    def step(self, u, memory, ev):
+        x, lim = _f64(u[0]), _f64(u[1])
+        prev = memory[..., 0]
+        y = torch.where(x < lim - self.band, torch.ones_like(prev),
+                        torch.where(x > lim, torch.zeros_like(prev), prev))
+        return y, y.unsqueeze(-1)
+
+
+class Hysteresis(Block):
+    """ContamX's hysteresis: with `x` the input clipped to 0..1, the output follows the
+    rising line `max(0, (x - slack) slope)` and the falling line `min(1, x slope)` and stays
+    between them: `y = min(falling, max(rising, y_prev))`. `slope` defaults to
+    `1 / (1 - slack)`; the previous output starts at `initial * slope`."""
+
+    memory_size = 1
+    sampled_only = True
+
+    def __init__(self, a: int, *, slack: float, slope: float | None = None,
+                 initial: float = 0.0, name: str = "") -> None:
+        if not 0.0 <= slack < 1.0:
+            raise ValueError(f"Hysteresis {name!r}: slack must be in [0, 1), got {slack}")
+        self.inputs, self.name = (int(a),), name
+        self.slack = float(slack)
+        self.slope = 1.0 / (1.0 - self.slack) if slope is None else float(slope)
+        self.initial = float(initial)
+
+    def initial_memory(self) -> list[float]:
+        return [self.initial * self.slope]
+
+    def step(self, u, memory, ev):
+        x = _f64(u[0]).clamp(0.0, 1.0)
+        rising = ((x - self.slack) * self.slope).clamp(min=0.0)
+        falling = (x * self.slope).clamp(max=1.0)
+        y = torch.minimum(falling, torch.maximum(rising, memory[..., 0]))
+        return y, y.unsqueeze(-1)
+
+
+class ProportionalControl(Block):
+    """`clip(gain u, 0, 1)` (CONTAM's proportional controller: the input is an error)."""
+
+    def __init__(self, a: int, *, gain: float, name: str = "") -> None:
+        self.inputs, self.gain, self.name = (int(a),), float(gain), name
+
+    def step(self, u, memory, ev):
+        return (self.gain * _f64(u[0])).clamp(0.0, 1.0), memory
+
+
+class IncrementalPI(Block):
+    """ContamX's PI controller on an error `e`, evaluated once per step of length `dt` (s). It
+    is incremental: the output changes by a proportional part on the change of the error and
+    an integral part on the trapezoid of the error over the step,
+    `y = clip(y_prev + kp (e - e_prev) + ki dt (e + e_prev) / 2, 0, 1)`, `ki` in 1/s. The
+    stored previous output is the clipped one (which limits windup); the first evaluation
+    updates from `initial_output` and `initial_error`."""
+
+    memory_size = 2
+    sampled_only = True
+
+    def __init__(self, a: int, *, kp: float, ki: float, initial_output: float = 0.0,
+                 initial_error: float = 0.0, name: str = "") -> None:
+        self.inputs, self.name = (int(a),), name
+        self.kp, self.ki = float(kp), float(ki)
+        self.initial_output, self.initial_error = float(initial_output), float(initial_error)
+
+    def initial_memory(self) -> list[float]:
+        return [self.initial_output, self.initial_error]
+
+    def step(self, u, memory, ev):
+        e = _f64(u[0])
+        y_prev, e_prev = memory[..., 0], memory[..., 1]
+        y = (y_prev + self.kp * (e - e_prev)
+             + self.ki * ev.dt * 0.5 * (e + e_prev)).clamp(0.0, 1.0)
+        return y, _stack([y, e])
+
+
 # ----------------------------------------------------------------------------- actuators
 @dataclass(frozen=True)
 class Actuator:
@@ -563,6 +672,10 @@ class ControlNetwork:
                 raise KeyError(f"controls: actuator {a.name or a.key!r} writes positions "
                                f"{list(a.index)} of driver {a.key!r}, which the model does "
                                f"not have")
+            if a.index is not None and base is not None and max(a.index) >= base.shape[-1]:
+                raise ValueError(f"controls: actuator {a.name or a.key!r} writes positions "
+                                 f"{list(a.index)} of driver {a.key!r}, which has "
+                                 f"{base.shape[-1]} entries")
             if a.index is None:
                 # One value per batch member, the same for every entry of the driver (a
                 # driver that does not exist yet gets one entry).
