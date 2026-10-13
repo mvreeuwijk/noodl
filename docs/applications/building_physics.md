@@ -575,6 +575,132 @@ print(outdoor.species, outdoor.signal(["sarin"]).value(15 * 3600.0, Calendar()).
 ('sarin',) [0.0]
 ```
 
+## Controls
+
+A `ControlNetwork` reads the model's state, computes signals and writes them into drivers:
+a fan's flow multiplier, a damper's opening, a heat input. It is built from three kinds of
+part:
+
+- a **reading** names one value of the state or the drivers: `StateReading(key, index)`,
+  `DriverReading(key, index)` or `FunctionReading(fn)`. The sensors by name build them for
+  you: `node_mass_fraction(model, node, species)` (kg/kg), `node_temperature(model, node)`
+  (K), `node_pressure(model, node)` (gauge, Pa), `edge_flow(model, kind, position)` (kg/s)
+  and `edge_pressure_difference(model, kind, position)` (Pa);
+- a **block** computes one output from the outputs of the blocks it names by position in the
+  network's list, or from a reading (`Sensor`);
+- an **actuator**, `Actuator(block, key, index=None, mode="set" | "add")`, writes a block's
+  output into a driver: the whole driver, or the positions `index` on its last axis; `"add"`
+  adds it to those entries (a heat flow into `"thermal.sources"`, W).
+
+| Block | Output |
+|---|---|
+| `Constant(value)` | the value |
+| `DriverValue(key, index)` | a driver's value at this evaluation, such as a schedule an `Input` writes into `"controls.input"` |
+| `Identity(a)` | its input |
+| `Sensor(reading, offset, scale, time_constant)` | `(value - offset) * scale`, lagged with `time_constant` (s) when it is > 0 |
+| `Sum(*inputs, weights)` | `sum_i w_i u_i` |
+| `Average`, `Maximum`, `Minimum`, `Product` | the mean, largest, smallest, product of its inputs |
+| `Divide(numerator, denominator)` | the quotient; a zero denominator raises, naming the block |
+| `Absolute(a)`, `Complement(a)` | `abs(u)`, `1 - u` |
+| `Positive(a)` | 1 where `u > 0`, else 0 |
+| `Affine(a, offset, gain)` | `(u - offset) * gain` |
+| `And`, `Or`, `ExclusiveOr` | logic on `u > 0` |
+| `BelowLimit(a, limit)`, `AboveLimit(a, limit)` | 1 where `u < limit` (or `u > limit`), else 0 |
+| `Shortfall(a, limit)`, `Excess(a, limit)` | `max(0, limit - u)`, `max(0, u - limit)` |
+| `LowerBandSwitch(a, limit, band)` | on above `limit + band`, off below `limit`, unchanged in between |
+| `UpperBandSwitch(a, limit, band)` | on below `limit - band`, off above `limit`, unchanged in between |
+| `Hysteresis(a, slack, slope, initial)` | ContamX's hysteresis between a rising and a falling line |
+| `ProportionalControl(a, gain)` | `clip(gain u, 0, 1)` on an error `u` |
+| `IncrementalPI(a, kp, ki)` | ContamX's PI controller: `y = clip(y_prev + kp (e - e_prev) + ki dt (e + e_prev)/2, 0, 1)` |
+| `LimitedPID(setpoint, measurement, gain, y_max, y_min, integral_time)` | MSL's `LimPID` as P or PI: `clamp(gain (u_s - u_m + xi), y_min, y_max)` with anti-windup |
+
+A network is **sampled** (the default) or **continuous** (`sampled=False`). A sampled network
+is evaluated once per step, as ContamX evaluates its control nodes; the switches with memory,
+the hysteresis, the incremental PI and a lagged sensor need one. A continuous network is
+algebraic in the state at every call, and its integrators (`LimitedPID` with an
+`integral_time`) advance by one explicit Euler step of their rate per step; `LimitedPID` needs
+one.
+
+The network is a closure of the model, the first one: `build_model(..., controls=network)`
+puts it ahead of the density closure, so its writes reach every other closure. Its block
+outputs and its blocks' memory travel in the state as `"controls.outputs"` and
+`"controls.memory"`, which `build_model(..., return_inputs=True)` seeds. Inputs are applied
+before the closures run, so a control overrides a schedule on the same driver entry, as in
+CONTAM.
+
+Timing in a sampled network follows ContamX:
+
+- sensors read the state the step starts from, so the value acting over a step comes from
+  the end of the previous one;
+- a flow or pressure sensor reads the last airflow solve, and 0 before the first;
+- a sensor of a driver (a prescribed temperature, an outdoor mass fraction) reads the value
+  the previous step used; the first evaluation reads the current value;
+- a block that reads a block later in the list gets that block's previous output, 0 before
+  the first evaluation. The network evaluates in the order given and never reorders.
+
+A room of 60 m³ with a CO2 source (4e-5 kg/s) takes its air through a leak and loses it
+through an exhaust fan of 0.1 kg/s, wrapped in `Scaled` so that a driver scales its flow. A PI
+controller on the room's CO2 above 1.2 g/kg sets the fan's multiplier:
+
+```python
+import torch
+from noodl.apps.building_physics import (
+    Actuator, ControlNetwork, IncrementalPI, Sensor, Zone, add_zone, build_model,
+    node_mass_fraction, orifice_elements_from_edges, simulate,
+)
+from noodl.drives import Stack
+from noodl.elements import FixedFlow, Scaled
+from noodl.topology import Network
+
+F64 = torch.float64
+net = Network(dtype=F64)
+net.add_node("ambient", z_ref=0.0)
+add_zone(net, Zone("room", volume=60.0, T0=293.15))
+net.add_edge("ambient", "room", kind="airpath", z_path=1.0, Cd=0.6, area=0.05)
+net.add_edge("room", "ambient", kind="fan")
+fan = Scaled(FixedFlow(torch.tensor([0.1], dtype=F64), kind="fan"), "flow_multiplier.fan")
+parts = dict(air_elements=[orifice_elements_from_edges(net, "airpath"), fan],
+             drives=[Stack.from_network(net, "airpath")], species=("CO2",))
+
+# The sensors find the room's row in a model built from the same network.
+co2 = node_mass_fraction(build_model(net, **parts), "room", "CO2")
+network = ControlNetwork(
+    [Sensor(co2, offset=1.2e-3, scale=1e3),        # CO2 above 1.2 g/kg, in g/kg
+     IncrementalPI(0, kp=2.0, ki=2e-3)],           # the fan multiplier, 0..1
+    [Actuator(1, "flow_multiplier.fan")])
+model, state, drivers = build_model(net, **parts, controls=network, return_inputs=True)
+state["species.x"] = torch.tensor([6e-4], dtype=F64)
+drivers["species.x_boundary"] = torch.tensor([6e-4], dtype=F64)  # outdoor CO2, kg/kg
+drivers["species.sources"] = torch.tensor([0.0, 4e-5], dtype=F64)  # kg/s in the room
+
+times = torch.arange(13, dtype=F64) * 300.0
+out = simulate(model, state, drivers, times)
+q_fan = out["air.q"][:, model.potential["air"].kind_slice("fan")][:, 0]
+for k in range(len(times)):
+    print(f"{times[k] / 60:4.0f} min  CO2 {out['species.x'][k, 0] * 1e3:.4f} g/kg  "
+          f"fan {q_fan[k]:.4f} kg/s")
+```
+
+```text
+   0 min  CO2 0.6000 g/kg  fan 0.0000 kg/s
+   5 min  CO2 0.7661 g/kg  fan 0.0000 kg/s
+  10 min  CO2 0.9292 g/kg  fan 0.0022 kg/s
+  15 min  CO2 1.0687 g/kg  fan 0.0137 kg/s
+  20 min  CO2 1.1655 g/kg  fan 0.0295 kg/s
+  25 min  CO2 1.2188 g/kg  fan 0.0439 kg/s
+  30 min  CO2 1.2409 g/kg  fan 0.0541 kg/s
+  35 min  CO2 1.2454 g/kg  fan 0.0603 kg/s
+  40 min  CO2 1.2416 g/kg  fan 0.0638 kg/s
+  45 min  CO2 1.2347 g/kg  fan 0.0656 kg/s
+  50 min  CO2 1.2274 g/kg  fan 0.0665 kg/s
+  55 min  CO2 1.2209 g/kg  fan 0.0670 kg/s
+  60 min  CO2 1.2155 g/kg  fan 0.0671 kg/s
+```
+
+The fan starts before the room reaches the set point: the proportional part answers the
+rising CO2 while the integral part still pulls down. It settles where it removes the source:
+4e-5 kg/s over the set point's 0.6 g/kg above the outdoor air is 0.067 kg/s.
+
 ## The API
 
 ### Zones and walls

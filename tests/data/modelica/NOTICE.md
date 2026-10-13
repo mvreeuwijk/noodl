@@ -133,3 +133,15 @@ licence covers:
 each of which reuses a subset of `ThreeRoomsContam`'s instance names (`volWes`/`volEas`/
 `dooOpeClo`, or the `colWesBot`/`oriWesTop`/`colWesTop`/`volTop` stack). No other fixture in
 that directory reuses an MBL instance name or model name.
+
+---
+
+Not derived from MBL: the controls probe in `controls/`, which uses the Modelica Standard
+Library 4.1.0 only.
+
+- `controls/PIProbe.mo`, `controls/LimPIDProbe.csv`: an MSL 4.1.0 `LimPID` (PI, k = 5,
+  Ti = 60 s, Ni = 0.9, limits +-1, xi_start = 0.1) heating a first-order room
+  (C dT/dt = 3000 y - 100 (T - 273.15), C = 75000 J/K, T(0) = 292 K, set point 293.15 K),
+  written for this repository and simulated with OpenModelica 1.27.1 (DASSL, tolerance
+  1e-12, 600 intervals over 1200 s; `simulate(PIProbe, ..., outputFormat="csv",
+  simflags="-noEventEmit")`); the CSV keeps time, T, con.I.y and con.y.

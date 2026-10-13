@@ -440,8 +440,10 @@ class UpperBandSwitch(Block):
 class Hysteresis(Block):
     """ContamX's hysteresis: with `x` the input clipped to 0..1, the output follows the
     rising line `max(0, (x - slack) slope)` and the falling line `min(1, x slope)` and stays
-    between them: `y = min(falling, max(rising, y_prev))`. `slope` defaults to
-    `1 / (1 - slack)`; the previous output starts at `initial * slope`."""
+    between them: `y = min(falling, max(rising, y_prev))`. The previous output starts at
+    `initial * slope`. ContamX's files give the slope; the default `1 / (1 - slack)`, the
+    slope that makes the falling line reach 1 where the rising line does, is a convenience
+    for networks written in Python."""
 
     memory_size = 1
     sampled_only = True
@@ -502,6 +504,63 @@ class IncrementalPI(Block):
         y = (y_prev + self.kp * (e - e_prev)
              + self.ki * ev.dt * 0.5 * (e + e_prev)).clamp(0.0, 1.0)
         return y, _stack([y, e])
+
+
+class LimitedPID(Block):
+    """A P or PI controller with a limited output and anti-windup, in continuous time, as
+    MSL 4.1.0's `LimPID` without its derivative part (`Modelica/Blocks/Continuous.mo`,
+    `LimPID`): `v = gain (setpoint_weight u_s - u_m + xi)`, `y = clamp(v, y_min, y_max)`
+    and, with an `integral_time` Ti (s), `d xi/dt = (u_s - u_m + (y - v)/(gain windup_ratio))
+    / Ti`, `xi(0) = initial_integral`; without one, `xi = 0` (a P controller). `y_min`
+    defaults to `-y_max`. Its switching values, `(v - y_max)/w` and `(v - y_min)/w` with
+    `w = y_max - y_min`, cross zero at the limiter's corners."""
+
+    continuous_only = True
+
+    def __init__(self, setpoint: int, measurement: int, *, gain: float, y_max: float,
+                 y_min: float | None = None, integral_time: float | None = None,
+                 setpoint_weight: float = 1.0, windup_ratio: float = 0.9,
+                 initial_integral: float = 0.0, name: str = "") -> None:
+        y_min = -float(y_max) if y_min is None else float(y_min)
+        if not float(y_max) >= y_min:
+            raise ValueError(f"LimitedPID {name!r}: y_max {y_max} is below y_min {y_min}")
+        if gain == 0.0:
+            raise ValueError(f"LimitedPID {name!r}: the gain must be nonzero")
+        if integral_time is not None and not integral_time > 0.0:
+            raise ValueError(f"LimitedPID {name!r}: integral_time must be > 0 s, got "
+                             f"{integral_time}")
+        if not windup_ratio > 0.0:
+            raise ValueError(f"LimitedPID {name!r}: windup_ratio must be > 0, got "
+                             f"{windup_ratio}")
+        self.inputs, self.name = (int(setpoint), int(measurement)), name
+        self.gain, self.y_max, self.y_min = float(gain), float(y_max), y_min
+        self.integral_time = None if integral_time is None else float(integral_time)
+        self.setpoint_weight, self.windup_ratio = float(setpoint_weight), float(windup_ratio)
+        self.initial_integral = float(initial_integral)
+        self.memory_size = 0 if self.integral_time is None else 1
+
+    def initial_memory(self) -> list[float]:
+        return [self.initial_integral] if self.memory_size else []
+
+    def _v(self, u, memory) -> Tensor:
+        xi = memory[..., 0] if self.memory_size else 0.0
+        return self.gain * (self.setpoint_weight * _f64(u[0]) - _f64(u[1]) + xi)
+
+    def step(self, u, memory, ev):
+        return self._v(u, memory).clamp(self.y_min, self.y_max), memory
+
+    def rate(self, u, memory, ev):
+        if not self.memory_size:
+            return memory
+        v = self._v(u, memory)
+        y = v.clamp(self.y_min, self.y_max)
+        track = (y - v) / (self.gain * self.windup_ratio)
+        return ((_f64(u[0]) - _f64(u[1]) + track) / self.integral_time).unsqueeze(-1)
+
+    def switching(self, u, memory, ev):
+        v = self._v(u, memory)
+        width = self.y_max - self.y_min if self.y_max > self.y_min else 1.0
+        return _stack([(v - self.y_max) / width, (v - self.y_min) / width])
 
 
 # ----------------------------------------------------------------------------- actuators
@@ -672,6 +731,10 @@ class ControlNetwork:
                 raise KeyError(f"controls: actuator {a.name or a.key!r} writes positions "
                                f"{list(a.index)} of driver {a.key!r}, which the model does "
                                f"not have")
+            if a.index is not None and base is not None and base.ndim == 0:
+                raise ValueError(f"controls: actuator {a.name or a.key!r} writes positions "
+                                 f"{list(a.index)} of driver {a.key!r}, which is a single "
+                                 f"value (no positions)")
             if a.index is not None and base is not None and max(a.index) >= base.shape[-1]:
                 raise ValueError(f"controls: actuator {a.name or a.key!r} writes positions "
                                  f"{list(a.index)} of driver {a.key!r}, which has "
@@ -704,3 +767,74 @@ class ControlNetwork:
                                 for b, s in zip(self.blocks, self._slots, strict=True)),
                               memory[..., :0]])
         return {**writes, self.outputs_key: outputs, self.memory_key: memory}
+
+
+# ------------------------------------------------------------------------ sensors by name
+def _interior_position(model, layer_name: str, node) -> int:
+    """`node`'s row in transport layer `layer_name`'s state."""
+    if layer_name not in model.transport:
+        raise KeyError(f"controls: the model has no {layer_name!r} layer (its transport "
+                       f"layers are {list(model.transport)})")
+    layer = model.transport[layer_name]
+    hit = (layer.interior_idx == model.net.node_index(node)).nonzero()
+    if hit.numel() != 1:
+        raise KeyError(f"controls: {node!r} is not an interior node of layer "
+                       f"{layer_name!r} (a boundary value is a driver)")
+    return int(hit[0, 0])
+
+
+def node_mass_fraction(model, node, species: int | str = 0) -> FunctionReading:
+    """A zone's mass fraction (kg/kg) of `species` (position or name) in the species
+    layer's state, read through the layer's own layout (`(..., n_interior)` for one
+    species, `(..., n_interior, K)` for more)."""
+    i = _interior_position(model, "species", node)
+    layer = model.transport["species"]
+    k = species
+    if isinstance(species, str):
+        if layer.species_names is None or species not in layer.species_names:
+            raise KeyError(f"controls: the species layer has no species {species!r} (its "
+                           f"species are {layer.species_names})")
+        k = layer.species_names.index(species)
+    k = int(k)
+    if not 0 <= k < layer.n_species:
+        raise IndexError(f"controls: the species layer has {layer.n_species} species, not "
+                         f"position {k}")
+    column = k * layer.n_i + i
+
+    def read(state: State, drivers: Drivers) -> Tensor:
+        stacked, _ = layer._to_stacked(state["species.x"], layer.n_i, "species.x")
+        return stacked[..., column]
+
+    return FunctionReading(read)
+
+
+def node_temperature(model, node) -> StateReading | DriverReading:
+    """A node's temperature (K): the thermal layer's state when the model has one, else the
+    prescribed temperature `"T"` (a driver, read one step late in a sampled network)."""
+    if "thermal" in model.transport:
+        return StateReading("thermal.x", (_interior_position(model, "thermal", node),))
+    return DriverReading("T", (model.net.node_index(node),))
+
+
+def node_pressure(model, node) -> StateReading:
+    """A node's gauge pressure (Pa): the air layer's potential."""
+    return StateReading("air.phi", (model.net.node_index(node),))
+
+
+def _column(model, kind: str, position: int) -> int:
+    sl = model.potential["air"].kind_slice(kind)
+    if not 0 <= position < sl.stop - sl.start:
+        raise IndexError(f"controls: kind {kind!r} has {sl.stop - sl.start} edges, not "
+                         f"position {position}")
+    return sl.start + int(position)
+
+
+def edge_flow(model, kind: str, position: int = 0) -> StateReading:
+    """The mass flow (kg/s) of edge `position` of `kind`, along the edge."""
+    return StateReading("air.q", (_column(model, kind, position),))
+
+
+def edge_pressure_difference(model, kind: str, position: int = 0) -> StateReading:
+    """The driving pressure difference (Pa) of an edge, from-node minus to-node with the
+    edge's drives (`PotentialFlowLayer.dp`), which `simulate` records as `"air.dp"`."""
+    return StateReading(PRESSURE_DIFFERENCE, (_column(model, kind, position),))

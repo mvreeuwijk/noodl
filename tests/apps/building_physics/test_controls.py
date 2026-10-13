@@ -4,7 +4,9 @@ The expected values are ContamX 3.4.1.7's (probes `d3`, `d4`, `d8` of the contro
 float32 in ContamX, so they are compared to 5e-8 where ContamX's own rounding shows.
 """
 
+import csv
 import math
+from pathlib import Path
 
 import pytest
 import torch
@@ -30,6 +32,7 @@ from noodl.apps.building_physics.controls import (
     Hysteresis,
     Identity,
     IncrementalPI,
+    LimitedPID,
     LowerBandSwitch,
     Maximum,
     Minimum,
@@ -42,6 +45,11 @@ from noodl.apps.building_physics.controls import (
     StateReading,
     Sum,
     UpperBandSwitch,
+    edge_flow,
+    edge_pressure_difference,
+    node_mass_fraction,
+    node_pressure,
+    node_temperature,
 )
 from noodl.model import StepContext
 
@@ -476,3 +484,224 @@ def test_memory_blocks_need_a_sampled_network():
                   LowerBandSwitch(0, 0, band=0.1)):
         with pytest.raises(ValueError, match="needs a sampled network"):
             ControlNetwork([Constant(0.0), block], sampled=False)
+
+
+def _sequence_rows(net, inputs):
+    state, rows = net.initial_state(), []
+    for v in inputs:
+        out, state = advance(net, state, values(*v))
+        rows.append(out[net.outputs_key].tolist())
+    return rows
+
+
+def test_the_band_switches_hysteresis_and_controllers_keep_a_batch_member_by_member():
+    """Two members whose inputs cross the thresholds at different steps: each member's
+    outputs are those of its own unbatched run, and the memory is (2, m)."""
+    def network():
+        return ControlNetwork([
+            DriverValue("controls.input", 0), DriverValue("controls.input", 1),
+            LowerBandSwitch(0, 1, band=0.4), UpperBandSwitch(0, 1, band=0.4),
+            Hysteresis(0, slack=0.3, slope=1.42857, initial=0.1),
+            ProportionalControl(0, gain=0.5),
+            IncrementalPI(0, kp=0.5, ki=1e-3, initial_output=0.1, initial_error=0.05)])
+
+    first = [-0.5, 0.0, 0.5, 1.0, 1.5, 1.0, 0.5, 0.0, -0.5]
+    second = [1.5, 1.0, 0.5, 0.0, -0.5, 0.0, 0.5, 1.0, 1.5]
+    alone = [_sequence_rows(network(), [(v, 0.5) for v in series])
+             for series in (first, second)]
+    net = network()
+    state = net.initial_state()
+    for k, (a, b) in enumerate(zip(first, second, strict=True)):
+        out, state = advance(net, state, {"controls.input": torch.tensor(
+            [[a, 0.5], [b, 0.5]], dtype=F64)})
+        assert out[net.memory_key].shape == (2, net.memory_size) == (2, 5)
+        assert out[net.outputs_key].tolist() == [alone[0][k], alone[1][k]]
+    for column in (2, 3, 4, 6):   # each block's outputs differ between the members
+        assert [r[column] for r in alone[0]] != [r[column] for r in alone[1]]
+
+
+@pytest.mark.parametrize("slack", [-0.1, 1.0, 1.5])
+def test_hysteresis_refuses_a_slack_outside_zero_to_one(slack):
+    with pytest.raises(ValueError, match=r"Hysteresis 'h': slack must be in \[0, 1\)"):
+        Hysteresis(0, slack=slack, name="h")
+
+
+def test_writing_positions_of_a_single_valued_driver_is_refused_by_name():
+    net = ControlNetwork([Constant(0.5)],
+                         [Actuator(0, "flow_multiplier.fan", (0,), name="damper")])
+    with pytest.raises(ValueError, match=r"damper.*positions \[0\].*'flow_multiplier.fan'"
+                                         r".*a single value"):
+        net(net.initial_state(), {"flow_multiplier.fan": torch.tensor(1.0, dtype=F64)}, STEP)
+
+
+PROBE = Path(__file__).resolve().parents[2] / "data" / "modelica" / "controls" / "LimPIDProbe.csv"
+
+
+def _probe():
+    lines = [ln for ln in PROBE.read_text().splitlines() if not ln.startswith("#")]
+    rows = list(csv.DictReader(lines))
+    return {k: [float(r[k]) for r in rows] for k in rows[0]}
+
+
+def test_limited_pid_matches_openmodelica_on_a_heated_room():
+    """MSL 4.1.0's LimPID (PI with anti-windup, limits +-1) heating a first-order room,
+    integrated here to 1e-12 from the network's own outputs and rates: T and the integral
+    state follow OpenModelica's run to 1e-8 through saturation and its end at 78 s."""
+    integrate = pytest.importorskip("scipy.integrate")
+    ref = _probe()
+    net = ControlNetwork([DriverValue("controls.input", 0), Sensor(StateReading("T", 0)),
+                          LimitedPID(0, 1, gain=5.0, y_max=1.0, y_min=-1.0,
+                                     integral_time=60.0, windup_ratio=0.9,
+                                     initial_integral=0.1)], sampled=False)
+    drivers = {"controls.input": torch.tensor([293.15], dtype=F64)}
+
+    def rhs(t, z):
+        state = {"T": torch.tensor([z[0]], dtype=F64),
+                 net.memory_key: torch.tensor([z[1]], dtype=F64)}
+        y = float(net.evaluate(state, drivers)[2])
+        return [(3000.0 * y - 100.0 * (z[0] - 273.15)) / 75000.0,
+                float(net.rates(state, drivers)[0])]
+
+    sol = integrate.solve_ivp(rhs, (0.0, 1200.0), [292.0, 0.1], t_eval=ref["time"],
+                              rtol=1e-12, atol=1e-12, method="LSODA")
+    assert max(abs(a - b) for a, b in zip(sol.y[0], ref["T"], strict=True)) < 1e-8
+    assert max(abs(a - b) for a, b in zip(sol.y[1], ref["con.I.y"], strict=True)) < 1e-8
+
+
+def test_a_p_only_limited_pid_is_algebraic_and_reports_its_limits():
+    """MBL's examples: P, k = 5, limits +-1 -> y = clamp(5 (T_set - T), -1, 1); the
+    switching values cross zero at the limits."""
+    net = ControlNetwork([Constant(293.15), Sensor(StateReading("T", 0)),
+                          LimitedPID(0, 1, gain=5.0, y_max=1.0, y_min=-1.0)], sampled=False)
+    assert net.memory_size == 0
+    for T, y in ((293.0, 0.75), (292.0, 1.0), (294.0, -1.0)):
+        state = {"T": torch.tensor([T], dtype=F64)}
+        assert float(net.evaluate(state, {})[2]) == pytest.approx(y)
+    s = net.switching({"T": torch.tensor([292.95], dtype=F64)}, {})
+    assert s.tolist() == pytest.approx([0.0, 1.0], abs=1e-9)   # (v - 1)/2, (v + 1)/2 at v = 1
+
+
+def test_a_batched_limited_pid_keeps_each_members_integral():
+    """Two set points: one member saturates high, the other low; the integral of each
+    advances by its own anti-windup rate (one Euler step of 1 s)."""
+    net = ControlNetwork([DriverValue("controls.input", 0), Sensor(StateReading("T", 0)),
+                          LimitedPID(0, 1, gain=5.0, y_max=1.0, integral_time=60.0,
+                                     initial_integral=0.1)], sampled=False)
+    drivers = {"controls.input": torch.tensor([[293.15], [292.0]], dtype=F64)}
+    state = {**net.initial_state(), "T": torch.tensor([292.9], dtype=F64)}
+    out = net(state, drivers, StepContext(dt=1.0, t=0.0))
+    # v = 5 (0.25 + 0.1) = 1.75 -> y = 1; v = 5 (-0.9 + 0.1) = -4 -> y = -1; k Ni = 4.5
+    rate = [(0.25 + (1.0 - 1.75) / 4.5) / 60.0, (-0.9 + (-1.0 + 4.0) / 4.5) / 60.0]
+    assert out[net.memory_key].shape == (2, 1)
+    assert out[net.memory_key][:, 0].tolist() == pytest.approx([0.1 + r for r in rate])
+    xi = torch.tensor([0.1 + r for r in rate], dtype=F64)
+    v = 5.0 * (torch.tensor([0.25, -0.9], dtype=F64) + xi)
+    assert out[net.outputs_key][:, 2].tolist() == pytest.approx(v.clamp(-1, 1).tolist())
+
+
+def test_limited_pid_refuses_bad_parameters_and_a_sampled_network():
+    with pytest.raises(ValueError, match="y_max"):
+        LimitedPID(0, 1, gain=1.0, y_max=-1.0, y_min=1.0)
+    with pytest.raises(ValueError, match="gain"):
+        LimitedPID(0, 1, gain=0.0, y_max=1.0)
+    with pytest.raises(ValueError, match="integral_time"):
+        LimitedPID(0, 1, gain=1.0, y_max=1.0, integral_time=0.0)
+    with pytest.raises(ValueError, match="windup_ratio"):
+        LimitedPID(0, 1, gain=1.0, y_max=1.0, integral_time=1.0, windup_ratio=0.0)
+    with pytest.raises(ValueError, match="sampled=False"):
+        ControlNetwork([Constant(0.0), Constant(0.0), LimitedPID(0, 1, gain=1.0, y_max=1.0)])
+
+
+def _two_rooms(**kwargs):
+    """The application page's Python model, smaller: rooms A and B in series between
+    two orifices to the ambient, with one species unless `species=` says otherwise."""
+    from noodl.apps.building_physics import (
+        Zone,
+        add_zone,
+        build_model,
+        orifice_elements_from_edges,
+    )
+    from noodl.drives import Stack
+    from noodl.topology import Network
+
+    net = Network(dtype=F64)
+    net.add_node("ambient", z_ref=0.0)
+    add_zone(net, Zone("A", volume=60.0, T0=293.15))
+    add_zone(net, Zone("B", volume=60.0, T0=293.15))
+    net.add_edge("ambient", "A", kind="airpath", z_path=0.5, Cd=0.6, area=0.05)
+    net.add_edge("A", "B", kind="airpath", z_path=1.0, Cd=0.6, area=0.05)
+    net.add_edge("B", "ambient", kind="airpath", z_path=1.5, Cd=0.6, area=0.05)
+    el = orifice_elements_from_edges(net, "airpath")
+    kwargs.setdefault("species", ("CO2",))
+    return build_model(net, air_elements=[el], drives=[Stack.from_network(net, "airpath")],
+                       return_inputs=True, **kwargs)
+
+
+def _interior(model, layer, node):
+    return model.transport[layer].interior_idx.tolist().index(model.net.node_index(node))
+
+
+def test_sensors_by_name_read_the_state_the_model_keeps():
+    """One species is stored reduced, (n_interior,): the reading follows the layer's own
+    layout."""
+    model, state, drivers = _two_rooms()
+    i = _interior(model, "species", "B")
+    x = torch.zeros(2, dtype=F64)
+    x[i] = 6e-4
+    co2 = node_mass_fraction(model, "B", "CO2")
+    assert float(co2({**state, "species.x": x}, drivers)) == 6e-4
+    temperature = node_temperature(model, "A")
+    assert isinstance(temperature, StateReading) and temperature.key == "thermal.x"
+    assert temperature.index == (_interior(model, "thermal", "A"),)
+    assert node_pressure(model, "A").index == (model.net.node_index("A"),)
+    column = model.potential["air"].kind_slice("airpath").start + 1
+    assert edge_flow(model, "airpath", 1).index == (column,)
+    dp = edge_pressure_difference(model, "airpath", 1)
+    assert (dp.key, dp.index) == ("air.dp", (column,))
+    with pytest.raises(KeyError, match="no species 'H2O'"):
+        node_mass_fraction(model, "B", "H2O")
+    with pytest.raises(KeyError, match="'ambient' is not an interior node"):
+        node_mass_fraction(model, "ambient")
+    with pytest.raises(IndexError, match="3 edges, not position 3"):
+        edge_flow(model, "airpath", 3)
+
+
+def test_a_mass_fraction_sensor_reads_two_species_batched_or_not():
+    """Two species are stored (n_interior, K); a batch goes in front."""
+    model, state, drivers = _two_rooms(species=("CO2", "H2O"))
+    x = torch.zeros(2, 2, dtype=F64)
+    x[_interior(model, "species", "B")] = torch.tensor([6e-4, 9e-3], dtype=F64)
+    water = node_mass_fraction(model, "B", "H2O")
+    assert float(water({**state, "species.x": x}, drivers)) == 9e-3
+    assert float(node_mass_fraction(model, "B", 0)({**state, "species.x": x}, drivers)) == 6e-4
+    batched = torch.stack([x, 2.0 * x])
+    assert water({**state, "species.x": batched}, drivers).tolist() == [9e-3, 1.8e-2]
+    with pytest.raises(IndexError, match="2 species, not position 2"):
+        node_mass_fraction(model, "B", 2)
+
+
+def test_a_temperature_sensor_without_a_thermal_layer_reads_the_prescribed_temperature():
+    model, _, _ = _two_rooms(thermal=False)
+    reading = node_temperature(model, "B")
+    assert isinstance(reading, DriverReading)
+    assert (reading.key, reading.index) == ("T", (model.net.node_index("B"),))
+
+
+def test_build_model_puts_the_network_first_and_seeds_its_state():
+    """A network adding a heat flow to room A from a value written each step."""
+    network = ControlNetwork([DriverValue("controls.input", 0)],
+                             [Actuator(0, "thermal.sources", (1,), mode="add")])
+    model, state, drivers = _two_rooms(controls=network)
+    assert model.closures[0] is network
+    assert state["controls.outputs"].tolist() == [0.0]
+    assert drivers["controls.input"].tolist() == [0.0]
+    a = model.net.node_index("A")
+    assert a == 1   # node order: ambient, A, B
+    sources = torch.zeros(len(model.net.nodes), dtype=F64)
+    new = model.step(state, {**drivers, "thermal.sources": sources,
+                             "controls.input": torch.tensor([500.0], dtype=F64)},
+                     60.0, t=0.0)
+    assert new["controls.outputs"].tolist() == [500.0]
+    unheated = model.step(state, {**drivers, "thermal.sources": sources}, 60.0, t=0.0)
+    i = _interior(model, "thermal", "A")
+    assert float(new["thermal.x"][i]) > float(unheated["thermal.x"][i])

@@ -12,6 +12,7 @@ from __future__ import annotations
 import numbers
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -23,6 +24,9 @@ from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Drivers, Model, State
 from noodl.refs import drivers_from, state_from
 from noodl.topology import Network
+
+if TYPE_CHECKING:
+    from noodl.apps.building_physics.controls import ControlNetwork
 
 R_AIR = 287.055
 RHO_0 = 1.2041
@@ -284,7 +288,8 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
                 coupling: str = "pingpong", iterate_tol=None, iterate_max: int = 20,
                 thermal_scheme: str | None = None, species_scheme: str = "implicit",
                 flow_kinds=None, closures: Sequence = (), flow_balanced: Sequence = (),
-                storage_free: Sequence = (), return_inputs: bool = False):
+                storage_free: Sequence = (), controls: ControlNetwork | None = None,
+                return_inputs: bool = False):
     """Layers "air" (+ "thermal", + "species"), the density closure, one Model.
 
     Returns the `Model`; with `return_inputs=True`, `(model, state, drivers)` -- its
@@ -321,6 +326,10 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
     `thermal_scheme` defaults to `thermal_layer`'s own default ("exact", or "implicit" when
     the layer has storage-free nodes).
 
+    `controls`: a `ControlNetwork`, put first among the closures (its actuators write the
+    drivers the other closures read); `return_inputs=True` then also seeds its outputs,
+    memory and `"controls.input"`.
+
     `closures` are appended after the density closure (an air handler's
     `AirHandlerFlows`). `flow_balanced` names nodes whose pressure the airflow solve does
     not need, because only prescribed, balanced flows touch them (an air handler's
@@ -350,7 +359,7 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
                                         "an air-handler plenum? pass flow_balanced= to "
                                         "build_model"))
     layers: dict = {"air": air}
-    model_closures: list = []
+    model_closures: list = [] if controls is None else [controls]
     if thermal:
         th = thermal_layer(net, ambient=ambient, flow_kinds=kinds, scheme=thermal_scheme,
                            storage_free=storage_free)
@@ -382,7 +391,11 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
     model = Model(net, layers, closures=model_closures, coupling=coupling, iterate_tol=iterate_tol,
                   iterate_max=iterate_max)
     if return_inputs:
-        return model, initial_state(model), initial_drivers(model)
+        state, drivers = initial_state(model), initial_drivers(model)
+        if controls is not None:
+            state.update(controls.initial_state())
+            drivers.update(controls.initial_drivers())
+        return model, state, drivers
     return model
 
 
