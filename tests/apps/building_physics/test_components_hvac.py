@@ -96,7 +96,7 @@ def test_factory_arguments_that_make_no_sense_are_refused():
         fan("f", flow=0.1, exterior="sideways")
     with pytest.raises(ComponentError, match="wind"):
         duct("d", length=1.0, diameter=0.2, azimuth=90.0)
-    with pytest.raises(ValueError, match="at least one supply"):
+    with pytest.raises(ComponentError, match="at least one supply"):
         air_handler("a", supplies=[], returns=[0.1])
 
 
@@ -184,3 +184,16 @@ def test_a_pressure_dependent_edge_on_a_plenum_is_refused_by_name():
                                        fan_elements_from_edges(net), element],
                     drives=[Stack.from_network(net, "airpath")], thermal=False, species=1,
                     closures=[closure], flow_balanced=plenums, storage_free=plenums)
+
+
+def test_duct_relabels_value_errors_only(monkeypatch):
+    """A bad argument is a ComponentError naming the duct; a programming KeyError passes through."""
+    with pytest.raises(ComponentError, match=r"^d1: .*diameter"):
+        duct("d1", length=1.0, diameter=-0.2)
+
+    def broken(self, *args, **kwargs):
+        raise KeyError("internal")
+
+    monkeypatch.setattr("noodl.apps.building_physics.components.DuctNetwork.junction", broken)
+    with pytest.raises(KeyError, match="internal"):
+        duct("d2", length=1.0, diameter=0.2)

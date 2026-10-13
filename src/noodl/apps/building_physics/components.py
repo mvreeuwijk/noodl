@@ -173,7 +173,7 @@ def duct(name: str, *, length: float, diameter: float, roughness: float = DEFAUL
                      z_a, z_b, T0, exterior, given)
     except ComponentError:
         raise
-    except (ValueError, KeyError) as err:
+    except ValueError as err:
         raise ComponentError(f"{name}: {err}") from err
 
 

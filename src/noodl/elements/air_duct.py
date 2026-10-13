@@ -170,6 +170,9 @@ class AirDuct(_UpstreamAir):
     or 64 / 2300): twice the lesser of `dp / a` and `sqrt(dp / k)` brackets the root strictly,
     and the solve runs on F in units of that bracket, so its tolerance is relative. At
     dp = 0 the flow is exactly 0 and the slope is `1 / a`.
+
+    The roughness bound (below 3.7 diameters) is checked at construction only: with
+    `learnable=True` a later update can leave it unchecked, so keep a learned roughness inside it.
     """
 
     def __init__(self, length, diameter, roughness, loss=0.0, *, area=None, src, tgt,

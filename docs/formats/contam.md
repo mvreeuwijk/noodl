@@ -72,9 +72,11 @@ ContamX holds at constant pressure), unless an air-handling system names it as a
 in a project with species, without the
 variable-contaminants flag (ContamX then holds the zone's concentrations at their initial values
 and ignores its sources); CFD and 1-D convection/diffusion zones; continuous-values-file
-zones and paths; duct leakage (a duct element's leakage rate); a schedule on a
-Darcy-Colebrook segment (ContamX ignores it); control nodes, kinetic reactions or value files on
-junctions, and control nodes or value files on segments; wind data on a terminal that is not
+zones and paths; duct elements of any type not listed above; duct leakage (a duct element's
+leakage rate); a schedule on a Darcy-Colebrook segment (ContamX ignores it); control nodes,
+kinetic reactions or value files on junctions, and control nodes or value files on segments; a
+segment, junction or terminal that references a junction, duct element, level or zone the file
+never defines; wind data on a terminal that is not
 an ambient terminal whose flags carry the value 1; a junction type other than 0 (junction),
 1 or 3 (terminal); a non-temperature schedule on a junction that is not a terminal; a junction
 that no segment or terminal reaches; initial-concentration rows for a zone or junction the
@@ -90,7 +92,8 @@ path or a `mult` on a supply or return point (ContamX ignores them), a flow elem
 pressure on an air-handling path, a kinetic reaction in a zero-volume plenum, any other path
 or duct terminal joined to a plenum (only the air handler's own flows may touch it), an
 air-handling system with `densZP = 1`, and a steady contaminant run with an air handler off
-(nothing passing through a plenum); airflow modes other than steady and transient
+(nothing passing through a plenum); a zone or junction with species rows that no airflow path,
+duct segment or terminal reaches (it would have no species state); airflow modes other than steady and transient
 (duct balancing, the building airflow and pressurization tests); a constant wind pressure on
 an interior path; `sup_afe` super elements (ContamX 3.4.1.7 cannot simulate them); `stackD = 1` (densities varying with
 height inside a zone); a wind pressure profile with the trigonometric curve fit; a day schedule whose shape is
