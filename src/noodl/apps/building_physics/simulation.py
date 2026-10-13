@@ -51,6 +51,7 @@ from noodl.apps.building_physics.prj import (
 )
 from noodl.apps.building_physics.schedules import Calendar
 from noodl.model import Drivers, Model, State
+from noodl.solvers import ConvergenceError
 
 Tensor = torch.Tensor
 F64 = torch.float64
@@ -139,8 +140,9 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     converge from there (a fan whose iterates swing between the ends of its curve, where its
     slope is zero, after a large speed change), the step is retried once from the airflow
     layers' linear initial guess, as the first solve of the run is; a retry that fails too
-    raises, naming the step. `diagnostics`, when given, receives `"airflow_retries"`: the end
-    time (s) of every step that was retried.
+    raises `ConvergenceError`, naming the step. Only non-convergence (`ConvergenceError`) is
+    retried; any other error passes through unchanged. `diagnostics`, when given, receives
+    `"airflow_retries"`: the end time (s) of every step that was retried, once per step.
 
     Returns `"time"` `(N,)`, and per row the state's `"<layer>.q"`, `"<layer>.phi"` of every
     potential layer and `"<layer>.x"` of every transport layer, stacked on a leading axis.
@@ -220,18 +222,20 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
                     step_from[step_key] = s[step_key]
                 try:
                     return model.step(step_from, d, dt, t=t0, **step_kwargs)
-                except RuntimeError as warm:
+                except ConvergenceError as warm:
                     # Without the previous pressures each airflow solve starts from its
-                    # layer's linear initial guess.
+                    # layer's linear initial guess. Only non-convergence is retried; every
+                    # other failure passes through as it was raised.
                     cold = {k: v for k, v in step_from.items() if k not in warm_keys}
                     try:
                         out = model.step(cold, d, dt, t=t0, **step_kwargs)
-                    except RuntimeError as again:
-                        raise RuntimeError(
+                    except ConvergenceError as again:
+                        raise ConvergenceError(
                             f"simulate: step of {dt} s ending at t = {t1} s: the airflow "
                             f"solve failed from the previous step's pressures ({warm}) and "
                             f"again from the linear initial guess ({again})") from again
-                    retries.append(t1)
+                    if not retries or retries[-1] != t1:      # once per step, all passes
+                        retries.append(t1)
                     return out
 
             state = _fixed_point(run, state, step_key, zone_pressure_rtol, zone_pressure_max_iter,

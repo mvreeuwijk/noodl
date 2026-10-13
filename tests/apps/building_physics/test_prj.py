@@ -1241,7 +1241,7 @@ def test_duct_records_contamx_cannot_run_or_ignores_are_refused(tmp_path):
         read_prj(_variant(text, geo, geo.replace("0.2 0 0 250", "0.2 0 0.5 250", 1),
                           tmp_path))
     j1 = "  1  1 3  -1"
-    with pytest.raises(ValueError, match=r"terminal 1.*wind.*bit 1"):
+    with pytest.raises(ValueError, match=r"terminal 1.*wind.*flag value 1"):
         read_prj(_variant(text, j1, "  1  0 3  -1", tmp_path))
     j2 = "  2  0 0  1   0   0   0"
     with pytest.raises(ValueError, match=r"junction 2.*temperature"):
@@ -1301,3 +1301,77 @@ def test_simulate_project_reports_the_terminal_flows(tmp_path):
     # The exhaust terminal carries the constant-volume fan's flow, to the solve's tolerance.
     assert out["terminal_flow"][0, 4].item() == pytest.approx(
         0.04 * 101325 / (R_AIR * 293.15), rel=1e-8)
+
+
+_BALANCE = "4 23 dct_plr balance\n\n 0.000237882 0.0141421 0.5 0.01 0.112838 1 0 0\n"
+_CURVE_ROWS = " 5 0 0\n 0 0\n 2 0.005\n 5 0.009\n 10 0.014\n 20 0.02\n"
+_CURVE_X, _CURVE_Y = [0.0, 2.0, 5.0, 10.0, 20.0], [0.0, 0.005, 0.009, 0.014, 0.02]
+
+
+@pytest.mark.parametrize("dtype, data", [
+    ("dct_fcn", " 0.000237882 0.0141421 0.5\n"),
+    ("dct_qcn", " 0.000237882 0.0141421 0.5\n"),
+    ("dct_cmf", " 0.05 0\n"),
+    ("dct_bdq", " 0.000237882 0.0141421 0.5 0.01 0.6\n"),
+    ("dct_fsp", _CURVE_ROWS),
+    ("dct_qsp", _CURVE_ROWS),
+    ("dct_psf", _CURVE_ROWS),
+    ("dct_psq", _CURVE_ROWS),
+])
+def test_every_duct_element_type_builds_its_element(dtype, data, tmp_path):
+    """The fixture's balancing element (segment 5) rewritten into each other duct type: the
+    power laws in the upstream density with exponent m (0 mass, 1 volume: rho_0 turb), the
+    volume damper's coefficients scaled by rho_0, the mass-flow fan scheduled through
+    `Scaled`, and the four curves on the element's points."""
+    variants = [(_BALANCE, f"4 23 {dtype} balance\n\n{data}")]
+    if dtype == "dct_cmf":
+        variants.append(("  5  0   4   6   4   0   0   0   4 5",
+                         "  5  0   4   6   4   0   1   0   4 5"))
+    p = read_prj(_variants(DUCTS.read_text(), variants, tmp_path))
+    el = {e.kind: e for e in p.elements}["duct_4"]
+    rho0 = 1.2041
+    if dtype in ("dct_fcn", "dct_qcn"):
+        assert isinstance(el, UpstreamDensityPowerLaw)
+        C, m = (0.0141421, 0.0) if dtype == "dct_fcn" else (rho0 * 0.0141421, 1.0)
+        assert el.C.tolist() == pytest.approx([C], rel=1e-15)
+        assert el.n.tolist() == [0.5] and el.m.item() == m
+    elif dtype == "dct_cmf":
+        assert isinstance(el, Scaled) and isinstance(el.inner, FixedFlow)
+        assert el.inner.q0.tolist() == [0.05]
+        assert el.key == "flow_multiplier.duct_4" and p.multiplier_edges["duct_4"] == 1
+        assert ("flow_multiplier.duct_4", (0,)) in [(i.key, i.index) for i in p.inputs]
+    elif dtype == "dct_bdq":
+        assert isinstance(el, Damper)
+        assert el.pos.C.item() == pytest.approx(rho0 * 0.0141421, rel=1e-15)
+        assert el.neg.C.item() == pytest.approx(rho0 * 0.01, rel=1e-15)
+        assert (el.pos.n.item(), el.neg.n.item()) == (0.5, 0.6)
+        assert el.pos.m.item() == el.neg.m.item() == 1.0
+    else:
+        assert isinstance(el, CubicSplineFlow)
+        form = {"fsp": ("pressure", False), "qsp": ("pressure", True),
+                "psf": ("flow", False), "psq": ("flow", True)}[dtype[-3:]]
+        assert (el.independent, el.volume) == form
+        assert el.curve.x.tolist() == _CURVE_X and el.curve.y.tolist() == _CURVE_Y
+
+
+def test_initial_concentrations_of_an_undefined_zone_or_junction_are_refused(tmp_path):
+    text = DUCTS.read_text()
+    with pytest.raises(KeyError, match=r"'initial junction concentrations'.*junction.*\[12\]"):
+        read_prj(_variant(text, "   9  0.000e+00\n-999", "   12  0.000e+00\n-999", tmp_path))
+    zone_rows = text[text.index("! initial zone concentrations:"):]
+    first = zone_rows.splitlines()[2]                      # after the `! Z#` comment line
+    assert first.split()[0] == "1", first
+    with pytest.raises(KeyError, match=r"'initial zone concentrations'.*zone.*\[7\]"):
+        read_prj(_variant(text, first, first.replace("1", "7", 1), tmp_path))
+
+
+def test_a_junction_no_segment_or_terminal_reaches_is_refused_by_name(tmp_path):
+    lone = ("  10  0 0  1   0   0   0   0   1   0.000   0.000   2.000 293.15 0 162 -1 0 0 2 0"
+            " 0\n")
+    p = read_prj(_variants(DUCTS.read_text(), [
+        ("9 ! duct junctions:", "10 ! duct junctions:"),
+        ("-999\n9 ! initial junction concentrations:",
+         lone + "-999\n9 ! initial junction concentrations:"),
+    ], tmp_path))
+    with pytest.raises(ValueError, match=r"\['junction 10'\] carry no airflow path"):
+        project_to_model(p)

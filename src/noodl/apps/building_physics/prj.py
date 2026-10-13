@@ -100,6 +100,7 @@ from noodl.elements import (
     UpstreamDensityPowerLaw,
 )
 from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.transport import active_interior
 from noodl.model import Model
 from noodl.nodesources import NodeSource
 from noodl.topology import Network
@@ -1522,8 +1523,9 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
 
     # A path schedule multiplies the path's flow: its kind is wrapped in `Scaled`, which reads
     # one multiplier per edge of the kind from "flow_multiplier.<kind>", and the schedule
-    # becomes an input on the path's own edges. Wrapping comes after the layout and drives
-    # above, which read only `el.kind` and `el.dp_independent`, both of which `Scaled` keeps.
+    # becomes an input on the path's own edges. Wrapping comes after the drives above, which
+    # read only `el.kind` and `el.dp_independent` (both of which `Scaled` keeps), and before
+    # the duct build, the kinds and the layout below, which see the wrapped elements.
     # On a fan curve the schedule is the speed ratio instead ("fan_speed.<kind>", read by
     # the `AffinityFan` itself), so that kind is not wrapped.
     multiplier_edges: dict[str, int] = {}
@@ -1585,6 +1587,14 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     duct_segments = [PrjSegment(nr, [layout[col]])
                      for nr, col in (duct.segment_columns if duct else [])]
 
+    for section, rows, known in (
+            ("initial zone concentrations", x0_rows, {z[0] for z in zones}),
+            ("initial junction concentrations", junction_x0_rows, {j.nr for j in junctions})):
+        unknown = sorted(set(rows) - known)
+        if unknown:
+            what = "zone" if section.endswith("zone concentrations") else "junction"
+            raise KeyError(f"prj: the {section!r} section has rows for {what}(s) {unknown}, "
+                           f"which the file never defines")
     K = max(1, len(species))
     x0 = torch.zeros(len(zone_names), K, dtype=F64)
     for i, (nr, *_rest) in enumerate(zones):
@@ -1754,6 +1764,23 @@ class ZoneAirMassChange(NodeSource):
         return slope.expand(torch.broadcast_shapes(slope.shape, phi_nodes.shape))
 
 
+def _initial_mass_fractions(project: Project) -> Tensor:
+    """The species state's initial rows in the species layer's node order (the network's:
+    the zones, then the junctions). Every zone and junction must be an active node of that
+    layer; one that no flow edge reaches is refused by name rather than dropped."""
+    net = project.net
+    interior, _ = active_interior(net, tuple(project.kinds), [project.ambient])
+    rows = {net.node_index(z): project.x0[i] for i, z in enumerate(project.zones)}
+    for i, j in enumerate(project.junctions):
+        rows[net.node_index(j)] = project.junction_x0[i]
+    active = set(interior.tolist())
+    inactive = [net.nodes[n] for n in sorted(rows) if n not in active]
+    if inactive:
+        raise ValueError(f"prj: {inactive} carry no airflow path, duct segment or terminal, "
+                         f"so they have no species state (unsupported)")
+    return torch.stack([rows[n] for n in interior.tolist()])
+
+
 def project_to_model(project: Project, *, ambient: dict | None = None, species: bool = True,
                      scheme: str = "implicit"):
     """Air layer + species layer (no thermal layer: a .prj carries no thermal data), the
@@ -1808,6 +1835,7 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         if project.edge_filters:
             transmission = filter_transmission(net, project.kinds, project.species_records,
                                                project.edge_filters)
+        x_initial = _initial_mass_fractions(project)
         # A duct junction without volume (its segments all of zero length, a fan's say) holds
         # no air: a storage-free node, whose mass fraction is the mix of what flows in.
         storage_free = [j for j in project.junctions
@@ -1859,8 +1887,7 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
                 project.ambient_mass_fractions.reshape(1, -1).clone())
         else:
             drivers["species.x_boundary"] = torch.zeros(1, K, dtype=F64)
-        state["species.x"] = (project.x0.clone() if not project.junctions
-                              else torch.cat([project.x0, project.junction_x0]))
+        state["species.x"] = x_initial
     # The inputs the airflow elements and drives read themselves, declared for
     # `model.refs.inputs` and `Model.check`.
     model.input_specs = {

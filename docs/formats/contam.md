@@ -42,7 +42,7 @@ the element area of every segment that meets them; a junction without volume, wh
 all have zero length, holds no air and carries the mix of what flows through it); terminals with their loss and balance
 coefficients (the duct-balancing data `bal`, `Fdes` and `Cbmax` is read and, as in ContamX,
 has no effect), filters, schedules (the opening, or the junction temperature when the week
-schedule's unit type is a temperature) and wind (an ambient terminal flagged for wind, from
+schedule's unit type is a temperature) and wind (an ambient terminal whose flags carry the value 1, from
 its profile or a constant wind pressure); segments with their dynamic losses, filters and
 schedules (a flow multiplier, or a fan's speed ratio).
 
@@ -66,8 +66,10 @@ and ignores its sources); CFD and 1-D convection/diffusion zones; continuous-val
 zones and paths; duct leakage (a duct element's leakage rate); a schedule on a
 Darcy-Colebrook segment (ContamX ignores it); control nodes, kinetic reactions or value files on
 junctions, and control nodes or value files on segments; wind data on a terminal that is not
-an ambient terminal flagged for wind; a non-temperature schedule on a junction that is not a
-terminal; a duct network with `densZP = 1` or `dodMdt = 1` (the junctions' air mass under
+an ambient terminal whose flags carry the value 1; a junction type other than 0 (junction),
+1 or 3 (terminal); a non-temperature schedule on a junction that is not a terminal; a junction
+that no segment or terminal reaches; initial-concentration rows for a zone or junction the
+file does not define; a duct network with `densZP = 1` or `dodMdt = 1` (the junctions' air mass under
 either is unmeasured); airflow modes other than steady and transient
 (duct balancing, the building airflow and pressurization tests); a constant wind pressure on
 an interior path; `sup_afe` super elements (ContamX 3.4.1.7 cannot simulate them); `stackD = 1` (densities varying with

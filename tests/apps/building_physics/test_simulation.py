@@ -731,15 +731,35 @@ def test_a_step_whose_airflow_fails_from_the_previous_pressures_is_retried_cold(
 
 
 def test_a_step_whose_retry_fails_too_raises_naming_the_step(monkeypatch):
+    from noodl.solvers import ConvergenceError
+
     model, state, drivers = project_to_model(read_prj(THREE))
     calls = []
 
     def failing(self, *args, **kwargs):
         calls.append(args[0].keys() & {"air.phi"})
-        raise RuntimeError("did not converge")
+        raise ConvergenceError("did not converge")
 
     monkeypatch.setattr(Model, "step", failing)
-    with pytest.raises(RuntimeError, match=r"ending at t = 300.0 s.*previous step's pressures"
-                                            r".*linear initial guess"):
+    with pytest.raises(ConvergenceError, match=r"ending at t = 300.0 s.*previous step's "
+                                               r"pressures.*linear initial guess"):
         simulate(model, state, drivers, [0.0, 300.0])
     assert calls == [{"air.phi"}, set()]       # warm, then without the previous pressures
+
+
+def test_an_error_other_than_non_convergence_passes_through_without_a_retry(monkeypatch):
+    model, state, drivers = project_to_model(read_prj(THREE))
+    calls = []
+
+    class SolveFailure(RuntimeError):
+        pass
+
+    def failing(self, *args, **kwargs):
+        calls.append(1)
+        raise SolveFailure("singular transport matrix")
+
+    monkeypatch.setattr(Model, "step", failing)
+    with pytest.raises(SolveFailure) as info:
+        simulate(model, state, drivers, [0.0, 300.0])
+    assert type(info.value) is SolveFailure and str(info.value) == "singular transport matrix"
+    assert calls == [1]

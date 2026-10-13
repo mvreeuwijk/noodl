@@ -49,8 +49,8 @@ TEMPERATURE_UNITS = 5          # ContamW's unit type of a temperature schedule
 #                 uH uXY uT udP vf` (vf != 0 reads a value file: refused) and, for a terminal
 #                 (jtype 1, or 3 "with wind"), `T: pf pw wPset wPmod wazm bal Ad Af Fdes Ct
 #                 Cb Cbmax u_A u_F ddir fdir`. z# -1 is the ambient. Wind acts on an ambient
-#                 terminal only when flags has bit 1 (measured); bal, Af, Fdes and Cbmax are
-#                 duct-balancing data and are not used. The junction's schedule is its
+#                 terminal only when its flags carry the value 1 (measured); bal, Af, Fdes
+#                 and Cbmax are duct-balancing data and are not used. The junction's schedule is its
 #                 temperature when the week schedule's unit type is 5, else (a terminal) the
 #                 terminal's opening S.
 #   initial junction concentrations   rows `J# x1 .. xK`; the count is values.
@@ -64,7 +64,7 @@ _DUCT_TYPES = {"dct_dwc", "dct_plr", "dct_fcn", "dct_qcn", "dct_cmf", "dct_cvf",
                "dct_bdq", "dct_bdf"} | _DUCT_SPLINES
 _JUNCTION_FIELDS = 21
 _SEGMENT_FIELDS = 17
-_WIND_FLAG = 1                 # the junction-flags bit that lets the wind act on a terminal
+_WIND_FLAG = 1                 # the junction-flags value that lets the wind act on a terminal
 
 
 @dataclass
@@ -359,7 +359,7 @@ def _build_terminals(ctx: BuildContext, junctions: list[JunctionRecord],
             raise ValueError(
                 f"prj: terminal {j.nr} carries wind data (profile {t.profile_nr}, wPset "
                 f"{t.wPset}) but ContamX applies wind only to an ambient terminal whose "
-                f"flags have bit 1 set; unsupported")
+                f"flags carry the flag value 1; unsupported")
         attrs = dict(area=t.area, loss=t.loss, z_path=j.z)
         if t.profile_nr:
             attrs.update(Ch=t.Ch, azimuth=t.azimuth, profile=float(t.profile_nr))
