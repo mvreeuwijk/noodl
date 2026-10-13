@@ -751,8 +751,10 @@ def test_nist_s_ahs_and_duct_sample_matches_contamx(contamx, tmp_path, record_pr
     The airflow residual tolerance is 1e-12 kg/s, not 1e-14: each duct terminal carries
     3.3e-4 kg/s across a 5.8e-6 Pa drop (conductance 28 kg/(s Pa)) between junction and zone
     pressures of 2-30 Pa, so the last-place units of the two pressures (2 x 3.6e-15 Pa)
-    moves a node's balance by up to 64 x 7.1e-15 = 4.6e-13 kg/s (zone Two has two terminals):
-    the float64 floor. 1e-12 kg/s is 3e-9 of the smallest flow, far inside the budgets."""
+    move a node's balance by its conductance times that: 57 kg/(s Pa) at zone Three (the
+    terminals of junctions 4 and 8), 64 at zone Two (the terminal of junction 6 and the
+    nearly idle envelope path 12), so up to 64 x 7.1e-15 = 4.6e-13 kg/s: the float64
+    floor. 1e-12 kg/s is 3e-9 of the smallest flow, far inside the budgets."""
     text = NIST_AHS.read_text()
     for old, new in (
         ("   1  3   0   3   0   1   0.000   600 293.15 0 One",

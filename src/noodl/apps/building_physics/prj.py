@@ -83,6 +83,7 @@ from noodl.apps.building_physics.air_handling import (
     RECIRCULATION,
     RETURN,
     SUPPLY,
+    AirHandlerFlows,
     air_handler_from_edges,
 )
 from noodl.apps.building_physics.filters import (
@@ -2070,6 +2071,22 @@ def _pressure_coupling(model: Model, where: str) -> tuple[str | None, str]:
     return key, " and ".join(couplings)
 
 
+def _refuse_idle_air_handlers(model: Model, state, drivers) -> None:
+    """A steady contaminant solve has no value for an air-handler plenum that nothing passes
+    through (a transient run holds it at its last value): refuse it, naming the handler."""
+    for closure in model.closures:
+        if not isinstance(closure, AirHandlerFlows):
+            continue
+        flows = closure(state, drivers)[closure.flow_key]
+        for role, what in ((SUPPLY, "supply"), (RETURN, "return")):
+            total = (flows * (closure.roles == role).to(flows.dtype)).sum(-1)
+            if bool((total.detach() == 0).any()):
+                raise ValueError(
+                    f"prj.steady: air handler {closure.name!r}: nothing passes through its "
+                    f"{what} plenum at the steady instant, so a steady contaminant solve "
+                    f"has no value for that plenum (unsupported)")
+
+
 def steady(model: Model, state, drivers, *, rtol: float = 1e-12, max_iter: int = 10,
            **solve_kwargs):
     """`model.steady`, repeated to a fixed point when the model carries a
@@ -2090,6 +2107,8 @@ def steady(model: Model, state, drivers, *, rtol: float = 1e-12, max_iter: int =
     """
     if max_iter < 1:
         raise ValueError(f"prj.steady: max_iter must be at least 1, got {max_iter!r}")
+    if "species" in model.transport:
+        _refuse_idle_air_handlers(model, state, drivers)
     zp = [c for c in model.closures if isinstance(c, ZonePressureDensity)]
     key, cause = _pressure_coupling(model, "prj.steady")
     out = model.steady(state, drivers, **solve_kwargs)

@@ -456,8 +456,9 @@ _IMPLICIT_FLAGS = 16 | 32 | 64
 def assign_air_handler_roles(handlers: list[AirHandlerRecord],
                              paths: list) -> dict[int, tuple[int, int]]:
     """Path number -> (AHS number, role) for every AHS path, checked against the flags,
-    endpoints and order ContamX relies on (it ignores the AHS record's numbers and takes
-    the implicit paths by their flags and position)."""
+    endpoints and order ContamX relies on: it ignores the AHS record's numbers and gives
+    the k-th AHS record (in file order) the k-th path flagged 16, 32 and 64 each, so the
+    paths each record names must be those."""
     roles: dict[int, tuple[int, int]] = {}
     by_nr = {p.nr: p for p in paths}
     implicit = [p.nr for p in paths if p.flags & _IMPLICIT_FLAGS]
@@ -466,8 +467,15 @@ def assign_air_handler_roles(handlers: list[AirHandlerRecord],
             f"prj: the implicit AHS paths {implicit} must come after every other path, as "
             f"ContamW writes them; ContamX takes them by position and mis-assigns them "
             f"otherwise (unsupported)")
+    by_flag = {flag: [p.nr for p in paths if p.flags & flag] for flag, _, _ in _IMPLICIT}
+    for flag, _, label in _IMPLICIT:
+        if len(by_flag[flag]) != len(handlers):
+            raise ValueError(
+                f"prj: paths {by_flag[flag]} are flagged {flag} ({label}) but the 'simple "
+                f"AHS' section has {len(handlers)} records; ContamX gives each AHS one such "
+                f"path, by position")
     by_ahs = {h.nr: h for h in handlers}
-    for h in handlers:
+    for k, h in enumerate(handlers):
         for (flag, role, label), nr, ends in zip(
                 _IMPLICIT, (h.recirculation, h.outdoor_air, h.exhaust),
                 ((h.return_zone, h.supply_zone), (-1, h.supply_zone), (h.return_zone, -1)),
@@ -477,13 +485,14 @@ def assign_air_handler_roles(handlers: list[AirHandlerRecord],
                 raise ValueError(
                     f"prj: AHS {h.nr} names path {nr} as its {label} path, but that path is "
                     f"not flagged {flag} from zone {ends[0]} to zone {ends[1]}")
-            if nr in roles:
-                raise ValueError(f"prj: path {nr} is named by AHS {roles[nr][0]} and AHS "
-                                 f"{h.nr}; each AHS needs its own implicit paths")
+            if by_flag[flag][k] != nr:
+                raise ValueError(
+                    f"prj: AHS {h.nr} (AHS record {k + 1}) names path {nr} as its {label} "
+                    f"path, but ContamX gives it the path in position {k + 1} among those "
+                    f"flagged {flag}, path {by_flag[flag][k]}; the implicit paths must come "
+                    f"in the order of the AHS records (unsupported otherwise)")
             roles[nr] = (h.nr, role)
     for p in paths:
-        if p.flags & _IMPLICIT_FLAGS and p.nr not in roles:
-            raise ValueError(f"prj: path {p.nr} is an implicit AHS path that no AHS names")
         if not p.ahs_nr:
             if p.flags & SUPPLY_OR_RETURN_FLAG:
                 raise ValueError(f"prj: path {p.nr} is an AHS supply or return point "

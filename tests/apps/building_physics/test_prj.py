@@ -1524,9 +1524,10 @@ def test_the_plenums_carry_no_zone_air_mass_change(tmp_path):
     assert sorted(p.net.nodes[i] for i in source.nodes.tolist()) == ["one", "three", "two"]
 
 
-def test_a_steady_contaminant_run_with_the_ahs_off_is_refused(tmp_path):
+def test_a_steady_contaminant_solve_with_the_ahs_off_is_refused(tmp_path):
     """A plenum with nothing passing through it holds its value; a steady solve has no
-    value to give it (ContamX's behaviour there was not measured)."""
+    value to give it (ContamX's behaviour there was not measured). `prj.steady` refuses it,
+    and `simulate_project` with it."""
     from noodl.apps.building_physics.simulation import simulate_project
 
     sup1 = "   5    8   5   1   0   0   0   1   2   0   1   0.000   0.000   0.000 1 0 0 0 0.1"
@@ -1536,5 +1537,80 @@ def test_a_steady_contaminant_run_with_the_ahs_off_is_refused(tmp_path):
         ("    2             30  1.00e-04", "    1             30  1.00e-04"),
         (sup1, sup1[:-3] + "0"), (sup2, sup2[:-4] + "0"),
     ], tmp_path)
-    with pytest.raises(ValueError, match=r"AHS 1.*no flow.*steady contaminant"):
-        simulate_project(read_prj(variant))
+    message = (r"air handler 'ahs_1': nothing passes through its supply plenum at the steady "
+               r"instant")
+    p = read_prj(variant)
+    with pytest.raises(ValueError, match=message):
+        prj_steady(*project_to_model(p))
+    with pytest.raises(ValueError, match=message):
+        simulate_project(p)
+    airflow_only, state, drivers = project_to_model(p, species=False)
+    prj_steady(airflow_only, state, drivers)       # no species: the idle handler is fine
+
+
+_NIST_READABLE = (
+    ("   1  3   0   3   0   1   0.000   600 293.15 0 One",
+     "   1  3   0   0   0   1   0.000   600 293.15 0 One"),
+    ("  4  0   5   6   2   0   0   5   2 5", "  4  0   5   6   2   0   0   0   2 5"),
+    (" 0.2 0.628319 0.0314159 0.2 0.2 0 0.5 1\n", " 0.2 0.628319 0.0314159 0.2 0.2 0 0 1\n"),
+)
+
+
+def _nist(tmp_path, extra=()) -> Path:
+    """NIST's two-AHS sample without its control references and duct leakage, plus
+    `extra` replacements."""
+    return _variants(NIST_AHS.read_text(), [*_NIST_READABLE, *extra], tmp_path)
+
+
+def test_nist_s_two_ahs_are_read_in_record_order(tmp_path):
+    p = read_prj(_nist(tmp_path))
+    assert [c.kind for c in p.closures] == ["ahs_1", "ahs_2"]
+    assert p.flow_balanced == ["ahsOne(Ret)", "ahsOne(Sup)", "ahsTwo(Ret)", "ahsTwo(Sup)"]
+
+
+def test_implicit_paths_out_of_the_records_order_are_refused(tmp_path):
+    """ContamX gives the k-th AHS record the k-th path of each implicit flag."""
+    lines = _nist(tmp_path).read_text().splitlines(keepends=True)
+    first = next(k for k, ln in enumerate(lines) if ln.startswith("  13   16"))
+    lines[first:first + 6] = lines[first + 3:first + 6] + lines[first:first + 3]
+    swapped = tmp_path / "swapped.prj"
+    swapped.write_text("".join(lines))
+    with pytest.raises(ValueError, match=r"AHS 1 \(AHS record 1\) names path 13 as its "
+                                         r"recirculation path.*path 16"):
+        read_prj(swapped)
+
+
+def test_an_implicit_path_named_by_two_ahs_is_refused(tmp_path):
+    """Its own plenum zones, no longer named, get the variable-pressure bit to pass."""
+    variant = _nist(tmp_path, [("  2   6   7  16  17  18 -1 ahsTwo",
+                                "  2   4   5  13  14  15 -1 ahsTwo"),
+                               ("   6 10   0", "   6 11   0"), ("   7 10   0", "   7 11   0")])
+    with pytest.raises(ValueError, match=r"AHS 2 \(AHS record 2\) names path 13.*path 16"):
+        read_prj(variant)
+
+
+def test_a_duct_terminal_into_an_ahs_plenum_is_refused(tmp_path):
+    variant = _nist(tmp_path, [("   4  0 1   3   0", "   4  0 1   4   0")])
+    with pytest.raises(ValueError, match=r"'ahsOne\(Ret\)'.*'junction 4' -> "
+                                         r"'ahsOne\(Ret\)' of kind 'duct_terminal'"):
+        project_to_model(read_prj(variant))
+
+
+_RECIRCULATION = "   8   16   4   5   0   1   0   0   1   0   1"
+_SUPPLY_TWO = "   6    8   5   2   0   0   0   1   0   0   1"
+
+
+@pytest.mark.parametrize("old, new, error, message", [
+    (_RECIRCULATION, "   8   16   4   5   0   1   0   1   1   0   1", ValueError,
+     r"path 8 is an implicit AHS path and also names AHS 1"),
+    (_SUPPLY_TWO, "   6    8   5   2   0   0   0   0   0   0   1", ValueError,
+     r"path 6 is an AHS supply or return point without an AHS"),
+    (_SUPPLY_TWO, "   6    8   5   2   0   0   0   2   0   0   1", KeyError,
+     r"path 6 references AHS 2, which the 'simple AHS' section does not define"),
+    (_RETURN_PLENUM, _RETURN_PLENUM.replace("   4 10", "   4  8", 1), ValueError,
+     r"zone 4 \('ahs\(Ret\)'\) has flags 8, without the variable-contaminants bit"),
+])
+def test_ahs_path_and_plenum_records_are_checked_by_name(tmp_path, old, new, error,
+                                                          message):
+    with pytest.raises(error, match=message):
+        read_prj(_variant(AHS.read_text(), old, new, tmp_path))

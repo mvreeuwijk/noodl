@@ -80,8 +80,12 @@ an ambient terminal whose flags carry the value 1; a junction type other than 0 
 that no segment or terminal reaches; initial-concentration rows for a zone or junction the
 file does not define; a duct network with `densZP = 1` or `dodMdt = 1` (the junctions' air mass under
 either is unmeasured); an air-handling system record that disagrees with its paths' flags and
-endpoints, implicit air-handling paths that are not the last paths (ContamX takes them by
-position and mis-assigns them otherwise), a schedule or a flow on an outdoor-air or exhaust
+endpoints, implicit air-handling paths that are not the last paths or not in the order of the
+air-handling records (ContamX gives the k-th record the k-th recirculation, outdoor-air and
+exhaust path, and mis-assigns them otherwise; this also refuses an implicit path named by two
+records), a path that is both an implicit air-handling path and a supply or return point, a
+supply or return point without an air-handling system or naming one the file does not
+define, a schedule or a flow on an outdoor-air or exhaust
 path or a `mult` on a supply or return point (ContamX ignores them), a flow element or a wind
 pressure on an air-handling path, a kinetic reaction in a zero-volume plenum, any other path
 or duct terminal joined to a plenum (only the air handler's own flows may touch it), an
