@@ -128,7 +128,7 @@ class Element(torch.nn.Module):
     #: "potential": flow is a function of the potential difference, `q = flow(dp)`.
     #: "implicit": the law is a relation `residual(dp, q) = 0` and the flow is an unknown
     #: of the layer (`ImplicitLaw`); this covers flow-controlled laws and ideal sources.
-    form: str = "potential"
+    law_form: str = "potential"
     #: Edges of this law's kind form consecutive groups of `ports` edges (kind order); the
     #: law may couple the edges within a group (a transformer's two windings), never across.
     ports: int = 1
@@ -272,7 +272,7 @@ class ImplicitLaw(Element):
     with the shape of `dp`.
     """
 
-    form = "implicit"
+    law_form = "implicit"
     contextual = True
 
     def residual(self, dp: Tensor, q: Tensor, drivers: Mapping[str, Tensor] | None,
@@ -281,6 +281,12 @@ class ImplicitLaw(Element):
 
     def forward(self, dp: Tensor, q: Tensor, drivers: Mapping[str, Tensor] | None = None,
                 ctx: LawContext | None = None) -> Tensor:
+        """Return `residual(dp, q, drivers, ctx)`.
+
+        An implicit law is called as `law(dp, q, drivers, ctx)`, with the flow `q` as the
+        second argument, unlike a potential-controlled law, which is called as
+        `law(dp, drivers, ctx)` and computes its flow from `dp`.
+        """
         return self.residual(dp, q, drivers, ctx)
 
     def _no_flow(self) -> TypeError:
