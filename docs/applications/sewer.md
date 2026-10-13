@@ -656,8 +656,82 @@ A regulator also enters the junctions as SWMM's does:
   `NORMAL` or `FIXED` rule with the regulator's crest height as its offset;
 - a regulator starts dry and counts, with depth 0, in its nodes' initial average depth.
 
-Roadway weirs, weir coefficient curves, pumps and dividers are refused by name, and so are
-control rules (a regulator is always fully open).
+Roadway weirs, weir coefficient curves and dividers are refused by name.
+
+#### Pumps
+
+A pump (`[PUMPS]`; `Pump`) is a fourth `StructureLink` kind, `"pump"`, whose column follows the
+outlets' in `"water.q"` (`model.link_names`). Its flow is SWMM's `pump_getInflow`
+(`link.c:1548-1634`, `noodl.apps.sewer.pumps`): the curve at the previous pass's inlet state,
+times the pump's setting, never negative. The curve kinds are PUMP1 (a step in the inlet node's
+volume: the flow of the first curve point whose volume exceeds it), PUMP2 (the same in the inlet
+depth), PUMP3 (continuous in the head DELIVERED, outlet minus inlet head, clamped at 0), PUMP4
+(continuous in the inlet depth) and PUMP5 (PUMP3 with the head divided by the squared speed
+setting), and an *ideal* pump (`*` for the curve) takes its inlet node's inflow. `dqdh` (the
+slope that shapes a pass) is the negated curve slope for PUMP3 and PUMP5, none for the others;
+the fixed point does not depend on it.
+
+SWMM then limits the flow to the water at the inlet (`dynwave.c::getModPumpFlow`,
+`pumps.mod_pump_flow`): at a storage unit and for a PUMP1 the outflow is capped at the node's
+inflow plus its volume over the step; for PUMP2-4 at a junction, where the step would leave a
+depth that is not positive the pump takes the inflow. These read the inlet node's inflow,
+outflow and surface area **so far in the trial**, and SWMM visits the conduits first, then the
+other links in input order, so a regulator or pump listed after the pump does not count yet.
+`pumps.PumpStation` reproduces that (the links' file order is the line number of the entry).
+An ideal pump also takes the node's overflow in SWMM; a run in which an ideal pump's inlet
+floods is refused by name (RuntimeError), not simulated differently. A PUMP1 curve gives a plain
+junction inlet its largest volume as its full volume, linear in the depth (`link.c:1521-1527`).
+
+Status ON or OFF, the startup and shutoff depths (the pump switches OFF below the shutoff
+depth and ON above the startup depth of its inlet, `link_setTargetSetting`) and the speed
+`setting` are the pump's discrete state (below). Pumps need at least one conduit in the
+network, like any dynamic-wave network, and an outfall at a pump's end gets normal and critical
+depth 0 as at any regulator.
+
+A stepped curve (PUMP1, PUMP2) crossed by a rising or falling inlet can have no fixed point
+inside a step: the pump flow depends on the depth, the depth on the pump flow, and the two
+branches never agree. SWMM then oscillates until its trials run out (it reports the step as not
+converging) and noodl's iteration does not converge either. That is the equations, not the
+solver, and the verification fixtures avoid it.
+
+#### Link settings and control rules
+
+With pumps or `[CONTROLS]` the closure carries each regulator's and pump's setting as the
+state keys `"sewer.setting"` (SWMM's `Link.setting`: a pump's speed, an orifice's, weir's or
+outlet's fraction open; `hyd.setting_names` names the columns), `"sewer.target_setting"`,
+`"sewer.time_last_set"` (the DateTime it was last opened or closed, for TIMEOPEN and
+TIMECLOSED) and `"sewer.orifice_hold"`. They are discrete state between steps: the pump depth
+limits, the rules and the orifice opening rate change them at the start of each step and
+nothing differentiates through them. `simulate_dynamic_wave(..., record=("water.q",
+"sewer.setting"))` reports each link's flow and setting.
+
+`linkcontrol.LinkControl` is SWMM's `evaluateControlRules` (`routing.c:271-310`) on the state
+at the START of a step: pump targets from the depth limits, then the rules
+(`controls.ControlEngine`, `controls_evaluate`) every routing step or, with `RULE_STEP`, at
+each multiple of it (the routing steps are shortened to end there), then every link whose
+target differs from its setting is changed - pumps, weirs and outlets at once, an orifice at
+the rate `CloseTime` gives (hours per full opening) - and a link opened or closed has its
+time-last-set updated. Rules follow `controls.c`: premises are judged strictly left to right
+(an AND after a false result stops the chain; an OR is tried only while false), the actions of
+the branch taken are visited last-written first and, per link, the first stays unless a later
+one comes from a strictly higher PRIORITY; a CURVE setting is the CONTROL curve at the value
+of the last premise compared, a TIMESERIES one the series at the clock (one millisecond late,
+as SWMM's clock is), a PID one SWMM's recursive PID on the last comparison's two sides.
+Comparisons use the values in the file's units (as SWMM), the clock premises SWMM's DateTime.
+`NODE INFLOW` reads the lateral inflow of the PREVIOUS step, as SWMM evaluates the rules
+before adding the new inflows.
+
+A setting changes the devices as in SWMM: an orifice's opening height is `setting` times the
+full height (`orifice_setSetting`, its `cOrif`, `cWeir` and critical height follow), a weir's
+crest rises by `(1 - setting)` of its opening, a V-notch becomes a trapezoid below 1 and the
+equivalent orifice coefficient is recomputed (`weir_setSetting`), an outlet's flow is scaled,
+and a setting of 0 closes the device (`link_getInflow`). A closed orifice keeps contributing
+the surface area it last had to its end nodes, as in SWMM, where it is no longer evaluated.
+
+Not modelled, refused by name when the file is read: `VARIABLE` and `EXPRESSION` in `[CONTROLS]`,
+rain-gauge premises, the premise attributes MAXDEPTH, FULLFLOW, FULLDEPTH, LENGTH, SLOPE and
+VELOCITY and the DEPTH of a link, and actions on conduits (a closed conduit). Control rules
+need an unbatched state.
 
 #### Conduit options
 
@@ -1334,8 +1408,9 @@ publish numbers from this application.
   manhole, no loops. Dynamic-wave routing allows loops and flat or adverse conduits.
 - **Dynamic wave, not supported.** Each is refused by name, with the line number when it comes
   from a file (see [SWMM `.inp`](../formats/swmm.md)), unless it says otherwise:
-    - pumps (`[PUMPS]`), flow dividers (`[DIVIDERS]`), control rules (`[CONTROLS]`: a regulator
-      is always fully open), roadway weirs and weir coefficient curves;
+    - flow dividers (`[DIVIDERS]`), roadway weirs and weir coefficient curves; of the control
+      rules, `VARIABLE` and `EXPRESSION`, rain-gauge premises, some premise attributes and
+      conduit actions (see "Link settings and control rules"); an ideal pump whose inlet floods;
     - ponding (`ALLOW_PONDING YES`): flooded water is lost, as in SWMM without ponding. A junction
       with no ground (`MaxDepth` 0) and no `SurDepth` floods as soon as it fills to its crown;
     - runoff, groundwater and LID (`[SUBCATCHMENTS]`, `[RAINGAGES]`, `[LID_USAGE]`), RDII,

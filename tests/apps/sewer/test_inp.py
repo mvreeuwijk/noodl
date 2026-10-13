@@ -569,7 +569,7 @@ def test_closed_storage_shapes_are_read(tmp_path, shape, params, expected):
     (("FUNCTIONAL 20 1.5 5", "FUNCTIONAL 20 1.5 -5"), r"c \(area at zero depth"),
     (("FUNCTIONAL 20 1.5 5", "BOWL 1 2 3"), "shape"),
     (("TABULAR  Bowl", "TABULAR  Cup"), "curve 'Cup'"),
-    (("Bowl    STORAGE", "Bowl    PUMP1"), "type PUMP1"),
+    (("Bowl    STORAGE", "Bowl    PUMP1"), "not a STORAGE curve"),
     (("Bowl             1.0 60", "Bowl             0.4 60"), "strictly increasing"),
     (("J3      10.0 2.0      0", "J3      10.0 -2.0     0"), "negative maximum depth"),
     (("J3      10.0 2.0      0", "J3      10.0 2.0      -1"), "negative initial depth"),
@@ -592,9 +592,9 @@ def test_storage_and_curves_are_dynamic_wave_only(tmp_path):
 
 
 def test_a_curve_section_without_storage_units_is_refused_unless_storage(tmp_path):
-    """[CURVES] is read for STORAGE curves only: a PUMP1 curve has nothing to drive."""
-    path = _dyn(tmp_path, [("[OUTFALLS]\n", "[CURVES]\nP1 PUMP1 0 0 1 1\n\n[OUTFALLS]\n")])
-    with pytest.raises(ValueError, match="P1.*type PUMP1"):
+    """[CURVES] is read for the types an object uses: a DIVERSION curve has nothing to drive."""
+    path = _dyn(tmp_path, [("[OUTFALLS]\n", "[CURVES]\nP1 DIVERSION 0 0 1 1\n\n[OUTFALLS]\n")])
+    with pytest.raises(ValueError, match="P1.*type DIVERSION"):
         read_swmm_inp(path)
 
 
@@ -628,8 +628,14 @@ def _structures(tmp_path, edits=()):
 def test_orifices_weirs_and_outlets_are_read():
     """[ORIFICES], [WEIRS] and [OUTLETS] (link.c:1641-1692, 2010-2099, 2524-2604) with
     their [XSECTIONS] openings and the [CURVES] RATING curve of a tabular outlet."""
+    import dataclasses
+
     from noodl.apps.sewer.network import Orifice, Outlet, Weir
     net, _, _ = read_swmm_inp(DATA / STRUCTURES)
+    for kind in ("orifices", "weirs", "outlets"):     # `order` is the line of the entry
+        assert all(d.order > 0 for d in getattr(net, kind))
+        net = dataclasses.replace(net, **{kind: tuple(dataclasses.replace(d, order=0)
+                                                      for d in getattr(net, kind))})
     assert net.orifices == (Orifice("OR1", "J2", "J3", "side", "rectangular", 0.2, 0.1, 0.65,
                                     width=0.3),)
     assert net.weirs == (

@@ -192,8 +192,11 @@ class Orifice:
     (`height` its diameter, m) or ``"rectangular"`` (`height` and `width`, m), its crest
     `crest_height` (m above `u`'s invert, SWMM's CrestHt), discharge coefficient
     `discharge_coefficient` (-, SWMM's Cd) and a `flap_gate` (closes on flow from `v` to
-    `u`, with SWMM's ARMCO head loss on forward flow). Always fully open (no control
-    rules). Flow follows `link.c::orifice_getInflow` (`noodl.apps.sewer.structures`)."""
+    `u`, with SWMM's ARMCO head loss on forward flow). It starts fully open; control rules
+    (`ControlSet`) move it, `close_time` (hours, SWMM's CloseTime) being the time they take
+    to move it through its full opening (0: at once). `order` is the line of the input file
+    (SWMM's link index order). Flow follows `link.c::orifice_getInflow`
+    (`noodl.apps.sewer.structures`)."""
 
     name: str
     u: str
@@ -221,7 +224,8 @@ class Weir:
     `end_discharge_coefficient` a trapezoid's end triangles' Cd (SWMM's Cd2),
     `end_contractions` the number of end contractions (SWMM's EndCon), `can_surcharge` SWMM's
     CanSurcharge (above the opening the weir flows as an orifice; else its head is capped at
-    the opening height) and `flap_gate` as for `Orifice`. Always fully open. Flow follows
+    the opening height) and `flap_gate` as for `Orifice`. It starts fully open (control
+    rules set its crest). Flow follows
     `link.c::weir_getInflow` (`noodl.apps.sewer.structures`)."""
 
     name: str

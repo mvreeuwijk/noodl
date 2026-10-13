@@ -2121,7 +2121,7 @@ def test_structure_element_is_swmms_flow_linearised_about_the_fed_heads():
     assert el.flow(torch.tensor([0.5, 0.5, -1.0], dtype=F64), drv)[1].item() == (
         pytest.approx(0.13))
     with pytest.raises(ValueError, match="kind must be one of"):
-        StructureLink("pump")
+        StructureLink("gate")
 
 
 @pytest.mark.parametrize("kind", ["orifice", "weir", "outlet"])

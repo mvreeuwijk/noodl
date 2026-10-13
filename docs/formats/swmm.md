@@ -7,8 +7,8 @@ column layouts and units are read by `apps/sewer/inp.py`.
 **Read:** `[TITLE]`, `[OPTIONS]`, `[JUNCTIONS]`, `[OUTFALLS]`, `[CONDUITS]`, `[XSECTIONS]`,
 `[LOSSES]` (the flap gate, and under `DYNWAVE` the entry, exit and average loss coefficients),
 `[INFLOWS]`, `[POLLUTANTS]`, and under `DYNWAVE` `[STORAGE]`, `[ORIFICES]`, `[WEIRS]`,
-`[OUTLETS]` and `[TRANSECTS]` with the `[CURVES]` of type `STORAGE`, `RATING`, `TIDAL` and
-`SHAPE`, and the lateral inflows `[TIMESERIES]` (inline and `FILE`), `[PATTERNS]`,
+`[OUTLETS]`, `[PUMPS]`, `[CONTROLS]` and `[TRANSECTS]` with the `[CURVES]` of type `STORAGE`,
+`RATING`, `TIDAL`, `SHAPE`, `PUMP1`-`PUMP5` and `CONTROL`, and the lateral inflows `[TIMESERIES]` (inline and `FILE`), `[PATTERNS]`,
 `[DWF]` and `[INFLOWS]` (see Lateral inflows below).
 
 **Ignored** because no conduit or node ever references them: `[EVAPORATION]`, `[REPORT]`,
@@ -114,8 +114,8 @@ which is not modelled.
 `Outlet` of `SewerNetwork.orifices`, `.weirs` or `.outlets`, between two nodes:
 
 - `[ORIFICES] Name N1 N2 SIDE|BOTTOM CrestHt Cd [Gated] [CloseTime]` with an `[XSECTIONS]`
-  opening `CIRCULAR` (diameter) or `RECT_CLOSED` (height, width). `CloseTime` only shapes
-  control actions, which are not read, so it is accepted and has no effect.
+  opening `CIRCULAR` (diameter) or `RECT_CLOSED` (height, width). `CloseTime` (hours) is the
+  time a control rule takes to move the orifice through its full opening (0: at once).
 - `[WEIRS] Name N1 N2 Type CrestHt Cd [Gated] [EndCon] [Cd2] [CanSurcharge]` (a `*` keeps
   SWMM's default: no gate, no end contractions, `Cd2` 0, `CanSurcharge` YES), `Type`
   `TRANSVERSE` or `SIDEFLOW` (opening `RECT_OPEN`: height, length), `V-NOTCH` (`TRIANGULAR`:
@@ -132,9 +132,30 @@ Refused with the line number: a `ROADWAY` weir, a weir coefficient curve (the th
 field), an opening of the wrong shape (SWMM's ERR_REGULATOR_SHAPE), a regulator without an
 `[XSECTIONS]` entry, an outlet with one, a negative orifice or weir crest height (SWMM
 raises it to 0 at the inlet end only), a negative coefficient, unknown nodes and keywords,
-`[CURVES]` of a type other than `STORAGE`, `RATING` and `TIDAL`, the regulator sections under
+`[CURVES]` of a type other than `STORAGE`, `RATING`, `TIDAL`, `SHAPE`, `PUMP1`-`PUMP5` and
+`CONTROL`, the regulator sections under
 `STEADY` or `KINWAVE` (SWMM routes them by the inflow alone there), and regulators with
 `LINK_OFFSETS ELEVATION` (SWMM then sets each end's offset from its own node).
+
+**Pumps (dynamic wave).** `[PUMPS] Name N1 N2 [Curve|*] [ON|OFF] [Startup] [Shutoff]` becomes a
+`Pump` of `SewerNetwork.pumps`: `*` or no curve is an ideal pump, otherwise the curve is a
+`[CURVES]` entry of type `PUMP1`-`PUMP5` (SWMM's ERR_NO_CURVE otherwise), converted to SI (a
+PUMP1 curve's x values are a volume, converted with SWMM's volume factor, m3 per ft3 0.02832),
+the startup and shutoff depths in the file's length unit (default 0: none; SWMM's
+ERR_PUMP_LIMITS when the startup depth is positive and not above the shutoff depth). Refused
+with the line number: pumps under `STEADY` or `KINWAVE`, an unknown node or curve, a status
+other than ON or OFF, a negative depth.
+
+**Control rules (dynamic wave).** `[CONTROLS]` becomes `SewerNetwork.controls`, a
+`ControlSet` (`RULE`, `IF`, `AND`, `OR`, `THEN`, `ELSE`, `PRIORITY`; premises on `NODE
+DEPTH|HEAD|VOLUME|INFLOW`, `LINK|CONDUIT|PUMP|ORIFICE|WEIR|OUTLET FLOW|STATUS|SETTING|TIMEOPEN|
+TIMECLOSED` and `SIMULATION TIME|DATE|CLOCKTIME|DAYOFYEAR|DAY|MONTH`, against a number or another
+variable; actions on a pump's `STATUS` and `SETTING` and an orifice's, weir's and outlet's
+`SETTING`, as a number, `CURVE` (a `[CURVES]` entry of type `CONTROL`), `TIMESERIES` or `PID`)
+with the `RULE_STEP` option. The values stay in the file's units, which is how SWMM compares
+them. Refused with the line number: controls under `STEADY` or `KINWAVE`, `VARIABLE` and
+`EXPRESSION`, rain-gauge premises, the attributes MAXDEPTH, FULLFLOW, FULLDEPTH, LENGTH, SLOPE
+and VELOCITY and a link's DEPTH, conduit actions, and everything SWMM itself rejects.
 
 **Outfalls.** `FREE`, `NORMAL`, `FIXED` (with its stage, m), `TIDAL` (with the name of its
 `[CURVES]` TIDAL curve, read as hours and stage elevations) and `TIMESERIES` (with the name of
@@ -235,9 +256,9 @@ ignored. `USE HOTSTART`, `USE INFLOWS`, `USE RDII` and `USE RUNOFF` change the p
 refused by name; `USE RAINFALL` only feeds rain gauges, which are refused anyway.
 
 **Refused by name**, because skipping them would silently change the physics:
-`[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` under `STEADY` or `KINWAVE`, `[PUMPS]`,
-`[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[STREETS]`, `[CURVES]` of any
-type but `STORAGE`, `RATING`, `TIDAL` and `SHAPE`, `[LID_USAGE]`, and any other section carrying
+`[STORAGE]`, `[ORIFICES]`, `[WEIRS]`, `[OUTLETS]`, `[PUMPS]` and `[CONTROLS]` under `STEADY` or
+`KINWAVE`, `[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[STREETS]`, `[CURVES]` of any
+type but `STORAGE`, `RATING`, `TIDAL`, `SHAPE`, `PUMP1`-`PUMP5` and `CONTROL`, `[LID_USAGE]`, and any other section carrying
 content.
 
 **Geometry.** `read_swmm_inp` builds its network with `geometry="tabulated"`: SWMM 5.2's own
@@ -266,8 +287,9 @@ dry-weather inflow, which are refused or absent.
 
 - runoff (`[SUBCATCHMENTS]` and everything that feeds them) and dry-weather patterns;
 - the `DUMMY` and `STREET` cross sections, conduit seepage and evaporation losses;
-- pumps, dividers, roadway weirs, weir coefficient curves and control rules (regulator
-  settings); orifices, weirs, outlets and storage units under `STEADY` or `KINWAVE`, and
+- dividers, roadway weirs, weir coefficient curves, named variables and expressions in control
+  rules; pumps, control rules, orifices, weirs, outlets and storage units under `STEADY` or
+  `KINWAVE`, and
   storage evaporation or exfiltration;
 - ponding (`ALLOW_PONDING YES`). Both `SURCHARGE_METHOD`s model
   surcharge, and a junction floods (without ponding) above `MaxDepth` (extended to its

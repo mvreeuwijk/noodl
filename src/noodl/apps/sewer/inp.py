@@ -13,7 +13,10 @@ DYNWAVE `[STORAGE]` (FUNCTIONAL, TABULAR and the closed shapes CYLINDRICAL, CONI
 PARABOLIC (also spelled PARABOLOID), PYRAMIDAL, with SurDepth; a non-zero evaporation factor and
 exfiltration are refused) with the `[CURVES]` of type STORAGE that its TABULAR units name, and
 `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` (their `[XSECTIONS]` openings and RATING curves;
-`_regulators`). The `[CURVES]` of type SHAPE give the `CUSTOM` sections their width curves.
+`_regulators`), `[PUMPS]` (curves of type PUMP1-PUMP5, `inp_controls.read_pumps`) and
+`[CONTROLS]` (rule-based controls with their CONTROL curves and time series, `RULE_STEP`,
+`inp_controls.read_controls`). The `[CURVES]` of type SHAPE give the `CUSTOM` sections their
+width curves.
 InitDepth,
 InitFlow, MaxFlow, flap gates and barrels are dynamic-wave physics: under STEADY or KINWAVE
 routing a non-zero or gated value is refused by name rather than skipped.
@@ -27,9 +30,10 @@ IGNORED because no conduit or node ever references them: `[EVAPORATION]`, `[REPO
 `[TAGS]`, `[MAP]`, `[COORDINATES]`.
 
 REFUSED BY NAME, because skipping them would silently change the physics:
-`[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` under STEADY or KINWAVE, `[PUMPS]`,
-`[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[CURVES]` of any type but
-STORAGE, RATING and TIDAL, `[LID_USAGE]`, roadway weirs, weir coefficient curves, `[FILES]`
+`[STORAGE]`, `[ORIFICES]`, `[WEIRS]`, `[OUTLETS]`, `[PUMPS]` and `[CONTROLS]` under STEADY or
+KINWAVE, `[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CURVES]` of any type but
+STORAGE, RATING, TIDAL, SHAPE, PUMP1-PUMP5 and CONTROL, `[LID_USAGE]`, roadway weirs, weir
+coefficient curves, `[FILES]`
 `USE HOTSTART`, `USE INFLOWS`, `USE RDII` and `USE RUNOFF` (`SAVE` lines are harmless and
 ignored), and any other section carrying content. A conduit with a
 seepage rate is refused for every routing; one with a non-circular section, a culvert code, a
