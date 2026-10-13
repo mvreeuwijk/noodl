@@ -80,15 +80,22 @@ class DuctNetwork:
         """A duct segment from junction `a` to `b` (positive flow a -> b): `length`,
         hydraulic `diameter` and `roughness` in m, `loss` the sum of its dynamic loss
         coefficients, `area` (m2) the circle of the diameter when not given."""
+        where = f"DuctNetwork: segment {name or f'{a!r} -> {b!r}'}"
         self._known(a, "a segment")
         self._known(b, "a segment")
         if a == b:
-            raise ValueError(f"DuctNetwork: a segment cannot join junction {a!r} to itself")
+            raise ValueError(f"{where}: a segment cannot join junction {a!r} to itself")
         for label, value in (("length", length), ("diameter", diameter),
-                             ("roughness", roughness)):
+                             ("roughness", roughness)) + ((("area", area),) if area is not None
+                                                          else ()):
             if not value > 0:
-                raise ValueError(f"DuctNetwork: segment {a!r} -> {b!r}: {label} must be "
-                                 f"positive, got {value!r}")
+                raise ValueError(f"{where}: {label} must be positive, got {value!r}")
+        if not loss >= 0:
+            raise ValueError(f"{where}: loss must be non-negative, got {loss!r}")
+        if not roughness < 3.7 * diameter:
+            raise ValueError(f"{where}: roughness must be below 3.7 diameters (the Colebrook "
+                             f"equation has no solution beyond), got roughness {roughness!r} "
+                             f"and diameter {diameter!r}")
         A = math.pi * diameter * diameter / 4.0 if area is None else float(area)
         self._segments.append(_Segment(a, b, float(length), float(diameter),
                                        float(roughness), float(loss), A, name))
@@ -96,15 +103,35 @@ class DuctNetwork:
     def terminal(self, junction: str, zone, *, area: float,
                  loss: float = DEFAULT_TERMINAL_LOSS, name: str | None = None,
                  Ch: float | None = None, azimuth: float | None = None,
-                 profile: int | None = None, facade: str | None = None) -> None:
+                 profile: int | None = None, Cp: float | None = None,
+                 facade: str | None = None) -> None:
         """A terminal from `junction` into `zone` (positive flow out of the duct): a zone's
         node name, or `outer("ambient")` inside a component. `area` (m2) is the duct's area
-        at the terminal, `loss` its loss coefficient. `Ch`, `azimuth` (or, inside a
-        component, `facade`) and `profile` put the wind on a terminal in the ambient, as on
-        an envelope path."""
+        at the terminal, `loss` (positive) its loss coefficient. A terminal in the ambient
+        takes the wind as an envelope path does: from the `WindProfile` numbered `profile`
+        at the wall's `azimuth` (or, inside a component, its `facade`), or from the constant
+        pressure coefficient `Cp`, scaled by the speed modifier `Ch` (1 by default). `Ch`,
+        `azimuth` and `facade` without a `profile` or a `Cp` are refused."""
+        where = f"DuctNetwork: terminal {name or f'{junction!r} -> {zone!r}'}"
         self._known(junction, "a terminal")
+        if not area > 0:
+            raise ValueError(f"{where}: area must be positive, got {area!r}")
+        if not loss > 0:
+            raise ValueError(f"{where}: loss must be positive (with no loss nothing limits "
+                             f"the flow), got {loss!r}")
+        if profile is not None and not (float(profile) == int(profile) and profile >= 1):
+            raise ValueError(f"{where}: profile must be a wind profile number from 1, got "
+                             f"{profile!r}; for no profile leave it out")
+        if profile is None and Cp is None:
+            stray = [k for k, v in dict(Ch=Ch, azimuth=azimuth, facade=facade).items()
+                     if v is not None]
+            if stray:
+                raise ValueError(f"{where}: {', '.join(stray)} given without a profile or a "
+                                 f"Cp, so no wind would act; give the terminal's profile or "
+                                 f"its constant pressure coefficient Cp")
         wind: dict = {k: float(v) for k, v in
-                      dict(Ch=Ch, azimuth=azimuth, profile=profile).items() if v is not None}
+                      dict(Ch=Ch, azimuth=azimuth, profile=profile, Cp=Cp).items()
+                      if v is not None}
         if facade is not None:
             wind["facade"] = facade
         self._terminals.append(_Terminal(junction, zone, float(area), float(loss), name,
@@ -142,7 +169,9 @@ def duct_elements_from_edges(net, *, kind: str = "duct", terminal_kind: str = "d
                              ambient="ambient", profiles: Sequence = ()):
     """The elements and drives of the duct edges `DuctNetwork.add_to` made: an `AirDuct`
     and a `DuctStack` for the segments, a `DuctTerminal`, a `Stack` (at the junction's
-    height) and, when a terminal has a wind profile, a `Wind` for the terminals. Returns
+    height) and, when a terminal has a wind profile or a nonzero `Cp`, a `Wind` for the
+    terminals (`profiles` numbers the `WindProfile`s from 1, as for `Wind.from_network`;
+    an edge with neither feels no wind). Returns
     `(elements, drives)`; a kind the network lacks contributes nothing.
     `temperature_key` names the full-node temperature driver for the viscosity (the
     viscosity at 293.15 K when None); `opening_key` the terminals' opening driver."""
@@ -162,7 +191,9 @@ def duct_elements_from_edges(net, *, kind: str = "duct", terminal_kind: str = "d
                                      temperature_key=temperature_key, opening_key=opening_key,
                                      kind=terminal_kind))
         drives.append(Stack.from_network(net, terminal_kind, g=g))
-        if bool((net.edge_attr("profile", terminal_kind, default=0.0) > 0).any()):
+        windy = ((net.edge_attr("profile", terminal_kind, default=0.0) > 0)
+                 | (net.edge_attr("Cp", terminal_kind, default=0.0) != 0))
+        if bool(windy.any()):
             drives.append(Wind.from_network(net, terminal_kind, ambient=ambient,
                                             profiles=profiles))
     return elements, drives

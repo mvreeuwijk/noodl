@@ -51,6 +51,13 @@ EDGE_ATTRIBUTES: dict[str, dict[str, tuple[str, str]]] = {
         "loss": ("loss coefficient of the terminal (dimensionless)",
                  "duct_elements_from_edges"),
         "z_path": ("height of the terminal, the junction's height (m)", "Stack.from_network"),
+        "profile": ("number of the WindProfile on a terminal in the ambient; absent or 0 "
+                    "for none", "duct_elements_from_edges, Wind.from_network"),
+        "Cp": ("constant wind pressure coefficient of a terminal in the ambient without a "
+               "profile", "duct_elements_from_edges, Wind.from_network"),
+        "Ch": ("wind speed modifier (dimensionless, 1 by default)", "Wind.from_network"),
+        "azimuth": ("wall direction of a terminal with a profile (degrees from CONTAM)",
+                    "Wind.from_network"),
     },
     "wall": {
         "ua": ("conductance zone -> wall or wall -> ambient (W/K)", "thermal_layer"),

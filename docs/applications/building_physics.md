@@ -103,12 +103,19 @@ A duct system is described with `DuctNetwork` and then added to a `Network` or a
 - a **terminal** (`terminal(junction, zone, area=, loss=)`) is a `DuctTerminal` edge from a
   junction into a zone, with a `Stack` at the junction's height. Its loss defaults to
   CONTAM's 0.125 (`DEFAULT_TERMINAL_LOSS`). A terminal in the ambient takes the wind as an
-  envelope path does (`Ch`, `azimuth` or a component's `facade`, and `profile`).
+  envelope path does: from the `WindProfile` numbered `profile` at the wall's `azimuth` (or a
+  component's `facade`), or from a constant pressure coefficient `Cp`, either scaled by the
+  speed modifier `Ch`. `Ch`, `azimuth` or `facade` without a `profile` or a `Cp` is refused,
+  since no wind would act.
+
+Every value is checked when the segment or terminal is described, and an error names it (its
+`name`, or its two ends): lengths, diameters, roughnesses and areas must be positive, a
+roughness below 3.7 diameters, a segment's loss non-negative and a terminal's positive.
 
 The laws are those under [Duct elements](#duct-elements). A fan, a damper or any other
 element in a duct is an ordinary edge between two junctions, added by the caller with its own
-element. `duct_elements_from_edges(net)` returns the segments' and terminals' elements and
-drives.
+element. `duct_elements_from_edges(net, profiles=...)` returns the segments' and terminals'
+elements and drives, with a `Wind` drive when a terminal has a profile or a nonzero `Cp`.
 
 A fan draws 0.05 kg/s from the ambient through a 10 m duct and blows it through a 5 m duct
 into a room, which leaks it back to the ambient:

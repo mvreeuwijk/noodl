@@ -115,15 +115,52 @@ def test_a_duct_network_refuses_a_bad_description_by_name():
     with pytest.raises(ValueError, match="to itself"):
         ducts.segment("j", "j", length=1.0, diameter=0.2)
     ducts.junction("k", z_ref=0.0)
-    with pytest.raises(ValueError, match="length must be positive"):
-        ducts.segment("j", "k", length=0.0, diameter=0.2)
     with pytest.raises(KeyError, match="'x'"):
         ducts.terminal("x", "room", area=0.03)
 
 
-def test_a_terminal_with_a_wind_profile_gets_a_wind_drive():
-    from noodl.drives import Wind, WindProfile
+@pytest.mark.parametrize("bad, message", [
+    (dict(length=0.0), "length must be positive"),
+    (dict(diameter=-0.2), "diameter must be positive"),
+    (dict(roughness=0.0), "roughness must be positive"),
+    (dict(area=-0.05), "area must be positive"),
+    (dict(area=float("nan")), "area must be positive"),
+    (dict(loss=-0.1), "loss must be non-negative"),
+    (dict(roughness=0.75), "roughness must be below 3.7 diameters"),
+])
+def test_a_segment_is_checked_when_it_is_described_and_named(bad, message):
+    ducts = DuctNetwork()
+    ducts.junction("j", z_ref=0.0)
+    ducts.junction("k", z_ref=0.0)
+    args = dict(length=1.0, diameter=0.2) | bad
+    with pytest.raises(ValueError, match=f"segment 'j' -> 'k': {message}"):
+        ducts.segment("j", "k", **args)
+    with pytest.raises(ValueError, match=f"segment supply: {message}"):
+        ducts.segment("j", "k", name="supply", **args)
+    assert ducts.volumes() == {"j": 0.0, "k": 0.0}
 
+
+@pytest.mark.parametrize("bad, message", [
+    (dict(area=0.0), "area must be positive"),
+    (dict(area=-0.03), "area must be positive"),
+    (dict(loss=0.0), "loss must be positive"),
+    (dict(loss=-1.0), "loss must be positive"),
+    (dict(profile=0), "profile must be a wind profile number"),
+    (dict(Ch=0.5), "Ch given without a profile or a Cp"),
+    (dict(azimuth=90.0), "azimuth given without a profile or a Cp"),
+    (dict(facade="south"), "facade given without a profile or a Cp"),
+])
+def test_a_terminal_is_checked_when_it_is_described_and_named(bad, message):
+    ducts = DuctNetwork()
+    ducts.junction("j", z_ref=0.0)
+    args = dict(area=0.03) | bad
+    with pytest.raises(ValueError, match=f"terminal 'j' -> 'ambient': {message}"):
+        ducts.terminal("j", "ambient", **args)
+    with pytest.raises(ValueError, match=f"terminal intake: {message}"):
+        ducts.terminal("j", "ambient", name="intake", **args)
+
+
+def _wind_net(**wind):
     net = Network(dtype=F64)
     net.add_node("ambient", z_ref=0.0, T0=293.15)
     net.add_node("room", z_ref=0.0, T0=293.15, volume=50.0)
@@ -131,9 +168,23 @@ def test_a_terminal_with_a_wind_profile_gets_a_wind_drive():
     ducts.junction("j", z_ref=3.0)
     ducts.junction("k", z_ref=3.0)
     ducts.segment("j", "k", length=2.0, diameter=0.2)
-    ducts.terminal("j", "ambient", area=0.03, Ch=0.5, azimuth=90.0, profile=1)
+    ducts.terminal("j", "ambient", area=0.03, **wind)
     ducts.terminal("k", "room", area=0.03)
     ducts.add_to(net)
+    return net
+
+
+WIND = {"rho_amb": torch.tensor(1.2, dtype=F64), "V_met": torch.tensor(4.0, dtype=F64),
+        "theta_w": torch.tensor(90.0, dtype=F64)}
+
+
+def test_a_terminal_with_a_wind_profile_feels_the_wind_as_an_envelope_path():
+    """The terminal runs from its junction into the ambient, so the wind enters with the sign
+    of an envelope path into the ambient: value = -1/2 rho V^2 Ch Cp(theta - azimuth). At a
+    wind from the wall's own direction Cp is the profile's value at 0, 0.6."""
+    from noodl.drives import Wind, WindProfile
+
+    net = _wind_net(Ch=0.5, azimuth=90.0, profile=1)
     assert net.edge_attr("z_path", "duct_terminal").tolist() == [3.0, 3.0]
     assert net.node_attr("heat_capacity", default=-1.0).tolist() == [-1.0, -1.0, 0.0, 0.0]
     volumes = net.node_attr("volume", default=0.0).tolist()
@@ -143,4 +194,21 @@ def test_a_terminal_with_a_wind_profile_gets_a_wind_drive():
     assert [type(e).__name__ for e in elements] == ["AirDuct", "DuctTerminal"]
     assert [type(d).__name__ for d in drives] == ["DuctStack", "Stack", "Wind"]
     wind = drives[-1]
-    assert isinstance(wind, Wind) and wind.ch.tolist() == [0.5, 1.0]
+    assert isinstance(wind, Wind)
+    value = wind(WIND)
+    assert value[0].item() == pytest.approx(-0.5 * 1.2 * 16.0 * 0.5 * 0.6, rel=1e-15)
+    assert value[1].item() == 0.0
+
+
+def test_a_terminal_with_a_constant_pressure_coefficient_feels_the_wind_without_a_profile():
+    net = _wind_net(Cp=-0.4, Ch=0.8)
+    elements, drives = duct_elements_from_edges(net)
+    assert [type(d).__name__ for d in drives] == ["DuctStack", "Stack", "Wind"]
+    value = drives[-1](WIND)
+    assert value[0].item() == pytest.approx(0.5 * 1.2 * 16.0 * 0.8 * 0.4, rel=1e-15)
+    assert value[1].item() == 0.0
+
+
+def test_terminals_without_wind_get_no_wind_drive():
+    elements, drives = duct_elements_from_edges(_wind_net())
+    assert [type(d).__name__ for d in drives] == ["DuctStack", "Stack"]
