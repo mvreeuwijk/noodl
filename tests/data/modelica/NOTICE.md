@@ -96,12 +96,17 @@ such enhancements or derivative works thereof, in binary and source code form.
 Three of the 23 multizone models are refused by `read_modelica` (`ModelicaImportError`,
 naming the offending instances); their JSON is exported and kept here for the refusal tests:
 
-- `TrickleVent.json` — a feedback controller (`LimPID`) and a temperature sensor wired as a
-  component (re-exported with the weather file its `ReaderTMY3` reads).
+- `TrickleVent.json` — a feedback controller (`LimPID`) is not supported.
 - `ChimneyShaftNoVolume.json` — a chain of more than one flow element between two nodes and a
   feedback controller are not supported.
-- `ChimneyShaftWithVolume.json` — a dynamic (mass- and heat-storing) hydrostatic column
-  (`MediumColumnDynamic`) and a feedback controller are not supported.
+- `ChimneyShaftWithVolume.json` — a feedback controller is not supported (its dynamic column,
+  `MediumColumnDynamic`, is read as a volume between two half columns).
+
+These three were re-exported on 14 Oct 2026 with `--tolerance 1e-13`, as the dynamic references
+above: the JSON now keeps the temperature sensor's `T` wired into the controller's `u_m`, and the
+CSV holds the controller's output `con.y` and, in `ChimneyShaftWithVolume.csv`, the state of the
+column's volume (`sha.vol.T`, `sha.vol.p`, `sha.vol.Xi[1]`). `TrickleVent`'s weather file is
+unchanged (same sha256).
 
 `PressurizationData.json` imports, but the dynamic parity tests do not yet compare it (an
 unresolved freeze of the room where its flow fades; `docs/formats/modelica.md`). Its CSV, at

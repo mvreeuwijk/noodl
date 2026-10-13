@@ -113,6 +113,13 @@ not a zone, and so on -- is refused. A `PrescribedHeatFlow` whose `port` is wire
 `heatPort` is recorded in `ComponentGraph.heat_sources` as `(component, zone)`; wired to
 anything else it is refused.
 
+A `TemperatureSensor` (`schema.HEAT_SENSORS`) whose `port` is wired to a zone's `heatPort` reads
+that zone's temperature and draws no heat; it is recorded in `ComponentGraph.heat_sensors` as
+`(component, zone)`, and wired to anything else it is refused. A connection from a component's
+output to an input of a signal block (`doc.signals`) is accepted only from such a sensor's `T`
+and recorded in `ComponentGraph.signal_wires` as `("<sensor>.T", "<block>.<input>")`; any
+other component output wired into a signal block is refused, naming the connection.
+
 Weather bus
 -----------
 A `ReaderTMY3` ("weather") is no node. A `connect()` of its `weaBus` to the `weaBus` of an
@@ -206,6 +213,10 @@ class ComponentGraph:
     attached: tuple[tuple[str, Component], ...] = ()
     # (Outside boundary, the ReaderTMY3 its weaBus is wired to) (module docstring).
     weather: tuple[tuple[str, Component], ...] = ()
+    # (temperature sensor, the zone whose heatPort it reads) (module docstring, "Heat ports").
+    heat_sensors: tuple[tuple[Component, str], ...] = ()
+    # ("<sensor>.T", "<signal block>.<input>"): a sensor output wired into a signal input.
+    signal_wires: tuple[tuple[str, str], ...] = ()
 
 
 class _UnionFind:
@@ -271,6 +282,8 @@ def _split(ref: str, errors: list[str] | None = None) -> tuple[str, str] | None:
 def _kind_of(cls: str, role: str | None) -> str:
     if cls in schema.INLINE_SENSORS:
         return "inline"  # before the role check: the exporter marks sensors as observers
+    if cls in schema.HEAT_SENSORS:
+        return "heat_sensor"
     if role == "observer":
         return "observer"
     if cls in schema.WEATHER_READERS:
@@ -313,7 +326,7 @@ def _is_fluid_port(kind: str, port: str) -> bool:
 def _is_heat_port(kind: str, cls: str, port: str) -> bool:
     if kind == "zone":
         return port == "heatPort"
-    if kind == "heat_source":
+    if kind in ("heat_source", "heat_sensor"):
         return port == "port"
     if kind == "pin":
         if cls == _FIXED_TEMPERATURE:
@@ -355,6 +368,7 @@ class _Ctx:
     root_to_name: dict[str, str] = field(default_factory=dict)
     root_to_kind: dict[str, str] = field(default_factory=dict)
     attached: dict[str, str] = field(default_factory=dict)  # zone -> boundary wired to it
+    signal_wires: list[tuple[str, str]] = field(default_factory=list)
 
     def node_of(self, ref: str) -> str:
         return self.root_to_name[self.uf.find(ref)]
@@ -381,15 +395,38 @@ def _classify_components(doc: ModelicaDoc) -> _Ctx:
             errors.append(f"{c.name} ({c.cls}): {reason}")
 
     for s in doc.signals:
-        if s.cls not in schema.SIGNALS and s.cls not in schema.MATH:
-            reason = schema.refusal_reason(s.cls) or "signal source is not supported"
+        reason = schema.refusal_reason(s.cls)
+        if reason is None and s.cls not in schema.SIGNALS | schema.MATH | schema.CONTROLLERS:
+            reason = "signal source is not supported"
+        if reason is not None:
             errors.append(f"{s.name} ({s.cls}): {reason}")
 
     return _Ctx(by_name=by_name, kind_of=kind_of, errors=errors)
 
 
+def _sensor_wire(ctx: _Ctx, ref_a: str, ref_b: str,
+                 signal_names: set[str]) -> tuple[str, str] | None:
+    """`(sensor output, signal input)` when one end is a signal block's input and the other a
+    component's output, or None when neither end is a signal block. Only a temperature
+    sensor's `T` may feed a signal; any other component output is reported by name (and
+    `("", "")` returned)."""
+    for src, dst in ((ref_a, ref_b), (ref_b, ref_a)):
+        s_inst, _, s_port = src.partition(".")
+        d_inst = dst.partition(".")[0]
+        if d_inst in signal_names and s_inst in ctx.by_name:
+            if ctx.kind_of[s_inst] == "heat_sensor" and s_port == "T":
+                return src, dst
+            ctx.errors.append(f"{src} -> {dst}: a component output wired into a signal is "
+                              f"supported only from a temperature sensor's T "
+                              f"({', '.join(sorted(schema.HEAT_SENSORS))})")
+            return "", ""
+    return None
+
+
 def _process_fluid_connections(doc: ModelicaDoc, ctx: _Ctx) -> None:
-    """Union every fluid `connect()` pair; note a signal-style connection's refusal, if any."""
+    """Union every fluid `connect()` pair; record a temperature sensor wired into a signal;
+    note a signal-style connection's refusal, if any."""
+    signal_names = {s.name for s in doc.signals}
     for a, b in doc.connections:
         if _bus_end(a) is not None or _bus_end(b) is not None:
             continue  # weather-bus wiring: `_resolve_weather`
@@ -398,6 +435,12 @@ def _process_fluid_connections(doc: ModelicaDoc, ctx: _Ctx) -> None:
             continue
         ia, pa = split_a
         ib, pb = split_b
+        if ia not in ctx.by_name or ib not in ctx.by_name:
+            wire = _sensor_wire(ctx, a, b, signal_names)
+            if wire is not None:
+                if wire != ("", ""):
+                    ctx.signal_wires.append(wire)
+                continue
         if ia not in ctx.by_name:
             ctx.errors.append(f"{a}: connection references unknown instance {ia!r}")
             continue
@@ -680,9 +723,13 @@ def _fuse_paths(ctx: _Ctx) -> list[FlowPath]:
     return paths
 
 
-def _resolve_pins(doc: ModelicaDoc, ctx: _Ctx) -> tuple[list[Pin], list[tuple[Component, str]]]:
-    """`FixedTemperature.port` -> `ThermalConductor.port_a`/`port_b` -> zone `heatPort`, and
-    `PrescribedHeatFlow.port` -> zone `heatPort`."""
+def _resolve_pins(doc: ModelicaDoc, ctx: _Ctx) -> tuple[
+    list[Pin], list[tuple[Component, str]], list[tuple[Component, str]]
+]:
+    """`FixedTemperature.port` -> `ThermalConductor.port_a`/`port_b` -> zone `heatPort`,
+    `PrescribedHeatFlow.port` -> zone `heatPort` and `TemperatureSensor.port` -> zone
+    `heatPort`: `(pins, heat sources, heat sensors)`. A zone's `heatPort` may carry several
+    connections; each one-port partner looks up its own end."""
     heat_partner: dict[tuple[str, str], tuple[str, str]] = {}
     for a, b in doc.connections:
         split_a, split_b = _split(a, ctx.errors), _split(b, ctx.errors)
@@ -741,7 +788,18 @@ def _resolve_pins(doc: ModelicaDoc, ctx: _Ctx) -> tuple[list[Pin], list[tuple[Co
                               f"must connect to a volume's heatPort)")
             continue
         heat_sources.append((comp, partner[0]))
-    return pins, heat_sources
+
+    heat_sensors: list[tuple[Component, str]] = []
+    for name, comp in ctx.by_name.items():
+        if ctx.kind_of[name] != "heat_sensor":
+            continue
+        partner = heat_partner.get((name, "port"))
+        if partner is None or ctx.kind_of[partner[0]] != "zone":
+            ctx.errors.append(f"{name} ({comp.cls}): unsupported heat-port wiring (its port "
+                              f"must connect to a volume's heatPort)")
+            continue
+        heat_sensors.append((comp, partner[0]))
+    return pins, heat_sources, heat_sensors
 
 
 def _bus_end(ref: str) -> tuple[str, str | None] | None:
@@ -844,8 +902,8 @@ def build(doc: ModelicaDoc) -> ComponentGraph:
     zonal = tuple(_two_way_edges(ctx, "zonal"))
     sources = tuple(_resolve_sources(ctx))
     paths = tuple(_fuse_paths(ctx))
-    pin_list, heat_list = _resolve_pins(doc, ctx)
-    pins, heat_sources = tuple(pin_list), tuple(heat_list)
+    pin_list, heat_list, sensor_list = _resolve_pins(doc, ctx)
+    pins, heat_sources, heat_sensors = tuple(pin_list), tuple(heat_list), tuple(sensor_list)
     sensors = tuple(_resolve_sensors(doc, ctx))
 
     _raise(ctx.errors)
@@ -853,5 +911,6 @@ def build(doc: ModelicaDoc) -> ComponentGraph:
     return ComponentGraph(
         nodes=nodes, zones=zones, boundaries=boundaries, paths=paths, doors=doors,
         zonal=zonal, pins=pins, sources=sources, sensors=sensors, heat_sources=heat_sources,
-        attached=attached, weather=weather,
+        attached=attached, weather=weather, heat_sensors=heat_sensors,
+        signal_wires=tuple(ctx.signal_wires),
     )

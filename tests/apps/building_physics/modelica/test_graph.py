@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
 
+from noodl.apps.building_physics.modelica import expand, graph, schema
 from noodl.apps.building_physics.modelica.graph import build
 from noodl.apps.building_physics.modelica.schema import ModelicaImportError, load
 
 FIXTURES = Path(__file__).parent / "fixtures"
+DATA = Path(__file__).resolve().parents[3] / "data" / "modelica"
 
 
 def _graph(name: str):
@@ -344,3 +347,30 @@ def test_ports_beside_a_refused_component_add_no_follow_on_message(tmp_path) -> 
     assert "refused 1 item" in msg
     assert "bouA (Buildings.Fluid.Movers.FlowControlled_m_flow)" in msg
     assert "not connected" not in msg
+
+
+def test_a_temperature_sensor_on_a_volume_is_wired_into_its_controller():
+    doc = expand.expand(schema.load(DATA / "ChimneyShaftWithVolume.json"))
+    with pytest.raises(ModelicaImportError) as err:      # the controller is still refused
+        graph.build(doc)
+    assert "con (Modelica.Blocks.Continuous.LimPID)" in str(err.value)
+    assert "temSen" not in str(err.value)
+    ctx = graph._classify_components(doc)
+    graph._process_fluid_connections(doc, ctx)
+    assert ctx.signal_wires == [("temSen.T", "con.u_m")]
+
+
+def test_a_component_output_into_a_signal_must_come_from_a_temperature_sensor():
+    doc = schema.load(DATA / "ChimneyShaftWithVolume.json")
+    wired = dataclasses.replace(doc, connections=(*doc.connections, ("roo.T", "con.u_m")))
+    with pytest.raises(ModelicaImportError, match=r"roo\.T -> con\.u_m"):
+        graph.build(expand.expand(wired))
+
+
+def test_a_temperature_sensor_must_sit_on_a_volume_heat_port():
+    doc = schema.load(DATA / "ChimneyShaftWithVolume.json")
+    loose = dataclasses.replace(doc, connections=tuple(
+        c for c in doc.connections if "temSen.port" not in c))
+    with pytest.raises(ModelicaImportError, match=r"temSen \(.*TemperatureSensor\): "
+                                                  r"unsupported heat-port wiring"):
+        graph.build(expand.expand(loose))

@@ -194,6 +194,10 @@
   ],
   "connections": [
     [
+      "temSen.T",
+      "con.u_m"
+    ],
+    [
       "sha.port_a",
       "oriChiTop.port_a"
     ],

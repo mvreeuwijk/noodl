@@ -208,7 +208,7 @@ from dataclasses import dataclass, field
 import torch
 
 from noodl._broadcast import broadcast_shapes
-from noodl.apps.building_physics.modelica import outside, schema, signals, storage, weather
+from noodl.apps.building_physics.modelica import expand, outside, schema, signals, storage, weather
 from noodl.apps.building_physics.modelica.graph import ComponentGraph, FlowPath, TwoWayEdge
 from noodl.apps.building_physics.modelica.graph import _raise as _refuse
 from noodl.apps.building_physics.modelica.graph import build as build_graph
@@ -273,6 +273,8 @@ class ModelicaNames:
     `air_references` lists the zones made air-layer pressure references (module docstring,
     "Closed zone groups"); `attached` maps a boundary wired straight to a zone to that zone.
     `p_ref` is the gauge reference of `"air.phi"` (module docstring, "Gauge reference").
+    Every zone is named by its Modelica path: the volume inside a `MediumColumnDynamic` `sha`
+    is `"sha.vol"` (`expand`).
     `weather` maps `"<reader>.weaBus.<output>"` (K, Pa, 1, m/s, rad) and `"<boundary>.pWin"`
     (Pa) to their values on the output grid `times` (module docstring, "Weather and wind").
     """
@@ -1637,11 +1639,12 @@ class _Builder:
             entries = self._port_flow(sensor.port, edges)
             if entries is not None:
                 edges[sensor.component.name] = tuple((c, sensor.sign * s) for c, s in entries)
-        names = ModelicaNames(edges=edges, nodes=dict(index), kinds=kinds,
-                              times=self.out_times.clone(),
-                              air_references=tuple(references),
-                              attached={b.name: z for z, b in g.attached}, p_ref=p_ref,
-                              storage=tuple(z for z in g.zones if z in storage_zones),
+        path = expand.modelica_path
+        names = ModelicaNames(edges=edges, nodes={path(n): i for n, i in index.items()},
+                              kinds=kinds, times=self.out_times.clone(),
+                              air_references=tuple(path(z) for z in references),
+                              attached={b.name: path(z) for z, b in g.attached}, p_ref=p_ref,
+                              storage=tuple(path(z) for z in g.zones if z in storage_zones),
                               weather=self.weather.columns(_rows(self.times, self.out_times)))
         return model, state, drivers, names
 
@@ -2050,6 +2053,7 @@ def weather_columns(doc: ModelicaDoc, times) -> dict[str, Tensor]:
     `Fluid.Sources` examples have none, and `read_modelica` refuses them). Raises
     `ModelicaImportError` naming every instance it cannot evaluate, and every signal driving
     an input of a reader or an Outside boundary that is not read (as `read_modelica` does)."""
+    doc = expand.expand(doc)
     g = build_graph(doc)
     times = torch.as_tensor(times, dtype=F64)
     errors: list[str] = []

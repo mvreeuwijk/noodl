@@ -37,6 +37,11 @@ district networks. `Validation`: `OneWayFlow`,
 `Outside_CpLowRise`, `Outside_CpData`, `Outside_CpData_Angles` and
 `Validation.Outside_CpData_Directions` (boundaries with no flow element, so not importable as
 models) are compared with `assemble.weather_columns`.
+`MediumColumnDynamic` is read as MBL builds it: a mixing volume between two half columns, the
+top one taking its density from below and the bottom one from above, both the volume's
+(`use_HeatTransfer = false` only). Its volume is named `<column>.vol` in `names.nodes`, as in
+MBL's results. A `TemperatureSensor` on a volume's `heatPort` reads that volume's
+temperature; its `T` may feed a signal block's input.
 
 **Imported, not yet compared.** `PressurizationData` imports (`read_modelica` builds it, and its weather and
 wind pressures match MBL's to round-off), but it is not yet compared as a dynamic model. It is a
@@ -57,9 +62,12 @@ is the direction for the follow-up. The wind boundaries are verified on the
 **Refused, each with a named error** (`ModelicaImportError` lists every offending instance and
 its class):
 
-- `TrickleVent`, `ChimneyShaftNoVolume`, `ChimneyShaftWithVolume` — feedback controllers, a
-  chain of two flow elements, or a dynamic (mass- and heat-storing) hydrostatic medium column,
-  none of which is in scope.
+- `TrickleVent`, `ChimneyShaftNoVolume`, `ChimneyShaftWithVolume` — feedback controllers
+  (`LimPID`), and in `ChimneyShaftNoVolume` a chain of two flow elements.
+- A `MediumColumnDynamic` with `use_HeatTransfer = true` (heat exchanged through its
+  `heatPort`).
+- A component output other than a temperature sensor's `T` wired into a signal block, naming
+  the connection; a temperature sensor whose `port` is not wired to a volume's `heatPort`.
 - Every `Buildings.BoundaryConditions.WeatherData` class but `ReaderTMY3`; a weather bus wired
   to anything but an `Outside` boundary's `weaBus`, or any weather-bus output other than
   `TDryBul`, `pAtm`, `relHum`, `winSpe` and `winDir` read by anything; a `ReaderTMY3` wired
@@ -70,9 +78,8 @@ its class):
 For example, reading `TrickleVent` raises:
 
 ```text
-ModelicaImportError: modelica: refused 2 items:
+ModelicaImportError: modelica: refused 1 item:
   - con (Modelica.Blocks.Continuous.LimPID): feedback controllers are not supported
-  - temSen (Modelica.Thermal.HeatTransfer.Sensors.TemperatureSensor): component class is not supported
 ```
 
 **Conventions:**
@@ -217,6 +224,13 @@ reader's `"files"` entry. The reader opens that copy and refuses the model, nami
 if the file is missing or its sha256 differs. The CSV of such a model also holds the reader's
 `weaBus.TDryBul`, `weaBus.pAtm`, `weaBus.relHum` and `weaBus.winSpe` and every wind boundary's
 `pWin`, which the parity tests compare at round-off.
+
+The exporter keeps a connection from a component's output into a signal block's input (a
+temperature sensor's `T` feeding a controller's `u_m`), so that the reader can wire the sensor
+into the block or refuse the connection by name. The CSV of a model with a feedback controller
+holds its output `<controller>.y`, and that of a model with a `MediumColumnDynamic` the state
+of its volume, `<column>.vol.T`, `.p`, `.Xi[1]` and `.C[k]`. `ChimneyShaftNoVolume`,
+`ChimneyShaftWithVolume` and `TrickleVent` were re-exported this way at `--tolerance 1e-13`.
 
 Regenerating the committed parity records (`tests/data/modelica/parity-{algebraic,dynamic}.json`,
 in [the building physics parity tables](../applications/building_physics.md#against-openmodelica-modelica-buildings-library))

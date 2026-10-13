@@ -427,3 +427,39 @@ def test_weather_class_sets_match_the_reader(exporter) -> None:
     assert exporter.WIND_BOUNDARIES == schema.OUTSIDE_WIND
     assert exporter.WEATHER_READERS == schema.WEATHER_READERS
     assert set(exporter.WEATHER_COLUMNS) < set(schema.WEATHER_BUS_OUTPUTS)
+
+
+def test_controllers_and_dynamic_columns_are_compared(exporter):
+    instance = {"elements": [
+        {"$kind": "component", "name": "sha",
+         "type": {"name": "Buildings.Airflow.Multizone.MediumColumnDynamic",
+                  "restriction": "model", "elements": []}},
+        {"$kind": "component", "name": "con",
+         "type": {"name": "Modelica.Blocks.Continuous.LimPID", "restriction": "block",
+                  "elements": []}},
+    ]}
+    doc = {"components": [{"name": "sha", "class":
+                           "Buildings.Airflow.Multizone.MediumColumnDynamic",
+                           "parameters": {}}],
+           "signals": [{"name": "con", "class": "Modelica.Blocks.Continuous.LimPID",
+                        "parameters": {}, "drives": "gain.u"}],
+           "medium": {"nXi": 1, "extraPropertiesNames": []}}
+    assert exporter.compared_variables(instance, doc) == [
+        "sha.vol.T", "sha.vol.p", "sha.vol.Xi[1]", "con.y"]
+
+
+def test_a_sensor_output_wired_into_a_signal_input_is_kept(exporter):
+    assert exporter.wires_output_into_signal("temSen.T", "con.u_m",
+                                             component_outputs={"temSen": {"T"}},
+                                             signal_names={"con"},
+                                             block_outputs={"con": {"y"}})
+    assert not exporter.wires_output_into_signal("con.y", "gain.u",
+                                                 component_outputs={"temSen": {"T"}},
+                                                 signal_names={"con", "gain"},
+                                                 block_outputs={"con": {"y"},
+                                                                "gain": {"y"}})
+
+
+def test_the_new_class_groups_match_the_reader(exporter):
+    assert exporter.CONTROLLERS == schema.CONTROLLERS
+    assert exporter.DYNAMIC_COLUMNS == schema.DYNAMIC_COLUMNS

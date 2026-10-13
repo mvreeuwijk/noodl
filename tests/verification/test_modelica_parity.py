@@ -244,12 +244,12 @@ def test_one_way_flow_against_the_embedded_contam_table():
 
 
 REFUSED = {
-    # A feedback controller and the temperature sensor wired as a component.
-    "TrickleVent": {"con", "temSen"},
-    # Two orifices in one column chain (no junction node), plus the controller.
-    "ChimneyShaftNoVolume": {"con", "oriChiBot", "oriChiTop", "temSen"},
-    # A mass- and heat-storing MediumColumnDynamic, plus the controller.
-    "ChimneyShaftWithVolume": {"con", "sha", "temSen"},
+    # The feedback controller (LimPID) its temperature sensor feeds.
+    "TrickleVent": {"con"},
+    # Two orifices in one column chain (no storing node between them), plus the controller.
+    "ChimneyShaftNoVolume": {"con", "oriChiBot", "oriChiTop"},
+    # The controller; its MediumColumnDynamic is read as a volume between two half columns.
+    "ChimneyShaftWithVolume": {"con"},
 }
 
 

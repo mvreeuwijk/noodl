@@ -86,6 +86,9 @@ for one, a list for several). Every other block, and every
 (signal wiring is carried by `drives` alone, since the reader resolves connection ends
 against `components`). A connection from a component's `weaBus.<variable>` to an input of a
 signal block is kept in `connections` too, so that the reader can refuse that wiring by name.
+So is a connection from a component's OUTPUT connector to an input of a signal block
+(`wires_output_into_signal`): a temperature sensor's `T` feeding a controller's `u_m`, which
+the reader wires into the controller (any other component output it refuses by name).
 
 CSV
 ---
@@ -100,11 +103,12 @@ dynamic parity references are regenerated tighter than declared, so that their o
 integration error is well below the tolerance the parity test asserts.
 Columns: each one-way flow element's `m_flow`, each four-port element's `m1_flow`/`m2_flow`
 (and `mAB_flow`/`mBA_flow` when the class declares them as variables), each volume's `T`,
-`p`, `Xi[1]` (when the medium has moisture) and `C[k]` (one per trace substance); then, for a
-weather reader, `<reader>.weaBus.<output>` for `TDryBul`, `pAtm`, `relHum` and `winSpe`, and
-for a wind boundary (`Outside_Cp`, `Outside_CpLowRise`, `Outside_CpData`) its `pWin`. If the
-simulation fails (a refused model may not simulate), the JSON is still written, with Reals
-flagged approximate, and no CSV.
+`p`, `Xi[1]` (when the medium has moisture) and `C[k]` (one per trace substance), the same for
+the volume `<column>.vol` inside a `MediumColumnDynamic`; each feedback controller's output
+`<controller>.y`; then, for a weather reader, `<reader>.weaBus.<output>` for `TDryBul`,
+`pAtm`, `relHum` and `winSpe`, and for a wind boundary (`Outside_Cp`, `Outside_CpLowRise`,
+`Outside_CpData`) its `pWin`. If the simulation fails (a refused model may not simulate), the
+JSON is still written, with Reals flagged approximate, and no CSV.
 """
 
 from __future__ import annotations
@@ -155,6 +159,10 @@ WIND_BOUNDARIES = frozenset({
     "Buildings.Fluid.Sources.Outside_CpData",
 })
 WEATHER_READERS = frozenset({"Buildings.BoundaryConditions.WeatherData.ReaderTMY3"})
+# Feedback controllers (their output `y` is compared) and dynamic columns (their volume's
+# state is compared): the reader's `schema.CONTROLLERS` and `schema.DYNAMIC_COLUMNS`.
+CONTROLLERS = frozenset({"Modelica.Blocks.Continuous.LimPID"})
+DYNAMIC_COLUMNS = frozenset({"Buildings.Airflow.Multizone.MediumColumnDynamic"})
 # Weather-bus outputs compared in the CSV (`<reader>.weaBus.<output>`): those the reader
 # evaluates, but `winDir`, which is periodic (a direction a round-off below 2 pi and one at 0
 # are the same) and enters only through the boundaries' `pWin`, which the CSV holds.
@@ -291,6 +299,21 @@ def _model_components(instance: dict) -> list[dict]:
     return comps
 
 
+def wires_output_into_signal(src: str, dst: str, *, component_outputs: dict[str, set[str]],
+                             signal_names: set[str],
+                             block_outputs: dict[str, set[str]]) -> bool:
+    """`src` is an OUTPUT connector of a component that is not a signal (a temperature
+    sensor's `T`) and `dst` an input of a signal block: the connection is kept, so that the
+    reader wires the sensor into the block (`graph.build` accepts only a temperature
+    sensor's `T` there and refuses any other by name)."""
+    s_inst, _, s_rest = src.partition(".")
+    d_inst, _, d_rest = dst.partition(".")
+    s_port = re.sub(r"\[.*\]$", "", s_rest.split(".")[0])
+    d_port = re.sub(r"\[.*\]$", "", d_rest.split(".")[0])
+    return (s_inst not in signal_names and s_port in component_outputs.get(s_inst, set())
+            and d_inst in signal_names and d_port not in block_outputs.get(d_inst, set()))
+
+
 def build_document(instance: dict, *, model: str, medium: dict, experiment: dict,
                    mbl_commit: str, openmodelica: str, extra: dict | None = None) -> dict:
     """The `noodl-modelica/1` document for one `getModelInstance` tree."""
@@ -354,6 +377,8 @@ def build_document(instance: dict, *, model: str, medium: dict, experiment: dict
         components.append(entry)
 
     signal_names = {s["name"] for s in signals}
+    component_outputs = {n: _outputs_of(c["type"]) for n, c in by_name.items()
+                         if not is_block[n]}
 
     def reads_bus(bus_end: str, other: str) -> bool:
         """`bus_end` is a component's weather-bus variable and `other` an INPUT of a signal
@@ -364,9 +389,13 @@ def build_document(instance: dict, *, model: str, medium: dict, experiment: dict
         return (len(parts) > 2 and parts[1] == "weaBus" and parts[0] not in signal_names
                 and inst in signal_names and port not in outputs.get(inst, set()))
 
+    def feeds_signal(src: str, dst: str) -> bool:
+        return wires_output_into_signal(src, dst, component_outputs=component_outputs,
+                                        signal_names=signal_names, block_outputs=outputs)
+
     kept = [[a, b] for a, b in connections
             if (port_base(a)[0] not in signal_names and port_base(b)[0] not in signal_names)
-            or reads_bus(a, b) or reads_bus(b, a)]
+            or reads_bus(a, b) or reads_bus(b, a) or feeds_signal(a, b) or feeds_signal(b, a)]
     unknown = sorted({port_base(r)[0] for pair in kept for r in pair} - set(by_name))
     if unknown:
         raise ExportError(f"connections reference instances that are not components: {unknown}")
@@ -388,8 +417,9 @@ def build_document(instance: dict, *, model: str, medium: dict, experiment: dict
 
 
 def compared_variables(instance: dict, doc: dict) -> list[str]:
-    """CSV columns (after `time`): flow-element flows first, then volume states, then the
-    weather readers' bus outputs and the wind boundaries' `pWin`."""
+    """CSV columns (after `time`): flow-element flows first, then volume states (a dynamic
+    column's volume `<name>.vol` among them), the controllers' outputs, then the weather
+    readers' bus outputs and the wind boundaries' `pWin`."""
     by_name = {c["name"]: c for c in _model_components(instance)}
     n_c = len(doc["medium"].get("extraPropertiesNames", []))
     n_xi = int(doc["medium"].get("nXi", 0))
@@ -405,15 +435,17 @@ def compared_variables(instance: dict, doc: dict) -> list[str]:
             for v in ("m1_flow", "m2_flow", "mAB_flow", "mBA_flow"):
                 if v in variables:
                     flows.append(f"{name}.{v}")
-        elif cls in VOLUMES:
-            states += [f"{name}.T", f"{name}.p"]
-            states += [f"{name}.Xi[{k + 1}]" for k in range(min(n_xi, 1))]
-            states += [f"{name}.C[{k + 1}]" for k in range(n_c)]
+        elif cls in VOLUMES or cls in DYNAMIC_COLUMNS:
+            vol = name if cls in VOLUMES else f"{name}.vol"
+            states += [f"{vol}.T", f"{vol}.p"]
+            states += [f"{vol}.Xi[{k + 1}]" for k in range(min(n_xi, 1))]
+            states += [f"{vol}.C[{k + 1}]" for k in range(n_c)]
         elif cls in WEATHER_READERS:
             weather += [f"{name}.weaBus.{q}" for q in WEATHER_COLUMNS]
         elif cls in WIND_BOUNDARIES:
             wind.append(f"{name}.pWin")
-    return flows + states + weather + wind
+    controls = [f"{s['name']}.y" for s in doc.get("signals", []) if s["class"] in CONTROLLERS]
+    return flows + states + controls + weather + wind
 
 
 _NOT_REAL = ("Integer", "Boolean", "String")

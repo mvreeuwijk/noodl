@@ -260,3 +260,11 @@ def test_weather_vocabulary() -> None:
     assert schema.WEATHER_BUS_OUTPUTS == ("TDryBul", "pAtm", "relHum", "winSpe", "winDir")
     assert schema.OUTSIDE_FAMILY == {"Buildings.Fluid.Sources.Outside"} | schema.OUTSIDE_WIND
     assert len(schema.OUTSIDE_WIND) == 3
+
+
+def test_dynamic_columns_and_temperature_sensors_are_no_longer_refused():
+    from noodl.apps.building_physics.modelica import schema
+
+    assert schema.refusal_reason("Buildings.Airflow.Multizone.MediumColumnDynamic") is None
+    assert "Modelica.Thermal.HeatTransfer.Sensors.TemperatureSensor" in schema.SUPPORTED
+    assert schema.refusal_reason("Modelica.Blocks.Continuous.LimPID") is not None

@@ -14,6 +14,9 @@ connection has been resolved to a port and a node. This module only supplies the
 names the reader recognises, and `REFUSED` maps a class this importer explicitly declines to
 convert to the short reason `graph.build` reports against every offending instance;
 `REFUSED_PREFIXES` refuses every class of the weather-data package but `ReaderTMY3`.
+`DYNAMIC_COLUMNS` are composite classes no graph sees: `expand.expand` rewrites each into
+supported parts first. `HEAT_SENSORS` read a volume's temperature, which may feed a signal
+block's input; `CONTROLLERS` are the feedback blocks such a sensor feeds.
 """
 
 from __future__ import annotations
@@ -98,6 +101,16 @@ THERMAL_PIN = frozenset({
 # A prescribed heat flow into a volume's `heatPort` (MSL `Thermal/HeatTransfer/Sources/
 # PrescribedHeatFlow.mo:15`): a heat source of the zone's energy balance (`assemble`).
 HEAT_SOURCES = frozenset({"Modelica.Thermal.HeatTransfer.Sources.PrescribedHeatFlow"})
+# A sensor on a volume's heat port whose output `T` is the volume's temperature (MSL 4.1.0
+# `Thermal/HeatTransfer/Sensors/TemperatureSensor.mo`: `T = port.T`, `port.Q_flow = 0`);
+# `graph.build` records which zone it reads and which signal inputs its `T` is wired into.
+HEAT_SENSORS = frozenset({"Modelica.Thermal.HeatTransfer.Sensors.TemperatureSensor"})
+# Feedback controllers: MSL 4.1.0's `LimPID` (`Blocks/Continuous.mo`). They sit in the JSON's
+# `signals`, like the Math blocks; one also listed in `REFUSED` is refused with that reason.
+CONTROLLERS = frozenset({"Modelica.Blocks.Continuous.LimPID"})
+# Composite classes `expand.expand` rewrites into supported ones before `graph.build`
+# (`MediumColumnDynamic`: a mixing volume between two half columns).
+DYNAMIC_COLUMNS = frozenset({"Buildings.Airflow.Multizone.MediumColumnDynamic"})
 SOURCES = frozenset({
     "Buildings.Fluid.Sources.TraceSubstancesFlowSource",
     "Buildings.Fluid.Sources.MassFlowSource_T",
@@ -155,16 +168,13 @@ OBSERVERS = frozenset({
 
 SUPPORTED = (
     ZONES | BOUNDARIES | ONE_WAY | TWO_WAY | COLUMNS | ZONAL | THERMAL_PIN | HEAT_SOURCES
-    | SOURCES | SIGNALS | MATH | INLINE_SENSORS | OBSERVERS | WEATHER_READERS
+    | HEAT_SENSORS | SOURCES | SIGNALS | MATH | INLINE_SENSORS | OBSERVERS | WEATHER_READERS
 )
 
 # Refused classes, each with the short reason `graph.build` reports
 # against every instance of it.
 REFUSED: dict[str, str] = {
     "Modelica.Blocks.Continuous.LimPID": "feedback controllers are not supported",
-    "Buildings.Airflow.Multizone.MediumColumnDynamic": (
-        "a dynamic (mass- and heat-storing) hydrostatic column is not supported"
-    ),
 }
 # `BoundaryConditions.WeatherData.*`: every class under this package but the supported
 # `ReaderTMY3` (`WEATHER_READERS`).
