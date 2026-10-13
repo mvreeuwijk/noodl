@@ -39,9 +39,12 @@ from noodl.apps.building_physics.species import KineticReaction, Species
 from noodl.apps.building_physics.thermal import R_AIR
 from noodl.elements import (
     AffinityFan,
+    AirDuct,
     CubicSplineFlow,
     Damper,
+    DuctTerminal,
     FixedFlow,
+    FixedVolumeFlow,
     Scaled,
     UpstreamDensityPowerLaw,
 )
@@ -1173,3 +1176,110 @@ def test_a_super_element_is_refused_naming_contamx_s_own_refusal(tmp_path):
     with pytest.raises(ValueError, match=r"element 4.*'sup_afe'.*ContamX"):
         read_prj(_variant(text, "4 23 csf_fsp csf_fsp\nmeasured curve\n 5 0 0\n",
                           "4 23 sup_afe super\n\n 2 0 0\n", tmp_path))
+
+
+DUCTS = DATA / "duct_three_zone.prj"
+A20_FILE, A15_FILE = 0.0314159, 0.0176715            # the duct elements' areas as written
+
+
+def test_junctions_become_nodes_with_contamx_s_volumes():
+    p = read_prj(DUCTS)
+    assert p.junctions == [f"junction {k}" for k in range(1, 10)]
+    v = {n: p.net.node_attr("volume")[p.net.node_index(n)].item() for n in p.junctions}
+    expected = {1: 2.0 * A20_FILE, 2: 2.5 * A20_FILE, 3: 0.85 * A20_FILE,
+                4: 2.85 * A20_FILE + 1.5 * A15_FILE, 5: 1.5 * A15_FILE, 6: 2.5 * A20_FILE,
+                7: 0.5 * A20_FILE, 8: 3.5 * A20_FILE, 9: 3.0 * A20_FILE}
+    for k, vol in expected.items():
+        assert v[f"junction {k}"] == pytest.approx(vol, rel=1e-12), k
+    z = p.net.node_attr("z_ref")
+    assert z[p.net.node_index("junction 4")].item() == pytest.approx(2.7)
+    assert p.junction_x0.shape == (9, 1)
+
+
+def test_segments_and_terminals_become_their_elements():
+    p = read_prj(DUCTS)
+    by_kind = {e.kind: e for e in p.elements}
+    assert isinstance(by_kind["duct_1"], AirDuct)
+    assert by_kind["duct_1"].length.tolist() == [4.0, 0.7]
+    assert by_kind["duct_1"].loss.tolist() == [0.0, 0.5]
+    assert isinstance(by_kind["duct_3"], AffinityFan)
+    assert by_kind["duct_3"].speed_key == "fan_speed.duct_3"
+    assert isinstance(by_kind["duct_6"], FixedVolumeFlow)
+    term = by_kind["duct_terminal"]
+    assert isinstance(term, DuctTerminal)
+    assert term.loss.tolist() == pytest.approx([0.5, 0.425, 0.125, 0.125, 1.0])
+    assert term.opening_key == "terminal_opening.duct_terminal"
+    assert [t.junction_nr for t in p.terminals] == [1, 5, 6, 7, 9]
+    keys = sorted((i.key, i.index) for i in p.inputs)
+    assert ("fan_speed.duct_3", (0,)) in keys
+    assert ("terminal_opening.duct_terminal", (2,)) in keys
+    assert len(p.edge_filters) == 2                     # segment 1 and terminal 6
+
+
+def test_the_duct_model_runs_its_initial_solve():
+    p = read_prj(DUCTS)
+    model, state, drivers = project_to_model(p)
+    out = model.steady(state, drivers, atol=1e-15, rtol=0.0)   # junctions balanced
+    flows = p.terminal_flows(out["air.q"])
+    assert flows.shape == (5,)
+    assert flows[3].item() == pytest.approx(-flows[4].item(), rel=1e-12)   # exhaust balance
+    assert flows[4].item() == pytest.approx(0.04 * 101325 / (R_AIR * 293.15), rel=1e-12)
+    assert state["species.x"].shape == (3 + 9, 1)
+    assert p.zone_mass_fractions(state["species.x"]).shape == (3, 1)
+    assert p.segment_flows(out["air.q"]).shape == (7,)
+
+
+def test_duct_records_contamx_cannot_run_or_ignores_are_refused(tmp_path):
+    text = DUCTS.read_text()
+    seg1 = "  1  0   1   2   1   1   0   0   4 4"
+    with pytest.raises(ValueError, match=r"segment 1.*Darcy-Colebrook.*ignores"):
+        read_prj(_variant(text, seg1, "  1  0   1   2   1   1   1   0   4 4", tmp_path))
+    with pytest.raises(ValueError, match=r"segment 1.*control node 3"):
+        read_prj(_variant(text, seg1, "  1  0   1   2   1   1   0   3   4 4", tmp_path))
+    geo = " 0.2 0.628319 0.0314159 0.2 0.2 0 0 250\n 0 4 4 2 4 4 0 0\n2 23 dct_dwc"
+    with pytest.raises(ValueError, match=r"duct element 1.*leakage"):
+        read_prj(_variant(text, geo, geo.replace("0.2 0 0 250", "0.2 0 0.5 250", 1),
+                          tmp_path))
+    j1 = "  1  1 3  -1"
+    with pytest.raises(ValueError, match=r"terminal 1.*wind.*bit 1"):
+        read_prj(_variant(text, j1, "  1  0 3  -1", tmp_path))
+    j2 = "  2  0 0  1   0   0   0"
+    with pytest.raises(ValueError, match=r"junction 2.*temperature"):
+        read_prj(_variant(text, j2, "  2  0 0  1   0   0   2", tmp_path))
+    dens = "   0    0.75    20     1      0      0      0"
+    with pytest.raises(ValueError, match=r"densZP.*duct"):
+        read_prj(_variant(text, dens, "   0    0.75    20     1      1      0      0",
+                          tmp_path))
+    with pytest.raises(ValueError, match=r"airflow mode is 2"):
+        read_prj(_variant(text, "     1      1     30   1e-05",
+                          "     2      1     30   1e-05", tmp_path))
+
+
+def test_the_air_mass_change_covers_the_zones_not_the_junctions(tmp_path):
+    """The zone air-mass change (`dodMdt = 1`) acts on the zones; the junctions carry none."""
+    from noodl.apps.building_physics.prj import ZoneAirMassChange
+
+    dens = "   0    0.75    20     1      0      0      0"
+    p = read_prj(_variant(DUCTS.read_text(), dens,
+                          "   0    0.75    20     1      0      0      1", tmp_path))
+    model, _, _ = project_to_model(p)
+    (source,) = [s for s in model.potential["air"].node_sources
+                 if isinstance(s, ZoneAirMassChange)]
+    assert source.nodes.tolist() == [p.net.node_index(z) for z in p.zones]
+
+
+def test_simulate_project_reports_the_terminal_flows(tmp_path):
+    """A steady-airflow run of the duct project: one row, the terminals in junction order."""
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    text = _variants(DUCTS.read_text(), [
+        ("     1      1     30   1e-05", "     0      1     30   1e-05"),
+        ("    2             30  1.00e-04", "    0             30  1.00e-04"),
+    ], tmp_path)
+    p = read_prj(text)
+    out = simulate_project(p)
+    assert out["terminal_flow"].shape == (1, 5)
+    torch.testing.assert_close(out["terminal_flow"], p.terminal_flows(out["air.q"]))
+    # The exhaust terminal carries the constant-volume fan's flow, to the solve's tolerance.
+    assert out["terminal_flow"][0, 4].item() == pytest.approx(
+        0.04 * 101325 / (R_AIR * 293.15), rel=1e-8)

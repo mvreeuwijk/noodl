@@ -373,13 +373,17 @@ def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf, record_property, label
 
     The absolute floor of the mass fractions is 64 u times the largest mass fraction; with
     `species_floor` it is 64 u times each species' own largest (a column floor), so a
-    species far smaller than another is still checked relative to its own size."""
+    species far smaller than another is still checked relative to its own size. The zones'
+    mass fractions are compared (a duct network's junctions follow them in the species
+    state), and the duct terminal flows when the project has any."""
     from noodl.apps.building_physics.contamx import run_project
     from noodl.apps.building_physics.simulation import simulate_project
 
     ref = run_project(prj, airflow_convergence=PROJECT_AIRFLOW)
     noodl_prj = _schedules_as_contamx_holds(prj, tmp_path / "noodl")
-    out = simulate_project(read_prj(noodl_prj), atol=NOODL_ATOL, rtol=1e-14)
+    project = read_prj(noodl_prj)
+    out = simulate_project(project, atol=NOODL_ATOL, rtol=1e-14)
+    out["species.x"] = project.zone_mass_fractions(out["species.x"])
     torch.testing.assert_close(out["time"], ref["time"], rtol=0, atol=1e-9)
     scale = ref["flow"].abs().max()
     torch.testing.assert_close(out["path_flow"], ref["flow"], rtol=rtol_flow,
@@ -393,12 +397,18 @@ def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf, record_property, label
     mf_allowed = 64 * F32_U * mf_scale + rtol_mf * ref["mf"].abs()
     assert bool((mf_err <= mf_allowed).all()), (
         f"mass fractions: worst error {(mf_err / mf_allowed).max().item():.3g} of allowed")
+    compared = [("flow", out["path_flow"], ref["flow"], scale, rtol_flow),
+                ("mf", out["species.x"], ref["mf"], mf_scale, rtol_mf)]
+    if ref["terminal_flow"].numel():
+        t_scale = ref["terminal_flow"].abs().max()
+        torch.testing.assert_close(out["terminal_flow"], ref["terminal_flow"],
+                                   rtol=rtol_flow, atol=(64 * F32_U * t_scale).item())
+        compared.append(("terminal_flow", out["terminal_flow"], ref["terminal_flow"],
+                         t_scale, rtol_flow))
     record_property("check", label)
     record_property("tolerance", f"flow rel {rtol_flow:.2e}, mf rel {rtol_mf:.2e}, "
                                  f"atol 64 u x max" + (" per species" if species_floor else ""))
-    for name, ours, theirs, top, rtol in (("flow", out["path_flow"], ref["flow"], scale,
-                                           rtol_flow),
-                                          ("mf", out["species.x"], ref["mf"], mf_scale, rtol_mf)):
+    for name, ours, theirs, top, rtol in compared:
         # The relative error of the entries carrying at least 0.1 % of the largest (below
         # that the floor governs: the isothermal hours' exchange flow is a float32 roundoff
         # of the zone temperature), and the largest error of any entry as a fraction of what
@@ -690,3 +700,29 @@ def test_the_four_spline_elements_match_contamx(contamx, tmp_path, record_proper
     _project_parity(SPLINES, tmp_path, rtol_flow=32 * F32_U, rtol_mf=64 * F32_U,
                     record_property=record_property, species_floor=True,
                     label="Three-zone project with the four cubic-spline elements, 24 steps")
+
+
+DUCTS = DATA / "duct_three_zone.prj"
+
+
+@pytest.mark.external
+@pytest.mark.xfail(strict=True, raises=RuntimeError, reason=(
+    "the airflow Newton started from the previous step's pressures cycles when the supply "
+    "fan's speed drops to 0.7 (step ending 00:35): its iterates alternate between the fan "
+    "curve's shut-off and free-delivery clips, where the curve's slope is zero; awaiting a "
+    "ruling (curve continuation or a cold restart)"))
+def test_a_duct_network_matches_contamx(contamx, tmp_path, record_property):
+    """`duct_three_zone.prj` (fixture NOTICE): wind terminal, filtered Colebrook duct, fan
+    curve on a speed schedule, vertical rise, split to two terminals (one half closed from
+    01:00), damper and constant-volume exhaust; 24 steps.
+
+    Budget, flows: ContamX evaluates the duct and terminal laws in single precision, 32 u in
+    a pressure drop at a fixed flow (the element tests derive it); each duct flow is set by a
+    balance of several such drops and the zone pressures, which at most doubles it: 64 u.
+    (An independent model built from the measured rules agreed with ContamX's first step to
+    32 u.) Mass fractions: the three-zone transient's 64 u, the filter's pass fraction 0.7
+    (0.43 u) and the junction volumes from float32 element areas (1 u each along the
+    chain): 72 u. The absolute floor is per species."""
+    _project_parity(DUCTS, tmp_path, rtol_flow=64 * F32_U, rtol_mf=72 * F32_U,
+                    record_property=record_property, species_floor=True,
+                    label="Three-zone project with a duct network, 24 steps")

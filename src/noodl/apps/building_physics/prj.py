@@ -5,17 +5,20 @@ transient run's dates, time step and day type, the weather and ambient-concentra
 names, the density options), the contaminants list and the species records, kinetic
 reactions and the zones that carry them, levels, day and week schedules, wind pressure
 profiles, airflow elements (power-law family, quadratic family, doorways, dampers,
-constant-flow fans and the cubic fan), zones and their temperature schedules, initial zone
-concentrations, filter elements (constant-efficiency, particle and super filters) and the
-filters on airflow paths, airflow paths with their schedules (flow multipliers)
-and constant wind pressures, source/sink elements and source/sinks of the constant, cutoff,
-decaying and burst types. Everything else is skipped to its -999 terminator; a RECORD that
-references a skipped section by a nonzero index (control, AHS) raises ValueError
-naming it, as does a non-trace species, a gaseous (loading-dependent) or UVGI filter
-element (referenced or not), a CFD or 1-D zone, a zone held at constant pressure, a
-duct network, an unsupported element type, a constant wind pressure on an interior path, a
-schedule on a fan curve and a fan curve on a path with mult != 1. A schedule number that no
-week schedule carries raises KeyError naming the zone or path.
+constant-flow fans, fan curves and cubic splines), zones and their temperature schedules,
+initial zone concentrations, filter elements (constant-efficiency, particle and super
+filters) and the filters on airflow paths, airflow paths with their schedules (flow
+multipliers) and constant wind pressures, source/sink elements and source/sinks of the
+constant, cutoff, decaying and burst types, and duct networks (`prj_hvac`): duct elements,
+junctions and terminals, their initial concentrations, and segments. Everything else is
+skipped to its -999 terminator; a RECORD that references a skipped section by a nonzero
+index (control, AHS) raises ValueError naming it, as does a non-trace species, a gaseous
+(loading-dependent) or UVGI filter element (referenced or not), a CFD or 1-D zone, a zone
+held at constant pressure, a simple air-handling system, an unsupported element type, a
+constant wind pressure on an interior path, duct leakage, a control node or a value file on
+a junction or segment, a schedule on a Darcy-Colebrook duct segment and a duct network with
+densZP = 1. A schedule number that no week schedule carries raises KeyError naming the
+zone, path, junction or segment.
 
 The control-node section is the motivating case for "skipped, not refused": NIST's own sample
 projects carry dozens of sensor and logger control nodes that no zone and no path points at,
@@ -74,6 +77,13 @@ from noodl.apps.building_physics.filters import (
     filter_transmission,
 )
 from noodl.apps.building_physics.inputs import Input, apply_inputs, bind_inputs
+from noodl.apps.building_physics.prj_hvac import (
+    BuildContext,
+    build_ducts,
+    read_duct_elements,
+    read_duct_segments,
+    read_junctions,
+)
 from noodl.apps.building_physics.schedules import Calendar, DaySchedule, WeekSchedule
 from noodl.apps.building_physics.species import KineticReaction, Species, reaction_kinetics
 from noodl.apps.building_physics.thermal import R_AIR, RHO_0, species_layer
@@ -248,11 +258,11 @@ _SHAPES = {0: "rectangular", 1: "trapezoidal"}
 _VARIABLE_PRESSURE = 1                  # the zone-flags bit of a zone whose pressure is solved
 _VARIABLE_CONTAMINANTS = 2              # ... and of a zone whose concentrations are solved
 
-# Sections whose records would silently change the physics if ignored. Ducts and the simple
-# air-handling system are networks in their own right, not attributes of a zone or a path, so
-# a project that HAS one cannot be read as the documented subset -- the refusal is on the
-# section, naming it and its record count.
-_REFUSED_SECTIONS = ("duct junctions", "duct segments", "duct elements", "simple AHS")
+# Sections whose records would silently change the physics if ignored. The simple air-handling
+# system is a network in its own right, not an attribute of a zone or a path, so a project
+# that HAS one cannot be read as the documented subset -- the refusal is on the section,
+# naming it and its record count. (Duct networks are read: see `prj_hvac`.)
+_REFUSED_SECTIONS = ("simple AHS",)
 
 
 @dataclass
@@ -278,6 +288,19 @@ class PrjPath:
     edge_columns: list[int] = field(default_factory=list)   # columns of q for this path
     schedule_nr: int = 0             # week schedule multiplying the flow; 0 = none
     filter_nr: int = 0               # filter on the path (either flow direction); 0 = none
+
+
+@dataclass
+class PrjTerminal:
+    junction_nr: int
+    zone_nr: int                     # the zone the terminal opens into; -1 = ambient
+    edge_columns: list[int]          # its column of q
+
+
+@dataclass
+class PrjSegment:
+    nr: int
+    edge_columns: list[int]          # its column of q
 
 
 @dataclass
@@ -411,6 +434,16 @@ class Project:
     zone_reactions: dict[str, KineticReaction] = field(default_factory=dict)
     # The filter on each filtered edge, by the edge's `(source, target, key)`.
     edge_filters: dict = field(default_factory=dict)
+    # Duct junction nodes in junction-number order (their species rows follow the zones'),
+    # their initial mass fractions (n_junctions, K), the terminals and segments with their
+    # columns of q, each week schedule's ContamW unit type, and the number of terminals
+    # (one opening each, on "terminal_opening.duct_terminal") when one is scheduled.
+    junctions: list[str] = field(default_factory=list)
+    junction_x0: torch.Tensor | None = None
+    terminals: list[PrjTerminal] = field(default_factory=list)
+    segments: list[PrjSegment] = field(default_factory=list)
+    schedule_units: dict[int, int] = field(default_factory=dict)
+    terminal_openings: int = 0
 
     def inputs_for(self, model) -> list[Input]:
         """The project's inputs that `model` can take: a model without a species layer (a run
@@ -428,6 +461,22 @@ class Project:
         """
         cols = [torch.as_tensor(p.edge_columns, dtype=torch.long) for p in self.paths]
         return torch.stack([q[..., c].sum(-1) for c in cols], dim=-1)
+
+    def terminal_flows(self, q: torch.Tensor) -> torch.Tensor:
+        """Flow out of each duct terminal into its zone (kg/s), in junction-number order
+        (ContamX's `getDuctTerminalFlow` order and sign)."""
+        cols = torch.tensor([t.edge_columns[0] for t in self.terminals], dtype=torch.long)
+        return q[..., cols]
+
+    def segment_flows(self, q: torch.Tensor) -> torch.Tensor:
+        """Flow along each duct segment, from its first junction to its second (kg/s), in
+        segment-number order."""
+        cols = torch.tensor([s.edge_columns[0] for s in self.segments], dtype=torch.long)
+        return q[..., cols]
+
+    def zone_mass_fractions(self, x: torch.Tensor) -> torch.Tensor:
+        """The zones' rows of a species state (the junctions' rows follow them)."""
+        return x[..., : len(self.zones), :]
 
 
 class _Lines:
@@ -574,7 +623,12 @@ def _read_run_control(lines: _Lines) -> tuple[dict[str, float], float, bool, Run
         elif stripped.startswith("!dens"):
             g = float(lines.raw().split()[1])
         elif stripped.startswith("!sim_af"):
-            fields["transient_airflow"] = int(lines.raw().split()[0]) == 1
+            mode = int(lines.raw().split()[0])
+            if mode not in (0, 1):
+                raise ValueError(
+                    f"prj: the run control's airflow mode is {mode} (duct balancing, a "
+                    f"building airflow test or a pressurization test), which is unsupported")
+            fields["transient_airflow"] = mode == 1
         elif stripped.startswith("!sim_mf"):
             fields["contaminants"] = _code(_CONTAMINANT_MODES, lines.raw().split()[0],
                                            "the contaminant simulation mode (sim_mf)")
@@ -774,11 +828,13 @@ def _read_day_schedules(lines: _Lines, count: int, out: dict[int, DaySchedule]) 
 
 
 def _read_week_schedules(lines: _Lines, count: int, days: dict[int, DaySchedule],
-                         out: dict[int, WeekSchedule]) -> None:
+                         out: dict[int, WeekSchedule], units: dict[int, int]) -> None:
+    """Week schedules by number, and each one's ContamW unit type into `units`."""
     order = sorted(days)
     for _ in range(count):
         tok = lines.record()
         nr = int(tok[0])
+        units[nr] = int(tok[1])
         lines.raw()                                 # description (may be blank)
         js = [int(v) for v in lines.record()]
         missing = sorted({j for j in js if j not in days})
@@ -791,9 +847,11 @@ def _read_week_schedules(lines: _Lines, count: int, days: dict[int, DaySchedule]
 
 
 def _read_initial_concentrations(
-    lines: _Lines, count: int, x0_rows: dict[int, list[float]]
+    lines: _Lines, count: int, x0_rows: dict[int, list[float]], *,
+    what: str = "initial zone concentrations",
 ) -> None:
-    """One row per zone, `Z# x1 .. xK`; the section's count is VALUES, not rows.
+    """One row per zone (or junction), `Z# x1 .. xK`; the section's count is VALUES, not
+    rows.
 
     Every other section's header count is a record count, but this one's is zones times
     species: `test_OneFloorWpcAddMf.prj:171` heads TWO zone rows with `6` (2 zones, 3
@@ -810,8 +868,8 @@ def _read_initial_concentrations(
         values += len(tok) - 1
     if values != count:
         raise ValueError(
-            f"prj: the 'initial zone concentrations' section promises {count} values "
-            f"(zones x species) but its rows carry {values}"
+            f"prj: the {what!r} section promises {count} values (rows x species) but its "
+            f"rows carry {values}"
         )
 
 
@@ -1105,6 +1163,11 @@ def read_prj(path) -> Project:
     x0_rows: dict[int, list[float]] = {}
     paths: list[PrjPath] = []
     sources: list[PrjSource] = []
+    schedule_units: dict[int, int] = {}
+    duct_elements: dict = {}
+    junctions: list = []
+    junction_x0_rows: dict[int, list[float]] = {}
+    segments: list = []
 
     while lines.i < len(lines.lines):
         line = lines.lines[lines.i].strip()
@@ -1127,7 +1190,7 @@ def read_prj(path) -> Project:
         elif name == "day-schedules":
             _read_day_schedules(lines, count, day_schedules)
         elif name == "week-schedules":
-            _read_week_schedules(lines, count, day_schedules, schedules)
+            _read_week_schedules(lines, count, day_schedules, schedules, schedule_units)
         elif name == "levels plus icon data":
             _read_levels(lines, count, levels)
         elif name == "wind pressure profiles":
@@ -1148,10 +1211,19 @@ def read_prj(path) -> Project:
             _read_paths(lines, count, paths, levels)
         elif name == "source/sinks":
             _read_sources(lines, count, sources, source_elements, species)
+        elif name == "duct elements":
+            read_duct_elements(lines, count, duct_elements)
+        elif name == "duct junctions":
+            read_junctions(lines, count, junctions, levels)
+        elif name == "initial junction concentrations":
+            _read_initial_concentrations(lines, count, junction_x0_rows,
+                                         what="initial junction concentrations")
+        elif name == "duct segments":
+            read_duct_segments(lines, count, segments)
         elif name in _REFUSED_SECTIONS and count:
             raise ValueError(
-                f"prj: section {name!r} has {count} records; duct networks and air-handling "
-                f"systems are unsupported"
+                f"prj: section {name!r} has {count} records; simple air-handling systems "
+                f"are unsupported"
             )
         else:
             lines.skip_section()
@@ -1162,14 +1234,22 @@ def read_prj(path) -> Project:
         sources=sources, dens_zp=dens_zp, schedules=schedules,
         species_records=species_records, reactions=reactions, zone_reactions=zone_reactions,
         run_control=run_control, source_path=source_path,
-        filter_elements=filter_elements, filters=filters,
+        filter_elements=filter_elements, filters=filters, schedule_units=schedule_units,
+        duct_elements=duct_elements, junctions=junctions, junction_x0_rows=junction_x0_rows,
+        segments=segments,
     )
 
 
 def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones, x0_rows,
            paths, sources, dens_zp, schedules, species_records, reactions, zone_reactions,
-           run_control, source_path, filter_elements, filters) -> Project:
-    """Turn the parsed records into a `Network`, elements, drives and a `Project`."""
+           run_control, source_path, filter_elements, filters, schedule_units, duct_elements,
+           junctions, junction_x0_rows, segments) -> Project:
+    """Turn the parsed records into a `Network`, elements, drives and a `Project`.
+
+    Order: the zones, the path edges and their elements, the path filters, constant wind
+    pressures and drives, the `Scaled` wrap of scheduled path kinds, then the duct network
+    (junctions, segments, terminals, with their own elements, drives, filters and inputs).
+    Only then are the element kinds and the flow layout read, so both cover the ducts."""
     net = Network(dtype=F64)
     ambient = "ambient"
     net.add_node(ambient, z_ref=0.0, volume=0.0, T0=ambient_conditions["Ta"])
@@ -1394,30 +1474,19 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
                 kind=kind,
             )
         )
-    kinds = [el.kind for el in built]
-
-    # `PotentialFlowLayer` concatenates `q` in element-KIND blocks, in
-    # `built` order -- NOT in path order, which is the network's own edge order. The two
-    # coincide only for a project with a single element kind, so translate here, once.
-    layout: dict[int, int] = {}
-    offset = 0
-    for el in built:
-        for i, col in enumerate(net.edge_index(el.kind).tolist()):
-            layout[col] = offset + i
-        offset += net.edge_index(el.kind).shape[0]
-    for p, cols in zip(paths, path_edges, strict=True):
-        p.edge_columns = [layout[c] for c in cols]
+    def filter_of(nr: int, what: str):
+        try:
+            element = filters[nr]
+        except KeyError as exc:
+            raise KeyError(f"prj: {what} references filter {nr}, which the "
+                           f"'filters' section does not define") from exc
+        return _filter_object(element, filter_elements, species)
 
     edge_filters: dict = {}
     for p, cols in zip(paths, path_edges, strict=True):
         if not p.filter_nr:
             continue
-        try:
-            element = filters[p.filter_nr]
-        except KeyError as exc:
-            raise KeyError(f"prj: path {p.nr} references filter {p.filter_nr}, which the "
-                           f"'filters' section does not define") from exc
-        flt = _filter_object(element, filter_elements, species)
+        flt = filter_of(p.filter_nr, f"path {p.nr}")
         for c in cols:
             edge_filters[net.edges[c]] = flt
 
@@ -1476,6 +1545,42 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
                             name=f"path {p.nr} schedule {p.schedule_nr}"))
     built = [Scaled(el, f"flow_multiplier.{el.kind}") if el.kind in multiplier_edges else el
              for el in built]
+    wind_pressure_tensors = {k: torch.tensor(v, dtype=F64) for k, v in wind_pressure.items()}
+
+    # The duct network adds its own kinds (already wrapped where scheduled), drives, filters
+    # and inputs; the kinds and the layout below are read after it, so they cover the ducts.
+    duct = None
+    if junctions or segments:
+        if dens_zp:
+            raise ValueError("prj: densZP = 1 in a project with a duct network is "
+                             "unsupported (junction densities at their absolute pressure "
+                             "are not modelled)")
+        ctx = BuildContext(net=net, ambient=ambient, zone_name=node_of, week=week,
+                           schedule_units=schedule_units, filter_of=filter_of, g=g,
+                           profiles=profiles, inputs=inputs, edge_filters=edge_filters,
+                           built=built, drives=drives,
+                           constant_wind_pressure=wind_pressure_tensors)
+        duct = build_ducts(ctx, duct_elements, junctions, segments)
+        multiplier_edges.update(duct.multiplier_edges)
+        speed_edges.update(duct.speed_edges)
+
+    kinds = [el.kind for el in built]
+
+    # `PotentialFlowLayer` concatenates `q` in element-KIND blocks, in
+    # `built` order -- NOT in path order, which is the network's own edge order. The two
+    # coincide only for a project with a single element kind, so translate here, once.
+    layout: dict[int, int] = {}
+    offset = 0
+    for el in built:
+        for i, col in enumerate(net.edge_index(el.kind).tolist()):
+            layout[col] = offset + i
+        offset += net.edge_index(el.kind).shape[0]
+    for p, cols in zip(paths, path_edges, strict=True):
+        p.edge_columns = [layout[c] for c in cols]
+    terminals = [PrjTerminal(j_nr, z_nr, [layout[col]])
+                 for j_nr, z_nr, col in (duct.terminal_columns if duct else [])]
+    duct_segments = [PrjSegment(nr, [layout[col]])
+                     for nr, col in (duct.segment_columns if duct else [])]
 
     K = max(1, len(species))
     x0 = torch.zeros(len(zone_names), K, dtype=F64)
@@ -1483,6 +1588,11 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         if nr in x0_rows:
             row = x0_rows[nr]
             x0[i, : len(row)] = torch.tensor(row, dtype=F64)
+    junction_x0 = torch.zeros(len(junctions), K, dtype=F64)
+    for i, j in enumerate(junctions):
+        if j.nr in junction_x0_rows:
+            row = junction_x0_rows[j.nr]
+            junction_x0[i, : len(row)] = torch.tensor(row, dtype=F64)
 
     return Project(
         net=net, elements=built, drives=drives, zones=zone_names, ambient=ambient, paths=paths,
@@ -1494,9 +1604,12 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         ambient_mass_fractions=torch.tensor(
             [s.default_mass_fraction for s in species_records], dtype=F64),
         multiplier_edges=multiplier_edges, speed_edges=speed_edges,
-        constant_wind_pressure={k: torch.tensor(v, dtype=F64) for k, v in wind_pressure.items()},
+        constant_wind_pressure=wind_pressure_tensors,
         zone_flags=zone_flags, source_path=source_path, species_records=species_records,
         zone_reactions=by_zone, edge_filters=edge_filters,
+        junctions=duct.junction_names if duct else [], junction_x0=junction_x0,
+        terminals=terminals, segments=duct_segments, schedule_units=schedule_units,
+        terminal_openings=duct.terminal_openings if duct else 0,
     )
 
 
@@ -1666,8 +1779,10 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     T[net.node_index(project.ambient)] = amb["Ta"]
     rho = amb["Pb"] / (R_AIR * T)
     volumes = net.node_attr("volume", default=0.0)
+    # The zones only: a duct junction's air-mass change is not part of the option.
+    zones = set(project.zones)
     zone_nodes = [i for i, name in enumerate(net.nodes)
-                  if name != project.ambient and volumes[i].item() > 0.0]
+                  if name in zones and volumes[i].item() > 0.0]
     zone_mass_change = project.run_control is not None and project.run_control.zone_mass_change
     # The zone air-mass change source exists only when the project asks for it and there is a
     # zone to carry it (an empty node set has no air mass to change).
@@ -1736,7 +1851,8 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
                 project.ambient_mass_fractions.reshape(1, -1).clone())
         else:
             drivers["species.x_boundary"] = torch.zeros(1, K, dtype=F64)
-        state["species.x"] = project.x0.clone()
+        state["species.x"] = (project.x0.clone() if not project.junctions
+                              else torch.cat([project.x0, project.junction_x0]))
     # The inputs the airflow elements and drives read themselves, declared for
     # `model.refs.inputs` and `Model.check`.
     model.input_specs = {
@@ -1756,6 +1872,13 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
             description="speed of each fan relative to its rated speed (a schedule or "
                         "control); below the fan's off ratio it is stopped",
             unit="-", over=("edges", kind))
+    if project.terminal_openings:
+        key = "terminal_opening.duct_terminal"
+        drivers[key] = torch.ones(project.terminal_openings, dtype=F64)
+        model.input_specs[key] = dict(
+            description="opening of each duct terminal (1 open, 0 closed: its loss "
+                        "coefficient rises by (1 - S) / S)", unit="-",
+            over=("edges", "duct_terminal"))
     for kind, value in project.constant_wind_pressure.items():
         drivers[f"wind_pressure.{kind}"] = value.clone()
         model.input_specs[f"wind_pressure.{kind}"] = dict(

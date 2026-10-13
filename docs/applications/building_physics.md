@@ -105,8 +105,10 @@ A duct system is described with `DuctNetwork` and then added to a `Network` or a
   CONTAM's 0.125 (`DEFAULT_TERMINAL_LOSS`). A terminal in the ambient takes the wind as an
   envelope path does: from the `WindProfile` numbered `profile` at the wall's `azimuth` (or a
   component's `facade`), or from a constant pressure coefficient `Cp`, either scaled by the
-  speed modifier `Ch`. `Ch`, `azimuth` or `facade` without a `profile` or a `Cp` is refused,
-  since no wind would act.
+  speed modifier `Ch`. Wind data that would act on nothing is refused, naming the terminal:
+  `Ch`, `azimuth` or `facade` without a `profile` or with `Cp=0`, a `profile` and a `Cp`
+  together, and wind on a terminal into any zone but the ambient (`DuctNetwork(ambient=...)`
+  names it, `"ambient"` by default; inside a component, `outer` of that name).
 
 Every value is checked when the segment or terminal is described, and an error names it (its
 `name`, or its two ends): lengths, diameters, roughnesses and areas must be positive, a
@@ -163,6 +165,39 @@ The terminal in the ambient carries the fan's flow into the duct (negative: its 
 direction is out of the duct) and the room's terminal delivers it. Each junction holds half
 of its segment: 157.1 litres for the 10 m duct of 0.2 m, 78.5 for the 5 m one. The junction
 nodes also carry `heat_capacity=0`: no lumped heat capacity beyond their air.
+
+From a `.prj`: `read_prj` reads a CONTAM duct network (duct elements, junctions, terminals,
+segments; see [CONTAM](../formats/contam.md)) into the same kinds of edges, one kind per duct
+element (`duct_<nr>`) and one for all terminals (`duct_terminal`). Its junctions are nodes
+named `"junction <nr>"`, after the zones, so a species state carries the zones' rows first;
+`project.zone_mass_fractions(x)` selects them. `project.terminal_flows(q)` is the flow out of
+each terminal into its zone in junction-number order (ContamX's order and sign), and
+`project.segment_flows(q)` the flow along each segment. `duct_three_zone.prj` supplies the
+three-zone building from a wind-exposed intake through a fan and exhausts zone three through a
+constant-volume fan:
+
+```python
+from noodl.apps.building_physics import project_to_model, read_prj
+from noodl.apps.building_physics.prj import steady
+
+project = read_prj("duct_three_zone.prj")
+model, state, drivers = project_to_model(project)
+solved = steady(model, state, drivers)
+print(project.junctions[:3], "...")
+print([round(v, 4) for v in project.terminal_flows(solved["air.q"]).tolist()], "kg/s")
+x = solved["species.x"]
+print(tuple(x.shape), tuple(project.zone_mass_fractions(x).shape))
+```
+
+```text
+['junction 1', 'junction 2', 'junction 3'] ...
+[-0.3169, 0.2088, 0.108, -0.0482, 0.0482] kg/s
+(12, 1) (3, 1)
+```
+
+The intake (junction 1) draws 0.317 kg/s from the ambient, split between zone one (0.209) and
+zone two (0.108); the exhaust takes 0.04 m3/s of 293.15 K air, 0.0482 kg/s, from zone three.
+`simulate_project` returns the terminal flows of every step as `"terminal_flow"`.
 
 ## Building from components
 

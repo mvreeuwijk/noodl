@@ -34,10 +34,19 @@ family
 which enters the element's first coefficient, and a `ccf` record's removal coefficient too); filters on airflow paths (`Project.edge_filters`, the species layer's `transmission`):
 constant-efficiency (`cef`), particle (`pf0`, interpolated at each species' mean diameter as
 ContamX does) and super (`spf`) filter elements; a filter acts on the air crossing its path in
-either direction.
+either direction; duct networks: duct elements `dct_dwc` (ContamX's friction law; its `lam`
+field has no effect, as in ContamX), `dct_plr`, `dct_fcn`, `dct_qcn`, `dct_cmf`, `dct_cvf`,
+`dct_fan`, `dct_bdq`, `dct_bdf`, `dct_fsp`, `dct_qsp`, `dct_psf`, `dct_psq`; junctions with
+their temperatures and initial concentrations and ContamX's volumes (half the length times
+the element area of every segment that meets them); terminals with their loss and balance
+coefficients (the duct-balancing data `bal`, `Fdes` and `Cbmax` is read and, as in ContamX,
+has no effect), filters, schedules (the opening, or the junction temperature when the week
+schedule's unit type is a temperature) and wind (an ambient terminal flagged for wind, from
+its profile or a constant wind pressure); segments with their dynamic losses, filters and
+schedules (a flow multiplier, or a fan's speed ratio).
 
 **Refused by name**, rather than silently dropped: control nodes and air-handling
-systems referenced by nonzero index; boundary-layer diffusion (`bls`), resuspension (`dvr`)
+systems referenced by nonzero index; simple air-handling systems; boundary-layer diffusion (`bls`), resuspension (`dvr`)
 and super (`sup`) source/sink elements, when a source/sink record references one; a source/sink
 record whose element or zone the file does not define; gaseous (`gf0`) and UVGI (`uv1`) filter elements,
 referenced or not; a filter that names a species the project does not simulate (when a path
@@ -53,7 +62,13 @@ value); a zone without the variable-pressure flag (which
 ContamX holds at constant pressure) or, in a project with species, without the
 variable-contaminants flag (ContamX then holds the zone's concentrations at their initial values
 and ignores its sources); CFD and 1-D convection/diffusion zones; continuous-values-file
-zones and paths; duct networks; a constant wind pressure on an interior path; `sup_afe` super elements (ContamX 3.4.1.7 cannot simulate them); `stackD = 1` (densities varying with
+zones and paths; duct leakage (a duct element's leakage rate); a schedule on a
+Darcy-Colebrook segment (ContamX ignores it); control nodes, kinetic reactions or value files on
+junctions, and control nodes or value files on segments; wind data on a terminal that is not
+an ambient terminal flagged for wind; a non-temperature schedule on a junction that is not a
+terminal; a duct network with `densZP = 1`; airflow modes other than steady and transient
+(duct balancing, the building airflow and pressurization tests); a constant wind pressure on
+an interior path; `sup_afe` super elements (ContamX 3.4.1.7 cannot simulate them); `stackD = 1` (densities varying with
 height inside a zone); a wind pressure profile with the trigonometric curve fit; a day schedule whose shape is
 neither rectangular nor trapezoidal; zone names with spaces.
 
@@ -122,6 +137,15 @@ project = read_prj("test_OneZoneWthCtmStack.prj")
 out = simulate_project(project)          # the project's run control, schedules, .wth and .ctm
 out["path_flow"]                         # (289, 2) kg/s, path-number order
 ```
+
+A project with a duct network adds its junctions to the network as nodes named
+`"junction <nr>"` (`Project.junctions`), after the zones: the species state carries the zones'
+rows first and the junctions' after them, and `project.zone_mass_fractions(x)` selects the
+zones. `project.terminal_flows(q)` is the flow out of each duct terminal into its zone, in
+junction-number order (the order and sign of ContamX's `getDuctTerminalFlow`), and
+`project.segment_flows(q)` the flow along each segment in segment-number order.
+`simulate_project` and `contamx.run_project` both report `"terminal_flow"`, `(N, n_terminals)`
+kg/s; `run_project`'s is empty, `(N, 0)`, without terminals.
 
 ## CONTAM `.wth`
 

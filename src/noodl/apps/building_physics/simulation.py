@@ -228,7 +228,11 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), **step_kwargs) ->
     schedules, its weather and ambient-concentration files (resolved next to the `.prj`), with
     the time step fixed (no step split at a schedule's jump, as in ContamX) and the zone
     air-mass change when the run control asks for it. `inputs` are extra inputs of your own.
-    Returns `simulate`'s histories plus `"path_flow"` (N, n_paths) in path-number order.
+    Returns `simulate`'s histories plus `"path_flow"` (N, n_paths) in path-number order and,
+    for a project with a duct network, `"terminal_flow"` (N, n_terminals): the flow out of
+    each duct terminal into its zone, in junction-number order. The species histories carry
+    the zones' rows first, then the junctions' (`project.zone_mass_fractions` selects the
+    zones).
 
     A steady airflow run (with no or steady contaminants) returns the one steady state at the
     run control's steady day, time and day type. Refused by name: cyclic contaminant runs,
@@ -278,6 +282,8 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), **step_kwargs) ->
         out.update({f"{n}.x": out_state[f"{n}.x"].unsqueeze(0) for n in model.transport})
         out["time"] = torch.zeros(1, dtype=F64)
         out["path_flow"] = project.path_flows(out["air.q"])
+        if project.terminals:
+            out["terminal_flow"] = project.terminal_flows(out["air.q"])
         return out
     weather = read_wth(base / rc.weather_file) if rc.weather_file else None
     ambient = read_ctm(base / rc.ambient_file) if rc.ambient_file else None
@@ -293,4 +299,6 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), **step_kwargs) ->
                    land_on_breakpoints=False,
                    **step_kwargs)
     out["path_flow"] = project.path_flows(out["air.q"])
+    if project.terminals:
+        out["terminal_flow"] = project.terminal_flows(out["air.q"])
     return out

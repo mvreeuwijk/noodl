@@ -212,3 +212,28 @@ def test_a_terminal_with_a_constant_pressure_coefficient_feels_the_wind_without_
 def test_terminals_without_wind_get_no_wind_drive():
     elements, drives = duct_elements_from_edges(_wind_net())
     assert [type(d).__name__ for d in drives] == ["DuctStack", "Stack"]
+
+
+@pytest.mark.parametrize("zone, wind, message", [
+    ("ambient", dict(Cp=0.0, Ch=0.5), "Ch given with Cp = 0"),
+    ("ambient", dict(Cp=0.0, azimuth=90.0), "azimuth given with Cp = 0"),
+    ("ambient", dict(Cp=0.0, facade="south"), "facade given with Cp = 0"),
+    ("ambient", dict(profile=1, Cp=0.4), "both a profile and a Cp"),
+    ("room", dict(profile=1), "wind on a terminal into 'room'"),
+    ("room", dict(Cp=0.4), "wind on a terminal into 'room'"),
+])
+def test_a_terminal_whose_wind_would_be_inert_is_refused_by_name(zone, wind, message):
+    ducts = DuctNetwork()
+    ducts.junction("j", z_ref=0.0)
+    with pytest.raises(ValueError, match=f"terminal intake: {message}"):
+        ducts.terminal("j", zone, area=0.03, name="intake", **wind)
+
+
+def test_wind_on_a_terminal_into_a_component_s_outer_ambient_is_accepted():
+    from noodl.components import Component
+
+    ducts = DuctNetwork(ambient="outdoors")
+    ducts.junction("j", z_ref=0.0)
+    ducts.terminal("j", Component.outer("outdoors"), area=0.03, Cp=0.4)
+    with pytest.raises(ValueError, match="wind on a terminal into 'ambient'"):
+        ducts.terminal("j", "ambient", area=0.03, Cp=0.4)

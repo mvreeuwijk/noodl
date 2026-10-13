@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from noodl.apps.building_physics.thermal import T_REF
+from noodl.components import OuterRef
 from noodl.drives import DuctStack, Stack, Wind
 from noodl.elements import AirDuct, DuctTerminal
 
@@ -55,10 +56,13 @@ class DuctNetwork:
 
     Junction volumes come from the segments, which is why the system is described before it
     is added. Edge kinds: `kind` for the segments, `terminal_kind` for the terminals.
+    `ambient` names the ambient node (or, inside a component, its `outer` reference), the
+    one zone whose terminals take the wind.
     """
 
-    def __init__(self, *, kind: str = "duct", terminal_kind: str = "duct_terminal") -> None:
-        self.kind, self.terminal_kind = kind, terminal_kind
+    def __init__(self, *, kind: str = "duct", terminal_kind: str = "duct_terminal",
+                 ambient: str = "ambient") -> None:
+        self.kind, self.terminal_kind, self.ambient = kind, terminal_kind, ambient
         self._junctions: dict[str, dict] = {}
         self._segments: list[_Segment] = []
         self._terminals: list[_Terminal] = []
@@ -110,8 +114,10 @@ class DuctNetwork:
         at the terminal, `loss` (positive) its loss coefficient. A terminal in the ambient
         takes the wind as an envelope path does: from the `WindProfile` numbered `profile`
         at the wall's `azimuth` (or, inside a component, its `facade`), or from the constant
-        pressure coefficient `Cp`, scaled by the speed modifier `Ch` (1 by default). `Ch`,
-        `azimuth` and `facade` without a `profile` or a `Cp` are refused."""
+        pressure coefficient `Cp`, scaled by the speed modifier `Ch` (1 by default). Wind data
+        that would act on nothing is refused: `Ch`, `azimuth` or `facade` without a `profile`
+        or with `Cp = 0`, a `profile` and a `Cp` together, and wind on a terminal into a zone
+        other than the ambient."""
         where = f"DuctNetwork: terminal {name or f'{junction!r} -> {zone!r}'}"
         self._known(junction, "a terminal")
         if not area > 0:
@@ -122,13 +128,23 @@ class DuctNetwork:
         if profile is not None and not (float(profile) == int(profile) and profile >= 1):
             raise ValueError(f"{where}: profile must be a wind profile number from 1, got "
                              f"{profile!r}; for no profile leave it out")
-        if profile is None and Cp is None:
-            stray = [k for k, v in dict(Ch=Ch, azimuth=azimuth, facade=facade).items()
-                     if v is not None]
-            if stray:
-                raise ValueError(f"{where}: {', '.join(stray)} given without a profile or a "
-                                 f"Cp, so no wind would act; give the terminal's profile or "
-                                 f"its constant pressure coefficient Cp")
+        stray = [k for k, v in dict(Ch=Ch, azimuth=azimuth, facade=facade).items()
+                 if v is not None]
+        if profile is None and Cp is None and stray:
+            raise ValueError(f"{where}: {', '.join(stray)} given without a profile or a "
+                             f"Cp, so no wind would act; give the terminal's profile or "
+                             f"its constant pressure coefficient Cp")
+        if profile is None and Cp is not None and float(Cp) == 0.0 and stray:
+            raise ValueError(f"{where}: {', '.join(stray)} given with Cp = 0, so no wind "
+                             f"would act; give a nonzero Cp or the terminal's profile")
+        if profile is not None and Cp is not None:
+            raise ValueError(f"{where}: both a profile and a Cp given; the profile would "
+                             f"replace the constant Cp, so give one of them")
+        into = zone.name if isinstance(zone, OuterRef) else zone
+        if (profile is not None or Cp is not None) and into != self.ambient:
+            raise ValueError(f"{where}: wind on a terminal into {into!r}, which is not the "
+                             f"ambient {self.ambient!r}; the wind acts only on a terminal "
+                             f"into the ambient")
         wind: dict = {k: float(v) for k, v in
                       dict(Ch=Ch, azimuth=azimuth, profile=profile, Cp=Cp).items()
                       if v is not None}

@@ -66,3 +66,13 @@ Two of NIST's one-zone stack projects are present:
   is crossed against its declared direction, zone two is at 303.15 K, and a 0.020068 kg/s
   supply (path 5) drives the curves past their first segment. Sarin outdoors at 1e-3 kg/kg;
   two hours at 300 s. Verified to load and run in ContamX 3.4.1.7.
+- `duct_three_zone.prj` is written for this repository from NIST's
+  `valThreeZonesWthCtm-UseApi.prj`, not an official sample. It adds a duct network: a
+  supply from a wind-exposed ambient terminal through a filtered Darcy-Colebrook duct, a
+  fan curve on a speed schedule (1, 0.7 from 00:30), a vertical rise with a dynamic loss
+  and a split to a terminal in zone one (with a balance coefficient) and a filtered
+  terminal in zone two (half closed from 01:00); and an exhaust from zone three through a
+  backdraft damper and a constant-volume fan to an ambient terminal. Supply junctions at
+  303.15 K. Sarin outdoors at 1e-3 kg/kg; two hours at 300 s. Verified to load and run in
+  ContamX 3.4.1.7; an independent model built from the measured duct rules reproduces its
+  first-step flows to 1.9e-6.

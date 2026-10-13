@@ -129,8 +129,10 @@ def _open(prj_path, ambient: dict, *, reported_as=None):
     return cx
 
 
-def _snapshot(cx) -> tuple[list[float], list[list[float]]]:
-    """Net path flows [kg/s] and zone mass fractions [-], in contamxpy's path and zone order.
+def _snapshot(cx) -> tuple[list[float], list[list[float]], list[float]]:
+    """Net path flows [kg/s], zone mass fractions [-], in contamxpy's path and zone order, and
+    duct terminal flows [kg/s], out of each terminal into its zone, in junction-number order
+    (`getDuctTerminalFlow`; an empty list without terminals).
 
     `getPathFlow` returns the path's two directional flows; their sum is the net flow, and
     that net is POSITIVE IN THE from_zone -> to_zone DIRECTION -- the same orientation
@@ -157,10 +159,11 @@ def _snapshot(cx) -> tuple[list[float], list[list[float]]]:
     """
     flows = [sum(cx.getPathFlow(p.nr)) for p in cx.paths]
     mf = [[cx.getZoneMassFraction(z.nr, c) for c in range(cx.nContaminants)] for z in cx.zones]
-    return flows, mf
+    terminals = [cx.getDuctTerminalFlow(i + 1) for i in range(cx.nDuctTerminals)]
+    return flows, mf, terminals
 
 
-def _result(cx, flows, mf, dt=None) -> dict:
+def _result(cx, flows, mf, terminals, dt=None) -> dict:
     # `from_zone`/`to_zone` are contamxpy's own numbering, in which AMBIENT IS 0 -- the `.prj`
     # file writes -1 for the same thing, so these do not compare directly with `PrjPath`.
     out = {
@@ -171,6 +174,7 @@ def _result(cx, flows, mf, dt=None) -> dict:
         "zone_name": [z.name for z in cx.zones],
         "flow": torch.tensor(flows, dtype=torch.float64),
         "mf": torch.tensor(mf, dtype=torch.float64),
+        "terminal_flow": torch.tensor(terminals, dtype=torch.float64),
     }
     if dt is not None:
         out["dt"] = dt
@@ -178,7 +182,9 @@ def _result(cx, flows, mf, dt=None) -> dict:
 
 
 def run_steady(prj_path, *, ambient: dict, airflow_convergence=None) -> dict:
-    """Path net flows [kg/s] and zone mass fractions after the initial steady-state solve.
+    """Path net flows [kg/s], zone mass fractions and duct terminal flows (`terminal_flow`,
+    kg/s, out of each terminal into its zone, in junction-number order) after the initial
+    steady-state solve.
 
     `airflow_convergence=(rcnvg, acnvg)` overrides the project's airflow tolerances in the
     scratch copy (see `_set_airflow_convergence`); `None` runs the project as written.
@@ -186,28 +192,28 @@ def run_steady(prj_path, *, ambient: dict, airflow_convergence=None) -> dict:
     with _isolated(prj_path, airflow_convergence) as prj:
         cx = _open(prj, ambient, reported_as=prj_path)
         try:
-            flows, mf = _snapshot(cx)
-            return _result(cx, flows, mf)
+            return _result(cx, *_snapshot(cx))
         finally:
             cx.endSimulation()
 
 
 def run_transient(prj_path, *, steps: int, ambient: dict, airflow_convergence=None) -> dict:
     """`steps` steps of the project's own time step; results stacked with the initial state
-    first: flow (steps+1, n_paths), mf (steps+1, n_zones, K). `airflow_convergence` as in
-    `run_steady`."""
+    first: flow (steps+1, n_paths), mf (steps+1, n_zones, K), terminal_flow
+    (steps+1, n_terminals). `airflow_convergence` as in `run_steady`."""
     with _isolated(prj_path, airflow_convergence) as prj:
         cx = _open(prj, ambient, reported_as=prj_path)
         try:
             dt = float(cx.getSimTimeStep())
-            f0, m0 = _snapshot(cx)
-            flows, mfs = [f0], [m0]
+            f0, m0, j0 = _snapshot(cx)
+            flows, mfs, terms = [f0], [m0], [j0]
             for _ in range(int(steps)):
                 cx.doSimStep(1)
-                f, m = _snapshot(cx)
+                f, m, j = _snapshot(cx)
                 flows.append(f)
                 mfs.append(m)
-            return _result(cx, flows, mfs, dt)
+                terms.append(j)
+            return _result(cx, flows, mfs, terms, dt)
         finally:
             cx.endSimulation()
 
@@ -216,8 +222,9 @@ def run_project(prj_path, *, airflow_convergence=None) -> dict:
     """Run the project AS WRITTEN: its own run control (start, end, time step), weather and
     ambient-concentration files and schedules; no ambient value is set through the API.
     Returns the initial state and every step: `time` (N,) s since the start, `flow`
-    (N, n_paths) kg/s, `mf` (N, n_zones, K), `dt`, and the path and zone numbering of
-    `run_transient`. `airflow_convergence` as in `run_steady`.
+    (N, n_paths) kg/s, `mf` (N, n_zones, K), `terminal_flow` (N, n_terminals): flow out of
+    each duct terminal into its zone, kg/s, in junction-number order, `dt`, and the path and
+    zone numbering of `run_transient`. `airflow_convergence` as in `run_steady`.
 
     ContamX (3.4.1.7) opens the project's weather and contaminant files relative to the
     process's WORKING DIRECTORY, so the run changes into the scratch copy's directory for its
@@ -243,18 +250,19 @@ def run_project(prj_path, *, airflow_convergence=None) -> dict:
                     f"contamx: {prj_path} runs {duration} s, not a whole number (>= 1) of "
                     f"{dt} s time steps"
                 )
-            f, m = _snapshot(cx)
-            flows, mfs, times = [f], [m], [0.0]
+            f, m, j = _snapshot(cx)
+            flows, mfs, terms, times = [f], [m], [j], [0.0]
             for k in range(1, n + 1):
                 cx.doSimStep(1)
                 t = (cx.getCurrentDayOfYear() - d0) * 86400.0 + cx.getCurrentTimeInSec() - t0
                 if abs(t - k * dt) > 1e-6:
                     raise RuntimeError(f"contamx: step {k} reports t = {t} s, not {k * dt} s")
-                f, m = _snapshot(cx)
+                f, m, j = _snapshot(cx)
                 flows.append(f)
                 mfs.append(m)
+                terms.append(j)
                 times.append(t)
-            out = _result(cx, flows, mfs, dt)
+            out = _result(cx, flows, mfs, terms, dt)
             out["time"] = torch.tensor(times, dtype=torch.float64)
             return out
         finally:
