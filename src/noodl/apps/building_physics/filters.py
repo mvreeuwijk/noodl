@@ -67,7 +67,8 @@ class ParticleFilter:
     `diameters` (m, increasing) and `efficiencies` (0..1) are the curve's points. As in
     ContamX 3.4.1.7 (measured): ContamX's curve fit (`noodl.elements.SplineCurve`) in
     log10(diameter); ContamX refuses a curve whose first two or last two efficiencies
-    differ, and so does this class. Efficiencies may be tensors that carry gradients.
+    differ, and so does this class. Efficiencies may be tensors that carry gradients; they
+    flow through the shared fit's slopes as well as its values (the values are unchanged).
     """
 
     def __init__(self, diameters, efficiencies, *, name: str = "") -> None:

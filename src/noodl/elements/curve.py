@@ -115,6 +115,26 @@ class SplineCurve:
         return torch.where(v < ys[0], below, torch.where(v > ys[-1], above, inside))
 
 
+def _fit_is_increasing(curve: SplineCurve) -> bool:
+    """True when the fitted curve has a positive derivative everywhere: the end slopes, the
+    knot slopes of the cubic part, and the minimum of each Hermite piece's quadratic
+    derivative."""
+    if curve._m is None:
+        return True
+    xs, ys, m = (t.detach() for t in (curve._xs, curve._ys, curve._m))
+    if bool((m <= 0).any()):
+        return False
+    h = xs[1:] - xs[:-1]
+    s = (ys[1:] - ys[:-1]) / h
+    a, b = m[:-1], m[1:]
+    c, d = 3 * s - 2 * a - b, a + b - 2 * s     # dp/dx = a + 2 c t + 3 d t^2 on t in [0, 1]
+    safe = torch.where(d.abs() > 0, d, torch.ones_like(d))
+    t = torch.where(d.abs() > 0, -c / (3 * safe), torch.zeros_like(d))
+    inside = (t > 0) & (t < 1)
+    low = a + 2 * c * t + 3 * d * t * t
+    return not bool((inside & (low <= 0)).any())
+
+
 class CubicSplineFlow(Element):
     """An airflow element given by measured points, fitted as ContamX fits them
     (`SplineCurve`): CONTAM's cubic-spline elements.
@@ -125,7 +145,10 @@ class CubicSplineFlow(Element):
     the density of the air entering the edge, `drivers[rho_key]` at `src` (dp >= 0) or `tgt`.
     `multiplier` (one per edge, or one for all) multiplies the flow, like CONTAM's path
     mult. ContamX requires at least four points and a positive slope on every segment, and
-    so does this element."""
+    so does this element. This element also refuses a curve whose fitted spline is not
+    increasing everywhere (the cubic part can overshoot between points even when every
+    segment rises): ContamX may accept such a curve, but the inversion of the `independent=
+    "flow"` forms would then be ambiguous. The result is float64 whatever the input dtype."""
 
     def __init__(self, x, y, *, independent: str = "pressure", volume: bool = False,
                  multiplier=1.0, src, tgt, rho_key: str = "rho",
@@ -144,6 +167,11 @@ class CubicSplineFlow(Element):
             raise ValueError(f"{label}: every segment's slope must be positive (ContamX "
                              f"refuses this curve), got {y_t.detach().tolist()}")
         self.curve = SplineCurve(x_t, y_t, name=kind)
+        if not _fit_is_increasing(self.curve):
+            raise ValueError(f"{label}: the fitted curve is not increasing (its cubic part "
+                             f"overshoots between points); the inversion of a pressure-flow "
+                             f"form would be ambiguous, so this curve is refused, though "
+                             f"ContamX may accept it")
         self.independent, self.volume = independent, bool(volume)
         self.register_buffer("multiplier", torch.as_tensor(multiplier, dtype=F64))
         self.register_buffer("src", torch.as_tensor(src).to(torch.long).reshape(-1))

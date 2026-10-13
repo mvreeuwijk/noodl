@@ -1,4 +1,4 @@
-"""Measured airflow curves fitted as ContamX 3.4.1.7 fits them (probes c6a-c6c)."""
+"""Measured airflow curves fitted as ContamX 3.4.1.7 fits them."""
 
 from __future__ import annotations
 
@@ -53,8 +53,16 @@ def test_the_inverse_undoes_the_curve_and_carries_gradients():
     assert torch.isfinite(g).all() and bool((g > 0).all())
 
 
+def _bisect(curve, target):
+    lo, hi = -10.0, 10.0
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if curve(mid).item() < target else (lo, mid)
+    return 0.5 * (lo + hi)
+
+
 def test_the_four_element_forms():
-    """ContamX (c6b): qsp F = rho_up Q(dp); psf dp = P(F); psq dp = P(F / rho_up)."""
+    """ContamX: qsp F = rho_up Q(dp); psf dp = P(F); psq dp = P(F / rho_up)."""
     kw = dict(src=[0], tgt=[1])
     d = {"rho": RHO}
     fsp = CubicSplineFlow(X, Y, **kw)
@@ -64,9 +72,9 @@ def test_the_four_element_forms():
     dp = torch.tensor([8.0], dtype=F64)
     assert qsp.flow(dp, d).item() == pytest.approx(RHO[0].item() * fsp.flow(dp, d).item())
     assert qsp.flow(-dp, d).item() == pytest.approx(RHO[1].item() * fsp.flow(-dp, d).item())
-    assert psf.flow(dp, d).item() == pytest.approx(SplineCurve(Y, X).inverse(8.0).item())
-    assert psq.flow(dp, d).item() == pytest.approx(
-        RHO[0].item() * SplineCurve(Y, X).inverse(8.0).item())
+    root = _bisect(SplineCurve(Y, X), 8.0)           # the flow at which the curve gives 8 Pa
+    assert psf.flow(dp, d).item() == pytest.approx(root, rel=1e-10)
+    assert psq.flow(dp, d).item() == pytest.approx(RHO[0].item() * root, rel=1e-10)
     mult = CubicSplineFlow(X, Y, multiplier=torch.tensor([3.0], dtype=F64), **kw)
     assert mult.flow(dp, d).item() == pytest.approx(3 * fsp.flow(dp, d).item())
 
@@ -79,3 +87,20 @@ def test_curves_contamx_would_refuse_are_refused():
                         kind="sp_4")
     with pytest.raises(ValueError, match="increasing"):
         SplineCurve([0.0, 2.0, 1.0], [0.0, 1.0, 2.0])
+
+
+OVERSHOOT_X = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+OVERSHOOT_Y = [0.0, 10.0, 10.01, 10.02, 10.03, 40.0]
+
+
+@pytest.mark.parametrize("independent, x, y", [
+    ("pressure", OVERSHOOT_X, OVERSHOOT_Y), ("flow", OVERSHOOT_X, OVERSHOOT_Y)])
+def test_a_fit_that_overshoots_is_refused_though_every_segment_rises(independent, x, y):
+    """Every segment rises, but the clamped spline between the interior points overshoots
+    (above 11.5 and falling), so the inverse would have several roots."""
+    with pytest.raises(ValueError, match=r"sp_9.*not increasing"):
+        CubicSplineFlow(x, y, independent=independent, src=[0], tgt=[1], kind="sp_9")
+
+
+def test_a_smooth_curve_is_accepted():
+    CubicSplineFlow(X, Y, src=[0], tgt=[1])

@@ -1154,6 +1154,20 @@ def test_the_four_spline_elements_are_read():
                      "sp_6": ("flow", False), "sp_7": ("flow", True)}
 
 
+def test_a_spline_record_contamx_would_refuse_is_refused_naming_its_element(tmp_path):
+    text = SPLINES.read_text()
+    head = "4 23 csf_fsp csf_fsp\nmeasured curve\n"
+    rows = " 0 0\n 2 0.005\n 5 0.009\n 10 0.014\n 20 0.02\n"
+    few = _variant(text, head + " 5 0 0\n" + rows,
+                   head + " 3 0 0\n 0 0\n 2 0.005\n 5 0.009\n", tmp_path)
+    with pytest.raises(ValueError, match=r"flow element 4.*at least four"):
+        read_prj(few)
+    flat = _variant(text, head + " 5 0 0\n" + rows,
+                    head + " 5 0 0\n" + rows.replace("5 0.009", "5 0.005"), tmp_path)
+    with pytest.raises(ValueError, match=r"flow element 4.*positive"):
+        read_prj(flat)
+
+
 def test_a_super_element_is_refused_naming_contamx_s_own_refusal(tmp_path):
     text = SPLINES.read_text()
     with pytest.raises(ValueError, match=r"element 4.*'sup_afe'.*ContamX"):
