@@ -762,3 +762,24 @@ def test_per_step_capacity_carries_a_gradient():
     assert volume.grad is not None
     assert torch.isfinite(volume.grad).all()
     assert float(volume.grad.abs().max()) > 0.0
+
+
+def test_a_forcing_polynomial_is_integrated_exactly_with_no_flow():
+    """With no flow the operator is zero and the Taylor schedule takes one term, where a
+    forcing polynomial of degree 3 needs four: `_expm_action` keeps them, so that
+    x(h) = x0 + b0 h + c1 h^2/2 + c2 h^3/3 + c3 h^4/4 exactly."""
+    from noodl.layers.transport import _expm_action
+
+    net = flow_through_zone()
+    layer = TransportLayer(
+        net, "co2", capacity=torch.tensor([1.0]), flow_kind="airpath", boundary=["ambient"],
+        scheme="exact",
+    )
+    op = layer._advection_operator(torch.zeros(2, dtype=torch.float64), layer._capacity_arg(None))
+    x0 = torch.tensor([1.0], dtype=torch.float64)
+    b0, c = torch.tensor([2.0], dtype=torch.float64), [torch.tensor([v], dtype=torch.float64)
+                                                       for v in (3.0, 4.0, 5.0)]
+    h = 2.0
+    out = _expm_action(op, x0, b0, h, forcing_poly=c).x
+    exact = 1.0 + 2.0 * h + 3.0 * h**2 / 2 + 4.0 * h**3 / 3 + 5.0 * h**4 / 4
+    assert float(out[0]) == pytest.approx(exact, rel=1e-14, abs=0.0)

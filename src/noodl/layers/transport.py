@@ -1756,6 +1756,9 @@ def _expm_action(
     # that also covers the forcing polynomial's coefficient derivative; when shifted,
     # it selects the bound covering the state polynomial's own coefficient derivative.
     s, m = _taylor_schedule(norm, tol, forcing=not shift)
+    # A forcing polynomial of degree d enters the first d + 1 terms: keep them all, so that
+    # it is integrated exactly however small the operator (a zero operator takes m = 1).
+    m = max(m, len(poly) + 1)
     if s * m > max_matvecs:
         raise RuntimeError(
             f"{where}: the exponential action needs about {s * m} matvecs (||dt M||_1 = "

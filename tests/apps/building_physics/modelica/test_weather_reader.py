@@ -349,3 +349,39 @@ def test_a_repeating_file_wraps_its_year_on_a_grid_jump(tmp_path):
     jumps, kinks = assemble.grid_events(doc, grid)
     assert jumps.tolist() == [year]
     assert kinks.numel() == 0
+
+
+def test_boundary_rates_stay_inside_a_file_that_starts_at_the_run(tmp_path):
+    """A weather file that does not repeat (4 hours) starting exactly at StartTime: the
+    boundary rates' stencil at the first time is mirrored to the right instead of reaching
+    before the file, and the rates come out (a temperature rising 1 K per hour: 1/3600 K/s at
+    the knots' interior times, from both sides)."""
+    rows = [tmy3_row(k * H, T=10.0 + k) for k in range(4)]
+    experiment = {"StartTime": 0.0, "StopTime": 3 * H, "Interval": 600.0, "Tolerance": 1e-6}
+    _, _, drivers, names = read_modelica(_two_walls(rows, tmp_path, experiment=experiment),
+                                         return_names=True)
+    left = drivers["series:thermal.x_boundary_rate_left"]
+    right = drivers["series:thermal.x_boundary_rate_right"]
+    assert left.shape == right.shape == (names.times.numel(), 2)
+    k = int(torch.argmin((drivers["series:time"] - 1800.0).abs()))
+    assert float(left[k, 0]) == pytest.approx(1.0 / H, rel=1e-6, abs=0.0)
+    assert float(right[k, 0]) == pytest.approx(1.0 / H, rel=1e-6, abs=0.0)
+    assert bool(torch.isfinite(left).all() and torch.isfinite(right).all())
+
+
+def test_a_refusal_at_the_boundary_rates_stencil_is_raised(tmp_path, monkeypatch):
+    """The boundary rates are evaluated at times next to the grid's; a boundary refused
+    there is raised by name, not dropped (which would fall back to straight-line
+    boundaries)."""
+    rows = [tmy3_row(k * H, T=10.0 + k) for k in range(4)]
+    path = _two_walls(rows, tmp_path)
+    boundary = assemble._Builder.boundary
+
+    def refuse_on_the_stencil(self, comp):
+        if isinstance(self, assemble._BoundaryShadow):
+            self.errors.append(f"{comp.name}: refused at the stencil")
+        return boundary(self, comp)
+
+    monkeypatch.setattr(assemble._Builder, "boundary", refuse_on_the_stencil)
+    with pytest.raises(ModelicaImportError, match="stencil times: east: refused at the stencil"):
+        read_modelica(path)

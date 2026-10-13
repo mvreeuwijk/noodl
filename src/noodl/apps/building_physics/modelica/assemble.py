@@ -1148,49 +1148,63 @@ class _Builder:
         a series `(n_t,)`; `None` when every boundary value is constant in time. `left` is the
         derivative at each grid time from the step that ends there, `right` from the step that
         starts there (they differ at a kink: a ramp's corner, a limiter starting to cut). Each
-        is the second-order one-sided difference of the values at `t -+ d`, `t -+ 2 d`, `t -+
-        3 d`, with `d` 1e-4 of the grid step on that side (`run._Midpoint`'s boundary
-        profile: "Boundary values" in the `run` module)."""
+        is the derivative at the grid time of the quadratic through the values at three
+        points on that side, `t -+ d`, `t -+ 2 d`, `t -+ 3 d`, with `d` RATE_STEP_FRACTION of
+        the grid step there, weighted by the offsets the times realise (`run._Midpoint`'s
+        boundary profile). The first time has no step ending at it and the last none starting
+        there: their missing side mirrors the other, so no stencil leaves the run (a weather
+        file that does not repeat need not cover any time before the start). The values at
+        all the stencil times are evaluated together, and any refusal there is raised."""
         g = self.times
-        if g.numel() < 2:
+        n = int(g.numel())
+        if n < 2:
             return None
         h = g[1:] - g[:-1]
-        d_left = torch.cat([h[:1], h]) * RATE_STEP_FRACTION
-        d_right = torch.cat([h, h[-1:]]) * RATE_STEP_FRACTION
-        shadows = {}
-        for side, d in (("left", -d_left), ("right", d_right)):
-            for o in (1, 2, 3):
-                times = g + o * d
-                errors: list[str] = []
-                sig = _Signals(self.doc, times, _component_kinds(self.doc), errors)
-                shadow = _BoundaryShadow(self.med, sig, _Weather(
-                    self.doc, dict(self.graph.weather), sig, self.med, errors),
-                    self.species_names, errors)
-                shadows[side, o] = {nm: _Builder.boundary(shadow, self.by_name[nm])
-                                    for nm in names}
-        # g'(t) from g(t + d), g(t + 2 d), g(t + 3 d): (-5/2 g1 + 4 g2 - 3/2 g3) / d (and the
-        # mirror image on the left, d < 0).
-        weights = {1: -2.5, 2: 4.0, 3: -1.5}
+        d_right = torch.cat([h, -h[-1:]]) * RATE_STEP_FRACTION       # last: mirrored
+        d_left = -torch.cat([-h[:1], h]) * RATE_STEP_FRACTION        # first: mirrored
+        sides = {"left": d_left, "right": d_right}
+        stencil = [(side, o) for side in sides for o in (1, 2, 3)]
+        times = torch.cat([g + o * sides[side] for side, o in stencil])
+        errors: list[str] = []
+        sig = _Signals(self.doc, times, _component_kinds(self.doc), errors)
+        shadow = _BoundaryShadow(self.med, sig, _Weather(
+            self.doc, dict(self.graph.weather), sig, self.med, errors),
+            self.species_names, errors)
+        values = {nm: _Builder.boundary(shadow, self.by_name[nm]) for nm in names}
+        _refuse([f"the boundary rates' stencil times: {e}" for e in errors])
+        if any(v is None for v in values.values()):
+            return None
+        offsets = {k: times[i * n:(i + 1) * n] - g for i, k in enumerate(stencil)}
 
-        def rate(side: str, d: Tensor, pick) -> Tensor:
-            return sum(w * pick(shadows[side, o]).expand(g.shape)
-                       for o, w in weights.items()) / d
+        def weights(side: str) -> list[Tensor]:
+            # d/dt at 0 of the quadratic through (e_i, v_i): L_i'(0) = -(e_j + e_k) /
+            # ((e_i - e_j) (e_i - e_k)).
+            e = [offsets[side, o] for o in (1, 2, 3)]
+            return [-(e[j] + e[k]) / ((e[i] - e[j]) * (e[i] - e[k]))
+                    for i, j, k in ((0, 1, 2), (1, 0, 2), (2, 0, 1))]
+
+        w = {side: weights(side) for side in sides}
+
+        def rate(side: str, value: Tensor) -> Tensor:
+            v = torch.as_tensor(value, dtype=F64)
+            if v.ndim == 0:  # constant
+                return torch.zeros(n, dtype=F64)
+            at = [v[stencil.index((side, o)) * n:(stencil.index((side, o)) + 1) * n]
+                  for o in (1, 2, 3)]
+            # The weights sum to zero: differences from the first value keep a constant's
+            # rate exactly zero.
+            return sum(wi * (vi - at[0]) for wi, vi in zip(w[side], at, strict=True))
+
+        def both(value: Tensor) -> tuple[Tensor, Tensor]:
+            return rate("left", value), rate("right", value)
 
         out: dict[str, dict[str, tuple]] = {}
         varying = False
         for nm in names:
-            if any(shadows[k][nm] is None for k in shadows):
-                return None
-            entry: dict[str, object] = {}
-            for key in ("T", "X_w"):
-                lr = tuple(rate(side, sd, lambda b, k=key, n=nm: b[n][k])
-                           for side, sd in (("left", -d_left), ("right", d_right)))
-                entry[key] = lr
-            entry["C"] = [tuple(rate(side, sd, lambda b, k=k, n=nm: b[n]["C"][k])
-                                for side, sd in (("left", -d_left), ("right", d_right)))
-                          for k in range(len(self.species_names))]
-            varying |= any(bool((v != 0).any()) for key in ("T", "X_w")
-                           for v in entry[key])
+            b = values[nm]
+            entry: dict[str, object] = {"T": both(b["T"]), "X_w": both(b["X_w"]),
+                                        "C": [both(c) for c in b["C"]]}
+            varying |= any(bool((v != 0).any()) for key in ("T", "X_w") for v in entry[key])
             varying |= any(bool((v != 0).any()) for lr in entry["C"] for v in lr)
             out[nm] = entry
         return out if varying else None

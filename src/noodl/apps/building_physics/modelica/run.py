@@ -208,7 +208,10 @@ class _StepDrivers:
     """The drivers of `simulate`'s steps. On a driver-grid step `(grid[j-1], grid[j])` they
     are the grid's own (`step_drivers` at its two ends). On any other interval `(u, v)` (a
     sub-step of the graded start, `_graded`, or the parts of a step split at a switch,
-    `_Switches`): point values linearly interpolated in the grid step holding each end, and
+    `_Switches`): point values interpolated in the grid step holding each end (a boundary
+    value with its rates, `"<key>_rate_left"`/`"<key>_rate_right"`, by the cubic Hermite
+    through the step's ends, `_hermite`, which also gives its rate there; any other linearly),
+    and
     every source (`"<layer>.sources"`, a step mean on the grid) the mean over `(u, v)` of its
     reconstruction, grid step by grid step (`_cell_mean`: through the step's own mean, the
     next step's and the one before, or at the run's first time (`start`) the point value;
@@ -406,10 +409,12 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
 
     `scheme`: `"implicit"` (the default) is `Model.step` with `coupling="iterate"`: the
     transport layers advance with the flows held at their END-of-step values, first order
-    in the step. `"midpoint"` (`_Midpoint`) advances them with the MEAN of the start- and
-    end-of-step flows, boundary values and state-dependent heat sources: symmetric and
-    second order in the step, so two runs at `r` and `2 r` substeps combine by `extrapolate`
-    to fourth order. It is forward-only (no gradient) and for unbatched models.
+    in the step. `"midpoint"` (`_Midpoint`) advances each exact transport layer over two
+    halves, the first with the start-of-step flows, capacity and state-dependent sources, the
+    second with the end-of-step ones, the boundary values through both ends (the cubic
+    Hermite with their rates where they vary, else the straight line): symmetric and second
+    order in the step, so two runs at `r` and `2 r` substeps combine by `extrapolate` to
+    fourth order. It is forward-only (no gradient) and for unbatched models.
     """
     if scheme not in ("implicit", "midpoint"):
         raise ValueError(f"simulate: unknown scheme {scheme!r}; 'implicit' or 'midpoint'")
