@@ -7,12 +7,30 @@ Every application is set up the same way; see [Using noodl](../usage.md).
 
 Import from `noodl.apps.electrical`. The full reference, with every parameter, is in the [API reference](../api.md).
 
+## Set-up
+
+Build the model and its starting state and inputs.
+
+| Name | What it does | How to call it |
+|---|---|---|
+| `build_model` | Assemble the circuit model and return `(model, state, drivers)`. | `build_model(circuit, *, phasor=False, frequency=None, temperature=None, learnable=False)` |
+| `initial_state` | The consistent initial state at time `t` (s), the start of a transient: every capacitor at its `v0`, every inductor (and transformer winding) at its `i0`, sources at their value at `t`, and the other voltages and currents consistent with those. | `initial_state(model, drivers, *, t=0.0)` |
+
 ## Network components
 
 Descriptions of the physical objects a network is built from.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `Capacitor` | A capacitor `i = C dv/dt` (`C` in F), with initial voltage `v0` (V). MSL `Basic.Capacitor`. | `Capacitor(name, p, n, C, v0=0.0)` |
+| `Circuit` | A netlist: `devices` (the dataclasses of this module) between named nodes, and the `ground` node (0 V). Construction checks the device types, unique non-empty names, node names on every pin (distinct within a port), scalar parameters, waveforms, switch controls and controlled-source modes, that `ground` is a pin, and that every node has a path through the devices to `ground`. | `Circuit(devices, ground='0')` |
+| `Conductor` | A linear conductance `i = G v` (`G` in S). MSL `Basic.Conductor`. | `Conductor(name, p, n, G)` |
+| `Diode` | A junction diode `i = Ids (exlin(v / Vt) - 1) + v / R` (`Ids` in A, `Vt` in V, `R` the parallel leak in ohm; exponential up to `Maxexp`, linear above). MSL `Semiconductors.Diode`. Not usable in an AC analysis. | `Diode(name, p, n, Ids=1e-06, Vt=0.04, Maxexp=15.0, R=100000000.0)` |
+| `IdealTransformer` | An ideal transformer `v1 = n v2`, `i2 = -n i1` (turns ratio `n`). MSL `Ideal.IdealTransformer` without magnetisation. | `IdealTransformer(name, p1, n1, p2, n2, n)` |
+| `Inductor` | An inductor `v = L di/dt` (`L` in H), with initial current `i0` (A). MSL `Basic.Inductor`. | `Inductor(name, p, n, L, i0=0.0)` |
+| `Resistor` | A linear resistor `v = R_actual i`, `R_actual = R (1 + alpha (T - T_ref))` (`R` in ohm at `T_ref` in K, `alpha` in 1/K); `T` comes from the builder's `temperature` driver, else `T = T_ref`. MSL `Basic.Resistor`. | `Resistor(name, p, n, R, alpha=0.0, T_ref=300.15)` |
+| `Switch` | An ideal closing switch: closed `v = Ron i`, open `i = Goff v` (`Ron` in ohm, `Goff` in S); closed where its control value exceeds 0.5. `control` is a driver key (read at index 0 of its last dimension) or a `(key, index)` pair. MSL `Ideal.IdealClosingSwitch`. | `Switch(name, p, n, control, Ron=1e-05, Goff=1e-05)` |
+| `Transformer` | Two coupled windings `v1 = L1 di1/dt + M di2/dt`, `v2 = M di1/dt + L2 di2/dt` (H), with initial currents `i0 = (i1, i2)` (A). MSL `Basic.Transformer`. | `Transformer(name, p1, n1, p2, n2, L1, L2, M, i0=(0.0, 0.0))` |
 | `Constant` | A constant: unit value 1 at every time (a DC source: value `offset + amplitude`). | `Constant()` |
 | `Pulse` | A pulse train: 1 for the first `width` percent of every `period` (s) from `start_time`, else 0; `n_periods < 0` repeats for ever, otherwise the pulse train stops after `n_periods` periods (MSL `Blocks.Sources.Pulse`). | `Pulse(width, period, start_time=0.0, n_periods=-1)` |
 | `Ramp` | A ramp: 0 before `start_time` (s), rising linearly to 1 over `duration` (s), then 1 (MSL `Blocks.Sources.Ramp`; `duration = 0` is a step). | `Ramp(duration, start_time=0.0)` |
@@ -36,3 +54,32 @@ Flow through an edge as a function of the potential difference across it.
 | `Resistance` | A linear resistor: `q = dp / R_actual` with `R_actual = R (1 + alpha (T - T_ref))` (`R` in ohm at `T_ref` in K, `alpha` in 1/K); `T` (K) is read per edge from `drivers[temperature]` when `temperature` names a driver, else `T = T_ref`. MSL `Basic.Resistor`. | `Resistance(R, *, alpha=0.0, T_ref=300.15, temperature=None, kind='resistor', learnable=False)` |
 | `SwitchedConductance` | An ideal closing switch: closed `q = dp / Ron`, open `q = Goff dp` (`Ron` in ohm, `Goff` in S); closed where the control value exceeds 0.5 (or is True). `control` is a driver key whose last dimension holds one value per switch edge (or one value for all), a single `(key, index)` pair read by every switch, or a sequence with one entry per edge, each a key (read at index 0) or a `(key, index)` pair. MSL `Ideal.IdealClosingSwitch`. | `SwitchedConductance(control, *, Ron=1e-05, Goff=1e-05, kind='switch')` |
 | `TransformerRatio` | An ideal transformer without magnetisation: `dp1 = n dp2`, `q2 = -n q1` (turns ratio `n`, primary to secondary voltage). Edges `[primary p1 -> n1, secondary p2 -> n2]` per device. MSL `Ideal.IdealTransformer` with `considerMagnetization = false`. | `TransformerRatio(n, *, kind='ideal_transformer', learnable=False)` |
+
+## Sources
+
+Nodal sources and withdrawals.
+
+| Name | What it does | How to call it |
+|---|---|---|
+| `ControlledSource` | A linear controlled source: port 1 senses (`control="voltage"`: an open circuit; `"current"`: a short) and port 2 imposes (`output="voltage"` or `"current"`) `gain` times the sensed quantity. MSL `Basic.VCV`, `VCC`, `CCV`, `CCC`. | `ControlledSource(name, p1, n1, p2, n2, gain, control, output)` |
+| `CurrentSource` | An ideal current source `i = offset + I unit(t)` (A) entering pin `p` (flowing through the source from `p` to `n`); waveform and AC phasor as for `VoltageSource`. MSL `Sources.*Current`. | `CurrentSource(name, p, n, I, waveform=Constant(), offset=0.0)` |
+| `VoltageSource` | An ideal voltage source `v = offset + V unit(t)` (V), `unit` the waveform. In an AC analysis a `Sine` source is its steady-state phasor (amplitude `V`, the waveform's phase) at the analysis frequency, and a `Constant` source is the magnitude `V` at phase 0; other waveforms are refused there. MSL `Sources.*Voltage`. | `VoltageSource(name, p, n, V, waveform=Constant(), offset=0.0)` |
+
+## Functions
+
+Calculations and helpers.
+
+| Name | What it does | How to call it |
+|---|---|---|
+| `ac_sweep` | The sinusoidal steady state of `circuit` at each of `frequencies` (Hz), one batched phasor solve: `{"frequency": (F,), "electrical.phi": (F, n), "electrical.q": (F, b)}`, complex peak-amplitude, sine-referenced phasors (`x(t) = \|X\| sin(omega t + arg X)`). | `ac_sweep(circuit, frequencies)` |
+| `device_values` | Per device name, its `(voltage, current)` (V, A) in `state`: `v = v_p - v_n` and the current entering pin `p`, each of shape `(...,)` for a one-port device and `(..., 2)` (port 1, port 2) for a two-port device. A source delivering power has a negative current. | `device_values(model, state)` |
+| `operating_point` | The DC operating point at time `t` (s): capacitors open, inductors shorted, sources at their value at `t` (`model.steady`; `solve_kwargs`, such as Newton's `atol` and `rtol`, reach the layer solve). On a phasor model, the AC steady state. | `operating_point(model, drivers, *, t=0.0, **solve_kwargs)` |
+| `transient` | March the circuit over the time grid `times` (s), from `state` at `times[0]` (usually `initial_state`), one `Model.step` per interval. | `transient(model, state, drivers, times, *, integration='trapezoidal')` |
+
+## Constants and tables
+
+Named values and option tables.
+
+| Name | Value |
+|---|---|
+| `LAYER` | `'electrical'` |
