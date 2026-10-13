@@ -300,3 +300,48 @@ def test_bad_blocks_and_missing_drivers_are_refused_by_name():
     sensing = ControlNetwork([Sensor(DriverReading("T", 0))])
     with pytest.raises(KeyError, match="a sensor reads driver 'T'"):
         sensing(sensing.initial_state(), {}, STEP)
+
+
+@pytest.mark.parametrize("entries", [3, 2])
+def test_a_batched_value_fills_every_entry_of_each_batch_member(entries):
+    """Batch (2,) against a driver of 3 entries and of 2 (the batch size): a whole-driver
+    actuator writes each member's value to all entries; an added value likewise."""
+    net = ControlNetwork([DriverValue("controls.input", 0), DriverValue("controls.input", 1)],
+                         [Actuator(0, "T", None),
+                          Actuator(1, "thermal.sources", tuple(range(entries)), mode="add")])
+    drivers = {"controls.input": torch.tensor([[0.2, 10.0], [0.7, 20.0]], dtype=F64),
+               "T": torch.ones(entries, dtype=F64),
+               "thermal.sources": torch.ones(entries, dtype=F64)}
+    out = net(net.initial_state(), drivers, STEP)
+    assert out["T"].tolist() == [[0.2] * entries, [0.7] * entries]
+    assert out["thermal.sources"].tolist() == [[11.0] * entries, [21.0] * entries]
+
+
+def test_an_added_value_listed_twice_is_added_twice():
+    net = ControlNetwork([Constant(5.0)], [Actuator(0, "thermal.sources", (0, 0), mode="add")])
+    out = net(net.initial_state(), {"thermal.sources": torch.tensor([1.0, 0.0], dtype=F64)},
+              STEP)
+    assert out["thermal.sources"].tolist() == [11.0, 0.0]
+    batched = {"thermal.sources": torch.zeros(2, 2, dtype=F64)}
+    assert net(net.initial_state(), batched, STEP)["thermal.sources"].tolist() == [
+        [10.0, 0.0], [10.0, 0.0]]
+
+
+def test_a_batched_driver_sensor_keeps_each_members_previous_value():
+    """The unbatched initial memory becomes batched on the first step; each member then
+    sees its own previous-step temperature."""
+    net = ControlNetwork([Sensor(DriverReading("T", 0), time_constant=600.0)])
+    state = net.initial_state()
+    assert state[net.memory_key].shape == (2,)
+    seen = []
+    for t in ((290.0, 300.0), (291.0, 302.0), (292.0, 304.0)):
+        drivers = {"T": torch.tensor([[t[0]], [t[1]]], dtype=F64)}
+        out, state = advance(net, state, drivers)
+        assert state[net.memory_key].shape == (2, 2)
+        seen.append(out[net.outputs_key][:, 0])
+    decay = math.exp(-0.5)
+    torch.testing.assert_close(seen[0], torch.tensor([290.0, 300.0], dtype=F64))
+    expect = torch.tensor([290.0, 300.0], dtype=F64)     # step 2 reads step 1's values
+    torch.testing.assert_close(seen[1], expect + (seen[0] - expect) * decay)
+    prev = torch.tensor([291.0, 302.0], dtype=F64)       # step 3 reads step 2's values
+    torch.testing.assert_close(seen[2], prev + (seen[1] - prev) * decay)

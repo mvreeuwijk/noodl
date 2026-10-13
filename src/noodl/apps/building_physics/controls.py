@@ -410,11 +410,12 @@ class Actuator:
 
 
 def _add_at(base: Tensor, index: Sequence[int], value: Tensor) -> Tensor:
+    """`base` with `value` added at `index` on the last axis, batch dimensions broadcast; a
+    position listed twice receives both additions."""
     idx = torch.as_tensor(list(index), dtype=torch.long)
     batch = broadcast_shapes(base.shape[:-1], value.shape[:-1])
-    out = base.to(F64).expand(batch + base.shape[-1:]).clone()
-    out[..., idx] = out[..., idx] + value.expand(batch + (idx.numel(),))
-    return out
+    out = base.to(F64).expand(batch + base.shape[-1:])
+    return out.index_add(-1, idx, value.expand(batch + (idx.numel(),)))
 
 
 # ------------------------------------------------------------------------------- network
@@ -559,7 +560,9 @@ class ControlNetwork:
                                f"{list(a.index)} of driver {a.key!r}, which the model does "
                                f"not have")
             if a.index is None:
-                out[a.key] = scatter(base, None, value)
+                # One value per batch member, the same for every entry of the driver.
+                whole = value if base is None or value.ndim == 0 else value.unsqueeze(-1)
+                out[a.key] = scatter(base, None, whole)
                 continue
             v = value.unsqueeze(-1).expand(*value.shape, len(a.index))
             out[a.key] = (scatter(base, a.index, v) if a.mode == "set"
