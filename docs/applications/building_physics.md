@@ -728,15 +728,16 @@ rising CO2 while the integral part still pulls down. It settles where it removes
 4e-5 kg/s over the set point's 0.6 g/kg above the outdoor air is 0.067 kg/s.
 
 **From a `.prj`.** `read_prj` reads a project's control nodes (`Project.control_nodes`) and
-plans the ones that a zone's, path's, source's, duct segment's, terminal's or air-handler
-path's control reference, or a named report node, needs (`Project.control_plan`), in the
-file's sequence order; `project_to_model` builds them into a new sampled network, first among
+plans, when some record references a control node, the ones that a zone's, path's,
+source's, duct segment's, terminal's or air-handler path's control reference, or a named
+report node, needs (`Project.control_plan`), in the file's sequence order (a project whose
+control nodes only report plans none: it runs as without them); `project_to_model` builds them into a new sampled network, first among
 the closures, for every model. A control reference acts on what a schedule on the same record
 acts on (a zone's `"T"`, a path's flow multiplier or fan speed, a source's multiplier, a
 terminal's opening, an air handler's flows), and a schedule node is an `Input` on
 `"controls.input"`. `project.control_outputs(out["controls.outputs"])` picks the named report
 nodes, ContamX's control outputs, from a history; `simulate_project` returns them as
-`"control"`. `dcv_three_zone.prj` (in `tests/data/contam`) is demand-controlled ventilation:
+`"control"` (when there is a plan). `dcv_three_zone.prj` (in `tests/data/contam`) is demand-controlled ventilation:
 a PI controller on zone one's CO2 above 650 ppm (by mass) drives an exhaust fan, never below
 0.2 of its flow, while the occupants are in from 08:00 to 18:00:
 
@@ -1519,11 +1520,12 @@ regression at rtol 1e-8.
   what that costs.
 - **Control nodes cover ContamX's sensors, schedules, arithmetic, logic, switches,
   hysteresis and P and PI controllers.** Integration, running-average, delay, modifier,
-  super and phantom nodes and value files are refused by name when an actuator or a named
-  report node depends on them (unused, they are ignored), as are occupancy and exposure
+  phantom nodes and value files are refused by name when an actuator, or a named report node
+  of a project with actuators, depends on them (unused, they are ignored), super nodes
+  wherever they are, as are occupancy and exposure
   sensors, a flow or pressure-difference sensor on a doorway, a control on a plain duct
-  junction, on a triggered source or on an AHS outdoor-air or exhaust path, and controls in
-  a steady airflow run.
+  junction, on a triggered source or on an AHS outdoor-air or exhaust path, and control
+  references in a steady airflow run.
 - **Duct leakage, duct balancing and super airflow elements are refused by name.** Duct leakage
   (a duct element's leakage rate) and ContamX's duct-balancing run mode are not modelled;
   `sup_afe` super elements cannot be simulated by ContamX itself. A schedule on a

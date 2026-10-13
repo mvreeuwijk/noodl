@@ -885,3 +885,12 @@ def test_a_nested_hold_keeps_the_outer_one():
         out, _ = advance(net, state, values(0.9))
     assert out[net.outputs_key].tolist() == [0.5]           # still held: not evaluated again
     assert advance(net, state, values(0.9))[0][net.outputs_key].tolist() == [0.9]
+
+
+def test_only_a_constant_is_preset_not_a_pi_controllers_initial_output():
+    """A block earlier in the order reads a later PI controller as 0 before the first
+    evaluation, not its initial output (ContamX presets constant nodes only)."""
+    net = ControlNetwork([Identity(1), IncrementalPI(2, kp=0.0, ki=0.0, initial_output=0.7),
+                          Constant(0.0)])
+    out, _ = advance(net, net.initial_state(), {})
+    assert out[net.outputs_key].tolist() == [0.0, 0.7, 0.0]

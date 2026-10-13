@@ -145,8 +145,8 @@ class Block:
     sampled_only = False
     continuous_only = False
     name = ""
-    # What a block later in the order reads from this one before its first evaluation.
-    initial_output = 0.0
+    # What a block earlier in the order reads from this one before its first evaluation.
+    preset_output = 0.0
 
     def initial_memory(self) -> list[float]:
         return [math.nan] * self.memory_size
@@ -175,7 +175,7 @@ class Constant(Block):
 
     def __init__(self, value: float, *, name: str = "") -> None:
         self.value, self.name = float(value), name
-        self.initial_output = self.value
+        self.preset_output = self.value
 
     def step(self, u, memory, ev):
         return _f64(self.value), memory
@@ -767,7 +767,7 @@ class ControlNetwork:
         "switching", that quantity of every block."""
         ev = Evaluation(state, drivers, dt)
         stored, _, evaluated = self._stored(state)
-        preset = torch.tensor([b.initial_output for b in self.blocks], dtype=F64)
+        preset = torch.tensor([b.preset_output for b in self.blocks], dtype=F64)
         seen = torch.where((evaluated > 0).unsqueeze(-1), stored, preset)
         out = list(seen.unbind(-1))
         mem, extra = [], []

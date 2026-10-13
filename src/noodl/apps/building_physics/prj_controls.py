@@ -1,7 +1,8 @@
 """CONTAM control nodes (TN 1887 Appendix A, section 12b) for the `.prj` reader.
 
-`read_control_nodes` parses the section into `PrjControlNode` records. `plan_controls` keeps
-the nodes an actuator or a named report node depends on. An actuator is a zone's, path's,
+`read_control_nodes` parses the section into `PrjControlNode` records (a super node, whose
+sub-nodes follow it, is refused). `plan_controls` keeps, when some record references a control
+node, the nodes an actuator or a named report node depends on. An actuator is a zone's, path's,
 source's, segment's, terminal's or AHS path's control reference; a named report node is a
 `pas` node with a name, which ContamX reports through its API. The nodes are put in ContamX's
 computation order, the file's sequence numbers. A needed node of a type this reader does not
@@ -61,8 +62,7 @@ _DATA: dict[str, int | None] = {
 _UNSUPPORTED = {
     "cvf": "a continuous values file", "dvf": "a discrete values file",
     "mod": "a modifier", "dls": "a scheduled delay", "dlx": "an exponential delay",
-    "int": "integration over time", "rav": "a running average", "sup": "a super node",
-    "sph": "a phantom node",
+    "int": "integration over time", "rav": "a running average", "sph": "a phantom node",
 }
 _ARITY = {"pas": 1, "log": 1, "hys": 1, "abs": 1, "bin": 1, "inv": 1, "pc1": 1, "pi1": 1,
           "and": 2, "or": 2, "xor": 2, "add": 2, "sub": 2, "mul": 2, "div": 2, "lls": 2,
@@ -110,6 +110,9 @@ def read_control_nodes(lines, count: int) -> dict[int, PrjControlNode]:
         if typ not in _DATA:
             raise ValueError(f"prj: control node {nr} has type {typ!r}, which this reader "
                              f"does not know (its data layout is unknown)")
+        if typ == "sup":
+            raise ValueError(f"prj: control node {nr} is a super node ('sup'), whose "
+                             f"sub-nodes this reader cannot lay out; unsupported")
         lines.raw()                                    # the description, possibly blank
         n_data, data = _DATA[typ], ()
         if n_data is not None:
@@ -150,10 +153,12 @@ class ControlPlan:
 
 def plan_controls(nodes: Mapping[int, PrjControlNode],
                   actuations: Sequence[Actuation]) -> ControlPlan | None:
-    """The `ControlPlan`, or `None` when no actuator and no named report node exists."""
-    reported = [n for n in sorted(nodes) if nodes[n].type == "pas" and nodes[n].name != NO_NAME]
-    if not actuations and not reported:
+    """The `ControlPlan`, or `None` when no record references a control node: report nodes
+    alone act on nothing, so a project whose controls only report (NIST's samples) builds
+    no network. With actuators, the named report nodes are planned too."""
+    if not actuations:
         return None
+    reported = [n for n in sorted(nodes) if nodes[n].type == "pas" and nodes[n].name != NO_NAME]
     stack = [(a.node, a.record) for a in actuations]
     stack += [(n, f"report node {nodes[n].name!r}") for n in reported]
     needed: dict[int, str] = {}

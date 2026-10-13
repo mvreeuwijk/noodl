@@ -11,11 +11,11 @@ filters) and the filters on airflow paths, airflow paths with their schedules (f
 multipliers) and constant wind pressures, source/sink elements and source/sinks of the
 constant, cutoff, decaying and burst types, duct networks (`prj_hvac`): duct elements,
 junctions and terminals, their initial concentrations, and segments, and simple air-handling
-systems (`prj_hvac`, `air_handling`), and control nodes (`prj_controls`): the nodes an
-actuator (a zone's, path's, source's, segment's, terminal's or AHS path's control reference)
-or a named report node needs become a sampled `ControlNetwork`, first among the model's
-closures, and a control reference acts on what a schedule on the same record acts on. An air
-handler's plenums (its zones flagged 10) are
+systems (`prj_hvac`, `air_handling`), and control nodes (`prj_controls`): when a record
+references one, the nodes an actuator (a zone's, path's, source's, segment's, terminal's or
+AHS path's control reference) or a named report node needs become a sampled
+`ControlNetwork`, first among the model's closures, and a control reference acts on what a
+schedule on the same record acts on. An air handler's plenums (its zones flagged 10) are
 zero-gauge nodes of the airflow solve (`Project.flow_balanced`) and storage-free species
 nodes when their volume is 0 (`Project.storage_free`); its supply and return points carry
 their design flows, scaled by their schedules; the recirculation path carries the
@@ -1494,9 +1494,17 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     per_kind_quad: dict[str, list[tuple[float, float]]] = {}
     per_kind_fan: dict[str, list[PrjPath]] = {}
     per_kind_spline: dict[str, list[PrjPath]] = {}
-    # A constant-flow fan element on several paths is one `FixedFlow` kind with a flow per
-    # edge, built where its first path puts it in `built` (kind -> position, flows).
-    per_kind_fixed: dict[str, tuple[int, list[float]]] = {}
+    # A damper or constant-flow fan element on several paths is one element of its kind
+    # with per-edge coefficients, built where its first path puts it in `built`
+    # (kind -> position, one row of coefficients per edge).
+    per_kind_slot: dict[str, tuple[int, list[tuple[float, ...]]]] = {}
+
+    def slot(kind: str, row: tuple[float, ...]) -> None:
+        if kind not in per_kind_slot:
+            per_kind_slot[kind] = (len(built), [])
+            built.append(None)
+        per_kind_slot[kind][1].append(row)
+        per_kind_cols.setdefault(kind, []).append(column - 1)
     path_edges: list[list[int]] = []          # per path, its NETWORK edge columns
     column = 0
     for p in paths:
@@ -1567,22 +1575,10 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         elif d in _DAMPER:
             lam, Cp, xp, Cn, xn = first[:5]
             scale = RHO_0 if d == "plr_bdq" else 1.0
-            built.append(
-                Damper(
-                    torch.tensor(p.mult * scale * Cp, dtype=F64),
-                    torch.tensor(xp, dtype=F64),
-                    torch.tensor(p.mult * scale * Cn, dtype=F64),
-                    torch.tensor(xn, dtype=F64),
-                    kind=kind,
-                )
-            )
+            slot(kind, (p.mult * scale * Cp, xp, p.mult * scale * Cn, xn))
         elif d in _FAN_CONST:
             flow = first[0] * (RHO_0 if d == "fan_cvf" else 1.0)
-            if kind not in per_kind_fixed:
-                per_kind_fixed[kind] = (len(built), [])
-                built.append(None)
-            per_kind_fixed[kind][1].append(p.mult * flow)
-            per_kind_cols.setdefault(kind, []).append(column - 1)
+            slot(kind, (p.mult * flow,))
         elif d == "fan_fan":
             per_kind_fan.setdefault(kind, []).append(p)
             per_kind_cols.setdefault(kind, []).append(column - 1)
@@ -1590,9 +1586,11 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
             per_kind_spline.setdefault(kind, []).append(p)
             per_kind_cols.setdefault(kind, []).append(column - 1)
 
-    for kind, (at, flows) in per_kind_fixed.items():
+    for kind, (at, rows) in per_kind_slot.items():
         _check_edge_order(net, kind, per_kind_cols[kind])
-        built[at] = FixedFlow(torch.tensor(flows, dtype=F64), kind=kind)
+        columns = torch.tensor(rows, dtype=F64).T
+        built[at] = (FixedFlow(columns[0], kind=kind) if len(rows[0]) == 1
+                     else Damper(*columns, kind=kind))
     # Power-law kinds: one `UpstreamDensityPowerLaw` per kind with per-edge C, n, m and the
     # kind's (shared) transition. The transition is the element's own, so it is the same for
     # every edge of the kind; edges only differ by `mult`.

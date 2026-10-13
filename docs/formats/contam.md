@@ -62,21 +62,24 @@ constant), schedule (`sch`), constant (`set`), pass and report (`pas`, `log`), a
 `or`, `xor`), limit switches and limit controls (`lls`, `uls`, `lbs`, `ubs`, `llc`, `ulc`),
 hysteresis (`hys`), proportional and PI control (`pc1`, `pi1`); control references on zones
 (temperature), paths, sources, duct segments, terminals and AHS paths, acting on what a
-schedule there acts on and taking precedence over it. The nodes that an actuator or a named
-report node (a `pas` node with a name, which ContamX reports through its API) depends on
-become a sampled `ControlNetwork`, first among the model's closures; `project_to_model`
-builds a new one for every model, and `simulate_project(...)["control"]` returns the named
-report nodes' values in node order.
+schedule there acts on and taking precedence over it. When some record references a control
+node, the nodes that an actuator or a named report node (a `pas` node with a name, which
+ContamX reports through its API) depends on become a sampled `ControlNetwork`, first among
+the model's closures; `project_to_model` builds a new one for every model, and
+`simulate_project(...)["control"]` returns the named report nodes' values in node order. A
+project whose control nodes only report (no record references one) builds no network and
+returns no `"control"`, so it loads and runs, steady runs included, as without them.
 
 **Refused by name**, rather than silently dropped: a control node of another type (`mod`,
-`int`, `rav`, `dls`, `dlx`, `sup`, `cvf`, `dvf`, phantom nodes) when an actuator or a named
-report node depends on it (unused nodes of any known type are ignored), a control node type
-the reader does not know at all (its data layout is unknown), and a reference to a node the
+`int`, `rav`, `dls`, `dlx`, `cvf`, `dvf`, phantom nodes) when an actuator, or a named report
+node of a project with actuators, depends on it (unused nodes of any known type are
+ignored); a super node (`sup`, whose sub-nodes the reader cannot lay out) and a control node
+type the reader does not know at all (its data layout is unknown), wherever they are; a reference to a node the
 file does not define; occupancy and exposure sensors, and a sensor of a species the model does
 not carry; a flow or pressure-difference sensor on a doorway (two-way path); a control on a
 duct junction that is not a terminal, on a triggered (`eds`, `brs`, `plm`, `pkm`) source, on a
-Darcy-Colebrook segment or on an AHS outdoor-air or exhaust path; controls in a steady
-airflow run (`simulate_project`); boundary-layer diffusion (`bls`), resuspension (`dvr`)
+Darcy-Colebrook segment or on an AHS outdoor-air or exhaust path; control references in a
+steady airflow run (`simulate_project`); boundary-layer diffusion (`bls`), resuspension (`dvr`)
 and super (`sup`) source/sink elements, when a source/sink record references one; a source/sink
 record whose element or zone the file does not define; gaseous (`gf0`) and UVGI (`uv1`) filter elements,
 referenced or not; a filter that names a species the project does not simulate (when a path

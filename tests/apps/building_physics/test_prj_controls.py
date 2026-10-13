@@ -15,9 +15,10 @@ from noodl.apps.building_physics.controls import (
     FunctionReading,
     Sensor,
 )
-from noodl.apps.building_physics.prj import project_to_model, read_prj
+from noodl.apps.building_physics.prj import project_to_model, read_prj, steady
 from noodl.apps.building_physics.prj_controls import Actuation
 from noodl.apps.building_physics.simulation import simulate, simulate_project
+from noodl.elements import Damper, FixedFlow
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "contam"
 THREE = DATA / "valThreeZonesWthCtm-UseApi.prj"
@@ -314,12 +315,14 @@ def test_refused_sensors_name_the_node(tmp_path):
              ("0 1 0 0 9 2 2 0 0 0 0 none", r"control node 1 \(sns\) senses path 9"),
              ("0 1 0 0 1 2 4 0 0 0 0 none", r"control node 1 \(sns\).*path sensor of "
                                             r"measure 4")]
+    zone_one = ("   1  3   0   0   0   1", "   1  3   0   2   0   1")  # zone 1 on node 2
     for sensor, message in cases:
-        p = read_prj(_write(tmp_path, _section(_text(THREE), "control nodes", 2,
-                                               body(sensor))))
+        text = _section(_replace(_text(THREE), zone_one), "control nodes", 2, body(sensor))
+        p = read_prj(_write(tmp_path, text))
         with pytest.raises(ValueError, match=message):
             project_to_model(p)
-    door = _section(_text(DOORWAY), "control nodes", 2, body("0 1 0 0 3 2 2 0 0 0 0 none"))
+    door = _section(_replace(_text(DOORWAY), zone_one), "control nodes", 2,
+                    body("0 1 0 0 3 2 2 0 0 0 0 none"))
     p = read_prj(_write(tmp_path, door))
     with pytest.raises(ValueError, match=r"control node 1 \(sns\).*path 3.*two"):
         project_to_model(p)
@@ -331,8 +334,11 @@ def test_duct_sensors_read_their_segment_and_terminal_columns(tmp_path):
             "  2 sns   2 0 0   0   0 <none>\nsensor\n 0 1 0 0 6 6 3 0 0 0 0 none\n"
             "  3 sns   3 0 0   0   0 <none>\nsensor\n 0 1 0 0 4 3 1 0 0 0 0 none\n"
             "  4 pas   4 0 1   1   0 seg\npass\n  5 pas   5 0 1   2   0 term\npass\n"
-            "  6 pas   6 0 1   3   0 junction\npass\n")
-    p = read_prj(_write(tmp_path, _section(_text(DUCTS), "control nodes", 6, body)))
+            "  6 pas   6 0 1   3   0 junction\npass\n"
+            "  7 set   7 0 0   0   0 <none>\nconstant\n 1\n")    # segment 2's fan speed
+    text = _replace(_text(DUCTS), ("  2  0   2   3   3   0   1   0   4 1",
+                                   "  2  0   2   3   3   0   1   7   4 1"))
+    p = read_prj(_write(tmp_path, _section(text, "control nodes", 7, body)))
     model, _, _ = project_to_model(p)
     s = model.closures[0].blocks
     seg = next(x for x in p.segments if x.nr == 4)
@@ -374,3 +380,72 @@ def test_simulate_project_reports_the_named_outputs():
     assert float(out["control"][0, 0]) == 0.0           # zone gauge pressure before a solve
     torch.testing.assert_close(out["control"], p.control_outputs(out["controls.outputs"]),
                                rtol=0, atol=0)
+
+
+def test_report_nodes_alone_build_no_network(tmp_path):
+    """Named report nodes act on nothing: a project whose control nodes only report (here
+    through an integration, which the reader does not build) loads, builds no network and
+    solves steady as without them."""
+    body = ("! # typ seq f n  c1  c2 name\n"
+            "  1 sns   1 0 0   0   0 <none>\nsensor\n 0 1 0 0 1 1 0 0 0 0 0 sarin\n"
+            "  2 int   2 0 2   1   3 <none>\nintegrate\n\n"
+            "  3 set   3 0 0   0   0 <none>\nconstant\n 1\n"
+            "  4 pas   4 0 1   2   0 dose\npass\n")
+    p = read_prj(_write(tmp_path, _section(_text(THREE), "control nodes", 4, body)))
+    assert p.control_plan is None and len(p.control_nodes) == 4
+    model, state, drivers = project_to_model(p)
+    plain, pstate, pdrivers = project_to_model(read_prj(THREE))
+    assert len(model.closures) == len(plain.closures)
+    out, ref = steady(model, state, drivers), steady(plain, pstate, pdrivers)
+    torch.testing.assert_close(out["air.q"], ref["air.q"], rtol=0, atol=0)
+
+
+def test_a_super_node_is_refused_where_it_is_read(tmp_path):
+    body = ("! # typ seq f n  c1  c2 name\n  1 sup   1 0 0   0   0 <none>\nsuper\n"
+            " 1 2 3 4\n")
+    with pytest.raises(ValueError, match=r"control node 1 is a super node"):
+        read_prj(_write(tmp_path, _section(_text(THREE), "control nodes", 1, body)))
+
+
+def test_a_control_overrides_a_schedule_on_the_same_record(tmp_path):
+    """ContamX: schedule 0.25 and control 0.5 on the fan path -> 0.050171 kg/s."""
+    schedules = ("1 ! day-schedules:\n! # npts shap utyp ucnv name\n"
+                 "  1    2    0    1    0 quarter\n\n 00:00:00 0.25\n 24:00:00 0.25\n-999\n"
+                 "1 ! week-schedules:\n! # utyp ucnv name\n  1    1    0 week\n\n"
+                 + " ".join(["1"] * 12) + "\n-999\n")
+    fan = ("   5    0  -1   1   2   0   0   0   1   1   1   0.000   0.000"
+           "   1.500 1 0 0 -1 0 0 0  23  2 -1 0 0 0 0 0 0\n")
+    text = _replace(_text(THREE), ("0 ! day-schedules:\n-999\n0 ! week-schedules:\n-999\n",
+                                   schedules),
+                    ("4 ! flow paths:", "5 ! flow paths:"), (P4, P4 + fan))
+    body = "! # typ seq f n  c1  c2 name\n  1 set   1 0 0   0   0 <none>\nconstant\n 0.5\n"
+    p = read_prj(_write(tmp_path, _section(text, "control nodes", 1, body)))
+    model, state, drivers = project_to_model(p, ambient={"Ws": 0.0})
+    assert drivers["flow_multiplier.fan_2"].tolist() == [0.25]   # the schedule alone
+    out = simulate(model, state, drivers, [0.0, 300.0], inputs=p.inputs, **TIGHT)
+    assert p.path_flows(out["air.q"])[:, 4].tolist() == pytest.approx([0.050171] * 2,
+                                                                       rel=1e-5)
+
+
+def test_one_fan_or_damper_element_on_several_paths_is_one_kind_per_edge(tmp_path):
+    """A second path on the constant-flow fan (mult 2) and one on the backdraft damper
+    (mult 3): one element per kind with a coefficient per edge, in the kind order a single
+    path gives, and each path its own flow."""
+    text = _text(DOORWAY)
+    p6 = ("   6    0   1  -1   5   0   0   0   0   0   1  10.000   0.000   1.500 1 0 0 -1 0 0 0"
+          "  23  2 -1 0 0 0 0 0 0\n")
+    extra = ("   7    0   1  -1   1   0   0   0   0   0   1  10.000   0.000   2.000 2 0 0 -1 0"
+             " 0 0  23  2 -1 0 0 0 0 0 0\n"
+             "   8    0  -1   1   4   0   0   0   0   0   1 -10.000   0.000   1.000 3 0 0 -1 0"
+             " 0 0  23  2 -1 0 0 0 0 0 0\n")
+    two = _replace(text, ("6 ! flow paths:", "8 ! flow paths:"), (p6, p6 + extra))
+    one, both = read_prj(DOORWAY), read_prj(_write(tmp_path, two))
+    assert both.kinds == one.kinds                     # same kinds, same order
+    (fan,) = [e for e in both.elements if isinstance(e, FixedFlow)]
+    (damper,) = [e for e in both.elements if isinstance(e, Damper)]
+    assert fan.q0.tolist() == pytest.approx([0.200683, 0.401366])
+    assert damper.pos.C.tolist() == pytest.approx([0.02, 0.06])
+    model, state, drivers = project_to_model(both, ambient={"Ws": 0.0})
+    flows = both.path_flows(steady(model, state, drivers)["air.q"])
+    assert flows[4].item() == pytest.approx(0.200683)
+    assert flows[6].item() == pytest.approx(0.401366)

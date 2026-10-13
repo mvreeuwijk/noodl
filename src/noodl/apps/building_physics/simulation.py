@@ -337,7 +337,7 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), diagnostics: dict
     Returns `simulate`'s histories plus `"path_flow"` (N, n_paths) in path-number order and,
     for a project with a duct network, `"terminal_flow"` (N, n_terminals): the flow out of
     each duct terminal into its zone, in junction-number order, and, for a project with
-    control nodes, `"control"` (N, n_reports): the named report nodes' values in node order
+    control references, `"control"` (N, n_reports): the named report nodes' values in node order
     (ContamX's control outputs; `"controls.outputs"` holds every block's). The species
     histories carry the zones' rows first, then the junctions' (`project.zone_mass_fractions`
     selects the zones). `diagnostics` is `simulate`'s run-level dict, not `Model.step`'s:
@@ -349,7 +349,7 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), diagnostics: dict
     integration other than the trapezoid method with weight 1 (short time step, CVODE, or a
     weight other than 1), steady airflow with transient contaminants, transient airflow with
     steady contaminants (ContamX solves the concentrations to steady state at every step;
-    this integrates them), control nodes in a steady airflow run, and a run whose duration is
+    this integrates them), control references in a steady airflow run, and a run whose duration is
     not a whole number of time steps.
     `prj.steady` refuses a steady contaminant run with nothing passing through an air
     handler's plenum.
