@@ -1123,3 +1123,20 @@ def test_an_unscheduled_fan_curve_runs_at_its_rated_speed(tmp_path):
     p = read_prj(_variant(text, p5, "   5    0   3  -1   4   0   0   0   0   0   1", tmp_path))
     (fan,) = [e for e in p.elements if isinstance(e, AffinityFan)]
     assert fan.speed_key is None and p.speed_edges == {}
+
+
+def test_a_batched_fan_speed_steps_as_per_instance_runs():
+    """A control drives "fan_speed.<kind>" with a batch of speeds (running, slowed, stopped
+    below its off ratio, overdriven); one batched step equals the per-instance steps."""
+    p = read_prj(FAN_CURVE)
+    model, state, drivers = project_to_model(p)
+    speeds = [1.0, 0.8, 0.05, 1.2]
+    batched = model.step(state, {**drivers, "fan_speed.fan_4": torch.tensor(
+        [[s] for s in speeds], dtype=F64)}, 300.0, atol=1e-14)
+    for i, s in enumerate(speeds):
+        one = model.step(state, {**drivers, "fan_speed.fan_4": torch.tensor([s], dtype=F64)},
+                         300.0, atol=1e-14)
+        for key in ("air.q", "species.x"):
+            torch.testing.assert_close(batched[key][i], one[key], rtol=1e-10, atol=1e-15)
+    fan_flow = p.path_flows(batched["air.q"])[:, 4]                  # path 5
+    assert len({round(v, 9) for v in fan_flow.tolist()}) == 4        # four distinct flows

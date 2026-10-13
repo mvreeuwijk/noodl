@@ -186,3 +186,56 @@ def test_the_fan_slope_follows_the_affinity_laws_and_batches():
     h = 1e-5
     fd = (fan.flow(dp + h, d) - fan.flow(dp - h, d)) / (2 * h)
     torch.testing.assert_close(slope, fd, rtol=1e-6, atol=0)
+
+
+def _shutoff_fan(off):
+    C = 0.0084853 * math.sqrt(1.2041)
+    shut = UpstreamDensityPowerLaw(torch.tensor(C, dtype=F64), torch.tensor(0.5, dtype=F64),
+                                   src=[0], tgt=[1], m=0.5, rho_ref=1.2041, kind="fan")
+    return _fan(speed_key="speed", off=off, multiplier=torch.tensor([1.5], dtype=F64),
+                shutoff=shut), shut
+
+
+def _finite_everywhere(fan, speed, dp):
+    """flow, dflow and the gradients of flow with respect to dp and the speed are finite."""
+    s = torch.tensor([speed], dtype=F64, requires_grad=True)
+    x = torch.tensor([dp], dtype=F64, requires_grad=True)
+    d = {"rho": torch.full((2,), RHO_293, dtype=F64), "speed": s}
+    q = fan.flow(x, d)
+    g_dp, g_s = torch.autograd.grad(q.sum(), (x, s))
+    slope = fan.dflow(x, d)
+    (g_slope,) = torch.autograd.grad(slope.sum(), (s,), allow_unused=True)
+    for v in (q, slope, g_dp, g_s) + ((g_slope,) if g_slope is not None else ()):
+        assert torch.isfinite(v).all(), (speed, dp, v)
+    return q.detach(), slope.detach()
+
+
+@pytest.mark.parametrize("off", [0.0, 0.1])
+@pytest.mark.parametrize("dp", [-20.0, 0.0, 0.5])
+def test_a_fan_at_zero_speed_is_stopped_and_finite(off, dp):
+    """s = 0 divides the fan laws by zero: it is stopped whatever `off` is, and passes its
+    shut-off orifice (times the multiplier)."""
+    fan, shut = _shutoff_fan(off)
+    q, slope = _finite_everywhere(fan, 0.0, dp)
+    d = {"rho": torch.full((2,), RHO_293, dtype=F64)}
+    x = torch.tensor([dp], dtype=F64)
+    torch.testing.assert_close(q, 1.5 * shut.flow(x, d), rtol=1e-14, atol=0)
+    torch.testing.assert_close(slope, 1.5 * shut.dflow(x, d), rtol=1e-14, atol=0)
+
+
+@pytest.mark.parametrize("speed", [0.1 - 1e-9, 0.1, 0.1 + 1e-9, 0.05, 1.0])
+def test_around_its_off_ratio_the_fan_and_its_gradients_stay_finite(speed):
+    """The flow jumps at the off ratio (running fan to shut-off orifice, as in ContamX);
+    on either side, and at a stopped edge, flow, slope and gradients are finite."""
+    fan, _ = _shutoff_fan(0.1)
+    q, _ = _finite_everywhere(fan, speed, -0.5)
+    assert (q.item() > 0) == (speed >= 0.1)     # running: pushes; stopped: the orifice leaks back
+
+
+def test_a_negative_speed_is_refused_naming_the_fan_and_the_value():
+    fan, _ = _shutoff_fan(0.1)
+    d = {"rho": torch.full((2,), RHO_293, dtype=F64), "speed": torch.tensor([-0.5], dtype=F64)}
+    with pytest.raises(ValueError, match=r"kind 'fan'.*'speed'.*negative speed ratio -0\.5"):
+        fan.flow(torch.tensor([-20.0], dtype=F64), d)
+    with pytest.raises(ValueError, match=r"negative speed ratio"):
+        fan.dflow(torch.tensor([-20.0], dtype=F64), d)

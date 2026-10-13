@@ -1000,6 +1000,19 @@ def _laminar_transition(C: float, lam: float, n: float) -> float:
     return 1e-3
 
 
+def _check_edge_order(net: Network, kind: str, cols_in_append_order: list[int]) -> None:
+    """Refuse per-edge data appended in an order other than the network's edge order of
+    `kind`, which `endpoints(kind)` and the flow layer's dp block follow: a mismatch would
+    pair each edge with another edge's coefficients and upstream node, silently."""
+    cols_in_network_order = net.edge_index(kind).tolist()
+    if cols_in_append_order != cols_in_network_order:
+        raise RuntimeError(
+            f"prj: element kind {kind!r} built its per-edge coefficients in edge order "
+            f"{cols_in_append_order} but the network orders that kind's edges "
+            f"{cols_in_network_order}; the upstream-density endpoints would be misaligned"
+        )
+
+
 def fan_curve_element(data: list[list[float]], *, kind: str, src, tgt, multiplier,
                       speed_key: str | None) -> AffinityFan:
     """CONTAM's performance-curve fan by the fan laws. `data` holds the element's lines:
@@ -1291,6 +1304,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
             built.append(FixedFlow(torch.tensor(p.mult * flow, dtype=F64), kind=kind))
         elif d == "fan_fan":
             per_kind_fan.setdefault(kind, []).append(p)
+            per_kind_cols.setdefault(kind, []).append(column - 1)
 
     # Power-law kinds: one `UpstreamDensityPowerLaw` per kind with per-edge C, n, m and the
     # kind's (shared) transition. The transition is the element's own, so it is the same for
@@ -1312,15 +1326,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         # network at the moment its coefficient is appended. Assert it: a silent mismatch
         # would pair each edge with another edge's endpoints and give the correction the
         # wrong upstream node, with no exception anywhere.
-        cols_in_append_order = per_kind_cols[kind]
-        cols_in_network_order = net.edge_index(kind).tolist()
-        if cols_in_append_order != cols_in_network_order:
-            raise RuntimeError(
-                f"prj: element kind {kind!r} built its per-edge coefficients in edge order "
-                f"{cols_in_append_order} but the network orders that kind's edges "
-                f"{cols_in_network_order}; the upstream-density endpoints would be "
-                f"misaligned"
-            )
+        _check_edge_order(net, kind, per_kind_cols[kind])
         src, tgt = net.endpoints(kind)
         built.append(
             UpstreamDensityPowerLaw(
@@ -1333,6 +1339,8 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     speed_kinds = {kind_of[p.element_nr] for p in paths
                    if p.schedule_nr and elements[p.element_nr].dtype == "fan_fan"}
     for kind, members in per_kind_fan.items():
+        # Per-edge mult in path order against the network's edge order, as for power laws.
+        _check_edge_order(net, kind, per_kind_cols[kind])
         src, tgt = net.endpoints(kind)
         built.append(fan_curve_element(
             elements[members[0].element_nr].data, kind=kind, src=src, tgt=tgt,

@@ -121,6 +121,10 @@ class AffinityFan(Element):
     power law), times `multiplier`; with no `shutoff` a stopped fan passes nothing. rho_up
     is `drivers[rho_key]` at the edge's source, since a fan pushes from source to target.
     `multiplier` (one per edge, or one for all) is fans in parallel: CONTAM's path mult.
+
+    The flow jumps at s = `off` (and at s = 0), from the running fan to the stopped one, as
+    in ContamX; the slope and the gradients are finite on either side of the jump. A
+    negative speed ratio is refused.
     """
 
     def __init__(self, curve: FanCurve, *, src, tgt, rho_ref: float,
@@ -156,7 +160,15 @@ class AffinityFan(Element):
                            f"fan's speed ratio")
         else:
             s = torch.as_tensor(drivers[self.speed_key]).to(dp.dtype)
-        running = s >= self.off
+            negative = s < 0
+            if bool(negative.any()):
+                raise ValueError(
+                    f"{name}: driver {self.speed_key!r} gives a negative speed ratio "
+                    f"{s.detach()[negative].flatten()[0].item()!r}; a fan's speed ratio is 0 "
+                    f"(stopped) or more")
+        # A speed of exactly 0 is stopped whatever `off` is (the fan laws divide by s), and
+        # stopped edges evaluate the curve at s = 1, so the discarded branch stays finite.
+        running = (s >= self.off) & (s > 0)
         s = torch.where(running, s, torch.ones_like(s))
         return r, s, self.multiplier.to(dp.dtype), running
 
