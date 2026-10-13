@@ -373,10 +373,12 @@ class TransportLayer:
     STORAGE-FREE NODES (``storage_free``): interior nodes that hold no amount, e.g. a
     zero-volume air-handler plenum. Their balance is algebraic in every step (inflow equals
     outflow, so their value is the flow-weighted mix of what enters), and a storage-free
-    node with nothing passing through it (no flow, no conduction) keeps its value. Their
+    node with nothing passing through it (no flow, no conduction) keeps its value, and a
+    nonzero source there is refused by name (it would have nowhere to go). Their
     capacity may be 0; removal and kinetics do not act on them. Only ``scheme="implicit"``
     (and ``steady``) can hold them; a ``steady`` with nothing passing through such a node
-    is singular. ``storage_free_mask`` is ``(n_i,)`` bool, True at those nodes.
+    is refused by name (it has no value there). ``storage_free_mask`` is ``(n_i,)`` bool,
+    True at those nodes.
     """
 
     #: The differentiable operator coefficients a layer owns, in the fixed order the
@@ -729,6 +731,44 @@ class TransportLayer:
     def _storage_free_stacked(self, device: torch.device) -> torch.Tensor:
         """`storage_free_mask` stacked like the state, `(K * n_i,)`."""
         return self.storage_free_mask.to(device).repeat(self.n_species)
+
+    def _refuse_idle_storage_free(self, q: torch.Tensor,
+                                  conductance: torch.Tensor | None) -> None:
+        """A steady solve has no value for a storage-free node that nothing passes through
+        (its row is empty): refuse it, naming the nodes, instead of a singular solve."""
+        storage = self._storage_stacked(q, torch.float64, conductance)
+        idle = self._storage_free_stacked(storage.device) & (storage > 0)
+        if not bool(idle.any()):
+            return
+        rows = idle.reshape(-1, idle.shape[-1]).any(0).reshape(self.n_species, self.n_i).any(0)
+        names = [self.net.nodes[int(self.interior_idx[i])]
+                 for i in rows.nonzero().flatten().tolist()]
+        raise ValueError(
+            f"TransportLayer '{self.name}' steady: nothing passes through storage-free "
+            f"node(s) {names} (no flow, no conduction); they hold no amount, so a steady "
+            f"solve has no value for them"
+        )
+
+    def _refuse_held_sources(self, q: torch.Tensor, sources: torch.Tensor,
+                             conductance: torch.Tensor | None) -> None:
+        """Refuse, by node, a nonzero source on a storage-free node that nothing passes
+        through this step: the node holds no amount and keeps its value, so the source would
+        have nowhere to go and would be dropped."""
+        storage = self._storage_stacked(q, torch.float64, conductance)
+        held = self._storage_free_stacked(storage.device) & (storage > 0)
+        src, _ = self._to_stacked(self._sources_interior(sources), self.n_i, "sources")
+        bad = held & (src.detach() != 0)
+        if not bool(bad.any()):
+            return
+        rows = bad.reshape(-1, bad.shape[-1]).any(0).reshape(self.n_species, self.n_i).any(0)
+        names = [self.net.nodes[int(self.interior_idx[i])]
+                 for i in rows.nonzero().flatten().tolist()]
+        raise ValueError(
+            f"TransportLayer '{self.name}': a nonzero source at storage-free node(s) {names}, "
+            f"which nothing passes through this step: they hold no amount and keep their "
+            f"value, so the source has nowhere to go; switch it off with the flow, or give "
+            f"the node a capacity (not storage-free)"
+        )
 
     def _resolve_solver(
         self, batch_size: int, *, op=None, rhs: torch.Tensor | None = None,
@@ -1499,6 +1539,9 @@ class TransportLayer:
         x_boundary = x_boundary.to(dtype)
         _, reduced = self._to_stacked(self._sources_interior(sources), self.n_i, "sources")
         names, coef = self._coefficients(removal=self._removal_arg(removal))
+        if self._has_storage_free:
+            self._refuse_idle_storage_free(
+                q, dict(zip(names, coef, strict=True)).get("conductance"))
 
         def build_system(q_, sources_, xb_, cap_, *coef_):
             op = self._advection_operator(q_, cap_, dict(zip(names, coef_, strict=True)))
@@ -1559,6 +1602,9 @@ class TransportLayer:
         cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev).to(dtype)
         _, reduced = self._to_stacked(x, self.n_i, "x")
         names, coef = self._coefficients(removal=removal)
+        if self._has_storage_free:
+            self._refuse_held_sources(q, sources,
+                                      dict(zip(names, coef, strict=True)).get("conductance"))
 
         def build_system(x_, q_, sources_, xb_, cap_, cap_prev_, *coef_):
             op = self._advection_operator(q_, cap_, dict(zip(names, coef_, strict=True)))
@@ -1574,7 +1620,7 @@ class TransportLayer:
                 rhs = ratio * x_s + dt * b0
             else:
                 # A storage-free row nothing passes through is `x_new = x_old` exactly: its
-                # operator row is empty, and a source there has nowhere to go.
+                # operator row is empty (a source there was refused above).
                 held = self._storage_free_stacked(storage.device) & (storage > 0)
                 rhs = torch.where(held, x_s, storage * ratio * x_s + dt * b0)
             system = _AffineSystemOperator(op, dt, storage=storage)

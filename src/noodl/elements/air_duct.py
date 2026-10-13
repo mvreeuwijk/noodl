@@ -120,6 +120,14 @@ def _scaled_residual(x, scale, target, rho, mu, L, D, eps, C, A):
     return _duct_loss(scale * x, rho, mu, L, D, eps, C, A) - target
 
 
+def _f64(value):
+    """A Python number or sequence as float64 (never the float32 default); a tensor keeps
+    its own dtype."""
+    if isinstance(value, torch.Tensor):
+        return value
+    return torch.as_tensor(value, dtype=torch.float64)
+
+
 class _UpstreamAir(Element):
     """Shared by the duct laws: per-edge upstream density and viscosity from the drivers."""
 
@@ -194,11 +202,11 @@ class AirDuct(_UpstreamAir):
         if area is not None and not bool((torch.as_tensor(area, dtype=torch.float64) > 0)
                                          .all()):
             raise ValueError(f"{where}: area must be strictly positive, got {area!r}")
-        self.length = self._param(length, learnable)
-        self.diameter = self._param(diameter, learnable)
-        self.roughness = self._param(roughness, learnable)
-        self.loss = self._param(loss, learnable)
-        self.area = None if area is None else self._param(area, learnable)
+        self.length = self._param(_f64(length), learnable)
+        self.diameter = self._param(_f64(diameter), learnable)
+        self.roughness = self._param(_f64(roughness), learnable)
+        self.loss = self._param(_f64(loss), learnable)
+        self.area = None if area is None else self._param(_f64(area), learnable)
         self._set_endpoints(src, tgt, rho_key, temperature_key)
 
     def _geometry(self, dtype: torch.dtype) -> list[Tensor]:
@@ -277,8 +285,8 @@ class DuctTerminal(_UpstreamAir):
             raise ValueError(f"{where}: area must be strictly positive, got {area!r}")
         if not bool((torch.as_tensor(loss, dtype=torch.float64) > 0).all()):
             raise ValueError(f"{where}: loss must be strictly positive, got {loss!r}")
-        self.area = self._param(area, learnable)
-        self.loss = self._param(loss, learnable)
+        self.area = self._param(_f64(area), learnable)
+        self.loss = self._param(_f64(loss), learnable)
         self.opening_key = opening_key
         self._set_endpoints(src, tgt, rho_key, temperature_key)
 

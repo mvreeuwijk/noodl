@@ -617,6 +617,7 @@ PRESSURE_SOURCE = DATA / "pressure_source_stack.prj"
 
 
 @pytest.mark.external
+@pytest.mark.filterwarnings("ignore::noodl.apps.building_physics.prj.ContamCompatibilityWarning")
 def test_sinks_and_emission_models_match_contamx(contamx, tmp_path, record_property):
     """`sinks_three_zone.prj`: a deposition velocity sink, a deposition rate sink on a
     schedule, a constant-coefficient source with a removal term, a cutoff source, NRCC
@@ -636,6 +637,7 @@ def test_sinks_and_emission_models_match_contamx(contamx, tmp_path, record_prope
 
 
 @pytest.mark.external
+@pytest.mark.filterwarnings("ignore::noodl.apps.building_physics.prj.ContamCompatibilityWarning")
 def test_a_constant_coefficient_source_scales_with_its_multiplier(contamx, tmp_path,
                                                                   record_property):
     """`sinks_three_zone.prj` with its constant-coefficient source's multiplier set to 2

@@ -153,6 +153,9 @@ class PotentialFlowLayer:
         self._elements = list(elements)
         self._drives = list(drives)
         self.kinds = [el.kind for el in elements]
+        # Node name -> a likely cause, appended when that node is reported floating (an
+        # application's builder fills it, e.g. for a node only prescribed flows touch).
+        self.node_hints: dict = {}
 
         cols_list = []
         self._kind_slices: dict[str, tuple[int, int]] = {}
@@ -652,9 +655,11 @@ class PotentialFlowLayer:
         if record["reason"] == "negative_slope":
             return f"negative slope on edges {record['edges']}"
         names = [self.net.nodes[i] for i in record["nodes"]]
+        hints = sorted({self.node_hints[n] for n in names if n in self.node_hints})
         return (
             f"floating nodes with no path to a boundary potential: "
             f"ungrounded interior nodes {names}"
+            + "".join(f" ({h})" for h in hints)
         )
 
     def linear_init(self, phi_boundary, drivers, sources):

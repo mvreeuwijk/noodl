@@ -130,7 +130,7 @@ def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
     if bad:
         raise ValueError(
             f"thermal layer {name!r}: nodes {bad} have no heat capacity (zero volume and no "
-            f"wall capacity)"
+            f"wall capacity){_STORAGE_FREE_HINT}"
         )
     return TransportLayer(
         net, name, capacity=capacity, flow_kind=kinds, boundary=boundary, carrier=float(c_p),
@@ -168,7 +168,8 @@ def species_layer(net: Network, *, ambient="ambient", name: str = "species",
         if c <= 0 and net.nodes[i] not in free
     ]
     if bad:
-        raise ValueError(f"species layer {name!r}: nodes {bad} have zero volume")
+        raise ValueError(f"species layer {name!r}: nodes {bad} have zero volume"
+                         f"{_STORAGE_FREE_HINT}")
     return TransportLayer(
         net, name, capacity=capacity, flow_kind=kinds, boundary=[ambient], n_species=n_species,
         scheme=scheme, quantity="mass_fraction", unit="kg/kg", species_names=species_names,
@@ -234,6 +235,23 @@ class LinearDensity(_DensityClosure):
 
     def _rho(self, T, drivers):
         return self.rho_0 * (1.0 - (T - self.T_0) / self.T_0)
+
+
+#: Appended to a zero-capacity refusal: the usual cause is an air handler's plenum.
+_STORAGE_FREE_HINT = " (an air-handler plenum? pass storage_free= to build_model)"
+
+
+def _prescribed_only_nodes(net: Network, air_elements, air) -> list:
+    """The airflow layer's interior nodes that only `PrescribedFlow` edges touch (an air
+    handler's plenums left out of `flow_balanced`): their pressure is undetermined."""
+    other: set = set()
+    prescribed: set = set()
+    for el in air_elements:
+        src, tgt = net.endpoints(el.kind)
+        touched = {net.nodes[i] for i in src.tolist() + tgt.tolist()}
+        (prescribed if isinstance(el, PrescribedFlow) else other).update(touched)
+    interior = {net.nodes[i] for i in air.interior.tolist()}
+    return [n for n in net.nodes if n in prescribed and n not in other and n in interior]
 
 
 def check_flow_balanced(net: Network, air_elements, flow_balanced, *,
@@ -328,6 +346,9 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
     air = PotentialFlowLayer(net, "air", list(air_elements), drives=list(drives),
                              boundary=[ambient, *flow_balanced], quantity="pressure", unit="Pa",
                              flow_unit="kg/s")
+    air.node_hints.update(dict.fromkeys(_prescribed_only_nodes(net, air_elements, air),
+                                        "an air-handler plenum? pass flow_balanced= to "
+                                        "build_model"))
     layers: dict = {"air": air}
     model_closures: list = []
     if thermal:

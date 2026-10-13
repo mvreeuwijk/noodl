@@ -737,14 +737,41 @@ def test_a_step_whose_retry_fails_too_raises_naming_the_step(monkeypatch):
     calls = []
 
     def failing(self, *args, **kwargs):
-        calls.append(args[0].keys() & {"air.phi"})
+        calls.append((args[0].keys() & {"air.phi"}, kwargs.get("warm_start", True)))
         raise ConvergenceError("did not converge")
 
     monkeypatch.setattr(Model, "step", failing)
     with pytest.raises(ConvergenceError, match=r"ending at t = 300.0 s.*previous step's "
                                                r"pressures.*linear initial guess"):
         simulate(model, state, drivers, [0.0, 300.0])
-    assert calls == [{"air.phi"}, set()]       # warm, then without the previous pressures
+    # warm, then from the linear initial guess with the previous pressures still in the state
+    assert calls == [({"air.phi"}, True), ({"air.phi"}, False)]
+
+
+def test_a_retried_step_keeps_the_pressures_the_zone_densities_read(monkeypatch):
+    """densZP project, a zone 30 K warmer than outdoors (gauge pressure about 1 Pa): every
+    warm solve of the second step is made to fail, so each of its passes is retried from the
+    linear initial guess. The zone densities still read the previous pressures, so the run
+    lands where the unretried run does (without them its pressure is 8e-5 off)."""
+    from noodl.solvers import ConvergenceError
+
+    model, state, drivers = project_to_model(read_prj(DATA / "pressure_source_stack.prj"))
+    drivers = {**drivers, "T": _f(263.15, 293.15)}
+    times = [0.0, 300.0, 600.0]
+    reference = simulate(model, state, drivers, times, **TIGHT)
+    real_step = Model.step
+
+    def warm_fails_at_300(self, s, d, dt, *, t=None, warm_start=True, **kwargs):
+        if t == 300.0 and warm_start:
+            raise ConvergenceError("forced")
+        return real_step(self, s, d, dt, t=t, warm_start=warm_start, **kwargs)
+
+    monkeypatch.setattr(Model, "step", warm_fails_at_300)
+    diagnostics: dict = {}
+    out = simulate(model, state, drivers, times, diagnostics=diagnostics, **TIGHT)
+    assert diagnostics["airflow_retries"] == [600.0]
+    for key in ("air.phi", "air.q"):
+        torch.testing.assert_close(out[key], reference[key], rtol=1e-10, atol=1e-12)
 
 
 def test_an_error_other_than_non_convergence_passes_through_without_a_retry(monkeypatch):

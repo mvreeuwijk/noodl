@@ -155,12 +155,13 @@ zero-volume air-handler plenum. Their balance is algebraic in every step: what f
 within the step, so their value is the flow-weighted mix of what enters. A storage-free node with
 nothing passing through it (no flow and no conduction) keeps its value, as ContamX holds the
 plenum of a switched-off air handler. A source at such a node (a heating coil in a plenum) is
-carried on by the flow through it within the step. Their capacity, at construction or per step, may be 0
+carried on by the flow through it within the step; a nonzero source at a node nothing passes
+through would have nowhere to go, so the step refuses it, naming the node. Their capacity, at construction or per step, may be 0
 (a negative one is refused everywhere, and a zero one at any other node). Removal and kinetics act
 on a stored amount, so they do not act on these nodes. Only `scheme="implicit"` and `steady` can
 hold them: the exponential and trapezoidal steps have no algebraic form, so a layer with either
-scheme refuses storage-free nodes at construction. A `steady` solve with nothing passing through
-such a node is singular. Whether such a node mixes or holds is a 0/1 choice on the flows and
+scheme refuses storage-free nodes at construction. A `steady` solve has no value for such a node
+with nothing passing through it, and refuses it, naming the node. Whether such a node mixes or holds is a 0/1 choice on the flows and
 carries no gradient: a held node's value has zero gradient with respect to the flows, although
 any flow through it would switch it to mixing. `layer.storage_free_mask` is the `(n_i,)` boolean mask of these nodes.
 

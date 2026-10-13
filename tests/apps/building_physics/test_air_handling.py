@@ -80,8 +80,10 @@ M_ROOM = 300.0 * 1.2041
 DT = 300.0
 
 
-def _house(fo=0.3, supply=0.1, plenum_volume=0.0):
-    """One room, a leak to the ambient, an air handler supplying and returning `supply`."""
+def _house(fo=0.3, supply=0.1, plenum_volume=0.0, *, balanced=True, free=None,
+           thermal=False):
+    """One room, a leak to the ambient, an air handler supplying and returning `supply`.
+    `balanced=False` leaves out `flow_balanced=`; `free` overrides `storage_free=`."""
     net = Network(dtype=F64)
     net.add_node("ambient", z_ref=0.0, T0=293.15)
     net.add_node("room", z_ref=0.0, T0=293.15, volume=300.0)
@@ -91,12 +93,13 @@ def _house(fo=0.3, supply=0.1, plenum_volume=0.0):
                     return_volume=plenum_volume)
     element, closure = air_handler_from_edges(net, "air_handler")
     plenums = air_handler_plenums(net, "air_handler")
-    free = plenums if plenum_volume == 0.0 else ()
+    if free is None:
+        free = plenums if plenum_volume == 0.0 else ()
     model = build_model(net, air_elements=[orifice_elements_from_edges(net, "airpath"),
                                            element],
-                        drives=[Stack.from_network(net, "airpath")], thermal=False,
-                        species=1, closures=[closure], flow_balanced=plenums,
-                        storage_free=free)
+                        drives=[Stack.from_network(net, "airpath")], thermal=thermal,
+                        species=1, closures=[closure],
+                        flow_balanced=plenums if balanced else (), storage_free=free)
     state = initial_state(model)
     drivers = initial_drivers(model)
     drivers["rho"] = torch.full((net.n,), 1.2041, dtype=F64)
@@ -315,3 +318,48 @@ def test_a_negative_point_is_refused_naming_it_not_the_fraction():
     d["flow_multiplier.ahs"] = torch.tensor([1, 1, -1, 1, 1, 1], dtype=F64)
     with pytest.raises(ValueError, match=r"supply or return points \[2\]"):
         closure({}, d)
+
+
+def test_omitted_plenum_options_are_refused_with_the_fix():
+    """Zero-volume plenums without `storage_free=` and plenums without `flow_balanced=`
+    are refused naming them, with the option that fixes it."""
+    with pytest.raises(ValueError, match=r"species layer 'species': nodes \['ahs_supply', "
+                                         r"'ahs_return'\] have zero volume \(an air-handler "
+                                         r"plenum\? pass storage_free= to build_model\)"):
+        _house(free=())
+    with pytest.raises(ValueError, match=r"thermal layer 'thermal': nodes .*ahs_supply.* "
+                                         r"\(an air-handler plenum\? pass storage_free= to "
+                                         r"build_model\)"):
+        _house(free=(), thermal=True)
+    _, model, state, drivers = _house(balanced=False)
+    with pytest.raises(RuntimeError, match=r"floating nodes .*\['ahs_supply', 'ahs_return'\]"
+                                           r" \(an air-handler plenum\? pass flow_balanced= "
+                                           r"to build_model\)"):
+        model.step(state, drivers, DT)
+
+
+def test_a_steady_solve_of_a_switched_off_air_handler_is_refused_naming_the_plenums():
+    """Nothing passes through the zero-volume plenums, so they have no steady value."""
+    _, model, state, drivers = _house()
+    drivers["flow_multiplier.air_handler"] = torch.zeros(5, dtype=F64)
+    with pytest.raises(ValueError, match=r"TransportLayer 'species' steady: nothing passes "
+                                         r"through storage-free node\(s\) \['ahs_supply', "
+                                         r"'ahs_return'\]"):
+        model.steady(state, drivers)
+
+
+def test_an_outdoor_air_fraction_of_shape_b_by_1_is_read_as_b():
+    closure = AirHandlerFlows("ahs", roles=ROLES,
+                              design_flows=torch.tensor([0.1, 0.05, 0.12, 0, 0, 0], dtype=F64))
+    m = torch.ones(2, 6, dtype=F64)
+    flat = closure({}, {"outdoor_air_fraction.ahs": torch.tensor([0.3, 1.0], dtype=F64),
+                        "flow_multiplier.ahs": m})["prescribed_flow.ahs"]
+    column = closure({}, {"outdoor_air_fraction.ahs": torch.tensor([[0.3], [1.0]], dtype=F64),
+                          "flow_multiplier.ahs": m})["prescribed_flow.ahs"]
+    assert column.shape == (2, 6)
+    torch.testing.assert_close(column, flat, rtol=0, atol=0)
+    with pytest.raises(ValueError, match=r"AirHandlerFlows 'ahs': outdoor-air fraction must "
+                                         r"be one value per instance \(shape \(\) or \(B,\), "
+                                         r"or \(B, 1\)\), got shape \(2, 3\)"):
+        closure({}, {"outdoor_air_fraction.ahs": torch.full((2, 3), 0.3, dtype=F64),
+                     "flow_multiplier.ahs": m})

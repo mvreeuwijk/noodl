@@ -57,6 +57,8 @@ class FixedVolumeFlow(Element):
             raise ValueError(f"FixedVolumeFlow (kind {kind!r}): src and tgt must give one "
                              f"node position per edge, got {tuple(src_t.shape)} and "
                              f"{tuple(tgt_t.shape)}")
+        if not isinstance(volume_flow, torch.Tensor):     # never the float32 default
+            volume_flow = torch.as_tensor(volume_flow, dtype=torch.float64)
         self.volume_flow = self._param(volume_flow, learnable)
         self.register_buffer("src", src_t)
         self.register_buffer("tgt", tgt_t)

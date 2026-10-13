@@ -139,10 +139,14 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     Each step's airflow solve starts from the previous step's pressures. When it does not
     converge from there (a fan whose iterates swing between the ends of its curve, where its
     slope is zero, after a large speed change), the step is retried once from the airflow
-    layers' linear initial guess, as the first solve of the run is; a retry that fails too
-    raises `ConvergenceError`, naming the step. Only non-convergence (`ConvergenceError`) is
-    retried; any other error passes through unchanged. `diagnostics`, when given, receives
-    `"airflow_retries"`: the end time (s) of every step that was retried, once per step.
+    layers' linear initial guess, as the first solve of the run is (the closures still read
+    the previous pressures: `Model.step(warm_start=False)`); a retry that fails too raises
+    `ConvergenceError`, naming the step. Only non-convergence (`ConvergenceError`) is
+    retried; any other error passes through unchanged.
+
+    `diagnostics`, when given, receives the RUN's diagnostics, not `Model.step`'s per-step
+    `diagnostics` (layer statistics, pass counts), which `simulate` does not collect:
+    `"airflow_retries"`, the end time (s) of every step that was retried, once per step.
 
     Returns `"time"` `(N,)`, and per row the state's `"<layer>.q"`, `"<layer>.phi"` of every
     potential layer and `"<layer>.x"` of every transport layer, stacked on a leading axis.
@@ -199,7 +203,6 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     keys += [f"{n}.x" for n in model.transport]
     rows: dict[str, list[Tensor]] = {k: [state[k]] for k in keys}
     retries: list[float] = []
-    warm_keys = {f"{n}.phi" for n in model.potential}
     t = ts[0]
     for t_out in ts[1:]:
         cuts = input_breakpoints(bound, t, t_out, cal) if land_on_breakpoints else []
@@ -223,12 +226,12 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
                 try:
                     return model.step(step_from, d, dt, t=t0, **step_kwargs)
                 except ConvergenceError as warm:
-                    # Without the previous pressures each airflow solve starts from its
-                    # layer's linear initial guess. Only non-convergence is retried; every
-                    # other failure passes through as it was raised.
-                    cold = {k: v for k, v in step_from.items() if k not in warm_keys}
+                    # Each airflow solve starts from its layer's linear initial guess; the
+                    # closures still read the previous pressures. Only non-convergence is
+                    # retried; every other failure passes through as it was raised.
                     try:
-                        out = model.step(cold, d, dt, t=t0, **step_kwargs)
+                        out = model.step(step_from, d, dt, t=t0, warm_start=False,
+                                         **step_kwargs)
                     except ConvergenceError as again:
                         raise ConvergenceError(
                             f"simulate: step of {dt} s ending at t = {t1} s: the airflow "
@@ -262,8 +265,9 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), diagnostics: dict
     for a project with a duct network, `"terminal_flow"` (N, n_terminals): the flow out of
     each duct terminal into its zone, in junction-number order. The species histories carry
     the zones' rows first, then the junctions' (`project.zone_mass_fractions` selects the
-    zones). `diagnostics` is `simulate`'s (the steps whose airflow solve was retried from the
-    linear initial guess; none for a steady run).
+    zones). `diagnostics` is `simulate`'s run-level dict, not `Model.step`'s:
+    `"airflow_retries"`, the steps whose airflow solve was retried from the linear initial
+    guess (none for a steady run).
 
     A steady airflow run (with no or steady contaminants) returns the one steady state at the
     run control's steady day, time and day type. Refused by name: cyclic contaminant runs,

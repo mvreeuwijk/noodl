@@ -90,3 +90,7 @@ def test_a_prescribed_flow_starts_in_the_layer_dtype():
     q32, _ = el32.linear_init({"prescribed_flow.ahs": torch.tensor([0.1], dtype=torch.float64)})
     assert q32.dtype == torch.float32
 
+
+
+def test_a_python_float_volume_flow_is_stored_as_float64():
+    assert FixedVolumeFlow(0.05, src=[0], tgt=[1]).volume_flow.dtype == torch.float64

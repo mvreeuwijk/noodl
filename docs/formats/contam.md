@@ -67,7 +67,7 @@ simulated species in file order; a source or kinetic reaction that names a speci
 does not simulate (a species the file defines but marks as not simulated included), a kinetic
 reaction that gives one product-reactant pair twice, and a zone whose kinetic reaction number the
 file does not define; a schedule
-number that no week schedule carries, a week schedule that names a day schedule the file
+number that no week schedule carries; a week schedule that names a day schedule the file
 does not define; a schedule on an `eds`,
 `brs`, `plm` or `pkm` source (CONTAM triggers these once, at the schedule's first nonzero
 value); a zone without the variable-pressure flag (which

@@ -90,6 +90,12 @@ class AirHandlerFlows:
         f_o = drivers.get(self.fraction_key)
         f_o = (torch.tensor(self.outdoor_air_fraction, dtype=design.dtype) if f_o is None
                else torch.as_tensor(f_o).to(design.dtype))
+        if f_o.dim() == 2 and f_o.shape[-1] == 1:
+            f_o = f_o.squeeze(-1)                   # (B, 1), a column of instances: (B,)
+        if f_o.dim() > 1:
+            raise ValueError(
+                f"AirHandlerFlows {self.name!r}: outdoor-air fraction must be one value per "
+                f"instance (shape () or (B,), or (B, 1)), got shape {tuple(f_o.shape)}")
         points = design * m
         is_point = (self.roles == SUPPLY) | (self.roles == RETURN)
         negative = ((points.detach() < 0) & is_point).reshape(-1, points.shape[-1]).any(0)

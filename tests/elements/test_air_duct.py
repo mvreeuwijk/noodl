@@ -337,3 +337,14 @@ def test_autograd_at_zero_pressure_difference_is_finite_and_correct():
     assert torch.isfinite(g_dp).all() and g_A.item() == 0.0
     assert g_dp.item() == pytest.approx(term.dflow(torch.zeros(1, dtype=F64), d).item(),
                                         rel=1e-14)
+
+
+def test_python_float_arguments_are_stored_as_float64():
+    """Python floats never fall through to the float32 default dtype; a tensor keeps its own."""
+    duct = AirDuct(2.0, 0.1, 1e-4, 0.5, area=0.008, src=[0], tgt=[1])
+    terminal = DuctTerminal(0.01, 1.0, src=[0], tgt=[1])
+    for value in (duct.length, duct.diameter, duct.roughness, duct.loss, duct.area,
+                  terminal.area, terminal.loss):
+        assert value.dtype == torch.float64
+    assert AirDuct(torch.tensor(2.0, dtype=torch.float32), 0.1, 1e-4, src=[0],
+                   tgt=[1]).length.dtype == torch.float32

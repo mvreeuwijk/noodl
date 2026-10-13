@@ -165,6 +165,9 @@ shape and its unit.
 `model.step(state, drivers, dt)` returns the new state; call it in a loop, changing the
 drivers between steps as the inputs change. `model.steady(state, drivers)` returns the
 quasi-steady state instead (an allocation layer, which is a time-stepping rule, has none).
+Each potential solve starts from the state's last potentials; `warm_start=False` starts it
+from the layer's linear initial guess instead, while closures still read those potentials
+(a retry when a warm start does not converge).
 
 When the layers feed back on each other — airflow carries heat, and temperature drives the
 airflow — build the model with `coupling="iterate"` and an `iterate_tol`, which repeats

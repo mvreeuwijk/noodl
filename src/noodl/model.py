@@ -807,7 +807,7 @@ class Model:
     def _pass(
         self, state, drivers, dt, solve_kwargs, *, step_from: State | None = None,
         t: float | None = None, boundary_transfers: bool | Collection[str] = False,
-        produced: list[str] | None = None,
+        produced: list[str] | None = None, warm_start: bool = True,
     ) -> tuple[State, dict, Drivers]:
         """One closures -> potential -> allocation -> transport -> reactions pass (reactions
         before transport under `reaction_order="before_transport"`);
@@ -818,7 +818,9 @@ class Model:
         carried to every closure as a `StepContext`, so an INTEGRATING closure reads the
         model's own clock rather than an interval fixed at its own construction.
 
-        `state` is what the closures read and what the potential solves warm-start from.
+        `state` is what the closures read and what the potential solves warm-start from
+        (`warm_start=False`: they start from their layer's linear initial guess instead,
+        while the closures still read `state`'s potentials).
         `step_from` is the state a transport STEP starts at, which is a different thing
         inside an iterated coupling: pass k there re-advances the SAME time step from the
         state at the start of it, with only the closures' view of the new state updated.
@@ -870,7 +872,7 @@ class Model:
         for name, layer in self.potential.items():
             pb = self._require(drv, f"{name}.phi_boundary")
             sources = drv.get(f"{name}.sources")
-            phi_prev = state.get(f"{name}.phi")
+            phi_prev = state.get(f"{name}.phi") if warm_start else None
             phi0 = None if phi_prev is None else phi_prev[..., layer.interior]
             d: dict = {}
             phi, q = layer.solve(pb, drv, sources, phi0=phi0, diagnostics=d, **solve_kwargs)
@@ -1091,7 +1093,8 @@ class Model:
     def step(
         self, state, drivers, dt: float, *, t: float | None = None,
         diagnostics: dict | None = None,
-        boundary_transfers: bool | Collection[str] = False, **solve_kwargs,
+        boundary_transfers: bool | Collection[str] = False, warm_start: bool = True,
+        **solve_kwargs,
     ):
         """Advance one step (ping-pong or iterated coupling, per `self.coupling`).
 
@@ -1114,6 +1117,11 @@ class Model:
         accumulator) on every transport layer of the model, including ones nothing reads a
         transfer from -- a coupled recipient with an unlinked `exact`-scheme thermal layer
         pays that cost on every one of its substeps for no benefit.
+
+        `warm_start` (default True) starts each potential layer's nonlinear solve from the
+        state's `"<layer>.phi"`. `False` starts it from the layer's linear initial guess
+        instead, while closures and node sources still read `"<layer>.phi"` as an input (a
+        retry after a warm start failed to converge, without losing that input).
         """
         if not dt > 0:
             raise ValueError(f"Model: dt must be positive, got {dt!r}")
@@ -1136,10 +1144,11 @@ class Model:
                 )
         return self._advance(
             state, drivers, float(dt), diagnostics, solve_kwargs, t=t,
-            boundary_transfers=boundary_transfers,
+            boundary_transfers=boundary_transfers, warm_start=warm_start,
         )
 
-    def steady(self, state, drivers, *, diagnostics: dict | None = None, **solve_kwargs):
+    def steady(self, state, drivers, *, diagnostics: dict | None = None,
+               warm_start: bool = True, **solve_kwargs):
         """The quasi-steady state of every layer at `drivers` (transport layers solved to
         `rate == 0` rather than advanced).
 
@@ -1152,13 +1161,14 @@ class Model:
         `dt=None` here means the `StepContext` an INTEGRATING closure receives carries
         `dt=None` too, and `_apply_closures` refuses that by the closure's own name: a
         closure that integrates some state over an interval has no interval to integrate over
-        at a quasi-steady state.
+        at a quasi-steady state. `warm_start` is `step`'s.
         """
-        return self._advance(state, drivers, None, diagnostics, solve_kwargs)
+        return self._advance(state, drivers, None, diagnostics, solve_kwargs,
+                             warm_start=warm_start)
 
     def _advance(
         self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None,
-        boundary_transfers: bool | Collection[str] = False,
+        boundary_transfers: bool | Collection[str] = False, warm_start: bool = True,
     ) -> State:
         # The coupling seam: ping-pong is exactly ONE pass, taken with the state at the start
         # of the step; `coupling="iterate"` repeats `_pass` until the named transport states
@@ -1166,18 +1176,19 @@ class Model:
         if self.coupling == "pingpong":
             new, diag, _ = self._pass(
                 state, drivers, dt, solve_kwargs, t=t, boundary_transfers=boundary_transfers,
+                warm_start=warm_start,
             )
             if diagnostics is not None:
                 diagnostics.update({"passes": 1, "layers": diag})
             return new
         return self._iterate(
             state, drivers, dt, diagnostics, solve_kwargs, t=t,
-            boundary_transfers=boundary_transfers,
+            boundary_transfers=boundary_transfers, warm_start=warm_start,
         )
 
     def _iterate(
         self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None,
-        boundary_transfers: bool | Collection[str] = False,
+        boundary_transfers: bool | Collection[str] = False, warm_start: bool = True,
     ) -> State:
         """Hensen's onion: repeat the pass until the named transport states stop changing.
 
@@ -1309,6 +1320,7 @@ class Model:
                 new, diag, _ = self._pass(
                     fed, drivers, dt, solve_kwargs, step_from=state, t=t,
                     boundary_transfers=boundary_transfers, produced=produced,
+                    warm_start=warm_start,
                 )
                 if passes == 1:
                     needs_adjoint = any(new[k].requires_grad for k in produced)
@@ -1419,7 +1431,7 @@ class Model:
                 f.update(zip(keys, z, strict=True))
                 out, d, _ = self._pass(
                     f, drivers, dt, solve_kwargs, step_from=state, t=t,
-                    boundary_transfers=boundary_transfers,
+                    boundary_transfers=boundary_transfers, warm_start=warm_start,
                 )
                 adjoint_diag.clear()
                 adjoint_diag.update(d)

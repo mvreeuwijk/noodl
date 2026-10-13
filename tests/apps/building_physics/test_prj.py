@@ -1068,7 +1068,8 @@ def test_an_unknown_filter_type_and_a_super_filter_containing_itself_are_refused
 
 
 def test_the_sink_and_emission_source_types_are_read():
-    p = read_prj(SINKS)
+    with pytest.warns(ContamCompatibilityWarning, match=r"'sarin'.*ContamX ignores"):
+        p = read_prj(SINKS)                                   # its decay constant
     assert [s.source_type for s in p.sources] == ["dvs", "drs", "ccf", "cut", "plm", "pkm"]
     srcs = sources_from_project(p)
     assert [type(s) for s in srcs] == [DepositionVelocitySink, DepositionRateSink,
@@ -1105,6 +1106,7 @@ def test_a_pressure_driven_source_is_read_with_the_node_heights(tmp_path):
     assert closure.g == p.g == pytest.approx(9.8055)
 
 
+@pytest.mark.filterwarnings("ignore::noodl.apps.building_physics.prj.ContamCompatibilityWarning")
 def test_unsupported_sources_are_refused_by_name(tmp_path):
     text = SINKS.read_text()
     dvs = "1 sarin dvs deposit\n\n 0.001 10 0 0"
@@ -1118,6 +1120,7 @@ def test_unsupported_sources_are_refused_by_name(tmp_path):
         read_prj(_variant(text, plm, "  5   2   5   1   0     1     0", tmp_path))
 
 
+@pytest.mark.filterwarnings("ignore::noodl.apps.building_physics.prj.ContamCompatibilityWarning")
 def test_an_unreferenced_super_element_ahead_of_a_used_one_is_read_and_ignored(tmp_path):
     """Only a source that references a super element is refused; the element's own data
     (a count, then that many sub-element numbers on the next line) is read past."""
@@ -1318,6 +1321,25 @@ def test_a_junction_without_volume_is_a_storage_free_node(tmp_path):
     zone_three = x[:, 2:3].expand(-1, 3)
     torch.testing.assert_close(x[:, rows], zone_three, rtol=1e-12, atol=0)
     assert bool((zone_three[-1] > 1e-4).all())
+
+
+def test_a_steady_solve_with_an_idle_junction_without_volume_is_refused_by_name(tmp_path):
+    """With the exhaust fan's flow set to 0 nothing passes through junctions 7, 8 and 9,
+    which hold no air: a steady contaminant solve has no value for them."""
+    from noodl.elements import FixedVolumeFlow
+
+    p = read_prj(_variants(DUCTS.read_text(), [
+        ("  6  0   7   8   5   0   0   0   4 1 ", "  6  0   7   8   5   0   0   0   4 0 "),
+        ("  7  0   8   9   6   0   0   0   4 6 ", "  7  0   8   9   6   0   0   0   4 0 "),
+    ], tmp_path))
+    model, state, drivers = project_to_model(p)
+    (fan,) = [el for el in model.potential["air"]._elements if isinstance(el, FixedVolumeFlow)]
+    with torch.no_grad():
+        fan.volume_flow.zero_()
+    with pytest.raises(ValueError, match=r"TransportLayer 'species' steady: nothing passes "
+                                         r"through storage-free node\(s\) \['junction 7', "
+                                         r"'junction 8', 'junction 9'\]"):
+        prj_steady(model, state, drivers)
 
 
 def test_simulate_project_reports_the_terminal_flows(tmp_path):
