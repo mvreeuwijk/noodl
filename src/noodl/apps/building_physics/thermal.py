@@ -240,7 +240,8 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
                 density_kwargs=None,
                 coupling: str = "pingpong", iterate_tol=None, iterate_max: int = 20,
                 thermal_scheme: str | None = None, species_scheme: str = "implicit",
-                flow_kinds=None, return_inputs: bool = False):
+                flow_kinds=None, closures: Sequence = (), flow_balanced: Sequence = (),
+                storage_free: Sequence = (), return_inputs: bool = False):
     """Layers "air" (+ "thermal", + "species"), the density closure, one Model.
 
     Returns the `Model`; with `return_inputs=True`, `(model, state, drivers)` -- its
@@ -276,7 +277,15 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
 
     `thermal_scheme` defaults to `thermal_layer`'s own default ("exact", or "implicit" when
     the layer has storage-free nodes).
+
+    `closures` are appended after the density closure (an air handler's
+    `AirHandlerFlows`). `flow_balanced` names nodes whose pressure the airflow solve does
+    not need, because only prescribed, balanced flows touch them (an air handler's
+    plenums): they join the air layer's boundary at zero gauge pressure, while staying
+    ordinary nodes of the heat and species layers. `storage_free` names nodes that hold no
+    air (a zero-volume plenum); their layers must use the implicit scheme.
     """
+    storage_free = tuple(storage_free)
     element_kinds = tuple(el.kind for el in air_elements)
     kinds = tuple(flow_kinds) if flow_kinds else element_kinds
     unknown = [k for k in kinds if k not in element_kinds]
@@ -287,19 +296,20 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
             f"not solve carries no flow, so heat and species would silently not advect on it"
         )
     air = PotentialFlowLayer(net, "air", list(air_elements), drives=list(drives),
-                             boundary=[ambient], quantity="pressure", unit="Pa",
+                             boundary=[ambient, *flow_balanced], quantity="pressure", unit="Pa",
                              flow_unit="kg/s")
     layers: dict = {"air": air}
-    closures: list = []
+    model_closures: list = []
     if thermal:
-        th = thermal_layer(net, ambient=ambient, flow_kinds=kinds, scheme=thermal_scheme)
+        th = thermal_layer(net, ambient=ambient, flow_kinds=kinds, scheme=thermal_scheme,
+                           storage_free=storage_free)
         layers["thermal"] = th
         amb = net.node_index(ambient)
         kw = dict(density_kwargs or {})
         if density == "ideal_gas":
-            closures.append(IdealGasDensity(th, ambient_index=amb, **kw))
+            model_closures.append(IdealGasDensity(th, ambient_index=amb, **kw))
         elif density == "linear":
-            closures.append(LinearDensity(th, ambient_index=amb, **kw))
+            model_closures.append(LinearDensity(th, ambient_index=amb, **kw))
         else:
             raise ValueError(
                 f"build_model: density must be 'ideal_gas' or 'linear', got {density!r}"
@@ -315,8 +325,10 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
         layers["species"] = species_layer(
             net, ambient=ambient, flow_kinds=kinds, scheme=species_scheme,
             n_species=int(species) if names is None else len(names), species_names=names,
+            storage_free=storage_free,
         )
-    model = Model(net, layers, closures=closures, coupling=coupling, iterate_tol=iterate_tol,
+    model_closures.extend(closures)
+    model = Model(net, layers, closures=model_closures, coupling=coupling, iterate_tol=iterate_tol,
                   iterate_max=iterate_max)
     if return_inputs:
         return model, initial_state(model), initial_drivers(model)

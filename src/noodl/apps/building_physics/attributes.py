@@ -59,6 +59,17 @@ EDGE_ATTRIBUTES: dict[str, dict[str, tuple[str, str]]] = {
         "azimuth": ("wall direction of a terminal with a profile (degrees from CONTAM)",
                     "Wind.from_network"),
     },
+    "air_handler, an air handler's edges (made by add_air_handler)": {
+        "role": ("what the edge is: 0 supply point (plenum -> zone), 1 return point (zone -> "
+                 "plenum), 2 recirculation, 3 outdoor air, 4 exhaust", "air_handler_from_edges"),
+        "design_flow": ("design mass flow of a supply or return point (kg/s); 0 on the other "
+                        "edges", "air_handler_from_edges"),
+        "outdoor_air_fraction": ("on the recirculation edge: the outdoor-air fraction of the "
+                                 "supply when no input sets it (dimensionless, 1 by default)",
+                                 "air_handler_from_edges"),
+        "min_outdoor_air": ("on the recirculation edge: the minimum outdoor-air flow (kg/s, 0 "
+                            "by default)", "air_handler_from_edges"),
+    },
     "wall": {
         "ua": ("conductance zone -> wall or wall -> ambient (W/K)", "thermal_layer"),
     },

@@ -62,6 +62,15 @@ What the builders, elements and drives read off `net.add_node(...)` and `net.add
 | `Ch` | wind speed modifier (dimensionless, 1 by default) | `Wind.from_network` |
 | `azimuth` | wall direction of a terminal with a profile (degrees from CONTAM) | `Wind.from_network` |
 
+**Edges of kind `air_handler`, an air handler's edges (made by add_air_handler)**
+
+| Attribute | Meaning | Read by |
+|---|---|---|
+| `role` | what the edge is: 0 supply point (plenum -> zone), 1 return point (zone -> plenum), 2 recirculation, 3 outdoor air, 4 exhaust | `air_handler_from_edges` |
+| `design_flow` | design mass flow of a supply or return point (kg/s); 0 on the other edges | `air_handler_from_edges` |
+| `outdoor_air_fraction` | on the recirculation edge: the outdoor-air fraction of the supply when no input sets it (dimensionless, 1 by default) | `air_handler_from_edges` |
+| `min_outdoor_air` | on the recirculation edge: the minimum outdoor-air flow (kg/s, 0 by default) | `air_handler_from_edges` |
+
 **Edges of kind `wall`**
 
 | Attribute | Meaning | Read by |
@@ -74,7 +83,7 @@ Build the model and its starting state and inputs.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `build_model`<br><small>`noodl.apps.building_physics`</small> | Layers "air" (+ "thermal", + "species"), the density closure, one Model. | `build_model(net, *, air_elements, drives, ambient='ambient', thermal=True, species=0, density='ideal_gas', density_kwargs=None, coupling='pingpong', iterate_tol=None, iterate_max=20, thermal_scheme=None, species_scheme='implicit', flow_kinds=None, return_inputs=False)` |
+| `build_model`<br><small>`noodl.apps.building_physics`</small> | Layers "air" (+ "thermal", + "species"), the density closure, one Model. | `build_model(net, *, air_elements, drives, ambient='ambient', thermal=True, species=0, density='ideal_gas', density_kwargs=None, coupling='pingpong', iterate_tol=None, iterate_max=20, thermal_scheme=None, species_scheme='implicit', flow_kinds=None, closures=(), flow_balanced=(), storage_free=(), return_inputs=False)` |
 | `initial_drivers`<br><small>`noodl.apps.building_physics`</small> | A complete driver set: zero boundary pressures, boundary temperatures from each boundary node's `T0` attribute (`T_REF` where it has none), zero boundary mass fractions; then `values`, by name (see `noodl.refs.drivers_from`). | `initial_drivers(model, *, values=None)` |
 | `initial_state`<br><small>`noodl.apps.building_physics`</small> | `"<layer>.x"` for every transport layer: temperatures from the node attribute `T0` (interior order), mass fractions zero; then `values`. | `initial_state(model, *, values=None)` |
 | `project_to_model`<br><small>`noodl.apps.building_physics`</small> | Air layer + species layer (no thermal layer: a .prj carries no thermal data), the initial state and the drivers for the project's ambient conditions (or `ambient`). | `project_to_model(project, *, ambient=None, species=True, scheme='implicit')` |
@@ -115,6 +124,7 @@ Flow through an edge as a function of the potential difference across it.
 | `OperableDoor`<br><small>also `MBLDoorOperable`</small><br><small>`noodl.elements`</small> | ``Buildings.Airflow.Multizone.DoorOperable``: the door blended between open and closed by the opening signal ``y`` read from ``drivers[y_key]``. | `OperableDoor(*, direction, src, tgt, medium, y_key, LClo, wOpe=0.9, hOpe=2.1, CDOpe=0.65, mOpe=0.5, mClo=0.65, dpCloRat=4.0, CDCloRat=1.0, dp_turbulent=0.01, T_key='T', kind='door', learnable=False)` |
 | `OperableDoorCompartment`<br><small>also `MBLDoorCompartmentOperable`</small><br><small>`noodl.elements`</small> | One compartment of ``Buildings.Airflow.Multizone.DoorDiscretizedOperable`` per edge, blended between the open door and the closed crack by ``y = drivers[y_key]``. | `OperableDoorCompartment(*, src, tgt, medium, y_key, AOpe, LClo, nCom, CDOpe=0.65, CDClo=0.65, CDCloRat=1.0, dpCloRat=4.0, mOpe=0.5, mClo=0.65, dp_turbulent=0.01, vZer=0.001, T_key='T', Xw_key='X_w', p_key='p_abs', kind='door', learnable=False)` |
 | `PowerLaw`<br><small>`noodl.elements`</small> | q = C sign(dp) \|dp\|^n, laminar-blended or smoothly regularised near dp = 0. `dp` is in Pa; `C` is in the flow unit per Pa^n (kg/s for a mass-flow coefficient, m3/s for a volume-flow one), so the flow comes out in whatever unit `C` carries; `n` is dimensionless (0.5 for an orifice, towards 1 for a laminar crack). | `PowerLaw(C, n, *, dp_transition=0.001, regularised=None, kind='airpath', learnable=False)` |
+| `PrescribedFlow`<br><small>`noodl.elements`</small> | F = drivers[key] whatever dp: a flow (kg/s, one value per edge of the kind) that a closure or an input prescribes every step, e.g. an air handler's supply flows. | `PrescribedFlow(key, *, kind)` |
 | `Quadratic`<br><small>`noodl.elements`</small> | q = sign(dp) * 2\|dp\| / (sqrt(a^2 + 4 b \|dp\|) + a): the inverse of dp = a q + b \|q\| q, with `dp` in Pa, `a` in Pa per flow unit and `b` in Pa per flow unit squared. | `Quadratic(a, b, *, kind='airpath', learnable=False)` |
 | `RegularizedPowerLaw`<br><small>also `MBLPowerLaw`</small><br><small>`noodl.elements`</small> | MBL's regularised power law, ``q = C sign(dp) \|dp\|^m``, volume or mass form. | `RegularizedPowerLaw(C, m, *, dp_turbulent=0.1, form, rho_default, kind='airpath', learnable=False)` |
 | `Scaled`<br><small>`noodl.elements`</small> | F = s F_element: `element`'s flow times the dimensionless multiplier `drivers[key]`. | `Scaled(element, key)` |
@@ -140,6 +150,7 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `AirHandlerFlows`<br><small>`noodl.apps.building_physics`</small> | The closure that prescribes every flow of one air handler each step, by CONTAM's algorithm (see the module) from its design flows and its outdoor-air fraction. | `AirHandlerFlows(kind, *, roles, design_flows, outdoor_air_fraction=1.0, min_outdoor_air=0.0, name='')` |
 | `IdealGasDensity`<br><small>`noodl.apps.building_physics`</small> | rho = P_ref / (R T); P_ref from drivers["P_ref"] if present (CONTAM section 3.18). | `IdealGasDensity(thermal, *, ambient_index, P_ref=101325.0, R=287.055)` |
 | `LinearDensity`<br><small>`noodl.apps.building_physics`</small> | Boussinesq: rho = rho_0 (1 - (T - T_0) / T_0), the form the analytical natural- ventilation solutions (Li and Delsante 2001) assume. | `LinearDensity(thermal, *, ambient_index, rho_0=1.2041, T_0=293.15)` |
 | `SpeciesSources`<br><small>`noodl.apps.building_physics`</small> | Closure: every source's generation summed into `"<layer>.sources"` (kg/s, full node order) and every removal coefficient into `"<layer>.removal"` (1/s, active interior order), each times its entry of `"<layer>.source_multiplier"`, on its own species. | `SpeciesSources(sources, *, species, layer, names=None, heights=None, g=9.80665, pressure_key='air.phi')` |
@@ -199,8 +210,11 @@ Calculations and helpers.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `add_air_handler`<br><small>`noodl.apps.building_physics`</small> | Add an air handler to `target` (a `Network` or a `Component`): its two plenums (volumes in m3, temperature `T0` in K) and its edges of `kind`. `supplies` maps each supplied zone to its design flow (kg/s), `returns` each zone it draws from. `outdoor_air_fraction` and `min_outdoor_air` (kg/s) are the defaults the closure uses when no input sets them. In a component the outdoor air and the exhaust reach the shared ambient through `outer(ambient)`. Give each air handler of a building its own `kind`. | `add_air_handler(target, *, supplies, returns, kind='air_handler', supply_plenum='ahs_supply', return_plenum='ahs_return', outdoor_air_fraction=1.0, min_outdoor_air=0.0, supply_volume=0.0, return_volume=0.0, T0=293.15, ambient='ambient')` |
 | `add_large_opening`<br><small>`noodl.apps.building_physics`</small> | CONTAM's two-opening doorway (DR_PL2, TN 1887r1 eq. 69-70): two orifices of area W H / 2 at z_mid -/+ 2H/9, both oriented a -> b. Exact for a mid-height neutral plane. Returns the two edge keys (low, high). Edge attributes: z_path, area, Cd, opening=1. `names` gives the two edges a `name` (as component factories do). `net` may be a `Network` or a `noodl.components.Component`. | `add_large_opening(net, a, b, *, H, W, z_mid, Cd=0.78, kind='airpath', names=None)` |
 | `add_zone`<br><small>`noodl.apps.building_physics`</small> | Add the zone's air node (attributes volume, T0, z_ref, heat_capacity=0) and, if it has a wall, the wall node (heat_capacity) with 'wall' edges zone -> wall -> ambient (ua). | `add_zone(net, zone, *, ambient='ambient')` |
+| `air_handler_from_edges`<br><small>`noodl.apps.building_physics`</small> | The element and the closure of the air handler whose edges are of `kind` (as `add_air_handler`, or the `.prj` reader, made them). | `air_handler_from_edges(net, kind)` |
+| `air_handler_plenums`<br><small>`noodl.apps.building_physics`</small> | (supply plenum, return plenum) of the air handler of `kind`: the recirculation edge's target and source. | `air_handler_plenums(net, kind)` |
 | `apply_inputs`<br><small>`noodl.apps.building_physics`</small> | New drivers with every input's value at `t` written in (inputs bound first). | `apply_inputs(drivers, inputs, t, calendar)` |
 | `assemble_sources`<br><small>`noodl.apps.building_physics`</small> | Sum of every source's explicit rate `source(t, x_full)` (kg/s), full-node order, shape like `x_full`; there is no separate node-count argument. | `assemble_sources(sources, t, x_full)` |
 | `bind_inputs`<br><small>`noodl.apps.building_physics`</small> | `inputs` with every `at` resolved to positions through `model.refs`, checked for overlap: two inputs may not write the same entry of the same driver (raises naming both). A key given with `at` must be one the model declares (`model.refs.field(key)`). | `bind_inputs(model, inputs)` |
@@ -245,6 +259,11 @@ Named values and option tables.
 |---|---|
 | `DEFAULT_ROUGHNESS` | `9e-05` |
 | `DEFAULT_TERMINAL_LOSS` | `0.125` |
+| `EXHAUST` | `4` |
+| `OUTDOOR_AIR` | `3` |
+| `RECIRCULATION` | `2` |
+| `RETURN` | `1` |
+| `SUPPLY` | `0` |
 
 ## Base classes (for extending)
 

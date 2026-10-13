@@ -79,3 +79,30 @@ class FixedVolumeFlow(Element):
     def linear_init(self, drivers=None) -> tuple[Tensor, Tensor]:
         q = self._mass_flow(drivers)
         return q, torch.zeros_like(q)
+
+
+class PrescribedFlow(Element):
+    """F = drivers[key] whatever dp: a flow (kg/s, one value per edge of the kind) that a
+    closure or an input prescribes every step, e.g. an air handler's supply flows."""
+
+    dp_independent = True
+
+    def __init__(self, key: str, *, kind: str) -> None:
+        super().__init__(kind)
+        self.key = str(key)
+
+    def _q(self, drivers) -> Tensor:
+        if drivers is None or self.key not in drivers:
+            raise KeyError(f"PrescribedFlow (kind {self.kind!r}): driver {self.key!r} not "
+                           f"found; the closure that prescribes these flows must run first")
+        return torch.as_tensor(drivers[self.key])
+
+    def flow(self, dp: Tensor, drivers=None) -> Tensor:
+        return self._q(drivers).to(dp.dtype) + torch.zeros_like(dp)
+
+    def dflow(self, dp: Tensor, drivers=None) -> Tensor:
+        return torch.zeros_like(self.flow(dp, drivers))
+
+    def linear_init(self, drivers=None) -> tuple[Tensor, Tensor]:
+        q = self._q(drivers)
+        return q, torch.zeros_like(q)

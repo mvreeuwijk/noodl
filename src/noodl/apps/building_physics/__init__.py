@@ -11,6 +11,17 @@ here.
 # installed without the `contam` extra still imports this package cleanly and only a call
 # to `run_steady`/`run_transient`/`run_project` raises the ImportError that names the
 # missing package.
+from noodl.apps.building_physics.air_handling import (
+    EXHAUST,
+    OUTDOOR_AIR,
+    RECIRCULATION,
+    RETURN,
+    SUPPLY,
+    AirHandlerFlows,
+    add_air_handler,
+    air_handler_from_edges,
+    air_handler_plenums,
+)
 from noodl.apps.building_physics.attributes import EDGE_ATTRIBUTES, NODE_ATTRIBUTES
 from noodl.apps.building_physics.components import crack, door, room, shaft, window
 from noodl.apps.building_physics.contamx import (
@@ -83,11 +94,17 @@ from noodl.apps.building_physics.thermal import (
 from noodl.apps.building_physics.wth import Weather, read_wth
 
 __all__ = [
+    "AirHandlerFlows",
     "AmbientConcentrations",
     "DEFAULT_ROUGHNESS",
     "DEFAULT_TERMINAL_LOSS",
     "EDGE_ATTRIBUTES",
+    "EXHAUST",
     "NODE_ATTRIBUTES",
+    "OUTDOOR_AIR",
+    "RECIRCULATION",
+    "RETURN",
+    "SUPPLY",
     "BurstSource",
     "Calendar",
     "ConstantEfficiencyFilter",
@@ -117,8 +134,11 @@ __all__ = [
     "Weather",
     "WeekSchedule",
     "Zone",
+    "add_air_handler",
     "add_large_opening",
     "add_zone",
+    "air_handler_from_edges",
+    "air_handler_plenums",
     "apply_inputs",
     "assemble_sources",
     "bind_inputs",

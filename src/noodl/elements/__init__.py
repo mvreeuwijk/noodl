@@ -37,7 +37,7 @@ from noodl.elements.door_discretized import (
 )
 from noodl.elements.duct import Duct
 from noodl.elements.fan import AffinityFan, FanCurve
-from noodl.elements.fixed import FixedFlow, FixedVolumeFlow
+from noodl.elements.fixed import FixedFlow, FixedVolumeFlow, PrescribedFlow
 from noodl.elements.media import AirMedium, MBLMedium, medium
 from noodl.elements.powerlaw import Orifice, PowerLaw
 from noodl.elements.powerlaw_regularized import (
@@ -80,6 +80,7 @@ __all__ = [
     "OperableDoorCompartment",
     "Orifice",
     "PowerLaw",
+    "PrescribedFlow",
     "Quadratic",
     "RegularizedPowerLaw",
     "Scaled",

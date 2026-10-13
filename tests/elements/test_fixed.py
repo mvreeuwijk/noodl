@@ -1,8 +1,9 @@
 """Tests for FixedFlow: q = q0 regardless of dp."""
 
+import pytest
 import torch
 
-from noodl.elements import FixedVolumeFlow
+from noodl.elements import FixedVolumeFlow, PrescribedFlow
 from noodl.elements.fixed import FixedFlow
 
 
@@ -69,3 +70,13 @@ def test_a_fixed_volume_flow_matches_contamx_and_works_batched():
     c, k = fan.linear_init({"rho": 101325 / (287.055 * T)})
     torch.testing.assert_close(c, q)
     assert k.eq(0).all()
+
+
+def test_a_prescribed_flow_reads_its_flows_from_the_drivers():
+    el = PrescribedFlow("prescribed_flow.ahs", kind="ahs")
+    d = {"prescribed_flow.ahs": torch.tensor([[0.1, 0.05], [0.0, 0.02]], dtype=torch.float64)}
+    q = el.flow(torch.zeros(2, 2, dtype=torch.float64), d)
+    torch.testing.assert_close(q, d["prescribed_flow.ahs"])
+    assert el.dp_independent and el.dflow(torch.zeros(2, dtype=torch.float64), d).eq(0).all()
+    with pytest.raises(KeyError, match="prescribed_flow.ahs"):
+        el.flow(torch.zeros(2, dtype=torch.float64), {})

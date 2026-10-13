@@ -199,6 +199,97 @@ The intake (junction 1) draws 0.317 kg/s from the ambient, split between zone on
 zone two (0.108); the exhaust takes 0.04 m3/s of 293.15 K air, 0.0482 kg/s, from zone three.
 `simulate_project` returns the terminal flows of every step as `"terminal_flow"`.
 
+## Air-handling systems
+
+CONTAM's simple air-handling system is not a black box in noodl: `add_air_handler` expands it
+into the network. Its supply plenum and return plenum are nodes, with their volumes. Edges of
+one kind join them: a supply point from the supply plenum into each supplied zone, a return
+point from each zone it draws from into the return plenum, the recirculation from the return
+to the supply plenum, the outdoor air from the ambient into the supply plenum, and the exhaust
+from the return plenum to the ambient. Every edge's flow is prescribed (a `PrescribedFlow`
+element). The closure `AirHandlerFlows` computes the flows each step, by CONTAM's algorithm
+(TN 1887 section 3.6, checked against ContamX 3.4.1.7), from the supply and return points'
+design flows and the outdoor-air fraction $f_o$. With $W_s$ the supplied flow, $W_{ret}$ the
+returned flow and $W_{o,min}$ the minimum outdoor air (kg/s):
+
+$$
+W_o' = \max\left(f_o W_s,\ \min(W_s, W_{o,min})\right), \qquad
+W_{rec} = \min(W_{ret},\ W_s - W_o'),
+$$
+
+$$
+W_o = W_s - W_{rec}, \qquad W_{ex} = W_{ret} - W_{rec}.
+$$
+
+When more air returns than is supplied, the surplus leaves through the exhaust. A minimum
+outdoor-air flow above the supply is capped at the supply. An outdoor-air fraction above 1
+would make the recirculation negative: ContamX stops there, and the closure raises, naming
+the air handler. A negative fraction is no error: it acts through the maximum.
+
+A schedule or a control acts through two inputs, declared in `model.refs.inputs`:
+`"flow_multiplier.<kind>"` (one value per edge of the kind) multiplies the supply and return
+points' design flows and is ignored on the other three edges, and
+`"outdoor_air_fraction.<kind>"` sets $f_o$. Without them the multipliers are 1 and $f_o$ is
+the `outdoor_air_fraction` given to `add_air_handler` (1 by default, all outdoor air). Both
+take leading batch dimensions. An air handler whose multipliers are all 0 moves no air; its
+plenums keep their last values.
+
+Only these balanced flows touch the plenums, so the airflow solve does not need their
+pressure: `build_model(flow_balanced=plenums)` puts them on the air layer's boundary at zero
+gauge pressure, while they stay ordinary nodes of the heat and species layers. They are
+well-mixed nodes with air mass $\rho V$. A plenum of zero volume (CONTAM's default) holds no
+air and must also be named in `storage_free=`: its balance is then algebraic, the mix of what
+flows in, and the heat and species layers use the implicit scheme (`build_model` selects it
+for heat; the species layer's default is already implicit). `closures=[closure]` adds the
+air handler's closure after the density closure. In a `Component`, the outdoor air and the
+exhaust reach the shared ambient through `outer("ambient")`. Give each air handler of a
+building its own `kind` (and its own plenum names).
+
+An office supplied with 0.1 kg/s, 30 % outdoor air, and stepped once with outdoor air at a
+mass fraction of 1e-3:
+
+```python
+import torch
+from noodl.apps.building_physics import (
+    add_air_handler, air_handler_from_edges, air_handler_plenums, build_model,
+    initial_drivers, initial_state, orifice_elements_from_edges,
+)
+from noodl.drives import Stack
+from noodl.topology import Network
+
+F64 = torch.float64
+net = Network(dtype=F64)
+net.add_node("ambient", z_ref=0.0, T0=293.15)
+net.add_node("office", z_ref=0.0, T0=293.15, volume=300.0)
+net.add_edge("ambient", "office", kind="airpath", z_path=1.0, Cd=0.6, area=0.01)
+add_air_handler(net, supplies={"office": 0.1}, returns={"office": 0.1},
+                outdoor_air_fraction=0.3)
+element, closure = air_handler_from_edges(net, "air_handler")
+plenums = air_handler_plenums(net, "air_handler")
+model = build_model(net, air_elements=[orifice_elements_from_edges(net, "airpath"), element],
+                    drives=[Stack.from_network(net, "airpath")], thermal=False, species=1,
+                    closures=[closure], flow_balanced=plenums, storage_free=plenums)
+drivers = initial_drivers(model)
+drivers["rho"] = torch.full((net.n,), 1.2041, dtype=F64)
+flows = closure({}, drivers)["prescribed_flow.air_handler"]
+print([round(v, 3) for v in flows.tolist()])
+sp = model.refs.species
+drivers[sp.boundary_mass_fraction] = torch.tensor([1e-3], dtype=F64)  # outdoor air
+state = model.step(initial_state(model), drivers, 300.0)
+x = sp.mass_fraction.named(state[sp.mass_fraction])
+print({node: f"{v.item():.4e}" for node, v in x.items()})
+```
+
+```text
+[0.1, 0.1, 0.07, 0.03, 0.03]
+{'office': '2.4309e-05', 'ahs_supply': '3.1702e-04', 'ahs_return': '2.4309e-05'}
+```
+
+The flows are in edge order: supply, return, recirculation, outdoor air, exhaust. The office
+exchanges 0.03 kg/s with the outdoor air through the air handler. The zero-volume return
+plenum is at the office's value, and the supply plenum at the mix, 0.3 of the outdoor air plus
+0.7 of the returned air.
+
 ## Building from components
 
 A larger building is easier to assemble from parts than to write out node by node. The
@@ -219,6 +310,8 @@ A `door` has two edges, `low` and `high`, as `add_large_opening` does. An exteri
 `inner("ambient", ...)`. A `shaft` is a stack of zones, one per level, joined by openings
 `slab[i]` (how stairwells are usually represented in multizone models). A door's or window's height is
 relative to the component's placement, so the same factory call serves every floor.
+`add_air_handler` adds an air handler to a component as it does to a network (see
+[Air-handling systems](#air-handling-systems)).
 
 A stairwell serving two flats, one per floor. A door joins each shaft level to its flat:
 connecting `stair.levels[i]` straight to `flat.air` would merge two real nodes, which
@@ -381,12 +474,15 @@ conducts nothing".
 |---|---|
 | `thermal_layer(net, *, ambient, name="thermal", flow_kinds=("airpath",), conduction_kind="wall", c_p=1005.0, rho=1.2041, scheme=None, fixed_temperature=(), storage_free=())` | The heat `TransportLayer`. Capacity is $\rho c_p V + C_{\text{node}}$ per active interior node. Raises naming any node with zero heat capacity that is not storage-free. `scheme` defaults to `"exact"`, or to `"implicit"` when `storage_free` names a node (the only scheme that holds them). |
 | `species_layer(net, *, ambient, name="species", flow_kinds=("airpath",), rho=1.2041, n_species=1, scheme="implicit", species_names=None, transmission=None, kinetics=None, storage_free=())` | The contaminant layer, as mass fractions, capacity = zone air mass $\rho V$ (CONTAM's convention). `transmission` `(b_flow, K)` is each flow edge's filter pass fraction; `kinetics` `(n_i, K, K)` each zone's first-order reactions (`reaction_kinetics` builds it). |
-| `build_model(net, *, air_elements, drives, ambient="ambient", thermal=True, species=0 (a count or a list of names), density="ideal_gas", density_kwargs=None, coupling="pingpong", iterate_tol=None, iterate_max=20, thermal_scheme=None, species_scheme="implicit", flow_kinds=None, return_inputs=False)` | The assembled `Model`; with `return_inputs=True`, `(model, state, drivers)` like the other applications. |
+| `build_model(net, *, air_elements, drives, ambient="ambient", thermal=True, species=0 (a count or a list of names), density="ideal_gas", density_kwargs=None, coupling="pingpong", iterate_tol=None, iterate_max=20, thermal_scheme=None, species_scheme="implicit", flow_kinds=None, closures=(), flow_balanced=(), storage_free=(), return_inputs=False)` | The assembled `Model`; with `return_inputs=True`, `(model, state, drivers)` like the other applications. `closures` follow the density closure; `flow_balanced` nodes join the air layer's boundary; `storage_free` nodes hold no air (see [Air-handling systems](#air-handling-systems)). |
+| `add_air_handler(target, *, supplies, returns, kind="air_handler", supply_plenum="ahs_supply", return_plenum="ahs_return", outdoor_air_fraction=1.0, min_outdoor_air=0.0, supply_volume=0.0, return_volume=0.0, T0=293.15, ambient="ambient")` | Adds an air handler's plenums and edges to a `Network` or a `Component`. `supplies` and `returns` map zones to design flows (kg/s). |
+| `air_handler_from_edges(net, kind)` | `(PrescribedFlow, AirHandlerFlows)`: the air handler's element and closure, from its edges' attributes. |
+| `air_handler_plenums(net, kind)` | `(supply plenum, return plenum)`. |
 | `initial_state(model, *, values=None)` | Temperatures from each node's `T0`, zeros for species; then `values` by node name. |
 | `initial_drivers(model, *, values=None)` | Zero boundary pressures, boundary temperatures from `T0`, zero boundary species; then `values` by node name. See [Using noodl](../usage.md). |
 
 `species_layer(..., storage_free=[...])` and `thermal_layer(..., storage_free=[...])` accept
-zero-volume nodes that hold no air, such as an air-handler plenum (see "Air-handling systems").
+zero-volume nodes that hold no air, such as an air-handler plenum (see [Air-handling systems](#air-handling-systems)).
 A contaminant source or sink on such a node is refused by name: it holds no air to emit into.
 
 `density` selects the closure relating temperature to air density:
