@@ -15,6 +15,7 @@ from noodl._broadcast import broadcast_shapes
 from noodl._tracking import bulk_values, same_tracking
 from noodl.drives import Drive, check_drive_signature
 from noodl.elements.base import Element
+from noodl.layers._mna import MnaSystem
 from noodl.nodesources import NodeSource
 from noodl.operators.graph import GraphLaplacianOperator
 from noodl.solvers.grounding import spd_certificate, spd_diagnosis
@@ -110,7 +111,13 @@ class PotentialFlowLayer:
     `A_I g(A^T phi) = s_I` for the interior potentials by Newton's method, with the element
     laws on its edge kinds, drives added to the potential differences, and prescribed
     potentials at its boundary nodes; differentiable through the converged solution.
-    `flow_unit` is reported by `model.refs`, never used numerically."""
+    `flow_unit` is reported by `model.refs`, never used numerically.
+
+    A layer whose constitutive laws include an implicit law (`ImplicitLaw`: an ideal source,
+    a flow-controlled law), a coupled multi-port law, a dynamic law or a law reading the
+    `LawContext` is solved by Modified Nodal Analysis (`mna` is True): the flows of its
+    implicit-law edges (`implicit_edges`) become unknowns alongside the interior potentials,
+    and every connected part of its edges must contain a boundary node (a ground)."""
 
     def __init__(
         self,
@@ -125,7 +132,10 @@ class PotentialFlowLayer:
         quantity: str = "potential",
         unit: str = "",
         flow_unit: str = "",
+        phasor: bool = False,
     ) -> None:
+        if phasor:
+            raise NotImplementedError("phasor layers")
         if linear_solver not in _LINEAR_SOLVERS:
             raise ValueError(
                 f"unknown linear_solver {linear_solver!r} in layer {name!r}; expected one "
@@ -153,6 +163,15 @@ class PotentialFlowLayer:
         self._elements = list(elements)
         self._drives = list(drives)
         self.kinds = [el.kind for el in elements]
+        # Modified Nodal Analysis: a law whose flow is an unknown (implicit), that couples
+        # several edges (ports > 1), that stores (dynamic) or that reads the law context
+        # cannot be solved by the classic nodal path; such a layer is solved by `MnaSystem`.
+        self.phasor = phasor
+        self.dynamic = any(el.dynamic for el in self._elements)
+        self.mna = self.phasor or any(
+            el.law_form == "implicit" or el.ports > 1 or el.dynamic or el.contextual
+            for el in self._elements
+        )
 
         cols_list = []
         self._kind_slices: dict[str, tuple[int, int]] = {}
@@ -270,6 +289,77 @@ class PotentialFlowLayer:
                     f"potential is prescribed and an inactive node has no row)"
                 )
             self._source_positions.append(pos)
+
+        self._mna: MnaSystem | None = None
+        if self.mna:
+            self._check_mna_structure()
+            self._mna = MnaSystem(self)
+
+    def _check_mna_structure(self) -> None:
+        """Construction checks of a Modified Nodal Analysis layer: port groups, solver,
+        drives on dynamic laws, and a boundary node in every connected part."""
+        name = self.name
+        for el, (s, e) in zip(self._elements, self._elem_slices, strict=True):
+            if (e - s) % el.ports:
+                raise ValueError(
+                    f"PotentialFlowLayer {name!r}: kind {el.kind!r} has {e - s} edges, not a "
+                    f"multiple of its law's ports={el.ports}"
+                )
+        if self.linear_solver == "cg":
+            raise ValueError(
+                f"PotentialFlowLayer {name!r}: linear_solver='cg' needs a symmetric positive "
+                f"definite Jacobian, which a Modified Nodal Analysis system is not; use "
+                f"'auto', 'sparse_direct', 'direct' or 'gmres'"
+            )
+        dynamic_kinds = {el.kind for el in self._elements if el.dynamic}
+        for drv in self._drives:
+            if drv.kind in dynamic_kinds:
+                raise ValueError(
+                    f"PotentialFlowLayer {name!r}: kind {drv.kind!r} has a dynamic law, which "
+                    f"may not carry a drive (its step-start values are the potential "
+                    f"differences without one)"
+                )
+        # Every connected part of this layer's edges must hold a boundary node: the
+        # potential of a part with none is defined only up to a constant.
+        parent = list(range(self._n_nodes))
+
+        def find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        for u, v in zip(self._src.tolist(), self._tgt.tolist(), strict=True):
+            parent[find(v)] = find(u)
+        grounded = {find(i) for i in self.bound.tolist()}
+        floating = [
+            self.net.nodes[i] for i in self.interior.tolist() if find(i) not in grounded
+        ]
+        if floating:
+            raise ValueError(
+                f"PotentialFlowLayer {name!r}: nodes {floating} have no path through this "
+                f"layer's edges to a boundary node, so their potentials are undetermined; "
+                f"add a node of each such part to boundary (a ground)"
+            )
+
+    @property
+    def implicit_edges(self) -> torch.Tensor:
+        """Positions, in layer edge order (the columns of `solve`'s `q`), of the edges whose
+        flow is an unknown of the layer (implicit constitutive laws); empty for a classic
+        layer."""
+        if self._mna is None:
+            return torch.zeros(0, dtype=torch.long)
+        return self._mna.f_edges
+
+    def _refuse_on_mna(self, method: str) -> None:
+        """Classic-only methods assume every flow is a function of its own edge's potential
+        difference; a Modified Nodal Analysis layer refuses them by name."""
+        if self.mna:
+            raise TypeError(
+                f"PotentialFlowLayer {self.name!r} is solved by Modified Nodal Analysis "
+                f"(its laws include implicit, multi-port, dynamic or context-reading ones), "
+                f"so {method}() is not defined on it; read the flows from solve()'s q"
+            )
 
     @property
     def node_sources(self) -> tuple:
@@ -429,6 +519,7 @@ class PotentialFlowLayer:
         return torch.cat([p[1] for p in parts], dim=-1)
 
     def flows(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
+        self._refuse_on_mna("flows")
         drivers = drivers or {}
         d = self.dp(phi, drivers)
         parts = [
@@ -472,6 +563,7 @@ class PotentialFlowLayer:
         return torch.cat([q[..., self.kind_slice(k)] for k in kinds], dim=-1)
 
     def dflows(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
+        self._refuse_on_mna("dflows")
         drivers = drivers or {}
         d = self.dp(phi, drivers)
         parts = [
@@ -520,6 +612,7 @@ class PotentialFlowLayer:
         return sources[..., self.interior]
 
     def residual(self, phi_interior, phi_boundary, drivers, sources):
+        self._refuse_on_mna("residual")
         return self._residual_parts(phi_interior, phi_boundary, drivers or {}, sources)[0]
 
     def _residual_parts(self, phi_interior, phi_boundary, drivers, sources):
@@ -543,6 +636,7 @@ class PotentialFlowLayer:
         access); no solve path calls it. Tests compare `GraphLaplacianOperator`'s matvec and
         the adjoint against this, so its einsum form is deliberately unchanged.
         """
+        self._refuse_on_mna("jacobian")
         drivers = drivers or {}
         phi = self.assemble(phi_interior, phi_boundary)
         dq = self.dflows(phi, drivers)
@@ -655,6 +749,7 @@ class PotentialFlowLayer:
         )
 
     def linear_init(self, phi_boundary, drivers, sources):
+        self._refuse_on_mna("linear_init")
         drivers = drivers or {}
         batch_shape = phi_boundary.shape[:-1]
         phi_i0 = torch.zeros(
@@ -761,6 +856,12 @@ class PotentialFlowLayer:
         sources=None,
         phi0=None,
         *,
+        q0=None,
+        history=None,
+        dt=None,
+        t=None,
+        integration="trapezoidal",
+        mode=None,
         differentiable=True,
         diagnostics: dict | None = None,
         **newton_kwargs,
@@ -843,7 +944,20 @@ class PotentialFlowLayer:
         calling: a caller who wants gradients calls `differentiable=True`, which is unchanged
         (`solvers.implicit._Implicit.forward` already solved under `no_grad` and takes its
         gradients from the adjoint).
+
+        A layer solved by Modified Nodal Analysis (`self.mna`) solves for the interior
+        potentials and the flows of its implicit-law edges together (`noodl.layers._mna`),
+        from zeros or the warm start `phi0` (interior potentials) and `q0` (the flows of
+        `implicit_edges`); the returned `q` covers every edge. `history`, `dt`, `t`,
+        `integration` and `mode` set the context its laws are evaluated in. A classic layer
+        accepts and ignores those keywords.
         """
+        if self.mna:
+            return self._mna.solve(
+                phi_boundary, drivers, sources, phi0, q0=q0, history=history, dt=dt, t=t,
+                integration=integration, mode=mode, differentiable=differentiable,
+                diagnostics=diagnostics, **newton_kwargs,
+            )
         drivers = drivers or {}
         newton_kwargs.setdefault("method", self.linear_solver)
         # Name this layer on every error the Newton solve or its INNER linear solves raise.
@@ -1189,6 +1303,7 @@ class PotentialFlowLayer:
         for the same reason `linear_init`'s equivalent is ("stays differentiable for callers
         who want it directly"). Wrap the call in `torch.no_grad()` to get the factorisation.
         """
+        self._refuse_on_mna("adjoint")
         drivers = drivers or {}
         phi = self.assemble(phi_interior, phi_boundary)
         dq = self.dflows(phi, drivers)
