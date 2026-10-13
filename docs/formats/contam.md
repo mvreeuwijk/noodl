@@ -29,7 +29,7 @@ ContamX); zones and initial concentrations; airflow paths; the power-law element
 family
 (`plr_orfc/leak1/leak2/leak3/crack/fcn/test1/test2/conn/stair/shaft/qcn`), the quadratic family
 (`qfr_*`), doorways (`dor_door`, `dor_pl2`), dampers (`plr_bdq`, `plr_bdf`), constant-flow fans
-(`fan_cmf`, `fan_cvf`) and the cubic fan curve (`fan_fan`); source/sink elements `ccf`, `cut`, `eds`,
+(`fan_cmf`, `fan_cvf`) and the cubic fan (`fan_fan`) with its speed schedule (the speed ratio, by the fan laws), its path `mult` (fans in parallel), the rating density and the shut-off orifice below its off ratio; source/sink elements `ccf`, `cut`, `eds`,
 `brs`, `prs`, `dvs`, `drs`, `plm` and `pkm`, attached by `project_to_model` (scaled by the record's multiplier,
 which enters the element's first coefficient, and a `ccf` record's removal coefficient too); filters on airflow paths (`Project.edge_filters`, the species layer's `transmission`):
 constant-efficiency (`cef`), particle (`pf0`, interpolated at each species' mean diameter as
@@ -47,14 +47,13 @@ simulated species in file order; a source or kinetic reaction that names a speci
 does not simulate (a species the file defines but marks as not simulated included), a kinetic
 reaction that gives one product-reactant pair twice, and a zone whose kinetic reaction number the
 file does not define; a schedule
-number that no week schedule carries; a schedule on a `fan_fan` path; a schedule on an `eds`,
+number that no week schedule carries; a schedule on an `eds`,
 `brs`, `plm` or `pkm` source (CONTAM triggers these once, at the schedule's first nonzero
 value); a zone without the variable-pressure flag (which
 ContamX holds at constant pressure) or, in a project with species, without the
 variable-contaminants flag (ContamX then holds the zone's concentrations at their initial values
 and ignores its sources); CFD and 1-D convection/diffusion zones; continuous-values-file
-zones and paths; duct networks; a constant wind pressure on an interior path; a fan curve on a
-path with `mult != 1`; `csf_*` and `sup_afe` elements; `stackD = 1` (densities varying with
+zones and paths; duct networks; a constant wind pressure on an interior path; `csf_*` and `sup_afe` elements; `stackD = 1` (densities varying with
 height inside a zone); a wind pressure profile with the trigonometric curve fit; a day schedule whose shape is
 neither rectangular nor trapezoidal; zone names with spaces.
 
@@ -69,9 +68,10 @@ day, time and day type), so a `steady()` on them is CONTAM's steady simulation, 
 included. `Project.inputs` holds the schedules as `Input`s for `simulate`.
 
 Every power-law element is built as `UpstreamDensityPowerLaw` — re-evaluating the density of the
-air *entering* the path, per direction, matching ContamX section 3.2. The quadratic, damper and
-fan families keep reference-density coefficients, because they are not part of this application's
-parity evidence.
+air *entering* the path, per direction, matching ContamX section 3.2. The cubic fan (`fan_fan`) runs at the
+ratio of its upstream density to its rating density by the fan laws, and its shut-off orifice
+takes the upstream density too. The quadratic, damper and constant-flow fan families keep
+reference-density coefficients, because they are not part of this application's parity evidence.
 
 Node densities are computed every step by the `PrescribedTemperatureDensity` closure from two
 drivers: `"T"` (K, every node's temperature, the ambient's included) and `"P_ref"` (Pa, the

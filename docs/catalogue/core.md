@@ -39,6 +39,7 @@ Flow through an edge as a function of the potential difference across it.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `AffinityFan`<br><small>`noodl.elements`</small> | A fan curve run at another speed and air density, by the fan laws (ContamX's performance-curve fan, measured against ContamX 3.4.1.7). | `AffinityFan(curve, *, src, tgt, rho_ref, speed_key=None, off=0.0, multiplier=1.0, shutoff=None, rho_key='rho', kind=None)` |
 | `AirDuct`<br><small>`noodl.elements`</small> | A duct segment, F (kg/s) from dp (Pa): Darcy-Weisbach with ContamX's friction factor. | `AirDuct(length, diameter, roughness, loss=0.0, *, area=None, src, tgt, rho_key='rho', temperature_key=None, kind='duct', learnable=False)` |
 | `Conductance`<br><small>`noodl.elements`</small> | q = g dp, the linear branch law used for thermal conduction and passive exchange; `g` is in the flow unit per unit of potential (W/K for heat, kg/s per Pa for air). | `Conductance(g, *, kind='conduction', learnable=False)` |
 | `Damper`<br><small>`noodl.elements`</small> | Separate power-law coefficient and exponent for each flow direction: `C_pos`/`n_pos` for dp > 0 and `C_neg`/`n_neg` for dp < 0, each as in `PowerLaw` (`C` in the flow unit per Pa^n, `n` dimensionless). | `Damper(C_pos, n_pos, C_neg, n_neg, *, dp_transition=0.001, src=None, tgt=None, m=0.0, rho_ref=1.2041, rho_key='rho', kind='damper', learnable=False)` |

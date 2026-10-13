@@ -80,6 +80,7 @@ from noodl.apps.building_physics.thermal import R_AIR, RHO_0, species_layer
 from noodl.apps.building_physics.wth import _DAYS_BEFORE_MONTH
 from noodl.drives import ConstantDrive, Stack, Wind, WindProfile
 from noodl.elements import (
+    AffinityFan,
     Damper,
     FanCurve,
     FixedFlow,
@@ -155,6 +156,12 @@ MU_0 = 1.81625e-5
 #     plr_orfc      `lam turb expt area dia coef Re u_A u_D`
 #     plr_leak3     `lam turb expt coef pres area1 area2 area3 u u u u`
 #     fan_cmf       `Flow u_F`
+#     fan_fan       line 1 `lam turb expt rdens fdf sop off`, line 2 `a0 a1 a2 a3 npts
+#                   Sarea u`, then `npts` measured-point lines (unused). The
+#                   cubic P(F) (Pa, F in kg/s) is rated at density `rdens` and holds up to
+#                   flow `fdf`; below speed ratio `off` the fan is the shut-off power law
+#                   `lam turb expt`. A path schedule on it is the speed ratio and the path
+#                   `mult` is fans in parallel (both measured against ContamX 3.4.1.7).
 #     dor_door      10 fields: `lam turb expt dTmin ht wd cd u u u`. VERIFIED against
 #                   `reg_solverContTrace-mz-MH-trans-3day.prj` lines 704-706, the one NIST
 #                   sample that carries a doorway:
@@ -380,13 +387,16 @@ class Project:
     density_uses_zone_pressure: bool = False
     run_control: RunControl | None = None
     # Week schedules by CONTAM number, and the zone and path schedules as inputs: zone
-    # temperatures on "T", path flow multipliers on "flow_multiplier.<kind>".
+    # temperatures on "T", path flow multipliers on "flow_multiplier.<kind>", fan-curve
+    # speed ratios on "fan_speed.<kind>".
     schedules: dict[int, WeekSchedule] = field(default_factory=dict)
     inputs: list[Input] = field(default_factory=list)
     # Each species' default ambient mass fraction (K,), kg/kg.
     ambient_mass_fractions: Tensor | None = None
     # Element kinds wrapped in `Scaled` (a scheduled path among their edges): kind -> edges.
     multiplier_edges: dict[str, int] = field(default_factory=dict)
+    # Fan-curve kinds with a speed schedule ("fan_speed.<kind>"): kind -> edges.
+    speed_edges: dict[str, int] = field(default_factory=dict)
     # Constant wind pressure per edge of a kind (Pa, on the ambient side), kind -> (n_edges,).
     constant_wind_pressure: dict[str, Tensor] = field(default_factory=dict)
     # Each zone's flag bits as the file gives them, by zone name.
@@ -862,9 +872,9 @@ def _read_flow_elements(lines: _Lines, count: int, elements: dict[int, PrjElemen
         lines.raw()                                 # description (may be blank)
         data = [[float(v) for v in lines.record()]]
         if dtype == "fan_fan":
-            # Cubic fan curve: the second data line ends with the number of measured
-            # points, each of which is a line of its own. Documented from TN 1887r1
-            # Appendix A; no NIST sample carries a fan_fan to verify it against.
+            # Cubic fan curve: field 4 of the second data line is the number of measured
+            # points, each of which is a line of its own (TN 1887r1 Appendix A; verified
+            # by loading `fan_curve_three_zone.prj` in ContamX 3.4.1.7).
             second = [float(v) for v in lines.record()]
             data.append(second)
             for _ in range(int(second[4])):
@@ -980,6 +990,33 @@ def _read_sources(
                 f"does not simulate") from exc
         sources.append(PrjSource(nr, pz, pe, stype, params, float(tok[5]), k, ps))
     lines.expect_end("source/sinks")
+
+
+def _laminar_transition(C: float, lam: float, n: float) -> float:
+    """dp_t (Pa) where CONTAM's laminar law F = lam (rho / mu) dp meets the power law
+    F = C dp^n, at RHO_0 and MU_0; 1e-3 Pa when the element has no laminar coefficient."""
+    if lam > 0 and n < 1:
+        return (C * MU_0 / (lam * RHO_0)) ** (1.0 / (1.0 - n))
+    return 1e-3
+
+
+def fan_curve_element(data: list[list[float]], *, kind: str, src, tgt, multiplier,
+                      speed_key: str | None) -> AffinityFan:
+    """CONTAM's performance-curve fan by the fan laws. `data` holds the element's lines:
+    `lam turb expt rdens fdf sop off`, then the cubic's four coefficients (Pa, in kg/s) and
+    the measured points (unused). The shut-off orifice is the element's own power law, in
+    the sqrt(rho) family with the upstream density."""
+    lam, turb, expt, rdens, fdf, _sop, off = data[0][:7]
+    curve = FanCurve(torch.tensor(data[1][:4], dtype=F64), torch.tensor(fdf, dtype=F64),
+                     kind=kind)
+    C = turb * math.sqrt(RHO_0)
+    shutoff = UpstreamDensityPowerLaw(
+        torch.tensor(C, dtype=F64), torch.tensor(expt, dtype=F64), src=src, tgt=tgt,
+        m=torch.tensor(0.5, dtype=F64), rho_ref=RHO_0,
+        dp_transition=_laminar_transition(C, lam, expt), kind=kind)
+    return AffinityFan(curve, src=src, tgt=tgt, rho_ref=rdens, speed_key=speed_key, off=off,
+                       multiplier=torch.tensor(multiplier, dtype=F64), shutoff=shutoff,
+                       kind=kind)
 
 
 def _kind_of(nr: int, dtype: str) -> str:
@@ -1180,6 +1217,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     # so the ordering `endpoints(kind)` assumes can be ASSERTED rather than trusted below.
     per_kind_cols: dict[str, list[int]] = {}
     per_kind_quad: dict[str, list[tuple[float, float]]] = {}
+    per_kind_fan: dict[str, list[PrjPath]] = {}
     path_edges: list[list[int]] = []          # per path, its NETWORK edge columns
     column = 0
     for p in paths:
@@ -1229,11 +1267,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
             per_kind_n.setdefault(kind, []).append(expt)
             per_kind_m.setdefault(kind, []).append(m)
             per_kind_cols.setdefault(kind, []).append(column - 1)
-            dpt = (
-                (C * MU_0 / (lam * RHO_0)) ** (1.0 / (1.0 - expt))
-                if (lam > 0 and expt < 1)
-                else 1e-3
-            )
+            dpt = _laminar_transition(C, lam, expt)
             per_kind_dpt.setdefault(kind, []).append(dpt)
         elif d in _QUADRATIC:
             a, b = first[0], first[1]
@@ -1256,18 +1290,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
             flow = first[0] * (RHO_0 if d == "fan_cvf" else 1.0)
             built.append(FixedFlow(torch.tensor(p.mult * flow, dtype=F64), kind=kind))
         elif d == "fan_fan":
-            if p.mult != 1.0:
-                raise ValueError(
-                    f"prj: path {p.nr} scales fan curve {p.element_nr} by mult {p.mult} "
-                    f"(unsupported)"
-                )
-            built.append(
-                FanCurve(
-                    torch.tensor(el.data[1][:4], dtype=F64),
-                    torch.tensor(first[4], dtype=F64),
-                    kind=kind,
-                )
-            )
+            per_kind_fan.setdefault(kind, []).append(p)
 
     # Power-law kinds: one `UpstreamDensityPowerLaw` per kind with per-edge C, n, m and the
     # kind's (shared) transition. The transition is the element's own, so it is the same for
@@ -1306,6 +1329,15 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
                 dp_transition=dpt, kind=kind,
             )
         )
+    # A fan curve's path schedule is its speed ratio, read from "fan_speed.<kind>".
+    speed_kinds = {kind_of[p.element_nr] for p in paths
+                   if p.schedule_nr and elements[p.element_nr].dtype == "fan_fan"}
+    for kind, members in per_kind_fan.items():
+        src, tgt = net.endpoints(kind)
+        built.append(fan_curve_element(
+            elements[members[0].element_nr].data, kind=kind, src=src, tgt=tgt,
+            multiplier=[p.mult for p in members],
+            speed_key=f"fan_speed.{kind}" if kind in speed_kinds else None))
     for kind, ab in per_kind_quad.items():
         built.append(
             Quadratic(
@@ -1375,18 +1407,21 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     # one multiplier per edge of the kind from "flow_multiplier.<kind>", and the schedule
     # becomes an input on the path's own edges. Wrapping comes after the layout and drives
     # above, which read only `el.kind` and `el.dp_independent`, both of which `Scaled` keeps.
+    # On a fan curve the schedule is the speed ratio instead ("fan_speed.<kind>", read by
+    # the `AffinityFan` itself), so that kind is not wrapped.
     multiplier_edges: dict[str, int] = {}
+    speed_edges: dict[str, int] = {}
     for p, cols in zip(paths, path_edges, strict=True):
         if not p.schedule_nr:
             continue
         kind = kind_of[p.element_nr]
         kind_cols = net.edge_index(kind).tolist()
         if elements[p.element_nr].dtype == "fan_fan":
-            raise ValueError(
-                f"prj: path {p.nr} puts schedule {p.schedule_nr} on fan curve element "
-                f"{p.element_nr} (unsupported: a fan curve's schedule scales its speed, not "
-                f"its flow)"
-            )
+            speed_edges[kind] = len(kind_cols)
+            inputs.append(Input(week(p.schedule_nr, f"path {p.nr}"), f"fan_speed.{kind}",
+                                index=[kind_cols.index(c) for c in cols],
+                                name=f"path {p.nr} fan speed schedule {p.schedule_nr}"))
+            continue
         multiplier_edges[kind] = len(kind_cols)
         inputs.append(Input(week(p.schedule_nr, f"path {p.nr}"), f"flow_multiplier.{kind}",
                             index=[kind_cols.index(c) for c in cols],
@@ -1410,7 +1445,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         run_control=run_control, schedules=schedules, inputs=inputs,
         ambient_mass_fractions=torch.tensor(
             [s.default_mass_fraction for s in species_records], dtype=F64),
-        multiplier_edges=multiplier_edges,
+        multiplier_edges=multiplier_edges, speed_edges=speed_edges,
         constant_wind_pressure={k: torch.tensor(v, dtype=F64) for k, v in wind_pressure.items()},
         zone_flags=zone_flags, source_path=source_path, species_records=species_records,
         zone_reactions=by_zone, edge_filters=edge_filters,
@@ -1667,6 +1702,12 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         model.input_specs[f"flow_multiplier.{kind}"] = dict(
             description="flow multiplier of each edge (a schedule or control)", unit="-",
             over=("edges", kind))
+    for kind, n_e in project.speed_edges.items():
+        drivers[f"fan_speed.{kind}"] = torch.ones(n_e, dtype=F64)
+        model.input_specs[f"fan_speed.{kind}"] = dict(
+            description="speed of each fan relative to its rated speed (a schedule or "
+                        "control); below the fan's off ratio it is stopped",
+            unit="-", over=("edges", kind))
     for kind, value in project.constant_wind_pressure.items():
         drivers[f"wind_pressure.{kind}"] = value.clone()
         model.input_specs[f"wind_pressure.{kind}"] = dict(

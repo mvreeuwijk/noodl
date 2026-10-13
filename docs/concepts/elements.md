@@ -67,6 +67,7 @@ gradient. See [Differentiability](differentiability.md#the-contract).
 | `Conductance(g)` | $q = g\,\Delta p$ | Linear conduction — thermal walls, passive exchange. |
 | `FixedFlow(q0)` | $q = q_0$, independent of $\Delta p$ | Constant-flow fans. Declares `dp_independent = True`, which lets the solve take an exact-zero Jacobian column. |
 | `FanCurve(coeffs, q_max)` | Cubic pressure-flow curve inverted for $q$ on $[0, q_{\max}]$ | Fans specified by a performance curve. |
+| `AffinityFan(curve, ...)` | A `FanCurve` at another speed and air density by the fan laws, $q = s\,r\,q_0(\Delta p/(s^2 r))$ | Scheduled or controlled fans; CONTAM's performance-curve fan with its speed schedule. |
 | `Duct(...)` | Colebrook friction, laminar below a transition Reynolds number | Ducts, and Darcy-Weisbach pipes with the water application's `friction="colebrook"`. |
 | `Damper(...)` | Separate power-law coefficient and exponent per flow direction | Backdraught dampers, one-way devices. |
 | `UpstreamDensityPowerLaw(...)` | `PowerLaw` with $C$ scaled by $(\rho_{\text{up}}/\rho_{\text{ref}})^{m}$ | The upstream-density correction on CONTAM power-law elements. |

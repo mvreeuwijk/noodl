@@ -53,3 +53,9 @@ Two of NIST's one-zone stack projects are present:
   `test_OneZoneWthCtmStack.prj` (it uses that sample's `.wth` and `.ctm`, which it names),
   not an official sample. It adds a pressure-driven sarin source (2e-6 kg/(s Pa^0.65)) to
   the zone. Verified to load and run in ContamX 3.4.1.7.
+- `fan_curve_three_zone.prj` is written for this repository from NIST's
+  `valThreeZonesWthCtm-UseApi.prj`, not an official sample. Path 5 is an exhaust fan with a
+  cubic performance curve (rated at 1.2041 kg/m3, off below speed ratio 0.1, path mult 1.5)
+  from zone three, which is at 303.15 K. Its schedule sets the speed ratio to 1, 0.8 from
+  00:30, 0.05 (off) from 01:00 and 1.2 from 01:30. Sarin outdoors at 1e-3 kg/kg; two hours
+  at 300 s. Verified to load and run in ContamX 3.4.1.7.

@@ -657,3 +657,20 @@ def test_a_pressure_driven_source_matches_contamx(contamx, tmp_path, record_prop
     _project_parity(PRESSURE_SOURCE, tmp_path, rtol_flow=64 * F32_U, rtol_mf=88 * F32_U,
                     record_property=record_property, species_floor=True,
                     label="One-zone stack with a pressure-driven source, 288 steps")
+
+
+FAN_CURVE = DATA / "fan_curve_three_zone.prj"
+
+
+@pytest.mark.external
+def test_a_scheduled_fan_curve_matches_contamx(contamx, tmp_path, record_property):
+    """`fan_curve_three_zone.prj`: an exhaust fan curve (mult 1.5) from zone three at 303.15
+    K on a speed schedule 1, 0.8, 0.05 (below its 0.1 off ratio: the shut-off orifice) and
+    1.2; two hours at 300 s, wind 5.23 m/s from 270 degrees. Budget: the three-zone steady
+    flows' 16 u for the orifice paths and the shut-off orifice, plus the fan's own 4 u (its
+    coefficients, rating density and the zone temperature through r), doubled for the
+    coupling of the fan's operating point with the zone pressure: 32 u on the flows; the
+    three-zone transient's 64 u on the mass fractions. The absolute floor is per species."""
+    _project_parity(FAN_CURVE, tmp_path, rtol_flow=32 * F32_U, rtol_mf=64 * F32_U,
+                    record_property=record_property, species_floor=True,
+                    label="Three-zone project with a scheduled fan curve, 24 steps")

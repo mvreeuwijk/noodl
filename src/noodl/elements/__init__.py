@@ -35,7 +35,7 @@ from noodl.elements.door_discretized import (
     mbl_discretized_operable_door,
 )
 from noodl.elements.duct import Duct
-from noodl.elements.fan import FanCurve
+from noodl.elements.fan import AffinityFan, FanCurve
 from noodl.elements.fixed import FixedFlow, FixedVolumeFlow
 from noodl.elements.media import AirMedium, MBLMedium, medium
 from noodl.elements.powerlaw import Orifice, PowerLaw
@@ -59,6 +59,7 @@ from noodl.elements.table import MBLTable, SplineFlowTable
 from noodl.elements.upstream import UpstreamDensityPowerLaw
 
 __all__ = [
+    "AffinityFan",
     "AirDuct",
     "AirMedium",
     "Conductance",

@@ -567,6 +567,7 @@ only one the airflow Jacobian sees, is exact and each edge's slope stays nonnega
 | `Duct(L, D, eps, sum_C=0.0, *, A=None, Re_t=2000.0, rho=1.2041, mu=1.81625e-5, n_iter=4)` | Flow through a duct of length `L`, diameter `D` and roughness `eps` (m) with dynamic loss coefficients `sum_C`: $F = \sqrt{2 \rho A^2 \lvert\Delta p\rvert / (f L/D + \sum C)}$, the friction factor $f$ from the Colebrook equation iterated `n_iter` times, and a straight line through the origin below the transition Reynolds number `Re_t`. `rho` and `mu` are fixed at construction. **Source:** CONTAM TN 1887r1 section 8.3.3, eq. 50–52. |
 | `Damper(C_pos, n_pos, C_neg, n_neg, *, dp_transition=1e-3, src=None, tgt=None, m=0.0, rho_ref=1.2041)` | A backdraught damper: a separate power law, with `PowerLaw`'s laminar blend, for each flow direction. With `src`/`tgt`/`m` each side's coefficient follows the entering air's density, $(\rho_{up}/\rho_{ref})^m$, as `UpstreamDensityPowerLaw`. **Source:** CONTAM's `PL_BDF`/`PL_BDQ` elements. |
 | `FanCurve(coeffs, q_max)` | A fan with cubic pressure rise $P(q) = a_0 + a_1 q + a_2 q^2 + a_3 q^3$, decreasing on $0 \le q \le q_{\max}$; the branch law $\Delta p = -P(q)$ is inverted for $q$. The flow is 0 when the back-pressure exceeds the shutoff pressure $P(0)$, and $q_{\max}$ when it is below $P(q_{\max})$. **Source:** CONTAM's cubic fan element. |
+| `AffinityFan(curve, *, src, tgt, rho_ref, speed_key=None, off=0.0, multiplier=1.0, shutoff=None)` | A `FanCurve` at speed ratio $s$ (`drivers[speed_key]`) and density ratio $r = \rho_{up}/\rho_{ref}$ by the fan laws, $F = s\,r\,F_0(\Delta p/(s^2 r))$, times `multiplier` (fans in parallel); below `off` the fan is stopped and the air passes `shutoff`. **Source:** CONTAM's performance-curve fan, measured against ContamX 3.4.1.7. |
 | `FixedFlow(q0)` | A prescribed supply or exhaust, $F = q_0$ whatever $\Delta p$. A zone connected to the rest of the network only through fixed flows makes the Jacobian singular; `solvers.grounding.spd_certificate` reports that case. **Source:** CONTAM's constant-flow fans. |
 | `Conductance(g)` | The linear law $F = g\,\Delta p$, used for thermal conduction and passive exchange. |
 
@@ -690,6 +691,7 @@ above 0.1 % of the largest.
 | Three-zone project with constant-efficiency, particle and series filters, 24 steps | flow rel 16 $u$, mf rel 72 $u$, floor 64 $u$ × each species' max | **9.1e-8** flow, **3.7e-7** mf |
 | Three-zone project with deposition sinks, removal terms and NRCC emissions, 24 steps | flow rel 16 $u$, mf rel 80 $u$, floor 64 $u$ × each species' max | **9.1e-8** flow, **1.3e-7** mf |
 | One-zone stack with a pressure-driven source, 288 steps | flow rel 64 $u$, mf rel 88 $u$, floor 64 $u$ × each species' max | **4.5e-8** flow, **7.4e-8** mf |
+| Three-zone project with a fan curve (mult 1.5) on a speed schedule 1, 0.8, off (its shut-off orifice) and 1.2, 24 steps | flow rel 32 $u$, mf rel 64 $u$, floor 64 $u$ × each species' max | **1.6e-7** flow, **5.8e-8** mf |
 
 Sinks and the concentration-proportional parts of sources are implicit in ContamX's species
 step, as are kinetic reactions and filters; noodl's implicit step reproduces it to float32
@@ -880,8 +882,7 @@ regression at rtol 1e-8.
   schedule is triggered by it in CONTAM rather than multiplied; such a project is refused by
   name. `PowerLawDecaySource` and `PeakEmissionSource` count their time from the simulation
   start.
-- **Schedules on fan curves are refused by name.** A weather or ambient file must cover the
-  whole run; nothing is extrapolated.
+- **A weather or ambient file must cover the whole run**; nothing is extrapolated.
 - **The default coupling is a single pass.** `build_model`'s `coupling` defaults to
   `"pingpong"`: a `.steady()` call then solves the airflow at the *initial* temperatures and does
   not re-converge. On the linear-density single-zone case it returns

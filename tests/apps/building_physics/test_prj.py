@@ -37,7 +37,13 @@ from noodl.apps.building_physics.sources import (
 )
 from noodl.apps.building_physics.species import KineticReaction, Species
 from noodl.apps.building_physics.thermal import R_AIR
-from noodl.elements import Damper, FanCurve, FixedFlow, Scaled, UpstreamDensityPowerLaw
+from noodl.elements import (
+    AffinityFan,
+    Damper,
+    FixedFlow,
+    Scaled,
+    UpstreamDensityPowerLaw,
+)
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "contam"
 THREE = DATA / "valThreeZonesWthCtm-UseApi.prj"
@@ -717,20 +723,6 @@ def test_a_scheduled_fixed_flow_fan_gets_no_stack_drive(tmp_path):
     assert "fan_1" not in [d.kind for d in p.drives]
 
 
-def test_a_schedule_on_a_fan_curve_is_refused_naming_path_and_schedule(tmp_path):
-    text = MIXED.read_text().replace(_NO_SCHEDULES, _HALF_SCHEDULE, 1)
-    fan_cmf = "1 28 fan_cmf fan\n\n 0.200683 4\n"
-    assert fan_cmf in text
-    text = text.replace(fan_cmf, "1 22 fan_fan fan\n\n 0 0 0.5 1.2041 0.5 100 0\n"
-                                 " 100 -200 0 0 2\n 0 100\n 0.5 0\n", 1)
-    path5 = "   5    0   1  -1   1   0   0   0   0   0   1"
-    assert isinstance(next(e for e in read_prj(_variant(text, path5, path5, tmp_path)).elements
-                           if e.kind == "fan_1"), FanCurve)         # unscheduled, it loads
-    variant = _variant(text, path5, "   5    0   1  -1   1   0   0   0   1   0   1", tmp_path)
-    with pytest.raises(ValueError, match=r"path 5.*schedule 1.*fan curve"):
-        read_prj(variant)
-
-
 def test_schedule_references_that_name_nothing_are_refused(tmp_path):
     text = THREE.read_text()
     path2 = "   2    0   1   2   3   0   0   0   0   0   1"
@@ -1104,3 +1096,30 @@ def test_a_filter_with_its_load_pair_split_over_two_lines_is_refused_by_number(t
     with pytest.raises(ValueError, match=r"filter 1 needs the pair `load nsload` on one line"):
         read_prj(_variant(text, "  1   1   1\n   0 0\n", "  1   1   1\n   0\n   0\n",
                           tmp_path))
+
+
+FAN_CURVE = DATA / "fan_curve_three_zone.prj"
+
+
+def test_a_fan_curve_path_is_an_affinity_fan_on_its_speed_schedule():
+    p = read_prj(FAN_CURVE)
+    (fan,) = [e for e in p.elements if isinstance(e, AffinityFan)]
+    assert fan.kind == "fan_4" and fan.rho_ref == pytest.approx(1.2041)
+    assert fan.off == pytest.approx(0.1) and fan.multiplier.tolist() == [1.5]
+    assert fan.speed_key == "fan_speed.fan_4" and fan.shutoff is not None
+    assert p.speed_edges == {"fan_4": 1}
+    (inp,) = [i for i in p.inputs if i.key == "fan_speed.fan_4"]
+    cal = Calendar()
+    assert inp.signal.value(1800.0, cal).item() == pytest.approx(1.0)       # left limit
+    assert inp.signal.value(2100.0, cal).item() == pytest.approx(0.8)
+    model, state, drivers = project_to_model(p)
+    assert drivers["fan_speed.fan_4"].tolist() == [1.0]
+    assert model.refs.inputs["fan_speed.fan_4"].unit == "-"
+
+
+def test_an_unscheduled_fan_curve_runs_at_its_rated_speed(tmp_path):
+    text = FAN_CURVE.read_text()
+    p5 = "   5    0   3  -1   4   0   0   0   1   0   1"
+    p = read_prj(_variant(text, p5, "   5    0   3  -1   4   0   0   0   0   0   1", tmp_path))
+    (fan,) = [e for e in p.elements if isinstance(e, AffinityFan)]
+    assert fan.speed_key is None and p.speed_edges == {}
