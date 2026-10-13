@@ -224,7 +224,10 @@ def run_project(prj_path, *, airflow_convergence=None) -> dict:
     Returns the initial state and every step: `time` (N,) s since the start, `flow`
     (N, n_paths) kg/s, `mf` (N, n_zones, K), `terminal_flow` (N, n_terminals): flow out of
     each duct terminal into its zone, kg/s, in junction-number order, `dt`, and the path and
-    zone numbering of `run_transient`. `airflow_convergence` as in `run_steady`.
+    zone numbering of `run_transient`, and `control` (N, n_reports): the project's named pass
+    (split) nodes, in node order, as `getOutputControlValue` reports them: the value the
+    network computed for that step ((N, 0) when the project has none). `airflow_convergence`
+    as in `run_steady`.
 
     ContamX (3.4.1.7) opens the project's weather and contaminant files relative to the
     process's WORKING DIRECTORY, so the run changes into the scratch copy's directory for its
@@ -250,8 +253,11 @@ def run_project(prj_path, *, airflow_convergence=None) -> dict:
                     f"contamx: {prj_path} runs {duration} s, not a whole number (>= 1) of "
                     f"{dt} s time steps"
                 )
+            def control():
+                return [cx.getOutputControlValue(i + 1) for i in range(cx.nOutputControls)]
+
             f, m, j = _snapshot(cx)
-            flows, mfs, terms, times = [f], [m], [j], [0.0]
+            flows, mfs, terms, times, controls = [f], [m], [j], [0.0], [control()]
             for k in range(1, n + 1):
                 cx.doSimStep(1)
                 t = (cx.getCurrentDayOfYear() - d0) * 86400.0 + cx.getCurrentTimeInSec() - t0
@@ -262,8 +268,10 @@ def run_project(prj_path, *, airflow_convergence=None) -> dict:
                 mfs.append(m)
                 terms.append(j)
                 times.append(t)
+                controls.append(control())
             out = _result(cx, flows, mfs, terms, dt)
             out["time"] = torch.tensor(times, dtype=torch.float64)
+            out["control"] = torch.tensor(controls, dtype=torch.float64).reshape(n + 1, -1)
             return out
         finally:
             cx.endSimulation()

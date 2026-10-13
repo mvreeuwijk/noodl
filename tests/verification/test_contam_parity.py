@@ -17,6 +17,8 @@ ContamX's airflow iteration is run at `TIGHT_AIRFLOW` rather than the sample pro
 from __future__ import annotations
 
 import dataclasses
+import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -366,7 +368,7 @@ def _schedules_as_contamx_holds(prj: Path, dest: Path) -> Path:
 
 
 def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf, record_property, label,
-                    species_floor=False, atol=NOODL_ATOL):
+                    species_floor=False, atol=NOODL_ATOL, atol_flow=0.0, ref=None):
     """ContamX's `run_project` (at `PROJECT_AIRFLOW`, its airflow tolerances tightened so its
     own iteration stays below the budgets) against `simulate_project` on the same project,
     with the schedule values ContamX holds (`_schedules_as_contamx_holds`).
@@ -376,11 +378,14 @@ def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf, record_property, label
     species far smaller than another is still checked relative to its own size. The zones'
     mass fractions are compared (a duct network's junctions follow them in the species
     state), and the duct terminal flows when the project has any. `atol` is noodl physics'
-    airflow residual tolerance (kg/s)."""
+    airflow residual tolerance (kg/s). `atol_flow` (kg/s) is added to the flows' floor (a
+    budget that is absolute, not relative); `ref` is ContamX's run when the caller already
+    made it."""
     from noodl.apps.building_physics.contamx import run_project
     from noodl.apps.building_physics.simulation import simulate_project
 
-    ref = run_project(prj, airflow_convergence=PROJECT_AIRFLOW)
+    if ref is None:
+        ref = run_project(prj, airflow_convergence=PROJECT_AIRFLOW)
     noodl_prj = _schedules_as_contamx_holds(prj, tmp_path / "noodl")
     project = read_prj(noodl_prj)
     out = simulate_project(project, atol=atol, rtol=1e-14)
@@ -388,7 +393,7 @@ def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf, record_property, label
     torch.testing.assert_close(out["time"], ref["time"], rtol=0, atol=1e-9)
     scale = ref["flow"].abs().max()
     torch.testing.assert_close(out["path_flow"], ref["flow"], rtol=rtol_flow,
-                               atol=(64 * F32_U * scale).item())
+                               atol=(64 * F32_U * scale).item() + atol_flow)
     mf_scale = ref["mf"].abs().max()
     if species_floor:
         mf_scale = ref["mf"].abs().flatten(0, -2).amax(0)              # (K,)
@@ -398,25 +403,30 @@ def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf, record_property, label
     mf_allowed = 64 * F32_U * mf_scale + rtol_mf * ref["mf"].abs()
     assert bool((mf_err <= mf_allowed).all()), (
         f"mass fractions: worst error {(mf_err / mf_allowed).max().item():.3g} of allowed")
-    compared = [("flow", out["path_flow"], ref["flow"], scale, rtol_flow),
-                ("mf", out["species.x"], ref["mf"], mf_scale, rtol_mf)]
+    compared = [("flow", out["path_flow"], ref["flow"], scale, rtol_flow, atol_flow),
+                ("mf", out["species.x"], ref["mf"], mf_scale, rtol_mf, 0.0)]
     if ref["terminal_flow"].numel():
         t_scale = ref["terminal_flow"].abs().max()
         torch.testing.assert_close(out["terminal_flow"], ref["terminal_flow"],
-                                   rtol=rtol_flow, atol=(64 * F32_U * t_scale).item())
+                                   rtol=rtol_flow,
+                                   atol=(64 * F32_U * t_scale).item() + atol_flow)
         compared.append(("terminal_flow", out["terminal_flow"], ref["terminal_flow"],
-                         t_scale, rtol_flow))
+                         t_scale, rtol_flow, atol_flow))
     record_property("check", label)
     record_property("tolerance", f"flow rel {rtol_flow:.2e}, mf rel {rtol_mf:.2e}, "
-                                 f"atol 64 u x max" + (" per species" if species_floor else ""))
-    for name, ours, theirs, top, rtol in compared:
+                                 f"atol 64 u x max" + (" per species" if species_floor else "")
+                                 + (f" + {atol_flow:.2e} kg/s on flows" if atol_flow else ""))
+    for name, ours, theirs, top, rtol, extra in compared:
         # The relative error of the entries carrying at least 0.1 % of the largest (below
         # that the floor governs: the isothermal hours' exchange flow is a float32 roundoff
         # of the zone temperature), and the largest error of any entry as a fraction of what
         # the tolerance allows it.
-        floor = 64 * F32_U * top
+        floor = 64 * F32_U * top + extra
         err = (ours - theirs).abs()
         big = theirs.abs() > 1e-3 * top
+        if not big.any():                       # identically zero (no source, clean air)
+            record_property(f"measured_rel_{name}", "all zero")
+            continue
         record_property(f"measured_rel_{name}", (err[big] / theirs[big].abs()).max().item())
         record_property(f"measured_{name}_of_allowed",
                         (err / (floor + rtol * theirs.abs())).max().item())
@@ -778,3 +788,189 @@ def test_nist_s_ahs_and_duct_sample_matches_contamx(contamx, tmp_path, record_pr
                     record_property=record_property, species_floor=True,
                     label="NIST test_GetPrjInfo (two AHS, two duct systems), 12 steps",
                     atol=1e-12)
+
+
+DCV = DATA / "dcv_three_zone.prj"
+PRESSURE_EXHAUST = DATA / "pressure_exhaust_three_zone.prj"
+WINDOW = DATA / "hysteresis_window_three_zone.prj"
+STEPS = 288
+
+
+def _control_outputs_match(ref, out, rtol, record_property, label, atol=0.0):
+    """Every named output within `rtol` relative plus `atol` absolute (either may be per
+    column), with a floor of 64 u times the column's largest value (the outputs differ in
+    scale by six orders: a CO2 reading in mg/kg and a fan signal)."""
+    want, got = ref["control"], out["control"]
+    assert got.shape == want.shape
+    allowed = rtol * want.abs() + 64 * F32_U * want.abs().amax(0) + atol
+    err = (got - want).abs()
+    worst = int(torch.argmax((err / allowed).amax(0)))
+    record_property("measured_control_of_allowed", (err / allowed).max().item())
+    assert bool((err <= allowed).all()), (
+        f"{label}: control output {worst} off by {err[:, worst].max().item():.3e}")
+
+
+def _longest_unsaturated(y):
+    """The longest run of steps over which `y` stays strictly inside (0, 1)."""
+    best = run = 0
+    for inside in ((y > 0) & (y < 1)).tolist():
+        run = run + 1 if inside else 0
+        best = max(best, run)
+    return best
+
+
+@pytest.mark.external
+def test_demand_controlled_ventilation_matches_contamx(contamx, tmp_path, record_property):
+    """`dcv_three_zone.prj`: CO2 from occupants (08:00-18:00, a schedule node on the
+    source), a PI controller (Kp 0.01, Ki 1e-5 /s) on zone one's CO2 above 650 mg/kg
+    driving the exhaust fan (`fan_cmf`, 0.100342 kg/s at signal 1), never below 0.2.
+
+    Budget. ContamX computes its control signals in float32 (0.178749993 = fl32(0.17875),
+    measured); noodl in float64. The CO2 reading r = 1e6 x is rounded twice (x to float32,
+    then the product): 2 u r. Its difference from the set point, e = r - 650, is exact
+    (Sterbenz) but carries that ABSOLUTE error, which is large against e (r ~ 660, e ~ 10).
+    The PI update y_k = y_(k-1) + Kp (e_k - e_(k-1)) + Ki dt (e_k + e_(k-1))/2 is stored in
+    float32. Since the output last saturated (a clipped 0 or 1 is exact in both), over N
+    steps: the proportional term telescopes, 2 Kp (2 u r_max); the integral term adds
+    Ki dt (2 u r_max) per step; the store u y <= u per step. Hence an absolute bound on the
+    PI output and the fan signal,
+    A = (N (1 + 2 Ki dt r_max) + 4 Kp r_max) u, with N the reference's longest unsaturated
+    stretch (119 steps) and r_max its largest reading (661 mg/kg): about 620 u. The fan flow
+    is the signal times the rating, so it is off by A x 0.100342 kg/s at most, and the zone's
+    other paths shift by no more (mass balance): an absolute flow budget on top of the
+    three-zone transient's 64 u. The CO2 responds to a relative error of the exhaust flow by
+    at most that relative error (the loop gain is below one: the controlled CO2 moves less
+    than the fan signal), and the signal is never below 0.2: A / 0.2 relative on the mass
+    fractions, plus 64 u. The control outputs: the reading carries the mass fractions' budget
+    plus 2 u; the PI output and the fan signal A; the excess (r - 600) x 0.6584 the
+    reading's absolute error times 0.6584. ContamX's airflow is solved to `PROJECT_AIRFLOW`:
+    at its own 1e-5 convergence its PI output at step 120 is 0.31324 against 0.31346 here,
+    an error of ContamX's airflow iteration (0.313458 at the tight tolerance)."""
+    from noodl.apps.building_physics.contamx import run_project
+
+    ref = run_project(DCV, airflow_convergence=PROJECT_AIRFLOW)
+    kp, ki_dt, fan_rating = 0.01, 1e-5 * 300.0, 0.100342
+    r_max = ref["control"][:, 0].max().item()
+    n = _longest_unsaturated(ref["control"][:, 1])
+    pi_bound = (n * (1 + 2 * ki_dt * r_max) + 4 * kp * r_max) * F32_U
+    rtol_mf = 64 * F32_U + pi_bound / 0.2
+    ref, out = _project_parity(DCV, tmp_path, rtol_flow=64 * F32_U, rtol_mf=rtol_mf,
+                               atol_flow=pi_bound * fan_rating, ref=ref,
+                               record_property=record_property, species_floor=True,
+                               label="Demand-controlled ventilation (PI), 288 steps")
+    reading = (rtol_mf + 2 * F32_U) * r_max
+    _control_outputs_match(
+        ref, out, torch.tensor([rtol_mf + 2 * F32_U, 0.0, 0.0, 0.0], dtype=F64),
+        record_property, "dcv",
+        atol=torch.tensor([0.0, pi_bound, pi_bound, 0.6584 * reading], dtype=F64))
+
+
+@pytest.mark.external
+def test_a_pressure_controlled_exhaust_matches_contamx(contamx, tmp_path, record_property):
+    """`pressure_exhaust_three_zone.prj`: a scheduled supply fan; zone three's gauge
+    pressure above -0.5 Pa (a limit control) through a P controller (Kp 0.8) drives the
+    exhaust fan; a path pressure-difference and a flow sensor reported. No state carries a
+    rounding from step to step (P control), so the three-zone transient budget, 64 u. The
+    float32 gauge pressure p and set point -0.5 Pa enter the limit control p + 0.5 with an
+    absolute u (|p| + 0.5) < 2 u Pa, inside the column floor (64 u times the largest
+    pressure, 0.41 Pa)."""
+    ref, out = _project_parity(PRESSURE_EXHAUST, tmp_path, rtol_flow=64 * F32_U,
+                               rtol_mf=64 * F32_U, record_property=record_property,
+                               species_floor=True,
+                               label="Pressure-controlled exhaust (P), 288 steps")
+    _control_outputs_match(ref, out, 64 * F32_U, record_property, "pressure exhaust")
+
+
+@pytest.mark.external
+def test_a_hysteresis_window_matches_contamx(contamx, tmp_path, record_property):
+    """`hysteresis_window_three_zone.prj`: zone one's temperature ramps 293.15 -> 303.15 ->
+    293.15 K through a schedule node; a window (path 5, an orifice) opens by hysteresis
+    (slope 1.66667) and a band switch on the sensed temperature, times a schedule; every
+    logical and arithmetic node type reported.
+
+    Budget. The sensor reads x = (T - 293.15) x 0.1 in float32: ContamX holds the ramped
+    temperature and the offset in single precision, each to u times itself, and the
+    difference cancels them against a small x. So x is off by an ABSOLUTE
+    dx = (0.1 (303.15 + 293.15) + 2) u = 61.6 u (the 2 u: the scale and the product), not by
+    a relative 64 u (measured: 0.29166871 = 28/96 + 2.0e-6 in ContamX at 08:25). The
+    switches decide alike: every threshold (0.49, 0.69, 0.29) lies at least 4.2e-4 from the
+    sensed values' grid k/96, far beyond dx; the tests u > 0 meet x = 0 in the isothermal
+    hours, where ContamX's float32 T and offset cancel exactly and noodl's float32-held
+    schedule value lies below the float64 offset (x = -6.1e-7): both off. No output sums
+    roundings over steps (the hysteresis stores one); the largest gain from x to an output
+    is the sum node's x + hysteresis + set point, 1 + 1.66667: an absolute
+    2.66667 dx on the control outputs, on top of 64 u. The window's flow is its opening (at
+    most 1.66667 dx off) times the flow per unit opening F_open (the reference's largest
+    |flow| / opening), and the other paths shift by no more: 1.66667 dx F_open absolute on
+    the flows, on top of the transient's 64 u. The air is clean (no species source)."""
+    from noodl.apps.building_physics.contamx import run_project
+
+    ref = run_project(WINDOW, airflow_convergence=PROJECT_AIRFLOW)
+    slope = 1.66667
+    dx = (0.1 * (303.15 + 293.15) + 2) * F32_U
+    opening, window_flow = ref["control"][:, 4], ref["flow"][:, 4]
+    f_open = (window_flow.abs()[opening > 0] / opening[opening > 0]).max().item()
+    ref, out = _project_parity(WINDOW, tmp_path, rtol_flow=64 * F32_U, rtol_mf=64 * F32_U,
+                               atol_flow=slope * dx * f_open, ref=ref,
+                               record_property=record_property, species_floor=True,
+                               label="Hysteresis window, 288 steps")
+    _control_outputs_match(ref, out, 64 * F32_U, record_property, "hysteresis window",
+                           atol=(1 + slope) * dx)
+
+
+def _through_schedule_nodes(src, records, tmp_path):
+    """`src` with each record's schedule replaced by a control reference to a schedule node
+    of the same week schedule (ContamX: bit-identical histories, measured)."""
+    text = src.read_bytes().decode().replace("\r\n", "\n")
+    body = "! # typ seq f n  c1  c2 name\n"
+    for i, (old, new, week) in enumerate(records, 1):
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+        body += f"  {i} sch {i} 0 0 0 0 <none>\nschedule node\n {week}\n"
+    text = re.sub(r"^\d+ ! control nodes:\n.*?^-999\n",
+                  f"{len(records)} ! control nodes:\n{body}-999\n", text,
+                  flags=re.DOTALL | re.MULTILINE)
+    out = tmp_path / "controlled" / src.name
+    out.parent.mkdir(parents=True)
+    out.write_bytes(text.replace("\n", "\r\n").encode())
+    for suffix in (".wth", ".ctm"):
+        if src.with_suffix(suffix).exists():
+            shutil.copy(src.with_suffix(suffix), out.parent)
+    return out
+
+
+AHS_RECORDS = [("   8   16   4   5   0   1   0   0   1   0   1",
+                "   8   16   4   5   0   1   0   0   0   1   1", 1),
+               ("   5    8   5   1   0   0   0   1   2   0   1",
+                "   5    8   5   1   0   0   0   1   0   2   1", 2)]
+DUCT_RECORDS = [("  2  0   2   3   3   0   1   0", "  2  0   2   3   3   0   0   1", 1),
+                ("  6  0 1  2   0   0   2   0", "  6  0 1  2   0   0   0   2", 2)]
+
+
+@pytest.mark.parametrize(("src", "records"), [(AHS, AHS_RECORDS), (DUCTS, DUCT_RECORDS)])
+def test_a_control_through_a_schedule_node_equals_the_schedule(src, records, tmp_path):
+    """The AHS outdoor-air fraction and supply point, a duct fan's speed and a terminal's
+    opening driven through schedule nodes: noodl's run is the scheduled run exactly, as
+    ContamX's is (both paths write the same float64 value into the same driver entry)."""
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    controlled = _through_schedule_nodes(src, records, tmp_path)
+    a = simulate_project(read_prj(src), atol=NOODL_ATOL, rtol=1e-14)
+    b = simulate_project(read_prj(controlled), atol=NOODL_ATOL, rtol=1e-14)
+    for key in ("path_flow", "species.x"):
+        torch.testing.assert_close(b[key], a[key], rtol=0, atol=0)
+
+
+@pytest.mark.external
+@pytest.mark.parametrize(("src", "records", "rtol_flow"),
+                         [(AHS, AHS_RECORDS, 32 * F32_U), (DUCTS, DUCT_RECORDS, 64 * F32_U)])
+def test_controls_through_schedule_nodes_match_contamx(contamx, src, records, rtol_flow,
+                                                       tmp_path, record_property):
+    """The same variants against ContamX, at the budgets of the scheduled originals' parity
+    tests (`test_a_simple_ahs_matches_contamx`: 32 u on flows, 72 u on mass fractions;
+    `test_a_duct_network_matches_contamx`: 64 u and 72 u), since the variants change
+    nothing ContamX computes."""
+    controlled = _through_schedule_nodes(src, records, tmp_path)
+    _project_parity(controlled, tmp_path, rtol_flow=rtol_flow, rtol_mf=72 * F32_U,
+                    record_property=record_property, species_floor=True,
+                    label=f"{src.stem} through controls")
