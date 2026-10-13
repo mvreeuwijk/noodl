@@ -19,6 +19,12 @@ from noodl.apps.building_physics.contamx import (
     run_transient,
 )
 from noodl.apps.building_physics.ctm import AmbientConcentrations, read_ctm
+from noodl.apps.building_physics.ducts import (
+    DEFAULT_ROUGHNESS,
+    DEFAULT_TERMINAL_LOSS,
+    DuctNetwork,
+    duct_elements_from_edges,
+)
 from noodl.apps.building_physics.elements import (
     add_large_opening,
     mass_orifice,
@@ -78,6 +84,8 @@ from noodl.apps.building_physics.wth import Weather, read_wth
 
 __all__ = [
     "AmbientConcentrations",
+    "DEFAULT_ROUGHNESS",
+    "DEFAULT_TERMINAL_LOSS",
     "EDGE_ATTRIBUTES",
     "NODE_ATTRIBUTES",
     "BurstSource",
@@ -89,6 +97,7 @@ __all__ = [
     "DecayingSource",
     "DepositionRateSink",
     "DepositionVelocitySink",
+    "DuctNetwork",
     "FilterSeries",
     "IdealGasDensity",
     "Input",
@@ -115,6 +124,7 @@ __all__ = [
     "bind_inputs",
     "build_model",
     "crack",
+    "duct_elements_from_edges",
     "door",
     "filter_transmission",
     "initial_drivers",

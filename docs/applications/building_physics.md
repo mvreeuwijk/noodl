@@ -87,6 +87,76 @@ are listed with their units under [Network attributes](../catalogue/building_phy
 Models can also be read from CONTAM `.prj`/`.wth` files or from a Modelica Buildings Library
 export — see [File formats](../formats/index.md).
 
+## Duct networks
+
+A duct system is described with `DuctNetwork` and then added to a `Network` or a
+`Component`. It has three parts, built the way CONTAM builds them:
+
+- a **junction** (`junction(name, z_ref=, T0=)`) is a node at height `z_ref`. It holds half
+  the volume of every segment that meets it (the segment's length times its area). A
+  terminal adds nothing to it. The volume is why the system is described first and added
+  afterwards: it is known only once every segment is;
+- a **segment** (`segment(a, b, length=, diameter=, roughness=, loss=, area=)`) is an
+  `AirDuct` edge between two junctions, with the hydrostatic term `DuctStack` (the column at
+  the junctions' mean temperature). The roughness defaults to CONTAM's 9e-5 m
+  (`DEFAULT_ROUGHNESS`) and the area to the circle of the diameter;
+- a **terminal** (`terminal(junction, zone, area=, loss=)`) is a `DuctTerminal` edge from a
+  junction into a zone, with a `Stack` at the junction's height. Its loss defaults to
+  CONTAM's 0.125 (`DEFAULT_TERMINAL_LOSS`). A terminal in the ambient takes the wind as an
+  envelope path does (`Ch`, `azimuth` or a component's `facade`, and `profile`).
+
+The laws are those under [Duct elements](#duct-elements). A fan, a damper or any other
+element in a duct is an ordinary edge between two junctions, added by the caller with its own
+element. `duct_elements_from_edges(net)` returns the segments' and terminals' elements and
+drives.
+
+A fan draws 0.05 kg/s from the ambient through a 10 m duct and blows it through a 5 m duct
+into a room, which leaks it back to the ambient:
+
+```python
+import torch
+from noodl.apps.building_physics import DuctNetwork, duct_elements_from_edges
+from noodl.elements import FixedFlow, PowerLaw
+from noodl.layers.potential import PotentialFlowLayer
+from noodl.topology import Network
+
+F64 = torch.float64
+net = Network(dtype=F64)
+net.add_node("ambient", z_ref=0.0, T0=293.15)
+net.add_node("room", z_ref=0.0, T0=293.15, volume=300.0)
+ducts = DuctNetwork()
+for j in ("inlet", "fan_in", "fan_out", "outlet"):
+    ducts.junction(j, z_ref=1.5)
+ducts.segment("inlet", "fan_in", length=10.0, diameter=0.2)
+ducts.segment("fan_out", "outlet", length=5.0, diameter=0.2)
+ducts.terminal("inlet", "ambient", area=0.0314)
+ducts.terminal("outlet", "room", area=0.0314)
+ducts.add_to(net)
+net.add_edge("fan_in", "fan_out", kind="fan")
+net.add_edge("room", "ambient", kind="leak")
+elements, drives = duct_elements_from_edges(net)
+elements += [FixedFlow(torch.tensor([0.05], dtype=F64), kind="fan"),
+             PowerLaw(torch.tensor([0.5], dtype=F64), torch.tensor([0.5], dtype=F64),
+                      kind="leak")]
+air = PotentialFlowLayer(net, "air", elements, drives=drives, boundary=["ambient"])
+rho = torch.full((net.n,), 1.204097, dtype=F64)
+phi, q = air.solve(torch.zeros(1, dtype=F64), {"rho": rho})
+print([round(v, 4) for v in air.flows_of_kind(q, "duct_terminal").tolist()], "kg/s")
+print(f"room at {phi[net.node_index('room')].item():.4f} Pa")
+print({j: round(v * 1e3, 1) for j, v in ducts.volumes().items()}, "litres")
+```
+
+```text
+[-0.05, 0.05] kg/s
+room at 0.0100 Pa
+{'inlet': 157.1, 'fan_in': 157.1, 'fan_out': 78.5, 'outlet': 78.5} litres
+```
+
+The terminal in the ambient carries the fan's flow into the duct (negative: its positive
+direction is out of the duct) and the room's terminal delivers it. Each junction holds half
+of its segment: 157.1 litres for the 10 m duct of 0.2 m, 78.5 for the 5 m one. The junction
+nodes also carry `heat_capacity=0`: no lumped heat capacity beyond their air.
+
 ## Building from components
 
 A larger building is easier to assemble from parts than to write out node by node. The

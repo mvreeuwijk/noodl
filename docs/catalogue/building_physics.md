@@ -40,6 +40,24 @@ What the builders, elements and drives read off `net.add_node(...)` and `net.add
 | `Ch` | wind speed modifier (dimensionless, 1 by default) | `Wind.from_network` |
 | `profile` | number of the WindProfile to use; 0 means the constant Cp | `Wind.from_network` |
 
+**Edges of kind `duct`, a segment between two junctions (made by DuctNetwork)**
+
+| Attribute | Meaning | Read by |
+|---|---|---|
+| `length` | length of the segment (m) | `duct_elements_from_edges` |
+| `diameter` | hydraulic diameter of the duct (m) | `duct_elements_from_edges` |
+| `roughness` | roughness of the duct wall (m) | `duct_elements_from_edges` |
+| `loss` | sum of the segment's dynamic loss coefficients (dimensionless) | `duct_elements_from_edges` |
+| `area` | cross-section of the duct (m2); the circle of the diameter by default | `duct_elements_from_edges` |
+
+**Edges of kind `duct_terminal`, a junction to a zone (made by DuctNetwork)**
+
+| Attribute | Meaning | Read by |
+|---|---|---|
+| `area` | area of the duct at the terminal (m2) | `duct_elements_from_edges` |
+| `loss` | loss coefficient of the terminal (dimensionless) | `duct_elements_from_edges` |
+| `z_path` | height of the terminal, the junction's height (m) | `Stack.from_network` |
+
 **Edges of kind `wall`**
 
 | Attribute | Meaning | Read by |
@@ -160,6 +178,7 @@ Supporting types.
 | `Calendar`<br><small>`noodl.apps.building_physics`</small> | Where t = 0 sits in the year, and the CONTAM day type (1-12) of every day. | `Calendar(*, start_day=1, start_time=0.0, start_day_type=1, day_types=None)` |
 | `ConstantEfficiencyFilter`<br><small>`noodl.apps.building_physics`</small> | Removes a fixed fraction of each species it lists, nothing of the others. | `ConstantEfficiencyFilter(efficiencies, *, name='')` |
 | `DaySchedule`<br><small>`noodl.apps.building_physics`</small> | One day of values at times of day: CONTAM's day schedule. | `DaySchedule(times, values, *, shape='rectangular', name='')` |
+| `DuctNetwork`<br><small>`noodl.apps.building_physics`</small> | A duct system, described first and then added to a `Network` or a `Component`. | `DuctNetwork(*, kind='duct', terminal_kind='duct_terminal')` |
 | `FilterSeries`<br><small>`noodl.apps.building_physics`</small> | Filters in series (CONTAM's super filter): the air passes each stage in turn, so the pass fraction is the product of the stages' pass fractions. | `FilterSeries(stages, *, name='')` |
 | `Input`<br><small>`noodl.apps.building_physics`</small> | `signal`'s value written into `drivers[key]` at each step. | `Input(signal, key, *, index=None, at=None, name='')` |
 | `KineticReaction`<br><small>`noodl.apps.building_physics`</small> | First-order reactions between species: dx_p/dt += k[p, r] x_r, x in kg/kg. | `KineticReaction(coefficients, *, name='')` |
@@ -182,6 +201,7 @@ Calculations and helpers.
 | `assemble_sources`<br><small>`noodl.apps.building_physics`</small> | Sum of every source's explicit rate `source(t, x_full)` (kg/s), full-node order, shape like `x_full`; there is no separate node-count argument. | `assemble_sources(sources, t, x_full)` |
 | `bind_inputs`<br><small>`noodl.apps.building_physics`</small> | `inputs` with every `at` resolved to positions through `model.refs`, checked for overlap: two inputs may not write the same entry of the same driver (raises naming both). A key given with `at` must be one the model declares (`model.refs.field(key)`). | `bind_inputs(model, inputs)` |
 | `crack`<br><small>`noodl.apps.building_physics`</small> | A small orifice (m2, m). Interior: between terminals `a` and `b`. Exterior: from the shared ambient to `a`, carrying the wind attributes `Wind.from_network` reads; give the facade direction as `azimuth` (degrees from north) or as `facade`, a key of the building's `inner_table("facades", ...)`. Edge: `path`. | `crack(name, *, area, z_path, Cd=0.6, exterior=False, azimuth=None, facade=None, Cp=None, Ch=None, profile=None)` |
+| `duct_elements_from_edges`<br><small>`noodl.apps.building_physics`</small> | The elements and drives of the duct edges `DuctNetwork.add_to` made: an `AirDuct` and a `DuctStack` for the segments, a `DuctTerminal`, a `Stack` (at the junction's height) and, when a terminal has a wind profile, a `Wind` for the terminals. Returns `(elements, drives)`; a kind the network lacks contributes nothing. `temperature_key` names the full-node temperature driver for the viscosity (the viscosity at 293.15 K when None); `opening_key` the terminals' opening driver. | `duct_elements_from_edges(net, *, kind='duct', terminal_kind='duct_terminal', temperature_key=None, opening_key=None, g=9.80665, ambient='ambient', profiles=())` |
 | `door`<br><small>`noodl.apps.building_physics`</small> | A doorway between two zones (CONTAM's two-opening DR_PL2): terminals `a`, `b` and edges `low`, `high`. `z_mid` (m) is relative to the door's placement. Ports: `a`, `b`. | `door(name, *, H, W, z_mid, Cd=0.78)` |
 | `filter_transmission`<br><small>`noodl.apps.building_physics`</small> | The species layer's `transmission`, `(b_flow, K)`: 1 - efficiency on each filtered edge, 1 elsewhere. Rows follow the layer's flow order: the edges of each kind in `flow_kinds`, kind by kind, each kind in network order; pass the layer's own `flow_kinds`. An edge is named by the `(source, target, key)` `add_edge` returned. | `filter_transmission(net, flow_kinds, species, filters)` |
 | `mass_orifice`<br><small>`noodl.apps.building_physics`</small> | F = Cd A sqrt(2 rho dp) [kg/s]: `PowerLaw(C = Cd A sqrt(2 rho), n = 0.5)`. | `mass_orifice(Cd, A, *, rho=1.2041, dp_transition=0.001, kind='airpath', learnable=False)` |
@@ -212,6 +232,15 @@ Calculations and helpers.
 | `power_law_from_points`<br><small>also `mbl_points`</small><br><small>`noodl.elements`</small> | ``Points_m_flow.mo:4-6,15-16``: the flow exponent itself is derived from two measured (dp, m_flow) pairs, ``m = (ln(mMea[0]) - ln(mMea[1])) / (ln(dpMea[0]) - ln(dpMea[1]))``, then ``k = mMea[0] / dpMea[0] ** m``. ``dpMea``/``mMea_flow`` are each a 2-element sequence. | `power_law_from_points(dpMea, mMea_flow, dp_turbulent=0.1, *, rho_default, kind='airpath', learnable=False)` |
 | `regularized_orifice`<br><small>also `mbl_orifice`</small><br><small>`noodl.elements`</small> | ``Orifice.mo:3-5,9``: ``C = CD * A * sqrt(2 / rho_default)``, ``m = 0.5`` by default (overridable, per ``Orifice.mo:3``'s non-``final`` ``m=0.5`` modifier); ``C`` itself is ``final`` in MBL (does not depend on ``m``). ``CD`` defaults to 0.65 (``Orifice.mo:9``, the sharp-edged-orifice discharge coefficient). | `regularized_orifice(A, CD=0.65, m=0.5, dp_turbulent=0.1, *, rho_default, kind='airpath', learnable=False)` |
 | `check_drive_signature`<br><small>`noodl.drives`</small> | Raise `TypeError` unless `drive` is callable as `drive(drivers)`. | `check_drive_signature(drive, *, where)` |
+
+## Constants and tables
+
+Named values and option tables.
+
+| Name | Value |
+|---|---|
+| `DEFAULT_ROUGHNESS` | `9e-05` |
+| `DEFAULT_TERMINAL_LOSS` | `0.125` |
 
 ## Base classes (for extending)
 

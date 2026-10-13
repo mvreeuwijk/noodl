@@ -37,6 +37,21 @@ EDGE_ATTRIBUTES: dict[str, dict[str, tuple[str, str]]] = {
         "profile": ("number of the WindProfile to use; 0 means the constant Cp",
                     "Wind.from_network"),
     },
+    "duct, a segment between two junctions (made by DuctNetwork)": {
+        "length": ("length of the segment (m)", "duct_elements_from_edges"),
+        "diameter": ("hydraulic diameter of the duct (m)", "duct_elements_from_edges"),
+        "roughness": ("roughness of the duct wall (m)", "duct_elements_from_edges"),
+        "loss": ("sum of the segment's dynamic loss coefficients (dimensionless)",
+                 "duct_elements_from_edges"),
+        "area": ("cross-section of the duct (m2); the circle of the diameter by default",
+                 "duct_elements_from_edges"),
+    },
+    "duct_terminal, a junction to a zone (made by DuctNetwork)": {
+        "area": ("area of the duct at the terminal (m2)", "duct_elements_from_edges"),
+        "loss": ("loss coefficient of the terminal (dimensionless)",
+                 "duct_elements_from_edges"),
+        "z_path": ("height of the terminal, the junction's height (m)", "Stack.from_network"),
+    },
     "wall": {
         "ua": ("conductance zone -> wall or wall -> ambient (W/K)", "thermal_layer"),
     },
