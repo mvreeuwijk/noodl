@@ -525,26 +525,67 @@ gradients through the whole model against central differences are checked as wel
 
 ## 9. Sewers and water distribution
 
-**Why the sewer's water side is CONTINUITY-first and the water-distribution side is a
-potential layer, on the same framework.** A gravity sewer runs free-surface: on the
-dendritic tree of section 1's own analysis, normal flow at every pipe is set by continuity
-alone -- the net inflow upstream of it (`cycles.particular_flow`, closed form on a tree,
-no Newton solve at all) -- and depth follows from Manning's law given that flow, not the
-other way round; a head difference does not drive the water, so a Newton potential layer
-built on head is the wrong shape for it. A pressurised water-distribution
-network is the opposite case, and it is exactly the framework's own: every pipe runs full,
-and head loss is a monotone function of the head difference at each pipe, pump and valve,
-so `noodl.apps.water` is an ordinary `PotentialFlowLayer` (§1, §3 above) with
-Hazen-Williams or Darcy-Weisbach pipes, `PumpCurve` and minor-loss elements, solved by the
-same batched, damped Newton iteration as every other potential layer in this codebase.
-Section 3's own table already says why: SWMM solves the sewer's full 1-D Saint-Venant
-equations (dynamic wave routing) with surcharging and reverse flow, "a genuinely dynamic
-(not quasi-steady) network" -- exactly why surcharge, backwater and dynamic-wave routing
-are OUT of scope here, and SWMM's KINWAVE (kinematic wave) routing, which shares the
-continuity-first assumption, is the comparison target rather than SWMM's own
-dynamic-wave engine.
+**Two sewer water sides, and the water-distribution side.** The sewer's kinematic-wave path is
+CONTINUITY-first. A gravity sewer runs free-surface: on the dendritic tree of section 1's own
+analysis, normal flow at every pipe is set by continuity alone -- the net inflow upstream of it
+(`cycles.particular_flow`, closed form on a tree, no Newton solve at all) -- and depth follows
+from Manning's law given that flow, not the other way round; a head difference does not drive the
+water there, so a potential layer on head is the wrong shape for it. The dynamic wave is the
+case where head differences do drive the flow, and there the sewer IS a potential layer on head.
+SWMM's dynamic-wave update (the Saint-Venant momentum equation integrated over a step) is, for
+frozen depth-dependent coefficients, linear in the end-head difference of each conduit,
+$q = c_0 + k\,(h_1 - h_2)$ with $k \ge 0$, and a junction's storage adds a monotone term in its
+own head, so one pass is an ordinary `PotentialFlowLayer` solve (§1, §3) with the outfalls as
+boundary heads. The coefficients depend on the heads, so the pass is iterated
+(`coupling="iterate"`) until the heads stop changing. SWMM's own Picard trials, which relax and
+average its iterates, and noodl's iterated implicit head solve share one fixed point: a state
+that reproduces its own coefficients and satisfies the conduit and junction equations. noodl
+converges to that fixed point and does not replay the trials (see the
+[sewer page](applications/sewer.md#dynamic-wave)). Conduits may form loops and may be flat or
+adverse, which the continuity-first path cannot represent.
 
-**The manhole-level storage idealisation, and what it is not.** With `storage=True`,
+**Surcharge as instantaneous continuity.** Above its crown a junction is pressurised: SWMM's
+EXTRAN update $y = y_{\text{last}} + \text{corr}\,\Delta Q/\text{denom}$ is converged exactly
+when the junction's net inflow $\Delta Q$ is zero, so a surcharged junction stores nothing and
+its balance is $\sum Q = 0$, an algebraic constraint in place of the storage term
+$A_s\,\Delta H/\Delta t$ (the correction factor and SWMM's blend only shape its trials). The
+conduits meanwhile cap their end depths at the crown and keep the heads driving a full
+conduit. The storage term is therefore non-smooth at the crown, switching from
+$A_s\,\Delta H/\Delta t$ to zero, but monotone in the head on each side, which is all the
+head solve needs. Flooding is the same device at $y_{\max}$: a wall in the head solve holds the
+junction at $y_{\max}$ and the excess leaves the network. The Preissmann slot (`SLOT`) is the
+smooth alternative: above $0.985\,y_{\text{full}}$ a conduit's top width follows Sjoberg's slot
+width, so the area above the crown grows as $a_{\text{full}} + (y - y_{\text{full}})\,w_{\text{slot}}$
+and the storage term stays smooth and positive, which is why SLOT needs no junction branch.
+
+**Tie rules.** Three of SWMM's switches have no fixed point on a band of states, because
+they test a quantity that the switched branch itself moves: SWMM's trials then alternate between
+the branches and it reports non-convergence. Each is replaced by a stiff in-pass switch that
+agrees with SWMM wherever SWMM has a fixed point and holds the state on the switching surface
+where it has none. (1) A junction at its crown, where the depth-only surcharge flag would
+chatter: a hold band keeps it at the crown while the net inflow needed lies inside the
+jump. (2) The normal-flow slope limit of a conduit, $q = \min(q_{\text{lin}}, \max(q_{\text{norm}},
+q_{\text{last}} + S\,(\Delta h - \Delta z)))$, which has a fixed point on the surface
+$y_1 = y_2$ between the two flows when a draining outfall conduit ties its end depths. (3) A
+junction filling through a drop end's surface-area threshold, where the area jumps with the
+junction's own depth: its withdrawal is $\max(w_{\text{lo}}, \min(w_{\text{hi}}, N_{\text{last}}
++ S\,(H - H^*)))$, so the junction sits on the threshold $H^*$ inside the jump. In each the
+wall slope $S$ shapes only the passes, and the fixed point does not depend on it. A gradient
+at such a state is that of the constrained solution; see the [sewer page](applications/sewer.md#intentional-differences-from-swmm)
+for the costs against SWMM.
+
+A pressurised water-distribution network is the opposite case to the kinematic-wave sewer, and
+exactly the framework's own: every pipe runs full, and head loss is a monotone function of the
+head difference at each pipe, pump and valve, so `noodl.apps.water` is an ordinary
+`PotentialFlowLayer` (§1, §3 above) with Hazen-Williams or Darcy-Weisbach pipes, `PumpCurve` and
+minor-loss elements, solved by the same batched, damped Newton iteration as every other
+potential layer in this codebase. Section 3's own table says why SWMM's dynamic-wave engine is
+the heavier comparison: it solves the sewer's full 1-D Saint-Venant equations with surcharging
+and reverse flow, "a genuinely dynamic (not quasi-steady) network". SWMM's KINWAVE routing, which
+shares the continuity-first assumption, is the comparison target for the kinematic-wave path and
+its live dynamic-wave runs for the dynamic-wave path.
+
+**The manhole-level storage idealisation, and what it is not.** On the kinematic-wave path, with `storage=True`,
 each manhole gets a surface area and a level advanced by implicit Euler,
 $A_s\, dH/dt = \sum \text{inflow} - Q_{\text{out}}(H)$, where $Q_{\text{out}}$ is read off the SAME Manning law as the
 quasi-steady case at depth $H$. This is a lumped storage-node approximation -- "the

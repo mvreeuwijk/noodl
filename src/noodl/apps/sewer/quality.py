@@ -87,18 +87,23 @@ def sulfide_rate(
 ) -> Tensor:
     """Pomeroy-Parkhurst ``d[S]/dt`` in kg m^-3 s^-1 (inputs in kg/m^3, SI, T in Celsius).
 
-    ``M' EBOD / R_h - m [S] (S0 V)^(3/8) / d_m``, both coefficients in m/h, so the whole
+    ``M' EBOD / R_h - m [S] (S0 |V|)^(3/8) / d_m``, both coefficients in m/h, so the whole
     expression is divided by 3600 to reach per-second. ``R_h`` and ``d_m`` are floored on
-    BOTH branches of their ``where``: a dry pipe generates and loses nothing.
+    BOTH branches of their ``where``: a dry pipe (``R_h = 0``) generates and loses nothing,
+    and a conduit flowing full (``d_m = A/T = 0``: no free surface) generates without the
+    loss term, its limit as the top width closes. The loss reads the speed ``|V|``: a
+    dynamic-wave conduit can carry its flow against its own direction.
     """
     theta = THETA ** (t_water_c - 20.0)
-    dry = (radius <= 0) | (depth <= 0)
+    dry = radius <= 0
+    closed = depth <= 0
     radius_safe = torch.where(dry, torch.ones_like(radius), radius)
-    depth_safe = torch.where(dry, torch.ones_like(depth), depth)
-    sv = torch.clamp(slope * velocity, min=0.0)
+    depth_safe = torch.where(closed, torch.ones_like(depth), depth)
+    sv = torch.clamp(slope * velocity.abs(), min=0.0)
     sv_safe = torch.where(sv <= 0, torch.zeros_like(sv) + 1e-300, sv)
     gen = m_prime * bod * theta / radius_safe
     loss = m_loss * sulfide * theta * sv_safe ** (3.0 / 8.0) / depth_safe
+    loss = torch.where(closed, torch.zeros_like(loss), loss)
     rate = (gen - loss) / 3600.0
     return torch.where(dry, torch.zeros_like(rate), rate)
 
@@ -212,13 +217,16 @@ class SulfideGeneration(Reaction):
     outgoing pipe. ``"sewer.q_slope"`` is ALREADY per manhole (the builder supplies it as a
     constant driver) and is NEVER gathered. When ``out_pipe`` is ``None`` every driver is
     used exactly as given -- the per-manhole vectors the direct unit tests hand in directly.
+
+    ``sulfide=None`` is BOD decay alone: it reads `T_water` only, never the hydraulic drivers
+    or ``out_pipe`` (a dynamic-wave junction need not have a unique outgoing conduit).
     """
 
     def __init__(
         self,
         *,
         bod: int = 0,
-        sulfide: int = 1,
+        sulfide: int | None = 1,
         m_prime: float = M_PRIME,
         m_loss: float = M_LOSS,
         k_bod: float = K_BOD,
@@ -227,7 +235,7 @@ class SulfideGeneration(Reaction):
         n_nodes: int | None = None,
     ) -> None:
         self.bod = int(bod)
-        self.sulfide = int(sulfide)
+        self.sulfide = None if sulfide is None else int(sulfide)
         self.m_prime = float(m_prime)
         self.m_loss = float(m_loss)
         self.k_bod = float(k_bod)
@@ -248,15 +256,18 @@ class SulfideGeneration(Reaction):
             return x
         drivers = drivers or {}
         n_species = x.shape[-1]
-        if not (0 <= self.bod < n_species) or not (0 <= self.sulfide < n_species):
+        if not (0 <= self.bod < n_species) or not (
+            self.sulfide is None or 0 <= self.sulfide < n_species
+        ):
             raise ValueError(
                 f"SulfideGeneration: species index bod={self.bod} sulfide={self.sulfide} "
                 f"out of range for a water_quality state with {n_species} species"
             )
-        radius = _gather(_need(drivers, "sewer.R_h"), self.out_pipe)
-        slope = _need(drivers, "sewer.q_slope")
-        velocity = _gather(_need(drivers, "sewer.v"), self.out_pipe)
-        depth = _gather(_need(drivers, "sewer.d_m"), self.out_pipe)
+        if self.sulfide is not None:
+            radius = _gather(_need(drivers, "sewer.R_h"), self.out_pipe)
+            slope = _need(drivers, "sewer.q_slope")
+            velocity = _gather(_need(drivers, "sewer.v"), self.out_pipe)
+            depth = _gather(_need(drivers, "sewer.d_m"), self.out_pipe)
         t_water = _need(drivers, "T_water")
         if self.manhole_idx is not None and self.n_nodes is not None:
             t_water = resolve_nodal_driver(
@@ -264,14 +275,15 @@ class SulfideGeneration(Reaction):
                 key="T_water", name="apps.sewer.SulfideGeneration",
             )
         bod = x[..., self.bod]
-        sulfide = x[..., self.sulfide]
-        d_sulfide = sulfide_rate(
-            bod, sulfide, t_water, radius, slope, velocity, depth,
-            m_prime=self.m_prime, m_loss=self.m_loss,
-        )
-        d_bod = bod_rate(bod, t_water, k_bod=self.k_bod)
         out = x.clone()
-        out[..., self.sulfide] = torch.clamp(sulfide + dt * d_sulfide, min=0.0)
+        if self.sulfide is not None:
+            sulfide = x[..., self.sulfide]
+            d_sulfide = sulfide_rate(
+                bod, sulfide, t_water, radius, slope, velocity, depth,
+                m_prime=self.m_prime, m_loss=self.m_loss,
+            )
+            out[..., self.sulfide] = torch.clamp(sulfide + dt * d_sulfide, min=0.0)
+        d_bod = bod_rate(bod, t_water, k_bod=self.k_bod)
         out[..., self.bod] = torch.clamp(bod + dt * d_bod, min=0.0)
         return out
 

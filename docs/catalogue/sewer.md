@@ -13,7 +13,7 @@ Build the model and its starting state and inputs.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `build_model` | Assemble the sewer model and return `(model, state, drivers)`. | `build_model(net, *, storage=False, air=True, quality=True, species=('bod', 'sulfide'), f_air=0.02, f_i=0.000749, c_s=1.0, leak_area=0.0008, leak_cd=0.6, fans=(), coupling='pingpong', scheme='implicit', dt_storage=None)` |
+| `build_model` | Assemble the sewer model and return `(model, state, drivers)`. | `build_model(net, *, storage=False, air=None, quality=None, species=('bod', 'sulfide'), f_air=0.02, f_i=0.000749, c_s=1.0, leak_area=0.0008, leak_cd=0.6, fans=(), coupling='pingpong', scheme='implicit', dt_storage=None, iterate_tol=None, iterate_max=None, outfall_stage=None)` |
 | `initial_drivers` | `build_model`'s driver template (copied), then `values` by name (see `noodl.refs.drivers_from`), e.g. by outfall and species name. | `initial_drivers(model, *, values=None)` |
 | `initial_state` | All-zero state, dispatching on each layer's `quantity` (the app convention). | `initial_state(model, drivers=None, *, values=None)` |
 
@@ -23,10 +23,14 @@ Descriptions of the physical objects a network is built from.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `Manhole` | A manhole: `invert` and `ground` elevations (m), a constant lateral `inflow` (m3/s) and, for storage, its `surface_area` (m2). | `Manhole(name, invert, ground=None, inflow=0.0, surface_area=None)` |
-| `Outfall` | An outfall, where the network discharges: its `invert` elevation (m). | `Outfall(name, invert)` |
-| `Pipe` | A conduit from manhole `u` to `v`: `length` and `diameter` (m), Manning's `n` and bed `slope` (m/m). | `Pipe(name, u, v, length, diameter, n, slope)` |
-| `SewerNetwork` | A dendritic gravity sewer: manholes, one outgoing pipe each, outfalls. | `SewerNetwork(manholes, pipes, outfalls, routing='KINWAVE', notes=<factory>, geometry='analytic')` |
+| `DynamicWaveOptions` | SWMM 5.2.4's dynamic-wave [OPTIONS] that change the physics, with SWMM's defaults (`project.c:841-880`). `head_tolerance` and `max_trials` are SWMM's own iteration controls: recorded so a file round-trips, never used -- noodl solves the same equations to `build_model`'s own `iterate_tol` (docs: "Dynamic wave"). | `DynamicWaveOptions(routing_step=20.0, inertial_damping='partial', normal_flow_limited='both', surcharge_method='extran', min_surface_area=None, head_tolerance=None, max_trials=None, variable_step=0.0, minimum_step=0.5, lengthening_step=0.0, lengthening_routing_step=None)` |
+| `Orifice` | An orifice (SWMM `[ORIFICES]`, dynamic wave only) from node `u` to node `v`: a ``"side"`` (vertical) or ``"bottom"`` (horizontal) opening of `shape` ``"circular"`` (`height` its diameter, m) or ``"rectangular"`` (`height` and `width`, m), its crest `crest_height` (m above `u`'s invert, SWMM's CrestHt), discharge coefficient `discharge_coefficient` (-, SWMM's Cd) and a `flap_gate` (closes on flow from `v` to `u`, with SWMM's ARMCO head loss on forward flow). Always fully open (no control rules). Flow follows `link.c::orifice_getInflow` (`noodl.apps.sewer.structures`). | `Orifice(name, u, v, orientation, shape, height, crest_height, discharge_coefficient, width=None, flap_gate=False)` |
+| `Weir` | A weir (SWMM `[WEIRS]`, dynamic wave only) from node `u` to node `v`. `kind` is ``"transverse"`` or ``"sideflow"`` (a rectangular opening `width` m wide), ``"v_notch"`` (a triangle `width` m wide at the top) or ``"trapezoidal"`` (bottom `width` m, `side_slopes` the left and right side slopes, horizontal per vertical); its opening is `height` m tall above the crest `crest_height` (m above `u`'s invert). `discharge_coefficient` is SWMM's Cd in SI units (m^0.5/s, the flow ``Cd L h^1.5``, ``Cd L^0.83 h^1.67`` sideflow, ``Cd s h^2.5`` V-notch, in m and m3/s), `end_discharge_coefficient` a trapezoid's end triangles' Cd (SWMM's Cd2), `end_contractions` the number of end contractions (SWMM's EndCon), `can_surcharge` SWMM's CanSurcharge (above the opening the weir flows as an orifice; else its head is capped at the opening height) and `flap_gate` as for `Orifice`. Always fully open. Flow follows `link.c::weir_getInflow` (`noodl.apps.sewer.structures`). | `Weir(name, u, v, kind, height, width, crest_height, discharge_coefficient, side_slopes=(0.0, 0.0), end_contractions=0.0, end_discharge_coefficient=0.0, can_surcharge=True, flap_gate=False)` |
+| `Outlet` | An outlet (SWMM `[OUTLETS]`, dynamic wave only) from node `u` to node `v`, its crest `crest_height` m above `u`'s invert, with a rating ``("functional", a, b)`` for ``q = a h^b`` (m3/s, h in m) or ``("tabular", heads, flows)`` (m, m3/s; SWMM's RATING curve, heads strictly increasing, held at the end flows outside them). `h` is the upstream depth above the crest (SWMM's /DEPTH, the default) or, with `head_difference`, the head across the outlet (/HEAD). `flap_gate` closes it on flow from `v` to `u`. Flow follows `link.c::outlet_getInflow` (`noodl.apps.sewer.structures`). | `Outlet(name, u, v, crest_height, rating, head_difference=False, flap_gate=False)` |
+| `Manhole` | A manhole: `invert` and `ground` elevations (m), a constant lateral `inflow` (m3/s), for storage its `surface_area` (m2), and SWMM's `surcharge_depth` (SurDepth, m >= 0): how far dynamic-wave routing lets the water rise above the full depth before the manhole floods (kinematic and steady routing ignore it). `initial_depth` is SWMM's InitDepth (m >= 0), the water depth the dynamic wave starts from (0 lets SWMM average the depths of the attached conduits, `DynamicWaveHydraulics.initial_state`). A `storage` curve makes it a SWMM storage unit (dynamic wave only). | `Manhole(name, invert, ground=None, inflow=0.0, surface_area=None, surcharge_depth=0.0, initial_depth=0.0, storage=None)` |
+| `Outfall` | An outfall, where the network discharges: its `invert` elevation (m). | `Outfall(name, invert, kind='free', stage=None, flap_gate=False, tide=None, series=None)` |
+| `Pipe` | A conduit from manhole `u` to `v`: `length` and `diameter` (m), Manning's `n` and bed `slope` (m/m). `inlet_offset` and `outlet_offset` (m) are the heights of the pipe invert above the invert of its `u` and `v` node (SWMM's link offsets). | `Pipe(name, u, v, length, diameter, n, slope, inlet_offset=0.0, outlet_offset=0.0, barrels=1, max_flow=None, initial_flow=0.0, flap_gate=False, flap_gate_reversed=False)` |
+| `SewerNetwork` | A gravity sewer: manholes, pipes, outfalls. Kinematic-wave and steady routing need a dendritic network (one outgoing pipe per manhole); dynamic-wave routing allows loops and flat pipes. | `SewerNetwork(manholes, pipes, outfalls, routing='kinematic_wave', notes=<factory>, geometry='analytic', dynamic_wave=DynamicWaveOptions(routing_step=20.0, inertial_damping='partial', normal_flow_limited='both', surcharge_method='extran', min_surface_area=None, head_tolerance=None, max_trials=None, variable_step=0.0, minimum_step=0.5, lengthening_step=0.0, lengthening_routing_step=None), orifices=(), weirs=(), outlets=())` |
 
 ## Elements (branch laws)
 
@@ -34,6 +38,8 @@ Flow through an edge as a function of the potential difference across it.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `DynamicWaveConduit` | SWMM's dynamic-wave conduit (`dwflow.c`) with its coefficients frozen for one pass. | `DynamicWaveConduit(kind='pipe')` |
+| `StructureLink` | A flow regulator (orifice, weir or outlet) with its flow linearised about the previous pass: ``q = c0 + g (dp - dp_fed)`` (m3/s, dp = H1 - H2 in m), then the flap gate's clamp. | `StructureLink(kind)` |
 | `Headspace` | ``dp = R \|Q\| Q`` on a headspace edge, with ``R`` read from per-edge drivers. | `Headspace(length, pipe_positions, *, f_air=0.02, rho_air=1.2041, area_key='sewer.A_air', dh_key='sewer.D_h', dp_transition=1e-08, kind='headspace', learnable=False)` |
 
 ## Drives
@@ -50,6 +56,7 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `DynamicWaveHydraulics` | The dynamic-wave closure: the conduit coefficients, junction surface areas and outfall heads of one pass, from the previous pass's heads and flows. | `DynamicWaveHydraulics(graph, net, *, layer='water', quality_layer=None, air=False, air_quality_layer='air_quality')` |
 | `H2STransfer` | Two-film water-to-air H2S transfer, as a `Model` closure. | `H2STransfer(n_nodes, manhole_idx, *, sulfide=1, water_layer='water_quality', air_layer='air_quality', out_pipe=None)` |
 | `SewerHydraulics` | The water side of a sewer, as a `Model` closure. | `SewerHydraulics(net, pipes, manholes, *, storage=False, dt=None, quality_layer='water_quality', air_quality_layer='air_quality', shaft_depth=None, surface_area=None, geometry='analytic', name='sewer')` |
 
@@ -59,7 +66,16 @@ Transformations applied to transported species each step.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `OverflowLoss` | The contents a flooded junction loses with its overflow (a dynamic-wave quality reaction). | `OverflowLoss(n_species, layer='water_quality')` |
 | `SulfideGeneration` | Operator-split Pomeroy-Parkhurst sulfide generation and bulk BOD decay. | `SulfideGeneration(*, bod=0, sulfide=1, m_prime=0.00032, m_loss=0.64, k_bod=0.2, out_pipe=None, manhole_idx=None, n_nodes=None)` |
+
+## Sources
+
+Nodal sources and withdrawals.
+
+| Name | What it does | How to call it |
+|---|---|---|
+| `JunctionStorage` | SWMM's junction continuity as a node withdrawal: trapezoidal storage over the step, with a stiff bed below the invert, or no storage at all where the junction is EXTRAN-surcharged, capped by flooding at the junction's top. | `JunctionStorage(nodes, bed, bed_area, crown=None, top=None, surchargeable=None)` |
 
 ## Files
 
@@ -69,19 +85,31 @@ Readers and writers of other tools' file formats.
 |---|---|---|
 | `read_swmm_inp` | `(network, {node: {pollutant: kg/m3}}, {pollutant: {...}})` for `path`. | `read_swmm_inp(path, *, geometry='tabulated')` |
 
+## Other classes
+
+Supporting types.
+
+| Name | What it does | How to call it |
+|---|---|---|
+| `StorageCurves` | The storage area (m2) and volume (m3) of every junction as functions of its depth (m), vectorised over the junctions (no per-junction loop on a pass); a junction with no curve (``None``) has neither. `full_depth` (m, per junction) caps the volume (node.c:943-945); a curve whose full volume is negative is refused by name with `names` (node.c:219-222). | `StorageCurves(curves, full_depth, names=None)` |
+
 ## Functions
 
 Calculations and helpers.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `build_dynamic_wave_model` | Assemble a dynamic-wave sewer and return ``(model, state, drivers)``. | `build_dynamic_wave_model(net, *, iterate_tol=1e-11, iterate_max=2000, relaxation=0.5, acceleration='anderson', memory=5, iterate_flow_tol=1e-10, outfall_stage=None, quality=False, species=('bod', 'sulfide'), scheme='implicit', air=False, f_air=0.02, f_i=0.000749, c_s=1.0, leak_area=0.0008, leak_cd=0.6, fans=())` |
+| `simulate_dynamic_wave` | Run the dynamic wave from `state` for `steps` steps, or for `duration` s. | `simulate_dynamic_wave(model, state, drivers, *, steps=None, duration=None, dt=None, inflow=None, outfall_stage=None, record=('water.phi', 'water.q'), diagnostics=None, **solve_kwargs)` |
+| `tidal_stage` | A TIDAL outfall's stage elevation (m) `t` s into the run (`node.c:: outfall_setOutletDepth`, node.c:1445-1452): the curve `tide` of ``(hour, stage)`` pairs is read at ``x = x_first + 24 frac(t / 1 day)`` (the elapsed time, not the clock time: the simulation's start is not added, so the tide begins at the curve's first hour and repeats every 24 h), by `table.c::table_lookup`: the first stage at or below the first hour, linear between entries, the last stage beyond the last hour (the curve is not wrapped, so one that stops short of 24 h holds its last stage). | `tidal_stage(tide, t)` |
+| `storage_unit` | A SWMM storage unit (`[STORAGE]`) as a `Manhole` with a `storage` curve: `invert` (m), `max_depth` (SWMM's MaxDepth, m >= 0: the manhole's ground is ``invert + max_depth``), the surface-area `curve` (`Manhole.storage`), SWMM's SurDepth `surcharge_depth` (m) and InitDepth `initial_depth` (m), and a constant lateral `inflow` (m3/s). Tabular depths and areas are stored as tuples (the manhole is hashable). | `storage_unit(name, invert, max_depth, curve, *, surcharge_depth=0.0, initial_depth=0.0, inflow=0.0)` |
 | `air_geometry` | ``(A_air, P_air, D_h)`` for the headspace above the water surface. | `air_geometry(h, diameter)` |
 | `capacity_flow` | ``Q_max = Q(H_MAX_RATIO D)``: the largest discharge the ascending Manning branch carries, and the surcharge threshold. | `capacity_flow(diameter, roughness, slope)` |
 | `henry_h2s` | Dimensionless Henry constant ``H = C_gas / C_liquid`` at absolute temperature (K). | `henry_h2s(temperature)` |
 | `kla_h2s` | ``K_L a`` in 1/s from the per-hour correlation ``a (1 + b Fr^2)(S0 V)^(3/8)/d_m``. | `kla_h2s(slope, velocity, depth, *, a=0.86, b=0.2)` |
 | `manning_flow` | Manning discharge ``Q = (1/n) A R^(2/3) sqrt(S0)`` (m^3/s), SI constant 1.0. | `manning_flow(h, diameter, roughness, slope)` |
 | `normal_depth` | Manning normal depth (m) for discharge ``q``, batched over pipes and instances. | `normal_depth(q, diameter, roughness, slope, *, names=None, tol=1e-14)` |
-| `pipe_table` | One row per pipe of every quantity `SewerHydraulics` publishes; optionally to CSV. | `pipe_table(model, state, drivers, *, path=None)` |
+| `pipe_table` | One row per pipe of every quantity the hydraulics closure publishes (the model's `pipe_columns` when it declares them, as a dynamic-wave model does); optionally to CSV. | `pipe_table(model, state, drivers, *, path=None)` |
 | `sewer_steady` | The explicit fixed point of transport PLUS reactions (the `street_steady` pattern). | `sewer_steady(model, state, drivers, *, reaction=None, dt=60.0, max_iter=500, tol=1e-12)` |
 | `to_mg_per_litre` | kg/m3 -> mg/L (the factor is exactly 1e3). | `to_mg_per_litre(x)` |
 | `to_ppm` | kg/m3 of headspace H2S -> ppm by volume at the headspace temperature (K). | `to_ppm(concentration, temperature)` |
@@ -93,6 +121,8 @@ Named values and option tables.
 
 | Name | Value |
 |---|---|
+| `ROUTING_ALIASES` | table of 3 entries: `STEADY`, `KINWAVE`, `DYNWAVE` |
+| `STORAGE_SHAPES` | 6 names: `functional`, `tabular`, `cylindrical`, `conical`, `paraboloid`, `pyramidal` |
 | `F_AIR_DEFAULT` | `0.02` |
 | `F_I_DEFAULT` | `0.000749` |
 | `H_MAX_RATIO` | `0.938` |
