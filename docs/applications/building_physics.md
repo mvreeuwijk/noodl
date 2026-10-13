@@ -238,8 +238,9 @@ Only these balanced flows touch the plenums, so the airflow solve does not need 
 pressure: `build_model(flow_balanced=plenums)` puts them on the air layer's boundary at zero
 gauge pressure, while they stay ordinary nodes of the heat and species layers. An edge whose
 element depends on the pressure (a leak into a plenum, say) would let a pinned plenum absorb
-an imbalance unseen, so `build_model` refuses one on a `flow_balanced` node, naming the node
-and the edge; CONTAM, too, joins only the air handler's own paths to its plenums. They are
+an imbalance unseen, and a fixed flow lies outside the air handler's balance, so
+`build_model` refuses any edge but a `PrescribedFlow` on a `flow_balanced` node, naming the
+node and the edge; CONTAM, too, joins only the air handler's own paths to its plenums. They are
 well-mixed nodes with air mass $\rho V$. A plenum of zero volume (CONTAM's default) holds no
 air and must also be named in `storage_free=`: its balance is then algebraic, the mix of what
 flows in, and the heat and species layers use the implicit scheme (`build_model` selects it
@@ -292,6 +293,38 @@ The flows are in edge order: supply, return, recirculation, outdoor air, exhaust
 exchanges 0.03 kg/s with the outdoor air through the air handler. The zero-volume return
 plenum is at the office's value, and the supply plenum at the mix, 0.3 of the outdoor air plus
 0.7 of the returned air.
+
+From a `.prj`: `read_prj` reads CONTAM's simple air-handling systems (see
+[CONTAM](../formats/contam.md)) into the same edges, one kind per system (`ahs_<nr>`), with
+its closure in `project.closures`, its plenum zones in `project.flow_balanced` and the
+zero-volume ones in `project.storage_free`; `project_to_model` passes all three on. The
+supply and return points carry their design flows, and their schedules become
+`"flow_multiplier.ahs_<nr>"` inputs. The outdoor-air fraction schedule and the minimum
+outdoor-air flow are read from the recirculation path, where ContamX reads them. Filters on
+any of the system's paths act on the air passing through, as on any path.
+`ahs_three_zone.prj` supplies zones one (0.1 kg/s) and two (0.05 kg/s) and draws 0.12 kg/s
+from zone three, with 30 % outdoor air and a minimum of 0.02 kg/s; its return plenum has no
+volume:
+
+```python
+from noodl.apps.building_physics import project_to_model, read_prj
+from noodl.apps.building_physics.prj import steady
+
+project = read_prj("ahs_three_zone.prj")
+print(project.flow_balanced, project.storage_free)
+model, state, drivers = project_to_model(project)
+solved = steady(model, state, drivers)
+print([round(v, 3) for v in project.path_flows(solved["air.q"])[4:].tolist()], "kg/s")
+```
+
+```text
+['ahs(Ret)', 'ahs(Sup)'] ['ahs(Ret)']
+[0.1, 0.05, 0.12, 0.105, 0.045, 0.015] kg/s
+```
+
+Paths 5 to 10 are the two supply points, the return point, the recirculation, the outdoor air
+and the exhaust: 30 % of the 0.15 kg/s supplied is 0.045 kg/s of outdoor air, and the
+0.12 kg/s returned splits into 0.105 kg/s recirculated and 0.015 kg/s exhausted.
 
 ## Building from components
 
@@ -911,6 +944,8 @@ above 0.1 % of the largest.
 | One-zone stack with a pressure-driven source, 288 steps | flow rel 64 $u$, mf rel 88 $u$, floor 64 $u$ × each species' max | **4.5e-8** flow, **7.4e-8** mf |
 | Three-zone project with a fan curve (mult 1.5) on a speed schedule 1, 0.8, off (its shut-off orifice) and 1.2, 24 steps | flow rel 32 $u$, mf rel 64 $u$, floor 64 $u$ × each species' max | **1.6e-7** flow, **5.8e-8** mf |
 | Three-zone project with a duct network (wind terminal, filtered Darcy-Colebrook duct, fan curve on a speed schedule, vertical rise, split to two terminals, one half closed from 01:00, damper and constant-volume exhaust), 24 steps | flow rel 64 $u$, mf rel 72 $u$, floor 64 $u$ × each species' max | **1.4e-7** flow, **1.0e-8** terminal flow, **5.4e-8** mf |
+| Three-zone project with a simple air-handling system (zero-volume return and 2 m³ supply plenum, two supply points, one halved from 00:30, a filtered return point, outdoor-air fraction 0.3 then 0.6 from 01:00, minimum outdoor air 0.02 kg/s, filtered recirculation and outdoor air), 24 steps | flow rel 32 $u$, mf rel 72 $u$, floor 64 $u$ × each species' max | **7.9e-7** flow (2 % of the allowance), **3.7e-7** mf |
+| NIST's `test_GetPrjInfo.prj` without its controls and duct leakage: two air-handling systems with zero-volume plenums (all outdoor air) and two fan-driven duct systems, 12 steps (noodl physics' Newton at 1e-12 kg/s, the float64 floor of its 28 kg/(s Pa) terminals) | flow rel 64 $u$, mf rel 72 $u$, floor 64 $u$ × each species' max | **1.1e-7** flow, **3.6e-8** terminal flow, **1.0e-7** mf |
 | Three-zone project with the four cubic-spline elements (one crossed against its declared direction, zone two at 303.15 K, a 0.02 kg/s supply), 24 steps | flow rel 32 $u$, mf rel 64 $u$, floor 64 $u$ × each species' max | **1.1e-8** flow, **2.7e-8** mf |
 
 Sinks and the concentration-proportional parts of sources are implicit in ContamX's species

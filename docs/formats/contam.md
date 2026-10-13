@@ -44,10 +44,18 @@ coefficients (the duct-balancing data `bal`, `Fdes` and `Cbmax` is read and, as 
 has no effect), filters, schedules (the opening, or the junction temperature when the week
 schedule's unit type is a temperature) and wind (an ambient terminal whose flags carry the value 1, from
 its profile or a constant wind pressure); segments with their dynamic losses, filters and
-schedules (a flow multiplier, or a fan's speed ratio).
+schedules (a flow multiplier, or a fan's speed ratio); simple air-handling systems
+(`Project.closures`, one `AirHandlerFlows` per system, on the edge kind `ahs_<nr>`): their
+plenum zones (zero gauge pressure in the airflow solve, `Project.flow_balanced`; storage-free
+when their volume is 0, `Project.storage_free`), supply and return points with their design
+flows, schedules (on `"flow_multiplier.ahs_<nr>"`) and filters, the recirculation,
+outdoor-air and exhaust paths with their filters, the outdoor-air fraction schedule (on
+`"outdoor_air_fraction.ahs_<nr>"`) and the minimum outdoor-air flow (both read from the
+recirculation path, as ContamX reads them; ContamX finds the implicit paths by their flags,
+not by the numbers in the AHS record, which noodl checks against them).
 
-**Refused by name**, rather than silently dropped: control nodes and air-handling
-systems referenced by nonzero index; simple air-handling systems; boundary-layer diffusion (`bls`), resuspension (`dvr`)
+**Refused by name**, rather than silently dropped: control nodes referenced by nonzero
+index; boundary-layer diffusion (`bls`), resuspension (`dvr`)
 and super (`sup`) source/sink elements, when a source/sink record references one; a source/sink
 record whose element or zone the file does not define; gaseous (`gf0`) and UVGI (`uv1`) filter elements,
 referenced or not; a filter that names a species the project does not simulate (when a path
@@ -60,7 +68,8 @@ file does not define; a schedule
 number that no week schedule carries; a schedule on an `eds`,
 `brs`, `plm` or `pkm` source (CONTAM triggers these once, at the schedule's first nonzero
 value); a zone without the variable-pressure flag (which
-ContamX holds at constant pressure) or, in a project with species, without the
+ContamX holds at constant pressure), unless an air-handling system names it as a plenum, or,
+in a project with species, without the
 variable-contaminants flag (ContamX then holds the zone's concentrations at their initial values
 and ignores its sources); CFD and 1-D convection/diffusion zones; continuous-values-file
 zones and paths; duct leakage (a duct element's leakage rate); a schedule on a
@@ -70,7 +79,14 @@ an ambient terminal whose flags carry the value 1; a junction type other than 0 
 1 or 3 (terminal); a non-temperature schedule on a junction that is not a terminal; a junction
 that no segment or terminal reaches; initial-concentration rows for a zone or junction the
 file does not define; a duct network with `densZP = 1` or `dodMdt = 1` (the junctions' air mass under
-either is unmeasured); airflow modes other than steady and transient
+either is unmeasured); an air-handling system record that disagrees with its paths' flags and
+endpoints, implicit air-handling paths that are not the last paths (ContamX takes them by
+position and mis-assigns them otherwise), a schedule or a flow on an outdoor-air or exhaust
+path or a `mult` on a supply or return point (ContamX ignores them), a flow element or a wind
+pressure on an air-handling path, a kinetic reaction in a zero-volume plenum, any other path
+or duct terminal joined to a plenum (only the air handler's own flows may touch it), an
+air-handling system with `densZP = 1`, and a steady contaminant run with an air handler off
+(nothing passing through a plenum); airflow modes other than steady and transient
 (duct balancing, the building airflow and pressurization tests); a constant wind pressure on
 an interior path; `sup_afe` super elements (ContamX 3.4.1.7 cannot simulate them); `stackD = 1` (densities varying with
 height inside a zone); a wind pressure profile with the trigonometric curve fit; a day schedule whose shape is

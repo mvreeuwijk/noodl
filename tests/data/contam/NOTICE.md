@@ -76,3 +76,14 @@ Two of NIST's one-zone stack projects are present:
   303.15 K. Sarin outdoors at 1e-3 kg/kg; two hours at 300 s. Verified to load and run in
   ContamX 3.4.1.7; an independent model built from the measured duct rules reproduces its
   first-step flows to 1.9e-6.
+- `ahs_three_zone.prj` is written for this repository from NIST's
+  `valThreeZonesWthCtm-UseApi.prj`, not an official sample. It adds a simple air-handling
+  system: a zero-volume return plenum and a 2 m3 supply plenum, supply points to zones one
+  (0.1 kg/s, halved from 00:30) and two (0.05 kg/s), a filtered return point from zone
+  three (0.12 kg/s), and the implicit recirculation (outdoor-air fraction 0.3, 0.6 from
+  01:00, minimum 0.02 kg/s; filtered), outdoor-air (filtered) and exhaust paths. Sarin
+  outdoors at 1e-3 kg/kg; two hours at 300 s. Verified to load and run in ContamX 3.4.1.7.
+- `test_GetPrjInfo.prj` is NIST's own sample from the `contamxpy` 0.0.9 sdist
+  (`demo_files/`), unchanged: two simple AHS with zero-volume plenums and two duct systems.
+  As written it is refused (its duct elements leak, and zone 1 and segment 4 reference
+  control nodes); the parity test runs a copy with those removed.

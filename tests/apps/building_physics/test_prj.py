@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from noodl.apps.building_physics.air_handling import AirHandlerFlows
 from noodl.apps.building_physics.filters import (
     ConstantEfficiencyFilter,
     FilterSeries,
@@ -45,6 +46,7 @@ from noodl.elements import (
     DuctTerminal,
     FixedFlow,
     FixedVolumeFlow,
+    PrescribedFlow,
     Scaled,
     UpstreamDensityPowerLaw,
 )
@@ -1375,3 +1377,164 @@ def test_a_junction_no_segment_or_terminal_reaches_is_refused_by_name(tmp_path):
     ], tmp_path))
     with pytest.raises(ValueError, match=r"\['junction 10'\] carry no airflow path"):
         project_to_model(p)
+
+
+AHS = DATA / "ahs_three_zone.prj"
+NIST_AHS = DATA / "test_GetPrjInfo.prj"
+
+
+def test_a_simple_ahs_becomes_plenums_prescribed_flows_and_its_closure():
+    p = read_prj(AHS)
+    (element,) = [e for e in p.elements if isinstance(e, PrescribedFlow)]
+    assert element.kind == "ahs_1"
+    (closure,) = p.closures
+    assert isinstance(closure, AirHandlerFlows)
+    assert closure.roles.tolist() == [0, 0, 1, 2, 3, 4]
+    assert closure.design_flows.tolist() == pytest.approx([0.1, 0.05, 0.12, 0, 0, 0])
+    assert closure.min_outdoor_air == pytest.approx(0.02)
+    assert p.flow_balanced == ["ahs(Ret)", "ahs(Sup)"]
+    assert p.storage_free == ["ahs(Ret)"]                     # the 0 m3 plenum
+    assert p.air_handler_edges == {"ahs_1": 6}
+    assert p.multiplier_edges == {}                          # the closure applies them
+    keys = sorted((i.key, i.index) for i in p.inputs)
+    assert ("flow_multiplier.ahs_1", (0,)) in keys            # supply point to zone one
+    assert ("outdoor_air_fraction.ahs_1", None) in keys
+    assert len(p.edge_filters) == 3                           # return, recirculation, OA
+    assert [x.flags for x in p.paths[4:]] == [8, 8, 8, 16, 32, 64]
+    assert [x.ahs_nr for x in p.paths[4:]] == [1, 1, 1, 0, 0, 0]
+    assert p.paths[7].design_flow == pytest.approx(0.02)
+
+
+def test_the_ahs_model_solves_with_its_plenums_on_the_boundary():
+    p = read_prj(AHS)
+    model, state, drivers = project_to_model(p)
+    out = prj_steady(model, state, drivers)
+    flows = p.path_flows(out["air.q"])
+    torch.testing.assert_close(flows[4:], torch.tensor([0.1, 0.05, 0.12, 0.105, 0.045,
+                                                        0.015], dtype=F64),
+                               rtol=1e-12, atol=1e-15)
+    assert drivers["air.phi_boundary"].shape == (3,)
+    assert drivers["flow_multiplier.ahs_1"].shape == (6,)
+    assert {"flow_multiplier.ahs_1", "outdoor_air_fraction.ahs_1"} <= set(model.refs.inputs)
+    # The plenums are ordinary species nodes; the zero-volume one holds no air.
+    species = model.transport["species"]
+    rows = species.interior_idx.tolist()
+    free = species.storage_free_mask.tolist()
+    assert free[rows.index(p.net.node_index("ahs(Ret)"))]
+    assert not free[rows.index(p.net.node_index("ahs(Sup)"))]
+
+
+def test_ahs_records_contamx_mishandles_or_ignores_are_refused(tmp_path):
+    text = AHS.read_text()
+    with pytest.raises(ValueError, match=r"AHS 1.*path 9.*recirculation"):
+        read_prj(_variant(text, "  1   4   5   8   9  10 -1 ahs",
+                          "  1   4   5   9   8  10 -1 ahs", tmp_path))
+    oa = "   9   32  -1   5   0   2   0   0   0   0   1"
+    with pytest.raises(ValueError, match=r"path 9.*schedule.*ignores"):
+        read_prj(_variant(text, oa, "   9   32  -1   5   0   2   0   0   1   0   1",
+                          tmp_path))
+    sup = "   5    8   5   1   0   0   0   1   2   0   1   0.000   0.000   0.000 1 0"
+    with pytest.raises(ValueError, match=r"path 5.*mult.*ignores"):
+        read_prj(_variant(text, sup, sup[:-3] + "2 0", tmp_path))
+
+
+def test_implicit_paths_before_other_paths_are_refused(tmp_path):
+    """ContamX takes the implicit paths by position; ContamW writes them last."""
+    text = AHS.read_text()
+    lines = text.splitlines(keepends=True)
+    i = next(k for k, ln in enumerate(lines) if ln.startswith("  10   64"))
+    j = next(k for k, ln in enumerate(lines) if ln.startswith("   5    8"))
+    lines.insert(j, lines.pop(i))
+    variant = tmp_path / "ahs_order.prj"
+    variant.write_text("".join(lines))
+    with pytest.raises(ValueError, match=r"implicit.*after every other path"):
+        read_prj(variant)
+
+
+def test_nist_s_ahs_sample_is_refused_for_its_duct_leakage():
+    """Its duct elements leak (Qr = 0.5); zone 1 and segment 4 also reference control
+    nodes. The parity test runs a copy without them."""
+    with pytest.raises(ValueError, match=r"duct element 1.*leakage"):
+        read_prj(NIST_AHS)
+
+
+_ZONE3 = "   3  3   0   0   0   1   0.000   900 293.15 0 three"
+_RETURN_PLENUM = "   4 10   0   0   0   1   0.000   0 293.15 0 ahs(Ret)"
+_DENSITY_OPTIONS = "   0    0.75    20     1      0      0      0"
+
+
+def test_only_ahs_plenums_may_lack_the_variable_pressure_bit(tmp_path):
+    """The plenum zones (flags 10) are accepted because the AHS record names them; any
+    other zone without the bit is still refused, after both sections are read."""
+    text = AHS.read_text()
+    assert read_prj(AHS).zone_flags["ahs(Ret)"] == 10
+    with pytest.raises(ValueError, match=r"zone 3 \('three'\).*flags 10.*variable-pressure"):
+        read_prj(_variant(text, _ZONE3, _ZONE3.replace("   3  3", "   3 10", 1), tmp_path))
+    no_ahs = _variant(THREE.read_text(), "   1  3   0", "   1 10   0", tmp_path)
+    with pytest.raises(ValueError, match=r"zone 1 \('one'\).*flags 10.*variable-pressure"):
+        read_prj(no_ahs)
+
+
+def test_an_ahs_with_zone_pressure_densities_is_refused(tmp_path):
+    variant = _variant(AHS.read_text(), _DENSITY_OPTIONS,
+                       "   0    0.75    20     1      1      0      0", tmp_path)
+    with pytest.raises(ValueError, match=r"densZP = 1.*air-handling"):
+        read_prj(variant)
+
+
+def test_a_reaction_in_a_zero_volume_plenum_is_refused(tmp_path):
+    variant = _variants(AHS.read_text(), [
+        ("0 ! kinetic reactions:\n-999", "1 ! kinetic reactions:\n1 1 decay\n\n"
+                                         "sarin sarin -0.001\n-999"),
+        (_RETURN_PLENUM, _RETURN_PLENUM.replace("10   0   0   0", "10   0   0   1", 1)),
+    ], tmp_path)
+    with pytest.raises(ValueError, match=r"zone 4 .*zero-volume AHS plenum.*kinetic reaction"):
+        read_prj(variant)
+
+
+def test_ahs_paths_with_an_element_or_wind_are_refused(tmp_path):
+    text = AHS.read_text()
+    oa = "   9   32  -1   5   0   2   0   0   0   0   1"
+    with pytest.raises(ValueError, match=r"path 9 .*AHS.*flow element 1"):
+        read_prj(_variant(text, oa, "   9   32  -1   5   1   2   0   0   0   0   1", tmp_path))
+    with pytest.raises(ValueError, match=r"path 9 .*AHS.*wind"):
+        read_prj(_variant(text, oa, "   9   32  -1   5   0   2   1   0   0   0   1", tmp_path))
+
+
+def test_a_leak_into_an_ahs_plenum_is_refused(tmp_path):
+    """A plenum's pressure is not solved, so only the AHS's own flows may touch it."""
+    p1 = "   1    1  -1   1   3   0   3   0   0   0   1"
+    variant = _variant(AHS.read_text(), p1, "   1    1  -1   5   3   0   3   0   0   0   1",
+                       tmp_path)
+    with pytest.raises(ValueError, match=r"'ahs\(Sup\)'.*'ambient' -> 'ahs\(Sup\)'.*pl_3"):
+        project_to_model(read_prj(variant))
+
+
+def test_the_plenums_carry_no_zone_air_mass_change(tmp_path):
+    """With dodMdt = 1 the zones' air-mass change enters the balance, but not at a plenum,
+    whose pressure is not solved; the 2 m3 supply plenum keeps its air mass as a species
+    node."""
+    from noodl.apps.building_physics.prj import ZoneAirMassChange
+
+    p = read_prj(_variant(AHS.read_text(), _DENSITY_OPTIONS,
+                          "   0    0.75    20     1      0      0      1", tmp_path))
+    model, state, drivers = project_to_model(p)
+    (source,) = [s for s in model.potential["air"].node_sources
+                 if isinstance(s, ZoneAirMassChange)]
+    assert sorted(p.net.nodes[i] for i in source.nodes.tolist()) == ["one", "three", "two"]
+
+
+def test_a_steady_contaminant_run_with_the_ahs_off_is_refused(tmp_path):
+    """A plenum with nothing passing through it holds its value; a steady solve has no
+    value to give it (ContamX's behaviour there was not measured)."""
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    sup1 = "   5    8   5   1   0   0   0   1   2   0   1   0.000   0.000   0.000 1 0 0 0 0.1"
+    sup2 = "   6    8   5   2   0   0   0   1   0   0   1   0.000   0.000   0.000 1 0 0 0 0.05"
+    variant = _variants(AHS.read_text(), [
+        ("     1      1     30   1e-05", "     0      1     30   1e-05"),
+        ("    2             30  1.00e-04", "    1             30  1.00e-04"),
+        (sup1, sup1[:-3] + "0"), (sup2, sup2[:-4] + "0"),
+    ], tmp_path)
+    with pytest.raises(ValueError, match=r"AHS 1.*no flow.*steady contaminant"):
+        simulate_project(read_prj(variant))

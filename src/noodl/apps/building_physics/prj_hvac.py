@@ -1,8 +1,11 @@
-"""CONTAM `.prj` sections for duct networks (11 duct elements, 17 junctions, 18 junction
-concentrations, 19 segments): the records, their readers, and the builder that adds them to
-the network `prj._build` assembles. Field positions are listed in RECORD LAYOUTS below; they
-follow TN 1887r1 Appendix A and were checked by loading `tests/data/contam/duct_three_zone.prj`
-in ContamX 3.4.1.7, whose flows the built network reproduces.
+"""CONTAM `.prj` sections for mechanical ventilation: simple air-handling systems (section
+13, with their supply and return points and implicit paths among the airflow paths) and duct
+networks (11 duct elements, 17 junctions, 18 junction concentrations, 19 segments): the
+records, their readers, and the builder that adds the ducts to the network `prj._build`
+assembles. Field positions are listed in RECORD LAYOUTS below; they follow TN 1887r1 Appendix
+A and were checked by loading `tests/data/contam/duct_three_zone.prj` and
+`tests/data/contam/ahs_three_zone.prj` in ContamX 3.4.1.7, whose flows the built networks
+reproduce.
 """
 
 from __future__ import annotations
@@ -13,6 +16,13 @@ from dataclasses import dataclass, field
 
 import torch
 
+from noodl.apps.building_physics.air_handling import (
+    EXHAUST,
+    OUTDOOR_AIR,
+    RECIRCULATION,
+    RETURN,
+    SUPPLY,
+)
 from noodl.apps.building_physics.inputs import Input
 from noodl.apps.building_physics.thermal import RHO_0
 from noodl.drives import ConstantDrive, DuctStack, Stack, Wind
@@ -57,6 +67,18 @@ TEMPERATURE_UNITS = 5          # ContamW's unit type of a temperature schedule
 #   segment       17 fields `nr flags n# m# e# f# s# c# dir len Ain Aout sllc clr u_L u_A
 #                 vf`: from junction n# to m#, duct element e#, filter, schedule, control,
 #                 length (m), sum of dynamic loss coefficients. Ain/Aout are not used.
+#   simple AHS    `nr zr zs pr ps px clr name`, then a description line: the return and
+#                 supply plenum zones and the recirculation, outdoor-air and exhaust path
+#                 numbers. ContamX ignores the path and zone numbers (measured): it finds the
+#                 implicit paths by their path flags, 16 recirculation (return -> supply
+#                 plenum), 32 outdoor air (ambient -> supply plenum), 64 exhaust (return
+#                 plenum -> ambient), and by position (ContamW writes them after every other
+#                 path). A supply or return point is a path with flag 8 and `pa` = the AHS
+#                 number; its `Fahs` (path field 18) is its design mass flow (kg/s), its
+#                 schedule multiplies it and its `mult` is ignored. The recirculation path's
+#                 schedule is the outdoor-air fraction and its `Fahs` the minimum outdoor-air
+#                 flow; a schedule or `Fahs` on the outdoor-air or exhaust path is ignored.
+#                 The plenum zones carry flags 10 (no variable-pressure bit).
 # --------------------------------------------------------------------------------------
 
 _DUCT_SPLINES = {"dct_fsp", "dct_qsp", "dct_psf", "dct_psq"}
@@ -403,3 +425,83 @@ def _build_terminals(ctx: BuildContext, junctions: list[JunctionRecord],
     if any(wind_pressure):
         ctx.constant_wind_pressure[TERMINAL_KIND] = torch.tensor(wind_pressure, dtype=F64)
         ctx.drives.append(ConstantDrive(TERMINAL_KIND, f"wind_pressure.{TERMINAL_KIND}"))
+
+
+@dataclass
+class AirHandlerRecord:
+    nr: int
+    return_zone: int
+    supply_zone: int
+    recirculation: int               # path numbers
+    outdoor_air: int
+    exhaust: int
+    name: str
+
+
+def read_air_handlers(lines, count: int, out: list[AirHandlerRecord]) -> None:
+    for k in range(count):
+        tok = _record(lines, "simple AHS", count, k)
+        nr, zr, zs, pr, ps, px = (int(v) for v in tok[:6])
+        out.append(AirHandlerRecord(nr, zr, zs, pr, ps, px, tok[-1] if len(tok) > 6 else ""))
+        lines.raw()                                 # description (may be blank)
+    lines.expect_end("simple AHS")
+
+
+SUPPLY_OR_RETURN_FLAG = 8
+_IMPLICIT = ((16, RECIRCULATION, "recirculation"), (32, OUTDOOR_AIR, "outdoor-air"),
+             (64, EXHAUST, "exhaust"))
+_IMPLICIT_FLAGS = 16 | 32 | 64
+
+
+def assign_air_handler_roles(handlers: list[AirHandlerRecord],
+                             paths: list) -> dict[int, tuple[int, int]]:
+    """Path number -> (AHS number, role) for every AHS path, checked against the flags,
+    endpoints and order ContamX relies on (it ignores the AHS record's numbers and takes
+    the implicit paths by their flags and position)."""
+    roles: dict[int, tuple[int, int]] = {}
+    by_nr = {p.nr: p for p in paths}
+    implicit = [p.nr for p in paths if p.flags & _IMPLICIT_FLAGS]
+    if implicit and [p.nr for p in paths[-len(implicit):]] != implicit:
+        raise ValueError(
+            f"prj: the implicit AHS paths {implicit} must come after every other path, as "
+            f"ContamW writes them; ContamX takes them by position and mis-assigns them "
+            f"otherwise (unsupported)")
+    by_ahs = {h.nr: h for h in handlers}
+    for h in handlers:
+        for (flag, role, label), nr, ends in zip(
+                _IMPLICIT, (h.recirculation, h.outdoor_air, h.exhaust),
+                ((h.return_zone, h.supply_zone), (-1, h.supply_zone), (h.return_zone, -1)),
+                strict=True):
+            p = by_nr.get(nr)
+            if p is None or not p.flags & flag or (p.from_zone, p.to_zone) != ends:
+                raise ValueError(
+                    f"prj: AHS {h.nr} names path {nr} as its {label} path, but that path is "
+                    f"not flagged {flag} from zone {ends[0]} to zone {ends[1]}")
+            if nr in roles:
+                raise ValueError(f"prj: path {nr} is named by AHS {roles[nr][0]} and AHS "
+                                 f"{h.nr}; each AHS needs its own implicit paths")
+            roles[nr] = (h.nr, role)
+    for p in paths:
+        if p.flags & _IMPLICIT_FLAGS and p.nr not in roles:
+            raise ValueError(f"prj: path {p.nr} is an implicit AHS path that no AHS names")
+        if not p.ahs_nr:
+            if p.flags & SUPPLY_OR_RETURN_FLAG:
+                raise ValueError(f"prj: path {p.nr} is an AHS supply or return point "
+                                 f"without an AHS")
+            continue
+        if p.nr in roles:
+            raise ValueError(f"prj: path {p.nr} is an implicit AHS path and also names AHS "
+                             f"{p.ahs_nr} as a supply or return point")
+        h = by_ahs.get(p.ahs_nr)
+        if h is None:
+            raise KeyError(f"prj: path {p.nr} references AHS {p.ahs_nr}, which the 'simple "
+                           f"AHS' section does not define")
+        if p.from_zone == h.supply_zone:
+            roles[p.nr] = (h.nr, SUPPLY)
+        elif p.to_zone == h.return_zone:
+            roles[p.nr] = (h.nr, RETURN)
+        else:
+            raise ValueError(f"prj: path {p.nr} of AHS {h.nr} neither leaves its supply "
+                             f"zone {h.supply_zone} nor enters its return zone "
+                             f"{h.return_zone}")
+    return roles

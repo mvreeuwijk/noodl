@@ -9,16 +9,23 @@ constant-flow fans, fan curves and cubic splines), zones and their temperature s
 initial zone concentrations, filter elements (constant-efficiency, particle and super
 filters) and the filters on airflow paths, airflow paths with their schedules (flow
 multipliers) and constant wind pressures, source/sink elements and source/sinks of the
-constant, cutoff, decaying and burst types, and duct networks (`prj_hvac`): duct elements,
-junctions and terminals, their initial concentrations, and segments. Everything else is
-skipped to its -999 terminator; a RECORD that references a skipped section by a nonzero
-index (control, AHS) raises ValueError naming it, as does a non-trace species, a gaseous
-(loading-dependent) or UVGI filter element (referenced or not), a CFD or 1-D zone, a zone
-held at constant pressure, a simple air-handling system, an unsupported element type, a
-constant wind pressure on an interior path, duct leakage, a control node or a value file on
-a junction or segment, a schedule on a Darcy-Colebrook duct segment and a duct network with
-densZP = 1 or dodMdt = 1. A schedule number that no week schedule carries raises KeyError naming the
-zone, path, junction or segment.
+constant, cutoff, decaying and burst types, duct networks (`prj_hvac`): duct elements,
+junctions and terminals, their initial concentrations, and segments, and simple air-handling
+systems (`prj_hvac`, `air_handling`). An air handler's plenums (its zones flagged 10) are
+zero-gauge nodes of the airflow solve (`Project.flow_balanced`) and storage-free species
+nodes when their volume is 0 (`Project.storage_free`); its supply and return points carry
+their design flows, scaled by their schedules; the recirculation path carries the
+outdoor-air fraction schedule and the minimum outdoor-air flow, as ContamX reads them; the
+flows are `AirHandlerFlows` closures (`Project.closures`). Everything else is skipped to its
+-999 terminator; a RECORD that references a skipped section by a nonzero index (control)
+raises ValueError naming it, as does a non-trace species, a gaseous (loading-dependent) or
+UVGI filter element (referenced or not), a CFD or 1-D zone, a zone held at constant
+pressure (other than an air handler's plenum), an unsupported element type, a constant wind
+pressure on an interior path, duct leakage, a control node or a value file on a junction or
+segment, a schedule on a Darcy-Colebrook duct segment, a duct network with densZP = 1 or
+dodMdt = 1, an air handler with densZP = 1, and the AHS paths ContamX mis-assigns or whose
+fields it ignores (see `prj_hvac`). A schedule number that no week schedule carries raises
+KeyError naming the zone, path, junction or segment.
 
 The control-node section is the motivating case for "skipped, not refused": NIST's own sample
 projects carry dozens of sensor and logger control nodes that no zone and no path points at,
@@ -70,6 +77,14 @@ from pathlib import Path
 import torch
 from torch import Tensor
 
+from noodl.apps.building_physics.air_handling import (
+    EXHAUST,
+    OUTDOOR_AIR,
+    RECIRCULATION,
+    RETURN,
+    SUPPLY,
+    air_handler_from_edges,
+)
 from noodl.apps.building_physics.filters import (
     ConstantEfficiencyFilter,
     FilterSeries,
@@ -78,15 +93,23 @@ from noodl.apps.building_physics.filters import (
 )
 from noodl.apps.building_physics.inputs import Input, apply_inputs, bind_inputs
 from noodl.apps.building_physics.prj_hvac import (
+    AirHandlerRecord,
     BuildContext,
+    assign_air_handler_roles,
     build_ducts,
+    read_air_handlers,
     read_duct_elements,
     read_duct_segments,
     read_junctions,
 )
 from noodl.apps.building_physics.schedules import Calendar, DaySchedule, WeekSchedule
 from noodl.apps.building_physics.species import KineticReaction, Species, reaction_kinetics
-from noodl.apps.building_physics.thermal import R_AIR, RHO_0, species_layer
+from noodl.apps.building_physics.thermal import (
+    R_AIR,
+    RHO_0,
+    check_flow_balanced,
+    species_layer,
+)
 from noodl.apps.building_physics.wth import _DAYS_BEFORE_MONTH
 from noodl.drives import ConstantDrive, Stack, Wind, WindProfile
 from noodl.elements import (
@@ -202,7 +225,10 @@ MU_0 = 1.81625e-5
 #                   constant pressure (measured on ContamX 3.4.1.7: flags 0 and 2 give no flow
 #                   through the zone, 1 and 3 the same flows).
 #   path            30 fields: `# f n# m# e# f# w# a# s# c# l# X Y relHt mult wPset wPmod
-#                   wazm Fahs Xmax Xmin icn dir clr u[4] cdvf cfd`. `f#` (field 5) is the
+#                   wazm Fahs Xmax Xmin icn dir clr u[4] cdvf cfd`. `f` (field 1) is a bit
+#                   set whose values 8, 16, 32 and 64 mark the paths of a simple air-handling
+#                   system, `a#` (field 7) its number and `Fahs` (field 18) its design flow
+#                   (`prj_hvac` lists their meaning). `f#` (field 5) is the
 #                   path's filter number, 0 for none; the filter acts on the air crossing the
 #                   path in either direction (measured). Same story: the header
 #                   comment omits `clr` (always -1 in every sample), so the trailing
@@ -259,13 +285,6 @@ _SHAPES = {0: "rectangular", 1: "trapezoidal"}
 _VARIABLE_PRESSURE = 1                  # the zone-flags bit of a zone whose pressure is solved
 _VARIABLE_CONTAMINANTS = 2              # ... and of a zone whose concentrations are solved
 
-# Sections whose records would silently change the physics if ignored. The simple air-handling
-# system is a network in its own right, not an attribute of a zone or a path, so a project
-# that HAS one cannot be read as the documented subset -- the refusal is on the section,
-# naming it and its record count. (Duct networks are read: see `prj_hvac`.)
-_REFUSED_SECTIONS = ("simple AHS",)
-
-
 @dataclass
 class PrjElement:
     nr: int
@@ -289,6 +308,9 @@ class PrjPath:
     edge_columns: list[int] = field(default_factory=list)   # columns of q for this path
     schedule_nr: int = 0             # week schedule multiplying the flow; 0 = none
     filter_nr: int = 0               # filter on the path (either flow direction); 0 = none
+    flags: int = 0                   # the path's flag bits (8..64: an air handler's paths)
+    ahs_nr: int = 0                  # the AHS of a supply or return point; 0 = none
+    design_flow: float = 0.0         # an AHS path's design flow (kg/s)
 
 
 @dataclass
@@ -445,6 +467,13 @@ class Project:
     segments: list[PrjSegment] = field(default_factory=list)
     schedule_units: dict[int, int] = field(default_factory=dict)
     terminal_openings: int = 0
+    # Simple air-handling systems: their plenums (zero gauge pressure in the airflow solve),
+    # the zero-volume ones (no air held), their `AirHandlerFlows` closures, and each one's
+    # kind with its number of edges ("flow_multiplier.<kind>", "outdoor_air_fraction.<kind>").
+    flow_balanced: list[str] = field(default_factory=list)
+    storage_free: list[str] = field(default_factory=list)
+    closures: list = field(default_factory=list)
+    air_handler_edges: dict[str, int] = field(default_factory=dict)
 
     def inputs_for(self, model) -> list[Input]:
         """The project's inputs that `model` can take: a model without a species layer (a run
@@ -964,12 +993,6 @@ def _read_zones(lines: _Lines, count: int, zones: list[tuple],
                 f"a CFD zone writes, are unsupported: {' '.join(tok)}"
             )
         flags, ps, pc, pk, pl = (int(v) for v in tok[1:6])
-        if not flags & _VARIABLE_PRESSURE:
-            raise ValueError(
-                f"prj: zone {nr} ({tok[10]!r}) has flags {flags}, without the "
-                f"variable-pressure bit (1): ContamX holds such a zone at constant pressure "
-                f"(unsupported)"
-            )
         if pc:
             raise ValueError(f"prj: zone {nr} references control node {pc} (unsupported)")
         if pk:
@@ -1001,10 +1024,9 @@ def _read_paths(
                 f"data fields, and neither is supported: {' '.join(tok)}"
             )
         pzn, pzm, pe, pf, pw, pa, ps, pc, pld = (int(v) for v in tok[2:11])
-        for label, val in (("AHS", pa), ("control node", pc)):
-            if val:
-                raise ValueError(f"prj: path {nr} references {label} {val} (unsupported)")
-        rel_ht, mult, wPset, wPmod, wazm = (float(v) for v in tok[13:18])
+        if pc:
+            raise ValueError(f"prj: path {nr} references control node {pc} (unsupported)")
+        rel_ht, mult, wPset, wPmod, wazm, design_flow = (float(v) for v in tok[13:19])
         cdvf, cfd = int(float(tok[28])), int(float(tok[29]))
         if cdvf or cfd:
             raise ValueError(
@@ -1015,7 +1037,8 @@ def _read_paths(
             raise KeyError(f"prj: path {nr} sits on level {pld}, which the file never defines")
         paths.append(
             PrjPath(nr, pzn, pzm, pe, levels[pld] + rel_ht, mult, wPset, wPmod, wazm, pw,
-                    schedule_nr=ps, filter_nr=pf)
+                    schedule_nr=ps, filter_nr=pf, flags=int(tok[1]), ahs_nr=pa,
+                    design_flow=design_flow)
         )
     lines.expect_end("flow paths")
 
@@ -1169,6 +1192,7 @@ def read_prj(path) -> Project:
     junctions: list = []
     junction_x0_rows: dict[int, list[float]] = {}
     segments: list = []
+    handlers: list[AirHandlerRecord] = []
 
     while lines.i < len(lines.lines):
         line = lines.lines[lines.i].strip()
@@ -1221,11 +1245,8 @@ def read_prj(path) -> Project:
                                          what="initial junction concentrations")
         elif name == "duct segments":
             read_duct_segments(lines, count, segments)
-        elif name in _REFUSED_SECTIONS and count:
-            raise ValueError(
-                f"prj: section {name!r} has {count} records; simple air-handling systems "
-                f"are unsupported"
-            )
+        elif name == "simple AHS":
+            read_air_handlers(lines, count, handlers)
         else:
             lines.skip_section()
 
@@ -1237,20 +1258,22 @@ def read_prj(path) -> Project:
         run_control=run_control, source_path=source_path,
         filter_elements=filter_elements, filters=filters, schedule_units=schedule_units,
         duct_elements=duct_elements, junctions=junctions, junction_x0_rows=junction_x0_rows,
-        segments=segments,
+        segments=segments, handlers=handlers,
     )
 
 
 def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones, x0_rows,
            paths, sources, dens_zp, schedules, species_records, reactions, zone_reactions,
            run_control, source_path, filter_elements, filters, schedule_units, duct_elements,
-           junctions, junction_x0_rows, segments) -> Project:
+           junctions, junction_x0_rows, segments, handlers) -> Project:
     """Turn the parsed records into a `Network`, elements, drives and a `Project`.
 
     Order: the zones, the path edges and their elements, the path filters, constant wind
     pressures and drives, the `Scaled` wrap of scheduled path kinds, then the duct network
     (junctions, segments, terminals, with their own elements, drives, filters and inputs).
-    Only then are the element kinds and the flow layout read, so both cover the ducts."""
+    The air handlers' paths become one prescribed-flow kind per handler, built after the
+    `Scaled` wrap (their closure applies the schedules). Only then are the element kinds and
+    the flow layout read, so both cover the ducts and the air handlers."""
     net = Network(dtype=F64)
     ambient = "ambient"
     net.add_node(ambient, z_ref=0.0, volume=0.0, T0=ambient_conditions["Ta"])
@@ -1258,8 +1281,19 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     zone_nr_to_name: dict[int, str] = {}
     T_list, V_list = [], []
     zone_flags: dict[str, int] = {}
+    plenums = {z for h in handlers for z in (h.return_zone, h.supply_zone)}
+    if handlers and dens_zp:
+        raise ValueError("prj: densZP = 1 in a project with a simple air-handling system is "
+                         "unsupported (its plenums' densities at their absolute pressure are "
+                         "not modelled)")
     for nr, zname, rel_ht, vol, T0, pl, _ps, flags in zones:
         zone_flags[zname] = flags
+        if not flags & _VARIABLE_PRESSURE and nr not in plenums:
+            raise ValueError(
+                f"prj: zone {nr} ({zname!r}) has flags {flags}, without the "
+                f"variable-pressure bit (1): ContamX holds such a zone at constant pressure "
+                f"(unsupported; only an air handler's plenum zones may lack it)"
+            )
         if species and not flags & _VARIABLE_CONTAMINANTS:
             raise ValueError(
                 f"prj: zone {nr} ({zname!r}) has flags {flags}, without the "
@@ -1309,8 +1343,30 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
             inputs.append(Input(week(ps, f"zone {nr}"), "T", index=net.node_index(zname),
                                 name=f"zone {nr} temperature schedule {ps}"))
 
+    ahs_roles = (assign_air_handler_roles(handlers, paths)
+                 if handlers or any(p.ahs_nr for p in paths) else {})
+    for p in paths:
+        if p.nr not in ahs_roles:
+            continue
+        _, role = ahs_roles[p.nr]
+        if p.element_nr:
+            raise ValueError(f"prj: path {p.nr} is an AHS path but names flow element "
+                             f"{p.element_nr}; its flow is the air handler's (unsupported)")
+        if p.profile_nr or p.wPset:
+            raise ValueError(f"prj: path {p.nr} is an AHS path with a wind pressure "
+                             f"(profile {p.profile_nr}, wPset {p.wPset}); its flow is the air "
+                             f"handler's (unsupported)")
+        if role in (OUTDOOR_AIR, EXHAUST) and (p.schedule_nr or p.design_flow):
+            raise ValueError(
+                f"prj: path {p.nr} (an AHS outdoor-air or exhaust path) has a schedule or a "
+                f"flow; ContamX ignores both there (the outdoor-air fraction and minimum are "
+                f"the recirculation path's), so they are refused")
+        if role in (SUPPLY, RETURN) and p.mult != 1.0:
+            raise ValueError(f"prj: path {p.nr} (an AHS supply or return point) has mult "
+                             f"{p.mult}; ContamX ignores it, so it is refused")
+
     kind_of: dict[int, str] = {}
-    for nr in sorted({p.element_nr for p in paths}):
+    for nr in sorted({p.element_nr for p in paths if p.nr not in ahs_roles}):
         try:
             el = elements[nr]
         except KeyError as exc:
@@ -1343,6 +1399,17 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     path_edges: list[list[int]] = []          # per path, its NETWORK edge columns
     column = 0
     for p in paths:
+        if p.nr in ahs_roles:
+            ahs, role = ahs_roles[p.nr]
+            attrs = dict(role=float(role),
+                         design_flow=p.design_flow if role in (SUPPLY, RETURN) else 0.0)
+            if role == RECIRCULATION:
+                attrs.update(min_outdoor_air=p.design_flow, outdoor_air_fraction=1.0)
+            net.add_edge(node_of(p.from_zone), node_of(p.to_zone), kind=f"ahs_{ahs}",
+                         z_path=p.z, **attrs)
+            path_edges.append([column])
+            column += 1
+            continue
         el = elements[p.element_nr]
         kind = kind_of[p.element_nr]
         d = el.dtype
@@ -1449,7 +1516,8 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         )
     # A fan curve's path schedule is its speed ratio, read from "fan_speed.<kind>".
     speed_kinds = {kind_of[p.element_nr] for p in paths
-                   if p.schedule_nr and elements[p.element_nr].dtype == "fan_fan"}
+                   if p.schedule_nr and p.nr not in ahs_roles
+                   and elements[p.element_nr].dtype == "fan_fan"}
     for kind, members in per_kind_fan.items():
         # Per-edge mult in path order against the network's edge order, as for power laws.
         _check_edge_order(net, kind, per_kind_cols[kind])
@@ -1531,8 +1599,8 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     multiplier_edges: dict[str, int] = {}
     speed_edges: dict[str, int] = {}
     for p, cols in zip(paths, path_edges, strict=True):
-        if not p.schedule_nr:
-            continue
+        if not p.schedule_nr or p.nr in ahs_roles:
+            continue                  # an air handler's schedules are its closure's inputs
         kind = kind_of[p.element_nr]
         kind_cols = net.edge_index(kind).tolist()
         if elements[p.element_nr].dtype == "fan_fan":
@@ -1548,6 +1616,44 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     built = [Scaled(el, f"flow_multiplier.{el.kind}") if el.kind in multiplier_edges else el
              for el in built]
     wind_pressure_tensors = {k: torch.tensor(v, dtype=F64) for k, v in wind_pressure.items()}
+
+    # Each air handler is one `PrescribedFlow` kind whose `AirHandlerFlows` closure applies
+    # the supply and return points' schedules ("flow_multiplier.<kind>", per edge) and the
+    # recirculation path's outdoor-air fraction ("outdoor_air_fraction.<kind>"). The kind is
+    # not wrapped in `Scaled`, which would apply the multipliers a second time.
+    air_handler_edges: dict[str, int] = {}
+    ahs_closures: list = []
+    flow_balanced: list[str] = []
+    storage_free: list[str] = []
+    zone_volume = {z[0]: z[3] for z in zones}
+    for h in handlers:
+        kind = f"ahs_{h.nr}"
+        element, closure = air_handler_from_edges(net, kind)
+        built.append(element)
+        ahs_closures.append(closure)
+        kind_cols = net.edge_index(kind).tolist()
+        air_handler_edges[kind] = len(kind_cols)
+        for z in (h.return_zone, h.supply_zone):
+            flow_balanced.append(node_of(z))
+            if zone_volume[z] == 0.0:
+                if node_of(z) in by_zone:
+                    raise ValueError(f"prj: zone {z} ({node_of(z)!r}) is a zero-volume AHS "
+                                     f"plenum with a kinetic reaction; it holds no air to "
+                                     f"react (unsupported)")
+                storage_free.append(node_of(z))
+        for p, cols in zip(paths, path_edges, strict=True):
+            if ahs_roles.get(p.nr, (None,))[0] != h.nr or not p.schedule_nr:
+                continue
+            if ahs_roles[p.nr][1] == RECIRCULATION:
+                inputs.append(Input(week(p.schedule_nr, f"path {p.nr}"),
+                                    f"outdoor_air_fraction.{kind}",
+                                    name=f"AHS {h.nr} outdoor-air fraction schedule "
+                                         f"{p.schedule_nr}"))
+            else:
+                inputs.append(Input(week(p.schedule_nr, f"path {p.nr}"),
+                                    f"flow_multiplier.{kind}",
+                                    index=[kind_cols.index(c) for c in cols],
+                                    name=f"path {p.nr} schedule {p.schedule_nr}"))
 
     # The duct network adds its own kinds (already wrapped where scheduled), drives, filters
     # and inputs; the kinds and the layout below are read after it, so they cover the ducts.
@@ -1623,6 +1729,8 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         junctions=duct.junction_names if duct else [], junction_x0=junction_x0,
         terminals=terminals, segments=duct_segments, schedule_units=schedule_units,
         terminal_openings=duct.terminal_openings if duct else 0,
+        flow_balanced=flow_balanced, storage_free=storage_free, closures=ahs_closures,
+        air_handler_edges=air_handler_edges,
     )
 
 
@@ -1809,8 +1917,10 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     T[net.node_index(project.ambient)] = amb["Ta"]
     rho = amb["Pb"] / (R_AIR * T)
     volumes = net.node_attr("volume", default=0.0)
-    # The zones only: a duct junction's air-mass change is not part of the option.
-    zones = set(project.zones)
+    check_flow_balanced(net, project.elements, project.flow_balanced, where="prj")
+    # The zones only: a duct junction's air-mass change is not part of the option, and an
+    # air handler's plenum is not a node of the airflow solve.
+    zones = set(project.zones) - set(project.flow_balanced)
     zone_nodes = [i for i, name in enumerate(net.nodes)
                   if name in zones and volumes[i].item() > 0.0]
     zone_mass_change = project.run_control is not None and project.run_control.zone_mass_change
@@ -1821,8 +1931,9 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         if zone_mass_change and zone_nodes else []
     )
     air = PotentialFlowLayer(net, "air", project.elements, drives=project.drives,
-                             boundary=[project.ambient], quantity="pressure", unit="Pa",
-                             flow_unit="kg/s", node_sources=node_sources)
+                             boundary=[project.ambient, *project.flow_balanced],
+                             quantity="pressure", unit="Pa", flow_unit="kg/s",
+                             node_sources=node_sources)
     layers: dict = {"air": air}
     no_contaminants = project.run_control is not None and project.run_control.contaminants == "none"
     if species and project.species and not no_contaminants:
@@ -1836,10 +1947,11 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
             transmission = filter_transmission(net, project.kinds, project.species_records,
                                                project.edge_filters)
         x_initial = _initial_mass_fractions(project)
-        # A duct junction without volume (its segments all of zero length, a fan's say) holds
-        # no air: a storage-free node, whose mass fraction is the mix of what flows in.
+        # A duct junction without volume (its segments all of zero length, a fan's say) and a
+        # zero-volume air-handler plenum hold no air: storage-free nodes, whose mass fraction
+        # is the mix of what flows in.
         storage_free = [j for j in project.junctions
-                        if volumes[net.node_index(j)].item() == 0.0]
+                        if volumes[net.node_index(j)].item() == 0.0] + project.storage_free
         layers["species"] = species_layer(
             net, ambient=project.ambient, flow_kinds=tuple(project.kinds),
             n_species=len(project.species), scheme=scheme, rho=rho,
@@ -1864,9 +1976,10 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
             sources_from_project(project, dt=dt), species=[s.species for s in project.sources],
             layer=layers["species"], names=[f"source {s.nr}" for s in project.sources],
             heights=net.node_attr("z_ref"), g=project.g))
+    closures.extend(project.closures)
     model = Model(net, layers, closures=closures)
     drivers = {
-        "air.phi_boundary": torch.zeros(1, dtype=F64),
+        "air.phi_boundary": torch.zeros(1 + len(project.flow_balanced), dtype=F64),
         "T": T.clone(),
         "P_ref": torch.tensor(amb["Pb"], dtype=F64),
         # Initial values, for code that reads them outside a step (`noodl.couple`'s
@@ -1901,6 +2014,10 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         model.input_specs[f"flow_multiplier.{kind}"] = dict(
             description="flow multiplier of each edge (a schedule or control)", unit="-",
             over=("edges", kind))
+    for kind, n_e in project.air_handler_edges.items():
+        # Declared by the air handler's closure.
+        drivers[f"flow_multiplier.{kind}"] = torch.ones(n_e, dtype=F64)
+        drivers[f"outdoor_air_fraction.{kind}"] = torch.tensor(1.0, dtype=F64)
     for kind, n_e in project.speed_edges.items():
         drivers[f"fan_speed.{kind}"] = torch.ones(n_e, dtype=F64)
         model.input_specs[f"fan_speed.{kind}"] = dict(

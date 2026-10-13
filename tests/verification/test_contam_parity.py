@@ -366,7 +366,7 @@ def _schedules_as_contamx_holds(prj: Path, dest: Path) -> Path:
 
 
 def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf, record_property, label,
-                    species_floor=False):
+                    species_floor=False, atol=NOODL_ATOL):
     """ContamX's `run_project` (at `PROJECT_AIRFLOW`, its airflow tolerances tightened so its
     own iteration stays below the budgets) against `simulate_project` on the same project,
     with the schedule values ContamX holds (`_schedules_as_contamx_holds`).
@@ -375,14 +375,15 @@ def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf, record_property, label
     `species_floor` it is 64 u times each species' own largest (a column floor), so a
     species far smaller than another is still checked relative to its own size. The zones'
     mass fractions are compared (a duct network's junctions follow them in the species
-    state), and the duct terminal flows when the project has any."""
+    state), and the duct terminal flows when the project has any. `atol` is noodl physics'
+    airflow residual tolerance (kg/s)."""
     from noodl.apps.building_physics.contamx import run_project
     from noodl.apps.building_physics.simulation import simulate_project
 
     ref = run_project(prj, airflow_convergence=PROJECT_AIRFLOW)
     noodl_prj = _schedules_as_contamx_holds(prj, tmp_path / "noodl")
     project = read_prj(noodl_prj)
-    out = simulate_project(project, atol=NOODL_ATOL, rtol=1e-14)
+    out = simulate_project(project, atol=atol, rtol=1e-14)
     out["species.x"] = project.zone_mass_fractions(out["species.x"])
     torch.testing.assert_close(out["time"], ref["time"], rtol=0, atol=1e-9)
     scale = ref["flow"].abs().max()
@@ -721,3 +722,55 @@ def test_a_duct_network_matches_contamx(contamx, tmp_path, record_property):
     _project_parity(DUCTS, tmp_path, rtol_flow=64 * F32_U, rtol_mf=72 * F32_U,
                     record_property=record_property, species_floor=True,
                     label="Three-zone project with a duct network, 24 steps")
+
+
+AHS = DATA / "ahs_three_zone.prj"
+NIST_AHS = DATA / "test_GetPrjInfo.prj"
+SARIN_LINE = ("  1 1 0 140.0900  0.0000e+00  0.0000e+00  0.0000e+00  2.0000e-05  0.0000e+00"
+              "  1.0000e+03")
+
+
+@pytest.mark.external
+def test_a_simple_ahs_matches_contamx(contamx, tmp_path, record_property):
+    """`ahs_three_zone.prj` (fixture NOTICE). Budget: the AHS flows are sums and minima of
+    float32 design flows and a float32 fraction (4 u); the envelope flows the three-zone
+    steady 16 u: 32 u. Mass fractions: the three-zone transient's 64 u plus the filters'
+    pass fractions (0.43 u for 0.3, 1 u for 0.5, chained over two): 72 u. The absolute
+    floor is per species."""
+    _project_parity(AHS, tmp_path, rtol_flow=32 * F32_U, rtol_mf=72 * F32_U,
+                    record_property=record_property, species_floor=True,
+                    label="Three-zone project with a simple AHS, 24 steps")
+
+
+@pytest.mark.external
+def test_nist_s_ahs_and_duct_sample_matches_contamx(contamx, tmp_path, record_property):
+    """NIST's `test_GetPrjInfo.prj` with zone 1's and segment 4's control references and the
+    duct leakage removed, one hour, sarin outdoors at 1e-3: two simple AHS with zero-volume
+    plenums (100 % outdoor air) and two fan-driven duct systems. Budget as the duct test.
+
+    The airflow residual tolerance is 1e-12 kg/s, not 1e-14: each duct terminal carries
+    3.3e-4 kg/s across a 5.8e-6 Pa drop (conductance 28 kg/(s Pa)) between junction and zone
+    pressures of 2-30 Pa, so the last-place units of the two pressures (2 x 3.6e-15 Pa)
+    moves a node's balance by up to 64 x 7.1e-15 = 4.6e-13 kg/s (zone Two has two terminals):
+    the float64 floor. 1e-12 kg/s is 3e-9 of the smallest flow, far inside the budgets."""
+    text = NIST_AHS.read_text()
+    for old, new in (
+        ("   1  3   0   3   0   1   0.000   600 293.15 0 One",
+         "   1  3   0   0   0   1   0.000   600 293.15 0 One"),
+        ("  4  0   5   6   2   0   0   5   2 5", "  4  0   5   6   2   0   0   0   2 5"),
+        ("  Jan01 00:00:00  Jan01 00:00:00  Jan02 24:00:00",
+         "  Jan01 00:00:00  Jan01 00:00:00  Jan01 01:00:00"),
+        (SARIN_LINE, SARIN_LINE.replace("0.0000e+00  1.0000e+03", "1.0000e-03  1.0000e+03")),
+    ):
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    leak = " 0.2 0.628319 0.0314159 0.2 0.2 0 0.5 1\n"
+    assert text.count(leak) == 1, leak
+    text = text.replace(leak, " 0.2 0.628319 0.0314159 0.2 0.2 0 0 1\n")
+    variant = tmp_path / "variant" / NIST_AHS.name
+    variant.parent.mkdir()
+    variant.write_text(text)
+    _project_parity(variant, tmp_path, rtol_flow=64 * F32_U, rtol_mf=72 * F32_U,
+                    record_property=record_property, species_floor=True,
+                    label="NIST test_GetPrjInfo (two AHS, two duct systems), 12 steps",
+                    atol=1e-12)

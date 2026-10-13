@@ -17,6 +17,7 @@ import torch
 
 from noodl._broadcast import broadcast_shapes
 from noodl.components import Component
+from noodl.elements import PrescribedFlow
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Drivers, Model, State
@@ -235,25 +236,28 @@ class LinearDensity(_DensityClosure):
         return self.rho_0 * (1.0 - (T - self.T_0) / self.T_0)
 
 
-def _check_flow_balanced(net: Network, air_elements, flow_balanced) -> None:
-    """Refuse a flow-balanced node that an edge with a pressure-dependent element touches."""
+def check_flow_balanced(net: Network, air_elements, flow_balanced, *,
+                        where: str = "build_model") -> None:
+    """Refuse a flow-balanced node that an edge touches whose element is not a
+    `PrescribedFlow` (an air handler's): the airflow solve pins such a node at zero gauge
+    pressure, so a pressure-dependent edge would let it absorb an imbalance silently, and a
+    fixed flow is outside the handler's balance."""
     balanced = set(net.canonical(list(flow_balanced))) if flow_balanced else set()
     if not balanced:
         return
     for el in air_elements:
-        if getattr(el, "dp_independent", False):
+        if isinstance(el, PrescribedFlow):
             continue
         src, tgt = net.endpoints(el.kind)
         for s, t in zip(src.tolist(), tgt.tolist(), strict=True):
             for node in (net.nodes[s], net.nodes[t]):
                 if node in balanced:
                     raise ValueError(
-                        f"build_model: flow_balanced node {node!r} is an end of the edge "
+                        f"{where}: flow_balanced node {node!r} is an end of the edge "
                         f"{net.nodes[s]!r} -> {net.nodes[t]!r} of kind {el.kind!r}, whose "
-                        f"element ({type(el).__name__}) depends on the pressure difference; "
-                        f"the airflow solve pins a flow-balanced node at zero gauge pressure, "
-                        f"so only prescribed flows (dp-independent elements, such as an air "
-                        f"handler's) may touch it")
+                        f"element is a {type(el).__name__}; the airflow solve pins a "
+                        f"flow-balanced node at zero gauge pressure, so only an air "
+                        f"handler's prescribed flows (PrescribedFlow) may touch it")
 
 
 def build_model(net: Network, *, air_elements, drives, ambient="ambient", thermal: bool = True,
@@ -303,14 +307,15 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
     `AirHandlerFlows`). `flow_balanced` names nodes whose pressure the airflow solve does
     not need, because only prescribed, balanced flows touch them (an air handler's
     plenums): they join the air layer's boundary at zero gauge pressure, while staying
-    ordinary nodes of the heat and species layers. Only edges whose element is
-    dp-independent (`PrescribedFlow`, `FixedFlow`) may touch them: a pressure-dependent edge
-    would let the plenum, pinned at zero gauge pressure, absorb an imbalance silently, so it
-    is refused, naming the node and the edge. `storage_free` names nodes that hold no air
-    (a zero-volume plenum); their layers must use the implicit scheme.
+    ordinary nodes of the heat and species layers. Only edges whose element is a
+    `PrescribedFlow` may touch them: a pressure-dependent edge would let the plenum, pinned
+    at zero gauge pressure, absorb an imbalance silently, and a fixed flow is outside the
+    handler's balance, so either is refused, naming the node and the edge. `storage_free`
+    names nodes that hold no air (a zero-volume plenum); their layers must use the implicit
+    scheme.
     """
     storage_free = tuple(storage_free)
-    _check_flow_balanced(net, air_elements, flow_balanced)
+    check_flow_balanced(net, air_elements, flow_balanced)
     element_kinds = tuple(el.kind for el in air_elements)
     kinds = tuple(flow_kinds) if flow_kinds else element_kinds
     unknown = [k for k in kinds if k not in element_kinds]

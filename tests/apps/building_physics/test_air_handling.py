@@ -253,6 +253,29 @@ def test_a_pressure_dependent_edge_on_a_flow_balanced_plenum_is_refused():
                     closures=[closure], flow_balanced=plenums, storage_free=plenums)
 
 
+def test_a_fixed_flow_on_a_flow_balanced_plenum_is_refused():
+    """A fixed flow is dp-independent too, but it is not part of the air handler's balance:
+    only the handler's prescribed flows may touch its plenums."""
+    from noodl.elements import FixedFlow
+
+    net = Network(dtype=F64)
+    net.add_node("ambient", z_ref=0.0, T0=293.15)
+    net.add_node("room", z_ref=0.0, T0=293.15, volume=300.0)
+    net.add_edge("ambient", "room", kind="airpath", z_path=1.0, Cd=0.6, area=0.01)
+    add_air_handler(net, supplies={"room": 0.1}, returns={"room": 0.1})
+    net.add_edge("ambient", "ahs_supply", kind="fan", z_path=1.0)
+    element, closure = air_handler_from_edges(net, "air_handler")
+    plenums = air_handler_plenums(net, "air_handler")
+    with pytest.raises(ValueError, match=r"flow_balanced node 'ahs_supply' is an end of the "
+                                         r"edge 'ambient' -> 'ahs_supply' of kind 'fan'.*"
+                                         r"FixedFlow"):
+        build_model(net, air_elements=[orifice_elements_from_edges(net, "airpath"),
+                                       FixedFlow(torch.tensor(0.01, dtype=F64), kind="fan"),
+                                       element],
+                    drives=[Stack.from_network(net, "airpath")], thermal=False, species=1,
+                    closures=[closure], flow_balanced=plenums, storage_free=plenums)
+
+
 @pytest.mark.parametrize("roles, message", [
     ([0, 1, 2, 3, 4, 7], r"unknown role codes \[7\] at edge positions \[5\]"),
     ([0, 1, 2.4, 3, 4], r"role codes must be integers 0..4, got \[2.4"),

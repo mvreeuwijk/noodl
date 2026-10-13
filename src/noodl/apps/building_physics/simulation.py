@@ -252,6 +252,24 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     return out
 
 
+def _refuse_idle_air_handlers(project, state: State, drivers: Drivers) -> None:
+    """A steady contaminant solve has no value to give an air handler's plenum that nothing
+    passes through (the handler off: no supply or no return), which a transient run holds
+    at its last value; refuse it, naming the handler."""
+    from noodl.apps.building_physics.air_handling import RETURN, SUPPLY
+
+    for closure in project.closures:
+        flows = closure(state, drivers)[closure.flow_key]
+        for role, what in ((SUPPLY, "supply"), (RETURN, "return")):
+            total = (flows * (closure.roles == role).to(flows.dtype)).sum(-1)
+            if bool((total.detach() == 0).any()):
+                raise ValueError(
+                    f"simulate_project: AHS {closure.name.removeprefix('ahs_')} has no flow "
+                    f"through its {what} plenum at the steady instant (the air handler is "
+                    f"off); a steady contaminant solve has no value for that plenum "
+                    f"(unsupported)")
+
+
 def simulate_project(project, *, inputs: Sequence[Input] = (), diagnostics: dict | None = None,
                      **step_kwargs) -> dict[str, Tensor]:
     """Run a `.prj` project the way ContamX does: its run control (start, end, time step), its
@@ -270,7 +288,8 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), diagnostics: dict
     integration other than the trapezoid method with weight 1 (short time step, CVODE, or a
     weight other than 1), steady airflow with transient contaminants, transient airflow with
     steady contaminants (ContamX solves the concentrations to steady state at every step;
-    this integrates them), and a run whose duration is not a whole number of time steps.
+    this integrates them), a run whose duration is not a whole number of time steps, and a
+    steady contaminant run with an air handler off (nothing passing through a plenum).
     """
     from noodl.apps.building_physics.ctm import read_ctm
     from noodl.apps.building_physics.prj import project_to_model, steady
@@ -307,6 +326,8 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), diagnostics: dict
         _refuse_unread_inputs(model, drivers, inputs, "simulate_project")
         bound = bind_inputs(model, [*project.inputs_for(model), *inputs])
         d = apply_inputs(drivers, bound, 0.0, rc.steady_calendar())
+        if "species" in model.transport:
+            _refuse_idle_air_handlers(project, state, d)
         out_state = steady(model, state, d, **step_kwargs)
         out = {f"{n}.{s}": out_state[f"{n}.{s}"].unsqueeze(0)
                for n in model.potential for s in ("q", "phi")}
