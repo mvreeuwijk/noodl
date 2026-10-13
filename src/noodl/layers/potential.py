@@ -371,6 +371,12 @@ class PotentialFlowLayer:
             return torch.zeros(0, dtype=torch.long)
         return self._mna.f_edges
 
+    @property
+    def frequency_key(self) -> str | None:
+        """The driver key a phasor layer reads its frequency from (`"<name>.frequency"`, in
+        Hz, one value per instance); `None` for a layer that is not a phasor layer."""
+        return self._mna.frequency_key if self.phasor else None
+
     def _refuse_on_mna(self, method: str) -> None:
         """Classic-only methods assume every flow is a function of its own edge's potential
         difference; a Modified Nodal Analysis layer refuses them by name."""
@@ -634,6 +640,21 @@ class PotentialFlowLayer:
     def residual(self, phi_interior, phi_boundary, drivers, sources):
         self._refuse_on_mna("residual")
         return self._residual_parts(phi_interior, phi_boundary, drivers or {}, sources)[0]
+
+    def balance(self, phi, q, sources=None, drivers=None):
+        """The interior flow balance `A_I q - s_I (+ w(phi))` of a state's own flows.
+
+        `phi` is full-node, `q` every edge's flow in layer edge order (what `solve`
+        returns), `sources` full-node (`None` means zero) and `drivers` what the node
+        sources read. Zero (to solver tolerance) at a solved state. Unlike `residual`, which
+        recomputes the flows from `phi`, this takes them as given, so it is defined on every
+        layer, including one solved by Modified Nodal Analysis, whose implicit-law flows are
+        not functions of `phi`.
+        """
+        phi_i = phi[..., self.interior]
+        lhs = self._accumulate_interior(q) - self._source_interior(sources, phi_i)
+        w = self._node_source_withdrawal(phi, drivers or {})
+        return lhs if w is None else lhs + w
 
     def _residual_parts(self, phi_interior, phi_boundary, drivers, sources):
         """`(residual, phi, q)`: the residual and the full-node potentials and edge flows it

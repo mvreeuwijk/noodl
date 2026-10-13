@@ -65,6 +65,13 @@ def _prepare_forward_mode() -> None:
     _forward_mode_ready = True
 
 
+def _complex(z: Tensor) -> Tensor:
+    """`z` as a complex128 tensor that `view_as_real` accepts: a phasor-capable law may
+    return a real tensor (a constant current) or a lazily conjugated one (a law written with
+    `torch.conj`). Both conversions are differentiable."""
+    return z.to(torch.complex128).resolve_conj()
+
+
 def _colour_jacobian(fn, z: Tensor, m: int, w: int) -> Tensor:
     """`(..., G, m, m, w, w)`: d fn(z)[g, k, ck] / d z[g, l, cl] for a groupwise `fn`."""
     shape = z.shape
@@ -76,7 +83,7 @@ def _colour_jacobian(fn, z: Tensor, m: int, w: int) -> Tensor:
             t[..., l_] = 1.0 if cl == 0 else 1j
             _, d = jvp(fn, (z,), (t.reshape(shape),))
             d = d.reshape(d.shape[:-1] + (G, m))
-            cols.append(torch.view_as_real(d.resolve_conj()) if w == 2 else d.unsqueeze(-1))
+            cols.append(torch.view_as_real(_complex(d)) if w == 2 else d.unsqueeze(-1))
     J = torch.stack(cols, dim=-1).unflatten(-1, (m, w))  # (..., G, k, ck, l, cl)
     return J.transpose(-3, -2)                            # (..., G, k, l, ck, cl)
 
@@ -187,7 +194,7 @@ class MnaSystem:
 
     # ------------------------------------------------------------- views
     def _to_real(self, z: Tensor) -> Tensor:
-        return torch.view_as_real(z.resolve_conj()).flatten(-2) if self.w == 2 else z
+        return torch.view_as_real(_complex(z)).flatten(-2) if self.w == 2 else z
 
     def _to_complex(self, x: Tensor) -> Tensor:
         return torch.view_as_complex(x.unflatten(-1, (-1, 2)).contiguous())
@@ -217,6 +224,33 @@ class MnaSystem:
         if not isinstance(f, Tensor):
             f = torch.tensor(f, dtype=torch.float64)
         return 2.0 * math.pi * f.unsqueeze(-1)
+
+    def _check_frequency(self, drivers, batches) -> None:
+        """Refuse a frequency driver that is not one value per instance of the solve.
+
+        The frequency must broadcast with the inputs' batch shape (`batches`, from the
+        boundary potentials, sources and warm starts) without adding dimensions: a frequency
+        of shape `(..., 1)` against a batch `(...)` would otherwise broadcast into an outer
+        product of instances and frequencies. With unbatched inputs the frequency sets the
+        batch itself."""
+        key = self.frequency_key
+        f = drivers.get(key)
+        if not isinstance(f, Tensor):
+            return
+        batch = broadcast_shapes(*batches)
+        if not batch:
+            return
+        try:
+            broadcast_shapes(tuple(f.shape), batch)
+            fits = f.dim() <= len(batch)
+        except RuntimeError:
+            fits = False
+        if not fits:
+            raise ValueError(
+                f"PotentialFlowLayer {self.layer.name!r}: driver {key!r} has shape "
+                f"{tuple(f.shape)}, which is not one frequency per instance of the batch "
+                f"{tuple(batch)}; give it the batch shape (...), not (..., 1)"
+            )
 
     def _phasor_context(self, mode, dt, t, history, drivers) -> LawContext:
         """The context of a phasor layer: the sinusoidal steady state at the frequency
@@ -496,6 +530,8 @@ class MnaSystem:
             phi_boundary, sources, phi0, q0 = (
                 None if v is None else torch.as_tensor(v).to(torch.complex128)
                 for v in (phi_boundary, sources, phi0, q0))
+            self._check_frequency(drivers, [
+                v.shape[:-1] for v in (phi_boundary, sources, phi0, q0) if v is not None])
         ctx = self._context(mode, dt, t, integration, history, drivers)
         requested = newton_kwargs.pop("method", layer.linear_solver)
         if requested == "cg":

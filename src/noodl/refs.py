@@ -511,15 +511,21 @@ class LayerRef:
             self.inactive_nodes = [nodes[i] for i in layer.inactive.tolist()]
             q_labels, q_alias = _edge_labels(net, layer.cols.tolist())
             meta = dict(quantity=self.quantity, unit=self.unit)
+            # A layer with dynamic laws (a capacitance, an inductance) starts every time
+            # step from its potentials and flows at the step start.
+            stored = _steps_from_state(layer)
             state["phi"] = Field(
                 f"{name}.phi", role="state", axis="node", labels=nodes,
                 aliases=_node_aliases(net, nodes),
-                ordering="full node order", required="optional", default=None,
-                description="solved potential (a warm start when given)", **meta, **common,
+                ordering="full node order", required="step" if stored else "optional",
+                default=None,
+                description="solved potential (the step start of its dynamic laws)" if stored
+                else "solved potential (a warm start when given)", **meta, **common,
             )
             state["q"] = Field(
                 f"{name}.q", role="state", axis="edge", labels=q_labels, aliases=q_alias,
-                ordering=f"edge order of kinds {tuple(layer.kinds)}", required="optional",
+                ordering=f"edge order of kinds {tuple(layer.kinds)}",
+                required="step" if stored else "optional",
                 default=0.0, description="solved branch flows",
                 unit=getattr(layer, "flow_unit", ""), **common,
             )
@@ -537,6 +543,15 @@ class LayerRef:
                 description="nodal injection (zero on boundary and inactive nodes)",
                 unit=getattr(layer, "flow_unit", ""), **common,
             )
+            frequency = getattr(layer, "frequency_key", None)
+            if frequency is not None:
+                inputs["frequency"] = Field(
+                    frequency, role="driver", axis="instance", labels=(), scalar=True,
+                    ordering="one value per instance", required="always", default=None,
+                    description="frequency of the sinusoidal steady state",
+                    quantity="frequency", unit="Hz",
+                    **common,
+                )
         elif kind == "transport":
             K = int(layer.n_species)
             species = getattr(layer, "species_names", None)
@@ -822,7 +837,8 @@ def state_from(
     A layer name may stand for that layer's own state key: `{"thermal": {"A": 293.15}}`
     means `{"thermal.x": ...}` for a transport layer and `{"<name>.s": ...}` for a
     allocation one. Raises `KeyError` if, after assembly, a key a time step needs (every
-    transport `"<layer>.x"`, allocation `"<layer>.s"` and closure-carried state key) is
+    transport `"<layer>.x"`, allocation `"<layer>.s"`, the `"<layer>.phi"` and
+    `"<layer>.q"` of a potential layer with dynamic laws, and closure-carried state key) is
     still missing, naming it and its order.
     """
     expanded: dict = {}
@@ -853,7 +869,15 @@ def initial_drivers(model: Model, *, values: Mapping | None = None) -> dict[str,
     return drivers_from(model, values or {}, base=base)
 
 
+def _steps_from_state(layer) -> bool:
+    """Whether a potential layer's step starts from its own state: dynamic laws, outside
+    a phasor layer (which takes no step)."""
+    return bool(getattr(layer, "dynamic", False)) and not getattr(layer, "phasor", False)
+
+
 def required_state_keys(model: Model) -> list[str]:
     """The state keys `Model.step` reads from the step-start state."""
     keys = [f"{n}.x" for n in model.transport] + [f"{n}.s" for n in model.allocation]
+    keys += [f"{n}.{s}" for n, layer in model.potential.items() if _steps_from_state(layer)
+             for s in ("phi", "q")]
     return keys + list(model.closure_state_keys)

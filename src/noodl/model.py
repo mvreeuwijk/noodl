@@ -624,6 +624,14 @@ class Model:
                     f"of a potential layer named in iterate_tol, and iterate_tol names none "
                     f"({sorted(self.iterate_tol)}; potential layers: {sorted(self.potential)})"
                 )
+            phasor = sorted(k for k in self.iterate_tol
+                            if k in self.potential and self.potential[k].phasor)
+            if phasor:
+                raise ValueError(
+                    f"Model: iterate_acceleration={iterate_acceleration!r} cannot mix the "
+                    f"complex potentials of the phasor layer(s) {phasor}; Anderson mixing is "
+                    f"real-valued -- use the relaxation (iterate_acceleration=None)"
+                )
             unset = sorted(k for k in self.iterate_tol
                            if k in self.potential and k not in self.iterate_flow_tol)
             if unset:
@@ -801,6 +809,35 @@ class Model:
             )
         return q
 
+    @staticmethod
+    def _circuit_kwargs(name: str, layer: PotentialFlowLayer, state: Mapping[str, Tensor],
+                        base: Mapping[str, Tensor], dt: float | None,
+                        t: float | None) -> dict:
+        """The solve keywords of a layer solved by Modified Nodal Analysis.
+
+        `q0`: the warm start of its implicit-law flows, from the fed state's `"<name>.q"`.
+        `t`: the time its laws are evaluated at -- the END of a step (`t + dt`, the time
+        the solved state belongs to), the given time of a steady solve, `None` without one.
+        On a step of a layer with dynamic laws (not a phasor layer, which takes no step),
+        `history` is the STEP-START state's `(phi, q)` -- `base`, never the fed state, so an
+        iterated coupling re-steps every pass from the same start -- and `dt` the step.
+        """
+        out: dict = {"t": t if dt is None or t is None else t + dt}
+        q_prev = state.get(f"{name}.q")
+        if q_prev is not None:
+            out["q0"] = q_prev[..., layer.implicit_edges]
+        if layer.dynamic and not layer.phasor and dt is not None:
+            missing = [k for k in (f"{name}.phi", f"{name}.q") if k not in base]
+            if missing:
+                raise KeyError(
+                    f"Model: state {missing} is required to step potential layer {name!r}, "
+                    f"whose dynamic laws start each step from the potentials and flows at "
+                    f"the step start (an initial point: layer.solve(..., mode='initial'))"
+                )
+            out["history"] = (base[f"{name}.phi"], base[f"{name}.q"])
+            out["dt"] = dt
+        return out
+
     # -------------------------------------------------------------------- pass
     def _pass(
         self, state, drivers, dt, solve_kwargs, *, step_from: State | None = None,
@@ -871,7 +908,9 @@ class Model:
             phi_prev = state.get(f"{name}.phi")
             phi0 = None if phi_prev is None else phi_prev[..., layer.interior]
             d: dict = {}
-            phi, q = layer.solve(pb, drv, sources, phi0=phi0, diagnostics=d, **solve_kwargs)
+            circuit = self._circuit_kwargs(name, layer, state, base, dt, t) if layer.mna else {}
+            phi, q = layer.solve(pb, drv, sources, phi0=phi0, diagnostics=d, **circuit,
+                                 **solve_kwargs)
             new[f"{name}.phi"], new[f"{name}.q"] = phi, q
             made += [f"{name}.phi", f"{name}.q"]
             diag[name] = d
@@ -1131,9 +1170,15 @@ class Model:
             boundary_transfers=boundary_transfers,
         )
 
-    def steady(self, state, drivers, *, diagnostics: dict | None = None, **solve_kwargs):
+    def steady(self, state, drivers, *, t: float | None = None,
+               diagnostics: dict | None = None, **solve_kwargs):
         """The quasi-steady state of every layer at `drivers` (transport layers solved to
         `rate == 0` rather than advanced).
+
+        `t` (optional) is the time of that state: closures receive it in their
+        `StepContext`, and the constitutive laws of a layer solved by Modified Nodal
+        Analysis are evaluated at it (a time-dependent source). A layer with dynamic laws is
+        solved at its operating point: a capacitance open, an inductance shorted.
 
         REACTIONS ARE NOT APPLIED. They are an operator splitting applied around a transport
         step (after it, or before it under `reaction_order="before_transport"`), so they
@@ -1146,7 +1191,7 @@ class Model:
         closure that integrates some state over an interval has no interval to integrate over
         at a quasi-steady state.
         """
-        return self._advance(state, drivers, None, diagnostics, solve_kwargs)
+        return self._advance(state, drivers, None, diagnostics, solve_kwargs, t=t)
 
     def _advance(
         self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None,
@@ -1404,10 +1449,15 @@ class Model:
             ]
             out_keys: list[str] = []
             adjoint_diag: dict = {}
+            # A phasor layer's complex `.phi`/`.q` enter the adjoint in their real view
+            # (real and imaginary parts as a trailing pair): its GMRES solve is real-valued.
+            complex_keys = {k for k in keys if certified_fed[k].is_complex()}
 
             def pass_fn(z: list[Tensor]) -> tuple[list[Tensor], list[Tensor]]:
                 f = dict(certified_fed)
                 f.update(carried)
+                z = [torch.view_as_complex(v.contiguous()) if k in complex_keys else v
+                     for k, v in zip(keys, z, strict=True)]
                 f.update(zip(keys, z, strict=True))
                 out, d, _ = self._pass(
                     f, drivers, dt, solve_kwargs, step_from=state, t=t,
@@ -1441,6 +1491,8 @@ class Model:
                         f"singular; a closure writing such a key must compute it rather "
                         f"than echo the state it was given"
                     )
+                z_next = [torch.view_as_real(n.resolve_conj()) if k in complex_keys else n
+                          for k, n in zip(keys, z_next, strict=True)]
                 return [out[k] for k in out_keys], z_next
 
             # `converged`'s shape IS the batch shape (it is judged per instance over every
@@ -1454,7 +1506,8 @@ class Model:
             # into another's.
             adjoint_report: dict = {}
             flat = differentiate_fixed_point(
-                [certified_fed[k] for k in keys], pass_fn, rtol=self.adjoint_rtol,
+                [torch.view_as_real(certified_fed[k].resolve_conj()) if k in complex_keys
+                 else certified_fed[k] for k in keys], pass_fn, rtol=self.adjoint_rtol,
                 where="Model coupling='iterate'",
                 batch_shape=tuple(converged.shape), report=adjoint_report,
             )
@@ -1500,6 +1553,12 @@ class Model:
         out: dict[str, Tensor] = {}
         for name, layer in self.potential.items():
             phi = state[f"{name}.phi"]
+            if layer.mna:
+                # Implicit-law flows are unknowns, not functions of `phi`: balance the
+                # state's own flows.
+                out[name] = layer.balance(phi, state[f"{name}.q"], drv.get(f"{name}.sources"),
+                                          drv)
+                continue
             out[name] = layer.residual(
                 phi[..., layer.interior], self._require(drv, f"{name}.phi_boundary"), drv,
                 drv.get(f"{name}.sources"),
@@ -1536,6 +1595,13 @@ class Model:
         """
         drv = self._apply_closures(state, drivers)
         owner = self.flow_layer_of[name]
+        if owner in self.potential and self.potential[owner].mna and f"{owner}.q" not in state:
+            raise KeyError(
+                f"Model: transport layer {name!r} takes its flows from potential layer "
+                f"{owner!r}, which is solved by Modified Nodal Analysis and cannot be solved "
+                f"here without its step history; give the state {owner + '.q'!r} (step the "
+                f"model first)"
+            )
         if owner in self.potential and f"{owner}.q" not in state:
             key = self.flow_driver_of[name]
             if key in drv:

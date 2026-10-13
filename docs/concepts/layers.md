@@ -303,6 +303,7 @@ State and driver keys are namespaced by layer name:
 | `"<layer>.sources"` | Nodal sources, **full node order** (driver, optional) |
 | `"<layer>.capacity"` | Per-step capacity override (driver, optional) |
 | `"<layer>.requests"` | An allocation layer's per-edge request (driver, required) |
+| `"<layer>.frequency"` | A phasor layer's frequency in Hz, one per instance (driver, required) |
 
 ### The order within a pass
 
@@ -312,6 +313,29 @@ the transport steps under `reaction_order="before_transport"`).
 The allocation step sits between the potential solves and the transport steps so that a
 transport layer reading `"<layer>.q"` sees a freshly written flow, whichever kind of layer wrote
 it.
+
+### Layers solved by Modified Nodal Analysis
+
+A potential layer whose constitutive laws include implicit, multi-port, dynamic or
+context-reading ones (`layer.mna`) is solved with the flows of its implicit-law edges as
+unknowns. `Model` hands such a layer what its laws need:
+
+- the warm start of those flows from `"<layer>.q"` in the state, when it is there;
+- the time the laws are evaluated at: the **end** of a step (`t + dt` for `step(..., t=t)`),
+  the `t` of `steady(..., t=t)`, or `None` when no time is given;
+- on a step of a layer with dynamic laws (`layer.dynamic`: a capacitance, an inductance), the
+  step-start `"<layer>.phi"` and `"<layer>.q"` as its history, and `dt`. Both keys are then
+  required in the state (`state_from` and `check` say so); give the first step a consistent
+  initial point, e.g. `layer.solve(..., mode="initial")`. The history is always the
+  step-start state, so `coupling="iterate"` re-steps every pass from the same start.
+
+`integration=` (`"trapezoidal"` or `"backward_euler"`) travels through `**solve_kwargs`.
+`steady` solves such a layer at its operating point (a capacitance open, an inductance
+shorted). `residuals` reports `layer.balance(phi, q, sources)`, the interior balance of the
+state's own flows. A phasor layer (`phasor=True`) has complex `"<layer>.phi"` and
+`"<layer>.q"` and reads the driver `layer.frequency_key`; the iterated coupling judges its
+convergence on the modulus of the change and differentiates its fixed point in the real view.
+Anderson mixing (`iterate_acceleration="anderson"`) is refused on a phasor layer.
 
 ### Closures
 
