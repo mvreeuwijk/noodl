@@ -44,6 +44,7 @@ from noodl.apps.sewer.quality import (
     henry_h2s,
     kla_h2s,
 )
+from noodl.apps.sewer.rdii import Rdii, RdiiInflow, RdiiModel, UnitHydrograph, UnitHydrographSet
 from noodl.apps.sewer.report import pipe_table, to_mg_per_litre, to_ppm
 from noodl.apps.sewer.runoff import (
     Adjustments,
@@ -74,4 +75,5 @@ __all__ = [
     "to_mg_per_litre", "to_ppm", "tree_steady", "unit_factors", "Transect", "Xsect",
     "Adjustments", "CurveNumber", "Evaporation", "GreenAmpt", "Horton", "Hydrology", "RainGage",
     "RunoffInflows", "RunoffModel", "Subareas", "Subcatchment",
+    "Rdii", "RdiiInflow", "RdiiModel", "UnitHydrograph", "UnitHydrographSet",
 ]

@@ -78,11 +78,15 @@ import dataclasses
 import datetime
 import math
 from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING
 
 import torch
 
 from noodl.apps.sewer.inflows import SAMPLE_OFFSET, InflowSchedule, TimeSeries
 from noodl.apps.sewer.xsect_tables import LCF, QCF
+
+if TYPE_CHECKING:
+    from noodl.apps.sewer.rdii import Rdii
 
 F64 = torch.float64
 Number = float | torch.Tensor
@@ -288,7 +292,8 @@ class Hydrology:
     `wet_step` and `dry_step` (s; `wet_step` already lowered to the smallest rain interval,
     SWMM's ``gage_validate``, and `dry_step` raised to it). `us_units` says whether the rain
     and evaporation values of the file are in inches (else millimetres). `ignore_rainfall` is
-    SWMM's IGNORE_RAINFALL."""
+    SWMM's IGNORE_RAINFALL. `rdii` is the file's RDII (`rdii.Rdii`; its unit hydrograph sets
+    read rain gages, which SWMM then counts as used), or ``None``."""
 
     gages: tuple[RainGage, ...]
     subcatchments: tuple[Subcatchment, ...]
@@ -300,10 +305,16 @@ class Hydrology:
     evaporation: Evaporation = Evaporation()
     adjustments: Adjustments = Adjustments()
     ignore_rainfall: bool = False
+    rdii: Rdii | None = None
 
     def __post_init__(self) -> None:
         gages = {g.name for g in self.gages}
         names = [s.name for s in self.subcatchments]
+        if self.rdii is not None:
+            for name in self.rdii.gage_names():
+                if name not in gages:
+                    raise ValueError(f"unit hydrograph set reads the rain gage {name!r}, "
+                                     f"which is not in `gages`")
         if len(set(names)) != len(names):
             raise ValueError("Hydrology: subcatchment names must be unique")
         for s in self.subcatchments:
@@ -1006,6 +1017,16 @@ class RunoffModel:
         self.subs = [_Sub(s, h) for s in h.subcatchments]
         gage_index = {g.name: i for i, g in enumerate(h.gages)}
         used = {gage_index[s.gage] for s in h.subcatchments}
+        if h.rdii is not None:
+            used |= {gage_index[g] for g in h.rdii.gage_names()}
+        if h.rdii is not None and any(f != 1.0 for f in h.adjustments.rainfall):
+            # SWMM's RDII processing leaves ``Adjust.rainFactor`` at the month of its last
+            # rain interval, and the runoff's gages read their first records with it
+            # (project_init does not reset it)
+            model = h.rdii.model(h)
+            if model.active:
+                model.run_to_end()
+                self.climate.rain_factor = model.rain_factor
         self.gages = [
             _GageState(g, i in used, h.ignore_rainfall, lambda: self.climate.rain_factor)
             for i, g in enumerate(h.gages)]
@@ -1273,12 +1294,17 @@ class RunoffDriver:
                              f"nodes")
         self.n = len(index)
         self.index = index
-        self.model = RunoffModel(inflows.hydrology)
+        h = inflows.hydrology
+        self.model = RunoffModel(h) if h.subcatchments else None
         self.runoff_nodes = frozenset(inflows._runoff_nodes)
+        self.rdii = h.rdii.model(h) if h.rdii is not None else None
+        self.rdii_nodes = frozenset(inflows._rdii_nodes)
 
     def runoff(self, t: float, step: float | None = None) -> dict[str, Number]:
         """`{node: m3/s}` of the runoff for the routing step that starts at `t` s with the
         length `step` s (``None``: the runoff at `t`)."""
+        if self.model is None:
+            return {}
         start_ms = round(t * 1000.0, 6)
         end_ms = round((t + step) * 1000.0, 6) if step is not None \
             else start_ms + 1.0
@@ -1292,6 +1318,10 @@ class RunoffDriver:
         if self.inflows.schedule is not None:
             base = self.inflows.schedule.flows(t)
         wet = self.runoff(t, step)
+        if self.rdii is not None:
+            for node, value in self.rdii.flows(t).items():
+                if node in self.rdii_nodes:
+                    wet[node] = wet[node] + value if node in wet else value
         q = torch.zeros(self.n, dtype=F64)
         for node, value in base.items():
             q[self.index[node]] = value
@@ -1310,14 +1340,19 @@ class RunoffInflows:
     ``driver(names)`` is the ``inflow`` callable of `simulate_dynamic_wave` (it makes a fresh
     `RunoffModel` each time, so every run starts from dry subcatchments). Runoff to a node
     that is not in `nodes` of the network (an outfall) is dropped by the reader, as the
-    dynamic wave ignores lateral inflow at an outfall."""
+    dynamic wave ignores lateral inflow at an outfall; so is RDII (`rdii.py`) to a node outside
+    `rdii_nodes`, which defaults to the nodes of ``hydrology.rdii``. The RDII of the file joins
+    the runoff in the driver, whether or not the file has subcatchments."""
 
     def __init__(self, hydrology: Hydrology, schedule: InflowSchedule | None = None,
-                 nodes: Sequence[str] | None = None) -> None:
+                 nodes: Sequence[str] | None = None,
+                 rdii_nodes: Sequence[str] | None = None) -> None:
         self.hydrology = hydrology
         self.schedule = schedule
         runoff_nodes = tuple(nodes) if nodes is not None else hydrology.outlet_nodes()
         self._runoff_nodes = runoff_nodes
+        self._rdii_nodes = (tuple(rdii_nodes) if rdii_nodes is not None
+                            else hydrology.rdii.nodes if hydrology.rdii is not None else ())
         self._cached: tuple[RunoffDriver, float] | None = None
 
     @property
@@ -1329,13 +1364,14 @@ class RunoffInflows:
     def nodes(self) -> tuple[str, ...]:
         """The nodes that receive an inflow: the schedule's, then the subcatchment outlets."""
         sched = self.schedule.nodes if self.schedule is not None else ()
-        return tuple(dict.fromkeys(list(sched) + list(self._runoff_nodes)))
+        return tuple(dict.fromkeys(list(sched) + list(self._runoff_nodes)
+                                   + list(self._rdii_nodes)))
 
     def with_duration(self, total_duration: float) -> RunoffInflows:
         """The same inflows with the hydrology cut at `total_duration` s (see
         `Hydrology.with_duration`)."""
         return RunoffInflows(self.hydrology.with_duration(total_duration), self.schedule,
-                             self._runoff_nodes)
+                             self._runoff_nodes, self._rdii_nodes)
 
     def driver(self, names: Sequence[str]) -> RunoffDriver:
         """``inflow(t, step)`` over the model's nodes `names`; see `RunoffDriver`."""
