@@ -72,8 +72,10 @@ pip install -e ".[dev]"
 pytest -q
 ```
 
-Slow tests — the performance budgets and scaling gates — are excluded by default and run with
-`pytest -m slow`. Tests needing an external engine carry the `external` marker and skip
+Slow tests — the long reference comparisons — are excluded by default and run with
+`pytest -m slow`. No test asserts a wall-clock time or a memory figure, since both depend on the
+machine; the performance budgets and scaling checks are reported by the scripts in `benchmarks/`
+(`python -m benchmarks.report_composed_scaling`, `--quick` for a short run). Tests needing an external engine carry the `external` marker and skip
 themselves when that engine is unavailable.
 
 ## GPU and dtype
