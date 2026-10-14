@@ -30,6 +30,7 @@ from noodl.apps.sewer.dynwave import (
 from noodl.apps.sewer.hydraulics import GEOMETRY_ALIASES, SewerHydraulics
 from noodl.apps.sewer.inflows import InflowSchedule
 from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
+from noodl.apps.sewer.runoff import Hydrology, RunoffInflows
 from noodl.apps.sewer.storage import validate_storage_curve
 from noodl.apps.sewer.xsect_spec import UNMODELLED_KINDS, Xsect
 from noodl.layers.transport import TransportLayer, active_interior
@@ -300,7 +301,9 @@ class SewerNetwork:
     `[TIMESERIES]`, `[PATTERNS]`, `[INFLOWS]` and `[DWF]`), ``None`` for constant
     `Manhole.inflow` only. When given, each scheduled manhole's `Manhole.inflow` is the value
     at the start of the run, and the model carries the schedule as ``model.inflow_schedule``;
-    `simulate_dynamic_wave` uses it when it is given no ``inflow``.
+    `simulate_dynamic_wave` uses it when it is given no ``inflow``. For a file with
+    `[SUBCATCHMENTS]` it is a `runoff.RunoffInflows`: the same schedule plus the runoff of the
+    subcatchments (`hydrology` is its `runoff.Hydrology`).
     """
 
     manholes: tuple[Manhole, ...]
@@ -313,7 +316,13 @@ class SewerNetwork:
     orifices: tuple[Orifice, ...] = ()
     weirs: tuple[Weir, ...] = ()
     outlets: tuple[Outlet, ...] = ()
-    inflows: InflowSchedule | None = None
+    inflows: InflowSchedule | RunoffInflows | None = None
+
+    @property
+    def hydrology(self) -> Hydrology | None:
+        """The subcatchment hydrology of the file (`runoff.Hydrology`: rain gages, subcatchments,
+        infiltration), or ``None`` when `inflows` carries no runoff."""
+        return getattr(self.inflows, "hydrology", None)
 
     @property
     def structures(self) -> dict[str, tuple]:

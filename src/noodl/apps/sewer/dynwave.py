@@ -2745,9 +2745,12 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
     inflow is its start), so ``inflow(t)`` is called once per step, with the step's start
     time. (SWMM's own clock reads 1 ms late, ``getDateTime`` adds 1 ms: `swmm5.c:1551`, so
     a [TIMESERIES] is sampled at ``t + 0.001`` s; a function standing in for one must add
-    that, as the verification test does.) A batched inflow expands an unbatched `state` to
-    the batch (a batch cannot be combined with a variable step: each member would need its
-    own). After every
+    that, as the verification test does.) A callable with a true ``step_aware`` attribute
+    (the runoff driver of a file with subcatchments, `noodl.apps.sewer.runoff`) is called
+    ``inflow(t, step)``, with the step's length in s as well, because SWMM takes the runoff
+    steps a routing step needs up to its end time (`execRouting`, swmm5.c:546). A batched
+    inflow expands an unbatched `state` to the batch (a batch cannot be combined with a
+    variable step: each member would need its own). After every
     step the carried keys are re-evaluated at the returned state. `record` may also name
     ``"sewer.overflow"`` (m3/s per junction, SWMM's flooding loss over each step:
     `DynamicWaveHydraulics.overflow`), which is not a state key, and the closure's
@@ -2816,19 +2819,28 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
                                  f"steps, {steps} asked")
         step_inflow = None
 
-    def inflow_at(k: int, t: float) -> Tensor | None:
+    step_aware = bool(getattr(step_inflow, "step_aware", False))
+
+    def inflow_at(k: int, t: float, step: float | None = None) -> Tensor | None:
         if series is not None:
             return series[k] if series.dim() == 3 else series
         if step_inflow is None:
             return None
-        value = torch.as_tensor(step_inflow(t), dtype=F64)
+        value = torch.as_tensor(step_inflow(t, step) if step_aware else step_inflow(t),
+                                dtype=F64)
         if value.dim() not in (1, 2) or value.shape[-1] != n:
             raise ValueError(
                 f"simulate_dynamic_wave: inflow(t={t}) must return (n,) or (B, n) with "
                 f"n = {n} nodes, got shape {tuple(value.shape)}")
         return value
 
-    first = inflow_at(0, 0.0)    # step 0's inflow, reused in the loop; it also sets the batch
+    first_step = None
+    if step_aware:          # a runoff driver needs the step's length: the first step's
+        first_step = (routing_step_size(hyd, None, state, None) if variable else fixed_dt)
+        if duration is not None and 1000.0 * first_step > 1000.0 * duration:
+            first_step = max(float(duration), 1.0 / 1000.0)
+    first = inflow_at(0, 0.0, first_step)   # step 0's inflow, reused in the loop; it also
+    #                                         sets the batch
     batch: tuple[int, ...] = ()
     if first is not None and first.dim() > 1:
         batch = tuple(first.shape[:-1])
@@ -2863,7 +2875,7 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
             next_ms = end_ms
         t = now_ms / 1000.0
         if inflow is not None:
-            drivers = dict(drivers, inflow=first if k == 0 else inflow_at(k, t))
+            drivers = dict(drivers, inflow=first if k == 0 else inflow_at(k, t, step))
         if staged:                                    # node.c:1449, 1456: the step's END
             drivers = dict(drivers,
                            outfall_stage=hyd.outfall_stage(next_ms / 1000.0, stage_functions))
