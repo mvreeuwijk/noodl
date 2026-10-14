@@ -38,11 +38,15 @@ for t in times:
 | [Sewers (SWMM)](applications/sewer.md) | `model, state, drivers = build_model(sewer_net, ...)`; a `routing="dynamic_wave"` network is run with `simulate_dynamic_wave(model, state, drivers, steps=...)` | `air`: `pressure`; `water_quality`, `air_quality`: `concentration`; dynamic wave: `water`: `head`, `flow` | inflows and temperatures are in the returned drivers |
 | [Water (EPANET)](applications/water.md) | `model, state, drivers = build_model(water_net, ...)` | `water`: `head`, `flow`; `quality`: `concentration` | tank levels and pump status are state, by tank and pump name |
 | [Allocation (WSIMOD)](applications/allocation.md) | `model, state, drivers = build_model(topology)` | `wsimod`: `storage`, `requests`, `flow` | nothing else |
+| [Electrical circuits](applications/electrical.md) | `model, state, drivers = build_model(circuit, ...)` | `electrical`: `voltage`, `flow` (current) | a transient starts from `initial_state(model, drivers)`; per-device values from `device_values` |
 
 Every application exports `build_model`, `initial_state` and `initial_drivers`, and
 `initial_state(model)`/`initial_drivers(model)` without `values` return its defaults.
 (The sewer's `initial_state` also takes the drivers, `initial_state(model, drivers=drivers,
 values=...)`, because its storage depends on them.)
+The electrical application is the exception, with no `initial_drivers`: a circuit has no state
+to set by name, so its `initial_state(model, drivers)` solves the consistent initial point from
+the devices' own initial values, and `build_model` returns every driver it needs.
 
 ## A complete example
 

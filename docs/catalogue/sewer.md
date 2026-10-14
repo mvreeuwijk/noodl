@@ -32,9 +32,9 @@ Descriptions of the physical objects a network is built from.
 | `Pipe` | A conduit from manhole `u` to `v`: `length` and `diameter` (m), Manning's `n` and bed `slope` (m/m). `inlet_offset` and `outlet_offset` (m) are the heights of the pipe invert above the invert of its `u` and `v` node (SWMM's link offsets). | `Pipe(name, u, v, length, diameter, n, slope, inlet_offset=0.0, outlet_offset=0.0, barrels=1, max_flow=None, initial_flow=0.0, flap_gate=False, flap_gate_reversed=False)` |
 | `SewerNetwork` | A gravity sewer: manholes, pipes, outfalls. Kinematic-wave and steady routing need a dendritic network (one outgoing pipe per manhole); dynamic-wave routing allows loops and flat pipes. | `SewerNetwork(manholes, pipes, outfalls, routing='kinematic_wave', notes=<factory>, geometry='analytic', dynamic_wave=DynamicWaveOptions(routing_step=20.0, inertial_damping='partial', normal_flow_limited='both', surcharge_method='extran', min_surface_area=None, head_tolerance=None, max_trials=None, variable_step=0.0, minimum_step=0.5, lengthening_step=0.0, lengthening_routing_step=None), orifices=(), weirs=(), outlets=())` |
 
-## Elements (branch laws)
+## Elements (constitutive laws)
 
-Flow through an edge as a function of the potential difference across it.
+The relation between the flow through an edge and the potential difference across it.
 
 | Name | What it does | How to call it |
 |---|---|---|

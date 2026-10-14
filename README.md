@@ -83,6 +83,7 @@ physics over the shared core:
 | Sewers | Gravity sewer hydraulics, headspace air, sulfide | Continuity on a tree for the water; Newton potential for the headspace air | `build_model` |
 | Water distribution | Pressurised mains, pumps, tanks, demand | Potential: Newton on hydraulic head | `build_model` |
 | Flow allocation | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer` |
+| Electrical circuits | Lumped circuits: DC, transient and AC | Potential: Modified Nodal Analysis on node voltage | `build_model`, `Circuit` |
 | Coupling | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
 
 ## Reading model files
@@ -120,7 +121,7 @@ module. Contributions: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status
 
-Version 0.1.0. The core and all six applications are implemented, each with its verification
+Version 0.1.0. The core and all seven applications are implemented, each with its verification
 cases in the test suite.
 
 ## The name

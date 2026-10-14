@@ -64,6 +64,12 @@ This follows `noodl.elements.conductance.Conductance`'s contract exactly:
 No other file changes. The law lives entirely in the test module (or, in a real project, in
 your own package) and needs no change to `noodl.elements`, `noodl.layers` or `noodl.model`.
 
+A law that is not a function of the potential difference (an ideal source, a flow-controlled
+law, a law with storage or one coupling several edges) subclasses `noodl.elements.ImplicitLaw`
+instead and implements `residual(dp, q, drivers, ctx)`; the layer then solves it by Modified
+Nodal Analysis. See
+[Implicit, coupled and dynamic constitutive laws](../concepts/elements.md#implicit-coupled-and-dynamic-constitutive-laws).
+
 ## Level 2: a new application
 
 A "new application" is nothing but a builder function returning `(model, state, drivers)` from

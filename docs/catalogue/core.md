@@ -32,9 +32,9 @@ The conservation layers and the model that steps them.
 | `TransportLayer`<br><small>`noodl.layers`</small> | dx/dt = M x + N x_b + sources / capacity on this layer's ACTIVE interior nodes. | `TransportLayer(net, name, *, capacity, flow_kind, boundary, n_species=1, carrier=1.0, transmission=None, kinetics=None, removal=None, conduction_kind=None, conductance=None, dilution=None, scheme='exact', linear_solver='auto', quantity='scalar', unit='', species_names=None, source_unit='', capacity_unit='', flow_unit='')` |
 | `CoupledModel`<br><small>`noodl.couple`</small> | Returned by `union`. `.step` takes and returns `{model_tag: State}` / `{model_tag: Drivers}` -- each model keeps its own dicts; nothing is merged. | `CoupledModel(models, links, aliases, substeps, *, relaxation=0.5, iterate_rtol=1e-08, iterate_atol=0.0, iterate_max=50, adjoint_rtol=1e-10)` |
 
-## Elements (branch laws)
+## Elements (constitutive laws)
 
-Flow through an edge as a function of the potential difference across it.
+The relation between the flow through an edge and the potential difference across it.
 
 | Name | What it does | How to call it |
 |---|---|---|
@@ -45,7 +45,6 @@ Flow through an edge as a function of the potential difference across it.
 | `Duct`<br><small>`noodl.elements`</small> | Colebrook duct: F(dp) with friction from the Colebrook equation, laminar below Re_t. Length `L`, diameter `D` and roughness `eps` (m); `sum_C` the dimensionless sum of dynamic loss coefficients; `A` (m2) defaults to the circular area; `rho` (kg/m3) and `mu` (Pa s); the flow is a mass flow in kg/s. | `Duct(L, D, eps, sum_C=0.0, *, A=None, Re_t=2000.0, rho=1.2041, mu=1.81625e-05, n_iter=4, kind='duct', learnable=False)` |
 | `FanCurve`<br><small>`noodl.elements`</small> | Cubic pressure-flow curve inverted for q given dp on [0, q_max]: `coeffs` are (a0, a1, a2, a3) of P(q) = a0 + a1 q + a2 q^2 + a3 q^3 in Pa for q in the flow unit, and `q_max` is the largest flow the curve covers, in that unit. | `FanCurve(coeffs, q_max, *, kind='airpath', learnable=False)` |
 | `FixedFlow`<br><small>`noodl.elements`</small> | q = q0 regardless of dp (`q0` in the flow unit); dflow = 0; linear_init = (q0, 0). | `FixedFlow(q0, *, kind='airpath', learnable=False)` |
-| `ImplicitLaw`<br><small>`noodl.elements`</small> | A constitutive law written as a relation `residual(dp, q, drivers, ctx) = 0`. | `ImplicitLaw(kind)` |
 | `OpenDoor`<br><small>also `MBLDoorOpen`</small><br><small>`noodl.elements`</small> | ``Buildings.Airflow.Multizone.DoorOpen``: one direction of the always-open door. | `OpenDoor(*, direction, src, tgt, medium, wOpe=0.9, hOpe=2.1, CD=0.65, m=0.5, dp_turbulent=0.01, T_key='T', kind='door', learnable=False)` |
 | `OperableDoor`<br><small>also `MBLDoorOperable`</small><br><small>`noodl.elements`</small> | ``Buildings.Airflow.Multizone.DoorOperable``: the door blended between open and closed by the opening signal ``y`` read from ``drivers[y_key]``. | `OperableDoor(*, direction, src, tgt, medium, y_key, LClo, wOpe=0.9, hOpe=2.1, CDOpe=0.65, mOpe=0.5, mClo=0.65, dpCloRat=4.0, CDCloRat=1.0, dp_turbulent=0.01, T_key='T', kind='door', learnable=False)` |
 | `OperableDoorCompartment`<br><small>also `MBLDoorCompartmentOperable`</small><br><small>`noodl.elements`</small> | One compartment of ``Buildings.Airflow.Multizone.DoorDiscretizedOperable`` per edge, blended between the open door and the closed crack by ``y = drivers[y_key]``. | `OperableDoorCompartment(*, src, tgt, medium, y_key, AOpe, LClo, nCom, CDOpe=0.65, CDClo=0.65, CDCloRat=1.0, dpCloRat=4.0, mOpe=0.5, mClo=0.65, dp_turbulent=0.01, vZer=0.001, T_key='T', Xw_key='X_w', p_key='p_abs', kind='door', learnable=False)` |
@@ -128,5 +127,6 @@ Subclass these to add an element, drive, closure, reaction or node source; see [
 | `Closure`<br><small>`noodl.model`</small> | state, drivers -> driver updates (a mapping of NEW driver values, merged in order). | `Closure(...)` |
 | `Reaction`<br><small>`noodl.layers`</small> | A local, per-node nonlinear map applied to the state after a transport step (or before it, under `Model(reaction_order="before_transport")`). | `Reaction(...)` |
 | `Element`<br><small>`noodl.elements`</small> | Abstract branch law: flow as a function of potential difference. | `Element(kind)` |
+| `ImplicitLaw`<br><small>`noodl.elements`</small> | A constitutive law written as a relation `residual(dp, q, drivers, ctx) = 0`. | `ImplicitLaw(kind)` |
 | `Drive`<br><small>`noodl.drives`</small> | A drive must read every differentiable quantity from `drivers`, never own one. | `Drive(...)` |
 | `NodeSource`<br><small>`noodl.nodesources`</small> | Base class: a potential-dependent withdrawal at a fixed set of nodes. | `NodeSource(nodes)` |

@@ -1,18 +1,21 @@
 # Elements and drives
 
-An **element** is the constitutive law on an edge kind: given the potential difference across
-the edge, it returns the flow along it. A **drive** is a term added to that potential
-difference before the element sees it — buoyancy, wind pressure, interfacial drag.
+An **element** is the constitutive law on an edge kind: the relation between the potential
+difference across each edge of that kind and the flow along it. Most constitutive laws give the
+flow as a function of the potential difference; some are relations between the two, with the
+flow an unknown (an ideal source, an inductance), and some couple several edges (a
+transformer's two windings). A **drive** is a term added to that potential difference before
+the constitutive law sees it — buoyancy, wind pressure, interfacial drag.
 
 Together they are the replaceable part of the framework. The network, the conservation law and
 the solve are fixed; the element is where your physics goes.
 
 ## The `Element` contract
 
-`noodl.elements.base.Element` subclasses `torch.nn.Module`. An element owns one edge `kind` and
-must provide three things:
+`noodl.elements.base.Element` subclasses `torch.nn.Module`. An element owns one edge `kind`.
+A constitutive law in the default, potential-controlled form provides three things:
 
-```python
+```py
 class Element(torch.nn.Module):
     kind: str
 
@@ -23,7 +26,7 @@ class Element(torch.nn.Module):
         """Its derivative, d(flow)/d(dp). This is the Jacobian the Newton solve assembles."""
 
     def linear_init(self, drivers: Mapping | None = None) -> tuple[Tensor, Tensor]:
-        """A linear surrogate (slope, offset) used to produce the Newton starting point."""
+        """A linear surrogate (offset c, slope k), q ~ c + k dp, for the starting point."""
 ```
 
 `dflow` is supplied analytically rather than taken from autograd because it is assembled into
@@ -48,7 +51,7 @@ step spoils the error expansion that Richardson extrapolation relies on.
 An element's differentiable quantities must be **registered parameters**, constructed with
 `learnable=True`:
 
-```python
+```py
 leak = PowerLaw(C=torch.tensor(0.01), n=torch.tensor(0.65), learnable=True)
 ```
 
@@ -86,7 +89,11 @@ law each one evaluates and how it differs from its CONTAM counterpart.
 
 Applications add their own: the water application contributes `HazenWilliams`,
 `CompositeDarcyWeisbach`, `PumpCurve` and `MinorLoss`; the sewer application contributes
-`Headspace`.
+`Headspace`; the [electrical application](../applications/electrical.md) contributes the circuit
+laws `Resistance`, `Capacitance`, `Inductance`, `PrescribedVoltage`, `PrescribedCurrent`,
+`JunctionDiode`, `SwitchedConductance`, `TransformerRatio`, `MutualInductance` and
+`DependentSource`, most of them in the implicit, multi-port or dynamic forms described
+[below](#implicit-coupled-and-dynamic-constitutive-laws).
 
 **Pre-rename names.** Identifiers now say what an element does physically, not which tool it
 comes from. The earlier names still import, as aliases of the same objects:
@@ -133,7 +140,7 @@ class Squared(Element):
 
     def __init__(self, k, *, kind="pipe", learnable=False):
         super().__init__(kind)
-        self.k = self._param("k", k, learnable)
+        self.k = self._param(k, learnable)
 
     def flow(self, dp, drivers=None):
         return self.k * torch.sign(dp) * dp**2
@@ -142,7 +149,8 @@ class Squared(Element):
         return 2.0 * self.k * torch.abs(dp)
 
     def linear_init(self, drivers=None):
-        return self.k, torch.zeros_like(self.k)
+        # (offset, slope) of the tangent at dp = 0: this law is flat there
+        return torch.zeros_like(self.k), torch.zeros_like(self.k)
 ```
 
 Two rules worth stating explicitly, because both produce wrong answers rather than errors:
@@ -157,6 +165,110 @@ Two rules worth stating explicitly, because both produce wrong answers rather th
 - **Keep `dflow` consistent with `flow`.** Nothing checks them against each other at runtime. An
   inconsistent pair converges to the right answer slowly, or to a wrong one confidently. Test it
   with `torch.autograd.gradcheck` against `flow`.
+
+## Implicit, coupled and dynamic constitutive laws
+
+The contract above is the potential-controlled form, `q = g(dp)`: one flow per edge, a function
+of that edge's own potential difference. Every built-in airflow, water and sewer law has it, and
+a layer whose laws all have it is solved by nodal analysis. Five class-level declarations on
+`Element` describe the other cases; a `PotentialFlowLayer` with any of them is solved by
+[Modified Nodal Analysis](layers.md#modified-nodal-analysis-implicit-coupled-and-dynamic-laws).
+
+| Declaration | Default | Meaning |
+|---|---|---|
+| `law_form` | `"potential"` | `"potential"`: `flow(dp, drivers) -> q`. `"implicit"`: the law is a relation `residual(dp, q, drivers, ctx) = 0` and the flow of each of its edges is an unknown of the layer. |
+| `ports` | `1` | The edges of the kind form consecutive groups of `ports` edges, in the order they were added; the law may couple the edges within a group (a transformer's primary and secondary), never across groups. |
+| `dynamic` | `False` | The law stores (a capacitance, an inductance): it reads its step-start values from the context and implements every mode below. |
+| `contextual` | `False` | `flow` takes the `LawContext` as a third argument (a time- or frequency-dependent potential-controlled law, such as a current source with a waveform). Implicit laws are always contextual. |
+| `phasor_capable` | `False` | The law accepts complex `dp` and `q` (a linear law with real or complex coefficients, or a law written for phasors). Only such laws are allowed in a phasor layer. |
+
+**The two forms.** A potential-controlled law is the nodal half of circuit theory: its flow is
+eliminated in favour of the potentials. An implicit law covers what cannot be written that way:
+a flow-controlled law `dp = h(q)`, an ideal potential source `dp = V` (no flow is a function of
+`dp`), an ideal constraint inside a multi-port law, and a law whose flow and potential are
+related through stored state. The base class `ImplicitLaw` sets `law_form = "implicit"` and
+`contextual = True`; a subclass implements `residual`, which returns one value per edge, with
+the shape of `dp`. An implicit law has no `flow`: its flow is read from the layer's solution.
+
+A loss given as potential difference against flow, `dp = r q |q|`, in series with a linear
+conductance, between two prescribed potentials:
+
+```python
+import torch
+
+from noodl.elements import Conductance, ImplicitLaw
+from noodl.layers.potential import PotentialFlowLayer
+from noodl.topology import Network
+
+F64 = torch.float64
+
+
+class QuadraticLoss(ImplicitLaw):
+    """A loss given as potential difference against flow: dp = r q |q|."""
+
+    def __init__(self, r, *, kind="loss", learnable=False):
+        super().__init__(kind)
+        self.r = self._param(r, learnable)
+
+    def residual(self, dp, q, drivers, ctx):
+        return dp - self.r * q * q.abs()
+
+
+net = Network(dtype=F64)
+for node in ("in", "mid", "out"):
+    net.add_node(node)
+net.add_edge("in", "mid", kind="loss")
+net.add_edge("mid", "out", kind="pipe")
+layer = PotentialFlowLayer(
+    net, "w",
+    [QuadraticLoss(torch.tensor(2.0, dtype=F64)),
+     Conductance(torch.tensor(1.0, dtype=F64), kind="pipe")],
+    boundary=["in", "out"],
+)
+phi, q = layer.solve(torch.tensor([10.0, 0.0], dtype=F64))
+print(layer.mna, layer.implicit_edges.tolist())
+print(f"phi_mid = {float(phi[1]):.6f}, q = {[round(v, 9) for v in q.tolist()]}")
+```
+
+```text
+True [0]
+phi_mid = 2.000000, q = [2.0, 2.0]
+```
+
+The flow satisfies `2 q^2 + q = 10`, so `q = 2` and `phi_mid = 2`. `implicit_edges` lists the
+edges whose flow is an unknown, in layer edge order.
+
+**The law context.** A contextual law receives a `LawContext` (`noodl.elements.base`), a frozen
+dataclass the layer builds for every solve:
+
+| Field | Meaning |
+|---|---|
+| `mode` | `"dc"` (the steady operating point), `"initial"` (the consistent initial point), `"transient"` (one implicit step) or `"phasor"` (the sinusoidal steady state) |
+| `dt` | The step length (transient only, else `None`) |
+| `t` | The evaluation time: the END of a transient step, the given time otherwise; `None` when the caller tracks no clock |
+| `integration` | `"trapezoidal"` (default) or `"backward_euler"`; read in the transient mode |
+| `dp_prev`, `q_prev` | This kind's own potential differences and flows at the step start (transient only) |
+| `omega` | The angular frequency `2 pi f`, one per instance (phasor only) |
+
+A dynamic law implements each mode as a companion form. The capacitance of the electrical
+application, `q = C d(dp)/dt`:
+
+```py
+def residual(self, dp, q, drivers, ctx):
+    if ctx.mode == "dc":
+        return q                                    # no current at rest
+    if ctx.mode == "initial":
+        return dp - self.v0                         # hold the initial potential difference
+    if ctx.mode == "phasor":
+        return q - 1j * ctx.omega * self.C * dp
+    if ctx.integration == "backward_euler":
+        return q - self.C * (dp - ctx.dp_prev) / ctx.dt
+    return q + ctx.q_prev - 2.0 * self.C / ctx.dt * (dp - ctx.dp_prev)   # trapezoidal
+```
+
+A dynamic law is implicit in every mode, so the layer's unknowns are the same whatever the mode.
+A multi-port law (`ports = 2`) receives the edges of all its groups together and pairs them
+itself: `dp.unflatten(-1, (-1, 2))` gives each group's `(port 1, port 2)`.
 
 ## Drives
 

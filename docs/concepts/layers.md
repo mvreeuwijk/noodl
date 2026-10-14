@@ -14,7 +14,7 @@ one graph.
 
 | # | Mode | The flow comes from | Implemented by |
 |---|---|---|---|
-| 1 | **Potential solve** | Newton's method on a nodal conservation residual: $A_I\,g(A^\top\phi) = s_I$ | `PotentialFlowLayer` |
+| 1 | **Potential solve** | Newton's method on a nodal conservation residual: $A_I\,g(A^\top\phi) = s_I$ (with the flows of implicit constitutive laws as extra unknowns: Modified Nodal Analysis) | `PotentialFlowLayer` |
 | 2 | **Driver-prescribed** | Handed in directly as a driver value | any `TransportLayer` with no potential owner |
 | 3 | **Closure-computed** | Computed from other state by an arbitrary function | a closure writing `"<layer>.q"` |
 | 4 | **Clip-and-allocate** | A *request*, clipped against arc capacity and receiver headroom — no potential variable anywhere | `AllocatedFlowLayer` |
@@ -53,6 +53,7 @@ layer = PotentialFlowLayer(
     linear_solver="auto",       # 'auto' | 'cg' | 'gmres' | 'direct' | 'sparse_direct'
     quantity="pressure",        # metadata a Model reports
     unit="Pa",
+    phasor=False,               # True: complex sinusoidal steady state (see below)
 )
 
 phi, q = layer.solve(phi_boundary, drivers, sources=sources, differentiable=True)
@@ -69,6 +70,86 @@ expose the Newton pieces directly; `kind_slice(kind)` and `element_for(kind)` lo
 `diagnostics`, when you pass a dict, is filled with `newton_iterations`, `linear_iterations`,
 `method`, `backend`, `converged` and `residual_norm`. `method` is what you asked for; `backend`
 is what actually ran. They are deliberately separate — see [Solvers](solvers.md#solve-the-auto-table).
+
+## Modified Nodal Analysis: implicit, coupled and dynamic laws
+
+A `PotentialFlowLayer` whose constitutive laws are all potential-controlled, single-edge and
+static is solved by nodal analysis, as above. A layer with any law that is implicit
+(`law_form = "implicit"`), multi-port (`ports > 1`), dynamic or contextual, or a layer built with
+`phasor=True`, is solved by **Modified Nodal Analysis** instead (`layer.mna` is True); the
+declarations are described under
+[Implicit, coupled and dynamic constitutive laws](elements.md#implicit-coupled-and-dynamic-constitutive-laws).
+The [electrical application](../applications/electrical.md) is built on it; the same machinery
+serves any domain with ideal sources, flow-controlled laws or storage on its edges.
+
+**The system.** The unknowns are the interior potentials and the flows of the implicit-law edges
+(`layer.implicit_edges`, in layer edge order). The residual rows are the conservation balance at
+the interior nodes, $A_I q - s_I$ (plus node sources), where $q$ is the law's flow on a
+potential-controlled edge and the unknown on an implicit one, followed by every implicit law's
+own residual. The Jacobian is assembled as a sparse, nonsymmetric matrix from each law's local
+blocks (forward-mode derivatives, one per port), so a multi-port law couples the edges of its
+group exactly. `solve` still returns `(phi, q)`, with `q` covering every edge.
+
+**Construction checks**, each raising `ValueError` naming the layer and the kind or nodes:
+
+- every kind's edge count is a multiple of its law's `ports`;
+- every connected part of the layer's edges contains a boundary node (a ground): a part with
+  none (a transformer secondary left floating) has undetermined potentials;
+- a dynamic kind carries no drive (its step-start potential differences are taken without one);
+- `linear_solver="cg"` is refused (the system is not symmetric positive definite);
+- on a phasor layer, every law is `phasor_capable` and there are no node sources.
+
+A system that is structurally sound but singular (a loop of ideal potential sources, a cut set
+of flow sources, a part reached only through flow-prescribed edges) raises a `RuntimeError` at
+the solve naming the layer and its implicit kinds. Under `on_failure="return"` that singularity
+shows only as `converged=False` in `diagnostics`.
+
+The nodal-only methods (`flows`, `dflows`, `residual`, `jacobian`, `linear_init`, `adjoint`)
+assume every flow is a function of its own edge's potential difference and raise `TypeError` on
+such a layer; read the flows from `solve`'s `q`, and the balance from `balance(phi, q, sources)`.
+
+### The solve keywords
+
+| Keyword | Meaning |
+|---|---|
+| `mode` | `None` (default): `"transient"` when `dt` is given, `"dc"` otherwise. `"dc"`: the steady operating point. `"initial"`: the consistent initial point (each storage law at its initial value; no `dt`). A phasor layer is always `"phasor"`. |
+| `dt` | One implicit step of this length (s). |
+| `t` | The evaluation time, the END of the step on a transient (a time-dependent source is evaluated there); `None` when untracked. |
+| `history` | `(phi, q)` at the step start, full-node potentials and every edge's flow, as `solve` returns them. Required on a step of a layer with a dynamic law. |
+| `integration` | `"trapezoidal"` (default) or `"backward_euler"`. |
+| `phi0`, `q0` | Warm start of the interior potentials and of the implicit-edge flows; zeros otherwise. |
+
+A layer solved by nodal analysis accepts `mode`, `dt`, `t`, `history`, `integration` and `q0`
+and ignores them (`phi0` is its own warm start). A phasor layer ignores `integration` and
+refuses `dt`, `history` and any mode but `"phasor"`. On the differentiable path (the default)
+gradients reach `history` too, so a chain of steps back-propagates through time.
+
+**Linear solver.** `linear_solver="auto"` on such a layer factorises: SciPy's sparse LU
+(`"sparse_direct"`, per instance) when SciPy is importable and the flat batch is at most 32
+instances, batched dense LU (`"direct"`) otherwise. It never picks GMRES (the system is
+indefinite and badly scaled, with potentials and flows in one vector) and refuses CG. An
+explicit `"gmres"`, `"direct"` or `"sparse_direct"` is honoured. `diagnostics["method"]` is the
+method requested and `diagnostics["backend"]` the one that ran.
+
+### Phasor layers
+
+`PotentialFlowLayer(..., phasor=True)` solves the sinusoidal steady state: `phi`, `q`, the
+boundary potentials and the warm starts are complex (complex128). The frequency in Hz comes from
+the driver `layer.frequency_key` (`"<name>.frequency"`, one value per instance) and reaches the
+laws as `ctx.omega = 2 pi f`. Each complex unknown is solved as its (real, imaginary) pair, so a
+law that is not holomorphic in `dp` (a constant-power load, `q = conj(S / dp)`) is solved
+exactly, and the real solver machinery serves unchanged. A load is an edge to ground (node
+sources are refused). `power_residual` is then the complex power balance, real and imaginary
+parts both zero at a solution: Tellegen's theorem for phasors.
+
+The initial guess is zero. A law that is singular or flat at `dp = 0`, such as a constant-power
+load, needs a warm start: pass `phi0` (for example every interior potential at the nominal
+source voltage).
+
+### On a `Model`
+
+`Model` gives such a layer its history, time and warm start; see
+[Layers solved by Modified Nodal Analysis](#layers-solved-by-modified-nodal-analysis) below.
 
 ## `TransportLayer`
 
@@ -153,11 +234,6 @@ on the `on_failure="return"` early-return path (which runs outside the different
 `no_grad`, unlike `step`'s ordinary forward/backward) falls back to `gmres` silently, since an
 explicit `sparse_direct` there would otherwise raise for a reason the caller did not ask for.
 `diagnostics["linear"]["backend"]` reports which backend actually ran on every solve.
-
-## Flow-controlled, coupled and dynamic laws
-
-Flow-controlled, coupled and dynamic constitutive laws are solved by `PotentialFlowLayer` itself;
-see Modified Nodal Analysis below.
 
 ## `Reaction`
 
@@ -303,7 +379,10 @@ unknowns. `Model` hands such a layer what its laws need:
 
 `integration=` (`"trapezoidal"` or `"backward_euler"`) travels through `**solve_kwargs`.
 `steady` solves such a layer at its operating point (a capacitance open, an inductance
-shorted). `residuals` reports `layer.balance(phi, q, sources)`, the interior balance of the
+shorted). A layer with contextual laws but no dynamic one (a time-dependent source and
+resistors, no storage) takes no history: on a step it is solved at its operating point at the
+step end, `t + dt`, with `ctx.mode == "dc"` and `ctx.dt` `None`, which is exact for a layer that
+stores nothing. `residuals` reports `layer.balance(phi, q, sources)`, the interior balance of the
 state's own flows. A phasor layer (`phasor=True`) has complex `"<layer>.phi"` and
 `"<layer>.q"` and reads the driver `layer.frequency_key`; the iterated coupling judges its
 convergence on the modulus of the change and differentiates its fixed point in the real view.

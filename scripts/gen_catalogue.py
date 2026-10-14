@@ -2,7 +2,7 @@
 
 One page per application plus one for the core library. Every public name (the module's
 `__all__`) is listed under its role -- set-up, network components, elements, drives,
-closures, reactions, sources, files, functions, constants -- with the first line of its
+closures, reactions, sources, waveforms, files, functions, constants -- with the first line of its
 docstring and its call signature. A name exported twice for one object (the old,
 model-named spelling kept as an alias of the physical name) is listed once, with its
 aliases.
@@ -61,13 +61,14 @@ ROLES = [
     ("component", "Network components",
      "Descriptions of the physical objects a network is built from."),
     ("layer", "Layers and model", "The conservation layers and the model that steps them."),
-    ("element", "Elements (branch laws)",
-     "Flow through an edge as a function of the potential difference across it."),
+    ("element", "Elements (constitutive laws)",
+     "The relation between the flow through an edge and the potential difference across it."),
     ("drive", "Drives", "Terms added to an edge's potential difference (stack, wind, fans)."),
     ("closure", "Closures",
      "Functions of the state that compute drivers each step (densities, flows, levels)."),
     ("reaction", "Reactions", "Transformations applied to transported species each step."),
     ("source", "Sources", "Nodal sources and withdrawals."),
+    ("waveform", "Waveforms", "Time signals a source follows."),
     ("file", "Files", "Readers and writers of other tools' file formats."),
     ("class", "Other classes", "Supporting types."),
     ("function", "Functions", "Calculations and helpers."),
@@ -76,7 +77,7 @@ ROLES = [
      "Subclass these to add an element, drive, closure, reaction or node source; see "
      "[Extending noodl](../development/extending.md)."),
 ]
-BASE_CLASSES = {"Element", "Drive", "Closure", "Reaction", "NodeSource"}
+BASE_CLASSES = {"Element", "ImplicitLaw", "Drive", "Closure", "Reaction", "NodeSource"}
 CONSTANT_ALIASES = {
     "KAPPA": "KAPPA_040", "KAPPA_MUNICH": "KAPPA_041",
     "GAMMA_E": "EULER_GAMMA_TRUNCATED", "SIRANE_EXCHANGE": "EXCHANGE_SIGMA_W_RATIO",
@@ -93,6 +94,14 @@ ATTRIBUTE_MODULES = {"building_physics": "noodl.apps.building_physics.attributes
 """Pages whose application reads node and edge attributes off the network: the module
 defining `NODE_ATTRIBUTES` and `EDGE_ATTRIBUTES`."""
 ATTRIBUTE_TABLE_NAMES = {"NODE_ATTRIBUTES", "EDGE_ATTRIBUTES"}
+
+MODULE_ROLES = {
+    "noodl.apps.electrical.circuit": "component",
+    "noodl.apps.electrical.waveforms": "waveform",
+}
+"""Modules whose public classes all take one role, whatever their names: a circuit's devices
+(`VoltageSource`, `ControlledSource`) are network components, not nodal sources, and its
+waveforms are a role of their own."""
 
 SETUP_NAMES = {"build_model", "initial_state", "initial_drivers", "project_to_model",
                "drivers_from", "state_from", "check_setup"}
@@ -147,6 +156,8 @@ def _role(name: str, obj) -> str:
 
     if name in SETUP_NAMES:
         return "setup"
+    if inspect.isclass(obj) and obj.__module__ in MODULE_ROLES:
+        return MODULE_ROLES[obj.__module__]
     if not (inspect.isclass(obj) or inspect.isfunction(obj) or inspect.isbuiltin(obj)):
         return "constant"
     if inspect.isclass(obj):

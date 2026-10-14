@@ -22,11 +22,13 @@ ROOT = Path(__file__).resolve().parent.parent
 PAGES = [
     "usage.md",
     "concepts/components.md",
+    "concepts/elements.md",
     "applications/building_physics.md",
     "applications/street_aq.md",
     "applications/sewer.md",
     "applications/water.md",
     "applications/allocation.md",
+    "applications/electrical.md",
 ]
 FIXTURES = ["sewer/*.inp", "water/*.inp", "wsimod/*.json"]
 BLOCK = re.compile(r"```(python|text)\n(.*?)```", re.S)

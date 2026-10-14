@@ -22,7 +22,7 @@ Generated from the package's own docstrings. For the ideas behind these objects,
 
 ::: noodl.elements.base
     options:
-      members: [Element]
+      members: [Element, ImplicitLaw, LawContext]
 
 Elements are grouped below by the physics they express, as in
 [Airflow elements](applications/building_physics.md#airflow-elements).
@@ -141,6 +141,7 @@ Elements are grouped below by the physics they express, as in
 ::: noodl.operators.dense
 ::: noodl.operators.graph
 ::: noodl.operators.advection
+::: noodl.operators.mna
 
 ## Solvers
 
@@ -224,6 +225,13 @@ Elements are grouped below by the physics they express, as in
 ### Allocation (WSIMOD)
 
 ::: noodl.apps.wsimod.network
+
+### Electrical circuits
+
+::: noodl.apps.electrical.circuit
+::: noodl.apps.electrical.analysis
+::: noodl.apps.electrical.laws
+::: noodl.apps.electrical.waveforms
 
 ### Shared
 

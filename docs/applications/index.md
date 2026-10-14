@@ -14,11 +14,12 @@ with `initial_state(model, values=...)` and `initial_drivers(model, values=...)`
 | [Sewers](sewer.md) | Gravity hydraulics, headspace air, sulfide | Continuity on a tree for the water (kinematic wave), or Newton potential on head (dynamic wave); Newton potential for the headspace air | `build_model` |
 | [Water distribution](water.md) | Pressurised mains, pumps, tanks, demand | Potential: Newton on hydraulic head | `build_model` |
 | [Flow allocation](allocation.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer`, `wsimod.build_model` |
+| [Electrical circuits](electrical.md) | Lumped circuits: DC, transient and AC | Potential: Modified Nodal Analysis on node voltage | `build_model`, `Circuit` |
 | [Coupling](coupling.md) | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
 
 ![The four flow-determination modes](../assets/four-modes.svg)
 
-## Why these six
+## Why these seven
 
 They are not a feature list. They are the argument that the factorisation works.
 
@@ -36,6 +37,9 @@ all four:
   potential solve.
 - The **flow allocation** application has no potential and no continuity solve — a
   request, clipped against capacity and headroom.
+- The **electrical circuits** application solves for a potential, the node voltage, with the
+  currents of ideal sources, inductors and transformers as extra unknowns: Modified Nodal
+  Analysis, the full form of the nodal solve the building and water applications use.
 
 And they share machinery in ways that would be coincidence if the abstraction were wrong. The
 sewer's headspace air layer drives its Newton solve with the *same* `Stack` buoyancy term the
@@ -51,7 +55,7 @@ Each application page ends with a **Verification** section: code-to-code compari
 established reference models that solve the same equations (CONTAM and ContamX and the Modelica
 Buildings Library for building physics, MUNICH for street air quality, SWMM through pyswmm for
 sewers, EPANET 2.2 through WNTR for water distribution, WSIMOD for flow allocation), plus
-checks against analytical solutions, conservation identities and finite-difference gradients.
+checks against analytical solutions (the only checks of the electrical application so far), conservation identities and finite-difference gradients.
 
 A comparison of this kind runs noodl physics and a reference model on the same input and compares the
 outputs at a stated tolerance. It shows that noodl physics solves the same model as the reference; it is
@@ -80,7 +84,7 @@ why. Several of the remaining discrepancies are the *reference*'s approximation 
 
 ## Starting a new application
 
-The six are also a template. A new application is:
+The seven are also a template. A new application is:
 
 1. A **network builder** — domain dataclasses plus a function that turns them into a `Network`
    with the right edge kinds and attributes.

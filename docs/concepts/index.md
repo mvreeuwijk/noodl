@@ -31,7 +31,7 @@ Model              several layers on one network, stepped together
 
 Read it bottom-up and it is a simulator. Read it top-down and it is a factorisation: the
 framework owns the graph, the conservation law and the solve; your problem owns the element
-laws, the drives and the closures. Everything domain-specific in the six
+laws, the drives and the closures. Everything domain-specific in the seven
 [applications](../applications/index.md) lives in those last three boxes.
 
 ![The noodl physics model stack](../assets/framework-overview.svg)

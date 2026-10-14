@@ -99,6 +99,17 @@ def test_generator_signatures_roles_and_summaries():
     assert gen._summary(bp.initial_drivers).endswith(".")
 
 
+def test_circuit_devices_are_components_and_waveforms_have_their_own_role():
+    from noodl.apps import electrical as el
+
+    assert gen._role("ControlledSource", el.ControlledSource) == "component"
+    assert gen._role("VoltageSource", el.VoltageSource) == "component"
+    assert gen._role("Sine", el.Sine) == "waveform"
+    assert gen._role("PrescribedVoltage", el.PrescribedVoltage) == "element"
+    page = gen.render(*[p for p in gen.PAGES if p[0] == "electrical"][0])
+    assert "## Waveforms" in page and "## Sources" not in page
+
+
 def test_alias_constants_are_the_same_object_and_listed_once():
     import importlib
 
