@@ -218,6 +218,19 @@ class CircuitNames:
 
 
 # ------------------------------------------------------------------------------ inputs
+# What evaluating a signal block can raise: the evaluator's own refusals, and the errors a
+# malformed parameter (a table column out of range, a non-numeric value) produces in it.
+_EVALUATION_ERRORS = (ModelicaImportError, ValueError, TypeError, IndexError, KeyError,
+                      ArithmeticError)
+
+
+def _evaluation_problem(sig: Signal, exc: Exception) -> str:
+    """The problem text for a signal that could not be evaluated, naming the signal."""
+    if isinstance(exc, ModelicaImportError):
+        return str(exc).removeprefix("modelica: ")
+    return f"{sig.name} ({sig.cls}): cannot be evaluated ({type(exc).__name__}: {exc})"
+
+
 class _Inputs:
     """The devices' signal inputs (`"<device>.<input>"`) from the document's signals.
 
@@ -280,8 +293,8 @@ class _Inputs:
                     y = signals.combine(s, values).expand(self.grid.shape).clone()
             else:
                 y = signals.evaluate(s, self.grid, t_start=float(self.grid[0]))
-        except (ModelicaImportError, ValueError, TypeError) as exc:  # a malformed parameter
-            self.problems.append(str(exc).removeprefix("modelica: "))
+        except _EVALUATION_ERRORS as exc:
+            self.problems.append(_evaluation_problem(s, exc))
             y = None
         self._values[s.name] = y
         return y
@@ -327,11 +340,13 @@ def _number(device: Device, key: str, problems: list[str], default: float | None
 
 
 def _positive(device: Device, key: str, problems: list[str]) -> float | None:
-    """A numeric parameter that must be > 0; `None` (with a problem) otherwise."""
+    """A numeric parameter that must be finite and > 0; `None` (with a problem)
+    otherwise."""
     value = device.parameters.get(key)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
-        problems.append(f"{device.name} ({device.cls}): parameter {key} must be a number "
-                        f"> 0, found {value!r}")
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not 0 < value < math.inf):
+        problems.append(f"{device.name} ({device.cls}): parameter {key} must be a finite "
+                        f"number > 0, found {value!r}")
         return None
     return float(value)
 
@@ -414,8 +429,8 @@ class _Builder:
                 return None
             try:
                 return signals.evaluate(block, self.grid, t_start=float(self.grid[0]))
-            except (ModelicaImportError, ValueError, TypeError) as exc:  # a bad parameter
-                self.problems.append(str(exc).removeprefix("modelica: "))
+            except _EVALUATION_ERRORS as exc:
+                self.problems.append(_evaluation_problem(block, exc))
                 return None
         if short == "SignalVoltage":
             return self.inputs.series(device, "v")

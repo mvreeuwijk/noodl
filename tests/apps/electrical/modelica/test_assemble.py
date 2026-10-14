@@ -394,20 +394,40 @@ def test_transformer_ratings_and_power_factors_are_checked(tmp_path):
         _c("t2", AC + "Conversion.ACACTransformer", VHigh=120.0, VLow=60.0, **rating),
         _c("t3", AC + "Conversion.ACACTransformer", VHigh=-1.0, VLow=60.0, VABase=4000.0,
            **rating),
+        _c("t4", AC + "Conversion.ACACTransformer", VHigh=120.0, VLow=60.0, VABase=1e400,
+           **rating),
         _c("l1", AC + "Loads.Inductive", pf=-2.0, **load),
         _c("l2", AC + "Loads.Inductive", pf=0.0, **load),
         _c("l3", AC + "Loads.Inductive", pf=1.5, **load),
     ], [["V.terminal", "t1.terminal_n"], ["V.terminal", "t2.terminal_n"],
-        ["V.terminal", "t3.terminal_n"], ["t1.terminal_p", "l1.terminal"],
+        ["V.terminal", "t3.terminal_n"], ["V.terminal", "t4.terminal_n"],
+        ["t1.terminal_p", "l1.terminal"],
         ["t2.terminal_p", "l2.terminal"], ["t3.terminal_p", "l3.terminal"]])
     with pytest.raises(ModelicaImportError) as exc:
         read_modelica_circuit(path)
     msg = str(exc.value)
     tra = AC + "Conversion.ACACTransformer"
-    assert f"t1 ({tra}): parameter VLow must be a number > 0, found 0.0" in msg
-    assert f"t1 ({tra}): parameter VABase must be a number > 0, found None" in msg
-    assert f"t2 ({tra}): parameter VABase must be a number > 0, found None" in msg
-    assert f"t3 ({tra}): parameter VHigh must be a number > 0, found -1.0" in msg
+    assert f"t1 ({tra}): parameter VLow must be a finite number > 0, found 0.0" in msg
+    assert f"t1 ({tra}): parameter VABase must be a finite number > 0, found None" in msg
+    assert f"t2 ({tra}): parameter VABase must be a finite number > 0, found None" in msg
+    assert f"t3 ({tra}): parameter VHigh must be a finite number > 0, found -1.0" in msg
+    assert f"t4 ({tra}): parameter VABase must be a finite number > 0, found inf" in msg
     for name, pf in (("l1", -2.0), ("l2", 0.0), ("l3", 1.5)):
         assert (f"{name} (Buildings.Electrical.AC.OnePhase.Loads.Inductive): pf = {pf!r}: a "
                 f"power factor must lie in (0, 1]") in msg
+
+
+def test_a_signal_the_evaluator_cannot_read_is_named(tmp_path):
+    # A table column out of range raises IndexError inside the evaluator.
+    path = _doc(tmp_path, [
+        _c("g", MSL + "Basic.Ground"),
+        _c("sv", MSL + "Sources.SignalVoltage"),
+        _resistor("r"),
+    ], [["sv.p", "r.p"], ["r.n", "g.p"], ["sv.n", "g.p"]],
+        signals=[{"name": "tab", "class": "Modelica.Blocks.Sources.CombiTimeTable",
+                  "parameters": {"table": [[0.0, 1.0], [1.0, 2.0]], "columns": [5]},
+                  "drives": "sv.v"}])
+    with pytest.raises(ModelicaImportError) as exc:
+        read_modelica_circuit(path)
+    expected = "tab (Modelica.Blocks.Sources.CombiTimeTable): cannot be evaluated (IndexError"
+    assert expected in str(exc.value)
