@@ -5,7 +5,8 @@ quadratic-drag loop, a spring-mass-damper stepped implicitly, and a three-zone c
 exchange -- computed independently of this codebase. Each test here reproduces one of the
 examples with today's public layer API and checks the result against the captured reference,
 not against a value re-derived from today's code -- that is what makes this a PARITY test
-rather than an ordinary regression test.
+rather than an ordinary regression test. The spring-mass-damper example, a dynamic law
+stepped implicitly, is reproduced in ``tests/layers/test_mna_dynamic.py``.
 """
 
 import json
@@ -14,7 +15,6 @@ from pathlib import Path
 import torch
 
 from noodl.elements.quadratic import Quadratic
-from noodl.layers.constitutive import ConstitutiveLayer
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.transport import TransportLayer
 from noodl.topology import Network
@@ -147,51 +147,4 @@ def test_quadratic_loop_matches_the_series_resistance_solution():
     )
     torch.testing.assert_close(
         dq_da0.item(), want_dq_da0, rtol=1e-6, atol=0.0,
-    )
-
-
-def test_spring_mass_damper_matches_the_worked_example():
-    """The spring-mass-damper worked example (``GOLD["spring_mass_damper_displacement"]``):
-    a single mesh (edges (0, 1), (1, 2), (2, 0), kind "pipe") carrying an inductor, a
-    resistor and a capacitor, stepped implicitly (``ConstitutiveLayer``).
-
-    ``theta = [L, R, C, q0_prev, p2_prev, dt]``; the worked example's own branch law does
-    not use ``L`` explicitly, folding ``dt / L = dt`` into the inductor term since ``L = 1``
-    for this example.
-    """
-    net = Network(dtype=F64)
-    net.add_node(0)
-    net.add_node(1)
-    net.add_node(2)
-    net.add_edge(0, 1, kind="pipe")
-    net.add_edge(1, 2, kind="pipe")
-    net.add_edge(2, 0, kind="pipe")
-
-    def spring_mass_damper(p, q, theta):
-        _l, r, _c, q0_prev, p2_prev, dt = theta
-        return torch.stack(
-            [
-                q[0] - q0_prev - dt * p[0],
-                p[1] - r * q[1],
-                p[2] - p2_prev - dt * q[2],
-            ]
-        )
-
-    layer = ConstitutiveLayer(net, "smd", kind="pipe", law=spring_mass_damper)
-
-    theta = torch.tensor([1.0, 0.2, 1.0, 0.0, 1.0, 0.2], dtype=F64)
-    displacement = [1.0]  # p2(t0) / C, prepended -- the worked example's own initial xs = [p2/C]
-    z0 = None
-    for _ in range(50):
-        p, q = layer.solve(theta, z0=z0)
-        theta = torch.stack([theta[0], theta[1], theta[2], q[0], p[2], theta[5]])
-        displacement.append((p[2] / theta[2]).item())
-
-    want = GOLD["spring_mass_damper_displacement"]
-    assert len(displacement) == len(want) == 51
-    torch.testing.assert_close(
-        torch.tensor(displacement, dtype=F64),
-        torch.tensor(want, dtype=F64),
-        rtol=1e-8,
-        atol=0.0,
     )

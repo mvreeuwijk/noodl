@@ -1,17 +1,21 @@
 """Modified Nodal Analysis in PotentialFlowLayer: dynamic laws stepped by companion forms."""
 
+import json
 import math
+from pathlib import Path
 
 import pytest
 import torch
 
 import noodl.layers._mna as mna_module
-from noodl.elements import Conductance, Element
+from noodl.elements import Conductance, Element, ImplicitLaw
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.topology import Network
 from tests._circuit_laws import Cap, DrivenSource, Ind, Source
 
 F64 = torch.float64
+GOLD = json.loads(
+    (Path(__file__).parent.parent / "golden" / "worked_examples.json").read_text())
 
 
 @pytest.fixture(autouse=True)
@@ -298,3 +302,100 @@ def test_cg_per_call_is_refused():
     _, layer = _rc()
     with pytest.raises(ValueError, match="PotentialFlowLayer 'e': method='cg'"):
         layer.solve(GROUND, method="cg", differentiable=False)
+
+
+# ------------------------------------------------- loop laws ported from the worked examples
+#
+# Both cases are a single mesh 0 -> 1 -> 2 -> 0 with node 0 as the reference (boundary) node.
+# The edge potential difference is dp = phi[u] - phi[v], so around the mesh the three edge
+# potential differences sum to zero and the three edge flows are equal, as in the loop
+# formulation these cases were first written for.
+
+
+class QuadraticLoss(ImplicitLaw):
+    """dp = a |q| q on every edge of its kind, written as an implicit law."""
+
+    def __init__(self, kind="loss"):
+        super().__init__(kind)
+
+    def residual(self, dp, q, drivers, ctx):
+        return dp - drivers["a"] * q.abs() * q
+
+
+def _mesh(kinds):
+    return _net([0, 1, 2], [(0, 1, kinds[0]), (1, 2, kinds[1]), (2, 0, kinds[2])])
+
+
+def _quadratic_loop():
+    net = _mesh(["source", "loss", "loss"])
+    layer = PotentialFlowLayer(net, "loop", [DrivenSource(), QuadraticLoss()], boundary=[0])
+    return net, layer
+
+
+def _quadratic_loop_solve(theta, **kwargs):
+    """theta = [a0, a1, a2]: the drive on edge 0 and the loss coefficients of edges 1, 2.
+    Returns the edge potential differences and the edge flows."""
+    _, layer = _quadratic_loop()
+    drivers = {"V": theta[:1], "a": theta[1:]}
+    # Newton from zero meets a singular Jacobian (d(a|q|q)/dq = 0 at q = 0): start from q = -1
+    phi, q = layer.solve(GROUND, drivers, q0=-torch.ones(3, dtype=F64), **kwargs)
+    p = torch.stack([phi[0] - phi[1], phi[1] - phi[2], phi[2] - phi[0]])
+    return p, q
+
+
+def test_quadratic_loop_matches_the_worked_example_p_and_q():
+    # old expectation (GOLD["quadratic_loop_a111"]): p = [1, -1/2, -1/2], q = -1/sqrt(2) on all
+    # three edges. Same physics; the unknowns are now the nodal potentials and edge flows.
+    p, q = _quadratic_loop_solve(torch.ones(3, dtype=F64))
+    torch.testing.assert_close(p, torch.tensor(GOLD["quadratic_loop_a111"]["p"], dtype=F64),
+                               rtol=1e-8, atol=0.0)
+    torch.testing.assert_close(q, torch.tensor(GOLD["quadratic_loop_a111"]["q"], dtype=F64),
+                               rtol=1e-8, atol=0.0)
+    assert q[0].item() == pytest.approx(-1.0 / math.sqrt(2.0), rel=1e-8)
+
+
+def test_quadratic_loop_jacobian_matches_the_worked_example_dp_da_dq_da():
+    def pq(theta):
+        p, q = _quadratic_loop_solve(theta)
+        return torch.cat([p, q])
+
+    jac = torch.autograd.functional.jacobian(pq, torch.ones(3, dtype=F64))  # rows p0..p2, q0..q2
+    torch.testing.assert_close(jac[:3], torch.tensor(GOLD["quadratic_loop_a111"]["dp_da"],
+                                                      dtype=F64), rtol=1e-6, atol=0.0)
+    torch.testing.assert_close(jac[3:], torch.tensor(GOLD["quadratic_loop_a111"]["dq_da"],
+                                                      dtype=F64), rtol=1e-6, atol=0.0)
+
+
+def test_quadratic_loop_gradcheck():
+    theta = torch.ones(3, dtype=F64, requires_grad=True)
+
+    def f(th):
+        p, q = _quadratic_loop_solve(th)
+        return torch.cat([p, q])
+
+    assert torch.autograd.gradcheck(f, (theta,), eps=1e-6, atol=1e-6)
+
+
+def test_spring_mass_damper_matches_the_worked_example_displacement_series():
+    # old law, theta = [L, R, C, q0_prev, p2_prev, dt] = [1, .2, 1, 0, 1, .2]:
+    #   q0 - q0_prev - dt p0 = 0   (inductor, L = 1, implicit Euler)
+    #   p1 - R q1 = 0              (resistor)
+    #   p2 - p2_prev - dt q2 = 0   (capacitor, C = 1, implicit Euler)
+    # now: an inductance (edge 0), a conductance 1/R (edge 1) and a capacitance whose initial
+    # voltage is p2(t0) = 1 (edge 2), marched by backward Euler from the "initial" state.
+    R, dt = 0.2, 0.2
+    net = _mesh(["ind", "r", "cap"])
+    layer = PotentialFlowLayer(
+        net, "smd", [Ind(torch.tensor([1.0])), Conductance(torch.tensor([1.0 / R]), kind="r"),
+                     Cap(torch.tensor([1.0]), v0=1.0)], boundary=[0])
+    n2 = net.nodes.index(2)
+    phi, q = layer.solve(GROUND, mode="initial", differentiable=False)
+    displacement = [phi[n2].item()]     # p2(t0) / C = 1: the golden series' first entry
+    for _ in range(50):
+        phi, q = layer.solve(GROUND, history=(phi, q), dt=dt, integration="backward_euler",
+                             differentiable=False)
+        displacement.append(phi[n2].item())     # edge 2 is 2 -> 0 with phi[0] = 0
+    want = GOLD["spring_mass_damper_displacement"]
+    assert len(displacement) == len(want) == 51
+    torch.testing.assert_close(torch.tensor(displacement, dtype=F64),
+                               torch.tensor(want, dtype=F64), rtol=1e-8, atol=0.0)
