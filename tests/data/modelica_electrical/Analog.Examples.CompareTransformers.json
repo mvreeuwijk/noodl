@@ -1,0 +1,261 @@
+{
+  "format": "noodl-modelica-electrical/1",
+  "model": "Modelica.Electrical.Analog.Examples.CompareTransformers",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "msl": "4.1.0",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 50.0,
+    "Interval": 0.05,
+    "Tolerance": 1e-12
+  },
+  "experiment_declared": {
+    "StopTime": 50.0,
+    "Interval": 0.001
+  },
+  "components": [
+    {
+      "name": "sineVoltage1",
+      "class": "Modelica.Electrical.Analog.Sources.SineVoltage",
+      "parameters": {
+        "V": 0.1,
+        "phase": 1.5707963267948966,
+        "f": 10.0,
+        "offset": 0.1,
+        "startTime": 0.0
+      }
+    },
+    {
+      "name": "ground11",
+      "class": "Modelica.Electrical.Analog.Basic.Ground",
+      "parameters": {}
+    },
+    {
+      "name": "resistor11",
+      "class": "Modelica.Electrical.Analog.Basic.Resistor",
+      "parameters": {
+        "R": 0.01,
+        "T_ref": 300.15,
+        "alpha": 0.0,
+        "useHeatPort": false,
+        "T": 300.15
+      }
+    },
+    {
+      "name": "resistor12",
+      "class": "Modelica.Electrical.Analog.Basic.Resistor",
+      "parameters": {
+        "R": 0.0025,
+        "T_ref": 300.15,
+        "alpha": 0.0,
+        "useHeatPort": false,
+        "T": 300.15
+      }
+    },
+    {
+      "name": "load1",
+      "class": "Modelica.Electrical.Analog.Basic.Resistor",
+      "parameters": {
+        "R": 0.25,
+        "T_ref": 300.15,
+        "alpha": 0.0,
+        "useHeatPort": false,
+        "T": 300.15
+      }
+    },
+    {
+      "name": "ground12",
+      "class": "Modelica.Electrical.Analog.Basic.Ground",
+      "parameters": {}
+    },
+    {
+      "name": "sineVoltage2",
+      "class": "Modelica.Electrical.Analog.Sources.SineVoltage",
+      "parameters": {
+        "V": 0.1,
+        "phase": 1.5707963267948966,
+        "f": 10.0,
+        "offset": 0.1,
+        "startTime": 0.0
+      }
+    },
+    {
+      "name": "ground21",
+      "class": "Modelica.Electrical.Analog.Basic.Ground",
+      "parameters": {}
+    },
+    {
+      "name": "resistor21",
+      "class": "Modelica.Electrical.Analog.Basic.Resistor",
+      "parameters": {
+        "R": 0.01,
+        "T_ref": 300.15,
+        "alpha": 0.0,
+        "useHeatPort": false,
+        "T": 300.15
+      }
+    },
+    {
+      "name": "inductor21",
+      "class": "Modelica.Electrical.Analog.Basic.Inductor",
+      "parameters": {
+        "L": 0.0007957747154594768
+      },
+      "initial": {
+        "i": 0.0
+      }
+    },
+    {
+      "name": "inductor22",
+      "class": "Modelica.Electrical.Analog.Basic.Inductor",
+      "parameters": {
+        "L": 0.0001989436788648692
+      },
+      "initial": {
+        "i": 0.0
+      }
+    },
+    {
+      "name": "resistor22",
+      "class": "Modelica.Electrical.Analog.Basic.Resistor",
+      "parameters": {
+        "R": 0.0025,
+        "T_ref": 300.15,
+        "alpha": 0.0,
+        "useHeatPort": false,
+        "T": 300.15
+      }
+    },
+    {
+      "name": "load2",
+      "class": "Modelica.Electrical.Analog.Basic.Resistor",
+      "parameters": {
+        "R": 0.25,
+        "T_ref": 300.15,
+        "alpha": 0.0,
+        "useHeatPort": false,
+        "T": 300.15
+      }
+    },
+    {
+      "name": "ground22",
+      "class": "Modelica.Electrical.Analog.Basic.Ground",
+      "parameters": {}
+    },
+    {
+      "name": "basicTransformer",
+      "class": "Modelica.Electrical.Analog.Basic.Transformer",
+      "parameters": {
+        "L1": 0.15995071780735481,
+        "L2": 0.039987679451838704,
+        "M": 0.07957747154594767
+      },
+      "initial": {
+        "i1": 0.0,
+        "i2": 0.0
+      }
+    },
+    {
+      "name": "idealTransformer",
+      "class": "Modelica.Electrical.Analog.Ideal.IdealTransformer",
+      "parameters": {
+        "n": 2.0,
+        "considerMagnetization": false,
+        "Lm1": 0.15915494309189535
+      }
+    }
+  ],
+  "connections": [
+    [
+      "sineVoltage1.n",
+      "ground11.p"
+    ],
+    [
+      "sineVoltage1.p",
+      "resistor11.p"
+    ],
+    [
+      "load1.n",
+      "ground12.p"
+    ],
+    [
+      "resistor12.n",
+      "load1.p"
+    ],
+    [
+      "sineVoltage2.n",
+      "ground21.p"
+    ],
+    [
+      "sineVoltage2.p",
+      "resistor21.p"
+    ],
+    [
+      "resistor21.n",
+      "inductor21.p"
+    ],
+    [
+      "inductor22.n",
+      "resistor22.p"
+    ],
+    [
+      "load2.n",
+      "ground22.p"
+    ],
+    [
+      "resistor22.n",
+      "load2.p"
+    ],
+    [
+      "ground11.p",
+      "basicTransformer.n1"
+    ],
+    [
+      "basicTransformer.n2",
+      "ground12.p"
+    ],
+    [
+      "basicTransformer.p1",
+      "resistor11.n"
+    ],
+    [
+      "basicTransformer.p2",
+      "resistor12.p"
+    ],
+    [
+      "ground21.p",
+      "idealTransformer.n1"
+    ],
+    [
+      "ground22.p",
+      "idealTransformer.n2"
+    ],
+    [
+      "idealTransformer.p1",
+      "inductor21.n"
+    ],
+    [
+      "idealTransformer.p2",
+      "inductor22.p"
+    ]
+  ],
+  "signals": [],
+  "compared": [
+    "sineVoltage1.i",
+    "resistor11.i",
+    "resistor12.i",
+    "load1.i",
+    "sineVoltage2.i",
+    "resistor21.i",
+    "inductor21.i",
+    "inductor22.i",
+    "resistor22.i",
+    "load2.i",
+    "basicTransformer.i1",
+    "basicTransformer.i2",
+    "idealTransformer.i1",
+    "idealTransformer.i2"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

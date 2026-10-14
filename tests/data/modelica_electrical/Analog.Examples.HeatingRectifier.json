@@ -1,0 +1,134 @@
+{
+  "format": "noodl-modelica-electrical/1",
+  "model": "Modelica.Electrical.Analog.Examples.HeatingRectifier",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "msl": "4.1.0",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 5.0,
+    "Interval": 0.01,
+    "Tolerance": 1e-12
+  },
+  "experiment_declared": {
+    "StopTime": 5.0
+  },
+  "components": [
+    {
+      "name": "HeatingDiode1",
+      "class": "Modelica.Electrical.Analog.Semiconductors.Diode",
+      "parameters": {
+        "Ids": 1e-06,
+        "useTemperatureDependency": true,
+        "Vt": 0.04,
+        "Maxexp": 15.0,
+        "R": 100000000.0,
+        "EG": 1.11,
+        "N": 1.0,
+        "TNOM": 300.15,
+        "XTI": 3.0,
+        "useHeatPort": true,
+        "T": 293.15
+      }
+    },
+    {
+      "name": "G",
+      "class": "Modelica.Electrical.Analog.Basic.Ground",
+      "parameters": {}
+    },
+    {
+      "name": "SineVoltage1",
+      "class": "Modelica.Electrical.Analog.Sources.SineVoltage",
+      "parameters": {
+        "V": 1.0,
+        "phase": 0.0,
+        "f": 1.0,
+        "offset": 0.0,
+        "startTime": 0.0
+      }
+    },
+    {
+      "name": "Capacitor1",
+      "class": "Modelica.Electrical.Analog.Basic.Capacitor",
+      "parameters": {
+        "C": 1.0
+      },
+      "initial": {
+        "v": 0.0
+      }
+    },
+    {
+      "name": "HeatCapacitor1",
+      "class": "Modelica.Thermal.HeatTransfer.Components.HeatCapacitor",
+      "parameters": {
+        "C": 1.0
+      },
+      "initial": {
+        "T": 293.15
+      }
+    },
+    {
+      "name": "ThermalConductor1",
+      "class": "Modelica.Thermal.HeatTransfer.Components.ThermalConductor",
+      "parameters": {
+        "G": 10.0
+      }
+    },
+    {
+      "name": "R",
+      "class": "Modelica.Electrical.Analog.Basic.Resistor",
+      "parameters": {
+        "R": 1.0,
+        "T_ref": 300.15,
+        "alpha": 0.0,
+        "useHeatPort": false,
+        "T": 300.15
+      }
+    }
+  ],
+  "connections": [
+    [
+      "SineVoltage1.p",
+      "HeatingDiode1.p"
+    ],
+    [
+      "SineVoltage1.n",
+      "G.p"
+    ],
+    [
+      "Capacitor1.n",
+      "G.p"
+    ],
+    [
+      "HeatingDiode1.n",
+      "Capacitor1.p"
+    ],
+    [
+      "HeatingDiode1.heatPort",
+      "ThermalConductor1.port_a"
+    ],
+    [
+      "ThermalConductor1.port_b",
+      "HeatCapacitor1.port"
+    ],
+    [
+      "R.p",
+      "Capacitor1.p"
+    ],
+    [
+      "R.n",
+      "Capacitor1.n"
+    ]
+  ],
+  "signals": [],
+  "compared": [
+    "HeatingDiode1.i",
+    "HeatingDiode1.T_heatPort",
+    "SineVoltage1.i",
+    "Capacitor1.i",
+    "Capacitor1.v",
+    "HeatCapacitor1.T",
+    "R.i"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

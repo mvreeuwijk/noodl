@@ -1,0 +1,165 @@
+{
+  "format": "noodl-modelica-electrical/1",
+  "model": "Modelica.Electrical.Analog.Examples.ShowVariableResistor",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "msl": "4.1.0",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 1.0,
+    "Interval": 0.002,
+    "Tolerance": 1e-12
+  },
+  "experiment_declared": {
+    "StopTime": 1.0
+  },
+  "components": [
+    {
+      "name": "VariableResistor",
+      "class": "Modelica.Electrical.Analog.Basic.VariableResistor",
+      "parameters": {
+        "T_ref": 300.15,
+        "alpha": 0.0,
+        "useHeatPort": false,
+        "T": 300.15
+      }
+    },
+    {
+      "name": "Ground1",
+      "class": "Modelica.Electrical.Analog.Basic.Ground",
+      "parameters": {}
+    },
+    {
+      "name": "Ground2",
+      "class": "Modelica.Electrical.Analog.Basic.Ground",
+      "parameters": {}
+    },
+    {
+      "name": "R1",
+      "class": "Modelica.Electrical.Analog.Basic.Resistor",
+      "parameters": {
+        "R": 1.0,
+        "T_ref": 300.15,
+        "alpha": 0.0,
+        "useHeatPort": false,
+        "T": 300.15
+      }
+    },
+    {
+      "name": "R2",
+      "class": "Modelica.Electrical.Analog.Basic.Resistor",
+      "parameters": {
+        "R": 1.0,
+        "T_ref": 300.15,
+        "alpha": 0.0,
+        "useHeatPort": false,
+        "T": 300.15
+      }
+    },
+    {
+      "name": "R3",
+      "class": "Modelica.Electrical.Analog.Basic.Resistor",
+      "parameters": {
+        "R": 1.0,
+        "T_ref": 300.15,
+        "alpha": 0.0,
+        "useHeatPort": false,
+        "T": 300.15
+      }
+    },
+    {
+      "name": "R4",
+      "class": "Modelica.Electrical.Analog.Basic.Resistor",
+      "parameters": {
+        "R": 1.0,
+        "T_ref": 300.15,
+        "alpha": 0.0,
+        "useHeatPort": false,
+        "T": 300.15
+      }
+    },
+    {
+      "name": "R5",
+      "class": "Modelica.Electrical.Analog.Basic.Resistor",
+      "parameters": {
+        "R": 1.0,
+        "T_ref": 300.15,
+        "alpha": 0.0,
+        "useHeatPort": false,
+        "T": 300.15
+      }
+    },
+    {
+      "name": "SineVoltage1",
+      "class": "Modelica.Electrical.Analog.Sources.SineVoltage",
+      "parameters": {
+        "V": 1.0,
+        "phase": 0.0,
+        "f": 1.0,
+        "offset": 0.0,
+        "startTime": 0.0
+      }
+    }
+  ],
+  "connections": [
+    [
+      "R1.n",
+      "R2.p"
+    ],
+    [
+      "R2.n",
+      "R3.p"
+    ],
+    [
+      "R4.n",
+      "VariableResistor.p"
+    ],
+    [
+      "VariableResistor.n",
+      "R5.p"
+    ],
+    [
+      "R3.n",
+      "Ground2.p"
+    ],
+    [
+      "Ground2.p",
+      "R5.n"
+    ],
+    [
+      "SineVoltage1.p",
+      "Ground1.p"
+    ],
+    [
+      "SineVoltage1.n",
+      "R1.p"
+    ],
+    [
+      "SineVoltage1.n",
+      "R4.p"
+    ]
+  ],
+  "signals": [
+    {
+      "name": "Ramp1",
+      "class": "Modelica.Blocks.Sources.Ramp",
+      "parameters": {
+        "height": 5.0,
+        "duration": 2.0,
+        "offset": 2.0,
+        "startTime": 0.0
+      },
+      "drives": "VariableResistor.R"
+    }
+  ],
+  "compared": [
+    "VariableResistor.i",
+    "R1.i",
+    "R2.i",
+    "R3.i",
+    "R4.i",
+    "R5.i",
+    "SineVoltage1.i"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

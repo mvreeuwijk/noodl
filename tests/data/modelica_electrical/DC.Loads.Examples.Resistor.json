@@ -1,0 +1,131 @@
+{
+  "format": "noodl-modelica-electrical/1",
+  "model": "Buildings.Electrical.DC.Loads.Examples.Resistor",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "msl": "4.1.0",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 1.0,
+    "Interval": 0.01,
+    "Tolerance": 1e-12
+  },
+  "experiment_declared": {
+    "StopTime": 1.0,
+    "Tolerance": 1e-06
+  },
+  "components": [
+    {
+      "name": "res2",
+      "class": "Buildings.Electrical.DC.Loads.Resistor",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "P_nominal": 72.0,
+        "V_nominal": 12.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized",
+        "useHeatPort": false,
+        "T": 300.15,
+        "R": 2.0,
+        "T_ref": 300.15,
+        "alpha": 0.0
+      }
+    },
+    {
+      "name": "sou",
+      "class": "Buildings.Electrical.DC.Sources.ConstantVoltage",
+      "parameters": {
+        "potentialReference": true,
+        "definiteReference": false,
+        "V": 12.0
+      }
+    },
+    {
+      "name": "gro",
+      "class": "Modelica.Electrical.Analog.Basic.Ground",
+      "parameters": {}
+    },
+    {
+      "name": "res",
+      "class": "Buildings.Electrical.DC.Lines.TwoPortResistance",
+      "parameters": {
+        "useHeatPort": false,
+        "T": 298.15,
+        "R": 2.0,
+        "T_ref": 298.15,
+        "M": 507.65
+      }
+    },
+    {
+      "name": "sen",
+      "class": "Buildings.Electrical.DC.Sensors.GeneralizedSensor",
+      "parameters": {}
+    },
+    {
+      "name": "res1",
+      "class": "Buildings.Electrical.DC.Loads.Resistor",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "P_nominal": 72.0,
+        "V_nominal": 12.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized",
+        "useHeatPort": false,
+        "T": 300.15,
+        "R": 2.0,
+        "T_ref": 300.15,
+        "alpha": 0.0
+      }
+    },
+    {
+      "name": "sen1",
+      "class": "Buildings.Electrical.DC.Sensors.GeneralizedSensor",
+      "parameters": {}
+    }
+  ],
+  "connections": [
+    [
+      "sou.terminal",
+      "res.terminal_n"
+    ],
+    [
+      "res.terminal_p",
+      "sen.terminal_n"
+    ],
+    [
+      "sen.terminal_p",
+      "res2.terminal"
+    ],
+    [
+      "res1.terminal",
+      "sen1.terminal_p"
+    ],
+    [
+      "sen1.terminal_n",
+      "res.terminal_n"
+    ],
+    [
+      "sou.n",
+      "gro.p"
+    ]
+  ],
+  "signals": [],
+  "compared": [
+    "res2.terminal.v[1]",
+    "res2.terminal.v[2]",
+    "res2.terminal.i[1]",
+    "sou.terminal.v[1]",
+    "sou.terminal.v[2]",
+    "sou.terminal.i[1]",
+    "res.terminal_n.v[1]",
+    "res.terminal_n.v[2]",
+    "res.terminal_n.i[1]",
+    "res.terminal_p.v[1]",
+    "res.terminal_p.v[2]",
+    "res.terminal_p.i[1]",
+    "res1.terminal.v[1]",
+    "res1.terminal.v[2]",
+    "res1.terminal.i[1]"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

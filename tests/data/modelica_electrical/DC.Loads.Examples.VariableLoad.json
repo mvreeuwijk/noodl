@@ -1,0 +1,153 @@
+{
+  "format": "noodl-modelica-electrical/1",
+  "model": "Buildings.Electrical.DC.Loads.Examples.VariableLoad",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "msl": "4.1.0",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 1.0,
+    "Interval": 0.01,
+    "Tolerance": 1e-12
+  },
+  "experiment_declared": {
+    "StopTime": 1.0,
+    "Tolerance": 1e-06
+  },
+  "components": [
+    {
+      "name": "loa1",
+      "class": "Buildings.Electrical.DC.Loads.Conductor",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "P_nominal": -50.0,
+        "V_nominal": 12.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized"
+      }
+    },
+    {
+      "name": "sou",
+      "class": "Buildings.Electrical.DC.Sources.ConstantVoltage",
+      "parameters": {
+        "potentialReference": true,
+        "definiteReference": false,
+        "V": 12.0
+      }
+    },
+    {
+      "name": "gro",
+      "class": "Modelica.Electrical.Analog.Basic.Ground",
+      "parameters": {}
+    },
+    {
+      "name": "loa2",
+      "class": "Buildings.Electrical.DC.Loads.Conductor",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.VariableZ_y_input",
+        "P_nominal": -50.0,
+        "V_nominal": 12.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized"
+      }
+    },
+    {
+      "name": "loa3",
+      "class": "Buildings.Electrical.DC.Loads.Conductor",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.VariableZ_P_input",
+        "P_nominal": 0.0,
+        "V_nominal": 12.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized"
+      }
+    },
+    {
+      "name": "res",
+      "class": "Buildings.Electrical.DC.Lines.TwoPortResistance",
+      "parameters": {
+        "useHeatPort": false,
+        "T": 298.15,
+        "R": 0.1,
+        "T_ref": 298.15,
+        "M": 507.65
+      }
+    },
+    {
+      "name": "sen",
+      "class": "Buildings.Electrical.DC.Sensors.GeneralizedSensor",
+      "parameters": {}
+    }
+  ],
+  "connections": [
+    [
+      "sou.terminal",
+      "loa2.terminal"
+    ],
+    [
+      "sou.terminal",
+      "loa3.terminal"
+    ],
+    [
+      "sou.terminal",
+      "res.terminal_n"
+    ],
+    [
+      "res.terminal_p",
+      "sen.terminal_n"
+    ],
+    [
+      "sen.terminal_p",
+      "loa1.terminal"
+    ],
+    [
+      "sou.n",
+      "gro.p"
+    ]
+  ],
+  "signals": [
+    {
+      "name": "varLoad_y",
+      "class": "Modelica.Blocks.Sources.Ramp",
+      "parameters": {
+        "height": 0.8,
+        "duration": 0.5,
+        "offset": 0.0,
+        "startTime": 0.3
+      },
+      "drives": "loa2.y"
+    },
+    {
+      "name": "varLoad_P",
+      "class": "Modelica.Blocks.Sources.Ramp",
+      "parameters": {
+        "height": 120.0,
+        "duration": 0.5,
+        "offset": -20.0,
+        "startTime": 0.3
+      },
+      "drives": "loa3.Pow"
+    }
+  ],
+  "compared": [
+    "loa1.terminal.v[1]",
+    "loa1.terminal.v[2]",
+    "loa1.terminal.i[1]",
+    "sou.terminal.v[1]",
+    "sou.terminal.v[2]",
+    "sou.terminal.i[1]",
+    "loa2.terminal.v[1]",
+    "loa2.terminal.v[2]",
+    "loa2.terminal.i[1]",
+    "loa3.terminal.v[1]",
+    "loa3.terminal.v[2]",
+    "loa3.terminal.i[1]",
+    "res.terminal_n.v[1]",
+    "res.terminal_n.v[2]",
+    "res.terminal_n.i[1]",
+    "res.terminal_p.v[1]",
+    "res.terminal_p.v[2]",
+    "res.terminal_p.i[1]"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

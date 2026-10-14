@@ -1,0 +1,201 @@
+{
+  "format": "noodl-modelica-electrical/1",
+  "model": "Buildings.Electrical.AC.OnePhase.Conversion.Examples.ACACTransformer",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "msl": "4.1.0",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 1.0,
+    "Interval": 0.01,
+    "Tolerance": 1e-12
+  },
+  "experiment_declared": {
+    "StopTime": 1.0,
+    "Tolerance": 1e-06
+  },
+  "components": [
+    {
+      "name": "tra_load",
+      "class": "Buildings.Electrical.AC.OnePhase.Conversion.ACACTransformer",
+      "parameters": {
+        "VHigh": 120.0,
+        "VLow": 60.0,
+        "VABase": 4000.0,
+        "XoverR": 8.0,
+        "Zperc": 0.03,
+        "ground_1": false,
+        "ground_2": true,
+        "phi_1": 0.0,
+        "phi_2": 0.0
+      }
+    },
+    {
+      "name": "sou",
+      "class": "Buildings.Electrical.AC.OnePhase.Sources.FixedVoltage",
+      "parameters": {
+        "potentialReference": true,
+        "definiteReference": true,
+        "f": 60.0,
+        "V": 120.0,
+        "phiSou": 0.0
+      }
+    },
+    {
+      "name": "load",
+      "class": "Buildings.Electrical.AC.OnePhase.Loads.Inductive",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.VariableZ_P_input",
+        "P_nominal": 0.0,
+        "V_nominal": 60.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized",
+        "use_pf_in": false,
+        "pf": 0.8
+      }
+    },
+    {
+      "name": "tra_cc",
+      "class": "Buildings.Electrical.AC.OnePhase.Conversion.ACACTransformer",
+      "parameters": {
+        "VHigh": 120.0,
+        "VLow": 60.0,
+        "VABase": 4000.0,
+        "XoverR": 8.0,
+        "Zperc": 0.03,
+        "ground_1": false,
+        "ground_2": true,
+        "phi_1": 0.0,
+        "phi_2": 0.0
+      }
+    },
+    {
+      "name": "shortCircuit",
+      "class": "Buildings.Electrical.AC.OnePhase.Loads.Impedance",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "P_nominal": 0.0,
+        "V_nominal": 1.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized",
+        "inductive": true,
+        "R": 1e-08,
+        "L": 0.0,
+        "C": 0.0,
+        "use_R_in": false,
+        "RMin": 0.0001,
+        "RMax": 100.0,
+        "use_C_in": false,
+        "CMin": 0.0001,
+        "CMax": 100.0,
+        "use_L_in": false,
+        "LMin": 0.0001,
+        "LMax": 100.0
+      }
+    },
+    {
+      "name": "tra_void",
+      "class": "Buildings.Electrical.AC.OnePhase.Conversion.ACACTransformer",
+      "parameters": {
+        "VHigh": 120.0,
+        "VLow": 60.0,
+        "VABase": 4000.0,
+        "XoverR": 8.0,
+        "Zperc": 0.03,
+        "ground_1": false,
+        "ground_2": true,
+        "phi_1": 0.0,
+        "phi_2": 0.0
+      }
+    },
+    {
+      "name": "sou1",
+      "class": "Buildings.Electrical.AC.OnePhase.Sources.FixedVoltage",
+      "parameters": {
+        "potentialReference": true,
+        "definiteReference": true,
+        "f": 60.0,
+        "V": 120.0,
+        "phiSou": 0.0
+      }
+    }
+  ],
+  "connections": [
+    [
+      "sou.terminal",
+      "tra_load.terminal_n"
+    ],
+    [
+      "tra_load.terminal_p",
+      "load.terminal"
+    ],
+    [
+      "tra_cc.terminal_p",
+      "shortCircuit.terminal"
+    ],
+    [
+      "sou1.terminal",
+      "tra_cc.terminal_n"
+    ],
+    [
+      "sou1.terminal",
+      "tra_void.terminal_n"
+    ]
+  ],
+  "signals": [
+    {
+      "name": "ramp",
+      "class": "Modelica.Blocks.Sources.Ramp",
+      "parameters": {
+        "height": -3200.0,
+        "duration": 0.5,
+        "offset": 0.0,
+        "startTime": 0.3
+      },
+      "drives": "load.Pow"
+    }
+  ],
+  "compared": [
+    "tra_load.terminal_n.v[1]",
+    "tra_load.terminal_n.v[2]",
+    "tra_load.terminal_n.i[1]",
+    "tra_load.terminal_n.i[2]",
+    "tra_load.terminal_p.v[1]",
+    "tra_load.terminal_p.v[2]",
+    "tra_load.terminal_p.i[1]",
+    "tra_load.terminal_p.i[2]",
+    "sou.terminal.v[1]",
+    "sou.terminal.v[2]",
+    "sou.terminal.i[1]",
+    "sou.terminal.i[2]",
+    "load.terminal.v[1]",
+    "load.terminal.v[2]",
+    "load.terminal.i[1]",
+    "load.terminal.i[2]",
+    "tra_cc.terminal_n.v[1]",
+    "tra_cc.terminal_n.v[2]",
+    "tra_cc.terminal_n.i[1]",
+    "tra_cc.terminal_n.i[2]",
+    "tra_cc.terminal_p.v[1]",
+    "tra_cc.terminal_p.v[2]",
+    "tra_cc.terminal_p.i[1]",
+    "tra_cc.terminal_p.i[2]",
+    "shortCircuit.terminal.v[1]",
+    "shortCircuit.terminal.v[2]",
+    "shortCircuit.terminal.i[1]",
+    "shortCircuit.terminal.i[2]",
+    "tra_void.terminal_n.v[1]",
+    "tra_void.terminal_n.v[2]",
+    "tra_void.terminal_n.i[1]",
+    "tra_void.terminal_n.i[2]",
+    "tra_void.terminal_p.v[1]",
+    "tra_void.terminal_p.v[2]",
+    "tra_void.terminal_p.i[1]",
+    "tra_void.terminal_p.i[2]",
+    "sou1.terminal.v[1]",
+    "sou1.terminal.v[2]",
+    "sou1.terminal.i[1]",
+    "sou1.terminal.i[2]"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

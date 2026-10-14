@@ -1,0 +1,241 @@
+{
+  "format": "noodl-modelica-electrical/1",
+  "model": "Buildings.Electrical.AC.OnePhase.Lines.Examples.ACLine_RL",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "msl": "4.1.0",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 1.0,
+    "Interval": 0.01,
+    "Tolerance": 1e-12
+  },
+  "experiment_declared": {
+    "StopTime": 1.0,
+    "Tolerance": 1e-06
+  },
+  "components": [
+    {
+      "name": "E",
+      "class": "Buildings.Electrical.AC.OnePhase.Sources.FixedVoltage",
+      "parameters": {
+        "potentialReference": true,
+        "definiteReference": true,
+        "f": 60.0,
+        "V": 120.0,
+        "phiSou": 0.0
+      }
+    },
+    {
+      "name": "load_sc_1",
+      "class": "Buildings.Electrical.AC.OnePhase.Loads.Impedance",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "P_nominal": 0.0,
+        "V_nominal": 1.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized",
+        "inductive": true,
+        "R": 0.0,
+        "L": 0.0,
+        "C": 0.0,
+        "use_R_in": false,
+        "RMin": 0.0001,
+        "RMax": 100.0,
+        "use_C_in": false,
+        "CMin": 0.0001,
+        "CMax": 100.0,
+        "use_L_in": false,
+        "LMin": 0.0001,
+        "LMax": 100.0
+      }
+    },
+    {
+      "name": "load_sc_2",
+      "class": "Buildings.Electrical.AC.OnePhase.Loads.Impedance",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "P_nominal": 0.0,
+        "V_nominal": 1.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized",
+        "inductive": true,
+        "R": 0.0,
+        "L": 0.0,
+        "C": 0.0,
+        "use_R_in": false,
+        "RMin": 0.0001,
+        "RMax": 100.0,
+        "use_C_in": false,
+        "CMin": 0.0001,
+        "CMax": 100.0,
+        "use_L_in": false,
+        "LMin": 0.0001,
+        "LMax": 100.0
+      }
+    },
+    {
+      "name": "RL_2",
+      "class": "Buildings.Electrical.AC.OnePhase.Lines.TwoPortRL",
+      "parameters": {
+        "useHeatPort": false,
+        "T": 298.15,
+        "R": 10.0,
+        "T_ref": 298.15,
+        "M": 507.65,
+        "C": 0.0,
+        "L": 0.026525823848649224,
+        "V_nominal": 0.0,
+        "i_start": [
+          0.0,
+          0.0
+        ],
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state"
+      }
+    },
+    {
+      "name": "R_1",
+      "class": "Buildings.Electrical.AC.OnePhase.Lines.TwoPortResistance",
+      "parameters": {
+        "useHeatPort": false,
+        "T": 298.15,
+        "R": 10.0,
+        "T_ref": 298.15,
+        "M": 507.65
+      }
+    },
+    {
+      "name": "L_1",
+      "class": "Buildings.Electrical.AC.OnePhase.Lines.TwoPortInductance",
+      "parameters": {
+        "L": 0.026525823848649224,
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state"
+      }
+    },
+    {
+      "name": "RL_3",
+      "class": "Buildings.Electrical.AC.OnePhase.Lines.TwoPortRL",
+      "parameters": {
+        "useHeatPort": false,
+        "T": 298.15,
+        "R": 10.0,
+        "T_ref": 298.15,
+        "M": 507.65,
+        "C": 0.0,
+        "L": 0.026525823848649224,
+        "V_nominal": 0.0,
+        "i_start": [
+          0.0,
+          0.0
+        ],
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_dynamic"
+      }
+    },
+    {
+      "name": "load_sc_3",
+      "class": "Buildings.Electrical.AC.OnePhase.Loads.Impedance",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "P_nominal": 0.0,
+        "V_nominal": 1.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized",
+        "inductive": true,
+        "R": 0.0,
+        "L": 0.0,
+        "C": 0.0,
+        "use_R_in": false,
+        "RMin": 0.0001,
+        "RMax": 100.0,
+        "use_C_in": false,
+        "CMin": 0.0001,
+        "CMax": 100.0,
+        "use_L_in": false,
+        "LMin": 0.0001,
+        "LMax": 100.0
+      }
+    }
+  ],
+  "connections": [
+    [
+      "E.terminal",
+      "R_1.terminal_n"
+    ],
+    [
+      "R_1.terminal_p",
+      "L_1.terminal_n"
+    ],
+    [
+      "L_1.terminal_p",
+      "load_sc_1.terminal"
+    ],
+    [
+      "E.terminal",
+      "RL_2.terminal_n"
+    ],
+    [
+      "RL_2.terminal_p",
+      "load_sc_2.terminal"
+    ],
+    [
+      "E.terminal",
+      "RL_3.terminal_n"
+    ],
+    [
+      "RL_3.terminal_p",
+      "load_sc_3.terminal"
+    ]
+  ],
+  "signals": [],
+  "compared": [
+    "E.terminal.v[1]",
+    "E.terminal.v[2]",
+    "E.terminal.i[1]",
+    "E.terminal.i[2]",
+    "load_sc_1.terminal.v[1]",
+    "load_sc_1.terminal.v[2]",
+    "load_sc_1.terminal.i[1]",
+    "load_sc_1.terminal.i[2]",
+    "load_sc_2.terminal.v[1]",
+    "load_sc_2.terminal.v[2]",
+    "load_sc_2.terminal.i[1]",
+    "load_sc_2.terminal.i[2]",
+    "RL_2.terminal_n.v[1]",
+    "RL_2.terminal_n.v[2]",
+    "RL_2.terminal_n.i[1]",
+    "RL_2.terminal_n.i[2]",
+    "RL_2.terminal_p.v[1]",
+    "RL_2.terminal_p.v[2]",
+    "RL_2.terminal_p.i[1]",
+    "RL_2.terminal_p.i[2]",
+    "R_1.terminal_n.v[1]",
+    "R_1.terminal_n.v[2]",
+    "R_1.terminal_n.i[1]",
+    "R_1.terminal_n.i[2]",
+    "R_1.terminal_p.v[1]",
+    "R_1.terminal_p.v[2]",
+    "R_1.terminal_p.i[1]",
+    "R_1.terminal_p.i[2]",
+    "L_1.terminal_n.v[1]",
+    "L_1.terminal_n.v[2]",
+    "L_1.terminal_n.i[1]",
+    "L_1.terminal_n.i[2]",
+    "L_1.terminal_p.v[1]",
+    "L_1.terminal_p.v[2]",
+    "L_1.terminal_p.i[1]",
+    "L_1.terminal_p.i[2]",
+    "RL_3.terminal_n.v[1]",
+    "RL_3.terminal_n.v[2]",
+    "RL_3.terminal_n.i[1]",
+    "RL_3.terminal_n.i[2]",
+    "RL_3.terminal_p.v[1]",
+    "RL_3.terminal_p.v[2]",
+    "RL_3.terminal_p.i[1]",
+    "RL_3.terminal_p.i[2]",
+    "load_sc_3.terminal.v[1]",
+    "load_sc_3.terminal.v[2]",
+    "load_sc_3.terminal.i[1]",
+    "load_sc_3.terminal.i[2]"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

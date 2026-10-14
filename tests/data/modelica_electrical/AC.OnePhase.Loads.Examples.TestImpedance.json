@@ -1,0 +1,200 @@
+{
+  "format": "noodl-modelica-electrical/1",
+  "model": "Buildings.Electrical.AC.OnePhase.Loads.Examples.TestImpedance",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "msl": "4.1.0",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 1.0,
+    "Interval": 0.01,
+    "Tolerance": 1e-12
+  },
+  "experiment_declared": {
+    "StopTime": 1.0,
+    "Tolerance": 1e-06
+  },
+  "components": [
+    {
+      "name": "V",
+      "class": "Buildings.Electrical.AC.OnePhase.Sources.FixedVoltage",
+      "parameters": {
+        "potentialReference": true,
+        "definiteReference": false,
+        "f": 60.0,
+        "V": 120.0,
+        "phiSou": 0.0
+      }
+    },
+    {
+      "name": "Z1",
+      "class": "Buildings.Electrical.AC.OnePhase.Loads.Impedance",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "P_nominal": 0.0,
+        "V_nominal": 1.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized",
+        "inductive": true,
+        "R": 0.0,
+        "L": 0.0026525823848649226,
+        "C": 0.0,
+        "use_R_in": false,
+        "RMin": 0.0001,
+        "RMax": 100.0,
+        "use_C_in": false,
+        "CMin": 0.0001,
+        "CMax": 100.0,
+        "use_L_in": false,
+        "LMin": 0.0001,
+        "LMax": 100.0
+      }
+    },
+    {
+      "name": "Z2",
+      "class": "Buildings.Electrical.AC.OnePhase.Loads.Impedance",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "P_nominal": 0.0,
+        "V_nominal": 1.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized",
+        "inductive": false,
+        "R": 0.0,
+        "L": 0.0,
+        "C": 0.0026525823848649226,
+        "use_R_in": false,
+        "RMin": 0.0001,
+        "RMax": 100.0,
+        "use_C_in": false,
+        "CMin": 0.0001,
+        "CMax": 100.0,
+        "use_L_in": false,
+        "LMin": 0.0001,
+        "LMax": 100.0
+      }
+    },
+    {
+      "name": "Z3",
+      "class": "Buildings.Electrical.AC.OnePhase.Loads.Impedance",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "P_nominal": 0.0,
+        "V_nominal": 1.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized",
+        "inductive": true,
+        "R": 1.0,
+        "L": 0.0,
+        "C": 0.0,
+        "use_R_in": false,
+        "RMin": 0.0001,
+        "RMax": 100.0,
+        "use_C_in": false,
+        "CMin": 0.0001,
+        "CMax": 100.0,
+        "use_L_in": false,
+        "LMin": 0.0001,
+        "LMax": 100.0
+      }
+    },
+    {
+      "name": "Z4",
+      "class": "Buildings.Electrical.AC.OnePhase.Loads.Impedance",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "P_nominal": 0.0,
+        "V_nominal": 1.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized",
+        "inductive": true,
+        "R": 1.0,
+        "L": 0.0026525823848649226,
+        "C": 0.0,
+        "use_R_in": false,
+        "RMin": 0.0001,
+        "RMax": 100.0,
+        "use_C_in": false,
+        "CMin": 0.0001,
+        "CMax": 100.0,
+        "use_L_in": false,
+        "LMin": 0.0001,
+        "LMax": 100.0
+      }
+    },
+    {
+      "name": "Z5",
+      "class": "Buildings.Electrical.AC.OnePhase.Loads.Impedance",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "P_nominal": 0.0,
+        "V_nominal": 1.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized",
+        "inductive": false,
+        "R": 1.0,
+        "L": 0.0,
+        "C": 0.0026525823848649226,
+        "use_R_in": false,
+        "RMin": 0.0001,
+        "RMax": 100.0,
+        "use_C_in": false,
+        "CMin": 0.0001,
+        "CMax": 100.0,
+        "use_L_in": false,
+        "LMin": 0.0001,
+        "LMax": 100.0
+      }
+    }
+  ],
+  "connections": [
+    [
+      "V.terminal",
+      "Z1.terminal"
+    ],
+    [
+      "V.terminal",
+      "Z2.terminal"
+    ],
+    [
+      "V.terminal",
+      "Z3.terminal"
+    ],
+    [
+      "V.terminal",
+      "Z4.terminal"
+    ],
+    [
+      "V.terminal",
+      "Z5.terminal"
+    ]
+  ],
+  "signals": [],
+  "compared": [
+    "V.terminal.v[1]",
+    "V.terminal.v[2]",
+    "V.terminal.i[1]",
+    "V.terminal.i[2]",
+    "Z1.terminal.v[1]",
+    "Z1.terminal.v[2]",
+    "Z1.terminal.i[1]",
+    "Z1.terminal.i[2]",
+    "Z2.terminal.v[1]",
+    "Z2.terminal.v[2]",
+    "Z2.terminal.i[1]",
+    "Z2.terminal.i[2]",
+    "Z3.terminal.v[1]",
+    "Z3.terminal.v[2]",
+    "Z3.terminal.i[1]",
+    "Z3.terminal.i[2]",
+    "Z4.terminal.v[1]",
+    "Z4.terminal.v[2]",
+    "Z4.terminal.i[1]",
+    "Z4.terminal.i[2]",
+    "Z5.terminal.v[1]",
+    "Z5.terminal.v[2]",
+    "Z5.terminal.i[1]",
+    "Z5.terminal.i[2]"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}
