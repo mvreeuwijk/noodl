@@ -1274,6 +1274,7 @@ class RunoffDriver:
         self.n = len(index)
         self.index = index
         self.model = RunoffModel(inflows.hydrology)
+        self.runoff_nodes = frozenset(inflows._runoff_nodes)
 
     def runoff(self, t: float, step: float | None = None) -> dict[str, Number]:
         """`{node: m3/s}` of the runoff for the routing step that starts at `t` s with the
@@ -1283,7 +1284,7 @@ class RunoffDriver:
             else start_ms + 1.0
         self.model.advance_to(end_ms)
         flows = self.model.outflow_by_node(start_ms)
-        return {n: q for n, q in flows.items() if n in self.index}
+        return {n: q for n, q in flows.items() if n in self.runoff_nodes}
 
     def __call__(self, t: float, step: float | None = None) -> torch.Tensor:
         t = float(t)

@@ -377,6 +377,15 @@ def read_hydrology(sections: dict, path, options: dict, start: datetime.datetime
     wet = float(math.floor(wet + 0.5))
     dry = float(math.floor(dry + 0.5))
     used = [g for g in gages if any(s.gage == g.name for s in subs)]
+    if sections.get("SNOWPACKS") and not ignore_snow:
+        # with snow packs defined SWMM turns precipitation below the snow temperature into
+        # snowfall scaled by the gage's catch factor (gage_getPrecip); the factor 1 changes nothing
+        for g in used:
+            if g.snow_factor != 1.0:
+                _fail(path, gage_lines[g.name],
+                      f"rain gage {g.name!r} has the snow catch factor {g.snow_factor:g}, which "
+                      f"scales snowfall; the file has snow packs and snowmelt is not modelled "
+                      f"(use 1, or IGNORE_SNOWMELT YES)")
     seen: list[RainGage] = []
     for g in used:
         co = next((o for o in seen if o.series == g.series), None)

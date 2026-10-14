@@ -448,6 +448,9 @@ def test_driver_adds_runoff_to_the_schedule_and_drops_outfalls(tmp_path):
     # a subcatchment draining to the outfall adds nothing (the outfall takes no lateral inflow)
     moved = _read(tmp_path, [("RG1              J2 ", "RG1              Outfall ")])
     assert moved.inflows.nodes == ("J1",)
+    every = [m.name for m in moved.manholes] + ["Outfall"]
+    q = moved.inflows.driver(every)(300.0, 10.0)
+    assert float(q[every.index("Outfall")]) == 0.0 and float(q[every.index("J1")]) > 0.0
 
 
 def test_runoff_inflows_combine_with_the_time_series_schedule(tmp_path):
@@ -546,3 +549,12 @@ def test_gradient_reaches_the_routed_depths(tmp_path):
         _, h = simulate_dynamic_wave(m2, s2, d2, steps=12, record=("water.phi",))
         outs.append(float(h["water.phi"][-1, j1]))
     assert grad == pytest.approx((outs[0] - outs[1]) / (2e-4 * area), rel=1e-3)
+
+
+def test_a_snow_catch_factor_is_refused_only_where_snow_packs_make_it_matter(tmp_path):
+    packs = ("[JUNCTIONS]", "[SNOWPACKS]\nSnow1 PLOWABLE 0 0 0 0 0 0 0\n\n[JUNCTIONS]")
+    factor = ("1.0      TIMESERIES R1", "0.8      TIMESERIES R1")
+    assert _read(tmp_path, [factor]).hydrology.gages[0].snow_factor == 0.8   # no snow packs
+    with pytest.raises(ValueError, match="snow catch factor 0.8"):
+        _read(tmp_path, [factor, packs])
+    assert _read(tmp_path, [factor, packs, _option("IGNORE_SNOWMELT      YES")]).hydrology
