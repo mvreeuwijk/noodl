@@ -57,7 +57,10 @@ class Manhole:
     the manhole floods (kinematic and steady routing ignore it). `initial_depth` is SWMM's
     InitDepth (m >= 0), the water depth the dynamic wave starts from (0 lets SWMM average
     the depths of the attached conduits, `DynamicWaveHydraulics.initial_state`). A
-    `storage` curve makes it a SWMM storage unit (dynamic wave only).
+    `storage` curve makes it a SWMM storage unit (dynamic wave only). `ponded_area` is
+    SWMM's Aponded (m2 >= 0): with `DynamicWaveOptions.allow_ponding` a flooded junction
+    with a positive one stores the water above its full depth over that area instead of
+    losing it (dynamic wave only; not for a storage unit).
 
     The `storage` curve (`storage_unit` builds such a manhole) is its surface area,
     ``("functional", a, b, c)`` for ``A = a y^b + c``
@@ -77,6 +80,7 @@ class Manhole:
     surcharge_depth: float = 0.0
     initial_depth: float = 0.0
     storage: tuple | None = None
+    ponded_area: float = 0.0
 
 
 def storage_unit(name: str, invert: float, max_depth: float, curve: tuple, *,
@@ -524,6 +528,11 @@ class SewerNetwork:
                     f"SewerNetwork: manhole {manhole.name!r} has initial_depth "
                     f"{manhole.initial_depth!r} m; only dynamic-wave routing models it "
                     f"(routing is {self.routing!r})")
+            if manhole.ponded_area > 0.0 and self.dynamic_wave.allow_ponding:
+                raise ValueError(
+                    f"SewerNetwork: manhole {manhole.name!r} has a ponded_area with "
+                    f"allow_ponding; only dynamic-wave routing models ponding (routing is "
+                    f"{self.routing!r})")
         for outfall in self.outfalls:
             if outfall.flap_gate:
                 raise ValueError(
@@ -594,6 +603,15 @@ class SewerNetwork:
                 raise ValueError(
                     f"SewerNetwork: manhole {manhole.name!r} initial_depth must be >= 0 m, "
                     f"got {manhole.initial_depth!r}")
+            if not manhole.ponded_area >= 0.0:
+                raise ValueError(
+                    f"SewerNetwork: manhole {manhole.name!r} ponded_area must be >= 0 m2, "
+                    f"got {manhole.ponded_area!r}")
+            if manhole.ponded_area > 0.0 and manhole.storage is not None:
+                raise ValueError(
+                    f"SewerNetwork: storage unit {manhole.name!r} has a ponded_area; SWMM "
+                    f"deprecates the ponded area of a storage unit (node.c:14) and it is "
+                    f"not modelled")
             if manhole.storage is not None:
                 validate_storage_curve(manhole.name, manhole.storage)
                 if manhole.surface_area is not None:

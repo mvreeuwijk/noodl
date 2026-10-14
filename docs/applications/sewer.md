@@ -598,7 +598,8 @@ sits on its bed.
 
 #### Flooding
 
-Flooding follows SWMM without ponding (`ALLOW_PONDING NO`, `dynwave.c:743-795`). A junction's
+Flooding follows SWMM without ponding (`ALLOW_PONDING NO`, or a junction without a ponded
+area; [Ponding](#ponding) below, `dynwave.c:743-795`). A junction's
 full depth is its `MaxDepth`, raised to the top of every conduit end it carries (so a
 `MaxDepth` of 0 means the crown, `link.c:440-463`), and it floods above
 `y_max = full depth + SurDepth` (`Manhole.surcharge_depth`). A flooded junction is held at
@@ -611,6 +612,34 @@ offset by the previous pass's excess of net inflow over what the junction would 
 take there; at the fixed point that offset is the solved excess, so a flooded junction sits
 exactly at `y_max` (not at a penalty's offset above it), and the excess falling to zero
 releases it on the next pass, without a flag to chatter.
+
+#### Ponding
+
+With `DynamicWaveOptions.allow_ponding` (`ALLOW_PONDING YES`) a junction with a positive
+`Manhole.ponded_area` (SWMM's Aponded, m²) does not flood (`dynwave.c:661, 738-748, 753, 766-795`):
+the water above its full depth stays, spread over `ponded_area` plus the conduit ends' surface
+areas (`node_getPondedArea`, `dynwave.c:309-312`), and `SurDepth` plays no part (`yMax` is the full
+depth, `dynwave.c:748`). SWMM takes the area from the previous trial's depth, so the junction
+is the drop-end area switch of the head solve with its threshold at the full head: the line with
+the conduit areas below it, the line with the ponded area added above it, and, from a step start
+below the full head, the junction held there where the lower line ends above it and the upper
+one below it (SWMM's trials alternate about the full depth there); from a start at or above it
+the line of the previous pass's side. A junction above its full depth does not surcharge
+(`dynwave.c:679-680`) and has no hold band; the flood wall of the previous section acts only on a
+ponding junction that is surcharged, at the full head plus SWMM's `FUDGE` depth (a newly ponded
+node rises barely above its full depth in the surcharged update, `dynwave.c:738-740`, and
+continues in the ponded one). A junction whose full depth is its crown has no surcharge zone.
+`sewer.overflow` of a ponding junction is the step's trapezoidal net inflow while it ends above
+its full depth (set to 0 below SWMM's 1e-4 cfs), which is the rate of SWMM's ponded-volume
+growth (`dynwave.c:787-792`); the ponded water stays in the network.
+
+The tie is the only place the model and SWMM can differ at the level of SWMM's own
+iteration: on the step where a rising junction crosses its full depth with the lower line ending
+above it and the upper one below it, SWMM's trials alternate about the full depth, stop wherever
+`MAX_TRIALS` or the head tolerance leaves them (a few `FUDGE` above or below), and the next steps
+inherit that depth; the model holds the junction exactly at the full depth. Ponding is refused
+together with water quality or headspace air (the ponded water would have to stay in the transport
+volume), and for a storage unit (SWMM deprecates its ponded area).
 
 #### Storage units
 
@@ -674,8 +703,10 @@ A regulator also enters the junctions as SWMM's does:
   `NORMAL` or `FIXED` rule with the regulator's crest height as its offset;
 - a regulator starts dry and counts, with depth 0, in its nodes' initial average depth.
 
-Roadway weirs, weir coefficient curves, pumps and dividers are refused by name, and so are
-control rules (a regulator is always fully open).
+Roadway weirs, weir coefficient curves and pumps are refused by name, and so are control rules
+(a regulator is always fully open). Flow dividers (`[DIVIDERS]`) are junctions under dynamic-wave
+routing, as in SWMM, and are refused by name under steady and kinematic-wave routing, where SWMM
+diverts flow (see [SWMM `.inp`](../formats/swmm.md)).
 
 #### Conduit options
 
@@ -707,14 +738,15 @@ the element's flow against a constant, so the flow stays continuous and non-decr
 head difference, as the head solve's Newton step needs. A set `InitDepth`, `InitFlow`,
 `MaxFlow`, flap gate or barrel count is refused by name under STEADY or KINWAVE routing.
 
-The reader refuses by name, with the line number, `ALLOW_PONDING YES`, seepage
+The reader refuses by name, with the line number, seepage
 in `[LOSSES]`, the `DUMMY` and `STREET` sections, storage evaporation and exfiltration, roadway weirs, weir coefficient curves and regulators with `LINK_OFFSETS
 ELEVATION` (see [SWMM `.inp`](../formats/swmm.md)).
 `build_model` with `storage=True` is refused by name; `quality=True` builds
 the water-quality layer on the solved flows (see
 [Quality on the dynamic wave](#quality-on-the-dynamic-wave)) and `air=True` the headspace air
 (see [Headspace air on the dynamic wave](#headspace-air-on-the-dynamic-wave)). Ponding
-(`ALLOW_PONDING YES`) is refused; see [Limitations](#limitations).
+(`ALLOW_PONDING YES` with a ponded area) is modelled, see [Ponding](#ponding), but not together
+with water quality or air; see [Limitations](#limitations).
 
 ```python
 from noodl.apps.sewer import read_swmm_inp, build_model, simulate_dynamic_wave
@@ -1386,9 +1418,10 @@ publish numbers from this application.
   manhole, no loops. Dynamic-wave routing allows loops and flat or adverse conduits.
 - **Dynamic wave, not supported.** Each is refused by name, with the line number when it comes
   from a file (see [SWMM `.inp`](../formats/swmm.md)), unless it says otherwise:
-    - pumps (`[PUMPS]`), flow dividers (`[DIVIDERS]`), control rules (`[CONTROLS]`: a regulator
+    - pumps (`[PUMPS]`), flow dividers under steady and kinematic-wave routing (a divider is a
+      junction under dynamic-wave routing, as in SWMM), control rules (`[CONTROLS]`: a regulator
       is always fully open), roadway weirs and weir coefficient curves;
-    - ponding (`ALLOW_PONDING YES`): flooded water is lost, as in SWMM without ponding. A junction
+    - ponding together with water quality or headspace air, and for a storage unit; a junction
       with no ground (`MaxDepth` 0) and no `SurDepth` floods as soon as it fills to its crown;
     - runoff, groundwater and LID (`[SUBCATCHMENTS]`, `[RAINGAGES]`, `[LID_USAGE]`), RDII,
       pollutant time-series, mass and dry-weather inflows, and the `[FILES]` `USE HOTSTART`,

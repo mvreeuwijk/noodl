@@ -93,3 +93,13 @@ def test_as_float_names_the_field(sample):
 def test_as_float_returns_the_value(sample):
     line = InpLine(section="JUNCTIONS", number=11, fields=("J1", "12.5"), raw="")
     assert as_float(line, 1, "the invert", sample) == 12.5
+
+
+def test_a_format_may_name_the_section_of_leading_lines(tmp_path):
+    """`leading` gives the lines before the first header a section (SWMM's `[TITLE]`);
+    without it they are refused."""
+    path = tmp_path / "lead.inp"
+    path.write_text("a title\n;; note\n[JUNCTIONS]\nJ1 12.0\n")
+    sections = read_sections(path, leading="title")
+    assert [line.fields for line in sections["TITLE"]] == [("a", "title")]
+    assert sections["TITLE"][0].number == 1 and "JUNCTIONS" in sections

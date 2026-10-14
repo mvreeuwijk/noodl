@@ -222,13 +222,21 @@ def test_a_constant_dwf_is_a_constant_inflow_without_a_schedule(tmp_path):
     ("[DWF]\nJ3 FLOW 1 NOPAT\n", "pattern 'NOPAT'"),
     ("[DWF]\nJ3 FLOW 1 *\n", "pattern '\\*'"),
     ("[DWF]\nJ3 BOD 1\n", "only the dry-weather FLOW"),
-    ("[DWF]\nOutfall FLOW 1\n", "'Outfall', which is not a junction"),
+    ("[DWF]\nNowhere FLOW 1\n", "'Nowhere', which is not a junction"),
     ("[DWF]\nJ3 FLOW\n", "a node, FLOW and an average value"),
     ("[DWF]\nJ3 FLOW abc\n", "average flow must be a number"),
 ])
 def test_what_dwf_does_not_take_is_refused_by_name(tmp_path, extra, message):
     with pytest.raises(ValueError, match=message):
         read_swmm_inp(_inp(tmp_path, extra=extra))
+
+
+def test_a_dry_weather_flow_into_an_outfall_is_dropped(tmp_path):
+    """Dynamic-wave routing never solves an outfall's depth from its inflow, so a
+    dry-weather flow at one reaches no link and no junction's inflow."""
+    net, _, _ = read_swmm_inp(_inp(tmp_path, extra="[DWF]\nOutfall FLOW 1\n"))
+    base, _, _ = read_swmm_inp(_inp(tmp_path))
+    assert net.manholes == base.manholes
 
 
 def test_a_dry_weather_pollutant_concentration_with_a_dwf_flow_is_refused(tmp_path):

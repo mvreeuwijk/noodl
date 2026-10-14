@@ -1,7 +1,8 @@
 """A documented SWMM 5 `.inp` subset.
 
 READ: `[TITLE]`, `[OPTIONS]` (`FLOW_UNITS` CFS, GPM, MGD, CMS, LPS or MLD; see Units below),
-`[JUNCTIONS]` (invert, MaxDepth, InitDepth, SurDepth), `[OUTFALLS]` (FREE, NORMAL, FIXED, TIDAL and
+`[JUNCTIONS]` (invert, MaxDepth, InitDepth, SurDepth, Aponded), under DYNWAVE `[DIVIDERS]` (a
+divider is a plain junction there, `_divider`), `[OUTFALLS]` (FREE, NORMAL, FIXED, TIDAL and
 TIMESERIES, with their flap gate), `[CONDUITS]` (with InitFlow and MaxFlow), `[XSECTIONS]`
 (`CIRCULAR`, and under DYNWAVE every other SWMM shape but `DUMMY` and `STREET`, with `inp_xsect`;
 barrels and the culvert code), `[TRANSECTS]` (DYNWAVE; the `IRREGULAR` sections), `[LOSSES]` (the
@@ -23,15 +24,20 @@ routing a non-zero or gated value is refused by name rather than skipped.
 The network uses SWMM's own tabulated circular section
 (``geometry="tabulated"``, `xsect_tables.py`; the other shapes `xsect_shapes.py`) unless
 ``geometry="analytic"`` is passed (circles only).
-IGNORED because no conduit or node ever references them: `[EVAPORATION]`, `[REPORT]`,
+`[RAINGAGES]` is ignored when no `[SUBCATCHMENTS]` (or `[HYDROGRAPHS]`, `[RDII]`) uses a gage.
+Lines before the first section header are `[TITLE]` text, as SWMM reads them (input.c:174);
+a version-control merge-conflict marker anywhere is refused (`_check_conflict_markers`).
+IGNORED because no conduit or node ever references them: `[EVAPORATION]` (unless it can be
+positive and a conduit is open: `_check_evaporation`), `[REPORT]`,
 `[TAGS]`, `[MAP]`, `[COORDINATES]`.
 
 REFUSED BY NAME, because skipping them would silently change the physics:
 `[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` under STEADY or KINWAVE, `[PUMPS]`,
-`[DIVIDERS]`, `[SUBCATCHMENTS]`, `[RAINGAGES]`, `[CONTROLS]`, `[CURVES]` of any type but
-STORAGE, RATING and TIDAL, `[LID_USAGE]`, roadway weirs, weir coefficient curves, `[FILES]`
-`USE HOTSTART`, `USE INFLOWS`, `USE RDII` and `USE RUNOFF` (`SAVE` lines are harmless and
-ignored), and any other section carrying content. A conduit with a
+`[DIVIDERS]` under STEADY or KINWAVE, `[SUBCATCHMENTS]`, `[RAINGAGES]` (with them), `[CONTROLS]`,
+`[CURVES]` of any type but STORAGE, RATING, TIDAL, SHAPE and DIVERSION, `[LID_USAGE]`,
+`IGNORE_ROUTING YES`, `FLOW_ROUTING NONE`, `SKIP_STEADY_STATE YES`, roadway weirs, weir
+coefficient curves, `[FILES]` `USE HOTSTART`, `USE INFLOWS`, `USE RDII` and `USE RUNOFF`
+(`SAVE` lines are harmless and ignored), and any other section carrying content. A conduit with a
 seepage rate is refused for every routing; one with a non-circular section, a culvert code, a
 non-zero entry, exit or average loss coefficient or more than one barrel under STEADY or
 KINWAVE.
@@ -53,11 +59,13 @@ DYNWAVE reads `VARIABLE_STEP` (the Courant factor; absent means SWMM's default 0
 project.c:854) and `MINIMUM_STEP`, and clips `ROUTING_STEP` to `WET_STEP` (default 300 s)
 as SWMM does (project.c:246-250) and `LENGTHENING_STEP` (conduit lengthening, with the file's own
 ROUTING_STEP, as SWMM validates conduits before it lowers the step to WET_STEP). It
-refuses, with the line number: `ALLOW_PONDING YES`. A TIDAL outfall reads its `[CURVES]` TIDAL
-curve (`Outfall.tide`, hours and stage elevations). A TIMESERIES outfall takes its stage from
-the `outfall_stage` driver (time variation belongs in the drivers): the reader records the
-series name (`Outfall.series`) and does not read that series; the model builder then refuses
-a network whose TIMESERIES outfall has no driver.
+reads `ALLOW_PONDING` (YES or NO, as SWMM's keyword test) for every routing: YES makes a
+junction or divider with a non-zero Aponded pond (`Manhole.ponded_area`), under DYNWAVE only;
+with STEADY or KINWAVE and an Aponded it is refused by name, with the line. A TIDAL outfall
+reads its `[CURVES]` TIDAL curve (`Outfall.tide`, hours and stage elevations). A TIMESERIES
+outfall takes its stage from the `outfall_stage` driver (time variation belongs in the
+drivers): the reader records the series name (`Outfall.series`) and does not read that
+series; the model builder then refuses a network whose TIMESERIES outfall has no driver.
 
 A conduit the reader reverses (adverse, below) has its `InitFlow` sign flipped and its flap
 gate recorded as reversed (`Pipe.flap_gate_reversed`), as SWMM does (`conduit_reverse`,
@@ -141,7 +149,6 @@ _DYNWAVE_KEYS = (
     "ROUTING_STEP", "WET_STEP", "VARIABLE_STEP", "MINIMUM_STEP", "LENGTHENING_STEP", "MIN_SURFAREA",
     "HEAD_TOLERANCE", "MAX_TRIALS", "MIN_SLOPE", "INERTIAL_DAMPING", "NORMAL_FLOW_LIMITED",
     "SURCHARGE_METHOD", "FORCE_MAIN_EQUATION",
-    "ALLOW_PONDING",
 )
 _DAMPING = {"NO": "none", "NONE": "none", "PARTIAL": "partial", "FULL": "full"}
 _NORMAL_FLOW = {"NO": "none", "NONE": "none", "NEITHER": "none", "SLOPE": "slope",
@@ -198,7 +205,7 @@ _IGNORED = {
 }
 _READ = {"OPTIONS", "JUNCTIONS", "OUTFALLS", "CONDUITS", "XSECTIONS", "LOSSES", "INFLOWS",
          "POLLUTANTS", "STORAGE", "CURVES", "ORIFICES", "WEIRS", "OUTLETS", "TIMESERIES",
-         "PATTERNS", "DWF", "FILES", "TRANSECTS"}
+         "PATTERNS", "DWF", "FILES", "TRANSECTS", "DIVIDERS"}
 #: `[FILES]` ``USE`` kinds that change the physics (a hot-start state, interface inflows, RDII
 #: or runoff flows): refused. ``USE RAINFALL`` only feeds rain gauges, which are refused anyway.
 _REFUSED_FILES = {"HOTSTART": "the initial state", "INFLOWS": "interface inflows",
@@ -231,10 +238,13 @@ def read_swmm_inp(
     (`noodl.apps.sewer.xsect_tables`). Pass ``geometry="analytic"`` for the exact circle.
     """
     path = Path(path)
-    sections = read_sections(path)
+    sections = read_sections(path, leading="TITLE")      # input.c:174: the pass starts in TITLE
+    _check_conflict_markers(sections, path)
     for name, lines in sections.items():
         if name in _READ or name in _IGNORED or not lines:
             continue
+        if name == "RAINGAGES" and not sections.get("SUBCATCHMENTS"):
+            continue        # a gage feeds subcatchments (and RDII, refused as its own section)
         raise ValueError(
             f"{path}: section [{name}] (line {lines[0].number}) is not part of the "
             f"documented subset and carries content; this reader models gravity conduits, "
@@ -244,6 +254,7 @@ def read_swmm_inp(
     routing = "KINWAVE"
     offsets = "DEPTH"
     flow_units = "CFS"                  # SWMM's default (project.c)
+    ponding = None                      # the ALLOW_PONDING line, if YES
     raw: dict[str, object] = {}
     opts: dict[str, tuple] = {}
     for line in sections.get("OPTIONS", []):
@@ -258,9 +269,32 @@ def read_swmm_inp(
                     f"{path}: line {line.number}: FLOW_UNITS must be one of "
                     f"{sorted(_FLOW_UNITS)}, got {line.fields[1]!r}"
                 )
+        elif key == "ALLOW_PONDING":
+            require_fields(line, 2, "ALLOW_PONDING", path)
+            word = line.fields[1].upper()
+            if word not in ("NO", "YES"):                          # project.c:612, NoYesWords
+                raise ValueError(
+                    f"{path}: line {line.number}: ALLOW_PONDING must be YES or NO, got "
+                    f"{line.fields[1]!r}")
+            ponding = line if word == "YES" else None
+        elif key in _SKIPPING_OPTIONS:
+            require_fields(line, 2, key, path)
+            word = line.fields[1].upper()
+            if word not in ("NO", "YES"):                          # project.c:612, NoYesWords
+                raise ValueError(
+                    f"{path}: line {line.number}: {key} must be YES or NO, got "
+                    f"{line.fields[1]!r}")
+            if word == "YES":
+                raise ValueError(
+                    f"{path}: line {line.number}: {key} YES {_SKIPPING_OPTIONS[key]}; set it "
+                    f"to NO")
         elif key == "FLOW_ROUTING":
             require_fields(line, 2, "FLOW_ROUTING", path)
             routing = line.fields[1].upper()
+            if routing == "NONE":                                   # project.c:487
+                raise ValueError(
+                    f"{path}: line {line.number}: FLOW_ROUTING NONE skips flow routing "
+                    f"altogether (SWMM's IgnoreRouting), which is not modelled")
         elif key == "LINK_OFFSETS":
             require_fields(line, 2, "LINK_OFFSETS", path)
             offsets = line.fields[1].upper()
@@ -288,36 +322,39 @@ def read_swmm_inp(
         for key, scale in (("HEAD_TOLERANCE", lf), ("MIN_SURFAREA", lf * lf)):
             if key in opts:
                 opts[key] = (opts[key][0], opts[key][1] * scale)
-        dynamic_wave = _dynamic_wave_options(opts, path)
+        dynamic_wave = dataclasses.replace(_dynamic_wave_options(opts, path),
+                                           allow_ponding=ponding is not None)
         min_slope = opts["MIN_SLOPE"][1] / 100.0 if "MIN_SLOPE" in opts else 0.0
 
     invert: dict[str, float] = {}
     manholes: list[Manhole] = []
     for line in sections.get("JUNCTIONS", []):
         require_fields(line, 2, "a junction", path)
-        name = line.fields[0]
-        elevation = as_float(line, 1, "the invert elevation", path) * lf
-        depth = (as_float(line, 2, "the maximum depth", path) * lf
-                 if len(line.fields) > 2 else None)
-        initial = (as_float(line, 3, "the initial depth", path) * lf
-                   if len(line.fields) > 3 else 0.0)
-        if initial < 0.0:
+        manhole = _junction(line, 2, path, lf)
+        invert[manhole.name] = manhole.invert
+        manholes.append(manhole)
+    if sections.get("DIVIDERS"):
+        if not dynamic:
             raise ValueError(
-                f"{path}: line {line.number}: junction {name!r} has a negative initial depth "
-                f"{line.fields[3]}"
-            )
-        surcharge = (as_float(line, 4, "the surcharge depth", path) * lf
-                     if len(line.fields) > 4 else 0.0)
-        if surcharge < 0.0:
+                f"{path}: section [DIVIDERS] (line {sections['DIVIDERS'][0].number}): flow "
+                f"dividers are read under dynamic-wave routing only (FLOW_ROUTING DYNWAVE), "
+                f"where SWMM routes them as plain junctions; under {routing} SWMM diverts "
+                f"flow (node.c divider_getOutflow), which is not modelled")
+        link_ends = {line.fields[0]: line.fields[1:3] for key in _LINK_SECTIONS
+                     for line in sections.get(key, []) if len(line.fields) > 2}
+        curve_names = {line.fields[0] for line in sections.get("CURVES", [])}
+        for line in sections["DIVIDERS"]:
+            manhole = _divider(line, link_ends, curve_names, path, lf)
+            invert[manhole.name] = manhole.invert
+            manholes.append(manhole)
+    if ponding is not None and not dynamic:
+        pond = next((m for m in manholes if m.ponded_area > 0.0), None)
+        if pond is not None:
             raise ValueError(
-                f"{path}: line {line.number}: junction {name!r} has a negative surcharge depth "
-                f"{line.fields[4]} (SWMM's SurDepth must be >= 0)"
-            )
-        invert[name] = elevation
-        manholes.append(
-            Manhole(name, elevation, ground=None if depth is None else elevation + depth,
-                    surcharge_depth=surcharge, initial_depth=initial)
-        )
+                f"{path}: line {ponding.number}: ALLOW_PONDING YES with node {pond.name!r} "
+                f"carrying a ponded area: under {routing} SWMM re-releases ponded water into "
+                f"the next step's flow (flowrout.c:151-156), which is not modelled; ponding "
+                f"is read under dynamic-wave routing only")
     all_curves = _curves(sections.get("CURVES", []), path, lf, qf)
     tides = {name: pts for name, (kind, pts) in all_curves.items() if kind == "TIDAL"}
     curves = {name: pts for name, (kind, pts) in all_curves.items() if kind == "STORAGE"}
@@ -443,6 +480,7 @@ def read_swmm_inp(
             culvert = int(code)
         culverts[line.fields[0]] = culvert
 
+    _check_evaporation(sections.get("EVAPORATION", []), xsects, conduit_names, path)
     pipes: list[Pipe] = []
     for line in sections.get("CONDUITS", []):
         require_fields(line, 5, "a conduit", path)
@@ -562,7 +600,8 @@ def read_swmm_inp(
         }
 
     inflow, loads, schedule = _lateral_inflows(
-        sections, {m.name for m in manholes}, pollutants, cdwf, start, qf, path)
+        sections, {m.name for m in manholes}, pollutants, cdwf, start, qf, path,
+        frozenset(o.name for o in outfalls))
 
     manholes = [
         dataclasses.replace(m, inflow=inflow[m.name])
@@ -578,13 +617,149 @@ def read_swmm_inp(
     return network, loads, pollutants
 
 
+#: `[OPTIONS]` keys whose YES changes what SWMM routes (project.c:617-623, routing.c:386-392,
+#: swmm5.c:375): the reason is the refusal's. Their NO is SWMM's default and changes nothing.
+_SKIPPING_OPTIONS = {
+    "IGNORE_ROUTING": "skips flow routing altogether (SWMM does not route at all)",
+    "SKIP_STEADY_STATE": ("freezes the routed state in any step whose flows are within "
+                          "SYS_FLOW_TOL and LAT_FLOW_TOL of the last (routing.c:386-392), "
+                          "so it stops a transient early"),
+}
+#: The sections whose first three fields are ``Name Node1 Node2`` (SWMM's links).
+_LINK_SECTIONS = ("CONDUITS", "ORIFICES", "WEIRS", "OUTLETS", "PUMPS")
+#: SWMM's `DividerTypeWords` (keywords.c:50) and the number of type-specific fields each takes
+#: after the type (node.c:1157-1194); the optional MaxDepth, InitDepth, SurDepth and Aponded
+#: follow them.
+_DIVIDER_FIELDS = {"CUTOFF": 1, "TABULAR": 1, "WEIR": 3, "OVERFLOW": 0}
+
+
+def _junction(line, first: int, path, lf: float) -> Manhole:
+    """A junction (`[JUNCTIONS]`, or a divider read as one) from `line`: ``Name Invert`` and
+    from field `first` MaxDepth, InitDepth, SurDepth and Aponded (node.c:620-640,
+    1196-1208). An absent MaxDepth leaves the ground to the attached conduits."""
+    name = line.fields[0]
+    elevation = as_float(line, 1, "the invert elevation", path) * lf
+
+    def given(k: int, what: str, default):
+        i = first + k
+        return as_float(line, i, what, path) if len(line.fields) > i else default
+
+    depth = given(0, "the maximum depth", None)
+    initial = given(1, "the initial depth", 0.0) * lf
+    surcharge = given(2, "the surcharge depth", 0.0) * lf
+    if initial < 0.0:
+        raise ValueError(
+            f"{path}: line {line.number}: junction {name!r} has a negative initial depth "
+            f"{line.fields[first + 1]}"
+        )
+    if surcharge < 0.0:
+        raise ValueError(
+            f"{path}: line {line.number}: junction {name!r} has a negative surcharge depth "
+            f"{line.fields[first + 2]} (SWMM's SurDepth must be >= 0)"
+        )
+    ponded = given(3, "the ponded area", 0.0) * lf * lf
+    if ponded < 0.0:
+        raise ValueError(
+            f"{path}: line {line.number}: junction {name!r} has a negative ponded area "
+            f"{line.fields[first + 3]}")
+    return Manhole(name, elevation,
+                   ground=None if depth is None else elevation + depth * lf,
+                   surcharge_depth=surcharge, initial_depth=initial, ponded_area=ponded)
+
+
+def _divider(line, link_ends: dict, curve_names: set, path, lf: float) -> Manhole:
+    """A `[DIVIDERS]` line as a junction, which is all a flow divider is under dynamic-wave
+    routing. SWMM's diversion (`divider_getOutflow`) is reached only through `link_getInflow`'s
+    default case (link.c:543-558) and `conduit_getInflow` (link.c:1327), which dynamic-wave
+    routing never calls for a conduit (dynwave.c:440 calls it for non-conduit links, whose own
+    inflow functions do not use the node's), and the tree-layout check (`validateTreeLayout`,
+    flowrout.c:216) is for STEADY and KINWAVE only. What `node_validate` -> `divider_validate`
+    (node.c:1216-1247) checks regardless of routing is refused here as SWMM does: a missing or
+    unattached diverted link, and a WEIR divider with non-positive ``dhMax`` or ``cWeir`` or a
+    ``qMin`` above ``cWeir dhMax^1.5``. The fields after the type-specific ones are MaxDepth,
+    InitDepth, SurDepth and Aponded (node.c:1196-1208), as for a junction."""
+    require_fields(line, 4, "a divider", path)
+    name, link, kind = line.fields[0], line.fields[2], line.fields[3].upper()
+    if kind not in _DIVIDER_FIELDS:
+        raise ValueError(f"{path}: line {line.number}: divider {name!r} has the type "
+                         f"{line.fields[3]!r}; SWMM takes one of {sorted(_DIVIDER_FIELDS)}")
+    if link not in link_ends or name not in link_ends[link]:
+        why = ("names no diverted link" if link == "*" else
+               f"names link {link!r}, which is not a link" if link not in link_ends else
+               f"names link {link!r}, which is not attached to it")
+        raise ValueError(f"{path}: line {line.number}: divider {name!r} {why} "
+                         f"(SWMM's ERR_DIVIDER_LINK, node.c:1227)")
+    n = 4 + _DIVIDER_FIELDS[kind]
+    require_fields(line, n, f"a {kind} divider", path)
+    if kind == "TABULAR" and line.fields[4] not in curve_names:
+        raise ValueError(f"{path}: line {line.number}: divider {name!r} names the diversion "
+                         f"curve {line.fields[4]!r}, which is not in [CURVES]")
+    values = ([] if kind == "TABULAR" else
+              [as_float(line, i, "a divider parameter", path) for i in range(4, n)])
+    if kind == "WEIR":
+        q_min, dh_max, c_weir = values
+        if dh_max <= 0.0 or c_weir <= 0.0 or q_min > c_weir * dh_max**1.5:
+            raise ValueError(
+                f"{path}: line {line.number}: weir divider {name!r} needs a positive dhMax "
+                f"and cWeir and a qMin not above cWeir * dhMax^1.5 (SWMM's ERR_WEIR_DIVIDER, "
+                f"node.c:1236-1244)")
+    return _junction(line, n, path, lf)
+
+
+def _check_evaporation(lines, xsects: dict, conduit_names: set, path) -> None:
+    """Refuse an `[EVAPORATION]` that can be positive while a conduit is open.
+
+    SWMM takes water from an open conduit at ``topWidth * length * Evap.rate``
+    (`link_getLossRate`, link.c:1359-1362; the rate is `climate_setState`'s at every routing
+    step, swmm5.c:556), which dynamic-wave routing subtracts from its end nodes
+    (dynwave.c:560-572). It is not modelled, so a file whose rate is not provably zero (a
+    ``CONSTANT`` or a ``MONTHLY`` list of zeros, or none) is refused naming the first open
+    conduit; with only closed conduits (a closed section loses nothing, and a storage unit's
+    own Fevap is refused where non-zero) it changes nothing and the section is ignored."""
+    positive = None
+    for line in lines:
+        kind = line.fields[0].upper()
+        if kind in ("CONSTANT", "MONTHLY"):
+            values = [as_float(line, i, "an evaporation rate", path)
+                      for i in range(1, len(line.fields))]
+            if any(v != 0.0 for v in values):
+                positive = positive or line
+        elif kind in ("TIMESERIES", "TEMPERATURE", "FILE"):
+            positive = positive or line
+    if positive is None:
+        return
+    for name in conduit_names:
+        x = xsects.get(name)
+        if x is not None and x.open:
+            raise ValueError(
+                f"{path}: line {positive.number}: [EVAPORATION] {positive.fields[0]} can be "
+                f"positive and conduit {name!r} is open; SWMM's evaporation from open conduits "
+                f"(link.c:1359) is not modelled")
+
+
+def _check_conflict_markers(sections, path) -> None:
+    """Refuse a version-control merge-conflict marker (``<<<<<<<``, ``=======``,
+    ``>>>>>>>``). SWMM would take one before the first section as title text, but a file
+    carrying them holds both sides of a merge, so its sections are duplicated: whichever
+    SWMM does with it, the model it builds is not the one the author meant."""
+    for lines in sections.values():
+        for line in lines:
+            word = line.fields[0]
+            if len(word) >= 7 and word[:7] in ("<<<<<<<", "=======", ">>>>>>>"):
+                raise ValueError(
+                    f"{path}: line {line.number}: version-control merge-conflict marker "
+                    f"{word[:7]!r}; the file holds both sides of an unresolved merge")
+
+
 def _curves(lines, path, lf: float = 1.0, qf: float = 1.0
             ) -> dict[str, tuple[str, tuple[tuple, tuple]]]:
-    """`[CURVES]`: ``{name: (type, (xs, ys))}`` of the STORAGE, RATING and TIDAL curves, each
-    curve's points in file order over any number of lines, its type on its first line
+    """`[CURVES]`: ``{name: (type, (xs, ys))}`` of the STORAGE, RATING, TIDAL, SHAPE and
+    DIVERSION curves (the last is only a divider's diversion table, unused under DYNWAVE),
+    each curve's points in file order over any number of lines, its type on its first line
     (`table.c:67-108`), in SI: `lf` m per length unit and `qf` m3/s per flow unit convert a
-    STORAGE curve (depth, area), a RATING curve (depth or head, flow) and a TIDAL curve (hours,
-    stage). A curve of another type is refused (no object that uses one is read), as are an
+    STORAGE curve (depth, area), a RATING curve (depth or head, flow), a TIDAL curve (hours,
+    stage) and a DIVERSION curve (flow, flow). A curve of another type is refused (no object
+    that uses one is read), as are an
     unpaired value and x values that do not strictly increase (`table.c:313`)."""
     points: dict[str, list[tuple[float, float]]] = {}
     kinds: dict[str, str] = {}
@@ -597,11 +772,11 @@ def _curves(lines, path, lf: float = 1.0, qf: float = 1.0
                 raise ValueError(
                     f"{path}: line {line.number}: curve {name!r} needs its type (one of "
                     f"{_CURVE_TYPES}) on its first line")
-            if kind not in ("STORAGE", "RATING", "TIDAL", "SHAPE"):
+            if kind not in ("STORAGE", "RATING", "TIDAL", "SHAPE", "DIVERSION"):
                 raise ValueError(
                     f"{path}: line {line.number}: curve {name!r} is of type {kind}; only "
-                    f"STORAGE, RATING, TIDAL and SHAPE curves are read (no object that uses "
-                    f"another type is modelled)")
+                    f"STORAGE, RATING, TIDAL, SHAPE and DIVERSION curves are read (no object "
+                    f"that uses another type is modelled)")
             points[name] = []
             kinds[name] = kind
             start = 2
@@ -618,7 +793,8 @@ def _curves(lines, path, lf: float = 1.0, qf: float = 1.0
                     f"after {points[name][-1][0]}")
             points[name].append((x, y))
     scales = {"STORAGE": (lf, lf * lf), "RATING": (lf, qf), "TIDAL": (1.0, lf),
-              "SHAPE": (1.0, 1.0)}
+              "SHAPE": (1.0, 1.0),
+              "DIVERSION": (qf, qf)}
     return {name: (kinds[name], (tuple(p[0] * scales[kinds[name]][0] for p in pts),
                                  tuple(p[1] * scales[kinds[name]][1] for p in pts)))
             for name, pts in points.items()}
@@ -873,8 +1049,6 @@ def _dynamic_wave_options(opts: dict, path) -> DynamicWaveOptions:
         refuse("MINIMUM_STEP", "-- must not be negative")
     if "LENGTHENING_STEP" in opts and opts["LENGTHENING_STEP"][1] < 0.0:
         refuse("LENGTHENING_STEP", "-- must not be negative")
-    if opts.get("ALLOW_PONDING", (None, "NO"))[1] not in ("NO", "FALSE"):
-        refuse("ALLOW_PONDING", "-- ponding is not modelled; set ALLOW_PONDING NO")
     kwargs: dict[str, object] = {}
     # SWMM lowers the routing step to the wet step when larger (project.c:246-250)
     routing_step = opts["ROUTING_STEP"][1] if "ROUTING_STEP" in opts else (
@@ -1041,13 +1215,17 @@ def _read_series(name, rows, start, path) -> TimeSeries:
 
 
 def _lateral_inflows(sections, junctions: set, pollutants: dict, cdwf: list, start, qf: float,
-                     path):
+                     path, outfalls: frozenset = frozenset()):
     """`(inflow, loads, schedule)` from `[INFLOWS]`, `[DWF]`, `[PATTERNS]` and `[TIMESERIES]`:
     `inflow` the m3/s of each junction at the start of the run, `loads` the constant
     pollutant concentrations (kg/m3) and `schedule` the `InflowSchedule` when any flow
     varies in time (a series, a pattern, patterned dry-weather flow), else ``None``. `qf` is
     the m3/s per flow unit of the file. SWMM's rules are in `inflows.py`; what it does not
-    take is refused by name, with the line."""
+    take is refused by name, with the line. A flow into an outfall (`outfalls`) is checked and
+    dropped: dynamic-wave routing skips an outfall's depth update (`findNodeDepths`,
+    dynwave.c:623) and the outfall's boundary depth is set by its link alone
+    (`link_setOutfallDepth`), so a lateral inflow reaches no link; it is in no junction's
+    `inflow`."""
     patterns = patterns_from_lines(
         [(line.number, tokens(line.raw)) for line in sections.get("PATTERNS", [])
          if tokens(line.raw)], path)
@@ -1083,7 +1261,7 @@ def _lateral_inflows(sections, junctions: set, pollutants: dict, cdwf: list, sta
                                       number(6, "the baseline", 0.0))
         label_pattern = toks[7] if len(toks) > 7 and toks[7] not in ("", "*") else None
         if constituent.upper() == "FLOW":
-            if node not in junctions:
+            if node not in junctions and node not in outfalls:
                 raise ValueError(
                     f"{path}: line {line.number}: inflow at {node!r}, which is not a "
                     f"junction")
@@ -1093,9 +1271,11 @@ def _lateral_inflows(sections, junctions: set, pollutants: dict, cdwf: list, sta
                         f"{path}: line {line.number}: inflow at {node!r} names the time "
                         f"series {label!r}, which has no [TIMESERIES] entry")
                 series[label] = _read_series(label, rows[label], start, path)
-            external[node] = ExternalInflow(
+            made = ExternalInflow(
                 node, series[label] if has_series else None, sfactor * qf, baseline * qf,
                 pattern(line, label_pattern) if label_pattern else None)
+            if node in junctions:
+                external[node] = made
             continue
         if constituent not in pollutants:
             raise ValueError(
@@ -1128,7 +1308,7 @@ def _lateral_inflows(sections, junctions: set, pollutants: dict, cdwf: list, sta
             raise ValueError(
                 f"{path}: line {line.number}: [DWF] of {constituent!r} at {node!r}: only "
                 f"the dry-weather FLOW is modelled, not a pollutant concentration")
-        if node not in junctions:
+        if node not in junctions and node not in outfalls:
             raise ValueError(f"{path}: line {line.number}: dry-weather flow at {node!r}, "
                              f"which is not a junction")
         try:
@@ -1141,7 +1321,8 @@ def _lateral_inflows(sections, junctions: set, pollutants: dict, cdwf: list, sta
             if label:
                 found = pattern(line, label)
                 by_kind[found.kind] = found   # one per kind: the last wins
-        dry[node] = DryWeatherInflow(node, average, tuple(by_kind.values()))
+        if node in junctions:
+            dry[node] = DryWeatherInflow(node, average, tuple(by_kind.values()))
     if dry and cdwf:
         raise ValueError(f"{path}: section [DWF] with pollutant {cdwf[0]!r}, whose Cdwf (the "
                          f"dry-weather concentration) is not 0; the dry-weather pollutant "
