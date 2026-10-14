@@ -1655,13 +1655,18 @@ regression at rtol 1e-8.
   controller with a 5 s loop, lags the flows' change by those 5 s, which a step that sees the
   flows at its two ends only misses. Over its first 7200 s the room temperature is up to
   4.3e-5 K (1.5e-7 relative) from the reference at 1 and 2 and at 2 and 4 substeps alike, and
-  the controller output, five times the room's deviation from its set point, 1.1e-2 relative.
-  Over every row the run at 1 substep does not get through: at 959400-960000 s (day
-  11) its airflow solve stops at a 0.142 kg/s residual (not diagnosed). Its weather and wind pressures are compared (above).
+  the controller output, five times the room's deviation from its set point, 1.1e-2 relative;
+  the flows are within 1.5e-5 and the humidity within 1.8e-4. Over every row the run at 1
+  substep does not get through: at 959400-960000 s (day 11) its airflow solve stops at a
+  0.142 kg/s residual (not diagnosed). Its weather and wind pressures are compared (above).
 - **The Modelica import accepts a stated subset.** A `LimPID` is read as a P controller on a
-  zone temperature driving a heat flow; integral and derivative parts, other feedback targets
-  and two flow elements in one column are refused with a named error, and only the weather
-  reader's airflow outputs are read; see [the Modelica import's refused
+  zone temperature driving a heat flow. Refused with a named error: a `LimPID` with an
+  integral or derivative part (`controllerType` PI, PD or PID), with feed-forward or with the
+  steady-state or initial-output initialisation; a feedback signal driving anything but a
+  `PrescribedHeatFlow`; a door or zonal flow inside a column chain, and a ring of one-way
+  elements in series with no volume or boundary; and every class outside the supported list,
+  the CDL blocks (`Buildings.Controls.OBC.CDL`, their PID and hysteresis included) among them.
+  Only the weather reader's airflow outputs are read; see [the Modelica import's refused
   content](../formats/modelica.md).
 
 ## Install

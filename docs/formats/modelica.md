@@ -123,6 +123,9 @@ its class):
   sensor's `T` wired to anything but one of a block's inputs, naming the connection; a
   temperature sensor whose `port` is not wired to a volume's `heatPort`.
 - A `TraceSubstancesFlowSource` with a negative (extracting) flow.
+- Every class outside the supported list above ("component class is not supported", or
+  "signal source is not supported" for a signal block), the CDL blocks
+  (`Buildings.Controls.OBC.CDL`, their PID and hysteresis included) among them.
 - Every `Buildings.BoundaryConditions.WeatherData` class but `ReaderTMY3`; a weather bus wired
   to anything but an `Outside` boundary's `weaBus`, or any weather-bus output other than
   `TDryBul`, `pAtm`, `relHum`, `winSpe` and `winDir` read by anything; a `ReaderTMY3` wired
