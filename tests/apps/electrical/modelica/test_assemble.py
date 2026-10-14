@@ -396,11 +396,14 @@ def test_transformer_ratings_and_power_factors_are_checked(tmp_path):
            **rating),
         _c("t4", AC + "Conversion.ACACTransformer", VHigh=120.0, VLow=60.0, VABase=1e400,
            **rating),
+        _c("t5", AC + "Conversion.ACACTransformer", VHigh=120.0, VLow=60.0, VABase=10 ** 400,
+           Zperc=10 ** 400, XoverR=8.0, ground_1=False, ground_2=True),
         _c("l1", AC + "Loads.Inductive", pf=-2.0, **load),
         _c("l2", AC + "Loads.Inductive", pf=0.0, **load),
         _c("l3", AC + "Loads.Inductive", pf=1.5, **load),
     ], [["V.terminal", "t1.terminal_n"], ["V.terminal", "t2.terminal_n"],
         ["V.terminal", "t3.terminal_n"], ["V.terminal", "t4.terminal_n"],
+        ["V.terminal", "t5.terminal_n"],
         ["t1.terminal_p", "l1.terminal"],
         ["t2.terminal_p", "l2.terminal"], ["t3.terminal_p", "l3.terminal"]])
     with pytest.raises(ModelicaImportError) as exc:
@@ -412,6 +415,9 @@ def test_transformer_ratings_and_power_factors_are_checked(tmp_path):
     assert f"t2 ({tra}): parameter VABase must be a finite number > 0, found None" in msg
     assert f"t3 ({tra}): parameter VHigh must be a finite number > 0, found -1.0" in msg
     assert f"t4 ({tra}): parameter VABase must be a finite number > 0, found inf" in msg
+    # a 400-digit integer overflows a float: named, not an OverflowError
+    assert f"t5 ({tra}): parameter VABase must be a finite number > 0, found 1000000" in msg
+    assert f"t5 ({tra}): parameter Zperc must be a finite number, found 1000000" in msg
     for name, pf in (("l1", -2.0), ("l2", 0.0), ("l3", 1.5)):
         assert (f"{name} (Buildings.Electrical.AC.OnePhase.Loads.Inductive): pf = {pf!r}: a "
                 f"power factor must lie in (0, 1]") in msg

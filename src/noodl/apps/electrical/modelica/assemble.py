@@ -327,28 +327,50 @@ class _Inputs:
 
 
 # ------------------------------------------------------------------------------ helpers
+def _finite(value) -> float | None:
+    """`value` as a finite float, or `None` (a bool, a non-number, or a number that is not
+    finite or does not fit a float, such as a 400-digit integer)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _shown(value) -> str:
+    """`repr(value)`, shortened for the message (a huge integer has a very long one)."""
+    try:
+        text = repr(value)
+    except ValueError:          # an integer beyond Python's digit limit for str()
+        return "a very large integer"
+    return text if len(text) <= 40 else f"{text[:20]}...({len(text)} characters)"
+
+
 def _number(device: Device, key: str, problems: list[str], default: float | None = None
             ) -> float:
-    """A numeric parameter of `device` (`default` when given and absent); a missing or
-    non-numeric one is a problem (0.0 stands in for it)."""
+    """A finite numeric parameter of `device` (`default` when given and absent); a missing,
+    non-numeric or non-finite one is a problem (0.0 stands in for it)."""
     value = device.parameters.get(key, default)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        problems.append(f"{device.name} ({device.cls}): parameter {key} must be a number, "
-                        f"found {value!r}")
+    number = _finite(value)
+    if number is None:
+        problems.append(f"{device.name} ({device.cls}): parameter {key} must be a finite "
+                        f"number, found {_shown(value)}")
         return 0.0
-    return float(value)
+    return number
 
 
 def _positive(device: Device, key: str, problems: list[str]) -> float | None:
     """A numeric parameter that must be finite and > 0; `None` (with a problem)
     otherwise."""
     value = device.parameters.get(key)
-    if (isinstance(value, bool) or not isinstance(value, (int, float))
-            or not 0 < value < math.inf):
+    number = _finite(value)
+    if number is None or not number > 0:
         problems.append(f"{device.name} ({device.cls}): parameter {key} must be a finite "
-                        f"number > 0, found {value!r}")
+                        f"number > 0, found {_shown(value)}")
         return None
-    return float(value)
+    return number
 
 
 def _flag(device: Device, key: str, problems: list[str]) -> bool:
