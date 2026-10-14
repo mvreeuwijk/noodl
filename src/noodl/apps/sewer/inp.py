@@ -28,10 +28,12 @@ The network uses SWMM's own tabulated circular section
 (``geometry="tabulated"``, `xsect_tables.py`; the other shapes `xsect_shapes.py`) unless
 ``geometry="analytic"`` is passed (circles only).
 `[RAINGAGES]` is ignored when no `[SUBCATCHMENTS]` (or `[HYDROGRAPHS]`, `[RDII]`) uses a gage.
-A file with `[SUBCATCHMENTS]` also gets its hydrology -- `[RAINGAGES]`, `[SUBAREAS]`,
+A file with `[SUBCATCHMENTS]`, `[HYDROGRAPHS]` or `[RDII]` also gets its hydrology --
+`[RAINGAGES]`, `[SUBAREAS]`,
 `[INFILTRATION]`, `[EVAPORATION]` and `[ADJUSTMENTS]`, read by `inp_hydrology.read_hydrology`
 (SWMM's runoff, `runoff.py`) -- as `SewerNetwork.inflows`, a `runoff.RunoffInflows` that adds
-the runoff of the subcatchments to the lateral inflows below.
+the runoff of the subcatchments, and the RDII of the unit hydrographs (`rdii.py`, read by
+`inp_rdii.read_rdii`: `[HYDROGRAPHS]`, `[RDII]`), to the lateral inflows below.
 Lines before the first section header are `[TITLE]` text, as SWMM reads them (input.c:174);
 a version-control merge-conflict marker anywhere is refused (`_check_conflict_markers`).
 IGNORED because no conduit or node ever references them: `[EVAPORATION]` (unless it can be
@@ -254,7 +256,8 @@ def read_swmm_inp(
     path = Path(path)
     sections = read_sections(path, leading="TITLE")      # input.c:174: the pass starts in TITLE
     _check_conflict_markers(sections, path)
-    hydro = bool(sections.get("SUBCATCHMENTS"))
+    hydro = bool(sections.get("SUBCATCHMENTS") or sections.get("HYDROGRAPHS")
+                 or sections.get("RDII"))
     for name, lines in sections.items():
         if name in _READ or name in _IGNORED or not lines:
             continue
@@ -690,8 +693,10 @@ def _hydrology(sections, path, start, manholes, outfalls, us: bool, pollutants: 
         has_pollutants=bool(pollutants), pollutant_rain=rain)
     if schedule is not None and not (schedule.external or schedule.dry_weather):
         schedule = None
+    rdii_nodes = hydrology.rdii.nodes if hydrology.rdii is not None else ()
     inflows = RunoffInflows(
-        hydrology, schedule, nodes=[n for n in hydrology.outlet_nodes() if n in junctions])
+        hydrology, schedule, nodes=[n for n in hydrology.outlet_nodes() if n in junctions],
+        rdii_nodes=[n for n in rdii_nodes if n in junctions])
     if dynamic:
         dynamic_wave = dataclasses.replace(
             dynamic_wave, routing_step=min(dynamic_wave.routing_step, hydrology.wet_step))

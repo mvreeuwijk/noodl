@@ -12,8 +12,8 @@ outfall's depth from its inflow), `[POLLUTANTS]`, and under `DYNWAVE` `[DIVIDERS
 `STORAGE`, `RATING`, `TIDAL`, `SHAPE`, `DIVERSION`, `PUMP1`-`PUMP5` and `CONTROL`, the lateral inflows
 `[TIMESERIES]` (inline and `FILE`), `[PATTERNS]`,
 `[DWF]` and `[INFLOWS]` (see Lateral inflows below) and the hydrology `[RAINGAGES]`,
-`[SUBCATCHMENTS]`, `[SUBAREAS]`, `[INFILTRATION]`, `[EVAPORATION]` and `[ADJUSTMENTS]` (see
-Hydrology below).
+`[SUBCATCHMENTS]`, `[SUBAREAS]`, `[INFILTRATION]`, `[EVAPORATION]` and `[ADJUSTMENTS]`, and the
+RDII sections `[HYDROGRAPHS]` and `[RDII]` (see Hydrology below).
 
 **Before the first section.** SWMM reads a line before the first `[SECTION]` header as `[TITLE]`
 text (`input.c:174`: the second pass over the file starts in section 0, the title), so the reader
@@ -41,8 +41,8 @@ diverts flow, `[DIVIDERS]` stays refused by name.
 `[BACKDROP]`, `[PROFILES]`; `[FILES]` is read for its `USE` lines (below). Any other section that carries content is refused, and
 so are the options and fields listed below. Two are ignored only when nothing uses them:
 
-- `[RAINGAGES]`, when the file has no `[SUBCATCHMENTS]` (a gage feeds subcatchments, and RDII,
-  whose sections are refused on their own), and any gage no subcatchment names;
+- `[RAINGAGES]`, when the file has no `[SUBCATCHMENTS]`, `[HYDROGRAPHS]` or `[RDII]`, and any
+  gage no subcatchment or unit hydrograph names;
 - `[EVAPORATION]` for conduits, unless it can be positive while a conduit is open (the
   subcatchments read it, below). SWMM takes
   `topWidth * length * rate` from an open conduit (`link.c:1359-1362`, from the climate state of
@@ -313,7 +313,7 @@ refused by name; `USE RAINFALL` only feeds `FILE` rain gages, which are refused.
 `DIVERSION`, `PUMP1`-`PUMP5` and `CONTROL`, `[LID_USAGE]`, and any other section carrying
 content.
 
-**Hydrology** (a file with `[SUBCATCHMENTS]`; `apps/sewer/inp_hydrology.py`, running in
+**Hydrology** (a file with `[SUBCATCHMENTS]`, `[HYDROGRAPHS]` or `[RDII]`; `apps/sewer/inp_hydrology.py`, running in
 `apps/sewer/runoff.py`; [the runoff](../applications/sewer.md#subcatchment-runoff-from-a-swmm-file)
 is SWMM 5.2.4's own computation). SWMM reads the file in order and so does the reader.
 
@@ -334,15 +334,24 @@ is SWMM 5.2.4's own computation). SWMM reads the file in order and so does the r
   and `FILE` (a climate file) are refused.
 - `[ADJUSTMENTS]` `EVAPORATION`, `RAINFALL`, `CONDUCTIVITY`, `N-PERV`, `DSTORE`, `INFIL`
   (the last three count only for a subcatchment defined above them); `TEMPERATURE` is ignored.
+- `[HYDROGRAPHS]` ``Name Gage`` and ``Name Month Response R T K [Dmax Drecov Dinit]`` (Month `ALL`
+  or `JAN`..`DEC`, Response `SHORT`, `MEDIUM` or `LONG`, T in hours, K the recession ratio; the older
+  nine-number line is read too) and `[RDII]` ``Node UnitHydrograph SewerArea`` (acres, or hectares in
+  SI units): the rainfall-dependent inflow of the unit hydrographs, added to the lateral inflow of
+  the node (`apps/sewer/inp_rdii.py`, `rdii.py`; [RDII](../applications/sewer.md#rdii-from-a-swmm-file)).
+  A file with only RDII has no subcatchments. A gage a unit hydrograph names counts as used.
 - `[OPTIONS]` `WET_STEP`, `DRY_STEP`, `START_*`, `END_*` (SWMM's total duration),
-  `INFILTRATION`, `IGNORE_RAINFALL`, `IGNORE_SNOWMELT`, `IGNORE_GROUNDWATER` and `IGNORE_QUALITY`.
+  `INFILTRATION`, `IGNORE_RAINFALL`, `IGNORE_RDII`, `IGNORE_SNOWMELT`, `IGNORE_GROUNDWATER` and
+  `IGNORE_QUALITY`.
   Under `DYNWAVE` the routing step is lowered to the effective `WET_STEP`, which a gage whose
   recording interval is shorter lowers first (`gage_validate`, `project_validate`).
 
 Refused by name: `[LID_USAGE]`, `[GROUNDWATER]` (without `IGNORE_GROUNDWATER YES`), a snow
 pack on a subcatchment (without `IGNORE_SNOWMELT YES`), `[LANDUSES]`, `[COVERAGES]`, `[BUILDUP]`,
 `[WASHOFF]`, `[LOADINGS]` and a rain concentration (`Crain`) while the file has pollutants
-(without `IGNORE_QUALITY YES`), an outfall's `Route To`, `[RDII]` and `[HYDROGRAPHS]`.
+(without `IGNORE_QUALITY YES`), an outfall's `Route To`, a unit hydrograph with no gage line that a
+node uses, response ratios beyond SWMM's limits, a pollutant's RDII concentration (`Crdii`) while a
+node has RDII (without `IGNORE_QUALITY YES`) and `[FILES]` `USE RDII`.
 `[SNOWPACKS]`, `[TEMPERATURE]`, `[AQUIFERS]` and `[LID_CONTROLS]` that nothing uses change
 nothing, in SWMM and here. The runoff reaches the model as `SewerNetwork.inflows`
 (`runoff.RunoffInflows`) and `SewerNetwork.hydrology`.
@@ -366,13 +375,13 @@ conservative pollutant matches SWMM's link quality at steady state (to 1e-8 rela
 tree and the loop), and in transit the two differ by their residence times. A pollutant's
 `Kdecay` is read (`pollutants[name]["decay"]`, 1/s); the model's own reactions are BOD decay
 and sulfide generation, and a tracer of any other name is conservative. A nonzero `Cinit` is refused (the model starts
-with clean water); the other pollutant fields feed only runoff quality, groundwater, RDII and
+with clean water); the other pollutant fields feed only runoff quality, groundwater, the quality of RDII and
 dry-weather inflow, which are refused or absent.
 
 **Not supported**, which rules out most published SWMM examples as they stand:
 
-- groundwater, LID, snowmelt, pollutant buildup and washoff, RDII and rain files (the surface
-  runoff itself is read: Hydrology above) and the evaporation of open conduits;
+- groundwater, LID, snowmelt, pollutant buildup and washoff and rain files (the surface
+  runoff and RDII themselves are read: Hydrology above) and the evaporation of open conduits;
 - the `DUMMY` and `STREET` cross sections, conduit seepage and evaporation losses;
 - dividers under `STEADY` or `KINWAVE`, roadway weirs, weir coefficient curves, named variables
   and expressions in control rules; pumps, control rules, orifices, weirs, outlets and storage

@@ -1049,7 +1049,7 @@ Refused by name, with the line: `[LID_USAGE]`; `[GROUNDWATER]` (unless `IGNORE_G
 subcatchment with a snow pack (unless `IGNORE_SNOWMELT YES`); `[LANDUSES]`, `[COVERAGES]`,
 `[BUILDUP]`, `[WASHOFF]`, `[LOADINGS]` and a rain concentration of a pollutant (their load is not
 modelled; `IGNORE_QUALITY YES` lets them pass); an outfall that routes onto a subcatchment;
-rain `FILE` gages; `[EVAPORATION]` `TEMPERATURE` and `FILE`; `[RDII]` and `[HYDROGRAPHS]`. The
+rain `FILE` gages; `[EVAPORATION]` `TEMPERATURE` and `FILE`. The
 evaporation of **open conduits** (`link.c:1359-1362`, subtracted from the end nodes in
 `dynwave.c:560-572` from every trial's mean depth) stays refused: a file whose
 evaporation can be positive while a conduit is open still names the conduit. `[SNOWPACKS]` no
@@ -1129,6 +1129,79 @@ Curve Number, Green-Ampt and modified Green-Ampt; SI, LPS and US units; `RouteTo
 `IMPERVIOUS` and `PERVIOUS`; subcatchment-to-subcatchment routing; the three rain formats; co-gages; monthly,
 constant and time-series evaporation; the adjustments and recovery patterns; a month boundary;
 gages faster than `WET_STEP`) and of sixteen variants of them.
+
+#### RDII from a SWMM file
+
+`[HYDROGRAPHS]` and `[RDII]` give rainfall-dependent infiltration and inflow: a triangular unit
+hydrograph set (three responses, SHORT, MEDIUM and LONG, per month) convolved with the rain of a
+gage and applied to the sewershed area of a node. `read_swmm_inp` reads them into
+`net.hydrology.rdii` (`noodl.apps.sewer.rdii.Rdii`; the reader is `inp_rdii.py`) and
+`RunoffInflows` adds the RDII of each node to the lateral inflow, **whether or not the file has
+subcatchments** (a file with only RDII has `net.hydrology.subcatchments == ()`). It is SWMM 5.2.4's
+own computation (`rdii.c`, with `rain.c`, `gage.c` and `routing.c`'s `addRdiiInflows`); SWMM writes
+the RDII of the whole run to an interface file before it starts and the routing reads that file, and
+noodl computes the same records directly, in order, as the routing asks for them. The module
+docstring of `rdii.py` has every rule with its source:
+
+- **Unit hydrographs.** `Name Gage`, then `Name Month Response R T K [Dmax Drecov Dinit]` (`ALL`
+  or `JAN`..`DEC`; later lines replace earlier ones, so `ALL` then `JAN` overrides January) or
+  the older one-line `Name Month R1 T1 K1 R2 T2 K2 R3 T3 K3 [Dmax Drecov Dinit]`. The triangle has
+  area R, time to peak `T` hours and base `T (1 + K)`, both truncated to whole seconds. The
+  initial abstraction (`Dmax` depth, `Drecov` depth per day, `Dinit` used at the start) is per
+  response and month.
+- **Rainfall.** The rain interval of a set is the `WET_STEP` (already lowered to the smallest
+  gage interval, which now includes the gages of the unit hydrographs, as in SWMM) lowered to
+  the shorter limb of any of its triangles; the RDII step is the `WET_STEP`. At each record the
+  rain of every interval since the last is taken from the gage, reduced by the unused initial
+  abstraction of the interval's month, stored, and convolved with the triangle at the middle of
+  each past interval. A dry spell longer than the triangle's base begins a new event.
+- **Flow.** A node's RDII is the sets' flow times its area over the unit factor of rainfall, in
+  cfs, zero below 1e-4 cfs and stored in single precision. A record holds for its `WET_STEP`
+  and the routing reads the record in force at the step's date plus 1 ms: the flow is **constant
+  within a record, not interpolated** (unlike runoff). The area is in acres (hectares in SI units).
+  RDII at an outfall is dropped, as runoff is.
+
+SWMM quirks that are reproduced, because a parity test fails without each of them: a gage's state is
+set once per record, so a set whose rain interval is shorter than the record uses the rain of the
+first of its intervals for all of them; sets that share a gage advance its one state in turn; the
+month of the stored rain is that of the record while the abstraction takes the month of the
+interval; the dates are SWMM's double-precision days and are compared as SWMM does; and, when the
+file also has subcatchments and `[ADJUSTMENTS]` `RAINFALL`, SWMM leaves the rain factor of the month
+of the last RDII interval behind and the runoff gage reads its first records with it (the reader
+reproduces that by running the RDII to the end of the file's duration when the factors differ).
+
+Refused by name: a set a node uses with no `Name Gage` line (SWMM would read the first gage of the
+file), an unknown gage, node or set, negative ratios or times, ratios that add to more than 1.01 in
+a month (SWMM's `ERR_UNITHYD_RATIOS`), a negative area, a pollutant's RDII concentration `Crdii` (its
+load is not modelled; `IGNORE_QUALITY YES` lets it pass), and `[FILES]` `USE RDII`. `IGNORE_RDII YES`
+and `IGNORE_RAINFALL YES` give no RDII (the gages of the sets still count as used).
+
+```py
+net, _, _ = read_swmm_inp("rdii.inp")
+rdii = net.hydrology.rdii                  # sets, inflows (m2), ignore
+model = rdii.model(net.hydrology)          # SWMM's records, computed in order
+print(model.flows(1200.0))                 # {node: m3/s} of the routing step that starts at 1200 s
+```
+
+**Differentiability.** The response ratios R, the initial abstraction parameters and the sewershed
+areas carry exact gradients; the time to peak T and the recession ratio K do so straight-through: the
+value is SWMM's truncation to whole seconds, the derivative that of the untruncated product (the true
+derivative of a truncation is zero). `Rdii.with_gradients` makes leaf tensors (`"UH1.ALL.SHORT.r"`,
+`"J1.area"`; months that share a response share a leaf), and a `RunoffInflows` built from the
+resulting hydrology (`dataclasses.replace(hydrology, rdii=...)`) gives `simulate_dynamic_wave` a
+differentiable lateral inflow; tests compare the gradient of a routed depth in the area with a
+finite difference. The comparisons (rain on or off, abstraction used up, the dry period, the
+triangle's limbs), the rain interval, the number of past intervals and the single-precision rounding
+are decided on the values. Not differentiable: the rainfall and the dates.
+
+`tests/verification/test_sewer_rdii_parity.py` writes its fixtures and compares the lateral inflow
+of every node after every routing step (1e-6 relative + 1e-9 m3/s) and the routed depths (1e-7 m)
+and flows with SWMM at `HEAD_TOLERANCE` 1e-12: one set with all three responses, monthly parameters
+across a month boundary, an initial abstraction with recovery, US units with an intensity gage,
+RDII with subcatchment runoff on the same nodes, a short limb with the records off the rain grid,
+two sets on one gage and on co-gages, the older line, a gage faster than `WET_STEP`, the rain
+adjustment left behind for the runoff, RDII tails below SWMM's 1e-4 cfs, `IGNORE_RDII` and
+`IGNORE_RAINFALL`.
 
 #### Tidal and time-series outfalls
 
@@ -1631,8 +1704,7 @@ publish numbers from this application.
     - ponding together with water quality or headspace air, and for a storage unit; a junction
       with no ground (`MaxDepth` 0) and no `SurDepth` floods as soon as it fills to its crown;
     - groundwater, LID, snowmelt and the pollutant buildup and washoff of the runoff
-      (`[GROUNDWATER]`, `[LID_USAGE]`, snow packs, `[LANDUSES]`), RDII (`[RDII]`,
-      `[HYDROGRAPHS]`), rain `FILE` gages, evaporation read from a climate file or computed from
+      (`[GROUNDWATER]`, `[LID_USAGE]`, snow packs, `[LANDUSES]`), rain `FILE` gages, evaporation read from a climate file or computed from
       temperature, and the evaporation of open conduits, pollutant time-series, mass and
       dry-weather inflows, and the `[FILES]` `USE HOTSTART`, `USE INFLOWS`, `USE RDII` and
       `USE RUNOFF` (a `TIMESERIES` outfall's stage is a driver); surface runoff itself is
