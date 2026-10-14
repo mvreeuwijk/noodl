@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from noodl.apps.electrical.modelica import extrapolate, read_modelica_circuit, simulate_circuit
-from noodl.apps.electrical.modelica.run import STEADY_ATOL, STEADY_RTOL
+from noodl.apps.electrical.modelica.run import STEADY_ATOL, STEADY_RTOL, THERMAL_STEADY_ATOL
 
 DATA = Path(__file__).resolve().parents[3] / "data" / "modelica_electrical"
 MSL = "Modelica.Electrical.Analog."
@@ -165,3 +165,24 @@ def test_steady_default_tolerances_and_step_keywords_reach_the_model(tmp_path):
     assert [c[1]["integration"] for c in rec.calls] == [
         "backward_euler", "trapezoidal", "trapezoidal", "backward_euler"]
     assert all(c[1]["max_iter"] == 7 and "atol" not in c[1] for c in rec.calls)
+
+
+def test_a_heat_port_circuit_is_solved_at_the_thermal_round_off_tolerance():
+    # MSL Resistor: 220 V sine heating R(T) through G = 50 W/K to 293.15 K. The electrical
+    # absolute tolerance would stall the heat balance (round-off ~ eps G T, W), so the
+    # runner's steady default is THERMAL_STEADY_ATOL there; the coupled state is the hand
+    # fixed point at the 220 V peak (t = 0.25 s).
+    model, state, drivers, names = read_modelica_circuit(DATA / "Analog.Examples.Resistor.json")
+    calls = []
+    steady = model.steady
+
+    def recording(*args, **kwargs):
+        calls.append((kwargs["atol"], kwargs["rtol"]))
+        return steady(*args, **kwargs)
+
+    model.steady = recording
+    out = simulate_circuit(model, state, drivers, names, times=[0.0, 0.25])
+    assert calls == [(THERMAL_STEADY_ATOL, STEADY_RTOL)] * 2
+    T = names.value(out, "resistor.T_heatPort")
+    assert float(T[0]) == pytest.approx(293.15, abs=1e-9)
+    assert abs(float(T[1]) - 302.73806893411466) <= 1e-9

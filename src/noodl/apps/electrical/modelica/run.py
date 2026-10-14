@@ -35,6 +35,10 @@ F64 = torch.float64
 # stalls at 3.4e-13 on ACDCConverter, at 1.1e-13 on the balanced ACLine.
 STEADY_ATOL = 1e-12
 STEADY_RTOL = 1e-14
+# With a thermal network the same absolute tolerance also applies to its heat balance (W),
+# whose round-off floor is eps G T: Newton stalls at 1.8e-12 W on MSL's Resistor example
+# (G = 50 W/K at 300 K). 1e-11 keeps that example within 0.03 of the comparison bound.
+THERMAL_STEADY_ATOL = 1e-11
 
 
 def _grid_index(grid: Tensor, times: Tensor) -> list[int]:
@@ -65,8 +69,9 @@ def simulate_circuit(model: Model, state: State, drivers: Mapping[str, Tensor],
 
     `solve_kwargs` (Newton's `atol`, `rtol`, `max_iter`, ...) are passed to every
     `model.steady` / `model.step`. The steady solves of an algebraic circuit default to
-    `atol=STEADY_ATOL, rtol=STEADY_RTOL` (round-off); the steps of a dynamic one to the
-    layer's own tolerances.
+    `atol=STEADY_ATOL, rtol=STEADY_RTOL` (round-off; `atol=THERMAL_STEADY_ATOL` when the
+    circuit has a thermal network); the steps of a dynamic one to the layer's own
+    tolerances.
     """
     grid = names.grid
     times = names.times if times is None else torch.as_tensor(times, dtype=F64)
@@ -75,7 +80,8 @@ def simulate_circuit(model: Model, state: State, drivers: Mapping[str, Tensor],
     want = _grid_index(grid, times)
     rows: list[State] = []
     if not names.dynamic:
-        kwargs = {"atol": STEADY_ATOL, "rtol": STEADY_RTOL, **solve_kwargs}
+        atol = THERMAL_STEADY_ATOL if "thermal.phi" in state else STEADY_ATOL
+        kwargs = {"atol": atol, "rtol": STEADY_RTOL, **solve_kwargs}
         for k in want:
             t = float(grid[k])
             state = model.steady(state, step_drivers(drivers, grid, t), t=t, **kwargs)

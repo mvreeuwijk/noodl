@@ -6,7 +6,8 @@ currents in A), in DC, transient and phasor (AC) modes. A netlist is a `Circuit`
 analysed by `operating_point`, `initial_state`, `transient`, `ac_sweep` and
 `device_values`. Device laws follow the Modelica Standard
 Library (`Modelica.Electrical.Analog`); impedances, constant-power loads and converters
-follow the Modelica Buildings Library (`Buildings.Electrical`).
+follow the Modelica Buildings Library (`Buildings.Electrical`). `JouleHeating` couples a
+circuit to a thermal network (Joule heat out, heat-port temperatures back).
 """
 
 from noodl.apps.electrical.analysis import (
@@ -46,6 +47,7 @@ from noodl.apps.electrical.laws import (
     TransformerRatio,
 )
 from noodl.apps.electrical.loads import ConstantPowerLoad, Impedance
+from noodl.apps.electrical.thermal import HeatedEdge, JouleHeating
 from noodl.apps.electrical.waveforms import Constant, Pulse, Ramp, Signal, Sine, Step
 
 __all__ = [
@@ -53,8 +55,9 @@ __all__ = [
     "Diode", "IdealTransformer", "Inductor", "Resistor", "Switch", "Transformer",
     "VoltageSource", "ac_sweep", "build_model", "device_values", "initial_state",
     "operating_point", "transient",
-    "Capacitance", "Constant", "ConstantPowerLoad", "DependentSource", "Impedance",
-    "ImpedanceTransformer", "Inductance", "JunctionDiode", "MutualInductance",
+    "Capacitance", "Constant", "ConstantPowerLoad", "DependentSource", "HeatedEdge",
+    "Impedance", "ImpedanceTransformer", "Inductance", "JouleHeating", "JunctionDiode",
+    "MutualInductance",
     "PowerConverter", "PrescribedCurrent", "PrescribedVoltage", "Pulse", "Ramp",
     "Resistance", "Signal", "Sine", "Step", "SwitchedConductance", "TransformerRatio",
 ]

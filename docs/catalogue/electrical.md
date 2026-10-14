@@ -34,6 +34,7 @@ Descriptions of the physical objects a network is built from.
 | `Switch` | An ideal closing switch: closed `v = Ron i`, open `i = Goff v` (`Ron` in ohm, `Goff` in S); closed where its control value exceeds 0.5. `control` is a driver key (read at index 0 of its last dimension) or a `(key, index)` pair. MSL `Ideal.IdealClosingSwitch`. | `Switch(name, p, n, control, Ron=1e-05, Goff=1e-05)` |
 | `Transformer` | Two coupled windings `v1 = L1 di1/dt + M di2/dt`, `v2 = M di1/dt + L2 di2/dt` (H), with initial currents `i0 = (i1, i2)` (A). MSL `Basic.Transformer`. | `Transformer(name, p1, n1, p2, n2, L1, L2, M, i0=(0.0, 0.0))` |
 | `VoltageSource` | An ideal voltage source `v = offset + V unit(t)` (V), `unit` the waveform. In an AC analysis a `Sine` source is its steady-state phasor (amplitude `V`, the waveform's phase) at the analysis frequency, and a `Constant` source is the magnitude `V` at phase 0; other waveforms are refused there. MSL `Sources.*Voltage`. | `VoltageSource(name, p, n, V, waveform=Constant(), offset=0.0)` |
+| `HeatedEdge` | A circuit device with a heat port: its edge `edge` (position in the electrical layer's `q`), its end nodes `p` and `n` (positions in `phi`), the thermal node `heat_node` of its heat port (position in the thermal layer's `phi`), and the per-edge temperature driver `temperature_key` its law reads, at position `slot` of that driver. | `HeatedEdge(edge, p, n, heat_node, temperature_key, slot)` |
 
 ## Elements (constitutive laws)
 
@@ -55,6 +56,14 @@ The relation between the flow through an edge and the potential difference acros
 | `Resistance` | A linear resistor: `q = dp / R_actual` with `R_actual = R s (1 + alpha (T - T_ref))` (`R` in ohm at `T_ref` in K, `alpha` in 1/K); `T` (K) is read per edge from `drivers[temperature]` when `temperature` names a driver, else `T = T_ref`; `s` is read per edge from `drivers[scale]` when `scale` names a driver (a variable resistor whose resistance follows a signal), else `s = 1`. MSL `Basic.Resistor`, `Basic.VariableResistor` (its input `R` is `R s`). | `Resistance(R, *, alpha=0.0, T_ref=300.15, temperature=None, scale=None, kind='resistor', learnable=False)` |
 | `SwitchedConductance` | An ideal closing switch: closed `q = dp / Ron`, open `q = Goff dp` (`Ron` in ohm, `Goff` in S); closed where the control value exceeds 0.5 (or is True). `control` is a driver key whose last dimension holds one value per switch edge (or one value for all), a single `(key, index)` pair read by every switch, or a sequence with one entry per edge, each a key (read at index 0) or a `(key, index)` pair. MSL `Ideal.IdealClosingSwitch`. | `SwitchedConductance(control, *, Ron=1e-05, Goff=1e-05, kind='switch')` |
 | `TransformerRatio` | An ideal transformer without magnetisation: `dp1 = n dp2`, `q2 = -n q1` (turns ratio `n`, primary to secondary voltage). Edges `[primary p1 -> n1, secondary p2 -> n2]` per device. MSL `Ideal.IdealTransformer` with `considerMagnetization = false`. | `TransformerRatio(n, *, kind='ideal_transformer', learnable=False)` |
+
+## Closures
+
+Functions of the state that compute drivers each step (densities, flows, levels).
+
+| Name | What it does | How to call it |
+|---|---|---|
+| `JouleHeating` | A coupling closure `closure(state, drivers) -> driver updates` between a circuit layer (`electrical`) and a thermal layer (`thermal`) on one network. | `JouleHeating(heated, *, electrical='electrical', thermal='thermal', heat_key='thermal.heat', base_temperatures)` |
 
 ## Waveforms
 

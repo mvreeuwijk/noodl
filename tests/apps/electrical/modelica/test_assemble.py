@@ -293,6 +293,67 @@ def test_heat_port_columns_map_to_the_thermal_nodes():
     assert set(names.thermal_nodes.values()).isdisjoint(names.nodes.values())
 
 
+def test_resistor_example_has_a_thermal_layer_coupled_by_iteration():
+    model, state, drivers, names = read_modelica_circuit(DATA / "Analog.Examples.Resistor.json")
+    assert list(model.potential) == ["electrical", "thermal"]
+    assert model.coupling == "iterate"
+    assert names.columns["resistor.T_heatPort"].key == "thermal.phi"
+    thermal = model.potential["thermal"]
+    assert thermal.kinds == ["conductor", "heat_source"]
+    assert (thermal.quantity, thermal.unit, thermal.flow_unit) == ("temperature", "K", "W")
+    assert not names.dynamic
+    # boundaries: the 0 K reference and the fixed temperature (20 degC), in that order
+    torch.testing.assert_close(drivers["thermal.phi_boundary"],
+                               torch.tensor([0.0, 293.15], dtype=torch.float64))
+    heat_port = names.thermal_nodes["resistor.heatPort"]
+    assert float(state["thermal.phi"][heat_port]) == 293.15
+    assert float(drivers["thermal.heat"][0]) == 0.0
+    # at t = 0.25 s the source is at its 220 V peak: the hand fixed point of
+    # alpha x^2 + x - V^2/(G R0) = 0 (R0 = 100, alpha = 1e-3, G = 50 W/K, T_ref = 293.15 K)
+    t = float(names.grid[25])
+    assert t == pytest.approx(0.25)
+    out = model.steady(state, step_drivers(drivers, names.grid, t), t=t)
+    assert abs(float(names.value(_hist(out), "resistor.T_heatPort")[0])
+               - 302.73806893411466) <= 1e-9
+    assert abs(float(names.value(_hist(out), "resistor.i")[0]) - 2.179106575935151) <= 1e-11
+
+
+def test_heating_rectifier_thermal_start_and_temperature_drivers():
+    model, state, drivers, names = read_modelica_circuit(
+        DATA / "Analog.Examples.HeatingRectifier.json")
+    thermal = model.potential["thermal"]
+    assert thermal.kinds == ["conductor", "heat_source", "heat_capacitor"]
+    assert names.dynamic
+    # no fixed temperature: the 0 K reference is the only boundary
+    torch.testing.assert_close(drivers["thermal.phi_boundary"],
+                               torch.tensor([0.0], dtype=torch.float64))
+    port = names.thermal_nodes["HeatingDiode1.heatPort"]
+    capacitor = names.thermal_nodes["HeatCapacitor1.port"]
+    assert float(state["thermal.phi"][capacitor]) == 293.15
+    assert float(state["thermal.phi"][port]) == 293.15      # the mean of the known ones
+    assert float(state["thermal.phi"][names.thermal_nodes["thermal.reference"]]) == 0.0
+    assert state["thermal.q"].shape == (3,)
+    # the heated diode reads its heat port; the resistor without one keeps its T
+    assert drivers["electrical.diode.T"].tolist() == [293.15]
+    assert drivers["electrical.resistor.T"].tolist() == [300.15]
+    closure = model.closures[0]
+    out = closure(state, drivers)
+    assert set(out) == {"thermal.heat", "electrical.diode.T"}
+
+
+def test_thermal_components_without_a_heated_device_are_refused(tmp_path):
+    path = _doc(tmp_path, [
+        _c("V", MSL + "Sources.ConstantVoltage", V=1.0),
+        _resistor("r"),
+        _c("G", MSL + "Basic.Ground"),
+        _c("hc", "Modelica.Thermal.HeatTransfer.Components.HeatCapacitor", {"T": 300.0},
+           C=1.0),
+    ], [["V.p", "r.p"], ["V.n", "G.p"], ["r.n", "G.p"]])
+    with pytest.raises(ModelicaImportError, match="the thermal components heat no circuit "
+                                                  "device"):
+        read_modelica_circuit(path)
+
+
 def test_column_value_takes_the_part_and_the_weighted_sum():
     names = CircuitNames(
         model="M", times=torch.zeros(1), grid=torch.zeros(1), restarts=frozenset({0}),

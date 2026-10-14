@@ -320,6 +320,47 @@ junction temperature read from a driver (MSL `Semiconductors.Diode` with
 `useTemperatureDependency = true`: `Vt = k T / e`, saturation current scaled by
 `(T/TNOM)^(XTI/N) exp((T/TNOM - 1) EG / (N Vt))`).
 
+## Electro-thermal coupling
+
+A device that heats up and whose resistance follows its temperature couples the circuit to a
+thermal network. noodl puts the thermal side on the same `Network` as a second
+`PotentialFlowLayer`, conventionally named `"thermal"`: temperature (K) is the potential against
+a reference node held at 0 K (a boundary node), heat flow (W) the flow.
+
+| Thermal part | Law | Edge | Modelica (MSL `Thermal.HeatTransfer`) |
+|---|---|---|---|
+| heat conductance `G` (W/K) | `Conductance(G)` | between the two nodes | `Components.ThermalConductor` |
+| heat capacity `C` (J/K) | `Capacitance(C, v0=T0)` | node `->` 0 K reference | `Components.HeatCapacitor` |
+| fixed temperature | a boundary node | | `Sources.FixedTemperature` |
+| a device's Joule heat | `PrescribedCurrent(1, waveforms=[Signal("thermal.heat", k)])` | 0 K reference `->` heat-port node | the device's `heatPort` |
+
+Give each thermal law a kind of its own (`kind="conductor"`, `"heat_capacitor"`,
+`"heat_source"`): the electrical kinds `capacitor` and `current_source` belong to the circuit
+layer. Both layers use the same companion forms, so a heat capacity is stepped by backward
+Euler or trapezoidal steps together with the circuit.
+
+`JouleHeating(heated, base_temperatures=...)` is the closure that couples them. Each
+`HeatedEdge(edge, p, n, heat_node, temperature_key, slot)` names a heated device: its edge in
+the circuit layer's `q`, its end nodes, the thermal node of its heat port, and the per-edge
+temperature driver its law reads (`Resistance(..., temperature=key)`,
+`JunctionDiode(..., temperature=key)`) with its position in it. From the state the closure
+writes the dissipated power `p = Re((phi[p] - phi[n]) conj(q[edge]))` (MSL `LossPower = v i`)
+into `"thermal.heat"`, and each temperature driver as `base_temperatures[key]` with the heated
+devices' entries replaced by their heat-port temperatures (devices without a heat port keep
+their fixed temperature). Build the model with `coupling="iterate"`, so that every step (or
+steady solve) repeats circuit and thermal solves until both stop changing:
+
+```py
+Model(net, [electrical, thermal], closures=[JouleHeating(heated, base_temperatures=base)],
+      coupling="iterate", iterate_tol={"electrical": 1e-10, "thermal": 1e-10},
+      iterate_flow_tol={"electrical": 1e-10, "thermal": 1e-8},
+      iterate_acceleration="anderson", iterate_max=100)
+```
+
+The Modelica reader builds exactly this for MSL models whose resistors or diodes have an
+enabled heat port (`Analog.Examples.Resistor`, `HeatingRectifier`); their heat-port and
+heat-capacitor temperatures are read from `"thermal.phi"`.
+
 ## Time integration and breakpoints
 
 `transient(..., integration="trapezoidal")` (the default) uses the trapezoidal rule, second

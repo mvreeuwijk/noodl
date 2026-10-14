@@ -1,7 +1,8 @@
 """Assemble a `Netlist` into a noodl circuit model: laws, drivers, step grid, start state, names.
 
-`build(netlist, doc)` returns `(model, state, drivers, names)`: a `Model` with ONE
-`PotentialFlowLayer` named `"electrical"` (real, or phasor for a model with MBL AC parts), the
+`build(netlist, doc)` returns `(model, state, drivers, names)`: a `Model` with a
+`PotentialFlowLayer` named `"electrical"` (real, or phasor for a model with MBL AC parts) and,
+when a device has a heat port, a second one named `"thermal"` coupled to it (below), the
 start state, the drivers on the step grid and a `CircuitNames` that maps the document's
 compared columns to noodl quantities.
 
@@ -47,6 +48,26 @@ kinds come in the order `voltage_source`, `resistor`, `diode`, `capacitor`, `ind
 - MBL `ACACTransformer`: `ImpedanceTransformer(VHigh/VLow, Zp e^{j atan(XoverR)})`,
   `Zp = VHigh^2 Zperc / VABase`, edges `n -> 0`, `p -> 0`; `ACDCConverter`:
   `PowerConverter(conversionFactor, eta)`, edges `ac -> 0`, `p1 -> p2`.
+
+Heat ports
+----------
+A model in which a resistor or diode has an enabled heat port gets a thermal layer
+`"thermal"` on the thermal nodes (`quantity="temperature"`, K; flows in W): temperature is
+the potential against `"thermal.reference"`, a boundary at 0 K, and the fixed temperatures
+(`HeatTransfer.Sources.FixedTemperature`, `Celsius.FixedTemperature`) are boundary nodes
+too, `"thermal.phi_boundary"` holding `[0, fixed temperatures in K...]` in that order. Edge
+kinds, in the layer's flow order: `conductor` (`ThermalConductor`: `Conductance(G)`,
+`port_a -> port_b`), `heat_source` (one per heated device, in device order:
+`PrescribedCurrent(1, Signal("thermal.heat", k))`, `thermal.reference -> heat port`) and
+`heat_capacitor` (`HeatCapacitor`: `Capacitance(C, v0=T0)`, `port -> thermal.reference`,
+`T0` the recorded start temperature). The `JouleHeating` closure writes each heated device's
+`LossPower = v i` into `"thermal.heat"` and its heat-port temperature into its slot of
+`"electrical.resistor.T"` / `"electrical.diode.T"` (devices without a heat port keep their
+parameter `T`); the layers are coupled by `coupling="iterate"` with Anderson mixing, to
+`1e-10` V and K on the potentials and `1e-10` A, `1e-8` W on the flows. The thermal start
+state: the boundaries at their temperatures, each heat capacitor's node at its `T0`, every
+other thermal node at the mean of those temperatures (0 K excluded); the heat drivers start
+at zero and the temperature drivers at the start temperatures of the heat ports.
 
 Sources, signal inputs and the step grid
 ----------------------------------------
@@ -112,6 +133,7 @@ from noodl.apps.electrical.laws import (
     Inductance,
     JunctionDiode,
     MutualInductance,
+    PrescribedCurrent,
     PrescribedVoltage,
     Resistance,
     TransformerRatio,
@@ -119,8 +141,10 @@ from noodl.apps.electrical.laws import (
 from noodl.apps.electrical.loads import ConstantPowerLoad, Impedance
 from noodl.apps.electrical.modelica.netlist import Device, Netlist, raise_problems
 from noodl.apps.electrical.modelica.schema import CircuitDoc, ModelicaImportError, Signal
+from noodl.apps.electrical.thermal import HeatedEdge, JouleHeating
 from noodl.apps.electrical.waveforms import Constant
 from noodl.apps.electrical.waveforms import Signal as SignalWaveform
+from noodl.elements import Conductance
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.model import Model
 from noodl.topology import Network
@@ -139,6 +163,14 @@ RESISTOR_T = "electrical.resistor.T"
 RESISTOR_SCALE = "electrical.resistor.scale"
 DIODE_T = "electrical.diode.T"
 LOAD_SCALE = "electrical.load.scale"
+THERMAL = "thermal"
+HEAT_KEY = "thermal.heat"
+_THERMAL_KINDS = ("conductor", "heat_source", "heat_capacitor")
+_THERMAL_ROLES = ("thermal_conductor", "heat_capacitor", "fixed_temperature")
+# The coupled iteration's tolerances: potentials in V and K, flows in A and W.
+_ITERATE_TOL = {LAYER: 1e-10, THERMAL: 1e-10}
+_ITERATE_FLOW_TOL = {LAYER: 1e-10, THERMAL: 1e-8}
+_ITERATE_MAX = 100
 _SERIES = "series:"
 _KINDS = ("voltage_source", "resistor", "diode", "capacitor", "inductor", "transformer",
           "ideal_transformer", "impedance", "load", "impedance_transformer",
@@ -722,8 +754,7 @@ class _Builder:
         return laws
 
     # ---------------------------------------------------------------- start state
-    def start(self, laws: list, n_nodes: int, drivers: Drivers) -> tuple[State, bool]:
-        dynamic = any(getattr(law, "dynamic", False) for law in laws)
+    def start(self, dynamic: bool, n_nodes: int, drivers: Drivers) -> State:
         n_e = len(self.nl.node_names)
         flows = [e for kind in _KINDS for e in self.edges[kind]]
         dtype = C128 if self.nl.phasor else F64
@@ -745,7 +776,7 @@ class _Builder:
                 values = drivers.get(_SERIES + SOURCE_KEY)
                 ref = 0.0 if values is None else float(values[0].abs().max())
             phi[1:n_e] = ref
-        return {f"{LAYER}.phi": phi, f"{LAYER}.q": q}, dynamic
+        return {f"{LAYER}.phi": phi, f"{LAYER}.q": q}
 
     def _capacitor_potentials(self, n_e: int) -> Tensor:
         adjacent: dict[int, list[tuple[int, float]]] = {}
@@ -851,6 +882,82 @@ def _terminal_current(d: Device, term: str) -> tuple[int, float] | None:
     return _TERMINAL_CURRENTS.get((d.role, term))
 
 
+# ------------------------------------------------------------------------------ thermal
+def _thermal_edges(netlist: Netlist, heated: list[Device], problems: list[str]
+                   ) -> dict[str, list[tuple[int, int, dict]]]:
+    """The thermal network's edges per kind, `(u, v, values)` on thermal node numbers."""
+    edges: dict[str, list[tuple[int, int, dict]]] = {k: [] for k in _THERMAL_KINDS}
+    for d in netlist.devices:
+        if d.role == "thermal_conductor":
+            edges["conductor"].append((d.nodes["port_a"], d.nodes["port_b"],
+                                       {"G": _number(d, "G", problems)}))
+        elif d.role == "heat_capacitor":
+            edges["heat_capacitor"].append((d.nodes["port"], 0,
+                                            {"C": _number(d, "C", problems),
+                                             "T0": _initial(d, "T", problems)}))
+    for d in heated:
+        edges["heat_source"].append((0, d.heat_node, {}))
+    return edges
+
+
+def _thermal(b: _Builder, net: Network, heated: list[Device], edges: dict, n_e: int,
+             names: list[str], drivers: Drivers, positions: dict
+             ) -> tuple[PotentialFlowLayer, JouleHeating, State]:
+    """The thermal layer, the coupling closure and the thermal start state; writes the
+    thermal drivers (boundary temperatures, heat, heat-port temperatures) into `drivers`."""
+    nl = b.nl
+    laws = []
+    for kind in _THERMAL_KINDS:
+        found = edges[kind]
+        if not found:
+            continue
+        if kind == "conductor":
+            laws.append(Conductance(torch.tensor([v["G"] for *_, v in found], dtype=F64),
+                                    kind=kind))
+        elif kind == "heat_source":
+            laws.append(PrescribedCurrent(torch.ones(len(found), dtype=F64), kind=kind,
+                                          waveforms=[SignalWaveform(HEAT_KEY, k)
+                                                     for k in range(len(found))]))
+        else:
+            laws.append(Capacitance(torch.tensor([v["C"] for *_, v in found], dtype=F64),
+                                    v0=torch.tensor([v["T0"] for *_, v in found], dtype=F64),
+                                    kind=kind))
+    fixed = list(nl.fixed_temperatures.items())
+    boundary = [names[n_e]] + [names[n_e + node] for node, _ in fixed]
+    layer = PotentialFlowLayer(net, THERMAL, laws, boundary=boundary,
+                               quantity="temperature", unit="K", flow_unit="W")
+
+    # start temperatures: boundaries, heat capacitors, the mean of those elsewhere
+    known = dict(fixed)
+    for u, _, v in edges["heat_capacitor"]:
+        known.setdefault(u, v["T0"])
+    mean = (sum(known.values()) / len(known) if known
+            else sum(float(d.parameters.get("T", 0.0)) for d in heated) / len(heated))
+    phi = torch.zeros(len(names), dtype=F64)
+    for k in range(1, len(nl.thermal_names)):
+        phi[n_e + k] = known.get(k, mean)
+    drivers[f"{THERMAL}.phi_boundary"] = torch.tensor([0.0] + [t for _, t in fixed], dtype=F64)
+    drivers[HEAT_KEY] = torch.zeros(len(heated), dtype=F64)
+
+    keys = {"resistor": RESISTOR_T, "diode": DIODE_T}
+    base = {key: drivers[key].clone() for key in keys.values() if key in drivers}
+    edge_list = []
+    for d in heated:
+        slot = next(k for k, e in enumerate(b.edges[d.role]) if e.device == d.name)
+        edge_list.append(HeatedEdge(edge=positions[d.name][1][0], p=d.nodes["p"],
+                                    n=d.nodes["n"], heat_node=n_e + d.heat_node,
+                                    temperature_key=keys[d.role], slot=slot))
+    closure = JouleHeating(edge_list, electrical=LAYER, thermal=THERMAL, heat_key=HEAT_KEY,
+                           base_temperatures=base)
+    for h in edge_list:         # the temperature drivers at the heat ports' start values
+        values = drivers[h.temperature_key].clone()
+        values[h.slot] = phi[h.heat_node]
+        drivers[h.temperature_key] = values
+    state = {f"{THERMAL}.phi": phi,
+             f"{THERMAL}.q": torch.zeros(sum(len(e) for e in edges.values()), dtype=F64)}
+    return layer, closure, state
+
+
 def build(netlist: Netlist, doc: CircuitDoc, *, substeps: int = 1
           ) -> tuple[Model, State, Drivers, CircuitNames]:
     """Assemble `netlist` (from `doc`) into `(model, state, drivers, names)` (module
@@ -873,6 +980,12 @@ def build(netlist: Netlist, doc: CircuitDoc, *, substeps: int = 1
             b.problems.append(f"compared column {column!r} maps to no noodl quantity")
         else:
             columns[column] = found
+    heated = [d for d in netlist.devices if d.heat_node is not None]
+    thermal_edges = _thermal_edges(netlist, heated, b.problems)
+    if not heated and any(d.role in _THERMAL_ROLES for d in netlist.devices):
+        b.problems.append("the thermal components heat no circuit device (no resistor or "
+                          "diode has an enabled heat port): a thermal network alone is not "
+                          "supported")
     raise_problems(b.problems)
 
     net = Network(dtype=F64)
@@ -882,6 +995,10 @@ def build(netlist: Netlist, doc: CircuitDoc, *, substeps: int = 1
     for kind in _KINDS:
         for e in b.edges[kind]:
             net.add_edge(names[e.u], names[e.v], kind=kind)
+    if heated:
+        for kind in _THERMAL_KINDS:
+            for u, v, _ in thermal_edges[kind]:
+                net.add_edge(names[n_e + u], names[n_e + v], kind=kind)
 
     dtype = C128 if netlist.phasor else F64
     drivers: Drivers = {f"{LAYER}.phi_boundary": torch.zeros(1, dtype=dtype)}
@@ -891,8 +1008,19 @@ def build(netlist: Netlist, doc: CircuitDoc, *, substeps: int = 1
                                quantity="voltage", unit="V", flow_unit="A")
     if netlist.phasor:
         drivers[layer.frequency_key] = torch.tensor(netlist.frequency, dtype=F64)
-    model = Model(net, [layer])
-    state, dynamic = b.start(laws, len(names), drivers)
+    dynamic = layer.dynamic
+    if heated:
+        thermal, closure, thermal_state = _thermal(b, net, heated, thermal_edges, n_e, names,
+                                                   drivers, positions)
+        dynamic = dynamic or thermal.dynamic
+        model = Model(net, [layer, thermal], closures=[closure], coupling="iterate",
+                      iterate_tol=_ITERATE_TOL, iterate_flow_tol=_ITERATE_FLOW_TOL,
+                      iterate_acceleration="anderson", iterate_max=_ITERATE_MAX)
+    else:
+        model = Model(net, [layer])
+    state = b.start(dynamic, len(names), drivers)
+    if heated:
+        state.update(thermal_state)
     sources = {e.device: i for i, e in enumerate(b.edges["voltage_source"])}
     circuit_names = CircuitNames(
         model=doc.model, times=b.times, grid=b.grid, restarts=b.restarts, dynamic=dynamic,

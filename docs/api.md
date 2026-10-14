@@ -233,6 +233,7 @@ Elements are grouped below by the physics they express, as in
 ::: noodl.apps.electrical.laws
 ::: noodl.apps.electrical.loads
 ::: noodl.apps.electrical.converters
+::: noodl.apps.electrical.thermal
 ::: noodl.apps.electrical.waveforms
 
 ### Shared
