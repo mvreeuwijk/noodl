@@ -40,7 +40,9 @@ SIMULATED: the interval of `--intervals`, the tolerance of `--tolerance`),
 `"experiment_declared"` (the model's own experiment annotation, only the four keys above that
 the annotation declares), `"compared"` (the CSV columns after `time`), and per component
 `"initial"` and `"derived"` where they apply. Every public parameter is exported, so the
-converter flags `ground_AC`/`ground_DC` are in the file for the reader to check.
+converter flags `ground_AC`/`ground_DC` are in the file for the reader to check. A component
+whose `useHeatPort`, `useTemperatureDependency` or `use_C` OpenModelica left unevaluated
+raises `ExportError` (these flags decide columns, states and ports; never assumed false).
 
 Class groups (the reader's schema must hold equal sets; the contract tests check it):
 
@@ -122,6 +124,8 @@ LINE_DERIVED = ("line.R", "line.L", "line.C")
 TERMINALS = ("terminal", "terminal_n", "terminal_p")
 _PREFIXES = ("Modelica.Electrical.", "Buildings.Electrical.")
 _EXPERIMENT_KEYS = ("StartTime", "StopTime", "Interval", "Tolerance")
+# Boolean parameters that decide columns, states or ports; each must have a value.
+FLAGS = ("useHeatPort", "useTemperatureDependency", "use_C")
 
 
 # =====================================================================================
@@ -166,6 +170,11 @@ def build_circuit_document(instance: dict, *, model: str, experiment: dict,
     """The `noodl-modelica-electrical/1` document for one `getModelInstance` tree."""
     doc = base.build_document(instance, model=model, medium={}, experiment=experiment,
                               mbl_commit=mbl_commit, openmodelica=openmodelica)
+    unresolved = [f"{c['name']}.{f}" for c in doc["components"]
+                  for f in FLAGS if f in c.get("unevaluated", [])]
+    if unresolved:
+        raise ExportError(f"OpenModelica gave no value for {unresolved}; these flags decide "
+                          f"columns and ports and are never assumed false")
     return {
         "format": FORMAT,
         "model": doc["model"],
@@ -262,6 +271,22 @@ def record_values(doc: dict, initial: dict[str, list[str]], derived: dict[str, l
             entries[name][key] = {v: values[f"{name}.{v}"] for v in variables}
 
 
+def csv_header(*, model: str, mbl_commit: str, openmodelica: str, msl: str,
+               experiment: dict) -> dict[str, str]:
+    """The CSV's `# key: value` header lines, from the experiment as simulated."""
+    return {
+        "model": model,
+        "mbl_commit": mbl_commit,
+        "openmodelica": openmodelica,
+        "msl": msl,
+        "tolerance": repr(float(experiment["Tolerance"])),
+        "start_time": repr(float(experiment["StartTime"])),
+        "stop_time": repr(float(experiment["StopTime"])),
+        "interval": repr(float(experiment["Interval"])),
+        "solver": "dassl",
+    }
+
+
 def check_result_variables(wanted: list[str], available) -> None:
     """Raise `ExportError` naming every name in `wanted` that the result does not hold."""
     have = set(available)
@@ -356,17 +381,8 @@ def export(model: str, *, out: Path, mbl: Path, run_simulation: bool = True,
                        introspect_s=round(t_intro - t_start, 1),
                        simulate_s=round(t_sim - t_intro, 1))
         if matrix is not None:
-            header = {
-                "model": model,
-                "mbl_commit": commit,
-                "openmodelica": omc,
-                "msl": msl,
-                "tolerance": repr(float(tolerance)),
-                "start_time": repr(sim_experiment["StartTime"]),
-                "stop_time": repr(sim_experiment["StopTime"]),
-                "interval": repr(sim_experiment["Interval"]),
-                "solver": "dassl",
-            }
+            header = csv_header(model=model, mbl_commit=commit, openmodelica=omc, msl=msl,
+                                experiment=sim_experiment)
             csv_path = out / f"{name}.csv"
             rows = base.write_csv(csv_path, header, columns, matrix)
             summary.update(csv=str(csv_path), rows=rows, columns=len(columns),

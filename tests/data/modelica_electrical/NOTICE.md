@@ -28,7 +28,7 @@ for m in \
  'Buildings.Electrical.DC.Lines.Examples.RCModel'; do python3 scripts/modelica_export_electrical.py $m; done
 python3 scripts/modelica_export_electrical.py Modelica.Electrical.Analog.Examples.SeriesResonance --intervals 1000
 python3 scripts/modelica_export_electrical.py Modelica.Electrical.Analog.Examples.CauerLowPassAnalog --intervals 600
-python3 scripts/modelica_export_electrical.py Modelica.Electrical.Analog.Examples.CompareTransformers --intervals 1000
+python3 scripts/modelica_export_electrical.py Modelica.Electrical.Analog.Examples.CompareTransformers --intervals 1003
 for m in \
  'Buildings.Electrical.DC.Loads.Examples.Resistor' 'Buildings.Electrical.DC.Loads.Examples.VariableLoad' \
  'Buildings.Electrical.AC.OnePhase.Loads.Examples.TestImpedance' \
@@ -47,7 +47,7 @@ for m in \
 | `DC.Lines.Examples.RCModel` | 15 | 500 | 0.03 |
 | `Analog.Examples.SeriesResonance` | 1 | 1000 | 0.001 |
 | `Analog.Examples.CauerLowPassAnalog` | 60 | 600 | 0.1 |
-| `Analog.Examples.CompareTransformers` | 50 | 1000 | 0.05 |
+| `Analog.Examples.CompareTransformers` | 50 | 1003 | 0.04985 (50/1003) |
 | `DC.Loads.Examples.Resistor` | 1 | 100 | 0.01 |
 | `DC.Loads.Examples.VariableLoad` | 1 | 100 | 0.01 |
 | `AC.OnePhase.Loads.Examples.TestImpedance` | 1 | 100 | 0.01 |
@@ -55,6 +55,11 @@ for m in \
 | `AC.OnePhase.Conversion.Examples.ACDCConverter` | 1 | 100 | 0.01 |
 | `AC.OnePhase.Conversion.Examples.ACACTransformer` | 1 | 100 | 0.01 |
 | `AC.ThreePhasesBalanced.Lines.Examples.ACLine` | 1 | 100 | 0.01 |
+
+`CompareTransformers` uses 1003 intervals rather than a round number: its sources run at
+10 Hz, and an output interval commensurate with the 0.1 s period (0.05 s) would sample only
+two phases of each period; 50/1003 s walks the samples through the whole period at the same
+CSV size.
 
 Compared columns, per component in document order, skipping observers, ideal current sensors
 (MSL `CurrentSensor`, MBL `GeneralizedSensor`) and grounds: for `Modelica.Electrical.Analog.*`

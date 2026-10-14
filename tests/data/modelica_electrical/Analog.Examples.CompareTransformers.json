@@ -7,7 +7,7 @@
   "experiment": {
     "StartTime": 0.0,
     "StopTime": 50.0,
-    "Interval": 0.05,
+    "Interval": 0.049850448654037885,
     "Tolerance": 1e-12
   },
   "experiment_declared": {

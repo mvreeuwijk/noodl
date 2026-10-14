@@ -222,6 +222,28 @@ def test_class_sets(exporter):
                               "Buildings.Electrical.AC.ThreePhasesBalanced.Lines.Line"}
 
 
+def test_unevaluated_flags_are_refused(exporter):
+    expr = {"$kind": "cref", "parts": [{"name": "x"}]}
+    inst = _cls("U", [_comp("R1", _one_port(
+        "Modelica.Electrical.Analog.Basic.Resistor", _param("R", 1.0),
+        _param("useHeatPort", binding=expr, type_="Boolean")))])
+    with pytest.raises(exporter.ExportError, match=r"R1\.useHeatPort"):
+        _document(exporter, inst)
+
+
+def test_csv_header_keys_and_formatting(exporter):
+    header = exporter.csv_header(
+        model="Modelica.Electrical.Analog.Examples.Resistor", mbl_commit="c",
+        openmodelica="OpenModelica 1.27.1", msl="4.1.0",
+        experiment={"StartTime": 0, "StopTime": 50, "Interval": 50 / 1003,
+                    "Tolerance": 1e-12})
+    assert header == {
+        "model": "Modelica.Electrical.Analog.Examples.Resistor", "mbl_commit": "c",
+        "openmodelica": "OpenModelica 1.27.1", "msl": "4.1.0", "tolerance": "1e-12",
+        "start_time": "0.0", "stop_time": "50.0", "interval": repr(50 / 1003),
+        "solver": "dassl"}
+
+
 def test_main_exit_code_follows_the_csv(exporter, monkeypatch):
     model = "Modelica.Electrical.Analog.Examples.Resistor"
     monkeypatch.setattr(exporter, "export", lambda model, **_kw: {"model": model})
