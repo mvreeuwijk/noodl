@@ -2532,8 +2532,10 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = N
     ``acceleration=None`` is plain relaxation, which reaches the same fixed point in two to
     three times the passes. `outfall_stage` gives each TIMESERIES outfall its stage
     elevation: ``{outfall name: stage (m) or a function of the elapsed time t (s) returning
-    it}``, required for every such outfall and refused for any other (a TIDAL outfall reads
-    its tide curve; `DynamicWaveHydraulics.outfall_stage`); it sets the initial heads (at
+    it}``, refused for any outfall that is not a TIMESERIES one (a TIDAL outfall reads its
+    tide curve); a TIMESERIES outfall read from a SWMM file defaults to the file's series
+    (`Outfall.stage_series`, held at its ends as SWMM does) and this overrides it, and one
+    built by hand needs it (`DynamicWaveHydraulics.outfall_stage`); it sets the initial heads (at
     t = 0) and is the default of `simulate_dynamic_wave`'s own `outfall_stage`.
     `iterate_flow_tol` (m3/s) is the tolerance on the conduit
     flows' own fixed-point residual, judged alongside the heads (`Model`'s
@@ -2614,15 +2616,6 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = N
     def elements():
         return [DynamicWaveConduit(), *(StructureLink(k) for k in closure.structures)]
 
-    # Built once without the node source to learn the interior (a NodeSource must sit on
-    # interior nodes), as the Modelica assembly does.
-    probe = PotentialFlowLayer(graph, "water", elements(), boundary=boundary,
-                               quantity="head", unit="m", flow_unit="m3/s")
-    interior = set(probe.interior.tolist())
-    stranded = [m.name for m, i in zip(net.manholes, junction_idx.tolist(), strict=True)
-                if i not in interior]
-    if stranded:
-        raise ValueError(f"build_dynamic_wave_model: junction(s) {stranded} touch no link")
     layer = PotentialFlowLayer(
         graph, "water", elements(), boundary=boundary,
         node_sources=[closure.storage],
@@ -2664,7 +2657,11 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = N
                   iterate_on_limit=controls["on_limit"])
     inflow = torch.zeros(graph.n, dtype=F64)
     inflow[junction_idx] = torch.tensor([m.inflow for m in net.manholes], dtype=F64)
-    stage_functions = closure.check_outfall_stage(outfall_stage)
+    # a TIMESERIES outfall's file series is its stage unless `outfall_stage` overrides it
+    stage_functions = closure.check_outfall_stage(
+        {**{o.name: o.stage_series.held for o in net.outfalls
+            if o.kind == "timeseries" and o.stage_series is not None},
+         **({} if outfall_stage is None else outfall_stage)})
     initial = {"inflow": inflow}
     if bool(closure.outfall_staged.any()):
         initial["outfall_stage"] = closure.outfall_stage(0.0, stage_functions)
@@ -3024,8 +3021,9 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
     its query at each step's end state.
     `outfall_stage` ``{outfall name: stage (m) or a function of t (s) returning it}`` gives
     the TIMESERIES outfalls their stage elevation (default: the model's own, the
-    `build_model` argument); a TIDAL outfall reads its tide curve (`tidal_stage`). Both
-    become the driver ``"outfall_stage"`` (m, per outfall) of each step, and share the
+    `build_model` argument, which its names override one by one); a TIDAL outfall reads its
+    tide curve (`tidal_stage`). Both become the driver ``"outfall_stage"`` (m, per outfall) of
+    each step, and share the
     FIXED outfall's stage rule. SWMM sets the outfall depth with the routing clock already
     advanced (`routing.c:301-302`; node.c:1449, 1456), so the stage is that at the END of
     the step: a function is called once per step with the step's end time in s -- not the
@@ -3065,7 +3063,7 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
     fixed_dt = model.routing_step if dt is None else float(dt)
     staged = bool(hyd.outfall_staged.any())
     stage_functions = hyd.check_outfall_stage(
-        model.outfall_stage if outfall_stage is None else outfall_stage)
+        {**model.outfall_stage, **({} if outfall_stage is None else outfall_stage)})
     atol_given = "atol" in solve_kwargs
     solve_kwargs.setdefault("rtol", 0.0)
     n = model.net.n

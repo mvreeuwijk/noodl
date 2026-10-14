@@ -114,9 +114,11 @@ class Outfall:
     (hour of the day, stage elevation in m, strictly increasing hours): the stage is read
     from it at the elapsed time of the run, repeating every 24 h
     (`DynamicWaveHydraulics`, `tidal_stage`). ``"timeseries"`` takes its stage elevation
-    from a driver, the `outfall_stage` function of `build_model` / `simulate_dynamic_wave`;
-    `series` is only the SWMM series' name, for messages. Only dynamic-wave routing reads
-    them.
+    from a driver, the `outfall_stage` function of `build_model` / `simulate_dynamic_wave`,
+    which defaults to `stage_series`, the file's series (`inflows.TimeSeries`, times in s
+    since the start and stage elevations in m; the stage is its value held beyond both ends,
+    as SWMM's ``table_tseriesLookup`` with ``extend``); `series` is the SWMM series' name.
+    Only dynamic-wave routing reads them.
     `flap_gate` (SWMM's Gated) blocks any flow from the outfall into its conduit
     (`link.c::link_setFlapGate`, dynamic wave only).
     """
@@ -128,6 +130,7 @@ class Outfall:
     flap_gate: bool = False
     tide: tuple[tuple[float, float], ...] | None = None
     series: str | None = None
+    stage_series: object | None = None
 
 
 @dataclass(frozen=True)
@@ -696,8 +699,9 @@ class SewerNetwork:
                 f"{x.kind} cross section's full height {height!r} m")
 
     def _validate_dynamic(self, outfall_names: set[str]) -> None:
-        """Dynamic-wave topology: loops and any flow direction are allowed, but every
-        connected component needs an outfall and each outfall ends exactly one conduit."""
+        """Dynamic-wave topology: loops and any flow direction are allowed, the network needs an
+        outfall (a component without one is allowed, as in SWMM) and each outfall ends exactly
+        one conduit."""
         self.dynamic_wave.validate()
         for manhole in self.manholes:
             if not manhole.initial_depth >= 0.0:
@@ -752,12 +756,9 @@ class SewerNetwork:
                     f"got {pipe.transect_length_factor!r}")
             if pipe.xsect is not None:
                 self._validate_xsect(pipe)
-        neighbours: dict[str, list[str]] = {}
         touching: dict[str, list[str]] = {name: [] for name in outfall_names}
         links = (*self.pipes, *self.orifices, *self.weirs, *self.outlets, *self.pumps)
         for link in links:
-            neighbours.setdefault(link.u, []).append(link.v)
-            neighbours.setdefault(link.v, []).append(link.u)
             for end in (link.u, link.v):
                 if end in outfall_names:
                     touching[end].append(link.name)
@@ -768,23 +769,12 @@ class SewerNetwork:
                     f"({found}); dynamic-wave routing takes exactly one link (a pipe, "
                     f"orifice, weir or outlet) per outfall (SWMM's ERR_OUTFALL)"
                 )
-        seen: set[str] = set()
-        for manhole in self.manholes:
-            if manhole.name in seen:
-                continue
-            component = {manhole.name}
-            frontier = [manhole.name]
-            while frontier:
-                for other in neighbours.get(frontier.pop(), ()):
-                    if other not in component:
-                        component.add(other)
-                        frontier.append(other)
-            seen |= component
-            if not component & outfall_names:
-                raise ValueError(
-                    f"SewerNetwork: manhole {manhole.name!r} and its connected pipes "
-                    f"({sorted(component)}) reach no outfall"
-                )
+        # SWMM asks for at least one outfall in the whole network (ERR_NO_OUTLETS,
+        # flowrout.c:325) and nothing per component: a junction with no link, or a group
+        # of nodes without an outfall, routes by its own continuity (its surface area is
+        # the head equation's storage row) and floods at its full depth.
+        if not outfall_names:
+            raise ValueError("SewerNetwork: the network has no outfall (SWMM's ERR_NO_OUTLETS)")
 
     def outgoing(self) -> dict[str, int]:
         """Manhole name -> the position of its outgoing pipe in `self.pipes`."""
