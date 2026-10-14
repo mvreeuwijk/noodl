@@ -149,8 +149,31 @@ class Squared(Element):
         return 2.0 * self.k * torch.abs(dp)
 
     def linear_init(self, drivers=None):
-        # (offset, slope) of the tangent at dp = 0: this law is flat there
-        return torch.zeros_like(self.k), torch.zeros_like(self.k)
+        # (offset, slope): the tangent at dp = 0 is flat (singular), so this is a surrogate,
+        # the linear law q = k dp, whose solve gives Newton its starting point
+        return torch.zeros_like(self.k), self.k
+```
+
+Two of them in series between prescribed potentials, `k = 1` then `k = 4`: equal flows need
+`(6 - phi_b)^2 = 4 phi_b^2`, so `phi_b = 2` and `q = 16`.
+
+```python
+from noodl.layers.potential import PotentialFlowLayer
+from noodl.topology import Network
+
+net = Network(dtype=torch.float64)
+for node in ("a", "b", "c"):
+    net.add_node(node)
+net.add_edge("a", "b", kind="pipe")
+net.add_edge("b", "c", kind="pipe")
+layer = PotentialFlowLayer(
+    net, "p", [Squared(torch.tensor([1.0, 4.0], dtype=torch.float64))], boundary=["a", "c"])
+phi, q = layer.solve(torch.tensor([6.0, 0.0], dtype=torch.float64))
+print([round(v, 9) for v in phi.tolist()], [round(v, 9) for v in q.tolist()])
+```
+
+```text
+[6.0, 2.0, 0.0] [16.0, 16.0]
 ```
 
 Two rules worth stating explicitly, because both produce wrong answers rather than errors:

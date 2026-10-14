@@ -119,20 +119,20 @@ $$
 B\, h(B^\top \lambda + f_p) = 0.
 $$
 
-Newton's method gives Jacobian $B H'(f) B^\top$, the loop-impedance analogue of the nodal
-Laplacian, again a Schur complement ($H' = dh/df$). Loop analysis needs only $l$
-unknowns rather than $n - 1$, favourable for tree-like networks with a handful of loops
-(most building airflow networks), and flow sources become part of the particular
-solution rather than extra unknowns; a branch with a *prescribed potential drop* needs
-the dual augmentation instead. Neither formulation is unconditionally better-conditioned
-— both reduce to a congruence transform of the same branch Jacobian — so the practical
-choice is driven by $n$ vs $l$ and by which sources are naturally flow- or
-potential-type. `noodl`'s potential layers are nodal, extended to Modified Nodal Analysis
-where a constitutive law requires it (below). The cycle space is kept for flows that are not potential-driven — prescribed or
+Newton's method gives Jacobian $B H'(f) B^\top$, the loop-impedance analogue of the nodal Laplacian,
+again a Schur complement ($H' = dh/df$). Loop analysis needs only $l$ unknowns rather
+than $n - 1$, favourable for tree-like networks with a handful of loops (most building
+airflow networks), and flow sources become part of the particular solution rather than extra
+unknowns; a branch with a *prescribed potential drop* needs the dual augmentation instead.
+Neither formulation is unconditionally better-conditioned — both reduce to a congruence
+transform of the same branch Jacobian — so the practical choice is driven by $n$ vs
+$l$ and by which sources are naturally flow- or potential-type. `noodl`'s potential
+layers are nodal, extended to Modified Nodal Analysis where a constitutive law requires it
+(below). The cycle space is kept for flows that are not potential-driven — prescribed or
 closure-computed flows, and the closed-form continuity solve on a tree
-(`cycles.particular_flow`, §9). `cycles.assert_forward_oriented` encodes a related
-constraint: only an entrywise non-negative cycle basis guarantees non-negative $\lambda$
-maps to non-negative $f$, needed for the constant upwind operator of §2.
+(`cycles.particular_flow`, §9). `cycles.assert_forward_oriented` encodes a related constraint:
+only an entrywise non-negative cycle basis guarantees non-negative $\lambda$ maps to
+non-negative $f$, needed for the constant upwind operator of §2.
 
 ### Modified Nodal Analysis in noodl
 
@@ -160,16 +160,18 @@ J = \begin{pmatrix} A_{I,P}\, G_P'\, A_{I,P}^\top & A_{I,F} \\
 \partial_e r_F\, A_{I,F}^\top & \partial_f r_F \end{pmatrix}.
 $$
 
-The upper-left block is the nodal Laplacian of the potential-controlled branches; the
-off-diagonal blocks are incidence columns, constant $\pm 1$ in the KCL rows. $G_P'$ and the
-$r_F$ derivatives are block diagonal with one block per group of coupled edges (a law's
-`ports`), so a multi-port law enters exactly. $J$ is nonsymmetric and indefinite in general,
-which is why such a layer is factorised (sparse or dense LU) rather than solved by conjugate
-gradients. MNA sits between nodal analysis and the **sparse tableau** formulation (Hachtel,
-Brayton & Gustavson, *The sparse tableau approach to network analysis and design*, IEEE Trans.
-Circuit Theory 18(1):101–113, 1971), which keeps every branch potential difference and flow
-as an unknown: MNA eliminates the potential-controlled flows and keeps only the flows that
-cannot be eliminated, so its system is far smaller while still admitting every law.
+The upper-left block is the nodal Laplacian of the potential-controlled branches. The
+upper-right block, the KCL rows against the implicit flows, is the incidence $A_{I,F}$
+itself, constant $\pm 1$; the lower-left block is the law's slope $\partial_e r_F$ times the
+transposed incidence. $G_P'$ and the $r_F$ derivatives are block diagonal with one
+block per group of coupled edges (a law's `ports`), so a multi-port law enters exactly.
+$J$ is nonsymmetric and indefinite in general, which is why such a layer is factorised
+(sparse or dense LU) rather than solved by conjugate gradients. MNA sits between nodal analysis
+and the **sparse tableau** formulation (Hachtel, Brayton & Gustavson, *The sparse tableau
+approach to network analysis and design*, IEEE Trans. Circuit Theory 18(1):101–113, 1971),
+which keeps every branch potential difference and flow as an unknown: MNA eliminates the
+potential-controlled flows and keeps only the flows that cannot be eliminated, so its system is
+far smaller while still admitting every law.
 
 **Storage** (a capacitance, an inductance) enters as a companion form: one implicit step of the
 trapezoidal rule or backward Euler turns $f = C\, de/dt$ into the algebraic relation

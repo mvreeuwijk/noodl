@@ -5,7 +5,9 @@ layer of domain physics (its elements, drives and closures) over the shared core
 be built directly in Python, as each page shows, or, where a reader exists, read from a model
 file; see [File formats](../formats/index.md). Every application is initialised the same way,
 with `initial_state(model, values=...)` and `initial_drivers(model, values=...)` by name; see
-[Using noodl](../usage.md).
+[Using noodl](../usage.md). The electrical application has no `initial_drivers`: its
+`build_model` returns every driver, and `initial_state(model, drivers)` solves the consistent
+initial point of the circuit.
 
 | Application | Physical system | Flow determination | Entry point |
 |---|---|---|---|
@@ -55,7 +57,7 @@ Each application page ends with a **Verification** section: code-to-code compari
 established reference models that solve the same equations (CONTAM and ContamX and the Modelica
 Buildings Library for building physics, MUNICH for street air quality, SWMM through pyswmm for
 sewers, EPANET 2.2 through WNTR for water distribution, WSIMOD for flow allocation), plus
-checks against analytical solutions (the only checks of the electrical application so far), conservation identities and finite-difference gradients.
+checks against analytical solutions, conservation identities and finite-difference gradients.
 
 A comparison of this kind runs noodl physics and a reference model on the same input and compares the
 outputs at a stated tolerance. It shows that noodl physics solves the same model as the reference; it is

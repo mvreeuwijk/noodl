@@ -150,13 +150,16 @@ t = 3.0 ms: v = 0.950212 V, exact 0.950213 V
 ```
 
 The result holds `"time"`, `"electrical.phi"` and `"electrical.q"` with the start state as row
-0, and `"integration"`, the rule each step used.
+0, and `"integration"`, the rule each step used. `operating_point`, `initial_state` and
+`transient` pass any further keyword (Newton's `atol` and `rtol`, `method`, ...) to every layer
+solve.
 
 ### AC (phasor) analysis
 
 `ac_sweep(circuit, frequencies)` solves the sinusoidal steady state at every frequency in one
-batched phasor solve. A series RLC circuit at, and either side of, its resonance
-`f0 = 1 / (2 pi sqrt(L C))`:
+batched phasor solve and returns `{"frequency": (F,), "electrical.phi": (F, n),
+"electrical.q": (F, b)}`, complex phasors with the frequency as the leading dimension. A
+series RLC circuit at, and either side of, its resonance `f0 = 1 / (2 pi sqrt(L C))`:
 
 ```python
 import torch
@@ -334,10 +337,14 @@ Every check is against a closed form or a hand Modified Nodal Analysis (`tests/a
 | RC charge, RL, backward Euler | The exact backward Euler recurrence at every step | 1e-13 abs |
 | RC charge and series RLC ringing, trapezoidal | Convergence order over `dt`, `dt/2`, `dt/4` | order 2 within 0.1 |
 | RC charge through `transient` (backward Euler first step) | Error at 1 s with `dt = 0.01` and order from `dt = 0.02` | error < 1e-4, order >= 1.9 |
-| Series RLC, phasor | Current against `1 / (R + j w L + 1 / (j w C))` at three frequencies, resonance included | 1e-12 relative |
+| Series RLC, `ac_sweep` | Current modulus against `1 / sqrt(R^2 + (w L - 1/(w C))^2)` at seven frequencies from `f0/2` to `2 f0`, peak at `f0` | 1e-12 relative |
+| Series RLC, phasor layer | Complex current against `1 / (R + j w L + 1 / (j w C))` at three frequencies | 1e-12 relative |
+| RC with a `Sine` source of phase 0.3 rad, `ac_sweep` | Complex node voltage at three sweep frequencies | 1e-12 relative |
+| RC phasor model, `device_values` | Complex device voltages and currents | 1e-13 relative |
 | Constant-power load behind an impedance, phasor | Load voltage against a fixed-point iteration; drawn power | 1e-12 relative |
 | Tellegen identity, real and complex | `power_residual` | 1e-12 |
-| Diode with a resistor and capacitor | KCL and the diode law at the solution | 1e-15 abs, 1e-9 relative |
+| Diode with a resistor and capacitor, transient | KCL at the diode node; the diode current against its law | 1e-15 A abs; 1e-12 relative |
+| Diode behind a resistor, DC | The resistor and diode laws at the solution | 1e-10 and 1e-9 relative |
 | Gradients: a capacitance and a source value through three transient steps; a conductance, a source and a boundary potential at DC; a conductance and a source through a phasor magnitude | `torch.autograd.gradcheck` against finite differences | gradcheck defaults |
 | Gradients of the learnable divider resistances | Closed form | 1e-10 relative |
 
@@ -352,8 +359,9 @@ OpenModelica on MSL models is planned.
 
 - **Fixed time grid.** No adaptive step and no inserted breakpoints: a source edge inside a step
   is seen at the step end.
-- **No event location.** A switch or a diode changes state at a step end only; the step in which
-  a switching law changes branch is not refined.
+- **No event location.** A `Switch` is a discontinuous law: it changes state only where its
+  control driver is evaluated, at a step end, and the step in which it switches is not refined.
+  (The `Diode` is smooth and needs no event.)
 - **No ideal diode.** The piecewise-linear ideal diode (MSL `Ideal.IdealDiode`) is not provided;
   `Diode` is the exponential junction diode with its linear continuation.
 - **One frequency per phasor model.** No harmonic balance, no small-signal linearisation of a
