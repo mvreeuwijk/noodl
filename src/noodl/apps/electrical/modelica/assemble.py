@@ -118,7 +118,7 @@ from noodl.apps.electrical.laws import (
 )
 from noodl.apps.electrical.loads import ConstantPowerLoad, Impedance
 from noodl.apps.electrical.modelica.netlist import Device, Netlist, raise_problems
-from noodl.apps.electrical.modelica.schema import CircuitDoc, Signal
+from noodl.apps.electrical.modelica.schema import CircuitDoc, ModelicaImportError, Signal
 from noodl.apps.electrical.waveforms import Constant
 from noodl.apps.electrical.waveforms import Signal as SignalWaveform
 from noodl.layers.potential import PotentialFlowLayer
@@ -280,7 +280,7 @@ class _Inputs:
                     y = signals.combine(s, values).expand(self.grid.shape).clone()
             else:
                 y = signals.evaluate(s, self.grid, t_start=float(self.grid[0]))
-        except Exception as exc:  # noqa: BLE001 - ModelicaImportError or a malformed value
+        except (ModelicaImportError, ValueError, TypeError) as exc:  # a malformed parameter
             self.problems.append(str(exc).removeprefix("modelica: "))
             y = None
         self._values[s.name] = y
@@ -323,6 +323,16 @@ def _number(device: Device, key: str, problems: list[str], default: float | None
         problems.append(f"{device.name} ({device.cls}): parameter {key} must be a number, "
                         f"found {value!r}")
         return 0.0
+    return float(value)
+
+
+def _positive(device: Device, key: str, problems: list[str]) -> float | None:
+    """A numeric parameter that must be > 0; `None` (with a problem) otherwise."""
+    value = device.parameters.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
+        problems.append(f"{device.name} ({device.cls}): parameter {key} must be a number "
+                        f"> 0, found {value!r}")
+        return None
     return float(value)
 
 
@@ -404,7 +414,7 @@ class _Builder:
                 return None
             try:
                 return signals.evaluate(block, self.grid, t_start=float(self.grid[0]))
-            except Exception as exc:  # noqa: BLE001 - ModelicaImportError or a bad value
+            except (ModelicaImportError, ValueError, TypeError) as exc:  # a bad parameter
                 self.problems.append(str(exc).removeprefix("modelica: "))
                 return None
         if short == "SignalVoltage":
@@ -495,11 +505,14 @@ class _Builder:
         elif role in ("dc_load", "ac_load"):
             self._load(d)
         elif role == "ac_transformer":
-            v_high, v_low = _number(d, "VHigh", p), _number(d, "VLow", p)
-            zp = v_high ** 2 * _number(d, "Zperc", p) / _number(d, "VABase", p)
-            angle = math.atan(_number(d, "XoverR", p))
+            v_high, v_low, base = (_positive(d, k, p) for k in ("VHigh", "VLow", "VABase"))
+            zperc, x_over_r = _number(d, "Zperc", p), _number(d, "XoverR", p)
+            if None in (v_high, v_low, base):
+                return      # reported: no arithmetic on a missing or non-positive rating
+            zp = v_high ** 2 * zperc / base
+            angle = math.atan(x_over_r)
             z = zp * complex(math.cos(angle), math.sin(angle))
-            ratio = v_high / v_low if v_low else 0.0
+            ratio = v_high / v_low
             self.add("impedance_transformer", d, n["n"], 0, n=ratio, Z=z)
             self.add("impedance_transformer", d, n["p"], 0, n=ratio, Z=z)
         elif role == "ac_dc_converter":
@@ -576,11 +589,15 @@ class _Builder:
                 p.append(f"{d.name} ({d.cls}): use_pf_in = {d.parameters.get('use_pf_in')!r}: "
                          f"a power factor input is not supported")
             pf = _number(d, "pf", p)
-            if abs(pf - _PF_LIMIT) < _PF_BAND:
+            if not 0.0 < pf <= 1.0:
+                p.append(f"{d.name} ({d.cls}): pf = {pf!r}: a power factor must lie in "
+                         f"(0, 1]")
+            elif abs(pf - _PF_LIMIT) < _PF_BAND:
                 p.append(f"{d.name} ({d.cls}): pf = {pf!r} lies in the band of MBL's "
                          f"smoothMin(pf, {_PF_LIMIT}, {_PF_BAND}), where its blend is not "
                          f"transcribed")
-            tangent = math.tan(math.acos(min(pf, _PF_LIMIT)))
+            else:
+                tangent = math.tan(math.acos(min(pf, _PF_LIMIT)))
         a = d.nodes["a"] if d.role == "ac_load" else d.nodes["c1"]
         b = 0 if d.role == "ac_load" else d.nodes["c2"]
         self.add("load", d, a, b, P=-P, Q=-P * tangent, V_nominal=_number(d, "V_nominal", p),

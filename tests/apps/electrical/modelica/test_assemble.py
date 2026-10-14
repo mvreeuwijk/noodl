@@ -40,6 +40,15 @@ def test_dc_resistor_example_hand_values():
                                  "res2.terminal.v[1]": 6.0}, rel=1e-13)
 
 
+def test_terminal_current_is_the_current_into_the_device():
+    # The line res carries 3 A from the source (at terminal_n) to res2 (at terminal_p).
+    model, state, drivers, names = read_modelica_circuit(DATA / "DC.Loads.Examples.Resistor.json")
+    h = _hist(model.steady(state, step_drivers(drivers, names.grid, 0.0), t=0.0))
+    assert float(names.value(h, "res.terminal_n.i[1]")[0]) == pytest.approx(3.0, rel=1e-13)
+    assert float(names.value(h, "res.terminal_p.i[1]")[0]) == pytest.approx(-3.0, rel=1e-13)
+    assert float(names.value(h, "sou.terminal.i[1]")[0]) == pytest.approx(-9.0, rel=1e-13)
+
+
 def test_test_impedance_hand_values():
     model, state, drivers, names = read_modelica_circuit(
         DATA / "AC.OnePhase.Loads.Examples.TestImpedance.json")
@@ -330,9 +339,10 @@ def test_ac_load_near_the_smoothing_band_and_power_factor_input_are_refused(tmp_
     with pytest.raises(ModelicaImportError) as exc:
         read_modelica_circuit(path)
     msg = str(exc.value)
-    assert "a " in msg and "0.99999" in msg
-    assert "b " in msg and "use_pf_in" in msg
-    assert "z " in msg and "C" in msg
+    assert "a (Buildings.Electrical.AC.OnePhase.Loads.Inductive): pf = 0.99999" in msg
+    assert "b (Buildings.Electrical.AC.OnePhase.Loads.Inductive): use_pf_in = True" in msg
+    assert ("z (Buildings.Electrical.AC.OnePhase.Loads.Impedance): a capacitive impedance "
+            "needs C > 0") in msg
 
 
 def test_algebraic_phasor_model_with_a_converter_and_zero_demand_converges():
@@ -372,3 +382,32 @@ def test_signal_wiring_and_start_value_problems_are_named(tmp_path):
     assert "input u2 is not driven" in msg         # add.u2 undriven
     assert "input u is not driven" in msg          # fb3.u undriven
     assert "start value of v" in msg               # C has no recorded start value
+
+
+def test_transformer_ratings_and_power_factors_are_checked(tmp_path):
+    rating = {"Zperc": 0.03, "XoverR": 8.0, "ground_1": False, "ground_2": True}
+    load = {"P_nominal": -100.0, "V_nominal": 60.0, "linearized": False, "use_pf_in": False,
+            "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state"}
+    path = _doc(tmp_path, [
+        _c("V", AC + "Sources.FixedVoltage", f=60.0, V=120.0, phiSou=0.0),
+        _c("t1", AC + "Conversion.ACACTransformer", VHigh=120.0, VLow=0.0, **rating),
+        _c("t2", AC + "Conversion.ACACTransformer", VHigh=120.0, VLow=60.0, **rating),
+        _c("t3", AC + "Conversion.ACACTransformer", VHigh=-1.0, VLow=60.0, VABase=4000.0,
+           **rating),
+        _c("l1", AC + "Loads.Inductive", pf=-2.0, **load),
+        _c("l2", AC + "Loads.Inductive", pf=0.0, **load),
+        _c("l3", AC + "Loads.Inductive", pf=1.5, **load),
+    ], [["V.terminal", "t1.terminal_n"], ["V.terminal", "t2.terminal_n"],
+        ["V.terminal", "t3.terminal_n"], ["t1.terminal_p", "l1.terminal"],
+        ["t2.terminal_p", "l2.terminal"], ["t3.terminal_p", "l3.terminal"]])
+    with pytest.raises(ModelicaImportError) as exc:
+        read_modelica_circuit(path)
+    msg = str(exc.value)
+    tra = AC + "Conversion.ACACTransformer"
+    assert f"t1 ({tra}): parameter VLow must be a number > 0, found 0.0" in msg
+    assert f"t1 ({tra}): parameter VABase must be a number > 0, found None" in msg
+    assert f"t2 ({tra}): parameter VABase must be a number > 0, found None" in msg
+    assert f"t3 ({tra}): parameter VHigh must be a number > 0, found -1.0" in msg
+    for name, pf in (("l1", -2.0), ("l2", 0.0), ("l3", 1.5)):
+        assert (f"{name} (Buildings.Electrical.AC.OnePhase.Loads.Inductive): pf = {pf!r}: a "
+                f"power factor must lie in (0, 1]") in msg

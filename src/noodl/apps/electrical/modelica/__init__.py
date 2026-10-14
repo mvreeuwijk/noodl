@@ -28,6 +28,11 @@ def read_modelica_circuit(path: str | Path, *, substeps: int = 1, omit: Iterable
     events) into that many equal steps; `omit` names components to drop, with their
     connections, before the netlist is built. Raises `ModelicaImportError` naming every
     problem of a model the reader cannot convert in full.
+
+    Comparing with the reference at round-off needs tight Newton tolerances: with the
+    layer's defaults an algebraic model such as MBL's `ACACTransformer` example stays
+    farther from OpenModelica than `1e-9` relative; pass `atol=1e-14, rtol=1e-14` to
+    `model.steady` / `model.step`.
     """
     doc = schema.load(path)
     return assemble.build(netlist.build(doc, omit=omit), doc, substeps=substeps)
