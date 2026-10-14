@@ -44,6 +44,19 @@ from noodl.apps.sewer.quality import (
     kla_h2s,
 )
 from noodl.apps.sewer.report import pipe_table, to_mg_per_litre, to_ppm
+from noodl.apps.sewer.runoff import (
+    Adjustments,
+    CurveNumber,
+    Evaporation,
+    GreenAmpt,
+    Horton,
+    Hydrology,
+    RainGage,
+    RunoffInflows,
+    RunoffModel,
+    Subareas,
+    Subcatchment,
+)
 from noodl.apps.sewer.storage import STORAGE_SHAPES, StorageCurves
 from noodl.apps.sewer.xsect_spec import Transect, Xsect
 
@@ -58,4 +71,6 @@ __all__ = [
     "air_geometry", "build_model", "capacity_flow", "henry_h2s", "initial_drivers", "initial_state",
     "kla_h2s", "manning_flow", "normal_depth", "pipe_table", "read_swmm_inp", "sewer_steady",
     "to_mg_per_litre", "to_ppm", "tree_steady", "unit_factors", "Transect", "Xsect",
+    "Adjustments", "CurveNumber", "Evaporation", "GreenAmpt", "Horton", "Hydrology", "RainGage",
+    "RunoffInflows", "RunoffModel", "Subareas", "Subcatchment",
 ]

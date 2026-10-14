@@ -190,6 +190,15 @@ T1 01/01/2026 00:00 10.0
 T1 01/02/2026 00:00 10.0
 
 """
+#: Green-Ampt under a conductivity adjustment (K scales, the upper zone with its square root)
+#: and a soil recovery pattern
+MONTHLY_GA = """[PATTERNS]
+Rec MONTHLY 0.4 0.4 0.4 0.4 0.4 0.4 0.4 0.4 0.4 0.4 0.4 0.4
+
+[ADJUSTMENTS]
+CONDUCTIVITY 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6
+
+"""
 #: the N-PERV, DSTORE and INFIL lines moved above [SUBCATCHMENTS]: SWMM resets them there
 MOVE_PATTERNS = [
     ("""N-PERV           S1       Nv
@@ -227,6 +236,9 @@ IGNORE_SNOWMELT      YES"""),
                                    "CONSTANT         12.0 ;")], True),
     "dry_only_monthly": (CN, [("DRY_ONLY         NO", "DRY_ONLY         YES")], True),
     "green_ampt_without_a_per_line_model": (GA, [("0.40  MODIFIED_GREEN_AMPT", "0.40")], True),
+    "green_ampt_conductivity_and_recovery": (GA, [
+        ("DRY_ONLY         YES", "RECOVERY         Rec\nDRY_ONLY         YES"),
+        ("[TIMESERIES]", MONTHLY_GA + "[TIMESERIES]")], True),
     "interval_in_decimal_hours": (CN, [("INTENSITY 0:05 ", "INTENSITY 0.0833333 ")], True),
     "wet_step_7_s": (CN, [("WET_STEP             00:00:45", "WET_STEP             00:00:07")],
                      True),

@@ -994,8 +994,8 @@ class RunoffModel:
     (cfs) interpolated to the routing time `t_ms` between the last two runoff times
     (routing.c `addWetWeatherInflows`); ``outflow_by_node`` sums it per outlet node in m3/s.
     ``old_ms`` and ``new_ms`` are SWMM's ``OldRunoffTime`` and ``NewRunoffTime``; ``steps`` lists
-    ``(start s, length s)`` of the runoff steps taken and ``runoff`` the subcatchments' runoff
-    (cfs) after the last step, by subcatchment name."""
+    ``(start s, length s)`` of the runoff steps taken and ``runoff`` (``runoff_m3s``) the
+    subcatchments' runoff in cfs (m3/s) after the last step, by subcatchment name."""
 
     def __init__(self, hydrology: Hydrology) -> None:
         self.hydrology = hydrology
@@ -1224,6 +1224,11 @@ class RunoffModel:
     def runoff(self) -> dict[str, Number]:
         """The runoff of each subcatchment (cfs) at the last runoff step, by name."""
         return {s.name: s.new_runoff for s in self.subs}
+
+    @property
+    def runoff_m3s(self) -> dict[str, Number]:
+        """The runoff of each subcatchment (m3/s) at the last runoff step, by name."""
+        return {s.name: s.new_runoff * QCF for s in self.subs}
 
     def weighted(self, routing_ms: float) -> list[Number]:
         """The runoff of each subcatchment (cfs) at the routing time `routing_ms`:

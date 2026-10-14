@@ -25,6 +25,10 @@ The network uses SWMM's own tabulated circular section
 (``geometry="tabulated"``, `xsect_tables.py`; the other shapes `xsect_shapes.py`) unless
 ``geometry="analytic"`` is passed (circles only).
 `[RAINGAGES]` is ignored when no `[SUBCATCHMENTS]` (or `[HYDROGRAPHS]`, `[RDII]`) uses a gage.
+A file with `[SUBCATCHMENTS]` also gets its hydrology -- `[RAINGAGES]`, `[SUBAREAS]`,
+`[INFILTRATION]`, `[EVAPORATION]` and `[ADJUSTMENTS]`, read by `inp_hydrology.read_hydrology`
+(SWMM's runoff, `runoff.py`) -- as `SewerNetwork.inflows`, a `runoff.RunoffInflows` that adds
+the runoff of the subcatchments to the lateral inflows below.
 Lines before the first section header are `[TITLE]` text, as SWMM reads them (input.c:174);
 a version-control merge-conflict marker anywhere is refused (`_check_conflict_markers`).
 IGNORED because no conduit or node ever references them: `[EVAPORATION]` (unless it can be
@@ -33,7 +37,7 @@ positive and a conduit is open: `_check_evaporation`), `[REPORT]`,
 
 REFUSED BY NAME, because skipping them would silently change the physics:
 `[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` under STEADY or KINWAVE, `[PUMPS]`,
-`[DIVIDERS]` under STEADY or KINWAVE, `[SUBCATCHMENTS]`, `[RAINGAGES]` (with them), `[CONTROLS]`,
+`[DIVIDERS]` under STEADY or KINWAVE, `[CONTROLS]`,
 `[CURVES]` of any type but STORAGE, RATING, TIDAL, SHAPE and DIVERSION, `[LID_USAGE]`,
 `IGNORE_ROUTING YES`, `FLOW_ROUTING NONE`, `SKIP_STEADY_STATE YES`, roadway weirs, weir
 coefficient curves, `[FILES]` `USE HOTSTART`, `USE INFLOWS`, `USE RDII` and `USE RUNOFF`
@@ -209,7 +213,7 @@ _READ = {"OPTIONS", "JUNCTIONS", "OUTFALLS", "CONDUITS", "XSECTIONS", "LOSSES", 
          "POLLUTANTS", "STORAGE", "CURVES", "ORIFICES", "WEIRS", "OUTLETS", "TIMESERIES",
          "PATTERNS", "DWF", "FILES", "TRANSECTS", "DIVIDERS"}
 #: `[FILES]` ``USE`` kinds that change the physics (a hot-start state, interface inflows, RDII
-#: or runoff flows): refused. ``USE RAINFALL`` only feeds rain gauges, which are refused anyway.
+#: or runoff flows): refused. ``USE RAINFALL`` only feeds ``FILE`` rain gages, which are refused.
 _REFUSED_FILES = {"HOTSTART": "the initial state", "INFLOWS": "interface inflows",
                   "RDII": "RDII flows", "RUNOFF": "runoff flows"}
 #: SWMM's default start of the simulation clock (project.c)

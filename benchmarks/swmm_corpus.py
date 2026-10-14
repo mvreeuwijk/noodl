@@ -90,6 +90,12 @@ def _noodl_worker(path: str, window: float) -> dict:
         net, _, _ = read_swmm_inp(path)
         out["routing"] = net.routing
         model, state, drivers = build_model(net, air=False, quality=False)
+        if net.hydrology is not None:
+            # SWMM's copy ends at the window, and cuts its last runoff step there
+            from noodl.apps.sewer.inp_hydrology import swmm_total_duration
+            h = net.hydrology
+            cut = swmm_total_duration(h.start, h.start + datetime.timedelta(seconds=window))
+            model.inflow_schedule = model.inflow_schedule.with_duration(cut)
     except ValueError as err:
         out.update(status="refused", reason=normalise_reason(err))
         return out

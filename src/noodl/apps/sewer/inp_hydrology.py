@@ -129,30 +129,40 @@ def _time_option(options: dict, key: str, default: float, path) -> float:
     return seconds
 
 
+def swmm_total_duration(start: datetime.datetime, end: datetime.datetime) -> float:
+    """SWMM's ``TotalDuration`` (s) of a run from `start` to `end`:
+    ``floor((EndDateTime - StartDateTime) * 86400)`` (project.c:165) with the dates and times as
+    SWMM encodes them (days, and the time of day as ``seconds / 86400``). The SWMM 5.2.4 engine
+    that pyswmm ships evaluates the difference as ``(EndDate - StartDate) + (EndTime -
+    StartTime)`` (the sum of two exact differences rather than the difference of two sums,
+    which the floor would take a second lower in a third of the cases: 12:20:00 after
+    12:00:00 is 1199 s -- found by comparing the last runoff step with SWMM's), and so does
+    this. The result is not positive when `end` is not after `start`."""
+    def of_day(t: datetime.datetime) -> float:
+        return (t - datetime.datetime.combine(t.date(), datetime.time())
+                ).total_seconds() / 86400.0
+
+    span = float((end.date() - start.date()).days) + (of_day(end) - of_day(start))
+    return float(math.floor(span * 86400.0))
+
+
 def _total_duration(options: dict, start: datetime.datetime, path) -> float:
-    """SWMM's ``TotalDuration`` (s) of the run: ``floor((EndDateTime - StartDateTime) * 86400)``
-    (project.c:165) with the dates and times as SWMM encodes them (days since 1899-12-30 and
-    ``seconds / 86400``). The SWMM 5.2.4 engine that pyswmm ships evaluates the difference as
-    ``(EndDate - StartDate) + (EndTime - StartTime)`` (the sum of two exact differences, not the
-    difference of two sums, which the floor would take a second lower in about a third of the
-    cases: 12:20:00 after 12:00:00 is 1199 s, found by comparing the last runoff step), and
-    so does this."""
+    """`swmm_total_duration` for the run `[OPTIONS]` describe; refuses an end that is not after
+    the start."""
     end_date = datetime.date(2004, 1, 1)
     if "END_DATE" in options:
         end_date = parse_date(options["END_DATE"][0].fields[1])
-    if end_date is None:
-        _fail(path, options["END_DATE"][0], "END_DATE must be a date")
-    end_time = _time_option(options, "END_TIME", 0.0, path) / 86400.0
-    start_time = (start - datetime.datetime.combine(start.date(), datetime.time())
-                  ).total_seconds() / 86400.0
-    days = float((end_date - start.date()).days)
-    span = days + (end_time - start_time)
-    if span <= 0.0:
+        if end_date is None:
+            _fail(path, options["END_DATE"][0], "END_DATE must be a date")
+    end = datetime.datetime.combine(end_date, datetime.time()) + datetime.timedelta(
+        seconds=_time_option(options, "END_TIME", 0.0, path))
+    total = swmm_total_duration(start, end)
+    if total <= 0.0:
         line = options["END_DATE"][0] if "END_DATE" in options else None
         raise ValueError(f"{path}: " + (f"line {line.number}: " if line else "")
                          + "the simulation must end after it starts (END_DATE and END_TIME "
                            "are not after START_DATE and START_TIME; SWMM's ERR_START_DATE)")
-    return float(math.floor(span * 86400.0))
+    return total
 
 
 def read_hydrology(sections: dict, path, options: dict, start: datetime.datetime, *,
@@ -521,4 +531,4 @@ def _adjustments(lines, path, monthly, sub_lines):
     return Adjustments(tuple(evap), tuple(rain), tuple(cond)), patterned
 
 
-__all__ = ["HYDROLOGY_SECTIONS", "read_hydrology"]
+__all__ = ["HYDROLOGY_SECTIONS", "read_hydrology", "swmm_total_duration"]
