@@ -495,3 +495,35 @@ def test_laws_carry_many_devices_and_declare_their_forms():
     assert MutualInductance(1, 1, 0).dynamic
     assert DependentSource(1.0, control="current", output="current").ports == 2
     assert not Resistance(1.0).contextual and Resistance(1.0).phasor_capable
+
+
+# ----------------------------------------------------- temperature and scale options
+def test_diode_temperature_dependence_matches_msl():
+    # MSL Semiconductors.Diode with useTemperatureDependency = true
+    law = JunctionDiode(temperature="T")
+    for v, temp, expect in [(0.3, 300.15, 0.10895711155642221),
+                            (0.3, 350.0, 14.946585537811181),
+                            (0.5, 350.0, 6031.610653800015)]:
+        i = law(T([v]), {"T": T([temp])})
+        assert abs(float(i) - expect) <= 1e-12 * abs(expect)
+
+
+def test_diode_temperature_options_enter_the_msl_formula():
+    k, q = 1.380649e-23, 1.602176634e-19
+    law = JunctionDiode(Ids=2e-6, Maxexp=40.0, R=1e6, temperature="T", N=1.5, TNOM=290.0,
+                        XTI=2.0, EG=1.2)
+    v, temp = 0.4, 320.0
+    vt = k * temp / q
+    expect = (2e-6 * (math.exp(v / (1.5 * vt)) - 1.0) * (temp / 290.0) ** (2.0 / 1.5)
+              * math.exp((temp / 290.0 - 1.0) * 1.2 / (1.5 * vt)) + v / 1e6)
+    _close(law(T([v]), {"T": T([temp])}), [expect], tol=0.0, rtol=1e-13)
+    with pytest.raises(KeyError, match="'T'"):
+        law(T([v]), {})
+
+
+def test_resistance_scale_driver_multiplies_r():
+    law = Resistance(T([2.0, 2.0]), scale="s")
+    i = law(T([6.0, 6.0]), {"s": T([1.0, 3.0])})
+    torch.testing.assert_close(i, T([3.0, 1.0]))
+    both = Resistance(T([2.0]), alpha=T([0.01]), temperature="T", scale="s")
+    _close(both.flow(T([6.0]), {"s": T([3.0]), "T": T([400.15])}), [6.0 / (6.0 * 2.0)])

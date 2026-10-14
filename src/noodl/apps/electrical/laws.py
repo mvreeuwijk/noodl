@@ -176,28 +176,33 @@ class PrescribedCurrent(_Source, Element):
 
 # -------------------------------------------------------------------- one-port devices
 class Resistance(Element):
-    """A linear resistor: `q = dp / R_actual` with `R_actual = R (1 + alpha (T - T_ref))`
+    """A linear resistor: `q = dp / R_actual` with `R_actual = R s (1 + alpha (T - T_ref))`
     (`R` in ohm at `T_ref` in K, `alpha` in 1/K); `T` (K) is read per edge from
-    `drivers[temperature]` when `temperature` names a driver, else `T = T_ref`. MSL
-    `Basic.Resistor`.
+    `drivers[temperature]` when `temperature` names a driver, else `T = T_ref`; `s` is read
+    per edge from `drivers[scale]` when `scale` names a driver (a variable resistor whose
+    resistance follows a signal), else `s = 1`. MSL `Basic.Resistor`, `Basic.VariableResistor`
+    (its input `R` is `R s`).
     """
 
     phasor_capable = True
 
     def __init__(self, R, *, alpha=0.0, T_ref=300.15, temperature: str | None = None,
-                 kind: str = "resistor", learnable: bool = False) -> None:
+                 scale: str | None = None, kind: str = "resistor",
+                 learnable: bool = False) -> None:
         super().__init__(kind)
         self.R = self._param(R, learnable)
         self.alpha = self._param(alpha, False)
         self.T_ref = self._param(T_ref, False)
         self.temperature = temperature
+        self.scale = scale
 
     def resistance(self, drivers: Mapping[str, Tensor] | None = None) -> Tensor:
-        """`R_actual` (ohm) per edge at the driver temperature."""
+        """`R_actual` (ohm) per edge at the driver temperature and scale."""
+        R = self.R if self.scale is None else self.R * _driver(drivers, self.scale, self.kind)
         if self.temperature is None:
-            return self.R * torch.ones_like(self.alpha)
+            return R * torch.ones_like(self.alpha)
         T = _driver(drivers, self.temperature, self.kind)
-        return self.R * (1.0 + self.alpha * (T - self.T_ref))
+        return R * (1.0 + self.alpha * (T - self.T_ref))
 
     def flow(self, dp, drivers=None):
         return dp / self.resistance(drivers)
@@ -264,28 +269,59 @@ class Inductance(ImplicitLaw):
         return dp + ctx.dp_prev - 2.0 * self.L / ctx.dt * (q - ctx.q_prev)
 
 
+#: Boltzmann constant (J/K) and elementary charge (C), exact SI values as in MSL
+#: `Modelica.Constants` (`k`, `q`).
+_BOLTZMANN = 1.380649e-23
+_ELEMENTARY_CHARGE = 1.602176634e-19
+
+
+def _exlin(x: Tensor, maxexp: Tensor) -> Tensor:
+    """`exp(x)` up to `maxexp`, continued linearly above it (MSL `Semiconductors.exlin`)."""
+    # the clamp keeps the unused exponential finite at large forward voltage
+    return torch.where(x > maxexp,
+                       torch.exp(maxexp) * (1.0 + x - maxexp),
+                       torch.exp(torch.clamp(x, max=maxexp)))
+
+
 class JunctionDiode(Element):
     """A junction diode with a parallel leak: `q = Ids (exlin(dp / Vt) - 1) + dp / R`, where
     `exlin(x) = exp(x)` up to `Maxexp` and continues linearly above it,
     `exp(Maxexp) (1 + x - Maxexp)` (`Ids` saturation current in A, `Vt` voltage equivalent of
-    temperature in V, `R` parallel resistance in ohm). MSL `Semiconductors.Diode` without
-    temperature dependency. Nonlinear, so not usable in a phasor layer.
+    temperature in V, `R` parallel resistance in ohm). MSL `Semiconductors.Diode`.
+
+    With `temperature` naming a driver (per edge, K) the current depends on the junction
+    temperature `T` as MSL's `useTemperatureDependency = true`: `vt = k T / e` (Boltzmann
+    constant `k`, elementary charge `e`) replaces `Vt`, and
+    `q = Ids (exlin(dp / (N vt)) - 1) (T / TNOM)^(XTI / N) exp((T / TNOM - 1) EG / (N vt))
+    + dp / R` (emission coefficient `N`, parameter measurement temperature `TNOM` in K,
+    saturation-current temperature exponent `XTI`, activation energy `EG`). Nonlinear, so not
+    usable in a phasor layer.
     """
 
-    def __init__(self, Ids=1e-6, Vt=0.04, Maxexp=15.0, R=1e8, *, kind: str = "diode") -> None:
+    def __init__(self, Ids=1e-6, Vt=0.04, Maxexp=15.0, R=1e8, *,
+                 temperature: str | None = None, N=1.0, TNOM=300.15, XTI=3.0, EG=1.11,
+                 kind: str = "diode") -> None:
         super().__init__(kind)
         self.Ids = self._param(Ids, False)
         self.Vt = self._param(Vt, False)
         self.Maxexp = self._param(Maxexp, False)
         self.R = self._param(R, False)
+        self.temperature = temperature
+        self.N = self._param(N, False)
+        self.TNOM = self._param(TNOM, False)
+        self.XTI = self._param(XTI, False)
+        self.EG = self._param(EG, False)
 
     def flow(self, dp, drivers=None):
-        x = dp / self.Vt
-        # the clamp keeps the unused exponential finite at large forward voltage
-        z = torch.where(x > self.Maxexp,
-                        torch.exp(self.Maxexp) * (1.0 + x - self.Maxexp),
-                        torch.exp(torch.clamp(x, max=self.Maxexp)))
-        return self.Ids * (z - 1.0) + dp / self.R
+        if self.temperature is None:
+            return self.Ids * (_exlin(dp / self.Vt, self.Maxexp) - 1.0) + dp / self.R
+        T = _driver(drivers, self.temperature, self.kind)
+        vt = _BOLTZMANN * T / _ELEMENTARY_CHARGE
+        n_vt = self.N * vt
+        ratio = T / self.TNOM
+        junction = self.Ids * (_exlin(dp / n_vt, self.Maxexp) - 1.0)
+        return (junction * ratio ** (self.XTI / self.N)
+                * torch.exp((ratio - 1.0) * self.EG / n_vt) + dp / self.R)
 
 
 def _driver_entries(spec, drivers: Mapping[str, Tensor] | None, kind: str) -> Tensor:

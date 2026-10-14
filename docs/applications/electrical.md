@@ -246,6 +246,77 @@ phase, its waveform's: a `Sine(frequency, phase, start_time)` source is the phas
 `offset` has no phasor). Other waveforms are refused in an AC analysis, by name, as are
 nonlinear devices (`Diode`).
 
+## Impedances, constant-power loads and converters
+
+Four further constitutive laws transcribe the building-scale electrical models of the
+Modelica Buildings Library (MBL, `Buildings.Electrical`). They are not circuit devices: use
+them directly as laws of a `PotentialFlowLayer`, alongside any of the laws above.
+
+| Law (default kind) | Relation (`dp` across the edge, `q` entering its first node) | MBL model |
+|---|---|---|
+| `Impedance(R, L=0, C=inf)` (`impedance`) | `dp = (R + jX) q`, `X = omega L - 1/(omega C)`; `dp = R q` on a real layer (a reactance is refused there); `R = 0` is a short | `AC.OnePhase.Loads.Impedance`, `DC.Loads.Resistor` |
+| `ConstantPowerLoad(P, Q=0, V_nominal=None, linearized=False, direct_current=False, scale=None)` (`load`) | `q = conj(S / dp)` with `S = P + jQ` absorbed (positive = consumption), or MBL's linearised forms | `DC.Loads.Conductor`, `AC.OnePhase.Loads.Inductive`, `Resistive` |
+| `ImpedanceTransformer(n, impedance)` (`impedance_transformer`) | two edges `[primary -> 0, secondary -> 0]`: `dp1 = Z q1 + n dp2`, `q2 = -n q1` | `AC.OnePhase.Conversion.ACACTransformer` |
+| `PowerConverter(voltage_ratio, efficiency)` (`power_converter`) | two edges `[ac -> 0, dc 1 -> dc 2]`: `dp_dc = k \|dp_ac\|`, power balance with loss `(1 - eta)` of the feeding side, unity power factor | `AC.OnePhase.Conversion.ACDCConverter` |
+
+`ImpedanceTransformer` and `PowerConverter` work in phasor layers only; a converter's DC side is
+a node of the same phasor layer whose imaginary part comes out zero. A `ConstantPowerLoad`
+given `V_nominal` returns MBL's homotopy start form below `1e-3 V_nominal`, so a solve may start
+from zero potentials; without it the load is singular at zero voltage and the solve needs a
+nonzero start (`phi0`). A `PowerConverter`'s power row has no slope at zero potentials: start
+it from a flat guess, every node at the source voltage. Its `scale` names a driver that
+multiplies the power per edge (a load profile).
+
+**Phasor scaling.** MBL's phasors are root-mean-square, so a load's or converter's power is
+`S = dp conj(q)` and a converter's `voltage_ratio` is the DC voltage over the AC RMS voltage.
+`Impedance` and `ImpedanceTransformer` are linear and hold for any scaling; in a layer of
+peak-amplitude phasors (the circuit devices' convention above), `P`, `Q` of a
+`ConstantPowerLoad` stand for twice the absorbed power. A 120 V feeder (taken as RMS) with a
+0.1 ohm, 0.5 ohm-reactance line and a 1 kW, 300 var load:
+
+```python
+import math
+
+import torch
+
+from noodl.apps.electrical import ConstantPowerLoad, Impedance, PrescribedVoltage
+from noodl.layers.potential import PotentialFlowLayer
+from noodl.topology import Network
+
+f64 = torch.float64
+net = Network(dtype=f64)
+for node in ("source", "load", "0"):
+    net.add_node(node)
+net.add_edge("source", "0", kind="voltage_source")
+net.add_edge("source", "load", kind="impedance")
+net.add_edge("load", "0", kind="load")
+laws = [PrescribedVoltage(torch.tensor(120.0, dtype=f64)),
+        Impedance(torch.tensor(0.1, dtype=f64),
+                  L=torch.tensor(0.5 / (2 * math.pi * 60.0), dtype=f64)),
+        ConstantPowerLoad(torch.tensor(1000.0, dtype=f64), torch.tensor(300.0, dtype=f64),
+                          V_nominal=torch.tensor(120.0, dtype=f64))]
+feeder = PotentialFlowLayer(net, "electrical", laws, boundary=["0"], phasor=True)
+phi, q = feeder.solve(torch.zeros(1, dtype=torch.complex128),
+                      {"electrical.frequency": torch.tensor(60.0, dtype=f64)},
+                      differentiable=False)
+v = phi[net.nodes.index("load")]
+S = v * q[2].conj()
+print(f"|V| = {float(v.abs()):.4f} V, arg V = {math.degrees(float(v.angle())):+.4f} deg")
+print(f"absorbed: P = {float(S.real):.6f} W, Q = {float(S.imag):.6f} var")
+```
+
+```text
+|V| = 117.8116 V, arg V = -1.9052 deg
+absorbed: P = 1000.000000 W, Q = 300.000000 var
+```
+
+Two options of the circuit laws serve the same models: `Resistance(..., scale=key)` multiplies
+`R` by a per-edge driver (MSL `Basic.VariableResistor`), and
+`JunctionDiode(..., temperature=key, N, TNOM, XTI, EG)` makes the diode current depend on the
+junction temperature read from a driver (MSL `Semiconductors.Diode` with
+`useTemperatureDependency = true`: `Vt = k T / e`, saturation current scaled by
+`(T/TNOM)^(XTI/N) exp((T/TNOM - 1) EG / (N Vt))`).
+
 ## Time integration and breakpoints
 
 `transient(..., integration="trapezoidal")` (the default) uses the trapezoidal rule, second
