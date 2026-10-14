@@ -264,14 +264,17 @@ a node of the same phasor layer whose imaginary part comes out zero. A `Constant
 given `V_nominal` returns MBL's homotopy start form below `1e-3 V_nominal`, so a solve may start
 from zero potentials; without it the load is singular at zero voltage and the solve needs a
 nonzero start (`phi0`). A `PowerConverter`'s power row has no slope at zero potentials: start
-it from a flat guess, every node at the source voltage. Its `scale` names a driver that
-multiplies the power per edge (a load profile).
+it from a flat guess, every node at the source voltage. A `ConstantPowerLoad`'s `scale` names
+a driver that multiplies the power per edge (a load profile).
 
-**Phasor scaling.** MBL's phasors are root-mean-square, so a load's or converter's power is
-`S = dp conj(q)` and a converter's `voltage_ratio` is the DC voltage over the AC RMS voltage.
-`Impedance` and `ImpedanceTransformer` are linear and hold for any scaling; in a layer of
-peak-amplitude phasors (the circuit devices' convention above), `P`, `Q` of a
-`ConstantPowerLoad` stand for twice the absorbed power. A 120 V feeder (taken as RMS) with a
+**Phasor scaling.** The power laws (`ConstantPowerLoad`, `PowerConverter`) define complex
+power as `S = dp conj(q)`, so they assume root-mean-square phasors, as MBL's are; a
+converter's `voltage_ratio` is the DC voltage over the AC RMS voltage, and `PowerConverter` is
+valid only with RMS phasors. In a circuit with a power law, give source amplitudes as RMS
+values (a `Sine` source's phasor is otherwise its peak, as above). `Impedance` and
+`ImpedanceTransformer` are linear and hold for either scaling. At zero frequency an
+`Impedance`'s inductance is a short and a finite capacitance is refused (an open circuit). A
+120 V (RMS) feeder with a
 0.1 ohm, 0.5 ohm-reactance line and a 1 kW, 300 var load:
 
 ```python

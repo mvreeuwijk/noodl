@@ -85,8 +85,9 @@ class PowerConverter(ImplicitLaw):
     `Im S_ac = 0` (unity power factor), with the loss
     `P_loss = (1 - eta) splice(P_dc, Re S_ac, Re q_dc, 0.1)`: a fraction of the power of
     whichever side feeds the converter. `k` (`voltage_ratio`) is the DC voltage over the AC
-    root-mean-square voltage and the power balance takes root-mean-square phasors (MBL's,
-    `S = V conj(I)`); `eta` (`efficiency`) is between 0 and 1. Phasor layers only. MBL
+    root-mean-square voltage; `eta` (`efficiency`) is between 0 and 1. Valid only with
+    root-mean-square phasors (MBL's, `S = V conj(I)`): give source amplitudes as RMS values.
+    Phasor layers only. MBL
     `AC.OnePhase.Conversion.ACDCConverter` (`conversionFactor`, `eta`, `ground_DC = true`).
     """
 

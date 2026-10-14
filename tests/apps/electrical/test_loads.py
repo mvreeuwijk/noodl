@@ -54,6 +54,23 @@ def test_impedances_at_60_hz_match_mbl_test_impedance():
     torch.testing.assert_close(q[1:], expect, rtol=1e-13, atol=1e-12)
 
 
+def test_impedance_at_zero_frequency_is_its_resistance():
+    # C = inf (no capacitance) must not give 0 * inf at omega = 0; the inductance is a short.
+    edges = [("s", "0", "voltage_source"), ("s", "0", "impedance")]
+    _, q, _ = _solve(edges, [PrescribedVoltage(12.0), Impedance(4.0, L=0.1)], phasor=True,
+                     f=0.0)
+    assert torch.isfinite(torch.view_as_real(q)).all()
+    torch.testing.assert_close(q[1:], torch.tensor([3.0 + 0j], dtype=C128), rtol=0,
+                               atol=1e-12)
+
+
+def test_capacitance_at_zero_frequency_is_refused():
+    edges = [("s", "0", "voltage_source"), ("s", "0", "impedance")]
+    with pytest.raises(ValueError, match="impedance kind 'impedance': a capacitance at zero "
+                                         "frequency"):
+        _solve(edges, [PrescribedVoltage(12.0), Impedance(4.0, C=1e-3)], phasor=True, f=0.0)
+
+
 def test_zero_resistance_is_a_short_in_a_real_layer():
     edges = [("s", "0", "voltage_source"), ("s", "a", "impedance"), ("a", "0", "impedance")]
     _, q, _ = _solve(edges, [PrescribedVoltage(12.0), Impedance(torch.tensor([2.0, 0.0]))])
@@ -146,6 +163,11 @@ def test_reactive_power_on_a_real_layer_is_refused():
     law = ConstantPowerLoad(1000.0, 750.0, V_nominal=120.0, kind="motor")
     with pytest.raises(ValueError, match="'motor'.*reactive power"):
         law(torch.tensor([120.0]), {})
+
+
+def test_reactive_power_on_a_direct_current_load_is_refused_at_construction():
+    with pytest.raises(ValueError, match="'battery'.*direct-current load"):
+        ConstantPowerLoad(50.0, 10.0, direct_current=True, kind="battery")
 
 
 def test_linearised_load_needs_a_nominal_voltage():

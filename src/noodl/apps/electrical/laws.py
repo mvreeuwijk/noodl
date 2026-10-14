@@ -287,15 +287,16 @@ class JunctionDiode(Element):
     """A junction diode with a parallel leak: `q = Ids (exlin(dp / Vt) - 1) + dp / R`, where
     `exlin(x) = exp(x)` up to `Maxexp` and continues linearly above it,
     `exp(Maxexp) (1 + x - Maxexp)` (`Ids` saturation current in A, `Vt` voltage equivalent of
-    temperature in V, `R` parallel resistance in ohm). MSL `Semiconductors.Diode`.
+    temperature in V, `R` parallel resistance in ohm). With `temperature` naming a driver the
+    current follows the junction temperature (below). MSL `Semiconductors.Diode`. Nonlinear,
+    so not usable in a phasor layer.
 
     With `temperature` naming a driver (per edge, K) the current depends on the junction
     temperature `T` as MSL's `useTemperatureDependency = true`: `vt = k T / e` (Boltzmann
     constant `k`, elementary charge `e`) replaces `Vt`, and
     `q = Ids (exlin(dp / (N vt)) - 1) (T / TNOM)^(XTI / N) exp((T / TNOM - 1) EG / (N vt))
     + dp / R` (emission coefficient `N`, parameter measurement temperature `TNOM` in K,
-    saturation-current temperature exponent `XTI`, activation energy `EG`). Nonlinear, so not
-    usable in a phasor layer.
+    saturation-current temperature exponent `XTI`, activation energy `EG`).
     """
 
     def __init__(self, Ids=1e-6, Vt=0.04, Maxexp=15.0, R=1e8, *,

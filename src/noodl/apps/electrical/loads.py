@@ -4,9 +4,9 @@ a constant-power load (nonlinear or linearised, direct or alternating current).
 Sign convention as for every electrical law: a load on the edge `p -> n` sees `dp = v_p - v_n`
 and carries the current `q` entering pin `p`. Every parameter is per edge (a scalar
 broadcasts). Phasor conventions: `Impedance` is linear, so it holds for any phasor scaling;
-`ConstantPowerLoad` relates power to `dp conj(q)`, the complex power of root-mean-square
-phasors (the Modelica Buildings Library's phasors, `S = V conj(I)`); on a layer carrying
-peak-amplitude phasors (`S = (1/2) V conj(I)`) its `P`, `Q` stand for twice the power.
+`ConstantPowerLoad` defines complex power as `dp conj(q)`, so it assumes root-mean-square
+phasors (the Modelica Buildings Library's, `S = V conj(I)`): in a circuit with a power law,
+give source amplitudes as RMS values (a `Sine` source's phasor is otherwise its peak).
 
 Transcribed from MBL `Electrical/Interfaces/Impedance.mo` and
 `Electrical/AC/OnePhase/Loads/Impedance.mo` (series `R` with `X = omega L` inductive or
@@ -37,7 +37,8 @@ class Impedance(ImplicitLaw):
     (`R` in ohm, `L` in H, `C` in F; `C = inf`, the default, is no capacitance) at the phasor
     layer's angular frequency `omega`. On a real layer (modes dc, initial, transient) it is
     the resistance `dp = R q`, and an edge with a reactance (`L != 0` or a finite `C`) is
-    refused. `R = 0` is a short. Implicit (the flow is an unknown), so a zero resistance
+    refused; at zero frequency an inductance is a short and a finite capacitance (an open
+    circuit) is refused. `R = 0` is a short. Implicit (the flow is an unknown), so a zero resistance
     needs no special case. MBL `AC.OnePhase.Loads.Impedance`, `DC.Loads.Resistor` and the
     MBL short-circuit loads. `learnable` applies to `R`. Linear: valid for any phasor
     scaling.
@@ -54,7 +55,18 @@ class Impedance(ImplicitLaw):
 
     def residual(self, dp, q, drivers, ctx):
         if ctx is not None and ctx.mode == "phasor":
-            x = ctx.omega * self.L - 1.0 / (ctx.omega * self.C)
+            capacitive = torch.isfinite(self.C)
+            at_rest = ctx.omega == 0
+            if bool((capacitive & at_rest).any()):
+                raise ValueError(
+                    f"impedance kind {self.kind!r}: a capacitance at zero frequency is an "
+                    f"open circuit, which a series impedance cannot carry; give a nonzero "
+                    f"frequency or C = inf")
+            # 1/(omega C) only where C is finite and omega nonzero, from a safe denominator
+            # so neither branch (nor its derivative) holds an inf or a NaN
+            live = capacitive & ~at_rest
+            wC = torch.where(live, ctx.omega * self.C, torch.ones_like(self.C))
+            x = ctx.omega * self.L - torch.where(live, 1.0 / wC, torch.zeros_like(wC))
             return dp - (self.R + 1j * x) * q
         reactive = (self.L != 0) | torch.isfinite(self.C)
         if bool(reactive.any()):
@@ -79,9 +91,10 @@ class ConstantPowerLoad(Element):
     above that voltage the actual law holds. Without `V_nominal` the load is singular at
     `dp = 0`: start the solve from a nonzero guess (`phi0`).
 
-    Phasors: `S = dp conj(q)`, the root-mean-square phasor power (MBL's phasors); on a
-    layer of peak-amplitude phasors `S` is twice the absorbed power. A nonzero `Q` on a real
-    layer, or on a direct-current load, is refused. MBL `DC.Loads.Conductor`,
+    Phasors: power is `S = dp conj(q)`, so the law assumes root-mean-square phasors (MBL's);
+    in a circuit with a power law give source amplitudes as RMS values. A nonzero `Q` on a
+    direct-current load is refused at construction, on a real layer when evaluated. MBL
+    `DC.Loads.Conductor`,
     `AC.OnePhase.Loads.Inductive`, `Capacitive`, `Resistive` with `P_mbl = -P`,
     `Q_mbl = -Q` (MBL counts consumption negative). `learnable` applies to `P` and `Q`.
     """
@@ -92,6 +105,9 @@ class ConstantPowerLoad(Element):
                  direct_current: bool = False, scale: str | None = None,
                  kind: str = "load", learnable: bool = False) -> None:
         super().__init__(kind)
+        if direct_current and bool((torch.as_tensor(Q) != 0).any()):
+            raise ValueError(f"constant-power load kind {kind!r}: reactive power Q on a "
+                             f"direct-current load; give Q = 0")
         if linearized and V_nominal is None:
             raise ValueError(f"constant-power load kind {kind!r}: linearized=True needs "
                              f"V_nominal (the nominal voltage, V)")
@@ -104,10 +120,9 @@ class ConstantPowerLoad(Element):
 
     def power(self, dp: Tensor, drivers: Mapping[str, Tensor] | None = None) -> Tensor:
         """`S` per edge (complex for a complex `dp`, else the real `P`), times the scale."""
-        if (not dp.is_complex() or self.direct_current) and bool((self.Q != 0).any()):
-            where = "a direct-current load" if self.direct_current else "a real layer"
+        if not dp.is_complex() and bool((self.Q != 0).any()):
             raise ValueError(f"constant-power load kind {self.kind!r}: reactive power Q on "
-                             f"{where}; give Q = 0")
+                             f"a real layer; give Q = 0")
         S = self.P + 1j * self.Q if dp.is_complex() else self.P
         if self.scale is not None:
             S = S * _driver(drivers, self.scale, self.kind)
