@@ -2,11 +2,11 @@
 
 ``tests/golden/worked_examples.json`` holds numeric results for three worked examples -- a
 quadratic-drag loop, a spring-mass-damper stepped implicitly, and a three-zone contaminant
-exchange -- computed independently of this codebase. Each test here reproduces one of the
-examples with today's public layer API and checks the result against the captured reference,
-not against a value re-derived from today's code -- that is what makes this a PARITY test
-rather than an ordinary regression test. The spring-mass-damper example, a dynamic law
-stepped implicitly, is reproduced in ``tests/layers/test_mna_dynamic.py``.
+exchange -- computed independently of this codebase. This module reproduces two of them (the
+loop and the exchange) with today's public layer API; the spring-mass-damper, a dynamic law,
+lives in ``tests/layers/test_mna_dynamic.py`` beside the loop's Jacobians. Each test checks the
+result against the captured reference, not against a value re-derived from today's code --
+that is what makes this a PARITY test rather than an ordinary regression test.
 """
 
 import json

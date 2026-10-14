@@ -399,3 +399,25 @@ def test_spring_mass_damper_matches_the_worked_example_displacement_series():
     assert len(displacement) == len(want) == 51
     torch.testing.assert_close(torch.tensor(displacement, dtype=F64),
                                torch.tensor(want, dtype=F64), rtol=1e-8, atol=0.0)
+
+
+class _WrongWidth(ImplicitLaw):
+    def residual(self, dp, q, drivers, ctx):
+        return dp[..., :1] - 1.0     # one value for a kind of two edges
+
+
+class _WrongWidthFlow(Element):
+    def flow(self, dp, drivers=None):
+        return dp[..., :1]           # one value for a kind of two edges
+
+
+@pytest.mark.parametrize("law, what", [(_WrongWidth("w"), "residual"),
+                                        (_WrongWidthFlow("w"), "flow")])
+def test_law_of_the_wrong_width_is_refused_by_layer_and_kind(law, what):
+    # the source edge makes the layer an MNA layer even when the bad law is a potential law
+    net = _net(["gnd", "a", "b"], [("a", "gnd", "source"), ("a", "b", "w"), ("b", "gnd", "w")])
+    layer = PotentialFlowLayer(net, "bad", [Source(torch.tensor([1.0])), law],
+                               boundary=["gnd"])
+    with pytest.raises(ValueError, match=rf"'bad'.*{what}.*'w'.*width 1.*2 edges"):
+        layer.solve(GROUND, differentiable=False, phi0=torch.zeros(2, dtype=F64),
+                    q0=torch.zeros(1, dtype=F64))

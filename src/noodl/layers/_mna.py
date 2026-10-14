@@ -363,6 +363,13 @@ class MnaSystem:
 
         return call
 
+    def _check_width(self, el, out, n_edges: int, what: str) -> None:
+        """A law returns one value per edge of its kind: refuse any other trailing width."""
+        if out.shape[-1] != n_edges:
+            raise ValueError(
+                f"layer {self.layer.name!r}: the {what} of the {el.kind!r} law has width "
+                f"{out.shape[-1]} but the kind has {n_edges} edges")
+
     def _flows_and_residuals(self, phi, q_F, drivers, ctx, call) -> tuple[Tensor, Tensor]:
         """`(q, r_F)`: every edge's flow (the law flow on potential-controlled edges, the
         unknown on implicit ones) and the implicit laws' residuals, in layer edge order."""
@@ -376,9 +383,12 @@ class MnaSystem:
             if el.law_form == "implicit":
                 f0 = int(self._f_index[s])
                 q_s = q_F[..., f0:f0 + e - s]
-                r_parts.append(call(i, (dp_s, q_s, drivers, lctx)))
+                r_s = call(i, (dp_s, q_s, drivers, lctx))
+                self._check_width(el, r_s, e - s, "residual")
+                r_parts.append(r_s)
             else:
                 q_s = call(i, (dp_s, drivers, lctx))
+                self._check_width(el, q_s, e - s, "flow")
             q_parts.append(q_s)
         return _cat(q_parts, dp), _cat(r_parts, dp)
 
