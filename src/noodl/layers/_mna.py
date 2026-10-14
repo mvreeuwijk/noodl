@@ -365,10 +365,11 @@ class MnaSystem:
 
     def _check_width(self, el, out, n_edges: int, what: str) -> None:
         """A law returns one value per edge of its kind: refuse any other trailing width."""
-        if out.shape[-1] != n_edges:
+        if out.dim() == 0 or out.shape[-1] != n_edges:
+            width = "a scalar" if out.dim() == 0 else f"width {out.shape[-1]}"
             raise ValueError(
-                f"layer {self.layer.name!r}: the {what} of the {el.kind!r} law has width "
-                f"{out.shape[-1]} but the kind has {n_edges} edges")
+                f"layer {self.layer.name!r}: the {what} of the {el.kind!r} law is {width} "
+                f"but the kind has {n_edges} edges")
 
     def _flows_and_residuals(self, phi, q_F, drivers, ctx, call) -> tuple[Tensor, Tensor]:
         """`(q, r_F)`: every edge's flow (the law flow on potential-controlled edges, the

@@ -406,18 +406,35 @@ class _WrongWidth(ImplicitLaw):
         return dp[..., :1] - 1.0     # one value for a kind of two edges
 
 
+class _ScalarResidual(ImplicitLaw):
+    def residual(self, dp, q, drivers, ctx):
+        return dp.sum() - 1.0        # 0-dim
+
+
 class _WrongWidthFlow(Element):
     def flow(self, dp, drivers=None):
         return dp[..., :1]           # one value for a kind of two edges
 
 
 @pytest.mark.parametrize("law, what", [(_WrongWidth("w"), "residual"),
-                                        (_WrongWidthFlow("w"), "flow")])
+                                        (_WrongWidthFlow("w"), "flow"),
+                                        (_ScalarResidual("w"), "residual")])
 def test_law_of_the_wrong_width_is_refused_by_layer_and_kind(law, what):
     # the source edge makes the layer an MNA layer even when the bad law is a potential law
     net = _net(["gnd", "a", "b"], [("a", "gnd", "source"), ("a", "b", "w"), ("b", "gnd", "w")])
     layer = PotentialFlowLayer(net, "bad", [Source(torch.tensor([1.0])), law],
                                boundary=["gnd"])
-    with pytest.raises(ValueError, match=rf"'bad'.*{what}.*'w'.*width 1.*2 edges"):
+    with pytest.raises(ValueError, match=rf"'bad'.*{what}.*'w'.*(width 1|a scalar).*2 edges"):
         layer.solve(GROUND, differentiable=False, phi0=torch.zeros(2, dtype=F64),
                     q0=torch.zeros(1, dtype=F64))
+
+
+def test_batch_leading_law_output_passes_the_width_check():
+    net = _net(["gnd", "a"], [("a", "gnd", "source"), ("a", "gnd", "r")])
+    layer = PotentialFlowLayer(net, "ok", [DrivenSource(), Conductance(torch.tensor([1.0]),
+                                                                     kind="r")],
+                               boundary=["gnd"])
+    phi, q = layer.solve(GROUND, {"V": torch.tensor([[1.0], [2.0], [3.0]])},
+                         differentiable=False)
+    assert q.shape == (3, 2)
+    torch.testing.assert_close(q[:, 1], torch.tensor([1.0, 2.0, 3.0]), rtol=0, atol=1e-13)
