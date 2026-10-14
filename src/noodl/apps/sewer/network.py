@@ -32,7 +32,7 @@ from noodl.apps.sewer.hydraulics import GEOMETRY_ALIASES, SewerHydraulics
 from noodl.apps.sewer.inflows import InflowSchedule
 from noodl.apps.sewer.pumps import PUMP_KINDS
 from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
-from noodl.apps.sewer.runoff import Hydrology, RunoffInflows
+from noodl.apps.sewer.runoff import Hydrology, RunoffInflows, evaporation_can_be_positive
 from noodl.apps.sewer.storage import validate_storage_curve
 from noodl.apps.sewer.xsect_spec import UNMODELLED_KINDS, Xsect
 from noodl.layers.transport import TransportLayer, active_interior
@@ -53,6 +53,23 @@ Drivers = dict[str, Tensor]
 
 
 @dataclass(frozen=True)
+class Exfiltration:
+    """The seepage of a storage unit into the soil below it (SWMM's ``[STORAGE]`` exfiltration
+    fields, `exfil.c`): the saturated hydraulic `conductivity` Ksat (m/s) and, for SWMM's
+    modified Green-Ampt model, the capillary `suction` head (m) and the maximum initial
+    moisture deficit `initial_deficit` (-, IMDmax). With ``initial_deficit == 0`` (the single
+    Ksat form always) the rate is Ksat times the monthly conductivity adjustment, whatever the
+    depth; with a positive one it follows the Green-Ampt model at the storage depth.
+    `us_units` says whether the file was in US units, which decides the one place SWMM
+    reads an area in the wrong unit (`losses.StorageLosses`)."""
+
+    conductivity: float
+    suction: float = 0.0
+    initial_deficit: float = 0.0
+    us_units: bool = True
+
+
+@dataclass(frozen=True)
 class Manhole:
     """A manhole: `invert` and `ground` elevations (m), a constant lateral `inflow`
     (m3/s), for storage its `surface_area` (m2), and SWMM's `surcharge_depth` (SurDepth,
@@ -63,7 +80,11 @@ class Manhole:
     `storage` curve makes it a SWMM storage unit (dynamic wave only). `ponded_area` is
     SWMM's Aponded (m2 >= 0): with `DynamicWaveOptions.allow_ponding` a flooded junction
     with a positive one stores the water above its full depth over that area instead of
-    losing it (dynamic wave only; not for a storage unit).
+    losing it (dynamic wave only; not for a storage unit). A storage unit also has SWMM's
+    `evaporation_factor` Fevap (-, >= 0: the fraction of the potential evaporation rate it
+    loses over its surface area) and an `exfiltration` (`Exfiltration`) into the soil
+    (dynamic wave only; both need `SewerNetwork.climate` or subcatchment hydrology for the
+    evaporation rate and the conductivity adjustment).
 
     The `storage` curve (`storage_unit` builds such a manhole) is its surface area,
     ``("functional", a, b, c)`` for ``A = a y^b + c``
@@ -84,16 +105,20 @@ class Manhole:
     initial_depth: float = 0.0
     storage: tuple | None = None
     ponded_area: float = 0.0
+    evaporation_factor: float = 0.0
+    exfiltration: Exfiltration | None = None
 
 
 def storage_unit(name: str, invert: float, max_depth: float, curve: tuple, *,
                  surcharge_depth: float = 0.0, initial_depth: float = 0.0,
-                 inflow: float = 0.0) -> Manhole:
+                 inflow: float = 0.0, evaporation_factor: float = 0.0,
+                 exfiltration: Exfiltration | None = None) -> Manhole:
     """A SWMM storage unit (`[STORAGE]`) as a `Manhole` with a `storage` curve: `invert`
     (m), `max_depth` (SWMM's MaxDepth, m >= 0: the manhole's ground is ``invert +
     max_depth``), the surface-area `curve` (`Manhole.storage`), SWMM's SurDepth
     `surcharge_depth` (m) and InitDepth `initial_depth` (m), and a constant lateral `inflow`
-    (m3/s). Tabular depths and areas are stored as tuples (the manhole is hashable)."""
+    (m3/s), SWMM's Fevap `evaporation_factor` and `exfiltration` (`Manhole`). Tabular depths
+    and areas are stored as tuples (the manhole is hashable)."""
     if curve and curve[0] == "tabular" and len(curve) == 3:
         curve = ("tabular", tuple(float(v) for v in curve[1]),
                  tuple(float(v) for v in curve[2]))
@@ -101,7 +126,8 @@ def storage_unit(name: str, invert: float, max_depth: float, curve: tuple, *,
     if not max_depth >= 0.0:
         raise ValueError(f"storage unit {name!r}: max_depth must be >= 0 m, got {max_depth!r}")
     return Manhole(name, invert, ground=invert + max_depth, inflow=inflow,
-                   surcharge_depth=surcharge_depth, initial_depth=initial_depth, storage=curve)
+                   surcharge_depth=surcharge_depth, initial_depth=initial_depth, storage=curve,
+                   evaporation_factor=evaporation_factor, exfiltration=exfiltration)
 
 
 @dataclass(frozen=True)
@@ -181,6 +207,7 @@ class Pipe:
     loss_average: float = 0.0
     transect_length_factor: float = 1.0
     culvert: int = 0
+    seepage: float = 0.0
 
 
 #: Orifice orientations (SWMM's SIDE, BOTTOM) and opening shapes (CIRCULAR, RECT_CLOSED).
@@ -351,6 +378,12 @@ class SewerNetwork:
     `simulate_dynamic_wave` uses it when it is given no ``inflow``. For a file with
     `[SUBCATCHMENTS]` it is a `runoff.RunoffInflows`: the same schedule plus the runoff of the
     subcatchments (`hydrology` is its `runoff.Hydrology`).
+
+    The evaporation and seepage losses of the conduits and storage units (dynamic wave only;
+    `losses.py`) read the evaporation rate and conductivity adjustment of the file's
+    `[EVAPORATION]` and `[ADJUSTMENTS]`: those of `hydrology` when there are subcatchments,
+    else `climate`, a `runoff.Hydrology` with no gages or subcatchments that holds just them
+    (``None``: no losses that need a climate).
     """
 
     manholes: tuple[Manhole, ...]
@@ -366,6 +399,29 @@ class SewerNetwork:
     inflows: InflowSchedule | RunoffInflows | None = None
     pumps: tuple[Pump, ...] = ()
     controls: ControlSet | None = None
+    climate: Hydrology | None = None
+
+    @property
+    def climate_source(self) -> Hydrology | None:
+        """The `runoff.Hydrology` whose evaporation and adjustments drive the conduit and
+        storage losses: the subcatchment `hydrology`, else `climate`, else ``None``."""
+        return self.hydrology if self.hydrology is not None else self.climate
+
+    @property
+    def has_wet_losses(self) -> bool:
+        """Whether any conduit seeps or any storage unit evaporates or exfiltrates
+        (`Pipe.seepage`, `Manhole.evaporation_factor`, `Manhole.exfiltration`), or any open
+        conduit can evaporate under the evaporation of `climate_source`: the network then
+        needs the climate drivers of `losses.py`."""
+        if any(p.seepage > 0.0 for p in self.pipes):
+            return True
+        if any(m.exfiltration is not None for m in self.manholes):
+            return True
+        source = self.climate_source
+        if source is None or not evaporation_can_be_positive(source):
+            return False
+        return (any(m.evaporation_factor != 0.0 for m in self.manholes)
+                or any(p.xsect is not None and p.xsect.open for p in self.pipes))
 
     @property
     def hydrology(self) -> Hydrology | None:
@@ -639,9 +695,17 @@ class SewerNetwork:
                 raise ValueError(
                     f"SewerNetwork: outfall {outfall.name!r} has a flap gate; only "
                     f"dynamic-wave routing models it (routing is {self.routing!r})")
+        for manhole in self.manholes:
+            for what, value, default in (("evaporation_factor", manhole.evaporation_factor, 0.0),
+                                         ("exfiltration", manhole.exfiltration, None)):
+                if value != default:
+                    raise ValueError(
+                        f"SewerNetwork: manhole {manhole.name!r} has {what} {value!r}; only "
+                        f"dynamic-wave routing models it (routing is {self.routing!r})")
         for pipe in self.pipes:
             for what, value, default in (
-                ("barrels", pipe.barrels, 1), ("max_flow", pipe.max_flow, None),
+                ("seepage", pipe.seepage, 0.0), ("barrels", pipe.barrels, 1),
+                ("max_flow", pipe.max_flow, None),
                 ("initial_flow", pipe.initial_flow, 0.0), ("flap_gate", pipe.flap_gate, False),
                 ("xsect", pipe.xsect, None), ("culvert", pipe.culvert, 0),
                 ("loss_inlet", pipe.loss_inlet, 0.0),
@@ -695,6 +759,29 @@ class SewerNetwork:
                 f"SewerNetwork: pipe {pipe.name!r} diameter {pipe.diameter!r} m is not its "
                 f"{x.kind} cross section's full height {height!r} m")
 
+    @staticmethod
+    def _validate_storage_losses(manhole: Manhole) -> None:
+        """Refuse a malformed `evaporation_factor` or `exfiltration` of a storage unit."""
+        if not math.isfinite(manhole.evaporation_factor):
+            raise ValueError(f"SewerNetwork: storage unit {manhole.name!r} evaporation_factor "
+                             f"must be finite, got {manhole.evaporation_factor!r}")
+        x = manhole.exfiltration
+        if x is None:
+            return
+        if not (math.isfinite(x.conductivity) and x.conductivity > 0.0
+                and math.isfinite(x.suction) and x.suction >= 0.0
+                and 0.0 <= x.initial_deficit <= 1.0):
+            raise ValueError(
+                f"SewerNetwork: storage unit {manhole.name!r} exfiltration needs a conductivity "
+                f"> 0, a suction head >= 0 and an initial deficit from 0 to 1 (SWMM's "
+                f"grnampt_setParams), got {x!r}")
+        if manhole.storage[0] == "paraboloid":
+            raise ValueError(
+                f"SewerNetwork: storage unit {manhole.name!r} is a PARABOLOID with an "
+                f"exfiltration; SWMM 5.2.4's exfil_initState has no case for that shape and "
+                f"leaves its bottom and bank areas unset (exfil.c:92-137), so there is nothing "
+                f"to reproduce")
+
     def _validate_dynamic(self, outfall_names: set[str]) -> None:
         """Dynamic-wave topology: loops and any flow direction are allowed, but every
         connected component needs an outfall and each outfall ends exactly one conduit."""
@@ -713,13 +800,23 @@ class SewerNetwork:
                     f"SewerNetwork: storage unit {manhole.name!r} has a ponded_area; SWMM "
                     f"deprecates the ponded area of a storage unit (node.c:14) and it is "
                     f"not modelled")
+            if manhole.storage is None and (manhole.evaporation_factor != 0.0
+                                            or manhole.exfiltration is not None):
+                raise ValueError(
+                    f"SewerNetwork: manhole {manhole.name!r} is not a storage unit but has an "
+                    f"evaporation_factor or an exfiltration")
             if manhole.storage is not None:
                 validate_storage_curve(manhole.name, manhole.storage)
                 if manhole.surface_area is not None:
                     raise ValueError(
                         f"SewerNetwork: storage unit {manhole.name!r} sets surface_area; its "
                         f"area is its storage curve")
+            self._validate_storage_losses(manhole)
         for pipe in self.pipes:
+            if not (math.isfinite(pipe.seepage) and pipe.seepage >= 0.0):
+                raise ValueError(
+                    f"SewerNetwork: pipe {pipe.name!r} seepage must be a finite rate >= 0 m/s, "
+                    f"got {pipe.seepage!r}")
             if (not isinstance(pipe.barrels, int) or isinstance(pipe.barrels, bool)
                     or not 1 <= pipe.barrels <= 127):
                 raise ValueError(

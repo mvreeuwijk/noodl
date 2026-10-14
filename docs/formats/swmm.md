@@ -43,14 +43,14 @@ so are the options and fields listed below. Two are ignored only when nothing us
 
 - `[RAINGAGES]`, when the file has no `[SUBCATCHMENTS]` (a gage feeds subcatchments, and RDII,
   whose sections are refused on their own), and any gage no subcatchment names;
-- `[EVAPORATION]` for conduits, unless it can be positive while a conduit is open (the
-  subcatchments read it, below). SWMM takes
-  `topWidth * length * rate` from an open conduit (`link.c:1359-1362`, from the climate state of
-  every routing step, `swmm5.c:556`) and dynamic-wave routing subtracts it from the end nodes
-  (`dynwave.c:560-572`) from every trial's mean depth; that is not modelled, so a `TIMESERIES`,
-  `TEMPERATURE` or `FILE` source, or a non-zero `CONSTANT` or `MONTHLY` value, is refused naming
-  the first open conduit. With only closed conduits, or a zero rate, nothing is lost and the
-  section changes nothing for them.
+- `[EVAPORATION]` and `[ADJUSTMENTS]`, when the file has no `[SUBCATCHMENTS]` (which read them,
+  below) and nothing uses them: no open conduit, no conduit with a seepage rate, no storage unit
+  with an evaporation factor or an exfiltration. Under dynamic-wave routing those losses read them
+  (`CONSTANT`, `MONTHLY`, `TIMESERIES` with `RECOVERY`, and the `EVAPORATION` and `CONDUCTIVITY`
+  adjustments; a `TEMPERATURE` or `FILE` source is refused naming its line; see
+  [Evaporation and seepage losses](../applications/sewer.md#evaporation-and-seepage-losses));
+  under `STEADY` or `KINWAVE` a rate that can be positive over an open conduit is refused naming
+  the first open conduit.
 
 **Options that change what is routed.** `IGNORE_ROUTING YES` and `FLOW_ROUTING NONE` (SWMM does
 not route at all) and `SKIP_STEADY_STATE YES` (a step whose flows are within `SYS_FLOW_TOL` and
@@ -94,9 +94,11 @@ eighth and ninth `[CONDUITS]` fields) are `Pipe.initial_flow` (a total over the 
 reverses (adverse, as SWMM does) has its `InitFlow` negated and its gate recorded as
 reversed. The entry, exit and average loss coefficients of `[LOSSES]` are
 `Pipe.loss_inlet`, `loss_outlet` and `loss_average` (swapped, as SWMM does, for a conduit the
-reader reverses); the seepage rate must be 0 (refused with the line number otherwise: seepage
-takes volume from the nodes at a rate set by the conduit's wetted width and volume, which is
-not modelled). Under `STEADY` or `KINWAVE` a non-zero `InitDepth`, `InitFlow` or
+reader reverses); the seepage rate (the sixth field, in/hr or mm/hr, read as
+`Pipe.seepage` in m/s) is a loss of water under dynamic-wave routing (see
+[Evaporation and seepage losses](../applications/sewer.md#evaporation-and-seepage-losses)) and
+refused with the line number under `STEADY` or `KINWAVE` when positive (a negative one does
+nothing in SWMM). Under `STEADY` or `KINWAVE` a non-zero `InitDepth`, `InitFlow` or
 `MaxFlow`, a flap gate, a gated outfall and a loss coefficient are refused by name.
 
 **Cross sections (dynamic wave).** `[XSECTIONS] Link Shape Geom1 Geom2 Geom3 Geom4 [Barrels
@@ -149,10 +151,13 @@ a0)`; `a0 >= 0` and `a2 >= 0`), `TABULAR Curve` (a `[CURVES]` curve of type `STO
 m against area in m², its points over any number of lines, depths strictly increasing) and the
 closed shapes `CYLINDRICAL L W -`, `CONICAL L W Z`, `PARABOLIC L W H` (SWMM 5.2.4's keyword; `PARABOLOID` is accepted too) and
 `PYRAMIDAL L W Z`
-(m; `Z` a side slope, run over rise). A non-zero evaporation factor `Fevap` and a non-zero
-exfiltration `Ksat` (the value after `Fevap`, or the second of suction head, `Ksat`,
-`IMDmax`; a `Ksat` of 0 is no exfiltration, as in SWMM) are refused with the line number, as
-are a `[CURVES]` curve of any other type and a curve name that is not in `[CURVES]`. A
+(m; `Z` a side slope, run over rise). The evaporation factor `Fevap` is `Manhole.evaporation_factor`;
+the exfiltration after it is `Ksat` alone (in/hr or mm/hr) or the suction head (in or mm),
+`Ksat` and `IMDmax` (`Exfiltration`; a `Ksat` of 0 is no exfiltration, as in SWMM; both are
+[losses of water](../applications/sewer.md#evaporation-and-seepage-losses)), and an
+exfiltrating `PARABOLIC` unit is refused (SWMM 5.2.4 leaves its bottom and bank areas unset).
+A `[CURVES]` curve of any other type and a curve name that is not in `[CURVES]` are refused with
+the line number. A
 negative `MaxDepth`, `InitDepth` or `SurDepth` on a storage line is refused too, which goes
 beyond SWMM's own input checks for storage units. `[STORAGE]` under
 `STEADY` or `KINWAVE` is refused by name: SWMM routes a storage unit by its volume there,
@@ -326,7 +331,8 @@ is SWMM 5.2.4's own computation). SWMM reads the file in order and so does the r
   Decay DryTime [MaxInfil]``, `GREEN_AMPT` and `MODIFIED_GREEN_AMPT` ``Suction Ksat IMDmax``,
   `CURVE_NUMBER` ``CN Conductivity DryTime``; the model of `[OPTIONS]` `INFILTRATION` (default
   `HORTON`) unless the line ends with a method. SWMM's range checks are refused by name.
-- `[EVAPORATION]` `CONSTANT`, `MONTHLY`, `TIMESERIES`, `RECOVERY` and `DRY_ONLY`; `TEMPERATURE`
+- `[EVAPORATION]` `CONSTANT`, `MONTHLY`, `TIMESERIES`, `RECOVERY` and `DRY_ONLY` (the
+  subcatchments' alone: open conduits and storage units evaporate while it rains); `TEMPERATURE`
   and `FILE` (a climate file) are refused.
 - `[ADJUSTMENTS]` `EVAPORATION`, `RAINFALL`, `CONDUCTIVITY`, `N-PERV`, `DSTORE`, `INFIL`
   (the last three count only for a subcatchment defined above them); `TEMPERATURE` is ignored.
@@ -368,12 +374,13 @@ dry-weather inflow, which are refused or absent.
 **Not supported**, which rules out most published SWMM examples as they stand:
 
 - groundwater, LID, snowmelt, pollutant buildup and washoff, RDII and rain files (the surface
-  runoff itself is read: Hydrology above) and the evaporation of open conduits;
-- the `DUMMY` and `STREET` cross sections, conduit seepage and evaporation losses;
+  runoff itself is read: Hydrology above);
+- the `DUMMY` and `STREET` cross sections, and conduit seepage and evaporation under `STEADY` or
+  `KINWAVE`;
 - dividers under `STEADY` or `KINWAVE`, roadway weirs, weir coefficient curves, named variables
   and expressions in control rules; pumps, control rules, orifices, weirs, outlets and storage
   units under `STEADY` or `KINWAVE`, and
-  storage evaporation or exfiltration;
+  water quality together with evaporation, seepage or exfiltration;
 - ponding together with water quality or headspace air, and ponding under `STEADY` or `KINWAVE`.
   Both `SURCHARGE_METHOD`s model surcharge, and a junction without a ponded area floods above
   `MaxDepth` (extended to its crown) plus `SurDepth`; the water that cannot enter is lost, as in

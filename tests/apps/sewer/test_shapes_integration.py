@@ -87,15 +87,15 @@ def test_non_circular_sections_need_dynamic_wave(tmp_path):
         read_swmm_inp(path)
 
 
-def test_losses_are_read_swapped_with_a_reversed_conduit_and_seepage_is_refused(tmp_path):
+def test_losses_are_read_swapped_with_a_reversed_conduit_and_seepage_is_read(tmp_path):
     base = (DATA / "tree_dynwave.inp").read_text()
     path = tmp_path / "l.inp"
     path.write_text(base + "\n[LOSSES]\nC1 0.5 0.25 0.1 NO 0\n")
     pipe = {p.name: p for p in read_swmm_inp(path)[0].pipes}["C1"]
     assert (pipe.loss_inlet, pipe.loss_outlet, pipe.loss_average) == (0.5, 0.25, 0.1)
-    path.write_text(base + "\n[LOSSES]\nC1 0.5 0.25 0.1 NO 3.0\n")
-    with pytest.raises(ValueError, match="seepage"):
-        read_swmm_inp(path)
+    path.write_text(base + "\n[LOSSES]\nC1 0.5 0.25 0.1 NO 3.6\n")      # 3.6 mm/hr = 1e-6 m/s
+    pipe = {p.name: p for p in read_swmm_inp(path)[0].pipes}["C1"]
+    assert pipe.seepage == pytest.approx(1e-6)
     path.write_text(base + "\n[LOSSES]\nC1 -0.5 0 0 NO 0\n")
     with pytest.raises(ValueError, match="negative"):
         read_swmm_inp(path)
