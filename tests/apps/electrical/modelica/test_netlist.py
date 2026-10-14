@@ -133,7 +133,7 @@ def _line(name, cls, derived, **parameters):
 
 def test_line_rule_is_checked_against_the_simulated_values(tmp_path):
     one = AC + "Lines.Line"
-    params = {"R": 0.9, "L": 3e-3, "modelMode": "Buildings.Electrical.Types.Load."
+    params = {"R": 0.9, "L": 3e-3, "use_T": False, "modelMode": "Buildings.Electrical.Types.Load."
               "FixedZ_steady_state", "mode": "Buildings.Electrical.Types.CableMode.commercial"}
     components = [
         _c("E", AC + "Sources.FixedVoltage", f=60.0, V=120.0),
@@ -275,7 +275,8 @@ def test_mbl_temperature_dependence_and_three_phase_unbalanced_are_refused(tmp_p
         _c("ln", AC3 + "Lines.Line", use_T=True, R=1.0, L=0.0, C=0.0),
         _c("r", DC + "Loads.Resistor", useHeatPort=True, R=1.0),
         _c("u", "Buildings.Electrical.AC.ThreePhasesUnbalanced.Loads.Impedance"),
-        _c("cl", AC + "Lines.Line", modelMode="Buildings.Electrical.Types.Load.FixedZ_dynamic",
+        _c("cl", AC + "Lines.Line", use_T=False,
+           modelMode="Buildings.Electrical.Types.Load.FixedZ_dynamic",
            mode="Buildings.Electrical.Types.CableMode.commercial"),
         _c("t", MSL + "Ideal.IdealTransformer", n=2.0, considerMagnetization=True),
         _c("grid", AC + "Sources.Grid"),
@@ -290,9 +291,9 @@ def test_unknown_connectors_and_instances_are_named(tmp_path):
     path = _doc(tmp_path, [
         _c("g", MSL + "Basic.Ground"),
         _c("r", MSL + "Basic.Resistor", R=1.0, useHeatPort=False),
-    ], [["r.p", "g.p"], ["r.q", "g.p"], ["nobody.p", "r.n"], ["r.heatPort", "g.p"]])
+    ], [["r.p", "g.p"], ["r.q", "g.p"], ["nobody.p", "r.n"]])
     msg = _refusal(path)
-    assert "r.q" in msg and "nobody.p" in msg and "r.heatPort" in msg
+    assert "r.q" in msg and "nobody.p" in msg
 
 
 def test_observers_are_ignored_and_do_not_join_nodes(tmp_path):
@@ -354,11 +355,88 @@ def test_load_refuses_malformed_documents(tmp_path):
 def test_line_without_simulated_values_is_refused(tmp_path):
     components = [
         _c("E", AC + "Sources.FixedVoltage", f=60.0, V=120.0),
-        _c("nod", AC + "Lines.Line", R=1.0, L=1e-3),
-        _c("nor", AC3 + "Lines.Line", L=1e-3, C=0.0),
-        _line("part", AC + "Lines.Line", {"line.R": 1.0 / 3}, R=1.0, L=1e-3),
+        _c("nod", AC + "Lines.Line", R=1.0, L=1e-3, use_T=False),
+        _c("nor", AC3 + "Lines.Line", L=1e-3, C=0.0, use_T=False),
+        _line("part", AC + "Lines.Line", {"line.R": 1.0 / 3}, R=1.0, L=1e-3, use_T=False),
     ]
     msg = _refusal(_doc(tmp_path, components, []))
     assert "nod " in msg and "'derived'" in msg
     assert "nor " in msg and "parameter(s) R missing" in msg
     assert "part " in msg and "line.L is missing" in msg and "3 problems" in msg
+
+
+# ------------------------------------------------------------------ review follow-ups
+def test_connection_to_a_disabled_heat_port_is_dropped(tmp_path):
+    # Modelica removes a connect() to a disabled conditional connector.
+    path = _doc(tmp_path, [
+        _c("g", MSL + "Basic.Ground"),
+        _c("v", MSL + "Sources.ConstantVoltage", V=1.0),
+        _c("r", MSL + "Basic.Resistor", R=1.0, useHeatPort=False),
+        _c("k", HEAT + "Components.ThermalConductor", G=1.0),
+        _c("amb", HEAT + "Sources.FixedTemperature", T=300.0),
+    ], [["v.p", "r.p"], ["v.n", "g.p"], ["r.n", "g.p"], ["r.heatPort", "k.port_a"],
+        ["k.port_b", "amb.port"]])
+    nl = build(load(path))
+    r = next(d for d in nl.devices if d.name == "r")
+    assert r.heat_node is None and "r.heatPort" not in nl.thermal_of
+
+
+def test_connection_with_a_signal_block_end_is_skipped(tmp_path):
+    path = _doc(tmp_path, [
+        _c("g", MSL + "Basic.Ground"),
+        _c("v", MSL + "Sources.SignalVoltage"),
+        _c("r", MSL + "Basic.Resistor", R=1.0, useHeatPort=False),
+    ], [["v.p", "r.p"], ["v.n", "g.p"], ["r.n", "g.p"], ["ramp.y", "v.v"]],
+        signals=[{"name": "ramp", "class": "Modelica.Blocks.Sources.Ramp",
+                  "parameters": {"duration": 1.0}, "drives": "v.v"}])
+    nl = build(load(path))
+    assert {d.name for d in nl.devices} == {"v", "r"}
+
+
+def test_missing_or_malformed_deciding_parameters_are_refused(tmp_path):
+    path = _doc(tmp_path, [
+        _c("E", AC + "Sources.FixedVoltage", f="sixty", V=120.0),
+        _c("ln", AC3 + "Lines.Line", R=1.0, L=0.0, C=0.0),
+        _c("t", MSL + "Ideal.IdealTransformer", n=2.0),
+        _c("amb", HEAT + "Sources.FixedTemperature", T="warm"),
+    ], [])
+    msg = _refusal(path)
+    assert "E " in msg and "f must be a number" in msg
+    assert "ln " in msg and "use_T must be true or false" in msg
+    assert "t " in msg and "considerMagnetization must be true or false" in msg
+    assert "amb " in msg and "T must be a number" in msg
+
+
+def test_rc_line_capacitor_off_the_reference_is_refused(tmp_path):
+    # The line's conductor 2 reaches only a load's conductor 2: not the reference.
+    path = _doc(tmp_path, [
+        _c("rc", DC + "Lines.TwoPortRCLine", R=1.0, C=1.0, use_C=True, T=298.15,
+           T_ref=298.15),
+        _c("a", DC + "Loads.Resistor", R=1.0, T=300.15, T_ref=300.15),
+        _c("b", DC + "Loads.Resistor", R=1.0, T=300.15, T_ref=300.15),
+    ], [["a.terminal", "rc.terminal_n"], ["rc.terminal_p", "b.terminal"]])
+    msg = _refusal(path)
+    assert "rc " in msg and "conductor 2" in msg
+    build(load(DATA / "DC.Lines.Examples.RCModel.json"))  # grounded through the source
+
+
+def test_mbl_resistive_parts_off_their_reference_temperature_are_refused(tmp_path):
+    path = _doc(tmp_path, [
+        _c("g", MSL + "Basic.Ground"),
+        _c("s", DC + "Sources.ConstantVoltage", V=12.0),
+        _c("res", DC + "Lines.TwoPortResistance", R=1.0, T=310.0, T_ref=298.15),
+        _c("l", DC + "Loads.Resistor", R=1.0, T=320.0, T_ref=300.15),
+        _c("ok", DC + "Loads.Resistor", R=1.0, T=300.15, T_ref=300.15),
+    ], [["s.n", "g.p"], ["s.terminal", "res.terminal_n"], ["res.terminal_p", "l.terminal"],
+        ["s.terminal", "ok.terminal"]])
+    msg = _refusal(path)
+    assert "res " in msg and "l " in msg and "ok " not in msg
+    assert "T = 310.0" in msg and "T_ref = 298.15" in msg
+
+
+def test_load_reads_utf8(tmp_path):
+    path = _doc(tmp_path, [_c("g", MSL + "Basic.Ground")], [])
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["model"] = "Modèle"
+    path.write_bytes(json.dumps(raw, ensure_ascii=False).encode("utf-8"))
+    assert load(path).model == "Modèle"

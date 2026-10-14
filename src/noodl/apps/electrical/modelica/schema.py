@@ -260,7 +260,7 @@ def load(path: str | Path) -> CircuitDoc:
     component names are refused. Class support is not judged here (`netlist.build`).
     """
     try:
-        raw = json.loads(Path(path).read_text())
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise _fail(f"{path}: not valid JSON ({exc})") from exc
     obj = _require_dict(raw, str(path))

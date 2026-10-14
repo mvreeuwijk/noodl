@@ -61,6 +61,17 @@ Parameters are passed through as exported (`Device.parameters`); fixed temperatu
 collected in kelvin in `Netlist.fixed_temperatures` (`Celsius.FixedTemperature` adds 273.15).
 MBL line classes are checked against the simulated values of their inner line (`derived`):
 the one-phase `Line` uses `R/3` and `L/3`, the balanced three-phase `Line` `R`, `L`, `C`.
+The parameters that decide a refusal or a node must be exported: `use_T` of the MBL lines and
+`considerMagnetization` of `IdealTransformer` as booleans, the temperature `T` of a fixed
+temperature and the frequency `f` of an AC source as numbers. An MBL resistive part without
+heat port must sit at its reference temperature (`T`, or a `Line`'s `TCable`, equal to
+`T_ref`), and a `TwoPortRCLine` with `use_C` must have its conductor 2 on node 0 (its
+capacitor is the edge `mid -> c2`).
+
+Connections follow Modelica's rules for what is not a physical connector: a `connect` to a
+DISABLED conditional heat port is removed (legal Modelica: the connection disappears with the
+connector), and a connection with a signal-block end is skipped whole (signal wiring is
+carried by the signals' `drives`).
 """
 
 from __future__ import annotations
@@ -142,7 +153,7 @@ class Netlist:
     `phasor` is true for a model with MBL AC components, `frequency` their sources' common
     frequency in Hz (`None` for a real model). `signals` are the document's signal blocks
     still driving a component after `omit`. `fixed_temperatures` maps a thermal node to its
-    temperature in K.
+    temperature in K. `omitted` names the components dropped by `omit`.
     """
 
     node_names: tuple[str, ...]
@@ -154,6 +165,7 @@ class Netlist:
     frequency: float | None
     signals: tuple[Signal, ...]
     fixed_temperatures: dict[int, float]
+    omitted: frozenset[str] = frozenset()
 
 
 # ------------------------------------------------------------------------------ union-find
@@ -279,6 +291,39 @@ def _line_problems(comp: CircuitComponent) -> list[str]:
     return problems
 
 
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _declared_problems(comp: CircuitComponent, role: str) -> list[str]:
+    """Refusal-deciding flags (booleans) and numbers that must have been exported."""
+    p, where, problems = comp.parameters, f"{comp.name} ({comp.cls})", []
+    flags = []
+    if comp.cls in schema.LINES:
+        flags.append("use_T")
+    if role == "ideal_transformer":
+        flags.append("considerMagnetization")
+    for key in flags:
+        if not isinstance(p.get(key), bool):
+            problems.append(f"{where}: {key} must be true or false, found {p.get(key)!r}")
+    key = {"fixed_temperature": "T", "ac_source": "f"}.get(role)
+    if key is not None and not _is_number(p.get(key)):
+        problems.append(f"{where}: {key} must be a number, found {p.get(key)!r}")
+    return problems
+
+
+def _temperature_problems(comp: CircuitComponent) -> list[str]:
+    """An MBL resistive part without heat port must be at its reference temperature."""
+    p = comp.parameters
+    if "T_ref" not in p:
+        return []
+    key = "T" if "T" in p else "TCable" if "TCable" in p else None
+    if key is None or p[key] == p["T_ref"]:
+        return []
+    return [f"{comp.name} ({comp.cls}): {key} = {p[key]!r} differs from T_ref = "
+            f"{p['T_ref']!r}; a resistance off its reference temperature is not supported"]
+
+
 def _component_problems(comp: CircuitComponent, role: str | None) -> list[str]:
     """Refusals that depend on one component alone."""
     where = f"{comp.name} ({comp.cls})"
@@ -287,7 +332,10 @@ def _component_problems(comp: CircuitComponent, role: str | None) -> list[str]:
         return [f"{where}: {reason}"]
     if role is None:
         return [f"{where}: class is not supported"]
-    p, problems = comp.parameters, []
+    problems = _declared_problems(comp, role)
+    if problems:
+        return problems
+    p = comp.parameters
     if comp.cls.startswith("Buildings.Electrical."):
         for key in ("mode", "modelMode"):
             if str(p.get(key, "")).endswith("FixedZ_dynamic"):
@@ -298,6 +346,8 @@ def _component_problems(comp: CircuitComponent, role: str | None) -> list[str]:
         if _flag(p, "useHeatPort"):
             problems.append(f"{where}: heat ports of MBL components are not supported "
                             f"(useHeatPort = true)")
+        else:
+            problems += _temperature_problems(comp)
     if role == "ideal_transformer" and _flag(p, "considerMagnetization"):
         problems.append(f"{where}: considerMagnetization = true is not supported")
     if role == "ac_dc_converter" and not _flag(p, "ground_DC"):
@@ -308,7 +358,9 @@ def _component_problems(comp: CircuitComponent, role: str | None) -> list[str]:
     return problems
 
 
-def _raise(problems: Iterable[str]) -> None:
+def raise_problems(problems: Iterable[str]) -> None:
+    """Raise ONE `ModelicaImportError` listing every problem (deduplicated, in order);
+    nothing when there is none."""
     unique = list(dict.fromkeys(problems))
     if not unique:
         return
@@ -365,14 +417,13 @@ def build(doc: CircuitDoc, *, omit: Iterable[str] = ()) -> Netlist:
                 problems.append(f"{where}: a DC line with capacitance (use_C = true) cannot "
                                 f"be part of a phasor (AC) model")
             if role == "ac_source":
-                frequencies[comp.name] = float(comp.parameters.get("f", float("nan")))
+                frequencies[comp.name] = float(comp.parameters["f"])
         distinct = set(frequencies.values())
-        unset = [n for n, f in frequencies.items() if f != f]
+        refused_sources = any(c.name not in roles and schema.ROLES.get(c.cls) == "ac_source"
+                              for c in components)
         if not frequencies:
-            problems.append("phasor (AC) model: no AC source sets the frequency")
-        elif unset:
-            problems.append(f"phasor (AC) model: AC source(s) {', '.join(unset)} have no "
-                            f"frequency f")
+            if not refused_sources:     # a refused source is reported already
+                problems.append("phasor (AC) model: no AC source sets the frequency")
         elif len(distinct) > 1:
             listed = ", ".join(f"{n} at {f!r} Hz" for n, f in frequencies.items())
             problems.append(f"phasor (AC) model: AC sources at different frequencies "
@@ -411,6 +462,9 @@ def build(doc: CircuitDoc, *, omit: Iterable[str] = ()) -> Netlist:
 
     connected_heat: set[str] = set()
     for a, b in connections:
+        if any(e.partition(".")[0] in signal_names and e.partition(".")[0] not in by_name
+               for e in (a, b)):
+            continue    # signal wiring: carried by the signals' drives
         ends = []
         for end in (a, b):
             inst, _, connector = end.partition(".")
@@ -429,9 +483,7 @@ def build(doc: CircuitDoc, *, omit: Iterable[str] = ()) -> Netlist:
                 problems.append(f"connection {a} -- {b}: {end} is not a connector of "
                                 f"{comp.cls}")
             elif connector == "heatPort" and not _heat_enabled(comp, role):
-                problems.append(f"connection {a} -- {b}: {end} is a disabled heat port "
-                                f"(useHeatPort = false)")
-                kind = None
+                kind = None     # a connect to a disabled conditional connector is removed
             ends.append(None if kind is None else (end, kind))
         if None in ends:
             continue
@@ -487,8 +539,12 @@ def build(doc: CircuitDoc, *, omit: Iterable[str] = ()) -> Netlist:
                               parameters=dict(comp.parameters), nodes=nodes,
                               heat_node=heat_node, initial=dict(comp.initial),
                               derived=dict(comp.derived)))
+        if role == "dc_rc_line" and _flag(comp.parameters, "use_C") and nodes["c2"] != 0:
+            problems.append(f"{comp.name} ({comp.cls}): with use_C = true the line's "
+                            f"conductor 2 must be connected to the reference (node 0), found "
+                            f"{labels[nodes['c2']]}")
         if role == "fixed_temperature":
-            t = float(comp.parameters.get("T", float("nan")))
+            t = float(comp.parameters["T"])
             t = t + 273.15 if comp.cls == _CELSIUS else t
             node = nodes["port"]
             if node in fixed:
@@ -497,7 +553,7 @@ def build(doc: CircuitDoc, *, omit: Iterable[str] = ()) -> Netlist:
             else:
                 fixed[node] = (comp.name, t)
 
-    _raise(problems)
+    raise_problems(problems)
 
     def lookup(table: dict) -> dict[str, int]:
         return {_text(e): table[uf.find(e)] for e in uf.parent
@@ -509,4 +565,5 @@ def build(doc: CircuitDoc, *, omit: Iterable[str] = ()) -> Netlist:
         devices=tuple(devices), phasor=phasor, frequency=frequency,
         signals=_kept_signals(doc.signals, omit),
         fixed_temperatures={node: t for node, (_, t) in fixed.items()},
+        omitted=frozenset(omit),
     )
