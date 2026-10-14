@@ -251,3 +251,24 @@ def test_main_exit_code_follows_the_csv(exporter, monkeypatch):
     assert exporter.main([model, "--no-simulate"]) == 0
     monkeypatch.setattr(exporter, "export", lambda model, **_kw: {"model": model, "csv": "x"})
     assert exporter.main([model]) == 0
+
+
+def test_reader_and_exporter_agree_on_class_sets(exporter):
+    from noodl.apps.electrical.modelica import schema
+
+    assert schema.FORMAT == exporter.FORMAT
+    assert schema.GROUNDS == exporter.GROUNDS
+    assert schema.WIRES == exporter.WIRES
+    assert schema.STATES == exporter.STATES
+    assert schema.LINES == exporter.LINES
+
+
+def test_every_fixture_loads():
+    from noodl.apps.electrical.modelica import schema
+
+    data = Path(__file__).resolve().parents[3] / "data" / "modelica_electrical"
+    paths = sorted(data.glob("*.json"))
+    assert len(paths) == 14
+    for path in paths:
+        doc = schema.load(path)
+        assert doc.compared and doc.components, path.name
