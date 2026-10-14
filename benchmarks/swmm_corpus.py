@@ -21,6 +21,9 @@ For every `.inp` under CORPUS_DIR (the corpus is an argument, never part of the 
    the maximum depth and flow differences and both wall times; ``swmm_error`` when SWMM
    itself fails.
 
+A file with subcatchments runs its runoff in noodl with the run cut at the window, as SWMM's
+copy is (the last runoff step is cut there: `inp_hydrology.swmm_total_duration`).
+
 Both engines report how many steps did not converge within their trials: SWMM's "% of Steps
 Not Converging" from its report, noodl's steps that used up the file's MAX_TRIALS
 (``out["converged"]``). Where SWMM does not converge it returns its last trial, which at its
@@ -90,6 +93,12 @@ def _noodl_worker(path: str, window: float) -> dict:
         net, _, _ = read_swmm_inp(path)
         out["routing"] = net.routing
         model, state, drivers = build_model(net, air=False, quality=False)
+        if net.hydrology is not None:
+            # SWMM's copy ends at the window, and cuts its last runoff step there
+            from noodl.apps.sewer.inp_hydrology import swmm_total_duration
+            h = net.hydrology
+            cut = swmm_total_duration(h.start, h.start + datetime.timedelta(seconds=window))
+            model.inflow_schedule = model.inflow_schedule.with_duration(cut)
     except ValueError as err:
         out.update(status="refused", reason=normalise_reason(err))
         return out

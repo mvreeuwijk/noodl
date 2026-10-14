@@ -914,5 +914,5 @@ def test_raingages_without_subcatchments_are_ignored(tmp_path):
     path.write_text(_dyn(tmp_path).read_text() + gages)
     read_swmm_inp(path)
     path.write_text(path.read_text() + "\n[SUBCATCHMENTS]\nS1 G1 J1 1 50 100 0.5 0\n")
-    with pytest.raises(ValueError, match=r"\[RAINGAGES\]|\[SUBCATCHMENTS\]"):
-        read_swmm_inp(path)
+    with pytest.raises(ValueError, match="time series 'R1', which has no"):
+        read_swmm_inp(path)         # subcatchments are read now (tests/apps/sewer/test_runoff.py)

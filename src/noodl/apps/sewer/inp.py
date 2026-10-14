@@ -25,6 +25,10 @@ The network uses SWMM's own tabulated circular section
 (``geometry="tabulated"``, `xsect_tables.py`; the other shapes `xsect_shapes.py`) unless
 ``geometry="analytic"`` is passed (circles only).
 `[RAINGAGES]` is ignored when no `[SUBCATCHMENTS]` (or `[HYDROGRAPHS]`, `[RDII]`) uses a gage.
+A file with `[SUBCATCHMENTS]` also gets its hydrology -- `[RAINGAGES]`, `[SUBAREAS]`,
+`[INFILTRATION]`, `[EVAPORATION]` and `[ADJUSTMENTS]`, read by `inp_hydrology.read_hydrology`
+(SWMM's runoff, `runoff.py`) -- as `SewerNetwork.inflows`, a `runoff.RunoffInflows` that adds
+the runoff of the subcatchments to the lateral inflows below.
 Lines before the first section header are `[TITLE]` text, as SWMM reads them (input.c:174);
 a version-control merge-conflict marker anywhere is refused (`_check_conflict_markers`).
 IGNORED because no conduit or node ever references them: `[EVAPORATION]` (unless it can be
@@ -33,7 +37,7 @@ positive and a conduit is open: `_check_evaporation`), `[REPORT]`,
 
 REFUSED BY NAME, because skipping them would silently change the physics:
 `[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` under STEADY or KINWAVE, `[PUMPS]`,
-`[DIVIDERS]` under STEADY or KINWAVE, `[SUBCATCHMENTS]`, `[RAINGAGES]` (with them), `[CONTROLS]`,
+`[DIVIDERS]` under STEADY or KINWAVE, `[CONTROLS]`,
 `[CURVES]` of any type but STORAGE, RATING, TIDAL, SHAPE and DIVERSION, `[LID_USAGE]`,
 `IGNORE_ROUTING YES`, `FLOW_ROUTING NONE`, `SKIP_STEADY_STATE YES`, roadway weirs, weir
 coefficient curves, `[FILES]` `USE HOTSTART`, `USE INFLOWS`, `USE RDII` and `USE RUNOFF`
@@ -126,6 +130,7 @@ from noodl.apps.sewer.inflows import (
     timeseries_entries,
     tokens,
 )
+from noodl.apps.sewer.inp_hydrology import HYDROLOGY_SECTIONS, read_hydrology
 from noodl.apps.sewer.inp_xsect import read_transects, read_xsect
 from noodl.apps.sewer.network import (
     Manhole,
@@ -136,6 +141,7 @@ from noodl.apps.sewer.network import (
     SewerNetwork,
     Weir,
 )
+from noodl.apps.sewer.runoff import RunoffInflows
 from noodl.apps.sewer.storage import validate_storage_curve
 from noodl.apps.sewer.structures import M3_PER_FT3
 from noodl.apps.sewer.xsect_spec import Xsect
@@ -207,7 +213,7 @@ _READ = {"OPTIONS", "JUNCTIONS", "OUTFALLS", "CONDUITS", "XSECTIONS", "LOSSES", 
          "POLLUTANTS", "STORAGE", "CURVES", "ORIFICES", "WEIRS", "OUTLETS", "TIMESERIES",
          "PATTERNS", "DWF", "FILES", "TRANSECTS", "DIVIDERS"}
 #: `[FILES]` ``USE`` kinds that change the physics (a hot-start state, interface inflows, RDII
-#: or runoff flows): refused. ``USE RAINFALL`` only feeds rain gauges, which are refused anyway.
+#: or runoff flows): refused. ``USE RAINFALL`` only feeds ``FILE`` rain gages, which are refused.
 _REFUSED_FILES = {"HOTSTART": "the initial state", "INFLOWS": "interface inflows",
                   "RDII": "RDII flows", "RUNOFF": "runoff flows"}
 #: SWMM's default start of the simulation clock (project.c)
@@ -240,11 +246,14 @@ def read_swmm_inp(
     path = Path(path)
     sections = read_sections(path, leading="TITLE")      # input.c:174: the pass starts in TITLE
     _check_conflict_markers(sections, path)
+    hydro = bool(sections.get("SUBCATCHMENTS"))
     for name, lines in sections.items():
         if name in _READ or name in _IGNORED or not lines:
             continue
-        if name == "RAINGAGES" and not sections.get("SUBCATCHMENTS"):
+        if name == "RAINGAGES" and not hydro:
             continue        # a gage feeds subcatchments (and RDII, refused as its own section)
+        if hydro and name in HYDROLOGY_SECTIONS:
+            continue        # read (or refused by name) by `read_hydrology`
         raise ValueError(
             f"{path}: section [{name}] (line {lines[0].number}) is not part of the "
             f"documented subset and carries content; this reader models gravity conduits, "
@@ -599,7 +608,7 @@ def read_swmm_inp(
             "decay": as_float(line, 5, "the decay coefficient", path) / 86400.0,
         }
 
-    inflow, loads, schedule = _lateral_inflows(
+    inflow, loads, schedule, full_schedule = _lateral_inflows(
         sections, {m.name for m in manholes}, pollutants, cdwf, start, qf, path,
         frozenset(o.name for o in outfalls))
 
@@ -607,6 +616,10 @@ def read_swmm_inp(
         dataclasses.replace(m, inflow=inflow[m.name])
         for m in manholes
     ]
+    if hydro:
+        schedule, dynamic_wave = _hydrology(
+            sections, path, start, manholes, outfalls, flow_units in _US_UNITS, pollutants,
+            full_schedule, dynamic_wave, dynamic)
     network = SewerNetwork(
         manholes=tuple(manholes), pipes=tuple(pipes), outfalls=tuple(outfalls),
         routing=routing, geometry=geometry, dynamic_wave=dynamic_wave,
@@ -615,6 +628,49 @@ def read_swmm_inp(
     )
     network.validate()
     return network, loads, pollutants
+
+
+def _hydrology(sections, path, start, manholes, outfalls, us: bool, pollutants: dict,
+               schedule, dynamic_wave: DynamicWaveOptions, dynamic: bool):
+    """`(inflows, dynamic_wave)`: the file's hydrology (`inp_hydrology.read_hydrology`) combined
+    with the inflow `schedule` into `RunoffInflows`, and under DYNWAVE the routing step lowered
+    to the effective WET_STEP (SWMM lowers it after `gage_validate` has lowered WET_STEP to the
+    smallest rain interval, project.c:238-250)."""
+    options = {line.fields[0].upper(): (line, line.fields[1].upper() if len(line.fields) > 1
+                                        else "")
+               for line in sections.get("OPTIONS", [])}
+    rows = _tseries(sections, path)
+    cache: dict[str, TimeSeries] = {}
+
+    def read_series(name: str) -> TimeSeries:
+        if name not in rows:
+            raise KeyError(name)
+        if name not in cache:
+            cache[name] = _read_series(name, rows[name], start, path)
+        return cache[name]
+
+    rain = any(len(line.fields) > 2 and _is_nonzero(line.fields[2])
+               for line in sections.get("POLLUTANTS", []))
+    junctions = {m.name for m in manholes}
+    hydrology = read_hydrology(
+        sections, path, options, start, nodes=junctions,
+        outfalls={o.name for o in outfalls}, us=us, read_series=read_series,
+        has_pollutants=bool(pollutants), pollutant_rain=rain)
+    if schedule is not None and not (schedule.external or schedule.dry_weather):
+        schedule = None
+    inflows = RunoffInflows(
+        hydrology, schedule, nodes=[n for n in hydrology.outlet_nodes() if n in junctions])
+    if dynamic:
+        dynamic_wave = dataclasses.replace(
+            dynamic_wave, routing_step=min(dynamic_wave.routing_step, hydrology.wet_step))
+    return inflows, dynamic_wave
+
+
+def _is_nonzero(text: str) -> bool:
+    try:
+        return float(text) != 0.0
+    except ValueError:
+        return False
 
 
 #: `[OPTIONS]` keys whose YES changes what SWMM routes (project.c:617-623, routing.c:386-392,
@@ -1216,10 +1272,12 @@ def _read_series(name, rows, start, path) -> TimeSeries:
 
 def _lateral_inflows(sections, junctions: set, pollutants: dict, cdwf: list, start, qf: float,
                      path, outfalls: frozenset = frozenset()):
-    """`(inflow, loads, schedule)` from `[INFLOWS]`, `[DWF]`, `[PATTERNS]` and `[TIMESERIES]`:
-    `inflow` the m3/s of each junction at the start of the run, `loads` the constant
-    pollutant concentrations (kg/m3) and `schedule` the `InflowSchedule` when any flow
-    varies in time (a series, a pattern, patterned dry-weather flow), else ``None``. `qf` is
+    """`(inflow, loads, schedule, full)` from `[INFLOWS]`, `[DWF]`, `[PATTERNS]` and
+    `[TIMESERIES]`: `inflow` the m3/s of each junction at the start of the run, `loads` the
+    constant pollutant concentrations (kg/m3), `schedule` the `InflowSchedule` when any flow
+    varies in time (a series, a pattern, patterned dry-weather flow), else ``None``, and
+    `full` the schedule of every external and dry-weather flow, constant ones too (the runoff
+    driver replaces the model's constant inflow, so it carries them). `qf` is
     the m3/s per flow unit of the file. SWMM's rules are in `inflows.py`; what it does not
     take is refused by name, with the line. A flow into an outfall (`outfalls`) is checked and
     dropped: dynamic-wave routing skips an outfall's depth update (`findNodeDepths`,
@@ -1333,4 +1391,4 @@ def _lateral_inflows(sections, junctions: set, pollutants: dict, cdwf: list, sta
                or any(d.patterns for d in dry.values()))
     initial = schedule.flows(0.0)
     inflow = {name: initial.get(name, 0.0) for name in junctions}
-    return inflow, loads, schedule if varying else None
+    return inflow, loads, schedule if varying else None, schedule

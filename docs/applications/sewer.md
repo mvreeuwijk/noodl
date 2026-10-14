@@ -928,6 +928,131 @@ midnight, month and weekend change, and an MGD file with `Mfactor`, `Sfactor` an
 pattern, and routes three of them against SWMM at the depth (1e-7 m) and flow (1e-6 relative)
 targets of the other dynamic-wave comparisons.
 
+#### Subcatchment runoff from a SWMM file
+
+A file with `[SUBCATCHMENTS]` gets its hydrology: `read_swmm_inp` reads `[RAINGAGES]`,
+`[SUBCATCHMENTS]`, `[SUBAREAS]`, `[INFILTRATION]`, `[EVAPORATION]` and `[ADJUSTMENTS]` into
+`net.hydrology` (`noodl.apps.sewer.runoff.Hydrology`), and `net.inflows` becomes a
+`RunoffInflows`: the file's inflow schedule plus the runoff of the subcatchments, which
+`simulate_dynamic_wave` takes as its lateral inflow (`model.inflow_schedule`) with no argument from
+the caller. It is SWMM 5.2.4's own computation, operation for operation (`subcatch.c`,
+`runoff.c`, `infil.c`, `gage.c`, `climate.c`, `odesolve.c` and `routing.c`; the module
+docstring of `runoff.py` lists each rule with its source):
+
+- **Rain.** A `TIMESERIES` gage, `INTENSITY`, `VOLUME` or `CUMULATIVE`; the rain of an entry
+  falls for the gage's recording interval from the entry's date and is zero until the next
+  non-zero entry; a record that starts after (before) the run is dry before it (already running);
+  gages that share a series take the rainfall of the first. A gage's interval shorter than
+  `WET_STEP` lowers `WET_STEP`, and with it the routing step, as `gage_validate` does.
+- **Runoff clock.** SWMM's runoff steps are not the routing steps. A runoff step is
+  `WET_STEP` while it rains or a subcatchment had runoff on the previous step, `DRY_STEP`
+  otherwise, shortened to the next change of rain or of monthly evaporation, and the last one is
+  cut at the end of the run; routing then adds each subcatchment's runoff to its outlet node
+  linearly interpolated between the runoff at the start and at the end of the runoff step that
+  covers the start of the routing step. `simulate_dynamic_wave` therefore passes the length of
+  each routing step to the runoff driver (an inflow callable with `step_aware = True` is called
+  as `inflow(t, step)`).
+- **Surface.** Each subcatchment is an impervious area without depression storage, an impervious
+  area with it and a pervious area; each is a nonlinear reservoir `q = alpha (d - d_s)^(5/3)`
+  integrated over the step by SWMM's Cash-Karp Runge-Kutta with its adaptive step (tolerance
+  1e-4). `RouteTo` `IMPERVIOUS` or `PERVIOUS` sends `PctRouted` of one area's runoff of the
+  previous step onto the other; the runoff of a subcatchment that drains to another one is that
+  one's runon on the next runoff step.
+- **Infiltration.** `HORTON`, `MODIFIED_HORTON`, `GREEN_AMPT`, `MODIFIED_GREEN_AMPT` and
+  `CURVE_NUMBER`, as the `[OPTIONS]` default or per subcatchment on its `[INFILTRATION]` line
+  (SWMM 5.2's trailing method keyword), with the soil recovery of dry weather and the monthly
+  `RECOVERY` pattern. A subcatchment with no `[INFILTRATION]` line has none, as in SWMM.
+- **Evaporation.** `CONSTANT`, `MONTHLY` or `TIMESERIES` (a step function), `DRY_ONLY`, and the
+  `[ADJUSTMENTS]` of evaporation, rainfall and conductivity and the `N-PERV`, `DSTORE` and
+  `INFIL` patterns, which SWMM applies only to a subcatchment named *before* the line (it resets
+  them when it reads `[SUBCATCHMENTS]`; the reader does the same, so a file with them in the other
+  order has them ignored, here as in SWMM).
+
+Refused by name, with the line: `[LID_USAGE]`; `[GROUNDWATER]` (unless `IGNORE_GROUNDWATER YES`); a
+subcatchment with a snow pack (unless `IGNORE_SNOWMELT YES`); `[LANDUSES]`, `[COVERAGES]`,
+`[BUILDUP]`, `[WASHOFF]`, `[LOADINGS]` and a rain concentration of a pollutant (their load is not
+modelled; `IGNORE_QUALITY YES` lets them pass); an outfall that routes onto a subcatchment;
+rain `FILE` gages; `[EVAPORATION]` `TEMPERATURE` and `FILE`; `[RDII]` and `[HYDROGRAPHS]`. The
+evaporation of **open conduits** (`link.c:1359-1362`, subtracted from the end nodes in
+`dynwave.c:560-572` from every trial's mean depth) stays refused: a file whose
+evaporation can be positive while a conduit is open still names the conduit. `[SNOWPACKS]` no
+subcatchment names, `[TEMPERATURE]`, `[AQUIFERS]` and `[LID_CONTROLS]` that nothing uses are
+inert, as they are in SWMM.
+
+```python
+from noodl.apps.sewer import read_swmm_inp
+from noodl.apps.sewer.runoff import RunoffModel
+
+net, _, _ = read_swmm_inp("runoff_horton_dynwave.inp")
+hydrology = net.hydrology
+runoff = RunoffModel(hydrology)
+runoff.advance_to(540_000.0)           # the runoff steps SWMM has taken by t = 540 s
+print({name: round(float(q), 4) for name, q in runoff.runoff_m3s.items()})
+print(runoff.steps[:3], len(runoff.steps))
+```
+
+```text
+{'S1': 0.916, 'S2': 0.2232, 'S3': 0.3022}
+[(0.0, 120.0), (120.0, 60.0), (180.0, 60.0)] 8
+```
+
+(The first runoff step is the 120 s the dry step is cut to by the first rain; the runoff steps are
+then the one-minute `WET_STEP`.) The routed run needs nothing more:
+
+```py
+model, state, drivers = build_model(net)
+state, hist = simulate_dynamic_wave(model, state, drivers, duration=600.0)   # runoff is the inflow
+```
+
+**Differentiability.** The runoff is plain arithmetic in which tensors flow, so every
+parameter of a subcatchment can carry a gradient: area, percent imperviousness, width, slope,
+the Manning roughness and depression storage of both areas, `PctZero`, `PctRouted`, and every
+parameter of the infiltration models (rates, decay, drying time, suction, conductivity, initial
+deficit, curve number). `Hydrology.with_gradients` makes leaf tensors of them (and returns them
+by name, e.g. `"S1.area"`, `"S1.infiltration.f0"`); a `RunoffInflows` built from it
+(`RunoffInflows(h2, schedule, nodes)`, set as `model.inflow_schedule`) gives
+`simulate_dynamic_wave` a lateral inflow with that graph, and the gradient of a routed depth or
+flow reaches the runoff parameters through the head solve's implicit differentiation:
+
+```python
+h2, leaves = hydrology.with_gradients(fields=("area",), subareas=(), infiltration=False,
+                                      only=("S1",))
+m = RunoffModel(h2)
+m.advance_to(540_000.0)
+m.runoff_m3s["S1"].backward()
+print(round(float(leaves["S1.area"].grad), 8))     # d runoff / d area, m3/s per m2
+```
+
+```text
+2.136e-05
+```
+
+The gradient is that of the branch the values select (rain on or off, ponding above the depression
+storage, saturation of the Green-Ampt or Curve Number surface, the Horton curve against the
+available water, the 10..99 clamp of the Curve Number), exact in each smooth region and
+one-sided at a switch, and it is that of the discrete scheme: the Runge-Kutta step sizes are chosen
+on the values and held fixed (the solver's tolerance, 1e-4, bounds the difference from the
+derivative of the exact solution; the tests compare with finite differences to 2e-3). Not
+differentiable: the rain itself (series values, recording interval, snow catch factor), the
+**runoff clock** (which step is wet or dry, where the last step is cut) and everything that
+selects the routing step. `Hydrology.with_duration` re-cuts the run, as SWMM does, if the
+simulation is shorter than the file's `END_DATE`.
+
+**Notes on reproducing SWMM.** (1) SWMM's total duration is the floor of `(END - START) * 86400`
+evaluated by the compiled engine as `(EndDate - StartDate) + (EndTime - StartTime)`, which is
+1199 s, not 1200 s, for 12:20:00 after 12:00:00; the reader does the same arithmetic
+(`inp_hydrology.swmm_total_duration`), because the last runoff step is cut there. (2) SWMM matches
+keywords by prefix of the field (`IMPERV`, `PERV`, `VOLUME`...), and so does the reader.
+(3) `WET_STEP` and `DRY_STEP` are read as SWMM's times (decimal hours or `H:MM:SS`).
+
+`tests/verification/test_sewer_runoff_parity.py` compares, against live SWMM 5.2.4, the runoff of
+every subcatchment and the lateral inflow of every node after every routing step (1e-6 relative
++ 1e-9 m3/s) and the routed depths (1e-7 m) and flows of five fixtures (Horton, modified Horton,
+Curve Number, Green-Ampt and modified Green-Ampt; SI, LPS and US units; `RouteTo` `OUTLET`,
+`IMPERVIOUS` and `PERVIOUS`; subcatchment-to-subcatchment routing; the three rain formats; co-gages; monthly,
+constant and time-series evaporation; the adjustments and recovery patterns; a month boundary;
+gages faster than `WET_STEP`) and of sixteen variants of them.
+
 #### Tidal and time-series outfalls
 
 A `TIDAL` outfall (`Outfall(kind="tidal", tide=...)`, the `.inp`'s `[CURVES]` TIDAL curve of
@@ -1139,8 +1264,8 @@ of circular conduits:
 
 - `tree_kinwave.inp`, the hand-built 5-conduit tree.
 - `example1_kinwave.inp`, the 13-conduit network of EPA SWMM's published *Example 1*. It is
-  converted to metres, and its runoff is replaced by rational-method constant inflows, because
-  runoff is outside this reader.
+  converted to metres, and its runoff is replaced by rational-method constant inflows (the
+  runoff itself is compared separately, [below](#subcatchment-runoff-from-a-swmm-file)).
 - `tree_kinwave_large.inp`, a synthetic 32-conduit tree with fills from 8e-5 to 0.81 of `Qfull`.
 
 `tests/data/sewer/make_kinwave_fixtures.py` regenerates the last two. The engine identity is
@@ -1423,9 +1548,13 @@ publish numbers from this application.
       is always fully open), roadway weirs and weir coefficient curves;
     - ponding together with water quality or headspace air, and for a storage unit; a junction
       with no ground (`MaxDepth` 0) and no `SurDepth` floods as soon as it fills to its crown;
-    - runoff, groundwater and LID (`[SUBCATCHMENTS]`, `[RAINGAGES]`, `[LID_USAGE]`), RDII,
-      pollutant time-series, mass and dry-weather inflows, and the `[FILES]` `USE HOTSTART`,
-      `USE INFLOWS`, `USE RDII` and `USE RUNOFF` (a `TIMESERIES` outfall's stage is a driver);
+    - groundwater, LID, snowmelt and the pollutant buildup and washoff of the runoff
+      (`[GROUNDWATER]`, `[LID_USAGE]`, snow packs, `[LANDUSES]`), RDII (`[RDII]`,
+      `[HYDROGRAPHS]`), rain `FILE` gages, evaporation read from a climate file or computed from
+      temperature, and the evaporation of open conduits, pollutant time-series, mass and
+      dry-weather inflows, and the `[FILES]` `USE HOTSTART`, `USE INFLOWS`, `USE RDII` and
+      `USE RUNOFF` (a `TIMESERIES` outfall's stage is a driver); surface runoff itself is
+      modelled ([Subcatchment runoff](#subcatchment-runoff-from-a-swmm-file));
     - conduit seepage (the `[LOSSES]` sixth field), storage evaporation (`Fevap`) and
       exfiltration, and a nonzero pollutant `Cinit`;
     - the `DUMMY` section (a link that routes its node's outflow without a section) and the
