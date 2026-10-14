@@ -132,8 +132,6 @@ def _math(sig: Signal, u: list[int]) -> Block:
         return Product(*u, name=where)
     if short == "Division":
         return Divide(u[0], u[1], name=where)
-    if not u:                                             # MultiSum with nu = 0
-        return Constant(0.0, name=where)
     if short in ("Add", "Add3"):
         weights = [float(p.get(f"k{i}", 1.0)) for i in range(1, len(u) + 1)]
     else:                                                 # Sum, MultiSum: k vector
@@ -261,7 +259,8 @@ class FeedbackHeat:
     `A` to `"thermal.sources"` (full node, W) and writes `"thermal.removal"` (thermal
     interior order, 1/s) `-B / C`, with `C` the zone heat capacity (`"thermal.capacity"`
     from the drivers or the state, else the thermal layer's, `layer`). `heat` lists
-    `(block, node)` per heat flow; `run._Midpoint` evaluates `affine` itself, on the piece of
+    `(block, node)` per heat flow (none: the closure writes nothing, and `run.simulate` still
+    records the network's outputs); `run._Midpoint` evaluates `affine` itself, on the piece of
     the whole step (`pieces_between`)."""
 
     def __init__(self, fb: Feedback, *, zone_index: Mapping[str, int],
@@ -355,6 +354,8 @@ class FeedbackHeat:
         return -B[..., self.layer.interior_idx] / cap
 
     def __call__(self, state, drivers) -> dict[str, Tensor]:
+        if not self.heat:
+            return {}  # a network that drives no heat flow (its outputs are still recorded)
         A, B = self.affine(state, drivers, self.pieces(state, drivers))
         cap = drivers.get("thermal.capacity", state.get("thermal.capacity"))
         base = drivers.get("thermal.sources")

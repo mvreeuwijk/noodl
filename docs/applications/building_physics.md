@@ -1475,7 +1475,7 @@ steps are laid out with care:
 `ClosedDoors`, `ReverseBuoyancy` and `ChimneyShaftWithVolume` combine two and four substeps per
 output interval: at one step per interval their crack flows switching on (`ClosedDoors`),
 their orifices reversing at 18 s (`ReverseBuoyancy`) and the room controller answering the end
-of the extraction at 601 s (`ChimneyShaftWithVolume`) are not yet in the asymptotic range of
+of the injection at 601 s (`ChimneyShaftWithVolume`) are not yet in the asymptotic range of
 the extrapolation.
 
 `ChimneyShaftWithVolume` adds a room heated by a P controller on its temperature
@@ -1483,7 +1483,7 @@ the extrapolation.
 source that injects and then extracts 0.05 kg/s. Its controller output `con.y` (column `y`)
 is compared like any other column; it is five times the room's deviation from its set point, a
 difference of two temperatures, so its relative error is the strictest of the model's. It is at
-7.4e-7 (7.1e-7 beyond the reference's resolution), 4 s after the extraction stops: its 3.6e-8
+7.4e-7 (7.1e-7 beyond the reference's resolution), 4 s after the injection stops: its 3.6e-8
 there is 7e-9 K of room temperature (2.5e-11 relative).
 
 The metric is `|noodl - omc| / max(|omc|, floor)` at every row after `t = StartTime`. The floor
@@ -1520,7 +1520,7 @@ differ and the first is above 1e-6, and the wall time of the two runs:
 | OneOpenDoor | 7.2e-05 (0) | 1.2e-10 | 2.1e-11 | — | — | 1, 2 | 288 s |
 | ReverseBuoyancy | 8.1e-06 (0) | 1.5e-10 | 4.7e-10 | 4.7e-10 | — | 2, 4 | 481 s |
 | OneEffectiveAirLeakageArea | 4.4e-07 | 7.4e-13 | 1.8e-13 | 3.0e-13 | — | 1, 2 | 114 s |
-| ChimneyShaftWithVolume | 1.1e-08 | 2.7e-11 | 9.1e-14 | 1.3e-12 | — | 2, 4 | 951 s |
+| ChimneyShaftWithVolume | 1.1e-08 | 2.7e-11 | 9.1e-14 | 1.3e-12 | — | 2, 4 | 591 s |
 
 No model needs a bound above 1e-6 (`PARITY_STORAGE` is empty). The storage-dominated models
 also assert the storage mechanism on noodl physics' own history. `ClosedDoors` and

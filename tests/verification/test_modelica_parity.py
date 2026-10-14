@@ -476,7 +476,7 @@ REFERENCE_RESOLUTION: dict[str, dict[str, float]] = {
 # 14.4 s steps across its crack flows switching on (3.5e-10 and 1.2e-12 kg/s at 993.6 s,
 # against a 1.3e-11 kg/s resolution), ReverseBuoyancy's 7.2 s steps across its orifices'
 # reversal at 18 s (8.4e-8 and 1.6e-8 kg/s at 21.6 s), ChimneyShaftWithVolume's 7.2 s steps
-# across the end of its extraction (the source's ramp to zero over 600-601 s), which its room
+# across the end of its injection (the source's ramp to zero over 600-601 s), which its room
 # controller answers within a few seconds (con.y 3.5e-7 and 2.5e-8 at 604.8 s, where it is
 # 0.034; the extrapolation's own correction at (1, 2) was 4e-8, an eighth of the error).
 PARITY_SUBSTEPS: dict[str, tuple[int, int]] = {"ClosedDoors": (2, 4),
@@ -491,7 +491,7 @@ PARITY_STORAGE: dict[str, dict[str, float]] = {}
 # before its orifices reverse (18 s), the rows that need (2, 4) substeps (PARITY_SUBSTEPS),
 # and runs at (1, 2) (DEFAULT_SUBSTEPS), a third of the cost; so does ChimneyShaftWithVolume's,
 # whose window (its room controller's start transient, through its limits within the first
-# second) ends long before its extraction stops at 601 s.
+# second) ends long before its injection stops at 601 s.
 PARITY_ROWS = {"ClosedDoors": 3, "CO2TransportStep": 2, "NaturalVentilation": 3,
                "OneEffectiveAirLeakageArea": 8, "OneOpenDoor": 4, "OneRoom": 21,
                "OpenDoorBuoyancyDynamic": 2, "OpenDoorBuoyancyPressureDynamic": 2,

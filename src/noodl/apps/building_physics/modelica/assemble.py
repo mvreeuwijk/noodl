@@ -1673,10 +1673,12 @@ class _Builder:
                 storage_air, air, air_boundary, elements, drives, layers, sp_interior,
                 sp_dilution if "species" in layers else None, m0, net, lam_T)
             closures.append(store)
-        if fb is not None and fb.heat:
+        if fb is not None:
+            # Always, so that `simulate` records every block named in `names.controls`
+            # (with no heat flow the closure writes nothing).
             closures.append(feedback.FeedbackHeat(
                 fb, zone_index=index, zone_temperature=closure.temperatures,
-                layer=layers["thermal"]))
+                layer=layers.get("thermal")))
         tol = {}
         if "thermal" in layers:
             tol["thermal"] = THERMAL_ITERATE_TOL

@@ -556,7 +556,7 @@
     },
     "reference_tolerance": 1e-13,
     "rtol": 1e-06,
-    "seconds": 1231.022420000052,
+    "seconds": 590.5988332000561,
     "storage_bounds": {},
     "substeps": [
       2,

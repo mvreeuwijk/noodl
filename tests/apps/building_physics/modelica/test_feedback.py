@@ -209,3 +209,117 @@ def test_a_heat_flow_driven_by_another_zones_temperature_is_refused():
                               errors=errors)
     assert any("gain (Modelica.Blocks.Math.Gain): drives preHea.Q_flow, a heat flow into "
                "zone roo, from the temperature of zone sha.vol" in e for e in errors), errors
+
+
+def test_the_midpoint_run_converges_across_the_extraction_onset():
+    """Quasi-steady airflow, the 0.05 kg/s extraction starting at 1800-1801 s: room T at
+    1807.2 s from 1785.6 s at 1, 2 and 4 substeps. The drawn air's sink at a step's start
+    takes that step's mean extraction, as the rest of the step does, so the second-order
+    scheme's error falls about fourfold per halving (or faster: 8.3 measured; 1.15 when the
+    start took the previous step's mean)."""
+    T = {}
+    for r in (1, 2, 4):
+        model, state, drivers, names = read_modelica(WITH_VOLUME, return_names=True,
+                                                     mass_storage=False, substeps=r)
+        out = simulate(model, state, drivers, names.times[248:252], scheme="midpoint")
+        assert float(names.times[251]) == pytest.approx(1807.2)
+        T[r] = float(out["T"][-1, names.nodes["roo"]])
+    assert abs(T[1] - T[4]) / abs(T[2] - T[4]) >= 3.5
+
+
+def _signal(raw, name):
+    return next(s for s in raw["signals"] if s["name"] == name)
+
+
+def _division_by_feedback(raw):
+    _signal(raw, "con")["drives"] = "div.u2"
+    raw["signals"] += [
+        {"name": "one", "class": "Modelica.Blocks.Sources.Constant", "parameters": {"k": 1.0},
+         "drives": "div.u1"},
+        {"name": "div", "class": "Modelica.Blocks.Math.Division", "parameters": {},
+         "drives": "gain.u"}]
+
+
+def _feedback_loop(raw):
+    _signal(raw, "con")["drives"] = "fb.u1"
+    raw["signals"].append({"name": "fb", "class": "Modelica.Blocks.Math.Feedback",
+                           "parameters": {}, "drives": ["gain.u", "fb.u2"]})
+
+
+def _undriven_input(raw):
+    _signal(raw, "con")["drives"] = "add.u1"
+    raw["signals"].append({"name": "add", "class": "Modelica.Blocks.Math.Add",
+                           "parameters": {}, "drives": "gain.u"})
+
+
+def _without(key):
+    def edit(raw):
+        del _signal(raw, "con")["parameters"][key]
+    return edit
+
+
+def _pd(raw):
+    _signal(raw, "con")["parameters"]["controllerType"] = (
+        "Modelica.Blocks.Types.SimpleController.PD")
+
+
+@pytest.mark.parametrize(("edit", "message"), [
+    (_division_by_feedback, r"div \(Modelica.Blocks.Math.Division\): divides by a feedback "
+                            r"signal"),
+    (_feedback_loop, r"fb \(Modelica.Blocks.Math.Feedback\): an algebraic loop of feedback "
+                     r"blocks is not supported"),
+    (_undriven_input, r"add\.u2: input of a feedback block that no supported signal drives"),
+    (_pd, r"con \(Modelica.Blocks.Continuous.LimPID\): controllerType PD is not supported"),
+    (_without("yMax"), r"con \(.*LimPID\): parameter 'yMax' is required"),
+    (_without("k"), r"con \(.*LimPID\): parameter 'k' is required"),
+])
+def test_feedback_networks_the_heat_balance_cannot_take_are_refused(edit, message, tmp_path):
+    with pytest.raises(ModelicaImportError, match=message):
+        read_modelica(_edited(tmp_path, edit))
+
+
+def test_a_feedback_heat_flow_into_a_pinned_zone_is_refused():
+    doc = expand.expand(schema.load(WITH_VOLUME))
+    g = graph.build(doc)
+    errors: list[str] = []
+    fb = feedback.feedback_network(doc, g, zone_index={z: i for i, z in enumerate(g.zones)},
+                                   zone_temperature=lambda s, d: torch.zeros(2),
+                                   pinned={"roo"}, errors=errors)
+    assert errors == ["gain (Modelica.Blocks.Math.Gain): drives preHea.Q_flow, a heat flow "
+                      "into zone roo, which a fixed temperature holds"]
+    # A network that drives no heat flow writes nothing (its outputs are still recorded).
+    assert fb.heat == ()
+    closure = feedback.FeedbackHeat(fb, zone_index={z: i for i, z in enumerate(g.zones)},
+                                    zone_temperature=lambda s, d: torch.zeros(2), layer=None)
+    assert closure({}, {}) == {}
+
+
+def _through(block):
+    """`con -> <block>.u1`, a constant 2 into its other input, `<block> -> gain.u`."""
+    cls, params, factor = block
+
+    def edit(raw):
+        _signal(raw, "con")["drives"] = "m.u1" if cls != "Sum" else "m.u[1]"
+        raw["signals"] += [
+            {"name": "two", "class": "Modelica.Blocks.Sources.Constant",
+             "parameters": {"k": 2.0}, "drives": "m.u2" if cls != "Sum" else "m.u[2]"},
+            {"name": "m", "class": f"Modelica.Blocks.Math.{cls}", "parameters": params,
+             "drives": "gain.u"}]
+    return edit, factor
+
+
+@pytest.mark.parametrize("block", [
+    ("Product", {}, lambda y: 2.0 * y),
+    ("Add", {"k1": 3.0, "k2": -1.0}, lambda y: 3.0 * y - 2.0),
+    ("Sum", {"nin": 2, "k": [3.0, 1.0]}, lambda y: 3.0 * y + 2.0),
+    ("Feedback", {}, lambda y: y - 2.0),
+], ids=lambda b: b[0])
+def test_math_blocks_between_the_controller_and_the_heat_flow(block, tmp_path):
+    """0.1 K below the set point the controller gives y = 0.5; the heat into the room is
+    3000 W/(unit) times the Math block's output, affine in the room temperature."""
+    edit, factor = _through(block)
+    model, state, drivers, names = read_modelica(_edited(tmp_path, edit), return_names=True)
+    fb = _control(model)
+    node, room = _room(model, names)
+    heat = fb.heat_flows(_cooled(state, room, 0.1), drivers)
+    assert heat[node].item() == pytest.approx(3000.0 * factor(0.5), abs=1e-6)  # A + B T

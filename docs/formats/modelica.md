@@ -59,7 +59,7 @@ which holds the blocks' outputs `y`.
 
 **Imported, not yet compared.** `PressurizationData` and `TrickleVent` import (`read_modelica`
 builds them, and their weather and wind pressures match MBL's to round-off), but they are not yet
-compared as dynamic models. `PressurizationData` It is a
+compared as dynamic models. `PressurizationData` is a
 62.5 m3 room between two `Outside_CpLowRise` walls over 30 days of San Francisco weather. The room
 flushes in about 10 s, against steps of 50 to 3000 s. Where the flow fades, in a calm or with the
 wind parallel to both walls, it can fall by orders of magnitude within one step, and the room

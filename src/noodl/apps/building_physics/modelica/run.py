@@ -972,6 +972,11 @@ class _Midpoint:
     def step(self, s0: State, d0: Drivers, d1: Drivers, h: float) -> State:
         air, name = self.air, self.air_name
         control = self.control
+        # Every step-mean driver (`"<...>.sources"`: the sources and the air drawn out of a
+        # zone, `assemble.EXTRACTION`) is the mean over THIS step, at both ends: `d0` at a grid
+        # time holds the previous step's means, which the closure's state-dependent sinks at
+        # state 0 would otherwise read.
+        d0 = {**d0, **{k: v for k, v in d1.items() if k.endswith(".sources")}}
         q0 = s0[f"{name}.q"]
         extra0 = self._extra_sources(s0, d0)
         z0 = self._pack(s0)
@@ -1018,7 +1023,7 @@ class _Midpoint:
                         ext1[n] = ext1.get(n, 0.0) + t1[f"{n}.extra"]
                 s["air.storage"] = now1
             removal0 = removal1 = None
-            if control is not None:
+            if control is not None and control.heat:
                 # The heat flows' affine form at each end, on the step's pieces (class
                 # docstring).
                 pieces = control.pieces_between(s0, d0, s, d1)
